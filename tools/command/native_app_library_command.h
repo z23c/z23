@@ -14,6 +14,11 @@ typedef void (*app_library_sharer)(void *, const struct app_selection *, const c
 typedef void (*app_library_preparer)(void *, const struct app_selection *,
     struct zcl_command_reply *);
 #if defined(ZCL_TESTING)
+struct app_network_test_hooks;
+void zcl_test_app_library_network(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice, void *context,
+    const struct app_network_test_hooks *hooks);
+
 void zcl_test_app_library_request(const struct app_launch_env *env, const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context);

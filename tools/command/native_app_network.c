@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Verify public app catalog frames and carrier bytes without RPC. */
 #include "command/native_app_network.h"
+#include "command/native_app_network_row.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "crypto/sha256.h"
@@ -199,15 +200,6 @@ bool app_network_exact(const struct app_network_transport *t, const char *onion,
     if (ok) *error = APP_NETWORK_OK; else memset(row, 0, sizeof(*row));
     return ok;
 }
-static bool an_same(const struct zcl_app_offer_row *a, const struct zcl_app_offer_row *b)
-{
-    const struct zcl_app_offer *x = &a->offer, *y = &b->offer;
-    return !strcmp(a->post_id, b->post_id) && !strcmp(a->host, b->host) &&
-        a->created_at == b->created_at && !strcmp(x->name, y->name) &&
-        !strcmp(x->root, y->root) && !strcmp(x->publisher, y->publisher) &&
-        !strcmp(x->carrier, y->carrier) && !strcmp(x->sha256, y->sha256) &&
-        !strcmp(x->onion, y->onion) && x->size == y->size;
-}
 static bool an_row_bounded(const struct zcl_app_offer_row *r)
 {
     const struct zcl_app_offer *o = &r->offer;
@@ -297,6 +289,6 @@ bool app_network_carrier(const struct app_network_transport *t, const char *cata
     struct an_run r; struct zcl_app_offer_row actual = {0};
     if (!selected || !an_row_bounded(selected) || !store || !an_onion(carrier_onion) || !an_begin(&r, t, error) ||
         !an_exact(&r, catalog_onion, selected->post_id, now, &actual)) return false;
-    if (!an_same(selected, &actual)) { *error = APP_NETWORK_CHANGED_OFFER; return false; }
+    if (!app_network_row_equal(selected, &actual)) { *error = APP_NETWORK_CHANGED_OFFER; return false; }
     return an_carrier_fetch(&r, carrier_onion, &actual, store, bytes, len, mutated);
 }

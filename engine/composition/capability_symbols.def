@@ -1387,6 +1387,7 @@ ZCL_CAPABILITY_SYMBOL("__isoc23_strtoull", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("__libc_current_sigrtmin", CAP_HARMLESS,
     "Reports the first real time signal number, and is a real entry "
     "point despite the leading underscores.")
+ZCL_CAPABILITY_SYMBOL("__strcpy_chk", CAP_HARMLESS, "Bounds-checked memory copy; no external resource access.")
 ZCL_CAPABILITY_SYMBOL("__memcpy_chk", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__memmove_chk", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__memset_chk", CAP_HARMLESS, "")

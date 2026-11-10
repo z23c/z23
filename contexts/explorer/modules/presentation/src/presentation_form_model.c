@@ -18,7 +18,9 @@ bool zcl_present_window_form_from_model_v1(
     struct zcl_present_window_form_v1 *form,
     char *error, size_t error_cap)
 {
-    if (!model || !form || model->kind != ZCL_PRESENT_MODEL_FORM ||
+    if (!model || !form ||
+        (model->kind != ZCL_PRESENT_MODEL_FORM &&
+         model->kind != ZCL_PRESENT_MODEL_INPUT_FORM) ||
         !zcl_present_model_validate_v1(model, error, error_cap))
         return form_model_error(error, error_cap,
                                 "presentation form model is invalid");

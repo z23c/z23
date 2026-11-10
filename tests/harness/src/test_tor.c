@@ -2036,11 +2036,118 @@ static int test_tor_start_limit_holds(void)
     return why ? 1 : 0;
 }
 
+static _Atomic int private_argv_result;
+static bool private_argv_expected;
+
+/* Copy the verdict, not Tor's temporary argv pointers, across threads. */
+static void private_argv_observer(int argc, char *const *argv)
+{
+    int owner = private_argv_expected ? 5 : 3;
+    bool ok = (argc == owner || argc == owner + 2) && !strcmp(argv[0], "tor") &&
+              !strcmp(argv[1], "-f") && argv[2][0] &&
+              (!private_argv_expected ||
+               (!strcmp(argv[3], "--defaults-torrc") &&
+                !strcmp(argv[4], "/dev/null"))) &&
+              (argc == owner ||
+               (!strcmp(argv[owner], "__OwningControllerFD") &&
+                argv[owner + 1][0]));
+    atomic_store(&private_argv_result, ok ? 1 : -1);
+}
+
+static bool private_argv_seen(void)
+{
+    for (unsigned i = 0; i < 500 && !atomic_load(&private_argv_result); ++i)
+        platform_sleep_ms(10); /* real-clock: wait for Tor's argv boundary */
+    return atomic_load(&private_argv_result) == 1;
+}
+
+static const char *private_start_rollback_case(const char *tmpdir)
+{
+    char blocked[600];
+    snprintf(blocked, sizeof(blocked), "%s/not-a-directory", tmpdir);
+    FILE *f = fopen(blocked, "w");
+    if (!f) return "cannot create blocked private-start fixture";
+    if (fclose(f)) return "cannot close blocked private-start fixture";
+    tor_integration_stop();
+    if (tor_integration_start_private(blocked, 39261))
+        return "private start accepted a non-directory";
+    if (tor_integration_retry_start(tmpdir, 39261))
+        return "failed private start cleared the stop latch";
+    if (!tor_integration_start(tmpdir, 39261))
+        return "failed private start poisoned ordinary startup";
+    if (!private_argv_seen())
+        return "ordinary start passed unexpected Tor arguments";
+    tor_integration_stop();
+    if (tor_integration_start_private(tmpdir, 39261))
+        return "private start accepted a previously used process";
+    return NULL;
+}
+
+static const char *private_start_sticky_case(const char *tmpdir)
+{
+    if (!tor_integration_start_private(tmpdir, 39263))
+        return "fresh private start failed";
+    if (!private_argv_seen())
+        return "private start passed unexpected Tor arguments";
+    if (tor_integration_start(tmpdir, 39263))
+        return "ordinary start accepted private process";
+    tor_integration_stop();
+    if (tor_integration_start(tmpdir, 39263))
+        return "stop erased private defaults mode";
+    if (tor_integration_retry_start(tmpdir, 39263))
+        return "retry restarted stopped private process";
+    return NULL;
+}
+
+static bool private_child_completed(pid_t pid)
+{
+    int status = 0;
+    bool done = false;
+    for (unsigned i = 0; pid > 0 && i < 300 && !done; ++i) {
+        pid_t got = waitpid(pid, &status, WNOHANG);
+        if (got == pid) done = true;
+        else if (got < 0 && errno != EINTR) break;
+        else platform_sleep_ms(100); /* real-clock: bound isolated Tor process cleanup */
+    }
+    if (pid > 0 && !done) {
+        (void)kill(pid, SIGKILL);
+        (void)waitpid(pid, &status, 0);
+    }
+    return done && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* Fork before this group's Tor threads start: private mode is intentionally
+ * process-sticky and must not consume the parent's bounded restart budget. */
+static int test_tor_private_start(bool rollback)
+{
+    printf("test_tor_private_start_%s: ", rollback ? "rollback" : "sticky");
+    fflush(stdout);
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "private");
+    pid_t pid = fork();
+    if (pid == 0) {
+        tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
+        private_argv_expected = !rollback;
+        tor_integration_set_argv_observer_for_test(private_argv_observer);
+        const char *why = rollback ? private_start_rollback_case(tmpdir) :
+                                     private_start_sticky_case(tmpdir);
+        tor_integration_stop();
+        if (why) fprintf(stderr, "private startup: %s\n", why);
+        _exit(why ? 1 : 0);
+    }
+    bool ok = private_child_completed(pid);
+    remove_tree(tmpdir);
+    printf("%s\n", ok ? "OK" : "FAIL (isolated private-start lifecycle)");
+    return ok ? 0 : 1;
+}
+
 /* Its own group, so it gets its own process, which may start Tor only
  * TOR_MAX_STARTS_IN_PROCESS times. These cases use all of them. */
 int test_tor_stop(void)
 {
-    int failures = test_tor_retry_after_stop_stays_down();
+    int failures = test_tor_private_start(true);
+    failures += test_tor_private_start(false);
+    failures += test_tor_retry_after_stop_stays_down();
     failures += test_tor_stop_hands_off_to_tor_thread();
     failures += test_tor_persist_install_with_loop_running();
     failures += test_tor_start_limit_holds();

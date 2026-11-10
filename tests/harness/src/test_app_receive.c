@@ -470,7 +470,7 @@ static bool rr_library_present(void *context, const struct zcl_present_model_v1 
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     (void)copy; (void)why; (void)cap; struct rr_ui *state = context;
-    if (!strcmp(model->request_id, "library-share-options")) {
+    if (!strcmp(model->request_id, "library-more-share-options")) {
         state->reached = true;
         for (uint32_t i = 0; i < model->action_count; ++i)
             if (!strcmp(model->actions[i].id, "share-original")) state->seen = true;
@@ -481,7 +481,8 @@ static bool rr_library_present(void *context, const struct zcl_present_model_v1 
         }
         return false; /* stop the fixture before any owner action */
     }
-    const char *wanted = !strcmp(model->request_id, "library-home") ? "myapps" : "choose";
+    const char *wanted = !strcmp(model->request_id, "library-home") ? "myapps" :
+        !strcmp(model->request_id, "library-share-options") ? "more-sharing" : "choose";
     for (uint32_t i = 0; i < model->action_count; ++i)
         if (!strcmp(model->actions[i].id, "share")) wanted = "share";
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
@@ -662,7 +663,7 @@ static bool rr_route_present(void *context, const struct zcl_present_model_v1 *m
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     struct rr_route *route = context;
-    if (strcmp(model->request_id, "library-share-options"))
+    if (strcmp(model->request_id, "library-more-share-options"))
         return rr_library_present(&route->ui, model, copy, event, why, cap);
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     if (route->confirmed) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }

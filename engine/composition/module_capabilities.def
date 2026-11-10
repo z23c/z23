@@ -939,7 +939,7 @@ ZCL_MODULE_CAPABILITY("core/modules/net/src/rom_seed.c", CAP_FS_WRITE|CAP_FS_REA
 ZCL_MODULE_CAPABILITY("core/modules/net/src/rom_seed_ledger.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/rom_seed_policy.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/rom_seed_report.c", CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("core/modules/net/src/tor_config_log.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("core/modules/net/src/tor_config_log.c", CAP_FS_READ|CAP_FS_WRITE|CAP_NETWORK, "Configures the embedded Tor command line and reads/writes its configuration and logs.")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/tor_fetch.c", CAP_NETWORK|CAP_FS_WRITE|CAP_CLOCK, "bounded outbound onion fetch ownership: dials the dynhost network client to fetch over the embedded Tor circuit")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/tor_control.c", CAP_NETWORK|CAP_FS_READ|CAP_FS_WRITE, "bounded Tor control exchanges; platforms without SOCK_CLOEXEC set descriptor flags using fcntl")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/tor_integration.c", CAP_NETWORK|CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "Tor is compiled into the node: this file runs Tor on its own thread, ends it through the owning control socket, and reads its configuration/state directory")

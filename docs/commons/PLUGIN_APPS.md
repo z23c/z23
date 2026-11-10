@@ -44,6 +44,10 @@ a metadata successor before customization; your previous kept app remains
 selected and runnable. Cancel stops the handoff. Copies already in your own
 publishing namespace need no extra preparation.
 
+Open **My Apps**, select your saved app, and choose **Change with your AI**
+(or **Change → Change with your AI** when unkept changes are present). Press
+**C** to copy the setup, keep the window open while pasting it into your
+assistant, and use its literal command and arguments for the local MCP server.
 The copied setup identifies both the kept `version` and editable
 `source_version`. Your assistant passes `name`, `expected_revision` and
 `source_version` to `app.customize` and `app.edit`; source reads and edit plans
@@ -86,6 +90,26 @@ builds and previews the change, ask it to request **Keep**, then approve the
 exact version in the native window. The
 assistant supplies the change; Z23 provides the source and build tools.
 
+To share a link from My Apps, select your kept app and choose **Share this
+version → Share a link**. Review the displayed saved version, package, publisher
+and release, then explicitly choose **Share link**. When the sharing window
+says it is available, choose **Copy link** and send it to your friend. Keep
+that window open while they receive it; the link is available for up to 24
+hours and stops when you close or stop sharing. Anyone with the link can
+receive that version while it is available.
+
+Your friend opens My Apps with their own app profile, chooses **Discover apps →
+Open a shared app**, pastes the link and chooses **Open**. They review the
+verified offer and publisher, then separately confirm **Receive**. Receiving
+does not build or run the app: **Build and preview** and **Keep this version**
+are separate choices. The link flow does not require signup or a configured
+node; public board publication and ongoing hosting are separate choices.
+Opening and sharing app links explicitly refuse on Windows.
+
+<!-- claim: symbol-present app_host_flow tools/command/native_app_host_flow.c # consent and bounded link hosting -->
+<!-- claim: symbol-present app_network_open_link tools/command/native_app_network_controller.c # explicit link receive flow -->
+<!-- claim: symbol-present al_setup_identity tools/command/native_app_library_command.c # copied AI setup binds saved and source identities -->
+
 To share your kept version, ask the assistant to share it to a new absolute
 file path. Review the version and publisher in the native window and confirm
 to create a `.z23share` file. Send that file directly to your friend.
@@ -102,7 +126,7 @@ limitations are below.
 To browse public offers, run a node with package hosting enabled and use its
 data directory for My Apps. See [Joining the software commons](../node/JOIN.md#2-joining-the-c23-software-commons--z23-join)
 for node setup. Open My Apps with `z23 app library --datadir=/absolute/path/to/node-data`,
-then choose **Discover apps**, select an offer, and review its
+then choose **Discover apps → Browse offers**, select an offer, and review its
 publisher and package before choosing Receive. Once received, **Build and
 preview** and **Keep this version** are separate choices. A matching-build
 count, when available, describes signing keys in the local snapshot; it does
@@ -116,10 +140,10 @@ other peers is not guaranteed. Receiving or keeping the copy does not itself
 require you to accept this hosting choice.
 
 You can decide later: open **My Apps**, select the kept received app, choose
-**Share this version → Help share original**, and review the original app and
+**Share this version → More sharing options → Help share original**, and review the original app and
 publisher before confirming. This offers the original signed release, even if
 you have since changed and kept your own version. To share your edits, use the
-separate **Create share file** or **Publish publicly** choice for that kept
+separate **Create share file** or **More sharing options → Publish publicly** choice for that kept
 version.
 
 To manage an existing original-hosting choice, open **My Apps → Hosting**,

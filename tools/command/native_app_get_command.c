@@ -5,6 +5,7 @@
 #include "command/native_app_front_door.h"
 #include "command/native_app_offer.h"
 #include "command/native_app_get_stage.h"
+#include "command/native_app_network_row.h"
 #include "command/native_app_fetch_progress.h"
 #include "command/native_dev_land_remote_shared.h"
 #include "command/native_zcode_package_copy.h"
@@ -12,6 +13,7 @@
 #include "base/safe_alloc.h"
 #include "base/hex.h"
 #include "json/json.h"
+#include "vcs/bundle_carry.h"
 #include "platform/time_compat.h"
 #include "platform/rng.h"
 #include "platform/private_directory.h"
@@ -734,15 +736,6 @@ static bool ag_row_bounded(const struct zcl_app_offer_row *r)
         memchr(r->post_id, 0, sizeof(r->post_id)) && memchr(r->host, 0, sizeof(r->host)) &&
         ag_hex(r->post_id, 32) && ag_hex(r->host, 32) && zcl_app_offer_valid(o);
 }
-static bool ag_row_equal(const struct zcl_app_offer_row *a, const struct zcl_app_offer_row *b)
-{
-    const struct zcl_app_offer *x = &a->offer, *y = &b->offer;
-    return !strcmp(a->post_id, b->post_id) && !strcmp(a->host, b->host) &&
-        a->created_at == b->created_at && !strcmp(x->name, y->name) &&
-        !strcmp(x->root, y->root) && !strcmp(x->publisher, y->publisher) &&
-        !strcmp(x->carrier, y->carrier) && !strcmp(x->sha256, y->sha256) &&
-        !strcmp(x->onion, y->onion) && x->size == y->size;
-}
 static bool ag_stage_identity(const struct ag_one *s, struct app_receive_identity *identity)
 {
     const char *release = zcl_app_inner_str(&s->inner, "release_id");
@@ -846,6 +839,108 @@ static bool ag_consume_one(const struct zcl_app_offer_row *row, const char *dir,
     }
     return ok;
 }
+/* Stage only parent-verified bytes after the network child is reaped. */
+static bool ag_write_owned_bytes(struct ag_private_stage *p, struct ag_one *s,
+                                 const uint8_t *bytes, size_t len)
+{
+#if defined(_WIN32)
+    (void)p; (void)s; (void)bytes; (void)len; return false;
+#else
+    if (!bytes || !len || !ag_private_bound(p, s->dir)) return false;
+    int fd = openat((int)p->dir.native, "offer.z23share",
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, bytes + off, len - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        off += (size_t)n;
+    }
+    bool ok = off == len && fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    return ok && ag_private_bound(p, s->dir) && ag_hash(s->path, &s->row->offer);
+#endif
+}
+/* Integration must run Receive plan on the staged path, decode its independently
+ * verified release/root/publisher into app_receive_identity, recheck stage binding,
+ * and invoke the existing synchronous consumer. Cleanup failure remains primary
+ * TEMP_CLEANUP_FAILED with mutated=true, preserving post-commit recovery facts.
+ * Never accept a child-provided path, skip the plan, or launch the consumer before
+ * parent-side size/SHA and the staged-file hash both match the selected offer. */
+
+/* Receive verification and consumer use the same retained stage. */
+static bool ag_consume_verified_bytes(struct ag_one *s, struct ag_private_stage *private,
+    const uint8_t *bytes, size_t len, app_get_bytes_consumer consumer, void *context)
+{
+    struct zcl_command_reply *reply = s->reply;
+    if (len != (size_t)s->row->offer.size ||
+        !ag_write_owned_bytes(private, s, bytes, len)) {
+        zcl_package_copy_fail(reply, "SHA256_MISMATCH", false,
+            "verified carrier or private staging changed", AG_COMMAND);
+        return false;
+    }
+    bool ok = ag_receive_plan(s);
+    struct app_receive_identity identity;
+    if (ok && !ag_stage_identity(s, &identity)) {
+        zcl_package_copy_fail(reply, "MALFORMED_INNER", false,
+            "verified receive identity is incomplete", AG_COMMAND); ok = false;
+    }
+    if (ok && !ag_private_bound(private, s->dir)) {
+        zcl_package_copy_fail(reply, "TEMP_CHANGED", false,
+            "the private staging directory changed", AG_COMMAND); ok = false;
+    }
+    if (ok) ok = consumer(context, s->path, &identity, reply);
+    if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED)
+        zcl_package_copy_fail(reply, "CONSUMER_FAILED", reply->error.mutated,
+            "staged carrier consumer failed", AG_COMMAND);
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED) ok = false;
+    zcl_command_reply_free(&s->inner);
+    return ok;
+}
+
+/* Typed bytes entry does not perform RPC, rehost or implicitly confirm. */
+static bool ag_bytes_valid(const struct zcl_app_offer_row *selected, const char *datadir,
+    const uint8_t *bytes, size_t len, app_get_bytes_consumer consumer)
+{
+    return selected && consumer && datadir && datadir[0] == '/' && ag_row_bounded(selected) && bytes &&
+        selected->offer.size > 0 && len <= VCS_BUNDLE_MAX_BYTES && len == (size_t)selected->offer.size;
+}
+bool app_get_stage_consume_bytes(const struct zcl_app_offer_row *selected,
+    const char *datadir, const uint8_t *bytes, size_t len,
+    app_get_bytes_consumer consumer, void *context, struct zcl_command_reply *reply)
+{
+    if (!reply) return false;
+    char anchor[AG_PATH];
+    if (!ag_bytes_valid(selected, datadir, bytes, len, consumer)) {
+        zcl_package_copy_fail(reply, "BAD_INPUT", false,
+            "a selected offer, absolute profile and exact carrier are required", AG_COMMAND);
+        return false;
+    }
+    if (!app_receive_profile_validate(datadir, anchor, sizeof(anchor), reply)) return false;
+    uint8_t random[16]; char token[33];
+    if (!rng_host_fill(random, sizeof(random))) {
+        zcl_package_copy_fail(reply, "BAD_TOKEN", false, "cannot create a fresh staging token", AG_COMMAND);
+        return false;
+    }
+    zcl_hex_encode(random, sizeof(random), token);
+    struct ag_one s = {.row = selected, .datadir = datadir, .token = token, .reply = reply};
+    struct ag_private_stage private;
+    if (!ag_private_create(&private, &s, anchor)) {
+        bool cleaned = s.created && ag_private_cleanup(&private, &s);
+        if (!s.created) { platform_directory_transaction_close(&private.dir); if (private.parent >= 0) close(private.parent); }
+        zcl_package_copy_fail(reply, "TEMP_UNAVAILABLE", s.created && !cleaned,
+            "cannot safely create private staging", s.dir);
+        return false;
+    }
+    bool ok = ag_consume_verified_bytes(&s, &private, bytes, len, consumer, context);
+    if (!ag_private_cleanup(&private, &s)) {
+        zcl_package_copy_fail(reply, "TEMP_CLEANUP_FAILED", true,
+            "private staging could not be safely removed", s.dir); return false;
+    }
+    return ok;
+}
+
 static bool ag_find_selected(const struct zcl_app_offer_row *selected,
     struct zcl_app_offer_row *row, struct zcl_command_reply *reply)
 {
@@ -854,7 +949,7 @@ static bool ag_find_selected(const struct zcl_app_offer_row *selected,
     if (!ok) zcl_app_inner_fail(reply, &why, false);
     zcl_command_reply_free(&why);
     if (!ok) return false;
-    if (ag_row_equal(selected, row)) return true;
+    if (app_network_row_equal(selected, row)) return true;
     zcl_package_copy_fail(reply, "OFFER_CHANGED", false, "the selected advertisement is no longer present", AG_COMMAND);
     return false;
 }

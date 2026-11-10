@@ -19,7 +19,24 @@ extern _Atomic unsigned g_enable_failures;
 extern struct stat g_tor_control_peer_id;
 #endif
 
+typedef struct tor_main_configuration_t tor_main_configuration_t;
+extern tor_main_configuration_t *tor_main_configuration_new(void);
+extern int tor_main_configuration_set_command_line(
+    tor_main_configuration_t *cfg, int argc, char *argv[]);
+extern void tor_main_configuration_free(tor_main_configuration_t *cfg);
+extern int tor_run_main(const tor_main_configuration_t *);
+
+/* Tor retains argv and its strings until configuration_free. */
+struct tor_launch_config {
+    tor_main_configuration_t *configuration;
+    char owner_fd[32];
+    char *argv[8];
+};
+void tor_launch_config_init(struct tor_launch_config *launch, char *torrc_path,
+                            bool private_defaults, bool has_owner, platform_socket_t owner);
+
 bool tor_is_linked(void);
+
 int64_t tor_wall_ms(void);
 bool tor_control_open(void);
 void tor_request_exit(void);

@@ -31,4 +31,11 @@ enum app_get_rebuild_state app_get_rebuild_prepare(const struct zcl_app_offer_ro
     const struct json_value *build_wire, const struct json_value *open_wire, struct zcl_app_rebuild *observation);
 bool app_get_rebuild_publish(const struct zcl_app_rebuild *observation, struct zcl_command_reply *reply);
 void app_get_rebuild_result_unavailable(struct zcl_command_reply *reply);
+typedef bool (*app_get_bytes_consumer)(void *context, const char *staged_path,
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply);
+/* Stages parent-verified bytes in an exclusively owned private directory,
+ * rechecks hash and Receive identity, then synchronously calls consumer. */
+bool app_get_stage_consume_bytes(const struct zcl_app_offer_row *selected, const char *datadir,
+    const uint8_t *bytes, size_t len, app_get_bytes_consumer consumer, void *context,
+    struct zcl_command_reply *reply);
 #endif

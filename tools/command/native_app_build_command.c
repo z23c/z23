@@ -516,8 +516,9 @@ static void zab_commit_reply(struct zab *z, const struct app_image_build *rec,
     (void)json_push_kv_bool(d, "make_ran", make_ran);
     (void)json_push_kv_bool(d, "executed", false);
     if (z->version) {
-        (void)json_push_kv_str(d, "next", "app open or app playtest this "
-                               "image_sha3 with accept_execution:true");
+        (void)json_push_kv_str(d, "next", "app open with name, absolute copy, "
+                               "datadir, version, env_root, dependency_root, "
+                               "image_sha3, record_id and accept_execution:true");
     } else {
         char next[ZAB_PATH + 96];
         if (zcl_app_hint(next, sizeof(next), zcl_package_copy_str(z->input, "datadir"),

@@ -34,6 +34,11 @@
 #include "command/native_app_get_stage.h"
 #include "command/native_app_fetch_progress.h"
 #include "command/native_app_network.h"
+#include "command/native_app_network_link.h"
+#include "command/native_app_network_job.h"
+#include "command/native_app_network_worker.h"
+#include "command/native_app_network_controller.h"
+#include "command/native_app_network_lifeline.h"
 #include "command/native_app_discover.h"
 #include "command/app_selection.h"
 #include "config/command_catalog.h"
@@ -61,6 +66,8 @@ int test_app_get(void)
 #include "vcs/bundle_carry.h"
 #include "vcs/package_manifest.h"
 #include "util/file_io.h"
+#include "util/spawn.h"
+#include <dirent.h>
 
 #include <ftw.h>
 #include <errno.h>
@@ -73,6 +80,8 @@ int test_app_get(void)
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <poll.h>
+#include <stdatomic.h>
 #include <unistd.h>
 
 #define TAG_PATH 1400
@@ -521,21 +530,36 @@ static bool tag_net_bad_frame(struct tag_net *f, struct fleet_board_post *p,
     return ok;
 }
 
-static bool tag_net_init(struct tag_net *f)
+static bool tag_net_prepare_carrier(struct tag_net *f, uint8_t root[32])
 {
-    memset(f, 0, sizeof(*f)); f->size = VCS_PACKAGE_CHUNK_BYTES + 13u;
-    f->bytes = zcl_malloc(f->size, "test.network.bytes");
-    if (!f->bytes) return false;
-    for (size_t i = 0; i < f->size; i++) f->bytes[i] = (uint8_t)(i * 31u);
-    uint8_t hashes[64], root[32] = {0}, sha[32]; struct sha256_ctx ctx;
-    bool ok = vcs_package_chunk_hash(f->bytes, VCS_PACKAGE_CHUNK_BYTES, hashes) &&
-        vcs_package_chunk_hash(f->bytes + VCS_PACKAGE_CHUNK_BYTES, 13, hashes + 32);
+    for (size_t i = 0; i < f->size; i++)
+        f->bytes[i] = (uint8_t)(i * 31u + i / VCS_PACKAGE_CHUNK_BYTES);
+    uint8_t hashes[(VCS_BUNDLE_MAX_BYTES / VCS_PACKAGE_CHUNK_BYTES + 1u) * 32u];
+    uint32_t chunks = (uint32_t)((f->size + VCS_PACKAGE_CHUNK_BYTES - 1u) / VCS_PACKAGE_CHUNK_BYTES);
+    bool ok = true;
+    for (size_t i = 0; ok && i < chunks; i++) {
+        size_t offset = i * VCS_PACKAGE_CHUNK_BYTES;
+        size_t n = f->size - offset;
+        if (n > VCS_PACKAGE_CHUNK_BYTES) n = VCS_PACKAGE_CHUNK_BYTES;
+        ok = vcs_package_chunk_hash(f->bytes + offset, n, hashes + i * 32u);
+    }
     struct vcs_package_manifest m; vcs_package_manifest_init(&m);
     ok = ok && vcs_package_manifest_add(&m, VCS_BUNDLE_PATH, VCS_PACKAGE_MODE_FILE,
-                                        f->size, hashes, 2) &&
+                                        f->size, hashes, chunks) &&
         vcs_package_manifest_root(&m, root) &&
         vcs_package_manifest_serialize(&m, &f->manifest, &f->manifest_len);
     vcs_package_manifest_free(&m);
+    return ok;
+}
+
+static bool tag_net_init(struct tag_net *f, size_t size)
+{
+    memset(f, 0, sizeof(*f)); f->size = size;
+    if (!size || size > VCS_BUNDLE_MAX_BYTES) return false;
+    f->bytes = zcl_malloc(f->size, "test.network.bytes");
+    if (!f->bytes) return false;
+    uint8_t root[32] = {0}, sha[32]; struct sha256_ctx ctx;
+    bool ok = tag_net_prepare_carrier(f, root);
     struct zcl_app_offer offer = {0};
     snprintf(offer.name, sizeof(offer.name), "test/app");
     memset(offer.root, '1', 64); offer.root[64] = 0;
@@ -753,7 +777,7 @@ static bool tag_network_bad_sha(struct tag_net *f, struct app_network_transport 
 }
 static bool tag_network_exercise(void)
 {
-    struct tag_net f; bool ok = tag_net_init(&f);
+    struct tag_net f; bool ok = tag_net_init(&f, VCS_PACKAGE_CHUNK_BYTES + 13u);
     char dir[PATH_MAX] = "";
     if (ok) ok = test_mkdtemp(dir, sizeof(dir), "app_network") != NULL;
     struct vcs_package_store *store = ok ? vcs_package_store_open(dir, vcs_package_store_quota_bytes()) : NULL;
@@ -770,11 +794,75 @@ static bool tag_network_exercise(void)
     if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
     free(f.bytes); free(f.manifest); return ok;
 }
+/* Exercise sliced retrieval through the same private-store opener as the worker. */
+static bool tag_network_worker_capacity(void)
+{
+    struct tag_net f; bool ok = tag_net_init(&f, VCS_BUNDLE_MAX_BYTES);
+    char dir[PATH_MAX] = "";
+    if (ok) ok = test_mkdtemp(dir, sizeof(dir), "app_network_worker_capacity") != NULL;
+    struct vcs_package_store *store = ok ? zcl_test_app_network_worker_store_open(dir) : NULL;
+    struct app_network_transport t = {.fetch = tag_net_fetch, .cancelled = tag_net_cancelled,
+                                      .context = &f, .timeout_ms = 120000};
+    struct zcl_app_offer_row row = {0}; uint8_t *out = NULL; size_t len = 0;
+    enum app_network_error error = APP_NETWORK_OK; bool mutated = false;
+    int64_t now = platform_time_wall_unix();
+    ok = ok && store && app_network_exact(&t, TAG_NET_RELAY, f.id, now, &row, &error) &&
+         app_network_carrier(&t, TAG_NET_RELAY, TAG_NET_HOST, &row, now,
+                             store, &out, &len, &mutated, &error) &&
+         mutated && len == f.size && !memcmp(out, f.bytes, len);
+    free(out); if (store) vcs_package_store_close(store);
+    if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
+    free(f.bytes); free(f.manifest); return ok;
+}
+
+/* Exact links preserve the offered identity. */
+static int tag_network_link(void)
+{
+    int failures = 0;
+    TEST("app network: exact link preserves identity and rejects ambiguity") {
+        static const char id[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        char url[257], bad[300]; struct app_network_link link;
+        ASSERT(snprintf(url, sizeof(url), "http://%s/board/apps/v1/%s", TAG_ONION, id) > 0);
+        ASSERT(app_network_link_parse(url, &link) && link.exact &&
+               !strcmp(link.onion, TAG_ONION) && !strcmp(link.post_id, id));
+        ASSERT(snprintf(url, sizeof(url), "http://%s/board/apps/v1", TAG_ONION) > 0);
+        ASSERT(app_network_link_parse(url, &link) && !link.exact && !link.post_id[0]);
+        ASSERT(snprintf(bad, sizeof(bad), "%s?x=1", url) > 0);
+        ASSERT(!app_network_link_parse(bad, &link) && !link.onion[0] && !link.exact);
+        ASSERT(snprintf(bad, sizeof(bad), "%s/%s/extra", url, id) > 0);
+        ASSERT(!app_network_link_parse(bad, &link));
+        ASSERT(snprintf(bad, sizeof(bad), "http://user@%s/board/apps/v1", TAG_ONION) > 0);
+        ASSERT(!app_network_link_parse(bad, &link));
+        ASSERT(snprintf(bad, sizeof(bad), "http://%s:80/board/apps/v1", TAG_ONION) > 0);
+        ASSERT(!app_network_link_parse(bad, &link));
+        memset(bad, 'a', sizeof(bad) - 1); bad[sizeof(bad) - 1] = 0;
+        ASSERT(!app_network_link_parse(bad, &link));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int tag_network_ipc(void)
+{
+    int failures = 0; struct app_network_job_args args = {.mode = "catalog"};
+    struct app_network_job_result result = {0};
+    static const char good[] = "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":true,\"incomplete\":false,\"rows\":[]}";
+    static const char raw_nul[] = "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":true,\"incomplete\":false,\"rows\":[]}\0junk";
+    static const char decoded_nul[] = "{\"schema\":\"zcl.app_network_worker.v1\\u0000junk\",\"ok\":true,\"incomplete\":false,\"rows\":[]}";
+    TEST("network worker IPC rejects raw and decoded hidden suffixes") {
+        ASSERT(zcl_test_app_network_job_parse(good, sizeof(good) - 1, &args, &result));
+        ASSERT(!zcl_test_app_network_job_parse(raw_nul, sizeof(raw_nul) - 1, &args, &result));
+        ASSERT(!zcl_test_app_network_job_parse(decoded_nul, sizeof(decoded_nul) - 1, &args, &result));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int tag_network_test(void)
 {
     int failures = 0;
     TEST("app network: independently verify frames and sliced carrier") {
-        ASSERT(tag_network_exercise()); PASS();
+        ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); PASS();
     } _test_next:;
     return failures;
 }
@@ -1855,6 +1943,27 @@ static bool tag_stage_replacement(struct tag_world *w, const struct zcl_app_offe
     if (!tag_replacement_cleanup(&c)) ok = false;
     zcl_command_reply_free(&reply); return ok;
 }
+static bool tag_scratch_replace(void *context, const char *path, long pid)
+{
+    struct tag_consumer *c = context;
+    if (pid <= 1 || kill((pid_t)pid, 0) != 0) return false;
+    ++c->calls; return tag_replace_stage(c, path);
+}
+static int tag_scratch_replacement(struct tag_world *w)
+{
+    int failures = 0; char tmp[TAG_PATH], canonical[PATH_MAX];
+    struct tag_consumer c = {.world = w}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_get.stage.v1"); bool reaped = false;
+    TEST("live worker scratch replacement is refused after child is reaped") {
+        ASSERT(test_mkdtemp(tmp, sizeof(tmp), "app_network_foreign") && realpath(tmp, canonical));
+        ASSERT(strlen(canonical) < sizeof(c.foreign)); memcpy(c.foreign, canonical, strlen(canonical) + 1);
+        ASSERT(asf_put(c.foreign, "offer.z23share", "foreign stays\n"));
+        bool done = zcl_test_app_network_scratch_replace(w->j.b_datadir, tag_scratch_replace, &c, &reaped, &reply);
+        ASSERT(reaped && tag_replacement_refused(done, &c, &reply)); PASS();
+    } _test_next:;
+    if (!tag_replacement_cleanup(&c)) ++failures;
+    zcl_command_reply_free(&reply); return failures;
+}
 static bool tag_stage_attempt(struct tag_world *w, const struct zcl_app_offer_row *row,
     int mode, const char *failure)
 {
@@ -1905,6 +2014,42 @@ static int tag_stage_consumer(struct tag_world *w)
         PASS();
     } _test_next:;
     g_tag.tamper = false; return failures;
+}
+static bool tag_consume_bytes(void *context, const char *path,
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply)
+{
+    bool host_original = false;
+    return tag_consume(context, path, identity, reply, &host_original) && !host_original;
+}
+static int tag_stage_bytes(struct tag_world *w)
+{
+    int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
+    struct zcl_command_reply why, reply; struct tag_consumer c = {.world = w};
+    TEST("verified network bytes stage through Receive identity and reject oversize") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u); zcl_command_reply_init(&reply, "zcl.app_get.stage.v1");
+        ASSERT(app_get_stage_consume_bytes(&rows[0], w->j.b_datadir, g_tag.bytes, g_tag.len,
+            tag_consume_bytes, &c, &reply));
+        ASSERT_EQ(c.calls, 1); ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(!c.path[0] || access(c.path, F_OK) != 0); zcl_command_reply_free(&reply);
+        memset(&c, 0, sizeof(c)); c.world = w;
+        struct zcl_app_offer_row oversized = rows[0]; oversized.offer.size = (int64_t)VCS_BUNDLE_MAX_BYTES + 1;
+        zcl_command_reply_init(&reply, "zcl.app_get.stage.v1");
+        ASSERT(!app_get_stage_consume_bytes(&oversized, w->j.b_datadir, g_tag.bytes,
+            VCS_BUNDLE_MAX_BYTES + 1u, tag_consume_bytes, &c, &reply));
+        ASSERT_EQ(c.calls, 0); ASSERT(!reply.error.mutated && !strcmp(reply.error.code, "BAD_INPUT"));
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u); zcl_command_reply_free(&reply);
+        uint8_t *bad = malloc(g_tag.len); ASSERT(bad && g_tag.len > 0);
+        memcpy(bad, g_tag.bytes, g_tag.len); bad[g_tag.len / 2] ^= 1u;
+        zcl_command_reply_init(&reply, "zcl.app_get.stage.v1");
+        bool accepted = app_get_stage_consume_bytes(&rows[0], w->j.b_datadir, bad, g_tag.len,
+            tag_consume_bytes, &c, &reply); free(bad);
+        ASSERT(!accepted && !reply.error.mutated && !strcmp(reply.error.code, "SHA256_MISMATCH"));
+        ASSERT_EQ(c.calls, 0); ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    return failures;
 }
 static int tag_stage_unsafe_parent(struct tag_world *w)
 {
@@ -2053,6 +2198,10 @@ static bool tag_discover_card(void *context, const struct zcl_present_model_v1 *
     tag_discover_capture(d);
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (!strcmp(model->request_id, "library-home")) return tag_discover_home(d, model, event);
+    if (!strcmp(model->request_id, "library-discover-options")) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true;
+    }
     if (!strcmp(model->request_id, "library-share-options"))
         return tag_discover_share_menu(d, model, event);
     if (d->keep && !strncmp(model->request_id, "library-", 8) && strcmp(model->request_id, "library-error"))
@@ -2358,6 +2507,152 @@ static int tag_library_discover(struct tag_world *w)
     tag_xdg_leave(&x);
     return failures;
 }
+struct tag_link_fixture { struct tag_discover discover; struct zcl_app_offer_row row; unsigned homes, jobs, errors, mode; };
+static bool tag_link_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
+{
+    struct tag_link_fixture *f = context; (void)why; (void)cap;
+    int n = snprintf(out, 257, "http://%s/board/apps/v1/%s", TAG_ONION, f->row.post_id);
+    *submitted = n > 0 && n < 257; return *submitted;
+}
+static bool tag_link_cards(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_link_fixture *f = context;
+    if (!strcmp(model->request_id, "library-discover-options")) {
+        if (!zcl_present_model_validate_v1(model, why, cap) || model->action_count != 3 || strcmp(model->actions[1].id, "open-link")) return false;
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 1; return true;
+    }
+    if (!strcmp(model->request_id, "library-home")) {
+        if (!zcl_present_model_validate_v1(model, why, cap) || model->action_count != 4 ||
+            strcmp(model->actions[1].id, "discover")) return false;
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = f->homes++ ? 3 : 1; return true;
+    }
+    if (!strcmp(model->request_id, "library-error")) {
+        ++f->errors; event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true;
+    }
+    return tag_discover_card(&f->discover, model, copy, event, why, cap);
+}
+static bool tag_link_receive(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct tag_link_fixture *f = context;
+    return tag_discover_receive(&f->discover, model, pages, live, why, cap);
+}
+static bool tag_link_selected(const struct tag_link_fixture *f, const char *carrier,
+    const struct zcl_app_offer_row *selected)
+{
+    return selected && carrier && !strcmp(carrier, TAG_ONION) &&
+        !strcmp(selected->post_id, f->row.post_id) && !strcmp(selected->offer.sha256, f->row.offer.sha256);
+}
+static bool tag_link_job(void *context, const char *mode, const char *url, const char *carrier,
+    const struct zcl_app_offer_row *selected, struct app_network_job_result *result,
+    struct zcl_command_reply *reply)
+{
+    struct tag_link_fixture *f = context; (void)reply;
+    struct app_network_link parsed;
+    if (!app_network_link_parse(url, &parsed) || !parsed.exact || strcmp(parsed.post_id, f->row.post_id)) return false;
+    ++f->jobs; result->error = APP_NETWORK_OK;
+    if (f->mode == 1) { result->cancelled = true; (void)json_push_kv_str(&reply->data, "status", "canceled"); return false; }
+    if (f->mode == 2) { zcl_package_copy_fail(reply, "TEMP_CLEANUP_FAILED", true, "Private cleanup failed.", "fixture"); return false; }
+    if (!strcmp(mode, "exact") && !selected && !carrier) { result->rows[0] = f->row; result->count = 1; return true; }
+    if (strcmp(mode, "carrier") || !tag_link_selected(f, carrier, selected)) return false;
+    result->bytes = malloc(g_tag.len); if (!result->bytes) return false;
+    memcpy(result->bytes, g_tag.bytes, g_tag.len); result->len = g_tag.len; return true;
+}
+static int tag_library_link_cancel(struct tag_world *w)
+{
+    int failures = 0; struct zcl_command_reply why, reply; struct app_launch_env env; char message[256];
+    struct tag_link_fixture f = {0}; struct zcl_app_offer_row rows[4]; size_t count = 0; struct tag_xdg x = {0};
+    struct tag_world fresh = *w; struct stat st;
+    char *home = getenv("HOME") ? strdup(getenv("HOME")) : NULL; bool had_home = getenv("HOME") != NULL;
+    TEST("My Apps opens the exact link and native Receive cancel keeps nothing") {
+        ASSERT(!had_home || home); ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why); ASSERT_EQ(count, 1u); f.row = rows[0];
+        ASSERT(test_mkdtemp(fresh.root, sizeof(fresh.root), "app_link_first_use"));
+        ASSERT(asf_journey_init(&fresh.j, "tinyapp", w->repo, fresh.root));
+        ASSERT(rmdir(fresh.j.b_datadir) == 0 && chmod(fresh.j.b_home, 0755) == 0);
+        ASSERT(setenv("HOME", fresh.j.b_home, 1) == 0 && tag_xdg_enter(&x, fresh.j.b_home));
+        ASSERT(app_launch_env_from_process(&env, message, sizeof(message)));
+        struct app_network_test_hooks hooks = {.form = tag_link_form, .job = tag_link_job, .receive = tag_link_receive};
+        int offers = g_tag.offers, posts = g_tag.posts;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_network(&env, fresh.j.b_datadir, &reply, tag_link_cards, NULL, &f, &hooks);
+        ASSERT_EQ(f.homes, 2u); ASSERT_EQ(f.jobs, 2u); ASSERT_EQ(f.discover.receive, 1);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
+        ASSERT(lstat(fresh.j.b_datadir, &st) != 0 && errno == ENOENT);
+        ASSERT_EQ(tag_glob(fresh.j.b_home, ".app-get-*"), 0u); zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    tag_xdg_leave(&x); if (home) { (void)setenv("HOME", home, 1); free(home); } else if (!had_home) (void)unsetenv("HOME");
+    return failures;
+}
+static int tag_library_link_fault(struct tag_world *w, unsigned mode)
+{
+    int failures = 0; struct zcl_command_reply why, reply; struct app_launch_env env; char message[256];
+    struct tag_link_fixture f = {.mode = mode}; struct zcl_app_offer_row rows[4]; size_t count = 0; struct tag_xdg x = {0};
+    char *home = getenv("HOME") ? strdup(getenv("HOME")) : NULL; bool had_home = getenv("HOME") != NULL;
+    TEST("link cancellation or uncertain cleanup does not retry or lose mutation") {
+        ASSERT(!had_home || home); ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why); ASSERT_EQ(count, 1u); f.row = rows[0];
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0 && tag_xdg_enter(&x, w->j.b_home));
+        ASSERT(app_launch_env_from_process(&env, message, sizeof(message)));
+        struct app_network_test_hooks hooks = {.form = tag_link_form, .job = tag_link_job, .receive = tag_link_receive};
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_network(&env, w->j.b_datadir, &reply, tag_link_cards, NULL, &f, &hooks);
+        ASSERT_EQ(f.jobs, 1u); ASSERT_EQ(f.discover.receive, 0);
+        if (mode == 1) ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && f.homes == 2 && !f.errors);
+        else ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
+            !strcmp(reply.error.code, "TEMP_CLEANUP_FAILED") && f.homes == 1 && f.errors == 1);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    tag_xdg_leave(&x); if (home) { (void)setenv("HOME", home, 1); free(home); } else if (!had_home) (void)unsetenv("HOME");
+    return failures;
+}
+static bool tag_link_late_worker(void *context, const struct app_network_job_args *args,
+    struct app_network_job_result *result)
+{
+    struct tag_link_fixture *f = context; (void)args; ++f->jobs;
+    result->rows[0] = f->row; result->count = 1; result->error = APP_NETWORK_OK; return true;
+}
+static bool tag_link_late_notice(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)context; (void)pages;
+    if (!zcl_present_model_validate_v1(model, why, cap) || strcmp(model->request_id, "app-network-progress")) return false;
+    bool redraw = false, close = false; int64_t end = platform_time_monotonic_ms() + 5000;
+    while (!close && platform_time_monotonic_ms() < end) {
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (!close) platform_sleep_ms(1); /* real-clock: test completion barrier */
+    }
+    if (!close) return false;
+    live->owner.update(live->owner.context, NULL, true, &redraw, &close); return close;
+}
+static int tag_library_link_late_cancel(struct tag_world *w)
+{
+    int failures = 0; struct zcl_command_reply why, reply; struct app_launch_env env; char message[256];
+    struct tag_link_fixture f = {0}; struct zcl_app_offer_row rows[4]; size_t count = 0; struct tag_xdg x = {0};
+    char *home = getenv("HOME") ? strdup(getenv("HOME")) : NULL; bool had_home = getenv("HOME") != NULL;
+    TEST("closing after worker completion still cancels before Receive") {
+        ASSERT(!had_home || home); ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why); ASSERT_EQ(count, 1u); f.row = rows[0];
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0 && tag_xdg_enter(&x, w->j.b_home));
+        ASSERT(app_launch_env_from_process(&env, message, sizeof(message)));
+        struct app_network_test_hooks hooks = {.form = tag_link_form, .worker = tag_link_late_worker, .receive = tag_link_receive};
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_network(&env, w->j.b_datadir, &reply, tag_link_cards, tag_link_late_notice, &f, &hooks);
+        ASSERT_EQ(f.jobs, 1u); ASSERT_EQ(f.discover.receive, 0); ASSERT_EQ(f.homes, 2u);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-network-*"), 0u);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    tag_xdg_leave(&x); if (home) { (void)setenv("HOME", home, 1); free(home); } else if (!had_home) (void)unsetenv("HOME");
+    return failures;
+}
 static bool tag_profile_canceled(const struct zcl_command_reply *reply, const struct tag_discover *d,
     const char *node, const char *stage_parent)
 {
@@ -2552,6 +2847,207 @@ static int tag_cached_comparison(struct tag_world *w)
     if (fixture_ready && !tag_stop_receipt(&d, fresh.j.b_datadir)) ++failures;
     zcl_command_reply_free(&reply);
     if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
+    return failures;
+}
+static ssize_t tag_wait_read(int fd, void *buf, size_t size, int timeout_ms)
+{
+    struct pollfd p = {.fd = fd, .events = POLLIN | POLLHUP}; int n;
+    do { n = poll(&p, 1, timeout_ms); } while (n < 0 && errno == EINTR);
+    if (n <= 0) return -1;
+    ssize_t got; do { got = read(fd, buf, size); } while (got < 0 && errno == EINTR);
+    return got;
+}
+static pid_t tag_wait_child(pid_t child, int *status)
+{
+    pid_t waited = -1;
+    if (child > 0) do { waited = waitpid(child, status, 0); } while (waited < 0 && errno == EINTR);
+    return waited;
+}
+static bool tag_record_worker(bool have_pid, pid_t worker, char executable[APP_LAUNCH_PATH_MAX], uint64_t *start)
+{
+    return have_pid && worker > 1 && app_proc_identity((long)worker, executable, start);
+}
+static void tag_kill_same_worker(pid_t worker, const char *executable, uint64_t start)
+{
+    char current[APP_LAUNCH_PATH_MAX]; uint64_t now = 0;
+    if (app_proc_identity((long)worker, current, &now) && now == start && !strcmp(current, executable))
+        (void)kill(worker, SIGKILL);
+}
+static void tag_lifeline_intermediate(int event_pipe[2], int pid_pipe[2])
+{
+    close(event_pipe[0]); close(pid_pipe[0]); pid_t worker = fork();
+    if (!worker) {
+        close(pid_pipe[1]); struct app_network_lifeline guard;
+        if (!app_network_lifeline_start(&guard, (uint64_t)getppid(), 5000)) _exit(2);
+        if (write(event_pipe[1], "R", 1) != 1) _exit(2);
+        for (;;) pause();
+    }
+    if (write(pid_pipe[1], &worker, sizeof(worker)) != (ssize_t)sizeof(worker)) _exit(2);
+    close(pid_pipe[1]); close(event_pipe[1]); for (;;) pause();
+}
+static bool tag_lifeline_normal(void)
+{
+    int fds[2]; if (pipe(fds)) return false;
+    pid_t child = fork();
+    if (!child) {
+        close(fds[0]); struct app_network_lifeline guard;
+        bool ok = app_network_lifeline_start(&guard, (uint64_t)getppid(), 5000) && app_network_lifeline_stop(&guard);
+        if (ok) ok = write(fds[1], "D", 1) == 1;
+        _exit(ok ? 0 : 2);
+    }
+    close(fds[1]); char byte = 0;
+    bool done = child > 0 && tag_wait_read(fds[0], &byte, 1, 3000) == 1 && byte == 'D';
+    if (child > 0 && !done) (void)kill(child, SIGKILL);
+    int status = 0; pid_t waited = tag_wait_child(child, &status);
+    close(fds[0]); return done && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+static bool tag_lifeline_deadline(void)
+{
+    int fds[2]; if (pipe(fds)) return false;
+    pid_t child = fork();
+    if (!child) {
+        close(fds[0]); struct app_network_lifeline guard;
+        if (!app_network_lifeline_start(&guard, (uint64_t)getppid(), 300)) _exit(2);
+        if (write(fds[1], "R", 1) != 1) _exit(2);
+        for (;;) pause();
+    }
+    close(fds[1]); char byte = 0;
+    bool ready = child > 0 && tag_wait_read(fds[0], &byte, 1, 3000) == 1 && byte == 'R';
+    bool eof = ready && tag_wait_read(fds[0], &byte, 1, 3000) == 0;
+    if (child > 0 && !eof) (void)kill(child, SIGKILL);
+    int status = 0; pid_t waited = tag_wait_child(child, &status);
+    close(fds[0]); return ready && eof && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 124;
+}
+static bool tag_lifeline_wait_eof(int fd)
+{
+    char byte = 0; ssize_t after = tag_wait_read(fd, &byte, 1, 7000);
+    if (after == 1) after = tag_wait_read(fd, &byte, 1, 3000);
+    return after == 0;
+}
+static bool tag_wait_child_bounded(pid_t child, int *status, unsigned timeout_ms)
+{
+    int64_t start = platform_time_monotonic_ms(); if (start < 0) return false;
+    int64_t end = start + timeout_ms;
+    for (;;) {
+        pid_t got = waitpid(child, status, WNOHANG);
+        if (got == child) return true;
+        if (got < 0 && errno != EINTR) return false;
+        int64_t now = platform_time_monotonic_ms(); if (now < 0 || now >= end) return false;
+        platform_sleep_ms(10); /* real-clock: owned child completion bound */
+    }
+}
+static void tag_lifeline_blocked_child(int data[2], int ready[2])
+{
+    close(data[0]); close(ready[0]); struct app_network_lifeline guard;
+    if (!app_network_lifeline_start(&guard, (uint64_t)getppid(), 300)) _exit(2);
+    if (write(ready[1], "R", 1) != 1) _exit(2);
+    close(ready[1]); char bytes[4096] = {0};
+    for (;;) if (write(data[1], bytes, sizeof(bytes)) < 0 && errno != EINTR) _exit(3);
+}
+static bool tag_lifeline_blocked_output(void)
+{
+    int data[2], ready[2]; if (pipe(data)) return false;
+    if (pipe(ready)) { close(data[0]); close(data[1]); return false; }
+    pid_t child = fork();
+    if (!child) tag_lifeline_blocked_child(data, ready);
+    close(data[1]); close(ready[1]); char byte = 0;
+    bool armed = child > 0 && tag_wait_read(ready[0], &byte, 1, 3000) == 1 && byte == 'R';
+    int status = 0; bool exited = armed && tag_wait_child_bounded(child, &status, 3000);
+    if (child > 0 && !exited) { (void)kill(child, SIGKILL); (void)tag_wait_child(child, &status); }
+    close(ready[0]); close(data[0]);
+    return armed && exited && WIFEXITED(status) && WEXITSTATUS(status) == 124;
+}
+struct tag_failing_clock { atomic_bool zero; };
+static int64_t tag_clock_sample(void *context)
+{
+    struct tag_failing_clock *clock = context;
+    return atomic_load_explicit(&clock->zero, memory_order_acquire) ? 0 : 1000000000LL;
+}
+static void tag_lifeline_clock_child(int ready[2], bool zero_first)
+{
+    close(ready[0]); struct tag_failing_clock clock; atomic_init(&clock.zero, zero_first);
+    clock_iface_t iface = {.now_monotonic_ns = tag_clock_sample, .now_wall_ms = tag_clock_sample, .self = &clock};
+    clock_set_default(&iface); struct app_network_lifeline guard;
+    bool armed = app_network_lifeline_start(&guard, (uint64_t)getppid(), 5000);
+    if (zero_first) { if (armed || write(ready[1], "R", 1) != 1) _exit(2); _exit(0); }
+    if (!armed || write(ready[1], "R", 1) != 1) _exit(2);
+    atomic_store_explicit(&clock.zero, true, memory_order_release);
+    for (;;) pause();
+}
+static bool tag_lifeline_clock_failure(bool zero_first)
+{
+    int ready[2]; if (pipe(ready)) return false;
+    pid_t child = fork();
+    if (!child) tag_lifeline_clock_child(ready, zero_first);
+    close(ready[1]); char byte = 0;
+    bool ready_seen = child > 0 && tag_wait_read(ready[0], &byte, 1, 3000) == 1 && byte == 'R';
+    int status = 0; bool exited = ready_seen && tag_wait_child_bounded(child, &status, 3000);
+    if (child > 0 && !exited) { (void)kill(child, SIGKILL); (void)tag_wait_child(child, &status); }
+    close(ready[0]);
+    return ready_seen && exited && WIFEXITED(status) && WEXITSTATUS(status) == (zero_first ? 0 : 124);
+}
+static bool tag_lifeline_parent_loss(void)
+{
+    int event_pipe[2], pid_pipe[2]; if (pipe(event_pipe)) return false;
+    if (pipe(pid_pipe)) { close(event_pipe[0]); close(event_pipe[1]); return false; }
+    pid_t parent = fork();
+    if (!parent) tag_lifeline_intermediate(event_pipe, pid_pipe);
+    close(event_pipe[1]); close(pid_pipe[1]); pid_t worker = -1; char byte = 0;
+    bool have_pid = parent > 0 && tag_wait_read(pid_pipe[0], &worker, sizeof(worker), 3000) == sizeof(worker) && worker > 1;
+    bool ready = have_pid && tag_wait_read(event_pipe[0], &byte, 1, 3000) == 1 && byte == 'R';
+    char executable[APP_LAUNCH_PATH_MAX] = {0}; uint64_t start = 0;
+    bool identity = tag_record_worker(have_pid, worker, executable, &start);
+    if (parent > 0) (void)kill(parent, SIGKILL);
+    int status = 0; pid_t waited = tag_wait_child(parent, &status);
+    bool eof = tag_lifeline_wait_eof(event_pipe[0]);
+    if (!eof && identity) tag_kill_same_worker(worker, executable, start);
+    close(event_pipe[0]); close(pid_pipe[0]);
+    return ready && identity && waited == parent && WIFSIGNALED(status) && eof;
+}
+static int tag_lifeline(void)
+{
+    int failures = 0;
+    TEST("network lifeline joins normally") { ASSERT(tag_lifeline_normal()); PASS(); }
+    TEST("network lifeline refuses zero clock at start and during watch") {
+        ASSERT(tag_lifeline_clock_failure(true)); ASSERT(tag_lifeline_clock_failure(false)); PASS();
+    }
+    TEST("network lifeline stops an armed worker at its hard deadline") { ASSERT(tag_lifeline_deadline()); PASS(); }
+    TEST("network lifeline stops a worker blocked writing its reply") { ASSERT(tag_lifeline_blocked_output()); PASS(); }
+    TEST("network lifeline closes worker pipe after its armed parent dies") { ASSERT(tag_lifeline_parent_loss()); PASS(); } _test_next:;
+    return failures;
+}
+static bool tag_directory_empty(const char *path)
+{
+    DIR *d = opendir(path); if (!d) return false;
+    bool empty = true; struct dirent *entry;
+    while ((entry = readdir(d)))
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) { empty = false; break; }
+    closedir(d); return empty;
+}
+static int tag_worker_invalid(struct tag_world *w)
+{
+    int failures = 0; char worker[PATH_MAX], home[TAG_PATH], url[257], bytes[256], parent[32];
+    char *old = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    bool had_home = getenv("HOME") != NULL, made = false;
+    TEST("reserved network worker rejects malformed invocation before node startup") {
+        ASSERT(!had_home || old); ASSERT(tag_fixture_worker(w, worker));
+        ASSERT(test_mkdtemp(home, sizeof(home), "app_network_worker")); made = true;
+        ASSERT(setenv("HOME", home, 1) == 0);
+        ASSERT(snprintf(url, sizeof(url), "http://%s/board/apps/v1/%064d", TAG_ONION, 0) > 0);
+        snprintf(parent, sizeof(parent), "%llu", (unsigned long long)getpid());
+        const char *missing[] = {worker, "--app-network-worker", NULL};
+        const char *extra[] = {worker, "--app-network-worker", "invalid", NULL};
+        const char *malformed[] = {worker, "--app-network-worker", "carrier", url, TAG_ONION,
+            "{bad", home, "0", "0", "1234", "1000", "v1", parent, NULL};
+        struct zcl_spawn_binary_observation out;
+        ASSERT(!zcl_spawn_capture_binary(missing, bytes, sizeof(bytes), 5000, &out).ok && out.exit_observed && out.exit_code == 2);
+        ASSERT(!zcl_spawn_capture_binary(extra, bytes, sizeof(bytes), 5000, &out).ok && out.exit_observed && out.exit_code == 2);
+        ASSERT(!zcl_spawn_capture_binary(malformed, bytes, sizeof(bytes), 5000, &out).ok &&
+            out.exit_observed && out.exit_code == 2);
+        ASSERT(tag_directory_empty(home)); PASS();
+    } _test_next:;
+    if (old) { (void)setenv("HOME", old, 1); free(old); } else if (!had_home) (void)unsetenv("HOME");
+    if (made && rmdir(home) != 0) ++failures;
     return failures;
 }
 static void tag_cancelled_share(void *context, const struct app_selection *selection,
@@ -3370,12 +3866,20 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_refusals(w);
     failures += tag_b_plan(w);
     failures += tag_stage_consumer(w);
+    failures += tag_scratch_replacement(w);
+    failures += tag_stage_bytes(w);
     failures += tag_stage_unsafe_parent(w);
     failures += tag_discover_cancel(w);
     failures += tag_discover_fetch_close(w);
     failures += tag_fetch_native_profile(w);
     failures += tag_library_discover(w);
+    failures += tag_library_link_cancel(w);
+    failures += tag_library_link_fault(w, 1);
+    failures += tag_library_link_fault(w, 2);
+    failures += tag_library_link_late_cancel(w);
     failures += tag_library_profile(w);
+    failures += tag_worker_invalid(w);
+    failures += tag_lifeline();
     failures += tag_discover_empty_cases(w);
     if (failures == 0) failures += tag_keep_cases(w);
     failures += tag_failed_fetch_cleanup(w);
@@ -3394,6 +3898,8 @@ int test_app_get(void)
     static struct tag_world w;
     int failures = 0;
     printf("app get (publish to room apps, get by identity)...\n");
+    failures += tag_network_link();
+    failures += tag_network_ipc();
     failures += tag_network_test();
     failures += tag_process_observation();
     failures += tag_recovery_serialization();

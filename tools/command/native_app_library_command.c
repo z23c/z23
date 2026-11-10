@@ -11,6 +11,8 @@
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_publish_command.h"
+#include "command/native_app_host_flow.h"
+#include "command/native_app_network_controller.h"
 #include "command/native_app_share_reveal.h"
 #include "command/native_app_personalize_view.h"
 #include "command/native_zcode_package_copy.h"
@@ -50,6 +52,9 @@ struct library {
     app_library_preparer preparer;
     void *prepare_context;
     const char *test_worker_path;
+#if defined(ZCL_TESTING)
+    const struct app_network_test_hooks *network_test;
+#endif
     bool prepared_mutated;
     bool error_presented;
     bool has_received;
@@ -148,9 +153,20 @@ static void al_home(struct library *w)
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
     (void)snprintf(m->summary, sizeof(m->summary), "Open your apps or discover available advertisements.");
     app_library_choice(m, "myapps", "My apps", "Browse installed and saved apps.");
-    app_library_choice(m, "discover", "Discover apps", "Browse offers received by this node.");
+    app_library_choice(m, "discover", "Discover apps", "Browse offers or open a shared app.");
     app_library_choice(m, "hosting", "Hosting", "Review and stop local hosting intents.");
     app_library_choice(m, "cancel", "Close", "Close without opening an app.");
+}
+
+static void al_discover_options(struct library *w)
+{
+    struct zcl_present_model_v1 *m = &w->model;
+    zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_CHOICE);
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-discover-options");
+    (void)snprintf(m->title, sizeof(m->title), "Discover apps");
+    app_library_choice(m, "catalog", "Browse offers", "Browse offers received by this node.");
+    app_library_choice(m, "open-link", "Open a shared app", "Paste an app link.");
+    app_library_choice(m, "discover-back", "Back", "Return to My Apps.");
 }
 
 static bool al_present(void *context, const struct zcl_present_model_v1 *model,
@@ -560,7 +576,7 @@ static void al_detail_model(struct library *w)
     if (w->page == 1) {
         app_library_choice(m, "open", "Open app", "Use this app.");
         al_change_choice(m, r);
-        app_library_choice(m, "share", "Share this version", r->saved ? "Choose file or public offer." : "Keep a version first.");
+        app_library_choice(m, "share", "Share this version", r->saved ? "Choose a file, link, or public offer." : "Keep a version first.");
     } else if (w->page == 7) {
         app_library_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
         app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
@@ -591,10 +607,21 @@ static void al_share_options(struct library *w)
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-share-options");
     (void)snprintf(m->summary, sizeof(m->summary), "Choose how to share this saved version.");
     app_library_choice(m, "share-file", "Create share file", "Send a file to someone.");
+    app_library_choice(m, "share-link", "Share a link", "Available while this window stays open.");
+    app_library_choice(m, "more-sharing", "More sharing options", "Publish or help share the original.");
+    app_library_choice(m, "share-back", "Back", "Return to this app.");
+}
+static void al_more_share_options(struct library *w)
+{
+    al_model(w);
+    struct zcl_present_model_v1 *m = &w->model;
+    m->item_count = m->action_count = 0;
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-more-share-options");
+    (void)snprintf(m->summary, sizeof(m->summary), "Choose another way to share.");
     app_library_choice(m, "publish", "Publish publicly", "Offer this version on the public apps board.");
     if (w->rows[w->index].saved && app_received_original_available(&w->rows[w->index].selection))
         app_library_choice(m, "share-original", "Help share original", "Offer the received original without changing your saved version.");
-    app_library_choice(m, "share-back", "Back", "Return to this app.");
+    app_library_choice(m, "more-share-back", "Back", "Return to sharing options.");
 }
 struct al_host_check { const struct library_row *row; const struct app_launch_env *env; };
 static bool al_host_current(void *context, struct zcl_command_reply *reply)
@@ -618,7 +645,7 @@ static void al_publish_notice(struct library *w, struct zcl_command_reply *reply
 {
     const char *post = zcl_package_copy_str(&reply->data, "post_id");
     const char *root = zcl_package_copy_str(&reply->data, "package_root");
-    const char *next = zcl_package_copy_str(&reply->data, "next");
+    const char *next = zcl_package_copy_str(&reply->data, "public_link");
     struct app_confirm *v = zcl_calloc(1, sizeof(*v), "library-publish-result");
     char why[256] = {0};
     if (v) {
@@ -627,7 +654,7 @@ static void al_publish_notice(struct library *w, struct zcl_command_reply *reply
         v->copy_text = next;
         (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "library-publish-result");
         (void)snprintf(v->model.title, sizeof(v->model.title), "Published to public apps");
-        (void)snprintf(v->model.summary, sizeof(v->model.summary), "Posted on this node for up to 24 hours. Other people can discover it after their nodes receive the offer. Press C to copy a command for the recipient.");
+        (void)snprintf(v->model.summary, sizeof(v->model.summary), "Available while this node hosts it, for up to 24 hours. Press C to copy the app link; keep this window open while pasting.");
         v->model.action_count = 4;
         app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
         app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
@@ -761,7 +788,7 @@ static void al_take_discover_result(struct library *w, struct zcl_command_reply 
 }
 static bool al_discover(struct library *w, const struct app_launch_env *env,
     const char *datadir, app_library_presenter presenter, void *context,
-    struct zcl_command_reply *reply)
+    struct zcl_command_reply *reply, bool open_link)
 {
     if (w->has_received && !w->recovery_ready)
         return al_fail(reply, "RECOVERY_TOO_LARGE", "The previous receipt cannot be safely retained while discovering another app.");
@@ -770,12 +797,21 @@ static bool al_discover(struct library *w, const struct app_launch_env *env,
     if (!datadir) datadir = zcl_native_command_datadir();
     bool shown = false;
     bool done;
-#ifdef ZCL_TESTING
-    if (w->test_worker_path)
-        done = app_discover_run_test(datadir, presenter, w->notice, context, &received, &shown, w->test_worker_path);
-    else
+    if (open_link) {
+#if defined(ZCL_TESTING)
+        if (w->network_test)
+            done = zcl_test_app_network_open_link(datadir, presenter, w->notice, context, &received, &shown, w->network_test);
+        else
 #endif
-        done = app_discover_run(datadir, presenter, w->notice, context, &received, &shown);
+            done = app_network_open_link(datadir, presenter, w->notice, context, &received, &shown);
+    } else {
+#ifdef ZCL_TESTING
+        if (w->test_worker_path)
+            done = app_discover_run_test(datadir, presenter, w->notice, context, &received, &shown, w->test_worker_path);
+        else
+#endif
+            done = app_discover_run(datadir, presenter, w->notice, context, &received, &shown);
+    }
     w->any_mutated |= received.error.mutated;
     w->receive_failure = received.status != ZCL_COMMAND_STATUS_PASSED;
     if (done) al_resolve_discover_error(w);
@@ -959,23 +995,50 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
     reply->error.mutated |= prior_mutated;
     return false;
 }
-static bool al_needs_recovery(const char *id)
+static bool al_host_link(struct library *w, const struct app_launch_env *env,
+    const char *exe, struct zcl_command_reply *reply)
 {
-    return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-original") || !strcmp(id, "help") ||
-        !strcmp(id, "open") || !strcmp(id, "draft");
+    const struct library_row *row = &w->rows[w->index];
+    if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before sharing.");
+    if (!al_current(row, env, reply)) return false;
+    char path[APP_SELECTION_PATH_MAX];
+    if (!exe) { if (!al_executable(path, sizeof(path))) return al_fail(reply, "HOST_UNAVAILABLE", "Cannot start sharing."); exe = path; }
+    struct zcl_command_reply inner; zcl_command_reply_init(&inner, "zcl.app_host_link.v1");
+    app_host_flow(&row->selection, exe, w->notice, w->prepare_context, &inner);
+    const char *status = zcl_package_copy_str(&inner.data, "status");
+    bool canceled = inner.status == ZCL_COMMAND_STATUS_PASSED && status && !strcmp(status, "canceled");
+    if (canceled) w->operation_canceled = true;
+    else if (inner.status != ZCL_COMMAND_STATUS_PASSED) app_confirm_forward_failure(reply, &inner);
+    else { json_free(&reply->data); reply->data = inner.data; json_init(&inner.data); reply->error.mutated |= inner.error.mutated; }
+    bool ok = inner.status == ZCL_COMMAND_STATUS_PASSED; zcl_command_reply_free(&inner); return ok;
+}
+static bool al_receipt_operation(const char *id)
+{
+    return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-link") || !strcmp(id, "share-original") ||
+        !strcmp(id, "help") || !strcmp(id, "open") || !strcmp(id, "draft");
+}
+static bool al_change_page(struct library *w, const char *id)
+{
+    static const struct { const char *id; unsigned page; } routes[] = {
+        {"change-options", 7}, {"share", 6}, {"share-back", 1},
+        {"more-sharing", 9}, {"more-share-back", 6}
+    };
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+        if (!strcmp(id, routes[i].id)) { w->page = routes[i].page; return true; }
+    }
+    return false;
 }
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
-    if (w->has_received && !w->recovery_ready && al_needs_recovery(id))
+    if (w->has_received && !w->recovery_ready && al_receipt_operation(id))
         return al_fail(reply, "RECOVERY_TOO_LARGE", "The previous receipt cannot be safely retained for another operation.");
-    if (!strcmp(id, "change-options")) { w->page = 7; return true; }
+    if (al_change_page(w, id)) return true;
     if (!strcmp(id, "draft")) return al_draft_action(w, env, reply);
-    if (!strcmp(id, "share")) { w->page = 6; return true; }
-    if (!strcmp(id, "share-back")) { w->page = 1; return true; }
     if (!strcmp(id, "share-file")) { w->receive_current = false; return al_share(w, env, reply); }
     if (!strcmp(id, "publish")) { w->receive_current = false; return al_publish(w, env, reply); }
     if (!strcmp(id, "share-original")) { w->receive_current = false; return al_host_original(w, env, reply); }
+    if (!strcmp(id, "share-link")) { w->receive_current = false; return al_host_link(w, env, exe, reply); }
     if (!strcmp(id, "help")) {
         w->receive_current = false;
         if (!al_setup(w, env, exe, datadir, reply)) return false;
@@ -1009,8 +1072,7 @@ static bool al_navigation_result(struct library *w, unsigned action, const struc
 {
     w->any_mutated |= reply->error.mutated;
     const char *id = w->model.actions[action].id;
-    bool operation = !strcmp(id, "open") || !strcmp(id, "share-file") ||
-                     !strcmp(id, "publish") || !strcmp(id, "share-original") || !strcmp(id, "help") || !strcmp(id, "draft");
+    bool operation = al_receipt_operation(id);
     w->operation_canceled = false;
     if (operation) w->receive_failure = false;
     bool next = al_navigate(w, action, env, exe, datadir, reply);
@@ -1024,12 +1086,23 @@ static bool al_external(struct library *w, const struct app_launch_env *env, con
     app_library_presenter presenter, void *context, struct zcl_command_reply *reply, const char *id, bool *handled)
 {
     *handled = true;
-    if (!strcmp(id, "discover")) return al_discover(w, env, datadir, presenter, context, reply);
+    if (!strcmp(id, "discover")) { w->page = 8; return true; }
+    if (!strcmp(id, "catalog") || !strcmp(id, "open-link")) return al_discover(w, env, datadir, presenter, context, reply, !strcmp(id, "open-link"));
+    if (!strcmp(id, "discover-back")) { w->page = 3; return true; }
     if (!strcmp(id, "hosting")) {
         bool ok = app_host_browser_run(presenter, w->notice, context, reply);
         w->any_mutated |= reply->error.mutated; return ok;
     }
     *handled = false; return true;
+}
+static void al_page_model(struct library *w)
+{
+    if (w->page == 3) al_home(w);
+    else if (w->page == 6) al_share_options(w);
+    else if (w->page == 8) al_discover_options(w);
+    else if (w->page == 9) al_more_share_options(w);
+    else if (w->page) al_detail_model(w);
+    else al_model(w);
 }
 static void al_loop(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir)
@@ -1037,10 +1110,7 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
     char why[256] = {0};
     bool loaded = al_load(w, env, reply);
     while (loaded) {
-        if (w->page == 3) al_home(w);
-        else if (w->page == 6) al_share_options(w);
-        else if (w->page) al_detail_model(w);
-        else al_model(w);
+        al_page_model(w);
         struct zcl_present_window_event_v1 event = {0};
         if (!zcl_present_model_validate_v1(&w->model, why, sizeof(why)) ||
             !presenter(context, &w->model, w->setup[0] ? w->setup : NULL, &event, why, sizeof(why))) {
@@ -1063,12 +1133,17 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir,
     app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice,
-    app_library_revealer revealer, const char *test_worker_path, size_t data_cap)
+    app_library_revealer revealer, const char *test_worker_path, const void *network_test, size_t data_cap)
 {
     struct library *w = zcl_calloc(1, sizeof(*w), "app-library");
     if (!w) { al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate My Apps."); return; }
     w->preparer = preparer; w->sharer = sharer; w->notice = notice; w->revealer = revealer; w->prepare_context = context;
     w->test_worker_path = test_worker_path;
+#if defined(ZCL_TESTING)
+    w->network_test = network_test;
+#else
+    (void)network_test;
+#endif
     w->page = 3;
     al_loop(w, env, reply, presenter, context, exe, datadir);
     al_discover_error_recovery(w, reply);
@@ -1117,61 +1192,65 @@ void zcl_native_handle_app_library(const struct zcl_command_request *request,
         return;
     }
     size_t cap = request && request->success_data_budget_provided ? request->success_data_budget : 30000u;
-    al_run(&env, reply, al_present, NULL, NULL, datadir, NULL, NULL, NULL, NULL, NULL, cap);
+    al_run(&env, reply, al_present, NULL, NULL, datadir, NULL, NULL, NULL, NULL, NULL, NULL, cap);
 }
 #if defined(ZCL_TESTING)
+void zcl_test_app_library_network(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice, void *context,
+    const struct app_network_test_hooks *hooks)
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, notice, NULL, NULL, hooks, 30000u); }
 void zcl_test_app_library_request(const struct app_launch_env *env, const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context)
 {
     const char *datadir;
     if (al_profile_input(request, &datadir, reply))
-        al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, 30000u);
+        al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u);
 }
 void zcl_test_app_library_discover(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_discover_worker(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, worker_path, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, worker_path, NULL, 30000u); }
 void zcl_test_app_library_discover_worker_share(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path,
     app_library_sharer sharer)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, sharer, receive_presenter, NULL, worker_path, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, sharer, receive_presenter, NULL, worker_path, NULL, 30000u); }
 void zcl_test_app_library_native_at(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
     void *context, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, notice, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, notice, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_sharer sharer,
     app_confirm_presenter notice, app_library_revealer revealer)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, revealer, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, revealer, NULL, NULL, 30000u); }
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 30000u);
+    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 30000u);
 }
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL, NULL, 30000u);
+    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL, NULL, NULL, 30000u);
 }
 void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer)
 {
-    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL, NULL, 30000u);
+    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL, NULL, NULL, 30000u);
 }
 
 #endif

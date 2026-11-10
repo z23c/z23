@@ -2989,7 +2989,8 @@ static bool ast_publish_library_present(void *context, const struct zcl_present_
     if (!zcl_present_model_validate_v1(m, why, cap)) return false;
     const char *wanted = "choose";
     if (!strcmp(m->request_id, "library-home")) wanted = "myapps";
-    else if (!strcmp(m->request_id, "library-share-options")) wanted = "publish";
+    else if (!strcmp(m->request_id, "library-share-options")) wanted = "more-sharing";
+    else if (!strcmp(m->request_id, "library-more-share-options")) wanted = "publish";
     else {
         for (uint32_t i = 0; i < m->action_count; ++i)
             if (!strcmp(m->actions[i].id, "share")) wanted = "share";
@@ -3011,12 +3012,12 @@ static bool ast_publish_library_notice(void *context, const struct zcl_present_m
     if (!strcmp(m->request_id, "library-publish-result")) {
         bool close = false, redraw = false; v->notices++;
         char expected[512];
-        int n = snprintf(expected, sizeof(expected), "z23 app get %s --root=%s --publisher=%s --offer=%s",
-            ast_publish_name, ast_publish_package, ast_publish_publisher,
+        int n = snprintf(expected, sizeof(expected), "http://%s/board/apps/v1/%s",
+            "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion",
             "3333333333333333333333333333333333333333333333333333333333333333");
         return n > 0 && (size_t)n < sizeof(expected) && pages && pages->page_count == 1 &&
             pages->pages && pages->pages[0].copy_text && !strcmp(pages->pages[0].copy_text, expected) &&
-            !strcmp(m->summary, "Posted on this node for up to 24 hours. Other people can discover it after their nodes receive the offer. Press C to copy a command for the recipient.") &&
+            !strcmp(m->summary, "Available while this node hosts it, for up to 24 hours. Press C to copy the app link; keep this window open while pasting.") &&
             ast_action(live, 0, &close, &redraw) && close;
     }
     v->publish.confirm = v->menus++ != 0;
@@ -3031,7 +3032,7 @@ static bool ast_publish_library(struct ac_fixture *f, const char *version)
         &reply, ast_publish_library_present, &view, ast_publish_library_notice);
     bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && view.menus == 2 && view.notices == 1 &&
         ast_publish_posts == posts + 1 && ast_publish_identity_ok && json_get(&reply.data, "post_id") &&
-        !json_get(&reply.data, "status");
+        json_get(&reply.data, "public_link") && !json_get(&reply.data, "status");
     zcl_command_reply_free(&reply); return ok;
 }
 static bool ast_publish_snapshot(struct ac_fixture *f)

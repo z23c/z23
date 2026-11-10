@@ -30,6 +30,8 @@
  *   z23 refold                        — UTXO anchor rebuild readiness
  *   z23 <method> [params...]          — RPC client to running node */
 
+#include "command/native_app_network_worker.h"
+#include "command/native_app_host_worker.h"
 #include "config/boot.h"
 #include "config/boot_cold_start.h"     /* -cold-start staged driver */
 #include "config/boot_error.h"          /* pre-registry typed failure surface */
@@ -922,6 +924,11 @@ static void main_log_malloc_arena_cap(int cap)
 
 int main(int argc, char **argv)
 {
+    /* Reserved workers never fall through to device, node or config startup. */
+    if (argc > 1 && !strcmp(argv[1], "--app-host-worker"))
+        return app_host_worker_main(argc, argv);
+    if (argc > 1 && !strcmp(argv[1], "--app-network-worker"))
+        return app_network_worker_main(argc, argv);
     /* Before any thread exists: glibc arenas are created per contending thread. */
     const int malloc_arena_cap = platform_allocator_cap_arenas();
     zcl_native_device_host_runtime_exit_if_requested(argc, argv);

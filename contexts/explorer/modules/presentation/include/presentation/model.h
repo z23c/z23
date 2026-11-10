@@ -44,6 +44,8 @@ enum zcl_present_model_kind {
     ZCL_PRESENT_MODEL_CONFIRMATION,
     ZCL_PRESENT_MODEL_FORM,
     ZCL_PRESENT_MODEL_CANVAS,
+    /* Collect local input before a content identity is known. No exact_root. */
+    ZCL_PRESENT_MODEL_INPUT_FORM,
 };
 
 enum zcl_present_item_kind {

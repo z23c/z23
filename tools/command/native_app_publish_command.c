@@ -4,6 +4,7 @@
 #include "command/native_app_compose.h"
 #include "command/native_app_offer.h"
 #include "command/native_app_publish_command.h"
+#include "command/native_app_network_link.h"
 #include "command/native_app_share_command.h"
 #include "command/app_selection.h"
 #include "command/native_fleet_bundle.h"
@@ -233,6 +234,39 @@ bool zcl_test_app_publish_next(char *out, size_t cap, const char *name, const ch
 }
 #endif
 
+static bool ap_public_link(const struct ap_state *s, const char *id, char link[160])
+{
+    int n = snprintf(link, 160, "http://%s/board/apps/v1/%s", s->host, id);
+    struct app_network_link parsed;
+    return n > 0 && n < 160 && app_network_link_parse(link, &parsed) &&
+        parsed.exact && !strcmp(parsed.post_id, id);
+}
+static bool ap_post_fields(struct ap_state *s, const char *id, const char *next, const char *link)
+{
+    return json_push_kv_str(&s->reply->data, "public_link", link) &&
+        json_push_kv_str(&s->reply->data, "name", s->share_name) &&
+        json_push_kv_str(&s->reply->data, "post_id", id) &&
+        json_push_kv_str(&s->reply->data, "package_root", s->root) &&
+        json_push_kv_str(&s->reply->data, "publisher_fingerprint", s->publisher) &&
+        json_push_kv_str(&s->reply->data, "next", next) &&
+        json_push_kv_bool(&s->reply->data, "executed", true);
+}
+static void ap_describe_post(struct ap_state *s, const struct zcl_command_reply *inner)
+{
+    const char *id = zcl_app_inner_str(inner, "id"); uint8_t decoded[32];
+    if (!id || !zcl_hex_decode_lower(id, decoded, sizeof(decoded))) {
+        zcl_package_copy_fail(s->reply, "PUBLISH_OUTCOME_UNKNOWN", true,
+            "board post returned no valid post id; the offer may exist", AP_COMMAND); return;
+    }
+    char next[512], link[160];
+    if (!ap_next(next, sizeof(next), s->share_name, s->root, s->publisher, id) ||
+        !ap_public_link(s, id, link)) {
+        zcl_package_copy_fail(s->reply, "RESULT_UNAVAILABLE", true,
+            "offer was posted but its link or continuation could not be described", id); return;
+    }
+    if (!ap_post_fields(s, id, next, link))
+        zcl_package_copy_fail(s->reply, "ALLOC", true, "offer was posted but its result could not be described", AP_COMMAND);
+}
 static void ap_post(struct ap_state *s, const char *text)
 {
     struct json_value in;
@@ -243,31 +277,7 @@ static void ap_post(struct ap_state *s, const char *text)
     json_free(&in);
     if (!built) zcl_command_reply_init(&inner, "zcl.app_publish.inner.v1");
     if (!ok) zcl_app_inner_fail(s->reply, &inner, true);
-    else {
-        const char *id = zcl_app_inner_str(&inner, "id");
-        uint8_t decoded[32];
-        if (!id || !zcl_hex_decode_lower(id, decoded, sizeof(decoded))) {
-            zcl_package_copy_fail(s->reply, "PUBLISH_OUTCOME_UNKNOWN", true,
-                                  "board post returned no valid post id; the offer may exist", AP_COMMAND);
-            zcl_command_reply_free(&inner);
-            return;
-        }
-        char next[512];
-        if (!ap_next(next, sizeof(next), s->share_name, s->root, s->publisher, id)) {
-            zcl_package_copy_fail(s->reply, "RESULT_UNAVAILABLE", true,
-                                  "offer was posted but its continuation could not be described", id);
-            zcl_command_reply_free(&inner);
-            return;
-        }
-        bool described = json_push_kv_str(&s->reply->data, "name", s->share_name) &&
-                         json_push_kv_str(&s->reply->data, "post_id", id) &&
-                         json_push_kv_str(&s->reply->data, "package_root", s->root) &&
-                         json_push_kv_str(&s->reply->data, "publisher_fingerprint", s->publisher) &&
-                         json_push_kv_str(&s->reply->data, "next", next) &&
-                         json_push_kv_bool(&s->reply->data, "executed", true);
-        if (!described) zcl_package_copy_fail(s->reply, "ALLOC", true,
-                                               "offer was posted but its result could not be described", AP_COMMAND);
-    }
+    else ap_describe_post(s, &inner);
     zcl_command_reply_free(&inner);
 }
 

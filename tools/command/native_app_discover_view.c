@@ -6,6 +6,16 @@
 #include <stdio.h>
 #include <string.h>
 
+bool app_discover_present_event(app_library_presenter presenter, void *context,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    char why[256] = {0};
+    return presenter(context, model, NULL, event, why, sizeof(why)) &&
+        event->struct_size == sizeof(*event) && event->abi_version == ZCL_PRESENT_ABI_V1 &&
+        (event->outcome == ZCL_PRESENT_WINDOW_DISMISSED ||
+         (event->outcome == ZCL_PRESENT_WINDOW_ACTION && event->action_index < model->action_count));
+}
+
 static bool adv_row_valid(const struct zcl_app_offer_row *row)
 {
     const struct zcl_app_offer *o = &row->offer;

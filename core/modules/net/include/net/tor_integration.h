@@ -51,6 +51,13 @@ void tor_integration_set_handler(tor_request_handler_fn handler, void *ctx);
  * the temporary localhost-only Tor bootstrap listener. */
 bool tor_integration_start(const char *datadir, uint16_t p2p_port);
 
+/* POSIX isolated process entry: refuse if Tor has previously started in this
+ * process, and ignore machine-wide torrc-defaults. The caller still chooses
+ * whether to serve an onion before starting. A successful private start
+ * permanently selects private defaults: ordinary starts then refuse, while
+ * retries retain them. A failed private start restores the prior mode. */
+bool tor_integration_start_private(const char *datadir, uint16_t p2p_port);
+
 /* The most times one process may start a linked Tor. Tor keeps its pubsub name
  * tables (vendor/tor/src/lib/dispatch/dispatch_naming.c) across tor_run_main()
  * calls but picks a new hash key each run (crypto_init.c), so the tables fill up
@@ -381,6 +388,10 @@ void tor_integration_set_dial_ready_for_test(bool ready);
 /* Test seam: append one line to the torrc tor_integration_start() writes
  * (e.g. "DisableNetwork 1"). "" clears it. */
 void tor_integration_set_extra_torrc_for_test(const char *line);
+
+/* Install before starting Tor; observer runs on the Tor thread. */
+void tor_integration_set_argv_observer_for_test(
+    void (*observer)(int argc, char *const *argv));
 #endif
 
 #ifdef ZCL_TESTING

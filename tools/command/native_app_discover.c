@@ -198,15 +198,6 @@ static bool ad_consume(void *context, const char *path,
     }
     json_free(&in); return ok;
 }
-static bool ad_event(struct discover *d, const struct zcl_present_model_v1 *model,
-    struct zcl_present_window_event_v1 *event)
-{
-    char why[256] = {0};
-    return d->presenter(d->context, model, NULL, event, why, sizeof(why)) &&
-        event->struct_size == sizeof(*event) && event->abi_version == ZCL_PRESENT_ABI_V1 &&
-        (event->outcome == ZCL_PRESENT_WINDOW_DISMISSED ||
-         (event->outcome == ZCL_PRESENT_WINDOW_ACTION && event->action_index < model->action_count));
-}
 static bool ad_error(struct discover *d, const char *message, bool retry)
 {
     struct zcl_present_model_v1 m; struct zcl_present_window_event_v1 event = {0};
@@ -217,7 +208,7 @@ static bool ad_error(struct discover *d, const char *message, bool retry)
     m.action_count = retry ? 2 : 1;
     if (retry) app_confirm_action(&m.actions[0], ZCL_PRESENT_ACTION_SELECT, "retry", "Retry");
     app_confirm_action(&m.actions[retry ? 1 : 0], ZCL_PRESENT_ACTION_CANCEL, "back", "Back");
-    bool shown = ad_event(d, &m, &event);
+    bool shown = app_discover_present_event(d->presenter, d->context, &m, &event);
     d->error_presented = shown;
     return shown && retry && event.outcome == ZCL_PRESENT_WINDOW_ACTION && event.action_index == 0;
 }
@@ -258,7 +249,7 @@ static bool ad_loop(struct discover *d, struct zcl_command_reply *reply)
         struct zcl_present_model_v1 model; struct zcl_present_window_event_v1 event = {0};
         d->error_presented = false;
         if (!app_discover_view(&model, d->count ? &d->rows[d->index] : NULL, d->index, d->count) ||
-            !ad_event(d, &model, &event)) {
+            !app_discover_present_event(d->presenter, d->context, &model, &event)) {
             zcl_package_copy_fail(reply, "PRESENTATION_FAILED", false, "The advertisement could not be displayed.", "app.library"); return false;
         }
         if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED) return false;

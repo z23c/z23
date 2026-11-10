@@ -71,7 +71,7 @@ static bool valid_root(const char *root)
 static bool valid_model_kind(uint16_t kind)
 {
     return kind >= ZCL_PRESENT_MODEL_QR_CARD &&
-           kind <= ZCL_PRESENT_MODEL_CANVAS;
+           kind <= ZCL_PRESENT_MODEL_INPUT_FORM;
 }
 
 static bool valid_item_kind(uint16_t kind)
@@ -183,8 +183,11 @@ static bool form_field_valid(const struct zcl_present_model_item_v1 *item)
 
 static bool form_shape(const struct zcl_present_model_v1 *model)
 {
-    if (model->kind != ZCL_PRESENT_MODEL_FORM) return true;
-    if (!model->exact_root[0] || model->item_count == 0 ||
+    if (model->kind != ZCL_PRESENT_MODEL_FORM &&
+        model->kind != ZCL_PRESENT_MODEL_INPUT_FORM) return true;
+    if ((model->kind == ZCL_PRESENT_MODEL_FORM && !model->exact_root[0]) ||
+        (model->kind == ZCL_PRESENT_MODEL_INPUT_FORM && model->exact_root[0]) ||
+        model->item_count == 0 ||
         model->item_count > ZCL_PRESENT_MODEL_FORM_FIELDS_MAX ||
         model->action_count != 2u ||
         model->actions[0].kind != ZCL_PRESENT_ACTION_CANCEL ||
@@ -834,7 +837,7 @@ const char *zcl_present_model_kind_name(uint16_t kind)
     static const char *const names[] = {
         "invalid", "qr", "status", "table", "progress", "chart",
         "timeline", "code-diff", "evidence-graph", "choice",
-        "confirmation", "form", "canvas",
+        "confirmation", "form", "canvas", "input-form",
     };
     return kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "invalid";
 }

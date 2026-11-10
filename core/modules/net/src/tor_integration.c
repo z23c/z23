@@ -30,7 +30,6 @@
 #endif
 
 #include <errno.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -611,14 +610,6 @@ static bool read_onion_address(const char *datadir)
     }
 }
 
-/* Tor embedding API */
-typedef struct tor_main_configuration_t tor_main_configuration_t;
-extern tor_main_configuration_t *tor_main_configuration_new(void);
-extern int tor_main_configuration_set_command_line(
-    tor_main_configuration_t *cfg, int argc, char *argv[]);
-extern void tor_main_configuration_free(tor_main_configuration_t *cfg);
-extern int tor_run_main(const tor_main_configuration_t *);
-
 /* The owning control connection: an unnamed socket pair, not a listener, so
  * it exposes no control port. Tor's event base and main-loop globals have no
  * locks and belong to the Tor thread alone, so every request from another
@@ -647,12 +638,11 @@ platform_socket_t g_tor_control_peer = PLATFORM_SOCKET_INVALID;
 struct stat g_tor_control_peer_id;
 #endif
 static _Atomic bool g_serve_onion = true;
+static _Atomic bool g_private_defaults;
 _Atomic int64_t g_claim_ms = -1;
 _Atomic int64_t g_network_enabled_ms = -1;
 _Atomic unsigned g_enable_failures;
 _Atomic int64_t g_enable_retry_ms;
-
-
 
 /* Dynhost external handler — routes .onion requests to our code */
 typedef size_t (*dynhost_external_handler_fn)(const char *, const char *,
@@ -684,17 +674,10 @@ static void *tor_thread_fn(void *arg)
     printf("Tor: starting embedded (no ports, no SOCKS, dynhost only)\n");
     fflush(stdout);
 
-    tor_main_configuration_t *cfg = tor_main_configuration_new();
-    /* Tor pre-authenticates this control connection. Stop ends Tor through it,
-     * and a node that serves no onion starts with the network disabled and
-     * clears it here. */
-    char owner_fd[32];
-    snprintf(owner_fd, sizeof(owner_fd), "%" PRIu64,
-             (uint64_t)g_tor_control_peer);
-    char *argv[] = {"tor", "-f", torrc_path,
-                    "__OwningControllerFD", owner_fd};
-    int argc = g_tor_control != PLATFORM_SOCKET_INVALID ? 5 : 3;
-    tor_main_configuration_set_command_line(cfg, argc, argv);
+    struct tor_launch_config launch;
+    tor_launch_config_init(&launch, torrc_path, atomic_load(&g_private_defaults),
+                           g_tor_control != PLATFORM_SOCKET_INVALID,
+                           g_tor_control_peer);
 
     /* Monitor for .onion address in parallel when the helper thread starts. */
     if (thread_registry_spawn("zcl_tor_monitor", tor_onion_monitor, NULL,
@@ -707,8 +690,8 @@ static void *tor_thread_fn(void *arg)
     }
 
     /* Run Tor in this thread (blocks until exit) */
-    int result = tor_run_main(cfg);
-    tor_main_configuration_free(cfg);
+    int result = tor_run_main(launch.configuration);
+    tor_main_configuration_free(launch.configuration);
 
     /* Signal monitor to stop, then join it if it actually started. */
     tor_clear_readiness();
@@ -1404,12 +1387,40 @@ static bool g_tor_stop_latched;
 bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 {
     pthread_mutex_lock(&g_tor_lifecycle);
-    bool admitted = !fs_server_onion_retiring();
+    bool admitted = !atomic_load(&g_private_defaults) &&
+                    !fs_server_onion_retiring();
     if (admitted)
         g_tor_stop_latched = false;
     bool started = admitted && tor_start_locked(datadir, p2p_port);
     pthread_mutex_unlock(&g_tor_lifecycle);
     return started;
+}
+
+bool tor_integration_start_private(const char *datadir, uint16_t p2p_port)
+{
+#if defined(_WIN32)
+    (void)datadir; (void)p2p_port;
+    return false;
+#else
+    pthread_mutex_lock(&g_tor_lifecycle);
+    bool previous = atomic_load(&g_private_defaults);
+    bool previous_stop = g_tor_stop_latched;
+    bool admitted = !fs_server_onion_retiring() &&
+                    !atomic_load(&g_tor_running) &&
+                    !atomic_load(&g_tor_started) &&
+                    atomic_load(&g_tor_starts_in_process) == 0;
+    if (admitted) {
+        atomic_store(&g_private_defaults, true);
+        g_tor_stop_latched = false;
+    }
+    bool started = admitted && tor_start_locked(datadir, p2p_port);
+    if (admitted && !started) {
+        atomic_store(&g_private_defaults, previous);
+        g_tor_stop_latched = previous_stop;
+    }
+    pthread_mutex_unlock(&g_tor_lifecycle);
+    return started;
+#endif
 }
 
 bool tor_integration_retry_start(const char *datadir, uint16_t p2p_port)

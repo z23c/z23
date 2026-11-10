@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_host_worker.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "Enters private scratch, reads the signed carrier, manages protocol descriptors and measures hosting deadlines; checked allocation reports failure to stderr.")

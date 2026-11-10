@@ -6,10 +6,25 @@
 #include "command/native_command.h"
 #include "command/native_app_compose.h"
 #include "command/native_app_host_browser.h"
+#include "command/native_app_host_job.h"
+#include "command/native_app_host_controller.h"
+#include "command/native_app_host_worker.h"
+#include "command/native_app_host_view.h"
+#include "command/native_app_host_flow.h"
+#include "command/native_app_share_command.h"
+#include "command/native_app_launch.h"
+#include "command/app_selection.h"
+#include "command/native_zcode_package_copy.h"
+#include "config/command_catalog.h"
+#include "command/native_app_network_lifeline.h"
+#include "vcs/package_share.h"
+#include "platform/time_compat.h"
+#include "platform/clock.h"
 #include "config/boot_app_host.h"
 #include "config/boot_fleet_board.h"
 #include "controllers/rpc_client.h"
 #include "crypto/ed25519.h"
+#include "crypto/sha256.h"
 #include "models/database.h"
 #include "models/app_host_intent.h"
 #include "models/fleet_board_post.h"
@@ -25,6 +40,13 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <errno.h>
+#include <dirent.h>
+#endif
 
 /* Constructed by the existing signed-copy/share fixture; the caller owns the
  * returned isolated fixture tree. It restores the process HOME before return. */
@@ -550,6 +572,275 @@ static int app_host_local_cases(void)
     if (w.root[0] && !app_host_test_close(&w)) ++failures;
     return failures;
 }
+#if !defined(_WIN32)
+/* Build-only identity fields are seeded; the selected source, grant and plan
+ * below are real. This does not claim a compiled Keep journey. */
+struct host_flow_fixture {
+    char root[512], share[700], home[700], data[700], copy[700], worker[800], sentinel[800];
+    char package[65], publisher[67], release[65], version[65], app_name[256], semver[256];
+    struct app_launch_env env; struct app_selection selection, changed;
+    bool stale, presented, identity_ok, cas_ok;
+};
+static bool host_flow_field(const struct zcl_present_model_v1 *model, const char *label, const char *expected)
+{
+    char value[512] = {0}; size_t used = 0; bool found = false;
+    for (unsigned i = 0; i < model->item_count; i++) {
+        const struct zcl_present_model_item_v1 *item = &model->items[i];
+        const char *part = item->value;
+        if (!found) { size_t prefix = strlen(label); if (strncmp(part, label, prefix)) continue; found = true; part += prefix; }
+        else { if (strncmp(part, "  ", 2)) break; part += 2; }
+        size_t n = strlen(part); if (n >= sizeof(value) - used) return false;
+        memcpy(value + used, part, n); used += n;
+    }
+    return found && !strcmp(value, expected);
+}
+static bool host_flow_events(bool stale, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    uint32_t count = 0; if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    bool redraw = false, close = false;
+    if (stale) {
+        if (count < 2) return false;
+        struct zcl_present_window_event_v1 early = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 3};
+        live->owner.update(live->owner.context, &early, true, &redraw, &close);
+        if (close) return false;
+    }
+    if (stale) for (uint32_t i = 1; i < count; ++i) {
+        struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 2};
+        live->owner.update(live->owner.context, &e, true, &redraw, &close); if (close) return false;
+    }
+    struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = stale ? 3u : 0u};
+    live->owner.update(live->owner.context, &e, true, &redraw, &close); return close;
+}
+static bool host_flow_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; struct host_flow_fixture *f = context; f->presented = true;
+    f->identity_ok = host_flow_field(model, "App: ", f->app_name) && host_flow_field(model, "Version: ", f->semver) &&
+        host_flow_field(model, "Publisher: ", f->publisher) &&
+        host_flow_field(model, "Package: ", f->package) && host_flow_field(model, "Release: ", f->release) &&
+        host_flow_field(model, "Saved version: ", f->version) &&
+        host_flow_field(model, "Availability: ", "Anyone with the link can receive this version while this window stays open, for up to 24 hours.");
+    if (!f->identity_ok) return false;
+    if (f->stale) {
+        f->cas_ok = app_selection_save(f->env.state_dir, f->selection.revision, &f->selection, &f->changed) == APP_SELECTION_OK;
+        if (!f->cas_ok) return false;
+    }
+    return host_flow_events(f->stale, model, live, why, cap);
+}
+static bool host_flow_no_scratch(const char *dir)
+{
+    DIR *d = opendir(dir); if (!d) return false;
+    bool ok = true; struct dirent *e;
+    while ((e = readdir(d))) if (!strncmp(e->d_name, ".app-network-", 13)) { ok = false; break; }
+    closedir(d); return ok;
+}
+/* Drive the same plan and owner-confirm transitions as the adopted app flow. */
+static bool host_fixture_call(const char *path, struct json_value *input, struct zcl_command_reply *reply)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    if (!spec || !spec->handler) return false;
+    struct zcl_command_request request = {.spec = spec, .input = input, .invoked_name = spec->path};
+    spec->handler(&request, reply);
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED)
+        fprintf(stderr, "host fixture %s: %s %s\n", path, reply->error.code, reply->error.message);
+    return reply->status == ZCL_COMMAND_STATUS_PASSED;
+}
+static bool host_fixture_confirm(const char *path, struct json_value *input, struct zcl_command_reply *reply)
+{
+    struct zcl_command_reply planned; zcl_command_reply_init(&planned, "zcl.test.host.v1");
+    bool ok = host_fixture_call(path, input, &planned);
+    const char *id = ok ? zcl_package_copy_str(&planned.data, "plan_id") : NULL;
+    char plan[65];
+    ok = id && strlen(id) == 64;
+    if (ok) memcpy(plan, id, sizeof(plan));
+    zcl_command_reply_free(&planned);
+    return ok && json_push_kv_str(input, "plan_id", plan) && json_push_kv_bool(input, "confirm", true) &&
+        host_fixture_call(path, input, reply);
+}
+static bool host_fixture_adopt(struct host_flow_fixture *f)
+{
+    size_t len = 0; uint8_t *bytes = zcl_native_source_bundle_read(f->share, &len);
+    struct vcs_package_share *share = calloc(1, sizeof(*share)); const char *why = NULL; char release[65];
+    bool ok = bytes && share && vcs_package_share_load(share, bytes, len, &why) && vcs_package_share_check_source(share, &why);
+    if (ok) zcl_hex_encode(share->release_id, 32, release);
+    if (share) vcs_package_share_cleanup(share);
+    free(share); free(bytes);
+    struct json_value in; json_init(&in); json_set_object(&in);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    ok = ok && json_push_kv_str(&in, "root", release) && json_push_kv_str(&in, "datadir", f->data) &&
+        host_fixture_confirm("zcode.package.adopt", &in, &reply);
+    const char *copy = ok ? zcl_package_copy_str(&reply.data, "copy") : NULL;
+    if (!copy || strlen(copy) >= sizeof(f->copy)) ok = false;
+    else memcpy(f->copy, copy, strlen(copy) + 1);
+    zcl_command_reply_free(&reply); json_free(&in); return ok;
+}
+static bool host_fixture_successor(struct host_flow_fixture *f)
+{
+    char path[800]; int n = snprintf(path, sizeof(path), "%s/src/zpb_boost.c", f->copy);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "ab"); if (!file) return false;
+    bool ok = fputs("\n/* host consent fixture successor */\n", file) >= 0;
+    if (fclose(file)) ok = false;
+    struct json_value in; json_init(&in); json_set_object(&in);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    ok = ok && json_push_kv_str(&in, "dir", f->copy) && host_fixture_confirm("zcode.package.version.save", &in, &reply);
+    zcl_command_reply_free(&reply); json_free(&in); return ok;
+}
+static bool host_fixture_package(struct host_flow_fixture *f, struct zcl_app_offer *offer)
+{
+    struct json_value in; json_init(&in); json_set_object(&in);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    bool ok = json_push_kv_str(&in, "dir", f->copy) && json_push_kv_str(&in, "datadir", f->data) &&
+        json_push_kv_str(&in, "publisher_pubkey", offer->publisher) &&
+        host_fixture_call("zcode.package.share", &in, &reply);
+    const char *root = ok ? zcl_package_copy_str(&reply.data, "package_root") : NULL;
+    if (!root || strlen(root) != 64) ok = false;
+    else memcpy(offer->root, root, 65);
+    zcl_command_reply_free(&reply); json_free(&in); return ok;
+}
+
+/* Prepare an owner-adopted copy and bind its saved successor's package root. */
+static bool host_fixture_prepare(struct host_flow_fixture *f, struct zcl_app_offer *offer)
+{
+    return host_fixture_adopt(f) && host_fixture_successor(f) && host_fixture_package(f, offer);
+}
+
+static bool host_flow_selection(struct host_flow_fixture *f, const struct zcl_app_offer *offer)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    struct zcl_package_copy copy = {0};
+    bool ok = zcl_package_copy_open_as(f->copy, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test");
+    struct app_selection selection = {0};
+    if (ok) {
+        (void)snprintf(selection.app, sizeof(selection.app), "host-fixture");
+        (void)snprintf(selection.copy, sizeof(selection.copy), "%s", f->copy);
+        (void)snprintf(selection.datadir, sizeof(selection.datadir), "%s", f->data);
+        memcpy(selection.fork, copy.fork_version, 32); memcpy(selection.parent, copy.parent_release, 32);
+        memcpy(selection.version, copy.selected_version, 32);
+        ok = zcl_hex_decode_lower(offer->root, selection.package, 32);
+        memset(selection.env, 1, 32); memset(selection.dependencies, 2, 32);
+        memset(selection.record, 3, 32); memset(selection.image, 4, 32);
+        zcl_hex_encode(selection.version, 32, f->version);
+    }
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    return ok && app_selection_save(f->env.state_dir, 0, &selection, &f->selection) == APP_SELECTION_OK;
+}
+static bool host_flow_plan(struct host_flow_fixture *f, const struct zcl_app_offer *offer)
+{
+    char output[800]; if (snprintf(output, sizeof(output), "%s/unused-share", f->root) >= (int)sizeof(output)) return false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    struct zcl_app_share_session *s = zcl_app_share_prepare(f->selection.app, output, &f->selection, &reply);
+    bool ok = s != NULL;
+    if (!ok) fprintf(stderr, "host flow share plan: code=%s message=%s evidence=%s\n", reply.error.code, reply.error.message, reply.error.evidence);
+    if (ok) {
+        struct zcl_app_share_identity id; zcl_app_share_identity(s, &id);
+        ok = !strcmp(id.package, offer->root) && !strcmp(id.publisher, offer->publisher) && !strcmp(id.version, f->version);
+        if (ok) { (void)snprintf(f->package, sizeof(f->package), "%s", id.package);
+            (void)snprintf(f->publisher, sizeof(f->publisher), "%s", id.publisher);
+            (void)snprintf(f->release, sizeof(f->release), "%s", id.release);
+            int a = snprintf(f->app_name, sizeof(f->app_name), "%s", id.name);
+            int v = snprintf(f->semver, sizeof(f->semver), "%s", id.semver);
+            ok = a > 0 && (size_t)a < sizeof(f->app_name) && v > 0 && (size_t)v < sizeof(f->semver); }
+    }
+    zcl_app_share_dispose(s); zcl_command_reply_free(&reply); return ok;
+}
+struct host_flow_disk { uint8_t share[32], key[32], version[32]; };
+static bool host_flow_hash_file(const char *path, uint8_t digest[32])
+{
+    size_t len = 0; uint8_t *bytes = zcl_native_source_bundle_read(path, &len);
+    if (!bytes) return false;
+    struct sha256_ctx sha; sha256_init(&sha); sha256_write(&sha, bytes, len); sha256_finalize(&sha, digest);
+    free(bytes); return true;
+}
+static bool host_flow_disk_snapshot(struct host_flow_fixture *f, struct host_flow_disk *out)
+{
+    char key[800]; int n = snprintf(key, sizeof(key), "%s/.z23/zcode_publisher.key", f->home);
+    if (n <= 0 || (size_t)n >= sizeof(key) || !host_flow_hash_file(f->share, out->share) ||
+        !host_flow_hash_file(key, out->key)) return false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    struct zcl_package_copy copy = {0};
+    bool ok = zcl_package_copy_open_as(f->copy, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test");
+    if (ok) memcpy(out->version, copy.head_version, 32);
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply); return ok;
+}
+static bool host_flow_paths(struct host_flow_fixture *f)
+{
+    return snprintf(f->home, sizeof(f->home), "%s/alice", f->root) < (int)sizeof(f->home) &&
+        snprintf(f->data, sizeof(f->data), "%s/datadir", f->home) < (int)sizeof(f->data) &&
+        snprintf(f->copy, sizeof(f->copy), "%s/my-skycombat", f->home) < (int)sizeof(f->copy) &&
+        snprintf(f->worker, sizeof(f->worker), "%s/worker", f->root) < (int)sizeof(f->worker) &&
+        snprintf(f->sentinel, sizeof(f->sentinel), "%s/worker-invoked", f->root) < (int)sizeof(f->sentinel);
+}
+static bool host_flow_worker(struct host_flow_fixture *f)
+{
+    FILE *fp = fopen(f->worker, "w"); if (!fp) return false;
+    int n = fprintf(fp, "#!/bin/sh\n: > '%s'\n", f->sentinel); int closed = fclose(fp);
+    return n > 0 && closed == 0 && chmod(f->worker, 0700) == 0;
+}
+static bool host_flow_setup(struct host_flow_fixture *f)
+{
+    struct zcl_app_offer offer = {0};
+    if (!test_app_host_fixture_create(f->root, sizeof(f->root), f->share, sizeof(f->share), &offer) || !host_flow_paths(f)) return false;
+    if (setenv("HOME", f->home, 1) || setenv("XDG_STATE_HOME", f->home, 1) || setenv("XDG_CONFIG_HOME", f->home, 1)) return false;
+    char why[256], parent[800];
+    if (!app_launch_env_from_process(&f->env, why, sizeof(why))) return false;
+    int n = snprintf(parent, sizeof(parent), "%s/z23", f->home);
+    if (n <= 0 || (size_t)n >= sizeof(parent) || mkdir(parent, 0700) || mkdir(f->env.state_dir, 0700)) return false;
+    if (!host_fixture_prepare(f, &offer) || !host_flow_selection(f, &offer) || !host_flow_plan(f, &offer)) return false;
+    return host_flow_worker(f);
+}
+static bool host_flow_outcome(const struct host_flow_fixture *f, const struct zcl_command_reply *reply)
+{
+    const char *status = zcl_package_copy_str(&reply->data, "status");
+    return f->stale ? reply->status != ZCL_COMMAND_STATUS_PASSED && !strcmp(reply->error.code, "SELECTION_STALE") :
+        reply->status == ZCL_COMMAND_STATUS_PASSED && status && !strcmp(status, "canceled");
+}
+static bool host_flow_absent(const char *path)
+{ errno = 0; return access(path, F_OK) != 0 && errno == ENOENT; }
+static bool host_flow_selection_same(const struct app_selection *a, const struct app_selection *b)
+{
+    const uint8_t *left[] = {a->fork, a->parent, a->version, a->package, a->env, a->dependencies, a->record, a->image};
+    const uint8_t *right[] = {b->fork, b->parent, b->version, b->package, b->env, b->dependencies, b->record, b->image};
+    if (a->revision != b->revision || strcmp(a->app, b->app) || strcmp(a->copy, b->copy) || strcmp(a->datadir, b->datadir)) return false;
+    for (size_t i = 0; i < 8; ++i) if (memcmp(left[i], right[i], 32)) return false;
+    return true;
+}
+static bool host_flow_result(struct host_flow_fixture *f, struct zcl_command_reply *reply,
+                             const struct host_flow_disk *before)
+{
+    struct app_selection actual = {0}; struct host_flow_disk after = {0};
+    return f->presented && f->identity_ok && (!f->stale || f->cas_ok) && !reply->error.mutated && host_flow_outcome(f, reply) &&
+        app_selection_load(f->env.state_dir, f->selection.app, &actual) == APP_SELECTION_OK &&
+        host_flow_selection_same(&actual, f->stale ? &f->changed : &f->selection) && host_flow_absent(f->sentinel) &&
+        host_flow_no_scratch(f->data) && host_flow_disk_snapshot(f, &after) && !memcmp(before, &after, sizeof(after));
+}
+static bool host_flow_child(bool stale)
+{
+    struct host_flow_fixture f = {.stale = stale}; struct host_flow_disk before = {0};
+    bool setup = host_flow_setup(&f);
+    bool snapshot = setup && host_flow_disk_snapshot(&f, &before);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    bool ok = false;
+    if (snapshot) {
+        app_host_flow(&f.selection, f.worker, host_flow_present, &f, &reply);
+        ok = host_flow_result(&f, &reply, &before);
+    }
+    if (!ok) fprintf(stderr, "host flow: setup=%d snapshot=%d presented=%d identity=%d cas=%d status=%d code=%s message=%s mutated=%d\n",
+        setup, snapshot, f.presented, f.identity_ok, f.cas_ok, reply.status, reply.error.code, reply.error.message, reply.error.mutated);
+    zcl_command_reply_free(&reply); if (f.root[0] && test_rm_rf_recursive(f.root) != 0) ok = false;
+    return ok;
+}
+static bool host_flow_case(bool stale)
+{
+    pid_t pid = fork(); if (pid < 0) return false;
+    if (!pid) _exit(host_flow_child(stale) ? 0 : 2);
+    int status = 0; pid_t done; do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
+    return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+#endif
+static int host_ready_frame_tests(void);
 
 int model_app_host_coordinator_tests(void)
 {
@@ -695,7 +986,7 @@ _test_next:
     if (sync_ready) { pthread_cond_destroy(&s.condition); pthread_mutex_destroy(&s.mutex); }
     boot_app_host_set_test_hooks(NULL); zcl_fleet_role_checker_install(NULL);
     if (!app_host_test_close(&w)) { printf("FAIL: app host fixture cleanup\n"); ++failures; }
-    return failures + host_cli_response_tests() + app_host_local_cases() + app_host_local_rpc_cases() + host_local_cli_cases();
+    return failures + host_cli_response_tests() + app_host_local_cases() + app_host_local_rpc_cases() + host_local_cli_cases() + host_ready_frame_tests();
 }
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Inert snippet for test_app_host.c; uses actual registered CLI handlers.
@@ -996,3 +1287,487 @@ static int host_local_cli_cases(void)
     } _test_next:;
     node_rpc_client_set_test_hook(NULL); json_free(&in); zcl_command_reply_free(&reply); return failures;
 }
+/* App-only ready is valid only for the exact signed carrier and selected tuple. */
+#if !defined(_WIN32)
+struct host_fake_owner { bool stop; unsigned ready_calls; const char *ack_path; };
+static bool host_fake_ready(const struct app_host_ready *ready, void *context)
+{
+    struct host_fake_owner *owner = context;
+    owner->ready_calls++;
+    owner->stop = ready && ready->post_id[0];
+    return true;
+}
+static void host_fake_unavailable(void *context) { (void)context; }
+static bool host_fake_cancel(void *context)
+{ return ((struct host_fake_owner *)context)->stop; }
+/* Simulate Stop arriving only after the observer reports child termination. */
+static bool host_late_ready(const struct app_host_ready *ready, void *context)
+{
+    struct host_fake_owner *owner = context; owner->ready_calls++;
+    if (!ready || !owner->ack_path) return false;
+    FILE *ack = fopen(owner->ack_path, "w");
+    if (!ack) return false;
+    return fclose(ack) == 0;
+}
+static void host_late_stop(void *context)
+{ ((struct host_fake_owner *)context)->stop = true; }
+
+static bool host_scratch_replacement(const char *root);
+static bool host_terminal_script(const char *root, const char *line, int len, unsigned mode,
+    char *script, size_t script_cap, char *ack, size_t ack_cap, struct stat *st)
+{
+    int n = snprintf(script, script_cap, "%s/fake-terminal", root);
+    int a = snprintf(ack, ack_cap, "%s/ready-ack", root);
+    if (a <= 0 || (size_t)a >= ack_cap) return false;
+    (void)unlink(ack);
+    FILE *fp = n > 0 && (size_t)n < script_cap ? fopen(script, "w") : NULL;
+    if (!fp) return false;
+    const char *wait = mode == 3 ? "i=0; while [ ! -f \"$2/ready-ack\" ] && [ $i -lt 100 ]; do sleep 0.02; i=$((i+1)); done; [ -f \"$2/ready-ack\" ] || exit 2" : "sleep 1";
+    const char *finish = mode == 1 ? "printf x; exec sleep 5" : (mode == 2 ? "exit 73" : "exit 0");
+    int wrote = fprintf(fp, "#!/bin/sh\nprintf '%%s\\n' '%.*s'\n%s\n%s\n", len - 1, line, wait, finish);
+    int closed = fclose(fp);
+    return wrote > 0 && !closed && !chmod(script, 0700) && !stat(root, st);
+}
+static bool host_terminal_late_stop(struct app_host_job_args *args, const char *ack)
+{
+    struct host_fake_owner late = {.ack_path = ack}; struct app_host_job_result result = {0};
+    args->cancel = host_fake_cancel; args->cancel_context = &late;
+    bool completed = app_host_job_run(args, host_late_ready, host_late_stop, &late, &result);
+    return !completed && late.stop && late.ready_calls == 1 && result.ready && result.reaped &&
+        !result.cancelled && !result.invalid_frame && result.outcome == APP_HOST_FAILED;
+}
+static bool host_terminal_result(const struct app_host_job_result *result, bool completed, unsigned mode)
+{
+    if (mode == 2) return completed && result->outcome == APP_HOST_EXPIRED && !result->invalid_frame;
+    return !completed && result->outcome == APP_HOST_FAILED &&
+        (mode == 1 ? result->invalid_frame : !result->invalid_frame);
+}
+static bool host_terminal_state(struct app_host_job_args *args, unsigned mode)
+{
+    struct app_host_state state; if (!app_host_state_init(&state)) return false;
+    args->cancel = app_host_state_cancel; args->cancel_context = &state;
+    struct app_host_job_result result = {0};
+    bool completed = app_host_job_run(args, app_host_state_publish, app_host_state_unavailable, &state, &result);
+    struct app_host_snapshot snapshot;
+    bool ok = app_host_state_snapshot(&state, &snapshot) && result.ready && result.launched && result.reaped &&
+        snapshot.ever_ready && snapshot.terminal && !snapshot.available && host_terminal_result(&result, completed, mode);
+    app_host_state_destroy(&state); return ok;
+}
+static bool host_fake_terminal(const char *root, const char *line, int line_len,
+    struct app_host_job_args *args, unsigned mode)
+{
+    char script[800], ack[800]; struct stat st;
+    if (!host_terminal_script(root, line, line_len, mode, script, sizeof(script), ack, sizeof(ack), &st)) return false;
+    args->self_path = script; args->scratch_path = root; args->scratch_dev = (uint64_t)st.st_dev;
+    args->scratch_ino = (uint64_t)st.st_ino; args->duration_ms = 5000;
+    return mode == 3 ? host_terminal_late_stop(args, ack) : host_terminal_state(args, mode);
+}
+struct host_view_probe { unsigned copies; bool valid, feedback; };
+static bool host_view_copy(const char *text, void *context)
+{
+    struct host_view_probe *p = context; p->copies++;
+    p->valid = text && !strncmp(text, "http://", 7) && strstr(text, "/board/apps/v1/");
+    return p->valid;
+}
+static bool host_view_wait(const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, bool closing)
+{
+    struct zcl_present_window_event_v1 event = {0}; struct timespec pause = {.tv_nsec = 10000000};
+    for (unsigned i = 0; i < 500; i++) {
+        bool redraw = false, allow = false;
+        live->owner.update(live->owner.context, &event, false, &redraw, &allow);
+        if (closing ? allow : strstr(model->summary, "Available while") != NULL) return true;
+        (void)nanosleep(&pause, NULL); /* real-clock: bounded fake-worker readiness */
+    }
+    return false;
+}
+static bool host_view_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; (void)why; (void)cap; struct host_view_probe *p = context;
+    if (!host_view_wait(model, live, false)) return false;
+    uint32_t focus = 0, action = UINT32_MAX;
+    struct zcl_present_input_v1 input = {.key = ZCL_PRESENT_INPUT_TEXT, .character = 'c'};
+    if (!live->input(live->owner.context, &input, &focus, &action) || action != UINT32_MAX) return false;
+    bool redraw = false, allow = false; struct zcl_present_window_event_v1 event = {0};
+    live->owner.update(live->owner.context, &event, false, &redraw, &allow);
+    for (unsigned i = 0; i < model->item_count; i++)
+        if (strstr(model->items[i].value, "Copied. Send the link")) p->feedback = true;
+    input.character = 'q';
+    if (!live->input(live->owner.context, &input, &focus, &action)) return false;
+    live->owner.update(live->owner.context, &event, false, &redraw, &allow);
+    if (strstr(model->summary, "Connecting")) return false;
+    if (!host_view_wait(model, live, true)) return false;
+    input.character = 'c';
+    if (!live->input(live->owner.context, &input, &focus, &action)) return false;
+    live->owner.update(live->owner.context, &event, false, &redraw, &allow);
+    for (unsigned i = 0; i < model->item_count; i++)
+        if (strstr(model->items[i].value, "Copied.") || strstr(model->items[i].value, "Try again")) return false;
+    return p->valid && p->feedback && p->copies == 1;
+}
+struct host_ready_fixture_data {
+    char root[512], path[700], release[65], line[8300];
+    struct zcl_app_offer offer; struct app_host_job_args args;
+    struct vcs_package_share *share; struct fleet_board_post *post;
+    uint8_t *bytes; int line_len;
+};
+static bool host_ready_sign(struct host_ready_fixture_data *f)
+{
+    uint8_t seed[32] = {7}, pk[32], sk[32]; ed25519_keypair(pk, sk, seed); memcpy(seed, sk, 32);
+    struct fleet_board_post *post = f->post;
+    post->kind = FLEET_BOARD_KIND_OFFER; post->scope = FLEET_BOARD_SCOPE_PUBLIC;
+    post->created_at = (uint64_t)platform_time_wall_unix(); post->ttl = 120;
+    (void)snprintf(post->room, sizeof(post->room), "apps");
+    (void)snprintf(post->agent, sizeof(post->agent), "app-host");
+    bool ok = zcl_app_offer_format(&f->offer, post->text, sizeof(post->text));
+    post->text_len = (uint32_t)strlen(post->text);
+    ok = ok && fleet_board_post_sign(post, seed, pk) == FLEET_BOARD_OK;
+    uint8_t wire[4096]; size_t n = 0; char hex[8193];
+    if (ok) ok = fleet_board_frame_encode_post(post, wire, sizeof(wire), &n) == FLEET_BOARD_OK;
+    if (ok) zcl_hex_encode(wire, n, hex);
+    f->line_len = ok ? snprintf(f->line, sizeof(f->line), "zcl-app-host-v1 %s %s\n", f->offer.onion, hex) : -1;
+    return f->line_len > 0 && (size_t)f->line_len < sizeof(f->line);
+}
+static bool host_ready_setup(struct host_ready_fixture_data *f)
+{
+    bool ok = test_app_host_fixture_create(f->root, sizeof(f->root), f->path, sizeof(f->path), &f->offer);
+    if (ok) { char *port = strchr(f->offer.onion, ':'); if (port) *port = '\0'; }
+    size_t len = 0; if (ok) f->bytes = zcl_native_source_bundle_read(f->path, &len);
+    f->share = calloc(1, sizeof(*f->share)); const char *reason = NULL;
+    ok = ok && f->bytes && f->share && vcs_package_share_load(f->share, f->bytes, len, &reason);
+    if (ok) zcl_hex_encode(f->share->release_id, 32, f->release);
+    f->post = calloc(1, sizeof(*f->post));
+    ok = ok && f->post && host_ready_sign(f);
+    f->args = (struct app_host_job_args){.name = f->offer.name, .release_root = f->release,
+        .package_root = f->offer.root, .publisher = f->offer.publisher,
+        .carrier_sha256 = f->offer.sha256, .carrier_size = (uint64_t)f->offer.size};
+    return ok;
+}
+static bool host_ready_identity(struct host_ready_fixture_data *f)
+{
+    struct app_host_ready ready = {0}; struct zcl_app_offer *o = &f->offer; int n = f->line_len;
+    bool ok = zcl_test_app_host_ready(&f->args, f->line, (size_t)n, 1, &ready) &&
+        !strcmp(ready.package_root, o->root) && !strcmp(ready.release_root, f->release) &&
+        !strcmp(ready.publisher, o->publisher) && !strcmp(ready.carrier_sha256, o->sha256);
+    if (ok) { char bad[67]; memcpy(bad, o->publisher, sizeof(bad)); bad[0] = bad[0] == '0' ? '1' : '0';
+        f->args.publisher = bad; ok = !zcl_test_app_host_ready(&f->args, f->line, (size_t)n, (size_t)n/2, &ready);
+        f->args.publisher = o->publisher; }
+    return ok;
+}
+static bool host_ready_view(struct app_host_job_args *args)
+{
+    struct app_host_owner *owner = app_host_owner_start(args); struct host_view_probe view = {0};
+    char why[256] = {0}; struct app_host_job_result result = {0};
+    if (!owner) return false;
+    bool shown = zcl_test_app_host_view_run(owner, host_view_present, &view, host_view_copy, &view, why, sizeof(why));
+    app_host_owner_stop(owner); bool joined = app_host_owner_join(owner, &result);
+    bool ok = shown && joined && result.reaped && result.outcome == APP_HOST_STOPPED;
+    if (joined) app_host_owner_free(owner);
+    return ok;
+}
+static bool host_ready_stopped(const struct host_fake_owner *owner,
+                               const struct app_host_job_result *result, bool completed)
+{
+    return !completed && owner->ready_calls == 1 && result->ready && result->cancelled &&
+        result->launched && result->reaped && !result->invalid_frame && result->outcome == APP_HOST_STOPPED;
+}
+static bool host_ready_process(struct host_ready_fixture_data *f)
+{
+    char script[800]; struct stat st; struct host_fake_owner owner = {0};
+    int k = snprintf(script, sizeof(script), "%s/fake-host", f->root);
+    FILE *fp = k > 0 && (size_t)k < sizeof(script) ? fopen(script, "w") : NULL;
+    if (!fp) return false;
+    int written = fprintf(fp, "#!/bin/sh\nprintf '%%s\\n' '%.*s'\nexec sleep 5\n", f->line_len - 1, f->line);
+    int closed = fclose(fp);
+    if (written <= 0 || closed || chmod(script, 0700) || stat(f->root, &st)) return false;
+    f->args.self_path = script; f->args.scratch_path = f->root; f->args.scratch_dev = (uint64_t)st.st_dev;
+    f->args.scratch_ino = (uint64_t)st.st_ino; f->args.duration_ms = 5000;
+    f->args.cancel = host_fake_cancel; f->args.cancel_context = &owner;
+    struct app_host_job_result result = {0};
+    bool completed = app_host_job_run(&f->args, host_fake_ready, host_fake_unavailable, &owner, &result);
+    return host_ready_stopped(&owner, &result, completed) && host_ready_view(&f->args);
+}
+static bool host_ready_rejections(struct host_ready_fixture_data *f)
+{
+    struct app_host_ready ready = {0}; int n = f->line_len;
+    f->args.publisher = f->offer.publisher; f->args.carrier_size++;
+    bool ok = !zcl_test_app_host_ready(&f->args, f->line, (size_t)n, 0, &ready); f->args.carrier_size--;
+    if (ok) { f->line[n] = 'x'; ok = !zcl_test_app_host_ready(&f->args, f->line, (size_t)n+1u, (size_t)n/2, &ready); }
+    if (ok) { f->line[n-2] = f->line[n-2] == '0' ? '1' : '0';
+        ok = !zcl_test_app_host_ready(&f->args, f->line, (size_t)n, (size_t)n/2, &ready); }
+    return ok;
+}
+static bool host_ready_fixture(void)
+{
+    struct host_ready_fixture_data f = {0};
+    bool ok = host_ready_setup(&f) && host_ready_identity(&f) && host_ready_process(&f);
+    for (unsigned mode = 0; ok && mode < 4; mode++)
+        ok = host_fake_terminal(f.root, f.line, f.line_len, &f.args, mode);
+    if (ok) ok = host_ready_rejections(&f);
+    if (ok) ok = host_scratch_replacement(f.root);
+    free(f.post); if (f.share) { vcs_package_share_cleanup(f.share); free(f.share); } free(f.bytes);
+    if (f.root[0] && test_rm_rf_recursive(f.root) != 0) ok = false;
+    return ok;
+}
+static bool host_scratch_refused(const char *path, const char *sentinel, const struct stat *original)
+{
+    pid_t pid = fork(); if (pid < 0) return false;
+    if (!pid) _exit(zcl_test_app_host_enter_scratch(path, (uint64_t)original->st_dev, (uint64_t)original->st_ino) ? 2 : 0);
+    int status = 0; pid_t done;
+    do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
+    char text[8] = {0}; FILE *fp = fopen(sentinel, "r"); if (!fp) return false;
+    size_t n = fread(text, 1, sizeof(text), fp); int closed = fclose(fp);
+    return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        closed == 0 && n == 4 && !memcmp(text, "KEEP", 4);
+}
+static bool host_scratch_replacement(const char *root)
+{
+    char path[800], saved[800], sentinel[800]; struct stat st;
+    if (snprintf(path, sizeof(path), "%s/host-scratch", root) >= (int)sizeof(path) ||
+        snprintf(saved, sizeof(saved), "%s/host-saved", root) >= (int)sizeof(saved) ||
+        snprintf(sentinel, sizeof(sentinel), "%s/host-scratch/sentinel", root) >= (int)sizeof(sentinel) ||
+        mkdir(path, 0700) != 0 || stat(path, &st) != 0 || rename(path, saved) != 0 || mkdir(path, 0700) != 0)
+        return false;
+    FILE *fp = fopen(sentinel, "w"); if (!fp) return false;
+    int wrote = fputs("KEEP", fp); int closed = fclose(fp);
+    if (wrote < 0 || closed != 0) return false;
+    return host_scratch_refused(path, sentinel, &st);
+}
+static bool host_test_copy(const struct app_host_ready *, void *);
+struct host_copy_race {
+    struct app_host_state state;
+    pthread_mutex_t mutex; pthread_cond_t condition;
+    bool entered, release, copied;
+};
+static bool host_race_copy(const struct app_host_ready *ready, void *context)
+{
+    struct host_copy_race *race = context; (void)ready;
+    pthread_mutex_lock(&race->mutex); race->entered = true;
+    pthread_cond_broadcast(&race->condition);
+    while (!race->release) pthread_cond_wait(&race->condition, &race->mutex);
+    pthread_mutex_unlock(&race->mutex); return true;
+}
+static void *host_race_copy_thread(void *context)
+{
+    struct host_copy_race *race = context;
+    race->copied = app_host_state_copy(&race->state, host_race_copy, race); return NULL;
+}
+static void *host_race_stop_thread(void *context)
+{ struct host_copy_race *race = context; app_host_state_stop(&race->state); return NULL; }
+static bool host_race_wait_entered(struct host_copy_race *race)
+{
+    struct timespec deadline = {0}; bool ok = clock_gettime(CLOCK_REALTIME, &deadline) == 0;
+    if (ok) deadline.tv_sec += 10;
+    pthread_mutex_lock(&race->mutex); int rc = 0;
+    while (ok && !race->entered && rc == 0) rc = pthread_cond_timedwait(&race->condition, &race->mutex, &deadline);
+    ok = ok && race->entered; pthread_mutex_unlock(&race->mutex); return ok;
+}
+static bool host_race_result(struct host_copy_race *race)
+{
+    struct app_host_snapshot snapshot; unsigned copies = 0;
+    return race->copied && app_host_state_snapshot(&race->state, &snapshot) && snapshot.stop &&
+        !snapshot.available && snapshot.ever_ready && !app_host_state_copy(&race->state, host_test_copy, &copies) && !copies;
+}
+static bool host_copy_stop_race(void)
+{
+    struct host_copy_race race = {0}; struct app_host_ready ready = {0};
+    pthread_t copier, stopper; ready.post_id[0] = 'a';
+    if (!app_host_state_init(&race.state)) return false;
+    if (pthread_mutex_init(&race.mutex, NULL)) { app_host_state_destroy(&race.state); return false; }
+    if (pthread_cond_init(&race.condition, NULL)) { pthread_mutex_destroy(&race.mutex); app_host_state_destroy(&race.state); return false; }
+    bool copy_started = false, stop_started = false;
+    bool ok = app_host_state_publish(&ready, &race.state) &&
+              pthread_create(&copier, NULL, host_race_copy_thread, &race) == 0;
+    copy_started = ok;
+    if (ok) ok = host_race_wait_entered(&race);
+    if (ok) { stop_started = pthread_create(&stopper, NULL, host_race_stop_thread, &race) == 0; ok = stop_started; }
+    pthread_mutex_lock(&race.mutex); race.release = true; pthread_cond_broadcast(&race.condition); pthread_mutex_unlock(&race.mutex);
+    if (copy_started) ok = pthread_join(copier, NULL) == 0 && ok;
+    if (stop_started) ok = pthread_join(stopper, NULL) == 0 && ok;
+    ok = ok && host_race_result(&race);
+    pthread_cond_destroy(&race.condition); pthread_mutex_destroy(&race.mutex); app_host_state_destroy(&race.state);
+    return ok;
+}
+struct host_test_clock { int64_t ns; };
+static int64_t host_test_now(void *context) { return ((struct host_test_clock *)context)->ns; }
+static bool host_state_clock_child(unsigned mode)
+{
+    struct host_test_clock time = {.ns = 1500000000LL};
+    clock_iface_t fake = {.now_monotonic_ns = host_test_now, .now_wall_ms = host_test_now, .self = &time};
+    const clock_iface_t *previous = clock_default(); clock_set_default(&fake);
+    struct app_host_state state; struct app_host_ready ready = {0}; struct app_host_snapshot snapshot;
+    bool ok = app_host_state_init(&state);
+    if (ok) {
+        state.started_ms = state.last_ms = 1000; state.deadline_ms = 2000;
+        ready.post_id[0] = 'a'; ok = app_host_state_publish(&ready, &state);
+        time.ns = mode == 0 ? 0 : (mode == 1 ? 1400000000LL : 2000000000LL);
+        ok = ok && app_host_state_snapshot(&state, &snapshot) && snapshot.terminal &&
+            !snapshot.available && snapshot.ever_ready && !app_host_state_publish(&ready, &state);
+        app_host_state_destroy(&state);
+    }
+    clock_set_default(previous); return ok;
+}
+static bool host_state_clock_case(unsigned mode)
+{
+    pid_t pid = fork(); if (pid < 0) return false;
+    if (!pid) _exit(host_state_clock_child(mode) ? 0 : 2);
+    int status = 0; pid_t done;
+    do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
+    return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+static bool host_cleanup_paths(const struct json_value *error, const struct json_value *facts,
+                               const char *scratch, const char *path, bool unconfirmed)
+{
+    const char *actual = zcl_package_copy_str(facts, "output");
+    const char *cleanup = zcl_package_copy_str(facts, "cleanup_path");
+    const char *evidence = zcl_package_copy_str(error, "evidence");
+    return unconfirmed ? actual && !strcmp(actual, path) && cleanup && !strcmp(cleanup, scratch) &&
+        json_get_bool(json_get(facts, "cleanup_unconfirmed")) :
+        !actual && !cleanup && (!evidence || strcmp(evidence, path)) && json_get_bool(json_get(facts, "cleanup_completed"));
+}
+static bool host_cleanup_check(const struct json_value *decoded, const char *scratch, const char *path,
+    const char *release, const char *package, const char *version, bool unconfirmed)
+{
+    const struct json_value *error = json_get(decoded, "error"), *facts = json_get(error, "facts");
+    const char *code = zcl_package_copy_str(error, "code");
+    const char *r = zcl_package_copy_str(facts, "release_id"), *p = zcl_package_copy_str(facts, "package_root");
+    const char *v = zcl_package_copy_str(facts, "version");
+    return code && !strcmp(code, "SHARE_FILE_WRITE") && r && !strcmp(r, release) && p && !strcmp(p, package) &&
+        v && !strcmp(v, version) && json_get_bool(json_get(error, "mutated")) &&
+        host_cleanup_paths(error, facts, scratch, path, unconfirmed);
+}
+static bool host_cleanup_failure_wire(bool unconfirmed)
+{
+    const char scratch[] = "/private/tmp/quoted-\"-scratch";
+    const char path[] = "/private/tmp/quoted-\"-scratch/carrier.z23share";
+    char release[65], package[65], version[65];
+    memset(release, 'c', 64); release[64] = 0;
+    memset(package, 'b', 64); package[64] = 0;
+    memset(version, 'a', 64); version[64] = 0;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_host_link.v1");
+    zcl_package_copy_fail(&reply, "SHARE_FILE_WRITE", true,
+        "the release is kept, but the share file could not be created; name a new path as output", path);
+    /* This is the actual shape added by sh_partial_facts after signer failure. */
+    struct json_value existing; json_init(&existing); json_set_object(&existing);
+    bool ok = json_push_kv_str(&existing, "release_id", release) && json_push_kv_str(&existing, "package_root", package) &&
+        json_push_kv_str(&existing, "version", version) && json_push_kv_str(&existing, "output", path) &&
+        json_push_kv(&reply.data, "failure_facts", &existing);
+    json_free(&existing);
+    if (ok) zcl_test_app_host_failure_facts(&reply, scratch, path, unconfirmed);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.library", NULL);
+    char wire[3073];
+    size_t n = ok && spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &reply, wire, sizeof(wire)) : 0;
+    struct json_value decoded; json_init(&decoded);
+    ok = n && n < sizeof(wire) && json_read(&decoded, wire, n);
+    ok = ok && host_cleanup_check(&decoded, scratch, path, release, package, version, unconfirmed);
+    json_free(&decoded); zcl_command_reply_free(&reply); return ok;
+}
+static bool host_lifeline_limits(void)
+{
+    pid_t pid = fork(); if (pid < 0) return false;
+    if (!pid) {
+        struct app_network_lifeline guard;
+        uint64_t parent = (uint64_t)getppid();
+        if (app_network_lifeline_start(&guard, parent, 135001u) ||
+            app_host_lifeline_start(&guard, parent, 86405001u) ||
+            !app_host_lifeline_start(&guard, parent, 86405000u) ||
+            !app_network_lifeline_stop(&guard)) _exit(2);
+        _exit(0);
+    }
+    int status = 0; pid_t done;
+    do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
+    return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+static bool host_test_copy(const struct app_host_ready *ready, void *context)
+{ unsigned *calls = context; (*calls)++; return ready->post_id[0] != 0; }
+static bool host_state_before_ready(bool stop)
+{
+    struct app_host_state state; struct app_host_snapshot snapshot; struct app_host_ready ready = {0};
+    unsigned copies = 0; ready.post_id[0] = 'a';
+    if (!app_host_state_init(&state)) return false;
+    if (stop) app_host_state_stop(&state); else app_host_state_unavailable(&state);
+    bool ok = !app_host_state_publish(&ready, &state) &&
+        (!stop || !app_host_state_copy(&state, host_test_copy, &copies)) &&
+        app_host_state_snapshot(&state, &snapshot) && !snapshot.ever_ready &&
+        (stop ? snapshot.stop : snapshot.terminal && !snapshot.available);
+    app_host_state_destroy(&state); return ok;
+}
+static bool host_state_after_ready(void)
+{
+    struct app_host_state state; struct app_host_snapshot snapshot; struct app_host_ready ready = {0};
+    unsigned copies = 0; ready.post_id[0] = 'a';
+    if (!app_host_state_init(&state)) return false;
+    bool ok = app_host_state_publish(&ready, &state) && app_host_state_copy(&state, host_test_copy, &copies);
+    app_host_state_unavailable(&state);
+    ok = ok && !app_host_state_copy(&state, host_test_copy, &copies) &&
+        !app_host_state_publish(&ready, &state) &&
+        app_host_state_snapshot(&state, &snapshot) && snapshot.ever_ready && snapshot.terminal && !snapshot.available;
+    app_host_state_finish(&state, APP_HOST_FAILED);
+    ok = ok && app_host_state_snapshot(&state, &snapshot) && snapshot.finished &&
+        !snapshot.available && snapshot.ever_ready && copies == 1;
+    app_host_state_destroy(&state); return ok;
+}
+static bool host_state_transitions(void)
+{ return host_state_before_ready(true) && host_state_before_ready(false) && host_state_after_ready(); }
+static bool host_carrier_capacity_child(const char *path)
+{
+    if (chdir(path)) return false;
+    size_t size = VCS_BUNDLE_MAX_BYTES;
+    uint8_t *bytes = malloc(size), *readback = malloc(size);
+    if (!bytes || !readback) { free(bytes); free(readback); return false; }
+    for (size_t i = 0; i < size; i++) bytes[i] = (uint8_t)(i * 37u);
+    char hex[65]; uint8_t root[32]; size_t got = 0;
+    bool ok = !zcl_test_app_host_store_carrier(bytes, 0, hex) &&
+        !zcl_test_app_host_store_carrier(bytes, size + 1, hex) &&
+        zcl_test_app_host_store_carrier(bytes, size, hex) && zcl_hex_decode_lower(hex, root, 32);
+    struct vcs_package_store *store = ok ? vcs_package_store_open(".",
+        VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES) : NULL;
+    ok = ok && store && vcs_bundle_get_from(store, root, readback, size, &got) == VCS_BUNDLE_OK &&
+        got == size && !memcmp(bytes, readback, size);
+    if (store) vcs_package_store_close(store);
+    free(bytes); free(readback); return ok;
+}
+static bool host_carrier_capacity(void)
+{
+    char path[800];
+    if (!test_mkdtemp(path, sizeof(path), "app_host_capacity")) return false;
+    pid_t child = fork();
+    if (!child) _exit(host_carrier_capacity_child(path) ? 0 : 2);
+    int status = 0; pid_t waited = -1;
+    if (child > 0) do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    bool ok = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return test_rm_rf_recursive(path) == 0 && ok;
+}
+static int host_ready_frame_tests(void)
+{
+    int failures = 0;
+    TEST("host carrier storage admits the full legal byte limit without eviction") {
+        ASSERT(host_carrier_capacity()); PASS();
+    }
+    TEST("host confirmation Cancel and stale revision never start a worker") {
+        ASSERT(host_flow_case(false)); ASSERT(host_flow_case(true)); PASS();
+    }
+    TEST("app host failure wire preserves signer facts and only unconfirmed cleanup path") {
+        ASSERT(host_cleanup_failure_wire(false)); ASSERT(host_cleanup_failure_wire(true)); PASS();
+    }
+    TEST("app host stop serializes with an in-flight copy") {
+        ASSERT(host_copy_stop_race()); PASS();
+    }
+    TEST("app host serializes stop, ready, copy, and observed failure") {
+        ASSERT(host_state_transitions()); PASS();
+    }
+    TEST("app host availability fails closed on zero, backward and expired clock") {
+        ASSERT(host_state_clock_case(0)); ASSERT(host_state_clock_case(1)); ASSERT(host_state_clock_case(2)); PASS();
+    }
+    TEST("app host lifeline preserves separate receiving and hosting limits") {
+        ASSERT(host_lifeline_limits()); PASS();
+    }
+    TEST("app host ready validates signed carrier identity") {
+        ASSERT(host_ready_fixture()); PASS();
+    } _test_next:;
+    return failures;
+}
+#else
+static int host_ready_frame_tests(void) { return 0; }
+#endif

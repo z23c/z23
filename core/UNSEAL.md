@@ -1226,3 +1226,15 @@ later lane flips it HARD.
 - 2026-11-08T15:54:16Z — REASON: Owner-authorized Flysync final candidate: complete transport, orchestration, module splits, and capability closure; no consensus predicate change
   old ROOT: 644d15b632b29064d783ca94447ad69d68e45bc261ed20ff78de8e6cf67df3d6
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-09T19:05:34Z — REASON: Owner authorized UNSEAL 2026-11-09: isolate app-only Tor defaults from machine configuration; no consensus predicate change
+  old ROOT: b79beebf078cc5b0862651e6f91f827b3b63de1ddbab7e5b013734f5b0810d45
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-09T19:12:35Z — REASON: Owner authorized UNSEAL 2026-11-09: verify actual private Tor startup arguments at test boundary
+  old ROOT: c6acd8fd437c0a8307f6e4b6cd64025ef873b65b61fefe923eee23b2a27aa655
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-09T19:27:31Z — REASON: Owner authorized any UNSEAL: move private Tor launch configuration into existing config module; preserve argv lifetime and consensus predicates
+  old ROOT: 3802b3e1a904365354b3c39c3f343b2a66f7ae2d98aa993fea6d716df833e573
+  by: owner unseal ritual (make core-unseal)

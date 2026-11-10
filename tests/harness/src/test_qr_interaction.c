@@ -88,6 +88,33 @@ void qr_case_form_bridge_and_typing(void)
              form_state.fields[0].value[0] == '\0' &&
              !zcl_present_window_form_edit_v1(
                  &form_state, 1, (uint8_t)'x', false));
+    form_model.exact_root[0] = '\0';
+    QR_CHECK("identity-bound form still rejects a missing root",
+             !zcl_present_window_form_from_model_v1(
+                 &form_model, &form_state, why, sizeof(why)));
+    form_model.kind = ZCL_PRESENT_MODEL_INPUT_FORM;
+    form_model.item_count = 1;
+    QR_CHECK("input-only form accepts a blank required field before identity",
+             zcl_present_window_form_from_model_v1(
+                 &form_model, &form_state, why, sizeof(why)) &&
+             form_state.field_count == 1 &&
+             form_state.fields[0].flags == ZCL_PRESENT_WINDOW_FORM_REQUIRED &&
+             form_state.fields[0].value[0] == '\0');
+    struct zcl_present_model_bitmap_v1 input_bitmap = {0};
+    QR_CHECK("input-only form renders without an invented identity",
+             zcl_present_model_render_v1(&form_model, &input_bitmap,
+                                         why, sizeof(why)));
+    zcl_present_model_bitmap_free_v1(&input_bitmap);
+    memset(form_model.exact_root, 'f', ZCL_PRESENT_MODEL_ROOT_MAX);
+    form_model.exact_root[ZCL_PRESENT_MODEL_ROOT_MAX] = '\0';
+    QR_CHECK("input-only form rejects a claimed content identity",
+             !zcl_present_window_form_from_model_v1(
+                 &form_model, &form_state, why, sizeof(why)));
+    form_model.exact_root[0] = '\0';
+    form_model.actions[1].kind = ZCL_PRESENT_ACTION_CONFIRM;
+    QR_CHECK("input-only form permits submission but not confirmation",
+             !zcl_present_window_form_from_model_v1(
+                 &form_model, &form_state, why, sizeof(why)));
 }
 
 void qr_case_form_focus(void)

@@ -3,13 +3,53 @@
  * parsing, independent of the embedded Tor thread lifecycle. */
 
 #include "net/tor_integration.h"
+#include "tor_integration_priv.h"
 #include "util/log_macros.h"
 #include "util/log_rotate.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef ZCL_TESTING
+static void (*g_test_argv_observer)(int argc, char *const *argv);
+
+void tor_integration_set_argv_observer_for_test(
+    void (*observer)(int argc, char *const *argv))
+{
+    g_test_argv_observer = observer;
+}
+#endif
+
+void tor_launch_config_init(struct tor_launch_config *launch, char *torrc_path,
+                            bool private_defaults, bool has_owner, platform_socket_t owner)
+{
+    *launch = (struct tor_launch_config){0};
+    /* Tor pre-authenticates this owning control connection; the caller
+     * keeps its peer alive until the Tor thread has finished. */
+    launch->configuration = tor_main_configuration_new();
+    snprintf(launch->owner_fd, sizeof(launch->owner_fd), "%" PRIu64,
+             (uint64_t)owner);
+    int argc = 0;
+    launch->argv[argc++] = "tor";
+    launch->argv[argc++] = "-f";
+    launch->argv[argc++] = torrc_path;
+    if (private_defaults) {
+        launch->argv[argc++] = "--defaults-torrc";
+        launch->argv[argc++] = "/dev/null";
+    }
+    if (has_owner) {
+        launch->argv[argc++] = "__OwningControllerFD";
+        launch->argv[argc++] = launch->owner_fd;
+    }
+#ifdef ZCL_TESTING
+    if (g_test_argv_observer)
+        g_test_argv_observer(argc, launch->argv);
+#endif
+    tor_main_configuration_set_command_line(launch->configuration, argc, launch->argv);
+}
 
 /* The [rend] info stream lives in its OWN file. Tor publishes the one line
  * that proves this node's onion descriptor reached an HSDir —

@@ -890,10 +890,12 @@ static bool al_library_home(struct al_library_script *s, const struct zcl_presen
 static void al_library_share_menu(struct al_library_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {
-    s->valid = s->valid && model->action_count == 3 &&
+    s->valid = s->valid && model->action_count == 4 &&
         !strcmp(model->actions[0].id, "share-file") &&
-        !strcmp(model->actions[1].id, "publish");
-    event->action_index = s->share_cancel && s->share_calls ? 2 : 0;
+        !strcmp(model->actions[1].id, "share-link") &&
+        !strcmp(model->actions[2].id, "more-sharing") &&
+        !strcmp(model->actions[3].id, "share-back");
+    event->action_index = s->share_cancel && s->share_calls ? 3 : 0;
 }
 static void al_library_error_card(struct al_library_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
