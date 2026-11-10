@@ -375,12 +375,20 @@ struct an_slice_job {
     atomic_bool done;
     pthread_t thread;
 };
-struct an_slice_batch { struct an_slice_batch *next; struct an_slice_job jobs[AN_SLICE_BATCH]; };
+struct an_slice_batch {
+    struct an_slice_batch *next; struct an_slice_job jobs[AN_SLICE_BATCH];
+    bool active[AN_SLICE_BATCH], lost;
+};
 static _Atomic(struct an_slice_batch *) an_unjoined;
 #if defined(ZCL_TESTING)
 static int an_test_spawn_after = -1, an_test_join_after = -1;
+static unsigned an_test_spawn_count;
+static void (*an_test_failure_observer)(void *); static void *an_test_failure_context;
 void zcl_test_app_network_thread_faults(int spawn_after, int join_after)
-{ an_test_spawn_after = spawn_after; an_test_join_after = join_after; }
+{ an_test_spawn_after = spawn_after; an_test_join_after = join_after; an_test_spawn_count = 0; }
+unsigned zcl_test_app_network_spawn_count(void) { return an_test_spawn_count; }
+void zcl_test_app_network_failure_observer(void (*observer)(void *), void *context)
+{ an_test_failure_observer = observer; an_test_failure_context = context; }
 #endif
 static int an_slice_spawn(struct an_slice_job *j);
 static void *an_slice_worker(void *context)
@@ -403,7 +411,11 @@ static int an_slice_spawn(struct an_slice_job *j)
     if (an_test_spawn_after == 0) return EAGAIN;
     if (an_test_spawn_after > 0) an_test_spawn_after--;
 #endif
-    return thread_registry_spawn("app-slice", an_slice_worker, j, &j->thread);
+    int rc = thread_registry_spawn("app-slice", an_slice_worker, j, &j->thread);
+#if defined(ZCL_TESTING)
+    if (!rc) an_test_spawn_count++;
+#endif
+    return rc;
 }
 static void an_keep_unjoined(struct an_slice_batch *b)
 {
@@ -411,21 +423,14 @@ static void an_keep_unjoined(struct an_slice_batch *b)
     do { b->next = old; } while (!atomic_compare_exchange_weak_explicit(&an_unjoined, &old, b,
         memory_order_release, memory_order_relaxed));
 }
-static bool an_slice_join(struct an_slice_batch *b, unsigned started)
+static bool an_slice_join_one(struct an_slice_job *j)
 {
-    bool joined = true;
-    for (unsigned i = 0; i < started; i++) {
-        struct an_slice_job *j = &b->jobs[i];
-        while (!atomic_load_explicit(&j->done, memory_order_acquire))
-            platform_sleep_ms(10); /* real-clock: owned callback completion barrier */
-        int rc; do { rc = pthread_join(j->thread, NULL); } while (rc == EINTR);
+    int rc; do { rc = pthread_join(j->thread, NULL); } while (rc == EINTR);
 #if defined(ZCL_TESTING)
-        if (!rc && an_test_join_after == 0) { rc = EINVAL; an_test_join_after = -1; }
-        else if (an_test_join_after > 0) an_test_join_after--;
+    if (!rc && an_test_join_after == 0) { rc = EINVAL; an_test_join_after = -1; }
+    else if (an_test_join_after > 0) an_test_join_after--;
 #endif
-        if (rc) joined = false;
-    }
-    return joined;
+    return rc == 0;
 }
 static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const char *onion,
     const struct zcl_app_offer *o, uint32_t index, size_t off, size_t size, uint8_t *chunk)
@@ -435,39 +440,80 @@ static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const cha
     if (now < 0 || now >= r->deadline) { *r->error = APP_NETWORK_TIMEOUT; return false; }
     if (!an_onion(onion) || (!r->t->fetch_budgeted && !an_reserve(&r->calls))) return false;
     j->transport = r->t; j->onion = onion; j->out = chunk + off;
+    j->got = 0; j->status = 0; j->ok = false;
     j->want = size - off < AN_SLICE ? size - off : AN_SLICE;
     j->deadline = r->deadline; j->attempts = &r->calls;
     (void)snprintf(j->path, sizeof(j->path), "/zcode/download/%s/0/%u/slice/%zu", o->carrier, index, off);
     atomic_init(&j->done, false); return true;
 }
-static bool an_slice_results(struct an_run *r, struct an_slice_batch *b, unsigned started)
+static bool an_slice_result(struct an_run *r, const struct an_slice_job *j)
 {
-    for (unsigned i = 0; i < started; i++) {
+    if (!j->ok || j->status != 200) {
+        *r->error = APP_NETWORK_UNAVAILABLE;
+#if defined(ZCL_TESTING)
+        if (an_test_failure_observer) an_test_failure_observer(an_test_failure_context);
+#endif
+        return false;
+    }
+    if (j->got > j->want) { *r->error = APP_NETWORK_INVALID_RESPONSE; return false; }
+    return j->got == j->want;
+}
+static bool an_slice_fill(struct an_run *r, struct an_slice_batch *b, const char *onion,
+    const struct zcl_app_offer *o, uint32_t index, size_t *off, size_t size, uint8_t *chunk)
+{
+    for (unsigned i = 0; i < AN_SLICE_BATCH && *off < size; i++) {
+        if (b->active[i]) continue;
         struct an_slice_job *j = &b->jobs[i];
-        if (!j->ok || j->status != 200) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
-        if (j->got > j->want) { *r->error = APP_NETWORK_INVALID_RESPONSE; return false; }
-        if (j->got != j->want) return false;
+        if (!an_slice_prepare(r, j, onion, o, index, *off, size, chunk)) return false;
+        if (an_slice_spawn(j) != 0) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
+        b->active[i] = true; *off += j->want;
     }
     return true;
+}
+static bool an_slice_scan(struct an_run *r, struct an_slice_batch *b, bool *completed)
+{
+    bool ok = true; *completed = false;
+    for (unsigned i = 0; i < AN_SLICE_BATCH; i++) {
+        struct an_slice_job *j = &b->jobs[i];
+        if (!b->active[i] || !atomic_load_explicit(&j->done, memory_order_acquire)) continue;
+        *completed = true; b->active[i] = false;
+        if (!an_slice_join_one(j)) { b->lost = true; if (ok) *r->error = APP_NETWORK_UNAVAILABLE; ok = false; }
+        else if (ok && !an_slice_result(r, j)) ok = false;
+    }
+    return ok;
+}
+static bool an_slice_active(const struct an_slice_batch *b)
+{
+    for (unsigned i = 0; i < AN_SLICE_BATCH; i++) if (b->active[i]) return true;
+    return false;
+}
+static void an_slice_drain(struct an_slice_batch *b)
+{
+    for (unsigned i = 0; i < AN_SLICE_BATCH; i++) {
+        struct an_slice_job *j = &b->jobs[i];
+        if (!b->active[i]) continue;
+        while (!atomic_load_explicit(&j->done, memory_order_acquire))
+            platform_sleep_ms(10); /* real-clock: owned callback completion barrier */
+        if (!an_slice_join_one(j)) b->lost = true;
+        b->active[i] = false;
+    }
 }
 static bool an_slice_batch_fetch(struct an_run *r, const char *onion, const struct zcl_app_offer *o,
     uint32_t index, size_t *off, size_t size, uint8_t *chunk)
 {
     struct an_slice_batch *b = zcl_calloc(1, sizeof(*b), "app.network.slices");
     if (!b) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
-    unsigned started = 0; bool launch_ok = true, spawn_failed = false;
-    while (started < AN_SLICE_BATCH && *off < size) {
-        struct an_slice_job *j = &b->jobs[started];
-        if (!an_slice_prepare(r, j, onion, o, index, *off, size, chunk)) { launch_ok = false; break; }
-        if (an_slice_spawn(j) != 0) { launch_ok = false; spawn_failed = true; break; }
-        *off += j->want; started++;
+    bool ok = an_slice_fill(r, b, onion, o, index, off, size, chunk);
+    while (ok && an_slice_active(b)) {
+        bool completed = false;
+        ok = an_live(r) && an_slice_scan(r, b, &completed) && an_live(r) &&
+             an_slice_fill(r, b, onion, o, index, off, size, chunk);
+        if (ok && !completed) platform_sleep_ms(10);
     }
-    bool joined = an_slice_join(b, started);
-    bool live = an_live(r);
-    bool ok = live && launch_ok && joined;
-    if (live && (!joined || spawn_failed)) *r->error = APP_NETWORK_UNAVAILABLE;
-    if (ok) ok = an_slice_results(r, b, started);
-    if (joined) free(b); else an_keep_unjoined(b);
+    an_slice_drain(b);
+    if (!an_live(r)) ok = false;
+    if (b->lost) { if (ok) *r->error = APP_NETWORK_UNAVAILABLE; ok = false; an_keep_unjoined(b); }
+    else free(b);
     return ok;
 }
 static bool an_chunks(struct an_run *r, const char *onion, const struct zcl_app_offer *o,

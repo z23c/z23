@@ -670,6 +670,8 @@ struct tag_parallel {
     pthread_cond_t cond;
     unsigned entered, active, peak;
     bool overlap, missed, barrier, second_done, cancel, expire, expire_entered;
+    bool rolling, rolling_fault, first_started, first_waiting, fifth_started, fifth_before_release;
+    bool failure_observed; unsigned spawns_at_failure, spawns_final;
     unsigned slice_fault;
     atomic_bool cancel_requested;
 };
@@ -711,6 +713,23 @@ static bool tag_parallel_fault(struct tag_parallel *p, bool slice, bool ok,
     if (p->slice_fault == 4 && *len) out[0] ^= 1;
     return ok;
 }
+static void tag_rolling_gate(struct tag_parallel *p, const char *path)
+{
+    const char *offset = strrchr(path, '/');
+    if (!offset) { p->missed = true; return; }
+    if (p->rolling_fault) {
+        if (!strcmp(offset + 1, "0") && !tag_parallel_wait(p, &p->failure_observed, 2000)) p->missed = true;
+        return;
+    }
+    if (!strcmp(offset + 1, "0")) {
+        p->first_waiting = true; p->first_started = true; pthread_cond_broadcast(&p->cond);
+        if (!tag_parallel_wait(p, &p->fifth_started, 2000)) p->missed = true;
+        p->first_waiting = false;
+    } else if (!strcmp(offset + 1, "196608")) {
+        p->fifth_before_release = p->first_waiting;
+        p->fifth_started = true; pthread_cond_broadcast(&p->cond);
+    } else if (!tag_parallel_wait(p, &p->first_started, 2000)) p->missed = true;
+}
 static bool tag_parallel_fetch(void *context, const char *onion, const char *path,
     uint8_t *out, size_t cap, size_t *len, int *status, unsigned timeout_ms)
 {
@@ -718,7 +737,9 @@ static bool tag_parallel_fetch(void *context, const char *onion, const char *pat
     pthread_mutex_lock(&p->mutex);
     bool slice = strstr(path, "/slice/") != NULL;
     bool second = slice && tag_parallel_enter(p, timeout_ms);
+    if (slice && (p->rolling || p->rolling_fault)) tag_rolling_gate(p, path);
     bool ok = tag_net_fetch(&p->net, onion, path, out, cap, len, status, timeout_ms);
+    if (slice && p->rolling_fault && strstr(path, "/slice/196608")) *status = 503;
     if (second) { p->second_done = true; pthread_cond_broadcast(&p->cond); }
     ok = tag_parallel_fault(p, slice, ok, out, len, status);
     if (slice) p->active--;
@@ -732,13 +753,22 @@ static bool tag_parallel_cancelled(void *context)
 }
 static bool tag_parallel_success(struct tag_parallel *p, bool parallel, const uint8_t *out, size_t len)
 {
+    if (p->rolling) return len == p->net.size && !memcmp(out, p->net.bytes, len) &&
+        p->fifth_before_release && !p->missed;
     return len == p->net.size && !memcmp(out, p->net.bytes, len) &&
         (parallel ? p->overlap && !p->missed && p->second_done : p->peak == 1);
+}
+static bool tag_parallel_rolling_failure(struct tag_parallel *p, const uint8_t *out,
+                                         enum app_network_error error)
+{
+    return !out && error == APP_NETWORK_UNAVAILABLE && p->failure_observed &&
+        p->spawns_at_failure == p->spawns_final && !p->missed;
 }
 static bool tag_parallel_outcome(struct tag_parallel *p, bool fetched, bool expected,
     bool parallel, const uint8_t *out, size_t len, enum app_network_error error)
 {
     if (fetched != expected || p->active != 0 || p->peak > 4) return false;
+    if (p->rolling_fault) return tag_parallel_rolling_failure(p, out, error);
     if (expected) return tag_parallel_success(p, parallel, out, len);
     if (out) return false;
     if (p->cancel) return error == APP_NETWORK_CANCELLED &&
@@ -757,18 +787,40 @@ static bool tag_parallel_cleanup(struct tag_parallel *p, struct vcs_package_stor
 }
 static bool tag_parallel_expected(unsigned fault, bool cancel, bool expire, int spawn_after, int join_after)
 { return !fault && !cancel && !expire && spawn_after < 0 && join_after < 0; }
+extern void zcl_test_app_network_failure_observer(void (*observer)(void *), void *context);
+extern unsigned zcl_test_app_network_spawn_count(void);
+static void tag_rolling_failure_observed(void *context)
+{
+    struct tag_parallel *p = context; pthread_mutex_lock(&p->mutex);
+    p->spawns_at_failure = zcl_test_app_network_spawn_count();
+    p->failure_observed = true; pthread_cond_broadcast(&p->cond); pthread_mutex_unlock(&p->mutex);
+}
+static bool tag_parallel_finish(struct tag_parallel *p, struct vcs_package_store *store,
+    const struct zcl_app_offer_row *row, bool fetched, bool expected, bool parallel,
+    const uint8_t *out, size_t len, enum app_network_error error)
+{
+    bool ok = tag_parallel_outcome(p, fetched, expected, parallel, out, len, error);
+    if (p->rolling_fault && store) { uint8_t root[32];
+        ok = ok && zcl_hex_decode_lower(row->offer.carrier, root, sizeof(root)) &&
+            !vcs_package_store_chunk_present(store, root, 0, 0); }
+    if ((p->rolling || p->rolling_fault) && !ok)
+        fprintf(stderr, "rolling fixture: fetched=%d fifth_before_release=%d missed=%d peak=%u active=%u\n",
+            fetched, p->fifth_before_release, p->missed, p->peak, p->active);
+    return ok;
+}
 static bool tag_network_parallel_case(bool parallel, unsigned slice_fault, bool cancel,
-    bool expire, int spawn_after, int join_after)
+    bool expire, int spawn_after, int join_after, unsigned rolling)
 {
     struct tag_parallel p = {0}; char dir[TAG_PATH] = {0};
     if (pthread_mutex_init(&p.mutex, NULL)) return false;
     if (pthread_cond_init(&p.cond, NULL)) { pthread_mutex_destroy(&p.mutex); return false; }
     atomic_init(&p.cancel_requested, false);
-    p.barrier = parallel && !expire; p.slice_fault = slice_fault; p.cancel = cancel; p.expire = expire;
+    p.barrier = parallel && !expire && !rolling; p.rolling = rolling == 1u; p.rolling_fault = rolling == 2u;
+    p.slice_fault = slice_fault; p.cancel = cancel; p.expire = expire;
     bool ok = tag_net_init(&p.net, VCS_PACKAGE_CHUNK_BYTES + 13u);
     struct app_network_transport t = {.fetch = tag_parallel_fetch, .cancelled = tag_parallel_cancelled, .context = &p,
         .timeout_ms = 120000, .parallel_safe = parallel};
-    struct zcl_app_offer_row row = {0}; enum app_network_error error;
+    struct zcl_app_offer_row row = {0}; enum app_network_error error = APP_NETWORK_UNAVAILABLE;
     uint8_t *out = NULL; size_t len = 0; bool mutated = false;
     struct vcs_package_store *store = NULL;
     if (ok && test_mkdtemp(dir, sizeof(dir), "app_network_parallel")) store = vcs_package_store_open(dir, VCS_BUNDLE_MAX_BYTES * 10u);
@@ -776,24 +828,29 @@ static bool tag_network_parallel_case(bool parallel, unsigned slice_fault, bool 
     ok = ok && store && app_network_exact(&t, TAG_NET_RELAY, p.net.id, now, &row, &error);
     if (expire) t.timeout_ms = 1000;
     zcl_test_app_network_thread_faults(spawn_after, join_after);
+    if (p.rolling_fault) zcl_test_app_network_failure_observer(tag_rolling_failure_observed, &p);
     bool fetched = ok && app_network_carrier(&t, TAG_NET_RELAY, TAG_NET_HOST, &row, now, store, &out, &len, &mutated, &error);
+    p.spawns_final = zcl_test_app_network_spawn_count();
+    zcl_test_app_network_failure_observer(NULL, NULL);
     zcl_test_app_network_thread_faults(-1, -1);
-    bool expected = tag_parallel_expected(slice_fault, cancel, expire, spawn_after, join_after);
-    ok = ok && tag_parallel_outcome(&p, fetched, expected, parallel, out, len, error);
+    bool expected = !p.rolling_fault && tag_parallel_expected(slice_fault, cancel, expire, spawn_after, join_after);
+    ok = tag_parallel_finish(&p, store, &row, fetched, expected, parallel, out, len, error) && ok;
     return tag_parallel_cleanup(&p, store, out, dir, ok);
 }
 static bool tag_network_parallel(void)
 {
-    return tag_network_parallel_case(true, 0, false, false, -1, -1) &&
-        tag_network_parallel_case(false, 0, false, false, -1, -1) &&
-        tag_network_parallel_case(true, 1, false, false, -1, -1) &&
-        tag_network_parallel_case(true, 2, false, false, -1, -1) &&
-        tag_network_parallel_case(true, 3, false, false, -1, -1) &&
-        tag_network_parallel_case(true, 4, false, false, -1, -1) &&
-        tag_network_parallel_case(true, 0, false, false, 1, -1) &&
-        tag_network_parallel_case(true, 0, false, false, -1, 0) &&
-        tag_network_parallel_case(true, 0, true, false, -1, -1) &&
-        tag_network_parallel_case(true, 0, false, true, -1, -1);
+    return tag_network_parallel_case(true, 0, false, false, -1, -1, 1) &&
+        tag_network_parallel_case(true, 0, false, false, -1, -1, 2) &&
+        tag_network_parallel_case(true, 0, false, false, -1, -1, false) &&
+        tag_network_parallel_case(false, 0, false, false, -1, -1, false) &&
+        tag_network_parallel_case(true, 1, false, false, -1, -1, false) &&
+        tag_network_parallel_case(true, 2, false, false, -1, -1, false) &&
+        tag_network_parallel_case(true, 3, false, false, -1, -1, false) &&
+        tag_network_parallel_case(true, 4, false, false, -1, -1, false) &&
+        tag_network_parallel_case(true, 0, false, false, 1, -1, false) &&
+        tag_network_parallel_case(true, 0, false, false, -1, 0, false) &&
+        tag_network_parallel_case(true, 0, true, false, -1, -1, false) &&
+        tag_network_parallel_case(true, 0, false, true, -1, -1, false);
 }
 
 static bool tag_net_wrong_sha(struct tag_net *f)
