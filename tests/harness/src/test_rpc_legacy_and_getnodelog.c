@@ -641,9 +641,46 @@ int check_rpc_getnodelog_level_filter(void)
     return failures;
 }
 
+static bool rpc_ere_named_classes(void)
+{
+    static const char upper[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static const char lower[] = "abcdefghijklmnopqrstuvwxyz";
+    static const char digits[] = "0123456789";
+    static const struct { const char *name; const char *chars; } cases[] = {
+        {"alpha", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"},
+        {"alnum", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"},
+        {"digit", digits}, {"upper", upper}, {"lower", lower},
+        {"space", " \t\n\v\f\r"}, {"blank", " \t"},
+        {"print", " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"},
+        {"graph", "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"},
+        {"punct", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"},
+        {"cntrl", NULL}, {"xdigit", "0123456789abcdefABCDEF"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        uint32_t bits[8] = {0};
+        if (!zcl_ere_class_named(bits, cases[i].name, strlen(cases[i].name)))
+            return false;
+        for (unsigned c = 0; c < 256; c++) {
+            bool want = cases[i].chars ? c != 0 && strchr(cases[i].chars, (int)c) != NULL
+                                       : c < 32 || c == 127;
+            if (((bits[c >> 5] >> (c & 31)) & 1u) != (unsigned)want)
+                return false;
+        }
+    }
+    uint32_t bits[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const uint32_t before[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    return !zcl_ere_class_named(bits, "bogus", 5) &&
+           !zcl_ere_class_named(bits, "digits", 6) &&
+           memcmp(bits, before, sizeof bits) == 0;
+}
+
 int check_rpc_ere_matcher(void)
 {
     int failures = 0;
+
+    printf("ere matcher: named classes cover every byte... ");
+    if (rpc_ere_named_classes()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     /* The in-tree ERE matcher behind `getnodelog`. Every expectation below
      * was taken from glibc regcomp/regexec with REG_EXTENDED|REG_NOSUB, so

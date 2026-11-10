@@ -231,44 +231,71 @@ static inline void zcl_ere_class_set(uint32_t bits[8], unsigned char value)
     bits[value >> 5] |= 1u << (value & 31u);
 }
 
+enum zcl_ere_class {
+    ZCL_ERE_ALPHA, ZCL_ERE_ALNUM, ZCL_ERE_DIGIT, ZCL_ERE_UPPER,
+    ZCL_ERE_LOWER, ZCL_ERE_SPACE, ZCL_ERE_BLANK, ZCL_ERE_PRINT,
+    ZCL_ERE_GRAPH, ZCL_ERE_PUNCT, ZCL_ERE_CNTRL, ZCL_ERE_XDIGIT,
+    ZCL_ERE_UNKNOWN
+};
+
+static inline enum zcl_ere_class zcl_ere_class_lookup(const char *name, size_t len)
+{
+    static const char *const names[] = {
+        "alpha", "alnum", "digit", "upper", "lower", "space", "blank",
+        "print", "graph", "punct", "cntrl", "xdigit"
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strlen(names[i]) == len && memcmp(name, names[i], len) == 0)
+            return (enum zcl_ere_class)i;
+    return ZCL_ERE_UNKNOWN;
+}
+
+static inline bool zcl_ere_class_letter(enum zcl_ere_class cls, unsigned char c)
+{
+    bool upper = c >= 'A' && c <= 'Z';
+    bool lower = c >= 'a' && c <= 'z';
+    bool digit = c >= '0' && c <= '9';
+    switch (cls) {
+    case ZCL_ERE_ALPHA: return upper || lower;
+    case ZCL_ERE_ALNUM: return upper || lower || digit;
+    case ZCL_ERE_DIGIT: return digit;
+    case ZCL_ERE_UPPER: return upper;
+    case ZCL_ERE_LOWER: return lower;
+    default: return false;
+    }
+}
+
+static inline bool zcl_ere_class_xdigit(unsigned char c)
+{
+    return zcl_ere_class_letter(ZCL_ERE_DIGIT, c) ||
+           (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static inline bool zcl_ere_class_other(enum zcl_ere_class cls, unsigned char c)
+{
+    bool print = c >= 0x20 && c <= 0x7e;
+    switch (cls) {
+    case ZCL_ERE_SPACE: return c == ' ' || (c >= 0x09 && c <= 0x0d);
+    case ZCL_ERE_BLANK: return c == ' ' || c == '\t';
+    case ZCL_ERE_PRINT: return print;
+    case ZCL_ERE_GRAPH: return print && c != ' ';
+    case ZCL_ERE_PUNCT:
+        return print && c != ' ' && !zcl_ere_class_letter(ZCL_ERE_ALNUM, c);
+    case ZCL_ERE_CNTRL: return c < 0x20 || c == 0x7f;
+    default: return false;
+    }
+}
+
 static inline bool zcl_ere_class_named(uint32_t bits[8], const char *name,
                                        size_t name_len)
 {
+    enum zcl_ere_class cls = zcl_ere_class_lookup(name, name_len);
+    if (cls == ZCL_ERE_UNKNOWN) return false;
     for (int value = 0; value < 256; value++) {
         unsigned char c = (unsigned char)value;
-        bool upper = c >= 'A' && c <= 'Z';
-        bool lower = c >= 'a' && c <= 'z';
-        bool digit = c >= '0' && c <= '9';
-        bool space = c == ' ' || (c >= 0x09 && c <= 0x0d);
-        bool print = c >= 0x20 && c <= 0x7e;
-        bool member;
-        if (name_len == 5 && memcmp(name, "alpha", 5) == 0)
-            member = upper || lower;
-        else if (name_len == 5 && memcmp(name, "alnum", 5) == 0)
-            member = upper || lower || digit;
-        else if (name_len == 5 && memcmp(name, "digit", 5) == 0)
-            member = digit;
-        else if (name_len == 5 && memcmp(name, "upper", 5) == 0)
-            member = upper;
-        else if (name_len == 5 && memcmp(name, "lower", 5) == 0)
-            member = lower;
-        else if (name_len == 5 && memcmp(name, "space", 5) == 0)
-            member = space;
-        else if (name_len == 5 && memcmp(name, "blank", 5) == 0)
-            member = c == ' ' || c == '\t';
-        else if (name_len == 5 && memcmp(name, "print", 5) == 0)
-            member = print;
-        else if (name_len == 5 && memcmp(name, "graph", 5) == 0)
-            member = print && c != ' ';
-        else if (name_len == 5 && memcmp(name, "punct", 5) == 0)
-            member = print && c != ' ' && !upper && !lower && !digit;
-        else if (name_len == 5 && memcmp(name, "cntrl", 5) == 0)
-            member = c < 0x20 || c == 0x7f;
-        else if (name_len == 6 && memcmp(name, "xdigit", 6) == 0)
-            member = digit || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-        else
-            return false;
-        if (member) zcl_ere_class_set(bits, c);
+        if (zcl_ere_class_letter(cls, c) || zcl_ere_class_other(cls, c) ||
+            (cls == ZCL_ERE_XDIGIT && zcl_ere_class_xdigit(c)))
+            zcl_ere_class_set(bits, c);
     }
     return true;
 }
