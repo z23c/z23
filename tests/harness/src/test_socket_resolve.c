@@ -49,6 +49,28 @@ int test_socket_resolve(void)
         failures++;
     }
 
+    TEST("socket resolver: bounded numeric results preserve mapped and native addresses") {
+        uint8_t addresses[2][16];
+        static const uint8_t mapped[16] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff,127,0,0,1};
+        static const uint8_t loopback[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+        size_t count = 99;
+        memset(addresses, 0xa5, sizeof(addresses));
+        ASSERT(platform_socket_resolve_addresses("127.0.0.1", false, addresses, 1, &count));
+        ASSERT_EQ(count, 1);
+        ASSERT(memcmp(addresses[0], mapped, sizeof(mapped)) == 0);
+        ASSERT_EQ(addresses[1][0], 0xa5);
+        ASSERT(platform_socket_resolve_addresses("::1", false, addresses, 1, &count));
+        ASSERT_EQ(count, 1);
+        ASSERT(memcmp(addresses[0], loopback, sizeof(loopback)) == 0);
+        count = 99;
+        ASSERT(!platform_socket_resolve_addresses("127.0.0.1", false, addresses, 0, &count));
+        ASSERT_EQ(count, 0);
+        count = 99;
+        ASSERT(!platform_socket_resolve_addresses("invalid host name []", false, addresses, 2, &count));
+        ASSERT_EQ(count, 0);
+        PASS();
+    } _test_next:;
+
     TEST("socket buffers: report the kernel grant after P2P configuration") {
         platform_socket_t pair[2];
         struct net_p2p_socket_buffer_stats before = {0};

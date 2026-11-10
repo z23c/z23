@@ -273,6 +273,22 @@ static inline platform_socket_t platform_socket_accept(
 #endif
 }
 
+#if defined(_WIN32)
+static inline bool platform_socket_pair_peer_matches(platform_socket_t client,
+                                                      platform_socket_t accepted)
+{
+    struct sockaddr_in client_local = {0};
+    struct sockaddr_in accepted_peer = {0};
+    int client_size = (int)sizeof(client_local);
+    int peer_size = (int)sizeof(accepted_peer);
+    return getsockname(client, (struct sockaddr *)&client_local, &client_size) == 0 &&
+        getpeername(accepted, (struct sockaddr *)&accepted_peer, &peer_size) == 0 &&
+        client_local.sin_family == accepted_peer.sin_family &&
+        client_local.sin_port == accepted_peer.sin_port &&
+        client_local.sin_addr.s_addr == accepted_peer.sin_addr.s_addr;
+}
+#endif
+
 /* Connected, process-local stream pair. Windows has no socketpair(); build
  * the equivalent over the IPv4 loopback and verify that accept returned the
  * exact client endpoint we created, so another local process cannot splice
@@ -306,16 +322,7 @@ static inline bool platform_socket_pair(platform_socket_t pair[2])
     accepted = platform_socket_accept(listener, (struct sockaddr *)&address,
                                       &accepted_size);
     if (accepted == PLATFORM_SOCKET_INVALID) goto fail;
-    struct sockaddr_in client_local = {0};
-    struct sockaddr_in accepted_peer = {0};
-    int client_size = (int)sizeof(client_local);
-    int peer_size = (int)sizeof(accepted_peer);
-    if (getsockname(client, (struct sockaddr *)&client_local, &client_size) != 0 ||
-        getpeername(accepted, (struct sockaddr *)&accepted_peer, &peer_size) != 0 ||
-        client_local.sin_family != accepted_peer.sin_family ||
-        client_local.sin_port != accepted_peer.sin_port ||
-        client_local.sin_addr.s_addr != accepted_peer.sin_addr.s_addr)
-        goto fail;
+    if (!platform_socket_pair_peer_matches(client, accepted)) goto fail;
     platform_socket_close(listener);
     pair[0] = client;
     pair[1] = accepted;
@@ -845,13 +852,37 @@ static inline bool platform_socket_format_address(int family,
 #endif
 }
 
+/* Copy one resolver address into the canonical 16-byte form. */
+static inline bool platform_socket_copy_resolved(int family, size_t length,
+    const struct sockaddr *address, uint8_t out[16], bool clear_v4)
+{
+    if (family == AF_INET && length >= sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *v4 = (const struct sockaddr_in *)address;
+        if (clear_v4) memset(out, 0, 10);
+        out[10] = 0xff;
+        out[11] = 0xff;
+        memcpy(out + 12, &v4->sin_addr, 4);
+        return true;
+    }
+    if (family == AF_INET6 && length >= sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)address;
+        memcpy(out, &v6->sin6_addr, 16);
+        return true;
+    }
+    return false;
+}
+static inline bool platform_socket_resolve_inputs(const char *host,
+    uint8_t (*addresses)[16], size_t capacity, const size_t *count)
+{
+    return host && host[0] && addresses && capacity != 0 && count &&
+        platform_socket_runtime_init();
+}
 static inline bool platform_socket_resolve_addresses(
     const char *host, bool allow_lookup, uint8_t (*addresses)[16],
     size_t capacity, size_t *count)
 {
     if (count) *count = 0;
-    if (!host || !host[0] || !addresses || capacity == 0 || !count ||
-        !platform_socket_runtime_init())
+    if (!platform_socket_resolve_inputs(host, addresses, capacity, count))
         return false;
 #if defined(_WIN32)
     wchar_t wide[256];
@@ -879,23 +910,9 @@ static inline bool platform_socket_resolve_addresses(
     for (struct addrinfo *it = results; it && *count < capacity;
          it = it->ai_next) {
 #endif
-        uint8_t *out = addresses[*count];
-        if (it->ai_family == AF_INET &&
-            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
-            const struct sockaddr_in *v4 =
-                (const struct sockaddr_in *)it->ai_addr;
-            memset(out, 0, 10);
-            out[10] = 0xff;
-            out[11] = 0xff;
-            memcpy(out + 12, &v4->sin_addr, 4);
+        if (platform_socket_copy_resolved(it->ai_family, it->ai_addrlen,
+                                          it->ai_addr, addresses[*count], true))
             (*count)++;
-        } else if (it->ai_family == AF_INET6 &&
-                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
-            const struct sockaddr_in6 *v6 =
-                (const struct sockaddr_in6 *)it->ai_addr;
-            memcpy(out, &v6->sin6_addr, 16);
-            (*count)++;
-        }
     }
 #if defined(_WIN32)
     FreeAddrInfoW(results);
@@ -929,21 +946,8 @@ static inline bool platform_socket_resolve_ip(const char *host,
         return false;
     bool found = false;
     for (PADDRINFOW it = results; it && !found; it = it->ai_next) {
-        if (it->ai_family == AF_INET &&
-            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
-            const struct sockaddr_in *v4 =
-                (const struct sockaddr_in *)it->ai_addr;
-            address[10] = 0xff;
-            address[11] = 0xff;
-            memcpy(address + 12, &v4->sin_addr, 4);
-            found = true;
-        } else if (it->ai_family == AF_INET6 &&
-                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
-            const struct sockaddr_in6 *v6 =
-                (const struct sockaddr_in6 *)it->ai_addr;
-            memcpy(address, &v6->sin6_addr, 16);
-            found = true;
-        }
+        found = platform_socket_copy_resolved(it->ai_family, it->ai_addrlen,
+                                               it->ai_addr, address, false);
     }
     FreeAddrInfoW(results);
 #else
@@ -955,21 +959,8 @@ static inline bool platform_socket_resolve_ip(const char *host,
         return false;
     bool found = false;
     for (struct addrinfo *it = results; it && !found; it = it->ai_next) {
-        if (it->ai_family == AF_INET &&
-            it->ai_addrlen >= sizeof(struct sockaddr_in)) {
-            const struct sockaddr_in *v4 =
-                (const struct sockaddr_in *)it->ai_addr;
-            address[10] = 0xff;
-            address[11] = 0xff;
-            memcpy(address + 12, &v4->sin_addr, 4);
-            found = true;
-        } else if (it->ai_family == AF_INET6 &&
-                   it->ai_addrlen >= sizeof(struct sockaddr_in6)) {
-            const struct sockaddr_in6 *v6 =
-                (const struct sockaddr_in6 *)it->ai_addr;
-            memcpy(address, &v6->sin6_addr, 16);
-            found = true;
-        }
+        found = platform_socket_copy_resolved(it->ai_family, it->ai_addrlen,
+                                               it->ai_addr, address, false);
     }
     freeaddrinfo(results);
 #endif
