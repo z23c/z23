@@ -183,9 +183,10 @@ rulings by number.
    explicit owner authorization.
 
 Every unit, including core, crypto, consensus and custody, needs one reviewer
-who is not its author, of any model. Run full `make lint` once at the exact
-candidate tip before `dev land submit`; any lead may submit and drive its own
-reviewed work. Commits are signed and authored by the repository owner; a
+who is not its author, of any model. The land proof runs full `make lint` on
+the exact candidate before publication. Before `dev land submit`, run the
+focused checks and applicable preflight described in section 4; any lead may
+submit and drive its own reviewed work. Commits are signed and authored by the repository owner; a
 commit an AI model wrote ends with its `Co-Authored-By:` trailer naming that
 model (owner ruling R12).
 
@@ -1680,16 +1681,23 @@ can stop with the row still queued; rerun `dev land drive` to continue it.
 A competing integrator receives `STEP_BUSY` during the short
 publication slot and must inspect status before another attempt.
 
-A lane lands with two commands and nothing else. The `dev land` leaves run in the
+After focused checks, a signed checkpoint and non-author review, submit the
+lane and drive its land proof. The `dev land` leaves run in the
 development build of a checkout (`make dev-bin`); the product build lists them
 and answers `COMMAND_COMPAT_ONLY`.
 
 ```bash
-devbuild --wait build/bin/z23-dev dev land submit --worktree=<path> --qualify
-devbuild --wait z23 dev land drive --seq=N
+devbuild --wait build/bin/z23-dev dev land submit --worktree=<path>
+devbuild --wait build/bin/z23-dev dev land drive --seq=N
 ```
 
-`submit --qualify` runs the pre-submit gates in the lane's worktree, then
+The land proof performs the full lint and affected tests before publication.
+Do not add `--qualify` to the ordinary focused-checks workflow: it repeats
+full lint and affected tests in the lane before the land proof runs them.
+See [the current work order](../work/FORWARD_PLAN.md#now) for the measured
+cost of duplicate pre-submit proof.
+
+The optional `submit --qualify` mode runs the pre-submit gates in the lane's worktree, then
 queues the tip they qualified (the worktree's `HEAD`; `--tip` is refused with
 `--qualify`). In order:
 
