@@ -6,6 +6,7 @@
 #include "command/native_app_network_link.h"
 #include "command/native_app_network_job.h"
 #include "command/native_app_discover_view.h"
+#include "command/native_app_discover.h"
 #include "command/native_app_get_stage.h"
 #include "command/native_app_receive_command.h"
 #include "command/native_app_confirm.h"
@@ -281,10 +282,17 @@ static bool an_run_job(const char *datadir, const char *mode, const char *url,
     bool shown = an_progress_run(p, controller->notices, controller->context, &started, &joined, why, sizeof(why));
     return an_job_finish(p, scratch, started, joined, shown, result, reply);
 }
-static bool an_receive(void *context, const char *path,
-    const struct app_receive_identity *identity, struct zcl_command_reply *reply)
+struct an_report { const struct zcl_app_offer_row *row; app_confirm_presenter presenter; void *context; };
+static void an_report_observed(void *context, const struct json_value *build,
+    const struct json_value *opened, struct zcl_command_reply *reply)
 {
-    struct an_controller *c = context;
+    struct an_report *report = context;
+    app_discover_report_observation(report->row, report->presenter, report->context, build, opened, reply);
+}
+static bool an_receive_impl(struct an_controller *c, const char *path,
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply,
+    const struct zcl_app_offer_row *row)
+{
     struct json_value in; json_init(&in); json_set_object(&in);
     const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
     bool ok = spec && json_push_kv_str(&in, "file", path) &&
@@ -293,16 +301,30 @@ static bool an_receive(void *context, const char *path,
         "Cannot prepare native Receive.", "app.library");
     else {
         struct zcl_command_request request = {.input = &in, .spec = spec, .invoked_name = spec->path};
+        app_confirm_presenter presenter = c->notices; const char *worker_path = NULL;
 #if defined(ZCL_TESTING)
-        if (c->hooks && c->hooks->receive)
-            zcl_test_app_receive_expected(&request, reply, identity, c->hooks->receive, c->context);
-        else
+        if (c->hooks && c->hooks->receive) { presenter = c->hooks->receive; worker_path = c->hooks->worker_path; }
 #endif
-            zcl_native_app_receive_expected(&request, reply, identity);
+        if (row) {
+            struct an_report report = {.row = row, .presenter = presenter, .context = c->context};
+            zcl_native_app_receive_observed(&request, reply, identity, presenter, c->context,
+                                           worker_path, an_report_observed, &report);
+        } else {
+#if defined(ZCL_TESTING)
+            if (c->hooks && c->hooks->receive) {
+                if (worker_path) zcl_test_app_receive_expected_worker(&request, reply, identity, presenter, c->context, worker_path);
+                else zcl_test_app_receive_expected(&request, reply, identity, presenter, c->context);
+            } else
+#endif
+                zcl_native_app_receive_expected(&request, reply, identity);
+        }
         ok = reply->status == ZCL_COMMAND_STATUS_PASSED;
     }
     json_free(&in); return ok;
 }
+static bool an_receive(void *context, const char *path,
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply)
+{ return an_receive_impl(context, path, identity, reply, NULL); }
 struct an_direct_receive { struct an_controller *controller; const char *frame, *post_id; };
 static bool an_direct_consume(void *context, const char *path,
     const struct app_receive_identity *identity, struct zcl_command_reply *reply)
@@ -312,7 +334,7 @@ static bool an_direct_consume(void *context, const char *path,
         zcl_package_copy_fail(reply, "INVALID_SIGNED_RESPONSE", false,
             "The signed offer is no longer valid.", "app.library"); return false;
     }
-    return an_receive(direct->controller, path, identity, reply);
+    return an_receive_impl(direct->controller, path, identity, reply, &row);
 }
 #if defined(ZCL_TESTING)
 bool zcl_test_app_network_direct_consume(const char *frame, const char *post_id,

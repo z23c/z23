@@ -3183,6 +3183,63 @@ static bool tag_fixture_worker(const struct tag_world *w, char worker[PATH_MAX])
     int n = snprintf(input, sizeof(input), "%s/build/bin/z23-dev", w->saved_cwd);
     return n > 0 && (size_t)n < sizeof(input) && realpath(input, worker);
 }
+static bool tag_rebuild_post_identity(const struct tag_world *, const struct tag_discover *);
+static bool tag_link_rebuild_result(const struct tag_world *w, const struct tag_link_fixture *f,
+                                    const struct zcl_command_reply *reply, int mode, int posts)
+{
+    if (!f->discover.pid || reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    if (mode == 2) return !f->discover.report_prompted && g_tag.posts == posts;
+    if (!f->discover.report_prompted || !f->discover.report_count_visible) return false;
+    if (mode == 1) return g_tag.posts == posts + 1 && tag_rebuild_post_identity(w, &f->discover);
+    return g_tag.posts == posts;
+}
+static bool tag_link_cached_second(struct tag_link_fixture *f, struct zcl_command_reply *reply,
+    const struct app_network_test_hooks *hooks, const char *datadir, int posts, bool *shown)
+{
+    zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+    if (!tag_stop_receipt(&f->discover, datadir)) return false;
+    memset(&f->discover, 0, sizeof(f->discover)); f->discover.keep = true; f->discover.reply = reply;
+    bool done = zcl_test_app_network_open_link(datadir, tag_link_cards, tag_link_receive, f, reply, shown, hooks);
+    tag_discover_capture(&f->discover);
+    const char *status = zcl_package_copy_str(&reply->data, "rebuild_report");
+    return done && status && strstr(status, "cached image") && f->discover.report_result &&
+        !f->discover.report_prompted && !f->discover.report_result_publish && g_tag.posts == posts;
+}
+static int tag_link_rebuild_choice(struct tag_world *w, int mode)
+{
+    int failures = 0; struct zcl_command_reply reply, why; struct tag_link_fixture f = {0};
+    struct zcl_app_offer_row rows[4]; size_t count = 0; struct tag_world fresh = *w; char worker[PATH_MAX];
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL; bool fixture_ready = false, shown = false;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Direct link offers an optional signed rebuild report after a real fresh build") {
+        ASSERT(test_mkdtemp(fresh.root, sizeof(fresh.root), "app_link_rebuild"));
+        ASSERT(tag_fixture_worker(w, worker)); ASSERT(asf_journey_init(&fresh.j, "tinyapp", w->repo, fresh.root));
+        fixture_ready = true; ASSERT(tag_board_variant(&fresh, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why); ASSERT_EQ(count, 1u);
+        f.row = rows[0]; f.discover.keep = true; f.discover.reply = &reply;
+        f.discover.report_rebuild = mode == 1; f.discover.close_keep = mode == 2;
+        f.discover.comparison_mode = mode == 3 ? 3 : mode == 4 ? 2 : 0;
+        ASSERT(setenv("HOME", fresh.j.b_home, 1) == 0);
+        int posts = g_tag.posts;
+        struct app_network_test_hooks hooks = {.form = tag_link_form, .job = tag_link_job,
+            .receive = tag_link_receive, .worker_path = worker};
+        tag_comparison_seed_mode = f.discover.comparison_mode; tag_comparison_seed_ok = false;
+        if (mode == 3 || mode == 4) app_discover_test_evidence_hook(tag_comparison_seed);
+        bool done = zcl_test_app_network_open_link(fresh.j.b_datadir, tag_link_cards, tag_link_receive,
+            &f, &reply, &shown, &hooks);
+        app_discover_test_evidence_hook(NULL);
+        tag_discover_capture(&f.discover);
+        ASSERT(done && tag_link_rebuild_result(w, &f, &reply, mode, posts));
+        if (mode == 3 || mode == 4) ASSERT(tag_comparison_seed_ok);
+        if (mode == 5) ASSERT(tag_link_cached_second(&f, &reply, &hooks, fresh.j.b_datadir, posts, &shown));
+        PASS();
+    } _test_next:;
+    app_discover_test_evidence_hook(NULL); g_tag.malformed_board = false;
+    if (fixture_ready && !tag_stop_receipt(&f.discover, fresh.j.b_datadir)) ++failures;
+    zcl_command_reply_free(&reply);
+    if (saved_home) { (void)setenv("HOME", saved_home, 1); free(saved_home); } else (void)unsetenv("HOME");
+    return failures;
+}
 static bool tag_host_failure_wire(struct zcl_command_reply *reply, const char *expected_carrier)
 {
     char wire[32768]; const struct zcl_command_spec *spec = asf_spec("app.library");
@@ -4282,6 +4339,12 @@ static bool tag_display_leave(struct tag_display *saved)
     free(saved->display); free(saved->wayland); return ok;
 }
 #endif
+static int tag_link_rebuild_cases(struct tag_world *w)
+{
+    int failures = 0;
+    for (int mode = 0; mode <= 5 && !failures; mode++) failures += tag_link_rebuild_choice(w, mode);
+    return failures;
+}
 static int tag_keep_cases(struct tag_world *w)
 {
 #if defined(__linux__)
@@ -4290,6 +4353,7 @@ static int tag_keep_cases(struct tag_world *w)
     bool ready = true;
 #endif
     int failures = ready ? tag_library_kept_failure(w) : 1;
+    if (!failures) failures += tag_link_rebuild_cases(w);
     if (!failures) failures += tag_rebuild_case(w, false);
     if (!failures) failures += tag_rebuild_case(w, true);
     if (!failures) failures += tag_rebuild_case(w, 2);

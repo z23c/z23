@@ -13,6 +13,7 @@ struct app_network_test_hooks {
         const struct zcl_app_offer_row *, struct app_network_job_result *, struct zcl_command_reply *);
     bool (*worker)(void *, const struct app_network_job_args *, struct app_network_job_result *);
     app_confirm_presenter receive;
+    const char *worker_path;
 };
 bool zcl_test_app_network_scratch_replace(const char *datadir,
     bool (*replace)(void *, const char *, long), void *context,

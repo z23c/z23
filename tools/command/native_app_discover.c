@@ -126,6 +126,15 @@ static void ad_rebuild_observed(void *context, const struct json_value *wire, co
     if (!chosen) { ad_rebuild_status(reply, "not published: declined"); return; }
     if (app_get_rebuild_publish(&observation, reply)) (void)ad_rebuild_result(d, reply, true);
 }
+void app_discover_report_observation(const struct zcl_app_offer_row *row,
+    app_confirm_presenter presenter, void *context, const struct json_value *build,
+    const struct json_value *opened, struct zcl_command_reply *reply)
+{
+    if (!row || !reply) return;
+    struct zcl_app_offer_row selected = *row;
+    struct discover d = {.rows = &selected, .receive_presenter = presenter, .context = context};
+    ad_rebuild_observed(&d, build, opened, reply);
+}
 static bool ad_host_choice(struct discover *d, struct zcl_command_reply *reply, bool *host_original)
 {
     const char *stage = zcl_package_copy_str(&reply->data, "stage");
