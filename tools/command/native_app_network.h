@@ -21,6 +21,9 @@ struct app_network_transport {
     unsigned timeout_ms; /* deadline, 1..120000; local I/O cannot be interrupted */
     bool parallel_safe; /* fetch callback and context support concurrent calls */
 };
+#if defined(ZCL_TESTING)
+void zcl_test_app_network_thread_faults(int spawn_after, int join_after);
+#endif
 enum app_network_error {
     APP_NETWORK_OK, APP_NETWORK_CANCELLED, APP_NETWORK_TIMEOUT,
     APP_NETWORK_UNAVAILABLE, APP_NETWORK_INVALID_RESPONSE,

@@ -11,6 +11,9 @@
 #include "session/fleet_board_proto.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_manifest.h"
+#include "util/thread_registry.h"
+#include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,6 +230,108 @@ static bool an_manifest(struct an_run *r, const char *onion, const struct zcl_ap
     if (!ok) *r->error = APP_NETWORK_STORE_REFUSED;
     return ok;
 }
+
+/* Only the owner reserves requests and touches store/error state. Workers own
+ * disjoint output ranges and publish completion as their final access. */
+#define AN_SLICE_BATCH 4u
+struct an_slice_job {
+    const struct app_network_transport *transport;
+    const char *onion;
+    char path[160];
+    uint8_t *out;
+    size_t want, got;
+    int64_t deadline;
+    int status;
+    bool ok;
+    atomic_bool done;
+    pthread_t thread;
+};
+struct an_slice_batch { struct an_slice_batch *next; struct an_slice_job jobs[AN_SLICE_BATCH]; };
+static _Atomic(struct an_slice_batch *) an_unjoined;
+#if defined(ZCL_TESTING)
+static int an_test_spawn_after = -1, an_test_join_after = -1;
+void zcl_test_app_network_thread_faults(int spawn_after, int join_after)
+{ an_test_spawn_after = spawn_after; an_test_join_after = join_after; }
+#endif
+static int an_slice_spawn(struct an_slice_job *j);
+static void *an_slice_worker(void *context)
+{
+    struct an_slice_job *j = context;
+    int64_t now = platform_time_monotonic_ms();
+    if (now >= 0 && now < j->deadline)
+        j->ok = j->transport->fetch(j->transport->context, j->onion, j->path,
+            j->out, j->want, &j->got, &j->status, (unsigned)(j->deadline - now));
+    atomic_store_explicit(&j->done, true, memory_order_release);
+    return NULL;
+}
+static int an_slice_spawn(struct an_slice_job *j)
+{
+#if defined(ZCL_TESTING)
+    if (an_test_spawn_after == 0) return EAGAIN;
+    if (an_test_spawn_after > 0) an_test_spawn_after--;
+#endif
+    return thread_registry_spawn("app-slice", an_slice_worker, j, &j->thread);
+}
+static void an_keep_unjoined(struct an_slice_batch *b)
+{
+    struct an_slice_batch *old = atomic_load_explicit(&an_unjoined, memory_order_relaxed);
+    do { b->next = old; } while (!atomic_compare_exchange_weak_explicit(&an_unjoined, &old, b,
+        memory_order_release, memory_order_relaxed));
+}
+static bool an_slice_join(struct an_slice_batch *b, unsigned started)
+{
+    bool joined = true;
+    for (unsigned i = 0; i < started; i++) {
+        struct an_slice_job *j = &b->jobs[i];
+        while (!atomic_load_explicit(&j->done, memory_order_acquire))
+            platform_sleep_ms(10); /* real-clock: owned callback completion barrier */
+        int rc; do { rc = pthread_join(j->thread, NULL); } while (rc == EINTR);
+#if defined(ZCL_TESTING)
+        if (!rc && an_test_join_after == 0) { rc = EINVAL; an_test_join_after = -1; }
+        else if (an_test_join_after > 0) an_test_join_after--;
+#endif
+        if (rc) joined = false;
+    }
+    return joined;
+}
+static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const char *onion,
+    const struct zcl_app_offer *o, uint32_t index, size_t off, size_t size, uint8_t *chunk)
+{
+    if (!an_live(r)) return false;
+    int64_t now = platform_time_monotonic_ms();
+    if (now < 0 || now >= r->deadline) { *r->error = APP_NETWORK_TIMEOUT; return false; }
+    if (!an_onion(onion) || r->calls >= AN_MAX_REQUESTS) return false;
+    j->transport = r->t; j->onion = onion; j->out = chunk + off;
+    j->want = size - off < AN_SLICE ? size - off : AN_SLICE;
+    j->deadline = r->deadline;
+    (void)snprintf(j->path, sizeof(j->path), "/zcode/download/%s/0/%u/slice/%zu", o->carrier, index, off);
+    atomic_init(&j->done, false); r->calls++; return true;
+}
+static bool an_slice_batch_fetch(struct an_run *r, const char *onion, const struct zcl_app_offer *o,
+    uint32_t index, size_t *off, size_t size, uint8_t *chunk)
+{
+    struct an_slice_batch *b = zcl_calloc(1, sizeof(*b), "app.network.slices");
+    if (!b) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
+    unsigned started = 0; bool launch_ok = true, spawn_failed = false;
+    while (started < AN_SLICE_BATCH && *off < size) {
+        struct an_slice_job *j = &b->jobs[started];
+        if (!an_slice_prepare(r, j, onion, o, index, *off, size, chunk)) { launch_ok = false; break; }
+        if (an_slice_spawn(j) != 0) { launch_ok = false; spawn_failed = true; break; }
+        *off += j->want; started++;
+    }
+    bool joined = an_slice_join(b, started);
+    bool live = an_live(r);
+    bool ok = live && launch_ok && joined;
+    if (live && (!joined || spawn_failed)) *r->error = APP_NETWORK_UNAVAILABLE;
+    for (unsigned i = 0; ok && i < started; i++) {
+        struct an_slice_job *j = &b->jobs[i];
+        if (!j->ok || j->status != 200) { *r->error = APP_NETWORK_UNAVAILABLE; ok = false; }
+        else if (j->got > j->want) { *r->error = APP_NETWORK_INVALID_RESPONSE; ok = false; }
+        else if (j->got != j->want) ok = false;
+    }
+    if (joined) free(b); else an_keep_unjoined(b);
+    return ok;
+}
 static bool an_chunks(struct an_run *r, const char *onion, const struct zcl_app_offer *o,
                       const struct vcs_package_manifest *m, const uint8_t root[32],
                       struct vcs_package_store *store)
@@ -238,6 +343,7 @@ static bool an_chunks(struct an_run *r, const char *onion, const struct zcl_app_
         size_t left = (size_t)file->size - (size_t)i * VCS_PACKAGE_CHUNK_BYTES;
         size_t size = left < VCS_PACKAGE_CHUNK_BYTES ? left : VCS_PACKAGE_CHUNK_BYTES;
         for (size_t off = 0; ok && off < size;) {
+            if (r->t->parallel_safe) { ok = an_slice_batch_fetch(r, onion, o, i, &off, size, chunk); continue; }
             char path[160]; size_t got = 0;
             (void)snprintf(path, sizeof(path), "/zcode/download/%s/0/%u/slice/%zu", o->carrier, i, off);
             size_t want = size - off < AN_SLICE ? size - off : AN_SLICE;
