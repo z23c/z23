@@ -134,6 +134,17 @@ stage_cursor_read_persisted(sqlite3 *db, const char *name, const char *tag)
     return r;
 }
 
+/* The caller clears out before reading; a failed read leaves it untouched. */
+static inline bool stage_cursor_result_value(
+    struct stage_cursor_read_result r, uint64_t *out)
+{
+    if (!r.ok)
+        return false;
+    if (out)
+        *out = r.found ? r.cursor : 0;
+    return true;
+}
+
 static inline bool stage_cursor_read_or_zero(sqlite3 *db, const char *name,
                                              const char *tag, uint64_t *out)
 {
@@ -152,11 +163,7 @@ static inline bool stage_cursor_read_or_zero(sqlite3 *db, const char *name,
     uint64_t generation = batched ? stage_batch_generation() : 0;
     if (batched && cached_db == db && cached_generation == generation &&
         name && strcmp(cached_name, name) == 0) {
-        if (!cached_result.ok)
-            return false;
-        if (out)
-            *out = cached_result.found ? cached_result.cursor : 0;
-        return true;
+        return stage_cursor_result_value(cached_result, out);
     }
 
     struct stage_cursor_read_result r =
@@ -167,11 +174,7 @@ static inline bool stage_cursor_read_or_zero(sqlite3 *db, const char *name,
         memcpy(cached_name, name, strlen(name) + 1);
         cached_result = r;
     }
-    if (!r.ok)
-        return false;
-    if (out)
-        *out = r.found ? r.cursor : 0;
-    return true;
+    return stage_cursor_result_value(r, out);
 }
 
 /* Compatibility wrapper for non-critical observers/tests that still want

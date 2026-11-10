@@ -190,6 +190,36 @@ static inline bool rpc_permit_bool(struct rpc_params *p,
 
 /* ── Amount Parsing (satoshi-safe) ────────────────────────────── */
 
+static inline int64_t rpc_amount_parse_string(const char *s)
+{
+    int64_t satoshis = 0;
+    /* Capture the sign explicitly: strtoll applies it to the integer part,
+     * but "-0.5" has an integer part of 0, so the sign would be lost and a
+     * negative amount silently become a positive send. Detect a leading '-'
+     * and negate the full result so negatives reach the rejection below. */
+    const char *t = s;
+    while (*t == ' ' || *t == '\t') t++;
+    bool negative = (*t == '-');
+    const char *dot = strchr(s, '.');
+    if (dot) {
+        int64_t whole = strtoll(s, NULL, 10);
+        if (whole < 0) whole = -whole; /* magnitude; sign applied below */
+        int64_t frac = 0;
+        int digits = 0;
+        for (const char *c = dot + 1; *c >= '0' && *c <= '9' && digits < 8; c++, digits++)
+            frac = frac * 10 + (*c - '0');
+        for (int i = digits; i < 8; i++)
+            frac *= 10;
+        satoshis = whole * 100000000LL + frac;
+    } else {
+        satoshis = strtoll(s, NULL, 10) * 100000000LL;
+        if (satoshis < 0) satoshis = -satoshis; /* magnitude */
+    }
+    if (negative)
+        satoshis = -satoshis;
+    return satoshis;
+}
+
 /* Parse a ZCL amount from string or number, returning satoshis.
  * Handles both "0.001" (string) and 0.001 (number) forms. */
 static inline int64_t rpc_require_amount(struct rpc_params *p,
@@ -211,31 +241,7 @@ static inline int64_t rpc_require_amount(struct rpc_params *p,
         double d = json_get_real(v);
         satoshis = (int64_t)(d * 100000000.0 + 0.5);
     } else if (v->type == JSON_STR) {
-        const char *s = json_get_str(v);
-        /* Capture the sign explicitly: strtoll applies it to the integer part,
-         * but "-0.5" has an integer part of 0, so the sign would be lost and a
-         * negative amount silently become a positive send. Detect a leading '-'
-         * and negate the full result so negatives reach the rejection below. */
-        const char *t = s;
-        while (*t == ' ' || *t == '\t') t++;
-        bool negative = (*t == '-');
-        const char *dot = strchr(s, '.');
-        if (dot) {
-            int64_t whole = strtoll(s, NULL, 10);
-            if (whole < 0) whole = -whole; /* magnitude; sign applied below */
-            int64_t frac = 0;
-            int digits = 0;
-            for (const char *c = dot + 1; *c >= '0' && *c <= '9' && digits < 8; c++, digits++)
-                frac = frac * 10 + (*c - '0');
-            for (int i = digits; i < 8; i++)
-                frac *= 10;
-            satoshis = whole * 100000000LL + frac;
-        } else {
-            satoshis = strtoll(s, NULL, 10) * 100000000LL;
-            if (satoshis < 0) satoshis = -satoshis; /* magnitude */
-        }
-        if (negative)
-            satoshis = -satoshis;
+        satoshis = rpc_amount_parse_string(json_get_str(v));
     } else {
         char buf[RPC_PARAM_ERROR_MAX];
         snprintf(buf, sizeof(buf), "Parameter %s must be a valid amount", name);
