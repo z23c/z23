@@ -62,6 +62,7 @@ struct library {
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure;
     bool operation_canceled;
+    bool share_review;
     struct json_value receive_receipt;
     struct zcl_command_reply discover_error;
     unsigned preparation_count;
@@ -580,6 +581,8 @@ static void al_detail_model(struct library *w)
         al_change_choice(m, r);
         app_library_choice(m, "share", "Share this version", r->saved ? "Choose a file, link, or public offer." : "Keep a version first.");
     } else if (w->page == 7) {
+        if (w->share_review)
+            (void)snprintf(m->summary, sizeof(m->summary), "Review, preview and Keep the prepared draft, then choose Share again.");
         app_library_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
         app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
     } else {
@@ -1019,6 +1022,18 @@ static bool al_receipt_operation(const char *id)
     return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-link") || !strcmp(id, "share-original") ||
         !strcmp(id, "help") || !strcmp(id, "open") || !strcmp(id, "draft");
 }
+static bool al_share_prepare(struct library *w, const struct app_launch_env *env,
+    struct zcl_command_reply *reply)
+{
+    const struct library_row *row = &w->rows[w->index];
+    if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before sharing.");
+    w->source_version[0] = 0;
+    if (!al_current(row, env, reply) || !al_prepare_source(w, env, reply)) return false;
+    char kept[65]; zcl_hex_encode(row->selection.version, 32, kept);
+    w->share_review = strcmp(w->source_version, kept) != 0;
+    if (w->share_review) w->page = 7;
+    return true;
+}
 static bool al_change_page(struct library *w, const char *id)
 {
     static const struct { const char *id; unsigned page; } routes[] = {
@@ -1026,9 +1041,21 @@ static bool al_change_page(struct library *w, const char *id)
         {"more-sharing", 9}, {"more-share-back", 6}
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
-        if (!strcmp(id, routes[i].id)) { w->page = routes[i].page; return true; }
+        if (!strcmp(id, routes[i].id)) { w->share_review = false; w->page = routes[i].page; return true; }
     }
     return false;
+}
+static bool al_signing_share(const char *id)
+{ return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-link"); }
+static bool al_share_dispatch(struct library *w, const char *id, const struct app_launch_env *env,
+    const char *exe, struct zcl_command_reply *reply)
+{
+    w->receive_current = false;
+    if (!al_share_prepare(w, env, reply)) return false;
+    if (w->share_review) return true;
+    if (!strcmp(id, "share-file")) return al_share(w, env, reply);
+    if (!strcmp(id, "publish")) return al_publish(w, env, reply);
+    return al_host_link(w, env, exe, reply);
 }
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
@@ -1037,10 +1064,8 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
         return al_fail(reply, "RECOVERY_TOO_LARGE", "The previous receipt cannot be safely retained for another operation.");
     if (al_change_page(w, id)) return true;
     if (!strcmp(id, "draft")) return al_draft_action(w, env, reply);
-    if (!strcmp(id, "share-file")) { w->receive_current = false; return al_share(w, env, reply); }
-    if (!strcmp(id, "publish")) { w->receive_current = false; return al_publish(w, env, reply); }
+    if (al_signing_share(id)) return al_share_dispatch(w, id, env, exe, reply);
     if (!strcmp(id, "share-original")) { w->receive_current = false; return al_host_original(w, env, reply); }
-    if (!strcmp(id, "share-link")) { w->receive_current = false; return al_host_link(w, env, exe, reply); }
     if (!strcmp(id, "help")) {
         w->receive_current = false;
         if (!al_setup(w, env, exe, datadir, reply)) return false;
@@ -1066,7 +1091,7 @@ static bool al_navigate(struct library *w, unsigned action, const struct app_lau
     if (!strcmp(id, "previous")) { if (w->index) --w->index; return true; }
     if (!strcmp(id, "next")) { if (w->index + 1 < w->count) ++w->index; return true; }
     if (!strcmp(id, "choose")) { w->page = 1; return true; }
-    if (!strcmp(id, "back")) { w->setup[0] = 0; if (w->page == 2) return al_refresh_after_help(w, env, reply); if (w->page == 7) w->page = 1; else --w->page; return true; }
+    if (!strcmp(id, "back")) { w->setup[0] = 0; w->share_review = false; if (w->page == 2) return al_refresh_after_help(w, env, reply); if (w->page == 7) w->page = 1; else --w->page; return true; }
     return al_action(w, id, env, exe, datadir, reply);
 }
 static bool al_navigation_result(struct library *w, unsigned action, const struct app_launch_env *env,
@@ -1224,23 +1249,24 @@ void zcl_test_app_library_discover_worker(const struct app_launch_env *env, cons
 void zcl_test_app_library_discover_worker_share(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path,
-    app_library_sharer sharer)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, sharer, receive_presenter, NULL, worker_path, NULL, 30000u); }
+    app_library_preparer preparer, app_library_sharer sharer)
+{ al_run(env, reply, presenter, context, NULL, datadir, preparer, sharer, receive_presenter, NULL, worker_path, NULL, 30000u); }
 void zcl_test_app_library_native_at(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
     void *context, app_confirm_presenter notice)
 { al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, notice, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
-    app_library_presenter presenter, void *context, app_library_sharer sharer,
+    app_library_presenter presenter, void *context, app_library_preparer preparer, app_library_sharer sharer,
     app_confirm_presenter notice, app_library_revealer revealer)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, revealer, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, NULL, preparer, sharer, notice, revealer, NULL, NULL, 30000u); }
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice)
 { al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
-    app_library_presenter presenter, void *context, app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, NULL, NULL, NULL, sharer, notice, NULL, NULL, NULL, 30000u); }
+    app_library_presenter presenter, void *context, app_library_preparer preparer,
+    app_library_sharer sharer, app_confirm_presenter notice)
+{ al_run(env, reply, presenter, context, NULL, NULL, preparer, sharer, notice, NULL, NULL, NULL, 30000u); }
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context)
 {

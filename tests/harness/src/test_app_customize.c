@@ -2314,8 +2314,9 @@ static bool asb_presenter(void *context, const struct zcl_present_model_v1 *mode
     (void)pages; struct asb_present *p = context; uint32_t count = 0;
     p->called = true;
     char kept[65]; zcl_hex_encode(p->f->kept.version, 32, kept);
-    if (strcmp(model->title, "Prepare your copy for changes?") ||
+    if (strcmp(model->title, "Prepare a personal copy?") ||
         !ast_field(model, "Saved version: ", kept) ||
+        !ast_field(model, "Your choice: ", "Prepare a personal draft for changes or sharing. Review, preview and Keep it; to share, choose Share again. Your current kept app stays available.") ||
         !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
     bool close = false, redraw = false;
     if (!p->confirm) return ast_action(live, 0, &close, &redraw) && close;

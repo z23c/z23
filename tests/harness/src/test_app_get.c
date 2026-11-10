@@ -3753,6 +3753,13 @@ static int tag_worker_chain(struct tag_world *w)
     if (root[0] && test_rm_rf_recursive(root) != 0) ++failures;
     return failures;
 }
+static void tag_share_prepared_same(void *context, const struct app_selection *selection,
+                                    struct zcl_command_reply *reply)
+{
+    (void)context; char version[65]; zcl_hex_encode(selection->version, 32, version);
+    if (!json_push_kv_str(&reply->data, "version", version))
+        zcl_package_copy_fail(reply, "ALLOC", false, "Cannot record prepared selection", "fixture");
+}
 static void tag_cancelled_share(void *context, const struct app_selection *selection,
                                 const char *path, struct zcl_command_reply *reply)
 {
@@ -3802,7 +3809,7 @@ static int tag_library_kept_failure(struct tag_world *w)
         tag_rebuild_controls_seen = tag_rebuild_controls_ok = false;
         app_discover_test_evidence_hook(tag_rebuild_evidence_controls);
         zcl_test_app_library_discover_worker_share(&env, fresh.j.b_datadir, &reply,
-            tag_discover_card, tag_discover_receive, &d, worker, tag_cancelled_share);
+            tag_discover_card, tag_discover_receive, &d, worker, tag_share_prepared_same, tag_cancelled_share);
         app_discover_test_evidence_hook(NULL);
         g_tag.tamper = false;
         tag_discover_capture(&d);
@@ -3913,7 +3920,7 @@ static int tag_library_oversized_failure(struct tag_world *w)
         int offers = g_tag.offers, enables = g_tag.enables, posts = g_tag.posts;
         d.reply = &reply;
         zcl_test_app_library_discover_worker_share(&env, fresh.j.b_datadir, &reply,
-            tag_discover_card, tag_discover_receive, &d, worker, tag_oversized_share);
+            tag_discover_card, tag_discover_receive, &d, worker, tag_share_prepared_same, tag_oversized_share);
         tag_discover_capture(&d);
         ASSERT(d.pid > 0 && d.kept && d.detail == 1 && tag_kept_selection(&env, &selection));
         ASSERT(d.host_prompted && d.host_identity && d.report_prompted); ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.enables, enables); ASSERT_EQ(g_tag.posts, posts);

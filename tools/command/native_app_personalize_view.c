@@ -173,7 +173,7 @@ static bool apv_model(struct apv_work *w, bool prepare, char *why, size_t cap)
     zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_STATUS_CARD);
     (void)snprintf(m->request_id, sizeof(m->request_id), "personalize-%.12s", plan);
     (void)snprintf(m->title, sizeof(m->title), "%s", prepare ?
-        "Prepare your copy for changes?" : "Personalize this saved version?");
+        "Prepare a personal copy?" : "Personalize this saved version?");
     (void)snprintf(m->summary, sizeof(m->summary), "Review every page before confirming.");
     m->action_count = 4;
     app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
@@ -181,7 +181,7 @@ static bool apv_model(struct apv_work *w, bool prepare, char *why, size_t cap)
     app_confirm_action(&m->actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
     app_confirm_action(&m->actions[3], ZCL_PRESENT_ACTION_CONFIRM, "personalize", "Personalize");
     return (!prepare || app_confirm_field(m, "Your choice: ",
-            "Prepare a personal draft for your AI so you can share the version you later Keep. Your current kept app stays available.")) &&
+            "Prepare a personal draft for changes or sharing. Review, preview and Keep it; to share, choose Share again. Your current kept app stays available.")) &&
         apv_identity_fields(w) && apv_namespace_fields(w) &&
         app_confirm_field(m, "Effect: ",
             "Save a metadata-only successor, or return the unchanged version if already personal. Working files and Keep stay unchanged. No build, run or share.") &&

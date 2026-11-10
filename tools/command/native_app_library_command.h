@@ -31,18 +31,18 @@ void zcl_test_app_library_discover_worker(const struct app_launch_env *env, cons
 void zcl_test_app_library_discover_worker_share(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path,
-    app_library_sharer sharer);
+    app_library_preparer preparer, app_library_sharer sharer);
 void zcl_test_app_library_native_at(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
     void *context, app_confirm_presenter notice);
 void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
-    app_library_presenter presenter, void *context, app_library_sharer sharer,
+    app_library_presenter presenter, void *context, app_library_preparer preparer, app_library_sharer sharer,
     app_confirm_presenter notice, app_library_revealer revealer);
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice);
 void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
-    app_library_presenter presenter, void *context, app_library_sharer sharer,
+    app_library_presenter presenter, void *context, app_library_preparer preparer, app_library_sharer sharer,
     app_confirm_presenter notice);
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context);
