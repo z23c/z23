@@ -11,6 +11,7 @@ int app_host_worker_main(int argc, char **argv);
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+bool zcl_test_app_host_bootstrap_port(bool (*fill)(uint8_t *, size_t), uint16_t *);
 /* Changes cwd: test only in a disposable child. */
 bool zcl_test_app_host_enter_scratch(const char *, uint64_t, uint64_t);
 bool zcl_test_app_host_store_carrier(const uint8_t *, size_t, char root[65]);

@@ -14,6 +14,7 @@
 #include "crypto/sha256.h"
 #include "net/tor_integration.h"
 #include "platform/time_compat.h"
+#include "platform/rng.h"
 #include "session/fleet_board_proto.h"
 #include "util/write_all.h"
 #include "vcs/app_offer.h"
@@ -181,12 +182,28 @@ static bool ahw_bootstrap(struct ahw_context *ctx, int64_t deadline)
     }
     return ok;
 }
+static bool ahw_bootstrap_port(bool (*fill)(uint8_t *, size_t), uint16_t *out)
+{
+    uint8_t random[2];
+    if (!fill || !out || !fill(random, sizeof(random))) return false;
+    *out = (uint16_t)(1024u + (((unsigned)random[0] << 8 | random[1]) % (53569u - 1024u + 1u)));
+    return true;
+}
+#if defined(ZCL_TESTING)
+bool zcl_test_app_host_bootstrap_port(bool (*fill)(uint8_t *, size_t), uint16_t *out)
+{ return ahw_bootstrap_port(fill, out); }
+#endif
+static bool ahw_start_tor(void)
+{
+    uint16_t port;
+    return ahw_bootstrap_port(rng_host_fill, &port) && tor_integration_start_private(".", port);
+}
 static bool ahw_serve(struct ahw_context *ctx, int protocol, char **argv, uint64_t size, int64_t deadline)
 {
     if (!ahw_carrier(ctx, argv[5], argv[6], argv[7], argv[8], argv[9], size)) return false;
     tor_integration_set_handler(ahw_handler, ctx);
     tor_integration_set_serve_onion(true);
-    if (!tor_integration_start_private(".", 0)) return false;
+    if (!ahw_start_tor()) return false;
     bool ok = ahw_bootstrap(ctx, deadline);
     const char *onion = ok && tor_integration_is_ready() ? tor_integration_get_onion_address() : NULL;
     ok = onion && strlen(onion) == 62 && ahw_post(ctx, argv[5], argv[6], argv[7], argv[8], argv[9], size, onion);

@@ -1739,9 +1739,23 @@ static bool host_carrier_capacity(void)
     bool ok = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     return test_rm_rf_recursive(path) == 0 && ok;
 }
+static bool host_port_low(uint8_t *out, size_t size)
+{ if (size != 2) return false; out[0] = 0; out[1] = 0; return true; }
+static bool host_port_high(uint8_t *out, size_t size)
+{ if (size != 2) return false; out[0] = 0xcd; out[1] = 0x41; return true; }
+static bool host_port_failure(uint8_t *out, size_t size)
+{ (void)out; (void)size; return false; }
 static int host_ready_frame_tests(void)
 {
     int failures = 0;
+    TEST("host private Tor bootstrap port varies and refuses entropy failure") {
+        uint16_t port = 99;
+        ASSERT(zcl_test_app_host_bootstrap_port(host_port_low, &port) && port == 1024);
+        ASSERT(zcl_test_app_host_bootstrap_port(host_port_high, &port) && port == 53569);
+        port = 99; ASSERT(!zcl_test_app_host_bootstrap_port(host_port_failure, &port) && port == 99);
+        ASSERT(!zcl_test_app_host_bootstrap_port(NULL, &port));
+        ASSERT(!zcl_test_app_host_bootstrap_port(host_port_low, NULL)); PASS();
+    }
     TEST("host carrier storage admits the full legal byte limit without eviction") {
         ASSERT(host_carrier_capacity()); PASS();
     }
