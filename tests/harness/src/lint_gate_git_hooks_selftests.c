@@ -802,11 +802,13 @@ static int hooks_quiet_held_ready(struct hooks_fx *fx)
     return bad;
 }
 
-/* ── bootstrap: hook goals skip vendor and Tor bootstrap, others do not ──── */
+/* ── bootstrap: dependency-free goals skip vendor and Tor, node goals do not */
+#define BOOT_GUEST "build/gen/guest_kernel_data.c"
 #define BOOT_TAIL \
     ".DEFAULT_GOAL := z23\n" \
     ".PHONY: git-hook git-hook-selftest install-hooks z23 unknown-goal\n" \
     "git-hook git-hook-selftest install-hooks:\n\t@touch hook-ran\n" \
+    BOOT_GUEST ":\n\t@touch guest-ran\n" \
     "z23 unknown-goal:\n\t@touch node-ran\n" \
     "vendor-ready.mk:\n\t@touch vendor-ran\n\t@printf '# established\\n' > $@\n" \
     "tor-ready.mk:\n\t@touch tor-ran\n\t@printf '# established\\n' > $@\n"
@@ -815,11 +817,12 @@ static int hooks_quiet_held_ready(struct hooks_fx *fx)
 struct hooks_goal_case {
     const char *goals[BOOT_GOALS_MAX];
     int node; /* the goals must reach vendor and Tor bootstrap */
+    const char *ran;
 };
 
 static const char *const k_boot_marks[] = {
     "hook-ran", "node-ran", "vendor-ran", "vendor-ready.mk", "tor-ran",
-    "tor-ready.mk"};
+    "tor-ready.mk", "guest-ran"};
 
 /* Copies the real parse-time bootstrap blocks of the Makefile and adds
  * stub recipes that only drop marker files. */
@@ -881,10 +884,10 @@ static int hooks_boot_case(const struct hooks_fx *fx, const char *dir,
         return 1;
     }
     if (c->node)
-        return !(hooks_boot_has(dir, "node-ran")
+        return !(hooks_boot_has(dir, c->ran)
                  && hooks_boot_has(dir, "vendor-ran")
                  && hooks_boot_has(dir, "tor-ran"));
-    return !hooks_boot_has(dir, "hook-ran")
+    return !hooks_boot_has(dir, c->ran)
            || hooks_boot_has(dir, "vendor-ran")
            || hooks_boot_has(dir, "tor-ran");
 }
@@ -892,10 +895,18 @@ static int hooks_boot_case(const struct hooks_fx *fx, const char *dir,
 static int hooks_boot_checks(struct hooks_fx *fx)
 {
     static const struct hooks_goal_case cases[] = {
-        {{"git-hook"}, 0}, {{"git-hook-selftest"}, 0},
-        {{"install-hooks"}, 0}, {{"git-hook", "install-hooks"}, 0},
-        {{"install-hooks", "z23"}, 1}, {{"unknown-goal"}, 1},
-        {{NULL}, 1} /* the default goal */};
+        {{"git-hook"}, 0, "hook-ran"},
+        {{"git-hook-selftest"}, 0, "hook-ran"},
+        {{"install-hooks"}, 0, "hook-ran"},
+        {{"git-hook", "install-hooks"}, 0, "hook-ran"},
+        {{"install-hooks", "z23"}, 1, "node-ran"},
+        {{"unknown-goal"}, 1, "node-ran"},
+        {{NULL}, 1, "node-ran"}, /* the default goal */
+        {{BOOT_GUEST}, 0, "guest-ran"},
+        {{BOOT_GUEST, "git-hook"}, 0, "guest-ran"},
+        {{BOOT_GUEST, "z23"}, 1, "node-ran"},
+        {{BOOT_GUEST, "Z23_GUEST_KERNEL=fixture-kernel"}, 1, "guest-ran"},
+        {{BOOT_GUEST, "Z23_GUEST_KERNEL=$(UNDEFINED_KERNEL)"}, 1, "guest-ran"}};
     char dir[PATH_MAX];
     size_t i;
     int bad = hooks_fx_base(fx, HOOKS_BASE_PREFIX "_bootstrap");
@@ -978,8 +989,8 @@ int t_git_hooks_bootstrap_goal_filter(void)
 {
     int failures = 0;
     struct hooks_fx *fx = hooks_fx_new();
-    TEST("[lint-gate] hook goals skip vendor and Tor bootstrap, node goals "
-         "do not") {
+    TEST("[lint-gate] dependency-free goals skip vendor and Tor bootstrap, "
+         "node and configured-kernel goals do not") {
         ASSERT(fx != NULL);
         ASSERT(hooks_boot_checks(fx) == 0);
         PASS();

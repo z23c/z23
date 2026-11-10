@@ -484,7 +484,11 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs print-game-closure help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint,$(MAKECMDGOALS))),,1),)
+# With no configured kernel this source is only a copy of the empty definition.
+# Keep configured values (including deferred variable references) conservative:
+# the packer links zlib. Mixed node goals still require normal bootstrap.
+ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1738,7 +1742,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 # default-permit shape this change exists to delete.
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
-	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) setup \
+	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
