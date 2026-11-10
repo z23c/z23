@@ -66,6 +66,14 @@ static bool bil_am_contiguous(struct block_index *tip, int height)
     }
     return tip == NULL;
 }
+static bool bil_am_input_valid(const char *dir, const char *row_arg, const char *height_arg,
+    const char *hash_arg, const char *bytes_arg, uint64_t *rows, uint64_t *height, uint64_t *bytes)
+{
+    return bil_am_decimal(row_arg, 3500000, rows) && *rows &&
+        bil_am_decimal(height_arg, 3499999, height) && *height + 1 <= *rows &&
+        bil_am_hex64(hash_arg) && bil_am_decimal(bytes_arg, UINT64_C(2000000000), bytes) &&
+        bil_am_owned_input(dir, *bytes);
+}
 static int bil_am_android_memory_fixture(void)
 {
     const char *dir = getenv("ZCL_BLOCK_INDEX_MEMORY_DIR");
@@ -74,10 +82,7 @@ static int bil_am_android_memory_fixture(void)
     const char *hash_arg = getenv("ZCL_BLOCK_INDEX_MEMORY_HASH");
     const char *bytes_arg = getenv("ZCL_BLOCK_INDEX_MEMORY_BYTES");
     uint64_t rows, height, bytes;
-    if (!bil_am_decimal(row_arg, 3500000, &rows) || !rows ||
-        !bil_am_decimal(height_arg, 3499999, &height) || height + 1 > rows ||
-        !bil_am_hex64(hash_arg) || !bil_am_decimal(bytes_arg, UINT64_C(2000000000), &bytes) ||
-        !bil_am_owned_input(dir, bytes)) {
+    if (!bil_am_input_valid(dir, row_arg, height_arg, hash_arg, bytes_arg, &rows, &height, &bytes)) {
         fputs("set ZCL_BLOCK_INDEX_MEMORY_DIR, ZCL_BLOCK_INDEX_MEMORY_ROWS, ZCL_BLOCK_INDEX_MEMORY_HEIGHT, ZCL_BLOCK_INDEX_MEMORY_HASH and ZCL_BLOCK_INDEX_MEMORY_BYTES\n", stderr);
         return 2;
     }
