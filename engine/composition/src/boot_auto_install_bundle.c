@@ -26,6 +26,7 @@
 #include "config/boot_internal.h"
 #include "config/boot.h"                       /* app_context, boot_refold_body_span_contiguous,
                                                  * boot_load_verify_snapshot_eligible, active_chain_* */
+#include "config/boot_error.h"
 #include "config/boot_bundle_fetch.h"          /* THE WELD: download-before-autodetect */
 #include "config/boot_header_seed_import.h"    /* headers-as-artifact in-process import */
 #include "config/boot_consensus_bundle_marker.h"
@@ -194,6 +195,13 @@ bool boot_install_bundle_request_refused(const char *datadir)
     const char *reason = status == IBR_BOUND ?
         "bound install request requires a supported installer" :
         "install request is malformed or unreadable";
+    boot_error_report(BOOT_ERROR_FATAL,
+        "BOOT_INSTALL_BUNDLE_REQUEST_REFUSED",
+        "install.request",
+        "install-bundle request refused: state-source selection stopped",
+        NULL, 0,
+        "stage=install_request_unusable status=%d reason=%s",
+        (int)status, reason);
 #if defined(_WIN32)
     fprintf(stderr, "boot: %s; refusing state-source selection\n", reason);
 #else

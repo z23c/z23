@@ -103,6 +103,7 @@ ZCL_WINDOWS_ACCEPTANCE_block_swarm_scale_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_boot_auto_install_bundle_refusal_SOURCES := \
 	tests/harness/src/boot_auto_install_bundle_windows_refusal_acceptance.c \
 	engine/composition/src/boot_auto_install_bundle.c \
+	engine/composition/src/boot_error.c \
 	platform/modules/codec/src/cursor.c \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/platform/src/private_acl_internal.c \
