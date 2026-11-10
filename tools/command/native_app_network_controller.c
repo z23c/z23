@@ -303,6 +303,26 @@ static bool an_receive(void *context, const char *path,
     }
     json_free(&in); return ok;
 }
+struct an_direct_receive { struct an_controller *controller; const char *frame, *post_id; };
+static bool an_direct_consume(void *context, const char *path,
+    const struct app_receive_identity *identity, struct zcl_command_reply *reply)
+{
+    struct an_direct_receive *direct = context; struct zcl_app_offer_row row = {0};
+    if (!app_network_frame_row(direct->frame, direct->post_id, platform_time_wall_unix(), &row)) {
+        zcl_package_copy_fail(reply, "INVALID_SIGNED_RESPONSE", false,
+            "The signed offer is no longer valid.", "app.library"); return false;
+    }
+    return an_receive(direct->controller, path, identity, reply);
+}
+#if defined(ZCL_TESTING)
+bool zcl_test_app_network_direct_consume(const char *frame, const char *post_id,
+    const struct app_network_test_hooks *hooks, void *context, struct zcl_command_reply *reply)
+{
+    struct an_controller c = {.hooks = hooks, .context = context};
+    struct an_direct_receive direct = {.controller = &c, .frame = frame, .post_id = post_id};
+    return an_direct_consume(&direct, "unused", NULL, reply);
+}
+#endif
 static bool an_card(struct an_controller *c, struct zcl_app_offer_row *rows,
     size_t count, size_t *selected, bool *review, bool *refresh, struct zcl_command_reply *reply)
 {
@@ -428,6 +448,27 @@ static bool an_catalog_loop(struct an_controller *c, const char *url, const stru
         return an_selected_review(c, url, link, &catalog.rows[selected], reply, shown);
     }
 }
+static bool an_direct_loop(struct an_controller *c, const char *url, const struct app_network_link *link,
+    struct zcl_command_reply *reply, bool *shown)
+{
+    for (;;) {
+        struct app_network_job_result result = {0};
+        if (!an_run_job(c->datadir, "direct", url, NULL, NULL, c, &result, reply)) {
+            if (result.cancelled || reply->error.mutated || !an_retry(c, reply, shown)) return false;
+            continue;
+        }
+        struct zcl_app_offer_row row = {0};
+        bool valid = app_network_frame_row(result.frame, link->post_id, platform_time_wall_unix(), &row);
+        struct an_direct_receive direct = {.controller = c, .frame = result.frame, .post_id = link->post_id};
+        bool ok = valid && app_get_stage_consume_bytes(&row, c->datadir, result.bytes, result.len,
+                                                       an_direct_consume, &direct, reply);
+        free(result.bytes);
+        if (!valid) zcl_package_copy_fail(reply, "INVALID_SIGNED_RESPONSE", false,
+            "The signed offer is no longer valid.", "app.library");
+        const char *status = zcl_package_copy_str(&reply->data, "status");
+        return ok && (!status || strcmp(status, "canceled"));
+    }
+}
 static bool an_open_link(const char *datadir, app_library_presenter cards,
     app_confirm_presenter notices, void *context, struct zcl_command_reply *reply, bool *shown
 #if defined(ZCL_TESTING)
@@ -442,7 +483,9 @@ static bool an_open_link(const char *datadir, app_library_presenter cards,
     c.hooks = hooks;
 #endif
     char url[257]; struct app_network_link link;
-    return an_form_input(&c, url, &link, reply, shown) && an_catalog_loop(&c, url, &link, reply, shown);
+    if (!an_form_input(&c, url, &link, reply, shown)) return false;
+    return link.exact ? an_direct_loop(&c, url, &link, reply, shown) :
+        an_catalog_loop(&c, url, &link, reply, shown);
 }
 
 

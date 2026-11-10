@@ -9,6 +9,7 @@
 #include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "platform/time_compat.h"
 #include "vcs/bundle_carry.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +21,7 @@
 #if !defined(_WIN32)
 /* One complete carrier hex plus small fixed envelope. Exact capture detects
  * overflow and EOF; the spare byte is only for a local JSON terminator. */
-#define ANJ_WIRE_MAX (2u * VCS_BUNDLE_MAX_BYTES + 4096u)
+#define ANJ_WIRE_MAX (2u * VCS_BUNDLE_MAX_BYTES + APP_NETWORK_FRAME_HEX_CAP + 4096u)
 static bool anj_selected_bounded(const struct zcl_app_offer_row *r)
 {
     if (!r) return false;
@@ -78,6 +79,19 @@ static bool anj_exact(const struct app_network_job_args *a, const struct app_net
     return app_network_link_parse(a->url, &link) && link.exact && r->count == 1 &&
         !r->incomplete && !strcmp(r->rows[0].post_id, link.post_id);
 }
+static bool anj_direct(const struct json_value *v, const struct app_network_job_args *a,
+                       struct app_network_job_result *r)
+{
+    struct app_network_link link; struct zcl_app_offer_row row = {0};
+    const char *frame = app_network_json_string(v, "frame");
+    size_t n = frame ? strlen(frame) : 0;
+    if (v->num_children != 5 || !n || n >= sizeof(r->frame) ||
+        !app_network_link_parse(a->url, &link) || !link.exact ||
+        !app_network_frame_row(frame, link.post_id, platform_time_wall_unix(), &row) ||
+        !anj_carrier(v, &row, r)) return false;
+    memcpy(r->frame, frame, n + 1u); r->rows[0] = row; r->count = 1;
+    return true;
+}
 static void anj_error(const struct json_value *v, struct app_network_job_result *r)
 {
     const struct json_value *e = json_get(v, "error");
@@ -91,6 +105,7 @@ static bool anj_parse(const char *wire, size_t len, const struct app_network_job
     bool ok = json_read(&v, wire, len) && app_network_json_canonical(&v, wire, len) && anj_envelope(&v);
     if (ok && !json_get_bool(json_get(&v, "ok"))) { anj_error(&v, r); ok = false; }
     else if (ok && !strcmp(args->mode, "carrier")) ok = v.num_children == 4 && anj_carrier(&v, args->selected, r);
+    else if (ok && !strcmp(args->mode, "direct")) ok = anj_direct(&v, args, r);
     else if (ok) ok = anj_rows(&v, r) && anj_exact(args, r);
     json_free(&v); if (ok) r->error = APP_NETWORK_OK; return ok;
 }
@@ -105,7 +120,7 @@ bool zcl_test_app_network_job_parse(const char *wire, size_t len,
 static bool anj_mode_matches(const struct app_network_job_args *a, const struct app_network_link *link)
 {
     if (!strcmp(a->mode, "catalog")) return !link->exact;
-    if (!strcmp(a->mode, "exact")) return link->exact;
+    if (!strcmp(a->mode, "exact") || !strcmp(a->mode, "direct")) return link->exact;
     if (strcmp(a->mode, "carrier") || !link->exact || !anj_selected_bounded(a->selected)) return false;
     return !strcmp(a->selected->post_id, link->post_id);
 }

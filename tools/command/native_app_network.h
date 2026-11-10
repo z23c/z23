@@ -7,6 +7,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "session/fleet_board_proto.h"
+
+#define APP_NETWORK_FRAME_HEX_CAP (2u * (FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES + 5u) + 1u)
 
 /* One synchronous fetch; the caller fills only the supplied buffer, reports
  * actual length/status, and must honor timeout_ms and cancellation. No reply
@@ -41,6 +44,12 @@ bool app_network_catalog(const struct app_network_transport *transport,
 bool app_network_exact(const struct app_network_transport *transport,
     const char *onion, const char *post_id, int64_t now,
     struct zcl_app_offer_row *row, enum app_network_error *error);
+bool app_network_frame_row(const char *frame, const char *post_id, int64_t now,
+    struct zcl_app_offer_row *row);
+bool app_network_direct(const struct app_network_transport *transport,
+    const char *onion, const char *post_id, int64_t now, struct vcs_package_store *store,
+    char frame[APP_NETWORK_FRAME_HEX_CAP], uint8_t **bytes, size_t *len,
+    bool *mutated, enum app_network_error *error);
 /* Rechecks the selected post then verifies manifest, all chunks, carrier
  * length and SHA256. The borrowed store is never evicted; *mutated is set
  * before attempting admission, even on refusal. Caller frees *bytes. */

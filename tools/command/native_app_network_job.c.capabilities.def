@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_app_network_job.c", CAP_FS_WRITE, "Checked allocation diagnostics may write to stderr; process lifecycle is owned by the spawn utility")
+ZCL_MODULE_CAPABILITY("tools/command/native_app_network_job.c", CAP_FS_WRITE, "Checked allocation diagnostics may write to stderr; freshness reads use the platform clock seam")

@@ -113,6 +113,12 @@ static bool an_post(const char *hex, int64_t now, struct zcl_app_offer_row *row)
     free(post);
     return ok;
 }
+bool app_network_frame_row(const char *frame, const char *post_id, int64_t now,
+                           struct zcl_app_offer_row *row)
+{
+    return row && vcs_app_offer_hex_valid(post_id, 32) && an_post(frame, now, row) &&
+        !strcmp(row->post_id, post_id);
+}
 /* The envelope is deliberately strict: duplicate/extra keys cannot redefine
  * the frame list or completeness flag. */
 static bool an_envelope_keys(const struct json_value *doc)
@@ -157,7 +163,7 @@ static bool an_rows(const struct json_value *frames, int64_t now,
 }
 static bool an_catalog(struct an_run *r, const char *onion, const char *path,
                        int64_t now, struct zcl_app_offer_row *rows, size_t cap,
-                       size_t *count, bool *incomplete)
+                       size_t *count, bool *incomplete, char *frame)
 {
     uint8_t *body = zcl_malloc(AN_JSON_CAP, "app.network.catalog");
     if (!body) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
@@ -166,6 +172,13 @@ static bool an_catalog(struct an_run *r, const char *onion, const char *path,
     bool fetched = an_fetch(r, onion, path, body, AN_JSON_CAP, &len);
     bool ok = fetched && an_envelope(body, len, &doc, &frames, incomplete) && json_size(frames) <= cap;
     if (ok) ok = an_rows(frames, now, rows, count, incomplete);
+    if (ok && frame) {
+        const struct json_value *item = json_at(frames, 0);
+        const char *text = item && item->type == JSON_STR ? json_get_str(item) : NULL;
+        size_t n = text ? strlen(text) : 0;
+        ok = json_size(frames) == 1 && n && n < APP_NETWORK_FRAME_HEX_CAP;
+        if (ok) memcpy(frame, text, n + 1u);
+    }
     if (fetched && !ok) *r->error = APP_NETWORK_INVALID_RESPONSE;
     json_free(&doc); free(body); return ok;
 }
@@ -177,19 +190,19 @@ bool app_network_catalog(const struct app_network_transport *t, const char *onio
     *count = 0; *incomplete = false; *error = APP_NETWORK_INVALID_RESPONSE;
     struct an_run r;
     bool ok = rows && cap && an_begin(&r, t, error) &&
-              an_catalog(&r, onion, "/board/apps/v1", now, rows, cap, count, incomplete) &&
+              an_catalog(&r, onion, "/board/apps/v1", now, rows, cap, count, incomplete, NULL) &&
               an_live(&r);
     if (!ok) { *count = 0; *incomplete = false; }
     else { if (*count == 4u) *incomplete = true; *error = APP_NETWORK_OK; }
     return ok;
 }
 static bool an_exact(struct an_run *r, const char *onion, const char *id, int64_t now,
-                     struct zcl_app_offer_row *row)
+                     struct zcl_app_offer_row *row, char *frame)
 {
     if (!vcs_app_offer_hex_valid(id, 32)) return false;
     char path[96]; (void)snprintf(path, sizeof(path), "/board/apps/v1/%s", id);
     size_t count = 0; bool incomplete = false;
-    return an_catalog(r, onion, path, now, row, 1, &count, &incomplete) &&
+    return an_catalog(r, onion, path, now, row, 1, &count, &incomplete, frame) &&
            count == 1 && !incomplete && !strcmp(row->post_id, id);
 }
 bool app_network_exact(const struct app_network_transport *t, const char *onion,
@@ -199,7 +212,7 @@ bool app_network_exact(const struct app_network_transport *t, const char *onion,
     if (!row || !error) return false;
     *error = APP_NETWORK_INVALID_RESPONSE;
     memset(row, 0, sizeof(*row)); struct an_run r;
-    bool ok = an_begin(&r, t, error) && an_exact(&r, onion, id, now, row) && an_live(&r);
+    bool ok = an_begin(&r, t, error) && an_exact(&r, onion, id, now, row, NULL) && an_live(&r);
     if (ok) *error = APP_NETWORK_OK; else memset(row, 0, sizeof(*row));
     return ok;
 }
@@ -399,7 +412,24 @@ bool app_network_carrier(const struct app_network_transport *t, const char *cata
     *bytes = NULL; *len = 0; *mutated = false; *error = APP_NETWORK_INVALID_RESPONSE;
     struct an_run r; struct zcl_app_offer_row actual = {0};
     if (!selected || !an_row_bounded(selected) || !store || !an_onion(carrier_onion) || !an_begin(&r, t, error) ||
-        !an_exact(&r, catalog_onion, selected->post_id, now, &actual)) return false;
+        !an_exact(&r, catalog_onion, selected->post_id, now, &actual, NULL)) return false;
     if (!app_network_row_equal(selected, &actual)) { *error = APP_NETWORK_CHANGED_OFFER; return false; }
     return an_carrier_fetch(&r, carrier_onion, &actual, store, bytes, len, mutated);
+}
+bool app_network_direct(const struct app_network_transport *t, const char *onion,
+    const char *post_id, int64_t now, struct vcs_package_store *store,
+    char frame[APP_NETWORK_FRAME_HEX_CAP], uint8_t **bytes, size_t *len,
+    bool *mutated, enum app_network_error *error)
+{
+    if (!frame || !bytes || !len || !mutated || !error) return false;
+    *frame = 0; *bytes = NULL; *len = 0; *mutated = false; *error = APP_NETWORK_INVALID_RESPONSE;
+    struct an_run r; struct zcl_app_offer_row row = {0}, checked = {0}; char host[63];
+    if (!store || !an_begin(&r, t, error) || !an_exact(&r, onion, post_id, now, &row, frame) ||
+        strlen(row.offer.onion) < 62u) return false;
+    memcpy(host, row.offer.onion, 62u); host[62] = 0;
+    bool ok = an_carrier_fetch(&r, host, &row, store, bytes, len, mutated) &&
+        app_network_frame_row(frame, post_id, platform_time_wall_unix(), &checked) &&
+        app_network_row_equal(&row, &checked) && an_live(&r);
+    if (!ok) { free(*bytes); *bytes = NULL; *len = 0; if (*error == APP_NETWORK_OK) *error = APP_NETWORK_INVALID_RESPONSE; }
+    return ok;
 }

@@ -15,6 +15,7 @@ struct app_network_job_args {
 struct app_network_job_result {
     struct zcl_app_offer_row rows[4]; size_t count; bool incomplete;
     uint8_t *bytes; size_t len;
+    char frame[APP_NETWORK_FRAME_HEX_CAP];
     enum app_network_error error;
     bool launched, reaped, cancelled;
 };

@@ -516,7 +516,7 @@ struct tag_net {
     uint8_t *bytes, *manifest;
     size_t size, manifest_len;
     char frame[8192], badframe[8192], id[65];
-    int fault, calls, cancel_checks, cancel_at;
+    int fault, calls, board_calls, cancel_checks, cancel_at;
 };
 
 static bool tag_net_bad_frame(struct tag_net *f, struct fleet_board_post *p,
@@ -647,6 +647,7 @@ static bool tag_net_fetch(void *context, const char *onion, const char *path,
     if (!timeout_ms) return false;
     const uint8_t *data = NULL; size_t size = 0; char json[17000];
     if (!strncmp(path, "/board/apps/v1", 14)) {
+        f->board_calls++;
         if (strcmp(onion, TAG_NET_RELAY)) return false;
         if (!tag_net_board_body(f, json, sizeof(json), &size)) return false;
         data = (const uint8_t *)json;
@@ -909,6 +910,109 @@ static bool tag_network_bad_sha(struct tag_net *f, struct app_network_transport 
     return ok && !app_network_exact(t, TAG_NET_RELAY, f->id, now, &row, &error) &&
            error == APP_NETWORK_CANCELLED && f->calls == before;
 }
+extern bool zcl_test_app_network_emit_direct(int fd, const uint8_t *bytes, size_t len, const char *frame);
+extern bool zcl_test_app_network_direct_consume(const char *frame, const char *post_id,
+    const struct app_network_test_hooks *hooks, void *context, struct zcl_command_reply *reply);
+static bool tag_direct_expired_consumer(const char *frame, int64_t now)
+{
+    size_t n = strlen(frame) / 2u, len = 0; uint8_t wire[4096], sk[32], pk[32];
+    struct fleet_board_post *post = zcl_calloc(1, sizeof(*post), "test.expired.post");
+    if (!post) return false;
+    tag_identity(sk, pk, 42);
+    bool ok = n <= sizeof(wire) && zcl_hex_decode_lower(frame, wire, n) &&
+        fleet_board_frame_decode_post(wire, n, post) == FLEET_BOARD_OK;
+    if (ok) { post->created_at = (uint64_t)(now - 7200); post->ttl = 3600; }
+    ok = ok && fleet_board_post_sign(post, sk, pk) == FLEET_BOARD_OK &&
+        fleet_board_frame_encode_post(post, wire, sizeof(wire), &len) == FLEET_BOARD_OK;
+    char expired[8192], id[65];
+    if (ok) { zcl_hex_encode(wire, len, expired); fleet_board_id_to_hex(post->id, id); }
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    ok = ok && !zcl_test_app_network_direct_consume(expired, id, NULL, NULL, &reply) &&
+        !strcmp(reply.error.code, "INVALID_SIGNED_RESPONSE") && !reply.error.mutated;
+    zcl_command_reply_free(&reply); free(post); return ok;
+}
+static bool tag_direct_carrier_fault(char *wire, size_t len, const struct app_network_job_args *args,
+                                     struct app_network_job_result *result)
+{
+    char *carrier = strstr(wire, "\"carrier_hex\":\""); char carrier_byte = 0;
+    if (carrier) { carrier += strlen("\"carrier_hex\":\""); carrier_byte = *carrier; *carrier = *carrier == '0' ? '1' : '0'; }
+    bool ok = carrier && !zcl_test_app_network_job_parse(wire, len, args, result) && !result->bytes;
+    if (carrier) *carrier = carrier_byte;
+    return ok;
+}
+static bool tag_direct_frame_faults(char *wire, size_t len, const struct app_network_job_args *args,
+                                    struct app_network_job_result *result)
+{
+    char *field = strstr(wire, "\"frame\":\""); char frame_byte = 0;
+    if (field) { frame_byte = field[10]; field[10] = field[10] == '0' ? '1' : '0'; }
+    bool ok = field && !zcl_test_app_network_job_parse(wire, len, args, result) && !result->bytes;
+    if (field) { field[10] = frame_byte; field[1] = 'x'; }
+    ok = ok && field && !zcl_test_app_network_job_parse(wire, len, args, result) && !result->bytes;
+    if (field) field[1] = 'f';
+    return ok;
+}
+static bool tag_direct_valid_wire(char *wire, size_t end, const struct app_network_job_args *args,
+                                  struct app_network_job_result *result, const uint8_t *bytes,
+                                  size_t len, const char *frame)
+{
+    wire[end] = 0;
+    bool ok = zcl_test_app_network_job_parse(wire, end, args, result) && result->len == len &&
+        !memcmp(result->bytes, bytes, len) && !strcmp(result->frame, frame);
+    free(result->bytes); result->bytes = NULL;
+    return ok && !zcl_test_app_network_job_parse(wire, end - 1u, args, result);
+}
+static bool tag_direct_extra_fields(char *wire, size_t len, const struct app_network_job_args *args,
+                                    struct app_network_job_result *result)
+{
+    memcpy(wire + len - 1, ",\"extra\":0}", 12);
+    bool ok = !zcl_test_app_network_job_parse(wire, len + 10u, args, result) && !result->bytes;
+    memcpy(wire + len - 1, ",\"ok\":true}", 12);
+    return ok && !zcl_test_app_network_job_parse(wire, len + 10u, args, result) && !result->bytes;
+}
+static bool tag_direct_roundtrip(struct tag_net *f, const uint8_t *bytes, size_t len, const char *frame)
+{
+    FILE *stream = tmpfile(); if (!stream) return false;
+    char url[257]; snprintf(url, sizeof(url), "http://%s/board/apps/v1/%s", TAG_NET_RELAY, f->id);
+    struct app_network_job_args args = {.mode = "direct", .url = url};
+    struct app_network_job_result result = {0};
+    bool ok = zcl_test_app_network_emit_direct(fileno(stream), bytes, len, frame) &&
+        fflush(stream) == 0 && fseek(stream, 0, SEEK_END) == 0;
+    long end = ok ? ftell(stream) : -1; ok = ok && end > 0 && fseek(stream, 0, SEEK_SET) == 0;
+    char *wire = ok ? zcl_malloc((size_t)end + 64u, "test.direct.wire") : NULL;
+    ok = ok && wire && fread(wire, 1, (size_t)end, stream) == (size_t)end;
+    if (ok) {
+        ok = tag_direct_valid_wire(wire, (size_t)end, &args, &result, bytes, len, frame) &&
+            tag_direct_carrier_fault(wire, (size_t)end, &args, &result) &&
+            tag_direct_frame_faults(wire, (size_t)end, &args, &result) &&
+            tag_direct_extra_fields(wire, (size_t)end, &args, &result);
+    }
+    free(wire); fclose(stream); return ok;
+}
+static bool tag_network_direct(struct tag_net *f, struct app_network_transport *t,
+                               struct vcs_package_store *store, int64_t now)
+{
+    char frame[APP_NETWORK_FRAME_HEX_CAP]; uint8_t *bytes = NULL; size_t len = 0;
+    bool mutated = false; enum app_network_error error = APP_NETWORK_OK;
+    int before = f->board_calls;
+    bool ok = app_network_direct(t, TAG_NET_RELAY, f->id, now, store, frame, &bytes, &len, &mutated, &error) &&
+        f->board_calls == before + 1 && len == f->size && !memcmp(bytes, f->bytes, len) &&
+        tag_direct_roundtrip(f, bytes, len, frame) && tag_direct_expired_consumer(frame, now);
+    free(bytes); bytes = NULL;
+    struct zcl_app_offer_row row = {0};
+    ok = ok && !app_network_frame_row(frame, f->id, now + 3601, &row);
+    char wrong[65]; memset(wrong, '0', 64); wrong[64] = 0;
+    ok = ok && !app_network_frame_row(frame, wrong, now, &row);
+    f->fault = 9;
+    ok = ok && !app_network_direct(t, TAG_NET_RELAY, f->id, now, store, frame, &bytes, &len, &mutated, &error) && !bytes;
+    f->fault = 0; return ok;
+}
+static bool tag_network_fault_cases(struct tag_net *f, struct app_network_transport *t,
+    struct zcl_app_offer_row *row, struct vcs_package_store *store, int64_t now)
+{
+    return tag_network_cancellation(f, t, row, store, now) &&
+        tag_network_bad_carriers(f, t, row, store, now) && tag_network_bad_catalog(f, t, now) &&
+        tag_network_direct(f, t, store, now) && tag_network_bad_sha(f, t, store, now);
+}
 static bool tag_network_exercise(void)
 {
     struct tag_net f; bool ok = tag_net_init(&f, VCS_PACKAGE_CHUNK_BYTES + 13u);
@@ -921,9 +1025,7 @@ static bool tag_network_exercise(void)
     enum app_network_error error = APP_NETWORK_OK; int64_t now = platform_time_wall_unix();
     ok = ok && store && app_network_catalog(&t, TAG_NET_RELAY, now, rows, 4, &count, &incomplete, &error) &&
          count == 1 && !incomplete && app_network_exact(&t, TAG_NET_RELAY, f.id, now, &row, &error) &&
-         tag_network_cancellation(&f, &t, &row, store, now) &&
-         tag_network_bad_carriers(&f, &t, &row, store, now) &&
-         tag_network_bad_catalog(&f, &t, now) && tag_network_bad_sha(&f, &t, store, now);
+         tag_network_fault_cases(&f, &t, &row, store, now);
     if (store) vcs_package_store_close(store);
     if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
     free(f.bytes); free(f.manifest); return ok;
@@ -2683,6 +2785,26 @@ static bool tag_link_selected(const struct tag_link_fixture *f, const char *carr
     return selected && carrier && !strcmp(carrier, TAG_ONION) &&
         !strcmp(selected->post_id, f->row.post_id) && !strcmp(selected->offer.sha256, f->row.offer.sha256);
 }
+static bool tag_link_bytes(struct app_network_job_result *result)
+{
+    result->bytes = malloc(g_tag.len); if (!result->bytes) return false;
+    memcpy(result->bytes, g_tag.bytes, g_tag.len); result->len = g_tag.len; return true;
+}
+static bool tag_link_frame(const struct tag_link_fixture *f, char *out, size_t cap)
+{
+    struct fleet_board_post *p = zcl_calloc(1, sizeof(*p), "test.link.post");
+    if (!p) return false;
+    uint8_t sk[32], pk[32], wire[4096]; size_t len = 0;
+    tag_identity(sk, pk, 0x5a);
+    p->kind = FLEET_BOARD_KIND_OFFER; p->scope = FLEET_BOARD_SCOPE_PUBLIC;
+    p->created_at = (uint64_t)f->row.created_at; p->ttl = 86400;
+    snprintf(p->room, sizeof(p->room), "apps"); snprintf(p->agent, sizeof(p->agent), "app.publish");
+    snprintf(p->text, sizeof(p->text), "%s", g_tag.text); p->text_len = (uint32_t)strlen(p->text);
+    bool ok = fleet_board_post_sign(p, sk, pk) == FLEET_BOARD_OK &&
+        fleet_board_frame_encode_post(p, wire, sizeof(wire), &len) == FLEET_BOARD_OK && len * 2u + 1u <= cap;
+    if (ok) zcl_hex_encode(wire, len, out);
+    free(p); return ok;
+}
 static bool tag_link_job(void *context, const char *mode, const char *url, const char *carrier,
     const struct zcl_app_offer_row *selected, struct app_network_job_result *result,
     struct zcl_command_reply *reply)
@@ -2693,10 +2815,13 @@ static bool tag_link_job(void *context, const char *mode, const char *url, const
     ++f->jobs; result->error = APP_NETWORK_OK;
     if (f->mode == 1) { result->cancelled = true; (void)json_push_kv_str(&reply->data, "status", "canceled"); return false; }
     if (f->mode == 2) { zcl_package_copy_fail(reply, "TEMP_CLEANUP_FAILED", true, "Private cleanup failed.", "fixture"); return false; }
+    if (!strcmp(mode, "direct") && !selected && !carrier) {
+        if (!tag_link_frame(f, result->frame, sizeof(result->frame))) return false;
+        return tag_link_bytes(result);
+    }
     if (!strcmp(mode, "exact") && !selected && !carrier) { result->rows[0] = f->row; result->count = 1; return true; }
     if (strcmp(mode, "carrier") || !tag_link_selected(f, carrier, selected)) return false;
-    result->bytes = malloc(g_tag.len); if (!result->bytes) return false;
-    memcpy(result->bytes, g_tag.bytes, g_tag.len); result->len = g_tag.len; return true;
+    return tag_link_bytes(result);
 }
 static int tag_library_link_cancel(struct tag_world *w)
 {
@@ -2716,7 +2841,7 @@ static int tag_library_link_cancel(struct tag_world *w)
         int offers = g_tag.offers, posts = g_tag.posts;
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_test_app_library_network(&env, fresh.j.b_datadir, &reply, tag_link_cards, NULL, &f, &hooks);
-        ASSERT_EQ(f.homes, 2u); ASSERT_EQ(f.jobs, 2u); ASSERT_EQ(f.discover.receive, 1);
+        ASSERT_EQ(f.homes, 2u); ASSERT_EQ(f.jobs, 1u); ASSERT_EQ(f.discover.receive, 1);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
         ASSERT(lstat(fresh.j.b_datadir, &st) != 0 && errno == ENOENT);

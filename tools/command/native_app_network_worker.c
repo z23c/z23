@@ -71,7 +71,7 @@ static bool anw_emit_rows(int fd, const struct zcl_app_offer_row *rows, size_t c
     ok = wire && json_write(&d, wire, len + 1) == len && zcl_write_all(fd, wire, len);
     free(wire); json_free(&a); json_free(&d); return ok;
 }
-static bool anw_emit_carrier(int fd, const uint8_t *bytes, size_t len)
+static bool anw_emit_carrier(int fd, const uint8_t *bytes, size_t len, const char *frame)
 {
     if (!bytes || !len || len > VCS_BUNDLE_MAX_BYTES) return false;
     char head[128]; int n = snprintf(head, sizeof(head),
@@ -84,25 +84,34 @@ static bool anw_emit_carrier(int fd, const uint8_t *bytes, size_t len)
         if (!zcl_write_all(fd, hex, take * 2u)) return false;
         bytes += take; len -= take;
     }
-    return zcl_write_all(fd, "\"}", 2);
+    if (!zcl_write_all(fd, "\"", 1)) return false;
+    if (frame && *frame) return zcl_write_all(fd, ",\"frame\":\"", 10) &&
+        zcl_write_all(fd, frame, strlen(frame)) && zcl_write_all(fd, "\"}", 2);
+    return zcl_write_all(fd, "}", 1);
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_app_network_emit_direct(int fd, const uint8_t *bytes, size_t len, const char *frame)
+{ return anw_emit_carrier(fd, bytes, len, frame); }
+#endif
 struct anw_request {
     struct app_network_link link; struct zcl_app_offer_row selected;
-    uint64_t port, timeout, parent; bool catalog, exact, carrier;
+    uint64_t port, timeout, parent; bool catalog, exact, carrier, direct;
 };
 struct anw_result {
     struct zcl_app_offer_row rows[4]; size_t count; bool incomplete;
     uint8_t *bytes; size_t len; enum app_network_error error;
+    char frame[APP_NETWORK_FRAME_HEX_CAP];
 };
 static bool anw_mode(struct anw_request *r, char **argv)
 {
     bool empty = !strcmp(argv[4], "-") && !strcmp(argv[5], "-");
     r->catalog = !strcmp(argv[2], "catalog") && !r->link.exact && empty;
     r->exact = !strcmp(argv[2], "exact") && r->link.exact && empty;
+    r->direct = !strcmp(argv[2], "direct") && r->link.exact && empty;
     r->carrier = !strcmp(argv[2], "carrier") && r->link.exact &&
         vcs_app_offer_peer_is_onion(argv[4]) && anw_selected(argv[5], &r->selected) &&
         !strcmp(r->selected.post_id, r->link.post_id);
-    return r->catalog || r->exact || r->carrier;
+    return r->catalog || r->exact || r->carrier || r->direct;
 }
 static bool anw_request_parse(struct anw_request *r, char **argv)
 {
@@ -137,8 +146,10 @@ static bool anw_fetch(const struct anw_request *r, char **argv,
     }
     struct vcs_package_store *store = anw_store_open(".");
     bool mutated = false;
-    bool ok = store && app_network_carrier(transport, r->link.onion, argv[4], &r->selected,
-        platform_time_wall_unix(), store, &out->bytes, &out->len, &mutated, &out->error);
+    bool ok = store && (r->direct ? app_network_direct(transport, r->link.onion, r->link.post_id,
+        platform_time_wall_unix(), store, out->frame, &out->bytes, &out->len, &mutated, &out->error) :
+        app_network_carrier(transport, r->link.onion, argv[4], &r->selected,
+        platform_time_wall_unix(), store, &out->bytes, &out->len, &mutated, &out->error));
     if (store) vcs_package_store_close(store);
     return ok;
 }
@@ -162,7 +173,7 @@ static bool anw_connect(const struct anw_request *r, char **argv, struct anw_res
 }
 static bool anw_emit_result(int protocol, const struct anw_result *result, bool ok)
 {
-    if (ok) return result->bytes ? anw_emit_carrier(protocol, result->bytes, result->len) :
+    if (ok) return result->bytes ? anw_emit_carrier(protocol, result->bytes, result->len, result->frame) :
         anw_emit_rows(protocol, result->rows, result->count, result->incomplete);
     char message[160];
     int n = snprintf(message, sizeof(message), "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":%d}", (int)result->error);
