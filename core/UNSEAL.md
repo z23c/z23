@@ -1238,3 +1238,7 @@ later lane flips it HARD.
 - 2026-11-09T19:27:31Z — REASON: Owner authorized any UNSEAL: move private Tor launch configuration into existing config module; preserve argv lifetime and consensus predicates
   old ROOT: 3802b3e1a904365354b3c39c3f343b2a66f7ae2d98aa993fea6d716df833e573
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-10T17:41:27Z — REASON: Owner authorized 2026-11-10 metadata-only dependency refresh after behavior-preserving text_fit complexity refactor; no consensus predicates changed
+  old ROOT: 0b668cf4c2ce053d9dabaf3a9d0bf6a1ba4b76edb6cc8150bead6275c4eeca99
+  by: owner unseal ritual (make core-unseal)

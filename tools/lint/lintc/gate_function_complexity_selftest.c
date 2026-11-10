@@ -557,6 +557,164 @@ static int cyc_st_writeback(const char *root)
     return bad;
 }
 
+/* Exercise the same extension set in the fixture walker and baseline writer. */
+static int cyc_st_scope_files(const char *root)
+{
+    static const char *const paths[] = {
+        "one.c", "two.h", "three.inc", "four.def", "ignored.txt",
+        "tests/fixtures/five.inc", "vendor/ignored.h", "build/ignored.def",
+        "test-tmp/ignored.c", NULL
+    };
+    char dir[8192], path[8192];
+    if (ovf(snprintf(dir, sizeof dir, "%s/vendor", root), sizeof dir) || csr_mkdirs(dir) ||
+        ovf(snprintf(dir, sizeof dir, "%s/tests/fixtures", root), sizeof dir) || csr_mkdirs(dir) ||
+        ovf(snprintf(dir, sizeof dir, "%s/build", root), sizeof dir) || csr_mkdirs(dir) ||
+        ovf(snprintf(dir, sizeof dir, "%s/test-tmp", root), sizeof dir) || csr_mkdirs(dir))
+        return 1;
+    for (int i = 0; paths[i]; i++) {
+        if (ovf(snprintf(path, sizeof path, "%s/%s", root, paths[i]), sizeof path) ||
+            csr_write(path, k_cyc_st_fn)) return 1;
+    }
+    if (ovf(snprintf(path, sizeof path, "%s/macro.h", root), sizeof path)) return 1;
+    return csr_write(path, "#define macro(x) ((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+"
+        "((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+"
+        "((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)\n");
+}
+
+static int cyc_st_scope_contents(const char *s)
+{
+    return !strstr(s, "one.c:") || !strstr(s, "two.h:") ||
+        !strstr(s, "three.inc:") || !strstr(s, "four.def:") ||
+        !strstr(s, "tests/fixtures/five.inc:") || !strstr(s, "macro.h:") || !strstr(s, "over_cap") ||
+        strstr(s, "ignored") != NULL;
+}
+
+static const char *const k_cyc_git_env[] = {
+    "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", NULL
+};
+struct cyc_st_env { char *value[6]; };
+
+static int cyc_st_env_save(struct cyc_st_env *env)
+{
+    memset(env, 0, sizeof *env);
+    for (int i = 0; k_cyc_git_env[i]; i++) {
+        const char *value = getenv(k_cyc_git_env[i]);
+        if (value && !(env->value[i] = strdup(value))) {
+            for (int j = 0; j < i; j++) free(env->value[j]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cyc_st_env_restore(struct cyc_st_env *env)
+{
+    int bad = 0;
+    for (int i = 0; k_cyc_git_env[i]; i++) {
+        if (env->value[i]) bad |= setenv(k_cyc_git_env[i], env->value[i], 1) != 0;
+        else bad |= unsetenv(k_cyc_git_env[i]) != 0;
+        free(env->value[i]);
+    }
+    return bad;
+}
+
+static int cyc_st_scope_git_check(void)
+{
+    char errors[8192];
+    FILE *out = tmpfile(), *err = tmpfile();
+    int bad = !out || !err;
+    if (!bad && (cyc_check(NULL, "baseline.txt", "RATCHET", 0, 0, out, err) != 1 ||
+                 csr_slurp(err, errors, sizeof errors) || cyc_st_scope_contents(errors))) bad = 1;
+    if (out) fclose(out);
+    if (err) fclose(err);
+    return bad;
+}
+
+/* The production rail enumerates Git's index, rather than walking the tree. */
+static int cyc_st_scope_git_clean(const char *root)
+{
+    char old[4096], cmdout[1024];
+    struct cyc_st_env env;
+    if (cyc_st_env_save(&env)) return 1;
+    int bad = 0;
+    for (int i = 0; k_cyc_git_env[i]; i++) bad |= unsetenv(k_cyc_git_env[i]) != 0;
+    if (!getcwd(old, sizeof old) || chdir(root)) {
+        (void)cyc_st_env_restore(&env);
+        return 1;
+    }
+    int code = 0;
+    if (!bad) bad = capture_cmd("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
+        "sh -c 'git init -q . && git add -f -- .' 2>&1", cmdout, sizeof cmdout, &code) || code;
+    if (!bad) bad = cyc_st_scope_git_check();
+    if (chdir(old)) bad = 1;
+    if (cyc_st_env_restore(&env)) bad = 1;
+    return bad;
+}
+
+static int cyc_st_scope_git(const char *root)
+{
+    struct cyc_st_env env;
+    if (cyc_st_env_save(&env)) return 1;
+    int bad = setenv("GIT_DIR", "conflicting-git-dir", 1) != 0;
+    if (!bad) bad = cyc_st_scope_git_clean(root);
+    const char *value = getenv("GIT_DIR");
+    if (!value || strcmp(value, "conflicting-git-dir")) bad = 1;
+    if (cyc_st_env_restore(&env)) bad = 1;
+    return bad;
+}
+
+static int cyc_st_scope_report(const char *root, const char *baseline)
+{
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (!out || !err) {
+        if (out) fclose(out);
+        if (err) fclose(err);
+        return 1;
+    }
+    int bad = cyc_check(root, baseline, "RATCHET", 0, 0, out, err);
+    fclose(out); fclose(err);
+    out = tmpfile(); err = tmpfile();
+    if (!out || !err) bad = 1;
+    char report[8192];
+    if (!bad && (cyc_check(root, baseline, "RATCHET", 1, 0, out, err) ||
+                 csr_slurp(out, report, sizeof report) ||
+                 !strstr(report, "11 functions in 6 files") ||
+                 !strstr(report, "M>15: 6"))) bad = 1;
+    if (out) fclose(out);
+    if (err) fclose(err);
+    return bad;
+}
+
+static int cyc_st_scope_baseline(const char *path)
+{
+    char body[8192];
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    int bad = csr_slurp(f, body, sizeof body) || cyc_st_scope_contents(body);
+    fclose(f);
+    return bad;
+}
+
+static int cyc_st_scope(void)
+{
+    const char *td = env_or("TMPDIR", cyc_tmp_default);
+    char root[4096], wb[8192] = {0};
+    if (ovf(snprintf(root, sizeof root, "%s/z23-lint-cyc-scope-XXXXXX", td), sizeof root) ||
+        !mkdtemp(root) || cyc_st_scope_files(root)) return 1;
+    struct cyc_st_run r;
+    int bad = cyc_st_exec(root, "", "RATCHET", 0, &r) || r.rc != 1 ||
+        cyc_st_scope_contents(r.err);
+    if (ovf(snprintf(wb, sizeof wb, "%s/generated.txt", root), sizeof wb) ||
+        cyc_write_baseline(root, wb)) bad = 1;
+    if (wb[0] && cyc_st_scope_baseline(wb)) bad = 1;
+    if (!bad) bad = cyc_st_scope_report(root, wb);
+    if (!bad) bad = cyc_st_scope_git(root);
+    (void)rap_rm_rf(root);
+    if (bad) fputs("check_cyclomatic_complexity selftest: extension scope failed\n", stderr);
+    return bad;
+}
+
 /* Write one C function `name` with cyclomatic M = m (m - 1 if statements)
  * into buf. Returns 0, or 1 when the text would not fit. */
 static int cyc_st_fn(char *buf, size_t cap, const char *name, int m)
@@ -662,7 +820,7 @@ static int cyc_st_hist(void)
 
 int check_cyclomatic_complexity_selftest(void)
 {
-    int bad = cyc_st_metric() | cyc_st_hist();
+    int bad = cyc_st_metric() | cyc_st_hist() | cyc_st_scope();
     const char *td = env_or("TMPDIR", cyc_tmp_default);
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-cyc-XXXXXX", td),

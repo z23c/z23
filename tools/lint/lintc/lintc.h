@@ -76,6 +76,7 @@ int lint_git_index_foreach(int (*fn)(const char *, int, void *), void *ctx,
                            char *badext);
 int want(const char *tag, const regex_t *re, const char *s, int w);
 int st_ok(int bad, const char *msg);
+/* hdrs: 0 = .c, 1 = .c/.h, 2 = .def, 3 = .c/.h/.inc/.def. */
 int walk_src(const char *dir, int hdrs,
              int (*scan)(const char *, void *), void *ctx);
 int require_scan_root(const char *gate, const char *root);

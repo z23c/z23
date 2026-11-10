@@ -50,6 +50,16 @@ static char g_brt_log[8192];
 static bool g_brt_reason_ok;
 static struct blocker_record g_brt_rec;
 static const char *g_brt_reason_in;
+static char g_brt_append[64];
+static const char *g_brt_append_src;
+static bool g_brt_append_ok;
+
+static void brt_append_under_capture(void)
+{
+    g_brt_append_ok = zcl_text_fit_append(g_brt_append, sizeof(g_brt_append),
+                                          ", ", g_brt_append_src,
+                                          "test", "append");
+}
 
 /* Same stderr-capture shape as log_level_capture() in test_log_level.c:
  * redirect stderr into a scratch file for the duration of `fn`, then hand back
@@ -118,6 +128,28 @@ static void brt_build_reason(char *out, size_t out_cap, size_t len,
     out[len] = '\0';
 }
 
+static bool brt_append_boundaries(void)
+{
+    char exact[8] = "ab";
+    if (!zcl_text_fit_append(exact, sizeof exact, ",", "cdef", "test", "append") ||
+        strcmp(exact, "ab,cdef") != 0) return false;
+    char unterminated[4] = {'a', 'b', 'c', 'd'};
+    if (zcl_text_fit_append(unterminated, sizeof unterminated, NULL, "x", "test", "append") ||
+        unterminated[3] != '\0') return false;
+    strcpy(g_brt_append, "prefix");
+    g_brt_append_src = "a long appended value that exceeds the available capacity in this field";
+    if (!brt_capture(brt_append_under_capture, g_brt_log, sizeof g_brt_log) ||
+        g_brt_append_ok || !strstr(g_brt_append, ZCL_TEXT_FIT_MARKER_TAG) ||
+        !strstr(g_brt_log, "did not fit")) return false;
+    char saved[sizeof g_brt_append];
+    memcpy(saved, g_brt_append, sizeof saved);
+    g_brt_append_src = "again";
+    if (!brt_capture(brt_append_under_capture, g_brt_log, sizeof g_brt_log) ||
+        g_brt_append_ok || memcmp(saved, g_brt_append, sizeof saved) != 0 ||
+        !strstr(g_brt_log, "already full and marked")) return false;
+    return true;
+}
+
 int test_blocker_reason_truncation(void)
 {
     int failures = 0;
@@ -132,6 +164,8 @@ int test_blocker_reason_truncation(void)
      * capture to see it. Don't inherit whatever a previous group left set. */
     enum zcl_log_level prev_level = zcl_log_level_get();
     zcl_log_level_set(ZCL_LOG_ALL);
+    BRT_CHECK("append exact fit, unterminated input and repeated truncation",
+              brt_append_boundaries());
 
     /* ── (1) over-long reason: visible marker + a report ───────────────── */
 

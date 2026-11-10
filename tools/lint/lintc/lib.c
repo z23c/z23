@@ -441,6 +441,10 @@ static int walk_src_match(const char *name, size_t nl, int hdrs)
         return 0;
     if (hdrs == 2)
         return nl >= 4 && memcmp(name + nl - 4, ".def", 4) == 0;
+    if (hdrs == 3)
+        return (nl >= 4 && (memcmp(name + nl - 4, ".def", 4) == 0 ||
+                            memcmp(name + nl - 4, ".inc", 4) == 0)) ||
+            (name[nl - 2] == '.' && (name[nl - 1] == 'c' || name[nl - 1] == 'h'));
     return name[nl - 2] == '.'
         && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h'));
 }

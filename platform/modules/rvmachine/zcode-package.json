@@ -8,17 +8,17 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "9eb43df134f89ffd511a557c93bca0c15c65563fe63a41c491e295fdc159afdc",
+      "root": "a4de0ccb82fd5e4d708e6624dd1fc529a5cb4b226caf1bf27bc196b9d99a9d11",
       "name": "zclassic23/base",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "c6736c3f9ea8b43a2a2cf371fa28288bc70d49d1e0dfcd8ed80e62f5c5608451",
+      "root": "4d2d6a689ef1924591b3dd300eb843de941d18c2bb0448066c5bf91c128eef6d",
       "name": "zclassic23/fdt",
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "cbc6238ef0e9e950e5d19eed075fa740819aa5da6d290c8e9cbd42c64a0154e8",
+      "root": "1549f2f48e1efb23226fde40199ac267578e01b8c9f5e5555b5048618415a9c1",
       "name": "zclassic23/rvemu",
       "semver": "0.1.0-dev.1"
     },
@@ -28,7 +28,7 @@
       "semver": "0.1.0-dev.1"
     },
     {
-      "root": "06aa558d802e0247917d348175888a8143460d0d1a57354086996362b2fbf715",
+      "root": "bd351c81d7e171367b3e9d0ec08f8bb744a8110e50167d11e2606c4520db38e4",
       "name": "zclassic23/rvvirtio",
       "semver": "0.1.0-dev.1"
     }

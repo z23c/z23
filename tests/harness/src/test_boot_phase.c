@@ -946,8 +946,13 @@ static bool bp_checkpoint_bench(struct boot_cutover_replay *r, event_log_t *log)
     unsigned char payload[4096]; memset(payload, 0x5a, sizeof(payload));
     for (int size = 0; size < 2; ++size) {
         int blocks = size == 0 ? 4 : 2048;
+        /* Build the durable fixture in batches; the measurements below use
+         * the normal synchronous mode, with all fixture events flushed. */
+        event_log_set_deferred_sync(log, true);
         for (int i = 0; i < blocks; ++i)
             if (event_log_append(log, EV_BLOCK_BODY, payload, sizeof(payload)) == UINT64_MAX) return false;
+        if (!event_log_flush(log)) return false;
+        event_log_set_deferred_sync(log, false);
         for (int sample = 0; sample < 3; ++sample) {
             struct wallet_discover_checkpoint cp;
             int64_t start = platform_time_monotonic_us();

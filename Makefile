@@ -14407,7 +14407,8 @@ check-long-functions: $(LINTC_TOOL)
 	@echo "══ LINT: long function cap (500 lines) ══"
 	@./build/bin/z23-lint check-long-functions --selftest && ./build/bin/z23-lint check-long-functions
 
-# Cyclomatic complexity cap 15 per C function definition (decision points:
+# Cyclomatic complexity cap 15 per function definition or function-like macro
+# in tracked .c, .h, .inc and .def files, including tests/fixtures (decision points:
 # if/for/while/case keywords, && and || operators, ternary ?, with comments
 # and string/char literals stripped). Legacy offenders are pinned at their
 # current M in tools/lint/cyclomatic_complexity_baseline.txt, an

@@ -156,6 +156,18 @@ static inline bool zcl_text_fit_impl(char *dst, size_t cap, const char *src,
     return false;
 }
 
+/* Return the bounded length, terminating an unterminated destination. */
+static inline size_t zcl_text_fit_used(char *dst, size_t cap)
+{
+    size_t used = 0;
+    while (used < cap && dst[used] != '\0') used++;
+    if (used >= cap) {
+        dst[cap - 1] = '\0';
+        used = cap - 1;
+    }
+    return used;
+}
+
 /* Append `src` to whatever NUL-terminated text is already in `dst[cap]`,
  * inserting `sep` first when `dst` is non-empty (pass NULL/"" for none). Same
  * visible-marker + report contract; used by the comma-joined warning
@@ -175,13 +187,7 @@ static inline bool zcl_text_fit_append_impl(char *dst, size_t cap,
     /* Bounded length, hand-rolled: this header must compile in a TU that has
      * not asked for POSIX 2008 (strnlen is not ISO C), because some tools link
      * their own explicit source lists with their own flags. */
-    size_t used = 0;
-    while (used < cap && dst[used] != '\0')
-        used++;
-    if (used >= cap) {                 /* caller handed us an unterminated field */
-        dst[cap - 1] = '\0';
-        used = cap - 1;
-    }
+    size_t used = zcl_text_fit_used(dst, cap);
     size_t seplen = (used && sep) ? strlen(sep) : 0;
     size_t srclen = strlen(src);
     size_t intended = used + seplen + srclen;

@@ -43,11 +43,12 @@
  * RATCHET enforces the baseline; FAIL fails every over-cap function and
  * ignores the baseline.
  *
- * Function-like macros: a `#define NAME(...)` in a .c file is measured as a
+ * Function-like macros: a `#define NAME(...)` in a scanned file is measured as a
  * function named NAME over its whole spliced body, with the same decision
  * points and the same cap, so control flow moved into a macro cannot dodge
  * the gate. The closing while of a `do { ... } while (0)` wrapper is no
- * decision point. Object-like macros and headers are not measured.
+ * decision point. Object-like macros are not measured. Macro expansions and
+ * control flow split across included files are not reconstructed.
  *
  * The selftest lives in gate_function_complexity_selftest.c.
  */
@@ -68,7 +69,7 @@ enum { LX_CODE = 0, LX_LINE, LX_BLOCK, LX_STR, LX_CHR };
 
 static const char k_cyc_base_rel[] =
     "tools/lint/cyclomatic_complexity_baseline.txt";
-static const char k_cyc_ls[] = "git ls-files -z -- '*.c'";
+static const char k_cyc_ls[] = "git ls-files -z -- '*.c' '*.h' '*.inc' '*.def'";
 /* TMPDIR fallback for the selftest: the one pinned bare-tmp site here. */
 const char cyc_tmp_default[] = "/tmp";
 
@@ -721,8 +722,8 @@ int cyc_scan_text(const char *text, const char *path,
 }
 
 /* ── scope ───────────────────────────────────────────────────────────────
- * git ls-files '*.c' from the repo root, minus vendor/, build/, test-tmp/,
- * tests/fixtures/, and anything under a .z23* directory. With
+ * tracked .c, .h, .inc and .def from the repo root, minus vendor/, build/, test-tmp/,
+ * and paths with a .z23-prefixed component. With
  * ZCL_CYCLOMATIC_ROOT set (the selftest fixture rail), walk that root
  * instead and report paths relative to it. */
 
@@ -738,7 +739,6 @@ static int cyc_excluded(const char *p)
 {
     return strncmp(p, "vendor/", 7) == 0 || strncmp(p, "build/", 6) == 0
         || strncmp(p, "test-tmp/", 9) == 0
-        || strncmp(p, "tests/fixtures/", 15) == 0
         || strncmp(p, ".z23", 4) == 0 || strstr(p, "/.z23") != NULL;
 }
 
@@ -1030,7 +1030,7 @@ int cyc_check(const char *root, const char *base_path,
     };
     int rc;
     if (root)
-        rc = walk_src(root, 0, cyc_on_walk_file, &w);
+        rc = walk_src(root, 3, cyc_on_walk_file, &w);
     else
         rc = each_zpath(k_cyc_ls, cyc_on_path, &w);
     if (rc == 0 && strcmp(mode, "FAIL") != 0 && !report) {
@@ -1099,7 +1099,7 @@ int cyc_write_baseline(const char *root, const char *base_path)
     };
     int rc;
     if (root)
-        rc = walk_src(root, 0, cyc_on_walk_file, &w);
+        rc = walk_src(root, 3, cyc_on_walk_file, &w);
     else
         rc = each_zpath(k_cyc_ls, cyc_on_path, &w);
     if (rc)
