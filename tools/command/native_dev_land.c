@@ -242,9 +242,11 @@ void dl_fail(struct zcl_command_reply *reply, const char *code,
  * before any queue or worktree access. Retryable: the caller is expected to
  * step again shortly rather than treat this as a real failure. The lock is
  * a plain open+flock, not a pid-file, so the holder is read from the
- * kernel's /proc/locks (never from the file); the evidence says "unknown"
- * where the kernel does not say, and always names the queue directory. */
-static bool dl_lock_holder_pid(const char *path, int *pid_out);
+ * kernel's /proc/locks (never from the file); for shared locks it reports
+ * one observed holder, not an exclusive owner or a complete holder list.
+ * The evidence says "unknown" where the kernel does not say, and always
+ * names the queue directory. */
+static bool dl_lock_holder_pid(const char *path, int *pid_out, bool include_shared);
 
 static void dl_step_busy(struct zcl_command_reply *reply, const char *landdir)
 {
@@ -253,7 +255,7 @@ static void dl_step_busy(struct zcl_command_reply *reply, const char *landdir)
     int n = landdir ? snprintf(path, sizeof(path), "%s/step.lock", landdir)
                     : -1;
     if (n > 0 && (size_t)n < sizeof(path) &&
-        dl_lock_holder_pid(path, &pid))
+        dl_lock_holder_pid(path, &pid, true))
         (void)snprintf(holder, sizeof(holder), "%d", pid);
     (void)snprintf(evidence, sizeof(evidence), "holder_pid=%s queue=%s",
                    holder, landdir ? landdir : "");
@@ -261,7 +263,7 @@ static void dl_step_busy(struct zcl_command_reply *reply, const char *landdir)
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                            ZCL_COMMAND_EXIT_BLOCKED, "STEP_BUSY", "step",
                            true, false,
-                           "another driver is already stepping this queue; "
+                           "another process holds the queue step lock; "
                            "retry",
                            evidence);
 }
@@ -4048,11 +4050,12 @@ static int64_t dl_row_age(const struct dl_row *row, int64_t now, int64_t bound)
     return age;
 }
 
-static bool dl_lock_holder_pid(const char *path, int *pid_out)
+static bool dl_lock_holder_pid(const char *path, int *pid_out, bool include_shared)
 {
 #if !defined(__linux__)
     (void)path;
     (void)pid_out;
+    (void)include_shared;
     return false;
 #else
     struct stat st;
@@ -4072,8 +4075,11 @@ static bool dl_lock_holder_pid(const char *path, int *pid_out)
         int pid = 0;
         unsigned lm = 0, ln = 0;
         unsigned long lino = 0;
-        if (sscanf(line, "%*d: FLOCK ADVISORY WRITE %d %x:%x:%lu",
-                   &pid, &lm, &ln, &lino) != 4)
+        char mode[6];
+        if (sscanf(line, "%*d: FLOCK ADVISORY %5s %d %x:%x:%lu",
+                   mode, &pid, &lm, &ln, &lino) != 5 ||
+            (strcmp(mode, "WRITE") != 0 &&
+             !(include_shared && strcmp(mode, "READ") == 0)))
             continue;
         if (lm == maj && ln == min && lino == ino && pid > 0) {
             *pid_out = pid;
@@ -4124,7 +4130,7 @@ static enum dl_beat dl_lock_state(const char *landdir, const char *name, int *pi
     (void)close(fd);
     if (err == EWOULDBLOCK || err == EAGAIN) {
         if (pid_out)
-            (void)dl_lock_holder_pid(path, pid_out);
+            (void)dl_lock_holder_pid(path, pid_out, false);
         return DL_BEAT_HELD;
     }
     return DL_BEAT_UNKNOWN;
@@ -12987,7 +12993,7 @@ static int dl_drive_lock(struct zcl_command_reply *reply)
     fd = dl_lock_path(path, true);
     if (fd >= 0)
         return fd;
-    if (dl_lock_holder_pid(path, &pid))
+    if (dl_lock_holder_pid(path, &pid, false))
         (void)snprintf(evidence, sizeof(evidence),
                        "another drive holds drive.lock (pid %d)", pid);
     dl_fail(reply, "DRIVE_BUSY", "drive",

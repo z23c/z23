@@ -1224,6 +1224,29 @@ int dlx_case_step_lock(void)
 
         /* Released, a step proceeds exactly as it would have. */
         dlx_step_lock_release(lockfd);
+#if defined(__linux__)
+        {
+            char path[1400], want[48];
+            ASSERT(snprintf(path, sizeof(path), "%s/step.lock", landdir) > 0);
+            lockfd = open(path, O_RDWR | O_CLOEXEC);
+            ASSERT(lockfd >= 0 && flock(lockfd, LOCK_SH | LOCK_NB) == 0);
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c)); ASSERT(!dlx_ok(&c));
+            ASSERT(strcmp(dlx_err_code(&c), "STEP_BUSY") == 0);
+            ASSERT(c.reply.error.retryable && !c.reply.error.mutated);
+            (void)snprintf(want, sizeof(want), "holder_pid=%d ", (int)getpid());
+            ASSERT(strstr(dlx_err_evidence(&c), want) != NULL);
+            dlx_end(&c);
+            ASSERT(dlx_slurp(qpath, after, sizeof(after), &after_len));
+            ASSERT_EQ((long long)before_len, (long long)after_len);
+            ASSERT(memcmp(before, after, before_len) == 0);
+            dlx_begin(&c, "status"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+            const struct json_value *steer = json_get(&c.reply.data, "steer");
+            ASSERT(steer && strcmp(dlx_jstr(steer, "owner"), "pid:unknown") == 0);
+            dlx_end(&c);
+            dlx_step_lock_release(lockfd);
+        }
+#endif
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
