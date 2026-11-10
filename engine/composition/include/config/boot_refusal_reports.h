@@ -111,6 +111,12 @@ void boot_report_post_restore_corrupt(const char *datadir, int tip_h,
                                       int zero_nbits, int mismatches,
                                       int first_mismatch_h);
 
+/* BOOT_SEED_ONESHOT_SNAPSHOT_OPEN_FAILED — uss_open failed for
+ * -coldstart-seed-oneshot. Boot refuses rather than continue without the
+ * seed snapshot. */
+void boot_report_seed_oneshot_snapshot_open_failed(const char *path,
+                                                   const char *err);
+
 #ifdef __cplusplus
 }
 #endif

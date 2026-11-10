@@ -379,3 +379,16 @@ void boot_report_post_restore_corrupt(const char *datadir, int tip_h,
                       "first_mismatch_h=%d",
                       dd, tip_h, zero_nbits, mismatches, first_mismatch_h);
 }
+
+void boot_report_seed_oneshot_snapshot_open_failed(const char *path,
+                                                   const char *err)
+{
+    const char *p = path && path[0] ? path : "(unset)";
+    const char *e = err && err[0] ? err : "(none)";
+    boot_error_report(BOOT_ERROR_FATAL,
+                      "BOOT_SEED_ONESHOT_SNAPSHOT_OPEN_FAILED",
+                      "seed.oneshot",
+                      "coldstart seed one-shot cannot open the snapshot; "
+                      "refusing to boot",
+                      NULL, 0, "path=%s err=%s", p, e);
+}

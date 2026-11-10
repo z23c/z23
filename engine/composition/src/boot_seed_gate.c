@@ -19,6 +19,7 @@
  * tests/harness/src/test_loader_owns_seed_gate.c. */
 
 #include "config/boot.h"          /* struct app_context, the gate declarations */
+#include "config/boot_refusal_reports.h" /* boot_report_seed_oneshot_snapshot_open_failed */
 
 #include "chain/utxo_snapshot_loader.h"  /* uss_open/uss_version/uss_close */
 #include "chain/chainparams.h"           /* chain_params_get */
@@ -96,8 +97,8 @@ bool boot_seed_oneshot_headers_preflight(const struct app_context *ctx,
                                        /*expected_sha3=*/NULL, &hdr, err,
                                        sizeof(err));
     if (!peek) {
-        fprintf(stderr, "FATAL: -coldstart-seed-oneshot: cannot open seed "
-                "snapshot %s: %s\n", ctx->load_snapshot_at_own_height, err);
+        boot_report_seed_oneshot_snapshot_open_failed(
+            ctx->load_snapshot_at_own_height, err);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                     "coldstart_seed_oneshot snapshot_open_failed err=%s", err);
         return false;

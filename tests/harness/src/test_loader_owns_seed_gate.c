@@ -32,11 +32,47 @@
 #include "test/test_core.h"
 
 #include "config/boot.h"          /* struct app_context, boot_snapshot_anchor_hash_matches */
+#include "config/boot_error.h"    /* boot_error_reset_for_testing, first code */
 #include "config/boot_internal.h" /* boot_loader_owns_seed */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+/* Calls the shipped preflight. A missing snapshot must latch the typed
+ * open refusal; a normal boot (flags false) must not. */
+static bool losg_oneshot_snapshot_open_latches(void)
+{
+    struct app_context ctx;
+    char rendered[4096];
+    const char *path = "/no/such/z23-seed-snapshot.uss";
+
+    boot_error_reset_for_testing();
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.cold_start_seed_oneshot = true;
+    ctx.load_snapshot_at_own_height = path;
+    if (boot_seed_oneshot_headers_preflight(&ctx, NULL) != false)
+        return false;
+    if (!boot_error_reported())
+        return false;
+    if (strcmp(boot_error_first_code(),
+               "BOOT_SEED_ONESHOT_SNAPSHOT_OPEN_FAILED") != 0)
+        return false;
+    if (boot_error_last_render(rendered, sizeof(rendered)) == 0)
+        return false;
+    if (strstr(rendered, "BOOT_SEED_ONESHOT_SNAPSHOT_OPEN_FAILED") == NULL)
+        return false;
+    if (strstr(rendered, "seed.oneshot") == NULL)
+        return false;
+    if (strstr(rendered, "/no/such/z23-seed-snapshot.uss") == NULL)
+        return false;
+
+    boot_error_reset_for_testing();
+    memset(&ctx, 0, sizeof(ctx));
+    if (boot_seed_oneshot_headers_preflight(&ctx, NULL) != true)
+        return false;
+    return !boot_error_reported();
+}
 
 #define LOSG_CHECK(name, expr) do {                       \
     printf("loader_owns_seed_gate: %s... ", (name));      \
@@ -167,6 +203,11 @@ int test_loader_owns_seed_gate(void)
         LOSG_CHECK("d3: no best_header (tip=-1) -> false",
                    boot_seed_oneshot_headers_ready(-1, SEED) == false);
     }
+
+    /* Missing -coldstart-seed-oneshot snapshot: the shipped preflight
+     * latches BOOT_SEED_ONESHOT_SNAPSHOT_OPEN_FAILED. Flags off do not. */
+    LOSG_CHECK("d3: missing oneshot snapshot latches typed open refusal",
+               losg_oneshot_snapshot_open_latches());
 
     return failures;
 }
