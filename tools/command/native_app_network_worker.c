@@ -166,7 +166,7 @@ static bool anw_connect(const struct anw_request *r, char **argv, struct anw_res
     int64_t elapsed = platform_time_monotonic_ms() - start;
     struct app_network_transport transport = {.fetch = app_network_tor_fetch,
         .timeout_ms = elapsed >= 0 && elapsed < (int64_t)r->timeout ? (unsigned)(r->timeout - (uint64_t)elapsed) : 0,
-        .parallel_safe = true};
+        .parallel_safe = true, .fetch_budgeted = app_network_tor_fetch_budgeted};
     bool ok = started && tor_integration_is_dial_ready() && transport.timeout_ms && anw_fetch(r, argv, &transport, out);
     if (started) tor_integration_stop();
     return ok;

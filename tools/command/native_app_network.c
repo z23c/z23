@@ -24,7 +24,95 @@
 #define AN_FRAME_CAP (FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES + 5u)
 #define AN_MAX_REQUESTS 128u
 
-struct an_run { const struct app_network_transport *t; int64_t deadline; unsigned calls; enum app_network_error *error; };
+struct an_run { const struct app_network_transport *t; int64_t deadline; atomic_uint calls; enum app_network_error *error; };
+static bool an_reserve(atomic_uint *attempts)
+{
+    unsigned n = atomic_load_explicit(attempts, memory_order_relaxed);
+    while (n < AN_MAX_REQUESTS) {
+        if (atomic_compare_exchange_weak_explicit(attempts, &n, n + 1u,
+            memory_order_relaxed, memory_order_relaxed)) return true;
+    }
+    return false;
+}
+struct an_tor_reply {
+    atomic_uint refs; atomic_bool done;
+    uint8_t *body; size_t len, cap; int status; bool malformed;
+};
+static void an_tor_release(struct an_tor_reply *reply)
+{
+    if (atomic_fetch_sub_explicit(&reply->refs, 1u, memory_order_acq_rel) == 1u) {
+        free(reply->body); free(reply);
+    }
+}
+static void an_tor_callback(int status, const uint8_t *body, size_t len, void *context)
+{
+    struct an_tor_reply *reply = context; reply->status = status;
+    if (len > reply->cap || (len && !body) || (status < 0 && len)) reply->malformed = true;
+    else if (status >= 0 && len) {
+        reply->body = zcl_malloc(len, "app.network.tor.reply");
+        if (!reply->body) reply->malformed = true;
+        else { memcpy(reply->body, body, len); reply->len = len; }
+    }
+    atomic_store_explicit(&reply->done, true, memory_order_release);
+    an_tor_release(reply);
+}
+static int an_tor_dispatch(const char *onion, const char *path, bool post,
+    const uint8_t *body, size_t len, tor_fetch_callback_fn callback, void *context, int timeout)
+{
+    (void)post; (void)body; (void)len;
+    return tor_integration_fetch_onion(onion, path, callback, context, timeout);
+}
+static int an_tor_wait(struct an_tor_reply *reply, int64_t deadline,
+                       uint8_t *out, size_t *len, int *status,
+                       bool (*cancelled)(void *), void *cancel_context)
+{
+    int64_t now;
+    while (!atomic_load_explicit(&reply->done, memory_order_acquire)) {
+        if (cancelled && cancelled(cancel_context)) return 0;
+        now = platform_time_monotonic_ms();
+        if (now < 0 || now >= deadline) return 0;
+        platform_sleep_ms(10);
+    }
+    now = platform_time_monotonic_ms();
+    if (now < 0 || now >= deadline || reply->malformed || (cancelled && cancelled(cancel_context))) return 0;
+    if (reply->status < 0) return -1;
+    if (reply->len) memcpy(out, reply->body, reply->len);
+    *len = reply->len; *status = reply->status; return 1;
+}
+static int an_tor_attempt(tor_fetch_dispatch_fn dispatch, const char *onion, const char *path,
+    uint8_t *out, size_t cap, size_t *len, int *status, int64_t deadline, atomic_uint *attempts,
+    unsigned max_seconds, bool (*cancelled)(void *), void *cancel_context)
+{
+    int64_t now = platform_time_monotonic_ms();
+    if (now < 0 || now >= deadline || deadline - now < 1000 || (cancelled && cancelled(cancel_context))) return 0;
+    struct an_tor_reply *reply = zcl_calloc(1, sizeof(*reply), "app.network.tor.context");
+    if (!reply) return 0;
+    if (!an_reserve(attempts)) { free(reply); return 0; }
+    reply->cap = cap; atomic_init(&reply->refs, 2u); atomic_init(&reply->done, false);
+    now = platform_time_monotonic_ms();
+    if (now < 0 || now >= deadline || deadline - now < 1000 || (cancelled && cancelled(cancel_context))) {
+        an_tor_release(reply); an_tor_release(reply); return 0;
+    }
+    int seconds = (int)((deadline - now) / 1000); if ((unsigned)seconds > max_seconds) seconds = (int)max_seconds;
+    if (dispatch(onion, path, false, NULL, 0, an_tor_callback, reply, seconds) < 0) {
+        an_tor_release(reply); an_tor_release(reply); return 0;
+    }
+    int outcome = an_tor_wait(reply, deadline, out, len, status, cancelled, cancel_context);
+    an_tor_release(reply); return outcome;
+}
+static bool an_tor_fetch_retry(tor_fetch_dispatch_fn dispatch, const char *onion, const char *path,
+    uint8_t *out, size_t cap, size_t *len, int *status, int64_t deadline, atomic_uint *attempts,
+    unsigned max_seconds, bool (*cancelled)(void *), void *cancel_context)
+{
+    *len = 0; *status = 0;
+    if (!dispatch || !out || !attempts || !max_seconds || max_seconds > 30u) return false;
+    for (unsigned i = 0; i < 4; i++) {
+        int outcome = an_tor_attempt(dispatch, onion, path, out, cap, len, status, deadline, attempts,
+                                     max_seconds, cancelled, cancel_context);
+        if (outcome >= 0) return outcome == 1;
+    }
+    return false;
+}
 static bool an_tor_ready(const char *onion, const char *path, unsigned timeout_ms)
 {
     return onion && strlen(onion) == 62u && vcs_app_offer_peer_is_onion(onion) &&
@@ -45,6 +133,30 @@ bool app_network_tor_fetch(void *context, const char *onion, const char *path,
     if (ok) { if (result.body_len) memcpy(out, result.body, result.body_len); *len = result.body_len; *status = result.status; }
     free(result.body); return ok;
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_app_network_retry_fetch(tor_fetch_dispatch_fn dispatch, uint8_t *out, size_t cap,
+                                     size_t *len, int *status)
+{
+    atomic_uint attempts; atomic_init(&attempts, 0u);
+    return an_tor_fetch_retry(dispatch, "test.onion", "/", out, cap, len, status,
+                              platform_time_monotonic_ms() + 2000, &attempts, 30u, NULL, NULL);
+}
+bool zcl_test_app_network_retry_budget(tor_fetch_dispatch_fn dispatch, uint8_t *out, size_t cap,
+    size_t *len, int *status, int64_t deadline, atomic_uint *attempts, unsigned max_seconds)
+{ return an_tor_fetch_retry(dispatch, "test.onion", "/", out, cap, len, status, deadline, attempts, max_seconds, NULL, NULL); }
+bool zcl_test_app_network_retry_cancel(tor_fetch_dispatch_fn dispatch, uint8_t *out, size_t cap,
+    size_t *len, int *status, int64_t deadline, atomic_uint *attempts,
+    bool (*cancelled)(void *), void *context)
+{ return an_tor_fetch_retry(dispatch, "test.onion", "/", out, cap, len, status, deadline, attempts, 1u, cancelled, context); }
+#endif
+bool app_network_tor_fetch_budgeted(void *context, const char *onion, const char *path,
+    uint8_t *out, size_t cap, size_t *len, int *status, int64_t deadline, atomic_uint *attempts,
+    bool (*cancelled)(void *))
+{
+    if (!out || !len || !status || !attempts || !an_tor_ready(onion, path, 1)) return false;
+    return an_tor_fetch_retry(an_tor_dispatch, onion, path, out, cap, len, status, deadline,
+                              attempts, 30u, cancelled, context);
+}
 static bool an_onion(const char *s)
 {
     return s && strlen(s) == 62u && vcs_app_offer_peer_is_onion(s);
@@ -52,10 +164,12 @@ static bool an_onion(const char *s)
 static bool an_begin(struct an_run *r, const struct app_network_transport *t,
                      enum app_network_error *error)
 {
-    if (!t || !t->fetch || !t->timeout_ms || t->timeout_ms > 120000u) return false;
+    if (!t || !t->fetch || !t->timeout_ms || t->timeout_ms > 120000u ||
+        (t->fetch_budgeted && t->parallel_safe && t->cancelled && !t->cancelled_parallel_safe)) return false;
     int64_t now = platform_time_monotonic_ms();
     if (now < 0 || now > INT64_MAX - (int64_t)t->timeout_ms) return false;
     *r = (struct an_run){.t = t, .deadline = now + (int64_t)t->timeout_ms, .error = error};
+    atomic_init(&r->calls, 0u);
     return true;
 }
 static bool an_live(struct an_run *r)
@@ -74,11 +188,12 @@ static bool an_fetch(struct an_run *r, const char *onion, const char *path,
     if (!an_live(r)) return false;
     int64_t now = platform_time_monotonic_ms();
     if (now < 0 || now >= r->deadline) { *r->error = APP_NETWORK_TIMEOUT; return false; }
-    if (!an_onion(onion) || r->calls >= AN_MAX_REQUESTS) return false;
-    r->calls++;
+    if (!an_onion(onion) || (!r->t->fetch_budgeted && !an_reserve(&r->calls))) return false;
     int status = 0;
     unsigned remaining = (unsigned)(r->deadline - now);
-    bool ok = r->t->fetch(r->t->context, onion, path, out, cap, len, &status, remaining);
+    bool ok = r->t->fetch_budgeted ? r->t->fetch_budgeted(r->t->context, onion, path,
+        out, cap, len, &status, r->deadline, &r->calls, r->t->cancelled) :
+        r->t->fetch(r->t->context, onion, path, out, cap, len, &status, remaining);
     if (!an_live(r)) return false;
     if (!ok || status != 200) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
     if (*len > cap) { *r->error = APP_NETWORK_INVALID_RESPONSE; return false; }
@@ -254,6 +369,7 @@ struct an_slice_job {
     uint8_t *out;
     size_t want, got;
     int64_t deadline;
+    atomic_uint *attempts;
     int status;
     bool ok;
     atomic_bool done;
@@ -271,9 +387,13 @@ static void *an_slice_worker(void *context)
 {
     struct an_slice_job *j = context;
     int64_t now = platform_time_monotonic_ms();
-    if (now >= 0 && now < j->deadline)
-        j->ok = j->transport->fetch(j->transport->context, j->onion, j->path,
+    if (now >= 0 && now < j->deadline) {
+        if (j->transport->fetch_budgeted)
+            j->ok = j->transport->fetch_budgeted(j->transport->context, j->onion, j->path,
+                j->out, j->want, &j->got, &j->status, j->deadline, j->attempts, j->transport->cancelled);
+        else j->ok = j->transport->fetch(j->transport->context, j->onion, j->path,
             j->out, j->want, &j->got, &j->status, (unsigned)(j->deadline - now));
+    }
     atomic_store_explicit(&j->done, true, memory_order_release);
     return NULL;
 }
@@ -313,12 +433,12 @@ static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const cha
     if (!an_live(r)) return false;
     int64_t now = platform_time_monotonic_ms();
     if (now < 0 || now >= r->deadline) { *r->error = APP_NETWORK_TIMEOUT; return false; }
-    if (!an_onion(onion) || r->calls >= AN_MAX_REQUESTS) return false;
+    if (!an_onion(onion) || (!r->t->fetch_budgeted && !an_reserve(&r->calls))) return false;
     j->transport = r->t; j->onion = onion; j->out = chunk + off;
     j->want = size - off < AN_SLICE ? size - off : AN_SLICE;
-    j->deadline = r->deadline;
+    j->deadline = r->deadline; j->attempts = &r->calls;
     (void)snprintf(j->path, sizeof(j->path), "/zcode/download/%s/0/%u/slice/%zu", o->carrier, index, off);
-    atomic_init(&j->done, false); r->calls++; return true;
+    atomic_init(&j->done, false); return true;
 }
 static bool an_slice_results(struct an_run *r, struct an_slice_batch *b, unsigned started)
 {

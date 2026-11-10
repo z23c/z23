@@ -61,6 +61,7 @@ int test_app_get(void)
 #include "crypto/sha256.h"
 #include "controllers/rpc_client.h"
 #include "json/json.h"
+#include "net/tor_integration.h"
 #include "platform/time_compat.h"
 #include "session/fleet_board_proto.h"
 #include "vcs/bundle_carry.h"
@@ -1013,6 +1014,13 @@ static bool tag_network_fault_cases(struct tag_net *f, struct app_network_transp
         tag_network_bad_carriers(f, t, row, store, now) && tag_network_bad_catalog(f, t, now) &&
         tag_network_direct(f, t, store, now) && tag_network_bad_sha(f, t, store, now);
 }
+static bool tag_network_unsafe_cancel_refused(struct tag_net *f, int64_t now)
+{
+    struct app_network_transport t = {.fetch = tag_net_fetch, .fetch_budgeted = app_network_tor_fetch_budgeted,
+        .cancelled = tag_net_cancelled, .context = f, .timeout_ms = 120000, .parallel_safe = true};
+    struct zcl_app_offer_row row = {0}; enum app_network_error error; int before = f->calls;
+    return !app_network_exact(&t, TAG_NET_RELAY, f->id, now, &row, &error) && f->calls == before;
+}
 static bool tag_network_exercise(void)
 {
     struct tag_net f; bool ok = tag_net_init(&f, VCS_PACKAGE_CHUNK_BYTES + 13u);
@@ -1023,7 +1031,8 @@ static bool tag_network_exercise(void)
                                       .context = &f, .timeout_ms = 120000};
     struct zcl_app_offer_row row = {0}, rows[4] = {0}; size_t count = 0; bool incomplete = true;
     enum app_network_error error = APP_NETWORK_OK; int64_t now = platform_time_wall_unix();
-    ok = ok && store && app_network_catalog(&t, TAG_NET_RELAY, now, rows, 4, &count, &incomplete, &error) &&
+    ok = ok && store && tag_network_unsafe_cancel_refused(&f, now) &&
+         app_network_catalog(&t, TAG_NET_RELAY, now, rows, 4, &count, &incomplete, &error) &&
          count == 1 && !incomplete && app_network_exact(&t, TAG_NET_RELAY, f.id, now, &row, &error) &&
          tag_network_fault_cases(&f, &t, &row, store, now);
     if (store) vcs_package_store_close(store);
@@ -1089,6 +1098,129 @@ static int tag_network_ipc(void)
         ASSERT(zcl_test_app_network_job_parse(good, sizeof(good) - 1, &args, &result));
         ASSERT(!zcl_test_app_network_job_parse(raw_nul, sizeof(raw_nul) - 1, &args, &result));
         ASSERT(!zcl_test_app_network_job_parse(decoded_nul, sizeof(decoded_nul) - 1, &args, &result));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+extern bool zcl_test_app_network_retry_fetch(tor_fetch_dispatch_fn dispatch, uint8_t *out,
+                                             size_t cap, size_t *len, int *status);
+extern bool zcl_test_app_network_retry_budget(tor_fetch_dispatch_fn dispatch, uint8_t *out,
+    size_t cap, size_t *len, int *status, int64_t deadline, atomic_uint *attempts, unsigned max_seconds);
+extern bool zcl_test_app_network_retry_cancel(tor_fetch_dispatch_fn dispatch, uint8_t *out,
+    size_t cap, size_t *len, int *status, int64_t deadline, atomic_uint *attempts,
+    bool (*cancelled)(void *), void *context);
+static atomic_uint tag_retry_dispatches;
+static atomic_int tag_retry_first_timeout;
+static atomic_bool tag_retry_pending_ready;
+static unsigned tag_retry_mode;
+static tor_fetch_callback_fn tag_retry_pending;
+static void *tag_retry_pending_context;
+static pthread_t tag_retry_thread;
+static bool tag_retry_thread_started;
+static void *tag_retry_delayed(void *unused)
+{
+    (void)unused; platform_sleep_ms(1100);
+    tag_retry_pending(-1, NULL, 0, tag_retry_pending_context); return NULL;
+}
+static int tag_retry_dispatch(const char *onion, const char *path, bool post,
+    const uint8_t *body, size_t body_len, tor_fetch_callback_fn callback, void *context, int timeout)
+{
+    (void)onion; (void)path; (void)post; (void)body; (void)body_len; (void)timeout;
+    static const uint8_t response[] = {42};
+    unsigned call = atomic_fetch_add(&tag_retry_dispatches, 1u) + 1u;
+    if (call == 1) atomic_store(&tag_retry_first_timeout, timeout);
+    if (tag_retry_mode == 1) callback(-1, NULL, 0, context);
+    else if (tag_retry_mode == 2) callback(200, NULL, 1, context);
+    else if (tag_retry_mode == 3) { tag_retry_pending = callback; tag_retry_pending_context = context;
+        atomic_store_explicit(&tag_retry_pending_ready, true, memory_order_release); }
+    else if (tag_retry_mode == 4) callback(503, NULL, 0, context);
+    else if (tag_retry_mode == 6) callback(-1, NULL, 1, context);
+    else if (tag_retry_mode == 7) return -1;
+    else if (tag_retry_mode == 8) callback(-1, response, sizeof(response), context);
+    else if (tag_retry_mode == 5 && call == 1) {
+        tag_retry_pending = callback; tag_retry_pending_context = context;
+        if (pthread_create(&tag_retry_thread, NULL, tag_retry_delayed, NULL) != 0) return -1;
+        tag_retry_thread_started = true;
+    } else if (call == 1 && tag_retry_mode == 0) callback(-1, NULL, 0, context);
+    else callback(200, response, sizeof(response), context);
+    return 0;
+}
+struct tag_retry_parallel { atomic_uint *attempts; bool result; };
+static void *tag_retry_parallel_run(void *context)
+{
+    struct tag_retry_parallel *p = context; uint8_t out[8]; size_t len; int status;
+    p->result = zcl_test_app_network_retry_budget(tag_retry_dispatch, out, sizeof(out), &len, &status,
+        platform_time_monotonic_ms() + 5000, p->attempts, 1u);
+    return NULL;
+}
+static bool tag_retry_parallel_budget(void)
+{
+    atomic_uint attempts; atomic_init(&attempts, 126u); atomic_store(&tag_retry_dispatches, 0u);
+    tag_retry_mode = 1; struct tag_retry_parallel p[4] = {0}; pthread_t threads[4]; unsigned started = 0;
+    for (; started < 4; started++) { p[started].attempts = &attempts;
+        if (pthread_create(&threads[started], NULL, tag_retry_parallel_run, &p[started]) != 0) break; }
+    bool ok = started == 4;
+    for (unsigned i = 0; i < started; i++) ok = pthread_join(threads[i], NULL) == 0 && !p[i].result && ok;
+    return ok && atomic_load(&attempts) == 128u && atomic_load(&tag_retry_dispatches) == 2u;
+}
+static bool tag_retry_single(unsigned mode, bool expected, int expected_status)
+{
+    uint8_t out[8] = {0}; size_t len = 0; int status = 0; atomic_uint attempts;
+    atomic_init(&attempts, 0u); atomic_store(&tag_retry_dispatches, 0u); tag_retry_mode = mode;
+    bool ok = zcl_test_app_network_retry_budget(tag_retry_dispatch, out, sizeof(out), &len, &status,
+        platform_time_monotonic_ms() + 5000, &attempts, 1u);
+    return ok == expected && status == expected_status && atomic_load(&tag_retry_dispatches) == (mode == 1 ? 4u : 1u);
+}
+static bool tag_retry_faults(void)
+{
+    return tag_retry_single(1, false, 0) && tag_retry_single(2, false, 0) &&
+        tag_retry_single(4, true, 503) && tag_retry_single(6, false, 0) &&
+        tag_retry_single(7, false, 0) && tag_retry_single(8, false, 0) && tag_retry_parallel_budget();
+}
+static bool tag_retry_late_callback(void)
+{
+    uint8_t out[8] = {0}; size_t len = 0; int status = 0; atomic_uint attempts;
+    atomic_init(&attempts, 0u); atomic_store(&tag_retry_dispatches, 0u); tag_retry_mode = 5; tag_retry_thread_started = false;
+    bool ok = zcl_test_app_network_retry_budget(tag_retry_dispatch, out, sizeof(out), &len, &status,
+        platform_time_monotonic_ms() + 8000, &attempts, 1u);
+    ok = tag_retry_thread_started && pthread_join(tag_retry_thread, NULL) == 0 && ok &&
+        atomic_load(&tag_retry_first_timeout) == 1 && atomic_load(&tag_retry_dispatches) == 2u;
+    atomic_store(&attempts, 0u); atomic_store(&tag_retry_dispatches, 0u); tag_retry_mode = 3;
+    tag_retry_pending = NULL;
+    bool expired = !zcl_test_app_network_retry_budget(tag_retry_dispatch, out, sizeof(out), &len, &status,
+        platform_time_monotonic_ms() + 1500, &attempts, 1u);
+    if (tag_retry_pending) tag_retry_pending(-1, NULL, 0, tag_retry_pending_context);
+    return ok && expired && tag_retry_pending && atomic_load(&tag_retry_dispatches) == 1u;
+}
+static bool tag_retry_cancelled(void *context)
+{ return atomic_load_explicit((atomic_bool *)context, memory_order_acquire); }
+static void *tag_retry_cancel_thread(void *context)
+{
+    int64_t end = platform_time_monotonic_ms() + 5000;
+    while (!atomic_load_explicit(&tag_retry_pending_ready, memory_order_acquire) &&
+           platform_time_monotonic_ms() < end) platform_sleep_ms(1);
+    atomic_store_explicit((atomic_bool *)context, true, memory_order_release); return NULL;
+}
+static bool tag_retry_cancel_pending(void)
+{
+    uint8_t out[8] = {0}; size_t len = 0; int status = 0; atomic_uint attempts; atomic_bool cancel;
+    atomic_init(&attempts, 0u); atomic_init(&cancel, false); atomic_store(&tag_retry_dispatches, 0u);
+    tag_retry_mode = 3; tag_retry_pending = NULL; atomic_store(&tag_retry_pending_ready, false); pthread_t thread;
+    if (pthread_create(&thread, NULL, tag_retry_cancel_thread, &cancel) != 0) return false;
+    bool refused = !zcl_test_app_network_retry_cancel(tag_retry_dispatch, out, sizeof(out), &len, &status,
+        platform_time_monotonic_ms() + 5000, &attempts, tag_retry_cancelled, &cancel);
+    bool joined = pthread_join(thread, NULL) == 0;
+    if (tag_retry_pending) tag_retry_pending(-1, NULL, 0, tag_retry_pending_context);
+    return refused && joined && tag_retry_pending && atomic_load(&tag_retry_dispatches) == 1u;
+}
+static int tag_network_retry(void)
+{
+    int failures = 0;
+    TEST("terminal Tor transport failure permits a bounded later success") {
+        uint8_t out[8] = {0}; size_t len = 0; int status = 0; atomic_store(&tag_retry_dispatches, 0u); tag_retry_mode = 0;
+        ASSERT(zcl_test_app_network_retry_fetch(tag_retry_dispatch, out, sizeof(out), &len, &status));
+        ASSERT_EQ(atomic_load(&tag_retry_dispatches), 2u); ASSERT_EQ(status, 200); ASSERT_EQ(len, 1u); ASSERT_EQ(out[0], 42);
+        ASSERT(tag_retry_faults()); ASSERT(tag_retry_late_callback()); ASSERT(tag_retry_cancel_pending());
         PASS();
     } _test_next:;
     return failures;
@@ -4160,6 +4292,7 @@ int test_app_get(void)
     printf("app get (publish to room apps, get by identity)...\n");
     failures += tag_network_link();
     failures += tag_network_ipc();
+    failures += tag_network_retry();
     failures += tag_network_test();
     failures += tag_process_observation();
     failures += tag_recovery_serialization();

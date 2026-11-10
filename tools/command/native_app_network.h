@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include "session/fleet_board_proto.h"
 
 #define APP_NETWORK_FRAME_HEX_CAP (2u * (FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES + 5u) + 1u)
@@ -23,6 +24,10 @@ struct app_network_transport {
     void *context;
     unsigned timeout_ms; /* deadline, 1..120000; local I/O cannot be interrupted */
     bool parallel_safe; /* fetch callback and context support concurrent calls */
+    bool cancelled_parallel_safe; /* cancelled callback may run on slice threads */
+    bool (*fetch_budgeted)(void *context, const char *onion, const char *path,
+        uint8_t *out, size_t cap, size_t *len, int *status,
+        int64_t deadline, atomic_uint *attempts, bool (*cancelled)(void *));
 };
 #if defined(ZCL_TESTING)
 void zcl_test_app_network_thread_faults(int spawn_after, int join_after);
@@ -37,6 +42,9 @@ enum app_network_error {
  * reconfigures it. A separate process owner must provide that lifetime. */
 bool app_network_tor_fetch(void *context, const char *onion, const char *path,
     uint8_t *out, size_t cap, size_t *len, int *status, unsigned timeout_ms);
+bool app_network_tor_fetch_budgeted(void *context, const char *onion, const char *path,
+    uint8_t *out, size_t cap, size_t *len, int *status, int64_t deadline, atomic_uint *attempts,
+    bool (*cancelled)(void *));
 /* Catalog is a bounded newest sample, not a complete global index. */
 bool app_network_catalog(const struct app_network_transport *transport,
     const char *onion, int64_t now, struct zcl_app_offer_row *rows, size_t cap,
