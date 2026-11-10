@@ -69,6 +69,7 @@
 #define BUF_SZ       (64 * 1024)
 #define TARGET_ADDR  "127.0.0.1"
 #define EPOLL_EVENTS 256
+#define PORTFWD_MANAGED_INTEREST 1
 
 /* One forward pair: a public listen port -> a 127.0.0.1 target port. */
 struct fwd_pair {
@@ -85,7 +86,10 @@ struct endpoint {
     unsigned char   buf[BUF_SZ];
     size_t          buf_len;     /* total bytes buffered */
     size_t          buf_off;     /* bytes already written out of buf */
-    bool            read_eof;    /* OUR fd hit EOF/error; once peer's buf drains, close */
+    bool            read_eof;    /* read returned EOF */
+    bool            write_shutdown;
+    bool            registered;
+    bool            connecting;  /* connect completion has not been checked */
     bool            is_listener; /* true => fd is a listening socket */
     bool            dead;        /* torn down this batch; skip + free after loop */
     struct endpoint *free_next;  /* deferred-free list link */
@@ -101,21 +105,26 @@ static struct endpoint *g_free_list = NULL;
 
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
-/* Update this endpoint's epoll interest: always EPOLLIN unless its peer is
- * fully gone; EPOLLOUT only while we have buffered bytes to flush. */
-static void ep_update(struct endpoint *e)
+/* A full peer buffer disables read and RDHUP interest together. An endpoint
+ * with no useful interest is removed: epoll reports HUP even with a zero mask. */
+static bool ep_update(struct endpoint *e)
 {
     struct epoll_event ev = {0};
     ev.data.ptr = e;
-    ev.events = EPOLLRDHUP;
-    /* Read more from us only if WE haven't hit EOF and the partner's outbound
-     * buffer (which our reads fill) still has room — backpressure. */
-    if (!e->read_eof && e->peer && e->peer->buf_len < BUF_SZ)
-        ev.events |= EPOLLIN;
-    /* Flush our outbound buffer when it has anything. */
-    if (e->buf_len > e->buf_off)
+    if (!e->connecting && !e->read_eof && e->peer && e->peer->buf_len < BUF_SZ)
+        ev.events |= EPOLLIN | EPOLLRDHUP;
+    if (e->connecting || e->buf_len > e->buf_off)
         ev.events |= EPOLLOUT;
-    epoll_ctl(g_epfd, EPOLL_CTL_MOD, e->fd, &ev);
+    if (!ev.events) {
+        if (e->registered && epoll_ctl(g_epfd, EPOLL_CTL_DEL, e->fd, NULL) < 0)
+            return false;
+        e->registered = false;
+        return true;
+    }
+    int op = e->registered ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+    if (epoll_ctl(g_epfd, op, e->fd, &ev) < 0) return false;
+    e->registered = true;
+    return true;
 }
 
 /* Tear down a proxied pair. Unhooks both fds from epoll and closes them NOW (so
@@ -150,8 +159,8 @@ static void drain_free_list(void)
 }
 
 /* Connect a brand-new non-blocking socket to 127.0.0.1:port. Returns fd or -1.
- * A pending (EINPROGRESS) connect is fine — we treat the fd as ready and let
- * the first write surface any real failure. */
+ * A pending (EINPROGRESS) connect stays registered for write readiness; the
+ * event handler checks SO_ERROR before forwarding bytes or EOF. */
 static int connect_target(uint16_t port)
 {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -192,18 +201,22 @@ static void handle_accept(struct endpoint *ln)
         if (!c || !u) { free(c); free(u); close(cfd); close(ufd); continue; }
         c->fd = cfd; u->fd = ufd;
         c->peer = u; u->peer = c;
+        u->connecting = true;
 
         struct epoll_event ev = {0};
         ev.events = EPOLLIN | EPOLLRDHUP;
         ev.data.ptr = c;
         if (epoll_ctl(g_epfd, EPOLL_CTL_ADD, cfd, &ev) < 0) { close(cfd); close(ufd); free(c); free(u); continue; }
+        c->registered = true;
         ev.data.ptr = u;
+        ev.events |= EPOLLOUT;
         if (epoll_ctl(g_epfd, EPOLL_CTL_ADD, ufd, &ev) < 0) { close_pair(c); continue; }
+        u->registered = true;
     }
 }
 
 /* Drain readable bytes from `e->fd` into the PEER's outbound buffer. */
-static void handle_read(struct endpoint *e)
+static bool handle_read(struct endpoint *e)
 {
     struct endpoint *p = e->peer;
     for (;;) {
@@ -213,9 +226,9 @@ static void handle_read(struct endpoint *e)
         if (n == 0) { e->read_eof = true; break; }   /* EOF from us */
         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
         if (errno == EINTR) continue;
-        e->read_eof = true;                          /* hard error */
-        break;
+        return false;                                 /* hard error */
     }
+    return true;
 }
 
 /* Flush this endpoint's outbound buffer to its fd. Returns false if the
@@ -345,31 +358,45 @@ static bool bind_pair_sockets(const struct fwd_pair *pr, bool *v6_ok, bool *v4_o
     return any;
 }
 
-/* Move bytes for one proxied endpoint according to its readiness flags and
- * note hangups. Returns true if the pair must be torn down. */
+/* Hangup is only a hint to read: unread kernel data can outlive RDHUP. */
 static bool service_endpoint_io(struct endpoint *e, struct endpoint *peer, uint32_t ev)
 {
-    bool tear = false;
-
-    if (ev & EPOLLIN)  handle_read(e);
-    /* moving our peer's buffer? data read from e went into peer->buf. */
-    if (peer && peer->buf_len > peer->buf_off)
-        if (!handle_write(peer)) tear = true;
-    if ((ev & EPOLLOUT) && !tear)
-        if (!handle_write(e)) tear = true;
-    if (ev & (EPOLLHUP | EPOLLERR)) tear = true;
-    if (ev & EPOLLRDHUP) e->read_eof = true;
-    return tear;
+    if (e->connecting) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (getsockopt(e->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err)
+            return true;
+        e->connecting = false;
+    }
+    if (!e->read_eof && (ev & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)))
+        if (!handle_read(e)) return true;
+    if (peer && !peer->connecting && peer->buf_len > peer->buf_off)
+        if (!handle_write(peer)) return true;
+    if ((ev & (EPOLLOUT | EPOLLHUP | EPOLLERR)) && e->buf_len > e->buf_off)
+        if (!handle_write(e)) return true;
+    if (ev & EPOLLERR) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (getsockopt(e->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err)
+            return true;
+    }
+    return false;
 }
 
-/* Tear down once both directions are drained and one side is gone. */
+/* Forward each EOF only after all bytes in that direction have drained. */
 static bool pair_should_close(struct endpoint *e, struct endpoint *peer, bool tear)
 {
-    if (!tear && e->read_eof && (!peer || peer->buf_len == peer->buf_off))
-        tear = true;
-    if (!tear && peer && peer->read_eof && e->buf_len == e->buf_off)
-        tear = true;
-    return tear;
+    if (tear || !peer) return true;
+    if (e->read_eof && !peer->connecting && peer->buf_len == peer->buf_off && !peer->write_shutdown) {
+        if (shutdown(peer->fd, SHUT_WR) < 0) return true;
+        peer->write_shutdown = true;
+    }
+    if (peer->read_eof && !e->connecting && e->buf_len == e->buf_off && !e->write_shutdown) {
+        if (shutdown(e->fd, SHUT_WR) < 0) return true;
+        e->write_shutdown = true;
+    }
+    return !e->connecting && !peer->connecting && e->read_eof && peer->read_eof &&
+           e->buf_len == e->buf_off && peer->buf_len == peer->buf_off;
 }
 
 /* Handle one event from the current epoll batch: skip stale events for
@@ -389,8 +416,7 @@ static void dispatch_epoll_event(struct endpoint *e, uint32_t ev)
 
     if (tear) { close_pair(e); return; }
 
-    ep_update(e);
-    if (peer) ep_update(peer);
+    if (!ep_update(e) || (peer && !ep_update(peer))) close_pair(e);
 }
 
 /* Run the epoll event loop until g_stop is set. Returns 0 on a clean stop,

@@ -1216,6 +1216,7 @@ static void run_full_suite_foundation(int *failures)
       *failures += test_shared_validators_zcl_address(); }
     *failures += test_script();
     *failures += test_net();
+    { extern int test_portfwd(void); *failures += test_portfwd(); }
     *failures += test_netbase_split_host_port();
     *failures += test_nat_route_dump();
     *failures += test_peer_strategy_worker();

@@ -3608,3 +3608,5 @@ AGENT_IMPACT_RULE("engine/services/src/wallet_history_capability.c|engine/servic
 AGENT_IMPACT_RULE("engine/services/src/wallet_history_export.c|engine/services/include/services/wallet_history_export.h|engine/services/src/wallet_history_manifest.c|engine/services/include/services/wallet_history_manifest.h|tests/harness/src/test_wallet_history_export.c", "wallet_history_export file_controller block_index_loader make_lint_gates")
 
 AGENT_IMPACT_RULE("engine/composition/src/boot_wallet_bound_fresh.c", "snapshot_install_recovery boot_phase block_index_loader")
+
+AGENT_IMPACT_RULE("tools/zcl_portfwd.c|tests/harness/src/test_portfwd.c", "portfwd")
