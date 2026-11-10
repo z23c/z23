@@ -74,6 +74,28 @@ static inline bool web_form_url_decode(char *dst, size_t dstmax,
     return di > 0;
 }
 
+/* Locate complete field segments without reading beyond the body slice. */
+static inline size_t web_form_find_segments(const char *body, size_t len,
+                                             const char *field, size_t klen,
+                                             size_t *value_start, size_t *value_len)
+{
+    size_t occurrences = 0;
+    for (size_t pos = 0; pos < len;) {
+        size_t end = pos;
+        while (end < len && body[end] != '&')
+            end++;
+        size_t segment_len = end - pos;
+        if (segment_len > klen && body[pos + klen] == '=' &&
+            memcmp(body + pos, field, klen) == 0) {
+            occurrences++;
+            *value_start = pos + klen + 1;
+            *value_len = end - *value_start;
+        }
+        pos = end < len ? end + 1 : len;
+    }
+    return occurrences;
+}
+
 /* Find `field=value` in the slice body[0..len) and URL-decode the value
  * into out. Returns true on a hit, false when the field is absent,
  * holds no value, or is supplied MORE THAN ONCE — a payment form that
@@ -96,22 +118,10 @@ static inline bool web_form_field(const char *body, size_t len,
     if (klen == 0 || klen >= len)
         return false;
 
-    size_t occurrences = 0;
     size_t value_start = 0;
     size_t value_len = 0;
-    for (size_t pos = 0; pos < len;) {
-        size_t end = pos;
-        while (end < len && body[end] != '&')
-            end++;
-        size_t segment_len = end - pos;
-        if (segment_len > klen && body[pos + klen] == '=' &&
-            memcmp(body + pos, field, klen) == 0) {
-            occurrences++;
-            value_start = pos + klen + 1;
-            value_len = end - value_start;
-        }
-        pos = end < len ? end + 1 : len;
-    }
+    size_t occurrences = web_form_find_segments(body, len, field, klen,
+                                                &value_start, &value_len);
     if (occurrences != 1 || value_len == 0 ||
         !web_form_url_decode(out, out_max, body + value_start, value_len)) {
         out[0] = '\0';
