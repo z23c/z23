@@ -37,18 +37,9 @@ static int socket_resolve_probe(void)
     return 0;
 }
 
-int test_socket_resolve(void)
+static int socket_resolve_addresses_test(void)
 {
     int failures = 0;
-    int rc = socket_resolve_probe();
-    printf("socket_resolve: resolve_ip mapped/native/localhost/refusal... ");
-    if (rc == 0) {
-        printf("OK\n");
-    } else {
-        printf("FAIL (step %d)\n", rc);
-        failures++;
-    }
-
     TEST("socket resolver: bounded numeric results preserve mapped and native addresses") {
         uint8_t addresses[2][16];
         static const uint8_t mapped[16] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff,127,0,0,1};
@@ -70,6 +61,22 @@ int test_socket_resolve(void)
         ASSERT_EQ(count, 0);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+int test_socket_resolve(void)
+{
+    int failures = 0;
+    int rc = socket_resolve_probe();
+    printf("socket_resolve: resolve_ip mapped/native/localhost/refusal... ");
+    if (rc == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (step %d)\n", rc);
+        failures++;
+    }
+
+    failures += socket_resolve_addresses_test();
 
     TEST("socket buffers: report the kernel grant after P2P configuration") {
         platform_socket_t pair[2];
