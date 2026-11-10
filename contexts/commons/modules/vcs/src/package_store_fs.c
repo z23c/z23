@@ -12,7 +12,12 @@
 
 #include "package_store_priv.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
+#include "platform/file_metadata.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
+#include "vcs/package_accept.h"
 #include "platform/directory_compat.h"
 
 #include <errno.h>
@@ -24,17 +29,131 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <io.h>
 #include <wchar.h>
 #include <windows.h>
 #else
 #include <dirent.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
 
 #define STORE_LOG "vcs.store"
+
+bool store_process_lock(struct vcs_package_store *store)
+{
+#ifdef _WIN32
+    if (!store || store->process_lock_fd < 0)
+        return false;
+    intptr_t raw = _get_osfhandle(store->process_lock_fd);
+    if (raw == -1)
+        return false;
+    OVERLAPPED overlap = {0};
+    return LockFileEx((HANDLE)raw, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0,
+                      &overlap) != 0;
+#else
+    if (!store || store->process_lock_fd < 0)
+        return false;
+    int rc;
+    do {
+        rc = flock(store->process_lock_fd, LOCK_EX);
+    } while (rc != 0 && errno == EINTR);
+    return rc == 0;
+#endif
+}
+
+void store_process_unlock(struct vcs_package_store *store)
+{
+#ifdef _WIN32
+    if (store && store->process_lock_fd >= 0) {
+        intptr_t raw = _get_osfhandle(store->process_lock_fd);
+        OVERLAPPED overlap = {0};
+        if (raw != -1)
+            (void)UnlockFileEx((HANDLE)raw, 0, 1, 0, &overlap);
+    }
+#else
+    if (store && store->process_lock_fd >= 0)
+        (void)flock(store->process_lock_fd, LOCK_UN);
+#endif
+}
+
+
+bool store_sync_directory(const char *dir)
+{
+#if defined(_WIN32)
+    (void)dir;
+    return true;
+#else
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool synced = fsync(fd) == 0;
+    close(fd);
+    return synced;
+#endif
+}
+
+/* Updated writers bind a store to one chain. Older binaries do not understand
+ * this record; concurrent use by an older writer is unsupported. */
+static bool store_chain_path(const struct vcs_package_store *store, char path[STORE_PATH_MAX])
+{
+    int n = snprintf(path, STORE_PATH_MAX, "%s/chain-binding.v1", store->root);
+    return n > 0 && n < (int)STORE_PATH_MAX;
+}
+
+static bool store_chain_expected(char *text, size_t cap, size_t *len)
+{
+    char chain[VCS_PACKAGE_RELEASE_CHAIN_ID_MAX + 1u];
+    if (!vcs_package_accept_chain_id(chain, sizeof(chain))) return false;
+    int n = snprintf(text, cap, "zcl.package-store.chain.v1\n%s\n", chain);
+    if (n <= 0 || (size_t)n >= cap) return false;
+    *len = (size_t)n; return true;
+}
+
+bool store_chain_matches(const struct vcs_package_store *store)
+{
+    char path[STORE_PATH_MAX], expected[160], actual[160]; size_t len = 0; uint64_t size = 0;
+    struct platform_private_file file; platform_private_file_init(&file);
+    bool ok = store_chain_path(store, path) && store_chain_expected(expected, sizeof(expected), &len) &&
+        platform_private_file_open_observation(path, &file) &&
+        platform_private_file_validate_owner_private(&file) && platform_private_file_size(&file, &size) &&
+        size == len && platform_private_file_read_at(&file, actual, len, 0) && !memcmp(actual, expected, len);
+    platform_private_file_close(&file); return ok;
+}
+
+static bool store_chain_publish(struct vcs_package_store *store, const char *path,
+                                const char *text, size_t len)
+{
+    char temp[STORE_PATH_MAX];
+    uint8_t random[16]; char hex[33];
+    if (!rng_fill(random, sizeof(random))) return false;
+    zcl_hex_encode(random, sizeof(random), hex);
+    int n = snprintf(temp, sizeof(temp), "%s/.chain-binding.%s", store->root, hex);
+    if (n <= 0 || (size_t)n >= sizeof(temp)) return false;
+    struct platform_private_file file; platform_private_file_init(&file);
+    bool created = platform_private_file_create(temp, &file), exists = false;
+    bool ok = created && platform_private_file_write_at(&file, text, len, 0) &&
+        platform_private_file_truncate(&file, len) && platform_private_file_flush(&file) &&
+        platform_private_file_publish_no_clobber(&file, temp, path, &exists);
+    if (created && (!ok || exists)) (void)platform_private_file_retire(&file, temp);
+    platform_private_file_close(&file);
+    return ok && (exists || store_sync_directory(store->root)) && store_chain_matches(store);
+}
+
+/* Caller owns store-process.lock. An absent record is initialized only after
+ * the entire legacy release history verifies without mutating recovery. */
+bool store_chain_bind(struct vcs_package_store *store)
+{
+    char path[STORE_PATH_MAX], text[160]; size_t len = 0;
+    struct platform_file_metadata metadata;
+    if (!store_chain_path(store, path) || !store_chain_expected(text, sizeof(text), &len)) return false;
+    enum platform_file_metadata_result state = platform_file_metadata_read(path, &metadata);
+    if (state != PLATFORM_FILE_METADATA_MISSING) return state == PLATFORM_FILE_METADATA_OK && store_chain_matches(store);
+    return store_legacy_release_history_valid(store->root) && store_chain_publish(store, path, text, len);
+}
+
 
 /* Join dir and name into child; false when the result does not fit. */
 static bool store_sweep_child_path(const char *dir, const char *name,

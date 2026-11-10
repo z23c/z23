@@ -78,6 +78,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #include "vcs/package_content.h"
@@ -1353,6 +1356,227 @@ static int t_store_chunk_commit_retry(bool no_evict)
     return failures;
 }
 
+#if !defined(_WIN32)
+static void store_chain_child_writer(const char *dir, int read_fd, int write_fd)
+{
+    (void)close(write_fd); char go;
+    if (read(read_fd, &go, 1) != 1) _exit(10);
+    (void)close(read_fd); chain_params_select(CHAIN_MAIN);
+    struct vcs_package_store *writer = vcs_package_store_open(dir, 1000000);
+    struct vcs_package_release release;
+    bool refused = zs_release(&release, 0x42, 1, "fixture/chain") && !writer;
+    if (writer) vcs_package_store_close(writer);
+    _exit(refused ? 0 : 11);
+}
+
+static bool store_chain_child_wait(pid_t child)
+{
+    int status = 0;
+    return child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* A separate wrong-chain writer cannot alter a live regtest store. */
+static int store_case_cross_chain_writer(void)
+{
+    int failures = 0, signal_pipe[2] = {-1, -1};
+    char dir[512] = {0};
+    struct vcs_package_store *resident = NULL, *reopened = NULL;
+    pid_t child = -1;
+    bool created = test_mkdtemp(dir, sizeof(dir), "store_chain_writer") != NULL;
+    if (created && pipe(signal_pipe) == 0) child = fork();
+    if (child == 0) store_chain_child_writer(dir, signal_pipe[0], signal_pipe[1]);
+    if (signal_pipe[0] >= 0) (void)close(signal_pipe[0]);
+    chain_params_select(CHAIN_REGTEST);
+    if (child > 0) resident = vcs_package_store_open(dir, 1000000);
+    bool sent = resident && write(signal_pipe[1], "x", 1) == 1;
+    if (signal_pipe[1] >= 0) (void)close(signal_pipe[1]);
+    bool child_ok = store_chain_child_wait(child);
+    if (resident) vcs_package_store_close(resident);
+    if (created) reopened = vcs_package_store_open(dir, 1000000);
+    ZS_CHECK("cross-chain: main writer refuses and regtest store reopens",
+             sent && child_ok && reopened);
+    if (reopened) vcs_package_store_close(reopened);
+    chain_params_select(CHAIN_MAIN);
+    if (created) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static bool store_chain_test_read(const char *path, unsigned char *out, size_t cap, size_t *length)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    *length = fread(out, 1, cap, f);
+    bool ok = !ferror(f) && feof(f);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool store_chain_test_snapshot(const char *path, const unsigned char *before, size_t size)
+{
+    unsigned char after[2048]; size_t n = 0;
+    return store_chain_test_read(path, after, sizeof(after), &n) && n == size && !memcmp(before, after, n);
+}
+
+static bool store_chain_seed_release(struct vcs_package_store *s, uint8_t seed,
+                                     const char *name, uint8_t id[32])
+{
+    struct vcs_package_release release; enum vcs_package_accept_result accepted;
+    return s && zs_release(&release, seed, 1, name) &&
+        vcs_package_store_put_release(s, &release, &accepted) == VCS_PACKAGE_STORE_OK &&
+        accepted == VCS_PACKAGE_ACCEPT_OK && vcs_package_release_id(&release, id) == VCS_PACKAGE_RELEASE_OK;
+}
+
+static bool store_chain_foreign_refused(bool saved, struct vcs_package_store *s,
+    const char *marker, const char *release_path, const unsigned char *before, size_t size,
+    const char *generation, const unsigned char *gen_before, size_t gen_size)
+{
+    return saved && !s && access(marker, F_OK) != 0 &&
+        store_chain_test_snapshot(release_path, before, size) &&
+        store_chain_test_snapshot(generation, gen_before, gen_size);
+}
+
+static int store_case_chain_legacy(void)
+{
+    int failures = 0; char dir[512] = {0}, marker[600], generation[600], release_path[700], hex[65];
+    unsigned char before[2048], gen_before[64]; size_t size = 0, gen_size = 0;
+    bool made = test_mkdtemp(dir, sizeof(dir), "store_chain_legacy") != NULL;
+    chain_params_select(CHAIN_MAIN);
+    struct vcs_package_store *s = made ? vcs_package_store_open(dir, 1000000) : NULL;
+    uint8_t id[32] = {0};
+    bool wrote = store_chain_seed_release(s, 0x44, "fixture/legacy", id);
+    if (s) vcs_package_store_close(s);
+    zcl_hex_encode(id, 32, hex);
+    (void)snprintf(marker, sizeof(marker), "%s/zcode/chain-binding.v1", dir);
+    (void)snprintf(generation, sizeof(generation), "%s/zcode/store-generation", dir);
+    (void)snprintf(release_path, sizeof(release_path), "%s/zcode/releases/%s", dir, hex);
+    bool saved = wrote && store_chain_test_read(release_path, before, sizeof(before), &size) &&
+        store_chain_test_read(generation, gen_before, sizeof(gen_before), &gen_size) && unlink(marker) == 0;
+    chain_params_select(CHAIN_REGTEST);
+    s = saved ? vcs_package_store_open(dir, 1000000) : NULL;
+    ZS_CHECK("chain legacy: foreign signed history refuses without marker or changed evidence",
+        store_chain_foreign_refused(saved, s, marker, release_path, before, size,
+                                    generation, gen_before, gen_size));
+    if (s) vcs_package_store_close(s);
+    chain_params_select(CHAIN_MAIN);
+    s = saved ? vcs_package_store_open(dir, 1000000) : NULL;
+    ZS_CHECK("chain legacy: matching signed history binds and reopens", s && access(marker, F_OK) == 0 &&
+        store_chain_test_snapshot(release_path, before, size));
+    if (s) vcs_package_store_close(s);
+    if (made) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+struct store_chain_marker_fixture {
+    char dir[512], marker[600], generation[600], sentinel[600];
+    unsigned char generation_bytes[64]; size_t generation_size;
+    struct vcs_package_store *reader;
+};
+
+static bool store_chain_marker_setup(struct store_chain_marker_fixture *f)
+{
+    memset(f, 0, sizeof(*f)); chain_params_select(CHAIN_MAIN);
+    if (!test_mkdtemp(f->dir, sizeof(f->dir), "store_chain_invalid")) return false;
+    (void)snprintf(f->marker, sizeof(f->marker), "%s/zcode/chain-binding.v1", f->dir);
+    (void)snprintf(f->generation, sizeof(f->generation), "%s/zcode/store-generation", f->dir);
+    (void)snprintf(f->sentinel, sizeof(f->sentinel), "%s/zcode/probe.zstmp.2147483647.0", f->dir);
+    f->reader = vcs_package_store_open(f->dir, 1000000);
+    struct vcs_package_store *writer = f->reader ? vcs_package_store_open(f->dir, 1000000) : NULL;
+    uint8_t id[32]; bool moved = store_chain_seed_release(writer, 0x45, "fixture/refresh", id);
+    if (writer) vcs_package_store_close(writer);
+    return moved && store_chain_test_read(f->generation, f->generation_bytes,
+                                           sizeof(f->generation_bytes), &f->generation_size);
+}
+
+static bool store_chain_marker_missing(struct store_chain_marker_fixture *f)
+{
+    FILE *probe = fopen(f->sentinel, "wb");
+    bool staged = probe && fwrite("stay", 1, 4, probe) == 4;
+    if (probe && fclose(probe) != 0) staged = false;
+    return staged && unlink(f->marker) == 0 && !vcs_package_store_refresh(f->reader) &&
+        store_chain_test_snapshot(f->generation, f->generation_bytes, f->generation_size) &&
+        access(f->sentinel, F_OK) == 0;
+}
+
+static bool store_chain_marker_invalid(struct store_chain_marker_fixture *f)
+{
+    static const unsigned char invalid[] = "invalid\n";
+    FILE *file = fopen(f->marker, "wb");
+    bool wrote = file && fwrite(invalid, 1, sizeof(invalid) - 1, file) == sizeof(invalid) - 1;
+    if (file && fclose(file) != 0) wrote = false;
+    struct stat st;
+    bool changed = wrote && chmod(f->marker, 0600) == 0 && lstat(f->marker, &st) == 0 &&
+        S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600;
+    if (!changed || vcs_package_store_refresh(f->reader)) return false;
+    vcs_package_store_close(f->reader); f->reader = NULL;
+    struct vcs_package_store *opened = vcs_package_store_open(f->dir, 1000000);
+    bool refused = !opened && store_chain_test_snapshot(f->marker, invalid, sizeof(invalid) - 1) &&
+        store_chain_test_snapshot(f->generation, f->generation_bytes, f->generation_size);
+    if (opened) vcs_package_store_close(opened);
+    return refused;
+}
+
+static bool store_chain_marker_link(struct store_chain_marker_fixture *f)
+{
+    if (unlink(f->marker) != 0 || symlink(f->generation, f->marker) != 0) return false;
+    struct vcs_package_store *opened = vcs_package_store_open(f->dir, 1000000);
+    bool refused = !opened && store_chain_test_snapshot(f->generation, f->generation_bytes, f->generation_size);
+    if (opened) vcs_package_store_close(opened);
+    return refused;
+}
+
+static int store_case_chain_marker_refusal(void)
+{
+    int failures = 0; struct store_chain_marker_fixture f;
+    bool ready = store_chain_marker_setup(&f);
+    bool missing = ready && store_chain_marker_missing(&f);
+    ZS_CHECK("chain binding: missing marker blocks changed-generation recovery", missing);
+    bool invalid = missing && store_chain_marker_invalid(&f);
+    ZS_CHECK("chain binding: malformed private marker blocks refresh and reopen without mutation", invalid);
+    ZS_CHECK("chain binding: symlink refuses without changing target", invalid && store_chain_marker_link(&f));
+    if (f.reader) vcs_package_store_close(f.reader);
+    if (f.dir[0]) test_rm_rf_recursive(f.dir);
+    return failures;
+}
+
+static bool store_chain_damage_refused(const char *dir, const char *marker,
+                                       const char *generation)
+{
+    char bad[700]; unsigned char gen_before[64], invalid[] = "broken\n"; size_t gen_size = 0;
+    (void)snprintf(bad, sizeof(bad), "%s/zcode/releases/%064d", dir, 1);
+    FILE *f = fopen(bad, "wb");
+    bool wrote = f && fwrite(invalid, 1, sizeof(invalid) - 1, f) == sizeof(invalid) - 1;
+    if (f && fclose(f) != 0) wrote = false;
+    bool saved = wrote && unlink(marker) == 0 && store_chain_test_read(generation, gen_before, sizeof(gen_before), &gen_size);
+    struct vcs_package_store *s = saved ? vcs_package_store_open(dir, 1000000) : NULL;
+    bool refused = saved && !s &&
+        access(marker, F_OK) != 0 && store_chain_test_snapshot(bad, invalid, sizeof(invalid) - 1) &&
+        store_chain_test_snapshot(generation, gen_before, gen_size);
+    if (s) vcs_package_store_close(s);
+    return refused;
+}
+
+static int store_case_chain_legacy_empty_and_damaged(void)
+{
+    int failures = 0; char dir[512] = {0}, marker[600], generation[600];
+    bool made = test_mkdtemp(dir, sizeof(dir), "store_chain_empty") != NULL;
+    chain_params_select(CHAIN_MAIN);
+    struct vcs_package_store *s = made ? vcs_package_store_open(dir, 1000000) : NULL;
+    (void)snprintf(marker, sizeof(marker), "%s/zcode/chain-binding.v1", dir);
+    (void)snprintf(generation, sizeof(generation), "%s/zcode/store-generation", dir);
+    if (s) vcs_package_store_close(s);
+    bool removed = made && unlink(marker) == 0;
+    s = removed ? vcs_package_store_open(dir, 1000000) : NULL;
+    bool empty_ok = s && access(marker, F_OK) == 0;
+    ZS_CHECK("chain legacy: empty history initializes first binding", empty_ok);
+    if (s) vcs_package_store_close(s);
+    ZS_CHECK("chain legacy: damaged history refuses without quarantine or metadata change",
+             empty_ok && store_chain_damage_refused(dir, marker, generation));
+    if (made) test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
@@ -1381,6 +1605,12 @@ int test_zcode_store(void)
     failures += t_store_pins();
     failures += t_store_possession_scheduler();
     failures += t_store_releases();
+#if !defined(_WIN32)
+    failures += store_case_cross_chain_writer();
+    failures += store_case_chain_legacy();
+    failures += store_case_chain_marker_refusal();
+    failures += store_case_chain_legacy_empty_and_damaged();
+#endif
     failures += t_store_history_observation();
     failures += t_store_release_quarantine();
     failures += t_store_blob();

@@ -4480,6 +4480,11 @@ static int tag_link_rebuild_cases(struct tag_world *w)
 }
 static int tag_keep_cases(struct tag_world *w)
 {
+    zcl_native_bridge_ensure_rpc();
+    char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(w->j.b_datadir, 19381);
 #if defined(__linux__)
     struct tag_display saved = {0}; bool ready = tag_display_enter(&saved);
 #else
@@ -4499,6 +4504,7 @@ static int tag_keep_cases(struct tag_world *w)
 #if defined(__linux__)
     if (!tag_display_leave(&saved)) ++failures;
 #endif
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
     return failures;
 }
 

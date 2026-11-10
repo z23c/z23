@@ -177,6 +177,10 @@ void store_open_log_slow(const struct vcs_package_store *store);
  * receives the count of provably invalid records moved aside. */
 struct vcs_package_accept *store_replay_releases(const char *root,
                                                  uint64_t *quarantined);
+bool store_legacy_release_history_valid(const char *root);
+bool store_sync_directory(const char *dir);
+bool store_chain_bind(struct vcs_package_store *store);
+bool store_chain_matches(const struct vcs_package_store *store);
 bool store_process_lock(struct vcs_package_store *store);
 void store_process_unlock(struct vcs_package_store *store);
 bool store_generation_check(struct vcs_package_store *store);

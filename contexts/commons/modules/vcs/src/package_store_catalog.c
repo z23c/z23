@@ -5,6 +5,8 @@
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "platform/positioned_file.h"
+#include "platform/file_metadata.h"
+#include "platform/private_directory.h"
 #include "platform/clock.h"
 #include "platform/directory_compat.h"
 #include <errno.h>
@@ -428,6 +430,11 @@ bool vcs_package_store_refresh(struct vcs_package_store *store)
     if (!store_process_lock(store)) {
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(false, STORE_LOG, "lock store for catalog refresh");
+    }
+    if (!store_chain_matches(store)) {
+        store_process_unlock(store);
+        pthread_mutex_unlock(&store->lock);
+        LOG_RETURN(false, STORE_LOG, "package store chain binding refused during refresh");
     }
     uint64_t disk_generation = 0;
     if (!store_generation_read(store, &disk_generation)) {
@@ -1006,6 +1013,7 @@ struct store_replay {
     size_t count;
     size_t capacity;
     uint64_t quarantined;
+    bool read_only;
 };
 
 enum store_release_read {
@@ -1097,20 +1105,6 @@ static bool store_move_noreplace(const char *from, const char *to)
 #endif
 }
 
-static bool store_sync_directory(const char *dir)
-{
-#if defined(_WIN32)
-    (void)dir;
-    return true;
-#else
-    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return false;
-    bool synced = fsync(fd) == 0;
-    close(fd);
-    return synced;
-#endif
-}
-
 /* First unused <name>.<unix_ts>[.<n>] under qdir. */
 static bool store_quarantine_target(const char *qdir, const char *name,
                                     char *to, size_t to_size)
@@ -1191,6 +1185,8 @@ static bool store_release_row_add(struct store_replay *rp, const char *name)
     if (refused != VCS_PACKAGE_RELEASE_OK)
         LOG_FAIL(STORE_LOG, "persisted release %s is refused by this build: %s",
                  name, vcs_package_release_error_string(refused));
+    if (damage && rp->read_only)
+        LOG_FAIL(STORE_LOG, "damaged legacy release %s: %s", name, damage);
     if (damage)
         return store_release_quarantine(rp, name, damage);
     return store_release_row_push(rp, &row);
@@ -1312,6 +1308,26 @@ struct vcs_package_accept *store_replay_releases(const char *root,
         LOG_ERROR(STORE_LOG, "persisted release history incomplete under %s",
                   dir);
     return projection;
+}
+
+/* Validate legacy releases before any recovery, without quarantining damage. */
+bool store_legacy_release_history_valid(const char *root)
+{
+    char dir[STORE_PATH_MAX];
+    int n = snprintf(dir, sizeof(dir), "%s/releases", root);
+    if (n <= 0 || (size_t)n >= sizeof(dir)) return false;
+    struct platform_file_metadata metadata;
+    enum platform_file_metadata_result state = platform_file_metadata_read(dir, &metadata);
+    if (state == PLATFORM_FILE_METADATA_MISSING) return true;
+    uintptr_t handle;
+    if (!platform_private_directory_open_validated_traverse(dir, &handle)) return false;
+    struct store_replay rp = { .root = root, .dir = dir, .read_only = true };
+    struct vcs_package_accept *projection = store_release_collect(&rp) ? store_replay_project(&rp) : NULL;
+    platform_private_directory_close(handle);
+    free(rp.rows);
+    if (!projection) return false;
+    vcs_package_accept_free(projection);
+    return true;
 }
 
 /* ── admission: releases ────────────────────── */

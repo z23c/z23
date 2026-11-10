@@ -17,9 +17,11 @@
 #include "json/json.h"
 #include "platform/positioned_file.h"
 #include "platform/file_metadata.h"
+#include "platform/private_file.h"
 #include "platform/rng.h"
 #include "util/util.h"
 #include "vcs/package_recipe.h"
+#include "vcs/package_accept.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -39,43 +41,6 @@
 #include <unistd.h>
 
 #define STORE_LOG "vcs.store"
-
-bool store_process_lock(struct vcs_package_store *store)
-{
-#ifdef _WIN32
-    if (!store || store->process_lock_fd < 0)
-        return false;
-    intptr_t raw = _get_osfhandle(store->process_lock_fd);
-    if (raw == -1)
-        return false;
-    OVERLAPPED overlap = {0};
-    return LockFileEx((HANDLE)raw, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0,
-                      &overlap) != 0;
-#else
-    if (!store || store->process_lock_fd < 0)
-        return false;
-    int rc;
-    do {
-        rc = flock(store->process_lock_fd, LOCK_EX);
-    } while (rc != 0 && errno == EINTR);
-    return rc == 0;
-#endif
-}
-
-void store_process_unlock(struct vcs_package_store *store)
-{
-#ifdef _WIN32
-    if (store && store->process_lock_fd >= 0) {
-        intptr_t raw = _get_osfhandle(store->process_lock_fd);
-        OVERLAPPED overlap = {0};
-        if (raw != -1)
-            (void)UnlockFileEx((HANDLE)raw, 0, 1, 0, &overlap);
-    }
-#else
-    if (store && store->process_lock_fd >= 0)
-        (void)flock(store->process_lock_fd, LOCK_UN);
-#endif
-}
 
 /* The process lock serializes this atomic change detector. It grants no
  * object authority: open still rebuilds from manifests and CAS, and final
@@ -116,7 +81,7 @@ static bool store_generation_write(struct vcs_package_store *store,
 bool store_generation_check(struct vcs_package_store *store)
 {
     uint64_t value = 0;
-    return store_generation_read(store, &value) &&
+    return store_chain_matches(store) && store_generation_read(store, &value) &&
            value == store->shared_generation;
 }
 
@@ -562,6 +527,12 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
             close(store->process_lock_fd);
         free(store);
         LOG_NULL(STORE_LOG, "could not lock store recovery at %s", lock_path);
+    }
+    if (!store_chain_bind(store)) {
+        store_process_unlock(store);
+        close(store->process_lock_fd);
+        free(store);
+        LOG_NULL(STORE_LOG, "package store chain binding refused at %s", lock_path);
     }
     if (!store_generation_initialize(store)) {
         store_process_unlock(store);
