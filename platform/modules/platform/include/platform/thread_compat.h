@@ -70,6 +70,32 @@ static inline int platform_thread_tryjoin(pthread_t thread, void **result)
 #include <stdint.h>
 #endif
 
+#if defined(__ANDROID__) || defined(__APPLE__)
+static inline int platform_thread_join_poll(pthread_t thread, void **result,
+                                            const struct timespec *deadline)
+{
+    if (!deadline || deadline->tv_nsec < 0 || deadline->tv_nsec >= 1000000000L)
+        return EINVAL;
+    for (;;) {
+        int rc = platform_thread_tryjoin(thread, result);
+        if (rc != EBUSY)
+            return rc;
+        struct timespec now;
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0)
+            return errno;
+        if (now.tv_sec > deadline->tv_sec ||
+            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec))
+            return ETIMEDOUT;
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 1000000L };
+        if (now.tv_sec == deadline->tv_sec &&
+            deadline->tv_nsec - now.tv_nsec < delay.tv_nsec)
+            delay.tv_nsec = deadline->tv_nsec - now.tv_nsec;
+        if (nanosleep(&delay, NULL) != 0 && errno != EINTR)
+            return errno;
+    }
+}
+#endif
+
 static inline int platform_thread_join_until(pthread_t thread,
                                              void **result,
                                              const struct timespec *deadline)
@@ -116,25 +142,7 @@ static inline int platform_thread_join_until(pthread_t thread,
         return EINVAL;
     return pthread_join(thread, result);
 #elif defined(__ANDROID__) || defined(__APPLE__)
-    if (!deadline || deadline->tv_nsec < 0 || deadline->tv_nsec >= 1000000000L)
-        return EINVAL;
-    for (;;) {
-        int rc = platform_thread_tryjoin(thread, result);
-        if (rc != EBUSY)
-            return rc;
-        struct timespec now;
-        if (clock_gettime(CLOCK_REALTIME, &now) != 0)
-            return errno;
-        if (now.tv_sec > deadline->tv_sec ||
-            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec))
-            return ETIMEDOUT;
-        struct timespec delay = { .tv_sec = 0, .tv_nsec = 1000000L };
-        if (now.tv_sec == deadline->tv_sec &&
-            deadline->tv_nsec - now.tv_nsec < delay.tv_nsec)
-            delay.tv_nsec = deadline->tv_nsec - now.tv_nsec;
-        if (nanosleep(&delay, NULL) != 0 && errno != EINTR)
-            return errno;
-    }
+    return platform_thread_join_poll(thread, result, deadline);
 #elif defined(__linux__)
     return pthread_timedjoin_np(thread, result, deadline);
 #else
