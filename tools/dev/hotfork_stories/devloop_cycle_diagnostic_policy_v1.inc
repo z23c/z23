@@ -20,6 +20,36 @@
 #define ZCL_HOTFORK_DEVLOOP_CYCLE_CORE 1
 #include "hotswap/hotfork_capsule.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
+static bool hf_cycle_publication_policy(void)
+{
+    return !zcl_devloop_publish_mode_applies(ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY)
+        && zcl_devloop_publish_mode_applies(ZCL_DEVLOOP_PUBLISH_APPLY)
+        && strcmp(zcl_devloop_publish_mode_name(ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY),
+                  "verify") == 0
+        && strcmp(zcl_devloop_publish_mode_name(ZCL_DEVLOOP_PUBLISH_APPLY),
+                  "auto") == 0
+        && zcl_devloop_publish_mode_name((enum zcl_devloop_publish_mode)9) == NULL
+        && zcl_devloop_publication_target_port_supported(18252)
+        && !zcl_devloop_publication_target_port_supported(18232);
+}
+
+static bool hf_cycle_watcher_policy(void)
+{
+    return strcmp(zcl_devloop_watcher_freshness(false, false, false),
+                  "watcher_not_running") == 0
+        && strcmp(zcl_devloop_watcher_freshness(true, false, false),
+                  "watcher_starting") == 0
+        && strcmp(zcl_devloop_watcher_freshness(true, true, false),
+                  "runtime_starting") == 0
+        && strcmp(zcl_devloop_watcher_freshness(true, true, true), "current") == 0
+        && strcmp(zcl_devloop_watcher_next_action(
+                      false, false, false, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY),
+                  "z23-dev dev begin") == 0
+        && strcmp(zcl_devloop_watcher_next_action(
+                      true, true, true, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY),
+                  "edit one C23 file") == 0;
+}
+
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -54,39 +84,8 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
     HF_CHECK(zcl_devloop_cycle_proof_complete("passed", "verify")
              && !zcl_devloop_cycle_proof_complete("passed", "compile")
              && !zcl_devloop_cycle_proof_complete("rejected", "verify"));
-    HF_CHECK(!zcl_devloop_publish_mode_applies(ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY)
-             && zcl_devloop_publish_mode_applies(ZCL_DEVLOOP_PUBLISH_APPLY)
-             && strcmp(zcl_devloop_publish_mode_name(
-                           ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY),
-                       "verify")
-                    == 0
-             && strcmp(zcl_devloop_publish_mode_name(ZCL_DEVLOOP_PUBLISH_APPLY),
-                       "auto")
-                    == 0
-             && zcl_devloop_publish_mode_name((enum zcl_devloop_publish_mode)9)
-                    == NULL
-             && zcl_devloop_publication_target_port_supported(18252)
-             && !zcl_devloop_publication_target_port_supported(18232));
-    HF_CHECK(
-        strcmp(zcl_devloop_watcher_freshness(false, false, false),
-               "watcher_not_running")
-            == 0
-        && strcmp(zcl_devloop_watcher_freshness(true, false, false),
-                  "watcher_starting")
-               == 0
-        && strcmp(zcl_devloop_watcher_freshness(true, true, false),
-                  "runtime_starting")
-               == 0
-        && strcmp(zcl_devloop_watcher_freshness(true, true, true), "current")
-               == 0
-        && strcmp(zcl_devloop_watcher_next_action(
-                      false, false, false, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY),
-                  "z23-dev dev begin")
-               == 0
-        && strcmp(zcl_devloop_watcher_next_action(
-                      true, true, true, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY),
-                  "edit one C23 file")
-               == 0);
+    HF_CHECK(hf_cycle_publication_policy());
+    HF_CHECK(hf_cycle_watcher_policy());
 #undef HF_CHECK
     snprintf(out->exercised_surface, sizeof(out->exercised_surface),
              ZCL_HOTFORK_EXERCISED_SURFACE);

@@ -13,6 +13,21 @@
 #define _GNU_SOURCE
 #include "hotswap/hotfork_capsule.h"
 #elif ZCL_HOTFORK_STORY_PHASE == 2
+static bool hf_plan_safe_paths(void)
+{
+    return path_is_safe("tools/dev/a.c") && !path_is_safe("../a.c")
+        && !path_is_safe("/a.c") && !path_is_safe("a\\b.c")
+        && !path_is_safe(NULL);
+}
+
+static bool hf_plan_document_paths(void)
+{
+    return path_is_docs("docs/a.md") && path_is_docs("README.md")
+        && !path_is_docs("lib/a.c")
+        && zcl_devloop_path_is_sealed_core("core/math/a.c")
+        && !zcl_devloop_path_is_sealed_core("lib/a.c");
+}
+
 __attribute__((visibility("hidden"))) bool
 zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
 {
@@ -30,13 +45,8 @@ zcl_hotfork_candidate_story_v1(struct zcl_hotfork_observation_v1 *out)
         else \
             failed |= 1u << n; \
     } while (0)
-    HF_CHECK(path_is_safe("tools/dev/a.c") && !path_is_safe("../a.c")
-             && !path_is_safe("/a.c") && !path_is_safe("a\\b.c")
-             && !path_is_safe(NULL));
-    HF_CHECK(path_is_docs("docs/a.md") && path_is_docs("README.md")
-             && !path_is_docs("lib/a.c")
-             && zcl_devloop_path_is_sealed_core("core/math/a.c")
-             && !zcl_devloop_path_is_sealed_core("lib/a.c"));
+    HF_CHECK(hf_plan_safe_paths());
+    HF_CHECK(hf_plan_document_paths());
     HF_CHECK(zcl_devloop_path_is_relevant("lib/a.c")
              && zcl_devloop_path_is_relevant("Makefile")
              && !zcl_devloop_path_is_relevant("build/a.c")
