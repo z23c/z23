@@ -353,6 +353,61 @@ static inline enum crs_status crs_validate_config(const struct crs_config *cfg)
     return CRS_OK;
 }
 
+static inline void crs_push_halving_boundaries(
+    const struct consensus_params *p, int32_t *out, size_t cap, size_t *n,
+    int32_t max_h, bool *overflow)
+{
+    /* (2) halving boundaries +/- 1, derived arithmetically from BOTH interval
+     * families (pre-Buttercup and post-Buttercup) so no boundary depends on
+     * this file agreeing with consensus_halving() about which regime applies.
+     * Both the shifted and unshifted multiples are emitted: a superfluous
+     * height costs one row, a missed boundary costs the whole check. */
+    const int32_t shift = consensus_subsidy_slow_start_shift(p);
+    const int32_t pre = p->nPreButtercupSubsidyHalvingInterval;
+    const int32_t post = p->nPostButtercupSubsidyHalvingInterval;
+    const int32_t bc = p->vUpgrades[UPGRADE_BUTTERCUP].nActivationHeight;
+    if (pre > 0) {
+        for (int64_t h = 0; h <= (int64_t)max_h; h += pre) {
+            crs_push_triple(out, cap, n, h, max_h, overflow);
+            crs_push_triple(out, cap, n, h + shift, max_h, overflow);
+        }
+    }
+    if (post > 0 && bc >= 0) {
+        for (int64_t h = bc; h <= (int64_t)max_h; h += post) {
+            crs_push_triple(out, cap, n, h, max_h, overflow);
+            crs_push_triple(out, cap, n, h + shift, max_h, overflow);
+        }
+    }
+    /* The founders-reward cliff is one block before the first shifted
+     * pre-Buttercup boundary; pin it explicitly rather than by coincidence. */
+    crs_push_triple(out, cap, n, consensus_last_founders_reward_height(p),
+                    max_h, overflow);
+}
+
+static inline void crs_push_forward_bands(
+    const struct crs_config *cfg, int32_t *out, size_t cap, size_t *n,
+    int32_t max_h, bool *overflow)
+{
+    /* (4) tip .. tip+horizon at the stride, with a dense band around each
+     * stride point. This is the FORWARD reach — the part no replay can do.
+     * When the bands touch or overlap (2*band+1 >= stride) the sampled set IS
+     * the contiguous range, so emit it once: that keeps `--stride=1` (the
+     * exhaustive forward sweep) from pushing 9 duplicates per height and
+     * hitting CRS_ERR_CAPACITY on a vector that actually fits. */
+    const int64_t lo = (int64_t)cfg->tip - cfg->band;
+    const int64_t hi = (int64_t)cfg->tip + cfg->horizon + cfg->band;
+    if ((int64_t)2 * cfg->band + 1 >= cfg->stride) {
+        for (int64_t h = lo; h <= hi; h++)
+            crs_push(out, cap, n, h, max_h, overflow);
+    } else {
+        for (int64_t s = cfg->tip; s <= (int64_t)cfg->tip + cfg->horizon;
+             s += cfg->stride) {
+            for (int32_t d = -cfg->band; d <= cfg->band; d++)
+                crs_push(out, cap, n, s + d, max_h, overflow);
+        }
+    }
+}
+
 /* Build the deduplicated, ascending sweep vector into `out`. Deterministic:
  * same (config, params) in, same vector out, on any host. */
 static inline enum crs_status crs_build_vector(const struct crs_config *cfg,
@@ -376,31 +431,7 @@ static inline enum crs_status crs_build_vector(const struct crs_config *cfg,
     for (int32_t h = 0; h <= CRS_LOW_DENSE_MAX && h <= max_h; h++)
         crs_push(out, cap, &n, h, max_h, &overflow);
 
-    /* (2) halving boundaries +/- 1, derived arithmetically from BOTH interval
-     * families (pre-Buttercup and post-Buttercup) so no boundary depends on
-     * this file agreeing with consensus_halving() about which regime applies.
-     * Both the shifted and unshifted multiples are emitted: a superfluous
-     * height costs one row, a missed boundary costs the whole check. */
-    const int32_t shift = consensus_subsidy_slow_start_shift(p);
-    const int32_t pre = p->nPreButtercupSubsidyHalvingInterval;
-    const int32_t post = p->nPostButtercupSubsidyHalvingInterval;
-    const int32_t bc = p->vUpgrades[UPGRADE_BUTTERCUP].nActivationHeight;
-    if (pre > 0) {
-        for (int64_t h = 0; h <= (int64_t)max_h; h += pre) {
-            crs_push_triple(out, cap, &n, h, max_h, &overflow);
-            crs_push_triple(out, cap, &n, h + shift, max_h, &overflow);
-        }
-    }
-    if (post > 0 && bc >= 0) {
-        for (int64_t h = bc; h <= (int64_t)max_h; h += post) {
-            crs_push_triple(out, cap, &n, h, max_h, &overflow);
-            crs_push_triple(out, cap, &n, h + shift, max_h, &overflow);
-        }
-    }
-    /* The founders-reward cliff is one block before the first shifted
-     * pre-Buttercup boundary; pin it explicitly rather than by coincidence. */
-    crs_push_triple(out, cap, &n, consensus_last_founders_reward_height(p),
-                    max_h, &overflow);
+    crs_push_halving_boundaries(p, out, cap, &n, max_h, &overflow);
 
     /* (3) every upgrade activation height +/- 1, including slots that are
      * disabled today — a disabled slot that acquires a height is exactly the
@@ -412,24 +443,7 @@ static inline enum crs_status crs_build_vector(const struct crs_config *cfg,
         crs_push_triple(out, cap, &n, a, max_h, &overflow);
     }
 
-    /* (4) tip .. tip+horizon at the stride, with a dense band around each
-     * stride point. This is the FORWARD reach — the part no replay can do.
-     * When the bands touch or overlap (2*band+1 >= stride) the sampled set IS
-     * the contiguous range, so emit it once: that keeps `--stride=1` (the
-     * exhaustive forward sweep) from pushing 9 duplicates per height and
-     * hitting CRS_ERR_CAPACITY on a vector that actually fits. */
-    const int64_t lo = (int64_t)cfg->tip - cfg->band;
-    const int64_t hi = (int64_t)cfg->tip + cfg->horizon + cfg->band;
-    if ((int64_t)2 * cfg->band + 1 >= cfg->stride) {
-        for (int64_t h = lo; h <= hi; h++)
-            crs_push(out, cap, &n, h, max_h, &overflow);
-    } else {
-        for (int64_t s = cfg->tip; s <= (int64_t)cfg->tip + cfg->horizon;
-             s += cfg->stride) {
-            for (int32_t d = -cfg->band; d <= cfg->band; d++)
-                crs_push(out, cap, &n, s + d, max_h, &overflow);
-        }
-    }
+    crs_push_forward_bands(cfg, out, cap, &n, max_h, &overflow);
 
     if (overflow)
         return CRS_ERR_CAPACITY;
