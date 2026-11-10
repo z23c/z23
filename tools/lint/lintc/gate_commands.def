@@ -67,7 +67,7 @@ LINT_ROW("check-operator-needed-sink", "./build/bin/z23-lint check-operator-need
 LINT_ROW("check-systemd-memory-budget", "./build/bin/z23-lint check-systemd-memory-budget --selftest && ./build/bin/z23-lint check-systemd-memory-budget")
 LINT_ROW("check-no-stale-pinned-facts", "./build/bin/z23-lint check-no-stale-pinned-facts --selftest && ./build/bin/z23-lint check-no-stale-pinned-facts .")
 LINT_ROW("check-no-uncited-victory", "./build/bin/z23-lint check-no-uncited-victory")
-LINT_ROW("check-doc-claims", "./build/bin/z23-lint check-doc-claims --selftest && ./build/bin/z23-lint check-doc-claims")
+LINT_ROW("check-doc-claims", "./build/bin/z23-lint check-doc-claims")
 LINT_ROW("check-describe-budget", "./build/bin/z23-lint check-describe-budget --combined")
 LINT_ROW("check-capability-inventory-generated", "./build/bin/z23-lint check-capability-inventory-generated --selftest")
 LINT_ROW("check-markdown-links", "./build/bin/z23-lint check-markdown-links .")

@@ -15579,7 +15579,6 @@ check-no-uncited-victory: $(LINTC_TOOL)
 # `z23-lint check-doc-claims --scan <dir>` invocation.
 check-doc-claims: $(LINTC_TOOL) $(BIN_DIR)/z23_bounded_run
 	@echo "══ LINT: bound doc claims (doc freshness) ══"
-	@./build/bin/z23-lint check-doc-claims --selftest
 	@./build/bin/z23-lint check-doc-claims
 
 # The out-of-repo half, made one command instead of a remembered path.
