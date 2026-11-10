@@ -402,6 +402,18 @@ static inline bool sql_query_text(sqlite3 *db, const char *sql,
  * bounded gap, reject a large one. */
 #define EXPLORER_HISTORY_MAX_BLOCK_GAP 16
 
+static inline const char *explorer_history_derived_error(
+    const struct explorer_history_validation *history)
+{
+    if (history->max_height > 10 && history->tx_rows <= 0)
+        return "transactions projection is empty";
+    if (history->max_height > 10 && history->tx_output_rows <= 0)
+        return "tx_outputs projection is empty";
+    if (history->max_height + 1 - history->integrity_rows > EXPLORER_HISTORY_MAX_BLOCK_GAP)
+        return "integrity receipts are incomplete";
+    return NULL;
+}
+
 static inline void explorer_validate_block_history(
     sqlite3 *db, int64_t chain_height, struct explorer_history_validation *out)
 {
@@ -470,12 +482,9 @@ static inline void explorer_validate_block_history(
     if (strcmp(genesis_hash, ZCL_EXPLORER_GENESIS_HASH_INTERNAL_HEX) != 0)
         EXPLORER_HISTORY_BAD("genesis hash byte order/value mismatch");
 
-    if (out->max_height > 10 && out->tx_rows <= 0)
-        EXPLORER_HISTORY_BAD("transactions projection is empty");
-    if (out->max_height > 10 && out->tx_output_rows <= 0)
-        EXPLORER_HISTORY_BAD("tx_outputs projection is empty");
-    if (out->max_height + 1 - out->integrity_rows > EXPLORER_HISTORY_MAX_BLOCK_GAP)
-        EXPLORER_HISTORY_BAD("integrity receipts are incomplete");
+    const char *derived_error = explorer_history_derived_error(out);
+    if (derived_error)
+        EXPLORER_HISTORY_BAD(derived_error);
 
     out->usable = true;
     snprintf(out->reason, sizeof(out->reason), "ok");
@@ -711,6 +720,27 @@ static inline double supply_zcl_at_height(int64_t height)
     return (double)zcl_total_supply_zatoshi(height) / (double)ZATOSHI_PER_ZCL;
 }
 
+static inline void explorer_svg_value_bounds(const double *values, int count,
+                                              double *minimum, double *maximum)
+{
+    *minimum = values[0];
+    *maximum = values[0];
+    for (int i = 1; i < count; i++) {
+        if (values[i] < *minimum) *minimum = values[i];
+        if (values[i] > *maximum) *maximum = values[i];
+    }
+    if (*maximum == *minimum) *maximum = *minimum + 1;
+}
+
+static inline void explorer_svg_log_bounds(double pos_min, double pos_max,
+                                            double *minimum, double *range)
+{
+    *minimum = log10(pos_min > 0 ? pos_min : 0.01);
+    double log_max = log10(pos_max);
+    *range = log_max - *minimum;
+    if (*range < 0.1) *range = 0.1;
+}
+
 /* SVG line chart — renders into buffer at *off, advances *off */
 static inline void explorer_svg_line_chart(char *out, size_t max, size_t *off,
                             const char *title, const char *color,
@@ -719,12 +749,8 @@ static inline void explorer_svg_line_chart(char *out, size_t max, size_t *off,
 {
     if (count < 2) return;
 
-    double min_v = values[0], max_v = values[0];
-    for (int i = 1; i < count; i++) {
-        if (values[i] < min_v) min_v = values[i];
-        if (values[i] > max_v) max_v = values[i];
-    }
-    if (max_v == min_v) max_v = min_v + 1;
+    double min_v, max_v;
+    explorer_svg_value_bounds(values, count, &min_v, &max_v);
 
     double pos_min = min_v > 0 ? min_v : 0.01;
     double pos_max = max_v > 0 ? max_v : 1;
@@ -732,12 +758,8 @@ static inline void explorer_svg_line_chart(char *out, size_t max, size_t *off,
 
     double range = max_v - min_v;
     double log_min = 0, log_range = 1;
-    if (use_log) {
-        log_min = log10(pos_min > 0 ? pos_min : 0.01);
-        double log_max = log10(pos_max);
-        log_range = log_max - log_min;
-        if (log_range < 0.1) log_range = 0.1;
-    }
+    if (use_log)
+        explorer_svg_log_bounds(pos_min, pos_max, &log_min, &log_range);
 
     int w = 800, h = 300, pad_l = 90, pad_r = 20, pad_t = 40, pad_b = 60;
     int plot_w = w - pad_l - pad_r;

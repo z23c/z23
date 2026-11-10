@@ -2395,9 +2395,44 @@ static int ex_mirror_address_availability(void)
     return failures;
 }
 
+static bool ex_svg_chart_case(double first, double last, bool logarithmic,
+                               const char *points)
+{
+    char out[8192] = {0}; size_t off = 0;
+    double values[] = {first, last};
+    const char labels[2][20] = {"first", "last"};
+    explorer_svg_line_chart(out, sizeof(out), &off, "chart", "#123456",
+                            values, labels, 2, "units");
+    bool ok = off == strlen(out) && strstr(out, points) &&
+              (strstr(out, "chart (log scale)") != NULL) == logarithmic &&
+              strstr(out, "first</text>") && strstr(out, "last</text>");
+    if (!ok) printf("explorer: SVG scale %.1f..%.1f log=%d... FAIL\n",
+                    first, last, logarithmic);
+    return ok;
+}
+
+static int ex_svg_chart_boundaries(void)
+{
+    int failures = 0;
+    failures += !ex_svg_chart_case(1, 2, false, "points='90,240 780,40 '");
+    failures += !ex_svg_chart_case(2, 2, false, "points='90,240 780,240 '");
+    failures += !ex_svg_chart_case(1, 1000, true, "points='90,240 780,40 '");
+    failures += !ex_svg_chart_case(0, 1000, true, "points='90,240 780,40 '");
+    char out[8] = "old"; size_t off = 3;
+    double value = 1; const char labels[1][20] = {"only"};
+    explorer_svg_line_chart(out, sizeof(out), &off, "chart", "#123456",
+                            &value, labels, 1, "units");
+    if (off != 3 || strcmp(out, "old")) {
+        printf("explorer: one-point SVG changed output... FAIL\n");
+        failures++;
+    }
+    return failures;
+}
+
 int test_explorer(void)
 {
     int failures = 0;
+    failures += ex_svg_chart_boundaries();
     failures += ex_mirror_address_availability();
     failures += ex_shielded_sign_witness();
     failures += ex_favicon_boundaries();
