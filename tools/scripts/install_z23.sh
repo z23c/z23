@@ -422,9 +422,24 @@ materialize_aliases() {
 
 curl_bounded() {
     local url="$1" dest="$2" maximum_bytes="$3" maximum_seconds="$4"
-    curl --connect-timeout "$REMOTE_CONNECT_TIMEOUT_SECONDS" \
-        --max-time "$maximum_seconds" --max-filesize "$maximum_bytes" \
-        -fsSL "$url" -o "$dest"
+    local started="$SECONDS" remaining="$maximum_seconds" elapsed rc attempt=1
+    while :; do
+        if curl --connect-timeout "$REMOTE_CONNECT_TIMEOUT_SECONDS" \
+            --max-time "$remaining" --max-filesize "$maximum_bytes" \
+            -fsSL "$url" -o "$dest"; then
+            return 0
+        else
+            rc=$?
+        fi
+        [ "$rc" -eq 18 ] && [ "$attempt" -lt 3 ] || return "$rc"
+        elapsed=$((SECONDS - started))
+        [ "$elapsed" -ge 0 ] || return "$rc"
+        remaining=$((maximum_seconds - elapsed - 1))
+        [ "$remaining" -gt 0 ] || return "$rc"
+        rm -f -- "$dest" || return 1
+        attempt=$((attempt + 1))
+        say "download interrupted; retrying from the beginning (attempt $attempt of 3)"
+    done
 }
 
 require_bounded_curl() {
@@ -1595,6 +1610,44 @@ actual_bytes="$(wc -c <"$Z23_INSTALL_TEST_HTTP_ROOT/$rel" | tr -d ' ')"
 cp -- "$Z23_INSTALL_TEST_HTTP_ROOT/$rel" "$dest"
 EOF
     chmod 755 "$tmp/mockbin/curl"
+}
+
+# Test the production retry function in-process with a deterministic curl stub.
+selftest_partial_retry() {
+    local tmp="$SELFTEST_TMP" rc count deadline
+    local SECONDS=0
+    SELFTEST_RETRY_CASE=once SELFTEST_RETRY_CALLS=0 SELFTEST_RETRY_BAD=0
+    curl() {
+        SELFTEST_RETRY_CALLS=$((SELFTEST_RETRY_CALLS + 1))
+        [ "$1" = --connect-timeout ] && [ "$3" = --max-time ] &&
+            [ "$5" = --max-filesize ] && [ "$7" = -fsSL ] && [ "$9" = -o ] || return 2
+        count="$SELFTEST_RETRY_CALLS"; deadline="$4"
+        if [ "$count" -gt 1 ] && [ -e "${10}" ]; then SELFTEST_RETRY_BAD=1; fi
+        case "$SELFTEST_RETRY_CASE" in
+            once)
+                if [ "$count" -eq 1 ]; then printf partial >"${10}"; return 18; fi
+                [ "$deadline" -le 29 ] || return 2
+                printf complete >"${10}"; return 0 ;;
+            repeated) printf partial >"${10}"; return 18 ;;
+            other) printf failure >"${10}"; return 63 ;;
+            expired) printf partial >"${10}"; SECONDS=$((SECONDS + 30)); return 18 ;;
+        esac
+        return 2
+    }
+    rc=0; curl_bounded https://fixture.invalid/file "$tmp/retry-once" 1024 30 2>"$tmp/retry.err" || rc=$?
+    [ "$rc" -eq 0 ] && [ "$SELFTEST_RETRY_CALLS" -eq 2 ] && [ "$SELFTEST_RETRY_BAD" -eq 0 ] &&
+        [ "$(cat "$tmp/retry-once")" = complete ] || die "selftest: partial retry did not replace bytes"
+    SELFTEST_RETRY_CASE=repeated SELFTEST_RETRY_CALLS=0 SELFTEST_RETRY_BAD=0
+    rc=0; curl_bounded https://fixture.invalid/file "$tmp/retry-repeat" 1024 30 2>/dev/null || rc=$?
+    [ "$rc" -eq 18 ] && [ "$SELFTEST_RETRY_CALLS" -eq 3 ] && [ "$SELFTEST_RETRY_BAD" -eq 0 ] ||
+        die "selftest: repeated partial transfer exceeded three attempts"
+    SELFTEST_RETRY_CASE=other SELFTEST_RETRY_CALLS=0
+    rc=0; curl_bounded https://fixture.invalid/file "$tmp/retry-other" 1024 30 2>/dev/null || rc=$?
+    [ "$rc" -eq 63 ] && [ "$SELFTEST_RETRY_CALLS" -eq 1 ] || die "selftest: nonpartial error retried"
+    SELFTEST_RETRY_CASE=expired SELFTEST_RETRY_CALLS=0
+    rc=0; curl_bounded https://fixture.invalid/file "$tmp/retry-expired" 1024 30 2>/dev/null || rc=$?
+    [ "$rc" -eq 18 ] && [ "$SELFTEST_RETRY_CALLS" -eq 1 ] || die "selftest: exhausted deadline retried"
+    unset -f curl
 }
 
 selftest_local_refusals() {
@@ -3240,6 +3293,7 @@ selftest() {
     SELFTEST_TOR_CASES=""
     selftest_prepare
     selftest_prepare_curl_mock
+    selftest_partial_retry
     selftest_local_refusals
     selftest_remote_authority
     selftest_remote_pins

@@ -42,6 +42,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SN_CHECK(name, expr) do {                          \
@@ -530,6 +531,101 @@ static bool sn_pi_body_streamed(const char *resp, size_t got)
            sep[4 + 39999] == 'A';
 }
 
+/* Write a deterministic large fixture without allocating the whole body. */
+#define SN_STREAM_BYTES (8u * 1024u * 1024u)
+static unsigned char sn_pi_pattern(size_t offset)
+{
+    uint32_t x = (uint32_t)offset;
+    x ^= x >> 13; x *= UINT32_C(0x5bd1e995); x ^= x >> 15;
+    return (unsigned char)x;
+}
+
+static bool sn_pi_large_fixture(const char *root)
+{
+    char path[768];
+    unsigned char block[16384];
+    snprintf(path, sizeof(path), "%s/release/large.bin", root);
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = true;
+    for (size_t n = 0; n < SN_STREAM_BYTES; n += sizeof(block)) {
+        for (size_t i = 0; i < sizeof(block); i++) block[i] = sn_pi_pattern(n + i);
+        if (fwrite(block, 1, sizeof(block), f) != sizeof(block)) {
+            ok = false;
+            break;
+        }
+    }
+    return fclose(f) == 0 && ok;
+}
+
+/* One deadline bounds both response phases; each SSL read also has a timeout. */
+static bool sn_pi_before_deadline(const struct timespec *start)
+{
+    struct timespec now;
+    return clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
+           now.tv_sec - start->tv_sec < 10;
+}
+
+/* Read and validate the response header before accepting any body. */
+static bool sn_pi_large_header(SSL *ssl, const struct timespec *start)
+{
+    char header[2048] = {0};
+    size_t h = 0;
+    while (h + 1 < sizeof(header)) {
+        if (!sn_pi_before_deadline(start) || SSL_read(ssl, header + h, 1) != 1) return false;
+        h++;
+        if (h >= 4 && memcmp(header + h - 4, "\r\n\r\n", 4) == 0)
+            return strstr(header, "HTTP/1.1 200 OK\r\n") &&
+                   strstr(header, "Content-Length: 8388608\r\n");
+    }
+    return false;
+}
+
+static bool sn_pi_large_body(SSL *ssl, size_t *total, const struct timespec *start)
+{
+    unsigned char body[16384];
+    while (*total < SN_STREAM_BYTES) {
+        if (!sn_pi_before_deadline(start)) return false;
+        size_t want = SN_STREAM_BYTES - *total;
+        if (want > sizeof(body)) want = sizeof(body);
+        int n = SSL_read(ssl, body, (int)want);
+        if (n <= 0) return false;
+        for (int i = 0; i < n; i++) if (body[i] != sn_pi_pattern(*total + (size_t)i)) return false;
+        *total += (size_t)n;
+    }
+    return true;
+}
+
+/* Actual HTTPS path: pause the reader to fill TCP buffers, then verify every
+ * byte and the declared length. Socket timeouts bound a broken connection. */
+static bool sn_pi_large_stream(void)
+{
+    platform_socket_t fd = listener_socket_connect(atomic_load(&g_port));
+    SSL_CTX *ctx = NULL;
+    SSL *ssl = NULL;
+    bool ok = false;
+    size_t total = 0;
+    const int receive_buffer = 262144;
+    if (fd == PLATFORM_SOCKET_INVALID) return false;
+    if (platform_socket_set_receive_buffer(fd, receive_buffer) != 0 ||
+        platform_socket_set_receive_timeout(fd, 2000) != 0 ||
+        platform_socket_set_send_timeout(fd, 2000) != 0 ||
+        tls_client_session_open((int)(intptr_t)fd, NULL, false, &ctx, &ssl) != 0)
+        goto done;
+    static const char request[] = "GET /release/large.bin HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if (SSL_write(ssl, request, (int)(sizeof(request) - 1)) != (int)(sizeof(request) - 1))
+        goto done;
+    struct timespec start, pause = {.tv_sec = 1, .tv_nsec = 0};
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0 || nanosleep(&pause, NULL) != 0) goto done;
+    ok = sn_pi_large_header(ssl, &start) && sn_pi_large_body(ssl, &total, &start);
+done:
+    if (!ok) fprintf(stderr, "https_sni_select: large response incomplete or mismatched at %zu/%u bytes\n", total, SN_STREAM_BYTES);
+    if (ssl) SSL_free(ssl);
+    if (ctx) SSL_CTX_free(ctx);
+    platform_socket_close(fd);
+    return ok;
+}
+
 static int sn_pi_release_cases(const char *install_root)
 {
     static char resp[65536];
@@ -549,6 +645,8 @@ static int sn_pi_release_cases(const char *install_root)
              strstr(resp, "Cache-Control: no-store\r\n") != NULL);
     SN_CHECK("the 40000-byte release body is streamed in full",
              got > 0 && sn_pi_body_streamed(resp, got));
+    SN_CHECK("large release fixture is written", sn_pi_large_fixture(install_root));
+    SN_CHECK("large release survives reader backpressure byte-for-byte", sn_pi_large_stream());
     SN_CHECK("a .sh file is served as text",
              http_get_ua("/install_z23.sh", NULL, resp, sizeof(resp)) &&
              strstr(resp, "Content-Type: text/plain; charset=utf-8\r\n") !=
