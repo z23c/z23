@@ -8,6 +8,7 @@
  *   land      ZCL_DEV_FACTORY_LAND_DIR  directory holding outcomes.jsonl
  *   attempts  ZCL_DEV_FACTORY_ATTEMPTS  proof attempt directories
  *   proc      ZCL_DEV_FACTORY_PROC      stands in for /proc (pressure/ files)
+ *   verdicts  ZCL_DEV_FACTORY_VERDICTS  durable scheduler suite observations
  *
  * Output (zcl.dev_factory.v1): hours, window_s, jobs{...}, land_outcomes{...},
  * proof_attempts{...}, host{...}. Every source carries source = "ok" or
@@ -20,14 +21,17 @@
  * Jobs also report first_job_per_cwd (the earliest ledger row of each cwd,
  * a cold-start proxy, against the rest), cold_build_seconds_estimate (a
  * proxy: first-job run time above the non-first median of its class) and
- * failed_runs_named / failed_runs_unnamed, where a failed run is named when
- * <cwd>/build/test-verdict.json ended within 120 s of it and lists groups.
- * failed_runs_by_class splits that coverage by job class; attribution metadata
- * labels the latest-cwd-verdict time proxy, which is not an exact job join.
+ * failed_runs_named / failed_runs_unnamed, where a failed run is named only
+ * from retained suite observations bound to its unique scheduler unit.
+ * These observations can be incomplete and do not establish what caused the
+ * job's final exit. Legacy or ambiguous identities remain unnamed.
  * cold_t_fast_* counts t-fast runs with cpu_s above 600 (cold builds), their
  * run_s total and how many ran without a -j token; warm_t_fast_n counts the
  * rest. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "command/native_command.h"
 #include "dev/dev_proof.h"
 
@@ -38,13 +42,16 @@
 #include "sha3/sha3.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/statvfs.h>
+#include <unistd.h>
 #endif
 
 #define FAC_DEFAULT_HOURS 48
@@ -62,7 +69,6 @@
 #define FAC_MAX_CWDS 4096u
 #define FAC_CWD_SLOTS 8192u
 #define FAC_VERDICT_MAX (1u << 16)
-#define FAC_VERDICT_SKEW_S 120.0
 #define FAC_NAME 64u
 #define FAC_MAX_NAMES 64u
 #define FAC_COLD_CPU_S 600.0 /* a t-fast run above this cpu_s is a cold build */
@@ -263,7 +269,10 @@ struct fac_job {
     size_t cwd_off;                /* cwd starts at key + cwd_off */
     double queued, started, ended, wait_s, run_s, cpu_s;
     char *key; /* tree 0x1f cmd 0x1f cwd */
+    char unit[129];
 };
+
+struct fac_unit_slot { const char *unit; size_t count; };
 
 /* Earliest (queued, idx) ledger row seen for one cwd, over the whole ledger. */
 struct fac_cwd {
@@ -280,7 +289,21 @@ struct fac_jobs {
     size_t ncwds;
     int64_t rows;    /* valid ledger rows, every project */
     bool cwd_cap_hit; /* a cwd could not be tracked (table or path cap) */
+    struct fac_unit_slot *units;
+    size_t unit_cap;
+    char verdict_root[FAC_PATH];
 };
+
+static bool fac_unit_valid(const char *s)
+{
+    if (!s || strlen(s) > 128 || strncmp(s, "devbuild-", 9)) return false;
+    s += 9;
+    if (*s < '0' || *s > '9') return false;
+    while (*s >= '0' && *s <= '9') s++;
+    if (*s++ != '-' || *s < '0' || *s > '9') return false;
+    while (*s >= '0' && *s <= '9') s++;
+    return strcmp(s, ".scope") == 0;
+}
 
 /* Saturating increment: a count never wraps. */
 static void fac_inc(int64_t *v)
@@ -334,6 +357,30 @@ static uint64_t fac_hash(const char *s)
     for (; *s; s++)
         h = (h ^ (unsigned char)*s) * 1099511628211ull;
     return h;
+}
+
+static struct fac_unit_slot *fac_unit_slot(struct fac_jobs *j, const char *unit)
+{
+    if (!j->units || !unit[0]) return NULL;
+    size_t i = (size_t)fac_hash(unit) & (j->unit_cap - 1);
+    while (j->units[i].unit && strcmp(j->units[i].unit, unit))
+        i = (i + 1) & (j->unit_cap - 1);
+    return &j->units[i];
+}
+
+/* Index only identities in the selected window; the second pass counts
+ * matching rows across the whole captured ledger, including older rows. */
+static void fac_unit_index(struct fac_jobs *j)
+{
+    size_t cap = 16;
+    while (cap < j->n * 2 + 2) cap *= 2;
+    j->units = zcl_calloc(cap, sizeof(*j->units), "dev_factory_units");
+    if (!j->units) return;
+    j->unit_cap = cap;
+    for (size_t i = 0; i < j->n; ++i) {
+        struct fac_unit_slot *slot = fac_unit_slot(j, j->v[i].unit);
+        if (slot && !slot->unit) slot->unit = j->v[i].unit;
+    }
 }
 
 /* Slot of `cwd` in the first-seen table, keeping the earliest (queued, idx)
@@ -394,7 +441,7 @@ static bool fac_has_j(const char *cmd)
 }
 
 static void fac_job_fill(struct fac_job *jb, const struct json_value *row,
-                         int64_t seq)
+                         int64_t seq, const char *verdict_root)
 {
     const char *cmd = fac_text(row, "cmd");
     const char *cwd = fac_text(row, "cwd");
@@ -416,6 +463,9 @@ static void fac_job_fill(struct fac_job *jb, const struct json_value *row,
     jb->run_s = fac_field(row, "run_s");
     jb->cpu_s = fac_field(row, "cpu_s");
     jb->key = fac_make_key(tree, cmd, cwd);
+    const char *unit = fac_text(row, "unit");
+    if (fac_unit_valid(unit) && verdict_root[0] && !strcmp(fac_text(row, "verdict_root"), verdict_root))
+        (void)snprintf(jb->unit, sizeof(jb->unit), "%s", unit);
 }
 
 static bool fac_job_line(const char *line, size_t len, void *ctx,
@@ -447,7 +497,7 @@ static bool fac_job_line(const char *line, size_t len, void *ctx,
             json_free(&row);
             return false;
         }
-        fac_job_fill(&j->v[j->n], &row, (int64_t)j->n);
+        fac_job_fill(&j->v[j->n], &row, (int64_t)j->n, j->verdict_root);
         j->v[j->n].ledger_idx = idx;
         j->v[j->n].slot = slot;
         j->n++;
@@ -465,11 +515,13 @@ static bool fac_job_history_line(const char *line, size_t len, void *ctx,
     double queued;
     (void)src;
     json_init(&row);
-    if (!json_read(&row, line, len) || row.type != JSON_OBJ ||
-        !fac_num(json_get(&row, "queued"), &queued)) {
+    if (!json_read(&row, line, len) || row.type != JSON_OBJ) {
         json_free(&row);
         return true;
     }
+    struct fac_unit_slot *unit = fac_unit_slot(j, fac_text(&row, "unit"));
+    if (unit && unit->unit && unit->count < SIZE_MAX) unit->count++;
+    if (!fac_num(json_get(&row, "queued"), &queued)) { json_free(&row); return true; }
     int64_t idx = j->rows;
     fac_inc(&j->rows);
     const char *cwd = fac_text(&row, "cwd");
@@ -547,6 +599,7 @@ static bool fac_jobs_scan(const char *path, struct fac_jobs *j,
     ok = extent >= 0 && fseek(fp, 0, SEEK_SET) == 0 &&
          fac_snapshot_pass(fp, extent, fac_job_line, j, src, first);
     if (ok) {
+        fac_unit_index(j);
         j->rows = 0;
         ok = fseek(fp, 0, SEEK_SET) == 0 &&
              fac_snapshot_pass(fp, extent, fac_job_history_line, j, &history, second) &&
@@ -561,6 +614,7 @@ static void fac_jobs_free(struct fac_jobs *j)
     for (size_t i = 0; i < j->n; i++)
         free(j->v[i].key);
     free(j->v);
+    free(j->units);
     if (j->cwds)
         for (size_t s = 0; s < FAC_CWD_SLOTS; s++)
             free(j->cwds[s].cwd);
@@ -894,25 +948,42 @@ static void fac_verdict_note(struct fac_verdict *v, const char *name)
     v->nn++;
 }
 
-/* Read `<cwd>/build/test-verdict.json`, a JSON object. False when absent,
- * oversized or not an object; doc is then not to be freed. */
-static bool fac_verdict_read(const char *cwd, struct json_value *doc)
+#if !defined(_WIN32)
+static bool fac_private_stat(const struct stat *st, mode_t mode, bool directory)
 {
-    char path[FAC_PATH + 32];
+    return (directory ? S_ISDIR(st->st_mode) : S_ISREG(st->st_mode)) &&
+        st->st_uid == geteuid() && (st->st_mode & 0777) == mode;
+}
+#endif
+
+/* Read one bounded regular receipt without following a final symlink. */
+static bool fac_verdict_read(DIR *directory, const char *dir, const char *name, struct json_value *doc)
+{
     char *buf;
     FILE *fp;
     size_t len = 0;
     bool ok = false;
-    if (snprintf(path, sizeof(path), "%s/build/test-verdict.json", cwd) >=
-        (int)sizeof(path))
-        return false;
+#if defined(_WIN32)
+    char path[FAC_PATH + 200];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    (void)directory;
     fp = fopen(path, "r");
+#else
+    (void)dir;
+    int fd = openat(dirfd(directory), name, O_RDONLY | O_NOFOLLOW);
+    struct stat st;
+    if (fd < 0) return false;
+    if (fstat(fd, &st) != 0 || !fac_private_stat(&st, 0600, false)) { close(fd); return false; }
+    fp = fdopen(fd, "r");
+    if (!fp) close(fd);
+#endif
     if (!fp)
         return false;
     buf = zcl_malloc(FAC_VERDICT_MAX + 1u, "dev_factory_verdict");
     if (buf) {
         len = fread(buf, 1, FAC_VERDICT_MAX + 1u, fp);
-        if (len <= FAC_VERDICT_MAX) {
+        if (len <= FAC_VERDICT_MAX && !ferror(fp) && feof(fp)) {
             json_init(doc);
             ok = json_read(doc, buf, len) && doc->type == JSON_OBJ;
             if (!ok)
@@ -922,17 +993,6 @@ static bool fac_verdict_read(const char *cwd, struct json_value *doc)
     }
     (void)fclose(fp);
     return ok;
-}
-
-/* A time proxy: verdict ended no later than the job, within the preceding
- * skew window. Equal seconds still do not establish an exact job join. */
-static bool fac_verdict_match(const struct json_value *doc, double ended)
-{
-    double vu = 0, d;
-    if (!fac_num(json_get(doc, "ended_unix"), &vu))
-        return false;
-    d = vu - ended;
-    return d <= 0 && d >= -FAC_VERDICT_SKEW_S;
 }
 
 /* Note each non-empty string of failed_groups; true when there was one. */
@@ -954,20 +1014,118 @@ static bool fac_verdict_names(const struct json_value *doc,
     return any;
 }
 
-/* A failed run is named when its cwd's verdict ended with it and names at
- * least one failed group; any other failed run is unnamed. */
-static void fac_verdict_job(const struct fac_job *jb, struct fac_verdict *v)
+/* Only a uniquely bound job can contribute observed suite failures. */
+static bool fac_suite_name(const char *name)
+{
+    if (strlen(name) != 37 || strcmp(name + 32, ".json")) return false;
+    for (size_t i = 0; i < 32; ++i)
+        if (!((name[i] >= '0' && name[i] <= '9') ||
+              (name[i] >= 'a' && name[i] <= 'f'))) return false;
+    return true;
+}
+
+static bool fac_unit_counts_valid(const struct json_value *doc)
+{
+    const struct json_value *total = json_get(doc, "groups_total"), *ran = json_get(doc, "groups_ran");
+    const struct json_value *cached = json_get(doc, "groups_cached"), *failed = json_get(doc, "groups_failed");
+    if (!total || total->type != JSON_INT || !ran || ran->type != JSON_INT ||
+        !cached || cached->type != JSON_INT || !failed || failed->type != JSON_INT) return false;
+    int64_t t = json_get_int(total), r = json_get_int(ran), c = json_get_int(cached), f = json_get_int(failed);
+    return t >= 0 && r >= 0 && c >= 0 && f >= 0 && f <= r && r <= t && c <= t - r;
+}
+
+static bool fac_unit_groups_valid(const struct json_value *doc)
+{
+    const struct json_value *groups = json_get(doc, "failed_groups");
+    const struct json_value *failed = json_get(doc, "groups_failed");
+    const struct json_value *truncated = json_get(doc, "failed_groups_truncated");
+    if (!fac_unit_counts_valid(doc) || !groups || groups->type != JSON_ARR || !failed || failed->type != JSON_INT ||
+        !truncated || truncated->type != JSON_BOOL) return false;
+    if (json_get_int(failed) < 0 || (uint64_t)json_get_int(failed) < json_size(groups) ||
+        json_get_bool(truncated) != ((uint64_t)json_get_int(failed) > json_size(groups))) return false;
+    for (size_t i = 0; i < json_size(groups); ++i) {
+        const struct json_value *g = json_at(groups, i);
+        if (!g || g->type != JSON_STR || !json_get_str(g)[0]) return false;
+    }
+    return true;
+}
+
+static bool fac_unit_doc_valid(const struct json_value *doc, const char *unit, const char *name)
+{
+    const char *schema = fac_text(doc, "schema"), *actual = fac_text(doc, "unit"), *suite = fac_text(doc, "suite");
+    return !strcmp(schema, "zcl.test_verdict.v1") && !strcmp(actual, unit) &&
+        strlen(suite) == 32 && !strncmp(suite, name, 32) && fac_unit_groups_valid(doc);
+}
+
+static bool fac_unit_read_one(DIR *directory, const char *dir, const char *name, const char *unit,
+                              struct fac_verdict *found, bool *any)
 {
     struct json_value doc;
-    const char *cwd;
+    if (!fac_verdict_read(directory, dir, name, &doc)) return false;
+    bool ok = fac_unit_doc_valid(&doc, unit, name);
+    if (ok && fac_verdict_names(&doc, found)) *any = true;
+    json_free(&doc);
+    return ok;
+}
+
+#if !defined(_WIN32)
+static bool fac_private_root(const char *root)
+{
+    struct stat st; char canonical[FAC_PATH];
+    return lstat(root, &st) == 0 && fac_private_stat(&st, 0700, true) &&
+        realpath(root, canonical) && !strcmp(root, canonical);
+}
+#endif
+
+static DIR *fac_unit_open(const struct fac_job *jb, const char *root, char *dir, size_t cap)
+{
+    int n = snprintf(dir, cap, "%s/%s", root, jb->unit);
+    if (!root[0] || n <= 0 || (size_t)n >= cap) return NULL;
+#if !defined(_WIN32)
+    struct stat st;
+    if (!fac_private_root(root)) return NULL;
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) return NULL;
+    if (fstat(fd, &st) != 0 || !fac_private_stat(&st, 0700, true)) { close(fd); return NULL; }
+    DIR *d = fdopendir(fd);
+    if (!d) close(fd);
+    return d;
+#else
+    return opendir(dir);
+#endif
+}
+
+static bool fac_unit_verdicts(const struct fac_job *jb, const char *root, struct fac_verdict *found)
+{
+    char dir[FAC_PATH + 160];
+    DIR *d = fac_unit_open(jb, root, dir, sizeof(dir));
+    if (!d) return false;
+    bool ok = true, any = false; size_t count = 0;
+    struct dirent *ent;
+    for (;;) {
+        errno = 0; ent = readdir(d);
+        if (!ent) { if (errno) ok = false; break; }
+        if (ent->d_name[0] == '.') continue;
+        if (++count > 64 || !fac_suite_name(ent->d_name)) { ok = false; break; }
+        if (!fac_unit_read_one(d, dir, ent->d_name, jb->unit, found, &any)) { ok = false; break; }
+    }
+    if (closedir(d) != 0) ok = false;
+    return ok && any;
+}
+
+static void fac_verdict_job(struct fac_jobs *jobs, const struct fac_job *jb, struct fac_verdict *v)
+{
     bool named = false;
     if (jb->rc == 0)
         return;
-    cwd = jb->key ? jb->key + jb->cwd_off : "";
-    if (cwd[0] && fac_verdict_read(cwd, &doc)) {
-        named = fac_verdict_match(&doc, jb->ended) && fac_verdict_names(&doc, v);
-        json_free(&doc);
+    struct fac_unit_slot *slot = fac_unit_slot(jobs, jb->unit);
+    struct fac_verdict *found = zcl_calloc(1, sizeof(*found), "dev_factory_unit_verdict");
+    if (slot && slot->count == 1 && found && fac_unit_verdicts(jb, jobs->verdict_root, found)) {
+        for (size_t i = 0; i < found->nn; ++i) fac_verdict_note(v, found->names[i].key);
+        if (found->overflow) fac_inc(&v->overflow);
+        named = true;
     }
+    free(found);
     if (named) {
         fac_inc(&v->named);
         fac_inc(&v->named_by_class[jb->cls]);
@@ -991,9 +1149,7 @@ static void fac_verdict_coverage(const struct fac_verdict *v,
     }
     fac_attach(out, "failed_runs_by_class", &classes);
     (void)json_push_kv_str(out, "failed_group_attribution_basis",
-                           "latest_cwd_verdict_time_proxy");
-    (void)json_push_kv_real(out, "failed_group_attribution_skew_s",
-                            FAC_VERDICT_SKEW_S);
+                           "observed_unit_bound_verdicts_incomplete");
 }
 
 static int fac_cmp_name(const void *a, const void *b)
@@ -1004,7 +1160,7 @@ static int fac_cmp_name(const void *a, const void *b)
     return strcmp(x->key, y->key);
 }
 
-static void fac_failed_section(const struct fac_jobs *j, struct json_value *out)
+static void fac_failed_section(struct fac_jobs *j, struct json_value *out)
 {
     struct fac_verdict *v = zcl_calloc(1, sizeof(*v), "dev_factory_verdicts");
     struct json_value names;
@@ -1012,7 +1168,7 @@ static void fac_failed_section(const struct fac_jobs *j, struct json_value *out)
     if (!v)
         return;
     for (size_t i = 0; i < j->n; i++)
-        fac_verdict_job(&j->v[i], v);
+        fac_verdict_job(j, &j->v[i], v);
     (void)json_push_kv_int(out, "failed_runs_named", v->named);
     (void)json_push_kv_int(out, "failed_runs_unnamed", v->unnamed);
     fac_verdict_coverage(v, out);
@@ -1042,6 +1198,9 @@ static void fac_jobs_report(struct fac_jobs *j, double now, double window_s,
     fac_new_obj(&classes);
     (void)fac_classes(j, &classes);
     fac_attach(out, "classes", &classes);
+    /* Unit index borrows strings in j->v, so consume it before duplicates
+     * sorts that array. */
+    fac_failed_section(j, out);
     (void)json_push_kv_int(out, "duplicates", fac_duplicates(j));
     if (fac_busy(j, now, &lander, &lanes)) {
         (void)json_push_kv_real(out, "lander_busy_pct",
@@ -1052,7 +1211,6 @@ static void fac_jobs_report(struct fac_jobs *j, double now, double window_s,
     fac_lane_lint(j, out);
     fac_first_section(j, out);
     fac_cold_section(j, out);
-    fac_failed_section(j, out);
 }
 
 static void fac_jobs_section(double now, double window_s,
@@ -1062,6 +1220,9 @@ static void fac_jobs_section(double now, double window_s,
     struct fac_src src = {0};
     char path[FAC_PATH];
     j.window_start = now - window_s;
+    if (!fac_path(getenv("ZCL_DEV_FACTORY_VERDICTS"), ".local/state/development/test-verdicts",
+                  j.verdict_root, sizeof(j.verdict_root)) || j.verdict_root[0] != '/')
+        j.verdict_root[0] = 0;
     j.cwds = zcl_calloc(FAC_CWD_SLOTS, sizeof(*j.cwds), "dev_factory_cwds");
     if (!j.cwds ||
         !fac_path(getenv("ZCL_DEV_FACTORY_JOBS"),

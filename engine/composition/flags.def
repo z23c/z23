@@ -682,6 +682,8 @@ Z23_FLAG("ZCL_DEV_FACTORY_LAND_DIR", "env_runtime", "-", "-",
           "Land state directory holding outcomes.jsonl read by dev.factory; first use tools/command/native_dev_factory.c:auto")
 Z23_FLAG("ZCL_DEV_FACTORY_PROC", "env_runtime", "-", "-",
           "Directory standing in for /proc (pressure/ files) read by dev.factory; first use tools/command/native_dev_factory.c:auto")
+Z23_FLAG("ZCL_DEV_FACTORY_VERDICTS", "env_runtime", "-", "-",
+          "Directory of scheduler-bound suite observations read by dev.factory; first use tools/command/native_dev_factory.c:auto")
 Z23_FLAG("ZCL_DEV_FAILURE_TEST_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/native-dev-failure-selftest.sh:auto")
 Z23_FLAG("ZCL_DEV_GENERATION_ROOT", "env_test", "-", "-",

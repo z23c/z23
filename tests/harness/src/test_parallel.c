@@ -1161,9 +1161,9 @@ static bool retry_probe_parse(const char *arg)
 {
     static const char *const flags[] = {
         "--retry-evidence-probe", "--retry-evidence-unobserved",
-        "--retry-evidence-rename-failure"
+        "--retry-evidence-rename-failure", "--retry-evidence-always-fail"
     };
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = 0; i < 4; i++) {
         if (strcmp(arg, flags[i]) == 0) {
             g_retry_evidence_probe = i + 1;
             return true;
@@ -1177,16 +1177,16 @@ static bool retry_probe_options(int argc, char **argv)
     static const char *const allowed[] = {
         "--jobs=2", "--verbose", "--no-cache", "--exact=test_hex_codec",
         "--retry-evidence-probe", "--retry-evidence-unobserved",
-        "--retry-evidence-rename-failure", "--diagnostic-once"
+        "--retry-evidence-rename-failure", "--diagnostic-once", "--retry-evidence-always-fail"
     };
-    unsigned seen[8] = {0};
+    unsigned seen[9] = {0};
     for (int i = 1; i < argc; i++) {
         size_t j = 0;
-        while (j < 8 && strcmp(argv[i], allowed[j]) != 0) j++;
-        if (j == 8 || seen[j]++) return false;
+        while (j < 9 && strcmp(argv[i], allowed[j]) != 0) j++;
+        if (j == 9 || seen[j]++) return false;
     }
     return seen[2] == 1 && seen[3] == 1 &&
-        seen[4] + seen[5] + seen[6] == 1 && !getenv("ZCL_TEST_CACHE_DUMP");
+        seen[4] + seen[5] + seen[6] + seen[8] == 1 && !getenv("ZCL_TEST_CACHE_DUMP");
 }
 
 static bool retry_probe_admit(int argc, char **argv)
@@ -1226,6 +1226,7 @@ static void retry_probe_emit(unsigned count)
 static int retry_probe_result(bool ok, unsigned count)
 {
     if (!ok) return 2;
+    if (g_retry_evidence_probe == 4) return 1;
     if (g_retry_evidence_probe == 2) {
         if (count == 0) printf("UNOBSERVED (synthetic retry evidence fixture)\n");
         return 0;
@@ -1256,10 +1257,11 @@ static int retry_evidence_probe(const char *out_path)
 #if !defined(_WIN32)
 /* Land's receiver only admits source checkouts under the checkout policy.
  * Its fixture repositories therefore stay under cwd/test-tmp. */
-static bool child_fixture_root_select(size_t idx)
+static bool child_prepare_environment(size_t idx)
 {
-    return strncmp(g_groups[idx].name, "test_dev_land", 13) != 0 ||
-           unsetenv("ZCL_TEST_TMPROOT") == 0;
+    /* Nested synthetic runners are not directly observed scheduler suites. */
+    return unsetenv("DEVBUILD_UNIT") == 0 && unsetenv("DEVBUILD_VERDICT_ROOT") == 0 &&
+        (strncmp(g_groups[idx].name, "test_dev_land", 13) != 0 || unsetenv("ZCL_TEST_TMPROOT") == 0);
 }
 #endif
 
@@ -1305,7 +1307,7 @@ static void child_run(size_t idx, const char *out_path, const char *state_path,
     setbuf(stderr, NULL);
 
 #if !defined(_WIN32)
-    if (!child_fixture_root_select(idx)) _exit(2);
+    if (!child_prepare_environment(idx)) _exit(2);
 #endif
     if (!state_path || !state_path[0] ||
         setenv("XDG_STATE_HOME", state_path, 1) != 0) {
@@ -1395,6 +1397,8 @@ static bool child_dispatch(int argc, char **argv)
             g_retry_evidence_probe = 2;
         else if (strcmp(argv[i], "--retry-evidence-rename-failure") == 0)
             g_retry_evidence_probe = 3;
+        else if (strcmp(argv[i], "--retry-evidence-always-fail") == 0)
+            g_retry_evidence_probe = 4;
     }
     if (idx < 0) return false;
     if (!out || !state || (unsigned long)idx >= (unsigned long)g_num_groups) {
@@ -1492,7 +1496,8 @@ static int child_spawn(size_t idx, const char *out_path,
                        g_state_isolation_probe ? " --state-isolation-probe" : "",
                        g_retry_evidence_probe == 1 ? " --retry-evidence-probe" :
                        g_retry_evidence_probe == 2 ? " --retry-evidence-unobserved" :
-                       g_retry_evidence_probe == 3 ? " --retry-evidence-rename-failure" : "");
+                       g_retry_evidence_probe == 3 ? " --retry-evidence-rename-failure" :
+                       g_retry_evidence_probe == 4 ? " --retry-evidence-always-fail" : "");
     if (len < 0 || (size_t)len >= sizeof(cmd)) {
         fprintf(stderr, "test_parallel: child command line too long\n");
         return -1;
@@ -2671,6 +2676,83 @@ static void write_test_timing_json(const struct group_result *results,
     timing_publish(tmp_path, final_path);
 }
 
+#if !defined(_WIN32)
+/* A scheduler unit is already the identity used for the admitted scope. */
+static bool verdict_unit_valid(const char *s)
+{
+    if (!s || strncmp(s, "devbuild-", 9)) return false;
+    s += 9;
+    if (*s < '0' || *s > '9') return false;
+    while (*s >= '0' && *s <= '9') s++;
+    if (*s++ != '-' || *s < '0' || *s > '9') return false;
+    while (*s >= '0' && *s <= '9') s++;
+    return strcmp(s, ".scope") == 0;
+}
+
+static bool verdict_private_dir(const char *path)
+{
+    struct stat st;
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) &&
+        st.st_uid == geteuid() && (st.st_mode & 0777) == 0700;
+}
+
+static bool verdict_publish_file(const char *tmp, const char *final, const char *wire, size_t len)
+{
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) return false;
+    FILE *fp = fdopen(fd, "w");
+    if (!fp) { close(fd); unlink(tmp); return false; }
+    bool ok = fwrite(wire, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
+    if (fclose(fp) != 0) ok = false;
+    if (ok) ok = link(tmp, final) == 0;
+    (void)unlink(tmp);
+    return ok;
+}
+
+static bool verdict_paths(const char *dir, const char *hex, char *tmp, size_t tcap,
+                          char *final, size_t fcap)
+{
+    int a = snprintf(tmp, tcap, "%s/.tmp-%s", dir, hex);
+    int b = snprintf(final, fcap, "%s/%s.json", dir, hex);
+    return a > 0 && (size_t)a < tcap && b > 0 && (size_t)b < fcap;
+}
+
+static bool verdict_root_valid(const char *root)
+{
+    char canonical[PATH_MAX];
+    return root && root[0] == '/' && verdict_private_dir(root) &&
+        realpath(root, canonical) && !strcmp(root, canonical);
+}
+
+/* Each suite gets a separate no-clobber observation; temporary writes are
+ * never considered receipts. A missing observation is not a passing suite. */
+static bool verdict_publish_unit(const char *root, const char *unit, const char *body, size_t len)
+{
+    char dir[PATH_MAX], tmp[PATH_MAX], final[PATH_MAX], hex[33], wire[41216];
+    uint8_t random[16];
+    if (!verdict_unit_valid(unit) || strlen(unit) > 128 || len < 2 ||
+        body[len - 2] != '}' || body[len - 1] != '\n' || !verdict_root_valid(root)) return false;
+    int n = snprintf(dir, sizeof(dir), "%s/%s", root, unit);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || !verdict_private_dir(dir) ||
+        !rng_fill(random, sizeof(random))) return false;
+    zcl_hex_encode(random, sizeof(random), hex);
+    n = snprintf(wire, sizeof(wire), "%.*s,\"unit\":\"%s\",\"suite\":\"%s\"}\n",
+                 (int)(len - 2), body, unit, hex);
+    if (n <= 0 || (size_t)n >= sizeof(wire)) return false;
+    if (!verdict_paths(dir, hex, tmp, sizeof(tmp), final, sizeof(final))) return false;
+    return verdict_publish_file(tmp, final, wire, (size_t)n);
+}
+
+static void verdict_publish_if_bound(const char *body, size_t len)
+{
+    const char *unit = getenv("DEVBUILD_UNIT");
+    const char *root = getenv("DEVBUILD_VERDICT_ROOT");
+    if (unit && unit[0] && !verdict_publish_unit(root, unit, body, len))
+        fprintf(stderr, "test_parallel: unit verdict was not retained\n");
+}
+#endif
+
 /* Machine-readable verdict of THIS run: build/test-verdict.json (schema
  * zcl.test_verdict.v1), written on every run, pass or fail, beside the
  * SUITE VERDICT line. The host job ledger keeps command, rc and timings but no
@@ -2712,6 +2794,9 @@ static void write_test_verdict_file(const struct group_result *results,
                         "build/test-verdict.json not written\n");
         return;
     }
+#if !defined(_WIN32)
+    verdict_publish_if_bound(body, (size_t)len);
+#endif
 
     /* Write-then-rename: a reader never sees a torn file. The pid in the tmp
      * name keeps two concurrent runners from sharing one tmp file. */

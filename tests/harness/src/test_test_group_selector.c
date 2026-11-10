@@ -7,6 +7,9 @@
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
 #include "test/test_verdict_json.h"
+#include "command/native_command.h"
+#include "config/command_catalog.h"
+#include "kernel/command_registry.h"
 #include "platform/os_proc.h"
 #include "platform/file_metadata.h"
 #include "platform/glob_match.h"
@@ -24,6 +27,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #if defined(__linux__)
 #include <dirent.h>
@@ -2930,6 +2934,9 @@ static bool tgs_marker_probe_output(void)
 
 static int tgs_state_probe(void)
 {
+#if !defined(_WIN32)
+    if (getenv("DEVBUILD_UNIT") || getenv("DEVBUILD_VERDICT_ROOT")) return 1;
+#endif
     const char *state = getenv("XDG_STATE_HOME");
     const char *expected = getenv("ZCL_TEST_RUNNER_EXPECT_HOME");
     char path[PATH_MAX];
@@ -3313,6 +3320,7 @@ static int test_runner_private_state(void)
                  * green exit. test_tmpfs_inherited_root covers the tmpfs path. */
                 "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME "
                 "-u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE %s %s ZCL_TEST_TMPFS=0 %s='%s' "
+                "DEVBUILD_UNIT=devbuild-123-456.scope DEVBUILD_VERDICT_ROOT='%s' "
                 TGS_OVERSIZED_PROBE "=\"$(head -c 70000 /dev/zero | tr '\\0' x)\" ZCL_STATE_ROOT='%s' "
                 "ZCL_TEST_RUNNER_EXPECT_HOME='%s' "
                 "'%s' --jobs=2 --verbose --no-cache --state-isolation-probe "
@@ -3321,7 +3329,7 @@ static int test_runner_private_state(void)
                 attempt == 1 ? "-u XDG_STATE_HOME" : "",
                 home_env,
                 attempt == 0 ? "XDG_STATE_HOME" : "ZCL_TEST_CALLER_STATE",
-                caller_state, caller_state,
+                caller_state, caller_state, caller_state,
                 attempt == 2 ? "" : home, exe);
             ASSERT(n > 0 && (size_t)n < sizeof(command));
             ASSERT(capture_command(command, out, sizeof(out)) == 0);
@@ -3503,6 +3511,121 @@ static int tgs_count_prefixed(const char *dir, const char *prefix)
         if (strncmp(e->d_name, prefix, strlen(prefix)) == 0) n++;
     closedir(d);
     return n;
+}
+
+static bool tgs_bound_receipt_identity(const struct json_value *doc, const char *name, bool *failed)
+{
+    const char *unit = json_get_str(json_get(doc, "unit"));
+    const char *suite = json_get_str(json_get(doc, "suite"));
+    const struct json_value *count = json_get(doc, "groups_failed");
+    if (!unit || strcmp(unit, "devbuild-123-456.scope") || !suite ||
+        strlen(suite) != 32 || strncmp(suite, name, 32) || !count || count->type != JSON_INT) return false;
+    *failed = json_get_int(count) != 0;
+    return true;
+}
+
+static bool tgs_bound_receipt(const char *dir, const char *name, bool *failed)
+{
+    if (strlen(name) != 37 || strcmp(name + 32, ".json")) return false;
+    char path[PATH_MAX], wire[1024];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *fp = fopen(path, "r"); if (!fp) return false;
+    size_t len = fread(wire, 1, sizeof(wire), fp);
+    bool ok = !ferror(fp) && feof(fp);
+    if (fclose(fp) != 0) ok = false;
+    struct json_value doc; json_init(&doc);
+    if (ok) ok = json_read(&doc, wire, len);
+    ok = ok && tgs_bound_receipt_identity(&doc, name, failed);
+    json_free(&doc); return ok;
+}
+
+static bool tgs_bound_receipts(const char *dir)
+{
+    DIR *d = opendir(dir); if (!d) return false;
+    bool ok = true; int count = 0, failures = 0; struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        bool failed = false;
+        if (!tgs_bound_receipt(dir, e->d_name, &failed)) {
+            fprintf(stderr, "bound verdict fixture: invalid receipt %.100s\n", e->d_name);
+            ok = false; break;
+        }
+        count++; failures += failed;
+    }
+    if (closedir(d) != 0) ok = false;
+    if (!ok || count != 2 || failures != 1)
+        fprintf(stderr, "bound verdict fixture: dir=%s ok=%d receipts=%d failed=%d\n", dir, ok, count, failures);
+    return ok && count == 2 && failures == 1;
+}
+
+static bool tgs_factory_observed(const char *root, const char *store)
+{
+    char ledger[PATH_MAX], row[3 * PATH_MAX];
+    int n = snprintf(ledger, sizeof(ledger), "%s/jobs.jsonl", root);
+    if (n <= 0 || (size_t)n >= sizeof(ledger)) return false;
+    n = snprintf(row, sizeof(row),
+        "{\"project\":\"z23\",\"cwd\":\"%s\",\"queued\":%lld,\"rc\":2,"
+        "\"cmd\":\"make t-fast\",\"unit\":\"devbuild-123-456.scope\",\"verdict_root\":\"%s\"}\n",
+        root, (long long)time(NULL), store);
+    if (n <= 0 || (size_t)n >= sizeof(row) || !tgs_write_file(ledger, row)) return false;
+    if (setenv("ZCL_DEV_FACTORY_JOBS", ledger, 1) || setenv("ZCL_DEV_FACTORY_VERDICTS", store, 1)) return false;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct zcl_command_request req = {.input = &input,
+        .spec = zcl_command_registry_find(zcl_command_catalog(), "dev.agent.factory", NULL)};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.dev_factory.v1");
+    if (req.spec) zcl_native_handle_dev_factory(&req, &reply);
+    const struct json_value *jobs = json_get(&reply.data, "jobs");
+    const struct json_value *names = json_get(jobs, "failed_groups");
+    const struct json_value *first = json_at(names, 0);
+    const char *name = json_get_str(json_get(first, "group"));
+    bool ok = req.spec && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        json_get_int(json_get(jobs, "failed_runs_named")) == 1 && name && !strcmp(name, "test_hex_codec");
+    zcl_command_reply_free(&reply); json_free(&input);
+    (void)unsetenv("ZCL_DEV_FACTORY_JOBS"); (void)unsetenv("ZCL_DEV_FACTORY_VERDICTS");
+    return ok;
+}
+
+static int tgs_durable_verdict(void)
+{
+    int failures = 0; char root[PATH_MAX] = {0};
+    TEST("runner: bound suite receipts survive its generated cwd") {
+        static char out[1024 * 1024];
+        char gen[PATH_MAX], store[PATH_MAX], unitdir[PATH_MAX], exe[PATH_MAX], command[8 * PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_verdict", "bound");
+        ASSERT(snprintf(gen, sizeof(gen), "%s/generation", root) > 0 && mkdir(gen, 0700) == 0);
+        ASSERT(snprintf(store, sizeof(store), "%s/ledger-sidecar", root) > 0 && mkdir(store, 0700) == 0);
+        ASSERT(snprintf(unitdir, sizeof(unitdir), "%s/devbuild-123-456.scope", store) > 0);
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        ASSERT(strpbrk(root, "'\n\r") == NULL && strpbrk(exe, "'\n\r") == NULL);
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && env -u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE "
+            "ZCL_TEST_TMPFS=0 DEVBUILD_UNIT=devbuild-123-456.scope DEVBUILD_VERDICT_ROOT='%s' "
+            "'%s' --jobs=2 --no-cache --retry-evidence-always-fail --exact=test_hex_codec 2>&1", gen, store, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 1);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && env -u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE "
+            "ZCL_TEST_TMPFS=0 DEVBUILD_UNIT=devbuild-123-456.scope DEVBUILD_VERDICT_ROOT='%s' "
+            "'%s' --jobs=1 --no-cache --exact=test_hex_codec 2>&1", gen, store, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && env -u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE "
+            "ZCL_TEST_TMPFS=0 DEVBUILD_UNIT=../invalid DEVBUILD_VERDICT_ROOT='%s' "
+            "'%s' --jobs=1 --no-cache --exact=test_hex_codec 2>&1", gen, store, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "unit verdict was not retained") != NULL);
+        ASSERT(test_rm_rf_recursive(gen) == 0);
+        /* Distinct complete files, not a reused per-unit name or temp file. */
+        ASSERT(tgs_bound_receipts(unitdir));
+        ASSERT(tgs_factory_observed(root, store));
+        PASS();
+    } _test_next:;
+    if (root[0] && failures) fprintf(stderr, "bound verdict fixture retained: %s\n", root);
+    else if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
 }
 
 /* A nested runner that inherits a live outer tmpfs root (the runner exports
@@ -3887,6 +4010,7 @@ int test_test_group_selector(void)
     failures += test_runner_marker_lines();
 #endif
 #if defined(__linux__)
+    failures += tgs_durable_verdict();
     failures += test_tmpfs_fallback();
     failures += test_tmpfs_inherited_root();
     failures += test_tmpfs_failure_retained();

@@ -542,24 +542,81 @@ int test_dev_factory(void)
         PASS();
     }
 
-    TEST("factory: cold-start proxy and failed runs named by a verdict") {
-        char cwd_a[700], cwd_b[700], vdir[800], vpath[900], jobs_c[700];
-        char vtext[256];
+    TEST("factory: immutable unit verdict survives a later passing suite") {
+        char wt[700], root[700], dir[800], path[900], jobs_unit[700], text[2048];
+        (void)snprintf(wt, sizeof(wt), "%s/wt_unit", base);
+        (void)snprintf(root, sizeof(root), "%s/durable-verdicts", base);
+        (void)snprintf(dir, sizeof(dir), "%s/devbuild-123-456.scope", root);
+        (void)snprintf(path, sizeof(path), "%s/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json", dir);
+        (void)snprintf(jobs_unit, sizeof(jobs_unit), "%s/jobs_unit.jsonl", base);
+        dfx_mkdirs(dir);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"groups_total\":2,\"groups_ran\":1,\"groups_cached\":0,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"test_observed\"]}\n");
+        ASSERT(chmod(path, 0600) == 0);
+        (void)snprintf(path, sizeof(path), "%s/build", wt); dfx_mkdirs(path);
+        (void)snprintf(path, sizeof(path), "%s/build/test-verdict.json", wt);
+        dfx_write(path, "{\"failed_groups\":[]}\n");
+        (void)snprintf(text, sizeof(text), "{\"project\":\"z23\",\"cwd\":\"%s\",\"queued\":%ld,\"ended\":%ld,\"rc\":2,\"cmd\":\"make t-fast\",\"unit\":\"devbuild-123-456.scope\",\"verdict_root\":\"%s\"}\n", wt, now - 10, now, root);
+        dfx_write(jobs_unit, text);
+        (void)setenv("ZCL_DEV_FACTORY_VERDICTS", root, 1);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_unit, 1);
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 1);
+        ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 1);
+        dfx_end(&c);
+        (void)setenv("ZCL_DEV_FACTORY_VERDICTS", wt, 1);
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        (void)setenv("ZCL_DEV_FACTORY_VERDICTS", root, 1);
+        /* A second valid suite contributes another observation. */
+        (void)snprintf(path, sizeof(path), "%s/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json", dir);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_total\":2,\"groups_ran\":1,\"groups_cached\":0,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        ASSERT(chmod(path, 0600) == 0);
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 2); dfx_end(&c);
+        /* Wrong unit or contradictory count invalidates the whole join. */
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-7-8.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_total\":2,\"groups_ran\":1,\"groups_cached\":0,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_total\":2,\"groups_ran\":1,\"groups_cached\":0,\"groups_failed\":0,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"cccccccccccccccccccccccccccccccc\",\"groups_total\":2,\"groups_ran\":1,\"groups_cached\":0,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_total\":2,\"groups_ran\":-1,\"groups_cached\":0,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_total\":2,\"groups_ran\":0,\"groups_cached\":0,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(path, "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"devbuild-123-456.scope\",\"suite\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"groups_total\":2,\"groups_ran\":1,\"groups_cached\":2,\"groups_failed\":1,\"failed_groups_truncated\":false,\"failed_groups\":[\"second\"]}\n");
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        (void)remove(path);
+        /* An identifiable malformed ledger row still makes the unit ambiguous. */
+        FILE *append = fopen(jobs_unit, "a"); ASSERT(append != NULL);
+        ASSERT(fputs("{\"unit\":\"devbuild-123-456.scope\"}\n", append) >= 0); ASSERT(fclose(append) == 0);
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        dfx_write(jobs_unit, text);
+        /* A repeated scheduler identity is ambiguous, even on an older row. */
+        append = fopen(jobs_unit, "a"); ASSERT(append != NULL);
+        ASSERT(fputs(text, append) >= 0); ASSERT(fclose(append) == 0);
+        dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2); dfx_end(&c);
+        (void)snprintf(text, sizeof(text), "{\"project\":\"z23\",\"cwd\":\"%s\",\"queued\":%ld,\"ended\":%ld,\"rc\":2,\"cmd\":\"make t-fast\",\"unit\":\"devbuild-../invalid.scope\",\"verdict_root\":\"%s\"}\n", wt, now - 10, now, root);
+        dfx_write(jobs_unit, text); dfx_run(&c, 48); ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        (void)snprintf(text, sizeof(text), "{\"project\":\"z23\",\"cwd\":\"%s\",\"queued\":%ld,\"ended\":%ld,\"rc\":2,\"cmd\":\"make t-fast\",\"unit\":\"devbuild-987-654.scope\",\"verdict_root\":\"%s\"}\n", wt, now - 10, now, root);
+        dfx_write(jobs_unit, text); dfx_run(&c, 48); ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
+        (void)unsetenv("ZCL_DEV_FACTORY_VERDICTS"); dfx_env(jobs, land, att, proc); PASS();
+    }
+
+    TEST("factory: legacy jobs remain unnamed despite a nearby verdict") {
+        char cwd_a[700], cwd_b[700], dir[800], path[900], jobs_c[700], vtext[256];
         (void)snprintf(cwd_a, sizeof(cwd_a), "%s/wt_a", base);
         (void)snprintf(cwd_b, sizeof(cwd_b), "%s/wt_b", base);
         (void)snprintf(jobs_c, sizeof(jobs_c), "%s/jobs_cold.jsonl", base);
-        (void)snprintf(vdir, sizeof(vdir), "%s/build", cwd_a);
-        (void)snprintf(vpath, sizeof(vpath), "%s/test-verdict.json", vdir);
-        dfx_mkdirs(vdir);
-        (void)snprintf(vtext, sizeof(vtext),
-                       "{\"ended_unix\":%ld,\"failed_groups\":"
-                       "[\"zcl_group_b\",\"zcl_group_a\"]}\n",
-                       now);
-        dfx_write(vpath, vtext);
-        dfx_cold_fixture(jobs_c, cwd_a, cwd_b, now);
-        (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_c, 1);
-        dfx_run(&c, 48);
-        ASSERT(dfx_ok(&c));
+        (void)snprintf(dir, sizeof(dir), "%s/build", cwd_a); dfx_mkdirs(dir);
+        (void)snprintf(path, sizeof(path), "%s/test-verdict.json", dir);
+        (void)snprintf(vtext, sizeof(vtext), "{\"ended_unix\":%ld,\"failed_groups\":[\"nearby\"]}\n", now);
+        dfx_write(path, vtext); dfx_cold_fixture(jobs_c, cwd_a, cwd_b, now);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_c, 1); dfx_run(&c, 48); ASSERT(dfx_ok(&c));
         ASSERT_EQ((int)dfx_num(&c, "jobs.total"), 4);
         ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.first.n"), 2);
         ASSERT(dfx_near(&c, "jobs.first_job_per_cwd.first.run_p50_s", 500));
@@ -572,77 +629,15 @@ int test_dev_factory(void)
         ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.tracked_cwds"), 2);
         ASSERT(dfx_bool_is(&c, "jobs.first_job_per_cwd.cwd_cap_hit", false));
         ASSERT_EQ((int)dfx_num(&c, "jobs.first_job_per_cwd.unknown_jobs"), 0);
-        /* build: 900 - 300 = 600; t_fast: 500 - 200 = 300 */
         ASSERT(dfx_near(&c, "jobs.cold_build_seconds_estimate", 900));
         ASSERT(dfx_str_is(&c, "jobs.cold_build_basis", "proxy"));
         ASSERT_EQ((int)dfx_num(&c, "jobs.cold_build_unbaselined_first_jobs"), 0);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 1);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 1);
-        ASSERT(dfx_str_is(&c, "jobs.failed_group_attribution_basis",
-                          "latest_cwd_verdict_time_proxy"));
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_group_attribution_skew_s"), 120);
-        /* Even the failed build matches: this is a time proxy, not a job join. */
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.named"), 1);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.unnamed"), 0);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.t_fast.named"), 0);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.t_fast.unnamed"), 1);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.lint.named"), 0);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.lint.unnamed"), 0);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_groups_overflow"), 0);
-        {
-            const struct json_value *g = dfx_at(&c, "jobs.failed_groups");
-            ASSERT(g && g->type == JSON_ARR);
-            ASSERT_EQ((int)json_size(g), 2);
-            ASSERT_STR_EQ(json_get_str(json_get(json_at(g, 0), "group")),
-                          "zcl_group_a");
-            ASSERT_EQ((int)json_get_int(json_get(json_at(g, 0), "n")), 1);
-            ASSERT_STR_EQ(json_get_str(json_get(json_at(g, 1), "group")),
-                          "zcl_group_b");
-        }
-        dfx_end(&c);
-        /* A later red verdict cannot name an earlier failed job. The two
-         * boundaries and same-second case remain a time proxy, not a join. */
-        {
-            const int offsets[] = {1, 83, 120, 0, -120, -121};
-            const int named[] = {0, 0, 0, 1, 1, 0};
-            for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
-                (void)snprintf(vtext, sizeof(vtext),
-                               "{\"ended_unix\":%ld,\"failed_groups\":[\"later_group\"]}\n",
-                               now + offsets[i]);
-                dfx_write(vpath, vtext);
-                dfx_run(&c, 48);
-                ASSERT(dfx_ok(&c));
-                ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), named[i]);
-                ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2 - named[i]);
-                ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), named[i]);
-                dfx_end(&c);
-            }
-        }
-        (void)snprintf(vtext, sizeof(vtext),
-                       "{\"ended_unix\":%ld,\"failed_groups\":[]}\n", now + 83);
-        dfx_write(vpath, vtext);
-        dfx_run(&c, 48);
-        ASSERT(dfx_ok(&c));
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0);
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2);
-        ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 0);
-        dfx_end(&c);
-        /* A later run overwrites the only verdict; historical names disappear. */
-        (void)snprintf(vtext, sizeof(vtext),
-                       "{\"ended_unix\":%ld,\"failed_groups\":[\"later_group\"]}\n",
-                       now + 1000);
-        dfx_write(vpath, vtext);
-        dfx_run(&c, 48);
-        ASSERT(dfx_ok(&c));
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2);
-        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.named"), 0);
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.unnamed"), 1);
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.t_fast.unnamed"), 1);
-        ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 0);
-        dfx_end(&c);
-        dfx_env(jobs, land, att, proc);
-        PASS();
+        ASSERT(dfx_str_is(&c, "jobs.failed_group_attribution_basis", "observed_unit_bound_verdicts_incomplete"));
+        dfx_end(&c); dfx_env(jobs, land, att, proc); PASS();
     }
 
     TEST("factory: first-seen cwd table caps at 4096 and says so") {
