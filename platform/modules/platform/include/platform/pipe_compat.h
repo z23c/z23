@@ -62,6 +62,17 @@ static inline ssize_t platform_pipe_write_error(int error)
     return -1;
 }
 
+#if defined(__linux__)
+static inline bool platform_pipe_drain_sigpipe(const sigset_t *blocked)
+{
+    struct timespec zero = {0};
+    int drained;
+    do { drained = sigtimedwait(blocked, NULL, &zero); }
+    while (drained < 0 && errno == EINTR);
+    return drained == SIGPIPE || (drained < 0 && errno == EAGAIN);
+}
+#endif
+
 /* Caller exclusively owns the descriptor and its flag changes for this call;
  * concurrent close, duplication, or writes through aliases are unsupported.
  * Writes once, preserving partial writes and errno. Never changes process-wide
@@ -106,11 +117,7 @@ static inline ssize_t platform_pipe_write_nosigpipe(int fd, const void *bytes,
         saved = errno;
     }
     if (known && written < 0 && saved == EPIPE && !already) {
-        struct timespec zero = {0};
-        int drained;
-        do { drained = sigtimedwait(&blocked, NULL, &zero); }
-        while (drained < 0 && errno == EINTR);
-        if (drained != SIGPIPE && !(drained < 0 && errno == EAGAIN))
+        if (!platform_pipe_drain_sigpipe(&blocked))
             return platform_pipe_write_error(EIO);
     }
     error = pthread_sigmask(SIG_SETMASK, &previous, NULL);

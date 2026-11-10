@@ -73,6 +73,22 @@ static int check_broken_pipe(int fd)
     return 0;
 }
 
+/* An ignored SIGPIPE creates no pending signal to drain on Linux. The write
+ * must still return EPIPE, without changing the caller's signal policy. */
+static int check_ignored_pipe(int fd)
+{
+    struct sigaction ignored = {.sa_handler = SIG_IGN}, previous;
+    sigemptyset(&ignored.sa_mask);
+    CHECK(sigaction(SIGPIPE, &ignored, &previous) == 0);
+    errno = 0;
+    ssize_t written = platform_pipe_write_nosigpipe(fd, "x", 1);
+    int saved = errno;
+    int restored = sigaction(SIGPIPE, &previous, NULL);
+    CHECK(restored == 0);
+    CHECK(written == -1 && saved == EPIPE);
+    return 0;
+}
+
 static int check_pending_signal(int fd, const sigset_t *original, const sigset_t *blocked)
 {
     sigset_t after, pending;
@@ -97,6 +113,7 @@ static int check_pipe_iterations(const sigset_t *original, const sigset_t *block
         CHECK(check_exact_write(pair[0], pair[1]) == 0);
         CHECK(close(pair[0]) == 0);
         CHECK(check_broken_pipe(pair[1]) == 0);
+        CHECK(check_ignored_pipe(pair[1]) == 0);
         CHECK(check_pending_signal(pair[1], original, blocked) == 0);
         CHECK(close(pair[1]) == 0);
     }
