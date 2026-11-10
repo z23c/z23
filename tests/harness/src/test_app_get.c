@@ -666,8 +666,10 @@ struct tag_parallel {
     struct tag_net net;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-    unsigned entered, active, peak, checks;
-    bool overlap, missed, barrier, second_done, fail_slice, cancel;
+    unsigned entered, active, peak;
+    bool overlap, missed, barrier, second_done, cancel, expire, expire_entered;
+    unsigned slice_fault;
+    atomic_bool cancel_requested;
 };
 static bool tag_parallel_fetch(void *context, const char *onion, const char *path,
     uint8_t *out, size_t cap, size_t *len, int *status, unsigned timeout_ms)
@@ -675,7 +677,23 @@ static bool tag_parallel_fetch(void *context, const char *onion, const char *pat
     struct tag_parallel *p = context;
     pthread_mutex_lock(&p->mutex);
     bool slice = strstr(path, "/slice/") != NULL;
-    if (slice) { p->active++; if (p->active > p->peak) p->peak = p->active; }
+    if (slice) {
+        p->active++; if (p->active > p->peak) p->peak = p->active;
+        if (p->cancel) atomic_store_explicit(&p->cancel_requested, true, memory_order_release);
+        if (p->expire) {
+            p->expire_entered = true;
+            struct timespec until;
+            if (clock_gettime(CLOCK_REALTIME, &until)) p->missed = true;
+            else {
+                unsigned ms = timeout_ms + 50u;
+                until.tv_sec += (time_t)(ms / 1000u);
+                until.tv_nsec += (long)(ms % 1000u) * 1000000L;
+                if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
+                int rc; do { rc = pthread_cond_timedwait(&p->cond, &p->mutex, &until); } while (!rc);
+                if (rc != ETIMEDOUT) p->missed = true;
+            }
+        }
+    }
     bool first = false, second = false;
     if (slice && p->barrier && p->entered < 2) {
         p->entered++;
@@ -703,7 +721,10 @@ static bool tag_parallel_fetch(void *context, const char *onion, const char *pat
     }
     bool ok = tag_net_fetch(&p->net, onion, path, out, cap, len, status, timeout_ms);
     if (second) { p->second_done = true; pthread_cond_broadcast(&p->cond); }
-    if (slice && p->fail_slice) ok = false;
+    if (slice && p->slice_fault == 1) ok = false;
+    if (slice && p->slice_fault == 2) *status = 503;
+    if (slice && p->slice_fault == 3 && *len) (*len)--;
+    if (slice && p->slice_fault == 4 && *len) out[0] ^= 1;
     if (slice) p->active--;
     pthread_mutex_unlock(&p->mutex);
     return ok;
@@ -711,14 +732,16 @@ static bool tag_parallel_fetch(void *context, const char *onion, const char *pat
 static bool tag_parallel_cancelled(void *context)
 {
     struct tag_parallel *p = context;
-    return p->cancel && ++p->checks >= 7;
+    return p->cancel && atomic_load_explicit(&p->cancel_requested, memory_order_acquire);
 }
-static bool tag_network_parallel_case(bool parallel, bool fail_slice, bool cancel, int spawn_after, int join_after)
+static bool tag_network_parallel_case(bool parallel, unsigned slice_fault, bool cancel,
+    bool expire, int spawn_after, int join_after)
 {
     struct tag_parallel p = {0}; char dir[TAG_PATH] = {0};
     if (pthread_mutex_init(&p.mutex, NULL)) return false;
     if (pthread_cond_init(&p.cond, NULL)) { pthread_mutex_destroy(&p.mutex); return false; }
-    p.barrier = parallel; p.fail_slice = fail_slice; p.cancel = cancel;
+    atomic_init(&p.cancel_requested, false);
+    p.barrier = parallel && !expire; p.slice_fault = slice_fault; p.cancel = cancel; p.expire = expire;
     bool ok = tag_net_init(&p.net, VCS_PACKAGE_CHUNK_BYTES + 13u);
     struct app_network_transport t = {.fetch = tag_parallel_fetch, .cancelled = tag_parallel_cancelled, .context = &p,
         .timeout_ms = 120000, .parallel_safe = parallel};
@@ -728,15 +751,19 @@ static bool tag_network_parallel_case(bool parallel, bool fail_slice, bool cance
     if (ok && test_mkdtemp(dir, sizeof(dir), "app_network_parallel")) store = vcs_package_store_open(dir, VCS_BUNDLE_MAX_BYTES * 10u);
     int64_t now = platform_time_wall_unix();
     ok = ok && store && app_network_exact(&t, TAG_NET_RELAY, p.net.id, now, &row, &error);
-    p.checks = 0;
+    if (expire) t.timeout_ms = 1000;
     zcl_test_app_network_thread_faults(spawn_after, join_after);
     bool fetched = ok && app_network_carrier(&t, TAG_NET_RELAY, TAG_NET_HOST, &row, now, store, &out, &len, &mutated, &error);
     zcl_test_app_network_thread_faults(-1, -1);
-    bool expected = !fail_slice && !cancel && spawn_after < 0 && join_after < 0;
+    bool expected = !slice_fault && !cancel && !expire && spawn_after < 0 && join_after < 0;
     ok = ok && fetched == expected && p.active == 0 && p.peak <= 4;
     if (expected) ok = ok && len == p.net.size && !memcmp(out, p.net.bytes, len) &&
         (parallel ? p.overlap && !p.missed && p.second_done : p.peak == 1);
-    else ok = ok && !out && (cancel ? error == APP_NETWORK_CANCELLED : error == APP_NETWORK_UNAVAILABLE);
+    else if (cancel) ok = ok && !out && error == APP_NETWORK_CANCELLED &&
+        atomic_load_explicit(&p.cancel_requested, memory_order_acquire);
+    else if (expire) ok = ok && !out && error == APP_NETWORK_TIMEOUT && p.expire_entered && !p.missed;
+    else if (slice_fault >= 3) ok = ok && !out && error == APP_NETWORK_CONTENT_MISMATCH;
+    else ok = ok && !out && error == APP_NETWORK_UNAVAILABLE;
     free(out); if (store) vcs_package_store_close(store);
     if (dir[0]) ok = test_rm_rf_recursive(dir) == 0 && ok;
     free(p.net.bytes); free(p.net.manifest);
@@ -744,12 +771,16 @@ static bool tag_network_parallel_case(bool parallel, bool fail_slice, bool cance
 }
 static bool tag_network_parallel(void)
 {
-    return tag_network_parallel_case(true, false, false, -1, -1) &&
-        tag_network_parallel_case(false, false, false, -1, -1) &&
-        tag_network_parallel_case(true, true, false, -1, -1) &&
-        tag_network_parallel_case(true, false, false, 1, -1) &&
-        tag_network_parallel_case(true, false, false, -1, 0) &&
-        tag_network_parallel_case(true, false, true, -1, -1);
+    return tag_network_parallel_case(true, 0, false, false, -1, -1) &&
+        tag_network_parallel_case(false, 0, false, false, -1, -1) &&
+        tag_network_parallel_case(true, 1, false, false, -1, -1) &&
+        tag_network_parallel_case(true, 2, false, false, -1, -1) &&
+        tag_network_parallel_case(true, 3, false, false, -1, -1) &&
+        tag_network_parallel_case(true, 4, false, false, -1, -1) &&
+        tag_network_parallel_case(true, 0, false, false, 1, -1) &&
+        tag_network_parallel_case(true, 0, false, false, -1, 0) &&
+        tag_network_parallel_case(true, 0, true, false, -1, -1) &&
+        tag_network_parallel_case(true, 0, false, true, -1, -1);
 }
 
 static bool tag_net_wrong_sha(struct tag_net *f)
