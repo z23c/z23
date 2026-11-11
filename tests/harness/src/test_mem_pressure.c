@@ -7,7 +7,7 @@
  *   - level classification walks NOMINAL -> ELEVATED -> HIGH -> CRITICAL as
  *     the os_proc_mem override's usage/denominator ratio crosses the
  *     default 50/75/90 thresholds
- *   - denominator priority: cgroup_high > cgroup_max > system availability
+ *   - denominator: tighter positive cgroup limit, then system availability
  *   - host-wide pressure outranks a low process RSS when availability exists
  *   - registered sinks fire at HIGH and CRITICAL, NOT at NOMINAL/ELEVATED
  *   - shrink_calls / last_shrink_unix bookkeeping increments correctly
@@ -198,7 +198,7 @@ int test_mem_pressure(void)
                  mem_pressure_current() == MEM_HIGH);
     }
 
-    /* ── denominator priority: cgroup_high beats cgroup_max/sys_total ── */
+    /* ── denominator: tighter cgroup limit beats system availability ── */
     {
         /* cgroup_current=80/cgroup_high=100 -> 80% (HIGH), even though
          * sys_total-based usage would read differently (RSS unused here
@@ -208,6 +208,25 @@ int test_mem_pressure(void)
         mem_pressure_poll_tick();
         MP_CHECK("cgroup_high selected over cgroup_max/sys_total when set",
                  mem_pressure_current() == MEM_HIGH);
+
+        /* A high limit above the hard max cannot postpone shrink until OOM. */
+        set_override(999999, 90, 1000, 100, 1000000, 900000);
+        mem_pressure_poll_tick();
+        MP_CHECK("tighter cgroup_max reads CRITICAL before the hard cap",
+                 mem_pressure_current() == MEM_CRITICAL);
+        MP_CHECK("tighter cgroup_max is the published denominator",
+                 dumped_state_int("denominator_bytes") == 100);
+        {
+            struct json_value out;
+            json_init(&out);
+            json_set_object(&out);
+            MP_CHECK("tighter cgroup_max dump succeeds",
+                     mem_pressure_dump_state_json(&out, NULL));
+            const struct json_value *basis = json_get(&out, "denominator_basis");
+            MP_CHECK("tighter cgroup_max reports max basis",
+                     basis && strcmp(json_get_str(basis), "cgroup_max") == 0);
+            json_free(&out);
+        }
 
         /* No cgroup_high, cgroup_max=100, current=95 -> 95% CRITICAL via
          * cgroup_max. */

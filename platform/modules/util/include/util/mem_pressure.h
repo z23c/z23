@@ -16,13 +16,11 @@
  *
  * LEVELS: computed as current-usage / denominator, where the denominator is
  * the best available ceiling in this priority order:
- *   1. cgroup memory.high (the soft cap the kernel throttles reclaim
- *      against — the most accurate "getting close to trouble" signal when
- *      set)
- *   2. cgroup memory.max (the hard OOM-kill ceiling)
- *   3. observed host available memory against system total RAM (Darwin and
+ *   1. the tighter positive cgroup memory.high (reclaim throttle) or
+ *      memory.max (hard OOM-kill ceiling), if either is set
+ *   2. observed host available memory against system total RAM (Darwin and
  *      Linux bare-metal/non-systemd)
- *   4. process RSS against system total RAM when host availability is unknown
+ *   3. process RSS against system total RAM when host availability is unknown
  * current usage on a cgroup denominator is memory.current MINUS the droppable
  * page cache (memory.stat `file`, less `shmem`, `unevictable`, `file_dirty`
  * and `file_writeback`): a sequential scan of the block files walks the charge

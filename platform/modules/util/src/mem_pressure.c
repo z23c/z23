@@ -286,8 +286,10 @@ static enum mem_pressure_denominator_basis select_basis(const struct os_proc_mem
 {
     if (m->cgroup_current >= 0 && (m->cgroup_high > 0 || m->cgroup_max > 0)) {
         *current_bytes = cgroup_unreclaimable_bytes(m);
-        *denom_bytes = m->cgroup_high > 0 ? m->cgroup_high : m->cgroup_max;
-        return m->cgroup_high > 0 ? MEM_PRESSURE_BASIS_CGROUP_HIGH
+        const bool use_high = m->cgroup_high > 0 &&
+                              (m->cgroup_max <= 0 || m->cgroup_high <= m->cgroup_max);
+        *denom_bytes = use_high ? m->cgroup_high : m->cgroup_max;
+        return use_high ? MEM_PRESSURE_BASIS_CGROUP_HIGH
                                   : MEM_PRESSURE_BASIS_CGROUP_MAX;
     }
     if (atomic_load(&g_available_usable) && m->sys_total_bytes > 0 &&
