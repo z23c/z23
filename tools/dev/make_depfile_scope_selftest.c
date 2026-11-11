@@ -311,6 +311,80 @@ static void consistency_probes(void)
     }
 }
 
+static const char *const tor_header_goals[] = {
+    "contexts/wallet/views/include/views/wallet_templates_gen.h",
+    "contexts/explorer/views/include/views/site_css.h",
+    "contexts/commons/views/include/views/install_script_gen.h",
+    "tools/dev/native_tunnel_export_binding.h",
+    "build/identity/gen-stamps/wallet_templates.stamp",
+    "build/identity/gen-stamps/site_css.stamp",
+    "build/identity/gen-stamps/install_script.stamp",
+    "build/identity/gen-stamps/native_tunnel_export_binding.stamp",
+};
+
+static size_t tor_probe_start(size_t i, const char *first, const char *second,
+                              bool invalid, const char *log)
+{
+    const char *argv[48] = {"make", "-f", text("%s/probe.mk", work),
+                            "--no-print-directory", "-n"};
+    size_t n = 5;
+    for (size_t j = 0; j < sizeof tor_header_goals / sizeof tor_header_goals[0]; j++) {
+        argv[n++] = "-o";
+        argv[n++] = tor_header_goals[j];
+    }
+    argv[n++] = "VENDOR_LIBS=";
+    argv[n++] = "VIEW_GEN_HEADERS=";
+    argv[n++] = "VIEW_GEN_HEADERS_EARLY=";
+    argv[n++] = text("BUILD_SOURCE_RECORD=%s", source_record);
+    argv[n++] = "BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = invalid ? "ZCL_TOR=invalid" : "ZCL_TOR=full";
+    argv[n++] = "ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)";
+    argv[n++] = text("BUILD_DIR=%s/tor-%zu/build", work, i);
+    if (first) argv[n++] = first;
+    if (second) argv[n++] = second;
+    argv[n] = NULL;
+    return probe_start(argv, log, false);
+}
+
+static void tor_guard_probes(void)
+{
+    struct { const char *first, *second; bool sentinel, invalid; } cases[15] = {0};
+    for (size_t i = 0; i < 8; i++) cases[i].first = tor_header_goals[i];
+    cases[8].first = tor_header_goals[1]; cases[8].second = "help";
+    cases[9].first = "help"; cases[9].second = tor_header_goals[1];
+    cases[10].first = tor_header_goals[1]; cases[10].second = "z23"; cases[10].sentinel = true;
+    cases[11].first = "z23"; cases[11].second = tor_header_goals[1]; cases[11].sentinel = true;
+    cases[12].first = "zcl-depfile-unknown"; cases[12].sentinel = true;
+    cases[13].sentinel = true;
+    cases[14].first = tor_header_goals[1]; cases[14].invalid = true;
+    size_t children[15];
+    const char *logs[15];
+    probe_count = 0; /* prior probes have all been reaped */
+    for (size_t i = 0; i < 15; i++) {
+        logs[i] = text("%s/tor-guard-%zu.out", work, i);
+        children[i] = tor_probe_start(i, cases[i].first, cases[i].second,
+                                      cases[i].invalid, logs[i]);
+    }
+    bool failed = false;
+    for (size_t i = 0; i < 15; i++) {
+        int rc = probe_wait(children[i]);
+        char *data = output(logs[i]);
+        bool sentinel = strstr(data, "TOR_SENTINEL") != NULL;
+        bool invalid = strstr(data, "ZCL_TOR must be") != NULL;
+        bool ok = cases[i].invalid ? rc == 2 && invalid && !sentinel :
+                  cases[i].sentinel ? rc == 2 && sentinel : rc == 0 && !sentinel;
+        if (!ok) {
+            fprintf(stderr, "tor guard case=%zu rc=%d sentinel=%d invalid=%d\n%s\n",
+                    i, rc, sentinel, invalid, data);
+            failed = true;
+        }
+        free(data);
+    }
+    if (failed) fail("Tor bootstrap guard probe failed");
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) fail("usage: make-depfile-scope-selftest ROOT WORK");
@@ -321,6 +395,7 @@ int main(int argc, char **argv)
     profile_probes();
     binding_probes();
     consistency_probes();
+    tor_guard_probes();
     puts("make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true hot_module_scoped=true mixed_unknown_all=true default_node_c23=true epoch_depfile_consistent=true tunnel_binding_scoped=true");
     return 0;
 }
