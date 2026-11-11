@@ -3,37 +3,25 @@
 #
 # zcl-portfwd-setup.sh — one-time setup for the clearnet port forwarder.
 #
-# THE WHOLE POINT: the operator runs ONE privileged command, ONCE, ever:
-#
-#       sudo bash tools/scripts/zcl-portfwd-setup.sh
-#
-# The ONLY thing that needs root is a single `setcap` on a project-owned forwarder
-# binary so it may bind ports <1024. Everything else (build, install the user unit,
-# enable+start the service) is done as the operator with NO sudo. After this, an AI
-# agent / the operator manages the service with `systemctl --user ...` forever:
-#
-#       systemctl --user enable --now zcl-portfwd      # start + persist across reboot
-#       systemctl --user {start,stop,restart,status} zcl-portfwd
-#
-# It forwards public 443 -> 127.0.0.1:8443 (node HTTPS) and 80 -> 127.0.0.1:8080
-# (node HTTP redirect). The node keeps binding the high ports as the unprivileged
-# user; only this tiny forwarder gets the one capability. The cap lives on the
-# forwarder file, so it SURVIVES node redeploys (`make deploy`). See
-# docs/BLOCK_EXPLORER_HOSTING.md and deploy/systemd/zcl-portfwd.service.
-#
-# Modes:
-#   (default)     build + setcap (the one sudo) + install unit + enable+start
-#   --status      show forwarder/cap/unit/service state (no changes, no sudo)
-#   --uninstall   stop + disable + remove unit + forwarder (no sudo; cap dies with the file)
-#
-# Idempotent and safe to re-run.
+# Fresh setup builds a dedicated forwarder and installs the 443-only user
+# unit. Binding 443 requires a one-time file capability grant; the existing
+# service can then be managed unprivileged with systemctl --user.
+# Existing and partial installations are preserved on repeat setup.
+# Modes: --install (default), --status, --uninstall.
 
 set -uo pipefail
 
 # ── Resolve the operator (the user whose --user session owns the service) ──
 # When invoked via `sudo`, $SUDO_USER is the human; otherwise it's us.
 OP_USER="${SUDO_USER:-$(id -un)}"
-OP_HOME="$(eval echo "~$OP_USER")"
+if [ -n "${SUDO_USER:-}" ]; then
+    OP_HOME="$(getent passwd "$OP_USER" | cut -d: -f6)"
+else
+    OP_HOME="${HOME:-}"
+fi
+[ -n "$OP_HOME" ] && [ "${OP_HOME#/}" != "$OP_HOME" ] || {
+    printf '%s\n' 'zcl-portfwd-setup: ERROR: cannot resolve operator home' >&2; exit 1;
+}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 FWD_SRC="$REPO_ROOT/tools/zcl_portfwd.c"
@@ -103,8 +91,22 @@ do_setcap() {
     return 0
 }
 
+install_preflight() {
+    local path state
+    for path in "$FWD_BIN" "$UNIT_DST" "$UNIT_DST.d"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            die "existing setup or partial artifact at $path is preserved; inspect it and manage existing service with systemctl --user"
+        fi
+    done
+    state="$(as_op systemctl --user show --property=LoadState --value zcl-portfwd.service 2>/dev/null)" ||
+        die "cannot inspect the user service manager; existing setup is preserved; inspect systemctl --user"
+    [ "$state" = "not-found" ] ||
+        die "service state '$state' is existing or unknown; setup is preserved; inspect systemctl --user"
+}
+
 cmd_install() {
     say "zcl-portfwd setup for user '$OP_USER' (home: $OP_HOME)"
+    install_preflight
     [ -f "$FWD_SRC" ]  || die "missing $FWD_SRC"
     [ -f "$UNIT_SRC" ] || die "missing $UNIT_SRC"
     build_forwarder
@@ -117,31 +119,26 @@ cmd_install() {
         # We are root AND the cap is set: finish by enabling+starting as the operator.
         enable_start
         say ""
-        say "DONE. Forwarding 443->8443 and 80->8080 is live."
+        say "Setup requested for 443->8443; check service status for readiness."
         say "Manage it (no sudo): systemctl --user {start,stop,restart,status} zcl-portfwd"
     fi
-    # Always remind about the 8080 collision.
-    say ""
-    say "  8080 NOTE: if the old 'zcl-supply' still listens on 127.0.0.1:8080,"
-    say "             retire it first (see docs/BLOCK_EXPLORER_HOSTING.md §B) — else"
-    say "             http://...:80 forwards to the wrong backend."
 }
 
 cmd_status() {
     say "== zcl-portfwd status =="
     say "operator        : $OP_USER ($OP_HOME)"
     if [ -x "$FWD_BIN" ]; then
-        say "forwarder binary: $FWD_BIN  [present]"
+        say "legacy binary   : $FWD_BIN  [present; service may use an override]"
         if command -v getcap >/dev/null 2>&1; then
             local c; c="$(getcap "$FWD_BIN" 2>/dev/null)"
             if printf '%s' "$c" | grep -q cap_net_bind_service; then
-                say "capability      : GRANTED  ($c)"
+                say "legacy capability: GRANTED  ($c)"
             else
-                say "capability      : NOT set  -> run: sudo setcap '$CAP' $FWD_BIN"
+                say "legacy capability: not set (effective service image may differ)"
             fi
         fi
     else
-        say "forwarder binary: $FWD_BIN  [MISSING — run setup]"
+        say "legacy binary   : $FWD_BIN  [missing; service may use an override]"
     fi
     [ -f "$UNIT_DST" ] && say "user unit       : $UNIT_DST  [installed]" \
                        || say "user unit       : [not installed]"
@@ -150,13 +147,6 @@ cmd_status() {
         act="$(as_op systemctl --user is-active  zcl-portfwd 2>/dev/null)"; [ -n "$act" ] || act="inactive"
         ena="$(as_op systemctl --user is-enabled zcl-portfwd 2>/dev/null)"; [ -n "$ena" ] || ena="disabled"
         say "service state   : active=$act enabled=$ena"
-    fi
-    # Surface the 8080 collision if visible.
-    if command -v ss >/dev/null 2>&1; then
-        if grep -q '127.0.0.1:8080' <<<"$(ss -ltnp 2>/dev/null)"; then
-            local who; who="$(ss -ltnp 2>/dev/null | grep '127.0.0.1:8080' | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*"//')"
-            say "8080 listener   : $who is on 127.0.0.1:8080 (must be the NODE, not zcl-supply)"
-        fi
     fi
 }
 

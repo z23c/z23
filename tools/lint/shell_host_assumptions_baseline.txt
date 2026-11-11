@@ -37,7 +37,6 @@ ss	tools/scripts/netdisrupt_two_node_drill.sh	5
 ss	tools/scripts/onion_pair_watch.sh	1
 ss	tools/scripts/port_probe.sh	11
 ss	tools/scripts/store_sell_operator_proof.sh	4
-ss	tools/scripts/zcl-portfwd-setup.sh	3
 stat	platform/deploy/migrate-role-names.sh	2
 stat	platform/deploy/provision-z23-build-host.sh	4
 stat	platform/deploy/z23-bundle-export.sh	2

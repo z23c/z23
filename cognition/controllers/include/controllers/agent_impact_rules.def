@@ -3613,7 +3613,7 @@ AGENT_IMPACT_RULE("engine/services/src/wallet_history_export.c|engine/services/i
 
 AGENT_IMPACT_RULE("engine/composition/src/boot_wallet_bound_fresh.c", "snapshot_install_recovery boot_phase block_index_loader")
 
-AGENT_IMPACT_RULE("tools/zcl_portfwd.c|tests/harness/src/test_portfwd.c", "portfwd")
+AGENT_IMPACT_RULE("tools/zcl_portfwd.c|tools/scripts/zcl-portfwd-setup.sh|tests/harness/src/test_portfwd.c", "portfwd")
 
 AGENT_IMPACT_RULE("engine/models/src/fleet_board_post_wiki.c|engine/models/include/models/fleet_board_post.h", "board_site models make_lint_gates")
 
