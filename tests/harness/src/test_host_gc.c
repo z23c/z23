@@ -776,6 +776,108 @@ static bool hgt_listed(const struct host_gc_report *r, const char *path,
     return false;
 }
 
+struct hgt_route_fixture {
+    char root[HGT_PATH], repo[HGT_PATH], foreign[HGT_PATH], pool[HGT_PATH];
+    char candidate[HGT_PATH], sentinel[HGT_PATH], index[HGT_PATH];
+    char gitdir[HGT_PATH], objects[HGT_PATH];
+    char foreign_head[HGT_OUT];
+};
+
+static bool hgt_route_setup(struct hgt_route_fixture *f)
+{
+    if (!test_mkdtemp(f->root, sizeof f->root, "host_gc_routes")) return false;
+    snprintf(f->repo, sizeof f->repo, "%s/repo", f->root);
+    snprintf(f->foreign, sizeof f->foreign, "%s/foreign", f->root);
+    snprintf(f->pool, sizeof f->pool, "%s/pool", f->root);
+    snprintf(f->index, sizeof f->index, "%s/.git/index", f->foreign);
+    snprintf(f->gitdir, sizeof f->gitdir, "%s/.git", f->foreign);
+    snprintf(f->objects, sizeof f->objects, "%s/.git/objects", f->foreign);
+    if (!hgt_make_repo(f->repo) || !hgt_make_repo(f->foreign) ||
+        mkdir(f->pool, 0700) != 0 ||
+        !hgt_add_gen(f->repo, f->pool, "dirty", f->candidate, sizeof f->candidate) ||
+        !hgt_backdate(f->candidate, 48)) return false;
+    snprintf(f->sentinel, sizeof f->sentinel, "%s/seed.txt", f->candidate);
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    return hgt_write(f->sentinel, "dirty sentinel\n") &&
+           hgt_out(f->foreign, head, f->foreign_head, sizeof f->foreign_head);
+}
+
+static bool hgt_route_set(const struct hgt_route_fixture *f, bool all)
+{
+    if (setenv("GIT_WORK_TREE", f->foreign, 1) || setenv("GIT_INDEX_FILE", f->index, 1)) return false;
+    if (!all) return true;
+    return !setenv("GIT_DIR", f->gitdir, 1) && !setenv("GIT_COMMON_DIR", f->gitdir, 1) &&
+           !setenv("GIT_OBJECT_DIRECTORY", f->objects, 1) &&
+           !setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", f->objects, 1);
+}
+
+static bool hgt_route_env_unchanged(const struct hgt_route_fixture *f, bool all)
+{
+    const char *work = getenv("GIT_WORK_TREE"), *index = getenv("GIT_INDEX_FILE");
+    if (!work || strcmp(work, f->foreign) || !index || strcmp(index, f->index)) return false;
+    if (!all) return true;
+    const char *dir = getenv("GIT_DIR"), *common = getenv("GIT_COMMON_DIR");
+    const char *objects = getenv("GIT_OBJECT_DIRECTORY"), *alternate = getenv("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    return dir && !strcmp(dir, f->gitdir) && common && !strcmp(common, f->gitdir) &&
+           objects && !strcmp(objects, f->objects) && alternate && !strcmp(alternate, f->objects);
+}
+
+static bool hgt_route_run(const struct hgt_route_fixture *f, bool all, bool apply,
+                          struct host_gc_report *report)
+{
+    struct hgt_env saved;
+    if (!hgt_env_clear(&saved)) { (void)hgt_env_restore(&saved); return false; }
+    struct host_gc_request req;
+    hgt_seed_request(&req, f->pool);
+    req.apply = apply;
+    bool ok = hgt_route_set(f, all) && host_gc_run(&req, report) && hgt_route_env_unchanged(f, all);
+    return hgt_env_restore(&saved) && ok;
+}
+
+static int hgt_route_tests(void)
+{
+    int failures = 0;
+    struct hgt_route_fixture f = {0};
+    struct host_gc_report report;
+    const struct host_gc_class *cls;
+    TEST("host gc: inherited Git selectors cannot redirect repository or dirty status") {
+        ASSERT(hgt_route_setup(&f));
+        ASSERT(hgt_route_run(&f, false, false, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls && cls->need_review == 1 && hgt_listed(&report, f.candidate, 1));
+        ASSERT(hgt_route_run(&f, false, true, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls && cls->need_review == 1 && hgt_listed(&report, f.candidate, 1));
+        ASSERT(hgt_exists(f.sentinel));
+        char bytes[32] = {0};
+        FILE *in = fopen(f.sentinel, "r");
+        ASSERT(in != NULL);
+        bool read_ok = fgets(bytes, sizeof bytes, in) != NULL;
+        ASSERT(fclose(in) == 0 && read_ok);
+        ASSERT_STR_EQ(bytes, "dirty sentinel\n");
+        ASSERT(hgt_route_run(&f, true, false, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls && !strcmp(cls->repo, f.repo) && cls->registered == 1 && cls->need_review == 1);
+        char foreign_seed[HGT_PATH];
+        snprintf(foreign_seed, sizeof foreign_seed, "%s/seed.txt", f.foreign);
+        in = fopen(foreign_seed, "r");
+        ASSERT(in != NULL);
+        read_ok = fgets(bytes, sizeof bytes, in) != NULL;
+        ASSERT(fclose(in) == 0 && read_ok);
+        ASSERT_STR_EQ(bytes, "fixture\n");
+        char foreign_head[HGT_OUT], status[HGT_OUT];
+        const char *head[] = { "rev-parse", "HEAD", NULL };
+        const char *status_args[] = { "--no-optional-locks", "status", "--porcelain", "--untracked-files=all", NULL };
+        ASSERT(hgt_out(f.foreign, head, foreign_head, sizeof foreign_head));
+        ASSERT_STR_EQ(foreign_head, f.foreign_head);
+        ASSERT(hgt_out(f.foreign, status_args, status, sizeof status));
+        ASSERT_STR_EQ(status, "");
+        PASS();
+    } _test_next:;
+    if (f.root[0]) (void)test_rm_rf_recursive(f.root);
+    return failures;
+}
+
 static int hgt_arch_dry(const struct hgt_arch *a)
 {
     struct host_gc_request req;
@@ -1452,6 +1554,7 @@ int test_host_gc(void)
 
     failures += hgt_archive_tests(tmp);
     failures += hgt_disposable_tests(tmp);
+    failures += hgt_route_tests();
     if (!hgt_script_isolated(tmp)) {
         fprintf(stderr, "host gc: selftest escaped isolated Git environment\n");
         ++failures;

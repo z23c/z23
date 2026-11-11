@@ -70,18 +70,27 @@ struct hg_scan {
 static int hg_git(const char *dir, const char *const args[], char *out,
                   size_t out_cap)
 {
-    const char *argv[16];
+    static const char *const clean[] = {
+        "env", "-u", "GIT_DIR", "-u", "GIT_COMMON_DIR", "-u", "GIT_WORK_TREE",
+        "-u", "GIT_INDEX_FILE", "-u", "GIT_OBJECT_DIRECTORY",
+        "-u", "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+    };
+    const char *argv[32];
     size_t n = 0;
+    if (out && out_cap)
+        out[0] = '\0';
+    for (size_t i = 0; i < sizeof(clean) / sizeof(clean[0]); i++)
+        argv[n++] = clean[i];
     argv[n++] = "git";
     if (dir && dir[0]) {
         argv[n++] = "-C";
         argv[n++] = dir;
     }
-    for (size_t i = 0; args[i] && n + 1 < sizeof(argv) / sizeof(argv[0]); i++)
+    for (size_t i = 0; args[i]; i++) {
+        if (n + 1 >= sizeof(argv) / sizeof(argv[0])) return -1;
         argv[n++] = args[i];
+    }
     argv[n] = NULL;
-    if (out && out_cap)
-        out[0] = '\0';
     return zcl_spawn_capture(argv, out, out_cap, HG_GIT_TIMEOUT_MS);
 }
 
