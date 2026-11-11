@@ -397,6 +397,41 @@ static void stl_st_key_with_fake(const char *dir, const char *tool, const char *
     setenv("PATH", oldpath, 1);
 }
 
+static int stl_st_stamp_bytes(const char *path, const char *key, const char *bytes,
+                               size_t len, int want, const char *what)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return stl_st_expect("stamp fixture open", 1, 0);
+    int bad = fwrite(bytes, 1, len, f) != len;
+    if (fclose(f) != 0) bad = 1;
+    if (bad) return stl_st_expect("stamp fixture write", 1, 0);
+    return stl_st_expect(what, stl_stamp_hit(key, path, 1), want);
+}
+
+static int stl_st_stamp_contents(const char *dir)
+{
+    static const char key[] =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    char path[STL_PATH], bytes[256];
+    if (stl_st_path(dir, "contents.stamp", path, sizeof path)) return 1;
+    memset(bytes, '\n', sizeof bytes);
+    memcpy(bytes, key, sizeof key - 1);
+    int bad = stl_st_stamp_bytes(path, key, bytes, 64, 1, "stamp exact bytes hit");
+    bad |= stl_st_stamp_bytes(path, key, bytes, 65, 1, "stamp newline hit");
+    bad |= stl_st_stamp_bytes(path, key, bytes, 128, 1, "stamp bounded newlines hit");
+    bad |= stl_st_stamp_bytes(path, key, bytes, 63, 0, "stamp short key misses");
+    bad |= stl_st_stamp_bytes(path, key, bytes, 0, 0, "stamp empty file misses");
+    bytes[64] = '\0';
+    bytes[65] = 'x';
+    bad |= stl_st_stamp_bytes(path, key, bytes, 66, 0, "stamp embedded NUL suffix misses");
+    memset(bytes + 64, '\n', sizeof bytes - 64);
+    bytes[sizeof bytes - 1] = 'x';
+    bad |= stl_st_stamp_bytes(path, key, bytes, sizeof bytes, 0, "stamp unread suffix misses");
+    bytes[sizeof bytes - 1] = '\n';
+    bad |= stl_st_stamp_bytes(path, key, bytes, sizeof bytes, 0, "stamp oversized file misses");
+    return bad;
+}
+
 /* The X11 selftest stamp: the key follows make and bash, a nested fixture run
  * never touches the shared stamp, a matching shared stamp is a hit. */
 static int stl_st_stamp(const char *dir)
@@ -452,6 +487,7 @@ int check_standalone_tools_link_selftest(void)
     bad |= stl_st_link_log(dir);
     bad |= stl_st_nested();
     bad |= stl_st_stamp(dir);
+    bad |= stl_st_stamp_contents(dir);
     bad |= stl_st_expect("unknown argument is fatal",
                          check_standalone_tools_link_run(1, bogus), 2);
     rap_rm_rf(dir);

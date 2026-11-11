@@ -152,23 +152,24 @@ static void stl_x11_key(struct stl_bs *bs)
     stl_x11_key_in(bs->dir, bs->key, sizeof bs->key);
 }
 
-/* True when the file at path holds exactly key (trailing newlines ignored);
- * a read error is a miss. */
+/* A bounded stamp must contain exactly key plus optional trailing newlines.
+ * Oversized files, unread bytes and I/O errors are conservative cache misses. */
 int stl_stamp_file_has(const char *path, const char *key)
 {
-    char have[128] = "";
-    FILE *f = fopen(path, "r");
+    char have[128];
+    FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
-    size_t n = fread(have, 1, sizeof have - 1, f);
+    size_t n = fread(have, 1, sizeof have, f);
+    int tail = fgetc(f);
     int err = ferror(f);
-    fclose(f);
-    if (err)
+    if (fclose(f) != 0)
+        err = 1;
+    if (err || tail != EOF)
         return 0;
-    have[n] = '\0';
     while (n && have[n - 1] == '\n')
-        have[--n] = '\0';
-    return strcmp(have, key) == 0;
+        n--;
+    return n == strlen(key) && memcmp(have, key, n) == 0;
 }
 
 /* A fresh worktree has no build/lint-stamps, so the per-tree stamp alone made
