@@ -146,6 +146,98 @@ static bool cct_build_fixture(struct cc_fix *fx)
     return ok;
 }
 
+static bool cct_moving_setup(const struct cc_fix *fx, const char *next,
+                             const char *old_path)
+{
+    static const char script[] =
+        "#!/bin/sh\nd=${0%/*}\nIFS= read -r PATH < \"$d/path\" || exit 1\n"
+        "export PATH\nIFS= read -r target < \"$d/target\" || exit 1\n"
+        "case \"$*\" in\n"
+        "*'moving^{commit}'*) git \"$@\"; r=$?; "
+        "if [ \"$r\" = 0 ]; then git -C \"$d/..\" update-ref "
+        "refs/heads/moving \"$target\" || exit 1; fi; exit \"$r\";;\n"
+        "*) exec git \"$@\";;\nesac\n";
+    char shim[640], path_line[1024], target_line[128];
+    if (cct_git(fx, NULL, 0, "branch", "moving", fx->commit1, NULL))
+        return false;
+    int n = snprintf(path_line, sizeof path_line, "%s\n", old_path);
+    int m = snprintf(target_line, sizeof target_line, "%s\n", next);
+    if (n < 0 || (size_t)n >= sizeof path_line || m < 0 ||
+        (size_t)m >= sizeof target_line)
+        return false;
+    if (!cct_write(fx, "shim/path", path_line) ||
+        !cct_write(fx, "shim/target", target_line) ||
+        !cct_write(fx, "shim/git", script))
+        return false;
+    (void)snprintf(shim, sizeof shim, "%s/shim/git", fx->dir);
+    return chmod(shim, 0700) == 0;
+}
+
+static bool cct_moving_result(const struct cct_call *c, const struct cc_fix *fx,
+                              const char *tree, const char *moved, const char *next,
+                              bool installed, bool ran, bool restored)
+{
+    const char *commit = json_get_str(json_get(&c->reply.data, "commit"));
+    const char *actual_tree = json_get_str(json_get(&c->reply.data, "tree"));
+    bool ok = installed && ran && restored && commit && actual_tree &&
+              strcmp(commit, fx->commit1) == 0 && strcmp(actual_tree, tree) == 0 &&
+              cct_int(c, "files") == 12 && cct_int(c, "lines") == 14 &&
+              strcmp(moved, next) == 0;
+    if (!ok)
+        printf("[moving installed=%d ran=%d restored=%d commit=%s expected=%s "
+               "tree=%s expected=%s files=%lld lines=%lld moved=%s expected=%s] ",
+               installed, ran, restored, commit ? commit : "(null)", fx->commit1,
+               actual_tree ? actual_tree : "(null)", tree,
+               (long long)cct_int(c, "files"), (long long)cct_int(c, "lines"),
+               moved, next);
+    return ok;
+}
+
+/* Move only this fixture's branch after Git has returned its first lookup. */
+static bool cct_moving_ref(const struct cc_fix *fx, const char *next)
+{
+    char tree[128] = "", path[1024], moved[128] = "";
+    if (cct_git(fx, tree, sizeof tree, "rev-parse", "HEAD~1^{tree}", NULL, NULL))
+        return false;
+    tree[strcspn(tree, "\n")] = '\0';
+    const char *old = getenv("PATH");
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved)
+        return false;
+    bool setup = saved && cct_moving_setup(fx, next, saved);
+    int n = snprintf(path, sizeof path, "%s/shim:%s", fx->dir, saved ? saved : "");
+    bool installed = setup && n >= 0 && (size_t)n < sizeof path &&
+                     setenv("PATH", path, 1) == 0;
+    struct cct_call c;
+    cct_begin(&c, fx);
+    cct_arg(&c, "at", "moving");
+    bool ran = installed && cct_run(&c);
+    bool restored = !installed || setenv("PATH", saved, 1) == 0;
+    free(saved);
+    if (restored)
+        (void)cct_git(fx, moved, sizeof moved, "rev-parse", "moving", NULL, NULL);
+    moved[strcspn(moved, "\n")] = '\0';
+    bool ok = cct_moving_result(&c, fx, tree, moved, next, installed, ran, restored);
+    cct_end(&c);
+    return ok;
+}
+
+static bool cct_revision_case(const struct cc_fix *fx, const char *revision,
+                              bool accepted)
+{
+    struct cct_call c;
+    cct_begin(&c, fx);
+    cct_arg(&c, "at", revision);
+    bool passed = cct_run(&c);
+    bool ok = passed == accepted;
+    if (accepted && passed) {
+        const char *commit = json_get_str(json_get(&c.reply.data, "commit"));
+        ok = commit && strcmp(commit, fx->commit1) == 0;
+    }
+    cct_end(&c);
+    return ok;
+}
+
 int test_code_count(void);
 int test_code_count(void)
 {
@@ -220,6 +312,20 @@ int test_code_count(void)
         ASSERT(cct_run(&c));
         ASSERT_EQ(cct_int(&c, "lines"), 18);
         cct_end(&c);
+        PASS();
+    }
+
+    TEST("code.count: moving a ref cannot mix commit and tree") {
+        ASSERT(cct_moving_ref(&fx, head));
+        PASS();
+    }
+
+    TEST("code.count: revision expressions retain single-commit semantics") {
+        ASSERT_EQ(cct_git(&fx, NULL, 0, "tag", "fixture-tag", fx.commit1, NULL), 0);
+        ASSERT(cct_revision_case(&fx, "fixture-tag", true));
+        ASSERT(cct_revision_case(&fx, "HEAD~1", true));
+        ASSERT(cct_revision_case(&fx, "HEAD~1..HEAD", false));
+        ASSERT(cct_revision_case(&fx, "HEAD^{tree}", false));
         PASS();
     }
 

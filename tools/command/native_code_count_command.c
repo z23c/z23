@@ -492,12 +492,13 @@ static bool cc_resolve(const char *root, const char *at, char commit[41],
 {
     char rev_c[256], rev_t[256];
     (void)snprintf(rev_c, sizeof rev_c, "%s^{commit}", at);
-    (void)snprintf(rev_t, sizeof rev_t, "%s^{tree}", at);
     const char *args[] = {"rev-parse", "--verify", "-q", rev_c, NULL};
     char *out = cc_git(root, args, false);
     bool ok = out && strlen(out) >= 40 && cc_hex20(out, (unsigned char[20]){0});
-    if (ok)
+    if (ok) {
         memcpy(commit, out, 40), commit[40] = '\0';
+        (void)snprintf(rev_t, sizeof rev_t, "%s^{tree}", commit);
+    }
     free(out);
     args[3] = rev_t;
     out = ok ? cc_git(root, args, false) : NULL;
