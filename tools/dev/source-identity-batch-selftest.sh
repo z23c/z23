@@ -34,6 +34,11 @@ fi
     fail 'native helper did not report its exact input identity'
 
 cd "$SANDBOX"
+# Establish this fixture's repository before the helper runs: otherwise its
+# optional ignored-build diagnostics can discover an enclosing repository.
+git init -q
+git config user.email source-identity-batch@example.invalid
+git config user.name source-identity-batch
 printf 'plain\n' > plain.c
 printf 'CRLF\r\nCtrl-Z\032tail\r\n' > binary.c
 printf 'space\n' > 'space name.c'
@@ -190,9 +195,6 @@ cmp -s prefix-expected prefix-out || fail 'prefix join output differs'
 
 cd "$SANDBOX"
 
-git init -q
-git config user.email source-identity-batch@example.invalid
-git config user.name source-identity-batch
 mkdir -p vendor/sub
 git -C vendor/sub init -q
 git -C vendor/sub config user.email source-identity-batch@example.invalid

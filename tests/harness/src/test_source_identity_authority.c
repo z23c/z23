@@ -163,7 +163,7 @@ static bool sia_poison_run(const char *root, const char *foreign, const char *sc
     if (!sia_fixture_paths(root, scratch, script, tmp, bin, executable)) return false;
     const char *argv[] = {"env", "-u", "ZCL_SOVEREIGN_SOURCE_ROOT", "-u", "ZCL_SOURCE_IDENTITY_BATCH_DISABLE",
         "-u", "ZCL_SOURCE_IDENTITY_SESSION", a, b, c, d, e, f, tmp, bin, executable, NULL};
-    int rc = zcl_spawn_capture(argv, out, sizeof out, 180000);
+    int rc = zcl_spawn_capture_merged_observed(argv, out, sizeof out, 180000, NULL);
     if (rc) fprintf(stderr, "source selftest %s rc=%d: %s\n", script, rc, out);
     return rc == 0 && strstr(out, "source-identity-batch-selftest: PASS record=") != NULL &&
         (!strcmp(script, "source-identity-batch-selftest.sh") || strstr(out, "source-identity-selftest: PASS identity=") != NULL);
@@ -229,6 +229,9 @@ static int sia_selftest_git_isolation(void)
         ASSERT(snprintf(foreign, sizeof foreign, "%s/foreign", work) < (int)sizeof foreign);
         ASSERT(snprintf(scratch, sizeof scratch, "%s/scratch", work) < (int)sizeof scratch);
         ASSERT(!mkdir(root, 0700) && !mkdir(foreign, 0700) && !mkdir(scratch, 0700));
+        ASSERT(sia_repo_init(work));
+        ASSERT(snprintf(out, sizeof out, "%s/.git/info/exclude", work) < (int)sizeof out);
+        ASSERT(sia_write_file(out, "scratch/\n"));
         ASSERT(sia_fixture_files(root) && sia_repo_init(root) && sia_repo_init(foreign));
         ASSERT(snprintf(wt, sizeof wt, "%s/foreign-wt", work) < (int)sizeof wt);
         const char *add[] = {"worktree", "add", "--detach", "-q", wt, "HEAD", NULL};
