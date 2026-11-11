@@ -9,6 +9,7 @@
  * — the watcher only reads supervisor_sweep_heartbeat()). */
 
 #include "config/boot_internal.h"
+#include "config/boot_error.h"
 #include "util/supervisor_backstop.h"
 
 static bool boot_supervisor_backstop_start(void *ctx)
@@ -28,8 +29,15 @@ static void boot_supervisor_backstop_stop(void *ctx)
 
 bool boot_supervisor_backstop_register(struct boot_svc_ctx *svc)
 {
-    if (!svc)
+    if (!svc) {
+        boot_error_report(BOOT_ERROR_FATAL,
+            "BOOT_SUPERVISOR_BACKSTOP_REGISTER_REFUSED",
+            "supervisor.backstop",
+            "supervisor backstop register refused: no boot service context",
+            NULL, 0,
+            "stage=supervisor_backstop_no_context");
         return false;
+    }
     const struct zcl_service_spec spec = {
         .name = "supervisor_backstop",
         .start = boot_supervisor_backstop_start,
