@@ -541,24 +541,20 @@ int check_wallet_view_receive_has_qr_code_svg(void)
 {
     int failures = 0;
 
-    printf("wallet_view: receive has QR code SVG... ");
+    printf("wallet_view: no wallet address means no receive QR... ");
     {
         wv_get("/wallet/receive");
-        bool ok = wv_has("<svg");
-        ok = ok && wv_has("viewBox");
-        ok = ok && wv_has("fill='black'");  /* QR modules */
-        ok = ok && wv_has("fill='white'");  /* QR background */
+        bool ok = !wv_has("<svg") && wv_has("No private addresses yet");
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("wallet_view: receive shows primary address with chunking... ");
+    printf("wallet_view: transparent receive fails closed... ");
     {
         wv_get("/wallet/receive");
-        bool ok = wv_has("addr-chunked");
-        ok = ok && wv_has("t1YR");  /* first chunk of PRIMARY_ADDR */
-        ok = ok && wv_has("class='hi'");  /* highlighted chunks */
-        ok = ok && wv_has("class='sep'");  /* separators */
+        bool ok = wv_has("Transparent receiving unavailable") &&
+                  !wv_has("t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn") &&
+                  !wv_has("id='t-addr'") && !wv_has("id='copy-btn'");
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

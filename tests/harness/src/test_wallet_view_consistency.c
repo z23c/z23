@@ -318,13 +318,15 @@ int check_wallet_view_pulse_has_peers_0(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Receive with real address ───────────────────────────── */
-
-    printf("LIVE: receive shows PRIMARY_ADDR in chunked format... ");
+    /* The fixture-backed shielded address remains usable; no fixed public
+     * placeholder may be offered as a deposit destination. */
+    printf("LIVE: receive uses shielded fixture and disables public placeholder... ");
     {
         wv_get("/wallet/receive");
-        bool ok = wv_has("t1YR") && wv_has("BXK");
-        ok = ok && wv_has("addr-chunked");
+        bool ok = wv_has("zs1fixtureaddress") &&
+                  wv_has("Transparent receiving unavailable") &&
+                  !wv_has("t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn") &&
+                  !wv_has("id='t-addr'") && !wv_has("id='copy-btn'");
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

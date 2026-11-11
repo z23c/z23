@@ -59,42 +59,13 @@ size_t serve_receive(uint8_t *r, size_t max) {
     off += template_render(TMPL_RECEIVE_ZPANE_CLOSE, NULL, 0,
         (char *)r + off, max - off);
 
-    /* ── Public address pane ── */
-    {
-        /* Build QR SVG into temp buffer */
-        char qr_buf[65536] = "";
-        wv_emit_qr_svg((uint8_t *)qr_buf, sizeof(qr_buf), 0, PRIMARY_ADDR, 5);
-
-        /* Build chunked address display */
-        char chunk_buf[512];
-        size_t ci = 0;
-        const char *a = PRIMARY_ADDR;
-        size_t alen = strlen(a);
-        ci += (size_t)snprintf(chunk_buf + ci, sizeof(chunk_buf) - ci,
-            "<div class='addr-display addr-chunked' "
-            "style='margin-top:16px' id='t-addr'>"
-            "<span class='hi'>%.4s</span>", a);
-        for (size_t i = 4; i < alen && ci < sizeof(chunk_buf) - 80; i += 4) {
-            size_t left = alen - i;
-            if (left > 4) left = 4;
-            ci += (size_t)snprintf(chunk_buf + ci, sizeof(chunk_buf) - ci,
-                "<span class='sep'> </span>");
-            if (i + left >= alen)
-                ci += (size_t)snprintf(chunk_buf + ci, sizeof(chunk_buf) - ci,
-                    "<span class='hi'>%.*s</span>", (int)left, a + i);
-            else
-                ci += (size_t)snprintf(chunk_buf + ci, sizeof(chunk_buf) - ci,
-                    "%.*s", (int)left, a + i);
-        }
-        snprintf(chunk_buf + ci, sizeof(chunk_buf) - ci, "</div>");
-
-        struct template_var tv[] = {
-            { "qr_svg", qr_buf },
-            { "chunked_addr", chunk_buf },
-        };
-        off += template_render(TMPL_RECEIVE_TPANE, tv, 2,
-            (char *)r + off, max - off);
-    }
+    /* Do not present a fixed placeholder as a wallet-owned deposit address. */
+    APPEND(off, r, max,
+        "<div id='pane-t' style='display:none;text-align:center;padding:16px 0'>"
+        "<div class='balance-sub'>Transparent receiving unavailable</div>"
+        "<p>Public transactions are visible on-chain. This view cannot verify "
+        "a wallet-owned transparent address; use a verified wallet address "
+        "from the wallet command interface instead.</p></div>");
 
     off += template_render(TMPL_RECEIVE_JS, NULL, 0,
         (char *)r + off, max - off);
