@@ -62,6 +62,7 @@
 #include "test/test_core.h"
 
 #include "test/semantic_fuzz.h"
+#include "semantic_fuzz_case_priv.h"
 
 #include "devloop.h"
 
@@ -747,6 +748,194 @@ static int sfz_t_repros(struct sfz_group *g)
     return failures;
 }
 
+static bool sfz_pool_job(struct sfz_job *job, const char *root, size_t index,
+                         const char *script)
+{
+    int n = snprintf(job->log, sizeof job->log, "%s/pool-%zu.log", root, index);
+    if (n < 0 || (size_t)n >= sizeof job->log)
+        return false;
+    job->argv[0] = "/bin/sh";
+    job->argv[1] = "-c";
+    job->argv[2] = script;
+    job->argv[3] = NULL;
+    return true;
+}
+
+static bool sfz_pool_prepare(struct sfz_run *r, const char *root)
+{
+    char path[PATH_MAX];
+    int n = snprintf(r->tree, sizeof r->tree, "%s", root);
+    if (n < 0 || (size_t)n >= sizeof r->tree)
+        return false;
+    n = snprintf(path, sizeof path, "%s/ready", root);
+    if (n < 0 || (size_t)n >= sizeof path || mkfifo(path, 0600) != 0)
+        return false;
+    n = snprintf(path, sizeof path, "%s/release", root);
+    return n >= 0 && (size_t)n < sizeof path && mkfifo(path, 0600) == 0;
+}
+
+static bool sfz_pool_reaped(struct sfz_job *jobs, size_t count)
+{
+    bool ok = true;
+    for (size_t i = 0; i < count; i++) {
+        if (jobs[i].pid <= 0)
+            continue;
+        int status;
+        pid_t got;
+        do { got = waitpid(jobs[i].pid, &status, WNOHANG); } while (got < 0 && errno == EINTR);
+        if (got == -1 && errno == ECHILD)
+            continue;
+        ok = false;
+        if (got == 0) {
+            (void)kill(jobs[i].pid, SIGKILL);
+            do { got = waitpid(jobs[i].pid, &status, 0); } while (got < 0 && errno == EINTR);
+        }
+    }
+    return ok;
+}
+
+static bool sfz_pool_handshake_jobs(struct sfz_job *jobs, const char *root)
+{
+    return sfz_pool_job(&jobs[0], root, 0,
+              "printf '%s\\n' \"$$\" > apid; printf 'x\\n' > ready; read x < release") &&
+           sfz_pool_job(&jobs[1], root, 1,
+              "read x < ready; printf '%s\\n' \"$$\" > bpid") &&
+           sfz_pool_job(&jobs[2], root, 2,
+              "read a < apid && read b < bpid && kill -0 \"$a\" && "
+              "! kill -0 \"$b\" 2>/dev/null && printf 'x\\n' > release");
+}
+
+static bool sfz_pool_handshake_result(struct sfz_run *r, struct sfz_job *jobs,
+                                      size_t bad)
+{
+    bool ok = bad == 0 && r->killed == 0;
+    for (size_t i = 0; i < 3; i++)
+        if (jobs[i].status != 0 || jobs[i].killed)
+            ok = false;
+    if (!sfz_pool_reaped(jobs, 3))
+        ok = false;
+    if (!ok)
+        printf("[pool handshake bad=%zu killed=%zu statuses=%d,%d,%d]\n", bad,
+               r->killed, jobs[0].status, jobs[1].status, jobs[2].status);
+    return ok;
+}
+
+static bool sfz_pool_handshake(struct sfz_group *g)
+{
+    char root[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof root, "sfz_pool"))
+        return false;
+    struct sfz_env env = { .jobs = 2 };
+    struct sfz_run *r = zcl_calloc(1, sizeof *r, "sfz.pool.test");
+    struct sfz_job *jobs = zcl_calloc(3, sizeof *jobs, "sfz.pool.jobs");
+    bool setup = r && jobs && sfz_pool_prepare(r, root);
+    if (setup) {
+        r->env = &env;
+        r->test_budget_s = 5;
+        setup = sfz_pool_handshake_jobs(jobs, root);
+    }
+    size_t bad = setup ? sfz_run_jobs(r, jobs, 3) : 3;
+    bool ok = setup && sfz_pool_handshake_result(r, jobs, bad);
+    free(jobs);
+    free(r);
+    (void)test_rm_rf_recursive(root);
+    (void)g;
+    return ok;
+}
+
+static bool sfz_pool_foreign_wait(pid_t foreign)
+{
+    int st = 0;
+    pid_t got = -1;
+    if (foreign > 0)
+        do { got = waitpid(foreign, &st, 0); } while (got < 0 && errno == EINTR);
+    return got == foreign && foreign > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 37;
+}
+
+static bool sfz_pool_failure_result(struct sfz_run *r, struct sfz_job *jobs,
+                                    size_t bad, bool foreign_ok)
+{
+    bool ok = foreign_ok && bad == 3 && r->killed == 1 && jobs[0].status == 7 &&
+              jobs[1].killed && jobs[2].status == 127;
+    if (!sfz_pool_reaped(jobs, 3))
+        ok = false;
+    if (!ok)
+        printf("[pool failures foreign=%d bad=%zu]\n", foreign_ok, bad);
+    return ok;
+}
+
+static bool sfz_pool_failures(struct sfz_group *g)
+{
+    char root[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof root, "sfz_pool_fail"))
+        return false;
+    struct sfz_env env = { .jobs = 2 };
+    struct sfz_run *r = zcl_calloc(1, sizeof *r, "sfz.pool.test");
+    struct sfz_job *jobs = zcl_calloc(3, sizeof *jobs, "sfz.pool.jobs");
+    bool setup = r && jobs && sfz_pool_prepare(r, root);
+    if (setup) {
+        r->env = &env;
+        r->test_budget_s = 2;
+        setup = sfz_pool_job(&jobs[0], root, 0, "exit 7") &&
+                sfz_pool_job(&jobs[1], root, 1, "read x < release") &&
+                sfz_pool_job(&jobs[2], root, 2, "exit 0");
+        jobs[2].argv[0] = "/no-such-sfz-executable";
+    }
+    pid_t foreign = setup ? fork() : -1;
+    if (foreign == 0)
+        _exit(37);
+    size_t bad = foreign > 0 ? sfz_run_jobs(r, jobs, 3) : 0;
+    bool own = sfz_pool_foreign_wait(foreign);
+    bool ok = setup && sfz_pool_failure_result(r, jobs, bad, own);
+    free(jobs);
+    free(r);
+    (void)test_rm_rf_recursive(root);
+    (void)g;
+    return ok;
+}
+
+static bool sfz_pool_cap(void)
+{
+    char root[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof root, "sfz_pool_cap"))
+        return false;
+    struct sfz_env env = { .jobs = 1 };
+    struct sfz_run *r = zcl_calloc(1, sizeof *r, "sfz.pool.test");
+    struct sfz_job *jobs = zcl_calloc(2, sizeof *jobs, "sfz.pool.jobs");
+    bool setup = r && jobs && sfz_pool_prepare(r, root);
+    if (setup) {
+        r->env = &env;
+        r->test_budget_s = 2;
+        setup = sfz_pool_job(&jobs[0], root, 0,
+                  "printf '%s\\n' \"$$\" > apid; read x < release") &&
+                sfz_pool_job(&jobs[1], root, 1,
+                  "read a < apid && ! kill -0 \"$a\" 2>/dev/null");
+    }
+    size_t bad = setup ? sfz_run_jobs(r, jobs, 2) : 0;
+    bool ok = setup && bad == 1 && r->killed == 1 && jobs[0].killed &&
+              jobs[1].status == 0;
+    if (setup && !sfz_pool_reaped(jobs, 2))
+        ok = false;
+    if (!ok)
+        printf("[pool cap setup=%d bad=%zu]\n", setup, bad);
+    free(jobs);
+    free(r);
+    (void)test_rm_rf_recursive(root);
+    return ok;
+}
+
+static int sfz_t_pool(struct sfz_group *g)
+{
+    int failures = 0;
+    TEST_CASE("semantic_facts_fuzz: owned pool advances and accounts for failures") {
+        bool handshake = sfz_pool_handshake(g);
+        bool failures_ok = sfz_pool_failures(g);
+        bool cap = sfz_pool_cap();
+        ASSERT(handshake && failures_ok && cap);
+    } TEST_END
+    return failures;
+}
+
 static bool sfz_nested_assist(const struct sfz_case *c)
 {
     char path[PATH_MAX];
@@ -1106,6 +1295,7 @@ int test_semantic_facts_fuzz(void)
     } TEST_END
     if (failures == 0) {
         failures += sfz_t_repros(g);
+        failures += sfz_t_pool(g);
         failures += sfz_t_nested_outputs(g);
         failures += sfz_t_nested_deps(g);
         failures += sfz_t_sdir_mutant(g);

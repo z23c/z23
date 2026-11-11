@@ -27,7 +27,6 @@
 #include <sys/prctl.h>
 #endif
 
-#define SFZ_ARGV_MAX 48
 #define SFZ_EXTRA_MAX 16
 /* A compile, sensor or gcc run of a small generated TU takes well under a
  * second; one still running after this is killed and fails its case. */
@@ -233,16 +232,6 @@ static bool is_c(const char *path)
 
 /* ---- processes --------------------------------------------------------------- */
 
-struct sfz_job {
-    const char *argv[SFZ_ARGV_MAX];
-    char s[4][PATH_MAX]; /* per-job argument storage */
-    char log[PATH_MAX];
-    pid_t pid;
-    int64_t deadline;    /* monotonic ns after which it is killed */
-    int status;          /* exit status, -1 when it did not exit normally */
-    bool killed;         /* it outran SFZ_JOB_BUDGET_S */
-};
-
 /* The whole environment of a compile, sensor or gcc run, and nothing
  * else: an inherited CPATH or C_INCLUDE_PATH would change what clang and
  * the sensor read (the sensor records both in its facts), and any other
@@ -267,11 +256,11 @@ static void envp_init(struct sfz_run *r)
 }
 
 static pid_t job_start(struct sfz_job *j, const char *cwd,
-                       const char *const *envp)
+                       const char *const *envp, unsigned budget_s)
 {
     pid_t parent = getpid();
     pid_t pid = fork();
-    j->deadline = clock_now_monotonic_ns() + (int64_t)SFZ_JOB_BUDGET_S * 1000000000;
+    j->deadline = clock_now_monotonic_ns() + (int64_t)budget_s * 1000000000;
     if (pid != 0)
         return pid;
 #if defined(__linux__)
@@ -293,60 +282,102 @@ static pid_t job_start(struct sfz_job *j, const char *cwd,
     _exit(127);
 }
 
-/* Reap j, killing it at its deadline. */
-static void job_wait(struct sfz_job *j)
+static void job_kill_reap(struct sfz_job *j)
 {
-    int st = 0;
     pid_t got;
-    j->status = -1;
-    if (j->pid <= 0)
-        return;
-    while ((got = waitpid(j->pid, &st, WNOHANG)) == 0 ||
-           (got < 0 && errno == EINTR)) {
-        if (clock_now_monotonic_ns() >= j->deadline) {
-            (void)kill(j->pid, SIGKILL);
-            j->killed = true;
-            (void)waitpid(j->pid, &st, 0);
-            return;
-        }
-        (void)poll(NULL, 0, 5);
-    }
-    if (got == j->pid && WIFEXITED(st))
-        j->status = WEXITSTATUS(st);
+    int st;
+    int rc;
+    do { rc = kill(j->pid, SIGKILL); } while (rc < 0 && errno == EINTR);
+    do { got = waitpid(j->pid, &st, 0); } while (got < 0 && errno == EINTR);
 }
 
-static void job_complain(const struct sfz_job *j)
+/* Observe only this owned child; true means its slot is no longer live. */
+static bool job_check(struct sfz_job *j)
+{
+    int st = 0;
+    pid_t got = waitpid(j->pid, &st, WNOHANG);
+    if (got == j->pid) {
+        if (WIFEXITED(st))
+            j->status = WEXITSTATUS(st);
+        return true;
+    }
+    if (got < 0 && errno != EINTR) {
+        if (errno != ECHILD)
+            job_kill_reap(j);
+        return true;
+    }
+    if (clock_now_monotonic_ns() >= j->deadline) {
+        j->killed = true;
+        job_kill_reap(j);
+        return true;
+    }
+    return false;
+}
+
+static void job_complain(const struct sfz_job *j, unsigned budget_s)
 {
     if (j->killed)
-        fprintf(stderr, "sfz: %s killed after %d s (log %s)\n", j->argv[0],
-                SFZ_JOB_BUDGET_S, j->log);
+        fprintf(stderr, "sfz: %s killed after %u s (log %s)\n", j->argv[0],
+                budget_s, j->log);
     else
         fprintf(stderr, "sfz: %s exited %d (log %s)\n", j->argv[0], j->status,
                 j->log);
 }
 
-/* Run the jobs in the case tree, r->env->jobs at once, oldest reaped
- * first; the number that failed, adding those killed to r->killed. */
-static size_t run_jobs(struct sfz_run *r, struct sfz_job *jobs, size_t n)
+static void job_launch(struct sfz_run *r, struct sfz_job *j,
+                       unsigned budget, size_t *live)
 {
-    size_t bad = 0, par = (size_t)r->env->jobs;
-    for (size_t k = 0; k < n; k++) {
-        if (k >= par)
-            job_wait(&jobs[k - par]);
-        jobs[k].pid = job_start(&jobs[k], r->tree, r->envp);
-        if (jobs[k].pid < 0)
-            fprintf(stderr, "sfz: fork failed for %s\n", jobs[k].argv[0]);
+    j->pid = job_start(j, r->tree, r->envp, budget);
+    if (j->pid > 0) {
+        j->live = true;
+        (*live)++;
+    } else {
+        fprintf(stderr, "sfz: fork failed for %s\n", j->argv[0]);
     }
-    for (size_t k = n > par ? n - par : 0; k < n; k++)
-        job_wait(&jobs[k]);
+}
+
+static size_t job_report(struct sfz_run *r, struct sfz_job *jobs, size_t n,
+                         unsigned budget)
+{
+    size_t bad = 0;
     for (size_t k = 0; k < n; k++) {
         if (jobs[k].status == 0)
             continue;
         bad++;
         r->killed += jobs[k].killed;
-        job_complain(&jobs[k]);
+        job_complain(&jobs[k], budget);
     }
     return bad;
+}
+
+/* Run owned jobs up to the cap, reusing slots when any child completes. */
+size_t sfz_run_jobs(struct sfz_run *r, struct sfz_job *jobs, size_t n)
+{
+    if (r->env->jobs <= 0) {
+        fprintf(stderr, "sfz: job pool capacity must be positive\n");
+        return n ? n : 1;
+    }
+    size_t par = (size_t)r->env->jobs, next = 0, live = 0;
+    unsigned budget = r->test_budget_s ? r->test_budget_s : SFZ_JOB_BUDGET_S;
+    for (size_t k = 0; k < n; k++) {
+        jobs[k].pid = 0;
+        jobs[k].status = -1;
+        jobs[k].killed = jobs[k].live = false;
+    }
+    while (next < n || live) {
+        while (next < n && live < par) {
+            struct sfz_job *j = &jobs[next++];
+            job_launch(r, j, budget, &live);
+        }
+        for (size_t k = 0; k < next; k++)
+            if (jobs[k].live && job_check(&jobs[k])) {
+                jobs[k].live = false;
+                live--;
+            }
+        if (live && (next == n || live == par))
+            (void)poll(NULL, 0, 5);
+    }
+    return job_report(r, jobs, n, budget);
 }
 
 /* ---- the phases ----------------------------------------------------------------- */
@@ -520,7 +551,7 @@ static size_t gcc_depfiles(struct sfz_run *r, const char *ph,
             !job_log(&jobs[k], r, r->tus.v[k], "gcc", ph))
             return 1;
     }
-    return run_jobs(r, jobs, r->tus.n);
+    return sfz_run_jobs(r, jobs, r->tus.n);
 }
 
 static bool phase_job(struct sfz_run *r, struct sfz_job *jobs, size_t k,
@@ -560,7 +591,7 @@ static bool phase(struct sfz_run *r, const char *ph, const char *objdir)
     for (size_t k = 0; ok && k < n; k++) {
         ok = phase_job(r, jobs, k, ph, objdir, cc, &f, &fs);
     }
-    bad = ok ? run_jobs(r, jobs, 2 * n) : 1;
+    bad = ok ? sfz_run_jobs(r, jobs, 2 * n) : 1;
     if (bad == 0 && r->c->gcc_deps)
         bad = gcc_depfiles(r, ph, &f, jobs);
     free(jobs);

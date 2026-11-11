@@ -8,6 +8,19 @@
 #include "base/format_attribute.h"
 
 #include <stdarg.h>
+#include <sys/types.h>
+
+#define SFZ_ARGV_MAX 48
+struct sfz_job {
+    const char *argv[SFZ_ARGV_MAX];
+    char s[4][PATH_MAX];
+    char log[PATH_MAX];
+    pid_t pid;
+    int64_t deadline;
+    int status;
+    bool killed;
+    bool live;
+};
 
 /* A sorted set of repo-relative paths. */
 struct sfz_paths {
@@ -32,10 +45,13 @@ struct sfz_run {
     struct sfz_paths tus;     /* src/ .c files on either side */
     bool header_changed;      /* a changed file is not a .c */
     size_t killed;            /* compile or sensor runs killed at their deadline */
+    unsigned test_budget_s;   /* zero retains the normal job deadline */
     /* the whole environment of every compile, sensor and gcc run */
     char env_path[4096], env_home[PATH_MAX + 8], env_tmp[PATH_MAX + 8];
     const char *envp[5];
 };
+
+size_t sfz_run_jobs(struct sfz_run *r, struct sfz_job *jobs, size_t n);
 
 /* Append one line to out->why (bounded; the first lines win). */
 void sfz_why(struct sfz_outcome *out, const char *fmt, ...) ZCL_PRINTF_LIKE(2, 3);
