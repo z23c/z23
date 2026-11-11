@@ -1000,6 +1000,50 @@ static bool proof_lease_running(const char *path, int64_t *pid_out,
     return true;
 }
 
+/* Status may expose only the attempt named by the observed live lease. */
+static bool proof_live_token_valid(const struct proof_paths *paths, const char *token)
+{
+    size_t n = strlen(paths->key);
+    if (strncmp(token, paths->key, n) || token[n] != '.' || strlen(token + n + 1) != 6)
+        return false;
+    for (const char *p = token + n + 1; *p; ++p)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9'))) return false;
+    return true;
+}
+
+static bool proof_live_private_dir(const char *path)
+{
+    uintptr_t handle;
+    if (!platform_private_directory_open_validated_traverse(path, &handle)) return false;
+    platform_private_directory_close(handle);
+    return true;
+}
+
+static bool proof_live_log_path(const struct proof_paths *paths, const char *token,
+                                char logs[PATH_MAX])
+{
+    char attempt[PATH_MAX];
+    return proof_live_token_valid(paths, token) &&
+        snprintf(attempt, sizeof(attempt), "%s/%s", paths->attempts, token) < (int)sizeof(attempt) &&
+        snprintf(logs, PATH_MAX, "%s/logs", attempt) < PATH_MAX &&
+        proof_live_private_dir(paths->attempts) && proof_live_private_dir(attempt) &&
+        proof_live_private_dir(logs);
+}
+
+static void proof_live_logs(const struct proof_paths *paths, bool leased, int64_t pid,
+                            int64_t started, char *out, size_t out_len)
+{
+    char token[192], again[192], logs[PATH_MAX];
+    int64_t current_pid, current_started, next_pid, next_started;
+    if (!leased || !proof_lease_read(paths->lease, token, sizeof(token), &current_pid, &current_started) ||
+        current_pid != pid || current_started != started || !proof_live_log_path(paths, token, logs) ||
+        !proof_lease_read(paths->lease, again, sizeof(again), &next_pid, &next_started) ||
+        next_pid != pid || next_started != started || strcmp(token, again) ||
+        strlen(logs) >= out_len) return;
+    (void)snprintf(out, out_len, "%s", logs);
+}
+
 /* A request file is exactly five lines: the schema, the two commit ids, and
  * the two clocks. Splitting, shape-checking and clock-parsing are three
  * separate refusals, so a caller reading this code can see which of the
@@ -1307,7 +1351,6 @@ static bool proof_status_read_platform(const char *repo_root,
     (void)snprintf(out->receipt_path, sizeof(out->receipt_path), "%s",
                    paths.receipt);
     (void)snprintf(out->root, sizeof(out->root), "%s", paths.root);
-    (void)snprintf(out->log_dir, sizeof(out->log_dir), "%s", paths.logs);
     struct zcl_dev_acceptance_receipt_v1 receipt;
     if (receipt_load(&paths, local, base, &receipt, why, sizeof(why))) {
         out->state = ZCL_DEV_PROOF_STATE_PASSED;
@@ -1322,8 +1365,8 @@ static bool proof_status_read_platform(const char *repo_root,
         return true;
     }
     int64_t pid = 0, started = 0;
-    if (proof_lease_running(paths.lease, &pid, &started) ||
-        proof_running(paths.lock, &pid, &started)) {
+    bool leased = proof_lease_running(paths.lease, &pid, &started);
+    if (leased || proof_running(paths.lock, &pid, &started)) {
         int64_t now = platform_time_wall_unix();
         int64_t elapsed_ms = now > started ? (now - started) * 1000 : 0;
         out->state = ZCL_DEV_PROOF_STATE_RUNNING;
@@ -1333,6 +1376,7 @@ static bool proof_status_read_platform(const char *repo_root,
         out->eta_ms = elapsed_ms < ceiling_ms ? ceiling_ms - elapsed_ms : 0;
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "background_verification_running");
+        proof_live_logs(&paths, leased, pid, started, out->log_dir, sizeof(out->log_dir));
         return true;
     }
     if (proof_request_matches_pair(paths.request, local, base)) {

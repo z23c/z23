@@ -3339,6 +3339,79 @@ static bool ic_live_proof_status_reply(const char *root, const char *local,
     return ok && cleaned;
 }
 
+static bool ic_live_log_dirs_private(const char *root, const char *local, const char *base)
+{
+    char path[4096];
+    const char *suffixes[] = {"", "/logs"};
+    if (snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/attempts", root) >= (int)sizeof(path) || chmod(path, 0700)) return false;
+    for (size_t i = 0; i < 2; ++i) {
+        if (snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/attempts/%s-%s.abc123%s", root, local, base, suffixes[i]) >= (int)sizeof(path) || chmod(path, 0700)) return false;
+    }
+    return true;
+}
+
+static int test_ic_proof_live_log_dir(void)
+{
+    int failures = 0;
+    TEST("proof status: live logs bind to the lease, never a newer attempt") {
+        const char *local = "1111111111111111111111111111111111111111";
+        const char *base = "2222222222222222222222222222222222222222";
+        char root[4096], canonical[4096], relative[512], body[512], expected[4096];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "status-live-logs");
+        ASSERT(realpath(root, canonical) != NULL);
+        ASSERT(snprintf(relative, sizeof(relative), ".cache/zcl-dev-proof/attempts/%s-%s.abc123/logs/x", local, base) < (int)sizeof(relative));
+        ASSERT(ic_proof_private_write(root, relative, "live\n"));
+        ASSERT(snprintf(relative, sizeof(relative), ".cache/zcl-dev-proof/attempts/%s-%s.decoy1/logs/x", local, base) < (int)sizeof(relative));
+        ASSERT(ic_proof_private_write(root, relative, "decoy\n"));
+        ASSERT(ic_live_log_dirs_private(root, local, base));
+        ASSERT(snprintf(body, sizeof(body), "%s/.cache/zcl-dev-proof/attempts/%s-%s.decoy1", root, local, base) < (int)sizeof(body));
+        struct utimbuf newer = {.actime = 2000000000, .modtime = 2000000000};
+        ASSERT(utime(body, &newer) == 0);
+        ASSERT(snprintf(relative, sizeof(relative), ".cache/zcl-dev-proof/leases/%s-%s.lease", local, base) < (int)sizeof(relative));
+        ASSERT(snprintf(body, sizeof(body), "%s-%s.abc123 %ld %lld\n", local, base, (long)getpid(), (long long)time(NULL)) < (int)sizeof(body));
+        ASSERT(ic_proof_private_write(root, relative, body));
+        ASSERT(snprintf(expected, sizeof(expected), "%s/.cache/zcl-dev-proof/attempts/%s-%s.abc123/logs", canonical, local, base) < (int)sizeof(expected));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT_STR_EQ(status.log_dir, expected);
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_status_conclude(&reply, &status);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "log_dir")), expected);
+        zcl_command_reply_free(&reply);
+        ASSERT(snprintf(body, sizeof(body), "../escape %ld %lld\n", (long)getpid(), (long long)time(NULL)) < (int)sizeof(body));
+        ASSERT(ic_proof_private_write(root, relative, body));
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING && !status.log_dir[0]);
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_status_conclude(&reply, &status);
+        ASSERT(json_get(&reply.data, "log_dir") == NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(snprintf(body, sizeof(body), "%s-%s.abc123 %ld %lld\n", base, local, (long)getpid(), (long long)time(NULL)) < (int)sizeof(body));
+        ASSERT(ic_proof_private_write(root, relative, body));
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING && !status.log_dir[0]);
+        char linkpath[4096];
+        ASSERT(snprintf(linkpath, sizeof(linkpath), "%s/.cache/zcl-dev-proof/attempts/%s-%s.link01", root, local, base) < (int)sizeof(linkpath));
+        ASSERT(snprintf(body, sizeof(body), "%s-%s.abc123", local, base) < (int)sizeof(body));
+        ASSERT(symlink(body, linkpath) == 0);
+        ASSERT(snprintf(body, sizeof(body), "%s-%s.link01 %ld %lld\n", local, base, (long)getpid(), (long long)time(NULL)) < (int)sizeof(body));
+        ASSERT(ic_proof_private_write(root, relative, body));
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING && !status.log_dir[0]);
+        ASSERT(snprintf(body, sizeof(body), "%s-%s.abc123 %ld %lld\n", local, base, (long)getpid(), (long long)time(NULL)) < (int)sizeof(body));
+        ASSERT(ic_proof_private_write(root, relative, body));
+        ASSERT(chmod(expected, 0777) == 0);
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING && !status.log_dir[0]);
+        ASSERT(chmod(expected, 0700) == 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_status_execution_projection(void)
 {
     int failures = 0;
@@ -3357,6 +3430,7 @@ static int test_ic_proof_status_execution_projection(void)
         ASSERT(utimensat(AT_FDCWD, path, aged, 0) == 0);
         struct zcl_dev_proof_status status = {0};
         ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(!status.log_dir[0]);
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
         zcl_dev_proof_status_conclude(&reply, &status);
@@ -4333,6 +4407,8 @@ static int test_ic_proof_retry(void)
         ASSERT(ic_proof_private_write(state, relative, marker_body));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_RUNNING);
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(!status.log_dir[0]);
         ASSERT(ic_proof_private_write(state, relative, "unparseable worker marker\n"));
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(strcmp(status.detail, "proof_retry_worker_not_settled") == 0);
@@ -16697,6 +16773,7 @@ int test_impact_composition(void)
     failures += test_ic_proof_observation_refusals();
     failures += test_ic_proof_retry();
     failures += test_ic_proof_status_execution_projection();
+    failures += test_ic_proof_live_log_dir();
     failures += test_ic_proof_ensure_passed_writes_no_request();
     failures += test_ic_proof_leftover_request_never_hides_passed();
     failures += test_ic_proof_next_preserves_root();
