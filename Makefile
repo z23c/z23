@@ -16263,8 +16263,8 @@ TOR_PROVENANCE_HEADERS = tools/tor_compiler_id.h \
     platform/modules/platform/src/windows_path_internal.h
 $(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS) $(TOR_PROVENANCE_HEADERS) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zsha256/include \
 	    -Iplatform/modules/base/include \
 	    -Iplatform/modules/platform/include \
