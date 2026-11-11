@@ -59,13 +59,52 @@ static char *fake_fgets(char *text, int cap, FILE *file)
 #define pread fake_pread
 #define fgets fake_fgets
 #endif
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+static mach_vm_address_t fixture_address;
+static int region_mode, region_calls;
+static kern_return_t test_region(vm_map_read_t task, mach_vm_address_t *address, mach_vm_size_t *size,
+                                 vm_region_flavor_t flavor, vm_region_info_t info,
+                                 mach_msg_type_number_t *count, mach_port_t *object)
+{
+    if (!region_mode) return mach_vm_region(task, address, size, flavor, info, count, object);
+    if (region_calls++) return region_mode == 2 ? KERN_FAILURE : KERN_INVALID_ADDRESS;
+    *address = fixture_address;
+    *size = region_mode == 3 ? 0 : (region_mode == 4 ? UINT64_MAX : 16384);
+    *object = MACH_PORT_NULL;
+    vm_region_extended_info_data_t *entry = (void *)info;
+    memset(entry, 0, sizeof(*entry));
+    entry->protection = VM_PROT_READ | VM_PROT_WRITE;
+    return KERN_SUCCESS;
+}
+#define mach_vm_region test_region
+#endif
 #include "residue.h"
+#ifdef __APPLE__
+#undef mach_vm_region
+#endif
 #ifndef __APPLE__
 #undef pread
 #undef fgets
 #endif
 
 #ifdef __APPLE__
+static void region_enumeration_cases(void)
+{
+    assert(mach_vm_allocate(mach_task_self(), &fixture_address, 16384, VM_FLAGS_ANYWHERE) == KERN_SUCCESS);
+    memset((void *)(uintptr_t)fixture_address, 'x', 16384);
+    region_mode = 1; region_calls = 0;
+    assert(!process_holds("isolated-missing-marker") && region_calls == 2);
+    region_mode = 2; region_calls = 0;
+    assert(process_holds("isolated-missing-marker") && region_calls == 2);
+    region_mode = 3; region_calls = 0;
+    assert(process_holds("isolated-missing-marker"));
+    region_mode = 4; region_calls = 0;
+    assert(process_holds("isolated-missing-marker"));
+    region_mode = 0;
+    assert(mach_vm_deallocate(mach_task_self(), fixture_address, 16384) == KERN_SUCCESS);
+}
 static void region_boundary_cases(void)
 {
     enum { REGION_SIZE = 262144 };
@@ -97,6 +136,7 @@ static void region_boundary_cases(void)
 int main(void)
 {
 #ifdef __APPLE__
+    region_enumeration_cases();
     region_boundary_cases();
     char *marker = malloc(32);
     assert(marker);

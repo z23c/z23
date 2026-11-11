@@ -127,12 +127,16 @@ static inline bool apple_process_holds(const char *needle)
         vm_region_extended_info_data_t info;
         mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
         mach_port_t object = MACH_PORT_NULL;
-        if (mach_vm_region(mach_task_self(), &address, &size, VM_REGION_EXTENDED_INFO,
-                           (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS) break;
+        mach_vm_address_t requested = address;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &address, &size, VM_REGION_EXTENDED_INFO,
+                                          (vm_region_info_t)&info, &count, &object);
+        if (kr == KERN_INVALID_ADDRESS) break;
+        if (kr != KERN_SUCCESS) return true;
         if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        if (address < requested || !size || size > UINT64_MAX - address) return true;
         if (region_readable(&info, address, size, stack_low, stack_high))
             found = region_contains(address, size, needle, needle_len, &read_any);
-        if (found || address + size < address) break;
+        if (found) break;
         address += size;
     }
     return found || !read_any;
