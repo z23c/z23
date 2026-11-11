@@ -309,7 +309,7 @@ static int64_t syncsvc_getheaders_interval(const struct p2p_node *node,
 {
     int64_t base;
     if (syncsvc_is_initial_block_download(node, our_height) &&
-        node->starting_height - our_height < SYNCSVC_IBD_NEAR_LEAD)
+        (int64_t)node->starting_height - our_height < SYNCSVC_IBD_NEAR_LEAD)
         base = 1;    /* short lead: a few batch runs close it, so re-ask quickly */
     else if (syncsvc_is_initial_block_download(node, our_height) || syncsvc_header_band_hole_open())
         base = 10;   /* S8: band hole (island-anchored tip) also forces IBD */

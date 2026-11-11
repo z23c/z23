@@ -7,6 +7,7 @@
 #include "net/net.h"
 #include "platform/time_compat.h"
 #include "sync/sync_planner.h"
+#include <limits.h>
 
 /* Helper: build a minimal p2p_node for testing sync decisions. */
 static struct p2p_node make_test_node(int starting_height, int64_t last_gh_time)
@@ -244,6 +245,17 @@ static int header_sync_check_locator_timing_and_anchor_release(void)
         bool far_101 = syncsvc_should_request_headers(&far, 100, 101);
         bool ok = !at_100 && at_102 && !stale_103 && stale_105 && !far_101;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    /* A peer can advertise INT_MAX while our local height is unknown (-1).
+     * Its lead is far, not a wrapped negative near-lead interval. */
+    printf("header_sync: unknown height with INT_MAX peer uses far interval... ");
+    {
+        struct p2p_node n = make_test_node(INT_MAX, 100);
+        bool early = syncsvc_should_request_headers(&n, -1, 102);
+        bool due = syncsvc_should_request_headers(&n, -1, 111);
+        if (!early && due) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
     }
 
     /* ── 16c. Fresh peer after a drop is asked at once ────── */
