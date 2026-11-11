@@ -15832,18 +15832,41 @@ build/lintc-obj/gate_capability_closure_selftest.o: \
 build/lintc-obj/run_table.o: tools/lint/lintc/gate_commands.def
 
 # LINTC_OBJECT_RULES_BEGIN
+# Compare successful command text during secondary expansion: changed flags
+# rebuild even at equal timestamps, while unchanged -q/-n remain accurate.
+# Preserve quoted whitespace. Compiler and environment identity remain separate.
+# Records are invalidated before work and published after the artifact.
+# Record bytes have no added newline, so comparison preserves command text.
+# Versioned records invalidate older unversioned build metadata.
+.SECONDEXPANSION:
+LINTC_EQ = $(and $(strip $(1)),$(strip $(2)),$(findstring $(1),$(2)),$(findstring $(2),$(1)))
+LINTC_RECORD = lintc-command-v1:$(1)
+LINTC_LINT_SRC = tools/lint/lintc/$(patsubst build/lintc-obj/%.o,%.c,$(1))
+LINTC_NODE_SRC = $(patsubst build/lintc-obj/node/%.o,%.c,$(1))
+LINTC_COMPILE = $(or $(HOST_CC),cc) $(LINTC_CFLAGS) -MMD -MP -MF "$$d" -MQ "$@" -c -o "$$o" "$(1)"
+LINTC_LINT_COMMAND = $(call LINTC_COMPILE,$(call LINTC_LINT_SRC,$@)); $(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only "$(call LINTC_LINT_SRC,$@)",echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $(call LINTC_LINT_SRC,$@)")
+LINTC_NODE_COMMAND = $(call LINTC_COMPILE,$(call LINTC_NODE_SRC,$@))
+LINTC_COMMAND_STALE = $(if $(wildcard $(1).cmd),$(if $(call LINTC_EQ,$(call LINTC_RECORD,$(2)),$(file <$(1).cmd)),,lintc-missing-dep-force),lintc-missing-dep-force)
+LINTC_SHELL_QUOTE = $(subst ','"'"',$(1))
+ifneq ($(strip $(LINTC_OBJS)),)
+$(LINTC_OBJS): $$(call LINTC_COMMAND_STALE,$$@,$$(LINTC_LINT_COMMAND))
+endif
+ifneq ($(strip $(LINTC_NODE_OBJS)),)
+$(LINTC_NODE_OBJS): $$(call LINTC_COMMAND_STALE,$$@,$$(LINTC_NODE_COMMAND))
+endif
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def tools/lint/lintc/precheck_base.h
 	@mkdir -p "$(dir $@)"
-	@set -eu; dep="$(@:.o=.d)"; o=; d=; \
-	trap 'rm -f -- "$$o" "$$d"' EXIT; trap 'exit 1' HUP INT TERM; \
-	rm -f -- "$$dep"; \
-	o="$$(mktemp "$(dir $@).lintc-object.XXXXXX")"; \
+	@set -eu; dep="$(@:.o=.d)"; record="$@.cmd"; o=; d=; c=; s=; \
+	trap 'rm -f -- "$$o" "$$d" "$$c"; if [ -n "$$s" ]; then rmdir -- "$$s"; fi' EXIT; trap 'exit 1' HUP INT TERM; \
+	rm -f -- "$$dep" "$$record"; \
+	s="$$(mktemp -d "$(dir $@).lintc-object.XXXXXX")"; o="$$s/output.o"; \
 	d="$$(mktemp "$(dir $@).lintc-dep.XXXXXX")"; \
-	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -MMD -MP -MF "$$d" -MQ "$@" -c -o "$$o" "$<"; \
-	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only "$<",echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<"); \
+	c="$$(mktemp "$(dir $@).lintc-cmd.XXXXXX")"; \
+	$(LINTC_LINT_COMMAND); \
 	test -s "$$o" || { echo "lintc: empty object for $<" >&2; exit 1; }; \
 	test -s "$$d" || { echo "lintc: empty depfile for $<" >&2; exit 1; }; \
-	mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; trap - EXIT HUP INT TERM
+	printf '%s' '$(call LINTC_SHELL_QUOTE,$(call LINTC_RECORD,$(LINTC_LINT_COMMAND)))' > "$$c"; \
+	test -s "$$c"; mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; rmdir -- "$$s"; s=; mv -f -- "$$c" "$$record"; trap - EXIT HUP INT TERM
 
 $(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/main.o: \
 	tools/lint/lintc/premise.h tools/lint/lintc/selection_gates.def
@@ -15859,24 +15882,36 @@ build/lintc-obj/node/platform/modules/util/src/spawn_binary.o: $(SPAWN_BINARY_HE
 
 build/lintc-obj/node/%.o: %.c
 	@mkdir -p "$(dir $@)"
-	@set -eu; dep="$(@:.o=.d)"; o=; d=; \
-	trap 'rm -f -- "$$o" "$$d"' EXIT; trap 'exit 1' HUP INT TERM; \
-	rm -f -- "$$dep"; \
-	o="$$(mktemp "$(dir $@).lintc-object.XXXXXX")"; \
+	@set -eu; dep="$(@:.o=.d)"; record="$@.cmd"; o=; d=; c=; s=; \
+	trap 'rm -f -- "$$o" "$$d" "$$c"; if [ -n "$$s" ]; then rmdir -- "$$s"; fi' EXIT; trap 'exit 1' HUP INT TERM; \
+	rm -f -- "$$dep" "$$record"; \
+	s="$$(mktemp -d "$(dir $@).lintc-object.XXXXXX")"; o="$$s/output.o"; \
 	d="$$(mktemp "$(dir $@).lintc-dep.XXXXXX")"; \
-	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -MMD -MP -MF "$$d" -MQ "$@" -c -o "$$o" "$<"; \
+	c="$$(mktemp "$(dir $@).lintc-cmd.XXXXXX")"; \
+	$(LINTC_NODE_COMMAND); \
 	test -s "$$o" || { echo "lintc: empty object for $<" >&2; exit 1; }; \
 	test -s "$$d" || { echo "lintc: empty depfile for $<" >&2; exit 1; }; \
-	mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; trap - EXIT HUP INT TERM
+	printf '%s' '$(call LINTC_SHELL_QUOTE,$(call LINTC_RECORD,$(LINTC_NODE_COMMAND)))' > "$$c"; \
+	test -s "$$c"; mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; rmdir -- "$$s"; s=; mv -f -- "$$c" "$$record"; trap - EXIT HUP INT TERM
 # LINTC_OBJECT_RULES_END
 
 build/lintc-obj/gate_zcode_packages.o \
 build/lintc-obj/node/platform/modules/platform/src/toolchain.o: \
     platform/modules/platform/include/platform/toolchain.h
 
-$(LINTC_TOOL): $(LINTC_OBJS) $(LINTC_NODE_OBJS)
-	@mkdir -p $(dir $@)
-	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -o $@ $(LINTC_OBJS) $(LINTC_NODE_OBJS)
+# LINTC_LINK_RULES_BEGIN
+LINTC_LINK_COMMAND = $(or $(HOST_CC),cc) $(LINTC_CFLAGS) -o "$$o" $(LINTC_OBJS) $(LINTC_NODE_OBJS)
+$(LINTC_TOOL): $(LINTC_OBJS) $(LINTC_NODE_OBJS) $$(call LINTC_COMMAND_STALE,$$@,$$(LINTC_LINK_COMMAND))
+	@mkdir -p "$(dir $@)"
+	@set -eu; record="$@.cmd"; o=; c=; s=; \
+	trap 'rm -f -- "$$o" "$$c"; if [ -n "$$s" ]; then rmdir -- "$$s"; fi' EXIT; trap 'exit 1' HUP INT TERM; \
+	rm -f -- "$$record"; \
+	s="$$(mktemp -d "$(dir $@).lintc-link.XXXXXX")"; o="$$s/output"; \
+	c="$$(mktemp "$(dir $@).lintc-cmd.XXXXXX")"; \
+	$(LINTC_LINK_COMMAND); test -s "$$o" || { echo "lintc: empty linked binary" >&2; exit 1; }; \
+	printf '%s' '$(call LINTC_SHELL_QUOTE,$(call LINTC_RECORD,$(LINTC_LINK_COMMAND)))' > "$$c"; \
+	test -s "$$c"; mv -f -- "$$o" "$@"; rmdir -- "$$s"; s=; mv -f -- "$$c" "$$record"; trap - EXIT HUP INT TERM
+# LINTC_LINK_RULES_END
 
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)

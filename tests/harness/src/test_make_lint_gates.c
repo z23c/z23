@@ -2094,6 +2094,285 @@ static int t_lint_inventory_dispatch(void)
     return bad;
 }
 
+static const char lint_command_part_0[] =
+    "set -eu\n"
+    "umask 022\n"
+    "cd \"$2\"\n"
+    "fail() { echo \"command-fixture: $1\" >&2; exit 1; }\n"
+    "mkdir -p tools/lint/lintc platform build/bin\n"
+    "for f in lintc.h gates.def precheck_base.h; do : > \"tools/lint/lintc/$f\"; done\n"
+    "printf '#define EXTRA 0\\n' > tools/lint/lintc/private.h\n"
+    "printf '#include \"private.h\"\\nint value(void) { return VALUE + EXTRA; }\\n' > tools/lint/lintc/one.c\n"
+    "printf '#include <stdio.h>\\nint value(void); int node_value(void); int main(void) { return printf(\"%%d %%d\\\\n\", value(), node_value()) < 0; }\\n' > tools/lint/lintc/two.c\n"
+    "printf '#ifndef NODE_VALUE\n"
+    "#define NODE_VALUE 17\n"
+    "#endif\n"
+    "int node_value(void) { return NODE_VALUE; }\\n' > platform/node.c\n"
+    "cat > cc-one <<'WRAPPER'\n"
+    "#!/bin/sh\n"
+    "printf 'one %s\\n' \"$*\" >> compiler.trace\n"
+    "[ ! -f fail-cc ] || exit 1\n"
+    "link=1\n"
+    "prev=\n"
+    "for arg do\n"
+;
+static const char lint_command_part_1[] =
+    "    [ \"$arg\" != -c ] || link=0\n"
+    "    [ \"$prev\" != -o ] || output=$arg\n"
+    "    prev=$arg\n"
+    "done\n"
+    "if [ \"$link\" = 1 ] && [ -f fail-link ]; then exit 1; fi\n"
+    "if [ \"$link\" = 1 ] && [ -f empty-link ]; then : > \"$output\"; exit 0; fi\n"
+    "exec cc \"$@\"\n"
+    "WRAPPER\n"
+    "cat > cc-two <<'WRAPPER'\n"
+    "#!/bin/sh\n"
+    "printf 'two %s\\n' \"$*\" >> compiler.trace\n"
+    "exec cc \"$@\"\n"
+    "WRAPPER\n"
+    "cat > clang-one <<'WRAPPER'\n"
+    "#!/bin/sh\n"
+    "printf 'clang-one %s\\n' \"$*\" >> clang.trace\n"
+    "exit 0\n"
+    "WRAPPER\n"
+    "cat > clang-two <<'WRAPPER'\n"
+    "#!/bin/sh\n"
+;
+static const char lint_command_part_2[] =
+    "printf 'clang-two %s\\n' \"$*\" >> clang.trace\n"
+    "[ ! -f fail-clang ]\n"
+    "WRAPPER\n"
+    "chmod +x cc-one cc-two clang-one clang-two\n"
+    "cat > Fixture.mk <<'MAKE'\n"
+    "HOST_CC = ./cc-one\n"
+    "LINTC_CFLAGS = -std=c2x $(GLOBAL)\n"
+    "LINTC_CLANG =\n"
+    "LINTC_TOOL = build/bin/lint-fixture\n"
+    "LINTC_OBJS = build/lintc-obj/one.o build/lintc-obj/two.o\n"
+    "LINTC_NODE_OBJS = build/lintc-obj/node/platform/node.o\n"
+    "AFLAG ?= -DVALUE=1\n"
+    "build/lintc-obj/one.o: LINTC_CFLAGS += $(AFLAG)\n"
+    "build/lintc-obj/node/platform/node.o: LINTC_CFLAGS += $(NFLAG)\n"
+    "MAKE\n"
+    "awk '/^# LINTC_DEPENDENCIES_BEGIN/{on=1} on{print} /^# LINTC_DEPENDENCIES_END/{on=0} /^# LINTC_OBJECT_RULES_BEGIN/{on=1} /^# LINTC_OBJECT_RULES_END/{print; on=0} /^# LINTC_LINK_RULES_BEGIN/{link=1; on=1} /^# LINTC_LINK_RULES_END/{print; on=0} END{if(!link) exit 1}' \"$1/Makefile\" >> Fixture.mk || {\n"
+    "  awk '/^\\$\\(LINTC_TOOL\\):/{print; getline; print; getline; print}' \"$1/Makefile\" >> Fixture.mk\n"
+    "}\n"
+    "touch -t 200001010000 tools/lint/lintc/* platform/node.c\n"
+    "make -j2 -s -f Fixture.mk build/bin/lint-fixture > make.log 2>&1 || fail initial\n"
+;
+static const char lint_command_part_3[] =
+    "[ \"$(build/bin/lint-fixture)\" = '1 17' ] || fail initial-output\n"
+    "cc -std=c2x -DVALUE=1 -c tools/lint/lintc/one.c -o direct-022.o\n"
+    "cc build/lintc-obj/one.o build/lintc-obj/two.o build/lintc-obj/node/platform/node.o -o direct-022\n"
+    "[ \"$(ls -ld direct-022.o | awk '{print $1}')\" = \"$(ls -ld build/lintc-obj/one.o | awk '{print $1}')\" ] || fail object-mode-022\n"
+    "[ \"$(ls -ld direct-022 | awk '{print $1}')\" = \"$(ls -ld build/bin/lint-fixture | awk '{print $1}')\" ] || fail binary-mode-022\n"
+    "touch -t 200101010000 build/lintc-obj/one.o build/lintc-obj/two.o build/lintc-obj/node/platform/node.o build/lintc-obj/one.d build/lintc-obj/two.d build/lintc-obj/node/platform/node.d\n"
+    "for f in build/lintc-obj/one.o.cmd build/lintc-obj/two.o.cmd build/lintc-obj/node/platform/node.o.cmd; do [ ! -e \"$f\" ] || touch -t 200101010000 \"$f\"; done\n"
+    "touch -t 200201010000 build/bin/lint-fixture\n"
+    "[ ! -e build/bin/lint-fixture.cmd ] || touch -t 200201010000 build/bin/lint-fixture.cmd\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk build/bin/lint-fixture >>make.log 2>&1 || fail warm\n"
+    "[ ! -s compiler.trace ] || fail warm-compiler\n"
+    "make -q -f Fixture.mk build/bin/lint-fixture || fail warm-question\n"
+    "make -n -f Fixture.mk build/bin/lint-fixture >dryrun.log 2>&1 || fail warm-dryrun\n"
+    "[ \"$(cat dryrun.log)\" = \"make: 'build/bin/lint-fixture' is up to date.\" ] || fail warm-dryrun-commands\n"
+    "[ ! -s compiler.trace ] || fail dryrun-executed\n"
+    "# Old unversioned newline-terminated records require one complete migration.\n"
+    "for record in build/lintc-obj/one.o.cmd build/lintc-obj/two.o.cmd build/lintc-obj/node/platform/node.o.cmd build/bin/lint-fixture.cmd; do\n"
+    "  grep -q '^lintc-command-v1:' \"$record\" || fail record-prefix\n"
+    "  [ \"$(wc -l < \"$record\")\" -eq 0 ] || fail record-newline\n"
+;
+static const char lint_command_part_4[] =
+    "  printf '%s\\n' \"$(sed 's/^lintc-command-v1://' \"$record\")\" > \"$record.old\"\n"
+    "  [ \"$(wc -l < \"$record.old\")\" -eq 1 ] || fail legacy-newline\n"
+    "  mv \"$record.old\" \"$record\"\n"
+    "done\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk build/bin/lint-fixture >>make.log 2>&1 || fail legacy-migration\n"
+    "[ \"$(grep -c ' -c ' compiler.trace)\" = 3 ] || fail legacy-compile-count\n"
+    "[ \"$(wc -l < compiler.trace)\" = 4 ] || fail legacy-link-count\n"
+    "[ \"$(build/bin/lint-fixture)\" = '1 17' ] || fail legacy-output\n"
+    "for record in build/lintc-obj/one.o.cmd build/lintc-obj/two.o.cmd build/lintc-obj/node/platform/node.o.cmd build/bin/lint-fixture.cmd; do\n"
+    "  grep -q '^lintc-command-v1:' \"$record\" || fail migrated-prefix\n"
+    "  [ \"$(wc -l < \"$record\")\" -eq 0 ] || fail migrated-newline\n"
+    "done\n"
+    ": > compiler.trace\n"
+    "make -q -f Fixture.mk build/bin/lint-fixture || fail migrated-q\n"
+    "make -n -f Fixture.mk build/bin/lint-fixture >migrated-dryrun.log 2>&1 || fail migrated-n\n"
+    "[ \"$(cat migrated-dryrun.log)\" = \"make: 'build/bin/lint-fixture' is up to date.\" ] || fail migrated-n-work\n"
+    "[ ! -s compiler.trace ] || fail migrated-work\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk AFLAG=-DVALUE=2 build/bin/lint-fixture >>make.log 2>&1 || fail flag-change\n"
+    "[ \"$(build/bin/lint-fixture)\" = '2 17' ] || fail flag-output\n"
+;
+static const char lint_command_part_5[] =
+    "grep -q 'tools/lint/lintc/one.c' compiler.trace || fail flag-not-compiled\n"
+    "! grep -q 'tools/lint/lintc/two.c' compiler.trace || fail flag-extra-tu\n"
+    "! grep -q 'platform/node.c' compiler.trace || fail flag-extra-node\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk build/bin/lint-fixture >>make.log 2>&1 || fail flag-back\n"
+    "[ \"$(build/bin/lint-fixture)\" = '1 17' ] || fail flag-back-output\n"
+    "! grep -q 'tools/lint/lintc/two.c' compiler.trace || fail flag-back-extra\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk GLOBAL=-DGLOBAL=1 build/bin/lint-fixture >>make.log 2>&1 || fail global\n"
+    "[ \"$(grep -c ' -c ' compiler.trace)\" = 3 ] || fail global-count\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk GLOBAL=-DGLOBAL=1 HOST_CC=./cc-two build/bin/lint-fixture >>make.log 2>&1 || fail host-cc\n"
+    "[ \"$(grep -c '^two .* -c ' compiler.trace)\" = 3 ] || fail host-cc-count\n"
+    "rm build/lintc-obj/one.o.cmd\n"
+    ": > build/lintc-obj/two.o.cmd\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk GLOBAL=-DGLOBAL=1 HOST_CC=./cc-two build/bin/lint-fixture >>make.log 2>&1 || fail missing-command\n"
+    "[ \"$(grep -c ' -c ' compiler.trace)\" = 2 ] || fail missing-command-count\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk GLOBAL=-DGLOBAL=1 HOST_CC=./cc-two 'LINTC_OBJS=build/lintc-obj/two.o build/lintc-obj/one.o' build/bin/lint-fixture >>make.log 2>&1 || fail link-order\n"
+;
+static const char lint_command_part_6[] =
+    "! grep -q ' -c ' compiler.trace || fail link-order-compile\n"
+    "[ \"$(wc -l < compiler.trace)\" = 1 ] || fail link-order-count\n"
+    "make -j2 -s -f Fixture.mk build/bin/lint-fixture >>make.log 2>&1 || fail restore\n"
+    "cp build/lintc-obj/one.o saved.o\n"
+    "cp build/bin/lint-fixture saved.bin\n"
+    ": > fail-cc\n"
+    "if make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 build/bin/lint-fixture >>make.log 2>&1; then fail compiler-accepted; fi\n"
+    "cmp -s saved.o build/lintc-obj/one.o && cmp -s saved.bin build/bin/lint-fixture || fail compiler-publication\n"
+    "[ ! -e build/lintc-obj/one.o.cmd ] || fail compiler-record\n"
+    "rm fail-cc\n"
+    "make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 build/bin/lint-fixture >>make.log 2>&1 || fail compiler-retry\n"
+    "[ \"$(build/bin/lint-fixture)\" = '4 17' ] || fail compiler-retry-output\n"
+    ": > compiler.trace\n"
+    ": > clang.trace\n"
+    "make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 LINTC_CLANG=./clang-one build/bin/lint-fixture >>make.log 2>&1 || fail clang-on\n"
+    "[ \"$(grep -c ' -c ' compiler.trace)\" = 2 ] && [ \"$(wc -l < clang.trace)\" = 2 ] || fail clang-scope\n"
+    "cp build/bin/lint-fixture saved.bin\n"
+    ": > fail-clang\n"
+    "if make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 LINTC_CLANG=./clang-two build/bin/lint-fixture >>make.log 2>&1; then fail clang-accepted; fi\n"
+    "cmp -s saved.bin build/bin/lint-fixture || fail clang-publication\n"
+;
+static const char lint_command_part_7[] =
+    "rm fail-clang\n"
+    "make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 LINTC_CLANG=./clang-two build/bin/lint-fixture >>make.log 2>&1 || fail clang-retry\n"
+    "cp build/bin/lint-fixture saved.bin\n"
+    ": > fail-link\n"
+    "if make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 LINTC_CLANG=./clang-two 'LINTC_OBJS=build/lintc-obj/two.o build/lintc-obj/one.o' build/bin/lint-fixture >>make.log 2>&1; then fail link-accepted; fi\n"
+    "cmp -s saved.bin build/bin/lint-fixture && [ ! -e build/bin/lint-fixture.cmd ] || fail link-publication\n"
+    "rm fail-link\n"
+    ": > empty-link\n"
+    "if make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 LINTC_CLANG=./clang-two build/bin/lint-fixture >>make.log 2>&1; then fail empty-link-accepted; fi\n"
+    "cmp -s saved.bin build/bin/lint-fixture && [ ! -e build/bin/lint-fixture.cmd ] || fail empty-link-publication\n"
+    "rm empty-link\n"
+    "make -j2 -s -f Fixture.mk AFLAG=-DVALUE=4 LINTC_CLANG=./clang-two build/bin/lint-fixture >>make.log 2>&1 || fail link-retry\n"
+    "quote=$(printf '\\047')\n"
+    "arg=\"-DVALUE=5 -DLABEL=${quote}quote # \\$\\$HOME ; touch injected${quote}\"\n"
+    "make -j2 -s -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >>make.log 2>&1 || fail quoted\n"
+    "[ \"$(build/bin/lint-fixture)\" = '5 17' ] && [ ! -e injected ] || fail quoted-output\n"
+    "grep -Fq 'quote # $HOME ; touch injected' build/lintc-obj/one.o.cmd || fail quoted-record\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >>make.log 2>&1 || fail quoted-warm\n"
+    "[ ! -s compiler.trace ] && [ ! -e injected ] || fail quoted-warm-work\n"
+;
+static const char lint_command_part_8[] =
+    "# Direct and parent requests must agree on the effective per-object command.\n"
+    ": > compiler.trace\n"
+    "make -s -f Fixture.mk AFLAG=-DVALUE=6 build/lintc-obj/one.o >>make.log 2>&1 || fail direct-lint\n"
+    "[ \"$(grep -c 'tools/lint/lintc/one.c' compiler.trace)\" = 1 ] || fail direct-lint-trace\n"
+    ": > compiler.trace\n"
+    "make -s -f Fixture.mk AFLAG=-DVALUE=6 build/bin/lint-fixture >>make.log 2>&1 || fail direct-lint-parent\n"
+    "[ \"$(build/bin/lint-fixture)\" = '6 17' ] || fail direct-lint-output\n"
+    "! grep -q ' -c ' compiler.trace || fail direct-lint-parent-recompile\n"
+    "make -q -f Fixture.mk AFLAG=-DVALUE=6 build/lintc-obj/one.o || fail direct-lint-q\n"
+    "make -n -f Fixture.mk AFLAG=-DVALUE=6 build/lintc-obj/one.o >direct-dryrun.log 2>&1 || fail direct-lint-n\n"
+    "[ \"$(cat direct-dryrun.log)\" = \"make: 'build/lintc-obj/one.o' is up to date.\" ] || fail direct-lint-n-work\n"
+    ": > compiler.trace\n"
+    "make -s -f Fixture.mk AFLAG=-DVALUE=6 NFLAG=-DNODE_VALUE=19 build/lintc-obj/node/platform/node.o >>make.log 2>&1 || fail direct-node\n"
+    "[ \"$(grep -c 'platform/node.c' compiler.trace)\" = 1 ] || fail direct-node-trace\n"
+    ": > compiler.trace\n"
+    "make -s -f Fixture.mk AFLAG=-DVALUE=6 NFLAG=-DNODE_VALUE=19 build/bin/lint-fixture >>make.log 2>&1 || fail direct-node-parent\n"
+    "[ \"$(build/bin/lint-fixture)\" = '6 19' ] || fail direct-node-output\n"
+    "! grep -q ' -c ' compiler.trace || fail direct-node-parent-recompile\n"
+    "make -q -f Fixture.mk AFLAG=-DVALUE=6 NFLAG=-DNODE_VALUE=19 build/lintc-obj/node/platform/node.o || fail direct-node-q\n"
+    "make -n -f Fixture.mk AFLAG=-DVALUE=6 NFLAG=-DNODE_VALUE=19 build/lintc-obj/node/platform/node.o >direct-dryrun.log 2>&1 || fail direct-node-n\n"
+;
+static const char lint_command_part_9[] =
+    "[ \"$(cat direct-dryrun.log)\" = \"make: 'build/lintc-obj/node/platform/node.o' is up to date.\" ] || fail direct-node-n-work\n"
+    ": > compiler.trace\n"
+    "make -s -f Fixture.mk AFLAG=-DVALUE=8 NFLAG=-DNODE_VALUE=21 build/bin/lint-fixture >>make.log 2>&1 || fail parent-first\n"
+    "[ \"$(build/bin/lint-fixture)\" = '8 21' ] || fail parent-first-output\n"
+    "[ \"$(grep -c ' -c ' compiler.trace)\" = 2 ] || fail parent-first-count\n"
+    ": > compiler.trace\n"
+    "for obj in build/lintc-obj/one.o build/lintc-obj/node/platform/node.o; do\n"
+    "  make -q -f Fixture.mk AFLAG=-DVALUE=8 NFLAG=-DNODE_VALUE=21 \"$obj\" || fail parent-direct-q\n"
+    "  make -n -f Fixture.mk AFLAG=-DVALUE=8 NFLAG=-DNODE_VALUE=21 \"$obj\" >direct-dryrun.log 2>&1 || fail parent-direct-n\n"
+    "  [ \"$(cat direct-dryrun.log)\" = \"make: '$obj' is up to date.\" ] || fail parent-direct-n-work\n"
+    "done\n"
+    "[ ! -s compiler.trace ] || fail parent-direct-work\n"
+    "# A record is untrusted data, never an expression to evaluate.\n"
+    "printf '%s' '$(shell touch injected-read)' > build/lintc-obj/one.o.cmd\n"
+    ": > compiler.trace\n"
+    "make -s -f Fixture.mk AFLAG=-DVALUE=8 NFLAG=-DNODE_VALUE=21 build/bin/lint-fixture >>make.log 2>&1 || fail corrupt-record\n"
+    "[ ! -e injected-read ] || fail corrupt-record-executed\n"
+    "[ \"$(grep -c 'tools/lint/lintc/one.c' compiler.trace)\" = 1 ] || fail corrupt-record-miss\n"
+    "! grep -Fq '$(shell touch injected-read)' build/lintc-obj/one.o.cmd || fail corrupt-record-retained\n"
+    "pad=$(awk 'BEGIN { for (i = 0; i < 3000; i++) printf \"a\" }')\n"
+;
+static const char lint_command_part_10[] =
+    "arg=\"-DVALUE=5 -DPADDING=$pad\"\n"
+    "make -j2 -s -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >>make.log 2>&1 || fail long-command\n"
+    "[ \"$(wc -c < build/lintc-obj/one.o.cmd)\" -gt 2048 ] || fail long-record\n"
+    "[ \"$(build/bin/lint-fixture)\" = '5 17' ] || fail long-output\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >>make.log 2>&1 || fail long-warm\n"
+    "[ ! -s compiler.trace ] || fail long-warm-compiler\n"
+    "make -q -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture || fail long-warm-question\n"
+    "make -n -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >long-dryrun.log 2>&1 || fail long-warm-dryrun\n"
+    "[ \"$(cat long-dryrun.log)\" = \"make: 'build/bin/lint-fixture' is up to date.\" ] || fail long-dryrun-commands\n"
+    "touch -t 200301010000 build/lintc-obj/one.o\n"
+    "printf '#define EXTRA 2\\n' > tools/lint/lintc/private.h\n"
+    "touch -t 200401010000 tools/lint/lintc/private.h\n"
+    ": > compiler.trace\n"
+    "make -j2 -s -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >>make.log 2>&1 || fail header-change\n"
+    "[ \"$(build/bin/lint-fixture)\" = '7 17' ] || fail header-output\n"
+    "grep -q 'tools/lint/lintc/one.c' compiler.trace && ! grep -q 'tools/lint/lintc/two.c' compiler.trace && ! grep -q 'platform/node.c' compiler.trace || fail header-scope\n"
+    "umask 077\n"
+    "rm -f build/lintc-obj/one.o build/lintc-obj/two.o build/lintc-obj/node/platform/node.o\n"
+    "rm -f build/lintc-obj/one.d build/lintc-obj/two.d build/lintc-obj/node/platform/node.d\n"
+;
+static const char lint_command_part_11[] =
+    "rm -f build/lintc-obj/one.o.cmd build/lintc-obj/two.o.cmd build/lintc-obj/node/platform/node.o.cmd\n"
+    "rm -f build/bin/lint-fixture build/bin/lint-fixture.cmd\n"
+    "make -j2 -s -f Fixture.mk \"AFLAG=$arg\" build/bin/lint-fixture >>make.log 2>&1 || fail mode-077-build\n"
+    "cc -std=c2x -DVALUE=5 -c tools/lint/lintc/one.c -o direct-077.o\n"
+    "cc build/lintc-obj/one.o build/lintc-obj/two.o build/lintc-obj/node/platform/node.o -o direct-077\n"
+    "[ \"$(ls -ld direct-077.o | awk '{print $1}')\" = \"$(ls -ld build/lintc-obj/one.o | awk '{print $1}')\" ] || fail object-mode-077\n"
+    "[ \"$(ls -ld direct-077 | awk '{print $1}')\" = \"$(ls -ld build/bin/lint-fixture | awk '{print $1}')\" ] || fail binary-mode-077\n"
+    "[ \"$(build/bin/lint-fixture)\" = '7 17' ] || fail mode-077-output\n"
+    "printf 'command-fixture PASS\\n'\n"
+;
+static int t_lint_command_rebuild(void)
+{
+    char script[sizeof lint_command_part_0 + sizeof lint_command_part_1 + sizeof lint_command_part_2 + sizeof lint_command_part_3 + sizeof lint_command_part_4 + sizeof lint_command_part_5 + sizeof lint_command_part_6 + sizeof lint_command_part_7 + sizeof lint_command_part_8 + sizeof lint_command_part_9 + sizeof lint_command_part_10 + sizeof lint_command_part_11];
+    int n = snprintf(script, sizeof script, "%s%s%s%s%s%s%s%s%s%s%s%s",
+                     lint_command_part_0,
+                     lint_command_part_1,
+                     lint_command_part_2,
+                     lint_command_part_3,
+                     lint_command_part_4,
+                     lint_command_part_5,
+                     lint_command_part_6,
+                     lint_command_part_7,
+                     lint_command_part_8,
+                     lint_command_part_9,
+                     lint_command_part_10,
+                     lint_command_part_11);
+    if (n < 0 || (size_t)n >= sizeof script) return 1;
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "lint_command", "rebuild");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "lint command fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates(void)
 {
     char real_root[PATH_MAX];
@@ -2103,6 +2382,7 @@ int test_make_lint_gates(void)
     printf("\n=== make_lint_gates tests ===\n");
 
     if (t_lint_table_rebuild() != 0 || t_lint_private_header_rebuild() != 0) return 1;
+    if (t_lint_command_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;
     if (t_lint_explicit_gates_run_once() != 0) return 1;
