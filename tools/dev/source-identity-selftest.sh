@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+# Every Git command and background fixture must address its disposable repo.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity.sh"
 REAL_GIT="$(command -v git)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-source-identity-selftest.XXXXXX")"

@@ -1849,6 +1849,7 @@ AGENT_IMPACT_RULE("docs/quality/CODE_FEARLESSLY.md|AGENTS.md|CLAUDE.md|*/AGENTS.
  * nothing looking. Mapped so an edit here can never reach the push gate
  * having run zero test groups. */
 AGENT_IMPACT_RULE("tools/scripts/source_identity_lib.sh|tools/deploy_verify.sh|platform/modules/util/src/clientversion.c|platform/modules/util/include/util/clientversion.h|cognition/controllers/src/agent_runtime_controller.c|tests/harness/src/test_source_identity_authority.c", "source_identity_authority make_lint_gates")
+AGENT_IMPACT_RULE("tools/dev/source-identity-selftest.sh|tools/dev/source-identity-batch-selftest.sh", "source_identity_authority make_lint_gates")
 /* LANE anti-flake / load-independent verdicts. A test graded on wall-clock
  * duration reports on the MACHINE, not the code — measured on this tree, the
  * same commit and binary FAILED at 48s under a 32-worker run and PASSED at

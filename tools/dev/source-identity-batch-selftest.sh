@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+# The standalone fixture must not inherit another repository's Git routing.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 SOURCE_IDENTITY="$SELF_DIR/source-identity.sh"

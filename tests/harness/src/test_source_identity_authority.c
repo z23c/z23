@@ -44,8 +44,10 @@
 #include "json/json.h"
 #include "util/clientversion.h"
 #include "vcs/build_action.h"
+#include "util/spawn.h"
 
 #include <limits.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +78,173 @@ static bool sia_write_file(const char *path, const char *content)
     if (fclose(f) != 0) ok = false;
     return ok;
 }
+
+#if !defined(_WIN32)
+static bool sia_copy_bytes(const char *path, const char *dest)
+{
+    FILE *in = fopen(path, "rb"), *out = in ? fopen(dest, "wb") : NULL;
+    bool ok = in && out; char bytes[8192]; size_t got;
+    while (ok && (got = fread(bytes, 1, sizeof bytes, in)) != 0)
+        ok = fwrite(bytes, 1, got, out) == got;
+    if (in && ferror(in)) ok = false;
+    if (in && fclose(in)) ok = false;
+    if (out && fclose(out)) ok = false;
+    return ok && chmod(dest, 0700) == 0;
+}
+
+static bool sia_copy_fixture(const char *root, const char *path)
+{
+    char dest[PATH_MAX];
+    int n = snprintf(dest, sizeof dest, "%s/%s", root, path);
+    if (n <= 0 || (size_t)n >= sizeof dest) return false;
+    for (char *p = dest + strlen(root) + 1; *p; ++p) {
+        if (*p != '/') continue;
+        *p = 0;
+        if (mkdir(dest, 0700) && errno != EEXIST) return false;
+        *p = '/';
+    }
+    return sia_copy_bytes(path, dest);
+}
+
+static bool sia_clean_git(const char *dir, const char *const args[], char *out, size_t cap)
+{
+    const char *argv[32] = {"env", "-u", "GIT_DIR", "-u", "GIT_COMMON_DIR", "-u", "GIT_WORK_TREE",
+        "-u", "GIT_INDEX_FILE", "-u", "GIT_OBJECT_DIRECTORY", "-u", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "git", "-C", dir};
+    size_t n = 16;
+    for (size_t i = 0; args[i]; ++i) { if (n + 1 >= 32) return false; argv[n++] = args[i]; }
+    argv[n] = NULL;
+    return zcl_spawn_capture(argv, out, cap, 60000) == 0;
+}
+
+static bool sia_repo_init(const char *dir)
+{
+    char out[4096], file[PATH_MAX];
+    const char *init[] = {"init", "-q", NULL};
+    const char *add[] = {"add", "-A", NULL};
+    const char *commit[] = {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-qm", "fixture", NULL};
+    return sia_clean_git(dir, init, out, sizeof out) &&
+        snprintf(file, sizeof file, "%s/seed.c", dir) < (int)sizeof file &&
+        sia_write_file(file, "int seed;\n") && sia_clean_git(dir, add, out, sizeof out) &&
+        sia_clean_git(dir, commit, out, sizeof out);
+}
+
+static bool sia_exact_file(const char *path, unsigned char *data, size_t cap, size_t *size)
+{
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    *size = fread(data, 1, cap, f);
+    bool ok = !ferror(f) && feof(f);
+    return fclose(f) == 0 && ok;
+}
+
+static bool sia_fixture_paths(const char *root, const char *scratch, const char *script,
+                              char *tmp, char *bin, char *executable)
+{
+    return snprintf(tmp, PATH_MAX + 16, "TMPDIR=%s", scratch) < PATH_MAX + 16 &&
+        snprintf(bin, PATH_MAX + 24, "ZCL_BIN_DIR=%s/build/bin", root) < PATH_MAX + 24 &&
+        snprintf(executable, PATH_MAX, "%s/tools/dev/%s", root, script) < PATH_MAX;
+}
+
+static bool sia_poison_run(const char *root, const char *foreign, const char *scratch, const char *script)
+{
+    char dir[PATH_MAX], index[PATH_MAX], objects[PATH_MAX], a[PATH_MAX + 32], b[PATH_MAX + 32];
+    char c[PATH_MAX + 32], d[PATH_MAX + 32], e[PATH_MAX + 32], f[PATH_MAX + 40];
+    char tmp[PATH_MAX + 16], bin[PATH_MAX + 24], executable[PATH_MAX], out[16384];
+    if (snprintf(dir, sizeof dir, "%s/.git", foreign) >= (int)sizeof dir ||
+        snprintf(index, sizeof index, "%s/index", dir) >= (int)sizeof index ||
+        snprintf(objects, sizeof objects, "%s/objects", dir) >= (int)sizeof objects ||
+        snprintf(a, sizeof a, "GIT_DIR=%s", dir) >= (int)sizeof a ||
+        snprintf(b, sizeof b, "GIT_COMMON_DIR=%s", dir) >= (int)sizeof b ||
+        snprintf(c, sizeof c, "GIT_WORK_TREE=%s", foreign) >= (int)sizeof c ||
+        snprintf(d, sizeof d, "GIT_INDEX_FILE=%s", index) >= (int)sizeof d ||
+        snprintf(e, sizeof e, "GIT_OBJECT_DIRECTORY=%s", objects) >= (int)sizeof e ||
+        snprintf(f, sizeof f, "GIT_ALTERNATE_OBJECT_DIRECTORIES=%s", objects) >= (int)sizeof f) return false;
+    if (!sia_fixture_paths(root, scratch, script, tmp, bin, executable)) return false;
+    const char *argv[] = {"env", "-u", "ZCL_SOVEREIGN_SOURCE_ROOT", "-u", "ZCL_SOURCE_IDENTITY_BATCH_DISABLE",
+        "-u", "ZCL_SOURCE_IDENTITY_SESSION", a, b, c, d, e, f, tmp, bin, executable, NULL};
+    int rc = zcl_spawn_capture(argv, out, sizeof out, 180000);
+    if (rc) fprintf(stderr, "source selftest %s rc=%d: %s\n", script, rc, out);
+    return rc == 0 && strstr(out, "source-identity-batch-selftest: PASS record=") != NULL &&
+        (!strcmp(script, "source-identity-batch-selftest.sh") || strstr(out, "source-identity-selftest: PASS identity=") != NULL);
+}
+
+static bool sia_fixture_files(const char *root)
+{
+    static const char *const paths[] = {
+        "tools/dev/source-identity-selftest.sh", "tools/dev/source-identity-batch-selftest.sh",
+        "tools/dev/source-identity.sh", "tools/dev/source-identity-batch-bootstrap.sh",
+        "tools/dev/source_identity_batch.c", "contexts/commons/packages/zsha256/src/zsha256.c",
+        "contexts/commons/packages/zsha256/include/zsha256/zsha256.h",
+        "platform/modules/base/src/safe_alloc.c", "platform/modules/base/include/base/safe_alloc.h",
+        "platform/modules/base/include/base/hex.h"
+    };
+    for (size_t i = 0; i < sizeof paths / sizeof paths[0]; ++i)
+        if (!sia_copy_fixture(root, paths[i])) return false;
+    return true;
+}
+
+static bool sia_git_snapshot(const char *repo, char *out, size_t cap)
+{
+    char status[8192], refs[8192], trees[8192];
+    const char *sa[] = {"--no-optional-locks", "status", "--porcelain=v1", "--branch", NULL};
+    const char *ra[] = {"show-ref", NULL};
+    const char *wa[] = {"worktree", "list", "--porcelain", NULL};
+    if (!sia_clean_git(repo, sa, status, sizeof status) || !sia_clean_git(repo, ra, refs, sizeof refs) ||
+        !sia_clean_git(repo, wa, trees, sizeof trees)) return false;
+    int n = snprintf(out, cap, "%s\n%s\n%s", status, refs, trees);
+    return n >= 0 && (size_t)n < cap;
+}
+
+static bool sia_run_isolation(const char *root, const char *foreign, const char *scratch, const char *script)
+{
+    char config[PATH_MAX], index[PATH_MAX], before[24576], after[24576];
+    unsigned char cfg[8192], idx[8192], now[8192]; size_t cn, in, nn;
+    if (snprintf(config, sizeof config, "%s/.git/config", foreign) >= (int)sizeof config ||
+        snprintf(index, sizeof index, "%s/.git/index", foreign) >= (int)sizeof index ||
+        !sia_exact_file(config, cfg, sizeof cfg, &cn) || !sia_exact_file(index, idx, sizeof idx, &in) ||
+        !sia_git_snapshot(foreign, before, sizeof before)) return false;
+    bool ran = sia_poison_run(root, foreign, scratch, script);
+    bool intact = sia_exact_file(config, now, sizeof now, &nn) && nn == cn && !memcmp(cfg, now, cn) &&
+        sia_exact_file(index, now, sizeof now, &nn) && nn == in && !memcmp(idx, now, in) &&
+        sia_git_snapshot(foreign, after, sizeof after) && !strcmp(before, after);
+    return ran && intact;
+}
+
+static bool sia_worktree_intact(const char *wt, const char *seed)
+{
+    unsigned char data[64]; size_t n; char status[4096];
+    const char *args[] = {"--no-optional-locks", "status", "--porcelain", NULL};
+    return sia_exact_file(seed, data, sizeof data, &n) && n == sizeof("int seed;\n") - 1 &&
+        !memcmp(data, "int seed;\n", n) && sia_clean_git(wt, args, status, sizeof status) && !status[0];
+}
+
+static int sia_selftest_git_isolation(void)
+{
+    int failures = 0; char work[PATH_MAX] = {0}, root[PATH_MAX], foreign[PATH_MAX], scratch[PATH_MAX];
+    char wt[PATH_MAX], helper[PATH_MAX], seed[PATH_MAX], out[4096];
+    TEST("source identity selftests ignore inherited Git routing") {
+        ASSERT(test_mkdtemp(work, sizeof work, "sia_git_isolation"));
+        ASSERT(snprintf(root, sizeof root, "%s/root", work) < (int)sizeof root);
+        ASSERT(snprintf(foreign, sizeof foreign, "%s/foreign", work) < (int)sizeof foreign);
+        ASSERT(snprintf(scratch, sizeof scratch, "%s/scratch", work) < (int)sizeof scratch);
+        ASSERT(!mkdir(root, 0700) && !mkdir(foreign, 0700) && !mkdir(scratch, 0700));
+        ASSERT(sia_fixture_files(root) && sia_repo_init(root) && sia_repo_init(foreign));
+        ASSERT(snprintf(wt, sizeof wt, "%s/foreign-wt", work) < (int)sizeof wt);
+        const char *add[] = {"worktree", "add", "--detach", "-q", wt, "HEAD", NULL};
+        ASSERT(sia_clean_git(foreign, add, out, sizeof out));
+        ASSERT(snprintf(seed, sizeof seed, "%s/seed.c", wt) < (int)sizeof seed);
+        ASSERT(snprintf(helper, sizeof helper, "%s/build/bin/source-identity-batch", root) < (int)sizeof helper);
+        ASSERT(sia_run_isolation(root, foreign, scratch, "source-identity-selftest.sh"));
+        ASSERT(access(helper, X_OK) == 0 && sia_worktree_intact(wt, seed));
+        ASSERT(sia_run_isolation(root, foreign, scratch, "source-identity-batch-selftest.sh"));
+        ASSERT(sia_worktree_intact(wt, seed));
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+#endif
 
 /* Exercise the existing canonical action encoder with a real captured source
  * identity. Other roots are fixed fixture inputs; this case proves that Git
@@ -888,7 +1057,8 @@ static int sia_tor_receipt_is_not_source(void)
         ASSERT(getcwd(origin, sizeof(origin)) != NULL);
         test_make_tmpdir(work, sizeof(work), "sia", "tor-receipt");
         int n = snprintf(cmd, sizeof(cmd),
-            "bash -c 'set -euo pipefail; cd \"%s\"; "
+            "env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE "
+            "-u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES bash -c 'set -euo pipefail; cd \"%s\"; "
             "mkdir -p a/vendor/tor; git init -q a; "
             "git init -q a/vendor/tor; "
             "printf source > a/vendor/tor/input.c; "
@@ -961,6 +1131,7 @@ int test_source_identity_authority(void)
     failures += sia_precommit_source_action();
     failures += sia_tor_receipt_is_not_source();
 #if !defined(_WIN32)
+    failures += sia_selftest_git_isolation();
     failures += sia_digest_cache_concurrent();
     failures += sia_digest_cache_absent_directory();
     failures += sia_digest_cache_framing();
