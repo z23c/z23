@@ -176,7 +176,11 @@ static inline bool maps_unreadable(FILE *maps, int mem)
 static inline bool maps_line(struct maps_scan *scan, const char *line)
 {
     bool address = isxdigit((unsigned char)line[0]) && strchr(line, '-');
-    if (isxdigit((unsigned char)line[0]) && !address && !metadata_known(line)) return true;
+    /* Hex that is not an address and not a "Name:" field is a broken map line. */
+    if (isxdigit((unsigned char)line[0]) && !address && !metadata_known(line) && !strchr(line, ':')) {
+        scan->found = true;
+        return true;
+    }
     if (!address) {
         if (scan->have_mapping && guard_flags(line)) scan->candidate = false;
         return false;
