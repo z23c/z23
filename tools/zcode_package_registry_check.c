@@ -47,12 +47,11 @@ static void print_derived_roots(const struct vcs_package_prepared *prepared)
 
 /* This key is the public alpha fixture identity already embedded in the
  * checked projection. It has no owner, wallet, or stable-release authority. */
-static bool derive_fixture_signature(const uint8_t digest[32], char out[129])
+static bool derive_fixture_signature(secp256k1_context *ctx,
+                                     const uint8_t digest[32], char out[129])
 {
     uint8_t secret[32], compact[64];
     memset(secret, 0x47, sizeof(secret));
-    secp256k1_context *ctx = secp256k1_context_create(
-        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     secp256k1_ecdsa_recoverable_signature signature;
     int recovery_id = -1;
     bool ok = ctx && secp256k1_ec_seckey_verify(ctx, secret) == 1 &&
@@ -60,8 +59,6 @@ static bool derive_fixture_signature(const uint8_t digest[32], char out[129])
             secp256k1_nonce_function_rfc6979, NULL) == 1 &&
         secp256k1_ecdsa_recoverable_signature_serialize_compact(
             ctx, compact, &recovery_id, &signature) == 1 && recovery_id >= 0;
-    if (ctx)
-        secp256k1_context_destroy(ctx);
     memset(secret, 0, sizeof(secret));
     if (!ok)
         return false;
@@ -70,26 +67,23 @@ static bool derive_fixture_signature(const uint8_t digest[32], char out[129])
     return true;
 }
 
-static bool derive_fixture_public(uint8_t out[33])
+static bool derive_fixture_public(secp256k1_context *ctx, uint8_t out[33])
 {
     uint8_t secret[32];
     memset(secret, 0x47, sizeof(secret));
-    secp256k1_context *ctx = secp256k1_context_create(
-        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     secp256k1_pubkey public_key;
     size_t out_len = 33;
     bool ok = ctx && secp256k1_ec_pubkey_create(ctx, &public_key, secret) == 1 &&
         secp256k1_ec_pubkey_serialize(ctx, out, &out_len, &public_key,
                                      SECP256K1_EC_COMPRESSED) == 1 &&
         out_len == 33;
-    if (ctx)
-        secp256k1_context_destroy(ctx);
     memset(secret, 0, sizeof(secret));
     return ok;
 }
 
 static bool print_derived_row(const char *name,
-                              const struct vcs_package_prepared *prepared)
+                              const struct vcs_package_prepared *prepared,
+                              secp256k1_context *ctx)
 {
     char content[65], release[65], recipe[65], lock[65], capsule[65];
     char publisher[67], signature[129];
@@ -99,7 +93,7 @@ static bool print_derived_row(const char *name,
     zcl_hex_encode(prepared->lock_root, 32, lock);
     zcl_hex_encode(prepared->capsule_root, 32, capsule);
     zcl_hex_encode(prepared->release.publisher_pubkey, 33, publisher);
-    if (!derive_fixture_signature(prepared->signing_digest, signature))
+    if (!derive_fixture_signature(ctx, prepared->signing_digest, signature))
         return false;
     printf("%s content=%s release=%s recipe=%s lock=%s capsule=%s "
            "publisher=%s signature=%s\n", name, content, release,
@@ -109,9 +103,13 @@ static bool print_derived_row(const char *name,
 
 static int derive_directory(const char *dir)
 {
+    secp256k1_context *ctx = secp256k1_context_create(
+        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     uint8_t pubkey[33];
-    if (!derive_fixture_public(pubkey))
+    if (!derive_fixture_public(ctx, pubkey)) {
+        if (ctx) secp256k1_context_destroy(ctx);
         return 1;
+    }
     struct vcs_package_prepare_options options = {
         .dir = dir, .publisher_sequence = 1,
         .reward_address = "", .chain_id = "zclassic-main",
@@ -124,9 +122,10 @@ static int derive_directory(const char *dir)
     if (err != VCS_PACKAGE_PREPARE_OK) {
         fprintf(stderr, "zcode package derive failed: %s (%s: %s)\n", dir,
                 vcs_package_prepare_error_string(err), detail);
+        secp256k1_context_destroy(ctx);
         return 1;
     }
-    bool ok = print_derived_row(prepared.release.name, &prepared);
+    bool ok = print_derived_row(prepared.release.name, &prepared, ctx);
     for (size_t i = 0; ok && i + 1u < prepared.lock.count; i++) {
         char root[65];
         zcl_hex_encode(prepared.lock.nodes[i].root, 32, root);
@@ -134,13 +133,14 @@ static int derive_directory(const char *dir)
                prepared.lock.nodes[i].name, root);
     }
     vcs_package_prepared_free(&prepared);
+    secp256k1_context_destroy(ctx);
     return ok ? 0 : 1;
 }
 
-static bool row_publisher_key(const struct registry_row *row, bool derive,
+static bool row_publisher_key(const struct registry_row *row, bool derive, secp256k1_context *ctx,
                               uint8_t pubkey[33])
 {
-    return derive ? derive_fixture_public(pubkey) :
+    return derive ? derive_fixture_public(ctx, pubkey) :
                     zcl_hex_decode_lower(row->publisher, pubkey, 33);
 }
 
@@ -211,9 +211,13 @@ static void report_registry_mismatch(const struct registry_row *row,
 
 static int check_registry_row(size_t i, bool derive, bool *derived)
 {
+    secp256k1_context *ctx = derive ? secp256k1_context_create(
+        SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY) : NULL;
     uint8_t pubkey[33];
-    if (!row_publisher_key(&rows[i], derive, pubkey))
+    if (!row_publisher_key(&rows[i], derive, ctx, pubkey)) {
+        if (ctx) secp256k1_context_destroy(ctx);
         return 1;
+    }
     struct vcs_package_prepare_options options = {
         .dir = rows[i].dir, .publisher_sequence = rows[i].sequence,
         .reward_address = "", .chain_id = "zclassic-main",
@@ -227,7 +231,7 @@ static int check_registry_row(size_t i, bool derive, bool *derived)
     if (ok)
         ok = lock_dag_matches(&prepared, i);
     if (derive && err == VCS_PACKAGE_PREPARE_OK) {
-        *derived = print_derived_row(rows[i].name, &prepared);
+        *derived = print_derived_row(rows[i].name, &prepared, ctx);
     }
     if (!ok && !derive) {
         report_registry_mismatch(&rows[i], &prepared, err, detail);
@@ -235,6 +239,7 @@ static int check_registry_row(size_t i, bool derive, bool *derived)
         return 1;
     }
     vcs_package_prepared_free(&prepared);
+    if (ctx) secp256k1_context_destroy(ctx);
     return 0;
 }
 
