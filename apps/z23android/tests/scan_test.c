@@ -147,6 +147,16 @@ static void a_typed_address_is_read_like_a_scanned_one(void)
     assert(scan("zclassic:not-an-address?amount=1") == ZAPP_SCAN_PAY_REFUSED);
     assert(!strcmp(value, zapp_scan_refusal_text(zapp_scan_payment("zclassic:not-an-address?amount=1", &pay))));
 }
+/* A field that does not fit says so. An unreadable field does not borrow that sentence. */
+static void refusal_words(void)
+{
+    assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_TOO_LONG), "too long") &&
+           !strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_TOO_LONG), "not readable"));
+    assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG), "too long") &&
+           !strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG), "not readable"));
+    assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_INVALID), "not readable"));
+    assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_INVALID), "not readable"));
+}
 /* A payment code opens the send review and does nothing else; a refused one says why; other text is untouched. */
 static void payment_codes(void)
 {
@@ -176,6 +186,7 @@ static void payment_codes(void)
     assert(zapp_scan_refusal_text(ZAPP_PAY_OK)[0] == 0);
     for (int r = ZAPP_PAY_REFUSE_INPUT_TOO_LONG; r <= ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG; ++r)
         assert(strstr(zapp_scan_refusal_text((enum zapp_pay_refusal)r), "Nothing was done."));
+    refusal_words();
     /* text that is not a payment code keeps what it was */
     assert(scan("hello world") == ZAPP_SCAN_TEXT && !strcmp(value, "hello world"));
     assert(scan("t1 is a short word") == ZAPP_SCAN_TEXT);
