@@ -1,0 +1,27 @@
+# Example timer for platform/deploy/examples/z23-tunnel-renew@.service.
+#
+# Install as ~/.config/systemd/user/z23-tunnel-renew.timer (one timer per
+# peer instance; copy and rename for further peers). A pairing epoch
+# lives grant_days (1..30, default 7) and the plan reports renew_due only
+# inside renew_before_s (default 72 h), so a daily run renews every grant
+# with several days of margin and one missed run is a logged gap, not an
+# expired tunnel: Persistent=true fires a catch-up run after downtime, and
+# the receiver unit keeps serving the current epoch until the confirm
+# step's smoke round trip has proven epoch N+1 end to end.
+#
+# Enable: systemctl --user daemon-reload && systemctl --user enable --now
+# z23-tunnel-renew.timer
+# Disable: systemctl --user disable --now z23-tunnel-renew.timer
+# The renewal itself is one bounded run per fire; nothing runs between.
+
+[Unit]
+Description=Z23 hash-PSK pairing renewal timer — daily, per peer
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=z23-tunnel-renew@r1.service
+
+[Install]
+WantedBy=timers.target

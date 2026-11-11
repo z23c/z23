@@ -129,6 +129,35 @@ operator-specific peers. Copy and adapt before installing:
   z23-tunnel-receiver`. **Rollback:** disable it, remove the unit file and
   `daemon-reload`; revoke the grant with `ops mesh device revoke` if the
   peer must lose access, which the next bounded run honours.
+- `z23-tunnel-renew@.service` / `z23-tunnel-renew.env.example` /
+  `z23-tunnel-renew.timer` — supervised hash-PSK pairing renewal, one
+  instance per paired peer. A pairing grant lives `grant_days` (1..30,
+  default 7) and nothing renews it by itself; without this driver the
+  receiver's exit 4 (grant refused) is the first sign, on the day it
+  expires. Each timer fire is one bounded run: `z23 ops mesh device pair
+  renew --input-file=<json>` as a plan (mutates nothing; a plan that is
+  not `renew_due` ends the run successfully), then, when due, a second
+  call with that `plan_id` and `confirm:true`, which mints epoch N+1 on
+  both profiles, rewrites the hub route and the receiver unit's
+  environment file, requires a loopback smoke round trip through N+1 and
+  only then writes the client route and revokes N — any failure leaves N
+  in force with a typed `RENEW_*` code, a failed unit and no receipt. The
+  confirm step writes the typed renewal receipt, which is the evidence a
+  fleet's tunnel goal reads as a renewal producer. Exit 3 with
+  `RENEW_NO_CURRENT_EPOCH` means no current epoch exists for the peer:
+  pair a first epoch (see the receiver's **PSK path** above) before
+  enabling the timer. The plan's input names client and hub state
+  directories that must both live on this host — the leaf reaches no
+  other machine, so renew each host's outbound peers there.
+  **Enable:** copy the unit and timer to `~/.config/systemd/user/`, the
+  env example to `~/.config/z23/tunnel-renew-<peer>.env` (edit `Z23_BIN`
+  and the input path to real absolute paths — environment files expand no
+  specifiers — and the instance name, including the timer's `Unit=`), then
+  `systemctl --user daemon-reload && systemctl --user enable --now
+  z23-tunnel-renew.timer`. **Disable:** `systemctl --user disable --now
+  z23-tunnel-renew.timer`. **Rollback:** disable the timer; the current
+  epoch keeps serving until it expires, and the receiver unit's own
+  relaunch discipline (above) governs what happens then.
 
 ## Replay-canary operational notes
 

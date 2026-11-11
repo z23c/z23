@@ -1,0 +1,57 @@
+# Example supervised hash-PSK pairing renewal (systemd USER unit, one
+# instance per paired peer: z23-tunnel-renew@r1, z23-tunnel-renew@mac ...).
+#
+# Install as ~/.config/systemd/user/z23-tunnel-renew@.service and copy
+# z23-tunnel-renew.env.example to ~/.config/z23/tunnel-renew-<peer>.env.
+# Pairing grants live 1..30 days (grant_days, default 7); this unit runs
+# the two-step renew leaf so a grant never silently expires the way the
+# 2026-10 fleet pairings did.
+#
+# One run is two leaf calls of `ops mesh device pair renew`:
+#   1. plan  — reads epoch N, reports renew_due against renew_before_s
+#              (default 72 h) and returns a plan_id. Mutates nothing. A
+#              plan that is not due ends the run successfully: renewal
+#              receipts are only written when work happened.
+#   2. confirm — re-derives the plan (drift refuses RENEW_PLAN_MISMATCH),
+#              mints epoch N+1 on both profiles, rewrites the hub route and
+#              the receiver unit's environment file, requires a loopback
+#              smoke round trip THROUGH N+1, and only then writes the client
+#              route and revokes N. Any failure leaves N in force with a
+#              typed RENEW_* code and a nonzero exit, which the timer
+#              surfaces as a failed unit. The confirm step writes the typed
+#              renewal receipt (the fleet-goal producer evidence).
+#
+# Exit codes: 0 nothing due or renewal confirmed; 1 the confirm leaf
+# refused (read the RENEW_* code in the journal); 2 configuration or state
+# malformed — the environment file is missing its Z23_BIN /
+# Z23_TUNNEL_RENEW_INPUT (copy z23-tunnel-renew.env.example, edit the real
+# absolute paths), the plan reply carried no plan_id (run `ops mesh device
+# pair status`), or the input JSON does not end in `}` where the confirm
+# object is appended; 3 the plan leaf itself failed (RENEW_NO_CURRENT_EPOCH:
+# no current epoch for the peer — pair a first epoch before enabling the
+# timer; see the receiver example's pairing step).
+#
+# The inline /bin/sh -c carries the plan_id from step 1 to step 2 through
+# a PrivateTmp file; it handles no secret bytes. Every $VAR it references
+# comes from the environment file, so systemd expands them before the
+# shell starts.
+
+[Unit]
+Description=Z23 hash-PSK pairing renewal for peer %i (plan, then confirm when due)
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/z23/tunnel-renew-%i.env
+ExecStart=/bin/sh -c 'test -n "${Z23_BIN:-}" && test -n "${Z23_TUNNEL_RENEW_INPUT:-}" || { echo "renew: Z23_BIN or Z23_TUNNEL_RENEW_INPUT unset — copy z23-tunnel-renew.env.example and edit the real absolute paths"; exit 2; }; plan=$(mktemp /tmp/z23-renew-plan.XXXXXX) || exit 3; conf=$(mktemp /tmp/z23-renew-conf.XXXXXX) || { rm -f "$plan"; exit 3; }; trap "rm -f \"$plan\" \"$conf\"" EXIT; "$Z23_BIN" ops mesh device pair renew --input-file="$Z23_TUNNEL_RENEW_INPUT" >"$plan" || { cat "$plan"; exit 3; }; cat "$plan"; grep -q "\"renew_due\":true" "$plan" || exit 0; id=$(grep -o "\"plan_id\":\"[0-9a-f]*\"" "$plan" | head -n 1 | cut -d "\"" -f 4); test -n "$id" || exit 2; sed "s/}$/,\"plan_id\":\"$id\",\"confirm\":true}/" "$Z23_TUNNEL_RENEW_INPUT" >"$conf" || exit 2; grep -q "\"confirm\":true" "$conf" || { echo "renew: confirm object not appended — input JSON does not end in }"; exit 2; }; "$Z23_BIN" ops mesh device pair renew --input-file="$conf"'
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# The renew leaf writes the client profile, the hub profile, the receiver
+# unit's environment file and typed receipts under these roots.
+ReadWritePaths=%h/.local/state/z23-tunnel %h/.config/systemd/user %h/.config/z23
+UMask=0077
