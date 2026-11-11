@@ -253,12 +253,12 @@ static void judge_side(struct sfz_run *r, const struct sfz_plan *p,
 static bool read_syms(struct sfz_run *r, const char *dir, const char *tu,
                       struct sfz_syms *out)
 {
-    char path[PATH_MAX], err[128] = "";
+    char path[PATH_MAX] = "", err[128] = "";
     uint8_t *img = NULL;
     size_t n = 0;
     bool ok;
-    sfz_object(path, sizeof(path), dir, tu);
-    ok = sfz_slurp(path, &img, &n) && sfz_elf_syms(img, n, out, err, sizeof(err));
+    ok = sfz_object(path, sizeof(path), dir, tu) && sfz_slurp(path, &img, &n) &&
+         sfz_elf_syms(img, n, out, err, sizeof(err));
     if (!ok)
         sfz_why(r->out, "cannot read the symbols of %s: %s\n", path, err);
     free(img);
@@ -279,19 +279,17 @@ static bool judge_syms(struct sfz_run *r, const struct sfz_plan *p,
     return ok;
 }
 
-static bool same_object(const struct sfz_run *r, const char *tu)
+static bool same_object(const struct sfz_run *r, const char *tu, bool *same)
 {
     char a[PATH_MAX], b[PATH_MAX];
     uint8_t *x = NULL, *y = NULL;
     size_t xn = 0, yn = 0;
-    bool same;
-    sfz_object(a, sizeof(a), r->ob, tu);
-    sfz_object(b, sizeof(b), r->oa, tu);
-    same = sfz_slurp(a, &x, &xn) && sfz_slurp(b, &y, &yn) && xn == yn &&
-           memcmp(x, y, xn) == 0;
+    bool ok = sfz_object(a, sizeof(a), r->ob, tu) && sfz_object(b, sizeof(b), r->oa, tu) &&
+              sfz_slurp(a, &x, &xn) && sfz_slurp(b, &y, &yn);
+    *same = ok && xn == yn && memcmp(x, y, xn) == 0;
     free(x);
     free(y);
-    return same;
+    return ok;
 }
 
 static bool judge_tu(struct sfz_run *r, const struct sfz_plan *p, const char *tu)
@@ -300,7 +298,11 @@ static bool judge_tu(struct sfz_run *r, const struct sfz_plan *p, const char *tu
     struct tu_judge j = {.tu = tu, .predicted = t != NULL && t->affected,
                          .broadened = t != NULL && t->broadened};
     struct sfz_outcome *o = r->out;
-    bool same = same_object(r, tu);
+    bool same = false;
+    if (!same_object(r, tu, &same)) {
+        sfz_why(o, "cannot compare objects for %s\n", tu);
+        return false;
+    }
     o->tus++;
     o->predicted += j.predicted;
     o->changed += !same;

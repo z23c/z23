@@ -43,8 +43,8 @@ void sfz_why(struct sfz_outcome *out, const char *fmt, ...) ZCL_PRINTF_LIKE(2, 3
 /* Read a whole file into a heap buffer. */
 bool sfz_slurp(const char *path, uint8_t **out, size_t *len);
 
-/* The object path of TU `tu` under dir: <dir>/<basename without .c>.o */
-void sfz_object(char *buf, size_t n, const char *dir, const char *tu);
+/* Object path <dir>/<tu>.o, preserving the full TU path; false on truncation. */
+bool sfz_object(char *buf, size_t n, const char *dir, const char *tu);
 
 /* semantic_fuzz_oracle.c: plan the changed files with the facts under
  * <tree>/facts and judge every TU's objects; fills r->out. False only when

@@ -747,6 +747,93 @@ static int sfz_t_repros(struct sfz_group *g)
     return failures;
 }
 
+static bool sfz_nested_assist(const struct sfz_case *c)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/tree/facts/src/a", c->dir);
+    if (n < 0 || (size_t)n >= sizeof path || !sfz_mkdirs(path))
+        return false;
+    n = snprintf(path, sizeof path, "%s/tree/facts/src/b", c->dir);
+    return n >= 0 && (size_t)n < sizeof path && sfz_mkdirs(path);
+}
+
+static int sfz_t_nested_outputs(struct sfz_group *g)
+{
+    static const struct sfz_file files[] = {
+        {"src/a/x.c", "int a(void) { return 1; }\n", "int a(void) { return 2; }\n"},
+        {"src/b/x.c", "int b(void) { return 3; }\n", "int b(void) { return 3; }\n"},
+        {"src/a_x.c", "int ax(void) { return 4; }\n", "int ax(void) { return 4; }\n"},
+    };
+    static const char *const names[] = {"nested_plain", "nested_gcc",
+                                        "nested_assisted", "nested_gcc_assisted"};
+    struct sfz_item items[4] = {0};
+    int failures = 0;
+    TEST_CASE("semantic_facts_fuzz: nested same-name TUs remain distinct") {
+        for (size_t i = 0; i < 4; i++) {
+            struct sfz_repro r = { .name = names[i], .kind = "body_extern",
+                .detail = "one nested body changes", .gcc_deps = (i % 2) != 0,
+                .files = files, .nfiles = sizeof files / sizeof files[0] };
+            prep_repro(g, &r, NULL, &items[i]);
+            if (i >= 2 && items[i].run && !sfz_nested_assist(&items[i].c))
+                items[i].ok = items[i].run = false;
+        }
+        size_t bad = run_items(g, items, 4);
+        for (size_t i = 0; i < 4; i++) {
+            const struct sfz_outcome *o = &items[i].o;
+            if (!items[i].run || o->status != SFZ_PASS || o->tus != 3 ||
+                o->changed != 1 || o->cfun != 1) {
+                printf("semantic_facts_fuzz: %s nested expected pass/tus=3/changed=1/cfun=1 "
+                       "run=%d status=%d tus=%zu changed=%zu cfun=%zu\n",
+                       names[i], items[i].run, (int)o->status, o->tus, o->changed, o->cfun);
+                bad++;
+            }
+        }
+        ASSERT_EQ(bad, (size_t)0);
+    } TEST_END
+    return failures;
+}
+
+static int sfz_t_nested_deps(struct sfz_group *g)
+{
+    static const struct sfz_file history[] = {
+        {"src/history/x.c", "#define H \"v.h\"\n#include H\nint hx(void){return V;}\n",
+         "#define H \"v.h\"\n#include H\nint hx(void){return V;}\n"},
+        {"src/history/v.h", "#define V 1\n", "#define V 2\n"},
+        {"src/other.c", "int other(void){return 3;}\n", "int other(void){return 3;}\n"},
+    };
+    static const struct sfz_file hidden[] = {
+        {"src/.hidden/x.c", "#define H \"v.h\"\n#include H\nint hx(void){return V;}\n",
+         "#define H \"v.h\"\n#include H\nint hx(void){return V;}\n"},
+        {"src/.hidden/v.h", "#define V 1\n", "#define V 2\n"},
+        {"src/other.c", "int other(void){return 3;}\n", "int other(void){return 3;}\n"},
+    };
+    static const char *const names[] = {"deps_history", "deps_hidden"};
+    struct sfz_item items[2] = {0};
+    int failures = 0;
+    TEST_CASE("semantic_facts_fuzz: gcc deps select nested header consumers") {
+        for (size_t i = 0; i < 2; i++) {
+            struct sfz_repro r = { .name = names[i], .kind = "header_const",
+                .detail = "macro include changes one nested TU", .gcc_deps = true,
+                .files = i ? hidden : history, .nfiles = 3 };
+            prep_repro(g, &r, NULL, &items[i]);
+        }
+        size_t bad = run_items(g, items, 2);
+        for (size_t i = 0; i < 2; i++) {
+            const struct sfz_outcome *o = &items[i].o;
+            if (!items[i].run || o->status != SFZ_PASS || o->tus != 2 ||
+                o->predicted != 1 || o->changed != 1 || o->missed != 0 || o->cfun != 1) {
+                printf("semantic_facts_fuzz: %s dep expected pass/tus=2/pred=1/changed=1/"
+                       "missed=0/cfun=1 run=%d status=%d tus=%zu pred=%zu changed=%zu "
+                       "missed=%zu cfun=%zu\n", names[i], items[i].run, (int)o->status,
+                       o->tus, o->predicted, o->changed, o->missed, o->cfun);
+                bad++;
+            }
+        }
+        ASSERT_EQ(bad, (size_t)0);
+    } TEST_END
+    return failures;
+}
+
 /* ---- the search-dir replay is load-bearing --------------------------------------- */
 
 /* SD3 with the consumer's search-dir replay dropped, so every
@@ -1019,6 +1106,8 @@ int test_semantic_facts_fuzz(void)
     } TEST_END
     if (failures == 0) {
         failures += sfz_t_repros(g);
+        failures += sfz_t_nested_outputs(g);
+        failures += sfz_t_nested_deps(g);
         failures += sfz_t_sdir_mutant(g);
         failures += sfz_t_assert_mutant(g);
         failures += sfz_t_unbound_mutant(g);

@@ -112,11 +112,23 @@ bool sfz_slurp(const char *path, uint8_t **out, size_t *len)
     return ok;
 }
 
-void sfz_object(char *buf, size_t n, const char *dir, const char *tu)
+bool sfz_object(char *buf, size_t n, const char *dir, const char *tu)
 {
-    const char *base = strrchr(tu, '/');
-    base = base != NULL ? base + 1 : tu;
-    (void)snprintf(buf, n, "%s/%.*s.o", dir, (int)(strlen(base) - 2), base);
+    int written = snprintf(buf, n, "%s/%s.o", dir, tu);
+    return written >= 0 && (size_t)written < n;
+}
+
+static bool sfz_parent(const char *path)
+{
+    char copy[PATH_MAX];
+    int n = snprintf(copy, sizeof copy, "%s", path);
+    if (n < 0 || (size_t)n >= sizeof copy)
+        return false;
+    char *slash = strrchr(copy, '/');
+    if (!slash)
+        return false;
+    *slash = '\0';
+    return sfz_mkdirs(copy);
 }
 
 /* Every regular file under <root>/<rel>, as paths relative to root. */
@@ -426,14 +438,18 @@ static size_t put_flags(struct sfz_job *j, size_t k, const struct sfz_flags *f)
     return k;
 }
 
-/* <tool> flags -MMD -MF build/deps/src_<b>.c.d -MT <tu>.o <mode> <tu> -o <out> */
-static void compile_job(struct sfz_job *j, const char *tool, const char *mode,
-                        const struct sfz_flags *f, const char *tu, const char *obj)
+/* The sorted TU ordinal uniquely names its depfile across both phases. */
+static bool compile_job(struct sfz_job *j, const char *tool, const char *mode,
+                        const struct sfz_flags *f, const char *tu, const char *obj,
+                        size_t ordinal)
 {
-    size_t k = 0, base = strlen(strrchr(tu, '/') + 1) - 2;
-    (void)snprintf(j->s[0], sizeof(j->s[0]), "build/deps/src_%.*s.c.d", (int)base,
-                   strrchr(tu, '/') + 1);
-    (void)snprintf(j->s[1], sizeof(j->s[1]), "%s.o", tu);
+    size_t k = 0;
+    int a = snprintf(j->s[0], sizeof(j->s[0]), "build/deps/tu-%zu.d", ordinal);
+    int b = snprintf(j->s[1], sizeof(j->s[1]), "%s.o", tu);
+    int c = snprintf(j->s[3], sizeof(j->s[3]), "%s", obj);
+    if (a < 0 || (size_t)a >= sizeof(j->s[0]) || b < 0 ||
+        (size_t)b >= sizeof(j->s[1]) || c < 0 || (size_t)c >= sizeof(j->s[3]))
+        return false;
     j->argv[k++] = tool;
     k = put_flags(j, k, f);
     j->argv[k++] = "-MMD";
@@ -444,9 +460,9 @@ static void compile_job(struct sfz_job *j, const char *tool, const char *mode,
     j->argv[k++] = mode;
     j->argv[k++] = tu;
     j->argv[k++] = "-o";
-    (void)snprintf(j->s[3], sizeof(j->s[3]), "%s", obj);
     j->argv[k++] = j->s[3];
     j->argv[k] = NULL;
+    return true;
 }
 
 /* The fuzz case's --cc and --toolchain-id: the actual object compiler (the
@@ -461,12 +477,14 @@ static void compile_job(struct sfz_job *j, const char *tool, const char *mode,
 
 /* sensor emit --root . --source <tu> --out facts/<tu>.<phase>.zsm --facts
  * --cc <cc> --toolchain-id <id> -- flags */
-static void sensor_job(struct sfz_job *j, const char *sensor, const char *cc,
+static bool sensor_job(struct sfz_job *j, const char *sensor, const char *cc,
                        const char *phase, const struct sfz_flags *f,
                        const char *tu)
 {
     size_t k = 0;
-    (void)snprintf(j->s[2], sizeof(j->s[2]), "facts/%s.%s.zsm", tu, phase);
+    int n = snprintf(j->s[2], sizeof(j->s[2]), "facts/%s.%s.zsm", tu, phase);
+    if (n < 0 || (size_t)n >= sizeof(j->s[2]))
+        return false;
     j->argv[k++] = sensor;
     j->argv[k++] = "emit";
     j->argv[k++] = "--root";
@@ -483,13 +501,14 @@ static void sensor_job(struct sfz_job *j, const char *sensor, const char *cc,
     j->argv[k++] = "--";
     k = put_flags(j, k, f);
     j->argv[k] = NULL;
+    return true;
 }
 
-static void job_log(struct sfz_job *j, const struct sfz_run *r, const char *tu,
+static bool job_log(struct sfz_job *j, const struct sfz_run *r, const char *tu,
                     const char *what, const char *phase)
 {
-    (void)snprintf(j->log, sizeof(j->log), "%s/%s.%s.%s", r->log,
-                   strrchr(tu, '/') + 1, phase, what);
+    int n = snprintf(j->log, sizeof(j->log), "%s/%s.%s.%s", r->log, tu, phase, what);
+    return n >= 0 && (size_t)n < sizeof(j->log) && sfz_parent(j->log);
 }
 
 /* gcc -E over every TU, rewriting each depfile as the dev compile does. */
@@ -497,10 +516,27 @@ static size_t gcc_depfiles(struct sfz_run *r, const char *ph,
                            const struct sfz_flags *f, struct sfz_job *jobs)
 {
     for (size_t k = 0; k < r->tus.n; k++) {
-        compile_job(&jobs[k], r->env->gcc, "-E", f, r->tus.v[k], "/dev/null");
-        job_log(&jobs[k], r, r->tus.v[k], "gcc", ph);
+        if (!compile_job(&jobs[k], r->env->gcc, "-E", f, r->tus.v[k], "/dev/null", k) ||
+            !job_log(&jobs[k], r, r->tus.v[k], "gcc", ph))
+            return 1;
     }
     return run_jobs(r, jobs, r->tus.n);
+}
+
+static bool phase_job(struct sfz_run *r, struct sfz_job *jobs, size_t k,
+                      const char *ph, const char *objdir, const char *cc,
+                      const struct sfz_flags *f, const struct sfz_flags *fs)
+{
+    const char *tu = r->tus.v[k];
+    char obj[PATH_MAX], sensor_path[PATH_MAX];
+    bool ok = sfz_object(obj, sizeof(obj), objdir, tu) && sfz_parent(obj) &&
+              compile_job(&jobs[2 * k], cc, "-c", f, tu, obj, k) &&
+              job_log(&jobs[2 * k], r, tu, "cc", ph) &&
+              sensor_job(&jobs[2 * k + 1], r->env->sensor, cc, ph, fs, tu) &&
+              job_log(&jobs[2 * k + 1], r, tu, "sensor", ph);
+    int n = snprintf(sensor_path, sizeof sensor_path, "%s/%s", r->tree,
+                     jobs[2 * k + 1].s[2]);
+    return ok && n >= 0 && (size_t)n < sizeof sensor_path && sfz_parent(sensor_path);
 }
 
 /* Compile and sense every TU of one side; with gcc_deps, gcc then rewrites
@@ -510,24 +546,19 @@ static bool phase(struct sfz_run *r, const char *ph, const char *objdir)
     size_t n = r->tus.n, bad;
     struct sfz_flags f, fs;
     struct sfz_job *jobs = zcl_calloc(2 * n + 1, sizeof(*jobs), "sfz.jobs");
-    char obj[PATH_MAX];
     char facts[PATH_MAX + 16];
     bool ok;
-    (void)snprintf(facts, sizeof(facts), "%s/facts/src", r->tree);
+    int facts_n = snprintf(facts, sizeof(facts), "%s/facts/src", r->tree);
     bool after = objdir == r->oa;
     /* the side's object compiler, which the sensor names as the facts
      * rule has it do */
     const char *cc = r->c->cc[after][0] ? r->c->cc[after] : r->env->clang;
-    ok = jobs != NULL && read_flags(r, after, false, &f) &&
+    ok = facts_n >= 0 && (size_t)facts_n < sizeof facts && jobs != NULL &&
+         read_flags(r, after, false, &f) &&
          read_flags(r, after, true, &fs) &&
          sfz_mkdirs(facts);
     for (size_t k = 0; ok && k < n; k++) {
-        const char *tu = r->tus.v[k];
-        sfz_object(obj, sizeof(obj), objdir, tu);
-        compile_job(&jobs[2 * k], cc, "-c", &f, tu, obj);
-        job_log(&jobs[2 * k], r, tu, "cc", ph);
-        sensor_job(&jobs[2 * k + 1], r->env->sensor, cc, ph, &fs, tu);
-        job_log(&jobs[2 * k + 1], r, tu, "sensor", ph);
+        ok = phase_job(r, jobs, k, ph, objdir, cc, &f, &fs);
     }
     bad = ok ? run_jobs(r, jobs, 2 * n) : 1;
     if (bad == 0 && r->c->gcc_deps)
