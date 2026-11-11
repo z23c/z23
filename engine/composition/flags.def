@@ -1562,10 +1562,6 @@ Z23_FLAG("ZCL_MAX_UTXO_WIPE_ROWS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:auto")
 Z23_FLAG("ZCL_MAX_VALIDATION_REBIND", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:auto")
-Z23_FLAG("ZCL_MEM_PRESSURE_CRITICAL_PCT", "env_runtime", "90", "-",
-          "Critical memory pressure threshold, as a percentage of the selected ceiling.")
-Z23_FLAG("ZCL_MEM_PRESSURE_ELEVATED_PCT", "env_runtime", "50", "-",
-          "Elevated memory pressure threshold, as a percentage of the selected ceiling.")
 Z23_FLAG("ZCL_MEM_PRESSURE_HIGH_PCT", "env_runtime", "75", "-",
           "High memory pressure threshold, as a percentage of the selected ceiling.")
 Z23_FLAG("ZCL_MESH_PORTS_DIR", "env_build", "-", "-",
