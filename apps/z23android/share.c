@@ -4,6 +4,7 @@
 #include "jni_util.h"
 #include "payment_code.h"
 #include "wallet_screens.h"
+#include "share_diag.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -147,6 +148,7 @@ bool zapp_share_begin(JNIEnv *env, jobject activity)
 }
 void zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
 {
+    SHARE_DIAG("share result request=%ld result=%ld data=%d", (long)request, (long)result, !!data);
     if (request != ZAPP_SHARE_PICK_REQUEST) return;
     if (result != -1 || !data) {
         return_with_notice("Share cancelled. Nothing was sent.");
