@@ -17,7 +17,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include "share_diag.h"
 
 #define OUT_CAP 65536u
 #define PAGES_MAX 64u
@@ -124,7 +123,6 @@ static void touch(void) { ++st.version; }
 static void copy(char *dst, size_t cap, const char *src) { snprintf(dst, cap, "%s", src); }
 static void clear_share_notice(void)
 {
-    SHARE_DIAG("clear share notice");
     st.d.share_notice = false;
     st.d.note[0] = '\0';
 }
@@ -557,8 +555,6 @@ static void funds_items(struct wallet_screen *s)
 
 static void receive_items(struct wallet_screen *s)
 {
-    SHARE_DIAG("receive items ready=%d blocked=%d page=%d share=%d note=%d",
-               st.ready, st.blocked, st.page, st.d.share_notice, !!st.d.note[0]);
 #ifdef ZAPP_SHARE_FIXTURE
     title(s, "Receive");
     (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
@@ -571,6 +567,7 @@ static void receive_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     char grouped[ZAPP_PAY_ADDRESS_MAX * 2], text[WALLET_TEXT_MAX];
     title(s, "Receive");
+    if (d->note[0]) note(s, d->note);
     bool shown = d->address[0] && wallet_view_group_address(d->address, grouped, sizeof(grouped));
     if (shown) {
         (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, d->code);
@@ -584,7 +581,6 @@ static void receive_items(struct wallet_screen *s)
     } else if (d->address_pending) line(s, "Loading the address…");
     if (d->address_unavailable && !d->address_pending) button(s, WALLET_ACT_RETRY_ADDRESS, "Retry");
     else if (!d->address_unavailable && !d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
-    if (d->note[0]) note(s, d->note);
     (void)add(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE, "Amount in ZCL (optional)");
     button(s, WALLET_ACT_SET_AMOUNT, "Set amount");
     button(s, WALLET_ACT_BACK, "Back");
@@ -764,7 +760,7 @@ static bool fallback_current(void)
         char identity[82];
         if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
         st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.offline_bound = false;
-        SHARE_DIAG("fallback invalidate"); clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
+        clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
         return false;
     }
     if (!st.d.setup_bound) return true;
@@ -773,7 +769,7 @@ static bool fallback_current(void)
     if (st.env.setup_address && st.env.setup_address(st.env.ctx, address, sizeof(address), &generation) &&
         generation == st.d.address_generation && !strcmp(address, st.d.setup_anchor)) return true;
     st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.setup_bound = false;
-    SHARE_DIAG("fallback invalidate"); clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
+    clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
     return false;
 }
 unsigned wallet_screens_snapshot(struct wallet_screen *out)
@@ -981,7 +977,6 @@ static void request_guard(void)
     if (!st.request.valid) return;
     if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) &&
         !strcmp(identity, st.request.identity)) return;
-    SHARE_DIAG("request guard invalidate");
     request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice();
     if (st.d.address[0]) rebuild_code();
     touch();
@@ -1002,15 +997,12 @@ static void request_restore(const char *address)
     if (!st.request.valid) return;
     if (!st.env.setup_identity || !st.env.setup_identity(st.env.ctx, identity) ||
         strcmp(identity, st.request.identity) || strcmp(address, st.request.address)) {
-        SHARE_DIAG("request restore invalidate");
         request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice(); return;
     }
     st.d.has_amount = true; st.d.amount_zat = st.request.amount;
 }
 static void show_address(const char *address)
 {
-    SHARE_DIAG("show address share=%d note=%d changed=%d",
-               st.d.share_notice, !!st.d.note[0], st.d.address[0] && strcmp(st.d.address, address));
     if (st.d.address[0] && strcmp(st.d.address, address)) clear_share_notice();
     if (!st.d.share_notice) st.d.note[0] = '\0';
     if (!private_network(address, &st.d.network)) {
@@ -1047,8 +1039,9 @@ static void address_unavailable(void)
          "The receive address cannot be checked. Retry or check your wallet.");
 }
 
-static void address_failure(const struct json_value *data, bool missing, bool latest)
+static void address_failure(const struct json_value *data, bool missing, bool latest, bool preserve_share)
 {
+    if (preserve_share) return;
     clear_share_notice();
     if (latest && st.d.address_unavailable) address_unavailable();
     else if (latest && st.d.address_fallback) st.d.note[0] = 0;
@@ -1071,7 +1064,12 @@ static bool address_is_showable(const char *address)
            (!(st.d.setup_bound || st.d.offline_bound) || strict_private(address));
 }
 
-static void apply_address(bool ok, bool missing, bool latest, const char *json)
+static bool share_notice_survives_silence(bool latest, bool silent)
+{
+    return latest && silent && st.d.share_notice && st.d.address[0];
+}
+
+static void apply_address(bool ok, bool missing, bool latest, const char *json, bool silent)
 {
     struct json_value root;
     const struct json_value *data;
@@ -1094,7 +1092,7 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
         st.d.offline_bound = false;
         st.d.address_fallback = false;
     }
-    else address_failure(data, missing, latest);
+    else address_failure(data, missing, latest, share_notice_survives_silence(latest, silent));
     drop_tree(&root);
 }
 
@@ -1273,8 +1271,8 @@ static void apply(const struct job *j, const struct reply *r)
     else if (!strcmp(j->op, "preload")) {
         if (r->preloaded && (!st.d.address[0] || st.d.address_fallback)) (void)apply_offline(r);
     }
-    else if (r->offline) { if (!apply_offline(r)) apply_address(false, r->missing, true, NULL); }
-    else apply_address(r->ok, r->missing, !strcmp(j->op, "latest"), r->json);
+    else if (r->offline) { if (!apply_offline(r)) apply_address(false, r->missing, true, NULL, r->silent); }
+    else apply_address(r->ok, r->missing, !strcmp(j->op, "latest"), r->json, r->silent);
 }
 
 static void finish(const struct job *j, const struct reply *r)
@@ -1725,8 +1723,6 @@ bool wallet_screens_share_code(char *out, size_t cap)
 void wallet_screens_receive_notice(const char *text)
 {
     pthread_mutex_lock(&st.lock);
-    SHARE_DIAG("receive notice ready=%d blocked=%d page=%d text=%d",
-               st.ready, st.blocked, st.page, text ? 1 : 0);
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
         st.d.share_notice = text[0] != '\0';
         copy(st.d.note, sizeof(st.d.note), text);

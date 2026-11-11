@@ -2424,6 +2424,31 @@ static void delayed_share_notice(const char *op, const char *arg)
     (void)arg;
     if (!strcmp(op, "latest") || !strcmp(op, "offline_address")) wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
 }
+static const char *share_latest_after;
+static void delayed_share_reply(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "latest")) {
+        wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+        fake.latest = share_latest_after;
+    }
+}
+static void check_share_reply(const char *reply, const char *expected, bool preload)
+{
+    start(false);
+    if (preload) fake.setup_address = A1;
+    share_latest_after = reply;
+    fake.during = delayed_share_reply;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    if (expected) {
+        CHECK(has(expected));
+        CHECK(!has("Share cancelled. Nothing was sent."));
+    } else {
+        CHECK(has("Share cancelled. Nothing was sent."));
+        CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST) >= 0);
+    }
+    wallet_screens_close();
+}
 static void delayed_copy_after_share(const char *op, const char *arg)
 {
     (void)arg;
@@ -2489,6 +2514,9 @@ static void test_receive_share(void)
     CHECK(fake.copy_calls == 0);
     wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
     CHECK(has("Share cancelled. Nothing was sent."));
+    s = snap();
+    long note = find_text(s, "Share cancelled. Nothing was sent.");
+    CHECK(note >= 0 && note < find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST));
     wallet_screens_pause();
     fake.during = delayed_share_notice;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
@@ -2521,6 +2549,11 @@ static void test_receive_share(void)
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
     CHECK(has("Share cancelled. Nothing was sent."));
     wallet_screens_close();
+
+    check_share_reply(NODE_UNAVAILABLE_ERROR, NULL, true);
+    check_share_reply("{\"ok\":true,\"data\":{\"address\":null}}", "This wallet has no receive address yet. Tap New address.", false);
+    check_share_reply(NULL, "This node cannot report its latest address yet. Tap New address to make one.", false);
+    check_share_reply("not-json", "The latest address could not be read. Check that your node is running, or tap New address.", false);
 
     check_request_refresh(A1, "confirmed-wallet-one", true);
     check_request_refresh(A2, "confirmed-wallet-one", false);
