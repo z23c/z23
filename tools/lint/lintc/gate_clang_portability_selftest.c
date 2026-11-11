@@ -146,6 +146,14 @@ static int cps_cov_selftests(const char *self, struct cp_ctx *c)
 static int cps_proven_cases(struct cp_ctx *c)
 {
     char p[CP_PATH];
+    if (cps_snp(p, "%s/absent-compiler.log", c->work)) return 2;
+    if (cp_compiler_result_proven(p, 0))
+        return cps_fail("a missing success log was accepted.");
+    if (cp_compiler_result_proven(c->work, 0))
+        return cps_fail("a directory used as a success log was accepted.");
+    if (cps_snp(p, "%s/empty-compiler.log", c->work) || cps_static_write(p, "")) return 2;
+    if (!cp_compiler_result_proven(p, 0))
+        return cps_fail("a readable empty success log was refused.");
     cps_snp(p, "%s/compiler-crash.log", c->work);
     cps_static_write(p, "gcc: fatal error: cannot execute 'cc1': CreateProcess failed\n");
     if (cp_compiler_result_proven(p, 1))
@@ -166,6 +174,55 @@ static int cps_proven_cases(struct cp_ctx *c)
     if (cp_compiler_result_proven(p, 0))
         return cps_fail("compiler rc=0 with an error was accepted.");
     return 0;
+}
+
+static int cps_append_cases(struct cp_ctx *c)
+{
+    char src[CP_PATH], absent[CP_PATH], dest[CP_PATH];
+    if (cps_snp(src, "%s/append-source", c->work) ||
+        cps_snp(absent, "%s/append-absent", c->work) ||
+        cps_snp(dest, "%s/append-dest", c->work) ||
+        cps_static_write(src, "diagnostic\n")) return 2;
+    FILE *out = fopen(dest, "w");
+    if (!out) return 2;
+    int missing = cp_append_log(out, absent);
+    int directory = cp_append_log(out, c->work);
+    int good = cp_append_log(out, src);
+    int close_rc = fclose(out);
+    if (!missing || !directory || good || close_rc) return cps_fail("log append did not preserve input failures and success.");
+    out = fopen(dest, "r");
+    if (!out) return 2;
+    int bad_sink = cp_append_log(out, src);
+    close_rc = fclose(out);
+    if (!bad_sink || close_rc) return cps_fail("log append accepted a read-only sink.");
+    return 0;
+}
+
+static int cps_concat_full_sink(struct cp_ctx *fixture, const char *sink)
+{
+    if (access("/dev/full", W_OK) != 0) return 0;
+    if (unlink(sink) || symlink("/dev/full", sink) || !cp_concat_logs(fixture))
+        return cps_fail("concat accepted a failing output sink.");
+    return unlink(sink) ? 2 : 0;
+}
+
+static int cps_concat_cases(struct cp_ctx *c)
+{
+    static struct cp_ctx fixture;
+    char log[CP_PATH], sink[CP_PATH];
+    if (cps_snp(fixture.work, "%s/concat", c->work) ||
+        cps_snp(fixture.out_dir, "%s/out", fixture.work) ||
+        cp_mkdirs(fixture.out_dir) ||
+        cps_snp(log, "%s/one_c.log", fixture.out_dir) ||
+        cps_snp(sink, "%s/clang.log", fixture.work)) return 2;
+    snprintf(fixture.srcs[0], CP_PATH, "one.c");
+    fixture.nsrc = 1;
+    if (!cp_concat_logs(&fixture)) return cps_fail("concat accepted a missing input.");
+    if (mkdir(log, 0700) || !cp_concat_logs(&fixture) || rmdir(log))
+        return cps_fail("concat accepted an unreadable directory input.");
+    if (cps_static_write(log, "diagnostic\n") || cp_concat_logs(&fixture))
+        return cps_fail("concat rejected readable input.");
+    return cps_concat_full_sink(&fixture, sink);
 }
 
 static int cps_probe_cases(struct cp_ctx *c)
@@ -228,6 +285,10 @@ static int cps_run_all(struct cp_ctx *c)
         rc = cps_probe_cases(c);
     if (!rc)
         rc = cps_proven_cases(c);
+    if (!rc)
+        rc = cps_append_cases(c);
+    if (!rc)
+        rc = cps_concat_cases(c);
     if (!rc && lint_self_exe(self, sizeof self) != 0)
         rc = die("z23-lint: cannot locate self\n", "");
     if (!rc)

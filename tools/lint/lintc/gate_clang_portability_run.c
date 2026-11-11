@@ -66,30 +66,35 @@ static regex_t *cpr_err_re(int warn)
     return warn ? &w : &e;
 }
 
-static int cpr_log_matches(const char *path, const regex_t *re)
+static int cpr_log_classify(const char *path, const regex_t *crash,
+                            const regex_t *diagnostic, int *hit)
 {
     FILE *f = fopen(path, "r");
     if (!f)
-        return 0;
+        return -1;
     char line[CP_LINE];
-    int hit = 0;
-    while (!hit && fgets(line, sizeof line, f))
-        if (regexec(re, line, 0, NULL, 0) == 0)
-            hit = 1;
-    fclose(f);
-    return hit;
+    int bad = 0;
+    *hit = 0;
+    while (fgets(line, sizeof line, f)) {
+        int a = regexec(crash, line, 0, NULL, 0);
+        int b = regexec(diagnostic, line, 0, NULL, 0);
+        if ((a != 0 && a != REG_NOMATCH) || (b != 0 && b != REG_NOMATCH)) bad = 1;
+        if (a == 0) bad = 1;
+        if (b == 0) *hit = 1;
+    }
+    if (ferror(f)) bad = 1;
+    if (fclose(f) != 0) bad = 1;
+    return bad ? -1 : 0;
 }
 
 int cp_compiler_result_proven(const char *log, int rc)
 {
     regex_t *crash = cpr_crash_re();
-    if (!crash || cpr_log_matches(log, crash))
-        return 0;
-    if (rc == 0)
-        return cpr_log_matches(log, cpr_err_re(0)) ? 0 : 1;
-    if (rc != 1)
-        return 0;
-    return cpr_log_matches(log, cpr_err_re(1)) ? 1 : 0;
+    if (rc != 0 && rc != 1) return 0;
+    regex_t *diagnostic = cpr_err_re(rc == 1);
+    int hit = 0;
+    if (!crash || !diagnostic || cpr_log_classify(log, crash, diagnostic, &hit)) return 0;
+    return rc == 0 ? !hit : hit;
 }
 
 /* ── version skew ────────────────────────────────────────────────────── */
@@ -442,7 +447,6 @@ static int cpr_sites(struct cp_ctx *c, char sites[][CP_LINE], int max, int *n,
 static int cpr_infra_one(const struct cp_ctx *c, const char *src, FILE *inf)
 {
     char key[CP_PATH], log[CP_PATH], rcf[CP_PATH], rcstr[32];
-    struct stat st;
     cp_key(src, key, sizeof key);
     if (cps_snp(log, "%s/%s.log", c->out_dir, key) ||
         cps_snp(rcf, "%s/%s.rc", c->out_dir, key))
@@ -454,8 +458,6 @@ static int cpr_infra_one(const struct cp_ctx *c, const char *src, FILE *inf)
         return 1;
     }
     int rc = atoi(rcstr);
-    if (rc == 0 && (stat(log, &st) != 0 || st.st_size == 0))
-        return 0;
     if (cp_compiler_result_proven(log, rc))
         return 0;
     fprintf(inf, "%s|%d\n", src, rc);
@@ -582,20 +584,23 @@ static void cp_pick_jobs(struct cp_ctx *c)
     c->jobs = (int)jobs;
 }
 
-static void cpr_append_file(FILE *dst, const char *path)
+int cp_append_log(FILE *dst, const char *path)
 {
     char buf[8192];
     size_t n;
     FILE *t = fopen(path, "rb");
     if (!t)
-        return;
+        return 2;
+    int rc = 0;
     while ((n = fread(buf, 1, sizeof buf, t)) > 0)
-        fwrite(buf, 1, n, dst);
-    fclose(t);
+        if (fwrite(buf, 1, n, dst) != n) { rc = 2; break; }
+    if (ferror(t)) rc = 2;
+    if (fclose(t) != 0) rc = 2;
+    return rc;
 }
 
 /* One clang.log from the per-TU logs, in scan order. */
-static int cpr_concat_logs(const struct cp_ctx *c)
+int cp_concat_logs(const struct cp_ctx *c)
 {
     char logp[CP_PATH], key[CP_PATH], p[CP_PATH];
     if (cps_snp(logp, "%s/clang.log", c->work))
@@ -603,13 +608,15 @@ static int cpr_concat_logs(const struct cp_ctx *c)
     FILE *lf = fopen(logp, "wb");
     if (!lf)
         return die("z23-lint: cannot write %s\n", logp);
-    for (int i = 0; i < c->nsrc; i++) {
+    int rc = 0;
+    for (int i = 0; i < c->nsrc && !rc; i++) {
         cp_key(c->srcs[i], key, sizeof key);
-        if (!cps_snp(p, "%s/%s.log", c->out_dir, key))
-            cpr_append_file(lf, p);
+        if (cps_snp(p, "%s/%s.log", c->out_dir, key) || cp_append_log(lf, p))
+            rc = 2;
     }
-    fclose(lf);
-    return 0;
+    if (fclose(lf) != 0) rc = 2;
+    if (rc) fprintf(stderr, "%s: cannot concatenate compiler logs\n", k_cpr_gate);
+    return rc;
 }
 
 /* Every TU must have produced both a log and a status file. */
@@ -656,7 +663,7 @@ static int cpr_compile_all(struct cp_ctx *c)
     if (!rc)
         rc = cp_compile_misses(c);
     if (!rc)
-        rc = cpr_concat_logs(c);
+        rc = cp_concat_logs(c);
     if (rc)
         return rc;
     cp_cache_summary(c);

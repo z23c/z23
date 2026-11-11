@@ -102,6 +102,8 @@ int  cp_compile_one(struct cp_ctx *c, const char *src);
 /* run-internal, shared with the selftest */
 int  cp_gate_body(struct cp_ctx *c, int argc, char **argv);
 int  cp_compiler_result_proven(const char *log, int rc);
+int  cp_append_log(FILE *dst, const char *path);
+int  cp_concat_logs(const struct cp_ctx *c);
 int  cp_stub_cc_main(int argc, char **argv);
 int  cp_ctx_open(struct cp_ctx *c, int *skip);
 
