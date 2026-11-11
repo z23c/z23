@@ -65,9 +65,39 @@ static char *fake_fgets(char *text, int cap, FILE *file)
 #undef fgets
 #endif
 
+#ifdef __APPLE__
+static void region_boundary_cases(void)
+{
+    enum { REGION_SIZE = 262144 };
+    static const struct { size_t offset, length; } cases[] = {
+        {0, 1}, {65528, 21}, {65535, 2}, {65536, 21},
+        {131064, 21}, {150, 70000}, {65528, 70000}, {REGION_SIZE - 21, 21}
+    };
+    mach_vm_address_t address = 0;
+    assert(mach_vm_allocate(mach_task_self(), &address, REGION_SIZE, VM_FLAGS_ANYWHERE) == KERN_SUCCESS);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        size_t length = cases[i].length;
+        char *marker = malloc(length);
+        assert(marker);
+        memset(marker, 'Z', length);
+        marker[length - 1] = '!';
+        memset((void *)(uintptr_t)address, 'x', REGION_SIZE);
+        memcpy((void *)(uintptr_t)(address + cases[i].offset), marker, length);
+        bool read_any = false;
+        assert(region_contains(address, REGION_SIZE, marker, length, &read_any) && read_any);
+        memset((void *)(uintptr_t)address, 'x', REGION_SIZE);
+        read_any = false;
+        assert(!region_contains(address, REGION_SIZE, marker, length, &read_any) && read_any);
+        free(marker);
+    }
+    assert(mach_vm_deallocate(mach_task_self(), address, REGION_SIZE) == KERN_SUCCESS);
+}
+#endif
+
 int main(void)
 {
 #ifdef __APPLE__
+    region_boundary_cases();
     char *marker = malloc(32);
     assert(marker);
     memcpy(marker, "residue-long-short", 19);

@@ -92,18 +92,25 @@ static inline bool region_readable(const vm_region_extended_info_data_t *info, m
 static inline bool region_contains(mach_vm_address_t address, mach_vm_size_t size, const char *needle, size_t needle_len,
                                    bool *read_any)
 {
+    /* Overlap reads so a marker crossing a chunk boundary is still searched.
+     * Mach reports the returned byte count in a 32-bit field. */
+    if (!needle_len || needle_len > UINT32_MAX - 65535 || size > UINT64_MAX - address) return true;
+    const mach_vm_size_t window = 65536 + needle_len - 1;
     bool found = false;
     mach_vm_address_t at = address;
     while (at < address + size && !found) {
         mach_vm_size_t want = address + size - at;
         vm_offset_t data = 0;
         mach_msg_type_number_t data_count = 0;
-        if (want > 65536) want = 65536;
+        if (want > window) want = window;
         if (mach_vm_read(mach_task_self(), at, want, &data, &data_count) != KERN_SUCCESS) return true;
         *read_any = true;
+        bool incomplete = data_count != want;
         if (data_count >= needle_len && memmem((void *)data, data_count, needle, needle_len)) found = true;
         vm_deallocate(mach_task_self(), data, data_count);
-        at += want;
+        if (incomplete) return true;
+        if (want == address + size - at) break;
+        at += 65536;
     }
     return found;
 }
