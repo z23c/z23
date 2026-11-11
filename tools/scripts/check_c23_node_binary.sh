@@ -154,10 +154,11 @@ if [[ "$interpreter" == /system/bin/linker64 ]]; then
     elf_header="$(LC_ALL=C "$readelf_tool" -hW "$bin")" || exit 1
     dynamic="$(LC_ALL=C "$readelf_tool" -dW "$bin")" || exit 1
     symbols="$(LC_ALL=C "$readelf_tool" -Ws "$bin")" || exit 1
+    # GNU labels the value "Flags:"; LLVM prints the flag names directly.
     if ! grep -Eq 'Class:[[:space:]]+ELF64$' <<<"$elf_header" ||
        ! grep -Eq 'Machine:[[:space:]]+AArch64$' <<<"$elf_header" ||
        ! grep -Eq 'Type:[[:space:]]+DYN[[:space:]]' <<<"$elf_header" ||
-       ! grep -Eq '\(FLAGS_1\).*Flags:.*PIE' <<<"$dynamic"; then
+       ! grep -Eq '\(FLAGS_1\).*PIE' <<<"$dynamic"; then
         echo "c23-node: Android requires an AArch64 ELF64 PIE executable" >&2
         exit 1
     fi

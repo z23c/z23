@@ -88,7 +88,7 @@ zcl_tor_compiler_identity_for_cc() {
 # No such file or directory" -- silent everywhere except a bootstrap build.
 # One rule, no drift.
 zcl_tor_provenance_ensure_bin() {
-    local root="$1" bin src1 src2 rel
+    local root="$1" bin src1 src2 rel host_cc="${HOSTCC:-${HOST_CC:-cc}}"
     bin="$(zcl_tor_provenance_bin "$root")"
     src1="$root/tools/tor_provenance.c"
     src2="$root/contexts/commons/packages/zsha256/src/zsha256.c"
@@ -99,10 +99,19 @@ zcl_tor_provenance_ensure_bin() {
     # The lean helper goal has no vendor or Tor bootstrap. Let its canonical
     # rule check the complete source/header closure, rather than letting a
     # two-source timestamp shortcut reuse a stale platform implementation.
+    # This helper runs on the build host even when CC names a cross compiler.
     rel="${bin#"$root"/}"
-    if ! make -s -C "$root" "$rel"; then
+    if ! make -s -C "$root" "$rel" CC="$host_cc"; then
         echo "tor-provenance: could not build $bin via make -C $root $rel" >&2
         return 1
+    fi
+    # A target-built helper can be newer than its sources. Reuse it only when
+    # it executes on this host; force just that incompatible artifact to rebuild.
+    if ! "$bin" --selftest >/dev/null 2>&1; then
+        if ! make -B -s -C "$root" "$rel" CC="$host_cc" || ! "$bin" --selftest >/dev/null 2>&1; then
+            echo "tor-provenance: $bin cannot execute on the build host" >&2
+            return 1
+        fi
     fi
     return 0
 }

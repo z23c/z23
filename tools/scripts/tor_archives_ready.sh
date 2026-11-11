@@ -342,6 +342,23 @@ case "${1:-ready}" in
         fake_wt="$fixture/worktree"
         mkdir -p "$fake_primary" "$fake_wt"
         zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || exit 1
+        known_good="$(zcl_tor_provenance_bin "$SCRIPT_ROOT")"
+        (
+            wrong="$fixture/wrong-format-helper"
+            printf '#!/bin/sh\nexit 126\n' >"$wrong"
+            chmod +x "$wrong"
+            touch -t 209901010000 "$wrong"
+            zcl_tor_provenance_bin() { printf '%s\n' "$wrong"; }
+            make() {
+                if [ "$1" = "-B" ]; then cp "$known_good" "$wrong"; fi
+                return 0
+            }
+            if ! zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" ||
+               ! "$wrong" --selftest >/dev/null; then
+                echo "tor_archives_ready: selftest FAILED — stale host-incompatible helper was reused" >&2
+                exit 1
+            fi
+        )
         mkdir -p "$fake_primary/$TOR_TREE"
         printf 'CFLAGS = -g -O2\nfixture-object:\n\t$(CC) $(CFLAGS) -x c -c -o "$(OBJECT)" -\n' >"$fake_primary/$TOR_TREE/Makefile"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" map-build-path "$fake_primary/$TOR_TREE" "$fake_primary" || exit 1

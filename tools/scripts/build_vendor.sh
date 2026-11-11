@@ -311,7 +311,7 @@ esac
 PROVENANCE_CONTRACT_REV="vp3"
 RECIPE_TOR_STUB="tor-stub-r2"
 RECIPE_SQLITE="sqlite-r2"
-RECIPE_ZLIB="zlib-r2"
+RECIPE_ZLIB="zlib-r3"
 RECIPE_OPENSSL="openssl-r5"
 # r6: the pinned secure-rng ABI patch grew a second hunk (it now unguards the
 # evutil_secure_rng_add_bytes DECLARATION in include/event2/util.h, not only its
@@ -556,7 +556,7 @@ recipe_flags_host() {
     case "$group" in
         tor_stub) printf '%s' "$VENDOR_C_STD -O2 -fPIC; ar=Dcr" ;;
         sqlite) printf '%s' '-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED -DSQLITE_DEFAULT_FOREIGN_KEYS=1; ar=Dcr' ;;
-        zlib) printf '%s' 'CFLAGS=-O2 -fPIC; ./configure --static; make libz.a' ;;
+        zlib) printf '%s' 'CFLAGS=-O2 -fPIC; ./configure --static; make AR=$VENDOR_AR ARFLAGS=rc RANLIB=$VENDOR_RANLIB libz.a' ;;
         openssl) printf '%s' './Configure no-shared no-tests --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib; make build_libs' ;;
         libevent)
             # The descriptor is a recipe IDENTITY, hashed into the stamp that
@@ -815,12 +815,13 @@ build_zlib() {         # FETCHED: zlib
     local d="$WORK/zlib-${ZLIB_VER}"
     rm -rf "$d"; tar -C "$WORK" -xzf "$tb"
     # zlib's configure has no --host: it takes the toolchain from the
-    # environment and only ever COMPILES its probes, never runs them, so the
-    # cross build differs from the host build by the toolchain alone.
+    # environment and only ever COMPILES its probes, never runs them. Darwin
+    # selects Apple libtool even for a cross build, so the submake needs the
+    # target archiver and a compatible static-archive flag too.
     ( cd "$d" && CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
         CFLAGS="-O2 -fPIC" \
         ./configure --static >/dev/null \
-        && make -j"$JOBS" libz.a >/dev/null )
+        && make -j"$JOBS" AR="$VENDOR_AR" ARFLAGS=rc RANLIB="$VENDOR_RANLIB" libz.a >/dev/null )
     install_archive "$d/libz.a" libz.a
     cp -f "$d/zlib.h" "$d/zconf.h" "$INC/"
     stamp_archives libz.a
