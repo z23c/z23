@@ -202,8 +202,11 @@ z23 fleet board post <kind> <text> [--scope=public|fleet] [--room=R]
 z23 fleet wiki write <slug> <title> <body>
 ```
 
-Posting and wiki writes are local-only and never remotely invocable. Keep
-endpoints, credentials and private paths out of public scope.
+Direct board posting and `fleet.wiki.write` are local-only. The separately
+authorized steer `wiki_write` gateway can publish public wiki revisions on
+another node with an attributable `wiki-write` grant. Keep endpoints,
+credentials and private paths out of public scope.
+<!-- claim: symbol-present fleet.steer.wiki-write engine/composition/commands/fleet.def -->
 
 ### Agents
 

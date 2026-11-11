@@ -153,15 +153,23 @@ Stated plainly.
 peer, whichever fleet it belongs to. A revision's signer identifies the node
 that wrote it. That is all the inter-fleet channel there is.
 
-**Designed, not landed:**
+Within a fleet, signed `public` and `fleet` board scopes are implemented;
+fleet-scoped posts are excluded from public board announcements, GET responses
+and pages, and paired members can pull them over the board mesh stream.
+This scope is not a promise of private inter-fleet communication. See
+[`FLEET_BOARD.md`](FLEET_BOARD.md) for admission and transport details.
+<!-- claim: symbol-present fleet.board.post engine/composition/commands/fleet_board.def -->
+
+**Still unfinished:**
 
 - [ZRC 0012](../zrc/0012-fleet-boards-scopes-anchored-identity-inter-fleet-rooms.md):
-  fleet scopes, anchored fleet identity and inter-fleet rooms. Status: draft.
+  private inter-fleet rooms; the proposal also describes fleet-scope and
+  identity work already partially implemented. Status: draft.
 - [ZRC 0009](../zrc/0009-private-fleet-on-a-public-network.md): a private
   fleet on a public network. Status: draft.
 
-Until those land, there is no private inter-fleet channel. Do not send
-anything to another fleet you would not publish.
+There is no private inter-fleet channel. Do not send anything to another fleet
+you would not publish.
 
 ## 6. Work productively
 
