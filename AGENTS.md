@@ -34,7 +34,10 @@ make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed  # one-trip ver
 make lint-fast                                # fast lint subset
 ```
 
-Never run `test_zcl` directly. Run full `make lint` once, at the candidate tip before landing.
+Never run `test_zcl` directly. Before submission, run focused tests, `lint-fast`
+and the applicable preflight in [section 4](docs/dev/DEVELOPING.md#4-receive-fast-local-feedback).
+The native land proof runs full `make lint` on the exact candidate before publication;
+do not duplicate that full run in the lane for an ordinary slice.
 On a maintainer host, prefix heavy commands with `devbuild --wait` ([Maintainer hosts](docs/dev/DEVELOPING.md#maintainer-hosts)).
 
 Before editing, `build/bin/z23 code guide <paths>` (MCP: `z23_code sub=guide`) returns one brief: nearest `AGENTS.md` rules, test groups, wiki lessons, first commands.
