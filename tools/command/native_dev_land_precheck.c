@@ -448,6 +448,12 @@ static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
     struct pc_history *h = context;
     if (row->classification != ZCL_PROOF_HISTORY_FAILURE) return true;
     if (!row->digest[0]) {
+        if (pc_recording_expired(row, h->now))
+            return true;
+        if (row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER &&
+            row->observed_upper_unix <= h->now &&
+            row->observed_upper_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S)
+            return true;
         h->uncertain = true;
         return true;
     }

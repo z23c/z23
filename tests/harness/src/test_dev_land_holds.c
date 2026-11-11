@@ -1300,6 +1300,126 @@ static bool dlx_pc_recording_case(int days_ago, int record_days, bool corrupt, b
     return ok;
 }
 
+enum dlx_empty_bound { DLX_EMPTY_NONE, DLX_EMPTY_RECORDED, DLX_EMPTY_OBSERVED,
+                       DLX_EMPTY_CORRUPT, DLX_EMPTY_BAD_OBSERVATION,
+                       DLX_EMPTY_REC_BAD_OBS };
+
+static bool dlx_pc_empty_metadata(const char *wt, const char *leaf,
+                                  enum dlx_empty_bound kind, int days)
+{
+    if (kind == DLX_EMPTY_NONE)
+        return true;
+    if (kind == DLX_EMPTY_REC_BAD_OBS)
+        return dlx_pc_empty_metadata(wt, leaf, DLX_EMPTY_RECORDED, days) &&
+               dlx_pc_empty_metadata(wt, leaf, DLX_EMPTY_BAD_OBSERVATION, days);
+    char request[320], reqhash[65], failhash[65], path[1600], body[1024];
+    bool observed = kind == DLX_EMPTY_OBSERVED || kind == DLX_EMPTY_BAD_OBSERVATION;
+    (void)snprintf(request, sizeof request, "zcl.dev_proof_request.v1\n1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n%lld\n1\n",
+                   (long long)DLX_PC_NOW - 10LL * 86400);
+    dlx_pc_recording_hash(observed ? "zcl.dev_proof_failure_observed.request.v1" :
+                          "zcl.dev_proof_failure_recorded.request.v1", request, reqhash);
+    dlx_pc_recording_hash(observed ? "zcl.dev_proof_failure_observed.failure.v1" :
+                          "zcl.dev_proof_failure_recorded.failure.v1",
+                          "child_proof_failed_exit_2\n", failhash);
+    if (kind == DLX_EMPTY_CORRUPT)
+        reqhash[0] = reqhash[0] == '0' ? '1' : '0';
+    (void)snprintf(path, sizeof path, ".cache/zcl-dev-proof/attempts/%s/logs/%s", leaf,
+                   observed ? "failure-observed.v1" : "failure-time.v1");
+    (void)snprintf(body, sizeof body, "zcl.dev_proof_failure_%s.v1\nattempt=%s\nlocal=1111111111111111111111111111111111111111\nbase=2222222222222222222222222222222222222222\nrequest_sha3=%s\nfailure_sha3=%s\n%s=%lld\n%s=2\n",
+                   observed ? "observed" : "recorded", leaf, reqhash, failhash,
+                   observed ? "observed_upper_unix" : "recorded_unix",
+                   (long long)DLX_PC_NOW - (long long)days * 86400,
+                   observed ? "observed_upper_monotonic_us" : "recorded_monotonic_us");
+    if (kind == DLX_EMPTY_BAD_OBSERVATION)
+        return dlx_pc_owned_file(wt, path, "invalid observation\n", 0600);
+    return dlx_pc_owned_file(wt, path, body, 0600);
+}
+
+static bool dlx_pc_empty_typed(const struct zcl_dev_proof_history_failure *row,
+                               enum dlx_empty_bound kind, int days)
+{
+    int64_t stamp = DLX_PC_NOW - (int64_t)days * 86400;
+    if (row->classification != ZCL_PROOF_HISTORY_FAILURE || row->digest[0])
+        return false;
+    switch (kind) {
+    case DLX_EMPTY_RECORDED:
+        return row->time_state == ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING &&
+               row->recorded_unix == stamp;
+    case DLX_EMPTY_OBSERVED:
+        return row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER &&
+               row->observed_upper_unix == stamp;
+    case DLX_EMPTY_CORRUPT:
+        return row->time_state == ZCL_PROOF_HISTORY_TIME_UNUSABLE;
+    case DLX_EMPTY_BAD_OBSERVATION:
+        return row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE;
+    case DLX_EMPTY_REC_BAD_OBS:
+        return row->time_state == ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING &&
+               row->recorded_unix == stamp &&
+               row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE;
+    case DLX_EMPTY_NONE:
+        return row->time_state == ZCL_PROOF_HISTORY_TIME_MISSING &&
+               row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_MISSING;
+    }
+    return false;
+}
+
+static bool dlx_pc_empty_case(enum dlx_empty_bound kind, int days, bool uncertain)
+{
+    static const char leaf[] = "1111111111111111111111111111111111111111-"
+                               "2222222222222222222222222222222222222222.aaaaaa";
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], state[512], wt[800], canonical[1600], outcome[512];
+    if (!dlx_pc_rig(&rig, "empty_failure_window", true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", 10, "child_proof_failed_exit_2", archive) ||
+        !dlx_write(archive, "child_proof_failed_exit_2\n") ||
+        !platform_state_root(state, sizeof state)) return false;
+    (void)snprintf(wt, sizeof wt, "%s/land/wt", state);
+    if (!platform_directory_canonical_real(wt, canonical, sizeof canonical) ||
+        !dlx_pc_empty_metadata(wt, leaf, kind, days)) return false;
+    struct zcl_dev_proof_history_failure row;
+    bool read = zcl_dev_proof_history_failure_read(canonical, leaf, &row);
+    bool bound = read && dlx_pc_empty_typed(&row, kind, days);
+    dlx_pc_row(outcome, sizeof outcome, 8, "failed", "lint", 1, "check-learned-one failed");
+    if (!dlx_pc_outcomes(outcome)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    bool actual = strstr(dlx_str(&c, "precheck_unproven"), "proof-history:") != NULL;
+    bool ok = bound && ran && dlx_ok(&c) && actual == uncertain;
+    if (!ok) fprintf(stderr, "empty history kind=%d days=%d read=%d bound=%d ran=%d uncertain=%d expected=%d\n",
+                     kind, days, read, bound, ran, actual, uncertain);
+    dlx_end(&c); dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_empty_cases(void)
+{
+    bool ok = true;
+    const struct { enum dlx_empty_bound kind; int days; bool uncertain; } cases[] = {
+        {DLX_EMPTY_RECORDED, 8, false}, {DLX_EMPTY_OBSERVED, 8, false},
+        {DLX_EMPTY_RECORDED, 7, true}, {DLX_EMPTY_RECORDED, 1, true},
+        {DLX_EMPTY_RECORDED, -1, true}, {DLX_EMPTY_NONE, 0, true},
+        {DLX_EMPTY_OBSERVED, 7, true}, {DLX_EMPTY_OBSERVED, 1, true},
+        {DLX_EMPTY_OBSERVED, -1, true},
+        {DLX_EMPTY_CORRUPT, 8, true}, {DLX_EMPTY_BAD_OBSERVATION, 8, true},
+        {DLX_EMPTY_REC_BAD_OBS, 8, true},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        if (!dlx_pc_empty_case(cases[i].kind, cases[i].days, cases[i].uncertain))
+            ok = false;
+    return ok;
+}
+
+static bool dlx_pc_recording_cases(void)
+{
+    return dlx_pc_recording_case(10, 8, false, false, false, false) &&
+        dlx_pc_recording_case(7, 7, false, false, false, true) &&
+        dlx_pc_recording_case(10, 1, false, false, true, false) &&
+        dlx_pc_recording_case(10, -1, false, false, true, false) &&
+        dlx_pc_recording_case(10, 8, true, false, true, false) &&
+        dlx_pc_recording_case(10, 8, false, true, true, false);
+}
+
 bool dlx_pc_observation_aged(void)
 {
     struct dlx_rig rig;
@@ -1318,12 +1438,8 @@ bool dlx_pc_observation_aged(void)
         row.observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER && row.observed_upper_unix == age;
     dlx_end(&c);
     dlx_restore();
-    return ok && dlx_pc_recording_case(10, 8, false, false, false, false) &&
-        dlx_pc_recording_case(7, 7, false, false, false, true) &&
-        dlx_pc_recording_case(10, 1, false, false, true, false) &&
-        dlx_pc_recording_case(10, -1, false, false, true, false) &&
-        dlx_pc_recording_case(10, 8, true, false, true, false) &&
-        dlx_pc_recording_case(10, 8, false, true, true, false);
+    bool empty_ok = dlx_pc_empty_cases();
+    return ok && empty_ok && dlx_pc_recording_cases();
 }
 
 bool dlx_pc_gate_set_learns(void)
