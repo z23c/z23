@@ -11,12 +11,10 @@
 #include <string.h>
 #include <time.h>
 
-#define WIDTH 1280
-#define HEIGHT 960
+#define DEFAULT_WIDTH 1280
+#define DEFAULT_HEIGHT 960
 #define PREVIEW_W 320
 #define PREVIEW_H 240
-#define PREVIEW_STEP_X (WIDTH / PREVIEW_W)
-#define PREVIEW_STEP_Y (HEIGHT / PREVIEW_H)
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool stopped, device_failed;
 static bool scanning, preview_ready;
@@ -80,11 +78,18 @@ bool zapp_camera_preview(unsigned char **bmp, size_t *len)
     *bmp = out; *len = size; return true;
 }
 
-static void update_preview(const uint8_t *dst)
+static void update_preview(const uint8_t *dst, int width, int height)
 {
+    int out_w = PREVIEW_W, out_h = PREVIEW_H;
+    if (width * PREVIEW_H > height * PREVIEW_W) out_h = height * PREVIEW_W / width;
+    else out_w = width * PREVIEW_H / height;
+    if (out_w < 1) out_w = 1;
+    if (out_h < 1) out_h = 1;
+    int off_x = (PREVIEW_W - out_w) / 2, off_y = (PREVIEW_H - out_h) / 2;
     pthread_mutex_lock(&lock);
-    for (int y = 0; y < PREVIEW_H; ++y) for (int x = 0; x < PREVIEW_W; ++x)
-        preview[y * PREVIEW_W + x] = dst[(y * PREVIEW_STEP_Y) * WIDTH + x * PREVIEW_STEP_X];
+    memset(preview, 0, sizeof(preview));
+    for (int y = 0; y < out_h; ++y) for (int x = 0; x < out_w; ++x)
+        preview[(y + off_y) * PREVIEW_W + x + off_x] = dst[(y * height / out_h) * width + x * width / out_w];
     preview_ready = true;
     struct timespec now; void (*notify)(void) = NULL;
     if (frame_notify && clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
@@ -107,19 +112,20 @@ static bool decode_frame(struct quirc *qr, char *result, size_t cap)
     }
     return false;
 }
-static bool frame(AImage *image, struct quirc *qr, char *result, size_t cap)
+static bool frame(AImage *image, struct quirc *qr, int width, int height, char *result, size_t cap)
 {
-    uint8_t *src = NULL; int length = 0, stride = 0, pixel_stride = 0;
-    if (AImage_getPlaneData(image, 0, &src, &length) != AMEDIA_OK ||
+    uint8_t *src = NULL; int length = 0, stride = 0, pixel_stride = 0, actual_width = 0, actual_height = 0;
+    if (AImage_getWidth(image, &actual_width) != AMEDIA_OK || AImage_getHeight(image, &actual_height) != AMEDIA_OK ||
+        actual_width != width || actual_height != height ||
+        AImage_getPlaneData(image, 0, &src, &length) != AMEDIA_OK ||
         AImage_getPlaneRowStride(image, 0, &stride) != AMEDIA_OK ||
         AImage_getPlanePixelStride(image, 0, &pixel_stride) != AMEDIA_OK ||
-        !src || stride <= 0 || pixel_stride <= 0 ||
-        (int64_t)(HEIGHT - 1) * stride + (WIDTH - 1) * (int64_t)pixel_stride >= length) return false;
+        !src || !zapp_camera_luma_fits(width, height, stride, pixel_stride, length)) return false;
     int w, h; uint8_t *dst = quirc_begin(qr, &w, &h);
-    if (!dst || w != WIDTH || h != HEIGHT) return false;
-    for (int y = 0; y < HEIGHT; ++y) for (int x = 0; x < WIDTH; ++x)
-        dst[y * WIDTH + x] = src[y * stride + x * pixel_stride];
-    update_preview(dst);
+    if (!dst || w != width || h != height) return false;
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
+        dst[y * width + x] = src[y * stride + x * pixel_stride];
+    update_preview(dst, width, height);
     quirc_end(qr);
     return decode_frame(qr, result, cap);
 }
@@ -130,6 +136,7 @@ struct camera_scan {
     ACaptureSessionOutputContainer *outputs; ACaptureSessionOutput *output;
     ACameraOutputTarget *target; ACaptureRequest *request;
     ACameraCaptureSession *session; struct quirc *qr;
+    int width, height;
 };
 static const char *rear_camera(struct camera_scan *r, char *error, size_t error_cap)
 {
@@ -148,12 +155,22 @@ static const char *rear_camera(struct camera_scan *r, char *error, size_t error_
     if (!id) snprintf(error, error_cap, "No rear camera available.");
     return id;
 }
+static bool choose_size(struct camera_scan *r, const char *id, char *error, size_t error_cap)
+{
+    ACameraMetadata *metadata = NULL; ACameraMetadata_const_entry entry;
+    bool ok = ACameraManager_getCameraCharacteristics(r->manager, id, &metadata) == ACAMERA_OK &&
+        ACameraMetadata_getConstEntry(metadata, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, &entry) == ACAMERA_OK &&
+        zapp_camera_choose_size(entry.data.i32, entry.count, DEFAULT_WIDTH, DEFAULT_HEIGHT, &r->width, &r->height);
+    if (metadata) ACameraMetadata_free(metadata);
+    if (!ok) snprintf(error, error_cap, "This camera has no compatible YUV preview size.");
+    return ok;
+}
 static bool open_capture(struct camera_scan *r, const char *id, uintptr_t sequence)
 {
     ACameraDevice_StateCallbacks dc = { .context = (void *)sequence, .onDisconnected = device_disconnected, .onError = device_error };
     ACameraCaptureSession_stateCallbacks sc = { .context = NULL, .onClosed = session_state, .onReady = session_state, .onActive = session_state };
     if (ACameraManager_openCamera(r->manager, id, &dc, &r->device) != ACAMERA_OK ||
-        AImageReader_new(WIDTH, HEIGHT, AIMAGE_FORMAT_YUV_420_888, 2, &r->reader) != AMEDIA_OK ||
+        AImageReader_new(r->width, r->height, AIMAGE_FORMAT_YUV_420_888, 2, &r->reader) != AMEDIA_OK ||
         AImageReader_getWindow(r->reader, &r->window) != AMEDIA_OK ||
         ACaptureSessionOutputContainer_create(&r->outputs) != ACAMERA_OK ||
         ACaptureSessionOutput_create(r->window, &r->output) != ACAMERA_OK ||
@@ -171,7 +188,7 @@ static bool next_frame(void *arg)
     struct frame_loop *loop = arg;
     AImage *image = NULL;
     if (AImageReader_acquireLatestImage(loop->scan->reader, &image) != AMEDIA_OK || !image) return false;
-    bool ok = frame(image, loop->scan->qr, loop->result, loop->cap);
+    bool ok = frame(image, loop->scan->qr, loop->scan->width, loop->scan->height, loop->result, loop->cap);
     AImage_delete(image);
     return ok;
 }
@@ -184,7 +201,7 @@ static void frame_pause(void *arg)
 }
 static bool scan_frames(struct camera_scan *r, char *result, size_t cap)
 {
-    r->qr = quirc_new(); if (!r->qr || quirc_resize(r->qr, WIDTH, HEIGHT) != 0) return false;
+    r->qr = quirc_new(); if (!r->qr || quirc_resize(r->qr, r->width, r->height) != 0) return false;
     struct frame_loop loop = { r, result, cap };
     return zapp_camera_run_frames(&loop, next_frame, frame_stopped, frame_pause);
 }
@@ -259,7 +276,7 @@ enum zapp_camera_result zapp_camera_scan(uint64_t ticket, char *result, size_t c
         goto out;
     }
     const char *id = rear_camera(&state, error, error_cap);
-    if (!id || !open_capture(&state, id, sequence)) goto out;
+    if (!id || !choose_size(&state, id, error, error_cap) || !open_capture(&state, id, sequence)) goto out;
     ok = scan_frames(&state, result, cap);
 out:
     close_capture(&state);

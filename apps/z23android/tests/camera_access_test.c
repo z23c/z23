@@ -77,11 +77,57 @@ static void scan_lifetime(void)
     assert(cancelled.frames == 450);
 }
 
+static void stream_sizes(void)
+{
+    int w = 0, h = 0;
+    const int32_t exact[] = {35, 640, 480, 0, 35, 1280, 960, 0};
+    assert(zapp_camera_choose_size(exact, sizeof(exact) / sizeof(exact[0]), 1280, 960, &w, &h));
+    assert(w == 1280 && h == 960);
+    const int32_t emulator[] = {
+        33, 1856, 1392, 0, 35, 160, 120, 0, 35, 640, 480, 0,
+        35, 1280, 720, 0, 35, 1024, 768, 0, 35, 1856, 1392, 0,
+        35, 1280, 960, 1,
+    };
+    assert(zapp_camera_choose_size(emulator, sizeof(emulator) / sizeof(emulator[0]), 1280, 960, &w, &h));
+    assert(w == 1280 && h == 720);
+    const int32_t no_yuv[] = {33, 1280, 960, 0};
+    assert(!zapp_camera_choose_size(no_yuv, sizeof(no_yuv) / sizeof(no_yuv[0]), 1280, 960, &w, &h));
+    assert(!zapp_camera_choose_size(exact, 3, 1280, 960, &w, &h));
+    const int32_t invalid[] = {35, 0, 720, 0, 35, 8192, 8192, 0};
+    assert(!zapp_camera_choose_size(invalid, sizeof(invalid) / sizeof(invalid[0]), 1280, 960, &w, &h));
+    const int32_t tiny[] = {35, 1, 1, 0};
+    assert(zapp_camera_choose_size(tiny, sizeof(tiny) / sizeof(tiny[0]), INT32_MAX, INT32_MAX, &w, &h));
+    assert(w == 1 && h == 1);
+}
+
+static void plane_bounds(void)
+{
+    assert(zapp_camera_luma_fits(2, 2, 6, 1, 12));
+    assert(zapp_camera_luma_fits(2, 2, 6, 1, 8));
+    assert(!zapp_camera_luma_fits(2, 2, 6, 1, 7));
+    assert(zapp_camera_luma_fits(2, 2, 8, 2, 11));
+    assert(!zapp_camera_luma_fits(2, 2, 8, 2, 10));
+    assert(!zapp_camera_luma_fits(0, 2, 6, 1, 12));
+    assert(!zapp_camera_luma_fits(2, 0, 6, 1, 12));
+    assert(!zapp_camera_luma_fits(-1, 2, 6, 1, 12));
+    assert(!zapp_camera_luma_fits(2, -1, 6, 1, 12));
+    assert(!zapp_camera_luma_fits(2, 2, 0, 1, 12));
+    assert(!zapp_camera_luma_fits(2, 2, 6, 0, 12));
+    assert(!zapp_camera_luma_fits(2, 2, -1, 1, 12));
+    assert(!zapp_camera_luma_fits(2, 2, 6, -1, 12));
+    assert(!zapp_camera_luma_fits(2, 2, 6, 1, 0));
+    assert(!zapp_camera_luma_fits(2, 2, 6, 1, -1));
+    assert(zapp_camera_luma_fits(1, 1, INT32_MAX, INT32_MAX, INT32_MAX));
+    assert(!zapp_camera_luma_fits(INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX));
+}
+
 int main(void)
 {
     states();
     screens();
     waits();
     scan_lifetime();
+    stream_sizes();
+    plane_bounds();
     return 0;
 }

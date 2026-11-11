@@ -2,6 +2,14 @@
 #ifndef Z23_ANDROID_CAMERA_ACCESS_H
 #define Z23_ANDROID_CAMERA_ACCESS_H
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* Selects an output YUV_420_888 size from camera metadata quadruples, preferring the requested area. */
+bool zapp_camera_choose_size(const int32_t *entries, size_t count, int wanted_width, int wanted_height,
+                             int *width, int *height);
+/* Whether positive dimensions and strides put the last addressed luma byte inside the reported buffer. */
+bool zapp_camera_luma_fits(int width, int height, int stride, int pixel_stride, int length);
 
 /* What the camera scan may do, from the state of the camera permission. */
 enum zapp_camera_access {
