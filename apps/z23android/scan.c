@@ -149,9 +149,9 @@ const char *zapp_scan_refusal_text(enum zapp_pay_refusal refusal)
         [ZAPP_PAY_REFUSE_MEMO_ENCODING] = "The memo in this code is not readable. Nothing was done.",
         [ZAPP_PAY_REFUSE_MEMO_TOO_LONG] = "The memo in this code is too long. Nothing was done.",
         [ZAPP_PAY_REFUSE_PERCENT] = "This payment code is damaged. Nothing was done.",
-        [ZAPP_PAY_REFUSE_LABEL_INVALID] = "The label or message in this code is not readable. Nothing was done.",
+        [ZAPP_PAY_REFUSE_LABEL_INVALID] = "The label in this code is not readable. Nothing was done.",
         [ZAPP_PAY_REFUSE_LABEL_TOO_LONG] = "The label in this code is too long. Nothing was done.",
-        [ZAPP_PAY_REFUSE_MESSAGE_INVALID] = "The label or message in this code is not readable. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MESSAGE_INVALID] = "The message in this code is not readable. Nothing was done.",
         [ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG] = "The message in this code is too long. Nothing was done.",
     };
     bool known = (unsigned)refusal < sizeof(text) / sizeof(text[0]) && text[refusal];

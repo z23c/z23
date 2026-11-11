@@ -147,15 +147,25 @@ static void a_typed_address_is_read_like_a_scanned_one(void)
     assert(scan("zclassic:not-an-address?amount=1") == ZAPP_SCAN_PAY_REFUSED);
     assert(!strcmp(value, zapp_scan_refusal_text(zapp_scan_payment("zclassic:not-an-address?amount=1", &pay))));
 }
-/* A field that does not fit says so. An unreadable field does not borrow that sentence. */
-static void refusal_words(void)
+/* A field that does not fit says so. An unreadable field names itself and does not borrow that sentence. */
+static void too_long_words(void)
 {
     assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_TOO_LONG), "too long") &&
            !strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_TOO_LONG), "not readable"));
     assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG), "too long") &&
            !strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG), "not readable"));
-    assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_INVALID), "not readable"));
-    assert(strstr(zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_INVALID), "not readable"));
+}
+static void unreadable_words(void)
+{
+    const char *label = zapp_scan_refusal_text(ZAPP_PAY_REFUSE_LABEL_INVALID);
+    const char *message = zapp_scan_refusal_text(ZAPP_PAY_REFUSE_MESSAGE_INVALID);
+    assert(strstr(label, "label") && strstr(label, "not readable") && !strstr(label, "message"));
+    assert(strstr(message, "message") && strstr(message, "not readable") && !strstr(message, "label"));
+}
+static void refusal_words(void)
+{
+    too_long_words();
+    unreadable_words();
 }
 /* A payment code opens the send review and does nothing else; a refused one says why; other text is untouched. */
 static void payment_codes(void)
