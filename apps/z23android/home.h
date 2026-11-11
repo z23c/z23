@@ -87,4 +87,7 @@ bool zapp_home_same_press(size_t index_a, bool by_button_a, unsigned button_a, s
 void zapp_home_fallback_label(char *label, size_t cap, const char *declared, const char *package);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */
 void zapp_home_fit_label(char *out, size_t cap, const char *text);
+/* Stores a present versionName, cut on a character boundary so a long name stays on the row.
+ * NULL or empty clears the name, which is the code-only line. */
+void zapp_home_store_version_name(struct zapp_app_entry *app, const char *text);
 #endif

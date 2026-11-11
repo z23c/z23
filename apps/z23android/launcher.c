@@ -126,6 +126,17 @@ static bool same_signature(JNIEnv *env, jobject manager, const char *own, const 
     jint result = b ? (*env)->CallIntMethod(env, manager, check, a, b) : -1;
     return zj_clean(env) && result == 0;
 }
+/* A long versionName is cut on a character boundary. Dropping it would show the code as if the name were absent. */
+static void copy_version_name(JNIEnv *env, jobject info, struct zapp_app_entry *entry)
+{
+    jclass cls = info ? (*env)->GetObjectClass(env, info) : NULL;
+    jfieldID id = zj_clean(env) && cls ? (*env)->GetFieldID(env, cls, "versionName", "Ljava/lang/String;") : NULL;
+    jstring value = zj_clean(env) && id ? (*env)->GetObjectField(env, info, id) : NULL;
+    const char *chars = zj_clean(env) && value ? (*env)->GetStringUTFChars(env, value, NULL) : NULL;
+    if (chars) zapp_home_store_version_name(entry, chars);
+    if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
+    (void)zj_clean(env);
+}
 /* Reads an installed Z23 app's version without treating it as source identity. */
 static void resolve_version(JNIEnv *env, jobject manager, struct zapp_app_entry *entry)
 {
@@ -137,10 +148,7 @@ static void resolve_version(JNIEnv *env, jobject manager, struct zapp_app_entry 
     jlong value = code ? (*env)->CallLongMethod(env, info, code) : -1;
     entry->version_code = (int64_t)value;
     entry->version_known = zj_clean(env) && value >= 0;
-    if (entry->version_known) {
-        jclass cls = (*env)->GetObjectClass(env, info);
-        if (cls) (void)string_field(env, info, cls, "versionName", entry->version_name, sizeof(entry->version_name));
-    }
+    if (entry->version_known) copy_version_name(env, info, entry);
     (*env)->PopLocalFrame(env, NULL);
 }
 static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *own, struct zapp_launcher_app *app)

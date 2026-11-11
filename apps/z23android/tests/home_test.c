@@ -325,6 +325,31 @@ static void z23_version_metadata(void)
     assert(json_read(&card, text, strlen(text)) && !json_get(&card, "version_code") && !json_get(&card, "version_name"));
     json_free(&card);
 }
+/* A versionName longer than the field is cut on a character boundary and still shown with its code. */
+static void long_version_name_is_cut_not_dropped(void)
+{
+    struct zapp_app_entry app = {.label = "Clips", .package = "org.z23.clips", .same_signature = true,
+        .version_code = 42, .version_known = true};
+    char raw[ZAPP_APP_VERSION_NAME_CAP + 8], version[ZAPP_APP_VERSION_LINE_CAP], expect[ZAPP_APP_VERSION_LINE_CAP];
+    char text[512];
+    struct json_value card;
+    memset(raw, 'v', sizeof(raw) - 1);
+    raw[sizeof(raw) - 1] = 0;
+    memcpy(raw + ZAPP_APP_VERSION_NAME_CAP - 2, "\xc3\xa9", 2);
+    zapp_home_store_version_name(&app, raw);
+    assert(app.version_name[0] && strlen(app.version_name) < sizeof(app.version_name));
+    assert(strlen(app.version_name) < strlen(raw) && !strncmp(raw, app.version_name, strlen(app.version_name)));
+    snprintf(expect, sizeof(expect), "%s (42)", app.version_name);
+    assert(!strcmp(zapp_home_version_line(&app, version, sizeof(version)), expect) && strcmp(version, "42"));
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && !strcmp(json_get_str(json_get(&card, "version_name")), app.version_name));
+    json_free(&card);
+    zapp_home_store_version_name(&app, NULL);
+    assert(!app.version_name[0] && !strcmp(zapp_home_version_line(&app, version, sizeof(version)), "42"));
+    zapp_home_store_version_name(&app, "");
+    assert(!app.version_name[0] && !strcmp(zapp_home_version_line(&app, version, sizeof(version)), "42"));
+}
 /* A package that is not signed with this app's key gets a plain app tile, whatever its name. */
 static void unsigned_z23_package_is_plain(void)
 {
@@ -739,6 +764,7 @@ int main(void)
     app_card_golden();
     z23_app_cards();
     z23_version_metadata();
+    long_version_name_is_cut_not_dropped();
     unsigned_z23_package_is_plain();
     label_fits_on_character_boundary();
     scan_destinations();

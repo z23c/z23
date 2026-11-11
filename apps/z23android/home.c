@@ -194,6 +194,12 @@ void zapp_home_fit_label(char *out, size_t cap, const char *text)
     memcpy(out, text, length);
     out[length] = '\0';
 }
+void zapp_home_store_version_name(struct zapp_app_entry *app, const char *text)
+{
+    if (!app) return;
+    app->version_name[0] = 0;
+    if (text && text[0]) zapp_home_fit_label(app->version_name, sizeof(app->version_name), text);
+}
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer)
 {
     if (kind == ZAPP_SCAN_FLEET) return ZAPP_SCAN_TO_FLEET_REVIEW;
