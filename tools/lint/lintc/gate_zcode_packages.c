@@ -251,7 +251,10 @@ static int zpr_run_pkg_sources(char pkg_src[][RS_PATH], int *ns)
 static int zpr_run_monolith_sources(char *cap, size_t capn, char mono[][RS_PATH], int *nm)
 {
     int code = 0;
-    if (capture_cmd("make -s --no-print-directory print-zcode-monolith-lib-sources", cap, capn, &code))
+    /* This target prints fresh LIB_SRCS and builds no objects. Keep unrelated
+     * compile-profile depfiles out of this read-only query. */
+    if (capture_cmd("make -s --no-print-directory ZCL_DEPFILE_PROFILES= "
+                    "print-zcode-monolith-lib-sources", cap, capn, &code))
         return 2;
     if (code != 0) return 1;
     regex_t re;
