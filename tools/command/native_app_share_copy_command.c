@@ -97,9 +97,9 @@ static bool zsh_state(struct zsh *z)
     size_t changes = 0;
     if (!app_copy_build_dir(z->datadir, z->name, z->dir, sizeof(z->dir),
                             z->reply) ||
-        !zcl_package_copy_open(z->dir, &copy, z->reply, ZSH_COMMAND))
+        !zcl_package_copy_open_as(z->dir, ZCL_PACKAGE_COPY_READ, &copy, z->reply, ZSH_COMMAND))
         return false;
-    bool ok = zcl_package_copy_unsaved(&copy, &changes);
+    bool ok = zcl_package_copy_unsaved_readonly(&copy, &changes);
     zcl_hex_encode(copy.head_version, 32, z->head);
     memcpy(z->fork, copy.fork_version, 32);
     zcl_package_copy_close(&copy);

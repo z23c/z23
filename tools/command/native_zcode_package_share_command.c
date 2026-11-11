@@ -216,9 +216,8 @@ static void zps_scratch_remove(char scratch[PLATFORM_TEMP_PATH_MAX])
  * offline selected-version plan read only canonical copy objects. */
 static bool zps_strict_source(const struct zps_share *s)
 {
-    return s->explicit_version &&
-        ((!s->local_key && !zcl_package_copy_confirmed(s->input)) ||
-         (s->local_key && s->expected_key_value != NULL));
+    return !zcl_package_copy_confirmed(s->input) ||
+        (s->explicit_version && s->local_key && s->expected_key_value != NULL);
 }
 
 /* Materialize one saved tree into fresh private scratch and prepare it.
@@ -394,7 +393,9 @@ static bool zps_local_key(struct zps_share *s)
 static bool zps_admit(struct zps_share *s)
 {
     size_t changes = 0;
-    if (!s->explicit_version && (!zcl_package_copy_unsaved(&s->copy, &changes) || changes > 0)) {
+    if (!s->explicit_version && (!(zps_strict_source(s) ?
+        zcl_package_copy_unsaved_readonly(&s->copy, &changes) :
+        zcl_package_copy_unsaved(&s->copy, &changes)) || changes > 0)) {
         zcl_package_copy_fail(s->reply, "SHARE_UNSAVED_CHANGES", false,
                               "save the copy's changes with zcode package "
                               "version save before sharing", s->dir);

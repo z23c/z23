@@ -144,6 +144,7 @@ bool zcl_package_copy_make(const char *datadir,
 
 /* Count working-tree changes against the saved head. */
 bool zcl_package_copy_unsaved(struct zcl_package_copy *copy, size_t *changes);
+bool zcl_package_copy_unsaved_readonly(struct zcl_package_copy *copy, size_t *changes);
 
 /* Find the persisted release under <datadir>/zcode/releases whose release id
  * equals root, or else the single release whose package root equals root. */

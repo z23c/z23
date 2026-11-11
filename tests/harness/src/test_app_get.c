@@ -81,6 +81,7 @@ int test_app_get(void)
 
 #include <ftw.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <glob.h>
 #include <limits.h>
 #include <stdio.h>
@@ -2022,12 +2023,19 @@ static int tag_publish_onion_change(struct tag_world *w)
     int failures = 0;
     TEST("app get: a changed onion port invalidates the publish plan") {
         struct asf_leaf l;
-        char token[33], plan[65];
+        char token[33], plan[65], zvcs[TAG_PATH];
+        struct stat before, after_plan, after_confirm;
+        const struct timespec old[2] = {{1000000000, 0}, {1000000000, 0}};
+        ASSERT(snprintf(zvcs, sizeof zvcs, "%s/.zvcs", w->j.a_copy) < (int)sizeof zvcs);
+        ASSERT(utimensat(AT_FDCWD, zvcs, old, 0) == 0);
+        ASSERT(stat(zvcs, &before) == 0);
         uint64_t home = tag_tree(w->j.a_home), data = tag_tree(w->j.a_datadir);
         asf_open(&l);
         ASSERT(json_push_kv_str(&l.in, "copy", w->j.copy));
         ASSERT(json_push_kv_str(&l.in, "datadir", w->j.a_datadir));
         ASSERT(asf_pass("app.publish", &l));
+        ASSERT(stat(zvcs, &after_plan) == 0);
+        bool plan_unchanged = tag_tree(w->j.a_home) == home && tag_tree(w->j.a_datadir) == data;
         (void)snprintf(token, sizeof(token), "%s", asf_get(&l, "token"));
         (void)snprintf(plan, sizeof(plan), "%s", asf_get(&l, "plan_id"));
         ASSERT(json_push_kv_str(&l.in, "token", token));
@@ -2037,16 +2045,36 @@ static int tag_publish_onion_change(struct tag_world *w)
         zcl_command_reply_init(&l.out, "zcl.test.app_get.v1");
         g_tag.onion_changed = true;
         bool answered = asf_exec("app.publish", &l);
+        bool observed = stat(zvcs, &after_confirm) == 0;
         g_tag.onion_changed = false;
+        if (observed && (before.st_mtime != after_plan.st_mtime || before.st_mtime != after_confirm.st_mtime))
+            fprintf(stderr, "publish plan changed %s mtime: before=%lld plan=%lld confirm=%lld\n",
+                    zvcs, (long long)before.st_mtime, (long long)after_plan.st_mtime,
+                    (long long)after_confirm.st_mtime);
         ASSERT(answered);
+        ASSERT(observed);
         ASSERT(asf_refusal(&l, "PLAN_MISMATCH"));
         ASSERT_EQ(g_tag.offers + g_tag.posts, 0);
+        ASSERT(plan_unchanged);
+        ASSERT_EQ(after_plan.st_mtime, before.st_mtime);
+        ASSERT_EQ(after_confirm.st_mtime, before.st_mtime);
         ASSERT_EQ(tag_tree(w->j.a_home), home);
         ASSERT_EQ(tag_tree(w->j.a_datadir), data);
         asf_close(&l);
         PASS();
     } _test_next:;
     g_tag.onion_changed = false;
+    return failures;
+}
+
+static int tag_publish_onion_dirty(struct tag_world *w)
+{
+    char changed[4096];
+    int n = snprintf(changed, sizeof changed, "%s\n/* unsaved plan fixture */\n", k_tag_main);
+    if (n <= 0 || (size_t)n >= sizeof changed || !asf_put(w->j.a_copy, "src/main.c", changed))
+        return 1;
+    int failures = tag_publish_onion_change(w);
+    if (!asf_put(w->j.a_copy, "src/main.c", k_tag_main)) ++failures;
     return failures;
 }
 
@@ -4741,6 +4769,8 @@ int test_app_get(void)
         failures += tag_publish_collision(&w);
     if (failures == 0)
         failures += tag_publish_onion_change(&w);
+    if (failures == 0)
+        failures += tag_publish_onion_dirty(&w);
     if (failures == 0)
         failures += tag_publish_source_change(&w);
     if (failures == 0)

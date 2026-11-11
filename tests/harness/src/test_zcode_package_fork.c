@@ -31,6 +31,7 @@
 #include "vcs/package_checkout.h"
 #include "vcs/package_release.h"
 #include "vcs/vcs.h"
+#include "vcs/vcs_index.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -484,6 +485,50 @@ static int zpf_no_change_refusals(const struct zpf_world *w)
         zpf_end(&c);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static bool zpf_mismatch_index(const char *dir, bool missing)
+{
+    char path[1400];
+    if (missing) {
+        int n = snprintf(path, sizeof path, "%s/.zvcs/index.kv", dir);
+        if (n <= 0 || (size_t)n >= sizeof path || unlink(path) != 0) return false;
+    }
+    struct vcs_index *idx = vcs_index_open(dir);
+    if (!idx) return false;
+    uint8_t other[32] = {1};
+    bool ok = missing || (vcs_index_begin(idx) &&
+        vcs_index_ref_set_in_tx(idx, "HEAD", other) && vcs_index_commit(idx));
+    vcs_index_close(idx);
+    return ok;
+}
+
+static int zpf_index_head_refusal(const struct zpf_world *w)
+{
+    int failures = 0;
+    for (int missing = 0; missing < 2; ++missing) {
+        TEST("zcode package version save: inconsistent index HEAD refuses") {
+            char dir[700], plan[65]; struct zpf_call c;
+            (void)snprintf(dir, sizeof dir, "%s/index-head-%d", w->root, missing);
+            ASSERT(zpf_fork(w, w->origin_release_hex, dir, NULL));
+            ASSERT(zpf_append(dir, ZPF_EDITED, "/* dirty */\n"));
+            zpf_begin(&c);
+            ASSERT(json_push_kv_str(&c.input, "dir", dir));
+            ASSERT(zpf_run("zcode.package.version.save", &c) && zpf_passed(&c));
+            (void)snprintf(plan, sizeof plan, "%s", zpf_data_str(&c, "plan_id"));
+            ASSERT(zpf_mismatch_index(dir, missing));
+            ASSERT(json_push_kv_str(&c.input, "plan_id", plan));
+            ASSERT(json_push_kv_bool(&c.input, "confirm", true));
+            zcl_command_reply_free(&c.reply);
+            zcl_command_reply_init(&c.reply, "zcl.test.zcode_package_fork.v1");
+            ASSERT(zpf_run("zcode.package.version.save", &c));
+            ASSERT(zpf_refused(&c, "COPY_HEAD_MISMATCH"));
+            ASSERT(!c.reply.error.mutated);
+            zpf_end(&c);
+            PASS();
+        } _test_next:;
+    }
     return failures;
 }
 
@@ -1443,6 +1488,7 @@ int test_zcode_package_fork(void)
     failures += zpf_mcp_confirmation(&w);
     failures += zpf_fork_records_parent(&w, fork_version);
     failures += zpf_no_change_refusals(&w);
+    failures += zpf_index_head_refusal(&w);
     failures += zpf_save_and_restore(&w, fork_version);
     failures += zpf_unsaved_refusal(&w);
     failures += zpf_share_names_parent(&w, shared_release);

@@ -19,6 +19,7 @@
 #include "vcs/package_checkout.h"
 #include "vcs/package_store.h"
 #include "vcs/vcs.h"
+#include "vcs/vcs_index.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -295,6 +296,39 @@ bool zcl_package_copy_unsaved(struct zcl_package_copy *copy, size_t *changes)
     return vcs_status(copy->repo, NULL, NULL, changes) == VCS_OK;
 }
 
+struct zpc_read_diff { vcs_diff_cb cb; void *user; size_t count; };
+
+static void zpc_read_diff_cb(enum vcs_diff_kind kind, const struct vcs_entry *a,
+                             const struct vcs_entry *b, void *user)
+{
+    struct zpc_read_diff *d = user;
+    ++d->count;
+    if (d->cb) d->cb(kind, a, b, d->user);
+}
+
+static bool zpc_status_readonly(struct zcl_package_copy *copy, vcs_diff_cb cb,
+                                void *user, size_t *changes)
+{
+    struct vcs_manifest current, head;
+    const char *root = vcs_repo_root(copy->repo);
+    if (changes) *changes = 0;
+    if (!vcs_manifest_build(root, NULL, &current)) return false;
+    vcs_manifest_init(&head);
+    bool ok = vcs_tree_load_readonly_bounded(root, copy->head_tree,
+                                            SIZE_MAX, SIZE_MAX, &head);
+    struct zpc_read_diff d = {.cb = cb, .user = user};
+    if (ok) vcs_manifest_diff(&head, &current, zpc_read_diff_cb, &d);
+    vcs_manifest_free(&head);
+    vcs_manifest_free(&current);
+    if (ok && changes) *changes = d.count;
+    return ok;
+}
+
+bool zcl_package_copy_unsaved_readonly(struct zcl_package_copy *copy, size_t *changes)
+{
+    return zpc_status_readonly(copy, NULL, NULL, changes);
+}
+
 /* ── zcode package fork ─────────────────────────────────────────────── */
 
 struct zpc_fork {
@@ -497,6 +531,14 @@ static void zpc_change_cb(enum vcs_diff_kind kind, const struct vcs_entry *a,
     }
 }
 
+static bool zpc_save_head_matches(struct zcl_package_copy *copy)
+{
+    uint8_t head[32]; bool present = false;
+    struct vcs_index *idx = vcs_repo_index(copy->repo);
+    return idx && vcs_index_ref_get(idx, "HEAD", head, &present) && present &&
+           memcmp(head, copy->head_version, sizeof head) == 0;
+}
+
 void zcl_native_handle_zcode_package_version_save(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -504,9 +546,16 @@ void zcl_native_handle_zcode_package_version_save(
     struct zcl_package_copy copy;
     if (!request || !reply ||
         !zcl_package_copy_open_as(zcl_package_copy_str(request->input, "dir"),
-                                  zpc_access(request->input), &copy, reply,
+                                  zcl_package_copy_confirmed(request->input) ?
+                                      ZCL_PACKAGE_COPY_RECOVER : ZCL_PACKAGE_COPY_READ, &copy, reply,
                                   command))
         return;
+    if (zcl_package_copy_confirmed(request->input) && !zpc_save_head_matches(&copy)) {
+        zcl_package_copy_fail(reply, "COPY_HEAD_MISMATCH", false,
+                              "the copy index HEAD does not match its validated history", command);
+        zcl_package_copy_close(&copy);
+        return;
+    }
     struct zpc_changes ch = {.count = 0};
     uint8_t plan_id[32], version[32];
     json_init(&ch.paths);
@@ -514,7 +563,9 @@ void zcl_native_handle_zcode_package_version_save(
     sha3_256_init(&ch.ctx);
     zpc_hash_text(&ch.ctx, "zcl.zcode_package_version_save.plan.v1");
     sha3_256_write(&ch.ctx, copy.head_version, 32);
-    bool ok = vcs_status(copy.repo, zpc_change_cb, &ch, NULL) == VCS_OK;
+    bool ok = zcl_package_copy_confirmed(request->input) ?
+        vcs_status(copy.repo, zpc_change_cb, &ch, NULL) == VCS_OK :
+        zpc_status_readonly(&copy, zpc_change_cb, &ch, NULL);
     sha3_256_finalize(&ch.ctx, plan_id);
     if (!ok || ch.count == 0) {
         zcl_package_copy_fail(reply, ok ? "VERSION_NO_CHANGES" : "STATUS_FAILED",
