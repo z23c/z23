@@ -17,7 +17,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include "share_diag.h"
 
 #define OUT_CAP 65536u
 #define PAGES_MAX 64u
@@ -78,6 +77,7 @@ struct data {
     enum zapp_pay_network network;
     char setup_anchor[ZAPP_PAY_ADDRESS_MAX];
     char address[ZAPP_PAY_ADDRESS_MAX], code[ZAPP_RECEIVE_CODE_MAX], note[NOTE_MAX], scan_note[NOTE_MAX];
+    bool share_notice;
     bool history_pending, history_failed, has_more;
     enum history_state history_state;
     unsigned page, detail;
@@ -121,6 +121,7 @@ enum { WALLET_SETTLE_MS = 250, WALLET_SETTLE_TICKS = 2 };
 
 static void touch(void) { ++st.version; }
 static void copy(char *dst, size_t cap, const char *src) { snprintf(dst, cap, "%s", src); }
+static void clear_share_notice(void) { st.d.share_notice = false; st.d.note[0] = '\0'; }
 static uint64_t now(void) { return st.env.now_ms ? st.env.now_ms(st.env.ctx) : 0; }
 /* The JSON object in command output: at its start, or on the first line that begins with a brace. */
 static const char *json_start(const char *text)
@@ -550,8 +551,6 @@ static void funds_items(struct wallet_screen *s)
 
 static void receive_items(struct wallet_screen *s)
 {
-    SHARE_DIAG("receive items ready=%d blocked=%d page=%d note=%d",
-               st.ready, st.blocked, st.page, st.d.note[0] ? 1 : 0);
 #ifdef ZAPP_SHARE_FIXTURE
     title(s, "Receive");
     (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
@@ -757,7 +756,7 @@ static bool fallback_current(void)
         char identity[82];
         if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
         st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.offline_bound = false;
-        st.d.address_pending = false; ++st.epoch; touch();
+        clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
         return false;
     }
     if (!st.d.setup_bound) return true;
@@ -766,7 +765,7 @@ static bool fallback_current(void)
     if (st.env.setup_address && st.env.setup_address(st.env.ctx, address, sizeof(address), &generation) &&
         generation == st.d.address_generation && !strcmp(address, st.d.setup_anchor)) return true;
     st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.setup_bound = false;
-    st.d.address_pending = false; ++st.epoch; touch();
+    clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
     return false;
 }
 unsigned wallet_screens_snapshot(struct wallet_screen *out)
@@ -974,7 +973,7 @@ static void request_guard(void)
     if (!st.request.valid) return;
     if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) &&
         !strcmp(identity, st.request.identity)) return;
-    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
+    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice();
     if (st.d.address[0]) rebuild_code();
     touch();
 }
@@ -994,14 +993,18 @@ static void request_restore(const char *address)
     if (!st.request.valid) return;
     if (!st.env.setup_identity || !st.env.setup_identity(st.env.ctx, identity) ||
         strcmp(identity, st.request.identity) || strcmp(address, st.request.address)) {
-        request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; return;
+        request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice(); return;
     }
     st.d.has_amount = true; st.d.amount_zat = st.request.amount;
 }
 static void show_address(const char *address)
 {
-    st.d.note[0] = '\0';
-    if (!private_network(address, &st.d.network)) copy(st.d.note, sizeof(st.d.note), "The wallet returned an address that is not private, so it is not shown. Tap New address.");
+    if (st.d.address[0] && strcmp(st.d.address, address)) clear_share_notice();
+    if (!st.d.share_notice) st.d.note[0] = '\0';
+    if (!private_network(address, &st.d.network)) {
+        clear_share_notice();
+        copy(st.d.note, sizeof(st.d.note), "The wallet returned an address that is not private, so it is not shown. Tap New address.");
+    }
     else {
         copy(st.d.address, sizeof(st.d.address), address);
         request_restore(address);
@@ -1020,7 +1023,7 @@ static bool strict_private(const char *address)
 }
 static void address_unavailable(void)
 {
-    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
+    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice();
     memory_cleanse(st.d.address, sizeof(st.d.address));
     memory_cleanse(st.d.code, sizeof(st.d.code));
     st.d.address_fallback = false;
@@ -1034,6 +1037,7 @@ static void address_unavailable(void)
 
 static void address_failure(const struct json_value *data, bool missing, bool latest)
 {
+    clear_share_notice();
     if (latest && st.d.address_unavailable) address_unavailable();
     else if (latest && st.d.address_fallback) st.d.note[0] = 0;
     else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
@@ -1242,7 +1246,7 @@ static bool apply_offline(const struct reply *r)
         st.d.offline_bound = st.d.address[0] != 0;
         st.d.address_fallback = st.d.offline_bound;
         st.d.address_pending = false;
-        st.d.note[0] = 0;
+        if (!st.d.share_notice) st.d.note[0] = 0;
     }
     drop_tree(&root);
     return valid || unavailable;
@@ -1601,7 +1605,7 @@ static size_t new_address(struct job *jobs)
     if (st.d.no_receive || st.d.address_unavailable) return 0;
     ++st.epoch;
     if (!submit(jobs, &count, K_NEW, "receive", "")) { --st.epoch; return 0; }
-    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0;
+    request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice();
     memory_cleanse(st.d.address, sizeof(st.d.address));
     memory_cleanse(st.d.code, sizeof(st.d.code));
     st.d.note[0] = '\0';
@@ -1629,6 +1633,7 @@ static void copy_address(void)
     copy(address, sizeof(address), st.d.address);
     bool ok = st.env.copy_address && st.env.copy_address(st.env.ctx, address);
     memory_cleanse(address, sizeof(address));
+    clear_share_notice();
     copy(st.d.note, sizeof(st.d.note), ok ? WALLET_COPIED_NOTE : WALLET_COPY_FAILED_NOTE);
     touch();
 }
@@ -1708,9 +1713,8 @@ bool wallet_screens_share_code(char *out, size_t cap)
 void wallet_screens_receive_notice(const char *text)
 {
     pthread_mutex_lock(&st.lock);
-    SHARE_DIAG("receive notice ready=%d blocked=%d page=%d text=%d",
-               st.ready, st.blocked, st.page, text ? 1 : 0);
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
+        st.d.share_notice = text[0] != '\0';
         copy(st.d.note, sizeof(st.d.note), text);
         touch();
     }
@@ -1726,6 +1730,7 @@ bool wallet_screens_set_amount(const char *text)
     for (const char *c = text ? text : ""; *c; ++c) if (*c != ' ') blank = false;
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
         st.dropped = 0;
+        clear_share_notice();
         st.d.note[0] = '\0';
         if (blank) { st.d.has_amount = false; ok = true; }
         else if (zapp_zat_parse(text, &zat) && zat > 0) { st.d.has_amount = true; st.d.amount_zat = zat; ok = true; }

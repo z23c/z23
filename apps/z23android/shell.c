@@ -25,7 +25,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include "share_diag.h"
 
 #define MATCH (-1)
 #define WRAP (-2)
@@ -1425,8 +1424,6 @@ void zapp_shell_resume(JNIEnv *env)
     load_layout();
     char share_notice[96];
     if (zapp_share_take_result(share_notice, sizeof(share_notice))) {
-        SHARE_DIAG("share resume page=%d notice=%d",
-                   shell.current, !!share_notice[0]);
         open_receive(env);
         if (shell.current == SCREEN_WALLET && share_notice[0]) wallet_screens_receive_notice(share_notice);
         zapp_wallet_ui_render(env);

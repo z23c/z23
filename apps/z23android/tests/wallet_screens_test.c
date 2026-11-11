@@ -2419,6 +2419,60 @@ static void test_receive_copy(void)
     wallet_screens_close();
 }
 
+static void delayed_share_notice(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "latest") || !strcmp(op, "offline_address")) wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+}
+static void delayed_copy_after_share(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "latest")) {
+        wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+        tap(WALLET_ACT_COPY_ADDRESS, 0, WALLET_STAY);
+    }
+}
+static const char *share_identity_after;
+static void delayed_share_identity(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "latest")) {
+        wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+        fake.identity = share_identity_after;
+    }
+}
+static void check_request_refresh(const char *next, const char *identity, bool preserved)
+{
+    start(false);
+    fake.identity = "confirmed-wallet-one";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("0.001"));
+    wallet_screens_pause();
+    fake.latest = !strcmp(next, A2) ? "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}" : "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
+    fake.identity = "confirmed-wallet-one";
+    share_identity_after = identity;
+    fake.during = delayed_share_identity;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    bool shown = has("Share cancelled. Nothing was sent.");
+    if (shown != preserved) fprintf(stderr, "request refresh mismatch: %s %s\n", !strcmp(next, A2) ? "address-change" : "same-address", identity);
+    CHECK(shown == preserved);
+    CHECK(has("Asking for") == preserved);
+    wallet_screens_close();
+}
+static void check_setup_invalidation(bool generation, bool address)
+{
+    start(false);
+    fake.setup_address = A1;
+    fake.setup_generation = 7;
+    fake.identity = "confirmed-wallet-one";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+    CHECK(has("Share cancelled. Nothing was sent."));
+    if (generation) fake.setup_generation = 8;
+    if (address) fake.setup_address = A2;
+    CHECK(!has("Share cancelled. Nothing was sent."));
+    wallet_screens_close();
+}
 /* Share request carries the current code and returns to the picker, never directly to a recipient. */
 static void test_receive_share(void)
 {
@@ -2435,7 +2489,57 @@ static void test_receive_share(void)
     CHECK(fake.copy_calls == 0);
     wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
     CHECK(has("Share cancelled. Nothing was sent."));
+    wallet_screens_pause();
+    fake.during = delayed_share_notice;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(has("Share cancelled. Nothing was sent."));
+    fake.during = NULL;
+    CHECK(wallet_screens_set_amount("0.002"));
+    CHECK(!has("Share cancelled. Nothing was sent."));
+    wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    CHECK(!has("Share cancelled. Nothing was sent."));
     wallet_screens_close();
+
+    start(false);
+    fake.setup_address = A1;
+    fake.during = delayed_copy_after_share;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(fake.copy_calls == 1 && !has("Address copied") && !has("Share cancelled. Nothing was sent."));
+    wallet_screens_close();
+
+    start(false);
+    fake.node_up = false;
+    fake.identity = "confirmed-wallet-one";
+    fake.latest = NULL;
+    uint8_t symbols[69] = {2};
+    char address[92], response[512];
+    CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
+    snprintf(response, sizeof(response), "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\",\"facts\":{\"persisted_shielded_address\":\"%s\"}}}", address);
+    fake.offline = response;
+    fake.during = delayed_share_notice;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(has("Share cancelled. Nothing was sent."));
+    wallet_screens_close();
+
+    check_request_refresh(A1, "confirmed-wallet-one", true);
+    check_request_refresh(A2, "confirmed-wallet-one", false);
+    check_request_refresh(A1, "confirmed-wallet-two", false);
+
+    start(false);
+    fake.node_up = false;
+    fake.identity = "confirmed-wallet-one";
+    fake.latest = NULL;
+    fake.offline = response;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+    CHECK(has("Share cancelled. Nothing was sent."));
+    fake.identity = "confirmed-wallet-two";
+    CHECK(!has("Share cancelled. Nothing was sent."));
+    wallet_screens_close();
+
+    check_setup_invalidation(true, false);
+    check_setup_invalidation(false, true);
 }
 
 /* No address on the screen: nothing is copied, whatever is tapped. */
