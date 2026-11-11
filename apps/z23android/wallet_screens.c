@@ -17,7 +17,6 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include "share_diag.h"
 
 #define OUT_CAP 65536u
 #define PAGES_MAX 64u
@@ -110,6 +109,7 @@ static struct {
     unsigned epoch, version, dropped;
     enum wallet_page page;
     struct data d;
+    char pending_share[96];
     struct { bool valid; uint64_t amount; char identity[82], address[ZAPP_PAY_ADDRESS_MAX]; } request;
     struct flight flight[K_COUNT];
 } st = {.lock = PTHREAD_MUTEX_INITIALIZER};
@@ -122,10 +122,16 @@ enum { WALLET_SETTLE_MS = 250, WALLET_SETTLE_TICKS = 2 };
 
 static void touch(void) { ++st.version; }
 static void copy(char *dst, size_t cap, const char *src) { snprintf(dst, cap, "%s", src); }
-static void clear_share_notice(void)
+static void clear_pending_share_notice(void) { st.pending_share[0] = '\0'; }
+static void clear_committed_share_notice(void)
 {
     st.d.share_notice = false;
     st.d.note[0] = '\0';
+}
+static void clear_share_notice(void)
+{
+    clear_committed_share_notice();
+    clear_pending_share_notice();
 }
 static uint64_t now(void) { return st.env.now_ms ? st.env.now_ms(st.env.ctx) : 0; }
 /* The JSON object in command output: at its start, or on the first line that begins with a brace. */
@@ -556,13 +562,12 @@ static void funds_items(struct wallet_screen *s)
 
 static void receive_items(struct wallet_screen *s)
 {
-    SHARE_DIAG("receive items ready=%d blocked=%d page=%d share=%d note=%d",
-               st.ready, st.blocked, st.page, st.d.share_notice, !!st.d.note[0]);
 #ifdef ZAPP_SHARE_FIXTURE
     title(s, "Receive");
     (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
     (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, "t1 aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa a");
     button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
+    if (st.pending_share[0]) note(s, st.pending_share);
     if (st.d.note[0]) note(s, st.d.note);
     button(s, WALLET_ACT_BACK, "Back");
     return;
@@ -570,6 +575,7 @@ static void receive_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     char grouped[ZAPP_PAY_ADDRESS_MAX * 2], text[WALLET_TEXT_MAX];
     title(s, "Receive");
+    if (st.pending_share[0]) note(s, st.pending_share);
     if (d->note[0]) note(s, d->note);
     bool shown = d->address[0] && wallet_view_group_address(d->address, grouped, sizeof(grouped));
     if (shown) {
@@ -1017,6 +1023,11 @@ static void show_address(const char *address)
         request_restore(address);
         rebuild_code();
         if (st.d.has_amount && !st.request.valid) request_save();
+        if (st.pending_share[0] && st.page == WALLET_PAGE_RECEIVE) {
+            st.d.share_notice = true;
+            copy(st.d.note, sizeof(st.d.note), st.pending_share);
+            clear_pending_share_notice();
+        }
     }
 }
 /* A reply that names an address: {"address":"zs1..."}. latest may answer null when the wallet has none. */
@@ -1044,11 +1055,8 @@ static void address_unavailable(void)
 
 static void address_failure(const struct json_value *data, bool missing, bool latest, bool preserve_share)
 {
-    SHARE_DIAG("address failure latest=%d missing=%d preserve=%d share=%d address=%d null=%d",
-               latest, missing, preserve_share, st.d.share_notice, !!st.d.address[0],
-               data && !!typed(data, "address", JSON_NULL));
     if (preserve_share) return;
-    clear_share_notice();
+    clear_committed_share_notice();
     if (latest && st.d.address_unavailable) address_unavailable();
     else if (latest && st.d.address_fallback) st.d.note[0] = 0;
     else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
@@ -1458,6 +1466,7 @@ static size_t enter(enum wallet_page page, struct job *jobs)
     size_t count = 0;
     st.dropped = 0;
     wipe();
+    if (page != WALLET_PAGE_RECEIVE) clear_pending_share_notice();
     ++st.epoch;
     st.page = page;
     if (page == WALLET_PAGE_FUNDS) {
@@ -1493,6 +1502,7 @@ bool wallet_screens_init(const struct wallet_env *env)
     if (!env || !env->secure || !env->run || !env->now_ms) return false;
     pthread_mutex_lock(&st.lock);
     memset(&st.d, 0, sizeof(st.d));
+    clear_pending_share_notice();
     request_clear();
     drop_queued();
     st.env = *env;
@@ -1535,6 +1545,7 @@ void wallet_screens_shutdown(void)
     pthread_mutex_lock(&st.lock);
     if (st.ready) leave_locked(false);
     st.ready = false;
+    clear_pending_share_notice();
     request_clear();
     memset(&st.env, 0, sizeof(st.env));
     pthread_mutex_unlock(&st.lock);
@@ -1728,14 +1739,18 @@ bool wallet_screens_share_code(char *out, size_t cap)
 
 void wallet_screens_receive_notice(const char *text)
 {
+    if (!text) return;
     pthread_mutex_lock(&st.lock);
-    SHARE_DIAG("receive notice ready=%d blocked=%d page=%d text=%d",
-               st.ready, st.blocked, st.page, text && text[0]);
-    if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
+    if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && st.d.address[0]) {
         st.d.share_notice = text[0] != '\0';
         copy(st.d.note, sizeof(st.d.note), text);
-        touch();
+        clear_pending_share_notice();
+    } else {
+        if (st.d.share_notice) st.d.note[0] = '\0';
+        st.d.share_notice = false;
+        copy(st.pending_share, sizeof(st.pending_share), text);
     }
+    touch();
     pthread_mutex_unlock(&st.lock);
 }
 

@@ -2442,11 +2442,19 @@ static void check_share_reply(const char *reply, const char *expected, bool prel
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
     if (expected) {
         CHECK(has(expected));
-        CHECK(!has("Share cancelled. Nothing was sent."));
+        CHECK(has("Share cancelled. Nothing was sent.") == !preload);
     } else {
         CHECK(has("Share cancelled. Nothing was sent."));
         CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST) >= 0);
     }
+    wallet_screens_close();
+}
+static void check_pending_share_notice(void)
+{
+    start(false);
+    wallet_screens_receive_notice("Share cancelled. Nothing was sent.");
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(has("Share cancelled. Nothing was sent."));
     wallet_screens_close();
 }
 static void delayed_copy_after_share(const char *op, const char *arg)
@@ -2554,6 +2562,7 @@ static void test_receive_share(void)
     check_share_reply("{\"ok\":true,\"data\":{\"address\":null}}", "This wallet has no receive address yet. Tap New address.", false);
     check_share_reply(NULL, "This node cannot report its latest address yet. Tap New address to make one.", false);
     check_share_reply("not-json", "The latest address could not be read. Check that your node is running, or tap New address.", false);
+    check_pending_share_notice();
 
     check_request_refresh(A1, "confirmed-wallet-one", true);
     check_request_refresh(A2, "confirmed-wallet-one", false);
