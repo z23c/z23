@@ -6898,7 +6898,8 @@ syntax-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN)
 EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-    -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
+    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-isysroot $(shell /usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null) -D_DARWIN_C_SOURCE -Dst_atim=st_atimespec -Dst_mtim=st_mtimespec -Dst_ctim=st_ctimespec,) \
+    -Iplatform/modules/base/include \
     -Iplatform/modules/sha3/include -Iplatform/modules/platform/include \
     -Iplatform/modules/util/include -Icontexts/commons/packages/zsha256/include \
     -Icognition/modules/kpi/include -Iengine/modules/chainlog/include \
@@ -6928,12 +6929,13 @@ LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
 # patterns (e.g. an increment-only counter) that gcc's -Wextra does not
 # flag, so a lint-runtime source that builds clean here can refuse on
-# macOS. Run clang -fsyntax-only with the same strictness on every build
-# when clang is on this box's PATH, so that class of Mac-only failure
+# macOS. Run host clang -fsyntax-only with the same strictness on every build
+# when clang is on the host's PATH, so that class of Mac-only failure
 # surfaces on Linux instead of only in a macOS build. This is a syntax
-# check only -- gcc still produces the object -- and it must never be
-# silently skipped: when clang is absent the recipe says so explicitly.
-LINTC_CLANG := $(shell command -v clang 2>/dev/null)
+# check only -- the host compiler still produces the object -- and it must
+# never be silently skipped: when clang is absent the recipe says so explicitly.
+LINTC_HOST_PATH = $(if $(ZCL_ANDROID_BIN),$(subst $(ZCL_ANDROID_BIN):,,$(PATH)),$(PATH))
+LINTC_CLANG := $(shell PATH='$(subst ','"'"',$(LINTC_HOST_PATH))' command -v clang 2>/dev/null)
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
     core/params/src/upgrades.c core/consensus/src/upgrades.c \
@@ -15818,7 +15820,7 @@ build/lintc-obj/run_table.o: tools/lint/lintc/gate_commands.def
 
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def tools/lint/lintc/precheck_base.h
 	@mkdir -p $(dir $@)
-	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
+	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -c -o $@ $<
 	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only $<,echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<")
 
 $(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/main.o: \
@@ -15835,7 +15837,7 @@ build/lintc-obj/node/platform/modules/util/src/spawn_binary.o: $(SPAWN_BINARY_HE
 
 build/lintc-obj/node/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
+	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -c -o $@ $<
 
 build/lintc-obj/gate_zcode_packages.o \
 build/lintc-obj/node/platform/modules/platform/src/toolchain.o: \
@@ -15843,7 +15845,7 @@ build/lintc-obj/node/platform/modules/platform/src/toolchain.o: \
 
 $(LINTC_TOOL): $(LINTC_OBJS) $(LINTC_NODE_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(LINTC_CFLAGS) -o $@ $(LINTC_OBJS) $(LINTC_NODE_OBJS)
+	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -o $@ $(LINTC_OBJS) $(LINTC_NODE_OBJS)
 
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
