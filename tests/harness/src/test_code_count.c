@@ -238,6 +238,95 @@ static bool cct_revision_case(const struct cc_fix *fx, const char *revision,
     return ok;
 }
 
+static bool cct_tree_fixture(const struct cc_fix *fx, size_t entries, bool fail,
+                             size_t *bytes)
+{
+    char name[640];
+    (void)snprintf(name, sizeof name, "%s/shim/listing", fx->dir);
+    FILE *fp = fopen(name, "wb");
+    if (!fp)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; i < entries; i++) {
+        int n = fprintf(fp, "100644 blob 0000000000000000000000000000000000000000 0\tfile%06zu.c\n", i);
+        if (n < 0) { ok = false; break; }
+        *bytes += (size_t)n;
+    }
+    if (fclose(fp) != 0)
+        ok = false;
+    (void)snprintf(name, sizeof name, "%s/shim/fail", fx->dir);
+    if (fail)
+        ok = cct_write(fx, "shim/fail", "fail\n") && ok;
+    else if (unlink(name) != 0 && access(name, F_OK) == 0)
+        ok = false;
+    return cct_write(fx, "shim/calls", "") && ok;
+}
+
+static bool cct_tree_shim(const struct cc_fix *fx, const char *old)
+{
+    static const char script[] =
+        "#!/bin/sh\nd=${0%/*}\nIFS= read -r PATH < \"$d/path\" || exit 1\n"
+        "export PATH\ncase \"$*\" in\n"
+        "*ls-tree*) printf x >> \"$d/calls\" || exit 1; "
+        "cat \"$d/listing\" || exit 1; [ ! -f \"$d/fail\" ] || exit 1;;\n"
+        "*) exec git \"$@\";;\nesac\n";
+    char path_line[1024], shim[640];
+    int n = snprintf(path_line, sizeof path_line, "%s\n", old);
+    if (n < 0 || (size_t)n >= sizeof path_line ||
+        !cct_write(fx, "shim/path", path_line) || !cct_write(fx, "shim/git", script))
+        return false;
+    (void)snprintf(shim, sizeof shim, "%s/shim/git", fx->dir);
+    return chmod(shim, 0700) == 0;
+}
+
+static bool cct_tree_result(const struct cc_fix *fx, const struct cct_call *c,
+                            size_t entries, size_t bytes, bool fail, long expected,
+                            bool ran, bool installed, bool restored)
+{
+    char path[640];
+    struct stat st;
+    (void)snprintf(path, sizeof path, "%s/shim/calls", fx->dir);
+    long calls = stat(path, &st) == 0 ? (long)st.st_size : -1;
+    bool ok = installed && restored && (fail ? !ran : ran) && calls == (fail ? 1 : expected);
+    if (fail)
+        ok = ok && strcmp(c->reply.error.code, "CODE_COUNT_TREE") == 0 &&
+             json_get(&c->reply.data, "files") == NULL;
+    else
+        ok = ok && cct_int(c, "files") == (int64_t)entries && cct_int(c, "lines") == 0;
+    if (!ok)
+        printf("[tree bytes=%zu entries=%zu fail=%d installed=%d restored=%d ran=%d "
+               "status=%d calls=%ld expected=%ld files=%lld lines=%lld code=%s] ",
+               bytes, entries, fail, installed, restored, ran, (int)c->reply.status,
+               calls, fail ? 1L : expected, (long long)cct_int(c, "files"),
+               (long long)cct_int(c, "lines"), c->reply.error.code);
+    return ok;
+}
+
+static bool cct_tree_capture(const struct cc_fix *fx, size_t entries, bool fail,
+                             long expected)
+{
+    const char *old = getenv("PATH");
+    char *saved = old ? strdup(old) : NULL;
+    if (!saved)
+        return false;
+    size_t bytes = 0;
+    bool setup = cct_tree_shim(fx, saved) && cct_tree_fixture(fx, entries, fail, &bytes);
+    size_t lower = entries == 20000 ? 1024 * 1024 : 2 * 1024 * 1024;
+    bool size_ok = bytes > lower && bytes < lower * 2;
+    char path[1024];
+    int n = snprintf(path, sizeof path, "%s/shim:%s", fx->dir, saved);
+    bool installed = setup && size_ok && n >= 0 && (size_t)n < sizeof path &&
+                     setenv("PATH", path, 1) == 0;
+    struct cct_call c;
+    cct_begin(&c, fx);
+    bool ran = installed && cct_run(&c);
+    bool restored = !installed || setenv("PATH", saved, 1) == 0;
+    free(saved);
+    bool ok = cct_tree_result(fx, &c, entries, bytes, fail, expected, ran, installed, restored);
+    cct_end(&c);
+    return ok;
+}
+
 int test_code_count(void);
 int test_code_count(void)
 {
@@ -326,6 +415,21 @@ int test_code_count(void)
         ASSERT(cct_revision_case(&fx, "HEAD~1", true));
         ASSERT(cct_revision_case(&fx, "HEAD~1..HEAD", false));
         ASSERT(cct_revision_case(&fx, "HEAD^{tree}", false));
+        PASS();
+    }
+
+    TEST("code.count: one capture handles a tree above 1 MiB") {
+        ASSERT(cct_tree_capture(&fx, 20000, false, 1));
+        PASS();
+    }
+
+    TEST("code.count: a tree above 2 MiB is retried completely") {
+        ASSERT(cct_tree_capture(&fx, 40000, false, 2));
+        PASS();
+    }
+
+    TEST("code.count: failing tree capture never returns partial counts") {
+        ASSERT(cct_tree_capture(&fx, 40000, true, 1));
         PASS();
     }
 

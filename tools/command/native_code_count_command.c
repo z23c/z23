@@ -148,9 +148,10 @@ static bool cc_read_opts(const struct zcl_command_request *request,
 /* Run git and capture stdout, growing until the helper proves it did not
  * truncate. rc 0 is success; rc 1 is also accepted when allow_rc1 (grep with
  * no match). NULL on any other outcome. */
-static char *cc_git(const char *root, const char *const args[], bool allow_rc1)
+static char *cc_git(const char *root, const char *const args[], bool allow_rc1,
+                    size_t initial)
 {
-    for (size_t cap = CC_CAPTURE_INITIAL; cap <= CC_CAPTURE_MAX; cap *= 2) {
+    for (size_t cap = initial; cap <= CC_CAPTURE_MAX; cap *= 2) {
         char *out = zcl_malloc(cap, "code_count_git");
         if (!out)
             return NULL;
@@ -478,7 +479,7 @@ static bool cc_count_misses(const char *root, const char *commit,
     for (size_t i = 0; ok && i < specs->n; i++)
         args[n++] = specs->buf[i];
     args[n] = NULL;
-    char *out = ok ? cc_git(root, args, true) : NULL;
+    char *out = ok ? cc_git(root, args, true, CC_CAPTURE_INITIAL) : NULL;
     ok = out && cc_apply_grep(t, out, commit);
     free(out);
     free(specs);
@@ -493,7 +494,7 @@ static bool cc_resolve(const char *root, const char *at, char commit[41],
     char rev_c[256], rev_t[256];
     (void)snprintf(rev_c, sizeof rev_c, "%s^{commit}", at);
     const char *args[] = {"rev-parse", "--verify", "-q", rev_c, NULL};
-    char *out = cc_git(root, args, false);
+    char *out = cc_git(root, args, false, CC_CAPTURE_INITIAL);
     bool ok = out && strlen(out) >= 40 && cc_hex20(out, (unsigned char[20]){0});
     if (ok) {
         memcpy(commit, out, 40), commit[40] = '\0';
@@ -501,7 +502,7 @@ static bool cc_resolve(const char *root, const char *at, char commit[41],
     }
     free(out);
     args[3] = rev_t;
-    out = ok ? cc_git(root, args, false) : NULL;
+    out = ok ? cc_git(root, args, false, CC_CAPTURE_INITIAL) : NULL;
     ok = out && strlen(out) >= 40;
     if (ok)
         memcpy(tree, out, 40), tree[40] = '\0';
@@ -608,7 +609,7 @@ static bool cc_list_tree(const char *root, const char *commit,
                           o->path, NULL};
     if (!o->path[0])
         args[5] = NULL;
-    t->text = cc_git(root, args, false);
+    t->text = cc_git(root, args, false, 2 * CC_CAPTURE_INITIAL);
     return t->text && cc_parse_tree(t, o);
 }
 
