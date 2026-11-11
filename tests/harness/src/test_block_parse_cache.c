@@ -1153,6 +1153,33 @@ static int test_profile_reset(void)
     return failures;
 }
 
+static int test_byte_ceiling_parser(void)
+{
+    static const struct { const char *input; uint64_t expected; } cases[] = {
+        {NULL, BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"-1", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"+1", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {" 1", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"12x", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"18446744073709551616", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"0", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"1", BLOCK_PARSE_CACHE_MIN_MAX_BYTES},
+        {"8388608", BLOCK_PARSE_CACHE_MIN_MAX_BYTES},
+        {"134217728", BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES},
+        {"1073741824", BLOCK_PARSE_CACHE_MAX_MAX_BYTES},
+        {"1073741825", BLOCK_PARSE_CACHE_MAX_MAX_BYTES},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (block_parse_cache_ceiling_for_test(cases[i].input) != cases[i].expected) {
+            printf("FAIL cache ceiling parser case %zu\n", i);
+            failures++;
+        }
+    }
+    return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────────── */
 
 int test_block_parse_cache(void)
@@ -1171,6 +1198,7 @@ int test_block_parse_cache(void)
 
     make_test_dir(tmpdir, sizeof(tmpdir));
 
+    failures += test_byte_ceiling_parser();
     failures += test_deep_clone_equality(tmpdir);
     failures += test_no_key_collision(tmpdir);
     failures += test_ring_replacement(tmpdir);

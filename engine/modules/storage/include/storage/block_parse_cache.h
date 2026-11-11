@@ -74,6 +74,11 @@ struct block_parse_handle {
 #define BLOCK_PARSE_CACHE_MIN_MAX_BYTES     8388608ull    /*   8 MiB */
 #define BLOCK_PARSE_CACHE_MAX_MAX_BYTES    1073741824ull  /*   1 GiB */
 
+#ifdef ZCL_TESTING
+/* Pure parser used by the first-use environment path. */
+uint64_t block_parse_cache_ceiling_for_test(const char *value);
+#endif
+
 /* Pin one immutable parsed body. A hit is a borrowed view of the resident
  * body, not a clone. The pointer returned by block_parse_handle_block is valid
  * only until the matching release. */

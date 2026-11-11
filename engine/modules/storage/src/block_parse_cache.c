@@ -29,6 +29,7 @@
 #include "util/safe_alloc.h"
 #include "platform/time_compat.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -86,24 +87,35 @@ static uint64_t g_bpc_ceiling_bytes = BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES;
 static bool g_bpc_ceiling_evict_logged;
 static bool g_bpc_ceiling_pinned_logged;
 
-static void bpc_read_byte_ceiling_env(void)
+/* Invalid or overflowing unsigned decimal uses the safe default. */
+static uint64_t bpc_parse_byte_ceiling(const char *v)
 {
-    const char *v = getenv("ZCL_PARSE_CACHE_MAX_BYTES");
-    if (!v || !*v)
-        return;
-    /* Reject anything but a full unsigned decimal: trailing garbage would
-     * silently truncate ("12x" as 12) and a leading minus wraps through
-     * strtoull to a huge value that would clamp UP to the maximum. */
+    if (!v || !*v) return BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES;
+    for (const char *p = v; *p; ++p)
+        if (*p < '0' || *p > '9') return BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES;
     char *end = NULL;
+    errno = 0;
     unsigned long long parsed = strtoull(v, &end, 10);
-    if (end == v || parsed == 0 || *end != '\0')
-        return;
+    if (errno == ERANGE || end == v || *end != 0 || parsed == 0)
+        return BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES;
     uint64_t n = (uint64_t)parsed;
     if (n < BLOCK_PARSE_CACHE_MIN_MAX_BYTES)
         n = BLOCK_PARSE_CACHE_MIN_MAX_BYTES;
     if (n > BLOCK_PARSE_CACHE_MAX_MAX_BYTES)
         n = BLOCK_PARSE_CACHE_MAX_MAX_BYTES;
-    g_bpc_ceiling_bytes = n;
+    return n;
+}
+
+#ifdef ZCL_TESTING
+uint64_t block_parse_cache_ceiling_for_test(const char *v)
+{
+    return bpc_parse_byte_ceiling(v);
+}
+#endif
+
+static void bpc_read_byte_ceiling_env(void)
+{
+    g_bpc_ceiling_bytes = bpc_parse_byte_ceiling(getenv("ZCL_PARSE_CACHE_MAX_BYTES"));
 }
 
 static pthread_once_t g_bpc_first_use_once = PTHREAD_ONCE_INIT;
