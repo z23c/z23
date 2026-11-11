@@ -20,6 +20,77 @@
 #include "lintc.h"
 #include "gate_git_scan_a_priv.h"
 
+/* Original prefilter, retained only as a differential test oracle. */
+static int nak_old_possible(const char *s, size_t n)
+{
+    static const char *const lead[] = {"sk-", "xai-", "gsk_", "ghp_", "glpat-", "AKIA", "Bearer"};
+    for (size_t k = 0; k < sizeof lead / sizeof lead[0]; ++k) {
+        size_t m = strlen(lead[k]);
+        for (size_t i = 0; i + m <= n; ++i)
+            if (!memcmp(s + i, lead[k], m)) return 1;
+    }
+    for (size_t i = 32; i + 16 < n; ++i) {
+        if (s[i] != '.') continue;
+        size_t j = 0;
+        for (; j < 32; ++j) {
+            unsigned char c = (unsigned char)s[i - 1 - j];
+            if (c < 128 && !isalnum(c)) break;
+        }
+        if (j != 32) continue;
+        for (j = 0; j < 16; ++j) {
+            unsigned char c = (unsigned char)s[i + 1 + j];
+            if (c < 128 && !isalnum(c)) break;
+        }
+        if (j == 16) return 1;
+    }
+    return 0;
+}
+
+static int nak_lead_equivalence(void)
+{
+    static const char *const leads[] = {"s" "k-", "x" "ai-", "g" "sk_", "g" "hp_", "g" "lpat-", "A" "KIA", "B" "earer"};
+    char sample[80];
+    for (size_t k = 0; k < sizeof leads / sizeof leads[0]; ++k)
+        for (size_t offset = 0; offset < 40; ++offset) {
+            memset(sample, '!', sizeof sample);
+            memcpy(sample + offset, leads[k], strlen(leads[k]));
+            for (size_t n = 0; n <= sizeof sample; ++n)
+                if (nak_old_possible(sample, n) != nak_regex_possible(sample, n)) return 1;
+        }
+    return 0;
+}
+
+static int nak_bytes_equivalence(void)
+{
+    unsigned state = 0x537123u; char sample[128];
+    for (size_t round = 0; round < 5000; ++round) {
+        for (size_t i = 0; i < sizeof sample; ++i) {
+            state = state * 1664525u + 1013904223u;
+            sample[i] = (char)(state / 16777216u); /* sample the PRNG's high bits */
+        }
+        size_t n = round % (sizeof sample + 1);
+        if (nak_old_possible(sample, n) != nak_regex_possible(sample, n)) return 1;
+    }
+    memset(sample, 'a', sizeof sample);
+    sample[40] = '.';
+    for (size_t i = 0; i < sizeof sample; ++i) {
+        char saved = sample[i];
+        for (unsigned b = 0; b < 256; ++b) {
+            sample[i] = (char)b;
+            if (nak_old_possible(sample, sizeof sample) != nak_regex_possible(sample, sizeof sample)) return 1;
+        }
+        sample[i] = saved;
+    }
+    return 0;
+}
+
+int nak_prefilter_equivalence_selftest(void)
+{
+    int bad = nak_lead_equivalence() | nak_bytes_equivalence();
+    if (bad) fprintf(stderr, "check_no_api_keys: prefilter equivalence failed\n");
+    return bad;
+}
+
 static int eqp_build_paths(char *p_build, size_t bsz, char *p_skill, size_t ssz,
     char *p_disp, size_t dsz)
 {
@@ -158,6 +229,23 @@ static int nak_paths(const char *dir, char *path, char *child, char *missing,
         || sh_single_quote(exe, quoted, cap);
 }
 
+static int nak_marker_nul(const char *path)
+{
+    static const char input[] = "api-key-example-ok\0s" "k-" "abcdefghijklmnopqrst\n";
+    FILE *f = fopen(path, "wb");
+    if (!f) return 1;
+    int bad = fwrite(input, 1, sizeof(input) - 1, f) != sizeof(input) - 1;
+    return bad | (fclose(f) != 0);
+}
+
+static int nak_file_checks(const char *exe, const char *path)
+{
+    if (csr_write(path, "s" "k-" "abcdefghijklmnopqrst\n")) return 2;
+    if (nak_case(exe, path, 1) || nak_marker_nul(path) || nak_case(exe, path, 0)) return 1;
+    if (csr_write(path, "ordinary text\n")) return 2;
+    return nak_case(exe, path, 0);
+}
+
 int nak_filesystem_selftest(void)
 {
     char dir[] = "./test-tmp/nak-open.XXXXXX";
@@ -165,10 +253,7 @@ int nak_filesystem_selftest(void)
     if (mkdir("./test-tmp", 0755) != 0 && errno != EEXIST) return 2;
     if (!mkdtemp(dir)) return 2;
     int rc = nak_paths(dir, path, child, missing, quoted, sizeof quoted);
-    if (!rc) rc = csr_write(path, "s" "k-" "abcdefghijklmnopqrst\n");
-    if (!rc) rc = nak_case(quoted, path, 1);
-    if (!rc) rc = csr_write(path, "ordinary text\n");
-    if (!rc) rc = nak_case(quoted, path, 0);
+    if (!rc) rc = nak_file_checks(quoted, path);
     if (!rc) rc = nak_case(quoted, missing, 0);
     if (!rc) rc = nak_case(quoted, child, 2);
     if (unlink(path) != 0 && errno != ENOENT && !rc) rc = 2;

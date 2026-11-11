@@ -734,13 +734,23 @@ int check_no_api_keys_run(int argc, char **argv)
  * 32 hex and 16 alphanumeric bytes beside it. Keep the dot check wider than
  * the regex: false positives cost one regexec, while false negatives would
  * hide a credential. This only skips regex work; every tracked file is read. */
-static int nak_regex_possible(const char *s, size_t n)
+static int nak_lead_at(const char *s, size_t n)
 {
-    static const char *const lead[] = {
-        "sk-", "xai-", "gsk_", "ghp_", "glpat-", "AKIA", "Bearer"
-    };
-    for (size_t k = 0; k < sizeof lead / sizeof lead[0]; k++)
-        if (nak_has(s, n, lead[k])) return 1;
+    switch (*s) {
+    case 's': return n >= 3 && memcmp(s, "sk-", 3) == 0;
+    case 'x': return n >= 4 && memcmp(s, "xai-", 4) == 0;
+    case 'g': return (n >= 4 && (memcmp(s, "gsk_", 4) == 0 || memcmp(s, "ghp_", 4) == 0)) ||
+                     (n >= 6 && memcmp(s, "glpat-", 6) == 0);
+    case 'A': return n >= 4 && memcmp(s, "AKIA", 4) == 0;
+    case 'B': return n >= 6 && memcmp(s, "Bearer", 6) == 0;
+    default: return 0;
+    }
+}
+
+int nak_regex_possible(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+        if (nak_lead_at(s + i, n - i)) return 1;
     for (size_t i = 32; i + 16 < n; i++) {
         if (s[i] != '.') continue;
         size_t j = 0;
@@ -870,7 +880,7 @@ int check_no_api_keys_selftest(void)
     regfree(&re);
     if (rc)
         return rc;
-    bad |= nak_filesystem_selftest();
+    bad |= nak_filesystem_selftest() | nak_prefilter_equivalence_selftest();
     return st_ok(bad, "check_no_api_keys selftest: OK\n");
 }
 

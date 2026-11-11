@@ -14,6 +14,8 @@
 #include <stdio.h>
 
 int nak_filesystem_selftest(void);
+int nak_regex_possible(const char *s, size_t n);
+int nak_prefilter_equivalence_selftest(void);
 
 /* suffix test, also used by check-error-doc-refs in gate_git_scan_c.c. */
 int c23_ends(const char *path, const char *suf);
