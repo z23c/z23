@@ -8,6 +8,7 @@
 #include "net/net.h"
 #include "util/log_macros.h"
 #include <stdatomic.h>
+#include <stdint.h>
 
 /* ONION_EDGE_SYNC_GATE_startingheight
  *
@@ -37,7 +38,7 @@ bool syncsvc_peer_is_behind(const struct p2p_node *node, int our_height)
      * reorg tolerance eligible, but gate a peer proven substantially behind.
      * The zero-height onion exception above lasts only until its first
      * request records last_getheaders_time. */
-    return node->starting_height + SYNC_PEER_BEHIND_TOLERANCE < our_height;
+    return (int64_t)node->starting_height + SYNC_PEER_BEHIND_TOLERANCE < our_height;
 }
 
 /* Global sync states that are already inside an active header/block sync

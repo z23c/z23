@@ -578,6 +578,12 @@ static int test_sync_service_block_assignment_plan(void)
         node.starting_height = our_height - SYNC_PEER_BEHIND_TOLERANCE - 1;
         syncsvc_plan_block_assignment(&plan, &node, 0, our_height);
         ASSERT(!plan.should_assign);
+        /* VERSION carries a signed peer-supplied height. Adding the band
+         * must not overflow and misclassify an INT_MAX claim as behind. */
+        node.starting_height = INT_MAX;
+        ASSERT(!syncsvc_peer_is_behind(&node, our_height));
+        syncsvc_plan_block_assignment(&plan, &node, 0, our_height);
+        ASSERT(plan.should_assign);
         node.starting_height = -1;   /* unknown height: stays eligible */
         syncsvc_plan_block_assignment(&plan, &node, 0, our_height);
         ASSERT(plan.should_assign);
