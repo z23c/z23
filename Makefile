@@ -15844,7 +15844,7 @@ LINTC_RECORD = lintc-command-v1:$(1)
 LINTC_LINT_SRC = tools/lint/lintc/$(patsubst build/lintc-obj/%.o,%.c,$(1))
 LINTC_NODE_SRC = $(patsubst build/lintc-obj/node/%.o,%.c,$(1))
 LINTC_COMPILE = $(or $(HOST_CC),cc) $(LINTC_CFLAGS) -MMD -MP -MF "$$d" -MQ "$@" -c -o "$$o" "$(1)"
-LINTC_LINT_COMMAND = $(call LINTC_COMPILE,$(call LINTC_LINT_SRC,$@)); $(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only "$(call LINTC_LINT_SRC,$@)",echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $(call LINTC_LINT_SRC,$@)")
+LINTC_LINT_COMMAND = $(call LINTC_COMPILE,$(call LINTC_LINT_SRC,$@)); $(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -MMD -MP -MF "$$x" -MQ "$@" -fsyntax-only "$(call LINTC_LINT_SRC,$@)",echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $(call LINTC_LINT_SRC,$@)")
 LINTC_NODE_COMMAND = $(call LINTC_COMPILE,$(call LINTC_NODE_SRC,$@))
 LINTC_COMMAND_STALE = $(if $(wildcard $(1).cmd),$(if $(call LINTC_EQ,$(call LINTC_RECORD,$(2)),$(file <$(1).cmd)),,lintc-missing-dep-force),lintc-missing-dep-force)
 LINTC_SHELL_QUOTE = $(subst ','"'"',$(1))
@@ -15856,15 +15856,17 @@ $(LINTC_NODE_OBJS): $$(call LINTC_COMMAND_STALE,$$@,$$(LINTC_NODE_COMMAND))
 endif
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def
 	@mkdir -p "$(dir $@)"
-	@set -eu; dep="$(@:.o=.d)"; record="$@.cmd"; o=; d=; c=; s=; \
-	trap 'rm -f -- "$$o" "$$d" "$$c"; if [ -n "$$s" ]; then rmdir -- "$$s"; fi' EXIT; trap 'exit 1' HUP INT TERM; \
+	@set -eu; dep="$(@:.o=.d)"; record="$@.cmd"; o=; d=; c=; x=; s=; \
+	trap 'rm -f -- "$$o" "$$d" "$$c" "$$x"; if [ -n "$$s" ]; then rmdir -- "$$s"; fi' EXIT; trap 'exit 1' HUP INT TERM; \
 	rm -f -- "$$dep" "$$record"; \
 	s="$$(mktemp -d "$(dir $@).lintc-object.XXXXXX")"; o="$$s/output.o"; \
 	d="$$(mktemp "$(dir $@).lintc-dep.XXXXXX")"; \
 	c="$$(mktemp "$(dir $@).lintc-cmd.XXXXXX")"; \
+	$(if $(LINTC_CLANG),x="$$(mktemp "$(dir $@).lintc-clang-dep.XXXXXX")",:); \
 	$(LINTC_LINT_COMMAND); \
 	test -s "$$o" || { echo "lintc: empty object for $<" >&2; exit 1; }; \
 	test -s "$$d" || { echo "lintc: empty depfile for $<" >&2; exit 1; }; \
+	$(if $(LINTC_CLANG),test -s "$$x" || { echo "lintc: empty clang depfile for $<" >&2; exit 1; }; cat "$$x" >> "$$d"; rm -f -- "$$x"; x=,:); \
 	printf '%s' '$(call LINTC_SHELL_QUOTE,$(call LINTC_RECORD,$(LINTC_LINT_COMMAND)))' > "$$c"; \
 	test -s "$$c"; mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; rmdir -- "$$s"; s=; mv -f -- "$$c" "$$record"; trap - EXIT HUP INT TERM
 

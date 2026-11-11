@@ -1984,12 +1984,13 @@ static int t_lint_private_header_rebuild(void)
         "fail() { echo \"private-header: $1\" >&2; exit 1; }\n"
         "mkdir -p tools/lint/lintc build/lintc-obj platform\n"
         "for f in lintc.h gates.def precheck_base.h; do : > tools/lint/lintc/$f; done\n"
-        "printf '#include \"direct.h\"\\nint value(void) { return VALUE + EXTRA; }\\n' > tools/lint/lintc/one.c\n"
+        "printf '#ifdef LINT_FIXTURE_CHECKER\n#include \"checker_only.h\"\n#endif\n#include \"direct.h\"\nint value(void) { return VALUE + EXTRA; }\n' > tools/lint/lintc/one.c\n"
+        "printf '/* valid */\\n' > tools/lint/lintc/checker_only.h\n"
         "printf '#include <stdio.h>\\nint value(void); int main(void) { return printf(\"%%d\\\\n\", value()) < 0; }\\n' > tools/lint/lintc/two.c\n"
         "printf '#include \"precheck_base.h\"\\n#define EXTRA 1\\n' > tools/lint/lintc/direct.h\n"
         "printf '#define VALUE 1\\n' > tools/lint/lintc/precheck_base.h\n"
         "printf '#!/bin/sh\\necho \"$*\" >> cc.log\\n[ ! -f cc.fail ] || exit 1\\nif [ -f cc.empty ]; then exit 0; fi\\nif [ -f cc.emptyobj ] || [ -f cc.emptydep ]; then\\n  prev=; for arg do case \"$prev\" in -o) obj=$arg;; -MF) dep=$arg;; esac; prev=$arg; done\\n  cc \"$@\" || exit; if [ -f cc.emptyobj ]; then : > \"$obj\"; else : > \"$dep\"; fi; exit 0\\nfi\\nexec cc \"$@\"\\n' > cc-trace; chmod +x cc-trace\n"
-        "printf '#!/bin/sh\\n[ ! -f clang.fail ]\\n' > clang-check; chmod +x clang-check\n"
+        "printf '#!/bin/sh\\n[ ! -f clang.fail ] || exit 1\\nif [ -f clang.empty ]; then prev=; for arg do [ \"$prev\" != -MF ] || : > \"$arg\"; prev=$arg; done; exit 0; fi\\nexec cc -DLINT_FIXTURE_CHECKER \"$@\"\\n' > clang-check; chmod +x clang-check\n"
         "printf 'LINTC_OBJS := build/lintc-obj/one.o build/lintc-obj/two.o\\nLINTC_NODE_OBJS := build/lintc-obj/node/platform/node.o\\n' > Fixture.mk\n"
         "if grep -q '^# LINTC_DEPENDENCIES_BEGIN' \"$1/Makefile\"; then\n"
         "  awk '/^# LINTC_DEPENDENCIES_BEGIN/{on=1} on{print} /^# LINTC_DEPENDENCIES_END/{on=0} /^# LINTC_OBJECT_RULES_BEGIN/{on=1} /^# LINTC_OBJECT_RULES_END/{print; on=0}' \"$1/Makefile\" >> Fixture.mk\n"
@@ -2048,12 +2049,27 @@ static int t_lint_private_header_rebuild(void)
         "rm -f build/lintc-obj/node/platform/node.d; : > cc.log; make -s -f Fixture.mk build/lintc-obj/node/platform/node.o >>log 2>&1 || fail node-legacy\n"
         "test -s build/lintc-obj/node/platform/node.d && grep -q 'platform/node.c' cc.log || fail node-legacy-dep\n"
         ": > cc.log; make -s -f Fixture.mk build/lintc-obj/node/platform/node.o >>log 2>&1 || fail node-warm; test ! -s cc.log || fail node-warm-recompile\n";
+    static const char checker[] =
+        "cp build/lintc-obj/one.o saved.o; touch -t 200901010000 build/lintc-obj/one.o\n"
+        "printf 'invalid syntax here\\n' > tools/lint/lintc/checker_only.h; touch -t 201001010000 tools/lint/lintc/checker_only.h\n"
+        "if make -s -f Fixture.mk build/lintc-obj/one.o >checker-invalid.log 2>&1; then fail checker-invalid-accepted; fi\n"
+        "cmp -s saved.o build/lintc-obj/one.o && test ! -e build/lintc-obj/one.d && test ! -e build/lintc-obj/one.o.cmd || fail checker-invalid-publication\n"
+        "printf '/* valid */\\n' > tools/lint/lintc/checker_only.h; make -s -f Fixture.mk build/lintc-obj/one.o >>log 2>&1 || fail checker-retry\n"
+        "grep -q checker_only.h build/lintc-obj/one.d || fail checker-dep\n"
+        ": > cc.log; make -s -f Fixture.mk build/lintc-obj/one.o >>log 2>&1 || fail checker-warm; test ! -s cc.log || fail checker-warm-recompile\n"
+        "cp build/lintc-obj/one.o saved.o; : > clang.empty; touch -t 200901010000 build/lintc-obj/one.o; touch -t 201101010000 tools/lint/lintc/direct.h\n"
+        "if make -s -f Fixture.mk build/lintc-obj/one.o >>log 2>&1; then fail checker-empty-accepted; fi; rm clang.empty\n"
+        "cmp -s saved.o build/lintc-obj/one.o && test ! -e build/lintc-obj/one.d && test ! -e build/lintc-obj/one.o.cmd || fail checker-empty-publication\n"
+        "make -s -f Fixture.mk build/lintc-obj/one.o >>log 2>&1 || fail checker-empty-retry\n"
+        "rm tools/lint/lintc/checker_only.h; make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o >>log 2>&1 || fail checker-disable\n"
+        ": > cc.log; make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o >>log 2>&1 || fail checker-disable-warm; test ! -s cc.log || fail checker-disable-recompile\n";
     /* Keep each literal below the strict compiler's 4095-byte limit. */
-    char script[sizeof(setup) + sizeof(checks) + sizeof(recovery) - 2];
+    char script[sizeof(setup) + sizeof(checks) + sizeof(recovery) + sizeof(checker) - 3];
     memcpy(script, setup, sizeof(setup) - 1);
     memcpy(script + sizeof(setup) - 1, checks, sizeof(checks) - 1);
     memcpy(script + sizeof(setup) + sizeof(checks) - 2,
-           recovery, sizeof(recovery));
+           recovery, sizeof(recovery) - 1);
+    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(recovery) - 3, checker, sizeof(checker));
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_header", "rebuild");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
@@ -2133,14 +2149,15 @@ static const char lint_command_part_1[] =
     "cat > clang-one <<'WRAPPER'\n"
     "#!/bin/sh\n"
     "printf 'clang-one %s\\n' \"$*\" >> clang.trace\n"
-    "exit 0\n"
+    "exec cc -DLINT_FIXTURE_CHECKER \"$@\"\n"
     "WRAPPER\n"
     "cat > clang-two <<'WRAPPER'\n"
     "#!/bin/sh\n"
 ;
 static const char lint_command_part_2[] =
     "printf 'clang-two %s\\n' \"$*\" >> clang.trace\n"
-    "[ ! -f fail-clang ]\n"
+    "[ ! -f fail-clang ] || exit 1\n"
+    "exec cc -DLINT_FIXTURE_CHECKER \"$@\"\n"
     "WRAPPER\n"
     "chmod +x cc-one cc-two clang-one clang-two\n"
     "cat > Fixture.mk <<'MAKE'\n"
