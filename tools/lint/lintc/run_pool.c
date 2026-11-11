@@ -105,21 +105,68 @@ static void finish_gate(struct lr_run *r, int i, int status)
     print_verdict(r, g);
 }
 
-static int reap_one(struct lr_run *r, const int *order, int cnt)
+static int reap_gate(struct lr_run *r, int i, int options)
 {
+    struct lr_gate *g = &r->g[i];
     int status = 0;
     pid_t pid;
-    while ((pid = waitpid(-1, &status, 0)) < 0) {
-        if (errno != EINTR)
-            return -1;
+    do {
+        pid = waitpid(g->pid, &status, options);
+    } while (pid < 0 && errno == EINTR);
+    if (pid < 0) {
+        (void)fprintf(r->o->err, "z23-lint run: cannot wait for gate %s: %s\n",
+                      g->name, strerror(errno));
+        /* Its status is unavailable. Never signal a possibly reused PID. */
+        g->pid = 0;
+        return -1;
     }
+    if (pid == 0)
+        return 0;
+    finish_gate(r, i, status);
+    return 1;
+}
+
+/* Only these worker PIDs belong to this pool. A process-wide wait can steal
+ * another caller's child and release a slot whose worker is still running. */
+static int reap_ready(struct lr_run *r, const int *order, int cnt)
+{
+    bool active = false;
     for (int k = 0; k < cnt; k++) {
-        if (r->g[order[k]].pid == pid) {
-            finish_gate(r, order[k], status);
-            return 0;
+        struct lr_gate *g = &r->g[order[k]];
+        if (g->pid <= 0)
+            continue;
+        active = true;
+        int ready = reap_gate(r, order[k], WNOHANG);
+        if (ready != 0)
+            return ready;
+    }
+    return active ? 0 : -1;
+}
+
+static int reap_one(struct lr_run *r, const int *order, int cnt)
+{
+    for (;;) {
+        int ready = reap_ready(r, order, cnt);
+        if (ready != 0)
+            return ready < 0 ? -1 : 0;
+        /* Waiting on the first PID would stall slot refill behind a slow
+         * gate. Rescan all owned workers without busy-spinning instead. */
+        struct timespec pause = { .tv_sec = 0, .tv_nsec = 5000000 };
+        while (nanosleep(&pause, &pause) != 0) {
+            if (errno != EINTR)
+                return -1;
         }
     }
-    return 0;
+}
+
+/* A driver failure stops dispatch, but already launched gates still own
+ * their logs and inputs. Wait for them before returning the run's scope. */
+static void drain_workers(struct lr_run *r, const int *order, int cnt)
+{
+    for (int k = 0; k < cnt; k++) {
+        if (r->g[order[k]].pid > 0)
+            (void)reap_gate(r, order[k], 0);
+    }
 }
 
 int lr_pool(struct lr_run *r, const int *order, int cnt, int jobs)
@@ -130,8 +177,10 @@ int lr_pool(struct lr_run *r, const int *order, int cnt, int jobs)
             if (spawn_worker(r, order[next++]) > 0)
                 running++;
         }
-        if (running > 0 && reap_one(r, order, cnt) != 0)
+        if (running > 0 && reap_one(r, order, cnt) != 0) {
+            drain_workers(r, order, cnt);
             return 1;
+        }
         if (running > 0)
             running--;
     }

@@ -16,6 +16,8 @@
 #include "lint/lintc/run_priv.h"
 
 #include <limits.h>
+#include <errno.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -171,6 +173,123 @@ static int lrun_vendor_go(struct lrun_fx *fx)
     return WEXITSTATUS(status);
 }
 
+static bool lrun_foreign_ready(pid_t pid)
+{
+    siginfo_t info = {0};
+    int rc;
+    do { rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT); }
+    while (rc < 0 && errno == EINTR);
+    return rc == 0 && info.si_pid == pid && info.si_code == CLD_EXITED && info.si_status == 37;
+}
+
+static bool lrun_foreign_wait(pid_t pid)
+{
+    int status = 0;
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    return got == pid && WIFEXITED(status) && WEXITSTATUS(status) == 37;
+}
+
+static bool lrun_owned_verdicts(const char *out, const struct lrun_fx *fx)
+{
+    char path[PATH_MAX + 32], data[8192];
+    (void)snprintf(path, sizeof path, "%s/state/last-run.json", fx->root);
+    return strstr(out, "PASS check-fx-rv-a ") && strstr(out, "PASS check-fx-rv-b ") &&
+           lrun_read(path, data, sizeof data) && strstr(data, "\"name\":\"check-fx-rv-a\"") &&
+           strstr(data, "\"name\":\"check-fx-rv-b\"");
+}
+
+static void lrun_reap_fixture_children(void)
+{
+    int status;
+    pid_t got;
+    do {
+        got = waitpid(-1, &status, 0);
+    } while (got > 0 || (got < 0 && errno == EINTR));
+}
+
+/* This process owns only the fixture's foreign child and lint workers. */
+static int lrun_foreign_worker(void)
+{
+    struct lrun_fx fx;
+    if (!lrun_plant(&fx)) return 1;
+    pid_t foreign = fork();
+    if (foreign == 0) _exit(37);
+    bool ready = foreign > 0 && lrun_foreign_ready(foreign);
+    char out[8192] = "", err[8192] = "";
+    char *gates[] = {(char *)"check-fx-rv-a", (char *)"check-fx-rv-b"};
+    struct lrun_cfg c = {2, "", "", ""};
+    int rc = ready ? lrun_go(&fx, &c, gates, 2, out, err, sizeof out) : -1;
+    bool owned = foreign > 0 && lrun_foreign_wait(foreign);
+    bool verdicts = lrun_owned_verdicts(out, &fx);
+    lrun_reap_fixture_children();
+    if (!ready || !owned || rc != 0 || !verdicts)
+        fprintf(stderr, "lint foreign child: ready=%d owner_wait=%d rc=%d verdicts=%d\n%s\n%s\n",
+                ready, owned, rc, verdicts, out, err);
+    (void)test_rm_rf_recursive(fx.root);
+    return ready && owned && rc == 0 && verdicts ? 0 : 1;
+}
+
+static int test_lrun_foreign_child(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: unrelated waitable child remains owned and all verdicts appear") {
+        pid_t worker = fork();
+        if (worker == 0) {
+            _exit(lrun_foreign_worker());
+        }
+        int status = 0;
+        pid_t got = -1;
+        if (worker > 0)
+            do { got = waitpid(worker, &status, 0); } while (got < 0 && errno == EINTR);
+        ASSERT(worker > 0 && got == worker && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    } TEST_END
+    return failures;
+}
+
+static int lrun_wait_error_worker(void)
+{
+    struct lrun_fx fx;
+    if (!lrun_plant(&fx)) return 1;
+    struct sigaction ignored = {0}, saved;
+    ignored.sa_handler = SIG_IGN;
+    if (sigemptyset(&ignored.sa_mask) != 0 || sigaction(SIGCHLD, &ignored, &saved) != 0) {
+        (void)test_rm_rf_recursive(fx.root);
+        return 1;
+    }
+    char out[8192] = "", err[8192] = "";
+    char *gates[] = {(char *)"check-fx-pass", (char *)"check-fx-rv-a"};
+    struct lrun_cfg c = {2, "", "", ""};
+    int rc = lrun_go(&fx, &c, gates, 2, out, err, sizeof out);
+    int status;
+    pid_t got;
+    do { got = waitpid(-1, &status, WNOHANG); } while (got < 0 && errno == EINTR);
+    int wait_error = errno;
+    bool quiescent = got == -1 && wait_error == ECHILD;
+    bool restored = sigaction(SIGCHLD, &saved, NULL) == 0;
+    lrun_reap_fixture_children();
+    if (rc != 1 || !quiescent || !restored)
+        fprintf(stderr, "lint wait error: rc=%d quiescent=%d waitpid=%ld errno=%d restored=%d\n%s\n%s\n",
+                rc, quiescent, (long)got, wait_error, restored, out, err);
+    (void)test_rm_rf_recursive(fx.root);
+    return rc == 1 && quiescent && restored ? 0 : 1;
+}
+
+static int test_lrun_wait_error_drain(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: wait failure drains remaining workers") {
+        pid_t worker = fork();
+        if (worker == 0) _exit(lrun_wait_error_worker());
+        int status = 0;
+        pid_t got = -1;
+        if (worker > 0)
+            do { got = waitpid(worker, &status, 0); } while (got < 0 && errno == EINTR);
+        ASSERT(worker > 0 && got == worker && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    } TEST_END
+    return failures;
+}
+
 static int test_lrun_verdicts(void)
 {
     int failures = 0;
@@ -265,6 +384,25 @@ static int test_lrun_parallel(void)
         ASSERT(strstr(out, "FAIL check-fx-rv-a") != NULL);
         ASSERT(strstr(out, "PASS check-fx-rv-b") != NULL);
         test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lrun_refill(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: a completed later worker frees a slot") {
+        struct lrun_fx fx;
+        char out[4096] = "", err[4096] = "";
+        char *gates[] = {(char *)"check-fx-rv-a", (char *)"check-fx-pass",
+                         (char *)"check-fx-rv-b"};
+        struct lrun_cfg c = {2, "", "", ""};
+        bool planted = lrun_plant(&fx);
+        int rc = planted ? lrun_go(&fx, &c, gates, 3, out, err, sizeof out) : -1;
+        bool ok = planted && rc == 0 && strstr(out, "PASS check-fx-rv-a") &&
+                  strstr(out, "PASS check-fx-pass") && strstr(out, "PASS check-fx-rv-b");
+        if (planted) (void)test_rm_rf_recursive(fx.root);
+        ASSERT(ok);
     } TEST_END
     return failures;
 }
@@ -563,6 +701,9 @@ int test_lint_run(void)
     failures += test_lrun_green();
     failures += test_lrun_chain();
     failures += test_lrun_parallel();
+    failures += test_lrun_foreign_child();
+    failures += test_lrun_wait_error_drain();
+    failures += test_lrun_refill();
     failures += test_lrun_order();
     failures += test_lrun_inventory_prerequisite();
     failures += test_lrun_prerequisite_failure();
