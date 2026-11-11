@@ -247,17 +247,6 @@ static int header_sync_check_locator_timing_and_anchor_release(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    /* A peer can advertise INT_MAX while our local height is unknown (-1).
-     * Its lead is far, not a wrapped negative near-lead interval. */
-    printf("header_sync: unknown height with INT_MAX peer uses far interval... ");
-    {
-        struct p2p_node n = make_test_node(INT_MAX, 100);
-        bool early = syncsvc_should_request_headers(&n, -1, 102);
-        bool due = syncsvc_should_request_headers(&n, -1, 111);
-        if (!early && due) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
     /* ── 16c. Fresh peer after a drop is asked at once ────── */
     printf("header_sync: fresh IBD peer asked at once... ");
     {
@@ -325,6 +314,18 @@ static int header_sync_replay_suppresses_rekick(void)
     return failures;
 }
 
+static int header_sync_unknown_height_far_peer(void)
+{
+    /* INT_MAX is peer-supplied; -1 means no local height yet. */
+    printf("header_sync: unknown height with INT_MAX peer uses far interval... ");
+    struct p2p_node n = make_test_node(INT_MAX, 100);
+    bool early = syncsvc_should_request_headers(&n, -1, 102);
+    bool due = syncsvc_should_request_headers(&n, -1, 111);
+    if (!early && due) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+
 int test_header_sync(void)
 {
     int failures = 0;
@@ -333,6 +334,7 @@ int test_header_sync(void)
     failures += header_sync_check_backoff_and_peer_gating();
     failures += header_sync_check_planning_and_batch_evaluation();
     failures += header_sync_check_locator_timing_and_anchor_release();
+    failures += header_sync_unknown_height_far_peer();
 
     failures += header_sync_replay_suppresses_rekick();
 
