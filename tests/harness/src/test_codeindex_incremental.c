@@ -11,6 +11,11 @@
 #include "test/test_core.h"
 
 #include "codeindex/codeindex.h"
+#include "codeindex/codeindex_merkle.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
+#include "base/safe_alloc.h"
+
+#include <sqlite3.h>
 
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
@@ -890,6 +895,145 @@ static bool cin_seed_fixture_pair(const char *workspace, char live[PATH_MAX],
            cin_seed(live) && cin_seed(reference);
 }
 
+struct cin_scan_counts { int symbols, refs; };
+static const char cin_fault_source[] =
+    "int target(void) { return 1; }\nint caller(void) { return target(); }\n";
+static const char cin_old_source[] =
+    "int old_callee(void) { return 1; }\nint old_symbol(void) { return old_callee(); }\n";
+static void cin_fault_symbol(const struct ci_symbol *symbol, void *user)
+{
+    (void)symbol;
+    ((struct cin_scan_counts *)user)->symbols++;
+}
+static void cin_fault_ref(const char *callee, const char *file, int line,
+                          const char *enclosing, void *user)
+{
+    (void)callee; (void)file; (void)line; (void)enclosing;
+    ((struct cin_scan_counts *)user)->refs++;
+}
+
+static bool cin_fault_scan(const char *root, const char *label)
+{
+    struct cin_scan_counts counts = {0};
+    zcl_alloc_fault_fail_nth(label, 1);
+    bool ok = ci_scan_file(root, "lib/net/src/fault.c", cin_fault_symbol,
+                           cin_fault_ref, &counts, NULL, NULL, NULL);
+    bool consumed = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    printf("codeindex_incremental: scan fault %s consumed=%d returned=%d symbols=%d refs=%d\n",
+           label, consumed, ok, counts.symbols, counts.refs);
+    return consumed && !ok;
+}
+
+static bool cin_fault_seed(const char *root, struct ci_store **store)
+{
+    uint8_t source_root[32], dep_root[32];
+    *store = NULL;
+    return cin_write_file(root, "lib/net/src/fault.c", cin_old_source) &&
+        ci_build_store_memory(root, 0, store, source_root, dep_root) &&
+        cin_write_file(root, "lib/net/src/fault.c", cin_fault_source);
+}
+
+static bool cin_fault_old_rows(sqlite3 *db)
+{
+    static const char *sql =
+        "SELECT (SELECT count(*) FROM files WHERE path='lib/net/src/fault.c' "
+        "AND content_sha3=?1)=1"
+        " AND (SELECT count(*) FROM symbols WHERE name='old_symbol' AND def_path='lib/net/src/fault.c')=1"
+        " AND (SELECT count(*) FROM symbols WHERE name='old_callee' AND def_path='lib/net/src/fault.c')=1"
+        " AND (SELECT count(*) FROM symbols WHERE def_path='lib/net/src/fault.c')=2"
+        " AND (SELECT count(*) FROM refs WHERE callee_name='old_callee' AND ref_file='lib/net/src/fault.c')=1"
+        " AND (SELECT count(*) FROM refs WHERE ref_file='lib/net/src/fault.c')=1";
+    uint8_t digest[32];
+    ci_scan_hash_contents(cin_old_source, sizeof cin_old_source - 1, digest);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(stmt, 1, digest, sizeof digest, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1; // raw-sql-ok:codeindex-derived
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
+}
+
+static bool cin_fault_incremental(const char *root, const char *label)
+{
+    struct ci_store *store = NULL;
+    bool ready = cin_fault_seed(root, &store);
+    if (!store) return false;
+    bool seeded = ready && cin_fault_old_rows(ci_store_db(store));
+    struct ci_merkle_leaf leaf = {0};
+    (void)snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
+    uint8_t digest[32] = {0};
+    zcl_alloc_fault_fail_nth(label, 1);
+    bool ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, digest, digest);
+    bool consumed = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool preserved = cin_fault_old_rows(ci_store_db(store));
+    printf("codeindex_incremental: incremental fault %s ready=%d seeded=%d consumed=%d returned=%d old_rows=%d\n",
+           label, ready, seeded, consumed, ok, preserved);
+    ci_store_close(store);
+    return ready && seeded && consumed && !ok && preserved;
+}
+
+static bool cin_fault_new_rows(sqlite3 *db)
+{
+    static const char *sql =
+        "SELECT (SELECT count(*) FROM files WHERE path='lib/net/src/fault.c' AND content_sha3=?1)=1"
+        " AND (SELECT count(*) FROM symbols WHERE name='target' AND def_path='lib/net/src/fault.c')=1"
+        " AND (SELECT count(*) FROM symbols WHERE name='caller' AND def_path='lib/net/src/fault.c')=1"
+        " AND (SELECT count(*) FROM refs WHERE callee_name='target' AND ref_file='lib/net/src/fault.c')>0"
+        " AND (SELECT count(*) FROM symbols WHERE name='old_symbol')=0"
+        " AND (SELECT count(*) FROM refs WHERE callee_name='old_callee')=0";
+    uint8_t digest[32];
+    ci_scan_hash_contents(cin_fault_source, sizeof(cin_fault_source) - 1, digest);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_blob(stmt, 1, digest, sizeof digest, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1; // raw-sql-ok:codeindex-derived
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
+}
+
+static bool cin_incremental_control(const char *root)
+{
+    struct ci_store *store = NULL;
+    bool ready = cin_fault_seed(root, &store);
+    if (!store) return false;
+    bool seeded = ready && cin_fault_old_rows(ci_store_db(store));
+    struct ci_merkle_leaf leaf = {0};
+    (void)snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
+    uint8_t digest[32] = {0};
+    bool ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, digest, digest);
+    bool new_rows = cin_fault_new_rows(ci_store_db(store));
+    printf("codeindex_incremental: incremental control ready=%d seeded=%d returned=%d new_rows=%d\n",
+           ready, seeded, ok, new_rows);
+    ci_store_close(store);
+    return ok && new_rows;
+}
+
+static int cin_scan_allocation_cases(const char *workspace)
+{
+    int failures = 0;
+    char root[PATH_MAX];
+    int n = snprintf(root, sizeof root, "%s/scan-faults", workspace);
+    bool ready = n > 0 && (size_t)n < sizeof root &&
+        cin_write_file(root, "lib/net/src/fault.c", cin_fault_source) &&
+        cin_write_file(root, "lib/net/src/empty.c", "");
+    CIN_CHECK("scanner allocation fixture is ready", ready);
+    if (!ready) return failures;
+    struct cin_scan_counts normal = {0};
+    bool normal_ok = ci_scan_file(root, "lib/net/src/fault.c", cin_fault_symbol,
+                                  cin_fault_ref, &normal, NULL, NULL, NULL);
+    CIN_CHECK("normal scanner emits a symbol and reference", normal_ok && normal.symbols > 0 && normal.refs > 0);
+    CIN_CHECK("empty source scan succeeds", ci_scan_file(root, "lib/net/src/empty.c", cin_fault_symbol,
+                                                          cin_fault_ref, &normal, NULL, NULL, NULL));
+    CIN_CHECK("unfaulted incremental fixture succeeds", cin_incremental_control(root));
+    const char *const labels[] = {"ci_clean", "ci_line_starts", "ci_line_guard", "ci_pp_line"};
+    for (size_t i = 0; i < sizeof labels / sizeof labels[0]; i++) {
+        CIN_CHECK("scanner setup allocation failure refuses", cin_fault_scan(root, labels[i]));
+        CIN_CHECK("incremental allocation failure preserves old rows", cin_fault_incremental(root, labels[i]));
+    }
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
 int test_codeindex_incremental(void)
 {
     int failures = 0;
@@ -910,6 +1054,7 @@ int test_codeindex_incremental(void)
     failures += cin_depfile_cases(live, reference);
     failures += cin_vanished_cases(workspace);
     failures += cin_source_line_cases(workspace);
+    failures += cin_scan_allocation_cases(workspace);
     failures += cin_edit_cases(live, reference);
     failures += cin_inventory_cases(live, reference, baseline_files);
     failures += cin_snapshot_cases(live, reference);

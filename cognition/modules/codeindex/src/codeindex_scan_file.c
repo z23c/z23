@@ -135,8 +135,9 @@ bool ci_scan_file(const char *root, const char *relpath,
     bool is_header = ci_scan_path_is_header(relpath);
     char group[64];
     ci_group_for_path(relpath, group);
-    ci_scan_text(buf, len, relpath, is_header, group, on_sym, on_ref, user,
-                 purpose_out);
+    bool scanned = ci_scan_text(buf, len, relpath, is_header, group, on_sym,
+                                on_ref, user, purpose_out);
     free(buf);
+    if (!scanned) LOG_FAIL("codeindex", "scanner setup failed for %s", relpath);
     return true;
 }

@@ -983,16 +983,17 @@ static bool build_line_index(struct scan_ctx *c)
     return true;
 }
 
-void ci_scan_text(const char *src, size_t len, const char *relpath,
+bool ci_scan_text(const char *src, size_t len, const char *relpath,
                   bool is_header, const char *group,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
                   char purpose_out[CI_FILE_PURPOSE_MAX])
 {
     if (purpose_out) purpose_out[0] = '\0';
-    if (!src || len == 0 || !relpath || !on_sym || !on_ref) return;
+    if (!src || !relpath || !on_sym || !on_ref) return false;
+    if (len == 0) return true;
 
     char *clean = zcl_malloc(len, "ci_clean");
-    if (!clean) return;
+    if (!clean) return false;
 
     struct scan_ctx c;
     memset(&c, 0, sizeof(c));
@@ -1005,7 +1006,8 @@ void ci_scan_text(const char *src, size_t len, const char *relpath,
     /* file self-description: derive purpose from the leading comment */
     if (purpose_out) ci_file_purpose(&c, purpose_out);
 
-    if (build_line_index(&c)) {
+    bool ready = build_line_index(&c);
+    if (ready) {
         scan_pp_lines(&c);
         blank_pp_lines(&c, clean);
         scan_structure(&c);
@@ -1018,6 +1020,7 @@ void ci_scan_text(const char *src, size_t len, const char *relpath,
     free(c.pp_line);
     free(c.comments);
     free(c.funcs);
+    return ready;
 }
 
 void codeindex_text_purpose(const char *src, size_t len, const char *relpath,

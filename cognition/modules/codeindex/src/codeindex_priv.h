@@ -436,8 +436,10 @@ bool ci_scan_file(const char *root, const char *relpath,
 
 /* Pure text scanner (no file I/O) — the testable core. `src`/`len` is the raw
  * file text; the group is stamped into every emitted symbol. `purpose_out`
- * (may be NULL) receives the derived file purpose (see ci_scan_file). */
-void ci_scan_text(const char *src, size_t len, const char *relpath,
+ * (may be NULL) receives the derived file purpose (see ci_scan_file).
+ * Returns false for invalid input or required setup allocation failure.
+ * Valid empty input succeeds; optional doc/attribution capture is best-effort. */
+bool ci_scan_text(const char *src, size_t len, const char *relpath,
                   bool is_header, const char *group,
                   ci_sym_cb on_sym, ci_ref_cb on_ref, void *user,
                   char purpose_out[CI_FILE_PURPOSE_MAX]);

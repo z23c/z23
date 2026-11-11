@@ -6,6 +6,7 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "codeindex/codeindex_inventory.h"
 #include "codeindex/codeindex_docs.h"
 #include "codeindex/codeindex_pages.h"
 #include "platform/directory_compat.h"
@@ -13,6 +14,7 @@
 #include "command/native_code_pages.h"
 #include "util/spawn.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
@@ -503,6 +505,61 @@ static bool cis_page_roundtrip(const char *root)
     return ok;
 }
 
+static bool cis_inventory_fault_fixture(const char *root)
+{
+    static const char baseline[] =
+        "# z23-generated-artifact: zcl.generated_artifact.v1\n"
+        "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
+        "# asserts: multi_arm_definition(path,symbol)\n"
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n";
+    return cis_put(root, "lib/net/include/net/fault.h", "int inventory_fixture(void);\n") &&
+        cis_put(root, "lib/net/src/fault.c", "int inventory_fixture(void) { return 1; }\n") &&
+        cis_put(root, "tools/dev/test_group_catalog.def", "ZCL_TEST_GROUP(inventory_fixture)\n") &&
+        cis_put(root, "tools/lint/arm_symbol_single_baseline.txt", baseline);
+}
+
+static bool cis_inventory_control(const struct ci_inventory_report *report)
+{
+    if (!report || report->files_scanned < 2 || report->production_files < 2 ||
+        report->public_headers < 1) return false;
+    for (int i = 0; i < report->symbol_count; i++)
+        if (!strcmp(report->symbols[i].name, "inventory_fixture") &&
+            !strcmp(report->symbols[i].declaration_path, "lib/net/include/net/fault.h")) return true;
+    return false;
+}
+
+static bool cis_inventory_fault(const char *root, const char *label)
+{
+    zcl_alloc_fault_fail_nth(label, 1);
+    struct ci_inventory_report *report = codeindex_inventory_analyze(root);
+    bool consumed = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    printf("codeindex_inventory_schema: fault %s consumed=%d returned=%d\n", label, consumed, report != NULL);
+    bool refused = report == NULL;
+    codeindex_inventory_free(report);
+    return consumed && refused;
+}
+
+static int cis_inventory_fault_cases(const char *workspace)
+{
+    int failures = 0;
+    char root[PATH_MAX];
+    int n = snprintf(root, sizeof root, "%s/inventory-fault", workspace);
+    bool ready = n > 0 && (size_t)n < sizeof root &&
+        platform_directory_ensure(root, 0700) && cis_inventory_fault_fixture(root);
+    CIS_CHECK("inventory fault fixture is ready", ready);
+    if (!ready) return failures;
+    struct ci_inventory_report *control = codeindex_inventory_analyze(root);
+    CIS_CHECK("unfaulted inventory fixture exposes its declared symbol", cis_inventory_control(control));
+    codeindex_inventory_free(control);
+    const char *const labels[] = {"ci_clean", "ci_line_starts", "ci_line_guard", "ci_pp_line"};
+    for (size_t i = 0; i < sizeof labels / sizeof labels[0]; i++)
+        CIS_CHECK("inventory scanner setup failure refuses", cis_inventory_fault(root, labels[i]));
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
 int test_codeindex_inventory_schema(void)
 {
     int failures = 0;
@@ -513,6 +570,7 @@ int test_codeindex_inventory_schema(void)
                                                    sizeof(root)) &&
                  cis_fixture(root);
     CIS_CHECK("fixture tree is written", ready);
+    if (ready) failures += cis_inventory_fault_cases(root);
     CIS_CHECK("page subject resolves exact commit tree and refuses invalid input", cis_page_subject());
     CIS_CHECK("native import excludes stale cards and never claims live overlay freshness", cis_native_pages());
 

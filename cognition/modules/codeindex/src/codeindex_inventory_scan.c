@@ -621,6 +621,37 @@ bool inv_read_arm_symbol_baseline(struct inv_scan *s)
     return ok;
 }
 
+static bool inv_scan_one(struct inv_scan *s, int i, struct sha3_256_ctx *sha)
+{
+    char *src = NULL;
+    size_t len = 0;
+    if (!inv_read_stable(s, i, &src, &len))
+        LOG_FAIL("codeindex.inventory", "stable read failed: %s", s->paths[i].path);
+    sha3_256_write(sha, (const unsigned char *)s->paths[i].path,
+                   strlen(s->paths[i].path) + 1);
+    inv_sha_u64(sha, (uint64_t)len);
+    if (len) sha3_256_write(sha, (const unsigned char *)src, len);
+
+    char group[64], purpose[CI_FILE_PURPOSE_MAX] = "";
+    inv_group_for_path(s->paths[i].path, group);
+    bool is_header = strlen(s->paths[i].path) >= 2 &&
+        strcmp(s->paths[i].path + strlen(s->paths[i].path) - 2, ".h") == 0;
+    struct inv_cb_env env = { .scan = s, .file_index = i };
+    bool scanned = ci_scan_text(src, len, s->paths[i].path, is_header, group,
+                                inv_symbol_cb, inv_ref_cb, &env, purpose);
+    if (!scanned) {
+        free(src);
+        LOG_FAIL("codeindex.inventory", "scanner setup failed: %s", s->paths[i].path);
+    }
+    if (s->failed || !inv_file_push(s, i, purpose)) {
+        free(src);
+        return false;
+    }
+    inv_scan_includes_and_bodies(s, i, src, len);
+    free(src);
+    return !s->failed;
+}
+
 bool inv_scan_all(struct inv_scan *s, uint8_t source_root[32])
 {
     if (!s || !source_root || !inv_collect_paths(s)) return false;
@@ -628,33 +659,8 @@ bool inv_scan_all(struct inv_scan *s, uint8_t source_root[32])
     static const char domain[] = "zcl.code_capability_inventory.source.v1";
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
-    for (int i = 0; i < s->path_count; i++) {
-        char *src = NULL;
-        size_t len = 0;
-        if (!inv_read_stable(s, i, &src, &len)) {
-            LOG_FAIL("codeindex.inventory", "stable read failed: %s",
-                     s->paths[i].path);
-        }
-        sha3_256_write(&sha, (const unsigned char *)s->paths[i].path,
-                       strlen(s->paths[i].path) + 1);
-        inv_sha_u64(&sha, (uint64_t)len);
-        if (len) sha3_256_write(&sha, (const unsigned char *)src, len);
-
-        char group[64], purpose[CI_FILE_PURPOSE_MAX] = "";
-        inv_group_for_path(s->paths[i].path, group);
-        bool is_header = strlen(s->paths[i].path) >= 2 &&
-            strcmp(s->paths[i].path + strlen(s->paths[i].path) - 2, ".h") == 0;
-        struct inv_cb_env env = { .scan = s, .file_index = i };
-        ci_scan_text(src, len, s->paths[i].path, is_header, group,
-                     inv_symbol_cb, inv_ref_cb, &env, purpose);
-        if (s->failed || !inv_file_push(s, i, purpose)) {
-            free(src);
-            return false;
-        }
-        inv_scan_includes_and_bodies(s, i, src, len);
-        free(src);
-        if (s->failed) return false;
-    }
+    for (int i = 0; i < s->path_count; i++)
+        if (!inv_scan_one(s, i, &sha)) return false;
     if (!inv_hash_extra(s, &sha, "tools/dev/test_group_catalog.def") ||
         !inv_hash_extra(s, &sha,
                         "tools/lint/arm_symbol_single_baseline.txt") ||
