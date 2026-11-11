@@ -812,7 +812,7 @@ static int hooks_quiet_held_ready(struct hooks_fx *fx)
     BOOT_GUEST ":\n\t@touch guest-ran\n" \
     "rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures:\n\t@touch fixture-ran\n" \
     "z23 unknown-goal:\n\t@touch node-ran\n" \
-    "vendor-ready.mk:\n\t@touch vendor-ran\n\t@printf '# established\\n' > $@\n" \
+    "vendor-ready.mk: vendor-ready\n\t@touch vendor-ran\n\t@printf '# established\\n' > $@\n" \
     "tor-ready.mk:\n\t@touch tor-ran\n\t@printf '# established\\n' > $@\n"
 #define BOOT_GOALS_MAX 3
 
@@ -824,7 +824,21 @@ struct hooks_goal_case {
 
 static const char *const k_boot_marks[] = {
     "hook-ran", "node-ran", "vendor-ran", "vendor-ready.mk", "tor-ran",
-    "tor-ready.mk", "guest-ran", "fixture-ran"};
+    "tor-ready.mk", "guest-ran", "fixture-ran", "vendor-count", "audit-count"};
+
+static int hooks_boot_scripts(const char *dir)
+{
+    char path[PATH_MAX]; int bad = 0;
+    bad |= dip_join(path, sizeof path, dir, "tools"); bad |= mkdir(path, 0755) != 0;
+    bad |= dip_join(path, sizeof path, dir, "tools/scripts"); bad |= mkdir(path, 0755) != 0;
+    bad |= dip_join(path, sizeof path, dir, "tools/scripts/build_vendor.sh");
+    bad |= write_file(path, "#!/bin/sh\necho run >> vendor-count\n[ -z \"$FAIL_VENDOR\" ]\n") != 0;
+    bad |= chmod(path, 0700) != 0;
+    bad |= dip_join(path, sizeof path, dir, "audit");
+    bad |= write_file(path, "#!/bin/sh\necho run >> audit-count\n[ -z \"$FAIL_AUDIT\" ]\n") != 0;
+    bad |= chmod(path, 0700) != 0;
+    return bad;
+}
 
 /* Copies the real parse-time bootstrap blocks of the Makefile and adds
  * stub recipes that only drop marker files. */
@@ -832,7 +846,8 @@ static int hooks_boot_fixture(const char *dir)
 {
     static const char *const marks[][2] = {
         {"\nZCL_WINDOWS_LAUNCHER_GOALS :=", "\n# Generated view headers"},
-        {"\nZCL_TOR_SKIP_GOALS :=", "\n# The stub is reachable"}};
+        {"\nZCL_TOR_SKIP_GOALS :=", "\n# The stub is reachable"},
+        {"\n# Link/release/deploy front door:", "\n# Build the real embedded onion service"}};
     char mk_path[PATH_MAX], out_path[PATH_MAX], *mk = NULL;
     FILE *f;
     size_t i;
@@ -846,7 +861,8 @@ static int hooks_boot_fixture(const char *dir)
     }
     f = fopen(out_path, "wb");
     bad = f == NULL;
-    for (i = 0; f && i < 2; i++) {
+    if (f) bad |= fputs("VENDOR_REPAIR_REQUESTED := $(filter vendor-ready deploy install,$(MAKECMDGOALS))\nDEP_AUDIT_BIN := ./audit\n", f) < 0;
+    for (i = 0; f && i < 3; i++) {
         const char *s = strstr(mk, marks[i][0]);
         const char *e = s ? strstr(s, marks[i][1]) : NULL;
         bad |= !e || fwrite(s, 1, (size_t)(e - s), f) != (size_t)(e - s);
@@ -854,7 +870,7 @@ static int hooks_boot_fixture(const char *dir)
     bad |= f && fputs(BOOT_TAIL, f) < 0;
     bad |= f && fclose(f) != 0;
     free(mk);
-    return bad;
+    return bad | hooks_boot_scripts(dir);
 }
 
 static int hooks_boot_has(const char *dir, const char *mark)
@@ -862,6 +878,41 @@ static int hooks_boot_has(const char *dir, const char *mark)
     char path[PATH_MAX];
     return dip_join(path, sizeof path, dir, mark) == 0
            && access(path, F_OK) == 0;
+}
+
+static int hooks_vendor_reset(const char *dir)
+{
+    char path[PATH_MAX];
+    const char *marks[] = {"vendor-ready.mk", "tor-ready.mk", "vendor-count", "audit-count"};
+    for (size_t i = 0; i < sizeof marks / sizeof marks[0]; ++i)
+        if (dip_join(path, sizeof path, dir, marks[i]) || (unlink(path) && errno != ENOENT)) return 1;
+    return 0;
+}
+
+static int hooks_vendor_count(const char *dir, const char *mark, const char *goal, int want)
+{
+    char path[PATH_MAX], *data = NULL;
+    if (dip_join(path, sizeof path, dir, mark) || read_entire_file(path, &data)) return 1;
+    size_t bytes = data ? strlen(data) : 0;
+    int bad = !data || bytes != (size_t)want * 4;
+    if (bad) fprintf(stderr, "vendor goal %s: expected %d %s, got %zu bytes\n", goal ? goal : "standalone", want, mark, bytes);
+    free(data); return bad;
+}
+
+static int hooks_vendor_case(const struct hooks_fx *fx, const char *dir,
+                             const char *goal, const char *failure, int want)
+{
+    const char *argv[] = {"make", "-s", "-C", dir, "VENDOR_MISSING_INPUTS=missing.a",
+        "VENDOR_BOOTSTRAP_MK=vendor-ready.mk", "ZCL_TOR=full",
+        "TOR_MISSING_ARCHIVES=missing-tor.a", "TOR_BOOTSTRAP_MK=tor-ready.mk",
+        "vendor-ready", goal, failure, NULL};
+    char out[HOOKS_OUT_CAP];
+    if (hooks_vendor_reset(dir)) return 1;
+    int rc = hooks_spawn(argv, fx->genv.vp, out, sizeof out);
+    if (failure) return rc == 0;
+    if (rc) return 1;
+    int bad = hooks_vendor_count(dir, "vendor-count", goal, want);
+    return bad | hooks_vendor_count(dir, "audit-count", goal, want);
 }
 
 static int hooks_boot_case(const struct hooks_fx *fx, const char *dir,
@@ -926,6 +977,11 @@ static int hooks_boot_checks(struct hooks_fx *fx)
             bad = 1;
         }
     }
+    bad |= hooks_vendor_case(fx, dir, NULL, NULL, 1);
+    bad |= hooks_vendor_case(fx, dir, "z23", NULL, 2);
+    bad |= hooks_vendor_case(fx, dir, "MAKE_RESTARTS=1", NULL, 1);
+    bad |= hooks_vendor_case(fx, dir, "FAIL_VENDOR=1", "FAIL_VENDOR=1", 0);
+    bad |= hooks_vendor_case(fx, dir, "FAIL_AUDIT=1", "FAIL_AUDIT=1", 0);
     return bad;
 }
 

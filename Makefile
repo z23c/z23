@@ -495,9 +495,14 @@ ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
 ifneq ($(ZCL_BOOTSTRAP_HELPER_ONLY),1)
+# A standalone vendor-ready has no archive-consuming target or identity-bound
+# output. Its own recipe repairs and audits once; mixed builds still restart
+# after repair so their source identity captures the established archives.
+ifneq ($(strip $(MAKECMDGOALS)),vendor-ready)
 ifneq ($(strip $(VENDOR_MISSING_INPUTS) $(VENDOR_REPAIR_REQUESTED)),)
 ifeq ($(strip $(MAKE_RESTARTS)),)
 -include $(VENDOR_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif
