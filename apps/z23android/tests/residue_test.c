@@ -50,6 +50,10 @@ static char *fake_fgets(char *text, int cap, FILE *file)
         memcpy(text, "1bad mapping\n", sizeof("1bad mapping\n"));
         return text;
     }
+    if (mode == 11 && memory_reads > 0 && calls++ == 0) {
+        memcpy(text, "1bad- mapping\n", sizeof("1bad- mapping\n"));
+        return text;
+    }
     if (mode == 10 && memory_reads > 0 && calls++ == 0) {
         memcpy(text, "AnonExtra: 4 kB\n", sizeof("AnonExtra: 4 kB\n"));
         return text;
@@ -178,6 +182,9 @@ int main(void)
     assert(memory_reads > 0);
     mode = 10; calls = 0; memory_reads = 0;
     assert(!process_holds("residue-missing"));
+    mode = 11; calls = 0; memory_reads = 0;
+    assert(process_holds("residue-missing"));
+    assert(memory_reads > 0 && calls > 0);
     mode = 0;
     assert(!process_holds("residue-missing"));
     const size_t page = 4096;

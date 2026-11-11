@@ -198,7 +198,10 @@ static inline bool maps_line(struct maps_scan *scan, const char *line)
     }
     unsigned long next_low = 0, next_high = 0;
     char perms[8] = "", path[400] = "";
-    if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %399[^\n]", &next_low, &next_high, perms, path) < 3) return true;
+    if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %399[^\n]", &next_low, &next_high, perms, path) < 3) {
+        scan->found = true;
+        return true;
+    }
     if (scan->have_mapping && scan->candidate)
         scan->found = scan_candidate(scan->mem, scan->low, scan->high, scan->needle, scan->needle_len, &scan->read_any);
     scan->low = next_low;
