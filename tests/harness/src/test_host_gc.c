@@ -44,6 +44,33 @@
 
 enum { HGT_PATH = 512, HGT_OUT = 8192 };
 
+static const char *const hgt_git_vars[] = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE",
+    "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"};
+struct hgt_env { char *value[6]; bool present[6]; size_t captured; };
+static bool hgt_env_clear(struct hgt_env *saved)
+{
+    memset(saved, 0, sizeof(*saved));
+    for (size_t i = 0; i < 6; ++i) {
+        const char *v = getenv(hgt_git_vars[i]);
+        saved->present[i] = v != NULL;
+        if (v && !(saved->value[i] = strdup(v))) return false;
+        ++saved->captured;
+    }
+    for (size_t i = 0; i < 6; ++i) if (unsetenv(hgt_git_vars[i])) return false;
+    return true;
+}
+static bool hgt_env_restore(struct hgt_env *saved)
+{
+    bool ok = true;
+    for (size_t i = 0; i < saved->captured; ++i) {
+        if (saved->present[i] && saved->value[i]) {
+            if (setenv(hgt_git_vars[i], saved->value[i], 1)) ok = false;
+        } else if (!saved->present[i] && unsetenv(hgt_git_vars[i])) ok = false;
+        free(saved->value[i]);
+    }
+    return ok;
+}
+
 /* git through the same bounded capture seam the engine uses: no shell
  * string anywhere in this fixture either. */
 static bool hgt_git(const char *dir, const char *const *args)
@@ -522,6 +549,109 @@ static bool hgt_out(const char *dir, const char *const *args, char *out,
     argv[n] = NULL;
     out[0] = '\0';
     return zcl_spawn_capture(argv, out, cap, 60000) == 0;
+}
+
+static bool hgt_file_equal(const char *path, const unsigned char *before, size_t size)
+{
+    unsigned char after[8192];
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(after, 1, sizeof(after), f);
+    bool ok = !ferror(f) && feof(f) && n == size && !memcmp(before, after, n);
+    return fclose(f) == 0 && ok;
+}
+struct hgt_script_fixture {
+    char repo[HGT_PATH], pool[HGT_PATH], wt[HGT_PATH], gitdir[HGT_PATH];
+    char index[HGT_PATH], objects[HGT_PATH], scratch[HGT_PATH];
+    char before_list[HGT_OUT];
+    unsigned char before_index[8192];
+    size_t index_size;
+};
+
+static bool hgt_script_paths(struct hgt_script_fixture *f, const char *tmp)
+{
+    return snprintf(f->repo, sizeof f->repo, "%s/foreign", tmp) < (int)sizeof f->repo &&
+        snprintf(f->pool, sizeof f->pool, "%s/foreign-pool", tmp) < (int)sizeof f->pool &&
+        snprintf(f->gitdir, sizeof f->gitdir, "%s/.git", f->repo) < (int)sizeof f->gitdir &&
+        snprintf(f->index, sizeof f->index, "%s/index", f->gitdir) < (int)sizeof f->index &&
+        snprintf(f->objects, sizeof f->objects, "%s/objects", f->gitdir) < (int)sizeof f->objects &&
+        snprintf(f->scratch, sizeof f->scratch, "%s/script-scratch", tmp) < (int)sizeof f->scratch;
+}
+
+static bool hgt_script_worktree_intact(const struct hgt_script_fixture *f)
+{
+    char seed[HGT_PATH], status[HGT_OUT];
+    static const unsigned char expected[] = "fixture\n";
+    const char *const args[] = {"--no-optional-locks", "status", "--porcelain",
+                               "--untracked-files=all", NULL};
+    if ((size_t)snprintf(seed, sizeof seed, "%s/seed.txt", f->wt) >= sizeof seed)
+        return false;
+    return hgt_file_equal(seed, expected, sizeof expected - 1) &&
+           hgt_out(f->wt, args, status, sizeof status) && status[0] == '\0';
+}
+
+static bool hgt_script_prepare(struct hgt_script_fixture *f, const char *tmp)
+{
+    const char *const list[] = {"worktree", "list", "--porcelain", NULL};
+    if (!hgt_script_paths(f, tmp) || !hgt_make_repo(f->repo) ||
+        mkdir(f->pool, 0700) || mkdir(f->scratch, 0700) ||
+        !hgt_add_gen(f->repo, f->pool, "foreign-wt", f->wt, sizeof f->wt) ||
+        !hgt_out(f->repo, list, f->before_list, sizeof f->before_list)) return false;
+    FILE *index = fopen(f->index, "rb");
+    if (!index) return false;
+    f->index_size = fread(f->before_index, 1, sizeof f->before_index, index);
+    bool ok = !ferror(index) && feof(index);
+    return fclose(index) == 0 && ok && hgt_script_worktree_intact(f);
+}
+
+static bool hgt_script_run(void)
+{
+    char output[65536];
+    const char *argv[] = {"tools/scripts/host_gc_selftest.sh", NULL};
+    int rc = zcl_spawn_capture(argv, output, sizeof output, 180000);
+    bool ok = rc == 0 && strstr(output, "host_gc_selftest: PASS") != NULL;
+    if (!ok) fprintf(stderr, "host gc selftest rc=%d output:\n%s\n", rc, output);
+    return ok;
+}
+
+static bool hgt_script_redirected(const struct hgt_script_fixture *f)
+{
+    const char *old_tmp = getenv("TMPDIR");
+    char *saved_tmp = old_tmp ? strdup(old_tmp) : NULL;
+    if (old_tmp && !saved_tmp) return false;
+    const char *values[] = {f->gitdir, f->gitdir, f->repo, f->index, f->objects, f->objects};
+    bool ok = setenv("TMPDIR", f->scratch, 1) == 0;
+    for (size_t i = 0; i < 6; ++i)
+        if (setenv(hgt_git_vars[i], values[i], 1)) ok = false;
+    if (ok) ok = hgt_script_run();
+    for (size_t i = 0; i < 6; ++i) if (unsetenv(hgt_git_vars[i])) ok = false;
+    if (saved_tmp) { if (setenv("TMPDIR", saved_tmp, 1)) ok = false; }
+    else if (unsetenv("TMPDIR")) ok = false;
+    free(saved_tmp);
+    return ok;
+}
+
+static bool hgt_script_intact(const struct hgt_script_fixture *f)
+{
+    char after_list[HGT_OUT];
+    const char *const list[] = {"worktree", "list", "--porcelain", NULL};
+    bool contents_ok = hgt_script_worktree_intact(f);
+    bool index_ok = hgt_file_equal(f->index, f->before_index, f->index_size);
+    bool listed = hgt_out(f->repo, list, after_list, sizeof after_list) &&
+                  !strcmp(f->before_list, after_list);
+    bool intact = contents_ok && index_ok && listed;
+    if (!intact) fprintf(stderr, "host gc foreign fixture: contents=%d index=%d registry=%d\n",
+                         contents_ok, index_ok, listed);
+    return intact;
+}
+
+static bool hgt_script_isolated(const char *tmp)
+{
+    struct hgt_script_fixture f = {0};
+    if (!hgt_script_prepare(&f, tmp)) return false;
+    bool ok = hgt_script_redirected(&f);
+    bool intact = hgt_script_intact(&f);
+    return ok && intact;
 }
 
 static void hgt_chomp(char *s)
@@ -1034,6 +1164,12 @@ _test_next:;
 
 int test_host_gc(void)
 {
+    struct hgt_env saved_env;
+    if (!hgt_env_clear(&saved_env)) {
+        (void)hgt_env_restore(&saved_env);
+        fprintf(stderr, "host gc: cannot isolate Git environment\n");
+        return 1;
+    }
     int failures = 0;
     char tmp[HGT_PATH] = "", repo[HGT_PATH] = "", pool[HGT_PATH] = "";
     char fake[HGT_PATH] = "", blk[HGT_PATH] = "";
@@ -1316,6 +1452,10 @@ int test_host_gc(void)
 
     failures += hgt_archive_tests(tmp);
     failures += hgt_disposable_tests(tmp);
+    if (!hgt_script_isolated(tmp)) {
+        fprintf(stderr, "host gc: selftest escaped isolated Git environment\n");
+        ++failures;
+    }
 
 _test_next:;
     /* Restore both read-only fixture directories so the recursive cleanup can run. */
@@ -1339,6 +1479,10 @@ _test_next:;
     }
     if (tmp[0])
         (void)test_rm_rf_recursive(tmp);
+    if (!hgt_env_restore(&saved_env)) {
+        fprintf(stderr, "host gc: cannot restore Git environment\n");
+        ++failures;
+    }
     if (failures == 0)
         printf("test_host_gc: all passed\n");
     else

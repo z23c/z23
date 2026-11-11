@@ -9,6 +9,10 @@
 # live host (no overrides) is the caller's job, not this selftest's.
 set -euo pipefail
 
+# All Git operations, including host_gc's children, must use the fixture repo.
+unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOSTGC="$SELF_DIR/host_gc.sh"
 mkdir -p -- "${TMPDIR:-./test-tmp}"
