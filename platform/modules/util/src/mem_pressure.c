@@ -34,7 +34,7 @@ static int env_pct(const char *name, int fallback)
     if (!v || !*v) return fallback;
     char *end = NULL;
     long parsed = strtol(v, &end, 10);
-    if (end == v || parsed <= 0 || parsed > 100) return fallback;
+    if (end == v || *end != 0 || parsed <= 0 || parsed > 100) return fallback;
     return (int)parsed;
 }
 

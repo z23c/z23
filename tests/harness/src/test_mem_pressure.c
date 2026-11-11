@@ -32,6 +32,7 @@
 
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -152,6 +153,30 @@ int test_mem_pressure(void)
         mem_pressure_poll_tick();
         MP_CHECK("dropping back to 10% -> NOMINAL again",
                  mem_pressure_current() == MEM_NOMINAL);
+    }
+
+    /* Invalid suffixes must not silently delay the high-pressure shrink. */
+    {
+        const char *old = getenv("ZCL_MEM_PRESSURE_HIGH_PCT");
+        char *saved = old ? strdup(old) : NULL;
+        if (old && !saved) {
+            MP_CHECK("save high threshold environment", false);
+        } else {
+            set_override(800, -1, -1, -1, 1000, 200);
+            (void)setenv("ZCL_MEM_PRESSURE_HIGH_PCT", "89oops", 1);
+            mem_pressure_poll_tick();
+            MP_CHECK("malformed high threshold falls back to 75",
+                     mem_pressure_current() == MEM_HIGH &&
+                     dumped_state_int("high_pct") == 75);
+            (void)setenv("ZCL_MEM_PRESSURE_HIGH_PCT", "89", 1);
+            mem_pressure_poll_tick();
+            MP_CHECK("valid high threshold remains configurable",
+                     mem_pressure_current() == MEM_ELEVATED &&
+                     dumped_state_int("high_pct") == 89);
+            if (saved) (void)setenv("ZCL_MEM_PRESSURE_HIGH_PCT", saved, 1);
+            else (void)unsetenv("ZCL_MEM_PRESSURE_HIGH_PCT");
+            free(saved);
+        }
     }
 
     /* ── Android: MemAvailable leaves out cached apps lmkd reclaims ──── */
