@@ -119,6 +119,115 @@ static bool lrun_vendor_setup(const char *root)
     return lrun_write(path, "build_time_patch_sha256=fixture\n");
 }
 
+static bool lrun_plant(struct lrun_fx *fx);
+
+static bool lrun_epoch_file(const char *root, const char *rel, const char *body,
+                            bool executable)
+{
+    char path[PATH_MAX + 128];
+    int n = snprintf(path, sizeof path, "%s/%s", root, rel);
+    return n > 0 && (size_t)n < sizeof path && lrun_write(path, body) &&
+           (!executable || chmod(path, 0700) == 0);
+}
+
+static bool lrun_epoch_setup(const char *root)
+{
+    static const char *const inputs[] = {
+        "tools/dev/publish-build-alias.sh", "tools/dev/build-epoch-lock-wait.sh",
+        "tools/dev/compile-epoch-object.sh", "tools/dev/build-epoch-session.sh",
+        "tools/dev/build-epoch-open-file-identity.sh", "tools/dev/process-start-token.sh",
+        "tools/dev/source-identity.sh", "tools/dev/make_depfile_scope_selftest.c",
+        "tools/dev/make_depfile_scope_process.h", "Makefile",
+    };
+    static const char build_probe[] = "#!/bin/sh\necho run >> build.trace\n"
+        "[ \"$(cat tools/dev/source_identity_batch.c)\" = good ]\n";
+    static const char dep_probe[] = "#!/bin/sh\necho run >> dep.trace\n"
+        "[ -z \"${MAKEFILES:-}\" ]\n";
+    static const char key_tool[] = "#!/bin/sh\nprintf '%064d\\n' 0\n";
+    char driver[16384], lint[PATH_MAX], target[PATH_MAX + 64], dir[PATH_MAX + 32];
+    if (!lrun_read("tools/dev/build-epoch-integrity-cached.sh", driver, sizeof driver) ||
+        !realpath("build/bin/z23-lint", lint)) return false;
+    const char *dirs[] = {"tools", "tools/dev", "build", "build/bin"};
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        (void)snprintf(dir, sizeof dir, "%s/%s", root, dirs[i]);
+        if (mkdir(dir, 0700) != 0) return false;
+    }
+    for (size_t i = 0; i < sizeof inputs / sizeof inputs[0]; i++)
+        if (!lrun_epoch_file(root, inputs[i], "fixture\n", false)) return false;
+    (void)snprintf(target, sizeof target, "%s/build/bin/z23-lint", root);
+    return symlink(lint, target) == 0 &&
+        lrun_epoch_file(root, "tools/dev/build-epoch-integrity-cached.sh", driver, true) &&
+        lrun_epoch_file(root, "tools/dev/build-epoch-key.sh", key_tool, true) &&
+        lrun_epoch_file(root, "tools/dev/build-epoch-selftest.sh", build_probe, true) &&
+        lrun_epoch_file(root, "tools/dev/make-depfile-scope-selftest.sh", dep_probe, true) &&
+        lrun_epoch_file(root, "tools/dev/source_identity_batch.c", "good\n", false) &&
+        lrun_epoch_file(root, "poison.mk", "$(error fixture poison)\n", false);
+}
+
+static int lrun_epoch_driver(const char *root, bool poison)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char cache[PATH_MAX + 32], makefiles[PATH_MAX + 32];
+        (void)snprintf(cache, sizeof cache, "%s/cache", root);
+        (void)snprintf(makefiles, sizeof makefiles, "%s/poison.mk", root);
+        if (chdir(root) != 0 || setenv("ZCL_BUILD_EPOCH_CACHE_DIR", cache, 1) != 0 ||
+            (poison ? setenv("MAKEFILES", makefiles, 1) : unsetenv("MAKEFILES")) != 0)
+            _exit(127);
+        execlp("bash", "bash", "tools/dev/build-epoch-integrity-cached.sh", (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    return got == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static size_t lrun_epoch_calls(const char *root, const char *name)
+{
+    char path[PATH_MAX + 64], data[256];
+    (void)snprintf(path, sizeof path, "%s/%s", root, name);
+    if (!lrun_read(path, data, sizeof data)) return 0;
+    size_t count = 0;
+    for (const char *p = data; *p; p++) if (*p == '\n') count++;
+    return count;
+}
+
+static bool lrun_epoch_fixture(void)
+{
+    struct lrun_fx fx;
+    if (!lrun_plant(&fx)) return false;
+    bool setup = lrun_epoch_setup(fx.root);
+    int rc[4] = {-1, -1, -1, -1};
+    if (setup) {
+        rc[0] = lrun_epoch_driver(fx.root, false);
+        rc[1] = lrun_epoch_driver(fx.root, false);
+        bool changed = lrun_epoch_file(fx.root, "tools/dev/source_identity_batch.c", "bad\n", false);
+        if (changed) rc[2] = lrun_epoch_driver(fx.root, false);
+        changed = lrun_epoch_file(fx.root, "tools/dev/source_identity_batch.c", "good\n", false);
+        if (changed) rc[3] = lrun_epoch_driver(fx.root, true);
+    }
+    size_t build_calls = lrun_epoch_calls(fx.root, "build.trace");
+    size_t dep_calls = lrun_epoch_calls(fx.root, "dep.trace");
+    bool ok = setup && rc[0] == 0 && rc[1] == 0 && rc[2] == 1 && rc[3] == 1 &&
+              build_calls == 4 && dep_calls == 4;
+    if (!ok)
+        fprintf(stderr, "epoch driver fixture setup=%d rc=%d,%d,%d,%d probe_calls=%zu,%zu\n",
+                setup, rc[0], rc[1], rc[2], rc[3], build_calls, dep_calls);
+    (void)test_rm_rf_recursive(fx.root);
+    return ok;
+}
+
+static int test_lrun_epoch_driver(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: epoch probes rerun and refuse changed hidden inputs") {
+        ASSERT(lrun_epoch_fixture());
+    } TEST_END
+    return failures;
+}
+
 struct lrun_cfg {
     int jobs;
     const char *pro, *epi, *poles;
@@ -713,6 +822,7 @@ int test_lint_run(void)
     failures += test_lrun_wrapper();
     failures += test_lrun_table();
     failures += test_lrun_vendor();
+    failures += test_lrun_epoch_driver();
     return failures;
 }
 

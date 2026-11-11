@@ -11148,14 +11148,14 @@ static int test_generator_stamp_gate(void)
  * behind the parse-time speedup: the identity, mutation, and inventory
  * digests cannot move when the helper takes over, and shadow mode must
  * agree on a tree that also carries a live untracked file and a symlink. */
-/* The build-epoch integrity gate must pass from a COLD cache on any host:
+/* The build-epoch integrity gate must run both real probes on any host:
  * pins driver discovery when a plain `cc` lacks cc1plus or a `gcc` rejects
- * -std=c23. A private empty cache directory makes the compiler probes run
- * for real every time. */
+ * -std=c23. A private directory holds the native pool's diagnostics; no
+ * invocation may inherit a cached PASS. */
 static int test_cold_epoch_integrity_gate(void)
 {
     int failures = 0;
-    TEST("dev platform: build-epoch integrity passes from a cold cache") {
+    TEST("dev platform: build-epoch integrity runs both real probes") {
         pid_t child = fork();
         ASSERT(child >= 0);
         if (child == 0) {
@@ -11179,10 +11179,10 @@ static int test_cold_epoch_integrity_gate(void)
                    "trap cleanup EXIT HUP INT TERM\n"
                    "ZCL_BUILD_EPOCH_CACHE_DIR=\"$scratch/cache\" \\\n"
                    "  tools/dev/build-epoch-integrity-cached.sh \\\n"
-                   "  >\"$scratch/out.log\" 2>&1\n"
-                   "grep -Fq 'build-epoch-selftest: PASS' \"$scratch/out.log\"\n"
-                   "grep -Fq 'make-depfile-scope-selftest: PASS' "
-                   "\"$scratch/out.log\"\n",
+                   "  >\"$scratch/out.log\" 2>&1 || { cat \"$scratch/out.log\"; exit 1; }\n"
+                   "grep -Eq '^PASS check-build-epoch-selftest[[:space:]]' \"$scratch/out.log\" &&\n"
+                   "grep -Eq '^PASS check-make-depfile-scope-selftest[[:space:]]' "
+                   "\"$scratch/out.log\" || { cat \"$scratch/out.log\"; exit 1; }\n",
                    (char *)NULL);
             _exit(127);
         }

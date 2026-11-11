@@ -58,6 +58,8 @@ const struct lint_gate *lint_gate_table(size_t *n);
 int lint_precheck_main(int argc, char **argv);
 /* `z23-lint run`: the C23 lint driver, run_main.c. */
 int lint_run_main(int argc, char **argv);
+/* Run both build-epoch probes through the native pool, without reuse. */
+int lint_epoch_probes_main(int argc, char **argv);
 int fin(FILE *f, char *line, const char *path, int rc);
 int reg_fail(regex_t *re, int err);
 int ovf(int n, size_t cap);

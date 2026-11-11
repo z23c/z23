@@ -461,11 +461,29 @@ static void prime_guard_probes(void)
     if (failed) fail("worktree-prime parse guard probe failed");
 }
 
+/* These probes own their Make argv. A parent test build freezes its source
+ * record through recursive Make flags; inheriting that override would skip
+ * the source capture that the prime-guard sentinel is meant to exercise.
+ * Keep explicit probe arguments and other build environment inputs intact. */
+static void isolate_make_options(void)
+{
+    const char *const names[] = {"MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "GNUMAKEFLAGS"};
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+#ifdef _WIN32
+        int rc = _putenv(text("%s=", names[i]));
+#else
+        int rc = unsetenv(names[i]);
+#endif
+        if (rc != 0) fail(text("cannot clear inherited %s: %s", names[i], strerror(errno)));
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) fail("usage: make-depfile-scope-selftest ROOT WORK");
     root = argv[1]; work = argv[2];
     if (chdir(root) != 0) fail("cannot enter repository root");
+    isolate_make_options();
     probe_install_cleanup();
     setup();
     profile_probes();

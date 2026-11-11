@@ -37,6 +37,7 @@ static const struct {
     { "precheck", lint_precheck_main },
     { "module-linkgraph", lmg_main },
     { "run", lint_run_main },
+    { "epoch-probes", lint_epoch_probes_main },
 };
 
 /* The premise-selection tool named by argv[1], or NULL. */

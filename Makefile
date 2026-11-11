@@ -16024,12 +16024,9 @@ check-honest-witness: $(LINTC_TOOL)
 # invocation and the `lint:` umbrella uniformly.
 check-%: export ZCL_LINT_PRODUCTION_SCAN := 1
 
-# tools/dev/build-epoch-integrity-cached.sh drives the two real compile-probe
-# selftests (tools/dev/build-epoch-selftest.sh and
-# tools/dev/make-depfile-scope-selftest.sh) concurrently behind a cache keyed
-# on every input those probes read; a cache hit skips the ~15s of real `cc`
-# compiles / `make -n` dry runs and reproduces the identical verdict, an
-# input change is a cache MISS that reruns both probes for real.
+# The compatibility shim delegates both real compile-probe selftests to the
+# native lint pool. Each invocation runs both: their real Make/source-identity
+# reads and ambient build inputs are not covered by a finite cache premise.
 # The shim requests this exact standalone target in private scratch; it never
 # recurses through check-build-epoch-integrity while compiling the fixture.
 $(BIN_DIR)/make-depfile-scope-selftest: tools/dev/make_depfile_scope_selftest.c \
@@ -16037,7 +16034,7 @@ $(BIN_DIR)/make-depfile-scope-selftest: tools/dev/make_depfile_scope_selftest.c 
 	@mkdir -p "$(dir $@)"
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -o "$@" tools/dev/make_depfile_scope_selftest.c
 
-check-build-epoch-integrity:
+check-build-epoch-integrity: $(LINTC_TOOL)
 	@echo "══ LINT: toolchain-keyed compile epochs + atomic publication ══"
 	@tools/dev/build-epoch-integrity-cached.sh
 

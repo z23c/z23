@@ -281,7 +281,7 @@ Z23_FLAG("ZCL_BUILD_BENCH_FAKE", "env_build", "-", "-",
 Z23_FLAG("ZCL_BUILD_BENCH_GROUP", "env_build", "netbase_split_host_port", "-",
           "undocumented; first use tools/scripts/build_bench.sh:auto")
 Z23_FLAG("ZCL_BUILD_EPOCH_CACHE_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/dev/build-epoch-integrity-cached.sh:auto")
+          "legacy selector for build-epoch probe diagnostics under its probes subdirectory; verdicts are never reused; first use tools/dev/build-epoch-integrity-cached.sh:auto")
 Z23_FLAG("ZCL_BUILD_EPOCH_DIAG_DIR", "env_build", "-", "-",
           "directory build-epoch-key.sh copies each compiler-identity preimage into, named by its own digest, so two disagreeing fingerprints can be diffed input by input; off by default because the copy is multi-megabyte; first use tools/dev/build-epoch-key.sh:auto")
 Z23_FLAG("ZCL_BUILD_EPOCH_LOCK_TIMEOUT", "env_build", "120", "-",
