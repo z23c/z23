@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "share_diag.h"
 
 #define OUT_CAP 65536u
 #define PAGES_MAX 64u
@@ -549,6 +550,8 @@ static void funds_items(struct wallet_screen *s)
 
 static void receive_items(struct wallet_screen *s)
 {
+    SHARE_DIAG("receive items ready=%d blocked=%d page=%d note=%d",
+               st.ready, st.blocked, st.page, st.d.note[0] ? 1 : 0);
 #ifdef ZAPP_SHARE_FIXTURE
     title(s, "Receive");
     (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
@@ -1705,6 +1708,8 @@ bool wallet_screens_share_code(char *out, size_t cap)
 void wallet_screens_receive_notice(const char *text)
 {
     pthread_mutex_lock(&st.lock);
+    SHARE_DIAG("receive notice ready=%d blocked=%d page=%d text=%d",
+               st.ready, st.blocked, st.page, text ? 1 : 0);
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
         copy(st.d.note, sizeof(st.d.note), text);
         touch();
