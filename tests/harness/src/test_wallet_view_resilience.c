@@ -317,13 +317,14 @@ int check_wallet_view_backup_warning_template_has_address(void)
 {
     int failures = 0;
 
-    printf("TMPL: backup warning template has address... ");
+    printf("INTEG: backup warning does not suggest a fixed key export... ");
     {
         wv_get("/wallet");
-        bool has_backup = wv_has("Back Up");
-        bool has_addr = wv_has("t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn");
-        if (has_backup && has_addr) printf("OK (address in backup cmd)\n");
-        else if (!has_backup) printf("OK (backed up)\n");
+        bool ok = wv_has("Back Up Your Wallet") &&
+                  wv_has("Backup instructions are unavailable in this view") &&
+                  !wv_has("dumpprivkey") &&
+                  !wv_has("t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn");
+        if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
     return failures;

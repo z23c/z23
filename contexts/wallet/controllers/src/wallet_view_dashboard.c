@@ -199,9 +199,10 @@ static void render_backup_warning(char *backup_buf, size_t buflen,
         char bk_path[1024];
         snprintf(bk_path, sizeof(bk_path), "%s/wallet.backup", g_wv_datadir);
         if (access(bk_path, F_OK) != 0) {
-            struct template_var bv[] = { { "address", PRIMARY_ADDR } };
-            template_render(TMPL_BACKUP_WARNING, bv, 1,
-                backup_buf, buflen);
+            snprintf(backup_buf, buflen,
+                "<div class='card' style='border-left-color:#f87171;margin:16px 0'>"
+                "<div style='color:#f87171;font-weight:700'>Back Up Your Wallet</div>"
+                "<div>Backup instructions are unavailable in this view.</div></div>");
         }
     }
 }
