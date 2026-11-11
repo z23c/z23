@@ -1592,7 +1592,7 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "ops.telegram.send", "ops.telegram", "telegram.send",
     "Send a text message to the owner chat",
-    "Sends text through the bot to chat_id, default TELEGRAM_CHAT_ID; the chat must be TELEGRAM_CHAT_ID or listed in TELEGRAM_ALLOW_FROM. Text over 4096 UTF-16 units is split on character boundaries into several messages, up to 12000 bytes in all. Text that holds the bot token, an API key, a private key or seed phrase mention, or an onion address is refused with TELEGRAM_SECRET_REFUSED before any request. idempotency_key (1..64 of letters, digits . _ : -) makes a retry return the first send's message ids without sending again; MCP callers must supply it. A number or true/false as --text is read as a number or flag: pass such text with --input.",
+    "Sends text through the bot to a nonzero signed-integer chat_id. Omit chat_id to use TELEGRAM_CHAT_ID; the chat must be TELEGRAM_CHAT_ID or listed in TELEGRAM_ALLOW_FROM. Text over 4096 UTF-16 units is split on character boundaries into several messages, up to 12000 bytes in all. Text that holds the bot token, an API key, a private key or seed phrase mention, or an onion address is refused with TELEGRAM_SECRET_REFUSED before any request. idempotency_key (1..64 of letters, digits . _ : -) makes a retry return the first send's message ids without sending again; MCP callers must supply it. A number or true/false as --text is read as a number or flag: pass such text with --input.",
     ZCL_COMMAND_RESULT_BUDGET, "telegram,send,message,notify,chat",
     "zcl.telegram.send.input.v1", "zcl.telegram.send.v1",
     "text,chat_id,idempotency_key", "text",

@@ -198,8 +198,6 @@ static bool tg_send_parse(const struct zcl_command_request *request, struct zcl_
     memset(in, 0, sizeof(*in));
     in->text = tg_input_str(request, "text");
     in->key = tg_input_str(request, "idempotency_key");
-    if (chat && chat->type == JSON_INT)
-        in->chat_id = json_get_int(chat);
     size_t len = in->text ? strlen(in->text) : 0;
     if (len == 0 || len > TG_TEXT_MAX || !tg_utf8_valid(in->text, len)) {
         tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_TEXT", "normalize", false, false,
@@ -211,6 +209,15 @@ static bool tg_send_parse(const struct zcl_command_request *request, struct zcl_
                 "idempotency_key must be 1..64 characters of letters, digits and . _ : -",
                 "z23 telegram send --idempotency_key=<key>");
         return false;
+    }
+    if (chat) {
+        if (chat->type != JSON_INT || json_get_int(chat) == 0) {
+            tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_CHAT_ID", "normalize", false, false,
+                    "chat_id must be a nonzero signed integer; omit it to use the configured owner chat",
+                    "pass an allowlisted numeric chat_id, or omit chat_id");
+            return false;
+        }
+        in->chat_id = json_get_int(chat);
     }
     return true;
 }

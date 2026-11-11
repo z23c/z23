@@ -273,6 +273,69 @@ static int tgt_case_4(void)
     return failures;
 }
 
+static int tgt_explicit_target_refusal_case(void)
+{
+    int failures = 0;
+    TEST_CASE("telegram invalid explicit destinations never fall back to the owner") {
+        static const char *const bad[] = {
+            "0", "null", "true", "false", "1.5", "[]", "{}", "\"99\"", "\"@z23_chat\""
+        };
+        memset(&g_fake, 0, sizeof(g_fake));
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            char input[200];
+            snprintf(input, sizeof(input), "{\"text\":\"target probe\",\"chat_id\":%s,"
+                     "\"idempotency_key\":\"target-correction\"}", bad[i]);
+            ASSERT(tgt_call("ops.telegram.send", input, &r, &clean));
+            ASSERT(tgt_failed(&r, "TELEGRAM_BAD_CHAT_ID"));
+            ASSERT_STR_EQ(r.error.phase, "normalize");
+            ASSERT(!r.error.mutated);
+            ASSERT_EQ(g_fake.calls, 0);
+            ASSERT(clean);
+            json_free(&r.data);
+        }
+    } TEST_END
+    return failures;
+}
+
+static int tgt_explicit_group_case(void)
+{
+    int failures = 0;
+    if (!tgt_write_file(g_env, "TELEGRAM_BOT_TOKEN=" TGT_CANARY
+                       "\nTELEGRAM_CHAT_ID=4242\nTELEGRAM_ALLOW_FROM=-100123\n", 0600)) return 1;
+    TEST_CASE("telegram corrected group target keeps its idempotency key and exact destination") {
+        const char *input = "{\"text\":\"target probe\",\"chat_id\":-100123,"
+                            "\"idempotency_key\":\"target-correction\"}";
+        memset(&g_fake, 0, sizeof(g_fake));
+        ASSERT(tgt_call("ops.telegram.send", input, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "chat_id"), -100123);
+        ASSERT(!json_get_bool(json_get(&r.data, "duplicate")));
+        ASSERT_EQ(g_fake.calls, 1);
+        struct json_value sent = {0};
+        ASSERT(json_read(&sent, g_fake.body[0], strlen(g_fake.body[0])));
+        ASSERT_EQ(json_get_int(json_get(&sent, "chat_id")), -100123);
+        json_free(&sent);
+        json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", input, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&r.data, "duplicate")));
+        ASSERT_EQ(g_fake.calls, 1);
+        json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"default probe\"}", &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "chat_id"), 4242);
+        ASSERT_EQ(g_fake.calls, 2);
+        json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"blocked probe\",\"chat_id\":-100124}", &r, &clean));
+        ASSERT(tgt_failed(&r, "TELEGRAM_CHAT_NOT_ALLOWED"));
+        ASSERT_EQ(g_fake.calls, 2);
+        ASSERT(clean);
+        json_free(&r.data);
+    } TEST_END
+    if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600)) failures++;
+    return failures;
+}
+
 static const char updates[] =
         "{\"ok\":true,\"result\":["
         "{\"update_id\":10,\"message\":{\"message_id\":1,\"date\":1,\"text\":\"hello\","
@@ -683,6 +746,8 @@ int test_telegram(void)
         return 1;
     }
     failures += tgt_case_0() + tgt_case_1() + tgt_case_2() + tgt_case_3() + tgt_case_4();
+    failures += tgt_explicit_target_refusal_case();
+    failures += tgt_explicit_group_case();
     failures += tgt_case_5() + tgt_case_6() + tgt_case_mono() + tgt_case_7();
     failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet() + tgt_case_testnet_wif();
     failures += tgt_legacy_sent_case();
