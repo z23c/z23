@@ -38,6 +38,7 @@
 #include "sha3/sha3.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -443,6 +444,8 @@ static bool bmx_grant(const char *label, const char *peer, char *id,
 
 /* fleet.steer.send one directive from box A as `chatgpt`. Returns the
  * item's state ("queued" or "refused") and its error through `error`. */
+static char g_bmx_route[160], g_bmx_route_hint[1024];
+static bool g_bmx_duplicate;
 static bool bmx_send(const char *grant, const char *to, const char *ref,
                      const char *body, char *error, size_t cap)
 {
@@ -469,6 +472,9 @@ static bool bmx_send(const char *grant, const char *to, const char *ref,
     r = json_at(json_get(&c.reply.data, "items"), 0);
     queued = bmx_ok(&c) && r &&
              strcmp(json_get_str(json_get(r, "state")), "queued") == 0;
+    (void)snprintf(g_bmx_route, sizeof(g_bmx_route), "%s", r ? json_get_str(json_get(r, "route_snapshot")) : "");
+    (void)snprintf(g_bmx_route_hint, sizeof(g_bmx_route_hint), "%s", r ? json_get_str(json_get(r, "route_hint")) : "");
+    g_bmx_duplicate = r && json_get_bool(json_get(r, "duplicate"));
     if (error)
         (void)snprintf(error, cap, "%s",
                        r ? json_get_str(json_get(r, "error"))
@@ -1111,6 +1117,30 @@ static bool bmx_post_where(const char *to, const char *ref, char *label,
     return ok;
 }
 
+static bool bmx_own_key(void)
+{
+    char path[1600]; uint8_t seed[32];
+    memset(seed, 0x41, sizeof(seed));
+    if (!fleet_enrol_state_path("box.ed25519", path, sizeof(path))) return false;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return false;
+    bool ok = write(fd, seed, sizeof(seed)) == (ssize_t)sizeof(seed);
+    return close(fd) == 0 && ok;
+}
+
+static bool bmx_oversize_refs(void)
+{
+    char path[1600];
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.refs", g_bmx_state[BMX_A]);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = true;
+    for (size_t i = 0; i < 1025; ++i)
+        if (fprintf(f, "in job-%zu node-b\n", i) < 0) { ok = false; break; }
+    return fclose(f) == 0 && ok;
+}
+
 static int bmx_t_delivery(void)
 {
     int failures = 0;
@@ -1118,6 +1148,7 @@ static int bmx_t_delivery(void)
         char label[160], hint[1024], path[1600];
         ASSERT(bmx_setup("delivery"));
         bmx_use(BMX_A);
+        ASSERT(bmx_own_key());
         /* Broadcast: this box only, nothing carried. */
         ASSERT(bmx_post_where("*", NULL, label, sizeof(label), hint,
                               sizeof(hint)));
@@ -1135,6 +1166,23 @@ static int bmx_t_delivery(void)
         ASSERT_STR_EQ(label, "local");
         ASSERT(strstr(hint, "no roster box named someagent") != NULL);
         ASSERT(strstr(hint, "node-b") != NULL);
+        struct zcl_boardmail_delivery route;
+        zcl_devagent_boardmail_observe(NULL, NULL, &route);
+        ASSERT_STR_EQ(route.label, "unknown");
+        zcl_devagent_boardmail_observe("node-b", NULL, &route);
+        ASSERT_STR_EQ(route.label, "export_eligible");
+        zcl_devagent_boardmail_observe("someagent", NULL, &route);
+        ASSERT_STR_EQ(route.label, "local");
+        ASSERT(strstr(route.hint, "node-b") != NULL);
+        char grant[64], error[64];
+        ASSERT(bmx_grant("chatgpt", NULL, grant, sizeof(grant)));
+        ASSERT(bmx_send(grant, "someagent", "route-test", g_bmx_body, error, sizeof(error)));
+        ASSERT_STR_EQ(g_bmx_route, "local");
+        ASSERT(strstr(g_bmx_route_hint, "node-b") && !g_bmx_duplicate);
+        ASSERT(bmx_send(grant, "someagent", "route-test", g_bmx_body, error, sizeof(error)));
+        ASSERT_STR_EQ(g_bmx_route, "local");
+        ASSERT(strstr(g_bmx_route_hint, "node-b") && g_bmx_duplicate);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/outbox.jsonl", "route-test", NULL), 1);
         /* A reply under a ref this box imported from node-b goes back to
          * node-b, whatever `to` names. Lay down the refs ledger the receive
          * beat keeps under <state>/receive. */
@@ -1147,6 +1195,27 @@ static int bmx_t_delivery(void)
                               hint, sizeof(hint)));
         ASSERT_STR_EQ(label, "exported");
         ASSERT_STR_EQ(hint, "");
+        zcl_devagent_boardmail_observe("someagent", "job-9", &route);
+        ASSERT_STR_EQ(route.label, "export_eligible");
+        zcl_devagent_boardmail_observe("*", "job-9", &route);
+        ASSERT_STR_EQ(route.label, "export_eligible");
+        ASSERT(bmx_write(BMX_A, "receive/boardmail.refs", "broken", "wb"));
+        zcl_devagent_boardmail_observe("someagent", "job-9", &route);
+        ASSERT_STR_EQ(route.label, "unknown");
+        ASSERT(bmx_oversize_refs());
+        zcl_devagent_boardmail_observe("someagent", "job-9", &route);
+        ASSERT_STR_EQ(route.label, "unknown");
+        ASSERT(bmx_send(grant, "someagent", "route-overflow", g_bmx_body, error, sizeof(error)));
+        ASSERT_STR_EQ(g_bmx_route, "unknown");
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/outbox.jsonl", "route-overflow", NULL), 1);
+        ASSERT(bmx_write(BMX_A, "receive/boardmail.refs", "", "wb"));
+        ASSERT(fleet_enrol_state_path("machines.roster", path, sizeof(path)));
+        FILE *roster = fopen(path, "ab");
+        ASSERT(roster != NULL);
+        ASSERT(fputs("unverifiable roster row\n", roster) >= 0);
+        ASSERT(fclose(roster) == 0);
+        zcl_devagent_boardmail_observe("someagent", NULL, &route);
+        ASSERT_STR_EQ(route.label, "unknown");
         bmx_teardown();
         PASS();
     }

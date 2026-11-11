@@ -1243,6 +1243,7 @@ static int fmx_t_duplicate(void)
         out = fmx_arr(&s, "items");
         ASSERT(out != NULL);
         row = json_at(out, 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "route_snapshot")), "unknown");
         v = json_get(row, "seq");
         ASSERT(v && v->type == JSON_INT);
         seq1 = json_get_int(v);
@@ -1261,6 +1262,7 @@ static int fmx_t_duplicate(void)
         ASSERT(fmx_ok(&s));
         out = fmx_arr(&s, "items");
         row = json_at(out, 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "route_snapshot")), "unknown");
         v = json_get(row, "seq");
         ASSERT(v && v->type == JSON_INT);
         seq2 = json_get_int(v);

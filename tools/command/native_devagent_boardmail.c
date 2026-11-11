@@ -245,6 +245,7 @@ struct bm_peer {
 struct bm_roster {
     struct bm_peer p[FLEET_ENROL_ROSTER_MAX];
     size_t n;
+    bool overflow;
 };
 
 static void bm_roster_visit(const struct fleet_machine *m, void *user)
@@ -253,9 +254,8 @@ static void bm_roster_visit(const struct fleet_machine *m, void *user)
     struct bm_roster *r = user;
     struct bm_peer *p;
     /* A box that named no signing key cannot have signed a post. */
-    if (r->n >= FLEET_ENROL_ROSTER_MAX ||
-        memcmp(m->receipt.signer_pubkey, zero, sizeof(zero)) == 0)
-        return;
+    if (memcmp(m->receipt.signer_pubkey, zero, sizeof(zero)) == 0) return;
+    if (r->n >= FLEET_ENROL_ROSTER_MAX) { r->overflow = true; return; }
     p = &r->p[r->n++];
     (void)snprintf(p->name, sizeof(p->name), "%s", m->receipt.invite.name);
     memcpy(p->signer, m->receipt.signer_pubkey, sizeof(p->signer));
@@ -284,18 +284,22 @@ static bool bm_operator(uint8_t out[FLEET_ENROL_PUBKEY_BYTES])
 
 /* Every verified roster box with a signing key. Empty (never an error) on
  * a box that trusts no operator: such a box has no peers. */
-static void bm_roster_load(struct bm_roster *r)
+static bool bm_roster_load_checked(struct bm_roster *r)
 {
     uint8_t op[FLEET_ENROL_PUBKEY_BYTES];
     struct fleet_roster_scan scan;
     const char *why = NULL;
     memset(r, 0, sizeof(*r));
-    if (!bm_operator(op))
-        return;
+    if (!bm_operator(op)) return false;
     if (!fleet_roster_each(op, bm_roster_visit, r, &scan, &why)) {
         LOG_WARN(BM_LOG, "fleet roster unreadable: %s", why ? why : "unknown");
-        r->n = 0;
+        r->n = 0; return false;
     }
+    return scan.unverifiable == 0 && !r->overflow;
+}
+static void bm_roster_load(struct bm_roster *r)
+{
+    (void)bm_roster_load_checked(r);
 }
 
 static const struct bm_peer *bm_by_name(const struct bm_roster *r,
@@ -670,6 +674,36 @@ static void bm_route_load(struct bm_route *v)
         bm_refs_load(&v->refs, dir);
 }
 
+/* Bound the snapshot: an incomplete ledger cannot establish a local route. */
+#define BM_OBSERVE_BYTES (256u * 1024u)
+static bool bm_refs_observe_line(struct bm_refs *refs, const char *line)
+{
+    char direction[4], ref[80], peer[40], extra;
+    size_t n = strlen(line);
+    if (!n || line[n - 1] != '\n' ||
+        sscanf(line, "%3s %79s %39s %c", direction, ref, peer, &extra) != 3 ||
+        (strcmp(direction, "out") && strcmp(direction, "in")) ||
+        !zcl_devagent_name_ok(ref) || !fleet_enrol_name_valid(peer)) return false;
+    bm_refs_line(refs, line);
+    return true;
+}
+static bool bm_refs_observe(struct bm_refs *refs, const char *dir)
+{
+    int n = snprintf(refs->path, sizeof(refs->path), "%s/%s", dir, BM_REFS_FILE);
+    if (n <= 0 || (size_t)n >= sizeof(refs->path)) return false;
+    FILE *f = fopen(refs->path, "rb");
+    if (!f) return errno == ENOENT;
+    struct stat st; char line[256]; size_t rows = 0;
+    bool ok = fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode) &&
+        st.st_size >= 0 && (uint64_t)st.st_size <= BM_OBSERVE_BYTES;
+    while (ok && fgets(line, sizeof(line), f)) {
+        if (++rows > BM_REFS_MAX || !bm_refs_observe_line(refs, line)) ok = false;
+    }
+    if (ferror(f)) ok = false;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
 /* Comma list of the other roster box names, capped at BM_KNOWN_SHOWN. */
 static void bm_known_names(const struct bm_roster *r, const char *self,
                            char *out, size_t cap)
@@ -726,6 +760,45 @@ void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
                        "no roster box named %s; cross-host mail is addressed "
                        "by roster box name (known: %s)",
                        to, known);
+    }
+    free(v);
+}
+
+/* Read one bounded and complete route view for an observation. */
+static bool bm_route_observe_load(struct bm_route *v)
+{
+    uint8_t own[FLEET_ENROL_PUBKEY_BYTES]; char root[4096], dir[4200];
+    if (!bm_roster_load_checked(&v->ro) || !bm_own_box(own)) return false;
+    for (size_t i = 0; i < v->ro.n; ++i)
+        if (!memcmp(v->ro.p[i].box, own, sizeof(own)))
+            (void)snprintf(v->self, sizeof(v->self), "%s", v->ro.p[i].name);
+    if (!v->self[0] || !platform_state_root(root, sizeof(root))) return false;
+    int n = snprintf(dir, sizeof(dir), "%s/receive", root);
+    return n > 0 && (size_t)n < sizeof(dir) && bm_refs_observe(&v->refs, dir);
+}
+static void bm_observe_hint(const struct bm_route *v, const char *to,
+                            const char *peer, struct zcl_boardmail_delivery *out)
+{
+    if (peer || !strcmp(to, "*") || !strcmp(to, v->self) || bm_by_name(&v->ro, to)) return;
+    char known[BM_KNOWN_CAP]; bm_known_names(&v->ro, v->self, known, sizeof(known));
+    (void)snprintf(out->hint, sizeof(out->hint),
+        "no roster box named %s; cross-host mail is addressed by roster box name (known: %s)", to, known);
+}
+/* Snapshot the export predicate without changing mail or the receiver. */
+void zcl_devagent_boardmail_observe(const char *to, const char *ref,
+                                    struct zcl_boardmail_delivery *out)
+{
+    memset(out, 0, sizeof(*out));
+    (void)snprintf(out->label, sizeof(out->label), "unknown");
+    if (!to || !to[0]) return;
+    struct bm_route *v = zcl_calloc(1, sizeof(*v), "boardmail.observation");
+    if (!v) return;
+    if (bm_route_observe_load(v)) {
+        struct zcl_boardmail_ctx ctx = {.receiver = v->self};
+        struct bm_row row = {.to = to, .ref = ref ? ref : ""}; bool record = false;
+        const char *peer = bm_export_peer(&ctx, &v->ro, &v->refs, &row, &record);
+        (void)snprintf(out->label, sizeof(out->label), "%s", peer ? "export_eligible" : "local");
+        bm_observe_hint(v, to, peer, out);
     }
     free(v);
 }

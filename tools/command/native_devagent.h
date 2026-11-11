@@ -542,6 +542,9 @@ struct zcl_boardmail_delivery {
 };
 void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
                                      struct zcl_boardmail_delivery *out);
+/* Read-only snapshot: export_eligible is not delivery; unknown means incomplete inputs. */
+void zcl_devagent_boardmail_observe(const char *to, const char *ref,
+                                    struct zcl_boardmail_delivery *out);
 
 /* The longest mail row line (without its newline) the board carries: the
  * signed text ceiling of one fleet note (FLEET_BOARD_TEXT_MAX). A row bound

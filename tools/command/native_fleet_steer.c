@@ -4878,6 +4878,10 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
         (void)json_push_kv_int(&item, "seq", seq);
         (void)json_push_kv_bool(&item, "duplicate", duplicate);
     }
+    struct zcl_boardmail_delivery route;
+    zcl_devagent_boardmail_observe(f->to, f->ref, &route);
+    (void)json_push_kv_str(&item, "route_snapshot", route.label);
+    if (route.hint[0]) (void)json_push_kv_str(&item, "route_hint", route.hint);
     (void)json_push_back(items, &item);
     json_free(&item);
 }
