@@ -6,7 +6,7 @@
 #include <string.h>
 
 static const char *const queued[] = {"node_start", "node_stop", "fleet_join", "fleet_hosts", "fleet_preview", "voice_pair",
-                                     "chat", "voice_start", "scan", "ops_errors", "ops_restart", "ops_confirm"};
+                                     "chat", "voice_start", "scan", "ops_errors", "ops_plugins", "ops_restart", "ops_confirm"};
 
 /* Every action the controller queues has a few words that end in an ellipsis. */
 static void doing_tests(void)
@@ -21,7 +21,7 @@ static void doing_tests(void)
     assert(!zapp_action_doing("pair_accept") && !zapp_action_doing("") && !zapp_action_doing(NULL));
     /* The camera, the question, the voice line and the host controls show their own progress; node and fleet taps do not. */
     assert(zapp_action_shows_itself("scan") && zapp_action_shows_itself("chat") && zapp_action_shows_itself("voice_start"));
-    assert(zapp_action_shows_itself("ops_confirm") && !zapp_action_shows_itself("node_start"));
+    assert(zapp_action_shows_itself("ops_confirm") && zapp_action_shows_itself("ops_plugins") && !zapp_action_shows_itself("node_start"));
     assert(!zapp_action_shows_itself("fleet_join") && !zapp_action_shows_itself("unknown"));
 }
 

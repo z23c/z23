@@ -5,12 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { ERRORS_SHOWN = 5, LINE_SHOWN = 200, REPLY_BYTES = 16384, TEXT_BYTES = 1400,
-       READ_MS = 15000, CONFIRM_MS = 75000 };
+enum { ERRORS_SHOWN = 5, PLUGINS_SHOWN = 8, LINE_SHOWN = 200, REPLY_BYTES = 16384,
+       TEXT_BYTES = 1400, READ_MS = 15000, CONFIRM_MS = 75000 };
 #define ERRORS_COMMAND "z23 ops logs --pattern=ERROR --since_secs=86400 --max_lines=5"
 #define PLAN_COMMAND "z23 ops node restart"
+#define PLUGINS_COMMAND "z23 plugin list"
 #define CONFIRM_FORMAT "z23 ops node restart --input='{\"plan_id\":\"%s\",\"confirm\":true,\"wait_s\":60}'"
-static const char *const action_words[] = {"errors", "plan", "confirm"};
+static const char *const action_words[] = {"errors", "plan", "confirm", "plugins"};
 
 static bool plan_id_valid(const char *id)
 {
@@ -26,9 +27,9 @@ const struct zapp_fleet_host *zapp_ops_parse(const struct zapp_fleet_host *hosts
     if (!hosts || !scope || strlen(scope) > 80 || count > ZAPP_OPS_HOSTS ||
         sscanf(scope, "%15[a-z] %15[a-z0-9-]%n", word, label, &used) < 2) return NULL;
     size_t kind = 0;
-    while (kind < 3 && strcmp(word, action_words[kind])) kind++;
+    while (kind < sizeof(action_words) / sizeof(action_words[0]) && strcmp(word, action_words[kind])) kind++;
     const char *rest = scope + used;
-    if (kind == 3) return NULL;
+    if (kind == sizeof(action_words) / sizeof(action_words[0])) return NULL;
     if (kind == ZAPP_OPS_CONFIRM) {
         if (*rest++ != ' ' || !plan_id_valid(rest)) return NULL;
         memcpy(plan_id, rest, ZAPP_OPS_PLAN_ID + 1);
@@ -89,6 +90,93 @@ static void plan_text(const char *host, const struct json_value *data, char *tex
         snprintf(now, sizeof(now), "It is at height %lld.", (long long)json_get_int(height));
     snprintf(text, cap, "Restart the z23 node on %s? %s Nothing changes until you confirm.", host, now);
 }
+static bool slot_state(const char *state)
+{
+    return state && (!strcmp(state, "ok") || !strcmp(state, "missing") || !strcmp(state, "unreadable") || !strcmp(state, "corrupt"));
+}
+static bool slot_text(const struct json_value *plugin, const char *id_key, const char *state_key, char *out, size_t cap)
+{
+    const char *id = json_get_str(json_get(plugin, id_key)), *state = json_get_str(json_get(plugin, state_key));
+    if (!id || !slot_state(state)) return false;
+    if (!strcmp(state, "ok")) {
+        if (strlen(id) != 128 || strspn(id, "0123456789abcdef") != 128) return false;
+        snprintf(out, cap, "%.12s (ok)", id);
+    } else {
+        if (id[0]) return false;
+        snprintf(out, cap, "%s (%s)", !strcmp(state, "missing") ? "-" : "unknown", state);
+    }
+    return true;
+}
+static bool plugin_name(const struct json_value *plugin, const char **name)
+{
+    *name = json_get_str(json_get(plugin, "name"));
+    size_t length = *name ? strlen(*name) : 0;
+    if (!length || length > 32) return false;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)(*name)[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    }
+    return true;
+}
+static bool generations_valid(const struct json_value *plugin, const char *state)
+{
+    const struct json_value *generations = json_get(plugin, "generations");
+    if (!generations || generations->type != JSON_ARR || (strcmp(state, "ok") && json_size(generations))) return false;
+    for (size_t i = 0; i < json_size(generations); ++i) {
+        const char *id = json_get_str(json_at(generations, i));
+        if (!id || strlen(id) != 128 || strspn(id, "0123456789abcdef") != 128) return false;
+    }
+    return true;
+}
+static bool plugins_document_valid(const struct json_value *data, const struct json_value *plugins)
+{
+    const char *schema = json_get_str(json_get(data, "schema"));
+    const struct json_value *count = json_get(data, "count");
+    return schema && !strcmp(schema, "zcl.plugin_list.v1") && plugins && plugins->type == JSON_ARR &&
+        count && count->type == JSON_INT && json_get_int(count) >= 0 &&
+        (uint64_t)json_get_int(count) == (uint64_t)json_size(plugins);
+}
+static bool plugin_valid(const struct json_value *plugin, const char *store, const char **name,
+                         char current[32], char last_good[32])
+{
+    return plugin_name(plugin, name) && slot_state(store) && generations_valid(plugin, store) &&
+        slot_text(plugin, "current", "current_state", current, 32) &&
+        slot_text(plugin, "last_good", "last_good_state", last_good, 32);
+}
+static bool plugin_line(char *text, size_t cap, size_t *used, const char *name, const char *store,
+                        const char *current, const char *last_good)
+{
+    int n = snprintf(text + *used, cap - *used, "\n%s\n current %s · last-good %s%s%s", name, current, last_good,
+                     strcmp(store, "ok") ? " · store " : "", strcmp(store, "ok") ? store : "");
+    if (n < 0 || (size_t)n >= cap - *used) return false;
+    *used += (size_t)n;
+    return true;
+}
+static bool plugins_text(const struct json_value *data, char *text, size_t cap)
+{
+    const struct json_value *plugins = json_get(data, "plugins");
+    if (!plugins_document_valid(data, plugins)) return false;
+    int first = snprintf(text, cap, "Inventory scan only; signatures are not rechecked.");
+    if (first < 0 || (size_t)first >= cap) return false;
+    size_t used = (size_t)first, total = json_size(plugins), shown = total < PLUGINS_SHOWN ? total : PLUGINS_SHOWN;
+    if (!total) {
+        int n = snprintf(text + used, cap - used, "\nNo plugins installed.");
+        return n > 0 && (size_t)n < cap - used;
+    }
+    for (size_t i = 0; i < total; ++i) {
+        const struct json_value *plugin = json_at(plugins, i), *store_value = json_get(plugin, "generations_state");
+        const char *name, *store = json_get_str(store_value);
+        char current[32], last_good[32];
+        if (!plugin_valid(plugin, store, &name, current, last_good)) return false;
+        if (i >= shown) continue;
+        if (!plugin_line(text, cap, &used, name, store, current, last_good)) return false;
+    }
+    if (total > shown) {
+        int n = snprintf(text + used, cap - used, "\n%zu more not shown.", total - shown);
+        if (n < 0 || (size_t)n >= cap - used) return false;
+    }
+    return true;
+}
 /* Turns a leaf reply into the text to show; false puts the leaf's refusal in text instead. */
 static bool leaf_text(enum zapp_ops_action action, const char *host, const struct json_value *doc,
                       char *text, size_t cap, char plan[ZAPP_OPS_PLAN_ID + 1])
@@ -100,7 +188,12 @@ static bool leaf_text(enum zapp_ops_action action, const char *host, const struc
         return false;
     }
     if (action == ZAPP_OPS_ERRORS) errors_text(data, text, cap);
-    else if (action == ZAPP_OPS_CONFIRM) {
+    else if (action == ZAPP_OPS_PLUGINS) {
+        if (!plugins_text(data, text, cap)) {
+            snprintf(text, cap, "The host's plugin inventory was not understood.");
+            return false;
+        }
+    } else if (action == ZAPP_OPS_CONFIRM) {
         const char *note = json_get_str(json_get(data, "note"));
         snprintf(text, cap, "%s", note && note[0] && strlen(note) < 200 ? note : "Restart requested.");
     } else {
@@ -124,12 +217,15 @@ static bool run(struct zapp_ops *ops, const struct zapp_fleet_host *host, enum z
     char command[160], *raw = malloc(REPLY_BYTES);
     struct json_value doc = {0};
     int n = action == ZAPP_OPS_ERRORS ? snprintf(command, sizeof(command), "%s", ERRORS_COMMAND) :
+        action == ZAPP_OPS_PLUGINS ? snprintf(command, sizeof(command), "%s", PLUGINS_COMMAND) :
         action == ZAPP_OPS_PLAN ? snprintf(command, sizeof(command), "%s", PLAN_COMMAND) :
         snprintf(command, sizeof(command), CONFIRM_FORMAT, plan_id);
     bool ran = raw && n > 0 && (size_t)n < sizeof(command) && ops->exec &&
         ops->exec(host, command, action == ZAPP_OPS_CONFIRM ? CONFIRM_MS : READ_MS, raw, REPLY_BYTES, ops->ctx);
     bool ok = false;
     if (!ran) snprintf(text, cap, "The host did not answer.");
+    else if (action == ZAPP_OPS_PLUGINS && strlen(raw) >= REPLY_BYTES - 1)
+        snprintf(text, cap, "The plugin inventory is too large to read safely.");
     else if (!json_read(&doc, raw, strlen(raw))) snprintf(text, cap, "The host's reply could not be read.");
     else ok = leaf_text(action, host->label, &doc, text, cap, plan);
     json_cleanse_strings(&doc); json_free(&doc); free(raw);

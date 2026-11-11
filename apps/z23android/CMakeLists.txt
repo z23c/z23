@@ -18,7 +18,7 @@ endif()
 
 add_library(z23android SHARED
     android_main.c node_service.c node_watch.c node_notice.c node_restart.c action_text.c camera.c camera_access.c native_ui.c jni_util.c view_hit.c shell.c surface.c launcher.c layout.c home.c game.c game_view.c controller.c conversation.c bridge_client.c bridge_auth.c operations.c startup_auth.c rpc.c fleet.c
-    device_key.c device_key_jni.c payment_code.c wallet_view.c secure_window.c wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_sweep.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c wallet_reveal.c pay_stash.c send_key.c payment_notice.c
+    device_key.c device_key_jni.c payment_code.c wallet_view.c secure_window.c share.c wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_sweep.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c wallet_reveal.c pay_stash.c send_key.c payment_notice.c
     setup_words.c setup_wordlist.c setup_state.c setup_node.c wallet_setup.c wallet_setup_ui.c
     audio.c speech_client.c voice.c hosts.c private.c pairing.c scan.c thermal.c nodelog.c params.c params_install.c params_job.c params_android.c
     wallet_screens.c wallet_ui.c
@@ -52,6 +52,10 @@ option(Z23_DEVKEY_PROBE "Build the device key phone probe (preview package only)
 if(Z23_DEVKEY_PROBE)
     target_sources(z23android PRIVATE device_key_probe.c)
     target_compile_definitions(z23android PRIVATE ZAPP_DEVKEY_PROBE=1)
+endif()
+option(ZAPP_SHARE_FIXTURE "Use a regtest payment request when ShareActivity starts" OFF)
+if(ZAPP_SHARE_FIXTURE)
+    target_compile_definitions(z23android PRIVATE ZAPP_SHARE_FIXTURE=1)
 endif()
 target_link_options(z23android PRIVATE -Wl,--no-undefined -Wl,--gc-sections
     -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,-z,max-page-size=16384)

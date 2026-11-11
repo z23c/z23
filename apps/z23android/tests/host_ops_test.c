@@ -11,13 +11,13 @@
 #define DONE_REPLY "{\"ok\":true,\"data\":{\"restarted\":true,\"note\":\"restarted, answering at height 3302090\"}}"
 #define MISMATCH_REPLY "{\"ok\":false,\"error\":{\"code\":\"PLAN_MISMATCH\",\"message\":\"plan_id is wrong or used\"}}"
 
-struct fake { int calls; char command[256]; int timeout_ms; const char *reply; };
+struct fake { int calls; char command[256]; int timeout_ms; size_t cap; const char *reply; };
 static bool fake_exec(const struct zapp_fleet_host *host, const char *command, int timeout_ms,
                       char *out, size_t cap, void *ctx)
 {
     struct fake *f = ctx;
     (void)host;
-    f->calls++; f->timeout_ms = timeout_ms;
+    f->calls++; f->timeout_ms = timeout_ms; f->cap = cap;
     snprintf(f->command, sizeof(f->command), "%s", command);
     if (!f->reply) return false;
     snprintf(out, cap, "%s", f->reply);
@@ -45,7 +45,8 @@ static void refusals(void)
         "errors -oProxyCommand=x", "errors r1 " ID, "plan r1 " ID, "confirm r1", "confirm r1 ",
         "confirm r1 0123456789abcdef0123456789abcde", "confirm r1 0123456789ABCDEF0123456789ABCDEF",
         "confirm r1 0123456789abcdef0123456789abcdef0", "confirm r1 '; touch x; '0123456789abcdef",
-        "confirm r1  " ID, "confirm  r1 " ID, "errors r1111111111111111"};
+        "confirm r1  " ID, "confirm  r1 " ID, "errors r1111111111111111",
+        "plugins", "plugins r3", "plugins r1 ", "plugins r1;id", "plugin r1"};
     struct fake f = {0};
     struct zapp_ops ops = {.exec = fake_exec, .ctx = &f};
     for (size_t i = 0; i < sizeof(refused) / sizeof(*refused); i++) {
@@ -58,6 +59,8 @@ static void refusals(void)
     assert(zapp_ops_parse(hosts, 2, "confirm r2 " ID, &action, id) == &hosts[1] &&
            action == ZAPP_OPS_CONFIRM && !strcmp(id, ID));
     assert(zapp_ops_parse(hosts, 2, "errors r1", &action, id) == &hosts[0] && !id[0]);
+    assert(zapp_ops_parse(hosts, 2, "plugins r2", &action, id) == &hosts[1] &&
+           action == ZAPP_OPS_PLUGINS && !id[0]);
 }
 static void errors_view(void)
 {
@@ -126,10 +129,103 @@ static void stale_and_failed(void)
     ask(&ops, "confirm r1 " ID, 7001);
     assert(f.calls == 4);
 }
+#define HEX16 "0123456789abcdef"
+#define PLUGIN_GEN HEX16 HEX16 HEX16 HEX16 HEX16 HEX16 HEX16 HEX16
+static void plugins_view(void)
+{
+    struct fake f = {.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+        "\"name\":\"clips\",\"current\":\"" PLUGIN_GEN "\",\"last_good\":\"\",\"current_state\":\"ok\","
+        "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":[\"" PLUGIN_GEN "\"]}]}}"};
+    struct zapp_ops ops = {.exec = fake_exec, .ctx = &f};
+    ask(&ops, "plugins r2", 1000);
+    assert(f.calls == 1 && !strcmp(f.command, "z23 plugin list") && f.timeout_ms == 15000 && f.cap == 16384);
+    assert(!strcmp(field("host"), "r2") && !strcmp(field("action"), "plugins"));
+    assert(strstr(field("text"), "Inventory scan only; signatures are not rechecked."));
+    assert(strstr(field("text"), "clips\n current 0123456789ab (ok) · last-good - (missing)"));
+    f.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+        "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"unreadable\","
+        "\"last_good_state\":\"corrupt\",\"generations_state\":\"corrupt\",\"generations\":[]}]}}";
+    ask(&ops, "plugins r1", 1000);
+    assert(strstr(field("text"), "current unknown (unreadable) · last-good unknown (corrupt) · store corrupt"));
+    f.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":0,\"plugins\":[]}}";
+    ask(&ops, "plugins r1", 1000);
+    assert(strstr(field("text"), "No plugins installed."));
+    static const char *const invalid[] = {
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v2\",\"count\":0,\"plugins\":[]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":\"0\",\"plugins\":[]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"bad name\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\"}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"ok\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\"}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"" PLUGIN_GEN "\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\"}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"verified\"}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"Bad_Name\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":[]}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\"}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":[\"short\"]}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"corrupt\",\"generations\":[\"" PLUGIN_GEN "\"]}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":{}}]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+            "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":[42]}]}}",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(*invalid); ++i) {
+        f.reply = invalid[i];
+        ask(&ops, "plugins r1", 1000);
+        assert(!strcmp(field("error"), "The host's plugin inventory was not understood.") && !field("text")[0]);
+    }
+    char large[16384];
+    int n = snprintf(large, sizeof(large), "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":10,\"plugins\":[");
+    assert(n > 0 && (size_t)n < sizeof(large));
+    size_t used = (size_t)n;
+    for (size_t i = 0; i < 10; ++i) {
+        n = snprintf(large + used, sizeof(large) - used,
+            "%s{\"name\":\"p%zu\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"missing\","
+            "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":[]}", i ? "," : "", i);
+        assert(n > 0 && (size_t)n < sizeof(large) - used);
+        used += (size_t)n;
+    }
+    n = snprintf(large + used, sizeof(large) - used, "]}}");
+    assert(n > 0 && (size_t)n < sizeof(large) - used);
+    f.reply = large;
+    ask(&ops, "plugins r1", 1000);
+    assert(strstr(field("text"), "2 more not shown.") && !strstr(field("text"), "p8"));
+    char *hidden = strstr(large, "\"name\":\"p8\"");
+    assert(hidden);
+    hidden[8] = ' ';
+    f.reply = large;
+    ask(&ops, "plugins r1", 1000);
+    assert(!strcmp(field("error"), "The host's plugin inventory was not understood."));
+    char too_big[16385];
+    memset(too_big, 'x', sizeof(too_big) - 1);
+    too_big[sizeof(too_big) - 1] = 0;
+    f.reply = too_big;
+    ask(&ops, "plugins r1", 1000);
+    assert(!strcmp(field("error"), "The plugin inventory is too large to read safely."));
+}
+#undef PLUGIN_GEN
+#undef HEX16
 int main(void)
 {
     refusals();
     errors_view();
+    plugins_view();
     restart_flow();
     stale_and_failed();
     json_free(&doc);

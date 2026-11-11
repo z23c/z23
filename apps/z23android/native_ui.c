@@ -17,7 +17,7 @@
 static jobject root, status_view, result_view, prompt_view, invite_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
 static jobject voice_view, pair_view, hosts_view, sync_view, ops_view;
-static jobject buttons[21];
+static jobject buttons[22];
 static enum zapp_voice_state voice_state;
 static bool details_open;
 static enum zapp_reply_state reply_state;
@@ -176,6 +176,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
 static bool node_widgets(JNIEnv *env, jobject layout, jobject activity)
 {
     return add_text(env, layout, activity, "", &status_view) &&
+        zj_int_property(env, status_view, "setMinLines", 3) &&
         add_button(env, layout, activity, "Start node", 0) &&
         add_text(env, layout, activity, "", &pair_view) &&
         add_button(env, layout, activity, "Accept pairing", 12) &&
@@ -194,8 +195,8 @@ static bool bar_widgets(JNIEnv *env, jobject bar, jobject activity)
 static bool ops_widgets(JNIEnv *env, jobject layout, jobject activity)
 {
     return add_button(env, layout, activity, "Host", 16) && add_button(env, layout, activity, "Show errors", 17) &&
-        add_button(env, layout, activity, "Restart node", 18) && add_text(env, layout, activity, "", &ops_view) &&
-        add_button(env, layout, activity, "Confirm restart", 19);
+        add_button(env, layout, activity, "Plugins", 20) && add_button(env, layout, activity, "Restart node", 18) &&
+        add_text(env, layout, activity, "", &ops_view) && add_button(env, layout, activity, "Confirm restart", 19);
 }
 static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject receipt, jobject scroll)
 {
@@ -229,7 +230,7 @@ static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject
 static bool finish_widgets(JNIEnv *env, jobject layout, jobject activity, jobject receipt)
 {
     return zj_append(env, layout, receipt) && zj_keep(env, &receipt_view, receipt) &&
-        add_button(env, layout, activity, "Copy code", 20) &&
+        add_button(env, layout, activity, "Copy code", 21) &&
         add_text(env, layout, activity, "", &result_view);
 }
 static bool orient_layout(JNIEnv *env, jobject layout)
@@ -379,7 +380,8 @@ static bool fixed_action(int index, const char **action, const char **arg)
     case 17: *action = "ops_errors"; return true;
     case 18: *action = "ops_restart"; return true;
     case 19: *action = "ops_confirm"; return true;
-    case 20: *action = "fleet_copy"; *arg = copy_receipt; return copy_receipt[0] != 0;
+    case 20: *action = "ops_plugins"; return true;
+    case 21: *action = "fleet_copy"; *arg = copy_receipt; return copy_receipt[0] != 0;
     default: return false;
     }
 }
@@ -548,17 +550,21 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
     /* Stop node also clears a saved Start node choice when that node has exited on its own. */
     if (buttons[1]) (void)zj_visible(env, buttons[1], shown && (running || view->node_wanted));
 }
-/* The host controls show only while a laptop host is paired and has reported a host; Confirm restart
- * only for a plan the host returned. */
+/* Host selection and read-only plugin inventory also work in the node-free preview. Errors and
+ * restart controls require the production app; Confirm restart only for a plan the host returned.
+ * Plugins stays visible while its read runs; the controller rejects duplicate busy actions. */
 static void render_ops(JNIEnv *env, const struct zapp_view *view)
 {
     char label[40];
-    bool shown = view->fleet_paired && view->ops_host[0] && !voice_preview;
+    bool paired = view->fleet_paired && view->ops_host[0];
+    bool shown = paired && !voice_preview;
     snprintf(label, sizeof(label), "Host: %s", view->ops_host);
     if (buttons[16]) (void)zj_text(env, buttons[16], label);
-    for (int i = 16; i <= 18; ++i) if (buttons[i]) (void)zj_visible(env, buttons[i], shown);
+    if (buttons[16]) (void)zj_visible(env, buttons[16], paired);
+    for (int i = 17; i <= 18; ++i) if (buttons[i]) (void)zj_visible(env, buttons[i], shown);
     if (buttons[19]) (void)zj_visible(env, buttons[19], shown && view->ops_plan[0] && !view->busy);
-    if (ops_view) { (void)zj_text(env, ops_view, view->ops_text); (void)zj_visible(env, ops_view, shown && view->ops_text[0]); }
+    if (buttons[20]) (void)zj_visible(env, buttons[20], paired);
+    if (ops_view) { (void)zj_text(env, ops_view, view->ops_text); (void)zj_visible(env, ops_view, paired && view->ops_text[0]); }
 }
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
@@ -581,7 +587,7 @@ static void render_fleet(JNIEnv *env, const struct zapp_view *view)
         review_available = view->fleet_token[0] && !view->busy;
         review_button(env);
     }
-    if (buttons[20]) (void)zj_visible(env, buttons[20], view->fleet_receipt[0] != 0);
+    if (buttons[21]) (void)zj_visible(env, buttons[21], view->fleet_receipt[0] != 0);
     snprintf(pairing, sizeof(pairing), "Your laptop offers private voice and fleet control. "
              "Accept only if the laptop shows code %s.", view->pair_code);
     (void)zj_text(env, pair_view, pairing);

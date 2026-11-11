@@ -11,6 +11,7 @@
 #include "launcher.h"
 #include "layout.h"
 #include "secure_window.h"
+#include "share.h"
 #include "surface.h"
 #include "pay_stash.h"
 #include "setup_state.h"
@@ -166,12 +167,11 @@ static void release_cards(void)
     for (size_t i = 0; i < shell.app_count; ++i) json_free(&shell.app_cards[i]);
     shell.app_count = 0;
 }
-static void refresh_apps(JNIEnv *env, bool icons)
+static void refresh_apps(JNIEnv *env)
 {
     char text[ZAPP_APP_CARD_CAP];
     release_cards();
-    zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
-    size_t count = zapp_launcher_list(env, shell.activity, shell.apps, ZAPP_LAUNCHER_MAX, icons);
+    size_t count = zapp_launcher_list(env, shell.activity, shell.apps, ZAPP_LAUNCHER_MAX);
     for (size_t i = 0; i < count; ++i) {
         size_t length = zapp_home_app_card(&shell.apps[i].entry, text, sizeof(text));
         json_init(&shell.app_cards[i]);
@@ -580,15 +580,12 @@ static void settings_status(JNIEnv *env)
     else snprintf(text, sizeof(text), "Using the built-in %s layout.%s", shell.builtin, shell.layout_notice[0] ? " The layout file was not used." : "");
     (void)zj_text(env, shell.status_view, text);
 }
-/* Adds the list row of app i: its icon and label. False when the local reference frame could not open. */
+/* Adds the text-only list row of app i. False when the local reference frame could not open. */
 static bool add_app_row(JNIEnv *env, size_t i)
 {
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
-    jobject row = column(env, DARK, 4, true), icon = zj_widget(env, "android/widget/ImageView", shell.activity);
-    jmethodID set = icon ? zj_method(env, icon, "setImageDrawable", "(Landroid/graphics/drawable/Drawable;)V") : NULL;
-    if (set && shell.apps[i].icon) (*env)->CallVoidMethod(env, icon, set, shell.apps[i].icon);
-    bool ok = row && icon && zj_clean(env) && zj_margins(env, icon, zj_dp(40.0f), zj_dp(40.0f), 0.0f, 0, 0, 12, 0) &&
-        zj_int_property(env, row, "setGravity", 16) && zj_append(env, row, icon) &&
+    jobject row = column(env, DARK, 4, true);
+    bool ok = row && zj_int_property(env, row, "setGravity", 16) &&
         label(env, row, shell.apps[i].entry.label, 17.0f, WHITE) && zj_append(env, shell.apps_list, row) &&
         zj_keep(env, &shell.rows[shell.row_count], row);
     if (ok) ++shell.row_count;
@@ -669,7 +666,7 @@ static void set_protection(JNIEnv *env, enum screen next)
 /* What a screen does as it comes into view. */
 static void enter_screen(JNIEnv *env, enum screen next)
 {
-    if (next == SCREEN_APPS) { refresh_apps(env, true); fill_apps(env); }
+    if (next == SCREEN_APPS) { refresh_apps(env); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
     if (next == SCREEN_WALLET) enter_wallet(env);
@@ -920,6 +917,17 @@ static bool same_target(const struct target *a, const struct target *b)
     return a->kind == b->kind && !strcmp(a->id, b->id) &&
            zapp_home_same_press(a->index, by_button(a), a->button, b->index, by_button(b), b->button);
 }
+static void share_wallet(JNIEnv *env)
+{
+    char package[ZAPP_APP_PACKAGE_CAP];
+    jstring name = zj_object_property(env, shell.activity, "getPackageName", "()Ljava/lang/String;");
+    bool ok = zapp_share_prepare() && name && zj_copy_utf(env, name, package, sizeof(package)) &&
+        zapp_launcher_start(env, shell.activity, package, "org.z23.nativeapp.ShareActivity");
+    if (!ok) {
+        wallet_screens_receive_notice("Could not open the media picker.");
+        zapp_share_destroy();
+    }
+}
 static void run_wallet(JNIEnv *env, size_t button)
 {
     enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
@@ -927,6 +935,7 @@ static void run_wallet(JNIEnv *env, size_t button)
     if (outcome == WALLET_SEND && wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);
     if (outcome == WALLET_SEND) open_send(env, NULL, "", false);
     else if (outcome == WALLET_MAKE_PRIVATE) open_send(env, NULL, "", true);
+    else if (outcome == WALLET_SHARE) share_wallet(env);
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
 }
@@ -1285,9 +1294,15 @@ void zapp_shell_resume(JNIEnv *env)
 {
     if (!shell.activity) return;
     zapp_shell_immersive(env);
-    refresh_apps(env, false);
+    refresh_apps(env);
     load_layout();
-    if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
+    char share_notice[96];
+    if (zapp_share_take_result(share_notice, sizeof(share_notice))) {
+        open_receive(env);
+        if (shell.current == SCREEN_WALLET && share_notice[0]) wallet_screens_receive_notice(share_notice);
+        zapp_wallet_ui_render(env);
+    }
+    else if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
     else if (shell.current == SCREEN_SCAN) {
         if (shell.paste_mode && !protect_window(env, true)) {
             back(env);
@@ -1318,7 +1333,6 @@ void zapp_shell_destroy(JNIEnv *env)
     jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
-    zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
     if (shell.phone_ok) json_free(&shell.phone);
     zapp_layout_free(shell.layout);
     (*env)->DeleteGlobalRef(env, shell.activity);
@@ -1336,7 +1350,7 @@ bool zapp_shell_create(JNIEnv *env, jobject activity, jobject assistant, zapp_na
     load_choice();
     if (!build_stage(env, assistant)) goto fail;
     load_layout();
-    refresh_apps(env, false);
+    refresh_apps(env);
     zapp_shell_immersive(env);
     return true;
 fail:

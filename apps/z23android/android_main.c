@@ -7,6 +7,7 @@
 #include "game.h"
 #include "shell.h"
 #include "jni_util.h"
+#include "layout.h"
 #include "device_key.h"
 #include "startup_auth.h"
 #ifdef ZAPP_DEVKEY_PROBE
@@ -18,6 +19,7 @@
 #include "params_android.h"
 #include "pay_stash.h"
 #include "secure_window.h"
+#include "share.h"
 #include "wallet_send_ui.h"
 #include "wallet_setup_ui.h"
 #include "wallet_ui.h"
@@ -583,6 +585,7 @@ static void detach_activity(JNIEnv *env)
     looper = NULL;
     pthread_mutex_unlock(&lock);
     zapp_secure_window_release();
+    zapp_share_destroy();
     zapp_wallet_detach();
     zapp_native_ui_destroy(env);
     if (retained) (*env)->DeleteGlobalRef(env, retained);
@@ -662,11 +665,48 @@ static bool start_tick(void)
     return tick_fd >= 0 && arm_tick(true) &&
            ALooper_addFd(looper, tick_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, tick_ready, NULL) == 1;
 }
-/* Hands a pairing offer that started the app to the controller. */
+/* Imports a one-time USB offer from this app's external files directory. The descriptor never
+ * becomes an intent argument; the owner still confirms its six-digit code before it is stored. */
+static bool usb_pairing_path(JNIEnv *env, jobject activity, char *out, size_t cap)
+{
+    if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getExternalFilesDir",
+        "(Ljava/lang/String;)Ljava/io/File;") : NULL;
+    jobject directory = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get, NULL) : NULL;
+    jclass file_cls = clean(env) && directory ? (*env)->GetObjectClass(env, directory) : NULL;
+    jmethodID absolute = file_cls ? (*env)->GetMethodID(env, file_cls, "getAbsolutePath",
+        "()Ljava/lang/String;") : NULL;
+    jstring value = clean(env) && absolute ? (*env)->CallObjectMethod(env, directory, absolute) : NULL;
+    char parent[1024];
+    bool ok = copy_utf(env, value, parent, sizeof(parent));
+    int n = ok ? snprintf(out, cap, "%s/pairing.json", parent) : -1;
+    (*env)->PopLocalFrame(env, NULL);
+    return ok && n > 0 && (size_t)n < cap;
+}
+static bool usb_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
+{
+    char path[1100], reason[128];
+    size_t length = 0;
+    char *data = usb_pairing_path(env, activity, path, sizeof(path)) ?
+        zapp_layout_read(path, &length, reason, sizeof(reason)) : NULL;
+    bool ok = data && length > 0 && length < cap && !memchr(data, 0, length);
+    if (ok) {
+        memcpy(out, data, length);
+        out[length] = 0;
+        if (unlink(path) != 0) __android_log_print(ANDROID_LOG_WARN, "z23", "USB pairing offer could not be removed");
+    }
+    if (data) memory_cleanse(data, length);
+    free(data);
+    return ok;
+}
+/* Hands a launch-intent or one-time USB-file pairing offer to the controller. */
 static void forward_pairing(JNIEnv *env, jobject activity)
 {
     char offer[256];
-    if (!intent_pairing(env, activity, offer, sizeof(offer))) return;
+    bool ok = intent_pairing(env, activity, offer, sizeof(offer));
+    if (!ok) ok = usb_pairing(env, activity, offer, sizeof(offer));
+    if (!ok) return;
     (void)zapp_controller_action("pair_offer", offer, NULL, 0);
     memory_cleanse(offer, sizeof(offer));
 }

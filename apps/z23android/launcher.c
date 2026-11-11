@@ -117,12 +117,6 @@ static void resolve_label(JNIEnv *env, jobject info, jobject manager, const char
     if (!out[0]) resolve_declared(env, info, declared, sizeof(declared));
     zapp_home_fallback_label(out, cap, declared, package);
 }
-static jobject resolve_icon(JNIEnv *env, jobject info, jobject manager)
-{
-    jmethodID load = zj_method(env, info, "loadIcon", "(Landroid/content/pm/PackageManager;)Landroid/graphics/drawable/Drawable;");
-    jobject icon = load ? (*env)->CallObjectMethod(env, info, load, manager) : NULL;
-    return zj_clean(env) ? icon : NULL;
-}
 /* Whether two installed packages are signed with the same key. */
 static bool same_signature(JNIEnv *env, jobject manager, const char *own, const char *other)
 {
@@ -132,16 +126,13 @@ static bool same_signature(JNIEnv *env, jobject manager, const char *own, const 
     jint result = b ? (*env)->CallIntMethod(env, manager, check, a, b) : -1;
     return zj_clean(env) && result == 0;
 }
-static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *own, struct zapp_launcher_app *app, bool icons)
+static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *own, struct zapp_launcher_app *app)
 {
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); return false; }
-    jobject icon = NULL;
     memset(app, 0, sizeof(*app));
     bool ok = resolve_names(env, info, &app->entry) && strcmp(app->entry.package, own);
     if (ok) resolve_label(env, info, manager, app->entry.package, app->entry.label, sizeof(app->entry.label));
     if (ok && zapp_home_is_z23_app(app->entry.package)) app->entry.same_signature = same_signature(env, manager, own, app->entry.package);
-    if (ok && icons) icon = resolve_icon(env, info, manager);
-    if (icon && !zj_keep(env, &app->icon, icon)) app->icon = NULL;
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
@@ -156,7 +147,7 @@ static bool own_package(JNIEnv *env, jobject activity, char *out, size_t cap)
     jstring name = (jstring)zj_object_property(env, activity, "getPackageName", "()Ljava/lang/String;");
     return name && zj_copy_utf(env, name, out, cap);
 }
-size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max, bool icons)
+size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max)
 {
     size_t count = 0;
     char own[ZAPP_APP_PACKAGE_CAP] = "";
@@ -169,17 +160,10 @@ size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_ap
     jint total = get ? (*env)->CallIntMethod(env, list, size) : 0;
     for (jint i = 0; zj_clean(env) && i < total && count < max; ++i) {
         jobject info = (*env)->CallObjectMethod(env, list, get, i);
-        if (zj_clean(env) && info && read_entry(env, info, manager, own, &apps[count], icons)) ++count;
+        if (zj_clean(env) && info && read_entry(env, info, manager, own, &apps[count])) ++count;
         if (info) (*env)->DeleteLocalRef(env, info);
     }
     (*env)->PopLocalFrame(env, NULL);
     qsort(apps, count, sizeof(*apps), by_label);
     return count;
-}
-void zapp_launcher_release(JNIEnv *env, struct zapp_launcher_app *apps, size_t count)
-{
-    for (size_t i = 0; i < count; ++i) {
-        if (apps[i].icon) (*env)->DeleteGlobalRef(env, apps[i].icon);
-        apps[i].icon = NULL;
-    }
 }

@@ -9,8 +9,9 @@
 /* The only actions the phone can request, each mapped to one fixed command on a configured host:
  * errors   z23 ops logs, a read-only tail of recent ERROR lines
  * plan     z23 ops node restart, which changes nothing and returns a plan id
- * confirm  z23 ops node restart with that plan id and confirm, run only for the plan issued here. */
-enum zapp_ops_action { ZAPP_OPS_ERRORS, ZAPP_OPS_PLAN, ZAPP_OPS_CONFIRM };
+ * confirm  z23 ops node restart with that plan id and confirm, run only for the plan issued here.
+ * plugins  z23 plugin list, an inventory scan, not a fresh signature verification or a plugin switch. */
+enum zapp_ops_action { ZAPP_OPS_ERRORS, ZAPP_OPS_PLAN, ZAPP_OPS_CONFIRM, ZAPP_OPS_PLUGINS };
 enum { ZAPP_OPS_HOSTS = 16, ZAPP_OPS_PLAN_ID = 32, ZAPP_OPS_PLAN_TTL_S = 280 };
 
 /* Runs command on host and copies its output to out; false when the host did not answer. */

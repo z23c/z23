@@ -73,7 +73,8 @@ enum wallet_action {
     WALLET_ACT_START_NODE, WALLET_ACT_COPY_ADDRESS, WALLET_ACT_DISMISS_SEND,
     WALLET_ACT_SHOW_PRIVATE, /* ask the screen lock and show the private balance of a locked wallet for a short while */
     WALLET_ACT_MAKE_PRIVATE, /* open the review that moves public funds into the private balance */
-    WALLET_ACT_RETRY_SUMMARY, WALLET_ACT_RETRY_ADDRESS
+    WALLET_ACT_RETRY_SUMMARY, WALLET_ACT_RETRY_ADDRESS,
+    WALLET_ACT_SHARE_REQUEST /* choose media and share it with the current payment request */
 };
 /* Where the private balance request stands, as the environment reports it. WALLET_REVEAL_OPEN: the wallet is unlocked for
  * the owner and not yet locked again. The reasons after it say why the last request left the wallet locked. */
@@ -86,7 +87,8 @@ enum wallet_outcome {
     WALLET_SEND,  /* open the Send screen; the camera starts only from its Scan code button */
     WALLET_LEAVE, /* leave the wallet for Home */
     WALLET_START_NODE, /* ask the controller to start the node, and nothing else */
-    WALLET_MAKE_PRIVATE /* open the Send screen on the move of public funds into the private balance */
+    WALLET_MAKE_PRIVATE, /* open the Send screen on the move of public funds into the private balance */
+    WALLET_SHARE /* choose media, then offer it with the current payment request */
 };
 
 struct wallet_item {
@@ -180,6 +182,10 @@ void wallet_screens_settle(void);
 bool wallet_screens_back(void);
 /* A tap on an item. */
 enum wallet_outcome wallet_screens_activate(enum wallet_action action, unsigned arg);
+/* Copies the current Receive code, or refuses when there is none. The caller wipes its copy after sharing it. */
+bool wallet_screens_share_code(char *out, size_t cap);
+/* Shows a plain notice on Receive: a cancelled share or a picker/share-sheet failure. */
+void wallet_screens_receive_notice(const char *text);
 /* The text typed into the amount field, in ZCL; empty clears the amount. False, with a note on the
  * screen, when it is not an amount the parser of payment codes would accept. */
 bool wallet_screens_set_amount(const char *text);

@@ -29,8 +29,8 @@ static void test_header(const uint8_t *d, size_t n)
     dexgen_sha1(d + 32, n - 32, digest);
     CHECK(!memcmp(d + 12, digest, 20));
     CHECK(rd32(d + 56) == S_COUNT && rd32(d + 64) == T_COUNT && rd32(d + 72) == P_COUNT);
-    CHECK(rd32(d + 80) == 0 && rd32(d + 88) == M_COUNT && rd32(d + 96) == 2);
-    CHECK(rd32(d + 108) == rd32(d + 100) + 64 && rd32(d + 104) == n - rd32(d + 108));
+    CHECK(rd32(d + 80) == 0 && rd32(d + 88) == M_COUNT && rd32(d + 96) == 3);
+    CHECK(rd32(d + 108) == rd32(d + 100) + 96 && rd32(d + 104) == n - rd32(d + 108));
 }
 /* The string at index i, read from its string_data item. */
 static const char *string_at(const uint8_t *d, uint32_t i)
@@ -65,11 +65,11 @@ static void test_map(const uint8_t *d, size_t n)
         if (rd16(item) == 0x2001) CHECK(rd32(item + 4) == C_COUNT && at % 4 == 0);
     }
 }
-/* True when window holds one KeyPrompt method in dexdump order: the class, the name, the type, then the
+/* True when window holds one class method in dexdump order: the class, the name, the type, then the
  * access flags of that method alone, with the native flag on that line when native is set. */
-static bool window_has_method(const char *window, const char *want, const char *sig, bool native)
+static bool window_has_method(const char *window, const char *class, const char *want, const char *sig, bool native)
 {
-    const char *class_at = strstr(window, "(in Lorg/z23/nativeapp/KeyPrompt;)");
+    const char *class_at = strstr(window, class);
     const char *name_at = strstr(window, want);
     const char *type_at = strstr(window, sig);
     const char *access_at = strstr(window, "access        : ");
@@ -91,9 +91,23 @@ static bool key_prompt_method(const char *listing, const char *name, const char 
         char window[512];
         size_t before = (size_t)(at - listing) < 100 ? (size_t)(at - listing) : 100;
         snprintf(window, sizeof(window), "%.*s", (int)(before + 260), at - before);
-        if (window_has_method(window, want, sig, native)) return true;
+        if (window_has_method(window, "(in Lorg/z23/nativeapp/KeyPrompt;)", want, sig, native)) return true;
     }
     fprintf(stderr, "dexgen_test: KeyPrompt lacks %s %s%s\n", name, type, native ? " (native)" : "");
+    return false;
+}
+static bool share_method(const char *listing, const char *name, const char *type, bool native)
+{
+    char want[160], sig[220];
+    snprintf(want, sizeof(want), "name          : '%s'", name);
+    snprintf(sig, sizeof(sig), "type          : '%s'", type);
+    for (const char *at = strstr(listing, want); at; at = strstr(at + 1, want)) {
+        char window[512];
+        size_t before = (size_t)(at - listing) < 100 ? (size_t)(at - listing) : 100;
+        snprintf(window, sizeof(window), "%.*s", (int)(before + 260), at - before);
+        if (window_has_method(window, "(in Lorg/z23/nativeapp/ShareActivity;)", want, sig, native)) return true;
+    }
+    fprintf(stderr, "dexgen_test: ShareActivity lacks %s %s%s\n", name, type, native ? " (native)" : "");
     return false;
 }
 static void test_key_prompt_methods(const char *dexdump, const char *path, const char *scratch)
@@ -113,6 +127,11 @@ static void test_key_prompt_methods(const char *dexdump, const char *path, const
     CHECK(key_prompt_method(listing, "onEditorAction", "(Landroid/widget/TextView;ILandroid/view/KeyEvent;)Z", true));
     CHECK(strstr(listing, "Landroid/widget/TextView$OnEditorActionListener;"));
     CHECK(key_prompt_method(listing, "<init>", "()V", false));
+    CHECK(share_method(listing, "<clinit>", "()V", false));
+    CHECK(share_method(listing, "onCreate", "(Landroid/os/Bundle;)V", false));
+    CHECK(share_method(listing, "onActivityResult", "(IILandroid/content/Intent;)V", false));
+    CHECK(share_method(listing, "shareCreate", "()V", true));
+    CHECK(share_method(listing, "shareResultNative", "(IILandroid/content/Intent;)V", true));
     remove(listing_path);
 }
 static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const char *dexdump)
@@ -130,17 +149,55 @@ static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const 
     test_key_prompt_methods(dexdump, path, scratch);
     remove(path);
 }
+static void test_share_invocations(void)
+{
+    CHECK(code_share_create[0] == 0x206f && code_share_create[1] == M_ACTIVITY_ONCREATE);
+    CHECK(code_share_create[3] == 0x1070 && code_share_create[4] == M_SHARE_CREATE);
+    CHECK(code_share_result[0] == 0x4070 && code_share_result[1] == M_SHARE_NATIVE_RESULT);
+}
+static uint32_t read_uleb(const uint8_t **p)
+{
+    uint32_t value = 0;
+    unsigned shift = 0;
+    uint8_t byte;
+    do { byte = *(*p)++; value |= (uint32_t)(byte & 0x7f) << shift; shift += 7; } while (byte & 0x80);
+    return value;
+}
+static uint32_t init_target(const uint8_t *d, uint32_t class_index, uint32_t init)
+{
+    const uint8_t *p = d + rd32(d + rd32(d + 100) + 32 * class_index + 24);
+    (void)read_uleb(&p);
+    (void)read_uleb(&p);
+    uint32_t count = read_uleb(&p), method = 0;
+    (void)read_uleb(&p);
+    for (uint32_t i = 0; i < count; ++i) {
+        method += read_uleb(&p);
+        (void)read_uleb(&p);
+        uint32_t at = read_uleb(&p);
+        if (method == init) {
+            CHECK(rd16(d + at + 16) == 0x1070);
+            return rd16(d + at + 18);
+        }
+    }
+    return M_COUNT;
+}
+static void test_init_targets(const uint8_t *d)
+{
+    CHECK(init_target(d, 0, M_INIT) == M_SERVICE_INIT);
+    CHECK(init_target(d, 2, M_SHARE_INIT) == M_ACTIVITY_INIT);
+}
 int main(int argc, char **argv)
 {
     static uint8_t first[DEX_MAX], second[DEX_MAX];
     if (argc < 2) { fputs("usage: dexgen-test <scratch-dir> [dexdump]\n", stderr); return 2; }
     test_digests();
+    test_share_invocations();
     size_t n = dexgen_build(first, sizeof(first));
     CHECK(n > HEADER_SIZE);
     CHECK(dexgen_build(second, sizeof(second)) == n && !memcmp(first, second, n));
     CHECK(dexgen_build(second, n - 1) == 0);
     if (n > HEADER_SIZE) {
-        test_header(first, n); test_sorted_ids(first); test_map(first, n);
+        test_header(first, n); test_sorted_ids(first); test_map(first, n); test_init_targets(first);
         test_dexdump(first, n, argv[1], argc > 2 ? argv[2] : NULL);
     }
     if (failures) { fprintf(stderr, "dexgen_test: %d failure(s)\n", failures); return 1; }

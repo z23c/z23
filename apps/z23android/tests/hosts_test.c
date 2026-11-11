@@ -146,6 +146,9 @@ static void ops_reply_tests(void)
     char text[512], plan[33];
     assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"errors\",\"text\":\"a ERROR\\nb ERROR\"}", text, sizeof(text), plan));
     assert(!strcmp(text, "r1 · recent errors\na ERROR\nb ERROR") && !plan[0]);
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plugins\",\"text\":\"Inventory scan only; signatures are not rechecked.\"}",
+                         text, sizeof(text), plan));
+    assert(!strcmp(text, "r1 · plugin inventory\nInventory scan only; signatures are not rechecked.") && !plan[0]);
     assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"0123456789abcdef0123456789abcdef\","
         "\"text\":\"Restart the z23 node on r1? It is at height 5.\"}", text, sizeof(text), plan));
     assert(!strcmp(plan, "0123456789abcdef0123456789abcdef") && strstr(text, "Restart the z23 node on r1?") &&

@@ -390,6 +390,7 @@ bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33])
     if (!ok) snprintf(text, cap, "The host's reply could not be read.");
     else if (error[0]) { snprintf(text, cap, "%s%s%s", host, host[0] ? ": " : "", error); ok = false; }
     else if (!strcmp(action, "errors")) snprintf(text, cap, "%s · recent errors\n%s", host, body);
+    else if (!strcmp(action, "plugins")) snprintf(text, cap, "%s · plugin inventory\n%s", host, body);
     else if (!strcmp(action, "plan") && strlen(id) == 32) {
         snprintf(plan, 33, "%s", id);
         snprintf(text, cap, "%s\nTap Confirm restart to restart it, or leave it.", body);

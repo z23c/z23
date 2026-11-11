@@ -1,8 +1,12 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _GNU_SOURCE
 #include "fleet_probe.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 bool zapp_relay_stopping(void) { return false; }
 static void check_parse(void)
@@ -186,6 +190,31 @@ static void check_wanted(void)
     assert(!zapp_fleet_tool_wanted(hosts, 0, wanted[0][0], name, sizeof(name), args, sizeof(args)));
     assert(!zapp_fleet_tool_wanted(hosts, n, wanted[0][0], name, sizeof(name), args, 13));
 }
+static void check_runner(void)
+{
+    char directory[] = "/tmp/z23-fleet-runner.XXXXXX", script[256], original[4096];
+    assert(mkdtemp(directory));
+    const char *environment = getenv("PATH");
+    snprintf(original, sizeof(original), "%s", environment ? environment : "/usr/bin:/bin");
+    snprintf(script, sizeof(script), "%s/ssh", directory);
+    assert(setenv("PATH", directory, 1) == 0);
+    FILE *file = fopen(script, "w");
+    assert(file);
+    assert(fputs("#!/bin/sh\nprintf '{\"ok\":true}'\n", file) >= 0);
+    assert(fclose(file) == 0);
+    assert(chmod(script, 0700) == 0);
+    const struct zapp_fleet_host host = {"r1", "fixture"};
+    char output[256];
+    assert(zapp_fleet_run(&host, "ignored", 1000, output, sizeof(output)) && !strcmp(output, "{\"ok\":true}"));
+    file = fopen(script, "w");
+    assert(file);
+    assert(fputs("#!/bin/sh\nprintf '{\"ok\":true}\\0ignored'\n", file) >= 0);
+    assert(fclose(file) == 0);
+    assert(!zapp_fleet_run(&host, "ignored", 1000, output, sizeof(output)));
+    assert(setenv("PATH", original, 1) == 0);
+    assert(unlink(script) == 0);
+    assert(rmdir(directory) == 0);
+}
 int main(void)
 {
     check_parse();
@@ -195,6 +224,7 @@ int main(void)
     check_blockers();
     check_tool();
     check_wanted();
+    check_runner();
     puts("fleet probe tests passed");
     return 0;
 }

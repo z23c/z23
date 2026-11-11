@@ -589,8 +589,9 @@ static enum zapp_refusal ops_scope(struct controller *c, const char *action, con
     bool confirm = !strcmp(action, "ops_confirm");
     if (!host[0]) return ZAPP_REFUSAL_NO_HOST;
     if (confirm && !c->view.ops_plan[0]) return ZAPP_REFUSAL_NO_PLAN;
+    const char *word = !strcmp(action, "ops_errors") ? "errors" : !strcmp(action, "ops_plugins") ? "plugins" : "plan";
     int n = confirm ? snprintf(c->ops_scope, sizeof(c->ops_scope), "confirm %s %s", host, c->view.ops_plan) :
-        snprintf(c->ops_scope, sizeof(c->ops_scope), "%s %s", !strcmp(action, "ops_errors") ? "errors" : "plan", host);
+        snprintf(c->ops_scope, sizeof(c->ops_scope), "%s %s", word, host);
     if (n < 0 || (size_t)n >= sizeof(c->ops_scope)) return ZAPP_REFUSAL_TOO_LONG;
     snprintf(c->view.ops_text, sizeof(c->view.ops_text), "Asking %s…", host);
     c->view.ops_plan[0] = 0;
@@ -1338,7 +1339,7 @@ void zapp_controller_snapshot(struct zapp_view *view)
 }
 static bool action_allowed(const char *action)
 {
-    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "scan", "scan_paste", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_restart", "ops_confirm"};
+    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "scan", "scan_paste", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_plugins", "ops_restart", "ops_confirm"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (!strcmp(action, allowed[i])) return true;
     return false;

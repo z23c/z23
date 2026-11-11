@@ -16,6 +16,7 @@ static const struct { const char *action, *doing; bool own; } actions[] = {
     {"voice_start", "Listening…", true},
     {"scan", "Reading a code…", true},
     {"ops_errors", "Asking the host…", true},
+    {"ops_plugins", "Reading plugin inventory…", true},
     {"ops_restart", "Asking the host…", true},
     {"ops_confirm", "Asking the host…", true},
 };

@@ -25,7 +25,7 @@
 struct options {
     const char *dir, *llama, *models, *speaker, *fleet, *adb, *serial, *app, *qr_window, *game;
     uint16_t port;
-    bool game_only;
+    bool game_only, pair_file;
 };
 static struct zapp_assistant assistant;
 static struct zapp_fleet_host fleet_hosts[16];
@@ -155,7 +155,7 @@ static bool ops_exec(const struct zapp_fleet_host *host, const char *command, in
 }
 static struct zapp_ops host_ops = {.exec = ops_exec};
 static pthread_mutex_t host_ops_lock = PTHREAD_MUTEX_INITIALIZER;
-/* The phone's request for one host's recent errors or restart steps; the table in host_ops.c is
+/* The phone's request for one host's recent errors, plugin inventory or restart steps; the table in host_ops.c is
  * the only thing it can reach. A refusal is answered in the reply, not as a failed request. */
 static bool host_op(const struct json_value *request, struct json_value *response)
 {
@@ -250,7 +250,7 @@ static void *pairing_loop(void *opaque)
     int next = 0, wait = 10; /* Ticks of 200 ms; a failed offer doubles the wait up to 30 s, because each offer replaces the secret. */
     for (int tick = 0; !zapp_relay_stopping(); tick++) {
         if (!offered && tick >= next) {
-            offered = zapp_host_offer_pairing(o->adb, o->serial, o->app, o->port, o->dir, o->qr_window);
+            offered = zapp_host_offer_pairing(o->adb, o->serial, o->app, o->port, o->dir, o->qr_window, o->pair_file);
             if (offered) fputs("Pairing offered to the phone. Confirm it on the phone screen.\n", stderr);
             else { next = tick + wait; wait = wait < 75 ? wait * 2 : 150; }
         } else if (offered && tick % 100 == 0) (void)zapp_host_route(o->adb, o->serial, o->port);
@@ -273,7 +273,15 @@ static const struct zapp_assistant_tools fleet_tools = {.schema = &tool_schema, 
 static const char usage[] =
     "Usage: z23-speech-bridge --dir DIR --llama-server PATH --models DIR [--port N]\n"
     "         [--speaker WAV] [--fleet label=ssh-destination,...]\n"
-    "         [--adb PATH --serial SERIAL [--app PACKAGE] [--qr-window PATH]] [--game PATH] [--game-only]\n";
+    "         [--adb PATH --serial SERIAL [--app PACKAGE] [--qr-window PATH] [--pair-file]]\n"
+    "         [--game PATH] [--game-only]\n";
+static bool flag_option(int c, struct options *o)
+{
+    if (c == 'G') o->game_only = true;
+    else if (c == 'U') o->pair_file = true;
+    else return false;
+    return true;
+}
 static bool set_option(int c, struct options *o)
 {
     switch (c) {
@@ -287,28 +295,30 @@ static bool set_option(int c, struct options *o)
     case 'A': o->app = optarg; return true;
     case 'q': o->qr_window = optarg; return true;
     case 'g': o->game = optarg; return true;
-    case 'G': o->game_only = true; return true;
     case 'p': {
         long v = strtol(optarg, NULL, 10);
         if (v < 1024 || v > 65530) return false;
         o->port = (uint16_t)v; return true;
     }
-    default: return false;
+    default: return flag_option(c, o);
     }
+}
+static bool adb_options_valid(const struct options *o)
+{
+    return strspn(o->app, "abcdefghijklmnopqrstuvwxyz0123456789._") == strlen(o->app) &&
+        (!o->qr_window || (o->adb && o->qr_window[0] == '/')) && (!o->pair_file || o->adb);
 }
 static bool options_valid(const struct options *o)
 {
     return o->dir && ((o->game_only && o->game && !o->llama && !o->models) || (!o->game_only && o->llama && o->models)) && !o->adb == !o->serial &&
-        strspn(o->app, "abcdefghijklmnopqrstuvwxyz0123456789._") == strlen(o->app) &&
-        (!o->qr_window || (o->adb && o->qr_window[0] == '/')) &&
-        (!o->fleet || zapp_fleet_hosts_parse(o->fleet, fleet_hosts, 16, &fleet_count));
+        adb_options_valid(o) && (!o->fleet || zapp_fleet_hosts_parse(o->fleet, fleet_hosts, 16, &fleet_count));
 }
 static bool parse(int argc, char **argv, struct options *o)
 {
     static const struct option longs[] = {{"dir", 1, 0, 'd'}, {"llama-server", 1, 0, 'l'},
         {"models", 1, 0, 'm'}, {"port", 1, 0, 'p'}, {"speaker", 1, 0, 's'}, {"fleet", 1, 0, 'f'},
         {"adb", 1, 0, 'a'}, {"serial", 1, 0, 'S'}, {"app", 1, 0, 'A'}, {"qr-window", 1, 0, 'q'},
-        {"game", 1, 0, 'g'}, {"game-only", 0, 0, 'G'},
+        {"game", 1, 0, 'g'}, {"game-only", 0, 0, 'G'}, {"pair-file", 0, 0, 'U'},
         {0, 0, 0, 0}};
     *o = (struct options){.port = 8770, .app = "org.z23.nativeapp"};
     for (int c; (c = getopt_long(argc, argv, "", longs, NULL)) != -1;)

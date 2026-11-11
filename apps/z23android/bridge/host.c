@@ -215,9 +215,9 @@ static bool spawn_qr_window(const char *program, const char *code, const char *d
     return ok && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *app, uint16_t port,
-                             const char *dir, const char *qr_window)
+                             const char *dir, const char *qr_window, bool pair_file)
 {
-    char path[1024], command[512];
+    char path[1024], command[2048];
     char *shell[] = {(char *)adb, "-s", (char *)serial, "shell", NULL};
     unsigned char *descriptor = NULL; size_t size = 0;
     /* Each offer starts a new pairing: the secret the phone held before stops working. */
@@ -226,8 +226,14 @@ bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *ap
         !strchr((char *)descriptor, '\'');
     if (ok) {
         descriptor[strcspn((char *)descriptor, "\n")] = 0;
-        int n = snprintf(command, sizeof(command), "am start -n %s/android.app.NativeActivity "
-            "-f 0x10008000 --es org.z23.pair '%s'\nexit\n", app, (char *)descriptor);
+        int n = pair_file ?
+            snprintf(command, sizeof(command),
+                "mkdir -p /sdcard/Android/data/%s/files\n"
+                "cat > /sdcard/Android/data/%s/files/pairing.json <<'Z23_PAIR'\n%s\nZ23_PAIR\n"
+                "am start -n %s/android.app.NativeActivity -f 0x10008000\nexit\n",
+                app, app, (char *)descriptor, app) :
+            snprintf(command, sizeof(command), "am start -n %s/android.app.NativeActivity "
+                "-f 0x10008000 --es org.z23.pair '%s'\nexit\n", app, (char *)descriptor);
         ok = n > 0 && (size_t)n < sizeof(command) && run_adb(adb, shell, command);
         char code[7];
         if (ok && zapp_pair_code((const char *)descriptor, code)) {

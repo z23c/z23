@@ -39,6 +39,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+        <activity android:name="org.z23.nativeapp.ShareActivity" android:exported="false"
+            android:excludeFromRecents="true" />
         <service android:name="org.z23.nativeapp.NodeService" android:exported="false"
             android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

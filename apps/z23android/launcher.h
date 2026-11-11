@@ -10,13 +10,11 @@
 
 struct zapp_launcher_app {
     struct zapp_app_entry entry;
-    jobject icon; /* Global reference to the app's Drawable, or NULL. */
 };
 
 /* Lists the apps with a launcher entry other than this one, sorted by label, at most max (and
- * ZAPP_LAUNCHER_MAX). With icons set, each icon is a global reference released by zapp_launcher_release. */
-size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max, bool icons);
-void zapp_launcher_release(JNIEnv *env, struct zapp_launcher_app *apps, size_t count);
+ * ZAPP_LAUNCHER_MAX). The UI uses text labels and does not load app icons. */
+size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max);
 /* Starts one launcher activity class of a package. False when it cannot be started. */
 bool zapp_launcher_start(JNIEnv *env, jobject activity, const char *package, const char *activity_class);
 /* Opens the system screen that chooses the Home app, or the main Android settings when no app handles it. */

@@ -549,6 +549,15 @@ static void funds_items(struct wallet_screen *s)
 
 static void receive_items(struct wallet_screen *s)
 {
+#ifdef ZAPP_SHARE_FIXTURE
+    title(s, "Receive");
+    (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
+    (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, "t1 aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa a");
+    button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
+    if (st.d.note[0]) note(s, st.d.note);
+    button(s, WALLET_ACT_BACK, "Back");
+    return;
+#endif
     const struct data *d = &st.d;
     char grouped[ZAPP_PAY_ADDRESS_MAX * 2], text[WALLET_TEXT_MAX];
     title(s, "Receive");
@@ -557,6 +566,7 @@ static void receive_items(struct wallet_screen *s)
         (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, d->code);
         (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, grouped);
         button(s, WALLET_ACT_COPY_ADDRESS, "Copy address");
+        button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
         if (d->has_amount && zapp_zat_format(d->amount_zat, grouped, sizeof(grouped))) {
             snprintf(text, sizeof(text), "Asking for %s ZCL", grouped);
             line(s, text);
@@ -1655,6 +1665,15 @@ static size_t from_history(enum wallet_action action, unsigned arg, struct job *
     return 0;
 }
 
+static size_t receive_action(enum wallet_action action, enum wallet_outcome *outcome, struct job *jobs)
+{
+    if (action == WALLET_ACT_NEW_ADDRESS) return new_address(jobs);
+    if (action == WALLET_ACT_COPY_ADDRESS) copy_address();
+    if (action == WALLET_ACT_SHARE_REQUEST) *outcome = WALLET_SHARE;
+    if (action == WALLET_ACT_RETRY_ADDRESS) return retry_address(jobs);
+    return 0;
+}
+
 enum wallet_outcome wallet_screens_activate(enum wallet_action action, unsigned arg)
 {
     struct job jobs[2];
@@ -1665,15 +1684,32 @@ enum wallet_outcome wallet_screens_activate(enum wallet_action action, unsigned 
     if (st.dropped && action != WALLET_ACT_BACK) { st.dropped = 0; touch(); }
     if (st.ready && !st.blocked) {
         if (st.page == WALLET_PAGE_FUNDS) count = from_funds(action, jobs, &outcome);
-        else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_NEW_ADDRESS) count = new_address(jobs);
-        else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_COPY_ADDRESS) copy_address();
-        else if (st.page == WALLET_PAGE_RECEIVE && action == WALLET_ACT_RETRY_ADDRESS) count = retry_address(jobs);
+        else if (st.page == WALLET_PAGE_RECEIVE) count = receive_action(action, &outcome, jobs);
         else if (st.page == WALLET_PAGE_HISTORY) count = from_history(action, arg, jobs);
     }
     pthread_mutex_unlock(&st.lock);
     dispatch(jobs, count);
     if (action == WALLET_ACT_BACK && !wallet_screens_back()) outcome = WALLET_LEAVE;
     return outcome;
+}
+
+bool wallet_screens_share_code(char *out, size_t cap)
+{
+    pthread_mutex_lock(&st.lock);
+    bool ok = out && cap && st.d.address[0] && st.d.code[0] && strlen(st.d.code) < cap;
+    if (ok) snprintf(out, cap, "%s", st.d.code);
+    pthread_mutex_unlock(&st.lock);
+    return ok;
+}
+
+void wallet_screens_receive_notice(const char *text)
+{
+    pthread_mutex_lock(&st.lock);
+    if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
+        copy(st.d.note, sizeof(st.d.note), text);
+        touch();
+    }
+    pthread_mutex_unlock(&st.lock);
 }
 
 bool wallet_screens_set_amount(const char *text)

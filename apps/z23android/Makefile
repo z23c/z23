@@ -4,6 +4,7 @@ SDK_ROOT ?= $(ANDROID_SDK_ROOT)
 ANDROID_NDK_ROOT ?= $(ANDROID_NDK_HOME)
 ANDROID_API ?= 35
 DEVKEY_PROBE ?= OFF
+ZAPP_SHARE_FIXTURE ?= OFF
 BUILD_TOOLS_VERSION ?= 35.0.0
 JAVA_HOME ?= /usr/lib/jvm/default
 ADB ?= $(SDK_ROOT)/platform-tools/adb
@@ -11,6 +12,7 @@ ANDROID_SERIAL ?=
 BUILD_DIR ?= ../../build/android-app
 NODE_BIN ?= ../../build/bin/z23
 APP_ID := org.z23.nativeapp
+PREVIEW_APP_ID ?= org.z23.voicepreview
 TOOLS := $(SDK_ROOT)/build-tools/$(BUILD_TOOLS_VERSION)
 ANDROID_JAR := $(SDK_ROOT)/platforms/android-$(ANDROID_API)/android.jar
 KEYSTORE ?= $(BUILD_DIR)/development.keystore
@@ -99,8 +101,10 @@ test-dexgen:
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/dexgen-test' "$$scratch" $$(test -x '$(DEXDUMP)' && echo '$(DEXDUMP)')
 
 preview-apk:
+	@printf '%s\n' '$(PREVIEW_APP_ID)' | grep -E '^org\.z23\.voicepreview(\.[a-z0-9_]+)*$$' >/dev/null || \
+	  { echo 'PREVIEW_APP_ID must be org.z23.voicepreview or a lowercase suffix beneath it' >&2; exit 1; }
 	@mkdir -p '$(BUILD_DIR)/preview'
-	sed -e 's/package="org.z23.nativeapp"/package="org.z23.voicepreview"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
+	sed -e 's/package="org.z23.nativeapp"/package="$(PREVIEW_APP_ID)"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
 	$(MAKE) apk PACKAGE_PREVIEW=1 PACK_PARAMS='$(PREVIEW_PARAMS)' APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
 
@@ -242,7 +246,7 @@ test-wallet:
 
 check-node:
 	@if test '$(PACKAGE_PREVIEW)' = 1; then \
-	  sed -e 's/package="org.z23.nativeapp"/package="org.z23.voicepreview"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
+	  sed -e 's/package="org.z23.nativeapp"/package="$(PREVIEW_APP_ID)"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	    -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml | cmp -s - '$(APP_MANIFEST)' || \
 	    { echo 'Preview packaging requires the generated preview manifest' >&2; exit 1; }; \
 	elif test '$(PACKAGE_PREVIEW)' = 0; then \
@@ -280,7 +284,7 @@ native: check-config prepare-quirc
 	cmake -S . -B '$(BUILD_DIR)/native' \
 	  -DCMAKE_TOOLCHAIN_FILE='$(ANDROID_NDK_ROOT)/build/cmake/android.toolchain.cmake' \
 	  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-$(ANDROID_API) \
-	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DZ23_DEVKEY_PROBE=$(DEVKEY_PROBE) -DCMAKE_BUILD_TYPE=Release
+	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DZ23_DEVKEY_PROBE=$(DEVKEY_PROBE) -DZAPP_SHARE_FIXTURE=$(ZAPP_SHARE_FIXTURE) -DCMAKE_BUILD_TYPE=Release
 	cmake --build '$(BUILD_DIR)/native' --parallel 4
 
 .PHONY: check-signer-input check-signer-output
