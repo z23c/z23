@@ -374,6 +374,39 @@ static int dlx_prepare_bounded_output(void)
     return failures;
 }
 
+extern bool zcl_dev_land_lint_snapshot_test(FILE *f, size_t size, char *detail, size_t cap);
+static bool dlx_lint_growth_snapshot(void)
+{
+    FILE *f = tmpfile();
+    if (!f) return false;
+    bool ok = fputs("──── FAIL log: check-red ────────────────────────────\n"
+                    "original prefix\n[check-red] FA", f) >= 0 && fflush(f) == 0;
+    long size = ok ? ftell(f) : -1;
+    ok = ok && size > 0 && fputs("IL late marker\nappended diagnostic\n", f) >= 0 && fflush(f) == 0;
+    rewind(f);
+    char detail[1024] = {0};
+    ok = ok && zcl_dev_land_lint_snapshot_test(f, (size_t)size, detail, sizeof(detail)) &&
+        strstr(detail, "original prefix") && strstr(detail, "[detail truncated]") &&
+        !strstr(detail, "late marker") && !strstr(detail, "appended diagnostic");
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool dlx_lint_late_failure(const char *log)
+{
+    char detail[1024], dimension[64];
+    const char *argv[] = {"/bin/sh", "-c",
+        "printf '%s\\n' '──── FAIL log: check-red ────────────────────────────'; "
+        "i=0; while [ \"$i\" -lt 50 ]; do printf 'PASS selftest preamble %s\\n' \"$i\"; i=$((i+1)); done; "
+        "printf '%s\\n' '[check-other] FAIL wrong gate' '[check-red] FAIL — shell debt changed:' "
+        "'ss tools/scripts/fixture.sh actual=0 baseline=3 (stale row)' "
+        "'──── FAIL log: check-other ────────────────────────────' 'later frame contamination'; exit 7", NULL};
+    int rc = zcl_dev_land_lint_test(argv, log, detail, sizeof(detail), dimension, sizeof(dimension), 0);
+    return rc == 7 && !strcmp(dimension, "lint") && strstr(detail, "shell debt changed") &&
+        strstr(detail, "actual=0 baseline=3 (stale row)") && !strstr(detail, "wrong gate") &&
+        !strstr(detail, "PASS selftest") && !strstr(detail, "later frame contamination");
+}
+
 /* Exercise the actual preparation adapter with an existing stale plan. */
 static int dlx_lint_failure_detail(void)
 {
@@ -398,6 +431,8 @@ static int dlx_lint_failure_detail(void)
             if (strstr(line, "actual diagnostic body")) found = true;
         ASSERT(fclose(f) == 0);
         ASSERT(found);
+        ASSERT(dlx_lint_late_failure(log));
+        ASSERT(dlx_lint_growth_snapshot());
         const char *empty[] = {"/bin/sh", "-c", "printf '%s\\n' 'error: earlier generic' 'FAIL check-empty' >&2; exit 3", NULL};
         ASSERT(zcl_dev_land_lint_test(empty, log, detail, sizeof(detail), dimension, sizeof(dimension), 0) == 3);
         ASSERT(strstr(detail, "FAIL check-empty") != NULL);

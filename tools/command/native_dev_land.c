@@ -5901,18 +5901,21 @@ static bool dl_lint_append_body(char *body, size_t cap, size_t *used, const char
 #if !defined(_WIN32) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
 /* Only lint's own failed-gate frame can supply the body; PASS output and
  * the verdict summary precede it and are not the gate's diagnosis. */
-static bool dl_lint_line(FILE *f, char *line, size_t cap, bool *clipped)
+static bool dl_lint_line(FILE *f, char *line, size_t cap, bool *clipped, size_t *remaining)
 {
     size_t used = 0;
-    bool any = false;
+    bool any = false, ended = false;
     int c;
     *clipped = false;
-    while ((c = fgetc(f)) != EOF) {
+    while ((!remaining || *remaining) && (c = fgetc(f)) != EOF) {
+        if (remaining) --*remaining;
         any = true;
         if (c == 0 || used + 1 >= cap) *clipped = true;
         else line[used++] = (char)c;
-        if (c == '\n') break;
+        if (c == '\n') { ended = true; break; }
     }
+    /* Neither EOF nor the size boundary completes an unterminated line. */
+    if (remaining && any && !ended) *clipped = true;
     line[used] = '\0';
     return any;
 }
@@ -5948,26 +5951,66 @@ static void dl_lint_render(char *detail, size_t cap, const char *gate,
     } else (void)snprintf(detail, cap, "%s", rendered);
 }
 
-static bool dl_lint_body(FILE *f, char *detail, size_t cap)
+struct dl_lint_excerpt {
+    char text[701];
+    size_t used;
+    bool clipped;
+};
+static void dl_lint_excerpt_add(struct dl_lint_excerpt *e, const char *line, bool clipped)
 {
-    char line[4096], gate[256], next[256], body[701] = "";
-    bool line_clipped = false, found = false, clipped = false;
-    size_t used = 0;
-    while (dl_lint_line(f, line, sizeof(line), &line_clipped)) {
+    if (e->clipped) return;
+    bool complete = dl_lint_append_body(e->text, sizeof(e->text), &e->used, line);
+    e->clipped = clipped || !complete;
+}
+/* Only the gate named by the validated frame may claim its verdict. */
+static bool dl_lint_attributed_fail(const char *line, const char *gate)
+{
+    size_t n = strlen(gate);
+    if (line[0] != '[' || strncmp(line + 1, gate, n) != 0 ||
+        line[n + 1] != ']' || strncmp(line + n + 2, " FAIL", 5) != 0) return false;
+    char c = line[n + 7];
+    return c == '\0' || c == ':' || c == ' ' || c == '\r' || c == '\n';
+}
+static bool dl_lint_body_snapshot(FILE *f, char *detail, size_t cap, size_t remaining)
+{
+    char line[4096], gate[256], next[256];
+    struct dl_lint_excerpt prefix = {0}, diagnosis = {0};
+    bool line_clipped = false, found = false, attributed = false;
+    while (dl_lint_line(f, line, sizeof(line), &line_clipped, &remaining)) {
         if (!found) {
             found = !line_clipped && dl_lint_frame(line, gate, sizeof(gate));
             continue;
         }
         if (!line_clipped && dl_lint_frame(line, next, sizeof(next))) break;
         if (line[strspn(line, " \t\r\n")] == '\0') continue;
-        clipped |= line_clipped;
-        if (!dl_lint_append_body(body, sizeof(body), &used, line)) clipped = true;
-        if (clipped || used == sizeof(body) - 1) { clipped = true; break; }
+        if (!attributed && !line_clipped && dl_lint_attributed_fail(line, gate)) attributed = true;
+        if (attributed) dl_lint_excerpt_add(&diagnosis, line, line_clipped);
+        else dl_lint_excerpt_add(&prefix, line, line_clipped);
+        if (attributed && diagnosis.clipped) break;
     }
-    if (!found || !used) return false;
-    dl_lint_render(detail, cap, gate, body, clipped);
+    struct dl_lint_excerpt *chosen = attributed ? &diagnosis : &prefix;
+    if (!chosen->used) return false;
+    dl_lint_render(detail, cap, gate, chosen->text, chosen->clipped);
     return true;
 }
+
+static bool dl_lint_body(FILE *f, char *detail, size_t cap)
+{
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size < 0 || st.st_size > 32 * 1024 * 1024) return false;
+    return dl_lint_body_snapshot(f, detail, cap, (size_t)st.st_size);
+}
+#if defined(ZCL_TESTING)
+bool zcl_dev_land_lint_snapshot_test(FILE *f, size_t size, char *detail, size_t cap);
+bool zcl_dev_land_lint_snapshot_test(FILE *f, size_t size, char *detail, size_t cap)
+{
+    struct stat st;
+    return f && fstat(fileno(f), &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0 &&
+        size <= 32u * 1024u * 1024u && size <= (size_t)st.st_size &&
+        dl_lint_body_snapshot(f, detail, cap, size);
+}
+#endif
 
 static bool dl_lint_copy_log(const char *source, const char *dest)
 {
@@ -5998,7 +6041,7 @@ static bool dl_lint_has_failed_gate(FILE *f)
     char line[4096], gate[256];
     bool clipped;
     rewind(f);
-    while (dl_lint_line(f, line, sizeof(line), &clipped))
+    while (dl_lint_line(f, line, sizeof(line), &clipped, NULL))
         if (!clipped && dl_lint_frame(line, gate, sizeof(gate))) return true;
     return false;
 }
@@ -6018,7 +6061,7 @@ static void dl_lint_fallback(FILE *f, char *out, size_t cap)
     char line[4096], fallback[1024] = "";
     bool clipped;
     rewind(f);
-    while (dl_lint_line(f, line, sizeof(line), &clipped)) {
+    while (dl_lint_line(f, line, sizeof(line), &clipped, NULL)) {
         const char *p = line + strspn(line, " \t");
         if (!clipped && strncmp(p, "FAIL ", 5) == 0) {
             dl_sanitize_copy(p, out, cap);

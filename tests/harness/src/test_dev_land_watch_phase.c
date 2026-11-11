@@ -1483,6 +1483,30 @@ static bool dlx_lint_utf8_boundary(void)
     return ok;
 }
 
+static bool dlx_evidence_lint_late(void)
+{
+    const struct dlx_evidence_case k = {
+        .tag = "evidence_lint_late", .dimension = ZCL_DEV_PROOF_LINT,
+        .script = "printf '%s\\n' 'FAIL check-red' '──── FAIL log: check-red ────────────────────────────'\n"
+                  "i=0; while [ \"$i\" -lt 50 ]; do printf 'PASS selftest preamble %s\\n' \"$i\"; i=$((i+1)); done\n"
+                  "printf '%s\\n' '[check-other] FAIL wrong gate' '[check-red] FAIL — shell debt changed:' "
+                  "'ss tools/scripts/fixture.sh actual=0 baseline=3 (stale row)' "
+                  "'──── FAIL log: check-other ────────────────────────────' 'later frame contamination'\nexit 1\n",
+        .token = "child_proof_failed_exit_1",
+    };
+    char wt[PATH_MAX], local[64], base[64];
+    dlx_isolate(k.tag);
+    bool ok = dlx_evidence_settle(&k, wt, local, base);
+    setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+    struct dlx_call c; dlx_begin(&c, "step");
+    ok = ok && dlx_run(&c) && dlx_ok(&c) && !strcmp(dlx_str(&c, "state"), "failed") &&
+        !strcmp(dlx_str(&c, "dimension"), "lint") && strstr(dlx_str(&c, "detail"), "shell debt changed") &&
+        strstr(dlx_str(&c, "detail"), "actual=0 baseline=3 (stale row)") &&
+        !strstr(dlx_str(&c, "detail"), "wrong gate") && !strstr(dlx_str(&c, "detail"), "PASS selftest") &&
+        !strstr(dlx_str(&c, "detail"), "later frame contamination");
+    dlx_end(&c); dlx_restore(); return ok;
+}
+
 static int dlx_evidence_lint_body(void)
 {
     int failures = 0;
@@ -1506,6 +1530,7 @@ static int dlx_evidence_lint_body(void)
         ASSERT(strstr(dlx_str(&c, "detail"), "PASS check-pass") == NULL);
         dlx_end(&c);
         dlx_restore();
+        ASSERT(dlx_evidence_lint_late());
         ASSERT(dlx_lint_bad_file(false));
         ASSERT(dlx_lint_bad_file(true));
         ASSERT(dlx_lint_utf8_boundary());
