@@ -2040,23 +2040,24 @@ static void ruf_display_failure(struct ru_run *r)
     errno = saved_errno;
 }
 /* Capture only this invocation, before another driver appends to the log. */
-static void ruf_driver_evidence(const struct ru_run *r, off_t start)
+static void ruf_log_evidence(const struct ru_run *r, const char *name,
+                             const char *label, off_t start)
 {
     char path[1100], buf[4096];
-    int n = snprintf(path, sizeof(path), "%s/receive-flow-driver.log", r->fixture->world.root);
+    int n = snprintf(path, sizeof(path), "%s/%s", r->fixture->world.root, name);
     int fd = n > 0 && (size_t)n < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat st;
     if (fd < 0 || start < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < start) {
-        fprintf(stderr, "RECEIVE_FLOW_DRIVER_OUTPUT unavailable\n");
+        fprintf(stderr, "%s unavailable\n", label);
         if (fd >= 0) close(fd);
         return;
     }
     off_t available = st.st_size - start;
     size_t want = available > (off_t)sizeof(buf) ? sizeof(buf) : (size_t)available;
     ssize_t got = pread(fd, buf, want, start); int saved = errno; close(fd);
-    if (got < 0) { fprintf(stderr, "RECEIVE_FLOW_DRIVER_OUTPUT read_error=%d\n", saved); return; }
-    fprintf(stderr, "RECEIVE_FLOW_DRIVER_OUTPUT bytes=%zd available=%lld truncated=%d\n",
-        got, (long long)available, (off_t)got < available);
+    if (got < 0) { fprintf(stderr, "%s read_error=%d\n", label, saved); return; }
+    fprintf(stderr, "%s bytes=%zd available=%lld truncated=%d\n",
+        label, got, (long long)available, (off_t)got < available);
     if (got > 0) (void)fwrite(buf, 1, (size_t)got, stderr);
     fputc('\n', stderr);
 }
@@ -2076,7 +2077,7 @@ static bool ruf_driver(struct ru_run *r, const char *title, const char *action, 
     bool stopped = ru_stop(&r->driver);
     if (!ok || !stopped) fprintf(stderr, "RECEIVE_FLOW_DRIVER title=%s action=%s wait=%d exit=%u stopped=%d\n",
         title, action, waited, code, stopped);
-    if (!ok || !stopped) { ruf_driver_evidence(r, start); ruf_display_failure(r); }
+    if (!ok || !stopped) { ruf_log_evidence(r, "receive-flow-driver.log", "RECEIVE_FLOW_DRIVER_OUTPUT", start); ruf_display_failure(r); }
     return ok && stopped;
 }
 static bool ruf_cli(struct ru_run *r, enum ruf_case which)
@@ -2588,14 +2589,29 @@ static bool rus_received(struct receive_fixture *f, struct rus_identity *id, boo
 }
 static bool rus_wait_keep_window(struct ru_run *r)
 {
+    int64_t begin = platform_time_monotonic_ms();
     int log = ru_log(r, "receive-success-driver.log");
+    int log_errno = log < 0 ? errno : 0;
+    off_t start = log >= 0 ? lseek(log, 0, SEEK_END) : -1;
     const char *argv[] = {r->driver_image, "--title=Preview opened", "--expect-count=1",
         "--timeout-ms=30000", NULL};
-    bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    bool spawned = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    int spawn_errno = log >= 0 && !spawned ? errno : 0;
     if (log >= 0) close(log);
     uint32_t code = UINT32_MAX;
-    ok = ok && ru_wait(&r->driver, 32000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
-    bool stopped = ru_stop(&r->driver); return ok && stopped;
+    int waited = spawned ? (int)ru_wait(&r->driver, 32000, &code) : -1;
+    bool ok = spawned && waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool stopped = ru_stop(&r->driver);
+    if (!ok || !stopped) {
+        int64_t end = platform_time_monotonic_ms();
+        fprintf(stderr, "RECEIVE_PREVIEW_WAIT log=%d log_errno=%d spawned=%d spawn_errno=%d wait=%d exit=%u elapsed_ms=%lld cleanup=%d\n",
+                log >= 0, log_errno, spawned, spawn_errno, waited, code,
+                (long long)(begin > 0 && end >= begin ? end - begin : -1), stopped);
+        ruf_log_evidence(r, "receive-success-driver.log", "RECEIVE_PREVIEW_DRIVER_OUTPUT", start);
+        ruf_log_evidence(r, "receive-flow-cli.log", "RECEIVE_PREVIEW_CLI_OUTPUT", 0);
+        ruf_display_failure(r);
+    }
+    return ok && stopped;
 }
 static bool rus_keep_pages(const struct rus_identity *id, uint32_t *count)
 {
@@ -2991,6 +3007,7 @@ static bool rud_cases(struct ru_run *r)
     }
     return ok;
 }
+
 static int rud_readiness(void)
 {
     int failures = 0; size_t saved = 0;
