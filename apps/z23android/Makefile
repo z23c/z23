@@ -405,6 +405,8 @@ test-host:
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/layout-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen -I../../platform/domain/encoding/include ../../platform/domain/encoding/src/bech32.c tests/home_test.c home.c layout.c hosts.c private.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c bridge_auth.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
+	@sed -n '/^static bool add_app_row/,/^}/p' shell.c | grep -n 'column(env, DARK, 4, false)'
+	@sed -n '/^static bool add_app_row/,/^}/p' shell.c | grep -n 'label(env, row, version, 13.0f, WHITE)'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_notice_test.c node_notice.c -o '$(BUILD_DIR)/node-notice-test'
 	'$(BUILD_DIR)/node-notice-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/node_restart_test.c node_restart.c -o '$(BUILD_DIR)/node-restart-test'

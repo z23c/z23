@@ -667,7 +667,7 @@ static bool add_app_row(JNIEnv *env, size_t i)
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
     char version[ZAPP_APP_VERSION_LINE_CAP];
     (void)zapp_home_version_line(&shell.apps[i].entry, version, sizeof(version));
-    jobject row = column(env, DARK, 4, true);
+    jobject row = column(env, DARK, 4, false);
     bool ok = row && zj_int_property(env, row, "setGravity", 16) &&
         label(env, row, shell.apps[i].entry.label, 17.0f, WHITE) &&
         (!version[0] || label(env, row, version, 13.0f, WHITE)) &&
