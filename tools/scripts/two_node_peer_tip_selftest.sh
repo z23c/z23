@@ -7,6 +7,10 @@ source "$SELF_DIR/two_node_peer_tip.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/z23-peer-tip-contract.XXXXXX")"
 trap 'if [ -n "${TN_PID_B:-}" ]; then tn_kill_group "$TN_PGID_B"; wait "$TN_PID_B" 2>/dev/null || true; fi; rm -rf -- "$fixture"' EXIT
 fail() { printf 'peer-tip selftest: FAIL: %s\n' "$*" >&2; exit 1; }
+if [ "$(uname -s)" = Linux ]; then
+    [ -f "$PROCESS_GROUP_EXEC" ] && [ -x "$PROCESS_GROUP_EXEC" ] \
+        || fail "requires executable launcher $PROCESS_GROUP_EXEC; run make process-group-exec"
+fi
 RPC_BIN="$fixture/rpc"
 cat > "$RPC_BIN" <<'RPC'
 #!/bin/sh
