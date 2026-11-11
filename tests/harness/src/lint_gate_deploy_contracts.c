@@ -708,8 +708,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "BUILD_COMPILER_ID") != NULL);
         ASSERT(strstr(buf, "compile-epoch-object.sh") != NULL);
         ASSERT(strstr(buf, "publish-build-alias.sh") != NULL);
-        ASSERT(strstr(buf, "build-epoch-selftest.sh") != NULL);
-        ASSERT(strstr(buf, "check-build-epoch-integrity") != NULL);
+        ASSERT(strstr(buf, "check-build-epoch-integrity: $(LINTC_TOOL)") != NULL);
         ASSERT(strstr(buf, "COV_CFLAGS = $(filter-out -flto -flto=%")
                != NULL);
         ASSERT(strstr(buf, "coverage-locked: coverage-clean") == NULL);
