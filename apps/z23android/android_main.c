@@ -766,7 +766,8 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     if (!start_tick()) goto fail;
     pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); copy_activity = activity; pthread_mutex_unlock(&lock);
     if (!clean(env) || !active || !start_services(env, activity, native_dir, &preview)) goto fail;
-    (void)zapp_params_launch(prepare_params, activity->assetManager, activity->internalDataPath);
+    (void)zapp_params_launch(prepare_params, activity->assetManager, activity->internalDataPath,
+                             preview, Z23_PREVIEW_PARAMS == 1);
     request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
     zapp_game_set_notify(notify_game);

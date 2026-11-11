@@ -53,10 +53,13 @@ sums in `params.sha256`, which are the sums in
 [Getting started](../../docs/node/GETTING_STARTED.md). They add
 about 51.6 MB to the package.
 
-A preview build (`make preview-apk`) runs no node and leaves the files out, so it needs neither
-the files nor `check-params`. Pass `PREVIEW_PARAMS=1` to pack them into a wallet preview.
+A preview build (`make preview-apk`) runs no node and by default leaves the files out, so it needs neither
+the files nor `check-params`. It does not start a missing-parameter copy or poll for node status at launch. Pass `PREVIEW_PARAMS=1`
+to pack them for intentional parameter-copy testing in a preview; that variant retains the startup copy.
+<!-- claim: symbol-present Z23_PREVIEW_PARAMS apps/z23android/CMakeLists.txt # packaged preview build flag -->
+<!-- claim: symbol-present observe_node apps/z23android/controller.c # preview does not poll node status -->
 
-State today: the app starts the copy at launch (`zapp_params_launch`, once per process unless the
+State today: the node app starts the copy at launch (`zapp_params_launch`, once per process unless the
 last attempt failed) and tests cover it on a Linux host; it has not run on a phone. `params_android.c` opens the packaged files on the caller's thread and
 `params_job.c` verifies and copies them on a worker thread to `files/params`: existing files are
 read and checked against their pinned SHA-256 first, a copy that differs (also at the same size) is
@@ -147,6 +150,10 @@ release:
 
 - Cards: typed JSON, `zcl.phone_card.v1`, `zcl.z23_app_card.v1` and
   `zcl.app_card.v1`. They carry no token, plan, pairing offer, key or path.
+  A signed Z23 app card also carries `version_name` when nonempty and
+  `version_code` when PackageManager reports it. This is install metadata, not
+  source identity or proof that an update activated.
+  <!-- claim: symbol-present zapp_home_app_card apps/z23android/home.c # version metadata on signed Z23 cards -->
 - A layout recipe, `zcl.layout_recipe.v1` (see `docs/spec/short-video-network.md`
   section 5.4), plus an optional `theme` of `background`, `text`, `muted` and
   `accent`, each `#rrggbb`. Containers: `pager_vertical`, `list`, `grid`;
@@ -174,7 +181,12 @@ The apps list, the **Android home settings** entry and the footer **Apps** and
 **Settings** buttons are drawn by app code, not by the layout, so a bad layout
 never hides them. The Apps screen uses text labels only and does not load or draw
 installed-app icons; camera previews, QR codes and other functional media are unaffected.
+Signed Z23 rows also show the installed `versionName` and `versionCode` from
+PackageManager, or the numeric code alone when the name is empty. Version
+metadata helps check an APK update or rollback, but does not establish
+in-process hot swapping.
 <!-- claim: symbol-present add_app_row apps/z23android/shell.c # text-only installed-app rows -->
+<!-- claim: symbol-present zapp_home_version_line apps/z23android/home.c # Apps shows installed version metadata -->
 To stop using Z23 as Home, open **Settings**, then
 **Android home settings**, and choose another Home app.
 

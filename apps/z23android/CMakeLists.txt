@@ -47,7 +47,9 @@ target_include_directories(z23android PRIVATE
     "${Z23_ROOT}/vendor/include")
 target_compile_options(z23android PRIVATE -std=c23 -Wall -Wextra -Werror -pedantic
     -fstack-protector-strong -fvisibility=hidden -ffunction-sections -fdata-sections)
-target_compile_definitions(z23android PRIVATE _POSIX_C_SOURCE=200809L QUIRC_MAX_REGIONS=65534)
+option(Z23_PREVIEW_PARAMS "Build a preview with proving parameters" OFF)
+target_compile_definitions(z23android PRIVATE _POSIX_C_SOURCE=200809L QUIRC_MAX_REGIONS=65534
+    Z23_PREVIEW_PARAMS=$<BOOL:${Z23_PREVIEW_PARAMS}>)
 option(Z23_DEVKEY_PROBE "Build the device key phone probe (preview package only)" OFF)
 if(Z23_DEVKEY_PROBE)
     target_sources(z23android PRIVATE device_key_probe.c)

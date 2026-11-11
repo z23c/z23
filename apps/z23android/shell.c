@@ -48,7 +48,7 @@ static bool camera_settings_pending;
 static enum screen camera_settings_origin;
 
 static struct {
-    jobject activity, roots[SCREEN_COUNT];
+    jobject activity, stage, roots[SCREEN_COUNT];
     zapp_native_action send;
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
@@ -72,6 +72,7 @@ static struct {
     struct zapp_launcher_app apps[ZAPP_LAUNCHER_MAX];
     size_t app_count;
     jobject rows[ZAPP_LAUNCHER_MAX];
+    size_t row_apps[ZAPP_LAUNCHER_MAX];
     size_t row_count;
     struct nav navs[NAV_MAX];
     size_t nav_count;
@@ -215,6 +216,10 @@ static jobject column(JNIEnv *env, uint32_t color, int padding_dp, bool horizont
     jobject view = zj_widget(env, "android/widget/LinearLayout", shell.activity);
     bool ok = view && zj_int_property(env, view, "setOrientation", horizontal ? 0 : 1) &&
         zj_int_property(env, view, "setBackgroundColor", (jint)color) && zj_padding(env, view, padding_dp, padding_dp);
+    if (!ok && view) {
+        (*env)->DeleteLocalRef(env, view);
+        view = NULL;
+    }
     return ok ? view : NULL;
 }
 static jobject bar(JNIEnv *env, uint32_t color)
@@ -222,6 +227,10 @@ static jobject bar(JNIEnv *env, uint32_t color)
     jobject view = zj_widget(env, "android/widget/TextView", shell.activity);
     bool ok = view && zj_typography(env, view, 14.0f, (jint)WHITE) && zj_padding(env, view, 16, 10) &&
         zj_int_property(env, view, "setBackgroundColor", (jint)color) && zj_visible(env, view, false);
+    if (!ok && view) {
+        (*env)->DeleteLocalRef(env, view);
+        view = NULL;
+    }
     return ok ? view : NULL;
 }
 /* A red notice bar at the top of a screen. */
@@ -497,41 +506,113 @@ static bool build_setup(JNIEnv *env, jobject root)
 static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject root)
 {
     bool ok = root && zj_margins(env, root, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_visible(env, root, which == SCREEN_HOME) &&
-        zj_append(env, stage, root) && zj_keep(env, &shell.roots[which], root);
+        zj_keep(env, &shell.roots[which], root);
+    if (ok && !zj_append(env, stage, root)) {
+        (*env)->DeleteGlobalRef(env, shell.roots[which]);
+        shell.roots[which] = NULL;
+        ok = false;
+    }
     if (root && which != SCREEN_ASSISTANT) (*env)->DeleteLocalRef(env, root);
     return ok;
 }
-static bool attach_extra_pages(JNIEnv *env, jobject stage, jobject review, jobject wallet, jobject send, jobject setup)
+static bool attach_wallet_pages(JNIEnv *env, jobject stage, jobject wallet, jobject send, jobject setup)
 {
-    return build_fleet_review(env, review) && build_wallet(env, wallet) &&
-        build_send(env, send) && build_setup(env, setup) &&
-        add_screen(env, stage, SCREEN_FLEET_REVIEW, review) &&
+    return build_wallet(env, wallet) && build_send(env, send) && build_setup(env, setup) &&
         add_screen(env, stage, SCREEN_WALLET, wallet) &&
         add_screen(env, stage, SCREEN_SEND, send) && add_screen(env, stage, SCREEN_SETUP, setup);
 }
 
 static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
 {
-    jobject review = column(env, DARK, 0, false);
-    jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
-    jobject game = column(env, DARK, 0, false);
-    return game && zapp_game_view_create(env, shell.activity, game) && add_screen(env, stage, SCREEN_GAME, game) &&
-           build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
+    jobject wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
+    return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) &&
            add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
-           add_screen(env, stage, SCREEN_SCAN, scan) && attach_extra_pages(env, stage, review, wallet, send, setup);
+           attach_wallet_pages(env, stage, wallet, send, setup);
 }
 static bool build_stage(JNIEnv *env, jobject assistant)
 {
     jobject stage = zj_widget(env, "android/widget/FrameLayout", shell.activity);
     jobject home = column(env, DARK, 0, false), apps = column(env, DARK, 12, false), settings = column(env, DARK, 20, false);
-    bool ok = stage && build_pages(env, stage, home, apps, settings) && add_screen(env, stage, SCREEN_ASSISTANT, assistant);
+    bool ok = stage && build_pages(env, stage, home, apps, settings) && add_screen(env, stage, SCREEN_ASSISTANT, assistant) &&
+        zj_keep(env, &shell.stage, stage);
     if (ok) {
         jmethodID set = zj_method(env, shell.activity, "setContentView", "(Landroid/view/View;)V");
         if (set) (*env)->CallVoidMethod(env, shell.activity, set, stage);
         ok = set && zj_clean(env);
     }
     return ok;
+}
+static void release_refs(JNIEnv *env, jobject **refs, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (*refs[i]) (*env)->DeleteGlobalRef(env, *refs[i]);
+        *refs[i] = NULL;
+    }
+}
+static void discard_page(JNIEnv *env, enum screen which)
+{
+    if (which == SCREEN_GAME) {
+        zapp_game_view_destroy(env);
+        return;
+    }
+    jobject *refs[10];
+    size_t count = 0;
+    if (which == SCREEN_SCAN) {
+        refs[count++] = &shell.scan_view;
+        refs[count++] = &shell.scan_hint_view;
+        refs[count++] = &shell.scan_camera;
+        refs[count++] = &shell.scan_panel;
+        refs[count++] = &shell.paste_panel;
+        refs[count++] = &shell.paste_field;
+        refs[count++] = &shell.paste_error;
+    } else if (which == SCREEN_FLEET_REVIEW) {
+        refs[count++] = &shell.fleet_review_text;
+        refs[count++] = &shell.fleet_review_result;
+        refs[count++] = &shell.fleet_review_qr;
+        refs[count++] = &shell.fleet_review_scroll;
+        refs[count++] = &shell.fleet_review_hint;
+        refs[count++] = &shell.fleet_review_status;
+        refs[count++] = &shell.fleet_result_scroll;
+    } else return;
+    refs[count++] = &shell.notice_views[which];
+    release_refs(env, refs, count);
+}
+static void discard_navs(JNIEnv *env, enum screen which, size_t first)
+{
+    for (size_t i = first; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
+    shell.nav_count = first;
+    if (which == SCREEN_SCAN) {
+        shell.camera_retry = NULL;
+        shell.camera_settings = NULL;
+        shell.paste_review = NULL;
+    } else if (which == SCREEN_FLEET_REVIEW) {
+        shell.fleet_join_button = NULL;
+        shell.fleet_copy_button = NULL;
+        shell.fleet_back_button = NULL;
+        shell.fleet_start_button = NULL;
+    }
+}
+static bool ensure_screen(JNIEnv *env, enum screen which)
+{
+    if (shell.roots[which]) return true;
+    if (which != SCREEN_SCAN && which != SCREEN_FLEET_REVIEW && which != SCREEN_GAME) return true;
+    size_t nav_start = shell.nav_count;
+    jobject root = column(env, which == SCREEN_SCAN ? 0xff000000u : DARK, 0, false);
+    bool ok = root != NULL;
+    if (ok) {
+        if (which == SCREEN_SCAN) ok = build_scan(env, root);
+        else if (which == SCREEN_FLEET_REVIEW) ok = build_fleet_review(env, root);
+        else ok = zapp_game_view_create(env, shell.activity, root);
+    }
+    if (ok) {
+        if (add_screen(env, shell.stage, which, root)) return true;
+    } else if (root) {
+        (*env)->DeleteLocalRef(env, root);
+    }
+    discard_page(env, which);
+    discard_navs(env, which, nav_start);
+    return false;
 }
 
 /* ---- immersive mode ---- */
@@ -581,15 +662,22 @@ static void settings_status(JNIEnv *env)
     else snprintf(text, sizeof(text), "Using the built-in %s layout.%s", shell.builtin, shell.layout_notice[0] ? " The layout file was not used." : "");
     (void)zj_text(env, shell.status_view, text);
 }
-/* Adds the text-only list row of app i. False when the local reference frame could not open. */
+/* Adds the text-only list row of app i, including its installed version when known. */
 static bool add_app_row(JNIEnv *env, size_t i)
 {
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
+    char version[ZAPP_APP_VERSION_LINE_CAP];
+    (void)zapp_home_version_line(&shell.apps[i].entry, version, sizeof(version));
     jobject row = column(env, DARK, 4, true);
     bool ok = row && zj_int_property(env, row, "setGravity", 16) &&
-        label(env, row, shell.apps[i].entry.label, 17.0f, WHITE) && zj_append(env, shell.apps_list, row) &&
+        label(env, row, shell.apps[i].entry.label, 17.0f, WHITE) &&
+        (!version[0] || label(env, row, version, 13.0f, WHITE)) &&
+        zj_append(env, shell.apps_list, row) &&
         zj_keep(env, &shell.rows[shell.row_count], row);
-    if (ok) ++shell.row_count;
+    if (ok) {
+        shell.row_apps[shell.row_count] = i;
+        ++shell.row_count;
+    }
     (*env)->PopLocalFrame(env, NULL);
     return true;
 }
@@ -682,17 +770,8 @@ static bool leave_screen(JNIEnv *env, enum screen next)
     if (shell.current == SCREEN_GAME && next != SCREEN_GAME) zapp_game_close();
     return true;
 }
-static void go(JNIEnv *env, enum screen next)
+static void clear_page_state(JNIEnv *env, enum screen next)
 {
-    next = screen_for(next);
-    note_send_origin(next);
-    if (!leave_screen(env, next)) return;
-    char why[sizeof(shell.action_notice)] = "";
-    if ((next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) && !protect_window(env, true)) {
-        assistant_refused(why, sizeof(why));
-        next = SCREEN_HOME;
-    }
-    set_protection(env, next);
     if (next != SCREEN_SCAN) { shell.camera_waiting = false; camera_settings_pending = false; }
     /* An outcome line under More belongs to the visit that showed it; the camera screen is part of that visit. */
     if (shell.current == SCREEN_ASSISTANT && next != SCREEN_ASSISTANT && next != SCREEN_SCAN) zapp_controller_clear_result();
@@ -702,11 +781,29 @@ static void go(JNIEnv *env, enum screen next)
         (void)zj_bitmap(env, shell.fleet_review_qr, NULL, 0);
         shell.fleet_qr_shown = false;
     }
+}
+static void go(JNIEnv *env, enum screen next)
+{
+    next = screen_for(next);
+    if (!ensure_screen(env, next)) {
+        snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open this screen. Try again.");
+        show_notice(env);
+        return;
+    }
+    note_send_origin(next);
+    if (!leave_screen(env, next)) return;
+    char why[sizeof(shell.action_notice)] = "";
+    if ((next == SCREEN_ASSISTANT || next == SCREEN_FLEET_REVIEW) && !protect_window(env, true)) {
+        assistant_refused(why, sizeof(why));
+        next = SCREEN_HOME;
+    }
+    set_protection(env, next);
+    clear_page_state(env, next);
     shell.current = next;
     snprintf(shell.action_notice, sizeof(shell.action_notice), "%s", why);
     set_outcome(env, "");
     enter_screen(env, next);
-    for (int i = 0; i < SCREEN_COUNT; ++i) (void)zj_visible(env, shell.roots[i], i == (int)next);
+    for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (void)zj_visible(env, shell.roots[i], i == (int)next);
     if (next == SCREEN_SETUP) zapp_setup_ui_render(env);
     if (next == SCREEN_HOME) show_home(env);
     show_notice(env);
@@ -816,9 +913,15 @@ static void review_paste(JNIEnv *env)
 static void begin_scan(JNIEnv *env)
 {
     enum zapp_camera_access access = zapp_camera_access_now();
+    if (!ensure_screen(env, SCREEN_SCAN)) {
+        snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open the code screen. Try again.");
+        show_notice(env);
+        return;
+    }
     if (access != ZAPP_CAMERA_SETTINGS) { shell.send("scan", ""); return; }
     shell.before_scan = shell.current;
     go(env, SCREEN_SCAN);
+    if (shell.current != SCREEN_SCAN) return;
     shell.camera_waiting = true;
     show_scan_screen(env, access);
 }
@@ -972,7 +1075,10 @@ static void tap(JNIEnv *env, float x, float y)
     else if (now.kind == TARGET_WALLET) run_wallet(env, now.index);
     else if (now.kind == TARGET_SEND) run_send(env, now.index);
     else if (now.kind == TARGET_SETUP) run_setup(env, now.index);
-    else if (now.kind == TARGET_ROW) launch(env, shell.apps[now.index].entry.package, shell.apps[now.index].entry.activity, shell.apps[now.index].entry.label);
+    else if (now.kind == TARGET_ROW) {
+        const struct zapp_launcher_app *app = &shell.apps[shell.row_apps[now.index]];
+        launch(env, app->entry.package, app->entry.activity, app->entry.label);
+    }
     else run_tile(env, &now);
 }
 static void touch(JNIEnv *env, const AInputEvent *event)
@@ -1107,6 +1213,14 @@ static void render_paste(JNIEnv *env, const struct zapp_view *view, bool finishe
 }
 static void render_scan_running(JNIEnv *env, const struct zapp_view *view, bool dismissed)
 {
+    if (dismissed && !shell.roots[SCREEN_SCAN]) return;
+    if (!ensure_screen(env, SCREEN_SCAN)) {
+        shell.scan_dismissed = true;
+        zapp_controller_cancel_scan();
+        snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open the code screen. Try again.");
+        show_notice(env);
+        return;
+    }
     shell.camera_waiting = false;
     show_scan_screen(env, ZAPP_CAMERA_GRANTED);
     (void)zj_text(env, shell.scan_hint_view, view->scan_checking ? "Code scanned. Checking…" : zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint);
@@ -1115,7 +1229,15 @@ static void render_scan_running(JNIEnv *env, const struct zapp_view *view, bool 
 static void render_scan_denied(JNIEnv *env)
 {
     shell.camera_waiting = true;
-    if (shell.current != SCREEN_SCAN) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
+    if (shell.current != SCREEN_SCAN) {
+        shell.before_scan = shell.current;
+        go(env, SCREEN_SCAN);
+        if (shell.current != SCREEN_SCAN) {
+            shell.camera_waiting = false;
+            zapp_controller_clear_result();
+            return;
+        }
+    }
     enum zapp_camera_access access = zapp_camera_access_now();
     show_scan_screen(env, access == ZAPP_CAMERA_GRANTED ? ZAPP_CAMERA_ASK_AGAIN : access);
     zapp_controller_clear_result();
@@ -1199,6 +1321,10 @@ static void restore_camera_settings(JNIEnv *env)
 {
     shell.before_scan = camera_settings_origin;
     go(env, SCREEN_SCAN);
+    if (shell.current != SCREEN_SCAN) {
+        shell.camera_waiting = false;
+        return;
+    }
     shell.camera_waiting = true;
     enum zapp_camera_access access = zapp_camera_access_now();
     show_scan_screen(env, access == ZAPP_CAMERA_GRANTED ? ZAPP_CAMERA_ASK_AGAIN : access);
@@ -1338,6 +1464,7 @@ void zapp_shell_destroy(JNIEnv *env)
     release_cards();
     if (shell.phone_ok) json_free(&shell.phone);
     zapp_layout_free(shell.layout);
+    if (shell.stage) (*env)->DeleteGlobalRef(env, shell.stage);
     (*env)->DeleteGlobalRef(env, shell.activity);
     memset(&shell, 0, sizeof(shell));
 }

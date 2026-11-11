@@ -333,16 +333,12 @@ static bool sky_agent_resize(Image *image)
 
 static void sky_agent_encode(const Image *image, struct sky_agent_capture *capture)
 {
-    size_t needed = 0;
-    capture->error = "CAPTURE_ENCODE";
-    if (!png_encode_rgba(image->data, (uint32_t)image->width, (uint32_t)image->height,
-                         NULL, 0, &needed) || needed > SKY_AGENT_PNG_MAX) return;
-    capture->png = malloc(needed);
     capture->error = "CAPTURE_ALLOC";
+    capture->png = malloc(SKY_AGENT_PNG_MAX);
     if (!capture->png) return;
     capture->error = "CAPTURE_ENCODE";
     if (!png_encode_rgba(image->data, (uint32_t)image->width, (uint32_t)image->height,
-                         capture->png, needed, &capture->size)) return;
+                         capture->png, SKY_AGENT_PNG_MAX, &capture->size)) return;
     capture->width = image->width;
     capture->height = image->height;
     capture->error = NULL;

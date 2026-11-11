@@ -34,9 +34,26 @@ static bool wait_io(int fd, short events, int64_t deadline, int alive)
         if (rc > 0) return !(p.revents & (POLLERR | POLLNVAL));
     }
 }
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+static int stream_socket(void)
+{
+#if defined(__APPLE__)
+    int fd = socket(AF_INET, SOCK_STREAM, 0), nosig = 1;
+    if (fd < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig)) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+#else
+    return socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#endif
+}
 static int connect_loopback(uint16_t port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = stream_socket();
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port),
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     if (fd < 0) return -1;

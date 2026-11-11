@@ -5,10 +5,13 @@
 #include "scan.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define ZAPP_APP_LABEL_CAP 96
 #define ZAPP_APP_PACKAGE_CAP 256
 #define ZAPP_APP_ACTIVITY_CAP 512
+#define ZAPP_APP_VERSION_NAME_CAP 64
+#define ZAPP_APP_VERSION_LINE_CAP 96
 /* Room for one app card with every character of its label escaped to six bytes. */
 #define ZAPP_APP_CARD_CAP 2048
 
@@ -17,6 +20,9 @@ struct zapp_app_entry {
     char package[ZAPP_APP_PACKAGE_CAP];
     char activity[ZAPP_APP_ACTIVITY_CAP]; /* Launcher activity class that the tile starts. */
     bool same_signature;                  /* Signed with the same key as this app. */
+    char version_name[ZAPP_APP_VERSION_NAME_CAP];
+    int64_t version_code;
+    bool version_known;                   /* PackageManager returned this app's version. */
 };
 
 /* zcl.phone_card.v1: one plain node line, an empty sync, pace and the node button. It carries nothing else
@@ -26,8 +32,12 @@ size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *ou
 /* The plain node line the Home card shows for the view, copied into out. */
 const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t cap);
 /* One launchable app: zcl.z23_app_card.v1 for an org.z23.* app signed with this app's key, else
- * zcl.app_card.v1. Returns the JSON length or 0. */
+ * zcl.app_card.v1. Signed Z23 cards also carry version_code when known and version_name when nonempty.
+ * Returns the JSON length or 0. */
 size_t zapp_home_app_card(const struct zapp_app_entry *app, char *out, size_t cap);
+/* Formats a signed Z23 app's installed version as "name (code)", or the numeric code alone
+ * when the name is empty. Empty for other apps and unknown versions. */
+const char *zapp_home_version_line(const struct zapp_app_entry *app, char *out, size_t cap);
 /* Whether a package is one of the separate Z23 apps (org.z23.*), not the base app org.z23.nativeapp or a
  * voice preview build. */
 bool zapp_home_is_z23_app(const char *package);

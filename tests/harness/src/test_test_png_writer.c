@@ -83,8 +83,8 @@ static uint16_t pngw_rd_le16(const uint8_t *p)
  * build_idat produces: 2-byte zlib header, one-or-more BTYPE=00 stored
  * blocks, big-endian Adler32 trailer. Returns the decoded length, or
  * SIZE_MAX on any structural violation (including an Adler32 mismatch,
- * checked via the SAME adler32() helper under test — legitimate here
- * because adler32() already has its own known-answer coverage below;
+ * checked via the SAME png_adler32() helper under test — legitimate here
+ * because png_adler32() already has its own known-answer coverage below;
  * this decoder is testing build_idat's *framing*, not re-deriving
  * Adler32 itself). */
 static size_t pngw_inflate_stored(const uint8_t *idat, size_t idat_len,
@@ -113,7 +113,7 @@ static size_t pngw_inflate_stored(const uint8_t *idat, size_t idat_len,
     }
     if (pos != idat_len - 4) return SIZE_MAX; /* must land exactly on trailer */
     uint32_t stored_adler = pngw_rd_be32(&idat[pos]);
-    if (stored_adler != adler32(out, out_len)) return SIZE_MAX;
+    if (stored_adler != png_adler32(out, out_len)) return SIZE_MAX;
     return out_len;
 }
 
@@ -222,9 +222,9 @@ static int pngw_check_multiple_blocks(const uint8_t *bidat, size_t bidat_len,
                consumed == bfiltered_len);
     PNGW_CHECK("build_idat: multi-block trailer position == idat_len-4",
                pos == bidat_len - 4);
-    PNGW_CHECK("build_idat: multi-block trailing Adler32 matches adler32(expected)",
+    PNGW_CHECK("build_idat: multi-block trailing Adler32 matches png_adler32(expected)",
                pos + 4 == bidat_len &&
-                   pngw_rd_be32(&bidat[pos]) == adler32(bexpected, bfiltered_len));
+                   pngw_rd_be32(&bidat[pos]) == png_adler32(bexpected, bfiltered_len));
 
     return failures;
 }
@@ -335,18 +335,18 @@ static int pngw_test_adler(void)
     /* ───────────────────────────────── adler32 ───────────────────────────────── */
     {
         PNGW_CHECK("adler32: empty input == 1 (a=1,b=0)",
-                   adler32((const uint8_t *)"", 0) == 1);
+                   png_adler32((const uint8_t *)"", 0) == 1);
         PNGW_CHECK("adler32: known-answer \"a\" == 0x00620062",
-                   adler32((const uint8_t *)"a", 1) == 0x00620062u);
+                   png_adler32((const uint8_t *)"a", 1) == 0x00620062u);
         PNGW_CHECK("adler32: known-answer \"Wikipedia\" == 0x11E60398",
-                   adler32((const uint8_t *)"Wikipedia", 9) == 0x11E60398u);
+                   png_adler32((const uint8_t *)"Wikipedia", 9) == 0x11E60398u);
 
         /* Modulo-65521 wraparound: 6000 bytes of 0xFF pushes both running
          * sums well past 65521 many times over. */
         uint8_t big[6000];
         memset(big, 0xFF, sizeof(big));
         PNGW_CHECK("adler32: known-answer 6000x0xFF wraparound == 0xA49759EA",
-                   adler32(big, sizeof(big)) == 0xA49759EAu);
+                   png_adler32(big, sizeof(big)) == 0xA49759EAu);
     }
 
     return failures;
@@ -498,9 +498,9 @@ static int pngw_test_idat_single(void)
                            pngw_rd_le16(&idat[5]) == (uint16_t)(~39u & 0xFFFFu));
             PNGW_CHECK("build_idat: single block payload matches expected filtered bytes",
                        idat_len >= 46 && memcmp(&idat[7], expected, filtered_len) == 0);
-            PNGW_CHECK("build_idat: trailing Adler32 matches adler32(expected)",
+            PNGW_CHECK("build_idat: trailing Adler32 matches png_adler32(expected)",
                        idat_len == 50 &&
-                           pngw_rd_be32(&idat[46]) == adler32(expected, filtered_len));
+                           pngw_rd_be32(&idat[46]) == png_adler32(expected, filtered_len));
 
             uint8_t decoded[64];
             size_t dec_len = pngw_inflate_stored(idat, idat_len, decoded, sizeof(decoded));

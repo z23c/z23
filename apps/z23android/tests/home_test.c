@@ -284,6 +284,47 @@ static void z23_app_cards(void)
     }
     assert(!zapp_home_is_z23_app(NULL));
 }
+static void z23_version_metadata(void)
+{
+    struct zapp_app_entry app = {.label = "Clips", .package = "org.z23.clips", .same_signature = true,
+        .version_name = "1.2.0", .version_code = 42, .version_known = true};
+    char text[512], version[ZAPP_APP_VERSION_LINE_CAP];
+    assert(!strcmp(zapp_home_version_line(&app, version, sizeof(version)), "1.2.0 (42)"));
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    struct json_value card;
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)));
+    assert(json_get_int(json_get(&card, "version_code")) == 42);
+    assert(!strcmp(json_get_str(json_get(&card, "version_name")), "1.2.0"));
+    json_free(&card);
+    app.version_name[0] = 0;
+    assert(!strcmp(zapp_home_version_line(&app, version, sizeof(version)), "42"));
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && !json_get(&card, "version_name"));
+    json_free(&card);
+    app.version_known = false;
+    snprintf(app.version_name, sizeof(app.version_name), "stale");
+    assert(!zapp_home_version_line(&app, version, sizeof(version))[0]);
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && !json_get(&card, "version_code") && !json_get(&card, "version_name"));
+    json_free(&card);
+    app.same_signature = false;
+    app.version_known = true;
+    assert(!zapp_home_version_line(&app, version, sizeof(version))[0]);
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && !json_get(&card, "version_code") && !json_get(&card, "version_name"));
+    json_free(&card);
+    app.same_signature = true;
+    snprintf(app.package, sizeof(app.package), "com.example.app");
+    assert(!zapp_home_version_line(&app, version, sizeof(version))[0]);
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && !json_get(&card, "version_code") && !json_get(&card, "version_name"));
+    json_free(&card);
+}
 /* A package that is not signed with this app's key gets a plain app tile, whatever its name. */
 static void unsigned_z23_package_is_plain(void)
 {
@@ -697,6 +738,7 @@ int main(void)
     wallet_data_does_not_outlive_the_screens();
     app_card_golden();
     z23_app_cards();
+    z23_version_metadata();
     unsigned_z23_package_is_plain();
     label_fits_on_character_boundary();
     scan_destinations();

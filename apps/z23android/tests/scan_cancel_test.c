@@ -175,8 +175,20 @@ static void allocation_failure_case(void)
     assert(discarded == 1 && !handoff_hold && !c.handoff_active && !c.handoff_wait);
 }
 
+static void preview_observation_case(void)
+{
+    static struct controller test;
+    test.runtime.preview = true;
+    observe_node(&test);
+    assert(node_observations_for_test == 0);
+    test.runtime.preview = false;
+    observe_node(&test);
+    assert(node_observations_for_test == 1);
+}
+
 int main(void)
 {
+    preview_observation_case();
     installer_view_case();
     struct zapp_runtime delayed = {0};
     delayed.start_epoch = 10; delayed.installer_generation = 20;

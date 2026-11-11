@@ -1,12 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Minimal PNG encoder in pure C23. No external dependencies.
+ * Minimal PNG encoder in pure C23, with optional zlib compression.
  * Implements CRC32, Adler32, and DEFLATE (stored blocks) natively.
  * Produces valid PNG files per ISO/IEC 15948 / RFC 2083. */
 
 #include "util/png_writer.h"
 
 #include "base/serialize_le.h"
+#ifdef ZCL_PNG_USE_ZLIB
+#include <limits.h>
+#include <zlib.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +52,7 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len)
 
 /* ── Adler32 (used inside zlib wrapper for DEFLATE stream) ──── */
 
-static uint32_t adler32(const uint8_t *data, size_t len)
+static uint32_t png_adler32(const uint8_t *data, size_t len)
 {
     uint32_t a = 1, b = 0;
     for (size_t i = 0; i < len; i++) {
@@ -205,6 +209,46 @@ static bool png_emit_stored_idat(uint8_t *idat, size_t idat_cap,
     return pos == idat_len;
 }
 
+#ifdef ZCL_PNG_USE_ZLIB
+static uint8_t *png_compress_idat(const uint8_t *filtered, size_t filtered_len,
+                                  size_t *out_len)
+{
+    if (filtered_len > ULONG_MAX) return NULL;
+    uLongf cap = compressBound((uLong)filtered_len);
+    if (cap > UINT32_MAX || cap > SIZE_MAX) return NULL;
+    uint8_t *idat = zcl_malloc((size_t)cap, "png_idat");
+    if (!idat) return NULL;
+    uLongf len = cap;
+    if (compress2(idat, &len, filtered, (uLong)filtered_len, Z_BEST_SPEED) != Z_OK ||
+        len > UINT32_MAX) {
+        png_release_buffer(idat);
+        return NULL;
+    }
+    *out_len = (size_t)len;
+    return idat;
+}
+#endif
+
+static uint8_t *stored_idat(uint8_t *filtered, size_t filtered_len,
+                            bool empty_image, size_t layout_idat, size_t *out_len)
+{
+    uint32_t adler = png_adler32(filtered, filtered_len);
+    size_t max_block = 65535;
+    size_t num_blocks = filtered_len / max_block + (filtered_len % max_block != 0);
+    if (num_blocks == 0) num_blocks = 1;
+    size_t idat_len = 2 + num_blocks * 5 + filtered_len + 4;
+    uint8_t *idat = zcl_malloc(idat_len, "png_idat");
+    if (!idat) { png_release_buffer(filtered); return NULL; }
+    bool emitted = png_emit_stored_idat(idat, idat_len, filtered, filtered_len, adler);
+    png_release_buffer(filtered);
+    if (!emitted || (!empty_image && idat_len != layout_idat)) {
+        png_release_buffer(idat);
+        return NULL;
+    }
+    *out_len = idat_len;
+    return idat;
+}
+
 static uint8_t *build_idat_channels(const uint8_t *pixels, uint32_t w,
                                     uint32_t h, size_t channels,
                                     size_t *out_len)
@@ -222,39 +266,22 @@ static uint8_t *build_idat_channels(const uint8_t *pixels, uint32_t w,
         !png_encoded_layout(w, h, channels, &layout_idat, &layout_png))
         return NULL;
 
-    /* Filtered data: each row = filter byte (None) + packed pixel bytes.
-     * Provably no wrap for non-empty images: png_encoded_layout validated
-     * both factors; empty images trivially cannot overflow. */
     size_t row_bytes = (size_t)w * channels;
     size_t filtered_len = (size_t)h * (1 + row_bytes);
-
     uint8_t *filtered = zcl_malloc(filtered_len, "png_filtered");
     if (!filtered) return NULL;
-
     png_fill_filtered_rows(filtered, pixels, h, row_bytes);
 
-    /* Compute Adler32 of the filtered data */
-    uint32_t adler = adler32(filtered, filtered_len);
-
-    /* Count stored blocks needed (max 65535 bytes per block)
-     * Total IDAT size: 2 (zlib header) + blocks + 4 (adler32)
-     * Each block: 1 (bfinal/btype) + 2 (len) + 2 (nlen) + payload */
-    size_t max_block = 65535;
-    size_t num_blocks = filtered_len / max_block + (filtered_len % max_block != 0);
-    if (num_blocks == 0) num_blocks = 1;
-    size_t idat_len = 2 + num_blocks * 5 + filtered_len + 4;
-    uint8_t *idat = zcl_malloc(idat_len, "png_idat");
-    if (!idat) { png_release_buffer(filtered); return NULL; }
-
-    bool emitted = png_emit_stored_idat(idat, idat_len, filtered,
-                                        filtered_len, adler);
-    png_release_buffer(filtered);
-    if (!emitted || (!empty_image && idat_len != layout_idat)) {
-        png_release_buffer(idat);
-        return NULL;
+#ifdef ZCL_PNG_USE_ZLIB
+    /* A compression failure is not a stored-block success: the caller sees
+     * refusal and its buffer is left untouched. */
+    if (!empty_image) {
+        uint8_t *compressed = png_compress_idat(filtered, filtered_len, out_len);
+        png_release_buffer(filtered);
+        return compressed;
     }
-    *out_len = idat_len;
-    return idat;
+#endif
+    return stored_idat(filtered, filtered_len, empty_image, layout_idat, out_len);
 }
 
 static bool png_encode_channels(
@@ -269,15 +296,36 @@ static bool png_encode_channels(
                             &expected_idat, &required))
         return false;
     *written = required;
+#ifndef ZCL_PNG_USE_ZLIB
     if (!output) return true;
     if (output_cap < required) return false;
+#endif
     size_t idat_len = 0;
     uint8_t *idat = build_idat_channels(
         pixels, width, height, channels, &idat_len);
-    if (!idat || idat_len != expected_idat) {
-        png_release_buffer(idat);
+    if (!idat) {
+        *written = 0;
         return false;
     }
+#ifdef ZCL_PNG_USE_ZLIB
+    if (idat_len > SIZE_MAX - 57u) {
+        png_release_buffer(idat);
+        *written = 0;
+        return false;
+    }
+    required = 57u + idat_len;
+    *written = required;
+    if (!output || output_cap < required) {
+        png_release_buffer(idat);
+        return !output;
+    }
+#else
+    if (idat_len != expected_idat) {
+        png_release_buffer(idat);
+        *written = 0;
+        return false;
+    }
+#endif
     static const uint8_t signature[8] = {137,80,78,71,13,10,26,10};
     uint8_t *cursor = output;
     memcpy(cursor, signature, sizeof(signature));
@@ -291,7 +339,9 @@ static bool png_encode_channels(
     encode_chunk(&cursor, "IDAT", idat, (uint32_t)idat_len);
     encode_chunk(&cursor, "IEND", NULL, 0u);
     png_release_buffer(idat);
-    return (size_t)(cursor - output) == required;
+    bool ok = (size_t)(cursor - output) == required;
+    if (!ok) *written = 0;
+    return ok;
 }
 
 /* ── Public API ─────────────────────────────────────────────── */

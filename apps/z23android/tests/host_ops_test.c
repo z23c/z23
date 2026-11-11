@@ -205,6 +205,7 @@ static void plugins_view(void)
     assert(n > 0 && (size_t)n < sizeof(large) - used);
     f.reply = large;
     ask(&ops, "plugins r1", 1000);
+    assert(strstr(field("text"), "\np0\n") && strstr(field("text"), "\np7\n"));
     assert(strstr(field("text"), "2 more not shown.") && !strstr(field("text"), "p8"));
     char *hidden = strstr(large, "\"name\":\"p8\"");
     assert(hidden);

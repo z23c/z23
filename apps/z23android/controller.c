@@ -405,8 +405,15 @@ static void observe_replay_status(bool responding, bool running, bool stopping, 
         zapp_nodelog_replay_text(replay, status, cap);
     if (stopping) copy_text(status, cap, "The node is saving its data before it exits.");
 }
-static void observe_node(struct controller *c)
+#ifdef ZAPP_CONTROLLER_TEST
+static int node_observations_for_test;
+#endif
+static void observe_node_work(struct controller *c)
 {
+#ifdef ZAPP_CONTROLLER_TEST
+    ++node_observations_for_test;
+    return;
+#endif
     if (observe_installer(c)) return;
     pthread_mutex_lock(&c->runtime.mutex);
     uint64_t status_epoch = c->runtime.start_epoch, install_generation = c->runtime.installer_generation;
@@ -477,6 +484,11 @@ static void observe_node(struct controller *c)
     refresh_suggestion(c);
     pthread_mutex_unlock(&c->lock);
     notify_view(c);
+}
+static void observe_node(struct controller *c)
+{
+    if (c->runtime.preview) return;
+    observe_node_work(c);
 }
 /* Caller holds c->lock. Shows the exchange first; only answers from the model join the history sent
  * with later questions and move the suggestion on to a follow-up. */
@@ -1243,7 +1255,7 @@ static void *worker(void *opaque)
     }
     return NULL;
 }
-/* Reads the node status on every step, and at once when watch_due is set. The notification is a screen while the app is
+/* Outside the node-free preview, reads the node status on every step and when watch_due is set. The notification is a screen while the app is
  * hidden, so the node is read then too. A read that hangs ends at its command limit and delays only the next read. */
 static void *watcher(void *opaque)
 {

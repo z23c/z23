@@ -11,10 +11,16 @@
 bool zapp_auth_random(unsigned char *out, size_t size)
 {
     for (size_t used = 0; used < size;) {
+#if defined(__APPLE__)
+        size_t chunk = size - used > 256 ? 256 : size - used;
+        if (getentropy(out + used, chunk) != 0) { memory_cleanse(out, size); return false; }
+        used += chunk;
+#else
         ssize_t n = getrandom(out + used, size - used, 0);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { memory_cleanse(out, size); return false; }
         used += (size_t)n;
+#endif
     }
     return true;
 }

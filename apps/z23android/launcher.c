@@ -126,13 +126,33 @@ static bool same_signature(JNIEnv *env, jobject manager, const char *own, const 
     jint result = b ? (*env)->CallIntMethod(env, manager, check, a, b) : -1;
     return zj_clean(env) && result == 0;
 }
+/* Reads an installed Z23 app's version without treating it as source identity. */
+static void resolve_version(JNIEnv *env, jobject manager, struct zapp_app_entry *entry)
+{
+    if (!entry->same_signature || (*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return; }
+    jstring package = (*env)->NewStringUTF(env, entry->package);
+    jmethodID get = package ? zj_method(env, manager, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;") : NULL;
+    jobject info = get ? (*env)->CallObjectMethod(env, manager, get, package, 0) : NULL;
+    jmethodID code = info ? zj_method(env, info, "getLongVersionCode", "()J") : NULL;
+    jlong value = code ? (*env)->CallLongMethod(env, info, code) : -1;
+    entry->version_code = (int64_t)value;
+    entry->version_known = zj_clean(env) && value >= 0;
+    if (entry->version_known) {
+        jclass cls = (*env)->GetObjectClass(env, info);
+        if (cls) (void)string_field(env, info, cls, "versionName", entry->version_name, sizeof(entry->version_name));
+    }
+    (*env)->PopLocalFrame(env, NULL);
+}
 static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *own, struct zapp_launcher_app *app)
 {
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); return false; }
     memset(app, 0, sizeof(*app));
     bool ok = resolve_names(env, info, &app->entry) && strcmp(app->entry.package, own);
     if (ok) resolve_label(env, info, manager, app->entry.package, app->entry.label, sizeof(app->entry.label));
-    if (ok && zapp_home_is_z23_app(app->entry.package)) app->entry.same_signature = same_signature(env, manager, own, app->entry.package);
+    if (ok && zapp_home_is_z23_app(app->entry.package)) {
+        app->entry.same_signature = same_signature(env, manager, own, app->entry.package);
+        resolve_version(env, manager, &app->entry);
+    }
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }

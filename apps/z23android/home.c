@@ -152,7 +152,20 @@ size_t zapp_home_app_card(const struct zapp_app_entry *app, char *out, size_t ca
     json_push_kv_str(&card, "label", app->label);
     json_push_kv_str(&card, "package", app->package);
     json_push_kv_str(&card, "activity", app->activity);
+    if (app->same_signature && zapp_home_is_z23_app(app->package) && app->version_known) {
+        json_push_kv_int(&card, "version_code", app->version_code);
+        if (app->version_name[0]) json_push_kv_str(&card, "version_name", app->version_name);
+    }
     return finish(&card, out, cap);
+}
+const char *zapp_home_version_line(const struct zapp_app_entry *app, char *out, size_t cap)
+{
+    if (!out || !cap) return NULL;
+    out[0] = 0;
+    if (!app || !app->same_signature || !app->version_known || !zapp_home_is_z23_app(app->package)) return out;
+    if (app->version_name[0]) snprintf(out, cap, "%s (%lld)", app->version_name, (long long)app->version_code);
+    else snprintf(out, cap, "%lld", (long long)app->version_code);
+    return out;
 }
 bool zapp_home_offer_jump(bool offer, bool on_scan_screen, bool *seen)
 {

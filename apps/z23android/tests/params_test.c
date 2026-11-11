@@ -1,4 +1,13 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#ifdef ZAPP_PARAMS_TEST_DIRECT_WRAP
+#undef fsync
+#undef write
+#undef pread
+#undef close
+#undef calloc
+#undef free
+#undef pthread_create
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include "params.h"
 #include "params_job.h"
@@ -17,7 +26,17 @@
 #include <unistd.h>
 
 /* Fault injection: the Nth flush fails, and writes fail once write_limit bytes went through. The first
- * flush after hold_fsync is armed blocks until released, which holds a worker in the middle of a copy. */
+ * flush after hold_fsync is armed blocks until released, which holds a worker in the middle of a copy.
+ * Darwin renames the calls in the code under test; GNU ld --wrap supplies __real_* instead. */
+#ifdef ZAPP_PARAMS_TEST_DIRECT_WRAP
+#define __real_fsync fsync
+#define __real_write write
+#define __real_pread pread
+#define __real_close close
+#define __real_calloc calloc
+#define __real_free free
+#define __real_pthread_create pthread_create
+#else
 int __real_fsync(int fd);
 ssize_t __real_write(int fd, const void *buf, size_t len);
 ssize_t __real_pread(int fd, void *buf, size_t len, off_t at);
@@ -25,6 +44,7 @@ int __real_close(int fd);
 void *__real_calloc(size_t n, size_t size);
 void __real_free(void *p);
 int __real_pthread_create(pthread_t *t, const pthread_attr_t *attr, void *(*fn)(void *), void *arg);
+#endif
 static int fsyncs, fail_fsync_at;
 static long long write_limit = -1;
 static atomic_int hold_fsync, in_fsync, release_fsync, fail_thread_start, reads, reads_without_cloexec;
@@ -349,8 +369,8 @@ static bool ready_text(enum zapp_proving node_says, const char *needle)
 static void idle_process_starts_once(void)
 {
     starts = 0; start_result = true;
-    assert(zapp_params_launch(count_start, NULL, files) && starts == 1);
-    assert(!zapp_params_launch(NULL, NULL, files) && starts == 1);
+    assert(zapp_params_launch(count_start, NULL, files, false, false) && starts == 1);
+    assert(!zapp_params_launch(NULL, NULL, files, false, false) && starts == 1);
     assert(ready_text(ZAPP_PROVING_ARMED, "were not installed") && stub_probe_calls == 0);
 }
 
@@ -359,7 +379,7 @@ static void copying_is_not_restarted(void)
     char why[300] = "";
     struct zapp_proving_probe node = {NULL, NULL};
     starts = 0; start_result = true;
-    assert(!zapp_params_launch(count_start, NULL, files) && starts == 0);
+    assert(!zapp_params_launch(count_start, NULL, files, false, false) && starts == 0);
     assert(!zapp_send_prover_ready(0, &node, why, sizeof(why)) && !strcmp(why, NOT_READY));
     assert(ready_text(ZAPP_PROVING_ARMED, "still being installed") && stub_probe_calls == 0);
 }
@@ -367,7 +387,7 @@ static void copying_is_not_restarted(void)
 static void verified_is_not_restarted_and_asks_the_node(void)
 {
     starts = 0; start_result = true;
-    assert(!zapp_params_launch(count_start, NULL, files) && starts == 0);
+    assert(!zapp_params_launch(count_start, NULL, files, false, false) && starts == 0);
     assert(ready_text(ZAPP_PROVING_ARMED, NULL) && stub_probe_calls == 1);
     assert(ready_text(ZAPP_PROVING_UNAVAILABLE, "cannot prove"));
     assert(ready_text(ZAPP_PROVING_UNKNOWN, "not confirmed"));
@@ -378,7 +398,7 @@ static void failed_says_why_and_may_start_again(void)
     starts = 0; start_result = true;
     assert(ready_text(ZAPP_PROVING_ARMED, "could not be installed") && ready_text(ZAPP_PROVING_ARMED, "hash"));
     assert(stub_probe_calls == 0);
-    assert(zapp_params_launch(count_start, NULL, files) && starts == 1);
+    assert(zapp_params_launch(count_start, NULL, files, false, false) && starts == 1);
 }
 
 static enum zapp_rpc_result rpc_answer;

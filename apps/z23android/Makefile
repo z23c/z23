@@ -32,6 +32,17 @@ PREVIEW_PARAMS ?= 0
 PACKAGE_PREVIEW ?= 0
 HOST_CC ?= cc
 HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
+ifeq ($(shell uname -s),Darwin)
+# Strict _POSIX_C_SOURCE hides O_NOFOLLOW on macOS; the host tests still refuse symlinks.
+HOST_WARNINGS += -D_DARWIN_C_SOURCE
+# macOS ld has no --wrap. Rename the same calls and let the test supply the real symbols.
+PARAMS_WRAP := -DZAPP_PARAMS_TEST_DIRECT_WRAP=1 -Dfsync=__wrap_fsync -Dwrite=__wrap_write \
+  -Dpread=__wrap_pread -Dclose=__wrap_close -Dcalloc=__wrap_calloc -Dfree=__wrap_free \
+  -Dpthread_create=__wrap_pthread_create
+else
+PARAMS_WRAP := -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=pread -Wl,--wrap=close \
+  -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=pthread_create
+endif
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
@@ -123,7 +134,7 @@ test-startup-auth:
 	  tests/startup_auth_test.c startup_auth.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/startup-auth-test'
 	'$(BUILD_DIR)/startup-auth-test'
 
-test: prepare-quirc test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access test-startup-auth
+test: prepare-quirc test-params-launch test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access test-camera-frame test-residue test-startup-auth
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -207,6 +218,19 @@ test-camera-access:
 	@grep -q 'zapp_camera_wait_goes_on(i, atomic_load(&camera_paused)' android_main.c || { echo 'the camera wait must end on the dialog result or when no dialog appears' >&2; exit 1; }
 	@grep -q 'zapp_camera_screen(ZAPP_CAMERA_GRANTED).hint' shell.c || { echo 'the scan screen must say what to point the camera at' >&2; exit 1; }
 
+.PHONY: test-camera-frame
+test-camera-frame: prepare-quirc
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -D_POSIX_C_SOURCE=200809L -pthread -ffunction-sections -Itests/camera_frame_fake -I. -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
+	  tests/camera_frame_test.c camera_access.c $(QUIRC_SOURCES) $(SCAN_CANCEL_GC) -lm -o '$(BUILD_DIR)/camera-frame-test'
+	'$(BUILD_DIR)/camera-frame-test'
+
+.PHONY: test-residue
+test-residue:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/residue_test.c -o '$(BUILD_DIR)/residue-test'
+	'$(BUILD_DIR)/residue-test'
+
 .PHONY: test-payment test-wallet
 test-payment:
 	@mkdir -p '$(BUILD_DIR)'
@@ -284,7 +308,8 @@ native: check-config prepare-quirc
 	cmake -S . -B '$(BUILD_DIR)/native' \
 	  -DCMAKE_TOOLCHAIN_FILE='$(ANDROID_NDK_ROOT)/build/cmake/android.toolchain.cmake' \
 	  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-$(ANDROID_API) \
-	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DZ23_DEVKEY_PROBE=$(DEVKEY_PROBE) -DZAPP_SHARE_FIXTURE=$(ZAPP_SHARE_FIXTURE) -DCMAKE_BUILD_TYPE=Release
+	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DZ23_DEVKEY_PROBE=$(DEVKEY_PROBE) -DZAPP_SHARE_FIXTURE=$(ZAPP_SHARE_FIXTURE) \
+	  -DZ23_PREVIEW_PARAMS=$(if $(filter 1,$(PACKAGE_PREVIEW)),$(if $(filter 1,$(PREVIEW_PARAMS)),ON,OFF),OFF) -DCMAKE_BUILD_TYPE=Release
 	cmake --build '$(BUILD_DIR)/native' --parallel 4
 
 .PHONY: check-signer-input check-signer-output
@@ -334,6 +359,13 @@ launch:
 	'$(ADB)' -s '$(ANDROID_SERIAL)' shell am start -n '$(APP_ID)/android.app.NativeActivity'
 
 HOST_TEST_BASE := $(SPEECH_JSON) ../../platform/modules/sha3/src/sha3.c
+.PHONY: test-params-launch
+test-params-launch:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include -I../../platform/modules/base/include \
+	  tests/params_launch_test.c params_job.c params.c $(SPEECH_JSON) -o '$(BUILD_DIR)/params-launch-test'
+	'$(BUILD_DIR)/params-launch-test'
+
 test-host:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) tests/surface_test.c -o '$(BUILD_DIR)/surface-test'
@@ -342,7 +374,7 @@ test-host:
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zsha256/include tests/params_test.c params.c params_install.c params_job.c \
 	  -I../../platform/modules/json/include -I../../platform/modules/base/include ../../platform/modules/json/src/json.c \
 	  ../../platform/modules/base/src/safe_alloc.c ../../platform/modules/base/src/cleanse.c \
-	  ../../contexts/commons/packages/zsha256/src/zsha256.c -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=pread -Wl,--wrap=close -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=pthread_create -pthread -o '$(BUILD_DIR)/params-test'
+	  ../../contexts/commons/packages/zsha256/src/zsha256.c $(PARAMS_WRAP) -pthread -o '$(BUILD_DIR)/params-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/params-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/params-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c private.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
@@ -513,11 +545,25 @@ test-setup-native: build-setup-native
 	@test -x '$(NODE_BIN)' || { echo 'Set NODE_BIN to the reviewed host node' >&2; exit 1; }
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/setup-native.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/setup-native-test' "$$(cd "$$scratch" && pwd)" '$(abspath $(NODE_BIN))'
-.PHONY: test-game
-test-game:
+.PHONY: test-game test-game-png
+test-game: test-game-png
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -fsyntax-only bridge/speech_main.c
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/game_host_test.c bridge/game_host.c ../../contexts/commons/packages/zsha256/src/zsha256.c -o '$(BUILD_DIR)/game-host-test'
 	'$(BUILD_DIR)/game-host-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/game_test.c $(SPEECH_JSON) -lm -o '$(BUILD_DIR)/game-test'
 	'$(BUILD_DIR)/game-test'
+
+ifeq ($(shell uname -s),Darwin)
+PNG_FAULT_INJECT := -DZCL_PNG_TEST_DIRECT_COMPRESS2=1 -Dcompress2=png_fault_compress2
+else
+PNG_FAULT_INJECT := -Wl,--wrap=compress2
+endif
+test-game-png:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -DZCL_PNG_USE_ZLIB=1 -I../../platform/modules/base/include -I../../platform/modules/util/include \
+	  tests/game_png_test.c ../../platform/modules/util/src/png_writer.c ../../platform/modules/base/src/safe_alloc.c -lz -o '$(BUILD_DIR)/game-png-test'
+	'$(BUILD_DIR)/game-png-test'
+	$(HOST_CC) $(HOST_WARNINGS) -DZCL_PNG_USE_ZLIB=1 -I../../platform/modules/base/include -I../../platform/modules/util/include \
+	  tests/game_png_fault_test.c ../../platform/modules/util/src/png_writer.c ../../platform/modules/base/src/safe_alloc.c $(PNG_FAULT_INJECT) -lz -o '$(BUILD_DIR)/game-png-fault-test'
+	'$(BUILD_DIR)/game-png-fault-test'

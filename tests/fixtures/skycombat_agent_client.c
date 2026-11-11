@@ -145,7 +145,7 @@ static bool decode_stored(const unsigned char *input, size_t size,
         position += length;
     }
     return used == expected && position == size - 4 &&
-        big_endian(input + position) == adler32(output, used);
+        big_endian(input + position) == png_adler32(output, used);
 }
 
 static bool png_chunk(const unsigned char *bytes, size_t size, size_t *position,

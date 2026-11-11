@@ -91,8 +91,10 @@ bool zapp_params_job_start_set(const struct zapp_param_file *set, size_t count, 
     return false;
 }
 
-bool zapp_params_launch(zapp_params_start_fn start, void *ctx, const char *files)
+bool zapp_params_launch(zapp_params_start_fn start, void *ctx, const char *files,
+                        bool preview, bool preview_params)
 {
+    if (preview && !preview_params) return false;
     enum zapp_params_state now = zapp_params_job_state(NULL, 0);
     if (!start || now == ZAPP_PARAMS_COPYING || now == ZAPP_PARAMS_VERIFIED) return false;
     return start(ctx, files);

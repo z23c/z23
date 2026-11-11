@@ -31,9 +31,12 @@ bool zapp_params_job_start_set(const struct zapp_param_file *set, size_t count, 
 /* Starts a copy at launch through start (zapp_params_prepare_async in the app), unless this process
  * already has one running or has already verified the files: those two cases return false without
  * calling start, so a second activity of the same process neither opens the package again nor reads the
- * 51.6 MB a second time. An idle or failed state starts one. Returns what start returned. */
+ * 51.6 MB a second time. An idle or failed state starts one. A preview without packaged parameters
+ * returns false without calling start; preview_params preserves the intentional packaged-preview test.
+ * Returns what start returned. */
 typedef bool (*zapp_params_start_fn)(void *ctx, const char *files);
-bool zapp_params_launch(zapp_params_start_fn start, void *ctx, const char *files);
+bool zapp_params_launch(zapp_params_start_fn start, void *ctx, const char *files,
+                        bool preview, bool preview_params);
 
 /* Whether a shielded send may be built now, with the plain reason in why when not. While the copy
  * runs it says so; after a failed or missing copy it says that; once the files are verified it is

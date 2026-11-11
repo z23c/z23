@@ -18,6 +18,23 @@
 #include <unistd.h>
 
 #define WIRE_CAP 2097152
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+static int stream_socket(void)
+{
+#if defined(__APPLE__)
+    int fd = socket(AF_INET, SOCK_STREAM, 0), nosig = 1;
+    if (fd < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || fcntl(fd, F_SETFL, O_NONBLOCK) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig)) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    return fd;
+#else
+    return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+#endif
+}
 static int64_t now_ms(void)
 {
     struct timespec now;
@@ -100,7 +117,7 @@ static int descriptor(const char *files, const char *name, uint16_t *port, char 
 static int connect_local(uint16_t port, int64_t deadline, const atomic_bool *cancel)
 {
     if (cancelled(cancel)) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    int fd = stream_socket();
     if (fd < 0) return -1;
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     int rc = connect(fd, (struct sockaddr *)&address, sizeof(address));

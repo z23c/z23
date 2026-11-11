@@ -190,10 +190,22 @@ bool zapp_fleet_row(const char *label, const char *output, int64_t elapsed_ms, s
     output_value(output, "disk_kb", disk, sizeof(disk));
     return ok && push_load(row, uptime) && push_disk(row, disk) && push_onion(row, output);
 }
+static bool cloexec_pipe(int pipefd[2])
+{
+#if defined(__APPLE__)
+    if (pipe(pipefd) != 0) return false;
+    if (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == 0) return true;
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return false;
+#else
+    return pipe2(pipefd, O_CLOEXEC) == 0;
+#endif
+}
 static bool spawn(const struct zapp_fleet_host *host, const char *command, struct probe *p)
 {
     int pipefd[2];
-    if (pipe2(pipefd, O_CLOEXEC)) return false;
+    if (!cloexec_pipe(pipefd)) return false;
     char *argv[] = {"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-T", "--",
         (char *)host->destination, (char *)command, NULL};
     p->pid = fork();
