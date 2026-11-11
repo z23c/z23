@@ -2712,6 +2712,25 @@ static bool sqlite_test_small_ram_seam(void)
     return ok;
 }
 
+/* A hard cap below memory.high must still constrain every DB budget. */
+static bool sqlite_test_hard_cap_below_high(void)
+{
+    struct os_proc_mem mem = {
+        .cgroup_high = 8LL * 1024 * 1024 * 1024,
+        .cgroup_max = 2LL * 1024 * 1024 * 1024,
+    };
+    os_proc_mem_set_override(&mem);
+    node_db_test_set_host_ram(64LL * 1024 * 1024 * 1024);
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:") &&
+              sqlite_test_cache_pages(&ndb) == -(16 * 1024) &&
+              sqlite_test_turbo_cache(&ndb, 64 * 1024) &&
+              node_db_recommended_mmap_bytes() == 0;
+    if (ndb.open) node_db_close(&ndb);
+    node_db_test_clear_host_ram();
+    return ok;
+}
+
 /* Unreadable RAM (ram <= 0) takes the constrained turbo size; 4 GiB is the
  * last constrained size and one byte above it is the server size. */
 static bool sqlite_test_unreadable_ram_turbo(void)
@@ -2753,6 +2772,7 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
     node_db_test_clear_host_ram();
     ok = ok && sqlite_test_server_turbo_cache();
     ok = ok && sqlite_test_small_ram_seam();
+    ok = ok && sqlite_test_hard_cap_below_high();
     ok = ok && sqlite_test_unreadable_ram_turbo();
     os_proc_mem_set_override(NULL);
     if (ok) printf("OK (cache=%lld mmap=0)\n",
@@ -4805,9 +4825,10 @@ static int64_t sqlite_test_expected_cache_kib(void)
     int64_t effective_ram = hw_profile_ram_bytes();
     struct os_proc_mem mem;
     if (os_proc_mem_read(&mem)) {
-        int64_t cap = mem.cgroup_high > 0 ? mem.cgroup_high : mem.cgroup_max;
-        if (cap > 0 && (effective_ram <= 0 || cap < effective_ram))
-            effective_ram = cap;
+        if (mem.cgroup_high > 0 && (effective_ram <= 0 || mem.cgroup_high < effective_ram))
+            effective_ram = mem.cgroup_high;
+        if (mem.cgroup_max > 0 && (effective_ram <= 0 || mem.cgroup_max < effective_ram))
+            effective_ram = mem.cgroup_max;
     }
     /* The proof scheduler can impose a smaller cgroup than host RAM.
      * The live DB's 16 MiB ceiling is mandatory at or below 4 GiB. */

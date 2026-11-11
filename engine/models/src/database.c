@@ -458,9 +458,10 @@ static int64_t db_effective_ram_bytes(void)
     struct os_proc_mem mem;
     if (!os_proc_mem_read(&mem))
         return ram;
-    int64_t cap = mem.cgroup_high > 0 ? mem.cgroup_high : mem.cgroup_max;
-    if (cap > 0 && (ram <= 0 || cap < ram))
-        ram = cap;
+    if (mem.cgroup_high > 0 && (ram <= 0 || mem.cgroup_high < ram))
+        ram = mem.cgroup_high;
+    if (mem.cgroup_max > 0 && (ram <= 0 || mem.cgroup_max < ram))
+        ram = mem.cgroup_max;
     return ram;
 }
 
