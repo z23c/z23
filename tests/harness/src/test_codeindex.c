@@ -42,6 +42,7 @@
 #include "crypto/sha256.h"
 #include "util/file_io.h"
 #include "vcs/vcs_manifest.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 
 #include <sqlite3.h>
 
@@ -3410,9 +3411,126 @@ static bool ci_restart_inputs(const char *repo, const char *workspace,
         root && root[0] && ci_measure_restart(repo, workspace, requests, root);
 }
 
+#if !defined(_WIN32)
+static int ci_include_authorize(void *context, int action, const char *one,
+                                const char *two, const char *db, const char *trigger)
+{
+    (void)two; (void)db; (void)trigger;
+    if (action == SQLITE_INSERT && one && !strcmp(one, "includes")) (*(int *)context)++;
+    return SQLITE_OK;
+}
+
+static bool ci_include_rows(sqlite3 *db, const char *expected)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT group_concat(item, ',') FROM "
+        "(SELECT file_id || ':' || dep_path AS item FROM includes ORDER BY file_id, dep_path)";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW; // raw-sql-ok:codeindex-derived
+    const unsigned char *text = ok ? sqlite3_column_text(stmt, 0) : NULL;
+    ok = text && !strcmp((const char *)text, expected);
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
+}
+
+static int ci_include_transaction_tests(struct ci_store *store)
+{
+    int failures = 0, prepares = 0;
+    sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_include_authorize, &prepares) == SQLITE_OK;
+    bool begun = setup && ci_store_begin(store);
+    bool a = begun && ci_store_put_include(store, 1, "a.h");
+    bool b = begun && ci_store_put_include(store, 1, "b.h");
+    bool duplicate = begun && ci_store_put_include(store, 1, "a.h");
+    bool other = begun && ci_store_put_include(store, 2, "a.h");
+    int prepares_in_tx = prepares;
+    printf("  codeindex: include insert prepare authorizations=%d\n", prepares_in_tx);
+    bool committed = begun && ci_store_commit(store);
+    CI_CHECK("include transaction writes distinct pairs and ignores duplicates",
+             a && b && duplicate && other && committed && ci_include_rows(db, "1:a.h,1:b.h,2:a.h"));
+    CI_CHECK("include transaction reuses one prepared insert", prepares_in_tx == 1);
+    CI_CHECK("include commit finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    (void)sqlite3_set_authorizer(db, NULL, NULL);
+    return failures;
+}
+
+static int ci_include_rollback_tests(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    bool second = ci_store_begin(store);
+    bool rolled_write = second && ci_store_put_include(store, 3, "rolled.h");
+    bool rolled = second && ci_store_rollback(store);
+    CI_CHECK("include rollback leaves committed graph unchanged",
+             rolled_write && rolled && ci_include_rows(db, "1:a.h,1:b.h,2:a.h"));
+    CI_CHECK("include rollback finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    bool standalone = ci_store_put_include(store, 4, "standalone.h");
+    CI_CHECK("include standalone insert survives outside transaction",
+             standalone && ci_include_rows(db, "1:a.h,1:b.h,2:a.h,4:standalone.h"));
+    CI_CHECK("include standalone finalizes statement", sqlite3_next_stmt(db, NULL) == NULL);
+    return failures;
+}
+
+static int ci_include_bind_tests(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    char long_path[513]; memset(long_path, 'x', sizeof(long_path) - 1); long_path[512] = 0;
+    bool limited = ci_store_begin(store);
+    bool warm = limited && ci_store_put_include(store, 5, "warm.h");
+    int old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 128);
+    bool refused = limited && !ci_store_put_include(store, 5, long_path);
+    (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
+    bool recovered = limited && ci_store_put_include(store, 5, "after.h");
+    bool last_commit = limited && ci_store_commit(store);
+    bool rows = ci_include_rows(db, "1:a.h,1:b.h,2:a.h,4:standalone.h,5:after.h,5:warm.h");
+    printf("  codeindex: include bind warm=%d refused=%d recovered=%d commit=%d rows=%d\n",
+           warm, refused, recovered, last_commit, rows);
+    CI_CHECK("include warm insertion succeeds", warm);
+    CI_CHECK("include over-limit bind is refused", refused);
+    CI_CHECK("include after failed bind succeeds", recovered);
+    CI_CHECK("include bind transaction commits", last_commit);
+    CI_CHECK("include bind recovery preserves exact graph", rows);
+    CI_CHECK("include bind commit finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    return failures;
+}
+
+static int ci_include_step_tests(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    const char *trigger = "CREATE TRIGGER include_reject BEFORE INSERT ON includes "
+        "WHEN NEW.dep_path='reject.h' BEGIN SELECT RAISE(ABORT,'fixture'); END";
+    bool setup = sqlite3_exec(db, trigger, NULL, NULL, NULL) == SQLITE_OK;
+    bool begun = setup && ci_store_begin(store);
+    bool refused = begun && !ci_store_put_include(store, 6, "reject.h");
+    bool recovered = begun && ci_store_put_include(store, 6, "accepted.h");
+    bool committed = begun && ci_store_commit(store);
+    CI_CHECK("include step failure refuses and next row succeeds", refused && recovered && committed);
+    CI_CHECK("include step recovery preserves exact graph", ci_include_rows(db,
+        "1:a.h,1:b.h,2:a.h,4:standalone.h,5:after.h,5:warm.h,6:accepted.h"));
+    CI_CHECK("include step commit finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    return failures;
+}
+
+static int ci_include_insert_tests(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: include fixture... FAIL\n"); return 1; }
+    int failures = ci_include_transaction_tests(store);
+    failures += ci_include_rollback_tests(store);
+    failures += ci_include_bind_tests(store);
+    failures += ci_include_step_tests(store);
+    ci_store_close(store);
+    return failures;
+}
+#endif
+
 int test_codeindex(void)
 {
     int failures = test_codeindex_platform_arm();
+#if !defined(_WIN32)
+    failures += ci_include_insert_tests();
+#endif
 #if defined(__linux__) || defined(__APPLE__)
     failures += ci_restart_environment_tests();
     failures += ci_restart_child_environment_tests();
