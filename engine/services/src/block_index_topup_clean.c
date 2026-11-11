@@ -197,10 +197,14 @@ int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
 
 void topup_clean_record(struct main_state *ms, struct node_db *ndb,
                                const uint8_t anchor[32], int lo,
-                               int coins_best, bool fold_was_noop, bool verified)
+                               int coins_best, bool fold_was_noop, bool verified,
+                               int verified_to)
 {
     if (!fold_was_noop && verified) return;
     const int clean_to = coins_best - NODE_DB_TOPUP_CLEAN_MARGIN;
+    /* The same transaction and cs_main protect verification and the no-op
+     * fold. The existing mark already binds exactly this unchanged prefix. */
+    if (fold_was_noop && verified && verified_to == clean_to) return;
     struct topup_clean_mark m;
     memset(&m, 0, sizeof(m));
     if (!fold_was_noop || clean_to < lo ||

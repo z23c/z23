@@ -11,5 +11,5 @@ int topup_clean_resume(struct main_state *ms, struct node_db *ndb,
                        bool *verified);
 void topup_clean_record(struct main_state *ms, struct node_db *ndb,
                         const uint8_t anchor[32], int lo, int coins_best,
-                        bool fold_was_noop, bool verified);
+                        bool fold_was_noop, bool verified, int verified_to);
 #endif

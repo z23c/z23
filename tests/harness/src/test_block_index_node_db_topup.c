@@ -1060,6 +1060,30 @@ static bool ndt_clean_topup(struct main_state *ms, struct node_db *ndb,
     return ok;
 }
 
+struct ndt_scan_observation { unsigned range_scans; int writes; };
+static int ndt_trace_scan(unsigned event, void *context, void *stmt, void *unused)
+{
+    (void)unused;
+    struct ndt_scan_observation *o = context;
+    const char *sql = event == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
+    if (sql && strstr(sql, "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx") &&
+        strstr(sql, "FROM blocks WHERE height BETWEEN")) ++o->range_scans;
+    return 0;
+}
+static bool ndt_observed_topup(struct main_state *ms, struct node_db *ndb,
+    sqlite3 *progress, const char *dir, size_t *rows, struct ndt_scan_observation *o)
+{
+    memset(o, 0, sizeof(*o));
+    int before = sqlite3_total_changes(ndb->db);
+    if (sqlite3_trace_v2(ndb->db, SQLITE_TRACE_STMT, ndt_trace_scan, o) != SQLITE_OK) return false;
+    bool ok = ndt_clean_topup(ms, ndb, progress, dir, false, rows);
+    if (sqlite3_trace_v2(ndb->db, 0, NULL, NULL) != SQLITE_OK) ok = false;
+    o->writes = sqlite3_total_changes(ndb->db) - before;
+    printf("block_index_node_db_topup: observed range_scans=%u writes=%d\n",
+           o->range_scans, o->writes);
+    return ok;
+}
+
 static bool ndt_clean_acceptance_logged(const char *dir)
 {
     char path[320], line[1024], expected[128];
@@ -1075,6 +1099,23 @@ static bool ndt_clean_acceptance_logged(const char *dir)
         if (strstr(line, expected)) found = true;
     fclose(fp);
     return found;
+}
+
+static int ndt_clean_warm_observe(struct main_state *ms, struct node_db *ndb,
+    sqlite3 *progress, const char *dir, size_t cold, size_t noop)
+{
+    int failures = 0; size_t rows = 0;
+    struct ndt_scan_observation warm = {0};
+    NDT_CHECK("clean: warm fold ok",
+              ndt_observed_topup(ms, ndb, progress, dir, &rows, &warm));
+    NDT_CHECK("clean: verified prefix is measured once and mark is retained",
+              warm.range_scans == 2 && warm.writes == 0);
+    NDT_CHECK("clean: verified resume is logged", ndt_clean_acceptance_logged(dir));
+    printf("block_index_node_db_topup: clean prefix rows read: "
+           "cold=%zu noop=%zu warm=%zu\n", cold, noop, rows);
+    NDT_CHECK("clean: warm fold read only the tip region",
+              rows > 0 && rows <= NDT_CLEAN_MARGIN);
+    return failures;
 }
 
 static int ndt_clean_prefix_cases(const char *dir)
@@ -1099,7 +1140,7 @@ static int ndt_clean_prefix_cases(const char *dir)
             ndt_insert_entry(&b, NDT_CLEAN_SEED) &&
             ndt_insert_entry(&c, NDT_CLEAN_SEED);
     const size_t window = NDT_CLEAN_BEST - NDT_CLEAN_SEED;
-    size_t r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, ro = 0;
+    size_t r1 = 0, r2 = 0, r4 = 0, r5 = 0, r6 = 0, ro = 0;
     if (ready) {
         /* Cold: inserts the window (not a no-op, so no mark yet). */
         NDT_CHECK("clean: cold fold ok",
@@ -1109,15 +1150,8 @@ static int ndt_clean_prefix_cases(const char *dir)
         NDT_CHECK("clean: no-op fold ok",
                   ndt_clean_topup(&a, &ndb, progress, dir, false, &r2));
         NDT_CHECK("clean: no-op fold read the whole window", r2 == window);
-        /* Third: the prefix re-verifies; only the tip region is read. */
-        NDT_CHECK("clean: warm fold ok",
-                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r3));
-        NDT_CHECK("clean: verified resume is logged",
-                  ndt_clean_acceptance_logged(dir));
-        printf("block_index_node_db_topup: clean prefix rows read: "
-               "cold=%zu noop=%zu warm=%zu\n", r1, r2, r3);
-        NDT_CHECK("clean: warm fold read only the tip region",
-                  r3 > 0 && r3 <= NDT_CLEAN_MARGIN);
+        /* Third: the prefix re-verifies; only the tip region is folded. */
+        failures += ndt_clean_warm_observe(&a, &ndb, progress, dir, r1, r2);
         /* The map the resumed fold leaves is the full fold's map. */
         NDT_CHECK("clean: oracle full fold ok",
                   ndt_clean_topup(&b, &ndb, progress, dir, true, &ro));
@@ -1334,8 +1368,12 @@ static int ndt_tail_advance_cases(const char *dir, bool prefix_change)
         NDT_CHECK("tail advance: new tail was inserted",
                   block_map_find(&actual.map_block_index, &last_hash) != NULL);
         if (prefix_change) failures += ndt_tail_change_prefix(&ndb);
+        struct ndt_scan_observation advance = {0};
         NDT_CHECK("tail advance: next fold succeeds",
-                  ndt_clean_topup(&actual, &ndb, progress, dir, false, &rows));
+                  ndt_observed_topup(&actual, &ndb, progress, dir, &rows, &advance));
+        if (!prefix_change)
+            NDT_CHECK("tail advance: expanded prefix is measured and stored",
+                      advance.range_scans == 3 && advance.writes > 0);
         printf("block_index_node_db_topup: tail advance next rows=%zu\n", rows);
         if (prefix_change)
             failures += ndt_tail_verify_prefix(&actual, rows);

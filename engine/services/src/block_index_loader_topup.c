@@ -1258,7 +1258,8 @@ static bool node_db_topup_locked(struct main_state *ms, struct node_db *ndb,
                ntx_applied,
                valid_raised, height_conflicts, missing_rows);
     }
-    topup_clean_record(ms, ndb, anchor_hash, lo, coins_best, fold_was_noop, verified);
+    topup_clean_record(ms, ndb, anchor_hash, lo, coins_best, fold_was_noop,
+                       verified, verified ? fold_from - 1 : 0);
     (void)datadir;  /* reserved for a future on-disk re-verify pass */
     return true;
 }
