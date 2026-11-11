@@ -563,6 +563,7 @@ static bool hgt_file_equal(const char *path, const unsigned char *before, size_t
 struct hgt_script_fixture {
     char repo[HGT_PATH], pool[HGT_PATH], wt[HGT_PATH], gitdir[HGT_PATH];
     char index[HGT_PATH], objects[HGT_PATH], scratch[HGT_PATH];
+    char guard[HGT_PATH], guard_log[HGT_PATH];
     char before_list[HGT_OUT];
     unsigned char before_index[8192];
     size_t index_size;
@@ -575,7 +576,25 @@ static bool hgt_script_paths(struct hgt_script_fixture *f, const char *tmp)
         snprintf(f->gitdir, sizeof f->gitdir, "%s/.git", f->repo) < (int)sizeof f->gitdir &&
         snprintf(f->index, sizeof f->index, "%s/index", f->gitdir) < (int)sizeof f->index &&
         snprintf(f->objects, sizeof f->objects, "%s/objects", f->gitdir) < (int)sizeof f->objects &&
-        snprintf(f->scratch, sizeof f->scratch, "%s/script-scratch", tmp) < (int)sizeof f->scratch;
+        snprintf(f->scratch, sizeof f->scratch, "%s/script-scratch", tmp) < (int)sizeof f->scratch &&
+        snprintf(f->guard, sizeof f->guard, "%s/delegate-guard", tmp) < (int)sizeof f->guard &&
+        snprintf(f->guard_log, sizeof f->guard_log, "%s/delegate-guard.log", tmp) < (int)sizeof f->guard_log;
+}
+
+static bool hgt_script_guard(const struct hgt_script_fixture *f)
+{
+    FILE *src = fopen("tools/scripts/worktree_gc.sh", "r");
+    FILE *dst = fopen(f->guard, "w");
+    char line[2048]; bool found = false, ok = src && dst;
+    if (ok && fputs("#!/bin/sh\nprintf 'called\\n' >> \"$HGT_DELEGATE_GUARD\"\nexit 0\n", dst) == EOF) ok = false;
+    while (ok && fgets(line, sizeof line, src)) {
+        if (strncmp(line, "PROTECTED_NAMES=\"", 17)) continue;
+        found = fputs(line, dst) != EOF;
+        break;
+    }
+    if (src && fclose(src)) ok = false;
+    if (dst && fclose(dst)) ok = false;
+    return ok && found && chmod(f->guard, 0700) == 0;
 }
 
 static bool hgt_script_worktree_intact(const struct hgt_script_fixture *f)
@@ -596,7 +615,8 @@ static bool hgt_script_prepare(struct hgt_script_fixture *f, const char *tmp)
     if (!hgt_script_paths(f, tmp) || !hgt_make_repo(f->repo) ||
         mkdir(f->pool, 0700) || mkdir(f->scratch, 0700) ||
         !hgt_add_gen(f->repo, f->pool, "foreign-wt", f->wt, sizeof f->wt) ||
-        !hgt_out(f->repo, list, f->before_list, sizeof f->before_list)) return false;
+        !hgt_out(f->repo, list, f->before_list, sizeof f->before_list) ||
+        !hgt_script_guard(f)) return false;
     FILE *index = fopen(f->index, "rb");
     if (!index) return false;
     f->index_size = fread(f->before_index, 1, sizeof f->before_index, index);
@@ -614,20 +634,46 @@ static bool hgt_script_run(void)
     return ok;
 }
 
+static const char *const hgt_script_vars[] = { "TMPDIR", "ZCL_HOST_GC_WORKTREE_GC", "HGT_DELEGATE_GUARD" };
+struct hgt_script_env { char *saved[3]; bool present[3]; size_t captured; };
+
+static bool hgt_script_env_save(struct hgt_script_env *saved)
+{
+    for (size_t i = 0; i < 3; ++i) {
+        const char *value = getenv(hgt_script_vars[i]);
+        saved->present[i] = value != NULL;
+        if (value && !(saved->saved[i] = strdup(value))) return false;
+        ++saved->captured;
+    }
+    return true;
+}
+
+static bool hgt_script_env_restore(struct hgt_script_env *saved)
+{
+    bool ok = true;
+    for (size_t i = 0; i < saved->captured; ++i) {
+        if (saved->present[i] && saved->saved[i]) {
+            if (setenv(hgt_script_vars[i], saved->saved[i], 1)) ok = false;
+        } else if (!saved->present[i] && unsetenv(hgt_script_vars[i])) ok = false;
+        free(saved->saved[i]);
+    }
+    return ok;
+}
+
 static bool hgt_script_redirected(const struct hgt_script_fixture *f)
 {
-    const char *old_tmp = getenv("TMPDIR");
-    char *saved_tmp = old_tmp ? strdup(old_tmp) : NULL;
-    if (old_tmp && !saved_tmp) return false;
+    struct hgt_script_env saved = {0};
+    if (!hgt_script_env_save(&saved)) { (void)hgt_script_env_restore(&saved); return false; }
     const char *values[] = {f->gitdir, f->gitdir, f->repo, f->index, f->objects, f->objects};
-    bool ok = setenv("TMPDIR", f->scratch, 1) == 0;
+    bool ok = setenv("TMPDIR", f->scratch, 1) == 0 &&
+        setenv("ZCL_HOST_GC_WORKTREE_GC", f->guard, 1) == 0 &&
+        setenv("HGT_DELEGATE_GUARD", f->guard_log, 1) == 0;
     for (size_t i = 0; i < 6; ++i)
         if (setenv(hgt_git_vars[i], values[i], 1)) ok = false;
     if (ok) ok = hgt_script_run();
     for (size_t i = 0; i < 6; ++i) if (unsetenv(hgt_git_vars[i])) ok = false;
-    if (saved_tmp) { if (setenv("TMPDIR", saved_tmp, 1)) ok = false; }
-    else if (unsetenv("TMPDIR")) ok = false;
-    free(saved_tmp);
+    if (!hgt_script_env_restore(&saved)) ok = false;
+    if (hgt_exists(f->guard_log)) { fprintf(stderr, "host gc selftest invoked inherited delegate guard\n"); ok = false; }
     return ok;
 }
 

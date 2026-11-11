@@ -50,6 +50,24 @@ Z23P_FX="$HOME_FX/github/.z23p"
 RAM_FX="$WORK/shm/z23p"
 Z23_STUB="$WORK/z23-stub"
 Z23_STUB_CALLS="$WORK/z23-stub-calls.log"
+WORKTREE_STUB="$WORK/worktree-gc-stub"
+WORKTREE_CALLS="$WORK/worktree-gc-calls.log"
+
+# host_gc reads this metadata for its protected-lane classifier. Copy the
+# authoritative assignment as data; do not execute the real delegate.
+protected_line="$(sed -n '/^PROTECTED_NAMES="[^"]*"$/p' "$SELF_DIR/worktree_gc.sh")"
+[ "$(printf '%s\n' "$protected_line" | wc -l | tr -d '[:space:]')" = 1 ] &&
+    [ -n "$protected_line" ] || { echo "host_gc_selftest: protected names unavailable" >&2; exit 2; }
+{
+    printf '#!/bin/sh\n'
+    cat <<'STUBEOF'
+printf '%s:%s\n' "$#" "$*" >> "$HGT_WORKTREE_CALLS"
+exit 0
+STUBEOF
+    printf '%s\n' "$protected_line"
+} > "$WORKTREE_STUB"
+chmod +x "$WORKTREE_STUB"
+: > "$WORKTREE_CALLS"
 
 mkdir -p -- "$TMP_FX" "$PROC_FX" "$STATE_FX" "$UNITS_FX" "$LANES_FX" \
     "$TRAINS_FX" "$SCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX"
@@ -147,6 +165,8 @@ run_hostgc() {
         ZCL_HOST_GC_Z23P="$Z23P_FX" \
         ZCL_HOST_GC_RAM_ROOT="$RAM_FX" \
         ZCL_HOST_GC_Z23_BIN="${ZCL_HOST_GC_Z23_BIN:-$Z23_STUB}" \
+        ZCL_HOST_GC_WORKTREE_GC="$WORKTREE_STUB" \
+        HGT_WORKTREE_CALLS="$WORKTREE_CALLS" \
         Z23_STUB_CALL_LOG="$Z23_STUB_CALLS" \
         ZCL_HOST_GC_UNITS_MIN_AGE_H=0 \
         ZCL_HOST_GC_SCRATCH_MIN_AGE_D=0 \
@@ -777,11 +797,18 @@ n="$(wc -l < "$DEV_STUB_CALLS" | tr -d '[:space:]')"
     || fail "lowdisk posted $n times inside its rate-limit window"
 
 # ----------------------------------------------------------------- pressure
+: > "$WORKTREE_CALLS"
 out="$(ZCL_HOST_GC_PRESSURE_MIN_FREE_PCT=101 ZCL_HOST_GC_PRESSURE_CRITICAL_FREE_PCT=101 \
     run_hostgc worktree dry-run)"
 assert_contains "$out" "PRESSURE" "an impossible pressure floor is always reported"
 assert_contains "$out" "CRITICAL" "an impossible critical floor is always reported"
 assert_contains "$out" "largest dirs under" "critical pressure names the largest directories"
+[ "$(cat -- "$WORKTREE_CALLS")" = "0:" ] && pass "worktree dry-run delegates once without arguments" \
+    || fail "worktree dry-run did not delegate exactly once without arguments"
+: > "$WORKTREE_CALLS"
+out="$(run_hostgc worktree apply)"
+[ "$(cat -- "$WORKTREE_CALLS")" = "1:--apply" ] && pass "worktree apply delegates once with apply" \
+    || fail "worktree apply did not delegate exactly once with apply"
 
 # --------------------------------------------------------------- protection
 out="$(env ZCL_HOST_GC_HOME="$HOME_FX" ZCL_HOST_GC_REPO="$REPO_FX" \
