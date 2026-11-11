@@ -81,6 +81,8 @@ struct fmd_run_ctx {
 /* No heap anywhere in this gate: the measurement lives in one static
  * instance (the tool is single-threaded and measures once per process). */
 static struct fmd_meas g_fmd_meas;
+static struct fmd_meas g_fmd_synthetic;
+int fmd_selftest_measured(const char *root, struct fmd_meas *m);
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -177,7 +179,9 @@ static int fmd_compile(const char *src, const char *obj, const char *opt,
     while (waitpid(pid, &st, 0) < 0)
         if (errno != EINTR)
             return -1; /* unobserved: an error, never a clean compile */
-    return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : 1;
+    if (!WIFEXITED(st) || WEXITSTATUS(st) == 126 || WEXITSTATUS(st) == 127)
+        return -1;
+    return WEXITSTATUS(st) == 0 ? 0 : 1;
 }
 
 /* True when code contains `name` as a whole word followed by optional
@@ -248,8 +252,11 @@ static int fmd_probe_one(const char *work, const char *fn,
         return 2;
     int rc0 = fmd_compile(src, pobj, "-O0", cc);
     int rc2 = fmd_compile(src, pobj, "-O2", cc);
-    if (rc0 < 0 || rc2 < 0)
+    if (rc0 < 0 || rc2 < 0) {
+        fprintf(stderr, "%s: compiler invocation failed while probing %s (O0=%d O2=%d)\n",
+                k_fmd_gate, fn, rc0, rc2);
         return 2;
+    }
     *masked = (rc0 != 0 && rc2 == 0);
     return 0;
 }
@@ -300,7 +307,24 @@ int fmd_meas_create(const char *work, struct fmd_meas *m)
             m->nmasked++;
         }
     }
+    if (fmd_ctl_probe(work, m)) return 2;
     return fmd_meas_regexes(m);
+}
+
+void fmd_meas_release(struct fmd_meas *m)
+{
+    if (m->re_ok) { regfree(&m->re_inc); regfree(&m->re_def); m->re_ok = 0; }
+}
+
+/* Darwin and other non-glibc hosts can truthfully measure an empty set; the
+ * lexical scanner still needs a discriminating name to test against. */
+struct fmd_meas *fmd_meas_synthetic(void)
+{
+    struct fmd_meas *m = &g_fmd_synthetic;
+    memset(m, 0, sizeof *m);
+    m->nmasked = 1;
+    snprintf(m->masked[0], FMD_NAME, "%s", "zcl_synthetic_masked_decl");
+    return fmd_meas_regexes(m) == 0 ? m : NULL;
 }
 
 int fmd_meas_nmasked(const struct fmd_meas *m) { return m->nmasked; }
@@ -308,14 +332,6 @@ int fmd_meas_nmasked(const struct fmd_meas *m) { return m->nmasked; }
 const char *fmd_meas_masked_first(const struct fmd_meas *m)
 {
     return m->nmasked > 0 ? m->masked[0] : "";
-}
-
-/* Darwin and other non-glibc hosts can truthfully measure an empty set; the
- * lexical scanner still needs a discriminating name to test against. */
-void fmd_meas_force_synthetic(struct fmd_meas *m)
-{
-    m->nmasked = 1;
-    snprintf(m->masked[0], FMD_NAME, "%s", "zcl_synthetic_masked_decl");
 }
 
 void fmd_meas_masked_str(const struct fmd_meas *m, char *out, size_t cap)
@@ -467,17 +483,8 @@ static void fmd_report_fail(const struct fmd_run_ctx *c, const char *mset,
             "not a row.\n", cc, mset);
 }
 
-int check_fortify_masked_decls_run(int argc, char **argv)
+static int fmd_scan_measured(const char *root, struct fmd_meas *m)
 {
-    const char *root = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : ".";
-    static char work[FMD_PATH];
-    if (lint_mkdtemp(work, sizeof work, "fmd") != 0)
-        return 2;
-    struct fmd_meas *m = fmd_meas_static();
-    int rc = fmd_meas_create(work, m);
-    rap_rm_rf(work);
-    if (rc)
-        return 2;
     char mset[FMD_CC_BUF];
     fmd_meas_masked_str(m, mset, sizeof mset);
     if (m->nmasked == 0) {
@@ -504,4 +511,20 @@ int check_fortify_masked_decls_run(int argc, char **argv)
     printf("%s: PASSED (masked set:%s; no unguarded caller)\n", k_fmd_gate,
            mset);
     return 0;
+}
+
+int check_fortify_masked_decls_run(int argc, char **argv)
+{
+    bool verify = argc >= 1 && !strcmp(argv[0], "--verify");
+    if (verify) { --argc; ++argv; }
+    const char *root = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : ".";
+    static char work[FMD_PATH];
+    if (lint_mkdtemp(work, sizeof work, "fmd") != 0) return 2;
+    struct fmd_meas *m = fmd_meas_static();
+    int rc = fmd_meas_create(work, m);
+    if (!rc && verify) rc = fmd_selftest_measured(work, m);
+    rap_rm_rf(work);
+    if (!rc) rc = fmd_scan_measured(root, m);
+    fmd_meas_release(m);
+    return rc;
 }

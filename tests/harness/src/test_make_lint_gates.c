@@ -1204,6 +1204,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_wallet_view_never_invents_rpc_credentials),
     S_(t_deleted_engine_names_absent_from_production_sources),
     S_(t_build_commit_macro_stays_behind_getter),
+    N_(t_fortify_combined_measurement),
     S_(t_boot_repaired_index_persistence_contract),
     S_(t_chain_evidence_reconstruct_uses_retry_persistence),
     S_(t_boot_genesis_init_preserves_restored_authority_contract),

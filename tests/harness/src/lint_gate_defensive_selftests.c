@@ -778,6 +778,211 @@ int t_build_commit_macro_stays_behind_getter(void)
     return failures;
 }
 
+/* A fake compiler records every optimization/candidate pair and exposes
+ * distinct probe failures without relying on the host libc's masked set. */
+static const char k_fmd_fake[] =
+    "#!/bin/sh\n"
+    "src= opt=\n"
+    "for a do case $a in *control.c|*probe.c) src=$a;; -O0|-O2) opt=$a;; esac; done\n"
+    "case $src in *control.c) name=control; echo x >> \"$FMD_CTL\";; "
+    "*) name=$(sed -n 's/.*&\\([a-zA-Z_]*\\);.*/\\1/p' \"$src\");; esac\n"
+    "printf '%s %s\\n' \"$opt\" \"$name\" >> \"$FMD_TRACE\"\n"
+    "if [ \"$name\" = control ]; then\n"
+    " n=$(wc -l < \"$FMD_CTL\")\n"
+    " [ \"$FMD_MODE:$n\" = initial:1 ] && exit 1\n"
+    " [ \"$FMD_MODE:$n\" = final:2 ] && exit 1\n"
+    " [ \"$FMD_MODE:$n\" = fixture:2 ] && : > \"${src%/*}/st\"\n"
+    " exit 0\nfi\n"
+    "[ \"$FMD_MODE\" = exec127 ] && exit 127\n"
+    "[ \"$FMD_MODE\" = exec126 ] && exit 126\n"
+    "[ \"$FMD_MODE\" = signal ] && kill -TERM $$\n"
+    "[ \"$FMD_MODE\" != empty ] && [ \"$name:$opt\" = realpath:-O0 ] && exit 1\n"
+    "exit 0\n";
+
+static int fmd_fixture_source(const char *dir, const char *mode)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/fixture.c", dir) >= (int)sizeof path) return 1;
+    const char *body = "#include <stdlib.h>\nvoid f(void){ zcl_synthetic_masked_decl(); }\n";
+    if (!strcmp(mode, "masked_bad") || !strcmp(mode, "empty"))
+        body = "#include <stdlib.h>\nvoid f(void){ realpath(0,0); zcl_synthetic_masked_decl(); }\n";
+    if (!strcmp(mode, "guarded"))
+        body = "#define _DEFAULT_SOURCE\n#include <stdlib.h>\nvoid f(void){ realpath(0,0); }\n";
+    if (!strcmp(mode, "comment"))
+        body = "#include <stdlib.h>\n/* realpath(0,0) */\n";
+    return write_file(path, body);
+}
+
+static int fmd_spawn_isolated(const char *const argv[], const char *dir, char *out, size_t cap);
+
+static int fmd_fake_run(const char *dir, const char *mode, const char *arg, char *out, size_t cap)
+{
+    char bin[PATH_MAX], cc[PATH_MAX], trace[PATH_MAX], ctl[PATH_MAX];
+    if (repo_path(bin, sizeof bin, "build/bin/z23-lint") ||
+        snprintf(cc, sizeof cc, "%s/cc", dir) >= (int)sizeof cc ||
+        snprintf(trace, sizeof trace, "%s/trace", dir) >= (int)sizeof trace ||
+        snprintf(ctl, sizeof ctl, "%s/control", dir) >= (int)sizeof ctl) return -1;
+    (void)unlink(trace); (void)unlink(ctl);
+    if (fmd_fixture_source(dir, mode) || setenv("CC", cc, 1) || setenv("FMD_TRACE", trace, 1) ||
+        setenv("FMD_CTL", ctl, 1) || setenv("FMD_MODE", mode, 1)) return -1;
+    const char *argv[] = {bin, "check-fortify-masked-decls", arg, NULL};
+    return fmd_spawn_isolated(argv, dir, out, cap);
+}
+
+static int fmd_trace_pairs(const char *trace)
+{
+    static const char *const names[] = {"realpath", "ptsname_r", "getwd", "gethostname", "mktemp", "getcwd",
+        "readlink", "readlinkat", "stpcpy", "stpncpy", "mempcpy", "strcasestr", "memmem", "strsep",
+        "strdup", "strndup", "asprintf", "vasprintf", "getline", "getdelim", "usleep", "random",
+        "srandom", "initstate", "setstate", "lockf", "pread", "pwrite", "ftruncate", "truncate",
+        "fchdir", "symlink", "chroot", "wcpcpy", "wcpncpy"};
+    char line[80];
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i)
+        for (int opt = 0; opt <= 2; opt += 2) {
+            if (snprintf(line, sizeof line, "-O%d %s\n", opt, names[i]) >= (int)sizeof line || !strstr(trace, line)) return 1;
+        }
+    return 0;
+}
+
+static int fmd_trace_check(const char *dir, int want)
+{
+    char path[PATH_MAX], *text = NULL;
+    if (snprintf(path, sizeof path, "%s/trace", dir) >= (int)sizeof path || read_entire_file(path, &text)) return 1;
+    int lines = 0; for (char *p = text; *p; ++p) lines += *p == '\n';
+    int bad = lines != want || (want == 72 && fmd_trace_pairs(text));
+    free(text); return bad;
+}
+
+static int fmd_fake_cases(const char *dir)
+{
+    static const struct { const char *mode, *arg; int exit_code, calls; const char *expected; } cases[] = {
+        {"masked", "--verify", 0, 72, "masked set:realpath"},
+        {"masked_bad", "--verify", 1, 72, "fixture.c calls: realpath"},
+        {"guarded", "--verify", 0, 72, "masked set:realpath"},
+        {"comment", "--verify", 0, 72, "masked set:realpath"},
+        {"empty", "--verify", 0, 72, "masks no candidate"},
+        {"masked", "--selftest", 0, 72, "selftest: OK"},
+        {"masked", NULL, 0, 72, "masked set:realpath"},
+        {"initial", "--verify", 2, 1, "control probe does not compile"},
+        {"final", "--verify", 2, 72, "control probe does not compile"},
+        {"exec127", "--verify", 2, 3, "compiler invocation failed"},
+        {"exec126", "--verify", 2, 3, "compiler invocation failed"},
+        {"signal", "--verify", 2, 3, "compiler invocation failed"},
+        {"fixture", "--verify", 2, 72, NULL}};
+    char out[16384]; int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        out[0] = '\0';
+        int rc = fmd_fake_run(dir, cases[i].mode, cases[i].arg, out, sizeof out);
+        if (rc != cases[i].exit_code || fmd_trace_check(dir, cases[i].calls) ||
+            (cases[i].expected && !strstr(out, cases[i].expected)) ||
+            (!strcmp(cases[i].mode, "empty") && !strstr(out, "selftest uses a synthetic masked")) ||
+            (cases[i].exit_code == 2 && strstr(out, "no unguarded caller"))) {
+            fprintf(stderr, "fortify fake mode=%s rc=%d output=%s\n", cases[i].mode, rc, out);
+            bad = 1;
+        }
+    }
+    return bad;
+}
+
+struct fmd_saved_env { const char *name; char *value; bool present; };
+
+static int fmd_env_save(struct fmd_saved_env *env, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) {
+        const char *value = getenv(env[i].name);
+        env[i].present = value != NULL;
+        if (value && !(env[i].value = strdup(value))) {
+            while (i) free(env[--i].value);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int fmd_env_restore(struct fmd_saved_env *env, size_t n)
+{
+    int bad = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (env[i].present && env[i].value) bad |= setenv(env[i].name, env[i].value, 1) != 0;
+        else if (!env[i].present) bad |= unsetenv(env[i].name) != 0;
+        free(env[i].value);
+    }
+    return bad;
+}
+
+static int fmd_spawn_isolated(const char *const argv[], const char *dir, char *out, size_t cap)
+{
+    struct fmd_saved_env env[] = {{"GIT_DIR", NULL, false}, {"GIT_INDEX_FILE", NULL, false},
+        {"GIT_WORK_TREE", NULL, false}, {"GIT_COMMON_DIR", NULL, false},
+        {"GIT_OBJECT_DIRECTORY", NULL, false}, {"GIT_ALTERNATE_OBJECT_DIRECTORIES", NULL, false}};
+    size_t n = sizeof env / sizeof env[0];
+    if (fmd_env_save(env, n)) return -1;
+    int bad = 0;
+    for (size_t i = 0; i < n; ++i) bad |= unsetenv(env[i].name) != 0;
+    bool timeout = false;
+    int rc = bad ? -1 : zcl_spawn_capture_merged_in_dir_observed(argv, dir, out, cap, 30000, &timeout);
+    bad |= fmd_env_restore(env, n);
+    return bad || timeout ? -1 : rc;
+}
+
+static int fmd_git_init(const char *dir)
+{
+    const char *init[] = {"git", "init", "-q", NULL};
+    const char *add[] = {"git", "add", "fixture.c", NULL};
+    char out[4096];
+    if (fmd_fixture_source(dir, "empty") ||
+        fmd_spawn_isolated(init, dir, out, sizeof out)) return 1;
+    return fmd_spawn_isolated(add, dir, out, sizeof out);
+}
+
+static int fmd_poison_git(const char *foreign, char *index, size_t cap)
+{
+    char gitdir[PATH_MAX], objects[PATH_MAX];
+    if (snprintf(gitdir, sizeof gitdir, "%s/.git", foreign) >= (int)sizeof gitdir ||
+        snprintf(objects, sizeof objects, "%s/objects", gitdir) >= (int)sizeof objects ||
+        snprintf(index, cap, "%s/index", gitdir) >= (int)cap) return 1;
+    return setenv("GIT_DIR", gitdir, 1) || setenv("GIT_WORK_TREE", foreign, 1) ||
+        setenv("GIT_INDEX_FILE", index, 1) || setenv("GIT_COMMON_DIR", gitdir, 1) ||
+        setenv("GIT_OBJECT_DIRECTORY", objects, 1) || setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", objects, 1);
+}
+
+static int fmd_read_index(const char *path, unsigned char *buf, size_t cap, size_t *used)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 1;
+    *used = fread(buf, 1, cap, f);
+    int bad = ferror(f) || !feof(f);
+    return bad | (fclose(f) != 0);
+}
+
+int t_fortify_combined_measurement(void)
+{
+    int failures = 0; char dir[PATH_MAX], cc[PATH_MAX], foreign[PATH_MAX], index[PATH_MAX];
+    unsigned char before[8192], after[8192]; size_t n_before = 0, n_after = 0;
+    struct fmd_saved_env env[] = {{"CC", NULL, false}, {"FMD_TRACE", NULL, false},
+        {"FMD_CTL", NULL, false}, {"FMD_MODE", NULL, false}, {"GIT_DIR", NULL, false},
+        {"GIT_INDEX_FILE", NULL, false}, {"GIT_WORK_TREE", NULL, false}, {"GIT_COMMON_DIR", NULL, false},
+        {"GIT_OBJECT_DIRECTORY", NULL, false}, {"GIT_ALTERNATE_OBJECT_DIRECTORIES", NULL, false}};
+    int saved = fmd_env_save(env, sizeof env / sizeof env[0]);
+    TEST("[lint-gate] fortify combined measurement runs once and fails closed") {
+        ASSERT(saved == 0);
+        ASSERT(test_mkdtemp(dir, sizeof dir, "fortify_combined"));
+        ASSERT(snprintf(foreign, sizeof foreign, "%s/foreign", dir) < (int)sizeof foreign);
+        ASSERT(mkdir(foreign, 0700) == 0 && fmd_git_init(foreign) == 0);
+        ASSERT(fmd_poison_git(foreign, index, sizeof index) == 0);
+        ASSERT(fmd_read_index(index, before, sizeof before, &n_before) == 0);
+        ASSERT(snprintf(cc, sizeof cc, "%s/cc", dir) < (int)sizeof cc);
+        ASSERT(write_file(cc, k_fmd_fake) == 0 && chmod(cc, 0700) == 0);
+        ASSERT(fmd_git_init(dir) == 0);
+        ASSERT(fmd_fake_cases(dir) == 0);
+        ASSERT(fmd_read_index(index, after, sizeof after, &n_after) == 0);
+        ASSERT(n_before == n_after && memcmp(before, after, n_before) == 0);
+        PASS();
+    } _test_next:;
+    if (!saved && fmd_env_restore(env, sizeof env / sizeof env[0])) ++failures;
+    return failures;
+}
+
 #else  /* !ZCL_TESTING */
 
 /* Without ZCL_TESTING the lint-gate self-tests compile to nothing; this

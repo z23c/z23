@@ -17,7 +17,8 @@ struct fmd_meas *fmd_meas_static(void);
 int fmd_meas_create(const char *work, struct fmd_meas *m);
 int fmd_meas_nmasked(const struct fmd_meas *m);
 const char *fmd_meas_masked_first(const struct fmd_meas *m);
-void fmd_meas_force_synthetic(struct fmd_meas *m);
+struct fmd_meas *fmd_meas_synthetic(void);
+void fmd_meas_release(struct fmd_meas *m);
 void fmd_meas_masked_str(const struct fmd_meas *m, char *out, size_t cap);
 int fmd_scan_file(const char *path, const struct fmd_meas *m, char *hits,
                   size_t cap);
@@ -112,28 +113,22 @@ static int fmds_case_comment(const char *root, const struct fmd_meas *m,
     return fmds_check(root, "comment.c", 0, m, why);
 }
 
-int check_fortify_masked_decls_selftest(void)
+int fmd_selftest_measured(const char *root, struct fmd_meas *m);
+
+int fmd_selftest_measured(const char *root, struct fmd_meas *m)
 {
-    char root[FMDS_PATH];
-    int rc = fmds_fixture_root(root, sizeof root);
-    if (rc)
-        return rc;
-    struct fmd_meas *m = fmd_meas_static();
-    rc = fmd_meas_create(root, m);
-    if (rc) {
-        rap_rm_rf(root);
-        return die("z23-lint: check-fortify-masked-decls selftest cannot "
-                   "measure the masked set\n", "");
-    }
+    struct fmd_meas *synthetic = NULL;
     if (fmd_meas_nmasked(m) == 0) {
         printf("check-fortify-masked-decls: selftest uses a synthetic masked "
                "name\n");
-        fmd_meas_force_synthetic(m);
+        synthetic = fmd_meas_synthetic();
+        if (!synthetic) return 2;
+        m = synthetic;
     }
     const char *fn = fmd_meas_masked_first(m);
-    rc = fmds_write_cases(root, fn);
+    int rc = fmds_write_cases(root, fn);
     if (rc) {
-        rap_rm_rf(root);
+        if (synthetic) fmd_meas_release(synthetic);
         return rc;
     }
     int bad = fmds_case_bad(root, m, fn);
@@ -143,13 +138,25 @@ int check_fortify_masked_decls_selftest(void)
         bad = fmds_case_comment(root, m, fn);
     if (bad) {
         fputs("check-fortify-masked-decls: SELFTEST FAILED\n", stderr);
-        rap_rm_rf(root);
+        if (synthetic) fmd_meas_release(synthetic);
         return 1;
     }
     char mset[FMDS_SET];
     fmd_meas_masked_str(m, mset, sizeof mset);
     printf("check-fortify-masked-decls: selftest PASSED (masked set measured "
            "as:%s)\n", mset);
-    rap_rm_rf(root);
+    if (synthetic) fmd_meas_release(synthetic);
     return st_ok(0, "check-fortify-masked-decls selftest: OK\n");
+}
+
+int check_fortify_masked_decls_selftest(void)
+{
+    char root[FMDS_PATH];
+    if (fmds_fixture_root(root, sizeof root)) return 2;
+    struct fmd_meas *m = fmd_meas_static();
+    int rc = fmd_meas_create(root, m);
+    if (!rc) rc = fmd_selftest_measured(root, m);
+    fmd_meas_release(m);
+    rap_rm_rf(root);
+    return rc;
 }

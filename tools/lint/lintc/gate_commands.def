@@ -7,6 +7,7 @@
 // One row per line, string escapes \" and \\ only; first row wins.
 
 LINT_ROW("check-toolchain", "./tools/dev/check-toolchain.sh --selftest && ./tools/dev/check-toolchain.sh")
+LINT_ROW("check-fortify-masked-decls", "./build/bin/z23-lint check-fortify-masked-decls --verify")
 LINT_ROW("check-dev-linker-threads", "make check-dev-linker-threads")
 LINT_ROW("check-fuzz-artifact-ledger", "./build/bin/z23-lint check-fuzz-artifact-ledger --ledger-only")
 LINT_ROW("check-build-epoch-integrity", "tools/dev/build-epoch-integrity-cached.sh")
