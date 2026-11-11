@@ -24,6 +24,7 @@
 #include "test/test_core.h"
 #include "controllers/agent_test_controller.h"
 #include "json/json.h"
+#include "platform/os_proc.h"
 #include "util/spawn.h"
 
 #include <errno.h>
@@ -335,6 +336,86 @@ static int test_at_real_script_scenario_not_found(void)
     return failures;
 }
 
+static bool at_read(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(buf, 1, cap - 1, f);
+    bool ok = !ferror(f) && feof(f);
+    if (fclose(f) != 0) ok = false;
+    buf[n] = '\0';
+    return ok;
+}
+
+static bool at_selector_status(const char *name, const char *body, char *output, bool known)
+{
+    struct json_value j;
+    json_init(&j);
+    bool ok = json_read(&j, body, strlen(body));
+    if (!ok) fprintf(stderr, "selector %s invalid status: %s\n", name, body);
+    if (ok) {
+        const char *verdict = json_get_str(json_get(&j, "verdict"));
+        const char *tail = json_get_str(json_get(&j, "tail"));
+        size_t len = strlen(output);
+        while (len && output[len - 1] == '\n') output[--len] = '\0';
+        ok = verdict && !strcmp(verdict, known ? "PASS" : "NO_MATCH") &&
+             json_get_int(json_get(&j, "exit_code")) == (known ? 0 : 2) &&
+             tail && !strcmp(tail, output);
+    }
+    json_free(&j);
+    return ok;
+}
+
+static bool at_selector_case(const char *work, const char *name, bool known)
+{
+    char status[700], log[700], name_arg[100], status_arg[800], log_arg[800];
+    char output[4096], body[8192], selected[128];
+    snprintf(status, sizeof status, "%s/status.json", work);
+    snprintf(log, sizeof log, "%s/run.log", work);
+    snprintf(name_arg, sizeof name_arg, "--name=%s", name);
+    snprintf(status_arg, sizeof status_arg, "--status-file=%s", status);
+    snprintf(log_arg, sizeof log_arg, "--log-file=%s", log);
+    const char *argv[] = {"tools/agent_test_runner.sh", "--kind=test_group",
+                          name_arg, status_arg, log_arg, NULL};
+    if (zcl_spawn_capture(argv, output, sizeof output, 30000) != 0 ||
+        !at_read(status, body, sizeof body) || !at_read(log, output, sizeof output))
+        return false;
+    bool ok = at_selector_status(name, body, output, known);
+    if (!ok || !known) return ok;
+    snprintf(selected, sizeof selected, "SELECTED %s\n", name);
+    bool matched = strstr(output, selected) && strstr(output, "SELECTION-ONLY groups=1 ") &&
+                   !strstr(output, "runs as its");
+    if (!matched) fprintf(stderr, "selector %s output: %s\n", name, output);
+    return matched;
+}
+
+static int test_at_real_group_selector(void)
+{
+    int failures = 0;
+    char work[512], wrapper[700], exe[4096];
+    struct at_saved_env bin_env, exe_env;
+    at_env_save(&bin_env, "ZCL_AGENT_TEST_PARALLEL_BIN");
+    at_env_save(&exe_env, "AT_SELECTOR_EXE");
+    test_make_tmpdir(work, sizeof work, "at_selector", "real");
+    snprintf(wrapper, sizeof wrapper, "%s/selector", work);
+    bool ready = os_proc_exe_path(exe, sizeof exe) &&
+        at_write_file(wrapper, "#!/bin/sh\nprintf 'controls:\\001\\011\\015 quote:\" slash:\\\\ utf8:\\303\\251\\n'\n"
+                               "exec \"$AT_SELECTOR_EXE\" \"$@\" --selection-only --no-cache\n") &&
+        chmod(wrapper, 0700) == 0 && setenv("AT_SELECTOR_EXE", exe, 1) == 0 &&
+        setenv("ZCL_AGENT_TEST_PARALLEL_BIN", wrapper, 1) == 0;
+    AT_CHECK("selector fixture prepared", ready);
+    if (ready) {
+        AT_CHECK("exact overlapping group stays alone", at_selector_case(work, "test_hex_codec", true));
+        AT_CHECK("exact umbrella stays whole", at_selector_case(work, "test_zcode_swarm_net", true));
+        AT_CHECK("exact spec identifier", at_selector_case(work, "spec_wallet_dashboard", true));
+        AT_CHECK("unknown substring is NO_MATCH", at_selector_case(work, "hex_codec", false));
+    }
+    at_env_restore(&exe_env);
+    at_env_restore(&bin_env);
+    test_rm_rf_recursive(work);
+    return failures;
+}
+
 /* ── D: dumper not_found / invalid-key refusals ──────────────────────── */
 
 static int test_at_dumper_refusals(void)
@@ -474,6 +555,7 @@ int test_agent_test(void)
     failures += test_at_rpc_refusals();
     failures += test_at_rpc_launch_and_poll();
     failures += test_at_real_script_scenario_not_found();
+    failures += test_at_real_group_selector();
     failures += test_at_dumper_refusals();
     failures += test_at_queued_write_refusals();
     printf("[test_agent_test] %d failure(s)\n", failures);

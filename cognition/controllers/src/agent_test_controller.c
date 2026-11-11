@@ -2,7 +2,7 @@
  *
  * agenttest — native agent contract wrapping tools/agent_test_runner.sh,
  * which in turn runs ONE allowlisted test surface:
- *   kind=test_group -> build/bin/test_parallel --only=<name>
+ *   kind=test_group -> build/bin/test_parallel --exact=<name>
  *   kind=scenario   -> build/bin/z23-chaos --scenario=tools/sim/scenarios/<name>.scenario
  *
  * Cloned end-to-end from the agentcopyprove pattern
@@ -25,11 +25,9 @@
  *     can launch are build/bin/test_parallel and build/bin/z23-chaos.
  *   - test_group additionally cross-checks `name` against the COMPILED
  *     group registry via `test_parallel --list` (exact line match) when
- *     that binary is reachable — not a substring match, so this contract's
- *     notion of "matches an existing registered group" is strictly tighter
- *     than test_parallel's own `--only=SUBSTR` semantics. When the binary
+ *     that binary is reachable — not a substring match. When the binary
  *     is not yet built, this pre-check is skipped and the launch is still
- *     safe: the underlying `--only=<name>` run itself reports "matched no
+ *     safe: the underlying `--exact=<name>` run itself reports "matched no
  *     groups" (exit 2) if `name` was never registered, which the runner
  *     script surfaces as verdict=NO_MATCH — never a silently-wrong result.
  *   - scenario requires `name.scenario` to already exist as a regular file
@@ -331,7 +329,7 @@ bool rpc_agent_test(const struct json_value *params, bool help,
         "return immediately without blocking for the run. There is no\n"
         "arbitrary-command field — the two inputs (kind, name) are\n"
         "allowlist-validated below and can only ever select build/bin/\n"
-        "test_parallel --only=<name> or build/bin/z23-chaos\n"
+        "test_parallel --exact=<name> or build/bin/z23-chaos\n"
         "--scenario=tools/sim/scenarios/<name>.scenario.\n"
         "\nParams:\n"
         "  kind (string, required)  \"test_group\" or \"scenario\"\n"

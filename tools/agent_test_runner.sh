@@ -9,19 +9,29 @@
 # Runs ONE bounded, already-allowlisted test surface in the background and
 # writes a JSON status file the caller polls via `z23 dumpstate
 # subsystem=agent_test key=<kind>_<name>` instead of holding an RPC thread:
-#   - kind=test_group: build/bin/test_parallel --only=<name>
+#   - kind=test_group: build/bin/test_parallel --exact=<name>
 #   - kind=scenario:   build/bin/z23-chaos --scenario=tools/sim/scenarios/<name>.scenario
 #
 # SAFETY: this script re-validates --kind/--name itself (belt and suspenders
 # on top of the C controller's allowlist) and NEVER passes them through a
 # nested shell/eval — each is used as exactly one argv word to the target
-# binary (--only=$NAME / --scenario=$PATH), never concatenated into an
+# binary (--exact=$NAME / --scenario=$PATH), never concatenated into an
 # interpreted command string. --name is restricted to
 # ^[a-z0-9_]{1,64}$ — no slash, no dot, no shell metacharacter of any kind.
 set -u
 
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    printf '%s' "$1" | LC_ALL=C awk '
+        BEGIN { for (i = 1; i < 32; i++) control[sprintf("%c", i)] = i }
+        {
+            if (NR > 1) printf "\\n"
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "\\" || c == "\"") printf "\\%s", c
+                else if (c in control) printf "\\u%04x", control[c]
+                else printf "%s", c
+            }
+        }'
 }
 
 # atomic_write PATH — reads stdin, writes PATH.tmp then renames onto PATH so
@@ -107,14 +117,14 @@ emit_status "running" "" 0 "" | atomic_write "$STATUS_FILE"
 
 case "$KIND" in
     test_group)
-        CMD_DESC="test_parallel --only=$NAME"
+        CMD_DESC="test_parallel --exact=$NAME"
         if [ ! -x "$TEST_PARALLEL_BIN" ]; then
             emit_status "done" "ERROR" 127 \
                 "$(json_escape "test_parallel binary not built: $TEST_PARALLEL_BIN")" \
                 | atomic_write "$STATUS_FILE"
             exit 1
         fi
-        "$TEST_PARALLEL_BIN" "--only=$NAME" > "$LOG_FILE" 2>&1
+        "$TEST_PARALLEL_BIN" "--exact=$NAME" > "$LOG_FILE" 2>&1
         rc=$?
         if [ "$rc" -eq 0 ]; then verdict="PASS"
         elif [ "$rc" -eq 2 ]; then verdict="NO_MATCH"
