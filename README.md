@@ -110,11 +110,14 @@ call `apps_adopt` with `name: "skycombat"`. Review **Make my copy**, then use
 the offered **Build and preview** and **Keep this version** choices. Canceling
 any step does not mean a version was kept.
 
-Return to My Apps, select the kept copy, and choose **Change with your AI**
-(or **Change → Change with your AI**). Press **C** and give the fresh setup to
-your connected assistant, keeping the window open while pasting. It identifies
-the actual kept copy and its source. Ask it to change your copy; review
-and preview the exact saved draft, then explicitly choose **Keep this version**.
+After that first Keep, your assistant can continue using the kept-copy receipt
+and verify its source; you do not need to copy the setup again. If the receipt
+is missing or the copy has changed, return to My Apps, select the kept copy,
+and choose **Change with your AI** (or **Change → Change with your AI**).
+Press **C** and give that fresh setup to your connected assistant, keeping the
+window open while pasting. Use this setup path for an existing or received copy
+as well. Ask it to change your copy; review and preview the exact saved draft,
+then explicitly choose **Keep this version**.
 Your previous kept version remains available until you approve the new one.
 
 To send that kept version, choose **Share this version → Share a link**, review

@@ -471,19 +471,22 @@ static bool act_preserved(struct ac_fixture *f, bool capture)
 static bool act_read_identity(struct ac_fixture *f, struct abc_leaf *l)
 {
     bool ok = json_push_kv_str(&l->in, "change", "Make the plane green") && act_result(l, NULL);
-    char tree[65], version[65];
+    char tree[65], version[65], head[65];
     zcl_hex_encode(f->tree, 32, tree); zcl_hex_encode(f->kept.version, 32, version);
+    zcl_hex_encode(f->head, 32, head);
     ok = ok && !strcmp(abc_get(l, "source_root"), tree) && !strcmp(abc_get(l, "version"), version) &&
-        json_get_int(json_get(&l->out.data, "selection_revision")) == 1;
+        !strcmp(abc_get(l, "source_version"), version) && !strcmp(abc_get(l, "head_version"), head) &&
+        strcmp(head, version) && json_get_int(json_get(&l->out.data, "selection_revision")) == 1;
     return ok;
 }
 
-static bool act_read_files(struct ac_fixture *f, bool ok)
+static bool act_read_files(struct ac_fixture *f, bool ok, const char *source)
 {
     char blob[65]; zcl_hex_encode(f->blob, 32, blob);
     struct abc_leaf l;
     if (!act_call(&l, "include/boost.h", true)) return false;
-    ok = act_result(&l, NULL) && ok && !strcmp(abc_get(&l, "content"), "#define BOOST 2\n") &&
+    ok = json_push_kv_str(&l.in, "source_version", source) && act_result(&l, NULL) && ok &&
+        !strcmp(abc_get(&l, "source_version"), source) && !strcmp(abc_get(&l, "content"), "#define BOOST 2\n") &&
         !strcmp(abc_get(&l, "encoding"), "utf8") &&
         !strcmp(json_get_str(json_get(json_get(&l.out.data, "file"), "blob")), blob);
     abc_close(&l);
@@ -497,11 +500,12 @@ static bool act_read_files(struct ac_fixture *f, bool ok)
 static bool act_reads(struct ac_fixture *f)
 {
     struct abc_leaf l;
-    bool ok = act_preserved(f, true) && act_call(&l, NULL, false);
+    bool ok = act_preserved(f, true) && act_call(&l, NULL, true);
     if (!ok) return false;
     ok = act_read_identity(f, &l);
+    char source[65]; (void)snprintf(source, sizeof(source), "%s", abc_get(&l, "source_version"));
     abc_close(&l);
-    return act_read_files(f, ok);
+    return act_read_files(f, ok, source);
 }
 
 static bool act_refusals(void)
