@@ -2999,7 +2999,7 @@ static bool rud_one(struct ru_run *r, const char *mode, uint32_t expected)
 static bool rud_cases(struct ru_run *r)
 {
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
-        "name-race", "tree-race", "name-unexpected"};
+        "name-race", "tree-race", "name-unexpected", "keys"};
     bool ok = true;
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
         bool passed = rud_one(r, modes[i], (i == 3 || i == 7) ? 77u : 0u);

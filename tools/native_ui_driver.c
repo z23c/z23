@@ -275,6 +275,9 @@ struct ui_driver_key_entry {
 
 static const struct ui_driver_key_entry ui_driver_key_table[] = {
     {"1", XK_1},
+    {"2", XK_2},
+    {"3", XK_3},
+    {"4", XK_4},
     {"c", XK_c},
     {"tab", XK_Tab},
     {"enter", XK_Return},
@@ -371,7 +374,7 @@ static int usage(const char *program)
 {
     fprintf(stderr,
             "usage: %s --title=<substring> "
-            "(--key=1|c|tab|enter|left|right|up|down|pagedown|pageup|escape "
+            "(--key=1|2|3|4|c|tab|enter|left|right|up|down|pagedown|pageup|escape "
             "| --expect-count=N) "
             "[--expect-pixels-change] [--timeout-ms=N]\n",
             program);

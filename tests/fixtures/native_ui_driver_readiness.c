@@ -12,13 +12,14 @@
 #include <unistd.h>
 
 enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE,
-    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED };
+    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS };
 static struct {
     enum nur_mode mode;
     Display *owner;
     Window window, victim;
     GC gc;
     unsigned int sleeps, presses, releases, images;
+    KeySym pressed[4], released[4];
     bool injected, first_null, count_ok;
 } nur;
 
@@ -40,6 +41,8 @@ static void nur_events(void)
         XEvent event; XNextEvent(nur.owner, &event);
         if (event.xany.window != nur.window) continue;
         if (event.type == KeyPress) {
+            if (nur.mode == NUR_KEYS && nur.presses < 4)
+                nur.pressed[nur.presses] = XLookupKeysym(&event.xkey, 0);
             ++nur.presses;
             if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE ||
                 nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE) {
@@ -47,7 +50,11 @@ static void nur_events(void)
                 XFillRectangle(nur.owner, nur.window, nur.gc, 0, 0, 80, 60);
             }
         }
-        if (event.type == KeyRelease) ++nur.releases;
+        if (event.type == KeyRelease) {
+            if (nur.mode == NUR_KEYS && nur.releases < 4)
+                nur.released[nur.releases] = XLookupKeysym(&event.xkey, 0);
+            ++nur.releases;
+        }
     }
     (void)XSync(nur.owner, False);
 }
@@ -141,7 +148,7 @@ static bool nur_open(char title[96])
     int screen = DefaultScreen(nur.owner);
     unsigned long black = BlackPixel(nur.owner, screen);
     (void)snprintf(title, 96, "z23-driver-readiness-%ld", (long)getpid());
-    if (nur.mode >= NUR_NAME_RACE) {
+    if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE || nur.mode == NUR_NAME_UNEXPECTED) {
         nur.victim = XCreateSimpleWindow(nur.owner, RootWindow(nur.owner, screen),
             8, 8, 80, 60, 0, black, black);
         if (nur.victim == None) return false;
@@ -173,6 +180,7 @@ static bool nur_discovery_result(int result)
 }
 static bool nur_result(int result)
 {
+    if (nur.mode == NUR_KEYS) return result == 0;
     if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE)
         return nur_discovery_result(result);
     if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE)
@@ -187,10 +195,22 @@ static bool nur_result(int result)
 static bool nur_mode_parse(const char *name)
 {
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
-        "name-race", "tree-race", "name-unexpected"};
+        "name-race", "tree-race", "name-unexpected", "keys"};
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i)
         if (!strcmp(name, modes[i])) { nur.mode = (enum nur_mode)i; return true; }
     return false;
+}
+static bool nur_keys(const char *option)
+{
+    static const char *const keys[] = {"--key=1", "--key=2", "--key=3", "--key=4"};
+    static const KeySym expected[] = {XK_1, XK_2, XK_3, XK_4};
+    for (size_t i = 0; i < 4; ++i) {
+        char *args[] = {"native_ui_driver", (char *)option, (char *)keys[i], "--timeout-ms=200", NULL};
+        if (native_ui_driver_main(4, args) != 0 || nur.presses != i + 1 || nur.releases != i + 1 ||
+            nur.pressed[i] != expected[i] || nur.released[i] != expected[i]) return false;
+    }
+    char *invalid[] = {"native_ui_driver", (char *)option, "--key=5", "--timeout-ms=200", NULL};
+    return native_ui_driver_main(4, invalid) == 2 && nur.presses == 4 && nur.releases == 4;
 }
 int main(int argc, char **argv)
 {
@@ -207,7 +227,7 @@ int main(int argc, char **argv)
             char *count_args[] = {"native_ui_driver", option, "--expect-count=1", "--timeout-ms=200", NULL};
             nur.count_ok = native_ui_driver_main(4, count_args) == 0;
         }
-        result = native_ui_driver_main(5, args);
+        result = nur.mode == NUR_KEYS ? (nur_keys(option) ? 0 : 1) : native_ui_driver_main(5, args);
         (void)XSetErrorHandler(previous);
     }
     bool ok = ready && nur_result(result);
