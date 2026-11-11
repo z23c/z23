@@ -6926,6 +6926,19 @@ LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
 # a hand-listed edit. The glob is the same set the hand list named.
 LINTC_SRCS = $(sort $(wildcard tools/lint/lintc/*.c))
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
+# LINTC_DEPENDENCIES_BEGIN
+LINTC_ALL_OBJS := $(LINTC_OBJS) $(LINTC_NODE_OBJS)
+LINTC_DEPS := $(LINTC_ALL_OBJS:.o=.d)
+LINTC_EXISTING_OBJS := $(wildcard $(LINTC_ALL_OBJS))
+LINTC_EXISTING_DEPS := $(wildcard $(LINTC_DEPS))
+LINTC_MISSING_DEPS := $(filter-out $(LINTC_EXISTING_DEPS:.d=.o),$(LINTC_EXISTING_OBJS))
+.PHONY: lintc-missing-dep-force
+lintc-missing-dep-force:
+ifneq ($(strip $(LINTC_MISSING_DEPS)),)
+$(LINTC_MISSING_DEPS): lintc-missing-dep-force
+endif
+-include $(LINTC_EXISTING_DEPS)
+# LINTC_DEPENDENCIES_END
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
 # patterns (e.g. an increment-only counter) that gcc's -Wextra does not
 # flag, so a lint-runtime source that builds clean here can refuse on
@@ -15818,10 +15831,19 @@ build/lintc-obj/gate_capability_closure_selftest.o: \
 
 build/lintc-obj/run_table.o: tools/lint/lintc/gate_commands.def
 
+# LINTC_OBJECT_RULES_BEGIN
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def tools/lint/lintc/precheck_base.h
-	@mkdir -p $(dir $@)
-	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -c -o $@ $<
-	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only $<,echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<")
+	@mkdir -p "$(dir $@)"
+	@set -eu; dep="$(@:.o=.d)"; o=; d=; \
+	trap 'rm -f -- "$$o" "$$d"' EXIT; trap 'exit 1' HUP INT TERM; \
+	rm -f -- "$$dep"; \
+	o="$$(mktemp "$(dir $@).lintc-object.XXXXXX")"; \
+	d="$$(mktemp "$(dir $@).lintc-dep.XXXXXX")"; \
+	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -MMD -MP -MF "$$d" -MQ "$@" -c -o "$$o" "$<"; \
+	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only "$<",echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<"); \
+	test -s "$$o" || { echo "lintc: empty object for $<" >&2; exit 1; }; \
+	test -s "$$d" || { echo "lintc: empty depfile for $<" >&2; exit 1; }; \
+	mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; trap - EXIT HUP INT TERM
 
 $(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/main.o: \
 	tools/lint/lintc/premise.h tools/lint/lintc/selection_gates.def
@@ -15836,8 +15858,17 @@ build/lintc-obj/node/platform/modules/util/src/spawn.o \
 build/lintc-obj/node/platform/modules/util/src/spawn_binary.o: $(SPAWN_BINARY_HEADERS)
 
 build/lintc-obj/node/%.o: %.c
-	@mkdir -p $(dir $@)
-	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -c -o $@ $<
+	@mkdir -p "$(dir $@)"
+	@set -eu; dep="$(@:.o=.d)"; o=; d=; \
+	trap 'rm -f -- "$$o" "$$d"' EXIT; trap 'exit 1' HUP INT TERM; \
+	rm -f -- "$$dep"; \
+	o="$$(mktemp "$(dir $@).lintc-object.XXXXXX")"; \
+	d="$$(mktemp "$(dir $@).lintc-dep.XXXXXX")"; \
+	$(or $(HOST_CC),cc) $(LINTC_CFLAGS) -MMD -MP -MF "$$d" -MQ "$@" -c -o "$$o" "$<"; \
+	test -s "$$o" || { echo "lintc: empty object for $<" >&2; exit 1; }; \
+	test -s "$$d" || { echo "lintc: empty depfile for $<" >&2; exit 1; }; \
+	mv -f -- "$$o" "$@"; mv -f -- "$$d" "$$dep"; trap - EXIT HUP INT TERM
+# LINTC_OBJECT_RULES_END
 
 build/lintc-obj/gate_zcode_packages.o \
 build/lintc-obj/node/platform/modules/platform/src/toolchain.o: \
