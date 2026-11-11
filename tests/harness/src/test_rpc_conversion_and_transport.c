@@ -1205,11 +1205,6 @@ static struct rt_run rt_run(enum rt_mode mode, int delay, const char *dir, rt_ca
     r.req = rt_server_stop(&s);
     return r;
 }
-static void rt_done(struct rt_run *r, bool ok, const char *name)
-{
-    rt_expect(ok && r->body, name, r->ms, r->req);
-    free(r->body);
-}
 static void rt_slow_bootstrap(void) { platform_sleep_ms(300); }
 static void rt_no_bootstrap(void) {}
 
@@ -1263,6 +1258,24 @@ static bool rt_real_ok(const struct rt_real *c, const struct rt_run *r)
            r->ms >= c->min_ms && (!c->max_ms || r->ms < c->max_ms) && (c->req < 0 || r->req == c->req);
 }
 
+static void rt_done(struct rt_run *r, const struct rt_real *c)
+{
+    bool ok = rt_real_ok(c, r) && r->body;
+    const char *name = c->name;
+    char detail[1024];
+    if (!ok) {
+        const char *body = r->body ? r->body : "<null>";
+        int n = snprintf(detail, sizeof(detail),
+            "%.160s expected{want=%.96s forbid=%.96s min_ms=%d max_exclusive_ms=%d(0=none) requests=%d(-1=any)} observed{body=%.256s%s}",
+            c->name, c->want, c->forbid ? c->forbid : "<none>",
+            c->min_ms, c->max_ms, c->req, body,
+            strlen(body) > 256 ? " [truncated]" : "");
+        if (n > 0 && (size_t)n < sizeof(detail)) name = detail;
+    }
+    rt_expect(ok, name, r->ms, r->req);
+    free(r->body);
+}
+
 static void rt_case_real(const char *dir, const char *nodir)
 {
     zcl_native_fleet_board_test_set_bootstrap(rt_no_bootstrap); /* never the real bridge */
@@ -1280,7 +1293,7 @@ static void rt_case_real(const char *dir, const char *nodir)
         struct rt_run r = rt_run(c->mode, c->delay, c->fifo ? fifo : d, c->call, c->arg);
         zcl_native_fleet_board_test_set_bootstrap(rt_no_bootstrap);
         if (c->fifo) pthread_join(w.thread, NULL), test_rm_rf(fifo);
-        rt_done(&r, rt_real_ok(c, &r), c->name);
+        rt_done(&r, c);
     }
     zcl_native_fleet_board_test_set_bootstrap(NULL);
 }
