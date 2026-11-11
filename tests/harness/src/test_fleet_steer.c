@@ -6132,6 +6132,54 @@ static int fmx_t_board_deadline(void)
     return failures;
 }
 
+static const char *g_fmx_board_body;
+static char *fmx_board_body_rpc(const char *method, const char *params)
+{
+    (void)params;
+    return strcmp(method, "fleet_board") ? NULL : strdup(g_fmx_board_body);
+}
+
+static int fmx_t_board_refusal_reason(void)
+{
+    int failures = 0;
+    static const struct { const char *body, *reason; } cases[] = {
+        {"{\"ok\":true,\"posts\":[{\"id\":\"refusal-post\",\"kind\":\"claim\",\"agent\":\"refusal-agent\",\"ref\":\"refusal-candidate\"}]}", "board_page_metadata_missing"},
+        {"{\"ok\":true,\"has_more\":\"false\",\"posts\":[{\"id\":\"refusal-post\",\"kind\":\"claim\",\"agent\":\"refusal-agent\",\"ref\":\"refusal-candidate\"}]}", "sibling_refused"},
+        {"{\"ok\":true,\"has_more\":false,\"posts\":[]}", NULL}
+    };
+    TEST("steer: board pagination refusal preserves unread coverage without leaking posts") {
+        ASSERT(fmx_forward_setup("board_refusal_reason"));
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            struct fmx_call call;
+            g_fmx_board_body = cases[i].body;
+            node_rpc_client_set_test_hook(fmx_board_body_rpc);
+            bool passed = fmx_forward_page(&call, "0|", 1, 65536);
+            node_rpc_client_set_test_hook(fmx_no_node);
+            ASSERT(passed);
+            ASSERT(!fmx_arr_has(fmx_arr(&call, "agents"), "refusal-agent"));
+            const struct json_value *candidates = fmx_arr(&call, "candidates");
+            const struct json_value *post_ids = json_get(fmx_get(&call, "evidence"), "post_ids");
+            ASSERT(candidates && json_size(candidates) == 0);
+            ASSERT(post_ids && post_ids->type == JSON_ARR && json_size(post_ids) == 0);
+            if (cases[i].reason) {
+                ASSERT_STR_EQ(fmx_missing_reason(&call, "fleet.board"), cases[i].reason);
+                ASSERT_STR_EQ(fmx_missing_reason(&call, "candidates.board"), "source-unread");
+                const struct json_value *total = fmx_get(&call, "candidates_total");
+                const struct json_value *complete = fmx_get(&call, "candidates_complete");
+                ASSERT(total && json_is_null(total));
+                ASSERT(complete && complete->type == JSON_BOOL && !json_get_bool(complete));
+            } else {
+                ASSERT(!fmx_missing_has(&call, "fleet.board"));
+                ASSERT(!fmx_missing_has(&call, "candidates.board"));
+            }
+            fmx_end(&call);
+        }
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(fmx_no_node); fmx_restore();
+    return failures;
+}
+
 static int fmx_t_forward_fault(void)
 {
     int failures = 0;
@@ -6181,6 +6229,7 @@ int test_fleet_steer(void)
     failures += fmx_t_forward_boundary();
     failures += fmx_t_forward_fault();
     failures += fmx_t_board_deadline();
+    failures += fmx_t_board_refusal_reason();
     failures += fmx_task_projection_checks();
 #if !defined(_WIN32)
     failures += fmx_t_ledger_age();

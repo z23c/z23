@@ -3833,6 +3833,8 @@ static const char *fmc_board_refusal(const struct fmc_sub *sub)
         return "sibling_refused";
     if (strcmp(sub->reply.error.code, "BOARD_OBSERVATION_BUDGET_EXHAUSTED") == 0)
         return "observation_budget_exhausted";
+    if (strcmp(sub->reply.error.code, "BOARD_PAGE_METADATA_MISSING") == 0)
+        return "board_page_metadata_missing";
     if (sub->reply.error.code[0] &&
         strstr(sub->reply.error.code, "NODE_UNAVAILABLE"))
         return "node_unavailable";
