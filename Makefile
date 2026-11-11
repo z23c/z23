@@ -375,6 +375,9 @@ ZCL_GENERATED_HEADER_GOALS := contexts/wallet/views/include/views/wallet_templat
 	build/identity/gen-stamps/install_script.stamp \
 	build/identity/gen-stamps/native_tunnel_export_binding.stamp
 ZCL_GENERATED_HEADER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS))),,1),)
+# Only profile selection ignores generated-header companions; identity and
+# artifact gates still inspect the original MAKECMDGOALS.
+ZCL_PROFILE_GOALS := $(if $(strip $(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS))),$(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS)),$(MAKECMDGOALS))
 
 # These exact goals build standalone C23 checkers or list game inputs. They consume no node
 # objects, vendor archives, generated view headers, or compile epoch. Mixed
@@ -590,8 +593,9 @@ ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 # build-system inputs.  Doing that for every profile on every parse made a
 # warm one-group test pay for build-only, dev, strict, coverage, and sanitizer
 # profiles it could never consume.  Exact known goals select only the profile
-# they execute; mixed/default/unknown goals retain the conservative all-profile
-# fallback so a newly-added goal cannot silently lose freshness authority.
+# they execute, including generated-header companions. Multiple nonheader or
+# unknown goals retain the conservative all-profile fallback; the default
+# selects its node profile below.
 ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
@@ -615,8 +619,8 @@ else ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
-else ifeq ($(words $(MAKECMDGOALS)),1)
-ZCL_EPOCH_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
+else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
+ZCL_EPOCH_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
 ifneq ($(filter help dev-package-verifier-ensure,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # Neither goal compiles. Ensure still captures source and its nested verifier
 # make selects the dev profile; do not freeze zero toolchain IDs into it.
@@ -2165,9 +2169,9 @@ $(DEV_TSAN_LEASE): $(BUILD_EPOCH_LEASE_FORCE)
 
 # Make normally imports large immutable depfile graphs even when one profile
 # is requested. Narrow an exact known goal, including the empty spelling of
-# `.DEFAULT_GOAL := z23`. Mixed and unknown explicit goals keep the
-# conservative source-wide fallback so a new target cannot accidentally lose
-# header invalidation merely because this table was not updated.
+# `.DEFAULT_GOAL := z23`, and allow generated-header companions. Multiple
+# nonheader or unknown goals keep the conservative source-wide fallback so a
+# new target cannot accidentally lose header invalidation.
 ZCL_DEPFILE_ALL_PROFILES := build-only dev test-fast test-strict coverage fuzz \
 	node-c23
 ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_ALL_PROFILES)
@@ -2179,8 +2183,8 @@ ifeq ($(ZCL_HOTSWAP_DEPFILE_LEAN_ONLY),1)
 ZCL_DEPFILE_PROFILES :=
 else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
-else ifeq ($(words $(MAKECMDGOALS)),1)
-ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
+else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
+ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
 ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
 # The generator is compiled directly; no profile %.o depfile graph is consumed.
 ZCL_DEPFILE_PROFILES :=

@@ -119,38 +119,49 @@ static void setup(void)
     for (size_t i = 0; i < 5; ++i) fprintf(file, "%s/%s.o ", make_path(work), profiles[i]);
     fprintf(file, "\nfast-compile build-only t-fast t dev-failure-execution-id: $(ZCL_DEP_PROBE_OBJECTS)\n"
         "t-hotswap hotswap-test-so: $(ZCL_DEP_PROBE_OBJECTS)\n\t@:\n"
-        "zclassic23 z23 z23-package-verify: $(ZCL_DEP_PROBE_OBJECTS)\n"
+        "zclassic23 z23 z23-package-verify help: $(ZCL_DEP_PROBE_OBJECTS)\n"
         "zcl-depfile-unknown zcl-depfile-default: $(ZCL_DEP_PROBE_OBJECTS)\n\t@:\n"
-        ".DEFAULT_GOAL := zcl-depfile-default\n");
+        ".DEFAULT_GOAL := zcl-depfile-default\n"
+        "$(info ZCL_EPOCH_PROBE=[$(ZCL_EPOCH_PROFILES)])\n");
     if (ferror(file) || fclose(file) != 0) fail("probe Makefile write failed");
 }
 
 static void profile_probes(void)
 {
-    static const struct {const char *name; unsigned mask; const char *goals[4];} probes[] = {
-        {"dev", 2, {"fast-compile"}}, {"build", 1, {"build-only"}},
-        {"fast", 4, {"t-fast", "ONLY=boot_phase"}}, {"strict", 8, {"t", "ONLY=boot_phase"}},
-        {"failure-id", 0, {"dev-failure-execution-id"}},
-        {"hot-loop", 0, {"t-hotswap", "ONLY=boot_phase"}},
-        {"hot-module", 0, {"hotswap-test-so"}},
-        {"hot-both", 0, {"t-hotswap", "hotswap-test-so", "ONLY=boot_phase"}},
-        {"hot-mixed", 31, {"t-hotswap", "t-fast", "ONLY=boot_phase"}},
-        {"node", 16, {"zclassic23"}}, {"node-alias", 16, {"z23"}},
-        {"verifier", 16, {"z23-package-verify"}},
-        {"mixed", 31, {"fast-compile", "build-only"}},
-        {"unknown", 31, {"zcl-depfile-unknown"}}, {"default", 16, {NULL}}
+    static const struct {const char *name; unsigned mask; const char *goals[4]; const char *epoch;} probes[] = {
+        {"dev", 2, {"fast-compile"}, NULL}, {"build", 1, {"build-only"}, NULL},
+        {"fast", 4, {"t-fast", "ONLY=boot_phase"}, NULL}, {"strict", 8, {"t", "ONLY=boot_phase"}, NULL},
+        {"failure-id", 0, {"dev-failure-execution-id"}, NULL},
+        {"hot-loop", 0, {"t-hotswap", "ONLY=boot_phase"}, NULL},
+        {"hot-module", 0, {"hotswap-test-so"}, NULL},
+        {"hot-both", 0, {"t-hotswap", "hotswap-test-so", "ONLY=boot_phase"}, NULL},
+        {"hot-mixed", 31, {"t-hotswap", "t-fast", "ONLY=boot_phase"}, NULL},
+        {"node", 16, {"zclassic23"}, "node-c23"}, {"node-alias", 16, {"z23"}, "node-c23"},
+        {"verifier", 16, {"z23-package-verify"}, "node-c23"},
+        {"mixed", 31, {"fast-compile", "build-only"}, NULL},
+        {"unknown", 31, {"zcl-depfile-unknown"}, NULL}, {"default", 16, {NULL}, NULL},
+        {"header-node", 16, {"contexts/explorer/views/include/views/site_css.h", "z23"}, "node-c23"},
+        {"node-header", 16, {"z23", "contexts/explorer/views/include/views/site_css.h"}, "node-c23"},
+        {"stamp-node", 16, {"build/identity/gen-stamps/site_css.stamp", "z23"}, "node-c23"},
+        {"node-stamp", 16, {"z23", "build/identity/gen-stamps/site_css.stamp"}, "node-c23"},
+        {"header-help", 31, {"contexts/explorer/views/include/views/site_css.h", "help"}, ""},
+        {"help-header", 31, {"help", "contexts/explorer/views/include/views/site_css.h"}, ""},
+        {"help", 31, {"help"}, ""},
+        {"header-unknown", 31, {"contexts/explorer/views/include/views/site_css.h", "zcl-depfile-unknown"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"},
+        {"header-mixed", 31, {"contexts/explorer/views/include/views/site_css.h", "fast-compile", "build-only"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"}
     };
-    size_t children[15];
-    const char *logs[15];
-    for (size_t i = 0; i < 15; ++i) {
+    enum { count = sizeof(probes) / sizeof(probes[0]) };
+    size_t children[count];
+    const char *logs[count];
+    for (size_t i = 0; i < count; ++i) {
         char *scratch = text("%s/%s.scratch", work, probes[i].name);
         directory(scratch);
         logs[i] = text("%s/%s.out", work, probes[i].name);
         const char *argv[48] = {"make", "-f", text("%s/probe.mk", work), "--no-print-directory", "-n",
-            "ZCL_STANDALONE_CLEAN=1", text("BUILD_SOURCE_RECORD=%s", source_record),
+            probes[i].epoch ? "BUILD_EPOCH_CLEAN_ONLY=0" : "ZCL_STANDALONE_CLEAN=1", text("BUILD_SOURCE_RECORD=%s", source_record),
             text("BUILD_DIR=%s/build", scratch), text("BIN_DIR=%s/build/bin", scratch),
-            "VIEW_GEN_HEADERS=", "VIEW_GEN_HEADERS_EARLY=", "VENDOR_LIBS="};
-        size_t n = 12;
+            "VIEW_GEN_HEADERS=", "VIEW_GEN_HEADERS_EARLY=", "VENDOR_LIBS=", "ZCL_TOR=stub"};
+        size_t n = 13;
         const char *variables[] = {"ALL_OBJS=build-only.o", "DEV_OBJS=dev.o", "DEV_OBJ_COMPLETE=dev.complete",
             "TEST_PARALLEL_FAST_OBJS=test-fast.o", "TEST_PARALLEL_FAST_CANDIDATE=test-fast.candidate",
             "TEST_PARALLEL_FAST_LINK_RSP=test-fast.rsp", "TEST_PARALLEL_REL_OBJS=test-strict.o",
@@ -160,12 +171,21 @@ static void profile_probes(void)
             const char *equal = strchr(variables[j], '=');
             argv[n++] = text("%.*s=%s/%s", (int)(equal - variables[j]), variables[j], work, equal + 1);
         }
+        if (probes[i].epoch) {
+            argv[n++] = "-o";
+            argv[n++] = "contexts/explorer/views/include/views/site_css.h";
+            argv[n++] = "-o";
+            argv[n++] = "build/identity/gen-stamps/site_css.stamp";
+            argv[n++] = "BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000";
+            argv[n++] = "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000";
+            argv[n++] = "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000";
+        }
         for (size_t j = 0; j < 4 && probes[i].goals[j]; ++j) argv[n++] = probes[i].goals[j];
         argv[n] = NULL;
         children[i] = probe_start(argv, logs[i], false);
     }
     bool failed = false;
-    for (size_t i = 0; i < 15; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         if (probe_wait(children[i]) != 0) {
             char *data = output(logs[i]);
             fprintf(stderr, "%s\nMake probe failed: %s\n", data, probes[i].name);
@@ -174,8 +194,12 @@ static void profile_probes(void)
         }
     }
     if (failed) fail("Make profile probe failed");
-    for (size_t i = 0; i < 15; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         char *data = output(logs[i]);
+        if (probes[i].epoch && !strstr(data, text("ZCL_EPOCH_PROBE=[%s]", probes[i].epoch))) {
+            fprintf(stderr, "%s\n", data);
+            fail(text("probe=%s epoch expected=[%s]", probes[i].name, probes[i].epoch));
+        }
         for (size_t j = 0; j < 5; ++j) {
             bool present = strstr(data, text("ZCL_DEP_REBUILD=%s", profiles[j])) != NULL;
             if (present != ((probes[i].mask & (1u << j)) != 0)) {
@@ -186,6 +210,7 @@ static void profile_probes(void)
         }
         free(data);
     }
+    probe_count = 0; /* all profile children were reaped; reuse the bounded slots */
 }
 
 static void binding_probes(void)
@@ -261,7 +286,10 @@ static void consistency_probes(void)
     size_t children[8];
     const char *logs[8];
     for (size_t i = 0; i < 8; ++i) {
-        const char *argv[] = {"make", "-pn", "--no-print-directory", goals[i], NULL};
+        /* A dry-run may remake included bootstrap Makefiles. These probes
+         * inspect profile selection only and must not repair vendor inputs. */
+        const char *argv[] = {"make", "-pn", "--no-print-directory",
+                              "VENDOR_LIBS=", "ZCL_TOR=stub", goals[i], NULL};
         logs[i] = text("%s/consistency.%s", work, goals[i]);
         children[i] = probe_start(argv, logs[i], true);
     }

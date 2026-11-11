@@ -704,6 +704,7 @@ chmod +x "$HOT_MAKE" "$HOT_HARNESS"
 # VENDOR_MISSING_INPUTS for this one invocation skips that bootstrap, the same
 # way the view-header bootstrap is emptied, so the fixture never builds or
 # rewrites vendor/lib or vendor/include (see vendor_inputs_unchanged).
+# Select the Tor stub too: its separate bootstrap can otherwise repair vendors.
 # ZCL_TEST_STACK_SETUP is emptied too: the recipe's `ulimit -s unlimited`
 # cannot raise the stack hard limit that t-asan/t-tsan fix at 1 GiB
 # (ulimit -s 1048576), and the inert harness below needs no stack.
@@ -715,7 +716,7 @@ run_hot_fixture()
     make --no-print-directory \
         MAKE="$HOT_MAKE" BUILD_SOURCE_RECORD="$HOT_RECORD" \
         ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= ZCL_TEST_STACK_SETUP=: \
-        VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= VENDOR_MISSING_INPUTS= \
+        VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= VENDOR_MISSING_INPUTS= ZCL_TOR=stub \
         TEST_FAST_COMPILE_EPOCH="$EPOCH_MAIN" \
         TEST_PARALLEL_FAST_CANDIDATE="$HOT_HARNESS" \
         TEST_PARALLEL_FAST_ACTIVE="$HOT_HARNESS" \
@@ -1465,7 +1466,7 @@ run_make_recovery()
     # This fixture supplies an already-probed compiler identity and its own
     # profile. Keep that probe's deployment environment: the included native
     # Makefile otherwise exports its release floor and changes Clang builtins.
-    # The probe links no vendor archive, so it skips the vendor bootstrap too.
+    # The probe links no vendor archive, so it skips vendor and Tor bootstrap.
     local log="$1"
     (
         cd "$ROOT"
@@ -1477,7 +1478,7 @@ run_make_recovery()
             MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET-}" \
             ZCL_EPOCH_PROFILES=test-fast ZCL_DEPFILE_PROFILES= \
             BUILD_DIR="$MAKE_RECOVERY" BIN_DIR="$MAKE_RECOVERY/bin" \
-            VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= VENDOR_MISSING_INPUTS= \
+            VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= VENDOR_MISSING_INPUTS= ZCL_TOR=stub \
             VIEW_BOOTSTRAP_MK="$MAKE_RECOVERY_VIEW_READY" \
             BUILD_SOURCE_RECORD="$MAKE_SOURCE_RECORD" \
             BUILD_COMPILER_ID="$COMPILER_ID" BUILD_SYSTEM_ID="$BSYS_REAL" \
