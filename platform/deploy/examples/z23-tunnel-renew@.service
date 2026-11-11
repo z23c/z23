@@ -25,16 +25,23 @@
 # refused (read the RENEW_* code in the journal); 2 configuration or state
 # malformed — the environment file is missing its Z23_BIN /
 # Z23_TUNNEL_RENEW_INPUT (copy z23-tunnel-renew.env.example, edit the real
-# absolute paths), the plan reply carried no plan_id (run `ops mesh device
-# pair status`), or the input JSON does not end in `}` where the confirm
-# object is appended; 3 the plan leaf itself failed (RENEW_NO_CURRENT_EPOCH:
-# no current epoch for the peer — pair a first epoch before enabling the
-# timer; see the receiver example's pairing step).
+# absolute paths), or the plan reply carried no plan_id (run `z23 ops mesh
+# device pair status`); 3 the plan leaf itself failed
+# (RENEW_NO_CURRENT_EPOCH: no current epoch for the peer — pair a first
+# epoch before enabling the timer; see the receiver example's pairing step).
 #
-# The inline /bin/sh -c carries the plan_id from step 1 to step 2 through
-# a PrivateTmp file; it handles no secret bytes. Every $VAR it references
-# comes from the environment file, so systemd expands them before the
-# shell starts.
+# The inline /bin/sh carries the plan_id from step 1 to step 2 through a
+# PrivateTmp file and handles no secret bytes. Quoting note, learned the
+# hard way on 2026-11-11: systemd's ExecStart lexer unescapes \" even
+# inside a single-quoted argument, so shell-level \" patterns reach the
+# shell as bare quotes and break its own quoting. The payload therefore
+# uses only forms that survive both lexers verbatim: shell-single-quoted
+# segments written with the close-quote-escape-reopen idiom (the two
+# '\'' sequences below), a dot in place of each JSON quote in grep
+# patterns (.renew_due.), and jq (no quoted tokens) for extracting the
+# plan_id and building the confirm input. Do not simplify these back to
+# escaped quotes: the unit fails with exit 2 the moment systemd rewrites
+# them. jq is required on the host running this unit.
 
 [Unit]
 Description=Z23 hash-PSK pairing renewal for peer %i (plan, then confirm when due)
@@ -42,7 +49,7 @@ Description=Z23 hash-PSK pairing renewal for peer %i (plan, then confirm when du
 [Service]
 Type=oneshot
 EnvironmentFile=-%h/.config/z23/tunnel-renew-%i.env
-ExecStart=/bin/sh -c 'test -n "${Z23_BIN:-}" && test -n "${Z23_TUNNEL_RENEW_INPUT:-}" || { echo "renew: Z23_BIN or Z23_TUNNEL_RENEW_INPUT unset — copy z23-tunnel-renew.env.example and edit the real absolute paths"; exit 2; }; plan=$(mktemp /tmp/z23-renew-plan.XXXXXX) || exit 3; conf=$(mktemp /tmp/z23-renew-conf.XXXXXX) || { rm -f "$plan"; exit 3; }; trap "rm -f \"$plan\" \"$conf\"" EXIT; "$Z23_BIN" ops mesh device pair renew --input-file="$Z23_TUNNEL_RENEW_INPUT" >"$plan" || { cat "$plan"; exit 3; }; cat "$plan"; grep -q "\"renew_due\":true" "$plan" || exit 0; id=$(grep -o "\"plan_id\":\"[0-9a-f]*\"" "$plan" | head -n 1 | cut -d "\"" -f 4); test -n "$id" || exit 2; sed "s/}$/,\"plan_id\":\"$id\",\"confirm\":true}/" "$Z23_TUNNEL_RENEW_INPUT" >"$conf" || exit 2; grep -q "\"confirm\":true" "$conf" || { echo "renew: confirm object not appended — input JSON does not end in }"; exit 2; }; "$Z23_BIN" ops mesh device pair renew --input-file="$conf"'
+ExecStart=/bin/sh -c 'test -n "${Z23_BIN:-}" && test -n "${Z23_TUNNEL_RENEW_INPUT:-}" || exit 2; plan=$(mktemp /tmp/z23-renew-plan.XXXXXX) || exit 3; conf=$(mktemp /tmp/z23-renew-conf.XXXXXX) || { rm -f "$plan"; exit 3; }; trap '\''rm -f "$plan" "$conf"'\'' EXIT; "$Z23_BIN" ops mesh device pair renew --input-file="$Z23_TUNNEL_RENEW_INPUT" >"$plan" || { cat "$plan"; exit 3; }; cat "$plan"; grep -q .renew_due.:true "$plan" || exit 0; id=$(jq -r .data.plan_id "$plan"); test -n "$id" && test "$id" != null || exit 2; jq -c --arg id "$id" '\''. + {plan_id:$id, confirm:true}'\'' "$Z23_TUNNEL_RENEW_INPUT" >"$conf" || exit 2; "$Z23_BIN" ops mesh device pair renew --input-file="$conf"'
 TimeoutStartSec=120
 StandardOutput=journal
 StandardError=journal

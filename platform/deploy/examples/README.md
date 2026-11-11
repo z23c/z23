@@ -143,12 +143,20 @@ operator-specific peers. Copy and adapt before installing:
   only then writes the client route and revokes N — any failure leaves N
   in force with a typed `RENEW_*` code, a failed unit and no receipt. The
   confirm step writes the typed renewal receipt, which is the evidence a
-  fleet's tunnel goal reads as a renewal producer. Exit 3 with
-  `RENEW_NO_CURRENT_EPOCH` means no current epoch exists for the peer:
-  pair a first epoch (see the receiver's **PSK path** above) before
-  enabling the timer. The plan's input names client and hub state
-  directories that must both live on this host — the leaf reaches no
-  other machine, so renew each host's outbound peers there.
+  fleet's tunnel goal reads as a renewal producer. The confirm reply also
+  lists `operator_steps` (restart the hub receiver unit; restart the
+  client tunnel runtime) — a standing direction is only fully served once
+  those are acted on, so cross-host pairs still need the deploy-back step
+  after each renewal. Exit 3 with `RENEW_NO_CURRENT_EPOCH` means no
+  current epoch exists for the peer: pair a first epoch (see the
+  receiver's **PSK path** above) before enabling the timer. The plan's
+  input names client and hub state directories that must both live on
+  this host — the leaf reaches no other machine, so renew each host's
+  outbound peers there. The unit's inline shell uses jq (unquoted
+  filters) to carry the plan_id between the two leaf calls because
+  systemd's ExecStart lexer unescapes `\"` inside single quotes, so any
+  shell pattern written with escaped quotes arrives broken; jq and
+  dot-for-quote greps are the forms that survive both lexers.
   **Enable:** copy the unit and timer to `~/.config/systemd/user/`, the
   env example to `~/.config/z23/tunnel-renew-<peer>.env` (edit `Z23_BIN`
   and the input path to real absolute paths — environment files expand no
