@@ -18,6 +18,14 @@
 typedef bool (*app_network_fetch_fn)(void *context, const char *onion,
     const char *path, uint8_t *out, size_t cap, size_t *len, int *status,
     unsigned timeout_ms);
+enum app_network_phase { APP_NET_PHASE_NONE, APP_NET_PHASE_SCRATCH, APP_NET_PHASE_STORE,
+    APP_NET_PHASE_TOR, APP_NET_PHASE_BOARD, APP_NET_PHASE_MANIFEST, APP_NET_PHASE_SLICE };
+struct app_network_diagnostic {
+    enum app_network_phase phase;
+    unsigned elapsed_ms, attempts;
+    int last_http_status;
+    bool transport_ok;
+};
 struct app_network_transport {
     app_network_fetch_fn fetch;
     bool (*cancelled)(void *context);
@@ -25,6 +33,7 @@ struct app_network_transport {
     unsigned timeout_ms; /* deadline, 1..120000; local I/O cannot be interrupted */
     bool parallel_safe; /* fetch callback and context support concurrent calls */
     bool cancelled_parallel_safe; /* cancelled callback may run on slice threads */
+    struct app_network_diagnostic *diagnostic; /* owner thread only */
     bool (*fetch_budgeted)(void *context, const char *onion, const char *path,
         uint8_t *out, size_t cap, size_t *len, int *status,
         int64_t deadline, atomic_uint *attempts, bool (*cancelled)(void *));

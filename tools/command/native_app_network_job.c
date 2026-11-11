@@ -93,22 +93,49 @@ static bool anj_direct(const struct json_value *v, const struct app_network_job_
     memcpy(r->frame, frame, n + 1u); r->rows[0] = row; r->count = 1;
     return true;
 }
-static void anj_error(const struct json_value *v, struct app_network_job_result *r)
+static bool anj_uint(const struct json_value *v, const char *key, int64_t max, unsigned *out)
+{
+    const struct json_value *n = json_get(v, key);
+    if (!n || n->type != JSON_INT || json_get_int(n) < 0 || json_get_int(n) > max) return false;
+    *out = (unsigned)json_get_int(n); return true;
+}
+static bool anj_diagnostic(const struct json_value *v, struct app_network_diagnostic *d)
+{
+    if (!v || v->type != JSON_OBJ || v->num_children != 5) return false;
+    unsigned phase, elapsed, attempts, status;
+    const struct json_value *ok = json_get(v, "transport_ok");
+    if (!ok || ok->type != JSON_BOOL ||
+        !anj_uint(v, "phase", APP_NET_PHASE_SLICE, &phase) ||
+        !anj_uint(v, "elapsed_ms", 135000, &elapsed) || !anj_uint(v, "attempts", 128, &attempts) ||
+        !anj_uint(v, "http_status", 599, &status)) return false;
+    *d = (struct app_network_diagnostic){.phase = (enum app_network_phase)phase,
+        .elapsed_ms = elapsed, .attempts = attempts, .last_http_status = (int)status,
+        .transport_ok = json_get_bool(ok)};
+    return true;
+}
+static bool anj_error(const struct json_value *v, struct app_network_job_result *r)
 {
     const struct json_value *e = json_get(v, "error");
-    if (v->num_children == 3 && e && e->type == JSON_INT && json_get_int(e) >= APP_NETWORK_CANCELLED &&
-        json_get_int(e) <= APP_NETWORK_STORE_REFUSED) r->error = (enum app_network_error)json_get_int(e);
+    if (!e || e->type != JSON_INT || json_get_int(e) < APP_NETWORK_CANCELLED ||
+        json_get_int(e) > APP_NETWORK_STORE_REFUSED) return false;
+    struct app_network_diagnostic d = {0};
+    if (v->num_children != 3 && (v->num_children != 4 || !anj_diagnostic(json_get(v, "diagnostic"), &d))) return false;
+    r->diagnostic = d; r->diagnostic_valid = v->num_children == 4;
+    r->error = (enum app_network_error)json_get_int(e); return true;
 }
 static bool anj_parse(const char *wire, size_t len, const struct app_network_job_args *args,
     struct app_network_job_result *r)
 {
     struct json_value v; json_init(&v);
     bool ok = json_read(&v, wire, len) && app_network_json_canonical(&v, wire, len) && anj_envelope(&v);
-    if (ok && !json_get_bool(json_get(&v, "ok"))) { anj_error(&v, r); ok = false; }
+    r->protocol_valid = r->diagnostic_valid = false;
+    if (ok && !json_get_bool(json_get(&v, "ok"))) {
+        r->protocol_valid = anj_error(&v, r); json_free(&v); return false;
+    }
     else if (ok && !strcmp(args->mode, "carrier")) ok = v.num_children == 4 && anj_carrier(&v, args->selected, r);
     else if (ok && !strcmp(args->mode, "direct")) ok = anj_direct(&v, args, r);
     else if (ok) ok = anj_rows(&v, r) && anj_exact(args, r);
-    json_free(&v); if (ok) r->error = APP_NETWORK_OK; return ok;
+    json_free(&v); r->protocol_valid = ok; if (ok) r->error = APP_NETWORK_OK; return ok;
 }
 #if defined(ZCL_TESTING)
 bool zcl_test_app_network_job_parse(const char *wire, size_t len,
@@ -142,13 +169,20 @@ static bool anj_capture(const struct app_network_job_args *a, const char *const 
         ANJ_WIRE_MAX, (int)a->timeout_ms + 15000, a->cancel, a->cancel_context,
         &cancelled, &observed, &measure);
     r->launched = measure.launched; r->reaped = measure.reaped; r->cancelled = cancelled;
+    r->exit_observed = observed.exit_observed; r->exit_code = observed.exit_code;
+    r->timed_out = observed.timed_out; r->eof = observed.eof; r->overflow = observed.overflow;
+    r->capture_elapsed_ms = measure.wall_us > 0 ? measure.wall_us / 1000 : 0;
     size_t n = observed.output_len;
     bool ok = capture.ok && n < ANJ_WIRE_MAX && !memchr(wire, 0, n);
     if (ok) { wire[n] = 0; ok = anj_parse(wire, n, a, r); }
     if (cancelled) r->error = APP_NETWORK_CANCELLED;
     free(wire); return ok;
 }
-
+#if defined(ZCL_TESTING)
+bool zcl_test_app_network_job_capture(const struct app_network_job_args *a,
+    const char *const argv[], struct app_network_job_result *r)
+{ return anj_capture(a, argv, r); }
+#endif
 
 #endif
 

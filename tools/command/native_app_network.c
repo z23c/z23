@@ -25,6 +25,13 @@
 #define AN_MAX_REQUESTS 128u
 
 struct an_run { const struct app_network_transport *t; int64_t deadline; atomic_uint calls; enum app_network_error *error; };
+static void an_observe(struct an_run *r, enum app_network_phase phase, int status, bool ok)
+{
+    struct app_network_diagnostic *d = r->t->diagnostic;
+    if (!d) return;
+    d->phase = phase; d->attempts = atomic_load_explicit(&r->calls, memory_order_relaxed);
+    d->last_http_status = status >= 0 && status <= 599 ? status : 0; d->transport_ok = ok;
+}
 static bool an_reserve(atomic_uint *attempts)
 {
     unsigned n = atomic_load_explicit(attempts, memory_order_relaxed);
@@ -178,12 +185,18 @@ static bool an_live(struct an_run *r)
         *r->error = APP_NETWORK_CANCELLED; return false;
     }
     int64_t now = platform_time_monotonic_ms();
-    if (now < 0 || now >= r->deadline) { *r->error = APP_NETWORK_TIMEOUT; return false; }
+    if (now < 0 || now >= r->deadline) {
+        if (r->t->diagnostic) r->t->diagnostic->attempts = atomic_load_explicit(&r->calls, memory_order_relaxed);
+        *r->error = APP_NETWORK_TIMEOUT; return false;
+    }
     return true;
 }
 static bool an_fetch(struct an_run *r, const char *onion, const char *path,
                      uint8_t *out, size_t cap, size_t *len)
 {
+    enum app_network_phase phase = !strncmp(path, "/board/", 7) ? APP_NET_PHASE_BOARD :
+        strstr(path, "/slice/") ? APP_NET_PHASE_SLICE : APP_NET_PHASE_MANIFEST;
+    an_observe(r, phase, 0, false);
     *len = 0;
     if (!an_live(r)) return false;
     int64_t now = platform_time_monotonic_ms();
@@ -194,6 +207,7 @@ static bool an_fetch(struct an_run *r, const char *onion, const char *path,
     bool ok = r->t->fetch_budgeted ? r->t->fetch_budgeted(r->t->context, onion, path,
         out, cap, len, &status, r->deadline, &r->calls, r->t->cancelled) :
         r->t->fetch(r->t->context, onion, path, out, cap, len, &status, remaining);
+    an_observe(r, phase, status, ok);
     if (!an_live(r)) return false;
     if (!ok || status != 200) { *r->error = APP_NETWORK_UNAVAILABLE; return false; }
     if (*len > cap) { *r->error = APP_NETWORK_INVALID_RESPONSE; return false; }
@@ -435,6 +449,7 @@ static bool an_slice_join_one(struct an_slice_job *j)
 static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const char *onion,
     const struct zcl_app_offer *o, uint32_t index, size_t off, size_t size, uint8_t *chunk)
 {
+    an_observe(r, APP_NET_PHASE_SLICE, 0, false);
     if (!an_live(r)) return false;
     int64_t now = platform_time_monotonic_ms();
     if (now < 0 || now >= r->deadline) { *r->error = APP_NETWORK_TIMEOUT; return false; }
@@ -448,6 +463,7 @@ static bool an_slice_prepare(struct an_run *r, struct an_slice_job *j, const cha
 }
 static bool an_slice_result(struct an_run *r, const struct an_slice_job *j)
 {
+    an_observe(r, APP_NET_PHASE_SLICE, j->status, j->ok);
     if (!j->ok || j->status != 200) {
         *r->error = APP_NETWORK_UNAVAILABLE;
 #if defined(ZCL_TESTING)
@@ -511,6 +527,7 @@ static bool an_slice_batch_fetch(struct an_run *r, const char *onion, const stru
         if (ok && !completed) platform_sleep_ms(10);
     }
     an_slice_drain(b);
+    if (r->t->diagnostic) r->t->diagnostic->attempts = atomic_load_explicit(&r->calls, memory_order_relaxed);
     if (!an_live(r)) ok = false;
     if (b->lost) { if (ok) *r->error = APP_NETWORK_UNAVAILABLE; ok = false; an_keep_unjoined(b); }
     else free(b);

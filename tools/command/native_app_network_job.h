@@ -20,6 +20,10 @@ struct app_network_job_result {
     char frame[APP_NETWORK_FRAME_HEX_CAP];
     enum app_network_error error;
     bool launched, reaped, cancelled;
+    bool exit_observed, timed_out, eof, overflow, protocol_valid, diagnostic_valid;
+    int exit_code;
+    int64_t capture_elapsed_ms;
+    struct app_network_diagnostic diagnostic;
 };
 /* Synchronous; UI owner must call on a joined worker thread. Result bytes
  * are caller-owned. Parent retains scratch descriptor and cleans only after
@@ -29,5 +33,7 @@ bool app_network_job_run(const struct app_network_job_args *args,
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 bool zcl_test_app_network_job_parse(const char *wire, size_t len,
     const struct app_network_job_args *args, struct app_network_job_result *result);
+bool zcl_test_app_network_job_capture(const struct app_network_job_args *args,
+    const char *const argv[], struct app_network_job_result *result);
 #endif
 #endif

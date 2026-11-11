@@ -1407,6 +1407,86 @@ static int tag_network_retry(void)
     return failures;
 }
 
+struct tag_diagnostic_clock { int64_t ns; unsigned mode; };
+static int64_t tag_diagnostic_now(void *context)
+{ return ((struct tag_diagnostic_clock *)context)->ns; }
+static bool tag_diagnostic_fetch(void *context, const char *onion, const char *path,
+    uint8_t *out, size_t cap, size_t *len, int *status, int64_t deadline,
+    atomic_uint *attempts, bool (*cancelled)(void *))
+{
+    (void)onion; (void)path; (void)out; (void)cap; (void)deadline; (void)cancelled;
+    struct tag_diagnostic_clock *c = context; *len = 0;
+    atomic_store(attempts, c->mode == 2 ? 128u : 1u);
+    *status = c->mode == 0 ? 503 : c->mode == 3 ? 200 : 0;
+    if (c->mode == 3) c->ns += 200000000LL;
+    return c->mode == 0 || c->mode == 3;
+}
+static bool tag_diagnostic_case(unsigned mode)
+{
+    struct tag_diagnostic_clock c = {.ns = 1000000000LL, .mode = mode};
+    clock_iface_t clock = {.now_monotonic_ns = tag_diagnostic_now, .now_wall_ms = tag_diagnostic_now, .self = &c};
+    const clock_iface_t *prior = clock_default(); clock_set_default(&clock);
+    struct app_network_diagnostic d = {0};
+    struct app_network_transport t = {.fetch = app_network_tor_fetch, .fetch_budgeted = tag_diagnostic_fetch,
+        .context = &c, .timeout_ms = 100, .diagnostic = &d};
+    struct zcl_app_offer_row row; size_t count = 0; bool incomplete = false; enum app_network_error error;
+    bool ok = app_network_catalog(&t, TAG_ONION, 1, &row, 1, &count, &incomplete, &error);
+    clock_set_default(prior);
+    return !ok && count == 0 && d.phase == APP_NET_PHASE_BOARD &&
+        d.attempts == (mode == 2 ? 128u : 1u) && d.transport_ok == (mode == 0 || mode == 3) &&
+        d.last_http_status == (mode == 0 ? 503 : mode == 3 ? 200 : 0) &&
+        error == (mode == 3 ? APP_NETWORK_TIMEOUT : APP_NETWORK_UNAVAILABLE);
+}
+static bool tag_diagnostic_wire(unsigned attempts, bool accepted)
+{
+    char wire[384]; struct app_network_job_args args = {.mode = "catalog"};
+    struct app_network_job_result r = {.error = APP_NETWORK_UNAVAILABLE};
+    int n = snprintf(wire, sizeof(wire), "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":2,"
+        "\"diagnostic\":{\"phase\":6,\"elapsed_ms\":120000,\"attempts\":%u,\"http_status\":503,\"transport_ok\":true}}", attempts);
+    if (n <= 0 || (size_t)n >= sizeof(wire)) return false;
+    bool ok = zcl_test_app_network_job_parse(wire, (size_t)n, &args, &r);
+    if (ok || r.protocol_valid != accepted || r.diagnostic_valid != accepted) return false;
+    if (!accepted) return r.error == APP_NETWORK_UNAVAILABLE;
+    if (r.error != APP_NETWORK_TIMEOUT || r.diagnostic.attempts != attempts || r.diagnostic.last_http_status != 503) return false;
+    wire[n - 1] = ','; memcpy(wire + n, "\"url\":\"private\"}", 16);
+    memset(&r, 0, sizeof(r));
+    return !zcl_test_app_network_job_parse(wire, (size_t)n + 16, &args, &r) && !r.protocol_valid;
+}
+extern bool zcl_test_app_network_failure_reply(struct app_network_job_result *, struct zcl_command_reply *);
+static bool tag_diagnostic_render(void)
+{
+    struct app_network_job_result r = {.error = APP_NETWORK_UNAVAILABLE, .launched = true, .reaped = true,
+        .exit_observed = true, .eof = true, .protocol_valid = true, .diagnostic_valid = true,
+        .diagnostic = {.phase = APP_NET_PHASE_SLICE, .attempts = 128, .last_http_status = 503}};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    char wire[8192]; const struct zcl_command_spec *spec = asf_spec("app.library");
+    bool refused = !zcl_test_app_network_failure_reply(&r, &reply);
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &reply, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = refused && n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts"), *worker = json_get(facts, "worker");
+    ok = ok && json_get_bool(json_get(facts, "protocol_valid")) && json_get_int(json_get(worker, "attempts")) == 128 &&
+        json_get_int(json_get(worker, "http_status")) == 503 && !strstr(wire, TAG_ONION);
+    json_free(&doc); zcl_command_reply_free(&reply); return ok;
+}
+static int tag_network_diagnostics(void)
+{
+    int failures = 0;
+    TEST("network failure diagnostics distinguish HTTP, transport, exhausted attempts and deadline") {
+        ASSERT(tag_diagnostic_case(0)); ASSERT(tag_diagnostic_case(1));
+        ASSERT(tag_diagnostic_case(2)); ASSERT(tag_diagnostic_case(3)); PASS();
+    } _test_next:;
+    return failures;
+}
+static int tag_network_diagnostic_protocol(void)
+{
+    int failures = 0;
+    TEST("network failure protocol is bounded and facts survive the public error envelope") {
+        ASSERT(tag_diagnostic_wire(128, true)); ASSERT(tag_diagnostic_wire(129, false));
+        ASSERT(tag_diagnostic_render()); PASS();
+    } _test_next:;
+    return failures;
+}
 static int tag_network_test(void)
 {
     int failures = 0;
@@ -3669,6 +3749,14 @@ static bool tag_directory_empty(const char *path)
         if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) { empty = false; break; }
     closedir(d); return empty;
 }
+static bool tag_worker_missing_capture(const char *const argv[])
+{
+    struct app_network_job_args args = {.mode = "direct", .timeout_ms = 1000};
+    struct app_network_job_result result = {.error = APP_NETWORK_UNAVAILABLE};
+    return !zcl_test_app_network_job_capture(&args, argv, &result) && result.launched && result.reaped &&
+        result.exit_observed && result.exit_code == 2 && result.eof && !result.timed_out &&
+        !result.overflow && !result.protocol_valid;
+}
 static int tag_worker_invalid(struct tag_world *w)
 {
     int failures = 0; char worker[PATH_MAX], home[TAG_PATH], url[257], bytes[256], parent[32];
@@ -3689,6 +3777,7 @@ static int tag_worker_invalid(struct tag_world *w)
         ASSERT(!zcl_spawn_capture_binary(extra, bytes, sizeof(bytes), 5000, &out).ok && out.exit_observed && out.exit_code == 2);
         ASSERT(!zcl_spawn_capture_binary(malformed, bytes, sizeof(bytes), 5000, &out).ok &&
             out.exit_observed && out.exit_code == 2);
+        ASSERT(tag_worker_missing_capture(missing));
         ASSERT(tag_directory_empty(home)); PASS();
     } _test_next:;
     if (old) { (void)setenv("HOME", old, 1); free(old); } else if (!had_home) (void)unsetenv("HOME");
@@ -3709,10 +3798,13 @@ static bool tag_worker_binding(const char *root, struct stat *st)
 }
 static bool tag_worker_refused(const char *root, const char *output)
 {
-    char expected[160], torlog[PATH_MAX]; struct stat unused;
-    int n = snprintf(expected, sizeof(expected), "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":%d}", APP_NETWORK_STORE_REFUSED);
+    char torlog[PATH_MAX]; struct stat unused;
+    struct app_network_job_args args = {.mode = "direct"};
+    struct app_network_job_result result = {0};
+    bool refused = !zcl_test_app_network_job_parse(output, strlen(output), &args, &result);
     int t = snprintf(torlog, sizeof(torlog), "%s/tor.log", root);
-    return n > 0 && (size_t)n < sizeof(expected) && !strcmp(output, expected) &&
+    return refused && result.protocol_valid && result.diagnostic_valid && result.error == APP_NETWORK_STORE_REFUSED &&
+        result.diagnostic.phase == APP_NET_PHASE_STORE && result.diagnostic.attempts == 0 &&
         t > 0 && (size_t)t < sizeof(torlog) && lstat(torlog, &unused) != 0 && errno == ENOENT;
 }
 static bool tag_worker_chain_call(const char *worker, const char *root, const struct stat *st,
@@ -4624,6 +4716,8 @@ int test_app_get(void)
     printf("app get (publish to room apps, get by identity)...\n");
     failures += tag_network_link();
     failures += tag_network_ipc();
+    failures += tag_network_diagnostics();
+    failures += tag_network_diagnostic_protocol();
     failures += tag_network_retry();
     failures += tag_network_test();
     failures += tag_process_observation();

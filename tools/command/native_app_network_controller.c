@@ -228,6 +228,27 @@ static struct an_scratch *an_job_scratch(const char *datadir, uint8_t random[18]
     zcl_package_copy_fail(reply, "TEMP_UNAVAILABLE", mutated, "Cannot safely prepare a private connection.", "app.library");
     return NULL;
 }
+static bool an_worker_facts(struct json_value *facts, const struct app_network_job_result *r)
+{
+    if (!r->protocol_valid || !r->diagnostic_valid) return true;
+    const struct app_network_diagnostic *d = &r->diagnostic;
+    struct json_value worker; json_init(&worker); json_set_object(&worker);
+    bool ok = json_push_kv_int(&worker, "phase", d->phase) && json_push_kv_int(&worker, "elapsed_ms", d->elapsed_ms) &&
+        json_push_kv_int(&worker, "attempts", d->attempts) && json_push_kv_int(&worker, "http_status", d->last_http_status) &&
+        json_push_kv_bool(&worker, "transport_ok", d->transport_ok) && json_push_kv(facts, "worker", &worker);
+    json_free(&worker); return ok;
+}
+static bool an_failure_facts(struct zcl_command_reply *reply, const struct app_network_job_result *r)
+{
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    bool ok = json_push_kv_bool(&facts, "launched", r->launched) && json_push_kv_bool(&facts, "reaped", r->reaped) &&
+        json_push_kv_bool(&facts, "exit_observed", r->exit_observed) && json_push_kv_int(&facts, "exit_code", r->exit_code) &&
+        json_push_kv_bool(&facts, "timed_out", r->timed_out) && json_push_kv_bool(&facts, "eof", r->eof) &&
+        json_push_kv_bool(&facts, "overflow", r->overflow) && json_push_kv_bool(&facts, "protocol_valid", r->protocol_valid) &&
+        json_push_kv_int(&facts, "capture_elapsed_ms", r->capture_elapsed_ms);
+    if (ok) ok = an_worker_facts(&facts, r) && json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts); return ok;
+}
 static bool an_job_reply(struct app_network_job_result *result, bool shown, struct zcl_command_reply *reply)
 {
     if (shown && !result->cancelled && result->error == APP_NETWORK_OK) return true;
@@ -235,10 +256,19 @@ static bool an_job_reply(struct app_network_job_result *result, bool shown, stru
     if (result->cancelled && shown) {
         if (!json_push_kv_str(&reply->data, "status", "canceled"))
             zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "Cannot record cancellation.", "app.library");
-    } else zcl_package_copy_fail(reply, shown ? an_error_code(result->error) : "PRESENTATION_FAILED", false,
-        shown ? "The app could not be retrieved or verified." : "Connection display failed.", "app.library");
+    } else {
+        zcl_package_copy_fail(reply, shown ? an_error_code(result->error) : "PRESENTATION_FAILED", false,
+            shown ? "The app could not be retrieved or verified." : "Connection display failed.", "app.library");
+        if (!an_failure_facts(reply, result)) zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false,
+            "Cannot record connection failure details.", "app.library");
+    }
     return false;
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_app_network_failure_reply(struct app_network_job_result *result, struct zcl_command_reply *reply);
+bool zcl_test_app_network_failure_reply(struct app_network_job_result *result, struct zcl_command_reply *reply)
+{ return an_job_reply(result, true, reply); }
+#endif
 static bool an_job_finish(struct an_progress *p, struct an_scratch *scratch,
     bool started, bool joined, bool shown, struct app_network_job_result *result, struct zcl_command_reply *reply)
 {

@@ -103,6 +103,7 @@ struct anw_result {
     struct zcl_app_offer_row rows[4]; size_t count; bool incomplete;
     uint8_t *bytes; size_t len; enum app_network_error error;
     char frame[APP_NETWORK_FRAME_HEX_CAP];
+    struct app_network_diagnostic diagnostic;
 };
 static bool anw_mode(struct anw_request *r, char **argv)
 {
@@ -156,6 +157,7 @@ static bool anw_fetch(const struct anw_request *r, char **argv,
 static bool anw_dial(const struct anw_request *r, char **argv,
     struct vcs_package_store *store, struct anw_result *out, int64_t start)
 {
+    out->diagnostic.phase = APP_NET_PHASE_TOR;
     bool started = false;
     int64_t now = platform_time_monotonic_ms();
     if (now >= start && now - start < (int64_t)r->timeout && !tor_integration_is_enabled()) {
@@ -168,7 +170,8 @@ static bool anw_dial(const struct anw_request *r, char **argv,
     int64_t elapsed = platform_time_monotonic_ms() - start;
     struct app_network_transport transport = {.fetch = app_network_tor_fetch,
         .timeout_ms = elapsed >= 0 && elapsed < (int64_t)r->timeout ? (unsigned)(r->timeout - (uint64_t)elapsed) : 0,
-        .parallel_safe = true, .fetch_budgeted = app_network_tor_fetch_budgeted};
+        .parallel_safe = true, .fetch_budgeted = app_network_tor_fetch_budgeted,
+        .diagnostic = &out->diagnostic};
     bool ok = started && tor_integration_is_dial_ready() && transport.timeout_ms && anw_fetch(r, argv, &transport, store, out);
     if (started) tor_integration_stop();
     return ok;
@@ -176,13 +179,17 @@ static bool anw_dial(const struct anw_request *r, char **argv,
 static bool anw_connect(const struct anw_request *r, char **argv, struct anw_result *out)
 {
     int64_t start = platform_time_monotonic_ms();
+    out->diagnostic.phase = APP_NET_PHASE_SCRATCH;
     if (start <= 0 || !anw_enter_scratch(argv[6], argv[7], argv[8])) return false;
     struct vcs_package_store *store = NULL;
     if (r->direct || r->carrier) {
+        out->diagnostic.phase = APP_NET_PHASE_STORE;
         store = anw_store_open(".");
         if (!store) { out->error = APP_NETWORK_STORE_REFUSED; return false; }
     }
     bool ok = anw_dial(r, argv, store, out, start);
+    int64_t elapsed = platform_time_monotonic_ms() - start;
+    out->diagnostic.elapsed_ms = elapsed < 0 ? 0u : elapsed > 135000 ? 135000u : (unsigned)elapsed;
     if (store) vcs_package_store_close(store);
     return ok;
 }
@@ -190,8 +197,12 @@ static bool anw_emit_result(int protocol, const struct anw_result *result, bool 
 {
     if (ok) return result->bytes ? anw_emit_carrier(protocol, result->bytes, result->len, result->frame) :
         anw_emit_rows(protocol, result->rows, result->count, result->incomplete);
-    char message[160];
-    int n = snprintf(message, sizeof(message), "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":%d}", (int)result->error);
+    char message[384];
+    const struct app_network_diagnostic *d = &result->diagnostic;
+    int n = snprintf(message, sizeof(message), "{\"schema\":\"zcl.app_network_worker.v1\",\"ok\":false,\"error\":%d,"
+        "\"diagnostic\":{\"phase\":%d,\"elapsed_ms\":%u,\"attempts\":%u,\"http_status\":%d,\"transport_ok\":%s}}",
+        (int)result->error, (int)d->phase, d->elapsed_ms, d->attempts, d->last_http_status,
+        d->transport_ok ? "true" : "false");
     return n > 0 && (size_t)n < sizeof(message) && zcl_write_all(protocol, message, (size_t)n);
 }
 /* Returns 0 only for a complete protocol reply; error code is fixed/local. */
