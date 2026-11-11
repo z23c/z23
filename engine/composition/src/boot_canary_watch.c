@@ -15,6 +15,7 @@
  * writes, no chain locks, no threads beyond the supervised poll Job. */
 
 #include "config/boot_internal.h"
+#include "config/boot_error.h"
 
 #include "services/canary_sentinel_watch.h"
 #include "jobs/canary_sentinel_poll.h"
@@ -50,8 +51,15 @@ static void boot_canary_watch_stop(void *ctx)
 
 bool boot_canary_watch_register(struct boot_svc_ctx *svc)
 {
-    if (!svc)
+    if (!svc) {
+        boot_error_report(BOOT_ERROR_FATAL,
+            "BOOT_CANARY_WATCH_REGISTER_REFUSED",
+            "canary.watch",
+            "canary watch register refused: no boot service context",
+            NULL, 0,
+            "stage=canary_watch_no_context");
         return false;
+    }
     const struct zcl_service_spec spec = {
         .name = "canary_watch",
         .start = boot_canary_watch_start,
