@@ -15239,28 +15239,83 @@ static bool ic_code_tests_has_group(const char *path, const char *group,
     return seen;
 }
 
-/* Index of `group` in `code tests <path>`'s test_groups, or -1. */
-static int ic_code_tests_group_index(const char *path, const char *group)
+static int ic_route_group_index(const struct agent_impact_acc *acc, const char *name)
 {
-    struct zcl_command_reply reply;
+    for (size_t i = 0; i < acc->groups_len; i++)
+        if (strcmp(acc->groups[i], name) == 0)
+            return (int)i;
+    return -1;
+}
+
+static void ic_catalog_route_diagnostic(const char *route,
+                                        const struct agent_impact_acc *acc,
+                                        const struct zcl_command_reply *reply)
+{
+    printf("[catalog route=%s retained=%zu lost=%d positions=%d,%d,%d "
+           "public status=%d listed=%zu retained=%lld lost=%d truncated=%d] ",
+           route ? route : "(null)", acc->groups_len, acc->groups_lost,
+           ic_route_group_index(acc, "code_ontology"),
+           ic_route_group_index(acc, "dev_app_scaffold"),
+           ic_route_group_index(acc, "dev_land"), (int)reply->status,
+           json_size(json_get(&reply->data, "test_groups")),
+           (long long)json_get_int(json_get(&reply->data, "test_groups_retained_count")),
+           json_get_bool(json_get(&reply->data, "test_groups_lost")),
+           json_get_bool(json_get(&reply->data, "test_groups_truncated")));
+}
+
+static bool ic_catalog_prefix(const struct agent_impact_acc *acc,
+                              const struct json_value *groups)
+{
+    if (!groups || groups->type != JSON_ARR || json_size(groups) != 12)
+        return false;
+    for (size_t i = 0; i < 12; i++) {
+        const char *name = json_get_str(json_at(groups, i));
+        if (!name || strcmp(name, acc->groups[i]) != 0) {
+            printf("[catalog prefix index=%zu actual=%s expected=%s] ", i,
+                   name ? name : "(null)", acc->groups[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ic_catalog_metadata(const struct agent_impact_acc *acc,
+                                const struct zcl_command_reply *reply)
+{
+    const struct json_value *count = json_get(&reply->data, "test_groups_retained_count");
+    const struct json_value *lost = json_get(&reply->data, "test_groups_lost");
+    const struct json_value *truncated = json_get(&reply->data, "test_groups_truncated");
+    return reply->status == ZCL_COMMAND_STATUS_PASSED && count && count->type == JSON_INT &&
+           json_get_int(count) == (int64_t)acc->groups_len && lost && lost->type == JSON_BOOL &&
+           !json_get_bool(lost) && truncated && truncated->type == JSON_BOOL &&
+           json_get_bool(truncated) && json_write(&reply->data, NULL, 0) <= ZCL_COMMAND_RESULT_BUDGET;
+}
+
+static bool ic_catalog_projection(void)
+{
+    const char *path = "tools/dev/test_group_" "catalog.def";
+    struct agent_impact_acc acc = {0};
+    bool consensus = false;
+    const char *route = zcl_native_code_route_for_path(path, &acc, &consensus);
+    int co = ic_route_group_index(&acc, "code_ontology");
+    int da = ic_route_group_index(&acc, "dev_app_scaffold");
+    int dl = ic_route_group_index(&acc, "dev_land");
     struct json_value input;
-    json_init(&input); json_set_object(&input);
+    json_init(&input);
+    json_set_object(&input);
     (void)json_push_kv_str(&input, "path", path);
-    struct zcl_command_request request = {
-        .input = &input, .view = "normal", .invoked_name = "code.tests",
-    };
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.code_tests.v1");
     zcl_native_handle_code_tests(&request, &reply);
-    const struct json_value *groups = json_get(&reply.data, "test_groups");
-    int found = -1;
-    for (size_t i = 0; groups && i < groups->num_children && found < 0; i++) {
-        const char *g = json_get_str(&groups->children[i]);
-        if (g && strcmp(g, group) == 0)
-            found = (int)i;
-    }
+    bool ok = route && !acc.groups_lost && acc.groups_len > 12 && co >= 0 &&
+              da > co && dl > da && ic_catalog_metadata(&acc, &reply) &&
+              ic_catalog_prefix(&acc, json_get(&reply.data, "test_groups"));
+    if (!ok)
+        ic_catalog_route_diagnostic(route, &acc, &reply);
     zcl_command_reply_free(&reply);
     json_free(&input);
-    return found;
+    return ok;
 }
 
 static int test_ic_data_file_routes_to_reading_test_group(void)
@@ -15278,23 +15333,8 @@ static int test_ic_data_file_routes_to_reading_test_group(void)
         ASSERT(ic_code_tests_has_group(
             "tools/dev/fixtures/shadow_select/" "corpus.tsv",
             "dev_shadow_select", &n));
-        /* a full-path literal reference in several groups. */
-        ASSERT(ic_code_tests_has_group(
-            "tools/dev/test_group_" "catalog.def", "dev_land", &n));
-        /* The name-reference scan visits referrers in sorted file-name order,
-         * not readdir order: `code tests` caps the groups it prints, so the
-         * directory order of a lived-in tree versus a clean checkout used to
-         * decide whether dev_land survived the cap. code_ontology <
-         * dev_app_scaffold < dev_land by test file name. */
-        {
-            int i_co = ic_code_tests_group_index(
-                "tools/dev/test_group_" "catalog.def", "code_ontology");
-            int i_da = ic_code_tests_group_index(
-                "tools/dev/test_group_" "catalog.def", "dev_app_scaffold");
-            int i_dl = ic_code_tests_group_index(
-                "tools/dev/test_group_" "catalog.def", "dev_land");
-            ASSERT(i_co >= 0 && i_da > i_co && i_dl > i_da);
-        }
+        /* Check ordering in the full route and the capped public projection. */
+        ASSERT(ic_catalog_projection());
         /* a data path no test names adds no group beyond the lint floor
          * (pieces split so this file is no referrer of it). */
         ASSERT(!ic_code_tests_has_group(
