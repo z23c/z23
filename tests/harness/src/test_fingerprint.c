@@ -30,6 +30,8 @@
 #endif
 #if defined(__linux__)
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -536,6 +538,112 @@ static int fx_scan_fixture_tree(void)
 }
 
 #if defined(__linux__)
+static int fx_wait_pool_case(void)
+{
+    pid_t pool[3] = {-1, -1, -1};
+    pool[0] = fork();
+    if (pool[0] == 0) _exit(0);
+    if (pool[0] < 0) return 0;
+    pool[2] = fork();
+    if (pool[2] == 0) _exit(1);
+    if (pool[2] < 0) { (void)waitpid(pool[0], NULL, 0); return 0; }
+    bool ok = !fp_wait_pool(pool, 3);
+    errno = 0;
+    bool first = waitpid(pool[0], NULL, WNOHANG) < 0 && errno == ECHILD;
+    errno = 0;
+    bool last = waitpid(pool[2], NULL, WNOHANG) < 0 && errno == ECHILD;
+    return ok && first && last;
+}
+
+static int fx_wait_stale_case(void)
+{
+    char dir[FP_MAX_PATH], driver[PATH_MAX];
+    test_make_tmpdir(dir, sizeof dir, "fingerprint", "stale-wait");
+    int n = snprintf(driver, sizeof driver, "%s/fp_driver_O2", dir);
+    bool ready = n > 0 && (size_t)n < sizeof driver &&
+        fx_write(dir, "fp_driver_O2", "#!/bin/sh\nexit 0\n") && chmod(driver, 0700) == 0 &&
+        fx_write(dir, "res_A.O2.fill00.txt", "0 OK 00000000000000010000000000000002 9\n") &&
+        fx_write(dir, "res_confirm.txt", "0 OK 00000000000000010000000000000002 9\n");
+    struct sigaction action = {0}; action.sa_handler = SIG_IGN;
+    if (!ready || sigaction(SIGCHLD, &action, NULL) != 0) {
+        (void)test_rm_rf_recursive(dir); return 0;
+    }
+    struct fp_scan_state state = {0};
+    (void)snprintf(state.env.work, sizeof state.env.work, "%s", dir);
+    state.env.jobs = 1; state.ncands = 1;
+    int observed = fp_observe(&state);
+    bool no_observation = state.obs && state.obs[0].state == FP_S_ABSENT;
+    int confirmed = fp_confirm(&state);
+    bool no_confirmation = state.confirm && state.confirm[0].state == FP_S_ABSENT;
+    free(state.obs); free(state.confirm); free(state.final); free(state.need_confirm);
+    bool removed = test_rm_rf_recursive(dir) == 0;
+    return observed == 2 && confirmed == 2 && no_observation && no_confirmation && removed;
+}
+
+static int fx_wait_child_case(int mode)
+{
+    char *const success[] = {"/bin/true", NULL};
+    char *const failure[] = {"/bin/false", NULL};
+    if (mode == 0) {
+        struct sigaction action = {0};
+        action.sa_handler = SIG_IGN;
+        if (sigaction(SIGCHLD, &action, NULL) != 0) return 0;
+        return fp_run(success, NULL, false) < 0;
+    }
+    if (mode == 1)
+        return fp_run(success, NULL, false) == 0 && fp_run(failure, NULL, false) == 1;
+    if (mode == 3) return fx_wait_pool_case();
+    if (mode == 4) return fx_wait_stale_case();
+    pid_t other = fork();
+    if (other < 0) return 0;
+    if (other == 0) _exit(23);
+    int result = fp_wait(-1), status = 0;
+    pid_t got;
+    do { got = waitpid(other, &status, 0); } while (got < 0 && errno == EINTR);
+    return result < 0 && got == other && WIFEXITED(status) && WEXITSTATUS(status) == 23;
+}
+
+static bool fx_wait_watchdog(int mode)
+{
+    int channel[2];
+    if (pipe(channel) != 0) return false;
+    pid_t child = fork();
+    if (child < 0) { close(channel[0]); close(channel[1]); return false; }
+    if (child == 0) {
+        close(channel[0]);
+        int result = fx_wait_child_case(mode);
+        ssize_t wrote = write(channel[1], &result, sizeof result);
+        close(channel[1]);
+        _exit(wrote == (ssize_t)sizeof result ? 0 : 2);
+    }
+    close(channel[1]);
+    struct pollfd event = {.fd = channel[0], .events = POLLIN};
+    int polled;
+    do { polled = poll(&event, 1, 3000); } while (polled < 0 && errno == EINTR);
+    int value = 0;
+    ssize_t got = polled > 0 ? read(channel[0], &value, sizeof value) : -1;
+    close(channel[0]);
+    if (got != (ssize_t)sizeof value) (void)kill(child, SIGKILL);
+    int status = 0; pid_t reaped;
+    do { reaped = waitpid(child, &status, 0); } while (reaped < 0 && errno == EINTR);
+    return got == (ssize_t)sizeof value && value == 1 && reaped == child &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int fx_wait_regressions(void)
+{
+    int failures = 0;
+    const char *const names[] = {"ignored SIGCHLD refuses unknown child outcome",
+        "normal child exit statuses remain exact", "invalid pid never reaps another child",
+        "pool drains launched children after invalid pid", "unobservable drivers reject stale results"};
+    for (int i = 0; i < 5; i++) {
+        bool ok = fx_wait_watchdog(i);
+        printf("fingerprint wait %s... %s\n", names[i], ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    return failures;
+}
+
 static int fx_run_cli(char *const argv[], const char *log)
 {
     pid_t pid = fork();
@@ -773,6 +881,7 @@ int test_fingerprint(void)
 {
     int failures = 0;
 #if defined(__linux__)
+    failures += fx_wait_regressions();
     failures += fx_cli_scan_fixture();
     failures += fx_parser_fixtures();
 #endif

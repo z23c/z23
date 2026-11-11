@@ -114,10 +114,28 @@ static int fp_split(char *s, char **argv, int at, int cap)
 static int fp_wait(pid_t pid)
 {
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0) { }
+    if (pid <= 0) {
+        fprintf(stderr, "fpscan: invalid child pid %ld\n", (long)pid);
+        return -1;
+    }
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    if (got != pid) {
+        fprintf(stderr, "fpscan: cannot wait for child %ld: %s\n", (long)pid, strerror(errno));
+        return -1;
+    }
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+}
+
+/* Drain all launched children, including after an unobservable outcome. */
+static bool fp_wait_pool(const pid_t *pool, size_t count)
+{
+    bool ok = true;
+    for (size_t i = 0; i < count; i++)
+        if (fp_wait(pool[i]) < 0) ok = false;
+    return ok;
 }
 
 static pid_t fp_spawn(char *const *argv, const char *out_log, bool big_env)
@@ -201,7 +219,7 @@ struct fp_env {
     int  jobs;
 };
 
-/* Compile one probe TU. Returns the compiler's exit status; diagnostics land
+/* Compile one probe TU. Returns the child pid; diagnostics land
  * in <work>/fp_probes_<g>.err so the pruning pass can read them. */
 static pid_t fp_compile_group(const struct fp_env *e, size_t g, const char *opt,
                               const char *suffix)
@@ -899,12 +917,19 @@ static int fp_compile_round(struct fp_scan_state *s, struct fp_build_state *b)
         for (size_t g = 0; g < s->ngroups; g++) {
             if (!b->dirty[g]) continue;
             pool[inflight++] = fp_compile_group(&s->env, g, opt, sfx);
-            if ((int)inflight >= s->env.jobs) {
-                for (size_t k = 0; k < inflight; k++) fp_wait(pool[k]);
+            if (pool[inflight - 1] <= 0 || (int)inflight >= s->env.jobs) {
+                bool ok = fp_wait_pool(pool, inflight);
                 inflight = 0;
+                if (!ok) {
+                    fprintf(stderr, "fpscan: could not observe compiler child status\n");
+                    free(pool); fp_index_free(s->ix); return 2;
+                }
             }
         }
-        for (size_t k = 0; k < inflight; k++) fp_wait(pool[k]);
+        if (!fp_wait_pool(pool, inflight)) {
+            fprintf(stderr, "fpscan: could not observe compiler child status\n");
+            free(pool); fp_index_free(s->ix); return 2;
+        }
         if (fp_compile_support(&s->env, "fp_main", opt, sfx, NULL) != 0 ||
             fp_compile_support(&s->env, "fp_stubs", opt, sfx, FP_STUB_CFLAG) != 0) {
             fprintf(stderr, "fpscan: a generated support unit did not compile at %s\n", opt);
@@ -961,7 +986,13 @@ static int fp_link_one(struct fp_scan_state *s, struct fp_build_state *b,
     const char *sfx = which == 0 ? "" : ".o0";
     const char *out = which == 0 ? b->out0 : b->out1;
     char errp[FP_MAX_PATH * 2 + 32];
-    if (fp_link(&s->env, s->ngroups, opt, sfx, out) == 0) return 0;
+    int link_result = fp_link(&s->env, s->ngroups, opt, sfx, out);
+    if (link_result == 0) return 0;
+    if (link_result < 0) {
+        fprintf(stderr, "fpscan: could not observe linker child status\n");
+        fp_index_free(s->ix);
+        return 2;
+    }
     snprintf(errp, sizeof errp, "%s.link.err", out);
     long n = fp_prune_link(errp, s->cands, (size_t)s->ncands, s->disabled,
                            b->gof, b->dirty);
@@ -1076,7 +1107,12 @@ static int fp_observe(struct fp_scan_state *s)
         rargv[at++] = s->jobsarg;
         rargv[at++] = outarg;
         rargv[at] = NULL;
-        if (fp_run(rargv, log, k_cfg[i].big_env) != 0)
+        int result = fp_run(rargv, log, k_cfg[i].big_env);
+        if (result < 0) {
+            fprintf(stderr, "fpscan: could not observe driver child status\n");
+            return 2;
+        }
+        if (result != 0)
             fprintf(stderr, "fpscan: driver run %s exited non-zero\n",
                     k_cfg[i].name);
         fp_parse_results(res, s->obs + (size_t)i * (size_t)s->ncands, (size_t)s->ncands);
@@ -1257,7 +1293,11 @@ static int fp_confirm(struct fp_scan_state *s)
         rargv[at++] = onlyarg;
         rargv[at++] = outarg;
         rargv[at] = NULL;
-        (void)fp_run(rargv, log, false);
+        if (fp_run(rargv, log, false) < 0) {
+            fprintf(stderr, "fpscan: could not observe confirmation child status\n");
+            fp_index_free(s->ix);
+            return 2;
+        }
         fp_parse_results(res, s->confirm, (size_t)s->ncands);
     }
 
