@@ -3874,41 +3874,44 @@ static void fmc_board_posts_walk(const struct json_value *posts,
  * inside the sibling; here that becomes a missing[] entry, never an empty
  * board masquerading as good news. */
 
-static void fmc_brief_board(const struct zcl_command_request *req,
+struct fmc_board_observation {
+    struct fmc_sub sub;
+    const char *failure;
+    int64_t elapsed_ms;
+};
+
+static void fmc_board_observe(const struct zcl_command_request *req,
+                              int64_t deadline_ms, struct fmc_board_observation *obs)
+{
+    memset(obs, 0, sizeof(*obs));
+    fmc_sub_begin(&obs->sub, "zcl.fleet_board_list.v1", req, "fleet.board.list");
+    if (!obs->sub.valid) { obs->failure = "unknown_sibling"; return; }
+    if (!fmc_sub_input(&obs->sub, "{\"open\":true,\"limit\":20}")) {
+        obs->failure = "input_encode"; return;
+    }
+    int64_t t0 = platform_time_monotonic_ms();
+    zcl_native_fleet_board_list_until(&obs->sub.request, &obs->sub.reply, deadline_ms);
+    obs->elapsed_ms = platform_time_monotonic_ms() - t0;
+    obs->sub.ran = true;
+}
+
+static void fmc_brief_board(struct fmc_board_observation *obs,
                             struct json_value *agents,
                             struct json_value *blockers,
                             struct zcl_fmc_cand_reg *cand,
                             struct json_value *missing,
-                            struct json_value *post_ids, int64_t deadline_ms)
+                            struct json_value *post_ids)
 {
-    struct fmc_sub sub;
-    const struct json_value *posts;
-    int64_t t0, t1;
-    fmc_sub_begin(&sub, "zcl.fleet_board_list.v1", req, "fleet.board.list");
-    if (!sub.valid) {
-        fmc_note_missing(missing, "fleet.board", "unknown_sibling", 0);
-        fmc_sub_end(&sub);
-        return;
+    if (obs->failure)
+        fmc_note_missing(missing, "fleet.board", obs->failure, 0);
+    else if (!fmc_sub_ok(&obs->sub))
+        fmc_note_missing(missing, "fleet.board", fmc_board_refusal(&obs->sub), obs->elapsed_ms);
+    else {
+        const struct json_value *posts = json_get(&obs->sub.reply.data, "posts");
+        zcl_fmc_cand_source_ok(cand, ZCL_FMC_CAND_SRC_BOARD);
+        fmc_board_posts_walk(posts, agents, blockers, cand, post_ids);
     }
-    if (!fmc_sub_input(&sub, "{\"open\":true,\"limit\":20}")) {
-        fmc_note_missing(missing, "fleet.board", "input_encode", 0);
-        fmc_sub_end(&sub);
-        return;
-    }
-    t0 = platform_time_monotonic_ms();
-    zcl_native_fleet_board_list_until(&sub.request, &sub.reply, deadline_ms);
-    t1 = platform_time_monotonic_ms();
-    sub.ran = true;
-    if (!fmc_sub_ok(&sub)) {
-        fmc_note_missing(missing, "fleet.board",
-                         fmc_board_refusal(&sub), t1 - t0);
-        fmc_sub_end(&sub);
-        return;
-    }
-    posts = json_get(&sub.reply.data, "posts");
-    zcl_fmc_cand_source_ok(cand, ZCL_FMC_CAND_SRC_BOARD);
-    fmc_board_posts_walk(posts, agents, blockers, cand, post_ids);
-    fmc_sub_end(&sub);
+    fmc_sub_end(&obs->sub);
 }
 
 /* ── brief: ledger section ───────────────────────────────────────────────
@@ -4482,6 +4485,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     struct fmc_local lo;
     struct fmc_emit_ctx ec;
     struct fmc_ledger_view ledger;
+    struct fmc_board_observation board;
     long long mail_cursor, tmp;
     if (!fmc_roster_init(&ro)) {
         fmc_roster_free(&ro);
@@ -4490,6 +4494,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
         return;
     }
     fmc_lists_init(&l);
+    fmc_board_observe(req, observation_deadline_ms, &board);
     memset(&mc, 0, sizeof(mc));
     mc.agents = &l.agents;
     mc.work = &l.work;
@@ -4511,8 +4516,8 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes, &l.tasks);
     fmc_brief_land(req, &l.tasks, &l.missing);
-    fmc_brief_board(req, &l.agents, &l.blockers, &l.cand, &l.missing,
-                    &l.post_ids, observation_deadline_ms);
+    fmc_brief_board(&board, &l.agents, &l.blockers, &l.cand, &l.missing,
+                    &l.post_ids);
     fmc_brief_ledger(req, &l.missing, &ledger);
     fmc_apply_completed(&l.changes, &l.outcomes);
     fmc_capacity_emit(&l.capacity, &qv);

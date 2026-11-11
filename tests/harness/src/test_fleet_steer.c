@@ -6087,6 +6087,51 @@ static int fmx_t_forward_boundary(void)
     return failures;
 }
 
+static int64_t g_fmx_board_now;
+static int g_fmx_board_calls;
+static int64_t fmx_board_clock(void *self) { (void)self; return g_fmx_board_now; }
+static void fmx_board_expire(void) { g_fmx_board_now += INT64_C(10000000000); }
+static char *fmx_board_rpc(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "fleet_board")) return NULL;
+    g_fmx_board_calls++;
+    return strdup("{\"ok\":true,\"has_more\":false,\"posts\":[{\"id\":\"board-id\",\"kind\":\"note\",\"agent\":\"board-agent\",\"text\":\"hello\"}]}");
+}
+
+static int fmx_t_board_deadline(void)
+{
+    int failures = 0;
+    const clock_iface_t *saved = clock_default();
+    clock_iface_t fixed = {fmx_board_clock, fmx_activity_wall_ms, NULL};
+    TEST("steer: board observation precedes a slow mail projection") {
+        ASSERT(fmx_forward_setup("board_deadline"));
+        fmx_seed_inbox("budget", "2026-09-20T00:00:00Z", 1, "m", "b", "note", "retained", "budget-row");
+        g_fmx_board_now = INT64_C(1000000000000); g_fmx_board_calls = 0;
+        clock_set_default(&fixed);
+        node_rpc_client_set_test_hook(fmx_board_rpc);
+        zcl_fleet_steer_test_set_before_change_projection(fmx_board_expire);
+        struct fmx_call call;
+        bool passed = fmx_forward_page(&call, "0|", 1, 65536);
+        zcl_fleet_steer_test_set_before_change_projection(NULL);
+        node_rpc_client_set_test_hook(fmx_no_node);
+        clock_set_default(saved);
+        ASSERT(passed);
+        ASSERT_EQ(g_fmx_board_calls, 1);
+        ASSERT(!fmx_missing_has(&call, "fleet.board"));
+        ASSERT(fmx_arr_has(fmx_arr(&call, "agents"), "board-agent"));
+        ASSERT_EQ(fmx_changes_n(&call), 1);
+        ASSERT(fmx_brief_has_mail_ref(&call, "budget-row"));
+        ASSERT(fmx_str(&call, "cursor_token")[0]);
+        fmx_end(&call);
+        PASS();
+    } _test_next:;
+    zcl_fleet_steer_test_set_before_change_projection(NULL);
+    node_rpc_client_set_test_hook(fmx_no_node);
+    clock_set_default(saved); fmx_restore();
+    return failures;
+}
+
 static int fmx_t_forward_fault(void)
 {
     int failures = 0;
@@ -6135,6 +6180,7 @@ int test_fleet_steer(void)
     failures += fmx_t_forward_budget();
     failures += fmx_t_forward_boundary();
     failures += fmx_t_forward_fault();
+    failures += fmx_t_board_deadline();
     failures += fmx_task_projection_checks();
 #if !defined(_WIN32)
     failures += fmx_t_ledger_age();
