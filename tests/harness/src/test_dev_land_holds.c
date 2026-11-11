@@ -1144,24 +1144,80 @@ static bool dlx_pc_no_ship(struct dlx_call *c, const struct dlx_rig *rig)
         dlx_pc_ship_calls(rig) == 0;
 }
 
-bool dlx_pc_history_ignored(const char *tag, int days_ago,
-                                  const char *reason, bool unsafe)
+static bool dlx_pc_history_reason(struct dlx_call *c, const char *suffix,
+                                  const char *reason)
 {
-    struct dlx_rig rig;
-    struct dlx_call c;
+    char expected[320];
+    int n = snprintf(expected, sizeof expected,
+        "proof-history: attempt=1111111111111111111111111111111111111111-"
+        "2222222222222222222222222222222222222222.%s reason=%s; lint history remains uncertain",
+        suffix, reason);
+    const char *actual = dlx_str(c, "precheck_unproven");
+    bool ok = n > 0 && (size_t)n < sizeof expected && strstr(actual, expected) != NULL;
+    if (!ok) fprintf(stderr, "history reason expected=%s actual=%s\n", expected, actual);
+    return ok;
+}
+
+static void dlx_pc_recording_hash(const char *domain, const char *text, char out[65]);
+
+static bool dlx_pc_request_bound(const char *suffix, int days_ago)
+{
+    static const char failure[] = "child_proof_failed_exit_2\n"
+        "lint check-ship-remote-transaction: FAIL check-ship-remote-transaction 3445 ms (rc=1)\n";
+    char state[512], wt[800], canonical[1600], leaf[144], request[320];
+    char reqhash[65], failhash[65], path[1600], body[1024];
+    if (!platform_state_root(state, sizeof state)) return false;
+    (void)snprintf(wt, sizeof wt, "%s/land/wt", state);
+    (void)snprintf(leaf, sizeof leaf, "1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.%s", suffix);
+    int64_t started = DLX_PC_NOW - (int64_t)days_ago * 86400;
+    int64_t recorded = started > DLX_PC_NOW ? started : DLX_PC_NOW;
+    (void)snprintf(request, sizeof request, "zcl.dev_proof_request.v1\n1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n%lld\n1\n", (long long)started);
+    dlx_pc_recording_hash("zcl.dev_proof_failure_recorded.request.v1", request, reqhash);
+    dlx_pc_recording_hash("zcl.dev_proof_failure_recorded.failure.v1", failure, failhash);
+    (void)snprintf(path, sizeof path, ".cache/zcl-dev-proof/attempts/%s/logs/failure-time.v1", leaf);
+    (void)snprintf(body, sizeof body, "zcl.dev_proof_failure_recorded.v1\nattempt=%s\nlocal=1111111111111111111111111111111111111111\nbase=2222222222222222222222222222222222222222\nrequest_sha3=%s\nfailure_sha3=%s\nrecorded_unix=%lld\nrecorded_monotonic_us=2\n", leaf, reqhash, failhash, (long long)recorded);
+    if (!dlx_pc_owned_file(wt, path, body, 0600) ||
+        !platform_directory_canonical_real(wt, canonical, sizeof canonical)) return false;
+    struct zcl_dev_proof_history_failure row;
+    bool ok = zcl_dev_proof_history_failure_read(canonical, leaf, &row) &&
+              row.classification == ZCL_PROOF_HISTORY_FAILURE && row.digest[0] &&
+              row.request_started_unix == started &&
+              row.time_state == ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING &&
+              row.recorded_unix == recorded &&
+              row.observation_state == ZCL_PROOF_HISTORY_OBSERVATION_MISSING;
+    if (!ok) fprintf(stderr, "history request bound invalid suffix=%s days=%d\n", suffix, days_ago);
+    return ok;
+}
+
+static bool dlx_pc_history_ignored_setup(struct dlx_rig *rig, const char *tag,
+                                         int days_ago, const char *reason, bool unsafe)
+{
     char archive[1600], failed[512];
-    if (!dlx_pc_rig(&rig, tag, true, "check-learned-one\n") ||
+    if (!dlx_pc_rig(rig, tag, true, "check-learned-one\n") ||
         !dlx_pc_history_archive("aaaaaa", days_ago, reason, archive)) return false;
+    if (!unsafe && (days_ago > 7 || days_ago < 0) &&
+        !dlx_pc_request_bound("aaaaaa", days_ago)) return false;
     if (unsafe) {
         if (!dlx_pc_history_archive("bbbbbb", 1, "child_proof_failed_exit_2", archive) ||
             unlink(archive) != 0 || symlink("../request", archive) != 0) return false;
     }
     dlx_pc_row(failed, sizeof(failed), 8, "failed", "lint", 1, "check-learned-one failed");
-    if (!dlx_pc_outcomes(failed)) return false;
+    return dlx_pc_outcomes(failed);
+}
+
+bool dlx_pc_history_ignored(const char *tag, int days_ago,
+                                  const char *reason, bool unsafe)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    if (!dlx_pc_history_ignored_setup(&rig, tag, days_ago, reason, unsafe)) return false;
     dlx_pc_submit(&c, &rig, NULL, NULL);
     bool ok = dlx_run(&c) && dlx_pc_no_ship(&c, &rig);
     if (unsafe || days_ago > 7 || days_ago < 0)
         ok = ok && strstr(dlx_str(&c, "precheck_unproven"), "proof-history:") != NULL;
+    if (!unsafe && (days_ago > 7 || days_ago < 0))
+        ok = dlx_pc_history_reason(&c, "aaaaaa", days_ago > 7 ?
+                                   "old-request-start" : "future-request-start") && ok;
     dlx_end(&c);
     dlx_restore();
     return ok;
@@ -1259,6 +1315,66 @@ static void dlx_pc_recording_hash(const char *domain, const char *text, char out
     sha3_256_write(&sha, (const uint8_t *)text, strlen(text));
     sha3_256_finalize(&sha, hash);
     zcl_hex_encode(hash, sizeof(hash), out);
+}
+
+static bool dlx_pc_future_observation(void)
+{
+    static const char leaf[] = "1111111111111111111111111111111111111111-"
+                               "2222222222222222222222222222222222222222.aaaaaa";
+    static const char failure[] = "child_proof_failed_exit_2\n"
+        "lint check-ship-remote-transaction: FAIL check-ship-remote-transaction 3445 ms (rc=1)\n";
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], state[512], wt[800], request[320], reqhash[65], failhash[65];
+    char path[1600], body[1024], outcome[512], canonical[1600];
+    if (!dlx_pc_rig(&rig, "future_observation", true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", 1, "child_proof_failed_exit_2", archive) ||
+        !platform_state_root(state, sizeof state)) return false;
+    (void)snprintf(wt, sizeof wt, "%s/land/wt", state);
+    (void)snprintf(request, sizeof request, "zcl.dev_proof_request.v1\n1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n%lld\n1\n", (long long)DLX_PC_NOW - 86400);
+    dlx_pc_recording_hash("zcl.dev_proof_failure_observed.request.v1", request, reqhash);
+    dlx_pc_recording_hash("zcl.dev_proof_failure_observed.failure.v1", failure, failhash);
+    (void)snprintf(path, sizeof path, ".cache/zcl-dev-proof/attempts/%s/logs/failure-observed.v1", leaf);
+    (void)snprintf(body, sizeof body, "zcl.dev_proof_failure_observed.v1\nattempt=%s\nlocal=1111111111111111111111111111111111111111\nbase=2222222222222222222222222222222222222222\nrequest_sha3=%s\nfailure_sha3=%s\nobserved_upper_unix=%lld\nobserved_upper_monotonic_us=2\n", leaf, reqhash, failhash, (long long)DLX_PC_NOW + 86400);
+    if (!dlx_pc_owned_file(wt, path, body, 0600) || !dlx_pc_ship_files(&rig, true) ||
+        !platform_directory_canonical_real(wt, canonical, sizeof canonical)) return false;
+    struct zcl_dev_proof_history_failure row;
+    bool bound = zcl_dev_proof_history_failure_read(canonical, leaf, &row) &&
+                 row.observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER &&
+                 row.observed_upper_unix == DLX_PC_NOW + 86400;
+    dlx_pc_row(outcome, sizeof outcome, 8, "failed", "lint", 1, "check-learned-one failed");
+    if (!dlx_pc_outcomes(outcome)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    bool reason_ok = dlx_pc_history_reason(&c, "aaaaaa", "future-observation-bound");
+    bool ok = bound && ran && dlx_ok(&c) && reason_ok &&
+              dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-ship-remote-transaction");
+    dlx_end(&c); dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_multiple_uncertain(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char archive[1600], outcome[512];
+    if (!dlx_pc_rig(&rig, "multiple_uncertain", true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", 10, "child_proof_failed_exit_2", archive) ||
+        !dlx_pc_history_archive("bbbbbb", -1, "child_proof_failed_exit_2", archive) ||
+        !dlx_pc_request_bound("aaaaaa", 10) ||
+        !dlx_pc_request_bound("bbbbbb", -1)) return false;
+    dlx_pc_row(outcome, sizeof outcome, 8, "failed", "lint", 1, "check-learned-one failed");
+    if (!dlx_pc_outcomes(outcome)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    const char *actual = dlx_str(&c, "precheck_unproven");
+    bool old = strstr(actual, ".aaaaaa reason=old-request-start;") != NULL;
+    bool future = strstr(actual, ".bbbbbb reason=future-request-start;") != NULL;
+    bool ok = ran && dlx_pc_no_ship(&c, &rig) && (old || future) &&
+              strstr(actual, "proof-history: attempt=1111111111111111111111111111111111111111-2222222222222222222222222222222222222222.") != NULL;
+    if (!ok) fprintf(stderr, "multiple history actual=%s\n", actual);
+    dlx_end(&c); dlx_restore();
+    return ok;
 }
 
 static bool dlx_pc_recording_case(int days_ago, int record_days, bool corrupt, bool bad_observation,
@@ -1363,7 +1479,8 @@ static bool dlx_pc_empty_typed(const struct zcl_dev_proof_history_failure *row,
     return false;
 }
 
-static bool dlx_pc_empty_case(enum dlx_empty_bound kind, int days, bool uncertain)
+static bool dlx_pc_empty_case(enum dlx_empty_bound kind, int days, bool uncertain,
+                              const char *expected_reason)
 {
     static const char leaf[] = "1111111111111111111111111111111111111111-"
                                "2222222222222222222222222222222222222222.aaaaaa";
@@ -1386,6 +1503,8 @@ static bool dlx_pc_empty_case(enum dlx_empty_bound kind, int days, bool uncertai
     bool ran = dlx_run(&c);
     bool actual = strstr(dlx_str(&c, "precheck_unproven"), "proof-history:") != NULL;
     bool ok = bound && ran && dlx_ok(&c) && actual == uncertain;
+    if (expected_reason)
+        ok = dlx_pc_history_reason(&c, "aaaaaa", expected_reason) && ok;
     if (!ok) fprintf(stderr, "empty history kind=%d days=%d read=%d bound=%d ran=%d uncertain=%d expected=%d\n",
                      kind, days, read, bound, ran, actual, uncertain);
     dlx_end(&c); dlx_restore();
@@ -1395,17 +1514,21 @@ static bool dlx_pc_empty_case(enum dlx_empty_bound kind, int days, bool uncertai
 static bool dlx_pc_empty_cases(void)
 {
     bool ok = true;
-    const struct { enum dlx_empty_bound kind; int days; bool uncertain; } cases[] = {
-        {DLX_EMPTY_RECORDED, 8, false}, {DLX_EMPTY_OBSERVED, 8, false},
-        {DLX_EMPTY_RECORDED, 7, true}, {DLX_EMPTY_RECORDED, 1, true},
-        {DLX_EMPTY_RECORDED, -1, true}, {DLX_EMPTY_NONE, 0, true},
-        {DLX_EMPTY_OBSERVED, 7, true}, {DLX_EMPTY_OBSERVED, 1, true},
-        {DLX_EMPTY_OBSERVED, -1, true},
-        {DLX_EMPTY_CORRUPT, 8, true}, {DLX_EMPTY_BAD_OBSERVATION, 8, true},
-        {DLX_EMPTY_REC_BAD_OBS, 8, true},
+    const struct { enum dlx_empty_bound kind; int days; bool uncertain; const char *reason; } cases[] = {
+        {DLX_EMPTY_RECORDED, 8, false, NULL}, {DLX_EMPTY_OBSERVED, 8, false, NULL},
+        {DLX_EMPTY_RECORDED, 7, true, "missing-failure-detail"},
+        {DLX_EMPTY_RECORDED, 1, true, "missing-failure-detail"},
+        {DLX_EMPTY_RECORDED, -1, true, "missing-failure-detail"},
+        {DLX_EMPTY_NONE, 0, true, "missing-failure-detail"},
+        {DLX_EMPTY_OBSERVED, 7, true, "missing-failure-detail"},
+        {DLX_EMPTY_OBSERVED, 1, true, "missing-failure-detail"},
+        {DLX_EMPTY_OBSERVED, -1, true, "missing-failure-detail"},
+        {DLX_EMPTY_CORRUPT, 8, true, NULL}, {DLX_EMPTY_BAD_OBSERVATION, 8, true, NULL},
+        {DLX_EMPTY_REC_BAD_OBS, 8, true, NULL},
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
-        if (!dlx_pc_empty_case(cases[i].kind, cases[i].days, cases[i].uncertain))
+        if (!dlx_pc_empty_case(cases[i].kind, cases[i].days, cases[i].uncertain,
+                               cases[i].reason))
             ok = false;
     return ok;
 }
@@ -1439,7 +1562,9 @@ bool dlx_pc_observation_aged(void)
     dlx_end(&c);
     dlx_restore();
     bool empty_ok = dlx_pc_empty_cases();
-    return ok && empty_ok && dlx_pc_recording_cases();
+    bool future_ok = dlx_pc_future_observation();
+    bool multiple_ok = dlx_pc_multiple_uncertain();
+    return ok && empty_ok && future_ok && multiple_ok && dlx_pc_recording_cases();
 }
 
 bool dlx_pc_gate_set_learns(void)

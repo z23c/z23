@@ -428,8 +428,33 @@ static void pc_history_unproven(struct pc_run *r, const char *reason)
 struct pc_history {
     struct zcl_land_precheck_gates gates;
     int64_t now;
-    bool uncertain;
+    const char *uncertain_reason;
+    char uncertain_attempt[sizeof(((struct zcl_dev_proof_history_failure *)0)->attempt)];
 };
+
+/* Retain the first visited uncertainty; directory order is not chronology. */
+static void pc_history_uncertain(struct pc_history *h,
+                                  const struct zcl_dev_proof_history_failure *row,
+                                  const char *reason)
+{
+    if (h->uncertain_reason) return;
+    h->uncertain_reason = reason;
+    (void)snprintf(h->uncertain_attempt, sizeof(h->uncertain_attempt), "%s", row->attempt);
+}
+
+static bool pc_history_request_recent(struct pc_history *h,
+                                       const struct zcl_dev_proof_history_failure *row)
+{
+    if (row->request_started_unix > h->now) {
+        pc_history_uncertain(h, row, "future-request-start");
+        return false;
+    }
+    if (row->request_started_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S) {
+        pc_history_uncertain(h, row, "old-request-start");
+        return false;
+    }
+    return true;
+}
 
 static bool pc_recording_expired(const struct zcl_dev_proof_history_failure *row,
                                  int64_t now)
@@ -454,7 +479,7 @@ static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
             row->observed_upper_unix <= h->now &&
             row->observed_upper_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S)
             return true;
-        h->uncertain = true;
+        pc_history_uncertain(h, row, "missing-failure-detail");
         return true;
     }
     if (strncmp(row->digest, "lint:", 5) != 0 &&
@@ -464,17 +489,15 @@ static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
     if (pc_recording_expired(row, h->now))
         return true;
     if (row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER) {
-        if (row->observed_upper_unix > h->now) h->uncertain = true;
+        if (row->observed_upper_unix > h->now)
+            pc_history_uncertain(h, row, "future-observation-bound");
         else if (row->observed_upper_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S)
             return true; /* Failure existed no later than this old bound. */
     }
     /* A retained failure observed now and requested within the window is
      * definitely recent. An older request cannot date its eventual failure. */
-    if (row->request_started_unix > h->now ||
-        row->request_started_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S) {
-        h->uncertain = true;
+    if (!pc_history_request_recent(h, row))
         return true;
-    }
     pc_gates_from_text(row->digest, &h->gates);
     return h->gates.count < ZCL_LAND_PRECHECK_MAX_GATES;
 }
@@ -520,8 +543,13 @@ static void pc_history_learn(struct pc_run *r, const char *land,
             pc_history_unproven(r, "historical gate capacity reached; historical gates not merged");
         else {
             *g = merged;
-            if (h->uncertain)
-                pc_history_unproven(r, "older/future request start or missing failure step leaves lint history uncertain; uncertain gates not learned");
+            if (h->uncertain_reason) {
+                char detail[320];
+                (void)snprintf(detail, sizeof(detail),
+                    "attempt=%s reason=%s; lint history remains uncertain",
+                    h->uncertain_attempt, h->uncertain_reason);
+                pc_history_unproven(r, detail);
+            }
         }
     }
     if (!observation_ok)
