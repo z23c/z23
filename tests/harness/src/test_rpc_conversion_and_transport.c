@@ -1247,7 +1247,7 @@ static const struct rt_real rt_real_cases[] = {
     { .name = "control: relative 40ms + 300ms cookie still sends", .want = "", .min_ms = 250, .req = 1, .call = rt_relative40, .fifo = true },
     { .name = "board observation: healthy data", .want = "PASSED", .mode = RT_HEALTHY, .req = 1, .call = rt_board, .arg = 2000 },
     { .name = "direct board: healthy reply delayed 300ms unchanged", .want = "PASSED", .mode = RT_HEALTHY, .delay = 300, .min_ms = 280, .req = 1, .call = rt_board },
-    { .name = "board observation: missing page flag refused", .want = "BAD_TOOL_BODY", .mode = RT_BOARD_MISSING, .req = 1, .call = rt_board, .arg = 2000 },
+    { .name = "board observation: missing page flag refused", .want = "BOARD_PAGE_METADATA_MISSING", .mode = RT_BOARD_MISSING, .req = 1, .call = rt_board, .arg = 2000 },
     { .name = "board observation: wrong page flag type refused", .want = "BAD_TOOL_BODY", .mode = RT_BOARD_BAD_TYPE, .req = 1, .call = rt_board, .arg = 2000 },
     { .name = "board observation: 300ms reply honestly unknown at FAST cap", .want = "NODE_UNAVAILABLE",
       .mode = RT_HEALTHY, .delay = 300, .min_ms = 230, .max_ms = 450, .req = 1, .call = rt_board, .arg = 2000 },

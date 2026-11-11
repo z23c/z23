@@ -511,6 +511,26 @@ static bool fb_is_board_list(const struct zcl_command_request *request)
            strcmp(request->spec->path, "fleet.board.list") == 0;
 }
 
+static bool fb_page_body_valid(const struct json_value *posts,
+                               const struct json_value *more,
+                               struct zcl_command_reply *reply)
+{
+    if (posts && posts->type == JSON_ARR) {
+        if (more && more->type == JSON_BOOL) return true;
+        if (!more) {
+            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                    "BOARD_PAGE_METADATA_MISSING", "serialize", false,
+                    "board reply lacks has_more; completeness is unknown. Check the node version and use the reviewed deployment workflow to upgrade it.",
+                    "fleet.board.list");
+            return false;
+        }
+    }
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "BAD_TOOL_BODY", "serialize", false,
+            "board page response is malformed", "fleet.board.list");
+    return false;
+}
+
 /* Project a node list reply into the command reply, lines first. */
 void zcl_native_fleet_board_project_list(
     const struct zcl_command_request *request,
@@ -519,13 +539,7 @@ void zcl_native_fleet_board_project_list(
     const struct json_value *posts = json_get(body, "posts");
     bool board_list = fb_is_board_list(request);
     const struct json_value *more = json_get(body, "has_more");
-    if (board_list && (!posts || posts->type != JSON_ARR ||
-                       !more || more->type != JSON_BOOL)) {
-        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "BAD_TOOL_BODY", "serialize", false,
-                "board page response is malformed", "fleet.board.list");
-        return;
-    }
+    if (board_list && !fb_page_body_valid(posts, more, reply)) return;
     struct json_value rows;
     json_init(&rows);
     if (!fb_page_rows(posts, &rows)) {

@@ -2378,6 +2378,36 @@ static bool fb_page_registry_controls(const struct zcl_command_spec *spec)
     return ok;
 }
 
+static bool fb_page_missing_metadata(const struct zcl_command_spec *spec)
+{
+    static const struct { const char *body; const char *code; } cases[] = {
+        {"{\"posts\":[]}", "BOARD_PAGE_METADATA_MISSING"},
+        {"{\"posts\":[],\"has_more\":null}", "BAD_TOOL_BODY"},
+        {"{\"posts\":[],\"has_more\":0}", "BAD_TOOL_BODY"},
+        {"{\"posts\":{}}", "BAD_TOOL_BODY"},
+        {"{}", "BAD_TOOL_BODY"},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct json_value body;
+        json_init(&body);
+        bool parsed = json_read(&body, cases[i].body, strlen(cases[i].body));
+        struct zcl_command_request req = {.spec = spec, .budget_bytes = 4096};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+        if (parsed) zcl_native_fleet_board_project_list(&req, &body, &reply);
+        ok = ok && parsed && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             !strcmp(reply.error.code, cases[i].code) &&
+             !json_get(&reply.data, "posts") && !json_get(&reply.data, "has_more");
+        if (i == 0)
+            ok = ok && strstr(reply.error.message, "completeness is unknown") &&
+                 strstr(reply.error.message, "node version");
+        zcl_command_reply_free(&reply);
+        json_free(&body);
+    }
+    return ok;
+}
+
 static bool fb_page_oversize_first(const struct zcl_command_spec *spec)
 {
     struct json_value body, posts, item;
@@ -2471,6 +2501,7 @@ static int test_fleet_board_keyset_pages(void)
             zcl_command_catalog(), "fleet.board.list", NULL);
         ASSERT(spec != NULL);
         ASSERT(fb_page_registry_controls(spec));
+        ASSERT(fb_page_missing_metadata(spec));
         ASSERT(fb_page_oversize_first(spec));
         ASSERT(fb_page_refuses_nonprogress(spec));
         struct zcl_command_request request = {.spec = spec, .input = &input,
