@@ -17,6 +17,10 @@
  *       installed into the cache (verify-before-store).
  *   (f) block_parse_cache_evict(height,hash) removes exactly that one entry
  *       and leaves every other resident entry untouched.
+ *   (h) the ZCL_PARSE_CACHE_MAX_BYTES resident byte ceiling evicts the OLDEST
+ *       unpinned entries on insert, keeps the newest, and never evicts a
+ *       pinned entry (setenv'd before the group's first cache use — the
+ *       ceiling is consumed by a process-wide first-use read).
  *
  * The cache is driven through its real public API (block_parse_cache_get /
  * block_parse_cache_clear). Misses are satisfied from synthetic blocks written
@@ -39,6 +43,7 @@
 #include "json/json.h"
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 
@@ -602,6 +607,143 @@ done:
     return failures;
 }
 
+/* ── Test (h): resident byte ceiling ────────────────────────────
+ * The entry-count ring bound does not bound RSS: a parsed body is large and
+ * variable, so ZCL_PARSE_CACHE_MAX_BYTES must evict the OLDEST UNPINNED
+ * entries on insert once the tracked resident bytes pass the ceiling, keep
+ * the newest resident, and never touch a pinned entry. The ceiling is read
+ * once per process on the first cache use, so test_block_parse_cache() sets
+ * a tiny env value BEFORE this group's first cache call. Each fixture below
+ * carries 200 tx outputs (~10 KiB resident each, struct script embeds its
+ * buffer), so five resident entries exceed the 8 MiB clamp floor and the
+ * eviction walk provably starts at the fifth insert. */
+
+#define BPC_CEILING_N      8    /* fixtures inserted */
+#define BPC_CEILING_NOUT   200  /* outputs per fixture (sizes the body) */
+#define BPC_CEILING_PINNED 1    /* the pinned survivor */
+#define BPC_CEILING_BASE   1600 /* first height (distinct ring slots) */
+
+static bool bpc_ceiling_make_fixtures(struct fixture *fxs, int n,
+                                      const char *datadir)
+{
+    bool ok = true;
+    for (int i = 0; i < n && ok; i++) {
+        struct block src;
+        build_block(&src, (uint32_t)(0xD000 + i), BPC_CEILING_NOUT);
+        ok = make_fixture(&fxs[i], datadir, &src, BPC_CEILING_BASE + i);
+        block_free(&src);
+    }
+    return ok;
+}
+
+static bool bpc_ceiling_insert(struct fixture *fxs, int i, const char *datadir)
+{
+    struct block g; block_init(&g);
+    bool ok = block_parse_cache_get(BPC_CEILING_BASE + i, fxs[i].hash.data,
+                                    &fxs[i].bi, datadir, &g);
+    block_free(&g);
+    return ok;
+}
+
+static bool bpc_ceiling_pin_fixture(struct block_parse_handle *pin,
+                                    struct fixture *fxs, const char *datadir)
+{
+    return block_parse_cache_acquire(BPC_CEILING_BASE + BPC_CEILING_PINNED,
+                                     fxs[BPC_CEILING_PINNED].hash.data,
+                                     &fxs[BPC_CEILING_PINNED].bi, datadir,
+                                     pin) &&
+           block_parse_handle_block(pin)->vtx[0].num_vout ==
+               BPC_CEILING_NOUT;
+}
+
+/* Insert 0..PINNED, pin PINNED, then insert the rest: from the fifth resident
+ * entry on, every insert pushes past the ceiling and must evict
+ * oldest-unpinned, skipping the pin. */
+static bool bpc_ceiling_populate_and_pin(struct fixture *fxs, int n,
+                                         const char *datadir,
+                                         struct block_parse_handle *pin_out)
+{
+    if (!bpc_ceiling_insert(fxs, 0, datadir) ||
+        !bpc_ceiling_insert(fxs, 1, datadir))
+        return false;
+    if (!bpc_ceiling_pin_fixture(pin_out, fxs, datadir))
+        return false;
+    for (int i = BPC_CEILING_PINNED + 1; i < n; i++) {
+        if (!bpc_ceiling_insert(fxs, i, datadir))
+            return false;
+    }
+    return true;
+}
+
+/* Residency probes with HAVE_DATA stripped: a HIT ignores the broken index,
+ * a MISS fails — each probe reads residency directly. *old_evicted: the two
+ * oldest unpinned entries are gone; *survivors_hit: the pinned entry and the
+ * newest are still served byte-identically from the ring. */
+static void bpc_ceiling_residency(struct fixture *fxs, int n,
+                                  const char *datadir,
+                                  bool *old_evicted, bool *survivors_hit)
+{
+    struct block_index broken0 = bpc_index_without_data(&fxs[0].bi);
+    struct block_index broken2 = bpc_index_without_data(&fxs[2].bi);
+    struct block_index brokenP =
+        bpc_index_without_data(&fxs[BPC_CEILING_PINNED].bi);
+    struct block_index brokenL = bpc_index_without_data(&fxs[n - 1].bi);
+    *old_evicted =
+        !bpc_get_matches_fixture(&fxs[0], &broken0, datadir,
+                                 BPC_CEILING_BASE + 0) &&
+        !bpc_get_matches_fixture(&fxs[2], &broken2, datadir,
+                                 BPC_CEILING_BASE + 2);
+    *survivors_hit =
+        bpc_get_matches_fixture(&fxs[BPC_CEILING_PINNED], &brokenP, datadir,
+                                BPC_CEILING_BASE + BPC_CEILING_PINNED) &&
+        bpc_get_matches_fixture(&fxs[n - 1], &brokenL, datadir,
+                                BPC_CEILING_BASE + n - 1);
+}
+
+static int test_byte_ceiling_evicts_oldest(const char *datadir)
+{
+    int failures = 0;
+    block_parse_cache_clear();
+
+    TEST("bpc: byte ceiling evicts oldest unpinned, keeps newest and pinned") {
+        struct fixture fxs[BPC_CEILING_N];
+        struct block_parse_handle pin = {0};
+        bool inserted =
+            bpc_ceiling_make_fixtures(fxs, BPC_CEILING_N, datadir) &&
+            bpc_ceiling_populate_and_pin(fxs, BPC_CEILING_N, datadir, &pin);
+        /* The pinned borrow must still be the pinned body after evictions
+         * walked right past it. */
+        bool pin_intact = inserted &&
+            block_parse_handle_block(&pin)->vtx[0].num_vout ==
+                BPC_CEILING_NOUT;
+        block_parse_cache_release(&pin);
+
+        bool old_evicted = false;
+        bool survivors_hit = false;
+        if (inserted)
+            bpc_ceiling_residency(fxs, BPC_CEILING_N, datadir, &old_evicted,
+                                  &survivors_hit);
+
+        if (!inserted || !pin_intact) {
+            printf("FAIL (populate/pin: inserted=%d intact=%d)\n",
+                   inserted, pin_intact);
+            failures++;
+        } else if (!old_evicted) {
+            printf("FAIL (an over-ceiling insert left an OLD entry resident)\n");
+            failures++;
+        } else if (!survivors_hit) {
+            printf("FAIL (byte ceiling evicted the pinned or newest entry)\n");
+            failures++;
+        } else {
+            printf("OK\n");
+        }
+
+        for (int i = 0; i < BPC_CEILING_N; i++) free(fxs[i].bytes);
+    }
+    block_parse_cache_clear();
+    return failures;
+}
+
 /* ── Test (d): sealed-segment source below the frontier ───────────
  * The fold substrate: when a sealed segment covers a height, the miss path
  * serves the body from the mmap'd segment (byte-identical, hash-bound) instead
@@ -1018,6 +1160,15 @@ int test_block_parse_cache(void)
     printf("\n=== block_parse_cache (borrow / key / ring / segment) ===\n");
     int failures = 0;
     char tmpdir[256];
+
+    /* The byte ceiling (block_parse_cache.h) is consumed ONCE, on this
+     * process's first cache use — the same lazy init as the pressure sink —
+     * so the tiny test ceiling must be set before ANY case below runs. The
+     * clamp floor (8 MiB) sits far above every other case's few-entry
+     * footprint, so only the ceiling case itself evicts. */
+    if (setenv("ZCL_PARSE_CACHE_MAX_BYTES", "8388608", 1) != 0)
+        printf("WARN (setenv ceiling failed: ceiling case will FAIL)\n");
+
     make_test_dir(tmpdir, sizeof(tmpdir));
 
     failures += test_deep_clone_equality(tmpdir);
@@ -1025,6 +1176,7 @@ int test_block_parse_cache(void)
     failures += test_ring_replacement(tmpdir);
     failures += test_no_cache_on_hash_mismatch(tmpdir);
     failures += test_evict_removes_one_key(tmpdir);
+    failures += test_byte_ceiling_evicts_oldest(tmpdir);
     failures += test_segment_backed_read(tmpdir);
     failures += test_segment_corruption_fails_closed(tmpdir);
     failures += test_borrowed_contract(tmpdir);
@@ -1032,5 +1184,6 @@ int test_block_parse_cache(void)
 
     block_parse_cache_clear();
     cleanup_test_dir(tmpdir);
+    unsetenv("ZCL_PARSE_CACHE_MAX_BYTES");
     return failures;
 }

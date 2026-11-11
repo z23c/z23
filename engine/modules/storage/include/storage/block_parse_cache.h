@@ -56,6 +56,24 @@ struct block_parse_handle {
  * hardcoding a duplicate that can silently drift out of sync. */
 #define BLOCK_PARSE_CACHE_CAPACITY 2048
 
+/* Resident byte ceiling on top of that entry count. Capacity alone bounds
+ * only HOW MANY bodies are resident, not how big they are — a parsed body is
+ * large and variable (every tx output costs ~10 KiB resident because struct
+ * script embeds its buffer inline, and a header nSolution is variable), so
+ * 2048 canonical bodies can reach gigabytes of RSS. The ceiling is read ONCE
+ * from ZCL_PARSE_CACHE_MAX_BYTES on the first cache use (lazy, same once as
+ * the mem-pressure sink registration), defaults to
+ * BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES and is clamped to
+ * [BLOCK_PARSE_CACHE_MIN_MAX_BYTES .. BLOCK_PARSE_CACHE_MAX_MAX_BYTES]. When
+ * an insert pushes the tracked resident total past the ceiling, the OLDEST
+ * UNPINNED entries are evicted (generation order) until it fits again; a
+ * pinned entry is never evicted, and if every entry is pinned the excess
+ * survives until the next insert. Over-estimating a body's cost is safe: it
+ * only evicts earlier. */
+#define BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES 134217728ull  /* 128 MiB */
+#define BLOCK_PARSE_CACHE_MIN_MAX_BYTES     8388608ull    /*   8 MiB */
+#define BLOCK_PARSE_CACHE_MAX_MAX_BYTES    1073741824ull  /*   1 GiB */
+
 /* Pin one immutable parsed body. A hit is a borrowed view of the resident
  * body, not a clone. The pointer returned by block_parse_handle_block is valid
  * only until the matching release. */

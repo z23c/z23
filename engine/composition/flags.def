@@ -1757,6 +1757,8 @@ Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_state_hygiene_fences.c:auto")
 Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/commons_journey_acceptance.sh:auto")
+Z23_FLAG("ZCL_PARSE_CACHE_MAX_BYTES", "env_runtime", "134217728", "-",
+          "byte ceiling on the block parse cache's resident parsed bodies, clamped 8 MiB..1 GiB; read once at first cache use (engine/modules/storage/src/block_parse_cache.c:auto)")
 Z23_FLAG("ZCL_PARAMS_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/store_sell_operator_proof.sh:auto")
 Z23_FLAG("ZCL_PARAMS_TESTS", "env_test", "-", "-",

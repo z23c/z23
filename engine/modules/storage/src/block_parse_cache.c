@@ -33,6 +33,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define BPC_CAPACITY BLOCK_PARSE_CACHE_CAPACITY
@@ -45,6 +46,7 @@ struct bpc_entry {
     uint8_t       hash[32];   /* key part 2 (block hash) */
     struct block  body;       /* owned PARSED block body (deep-owned) */
     uint64_t      generation; /* identity across slot replacement */
+    uint64_t      bytes;      /* body's accounted cost, mirrors g_bpc_bytes */
     uint32_t      pins;       /* immutable borrowers currently active */
     bool          pending_evict;
     bool          detached;   /* heap fallback when ring slot is pinned */
@@ -53,6 +55,7 @@ struct bpc_entry {
 static pthread_mutex_t g_bpc_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct bpc_entry g_bpc[BPC_CAPACITY];
 static _Atomic uint64_t g_bpc_generation;
+static _Atomic uint64_t g_bpc_bytes; /* resident deep-size total, ring only */
 
 /* ── mem_pressure sink (Rung 1 follow-on, docs/adr/0003-os-substrate-
  * verdict.md) ──────────────────────────────────────────────────────
@@ -75,11 +78,126 @@ static struct mem_pressure_sink g_bpc_pressure_sink = {
     .ctx = NULL,
 };
 
-static pthread_once_t g_bpc_pressure_once = PTHREAD_ONCE_INIT;
+/* ── Byte ceiling (see block_parse_cache.h) ────────────────────────
+ * Read ONCE from ZCL_PARSE_CACHE_MAX_BYTES on the same first-use pthread_once
+ * as the pressure sink. The INFO/WARN markers below let each cache generation
+ * (i.e. between block_parse_cache_clear calls) log at most one ceiling line. */
+static uint64_t g_bpc_ceiling_bytes = BLOCK_PARSE_CACHE_DEFAULT_MAX_BYTES;
+static bool g_bpc_ceiling_evict_logged;
+static bool g_bpc_ceiling_pinned_logged;
 
-static void bpc_register_pressure_sink(void)
+static void bpc_read_byte_ceiling_env(void)
 {
+    const char *v = getenv("ZCL_PARSE_CACHE_MAX_BYTES");
+    if (!v || !*v)
+        return;
+    /* Reject anything but a full unsigned decimal: trailing garbage would
+     * silently truncate ("12x" as 12) and a leading minus wraps through
+     * strtoull to a huge value that would clamp UP to the maximum. */
+    char *end = NULL;
+    unsigned long long parsed = strtoull(v, &end, 10);
+    if (end == v || parsed == 0 || *end != '\0')
+        return;
+    uint64_t n = (uint64_t)parsed;
+    if (n < BLOCK_PARSE_CACHE_MIN_MAX_BYTES)
+        n = BLOCK_PARSE_CACHE_MIN_MAX_BYTES;
+    if (n > BLOCK_PARSE_CACHE_MAX_MAX_BYTES)
+        n = BLOCK_PARSE_CACHE_MAX_MAX_BYTES;
+    g_bpc_ceiling_bytes = n;
+}
+
+static pthread_once_t g_bpc_first_use_once = PTHREAD_ONCE_INIT;
+
+static void bpc_first_use_init(void)
+{
+    bpc_read_byte_ceiling_env();
     (void)mem_pressure_register_sink(&g_bpc_pressure_sink);
+}
+
+/* Approximate deep resident cost of a parsed body: the struct-block frame plus
+ * every heap array it owns (one struct transaction per tx, and per tx its
+ * vin/vout/shielded/joinsplit arrays). A wire-serialize length would be the
+ * WRONG measure here: struct script embeds its buffer inline, so a parsed
+ * output costs ~10 KiB resident regardless of its ~9 wire bytes — the sizeof
+ * sum IS the residency. Slight over-count is safe: it only evicts earlier. */
+static uint64_t bpc_body_bytes(const struct block *b)
+{
+    if (!b)
+        return 0;
+    uint64_t n = sizeof(*b);
+    for (size_t i = 0; i < b->num_vtx; i++) {
+        const struct transaction *tx = &b->vtx[i];
+        n += sizeof(*tx) +
+             tx->num_vin * sizeof(struct tx_in) +
+             tx->num_vout * sizeof(struct tx_out) +
+             tx->num_shielded_spend * sizeof(struct spend_description) +
+             tx->num_shielded_output * sizeof(struct output_description) +
+             tx->num_joinsplit * sizeof(struct js_description);
+    }
+    return n;
+}
+
+/* Free one ring slot's body and subtract its accounted bytes. MUST hold
+ * g_bpc_mutex. Same teardown the release/evict/clear paths already did
+ * inline: the slot is reused by whoever stores into it next. */
+static void bpc_free_slot_locked(struct bpc_entry *entry)
+{
+    block_free(&entry->body);
+    atomic_fetch_sub(&g_bpc_bytes, entry->bytes);
+    entry->bytes = 0;
+    entry->used = false;
+    entry->pending_evict = false;
+    entry->generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
+}
+
+/* Oldest resident entry that may be evicted right now, or NULL when every
+ * entry is pinned or already pending. MUST hold g_bpc_mutex. */
+static struct bpc_entry *bpc_oldest_evictable_locked(void)
+{
+    struct bpc_entry *oldest = NULL;
+    for (size_t i = 0; i < BPC_CAPACITY; i++) {
+        struct bpc_entry *e = &g_bpc[i];
+        if (!e->used || e->pins > 0 || e->pending_evict)
+            continue;
+        if (!oldest || e->generation < oldest->generation)
+            oldest = e;
+    }
+    return oldest;
+}
+
+/* Enforce the resident byte ceiling straight after an insert. MUST hold
+ * g_bpc_mutex. Evicts oldest-unpinned entries (generation order) until the
+ * total fits; a pinned entry is never evicted — it is skipped and the scan
+ * continues — and if every entry is pinned the excess survives until the
+ * next insert. Logged at most once per cache generation. */
+static void bpc_enforce_byte_ceiling_locked(void)
+{
+    uint64_t evicted = 0;
+    while (atomic_load(&g_bpc_bytes) > g_bpc_ceiling_bytes) {
+        struct bpc_entry *victim = bpc_oldest_evictable_locked();
+        if (!victim) {
+            if (!g_bpc_ceiling_pinned_logged) {
+                LOG_WARN("block_parse_cache",
+                         "byte ceiling reached but all entries pinned: "
+                         "holding %llu bytes (ceiling %llu) until pins drop",
+                         (unsigned long long)atomic_load(&g_bpc_bytes),
+                         (unsigned long long)g_bpc_ceiling_bytes);
+                g_bpc_ceiling_pinned_logged = true;
+            }
+            break;
+        }
+        bpc_free_slot_locked(victim);
+        evicted++;
+    }
+    if (evicted > 0 && !g_bpc_ceiling_evict_logged) {
+        LOG_INFO("block_parse_cache",
+                 "byte ceiling: evicted %llu oldest entr%s, holding %llu "
+                 "bytes (ceiling %llu)",
+                 (unsigned long long)evicted, evicted == 1 ? "y" : "ies",
+                 (unsigned long long)atomic_load(&g_bpc_bytes),
+                 (unsigned long long)g_bpc_ceiling_bytes);
+        g_bpc_ceiling_evict_logged = true;
+    }
 }
 
 static size_t bpc_slot(int32_t height)
@@ -220,6 +338,8 @@ static struct bpc_entry *bpc_detached_from(struct block *loaded,
                                            int32_t height,
                                            const uint8_t hash[32])
 {
+    /* Detached entries are handle-owned, not ring-resident: they die with
+     * their handle, so they are not part of the tracked g_bpc_bytes total. */
     struct bpc_entry *entry = zcl_calloc(1, sizeof(*entry), "bpc detached");
     if (!entry)
         return NULL;
@@ -274,14 +394,19 @@ static bool bpc_store_unpinned(struct bpc_entry *entry, struct block *loaded,
                                struct block_parse_handle *out)
 {
     if (!entry->used || entry->pins == 0) {
-        if (entry->used)
+        uint64_t body_bytes = bpc_body_bytes(loaded);
+        if (entry->used) {
             block_free(&entry->body);
+            atomic_fetch_sub(&g_bpc_bytes, entry->bytes);
+        }
         memset(entry, 0, sizeof(*entry));
         entry->used = true;
         entry->height = height;
         memcpy(entry->hash, block_hash, 32);
         entry->body = *loaded;
         block_init(loaded);
+        entry->bytes = body_bytes;
+        atomic_fetch_add(&g_bpc_bytes, body_bytes);
         entry->generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
         bpc_handle_set(out, entry, false);
         return true;
@@ -309,7 +434,7 @@ bool block_parse_cache_acquire(int32_t height, const uint8_t block_hash[32],
     if (!out || !block_hash || !bi)
         return false;
     memset(out, 0, sizeof(*out));
-    pthread_once(&g_bpc_pressure_once, bpc_register_pressure_sink);
+    pthread_once(&g_bpc_first_use_once, bpc_first_use_init);
 
     size_t slot = bpc_slot(height);
     int64_t lock_started = platform_time_monotonic_us();
@@ -350,6 +475,7 @@ bool block_parse_cache_acquire(int32_t height, const uint8_t block_hash[32],
         return true;
     }
     if (bpc_store_unpinned(entry, &loaded, height, block_hash, out)) {
+        bpc_enforce_byte_ceiling_locked();
         pthread_mutex_unlock(&g_bpc_mutex);
         return true;
     }
@@ -380,12 +506,8 @@ void block_parse_cache_release(struct block_parse_handle *handle)
     pthread_mutex_lock(&g_bpc_mutex);
     if (entry->generation == handle->generation && entry->pins > 0) {
         entry->pins--;
-        if (entry->pins == 0 && entry->pending_evict) {
-            block_free(&entry->body);
-            entry->used = false;
-            entry->pending_evict = false;
-            entry->generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
-        }
+        if (entry->pins == 0 && entry->pending_evict)
+            bpc_free_slot_locked(entry);
     }
     pthread_mutex_unlock(&g_bpc_mutex);
     memset(handle, 0, sizeof(*handle));
@@ -413,12 +535,8 @@ void block_parse_cache_evict(int32_t height, const uint8_t hash[32])
     if (entry->used && entry->height == height &&
         memcmp(entry->hash, hash, 32) == 0) {
         entry->pending_evict = true;
-        if (entry->pins == 0) {
-            block_free(&entry->body);
-            entry->used = false;
-            entry->pending_evict = false;
-            entry->generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
-        }
+        if (entry->pins == 0)
+            bpc_free_slot_locked(entry);
     }
     pthread_mutex_unlock(&g_bpc_mutex);
 }
@@ -430,13 +548,14 @@ void block_parse_cache_clear(void)
         if (!g_bpc[i].used)
             continue;
         g_bpc[i].pending_evict = true;
-        if (g_bpc[i].pins == 0) {
-            block_free(&g_bpc[i].body);
-            g_bpc[i].used = false;
-            g_bpc[i].pending_evict = false;
-            g_bpc[i].generation = atomic_fetch_add(&g_bpc_generation, 1) + 1;
-        }
+        if (g_bpc[i].pins == 0)
+            bpc_free_slot_locked(&g_bpc[i]);
     }
+    /* A clear starts a new cache generation: the once-per-generation ceiling
+     * log markers apply again. Reset under the same lock the enforcer reads
+     * them under, or a concurrent enforcement could double-log. */
+    g_bpc_ceiling_evict_logged = false;
+    g_bpc_ceiling_pinned_logged = false;
     pthread_mutex_unlock(&g_bpc_mutex);
 }
 
