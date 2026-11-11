@@ -327,6 +327,76 @@ static bool cct_tree_capture(const struct cc_fix *fx, size_t entries, bool fail,
     return ok;
 }
 
+struct cct_cache_case {
+    const char *name;
+    const char *value;
+    size_t len;
+    bool hit;
+    int64_t lines;
+};
+
+static bool cct_cache_case(const struct cc_fix *fx, const char *blob,
+                           const struct cct_cache_case *test)
+{
+    char path[640];
+    (void)snprintf(path, sizeof path, "%s/.codeindex/code_count.v1", fx->dir);
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+        return false;
+    bool wrote = fprintf(fp, "%s ", blob) == 41 &&
+                 fwrite(test->value, 1, test->len, fp) == test->len;
+    if (fclose(fp) != 0)
+        wrote = false;
+    struct cct_call c;
+    cct_begin(&c, fx);
+    cct_arg(&c, "at", "HEAD");
+    cct_arg(&c, "path", "a.c");
+    bool ran = wrote && cct_run(&c);
+    int64_t hits = cct_sub(&c, "cache", "hits");
+    int64_t counted = cct_sub(&c, "cache", "counted");
+    int64_t lines = cct_int(&c, "lines");
+    bool ok = ran && cct_int(&c, "files") == 1 && lines == test->lines &&
+              hits == (test->hit ? 1 : 0) && counted == (test->hit ? 0 : 1);
+    if (!ok)
+        printf("[cache case=%s wrote=%d ran=%d hits=%lld counted=%lld lines=%lld "
+               "expected_hit=%d expected_lines=%lld] ", test->name, wrote, ran,
+               (long long)hits, (long long)counted, (long long)lines,
+               test->hit, (long long)test->lines);
+    cct_end(&c);
+    return ok;
+}
+
+static bool cct_cache_numbers(const struct cc_fix *fx)
+{
+#define CCT_CASE(label, text, accepted, result) \
+    {label, text, sizeof(text) - 1, accepted, result}
+    static const struct cct_cache_case cases[] = {
+        CCT_CASE("minus", "-1\n", false, 5),
+        CCT_CASE("plus", "+1\n", false, 5),
+        CCT_CASE("space", " 1\n", false, 5),
+        CCT_CASE("tab", "\t1\n", false, 5),
+        CCT_CASE("overflow", "18446744073709551616\n", false, 5),
+        CCT_CASE("missing", "\n", false, 5),
+        CCT_CASE("junk", "5x\n", false, 5),
+        CCT_CASE("torn", "5", false, 5),
+        CCT_CASE("nul-before", "\0" "5\n", false, 5),
+        CCT_CASE("nul-after", "5\0junk\n", false, 5),
+        CCT_CASE("ordinary", "5\n", true, 5),
+        CCT_CASE("leading-zero", "0005\n", true, 5),
+        CCT_CASE("zero-syntax", "0\n", true, 0),
+    };
+#undef CCT_CASE
+    char blob[128] = "";
+    if (cct_git(fx, blob, sizeof blob, "rev-parse", "HEAD:a.c", NULL, NULL) != 0)
+        return false;
+    blob[strcspn(blob, "\n")] = '\0';
+    bool ok = true;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        if (!cct_cache_case(fx, blob, &cases[i]))
+            ok = false;
+    return ok;
+}
+
 int test_code_count(void);
 int test_code_count(void)
 {
@@ -474,6 +544,11 @@ int test_code_count(void)
         ASSERT(cct_run(&c));
         ASSERT_EQ(cct_int(&c, "lines"), 18);
         cct_end(&c);
+        PASS();
+    }
+
+    TEST("code.count: cache numbers require complete unsigned decimal rows") {
+        ASSERT(cct_cache_numbers(&fx));
         PASS();
     }
 

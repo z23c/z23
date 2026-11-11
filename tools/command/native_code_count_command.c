@@ -269,13 +269,22 @@ static bool cc_cache_path(const char *root, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
-static bool cc_cache_row(const char *line, struct cc_row *row)
+static bool cc_cache_row(const char *line, size_t len, struct cc_row *row)
 {
-    char *end = NULL;
-    if (!cc_hex20(line, row->id) || line[40] != ' ')
+    if (len < 42 || !cc_hex20(line, row->id) || line[40] != ' ')
         return false;
-    row->lines = strtoull(line + 41, &end, 10);
-    return end != line + 41 && *end == '\0';
+    uint64_t value = 0;
+    for (size_t i = 41; i < len; i++) {
+        unsigned char c = (unsigned char)line[i];
+        if (c < '0' || c > '9')
+            return false;
+        unsigned digit = (unsigned)(c - '0');
+        if (value > (UINT64_MAX - digit) / 10)
+            return false;
+        value = value * 10 + digit;
+    }
+    row->lines = value;
+    return true;
 }
 
 /* Strictly parsed: any malformed or torn line is ignored, never trusted. */
@@ -295,8 +304,7 @@ static size_t cc_cache_load(const char *path, struct cc_row **rows)
         char *nl = memchr(line, '\n', (size_t)(text + len - line));
         if (!nl)
             break; /* torn tail */
-        *nl = '\0';
-        if (n < cap && cc_cache_row(line, &out[n]))
+        if (n < cap && cc_cache_row(line, (size_t)(nl - line), &out[n]))
             n++;
         line = nl + 1;
     }
