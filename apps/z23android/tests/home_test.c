@@ -255,10 +255,12 @@ static void phone_card_never_shows_wallet(void)
 static void wallet_tile_has_no_amount(void)
 {
     const char *layout = zapp_home_layout("default"), *classic = zapp_home_layout("classic");
-    const char *label = zapp_home_action_label("wallet");
+    const char *label = zapp_home_action_label("wallet"), *receive = zapp_home_action_label("receive");
     assert(layout && strstr(layout, "\"id\":\"wallet\"") && !strstr(layout, "balance"));
     assert(classic && strstr(classic, "\"id\":\"wallet\"") && !strstr(classic, "balance"));
     assert(label && !strcmp(label, "Wallet"));
+    assert(strstr(layout, "\"id\":\"receive\"") && strstr(classic, "\"id\":\"receive\""));
+    assert(receive && !strcmp(receive, "Receive"));
 }
 static void app_card_golden(void)
 {
@@ -439,17 +441,18 @@ static void scrollable_home_grid(const struct zapp_node *home)
 {
     /* Primary and app grids must retain their row heights inside a scrollable Home. */
     assert(home->kind == ZAPP_NODE_LIST && home->child_count >= 3);
-    assert(home->children[0].kind == ZAPP_NODE_GRID && home->children[0].child_count == 3);
+    assert(home->children[0].kind == ZAPP_NODE_GRID && home->children[0].child_count == 4);
     assert(!strcmp(home->children[0].children[0].id, "wallet") &&
-           !strcmp(home->children[0].children[1].id, "scan") &&
-           !strcmp(home->children[0].children[2].id, "assistant"));
+           !strcmp(home->children[0].children[1].id, "receive") &&
+           !strcmp(home->children[0].children[2].id, "scan") &&
+           !strcmp(home->children[0].children[3].id, "assistant"));
     assert(home->children[1].kind == ZAPP_NODE_COLUMN && !strcmp(home->children[1].card, "phone"));
     assert(home->children[1].child_count == 3 && !strcmp(home->children[1].children[2].id, "node_toggle"));
     assert(home->children[2].kind == ZAPP_NODE_GRID && !strcmp(home->children[2].card, "z23_app"));
 }
 static void built_in_layouts(void)
 {
-    static const char *const tiles[] = {"scan", "assistant"};
+    static const char *const tiles[] = {"scan", "assistant", "receive"};
     assert(zapp_home_layout_count() == 2 && !strcmp(zapp_home_layout_name(0), "default"));
     assert(!strcmp(zapp_home_layout_name(1), "classic") && !zapp_home_layout_name(2) && !zapp_home_layout("other"));
     for (size_t i = 0; i < zapp_home_layout_count(); ++i) {

@@ -58,6 +58,7 @@ static struct {
     char fleet_result_shown[ZAPP_NOTICE_CAP];
     bool fleet_review_started, fleet_qr_shown, fleet_start_requested, fleet_result_valid;
     enum screen current, before_scan;
+    enum wallet_page wallet_entry;
     bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting, paste_mode, paste_submitted, paste_result_ready;
     unsigned scans_seen;
@@ -688,9 +689,9 @@ static void fill_apps(JNIEnv *env)
     shell.row_count = 0;
     for (size_t i = 0; i < shell.app_count && add_app_row(env, i); ++i) {}
 }
-static void enter_wallet(JNIEnv *env)
+static void enter_wallet(JNIEnv *env, enum wallet_page page)
 {
-    (void)wallet_screens_open(WALLET_PAGE_FUNDS);
+    (void)wallet_screens_open(page);
     zapp_wallet_ui_render(env);
 }
 static void leave_wallet(JNIEnv *env)
@@ -752,12 +753,12 @@ static void set_protection(JNIEnv *env, enum screen next)
     if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW || (shell.current == SCREEN_SCAN && shell.paste_mode)) && next != SCREEN_ASSISTANT && next != SCREEN_FLEET_REVIEW && !wallet_screen(next) && next != SCREEN_SCAN) (void)protect_window(env, false);
 }
 /* What a screen does as it comes into view. */
-static void enter_screen(JNIEnv *env, enum screen next)
+static void enter_screen(JNIEnv *env, enum screen next, enum wallet_page page)
 {
     if (next == SCREEN_APPS) { refresh_apps(env); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
-    if (next == SCREEN_WALLET) enter_wallet(env);
+    if (next == SCREEN_WALLET) enter_wallet(env, page);
     if (next == SCREEN_SETUP) (void)zapp_setup_ui_open(env);
     if (next == SCREEN_GAME) { zapp_game_view_clear(env); (void)zapp_game_open(shell.files); }
 }
@@ -783,6 +784,8 @@ static void clear_page_state(JNIEnv *env, enum screen next)
 }
 static void go(JNIEnv *env, enum screen next)
 {
+    enum wallet_page page = shell.wallet_entry ? shell.wallet_entry : WALLET_PAGE_FUNDS;
+    shell.wallet_entry = WALLET_PAGE_FUNDS;
     next = screen_for(next);
     if (!ensure_screen(env, next)) {
         snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open this screen. Try again.");
@@ -801,11 +804,16 @@ static void go(JNIEnv *env, enum screen next)
     shell.current = next;
     snprintf(shell.action_notice, sizeof(shell.action_notice), "%s", why);
     set_outcome(env, "");
-    enter_screen(env, next);
+    enter_screen(env, next, page);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (void)zj_visible(env, shell.roots[i], i == (int)next);
     if (next == SCREEN_SETUP) zapp_setup_ui_render(env);
     if (next == SCREEN_HOME) show_home(env);
     show_notice(env);
+}
+static void go_page(JNIEnv *env, enum screen next, enum wallet_page page)
+{
+    shell.wallet_entry = page;
+    go(env, next);
 }
 /* Opens the Send screen with its flow: a payment, a notice, or, with sweep, the move of public funds into the private
  * balance. When setup is not finished, go shows the setup screens and nothing opens. */
@@ -1078,6 +1086,7 @@ static void tap(JNIEnv *env, float x, float y)
         const struct zapp_launcher_app *app = &shell.apps[shell.row_apps[now.index]];
         launch(env, app->entry.package, app->entry.activity, app->entry.label);
     }
+    else if (now.kind == TARGET_TILE && !strcmp(now.id, "receive")) go_page(env, SCREEN_WALLET, WALLET_PAGE_RECEIVE);
     else run_tile(env, &now);
 }
 static void touch(JNIEnv *env, const AInputEvent *event)

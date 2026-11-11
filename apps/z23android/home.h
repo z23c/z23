@@ -47,7 +47,7 @@ size_t zapp_home_layout_count(void);
 const char *zapp_home_layout_name(size_t index);
 /* The document of the named built-in layout, or NULL. */
 const char *zapp_home_layout(const char *name);
-/* The label of a home action id (scan, assistant, apps, settings), or NULL. */
+/* The label of a home action id (wallet, receive, scan, assistant, apps, settings), or NULL. */
 const char *zapp_home_action_label(const char *id);
 /* The action a Home node button sends, from the label drawn on it: "" for no action, such as while a stop is in progress. */
 const char *zapp_home_node_label(const struct zapp_view *view);

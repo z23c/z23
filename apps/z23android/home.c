@@ -6,7 +6,7 @@
 #include <string.h>
 
 #define HOME_TILES \
-    "{\"type\":\"action\",\"id\":\"wallet\"},{\"type\":\"action\",\"id\":\"scan\"}," \
+    "{\"type\":\"action\",\"id\":\"wallet\"},{\"type\":\"action\",\"id\":\"receive\"},{\"type\":\"action\",\"id\":\"scan\"}," \
     "{\"type\":\"action\",\"id\":\"assistant\"}"
 #define HOME_PHONE_TEXT \
     "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"caption\",\"lines\":2}," \
@@ -38,7 +38,7 @@ static const struct { const char *name, *document; } layouts[] = {
     {"default", default_layout}, {"classic", classic_layout},
 };
 static const struct { const char *id, *label; } labels[] = {
-    {"scan", "Scan"}, {"assistant", "Assistant"}, {"wallet", "Wallet"}, {"apps", "Apps"}, {"settings", "Settings"},
+    {"scan", "Scan"}, {"assistant", "Assistant"}, {"wallet", "Wallet"}, {"receive", "Receive"}, {"apps", "Apps"}, {"settings", "Settings"},
 };
 
 size_t zapp_home_layout_count(void) { return sizeof(layouts) / sizeof(layouts[0]); }

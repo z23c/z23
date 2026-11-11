@@ -166,7 +166,7 @@ struct wallet_env {
 bool wallet_screens_init(const struct wallet_env *env);
 /* Leaves any wallet screen and wipes everything. */
 void wallet_screens_shutdown(void);
-/* Enters a page (Funds from Home) and starts its commands. False, with only a plain notice to show, when
+/* Enters a page (Funds or Receive from Home) and starts its commands. False, with only a plain notice to show, when
  * the screen protection is not in force. */
 bool wallet_screens_open(enum wallet_page page);
 /* Leaves the wallet screens: wipes what they hold and removes the screen protection. */
