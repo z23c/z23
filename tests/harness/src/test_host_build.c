@@ -633,6 +633,100 @@ static int hbt_owner_tests(const char *tmp)
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
+static void hbt_report_lane(bool ok, size_t count, int64_t owner, bool other_ok, bool unnamed)
+{
+    if (!ok || count != 1 || owner != (int64_t)getpid() || !other_ok || !unnamed)
+        fprintf(stderr, "omitted lane: ok=%d count=%zu owner=%lld expected=%ld other_ok=%d unnamed=%d\n",
+                ok, count, (long long)owner, (long)getpid(), other_ok, unnamed);
+}
+
+static int hbt_omitted_lane_tests(const char *tmp)
+{
+    int failures = 0;
+    struct ba_config cfg;
+    struct json_value doc;
+    char dir[HBT_PATH], lock[HBT_PATH + 32];
+    TEST("host build: a held lane omitted from the lock snapshot remains visible") {
+        (void)snprintf(dir, sizeof(dir), "%s/omitted", tmp);
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(hbt_config(&cfg, dir, 1));
+        ASSERT(mkdir(cfg.state_dir, 0700) == 0);
+        (void)snprintf(lock, sizeof(lock), "%s/z23.lock", cfg.state_dir);
+        int fd = open(lock, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+        json_init(&doc);
+        json_set_object(&doc);
+        bool ok = ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc);
+        size_t count = hbt_array_size(&doc, "running");
+        const struct json_value *row = json_at(json_get(&doc, "running"), 0);
+        int64_t owner = row ? json_get_int(json_get(row, "pid")) : 0;
+        json_free(&doc);
+        json_init(&doc); json_set_object(&doc);
+        bool other_ok = ba_status_test_empty_locks(cfg.state_dir, geteuid() + 1, &doc);
+        row = json_at(json_get(&doc, "running"), 0);
+        bool unnamed = row && !json_get(row, "pid");
+        json_free(&doc);
+        close(fd);
+        hbt_report_lane(ok, count, owner, other_ok, unnamed);
+        ASSERT(ok && count == 1 && owner == (int64_t)getpid());
+        ASSERT(other_ok && unnamed);
+        json_init(&doc); json_set_object(&doc);
+        ASSERT(ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), 0u);
+        json_free(&doc);
+        fd = open(lock, O_RDONLY | O_CLOEXEC);
+        ASSERT(fd >= 0 && flock(fd, LOCK_SH | LOCK_NB) == 0);
+        json_init(&doc); json_set_object(&doc);
+        ok = ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc);
+        count = hbt_array_size(&doc, "running");
+        json_free(&doc); close(fd);
+        ASSERT(ok && count == 0);
+        ASSERT(unlink(lock) == 0);
+        json_init(&doc); json_set_object(&doc);
+        ASSERT(ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc));
+        ASSERT_EQ(hbt_array_size(&doc, "running"), 0u);
+        json_free(&doc);
+        ASSERT(symlink("missing", lock) == 0);
+        json_init(&doc); json_set_object(&doc);
+        ok = ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc);
+        json_free(&doc);
+        ASSERT(!ok);
+        ASSERT(unlink(lock) == 0 && mkdir(lock, 0700) == 0);
+        json_init(&doc); json_set_object(&doc);
+        ok = ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc);
+        json_free(&doc);
+        ASSERT(!ok && rmdir(lock) == 0 && mkfifo(lock, 0600) == 0);
+        json_init(&doc); json_set_object(&doc);
+        ok = ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc);
+        json_free(&doc);
+        ASSERT(!ok && unlink(lock) == 0);
+        if (geteuid() != 0) {
+            fd = open(lock, O_WRONLY | O_CREAT | O_CLOEXEC, 0000);
+            ASSERT(fd >= 0);
+            close(fd);
+            ASSERT(chmod(lock, 0000) == 0);
+            json_init(&doc); json_set_object(&doc);
+            ok = ba_status_test_empty_locks(cfg.state_dir, geteuid(), &doc);
+            json_free(&doc);
+            ASSERT(chmod(lock, 0600) == 0 && !ok);
+        }
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int hbt_hidden_owner_tests(const char *tmp)
+{
+    int failures = 0;
+    struct ba_config cfg;
+    struct json_value doc;
+    char dir[HBT_PATH], lock[HBT_PATH + 32];
     TEST("host build: a holder outside the caller's processes is reported without a pid") {
         const struct json_value *row;
         int fd, status = 0, sync[2];
@@ -980,6 +1074,8 @@ int test_host_build(void)
     failures += hbt_churn_tests(tmp);
 #ifdef __linux__
     failures += hbt_owner_tests(tmp);
+    failures += hbt_omitted_lane_tests(tmp);
+    failures += hbt_hidden_owner_tests(tmp);
 #endif
 #ifdef __linux__
     failures += hbt_broker_tests(tmp);

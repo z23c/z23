@@ -114,6 +114,9 @@ bool ba_status(const char *state_dir, struct json_value *out);
 #ifndef _WIN32
 /* The same, with owner lookup limited to processes of user `uid`. */
 bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out);
+#if defined(ZCL_TESTING) && defined(__linux__)
+bool ba_status_test_empty_locks(const char *state_dir, uid_t uid, struct json_value *out);
+#endif
 /* Read-only broker observation. Probe returns 1 active, 0 inactive, -1
  * unknown. NULL uses the local cgroup probe, which proves only active state;
  * absent, empty or unreadable cgroups remain unknown. No scope command runs.

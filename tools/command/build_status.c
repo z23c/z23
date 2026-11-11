@@ -4,7 +4,7 @@
  *          as JSON. Holders come from /proc/locks, which lists every flock
  *          with its owner and inode. The installed broker's bounded records
  *          are observed separately, with PID/start-tick and scope liveness.
- *          The read takes no lock and changes nothing.
+ *          Missing lane observations use a transient nonblocking shared probe.
  */
 
 #include "command/build_admit.h"
@@ -472,6 +472,60 @@ static void bs_push_process(struct json_value *row, int pid)
     (void)json_push_kv_str(row, "cwd", cwd);
 }
 
+static bool bs_same_inode(const struct bs_lock *lock, const struct stat *st)
+{
+    return lock->inode == (unsigned long)st->st_ino &&
+        lock->dev_major == platform_device_major(st->st_dev) &&
+        lock->dev_minor == platform_device_minor(st->st_dev);
+}
+
+static bool bs_probe_same_file(const char *path, const struct stat *opened)
+{
+    struct stat named;
+    return lstat(path, &named) == 0 && S_ISREG(named.st_mode) &&
+        opened->st_dev == named.st_dev && opened->st_ino == named.st_ino;
+}
+
+static int bs_probe_file(const char *path, struct stat *opened)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    bool ok = fstat(fd, opened) == 0 && S_ISREG(opened->st_mode);
+    int result = ok ? flock(fd, LOCK_SH | LOCK_NB) : -1;
+    int error = errno;
+    bool held = result < 0 && (error == EWOULDBLOCK || error == EAGAIN);
+    ok = ok && (result == 0 || held) && bs_probe_same_file(path, opened);
+    if (result == 0 && flock(fd, LOCK_UN) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    return ok ? (held ? 1 : 0) : -1;
+}
+
+static bool bs_probe_lane(struct bs_view *view, const char *path)
+{
+    struct stat opened;
+    int observed = bs_probe_file(path, &opened);
+    if (observed <= 0) return observed == 0;
+    for (size_t i = 0; i < view->count; i++)
+        if (bs_same_inode(&view->locks[i], &opened) && view->locks[i].write) return true;
+    /* Stale shared rows cannot identify the holder observed by this probe. */
+    for (size_t i = 0; i < view->count; ) {
+        if (bs_same_inode(&view->locks[i], &opened)) view->locks[i] = view->locks[--view->count];
+        else i++;
+    }
+    struct bs_lock found = {.dev_major = platform_device_major(opened.st_dev),
+        .dev_minor = platform_device_minor(opened.st_dev), .inode = (unsigned long)opened.st_ino, .write = true};
+    return bs_lock_append(view, found);
+}
+
+static bool bs_probe_lanes(struct bs_view *view, const char *state_dir)
+{
+    static const char *const names[BA_MAX_LANES] = {"z23.lock", "z23.lock.1", "z23.lock.2", "z23.lock.3"};
+    char path[BA_PATH_MAX];
+    for (size_t i = 0; i < BA_MAX_LANES; i++)
+        if (!bs_join(path, sizeof(path), state_dir, names[i]) || !bs_probe_lane(view, path)) return false;
+    return true;
+}
+
 static void bs_push_lanes(struct json_value *out, const char *state_dir,
                           struct bs_view *view)
 {
@@ -582,23 +636,23 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
 #ifndef _WIN32
 #ifdef __linux__
 static bool bs_status_as(const char *state_dir, uid_t uid, struct json_value *out,
-                          struct bs_view *snapshot)
+                          struct bs_view *view)
 {
-    struct bs_view view = *snapshot;
     char dir[BA_PATH_MAX], heavy[BA_PATH_MAX];
     int pids[4];
     bool exclusive = false;
     (void)json_push_kv_str(out, "state_dir", state_dir);
-    view.uid = uid;
-    bs_push_lanes(out, state_dir, &view);
+    view->uid = uid;
+    if (!bs_probe_lanes(view, state_dir)) return false;
+    bs_push_lanes(out, state_dir, view);
     if (!bs_join(dir, sizeof(dir), state_dir, "z23.fifo") ||
         !bs_join(heavy, sizeof(heavy), state_dir, "heavy.lock"))
         return false;
-    (void)bs_push_waiters(out, "queued", dir, &view);
+    (void)bs_push_waiters(out, "queued", dir, view);
     if (!bs_join(dir, sizeof(dir), state_dir, "z23.prio"))
         return false;
-    (void)bs_push_waiters(out, "landing", dir, &view);
-    (void)bs_holders(&view, heavy, pids, 4, &exclusive);
+    (void)bs_push_waiters(out, "landing", dir, view);
+    (void)bs_holders(view, heavy, pids, 4, &exclusive);
     (void)json_push_kv_bool(out, "exclusive_build", exclusive);
     const char *broker = getenv("DEVBUILD_BROKER_STATE");
     if (!broker || !broker[0]) {
@@ -606,6 +660,16 @@ static bool bs_status_as(const char *state_dir, uid_t uid, struct json_value *ou
         broker = dir;
     }
     return ba_status_broker(broker, uid, NULL, NULL, out);
+}
+#endif
+
+#if defined(ZCL_TESTING) && defined(__linux__)
+bool ba_status_test_empty_locks(const char *state_dir, uid_t uid, struct json_value *out)
+{
+    struct bs_view view = {0};
+    bool ok = bs_status_as(state_dir, uid, out, &view);
+    free(view.locks);
+    return ok;
 }
 #endif
 
