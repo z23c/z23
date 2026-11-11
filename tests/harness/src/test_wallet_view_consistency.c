@@ -276,6 +276,14 @@ int check_wallet_view_dashboard_recent_txs_link_to_wallet_tx_or_syn(void)
     return failures;
 }
 
+static bool wv_receive_fixture_is_safe(void)
+{
+    return wv_has("zs1fixtureaddress") &&
+           wv_has("Transparent receiving unavailable") &&
+           !wv_has("t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn") &&
+           !wv_has("id='t-addr'") && !wv_has("id='copy-btn'");
+}
+
 int check_wallet_view_pulse_has_peers_0(void)
 {
     int failures = 0;
@@ -323,10 +331,7 @@ int check_wallet_view_pulse_has_peers_0(void)
     printf("LIVE: receive uses shielded fixture and disables public placeholder... ");
     {
         wv_get("/wallet/receive");
-        bool ok = wv_has("zs1fixtureaddress") &&
-                  wv_has("Transparent receiving unavailable") &&
-                  !wv_has("t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn") &&
-                  !wv_has("id='t-addr'") && !wv_has("id='copy-btn'");
+        bool ok = wv_receive_fixture_is_safe();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
