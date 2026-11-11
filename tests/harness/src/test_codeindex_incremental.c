@@ -677,23 +677,27 @@ static int cin_scope_refusals(void)
     return failures;
 }
 
-static bool cin_source_line_result(struct codeindex *index, bool malformed)
+static bool cin_source_line_result(struct codeindex *index, const char *reason)
 {
     char rows[2][256], cause[CODEINDEX_INCLUDE_UNSAFE_CAUSE_MAX];
+    char expected[CODEINDEX_INCLUDE_UNSAFE_CAUSE_MAX];
     enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
     int count = codeindex_reverse_includes(index, "contexts/demo/b.h", rows,
                                            2, &dim);
     bool unsafe = codeindex_include_unsafe_cause(index, cause, sizeof(cause));
-    return malformed ? count >= 0 && dim != CODEINDEX_INCLUDE_DIM_COMPLETE &&
-                       unsafe && strcmp(cause,
-                           "text_line_nul build/fixture.d -> contexts/demo/a.c") == 0
+    if (reason && snprintf(expected, sizeof expected,
+                           "%s build/fixture.d -> contexts/demo/a.c", reason) >=
+                      (int)sizeof expected)
+        return false;
+    return reason ? count >= 0 && dim != CODEINDEX_INCLUDE_DIM_COMPLETE &&
+                       unsafe && strcmp(cause, expected) == 0
                      : count == 1 && dim == CODEINDEX_INCLUDE_DIM_COMPLETE &&
                        strcmp(rows[0], "contexts/demo/a.c") == 0 && !unsafe &&
                        cause[0] == '\0';
 }
 
 static bool cin_source_line_case(const char *root, const char *body, size_t len,
-                                 bool malformed)
+                                 const char *reason)
 {
     char source[PATH_MAX], depfile[PATH_MAX];
     int sn = snprintf(source, sizeof(source), "%s/contexts/demo/a.c", root);
@@ -712,9 +716,37 @@ static bool cin_source_line_case(const char *root, const char *body, size_t len,
     if (utime(source, &times) != 0 || !cin_force_cold(root)) return false;
     struct codeindex *index = codeindex_open(root);
     if (!index) return false;
-    ok = cin_source_line_result(index, malformed);
+    ok = cin_source_line_result(index, reason);
     codeindex_close(index);
     return ok;
+}
+
+static int cin_source_line_boundaries(const char *root)
+{
+    int failures = 0;
+    char body[8193];
+    static const char include[] = "#include \"b.h\"";
+    memset(body, ' ', sizeof body);
+    memcpy(body + 4092, include, sizeof include - 1);
+    CIN_CHECK("include split across input blocks retains its edge",
+              cin_source_line_case(root, body, 4092 + sizeof include - 1, NULL));
+    memset(body, ' ', sizeof body);
+    memcpy(body, include, sizeof include - 1);
+    body[8190] = '\n';
+    CIN_CHECK("maximum bounded line ending in newline retains its edge",
+              cin_source_line_case(root, body, 8191, NULL));
+    body[8190] = ' ';
+    CIN_CHECK("full bounded final line without newline refuses narrowing",
+              cin_source_line_case(root, body, 8191, "text_line_truncated"));
+    CIN_CHECK("overlong line refuses narrowing",
+              cin_source_line_case(root, body, 8192, "text_line_truncated"));
+    for (size_t pos = 4095; pos <= 4097; pos++) {
+        body[pos] = '\0';
+        CIN_CHECK("NUL around input block boundary refuses narrowing",
+                  cin_source_line_case(root, body, 4100, "text_line_nul"));
+        body[pos] = ' ';
+    }
+    return failures;
 }
 
 static int cin_source_line_cases(const char *workspace)
@@ -732,13 +764,14 @@ static int cin_source_line_cases(const char *workspace)
     static const char nonfinal[] = "\0#include \"b.h\"\n/* final */";
     static const char valid[] = "#include \"b.h\"";
     CIN_CHECK("final source line with leading NUL refuses narrowing",
-              cin_source_line_case(root, leading, sizeof(leading) - 1, true));
+              cin_source_line_case(root, leading, sizeof(leading) - 1, "text_line_nul"));
     CIN_CHECK("final source line with prefix before NUL refuses narrowing",
-              cin_source_line_case(root, prefix, sizeof(prefix) - 1, true));
+              cin_source_line_case(root, prefix, sizeof(prefix) - 1, "text_line_nul"));
     CIN_CHECK("nonfinal source line with NUL refuses narrowing",
-              cin_source_line_case(root, nonfinal, sizeof(nonfinal) - 1, true));
+              cin_source_line_case(root, nonfinal, sizeof(nonfinal) - 1, "text_line_nul"));
     CIN_CHECK("final include without newline retains its complete edge",
-              cin_source_line_case(root, valid, sizeof(valid) - 1, false));
+              cin_source_line_case(root, valid, sizeof(valid) - 1, NULL));
+    failures += cin_source_line_boundaries(root);
     return failures;
 }
 

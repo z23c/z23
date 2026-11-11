@@ -735,15 +735,39 @@ static void text_include_resolve(struct text_includes *t, const char *from,
         text_include_near(t, t->unit, quoted);
 }
 
+struct text_reader { // hardening-ok: fixed 4096-byte stdio buffer; copies bounded by unread bytes and line capacity
+    FILE *file;
+    unsigned char bytes[4096];
+    size_t at, len;
+    bool eof_observed;
+};
+
+/* Refill only when a logical read needs another byte. fread can set physical
+ * EOF while bytes remain buffered; that must not certify a full line. */
+static bool text_refill(struct text_reader *reader)
+{
+    reader->len = fread(reader->bytes, 1, sizeof reader->bytes, reader->file);
+    reader->at = 0;
+    if (reader->len) return true;
+    reader->eof_observed = feof(reader->file) != 0;
+    return false;
+}
+
 /* Preserve the measured extent even when a source line contains zero bytes. */
-static size_t text_read_line(FILE *file, char *line, size_t cap)
+static size_t text_read_line(struct text_reader *reader, char *line, size_t cap)
 {
     size_t used = 0;
-    int byte;
-    while (used < cap - 1 && (byte = fgetc(file)) != EOF) {
-        line[used++] = (char)byte;
-        if (byte == '\n')
-            break;
+    while (used < cap - 1) {
+        if (reader->at == reader->len && !text_refill(reader)) break;
+        size_t take = reader->len - reader->at;
+        if (take > cap - 1 - used) take = cap - 1 - used;
+        const unsigned char *start = reader->bytes + reader->at;
+        const unsigned char *newline = memchr(start, '\n', take);
+        if (newline) take = (size_t)(newline - start) + 1;
+        memcpy(line + used, start, take);
+        reader->at += take;
+        used += take;
+        if (newline) break;
     }
     line[used] = '\0';
     return used;
@@ -762,8 +786,9 @@ static void text_scan_file(struct text_includes *t, const char *from)
      * existing generated registries without turning normal scans into a
      * closure refusal. Lines beyond it still fail closed below. */
     char line[8192];
+    struct text_reader reader = {.file = file};
     size_t used;
-    while ((used = text_read_line(file, line, sizeof line)) > 0) {
+    while ((used = text_read_line(&reader, line, sizeof line)) > 0) {
         if (memchr(line, '\0', used) != NULL) {
             note_include_narrow_unsafe("text_line_nul", from);
             continue;
@@ -771,7 +796,7 @@ static void text_scan_file(struct text_includes *t, const char *from)
         /* A directive can straddle two bounded chunks. Do not certify a
          * complete include closure when this bounded text scan cannot see
          * one whole source line. A short final line needs no newline. */
-        if (used > 0 && line[used - 1] != '\n' && !feof(file))
+        if (used > 0 && line[used - 1] != '\n' && !reader.eof_observed)
             note_include_narrow_unsafe("text_line_truncated", from);
         char *quoted = strstr(line, "#include \"");
         char *end;
