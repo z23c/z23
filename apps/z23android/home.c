@@ -109,6 +109,8 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     if (view->node_stopping && view->node_installing) snprintf(out, cap, "Stopping…\nYou can use Z23");
     else if (view->node_installing) snprintf(out, cap, "Fast sync\n%s",
         view->node_wallet_replaying ? view->node_wallet_replay : "Preparing your wallet");
+    else if (!view->node_process_running && view->node_starting && !view->node_stopping)
+        snprintf(out, cap, "Starting node…\nYou can use Z23");
     else if (!view->node_process_running) snprintf(out, cap, "Node stopped");
     else if (view->node_stopping) snprintf(out, cap, "Stopping…\nYou can use Z23");
     else if (view->node_wallet_replaying && !view->node_running) snprintf(out, cap, "%s", view->node_wallet_replay);
