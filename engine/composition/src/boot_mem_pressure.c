@@ -8,6 +8,7 @@
  * mem_pressure_start()/stop(). */
 
 #include "config/boot_internal.h"
+#include "config/boot_error.h"
 
 #include "util/mem_pressure.h"
 
@@ -33,8 +34,15 @@ static void boot_mem_pressure_stop(void *ctx)
 
 bool boot_mem_pressure_register(struct boot_svc_ctx *svc)
 {
-    if (!svc)
+    if (!svc) {
+        boot_error_report(BOOT_ERROR_FATAL,
+            "BOOT_MEM_PRESSURE_REGISTER_REFUSED",
+            "mem.pressure",
+            "memory pressure register refused: no boot service context",
+            NULL, 0,
+            "stage=mem_pressure_no_context");
         return false;
+    }
     const struct zcl_service_spec spec = {
         .name = "mem_pressure",
         .start = boot_mem_pressure_start,
