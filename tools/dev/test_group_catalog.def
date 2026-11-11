@@ -210,6 +210,7 @@ ZCL_TEST_GROUP(p2p_bind_refusal)
 ZCL_TEST_GROUP(mem_pressure_register_refusal)
 ZCL_TEST_GROUP(canary_watch_register_refusal)
 ZCL_TEST_GROUP(supervisor_backstop_register_refusal)
+ZCL_TEST_GROUP(soak_attestation_register_refusal)
 ZCL_TEST_GROUP(stale_offers_only)
 /* mesh terminal open/receipt/data/resize/close wire codec and receipt proof */
 ZCL_TEST_GROUP(mesh_terminal_proto)

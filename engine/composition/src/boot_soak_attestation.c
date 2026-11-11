@@ -14,6 +14,7 @@
  * touches the reducer drive, sqlite, or consensus tables. */
 
 #include "config/boot_internal.h"
+#include "config/boot_error.h"
 #include "services/soak_attestation_service.h"
 #include "jobs/soak_attestation_poll.h"
 #include "util/log_macros.h"
@@ -52,8 +53,15 @@ static void boot_soak_attestation_stop(void *ctx)
 
 bool boot_soak_attestation_register(struct boot_svc_ctx *svc)
 {
-    if (!svc)
+    if (!svc) {
+        boot_error_report(BOOT_ERROR_FATAL,
+            "BOOT_SOAK_ATTESTATION_REGISTER_REFUSED",
+            "soak.attestation",
+            "soak attestation register refused: no boot service context",
+            NULL, 0,
+            "stage=soak_attestation_no_context");
         return false;
+    }
     const struct zcl_service_spec spec = {
         .name  = "soak_attestation",
         .start = boot_soak_attestation_start,
