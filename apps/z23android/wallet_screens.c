@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "share_diag.h"
 
 #define OUT_CAP 65536u
 #define PAGES_MAX 64u
@@ -121,7 +122,12 @@ enum { WALLET_SETTLE_MS = 250, WALLET_SETTLE_TICKS = 2 };
 
 static void touch(void) { ++st.version; }
 static void copy(char *dst, size_t cap, const char *src) { snprintf(dst, cap, "%s", src); }
-static void clear_share_notice(void) { st.d.share_notice = false; st.d.note[0] = '\0'; }
+static void clear_share_notice(void)
+{
+    SHARE_DIAG("clear share notice");
+    st.d.share_notice = false;
+    st.d.note[0] = '\0';
+}
 static uint64_t now(void) { return st.env.now_ms ? st.env.now_ms(st.env.ctx) : 0; }
 /* The JSON object in command output: at its start, or on the first line that begins with a brace. */
 static const char *json_start(const char *text)
@@ -551,6 +557,8 @@ static void funds_items(struct wallet_screen *s)
 
 static void receive_items(struct wallet_screen *s)
 {
+    SHARE_DIAG("receive items ready=%d blocked=%d page=%d share=%d note=%d",
+               st.ready, st.blocked, st.page, st.d.share_notice, !!st.d.note[0]);
 #ifdef ZAPP_SHARE_FIXTURE
     title(s, "Receive");
     (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
@@ -756,7 +764,7 @@ static bool fallback_current(void)
         char identity[82];
         if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) && !strcmp(identity, st.d.offline_identity)) return true;
         st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.offline_bound = false;
-        clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
+        SHARE_DIAG("fallback invalidate"); clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
         return false;
     }
     if (!st.d.setup_bound) return true;
@@ -765,7 +773,7 @@ static bool fallback_current(void)
     if (st.env.setup_address && st.env.setup_address(st.env.ctx, address, sizeof(address), &generation) &&
         generation == st.d.address_generation && !strcmp(address, st.d.setup_anchor)) return true;
     st.d.address[0] = 0; st.d.code[0] = 0; st.d.address_fallback = false; st.d.setup_bound = false;
-    clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
+    SHARE_DIAG("fallback invalidate"); clear_share_notice(); st.d.address_pending = false; ++st.epoch; touch();
     return false;
 }
 unsigned wallet_screens_snapshot(struct wallet_screen *out)
@@ -973,6 +981,7 @@ static void request_guard(void)
     if (!st.request.valid) return;
     if (st.env.setup_identity && st.env.setup_identity(st.env.ctx, identity) &&
         !strcmp(identity, st.request.identity)) return;
+    SHARE_DIAG("request guard invalidate");
     request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice();
     if (st.d.address[0]) rebuild_code();
     touch();
@@ -993,12 +1002,15 @@ static void request_restore(const char *address)
     if (!st.request.valid) return;
     if (!st.env.setup_identity || !st.env.setup_identity(st.env.ctx, identity) ||
         strcmp(identity, st.request.identity) || strcmp(address, st.request.address)) {
+        SHARE_DIAG("request restore invalidate");
         request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice(); return;
     }
     st.d.has_amount = true; st.d.amount_zat = st.request.amount;
 }
 static void show_address(const char *address)
 {
+    SHARE_DIAG("show address share=%d note=%d changed=%d",
+               st.d.share_notice, !!st.d.note[0], st.d.address[0] && strcmp(st.d.address, address));
     if (st.d.address[0] && strcmp(st.d.address, address)) clear_share_notice();
     if (!st.d.share_notice) st.d.note[0] = '\0';
     if (!private_network(address, &st.d.network)) {
@@ -1713,6 +1725,8 @@ bool wallet_screens_share_code(char *out, size_t cap)
 void wallet_screens_receive_notice(const char *text)
 {
     pthread_mutex_lock(&st.lock);
+    SHARE_DIAG("receive notice ready=%d blocked=%d page=%d text=%d",
+               st.ready, st.blocked, st.page, text ? 1 : 0);
     if (st.ready && !st.blocked && st.page == WALLET_PAGE_RECEIVE && text) {
         st.d.share_notice = text[0] != '\0';
         copy(st.d.note, sizeof(st.d.note), text);

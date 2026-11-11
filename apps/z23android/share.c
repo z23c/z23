@@ -6,6 +6,7 @@
 #include "wallet_screens.h"
 #include <stdio.h>
 #include <string.h>
+#include "share_diag.h"
 
 static char payment_code[ZAPP_RECEIVE_CODE_MAX];
 static bool pending;
@@ -104,6 +105,7 @@ static void return_with_notice(const char *text)
 bool zapp_share_take_result(char *out, size_t cap)
 {
     if (!return_to_receive) return false;
+    SHARE_DIAG("share take text=%d", !!result_notice[0]);
     if (out && cap) snprintf(out, cap, "%s", result_notice);
     return_to_receive = false;
     result_notice[0] = '\0';
@@ -147,6 +149,8 @@ bool zapp_share_begin(JNIEnv *env, jobject activity)
 }
 void zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
 {
+    SHARE_DIAG("share result request=%ld result=%ld data=%d",
+               (long)request, (long)result, !!data);
     if (request != ZAPP_SHARE_PICK_REQUEST) return;
     if (result != -1 || !data) {
         return_with_notice("Share cancelled. Nothing was sent.");
