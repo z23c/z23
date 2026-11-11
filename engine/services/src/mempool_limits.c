@@ -600,6 +600,15 @@ static void *ml_thread_fn(void *arg)
     return NULL;
 }
 
+#ifdef ZCL_TESTING
+static _Atomic bool g_ml_fail_spawn_once;
+
+void mempool_limits_fail_next_spawn_for_test(void)
+{
+    atomic_store(&g_ml_fail_spawn_once, true);
+}
+#endif
+
 /* ── Lifecycle ──────────────────────────────────────────────── */
 
 struct zcl_result mempool_limits_start(struct tx_mempool *pool,
@@ -627,12 +636,19 @@ struct zcl_result mempool_limits_start(struct tx_mempool *pool,
      * any concurrent add is already subject to enforcement. */
     tx_mempool_set_post_add_hook(ml_post_add_hook);
 
-    int rc = thread_registry_spawn("zcl_mempool_lim", ml_thread_fn, NULL,
-                                       &g_ml.thread);
+    int rc;
+#ifdef ZCL_TESTING
+    if (atomic_exchange(&g_ml_fail_spawn_once, false))
+        rc = EAGAIN;
+    else
+#endif
+        rc = thread_registry_spawn("zcl_mempool_lim", ml_thread_fn, NULL,
+                                   &g_ml.thread);
     if (rc != 0) {
         tx_mempool_set_post_add_hook(NULL);
         pthread_mutex_lock(&g_ml.lock);
         g_ml.thread_running = false;
+        g_ml.pool = NULL;
         pthread_mutex_unlock(&g_ml.lock);
         return ZCL_ERR(-3, "thread_registry_spawn failed (%d)", rc);
     }

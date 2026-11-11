@@ -164,6 +164,11 @@ void mempool_limits_stop(void);
 
 /* ── Test seams ─────────────────────────────────────────────── */
 
+#ifdef ZCL_TESTING
+/* Fail the next start at the thread spawn boundary. */
+void mempool_limits_fail_next_spawn_for_test(void);
+#endif
+
 /* Inject a fake wall clock for deterministic expiry tests.
  * `fn` returns seconds since Unix epoch. Pass NULL to revert to
  * the real `platform_time_wall_time_t()`. */

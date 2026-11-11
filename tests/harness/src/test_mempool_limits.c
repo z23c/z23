@@ -13,6 +13,8 @@
 #include "services/mempool_limits.h"
 #include "validation/txmempool.h"
 #include "event/event.h"
+#include "platform/os_proc.h"
+#include "util/mem_pressure.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -446,6 +448,42 @@ static int mlt_start_stop_lifecycle(void)
     return failures;
 }
 
+#ifdef ZCL_TESTING
+static int mlt_failed_start_does_not_shrink(void)
+{
+    int failures = 0;
+    printf("mempool_limits: failed start leaves pressure sink inert... ");
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+    struct transaction tx[3];
+    bool added = true;
+    for (int i = 0; i < 3; i++) {
+        mlt_build_tx(&tx[i], 0x900 + i, 1, 1, COIN_VALUE);
+        added = mlt_add(&pool, &tx[i], 1000 * (int64_t)(i + 1),
+                        1700000000) > 0 && added;
+    }
+    struct mempool_limits_config cfg = {0};
+    cfg.max_tx_count = 2;
+    mempool_limits_fail_next_spawn_for_test();
+    struct zcl_result result = mempool_limits_start(&pool, &cfg);
+    struct os_proc_mem forced = {
+        .rss_bytes = 100, .vsize_bytes = 100,
+        .cgroup_current = 100, .cgroup_high = 100, .cgroup_max = 100,
+        .sys_total_bytes = 100, .sys_avail_bytes = 0,
+    };
+    os_proc_mem_set_override(&forced);
+    mem_pressure_poll_tick();
+    bool ok = added && !result.ok && mem_pressure_current() >= MEM_HIGH &&
+              tx_mempool_size(&pool) == 3;
+    os_proc_mem_set_override(NULL);
+    mempool_limits_stop();
+    for (int i = 0; i < 3; i++) transaction_free(&tx[i]);
+    tx_mempool_free(&pool);
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+#endif
+
 /* ── 12. stats counters reflect calls ──────────────────── */
 static int mlt_stats_track_enforce_expire(void)
 {
@@ -553,6 +591,9 @@ int test_mempool_limits(void)
     failures += mlt_min_relay_fee_gates_tx();
     failures += mlt_post_add_enforces_count_cap();
     failures += mlt_start_stop_lifecycle();
+#ifdef ZCL_TESTING
+    failures += mlt_failed_start_does_not_shrink();
+#endif
     failures += mlt_stats_track_enforce_expire();
     failures += mlt_enforce_survives_fee_overflow();
 
