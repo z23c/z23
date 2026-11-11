@@ -1456,6 +1456,17 @@ static int ndt_holes_cases(const char *dir)
                   ndt_clean_topup(&a, &ndb, progress, dir, false, &r));
         NDT_CHECK("holes: old-format mark ignored, whole window read",
                   r == window - 1);
+
+        /* A rollback to exactly the stored clean boundary must not skip the
+         * entire now-shorter window. The upper bound is exclusive. */
+        NDT_CHECK("holes: mark restored before rollback",
+                  ndt_holes_mark(&a, &ndb, progress, dir));
+        const int rolled_best = NDT_CLEAN_BEST - NDT_CLEAN_MARGIN;
+        NDT_CHECK("holes: coins frontier rolled back to clean boundary",
+                  ndt_set_coins_best(progress, rolled_best));
+        NDT_CHECK("holes: rollback boundary folds the complete window",
+                  ndt_clean_topup(&a, &ndb, progress, dir, false, &r) &&
+                  r == (size_t)(rolled_best - NDT_CLEAN_SEED - 1));
     }
     main_state_free(&a);
     if (progress)
