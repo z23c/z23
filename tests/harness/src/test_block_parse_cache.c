@@ -40,6 +40,8 @@
 #include "core/amount.h"
 #include "core/uint256.h"
 #include "util/reducer_stage_profile.h"
+#include "util/mem_pressure.h"
+#include "platform/os_proc.h"
 #include "json/json.h"
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1005,6 +1007,50 @@ static int test_borrowed_pin_survives(struct fixture *fa, struct fixture *fb,
     return failures;
 }
 
+static int test_pressure_dispatch(struct fixture *fa, struct fixture *fb,
+                                  const char *datadir)
+{
+    int failures = 0;
+    TEST("bpc: pressure dispatch evicts unpinned and preserves pin") {
+        block_parse_cache_clear();
+        struct block_parse_handle pinned = {0}, unpinned = {0};
+        bool ok = block_parse_cache_acquire(1400, fa->hash.data, &fa->bi,
+                                            datadir, &pinned) &&
+                  block_parse_cache_acquire(1401, fb->hash.data, &fb->bi,
+                                            datadir, &unpinned);
+        block_parse_cache_release(&unpinned);
+        struct os_proc_mem forced = {
+            .rss_bytes = 100, .vsize_bytes = 100,
+            .cgroup_current = 100, .cgroup_high = 100, .cgroup_max = 100,
+            .sys_total_bytes = 100, .sys_avail_bytes = 0,
+        };
+        os_proc_mem_set_override(&forced);
+        mem_pressure_poll_tick();
+        ok = ok && mem_pressure_current() >= MEM_HIGH;
+        const struct block *held = block_parse_handle_block(&pinned);
+        ok = ok && held && held->vtx[0].num_vout == 3;
+        struct block_index broken_b = bpc_index_without_data(&fb->bi);
+        struct block after; block_init(&after);
+        bool unpinned_resident = block_parse_cache_get(1401, fb->hash.data,
+                                                       &broken_b, datadir,
+                                                       &after);
+        block_free(&after);
+        block_parse_cache_release(&pinned);
+        struct block_index broken_a = bpc_index_without_data(&fa->bi);
+        block_init(&after);
+        bool pinned_resident = block_parse_cache_get(1400, fa->hash.data,
+                                                     &broken_a, datadir,
+                                                     &after);
+        block_free(&after);
+        os_proc_mem_set_override(NULL);
+        block_parse_cache_clear();
+        if (!ok || unpinned_resident || pinned_resident) {
+            printf("FAIL (pressure dispatch)\n"); failures++;
+        } else printf("OK\n");
+    }
+    return failures;
+}
+
 static int test_borrowed_stale_release(struct fixture *fa, struct fixture *fb,
                                        const char *datadir)
 {
@@ -1098,6 +1144,7 @@ static int test_borrowed_contract(const char *datadir)
     }
 
     failures += test_borrowed_pin_survives(&fa, &fb, datadir);
+    failures += test_pressure_dispatch(&fa, &fb, datadir);
     failures += test_borrowed_stale_release(&fa, &fb, datadir);
     failures += test_borrowed_concurrent_readers(&fa, datadir);
     failures += test_borrowed_wire_identity(&fa, datadir);
