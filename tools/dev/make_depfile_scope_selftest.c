@@ -385,6 +385,82 @@ static void tor_guard_probes(void)
     if (failed) fail("Tor bootstrap guard probe failed");
 }
 
+struct prime_case {
+    const char *first, *second;
+    bool sentinel;
+};
+
+static const struct prime_case prime_cases[] = {
+    {"worktree-prime", NULL, false},
+    {"worktree-prime-selftest", NULL, false},
+    {"worktree-prime", "worktree-prime-selftest", false},
+    {"worktree-prime-selftest", "worktree-prime", false},
+    {"worktree-prime", "z23", true}, {"z23", "worktree-prime", true},
+    {"worktree-prime", "help", true}, {"help", "worktree-prime", true},
+    {"worktree-prime", "zcl-depfile-unknown", true},
+    {"zcl-depfile-unknown", "worktree-prime", true},
+    {NULL, NULL, true},
+};
+
+static size_t prime_probe_start(size_t i, bool capture, const char *log)
+{
+    const char *argv[40] = {"make", "-f", text("%s/probe.mk", work),
+                            "--no-print-directory", "-n"};
+    size_t n = 5;
+    const char *old[] = {"worktree-prime", "worktree-prime-selftest", "z23", "help",
+                         "zcl-depfile-unknown", "zcl-depfile-default"};
+    for (size_t j = 0; j < sizeof old / sizeof old[0]; j++) {
+        argv[n++] = "-o";
+        argv[n++] = old[j];
+    }
+    argv[n++] = "VENDOR_LIBS=";
+    argv[n++] = "VIEW_GEN_HEADERS=";
+    argv[n++] = "VIEW_GEN_HEADERS_EARLY=";
+    argv[n++] = "ZCL_TOR=stub";
+    argv[n++] = "BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = text("BUILD_DIR=%s/prime-%zu/build", work, i);
+    argv[n++] = capture ? "VIEW_BOOTSTRAP_MK=" :
+                          text("VIEW_BOOTSTRAP_MK=%s", make_path(text("%s/prime-view-sentinel.mk", work)));
+    argv[n++] = capture ? "ZCL_SOURCE_IDENTITY_SESSION=$(error PRIME_CAPTURE_SENTINEL)" :
+                          text("BUILD_SOURCE_RECORD=%s", source_record);
+    if (prime_cases[i].first) argv[n++] = prime_cases[i].first;
+    if (prime_cases[i].second) argv[n++] = prime_cases[i].second;
+    argv[n] = NULL;
+    return probe_start(argv, log, false);
+}
+
+static void prime_guard_probes(void)
+{
+    enum { count = sizeof prime_cases / sizeof prime_cases[0] };
+    size_t children[2][count];
+    const char *logs[2][count];
+    put(text("%s/prime-view-sentinel.mk", work), 0, "%s\n", "$(error PRIME_VIEW_SENTINEL)");
+    probe_count = 0; /* all previous probes were reaped */
+    for (size_t mode = 0; mode < 2; mode++)
+        for (size_t i = 0; i < count; i++) {
+            logs[mode][i] = text("%s/prime-guard-%zu-%zu.out", work, mode, i);
+            children[mode][i] = prime_probe_start(i, mode != 0, logs[mode][i]);
+        }
+    bool failed = false;
+    for (size_t mode = 0; mode < 2; mode++)
+        for (size_t i = 0; i < count; i++) {
+            int rc = probe_wait(children[mode][i]);
+            char *data = output(logs[mode][i]);
+            const char *marker = mode ? "PRIME_CAPTURE_SENTINEL" : "PRIME_VIEW_SENTINEL";
+            bool hit = strstr(data, marker) != NULL;
+            bool ok = prime_cases[i].sentinel ? rc == 2 && hit : rc == 0 && !hit;
+            if (!ok) {
+                fprintf(stderr, "prime guard mode=%zu case=%zu rc=%d sentinel=%d\n%s\n",
+                        mode, i, rc, hit, data);
+                failed = true;
+            }
+            free(data);
+        }
+    if (failed) fail("worktree-prime parse guard probe failed");
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) fail("usage: make-depfile-scope-selftest ROOT WORK");
@@ -396,6 +472,7 @@ int main(int argc, char **argv)
     binding_probes();
     consistency_probes();
     tor_guard_probes();
+    prime_guard_probes();
     puts("make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true hot_module_scoped=true mixed_unknown_all=true default_node_c23=true epoch_depfile_consistent=true tunnel_binding_scoped=true");
     return 0;
 }

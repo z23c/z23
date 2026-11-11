@@ -525,11 +525,13 @@ VIEW_GEN_HEADERS_EARLY := contexts/wallet/views/include/views/wallet_templates_g
 	tools/dev/native_tunnel_export_binding.h
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
+ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
 ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
 ifeq ($(ZCL_GENERATED_HEADER_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif
@@ -683,6 +685,10 @@ endif
 
 ifneq ($(origin BUILD_SOURCE_RECORD),command line)
 ifeq ($(ZCL_STANDALONE_CLEAN),1)
+BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
+else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
+# Prime recipes establish dependencies without a source-bound artifact.
+# A later build captures identity after those inputs are ready.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
 # The hot-swap loop recipe re-derives any identity it needs through the
