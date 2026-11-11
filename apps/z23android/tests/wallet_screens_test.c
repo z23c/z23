@@ -1441,15 +1441,15 @@ static void test_receive(void)
     wallet_screens_close();
 }
 
-/* Every wallet page has one Back, and it is the item the screen pins under the scrolling content, so it stays on screen
- * however long the page is: Funds (as "Home"), Receive, History and a detail. */
+/* Every wallet page pins Back under the scrolling content. Receive also pins Share request, so cancellation feedback
+ * cannot move that action off screen: Funds (as "Home"), Receive, History and a detail. */
 static size_t pinned(const struct wallet_screen *s)
 {
     size_t n = 0;
     for (size_t i = 0; i < s->count; ++i) n += wallet_item_pinned(&s->items[i]);
     return n;
 }
-static void test_every_page_pins_one_back(void)
+static void test_every_page_pins_navigation(void)
 {
     struct wallet_screen *s;
     start(false);
@@ -1458,7 +1458,9 @@ static void test_every_page_pins_one_back(void)
     CHECK(pinned(s) == 1 && !strcmp(text_at(s, find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK)), "Home"));
     tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
     s = snap();
-    CHECK(s->page == WALLET_PAGE_RECEIVE && pinned(s) == 1 && !strcmp(text_at(s, find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK)), "Back"));
+    CHECK(s->page == WALLET_PAGE_RECEIVE && pinned(s) == 2 && !strcmp(text_at(s, find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK)), "Back"));
+    long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST);
+    CHECK(share >= 0 && wallet_item_pinned(&s->items[share]));
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0 && !wallet_item_pinned(&s->items[find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS)]));
     CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_FUNDS);
     tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
@@ -2525,6 +2527,7 @@ static void test_receive_share(void)
     s = snap();
     long note = find_text(s, "Share cancelled. Nothing was sent.");
     CHECK(note >= 0 && note < find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST));
+    CHECK(pinned(s) == 2 && wallet_item_pinned(&s->items[find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST)]));
     wallet_screens_pause();
     fake.during = delayed_share_notice;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
@@ -3059,7 +3062,7 @@ int main(int argc, char **argv)
     test_setup_fallback();
     test_preload_while_latest_waits();
     test_setup_fallback_while_latest_waits();
-    test_every_page_pins_one_back();
+    test_every_page_pins_navigation();
     test_spendable_for_send();
     test_receive_amount();
     test_funds_action_positions();

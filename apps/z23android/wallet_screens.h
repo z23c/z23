@@ -208,11 +208,12 @@ void wallet_screens_scan_notice(const char *text);
 void wallet_time_label(int64_t now, int64_t when, int64_t offset, char *out, size_t cap);
 /* The phone's offset from UTC in seconds at a Unix time. */
 int64_t wallet_utc_offset(int64_t when);
-/* The item drawn in the fixed bar under a wallet page, where no scroll can take it off the screen: the page's Back, which
- * reads Home on Funds. */
+/* Items drawn in the fixed bar under a wallet page, where no scroll can take them off screen: Back on every page
+ * (Home on Funds), plus Share request on Receive. */
 static inline bool wallet_item_pinned(const struct wallet_item *item)
 {
-    return item->kind == WALLET_ITEM_BUTTON && item->action == WALLET_ACT_BACK;
+    return item->kind == WALLET_ITEM_BUTTON &&
+           (item->action == WALLET_ACT_BACK || item->action == WALLET_ACT_SHARE_REQUEST);
 }
 /* Whether two copies of a screen hold the same items. */
 bool wallet_screen_same(const struct wallet_screen *a, const struct wallet_screen *b);
