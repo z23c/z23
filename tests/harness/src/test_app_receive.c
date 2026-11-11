@@ -1570,8 +1570,10 @@ static bool ru_xvfb(struct ru_run *r)
     int fd[2];
     if (!ru_pipe(fd)) return false;
     int log = ru_log(r, "native-window-xvfb.log");
-    /* Xvfb writes displayfd on stdout, which is the private readiness pipe. */
-    const char *argv[] = {"/usr/bin/Xvfb", "-displayfd", "1", "-nolisten", "tcp",
+    /* Keep one server across gaps between short-lived dialog/driver clients.
+     * Cleanup owns its lifetime; Xvfb must not reset when the last client closes.
+     * displayfd on stdout is the private readiness pipe. */
+    const char *argv[] = {"/usr/bin/Xvfb", "-displayfd", "1", "-nolisten", "tcp", "-noreset",
         "-screen", "0", "1280x800x24", NULL};
     bool ok = log >= 0 && ru_spawn(&r->display, argv, log, fd[1], log);
     close(fd[1]); if (log >= 0) close(log);
@@ -2022,6 +2024,8 @@ static bool ruf_stage(const char *stage, bool ok)
     if (!ok) fprintf(stderr, "RECEIVE_FLOW_STAGE failed=%s\n", stage);
     return ok;
 }
+static void ruf_log_evidence(const struct ru_run *r, const char *name,
+                             const char *label, off_t start, bool tail);
 static void ruf_display_failure(struct ru_run *r)
 {
     int saved_errno = errno;
@@ -2037,11 +2041,13 @@ static void ruf_display_failure(struct ru_run *r)
     int wait_errno = rc < 0 ? errno : 0;
     fprintf(stderr, "RECEIVE_FLOW_DISPLAY equal=%d image_match=%d wait_rc=%d wait_errno=%d observed=%d code=%d status=%d\n",
         equal, image_match, rc, wait_errno, info.si_pid != 0, info.si_code, info.si_status);
+    ruf_log_evidence(r, "native-window-xvfb.log", "RECEIVE_XVFB_TAIL", 0, true);
     errno = saved_errno;
 }
-/* Capture only this invocation, before another driver appends to the log. */
+/* Capture this invocation, or the bounded tail of a long-lived server log,
+ * before cleanup retires the fixture and another invocation appends output. */
 static void ruf_log_evidence(const struct ru_run *r, const char *name,
-                             const char *label, off_t start)
+                             const char *label, off_t start, bool tail)
 {
     char path[1100], buf[4096];
     int n = snprintf(path, sizeof(path), "%s/%s", r->fixture->world.root, name);
@@ -2054,10 +2060,11 @@ static void ruf_log_evidence(const struct ru_run *r, const char *name,
     }
     off_t available = st.st_size - start;
     size_t want = available > (off_t)sizeof(buf) ? sizeof(buf) : (size_t)available;
-    ssize_t got = pread(fd, buf, want, start); int saved = errno; close(fd);
+    off_t offset = tail ? st.st_size - (off_t)want : start;
+    ssize_t got = pread(fd, buf, want, offset); int saved = errno; close(fd);
     if (got < 0) { fprintf(stderr, "%s read_error=%d\n", label, saved); return; }
-    fprintf(stderr, "%s bytes=%zd available=%lld truncated=%d\n",
-        label, got, (long long)available, (off_t)got < available);
+    fprintf(stderr, "%s bytes=%zd available=%lld truncated=%d offset=%lld\n",
+        label, got, (long long)available, (off_t)got < available, (long long)offset);
     if (got > 0) (void)fwrite(buf, 1, (size_t)got, stderr);
     fputc('\n', stderr);
 }
@@ -2075,9 +2082,13 @@ static bool ruf_driver(struct ru_run *r, const char *title, const char *action, 
     int waited = -1; /* no wait when spawn failed */
     if (ok) { waited = (int)ru_wait(&r->driver, 7000, &code); ok = waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0; }
     bool stopped = ru_stop(&r->driver);
-    if (!ok || !stopped) fprintf(stderr, "RECEIVE_FLOW_DRIVER title=%s action=%s wait=%d exit=%u stopped=%d\n",
-        title, action, waited, code, stopped);
-    if (!ok || !stopped) { ruf_log_evidence(r, "receive-flow-driver.log", "RECEIVE_FLOW_DRIVER_OUTPUT", start); ruf_display_failure(r); }
+    if (!ok || !stopped) {
+        fprintf(stderr, "--- evidence receive-ui-driver ---\nRECEIVE_FLOW_DRIVER title=%s action=%s wait=%d exit=%u stopped=%d\n",
+            title, action, waited, code, stopped);
+        ruf_log_evidence(r, "receive-flow-driver.log", "RECEIVE_FLOW_DRIVER_OUTPUT", start, false);
+        ruf_display_failure(r);
+        fputs("--- end evidence ---\n", stderr);
+    }
     return ok && stopped;
 }
 static bool ruf_cli(struct ru_run *r, enum ruf_case which)
@@ -2604,12 +2615,14 @@ static bool rus_wait_keep_window(struct ru_run *r)
     bool stopped = ru_stop(&r->driver);
     if (!ok || !stopped) {
         int64_t end = platform_time_monotonic_ms();
+        fputs("--- evidence receive-ui-preview ---\n", stderr);
         fprintf(stderr, "RECEIVE_PREVIEW_WAIT log=%d log_errno=%d spawned=%d spawn_errno=%d wait=%d exit=%u elapsed_ms=%lld cleanup=%d\n",
                 log >= 0, log_errno, spawned, spawn_errno, waited, code,
                 (long long)(begin > 0 && end >= begin ? end - begin : -1), stopped);
-        ruf_log_evidence(r, "receive-success-driver.log", "RECEIVE_PREVIEW_DRIVER_OUTPUT", start);
-        ruf_log_evidence(r, "receive-flow-cli.log", "RECEIVE_PREVIEW_CLI_OUTPUT", 0);
+        ruf_log_evidence(r, "receive-success-driver.log", "RECEIVE_PREVIEW_DRIVER_OUTPUT", start, false);
+        ruf_log_evidence(r, "receive-flow-cli.log", "RECEIVE_PREVIEW_CLI_OUTPUT", 0, false);
         ruf_display_failure(r);
+        fputs("--- end evidence ---\n", stderr);
     }
     return ok && stopped;
 }
