@@ -1309,6 +1309,77 @@ static void ci_tag_led_checks(void)
     if (!ci_failures) TEST_DISCARD(system("rm -rf " CI_TAG_FIX));
 }
 
+#define CI_ARM_FIX "test-tmp/code-inventory-arm-index-fixture"
+
+/* Same symbol, adjacent definitions and a same-named definition in another
+ * file: each arm must bind the body in its own file and line interval. */
+static bool ci_arm_index_fixture(void)
+{
+    if (system("rm -rf " CI_ARM_FIX " && mkdir -p "
+               CI_ARM_FIX "/platform/modules/demo/include/demo "
+               CI_ARM_FIX "/platform/modules/demo/src "
+               CI_ARM_FIX "/tests/harness/src "
+               CI_ARM_FIX "/tools/dev " CI_ARM_FIX "/tools/lint") != 0) return false;
+    return ci_write(CI_ARM_FIX "/platform/modules/demo/include/demo/arms.h",
+        "/* purpose: Expose adjacent alternate definitions. */\n"
+        "int arm_index_pick(int value);\n") &&
+        ci_write(CI_ARM_FIX "/platform/modules/demo/src/arms.c",
+        "#include \"demo/arms.h\"\n"
+        "#if defined(ARM_FIRST)\n"
+        "int arm_index_pick(int value) { (void)value; return 0; }\n"
+        "#elif defined(ARM_SECOND)\n"
+        "int arm_index_pick(int value) { (void)value; return 1; }\n"
+        "#else\n"
+        "int arm_index_pick(int value) { return value + 2; }\n"
+        "#endif\n") &&
+        ci_write(CI_ARM_FIX "/platform/modules/demo/src/other_arms.c",
+        "#include \"demo/arms.h\"\n"
+        "int arm_index_pick(int value) { (void)value; return 1; }\n") &&
+        ci_write(CI_ARM_FIX "/tests/harness/src/test_arm_index_fixture.c",
+        "#include \"demo/arms.h\"\n"
+        "int test_arm_index_fixture(void) { return arm_index_pick(0); }\n") &&
+        ci_write(CI_ARM_FIX "/tools/dev/test_group_catalog.def",
+        "ZCL_TEST_GROUP(arm_index_fixture)\n") &&
+        ci_write(CI_ARM_FIX "/tools/lint/arm_symbol_single_baseline.txt",
+        "# z23-generated-artifact: zcl.generated_artifact.v1\n"
+        "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
+        "# asserts: multi_arm_definition(path,symbol)\n"
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n"
+        "platform/modules/demo/src/arms.c\tarm_index_pick\n"
+        "platform/modules/demo/src/other_arms.c\tarm_index_pick\n");
+}
+static int ci_arm_index_match(const struct ci_inventory_definition_arm *arm)
+{
+    bool main = !strcmp(arm->definition_path, "platform/modules/demo/src/arms.c");
+    if (!main) return !strcmp(arm->definition_path, "platform/modules/demo/src/other_arms.c") &&
+        arm->definition_line == 2 && arm->constant_return_body &&
+        !strcmp(arm->constant_return_value, "1") ? 8 : 0;
+    if (arm->definition_line == 3 && arm->constant_return_body &&
+        !strcmp(arm->constant_return_value, "0")) return 1;
+    if (arm->definition_line == 5 && arm->constant_return_body &&
+        !strcmp(arm->constant_return_value, "1")) return 2;
+    if (arm->definition_line == 7 && !arm->constant_return_body &&
+        !strcmp(arm->constant_return_evidence, "parsed_definition_body")) return 4;
+    return 0;
+}
+static void ci_arm_index_checks(void)
+{
+    struct ci_inventory_report *report = codeindex_inventory_analyze(CI_ARM_FIX);
+    CI_ASSERT(report != NULL);
+    if (!report) return;
+    CI_ASSERT(report->definition_arm_count == 4);
+    int seen = 0;
+    for (int i = 0; i < report->definition_arm_count; ++i) {
+        const struct ci_inventory_definition_arm *arm = &report->definition_arms[i];
+        if (strcmp(arm->symbol, "arm_index_pick")) continue;
+        seen |= ci_arm_index_match(arm);
+    }
+    CI_ASSERT(seen == 15);
+    codeindex_inventory_free(report);
+    if (!ci_failures) TEST_DISCARD(system("rm -rf " CI_ARM_FIX));
+}
+
 int test_code_inventory(void)
 {
     ci_failures = 0;
@@ -1356,6 +1427,8 @@ int test_code_inventory(void)
     ci_semantic_known_answers(first);
     CI_ASSERT(ci_tagged_fixture());
     ci_tag_led_checks();
+    CI_ASSERT(ci_arm_index_fixture());
+    ci_arm_index_checks();
 
     struct ci_inventory_report *same = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(same != NULL);

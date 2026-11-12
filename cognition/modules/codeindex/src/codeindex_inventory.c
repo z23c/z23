@@ -353,9 +353,8 @@ static void inv_include_token(const char *path, char out[256])
     inv_cpy(out, 256, p ? p + strlen("/include/") : path);
 }
 
-/* Scratch indexes for inv_build_capabilities: definition, body and
- * baselined-arm lookup tables, plus the symbol-to-capability map that is
- * handed back to the use counter. */
+/* Shared capability/arm lookup indexes and the symbol-to-capability map.
+ * The analysis owns these until all derived evidence has been collected. */
 struct inv_cap_scratch {
     int *cap_for_symbol;
     struct inv_def_order *defs;
@@ -419,14 +418,6 @@ static void inv_cap_scratch_index(const struct inv_scan *scan,
     inv_def_order_sort(s->defs, s->def_count);
     inv_body_name_order_sort(s->bodies, scan->body_count);
     inv_arm_keys_sort(s->arm_keys, s->arm_key_count);
-}
-
-/* Keeps only the scratch that the caller still needs after the build. */
-static void inv_cap_scratch_release(struct inv_cap_scratch *s)
-{
-    free(s->defs);
-    free(s->bodies);
-    free(s->arm_keys);
 }
 
 static void inv_fill_capability_header(struct ci_inventory_capability *cap,
@@ -540,7 +531,7 @@ static void inv_emit_symbol(const struct inv_scan *scan,
 
 static bool inv_build_capabilities(const struct inv_scan *scan,
                                    struct ci_inventory_report *report,
-                                   int **out_cap_for_symbol)
+                                   struct inv_cap_scratch *out_scratch)
 {
     int caps = 0;
     for (int i = 0; i < scan->file_count; i++)
@@ -581,8 +572,7 @@ static bool inv_build_capabilities(const struct inv_scan *scan,
     report->symbol_count = si;
     report->public_headers = ci;
     report->symbols_exposed = si;
-    *out_cap_for_symbol = s.cap_for_symbol;
-    inv_cap_scratch_release(&s);
+    *out_scratch = s;
     return true;
 }
 
@@ -1003,51 +993,75 @@ static bool inv_definition_arm_push(
 
 /* Line of the next same-name definition after occ in its file, or 0 when
  * occ is the last one. */
-static int inv_next_definition_line(const struct inv_scan *scan,
+static int inv_next_definition_line(const struct inv_cap_scratch *index,
                                     const struct inv_symbol_occurrence *occ)
 {
-    int next_definition = 0;
-    for (int i = 0; i < scan->occurrence_count; i++) {
-        const struct inv_symbol_occurrence *other = &scan->occurrences[i];
-        if (other == occ || strcmp(other->symbol.name, occ->symbol.name) != 0 ||
-            strcmp(other->symbol.def_path, occ->symbol.def_path) != 0 ||
-            other->symbol.def_line <= occ->symbol.def_line)
-            continue;
-        if (!next_definition || other->symbol.def_line < next_definition)
-            next_definition = other->symbol.def_line;
+    int lo = 0, hi = index->def_count;
+    const struct ci_symbol *key = &occ->symbol;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        const struct ci_symbol *s = index->defs[mid].symbol;
+        int c = inv_name_path_line_cmp(s->name, s->def_path, s->def_line,
+                                      key->name, key->def_path, key->def_line);
+        if (c <= 0) lo = mid + 1;
+        else hi = mid;
     }
-    return next_definition;
+    if (lo == index->def_count) return 0;
+    const struct ci_symbol *next = index->defs[lo].symbol;
+    return strcmp(next->name, key->name) == 0 &&
+           strcmp(next->def_path, key->def_path) == 0 ? next->def_line : 0;
 }
 
 /* Earliest body of occ's name in occ's file, from its definition line up to
  * (not including) next_definition when that is nonzero. */
 static const struct inv_body *inv_earliest_body_before(
-    const struct inv_scan *scan, const struct inv_symbol_occurrence *occ,
-    int next_definition)
+    const struct inv_cap_scratch *index, int body_count,
+    const struct inv_symbol_occurrence *occ, int next_definition)
 {
-    const struct inv_body *best = NULL;
-    for (int i = 0; i < scan->body_count; i++) {
-        const struct inv_body *body = &scan->bodies[i];
-        if (strcmp(body->name, occ->symbol.name) != 0 ||
-            strcmp(body->path, occ->symbol.def_path) != 0 ||
-            body->line < occ->symbol.def_line ||
-            (next_definition && body->line >= next_definition))
-            continue;
-        if (!best || body->line < best->line) best = body;
+    int lo = 0, hi = body_count;
+    const struct ci_symbol *key = &occ->symbol;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        const struct inv_body *b = index->bodies[mid].body;
+        int c = inv_name_path_line_cmp(b->name, b->path, b->line,
+                                      key->name, key->def_path, key->def_line);
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
     }
-    return best;
+    if (lo == body_count) return NULL;
+    const struct inv_body *body = index->bodies[lo].body;
+    if (strcmp(body->name, key->name) != 0 ||
+        strcmp(body->path, key->def_path) != 0 ||
+        (next_definition && body->line >= next_definition)) return NULL;
+    return body;
 }
 
 static const struct inv_body *inv_body_for_occurrence(
-    const struct inv_scan *scan, const struct inv_symbol_occurrence *occ)
+    const struct inv_scan *scan, const struct inv_cap_scratch *index,
+    const struct inv_symbol_occurrence *occ)
 {
-    return inv_earliest_body_before(scan, occ,
-                                    inv_next_definition_line(scan, occ));
+    return inv_earliest_body_before(index, scan->body_count, occ,
+                                    inv_next_definition_line(index, occ));
+}
+
+/* Equal-line bodies retain the first original scan entry, as the linear
+ * arm lookup did. All pointers refer to entries of the same bodies array.
+ * Apply this ordering only after capability binding has used its own view. */
+static int inv_arm_body_order_cmp(const void *a, const void *b)
+{
+    int c = inv_body_name_order_cmp(a, b);
+    if (c) return c;
+    const struct inv_body_name_order *x = a, *y = b;
+    return (x->body > y->body) - (x->body < y->body);
 }
 
 static bool inv_derive_definition_arms(const struct inv_scan *scan,
-                                       struct ci_inventory_report *report)
+                                       struct ci_inventory_report *report,
+                                       struct inv_cap_scratch *index)
 {
+    if (scan->body_count > 1)
+        qsort(index->bodies, (size_t)scan->body_count, sizeof(*index->bodies),
+              inv_arm_body_order_cmp);
     for (int c = 0; c < report->capability_count; c++) {
         const struct ci_inventory_capability *cap = &report->capabilities[c];
         for (int i = cap->symbol_offset;
@@ -1063,7 +1077,7 @@ static bool inv_derive_definition_arms(const struct inv_scan *scan,
                     !inv_occurrence_is_baselined_arm(scan, occ))
                     continue;
                 const struct inv_body *body =
-                    inv_body_for_occurrence(scan, occ);
+                    inv_body_for_occurrence(scan, index, occ);
                 if (!inv_definition_arm_push(report, cap, symbol, occ, body))
                     return false;
                 found++;
@@ -1088,15 +1102,15 @@ struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
     struct ci_inventory_report *report = zcl_calloc(1, sizeof(*report),
                                                     "ci_inventory_report");
     if (!report) return NULL;
-    int *cap_for_symbol = NULL;
+    struct inv_cap_scratch scratch = {0};
     if (!inv_scan_all(&scan, report->source_root_sha3) ||
-        !inv_build_capabilities(&scan, report, &cap_for_symbol) ||
-        !inv_count_uses(&scan, report, cap_for_symbol) ||
+        !inv_build_capabilities(&scan, report, &scratch) ||
+        !inv_count_uses(&scan, report, scratch.cap_for_symbol) ||
         !inv_registered_reachability(&scan, report) ||
         !inv_derive_duplicates(&scan, report) ||
-        !inv_derive_definition_arms(&scan, report) ||
+        !inv_derive_definition_arms(&scan, report, &scratch) ||
         !inv_derive_invariants(&scan, report)) {
-        free(cap_for_symbol);
+        inv_cap_scratch_free_all(&scratch);
         inv_scan_release(&scan);
         codeindex_inventory_free(report);
         LOG_NULL("codeindex.inventory", "inventory derivation failed");
@@ -1109,7 +1123,7 @@ struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
         if (scan.files[i].is_test) report->test_files++;
         else if (!scan.files[i].is_example) report->production_files++;
     }
-    free(cap_for_symbol);
+    inv_cap_scratch_free_all(&scratch);
     inv_scan_release(&scan);
     return report;
 }
