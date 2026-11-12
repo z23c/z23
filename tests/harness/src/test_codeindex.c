@@ -3672,6 +3672,183 @@ static int ci_ref_insert_tests(void)
     return failures;
 }
 
+static int ci_include_select_authorize(void *context, int action, const char *one,
+                                       const char *two, const char *db, const char *trigger)
+{
+    (void)one; (void)two; (void)db; (void)trigger;
+    if (action == SQLITE_SELECT) (*(int *)context)++;
+    return SQLITE_OK;
+}
+
+static bool ci_include_select_file(struct ci_store *store, const char *path, int64_t *id)
+{
+    struct ci_file file = {0};
+    uint8_t hash[32] = {0};
+    if (snprintf(file.path, sizeof(file.path), "%s", path) >= (int)sizeof(file.path))
+        return false;
+    return ci_store_put_file(store, &file, hash, 0, id);
+}
+
+static bool ci_include_select_seed(struct ci_store *store, int64_t *id)
+{
+    int64_t other = -1;
+    bool begun = ci_store_begin(store);
+    bool ok = begun && ci_include_select_file(store, "one.c", id) &&
+        ci_include_select_file(store, "two.c", &other) &&
+        ci_store_put_include(store, *id, "c.h") &&
+        ci_store_put_include(store, *id, "a.h") &&
+        ci_store_put_include(store, *id, "b.h") &&
+        ci_store_put_include(store, other, "z.h");
+    bool committed = begun && ci_store_commit(store);
+    return ok && committed;
+}
+
+static bool ci_include_page(struct ci_store *store, const char *path, int offset,
+                            int cap, const char *first, const char *second)
+{
+    char out[3][256] = {{0}};
+    int n = ci_store_includes_of_file_page(store, path, offset, out, cap);
+    int expected = first ? (second ? 2 : 1) : 0;
+    return n == expected && (!first || !strcmp(out[0], first)) &&
+        (!second || !strcmp(out[1], second));
+}
+
+static sqlite3_stmt *ci_include_cached_stmt(sqlite3 *db)
+{
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s; s = sqlite3_next_stmt(db, s)) {
+        const char *sql = sqlite3_sql(s);
+        if (sql && strstr(sql, "SELECT i.dep_path FROM includes i"))
+            return s;
+    }
+    return NULL;
+}
+
+static bool ci_include_select_batch(struct ci_store *store)
+{
+    for (int i = 0; i < 8192; i++) {
+        bool ok = i % 2 ? ci_include_page(store, "two.c", 0, 1, "z.h", NULL)
+                        : ci_include_page(store, "one.c", 0, 2, "a.h", "b.h");
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static int ci_include_select_pages(struct ci_store *store)
+{
+    int failures = 0, prepares = 0;
+    sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_include_select_authorize, &prepares) == SQLITE_OK;
+    bool first = setup && ci_include_page(store, "one.c", 0, 2, "a.h", "b.h");
+    sqlite3_stmt *partial = ci_include_cached_stmt(db);
+    bool idle = partial && sqlite3_stmt_busy(partial) == 0;
+    bool more = ci_include_page(store, "one.c", 1, 2, "b.h", "c.h") &&
+        ci_include_page(store, "two.c", 0, 1, "z.h", NULL) &&
+        ci_include_page(store, "one.c", 3, 2, NULL, NULL) &&
+        ci_include_page(store, "missing.c", 0, 1, NULL, NULL);
+    uint64_t start = monotonic_us();
+    bool batch = ci_include_select_batch(store);
+    uint64_t elapsed = monotonic_us() - start;
+    sqlite3_stmt *cached = ci_include_cached_stmt(db);
+    int auto_reprepares = cached ? sqlite3_stmt_status(cached, SQLITE_STMTSTATUS_REPREPARE, 0) : 0;
+    int runs = cached ? sqlite3_stmt_status(cached, SQLITE_STMTSTATUS_RUN, 0) : 0;
+    printf("  codeindex: include select batch=8192 elapsed_us=%llu authorizations=%d auto_reprepares=%d runs=%d\n",
+           (unsigned long long)elapsed, prepares, auto_reprepares, runs);
+    CI_CHECK("include pages ordered and alternate paths, limits and offsets", first && more);
+    CI_CHECK("include select batch returns exact pages", batch);
+    CI_CHECK("include partial page leaves cached statement idle", idle);
+    CI_CHECK("include pages reuse one explicitly prepared select",
+             cached && prepares - auto_reprepares == 1 && runs == 8197);
+    (void)sqlite3_set_authorizer(db, NULL, NULL);
+    return failures;
+}
+
+static int ci_include_select_visibility(struct ci_store *store, int64_t id)
+{
+    int failures = 0;
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_store_put_include(store, id, "d.h");
+    bool committed = begun && ci_store_commit(store);
+    CI_CHECK("include select sees committed write", wrote && committed &&
+             ci_include_page(store, "one.c", 2, 2, "c.h", "d.h"));
+    begun = ci_store_begin(store);
+    wrote = begun && ci_store_put_include(store, id, "e.h");
+    bool rolled = begun && ci_store_rollback(store);
+    CI_CHECK("include select respects rollback", wrote && rolled &&
+             ci_include_page(store, "one.c", 3, 2, "d.h", NULL));
+    return failures;
+}
+
+static int ci_include_select_interrupt(void *context)
+{
+    (*(int *)context)++;
+    return 1;
+}
+
+static int ci_include_select_failures(struct ci_store *store)
+{
+    int failures = 0, interrupts = 0;
+    sqlite3 *db = ci_store_db(store);
+    char path[513], out[2][256];
+    memset(path, 'x', sizeof(path) - 1); path[512] = 0;
+    int old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 128);
+    int bound = ci_store_includes_of_file_page(store, path, 0, out, 2);
+    (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
+    CI_CHECK("include select bind failure refuses", bound < 0);
+    CI_CHECK("include select recovers after bind failure",
+             ci_include_page(store, "one.c", 0, 2, "a.h", "b.h"));
+    sqlite3_progress_handler(db, 1, ci_include_select_interrupt, &interrupts);
+    int interrupted = ci_store_includes_of_file_page(store, "one.c", 0, out, 2);
+    sqlite3_progress_handler(db, 0, NULL, NULL);
+    CI_CHECK("include select interrupted step refuses", interrupts > 0 && interrupted < 0);
+    CI_CHECK("include select recovers after interrupted step",
+             ci_include_page(store, "one.c", 0, 2, "a.h", "b.h"));
+    return failures;
+}
+
+static int ci_include_select_schema(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    char out[2][256];
+    bool renamed = sqlite3_exec(db, "ALTER TABLE includes RENAME TO held", NULL, NULL, NULL) == SQLITE_OK;
+    int missing = renamed ? ci_store_includes_of_file_page(store, "one.c", 0, out, 2) : 0;
+    bool restored = renamed && sqlite3_exec(db, "ALTER TABLE held RENAME TO includes", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("include select refuses missing table", renamed && missing < 0);
+    CI_CHECK("include select recovers after schema restoration", restored &&
+             ci_include_page(store, "one.c", 0, 2, "a.h", "b.h"));
+    return failures;
+}
+
+static void ci_include_close_destroy(void *context)
+{
+    *(bool *)context = true;
+}
+
+static void ci_include_close_function(sqlite3_context *context, int argc, sqlite3_value **argv)
+{
+    (void)argc; (void)argv;
+    sqlite3_result_null(context);
+}
+
+static int ci_include_select_tests(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: include select fixture... FAIL\n"); return 1; }
+    int64_t id = -1;
+    bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(ci_store_db(store), "close_witness", 0,
+        SQLITE_UTF8, &destroyed, ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_include_select_seed(store, &id);
+    int failures = seeded ? ci_include_select_pages(store) : 1;
+    if (seeded) failures += ci_include_select_visibility(store, id);
+    if (seeded) failures += ci_include_select_failures(store);
+    if (seeded) failures += ci_include_select_schema(store);
+    CI_CHECK("include close witness registered and remains live", registered && !destroyed);
+    ci_store_close(store);
+    CI_CHECK("include cached select finalized at close", registered && destroyed);
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -3690,6 +3867,7 @@ int test_codeindex(void)
     int failures = test_codeindex_platform_arm();
 #if !defined(_WIN32)
     failures += ci_include_insert_tests();
+    failures += ci_include_select_tests();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)

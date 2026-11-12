@@ -551,24 +551,44 @@ int ci_store_symbols_in_file(struct ci_store *s, const char *path,
     return n;
 }
 
+/* The store lock owns the prepared statement, including binding and reset.
+ * Every call ends its read and clears bindings before unlocking. */
+static bool ci_store_include_page_prepare(struct ci_store *s)
+{
+    if (s->include_page_stmt) return true;
+    return sqlite3_prepare_v2(s->db,
+        "SELECT i.dep_path FROM includes i JOIN files f ON f.id=i.file_id"
+        " WHERE f.path=? ORDER BY i.dep_path ASC LIMIT ? OFFSET ?",
+        -1, &s->include_page_stmt, NULL) == SQLITE_OK;
+}
+
+static int ci_store_include_page_finish(struct ci_store *s, bool complete)
+{
+    int reset_rc = sqlite3_reset(s->include_page_stmt);
+    int clear_rc = sqlite3_clear_bindings(s->include_page_stmt);
+    int rc = reset_rc != SQLITE_OK ? reset_rc : clear_rc;
+    if (!complete || rc != SQLITE_OK) {
+        (void)sqlite3_finalize(s->include_page_stmt);
+        s->include_page_stmt = NULL;
+    }
+    return rc;
+}
+
 int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
                                    int offset, char (*out)[256], int cap)
 {
     if (!s || !path || !out || offset < 0 || cap <= 0)
         LOG_ERR("codeindex", "bad arg to includes_of_file_page");
     pthread_mutex_lock(&s->lock);
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db,
-        "SELECT i.dep_path FROM includes i JOIN files f ON f.id=i.file_id"
-        " WHERE f.path=? ORDER BY i.dep_path ASC LIMIT ? OFFSET ?",
-        -1, &stmt, NULL) != SQLITE_OK) {
+    if (!ci_store_include_page_prepare(s)) {
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare includes_of_file_page");
     }
+    sqlite3_stmt *stmt = s->include_page_stmt;
     if (sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_bind_int(stmt, 2, cap) != SQLITE_OK ||
         sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) {
-        (void)sqlite3_finalize(stmt);
+        (void)ci_store_include_page_finish(s, false);
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "bind includes_of_file_page");
     }
@@ -579,11 +599,11 @@ int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
         n++;
     }
     const bool complete = n == cap || rc == SQLITE_DONE;
-    const int finalize_rc = sqlite3_finalize(stmt);
+    const int finish_rc = ci_store_include_page_finish(s, complete);
     pthread_mutex_unlock(&s->lock);
-    if (!complete || finalize_rc != SQLITE_OK)
-        LOG_ERR("codeindex", "read includes_of_file_page failed rc=%d finalize=%d",
-                rc, finalize_rc);
+    if (!complete || finish_rc != SQLITE_OK)
+        LOG_ERR("codeindex", "read includes_of_file_page failed rc=%d finish=%d",
+                rc, finish_rc);
     return n;
 }
 
