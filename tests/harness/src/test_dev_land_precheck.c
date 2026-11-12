@@ -10,6 +10,7 @@
 
 #include "test/test_dev_land_common.h"
 #include "platform/state_root.h"
+#include "platform/logical_cpu.h"
 
 #if !defined(_WIN32)
 #include <poll.h>
@@ -1791,6 +1792,114 @@ static bool dlx_one_cancel_outcome(void)
     fclose(f); return valid && total == 1 && cancelled == 1;
 }
 
+static bool dlx_lint_jobs_fixture(char *helper, size_t helper_cap,
+                                  char *observed, size_t observed_cap)
+{
+    char makefile[1200];
+    if (snprintf(helper, helper_cap, "%s/jobs-helper", g_dlx_state) >= (int)helper_cap ||
+        snprintf(observed, observed_cap, "%s/jobs-observed", g_dlx_state) >= (int)observed_cap ||
+        snprintf(makefile, sizeof(makefile), "%s/jobs.mk", g_dlx_state) >= (int)sizeof(makefile))
+        return false;
+    const char *script = "#!/bin/sh\nd=${0%/*}\nexec make ${2:+\"$2\"} -C \"$1\" -f \"$d/jobs.mk\" lint-land\n";
+    const char *mk = ".PHONY: lint-land prerequisite\nlint-land: prerequisite\nprerequisite:\n"
+                     "\t@printf '%s\\n' '$(filter -j%,$(MAKEFLAGS))' > '$(dir $(lastword $(MAKEFILE_LIST)))jobs-observed'\n";
+    return dlx_write(helper, script) && chmod(helper, 0700) == 0 && dlx_write(makefile, mk);
+}
+
+static bool dlx_lint_jobs_result(bool valid, bool bounded, bool row_ok,
+                                 bool exists, const char *text,
+                                 size_t n, const char *expected)
+{
+    if (!valid) return !bounded && row_ok && !exists;
+    if (!bounded || !row_ok || !exists || n == 0) return false;
+    return n == strlen(expected) + 1u && text[n - 1] == '\n' &&
+           strncmp(text, expected, n - 1u) == 0;
+}
+
+static bool dlx_lint_jobs_environment(const char *cap, const char *flags)
+{
+    if (setenv("ZCL_BUILD_MAX_JOBS", cap, 1) != 0) return false;
+    if ((flags ? setenv("MAKEFLAGS", flags, 1) : unsetenv("MAKEFLAGS")) != 0) return false;
+    return unsetenv("MFLAGS") == 0 && unsetenv("MAKEOVERRIDES") == 0 &&
+           unsetenv("GNUMAKEFLAGS") == 0;
+}
+
+static bool dlx_lint_jobs_row(const struct dlx_call *c, bool valid)
+{
+    if (!dlx_ok(c)) return false;
+    if (strcmp(dlx_str(c, "state"), valid ? "started" : "failed")) return false;
+    if (valid) return true;
+    return !strcmp(dlx_str(c, "dimension"), "preparation_config") &&
+           strstr(dlx_str(c, "detail"), "ZCL_BUILD_MAX_JOBS") != NULL;
+}
+
+static bool dlx_lint_jobs_setup(struct dlx_rig *rig, const char *tag,
+                                char helper[1200], char observed[1200],
+                                char origin[64])
+{
+    return dlx_lint_jobs_environment("2", NULL) &&
+           dlx_lint_rig_setup(rig, tag, tag) &&
+           dlx_lint_jobs_fixture(helper, 1200, observed, 1200) &&
+           dlx_origin_main(rig, origin);
+}
+
+static bool dlx_lint_jobs_one(const char *tag, const char *cap, const char *flags,
+                              bool valid)
+{
+    struct dlx_rig rig; struct dlx_call c;
+    char helper[1200] = {0}, path[1200] = {0}, expected[16] = {0}, text[128] = {0};
+    size_t n = 0;
+    char origin_before[64] = {0}, origin_after[64] = {0};
+    char row_state[64] = {0}, dimension[64] = {0}, detail[256] = {0};
+    bool ready = dlx_lint_jobs_setup(&rig, tag, helper, path, origin_before);
+    if (ready) ready = dlx_lint_jobs_environment(cap, flags);
+    bool bounded = ready && platform_build_jobs_arg(expected);
+    zcl_dev_land_lint_helper_for_test(ready ? helper : NULL);
+    dlx_begin(&c, "step");
+    bool called = ready && dlx_run(&c);
+    bool passed = dlx_ok(&c);
+    bool row_ok = called && dlx_lint_jobs_row(&c, valid);
+    (void)snprintf(row_state, sizeof(row_state), "%s", dlx_str(&c, "state"));
+    (void)snprintf(dimension, sizeof(dimension), "%s", dlx_str(&c, "dimension"));
+    (void)snprintf(detail, sizeof(detail), "%s", dlx_str(&c, "detail"));
+    dlx_end(&c);
+    bool exists = ready && dlx_slurp(path, text, sizeof(text) - 1u, &n);
+    text[n] = '\0';
+    bool unchanged = ready && dlx_origin_main(&rig, origin_after) &&
+                     !strcmp(origin_before, origin_after);
+    bool ok = called && unchanged && dlx_lint_jobs_result(valid, bounded, row_ok, exists, text, n, expected);
+    if (!ok) fprintf(stderr, "land lint jobs tag=%s cap=%s ready=%d bounded=%d called=%d passed=%d row=%s dimension=%s detail=%s observed=%s expected=%s\n",
+                     tag, cap, ready, bounded, called, passed, row_state, dimension, detail,
+                     exists ? text : "(absent)", expected);
+    zcl_dev_land_lint_helper_for_test(NULL);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_lint_jobs_isolated(void)
+{
+    int failures = 0;
+    TEST("land: lint Make uses admitted jobs and refuses invalid caps") {
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            bool ok = true;
+            ok &= dlx_lint_jobs_one("jobs_unset", "2", NULL, true);
+            ok &= dlx_lint_jobs_one("jobs_high", "2", "-j64", true);
+            ok &= dlx_lint_jobs_one("jobs_unlimited", "2", "-j", true);
+            ok &= dlx_lint_jobs_one("jobs_empty", "", NULL, false);
+            ok &= dlx_lint_jobs_one("jobs_zero", "0", NULL, false);
+            ok &= dlx_lint_jobs_one("jobs_bad", "bad", NULL, false);
+            ok &= dlx_lint_jobs_one("jobs_overflow", "4294967296", NULL, false);
+            _exit(ok ? 0 : 1);
+        }
+        ASSERT(dlx_lint_worker_ok(child));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dlx_cancel_active_lint(void)
 {
     int failures = 0;
@@ -2005,6 +2114,7 @@ int dlx_case_cancel_request(void)
     }
 _test_next:;
 #if !defined(_WIN32)
+    failures += dlx_lint_jobs_isolated();
     failures += dlx_cancel_active_lint();
     failures += dlx_cancel_lint_completion();
     failures += dlx_lint_queue_error();

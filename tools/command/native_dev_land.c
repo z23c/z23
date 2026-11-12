@@ -5810,10 +5810,18 @@ bool dl_lint_helper_enabled_for_test(void) { return g_dl_lint_test_helper && g_d
 static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *head,
                         struct dl_row *row)
 {
-    const char *argv[] = { "make", "-C", d->wt, "lint-land", NULL };
+    char jobs[16];
+    if (!platform_build_jobs_arg(jobs)) {
+        (void)snprintf(row->dimension, sizeof(row->dimension), "%s", "preparation_config");
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", "ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal");
+        dl_log(row, row->detail);
+        dl_log(row, "\n");
+        return -1;
+    }
+    const char *argv[] = { "make", jobs, "-C", d->wt, "lint-land", NULL };
 #if defined(ZCL_TESTING)
     const char *fixture = g_dl_lint_test_helper;
-    if (fixture && fixture[0]) { argv[0] = fixture; argv[1] = d->wt; argv[2] = NULL; }
+    if (fixture && fixture[0]) { argv[0] = fixture; argv[1] = d->wt; argv[2] = jobs; argv[3] = NULL; }
 #endif
     if (!dl_prepare_progress(d, head, row, "lint-land"))
         return -1;
