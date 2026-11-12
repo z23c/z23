@@ -486,6 +486,8 @@ static struct inv_ev_resolved_ref *inv_ev_resolve_refs(
         (size_t)scan->ref_count * sizeof(*edges),
         "ci_inventory_resolved_refs");
     if (scan->ref_count && !edges) return NULL;
+    const struct inv_ref *previous = NULL;
+    int previous_to = -2;
     for (int i = 0; i < scan->ref_count; i++) {
         edges[i].from = -1;
         edges[i].to = -2;
@@ -494,6 +496,15 @@ static struct inv_ev_resolved_ref *inv_ev_resolve_refs(
             report, cap_files, stride, scan->refs[i].enclosing,
             scan->refs[i].file_index);
         if (edges[i].from < 0) continue;
+        /* References are sorted by callee and file. Retain missing and
+         * ambiguous results too; visibility is frozen for this call. */
+        if (previous && previous->file_index == scan->refs[i].file_index &&
+            strcmp(previous->callee, scan->refs[i].callee) == 0) {
+            edges[i].to = previous_to;
+            continue;
+        }
+        previous = &scan->refs[i];
+        previous_to = -2;
         int begin = inv_ev_body_lower(order, scan->body_count,
                                       scan->refs[i].callee);
         if (begin >= scan->body_count ||
@@ -502,6 +513,7 @@ static struct inv_ev_resolved_ref *inv_ev_resolve_refs(
         edges[i].to = inv_ev_resolve_body(order, scan->body_count, scan,
             report, cap_files, stride, scan->refs[i].callee,
             scan->refs[i].file_index);
+        previous_to = edges[i].to;
     }
     return edges;
 }
