@@ -49,11 +49,33 @@ static int boot_run(const char *checkout, const char *output, const char *const 
         env[i + 1] = extra[i];
     struct zc_cmd c = { .argv = ZC_ARGV(zcf("%s/tools/dev/zcc_bootstrap.sh", checkout)),
         .env = env, .out = built, .cap = sizeof built };
-    zc_run(&c);
+    if (zc_run(&c) != 0) {
+        zc_fail("isolated bootstrap child failed");
+        return 1;
+    }
     built[strcspn(built, "\n")] = '\0';
     if (strcmp(built, zcf("%s/zcc", output)) != 0 || access(built, X_OK) != 0) {
         zc_fail("isolated bootstrap did not publish its executable");
         return 1;
+    }
+    return 0;
+}
+
+int zc_boot_status_selftest(void)
+{
+    const char *script = "bootstrap-status/tools/dev/zcc_bootstrap.sh";
+    const int statuses[] = {0, 7};
+    if (zc_put("bootstrap-status/out/zcc", "#!/bin/sh\nexit 0\n") ||
+        chmod(zcw("bootstrap-status/out/zcc"), 0755)) return 1;
+    for (size_t i = 0; i < sizeof statuses / sizeof statuses[0]; i++) {
+        if (zc_put(script, zcf("#!/bin/sh\nprintf '%%s\\n' \"$ZCL_BIN_DIR/zcc\"\nexit %d\n",
+                              statuses[i])) || chmod(zcw("%s", script), 0755)) return 1;
+        int saved_failures = zc.failures;
+        if (statuses[i] != 0)
+            fputs("check_zcc_cache selftest: expecting bootstrap child refusal next\n", stderr);
+        int rc = boot_run(zcw("bootstrap-status"), zcw("bootstrap-status/out"), NULL);
+        zc.failures = saved_failures;
+        if ((rc == 0) != (statuses[i] == 0)) return 1;
     }
     return 0;
 }

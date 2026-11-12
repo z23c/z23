@@ -76,10 +76,10 @@ int check_zcc_cache_selftest(void)
     memset(&zc, 0, sizeof zc);
     if (zc_mkwork("zcl-zcc-selftest.XXXXXX"))
         return zs_fail("scratch directory");
-    rc = zs_child() || zs_files() || zs_text();
+    rc = zs_child() || zs_files() || zs_text() || zc_boot_status_selftest();
     rap_rm_rf(zc.work);
     if (rc == 0)
         puts("check_zcc_cache: selftest OK (child capture, exit and signal codes, "
-             "env set/unset, log counting, LOOKUP matching, sed, find, copy)");
+             "env set/unset, log counting, LOOKUP matching, sed, find, copy, bootstrap status)");
     return rc;
 }

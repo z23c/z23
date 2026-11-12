@@ -90,6 +90,7 @@ int zc_stage_build(const char *tag, const char *const *env, char sha[ZC_SHA]);
 
 /* Sections: 0 continue, nonzero stop with exit 1. */
 int zc_sec_basic(void);
+int zc_boot_status_selftest(void);
 int zc_sec_header(void);
 int zc_sec_envfilter(void);
 int zc_sec_compilerversion(void);
