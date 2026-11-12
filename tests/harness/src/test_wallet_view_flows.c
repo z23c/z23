@@ -385,7 +385,7 @@ int check_wallet_view_send_form_has_blur_validation_on_address_fiel(void)
 static int check_send_exact_amount_validation(void)
 {
     int failures = 0;
-    const char *bad[] = { "1abc", "nan", "inf", "1e3", "0.000000001" };
+    const char *bad[] = { "1abc", "nan", "inf", "1e3", "0.000000001", "21000000.00000001" };
     const char *paths[] = { "/wallet/send/review", "/wallet/send/confirm" };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         char body[256];
@@ -398,7 +398,7 @@ static int check_send_exact_amount_validation(void)
                 wv_has("Send Failed")) failures++;
         }
     }
-    const char *valid[] = { "0.00000001", "123.12345678" };
+    const char *valid[] = { "0.00000001", "123.12345678", "20999999.99999999" };
     for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
         char body[256], hidden[80];
         snprintf(body, sizeof(body),
