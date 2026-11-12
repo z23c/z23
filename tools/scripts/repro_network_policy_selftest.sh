@@ -126,7 +126,8 @@ cat >> "$policy_make" <<'EOF'
 ci-reproducible:
 	@printf '%s %s\n' "$(ZCL_VENDOR_OFFLINE)" "$(ZCL_USE_CCACHE)"
 EOF
-policy_value="$(/usr/bin/make --no-print-directory -s -f "$policy_make" \
+# This independent fixture cannot use the outer Make's jobserver descriptors.
+policy_value="$(env -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS /usr/bin/make --no-print-directory -s -f "$policy_make" \
     ZCL_VENDOR_OFFLINE=0 ZCL_USE_CCACHE=1 ci-reproducible)"
 [[ "$policy_value" == "1 0" ]] ||
     fail "Make parse barrier did not force offline/no-cache policy: $policy_value"
