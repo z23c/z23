@@ -10,11 +10,15 @@
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 struct discover {
     struct zcl_app_offer_row *rows; size_t count, index;
+    struct zcl_app_offer_position *history, next;
+    size_t page, history_capacity;
+    bool has_more, select_last;
     const char *datadir; app_library_presenter presenter;
     app_confirm_presenter receive_presenter; void *context;
     const char *worker_path;
@@ -224,10 +228,17 @@ static bool ad_error(struct discover *d, const char *message, bool retry)
 static bool ad_catalog(struct discover *d, struct zcl_command_reply *reply)
 {
     struct zcl_command_reply why;
-    bool ok = zcl_app_offer_catalog(d->rows, ZCL_APP_OFFER_ROWS_MAX, &d->count, &why);
+    struct zcl_app_offer_page page = {0};
+    const struct zcl_app_offer_position *before = d->page ? &d->history[d->page - 1] : NULL;
+    bool ok = zcl_app_offer_catalog_page(d->rows, ZCL_APP_OFFER_ROWS_MAX, before, &page, &why);
     if (!ok) { d->count = 0; zcl_app_inner_fail(reply, &why, false); }
-    else { zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1"); }
-    zcl_command_reply_free(&why); d->index = 0; return ok;
+    else {
+        d->count = page.count; d->has_more = page.has_more; d->next = page.next;
+        d->index = d->select_last && d->count ? d->count - 1 : 0;
+        d->select_last = false;
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+    }
+    zcl_command_reply_free(&why); return ok;
 }
 static bool ad_review(struct discover *d, struct zcl_command_reply *reply)
 {
@@ -239,10 +250,45 @@ static bool ad_review(struct discover *d, struct zcl_command_reply *reply)
     const char *status = zcl_package_copy_str(&reply->data, "status");
     return !status || strcmp(status, "canceled");
 }
-static void ad_move(struct discover *d, const char *id)
+/* Keep only page cursors, not copies of the potentially large offer rows. */
+static bool ad_next_page(struct discover *d, struct zcl_command_reply *reply)
 {
-    if (!strcmp(id, "previous") && d->index) --d->index;
-    if (!strcmp(id, "next") && d->index + 1 < d->count) ++d->index;
+    if (d->page >= d->history_capacity) {
+        size_t n = d->history_capacity ? d->history_capacity : 8;
+        if (n > SIZE_MAX / 2 || n * 2 > SIZE_MAX / sizeof(*d->history)) {
+            zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "Cannot retain the Discover page cursor.", "app.library");
+            return false;
+        }
+        n *= 2;
+        void *p = zcl_realloc(d->history, n * sizeof(*d->history), "discover/page-cursors");
+        if (!p) {
+            zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "Cannot retain the Discover page cursor.", "app.library");
+            return false;
+        }
+        d->history = p; d->history_capacity = n;
+    }
+    d->history[d->page] = d->next;
+    ++d->page;
+    d->select_last = false;
+    return true;
+}
+
+static bool ad_navigate(struct discover *d, const char *id, bool *loaded,
+                        struct zcl_command_reply *reply)
+{
+    if (!strcmp(id, "refresh")) {
+        d->page = 0; d->select_last = false; *loaded = false;
+    } else if (!strcmp(id, "previous")) {
+        if (d->index) --d->index;
+        else if (d->page) { --d->page; d->select_last = true; *loaded = false; }
+    } else if (!strcmp(id, "next")) {
+        if (d->index + 1 < d->count) ++d->index;
+        else if (d->has_more) {
+            if (!ad_next_page(d, reply)) return false;
+            *loaded = false;
+        }
+    }
+    return true;
 }
 static bool ad_loop(struct discover *d, struct zcl_command_reply *reply)
 {
@@ -257,16 +303,16 @@ static bool ad_loop(struct discover *d, struct zcl_command_reply *reply)
         }
         struct zcl_present_model_v1 model; struct zcl_present_window_event_v1 event = {0};
         d->error_presented = false;
-        if (!app_discover_view(&model, d->count ? &d->rows[d->index] : NULL, d->index, d->count) ||
+        if (!app_discover_page_view(&model, d->count ? &d->rows[d->index] : NULL, d->index, d->count,
+                                    d->page > 0, d->has_more) ||
             !app_discover_present_event(d->presenter, d->context, &model, &event)) {
             zcl_package_copy_fail(reply, "PRESENTATION_FAILED", false, "The advertisement could not be displayed.", "app.library"); return false;
         }
         if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED) return false;
         const char *id = model.actions[event.action_index].id;
         if (!strcmp(id, "back")) return false;
-        if (!strcmp(id, "refresh")) { loaded = false; continue; }
-        if (!strcmp(id, "review")) return ad_review(d, reply);
-        ad_move(d, id);
+        if (!strcmp(id, "review") && d->count) return ad_review(d, reply);
+        if (!ad_navigate(d, id, &loaded, reply)) return false;
     }
 }
 static bool ad_run(const char *datadir, app_library_presenter presenter,
@@ -283,7 +329,7 @@ static bool ad_run(const char *datadir, app_library_presenter presenter,
     if (!d.rows) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "Cannot load advertisements.", "app.library"); return false; }
     bool received = ad_loop(&d, reply);
     if (error_presented) *error_presented = d.error_presented;
-    free(d.rows); return received;
+    free(d.history); free(d.rows); return received;
 }
 bool app_discover_run(const char *datadir, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, struct zcl_command_reply *reply,

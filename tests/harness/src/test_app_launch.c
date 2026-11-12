@@ -1927,6 +1927,57 @@ static int case_advertisement_view(void)
     zcl_present_model_bitmap_free_v1(&bitmap); return failures;
 }
 
+static bool adv_has_action(const struct zcl_present_model_v1 *m,
+    const char *id, const char *label)
+{
+    for (uint32_t i = 0; i < m->action_count; ++i)
+        if (!strcmp(m->actions[i].id, id))
+            return !label || !strcmp(m->actions[i].label, label);
+    return false;
+}
+static bool adv_empty_page(bool previous, bool more)
+{
+    struct zcl_present_model_v1 m; char why[256];
+    if (!app_discover_page_view(&m, NULL, 0, 0, previous, more) ||
+        !zcl_present_model_validate_v1(&m, why, sizeof(why))) return false;
+    return m.action_count == (previous || more ? 3u : 2u) &&
+        m.action_count <= 4 && !adv_has_action(&m, "review", NULL) &&
+        (strstr(m.summary, "Refresh") != NULL) == !(previous && more) &&
+        adv_has_action(&m, "back", NULL) &&
+        adv_has_action(&m, "next", "More apps") == more &&
+        adv_has_action(&m, "previous", "Previous page") == previous &&
+        adv_has_action(&m, "refresh", "Refresh") == !(previous && more);
+}
+static int case_discover_page_view(void)
+{
+    int failures = 0; struct zcl_app_offer_row row = {0};
+    struct zcl_present_model_v1 m; char why[256];
+    (void)snprintf(row.offer.name, sizeof(row.offer.name), "example/app");
+    memset(row.offer.root, 'f', 64); memset(row.offer.publisher, 'f', 66);
+    memset(row.offer.carrier, 'c', 64); memset(row.offer.sha256, 'd', 64);
+    memset(row.post_id, 'e', 64); row.offer.size = 1;
+    (void)snprintf(row.offer.onion, sizeof(row.offer.onion), "wvbpy5swzmxu2asl5pgausbbcok733mm2p32ytmylu5iqatewj3axcyd.onion:33133");
+    TEST("paged discover card navigation is scoped to the current page") {
+        ASSERT(app_discover_page_view(&m, &row, 0, 1, true, true));
+        ASSERT(zcl_present_model_validate_v1(&m, why, sizeof(why)) && m.action_count <= 4);
+        ASSERT(adv_has_action(&m, "review", NULL));
+        ASSERT(adv_has_action(&m, "previous", "Previous page"));
+        ASSERT(adv_has_action(&m, "next", "More apps"));
+        ASSERT(strstr(m.summary, "page") || strstr(m.summary, "Page"));
+        ASSERT(app_discover_page_view(&m, &row, 0, 1, false, false));
+        ASSERT(zcl_present_model_validate_v1(&m, why, sizeof(why)) && m.action_count <= 4);
+        ASSERT(adv_has_action(&m, "refresh", "Refresh"));
+        ASSERT(!adv_has_action(&m, "next", NULL));
+        /* Empty pages retain only available navigation. */
+        ASSERT(adv_empty_page(true, true));
+        ASSERT(adv_empty_page(false, true));
+        ASSERT(adv_empty_page(true, false));
+        ASSERT(adv_empty_page(false, false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -1947,6 +1998,7 @@ _test_next:
     failures += case_handlers(&f);
     failures += case_discover();
     failures += case_advertisement_view();
+    failures += case_discover_page_view();
     failures += case_preview();
     failures += case_resident_app(&f, f.bin_ready, "ready", true, false);
     failures += case_resident_app(&f, f.bin_exit, "exit", false, true);

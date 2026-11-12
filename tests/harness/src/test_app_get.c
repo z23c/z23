@@ -147,7 +147,7 @@ struct tag_stub {
     bool change_after_offer, bad_host_offer, fail_host_post, change_staged_after_receive;
     bool fail_host_output_alloc;
     int fetch_failures;
-    char fetch_root[65], fetch_peer[96], fetch_out[TAG_PATH];
+    char fetch_root[65], fetch_peer[96], fetch_out[TAG_PATH], shown_id[65];
 };
 
 static struct tag_stub g_tag;
@@ -519,6 +519,7 @@ static bool tag_host_enable(const struct json_value *in, struct zcl_command_repl
 static bool tag_show(const struct json_value *in, struct zcl_command_reply *out)
 {
     g_tag.shows++;
+    (void)snprintf(g_tag.shown_id, sizeof(g_tag.shown_id), "%s", tag_in(in, "id"));
     if (g_tag.show_mode == 1) return false;
     for (size_t i = 0; i < json_size(&g_tag.board); ++i) {
         const struct json_value *post = json_at(&g_tag.board, i);
@@ -540,11 +541,23 @@ static size_t tag_page_start(int64_t before, const char *id)
     }
     return start;
 }
+static struct { bool active; unsigned calls; int64_t before; char id[65]; bool same; } tag_retry_cursor;
+static void tag_retry_cursor_observe(int64_t before, const char *id)
+{
+    if (!tag_retry_cursor.active || !before) return;
+    if (tag_retry_cursor.calls++ == 0) {
+        tag_retry_cursor.before = before;
+        (void)snprintf(tag_retry_cursor.id, sizeof(tag_retry_cursor.id), "%s", id);
+    } else if (tag_retry_cursor.calls == 2) {
+        tag_retry_cursor.same = before == tag_retry_cursor.before && !strcmp(id, tag_retry_cursor.id);
+    }
+}
 static bool tag_list_page(const struct json_value *in, struct zcl_command_reply *out)
 {
         struct json_value posts; json_init(&posts); json_set_array(&posts);
         int64_t before = json_get_int(json_get(in, "before_created_at"));
         const char *id = tag_in(in, "before_id"); size_t total = json_size(&g_tag.board);
+        tag_retry_cursor_observe(before, id);
         size_t start = tag_page_start(before, id);
         size_t end = start + ZCL_APP_OFFER_ROWS_MAX;
         if (end > total) end = total;
@@ -4429,6 +4442,124 @@ static bool tag_pages_board(struct tag_world *w, char target[65])
     (void)snprintf(target, 65, "%s", tag_in(json_at(&g_tag.board, 512), "id"));
     return strlen(target) == 64;
 }
+struct tag_paged_discover {
+    struct tag_discover receive;
+    unsigned step, errors;
+    int mode;
+    bool consent;
+};
+
+static int tag_paged_action(const struct zcl_present_model_v1 *m, const char *id)
+{
+    for (unsigned i = 0; i < m->action_count; i++)
+        if (!strcmp(m->actions[i].id, id)) return (int)i;
+    return -1;
+}
+
+static bool tag_paged_empty(const struct zcl_present_model_v1 *m)
+{
+    int next = tag_paged_action(m, "next"), previous = tag_paged_action(m, "previous");
+    return tag_paged_action(m, "review") < 0 && tag_paged_action(m, "back") >= 0 &&
+        next >= 0 && previous >= 0 && !strcmp(m->actions[next].label, "More apps") &&
+        !strcmp(m->actions[previous].label, "Previous page");
+}
+
+static const char *tag_paged_retry_action(struct tag_paged_discover *d,
+    const struct zcl_present_model_v1 *model)
+{
+    static const char *const actions[] = {"next", "next", "review"};
+    if (d->step >= sizeof(actions) / sizeof(actions[0])) return NULL;
+    if (d->step == 1 && !tag_paged_empty(model)) return NULL;
+    return actions[d->step++];
+}
+
+static bool tag_paged_card(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    static const char *const actions[] = {"next", "next", "previous", "previous", "next",
+        "next", "refresh", "next", "next", "review"};
+    struct tag_paged_discover *d = context; (void)copy;
+    if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    const char *action;
+    if (!strcmp(model->request_id, "discover-error")) {
+        d->errors++;
+        if (d->errors > 1) return false;
+        if (d->mode == 5) { g_tag.page_mode = 1; action = "retry"; }
+        else action = "back";
+    }
+    else if (d->mode == 5) {
+        action = tag_paged_retry_action(d, model);
+        if (!action) return false;
+    }
+    else if (d->mode == 3) { d->step++; action = "next"; }
+    else {
+        if (d->step >= sizeof(actions) / sizeof(actions[0])) return false;
+        bool empty = d->step == 1 || d->step == 3 || d->step == 5 || d->step == 8;
+        if (empty ? !tag_paged_empty(model) : tag_paged_action(model, "review") < 0) return false;
+        action = actions[d->step++];
+    }
+    int i = tag_paged_action(model, action);
+    if (i < 0) return false;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = (unsigned)i;
+    return true;
+}
+
+static bool tag_paged_receive(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct tag_paged_discover *d = context;
+    if (!strcmp(model->title, "Receive this app copy?"))
+        d->consent = tag_paged_action(model, "receive") >= 0 && tag_paged_action(model, "cancel") >= 0;
+    return tag_discover_receive(&d->receive, model, pages, live, why, cap);
+}
+
+static int tag_paged_discover_case(struct tag_world *w, int mode)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct tag_paged_discover d = {.mode = mode};
+    char target[65] = {0};
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Discover pages across filtered results and preserves Receive consent") {
+        ASSERT(tag_pages_board(w, target));
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
+        int offers = g_tag.offers, posts = g_tag.posts, enables = g_tag.enables;
+        int shows = g_tag.shows, fetches = g_tag.fetches;
+        g_tag.shown_id[0] = 0; g_tag.page_mode = mode == 5 ? 3 : mode;
+        tag_retry_cursor = (typeof(tag_retry_cursor)){.active = mode == 5};
+        bool received = app_discover_run(w->j.b_datadir, tag_paged_card, tag_paged_receive, &d, &reply, NULL);
+        printf("  discover pages: mode=%d steps=%u errors=%u receive=%d consent=%d shown=%s target=%s\n",
+               mode, d.step, d.errors, d.receive.receive, d.consent, g_tag.shown_id, target);
+        ASSERT(!received); ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
+        ASSERT_EQ(g_tag.enables, enables); ASSERT(!d.receive.host_prompted);
+        if (mode == 1 || mode == 5) {
+            ASSERT_EQ(d.step, mode == 5 ? 3 : 10); ASSERT_EQ(d.errors, mode == 5 ? 1 : 0);
+            if (mode == 5) {
+                ASSERT(tag_retry_cursor.calls >= 2 && tag_retry_cursor.same);
+            }
+            ASSERT_EQ(d.receive.receive, 1);
+            ASSERT(d.consent && !strcmp(g_tag.shown_id, target));
+            ASSERT_EQ(g_tag.shows, shows + 1); ASSERT_EQ(g_tag.fetches, fetches + 1);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+            ASSERT(!strcmp(zcl_package_copy_str(&reply.data, "status"), "canceled"));
+        } else {
+            ASSERT_EQ(d.errors, 1); ASSERT_EQ(d.receive.receive, 0);
+            if (mode == 3) {
+                ASSERT_EQ(d.step, 1);
+            }
+            ASSERT(!d.consent);
+            ASSERT_EQ(g_tag.shows, shows); ASSERT_EQ(g_tag.fetches, fetches);
+            ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+            ASSERT(!strcmp(reply.error.code, "CATALOG_INCOMPLETE"));
+        }
+        PASS();
+    } _test_next:;
+    g_tag.page_mode = 0; tag_retry_cursor.active = false; zcl_command_reply_free(&reply);
+    return failures;
+}
+
 static int tag_public_pages(struct tag_world *w)
 {
     int failures = 0;
@@ -4734,6 +4865,10 @@ static int tag_world_cases(struct tag_world *w)
     if (failures == 0) failures += tag_rebuild_open_failure(w);
     if (failures == 0) failures += tag_rehost_build_failure(w);
     if (failures == 0) failures += tag_public_pages(w);
+    if (failures == 0) failures += tag_paged_discover_case(w, 1);
+    if (failures == 0) failures += tag_paged_discover_case(w, 2);
+    if (failures == 0) failures += tag_paged_discover_case(w, 3);
+    if (failures == 0) failures += tag_paged_discover_case(w, 5);
     return failures;
 }
 int test_app_get(void);

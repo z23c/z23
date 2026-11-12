@@ -64,3 +64,40 @@ bool app_discover_view(struct zcl_present_model_v1 *model,
     *model = m;
     return true;
 }
+
+static void adv_empty_page(struct zcl_present_model_v1 *m, bool previous_page, bool has_more)
+{
+    (void)snprintf(m->summary, sizeof(m->summary), "%s",
+        previous_page && has_more ? "No verified apps on this page. Browse another page or go back." :
+        "No verified apps on this page. Refresh or go back.");
+    m->action_count = 0;
+    if (has_more)
+        app_confirm_action(&m->actions[m->action_count++], ZCL_PRESENT_ACTION_SELECT, "next", "More apps");
+    if (previous_page)
+        app_confirm_action(&m->actions[m->action_count++], ZCL_PRESENT_ACTION_SELECT, "previous", "Previous page");
+    if (!has_more || !previous_page)
+        app_confirm_action(&m->actions[m->action_count++], ZCL_PRESENT_ACTION_SELECT, "refresh", "Refresh");
+    app_confirm_action(&m->actions[m->action_count++], ZCL_PRESENT_ACTION_CANCEL, "back", "Back");
+}
+bool app_discover_page_view(struct zcl_present_model_v1 *model,
+    const struct zcl_app_offer_row *row, size_t index, size_t count,
+    bool previous_page, bool has_more)
+{
+    if (!app_discover_view(model, row, index, count)) return false;
+    if (!count) adv_empty_page(model, previous_page, has_more);
+    else {
+        (void)snprintf(model->summary, sizeof(model->summary),
+            "Advertisement %zu of %zu on this page. Review before trusting.", index + 1, count);
+        if (!index && previous_page)
+            app_confirm_action(&model->actions[1], ZCL_PRESENT_ACTION_SELECT, "previous", "Previous page");
+        if (index + 1 == count) {
+            if (has_more)
+                app_confirm_action(&model->actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "More apps");
+            else
+                app_confirm_action(&model->actions[2], ZCL_PRESENT_ACTION_SELECT, "refresh", "Refresh");
+        }
+    }
+    char why[256]; uint32_t pages;
+    return zcl_present_model_validate_v1(model, why, sizeof(why)) &&
+        zcl_present_model_page_count_v1(model, &pages, why, sizeof(why)) && pages == 1;
+}
