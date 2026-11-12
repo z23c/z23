@@ -238,15 +238,18 @@ static void al_error_view(struct library *w, const struct zcl_command_reply *rep
     app_library_presenter presenter, void *context)
 {
     if (w->receive_failure && al_received_error_view(w, reply, context)) return;
+    const char *copy = w->publish_result && reply->error.mutated ?
+        zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "public_link") : NULL;
+    if (copy && (!copy[0] || strnlen(copy, ZCL_PRESENT_COPY_TEXT_MAX + 1) > ZCL_PRESENT_COPY_TEXT_MAX)) copy = NULL;
     zcl_present_model_init_v1(&w->model, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-error");
     (void)snprintf(w->model.title, sizeof(w->model.title), "%s",
-        w->action_failed ? "Could not complete this action" : "Could not open My Apps");
+        w->publish_result ? "Offer published" : w->action_failed ? "Could not complete this action" : "Could not open My Apps");
     (void)snprintf(w->model.summary, sizeof(w->model.summary), "%s", reply->error.message);
-    app_library_choice(&w->model, "close", "Close", "No other app will be opened.");
+    app_library_choice(&w->model, "close", "Close", copy ? "Press C to copy the published app link." : "No other app will be opened.");
     struct zcl_present_window_event_v1 event = {0};
     char why[256];
-    (void)presenter(context, &w->model, NULL, &event, why, sizeof(why));
+    (void)presenter(context, &w->model, copy, &event, why, sizeof(why));
 }
 static bool al_event_valid(const struct zcl_present_window_event_v1 *event, uint32_t count)
 {

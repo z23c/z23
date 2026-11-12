@@ -3085,12 +3085,34 @@ static bool ast_publish_preconsent(struct ac_fixture *f, struct ast_publish_view
         !strcmp(reply.error.code, "SELECTION_STALE") && !ast_publish_offers && !ast_publish_posts;
     zcl_command_reply_free(&reply); view->stale = false; return ok;
 }
-struct ast_publish_library_view { struct ast_publish_view publish; unsigned menus, notices; bool refuse_notice; };
+struct ast_publish_library_view {
+    struct ast_publish_view publish; unsigned menus, notices, errors;
+    bool refuse_notice, error_link, error_title, error_close;
+};
+static bool ast_publish_error_card(struct ast_publish_library_view *v,
+    const struct zcl_present_model_v1 *m, const char *copy,
+    struct zcl_present_window_event_v1 *event)
+{
+    const char *link = "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion/board/apps/v1/"
+                       "3333333333333333333333333333333333333333333333333333333333333333";
+    ++v->errors;
+    v->error_link = copy && !strcmp(copy, link);
+    v->error_title = strstr(m->title, "Published") || strstr(m->title, "published");
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    for (uint32_t i = 0; i < m->action_count; ++i) {
+        if (!strcmp(m->actions[i].id, "close")) {
+            v->error_close = true; event->action_index = i; return true;
+        }
+    }
+    return false;
+}
 static bool ast_publish_library_present(void *context, const struct zcl_present_model_v1 *m,
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
-    (void)context; (void)copy;
     if (!zcl_present_model_validate_v1(m, why, cap)) return false;
+    if (!strcmp(m->request_id, "library-error"))
+        return ast_publish_error_card(context, m, copy, event);
     const char *wanted = "choose";
     if (!strcmp(m->request_id, "library-home")) wanted = "myapps";
     else if (!strcmp(m->request_id, "library-share-options")) wanted = "more-sharing";
@@ -3168,10 +3190,12 @@ static bool ast_publish_notice_refused(struct ac_fixture *f, const char *version
         &reply, ast_publish_library_present, &view, ast_publish_library_notice);
     bool ran = reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
         !strcmp(reply.error.code, "PRESENTATION_FAILED") && view.menus == 2 && view.notices == 1 &&
-        ast_publish_posts == posts + 1 && ast_publish_identity_ok;
+        ast_publish_posts == posts + 1 && ast_publish_identity_ok && view.errors == 1 &&
+        view.error_link && view.error_title && view.error_close;
     bool wire = ast_publish_notice_wire(&reply);
-    if (!ran || !wire) printf("  publish notice refused ran=%d wire=%d posts=%d notices=%u code=%s\n",
-                              ran, wire, ast_publish_posts - posts, view.notices, reply.error.code);
+    if (!ran || !wire) printf("  publish notice refused ran=%d wire=%d posts=%d notices=%u error=%u link=%d title=%d close=%d code=%s\n",
+                              ran, wire, ast_publish_posts - posts, view.notices, view.errors,
+                              view.error_link, view.error_title, view.error_close, reply.error.code);
     zcl_command_reply_free(&reply); return ran && wire;
 }
 static bool ast_publish_snapshot(struct ac_fixture *f)
