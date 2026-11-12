@@ -77,7 +77,7 @@ static bool start_share(JNIEnv *env, jobject activity, jobject intent)
     jclass cls = (*env)->FindClass(env, "android/content/Intent");
     jmethodID make = cls ? (*env)->GetStaticMethodID(env, cls, "createChooser",
         "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;") : NULL;
-    jstring title = make ? zj_string(env, "Share ZCL request and media") : NULL;
+    jstring title = make ? zj_string(env, "Choose recipient") : NULL;
     jobject chooser = title ? (*env)->CallStaticObjectMethod(env, cls, make, intent, title) : NULL;
     jmethodID start = chooser ? zj_method(env, activity, "startActivity", "(Landroid/content/Intent;)V") : NULL;
     if (start) (*env)->CallVoidMethod(env, activity, start, chooser);

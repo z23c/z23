@@ -257,6 +257,13 @@ static void text_is_ellipsized(void)
     free(src);
 }
 
+static void share_text_is_clear(void)
+{
+    char *src = slurp("share.c");
+    require(src, "jstring title = make ? zj_string(env, \"Choose recipient\") : NULL;", "chooser asks for the recipient");
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
@@ -269,6 +276,7 @@ int main(int argc, char **argv)
     inputs_are_gated();
     clips_is_unreachable();
     text_is_ellipsized();
+    share_text_is_clear();
     puts("surface_test: ok");
     return 0;
 }
