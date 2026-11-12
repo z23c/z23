@@ -142,7 +142,8 @@ discover_package_manifests() { # $1 = repository root
 # helper. Nothing here trusts registry membership: the manifest census is the
 # authority over what must be scanned.
 scan_corpus() { # $1 = repository root, $2 = checker command/function
-    local root="$1" deriver="$2" out count i manifest name pinned expected field candidate known
+    local root="$1" deriver="$2" out count i manifest name pinned expected lines candidate known
+    local fields=()
     MISMATCH_MANIFESTS=()
     MISMATCH_NAMES=()
     MISMATCH_PINNED=()
@@ -163,16 +164,19 @@ scan_corpus() { # $1 = repository root, $2 = checker command/function
     }
     count=$("$JSONQ" count mismatches <<< "$out") || return 2
     for ((i = 0; i < count; i++)); do
-        for field in manifest name pinned expected; do
-            [ "$("$JSONQ" type "mismatches[$i].$field" <<< "$out")" = string ] || {
-                echo "FAIL: invalid corpus mismatch $i field $field" >&2
-                return 2
-            }
-        done
-        manifest=$("$JSONQ" get "mismatches[$i].manifest" <<< "$out") || return 2
-        name=$("$JSONQ" get "mismatches[$i].name" <<< "$out") || return 2
-        pinned=$("$JSONQ" get "mismatches[$i].pinned" <<< "$out") || return 2
-        expected=$("$JSONQ" get "mismatches[$i].expected" <<< "$out") || return 2
+        # One typed query validates every string before emitting any field.
+        # Newline/control refusal keeps record boundaries unambiguous.
+        if ! lines=$("$JSONQ" lines "mismatches[$i].manifest" "mismatches[$i].name" \
+                "mismatches[$i].pinned" "mismatches[$i].expected" <<< "$out"); then
+            echo "FAIL: invalid corpus mismatch $i fields" >&2
+            return 2
+        fi
+        mapfile -t fields <<< "$lines"
+        [ "${#fields[@]}" -eq 4 ] || { echo "FAIL: incomplete corpus mismatch $i" >&2; return 2; }
+        manifest=${fields[0]}
+        name=${fields[1]}
+        pinned=${fields[2]}
+        expected=${fields[3]}
         known=0
         for candidate in "${PACKAGE_MANIFESTS[@]}"; do
             [ "$manifest" != "$candidate" ] || known=1

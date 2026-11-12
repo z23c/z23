@@ -195,6 +195,74 @@ static int test_jsonq_array_index_bounds(void)
     return failures;
 }
 
+static int test_jsonq_lines(void)
+{
+    int failures = 0;
+    char out[512];
+    TEST("jsonq: lines emits decoded strings in argument order") {
+        const char *doc = "{\"a\":{\"s\":\"\\u00e9\\tX\"},\"empty\":\"\",\"v\":[\"end\"]}";
+        int rc = jsonq_fixture_run(doc, (const char *const[]){JSONQ_FIXTURE_BIN, "lines",
+            "a.s", "empty", "v[0]", "a.s", NULL}, out, sizeof(out));
+        ASSERT_EQ(rc, 0);
+        ASSERT_STR_EQ(out, "\xc3\xa9\tX" JSONQ_FIXTURE_EOL JSONQ_FIXTURE_EOL
+            "end" JSONQ_FIXTURE_EOL "\xc3\xa9\tX" JSONQ_FIXTURE_EOL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_jsonq_lines_refusals(void)
+{
+    int failures = 0;
+    char out[512];
+    static const struct { const char *doc, *path; int status; } bad[] = {
+        {"{\"a\":\"first\"}", "missing", 1},
+        {"{\"a\":\"first\",\"b\":17}", "b", 1},
+        {"{\"a\":\"first\",\"b\":null}", "b", 1},
+        {"{\"a\":\"first\",\"b\":[]}", "b", 1},
+        {"{\"a\":\"first\",\"b\":{}}", "b", 1},
+        {"{\"a\":\"first\",\"b\":\"bad\\u0000tail\"}", "b", 2},
+        {"{\"a\":\"first\",\"b\":\"bad\\rline\"}", "b", 2},
+        {"{\"a\":\"first\",\"b\":\"bad\\nline\"}", "b", 2},
+        {"{\"a\":\"first\",\"b\":\"ok\"} junk", "b", 2},
+        {"{\"a\":\"first\",\"b\":", "b", 2},
+        {"{\"a\":\"first\"}", "a[", 2},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        TEST("jsonq: lines refuses late invalid selections without partial output") {
+            int rc = jsonq_fixture_run(bad[i].doc,
+                (const char *const[]){JSONQ_FIXTURE_BIN, "lines", "a", bad[i].path, NULL}, out, sizeof(out));
+            ASSERT_EQ(rc, bad[i].status);
+            ASSERT_STR_EQ(out, "");
+            PASS();
+        } _test_next:;
+    }
+    return failures;
+}
+
+static int test_jsonq_lines_limits(void)
+{
+    int failures = 0;
+    char out[512];
+    TEST("jsonq: lines enforces argument count without partial output") {
+        const char *args[36] = {JSONQ_FIXTURE_BIN, "lines"};
+        for (size_t i = 0; i < 32; ++i) args[i + 2] = "a";
+        args[34] = NULL;
+        ASSERT_EQ(jsonq_fixture_run("{\"a\":\"x\"}", args, out, sizeof(out)), 0);
+        char expected[128] = {0};
+        for (size_t i = 0; i < 32; ++i) strcat(expected, "x" JSONQ_FIXTURE_EOL);
+        ASSERT_STR_EQ(out, expected);
+        args[34] = "a";
+        args[35] = NULL;
+        ASSERT_EQ(jsonq_fixture_run("{\"a\":\"x\"}", args, out, sizeof(out)), 2);
+        ASSERT_STR_EQ(out, "");
+        ASSERT_EQ(jsonq_fixture_run("{}", (const char *const[]){JSONQ_FIXTURE_BIN, "lines", NULL}, out, sizeof(out)), 2);
+        ASSERT_STR_EQ(out, "");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_jsonq_unwrap(void)
 {
     int failures = 0;
@@ -272,6 +340,7 @@ static int test_jsonq_output_errors(void)
     } cases[] = {
         {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "get", "x", NULL}, 2},
         {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "raw", "x", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "lines", "x", NULL}, 2},
         {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "type", "x", NULL}, 2},
         {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "count", "", NULL}, 2},
         {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "keys", "", NULL}, 2},
@@ -323,6 +392,9 @@ int test_jsonq(void)
     failures += test_jsonq_string_equality();
     failures += test_jsonq_scalar_paths();
     failures += test_jsonq_array_index_bounds();
+    failures += test_jsonq_lines();
+    failures += test_jsonq_lines_refusals();
+    failures += test_jsonq_lines_limits();
     failures += test_jsonq_unwrap();
 #if !defined(_WIN32)
     failures += test_jsonq_multicall_names();

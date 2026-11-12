@@ -42,7 +42,8 @@ enum {
     JSONQ_MAX_INPUT = 16 << 20,
     MAX_SEGS = 32,
     MAX_KEY = 256,
-    DECODE_CAP = 1 << 16
+    DECODE_CAP = 1 << 16,
+    MAX_LINE_PATHS = 32
 };
 
 typedef enum { SEG_KEY = 0, SEG_INDEX = 1 } seg_kind;
@@ -71,7 +72,9 @@ typedef enum {
     CMD_COUNT,
     CMD_KEYS,
     CMD_KEY_COUNT,
-    CMD_UNWRAP
+    CMD_UNWRAP,
+    CMD_LINES,
+    CMD_LINES_CHECK
 } cmd_kind;
 
 static char g_input[JSONQ_MAX_INPUT];
@@ -86,6 +89,7 @@ static void usage(void)
     fputs("usage: jsonq get|raw|type|has|eq|count|keys PATH\n"
           "       jsonq key-count PATH KEY\n"
           "       jsonq unwrap\n"
+          "       jsonq lines PATH [PATH ...] (1-32 strings without CR/LF/NUL)\n"
           "Read one JSON document from stdin.\n",
           stderr);
 }
@@ -380,6 +384,7 @@ static int finish_matched_container(zjsonp *p, const char *text,
                                     const zjsonp_event *open, cmd_kind cmd,
                                     const char *eq)
 {
+    if (cmd == CMD_LINES || cmd == CMD_LINES_CHECK) return 1;
     unsigned open_depth = p->depth;
     size_t start = open->off;
     switch (cmd) {
@@ -421,9 +426,23 @@ static int scalar_equals(const char *text, const zjsonp_event *ev, const char *e
     return strcmp(g_decode, eq) == 0 ? 0 : 1;
 }
 
+static int string_line(const char *text, const zjsonp_event *ev, bool emit)
+{
+    if (ev->kind != ZJRP_STR) return 1;
+    size_t n = zjsonp_str_decode(text, ev, g_decode, sizeof g_decode);
+    if (n == SIZE_MAX || n >= sizeof g_decode) return 2;
+    if (memchr(g_decode, '\0', n) || memchr(g_decode, '\r', n) ||
+        memchr(g_decode, '\n', n)) return 2;
+    if (emit && (fwrite(g_decode, 1, n, stdout) != n || fputc('\n', stdout) == EOF))
+        return 2;
+    return 0;
+}
+
 static int handle_matched_scalar(const char *text, const zjsonp_event *ev,
                                  cmd_kind cmd, const char *eq)
 {
+    if (cmd == CMD_LINES || cmd == CMD_LINES_CHECK)
+        return string_line(text, ev, cmd == CMD_LINES);
     if (cmd == CMD_HAS)
         return 0;
     if (cmd == CMD_TYPE) {
@@ -703,6 +722,11 @@ static bool parse_command(int argc, char **argv, cmd_kind *cmd)
         { "unwrap", CMD_UNWRAP, 2 }
     };
     if (argc < 2) return false;
+    if (strcmp(argv[1], "lines") == 0) {
+        if (argc < 3 || argc > MAX_LINE_PATHS + 2) return false;
+        *cmd = CMD_LINES;
+        return true;
+    }
     for (size_t i = 0; i < sizeof commands / sizeof commands[0]; i++) {
         if (strcmp(argv[1], commands[i].name) != 0) continue;
         if (argc != commands[i].argc) return false;
@@ -721,6 +745,23 @@ static int finish_stdout(int rc)
     return rc;
 }
 
+static int string_lines(size_t len, int count, char **paths)
+{
+    /* Two bounded passes over immutable input: semantic failures never emit a
+     * valid-looking prefix. The second pass can fail only on output delivery. */
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int i = 0; i < count; ++i) {
+            if (parse_path(paths[i]) != 0) return 2;
+            int rc = walk(g_input, len, pass ? CMD_LINES : CMD_LINES_CHECK, NULL);
+            if (rc != 0) {
+                fprintf(stderr, "jsonq: lines could not read string path %s\n", paths[i]);
+                return rc;
+            }
+        }
+    }
+    return 0;
+}
+
 int jsonq_main(int argc, char **argv)
 {
     cmd_kind cmd;
@@ -733,6 +774,8 @@ int jsonq_main(int argc, char **argv)
 
     size_t len = 0;
     if (!read_document(&len)) return 2;
+    if (cmd == CMD_LINES)
+        return finish_stdout(string_lines(len, argc - 2, argv + 2));
     if (cmd == CMD_UNWRAP)
         return finish_stdout(cmd_unwrap(g_input, len));
     if (parse_path(path) != 0)

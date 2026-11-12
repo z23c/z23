@@ -14,7 +14,7 @@
 #endif
 
 /* argv is a compile-time fixture vector, including argv[0] and terminator.
- * At most four non-NULL arguments (jsonq eq PATH VALUE). Empty path remains
+ * At most 35 non-NULL arguments (jsonq lines plus 33 paths). Empty path remains
  * an actual empty argv element. Document bytes never enter argv or a shell. */
 /* bin is the executable path, which argv[0] must name exactly. The alias
  * tests pass a link path (build/bin/jsonq or a temp-dir link to z23). */
@@ -55,7 +55,7 @@ static int jsonq_fixture_capture(const char *bin, const char *input,
     const char *script = readonly_stdout
         ? "input=$1; shift; exec \"$@\" < \"$input\" 1< \"$input\""
         : "input=$1; shift; exec \"$@\" < \"$input\"";
-    const char *shell_argv[11] = {
+    const char *shell_argv[41] = {
         "sh", "-c", script,
         "jsonq-fixture", input, NULL};
     for (size_t i = 0; i < count; i++) shell_argv[5u + i] = argv[i];
@@ -80,8 +80,8 @@ static bool jsonq_fixture_arguments(const char *bin, const char *document,
     if (!bin || !document || !argv || !argv[0] || !out || out_size == 0 ||
         strcmp(argv[0], bin) != 0) return false;
     *count = 0;
-    while (*count < 5u && argv[*count]) (*count)++;
-    return *count >= 2u && *count <= 4u;
+    while (*count < 36u && argv[*count]) (*count)++;
+    return *count >= 2u && *count <= 35u;
 }
 
 static int jsonq_fixture_run_as_mode(const char *bin, const char *document,
