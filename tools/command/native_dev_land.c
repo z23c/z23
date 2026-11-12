@@ -2007,17 +2007,59 @@ static bool dl_history_bytes(struct dl_history_reader *r,
     return true;
 }
 
-static bool dl_history_stream(struct platform_positioned_file *file,
-                               struct dl_history_reader *reader)
+enum dl_history_result { DL_HISTORY_OK, DL_HISTORY_FAILED, DL_HISTORY_CHANGED };
+
+#if defined(ZCL_TESTING)
+static void (*dl_test_history_snapshot_hook)(struct platform_positioned_file *, void *);
+static void *dl_test_history_snapshot_context;
+void zcl_native_dev_land_test_history_snapshot_hook(
+    void (*hook)(struct platform_positioned_file *, void *), void *context);
+void zcl_native_dev_land_test_history_snapshot_hook(
+    void (*hook)(struct platform_positioned_file *, void *), void *context)
 {
-    struct platform_positioned_file_snapshot before, after;
+    dl_test_history_snapshot_hook = hook;
+    dl_test_history_snapshot_context = context;
+}
+static void dl_test_history_snapshot_run(struct platform_positioned_file *file)
+{
+    if (!dl_test_history_snapshot_hook) return;
+    void (*hook)(struct platform_positioned_file *, void *) = dl_test_history_snapshot_hook;
+    void *context = dl_test_history_snapshot_context;
+    zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
+    hook(file, context);
+}
+#endif
+
+static enum dl_history_result dl_history_snapshot_result(
+    struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before)
+{
+#if defined(ZCL_TESTING)
+    dl_test_history_snapshot_run(file);
+#endif
+    struct platform_positioned_file_snapshot after;
+    if (!platform_positioned_file_snapshot(file, &after)) {
+        errno = EIO;
+        return DL_HISTORY_FAILED;
+    }
+    if (!platform_positioned_file_snapshot_equal(before, &after)) {
+        errno = EAGAIN;
+        return DL_HISTORY_CHANGED;
+    }
+    return DL_HISTORY_OK;
+}
+
+static enum dl_history_result dl_history_stream(
+    struct platform_positioned_file *file, struct dl_history_reader *reader)
+{
+    struct platform_positioned_file_snapshot before;
     if (!platform_positioned_file_snapshot(file, &before)) {
         errno = EIO;
-        return false;
+        return DL_HISTORY_FAILED;
     }
     if (before.size > DL_HISTORY_BYTES_MAX) {
         errno = EFBIG;
-        return false;
+        return DL_HISTORY_FAILED;
     }
     unsigned char bytes[4096];
     uint64_t offset = 0;
@@ -2027,25 +2069,32 @@ static bool dl_history_stream(struct platform_positioned_file *file,
         int64_t n = platform_positioned_file_read(file, bytes, need, offset);
         if (n <= 0 || (uint64_t)n > need) {
             errno = EIO;
-            return false;
+            return DL_HISTORY_FAILED;
         }
-        if (!dl_history_bytes(reader, bytes, (size_t)n)) return false;
+        if (!dl_history_bytes(reader, bytes, (size_t)n)) return DL_HISTORY_FAILED;
         offset += (uint64_t)n;
     }
     if (reader->used) {
         reader->record++;
         errno = EINVAL;
-        return false;
+        return DL_HISTORY_FAILED;
     }
-    if (!platform_positioned_file_snapshot(file, &after) ||
-        !platform_positioned_file_snapshot_equal(&before, &after)) {
-        errno = EAGAIN;
-        return false;
-    }
-    return true;
+    return dl_history_snapshot_result(file, &before);
 }
 
-bool dl_history_read(const char *path,
+static void dl_history_failure_reason(enum dl_history_result result,
+    const struct dl_history_reader *reader, int error, char *why, size_t cap)
+{
+    if (!why || !cap) return;
+    if (result == DL_HISTORY_CHANGED)
+        (void)snprintf(why, cap, "outcomes_snapshot_changed");
+    else if (error == EINVAL && reader && reader->record)
+        (void)snprintf(why, cap, "malformed_outcome_record_%zu", reader->record);
+    else
+        (void)snprintf(why, cap, "outcomes_read_failed_errno_%d", error);
+}
+
+static enum dl_history_result dl_history_read_result(const char *path,
     bool (*visit)(const struct dl_row *, void *), void *context,
     char *why, size_t why_cap)
 {
@@ -2053,29 +2102,31 @@ bool dl_history_read(const char *path,
     platform_positioned_file_init(&file);
     errno = 0;
     bool opened = platform_positioned_file_open(&file, path);
-    if (!opened && errno == ENOENT) return true;
+    if (!opened && errno == ENOENT) return DL_HISTORY_OK;
     struct dl_history_reader *reader = NULL;
-    bool ok = false;
+    enum dl_history_result result = DL_HISTORY_FAILED;
     if (opened) {
         reader = zcl_calloc(1, sizeof(*reader), "dev.land.history");
         if (reader) {
             reader->visit = visit;
             reader->context = context;
-            ok = dl_history_stream(&file, reader);
+            result = dl_history_stream(&file, reader);
         } else errno = ENOMEM;
     }
     int saved = errno ? errno : EIO;
-    if (!ok && why && why_cap) {
-        if (saved == EINVAL && reader && reader->record)
-            (void)snprintf(why, why_cap, "malformed_outcome_record_%zu",
-                           reader->record);
-        else
-            (void)snprintf(why, why_cap, "outcomes_read_failed_errno_%d", saved);
-    }
+    if (result != DL_HISTORY_OK)
+        dl_history_failure_reason(result, reader, saved, why, why_cap);
     free(reader);
     platform_positioned_file_close(&file);
-    if (!ok) errno = saved;
-    return ok;
+    if (result != DL_HISTORY_OK) errno = saved;
+    return result;
+}
+
+bool dl_history_read(const char *path,
+    bool (*visit)(const struct dl_row *, void *), void *context,
+    char *why, size_t why_cap)
+{
+    return dl_history_read_result(path, visit, context, why, why_cap) == DL_HISTORY_OK;
 }
 
 struct dl_outcome_scan {
@@ -4753,12 +4804,12 @@ static bool dl_collect_outcome_tail(const struct dl_row *row, void *context)
     return true;
 }
 
-static bool dl_outcomes_tail(const char *path, struct dl_row last[10],
+static enum dl_history_result dl_outcomes_tail(const char *path, struct dl_row last[10],
                              size_t *count, char *why, size_t why_cap)
 {
     *count = 0;
     struct dl_outcome_tail tail = {last, count};
-    return dl_history_read(path, dl_collect_outcome_tail, &tail, why, why_cap);
+    return dl_history_read_result(path, dl_collect_outcome_tail, &tail, why, why_cap);
 }
 
 static bool dl_status_wants_json(const struct zcl_command_request *req)
@@ -4807,10 +4858,12 @@ static bool dl_status_bucket_rows(struct json_value *queued,
 static bool dl_status_collect_outcomes(const char *opath,
                                        struct dl_row last[10], size_t *nlast,
                                        char *read_why, size_t why_cap,
+                                       enum dl_history_result *history_result,
                                        struct json_value *outcomes)
 {
     /* The last ten outcomes, oldest first. */
-    if (!dl_outcomes_tail(opath, last, nlast, read_why, why_cap))
+    *history_result = dl_outcomes_tail(opath, last, nlast, read_why, why_cap);
+    if (*history_result != DL_HISTORY_OK)
         return false;
     for (size_t k = 0; k < *nlast; k++) {
         if (!dl_push_outcome_row(outcomes, &last[k]))
@@ -4896,6 +4949,24 @@ static bool dl_status_screen_outcomes(struct dl_row *last, size_t nlast,
     return true;
 }
 
+static void dl_status_read_failure(struct zcl_command_reply *reply,
+    enum dl_history_result history_result, const char *read_why, const char *qpath)
+{
+    const char *message = history_result == DL_HISTORY_CHANGED
+        ? "outcomes changed while reading; retry status"
+        : read_why[0] ? "cannot read the outcomes file" : "cannot encode the status reply";
+    dl_fail(reply, "QUEUE_READ_FAILED", "status", message,
+            dl_reason_or_path(read_why, qpath));
+    if (history_result == DL_HISTORY_CHANGED) {
+        reply->error.retryable = true;
+        reply->error.human_action_required = false;
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "%s", "z23 dev land status");
+        (void)zcl_command_reply_add_next(reply, "dev.land.status", "{}",
+                                        "retry the read-only status snapshot");
+    }
+}
+
 static void dl_status(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -4905,6 +4976,7 @@ static void dl_status(const struct zcl_command_request *req,
     size_t nrows = 0, nlast = 0;
     char qpath[4096 + 32], opath[4096 + 32], screen[16384];
     char read_why[128] = {0};
+    enum dl_history_result history_result = DL_HISTORY_OK;
     struct json_value queued, inflight, outcomes;
     long long now = (long long)platform_time_wall_unix();
     bool want_json = dl_status_wants_json(req);
@@ -4938,7 +5010,7 @@ static void dl_status(const struct zcl_command_request *req,
         goto fail;
     dl_train_status(&inflight, rows, nrows);
     if (!dl_status_collect_outcomes(opath, last, &nlast, read_why,
-                                    sizeof(read_why), &outcomes))
+                                    sizeof(read_why), &history_result, &outcomes))
         goto fail;
     if (!want_json) {
         if (!dl_status_screen_header(&queued, have_inflight, screen,
@@ -4974,10 +5046,7 @@ fail:
     json_free(&inflight);
     json_free(&outcomes);
     free(rows);
-    dl_fail(reply, "QUEUE_READ_FAILED", "status",
-            read_why[0] ? "cannot read the outcomes file"
-                        : "cannot encode the status reply",
-            dl_reason_or_path(read_why, qpath));
+    dl_status_read_failure(reply, history_result, read_why, qpath);
 }
 
 /* ── step: one scheduler beat, and it never waits ──────────────────────── */

@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "platform/positioned_file.h"
 
 
 int test_dev_land_watcher_admission(void)
@@ -791,6 +792,107 @@ static bool dlx_history_status_error(const char *evidence)
     return ok;
 }
 
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+extern void zcl_native_dev_land_test_history_snapshot_hook(
+    void (*hook)(struct platform_positioned_file *, void *), void *context);
+
+struct dlx_snapshot_fixture { const char *path; bool ran, ok; };
+
+static void dlx_snapshot_append(struct platform_positioned_file *file, void *context)
+{
+    (void)file;
+    struct dlx_snapshot_fixture *f = context;
+    f->ran = true;
+    FILE *out = fopen(f->path, "ab");
+    if (!out) return;
+    bool wrote = fputs("{\"seq\":2,\"tip\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+                       "\"state\":\"failed\",\"attempt\":1}\n", out) >= 0;
+    f->ok = fclose(out) == 0 && wrote;
+}
+
+static void dlx_snapshot_close(struct platform_positioned_file *file, void *context)
+{
+    struct dlx_snapshot_fixture *f = context;
+    f->ran = true;
+    platform_positioned_file_close(file);
+}
+
+static bool dlx_snapshot_setup(const char *name, char *path, size_t cap)
+{
+    struct dlx_call c;
+    char land[1024];
+    dlx_isolate(name);
+    dlx_begin(&c, "step");
+    bool ready = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    dlx_landdir(land, sizeof(land));
+    int n = snprintf(path, cap, "%s/outcomes.jsonl", land);
+    return ready && n > 0 && (size_t)n < cap && dlx_write(path,
+        "{\"seq\":1,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"state\":\"failed\",\"attempt\":1}\n");
+}
+
+static int dlx_outcome_snapshot_changed(void)
+{
+    int failures = 0;
+    TEST("land: concurrent complete outcome append is retryable without partial status") {
+        struct dlx_call c;
+        char path[1200];
+        ASSERT(dlx_snapshot_setup("history_snapshot_changed", path, sizeof(path)));
+        struct dlx_snapshot_fixture f = {.path = path};
+        dlx_begin(&c, "status");
+        zcl_native_dev_land_test_history_snapshot_hook(dlx_snapshot_append, &f);
+        bool ran = dlx_run(&c);
+        zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
+        ASSERT(ran && f.ran && f.ok && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "outcomes_snapshot_changed");
+        ASSERT(c.reply.error.retryable && !c.reply.error.human_action_required && !c.reply.error.mutated);
+        ASSERT_STR_EQ(c.reply.error.next_action, "z23 dev land status");
+        ASSERT(!json_get(&c.reply.data, "outcomes") && !json_get(&c.reply.data, "queued"));
+        dlx_end(&c);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *rows = json_get(&c.reply.data, "outcomes");
+        ASSERT(rows && rows->type == JSON_ARR && rows->num_children == 2);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[0], "seq")), 1);
+        ASSERT_EQ(json_get_int(json_get(&rows->children[1], "seq")), 2);
+        dlx_end(&c);
+        PASS();
+    } _test_next:;
+    zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_outcome_snapshot_failure(void)
+{
+    int failures = 0;
+    TEST("land: failed outcome snapshot remains a nonretryable I/O refusal") {
+        struct dlx_call c;
+        char path[1200], evidence[96];
+        ASSERT(dlx_snapshot_setup("history_snapshot_failure", path, sizeof(path)));
+        struct dlx_snapshot_fixture f = {.path = path};
+        dlx_begin(&c, "status");
+        zcl_native_dev_land_test_history_snapshot_hook(dlx_snapshot_close, &f);
+        bool ran = dlx_run(&c);
+        zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
+        ASSERT(ran && f.ran && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT(snprintf(evidence, sizeof(evidence), "outcomes_read_failed_errno_%d", EIO) < (int)sizeof(evidence));
+        ASSERT_STR_EQ(dlx_err_evidence(&c), evidence);
+        ASSERT(!c.reply.error.retryable && c.reply.error.human_action_required && !c.reply.error.mutated);
+        ASSERT(strstr(c.reply.error.next_action, "expected types and read permissions") != NULL);
+        ASSERT(!json_get(&c.reply.data, "outcomes") && !json_get(&c.reply.data, "queued"));
+        dlx_end(&c);
+        PASS();
+    } _test_next:;
+    zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
+    dlx_restore();
+    return failures;
+}
+#endif
+
 static int dlx_outcome_stream_boundaries(void)
 {
     int failures = 0;
@@ -911,6 +1013,10 @@ int test_dev_land_malformed_outcome_refusal(void)
     failures += dlx_outcome_nul_refusal();
     failures += dlx_large_outcome_history();
     failures += dlx_outcome_stream_boundaries();
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    failures += dlx_outcome_snapshot_changed();
+    failures += dlx_outcome_snapshot_failure();
+#endif
     failures += dlx_outcome_record_budget();
     return failures;
 }
