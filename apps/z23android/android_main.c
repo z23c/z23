@@ -236,12 +236,23 @@ static void copy_fleet_code(JNIEnv *env, const char *argument)
     if (env) zapp_native_ui_update(env, NULL, copied
         ? "Code copied. It clears after a minute." : "Could not copy the code. Try again.");
 }
+static void copy_plugin_ids(JNIEnv *env, const char *argument)
+{
+    bool copied = foreground && env && copy_activity && argument[0] &&
+        zapp_clipboard_copy_sensitive(copy_activity, argument);
+    if (env) zapp_native_ui_update(env, NULL, copied
+        ? "Plugin IDs copied. Use them on the host; nothing was switched." : "Could not copy plugin IDs. Try again.");
+}
 static void action(const char *name, const char *argument)
 {
     JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) env = NULL;
     if (!strcmp(name, "fleet_copy")) {
         copy_fleet_code(env, argument);
+        return;
+    }
+    if (!strcmp(name, "plugin_copy")) {
+        copy_plugin_ids(env, argument);
         return;
     }
     if (!strcmp(name, "voice_start") && (!foreground || !env || !active || !microphone_allowed(env, active))) return;

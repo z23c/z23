@@ -17,7 +17,7 @@
 static jobject root, status_view, result_view, prompt_view, invite_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
 static jobject voice_view, pair_view, hosts_view, sync_view, ops_view;
-static jobject buttons[22];
+static jobject buttons[23];
 static enum zapp_voice_state voice_state;
 static bool details_open;
 static enum zapp_reply_state reply_state;
@@ -28,6 +28,7 @@ static char last_receipt[8192], copy_receipt[8192], review_input[8192];
 static bool review_typed, review_available;
 static bool voice_preview;
 static char suggestion[96]; /* The question on the button, so a tap sends exactly what was shown. */
+static char plugin_ids[4096];
 static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "scan", "fleet_preview", "fleet_join"};
 
 static bool read_density(JNIEnv *env, jobject display)
@@ -166,7 +167,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
     }
-    suggestion[0] = 0;
+    suggestion[0] = 0; plugin_ids[0] = 0;
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
     memory_cleanse(copy_receipt, sizeof(copy_receipt));
     memory_cleanse(review_input, sizeof(review_input)); review_typed = review_available = false;
@@ -195,7 +196,8 @@ static bool bar_widgets(JNIEnv *env, jobject bar, jobject activity)
 static bool ops_widgets(JNIEnv *env, jobject layout, jobject activity)
 {
     return add_button(env, layout, activity, "Host", 16) && add_button(env, layout, activity, "Show errors", 17) &&
-        add_button(env, layout, activity, "Plugins", 20) && add_button(env, layout, activity, "Restart node", 18) &&
+        add_button(env, layout, activity, "Plugins", 20) && add_button(env, layout, activity, "Copy IDs", 22) &&
+        add_button(env, layout, activity, "Restart node", 18) &&
         add_text(env, layout, activity, "", &ops_view) && add_button(env, layout, activity, "Confirm restart", 19);
 }
 static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject receipt, jobject scroll)
@@ -382,6 +384,7 @@ static bool fixed_action(int index, const char **action, const char **arg)
     case 19: *action = "ops_confirm"; return true;
     case 20: *action = "ops_plugins"; return true;
     case 21: *action = "fleet_copy"; *arg = copy_receipt; return copy_receipt[0] != 0;
+    case 22: *action = "plugin_copy"; *arg = plugin_ids; return plugin_ids[0] != 0;
     default: return false;
     }
 }
@@ -564,6 +567,7 @@ static void render_ops(JNIEnv *env, const struct zapp_view *view)
     for (int i = 17; i <= 18; ++i) if (buttons[i]) (void)zj_visible(env, buttons[i], shown);
     if (buttons[19]) (void)zj_visible(env, buttons[19], shown && view->ops_plan[0] && !view->busy);
     if (buttons[20]) (void)zj_visible(env, buttons[20], paired);
+    if (buttons[22]) (void)zj_visible(env, buttons[22], paired && view->ops_ids[0]);
     if (ops_view) { (void)zj_text(env, ops_view, view->ops_text); (void)zj_visible(env, ops_view, paired && view->ops_text[0]); }
 }
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
@@ -607,6 +611,7 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
     render_status(env, view);
     render_node(env, view);
     render_fleet(env, view);
+    snprintf(plugin_ids, sizeof(plugin_ids), "%s", view->ops_ids);
     render_ops(env, view);
     receipt_qr(env, view->fleet_receipt);
     zapp_shell_render(env, view);

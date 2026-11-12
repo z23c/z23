@@ -141,26 +141,40 @@ static void ops_view_tests(void)
     assert(zapp_hosts_label(report, 2, label) && !strcmp(label, "mac"));
     assert(!zapp_hosts_label(report, 3, label) && !zapp_hosts_label(NULL, 0, label) && !zapp_hosts_label("", 0, label));
 }
+static void ops_plugin_id_tests(void)
+{
+    char text[512], plan[33], ids[4];
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plugins\",\"text\":\"Inventory\",\"ids\":\"abc\"}",
+                         text, sizeof(text), plan, ids, sizeof(ids)) && !strcmp(ids, "abc"));
+    char small[2];
+    assert(!zapp_ops_view("{\"host\":\"r1\",\"action\":\"plugins\",\"text\":\"Inventory\",\"ids\":\"abc\"}",
+                          text, sizeof(text), plan, small, sizeof(small)) && !small[0]);
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plugins\",\"text\":\"Inventory\"}",
+                         text, sizeof(text), plan, ids, sizeof(ids)) && !ids[0]);
+    assert(!zapp_ops_view("{\"host\":\"r1\",\"error\":\"failed\",\"ids\":\"abc\"}",
+                          text, sizeof(text), plan, ids, sizeof(ids)) && !ids[0]);
+}
 static void ops_reply_tests(void)
 {
     char text[512], plan[33];
-    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"errors\",\"text\":\"a ERROR\\nb ERROR\"}", text, sizeof(text), plan));
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"errors\",\"text\":\"a ERROR\\nb ERROR\"}", text, sizeof(text), plan, NULL, 0));
     assert(!strcmp(text, "r1 · recent errors\na ERROR\nb ERROR") && !plan[0]);
     assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plugins\",\"text\":\"Inventory scan only; signatures are not rechecked.\"}",
-                         text, sizeof(text), plan));
+                         text, sizeof(text), plan, NULL, 0));
     assert(!strcmp(text, "r1 · plugin inventory\nInventory scan only; signatures are not rechecked.") && !plan[0]);
     assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"0123456789abcdef0123456789abcdef\","
-        "\"text\":\"Restart the z23 node on r1? It is at height 5.\"}", text, sizeof(text), plan));
+        "\"text\":\"Restart the z23 node on r1? It is at height 5.\"}", text, sizeof(text), plan, NULL, 0));
     assert(!strcmp(plan, "0123456789abcdef0123456789abcdef") && strstr(text, "Restart the z23 node on r1?") &&
            strstr(text, "Tap Confirm restart"));
     assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"confirm\",\"text\":\"restarted, answering at height 6\"}",
-                         text, sizeof(text), plan) && !strcmp(text, "r1 · restarted, answering at height 6") && !plan[0]);
-    assert(!zapp_ops_view("{\"host\":\"r2\",\"error\":\"The host did not answer.\"}", text, sizeof(text), plan) &&
+                         text, sizeof(text), plan, NULL, 0) && !strcmp(text, "r1 · restarted, answering at height 6") && !plan[0]);
+    assert(!zapp_ops_view("{\"host\":\"r2\",\"error\":\"The host did not answer.\"}", text, sizeof(text), plan, NULL, 0) &&
            !strcmp(text, "r2: The host did not answer.") && !plan[0]);
-    assert(!zapp_ops_view("{\"error\":\"That request is not allowed.\"}", text, sizeof(text), plan) &&
+    assert(!zapp_ops_view("{\"error\":\"That request is not allowed.\"}", text, sizeof(text), plan, NULL, 0) &&
            !strcmp(text, "That request is not allowed."));
-    assert(!zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"short\",\"text\":\"x\"}", text, sizeof(text), plan) && !plan[0]);
-    assert(!zapp_ops_view("nope", text, sizeof(text), plan) && !zapp_ops_view(NULL, text, sizeof(text), plan));
+    assert(!zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"short\",\"text\":\"x\"}", text, sizeof(text), plan, NULL, 0) && !plan[0]);
+    assert(!zapp_ops_view("nope", text, sizeof(text), plan, NULL, 0) && !zapp_ops_view(NULL, text, sizeof(text), plan, NULL, 0));
+    ops_plugin_id_tests();
 }
 /* Node and sync lines when the chain's liveness is uncertain: peers, a still tip and the fleet's height. */
 static void chain_evidence_tests(void)

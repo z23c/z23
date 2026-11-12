@@ -103,7 +103,8 @@ const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_
 /* The label of the index-th host row of a zapp_hosts_format report, or false past the last row. */
 bool zapp_hosts_label(const char *report, size_t index, char label[16]);
 /* Formats a host's reply to zapp_speech_client_ops as the text under the host controls. A plan
- * reply also copies its 32-character plan id to plan; otherwise plan is empty. False for a refusal,
- * a failure or a reply that is not understood, with the reason in text. */
-bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33]);
+ * reply also copies its 32-character plan id to plan; otherwise plan is empty. ids optionally holds
+ * the full current and last-good plugin IDs from a plugin reply, and is empty otherwise. False for
+ * a refusal, a failure or a reply that is not understood, with the reason in text. */
+bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33], char *ids, size_t ids_cap);
 #endif

@@ -147,6 +147,33 @@ static void saved_generations_view(void)
     const char *saved = strstr(field("text"), "\n other saved IDs: ");
     assert(saved && !strstr(saved, "a123456789ab") && !strstr(saved, "d123456789ab"));
     assert(!strcmp(saved, "\n other saved IDs: b123456789ab, c123456789ab (+1 more)"));
+    const char *ids = field("ids");
+    assert(strstr(ids, PLUGIN_GEN));
+    assert(strstr(ids, a));
+    assert(!strstr(ids, b));
+}
+static void plugin_id_fields(void)
+{
+    struct fake f = {.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+        "\"name\":\"clips\",\"current\":\"" PLUGIN_GEN "\",\"last_good\":\"\",\"current_state\":\"ok\","
+        "\"last_good_state\":\"missing\",\"generations_state\":\"ok\",\"generations\":[\"" PLUGIN_GEN "\"]}]}}"};
+    struct zapp_ops ops = {.exec = fake_exec, .ctx = &f};
+    ask(&ops, "plugins r1", 1000);
+    assert(strstr(field("ids"), PLUGIN_GEN));
+    assert(strstr(field("ids"), "last-good - (missing)"));
+    f.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":0,\"plugins\":[]}}";
+    ask(&ops, "plugins r1", 1000);
+    assert(!field("ids")[0]);
+    f.reply = "not json";
+    ask(&ops, "plugins r1", 1000);
+    const char *ids = field("ids");
+    assert(!ids || !ids[0]);
+}
+static void ids_omit_hidden(const char *ids)
+{
+    assert(strstr(ids, "p7"));
+    assert(!strstr(ids, "p8"));
+    assert(strstr(ids, "2 more plugins not copied."));
 }
 static void plugins_view(void)
 {
@@ -161,6 +188,7 @@ static void plugins_view(void)
     assert(strstr(field("text"), "clips\n current 0123456789ab (ok) · last-good - (missing)"));
     assert(!strstr(field("text"), "other saved IDs"));
     saved_generations_view();
+    plugin_id_fields();
     f.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
         "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"unreadable\","
         "\"last_good_state\":\"corrupt\",\"generations_state\":\"corrupt\",\"generations\":[]}]}}";
@@ -226,6 +254,7 @@ static void plugins_view(void)
     ask(&ops, "plugins r1", 1000);
     assert(strstr(field("text"), "\np0\n") && strstr(field("text"), "\np7\n"));
     assert(strstr(field("text"), "2 more not shown.") && !strstr(field("text"), "p8"));
+    ids_omit_hidden(field("ids"));
     char *hidden = strstr(large, "\"name\":\"p8\"");
     assert(hidden);
     hidden[8] = ' ';

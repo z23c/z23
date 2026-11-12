@@ -72,6 +72,7 @@ struct zapp_view {
     char pending_question[ZAPP_PENDING_CAP]; /* Question being answered, shown until its answer or cancel. */
     char ops_host[16];   /* Fleet host the host controls act on. */
     char ops_text[1536]; /* Errors, plugin inventory, restart plan or outcome last shown for that host. */
+    char ops_ids[4096];  /* Full current and last-good generation IDs for the plugins shown. */
     char ops_plan[33];   /* Plan id awaiting Confirm restart, or empty. */
 };
 #endif

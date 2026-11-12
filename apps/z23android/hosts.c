@@ -380,17 +380,34 @@ bool zapp_hosts_label(const char *report, size_t index, char label[16])
     }
     return false;
 }
-bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33])
+static void copy_plugin_ids(const struct json_value *root, char *ids, size_t cap, char *text, size_t text_cap, bool *ok)
+{
+    const char *full = str_of(root, "ids");
+    if (!ids || !cap || !full[0]) return;
+    size_t n = strlen(full);
+    if (n >= cap) {
+        ids[0] = 0;
+        snprintf(text, text_cap, "The plugin IDs were too large to copy.");
+        *ok = false;
+        return;
+    }
+    memcpy(ids, full, n + 1);
+}
+bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33], char *ids, size_t ids_cap)
 {
     struct json_value root = {0};
     plan[0] = 0;
+    if (ids && ids_cap) ids[0] = 0;
     bool ok = json && json_read(&root, json, strlen(json)) && root.type == JSON_OBJ;
     const char *host = str_of(&root, "host"), *error = str_of(&root, "error"), *body = str_of(&root, "text"),
         *action = str_of(&root, "action"), *id = str_of(&root, "plan_id");
     if (!ok) snprintf(text, cap, "The host's reply could not be read.");
     else if (error[0]) { snprintf(text, cap, "%s%s%s", host, host[0] ? ": " : "", error); ok = false; }
     else if (!strcmp(action, "errors")) snprintf(text, cap, "%s · recent errors\n%s", host, body);
-    else if (!strcmp(action, "plugins")) snprintf(text, cap, "%s · plugin inventory\n%s", host, body);
+    else if (!strcmp(action, "plugins")) {
+        snprintf(text, cap, "%s · plugin inventory\n%s", host, body);
+        copy_plugin_ids(&root, ids, ids_cap, text, cap, &ok);
+    }
     else if (!strcmp(action, "plan") && strlen(id) == 32) {
         snprintf(plan, 33, "%s", id);
         snprintf(text, cap, "%s\nTap Confirm restart to restart it, or leave it.", body);

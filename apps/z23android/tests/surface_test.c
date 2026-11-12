@@ -274,6 +274,27 @@ static void share_text_is_clear(void)
     free(src);
 }
 
+static void plugin_copy_is_text_only(void)
+{
+    char *src = slurp("native_ui.c");
+    require(src, "add_button(env, layout, activity, \"Copy IDs\", 22)", "text-only plugin copy action");
+    require(src, "*action = \"plugin_copy\"; *arg = plugin_ids; return plugin_ids[0] != 0;", "copies current IDs only when available");
+    require(src, "view->ops_ids[0]", "plugin copy visibility follows validated reply data");
+    require(src, "buttons[23]", "button array includes the copy action");
+    assert(!strstr(src, "plugin_switch"));
+    free(src);
+    src = slurp("android_main.c");
+    require(src, "copy_plugin_ids", "plugin clipboard handler");
+    require(src, "zapp_clipboard_copy_sensitive(copy_activity, argument)", "sensitive clipboard path");
+    require(src, "Plugin IDs copied. Use them on the host; nothing was switched.", "does not claim a plugin switch");
+    assert(!strstr(src, "plugin_switch"));
+    free(src);
+    src = slurp("controller.c");
+    assert(count(src, "c->view.ops_ids[0] = 0;") >= 3);
+    assert(!strstr(src, "plugin_switch"));
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
@@ -287,6 +308,7 @@ int main(int argc, char **argv)
     clips_is_unreachable();
     text_is_ellipsized();
     share_text_is_clear();
+    plugin_copy_is_text_only();
     puts("surface_test: ok");
     return 0;
 }

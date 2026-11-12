@@ -263,13 +263,16 @@ Under the fleet list in **More**, **Host** selects one fleet host, **Show errors
 lists its last five `ERROR` log lines from the past 24 hours (`z23 ops logs`, read-only), and **Plugins**
 runs the fixed read-only `z23 plugin list` command on that host. It shows up to eight plugin names,
 current and last-good generation prefixes and slot health. Each plugin also shows up to two other
-stored generation prefixes and a count of any others; omitted plugins are counted too. An oversize
+stored generation prefixes and a count of any others; omitted plugins are counted too. **Copy IDs**
+copies the full current and last-good IDs of the plugins shown, not the additional saved generations,
+through the same sensitive clipboard and best-effort clearing after a minute used by Copy address. An oversize
 reply is refused rather than truncated. This is an inventory scan, not a fresh signature
 verification; it does not fetch, install, switch or load
 plugin code. The isolated voice preview also offers **Host** and **Plugins**, but not **Show errors**
 or the restart controls. The Assistant reserves three lines for live status so a fleet report does not
 move **More**, and **Plugins** stays visible while its read runs.
 <!-- claim: symbol-present plugins_text apps/z23android/bridge/host_ops.c # bounded read-only plugin inventory -->
+<!-- claim: symbol-present copy_plugin_ids apps/z23android/android_main.c # Copy IDs uses the protected clipboard without changing plugin state -->
 <!-- claim: symbol-present node_widgets apps/z23android/native_ui.c # reserved status lines keep More in place -->
 <!-- claim: symbol-present render_ops apps/z23android/native_ui.c # Plugins remains visible during its read -->
 **Restart node** shows what a restart of its `z23-node.service` would do (`z23 ops node restart`

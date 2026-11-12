@@ -578,7 +578,7 @@ static void ops_track(struct controller *c, const char *report)
         if (!strcmp(label, c->view.ops_host)) return;
     if (!zapp_hosts_label(report, 0, label)) label[0] = 0;
     copy_text(c->view.ops_host, sizeof(c->view.ops_host), label);
-    c->view.ops_text[0] = 0; c->view.ops_plan[0] = 0;
+    c->view.ops_text[0] = 0; c->view.ops_plan[0] = 0; c->view.ops_ids[0] = 0;
 }
 /* Caller holds c->lock. Selects the host after the current one, wrapping to the first. */
 static void ops_next(struct controller *c)
@@ -591,7 +591,7 @@ static void ops_next(struct controller *c)
         found = found || !strcmp(label, c->view.ops_host);
     }
     copy_text(c->view.ops_host, sizeof(c->view.ops_host), next[0] ? next : first);
-    c->view.ops_text[0] = 0; c->view.ops_plan[0] = 0;
+    c->view.ops_text[0] = 0; c->view.ops_plan[0] = 0; c->view.ops_ids[0] = 0;
 }
 /* Caller holds c->lock. Builds the request for the selected host; a restart is confirmed only with
  * the plan id its own planning step returned, which is spent here. */
@@ -607,18 +607,20 @@ static enum zapp_refusal ops_scope(struct controller *c, const char *action, con
     if (n < 0 || (size_t)n >= sizeof(c->ops_scope)) return ZAPP_REFUSAL_TOO_LONG;
     snprintf(c->view.ops_text, sizeof(c->view.ops_text), "Asking %s…", host);
     c->view.ops_plan[0] = 0;
+    c->view.ops_ids[0] = 0;
     *arg = c->ops_scope;
     return ZAPP_REFUSAL_NONE;
 }
 /* Sends the request to the laptop host and shows its reply under the host controls. */
 static bool execute_ops(struct controller *c, const char *scope, char *out)
 {
-    char text[sizeof(c->view.ops_text)], plan[33] = "";
+    char text[sizeof(c->view.ops_text)], plan[33] = "", ids[sizeof(c->view.ops_ids)] = "";
     bool answered = zapp_speech_client_ops(c->files, scope, out, ZAPP_TEXT_CAP, NULL);
-    bool ok = answered && zapp_ops_view(out, text, sizeof(text), plan);
+    bool ok = answered && zapp_ops_view(out, text, sizeof(text), plan, ids, sizeof(ids));
     if (!answered) copy_text(text, sizeof(text), out);
     pthread_mutex_lock(&c->lock);
     copy_text(c->view.ops_text, sizeof(c->view.ops_text), text);
+    copy_text(c->view.ops_ids, sizeof(c->view.ops_ids), ids);
     copy_text(c->view.ops_plan, sizeof(c->view.ops_plan), plan);
     pthread_mutex_unlock(&c->lock);
     copy_text(out, ZAPP_TEXT_CAP, text);
