@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "share.h"
+#include "share_media.h"
 #include "base/cleanse.h"
 #include "jni_util.h"
 #include "payment_code.h"
@@ -33,6 +34,26 @@ static bool put_uri(JNIEnv *env, jobject intent, const char *key, jobject uri)
     jstring name = put ? zj_string(env, key) : NULL;
     if (name) (*env)->CallObjectMethod(env, intent, put, name, uri);
     return zj_clean(env) && name;
+}
+static bool put_allow_multiple(JNIEnv *env, jobject intent)
+{
+    jmethodID put = zj_method(env, intent, "putExtra", "(Ljava/lang/String;Z)Landroid/content/Intent;");
+    jstring name = put ? zj_string(env, "android.intent.extra.ALLOW_MULTIPLE") : NULL;
+    if (name) (*env)->CallObjectMethod(env, intent, put, name, true);
+    return zj_clean(env) && name;
+}
+static bool put_uri_list(JNIEnv *env, jobject intent, jobject list)
+{
+    jmethodID put = zj_method(env, intent, "putParcelableArrayListExtra", "(Ljava/lang/String;Ljava/util/ArrayList;)Landroid/content/Intent;");
+    jstring name = put ? zj_string(env, "android.intent.extra.STREAM") : NULL;
+    if (name) (*env)->CallObjectMethod(env, intent, put, name, list);
+    return zj_clean(env) && name;
+}
+static bool set_clip_data(JNIEnv *env, jobject intent, jobject clip)
+{
+    jmethodID set = zj_method(env, intent, "setClipData", "(Landroid/content/ClipData;)V");
+    if (set) (*env)->CallVoidMethod(env, intent, set, clip);
+    return zj_clean(env) && set;
 }
 static bool put_media_types(JNIEnv *env, jobject intent)
 {
@@ -105,6 +126,105 @@ static bool set_media_type(JNIEnv *env, jobject activity, jobject intent, jobjec
     if (value) (*env)->CallObjectMethod(env, intent, set, value);
     return zj_clean(env) && value;
 }
+static bool share_one_media(JNIEnv *env, jobject activity, jobject uri)
+{
+    bool ok = (*env)->PushLocalFrame(env, 16) == JNI_OK;
+    if (ok) {
+        jobject share = new_intent(env, "android.intent.action.SEND");
+        ok = share && uri && put_text(env, share, "android.intent.extra.TEXT", payment_code) &&
+            put_uri(env, share, "android.intent.extra.STREAM", uri) && add_read_grant(env, share) &&
+            set_media_type(env, activity, share, uri) && start_share(env, activity, share);
+        (*env)->PopLocalFrame(env, NULL);
+    }
+    return ok;
+}
+static int media_kind(JNIEnv *env, jobject resolver, jobject uri)
+{
+    jmethodID get = resolver ? zj_method(env, resolver, "getType", "(Landroid/net/Uri;)Ljava/lang/String;") : NULL;
+    if (!get) return -1;
+    jstring type = (*env)->CallObjectMethod(env, resolver, get, uri);
+    if (!zj_clean(env)) return -1;
+    if (!type) return 0;
+    char name[64];
+    bool copied = zj_copy_utf(env, type, name, sizeof(name));
+    (*env)->DeleteLocalRef(env, type);
+    if (!copied) return -1;
+    if (!strncmp(name, "image/", 6)) return 1;
+    if (!strncmp(name, "video/", 6)) return 2;
+    return 3;
+}
+struct multi_media {
+    jobject clip, resolver, list, share, grants, clip_type, item_type;
+    jmethodID list_add, get_item, make, add, item_init;
+    int kind;
+};
+static bool multi_setup(JNIEnv *env, jobject activity, jobject clip, jint count, struct multi_media *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->clip = clip;
+    m->resolver = zj_object_property(env, activity, "getContentResolver", "()Landroid/content/ContentResolver;");
+    jclass list_type = (*env)->FindClass(env, "java/util/ArrayList");
+    jmethodID list_init = list_type ? (*env)->GetMethodID(env, list_type, "<init>", "(I)V") : NULL;
+    m->list = list_init ? (*env)->NewObject(env, list_type, list_init, count) : NULL;
+    m->list_add = zj_method(env, m->list, "add", "(Ljava/lang/Object;)Z");
+    m->clip_type = (*env)->FindClass(env, "android/content/ClipData");
+    m->make = m->clip_type ? (*env)->GetStaticMethodID(env, m->clip_type, "newUri",
+        "(Landroid/content/ContentResolver;Ljava/lang/CharSequence;Landroid/net/Uri;)Landroid/content/ClipData;") : NULL;
+    m->add = m->clip_type ? (*env)->GetMethodID(env, m->clip_type, "addItem", "(Landroid/content/ClipData$Item;)V") : NULL;
+    m->item_type = (*env)->FindClass(env, "android/content/ClipData$Item");
+    m->item_init = m->item_type ? (*env)->GetMethodID(env, m->item_type, "<init>", "(Landroid/net/Uri;)V") : NULL;
+    m->get_item = zj_method(env, clip, "getItemAt", "(I)Landroid/content/ClipData$Item;");
+    m->share = new_intent(env, "android.intent.action.SEND_MULTIPLE");
+    return m->resolver && m->list && m->list_add && m->make && m->add && m->item_init && m->get_item && m->share;
+}
+static bool multi_add_grant(JNIEnv *env, struct multi_media *m, jobject uri, jint index)
+{
+    if (index == 0) {
+        jstring label = zj_string(env, "Z23 media");
+        m->grants = label ? (*env)->CallStaticObjectMethod(env, m->clip_type, m->make, m->resolver, label, uri) : NULL;
+        return m->grants && zj_clean(env);
+    }
+    jobject added = m->grants ? (*env)->NewObject(env, m->item_type, m->item_init, uri) : NULL;
+    if (!added) return false;
+    (*env)->CallVoidMethod(env, m->grants, m->add, added);
+    (*env)->DeleteLocalRef(env, added);
+    return zj_clean(env);
+}
+static bool multi_append(JNIEnv *env, struct multi_media *m, jint index)
+{
+    jobject item = (*env)->CallObjectMethod(env, m->clip, m->get_item, index);
+    jmethodID get_uri = item ? zj_method(env, item, "getUri", "()Landroid/net/Uri;") : NULL;
+    jobject uri = get_uri ? (*env)->CallObjectMethod(env, item, get_uri) : NULL;
+    if (!uri) { if (item) (*env)->DeleteLocalRef(env, item); return false; }
+    bool ok = multi_add_grant(env, m, uri, index);
+    if (ok) {
+        (*env)->CallBooleanMethod(env, m->list, m->list_add, uri);
+        int current = media_kind(env, m->resolver, uri);
+        if (current < 0) ok = false;
+        else m->kind = merge_media_kind(m->kind, current);
+    }
+    (*env)->DeleteLocalRef(env, uri);
+    if (item) (*env)->DeleteLocalRef(env, item);
+    return ok && zj_clean(env);
+}
+static bool share_multi_media(JNIEnv *env, jobject activity, jobject clip, jint count)
+{
+    bool ok = (*env)->PushLocalFrame(env, 32) == JNI_OK;
+    if (ok) {
+        struct multi_media m;
+        ok = multi_setup(env, activity, clip, count, &m);
+        /* The list carries the payload; matching ClipData grants every selected URI to the recipient. */
+        for (jint i = 0; ok && i < count; ++i) ok = multi_append(env, &m, i);
+        if (ok) {
+            ok = m.grants && put_text(env, m.share, "android.intent.extra.TEXT", payment_code) &&
+                put_uri_list(env, m.share, m.list) && set_clip_data(env, m.share, m.grants) && add_read_grant(env, m.share) &&
+                set_type(env, m.share, m.kind == 1 ? "image/*" : m.kind == 2 ? "video/*" : "*/*") &&
+                start_share(env, activity, m.share);
+        }
+        (*env)->PopLocalFrame(env, NULL);
+    }
+    return ok;
+}
 static bool return_to_receive;
 static char result_notice[96];
 
@@ -159,12 +279,46 @@ bool zapp_share_begin(JNIEnv *env, jobject activity)
     if (ok) {
         jobject picker = new_intent(env, "android.intent.action.OPEN_DOCUMENT");
         ok = picker && add_category(env, picker, "android.intent.category.OPENABLE") &&
-            set_type(env, picker, "*/*") && put_media_types(env, picker) &&
+            set_type(env, picker, "*/*") && put_media_types(env, picker) && put_allow_multiple(env, picker) &&
             add_read_grant(env, picker) && start_picker(env, activity, picker);
         (*env)->PopLocalFrame(env, NULL);
     }
     if (!ok) zapp_share_destroy();
     return ok;
+}
+enum picker_result { PICKER_FAILED, PICKER_LAUNCHED, PICKER_DONE };
+static enum picker_result share_picker_data(JNIEnv *env, jobject activity, jobject data)
+{
+    bool ok = (*env)->PushLocalFrame(env, 32) == JNI_OK;
+    if (!ok) return PICKER_FAILED;
+    jobject clip = zj_object_property(env, data, "getClipData", "()Landroid/content/ClipData;");
+    if (!clip) {
+        jobject uri = zj_object_property(env, data, "getData", "()Landroid/net/Uri;");
+        ok = share_one_media(env, activity, uri);
+        (*env)->PopLocalFrame(env, NULL);
+        return ok ? PICKER_LAUNCHED : PICKER_FAILED;
+    }
+    jmethodID count_method = zj_method(env, clip, "getItemCount", "()I");
+    if (!count_method) { (*env)->PopLocalFrame(env, NULL); return PICKER_FAILED; }
+    jint count = (*env)->CallIntMethod(env, clip, count_method);
+    if (!zj_clean(env)) { (*env)->PopLocalFrame(env, NULL); return PICKER_FAILED; }
+    if (!media_count_valid(count)) {
+        return_with_notice(count <= 0 ? "No media was selected. Nothing was sent." :
+            "Choose up to 32 photos or videos at a time. Nothing was sent.");
+        zapp_share_destroy();
+        (*env)->PopLocalFrame(env, NULL);
+        return PICKER_DONE;
+    }
+    if (count > 1) ok = share_multi_media(env, activity, clip, count);
+    else {
+        jmethodID get_item = zj_method(env, clip, "getItemAt", "(I)Landroid/content/ClipData$Item;");
+        jobject item = get_item ? (*env)->CallObjectMethod(env, clip, get_item, 0) : NULL;
+        jmethodID get_uri = item ? zj_method(env, item, "getUri", "()Landroid/net/Uri;") : NULL;
+        jobject uri = get_uri ? (*env)->CallObjectMethod(env, item, get_uri) : NULL;
+        ok = share_one_media(env, activity, uri);
+    }
+    (*env)->PopLocalFrame(env, NULL);
+    return ok ? PICKER_LAUNCHED : PICKER_FAILED;
 }
 bool zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
 {
@@ -181,18 +335,11 @@ bool zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result,
         zapp_share_destroy();
         return true;
     }
-    bool ok = (*env)->PushLocalFrame(env, 16) == JNI_OK;
-    if (ok) {
-        jobject share = new_intent(env, "android.intent.action.SEND");
-        jobject uri = share ? zj_object_property(env, data, "getData", "()Landroid/net/Uri;") : NULL;
-        ok = share && uri && put_text(env, share, "android.intent.extra.TEXT", payment_code) &&
-            put_uri(env, share, "android.intent.extra.STREAM", uri) && add_read_grant(env, share) &&
-            set_media_type(env, activity, share, uri) && start_share(env, activity, share);
-        (*env)->PopLocalFrame(env, NULL);
-    }
-    return_with_notice(ok ? "" : "Could not open the share sheet.");
+    enum picker_result outcome = share_picker_data(env, activity, data);
+    if (outcome == PICKER_DONE) return true;
+    return_with_notice(outcome == PICKER_LAUNCHED ? "" : "Could not open the share sheet.");
     zapp_share_destroy();
-    return !ok;
+    return outcome != PICKER_LAUNCHED;
 }
 
 static void finish_activity(JNIEnv *env, jobject activity)

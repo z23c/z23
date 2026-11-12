@@ -2521,7 +2521,7 @@ static void test_receive_share(void)
         !strcmp(text_at(s, text), "Share request: text") && !strcmp(text_at(s, share), "Share request: media"));
     CHECK(text > copy && s->items[text + 1].kind == WALLET_ITEM_NOTE &&
         !strcmp(text_at(s, text + 1),
-            "Share the request as text, or add a photo or video. Choose the recipient in Android's share sheet."));
+            "Share the request as text, or add photos or videos. Choose the recipient in Android's share sheet."));
     size_t next = (size_t)share + 1;
     CHECK(next < s->count && s->items[next].kind != WALLET_ITEM_NOTE);
     char expected[ZAPP_RECEIVE_CODE_MAX], code[ZAPP_RECEIVE_CODE_MAX];

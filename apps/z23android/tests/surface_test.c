@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "../share_media.h"
 
 static char *slurp(const char *path)
 {
@@ -262,6 +263,19 @@ static void share_text_is_clear(void)
     char *src = slurp("share.c");
     require(src, "jstring title = make ? zj_string(env, \"Choose recipient\") : NULL;", "chooser asks for the recipient");
     require(src, "ZAPP_SHARE_SEND_REQUEST", "send request id");
+    require(src, "android.intent.extra.ALLOW_MULTIPLE", "allow multiple picker items");
+    require(src, "android.intent.action.SEND_MULTIPLE", "send multiple action");
+    require(src, "getClipData", "read all selected items");
+    require(src, "(*env)->CallObjectMethod(env, intent, put, name, true)", "allow multiple uses an object-returning call");
+    require(src, "getItemCount", "ClipData item count API");
+    require(src, "enum picker_result outcome = share_picker_data(env, activity, data);", "picker outcome remains distinct");
+    require(src, "if (outcome == PICKER_DONE) return true;", "invalid selections close with notice");
+    require(src, "return outcome != PICKER_LAUNCHED;", "only launched choosers wait for results");
+    require(src, "getItemAt", "iterate selected items");
+    require(src, "putParcelableArrayListExtra", "URI list for multiple sharing");
+    require(src, "setClipData", "outgoing URI grants");
+    require(src, "addItem", "add every URI to ClipData");
+    require(src, "Choose up to 32 photos or videos at a time. Nothing was sent.", "bounded selection feedback");
     require(src, "static bool share_text(JNIEnv *env, jobject activity)", "direct text share");
     require(src, "bool zapp_share_prepare_text(void)", "text share preparation");
     require(src, "set_type(env, share, \"text/plain\")", "plain text MIME type");
@@ -278,7 +292,7 @@ static void share_text_is_clear(void)
     require(src, "if (request == ZAPP_SHARE_SEND_REQUEST)", "send result handling");
     require(src, "if (result == -1) return_with_notice(\"Android completed the share action. Delivery is not confirmed.\");", "confirmed chooser action without a delivery claim");
     require(src, "else return_with_notice(\"Share sheet closed. Android does not confirm whether anything was sent.\");", "ambiguous chooser result does not assert cancellation");
-    require(src, "return !ok;", "keep ShareActivity alive while the chooser is open");
+    require(src, "enum picker_result { PICKER_FAILED, PICKER_LAUNCHED, PICKER_DONE };", "picker result values cover all outcomes");
     free(src);
     src = slurp("shell.c");
     require(src, "share_wallet(env, false);", "text action opens direct share");
@@ -288,6 +302,27 @@ static void share_text_is_clear(void)
     require(src, "private native int shareResultNative", "native chooser result status");
     require(src, "M_ACTIVITY_FINISH", "Activity.finish method reference");
     free(src);
+}
+
+static void multi_media_contract(void)
+{
+    assert(!media_count_valid(0));
+    assert(media_count_valid(1));
+    assert(media_count_valid(2));
+    assert(media_count_valid(SHARE_MEDIA_MAX));
+    assert(!media_count_valid(SHARE_MEDIA_MAX + 1));
+    assert(!media_count_valid(-1));
+    assert(merge_media_kind(0, 0) == 3);
+    assert(merge_media_kind(0, 1) == 1);
+    assert(merge_media_kind(0, 2) == 2);
+    assert(merge_media_kind(0, 3) == 3);
+    assert(merge_media_kind(1, 1) == 1);
+    assert(merge_media_kind(2, 2) == 2);
+    assert(merge_media_kind(1, 2) == 3);
+    assert(merge_media_kind(2, 1) == 3);
+    assert(merge_media_kind(3, 0) == 3);
+    assert(merge_media_kind(3, 1) == 3);
+    assert(merge_media_kind(2, 0) == 3);
 }
 
 static void plugin_copy_is_text_only(void)
@@ -324,6 +359,7 @@ int main(int argc, char **argv)
     clips_is_unreachable();
     text_is_ellipsized();
     share_text_is_clear();
+    multi_media_contract();
     plugin_copy_is_text_only();
     puts("surface_test: ok");
     return 0;
