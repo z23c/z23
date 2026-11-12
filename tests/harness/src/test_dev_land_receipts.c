@@ -642,11 +642,11 @@ int test_dev_land_drive_producer_reproof(void)
         (void)snprintf(make_ok, sizeof(make_ok), "%s/fake-make", root);
         (void)snprintf(make_bad, sizeof(make_bad), "%s/fake-make-bad", root);
         (void)snprintf(log, sizeof(log), "%s/producer-argv", root);
-        /* argv: -jN -C <root> dev-bin. The built "producer" records how it
+        /* argv: -jN -C <root> dev-proof-producer. The built "producer" records how it
          * was called. */
         (void)snprintf(script, sizeof(script),
                        "#!/bin/sh\n"
-                       "[ \"$2\" = -C ] && [ \"$4\" = dev-bin ] || exit 64\n"
+                       "[ \"$2\" = -C ] && [ \"$4\" = dev-proof-producer ] || exit 64\n"
                        "mkdir -p \"$3/build/bin\" || exit 65\n"
                        "printf '%%s\\n' '#!/bin/sh' "
                        "'printf \"%%s \" \"$@\" > \"%s\"' "

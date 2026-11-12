@@ -1313,7 +1313,7 @@ _test_next:;
 
 /* ── drive prove:true max_rows:N: the manual proof recipe, bounded ─────── */
 
-/* A stand-in `make`: argv is -jN -C <root> dev-bin. It builds a stand-in
+/* A stand-in `make`: argv is -jN -C <root> dev-proof-producer. It builds a stand-in
  * producer in <root>/build/bin/z23-dev that counts its runs in `count` and
  * then either writes the pair's receipt (ok), exits 0 without one (quiet),
  * or fails (broken). */
@@ -1332,7 +1332,7 @@ static bool dlx_fake_make(const char *path, const char *count,
         script, sizeof(script),
         "#!/bin/sh\n"
         "echo \"make:${ZCL_LAND_PROOF_STUB-unset}:${ZCL_LAND_MAKE-unset}\" >> '%s.env'\n"
-        "[ \"$2\" = -C ] && [ \"$4\" = dev-bin ] || exit 64\n"
+        "[ \"$2\" = -C ] && [ \"$4\" = dev-proof-producer ] || exit 64\n"
         "mkdir -p \"$3/build/bin\" || exit 65\n"
         "cat > \"$3/build/bin/z23-dev\" <<'PRODUCER'\n"
         "#!/bin/sh\n"
