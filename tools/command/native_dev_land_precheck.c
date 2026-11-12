@@ -414,6 +414,7 @@ struct pc_run {
     int64_t deadline, budget_ms;
     const char *skipped[ZCL_LAND_PRECHECK_MAX_GATES];
     const char *ran[ZCL_LAND_PRECHECK_MAX_GATES];
+    int64_t elapsed_ms[ZCL_LAND_PRECHECK_MAX_GATES];
     char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
     bool gate_output_available;
@@ -935,6 +936,36 @@ static const char *pc_missing_need(struct pc_run *r, const char *gate)
 
 enum pc_gate_state { PC_GATE_RAN, PC_GATE_SKIPPED, PC_GATE_REFUSED };
 
+/* Diagnostic only: independent of the injected precheck deadline clock. */
+static int pc_gate_timed(struct pc_run *r, const char *gate, bool ship, bool size)
+{
+    int64_t start = clock_now_monotonic_raw_us();
+    int rc = pc_gate_exec(r, gate, ship, size);
+    int64_t end = clock_now_monotonic_raw_us();
+    if (rc == 0 && r->nran < ZCL_LAND_PRECHECK_MAX_GATES)
+        r->elapsed_ms[r->nran] = start > 0 && end >= start ? (end - start) / 1000 : -1;
+    return rc;
+}
+
+/* Passing-gate observations on successful submissions; unavailable clocks are null. */
+static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
+{
+    struct json_value list; json_init(&list); json_set_array(&list);
+    bool ok = list.type == JSON_ARR;
+    for (size_t i = 0; ok && i < r->nran; i++) {
+        struct json_value item, elapsed; json_init(&item); json_set_object(&item);
+        json_init(&elapsed);
+        if (r->elapsed_ms[i] >= 0) json_set_int(&elapsed, r->elapsed_ms[i]);
+        else json_set_null(&elapsed);
+        ok = item.type == JSON_OBJ && json_push_kv_str(&item, "gate", r->ran[i]) &&
+            json_push_kv(&item, "elapsed_ms", &elapsed) && json_push_back(&list, &item);
+        json_free(&elapsed); json_free(&item);
+    }
+    if (ok) ok = json_push_kv(&reply->data, "precheck_timings", &list);
+    json_free(&list);
+    return ok;
+}
+
 /* One gate: skipped (unknown or unproven), refused, or ran clean. */
 static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                                       const char *list,
@@ -956,7 +987,7 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         pc_note_unproven(r, gate);
         return PC_GATE_SKIPPED;
     }
-    rc = pc_gate_exec(r, gate, ship, size);
+    rc = pc_gate_timed(r, gate, ship, size);
     if (rc == -2&& strcmp(gate, "check-file-purpose") == 0) {
         pc_failure_facts(r, gate, reply, false);
         pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
@@ -1115,6 +1146,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);
         pc_push_names(reply, "precheck_skipped", r->skipped, r->nskipped);
         pc_push_unproven(r, reply);
+        if (!pc_push_timings(r, reply))
+            (void)json_push_kv_bool(&reply->data, "precheck_timings_unavailable", true);
     }
     free(r->out);
     free(g);

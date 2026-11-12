@@ -580,6 +580,51 @@ static bool dlx_pc_order_case(const char *detail, bool fail_shell,
     return ok;
 }
 
+static bool dlx_pc_timing_entry(const struct json_value *row,
+                                const struct json_value *ran,
+                                const struct json_value *skipped)
+{
+    const struct json_value *gate = row ? json_get(row, "gate") : NULL;
+    const struct json_value *elapsed = row ? json_get(row, "elapsed_ms") : NULL;
+    if (!row || row->type != JSON_OBJ || !gate || gate->type != JSON_STR ||
+        !ran || ran->type != JSON_STR || !elapsed) return false;
+    const char *name = json_get_str(gate);
+    return name && !strcmp(name, json_get_str(ran)) && !dlx_pc_has(skipped, name) &&
+        (elapsed->type == JSON_NULL || (elapsed->type == JSON_INT && json_get_int(elapsed) >= 0));
+}
+static bool dlx_pc_timing_has_integer(const struct json_value *timings)
+{
+    for (size_t i = 0; i < json_size(timings); ++i) {
+        const struct json_value *elapsed = json_get(json_at(timings, i), "elapsed_ms");
+        if (elapsed && elapsed->type == JSON_INT) return true;
+    }
+    return false;
+}
+static bool dlx_pc_timings_match(const struct dlx_call *c)
+{
+    const struct json_value *ran = dlx_arr(c, "precheck_ran");
+    const struct json_value *skipped = dlx_arr(c, "precheck_skipped");
+    const struct json_value *timings = dlx_arr(c, "precheck_timings");
+    if (!ran || ran->type != JSON_ARR || !skipped || skipped->type != JSON_ARR ||
+        !timings || timings->type != JSON_ARR || json_size(ran) < 2 ||
+        json_size(timings) != json_size(ran)) {
+        printf("precheck timings: ran=%zu skipped=%zu timings=%zu present=%d\n",
+               ran ? json_size(ran) : 0u, skipped ? json_size(skipped) : 0u,
+               timings ? json_size(timings) : 0u, timings != NULL);
+        return false;
+    }
+    for (size_t i = 0; i < json_size(ran); ++i) {
+        if (!dlx_pc_timing_entry(json_at(timings, i), json_at(ran, i), skipped)) {
+            printf("precheck timing invalid or out of order at index %zu\n", i);
+            return false;
+        }
+    }
+    if (!dlx_pc_timing_has_integer(timings)) {
+        printf("precheck timings: real-clock fixture produced no numeric duration\n");
+        return false;
+    }
+    return true;
+}
 static bool dlx_pc_unknown_gate_skipped(void)
 {
     struct dlx_rig rig;
@@ -603,6 +648,8 @@ static bool dlx_pc_unknown_gate_skipped(void)
          dlx_pc_has(dlx_arr(&c, "precheck_skipped"),
                     "check-arm-symbol-single") &&
          !dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-gone-gate");
+    bool timing_ok = dlx_pc_timings_match(&c);
+    ok = timing_ok && ok;
     dlx_end(&c);
     ok = ok && dlx_pc_ran(&rig, "check-learned-one") &&
          !dlx_pc_ran(&rig, "check-gone-gate");
