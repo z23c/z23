@@ -941,15 +941,26 @@ static void struct_nested(struct struct_scan *ss, size_t i, char ch)
     }
 }
 
+/* Retain only the macro probe's first nonspace position. The original
+ * segment boundary still owns raw signatures and documentation lookup. */
+static bool struct_macro_line(const struct struct_scan *ss, const char *clean,
+                               size_t end, size_t *prefix)
+{
+    if (ss->brace != 0 || ss->paren != 0) return false;
+    if (*prefix < ss->seg_start) *prefix = ss->seg_start;
+    *prefix = first_tok(clean, *prefix, end);
+    return macro_invocation_segment(clean, *prefix, end);
+}
+
 static void scan_structure(struct scan_ctx *c)
 {
     struct struct_scan ss = { 0, 0, 0, false, 0 };
     size_t line = 0;
+    size_t macro_prefix = 0;
     for (size_t i = 0; i < c->len; i++) {
         char ch = c->clean[i];
         if (ch == '\n') {
-            if (ss.brace == 0 && ss.paren == 0 &&
-                macro_invocation_segment(c->clean, ss.seg_start, i))
+            if (struct_macro_line(&ss, c->clean, i, &macro_prefix))
                 ss.seg_start = i + 1;
             line++;
             continue;
