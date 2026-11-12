@@ -564,16 +564,63 @@ static bool ci_store_include_page_prepare(struct ci_store *s)
         -1, &s->include_page_stmt, NULL) == SQLITE_OK;
 }
 
-static int ci_store_include_page_finish(struct ci_store *s, bool complete)
+static int ci_store_read_finish(sqlite3_stmt **slot, bool complete)
 {
-    int reset_rc = sqlite3_reset(s->include_page_stmt);
-    int clear_rc = sqlite3_clear_bindings(s->include_page_stmt);
+    int reset_rc = sqlite3_reset(*slot);
+    int clear_rc = sqlite3_clear_bindings(*slot);
     int rc = reset_rc != SQLITE_OK ? reset_rc : clear_rc;
     if (!complete || rc != SQLITE_OK) {
-        (void)sqlite3_finalize(s->include_page_stmt);
-        s->include_page_stmt = NULL;
+        (void)sqlite3_finalize(*slot);
+        *slot = NULL;
     }
     return rc;
+}
+
+static bool ci_store_defs_by_name_prepare(struct ci_store *s)
+{
+    if (s->defs_by_name_stmt) return true;
+    return sqlite3_prepare_v2(s->db,
+        "SELECT " CI_SYM_COLS " FROM symbols WHERE name=?"
+        " ORDER BY def_path ASC, def_line ASC",
+        -1, &s->defs_by_name_stmt, NULL) == SQLITE_OK;
+}
+
+/* Every symbol row named `name`, any kind, in a stable order. -1 on a query
+ * error or any row failing its checksum: fewer rows than exist are never
+ * returned silently. A result of `cap` rows may be clipped; the caller treats
+ * it as truncated. The store lock owns the cached statement for the whole read. */
+int ci_store_defs_by_name(struct ci_store *s, const char *name,
+                          struct ci_symbol *out, int cap)
+{
+    if (!s || !name || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to defs_by_name");
+    pthread_mutex_lock(&s->lock);
+    if (!ci_store_defs_by_name_prepare(s)) {
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "prepare defs_by_name");
+    }
+    sqlite3_stmt *stmt = s->defs_by_name_stmt;
+    const int bind_rc = sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+    if (bind_rc != SQLITE_OK) {
+        (void)ci_store_read_finish(&s->defs_by_name_stmt, false);
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "bind defs_by_name failed rc=%d", bind_rc);
+    }
+    int n = 0;
+    bool ok = true;
+    while (ok && n < cap) {
+        int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
+        if (rc == SQLITE_DONE)
+            break;
+        ok = rc == SQLITE_ROW && ci_store_fill_symbol(stmt, &out[n]);
+        if (ok)
+            n++;
+    }
+    const int finish_rc = ci_store_read_finish(&s->defs_by_name_stmt, ok);
+    pthread_mutex_unlock(&s->lock);
+    if (!ok || finish_rc != SQLITE_OK)
+        LOG_ERR("codeindex", "read defs_by_name failed for %s finish=%d", name, finish_rc);
+    return n;
 }
 
 int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
@@ -590,7 +637,7 @@ int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
     if (sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
         sqlite3_bind_int(stmt, 2, cap) != SQLITE_OK ||
         sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) {
-        (void)ci_store_include_page_finish(s, false);
+        (void)ci_store_read_finish(&s->include_page_stmt, false);
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "bind includes_of_file_page");
     }
@@ -601,7 +648,7 @@ int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
         n++;
     }
     const bool complete = n == cap || rc == SQLITE_DONE;
-    const int finish_rc = ci_store_include_page_finish(s, complete);
+    const int finish_rc = ci_store_read_finish(&s->include_page_stmt, complete);
     pthread_mutex_unlock(&s->lock);
     if (!complete || finish_rc != SQLITE_OK)
         LOG_ERR("codeindex", "read includes_of_file_page failed rc=%d finish=%d",

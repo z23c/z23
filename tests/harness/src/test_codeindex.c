@@ -3854,6 +3854,163 @@ static int ci_include_select_tests(void)
     return failures;
 }
 
+static bool ci_defs_put(struct ci_store *store, const char *name, const char *path,
+                        int line, char kind)
+{
+    struct ci_symbol sym = {0};
+    if (snprintf(sym.name, sizeof(sym.name), "%s", name) >= (int)sizeof(sym.name) ||
+        snprintf(sym.def_path, sizeof(sym.def_path), "%s", path) >= (int)sizeof(sym.def_path))
+        return false;
+    sym.def_line = line;
+    sym.kind = kind;
+    return ci_store_put_symbol(store, &sym);
+}
+
+static bool ci_defs_seed(struct ci_store *store)
+{
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_defs_put(store, "alpha", "b.c", 2, 'S') &&
+        ci_defs_put(store, "alpha", "a.c", 4, 'M') &&
+        ci_defs_put(store, "alpha", "a.c", 1, 'T') &&
+        ci_defs_put(store, "beta", "z.c", 8, 'D');
+    bool committed = begun && ci_store_commit(store);
+    return wrote && committed;
+}
+
+static bool ci_defs_page(struct ci_store *store, const char *name, int cap)
+{
+    struct ci_symbol out[4] = {0};
+    int n = ci_store_defs_by_name(store, name, out, cap);
+    if (!strcmp(name, "beta"))
+        return n == 1 && !strcmp(out[0].name, "beta") &&
+            !strcmp(out[0].def_path, "z.c") && out[0].def_line == 8 && out[0].kind == 'D';
+    if (strcmp(name, "alpha")) return n == 0;
+    if (n != (cap < 3 ? cap : 3)) return false;
+    static const char *const paths[] = {"a.c", "a.c", "b.c"};
+    static const int lines[] = {1, 4, 2};
+    static const char kinds[] = {'T', 'M', 'S'};
+    for (int i = 0; i < n; i++)
+        if (strcmp(out[i].name, "alpha") || strcmp(out[i].def_path, paths[i]) ||
+            out[i].def_line != lines[i] || out[i].kind != kinds[i]) return false;
+    return true;
+}
+
+static sqlite3_stmt *ci_defs_cached_stmt(sqlite3 *db)
+{
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s; s = sqlite3_next_stmt(db, s)) {
+        const char *sql = sqlite3_sql(s);
+        if (sql && strstr(sql, "FROM symbols WHERE name=?")) return s;
+    }
+    return NULL;
+}
+
+static bool ci_defs_batch(struct ci_store *store)
+{
+    for (int i = 0; i < 8192; i++)
+        if (!ci_defs_page(store, i % 2 ? "beta" : "alpha", i % 2 ? 2 : 1)) return false;
+    return true;
+}
+
+static int ci_defs_select_pages(struct ci_store *store)
+{
+    int failures = 0, prepares = 0;
+    sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_include_select_authorize, &prepares) == SQLITE_OK;
+    bool first = setup && ci_defs_page(store, "alpha", 2);
+    sqlite3_stmt *partial = ci_defs_cached_stmt(db);
+    bool idle = partial && !sqlite3_stmt_busy(partial);
+    bool rest = ci_defs_page(store, "alpha", 1) && ci_defs_page(store, "beta", 2) &&
+        ci_defs_page(store, "missing", 2) && ci_defs_page(store, "", 2);
+    uint64_t start = monotonic_us();
+    bool batch = ci_defs_batch(store);
+    uint64_t elapsed = monotonic_us() - start;
+    sqlite3_stmt *cached = ci_defs_cached_stmt(db);
+    int reprepare = cached ? sqlite3_stmt_status(cached, SQLITE_STMTSTATUS_REPREPARE, 0) : 0;
+    int runs = cached ? sqlite3_stmt_status(cached, SQLITE_STMTSTATUS_RUN, 0) : 0;
+    printf("  codeindex: defs batch=8192 elapsed_us=%llu authorizations=%d reprepares=%d runs=%d\n",
+           (unsigned long long)elapsed, prepares, reprepare, runs);
+    CI_CHECK("defs pages retain exact kind and order", first && rest && batch);
+    CI_CHECK("defs partial page leaves cached statement idle", idle);
+    CI_CHECK("defs pages reuse one explicitly prepared select",
+             cached && prepares - reprepare == 1 && runs == 8197);
+    (void)sqlite3_set_authorizer(db, NULL, NULL);
+    return failures;
+}
+
+static int ci_defs_select_visibility(struct ci_store *store)
+{
+    int failures = 0;
+    struct ci_symbol out[4] = {0};
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_defs_put(store, "new", "new.c", 3, 'Y');
+    bool committed = begun && ci_store_commit(store);
+    int found = ci_store_defs_by_name(store, "new", out, 4);
+    CI_CHECK("defs select sees committed row", wrote && committed && found == 1 &&
+             out[0].kind == 'Y' && out[0].def_line == 3 && !strcmp(out[0].def_path, "new.c"));
+    begun = ci_store_begin(store);
+    wrote = begun && ci_defs_put(store, "rolled", "r.c", 5, 't');
+    bool rolled = begun && ci_store_rollback(store);
+    CI_CHECK("defs select respects rollback", wrote && rolled &&
+             ci_store_defs_by_name(store, "rolled", out, 4) == 0);
+    return failures;
+}
+
+static int ci_defs_select_failures(struct ci_store *store)
+{
+    int failures = 0, interrupts = 0;
+    sqlite3 *db = ci_store_db(store);
+    struct ci_symbol out[4] = {0};
+    char name[513]; memset(name, 'x', sizeof(name) - 1); name[512] = 0;
+    int old = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 128);
+    int bound = ci_store_defs_by_name(store, name, out, 4);
+    (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old);
+    CI_CHECK("defs bind failure refuses", bound < 0);
+    CI_CHECK("defs recovers after bind failure", ci_defs_page(store, "alpha", 3));
+    sqlite3_progress_handler(db, 1, ci_include_select_interrupt, &interrupts);
+    int interrupted = ci_store_defs_by_name(store, "alpha", out, 4);
+    sqlite3_progress_handler(db, 0, NULL, NULL);
+    CI_CHECK("defs interrupted step refuses", interrupts > 0 && interrupted < 0);
+    CI_CHECK("defs recovers after interrupted step", ci_defs_page(store, "alpha", 3));
+    return failures;
+}
+
+static int ci_defs_select_integrity(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    struct ci_symbol out[4] = {0};
+    bool damaged = sqlite3_exec(db, "UPDATE symbols SET row_sha3=zeroblob(32) WHERE name='alpha' AND def_path='a.c' AND def_line=4", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("defs corrupt later row refuses partial result", damaged &&
+             ci_store_defs_by_name(store, "alpha", out, 4) < 0);
+    bool removed = sqlite3_exec(db, "DELETE FROM symbols WHERE name='alpha' AND def_path='a.c' AND def_line=4", NULL, NULL, NULL) == SQLITE_OK;
+    bool replaced = removed && ci_defs_put(store, "alpha", "a.c", 4, 'M');
+    CI_CHECK("defs recovers after repaired row", replaced && ci_defs_page(store, "alpha", 3));
+    bool renamed = sqlite3_exec(db, "ALTER TABLE symbols RENAME TO held_symbols", NULL, NULL, NULL) == SQLITE_OK;
+    int missing = renamed ? ci_store_defs_by_name(store, "alpha", out, 4) : 0;
+    bool restored = renamed && sqlite3_exec(db, "ALTER TABLE held_symbols RENAME TO symbols", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("defs missing table refuses", renamed && missing < 0);
+    CI_CHECK("defs recovers after schema restoration", restored && ci_defs_page(store, "alpha", 3));
+    return failures;
+}
+
+static int ci_defs_select_tests(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: defs select fixture... FAIL\n"); return 1; }
+    bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(ci_store_db(store), "defs_close_witness", 0,
+        SQLITE_UTF8, &destroyed, ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_defs_seed(store);
+    int failures = seeded ? ci_defs_select_pages(store) : 1;
+    if (seeded) failures += ci_defs_select_visibility(store);
+    if (seeded) failures += ci_defs_select_failures(store);
+    if (seeded) failures += ci_defs_select_integrity(store);
+    CI_CHECK("defs close witness registered and remains live", registered && !destroyed);
+    ci_store_close(store);
+    CI_CHECK("defs cached select finalized at close", registered && destroyed);
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -3873,6 +4030,7 @@ int test_codeindex(void)
 #if !defined(_WIN32)
     failures += ci_include_insert_tests();
     failures += ci_include_select_tests();
+    failures += ci_defs_select_tests();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)
