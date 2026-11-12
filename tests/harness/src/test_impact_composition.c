@@ -11589,6 +11589,110 @@ static int test_ic_epoch_dep_stale_behavior_red(void)
 }
 #endif
 
+#if !defined(_WIN32)
+struct ic_lint_diagnostic_paths {
+    char script[4096], log[4096], gen[4096], artifact[4096], inherited[4096];
+};
+
+static bool ic_lint_diagnostic_setup(const char *root, const char *logs,
+                                     struct ic_lint_diagnostic_paths *p)
+{
+    if (snprintf(p->script, sizeof(p->script), "%s/fake-make", root) >= (int)sizeof(p->script) ||
+        snprintf(p->log, sizeof(p->log), "%s/child.log", root) >= (int)sizeof(p->log) ||
+        snprintf(p->gen, sizeof(p->gen), "%s/generation", root) >= (int)sizeof(p->gen) ||
+        snprintf(p->artifact, sizeof(p->artifact), "%s/lint-timing/gate.log", logs) >= (int)sizeof(p->artifact) ||
+        snprintf(p->inherited, sizeof(p->inherited), "%s/inherited", root) >= (int)sizeof(p->inherited)) return false;
+    return ic_write(root, "fake-make", "#!/bin/sh\n"
+        "test \"$1\" = --no-print-directory && test \"$2\" = -j4 && test \"$3\" = lint || exit 2\n"
+        "test \"$ZCL_LINT_TU_CACHE\" = 0 || exit 3\n"
+        "mkdir -p \"$ZCL_LINT_TIMING_DIR\" && printf 'diagnostic\\n' > \"$ZCL_LINT_TIMING_DIR/gate.log\"\n");
+}
+
+static bool ic_lint_restore_env(const char *saved, bool present)
+{
+    const char *key = "ZCL_LINT_TIMING_DIR";
+    int rc = present ? setenv(key, saved, 1) : unsetenv(key);
+    const char *after = getenv(key);
+    return rc == 0 && (present ? after && !strcmp(after, saved) : after == NULL);
+}
+
+static bool ic_lint_run_child(const struct ic_lint_diagnostic_paths *p,
+                               const char *const argv[8])
+{
+    const char *child[] = {argv[0], argv[1], argv[2], p->script,
+                          argv[4], argv[5], argv[6], NULL};
+    struct zcl_dev_proof_step step = {0};
+    struct zcl_dev_proof_budget budget = zcl_dev_proof_budget_make(10000, 10000);
+    return zcl_dev_proof_step_start(&step, p->gen, p->log, child, &budget) &&
+           zcl_dev_proof_steps_wait(&step, 1) == 1 && step.report.rc == 0;
+}
+
+static bool ic_lint_diagnostic_child(const char *root, const char *logs,
+                                     const char *const argv[8])
+{
+    struct ic_lint_diagnostic_paths p;
+    if (!ic_lint_diagnostic_setup(root, logs, &p) ||
+        chmod(p.script, 0700) != 0 || mkdir(p.gen, 0700) != 0) return false;
+    const char *prior = getenv("ZCL_LINT_TIMING_DIR");
+    bool present = prior != NULL;
+    char *saved = present ? strdup(prior) : NULL;
+    if (present && !saved) return false;
+    bool ok = setenv("ZCL_LINT_TIMING_DIR", p.inherited, 1) == 0;
+    bool passed = ok && ic_lint_run_child(&p, argv);
+    bool parent_unchanged = getenv("ZCL_LINT_TIMING_DIR") &&
+        !strcmp(getenv("ZCL_LINT_TIMING_DIR"), p.inherited);
+    bool restored = ic_lint_restore_env(saved, present);
+    free(saved);
+    bool retired = test_rm_rf_recursive(p.gen) == 0;
+    return passed && parent_unchanged && restored && retired &&
+        access(p.inherited, F_OK) != 0 && ic_log_holds(p.artifact, "diagnostic\n");
+}
+#endif
+
+static int test_ic_lint_diagnostic_refusals(void)
+{
+    int failures = 0;
+    TEST("proof lint diagnostics: refuse short buffers and unsafe paths") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char logs[4096], child[8192], alias[8192], env[8192], long_path[8192];
+        const char *argv[8], *targets = NULL;
+        size_t argc = 0;
+        int64_t budget = 0;
+        test_make_tmpdir(logs, sizeof(logs), "proof_lint", "refusals");
+        ASSERT(chmod(logs, 0700) == 0);
+        ASSERT(snprintf(child, sizeof(child), "%s/lint-timing", logs) > 0);
+        ASSERT(snprintf(alias, sizeof(alias), "%s/alias", logs) > 0);
+        ASSERT(!zcl_dev_proof_test_lint_argv(logs, "-j4", env, 1,
+                                            argv, 8, &argc, &budget, &targets));
+        ASSERT(!zcl_dev_proof_test_lint_argv(logs, "-j4", env, sizeof(env),
+                                            argv, 7, &argc, &budget, &targets));
+        ASSERT(access(child, F_OK) != 0);
+        memset(long_path, 'x', sizeof(long_path) - 1);
+        long_path[sizeof(long_path) - 1] = '\0';
+        ASSERT(!zcl_dev_proof_test_lint_argv(long_path, "-j4", env, sizeof(env),
+                                            argv, 8, &argc, &budget, &targets));
+        ASSERT(symlink(logs, child) == 0);
+        ASSERT(!zcl_dev_proof_test_lint_argv(logs, "-j4", env, sizeof(env),
+                                            argv, 8, &argc, &budget, &targets));
+        ASSERT(unlink(child) == 0);
+        ASSERT(symlink(logs, alias) == 0);
+        ASSERT(!zcl_dev_proof_test_lint_argv(alias, "-j4", env, sizeof(env),
+                                            argv, 8, &argc, &budget, &targets));
+        ASSERT(access(child, F_OK) != 0);
+        ASSERT(chmod(logs, 0755) == 0);
+        ASSERT(!zcl_dev_proof_test_lint_argv(logs, "-j4", env, sizeof(env),
+                                            argv, 8, &argc, &budget, &targets));
+        ASSERT(access(child, F_OK) != 0);
+        ASSERT(chmod(logs, 0700) == 0);
+        ASSERT(test_rm_rf_recursive(logs) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_landing_proof_lint_argv(void)
 {
     int failures = 0;
@@ -11596,7 +11700,7 @@ static int test_ic_landing_proof_lint_argv(void)
 #if defined(_WIN32)
         ASSERT(true);
 #else
-        char land[4096], wt[4096], jobs[] = "-j4";
+        char land[4096], wt[4096], jobs[] = "-j4", timing_env[4096 + 32];
         const char *argv[8];
         size_t argc = 0;
         int64_t fallback_ms = 0;
@@ -11604,40 +11708,46 @@ static int test_ic_landing_proof_lint_argv(void)
 
         test_make_tmpdir(land, sizeof(land), "proof_lint", "landing");
         ASSERT(snprintf(wt, sizeof(wt), "%s/wt", land) > 0);
-        ASSERT(mkdir(wt, 0755) == 0);
+        ASSERT(mkdir(wt, 0700) == 0);
         ASSERT(ic_write(land, "queue.lock", ""));
-        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, argv, 8, &argc,
+        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, timing_env, sizeof(timing_env), argv, 8, &argc,
                                             &fallback_ms, &targets));
-        ASSERT(argc == 6);
+        ASSERT(argc == 7);
         ASSERT(strcmp(argv[0], "env") == 0);
         ASSERT(strcmp(argv[1], "ZCL_LINT_TU_CACHE=0") == 0);
-        ASSERT(strcmp(argv[2], "make") == 0);
-        ASSERT(strcmp(argv[3], "--no-print-directory") == 0);
-        ASSERT(strcmp(argv[4], jobs) == 0);
+        char timing[8192];
+        ASSERT(snprintf(timing, sizeof(timing), "ZCL_LINT_TIMING_DIR=%s/lint-timing", wt) < (int)sizeof(timing));
+        ASSERT(strcmp(argv[2], timing) == 0);
+        ASSERT(strcmp(argv[3], "make") == 0);
+        ASSERT(strcmp(argv[4], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[5], jobs) == 0);
         /* Publication coverage does not depend on a scheduling lock. */
-        ASSERT(strcmp(argv[5], "lint") == 0);
-        ASSERT(argv[6] == NULL);
+        ASSERT(strcmp(argv[6], "lint") == 0);
+        ASSERT(argv[7] == NULL);
         ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
         ASSERT(strcmp(targets, "lint") == 0);
         ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
+        ASSERT(ic_lint_diagnostic_child(land, wt, argv));
 
         char dev_parent[4096], dev[4096];
         test_make_tmpdir(dev_parent, sizeof(dev_parent), "proof_lint", "dev");
         ASSERT(snprintf(dev, sizeof(dev), "%s/wt", dev_parent) > 0);
-        ASSERT(mkdir(dev, 0755) == 0);
+        ASSERT(mkdir(dev, 0700) == 0);
         argc = 0;
         fallback_ms = 0;
         targets = NULL;
-        ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, argv, 8, &argc,
+        ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, timing_env, sizeof(timing_env), argv, 8, &argc,
                                             &fallback_ms, &targets));
-        ASSERT(argc == 6);
+        ASSERT(argc == 7);
         ASSERT(strcmp(argv[0], "env") == 0);
         ASSERT(strcmp(argv[1], "ZCL_LINT_TU_CACHE=0") == 0);
-        ASSERT(strcmp(argv[2], "make") == 0);
-        ASSERT(strcmp(argv[3], "--no-print-directory") == 0);
-        ASSERT(strcmp(argv[4], jobs) == 0);
-        ASSERT(strcmp(argv[5], "lint") == 0);
-        ASSERT(argv[6] == NULL);
+        ASSERT(snprintf(timing, sizeof(timing), "ZCL_LINT_TIMING_DIR=%s/lint-timing", dev) < (int)sizeof(timing));
+        ASSERT(strcmp(argv[2], timing) == 0);
+        ASSERT(strcmp(argv[3], "make") == 0);
+        ASSERT(strcmp(argv[4], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[5], jobs) == 0);
+        ASSERT(strcmp(argv[6], "lint") == 0);
+        ASSERT(argv[7] == NULL);
         ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
         ASSERT(strcmp(targets, "lint") == 0);
         ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
@@ -12562,6 +12672,7 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
          * all -- so this is the whole overlap surface between the two. */
         char land[4096], wt[4096], dev_parent[4096], dev[4096];
         const char *lint_argv[8];
+        char timing_env[4096 + 32];
         size_t lint_argc = 0;
         int64_t fallback_ms = 0;
         const char *targets = NULL;
@@ -12569,25 +12680,25 @@ static int test_ic_proof_prefork_builds_the_shared_targets(void)
                                                PROOF_PREFORK_ARGV_CAP));
         test_make_tmpdir(land, sizeof(land), "proof_prefork", "landing");
         ASSERT(snprintf(wt, sizeof(wt), "%s/wt", land) > 0);
-        ASSERT(mkdir(wt, 0755) == 0);
+        ASSERT(mkdir(wt, 0700) == 0);
         ASSERT(ic_write(land, "queue.lock", ""));
-        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, lint_argv, 8, &lint_argc,
+        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, timing_env, sizeof(timing_env), lint_argv, 8, &lint_argc,
                                             &fallback_ms, &targets));
-        for (size_t i = 5; i < lint_argc; i++)
+        for (size_t i = 6; i < lint_argc; i++)
             ASSERT(!ic_argv_has(landing, lint_argv[i]));
 
         test_make_tmpdir(dev_parent, sizeof(dev_parent), "proof_prefork",
                          "dev");
         ASSERT(snprintf(dev, sizeof(dev), "%s/wt", dev_parent) > 0);
-        ASSERT(mkdir(dev, 0755) == 0);
+        ASSERT(mkdir(dev, 0700) == 0);
         lint_argc = 0;
-        ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, lint_argv, 8, &lint_argc,
+        ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, timing_env, sizeof(timing_env), lint_argv, 8, &lint_argc,
                                             &fallback_ms, &targets));
         ASSERT(zcl_dev_proof_test_prefork_argv(
             jobs, zcl_dev_proof_test_lint_targets_are_full(targets), lane,
             PROOF_PREFORK_ARGV_CAP));
         ASSERT(ic_argv_has(lane, "proof-lint-prebuild"));
-        for (size_t i = 5; i < lint_argc; i++)
+        for (size_t i = 6; i < lint_argc; i++)
             ASSERT(!ic_argv_has(lane, lint_argv[i]));
 
         ASSERT(test_rm_rf_recursive(land) == 0);
@@ -16896,6 +17007,7 @@ int test_impact_composition(void)
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
     failures += test_ic_landing_proof_lint_argv();
+    failures += test_ic_lint_diagnostic_refusals();
 #if !defined(_WIN32)
     failures += test_ic_proof_environment_refuses_inherited_shortcuts();
     failures += test_ic_proof_compiles_against_a_private_store();

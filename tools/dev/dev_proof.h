@@ -873,8 +873,10 @@ bool zcl_dev_proof_test_text_reader(const char *path, unsigned reader);
 /* Seam for the landing-lint regression: the same argv, fallback budget, and
  * recorded target list the proof worker uses for the lint dimension, so a
  * test can prove every root runs the whole gate set plus Windows
- * acceptance, without driving a make or a proof cycle. */
-bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
+ * acceptance. `logs` is a private attempt log directory; the caller-owned
+ * timing assignment buffer and jobs string must outlive argv. */
+bool zcl_dev_proof_test_lint_argv(const char *logs, const char *jobs,
+                                  char *timing_env, size_t timing_env_cap,
                                   const char **argv, size_t argv_cap,
                                   size_t *argc_out, int64_t *fallback_ms,
                                   const char **targets_out);

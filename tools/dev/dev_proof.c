@@ -8131,7 +8131,23 @@ static struct zcl_dev_proof_budget proof_step_budget(
 #define PROOF_COMPILE_DEFAULT_MS 900000
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
 #define PROOF_PREFLIGHT_DEFAULT_MS 120000
-#define PROOF_LINT_ARGV_CAP 7u
+#define PROOF_LINT_ARGV_CAP 8u
+
+/* Keep ordinary runner diagnostics with this attempt, not its disposable
+ * generation. They remain logs, never receipt or cache authority. */
+static bool proof_lint_diagnostics_prepare(const char *logs, char *env,
+                                           size_t env_cap)
+{
+    char path[PATH_MAX];
+    if (!logs || !*logs || !env || !env_cap) return false;
+    int path_n = snprintf(path, sizeof(path), "%s/lint-timing", logs);
+    if (path_n < 0 || (size_t)path_n >= sizeof(path)) return false;
+    int n = snprintf(env, env_cap, "ZCL_LINT_TIMING_DIR=%s", path);
+    if (n < 0 || (size_t)n >= env_cap || !proof_live_private_dir(logs))
+        return false;
+    return platform_private_directory_ensure(path) &&
+           proof_live_private_dir(path);
+}
 
 /* Every exact receipt can authorize publication, regardless of the scratch
  * directory that requested it. Run the same full lint contract everywhere;
@@ -8139,14 +8155,15 @@ static struct zcl_dev_proof_budget proof_step_budget(
  * LINT_GATES already includes check-windows-acceptance. Naming that gate as
  * a second Make goal makes it a prerequisite of lint and serializes its
  * cross-links before the parallel gate runner, adding their wall times.
- * `jobs` must outlive argv. */
-static bool proof_lint_prepare(const char *root, const char *jobs,
+ * `jobs` and `timing_env` must outlive argv. */
+static bool proof_lint_prepare(const char *logs, const char *jobs,
+                               char *timing_env, size_t timing_env_cap,
                                const char **argv, size_t argv_cap,
                                int64_t *fallback_ms, const char **targets)
 {
-    (void)root;
     if (!jobs || !*jobs || !argv || argv_cap < PROOF_LINT_ARGV_CAP ||
-        !fallback_ms || !targets)
+        !fallback_ms || !targets ||
+        !proof_lint_diagnostics_prepare(logs, timing_env, timing_env_cap))
         return false;
     /* The per-TU cache starts empty in this private generation, so its
      * hashing and result stores are wasted work. Scope the cold setting to
@@ -8154,11 +8171,12 @@ static bool proof_lint_prepare(const char *root, const char *jobs,
      * knob from the shared worker would invalidate unrelated test hits. */
     argv[0] = "env";
     argv[1] = "ZCL_LINT_TU_CACHE=0";
-    argv[2] = "make";
-    argv[3] = "--no-print-directory";
-    argv[4] = jobs;
-    argv[5] = "lint";
-    argv[6] = NULL;
+    argv[2] = timing_env;
+    argv[3] = "make";
+    argv[4] = "--no-print-directory";
+    argv[5] = jobs;
+    argv[6] = "lint";
+    argv[7] = NULL;
     *fallback_ms = PROOF_LINT_LANDING_MS;
     *targets = "lint";
     return true;
@@ -9766,14 +9784,16 @@ bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
     return warm_status_line(warmstart_path, out, out_len);
 }
 
-bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
+bool zcl_dev_proof_test_lint_argv(const char *logs, const char *jobs,
+                                  char *timing_env, size_t timing_env_cap,
                                   const char **argv, size_t argv_cap,
                                   size_t *argc_out, int64_t *fallback_ms,
                                   const char **targets_out)
 {
     const char *targets = NULL;
     size_t n = 0;
-    if (!argc_out || !proof_lint_prepare(root, jobs, argv, argv_cap,
+    if (!argc_out || !proof_lint_prepare(logs, jobs, timing_env,
+                                         timing_env_cap, argv, argv_cap,
                                          fallback_ms, &targets))
         return false;
     while (argv[n]) n++;
@@ -10645,6 +10665,7 @@ struct dp_worker {
     uint8_t depfile_root[32];
     uint8_t helper_root[32];
     const char *lint_argv[PROOF_LINT_ARGV_CAP];
+    char lint_timing_env[PATH_MAX + 32];
     const char *lint_targets;
     struct zcl_dev_proof_budget lint_budget;
     bool lint_reads_artifacts;
@@ -11116,10 +11137,11 @@ static bool dp_worker_lint_plan(struct dp_worker *w,
 {
     int64_t lint_fallback_ms = PROOF_LINT_LANDING_MS;
     w->lint_targets = "lint";
-    if (!proof_lint_prepare(w->paths->root, w->make_jobs, w->lint_argv,
+    if (!proof_lint_prepare(w->paths->logs, w->make_jobs, w->lint_timing_env,
+                            sizeof(w->lint_timing_env), w->lint_argv,
                             PROOF_LINT_ARGV_CAP, &lint_fallback_ms,
                             &w->lint_targets)) {
-        proof_why(why, why_len, "lint_argv_invalid");
+        proof_why(why, why_len, "lint_argv_or_diagnostics_unavailable");
         return false;
     }
     w->lint_budget = proof_step_budget(w->paths, "lint", lint_fallback_ms);
