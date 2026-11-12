@@ -4339,6 +4339,135 @@ static int ci_family_tests(void)
     return failures;
 }
 
+static bool ci_identity_query(struct ci_store *store, const char *name, const char *path,
+                              const char *expected, int line, char kind)
+{
+    struct ci_symbol out = {0}; bool found = false;
+    bool ok = path ? ci_store_symbol_by_name_path(store, name, path, &out, &found) :
+                     ci_store_symbol_by_name(store, name, &out, &found);
+    if (!expected) return ok && !found;
+    return ok && found && !strcmp(out.name, name) && !strcmp(out.def_path, expected) &&
+           out.def_line == line && out.kind == kind;
+}
+static sqlite3_stmt *ci_identity_stmt(sqlite3 *db, bool scoped)
+{
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s; s = sqlite3_next_stmt(db, s)) {
+        const char *sql = sqlite3_sql(s);
+        if (sql && strstr(sql, "FROM symbols WHERE name=?") &&
+            (!!strstr(sql, "AND def_path=?") == scoped) && strstr(sql, "LIMIT 1")) return s;
+    }
+    return NULL;
+}
+static bool ci_identity_examples(struct ci_store *s)
+{
+    return ci_identity_query(s, "alpha", NULL, "a.c", 1, 'T') &&
+        ci_identity_query(s, "alpha", "b.c", "b.c", 2, 'S') &&
+        ci_identity_query(s, "alpha", "a.c", "a.c", 1, 'T') &&
+        ci_identity_query(s, "beta", NULL, "z.c", 8, 'D') &&
+        ci_identity_query(s, "alpha", "missing.c", NULL, 0, 0) &&
+        ci_identity_query(s, "missing", NULL, NULL, 0, 0);
+}
+static int ci_identity_reuse(struct ci_store *s)
+{
+    int failures = 0, prepares = 0; sqlite3 *db = ci_store_db(s);
+    bool setup = sqlite3_set_authorizer(db, ci_include_select_authorize, &prepares) == SQLITE_OK;
+    uint64_t start = monotonic_us(); bool exact = setup;
+    for (int i = 0; i < 256; i++) exact = ci_identity_examples(s) && exact;
+    sqlite3_stmt *a = ci_identity_stmt(db, false), *b = ci_identity_stmt(db, true);
+    int reprepare = (a ? sqlite3_stmt_status(a, SQLITE_STMTSTATUS_REPREPARE, 0) : 0) +
+                    (b ? sqlite3_stmt_status(b, SQLITE_STMTSTATUS_REPREPARE, 0) : 0);
+    int runs = (a ? sqlite3_stmt_status(a, SQLITE_STMTSTATUS_RUN, 0) : 0) +
+               (b ? sqlite3_stmt_status(b, SQLITE_STMTSTATUS_RUN, 0) : 0);
+    printf("  codeindex: identity elapsed_us=%llu authorizations=%d reprepare=%d runs=%d\n",
+           (unsigned long long)(monotonic_us() - start), prepares, reprepare, runs);
+    CI_CHECK("identity reads select exact name/path and missing", exact);
+    CI_CHECK("identity statements cached idle and prepared once", a && b && !sqlite3_stmt_busy(a) &&
+             !sqlite3_stmt_busy(b) && prepares - reprepare == 2 && runs == 1536);
+    (void)sqlite3_set_authorizer(db, NULL, NULL); return failures;
+}
+struct ci_identity_fault { sqlite3 *db; bool traced; int interrupts; };
+static int ci_identity_trace(unsigned kind, void *p, void *stmt, void *unused)
+{
+    (void)unused; struct ci_identity_fault *f = p; const char *sql = sqlite3_sql(stmt);
+    if (kind == SQLITE_TRACE_STMT && sql && strstr(sql, "FROM symbols WHERE name=?") && strstr(sql, "LIMIT 1")) {
+        f->traced = true; ++f->interrupts; sqlite3_interrupt(f->db);
+    }
+    return 0;
+}
+static int ci_identity_failures(struct ci_store *s)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(s); char large[1025];
+    memset(large, 'x', 1024); large[1024] = 0;
+    for (unsigned scoped = 0; scoped < 2; scoped++) {
+        struct ci_symbol out = {0}; bool found = true; int old = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 256);
+        bool bad_name = scoped ? ci_store_symbol_by_name_path(s, large, "a.c", &out, &found) :
+                                 ci_store_symbol_by_name(s, large, &out, &found);
+        bool name_found = found; found = true;
+        bool bad_path = scoped ? ci_store_symbol_by_name_path(s, "alpha", large, &out, &found) : false;
+        bool path_found = scoped && found; (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old);
+        bool recovered = ci_identity_examples(s);
+        struct ci_identity_fault fault = {.db = db};
+        bool trace = sqlite3_trace_v2(db, SQLITE_TRACE_STMT, ci_identity_trace, &fault) == SQLITE_OK;
+        found = true;
+        bool interrupted = scoped ? ci_store_symbol_by_name_path(s, "alpha", "a.c", &out, &found) :
+                                    ci_store_symbol_by_name(s, "alpha", &out, &found);
+        bool interrupted_found = found;
+        (void)sqlite3_trace_v2(db, 0, NULL, NULL);
+        printf("  codeindex: identity scoped=%u bind_name=%d found=%d bind_path=%d found=%d trace=%d interrupt_requests=%d step=%d found=%d\n",
+               scoped, bad_name, name_found, bad_path, path_found, fault.traced, fault.interrupts, interrupted, interrupted_found);
+        CI_CHECK("identity bind failures refuse and recover", !bad_name && !name_found && !bad_path && !path_found && recovered);
+        CI_CHECK("identity interrupted step refuses and recovers", trace && fault.traced && fault.interrupts > 0 &&
+                 !interrupted && !interrupted_found && ci_identity_examples(s));
+    }
+    return failures;
+}
+static int ci_identity_write_visibility(struct ci_store *s)
+{
+    int failures = 0; struct ci_symbol out = {0};
+    CI_CHECK("identity accepts nullable found and empty definition path",
+             ci_store_symbol_by_name(s, "alpha", &out, NULL) &&
+             ci_store_symbol_by_name_path(s, "alpha", "a.c", &out, NULL) &&
+             ci_identity_query(s, "alpha", "", "", 0, 'P'));
+    bool begun = ci_store_begin(s), wrote = begun && ci_defs_put(s, "new", "n.c", 3, 'T');
+    bool committed = begun && ci_store_commit(s);
+    CI_CHECK("identity observes committed insert", wrote && committed && ci_identity_query(s, "new", NULL, "n.c", 3, 'T'));
+    begun = ci_store_begin(s); wrote = begun && ci_defs_put(s, "rolled", "r.c", 1, 'T');
+    bool rolled = begun && ci_store_rollback(s);
+    CI_CHECK("identity respects rollback", wrote && rolled && ci_identity_query(s, "rolled", NULL, NULL, 0, 0));
+    return failures;
+}
+static int ci_identity_integrity(struct ci_store *s)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(s); struct ci_symbol out = {0}; bool found = true;
+    bool damaged = sqlite3_exec(db, "UPDATE symbols SET row_sha3=zeroblob(32) WHERE name='alpha' AND def_path='a.c' AND def_line=1", NULL, NULL, NULL) == SQLITE_OK;
+    bool ok = ci_store_symbol_by_name_path(s, "alpha", "a.c", &out, &found);
+    CI_CHECK("identity corruption remains success with found false", damaged && ok && !found);
+    bool removed = sqlite3_exec(db, "DELETE FROM symbols WHERE name='alpha' AND def_path='a.c' AND def_line=1", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("identity recovers after row repair", removed && ci_defs_put(s, "alpha", "a.c", 1, 'T') && ci_identity_examples(s));
+    bool renamed = sqlite3_exec(db, "ALTER TABLE symbols RENAME TO held_symbols", NULL, NULL, NULL) == SQLITE_OK;
+    found = true; bool missing = ci_store_symbol_by_name(s, "alpha", &out, &found); bool missing_found = found;
+    bool restored = renamed && sqlite3_exec(db, "ALTER TABLE held_symbols RENAME TO symbols", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("identity refuses missing schema and recovers", renamed && !missing && !missing_found && restored && ci_identity_examples(s));
+    return failures;
+}
+static int ci_identity_tests(void)
+{
+    struct ci_store *s = ci_store_open_path(":memory:");
+    if (!s) return 1;
+    bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(ci_store_db(s), "close_witness", 0,
+        SQLITE_UTF8, &destroyed, ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_defs_seed(s) && ci_defs_put(s, "alpha", "", 0, 'P');
+    int failures = seeded ? ci_identity_reuse(s) : 1;
+    if (seeded) failures += ci_identity_failures(s);
+    if (seeded) failures += ci_identity_write_visibility(s);
+    if (seeded) failures += ci_identity_integrity(s);
+    CI_CHECK("identity close witness registered", registered && !destroyed);
+    ci_store_close(s);
+    CI_CHECK("identity cached statements finalized on close", registered && destroyed);
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -4361,6 +4490,7 @@ int test_codeindex(void)
     failures += ci_defs_select_tests();
     failures += ci_enclosing_tests();
     failures += ci_family_tests();
+    failures += ci_identity_tests();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)

@@ -11,9 +11,8 @@
  * Both halves are the same single-writer derived store described in
  * codeindex_store.c's header, so raw sqlite3_step here carries the same
  * `// raw-sql-ok:codeindex-derived` marker, and every symbol read still runs
- * through ci_store_fill_symbol()'s verify-on-read row checksum. The one thing
- * that crosses the seam is the handle layout, in
- * codeindex_store_internal.h. */
+ * through ci_store_fill_symbol()'s verify-on-read row checksum. The private
+ * handle and cached-read cleanup contract are in codeindex_store_internal.h. */
 
 #include "codeindex_store_internal.h"
 
@@ -97,38 +96,6 @@ bool ci_store_fill_symbol(sqlite3_stmt *stmt, struct ci_symbol *out)
     ci_symbol_row_hash(out, want);
     if (!rb || rn != 32 || memcmp(rb, want, 32) != 0)
         return false;  /* corrupted row */
-    return true;
-}
-
-bool ci_store_symbol_by_name(struct ci_store *s, const char *name,
-                             struct ci_symbol *out, bool *found)
-{
-    if (found) *found = false;
-    if (!s || !name || !out)
-        LOG_FAIL("codeindex", "null arg to symbol_by_name");
-    pthread_mutex_lock(&s->lock);
-    sqlite3_stmt *stmt = NULL;
-    /* Prefer a definition over a bare declaration, then lowest def_line. */
-    if (sqlite3_prepare_v2(s->db,
-        "SELECT " CI_SYM_COLS " FROM symbols WHERE name=?"
-        " ORDER BY (def_path='') ASC, def_line ASC, def_path ASC LIMIT 1",
-        -1, &stmt, NULL) != SQLITE_OK) {
-        pthread_mutex_unlock(&s->lock);
-        LOG_FAIL("codeindex", "prepare symbol_by_name");
-    }
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
-    bool ok = true;
-    int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
-    if (rc == SQLITE_ROW) {
-        if (ci_store_fill_symbol(stmt, out)) {
-            if (found) *found = true;
-        }  /* corrupted → leave found=false */
-    } else if (rc != SQLITE_DONE) {
-        ok = false;
-    }
-    sqlite3_finalize(stmt);
-    pthread_mutex_unlock(&s->lock);
-    if (!ok) LOG_FAIL("codeindex", "step symbol_by_name");
     return true;
 }
 
@@ -244,8 +211,6 @@ int ci_store_caller_edges(struct ci_store *s, const char *callee,
     if (rc != SQLITE_OK) LOG_ERR("codeindex", "caller edge query failed");
     return n;
 }
-
-static int ci_store_read_finish(sqlite3_stmt **slot, bool complete);
 
 enum ci_ref_query { CI_REF_CALLEE, CI_REF_ENCLOSING, CI_REF_CALLEE_FILE, CI_REF_ENCLOSING_FILE };
 
@@ -583,7 +548,7 @@ static bool ci_store_include_page_prepare(struct ci_store *s)
         -1, &s->include_page_stmt, NULL) == SQLITE_OK;
 }
 
-static int ci_store_read_finish(sqlite3_stmt **slot, bool complete)
+int ci_store_read_finish(sqlite3_stmt **slot, bool complete)
 {
     int reset_rc = sqlite3_reset(*slot);
     int clear_rc = sqlite3_clear_bindings(*slot);
