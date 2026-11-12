@@ -20,9 +20,9 @@
  *   public final class org.z23.nativeapp.ShareActivity extends android.app.Activity {
  *       static { System.loadLibrary("z23android"); }
  *       public void onCreate(Bundle state) { super.onCreate(state); shareCreate(); }
- *       public void onActivityResult(int request, int result, Intent data) { shareResultNative(request, result, data); }
+ *       public void onActivityResult(int request, int result, Intent data) { if (shareResultNative(request, result, data) != 0) finish(); }
  *       private native void shareCreate();
- *       private native void shareResultNative(int request, int result, Intent data);
+ *       private native int shareResultNative(int request, int result, Intent data);
  *   }
  *
  * KeyPrompt supplies native callbacks for the device key prompt and editor action. The respective
@@ -37,20 +37,20 @@ enum { DEX_MAX = 4096, HEADER_SIZE = 0x70, NO_INDEX = -1 };
 
 /* String ids, in modified-UTF-8 byte order as the format requires. */
 enum {
-    S_CLINIT, S_INIT, S_I, S_ILI, S_ILII, S_LL, S_ACTIVITY, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT,
+    S_CLINIT, S_INIT, S_I, S_IIIL, S_ILI, S_ILII, S_LL, S_ACTIVITY, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT,
     S_BUNDLE, S_IBINDER, S_KEYEVENT, S_EDITORLISTENER, S_TEXTVIEW, S_CHARSEQ, S_STRING, S_SYSTEM,
-    S_KEYPROMPT, S_NODE, S_SHARE, S_V, S_VIIL, S_VIL, S_VL, S_Z, S_ZLIL, S_LOADLIB, S_ONACTIVITY,
+    S_KEYPROMPT, S_NODE, S_SHARE, S_V, S_VIIL, S_VIL, S_VL, S_Z, S_ZLIL, S_FINISH, S_LOADLIB, S_ONACTIVITY,
     S_ONERROR, S_ONSUCCEEDED, S_ONBIND, S_ONCREATE, S_ONEDITOR, S_ONSTART, S_SHARECREATE,
     S_SHARENATIVERESULT, S_START, S_LIB, S_COUNT
 };
 static const char *const strings[S_COUNT] = {
-    "<clinit>", "<init>", "I", "ILI", "ILII", "LL", "Landroid/app/Activity;", "Landroid/app/Service;",
+    "<clinit>", "<init>", "I", "IIIL", "ILI", "ILII", "LL", "Landroid/app/Activity;", "Landroid/app/Service;",
     "Landroid/content/Intent;", "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;",
     "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;", "Landroid/os/Bundle;",
     "Landroid/os/IBinder;", "Landroid/view/KeyEvent;", "Landroid/widget/TextView$OnEditorActionListener;",
     "Landroid/widget/TextView;", "Ljava/lang/CharSequence;", "Ljava/lang/String;", "Ljava/lang/System;",
     "Lorg/z23/nativeapp/KeyPrompt;", "Lorg/z23/nativeapp/NodeService;", "Lorg/z23/nativeapp/ShareActivity;",
-    "V", "VIIL", "VIL", "VL", "Z", "ZLIL", "loadLibrary", "onActivityResult", "onAuthenticationError",
+    "V", "VIIL", "VIL", "VL", "Z", "ZLIL", "finish", "loadLibrary", "onActivityResult", "onAuthenticationError",
     "onAuthenticationSucceeded", "onBind", "onCreate", "onEditorAction", "onStartCommand", "shareCreate",
     "shareResultNative", "start", "z23android"
 };
@@ -73,27 +73,27 @@ static const struct { uint8_t count; uint8_t types[3]; } lists[L_COUNT] = {
 };
 
 /* Prototypes, ascending by return type, then parameter types. */
-enum { P_I_SERVICE_I, P_I_INTENT_II, P_IBINDER_INTENT, P_V, P_V_II_INTENT, P_V_I_CHARSEQ, P_V_RESULT,
+enum { P_I_II_INTENT, P_I_SERVICE_I, P_I_INTENT_II, P_IBINDER_INTENT, P_V, P_V_II_INTENT, P_V_I_CHARSEQ, P_V_RESULT,
        P_V_BUNDLE, P_V_STRING, P_Z_EDITOR, P_COUNT };
 static const struct { uint8_t shorty, ret; int8_t list; } protos[P_COUNT] = {
-    { S_ILI, T_I, L_SERVICE_I }, { S_ILII, T_I, L_INTENT_II }, { S_LL, T_IBINDER, L_INTENT },
+    { S_IIIL, T_I, L_II_INTENT }, { S_ILI, T_I, L_SERVICE_I }, { S_ILII, T_I, L_INTENT_II }, { S_LL, T_IBINDER, L_INTENT },
     { S_V, T_V, L_NONE }, { S_VIIL, T_V, L_II_INTENT }, { S_VIL, T_V, L_I_CHARSEQ },
     { S_VL, T_V, L_RESULT }, { S_VL, T_V, L_BUNDLE }, { S_VL, T_V, L_STRING }, { S_ZLIL, T_Z, L_EDITOR_ARGS }
 };
 
 /* Methods, ascending by class, then name, then prototype. */
-enum { M_ACTIVITY_INIT, M_ACTIVITY_ONCREATE, M_SERVICE_INIT, M_CALLBACK_INIT, M_LOADLIB, M_KP_INIT,
+enum { M_ACTIVITY_INIT, M_ACTIVITY_FINISH, M_ACTIVITY_ONCREATE, M_SERVICE_INIT, M_CALLBACK_INIT, M_LOADLIB, M_KP_INIT,
        M_KP_ERROR, M_KP_SUCCEEDED, M_KP_EDITOR, M_CLINIT, M_INIT, M_ONBIND, M_ONSTART, M_START,
        M_SHARE_CLINIT, M_SHARE_INIT, M_SHARE_RESULT, M_ONCREATE, M_SHARE_CREATE, M_SHARE_NATIVE_RESULT, M_COUNT };
 static const struct { uint8_t cls, proto, name; } methods[M_COUNT] = {
-    { T_ACTIVITY, P_V, S_INIT }, { T_ACTIVITY, P_V_BUNDLE, S_ONCREATE },
+    { T_ACTIVITY, P_V, S_INIT }, { T_ACTIVITY, P_V, S_FINISH }, { T_ACTIVITY, P_V_BUNDLE, S_ONCREATE },
     { T_SERVICE, P_V, S_INIT }, { T_CALLBACK, P_V, S_INIT }, { T_SYSTEM, P_V_STRING, S_LOADLIB },
     { T_KEYPROMPT, P_V, S_INIT }, { T_KEYPROMPT, P_V_I_CHARSEQ, S_ONERROR }, { T_KEYPROMPT, P_V_RESULT, S_ONSUCCEEDED },
     { T_KEYPROMPT, P_Z_EDITOR, S_ONEDITOR },
     { T_NODE, P_V, S_CLINIT }, { T_NODE, P_V, S_INIT }, { T_NODE, P_IBINDER_INTENT, S_ONBIND },
     { T_NODE, P_I_INTENT_II, S_ONSTART }, { T_NODE, P_I_SERVICE_I, S_START },
     { T_SHARE, P_V, S_CLINIT }, { T_SHARE, P_V, S_INIT }, { T_SHARE, P_V_II_INTENT, S_ONACTIVITY },
-    { T_SHARE, P_V_BUNDLE, S_ONCREATE }, { T_SHARE, P_V, S_SHARECREATE }, { T_SHARE, P_V_II_INTENT, S_SHARENATIVERESULT }
+    { T_SHARE, P_V_BUNDLE, S_ONCREATE }, { T_SHARE, P_V, S_SHARECREATE }, { T_SHARE, P_I_II_INTENT, S_SHARENATIVERESULT }
 };
 
 /* Dalvik bytecode. */
@@ -104,12 +104,12 @@ static const uint16_t code_kp_init[] = { 0x1070, M_CALLBACK_INIT, 0x0000, 0x000e
 static const uint16_t code_onbind[] = { 0x0012, 0x0011 };
 static const uint16_t code_onstart[] = { 0x2071, M_START, 0x0041, 0x000a, 0x000f };
 static const uint16_t code_share_create[] = { 0x206f, M_ACTIVITY_ONCREATE, 0x0010, 0x1070, M_SHARE_CREATE, 0x0000, 0x000e };
-static const uint16_t code_share_result[] = { 0x4070, M_SHARE_NATIVE_RESULT, 0x3210, 0x000e };
+static const uint16_t code_share_result[] = { 0x4070, M_SHARE_NATIVE_RESULT, 0x4321, 0x000a, 0x0038, 0x0005, 0x106e, M_ACTIVITY_FINISH, 0x0001, 0x000e };
 enum { C_CLINIT, C_SERVICE_INIT, C_ACTIVITY_INIT, C_KP_INIT, C_ONBIND, C_ONSTART, C_SHARE_CREATE, C_SHARE_RESULT, C_COUNT };
 static const struct { uint16_t regs, ins, outs, units; const uint16_t *insns; } codes[C_COUNT] = {
     { 1, 0, 1, 6, code_clinit }, { 1, 1, 1, 4, code_service_init }, { 1, 1, 1, 4, code_activity_init },
     { 1, 1, 1, 4, code_kp_init }, { 3, 2, 0, 2, code_onbind }, { 5, 4, 2, 5, code_onstart },
-    { 2, 2, 2, 7, code_share_create }, { 4, 4, 4, 4, code_share_result }
+    { 2, 2, 2, 7, code_share_create }, { 5, 4, 4, 10, code_share_result }
 };
 
 enum { ACC_PUBLIC = 0x1, ACC_PRIVATE = 0x2, ACC_STATIC = 0x8, ACC_FINAL = 0x10, ACC_NATIVE = 0x100,

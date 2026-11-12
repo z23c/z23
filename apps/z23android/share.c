@@ -79,8 +79,8 @@ static bool start_share(JNIEnv *env, jobject activity, jobject intent)
         "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;") : NULL;
     jstring title = make ? zj_string(env, "Choose recipient") : NULL;
     jobject chooser = title ? (*env)->CallStaticObjectMethod(env, cls, make, intent, title) : NULL;
-    jmethodID start = chooser ? zj_method(env, activity, "startActivity", "(Landroid/content/Intent;)V") : NULL;
-    if (start) (*env)->CallVoidMethod(env, activity, start, chooser);
+    jmethodID start = chooser ? zj_method(env, activity, "startActivityForResult", "(Landroid/content/Intent;I)V") : NULL;
+    if (start) (*env)->CallVoidMethod(env, activity, start, chooser, ZAPP_SHARE_SEND_REQUEST);
     return zj_clean(env) && start;
 }
 static bool set_media_type(JNIEnv *env, jobject activity, jobject intent, jobject uri)
@@ -145,13 +145,19 @@ bool zapp_share_begin(JNIEnv *env, jobject activity)
     if (!ok) zapp_share_destroy();
     return ok;
 }
-void zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
+bool zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
 {
-    if (request != ZAPP_SHARE_PICK_REQUEST) return;
+    if (request == ZAPP_SHARE_SEND_REQUEST) {
+        if (result != -1) return_with_notice("Share cancelled. Nothing was sent.");
+        else return_with_notice("");
+        zapp_share_destroy();
+        return true;
+    }
+    if (request != ZAPP_SHARE_PICK_REQUEST) return true;
     if (result != -1 || !data) {
         return_with_notice("Share cancelled. Nothing was sent.");
         zapp_share_destroy();
-        return;
+        return true;
     }
     bool ok = (*env)->PushLocalFrame(env, 16) == JNI_OK;
     if (ok) {
@@ -164,6 +170,7 @@ void zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result,
     }
     return_with_notice(ok ? "" : "Could not open the share sheet.");
     zapp_share_destroy();
+    return !ok;
 }
 
 static void finish_activity(JNIEnv *env, jobject activity)
@@ -179,9 +186,8 @@ JNIEXPORT void JNICALL Java_org_z23_nativeapp_ShareActivity_shareCreate(JNIEnv *
         finish_activity(env, activity);
     }
 }
-JNIEXPORT void JNICALL Java_org_z23_nativeapp_ShareActivity_shareResultNative(JNIEnv *env, jobject activity,
+JNIEXPORT jint JNICALL Java_org_z23_nativeapp_ShareActivity_shareResultNative(JNIEnv *env, jobject activity,
     jint request, jint result, jobject data)
 {
-    zapp_share_result(env, activity, request, result, data);
-    finish_activity(env, activity);
+    return zapp_share_result(env, activity, request, result, data);
 }

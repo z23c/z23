@@ -261,6 +261,16 @@ static void share_text_is_clear(void)
 {
     char *src = slurp("share.c");
     require(src, "jstring title = make ? zj_string(env, \"Choose recipient\") : NULL;", "chooser asks for the recipient");
+    require(src, "ZAPP_SHARE_SEND_REQUEST", "send request id");
+    require(src, "startActivityForResult", "chooser result callback");
+    require(src, "if (request == ZAPP_SHARE_SEND_REQUEST)", "send result handling");
+    require(src, "if (result != -1) return_with_notice(\"Share cancelled. Nothing was sent.\");", "cancelled chooser notice");
+    require(src, "return !ok;", "keep ShareActivity alive while the chooser is open");
+    free(src);
+    src = slurp("dexgen.c");
+    require(src, "if (shareResultNative(request, result, data) != 0) finish();", "ShareActivity closes after a native result");
+    require(src, "private native int shareResultNative", "native chooser result status");
+    require(src, "M_ACTIVITY_FINISH", "Activity.finish method reference");
     free(src);
 }
 

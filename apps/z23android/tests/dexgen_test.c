@@ -131,7 +131,11 @@ static void test_key_prompt_methods(const char *dexdump, const char *path, const
     CHECK(share_method(listing, "onCreate", "(Landroid/os/Bundle;)V", false));
     CHECK(share_method(listing, "onActivityResult", "(IILandroid/content/Intent;)V", false));
     CHECK(share_method(listing, "shareCreate", "()V", true));
-    CHECK(share_method(listing, "shareResultNative", "(IILandroid/content/Intent;)V", true));
+    CHECK(share_method(listing, "shareResultNative", "(IILandroid/content/Intent;)I", true));
+    CHECK(strstr(listing, "invoke-direct {v1, v2, v3, v4}, Lorg/z23/nativeapp/ShareActivity;.shareResultNative:(IILandroid/content/Intent;)I"));
+    CHECK(strstr(listing, "move-result v0\n"));
+    CHECK(strstr(listing, "if-eqz v0, 0009 // +0005"));
+    CHECK(strstr(listing, "invoke-virtual {v1}, Landroid/app/Activity;.finish:()V"));
     remove(listing_path);
 }
 static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const char *dexdump)
@@ -151,9 +155,17 @@ static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const 
 }
 static void test_share_invocations(void)
 {
+    static const uint16_t result[] = {
+        0x4070, M_SHARE_NATIVE_RESULT, 0x4321, 0x000a,
+        0x0038, 0x0005, 0x106e, M_ACTIVITY_FINISH, 0x0001, 0x000e
+    };
     CHECK(code_share_create[0] == 0x206f && code_share_create[1] == M_ACTIVITY_ONCREATE);
     CHECK(code_share_create[3] == 0x1070 && code_share_create[4] == M_SHARE_CREATE);
-    CHECK(code_share_result[0] == 0x4070 && code_share_result[1] == M_SHARE_NATIVE_RESULT);
+    CHECK(codes[C_SHARE_RESULT].regs == 5 && codes[C_SHARE_RESULT].ins == 4);
+    CHECK(codes[C_SHARE_RESULT].regs - codes[C_SHARE_RESULT].ins == 1);
+    CHECK(codes[C_SHARE_RESULT].units == sizeof(result) / sizeof(result[0]));
+    CHECK(codes[C_SHARE_RESULT].units == sizeof(code_share_result) / sizeof(code_share_result[0]));
+    CHECK(!memcmp(code_share_result, result, sizeof(result)));
 }
 static uint32_t read_uleb(const uint8_t **p)
 {
