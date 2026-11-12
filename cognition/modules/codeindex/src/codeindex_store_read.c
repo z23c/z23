@@ -278,23 +278,35 @@ int ci_store_refs_by_callee(struct ci_store *s, const char *callee,
     return n;
 }
 
+static int ci_store_read_finish(sqlite3_stmt **slot, bool complete);
+
+static bool ci_store_refs_by_enclosing_prepare(struct ci_store *s)
+{
+    if (s->refs_by_enclosing_stmt) return true;
+    return sqlite3_prepare_v2(s->db,
+        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs"
+        " WHERE enclosing=? ORDER BY ref_file ASC, ref_line ASC",
+        -1, &s->refs_by_enclosing_stmt, NULL) == SQLITE_OK;
+}
+
 int ci_store_refs_by_enclosing(struct ci_store *s, const char *enclosing,
                                struct ci_ref *out, int cap)
 {
     if (!s || !enclosing || !out || cap <= 0)
         LOG_ERR("codeindex", "bad arg to refs_by_enclosing");
     pthread_mutex_lock(&s->lock);
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db,
-        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs"
-        " WHERE enclosing=? ORDER BY ref_file ASC, ref_line ASC",
-        -1, &stmt, NULL) != SQLITE_OK) {
+    if (!ci_store_refs_by_enclosing_prepare(s)) {
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare refs_by_enclosing");
     }
-    sqlite3_bind_text(stmt, 1, enclosing, -1, SQLITE_TRANSIENT);
+    sqlite3_stmt *stmt = s->refs_by_enclosing_stmt;
+    if (sqlite3_bind_text(stmt, 1, enclosing, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        (void)ci_store_read_finish(&s->refs_by_enclosing_stmt, false);
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "bind refs_by_enclosing");
+    }
     int n = 0;
-    int rc;
+    int rc = SQLITE_DONE;
     while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
         memset(&out[n], 0, sizeof(out[n]));
         ci_cpy(out[n].callee, sizeof(out[n].callee),
@@ -306,8 +318,11 @@ int ci_store_refs_by_enclosing(struct ci_store *s, const char *enclosing,
             (const char *)sqlite3_column_text(stmt, 3));
         n++;
     }
-    sqlite3_finalize(stmt);
+    bool complete = n == cap || rc == SQLITE_DONE;
+    int finish_rc = ci_store_read_finish(&s->refs_by_enclosing_stmt, complete);
     pthread_mutex_unlock(&s->lock);
+    if (!complete || finish_rc != SQLITE_OK)
+        LOG_ERR("codeindex", "read refs_by_enclosing failed rc=%d finish=%d", rc, finish_rc);
     return n;
 }
 

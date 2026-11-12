@@ -4011,6 +4011,147 @@ static int ci_defs_select_tests(void)
     return failures;
 }
 
+static bool ci_enclosing_seed(struct ci_store *store)
+{
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_store_put_ref(store, "third", "b.c", 2, "caller") &&
+        ci_store_put_ref(store, "second", "a.c", 4, "caller") &&
+        ci_store_put_ref(store, "first", "a.c", 1, "caller") &&
+        ci_store_put_ref(store, "other", "z.c", 8, "other");
+    bool committed = begun && ci_store_commit(store);
+    return wrote && committed;
+}
+static bool ci_enclosing_page(struct ci_store *store, const char *name, int cap)
+{
+    struct ci_ref out[4] = {0};
+    int n = ci_store_refs_by_enclosing(store, name, out, cap);
+    if (!strcmp(name, "other"))
+        return n == 1 && !strcmp(out[0].callee, "other") && !strcmp(out[0].ref_file, "z.c") &&
+            out[0].ref_line == 8 && !strcmp(out[0].enclosing, "other");
+    if (strcmp(name, "caller")) return n == 0;
+    if (n != (cap < 3 ? cap : 3)) return false;
+    static const char *const files[] = {"a.c", "a.c", "b.c"};
+    static const char *const callees[] = {"first", "second", "third"};
+    static const int lines[] = {1, 4, 2};
+    for (int i = 0; i < n; ++i)
+        if (strcmp(out[i].callee, callees[i]) || strcmp(out[i].ref_file, files[i]) ||
+            out[i].ref_line != lines[i] || strcmp(out[i].enclosing, "caller")) return false;
+    return true;
+}
+static sqlite3_stmt *ci_enclosing_cached(sqlite3 *db)
+{
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s; s = sqlite3_next_stmt(db, s)) {
+        const char *sql = sqlite3_sql(s);
+        if (sql && strstr(sql, "FROM refs WHERE enclosing=?")) return s;
+    }
+    return NULL;
+}
+static bool ci_enclosing_batch(struct ci_store *store)
+{
+    for (int i = 0; i < 8192; ++i)
+        if (!ci_enclosing_page(store, i % 2 ? "other" : "caller", i % 2 ? 2 : 1)) return false;
+    return true;
+}
+static int ci_enclosing_pages(struct ci_store *store)
+{
+    int failures = 0, prepares = 0; sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_include_select_authorize, &prepares) == SQLITE_OK;
+    bool first = setup && ci_enclosing_page(store, "caller", 2);
+    sqlite3_stmt *partial = ci_enclosing_cached(db);
+    bool idle = partial && !sqlite3_stmt_busy(partial);
+    bool rest = ci_enclosing_page(store, "caller", 1) && ci_enclosing_page(store, "caller", 4) &&
+        ci_enclosing_page(store, "other", 2) && ci_enclosing_page(store, "missing", 2) &&
+        ci_enclosing_page(store, "", 2);
+    uint64_t start = monotonic_us(); bool batch = ci_enclosing_batch(store);
+    uint64_t elapsed = monotonic_us() - start;
+    sqlite3_stmt *cached = ci_enclosing_cached(db);
+    int reprepare = cached ? sqlite3_stmt_status(cached, SQLITE_STMTSTATUS_REPREPARE, 0) : 0;
+    int runs = cached ? sqlite3_stmt_status(cached, SQLITE_STMTSTATUS_RUN, 0) : 0;
+    printf("  codeindex: enclosing batch=8192 elapsed_us=%llu authorizations=%d reprepares=%d runs=%d\n",
+        (unsigned long long)elapsed, prepares, reprepare, runs);
+    CI_CHECK("enclosing references retain exact order, bounds and names", first && rest && batch);
+    CI_CHECK("enclosing partial read leaves cached statement idle", idle);
+    CI_CHECK("enclosing reads reuse one explicitly prepared select", cached && prepares - reprepare == 1 && runs == 8198);
+    (void)sqlite3_set_authorizer(db, NULL, NULL); return failures;
+}
+static int ci_enclosing_visibility(struct ci_store *store)
+{
+    int failures = 0; struct ci_ref out[2] = {0};
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_store_put_ref(store, "new", "new.c", 3, "new");
+    bool committed = begun && ci_store_commit(store);
+    int n = ci_store_refs_by_enclosing(store, "new", out, 2);
+    CI_CHECK("enclosing select sees committed write", wrote && committed && n == 1 &&
+        !strcmp(out[0].callee, "new") && !strcmp(out[0].ref_file, "new.c") && out[0].ref_line == 3);
+    begun = ci_store_begin(store); wrote = begun && ci_store_put_ref(store, "rolled", "r.c", 4, "rolled");
+    bool rolled = begun && ci_store_rollback(store);
+    CI_CHECK("enclosing select respects rollback", wrote && rolled && ci_enclosing_page(store, "rolled", 2));
+    return failures;
+}
+struct ci_enclosing_step_fault { sqlite3 *db; bool traced; int interrupts; };
+static int ci_enclosing_step_interrupt(void *context)
+{
+    struct ci_enclosing_step_fault *fault = context;
+    ++fault->interrupts; return 1;
+}
+static int ci_enclosing_step_trace(unsigned kind, void *context, void *stmt, void *detail)
+{
+    (void)detail; struct ci_enclosing_step_fault *fault = context;
+    const char *sql = sqlite3_sql(stmt);
+    if (kind == SQLITE_TRACE_STMT && sql && strstr(sql, "FROM refs WHERE enclosing=?")) {
+        fault->traced = true;
+        sqlite3_progress_handler(fault->db, 1, ci_enclosing_step_interrupt, fault);
+    }
+    return 0;
+}
+static int ci_enclosing_failures(struct ci_store *store)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(store);
+    struct ci_ref out[4] = {0}; char name[513]; memset(name, 'x', 512); name[512] = 0;
+    int old = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 128);
+    int bound = ci_store_refs_by_enclosing(store, name, out, 4);
+    (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old);
+    CI_CHECK("enclosing bind failure refuses", bound < 0);
+    CI_CHECK("enclosing select recovers after bind failure", ci_enclosing_page(store, "caller", 3));
+    struct ci_enclosing_step_fault fault = {.db = db};
+    bool trace = sqlite3_trace_v2(db, SQLITE_TRACE_STMT, ci_enclosing_step_trace, &fault) == SQLITE_OK;
+    int interrupted = ci_store_refs_by_enclosing(store, "caller", out, 4);
+    sqlite3_progress_handler(db, 0, NULL, NULL);
+    (void)sqlite3_trace_v2(db, 0, NULL, NULL);
+    printf("  codeindex: enclosing bind=%d interrupted=%d traced=%d progress_calls=%d\n",
+        bound, interrupted, fault.traced, fault.interrupts);
+    CI_CHECK("enclosing interrupted step refuses", trace && fault.traced && fault.interrupts > 0 && interrupted < 0);
+    CI_CHECK("enclosing select recovers after interrupt", ci_enclosing_page(store, "caller", 3));
+    return failures;
+}
+static int ci_enclosing_schema(struct ci_store *store)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(store); struct ci_ref out[4] = {0};
+    bool renamed = sqlite3_exec(db, "ALTER TABLE refs RENAME TO held_refs", NULL, NULL, NULL) == SQLITE_OK;
+    int missing = renamed ? ci_store_refs_by_enclosing(store, "caller", out, 4) : 0;
+    bool restored = renamed && sqlite3_exec(db, "ALTER TABLE held_refs RENAME TO refs", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("enclosing missing table refuses", renamed && missing < 0);
+    CI_CHECK("enclosing select recovers after schema restoration", restored && ci_enclosing_page(store, "caller", 3));
+    return failures;
+}
+static int ci_enclosing_tests(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: enclosing select fixture... FAIL\n"); return 1; }
+    bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(ci_store_db(store), "enclosing_close_witness", 0,
+        SQLITE_UTF8, &destroyed, ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_enclosing_seed(store);
+    int failures = seeded ? ci_enclosing_pages(store) : 1;
+    if (seeded) failures += ci_enclosing_visibility(store);
+    if (seeded) failures += ci_enclosing_failures(store);
+    if (seeded) failures += ci_enclosing_schema(store);
+    CI_CHECK("enclosing close witness registered and remains live", registered && !destroyed);
+    ci_store_close(store);
+    CI_CHECK("enclosing cached select finalized at close", registered && destroyed);
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -4031,6 +4172,7 @@ int test_codeindex(void)
     failures += ci_include_insert_tests();
     failures += ci_include_select_tests();
     failures += ci_defs_select_tests();
+    failures += ci_enclosing_tests();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)

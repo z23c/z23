@@ -64,7 +64,7 @@ static int code_capsule_other_defs(struct codeindex *ci,
 
 /* One droppable section of the self-shrinking assembly below: direct callers
  * of `s` (codeindex_callers_for_symbol), capped at CODE_CAPSULE_CALLER_CAP. */
-static void code_capsule_fill_callers(struct codeindex *ci,
+static bool code_capsule_fill_callers(struct codeindex *ci,
                                       const struct ci_symbol *s,
                                       struct json_value *arr, int *n,
                                       bool *trunc)
@@ -72,7 +72,7 @@ static void code_capsule_fill_callers(struct codeindex *ci,
     static struct ci_ref crefs[CODE_CAPSULE_CALLER_CAP + 1];
     int want = CODE_CAPSULE_CALLER_CAP + 1;
     int nc = codeindex_callers_for_symbol(ci, s, crefs, want);
-    if (nc < 0) nc = 0;
+    if (nc < 0) return false;
     *trunc = nc > CODE_CAPSULE_CALLER_CAP;
     *n = *trunc ? CODE_CAPSULE_CALLER_CAP : nc;
     for (int i = 0; i < *n; i++) {
@@ -83,11 +83,12 @@ static void code_capsule_fill_callers(struct codeindex *ci,
         (void)json_push_kv_str(&o, "enclosing", crefs[i].enclosing);
         code_push_obj(arr, &o);
     }
+    return true;
 }
 
 /* One droppable section: direct callees of `s`
  * (codeindex_callees_for_symbol), capped at CODE_CAPSULE_CALLEE_CAP. */
-static void code_capsule_fill_callees(struct codeindex *ci,
+static bool code_capsule_fill_callees(struct codeindex *ci,
                                       const struct ci_symbol *s,
                                       struct json_value *arr, int *n,
                                       bool *trunc)
@@ -95,7 +96,7 @@ static void code_capsule_fill_callees(struct codeindex *ci,
     static struct ci_ref erefs[CODE_CAPSULE_CALLEE_CAP + 1];
     int want = CODE_CAPSULE_CALLEE_CAP + 1;
     int ne = codeindex_callees_for_symbol(ci, s, erefs, want);
-    if (ne < 0) ne = 0;
+    if (ne < 0) return false;
     *trunc = ne > CODE_CAPSULE_CALLEE_CAP;
     *n = *trunc ? CODE_CAPSULE_CALLEE_CAP : ne;
     for (int i = 0; i < *n; i++) {
@@ -106,11 +107,12 @@ static void code_capsule_fill_callees(struct codeindex *ci,
         (void)json_push_kv_int(&o, "line", erefs[i].ref_line);
         code_push_obj(arr, &o);
     }
+    return true;
 }
 
 /* One droppable section: the in-tree #include fan-out of the symbol's def
  * file (codeindex_includes_of_file), capped at CODE_CAPSULE_INC_CAP. */
-static void code_capsule_fill_includes(struct codeindex *ci,
+static bool code_capsule_fill_includes(struct codeindex *ci,
                                        const char *def_path,
                                        struct json_value *arr, int *n,
                                        bool *trunc)
@@ -118,11 +120,12 @@ static void code_capsule_fill_includes(struct codeindex *ci,
     static char incs[CODE_CAPSULE_INC_CAP + 1][256];
     int want = CODE_CAPSULE_INC_CAP + 1;
     int ni = codeindex_includes_of_file(ci, def_path, incs, want);
-    if (ni < 0) ni = 0;
+    if (ni < 0) return false;
     *trunc = ni > CODE_CAPSULE_INC_CAP;
     *n = *trunc ? CODE_CAPSULE_INC_CAP : ni;
     for (int i = 0; i < *n; i++)
         code_push_line(arr, incs[i]);
+    return true;
 }
 
 /* Measures only the droppable sections against the fixed reserve the rest of
@@ -217,11 +220,23 @@ struct code_capsule_sections {
     bool want_includes, want_callees, want_callers;
 };
 
+static bool code_capsule_query_sections(struct codeindex *ci, const struct ci_symbol *s,
+                                        const char *path, struct code_capsule_sections *sec)
+{
+    if (sec->want_callers && !code_capsule_fill_callers(ci, s, &sec->callers,
+        &sec->n_callers, &sec->callers_trunc)) return false;
+    if (sec->want_callees && !code_capsule_fill_callees(ci, s, &sec->callees,
+        &sec->n_callees, &sec->callees_trunc)) return false;
+    if (sec->want_includes && path[0] && !code_capsule_fill_includes(ci, path,
+        &sec->includes, &sec->n_inc, &sec->inc_trunc)) return false;
+    return true;
+}
+
 /* Self-shrinking assembly: build callers/callees/includes at full cap,
  * measure their serialized size, and — only if the reply would overflow —
  * drop ONE section at a time (includes, then callees, then callers) and
  * rebuild, until it fits or nothing droppable remains. */
-static void code_capsule_assemble_sections(struct codeindex *ci,
+static bool code_capsule_assemble_sections(struct codeindex *ci,
                                            const struct ci_symbol *s,
                                            const char *def_path,
                                            struct code_capsule_sections *sec)
@@ -241,23 +256,15 @@ static void code_capsule_assemble_sections(struct codeindex *ci,
         sec->n_callers = sec->n_callees = sec->n_inc = 0;
         sec->callers_trunc = sec->callees_trunc = sec->inc_trunc = false;
 
-        if (sec->want_callers)
-            code_capsule_fill_callers(ci, s, &sec->callers, &sec->n_callers,
-                                      &sec->callers_trunc);
-        if (sec->want_callees)
-            code_capsule_fill_callees(ci, s, &sec->callees, &sec->n_callees,
-                                      &sec->callees_trunc);
-        if (sec->want_includes && def_path[0])
-            code_capsule_fill_includes(ci, def_path, &sec->includes,
-                                       &sec->n_inc, &sec->inc_trunc);
+        if (!code_capsule_query_sections(ci, s, def_path, sec)) return false;
 
         if (code_capsule_sections_fit(&sec->callers, &sec->callees,
                                       &sec->includes))
-            return;
+            return true;
         if (sec->want_includes) { sec->want_includes = false; continue; }
         if (sec->want_callees)  { sec->want_callees = false; continue; }
         if (sec->want_callers)  { sec->want_callers = false; continue; }
-        return;   /* nothing left to drop */
+        return true;   /* nothing left to drop */
     }
 }
 
@@ -439,7 +446,16 @@ void zcl_native_handle_code_capsule(const struct zcl_command_request *request,
     for (int i = 0; i < ncmd; i++) code_push_line(&cmds, cmd_paths[i]);
 
     struct code_capsule_sections sec;
-    code_capsule_assemble_sections(ci, &s, def_path, &sec);
+    if (!code_capsule_assemble_sections(ci, &s, def_path, &sec)) {
+        json_free(&others); json_free(&cmds);
+        json_free(&sec.callers); json_free(&sec.callees); json_free(&sec.includes);
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_QUERY",
+                               "query", false, false,
+                               "code index relationship query failed", "");
+        return;
+    }
 
     code_capsule_emit_identity(reply, query, by_id, &s, id, sig, kind, shape,
                                &others, nother, &cmds, ncmd);

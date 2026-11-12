@@ -32,6 +32,7 @@
 #include "json/json.h"
 
 #include <stddef.h>
+#include <sqlite3.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -839,6 +840,61 @@ static int test_code_capsule_exact_other_defs(void)
     return failures;
 }
 
+/* Observe the real caller query and deny the immediately following refs
+ * read during callee preparation. The index is warmed before arming this
+ * connection-local authorizer, and the auto-extension is always removed. */
+static bool cap_fault_caller_seen, cap_fault_denied;
+static int cap_fault_trace(unsigned type, void *context, void *stmt, void *detail)
+{
+    (void)context; (void)stmt; const char *sql = detail;
+    if (type == SQLITE_TRACE_STMT && sql && strstr(sql, "FROM refs WHERE callee_name=?"))
+        cap_fault_caller_seen = true;
+    return 0;
+}
+static int cap_fault_authorize(void *context, int action, const char *one,
+    const char *two, const char *database, const char *trigger)
+{
+    (void)context; (void)two; (void)database; (void)trigger;
+    if (cap_fault_caller_seen && !cap_fault_denied && action == SQLITE_READ && one && !strcmp(one, "refs")) {
+        cap_fault_denied = true; return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+static int cap_fault_extension(sqlite3 *db, char **error, const sqlite3_api_routines *api)
+{
+    (void)error; (void)api;
+    int rc = sqlite3_trace_v2(db, SQLITE_TRACE_STMT, cap_fault_trace, NULL);
+    return rc == SQLITE_OK ? sqlite3_set_authorizer(db, cap_fault_authorize, NULL) : rc;
+}
+static int test_code_capsule_callee_refusal(void)
+{
+    int failures = 0; char source[65], dep[65];
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.code_capsule.v1");
+    bool warmed = false, armed = false, removed = false;
+    TEST("code_capsule refuses a failed callee query instead of reporting none") {
+        test_rm_rf_recursive(CAP_BUDGET_FIX);
+        warmed = write_cap_budget_fixture() && cap_generation_reply("cap_hot", true, source, dep);
+        ASSERT(warmed && json_push_kv_str(&input, "name", "cap_hot"));
+        struct zcl_command_context ctx = {.source_root = CAP_BUDGET_FIX};
+        struct zcl_command_request request = {.input = &input, .context = &ctx,
+            .view = "normal", .invoked_name = "code.capsule"};
+        cap_fault_caller_seen = cap_fault_denied = false;
+        void (*extension)(void) = (void (*)(void))cap_fault_extension;
+        armed = sqlite3_auto_extension(extension) == SQLITE_OK;
+        if (armed) zcl_native_handle_code_capsule(&request, &reply);
+        if (armed) removed = sqlite3_cancel_auto_extension(extension) != 0;
+        printf("  capsule callee fault: warmed=%d armed=%d caller=%d denied=%d removed=%d status=%d code=%s\n",
+            warmed, armed, cap_fault_caller_seen, cap_fault_denied, removed, reply.status, reply.error.code);
+        ASSERT(armed && removed && cap_fault_caller_seen && cap_fault_denied);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !strcmp(reply.error.code, "CODEINDEX_QUERY"));
+        ASSERT(!json_get(&reply.data, "callees") && !json_get(&reply.data, "callee_count"));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input);
+    test_rm_rf_recursive(CAP_BUDGET_FIX); return failures;
+}
+
 int test_code_capsule(void)
 {
     int failures = 0;
@@ -854,6 +910,7 @@ int test_code_capsule(void)
     failures += test_code_capsule_generation();
     failures += test_code_capsule_exact_enumeration();
     failures += test_code_capsule_exact_other_defs();
+    failures += test_code_capsule_callee_refusal();
     failures += test_code_relations_command_locus();
     failures += test_code_relations_refuses_false_absence();
     failures += test_code_relations_static_not_command_handler();
