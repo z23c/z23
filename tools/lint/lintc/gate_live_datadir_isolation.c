@@ -229,6 +229,9 @@ int ldi_doc_file(const char *path, void *ctx)
             if (*p == '#') continue;
         }
         if (strstr(line, "datadir")) continue;
+        /* Every supported invocation contains one of these strings, including
+         * z23-dev. Preserve substring matching and still read every line. */
+        if (!strstr(line, "z23") && !strstr(line, "zclassic23")) continue;
         rc = ldi_doc_line(s, path, line);
         if (rc) break;
     }

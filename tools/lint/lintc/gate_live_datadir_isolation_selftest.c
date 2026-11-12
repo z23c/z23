@@ -52,6 +52,10 @@ static const struct ldi_case k_cases[] = {
     { "C boundary equals", k_clean, "z23 sand thing peek=1\n", "", "", "", "PRONG C", 1 },
     { "C boundary later hit", k_clean, "z23 sand thing peeker; z23 sand thing peek\n", "", "", "", "PRONG C", 1 },
     { "C repetition per line", k_clean, "z23 sand thing peek ; z23 sand thing peek\n", "", "@DOC@ 1 # keep this\n", "ZCL_LDI_CEILING_C=1", "prong C 1 site", 0 },
+    { "C aliases and embedded needle", k_clean,
+      "ordinary prose unrelated to the command\n"
+      "prefixz23 sand thing peek ; z23-dev sand thing peek ; zclassic23 sand thing peek\n"
+      "more unrelated text\n", "", "@DOC@ 3\n", "ZCL_LDI_CEILING_C=3", "prong C 3 site", 0 },
     { "C stale", k_clean, k_doc, "", "@DOC@ 1\n", "ZCL_LDI_CEILING_C=1", "stale", 1 },
     { "WARN", "GetDataDir(p,n);\n", "z23 sand thing peek\n", "", "", "ZCL_LINT_MODE=WARN", "PRONG B", 0 },
     { "UPDATE", "\"%s/.zclassic\"\n", "z23 sand thing peek\n", "@TEST@ 1 # retain analysis\n", "@DOC@ 1 # retain doc analysis\n", "ZCL_LINT_MODE=UPDATE", "UPDATED", 0 },
