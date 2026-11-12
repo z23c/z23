@@ -194,7 +194,7 @@ static bool inv_keyword(const char *token)
         "bool", "true", "false", "NULL", "_Atomic", "_Bool", NULL
     };
     for (size_t i = 0; words[i]; i++)
-        if (strcmp(token, words[i]) == 0) return true;
+        if (token[0] == words[i][0] && strcmp(token, words[i]) == 0) return true;
     return false;
 }
 
@@ -319,9 +319,8 @@ static bool inv_is_pair_op(char a, char b)
         "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
         "^=", "::", NULL
     };
-    char pair[3] = { a, b, '\0' };
     for (size_t p = 0; pairs[p]; p++)
-        if (strcmp(pair, pairs[p]) == 0) return true;
+        if (pairs[p][0] == a && pairs[p][1] == b) return true;
     return false;
 }
 
