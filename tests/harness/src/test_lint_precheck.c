@@ -10,6 +10,7 @@
 #include "test/test_core.h"
 
 #include "lint/lintc/lintc.h"
+#include "lint/lintc/lintc_commands.h"
 #include "lint/lintc/precheck_base.h"
 
 #include <stdlib.h>

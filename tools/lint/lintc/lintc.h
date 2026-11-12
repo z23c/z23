@@ -54,12 +54,6 @@ extern char g_auth[RS_AUTH][RS_PATH];
 int die(const char *msg, const char *arg);
 /* The gate table main.c dispatches on; precheck.c reads it through this. */
 const struct lint_gate *lint_gate_table(size_t *n);
-/* `z23-lint precheck [--base=DIR]`: precheck.c, precheck_base.c. */
-int lint_precheck_main(int argc, char **argv);
-/* `z23-lint run`: the C23 lint driver, run_main.c. */
-int lint_run_main(int argc, char **argv);
-/* Run both build-epoch probes through the native pool, without reuse. */
-int lint_epoch_probes_main(int argc, char **argv);
 int fin(FILE *f, char *line, const char *path, int rc);
 int reg_fail(regex_t *re, int err);
 int ovf(int n, size_t cap);

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "lintc.h"
+#include "lintc_commands.h"
 #include "premise.h"
 #include "gate_lib_module_order_graph.h"
 

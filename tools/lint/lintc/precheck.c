@@ -40,6 +40,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "lintc.h"
+#include "lintc_commands.h"
 #include "precheck_base.h"
 
 #include <errno.h>

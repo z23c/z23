@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "lintc.h"
+#include "lintc_commands.h"
 #include "run_priv.h"
 
 enum { DEFAULT_JOBS = 8, DEFAULT_BUDGET = 75, DEFAULT_HOST = 8 };

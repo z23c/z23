@@ -4,6 +4,7 @@
  * every invocation executes both and keeps the pool's status and diagnostics.
  */
 #include "lintc.h"
+#include "lintc_commands.h"
 #include "run_priv.h"
 
 static const struct {
