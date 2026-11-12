@@ -4152,6 +4152,193 @@ static int ci_enclosing_tests(void)
     return failures;
 }
 
+/* Exercise each identity-aware reference shape against the same committed rows. */
+static int ci_family_query(struct ci_store *store, unsigned shape, const char *name,
+    const char *file, struct ci_ref *out, int cap)
+{
+    if (shape == 0) return ci_store_refs_by_callee(store, name, out, cap);
+    if (shape == 1) return ci_store_refs_by_callee_file(store, name, file, out, cap);
+    return ci_store_refs_by_enclosing_file(store, name, file, out, cap);
+}
+static bool ci_family_seed(struct ci_store *store)
+{
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_store_put_ref(store, "target", "a.c", 1, "scope") &&
+        ci_store_put_ref(store, "target", "a.c", 3, "scope") &&
+        ci_store_put_ref(store, "target", "b.c", 2, "scope") &&
+        ci_store_put_ref(store, "other", "a.c", 5, "elsewhere");
+    bool committed = begun && ci_store_commit(store);
+    return wrote && committed;
+}
+static bool ci_family_row(const struct ci_ref *out, unsigned shape, const char *file, int i)
+{
+    if (strcmp(out[i].callee, "target") || strcmp(out[i].enclosing, "scope")) return false;
+    if (shape && strcmp(out[i].ref_file, file)) return false;
+    int expected = !strcmp(out[i].ref_file, "b.c") ? 2 : (i ? 3 : 1);
+    if (out[i].ref_line != expected) return false;
+    return !i || (strcmp(out[i - 1].ref_file, out[i].ref_file) <= 0 &&
+        (strcmp(out[i - 1].ref_file, out[i].ref_file) || out[i - 1].ref_line < out[i].ref_line));
+}
+static bool ci_family_page(struct ci_store *store, unsigned shape, const char *name,
+    const char *file, int cap, int count, const char *first_file, int first_line)
+{
+    struct ci_ref out[4] = {0};
+    int n = ci_family_query(store, shape, name, file, out, cap);
+    if (n != count) return false;
+    if (!n) return true;
+    if (strcmp(out[0].ref_file, first_file) || out[0].ref_line != first_line) return false;
+    for (int i = 0; i < n; ++i) if (!ci_family_row(out, shape, file, i)) return false;
+    return true;
+}
+static bool ci_family_examples(struct ci_store *store, unsigned shape)
+{
+    const char *name = shape == 2 ? "scope" : "target";
+    if (shape == 0) return ci_family_page(store, shape, name, NULL, 2, 2, "a.c", 1) &&
+        ci_family_page(store, shape, name, NULL, 4, 3, "a.c", 1) &&
+        ci_family_page(store, shape, "missing", NULL, 2, 0, NULL, 0);
+    return ci_family_page(store, shape, name, "a.c", 1, 1, "a.c", 1) &&
+        ci_family_page(store, shape, name, "a.c", 4, 2, "a.c", 1) &&
+        ci_family_page(store, shape, name, "b.c", 4, 1, "b.c", 2) &&
+        ci_family_page(store, shape, name, "missing.c", 4, 0, NULL, 0) &&
+        ci_family_page(store, shape, "missing", "a.c", 4, 0, NULL, 0);
+}
+static sqlite3_stmt *ci_family_cached(sqlite3 *db, unsigned shape)
+{
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s; s = sqlite3_next_stmt(db, s)) {
+        const char *sql = sqlite3_sql(s);
+        if (!sql || !strstr(sql, "FROM refs WHERE ")) continue;
+        bool callee = strstr(sql, "WHERE callee_name=?") != NULL;
+        bool file = strstr(sql, "AND ref_file=?") != NULL;
+        if ((shape == 0 && callee && !file) || (shape == 1 && callee && file) ||
+            (shape == 2 && !callee && file && strstr(sql, "WHERE enclosing=?"))) return s;
+    }
+    return NULL;
+}
+static bool ci_family_capped_idle(struct ci_store *store, unsigned shape)
+{
+    struct ci_ref out;
+    int n = ci_family_query(store, shape, shape == 2 ? "scope" : "target", "a.c", &out, 1);
+    sqlite3_stmt *stmt = ci_family_cached(ci_store_db(store), shape);
+    return n == 1 && stmt && !sqlite3_stmt_busy(stmt);
+}
+static int ci_family_pages(struct ci_store *store)
+{
+    int failures = 0, prepares = 0; sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_include_select_authorize, &prepares) == SQLITE_OK;
+    bool exact = setup, idle = true; sqlite3_stmt *stmt[3] = {0};
+    for (unsigned shape = 0; shape < 3; ++shape) {
+        bool capped_idle = ci_family_capped_idle(store, shape); idle = capped_idle && idle;
+        bool one = ci_family_examples(store, shape); exact = one && exact;
+        stmt[shape] = ci_family_cached(db, shape);
+    }
+    uint64_t start = monotonic_us();
+    for (int i = 0; i < 256; ++i) {
+        bool one = ci_family_examples(store, (unsigned)i % 3); exact = one && exact;
+    }
+    uint64_t elapsed = monotonic_us() - start; int reprepare = 0, runs = 0;
+    for (unsigned i = 0; i < 3; ++i) if (stmt[i]) {
+        reprepare += sqlite3_stmt_status(stmt[i], SQLITE_STMTSTATUS_REPREPARE, 0);
+        runs += sqlite3_stmt_status(stmt[i], SQLITE_STMTSTATUS_RUN, 0);
+    }
+    printf("  codeindex: ref family rounds=256 elapsed_us=%llu authorizations=%d reprepares=%d runs=%d\n",
+        (unsigned long long)elapsed, prepares, reprepare, runs);
+    CI_CHECK("reference family retains order, cap and file identity", exact);
+    CI_CHECK("reference family cached statements idle after partial reads", idle);
+    CI_CHECK("reference family explicitly prepares each shape once", stmt[0] && stmt[1] && stmt[2] && prepares - reprepare == 3 && runs > 256);
+    (void)sqlite3_set_authorizer(db, NULL, NULL); return failures;
+}
+struct ci_family_fault { sqlite3 *db; unsigned shape; bool traced; int interrupts; };
+static int ci_family_interrupt(void *context)
+{
+    struct ci_family_fault *fault = context; ++fault->interrupts; return 1;
+}
+static int ci_family_trace(unsigned kind, void *context, void *stmt, void *detail)
+{
+    (void)detail; struct ci_family_fault *fault = context; const char *sql = sqlite3_sql(stmt);
+    if (kind != SQLITE_TRACE_STMT || !sql || !strstr(sql, "FROM refs WHERE ")) return 0;
+    bool callee = strstr(sql, "WHERE callee_name=?") != NULL;
+    bool file = strstr(sql, "AND ref_file=?") != NULL;
+    if ((fault->shape == 0 && callee && !file) || (fault->shape == 1 && callee && file) ||
+        (fault->shape == 2 && !callee && file && strstr(sql, "WHERE enclosing=?"))) {
+        fault->traced = true; sqlite3_progress_handler(fault->db, 1, ci_family_interrupt, fault);
+    }
+    return 0;
+}
+static int ci_family_failures(struct ci_store *store)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(store); char long_name[1025];
+    memset(long_name, 'x', 1024); long_name[1024] = 0;
+    for (unsigned shape = 0; shape < 3; ++shape) {
+        struct ci_ref out[4] = {0}; const char *name = shape == 2 ? "scope" : "target";
+        int old = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 256);
+        int bad_name = ci_family_query(store, shape, long_name, "a.c", out, 4);
+        int bad_file = shape ? ci_family_query(store, shape, name, long_name, out, 4) : -1;
+        (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old);
+        bool recovered = ci_family_examples(store, shape);
+        struct ci_family_fault fault = {.db = db, .shape = shape};
+        bool trace = sqlite3_trace_v2(db, SQLITE_TRACE_STMT, ci_family_trace, &fault) == SQLITE_OK;
+        int interrupted = ci_family_query(store, shape, name, "a.c", out, 4);
+        sqlite3_progress_handler(db, 0, NULL, NULL); (void)sqlite3_trace_v2(db, 0, NULL, NULL);
+        bool recovered_step = ci_family_examples(store, shape);
+        printf("  codeindex: refs shape=%u name=%d file=%d trace=%d progress=%d interrupted=%d\n",
+            shape, bad_name, bad_file, fault.traced, fault.interrupts, interrupted);
+        CI_CHECK("reference bind errors refuse and recover", bad_name < 0 && bad_file < 0 && recovered);
+        CI_CHECK("reference interrupted step refuses and recovers", trace && fault.traced && fault.interrupts > 0 && interrupted < 0 && recovered_step);
+    }
+    return failures;
+}
+static int ci_family_visibility(struct ci_store *store)
+{
+    int failures = 0; struct ci_ref out[4] = {0};
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_store_put_ref(store, "target", "a.c", 9, "scope");
+    bool committed = begun && ci_store_commit(store);
+    bool visible = true;
+    for (unsigned shape = 0; shape < 3; ++shape) {
+        int want = shape == 0 ? 4 : 3;
+        int n = ci_family_query(store, shape, shape == 2 ? "scope" : "target", "a.c", out, 4);
+        visible = visible && n == want;
+    }
+    CI_CHECK("reference family sees committed write", wrote && committed && visible);
+    begun = ci_store_begin(store); wrote = begun && ci_store_put_ref(store, "rolled", "r.c", 1, "rolled");
+    bool rolled = begun && ci_store_rollback(store); bool absent = true;
+    for (unsigned shape = 0; shape < 3; ++shape)
+        absent = absent && ci_family_query(store, shape, "rolled", "r.c", out, 4) == 0;
+    CI_CHECK("reference family respects rollback", wrote && rolled && absent);
+    return failures;
+}
+static int ci_family_schema(struct ci_store *store)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(store); struct ci_ref out[4] = {0};
+    bool renamed = sqlite3_exec(db, "ALTER TABLE refs RENAME TO held_refs", NULL, NULL, NULL) == SQLITE_OK;
+    bool refused = renamed;
+    for (unsigned shape = 0; shape < 3; ++shape)
+        refused = (ci_family_query(store, shape, shape == 2 ? "scope" : "target", "a.c", out, 4) < 0) && refused;
+    bool restored = renamed && sqlite3_exec(db, "ALTER TABLE held_refs RENAME TO refs", NULL, NULL, NULL) == SQLITE_OK;
+    bool recovered = restored;
+    for (unsigned shape = 0; shape < 3; ++shape) recovered = ci_family_examples(store, shape) && recovered;
+    CI_CHECK("reference family missing table refuses", refused);
+    CI_CHECK("reference family recovers after schema restore", recovered);
+    return failures;
+}
+static int ci_family_tests(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: ref family fixture... FAIL\n"); return 1; }
+    bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(ci_store_db(store), "family_close_witness", 0,
+        SQLITE_UTF8, &destroyed, ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_family_seed(store);
+    int failures = seeded ? ci_family_pages(store) : 1;
+    if (seeded) failures += ci_family_failures(store);
+    if (seeded) failures += ci_family_schema(store);
+    if (seeded) failures += ci_family_visibility(store);
+    CI_CHECK("reference family close witness remains live", registered && !destroyed);
+    ci_store_close(store);
+    CI_CHECK("reference family statements finalized at close", registered && destroyed);
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -4173,6 +4360,7 @@ int test_codeindex(void)
     failures += ci_include_select_tests();
     failures += ci_defs_select_tests();
     failures += ci_enclosing_tests();
+    failures += ci_family_tests();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)

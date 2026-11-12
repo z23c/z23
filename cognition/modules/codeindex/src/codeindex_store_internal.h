@@ -36,6 +36,9 @@ struct ci_store {
     sqlite3_stmt   *include_page_stmt; /* reset and cleared after each read */
     sqlite3_stmt   *defs_by_name_stmt; /* reset and cleared after each read */
     sqlite3_stmt   *refs_by_enclosing_stmt; /* reset and cleared after each read */
+    sqlite3_stmt   *refs_by_callee_stmt;
+    sqlite3_stmt   *refs_by_callee_file_stmt;
+    sqlite3_stmt   *refs_by_enclosing_file_stmt;
     pthread_mutex_t lock;   /* recursive: held begin..commit; reads take briefly */
     int             bound_fd; /* immutable canonical inode, -1 for :memory: */
     struct platform_positioned_file bound_file;

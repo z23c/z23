@@ -584,6 +584,9 @@ void ci_store_close(struct ci_store *s)
     if (s->include_page_stmt) sqlite3_finalize(s->include_page_stmt);
     if (s->defs_by_name_stmt) sqlite3_finalize(s->defs_by_name_stmt);
     if (s->refs_by_enclosing_stmt) sqlite3_finalize(s->refs_by_enclosing_stmt);
+    if (s->refs_by_callee_stmt) sqlite3_finalize(s->refs_by_callee_stmt);
+    if (s->refs_by_callee_file_stmt) sqlite3_finalize(s->refs_by_callee_file_stmt);
+    if (s->refs_by_enclosing_file_stmt) sqlite3_finalize(s->refs_by_enclosing_file_stmt);
     if (s->db) sqlite3_close(s->db);
     platform_read_mapping_close(&s->mapping);
     if (s->has_bound_file)

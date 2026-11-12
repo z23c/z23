@@ -245,86 +245,90 @@ int ci_store_caller_edges(struct ci_store *s, const char *callee,
     return n;
 }
 
-int ci_store_refs_by_callee(struct ci_store *s, const char *callee,
-                            struct ci_ref *out, int cap)
-{
-    if (!s || !callee || !out || cap <= 0)
-        LOG_ERR("codeindex", "bad arg to refs_by_callee");
-    pthread_mutex_lock(&s->lock);
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db,
-        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs"
-        " WHERE callee_name=? ORDER BY ref_file ASC, ref_line ASC",
-        -1, &stmt, NULL) != SQLITE_OK) {
-        pthread_mutex_unlock(&s->lock);
-        LOG_ERR("codeindex", "prepare refs_by_callee");
-    }
-    sqlite3_bind_text(stmt, 1, callee, -1, SQLITE_TRANSIENT);
-    int n = 0;
-    int rc;
-    while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
-        memset(&out[n], 0, sizeof(out[n]));
-        ci_cpy(out[n].callee, sizeof(out[n].callee),
-            (const char *)sqlite3_column_text(stmt, 0));
-        ci_cpy(out[n].ref_file, sizeof(out[n].ref_file),
-            (const char *)sqlite3_column_text(stmt, 1));
-        out[n].ref_line = sqlite3_column_int(stmt, 2);
-        ci_cpy(out[n].enclosing, sizeof(out[n].enclosing),
-            (const char *)sqlite3_column_text(stmt, 3));
-        n++;
-    }
-    sqlite3_finalize(stmt);
-    pthread_mutex_unlock(&s->lock);
-    return n;
-}
-
 static int ci_store_read_finish(sqlite3_stmt **slot, bool complete);
 
-static bool ci_store_refs_by_enclosing_prepare(struct ci_store *s)
+enum ci_ref_query { CI_REF_CALLEE, CI_REF_ENCLOSING, CI_REF_CALLEE_FILE, CI_REF_ENCLOSING_FILE };
+
+static sqlite3_stmt **ci_ref_slot(struct ci_store *s, enum ci_ref_query kind)
 {
-    if (s->refs_by_enclosing_stmt) return true;
-    return sqlite3_prepare_v2(s->db,
-        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs"
-        " WHERE enclosing=? ORDER BY ref_file ASC, ref_line ASC",
-        -1, &s->refs_by_enclosing_stmt, NULL) == SQLITE_OK;
+    switch (kind) {
+    case CI_REF_CALLEE: return &s->refs_by_callee_stmt;
+    case CI_REF_ENCLOSING: return &s->refs_by_enclosing_stmt;
+    case CI_REF_CALLEE_FILE: return &s->refs_by_callee_file_stmt;
+    case CI_REF_ENCLOSING_FILE: return &s->refs_by_enclosing_file_stmt;
+    }
+    return NULL;
 }
 
-int ci_store_refs_by_enclosing(struct ci_store *s, const char *enclosing,
-                               struct ci_ref *out, int cap)
+static bool ci_ref_prepare(struct ci_store *s, sqlite3_stmt **slot, enum ci_ref_query kind)
 {
-    if (!s || !enclosing || !out || cap <= 0)
-        LOG_ERR("codeindex", "bad arg to refs_by_enclosing");
+    static const char *const sql[] = {
+        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs WHERE callee_name=? ORDER BY ref_file ASC, ref_line ASC",
+        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs WHERE enclosing=? ORDER BY ref_file ASC, ref_line ASC",
+        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs WHERE callee_name=? AND ref_file=? ORDER BY ref_file ASC,ref_line ASC",
+        "SELECT callee_name,ref_file,ref_line,enclosing FROM refs WHERE enclosing=? AND ref_file=? ORDER BY ref_file ASC,ref_line ASC"
+    };
+    return *slot || sqlite3_prepare_v2(s->db, sql[kind], -1, slot, NULL) == SQLITE_OK;
+}
+
+static void ci_ref_read_row(sqlite3_stmt *stmt, struct ci_ref *out)
+{
+    memset(out, 0, sizeof(*out));
+    ci_cpy(out->callee, sizeof(out->callee), (const char *)sqlite3_column_text(stmt, 0));
+    ci_cpy(out->ref_file, sizeof(out->ref_file), (const char *)sqlite3_column_text(stmt, 1));
+    out->ref_line = sqlite3_column_int(stmt, 2);
+    ci_cpy(out->enclosing, sizeof(out->enclosing), (const char *)sqlite3_column_text(stmt, 3));
+}
+
+static bool ci_ref_bind(sqlite3_stmt *stmt, const char *name, const char *file, bool scoped)
+{
+    if (sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT) != SQLITE_OK) return false;
+    return !scoped || sqlite3_bind_text(stmt, 2, file, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+}
+
+static int ci_ref_read(struct ci_store *s, enum ci_ref_query kind, const char *name,
+                       const char *file, struct ci_ref *out, int cap)
+{
+    bool scoped = kind == CI_REF_CALLEE_FILE || kind == CI_REF_ENCLOSING_FILE;
+    if (!s || !name || (scoped && !file) || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to refs query");
     pthread_mutex_lock(&s->lock);
-    if (!ci_store_refs_by_enclosing_prepare(s)) {
+    sqlite3_stmt **slot = ci_ref_slot(s, kind);
+    if (!ci_ref_prepare(s, slot, kind)) {
         pthread_mutex_unlock(&s->lock);
-        LOG_ERR("codeindex", "prepare refs_by_enclosing");
+        LOG_ERR("codeindex", "prepare refs query");
     }
-    sqlite3_stmt *stmt = s->refs_by_enclosing_stmt;
-    if (sqlite3_bind_text(stmt, 1, enclosing, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
-        (void)ci_store_read_finish(&s->refs_by_enclosing_stmt, false);
+    sqlite3_stmt *stmt = *slot;
+    if (!ci_ref_bind(stmt, name, file, scoped)) {
+        (void)ci_store_read_finish(slot, false);
         pthread_mutex_unlock(&s->lock);
-        LOG_ERR("codeindex", "bind refs_by_enclosing");
+        LOG_ERR("codeindex", "bind refs query");
     }
-    int n = 0;
-    int rc = SQLITE_DONE;
+    int n = 0, rc = SQLITE_DONE;
     while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
-        memset(&out[n], 0, sizeof(out[n]));
-        ci_cpy(out[n].callee, sizeof(out[n].callee),
-            (const char *)sqlite3_column_text(stmt, 0));
-        ci_cpy(out[n].ref_file, sizeof(out[n].ref_file),
-            (const char *)sqlite3_column_text(stmt, 1));
-        out[n].ref_line = sqlite3_column_int(stmt, 2);
-        ci_cpy(out[n].enclosing, sizeof(out[n].enclosing),
-            (const char *)sqlite3_column_text(stmt, 3));
-        n++;
+        ci_ref_read_row(stmt, &out[n++]);
     }
     bool complete = n == cap || rc == SQLITE_DONE;
-    int finish_rc = ci_store_read_finish(&s->refs_by_enclosing_stmt, complete);
+    int finish_rc = ci_store_read_finish(slot, complete);
     pthread_mutex_unlock(&s->lock);
     if (!complete || finish_rc != SQLITE_OK)
-        LOG_ERR("codeindex", "read refs_by_enclosing failed rc=%d finish=%d", rc, finish_rc);
+        LOG_ERR("codeindex", "read refs query failed rc=%d finish=%d", rc, finish_rc);
     return n;
 }
+
+int ci_store_refs_by_callee(struct ci_store *s, const char *name, struct ci_ref *out, int cap)
+{ return ci_ref_read(s, CI_REF_CALLEE, name, NULL, out, cap); }
+
+int ci_store_refs_by_enclosing(struct ci_store *s, const char *name, struct ci_ref *out, int cap)
+{ return ci_ref_read(s, CI_REF_ENCLOSING, name, NULL, out, cap); }
+
+int ci_store_refs_by_callee_file(struct ci_store *s, const char *name, const char *file,
+                                 struct ci_ref *out, int cap)
+{ return ci_ref_read(s, CI_REF_CALLEE_FILE, name, file, out, cap); }
+
+int ci_store_refs_by_enclosing_file(struct ci_store *s, const char *name, const char *file,
+                                    struct ci_ref *out, int cap)
+{ return ci_ref_read(s, CI_REF_ENCLOSING_FILE, name, file, out, cap); }
 
 bool ci_store_file_by_path(struct ci_store *s, const char *path,
                            struct ci_file *out, bool *found)
