@@ -810,7 +810,7 @@ struct al_library_script {
     unsigned share_calls; bool share_cancel, fail_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     bool cancel_preparation, stale_preparation;
     bool bad_preparation, fail_preparation, saw_share_review;
-    unsigned share_choice;
+    unsigned share_choice, canceled_prepare_menu;
     unsigned second_preparation;
     bool fail_after_noop;
     bool saw_recovery;
@@ -910,7 +910,12 @@ static void al_library_share_menu(struct al_library_script *s,
         !strcmp(model->actions[1].id, "share-link") &&
         !strcmp(model->actions[2].id, "more-sharing") &&
         !strcmp(model->actions[3].id, "share-back");
-    event->action_index = s->share_cancel && s->share_calls ? 3 : s->share_choice;
+    if (s->cancel_preparation && s->preparations) {
+        if (!s->canceled_prepare_menu) ++s->canceled_prepare_menu;
+        event->action_index = 3;
+    } else if (s->second_preparation == 2 && s->preparations >= 2) {
+        ++s->canceled_prepare_menu; event->action_index = 3;
+    } else event->action_index = s->share_cancel && s->share_calls ? 3 : s->share_choice;
 }
 static void al_library_error_card(struct al_library_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
@@ -933,6 +938,34 @@ static bool al_library_fresh_copy_prompt(const struct zcl_present_model_v1 *mode
         if (strstr(model->items[i].value, "Ask your AI to request a copy.")) return true;
     return false;
 }
+static bool al_cancel_more_back(struct al_library_script *s,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    ++s->canceled_prepare_menu;
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "more-share-back")) {
+            event->action_index = i; return true;
+        }
+    s->valid = false; return false;
+}
+static bool al_library_special_menu(struct al_library_script *s,
+    const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event, bool *handled)
+{
+    *handled = true;
+    if (!strcmp(model->request_id, "library-home")) return al_library_home(s, model, event);
+    if (!strcmp(model->request_id, "library-share-options")) {
+        al_library_share_menu(s, model, event); return true;
+    }
+    if (!strcmp(model->request_id, "library-more-share-options") &&
+        s->cancel_preparation && s->preparations)
+        return al_cancel_more_back(s, model, event);
+    if (!strcmp(model->request_id, "library-error")) {
+        al_library_error_card(s, model, event); return true;
+    }
+    *handled = false;
+    return true;
+}
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -940,13 +973,9 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
     s->valid = s->valid && al_library_render(model, why, cap);
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
-    if (!strcmp(model->request_id, "library-home")) return al_library_home(s, model, event);
-    if (!strcmp(model->request_id, "library-share-options")) {
-        al_library_share_menu(s, model, event); return true;
-    }
-    if (!strcmp(model->request_id, "library-error")) {
-        al_library_error_card(s, model, event); return true;
-    }
+    bool handled = false;
+    bool routed = al_library_special_menu(s, model, event, &handled);
+    if (handled) return routed;
     if (s->fail_after_noop && s->calls == 4) {
         (void)snprintf(why, cap, "Fixture presentation stopped after the no-op.");
         return false;
@@ -1892,9 +1921,35 @@ static bool al_share_prepare_review(struct al_fx *f, unsigned choice)
         before.revision == after.revision && !memcmp(before.version, after.version, 32);
     zcl_command_reply_free(&reply); return ok;
 }
-static bool al_share_prepare_refused(struct al_fx *f, unsigned mode)
+static bool al_selection_identity_equal(const struct app_selection *a,
+                                        const struct app_selection *b)
+{
+    return a->revision == b->revision && !strcmp(a->app, b->app) &&
+        !strcmp(a->copy, b->copy) && !strcmp(a->datadir, b->datadir) &&
+        !memcmp(a->version, b->version, 32) && !memcmp(a->image, b->image, 32) &&
+        !memcmp(a->record, b->record, 32) && !memcmp(a->package, b->package, 32) &&
+        !memcmp(a->fork, b->fork, 32) && !memcmp(a->parent, b->parent, 32) &&
+        !memcmp(a->env, b->env, 32) && !memcmp(a->dependencies, b->dependencies, 32);
+}
+static bool al_share_cancel_checked(struct al_fx *f, const struct al_library_script *s,
+    const struct app_selection *before, const struct zcl_command_reply *reply)
+{
+    struct app_selection after;
+    return s->canceled_prepare_menu == 1 && s->calls == (s->share_choice == 2 ? 5u : 4u) &&
+        app_selection_load(f->env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK &&
+        al_selection_identity_equal(before, &after) && !s->errors && !reply->error.mutated &&
+        !strcmp(json_get_str(json_get(&reply->data, "status")), "canceled");
+}
+static bool al_share_prepare_refused(struct al_fx *f, unsigned mode, unsigned choice)
 {
     struct al_library_script s = {.actions = {0, 2}, .count = 2, .valid = true};
+    struct app_selection before;
+    if (app_selection_load(f->env.state_dir, "fixtureapp", &before) != APP_SELECTION_OK) return false;
+    if (mode == 0) {
+        s.share_choice = choice;
+        s.actions[2] = choice == 2 ? 0 : 3;
+        s.actions[3] = 3; s.actions[4] = 3; s.count = choice == 2 ? 5 : 4;
+    }
     s.cancel_preparation = mode == 0; s.fail_preparation = mode == 1;
     s.bad_preparation = mode == 2; s.stale_preparation = mode == 3; s.change_fixture = f;
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
@@ -1902,10 +1957,31 @@ static bool al_share_prepare_refused(struct al_fx *f, unsigned mode)
         al_library_prepare, al_library_share, al_library_notice);
     static const char *const errors[] = {"", "FIXTURE_FAILED", "PREPARE_FAILED", "SELECTION_STALE"};
     bool ok = s.valid && s.preparations == 1 && !s.share_calls && !s.saw_share_review;
-    if (mode == 0) ok = ok && !s.errors && !reply.error.mutated &&
-        !strcmp(json_get_str(json_get(&reply.data, "status")), "canceled");
+    if (mode == 0) ok = ok && al_share_cancel_checked(f, &s, &before, &reply);
     else ok = ok && s.errors == 1 && !strcmp(reply.error.code, errors[mode]);
     if (mode == 3) ok = ok && reply.error.mutated && json_get(&reply.data, "failure_facts");
+    zcl_command_reply_free(&reply); return ok;
+}
+
+static bool al_share_cancel_with_history(struct al_fx *f)
+{
+    struct app_selection before, after;
+    if (app_selection_load(f->env.state_dir, "fixtureapp", &before) != APP_SELECTION_OK) return false;
+    struct al_library_script s = {.actions = {0, 1, 2, 2, 3, 3}, .count = 6,
+        .valid = true, .second_preparation = 2};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_test_app_library_share(&f->env, &reply, al_library_present, &s,
+        al_library_prepare, al_library_share, al_library_notice);
+    const struct json_value *prep = json_get(&reply.data, "preparation");
+    bool ok = s.valid && s.preparations == 2 && s.canceled_prepare_menu == 1 &&
+        s.calls == 6 && !s.share_calls && !s.errors && reply.error.mutated && prep &&
+        json_get_bool(json_get(prep, "changed")) &&
+        !strcmp(json_get_str(json_get(prep, "copy")), before.copy) &&
+        app_selection_load(f->env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK &&
+        al_selection_identity_equal(&before, &after);
+    if (!ok) fprintf(stderr, "share cancel history valid=%d prepares=%u menus=%u calls=%u share=%u mutated=%d prep=%d\n",
+                     s.valid, s.preparations, s.canceled_prepare_menu, s.calls,
+                     s.share_calls, reply.error.mutated, prep != NULL);
     zcl_command_reply_free(&reply); return ok;
 }
 static int case_library_share_prepare(void)
@@ -1917,7 +1993,12 @@ static int case_library_share_prepare(void)
         PASS();
     }
     TEST("Share preparation cancellation, failure, malformed data and stale Keep never share") {
-        for (unsigned mode = 0; mode < 4; ++mode) ASSERT(al_share_prepare_refused(&f, mode));
+        for (unsigned choice = 0; choice < 3; ++choice) ASSERT(al_share_prepare_refused(&f, 0, choice));
+        for (unsigned mode = 1; mode < 4; ++mode) ASSERT(al_share_prepare_refused(&f, mode, 0));
+        PASS();
+    }
+    TEST("Canceling Share preparation returns to menu and retains prior preparation") {
+        ASSERT(al_share_cancel_with_history(&f));
         PASS();
     } _test_next:;
     return failures;

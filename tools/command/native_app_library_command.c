@@ -66,6 +66,7 @@ struct library {
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure, recovery_adoption, create_result, draft_result;
     bool operation_canceled;
+    bool preparation_canceled;
     bool share_review;
     struct json_value receive_receipt;
     struct json_value draft_receipt;
@@ -342,7 +343,7 @@ static void al_prepare_native(void *context, const struct app_selection *selecti
     json_free(&input);
 }
 static bool al_prepare_source(struct library *w, const struct app_launch_env *env,
-    struct zcl_command_reply *reply)
+    struct zcl_command_reply *reply, bool resume_cancel)
 {
     const struct library_row *r = &w->rows[w->index];
     if (!r->saved) return true;
@@ -355,7 +356,8 @@ static bool al_prepare_source(struct library *w, const struct app_launch_env *en
     if (!ok) app_confirm_forward_failure(reply, &prepared);
     else if (status && !strcmp(status, "canceled")) {
         ok = false;
-        if (!json_push_kv_str(&reply->data, "status", "canceled"))
+        if (resume_cancel && !prepared.error.mutated) w->operation_canceled = w->preparation_canceled = true;
+        else if (!json_push_kv_str(&reply->data, "status", "canceled"))
             al_fail(reply, "OUT_OF_MEMORY", "Cannot describe cancellation.");
     } else {
         const char *version = zcl_package_copy_str(&prepared.data, "version");
@@ -447,7 +449,7 @@ static bool al_setup(struct library *w, const struct app_launch_env *env,
     if (r->saved) datadir = r->selection.datadir;
     if (!datadir) datadir = zcl_native_command_datadir();
     if (!datadir || !datadir[0]) return al_fail(reply, "MISSING_DATADIR", "No app profile is bound to My Apps.");
-    return al_prepare_source(w, env, reply) && al_setup_encode(w, exe, datadir, reply);
+    return al_prepare_source(w, env, reply, false) && al_setup_encode(w, exe, datadir, reply);
 }
 static bool al_share_path(struct library *w, const struct library_row *row, struct zcl_command_reply *reply)
 {
@@ -1130,7 +1132,7 @@ static bool al_share_prepare(struct library *w, const struct app_launch_env *env
     const struct library_row *row = &w->rows[w->index];
     if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before sharing.");
     w->source_version[0] = 0;
-    if (!al_current(row, env, reply) || !al_prepare_source(w, env, reply)) return false;
+    if (!al_current(row, env, reply) || !al_prepare_source(w, env, reply, true)) return false;
     char kept[65]; zcl_hex_encode(row->selection.version, 32, kept);
     w->share_review = strcmp(w->source_version, kept) != 0;
     if (w->share_review) w->page = 7;
@@ -1152,8 +1154,12 @@ static bool al_signing_share(const char *id)
 static bool al_share_dispatch(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, struct zcl_command_reply *reply)
 {
+    bool prior_current = w->receive_current;
     w->receive_current = false;
-    if (!al_share_prepare(w, env, reply)) return false;
+    if (!al_share_prepare(w, env, reply)) {
+        if (w->preparation_canceled) w->receive_current = prior_current;
+        return w->operation_canceled;
+    }
     if (w->share_review) return true;
     if (!strcmp(id, "share-file")) return al_share(w, env, reply);
     if (!strcmp(id, "publish")) return al_publish(w, env, reply);
@@ -1202,10 +1208,13 @@ static bool al_navigation_result(struct library *w, unsigned action, const struc
     w->any_mutated |= reply->error.mutated;
     const char *id = w->model.actions[action].id;
     bool operation = al_receipt_operation(id);
+    bool draft_current = w->draft_current;
     if (operation && strcmp(id, "draft")) w->draft_current = false;
     w->operation_canceled = false;
+    w->preparation_canceled = false;
     if (operation) w->receive_failure = false;
     bool next = al_navigate(w, action, env, exe, datadir, reply);
+    if (w->preparation_canceled) w->draft_current = draft_current;
     w->any_mutated |= reply->error.mutated;
     const char *status = zcl_package_copy_str(&reply->data, "status");
     if (operation && !w->operation_canceled && reply->status == ZCL_COMMAND_STATUS_PASSED && (!status || strcmp(status, "canceled")))
@@ -1330,6 +1339,7 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
             break;
         }
         bool handled = false;
+        bool draft_result = w->draft_result;
         if (!al_external(w, env, datadir, presenter, context, reply, w->model.actions[event.action_index].id, &handled)) {
             w->action_failed = reply->status != ZCL_COMMAND_STATUS_PASSED; break;
         }
@@ -1337,6 +1347,7 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
         if (!al_navigation_result(w, event.action_index, env, exe, datadir, reply)) {
             w->action_failed = reply->status != ZCL_COMMAND_STATUS_PASSED; break;
         }
+        if (w->preparation_canceled) w->draft_result = draft_result;
     }
 }
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
