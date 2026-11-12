@@ -371,8 +371,12 @@ static void inv_body_fingerprints(const char *src, const char *clean,
         if (isspace((unsigned char)clean[i])) { i++; continue; }
         struct inv_fp_token tok;
         inv_next_token(&tok, src, clean, start, end, i);
-        inv_hash_token(&exact, tok.exact, tok.exact_len);
-        inv_hash_token(&shape, tok.shape, strlen(tok.shape));
+        /* Token builders terminate both buffers; include that separator
+         * in the write without changing the fingerprint byte stream. */
+        sha3_256_write(&exact, (const unsigned char *)tok.exact,
+                       tok.exact_len + 1);
+        sha3_256_write(&shape, (const unsigned char *)tok.shape,
+                       strlen(tok.shape) + 1);
         if (small_count < 64) inv_cpy(small[small_count++], 32, tok.exact);
         tokens++;
         i = tok.next;
