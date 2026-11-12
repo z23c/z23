@@ -337,10 +337,11 @@ static void set_amount(JNIEnv *env)
     } else if (typing && ui.input) (void)zj_keyboard(env, ui.activity, ui.input, true);
 }
 
-enum wallet_outcome zapp_wallet_ui_press(JNIEnv *env, size_t button)
+enum wallet_outcome zapp_wallet_ui_press(JNIEnv *env, size_t button, bool home_origin)
 {
     if (button >= ui.button_count) return WALLET_STAY;
     const struct wallet_item item = ui.screen.items[ui.button_item[button]];
+    if (home_origin && item.action == WALLET_ACT_BACK) return WALLET_LEAVE;
     if (item.action == WALLET_ACT_SET_AMOUNT) { set_amount(env); return WALLET_STAY; }
     enum wallet_outcome outcome = wallet_screens_activate(item.action, item.arg);
     if (outcome == WALLET_STAY) zapp_wallet_ui_render(env);

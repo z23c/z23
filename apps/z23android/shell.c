@@ -756,7 +756,7 @@ static void set_protection(JNIEnv *env, enum screen next)
 /* What a screen does as it comes into view. */
 static void enter_screen(JNIEnv *env, enum screen next, enum wallet_page page, enum screen origin)
 {
-    shell.receive_from_home = next == SCREEN_WALLET && page == WALLET_PAGE_RECEIVE && origin == SCREEN_HOME;
+    if (next == SCREEN_WALLET) shell.receive_from_home = page == WALLET_PAGE_RECEIVE && origin == SCREEN_HOME;
     if (next == SCREEN_APPS) { refresh_apps(env); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
@@ -851,8 +851,10 @@ static void back(JNIEnv *env)
         if (!shell.fleet_review_started) zapp_controller_cancel_scan();
         go(env, shell.before_scan);
     } else if (shell.current == SCREEN_WALLET) {
-        if (shell.receive_from_home) go(env, SCREEN_HOME);
-        else if (wallet_screens_back()) zapp_wallet_ui_render(env);
+        if (shell.receive_from_home) {
+            shell.receive_from_home = false;
+            go(env, SCREEN_HOME);
+        } else if (wallet_screens_back()) zapp_wallet_ui_render(env);
         else go(env, SCREEN_HOME);
     } else if (shell.current == SCREEN_SEND) {
         go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
@@ -1045,18 +1047,25 @@ static void share_wallet(JNIEnv *env)
 }
 static void run_wallet(JNIEnv *env, size_t button)
 {
-    enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
+    enum wallet_outcome outcome = zapp_wallet_ui_press(env, button, shell.receive_from_home);
     uint64_t spendable = 0;
     if (outcome == WALLET_SEND && wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);
     if (outcome == WALLET_SEND) open_send(env, NULL, "", false);
     else if (outcome == WALLET_MAKE_PRIVATE) open_send(env, NULL, "", true);
     else if (outcome == WALLET_SHARE) share_wallet(env);
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
-    else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
+    else if (outcome == WALLET_LEAVE) {
+        shell.receive_from_home = false;
+        go(env, SCREEN_HOME);
+    }
 }
-/* Receive on the wallet screen, for a Send page that had nothing to send. Back on Receive returns to Funds. */
+/* Receive from Send or a share result. A Home-origin visit keeps Home for Back; other entries return to Funds. */
 static void open_receive(JNIEnv *env)
 {
+    if (shell.receive_from_home) {
+        go_page(env, SCREEN_WALLET, WALLET_PAGE_RECEIVE);
+        return;
+    }
     go(env, SCREEN_WALLET);
     if (shell.current != SCREEN_WALLET) return;
     (void)wallet_screens_activate(WALLET_ACT_RECEIVE, 0);
