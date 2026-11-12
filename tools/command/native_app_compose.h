@@ -26,6 +26,8 @@ bool zcl_app_optional_fields(struct json_value *out, const struct json_value *so
     const char *const *keys, size_t count);
 bool zcl_app_fact_add(struct json_value *facts, const char *key,
     const struct json_value *value, size_t cap);
+void zcl_app_copy_facts(struct json_value *facts, const struct json_value *data,
+    const char *const *keys, size_t count, size_t required, size_t cap, bool *omitted);
 
 /* Run leaf `path` on `input` into `out`, which this initializes (the
  * caller always frees it). False when the leaf is not registered (*absent

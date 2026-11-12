@@ -361,3 +361,13 @@ bool zcl_app_fact_add(struct json_value *facts, const char *key, const struct js
     if (bytes && bytes <= cap) { json_free(facts); *facts = candidate; return true; }
     json_free(&candidate); return false;
 }
+
+void zcl_app_copy_facts(struct json_value *facts, const struct json_value *data,
+    const char *const *keys, size_t count, size_t required, size_t cap, bool *omitted)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *v = json_get(data, keys[i]);
+        if (!v) { if (i < required) *omitted = true; continue; }
+        if (!json_get(facts, keys[i]) && !zcl_app_fact_add(facts, keys[i], v, cap)) *omitted = true;
+    }
+}

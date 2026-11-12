@@ -3085,7 +3085,7 @@ static bool ast_publish_preconsent(struct ac_fixture *f, struct ast_publish_view
         !strcmp(reply.error.code, "SELECTION_STALE") && !ast_publish_offers && !ast_publish_posts;
     zcl_command_reply_free(&reply); view->stale = false; return ok;
 }
-struct ast_publish_library_view { struct ast_publish_view publish; unsigned menus, notices; };
+struct ast_publish_library_view { struct ast_publish_view publish; unsigned menus, notices; bool refuse_notice; };
 static bool ast_publish_library_present(void *context, const struct zcl_present_model_v1 *m,
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -3115,6 +3115,7 @@ static bool ast_publish_library_notice(void *context, const struct zcl_present_m
     struct ast_publish_library_view *v = context;
     if (!strcmp(m->request_id, "library-publish-result")) {
         bool close = false, redraw = false; v->notices++;
+        if (v->refuse_notice) return false;
         char expected[512];
         int n = snprintf(expected, sizeof(expected), "http://%s/board/apps/v1/%s",
             "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion",
@@ -3139,6 +3140,40 @@ static bool ast_publish_library(struct ac_fixture *f, const char *version)
         json_get(&reply.data, "public_link") && !json_get(&reply.data, "status");
     zcl_command_reply_free(&reply); return ok;
 }
+static bool ast_publish_notice_wire(struct zcl_command_reply *reply)
+{
+    const char *post = "3333333333333333333333333333333333333333333333333333333333333333";
+    const char *link = "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion/board/apps/v1/"
+                       "3333333333333333333333333333333333333333333333333333333333333333";
+    const struct zcl_command_spec *spec = abc_spec("app.library");
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool parsed = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    bool ok = parsed && ast_fact_is(error, "code", "PRESENTATION_FAILED") &&
+        json_get_bool(json_get(error, "mutated")) && ast_fact_is(facts, "post_id", post) &&
+        ast_fact_is(facts, "public_link", link) && ast_fact_is(facts, "package_root", ast_publish_package) &&
+        ast_fact_is(facts, "publisher_fingerprint", ast_publish_publisher);
+    if (!ok) printf("  publish notice wire parsed=%d bytes=%zu facts=%d\n", parsed, n, facts != NULL);
+    json_free(&doc); return ok;
+}
+static bool ast_publish_notice_refused(struct ac_fixture *f, const char *version)
+{
+    struct ast_publish_library_view view = {.publish = {.f = f, .version = version}, .refuse_notice = true};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.library.v1");
+    int posts = ast_publish_posts;
+    zcl_test_app_library_native_at(&f->env, "/fixture/z23", f->world.alice_datadir,
+        &reply, ast_publish_library_present, &view, ast_publish_library_notice);
+    bool ran = reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
+        !strcmp(reply.error.code, "PRESENTATION_FAILED") && view.menus == 2 && view.notices == 1 &&
+        ast_publish_posts == posts + 1 && ast_publish_identity_ok;
+    bool wire = ast_publish_notice_wire(&reply);
+    if (!ran || !wire) printf("  publish notice refused ran=%d wire=%d posts=%d notices=%u code=%s\n",
+                              ran, wire, ast_publish_posts - posts, view.notices, reply.error.code);
+    zcl_command_reply_free(&reply); return ran && wire;
+}
 static bool ast_publish_snapshot(struct ac_fixture *f)
 {
     char output[900], version[65], publisher[67];
@@ -3160,6 +3195,7 @@ static bool ast_publish_snapshot(struct ac_fixture *f)
         ast_reply_is(&reply, "publisher_fingerprint", publisher);
     zcl_command_reply_free(&reply);
     ok = ok && ast_publish_library(f, version);
+    if (!ast_publish_notice_refused(f, version)) ok = false;
     /* The direct failure probes start after the separate UI publication. */
     ast_publish_posts = 1;
     ok = ok && ast_publish_failures(f, &view, version, publisher);

@@ -64,7 +64,7 @@ struct library {
     bool action_failed;
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
-    bool receive_failure, recovery_adoption, create_result, draft_result;
+    bool receive_failure, recovery_adoption, create_result, draft_result, publish_result;
     bool operation_canceled;
     bool preparation_canceled;
     bool share_review;
@@ -697,7 +697,7 @@ static bool al_publish(struct library *w, const struct app_launch_env *env, stru
     if (inner.status != ZCL_COMMAND_STATUS_PASSED) app_confirm_forward_failure(reply, &inner);
     else { json_free(&reply->data); reply->data = inner.data; json_init(&inner.data); reply->error.mutated = true; }
     zcl_command_reply_free(&inner);
-    if (reply->status == ZCL_COMMAND_STATUS_PASSED) al_publish_notice(w, reply);
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED) { w->publish_result = true; al_publish_notice(w, reply); }
     return false;
 }
 static bool al_refresh_after_help(struct library *w, const struct app_launch_env *env,
@@ -974,16 +974,8 @@ static void al_copy_adoption_facts(struct json_value *facts, const struct json_v
     }
 }
 
-static void al_copy_draft_facts(struct json_value *facts, const struct json_value *data,
-    size_t cap, bool *omitted)
-{
-    const char *keys[] = {"kept", "name", "version", "continuation", "continuation_executed", "preview_opened", "operations"};
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
-        const struct json_value *v = json_get(data, keys[i]);
-        if (!v) { if (!i) *omitted = true; continue; }
-        if (!json_get(facts, keys[i]) && !zcl_app_fact_add(facts, keys[i], v, cap)) *omitted = true;
-    }
-}
+static const char *const al_draft_fact_keys[] = {"kept", "name", "version", "continuation", "continuation_executed", "preview_opened", "operations"};
+static const char *const al_publish_fact_keys[] = {"post_id", "public_link", "package_root", "publisher_fingerprint"};
 static void al_bound_preparation(struct library *w, struct json_value *facts,
     const struct json_value *old, size_t cap, bool *omitted)
 {
@@ -1025,7 +1017,8 @@ static void al_bound_failure(struct library *w, struct zcl_command_reply *reply)
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     bool omitted = false;
     size_t cap = al_failure_facts_cap(reply, &omitted);
-    if (w->draft_result) al_copy_draft_facts(&facts, &reply->data, cap, &omitted);
+    if (w->publish_result) zcl_app_copy_facts(&facts, &reply->data, al_publish_fact_keys, 4, 4, cap, &omitted);
+    if (w->draft_result) zcl_app_copy_facts(&facts, &reply->data, al_draft_fact_keys, 7, 1, cap, &omitted);
     if (w->has_draft && !zcl_app_fact_add(&facts, "historical_draft_keep", &w->draft_receipt, cap)) {
         omitted = true;
         (void)al_compact_keep(&facts, "historical_draft_keep", &w->draft_receipt, cap);
