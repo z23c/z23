@@ -437,6 +437,7 @@ int check_wallet_view_send_review_rejects_negative_amount(void)
         ok = ok && wv_has("0.01");        /* amount shown */
         ok = ok && wv_has("Review");
         ok = ok && wv_has("Confirm Send");
+        ok = ok && wv_has("Unavailable");  /* no DB: no fabricated balance */
         if (ok) printf("OK\n");
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }

@@ -6,6 +6,7 @@
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"
 #include "controllers/vault_intent_controller.h"
+#include "core/amount.h"
 #include "controllers/sovereignty_controller.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "models/activerecord.h"
@@ -211,27 +212,34 @@ static const char *review_rejection_reason(bool addr_ok,
 }
 
 /* Transparent + shielded wallet balance via a short-lived DB handle. */
-static int64_t query_total_spendable_balance(void) {
-    int64_t t_balance = 0, z_balance = 0;
+static bool query_total_spendable_balance(int64_t *out) {
     sqlite3 *db = wv_open_db();
-    if (db) {
-        t_balance = wv_query_ground_truth_balance(db, NULL);
-        z_balance = wv_query_shielded_balance(db, NULL);
-        sqlite3_close(db);
+    if (!db || !out) {
+        if (db) sqlite3_close(db);
+        return false;
     }
-    return t_balance + z_balance;
+    int64_t t_balance = wv_query_ground_truth_balance(db, NULL);
+    int64_t z_balance = wv_query_shielded_balance(db, NULL);
+    sqlite3_close(db);
+    if (!MoneyRange(t_balance) || !MoneyRange(z_balance))
+        return false;
+    *out = t_balance + z_balance;
+    return true;
 }
 
 /* Render the review table: amounts plus the t/z privacy pill and warning. */
 static size_t render_send_review_details(uint8_t *r, size_t max, size_t off,
                                          const char *safe_addr, int64_t amount,
                                          int64_t fee, int64_t total_deducted,
-                                         int64_t remaining, bool is_shielded) {
+                                         int64_t remaining, bool balance_known, bool is_shielded) {
     char amt_s[32], fee_s[32], tot_s[32], rem_s[32];
     zcl_format_zcl(amt_s, sizeof(amt_s), amount);
     zcl_format_zcl(fee_s, sizeof(fee_s), fee);
     zcl_format_zcl(tot_s, sizeof(tot_s), total_deducted);
-    zcl_format_zcl(rem_s, sizeof(rem_s), remaining);
+    if (balance_known)
+        zcl_format_zcl(rem_s, sizeof(rem_s), remaining);
+    else
+        snprintf(rem_s, sizeof(rem_s), "Unavailable");
 
     const char *pw = is_shielded
         ? "<div style='color:#fbbf24;font-size:13px;margin-top:4px'>"
@@ -313,14 +321,15 @@ size_t serve_send_review(uint8_t *r, size_t max,
     int64_t total_deducted = amount + fee;
 
     /* Query balance — use BOTH transparent and shielded */
-    int64_t spendable = query_total_spendable_balance();
-    int64_t remaining = spendable - total_deducted;
+    int64_t spendable = 0;
+    bool balance_known = query_total_spendable_balance(&spendable);
+    int64_t remaining = balance_known ? spendable - total_deducted : 0;
 
     char safe_addr[256];
     html_escape(safe_addr, sizeof(safe_addr), address);
 
     off = render_send_review_details(r, max, off, safe_addr, amount,
-        fee, total_deducted, remaining, is_shielded);
+        fee, total_deducted, remaining, balance_known, is_shielded);
 
     /* Cancel / Confirm buttons */
     off = render_send_confirm_buttons(r, max, off, safe_addr, amount,
