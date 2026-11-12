@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { ERRORS_SHOWN = 5, PLUGINS_SHOWN = 8, LINE_SHOWN = 200, REPLY_BYTES = 16384,
+enum { ERRORS_SHOWN = 5, PLUGINS_SHOWN = 8, SAVED_SHOWN = 2, LINE_SHOWN = 200, REPLY_BYTES = 16384,
        TEXT_BYTES = 1400, READ_MS = 15000, CONFIRM_MS = 75000 };
 #define ERRORS_COMMAND "z23 ops logs --pattern=ERROR --since_secs=86400 --max_lines=5"
 #define PLAN_COMMAND "z23 ops node restart"
@@ -143,11 +143,34 @@ static bool plugin_valid(const struct json_value *plugin, const char *store, con
         slot_text(plugin, "current", "current_state", current, 32) &&
         slot_text(plugin, "last_good", "last_good_state", last_good, 32);
 }
-static bool plugin_line(char *text, size_t cap, size_t *used, const char *name, const char *store,
-                        const char *current, const char *last_good)
+static bool saved_ids_text(const struct json_value *plugin, char *out, size_t cap)
 {
-    int n = snprintf(text + *used, cap - *used, "\n%s\n current %s · last-good %s%s%s", name, current, last_good,
-                     strcmp(store, "ok") ? " · store " : "", strcmp(store, "ok") ? store : "");
+    const char *current = json_get_str(json_get(plugin, "current"));
+    const char *last_good = json_get_str(json_get(plugin, "last_good"));
+    const struct json_value *generations = json_get(plugin, "generations");
+    size_t used = 0, shown = 0, omitted = 0;
+    out[0] = 0;
+    for (size_t i = 0; i < json_size(generations); ++i) {
+        const char *id = json_get_str(json_at(generations, i));
+        if (!strcmp(id, current) || !strcmp(id, last_good)) continue;
+        if (shown == SAVED_SHOWN) { omitted++; continue; }
+        int n = snprintf(out + used, cap - used, "%s%.12s", shown ? ", " : "", id);
+        if (n < 0 || (size_t)n >= cap - used) return false;
+        used += (size_t)n;
+        shown++;
+    }
+    if (omitted) {
+        int n = snprintf(out + used, cap - used, " (+%zu more)", omitted);
+        if (n < 0 || (size_t)n >= cap - used) return false;
+    }
+    return true;
+}
+static bool plugin_line(char *text, size_t cap, size_t *used, const char *name, const char *store,
+                        const char *current, const char *last_good, const char *saved)
+{
+    int n = snprintf(text + *used, cap - *used, "\n%s\n current %s · last-good %s%s%s%s%s", name, current, last_good,
+                     strcmp(store, "ok") ? " · store " : "", strcmp(store, "ok") ? store : "",
+                     saved[0] ? "\n other saved IDs: " : "", saved);
     if (n < 0 || (size_t)n >= cap - *used) return false;
     *used += (size_t)n;
     return true;
@@ -166,10 +189,11 @@ static bool plugins_text(const struct json_value *data, char *text, size_t cap)
     for (size_t i = 0; i < total; ++i) {
         const struct json_value *plugin = json_at(plugins, i), *store_value = json_get(plugin, "generations_state");
         const char *name, *store = json_get_str(store_value);
-        char current[32], last_good[32];
-        if (!plugin_valid(plugin, store, &name, current, last_good)) return false;
+        char current[32], last_good[32], saved[64];
+        if (!plugin_valid(plugin, store, &name, current, last_good) ||
+            !saved_ids_text(plugin, saved, sizeof(saved))) return false;
         if (i >= shown) continue;
-        if (!plugin_line(text, cap, &used, name, store, current, last_good)) return false;
+        if (!plugin_line(text, cap, &used, name, store, current, last_good, saved)) return false;
     }
     if (total > shown) {
         int n = snprintf(text + used, cap - used, "\n%zu more not shown.", total - shown);

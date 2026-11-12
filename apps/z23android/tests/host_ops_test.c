@@ -131,6 +131,23 @@ static void stale_and_failed(void)
 }
 #define HEX16 "0123456789abcdef"
 #define PLUGIN_GEN HEX16 HEX16 HEX16 HEX16 HEX16 HEX16 HEX16 HEX16
+static void saved_generations_view(void)
+{
+    char a[] = PLUGIN_GEN, b[] = PLUGIN_GEN, c[] = PLUGIN_GEN, d[] = PLUGIN_GEN;
+    a[0] = 'a'; b[0] = 'b'; c[0] = 'c'; d[0] = 'd';
+    char rich[2048];
+    int rich_len = snprintf(rich, sizeof(rich), "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
+        "\"name\":\"clips\",\"current\":\"" PLUGIN_GEN "\",\"last_good\":\"%s\",\"current_state\":\"ok\","
+        "\"last_good_state\":\"ok\",\"generations_state\":\"ok\",\"generations\":[\"" PLUGIN_GEN "\",\"%s\",\"%s\",\"%s\",\"%s\"]}]}}",
+        a, a, b, c, d);
+    assert(rich_len > 0 && (size_t)rich_len < sizeof(rich));
+    struct fake f = {.reply = rich};
+    struct zapp_ops ops = {.exec = fake_exec, .ctx = &f};
+    ask(&ops, "plugins r2", 1000);
+    const char *saved = strstr(field("text"), "\n other saved IDs: ");
+    assert(saved && !strstr(saved, "a123456789ab") && !strstr(saved, "d123456789ab"));
+    assert(!strcmp(saved, "\n other saved IDs: b123456789ab, c123456789ab (+1 more)"));
+}
 static void plugins_view(void)
 {
     struct fake f = {.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
@@ -142,6 +159,8 @@ static void plugins_view(void)
     assert(!strcmp(field("host"), "r2") && !strcmp(field("action"), "plugins"));
     assert(strstr(field("text"), "Inventory scan only; signatures are not rechecked."));
     assert(strstr(field("text"), "clips\n current 0123456789ab (ok) · last-good - (missing)"));
+    assert(!strstr(field("text"), "other saved IDs"));
+    saved_generations_view();
     f.reply = "{\"ok\":true,\"data\":{\"schema\":\"zcl.plugin_list.v1\",\"count\":1,\"plugins\":[{"
         "\"name\":\"clips\",\"current\":\"\",\"last_good\":\"\",\"current_state\":\"unreadable\","
         "\"last_good_state\":\"corrupt\",\"generations_state\":\"corrupt\",\"generations\":[]}]}}";

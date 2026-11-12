@@ -262,8 +262,9 @@ reads "Private · waiting for onion peers (1 of 2)".
 Under the fleet list in **More**, **Host** selects one fleet host, **Show errors**
 lists its last five `ERROR` log lines from the past 24 hours (`z23 ops logs`, read-only), and **Plugins**
 runs the fixed read-only `z23 plugin list` command on that host. It shows up to eight plugin names,
-current and last-good generation prefixes and slot health, with a note when more were omitted. An
-oversize reply is refused rather than truncated. This is an inventory scan, not a fresh signature
+current and last-good generation prefixes and slot health. Each plugin also shows up to two other
+stored generation prefixes and a count of any others; omitted plugins are counted too. An oversize
+reply is refused rather than truncated. This is an inventory scan, not a fresh signature
 verification; it does not fetch, install, switch or load
 plugin code. The isolated voice preview also offers **Host** and **Plugins**, but not **Show errors**
 or the restart controls. The Assistant reserves three lines for live status so a fleet report does not
