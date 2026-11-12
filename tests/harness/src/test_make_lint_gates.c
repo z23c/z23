@@ -1997,15 +1997,19 @@ static int t_registry_query_scope(void)
         "grep -Fx 'EPOCH=[]' \"$work/header\" >/dev/null && grep -Fx 'DEP=[]' \"$work/header\" >/dev/null || fail header-profile\n"
         "for goal in z23 fixture-unknown; do make_probe -n VENDOR_LIBS= ZCL_TOR=stub print-zcode-monolith-lib-sources \"$goal\" > \"$work/mixed\" 2>&1 || fail mixed; grep -Fx 'EPOCH=[build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23]' \"$work/mixed\" >/dev/null || fail mixed-epoch; grep -Fx 'DEP=[build-only dev test-fast test-strict coverage fuzz node-c23]' \"$work/mixed\" >/dev/null || fail mixed-dep; done\n"
         "make_probe -n VENDOR_LIBS= ZCL_TOR=stub > \"$work/default\" 2>&1 || fail default; grep -Fx 'EPOCH=[node-c23]' \"$work/default\" >/dev/null && grep -Fx 'DEP=[node-c23]' \"$work/default\" >/dev/null || fail default-profile\n";
+    static const char query_profiles[] =
+        "for goal in help print-CFLAGS; do make_probe -n VENDOR_LIBS= ZCL_TOR=stub \"$goal\" > \"$work/pure-$goal\" 2>&1 || fail \"$goal-run\"; grep -Fx 'EPOCH=[]' \"$work/pure-$goal\" >/dev/null && grep -Fx 'DEP=[]' \"$work/pure-$goal\" >/dev/null || fail \"$goal-profile\"; done\n"
+        "for goals in 'contexts/explorer/views/include/views/site_css.h print-node-c23-srcs' 'print-game-closure contexts/explorer/views/include/views/site_css.h'; do make_probe -n VENDOR_LIBS= ZCL_TOR=stub $goals > \"$work/pure-header\" 2>&1 || fail pure-header; grep -Fx 'EPOCH=[]' \"$work/pure-header\" >/dev/null && grep -Fx 'DEP=[]' \"$work/pure-header\" >/dev/null || fail pure-header-profile; done\n";
     static const char bootstrap[] =
         "make_probe -n VENDOR_LIBS=/missing/z23-vendor \"VENDOR_BOOTSTRAP_MK=$work/vendor.mk\" ZCL_TOR=stub print-zcode-monolith-lib-sources >\"$work/vendor-query\" 2>&1 || fail vendor-query\n"
         "for goal in z23 fixture-unknown; do if make_probe -n VENDOR_LIBS=/missing/z23-vendor \"VENDOR_BOOTSTRAP_MK=$work/vendor.mk\" ZCL_TOR=stub print-zcode-monolith-lib-sources \"$goal\" >\"$work/vendor-mixed\" 2>&1; then fail vendor-mixed-accepted; fi; grep -F VENDOR_SENTINEL \"$work/vendor-mixed\" >/dev/null || fail vendor-mixed-reason; done\n"
         "make_probe -n VENDOR_LIBS= ZCL_TOR=full 'ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)' print-zcode-monolith-lib-sources >\"$work/tor-query\" 2>&1 || fail tor-query\n"
         "for goal in z23 fixture-unknown; do if make_probe -n VENDOR_LIBS= ZCL_TOR=full 'ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)' print-zcode-monolith-lib-sources \"$goal\" >\"$work/tor-mixed\" 2>&1; then fail tor-mixed-accepted; fi; grep -F TOR_SENTINEL \"$work/tor-mixed\" >/dev/null || fail tor-mixed-reason; done\n";
-    char script[sizeof(setup) + sizeof(checks) + sizeof(bootstrap) - 2];
+    char script[sizeof(setup) + sizeof(checks) + sizeof(query_profiles) + sizeof(bootstrap) - 3];
     memcpy(script, setup, sizeof(setup) - 1);
     memcpy(script + sizeof(setup) - 1, checks, sizeof(checks) - 1);
-    memcpy(script + sizeof(setup) + sizeof(checks) - 2, bootstrap, sizeof(bootstrap));
+    memcpy(script + sizeof(setup) + sizeof(checks) - 2, query_profiles, sizeof(query_profiles) - 1);
+    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(query_profiles) - 3, bootstrap, sizeof(bootstrap));
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "registry_query", "scope");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);

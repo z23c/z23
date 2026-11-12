@@ -637,7 +637,9 @@ else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify
 ZCL_EPOCH_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only dev rank-pair,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags print-zcode-monolith-lib-sources,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags print-zcode-monolith-lib-sources print-node-c23-srcs print-game-closure,$(ZCL_EPOCH_SINGLE_GOAL)),)
+# Source queries also reach this branch with generated-header companions,
+# when their standalone-helper exemptions above no longer apply.
 ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # Windows has no native proof producer yet.  Its ordinary developer binary
@@ -2191,8 +2193,8 @@ else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
-ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),print-zcode-monolith-lib-sources)
-# This read-only query prints LIB_SRCS; it consumes no profile objects.
+ifneq ($(filter help print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags print-zcode-monolith-lib-sources print-node-c23-srcs print-game-closure,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+# These queries read configuration or list sources, without profile objects.
 ZCL_DEPFILE_PROFILES :=
 else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
 # The generator is compiled directly; no profile %.o depfile graph is consumed.
