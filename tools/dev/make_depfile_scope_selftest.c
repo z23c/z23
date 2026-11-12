@@ -126,11 +126,43 @@ static void setup(void)
     for (size_t i = 0; i < 5; ++i) fprintf(file, "%s/%s.o ", make_path(work), profiles[i]);
     fprintf(file, "\nfast-compile build-only t-fast t dev-failure-execution-id: $(ZCL_DEP_PROBE_OBJECTS)\n"
         "t-hotswap hotswap-test-so: $(ZCL_DEP_PROBE_OBJECTS)\n\t@:\n"
-        "zclassic23 z23 z23-package-verify help: $(ZCL_DEP_PROBE_OBJECTS)\n"
+        "zclassic23 z23 z23-package-verify help dev-proof-bundle-prefork: $(ZCL_DEP_PROBE_OBJECTS)\n"
         "zcl-depfile-unknown zcl-depfile-default: $(ZCL_DEP_PROBE_OBJECTS)\n\t@:\n"
         ".DEFAULT_GOAL := zcl-depfile-default\n"
-        "$(info ZCL_EPOCH_PROBE=[$(ZCL_EPOCH_PROFILES)])\n");
+        "$(info ZCL_EPOCH_PROBE=[$(ZCL_EPOCH_PROFILES)])\n"
+        "$(info ZCL_DEP_PROFILES_PROBE=[$(ZCL_DEPFILE_PROFILES)])\n");
     if (ferror(file) || fclose(file) != 0) fail("probe Makefile write failed");
+}
+
+static bool profile_bundle_query(const char *name)
+{
+    return strstr(name, "bundle") != NULL;
+}
+
+static bool profile_probe_ok(const char *name, int rc)
+{
+    return rc == 0 || (rc == 1 && profile_bundle_query(name));
+}
+
+static void profile_bundle_dep_assert(const char *name, unsigned mask, const char *data)
+{
+    const char *expected = mask == 31 ?
+        "build-only dev test-fast test-strict coverage fuzz node-c23" :
+        "dev test-fast node-c23";
+    if (!strstr(data, text("ZCL_DEP_PROFILES_PROBE=[%s]", expected)))
+        fail(text("probe=%s depfile profiles expected=[%s]", name, expected));
+}
+
+static void profile_rebuild_assert(const char *name, unsigned mask, const char *data)
+{
+    for (size_t j = 0; j < 5; ++j) {
+        bool present = strstr(data, text("ZCL_DEP_REBUILD=%s", profiles[j])) != NULL;
+        if (present != ((mask & (1u << j)) != 0)) {
+            fprintf(stderr, "%s\n", data);
+            fail(text("probe=%s profile=%s present=%d expected=%d", name, profiles[j],
+                present, (mask & (1u << j)) != 0));
+        }
+    }
 }
 
 static void profile_probes(void)
@@ -145,6 +177,12 @@ static void profile_probes(void)
         {"hot-mixed", 31, {"t-hotswap", "t-fast", "ONLY=boot_phase"}, NULL},
         {"node", 16, {"zclassic23"}, "node-c23"}, {"node-alias", 16, {"z23"}, "node-c23"},
         {"verifier", 16, {"z23-package-verify"}, "node-c23"},
+        {"bundle", 22, {"dev-proof-bundle-prefork"}, "dev test-fast node-c23"},
+        {"bundle-node", 22, {"dev-proof-bundle-prefork", "z23"}, "dev test-fast node-c23"},
+        {"node-bundle", 22, {"z23", "dev-proof-bundle-prefork"}, "dev test-fast node-c23"},
+        {"bundle-repeat", 22, {"z23", "dev-proof-bundle-prefork", "z23"}, "dev test-fast node-c23"},
+        {"bundle-header", 22, {"dev-proof-bundle-prefork", "z23", "contexts/explorer/views/include/views/site_css.h"}, "dev test-fast node-c23"},
+        {"bundle-unknown", 31, {"dev-proof-bundle-prefork", "z23", "zcl-depfile-unknown"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"},
         {"mixed", 31, {"fast-compile", "build-only"}, NULL},
         {"unknown", 31, {"zcl-depfile-unknown"}, NULL}, {"default", 16, {NULL}, NULL},
         {"header-node", 16, {"contexts/explorer/views/include/views/site_css.h", "z23"}, "node-c23"},
@@ -165,7 +203,7 @@ static void profile_probes(void)
         char *scratch = text("%s/%s.scratch", work, probes[i].name);
         directory(scratch);
         logs[i] = text("%s/%s.out", work, probes[i].name);
-        const char *argv[48] = {"make", "-f", text("%s/probe.mk", work), "--no-print-directory", "-n",
+        const char *argv[48] = {"make", "-f", text("%s/probe.mk", work), "--no-print-directory", profile_bundle_query(probes[i].name) ? "-q" : "-n",
             probes[i].epoch ? "BUILD_EPOCH_CLEAN_ONLY=0" : "ZCL_STANDALONE_CLEAN=1", text("BUILD_SOURCE_RECORD=%s", source_record),
             text("BUILD_DIR=%s/build", scratch), text("BIN_DIR=%s/build/bin", scratch),
             "VIEW_GEN_HEADERS=", "VIEW_GEN_HEADERS_EARLY=", "VENDOR_LIBS=", "ZCL_TOR=stub"};
@@ -194,7 +232,7 @@ static void profile_probes(void)
     }
     bool failed = false;
     for (size_t i = 0; i < count; ++i) {
-        if (probe_wait(children[i]) != 0) {
+        if (!profile_probe_ok(probes[i].name, probe_wait(children[i]))) {
             char *data = output(logs[i]);
             fprintf(stderr, "%s\nMake probe failed: %s\n", data, probes[i].name);
             free(data);
@@ -208,14 +246,12 @@ static void profile_probes(void)
             fprintf(stderr, "%s\n", data);
             fail(text("probe=%s epoch expected=[%s]", probes[i].name, probes[i].epoch));
         }
-        for (size_t j = 0; j < 5; ++j) {
-            bool present = strstr(data, text("ZCL_DEP_REBUILD=%s", profiles[j])) != NULL;
-            if (present != ((probes[i].mask & (1u << j)) != 0)) {
-                fprintf(stderr, "%s\n", data);
-                fail(text("probe=%s profile=%s present=%d expected=%d", probes[i].name, profiles[j],
-                    present, (probes[i].mask & (1u << j)) != 0));
-            }
+        if (profile_bundle_query(probes[i].name)) {
+            profile_bundle_dep_assert(probes[i].name, probes[i].mask, data);
+            free(data);
+            continue;
         }
+        profile_rebuild_assert(probes[i].name, probes[i].mask, data);
         free(data);
     }
     probe_count = 0; /* all profile children were reaped; reuse the bounded slots */

@@ -609,6 +609,9 @@ ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
 ZCL_PROOF_PLAN_GOALS := dev-proof-plan $(BUILD_DIR)/dev-proof/plan.env
+# The prefork bundle already consumes all three profiles needed by z23.
+# Recognize only this closed goal set; any other companion keeps the fallback.
+ZCL_PROOF_BUNDLE_NODE_ONLY := $(if $(filter dev-proof-bundle-prefork,$(ZCL_PROFILE_GOALS)),$(if $(filter-out dev-proof-bundle-prefork z23,$(ZCL_PROFILE_GOALS)),,1))
 # These release harnesses compile declared sources directly. Only their exact
 # raw goal set may omit object profiles; retain source, vendor and Tor setup.
 ZCL_RELEASE_HARNESS_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23-bootstrap install-selftest,$(MAKECMDGOALS))),,1),)
@@ -634,6 +637,8 @@ else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_RELEASE_HARNESS_ONLY),1)
 ZCL_EPOCH_PROFILES :=
+else ifeq ($(ZCL_PROOF_BUNDLE_NODE_ONLY),1)
+ZCL_EPOCH_PROFILES := dev test-fast node-c23
 else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
 ZCL_EPOCH_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
 ifneq ($(filter help dev-package-verifier-ensure,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -670,10 +675,6 @@ else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # therefore owns only the dev epoch; the explicit proof bundle below keeps the
 # complete dev+test-fast graph on platforms that can consume it.
 ZCL_EPOCH_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),dev-proof-bundle-prefork)
-# The standalone lint-tool closure includes the wiki qualifier, which shares
-# the public node object graph. Select its real epoch before acquiring leases.
-ZCL_EPOCH_PROFILES := dev test-fast node-c23
 else ifneq ($(filter dev-proof-bundle dev-proof-producer $(ZCL_PROOF_PLAN_GOALS) ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -2323,6 +2324,8 @@ else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(ZCL_RELEASE_HARNESS_ONLY),1)
 ZCL_DEPFILE_PROFILES :=
+else ifeq ($(ZCL_PROOF_BUNDLE_NODE_ONLY),1)
+ZCL_DEPFILE_PROFILES := dev test-fast node-c23
 else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
 ifneq ($(filter help print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags print-zcode-monolith-lib-sources print-node-c23-srcs print-game-closure,$(ZCL_DEPFILE_SINGLE_GOAL)),)
@@ -2359,10 +2362,6 @@ else ifneq ($(filter lint lint-preflight,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 # compile and link the dev node and package verifier, so a header edit must
 # invalidate those objects.  An empty profile relinked stale objects.
 ZCL_DEPFILE_PROFILES := dev
-else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),dev-proof-bundle-prefork)
-# Match the epoch selection: header edits must invalidate the shared node
-# objects and the qualifier main before the prefork bundle is admitted.
-ZCL_DEPFILE_PROFILES := dev test-fast node-c23
 else ifneq ($(filter dev-proof-bundle ff,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev test-fast
 else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast android-snapshot-recovery-build test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),)
