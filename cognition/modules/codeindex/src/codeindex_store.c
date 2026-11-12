@@ -583,7 +583,8 @@ void ci_store_close(struct ci_store *s)
     if (s->put_ref_stmt) sqlite3_finalize(s->put_ref_stmt);
     sqlite3_stmt *statements[] = {s->include_page_stmt, s->defs_by_name_stmt, s->refs_by_enclosing_stmt,
         s->refs_by_callee_stmt, s->refs_by_callee_file_stmt, s->refs_by_enclosing_file_stmt,
-        s->symbol_by_name_stmt, s->symbol_by_name_path_stmt};
+        s->symbol_by_name_stmt, s->symbol_by_name_path_stmt,
+        s->dependents_stmt, s->include_edge_count_stmt};
     for (size_t i = 0; i < sizeof(statements) / sizeof(statements[0]); i++)
         (void)sqlite3_finalize(statements[i]);
     if (s->db) sqlite3_close(s->db);

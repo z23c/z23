@@ -4560,6 +4560,131 @@ static int ci_reverse_public(struct ci_store *s)
     (void)unlink(FIX "/reverse-ci-header.h");
     return failures;
 }
+static sqlite3_stmt *ci_reverse_cached(sqlite3 *db, bool count)
+{
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s; s = sqlite3_next_stmt(db, s)) {
+        const char *sql = sqlite3_sql(s);
+        if (sql && strstr(sql, count ? "SELECT COUNT(*) FROM includes" :
+                                      "SELECT DISTINCT f.path FROM includes")) return s;
+    }
+    return NULL;
+}
+static bool ci_reverse_reuse_rounds(struct ci_store *s, bool *idle)
+{
+    sqlite3 *db = ci_store_db(s); bool ok = true; *idle = true;
+    for (int i = 0; i < 256; ++i) {
+        char out[2][256] = {{0}}; bool present = (i % 2) == 0;
+        int n = ci_store_dependents_of_file(s, present ? "shared.h" : "missing.h", out, 1);
+        bool row = n == (present ? 1 : 0) && (!present || !strcmp(out[0], "a.c"));
+        bool count = ci_store_include_edge_count(s) == 3;
+        ok = row && count && ok;
+        sqlite3_stmt *r = ci_reverse_cached(db, false), *c = ci_reverse_cached(db, true);
+        *idle = *idle && r && c && !sqlite3_stmt_busy(r) && !sqlite3_stmt_busy(c);
+    }
+    return ok;
+}
+static int ci_reverse_reuse_batch(struct ci_store *s)
+{
+    int failures = 0, prepares = 0; sqlite3 *db = ci_store_db(s);
+    bool setup = sqlite3_set_authorizer(db, ci_include_select_authorize, &prepares) == SQLITE_OK;
+    uint64_t start = monotonic_us(); bool idle = false;
+    bool ok = ci_reverse_reuse_rounds(s, &idle) && setup;
+    sqlite3_stmt *a = ci_reverse_cached(db, false), *b = ci_reverse_cached(db, true);
+    int reprepare = (a ? sqlite3_stmt_status(a, SQLITE_STMTSTATUS_REPREPARE, 0) : 0) +
+                    (b ? sqlite3_stmt_status(b, SQLITE_STMTSTATUS_REPREPARE, 0) : 0);
+    int runs = (a ? sqlite3_stmt_status(a, SQLITE_STMTSTATUS_RUN, 0) : 0) +
+               (b ? sqlite3_stmt_status(b, SQLITE_STMTSTATUS_RUN, 0) : 0);
+    printf("  codeindex: reverse reuse elapsed_us=%llu prepares=%d reprepare=%d runs=%d\n",
+           (unsigned long long)(monotonic_us() - start), prepares, reprepare, runs);
+    CI_CHECK("reverse reuse batch returns exact rows and fresh count", ok);
+    CI_CHECK("reverse and count reuse two idle statements", idle && a && b && !sqlite3_stmt_busy(a) &&
+             !sqlite3_stmt_busy(b) && prepares - reprepare == 2 && runs == 512);
+    (void)sqlite3_set_authorizer(db, NULL, NULL); return failures;
+}
+static int ci_reverse_reuse_rollback(struct ci_store *s, int64_t id)
+{
+    int failures = 0; char out[4][256] = {{0}};
+    bool begun = ci_store_begin(s), wrote = begun && ci_store_put_include(s, id, "rolled.h");
+    int64_t during_count = ci_store_include_edge_count(s);
+    int during_reverse = ci_store_dependents_of_file(s, "rolled.h", out, 4);
+    bool visible = during_reverse == 1 && !strcmp(out[0], "d.c");
+    bool rolled = begun && ci_store_rollback(s);
+    CI_CHECK("reverse cached reads observe uncommitted edge", wrote && during_count == 5 && visible);
+    CI_CHECK("reverse cached reads respect rollback", wrote && rolled &&
+             ci_store_dependents_of_file(s, "rolled.h", out, 4) == 0 && ci_store_include_edge_count(s) == 4);
+    return failures;
+}
+static int ci_reverse_reuse_mutations(struct ci_store *s)
+{
+    int failures = 0; int64_t id = -1; char out[4][256] = {{0}};
+    bool begun = ci_store_begin(s);
+    bool wrote = begun && ci_include_select_file(s, "d.c", &id) && ci_store_put_include(s, id, "shared.h");
+    bool committed = begun && ci_store_commit(s);
+    int n = ci_store_dependents_of_file(s, "shared.h", out, 4);
+    CI_CHECK("reverse cached reads observe committed write", wrote && committed && n == 4 &&
+             !strcmp(out[3], "d.c") && ci_store_include_edge_count(s) == 4);
+    failures += ci_reverse_reuse_rollback(s, id);
+    return failures;
+}
+struct ci_reverse_count_fault { sqlite3 *db; bool traced; unsigned requests; };
+static int ci_reverse_count_trace(unsigned kind, void *context, void *statement, void *detail)
+{
+    (void)detail; struct ci_reverse_count_fault *f = context;
+    const char *sql = sqlite3_sql(statement);
+    if (kind == SQLITE_TRACE_STMT && sql && strstr(sql, "SELECT COUNT(*) FROM includes")) {
+        f->traced = true; ++f->requests; sqlite3_interrupt(f->db);
+    }
+    return 0;
+}
+static int ci_reverse_count_interrupt(struct ci_store *s)
+{
+    int failures = 0; struct ci_reverse_count_fault f = {.db = ci_store_db(s)};
+    bool trace = sqlite3_trace_v2(f.db, SQLITE_TRACE_STMT, ci_reverse_count_trace, &f) == SQLITE_OK;
+    int64_t result = ci_store_include_edge_count(s);
+    (void)sqlite3_trace_v2(f.db, 0, NULL, NULL);
+    int64_t recovered = ci_store_include_edge_count(s);
+    printf("  codeindex: reverse count traced=%d requests=%u result=%lld recovered=%lld\n",
+           f.traced, f.requests, (long long)result, (long long)recovered);
+    CI_CHECK("reverse count interrupted step refuses and recovers", trace && f.traced &&
+             f.requests == 1 && result < 0 && recovered == 4);
+    return failures;
+}
+static int ci_reverse_empty_count(void)
+{
+    int failures = 0; struct ci_store *s = ci_store_open_path(":memory:");
+    if (!s) return 1;
+    CI_CHECK("reverse count starts at zero", ci_store_include_edge_count(s) == 0);
+    ci_store_close(s); return failures;
+}
+static int ci_reverse_reuse_schema(struct ci_store *s)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(s); char out[4][256] = {{0}};
+    bool renamed = sqlite3_exec(db, "ALTER TABLE includes RENAME TO held_reverse", NULL, NULL, NULL) == SQLITE_OK;
+    int reverse = ci_store_dependents_of_file(s, "shared.h", out, 4);
+    int64_t count = ci_store_include_edge_count(s);
+    bool restored = renamed && sqlite3_exec(db, "ALTER TABLE held_reverse RENAME TO includes", NULL, NULL, NULL) == SQLITE_OK;
+    CI_CHECK("reverse cached readers refuse missing table", renamed && reverse < 0 && count < 0);
+    CI_CHECK("reverse cached readers recover restored table", restored &&
+             ci_store_dependents_of_file(s, "shared.h", out, 4) == 4 && ci_store_include_edge_count(s) == 4);
+    return failures;
+}
+static int ci_reverse_reuse_tests(void)
+{
+    struct ci_store *s = ci_store_open_path(":memory:");
+    if (!s) return 1;
+    bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(ci_store_db(s), "reverse_reuse_close", 0,
+        SQLITE_UTF8, &destroyed, ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_reverse_seed(s); int failures = seeded ? ci_reverse_reuse_batch(s) : 1;
+    if (seeded) failures += ci_reverse_reuse_mutations(s);
+    if (seeded) failures += ci_reverse_count_interrupt(s);
+    if (seeded) failures += ci_reverse_reuse_schema(s);
+    CI_CHECK("reverse reuse close witness registered", registered && !destroyed);
+    ci_store_close(s);
+    CI_CHECK("reverse reuse statements finalized on close", registered && destroyed);
+    return failures;
+}
+
 static int ci_reverse_tests(void)
 {
     struct ci_store *s = ci_store_open_path(":memory:");
@@ -4607,6 +4732,8 @@ int test_codeindex(void)
     failures += ci_family_tests();
     failures += ci_identity_tests();
     failures += ci_reverse_tests();
+    failures += ci_reverse_reuse_tests();
+    failures += ci_reverse_empty_count();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)

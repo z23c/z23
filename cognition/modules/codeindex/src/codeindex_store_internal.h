@@ -41,6 +41,8 @@ struct ci_store {
     sqlite3_stmt   *refs_by_enclosing_file_stmt;
     sqlite3_stmt   *symbol_by_name_stmt;
     sqlite3_stmt   *symbol_by_name_path_stmt;
+    sqlite3_stmt   *dependents_stmt;
+    sqlite3_stmt   *include_edge_count_stmt;
     pthread_mutex_t lock;   /* recursive: held begin..commit; reads take briefly */
     int             bound_fd; /* immutable canonical inode, -1 for :memory: */
     struct platform_positioned_file bound_file;

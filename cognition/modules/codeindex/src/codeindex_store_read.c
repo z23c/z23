@@ -640,27 +640,31 @@ int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
     return n;
 }
 
+static bool ci_dependents_prepare(struct ci_store *s)
+{
+    return s->dependents_stmt || sqlite3_prepare_v2(s->db,
+        "SELECT DISTINCT f.path FROM includes i JOIN files f ON f.id=i.file_id"
+        " WHERE i.dep_path=? ORDER BY f.path ASC", -1, &s->dependents_stmt, NULL) == SQLITE_OK;
+}
+
 int ci_store_dependents_of_file(struct ci_store *s, const char *dep_path,
                                 char (*out)[256], int cap)
 {
     if (!s || !dep_path || !out || cap <= 0)
         LOG_ERR("codeindex", "bad arg to dependents_of_file");
     pthread_mutex_lock(&s->lock);
-    sqlite3_stmt *stmt = NULL;
     /* The reverse of the include-page query. Each row of `includes` is a
      * (translation unit -> prerequisite) pair the COMPILER recorded, and a
      * depfile's prerequisite list is already transitively flattened, so one
      * equality probe answers the whole reverse question: every TU whose bytes
      * the compiler read `dep_path` for, however many headers deep. */
-    if (sqlite3_prepare_v2(s->db,
-        "SELECT DISTINCT f.path FROM includes i JOIN files f ON f.id=i.file_id"
-        " WHERE i.dep_path=? ORDER BY f.path ASC",
-        -1, &stmt, NULL) != SQLITE_OK) {
+    if (!ci_dependents_prepare(s)) {
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare dependents_of_file");
     }
+    sqlite3_stmt *stmt = s->dependents_stmt;
     if (sqlite3_bind_text(stmt, 1, dep_path, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
-        (void)sqlite3_finalize(stmt);
+        (void)ci_store_read_finish(&s->dependents_stmt, false);
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "bind dependents_of_file");
     }
@@ -671,11 +675,17 @@ int ci_store_dependents_of_file(struct ci_store *s, const char *dep_path,
         n++;
     }
     bool complete = n == cap || rc == SQLITE_DONE;
-    int finish_rc = sqlite3_finalize(stmt);
+    int finish_rc = ci_store_read_finish(&s->dependents_stmt, complete);
     pthread_mutex_unlock(&s->lock);
     if (!complete || finish_rc != SQLITE_OK)
         LOG_ERR("codeindex", "read dependents_of_file failed rc=%d finish=%d", rc, finish_rc);
     return n;
+}
+
+static bool ci_include_count_prepare(struct ci_store *s)
+{
+    return s->include_edge_count_stmt || sqlite3_prepare_v2(s->db,
+        "SELECT COUNT(*) FROM includes", -1, &s->include_edge_count_stmt, NULL) == SQLITE_OK;
 }
 
 int64_t ci_store_include_edge_count(struct ci_store *s)
@@ -683,18 +693,17 @@ int64_t ci_store_include_edge_count(struct ci_store *s)
     if (!s)
         LOG_ERR("codeindex", "null store to include_edge_count");
     pthread_mutex_lock(&s->lock);
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, "SELECT COUNT(*) FROM includes", -1, &stmt,
-                           NULL) != SQLITE_OK) {
+    if (!ci_include_count_prepare(s)) {
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare include_edge_count");
     }
+    sqlite3_stmt *stmt = s->include_edge_count_stmt;
     int64_t count = -1;
     if (sqlite3_step(stmt) == SQLITE_ROW)  // raw-sql-ok:codeindex-derived
         count = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
+    int finish_rc = ci_store_read_finish(&s->include_edge_count_stmt, count >= 0);
     pthread_mutex_unlock(&s->lock);
-    if (count < 0)
+    if (count < 0 || finish_rc != SQLITE_OK)
         LOG_ERR("codeindex", "read include_edge_count");
     return count;
 }
