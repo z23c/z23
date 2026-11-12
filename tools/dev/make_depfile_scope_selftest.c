@@ -291,18 +291,25 @@ static void consistency_probes(void)
 {
     const char *goals[] = {"lint", "lint-preflight", "ff", "dev-bin", "dev-proof-bundle",
         "fast-compile", "dev-build-only", "dev-package-verifier"};
+    char *makefile = text("%s/consistency.mk", work);
+    /* Read the real goal-dependent values after inclusion without dumping
+     * hundreds of megabytes of unrelated Make database. On a Make restart,
+     * profile_values keeps the last emitted records, as for the old -pn dump. */
+    put(makefile, 0, "include %s/Makefile\n"
+        "$(info ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_PROFILES))\n"
+        "$(info ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_PROFILES))\n", make_path(root));
     size_t children[8];
     const char *logs[8];
     for (size_t i = 0; i < 8; ++i) {
-        /* A dry-run may remake included bootstrap Makefiles. These probes
-         * inspect profile selection only and must not repair vendor inputs. */
-        const char *argv[] = {"make", "-pn", "--no-print-directory",
+        /* Query parsed profile selection without printing or running recipes.
+         * Keep bootstrap vendor inputs disabled, as in the old dry-run. */
+        const char *argv[] = {"make", "-f", makefile, "-q", "--no-print-directory",
                               "VENDOR_LIBS=", "ZCL_TOR=stub", goals[i], NULL};
         logs[i] = text("%s/consistency.%s", work, goals[i]);
         children[i] = probe_start(argv, logs[i], true);
     }
-    /* -pn may fail because an unrelated prerequisite is absent. As in the
-     * shell fixture, the computed variable records remain the authority. */
+    /* Query status may report stale targets or missing unrelated prerequisites.
+     * The computed variable records remain the authority, as for the old -pn. */
     for (size_t i = 0; i < 8; ++i) (void)probe_wait(children[i]);
     for (size_t i = 0; i < 8; ++i) {
         char *data = output(logs[i]);
