@@ -492,7 +492,7 @@ static void engine_probe_setup(void)
     FILE *f = fopen(text("%s/engine.mk", work), "wb");
     if (!f) fail("cannot create engine probe Makefile");
     fprintf(f, "include %s/probe.mk\n", make_path(work));
-    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit vendor-ready: $(ZCL_DEP_PROBE_OBJECTS)\n"
+    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit vendor-ready z23-bootstrap install-selftest: $(ZCL_DEP_PROBE_OBJECTS)\n"
           "$(info ZCL_DEPFILES_PROBE=[$(ZCL_DEPFILE_PROFILES)])\n", f);
     bool bad = ferror(f) != 0;
     if (fclose(f) != 0) bad = true;
@@ -505,6 +505,16 @@ struct engine_probe_case {
     unsigned mask;
     const char *epoch, *dep;
 };
+
+static size_t release_probe_args(const struct engine_probe_case *c, const char **argv, size_t n)
+{
+    const char *path = NULL;
+    if (!strcmp(c->name, "release-bootstrap-source")) path = "tools/install/z23_bootstrap.c";
+    if (!strcmp(c->name, "release-install-source")) path = "tools/install/install_selftest.c";
+    if (!strcmp(c->name, "release-install-header")) path = "tools/install/install_selftest.h";
+    if (path) { argv[n++] = "-W"; argv[n++] = path; }
+    return n;
+}
 
 static size_t engine_probe_start(const struct engine_probe_case *c, const char *log)
 {
@@ -549,6 +559,7 @@ static size_t engine_probe_start(const struct engine_probe_case *c, const char *
         argv[n++] = !strcmp(c->name, "vendor-source") ? "tools/dep_audit.c" :
                     "platform/modules/util/src/spawn_binary_internal.h";
     }
+    n = release_probe_args(c, argv, n);
     if (c->first) argv[n++] = c->first;
     if (c->second) argv[n++] = c->second;
     argv[n] = NULL;
@@ -576,6 +587,17 @@ static bool vendor_audit_output(const char *data)
         !strstr(audit + 1, "NODE_SECP_ARCHIVE=") && strstr(audit, "/dep_audit");
 }
 
+static bool release_compile_output(const char *name, const char *data)
+{
+    if (!strcmp(name, "release-bootstrap-source"))
+        return strstr(data, text(" -o %s/engine-bin/z23-bootstrap", work)) && strstr(data, "tools/install/z23_bootstrap.c") &&
+            strstr(data, "vendor/lib/libssl.a") && strstr(data, "vendor/lib/libcrypto.a");
+    if (!strcmp(name, "release-install-source") || !strcmp(name, "release-install-header"))
+        return strstr(data, text("-o %s/engine-bin/install_selftest", work)) && strstr(data, "tools/install/install_selftest.c") &&
+            strstr(data, "tools/install/install_selftest_proc.c");
+    return true;
+}
+
 static void engine_scope_probes(void)
 {
     static const char all_epoch[] = "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23";
@@ -601,10 +623,22 @@ static void engine_scope_probes(void)
         {"vendor-unknown", "vendor-ready", "zcl-depfile-unknown", false, false, false, 31, all_epoch, all_dep},
         {"vendor-default", NULL, NULL, false, false, false, 16, "node-c23", "node-c23"},
         {"vendor-capture", "vendor-ready", NULL, false, false, true, 0, "", ""},
+        {"release-bootstrap-source", "z23-bootstrap", NULL, false, false, false, 0, "", ""},
+        {"release-install-source", "install-selftest", NULL, false, false, false, 0, "", ""},
+        {"release-install-header", "install-selftest", NULL, false, false, false, 0, "", ""},
+        {"release-both", "z23-bootstrap", "install-selftest", false, false, false, 0, "", ""},
+        {"release-both-reverse", "install-selftest", "z23-bootstrap", false, false, false, 0, "", ""},
+        {"release-node", "z23-bootstrap", "z23", false, false, false, 31, all_epoch, all_dep},
+        {"release-unknown", "install-selftest", "zcl-depfile-unknown", false, false, false, 31, all_epoch, all_dep},
+        {"release-header", header, "z23-bootstrap", false, false, false, 31, all_epoch, all_dep},
+        {"release-bootstrap-capture", "z23-bootstrap", NULL, false, false, true, 0, "", ""},
+        {"release-install-capture", "install-selftest", NULL, false, false, true, 0, "", ""},
     };
     engine_probe_setup();
     directory(text("%s/engine-bin", work));
     put(text("%s/engine-bin/dep_audit", work), 0, "fixture\n");
+    put(text("%s/engine-bin/z23-bootstrap", work), 0, "fixture\n");
+    put(text("%s/engine-bin/install_selftest", work), 0, "fixture\n");
     probe_count = 0;
     enum { count = sizeof(cases) / sizeof(cases[0]) };
     size_t children[count];
@@ -624,6 +658,10 @@ static void engine_scope_probes(void)
             !vendor_audit_output(data)) {
             fprintf(stderr, "vendor audit case=%s output:\n%s\n", cases[i].name, data);
             free(data); fail("vendor source/header dry-run lost audit or vendor recipe");
+        }
+        if (!release_compile_output(cases[i].name, data)) {
+            fprintf(stderr, "release compile case=%s output:\n%s\n", cases[i].name, data);
+            free(data); fail("release dry compile lost source, header, or arguments");
         }
         if (!strcmp(cases[i].name, "alias") &&
             (!strstr(data, "-DZCL_BUILD_SOURCE_ID=") ||

@@ -606,6 +606,9 @@ ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
 ZCL_PROOF_PLAN_GOALS := dev-proof-plan $(BUILD_DIR)/dev-proof/plan.env
+# These release harnesses compile declared sources directly. Only their exact
+# raw goal set may omit object profiles; retain source, vendor and Tor setup.
+ZCL_RELEASE_HARNESS_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23-bootstrap install-selftest,$(MAKECMDGOALS))),,1),)
 # With no explicit goal GNU Make executes `.DEFAULT_GOAL := z23`; selecting
 # every compiler profile here did not make that node build safer.  It only
 # fingerprinted nine toolchain/flag combinations that the default recipe can
@@ -625,6 +628,8 @@ endif
 else ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
+ZCL_EPOCH_PROFILES :=
+else ifeq ($(ZCL_RELEASE_HARNESS_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
 ZCL_EPOCH_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
@@ -2203,6 +2208,8 @@ ifeq ($(ZCL_HOTSWAP_DEPFILE_LEAN_ONLY),1)
 ZCL_DEPFILE_PROFILES :=
 else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
+else ifeq ($(ZCL_RELEASE_HARNESS_ONLY),1)
+ZCL_DEPFILE_PROFILES :=
 else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
 ifneq ($(filter help print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags print-zcode-monolith-lib-sources print-node-c23-srcs print-game-closure,$(ZCL_DEPFILE_SINGLE_GOAL)),)
