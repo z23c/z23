@@ -144,9 +144,10 @@ static void profile_probes(void)
         {"node-header", 16, {"z23", "contexts/explorer/views/include/views/site_css.h"}, "node-c23"},
         {"stamp-node", 16, {"build/identity/gen-stamps/site_css.stamp", "z23"}, "node-c23"},
         {"node-stamp", 16, {"z23", "build/identity/gen-stamps/site_css.stamp"}, "node-c23"},
-        {"header-help", 31, {"contexts/explorer/views/include/views/site_css.h", "help"}, ""},
-        {"help-header", 31, {"help", "contexts/explorer/views/include/views/site_css.h"}, ""},
-        {"help", 31, {"help"}, ""},
+        /* Help consumes no objects, including with generated-header companions. */
+        {"header-help", 0, {"contexts/explorer/views/include/views/site_css.h", "help"}, ""},
+        {"help-header", 0, {"help", "contexts/explorer/views/include/views/site_css.h"}, ""},
+        {"help", 0, {"help"}, ""},
         {"header-unknown", 31, {"contexts/explorer/views/include/views/site_css.h", "zcl-depfile-unknown"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"},
         {"header-mixed", 31, {"contexts/explorer/views/include/views/site_css.h", "fast-compile", "build-only"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"}
     };
