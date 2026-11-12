@@ -9,6 +9,7 @@
 
 static char payment_code[ZAPP_RECEIVE_CODE_MAX];
 static bool pending;
+static bool media = true;
 
 static jobject new_intent(JNIEnv *env, const char *action)
 {
@@ -83,6 +84,17 @@ static bool start_share(JNIEnv *env, jobject activity, jobject intent)
     if (start) (*env)->CallVoidMethod(env, activity, start, chooser, ZAPP_SHARE_SEND_REQUEST);
     return zj_clean(env) && start;
 }
+static bool share_text(JNIEnv *env, jobject activity)
+{
+    bool ok = (*env)->PushLocalFrame(env, 16) == JNI_OK;
+    if (ok) {
+        jobject share = new_intent(env, "android.intent.action.SEND");
+        ok = share && put_text(env, share, "android.intent.extra.TEXT", payment_code) &&
+            set_type(env, share, "text/plain") && start_share(env, activity, share);
+        (*env)->PopLocalFrame(env, NULL);
+    }
+    return ok;
+}
 static bool set_media_type(JNIEnv *env, jobject activity, jobject intent, jobject uri)
 {
     jobject resolver = zj_object_property(env, activity, "getContentResolver", "()Landroid/content/ContentResolver;");
@@ -114,7 +126,7 @@ void zapp_share_destroy(void)
     pending = false;
     memory_cleanse(payment_code, sizeof(payment_code));
 }
-bool zapp_share_prepare(void)
+static bool prepare(bool with_media)
 {
     if (pending) return false;
 #ifdef ZAPP_SHARE_FIXTURE
@@ -122,18 +134,27 @@ bool zapp_share_prepare(void)
 #else
     if (!wallet_screens_share_code(payment_code, sizeof(payment_code))) return false;
 #endif
+    media = with_media;
     pending = true;
     return true;
 }
+bool zapp_share_prepare(void) { return prepare(true); }
+bool zapp_share_prepare_text(void) { return prepare(false); }
 bool zapp_share_begin(JNIEnv *env, jobject activity)
 {
 #ifdef ZAPP_SHARE_FIXTURE
     if (!pending) {
+        media = true;
         pending = true;
         snprintf(payment_code, sizeof(payment_code), "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
     }
 #endif
     if (!pending || !payment_code[0]) return false;
+    if (!media) {
+        bool ok = share_text(env, activity);
+        if (!ok) zapp_share_destroy();
+        return ok;
+    }
     bool ok = (*env)->PushLocalFrame(env, 16) == JNI_OK;
     if (ok) {
         jobject picker = new_intent(env, "android.intent.action.OPEN_DOCUMENT");
@@ -183,7 +204,7 @@ static void finish_activity(JNIEnv *env, jobject activity)
 JNIEXPORT void JNICALL Java_org_z23_nativeapp_ShareActivity_shareCreate(JNIEnv *env, jobject activity)
 {
     if (!zapp_share_begin(env, activity)) {
-        return_with_notice("Could not open the media picker.");
+        return_with_notice(media ? "Could not open the media picker." : "Could not open the share sheet.");
         finish_activity(env, activity);
     }
 }

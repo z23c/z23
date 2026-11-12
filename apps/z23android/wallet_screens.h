@@ -74,7 +74,8 @@ enum wallet_action {
     WALLET_ACT_SHOW_PRIVATE, /* ask the screen lock and show the private balance of a locked wallet for a short while */
     WALLET_ACT_MAKE_PRIVATE, /* open the review that moves public funds into the private balance */
     WALLET_ACT_RETRY_SUMMARY, WALLET_ACT_RETRY_ADDRESS,
-    WALLET_ACT_SHARE_REQUEST /* choose media and share it with the current payment request */
+    WALLET_ACT_SHARE_REQUEST, /* choose media and share it with the current payment request */
+    WALLET_ACT_SHARE_TEXT /* share only the current payment request as text */
 };
 /* Where the private balance request stands, as the environment reports it. WALLET_REVEAL_OPEN: the wallet is unlocked for
  * the owner and not yet locked again. The reasons after it say why the last request left the wallet locked. */
@@ -88,7 +89,8 @@ enum wallet_outcome {
     WALLET_LEAVE, /* leave the wallet for Home */
     WALLET_START_NODE, /* ask the controller to start the node, and nothing else */
     WALLET_MAKE_PRIVATE, /* open the Send screen on the move of public funds into the private balance */
-    WALLET_SHARE /* choose media, then offer it with the current payment request */
+    WALLET_SHARE, /* choose media, then offer it with the current payment request */
+    WALLET_SHARE_TEXT /* offer only the current payment request as text */
 };
 
 struct wallet_item {

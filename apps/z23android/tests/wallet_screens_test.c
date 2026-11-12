@@ -2508,23 +2508,26 @@ static void check_setup_invalidation(bool generation, bool address)
     CHECK(!has("Share cancelled. Nothing was sent."));
     wallet_screens_close();
 }
-/* Share request carries the current code and returns to the picker, never directly to a recipient. */
+/* Both share actions keep the current code and leave recipient choice to Android. */
 static void test_receive_share(void)
 {
     start(false);
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
     struct wallet_screen *s = snap();
     long copy = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_COPY_ADDRESS);
+    long text = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_TEXT);
     long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST);
-    CHECK(copy >= 0 && share == copy + 2 &&
-        !strcmp(text_at(s, share), "Share request: media"));
-    CHECK(share > copy && s->items[share - 1].kind == WALLET_ITEM_NOTE &&
-        !strcmp(text_at(s, share - 1),
-            "Share a photo or video with your ZCL request. Choose the recipient in Android's share sheet."));
+    CHECK(copy >= 0 && text == copy + 1 && share == text + 2 &&
+        !strcmp(text_at(s, text), "Share request: text") && !strcmp(text_at(s, share), "Share request: media"));
+    CHECK(text > copy && s->items[text + 1].kind == WALLET_ITEM_NOTE &&
+        !strcmp(text_at(s, text + 1),
+            "Share the request as text, or add a photo or video. Choose the recipient in Android's share sheet."));
     size_t next = (size_t)share + 1;
     CHECK(next < s->count && s->items[next].kind != WALLET_ITEM_NOTE);
     char expected[ZAPP_RECEIVE_CODE_MAX], code[ZAPP_RECEIVE_CODE_MAX];
     snprintf(expected, sizeof(expected), "%s", text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)));
+    tap(WALLET_ACT_SHARE_TEXT, 0, WALLET_SHARE_TEXT);
+    CHECK(wallet_screens_share_code(code, sizeof(code)) && !strcmp(code, expected));
     tap(WALLET_ACT_SHARE_REQUEST, 0, WALLET_SHARE);
     CHECK(wallet_screens_share_code(code, sizeof(code)) && !strcmp(code, expected));
     CHECK(fake.copy_calls == 0);

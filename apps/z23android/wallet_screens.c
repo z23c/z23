@@ -562,7 +562,8 @@ static void funds_items(struct wallet_screen *s)
 
 static void share_request_items(struct wallet_screen *s)
 {
-    note(s, "Share a photo or video with your ZCL request. Choose the recipient in Android's share sheet.");
+    button(s, WALLET_ACT_SHARE_TEXT, "Share request: text");
+    note(s, "Share the request as text, or add a photo or video. Choose the recipient in Android's share sheet.");
     button(s, WALLET_ACT_SHARE_REQUEST, "Share request: media");
 }
 static void receive_items(struct wallet_screen *s)
@@ -1710,6 +1711,7 @@ static size_t receive_action(enum wallet_action action, enum wallet_outcome *out
     if (action == WALLET_ACT_NEW_ADDRESS) return new_address(jobs);
     if (action == WALLET_ACT_COPY_ADDRESS) copy_address();
     if (action == WALLET_ACT_SHARE_REQUEST) *outcome = WALLET_SHARE;
+    if (action == WALLET_ACT_SHARE_TEXT) *outcome = WALLET_SHARE_TEXT;
     if (action == WALLET_ACT_RETRY_ADDRESS) return retry_address(jobs);
     return 0;
 }

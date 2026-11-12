@@ -1034,14 +1034,15 @@ static bool same_target(const struct target *a, const struct target *b)
     return a->kind == b->kind && !strcmp(a->id, b->id) &&
            zapp_home_same_press(a->index, by_button(a), a->button, b->index, by_button(b), b->button);
 }
-static void share_wallet(JNIEnv *env)
+static void share_wallet(JNIEnv *env, bool media)
 {
     char package[ZAPP_APP_PACKAGE_CAP];
     jstring name = zj_object_property(env, shell.activity, "getPackageName", "()Ljava/lang/String;");
-    bool ok = zapp_share_prepare() && name && zj_copy_utf(env, name, package, sizeof(package)) &&
+    bool prepared = media ? zapp_share_prepare() : zapp_share_prepare_text();
+    bool ok = prepared && name && zj_copy_utf(env, name, package, sizeof(package)) &&
         zapp_launcher_start(env, shell.activity, package, "org.z23.nativeapp.ShareActivity");
     if (!ok) {
-        wallet_screens_receive_notice("Could not open the media picker.");
+        wallet_screens_receive_notice(media ? "Could not open the media picker." : "Could not open the share sheet.");
         zapp_share_destroy();
     }
 }
@@ -1052,7 +1053,8 @@ static void run_wallet(JNIEnv *env, size_t button)
     if (outcome == WALLET_SEND && wallet_screens_spendable(&spendable)) zapp_send_ui_known_balance(spendable);
     if (outcome == WALLET_SEND) open_send(env, NULL, "", false);
     else if (outcome == WALLET_MAKE_PRIVATE) open_send(env, NULL, "", true);
-    else if (outcome == WALLET_SHARE) share_wallet(env);
+    else if (outcome == WALLET_SHARE) share_wallet(env, true);
+    else if (outcome == WALLET_SHARE_TEXT) share_wallet(env, false);
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) {
         shell.receive_from_home = false;
