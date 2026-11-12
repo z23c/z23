@@ -254,7 +254,7 @@ static int check_all_rows(bool derive, const char *derive_name, bool *derived)
     return 0;
 }
 
-int main(int argc, char **argv)
+static int run_registry_check(int argc, char **argv)
 {
     bool derive = argc == 3 && strcmp(argv[1], "--derive") == 0;
     bool derive_dir = argc == 3 && strcmp(argv[1], "--derive-dir") == 0;
@@ -277,4 +277,14 @@ int main(int argc, char **argv)
     printf("zcode package registry: %zu roots and exact dependency DAG rederived\n",
            sizeof(rows) / sizeof(rows[0]));
     return 0;
+}
+
+int main(int argc, char **argv)
+{
+    int status = run_registry_check(argc, argv);
+    if (fflush(stdout) == EOF || ferror(stdout)) {
+        fprintf(stderr, "zcode package registry: could not write complete output\n");
+        return status ? status : 1;
+    }
+    return status;
 }
