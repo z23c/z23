@@ -59,6 +59,7 @@ static struct {
     bool fleet_review_started, fleet_qr_shown, fleet_start_requested, fleet_result_valid;
     enum screen current, before_scan;
     enum wallet_page wallet_entry;
+    bool receive_from_home;
     bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered, camera_waiting, paste_mode, paste_submitted, paste_result_ready;
     unsigned scans_seen;
@@ -753,8 +754,9 @@ static void set_protection(JNIEnv *env, enum screen next)
     if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW || (shell.current == SCREEN_SCAN && shell.paste_mode)) && next != SCREEN_ASSISTANT && next != SCREEN_FLEET_REVIEW && !wallet_screen(next) && next != SCREEN_SCAN) (void)protect_window(env, false);
 }
 /* What a screen does as it comes into view. */
-static void enter_screen(JNIEnv *env, enum screen next, enum wallet_page page)
+static void enter_screen(JNIEnv *env, enum screen next, enum wallet_page page, enum screen origin)
 {
+    shell.receive_from_home = next == SCREEN_WALLET && page == WALLET_PAGE_RECEIVE && origin == SCREEN_HOME;
     if (next == SCREEN_APPS) { refresh_apps(env); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
@@ -785,6 +787,7 @@ static void clear_page_state(JNIEnv *env, enum screen next)
 static void go(JNIEnv *env, enum screen next)
 {
     enum wallet_page page = shell.wallet_entry ? shell.wallet_entry : WALLET_PAGE_FUNDS;
+    enum screen origin = shell.current;
     shell.wallet_entry = WALLET_PAGE_FUNDS;
     next = screen_for(next);
     if (!ensure_screen(env, next)) {
@@ -804,7 +807,7 @@ static void go(JNIEnv *env, enum screen next)
     shell.current = next;
     snprintf(shell.action_notice, sizeof(shell.action_notice), "%s", why);
     set_outcome(env, "");
-    enter_screen(env, next, page);
+    enter_screen(env, next, page, origin);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (void)zj_visible(env, shell.roots[i], i == (int)next);
     if (next == SCREEN_SETUP) zapp_setup_ui_render(env);
     if (next == SCREEN_HOME) show_home(env);
@@ -848,7 +851,8 @@ static void back(JNIEnv *env)
         if (!shell.fleet_review_started) zapp_controller_cancel_scan();
         go(env, shell.before_scan);
     } else if (shell.current == SCREEN_WALLET) {
-        if (wallet_screens_back()) zapp_wallet_ui_render(env);
+        if (shell.receive_from_home) go(env, SCREEN_HOME);
+        else if (wallet_screens_back()) zapp_wallet_ui_render(env);
         else go(env, SCREEN_HOME);
     } else if (shell.current == SCREEN_SEND) {
         go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
