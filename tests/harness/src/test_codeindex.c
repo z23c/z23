@@ -3512,6 +3512,166 @@ static int ci_include_step_tests(struct ci_store *store)
     return failures;
 }
 
+static int ci_ref_authorize(void *context, int action, const char *one,
+                            const char *two, const char *db, const char *trigger)
+{
+    (void)two; (void)db; (void)trigger;
+    if (action == SQLITE_INSERT && one && !strcmp(one, "refs")) (*(int *)context)++;
+    return SQLITE_OK;
+}
+
+static bool ci_ref_rows(sqlite3 *db, const char *expected)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT group_concat(item, ',') FROM "
+        "(SELECT callee_name || ':' || ref_file || ':' || ref_line || ':' || enclosing AS item "
+        "FROM refs ORDER BY callee_name,ref_file,ref_line,enclosing)";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW; // raw-sql-ok:codeindex-derived
+    const unsigned char *text = ok ? sqlite3_column_text(stmt, 0) : NULL;
+    ok = text && !strcmp((const char *)text, expected);
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
+}
+
+static int ci_ref_transaction_tests(struct ci_store *store)
+{
+    int failures = 0, prepares = 0;
+    sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_ref_authorize, &prepares) == SQLITE_OK;
+    bool begun = setup && ci_store_begin(store);
+    bool a = begun && ci_store_put_ref(store, "alpha", "a.c", 1, NULL);
+    bool duplicate = begun && ci_store_put_ref(store, "alpha", "a.c", 1, NULL);
+    bool b = begun && ci_store_put_ref(store, "beta", "b.c", 2, "caller");
+    int count = prepares;
+    bool committed = begun && ci_store_commit(store);
+    printf("  codeindex: ref insert prepare authorizations=%d\n", count);
+    CI_CHECK("ref transaction retains duplicates and empty null enclosing",
+             a && duplicate && b && committed && ci_ref_rows(db,
+             "alpha:a.c:1:,alpha:a.c:1:,beta:b.c:2:caller"));
+    CI_CHECK("ref transaction reuses one prepared insert", count == 1);
+    CI_CHECK("ref commit finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    (void)sqlite3_set_authorizer(db, NULL, NULL);
+    return failures;
+}
+
+static int ci_ref_rollback_tests(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    bool begun = ci_store_begin(store);
+    bool wrote = begun && ci_store_put_ref(store, "discard", "c.c", 3, "caller");
+    bool rolled = begun && ci_store_rollback(store);
+    CI_CHECK("ref rollback preserves committed rows", wrote && rolled && ci_ref_rows(db,
+             "alpha:a.c:1:,alpha:a.c:1:,beta:b.c:2:caller"));
+    CI_CHECK("ref rollback finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    bool standalone = ci_store_put_ref(store, "gamma", "d.c", 4, NULL);
+    CI_CHECK("ref standalone insert persists", standalone && ci_ref_rows(db,
+             "alpha:a.c:1:,alpha:a.c:1:,beta:b.c:2:caller,gamma:d.c:4:"));
+    CI_CHECK("ref standalone finalizes statement", sqlite3_next_stmt(db, NULL) == NULL);
+    return failures;
+}
+
+static int ci_ref_bind_tests(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    char long_name[513]; memset(long_name, 'x', sizeof(long_name) - 1); long_name[512] = 0;
+    bool begun = ci_store_begin(store);
+    bool warm = begun && ci_store_put_ref(store, "warm", "e.c", 5, "caller");
+    int old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 128);
+    bool refused = begun && !ci_store_put_ref(store, long_name, "e.c", 6, "caller");
+    (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
+    bool recovered = begun && ci_store_put_ref(store, "after", "e.c", 7, NULL);
+    bool committed = begun && ci_store_commit(store);
+    CI_CHECK("ref over-limit bind refuses and next insert succeeds",
+             warm && refused && recovered && committed);
+    CI_CHECK("ref bind recovery preserves exact rows", ci_ref_rows(db,
+             "after:e.c:7:,alpha:a.c:1:,alpha:a.c:1:,beta:b.c:2:caller,gamma:d.c:4:,warm:e.c:5:caller"));
+    CI_CHECK("ref bind commit finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    return failures;
+}
+
+static int ci_ref_step_tests(struct ci_store *store)
+{
+    int failures = 0;
+    sqlite3 *db = ci_store_db(store);
+    const char *trigger = "CREATE TRIGGER ref_reject BEFORE INSERT ON refs "
+        "WHEN NEW.callee_name='reject' BEGIN SELECT RAISE(ABORT,'fixture'); END";
+    bool setup = sqlite3_exec(db, trigger, NULL, NULL, NULL) == SQLITE_OK;
+    bool begun = setup && ci_store_begin(store);
+    bool refused = begun && !ci_store_put_ref(store, "reject", "f.c", 8, NULL);
+    bool recovered = begun && ci_store_put_ref(store, "accepted", "f.c", 9, "owner");
+    bool committed = begun && ci_store_commit(store);
+    CI_CHECK("ref step failure refuses and next insert succeeds", refused && recovered && committed);
+    CI_CHECK("ref step recovery preserves exact rows", ci_ref_rows(db,
+             "accepted:f.c:9:owner,after:e.c:7:,alpha:a.c:1:,alpha:a.c:1:,beta:b.c:2:caller,gamma:d.c:4:,warm:e.c:5:caller"));
+    CI_CHECK("ref step commit finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    return failures;
+}
+
+static bool ci_ref_batch_rows(sqlite3 *db, int *rows)
+{
+    static const char sql[] =
+        "SELECT count(*),sum(CASE WHEN callee_name=printf('name-%d',ref_line) "
+        "AND ref_file='batch.c' AND ref_line BETWEEN 0 AND 8191 "
+        "AND enclosing=CASE WHEN ref_line%2=0 THEN '' ELSE 'owner' END "
+        "THEN 0 ELSE 1 END),count(DISTINCT ref_line) FROM refs";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW; // raw-sql-ok:codeindex-derived
+    *rows = ok ? sqlite3_column_int(stmt, 0) : -1;
+    ok = ok && *rows == 8192 && sqlite3_column_int(stmt, 1) == 0 &&
+        sqlite3_column_int(stmt, 2) == 8192;
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
+}
+
+static bool ci_ref_batch_write(struct ci_store *store)
+{
+    for (int i = 0; i < 8192; i++) {
+        char name[32];
+        if (snprintf(name, sizeof(name), "name-%d", i) < 0 ||
+            !ci_store_put_ref(store, name, "batch.c", i, i % 2 ? "owner" : NULL))
+            return false;
+    }
+    return true;
+}
+
+static int ci_ref_batch_tests(void)
+{
+    int failures = 0, prepares = 0, rows = -1;
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: ref batch fixture... FAIL\n"); return 1; }
+    sqlite3 *db = ci_store_db(store);
+    bool setup = sqlite3_set_authorizer(db, ci_ref_authorize, &prepares) == SQLITE_OK;
+    uint64_t start = monotonic_us();
+    bool begun = setup && ci_store_begin(store);
+    bool wrote = begun && ci_ref_batch_write(store);
+    bool committed = begun && ci_store_commit(store);
+    uint64_t elapsed = monotonic_us() - start;
+    bool exact = ci_ref_batch_rows(db, &rows);
+    printf("  codeindex: ref batch elapsed_us=%llu prepares=%d rows=%d\n",
+           (unsigned long long)elapsed, prepares, rows);
+    CI_CHECK("ref batch inserts exact rows", wrote && committed && exact);
+    CI_CHECK("ref batch prepares insert once", prepares == 1);
+    CI_CHECK("ref batch finalizes statements", sqlite3_next_stmt(db, NULL) == NULL);
+    (void)sqlite3_set_authorizer(db, NULL, NULL);
+    ci_store_close(store);
+    return failures;
+}
+
+static int ci_ref_insert_tests(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) { printf("  codeindex: ref fixture... FAIL\n"); return 1; }
+    int failures = ci_ref_transaction_tests(store);
+    failures += ci_ref_rollback_tests(store);
+    failures += ci_ref_bind_tests(store);
+    failures += ci_ref_step_tests(store);
+    ci_store_close(store);
+    failures += ci_ref_batch_tests();
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -3530,6 +3690,7 @@ int test_codeindex(void)
     int failures = test_codeindex_platform_arm();
 #if !defined(_WIN32)
     failures += ci_include_insert_tests();
+    failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)
     failures += ci_restart_environment_tests();

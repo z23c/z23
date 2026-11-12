@@ -580,6 +580,7 @@ void ci_store_close(struct ci_store *s)
     if (s->put_file_stmt) sqlite3_finalize(s->put_file_stmt);
     if (s->put_symbol_stmt) sqlite3_finalize(s->put_symbol_stmt);
     if (s->put_include_stmt) sqlite3_finalize(s->put_include_stmt);
+    if (s->put_ref_stmt) sqlite3_finalize(s->put_ref_stmt);
     if (s->db) sqlite3_close(s->db);
     platform_read_mapping_close(&s->mapping);
     if (s->has_bound_file)
@@ -605,10 +606,14 @@ static bool ci_store_finish_inserts(struct ci_store *s)
                                        : SQLITE_OK;
     int include_rc = s->put_include_stmt ? sqlite3_finalize(s->put_include_stmt)
                                          : SQLITE_OK;
+    int ref_rc = s->put_ref_stmt ? sqlite3_finalize(s->put_ref_stmt)
+                                 : SQLITE_OK;
     s->put_file_stmt = NULL;
     s->put_symbol_stmt = NULL;
     s->put_include_stmt = NULL;
-    return file_rc == SQLITE_OK && symbol_rc == SQLITE_OK && include_rc == SQLITE_OK;
+    s->put_ref_stmt = NULL;
+    return file_rc == SQLITE_OK && symbol_rc == SQLITE_OK &&
+           include_rc == SQLITE_OK && ref_rc == SQLITE_OK;
 }
 
 bool ci_store_begin(struct ci_store *s)
@@ -813,19 +818,20 @@ bool ci_store_put_ref(struct ci_store *s, const char *callee,
     if (!s || !callee || !ref_file)
         LOG_FAIL("codeindex", "null arg to put_ref");
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db,
+    bool cached = false;
+    if (!ci_store_insert_prepare(s, &s->put_ref_stmt,
         "INSERT INTO refs(callee_name,ref_file,ref_line,enclosing)"
-        " VALUES(?,?,?,?)",
-        -1, &stmt, NULL) != SQLITE_OK)
+        " VALUES(?,?,?,?)", &stmt, &cached))
         LOG_FAIL("codeindex", "prepare put_ref: %s", sqlite3_errmsg(s->db));
-    sqlite3_bind_text(stmt, 1, callee, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, ref_file, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 3, ref_line);
-    sqlite3_bind_text(stmt, 4, enclosing ? enclosing : "", -1, SQLITE_TRANSIENT);
-    int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE)
-        LOG_FAIL("codeindex", "step put_ref rc=%d", rc);
+    bool bound = sqlite3_bind_text(stmt, 1, callee, -1,
+                                   SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(stmt, 2, ref_file, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int(stmt, 3, ref_line) == SQLITE_OK &&
+        sqlite3_bind_text(stmt, 4, enclosing ? enclosing : "", -1,
+                          SQLITE_TRANSIENT) == SQLITE_OK;
+    int rc = bound ? sqlite3_step(stmt) : SQLITE_ERROR; // raw-sql-ok:codeindex-derived
+    if (!ci_store_insert_finish(stmt, cached, rc))
+        LOG_FAIL("codeindex", "put_ref bind/step/reset failed rc=%d", rc);
     return true;
 }
 
