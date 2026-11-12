@@ -10,9 +10,10 @@
  * Gate: check-cyclomatic-complexity
  * Metric: M = 1 + decision points per function definition. else, default
  * and goto do not add. A definition opens when { appears at file scope and
- * the declarator head before it ends in ) whose outermost (...) group is
- * preceded by an identifier other than if/for/while/switch; prototypes end
- * in ; and never open a body. Preprocessor lines are lexed for comments
+ * a completed declarator head precedes it. Grouped pointer declarators keep
+ * the function name through return-function or array suffixes; callback
+ * parameters cannot replace that name. Prototypes and initializers do not
+ * open bodies. Preprocessor lines are lexed for comments
  * and literals but contribute neither decision points nor braces.
  * Operators: && and || each add one decision point, and only when the two
  * operator characters are ADJACENT in the source. The pairing is never
@@ -23,13 +24,13 @@
  * Preprocessor conditionals: EVERY branch of a #if / #ifdef / #ifndef
  * region is read and every decision point in it is counted, so no branch of
  * real code is ever invisible to the cap. Only the STRUCTURE — brace and
- * paren depth, and the declarator head being assembled — is taken from the
+ * paren/bracket depth, and the declarator head being assembled — is taken from the
  * FIRST branch: each later branch restarts from the depth the region opened
  * at, and the #endif resumes at the depth the first branch reached. Without
  * that, branches that open or close different numbers of braces would
  * desynchronise the depth and glue the whole rest of the file onto one
  * function. Conditions are never evaluated. A region whose branches do not
- * all end at the same brace and paren depth has no single structure to
+ * all end at the same brace, paren and bracket depth has no single structure to
  * resume from; rather than silently mis-attribute the code after the
  * #endif, the gate fails on that file and names the #if line. Nesting is a
  * stack, so an inner region resolves before its outer one.
@@ -84,7 +85,8 @@ const char cyc_tmp_default[] = "/tmp";
  * NOT here — decisions accumulate across every branch, so no real branching
  * is hidden from the cap. */
 struct cyc_sp {
-    int brace, paren;
+    int brace, paren, bracket;
+    int decl_group, decl_init, cand_depth, head_group;
     int in_func, func_line;
     char func_name[CYC_NAME];
     int head_ok, head_line;
@@ -108,7 +110,8 @@ struct cyc_lx {
     int state, esc, pp, sol;
     int ppc_depth;         /* #if/#ifdef/#ifndef nesting depth */
     struct cyc_reg reg[CYC_PP_MAX];
-    int brace, paren;
+    int brace, paren, bracket;
+    int decl_group, decl_init, cand_depth, head_group;
     int in_func, m, func_line;
     char func_name[CYC_NAME];
     char tok[CYC_NAME];
@@ -180,6 +183,11 @@ static void cyc_sp_save(const struct cyc_lx *lx, struct cyc_sp *s)
 {
     s->brace = lx->brace;
     s->paren = lx->paren;
+    s->bracket = lx->bracket;
+    s->decl_group = lx->decl_group;
+    s->decl_init = lx->decl_init;
+    s->cand_depth = lx->cand_depth;
+    s->head_group = lx->head_group;
     s->in_func = lx->in_func;
     s->func_line = lx->func_line;
     memcpy(s->func_name, lx->func_name, sizeof s->func_name);
@@ -197,6 +205,11 @@ static void cyc_sp_load(struct cyc_lx *lx, const struct cyc_sp *s)
 {
     lx->brace = s->brace;
     lx->paren = s->paren;
+    lx->bracket = s->bracket;
+    lx->decl_group = s->decl_group;
+    lx->decl_init = s->decl_init;
+    lx->cand_depth = s->cand_depth;
+    lx->head_group = s->head_group;
     lx->in_func = s->in_func;
     lx->func_line = s->func_line;
     memcpy(lx->func_name, s->func_name, sizeof lx->func_name);
@@ -234,7 +247,7 @@ static int cyc_pp_open(struct cyc_lx *lx, const char *path, int lineno)
 
 /* End the branch that is running in the innermost region. The first branch
  * defines the structure the region resumes at; a later branch that ends at
- * a different brace or paren depth leaves the gate no defensible way to
+ * a different brace, paren or bracket depth leaves the gate no defensible way to
  * attribute what follows the #endif, so it fails the file. */
 static int cyc_pp_branch_end(struct cyc_lx *lx, const char *path)
 {
@@ -244,10 +257,11 @@ static int cyc_pp_branch_end(struct cyc_lx *lx, const char *path)
         r->first_done = 1;
         return 0;
     }
-    if (lx->brace != r->first.brace || lx->paren != r->first.paren)
+    if (lx->brace != r->first.brace || lx->paren != r->first.paren ||
+        lx->bracket != r->first.bracket)
         return cyc_pp_fail(path, r->line,
-                           "preprocessor branches end at different brace or "
-                           "paren depths; balance the branches so the "
+                           "preprocessor branches end at different brace, paren or "
+                           "bracket depths; balance the branches so the "
                            "complexity gate can attribute the code after "
                            "the #endif");
     return 0;
@@ -393,43 +407,102 @@ static void cyc_ident_char(struct cyc_lx *lx, char c)
     lx->sol = 0;
 }
 
+static void cyc_candidate(struct cyc_lx *lx, int lineno)
+{
+    lx->cand_ok = lx->last_sig == 'i'
+        && !cyc_is_kw(lx->last_tok, "if")
+        && !cyc_is_kw(lx->last_tok, "for")
+        && !cyc_is_kw(lx->last_tok, "while")
+        && !cyc_is_kw(lx->last_tok, "switch");
+    memcpy(lx->cand, lx->last_tok, sizeof lx->cand);
+    lx->cand_line = lineno;
+    lx->cand_depth = lx->paren + 1;
+    lx->head_group = 0;
+}
+
+/* A leading '(' or '*' cannot start a C23 parameter declaration. It exposes
+ * a grouped declarator instead, as in int (*factory(int x))(int). */
+static void cyc_decl_lparen(struct cyc_lx *lx, int lineno)
+{
+    if (lx->paren == 0 && lx->head_ok && lx->last_sig == ')') {
+        /* int (name)(args): the next parameter suffix disambiguates the
+         * enclosed name from a parameter of an ordinary function. A direct
+         * function cannot itself return a function in C23. */
+        if (lx->head_group) {
+            memcpy(lx->head_name, lx->cand, sizeof lx->head_name);
+            lx->head_line = lx->cand_line;
+            lx->head_group = 0;
+            lx->decl_group = 1;
+        }
+        return;
+    }
+    if (lx->cand_ok && lx->cand_depth == lx->paren && lx->last_sig == '(') {
+        lx->cand_ok = 0;
+        lx->decl_group = 1;
+    } else if (lx->paren == 0) {
+        lx->head_ok = 0;
+        lx->decl_group = lx->last_sig == '*';
+        cyc_candidate(lx, lineno);
+    } else if (lx->decl_group && !lx->cand_ok && !lx->head_ok && lx->last_sig == 'i') {
+        cyc_candidate(lx, lineno);
+    }
+}
+
+static int cyc_declarator(const struct cyc_lx *lx)
+{
+    return !cyc_off(lx) && !lx->brace && !lx->bracket && !lx->decl_init;
+}
+
 static void cyc_c_lparen(struct cyc_lx *lx, int lineno)
 {
-    if (!cyc_off(lx) && lx->brace == 0 && lx->paren == 0) {
-        lx->cand_ok = lx->last_sig == 'i'
-            && !cyc_is_kw(lx->last_tok, "if")
-            && !cyc_is_kw(lx->last_tok, "for")
-            && !cyc_is_kw(lx->last_tok, "while")
-            && !cyc_is_kw(lx->last_tok, "switch");
-        memcpy(lx->cand, lx->last_tok, sizeof lx->cand);
-        lx->cand_line = lineno;
-    }
+    if (cyc_declarator(lx))
+        cyc_decl_lparen(lx, lineno);
     if (!cyc_off(lx))
         lx->paren++;
 }
 
-static void cyc_c_rparen(struct cyc_lx *lx)
+static void cyc_decl_rparen(struct cyc_lx *lx, int lineno)
 {
-    if (!cyc_off(lx) && lx->paren > 0) {
-        lx->paren--;
-        if (lx->brace == 0 && lx->paren == 0) {
-            lx->head_ok = lx->cand_ok;
-            memcpy(lx->head_name, lx->cand, sizeof lx->head_name);
-            lx->head_line = lx->cand_line;
+    if (lx->cand_ok && lx->cand_depth == lx->paren) {
+        lx->head_ok = 1;
+        memcpy(lx->head_name, lx->cand, sizeof lx->head_name);
+        lx->head_line = lx->cand_line;
+        lx->cand_ok = 0;
+        lx->head_group = !lx->decl_group && lx->paren == 1 && lx->last_sig == 'i';
+        if (lx->head_group) {
+            memcpy(lx->cand, lx->last_tok, sizeof lx->cand);
+            lx->cand_line = lineno;
         }
+    } else if (lx->decl_group && !lx->cand_ok && !lx->head_ok && lx->last_sig == 'i') {
+        /* The name itself may be parenthesized: int (*(factory)(int))(int). */
+        lx->head_ok = 1;
+        memcpy(lx->head_name, lx->last_tok, sizeof lx->head_name);
+        lx->head_line = lineno;
     }
+}
+
+static void cyc_c_rparen(struct cyc_lx *lx, int lineno)
+{
+    if (cyc_off(lx) || lx->paren <= 0)
+        return;
+    if (cyc_declarator(lx))
+        cyc_decl_rparen(lx, lineno);
+    lx->paren--;
 }
 
 static void cyc_c_lbrace(struct cyc_lx *lx)
 {
-    if (!cyc_off(lx) && lx->brace == 0) {
-        if (lx->head_ok && lx->last_sig == ')') {
+    if (!cyc_off(lx) && lx->brace == 0 && !lx->paren && !lx->bracket) {
+        if (!lx->decl_init && lx->head_ok && (lx->last_sig == ')' || lx->last_sig == ']')) {
             lx->in_func = 1;
             lx->m = 1;
             lx->func_line = lx->head_line;
             memcpy(lx->func_name, lx->head_name, sizeof lx->func_name);
         }
         lx->head_ok = 0;
+        lx->cand_ok = 0;
+        lx->decl_group = 0;
+        lx->head_group = 0;
     }
     if (!cyc_off(lx))
         lx->brace++;
@@ -467,10 +540,30 @@ static void cyc_c_quest(struct cyc_lx *lx)
     cyc_decide(lx);
 }
 
-static void cyc_c_other(struct cyc_lx *lx)
+static void cyc_c_bracket(struct cyc_lx *lx, char c)
 {
-    if (!cyc_off(lx) && lx->brace == 0 && lx->paren == 0)
+    if (cyc_off(lx) || lx->brace)
+        return;
+    if (c == '[')
+        lx->bracket++;
+    else if (lx->bracket > 0)
+        lx->bracket--;
+}
+
+static void cyc_c_other(struct cyc_lx *lx, char c)
+{
+    if (cyc_off(lx) || lx->brace || lx->bracket)
+        return;
+    if (lx->paren == 0) {
         lx->head_ok = 0;
+        lx->cand_ok = 0;
+        lx->decl_group = 0;
+        lx->head_group = 0;
+        lx->decl_init = c == '=' || (lx->decl_init && c != ';');
+    } else if (c == '*' && lx->last_sig == '(' && lx->cand_ok && lx->cand_depth == lx->paren) {
+        lx->cand_ok = 0;
+        lx->decl_group = 1;
+    }
 }
 
 struct cyc_span {
@@ -485,7 +578,9 @@ static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
 {
     switch (c) {
     case '(': cyc_c_lparen(lx, s->lineno); break;
-    case ')': cyc_c_rparen(lx); break;
+    case ')': cyc_c_rparen(lx, s->lineno); break;
+    case '[':
+    case ']': cyc_c_bracket(lx, c); break;
     case '{': cyc_c_lbrace(lx); break;
     case '}': {
         int rc = cyc_c_rbrace(lx, em);
@@ -493,11 +588,11 @@ static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
             return rc;
         break;
     }
-    case ';': cyc_c_other(lx); break;
+    case ';': cyc_c_other(lx, c); break;
     case '&':
     case '|': cyc_c_logic(lx, s->line, s->n, s->i, c); break;
     case '?': cyc_c_quest(lx); break;
-    default: cyc_c_other(lx); break;
+    default: cyc_c_other(lx, c); break;
     }
     lx->last_sig = c;
     return 0;

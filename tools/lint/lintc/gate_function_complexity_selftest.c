@@ -302,10 +302,58 @@ static int cyc_st_macro(void)
         | cyc_st_one(calm, "PICK", 2);
 }
 
+static int cyc_st_return_declarators(void)
+{
+    int bad = cyc_st_one("static int (*find_tool(const char *name))(int, char **) {\n"
+                         "for (int i = 0; i < 1; i++) { if (name) return 0; }\n"
+                         "return 0; }\n", "find_tool", 3);
+    bad |= cyc_st_one("static int (*(*nested(int x))(int))(char) {\n"
+                      "if (x) return 0; return 0; }\n", "nested", 2);
+    bad |= cyc_st_one("int (*(grouped)(int x))(int) {\n"
+                      "if (x) return 0; return 0; }\n", "grouped", 2);
+    bad |= cyc_st_two("int (plain)(int x) { if (x) return 1; return 0; }\n"
+                      "typedef int result; result (typed)(int x) { if (x) return 1; return 0; }\n",
+                      "plain", 2, "typed", 2);
+    bad |= cyc_st_one("int (((*wrapped(int x))))(int) {\n"
+                      "if (x) return 0; return 0; }\n", "wrapped", 2);
+    bad |= cyc_st_one("int apply(int (*callback)(int), int x) {\n"
+                      "if (x) return callback(x); return 0; }\n", "apply", 2);
+    bad |= cyc_st_one("int (*select_callback(int (*callback)(int), int x))(int) {\n"
+                      "if (x) return callback; return 0; }\n", "select_callback", 2);
+    bad |= cyc_st_one("int (*array_return(int x))[1 + sizeof(int)] {\n"
+                      "if (x) return 0; return 0; }\n", "array_return", 2);
+    bad |= cyc_st_one("int (*array_cond(int x))[\n#if X\n3\n#else\n3\n#endif\n"
+                      "] { if (x) return 0; return 0; }\n", "array_cond", 2);
+    bad |= cyc_st_one("static int (*pp_return(\n#if X\nint x\n#else\nint x\n#endif\n"
+                      "))(int) { if (x) return 0; return 0; }\n", "pp_return", 2);
+    bad |= cyc_st_none("int (**slot)(int) = &(int (*)(int)){0};\nint (*factory(int))(int);\n"
+                       "struct callbacks { int (*fn)(int); };\n"
+                       "static struct callbacks table = { .fn = 0 };\n");
+    bad |= cyc_st_one("int (**slot)(int) = &(int (*)(int)){0};\n"
+                      "int after_initializer(int x) { if (x) return 1; return 0; }\n",
+                      "after_initializer", 2);
+    bad |= cyc_st_two("#if X\nint (*variant(int x))(int) { if(x) return 0; return 0; }\n"
+                      "#else\nint (*variant(int x))(int) { if(x && x > 1) return 0; return 0; }\n"
+                      "#endif\n", "variant", 2, "variant#2", 3);
+    return bad;
+}
+
+static int cyc_st_return_array_desync(void)
+{
+    struct cyc_st_acc a = {0};
+    fputs("check_cyclomatic_complexity selftest: the next bracket mismatch is expected\n", stderr);
+    if (cyc_scan_text("int (*array(int x))\n#if X\n[3]\n#else\n[3\n#endif\n"
+                      "{ if (x) return 0; return 0; }\n", "st.c", cyc_st_collect, &a))
+        return 0;
+    fputs("check_cyclomatic_complexity selftest: unbalanced array branches were not refused\n", stderr);
+    return 1;
+}
+
 static int cyc_st_metric(void)
 {
     int bad = cyc_st_logic_ops() | cyc_st_pp_cond() | cyc_st_pp_hidden()
-        | cyc_st_pp_desync() | cyc_st_pp_splice() | cyc_st_macro();
+        | cyc_st_pp_desync() | cyc_st_pp_splice() | cyc_st_macro()
+        | cyc_st_return_declarators() | cyc_st_return_array_desync();
     /* exactly at the cap passes the cap: 14 decision points -> M=15 */
     bad |= cyc_st_one("int cap15(int x)\n{\n"
                       "    int r = 0;\n"
@@ -374,6 +422,15 @@ static int cyc_st_metric(void)
     bad |= cyc_st_none("typedef int (*cmp_fn)(const void *, const void *);\n");
     return bad;
 }
+
+static const char k_cyc_st_return_over[] =
+    "int (*return_over(int x))(int) {\n"
+    "if (x > 0) x--; if (x > 1) x--; if (x > 2) x--;\n"
+    "if (x > 3) x--; if (x > 4) x--; if (x > 5) x--;\n"
+    "if (x > 6) x--; if (x > 7) x--; if (x > 8) x--;\n"
+    "if (x > 9) x--; if (x > 10) x--; if (x > 11) x--;\n"
+    "if (x > 12) x--; if (x > 13) x--; if (x > 14) x--;\n"
+    "return 0; }\n";
 
 static const char k_cyc_st_fn[] =
     "int over_cap(int x)\n"
@@ -561,7 +618,7 @@ static int cyc_st_writeback(const char *root)
 static int cyc_st_scope_files(const char *root)
 {
     static const char *const paths[] = {
-        "one.c", "two.h", "three.inc", "four.def", "ignored.txt",
+        "one.c", "two.h", "three.inc", "four.def", "return_pointer.c", "ignored.txt",
         "tests/fixtures/five.inc", "vendor/ignored.h", "build/ignored.def",
         "test-tmp/ignored.c", "vendor/tor_stub.c", "vendor/tor_stub_extra.c",
         "vendor/tor_stub.c.h", NULL
@@ -574,7 +631,8 @@ static int cyc_st_scope_files(const char *root)
         return 1;
     for (int i = 0; paths[i]; i++) {
         if (ovf(snprintf(path, sizeof path, "%s/%s", root, paths[i]), sizeof path) ||
-            csr_write(path, k_cyc_st_fn)) return 1;
+            csr_write(path, strcmp(paths[i], "return_pointer.c") == 0
+                            ? k_cyc_st_return_over : k_cyc_st_fn)) return 1;
     }
     if (ovf(snprintf(path, sizeof path, "%s/macro.h", root), sizeof path)) return 1;
     return csr_write(path, "#define macro(x) ((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+"
@@ -582,12 +640,18 @@ static int cyc_st_scope_files(const char *root)
         "((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)+((x)?1:0)\n");
 }
 
+static int cyc_st_scope_return_missing(const char *s)
+{
+    return !strstr(s, "return_pointer.c:1: return_over M=16") &&
+        !strstr(s, "return_pointer.c:return_over:16");
+}
+
 static int cyc_st_scope_contents(const char *s)
 {
     return !strstr(s, "one.c:") || !strstr(s, "two.h:") ||
         !strstr(s, "three.inc:") || !strstr(s, "four.def:") ||
         !strstr(s, "tests/fixtures/five.inc:") || !strstr(s, "macro.h:") || !strstr(s, "over_cap") ||
-        !strstr(s, "vendor/tor_stub.c:") ||
+        !strstr(s, "vendor/tor_stub.c:") || cyc_st_scope_return_missing(s) ||
         strstr(s, "vendor/tor_stub_extra.c:") || strstr(s, "vendor/tor_stub.c.h:") ||
         strstr(s, "ignored") != NULL;
 }
@@ -682,8 +746,8 @@ static int cyc_st_scope_report(const char *root, const char *baseline)
     char report[8192];
     if (!bad && (cyc_check(root, baseline, "RATCHET", 1, 0, out, err) ||
                  csr_slurp(out, report, sizeof report) ||
-                 !strstr(report, "13 functions in 7 files") ||
-                 !strstr(report, "M>15: 7"))) bad = 1;
+                 !strstr(report, "14 functions in 8 files") ||
+                 !strstr(report, "M>15: 8"))) bad = 1;
     if (out) fclose(out);
     if (err) fclose(err);
     return bad;
