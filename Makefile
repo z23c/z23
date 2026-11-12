@@ -5427,7 +5427,7 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 		platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
-	    -O0 -Wall -Wextra -Werror -pedantic \
+	    -O2 -Wall -Wextra -Werror -pedantic \
 	    -Icontexts/commons/modules/vcs/include -Iplatform/modules/json/include -Iplatform/modules/codec/include -Iplatform/modules/sha3/include \
 	    -Icore/modules/crypto/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -Iplatform/modules/platform/include -Ivendor/include -o $@ $(filter %.c,$^) \

@@ -104,9 +104,15 @@ enum vcs_package_capsule_error vcs_package_capsule_serialize(
     if (err != VCS_PACKAGE_CAPSULE_OK)
         return err;
     size_t total = sizeof(capsule_magic) + 2u + 2u;
-    for (size_t i = 0; i < capsule->count; i++)
-        total += 2u + strlen(capsule->headers[i].path) + 32u;
-    if (total > VCS_PACKAGE_CAPSULE_MAX_WIRE_BYTES)
+    for (size_t i = 0; i < capsule->count; i++) {
+        size_t len = strlen(capsule->headers[i].path);
+        size_t remaining = VCS_PACKAGE_CAPSULE_MAX_WIRE_BYTES - total;
+        if (remaining < 34u || len > remaining - 34u)
+            return VCS_PACKAGE_CAPSULE_ERR_OVERSIZE;
+        total += 34u + len;
+    }
+    /* Keep the fixed header allocation bound visible at the write site. */
+    if (total < sizeof(capsule_magic) + 4u)
         return VCS_PACKAGE_CAPSULE_ERR_OVERSIZE;
     uint8_t *buf = zcl_malloc(total, "vcs.package.capsule.wire");
     if (!buf)

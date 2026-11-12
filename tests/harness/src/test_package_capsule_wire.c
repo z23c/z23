@@ -10,6 +10,7 @@
 #include "vcs/package_capsule.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,6 +80,57 @@ static bool pcw_honest_round_trip(void)
     return ok;
 }
 
+/* 61 full-length paths plus a final 952-byte path produce exactly 65536
+ * bytes: 12-byte prefix and 62 entries, each with 34 bytes of framing. */
+static bool pcw_boundary_capsule(struct vcs_package_capsule *capsule, bool over)
+{
+    vcs_package_capsule_init(capsule);
+    for (size_t i = 0; i < 62; ++i) {
+        char *path = capsule->headers[i].path;
+        size_t len = i < 61 ? 1024u : (over ? 953u : 952u);
+        if (snprintf(path, 5, "%03u/", (unsigned)i) != 4) return false;
+        for (size_t j = 4; j < len; ++j)
+            path[j] = (j % 200u == 0 && j + 1u < len) ? '/' : 'a';
+        path[len] = 0;
+        if (!vcs_package_path_valid(path)) return false;
+        memset(capsule->headers[i].file_root, (int)i, 32);
+    }
+    capsule->count = 62;
+    return true;
+}
+static bool pcw_boundary_round_trip(void)
+{
+    static struct vcs_package_capsule input, parsed;
+    if (!pcw_boundary_capsule(&input, false)) return false;
+    uint8_t *wire = NULL; size_t len = 0;
+    enum vcs_package_capsule_error result = vcs_package_capsule_serialize(&input, &wire, &len);
+    bool ok = result == VCS_PACKAGE_CAPSULE_OK && wire && len == VCS_PACKAGE_CAPSULE_MAX_WIRE_BYTES &&
+        vcs_package_capsule_parse(wire, len, &parsed) == VCS_PACKAGE_CAPSULE_OK && parsed.count == input.count;
+    for (size_t i = 0; ok && i < input.count; ++i)
+        ok = !strcmp(input.headers[i].path, parsed.headers[i].path) &&
+             !memcmp(input.headers[i].file_root, parsed.headers[i].file_root, 32);
+    free(wire); return ok;
+}
+static bool pcw_over_limit(void)
+{
+    static struct vcs_package_capsule input;
+    if (!pcw_boundary_capsule(&input, true)) return false;
+    uint8_t *wire = (uint8_t *)(uintptr_t)1; size_t len = 1;
+    enum vcs_package_capsule_error result = vcs_package_capsule_serialize(&input, &wire, &len);
+    if (result == VCS_PACKAGE_CAPSULE_OK) free(wire);
+    return result == VCS_PACKAGE_CAPSULE_ERR_OVERSIZE && wire == NULL && len == 0;
+}
+static bool pcw_empty_round_trip(void)
+{
+    static struct vcs_package_capsule input, parsed;
+    vcs_package_capsule_init(&input);
+    uint8_t *wire = NULL; size_t len = 0;
+    enum vcs_package_capsule_error result = vcs_package_capsule_serialize(&input, &wire, &len);
+    bool ok = result == VCS_PACKAGE_CAPSULE_OK && wire && len == 12 &&
+        vcs_package_capsule_parse(wire, len, &parsed) == VCS_PACKAGE_CAPSULE_OK && parsed.count == 0;
+    free(wire); return ok;
+}
+
 static int pcw_case(const char *name, bool ok)
 {
     int failures = 0;
@@ -101,5 +153,8 @@ int package_capsule_wire_tests(void)
                                            sizeof(pcw_nul_early)));
     failures += pcw_case("capsule honest path round-trips, NUL-padded refused",
                          pcw_honest_round_trip());
+    failures += pcw_case("capsule empty header round-trips", pcw_empty_round_trip());
+    failures += pcw_case("capsule exact wire limit round-trips", pcw_boundary_round_trip());
+    failures += pcw_case("capsule one byte over limit refuses cleanly", pcw_over_limit());
     return failures;
 }
