@@ -950,6 +950,269 @@ static int sia_cache_rename(const char *from, const char *to)
     }
     return rc;
 }
+static void sia_stat_child(const char *work, const char *mode, bool full)
+{
+    if (chdir(work) != 0) _exit(120);
+    if (!freopen("stat-input", "rb", stdin) ||
+        !freopen(full ? "/dev/full" : "stat-output", "wb", stdout)) _exit(121);
+    char *argv[] = {"source-identity-batch", (char *)mode, NULL};
+    _exit(sia_batch_fixture_main(2, argv));
+}
+static int sia_stat_run(const char *work, const char *mode, const void *input,
+                        size_t length, bool full)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/stat-input", work) >= (int)sizeof(path)) return -1;
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    bool wrote = fwrite(input, 1, length, f) == length;
+    if (fclose(f) != 0 || !wrote) return -1;
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) sia_stat_child(work, mode, full);
+    if (child < 0) return -1;
+    int status; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+static bool sia_stat_read(const char *work, char *out, size_t cap)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/stat-output", work) >= (int)sizeof(path)) return false;
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    size_t n = fread(out, 1, cap - 1, f); bool ok = feof(f) && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    out[n] = 0; return ok;
+}
+static bool sia_stat_expected(const char *work, const char *path, bool follow,
+                              char *out, size_t cap)
+{
+    char full[PATH_MAX], hex[PATH_MAX * 2]; struct stat st;
+    if (snprintf(full, sizeof(full), "%s/%s", work, path) >= (int)sizeof(full)) return false;
+    if ((follow ? stat(full, &st) : lstat(full, &st)) != 0 || strlen(path) * 2 + 1 > sizeof(hex)) return false;
+    zcl_hex_encode((const uint8_t *)path, strlen(path), hex);
+#if defined(__APPLE__)
+    struct timespec mt = st.st_mtimespec, ct = st.st_ctimespec;
+#else
+    struct timespec mt = st.st_mtim, ct = st.st_ctim;
+#endif
+    int n = snprintf(out, cap, "%s\t%" PRIuMAX ":%" PRIuMAX ":%" PRIdMAX ":%" PRIdMAX ":%ld:%" PRIdMAX ":%ld\n",
+        hex, (uintmax_t)st.st_dev, (uintmax_t)st.st_ino, (intmax_t)st.st_size,
+        (intmax_t)mt.tv_sec, mt.tv_nsec, (intmax_t)ct.tv_sec, ct.tv_nsec);
+    return n > 0 && (size_t)n < cap;
+}
+static bool sia_stat_one(const char *work, const char *mode, const char *path, bool follow)
+{
+    char expected[PATH_MAX * 2 + 256], actual[PATH_MAX * 2 + 256];
+    return sia_stat_expected(work, path, follow, expected, sizeof(expected)) &&
+        sia_stat_run(work, mode, path, strlen(path) + 1, false) == 0 &&
+        sia_stat_read(work, actual, sizeof(actual)) && !strcmp(actual, expected);
+}
+static bool sia_stat_multiple(const char *work)
+{
+    static const char input[] = "file\0line\nfile\0";
+    char first[1024], second[1024], actual[2048], expected[2048];
+    if (!sia_stat_expected(work, "file", true, first, sizeof(first)) ||
+        !sia_stat_expected(work, "line\nfile", true, second, sizeof(second))) return false;
+    int n = snprintf(expected, sizeof(expected), "%s%s", first, second);
+    return n > 0 && (size_t)n < sizeof(expected) &&
+        sia_stat_run(work, "stat-follow", input, sizeof(input) - 1, false) == 0 &&
+        sia_stat_read(work, actual, sizeof(actual)) && !strcmp(actual, expected);
+}
+static bool sia_stat_setup(const char *work)
+{
+    char p[PATH_MAX];
+    if (snprintf(p, sizeof(p), "%s/file", work) >= (int)sizeof(p) || !sia_write_file(p, "data")) return false;
+    if (snprintf(p, sizeof(p), "%s/line\nfile", work) >= (int)sizeof(p) || !sia_write_file(p, "newline")) return false;
+    if (snprintf(p, sizeof(p), "%s/dir", work) >= (int)sizeof(p) || mkdir(p, 0700)) return false;
+    if (snprintf(p, sizeof(p), "%s/link", work) >= (int)sizeof(p) || symlink("file", p)) return false;
+    if (snprintf(p, sizeof(p), "%s/dirlink", work) >= (int)sizeof(p) || symlink("dir", p)) return false;
+    if (snprintf(p, sizeof(p), "%s/dangling", work) >= (int)sizeof(p) || symlink("absent", p)) return false;
+    return true;
+}
+static bool sia_stat_nanoseconds(const char *work)
+{
+    char path[PATH_MAX], a[1024], b[1024];
+    if (snprintf(path, sizeof(path), "%s/file", work) >= (int)sizeof(path)) return false;
+    struct timespec times[2] = {{1700000000, 123456789}, {1700000000, 123456789}};
+    if (utimensat(AT_FDCWD, path, times, 0) || !sia_stat_one(work, "stat-follow", "file", true) ||
+        !sia_stat_read(work, a, sizeof(a))) return false;
+    times[0].tv_nsec = times[1].tv_nsec = 987654321;
+    return !utimensat(AT_FDCWD, path, times, 0) && sia_stat_one(work, "stat-follow", "file", true) &&
+        sia_stat_read(work, b, sizeof(b)) && strcmp(a, b) != 0;
+}
+static bool sia_stat_hex_boundaries(const char *work)
+{
+    static const size_t lengths[] = {127, 128, 129, 255};
+    char name[256], path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+        memset(name, 'a' + (int)i, lengths[i]);
+        name[lengths[i]] = 0;
+        if (snprintf(path, sizeof(path), "%s/%s", work, name) >= (int)sizeof(path) ||
+            !sia_write_file(path, "boundary") ||
+            !sia_stat_one(work, "stat-follow", name, true) ||
+            !sia_stat_one(work, "stat-link", name, false)) return false;
+    }
+    return true;
+}
+static int sia_stat_modes(void)
+{
+    int failures = 0; char work[512] = {0}, out[256];
+    TEST("source identity stat modes preserve exact link and newline metadata") {
+        test_make_tmpdir(work, sizeof(work), "sia", "stat-modes");
+        ASSERT(sia_stat_setup(work));
+        ASSERT(sia_stat_one(work, "stat-follow", "file", true));
+        ASSERT(sia_stat_one(work, "stat-follow", "dir", true));
+        ASSERT(sia_stat_one(work, "stat-link", "dir", false));
+        ASSERT(sia_stat_one(work, "stat-follow", "link", true));
+        ASSERT(sia_stat_one(work, "stat-link", "link", false));
+        ASSERT(sia_stat_one(work, "stat-follow", "dirlink", true));
+        ASSERT(sia_stat_one(work, "stat-link", "dirlink", false));
+        ASSERT(sia_stat_one(work, "stat-link", "dangling", false));
+        ASSERT(sia_stat_one(work, "stat-follow", "line\nfile", true));
+        ASSERT(sia_stat_multiple(work));
+        ASSERT(sia_stat_nanoseconds(work));
+        ASSERT(sia_stat_hex_boundaries(work));
+        PASS();
+    }
+    TEST("source identity stat modes refuse bad streams and output errors") {
+        ASSERT(sia_stat_run(work, "stat-follow", "", 0, false) == 0);
+        ASSERT(sia_stat_read(work, out, sizeof(out)) && !out[0]);
+        ASSERT(sia_stat_run(work, "stat-follow", "\0", 1, false) != 0);
+        ASSERT(sia_stat_run(work, "stat-follow", "file", 4, false) != 0);
+        ASSERT(sia_stat_run(work, "stat-follow", "absent\0", 7, false) != 0);
+        ASSERT(sia_stat_run(work, "stat-follow", "dangling\0", 9, false) != 0);
+        if (access("/dev/full", W_OK) == 0)
+            ASSERT(sia_stat_run(work, "stat-follow", "file\0", 5, true) != 0);
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+
+/* Exercise the production shell functions themselves with failing fixture
+ * commands. Keep the extractor closed to whole top-level functions. */
+static bool sia_epoch_extract(FILE *out, const char *prefix, bool one_line)
+{
+    FILE *in = fopen("tools/dev/build-epoch-selftest.sh", "rb");
+    if (!in) return false;
+    char line[4096]; bool found = false, done = false, ok = true;
+    size_t n = strlen(prefix);
+    while (fgets(line, sizeof(line), in)) {
+        size_t len = strlen(line);
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n') { ok = false; break; }
+        if (!found && strncmp(line, prefix, n) == 0) found = true;
+        if (!found) continue;
+        if (fputs(line, out) == EOF) { ok = false; break; }
+        if (one_line || !strcmp(line, "}\n")) { done = true; break; }
+    }
+    bool read_error = ferror(in) != 0;
+    if (fclose(in) != 0 || read_error) ok = false;
+    return ok && found && done;
+}
+static bool sia_epoch_shell_script(const char *work)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/metadata-check", work) >= (int)sizeof(path)) return false;
+    FILE *out = fopen(path, "wb"); if (!out) return false;
+    bool ok = fputs("#!/bin/bash\nset -o pipefail\nWORK=.\nVENDOR_METADATA_TOOL=./metadata-tool\nVENDOR_METADATA_MODE=stat-link\n", out) >= 0;
+    const char *const functions[] = {"fail()", "artifact_stamp()", "vendor_input_paths()",
+                                     "vendor_input_state()", "vendor_inputs_unchanged()"};
+    for (size_t i = 0; ok && i < sizeof(functions) / sizeof(functions[0]); ++i)
+        ok = sia_epoch_extract(out, functions[i], false);
+    ok = ok && fputs("sia_initial() {\n", out) >= 0 &&
+        sia_epoch_extract(out, "VENDOR_STATE_BEFORE=", true) && fputs("}\n", out) >= 0;
+    if (ok) ok = fputs(
+        "SCENARIO=$1; export SCENARIO\n"
+        "case $SCENARIO in\n"
+        " find|initial|final) find() { printf 'vendor/lib/a.a\\0'; return 1; } ;;\n"
+        " helper) stat() { printf fallback > fallback-called; return 1; } ;;\n"
+        " sort) sort() { printf partial; return 1; } ;;\n"
+        " fallback) VENDOR_METADATA_TOOL=''; stat() { return 1; } ;;\n"
+        " fallback-good|fallback-change) VENDOR_METADATA_TOOL='' ;;\n"
+        "esac\n"
+        "case $SCENARIO in\n"
+        " initial) sia_initial; exit 4 ;;\n"
+        " final) VENDOR_STATE_BEFORE=original; vendor_inputs_unchanged; exit 4 ;;\n"
+        " good) vendor_input_state > state-result || exit 5; [ -s state-result ] || exit 6; exit 0 ;;\n"
+        " fallback-good) sia_initial; vendor_inputs_unchanged; exit 0 ;;\n"
+        " fallback-change) sia_initial; printf changed >> vendor/lib/a.a; vendor_inputs_unchanged; exit 4 ;;\n"
+        "esac\n"
+        "if vendor_input_state > state-result; then exit 4; fi\n"
+        "if [ \"$SCENARIO\" = helper ] && [ -e fallback-called ]; then exit 5; fi\n"
+        "exit 0\n", out) >= 0;
+    if (fclose(out) != 0) ok = false;
+    return ok;
+}
+static bool sia_epoch_shell_setup(const char *work)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/vendor", work) >= (int)sizeof(path) || mkdir(path, 0700)) return false;
+    if (snprintf(path, sizeof(path), "%s/vendor/lib", work) >= (int)sizeof(path) || mkdir(path, 0700)) return false;
+    if (snprintf(path, sizeof(path), "%s/vendor/lib/a.a", work) >= (int)sizeof(path) || !sia_write_file(path, "fixture")) return false;
+    if (snprintf(path, sizeof(path), "%s/metadata-tool", work) >= (int)sizeof(path)) return false;
+    return sia_write_exec(path, "#!/bin/sh\nprintf 'partial\\n'\n[ \"$SCENARIO\" != helper ]\n") && sia_epoch_shell_script(work);
+}
+static int sia_epoch_shell_run(const char *work, const char *scenario)
+{
+    fflush(NULL); pid_t child = fork();
+    if (child == 0) {
+        if (chdir(work) != 0 || !freopen("shell-error", "wb", stderr)) _exit(120);
+        execlp("bash", "bash", "metadata-check", scenario, (char *)NULL);
+        _exit(121);
+    }
+    if (child < 0) return -1;
+    int status; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+static bool sia_epoch_shell_error(const char *work, const char *expected)
+{
+    char path[PATH_MAX], buf[512];
+    if (snprintf(path, sizeof(path), "%s/shell-error", work) >= (int)sizeof(path)) return false;
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f); bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    buf[n] = 0; return ok && strstr(buf, expected) != NULL;
+}
+static int sia_epoch_metadata_failures(void)
+{
+    int failures = 0; char work[512] = {0};
+    TEST("epoch vendor snapshots fail closed on partial find/helper/sort and fallback stat errors") {
+        test_make_tmpdir(work, sizeof(work), "sia", "epoch-metadata-failures");
+        ASSERT(sia_epoch_shell_setup(work));
+        ASSERT_EQ(sia_epoch_shell_run(work, "good"), 0);
+        const char *const scenarios[] = {"find", "helper", "sort", "fallback"};
+        for (size_t i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]); ++i) {
+            int rc = sia_epoch_shell_run(work, scenarios[i]);
+            if (rc != 0) fprintf(stderr, "epoch metadata scenario=%s rc=%d\n", scenarios[i], rc);
+            ASSERT_EQ(rc, 0);
+        }
+        ASSERT_EQ(sia_epoch_shell_run(work, "initial"), 1);
+        ASSERT(sia_epoch_shell_error(work, "cannot capture initial vendor metadata"));
+        ASSERT_EQ(sia_epoch_shell_run(work, "final"), 1);
+        ASSERT(sia_epoch_shell_error(work, "cannot capture final vendor metadata"));
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+
+static int sia_epoch_metadata_fallback(void)
+{
+    int failures = 0; char work[512] = {0};
+    TEST("epoch vendor fallback detects inventory changes") {
+        test_make_tmpdir(work, sizeof(work), "sia", "epoch-metadata-fallback");
+        ASSERT(sia_epoch_shell_setup(work));
+        ASSERT_EQ(sia_epoch_shell_run(work, "fallback-good"), 0);
+        ASSERT_EQ(sia_epoch_shell_run(work, "fallback-change"), 1);
+        ASSERT(sia_epoch_shell_error(work, "the self-test changed vendor/lib/*.a or vendor/include"));
+        PASS();
+    } _test_next:;
+    if (work[0]) test_rm_rf_recursive(work);
+    return failures;
+}
+
 static int sia_digest_cache_concurrent(void)
 {
     int failures = 0;
@@ -1136,6 +1399,9 @@ int test_source_identity_authority(void)
 #if !defined(_WIN32)
     failures += sia_selftest_git_isolation();
     failures += sia_digest_cache_concurrent();
+    failures += sia_stat_modes();
+    failures += sia_epoch_metadata_failures();
+    failures += sia_epoch_metadata_fallback();
     failures += sia_digest_cache_absent_directory();
     failures += sia_digest_cache_framing();
     failures += sia_include_namespace_closure();

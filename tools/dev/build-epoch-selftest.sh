@@ -135,25 +135,45 @@ artifact_stamp()
 # at start and fails at the end if any of them moved. Rebuilding them here
 # once made every proof on a host whose toolchain had changed fail with a
 # changed source mutation.
+vendor_input_paths()
+{
+    if [ -d vendor/lib ]; then
+        find vendor/lib -maxdepth 1 -name '*.a' ! -type d -print0 || return 1
+    fi
+    if [ -d vendor/include ]; then
+        find vendor/include ! -type d -print0 || return 1
+    fi
+}
+
+# Build once in this selftest's private workspace; never race a shared binary.
+# Compiler-unavailable hosts retain the portable implementation for both
+# snapshots. A runtime capture error is fatal, never a fallback trigger.
+VENDOR_METADATA_TOOL="$(ZCL_BIN_DIR="$WORK/vendor-bin" \
+    "$SELF_DIR/source-identity-batch-bootstrap.sh")"
+VENDOR_METADATA_MODE=stat-link
+if stat -Lc '%d' "$SELF_DIR" >/dev/null 2>&1; then
+    VENDOR_METADATA_MODE=stat-follow
+fi
 vendor_input_state()
 {
-    local path
-    {
-        if [ -d vendor/lib ]; then
-            find vendor/lib -maxdepth 1 -name '*.a' ! -type d -print0
-        fi
-        if [ -d vendor/include ]; then
-            find vendor/include ! -type d -print0
-        fi
-    } | while IFS= read -r -d '' path; do
-        printf '%s %s\n' "$path" "$(artifact_stamp "$path")"
-    done | LC_ALL=C sort
+    local path stamp
+    vendor_input_paths > "$WORK/vendor-paths" || return 1
+    if [ -n "$VENDOR_METADATA_TOOL" ]; then
+        "$VENDOR_METADATA_TOOL" "$VENDOR_METADATA_MODE" \
+            < "$WORK/vendor-paths" > "$WORK/vendor-metadata" || return 1
+    else
+        while IFS= read -r -d '' path; do
+            stamp="$(artifact_stamp "$path")" || return 1
+            printf '%s %s\n' "$path" "$stamp" || return 1
+        done < "$WORK/vendor-paths" > "$WORK/vendor-metadata" || return 1
+    fi
+    LC_ALL=C sort "$WORK/vendor-metadata"
 }
-VENDOR_STATE_BEFORE="$(vendor_input_state)"
+VENDOR_STATE_BEFORE="$(vendor_input_state)" || fail 'cannot capture initial vendor metadata'
 vendor_inputs_unchanged()
 {
     local after
-    after="$(vendor_input_state)"
+    after="$(vendor_input_state)" || fail 'cannot capture final vendor metadata'
     [ "$after" = "$VENDOR_STATE_BEFORE" ] && return 0
     diff <(printf '%s\n' "$VENDOR_STATE_BEFORE") <(printf '%s\n' "$after") |
         awk 'sub(/^[<>] /, "build-epoch-selftest: vendor input moved: ") &&

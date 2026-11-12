@@ -52,6 +52,8 @@
 typedef enum {
     BATCH_HASH,
     BATCH_MODE,
+    BATCH_STAT_FOLLOW,
+    BATCH_STAT_LINK,
     BATCH_TOKEN_INVENTORY,
     BATCH_TOKEN_MUTATION,
     BATCH_TOKEN_IDENTITY,
@@ -613,6 +615,56 @@ static int mode_path(const char *path)
         return 1;
     }
     return 0;
+}
+
+/* Encode pathname bytes so line-oriented sorted snapshots stay unambiguous. */
+static int emit_stat_path_hex(const char *path)
+{
+    size_t remaining = strlen(path);
+    while (remaining != 0) {
+        char hex[257];
+        size_t chunk = remaining < 128 ? remaining : 128;
+        zcl_hex_encode((const uint8_t *)path, chunk, hex);
+        if (fputs(hex, stdout) == EOF) return 1;
+        path += chunk;
+        remaining -= chunk;
+    }
+    return 0;
+}
+
+/* One metadata snapshot per record; stat-follow follows the final symlink,
+ * while stat-link observes the link itself. Times retain nanoseconds. */
+static int stat_path(const char *path, bool follow)
+{
+    struct stat metadata;
+    if ((follow ? stat(path, &metadata) : lstat(path, &metadata)) != 0)
+        return report_path_error("could not stat", path);
+#if defined(__APPLE__)
+    struct timespec mtime = metadata.st_mtimespec, ctime = metadata.st_ctimespec;
+#else
+    struct timespec mtime = metadata.st_mtim, ctime = metadata.st_ctim;
+#endif
+    if (emit_stat_path_hex(path) != 0 ||
+        printf("\t%ju:%ju:%jd:%jd:%jd:%jd:%jd\n",
+               (uintmax_t)metadata.st_dev, (uintmax_t)metadata.st_ino,
+               (intmax_t)metadata.st_size,
+               (intmax_t)mtime.tv_sec, (intmax_t)mtime.tv_nsec,
+               (intmax_t)ctime.tv_sec, (intmax_t)ctime.tv_nsec) < 0) {
+        fprintf(stderr, "source-identity-batch: output write failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int batch_path_action(batch_mode mode, const char *path)
+{
+    switch (mode) {
+    case BATCH_HASH: return hash_path(path);
+    case BATCH_MODE: return mode_path(path);
+    case BATCH_STAT_FOLLOW: return stat_path(path, true);
+    case BATCH_STAT_LINK: return stat_path(path, false);
+    default: return 1;
+    }
 }
 
 /* ── token submode ────────────────────────────────────────────────────── */
@@ -1438,7 +1490,7 @@ static int batch_path_main(batch_mode mode)
         }
         if (at_eof)
             break;
-        status = mode == BATCH_HASH ? hash_path(path) : mode_path(path);
+        status = batch_path_action(mode, path);
         if (status != 0)
             break;
     }
@@ -1722,13 +1774,30 @@ static int hash_command(int argc, char **argv)
     return batch_path_main(BATCH_HASH);
 }
 
-int main(int argc, char **argv)
+/* Dispatch the independent one-pass commands; -1 means a different mode. */
+static int batch_simple_command(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "identity") == 0) {
         printf("zcl.source_identity_batch.v1 %s\n",
                ZCL_SOURCE_IDENTITY_BATCH_INPUT_ID);
         return ferror(stdout) ? 1 : 0;
     }
+    if (argv[1] != nullptr && strcmp(argv[1], "hash") == 0)
+        return hash_command(argc, argv);
+    if (argc == 2 && strcmp(argv[1], "mode") == 0)
+        return batch_path_main(BATCH_MODE);
+    if (argc == 2 && strcmp(argv[1], "stat-follow") == 0)
+        return batch_path_main(BATCH_STAT_FOLLOW);
+    if (argc == 2 && strcmp(argv[1], "stat-link") == 0)
+        return batch_path_main(BATCH_STAT_LINK);
+    return -1;
+}
+
+
+int main(int argc, char **argv)
+{
+    int simple = batch_simple_command(argc, argv);
+    if (simple >= 0) return simple;
     if (argv[1] != nullptr && strcmp(argv[1], "token") == 0) {
         if (argc == 5)
             return run_tokens(argv[2], argv[3], argv[4], nullptr);
@@ -1739,14 +1808,10 @@ int main(int argc, char **argv)
                 "<preimage> <gitlink-sidecar> [digest-table]\n");
         return 2;
     }
-    if (argv[1] != nullptr && strcmp(argv[1], "hash") == 0)
-        return hash_command(argc, argv);
-    if (argc == 2 && strcmp(argv[1], "mode") == 0)
-        return batch_path_main(BATCH_MODE);
     if (argc >= 2)
         return enumeration_main(argc, argv);
     fprintf(stderr,
-            "usage: source-identity-batch hash|mode|identity|token|"
+            "usage: source-identity-batch hash|mode|stat-follow|stat-link|identity|token|"
             "check-tags|split-index|prefix ...\n");
     return 2;
 }
