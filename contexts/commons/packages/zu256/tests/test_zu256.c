@@ -13,6 +13,7 @@ static FILE *cli_errors;
 static size_t cli_flushes;
 static FILE *real_stdout(void) { return stdout; }
 static FILE *real_stderr(void) { return stderr; }
+static FILE *cli_stderr(void) { return cli_errors ? cli_errors : real_stderr(); }
 [[maybe_unused]] static int cli_flush(FILE *stream)
 {
     if (stream == cli_sink) cli_flushes++;
@@ -21,7 +22,7 @@ static FILE *real_stderr(void) { return stderr; }
 #undef stdout
 #undef stderr
 #define stdout cli_sink
-#define stderr (cli_errors ? cli_errors : real_stderr())
+#define stderr cli_stderr()
 #define printf(...) fprintf(cli_sink, __VA_ARGS__)
 #define puts(text) fprintf(cli_sink, "%s\n", (text))
 #define fflush cli_flush
