@@ -659,15 +659,22 @@ int ci_store_dependents_of_file(struct ci_store *s, const char *dep_path,
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare dependents_of_file");
     }
-    sqlite3_bind_text(stmt, 1, dep_path, -1, SQLITE_TRANSIENT);
+    if (sqlite3_bind_text(stmt, 1, dep_path, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+        (void)sqlite3_finalize(stmt);
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "bind dependents_of_file");
+    }
     int n = 0;
-    int rc;
+    int rc = SQLITE_DONE;
     while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
         ci_cpy(out[n], 256, (const char *)sqlite3_column_text(stmt, 0));
         n++;
     }
-    sqlite3_finalize(stmt);
+    bool complete = n == cap || rc == SQLITE_DONE;
+    int finish_rc = sqlite3_finalize(stmt);
     pthread_mutex_unlock(&s->lock);
+    if (!complete || finish_rc != SQLITE_OK)
+        LOG_ERR("codeindex", "read dependents_of_file failed rc=%d finish=%d", rc, finish_rc);
     return n;
 }
 

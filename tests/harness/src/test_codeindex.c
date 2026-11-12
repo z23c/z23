@@ -4468,6 +4468,121 @@ static int ci_identity_tests(void)
     return failures;
 }
 
+struct ci_reverse_fault { sqlite3 *db; bool after_row, traced; int rows, requests, runs, target_run; };
+static int ci_reverse_trace(unsigned kind, void *context, void *statement, void *detail)
+{
+    (void)detail; struct ci_reverse_fault *f = context;
+    const char *sql = sqlite3_sql(statement);
+    if (!sql || !strstr(sql, "SELECT DISTINCT f.path FROM includes")) return 0;
+    if (kind == SQLITE_TRACE_STMT) { f->traced = true; ++f->runs; }
+    if (kind == SQLITE_TRACE_ROW) ++f->rows;
+    if (f->runs == (f->target_run ? f->target_run : 1) &&
+        ((!f->after_row && kind == SQLITE_TRACE_STMT) ||
+         (f->after_row && kind == SQLITE_TRACE_ROW && f->rows == 1))) {
+        ++f->requests; sqlite3_interrupt(f->db);
+    }
+    return 0;
+}
+static bool ci_reverse_seed(struct ci_store *s)
+{
+    int64_t a = -1, b = -1, c = -1;
+    bool begun = ci_store_begin(s);
+    bool ok = begun && ci_include_select_file(s, "a.c", &a) &&
+        ci_include_select_file(s, "b.c", &b) && ci_include_select_file(s, "c.c", &c) &&
+        ci_store_put_include(s, a, "shared.h") && ci_store_put_include(s, b, "shared.h") &&
+        ci_store_put_include(s, c, "shared.h");
+    bool committed = begun && ci_store_commit(s);
+    return ok && committed;
+}
+static bool ci_reverse_rows(struct ci_store *s)
+{
+    char out[4][256] = {{0}};
+    int n = ci_store_dependents_of_file(s, "shared.h", out, 4);
+    if (n != 3 || strcmp(out[0], "a.c") || strcmp(out[1], "b.c") || strcmp(out[2], "c.c")) return false;
+    n = ci_store_dependents_of_file(s, "shared.h", out, 1);
+    return n == 1 && !strcmp(out[0], "a.c") && ci_store_dependents_of_file(s, "absent.h", out, 4) == 0;
+}
+static int ci_reverse_interrupts(struct ci_store *s)
+{
+    int failures = 0; sqlite3 *db = ci_store_db(s);
+    for (unsigned after = 0; after < 2; ++after) {
+        struct ci_reverse_fault f = {.db = db, .after_row = after != 0}; char out[4][256] = {{0}};
+        bool trace = sqlite3_trace_v2(db, SQLITE_TRACE_STMT | SQLITE_TRACE_ROW, ci_reverse_trace, &f) == SQLITE_OK;
+        int result = ci_store_dependents_of_file(s, "shared.h", out, 4);
+        (void)sqlite3_trace_v2(db, 0, NULL, NULL);
+        bool recovered = ci_reverse_rows(s);
+        printf("  codeindex: reverse after=%u traced=%d rows=%d requests=%d result=%d first=%s\n",
+               after, f.traced, f.rows, f.requests, result, out[0]);
+        CI_CHECK("reverse interruption refuses incomplete answer", trace && f.traced && f.requests == 1 &&
+                 (!after || (f.rows >= 1 && !strcmp(out[0], "a.c"))) && result < 0 && recovered);
+    }
+    return failures;
+}
+static bool ci_reverse_public_seed(struct ci_store *s, const char *path)
+{
+    int64_t ids[3];
+    bool ok = ci_include_select_file(s, "d.c", &ids[0]) &&
+        ci_include_select_file(s, "e.c", &ids[1]) && ci_include_select_file(s, "f.c", &ids[2]);
+    for (size_t i = 0; i < 3 && ok; ++i) ok = ci_store_put_include(s, ids[i], path);
+    return ok;
+}
+static int ci_reverse_public_faults(struct codeindex *ci, const char *path)
+{
+    int failures = 0; char out[4][256] = {{0}};
+    for (int run = 1; run <= 2; ++run) {
+        struct ci_reverse_fault f = {.db = ci_store_db(ci->store), .target_run = run};
+        bool trace = sqlite3_trace_v2(f.db, SQLITE_TRACE_STMT, ci_reverse_trace, &f) == SQLITE_OK;
+        enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_COMPLETE;
+        int result = codeindex_reverse_includes(ci, path, out, 2, &dim);
+        (void)sqlite3_trace_v2(f.db, 0, NULL, NULL);
+        printf("  codeindex: reverse public target=%d runs=%d interrupts=%d result=%d dim=%d\n",
+               run, f.runs, f.requests, result, (int)dim);
+        CI_CHECK("reverse public refuses interrupted query or cap probe", trace && f.runs == run &&
+                 f.requests == 1 && result < 0 && dim == CODEINDEX_INCLUDE_DIM_UNAVAILABLE);
+    }
+    return failures;
+}
+static int ci_reverse_public(struct ci_store *s)
+{
+    int failures = 0; const char *path = "reverse-ci-header.h";
+    struct codeindex ci = {.store = s}; (void)snprintf(ci.root, sizeof(ci.root), "%s", FIX);
+    char out[4][256] = {{0}}; enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    bool setup = mk_write(FIX, path, "/* reverse input */\n") &&
+        ci_store_meta_set(s, "include_narrow_unsafe", "0", 1);
+    int control = codeindex_reverse_includes(&ci, path, out, 4, &dim);
+    CI_CHECK("reverse public control is complete", setup && control == 0 && dim == CODEINDEX_INCLUDE_DIM_COMPLETE);
+    /* The same real file is added as a dependency for three indexed units. */
+    bool added = ci_reverse_public_seed(s, path);
+    dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    control = codeindex_reverse_includes(&ci, path, out, 2, &dim);
+    CI_CHECK("reverse public cap probe reports truncation", added && control == 2 && dim == CODEINDEX_INCLUDE_DIM_TRUNCATED);
+    if (setup && added) failures += ci_reverse_public_faults(&ci, path);
+    (void)unlink(FIX "/reverse-ci-header.h");
+    return failures;
+}
+static int ci_reverse_tests(void)
+{
+    struct ci_store *s = ci_store_open_path(":memory:");
+    if (!s) return 1;
+    sqlite3 *db = ci_store_db(s); bool destroyed = false;
+    bool registered = sqlite3_create_function_v2(db, "reverse_close", 0, SQLITE_UTF8, &destroyed,
+        ci_include_close_function, NULL, NULL, ci_include_close_destroy) == SQLITE_OK;
+    bool seeded = ci_reverse_seed(s); int failures = 0; char path[1025], out[4][256] = {{0}};
+    memset(path, 'x', 1024); path[1024] = 0;
+    CI_CHECK("reverse ordered capped and empty results", seeded && ci_reverse_rows(s));
+    int old = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 256);
+    int bound = ci_store_dependents_of_file(s, path, out, 4);
+    (void)sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old);
+    printf("  codeindex: reverse oversized bind=%d\n", bound);
+    CI_CHECK("reverse bind error refuses and recovers", bound < 0 && ci_reverse_rows(s));
+    if (seeded) failures += ci_reverse_interrupts(s);
+    if (seeded) failures += ci_reverse_public(s);
+    CI_CHECK("reverse close witness registered", registered && !destroyed);
+    ci_store_close(s);
+    CI_CHECK("reverse statements finalized at close", registered && destroyed);
+    return failures;
+}
+
 static int ci_include_insert_tests(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -4491,6 +4606,7 @@ int test_codeindex(void)
     failures += ci_enclosing_tests();
     failures += ci_family_tests();
     failures += ci_identity_tests();
+    failures += ci_reverse_tests();
     failures += ci_ref_insert_tests();
 #endif
 #if defined(__linux__) || defined(__APPLE__)
