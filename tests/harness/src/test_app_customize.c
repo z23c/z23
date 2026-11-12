@@ -45,7 +45,7 @@
 #define ABC_PATH 900
 
 struct abc_world {
-    char root[512];
+    char root[512], fixture_root[512];
     char src[600];
     char alice_home[600], alice_datadir[600];
     char bob_home[600], bob_datadir[600], bob_copy[600];
@@ -277,7 +277,7 @@ static bool abc_adopt(struct abc_world *w)
     return ok && w->copy[0] == '/';
 }
 
-static bool abc_world_init(struct abc_world *w)
+static bool abc_world_init_profile(struct abc_world *w, bool long_profile)
 {
     memset(w, 0, sizeof(*w));
     const char *home = getenv("HOME");
@@ -285,6 +285,15 @@ static bool abc_world_init(struct abc_world *w)
                    home ? home : "");
     if (!test_mkdtemp(w->root, sizeof(w->root), "app_build_copy"))
         return false;
+    (void)snprintf(w->fixture_root, sizeof(w->fixture_root), "%s", w->root);
+    if (long_profile) {
+        char component[111]; memset(component, 'p', 110); component[108] = '"'; component[109] = '\\'; component[110] = 0;
+        for (int i = 0; i < 3; ++i) {
+            size_t n = strlen(w->root);
+            int wrote = snprintf(w->root + n, sizeof(w->root) - n, "/%s", component);
+            if (wrote < 0 || (size_t)wrote >= sizeof(w->root) - n || mkdir(w->root, 0700)) return false;
+        }
+    }
     (void)snprintf(w->src, sizeof(w->src), "%s/stub-src", w->root);
     (void)snprintf(w->alice_home, sizeof(w->alice_home), "%s/alice", w->root);
     (void)snprintf(w->alice_datadir, sizeof(w->alice_datadir),
@@ -300,6 +309,11 @@ static bool abc_world_init(struct abc_world *w)
            mkdir(w->alice_datadir, 0700) == 0 &&
            mkdir(w->bob_home, 0700) == 0 && abc_as(w->alice_home) &&
            abc_publish_origin(w) && abc_adopt(w);
+}
+
+static bool abc_world_init(struct abc_world *w)
+{
+    return abc_world_init_profile(w, false);
 }
 
 /* Source-only fixture: the publish/adopt helpers above are reused from
@@ -420,9 +434,9 @@ static bool act_find_kept_blob(struct ac_fixture *f)
     return found;
 }
 
-static bool act_setup(struct ac_fixture *f, bool escaped_source)
+static bool act_setup_profile(struct ac_fixture *f, bool escaped_source, bool long_profile)
 {
-    if (!act_save_environment(f) || !abc_world_init(&f->world) ||
+    if (!act_save_environment(f) || !abc_world_init_profile(&f->world, long_profile) ||
         !act_configure_environment(f)) return false;
     /* Escaped names exercise read-only JSON output, but are deliberately
      * outside the portable package paths required for editable app trees. */
@@ -430,6 +444,11 @@ static bool act_setup(struct ac_fixture *f, bool escaped_source)
         !act_snapshot(f, "save", f->head) || !act_keep(f)) return false;
     return act_find_kept_blob(f) && abc_put(f->world.copy, "include/boost.h", "#define BOOST 3\n") &&
         act_snapshot(f, "save", f->head) && abc_put(f->world.copy, "include/boost.h", "#define BOOST 4\n");
+}
+
+static bool act_setup(struct ac_fixture *f, bool escaped_source)
+{
+    return act_setup_profile(f, escaped_source, false);
 }
 
 static bool act_call(struct abc_leaf *l, const char *path, bool pinned)
@@ -769,7 +788,7 @@ static void act_cleanup(struct ac_fixture *f)
         else (void)unsetenv("XDG_STATE_HOME");
     }
     free(f->config_before); free(f->state_before); free(f->home_before);
-    if (f->world.root[0]) test_rm_rf(f->world.root);
+    if (f->world.fixture_root[0]) test_rm_rf(f->world.fixture_root);
 }
 
 /* Use the real catalog executor and envelope serializer, not the direct
@@ -1592,6 +1611,19 @@ static bool ae_prepare_draft(struct ac_fixture *f, const char *head, const char 
     abc_close(&l);
     return ok && strlen(plan) == 64 && act_preserved(f, false);
 }
+static bool ae_short_next_equal(const struct zcl_command_reply *reply)
+{
+    const struct json_value *input = json_get(&reply->data, "build_input");
+    if (!input || !reply->next_count) return false;
+    struct json_value next; json_init(&next);
+    char expected[512];
+    size_t n = json_write(input, expected, sizeof(expected));
+    bool ok = n && n < sizeof(expected) &&
+        json_read(&next, reply->next[0].input_json, strlen(reply->next[0].input_json));
+    char actual[512]; size_t m = ok ? json_write(&next, actual, sizeof(actual)) : 0;
+    ok = ok && m == n && m < sizeof(actual) && !memcmp(actual, expected, n);
+    json_free(&next); return ok;
+}
 static bool ae_draft(struct ac_fixture *f)
 {
     char head[65], blob[65], wrong[65];
@@ -1606,9 +1638,75 @@ static bool ae_draft(struct ac_fixture *f)
     snprintf(version, sizeof(version), "%s", abc_get(&l, "version"));
     snprintf(root, sizeof(root), "%s", abc_get(&l, "source_root"));
     ok = ok && strlen(version) == 64 && strlen(root) == 64 && l.out.next_count &&
-        !strcmp(l.out.next[0].command, "app.build") && strstr(l.out.next[0].input_json, version);
+        !strcmp(l.out.next[0].command, "app.build") && strstr(l.out.next[0].input_json, version) &&
+        ae_short_next_equal(&l.out);
     abc_close(&l);
     return ok && ae_verify_draft(f, version, root);
+}
+
+static bool ae_edit_wire(const struct json_value *input, struct json_value *doc)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = abc_spec("app.edit");
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    char wire[8193]; enum zcl_command_exit code;
+    if (!spec) return false;
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, input, false,
+        spec->path, "normal", 0, 0, NULL, wire, sizeof(wire), &code);
+    return n && n <= 8192 && code == ZCL_COMMAND_EXIT_OK && json_read(doc, wire, n);
+}
+static bool ae_long_input(const struct ac_fixture *f, const struct json_value *doc)
+{
+    const struct json_value *data = json_get(doc, "data"), *input = json_get(data, "build_input");
+    const char *copy = json_get_str(json_get(input, "copy"));
+    const char *datadir = json_get_str(json_get(input, "datadir"));
+    const char *version = json_get_str(json_get(input, "version"));
+    const char *saved = json_get_str(json_get(data, "version"));
+    const char *hint = json_get_str(json_get(data, "build_hint"));
+    return input && copy && datadir && version && saved && hint &&
+        !strcmp(copy, f->world.copy) && !strcmp(datadir, f->world.alice_datadir) &&
+        !strcmp(version, saved) && strlen(version) == 64 && json_write(input, NULL, 0) > 511 &&
+        !strcmp(hint, "Pass build_input to app.build to build this saved draft version.") &&
+        json_size(json_get(doc, "next")) == 0;
+}
+static bool ae_long_build_plan(const struct json_value *doc)
+{
+    const struct json_value *input = json_get(json_get(doc, "data"), "build_input");
+    struct abc_leaf build; abc_open(&build); json_free(&build.in);
+    bool ok = json_copy_checked(&build.in, input) && abc_pass("app.build", &build);
+    ok = ok && !strcmp(abc_get(&build, "stage"), "plan") &&
+        strlen(abc_get(&build, "plan_id")) == 64 && !build.out.error.mutated;
+    abc_close(&build); return ok;
+}
+static bool ae_long_continuation(struct ac_fixture *f)
+{
+    char head[65], blob[65], plan[65]; struct abc_leaf edit;
+    struct json_value doc; json_init(&doc);
+    zcl_hex_encode(f->head, 32, head); zcl_hex_encode(f->blob, 32, blob);
+    if (!ae_prepare_draft(f, head, blob, plan)) {
+        json_free(&doc); printf("  long edit: draft setup failed\n"); return false;
+    }
+    if (!ae_request(&edit, f, "include/boost.h", "#define BOOST 9\n", head, blob, 1, plan)) {
+        abc_close(&edit); json_free(&doc); printf("  long edit: request setup failed\n"); return false;
+    }
+    bool saved = ae_edit_wire(&edit.in, &doc);
+    const char *status = json_get_str(json_get(&doc, "status"));
+    saved = saved && status && !strcmp(status, "passed");
+    bool input = saved && ae_long_input(f, &doc);
+    bool planned = input && ae_long_build_plan(&doc);
+    printf("  long edit: saved=%d input=%d plan=%d\n", saved, input, planned);
+    abc_close(&edit); json_free(&doc); return saved && input && planned;
+}
+static int ae_long_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0};
+    TEST("app.edit returns full build input for a long profile") {
+        ASSERT(act_setup_profile(&f, false, true));
+        ASSERT(ae_long_continuation(&f));
+        PASS();
+    } _test_next:;
+    act_cleanup(&f); return failures;
 }
 
 static int ae_stale_case(void)
@@ -1757,6 +1855,7 @@ int test_app_edit(void)
     } _test_next:;
     act_cleanup(&f);
     failures += ae_stale_case();
+    failures += ae_long_case();
     failures += ae_sealed_case();
 #if defined(ZCL_TESTING)
     failures += asb_cases();

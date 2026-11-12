@@ -234,19 +234,26 @@ static bool edit_describe_plan(struct edit *e)
     if (!ok) edit_fail(e, "REPLY_FAILED", false, "cannot describe edit plan");
     return ok;
 }
-static void edit_next_build(struct edit *e, const char *version)
+static bool edit_next_build(struct edit *e, const char *version)
 {
     struct zcl_command_reply *reply = e->reply;
     struct json_value next; json_init(&next); json_set_object(&next);
-    if (json_push_kv_str(&next, "copy", e->selection.copy) &&
+    bool ok = json_push_kv_str(&next, "copy", e->selection.copy) &&
         json_push_kv_str(&next, "datadir", e->selection.datadir) &&
-        json_push_kv_str(&next, "version", version)) {
-        char wire[4400];
+        json_push_kv_str(&next, "version", version) &&
+        json_push_kv(&reply->data, "build_input", &next);
+    if (ok) {
+        char wire[sizeof(reply->next[0].input_json)];
         size_t n = json_write(&next, wire, sizeof(wire));
-        if (n && n < sizeof(wire) && n < sizeof(reply->next[0].input_json))
-            (void)zcl_command_reply_add_next(reply, "app.build", wire, "build the saved draft version");
+        if (!n) ok = false;
+        else if (n < sizeof(wire))
+            ok = zcl_command_reply_add_next(reply, "app.build", wire, "build the saved draft version");
+        else
+            ok = json_push_kv_str(&reply->data, "build_hint",
+                "Pass build_input to app.build to build this saved draft version.");
     }
     json_free(&next);
+    return ok;
 }
 static void edit_describe_commit(struct edit *e)
 {
@@ -257,10 +264,10 @@ static void edit_describe_commit(struct edit *e)
         edit_push_root(&reply->data, "source_version", e->copy.selected_version) &&
         edit_push_root(&reply->data, "kept_version", e->selection.version) &&
         json_push_kv_int(&reply->data, "source_selection_revision", (int64_t)e->revision);
+    if (described) described = edit_next_build(e, version);
     if (!described)
         zcl_package_copy_fail(reply, "REPLY_FAILED", true,
             "draft saved but reply allocation failed; reconcile candidate version", version);
-    edit_next_build(e, version);
     reply->error.mutated = true;
 }
 #endif
