@@ -323,6 +323,153 @@ static bool dlx_decision_registry(struct dlx_call *c)
     return ok;
 }
 
+static bool dlx_decision_expected_hash(char out[65])
+{
+    static const char domain[] = "zcl.land.decision.row.v1\n";
+    char queue[16384];
+    size_t len = 0;
+    if (!dlx_queue_bytes(queue, sizeof(queue), &len)) return false;
+    const char *end = memchr(queue, '\n', len);
+    if (!end || strncmp(queue, "{\"seq\":674,", strlen("{\"seq\":674,"))) return false;
+    struct sha3_256_ctx hash;
+    uint8_t digest[32];
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const uint8_t *)domain, sizeof(domain) - 1);
+    sha3_256_write(&hash, (const uint8_t *)queue, (size_t)(end - queue) + 1);
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+    return true;
+}
+
+static bool dlx_decision_digest(const struct dlx_call *c, char out[65])
+{
+    const struct json_value *schema = json_get(&c->reply.data, "row_schema");
+    const struct json_value *hash = json_get(&c->reply.data, "row_sha3");
+    if (!schema || schema->type != JSON_STR ||
+        strcmp(json_get_str(schema), "zcl.land.decision.row.v1") ||
+        !hash || hash->type != JSON_STR) return false;
+    const char *hex = json_get_str(hash);
+    if (!hex || strlen(hex) != 64) return false;
+    for (size_t i = 0; i < 64; i++)
+        if (!((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f')))
+            return false;
+    memcpy(out, hex, 65);
+    return true;
+}
+
+static int dlx_decision_row_hash_case(void)
+{
+    int failures = 0, lock = -1;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    char expected[65], first[65], second[65], changed[65], land[1400];
+    TEST("land: decision binds the exact selected row including hidden fields") {
+        ASSERT(dlx_scope_prepare(&t, "decision_row_hash", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        ASSERT(dlx_decision_expected_hash(expected));
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 674);
+        ASSERT(dlx_decision_digest(&c, first));
+        ASSERT_STR_EQ(first, expected);
+        ASSERT(dlx_scope_unchanged(&t));
+        dlx_end(&c); opened = false;
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c) && dlx_decision_digest(&c, second));
+        ASSERT_STR_EQ(second, first);
+        dlx_end(&c); opened = false;
+        ASSERT(dlx_queue_field_once("\"seq\":674,", "\"note\":\"\"", "\"note\":\"changed-hidden-note\""));
+        ASSERT(dlx_decision_expected_hash(expected));
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 674);
+        ASSERT(dlx_decision_digest(&c, changed));
+        ASSERT_STR_EQ(changed, expected);
+        ASSERT(strcmp(changed, first) != 0);
+        PASS();
+    }
+_test_next:;
+    if (lock >= 0) dlx_step_lock_release(lock);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_decision_empty_hash_case(void)
+{
+    int failures = 0, fd = -1;
+    struct dlx_call c;
+    bool opened = false;
+    char land[1400], lock[1500];
+    TEST("land: empty decision omits selected row digest") {
+        dlx_isolate("decision_empty_hash");
+        dlx_begin(&c, "step"); opened = true;
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c); opened = false;
+        /* An empty step creates step.lock but does not need queue.lock;
+         * the read-only decision deliberately opens both existing files. */
+        dlx_landdir(land, sizeof(land));
+        ASSERT(snprintf(lock, sizeof(lock), "%s/queue.lock", land) < (int)sizeof(lock));
+        fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0);
+        int close_rc = close(fd); fd = -1;
+        ASSERT(close_rc == 0);
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "dispatch"), "empty");
+        ASSERT(!json_get(&c.reply.data, "seq"));
+        ASSERT(!json_get(&c.reply.data, "row_schema"));
+        ASSERT(!json_get(&c.reply.data, "row_sha3"));
+        PASS();
+    }
+_test_next:;
+    if (fd >= 0) (void)close(fd);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_decision_encoding_failure_case(void)
+{
+    int failures = 0, lock = -1;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    char land[1400];
+    TEST("land: decision encoding failure never exposes a partial snapshot") {
+        ASSERT(dlx_scope_prepare(&t, "decision_encode_failure", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(c.request.spec && c.request.spec->handler);
+        /* The first two output keys are dispatch and scope. Fail the third,
+         * after both have been appended, without faulting queue JSON parsing. */
+        zcl_alloc_fault_fail_nth("json_push_kv_key", 3);
+        c.request.spec->handler(&c.request, &c.reply);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "DECISION_UNAVAILABLE");
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(!json_get(&c.reply.data, "dispatch") && !json_get(&c.reply.data, "scope"));
+        ASSERT(!json_get(&c.reply.data, "row_schema") && !json_get(&c.reply.data, "row_sha3"));
+        ASSERT(!json_get(&c.reply.data, "seq") && dlx_scope_unchanged(&t));
+        PASS();
+    }
+_test_next:;
+    zcl_alloc_fault_clear();
+    if (lock >= 0) dlx_step_lock_release(lock);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
 static int dlx_decision_queue_case(void)
 {
     int failures = 0, lock = -1;
@@ -522,7 +669,9 @@ _test_next:;
 
 static int test_dev_land_drive_seq_scope(void)
 {
-    return dlx_decision_queue_case() + dlx_decision_terminal_case() +
+    return dlx_decision_row_hash_case() + dlx_decision_empty_hash_case() +
+           dlx_decision_encoding_failure_case() +
+           dlx_decision_queue_case() + dlx_decision_terminal_case() +
            dlx_decision_unavailable_case() + dlx_decision_drift_case() +
            dlx_scope_refusal_case(685, NULL, "requested_seq=685 blocking_seq=674") +
            dlx_scope_refusal_case(999, "cancelled", "unknown_seq_999") +

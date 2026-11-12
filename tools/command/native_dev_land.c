@@ -161,6 +161,7 @@
 #include "base/hex.h"
 #include "config/command_catalog.h"
 #include "crypto/sha256.h"
+#include "sha3/sha3.h"
 #include "json/json.h"
 #include "zutf8/zutf8.h"
 #include "platform/directory_compat.h"
@@ -12125,6 +12126,27 @@ static enum dl_dispatch_kind dl_decision_snapshot(const struct dl_dirs *d,
 }
 #endif
 
+/* Bind only the selected row, not the queue or a future execution plan.
+ * Version the existing durable serialization rather than hashing padding or
+ * introducing another row format. The final newline is part of the digest. */
+static bool dl_decision_row_identity(struct zcl_command_reply *reply,
+                                     const struct dl_row *pick)
+{
+    static const char domain[] = "zcl.land.decision.row.v1\n";
+    char wire[DL_LINE_CAP], hex[65];
+    unsigned char digest[32];
+    size_t len = 0;
+    struct sha3_256_ctx hash;
+    if (!dl_encode_row(pick, wire, sizeof(wire), &len)) return false;
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const unsigned char *)domain, sizeof(domain) - 1);
+    sha3_256_write(&hash, (const unsigned char *)wire, len);
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), hex);
+    return json_push_kv_str(&reply->data, "row_schema", "zcl.land.decision.row.v1") &&
+           json_push_kv_str(&reply->data, "row_sha3", hex);
+}
+
 [[maybe_unused]] static bool dl_decision_encode(struct zcl_command_reply *reply, const char *name,
                                 const struct dl_row *pick, bool have)
 {
@@ -12132,7 +12154,8 @@ static enum dl_dispatch_kind dl_decision_snapshot(const struct dl_dirs *d,
         !json_push_kv_str(&reply->data, "scope", "observed_next_dispatch_only"))
         return false;
     if (!have) return true;
-    return json_push_kv_int(&reply->data, "seq", pick->seq) &&
+    return dl_decision_row_identity(reply, pick) &&
+        json_push_kv_int(&reply->data, "seq", pick->seq) &&
         json_push_kv_int(&reply->data, "priority_seq", pick->priority_seq) &&
         json_push_kv_str(&reply->data, "state", pick->state) &&
         json_push_kv_str(&reply->data, "phase", pick->phase) &&
@@ -12175,6 +12198,8 @@ static void dl_decision(const struct zcl_command_request *req,
     return;
 unavailable:
     dl_unlock(queue); dl_unlock(step);
+    json_free(&reply->data);
+    json_set_object(&reply->data);
     dl_fail(reply, "DECISION_UNAVAILABLE", "decision",
             "cannot obtain a coherent landing snapshot", "state, lock, fence or outcome unavailable");
 #endif
