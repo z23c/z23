@@ -55,7 +55,6 @@ KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
 # derivation (which passes $(CURDIR)) or the comparison is meaningless.
 SCOPE_ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 source "$SELF_DIR/build-epoch-open-file-identity.sh"
-source "$SELF_DIR/build-epoch-lock-wait.sh"
 HOST_SYSTEM="$(uname -s 2>/dev/null || printf 'unknown')"
 HOST_IS_MSYS=0
 case "$HOST_SYSTEM" in MINGW*|MSYS*) HOST_IS_MSYS=1 ;; esac
@@ -407,7 +406,8 @@ acquire_admission_lock()
             exec 8>&-
             fail 'epoch admission lock is not a regular file'
         }
-        z23_build_epoch_flock_bounded 'build-epoch-session' 8 \
+        "$SELF_DIR/../../build/bin/build-epoch-lock-wait" \
+            build-epoch-session 8 \
             "$ADMISSION_LOCK_FILE" 'epoch admission' || {
             exec 8>&-
             fail "could not acquire epoch admission lock $ADMISSION_LOCK_FILE"
@@ -582,7 +582,8 @@ acquire_epoch_gc_lock()
         command -v flock >/dev/null 2>&1 ||
             fail 'flock is required for epoch leases'
         exec 9> "$EPOCH_GC_LOCK_FILE"
-        z23_build_epoch_flock_bounded 'build-epoch-session' 9 \
+        "$SELF_DIR/../../build/bin/build-epoch-lock-wait" \
+            build-epoch-session 9 \
             "$EPOCH_GC_LOCK_FILE" 'epoch GC' ||
             fail "could not acquire epoch GC lock $EPOCH_GC_LOCK_FILE"
         return 0

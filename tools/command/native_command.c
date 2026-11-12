@@ -3582,6 +3582,32 @@ static void nc_brief_clamp(char *buf, size_t len)
     }
 }
 
+/* rss_mb and swap_mb render as one memory tail: both always present,
+ * `unknown` when the body lacks a valid integer — never a fabricated zero.
+ * Swap rides beside RSS because the two are halves of one footprint: a small
+ * machine under pressure looks lean in rss_mb alone. */
+static void nc_brief_render_memory(const struct json_value *d, char *buf,
+                                   size_t cap, size_t *len_io)
+{
+    static const char *const keys[2] = {"rss_mb", "swap_mb"};
+    size_t len = *len_io;
+    for (size_t i = 0; i < 2; i++) {
+        const struct json_value *v = json_get(d, keys[i]);
+        int n = v && v->type == JSON_INT
+            ? snprintf(buf + len, cap - len, "%s=%lld", keys[i],
+                       (long long)json_get_int(v))
+            : snprintf(buf + len, cap - len, "%s=unknown", keys[i]);
+        if (n > 0 && (size_t)n < cap - len)
+            len += (size_t)n;
+        if (i + 1 < 2) {
+            n = snprintf(buf + len, cap - len, " ");
+            if (n > 0 && (size_t)n < cap - len)
+                len += (size_t)n;
+        }
+    }
+    *len_io = len;
+}
+
 void zcl_native_status_brief_render(const struct json_value *d, char *buf,
                                     size_t cap)
 {
@@ -3610,13 +3636,7 @@ void zcl_native_status_brief_render(const struct json_value *d, char *buf,
                         json_get(d, "active_conditions"));
     nc_kv_int_or_unknown(buf, cap, &len, "peers", json_get(d, "peer_count"));
 
-    const struct json_value *rss = json_get(d, "rss_mb");
-    if (rss && rss->type == JSON_INT)
-        n = snprintf(buf + len, cap - len, "rss_mb=%lld",
-                    (long long)json_get_int(rss));
-    else
-        n = snprintf(buf + len, cap - len, "rss_mb=unknown");
-    if (n > 0 && (size_t)n < cap - len) len += (size_t)n;
+    nc_brief_render_memory(d, buf, cap, &len);
 
     nc_brief_clamp(buf, len);
 }

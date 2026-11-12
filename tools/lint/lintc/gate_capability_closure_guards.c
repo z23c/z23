@@ -91,7 +91,7 @@ static char *ccg_first_line(const char *file)
     return found;
 }
 
-static int ccg_ident(int c, int first)
+int ccg_ident(int c, int first)
 {
     return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (!first && c >= '0' && c <= '9');
 }

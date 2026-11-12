@@ -60,12 +60,22 @@ int ccd_symbols_load(const char *file, int windows, struct ccd_map *sym, size_t 
 
 /* Shared module-row reader: 0 success, 1 absent, -1 unreadable/malformed/OOM, or callback error. */
 int ccd_module_each(const char *file, int (*fn)(void *, const char *, const char *), void *ctx);
+/* Same contract over feature-conditional rows, yielding (features, path, class). */
+int ccd_when_each(const char *file, int (*fn)(void *, const char *, const char *, const char *), void *ctx);
+
+/* One feature-conditional module row: features is "MACRO[,MACRO...]". */
+struct ccd_whenrow { char *path, *features, *cls; };
 
 /* module_capabilities.def, source-owned sidecars and the platform supplement.
  * raw is the active-target class per source, uni the union of all rows; error
- * holds the exact sidecar_error text when the load returns 1. */
+ * holds the exact sidecar_error text when the load returns 1. The platform
+ * supplement may also carry ZCL_MODULE_CAPABILITY_WHEN rows in when: they join
+ * the union at load and a later ccd_when_select picks the arm this build's
+ * macros make exact. */
 struct ccd_mods {
     struct ccd_map raw, uni;
+    struct ccd_whenrow *when;
+    size_t when_n, when_cap, when_selected;
     size_t count, platform_count;
     char error[CCD_ERR];
 };
@@ -110,6 +120,16 @@ void ccg_host_cfg(struct ccg_cfg *cfg);
 
 /* Macros the compile line defines: -D adds one, a later -U blanks it. */
 struct ccg_macros { struct ccd_map def; int loaded; };
+/* One C identifier character: letter or underscore first, digit afterwards.
+ * Shared by the guard scanner and the feature-list reader. */
+int ccg_ident(int c, int first);
+/* Selects feature-conditional rows against the graded build's macros: a row
+ * applies when every listed macro is defined, the most specific applicable row
+ * (longest macro list) replaces the path's raw class, and a path with no
+ * applicable row keeps its unconditional one. Two applicable rows of equal
+ * specificity are an ambiguous table: 1 with error set, -1 out of memory,
+ * 0 otherwise. */
+int ccd_when_select(struct ccd_mods *m, const struct ccg_macros *mac);
 /* 0 once loaded, 1 when the repository's own flag query failed. */
 int ccg_macros_load(const struct ccg_cfg *cfg, const char *root, struct ccg_macros *m);
 /* Comma-joined guard macros of the file's first code line when none of them is

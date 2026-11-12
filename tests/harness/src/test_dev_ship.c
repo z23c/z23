@@ -51,7 +51,6 @@ int test_dev_ship(void)
 static const char *const dsx_copied[] = {
     "tools/ship.sh",
     "tools/scripts/source_identity_lib.sh",
-    "tools/scripts/tor_stamp_lib.sh",
     "tools/scripts/tor_provenance_lib.sh",
     "tools/scripts/ship_progress_lib.sh",
     "tools/dev/source-identity.sh",

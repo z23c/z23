@@ -494,12 +494,14 @@ PROBE_MAKE
         awk '/^worktree-prime:/ { copying=1 }
              /^worktree-prime-selftest:/ { copying=0 }
              copying { print }' "$SCRIPT_ROOT/Makefile" > "$prime/Makefile"
-        printf '#!/bin/sh\nexit 0\n' > "$prime/tools/scripts/copy_vendor_include.sh"
+        mkdir -p "$prime/build/bin"
+        printf '#!/bin/sh\nexit 0\n' > "$prime/build/bin/copy-vendor-include"
+        chmod +x "$prime/build/bin/copy-vendor-include"
         printf '#!/bin/sh\nprintf "%%s\\n" "$@" > donor-arguments\n' > \
             "$prime/tools/scripts/tor_archives_ready.sh"
         chmod +x "$prime/tools/scripts/"*.sh
         ln -s "$fake_primary" "$prime/-donor"
-        make -s -C "$prime" worktree-prime SRC=-donor >/dev/null
+        make -s -C "$prime" worktree-prime SRC=-donor BIN_DIR=build/bin >/dev/null
         printf 'link-only\n%s\n' "$fake_primary" > "$prime/expected-arguments"
         cmp "$prime/expected-arguments" "$prime/donor-arguments" || {
             echo 'tor_archives_ready: selftest FAILED — priming recipe lost explicit donor' >&2

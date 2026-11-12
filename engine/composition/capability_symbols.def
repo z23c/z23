@@ -201,6 +201,8 @@ ZCL_CAPABILITY_SYMBOL("clearenv", CAP_PROCESS,
 ZCL_CAPABILITY_SYMBOL("environ", CAP_PROCESS,
     "The environment block an execve hands its child. Read or written, "
     "it is the spawn argument surface.")
+ZCL_CAPABILITY_SYMBOL("execl", CAP_PROCESS, "")
+ZCL_CAPABILITY_SYMBOL("execlp", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("execv", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("execve", CAP_PROCESS, "")
 ZCL_CAPABILITY_SYMBOL("execvp", CAP_PROCESS, "")
@@ -213,6 +215,9 @@ ZCL_CAPABILITY_SYMBOL("getpgid", CAP_PROCESS,
 ZCL_CAPABILITY_SYMBOL("kill", CAP_PROCESS,
     "Reaches a process this one did not create. Contrast pthread_kill, "
     "which cannot leave this process.")
+ZCL_CAPABILITY_SYMBOL("posix_fallocate", CAP_FS_WRITE,
+    "Extends or punches the allocated range of an already-writable "
+    "descriptor; it can only make a file's bytes exist, never read them.")
 ZCL_CAPABILITY_SYMBOL("posix_spawn", CAP_PROCESS,
     "Creates the child image. Kept with fork and exec even when the "
     "Darwin caller requests an initially suspended process.")
@@ -235,6 +240,9 @@ ZCL_CAPABILITY_SYMBOL("posix_spawnattr_destroy", CAP_PROCESS,
     "Kept with the complete posix_spawn configuration family.")
 ZCL_CAPABILITY_SYMBOL("posix_spawnattr_init", CAP_PROCESS,
     "Kept with the complete posix_spawn configuration family.")
+ZCL_CAPABILITY_SYMBOL("posix_spawnp", CAP_PROCESS,
+    "Resolves the child image through PATH; same spawn surface as "
+    "posix_spawn with the search added.")
 ZCL_CAPABILITY_SYMBOL("posix_spawnattr_setflags", CAP_PROCESS,
     "Selects process-level spawn semantics, including suspended start "
     "and creation of a new session on Darwin.")
@@ -741,6 +749,10 @@ ZCL_CAPABILITY_SYMBOL("g_malloc", CAP_HARMLESS,
     "Allocates process memory.")
 ZCL_CAPABILITY_SYMBOL("g_memory_input_stream_new_from_data", CAP_HARMLESS,
     "Wraps caller-owned memory as an in-process stream.")
+ZCL_CAPABILITY_SYMBOL("g_signal_connect", CAP_HARMLESS,
+    "Registers a callback on an object already owned by the process.")
+ZCL_CAPABILITY_SYMBOL("g_strdup", CAP_HARMLESS,
+    "Duplicates a string into process memory.")
 ZCL_CAPABILITY_SYMBOL("g_object_new", CAP_HARMLESS,
     "Creates a local GLib object.")
 ZCL_CAPABILITY_SYMBOL("g_object_set", CAP_HARMLESS,

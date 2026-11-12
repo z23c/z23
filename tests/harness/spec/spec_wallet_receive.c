@@ -53,10 +53,16 @@ int spec_wallet_receive(void)
         }
 
         STORY("QR code lets user share without typing") {
+            char dir[1024];
+            GIVEN("a wallet with one shielded address exists")
+                EXPECT(seed_shielded_wallet(dir, sizeof dir) == 0);
+            wallet_view_init(dir);
             GIVEN("receive page loads")
                 GET("/wallet/receive");
             THEN("QR code SVG is rendered")
                 EXPECT(has("<svg"));
+            wallet_view_init(NULL);
+            test_rm_rf_recursive(dir);
             PASS();
         }
     }

@@ -906,7 +906,8 @@ build-system-id)
         "$SELF_DIR/compile-epoch-object.sh"
         "$SELF_DIR/build-epoch-session.sh"
         "$SELF_DIR/build-epoch-open-file-identity.sh"
-        "$SELF_DIR/publish-build-alias.sh"
+        "$SELF_DIR/publish_build_alias.c"
+        "$SELF_DIR/publish_build_alias.h"
     )
     while IFS= read -r input || [ -n "$input" ]; do
         case "$input" in

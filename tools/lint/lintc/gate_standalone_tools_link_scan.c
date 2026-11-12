@@ -261,7 +261,7 @@ int stl_load_fuzz(const char *mk, struct stl_names *fuzz)
     int rc = stl_fz_tokens(z.target + 15, fuzz);
     if (rc != 0)
         return rc;
-    if (z.nci != 1 || z.over || strcmp(z.ci, "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)") != 0) {
+    if (z.nci != 1 || z.over || strcmp(z.ci, "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS) $(BIN_DIR)/run-fuzz-ci") != 0) {
         fprintf(stderr, "%s: FATAL — fuzz-ci prerequisite list changed\n", k_stl_gate);
         return 2;
     }

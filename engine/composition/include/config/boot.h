@@ -694,7 +694,7 @@ void boot_refold_from_anchor_reset(struct node_db *ndb);
  * distinct from (1)'s narrower producer-output semantics — falls through to
  * (3) rather than pointing every caller at a dead path if the env var is
  * stale/unset); else (3) the default <datadir>/utxo-anchor.snapshot, which is
- * also the exact path tools/seed_anchor_snapshot.sh stages into. This is a
+ * also the exact path tools/dev/seed_anchor_snapshot.c stages into. This is a
  * LOCAL-path-only search — no network fetch. */
 bool boot_refold_from_anchor_artifact_available(struct node_db *ndb,
                                                 int32_t *anchor_height_out);

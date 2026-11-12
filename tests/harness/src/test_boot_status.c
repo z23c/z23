@@ -9,6 +9,10 @@
  *   - the writer (init/note_stage/set_height) publishes an atomically-readable
  *     <datadir>/boot_status.json the node-free reader recovers
  *   - typed recovery progress + named blockers survive writer/read round-trips
+ *   - per-stage elapsed milliseconds: the "stages" array reflects exactly the
+ *     transitions the writer observed, in order, with non-negative ms; a boot
+ *     with no recorded transition fabricates no stages, and the reader refuses
+ *     an array that names unvisited, out-of-order, or mismatched stages
  *   - the reader fails closed on missing, malformed, corrupt, or contradictory
  *     documents
  *
@@ -24,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -139,6 +144,177 @@ static int bs_diagnostic_checks(const char *dir)
     BS_CHECK("reader refusal identifies out and caller repair",
              captured && strstr(log, "out required") &&
              strstr(log, "supply an output snapshot"));
+    return failures;
+}
+
+/* The 3-transition probe: a real writer sequence (db_open -> wallet_loaded
+ * -> ready, with a measurable hold between transitions) must render exactly
+ * those three stage entries, in order, with non-negative sane ms — and a
+ * boot with no recorded transition must fabricate no stages at all. */
+static int bs_stage_probe_checks(const char *dir)
+{
+    int failures = 0;
+    boot_status_init(dir);
+    struct boot_status_snapshot out;
+    char why[128];
+    BS_CHECK("pre-transition beacon readable",
+             boot_status_read(dir, &out, why, sizeof(why)));
+    BS_CHECK("no transition recorded fabricates no stages",
+             out.stages_len == 0);
+
+    boot_status_note_stage((int)BOOT_STAGE_DB_OPEN);
+    struct timespec hold = { .tv_sec = 1, .tv_nsec = 150000000 };
+    (void)nanosleep(&hold, NULL);
+    boot_status_note_stage((int)BOOT_STAGE_WALLET_LOADED);
+    (void)nanosleep(&hold, NULL);
+    boot_status_note_stage((int)BOOT_STAGE_READY);
+
+    bool ok = boot_status_read(dir, &out, why, sizeof(why));
+    BS_CHECK("three-transition beacon readable", ok);
+    BS_CHECK("exactly the recorded transitions render", out.stages_len == 3);
+    BS_CHECK("first transition is db_open",
+             out.stages[0].stage == (int32_t)BOOT_STAGE_DB_OPEN);
+    BS_CHECK("second transition is wallet_loaded",
+             out.stages[1].stage == (int32_t)BOOT_STAGE_WALLET_LOADED);
+    BS_CHECK("third transition is ready",
+             out.stages[2].stage == (int32_t)BOOT_STAGE_READY);
+    BS_CHECK("skipped init stage is never fabricated",
+             out.stages[0].stage != (int32_t)BOOT_STAGE_INIT);
+    BS_CHECK("skipped crypto_ready stage is never fabricated",
+             out.stages[1].stage != (int32_t)BOOT_STAGE_CRYPTO_READY);
+    BS_CHECK("skipped network_ready stage is never fabricated",
+             out.stages[2].stage != (int32_t)BOOT_STAGE_NETWORK_READY);
+    BS_CHECK("first stage ms are non-negative", out.stages[0].ms >= 0);
+    BS_CHECK("second stage ms are non-negative", out.stages[1].ms >= 0);
+    BS_CHECK("third stage ms are non-negative", out.stages[2].ms >= 0);
+    BS_CHECK("first hold measures as sane ms", out.stages[0].ms >= 0);
+    BS_CHECK("second hold measures as sane ms", out.stages[1].ms >= 100);
+    BS_CHECK("third hold measures as sane ms", out.stages[2].ms >= 100);
+    BS_CHECK("current stage matches the last recorded transition",
+             out.stage_ordinal == (int32_t)BOOT_STAGE_READY);
+    int64_t total_ms = out.stages[0].ms + out.stages[1].ms +
+                       out.stages[2].ms;
+    BS_CHECK("stage ms sum tracks elapsed boot time",
+             total_ms >= 0 && total_ms <= (int64_t)out.elapsed_s * 1000 + 1000);
+
+    boot_status_init(NULL);
+    return failures;
+}
+
+/* Pure serialization + reader recovery: a synthesized three-entry history
+ * renders as the compact "stages" array verbatim and survives the reader;
+ * a snapshot with no recorded transitions emits no array at all. */
+static int bs_stage_serialize_checks(const char *dir)
+{
+    int failures = 0;
+    struct boot_status_snapshot in;
+    memset(&in, 0, sizeof(in));
+    snprintf(in.phase, sizeof(in.phase), "serving");
+    snprintf(in.stage, sizeof(in.stage), "ready");
+    in.stage_ordinal = (int32_t)BOOT_STAGE_READY;
+    in.height = -1;
+    in.rpc_bound = true;
+    in.serving = true;
+    in.started_unix = 1000;
+    in.updated_unix = 1001;
+    in.elapsed_s = 1;
+    in.stages_len = 3;
+    in.stages[0] = (struct boot_status_stage_ms)
+        {(int32_t)BOOT_STAGE_DB_OPEN, 120};
+    in.stages[1] = (struct boot_status_stage_ms)
+        {(int32_t)BOOT_STAGE_WALLET_LOADED, 80};
+    in.stages[2] = (struct boot_status_stage_ms)
+        {(int32_t)BOOT_STAGE_READY, 1};
+
+    char buf[1024];
+    size_t n = boot_status_write_json(&in, buf, sizeof(buf));
+    BS_CHECK("staged write_json produced bytes", n > 0 && n < sizeof(buf));
+    BS_CHECK("staged write_json renders the compact array",
+             n > 0 &&
+             strstr(buf, "\"stages\":[{\"stage\":3,\"ms\":120},"
+                         "{\"stage\":4,\"ms\":80},{\"stage\":9,\"ms\":1}]") != NULL);
+
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME, buf);
+    struct boot_status_snapshot out;
+    char why[128];
+    BS_CHECK("staged beacon survives the reader",
+             boot_status_read(dir, &out, why, sizeof(why)));
+    BS_CHECK("reader recovers the first recorded transition",
+             out.stages_len == 3 &&
+             out.stages[0].stage == (int32_t)BOOT_STAGE_DB_OPEN &&
+             out.stages[0].ms == 120);
+    BS_CHECK("reader recovers the second recorded transition",
+             out.stages[1].stage == (int32_t)BOOT_STAGE_WALLET_LOADED &&
+             out.stages[1].ms == 80);
+    BS_CHECK("reader recovers the third recorded transition",
+             out.stages[2].stage == (int32_t)BOOT_STAGE_READY &&
+             out.stages[2].ms == 1);
+
+    /* A snapshot with no recorded transitions emits no array at all. */
+    memset(&in, 0, sizeof(in));
+    snprintf(in.phase, sizeof(in.phase), "starting");
+    snprintf(in.stage, sizeof(in.stage), "init");
+    in.started_unix = 1000;
+    in.updated_unix = 1000;
+    n = boot_status_write_json(&in, buf, sizeof(buf));
+    BS_CHECK("transition-free write_json produced bytes",
+             n > 0 && n < sizeof(buf));
+    BS_CHECK("transition-free beacon emits no stages array",
+             n > 0 && strstr(buf, "stages") == NULL);
+    return failures;
+}
+
+/* Fail-closed: a hand-edited beacon may not lie about stage history. */
+static int bs_stage_refusal_checks(const char *dir)
+{
+    int failures = 0;
+    struct boot_status_snapshot out;
+    char why[128];
+
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+        "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"loading\","
+        "\"stage\":\"db_open\",\"stage_ordinal\":3,\"height\":-1,"
+        "\"rpc_bound\":false,\"serving\":false,\"started_unix\":1,"
+        "\"updated_unix\":1,\"elapsed_s\":0,"
+        "\"stages\":[{\"stage\":99,\"ms\":5}]}");
+    BS_CHECK("stage ordinal outside the enum is refused",
+             !boot_status_read(dir, &out, why, sizeof(why)));
+
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+        "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\","
+        "\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":1,"
+        "\"rpc_bound\":true,\"serving\":true,\"started_unix\":1,"
+        "\"updated_unix\":1,\"elapsed_s\":0,"
+        "\"stages\":[{\"stage\":9,\"ms\":50},{\"stage\":3,\"ms\":1}]}");
+    BS_CHECK("backward stage order is refused",
+             !boot_status_read(dir, &out, why, sizeof(why)));
+
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+        "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"loading\","
+        "\"stage\":\"db_open\",\"stage_ordinal\":3,\"height\":-1,"
+        "\"rpc_bound\":false,\"serving\":false,\"started_unix\":1,"
+        "\"updated_unix\":1,\"elapsed_s\":0,"
+        "\"stages\":[{\"stage\":3,\"ms\":-1}]}");
+    BS_CHECK("negative stage ms is refused",
+             !boot_status_read(dir, &out, why, sizeof(why)));
+
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+        "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"loading\","
+        "\"stage\":\"db_open\",\"stage_ordinal\":3,\"height\":-1,"
+        "\"rpc_bound\":false,\"serving\":false,\"started_unix\":1,"
+        "\"updated_unix\":1,\"elapsed_s\":0,"
+        "\"stages\":[{\"stage\":3,\"ms\":5},{\"stage\":9,\"ms\":6}]}");
+    BS_CHECK("array ending off the beacon's own stage is refused",
+             !boot_status_read(dir, &out, why, sizeof(why)));
+
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME,
+        "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\","
+        "\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":1,"
+        "\"rpc_bound\":true,\"serving\":true,\"started_unix\":1,"
+        "\"updated_unix\":1,\"elapsed_s\":0,"
+        "\"stages\":[3]}");
+    BS_CHECK("stage array of non-objects is refused",
+             !boot_status_read(dir, &out, why, sizeof(why)));
     return failures;
 }
 
@@ -270,6 +446,11 @@ int test_boot_status(void)
          * this scratch dir (which we remove below). */
         boot_status_init(NULL);
     }
+
+    /* ── per-stage elapsed milliseconds ────────────────────────────── */
+    failures += bs_stage_probe_checks(dir);
+    failures += bs_stage_serialize_checks(dir);
+    failures += bs_stage_refusal_checks(dir);
 
     /* One durable publication = one file flush (inside the replace) plus one
      * parent-directory flush. A duplicate explicit flush cost a third

@@ -71,7 +71,7 @@ One lander per worktree. Two landing loops ran on one worktree and
 a stale lander from a previous session held the proof lock for
 72 minutes while proving a head that a fresh rebase had already
 replaced. Before starting a lander, check who holds the proof
-lock. `tools/scripts/worktree_init.sh` and
+lock. `tools/dev/worktree_init.c` and
 `tools/scripts/worktree_gc.sh` govern the worktrees themselves.
 
 Peer ids on the onion mesh churn. The node2 peer was id 60,

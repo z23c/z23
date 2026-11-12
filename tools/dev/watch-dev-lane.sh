@@ -665,11 +665,11 @@ run_check_command()
         # run_cycle() unreachable from this — the default — mode. With sibling
         # lanes compiling in other checkouts that turned routine, expected
         # contention into a stream of false `rejected` verdicts.
-        # checkout-lock.sh exports ZCL_CHECKOUT_LOCK_HELD=1 around the command
+        # The lock tool exports ZCL_CHECKOUT_LOCK_HELD=1 around the command
         # it runs, so the inner make's own wrapper execs straight through
         # instead of re-acquiring (and self-deadlocking). This mirrors the
         # non-verify branch below, which always had the nesting right.
-        (cd "$ROOT" && tools/dev/checkout-lock.sh watcher \
+        (cd "$ROOT" && "$ROOT/build/bin/checkout-lock" watcher \
             "$ROOT/build/.checkout.lock" -- \
             env ZCL_DEV_WATCH_LANE=1 make --no-print-directory \
             BUILD_SOURCE_RECORD="$source_record" ff)
@@ -677,7 +677,7 @@ run_check_command()
         # The check lane's v3 cache receipt is written only after the same
         # global gates pass. Exact-source hits reattach to that proof inside
         # agent_fast_ci instead of rerunning the gates here.
-        (cd "$ROOT" && tools/dev/checkout-lock.sh watcher \
+        (cd "$ROOT" && "$ROOT/build/bin/checkout-lock" watcher \
             "$ROOT/build/.checkout.lock" -- tools/agent_fast_ci.sh)
     fi
 }
@@ -845,7 +845,7 @@ run_cycle()
     rc=$?
     CHECK_MS=$(( $(clock_ms) - phase_started ))
     if [ "$rc" -eq 99 ]; then
-        # tools/dev/checkout-lock.sh: a foreground make already holds the
+        # checkout lock: a foreground make already holds the
         # per-checkout lock. This is not a check failure — the watcher
         # yields and retries on the next poll instead of racing a
         # foreground build/test run in the same checkout.
@@ -967,7 +967,7 @@ acquire_single_watcher_lock()
     local lock_file="$ROOT/$WATCH_LOCK_REL" lock_parent
     if is_true "$CHECK_WORKER"; then
         # A benchmark worker never watches, publishes or activates.  Its
-        # compiler work still crosses checkout-lock.sh in run_check_command,
+        # compiler work still crosses the checkout lock in run_check_command,
         # while its records and lease stay outside the resident watcher's
         # state.  This lets measurement observe the normal warm service
         # without stopping or impersonating that service.

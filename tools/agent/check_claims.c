@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * check_claims - judge a lane's gate claims from the receipts left by
- * tools/agent/gate-receipt.sh, without re-running any gate.
+ * build/bin/gate_receipt, without re-running any gate.
  *
  * Usage: check_claims [--require a,b] [--dir PATH] [--max-age-hours N]
  *                     [--strict] [--json] | --help | --selftest
@@ -1204,13 +1204,13 @@ static void ccl_print_table(FILE *o, const struct ccl_ctx *c, const struct ccl_n
     for (size_t i = 0; i < res->missing.n; i++)
         fprintf(o,
                 "  MISSING  %s — claimed, but no receipt exists. Run it as:\n"
-                "             tools/agent/gate-receipt.sh --gate %s -- make %s\n",
+                "             make gate-receipt GATE=%s CMD='make %s'\n",
                 res->missing.v[i], res->missing.v[i], res->missing.v[i]);
     if (res->chain.broken.len > 0)
         fprintf(o,
                 "  CHAIN    receipt chain does not link: %.*s\n"
                 "           (a receipt written or removed after the fact; the chain\n"
-                "            is a tell, not a proof — see gate-receipt.sh)\n",
+                "            is a tell, not a proof — see tools/agent/gate_receipt.c)\n",
                 (int)res->chain.broken.len - 2, res->chain.broken.s);
 }
 
@@ -1350,7 +1350,7 @@ static const char CCL_HELP[] =
     "#\n"
     "# ── WHY THIS EXISTS ────────────────────────────────────────────────────────\n"
     "# \"make lint passed\" costs the orchestrator a full re-run to check. This reads\n"
-    "# the receipts tools/agent/gate-receipt.sh left behind and answers three\n"
+    "# the receipts build/bin/gate_receipt left behind and answers three\n"
     "# questions the prose cannot:\n"
     "#\n"
     "#   1. Did the gate run AT ALL for the gate the lane claims? (a claimed gate\n"
@@ -1364,7 +1364,7 @@ static const char CCL_HELP[] =
     "# Check 3 is what makes the receipt awkward to forge: a `verdict=PASS` line is\n"
     "# one edit, but it has to be backed by a log whose bytes hash to the recorded\n"
     "# digest AND which literally contains the gate's success banner. See the\n"
-    "# forgery-model section of gate-receipt.sh for what this does NOT defend\n"
+    "# forgery-model section of tools/agent/gate_receipt.c for what this does NOT defend\n"
     "# against — chiefly, a lane that writes both files by hand. This is evidence,\n"
     "# not proof.\n"
     "#\n"
@@ -1758,10 +1758,10 @@ static void ccl_selftest_report(void)
         "--- ---------------------- ------- ----- ----- ----------  -----\n"
         "*   lint                   BAD         2     1         12  EXIT_1\n\n"
         "  MISSING  t-fast — claimed, but no receipt exists. Run it as:\n"
-        "             tools/agent/gate-receipt.sh --gate t-fast -- make t-fast\n"
+        "             make gate-receipt GATE=t-fast CMD='make t-fast'\n"
         "  CHAIN    receipt chain does not link: index 5 follows 0\n"
         "           (a receipt written or removed after the fact; the chain\n"
-        "            is a tell, not a proof — see gate-receipt.sh)\n"
+        "            is a tell, not a proof — see tools/agent/gate_receipt.c)\n"
         "check-claims: FAIL — 3 problem(s); 1 claimed gate(s) without a receipt.\n";
     static const char r0[] = "gate=lint\nchain_index=0\nwall_ms=5\nprev_receipt_sha3=GENESIS\n";
     struct ccl_ctx c = {.dir = "/d", .head = "h"};

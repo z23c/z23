@@ -98,7 +98,7 @@ static bool lrun_vendor_setup(const char *root)
                                  "vendor", "vendor/patches", "vendor/provenance",
                                  "fakebin"};
     static const char *programs[] = {"build/bin/z23-lint", "tools/scripts/test_vendor_provenance.sh",
-        "tools/scripts/build_vendor_offline_selftest.sh", "tools/scripts/repro_network_policy_selftest.sh",
+        "tools/scripts/build_vendor_offline_selftest.sh", "build/bin/repro-network-policy-selftest",
         "fakebin/sha256sum"};
     static const char script[] = "#!/bin/sh\n"
         "printf '%s %s\\n' \"$0\" \"$*\" >> trace\n"
@@ -159,7 +159,7 @@ static bool lrun_epoch_setup(const char *root)
         lrun_epoch_file(root, "tools/dev/build-epoch-integrity-cached.sh", driver, true) &&
         lrun_epoch_file(root, "tools/dev/build-epoch-key.sh", key_tool, true) &&
         lrun_epoch_file(root, "tools/dev/build-epoch-selftest.sh", build_probe, true) &&
-        lrun_epoch_file(root, "tools/dev/make-depfile-scope-selftest.sh", dep_probe, true) &&
+        lrun_epoch_file(root, "build/bin/depfile-scope-launch", dep_probe, true) &&
         lrun_epoch_file(root, "tools/dev/source_identity_batch.c", "good\n", false) &&
         lrun_epoch_file(root, "poison.mk", "$(error fixture poison)\n", false);
 }
@@ -712,14 +712,14 @@ static int test_lrun_vendor(void)
         (void)snprintf(path, sizeof path, "%s/trace", fx.root);
         ASSERT(lrun_read(path, trace, sizeof trace));
         ASSERT(strstr(trace, "build_vendor_offline_selftest.sh") != NULL);
-        ASSERT(strstr(trace, "repro_network_policy_selftest.sh") == NULL);
+        ASSERT(strstr(trace, "repro-network-policy-selftest") == NULL);
         ASSERT(strstr(trace, "check-tor-provenance") == NULL);
         ASSERT(lrun_write(path, ""));
         ASSERT_EQ(lrun_vendor_go(&fx), 0);
         ASSERT(lrun_read(path, trace, sizeof trace));
         ASSERT(strstr(trace, "test_vendor_provenance.sh") != NULL);
         ASSERT(strstr(trace, "build_vendor_offline_selftest.sh") != NULL);
-        ASSERT(strstr(trace, "repro_network_policy_selftest.sh") != NULL);
+        ASSERT(strstr(trace, "repro-network-policy-selftest") != NULL);
         ASSERT(strstr(trace, "vendor/rgfw/SHA256SUMS") != NULL);
         ASSERT(strstr(trace, "vendor/qrcodegen/SHA256SUMS") != NULL);
         ASSERT(strstr(trace, "vendor/typography/SHA256SUMS") != NULL);

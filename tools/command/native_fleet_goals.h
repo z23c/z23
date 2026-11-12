@@ -100,6 +100,17 @@ struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
                                             const char *own_host,
                                             int64_t now, int64_t latency_ms);
 
+/* Grades G7 from its latency samples plus the two freshness legs: fresh_leg
+ * labels the code index metrics verdict for the store the warm lookups
+ * served from ("fresh-verbatim", "stale-warm-path", "no-verdict(<why>)"),
+ * group_leg labels the codeindex_stale receipt ("codeindex_stale-pass",
+ * "codeindex_stale-fail(exit N)", "codeindex_stale-unrun(<why>)"). Latency
+ * still FAILs over the bar; the freshness legs hold the row at partial and
+ * name themselves. Exposed so a fixture can pin each rule. */
+struct zcl_goal_result zcl_goals_g7_grade(int64_t median_ms, int64_t cold_ms,
+                                          int samples, const char *fresh_leg,
+                                          const char *group_leg);
+
 /* Build one graded row: `fmt` formats the evidence, `next` is copied whole. */
 struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade, const char *next,
                                      const char *fmt, ...)

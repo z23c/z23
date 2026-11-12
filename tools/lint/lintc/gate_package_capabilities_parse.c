@@ -127,10 +127,20 @@ static int pc_module_row(void *opaque, const char *path, const char *classes)
     if (!rc) (*c->rows)++;
     return rc;
 }
+/* Every feature arm joins the package-capability union: a conditional arm's
+ * reach is part of the package claim even on a host that never selects it. */
+static int pc_when_row(void *opaque, const char *features, const char *path, const char *classes)
+{
+    (void)features;
+    return pc_module_row(opaque, path, classes);
+}
+
 static int pc_load_module_file(const char *path, struct pc_modtable *out, int *n_rows)
 {
     struct pc_module_ctx c = { out, n_rows };
     int rc = ccd_module_each(path, pc_module_row, &c);
+    if (rc == 0)
+        rc = ccd_when_each(path, pc_when_row, &c);
     return rc == 1 ? -1 : rc == 0 ? 0 : 2;
 }
 int pc_load_module_rows(const char *const *paths, int npaths, struct pc_modtable *out,

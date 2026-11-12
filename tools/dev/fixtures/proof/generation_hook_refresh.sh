@@ -4,7 +4,7 @@
 set -eu
 source_root=${1:?source root}; donor=${2:?donor}; generation=${3:?generation}
 native="$source_root/build/bin/z23-git-hook"
-refresh="$source_root/tools/scripts/refresh_git_hooks_if_armed.sh"
+refresh="$source_root/build/bin/refresh-git-hooks"
 installer="$source_root/tools/scripts/install_git_hooks.sh"
 [ -x "$native" ] && [ -x "$refresh" ] && [ -x "$installer" ] || {
     echo 'generation hook fixture: required native hook or installer absent' >&2; exit 1;

@@ -6,35 +6,11 @@
 # live launchctl job record. Callers keep explicit environment overrides as
 # the highest authority and use these helpers only for read-only discovery.
 
-zcl_service_launchd_label() {
-    local plist="${1:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
-
-    [ -r "$plist" ] || return 1
-    command -v plutil >/dev/null 2>&1 || return 1
-    plutil -extract Label raw -o - "$plist" 2>/dev/null
-}
-
-zcl_service_launchd_print() {
-    local plist="${1:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
-    local label="" uid="" gui="" background=""
-
-    command -v launchctl >/dev/null 2>&1 || return 1
-    label="$(zcl_service_launchd_label "$plist" || true)"
-    [ -n "$label" ] || return 1
-    uid="$(id -u)" || return 1
-    gui="$(launchctl print "gui/$uid/$label" 2>/dev/null)" || gui=""
-    background="$(launchctl print "user/$uid/$label" 2>/dev/null)" || background=""
-    if [ -n "$gui" ] && [ -n "$background" ]; then
-        printf 'z23-service: ambiguous launchd job in GUI and Background domains\n' >&2
-        return 1
-    fi
-    if [ -n "$gui" ]; then
-        printf '%s\n' "$gui"
-    elif [ -n "$background" ]; then
-        printf '%s\n' "$background"
-    else
-        return 1
-    fi
+_zcl_service_args() {
+    local root bin
+    root="$(cd "${BASH_SOURCE[0]%/*}/../../.." && pwd)"
+    bin="$root/build/bin/service-args"
+    "$bin" "$@"
 }
 
 zcl_service_exec_arg() {
@@ -85,45 +61,13 @@ zcl_service_exec_arg() {
 zcl_service_pid() {
     local unit="${1:-z23-node}"
     local plist="${2:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
-    local value=""
-
-    if command -v systemctl >/dev/null 2>&1; then
-        value="$(systemctl --user show "$unit" -p MainPID --value 2>/dev/null || true)"
-        case "$value" in
-            ''|0|*[!0-9]*) ;;
-            *) printf '%s\n' "$value"; return 0 ;;
-        esac
-    fi
-
-    value="$(zcl_service_launchd_print "$plist" |
-        sed -n 's/^[[:space:]]*pid = \([1-9][0-9]*\)$/\1/p' |
-        head -1)"
-    [ -n "$value" ] || return 1
-    printf '%s\n' "$value"
+    _zcl_service_args pid "$unit" "$plist"
 }
 
 zcl_service_active_state() {
     local unit="${1:-z23-node}"
     local plist="${2:-${HOME:-}/Library/LaunchAgents/org.z23.zclassic.plist}"
-    local value=""
-
-    if command -v systemctl >/dev/null 2>&1; then
-        value="$(systemctl --user show "$unit" -p ActiveState --value 2>/dev/null || true)"
-        if [ -n "$value" ]; then
-            printf '%s\n' "$value"
-            return 0
-        fi
-    fi
-
-    value="$(zcl_service_launchd_print "$plist" |
-        sed -n 's/^[[:space:]]*state = \([^[:space:]][^[:space:]]*\)$/\1/p' |
-        head -1)"
-    [ -n "$value" ] || return 1
-    if [ "$value" = "running" ]; then
-        printf 'active\n'
-    else
-        printf '%s\n' "$value"
-    fi
+    _zcl_service_args active-state "$unit" "$plist"
 }
 
 zcl_service_restart_policy() {

@@ -589,12 +589,44 @@ static int pcs_case_long_glob(const char *base, int *fails)
 }
 
 typedef int (*pcs_case_fn)(const char *, int *);
+/* A feature-conditional arm is part of the package claim on every host: a
+ * manifest covering only the unconditional row understates a WHEN arm's
+ * class, and covering both is exact. */
+static int pcs_case_when(const char *base, int *fails)
+{
+    char d[4096], p[4096];
+    const char *srcs[] = { "src/one.c", NULL };
+    const char *def =
+        "ZCL_MODULE_CAPABILITY(\"lib/owned/src/one.c\", CAP_FS_READ, \"\")\n"
+        "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_GTK\", \"lib/owned/src/one.c\", CAP_FS_WRITE, \"gtk arm\")\n";
+    if (ovf(snprintf(d, sizeof d, "%s/when1", base), sizeof d) || csr_mkdirs(d))
+        return 2;
+    if (pcs_fixture_base(d) || pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\"", srcs))
+        return 2;
+    if (ovf(snprintf(p, sizeof p, "%s/engine/composition/module_capabilities.def", d), sizeof p)
+        || csr_write(p, def))
+        return 2;
+    if (pcs_expect_rc("W1: a manifest covering only the unconditional row understates the WHEN arm",
+                      1, "FS_WRITE", d, fails))
+        return 2;
+    if (ovf(snprintf(d, sizeof d, "%s/when2", base), sizeof d) || csr_mkdirs(d))
+        return 2;
+    if (pcs_fixture_base(d)
+        || pcs_fixture_pkg(d, "fx/owned", "lib/owned", "\"CAP_FS_READ\",\"CAP_FS_WRITE\"", srcs))
+        return 2;
+    if (ovf(snprintf(p, sizeof p, "%s/engine/composition/module_capabilities.def", d), sizeof p)
+        || csr_write(p, def))
+        return 2;
+    return pcs_expect_rc("W2: a manifest covering every arm, including the conditional one, is exact",
+                         0, NULL, d, fails);
+}
+
 static const pcs_case_fn k_pcs_cases[] = {
     pcs_case_a, pcs_case_b, pcs_case_c, pcs_case_c2, pcs_case_c3, pcs_case_d,
     pcs_case_e, pcs_case_e2, pcs_case_e3, pcs_case_f1, pcs_case_f2, pcs_case_g1,
     pcs_case_g2, pcs_case_h, pcs_case_i, pcs_case_j,
     pcs_case_source_owned, pcs_case_spaced_expression, pcs_case_comma_path, pcs_case_module_read_failure, pcs_case_source_owned_duplicate,
-    pcs_case_source_owned_misplaced, pcs_case_long_glob,
+    pcs_case_source_owned_misplaced, pcs_case_long_glob, pcs_case_when,
 };
 
 int check_package_capabilities_selftest(void)

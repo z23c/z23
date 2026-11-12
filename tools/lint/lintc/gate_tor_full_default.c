@@ -36,12 +36,12 @@ static const char k_tfd_refusal[] =
     "refusing to package a tor=stub binary: it cannot reach the onion "
     "network; rebuild with make tor-full";
 static const char *const k_tfd_refusal_files[] = {
-    "tools/scripts/tor_stamp_lib.sh",
+    "tools/dev/tor_stamp.c",
     "tools/scripts/install_z23.sh",
 };
 static const char *const k_tfd_refusal_users[] = {
     "tools/ship.sh",
-    "tools/scripts/build_c23_portable_release.sh",
+    "tools/dev/c23_portable_release.c",
 };
 enum { TFD_N_FILES = 2, TFD_N_USERS = 2 };
 
@@ -506,9 +506,9 @@ static int tfd_seed(const char *dir)
     if (rap_rm_rf(dir)) return 1;
     if (tfd_copy_named(dir, "Makefile")) return 1;
     if (tfd_copy_named(dir, "tools/ship.sh")) return 1;
-    if (tfd_copy_named(dir, "tools/scripts/tor_stamp_lib.sh")) return 1;
+    if (tfd_copy_named(dir, "tools/dev/tor_stamp.c")) return 1;
     if (tfd_copy_named(dir, "tools/scripts/install_z23.sh")) return 1;
-    if (tfd_copy_named(dir, "tools/scripts/build_c23_portable_release.sh"))
+    if (tfd_copy_named(dir, "tools/dev/c23_portable_release.c"))
         return 1;
     return 0;
 }
@@ -638,7 +638,7 @@ int check_tor_full_default_selftest(void)
         "include $(TOR_BOOTSTRAP_MK)", "-include $(TOR_BOOTSTRAP_MK)", 0);
     bad |= tfd_st_case(tmp, "default", "Makefile",
         "ZCL_TOR ?= full", "ZCL_TOR ?= stub", 0);
-    bad |= tfd_st_case(tmp, "forced", "tools/scripts/build_c23_portable_release.sh",
+    bad |= tfd_st_case(tmp, "forced", "tools/dev/c23_portable_release.c",
         "ZCL_C23_PORTABLE_RELEASE=1 ",
         "ZCL_C23_PORTABLE_RELEASE=1 TOR_FULL= ", 0);
     bad |= tfd_st_case(tmp, "install", "Makefile",

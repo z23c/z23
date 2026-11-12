@@ -14,6 +14,7 @@
 
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #include "platform/directory_compat.h"
+#include "platform/os_proc.h"   /* cgroup cap half of the import memory budget */
 #include "platform/time_compat.h"
 #include "controllers/snapshot_controller.h"
 #include "snapshot_controller_internal.h"
@@ -43,6 +44,7 @@
 #include <time.h>
 #include <pthread.h>
 #include "util/blocker.h"
+#include "util/hw_profile.h"    /* measured host RAM half of the budget */
 #include "util/log_macros.h"
 #include "support/log_throttle.h"
 #include "util/thread_registry.h"
@@ -225,6 +227,53 @@ static void import_block_index_restore_after_failure(struct node_db *ndb)
         (void)import_block_index_rebuild_block_indexes(ndb);
 }
 
+/* T1 import page cache, sized from the same effective memory budget as the
+ * node.db bulk caches (d21a9aa893 "Size the SQLite catch-up turbo cache from
+ * the memory budget", b0b05f7b7f): the smaller of measured host RAM and the
+ * cgroup memory.high/max cap. The old unconditional 512 MiB page cache was
+ * the boot-time memory spike on small machines (live node_rss_mb diagnostic:
+ * VmHWM 2.4 GB with such transients). Boundaries mirror
+ * node_db_turbo_cache_kib_for_ram (engine/models/src/database.c): at or below
+ * 4 GiB — and for unreadable RAM (ram <= 0) — the import takes the measured
+ * constrained-lane size, and only lanes above 4 GiB keep the full bulk cache.
+ * Bulk walk on 300k blocks (d21a9aa893's fixture): 16-512 MiB showed no
+ * throughput difference outside host noise while process maxrss grew
+ * 193/211/251/328/473 MiB for 16/32/64/128/512 MiB, so the constrained
+ * floor costs no measurable import speed. */
+#define ZCL_SNAPSHOT_IMPORT_CONSTRAINED_BYTES (4LL * 1024 * 1024 * 1024)
+#define ZCL_SNAPSHOT_IMPORT_TURBO_CACHE_KIB   (512LL * 1024)      /* 512 MiB */
+#define ZCL_SNAPSHOT_IMPORT_TURBO_CONSTRAINED_KIB (64LL * 1024)  /* 64 MiB */
+
+/* Same composition as db_effective_ram_bytes() in engine/models/src/
+ * database.c — keep the two in sync. */
+static int64_t import_block_index_effective_ram_bytes(void)
+{
+    hw_profile_init(NULL);
+    int64_t ram = hw_profile_ram_bytes();
+    struct os_proc_mem mem;
+    if (!os_proc_mem_read(&mem))
+        return ram;
+    int64_t cap = mem.cgroup_high > 0 ? mem.cgroup_high : mem.cgroup_max;
+    if (cap > 0 && (ram <= 0 || cap < ram))
+        ram = cap;
+    return ram;
+}
+
+static int64_t import_block_index_turbo_cache_kib_for_ram(int64_t ram)
+{
+    /* Unreadable RAM (ram <= 0) takes the constrained size, as the budget
+     * cache takes its floor. */
+    if (ram <= ZCL_SNAPSHOT_IMPORT_CONSTRAINED_BYTES)
+        return ZCL_SNAPSHOT_IMPORT_TURBO_CONSTRAINED_KIB;
+    return ZCL_SNAPSHOT_IMPORT_TURBO_CACHE_KIB;
+}
+
+static int64_t import_block_index_turbo_cache_kib(void)
+{
+    return import_block_index_turbo_cache_kib_for_ram(
+        import_block_index_effective_ram_bytes());
+}
+
 /* Prepare the SQLite side for the bulk walk and position the iterator:
  * turbo pragmas, busy timeout, drop the block indexes, reset the blocks
  * projection, then seek to the first 'b' key and open the bulk load
@@ -235,10 +284,16 @@ static bool import_block_index_begin_bulk_scan(struct node_db *ndb,
                                                struct snapshot_selected_chain *chain,
                                                struct db_iterator *it)
 {
-    /* Turbo mode */
+    /* Turbo mode. The page cache follows the memory budget
+     * (import_block_index_turbo_cache_kib above) instead of the old
+     * unconditional 512 MiB; synchronous=OFF and the disabled
+     * wal_autocheckpoint are unchanged. */
+    char cache_sql[48];
+    snprintf(cache_sql, sizeof(cache_sql), "PRAGMA cache_size=-%lld",
+             (long long)import_block_index_turbo_cache_kib());
     bool ok = snapshot_sql_exec_checked(ndb, "PRAGMA synchronous=OFF",
                                         "T1 set synchronous=OFF") &&
-              snapshot_sql_exec_checked(ndb, "PRAGMA cache_size=-524288",
+              snapshot_sql_exec_checked(ndb, cache_sql,
                                         "T1 set cache_size") &&
               snapshot_sql_exec_checked(ndb, "PRAGMA wal_autocheckpoint=0",
                                         "T1 disable wal_autocheckpoint");
@@ -673,6 +728,20 @@ bool snapshot_import_utxos_for_test(const char *snapshot_dir, const char *db_pat
     import_utxos_thread(&a);
     *out_count = a.count;
     return a.result == 0;
+}
+
+/* Budget seams for the T1 page-cache clamp test
+ * (test_importblockindex_roundtrip): the live value honors the
+ * os_proc_mem override exactly as the production PRAGMA does; the pure
+ * form pins the 4 GiB boundary and the unreadable-RAM floor. */
+int64_t snapshot_import_turbo_cache_kib_for_test(void)
+{
+    return import_block_index_turbo_cache_kib();
+}
+
+int64_t snapshot_import_turbo_cache_kib_for_ram_for_test(int64_t ram)
+{
+    return import_block_index_turbo_cache_kib_for_ram(ram);
 }
 #endif
 

@@ -937,6 +937,12 @@ static bool health_test_high_rss_snapshot_ok(
     ok = ok && health->healthy;
     ok = ok && health->serving;
     ok = ok && health->memory_rss_mb == 5000;
+#if defined(__linux__)
+    /* The swap half of the same snapshot: VmSwap is always present in
+     * /proc/self/status, so it is a real reading (0 MiB is a real one) —
+     * never the -1 "host cannot say" sentinel off a Linux test host. */
+    ok = ok && health->memory_swap_mb >= 0;
+#endif
     ok = ok && health->degraded_reason[0] == '\0';
     ok = ok && health->blocking_reason[0] == '\0';
     ok = ok && health->warning;

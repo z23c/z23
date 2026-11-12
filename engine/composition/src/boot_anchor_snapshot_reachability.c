@@ -2,7 +2,7 @@
  * each file keeps one focused responsibility (same discipline that file's own
  * header states). This file owns exactly one question: is a SHA3-checkpoint-
  * bound anchor UTXO snapshot (<datadir>/utxo-anchor.snapshot, the artifact the
- * -mint-anchor ceremony or tools/seed_anchor_snapshot.sh produces) reachable
+ * -mint-anchor ceremony or tools/dev/seed_anchor_snapshot.c produces) reachable
  * and verified RIGHT NOW — never whether/how to load it. Read-only: every path
  * here mmaps the candidate file PROT_READ via uss_open and closes it before
  * returning; no coins_kv mutation, no progress-store transaction.
@@ -40,7 +40,7 @@
  *       value never points every caller at a dead path.
  *   (3) <datadir>/utxo-anchor.snapshot (where <datadir> is node.db's
  *       directory) — the default reachable-by-construction location, and the
- *       exact target tools/seed_anchor_snapshot.sh stages into.
+ *       exact target tools/dev/seed_anchor_snapshot.c stages into.
  * All three are LOCAL paths only; this never fetches over the network.
  * Shared with boot_refold_staged.c's two real loaders (boot_anchor_seed_
  * from_snapshot, boot_load_verify_snapshot_eligible) via boot_internal.h so

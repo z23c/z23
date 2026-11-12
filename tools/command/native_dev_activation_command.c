@@ -16,6 +16,8 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/directory_transaction.h"
+#include "platform/os_proc.h"
+#include "platform/positioned_file.h"
 #include "platform/time_compat.h"
 #include "util/authority_receipt.h"
 #include "util/log_macros.h"
@@ -25,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
@@ -225,6 +228,41 @@ static bool dac_read_current(const char *gen_root, char out[80])
 #endif
 }
 
+/* Read any generation locator symlink (<gen_root>/<name>) into out. An absent
+ * link reads as the empty generation with true, mirroring dac_read_current. */
+static bool dac_read_generation_link(const char *gen_root, const char *name,
+                                     char out[80])
+{
+#if defined(_WIN32)
+    /* The win32 lane stores locators as selection files only for `current`;
+     * until that store grows named locators, rollback fails closed rather
+     * than guessing a target. */
+    (void)gen_root;
+    (void)name;
+    out[0] = 0;
+    return false;
+#else
+    out[0] = 0;
+    char link[PATH_MAX];
+    int n = snprintf(link, sizeof(link), "%s/%s", gen_root, name);
+    if (n <= 0 || (size_t)n >= sizeof(link))
+        return false;
+    ssize_t got = readlink(link, out, 79);
+    if (got < 0)
+        return true;
+    if (got == 0 || got >= 79) {
+        out[0] = 0;
+        return false;
+    }
+    out[got] = 0;
+    if (!dac_generation(out)) {
+        out[0] = 0;
+        return false;
+    }
+    return true;
+#endif
+}
+
 static bool dac_resolve_root(const struct zcl_command_request *request,
                              char out[PATH_MAX])
 {
@@ -334,6 +372,56 @@ static void dac_result_fields(struct zcl_command_reply *reply,
                            result->running_generation);
 }
 
+/* True when `path` opens as the staging engine opens artifacts: a regular
+ * executable file reachable WITHOUT following a symlink (the O_NOFOLLOW
+ * content-path contract). */
+static bool dac_artifact_usable(const char *path)
+{
+    struct platform_positioned_file artifact;
+    platform_positioned_file_init(&artifact);
+    bool usable = platform_positioned_file_open(&artifact, path) &&
+                  platform_positioned_file_is_executable(&artifact);
+    platform_positioned_file_close(&artifact);
+    return usable;
+}
+
+/* dev_activation_request_from_cycle() names the checkout's migration alias
+ * build/bin/zclassic23-dev, which the Makefile installs as "ln -sfn z23-dev"
+ * -- a SYMLINK. The staging engine opens the artifact with O_NOFOLLOW, so a
+ * symlinked artifact is refused with ELOOP before any digest is taken and
+ * every plan fails ACTIVATION_PREFLIGHT_FAILED "candidate staging failed".
+ * The proven shell transaction stages the hard-linked regular file
+ * build/bin/z23-dev for exactly this reason (the Makefile installs it as a
+ * regular file "for O_NOFOLLOW proof open"). Prefer that regular file, then
+ * the alias's resolved referent, so the engine receives a regular file. */
+static void dac_stage_artifact(const char *root,
+                               struct dev_activation_cycle_request *cycle)
+{
+    char regular[PATH_MAX];
+    int n = snprintf(regular, sizeof(regular), "%s/build/bin/z23-dev", root);
+    if (n > 0 && (size_t)n < sizeof(regular) && dac_artifact_usable(regular)) {
+        snprintf(cycle->artifact_path, sizeof(cycle->artifact_path), "%s",
+                 regular);
+        cycle->req.artifact_path = cycle->artifact_path;
+        return;
+    }
+    /* Only normalize a request whose artifact still points at the cycle's own
+     * constructed path; an adapter that bound a different artifact string
+     * owns that choice. */
+    if (!cycle->req.artifact_path ||
+        strcmp(cycle->req.artifact_path, cycle->artifact_path) != 0)
+        return;
+    char resolved[PATH_MAX];
+    if (platform_directory_canonical_real(cycle->artifact_path, resolved,
+                                          sizeof(resolved)) &&
+        strcmp(resolved, cycle->artifact_path) != 0 &&
+        dac_artifact_usable(resolved)) {
+        snprintf(cycle->artifact_path, sizeof(cycle->artifact_path), "%s",
+                 resolved);
+        cycle->req.artifact_path = cycle->artifact_path;
+    }
+}
+
 static bool dac_request(const char *root, const char *source_id,
                         const char *mutation, const char *expected_current,
                         enum dev_activation_mode mode,
@@ -345,6 +433,7 @@ static bool dac_request(const char *root, const char *source_id,
     cycle->req.source_mutation = mutation;
     cycle->req.expected_current_generation = expected_current;
     cycle->req.mode = mode;
+    dac_stage_artifact(root, cycle);
     return true;
 }
 
@@ -492,6 +581,10 @@ struct dac_commit_input {
     const char *intent, *effect, *candidate, *source_id, *mutation, *cas, *expected;
     int64_t expires;
 };
+
+/* Defined with the generation-history helpers below dac_commit(). */
+static void dac_record_accepted(const char *gen_root, const char *generation,
+                                const char *sha_hex, const char *result);
 
 static bool dac_commit_input_valid(const struct dac_commit_input *c)
 {
@@ -655,7 +748,296 @@ static void dac_commit(const struct zcl_command_request *request,
     (void)json_push_kv_bool(&reply->data, "idempotent_retry",
                             retry_same_effect);
     dac_result_fields(reply, &result);
+    dac_record_accepted(cycle.gen_root, result.candidate_generation,
+                        result.candidate_sha256, "activated");
     reply->error.mutated = true;
+}
+
+/* ── generation history: accepted markers ────────────────────────────── */
+
+static void dac_iso_utc_now(char out[32])
+{
+    time_t now = platform_time_wall_time_t();
+    struct tm tmv;
+    if (gmtime_r(&now, &tmv))
+        strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    else
+        snprintf(out, 32, "1970-01-01T00:00:00Z");
+}
+
+/* Read one bounded JSON document through the O_NOFOLLOW content-path open.
+ * The dev lane's deploy state and generation manifests are regular files the
+ * engine itself wrote; a replaced or oversized path simply reads as absent. */
+static bool dac_read_json_bounded(const char *path, char *buf, size_t capacity)
+{
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return false;
+    uint64_t size = 0;
+    int64_t got = platform_positioned_file_size(&file, &size)
+        ? platform_positioned_file_read(&file, buf, capacity - 1, 0)
+        : -1;
+    platform_positioned_file_close(&file);
+    if (got <= 0)
+        return false;
+    buf[got] = 0;
+    return (uint64_t)got == size;
+}
+
+/* The generation the last activation replaced (agent-deploy.json's
+ * previous_generation), or false when no deploy state records one. */
+static bool dac_read_previous_generation(const char *datadir, char out[80])
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/agent-deploy.json", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    char blob[4096];
+    if (!dac_read_json_bounded(path, blob, sizeof(blob)))
+        return false;
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, blob, strlen(blob)) && doc.type == JSON_OBJ;
+    const char *previous =
+        ok ? json_get_str(json_get(&doc, "previous_generation")) : NULL;
+    ok = previous && dac_generation(previous);
+    if (ok)
+        snprintf(out, 80, "%s", previous);
+    json_free(&doc);
+    return ok;
+}
+
+/* The authoritative baked source identity of an immutable generation. */
+static bool dac_read_generation_source_id(const char *gen_root,
+                                          const char *generation,
+                                          char out[65])
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s/manifest.json", gen_root,
+                     generation);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    char blob[4096];
+    if (!dac_read_json_bounded(path, blob, sizeof(blob)))
+        return false;
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, blob, strlen(blob)) && doc.type == JSON_OBJ;
+    const char *source_id =
+        ok ? json_get_str(json_get(&doc, "source_id_sha256")) : NULL;
+    ok = source_id && dac_hex64(source_id);
+    if (ok)
+        snprintf(out, 65, "%s", source_id);
+    json_free(&doc);
+    return ok;
+}
+
+/* Record a verified activation in the history the `dev generation history`
+ * reader scans: accepted/<gen>.json, mirroring the engine's rejected/<gen>.json
+ * quarantine markers, so an activate->rollback cycle leaves BOTH generations
+ * recorded with their results. */
+static void dac_record_accepted(const char *gen_root, const char *generation,
+                                const char *sha_hex, const char *result)
+{
+    char dir[PATH_MAX], path[PATH_MAX], tmp[PATH_MAX], now[32];
+    int n1 = snprintf(dir, sizeof(dir), "%s/accepted", gen_root);
+    int n2 = snprintf(path, sizeof(path), "%s/%s.json", dir, generation);
+    int n3 = snprintf(tmp, sizeof(tmp), "%s/.%s.%lld", dir, generation,
+                      (long long)os_proc_current_pid());
+    if (n1 <= 0 || (size_t)n1 >= sizeof(dir) || n2 <= 0 ||
+        (size_t)n2 >= sizeof(path) || n3 <= 0 || (size_t)n3 >= sizeof(tmp))
+        return;
+    (void)platform_directory_create(dir, 0755); /* EEXIST is fine */
+    dac_iso_utc_now(now);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "{\"schema\":\"zcl.dev_accepted_generation.v1\","
+               "\"generation\":\"%s\",\"sha256\":\"%s\","
+               "\"accepted_at_utc\":\"%s\",\"result\":\"%s\"}\n",
+            generation, sha_hex, now, result);
+    if (fclose(f) == 0)
+        (void)rename(tmp, path);
+    else
+        (void)remove(tmp);
+}
+
+/* ── dev generation rollback: restore the verified last-good generation ── */
+
+/* The undo target: last-good when it differs from the resident generation,
+ * else the generation the last activation replaced. After a VERIFIED
+ * activation the engine repoints last-good at the new candidate, so the
+ * distinct prior generation lives in the deploy state's previous_generation. */
+static bool dac_rollback_target(const char *gen_root, const char *datadir,
+                                const char *current, char out[80])
+{
+    char candidate[80];
+    if (dac_read_generation_link(gen_root, "last-good", candidate) &&
+        candidate[0] && strcmp(candidate, current) != 0) {
+        snprintf(out, 80, "%s", candidate);
+        return true;
+    }
+    if (dac_read_previous_generation(datadir, candidate) && candidate[0] &&
+        strcmp(candidate, current) != 0) {
+        snprintf(out, 80, "%s", candidate);
+        return true;
+    }
+    return false;
+}
+
+static void dac_rollback_plan(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX];
+    if (!dac_resolve_root(request, root)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "ROOT_RESOLVE_FAILED", "normalize",
+                 "could not resolve the checkout root", "");
+        return;
+    }
+    struct dev_activation_cycle_request cycle;
+    if (!dac_request(root, "", NULL, NULL, DEV_ACTIVATION_MODE_ACTIVATE,
+                     &cycle)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "ACTIVATION_REQUEST_FAILED", "plan",
+                 "could not construct the confined dev-lane request", "");
+        return;
+    }
+    char current[80];
+    if (!dac_read_current(cycle.gen_root, current)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "RESIDENT_EPOCH_UNKNOWN", "plan",
+                 "current dev generation is malformed or unreachable", "");
+        return;
+    }
+    char target[80];
+    if (!dac_rollback_target(cycle.gen_root, cycle.datadir, current, target)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "ROLLBACK_TARGET_UNAVAILABLE", "plan",
+                 "no verified generation differs from the resident one; "
+                 "nothing to roll back to",
+                 current[0] ? current : "no current generation");
+        return;
+    }
+    char source_id[65];
+    if (!dac_read_generation_source_id(cycle.gen_root, target, source_id)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "ROLLBACK_TARGET_INVALID", "plan",
+                 "rollback target carries no authoritative manifest source "
+                 "identity",
+                 target);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.dev_generation_rollback.v1");
+    (void)json_push_kv_str(&reply->data, "stage", "plan");
+    (void)json_push_kv_str(&reply->data, "current_generation", current);
+    (void)json_push_kv_str(&reply->data, "rollback_generation", target);
+    (void)json_push_kv_str(&reply->data, "source_id_sha256", source_id);
+    (void)json_push_kv_str(&reply->data, "confirm_hint",
+                           "re-run this command with confirm to restore the "
+                           "rollback generation");
+}
+
+static void dac_rollback_commit(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX];
+    if (!dac_resolve_root(request, root)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "ROOT_RESOLVE_FAILED", "normalize",
+                 "could not resolve the checkout root", "");
+        return;
+    }
+    struct dev_activation_cycle_request cycle;
+    if (!dac_request(root, NULL, NULL, NULL, DEV_ACTIVATION_MODE_ACTIVATE,
+                     &cycle)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "ACTIVATION_REQUEST_FAILED", "commit",
+                 "could not construct the confined dev-lane request", "");
+        return;
+    }
+    char current[80];
+    if (!dac_read_current(cycle.gen_root, current)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "RESIDENT_EPOCH_UNKNOWN", "authorize",
+                 "current dev generation is malformed or unreachable", "");
+        return;
+    }
+    char target[80];
+    if (!dac_rollback_target(cycle.gen_root, cycle.datadir, current, target)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "ROLLBACK_TARGET_UNAVAILABLE", "authorize",
+                 "no verified generation differs from the resident one; "
+                 "nothing to roll back to",
+                 current[0] ? current : "no current generation");
+        return;
+    }
+    char source_id[65];
+    if (!dac_read_generation_source_id(cycle.gen_root, target, source_id)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "ROLLBACK_TARGET_INVALID", "authorize",
+                 "rollback target carries no authoritative manifest source "
+                 "identity",
+                 target);
+        return;
+    }
+    char expected[80];
+    snprintf(expected, sizeof(expected), "%s", current);
+    cycle.req.source_identity = source_id;
+    cycle.req.expected_current_generation = expected;
+    uint8_t target_bytes[32];
+    if (!dac_unhex32(target + 4, target_bytes)) {
+        dac_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "ROLLBACK_TARGET_INVALID", "normalize",
+                 "rollback target hash is malformed", target);
+        return;
+    }
+    struct dev_activation_ops ops;
+    dev_activation_default_ops(&cycle.req, &ops);
+    /* Rollback exists to restore a binary from a PRIOR source epoch, so the
+     * current-tree source CAS would refuse exactly the restoration being
+     * requested. Authority is the target generation's own manifest identity,
+     * which candidate preflight still proves the staged binary carries. */
+    ops.source_epoch_cas = NULL;
+    struct dev_activation_result result = {0};
+    int rc = dev_activation_activate_generation(target_bytes, &cycle.req,
+                                                &ops, &result);
+    if (rc != DEV_ACTIVATION_OK) {
+        dac_result_fields(reply, &result);
+        dac_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "ACTIVATION_ROLLBACK_FAILED", "commit",
+                 result.verify_detail, result.failure_capsule);
+        /* The engine may have stopped, flipped, restarted, and restored the
+         * lane before reporting failure. Never describe that as untouched. */
+        reply->error.mutated = true;
+        return;
+    }
+    dac_record_accepted(cycle.gen_root, target, target + 4,
+                        "rollback_verified");
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.dev_generation_rollback.v1");
+    (void)json_push_kv_str(&reply->data, "stage", "committed");
+    (void)json_push_kv_str(&reply->data, "restored_generation", target);
+    dac_result_fields(reply, &result);
+    reply->error.mutated = true;
+}
+
+void zcl_native_handle_dev_generation_rollback(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !request->input || !reply) {
+        if (reply)
+            dac_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                     ZCL_COMMAND_EXIT_INTERNAL, "BAD_REQUEST", "normalize",
+                     "missing rollback request input", "");
+        return;
+    }
+    if (json_get_bool(json_get(request->input, "confirm")))
+        dac_rollback_commit(request, reply);
+    else
+        dac_rollback_plan(request, reply);
 }
 
 void zcl_native_handle_dev_generation_activate(

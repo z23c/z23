@@ -4,7 +4,7 @@ The RAM-network simulation harness is built on `engine/modules/sim/src/seed_tape
 (`sim/seed_tape.h`): an xoshiro256++ RNG plus a virtual mono/wall clock, both
 derived from one `uint64` seed, installed into `platform_rng`/`platform_clock`.
 **Every seed is a pure function of that one scalar** — record/replay and the
-`.cap` capsule format (`tools/scripts/simnet_replay_capsule.sh`) depend on
+`.cap` capsule format (`tools/dev/simnet_replay_capsule.c`) depend on
 this: replaying a capsule only needs the seed, never wall-clock or host
 entropy.
 

@@ -237,8 +237,8 @@ static bool cli_endpoint_setup(const char *root, const char *binary, const char 
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
         if (!platform_directory_ensure(path, 0700)) return cli_setup_error("directory", path);
     }
-    static const char *const links[] = {"build/bin/zcc", "build/bin/process-group-exec", "tools/dev/checkout-lock.sh"};
-    for (size_t i = 0; i < 3; ++i) {
+    static const char *const links[] = {"build/bin/zcc", "build/bin/process-group-exec"};
+    for (size_t i = 0; i < 2; ++i) {
         (void)snprintf(source, sizeof(source), "%s/%s", checkout, links[i]);
         (void)snprintf(path, sizeof(path), "%s/%s", root, links[i]);
         if (symlink(source, path) != 0) return cli_setup_error("maintained tool link", path);

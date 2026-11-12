@@ -463,9 +463,9 @@ static int vcs_delegation_checked(const char *publish_tool,
                                   FILE *err)
 {
     long verify = 0, publish = 0, srcverify = 0;
-    int rc = vcs_last_hit(publish_tool, "\"$SESSION_TOOL\" verify", &verify, err);
+    int rc = vcs_last_hit(publish_tool, "pba_session(req, \"verify\"", &verify, err);
     if (rc == 0)
-        rc = vcs_last_hit(publish_tool, "mv -f -- \"$TMP\" \"$ALIAS\"",
+        rc = vcs_last_hit(publish_tool, "rename(tmp_path, req->alias)",
                           &publish, err);
     if (rc == 0)
         rc = vcs_last_hit(session_tool, "\"$VERIFY_TOOL\" verify-record",
@@ -593,7 +593,7 @@ static int vcs_paths_init(struct vcs_paths *p, const char *root, FILE *err)
     if (rc == 0)
         rc = vcs_path(p->makefile, root, "Makefile", err);
     if (rc == 0)
-        rc = vcs_path(p->publish_tool, root, "tools/dev/publish-build-alias.sh", err);
+        rc = vcs_path(p->publish_tool, root, "tools/dev/publish_build_alias.c", err);
     if (rc == 0)
         rc = vcs_path(p->session_tool, root, "tools/dev/build-epoch-session.sh", err);
     return rc;
@@ -655,7 +655,7 @@ static const char *const k_authority_rel[] = {
     "engine/composition/src/consensus_state_snapshot_install.c",
     "engine/composition/src/consensus_state_snapshot_install_activate.c",
     "engine/services/src/consensus_state_publication_cas.c",
-    "tools/dev/publish-build-alias.sh",
+    "tools/dev/publish_build_alias.c",
     "tools/dev/build-epoch-session.sh",
     "tools/dev/build-epoch-key.sh",
     "tools/dev/compile-epoch-object.sh",
@@ -846,9 +846,8 @@ static const char k_fx_receipt[] =
 static const char k_fx_authority[] = "void authority_sha256_only(void);\n";
 static const char k_fx_cas[] = "void publication_sha256_only(void);\n";
 static const char k_fx_publish[] =
-    "#!/bin/sh\n"
-    "\"$SESSION_TOOL\" verify\n"
-    "mv -f -- \"$TMP\" \"$ALIAS\"\n";
+    "pba_session(req, \"verify\"\n"
+    "rename(tmp_path, req->alias)\n";
 static const char k_fx_session[] =
     "#!/bin/sh\n"
     "\"$VERIFY_TOOL\" verify-record\n";
@@ -894,7 +893,7 @@ static int vcs_fx_build(const char *root)
         rc = vcs_fx_write(root, "engine/services/src/consensus_state_publication_cas.c",
                           k_fx_cas);
     if (rc == 0)
-        rc = vcs_fx_write(root, "tools/dev/publish-build-alias.sh", k_fx_publish);
+        rc = vcs_fx_write(root, "tools/dev/publish_build_alias.c", k_fx_publish);
     if (rc == 0)
         rc = vcs_fx_write(root, "tools/dev/build-epoch-session.sh", k_fx_session);
     if (rc == 0)

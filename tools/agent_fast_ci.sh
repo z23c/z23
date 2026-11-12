@@ -574,11 +574,11 @@ cache_manifest() {
         tools/deploy_guard.sh tools/deploy_verify.sh \
         tools/dev/deploy-dev-lane.sh tools/dev/agent-dev-status.sh \
         tools/dev/agent-doctor.sh \
-        tools/dev/reflex-hotfork-transport-acceptance.sh \
-        tools/dev/reflex-hotfork-source-bundle-acceptance.sh \
+        tools/dev/reflex_hotfork_transport_main.c \
+        tools/dev/reflex_hotfork_source_bundle.c \
         tools/scripts/remote_node_update.sh \
         tools/scripts/lane_recover.sh \
-        tools/scripts/check_stable_publish_containment.sh \
+        tools/dev/stable_publish_containment.c \
         tools/scripts/build_vendor.sh \
         tools/scripts/background_quality_lane.sh \
         tools/lint/lintc/gate_agent_cli.c \

@@ -18,6 +18,9 @@
  *   - the Seccomp_filters status-text parser requires the trailing '\n'
  *     after the digits, so a status read truncated mid-number fails closed
  *     instead of returning a short-read digit prefix
+ *   - the "Label: NNN kB" status-field parser picks VmSwap (and VmRSS) out
+ *     of a fixture /proc-format buffer, reports -1 — never 0 — for an
+ *     absent or unparseable label, and never reads past a label's own line
  *   - os_proc_self_maps_read() returns the whole mapping table or refuses
  *   - platform_allocator_arena_cap() picks the default glibc arena cap of 4
  *     unless the operator set MALLOC_ARENA_MAX or a glibc.malloc.arena_max tunable
@@ -470,6 +473,56 @@ static int os_proc_live_mem_read_checks(void)
 #if defined(__APPLE__)
     OSPROC_CHECK("Darwin publishes reclaimable host memory",
                  mem.sys_avail_bytes >= 0);
+#endif
+#if defined(__linux__)
+    /* VmSwap is unconditional in /proc/self/status on Linux, so the swap
+     * half of the snapshot is never unknown here (0 kB is a real reading). */
+    OSPROC_CHECK("live swap is the -1 sentinel or a non-negative byte count",
+                 mem.swap_bytes >= 0);
+#endif
+    return failures;
+}
+
+/* The "Label: NNN kB" status-field parser behind os_proc_mem_read's
+ * VmRSS/VmSize/VmSwap: a fixture /proc-format buffer decides each field,
+ * including the swapped-out half the resident set alone understates. */
+static int os_proc_status_field_parse_checks(void)
+{
+    int failures = 0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    /* Shaped like a real /proc/self/status: tabs after the colon, unrelated
+     * labels before and after the memory fields, 186 MiB swapped out. */
+    static const char status[] =
+        "Name:\tz23\n"
+        "VmPeak:\t 4218880 kB\n"
+        "VmSize:\t 3612676 kB\n"
+        "VmRSS:\t  1473664 kB\n"
+        "VmSwap:\t  190464 kB\n"
+        "Threads:\t46\n";
+    OSPROC_CHECK("fixture VmRSS parses to bytes",
+                 os_proc_status_field_bytes_for_test(status, "VmRSS:") ==
+                     1473664LL * 1024);
+    OSPROC_CHECK("fixture VmSwap parses to bytes",
+                 os_proc_status_field_bytes_for_test(status, "VmSwap:") ==
+                     190464LL * 1024);
+    OSPROC_CHECK("an absent label reports -1, never 0",
+                 os_proc_status_field_bytes_for_test(status, "VmData:") == -1);
+    OSPROC_CHECK("a label whose number does not parse reports -1",
+                 os_proc_status_field_bytes_for_test(
+                     "VmSwap:\tnone kB\n", "VmSwap:") == -1);
+    /* A value must come from the label's own line: "VmSwap:" with no number
+     * must not reach into the next line for digits. */
+    OSPROC_CHECK("a label with no number never reads the next line",
+                 os_proc_status_field_bytes_for_test(
+                     "VmSwap:\t\nThreads:\t46\n", "VmSwap:") == -1);
+    OSPROC_CHECK("the last line needs no trailing newline to parse",
+                 os_proc_status_field_bytes_for_test(
+                     "VmRSS:\t 512 kB", "VmRSS:") == 512LL * 1024);
+    /* A real zero swaps to exactly 0 bytes, a known value — never the -1
+     * unknown: pin it so a falsy-zero regression cannot pass silently. */
+    OSPROC_CHECK("VmSwap 0 kB parses to 0 bytes, not unknown",
+                 os_proc_status_field_bytes_for_test(
+                     "VmSwap:\t 0 kB\n", "VmSwap:") == 0);
 #endif
     return failures;
 }
@@ -1041,6 +1094,7 @@ int test_os_proc(void)
     failures += os_proc_scratch_live_lease_checks();
     failures += os_proc_preserved_report_fd_checks();
     failures += os_proc_seccomp_filters_parse_checks();
+    failures += os_proc_status_field_parse_checks();
     failures += os_proc_self_exe_open_path_checks();
     failures += os_proc_self_maps_read_checks();
     failures += os_proc_environment_classify_checks();

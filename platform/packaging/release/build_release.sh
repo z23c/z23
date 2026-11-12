@@ -68,8 +68,7 @@ APP_VERIFIER="$REPO_ROOT/build/bin/z23-dev"
 APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
 APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
 LINUX_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
-# shellcheck source=tools/scripts/tor_stamp_lib.sh
-. "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"
+zcl_tor_write_stamp_sidecar() { "$REPO_ROOT/build/bin/tor-stamp" write-sidecar "$@"; }
 
 die() { printf 'build_release: REFUSE: %s\n' "$*" >&2; exit 1; }
 say() { printf 'build_release: %s\n' "$*" >&2; }
@@ -622,6 +621,9 @@ package_from_bin() {
 
     # Extra evidence, not a SHA256SUMS member: an installer that cannot
     # execute this payload still fail-closes on the exact `-version` line.
+    if [ ! -x "$REPO_ROOT/build/bin/tor-stamp" ]; then
+        make -C "$REPO_ROOT" tor-stamp >/dev/null || die "tor-stamp is not built"
+    fi
     zcl_tor_write_stamp_sidecar "$out_dir/z23$exe" || true
 
     say "packed $out_dir for $platform ($(printf '%s, ' $members)AGENT_CARD.md, SHA256SUMS)"

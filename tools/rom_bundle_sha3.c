@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * rom_bundle_sha3 — standalone SHA3-256 file digest tool. Used by
- * tools/scripts/rom-bundle-replicate.sh to verify a ROM bundle replication
+ * build/bin/rom-bundle-replicate to verify a ROM bundle replication
  * copy byte-for-byte against its source, without pulling any external
  * hashing dependency (openssl/sha3sum/etc) into the dev toolchain — this
  * links only the project's own SHA3 implementation (platform/modules/sha3/src/sha3.c),

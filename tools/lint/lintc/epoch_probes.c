@@ -12,7 +12,7 @@ static const struct {
     const char *command;
 } probes[] = {
     { "check-build-epoch-selftest", "tools/dev/build-epoch-selftest.sh" },
-    { "check-make-depfile-scope-selftest", "tools/dev/make-depfile-scope-selftest.sh" },
+    { "check-make-depfile-scope-selftest", "build/bin/depfile-scope-launch" },
 };
 
 static int resolve_probe(void *ctx, const char *name, char *command, size_t cap)

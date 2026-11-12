@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static FILE *cli_sink;
 static size_t cli_next_calls, cli_flushes;
@@ -269,6 +270,17 @@ static FILE *required_stream(FILE *stream)
     if (!stream) { fprintf(stderr, "zprng CLI fixture setup failed\n"); exit(2); }
     return stream;
 }
+/* tmpfile(3) writes to the host /tmp, which a confined package test cannot
+ * reach; this stream is tmpfile's semantics (writable, seekable, gone at
+ * close) inside the sandbox-granted working directory. */
+static FILE *cli_tmp_stream(void)
+{
+    const char name[] = "zprng-cli-out.tmp";
+    (void)unlink(name);
+    FILE *s = required_stream(fopen(name, "w+b"));
+    (void)unlink(name);
+    return s;
+}
 static int cli_invoke(FILE *sink, int argc, char **args)
 {
     cli_sink = sink;
@@ -292,7 +304,7 @@ static void cli_expected(char *out, size_t cap, uint64_t seed, size_t count)
 }
 static void cli_normal(int argc, char **args, uint64_t seed, size_t count)
 {
-    FILE *sink = required_stream(tmpfile());
+    FILE *sink = cli_tmp_stream();
     check(cli_invoke(sink, argc, args) == 0, "normal CLI status");
     check(cli_next_calls == count, "normal CLI draws exact count");
     if (!count) check(cli_flushes == 0, "zero CLI does not flush output");

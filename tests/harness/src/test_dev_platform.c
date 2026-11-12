@@ -13004,6 +13004,18 @@ static bool epn_write_exec(const char *root, const char *rel, const char *body)
            dp_mk_write(root, rel, body) && chmod(path, 0700) == 0;
 }
 
+static bool epn_copy_epoch_lock(const char *cwd, const char *root)
+{
+    char src[PATH_MAX], dst[PATH_MAX];
+    if (snprintf(src, sizeof(src), "%s/build/bin/build-epoch-lock-wait", cwd) >=
+            (int)sizeof(src) ||
+        snprintf(dst, sizeof(dst), "%s/build/bin/build-epoch-lock-wait", root) >=
+            (int)sizeof(dst))
+        return false;
+    return dp_mk_write(root, "build/bin/build-epoch-lock-wait", "") &&
+           dp_hf_copy_file(src, dst) && chmod(dst, 0700) == 0;
+}
+
 static bool epn_copy_tool(const char *cwd, const char *root, const char *name)
 {
     char rel[PATH_MAX], src[PATH_MAX], dst[PATH_MAX];
@@ -13026,7 +13038,7 @@ static bool epn_fixture(const char *cwd, const char *root)
     sha_e[EPN_SHA_LEN] = '\0';
     return epn_copy_tool(cwd, root, "build-epoch-session.sh") &&
            epn_copy_tool(cwd, root, "build-epoch-open-file-identity.sh") &&
-           epn_copy_tool(cwd, root, "build-epoch-lock-wait.sh") &&
+           epn_copy_epoch_lock(cwd, root) &&
            epn_write_exec(root, "tools/dev/process-start-token.sh",
                           "#!/bin/sh\nexit 1\n") &&
            epn_write_exec(root, "tools/dev/build-epoch-key.sh",
@@ -13123,14 +13135,14 @@ static bool epn_preflight_edges(const char *root)
 static bool epn_preflight_tools(const char *cwd, const char *root)
 {
     const char *tools[] = {"build-epoch-session.sh", "build-epoch-open-file-identity.sh",
-                           "build-epoch-lock-wait.sh", "compile-epoch-object.sh",
-                           "process-start-token.sh"};
+                           "compile-epoch-object.sh", "process-start-token.sh"};
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
         char path[PATH_MAX];
         if (!epn_copy_tool(cwd, root, tools[i]) ||
             snprintf(path, sizeof(path), "%s/tools/dev/%s", root, tools[i]) >= (int)sizeof(path) ||
             chmod(path, 0700) != 0) return false;
     }
+    if (!epn_copy_epoch_lock(cwd, root)) return false;
     return epn_write_exec(root, "tools/dev/build-epoch-key.sh",
         "#!/bin/sh\ncase \"$1\" in compiler-id) printf '%064d\\n' 1;; "
         "build-system-id) printf '%064d\\n' 2;; key) printf '%064d\\n' 3;; *) exit 2;; esac\n") &&

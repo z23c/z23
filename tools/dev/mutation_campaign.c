@@ -22,6 +22,7 @@
  * digest before and after so the reader does not have to take that on faith.
  */
 
+#include "checkout_lock.h"
 #include "mutation_harness.h"
 
 #include "base/hex.h"
@@ -35,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #if defined(ZCL_TESTING) && defined(__linux__)
 #include "platform/supervised_process.h"
 #include <fcntl.h>
@@ -258,25 +260,37 @@ static int mc_list(const char *root, const char *rel)
 static bool mc_plan(struct zcl_mut_owner *owner, const char *root, const char *rel, const char *target,
                     struct zcl_mut_plan *plan, bool quiet)
 {
-    char *argv[10];
+    char *argv[8];
+    char lock[PATH_MAX];
+    struct zcl_checkout_lock_hold hold;
     int n = 0;
-    argv[n++] = (char *)"tools/dev/checkout-lock.sh";
-    argv[n++] = (char *)"foreground";
-    argv[n++] = (char *)"build/.checkout.lock";
-    argv[n++] = (char *)"--";
+    int lock_n;
+    int locked;
+    memset(&hold, 0, sizeof hold);
     argv[n++] = (char *)"make";
     argv[n++] = (char *)"-n";
     argv[n++] = (char *)"-W";
     argv[n++] = (char *)rel;
     argv[n++] = (char *)target;
     argv[n] = NULL;
+    if (root && root[0])
+        lock_n = snprintf(lock, sizeof lock, "%s/build/.checkout.lock", root);
+    else
+        lock_n = snprintf(lock, sizeof lock, "%s", "build/.checkout.lock");
+    locked = lock_n > 0 && (size_t)lock_n < sizeof lock
+                 ? zcl_checkout_lock_enter(&hold, "foreground", lock,
+                                           STDERR_FILENO)
+                 : 2;
 
     if (!quiet)
         fprintf(stderr, "== deriving the build plan (make -n -W %s %s)\n", rel,
                 target);
     char *text = NULL;
     size_t len = 0;
-    int rc = zcl_mut_spawn_owned(owner, root, argv, 600000, &text, &len);
+    int rc = locked == 0
+                 ? zcl_mut_spawn_owned(owner, root, argv, 600000, &text, &len)
+                 : 2;
+    zcl_checkout_lock_leave(&hold);
     if (rc != 0) {
         fprintf(stderr,
                 "mutation-campaign: `make -n -W %s %s` exited %d; the build "

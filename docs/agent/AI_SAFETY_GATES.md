@@ -182,7 +182,7 @@ Two classes:
 
 - **Artifact-size claims — HARD, never grandfathered.** A size figure
   qualifying the compiled binary is always a violation, because that value has
-  a live source: `tools/scripts/binary_size.sh`. The fix is to write
+  a live source: `tools/dev/binary_size.c`. The fix is to write
   size-agnostic prose or quote the derived value. This is the owner's named
   case and carries no exemption path.
 - **Live-state height pins — RATCHET.** A line that asserts the node's current

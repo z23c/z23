@@ -270,11 +270,17 @@ static int stl_st_fuzz_one(const char *dir, const char *what, const char *text, 
 
 static int stl_st_fuzz(const char *dir)
 {
-    static const char ci[] = "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)\n";
+    static const char ci[] = "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS) $(BIN_DIR)/run-fuzz-ci\n";
     char text[512];
     int bad = 0;
     snprintf(text, sizeof text, "FUZZ_TARGETS = $(BIN_DIR)/fuzz_a $(BIN_DIR)/fuzz_b2\n%s", ci);
     bad |= stl_st_fuzz_one(dir, "fuzz good", text, 0);
+    snprintf(text, sizeof text, "FUZZ_TARGETS = $(BIN_DIR)/fuzz_a $(BIN_DIR)/fuzz_b2\n"
+                                "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)\n");
+    bad |= stl_st_fuzz_one(dir, "fuzz list without the native runner refused", text, 2);
+    snprintf(text, sizeof text, "FUZZ_TARGETS = $(BIN_DIR)/fuzz_a $(BIN_DIR)/fuzz_b2\n"
+                                "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS) $(BIN_DIR)/run-fuzz-ci extra\n");
+    bad |= stl_st_fuzz_one(dir, "fuzz list with an extra prerequisite refused", text, 2);
     snprintf(text, sizeof text, "FUZZ_TARGETS = $(BIN_DIR)/fuzz_a # note\n%s", ci);
     bad |= stl_st_fuzz_one(dir, "fuzz comment refused", text, 2);
     snprintf(text, sizeof text, "FUZZ_TARGETS = $(BIN_DIR)/fuzz_a\nFUZZ_TARGETS += $(BIN_DIR)/fuzz_b\n%s", ci);

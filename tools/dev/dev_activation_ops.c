@@ -52,7 +52,12 @@ static int dev_op_prepare(void *ctx)
     char target[PATH_MAX];
     int n1 = snprintf(unit_dir, sizeof(unit_dir),
                       "%s/.config/systemd/user", home);
-    int n2 = snprintf(source, sizeof(source), "%s/deploy/%s",
+    /* The unit is source-controlled at platform/deploy/ and installed from
+     * there by the proven shell transaction (deploy-dev-lane.sh: "install
+     * -m 644 $REPO/platform/deploy/$UNIT ..."); the repository has no
+     * top-level deploy/ directory, so the earlier <root>/deploy path made
+     * every unit prepare fail with "install: cannot stat". */
+    int n2 = snprintf(source, sizeof(source), "%s/platform/deploy/%s",
                       req->repo_root, req->unit);
     int n3 = snprintf(target, sizeof(target), "%s/%s", unit_dir, req->unit);
     if (n1 <= 0 || (size_t)n1 >= sizeof(unit_dir) ||

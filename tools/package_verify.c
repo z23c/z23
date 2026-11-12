@@ -725,9 +725,9 @@ static uint64_t g_pv_cpu_budget_us;
 static uint64_t g_pv_cpu_used_us;
 
 #if defined(__APPLE__)
-#define PV_CHILD_GRANT_BASE_CAP 12u
+#define PV_CHILD_GRANT_BASE_CAP 13u
 #else
-#define PV_CHILD_GRANT_BASE_CAP 10u
+#define PV_CHILD_GRANT_BASE_CAP 11u
 #endif
 
 static uint64_t pv_rusage_cpu_us(const struct rusage *usage)
@@ -822,6 +822,12 @@ static size_t pv_child_grants(const char *src_dir, const char *build_dir,
         .path = "/dev/null", .allow_read = true, .allow_write = true };
     rules[n++] = (struct os_sandbox_path_rule){
         .path = "/dev/urandom", .allow_read = true };
+    /* The write-error device: a package test proving its CLI stops after a
+     * failed write opens /dev/full by name (writes return ENOSPC; the device
+     * holds no data). Denying it made such tests exit 2 before main's own
+     * reporting, so the verdict said "test exit 2" with nothing else. */
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/dev/full", .allow_write = true };
     /* Locked dependencies: READ ONLY, and only the install dirs the caller
      * named (headers to compile against, archives to link). Never write,
      * never execute — a dependency is data to this build, not a program. */
@@ -6056,13 +6062,30 @@ static int pv_run_plain_test(
     bool *test_ran, bool *test_ok, uint32_t *test_exit,
     uint8_t *test_fail_code, char test_fail_detail_arr[])
 {
+            /* Plain run: the resource-bound verdict. tmpfile(3) honors
+             * TMPDIR: point it at the build dir the sandbox already grants
+             * (a bare or /tmp TMPDIR made the open fail under landlock, and
+             * a test fixture that required a temp stream exited 2 before its
+             * own reporting), replacing any inherited TMPDIR pair. */
+            char tmpdir_env[4200];
+            const char *env[24];
+            size_t env_n = 0;
+            if (snprintf(tmpdir_env, sizeof(tmpdir_env), "TMPDIR=%s",
+                         build_root) >= (int)sizeof(tmpdir_env))
+                return 5;
+            for (size_t i = 0; compile_env && compile_env[i] && env_n < 23;
+                 i++)
+                if (strncmp(compile_env[i], "TMPDIR=", 7) != 0)
+                    env[env_n++] = compile_env[i];
+            env[env_n++] = tmpdir_env;
+            env[env_n] = NULL;
             /* Plain run: the resource-bound verdict. */
             char bin_file[4200];
             snprintf(bin_file, sizeof(bin_file), "%s/%s_0_test", build_root,
                      cc);
             struct pv_run pr = pv_run_child(PV_PROCESS_TEST,
                 (const char *const[]){ bin_file, NULL }, build_root,
-                test_limits, full_isolation, rules, n_rules, compile_env,
+                test_limits, full_isolation, rules, n_rules, env,
                 (int)recipe->maximum_test_seconds * 1000 + 5000);
             if (!pr.launched || pr.sandbox_fail) {
                 fprintf(stderr,
@@ -6198,6 +6221,19 @@ static int pv_run_sanitizer_test(
             if (ci != sanitizer_compiler)
                 return PV_CONTINUE;
             char san_bin[4200];
+            /* Same TMPDIR confinement as the plain run: tmpfile(3) in a
+             * package test must land in the granted build dir, never /tmp. */
+            char san_tmpdir_env[4200];
+            const char *san_env_all[24];
+            size_t san_env_n = 0;
+            if (snprintf(san_tmpdir_env, sizeof(san_tmpdir_env), "TMPDIR=%s",
+                         build_root) >= (int)sizeof(san_tmpdir_env))
+                return 5;
+            for (size_t i = 0; san_env && san_env[i] && san_env_n < 23; i++)
+                if (strncmp(san_env[i], "TMPDIR=", 7) != 0)
+                    san_env_all[san_env_n++] = san_env[i];
+            san_env_all[san_env_n++] = san_tmpdir_env;
+            san_env_all[san_env_n] = NULL;
             snprintf(san_bin, sizeof(san_bin), "%s/%s_1_test", build_root,
                      cc);
 #if defined(__APPLE__)
@@ -6212,7 +6248,7 @@ static int pv_run_sanitizer_test(
 #endif
             struct pv_run sr = pv_run_child(PV_PROCESS_TEST,
                 sanitizer_argv, build_root,
-                san_test_limits, full_isolation, rules, n_rules, san_env,
+                san_test_limits, full_isolation, rules, n_rules, san_env_all,
                 (int)recipe->maximum_test_seconds * 1000 + 5000);
             if (!sr.launched || sr.sandbox_fail) {
                 fprintf(stderr,

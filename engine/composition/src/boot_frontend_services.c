@@ -113,7 +113,7 @@ static void boot_file_service_stop(void *ctx)
  * with -romseed-peer-bps / -romseed-global-bps / -romseed-max-inflight.
  *
  * -rombundlereplicadir=PATH additionally scans a SECOND, operator-designated
- * directory (typically fed by tools/scripts/rom-bundle-replicate.sh from a
+ * directory (typically fed by tools/dev/rom_bundle_replicate.c from a
  * second disk or a sibling node) and admits any consensus-state bundle found
  * there into the SAME rom_seed catalog, but ONLY through the receipt-gated
  * path (config/rom_bundle_admission.h) — a bundle with no adjoining verified

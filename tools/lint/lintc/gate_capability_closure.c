@@ -239,6 +239,26 @@ static int ccg_tables(struct ccg_scan *s)
     return 0;
 }
 
+/* Feature-conditional rows are selected against the same real compile line the
+ * compiled-out detector reads; a table no feature state can disambiguate, or an
+ * unreadable flag line, is never graded. */
+static int ccg_when(struct ccg_scan *s)
+{
+    int rc;
+    if (s->mods.when_n == 0)
+        return 0;
+    if (!s->macros.loaded && ccg_macros_load(s->cfg, s->root, &s->macros) != 0)
+        return 2;
+    rc = ccd_when_select(&s->mods, &s->macros);
+    if (rc != 0) {
+        if (s->mods.error[0])
+            fprintf(s->cfg->err, "%s\n", s->mods.error);
+        return ccg_fatal(s, rc == 1 ? "cannot select feature-conditional rows of" : "out of memory selecting feature rows of",
+                         s->root);
+    }
+    return 0;
+}
+
 /* Keeps an object whose translation unit exists here (or is generated under
  * build/); a leftover of a failed candidate is foreign and never graded. */
 static int ccg_grade_object(struct ccg_scan *s, const char *rel)
@@ -475,7 +495,7 @@ static int ccg_coverage_floor(struct ccg_scan *s)
     if (s->c.unobserved > CCG_UNOBS_SHOWN)
         ccg_say(s, "    ... and %d more\n", s->c.unobserved - CCG_UNOBS_SHOWN);
     ccg_say(s, "  Build a COMPLETE epoch and re-run:\n"
-               "    tools/dev/checkout-lock.sh foreground build/.checkout.lock -- \\\n"
+               "    build/bin/checkout-lock foreground build/.checkout.lock -- \\\n"
                "      %s\n", s->cfg->os == CCD_WINDOWS ? "make -j16 z23-dev"
                                                       : "make -j16 build/bin/z23-dev build/bin/z23-package-verify-dev");
     return 2;
@@ -762,11 +782,11 @@ static void ccg_summary(const struct ccg_scan *s)
                "  declared-but-unobserved=%d (coverage baseline=%ld)\n"
                "  platform-target-excluded=%d\n"
                "  foreign-objects=%zu (no source in this tree; not graded)\n"
-               "  platform-exact-overrides=%zu\n"
+               "  platform-exact-overrides=%zu feature-rows-selected=%zu\n"
                "  compiled-out-unobserved=%d (never a violation, never a pass " CCG_DASH " see UNOBSERVED lines above)\n",
             s->objs.n, s->epoch, s->n_sym, s->mods.count, c->unclassified, c->undeclared, c->overdeclared,
             c->platform_unobserved, s->cfg->symmetry, c->missing, c->syscall, c->unobserved, s->cfg->baseline,
-            c->excluded, s->foreign.n, s->mods.platform_count, c->compiled_out);
+            c->excluded, s->foreign.n, s->mods.platform_count, s->mods.when_selected, c->compiled_out);
     if (c->compiled_out > 0)
         ccg_say(s, "  compiled-out rows:\n");
     for (size_t i = 0; i < s->compiled_out.n; i++)
@@ -802,6 +822,7 @@ int ccg_check_root(const struct ccg_cfg *cfg, const char *root)
 {
     struct ccg_scan s = { .cfg = cfg, .root = root };
     int rc = ccg_tables(&s);
+    rc = rc ? rc : ccg_when(&s);
     rc = rc ? rc : ccg_objects(&s);
     rc = rc ? rc : ccg_nm(&s);
     rc = rc ? rc : ccg_coverage_floor(&s);

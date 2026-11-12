@@ -679,6 +679,14 @@ static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
 
 /* ── G7: warm code lookup ─────────────────────────────────────────────── */
 
+static const char k_g7_next[] = "card: measure tokens per task with and "
+                                "without MCP and report the reduction";
+
+/* No durable receipt exists for the codeindex_stale group. The leaf records
+ * that fact; it does not launch a suite to manufacture a pass. */
+static const char k_g7_receipt_unrun[] =
+    "codeindex_stale-unrun(no durable receipt)";
+
 static bool gr_lookup_once(int64_t *ms, char *why, size_t cap)
 {
     struct json_value input;
@@ -698,20 +706,74 @@ static bool gr_lookup_once(int64_t *ms, char *why, size_t cap)
     return ok;
 }
 
+/* Leg one of the freshness qualification: the verdict for the store the
+ * warm lookups just served from, read from the code index metrics leaf in
+ * this process. That leaf compares the live tree against the sealed
+ * snapshot directly, without the change-watched memo the warm path trusts,
+ * so a watcher miss that left the warm answers stale still surfaces here. */
+static void gr_g7_fresh_leg(char *note, size_t cap)
+{
+    struct json_value input;
+    struct zcl_command_reply reply;
+    const struct json_value *stale;
+    json_init(&input);
+    json_set_object(&input);
+    if (gr_call("code.index.metrics", &input, &reply)) {
+        stale = json_get(&reply.data, "stale");
+        if (stale && stale->type == JSON_BOOL) {
+            (void)snprintf(note, cap, "%s", json_get_bool(stale)
+                                              ? "stale-warm-path"
+                                              : "fresh-verbatim");
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+            return;
+        }
+        (void)snprintf(note, cap, "%s", "no-verdict(no staleness bool)");
+    } else {
+        char code[100];
+        gr_reason(&reply, code, sizeof(code));
+        (void)snprintf(note, cap, "no-verdict(%s)", code);
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+}
+
+/* Grades G7 from its latency samples and the two freshness legs. `fresh_leg`
+ * labels the code index metrics verdict for the store the warm lookups
+ * served from ("fresh-verbatim", "stale-warm-path" or "no-verdict(<why>)");
+ * `group_leg` labels the codeindex_stale receipt ("codeindex_stale-pass",
+ * "codeindex_stale-fail(exit N)" or "codeindex_stale-unrun(<why>)").
+ * Latency still FAILs over the bar; a stale warm view or a receipt that did
+ * not pass only names itself and holds the row at its existing partial cap,
+ * never a full pass. Exposed so a fixture can pin each rule. */
+struct zcl_goal_result zcl_goals_g7_grade(int64_t median_ms, int64_t cold_ms,
+                                          int samples, const char *fresh_leg,
+                                          const char *group_leg)
+{
+    return zcl_goal_make(
+        zcl_goals_grade_lookup(median_ms), k_g7_next,
+        "code find median %lld ms over %d warm samples (first call %lld ms), "
+        "bar %d ms; freshness=%s+%s; token reduction and MCP coverage are "
+        "not measured",
+        (long long)median_ms, samples, (long long)cold_ms,
+        ZCL_GOALS_LOOKUP_MS_MAX, fresh_leg && fresh_leg[0] ? fresh_leg
+                                                           : "no-verdict",
+        group_leg && group_leg[0] ? group_leg : "codeindex_stale-unrun");
+}
+
 static struct zcl_goal_result gr_g7(const struct zcl_goals_options *o)
 {
     int64_t ms[GOALS_LOOKUP_SAMPLES], cold, median;
-    char why[256];
-    const char *next = "card: measure tokens per task with and without MCP "
-                       "and report the reduction";
+    char why[256], fresh_note[160];
     if (o && o->skip_probes)
-        return gr_unmeasured(next, "code lookup probe skipped");
+        return gr_unmeasured(k_g7_next, "code lookup probe skipped");
     if (!gr_lookup_once(&cold, why, sizeof(why)))
         return gr_unmeasured("restore the code index in this checkout (see `z23 code guide`)",
                              "code find did not answer: %s", why);
     for (int i = 0; i < GOALS_LOOKUP_SAMPLES; i++)
         if (!gr_lookup_once(&ms[i], why, sizeof(why)))
-            return gr_unmeasured(next, "code find stopped answering: %s", why);
+            return gr_unmeasured(k_g7_next, "code find stopped answering: %s",
+                                 why);
     for (int i = 1; i < GOALS_LOOKUP_SAMPLES; i++)
         for (int j = i; j > 0 && ms[j - 1] > ms[j]; j--) {
             int64_t swap = ms[j];
@@ -719,12 +781,9 @@ static struct zcl_goal_result gr_g7(const struct zcl_goals_options *o)
             ms[j - 1] = swap;
         }
     median = ms[GOALS_LOOKUP_SAMPLES / 2];
-    return zcl_goal_make(zcl_goals_grade_lookup(median), next,
-                         "code find median %lld ms over %d warm samples "
-                         "(first call %lld ms), bar %d ms; token reduction and MCP "
-                         "coverage are not measured",
-                         (long long)median, GOALS_LOOKUP_SAMPLES, (long long)cold,
-                         ZCL_GOALS_LOOKUP_MS_MAX);
+    gr_g7_fresh_leg(fresh_note, sizeof(fresh_note));
+    return zcl_goals_g7_grade(median, cold, GOALS_LOOKUP_SAMPLES, fresh_note,
+                              k_g7_receipt_unrun);
 }
 
 /* ── G8: vitals sample age per admitted host ──────────────────────────── */

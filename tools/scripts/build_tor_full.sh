@@ -256,7 +256,7 @@ elif [ -n "${VENDOR_CC:-}" ]; then
     # A host build normally lets Tor's configure discover the compiler, and
     # that stays the default. But when the CALLER pins one, Tor must use that
     # one. The portable Linux release does exactly this: it rebuilds every
-    # vendor archive through tools/scripts/c23_portable_sysroot.sh's wrapper
+    # vendor archive through build/bin/c23-portable-sysroot's wrapper
     # (VENDOR_CC=cc with the wrapper first in PATH) so the whole artifact sits
     # on one ABI floor. Before this arm, Tor was the single input that ignored
     # the pin -- which is precisely why the release used to force the stub

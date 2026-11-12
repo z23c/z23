@@ -30,6 +30,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -62,6 +63,19 @@ static void dev_stage_run_after_hash_hook(void) { }
 #endif
 
 static _Atomic uint64_t g_stage_directory_sequence;
+
+/* Record which staging sub-step refused, so dev_run_locked() can name it in
+ * the typed failure instead of the single generic "candidate staging failed"
+ * string that hid every distinct refusal behind one message. */
+static void dev_stage_note(struct dev_activation_txn *txn, const char *fmt,
+                           ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    (void)vsnprintf(txn->result->verify_detail,
+                    sizeof(txn->result->verify_detail), fmt, args);
+    va_end(args);
+}
 
 /* ── staging: immutable content-addressed generation ─────────────────── */
 
@@ -214,6 +228,9 @@ static int dev_stage_check_existing(struct dev_activation_txn *txn)
     if (access(txn->candidate_bin, X_OK) != 0 ||
         !dev_activation_sha256_file(txn->candidate_bin, have) ||
         strcmp(have, txn->candidate_sha_hex) != 0) {
+        dev_stage_note(txn, "immutable generation collision (existing "
+                       "generation binary differs): %s",
+                       txn->candidate_dir);
         fprintf(stderr, "[dev-activation] immutable generation collision: %s\n",
                 txn->candidate_dir);
         return DEV_ACTIVATION_E_STAGE;
@@ -222,6 +239,9 @@ static int dev_stage_check_existing(struct dev_activation_txn *txn)
     dev_activation_generation_source_id(
         txn, txn->candidate_generation, staged_source_id);
     if (strcmp(staged_source_id, txn->req->source_identity) != 0) {
+        dev_stage_note(txn, "immutable generation source identity mismatch "
+                       "(generation predates the requested source epoch): %s",
+                       txn->candidate_dir);
         fprintf(stderr,
                 "[dev-activation] immutable generation source identity "
                 "mismatch: %s\n",
@@ -236,10 +256,13 @@ static int dev_stage_check_existing(struct dev_activation_txn *txn)
 static bool dev_stage_probe_candidate(struct dev_activation_txn *txn, int *rc)
 {
     if (!dev_stage_name_candidate(txn)) {
+        dev_stage_note(txn, "candidate generation path derivation failed");
         *rc = DEV_ACTIVATION_E_STAGE;
         return false;
     }
     if (dev_stage_quarantined(txn)) {
+        dev_stage_note(txn, "candidate generation is quarantined: %s",
+                       txn->candidate_generation);
         fprintf(stderr, "[dev-activation] candidate %s is quarantined\n",
                 txn->candidate_generation);
         *rc = DEV_ACTIVATION_E_STAGE;
@@ -252,6 +275,8 @@ static bool dev_stage_probe_candidate(struct dev_activation_txn *txn, int *rc)
         return false;
     }
     if (candidate_probe != PLATFORM_DIRECTORY_PROBE_MISSING) {
+        dev_stage_note(txn, "candidate generation probe failed: %s",
+                       txn->candidate_dir);
         *rc = DEV_ACTIVATION_E_STAGE;
         return false;
     }
@@ -327,13 +352,21 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
 {
     struct dev_activation_result *r = txn->result;
     if (!dev_stage_artifact_executable(txn->req->artifact_path)) {
+        dev_stage_note(txn,
+                       "staging artifact open refused (missing, not a regular "
+                       "executable file, or a symlink; the staging open is "
+                       "O_NOFOLLOW): %s",
+                       txn->req->artifact_path);
         fprintf(stderr, "[dev-activation] artifact missing/not executable: %s\n",
                 txn->req->artifact_path);
         return DEV_ACTIVATION_E_STAGE;
     }
     if (!dev_activation_sha256_file(txn->req->artifact_path,
-                                    txn->candidate_sha_hex))
+                                    txn->candidate_sha_hex)) {
+        dev_stage_note(txn, "staging artifact digest failed: %s",
+                       txn->req->artifact_path);
         return DEV_ACTIVATION_E_STAGE;
+    }
     dev_stage_run_after_hash_hook();
     snprintf(r->candidate_sha256, sizeof(r->candidate_sha256), "%s",
              txn->candidate_sha_hex);
@@ -343,18 +376,25 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
 
     char tmpl[PATH_MAX];
     if (!dev_stage_make_tmpdir(txn, tmpl, sizeof(tmpl))) {
+        dev_stage_note(txn, "staging temp directory create failed under %s",
+                       txn->gen_root);
         LOG_ERR("dev-activation", "candidate mkdtemp: %s", strerror(errno));
         return DEV_ACTIVATION_E_STAGE;
     }
     const char *tmpdir = tmpl;
     char tmp_bin[PATH_MAX], tmp_manifest[PATH_MAX];
-    if (!dev_stage_fill_tmp(txn, tmpdir, tmp_bin, tmp_manifest))
+    if (!dev_stage_fill_tmp(txn, tmpdir, tmp_bin, tmp_manifest)) {
+        dev_stage_note(txn, "staging copy or manifest write failed for %s",
+                       txn->candidate_generation);
         return DEV_ACTIVATION_E_STAGE;
+    }
     bool published = platform_private_directory_publish_no_clobber(
         tmpdir, txn->candidate_dir);
     if (!published) {
         dev_stage_discard_tmp(tmpdir, tmp_bin, tmp_manifest);
         if (access(txn->candidate_bin, X_OK) != 0) {
+            dev_stage_note(txn, "staging publish race lost: %s",
+                           txn->candidate_dir);
             LOG_ERR("dev-activation", "candidate rename lost the race: %s",
                     strerror(errno));
             return DEV_ACTIVATION_E_STAGE;
@@ -365,12 +405,16 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
      * the loser of a publish race must not re-mode the winner's
      * generation. */
     if (published && chmod(txn->candidate_dir, 0555) != 0) {
+        dev_stage_note(txn, "generation seal chmod failed: %s",
+                       txn->candidate_dir);
         LOG_ERR("dev-activation", "candidate chmod failed: %s",
                 strerror(errno));
         return DEV_ACTIVATION_E_STAGE;
     }
 #endif
     if (!platform_private_parent_flush(txn->gen_root)) {
+        dev_stage_note(txn, "generation parent flush failed: %s",
+                       txn->gen_root);
         LOG_ERR("dev-activation", "generation parent flush failed: %s",
                 strerror(errno));
         return DEV_ACTIVATION_E_STAGE;
@@ -378,6 +422,8 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
     char published_sha[65];
     if (!dev_activation_sha256_file(txn->candidate_bin, published_sha) ||
         strcmp(published_sha, txn->candidate_sha_hex) != 0) {
+        dev_stage_note(txn, "published generation digest mismatch: %s",
+                       txn->candidate_dir);
         LOG_ERR("dev-activation",
                 "published generation artifact digest mismatch: %s",
                 txn->candidate_dir);
@@ -387,6 +433,8 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
     dev_activation_generation_source_id(
         txn, txn->candidate_generation, published_source_id);
     if (strcmp(published_source_id, txn->req->source_identity) != 0) {
+        dev_stage_note(txn, "published generation source identity mismatch: %s",
+                       txn->candidate_dir);
         LOG_ERR("dev-activation",
                 "published generation source identity mismatch: %s",
                 txn->candidate_dir);

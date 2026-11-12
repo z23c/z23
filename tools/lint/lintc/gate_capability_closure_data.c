@@ -372,6 +372,7 @@ int ccd_run_nm(char *const *objs, size_t n, int defined_only, size_t batch, int 
 }
 
 typedef int (*ccd_rec_fn)(void *ctx, const char *key, const char *cls);
+typedef int (*ccd_when_fn)(void *ctx, const char *features, const char *path, const char *cls);
 
 /* One joined record: the first quoted argument and the class text after the
  * first comma, with trailing space and one trailing comma removed. buf is
@@ -432,6 +433,62 @@ static int ccd_record(const regex_t *re, char *buf, ccd_rec_fn fn, void *ctx, bo
     return fn(ctx, q + 1, c);
 }
 
+/* The closing quote of the quoted string that opens at q, escapes skipped. */
+static char *ccd_quote_end(char *q)
+{
+    char *e = q + 1;
+    while (*e && *e != '"')
+        e += *e == '\\' && e[1] ? 2 : 1;
+    return e;
+}
+
+/* The (features, path, class-start) fields of one joined WHEN record inside
+ * [buf, end): two quoted strings and the comma that follows the second. The
+ * two string terminators are written into buf; a shape the regex did not
+ * guarantee refuses with NULL. */
+static char *ccd_when_fields(char *buf, char *end, char **path, char **cls)
+{
+    char *q = strchr(buf, '"'), *e, *q2, *e2, *c;
+    if (!q)
+        return NULL;
+    e = ccd_quote_end(q);
+    q2 = *e == '"' ? strchr(e + 1, '"') : NULL;
+    e2 = q2 ? ccd_quote_end(q2) : NULL;
+    c = e2 && *e2 == '"' ? strchr(e2 + 1, ',') : NULL;
+    if (!q2 || !c || c >= end || e == q + 1 || e2 == q2 + 1)
+        return NULL;
+    for (c++; c < end && isspace((unsigned char)*c); c++)
+        ;
+    if (c == end)
+        return NULL;
+    *e = '\0';
+    *e2 = '\0';
+    *path = q2 + 1;
+    *cls = c;
+    return q + 1;
+}
+
+/* One joined feature-conditional record: the first quoted argument is the
+ * macro list, the second the path, and the class text follows the comma after
+ * it. buf is edited in place; a shape the regex did not guarantee refuses. */
+static int ccd_when_record(const regex_t *re, char *buf, ccd_when_fn fn, void *ctx)
+{
+    regmatch_t m;
+    char *features, *path, *cls, *end;
+    if (regexec(re, buf, 1, &m, 0) != 0 || m.rm_so != 0)
+        return -1;
+    end = buf + m.rm_eo;
+    features = ccd_when_fields(buf, end, &path, &cls);
+    if (!features)
+        return -1;
+    end = ccd_class_end(cls, end);
+    if (end == cls)
+        return -1;
+    *end = '\0';
+    if (!ccd_class_compact(cls)) return -1;
+    return fn(ctx, features, path, cls);
+}
+
 static const char *ccd_skip_quote(const char *p)
 {
     char quote = *p++;
@@ -470,8 +527,10 @@ static bool ccd_scan_start(const char *line, const char *marker, bool modules,
 }
 
 /* Each marker line plus the lines up to the next marker is one record, so a
- * call wrapped across lines still parses. */
-static int ccd_scan(char *text, const char *marker, const regex_t *re, ccd_rec_fn fn, void *ctx, bool modules)
+ * call wrapped across lines still parses. mode 0 scans symbol rows, 1 module
+ * rows, 2 feature-conditional module rows. */
+static int ccd_scan(char *text, const char *marker, const regex_t *re, ccd_rec_fn fn, ccd_when_fn wfn,
+                    void *ctx, int mode)
 {
     char *buf = NULL, *save = NULL;
     size_t len = 0, cap = 0;
@@ -479,16 +538,16 @@ static int ccd_scan(char *text, const char *marker, const regex_t *re, ccd_rec_f
     bool block = false;
     for (char *l = strtok_r(text, "\n", &save);; l = strtok_r(NULL, "\n", &save)) {
         const char *start_at = NULL;
-        int start = ccd_scan_start(l, marker, modules, &block, &start_at);
+        int start = ccd_scan_start(l, marker, mode != 0, &block, &start_at);
         if ((start || !l) && len) {
-            rc = ccd_record(re, buf, fn, ctx, modules);
+            rc = mode == 2 ? ccd_when_record(re, buf, wfn, ctx) : ccd_record(re, buf, fn, ctx, mode == 1);
             len = 0;
         }
         if (!l || rc != 0)
             break;
         if (!start && !len)
             continue;
-        if (start && modules) l = (char *)start_at;
+        if (start && mode != 0) l = (char *)start_at;
         size_t ln = strlen(l);
         char *nb = len + ln + 2 > cap ? ccd_grow(buf, &cap, len + ln + 2, 1) : buf;
         if (!nb) {
@@ -508,17 +567,23 @@ static const char k_ccd_sym_re[] = "ZCL_CAPABILITY_SYMBOL\\([[:space:]]*\"([^\"\
                                    "[[:space:]]*,[[:space:]]*CAP_[A-Z_]+";
 static const char k_ccd_mod_re[] = "ZCL_MODULE_CAPABILITY\\([[:space:]]*\"([^\"\\\\]|\\\\.)*\""
                                    "[[:space:]]*,[[:space:]]*[A-Za-z0-9_|[:space:]]+[[:space:]]*,";
+static const char k_ccd_when_re[] = "ZCL_MODULE_CAPABILITY_WHEN\\([[:space:]]*\"([^\"\\\\]|\\\\.)*\""
+                                    "[[:space:]]*,[[:space:]]*\"([^\"\\\\]|\\\\.)*\""
+                                    "[[:space:]]*,[[:space:]]*[A-Za-z0-9_|[:space:]]+[[:space:]]*,";
 
 /* 0 after fn saw every record, 1 when the file cannot be read, else fn's or -1. */
-static int ccd_def_each(const char *file, int modules, ccd_rec_fn fn, void *ctx)
+static int ccd_def_each(const char *file, int mode, ccd_rec_fn fn, ccd_when_fn wfn, void *ctx)
 {
+    static const char *const marker[] = { "ZCL_CAPABILITY_SYMBOL(", "ZCL_MODULE_CAPABILITY(",
+                                          "ZCL_MODULE_CAPABILITY_WHEN(" };
+    static const char *const pattern[] = { k_ccd_sym_re, k_ccd_mod_re, k_ccd_when_re };
     regex_t re;
     char *text = ccd_slurp(file);
     if (!text)
         return 1;
-    int rc = regcomp(&re, modules ? k_ccd_mod_re : k_ccd_sym_re, REG_EXTENDED) ? -1 : 0;
+    int rc = regcomp(&re, pattern[mode], REG_EXTENDED) ? -1 : 0;
     if (rc == 0) {
-        rc = ccd_scan(text, modules ? "ZCL_MODULE_CAPABILITY(" : "ZCL_CAPABILITY_SYMBOL(", &re, fn, ctx, modules != 0);
+        rc = ccd_scan(text, marker[mode], &re, fn, wfn, ctx, mode);
         regfree(&re);
     }
     free(text);
@@ -530,7 +595,19 @@ int ccd_module_each(const char *file, int (*fn)(void *, const char *, const char
     struct stat st;
     if (stat(file, &st) != 0) return errno == ENOENT ? 1 : -1;
     if (!S_ISREG(st.st_mode)) return -1;
-    int rc = ccd_def_each(file, 1, fn, ctx);
+    int rc = ccd_def_each(file, 1, fn, NULL, ctx);
+    return rc == 1 ? -1 : rc;
+}
+
+/* Shared feature-conditional reader, ccd_module_each's counterpart: the same
+ * 0/1/-1 contract over ZCL_MODULE_CAPABILITY_WHEN records, so every consumer
+ * of module rows can union the arms a particular build never selects. */
+int ccd_when_each(const char *file, int (*fn)(void *, const char *, const char *, const char *), void *ctx)
+{
+    struct stat st;
+    if (stat(file, &st) != 0) return errno == ENOENT ? 1 : -1;
+    if (!S_ISREG(st.st_mode)) return -1;
+    int rc = ccd_def_each(file, 2, NULL, fn, ctx);
     return rc == 1 ? -1 : rc;
 }
 
@@ -555,10 +632,10 @@ static int ccd_sym_row(void *ctx, const char *sym, const char *cls)
 int ccd_symbols_load(const char *file, int windows, struct ccd_map *sym, size_t *count)
 {
     struct ccd_symctx c = { sym, 0, 0 };
-    int rc = ccd_def_each(file, 0, ccd_sym_row, &c);
+    int rc = ccd_def_each(file, 0, ccd_sym_row, NULL, &c);
     *count = c.count;
     c.aliases = 1;
-    return rc == 0 && windows ? ccd_def_each(file, 0, ccd_sym_row, &c) : rc;
+    return rc == 0 && windows ? ccd_def_each(file, 0, ccd_sym_row, NULL, &c) : rc;
 }
 
 /* Next "|"-separated token of p: its length, with *next past the separator. */
@@ -617,6 +694,17 @@ static int ccd_mod_set(struct ccd_mods *m, const char *path, const char *cls, in
     return rc;
 }
 
+/* Joins cls into the union of path only, leaving the exact row untouched: a
+ * feature arm that never applies still tells the privilege scan its reach. */
+static int ccd_uni_add(struct ccd_mods *m, const char *path, const char *cls)
+{
+    const char *old = ccd_map_get(&m->uni, path);
+    char *u = ccd_union_caps(old ? old : "", cls);
+    int rc = !u || ccd_map_put(&m->uni, path, u) ? -1 : 0;
+    free(u);
+    return rc;
+}
+
 static int ccd_mod_row(void *ctx, const char *path, const char *cls)
 {
     struct ccd_modctx *c = ctx;
@@ -655,7 +743,7 @@ static int ccd_sidecar(struct ccd_mods *m, const char *root, const char *sc)
     int rc;
     if (lstat(sc, &st) != 0 || !S_ISREG(st.st_mode))
         return ccd_sidecar_fail(m, sc, "");
-    rc = ccd_def_each(sc, 1, ccd_mod_row, &one);
+    rc = ccd_def_each(sc, 1, ccd_mod_row, NULL, &one);
     if (rc == 0) {
         if (one.n != 1 || strlen(one.path) != el || memcmp(one.path, sc + rl, el) != 0)
             rc = ccd_sidecar_fail(m, sc, "");
@@ -809,6 +897,136 @@ static int ccd_sidecars(struct ccd_mods *m, const char *root)
     return rc;
 }
 
+/* A feature list is one or more comma-separated identifiers, never empty, and
+ * no identifier twice: a duplicate would inflate the row's specificity. */
+static int ccd_features_ok(const char *features)
+{
+    if (!*features)
+        return 0;
+    for (const char *p = features; *p;) {
+        size_t n = strcspn(p, ",");
+        if (n == 0 || n >= 256 || !ccg_ident((unsigned char)p[0], 1))
+            return 0;
+        for (size_t i = 1; i < n; i++)
+            if (!ccg_ident((unsigned char)p[i], 0))
+                return 0;
+        if (p[n] == ',' && p[n + 1] == '\0')
+            return 0; /* a trailing comma leaves an empty final identifier */
+        for (const char *r = p + n + (p[n] == ','); *r;) {
+            size_t m = strcspn(r, ",");
+            if (m == n && memcmp(r, p, n) == 0)
+                return 0;
+            r += m + (r[m] == ',');
+        }
+        p += n + (p[n] == ',');
+    }
+    return 1;
+}
+
+struct ccd_whenctx { struct ccd_mods *m; };
+
+/* Every feature-conditional row is retained for selection and joins the
+ * conservative union now; the exact row is chosen later against real macros. */
+static int ccd_when_row(void *ctx, const char *features, const char *path, const char *cls)
+{
+    struct ccd_whenctx *c = ctx;
+    if (!ccd_features_ok(features))
+        return -1;
+    struct ccd_whenrow *w = c->m->when_n < c->m->when_cap ? c->m->when
+        : ccd_grow(c->m->when, &c->m->when_cap, c->m->when_n + 1, sizeof *w);
+    if (w)
+        c->m->when = w;
+    char *p = w ? strndup(path, strlen(path)) : NULL;
+    char *f = p ? strndup(features, strlen(features)) : NULL;
+    char *l = f ? strndup(cls, strlen(cls)) : NULL;
+    if (!p || !f || !l) {
+        free(p);
+        free(f);
+        free(l);
+        return -1;
+    }
+    w[c->m->when_n++] = (struct ccd_whenrow){ p, f, l };
+    return ccd_uni_add(c->m, path, cls);
+}
+
+/* Macros a feature list names, so "A,B,C" is more specific than "A". */
+static size_t ccd_feature_count(const char *features)
+{
+    size_t n = 1;
+    for (const char *p = features; *p; p++)
+        n += *p == ',';
+    return n;
+}
+
+/* Applies when every named macro is defined non-empty in the graded build. */
+static int ccd_when_applies(const struct ccg_macros *mac, const char *features)
+{
+    char name[256];
+    for (const char *p = features; *p;) {
+        size_t n = strcspn(p, ",");
+        const char *v;
+        if (n >= sizeof name)
+            return 0;
+        snprintf(name, sizeof name, "%.*s", (int)n, p);
+        v = ccd_map_get(&mac->def, name);
+        if (!v || !v[0])
+            return 0;
+        p += n + (p[n] == ',');
+    }
+    return 1;
+}
+
+static int ccd_when_ambiguous(struct ccd_mods *m, const char *path)
+{
+    snprintf(m->error, sizeof m->error,
+             "check_capability_closure: FATAL \xe2\x80\x94 ambiguous feature rows: %s has two\n"
+             "  applicable ZCL_MODULE_CAPABILITY_WHEN rows of equal specificity; make\n"
+             "  one strictly more specific or drop an arm",
+             path);
+    return 1;
+}
+
+int ccd_when_select(struct ccd_mods *m, const struct ccg_macros *mac)
+{
+    struct ccd_map seen = { 0 };
+    int rc = 0;
+    m->when_selected = 0;
+    for (size_t i = 0; rc == 0 && i < m->when_n; i++) {
+        char idx[32];
+        size_t best = 0, chosen = 0;
+        int have_best = 0, at_rank = 0;
+        if (ccd_map_get(&seen, m->when[i].path))
+            continue;
+        snprintf(idx, sizeof idx, "%zu", i);
+        if ((rc = ccd_map_put(&seen, m->when[i].path, idx)) != 0)
+            break;
+        /* The top applicable specificity rank first, whatever the row order;
+         * only a tie AT that rank is ambiguous. */
+        for (size_t j = 0; j < m->when_n; j++) {
+            size_t rank;
+            if (strcmp(m->when[j].path, m->when[i].path) != 0 || !ccd_when_applies(mac, m->when[j].features))
+                continue;
+            rank = ccd_feature_count(m->when[j].features);
+            if (!have_best || rank > best) {
+                best = rank;
+                have_best = 1;
+                at_rank = 1;
+                chosen = j;
+            } else if (rank == best) {
+                at_rank++;
+            }
+        }
+        if (have_best && at_rank > 1)
+            rc = ccd_when_ambiguous(m, m->when[i].path);
+        else if (have_best) {
+            rc = ccd_mod_set(m, m->when[chosen].path, m->when[chosen].cls, 1);
+            m->when_selected++;
+        }
+    }
+    ccd_map_free(&seen);
+    return rc;
+}
+
 int ccd_modules_load(const char *file, const char *platform_file, const char *root, struct ccd_mods *m)
 {
     struct ccd_modctx c = { .m = m, .merge = 1 };
@@ -816,11 +1034,16 @@ int ccd_modules_load(const char *file, const char *platform_file, const char *ro
     memset(m, 0, sizeof *m);
     if (!ccd_is_file(file))
         return 1;
-    if ((rc = ccd_def_each(file, 1, ccd_mod_row, &c)) != 0 || (rc = ccd_sidecars(m, root)) != 0)
+    if ((rc = ccd_def_each(file, 1, ccd_mod_row, NULL, &c)) != 0 || (rc = ccd_sidecars(m, root)) != 0)
         return rc;
     c.n = 0;
-    if (platform_file && ccd_is_file(platform_file) && (rc = ccd_def_each(platform_file, 1, ccd_mod_row, &c)) != 0)
-        return rc;
+    if (platform_file && ccd_is_file(platform_file)) {
+        if ((rc = ccd_def_each(platform_file, 1, ccd_mod_row, NULL, &c)) != 0)
+            return rc;
+        struct ccd_whenctx w = { m };
+        if ((rc = ccd_def_each(platform_file, 2, NULL, ccd_when_row, &w)) != 0)
+            return rc;
+    }
     m->count = m->raw.n;
     m->platform_count = c.n;
     return 0;
@@ -830,6 +1053,12 @@ void ccd_mods_free(struct ccd_mods *m)
 {
     ccd_map_free(&m->raw);
     ccd_map_free(&m->uni);
+    for (size_t i = 0; i < m->when_n; i++) {
+        free(m->when[i].path);
+        free(m->when[i].features);
+        free(m->when[i].cls);
+    }
+    free(m->when);
 }
 
 int capability_closure_data_run(int argc, char **argv)

@@ -27,6 +27,7 @@ tor-provenance-ready:
 check-windows-acceptance check-other:
 	@echo $@ >> calls
 	@test "$(FAIL_GATE)" != "$@"
+/%: ; @: # empty BIN_DIR makes lint-fast prereqs absolute; dispatch never builds them
 EOF
 awk '/^lint:/{copy=1} /^# Everything the lint dimension/{copy=0} copy' \
     "$root/Makefile" >> "$fixture/Makefile"
@@ -71,7 +72,6 @@ if grep -F 'all checks passed' "$fixture/failure.log" ||
     exit 1
 fi
 echo 'PASS: lint dispatches each gate once and preserves explicit failures'
-
 # Copy the real fast assignment and both production target recipes.
 # Dependencies unrelated to dispatch are empty fixture variables; the
 # existing tor-provenance-ready target is a harmless prerequisite.

@@ -2,7 +2,7 @@
  *
  * agent_sha3 — SHA3-256 of files or stdin, for the agent gate-receipt harness.
  *
- * The receipts written by tools/agent/gate-receipt.sh commit to the captured
+ * The receipts written by build/bin/gate_receipt commit to the captured
  * output of a gate with a SHA3-256 digest, and tools/agent/check_claims.c
  * recomputes it. Both need a hash the repo already owns: this links the
  * in-tree FIPS-202 SHA3-256 (platform/modules/sha3/src/sha3.c) and nothing else, so the

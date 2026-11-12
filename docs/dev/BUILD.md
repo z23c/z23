@@ -773,7 +773,7 @@ both readers: an independent oracle you delete cannot catch a native-reader
 regression.
 
 The release-artifact ceiling is 100,000,000 bytes. This is a capacity limit,
-not a pinned current-size claim; query `tools/scripts/binary_size.sh` for the
+not a pinned current-size claim; query `tools/dev/binary_size.c` for the
 artifact actually built. Functionality and verifiable static dependencies take
 priority below that ceiling.
 
@@ -971,8 +971,8 @@ the wider original-x86-64 deployment baseline described above.
 
 ## Reproducible / signed releases
 
-`tools/release.sh` does not build, package, sign, or publish anything. It
-accepts exactly one invocation — `tools/release.sh --verify <archive.tar.gz>` —
+`tools/dev/release_containment.c` does not build, package, sign, or publish anything. It
+accepts exactly one invocation — `--verify <archive.tar.gz>` —
 which checks an *already existing* signed archive: it requires a sibling
 `.sha3` manifest and a detached `.sha3.sig`, recomputes the archive's SHA3-256
 and compares it to the manifest, verifies the GPG signature over the manifest,

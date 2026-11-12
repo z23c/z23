@@ -2,8 +2,8 @@
  *
  * gate_receipt - run a gate and leave behind evidence that it ran.
  *
- * Invoked through tools/agent/gate-receipt.sh, which builds this file and
- * passes the repository root as the first argument:
+ * Built by Make as build/bin/gate_receipt. The repository root is the
+ * first argument:
  *
  *   gate_receipt REPO_ROOT [options] -- COMMAND [ARG...]
  *
@@ -50,7 +50,7 @@ constexpr long GTR_LOCK_POLL_MS = 10;
 static const char *const gtr_help_text[] = {
     "# Copyright 2026 Rhett Creighton - Apache License 2.0\n",
     "#\n",
-    "# gate-receipt.sh — run a gate and leave behind evidence that it ran.\n",
+    "# gate_receipt — run a gate and leave behind evidence that it ran.\n",
     "#\n",
     "# ── WHY THIS EXISTS ────────────────────────────────────────────────────────\n",
     "# A lane agent reports \"make lint passed\". The orchestrator cannot tell that\n",
@@ -63,7 +63,7 @@ static const char *const gtr_help_text[] = {
     "# So: wrap the gate. The receipt is a BYPRODUCT of running it — the wrapper\n",
     "# holds the child's combined output, times it, and commits to it with a\n",
     "# SHA3-256 — and it is transparent (same stdout, same exit status), so the\n",
-    "# honest path is `tools/agent/gate-receipt.sh --gate lint -- make lint`\n",
+    "# honest path is `make gate-receipt GATE=lint CMD='make lint'`\n",
     "# instead of `make lint`, and nothing else changes.\n",
     "#\n",
     "# ── WHAT THIS DEFENDS AGAINST, AND WHAT IT DOES NOT ────────────────────────\n",
@@ -94,9 +94,9 @@ static const char *const gtr_help_text[] = {
     "# separate users or on separate machines.\n",
     "#\n",
     "# ── USAGE ──────────────────────────────────────────────────────────────────\n",
-    "#   tools/agent/gate-receipt.sh --gate lint -- make lint\n",
-    "#   tools/agent/gate-receipt.sh --gate t-fast -- make t-fast ONLY=boot_phase\n",
-    "#   tools/agent/gate-receipt.sh --gate custom --expect 'MY OK TOKEN' -- ./thing\n",
+    "#   build/bin/gate_receipt \"$PWD\" --gate lint -- make lint\n",
+    "#   build/bin/gate_receipt \"$PWD\" --gate t-fast -- make t-fast ONLY=boot_phase\n",
+    "#   build/bin/gate_receipt \"$PWD\" --gate custom --expect 'MY OK TOKEN' -- ./thing\n",
     "#   make gate-receipt GATE=lint CMD='make lint'\n",
     "#   gate_receipt REPO_ROOT [options] -- COMMAND [ARG...]\n",
     "#   REPO_ROOT must be the worktree's nonempty absolute root path.\n",

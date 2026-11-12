@@ -198,8 +198,12 @@ static void journey_user_checks_privacy_status(void)
 
 static void journey_user_receives_funds(void)
 {
+    char wallet_dir[1024];
     FEATURE("Journey: User receives funds") {
         STORY("receive page → copy address → explore tabs") {
+            GIVEN("a wallet with one shielded address exists")
+                EXPECT(seed_shielded_wallet(wallet_dir, sizeof wallet_dir) == 0);
+            wallet_view_init(wallet_dir);
             GIVEN("user opens receive")
                 GET("/wallet/receive");
             THEN("receive page loads with QR")
@@ -215,6 +219,8 @@ static void journey_user_receives_funds(void)
                 GET("/wallet/send");
             THEN("send page loads from receive context")
                 EXPECT(is_200());
+            wallet_view_init(NULL);
+            test_rm_rf_recursive(wallet_dir);
             PASS();
         }
     }

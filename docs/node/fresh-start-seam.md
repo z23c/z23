@@ -116,7 +116,7 @@ observationally indistinguishable today from a genuine discovery miss.
 | **Header-chain seed artifact** (`block_index.bin`) | `boot_header_seed_import_maybe`, `engine/composition/src/boot_auto_install_bundle.c:614` | `engine/composition/src/boot_header_seed_import.c:57-59` — `stat("<datadir>/bundles/block_index.bin")` fails because the fetch above never ran. Pure no-op, fail-open. |
 | **Consensus-state bundle install** (`engine/composition/src/consensus_state_snapshot_install.c`, `consensus_state_install_runtime.c`) | `boot_maybe_auto_install_consensus_bundle`, `engine/composition/src/boot_auto_install_bundle.c:395` | `boot_autodetect_consensus_bundle` returns NULL: `opendir("<datadir>/bundles")` fails (`engine/composition/src/boot_auto_install_bundle.c:92-94`). Nothing was downloaded. If a bundle *were* staged, the next gate is §3. |
 | **Legacy `~/.zclassic` import** | `engine/composition/src/boot.c` legacy-import ladder | Two refusals: the harness passes `-nolegacyimport`, and the isolated `$HOME` has no `~/.zclassic` at all. On a genuinely fresh machine the second refusal is the real one and is correct. |
-| **`utxo-anchor.snapshot` from-anchor reset** | `out->do_from_anchor`, `engine/composition/src/boot_auto_install_bundle.c:628-632` | `engine/composition/src/boot_anchor_snapshot_reachability.c:131-138` — `stat("<datadir>/utxo-anchor.snapshot")` returns `ANCHOR_SNAPSHOT_ABSENT`. This artifact is minted by an already-synced node (`-mint-anchor` / `tools/seed_anchor_snapshot.sh`) and is **not** among the artifacts the weld fetches. A fresh datadir cannot have one. |
+| **`utxo-anchor.snapshot` from-anchor reset** | `out->do_from_anchor`, `engine/composition/src/boot_auto_install_bundle.c:628-632` | `engine/composition/src/boot_anchor_snapshot_reachability.c:131-138` — `stat("<datadir>/utxo-anchor.snapshot")` returns `ANCHOR_SNAPSHOT_ABSENT`. This artifact is minted by an already-synced node (`-mint-anchor` / `tools/dev/seed_anchor_snapshot.c`) and is **not** among the artifacts the weld fetches. A fresh datadir cannot have one. |
 | **From-genesis fold** | the declared fallback in the comment at `engine/composition/src/boot_auto_install_bundle.c:636-642` | Not refused — *wedged*. See §4. |
 
 ---
@@ -275,7 +275,7 @@ Same predicate, same artifact:
 and rejected `ANCHOR_SNAPSHOT_ABSENT` at line 132.
 
 **Who was supposed to produce it:** an already-synced node running the
-`-mint-anchor` ceremony or `tools/seed_anchor_snapshot.sh`. It is a *recovery*
+`-mint-anchor` ceremony or `tools/dev/seed_anchor_snapshot.c`. It is a *recovery*
 artifact for a node that once had state, not a *bootstrap* artifact. Neither
 escalator rung is a fresh-start path and neither is wrong to refuse. They are
 noise in this failure mode, downstream of §1 and §4.

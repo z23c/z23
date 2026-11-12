@@ -868,8 +868,11 @@ static void health_collect_process_stats(struct node_health_snapshot *snapshot)
 
     {
         struct os_proc_mem mem;
-        snapshot->memory_rss_mb = (os_proc_mem_read(&mem) && mem.rss_bytes >= 0)
+        bool have_mem = os_proc_mem_read(&mem);
+        snapshot->memory_rss_mb = (have_mem && mem.rss_bytes >= 0)
             ? mem.rss_bytes / (1024 * 1024) : -1;
+        snapshot->memory_swap_mb = (have_mem && mem.swap_bytes >= 0)
+            ? mem.swap_bytes / (1024 * 1024) : -1;
 #ifdef ZCL_TESTING
         int64_t rss_override =
             atomic_load(&g_test_memory_rss_mb_override);

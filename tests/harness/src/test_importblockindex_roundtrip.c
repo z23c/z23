@@ -39,6 +39,7 @@
 #include "core/serialize.h"
 #include "models/block.h"
 #include "models/database.h"
+#include "platform/os_proc.h"    /* os_proc_mem_set_override budget fixtures */
 #include "platform/time_compat.h"
 #include "storage/block_index_db.h"
 #include "storage/dbwrapper.h"
@@ -930,6 +931,58 @@ static int ibr_scenario_f(const char *base)
     return failures;
 }
 
+/* The T1 import's bulk page cache must come from the memory budget, not the
+ * old unconditional 512 MiB (PRAGMA cache_size=-524288) that spiked boot RSS
+ * on small machines. Same clamp proof shape as d21a9aa893's turbo-cache
+ * tests in test_sqlite.c: a cgroup-constrained lane takes the 64 MiB floor,
+ * a roomy lane keeps the 512 MiB bulk size, and the pure form pins the
+ * 4 GiB boundary and unreadable RAM. The constrained fixture is hermetic on
+ * any host (a 2 GiB cap loses to every host RAM reading); the roomy fixture
+ * assumes a >4 GiB host, the same assumption test_sqlite's server turbo
+ * fixture already makes. */
+static int ibr_turbo_cache_clamp(void)
+{
+    int failures = 0;
+
+    struct os_proc_mem constrained = {
+        .rss_bytes = 1024 * 1024,
+        .vsize_bytes = 2 * 1024 * 1024,
+        .cgroup_current = 512LL * 1024 * 1024,
+        .cgroup_high = 2LL * 1024 * 1024 * 1024,
+        .cgroup_max = 2LL * 1024 * 1024 * 1024,
+        .sys_total_bytes = 64LL * 1024 * 1024 * 1024,
+        .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
+    };
+    os_proc_mem_set_override(&constrained);
+    IBR_CHECK("turbo cache: 2 GiB cgroup imports on the 64 MiB floor",
+              snapshot_import_turbo_cache_kib_for_test() == 64 * 1024);
+
+    struct os_proc_mem roomy = {
+        .rss_bytes = 1024 * 1024,
+        .vsize_bytes = 2 * 1024 * 1024,
+        .cgroup_current = 2LL * 1024 * 1024 * 1024,
+        .cgroup_high = 16LL * 1024 * 1024 * 1024,
+        .cgroup_max = 32LL * 1024 * 1024 * 1024,
+        .sys_total_bytes = 64LL * 1024 * 1024 * 1024,
+        .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
+    };
+    os_proc_mem_set_override(&roomy);
+    IBR_CHECK("turbo cache: roomy lane keeps the 512 MiB bulk cache",
+              snapshot_import_turbo_cache_kib_for_test() == 512 * 1024);
+    os_proc_mem_set_override(NULL);
+
+    IBR_CHECK("turbo cache: unreadable RAM and the 4 GiB boundary clamp",
+              snapshot_import_turbo_cache_kib_for_ram_for_test(0) ==
+                  64 * 1024 &&
+              snapshot_import_turbo_cache_kib_for_ram_for_test(-1) ==
+                  64 * 1024 &&
+              snapshot_import_turbo_cache_kib_for_ram_for_test(
+                  4LL * 1024 * 1024 * 1024) == 64 * 1024 &&
+              snapshot_import_turbo_cache_kib_for_ram_for_test(
+                  4LL * 1024 * 1024 * 1024 + 1) == 512 * 1024);
+    return failures;
+}
+
 int test_importblockindex_roundtrip(void)
 {
     int failures = 0;
@@ -957,6 +1010,8 @@ int test_importblockindex_roundtrip(void)
     failures += ibr_scenario_d(base);
     failures += ibr_scenario_e();
     failures += ibr_scenario_f(base);
+
+    failures += ibr_turbo_cache_clamp();
 
     failures += ibr_test_shutdown_abort();
 

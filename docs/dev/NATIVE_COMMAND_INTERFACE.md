@@ -989,7 +989,7 @@ and the node" than the ~15 KB `core.status` JSON.
 stable `key=value` pairs separated by single spaces, no JSON braces:
 
 ```
-hstar=3176325 gap=0 peer_best=3176325 sync=synced blocker=none blocker_age=unknown conditions=0 peers=8 rss_mb=512
+hstar=3176325 gap=0 peer_best=3176325 sync=synced blocker=none blocker_age=unknown conditions=0 peers=8 rss_mb=512 swap_mb=0
 ```
 
 Fields (frozen names, always present, `unknown` when the underlying RPC
@@ -999,8 +999,9 @@ value `getblockcount` serves), `gap` (validated header tip minus `hstar`),
 state machine's state), `blocker` (the headline blocker/gate id — may be a
 posture gate that outranks the registry, `none` when nothing is blocked),
 `blocker_age` (seconds, suffixed `s`), `conditions` (active self-heal
-condition count), `peers` (connected peer count), `rss_mb` (node RSS). All
-nine are read from ONE flat JSON body (`core.status.brief` /
+condition count), `peers` (connected peer count), `rss_mb` (node RSS),
+`swap_mb` (node swap, the swapped-out MiB `rss_mb` alone hides). All
+ten are read from ONE flat JSON body (`core.status.brief` /
 `zcl_native_status_brief_body`) — the field selector below reads the same
 body; there is no second data path.
 
@@ -1045,7 +1046,7 @@ one-line render (including `node_healthy`, `synced`, `wallet_ready`,
 `error_code`, and `next_action`). `core status brief field=...` selects the
 chain-only fields (`hstar`, `header_height`, `gap`, `peer_best`, `sync_state`,
 `serving`, `healthy`, `peer_count`, `primary_blocker`, `blocker_age_s`,
-`active_conditions`, `rss_mb`, `tip_advance_age_seconds`).
+`active_conditions`, `rss_mb`, `swap_mb`, `tip_advance_age_seconds`).
 `dumpstate <subsystem> field=...` selects out of
 that subsystem's own `.state` object (whatever top-level keys that subsystem
 publishes — see `dumpstate <subsystem>` with no `field=` to see them all).

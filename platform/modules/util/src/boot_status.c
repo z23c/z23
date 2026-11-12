@@ -45,6 +45,12 @@ static int64_t g_progress_published_mono_ms;
 static char    g_blocker[64];
 static char    g_blocker_reason[256];
 static _Atomic uint64_t g_publish_sequence;
+/* Per-stage transition marks: the ordinal each note_stage moved TO and its
+ * monotonic offset from boot start. Only observed transitions are ever
+ * appended — a stage nobody reached has no entry to serialize. */
+static int32_t g_stage_mark_stage[ZCL_BOOT_STATUS_STAGES_MAX];
+static int64_t g_stage_mark_mono_ms[ZCL_BOOT_STATUS_STAGES_MAX];
+static int32_t g_stage_marks_len;
 
 static bool boot_status_snapshot_same(
     const struct platform_positioned_file_snapshot *a,
@@ -137,6 +143,25 @@ size_t boot_status_write_json(const struct boot_status_snapshot *snap,
         (void)json_push_kv_str(&root, "blocker", snap->blocker);
         (void)json_push_kv_str(&root, "blocker_reason", snap->blocker_reason);
     }
+    /* Emitted only once this boot has observed a stage transition, so a
+     * beacon from a boot that never noted one keeps exactly the v1 field
+     * set — the array can never fabricate a stage. */
+    if (snap->stages_len > 0) {
+        struct json_value stages;
+        json_init(&stages);
+        json_set_array(&stages);
+        for (int32_t i = 0; i < snap->stages_len; i++) {
+            struct json_value entry;
+            json_init(&entry);
+            json_set_object(&entry);
+            (void)json_push_kv_int(&entry, "stage", snap->stages[i].stage);
+            (void)json_push_kv_int(&entry, "ms", snap->stages[i].ms);
+            (void)json_push_back(&stages, &entry);
+            json_free(&entry);
+        }
+        (void)json_push_kv(&root, "stages", &stages);
+        json_free(&stages);
+    }
 
     size_t n = json_write(&root, buf, buflen);
     json_free(&root);
@@ -169,6 +194,24 @@ static void boot_status_snapshot_locked(struct boot_status_snapshot *out)
     snprintf(out->blocker, sizeof(out->blocker), "%s", g_blocker);
     snprintf(out->blocker_reason, sizeof(out->blocker_reason), "%s",
              g_blocker_reason);
+    /* Per-stage durations: each mark measures the time the PREVIOUS stage
+     * (or boot start, before the first mark) held, and the current stage's
+     * entry measures from its transition to now — so the entries always sum
+     * to elapsed boot time at the moment of this snapshot. */
+    int64_t now_mono = platform_time_monotonic_ms() - g_started_mono_ms;
+    if (now_mono < 0)
+        now_mono = 0;                  /* coarse clock: never report negative */
+    for (int32_t i = 0; i < g_stage_marks_len; i++) {
+        int64_t prev = i > 0 ? g_stage_mark_mono_ms[i - 1] : 0;
+        int64_t end = i == g_stage_marks_len - 1 ? now_mono
+                                                 : g_stage_mark_mono_ms[i];
+        int64_t ms = end - prev;
+        if (ms < 0)
+            ms = 0;                /* coarse clock: never report negative */
+        out->stages[i].stage = g_stage_mark_stage[i];
+        out->stages[i].ms = ms;
+    }
+    out->stages_len = g_stage_marks_len;
 }
 
 /* Atomically publish the beacon: write to a tmp sibling then rename over the
@@ -259,6 +302,7 @@ void boot_status_init(const char *datadir)
     g_progress_published_mono_ms = 0;
     g_blocker[0] = '\0';
     g_blocker_reason[0] = '\0';
+    g_stage_marks_len = 0;         /* a re-armed boot restarts its history */
     g_started_unix = platform_time_wall_unix();
     g_started_mono_ms = platform_time_monotonic_ms();
     g_last_heartbeat_unix = 0;
@@ -271,6 +315,12 @@ void boot_status_note_stage(int stage)
     pthread_mutex_lock(&g_lock);
     if (g_datadir[0] != '\0') {
         g_stage_ordinal = stage;
+        if (g_stage_marks_len < ZCL_BOOT_STATUS_STAGES_MAX) {
+            int64_t mark = platform_time_monotonic_ms() - g_started_mono_ms;
+            g_stage_mark_stage[g_stage_marks_len] = stage;
+            g_stage_mark_mono_ms[g_stage_marks_len] = mark > 0 ? mark : 0;
+            g_stage_marks_len++;
+        }
         boot_status_publish_locked();
     }
     pthread_mutex_unlock(&g_lock);
@@ -516,6 +566,51 @@ static bool boot_status_read_blocker(const struct json_value *doc,
     return true;
 }
 
+/* Optional per-stage timing array, present only once this boot recorded a
+ * transition. Fail-closed like every other optional field: each entry is an
+ * object of exactly stage+ms with the stage inside the enum and a
+ * non-negative ms; entries strictly increase (the stage machine never moves
+ * backward); and the last entry must be the stage the beacon itself names —
+ * an array that ends anywhere else is a fabricated or stale history. */
+static bool boot_status_stage_entry_valid(const struct json_value *entry,
+                                          int64_t prev_stage,
+                                          struct boot_status_stage_ms *dst)
+{
+    if (!entry || entry->type != JSON_OBJ || entry->num_children != 2)
+        return false;
+    const struct json_value *sv = json_get(entry, "stage");
+    const struct json_value *mv = json_get(entry, "ms");
+    if (!sv || sv->type != JSON_INT || !mv || mv->type != JSON_INT)
+        return false;
+    int64_t stage = json_get_int(sv);
+    int64_t ms = json_get_int(mv);
+    if (stage < 0 || stage >= BOOT_STAGE__MAX || ms < 0 || stage <= prev_stage)
+        return false;
+    dst->stage = (int32_t)stage;
+    dst->ms = ms;
+    return true;
+}
+
+static bool boot_status_read_stages(const struct json_value *doc,
+                                    struct boot_status_snapshot *out)
+{
+    const struct json_value *stages = json_get(doc, "stages");
+    if (!stages)
+        return true;
+    if (stages->type != JSON_ARR || stages->num_children == 0 ||
+        stages->num_children > ZCL_BOOT_STATUS_STAGES_MAX)
+        return false;
+    int64_t prev_stage = -1;
+    for (size_t i = 0; i < stages->num_children; i++) {
+        if (!boot_status_stage_entry_valid(json_at(stages, i), prev_stage,
+                                           &out->stages[i]))
+            return false;
+        prev_stage = out->stages[i].stage;
+    }
+    out->stages_len = (int32_t)stages->num_children;
+    return out->stages[out->stages_len - 1].stage == out->stage_ordinal;
+}
+
 bool boot_status_read(const char *datadir, struct boot_status_snapshot *out,
                       char *err, size_t errlen)
 {
@@ -574,6 +669,12 @@ bool boot_status_read(const char *datadir, struct boot_status_snapshot *out,
         json_free(&doc);
         boot_status_set_err(err, errlen,
                             "boot_status.json blocker fields are invalid");
+        return false;
+    }
+    if (!boot_status_read_stages(&doc, out)) {
+        json_free(&doc);
+        boot_status_set_err(err, errlen,
+                            "boot_status.json stage timings are invalid");
         return false;
     }
     json_free(&doc);

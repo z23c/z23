@@ -29,7 +29,14 @@
  *     "progress_target": <int>,               // optional with activity
  *     "blocker": "<stable id>",              // optional
  *     "blocker_reason": "<operator remedy>"  // optional with blocker
+ *     "stages": [{"stage": 3, "ms": 812}, ...] // optional
  *   }
+ *
+ * The schema string stays `zcl.boot_status.v1` for "stages": like
+ * activity/progress and blocker, it is an additive optional field whose
+ * absence is meaningful, and every reader of the beacon matches the
+ * schema string exactly — bumping it would reject every v1 consumer for
+ * a field they can safely ignore.
  *
  * The write is tmp+rename (crash-safe: a reader either sees the old complete
  * file or the new complete file, never a torn one). Stage transitions rewrite
@@ -56,6 +63,11 @@ extern "C" {
 #define ZCL_BOOT_STATUS_FILENAME "boot_status.json"
 #define ZCL_BOOT_STATUS_SCHEMA   "zcl.boot_status.v1"
 
+/* Upper bound on recorded per-stage timing entries. A local constant so
+ * this header stays free of the boot_phase.h include cycle; the stage
+ * enum (BOOT_STAGE__MAX = 12) fits with room to spare. */
+#define ZCL_BOOT_STATUS_STAGES_MAX 16
+
 /* Parsed view of a boot_status.json document. All string fields are
  * NUL-terminated fixed buffers so the reader never allocates. */
 struct boot_status_snapshot {
@@ -81,6 +93,17 @@ struct boot_status_snapshot {
      * naming one is the silent halt this project says is unreachable. */
     char    blocker[64];         /* blocker id, e.g. wallet_phrase_no_terminal */
     char    blocker_reason[256]; /* plain-English reason + the way out */
+    /* One entry per stage transition actually observed this boot, in
+     * transition order; stages_len is 0 until the first transition, and
+     * a stage with no recorded transition is never fabricated. `ms` is
+     * the time the PREVIOUS stage (or boot start, for the first entry)
+     * held before this transition, so the entries sum to elapsed boot
+     * time; the last entry is the stage the beacon currently names. */
+    struct boot_status_stage_ms {
+        int32_t stage;       /* enum boot_stage ordinal at the transition */
+        int64_t ms;          /* milliseconds the previous stage held */
+    } stages[ZCL_BOOT_STATUS_STAGES_MAX];
+    int32_t stages_len;
 };
 
 /* ── Writer (called from the boot path) ──────────────────────────────── */

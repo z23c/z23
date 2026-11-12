@@ -1,9 +1,7 @@
 # check-shell-host-assumptions shrink-only baseline
 # Format: <kind> TAB <tracked path> TAB <count>. Counts may only shrink.
 nproc	tools/dev/deploy-dev-lane.sh	1
-nproc	tools/dev/doctor-build.sh	1
 nproc	tools/dev/sovereign_source_network_hook.sh	3
-nproc	tools/scripts/binary_size.sh	1
 nproc	tools/scripts/build_bench.sh	2
 nproc	tools/scripts/build_tor_full.sh	1
 nproc	tools/scripts/build_vendor.sh	1
@@ -53,7 +51,6 @@ stat	tools/dev/c23_commons_beta_hook.sh	2
 stat	tools/dev/compile-epoch-object.sh	1
 stat	tools/dev/custody-bind.sh	2
 stat	tools/dev/deploy-dev-lane.sh	4
-stat	tools/dev/dev-wallet-credential.sh	2
 stat	tools/dev/generate-compdb.sh	5
 stat	tools/dev/hotswap-module-fast.sh	2
 stat	tools/dev/hotswap-package.sh	2
@@ -64,7 +61,6 @@ stat	tools/dev/transaction-lab.sh	2
 stat	tools/dev/transaction-micro-lab-wallets.sh	1
 stat	tools/dev/transaction-micro-lab.sh	2
 stat	tools/dev/zcode_async_proof_acceptance_hook.sh	1
-stat	tools/scripts/binary_size.sh	1
 stat	tools/scripts/build_bench.sh	3
 stat	tools/scripts/build_drift_probe.sh	1
 stat	tools/scripts/ci_install_gate.sh	1
@@ -81,4 +77,3 @@ stat	tools/scripts/timings.sh	1
 stat	tools/scripts/tip_agreement_probe.sh	1
 stat	tools/scripts/zcash_params.sh	1
 stat	tools/scripts/zcl-logrotate.sh	1
-stat	tools/seed_anchor_snapshot.sh	3

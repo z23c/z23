@@ -946,6 +946,7 @@ static int test_brief_status_one_line_contract(void)
         struct json_value d;
         fixture_brief_body(&d, 100, 142, 42, "syncing",
                            "anchor_backfill_gap", 3600, 2, 8, 512, false);
+        json_push_kv_int(&d, "swap_mb", 186);
 
         char buf[1024];
         zcl_native_status_brief_render(&d, buf, sizeof(buf));
@@ -962,6 +963,39 @@ static int test_brief_status_one_line_contract(void)
         ASSERT(strstr(buf, "conditions=2") != NULL);
         ASSERT(strstr(buf, "peers=8") != NULL);
         ASSERT(strstr(buf, "rss_mb=512") != NULL);
+        /* Swap renders BESIDE rss_mb so the two halves of the footprint are
+         * one glance: same key=value style, same never-fabricated rule. */
+        ASSERT(strstr(buf, "rss_mb=512 swap_mb=186") != NULL);
+
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A real zero swap renders as a KNOWN 0, not unknown: pin it so a
+ * falsy-zero regression (0 folded into unknown) cannot pass silently. */
+static int test_brief_status_zero_swap_renders_known_zero(void)
+{
+    int failures = 0;
+    TEST("brief status renders a real zero swap as a known 0") {
+        struct json_value d;
+        json_init(&d);
+        json_set_object(&d);
+        json_push_kv_int(&d, "hstar", 100);
+        json_push_kv_int(&d, "gap", 42);
+        json_push_kv_int(&d, "peer_best", 142);
+        json_push_kv_str(&d, "sync_state", "syncing");
+        json_push_kv_str(&d, "blocker", "b");
+        json_push_kv_int(&d, "blocker_age", 60);
+        json_push_kv_int(&d, "conditions", 0);
+        json_push_kv_int(&d, "peers", 8);
+        json_push_kv_int(&d, "rss_mb", 512);
+        json_push_kv_int(&d, "swap_mb", 0);
+
+        char buf[1024];
+        zcl_native_status_brief_render(&d, buf, sizeof(buf));
+        ASSERT(strstr(buf, "swap_mb=0") != NULL);
 
         json_free(&d);
         PASS();
@@ -1025,6 +1059,8 @@ static int test_brief_status_unknown_fields_render_unknown(void)
         ASSERT(strstr(buf, "hstar=unknown") != NULL);
         ASSERT(strstr(buf, "gap=unknown") != NULL);
         ASSERT(strstr(buf, "blocker=unknown") != NULL);
+        ASSERT(strstr(buf, "rss_mb=unknown") != NULL);
+        ASSERT(strstr(buf, "swap_mb=unknown") != NULL);
         ASSERT(strstr(buf, "0") == NULL); /* never a fabricated zero */
 
         json_free(&d);
@@ -1459,6 +1495,7 @@ int test_operator_ux(void)
     failures += test_producer_status_completed_target_needs_no_rate();
     failures += test_producer_status_rejects_long_datadir();
     failures += test_brief_status_one_line_contract();
+    failures += test_brief_status_zero_swap_renders_known_zero();
     failures += test_brief_status_registry_fields_agree();
     failures += test_brief_status_unknown_fields_render_unknown();
     failures += test_money_journey_status_one_line_contract();

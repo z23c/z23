@@ -114,7 +114,7 @@ BUNDLE.md`) is exported once and, today, tends to live on a single machine's
 disk. Two pieces close that single point of failure without weakening
 rom_seed's unverified-delivery model: a **receipt-gated admission gate**
 (`config/rom_bundle_admission.h`) and a **replication helper**
-(`tools/scripts/rom-bundle-replicate.sh`).
+(`tools/dev/rom_bundle_replicate.c`).
 
 **The gate.** `net/rom_seed.h`'s own `rom_seed_scan_datadir()` admits any
 `consensus-state-bundle-*.sqlite` on structural grounds alone (SQLite magic +
@@ -133,14 +133,14 @@ that produced/verified the receipt (unlike the ACTIVATE authority check in
 `config/consensus_state_replay_receipt.h`, which does) — a seeding node is
 almost never the node that ran `-verify-consensus-bundle`.
 
-**The replicator.** `tools/scripts/rom-bundle-replicate.sh --bundle=... 
+**The replicator.** `tools/dev/rom_bundle_replicate.c --bundle=... 
 --receipt=... --dest=DIR` copies the bundle + receipt (renamed to the
 canonical `consensus_state_replay_receipt.v1` the gate looks for) + a SHA3
 record of the producing binary into `DIR`, then re-hashes both copies with
 the standalone `rom_bundle_sha3` tool (`make tools/rom_bundle_sha3`; links
 only `platform/modules/sha3/src/sha3.c`, no node libs) and refuses to report success
 unless every digest matches the source exactly. `make rom-bundle-replicate
-BUNDLE=... RECEIPT=... DEST=...` wraps the same script. Point a node's
+BUNDLE=... RECEIPT=... DEST=...` wraps the same tool. Point a node's
 `-rombundlereplicadir=DIR` at the result (or at a further copy of it, on a
 different disk or a different machine entirely) to turn it into another
 free-tier P2P recovery source for the same bundle.
@@ -267,7 +267,7 @@ copies an operator/packaging-designated bundle straight into
 no flags and no manual command at boot. It is not, and does not need to be, a
 peer-fetch client — the bytes can come from anywhere (a bundle you exported
 yourself, one copied off another node you operate, a future signed release
-artifact once stable publication is unsealed — see `tools/release.sh`) because
+artifact once stable publication is unsealed — see `tools/dev/release_containment.c`) because
 this script treats them as **unverified** input:
 
 - it never opens, parses, or interprets the bundle as SQLite or as consensus
@@ -276,7 +276,7 @@ this script treats them as **unverified** input:
   back to `openssl dgst -sha3-256` on a checkout that hasn't built that tool
   yet) is a **copy-integrity** check only — "did the bytes I just wrote match
   the bytes I just read" — not a content verification decision, exactly analogous to
-  the copy-verify step in `tools/scripts/rom-bundle-replicate.sh`;
+  the copy-verify step in `tools/dev/rom_bundle_replicate.c`;
 - the one and only verification boundary stays exactly where it already is: the
   RECEIPT / CHECKPOINT_ROM / CHECKPOINT_CONTENT authority resolved at INSTALL
   time
@@ -329,7 +329,7 @@ receipt-owning `-mint-anchor` full-validation fold, whose successful
 finalization immediately invokes the contained exporter
 (`docs/node/CONSENSUS-STATE-BUNDLE.md`); an operator running a second node
 can also point `SOURCE` at a copy pulled from a first node they already
-operate (optionally via `tools/scripts/rom-bundle-replicate.sh` for a
+operate (optionally via `tools/dev/rom_bundle_replicate.c` for a
 verified second-disk copy first). This is packaging/fleet plumbing, not a new
 distribution channel — it complements peer-fetch (above) rather than
 competing with it, and needs no change to the install/activation path either

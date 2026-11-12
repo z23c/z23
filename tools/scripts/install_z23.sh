@@ -526,7 +526,7 @@ fetch_into() {
     esac
 }
 
-# The same sentence tools/scripts/tor_stamp_lib.sh carries. This script must
+# The same sentence tools/dev/tor_stamp.c carries. This script must
 # run standalone on a box with no checkout, so it cannot source that file; the
 # check-tor-full-default lint gate is what keeps the two copies identical.
 TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the onion network; rebuild with make tor-full'

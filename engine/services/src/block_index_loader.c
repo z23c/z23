@@ -48,6 +48,7 @@
 #include <io.h>
 #else
 #include <unistd.h>
+#include <sys/mman.h>
 #endif
 #include <time.h>
 #include <errno.h>
@@ -687,6 +688,134 @@ static bool bil_flat_allocation_sizes_valid(size_t count)
            count <= SIZE_MAX / sizeof(struct block_index *);
 }
 
+/* ── File-backed load arena ────────────────────────────────
+ *
+ * Scout-verified design (lane block-index-arena-mmap-1111): the bulk-load
+ * arena is a MAP_SHARED mapping over a REAL datadir file — deliberately a
+ * file, not memfd and not the former zcl_calloc anonymous block. Dirty
+ * arena pages write back to the page cache and become evictable clean
+ * pages under memory pressure WITHOUT swap; anonymous arena pages stay
+ * unswappable resident memory for the whole process lifetime, and this
+ * loader already sheds the source mapping in steps so the mapping and the
+ * arena do not peak together (see bil_flat_release_rows above).
+ *
+ * <datadir>/.block_index.arena is PROCESS-LIFETIME SCRATCH: never a
+ * parseable format, never read by any loader. It holds raw struct
+ * block_index images with ABSOLUTE POINTERS valid only in this process,
+ * and must not appear in backups or snapshots. The dot-prefix follows
+ * this datadir's scratch-file convention (.cookie,
+ * .install-request-XXXXXX); the datadir has no central exclusion
+ * registry beyond that naming convention.
+ *
+ * Arena invariants (future edits must preserve): write-after-load only,
+ * entries never individually freed, never resized. block_map_free
+ * (chainstate.c) documents that block_index entries live for process
+ * lifetime — it frees only the buckets — and post-boot inserts allocate
+ * per-entry with zcl_calloc in chainstate_insert_block_index, so on
+ * success this mapping is never munmap'd; process exit tears it down
+ * with the map intact.
+ *
+ * O_CREAT|O_TRUNC gives every boot a freshly zeroed file whose
+ * ftruncate extension reads as zeros, which is why bil_flat_load needs
+ * no pre-fault memset. The fd is closed immediately after mmap — the
+ * mapping holds the file open. On failure the scratch file is unlinked
+ * and the caller falls back to a zcl_calloc arena: no POSIX mmap
+ * (Windows), an unusable datadir path, or open/ftruncate/mmap refusal.
+ * On success the file is left in place — the simpler portable shape:
+ * the next boot's O_TRUNC reuses it (it never accumulates), while
+ * unlink-after-mmap (also correct, the mapping pins the inode) would
+ * only hide the arena footprint. One trade-off accepted: ENOSPC on
+ * writeback of a MAP_SHARED page raises SIGBUS; a full datadir is
+ * already fatal for a node that cannot write blocks. */
+static bool bil_arena_file_map(const char *datadir, size_t count,
+                               struct block_index **arena_out,
+                               char *path_out, size_t path_cap)
+{
+    *arena_out = NULL;
+    path_out[0] = '\0';
+#if defined(_WIN32)
+    /* No writable POSIX mmap here; the caller keeps the zcl_calloc arena. */
+    (void)datadir; (void)count; (void)path_cap;
+    return false;
+#else
+    size_t bytes = count * sizeof(struct block_index);
+    if (!datadir || !datadir[0])
+        return false;
+    int n = snprintf(path_out, path_cap, "%s/.block_index.arena", datadir);
+    if (n < 0 || (size_t)n >= path_cap) {
+        path_out[0] = '\0';
+        return false;
+    }
+    int afd = open(path_out, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (afd < 0)
+        return false;
+    /* bytes cannot exceed off_t here (64-bit off_t targets; a truncated
+     * off_t would mmap past EOF and SIGBUS on first touch), but guard the
+     * cast anyway before ftruncate. */
+    /* Roundtrip-exact off_t check: on a 32-bit off_t target a bytes value
+     * beyond its range would truncate in the casts below, mmap past EOF
+     * and SIGBUS on first touch; the roundtrip refuses that here. */
+    bool sized = (uintmax_t)(off_t)bytes == bytes &&
+                 ftruncate(afd, (off_t)bytes) == 0;
+    if (sized) {
+        /* Best-effort full pre-allocation: the loader dirties every page
+         * during load, so on a filesystem that supports it this surfaces
+         * ENOSPC here as a clean refusal (anonymous fallback) instead of
+         * an uncatchable SIGBUS mid-load. Tmpfs and friends may refuse
+         * fallocate itself; proceeding then matches the pre-lane risk and
+         * keeps the mapping testable on such datadirs. */
+        (void)posix_fallocate(afd, 0, (off_t)bytes);
+    }
+    void *view = sized ? mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED,
+                              afd, 0) : MAP_FAILED;
+    close(afd); /* the mapping holds the file open from here */
+    if (view == MAP_FAILED) {
+        unlink(path_out);
+        return false;
+    }
+    *arena_out = (struct block_index *)view;
+    return true;
+#endif
+}
+
+/* Allocate the load arena: file-backed when the datadir allows it (see
+ * bil_arena_file_map above), the anonymous zcl_calloc fallback otherwise.
+ * Returns the arena or NULL; *mapped_out tells bil_arena_release which
+ * release form applies. */
+static struct block_index *bil_arena_alloc(const char *datadir,
+                                           uint32_t count, bool *mapped_out,
+                                           char *path_out, size_t path_cap)
+{
+    struct block_index *arena = NULL;
+    *mapped_out = bil_arena_file_map(datadir, count, &arena, path_out,
+                                     path_cap);
+    if (!arena)
+        arena = zcl_calloc(count, sizeof(struct block_index), "block_index arena");
+    return arena;
+}
+
+/* End-of-load arena disposition. Success keeps the arena: entries live for
+ * process lifetime (invariants above) and the map retains it. Failure
+ * releases it whole — bil_flat_insert_rows already rolled every arena
+ * pointer out of the map before refusing. */
+static void bil_arena_release(struct block_index *arena, bool mapped,
+                              size_t bytes, const char *path, bool failed)
+{
+    if (!failed)
+        return;
+#if defined(_WIN32)
+    (void)mapped; (void)bytes; (void)path; /* mapped is never true here */
+    free(arena);
+#else
+    if (mapped) {
+        munmap(arena, bytes);
+        unlink(path);
+    } else {
+        free(arena);
+    }
+#endif
+}
+
 static struct zcl_result bil_flat_load(const char *datadir, struct main_state *ms,
                                        size_t max_entries, bool publish_identity)
 {
@@ -723,15 +852,25 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
         flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-10, "block_index_flat: map reserve failed (%u entries)", count);
     }
-    struct block_index *arena = zcl_calloc(count, sizeof(struct block_index), "block_index arena");
+    /* File-backed arena (see bil_arena_file_map and bil_arena_alloc); the
+     * zcl_calloc fallback keeps every platform or path without a usable
+     * mapping loading identically. */
+    char arena_path[1024];
+    size_t arena_bytes = (size_t)count * sizeof(struct block_index);
+    bool arena_mapped;
+    struct block_index *arena = bil_arena_alloc(datadir, count, &arena_mapped,
+                                                arena_path,
+                                                sizeof(arena_path));
     if (!arena) {
         flat_read_mapping_close(&mapping, fd);
-        return ZCL_ERR(-10, "block_index_flat: calloc failed for %u entries "
-                       "(%zu bytes)", count,
-                       (size_t)count * sizeof(struct block_index));
+        return ZCL_ERR(-10, "block_index_flat: arena allocation failed for %u "
+                       "entries (%zu bytes)", count, arena_bytes);
     }
-    memset(arena, 0, count * sizeof(struct block_index)); /* pre-fault */
-    void *release = arena;
+    /* No pre-fault memset (the former calloc path faulted pages here):
+     * O_CREAT|O_TRUNC hands every boot a freshly zeroed file whose
+     * ftruncate extension faults in zero-filled, exactly like the calloc
+     * fallback's demand-zero anonymous pages. */
+    void *release = NULL; /* heap scratch (the sorted array) freed at finish */
     int64_t t_parse_ms = 0, t_fwd_ms = 0;
     struct bil_flat_release rel = {.mapping = &mapping,
                                    .entries = input.entries};
@@ -756,6 +895,8 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     bil_flat_forward_rows(arena, count, sorted);
 finish:
     free(release);
+    bil_arena_release(arena, arena_mapped, arena_bytes, arena_path,
+                      !result.ok);
     flat_read_mapping_close(&mapping, fd);
     if (!result.ok)
         return result;
@@ -767,6 +908,10 @@ finish:
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t0;
     LOG_INFO("block_index_flat", "Block index flat: loaded %u entries in %llds",
              count, (long long)elapsed);
+    if (arena_mapped)
+        LOG_INFO("block_index_flat",
+                 "Block index arena: file-backed mapping %zu bytes at %s",
+                 arena_bytes, arena_path);
     if (publish_identity && input.have_identity) {
         input.identity.row_count = count;
         block_index_flat_identity_remember(datadir, &input.identity);

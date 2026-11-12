@@ -7,7 +7,6 @@ export LC_ALL=C
 OBJECT_HOST_SYSTEM="$(uname -s 2>/dev/null || printf unknown)"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SELF_DIR/build-epoch-open-file-identity.sh"
-source "$SELF_DIR/build-epoch-lock-wait.sh"
 source "$SELF_DIR/process-start-token.sh"
 
 fail()
@@ -334,7 +333,8 @@ compile_one()
                     "$ADMISSION_LOCK_FILE" 6 \
                     "$OBJECT_HOST_SYSTEM" ||
                 fail 'epoch admission lock is not the opened regular file'
-            z23_build_epoch_flock_bounded 'compile-epoch-object' 6 \
+            "$SELF_DIR/../../build/bin/build-epoch-lock-wait" \
+                compile-epoch-object 6 \
                 "$ADMISSION_LOCK_FILE" 'epoch admission' || {
                 exec 6>&-
                 fail "could not acquire epoch admission lock $ADMISSION_LOCK_FILE"
@@ -396,7 +396,8 @@ compile_one()
 if [ "$MODE" = coverage ]; then
     command -v flock >/dev/null 2>&1 || fail 'flock is required for coverage objects'
     exec 9> "$OUTPUT.lock"
-    z23_build_epoch_flock_bounded 'compile-epoch-object' 9 \
+    "$SELF_DIR/../../build/bin/build-epoch-lock-wait" \
+        compile-epoch-object 9 \
         "$OUTPUT.lock" 'coverage object' ||
         fail "could not acquire coverage object lock $OUTPUT.lock"
 fi

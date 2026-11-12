@@ -643,6 +643,7 @@ static bool rpc_healthcheck_full(const struct json_value *params,
     push_block_source_policy_json(&checks, &sel);
     push_legacy_mirror_candidate_json(result, &sel);
     json_push_kv_int(&checks, "memory_rss_mb", health.memory_rss_mb);
+    json_push_kv_int(&checks, "memory_swap_mb", health.memory_swap_mb);
     json_push_kv_int(&checks, "uptime_seconds", health.uptime_seconds);
     json_push_kv_int(&checks, "tip_advance_age_seconds",
                      health.tip_advance_age_seconds);

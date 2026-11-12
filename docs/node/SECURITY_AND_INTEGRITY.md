@@ -218,7 +218,7 @@ height. Anchor membership is checked independently on both paths.
 - **Live-data discipline:** consensus-adjacent fixes are proven on a datadir
   copy before deployment. The isolated node harness refuses live datadirs and
   live ports and runs on throwaway `/tmp/zcl23-*` state.
-- **Release integrity:** `tools/release.sh --verify <archive.tar.gz>` checks an
+- **Release integrity:** `tools/dev/release_containment.c` (`--verify <archive.tar.gz>`) checks an
   existing archive's SHA3-256 manifest, detached GPG (OpenPGP) signature, and
   archive structure. It reports local artifact verification, not stable release
   verification. Every build/package/sign/publish invocation, including
@@ -421,7 +421,7 @@ Evidence files worth reading first:
 - [`RUNBOOK.md`](../RUNBOOK.md) - operational safety rails.
 - [Isolated node harness](../../tools/scripts/isolated_node_env.sh) - process
   and datadir guardrails.
-- [`../../tools/release.sh`](../../tools/release.sh) - existing archive
+- [`../../tools/dev/release_containment.c`](../../tools/dev/release_containment.c) - existing archive
   verification and release containment.
 
 ## Reporting

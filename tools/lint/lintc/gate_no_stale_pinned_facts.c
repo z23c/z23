@@ -511,7 +511,7 @@ static int snf_fail_block(const struct snf_pass *p)
                 "  binary-size: use size-agnostic language (\"compact "
                 "self-contained C23 binary\")\n"
                 "               or quote the derived value from "
-                "tools/scripts/binary_size.sh.\n"
+                "tools/dev/binary_size.c.\n"
                 "               (NOT baseline-exemptible — this is the "
                 "owner's named case.)\n"))
         return 2;

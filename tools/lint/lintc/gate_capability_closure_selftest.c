@@ -488,6 +488,208 @@ static int ccs_case_epoch_unreadable(struct ccs_fx *fx)
     return ccs_say(rc == -2, "epoch: an unreadable epochs directory refuses (-2), never reads as none");
 }
 
+/* Feature-conditional rows: parse and conservative union at load, selection
+ * against the graded build's macros, ambiguous and uncovered fail-closed
+ * states, and a malformed feature list. Split into state, refusal and rank
+ * helpers, each under the complexity cap. */
+static const char k_ccs_when_path[] = "fixture_src/when_user.c";
+static const char k_ccs_when_cent[] = "wn/engine/composition/module_capabilities.def";
+static const char k_ccs_when_plat[] = "wn/engine/composition/module_capabilities_linux.def";
+static const char k_ccs_when_root[] = "wn";
+
+/* W1..W5: load-time union and selection across the macro states. */
+static int ccs_when_states(const struct ccs_fx *fx)
+{
+    char cent[CCD_PATH], plat[CCD_PATH], root[CCD_PATH];
+    struct ccd_mods m = {0};
+    struct ccg_macros mac = {0};
+    int failures = 0, rc;
+    ccs_path(fx, k_ccs_when_cent, cent);
+    ccs_path(fx, k_ccs_when_plat, plat);
+    ccs_path(fx, k_ccs_when_root, root);
+    int made = ccs_put(fx, k_ccs_when_cent,
+                       "ZCL_MODULE_CAPABILITY(\"fixture_src/when_user.c\", CAP_NETWORK|CAP_PROCESS, \"portable arm\")\n") == 0
+            && ccs_put(fx, k_ccs_when_plat,
+                       "ZCL_MODULE_CAPABILITY(\"fixture_src/when_user.c\", CAP_FS_WRITE, \"fallback arm\")\n"
+                       "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_GTK\", \"fixture_src/when_user.c\",\n"
+                       "                           CAP_FS_WRITE|CAP_NETWORK, \"gtk arm\")\n"
+                       "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_GTK,HAVE_WEBKIT\", \"fixture_src/when_user.c\",\n"
+                       "                           CAP_FS_WRITE|CAP_DYNLOAD, \"webkit arm\")\n") == 0;
+    rc = made ? ccd_modules_load(cent, plat, root, &m) : 1;
+    failures += ccs_say(rc == 0 && m.when_n == 2 && ccs_eq(&m.raw, k_ccs_when_path, "CAP_FS_WRITE")
+                        && ccs_eq(&m.uni, k_ccs_when_path, "CAP_NETWORK|CAP_PROCESS|CAP_FS_WRITE|CAP_DYNLOAD"),
+                        "W1: when rows load beside the fallback and every arm joins the union");
+    rc = ccd_when_select(&m, &mac);
+    failures += ccs_say(rc == 0 && m.when_selected == 0 && ccs_eq(&m.raw, k_ccs_when_path, "CAP_FS_WRITE"),
+                        "W2: with no feature macros defined the unconditional fallback stays exact");
+    ccd_map_put(&mac.def, "HAVE_GTK", "1");
+    rc = ccd_when_select(&m, &mac);
+    failures += ccs_say(rc == 0 && m.when_selected == 1 && ccs_eq(&m.raw, k_ccs_when_path, "CAP_FS_WRITE|CAP_NETWORK")
+                        && ccs_eq(&m.uni, k_ccs_when_path, "CAP_NETWORK|CAP_PROCESS|CAP_FS_WRITE|CAP_DYNLOAD"),
+                        "W3: a single defined feature selects its arm and the unapplied arm stays unioned");
+    ccd_map_put(&mac.def, "HAVE_WEBKIT", "1");
+    rc = ccd_when_select(&m, &mac);
+    failures += ccs_say(rc == 0 && m.when_selected == 1 && ccs_eq(&m.raw, k_ccs_when_path, "CAP_FS_WRITE|CAP_DYNLOAD"),
+                        "W4: with every feature defined the most specific arm wins");
+    ccd_mods_free(&m);
+    ccd_map_free(&mac.def);
+    return failures;
+}
+
+/* W6, W7, W8 and W11: the ambiguity message and the malformed-list refusals. */
+static int ccs_when_refusals(const struct ccs_fx *fx)
+{
+    char cent[CCD_PATH], plat[CCD_PATH], root[CCD_PATH];
+    struct ccd_mods m = {0};
+    struct ccg_macros mac = {0};
+    int failures = 0, rc;
+    static const char *const bad_lists[] = { "HAVE_A,", ",HAVE_A", "HAVE_A,,HAVE_B", NULL };
+    ccs_path(fx, k_ccs_when_cent, cent);
+    ccs_path(fx, k_ccs_when_plat, plat);
+    ccs_path(fx, k_ccs_when_root, root);
+    rc = ccd_modules_load(cent, plat, root, &m);
+    ccd_mods_free(&m);
+    (void)rc;
+    int made = ccs_put(fx, k_ccs_when_plat,
+                   "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"a arm\")\n"
+                   "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_B\", \"fixture_src/when_user.c\", CAP_PROCESS, \"b arm\")\n") == 0;
+    rc = made ? ccd_modules_load(cent, plat, root, &m) : 1;
+    ccd_map_put(&mac.def, "HAVE_A", "1");
+    ccd_map_put(&mac.def, "HAVE_B", "1");
+    rc = rc == 0 ? ccd_when_select(&m, &mac) : rc;
+    failures += ccs_say(rc == 1 && !strcmp(m.error,
+                        "check_capability_closure: FATAL \xe2\x80\x94 ambiguous feature rows: fixture_src/when_user.c has two\n"
+                        "  applicable ZCL_MODULE_CAPABILITY_WHEN rows of equal specificity; make\n"
+                        "  one strictly more specific or drop an arm"),
+                        "W6: two applicable arms of equal specificity refuse with the exact message");
+    ccd_mods_free(&m);
+    ccd_map_free(&mac.def);
+    static const char *const refuse[] = {
+        "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE A!\", \"fixture_src/when_user.c\", CAP_NETWORK, \"bad arm\")\n",
+        "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"dup arm\")\n",
+        NULL,
+    };
+    for (size_t i = 0; refuse[i]; i++) {
+        made = ccs_put(fx, k_ccs_when_plat, refuse[i]) == 0
+            && ccd_modules_load(cent, plat, root, &m) != 0;
+        ccd_mods_free(&m);
+        if (!made)
+            return failures + 1;
+    }
+    failures += ccs_say(made, "W7/W8: a non-identifier or duplicate feature list refuses at load");
+    int bad_ok = 1;
+    for (size_t i = 0; bad_lists[i]; i++) {
+        char row[256];
+        snprintf(row, sizeof row, "ZCL_MODULE_CAPABILITY_WHEN(\"%s\", \"fixture_src/when_user.c\", CAP_NETWORK, \"x\")\n",
+                 bad_lists[i]);
+        bad_ok &= ccs_put(fx, k_ccs_when_plat, row) == 0
+               && ccd_modules_load(cent, plat, root, &m) != 0;
+        ccd_mods_free(&m);
+    }
+    failures += ccs_say(bad_ok, "W11: trailing, leading and doubled commas leave an empty identifier and refuse");
+    return failures;
+}
+
+/* W9: row order never decides which top-specificity arm a strict table selects. */
+static int ccs_when_permutations(const struct ccs_fx *fx)
+{
+    static const char *const perm[][3] = {
+        { "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_B\", \"fixture_src/when_user.c\", CAP_DYNLOAD, \"top arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"a arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_B\", \"fixture_src/when_user.c\", CAP_PROCESS, \"b arm\")\n" },
+        { "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"a arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_B\", \"fixture_src/when_user.c\", CAP_PROCESS, \"b arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_B\", \"fixture_src/when_user.c\", CAP_DYNLOAD, \"top arm\")\n" },
+        { "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_B\", \"fixture_src/when_user.c\", CAP_PROCESS, \"b arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_B\", \"fixture_src/when_user.c\", CAP_DYNLOAD, \"top arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"a arm\")\n" },
+    };
+    char cent[CCD_PATH], plat[CCD_PATH], root[CCD_PATH];
+    struct ccd_mods m = {0};
+    struct ccg_macros mac = {0};
+    int perm_ok = 1;
+    ccs_path(fx, k_ccs_when_cent, cent);
+    ccs_path(fx, k_ccs_when_plat, plat);
+    ccs_path(fx, k_ccs_when_root, root);
+    ccd_map_put(&mac.def, "HAVE_A", "1");
+    ccd_map_put(&mac.def, "HAVE_B", "1");
+    for (size_t p = 0; p < sizeof perm / sizeof *perm; p++) {
+        char joined[3 * 160];
+        snprintf(joined, sizeof joined, "%s%s%s", perm[p][0], perm[p][1], perm[p][2]);
+        perm_ok &= ccs_put(fx, k_ccs_when_plat, joined) == 0
+                && ccd_modules_load(cent, plat, root, &m) == 0
+                && ccd_when_select(&m, &mac) == 0 && m.when_selected == 1
+                && ccs_eq(&m.raw, k_ccs_when_path, "CAP_DYNLOAD");
+        ccd_mods_free(&m);
+    }
+    ccd_map_free(&mac.def);
+    return ccs_say(perm_ok, "W9: every row permutation selects the same top-specificity arm");
+}
+
+/* W10: a tie at the top specificity rank refuses in every order, lower rows
+ * notwithstanding. */
+static int ccs_when_ties(const struct ccs_fx *fx)
+{
+    static const char *const ties[][3] = {
+        { "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_B\", \"fixture_src/when_user.c\", CAP_DYNLOAD, \"top one\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_C\", \"fixture_src/when_user.c\", CAP_CLOCK, \"top two\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"lower arm\")\n" },
+        { "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A\", \"fixture_src/when_user.c\", CAP_NETWORK, \"lower arm\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_C\", \"fixture_src/when_user.c\", CAP_CLOCK, \"top two\")\n",
+          "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_A,HAVE_B\", \"fixture_src/when_user.c\", CAP_DYNLOAD, \"top one\")\n" },
+    };
+    char cent[CCD_PATH], plat[CCD_PATH], root[CCD_PATH];
+    struct ccd_mods m = {0};
+    struct ccg_macros mac = {0};
+    int tie_ok = 1;
+    ccs_path(fx, k_ccs_when_cent, cent);
+    ccs_path(fx, k_ccs_when_plat, plat);
+    ccs_path(fx, k_ccs_when_root, root);
+    ccd_map_put(&mac.def, "HAVE_A", "1");
+    ccd_map_put(&mac.def, "HAVE_B", "1");
+    ccd_map_put(&mac.def, "HAVE_C", "1");
+    for (size_t p = 0; p < sizeof ties / sizeof *ties; p++) {
+        char joined[3 * 160];
+        snprintf(joined, sizeof joined, "%s%s%s", ties[p][0], ties[p][1], ties[p][2]);
+        tie_ok &= ccs_put(fx, k_ccs_when_plat, joined) == 0
+               && ccd_modules_load(cent, plat, root, &m) == 0
+               && ccd_when_select(&m, &mac) == 1 && m.when_selected == 0;
+        ccd_mods_free(&m);
+    }
+    ccd_map_free(&mac.def);
+    return ccs_say(tie_ok, "W10: a tie at the top specificity rank refuses in every order, lower rows notwithstanding");
+}
+
+/* W5: a path whose only arm never applies keeps no exact row. */
+static int ccs_when_uncovered(const struct ccs_fx *fx)
+{
+    char cent[CCD_PATH], plat[CCD_PATH], root[CCD_PATH];
+    struct ccd_mods m = {0};
+    struct ccg_macros mac = {0};
+    int rc;
+    ccs_path(fx, k_ccs_when_cent, cent);
+    ccs_path(fx, k_ccs_when_plat, plat);
+    ccs_path(fx, k_ccs_when_root, root);
+    int made = ccs_put(fx, k_ccs_when_cent, "") == 0
+        && ccs_put(fx, k_ccs_when_plat,
+                   "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_GTK,HAVE_WEBKIT\", \"fixture_src/when_user.c\",\n"
+                   "                           CAP_FS_WRITE|CAP_DYNLOAD, \"only arm\")\n") == 0;
+    rc = made ? ccd_modules_load(cent, plat, root, &m) : 1;
+    ccd_map_put(&mac.def, "HAVE_WEBKIT", "1");
+    rc = rc == 0 ? ccd_when_select(&m, &mac) : rc;
+    int failures = ccs_say(rc == 0 && !ccd_map_get(&m.raw, k_ccs_when_path),
+                        "W5: arms that never apply leave the path with no exact row (missing-row stays fail-closed)");
+    ccd_mods_free(&m);
+    ccd_map_free(&mac.def);
+    return failures;
+}
+
+static int ccs_case_when(const struct ccs_fx *fx)
+{
+    return ccs_when_states(fx) + ccs_when_uncovered(fx) + ccs_when_refusals(fx)
+         + ccs_when_permutations(fx) + ccs_when_ties(fx);
+}
+
 int capability_closure_data_selftest(void)
 {
     struct ccs_fx fx;
@@ -497,7 +699,7 @@ int capability_closure_data_selftest(void)
     }
     int fails = ccs_case_parse() + ccs_case_nm(&fx) + ccs_case_symbols(&fx) + ccs_case_platform(&fx)
               + ccs_case_scan(&fx) + ccs_case_sidecar(&fx) + ccs_case_expression(&fx) + ccs_case_long_class(&fx) + ccs_case_sets() + ccs_case_coverage() + ccs_case_epoch(&fx)
-              + ccs_case_epoch_refusal(&fx) + ccs_case_epoch_unreadable(&fx);
+              + ccs_case_epoch_refusal(&fx) + ccs_case_epoch_unreadable(&fx) + ccs_case_when(&fx);
     lsc_unblock();
     rap_rm_rf(fx.base);
     puts(fails == 0 ? "== selftest: PASS ==" : "== selftest: FAIL ==");

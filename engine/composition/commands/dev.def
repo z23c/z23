@@ -1108,21 +1108,28 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_generation_activate,
     "generation activation requires the dev-only process executor",
     "make dev-bin, then z23-dev dev generation activate")
-ZCL_COMMAND_PLANNED_COMMAND(
+ZCL_COMMAND_DEV_COMMAND(
     "dev.generation.rollback", "dev.generation", "", "Restore verified last-good in the dev lane",
-    "Will report the restored last-good generation after an "
-    "activation-engine rollback; today the handler is NULL and every "
-    "call fails closed with exit 3.", 0,
+    "Restores the most recent distinct verified generation in the isolated "
+    "dev lane through the activation engine's exact-process transaction: "
+    "last-good when it differs from current, else the generation the last "
+    "activation replaced (previous_generation). The target's immutable "
+    "manifest is the source-identity authority, so a binary from a prior "
+    "source epoch can be restored. The plan call names the target; the "
+    "confirmed call performs the restoration and records an accepted "
+    "generation-history marker. Confined to zcl23-dev.service.", 0,
     "generation,rollback,last-good,recovery", "zcl.dev_generation_rollback_input.v1",
-    "zcl.dev_generation_rollback.v1", "intent_id,effect_digest", "",
-    "z23 dev generation rollback --input='<intent>'", ZCL_COMMAND_LAYER_DEV,
-    ZCL_COMMAND_EFFECT_DESTRUCTIVE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    "zcl.dev_generation_rollback.v1", "confirm", "",
+    "z23 dev generation rollback --input='{\"confirm\":true}'", ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_DEV_LANE, ZCL_COMMAND_AUTH_OWNER,
     ZCL_COMMAND_MODE_JOB, ZCL_COMMAND_LATENCY_FOREGROUND,
     ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
     ZCL_COMMAND_LANE_DEV, ZCL_COMMAND_CAP_DEV_ACTIVATE,
     ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_REVERSIBLE,
-    "native activation engine is not implemented")
+    zcl_native_handle_dev_generation_rollback,
+    "generation rollback requires the dev-only process executor",
+    "make dev-bin, then z23-dev dev generation rollback")
 ZCL_COMMAND_PLANNED_COMMAND(
     "dev.generation.compact", "dev.generation", "", "Compact unleased old generations",
     "Will report which unleased old generations were compacted and "

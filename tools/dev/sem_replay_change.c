@@ -21,7 +21,8 @@ static const char *const k_build_inputs[] = {
     "tools/dev/compile-epoch-object.sh",
     "tools/dev/build-epoch-session.sh",
     "tools/dev/build-epoch-open-file-identity.sh",
-    "tools/dev/publish-build-alias.sh",
+    "tools/dev/publish_build_alias.c",
+    "tools/dev/publish_build_alias.h",
     "tools/dev/zcc-bootstrap-inputs.list",
     "tools/zcc.c",
 };

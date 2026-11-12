@@ -110,6 +110,10 @@ struct node_health_snapshot {
 
     /* Memory */
     int64_t memory_rss_mb;
+    /* VmSwap in MiB beside memory_rss_mb: the swapped-out half of the
+     * footprint RSS alone understates. Rounded down like memory_rss_mb;
+     * -1 where the host reports no per-process swap. */
+    int64_t memory_swap_mb;
 
     /* Watchdog stats */
     int      wd_checks_run;

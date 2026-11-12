@@ -583,7 +583,7 @@ The Makefile rule (`check-vcs-no-sha1`) runs three commands:
    `tools/dev/source-identity-batch-selftest.sh` in the background (line
    18), then drives the host `git` (line 8) through more than 50 capture,
    verify and race-injection cases in a sandbox repository.
-3. `tools/dev/sovereign-source-identity-selftest.sh`, a sandbox-only test
+3. `tools/dev/sovereign_source_identity_selftest.c`, a sandbox-only test
    of the ZVCS identity adapter.
 
 The batch self-test gets its helper from
@@ -617,7 +617,7 @@ two runs; the two captures were run once each:
 | `source-identity-selftest.sh`, batch self-test included | 30.4–30.5 | 57.5–62.9 | global |
 | of which the batch self-test | 11.1–11.2 | 11.6–13.2 | global |
 | of which the two whole-tree captures (native 4.3, portable 3.1) | 7.4 | 9.0 | global |
-| `sovereign-source-identity-selftest.sh` | 0.2 | 0.7–1.3 | global |
+| `tools/dev/sovereign_source_identity_selftest.c` | 0.2 | 0.7–1.3 | global |
 | the whole rule (`make check-vcs-no-sha1`) | 33.2 | 92.2 | |
 
 Only the scan could be split per file. Its checks depend only on each

@@ -10,6 +10,8 @@ struct json_value;
 
 struct agent_resource_snapshot {
     int64_t rss_mb;
+    /* VmSwap in MiB beside rss_mb; -1 where the host reports none. */
+    int64_t swap_mb;
     int64_t rss_warn_threshold_mb;
     bool rss_warning;
     bool cgroup_memory_available;

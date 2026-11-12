@@ -214,7 +214,7 @@ time is unrecorded. These are the before-numbers for the inner-loop work.
 ### Bare link, test-strict lane, measured directly
 
 Same object set both runs — 1883 objects in, one test-runner binary out
-(quote `tools/scripts/binary_size.sh` if you need the size; it is not the
+(quote `tools/dev/binary_size.c` if you need the size; it is not the
 variable under test here, the wall time is):
 
 | Linker | Wall | maxrss |

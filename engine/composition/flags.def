@@ -84,9 +84,9 @@ Z23_FLAG("ZCL_ACTION_ROOT_PARENT_HARNESS", "env_test", "-", "-",
 Z23_FLAG("ZCL_ADDNODE_FLAGS", "env_build", "-", "-",
           "first use tools/repro_on_copy.sh:53; Goal:** restore full background re-verification on the live node. The flag is a TEMPORA...")
 Z23_FLAG("ZCL_AGENT_CLEAR_STALE_REINDEX_AGENT_TIMEOUT", "env_build", "10", "-",
-          "undocumented; first use tools/dev/agent-clear-stale-reindex.sh:auto")
+          "undocumented; first use tools/dev/agent_clear_stale_reindex.c:auto")
 Z23_FLAG("ZCL_AGENT_CLEAR_STALE_REINDEX_DRY_RUN", "env_build", "0", "-",
-          "undocumented; first use tools/dev/agent-clear-stale-reindex.sh:auto")
+          "undocumented; first use tools/dev/agent_clear_stale_reindex.c:auto")
 Z23_FLAG("ZCL_AGENT_COMPDB_PATH", "env_build", "-", "-",
           "undocumented; first use tools/dev/generate-compdb.sh:auto")
 Z23_FLAG("ZCL_AGENT_COPY_PROVE_SCRIPT", "env_runtime", "-", "-",
@@ -96,9 +96,9 @@ Z23_FLAG("ZCL_AGENTDEPLOYGUARD_CLI_TIMEOUT", "env_build", "10", "-",
 Z23_FLAG("ZCL_AGENT_DEV_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-dev-status.sh:auto")
 Z23_FLAG("ZCL_AGENT_DEV_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/dev/agent-clear-stale-reindex.sh:auto")
+          "undocumented; first use tools/dev/agent_clear_stale_reindex.c:auto")
 Z23_FLAG("ZCL_AGENT_DEV_RPCPORT", "env_build", "18252", "-",
-          "undocumented; first use tools/dev/agent-clear-stale-reindex.sh:auto")
+          "undocumented; first use tools/dev/agent_clear_stale_reindex.c:auto")
 Z23_FLAG("ZCL_AGENT_DEV_STATUS_AGENT_TIMEOUT", "env_build", "3", "-",
           "undocumented; first use tools/dev/agent-dev-status.sh:auto")
 Z23_FLAG("ZCL_AGENT_DEV_STATUS_CMD", "env_runtime", "-", "-",
@@ -106,7 +106,7 @@ Z23_FLAG("ZCL_AGENT_DEV_STATUS_CMD", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_AGENT_DEV_STATUS_SELFTEST", "env_build", "0", "-",
           "undocumented; first use tools/dev/agent-dev-status.sh:auto")
 Z23_FLAG("ZCL_AGENT_DEV_UNIT", "env_build", "zcl23-dev.service", "-",
-          "undocumented; first use tools/dev/agent-clear-stale-reindex.sh:auto")
+          "undocumented; first use tools/dev/agent_clear_stale_reindex.c:auto")
 Z23_FLAG("ZCL_AGENT_FAST_PLAN_CMD", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-doctor.sh:auto")
 Z23_FLAG("ZCL_AGENT_ID", "env_runtime", "-", "-",
@@ -168,7 +168,7 @@ Z23_FLAG("ZCL_ANCHOR_MINT_DATADIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ANCHOR_SNAPSHOT_PATH", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_anchor_snapshot_reachability.c:auto")
 Z23_FLAG("ZCL_ANCHOR_SNAPSHOT_SRC", "env_build", "/tmp/anchor-ram.snapshot", "-",
-          "undocumented; first use tools/seed_anchor_snapshot.sh:auto")
+          "undocumented; first use tools/dev/seed_anchor_snapshot.c:auto")
 Z23_FLAG("ZCL_API_KEY_SCAN_FILES", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_git_scan_a.c:auto")
 Z23_FLAG("ZCL_APP_AUTHORITY_DIRS", "env_build", "-", "-",
@@ -195,7 +195,7 @@ Z23_FLAG("ZCL_ASAN_ADX_MAKEFILE", "env_build", "Makefile", "-",
           "which Makefile the ASan/ADX build-config gate reads; a test rail so "
           "the selftest can point it at a fixture")
 Z23_FLAG("ZCL_BASELINE_LINT_GATES", "env_build", "-", "-",
-          "undocumented; first use tools/dev/agent-baseline.sh:auto")
+          "undocumented; first use tools/dev/agent_baseline.c:auto")
 Z23_FLAG("ZCL_BATCH_FSYNC_SLOW_EWMA_US", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/batch_fsync_slow.c:auto")
 Z23_FLAG("ZCL_BENCH_BUDGET_MS", "env_runtime", "-", "-",
@@ -226,8 +226,8 @@ Z23_FLAG("ZCL_BINARY_SLOTS_DIR", "env_runtime", "-", "-",
           "first use tools/zcl-nodectl.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_BIN_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/arena_demo.sh:auto")
-Z23_FLAG("ZCL_BIP_PAGE_CACHE_KIB", "env_runtime", "-", "-",
-          "undocumented; first use engine/modules/storage/src/block_index_projection.c:auto")
+Z23_FLAG("ZCL_BIP_PAGE_CACHE_KIB", "env_runtime", "262144", "-",
+          "steady SQLite page cache of the block-index projection in KiB, clamped 2 MiB..4 GiB; lowered per host to cut resident memory (engine/modules/storage/src/block_index_projection.c:auto)")
 Z23_FLAG("ZCL_BLUE_EXPORT_SAPLING_WIRE", "env_test", "-", "-",
           "Exports deterministic public Sapling wire only after the simulator's consensus verifier accepts it.")
 Z23_FLAG("ZCL_BLUE_EXPORT_TEST_KEYS", "env_test", "-", "-",
@@ -285,7 +285,7 @@ Z23_FLAG("ZCL_BUILD_EPOCH_CACHE_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_BUILD_EPOCH_DIAG_DIR", "env_build", "-", "-",
           "directory build-epoch-key.sh copies each compiler-identity preimage into, named by its own digest, so two disagreeing fingerprints can be diffed input by input; off by default because the copy is multi-megabyte; first use tools/dev/build-epoch-key.sh:auto")
 Z23_FLAG("ZCL_BUILD_EPOCH_LOCK_TIMEOUT", "env_build", "120", "-",
-          "undocumented; first use tools/dev/build-epoch-lock-wait.sh:auto")
+          "undocumented; first use tools/dev/build_epoch_lock_wait.c:auto")
 Z23_FLAG("ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT", "env_build", "120", "-",
           "undocumented; first use tools/dev/build-epoch-selftest.sh:auto")
 Z23_FLAG("ZCL_BUILD_EPOCH_SELFTEST_TIMEOUT", "env_build", "600", "-",
@@ -361,7 +361,7 @@ Z23_FLAG("ZCL_CC", "env_build", "clang", "-",
 Z23_FLAG("ZCL_CC_JOBS", "env_build", "ZCL_HOST_JOBS/2", "-",
           "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_CHECKOUT_LOCK_HELD", "env_build", "0", "-",
-          "undocumented; first use tools/dev/checkout-lock.sh:auto")
+          "undocumented; first use tools/dev/checkout_lock.c:auto")
 Z23_FLAG("ZCL_CLANG_MANIFEST_INJECT_WARM_MISMATCH", "env_runtime", "0", "-",
           "test fault: 1 makes the semantic sensor session corrupt every warm manifest before its cold-oracle comparison, so the semantic_sensor group proves a mismatch disables warm reuse and writes only the cold bytes; first use tools/sensors/clang_manifest_session.c")
 Z23_FLAG("ZCL_CLANG_PORTABILITY_COVERAGE", "env_build", "1", "-",
@@ -703,7 +703,7 @@ Z23_FLAG("ZCL_DEV_LINKER_RECEIPT", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_LINKER_RUNS", "env_build", "3", "-",
           "undocumented; first use tools/dev/dev-linker-shootout.sh:auto")
 Z23_FLAG("ZCL_DEV_LOOP_TEST_BIN", "env_build", "-", "-",
-          "undocumented; first use tools/dev/native-dev-loop-wait-selftest.sh:auto")
+          "undocumented; first use tools/dev/native_dev_loop_wait_selftest.c:auto")
 Z23_FLAG("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_dev_platform.c:auto")
 Z23_FLAG("ZCL_DEVLOOP_TEST_PROCESS", "env_test", "-", "-",
@@ -1098,7 +1098,7 @@ Z23_FLAG("ZCL_HEX_CODEC_FILE_FLOOR", "env_build", "800", "-",
 Z23_FLAG("ZCL_HEX_CODEC_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:auto")
 Z23_FLAG("ZCL_HOOKS_STATUS_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/hooks_status.sh:auto")
+          "undocumented; first use tools/dev/hooks_status.c:auto")
 Z23_FLAG("ZCL_HISTORY_ARCHIVE_DIR", "env_test", "-", "-",
           "private immutable public archive directory enabling the history archive probe; first use tests/harness/src/test_block_index_loader.c:auto")
 Z23_FLAG("ZCL_HISTORY_ARCHIVE_HASH", "env_test", "-", "-",
@@ -1822,7 +1822,7 @@ Z23_FLAG("ZCL_PEER_TIP_REQUIRE_SIGKILL", "env_build", "0", "-",
 Z23_FLAG("ZCL_PEER_TIP_TMP", "env_build", "-", "-",
           "undocumented; first use tools/scripts/two_node_peer_tip.sh:auto")
 Z23_FLAG("ZCL_PERF_REPORT_UNDER_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/dev/zcode_async_proof_perf_report_selftest.sh:auto")
+          "undocumented; first use tools/dev/zcode_async_proof_perf_selftest.c:auto")
 Z23_FLAG("ZCL_PERSONA_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_def_parsers.c:auto")
 Z23_FLAG("ZCL_PERSONA_ROW_FLOOR", "env_build", "3", "-",
@@ -1838,7 +1838,7 @@ Z23_FLAG("ZCL_PIPEFAIL_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_PORTABILITY_SCOPE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_PORTABLE_CC", "env_build", "cc", "-",
-          "undocumented; first use tools/scripts/c23_portable_sysroot.sh:auto")
+          "undocumented; first use tools/dev/c23_portable_sysroot.c:auto")
 Z23_FLAG("ZCL_PP_CUTTER", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_published_platforms.c:auto")
 Z23_FLAG("ZCL_PP_FRONT_DOOR_C", "env_build", "-", "-",
@@ -1998,25 +1998,25 @@ Z23_FLAG("ZCL_REFLEX_SHADOW_SELECT_CORE_ACCEPTANCE_OUTPUT", "env_build", "-", "-
 Z23_FLAG("ZCL_REFLEX_SHADOW_SELECT_SIBLING_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-watch-core-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_SHOP_REPUTATION_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
-          "undocumented; first use tools/dev/reflex-hotfork-shop-reputation-acceptance.sh:auto")
+          "undocumented; first use tools/dev/reflex_hotfork_shop.c:auto")
 Z23_FLAG("ZCL_REFLEX_SHOP_STATUS_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
-          "undocumented; first use tools/dev/reflex-hotfork-shop-status-acceptance.sh:auto")
+          "undocumented; first use tools/dev/reflex_hotfork_shop.c:auto")
 Z23_FLAG("ZCL_REFLEX_SHOP_WANT_CORE_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-watch-core-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_SHOP_WANT_VIEW_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-shop-want-view-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_SOURCE_BUNDLE_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
-          "undocumented; first use tools/dev/reflex-hotfork-source-bundle-acceptance.sh:auto")
+          "undocumented; first use tools/dev/reflex_hotfork_source_bundle.c:auto")
 Z23_FLAG("ZCL_REFLEX_TEST_CATALOG_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-test-catalog-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_TRANSPORT_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
-          "undocumented; first use tools/dev/reflex-hotfork-transport-acceptance.sh:auto")
+          "undocumented; first use tools/dev/reflex_hotfork_source_bundle.c:auto")
 Z23_FLAG("ZCL_REFLEX_WATCH_CORE_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-watch-core-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_ZCODE_PACKAGE_VIEW_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex-hotfork-zcode-package-view-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_ZCODE_WORK_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
-          "undocumented; first use tools/dev/reflex-hotfork-zcode-work-acceptance.sh:auto")
+          "undocumented; first use tools/dev/reflex_hotfork_shop.c:auto")
 Z23_FLAG("ZCL_REINDEX_REFUSE_MISSING_BODY", "env_build", "0", "-",
           "reindex_smoke.sh: clean 50-block isolated H25 payload damage must refuse without authority loss, then restored full replay must finish within one 120-second deadline; incompatible with KILL_MID")
 Z23_FLAG("ZCL_REINDEX_REQUIRE_TEETH", "env_build", "0", "-",
@@ -2074,9 +2074,9 @@ Z23_FLAG("ZCL_REPO_SHAPE_ROOT", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_REPRO_BUILD_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/repro_build.sh:auto")
 Z23_FLAG("ZCL_REPRO_CAPTURE_NAME", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/repro_network_policy_selftest.sh:auto")
+          "undocumented; first use tools/dev/repro_network_policy.c:auto")
 Z23_FLAG("ZCL_REPRO_CAPTURE_PATH", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/repro_network_policy_selftest.sh:auto")
+          "undocumented; first use tools/dev/repro_network_policy.c:auto")
 Z23_FLAG("ZCL_REPRO_HOST_OS", "env_build", "-", "-",
           "undocumented; first use tools/repro_on_copy.sh:auto")
 Z23_FLAG("ZCL_REPRO_JOBS", "env_build", "-", "-",
@@ -2646,7 +2646,7 @@ Z23_FLAG("ZCL_TOR", "env_runtime", "full", "-",
 Z23_FLAG("ZCL_TOR_JOBS", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_tor_full.sh:auto")
 Z23_FLAG("ZCL_TOR_STUB_REFUSAL", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/tor_stamp_lib.sh:auto")
+          "undocumented; first use tools/dev/tor_stamp.c:auto")
 Z23_FLAG("ZCL_TRACE_VERBOSE", "env_runtime", "-", "-",
           "undocumented; first use platform/modules/util/src/trace.c:auto")
 Z23_FLAG("ZCL_TRAIN_HELPER_DIR", "env_test", "-", "-",
@@ -2702,7 +2702,7 @@ Z23_FLAG("ZCL_UNATTENDED_PUBLISH_SCAN_FILES", "env_build", "-", "-",
 Z23_FLAG("ZCL_UNATTENDED_PUBLISH_TEST_REGEX", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_no_unattended_publish.c:auto")
 Z23_FLAG("ZCL_USE_CCACHE", "env_build", "unset", "-",
-          "first use tools/scripts/repro_network_policy_selftest.sh:auto; documented at docs/agent/AGENT_API.md:1286: installed, otherwise ccache. Set ZCL_USE_CCACHE=0 to force a direct")
+          "first use tools/scripts/vendor_provenance_lib.sh:auto; documented at docs/agent/AGENT_API.md:1286: installed, otherwise ccache. Set ZCL_USE_CCACHE=0 to force a direct")
 Z23_FLAG("ZCL_UTXO_LADDER_HEAVY", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_utxo_root_ladder.c:auto")
 Z23_FLAG("ZCL_UTXO_LADDER_LEAF_STORE", "env_test", "-", "-",

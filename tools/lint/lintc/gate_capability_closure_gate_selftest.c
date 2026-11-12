@@ -19,7 +19,7 @@
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
-enum { CGS_CASES = 26, CGS_FILLER = 500 };
+enum { CGS_CASES = 30, CGS_FILLER = 500 };
 
 static const char k_fx0[] = "build/dev-obj/epochs/fx0";
 
@@ -672,13 +672,79 @@ static int cgs_case_spaced(const struct ccs_fx *fx)
     return failures + cgs_check(fx, "space", &cfg, -1, NULL, "unknown capability does not close actual reaches");
 }
 
+/* Y. feature-conditional rows grade the epoch the build's real flags describe:
+ * each state stays exact, a flags/object mismatch still refuses, and a table
+ * no state can disambiguate is FATAL. Linux-only: the platform file is a Linux
+ * supplement, so other hosts skip the whole family. */
+static const char k_y_src[] = "#if defined(HAVE_GTK) && defined(HAVE_WEBKIT)\n"
+                              "extern int connect(int, int, int);\n"
+                              "int gui_both_export(void) { return connect(1, 2, 3); }\n"
+                              "#elif defined(HAVE_GTK)\n"
+                              "extern int connect(int, int, int);\n"
+                              "int gui_gtk_export(void) { return connect(1, 2, 3); }\n"
+                              "#else\n"
+                              "typedef int gui_user_headless;\n"
+                              "#endif\n";
+
+static int cgs_y_defs(const struct ccs_fx *fx, const char *dir)
+{
+    char rel[CCD_PATH];
+    snprintf(rel, sizeof rel, "%s/engine/composition/module_capabilities_linux.def", dir);
+    return ccs_put(fx, rel,
+                   "ZCL_MODULE_CAPABILITY(\"fixture_src/gui_user.c\", CAP_NONE, \"fallback arm\")\n"
+                   "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_GTK\", \"fixture_src/gui_user.c\", CAP_NETWORK, \"gtk arm\")\n"
+                   "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_GTK,HAVE_WEBKIT\", \"fixture_src/gui_user.c\",\n"
+                   "                           CAP_NETWORK|CAP_PROCESS, \"webkit arm\")\n") != 0;
+}
+
+static int cgs_case_y(const struct ccs_fx *fx)
+{
+    struct ccg_cfg cfg, host;
+    int f;
+    ccg_host_cfg(&host);
+    if (host.os != CCD_LINUX) {
+        printf("  SKIP Y: feature-conditional rows are a Linux platform supplement (host is not Linux)\n");
+        return 0;
+    }
+    cgs_cfg(&cfg);
+    if (cgs_base(fx, "y1", "") != 0 || cgs_y_defs(fx, "y1") != 0
+        || cgs_unit(fx, "y1", "fixture_src/gui_user.c", k_y_src, NULL) != 0)
+        return ccs_say(0, "Y1: fixture");
+    cfg.cflags = "";
+    f = cgs_check(fx, "y1", &cfg, 0, NULL, "Y1: the headless state keeps the unconditional fallback exact (exit 0)");
+    if (cgs_base(fx, "y2", "") != 0 || cgs_y_defs(fx, "y2") != 0
+        || cgs_unit(fx, "y2", "fixture_src/gui_user.c", k_y_src, "-DHAVE_GTK") != 0)
+        return f + ccs_say(0, "Y2: fixture");
+    cfg.cflags = "-DHAVE_GTK";
+    f += cgs_check(fx, "y2", &cfg, 0, NULL, "Y2: the gtk state selects its arm and closes the reach it built (exit 0)");
+    if (cgs_base(fx, "y3", "") != 0 || cgs_y_defs(fx, "y3") != 0
+        || cgs_unit(fx, "y3", "fixture_src/gui_user.c", k_y_src, NULL) != 0)
+        return f + ccs_say(0, "Y3: fixture");
+    {
+        const char *const need[] = { "fixture_src/gui_user.c declares CAP_NETWORK", NULL };
+        f += cgs_check(fx, "y3", &cfg, -1, need,
+                       "Y3: flags naming a state the epoch did not build stay an overdeclaration, never a pass");
+    }
+    if (cgs_base(fx, "y4", "") != 0 || cgs_y_defs(fx, "y4") != 0)
+        return f + ccs_say(0, "Y4: fixture");
+    ccs_put(fx, "y4/engine/composition/module_capabilities_linux.def",
+            "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_Y_A\", \"fixture_src/gui_user.c\", CAP_NETWORK, \"a arm\")\n"
+            "ZCL_MODULE_CAPABILITY_WHEN(\"HAVE_Y_B\", \"fixture_src/gui_user.c\", CAP_PROCESS, \"b arm\")\n");
+    cfg.cflags = "-DHAVE_Y_A -DHAVE_Y_B";
+    {
+        const char *const need[] = { "FATAL", "ambiguous feature rows", NULL };
+        f += cgs_check(fx, "y4", &cfg, 2, need, "Y4: two applicable arms of equal specificity are FATAL, never graded");
+    }
+    return f;
+}
+
 static int cgs_cases(const struct ccs_fx *fx)
 {
     return cgs_case_a(fx) + cgs_case_b(fx) + cgs_case_c(fx) + cgs_case_d(fx) + cgs_case_e(fx) + cgs_case_f(fx) +
            cgs_case_g(fx) + cgs_case_h() + cgs_case_i(fx) + cgs_case_j(fx) + cgs_case_k(fx) + cgs_case_l() +
            cgs_case_m(fx) + cgs_case_n1(fx) + cgs_case_n2(fx) + cgs_case_o(fx) + cgs_case_p(fx) + cgs_case_q(fx) +
            cgs_case_r(fx) + cgs_case_s(fx) + cgs_case_t(fx) + cgs_case_u(fx) + cgs_case_v(fx) + cgs_case_w(fx) +
-           cgs_case_x(fx) + cgs_case_spaced(fx);
+           cgs_case_x(fx) + cgs_case_spaced(fx) + cgs_case_y(fx);
 }
 
 int check_capability_closure_selftest(void)

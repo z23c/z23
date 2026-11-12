@@ -110,7 +110,7 @@ static void stl_helper_selftest(struct stl_bs *bs, int build_only)
         puts("[check_standalone_tools_link] still runs it in the lint dimension.");
         return;
     }
-    if (capture_cmd("tools/agent/gate-receipt.sh --selftest-helper 2>&1", out,
+    if (capture_cmd("build/bin/gate_receipt \"$(pwd)\" --selftest-helper 2>&1", out,
                     sizeof out, &code) == 0 && code == 0) {
         printf("[check_standalone_tools_link] %s\n", out);
         return;

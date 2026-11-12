@@ -2477,7 +2477,7 @@ static char *status_brief_mock_rpc(const char *method,
                 "\"schema\":\"zcl.condition_engine_summary.v2\","
                 "\"active_count\":2},"
             "\"resources\":{\"schema\":\"zcl.node_resources.v1\","
-                "\"rss_mb\":512},"
+                "\"rss_mb\":512,\"swap_mb\":186},"
             "\"reducer\":{\"tip_advance_age_seconds\":3},"
             "\"security_posture\":{"
                 "\"schema\":\"zcl.security_posture.v1\","
@@ -2620,13 +2620,13 @@ static char *status_journey_mock_rpc(const char *method,
 }
 
 /* core.status.brief is READY-bridged, yields a zcl.result.v1 envelope, and
- * `data` stays flat with exactly the thirteen documented keys. */
+ * `data` stays flat with exactly the fourteen documented keys. */
 static int test_status_brief_flat_lean_envelope(void)
 {
     int failures = 0;
     const struct zcl_command_registry *reg = zcl_command_catalog();
     char out[ZCL_COMMAND_RESULT_BUDGET + 1];
-    TEST("core.status.brief: flat lean zcl.result.v1 body, thirteen "
+    TEST("core.status.brief: flat lean zcl.result.v1 body, fourteen "
         "sync/serving fields") {
         const struct zcl_command_spec *root_status = find_spec(reg, "status");
         const struct zcl_command_spec *s =
@@ -2664,12 +2664,12 @@ static int test_status_brief_flat_lean_envelope(void)
         static const char *const expected_keys[] = {
             "hstar", "header_height", "gap", "peer_best", "sync_state",
             "serving", "healthy", "peer_count", "primary_blocker",
-            "blocker_age_s", "active_conditions", "rss_mb",
+            "blocker_age_s", "active_conditions", "rss_mb", "swap_mb",
             "tip_advance_age_seconds",
         };
         size_t expected_count =
             sizeof(expected_keys) / sizeof(expected_keys[0]);
-        /* The thirteen documented fields plus the universal `_page` sidecar
+        /* The fourteen documented fields plus the universal `_page` sidecar
          * every bridged leaf's envelope carries — nothing else. */
         ASSERT(data->num_children == expected_count + 1);
         for (size_t i = 0; i < expected_count; i++) {
@@ -2699,6 +2699,8 @@ static int test_status_brief_flat_lean_envelope(void)
         ASSERT_EQ(json_get_int(json_get(data, "active_conditions")),
                   (int64_t)2);
         ASSERT_EQ(json_get_int(json_get(data, "rss_mb")), (int64_t)512);
+        /* The fixture's 186 MiB swapped-out half surfaces beside rss_mb. */
+        ASSERT_EQ(json_get_int(json_get(data, "swap_mb")), (int64_t)186);
         ASSERT_EQ(json_get_int(json_get(data, "tip_advance_age_seconds")),
                   (int64_t)3);
         json_free(&root);
@@ -4227,7 +4229,6 @@ static int test_dev_branch_leaves(void)
          * discovery can never advertise a dev command that cannot dispatch. */
         const char *planned[] = {
             "dev.core.proof", "dev.app.inspect", "dev.test.replay",
-            "dev.generation.rollback",
         };
         for (size_t i = 0; i < sizeof(planned) / sizeof(planned[0]); i++) {
             const struct zcl_command_spec *s = find_spec(reg, planned[i]);
@@ -4244,7 +4245,8 @@ static int test_dev_branch_leaves(void)
             "dev.loop.ensure", "dev.loop.status",
             "dev.loop.wait", "dev.loop.events", "dev.loop.stop", "dev.test.run",
             "dev.test.sim", "dev.generation.current",
-            "dev.generation.history", "dev.diagnose.latest",
+            "dev.generation.history", "dev.generation.rollback",
+            "dev.diagnose.latest",
             "dev.diagnose.show",
             "dev.vcs.revert", "dev.vcs.seal.grant",
         };

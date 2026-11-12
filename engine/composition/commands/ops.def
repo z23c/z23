@@ -1331,6 +1331,32 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
     ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_mesh_device_pair_renew)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.device.pair.export", "ops.mesh.device.pair", "",
+    "Export one client pairing epoch as a self-contained archive",
+    "Reads one client epoch directory under state_dir (<peer>-e<N>: the client route, the epoch profile, any secret files) and writes a deterministic length-prefixed record stream (magic Z23PEA01, a header carrying peer, route_id, epoch and the client host's intended profile directory taken from client.json's directory field, then one sorted name/mode/size/bytes record per file) to an absent caller-supplied destination at 0600. epoch defaults to the newest readable epoch; an existing destination refuses EXPORT_DEST_EXISTS and an unreadable epoch or grant refuses EXPORT_EPOCH_UNREADABLE. Equal epochs export byte-identical archives, so the sha256 in the typed result (archive, bytes, sha256, epoch, peer, route_id, directory, files) names the exact bytes an import expects. Pure filesystem + sha256; no network, ssh or fork/exec; no secret byte is read into any reply or log.",
+    ZCL_COMMAND_RESULT_BUDGET, "mesh,device,pairing,epoch,export,fleet,cross-host",
+    "zcl.device.pair.export.input.v1", "zcl.device.pair.export.v1",
+    "state_dir,peer,epoch,destination", "",
+    "z23 ops mesh device pair export --peer=r2 --epoch=3 --destination=<absent path>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC, zcl_native_handle_ops_mesh_device_pair_export)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.device.pair.import", "ops.mesh.device.pair", "",
+    "Import an exported pairing epoch under a local state root",
+    "Reads one archive written by ops.mesh.device.pair.export, verifies every byte against the caller's expected_sha256 (IMPORT_SHA_MISMATCH refuses before anything is written), then materializes <peer>-e<N> under state_root, creating an absent state root owner-only, with owner-only directories (0700) and files (0600), rewriting client.json's directory from the archive header's original client-host path to the destination root's own profile path (the cross-host path fix). An existing epoch directory refuses IMPORT_EPOCH_EXISTS; a malformed record stream refuses IMPORT_FORMAT_REFUSED and an archive without a client route IMPORT_ROUTE_REFUSED. Prints the typed result: epoch, peer, route_id, rewritten directory, archive bytes and file count. Pure filesystem + sha256; no network, ssh or fork/exec.",
+    ZCL_COMMAND_RESULT_BUDGET, "mesh,device,pairing,epoch,import,fleet,cross-host",
+    "zcl.device.pair.import.input.v1", "zcl.device.pair.import.v1",
+    "archive,expected_sha256,state_root", "",
+    "z23 ops mesh device pair import --archive=<absent path> --expected_sha256=<64 hex> --state_root=<abs path>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_mesh_device_pair_import)
 ZCL_COMMAND_BRANCH("ops.mesh.device.host", "ops.mesh.device", "Foreground owner-approved hash-PSK host transport",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(

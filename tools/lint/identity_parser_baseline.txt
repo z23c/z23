@@ -38,7 +38,6 @@ tools/dev/build-epoch-session.sh 1
 tools/dev/compile-epoch-object.sh 1
 tools/dev/deploy-dev-lane.sh 2
 tools/dev/dev_lib.sh 1
-tools/dev/publish-build-alias.sh 1
 tools/dev/recover-dev-lane.sh 2
 tools/repro_on_copy.sh 2
 tools/scripts/replay_canary.sh 1

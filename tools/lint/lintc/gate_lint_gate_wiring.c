@@ -10,7 +10,7 @@
  * Sources of truth this gate never re-parses by hand: the Makefile's
  * backslash-continued LINT_GATES/LINT_FAST_GATES blocks (read directly,
  * same shape the check-doc-accuracy gate (gate_doc_accuracy.c) and
- * tools/dev/agent-baseline.sh already assume), and gate_commands.def's own
+ * tools/dev/agent_baseline.c already assume), and gate_commands.def's own
  * LINT_ROW lines (read with lint_cmdrow_parse, the parser the driver's
  * table shares; this gate never re-implements the table).
  *

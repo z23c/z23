@@ -6800,7 +6800,7 @@ static void generation_zcc_bootstrap(const char *generation)
 }
 
 /* Arm only this generation's own worktree scope with the same relative
- * spelling used by install_git_hooks.sh and refresh_git_hooks_if_armed.sh.
+ * spelling used by install_git_hooks.sh and refresh-git-hooks.
  * Git resolves hooks from the invoking worktree root; git_capture below
  * executes in `generation`. Relative arming both isolates the copied hooks
  * and permits a later native-hook rebuild to refresh that installed copy.

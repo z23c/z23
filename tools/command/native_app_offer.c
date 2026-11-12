@@ -446,24 +446,72 @@ void zcl_app_offer_age(int64_t created_at, int64_t now, char *out,
 
 /* ── the transport seam ──────────────────────────────────────────────── */
 
+/* The node RPC's own error message from a parsed refusal body, or an empty
+ * string when the body holds none. Called while the reply object is alive. */
+static void zao_board_refusal_reason(const struct json_value *body,
+                                     char *reason, size_t cap)
+{
+    reason[0] = '\0';
+    if (!body || body->type != JSON_OBJ)
+        return;
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *msg =
+        err && err->type == JSON_OBJ ? json_get(err, "message") : NULL;
+    const char *text =
+        msg && msg->type == JSON_STR ? json_get_str(msg) : NULL;
+    if (text)
+        (void)snprintf(reason, cap, "%s", text);
+}
+
+/* The BOARD_UNREADABLE failure, naming the node's own refusal when it gave
+ * one and the start-the-node remedy only when nothing answered. */
+static void zao_board_unreadable_fail(struct zcl_command_reply *out,
+                                      const char *node_reason)
+{
+    char why[320];
+    if (node_reason[0])
+        (void)snprintf(why, sizeof(why),
+                       "the node's board refused the listing: %s",
+                       node_reason);
+    else
+        (void)snprintf(why, sizeof(why),
+                       "the node's board did not answer; start the "
+                       "node (z23) and try again");
+    zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_TRANSIENT, "BOARD_UNREADABLE",
+                           "execute", true, false, why,
+                           "fleet_board list room=apps");
+}
+
 /* The node's whole board list for these filters, unpaged: the leaf's
  * reply budget would cut it to a few posts. */
+/* The board list params array ("[<filters with op:list>]"), or an empty
+ * string when the filters do not fit. */
+static bool zao_board_params(const struct json_value *input, char *params,
+                             size_t cap)
+{
+    struct json_value fwd;
+    json_init(&fwd);
+    json_copy(&fwd, input);
+    bool ok = json_push_kv_str(&fwd, "op", "list");
+    size_t n = ok ? json_write(&fwd, params + 1, cap - 2u) : 0;
+    json_free(&fwd);
+    if (!ok || n == 0 || n >= cap - 2u)
+        return params[0] = '\0', false;
+    params[0] = '[';
+    params[1 + n] = ']';
+    params[2 + n] = '\0';
+    return true;
+}
+
 static bool zao_board_list(const struct json_value *input,
                            struct zcl_command_reply *out)
 {
     char params[ZAO_PARAMS];
-    struct json_value fwd, body;
-    json_init(&fwd);
-    json_copy(&fwd, input);
-    bool ok = json_push_kv_str(&fwd, "op", "list");
-    size_t n = ok ? json_write(&fwd, params + 1, sizeof(params) - 2u) : 0;
-    json_free(&fwd);
-    ok = ok && n > 0 && n < sizeof(params) - 2u;
+    struct json_value body;
     char *raw = NULL;
+    bool ok = zao_board_params(input, params, sizeof(params));
     if (ok) {
-        params[0] = '[';
-        params[1 + n] = ']';
-        params[2 + n] = '\0';
         zcl_native_bridge_ensure_rpc();
         raw = node_rpc_call("fleet_board", params);
     }
@@ -472,6 +520,12 @@ static bool zao_board_list(const struct json_value *input,
          json_get_bool_or(&body, "ok", false) &&
          json_get(&body, "posts") &&
          json_get(&body, "posts")->type == JSON_ARR;
+    /* A node that ANSWERED with its own refusal (version skew, room policy)
+     * has more to say than "start the node": keep its message so the
+     * operator sees the real cause while the reply object is still alive. */
+    char node_reason[192];
+    zao_board_refusal_reason(!ok ? &body : NULL, node_reason,
+                             sizeof(node_reason));
     free(raw);
     if (ok) {
         static const char *const keys[] = {"posts", "returned", "has_more", "next_created_at", "next_id"};
@@ -482,12 +536,7 @@ static bool zao_board_list(const struct json_value *input,
     }
     json_free(&body);
     if (!ok)
-        zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_TRANSIENT, "BOARD_UNREADABLE",
-                               "execute", true, false,
-                               "the node's board did not answer; start the "
-                               "node (z23) and try again",
-                               "fleet_board list room=apps");
+        zao_board_unreadable_fail(out, node_reason);
     return ok;
 }
 

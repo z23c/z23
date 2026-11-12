@@ -19,6 +19,7 @@
 #include "command/native_command.h"
 #include "command/native_dev_train_command.h"
 
+#include "checkout_lock.h"
 #include "devloop.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -29,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define DVT_LEAF_BUILD "dev.train.build"
 #define DVT_LEAF_CHECK "dev.train.check"
@@ -786,6 +788,32 @@ static void dvt_collect_failed_gates(const char *output,
 }
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* lint-fast under the in-process checkout lock. False when it cannot start. */
+static bool dvt_run_lint_fast(const char *stack_dir, int timeout_ms,
+                              struct zcl_devloop_process_result *result)
+{
+    const char *make_argv[] = {"make", "--no-print-directory", "lint-fast",
+                               NULL};
+    char lock[PATH_MAX];
+    struct zcl_checkout_lock_hold hold;
+    int n;
+    int locked;
+    bool ran;
+    memset(&hold, 0, sizeof hold);
+    memset(result, 0, sizeof *result);
+    n = snprintf(lock, sizeof lock, "%s/build/.checkout.lock", stack_dir);
+    locked = n > 0 && (size_t)n < sizeof lock
+                 ? zcl_checkout_lock_enter(&hold, "foreground", lock,
+                                           STDERR_FILENO)
+                 : 2;
+    ran = locked == 0 &&
+          zcl_devloop_process_run(stack_dir, make_argv, timeout_ms, result);
+    zcl_checkout_lock_leave(&hold);
+    return ran;
+}
+#endif
+
 void zcl_native_handle_dev_train_check(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -817,12 +845,8 @@ void zcl_native_handle_dev_train_check(
         return;
     }
 
-    const char *lock_argv[] = {"tools/dev/checkout-lock.sh", "foreground",
-                               "build/.checkout.lock", "--", "make",
-                               "--no-print-directory", "lint-fast", NULL};
     struct zcl_devloop_process_result result;
-    if (!zcl_devloop_process_run(stack_dir, lock_argv, (int)timeout_ms,
-                                 &result)) {
+    if (!dvt_run_lint_fast(stack_dir, (int)timeout_ms, &result)) {
         dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                 "LINT_EXEC_FAILED", "execute", "could not execute lint-fast",
                 stack_dir);

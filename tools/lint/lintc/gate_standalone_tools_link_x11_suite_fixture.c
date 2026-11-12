@@ -37,7 +37,7 @@ static const char k_mk_hdr[] =
     "$(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht "
     "$(BIN_DIR)/fuzz_zcode_science $(BIN_DIR)/fuzz_mesh_status_proto "
     "$(BIN_DIR)/fuzz_semantic_manifest\n"
-    "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)\n";
+    "fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS) $(BIN_DIR)/run-fuzz-ci\n";
 
 static const char k_mk_rule[] = "$(BIN_DIR)/%s:\n\t@mkdir -p build/bin; touch $@\n";
 
@@ -210,9 +210,15 @@ static int x11_write_sources(struct stl_x11_ctx *c)
 static int x11_write_tools(struct stl_x11_ctx *c)
 {
     char rcpt[STL_X11_PATH], wa[STL_X11_PATH];
+    char bindir[STL_X11_PATH];
     if (x11_write_sources(c)) return 1;
-    if (ovf(snprintf(rcpt, sizeof rcpt, "%s/tools/agent/gate-receipt.sh",
-                     c->fixture), sizeof rcpt) ||
+    /* The gate-receipt helper is the built build/bin/gate_receipt binary (the
+     * retired tools/agent/gate-receipt.sh is gone from the tree), and the
+     * nested gate runs its selftest before any make: provision the stub the
+     * same way the repository root pre-builds the real one. */
+    if (ovf(snprintf(bindir, sizeof bindir, "%s/build/bin", c->fixture), sizeof bindir) ||
+        csr_mkdirs(bindir) != 0 ||
+        ovf(snprintf(rcpt, sizeof rcpt, "%s/gate_receipt", bindir), sizeof rcpt) ||
         csr_write(rcpt, "#!/usr/bin/env bash\necho fixture-receipt-helper\n") != 0 ||
         chmod(rcpt, 0755) != 0)
         return 1;
@@ -272,6 +278,11 @@ static int x11_makefile_write(struct stl_x11_ctx *c, const char *path)
                      "\t@mkdir -p build/bin; touch $@\n", i) < 0;
     if (!bad)
         bad = fputs("$(BIN_DIR)/z23-headless-run.exe:\n"
+                    "\t@mkdir -p build/bin; touch $@\n", out) == EOF;
+    /* fuzz-ci's prerequisite list names the native runner; give the fixture
+     * the same stub rule the real Makefile has a recipe for. */
+    if (!bad)
+        bad = fputs("$(BIN_DIR)/run-fuzz-ci:\n"
                     "\t@mkdir -p build/bin; touch $@\n", out) == EOF;
     if (ferror(out))
         bad = 1;

@@ -53,6 +53,18 @@
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+/* A successful flat load leaves the process-lifetime arena scratch file
+ * (<dir>/.block_index.arena — see bil_arena_file_map in
+ * block_index_loader.c) behind in the fixture datadir; drop it so the
+ * fixture rmdir()s keep succeeding. Harmless when no load mapped an
+ * arena (the loader unlinks it on its failure paths). */
+static void bil_test_unlink_arena(const char *dir)
+{
+    char p[512];
+    if (snprintf(p, sizeof(p), "%s/.block_index.arena", dir) < (int)sizeof(p))
+        unlink(p);
+}
+
 /* Build a minimal block_index chain of `n` blocks in main_state. */
 static void build_synthetic_chain(struct main_state *ms, int n)
 {
@@ -493,6 +505,68 @@ static int bil_flat_round_trip_case(void)
 
         unlink(sidecar_path);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
+        rmdir(tmpdir);
+        main_state_free(&ms);
+        main_state_free(&ms2);
+    }
+    return failures;
+}
+
+/* File-backed load arena (bil_arena_file_map in block_index_loader.c): a
+ * successful flat load must map its arena over the datadir scratch file.
+ * The FILE — not RSS — is the discriminating check: it can only exist if
+ * the load mapped it, and its exact byte size pins the mapping to
+ * count * sizeof(struct block_index). Entries must behave identically to
+ * the calloc path: first/last rows round-trip through block_map_find and
+ * the tip keeps its pprev link. */
+static int bil_flat_arena_file_case(void)
+{
+    int failures = 0;
+    {
+        struct main_state ms;
+        main_state_init(&ms);
+        build_synthetic_chain(&ms, 100);
+
+        char tmpdir[256];
+        snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_arena", getpid());
+        mkdir("./test-tmp", 0755);
+        mkdir(tmpdir, 0755);
+
+        save_block_index_flat(tmpdir, &ms);
+
+        struct main_state ms2;
+        main_state_init(&ms2);
+        bool loaded = load_block_index_flat(tmpdir, &ms2).ok;
+
+        char arena_path[512];
+        snprintf(arena_path, sizeof(arena_path), "%s/.block_index.arena",
+                 tmpdir);
+        struct stat st;
+        bool arena_ok = loaded &&
+            stat(arena_path, &st) == 0 &&
+            st.st_size == (off_t)(100u * sizeof(struct block_index));
+
+        struct uint256 first_hash = make_test_hash(0);
+        struct uint256 last_hash = make_test_hash(99);
+        struct block_index *first = block_map_find(&ms2.map_block_index,
+                                                   &first_hash);
+        struct block_index *last = block_map_find(&ms2.map_block_index,
+                                                  &last_hash);
+        bool entries_ok = loaded && first && first->nHeight == 0 &&
+            last && last->nHeight == 99 && last->pprev &&
+            last->pprev->nHeight == 98 &&
+            ms2.map_block_index.size == ms.map_block_index.size;
+
+        BIL_CHECK("bil: flat load arena is a file-backed mapping with exact byte size",
+                  arena_ok);
+        BIL_CHECK("bil: file-backed arena loads entries identically to calloc",
+                  entries_ok);
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
+        unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -533,6 +607,7 @@ static int bil_flat_pprev_link_case(void)
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -617,6 +692,7 @@ static int bil_flat_scrambled_height_case(void)
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -652,6 +728,7 @@ static int bil_flat_bad_magic_case(void)
         BIL_CHECK("bil: flat file rejects bad magic", ok);
 
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
     }
     return failures;
@@ -685,6 +762,7 @@ static int bil_flat_truncated_case(void)
         BIL_CHECK("bil: flat file rejects truncated file", ok);
 
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
     }
     return failures;
@@ -938,6 +1016,7 @@ static int bil_flat_chain_work_case(void)
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -984,6 +1063,7 @@ static int bil_embedded_corrupt_payload_case(void)
         BIL_CHECK("bil: embedded format rejects corrupted payload", rejected);
 
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -1021,6 +1101,7 @@ static int bil_embedded_truncated_case(void)
         BIL_CHECK("bil: embedded format rejects truncated file", rejected);
 
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -1058,6 +1139,7 @@ static int bil_embedded_header_only_case(void)
         BIL_CHECK("bil: embedded format rejects header-only file", rejected);
 
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
     }
@@ -1134,6 +1216,7 @@ static int bil_legacy_two_file_case(void)
                  "%s/block_index.bin.sha3", tmpdir);
         unlink(sidecar_path);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -1196,6 +1279,7 @@ static int bil_legacy_missing_sidecar_case(void)
                   missing_ok);
 
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -2071,6 +2155,7 @@ static int bil_fast_restart_forward_case(void)
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -2185,6 +2270,7 @@ static int bil_failed_bit_flat_low_checkpoint_case(void)
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -2231,6 +2317,7 @@ static int bil_failed_bit_flat_default_case(void)
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
         unlink(path);
+        bil_test_unlink_arena(tmpdir);
         rmdir(tmpdir);
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -2454,6 +2541,7 @@ static int bil_flat_boot_peak_case(void)
     char path[512];
     snprintf(path, sizeof(path), "%s/block_index.bin", dir);
     unlink(path);
+    bil_test_unlink_arena(dir);
     rmdir(dir);
     return failures;
 }
@@ -2604,6 +2692,7 @@ static int bil_release_direct_case(void)
     BIL_CHECK("bil: released range reads back the exact file bytes",
               mapped && !(code & 8));
     unlink(path);
+    bil_test_unlink_arena(dir);
     rmdir(dir);
     free(expected);
     return failures;
@@ -2664,7 +2753,9 @@ static int bil_flat_budget_case(void)
               !load_block_index_flat_bounded(dir, &dst, 2).ok && dst.map_block_index.size == 0 &&
               !block_index_flat_verified_identity(dir, &observed));
     main_state_free(&dst); main_state_free(&src);
-    unlink(path); rmdir(dir);
+    unlink(path);
+    bil_test_unlink_arena(dir);
+    rmdir(dir);
     return failures;
 }
 
@@ -3001,6 +3092,7 @@ int test_block_index_loader(void)
     /* ── 1. Flat file round-trip ─────────────────────────── */
 
     failures += bil_flat_round_trip_case();
+    failures += bil_flat_arena_file_case();
     failures += bil_flat_boot_peak_case();
     failures += bil_release_direct_case();
 

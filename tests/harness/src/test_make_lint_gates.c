@@ -177,7 +177,7 @@ static const char build_needs_fixture_cases[] =
     "  rm -f count shared fixture-a fixture-b path-a path-b dispatchers phases dev-bin dev-package-verifier-ensure path-node path-verifier producer-done z23 path-public path-alias node-producers node-lock\n"
     "  case $mode in node-producer-fail) touch path-public path-alias;; esac\n"
     "  rc=0; stage=dispatch\n"
-    "  BUILD_NEEDS_FIXTURE_MODE=\"$mode\" bash \"$1/tools/dev/checkout-lock.sh\" foreground \"$2/lock\" -- make -j2 --no-print-directory run > log 2>&1 || rc=$?\n"
+    "  BUILD_NEEDS_FIXTURE_MODE=\"$mode\" \"$1/build/bin/checkout-lock\" foreground \"$2/lock\" -- make -j2 --no-print-directory run > log 2>&1 || rc=$?\n"
     "  cat log\n"
     "  stage=outcome\n"
     "  case $mode in\n"
@@ -222,7 +222,7 @@ static const char build_needs_fixture_parallel[] =
     "  rm -f path-a path-b path-c path-d path-e path-f dispatchers phases\n"
     "  printf '0\\n' > parse-active; printf '0\\n' > parse-max\n"
     "  stage=parallel-dispatch\n"
-    "  BUILD_NEEDS_FIXTURE_MODE=fanout BUILD_NEEDS_EXPECT_JOBS=\"$jobs\" bash \"$1/tools/dev/checkout-lock.sh\" foreground \"$2/lock\" -- make -j\"$jobs\" --no-print-directory run > log 2>&1\n"
+    "  BUILD_NEEDS_FIXTURE_MODE=fanout BUILD_NEEDS_EXPECT_JOBS=\"$jobs\" \"$1/build/bin/checkout-lock\" foreground \"$2/lock\" -- make -j\"$jobs\" --no-print-directory run > log 2>&1\n"
     "  cat log\n"
     "  maximum=$(cat parse-max); active=$(cat parse-active)\n"
     "  printf 'build-needs: jobs=%s max-dispatch=%s active-after=%s\\n' \"$jobs\" \"$maximum\" \"$active\"\n"
@@ -654,13 +654,12 @@ static int t_desktop_receive_install(void)
 #endif
 }
 
-/* Builds the wrapper into the fixture exactly as tools/agent/gate-receipt.sh
- * would, so the fixture needs no copy of the sources besides the shim. */
+/* Builds the receipt binary into the fixture the way Make does, from the
+ * checkout sources, so the fixture needs no copy of those sources. */
 #define RECEIPT_FIXTURE_PREAMBLE \
     "set -euo pipefail; cd \"$2\"\n" \
     "for tool in cc git bash mkfifo; do command -v \"$tool\" >/dev/null; done\n" \
-    "mkdir -p tools/agent build/bin receipts\n" \
-    "cp \"$1/tools/agent/gate-receipt.sh\" tools/agent/\n" \
+    "mkdir -p build/bin receipts\n" \
     "inc=(-I\"$1/platform/modules/sha3/include\" -I\"$1/core/modules/crypto/include\" -I\"$1/platform/modules/support/include\" -I\"$1/platform/modules/base/include\")\n" \
     "cc -std=c23 -O2 -Wall -Wextra -Werror \"${inc[@]}\" -o build/bin/gate_receipt \"$1\"/tools/agent/gate_receipt.c \"$1\"/tools/agent/gate_receipt_proc.c \"$1\"/tools/agent/gate_receipt_text.c \"$1/platform/modules/sha3/src/sha3.c\" \"$1/platform/modules/base/src/safe_alloc.c\"\n" \
     "cc -std=c23 -O2 -Wall -Wextra -Werror \"${inc[@]}\" -o build/bin/agent_sha3 \"$1/tools/agent/agent_sha3.c\" \"$1/platform/modules/sha3/src/sha3.c\"\n" \
@@ -671,7 +670,7 @@ static const char receipt_overlap_script[] =
     RECEIPT_FIXTURE_PREAMBLE
     "mkfifo ready release-A release-B; exec 3<>ready 4<>release-A 5<>release-B\n"
     "for tag in A B; do\n"
-    "  bash tools/agent/gate-receipt.sh --quiet --gate custom --dir receipts -- bash -c 'echo ready >&3; read -r go < \"release-$1\"; echo \"$1\"' child \"$tag\" >\"$tag.out\" 2>&1 &\n"
+    "  build/bin/gate_receipt \"$PWD\" --quiet --gate custom --dir receipts -- bash -c 'echo ready >&3; read -r go < \"release-$1\"; echo \"$1\"' child \"$tag\" >\"$tag.out\" 2>&1 &\n"
     "  case $tag in A) a=$!;; B) b=$!;; esac\n"
     "done\n"
     "read -r first <&3; read -r second <&3; [ \"$first:$second\" = ready:ready ]\n"
@@ -694,7 +693,7 @@ static const char receipt_overlap_script[] =
 static const char receipt_root_script[] =
     RECEIPT_FIXTURE_PREAMBLE
     /* Reject unusable roots before creating output, compiling a helper or
-     * starting the gate. The direct binary bypasses the shim's absolute root. */
+     * starting the gate. The binary receives the root as its first argument. */
     "mv build/bin/agent_sha3 build/bin/agent_sha3.saved\n"
     "for root in '' '.' 'tools/..' 'missing-relative-root'; do\n"
     "  rc=0; CC=/nonexistent/compiler build/bin/gate_receipt \"$root\" --dir rejected-receipts --gate custom -- sh -c 'touch child-started; echo child-output' >rejected.out 2>rejected.err || rc=$?\n"
@@ -714,7 +713,7 @@ static const char receipt_root_script[] =
  * quoting of the recorded command and the strictness of option parsing. */
 static const char receipt_contract_script[] =
     RECEIPT_FIXTURE_PREAMBLE
-    "w() { bash tools/agent/gate-receipt.sh --dir receipts \"$@\"; }\n"
+    "w() { build/bin/gate_receipt \"$PWD\" --dir receipts \"$@\"; }\n"
     "newest() { ls receipts/*.receipt | sort | tail -n1; }\n"
     "rc=0; out=$(w --gate custom -- sh -c 'echo out; echo err >&2; exit 3' 2>stderr.txt) || rc=$?\n"
     "[ \"$rc\" = 3 ]; [ \"$out\" = $'out\\nerr' ]; r=$(newest)\n"
@@ -1743,7 +1742,7 @@ static int t_lint_fast_tor_graph(void)
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
-        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null \"$@\"; }\n"
+        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null REPRO_NETWORK_POLICY_SELFTEST_BIN=/dev/null BUILD_EPOCH_INTEGRITY_LINT_BIN=/dev/null CHECKOUT_LOCK_SELFTEST_LINT_BIN=/dev/null \"$@\"; }\n"
         "if ! fixture_make fixture-print-gates > expected 2>parse.log; then cat parse.log >&2; exit 1; fi\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
         "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"

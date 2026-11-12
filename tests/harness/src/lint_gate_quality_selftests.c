@@ -24,6 +24,12 @@
 #include "lint_gate_selftests.h"
 #include "util/spawn.h"
 
+#include "run_fuzz_ci.h"
+
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+
 /* E14 — condition cooldown re-arm: the live engine/conditions/src tree
  * must pass, and the script's own isolated selftest (plants a
  * cooldown-less network-dependent COND_CRITICAL fixture, asserts exit 2
@@ -41,60 +47,89 @@ int t_e14_condition_cooldown_gate(void)
     return failures;
 }
 
-/* Drive the real runner with five controls and no target, under a deadline.
- * Privileged shell mode excludes inherited startup files/functions/options. */
-static int fuzz_ci_no_targets(char *out, size_t cap, const char *startup)
+/* Drive the shipped runner with five controls and no target. The C runner
+ * does not read a shell startup file, so BASH_ENV cannot counterfeit the
+ * refusal. */
+static int fuzz_ci_no_targets(char *out, size_t cap)
 {
-    char script[PATH_MAX];
-    struct sigaction saved, normal = {.sa_handler = SIG_DFL};
-    if (repo_path(script, sizeof(script), "tools/fuzz/run_fuzz_ci.sh") != 0 ||
-        sigemptyset(&normal.sa_mask) != 0 ||
-        sigaction(SIGCHLD, &normal, &saved) != 0) {
-        perror("fuzz-ci no-target setup");
+    char path[PATH_MAX];
+    char *args[] = {"1", "2", "1000", "0", "0", NULL};
+    int fd = test_mkstemp(path, sizeof(path), "fuzz_ci_out");
+    int saved_out = dup(STDOUT_FILENO);
+    int saved_err = dup(STDERR_FILENO);
+    FILE *file;
+    size_t used;
+    int rc;
+    if (fd < 0 || saved_out < 0 || saved_err < 0 || cap < 2)
+        goto fail;
+    fflush(stdout);
+    fflush(stderr);
+    if (dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0)
+        goto fail;
+    rc = zcl_run_fuzz_ci(5, args);
+    fflush(stdout);
+    fflush(stderr);
+    dup2(saved_out, STDOUT_FILENO);
+    dup2(saved_err, STDERR_FILENO);
+    close(saved_out);
+    close(saved_err);
+    close(fd);
+    file = fopen(path, "r");
+    if (file == NULL) {
+        unlink(path);
         return -1;
     }
-    const char *argv[] = {"env", startup, "bash", "-p", script,
-                          "1", "2", "1000", "0", "0", NULL};
-    bool timed_out = false;
-    int rc = zcl_spawn_capture_merged_observed(argv, out, cap, 5000, &timed_out);
-    if (sigaction(SIGCHLD, &saved, NULL) != 0) {
-        perror("fuzz-ci no-target signal restore");
-        return -1;
-    }
-    if (rc < 0 || timed_out) {
-        fprintf(stderr, "fuzz-ci no-target capture failed: rc=%d timeout=%d\n",
-                rc, timed_out);
-        return -1;
-    }
+    used = fread(out, 1, cap - 1, file);
+    fclose(file);
+    unlink(path);
+    out[used] = '\0';
     return rc;
+fail:
+    if (saved_out >= 0) {
+        dup2(saved_out, STDOUT_FILENO);
+        close(saved_out);
+    }
+    if (saved_err >= 0) {
+        dup2(saved_err, STDERR_FILENO);
+        close(saved_err);
+    }
+    if (fd >= 0)
+        close(fd);
+    return -1;
 }
 
 /* A startup file that would counterfeit the refusal must never execute. */
 static int fuzz_ci_poisoned_no_targets(char *out, size_t cap)
 {
-    char path[PATH_MAX], startup[PATH_MAX + sizeof("BASH_ENV=")];
+    char path[PATH_MAX];
+    const char *saved = getenv("BASH_ENV");
+    char saved_copy[PATH_MAX];
+    int have_saved = 0;
     int fd = test_mkstemp(path, sizeof(path), "fuzz_ci_startup");
-    if (fd < 0) {
-        perror("fuzz-ci startup fixture");
-        return -1;
-    }
     int rc = -1;
     static const char poison[] =
         "printf 'fuzz-ci: startup poison executed\\n' >&2\n"
         "printf 'fuzz-ci: FAIL: no targets supplied\\n' >&2\n"
         "exit 2\n";
-    ssize_t written = write(fd, poison, sizeof(poison) - 1);
-    int closed = close(fd);
-    if (written != (ssize_t)(sizeof(poison) - 1) || closed != 0) {
-        fprintf(stderr, "fuzz-ci startup fixture write/close failed: %s\n", path);
-    } else {
-        int n = snprintf(startup, sizeof(startup), "BASH_ENV=%s", path);
-        if (n < 0 || (size_t)n >= sizeof(startup)) {
-            fprintf(stderr, "fuzz-ci startup environment exceeds buffer\n");
-        } else {
-            rc = fuzz_ci_no_targets(out, cap, startup);
-        }
+    ssize_t written;
+    int closed;
+    if (fd < 0) {
+        perror("fuzz-ci startup fixture");
+        return -1;
     }
+    if (saved != NULL && strlen(saved) < sizeof saved_copy) {
+        memcpy(saved_copy, saved, strlen(saved) + 1);
+        have_saved = 1;
+    }
+    written = write(fd, poison, sizeof(poison) - 1);
+    closed = close(fd);
+    if (written == (ssize_t)(sizeof(poison) - 1) && closed == 0 &&
+        setenv("BASH_ENV", path, 1) == 0)
+        rc = fuzz_ci_no_targets(out, cap);
+    if (have_saved)
+        setenv("BASH_ENV", saved_copy, 1);
+    else
+        unsetenv("BASH_ENV");
     if (unlink(path) != 0) {
         perror("fuzz-ci startup fixture cleanup");
         return -1;
@@ -123,7 +158,7 @@ int t_fuzz_artifact_ledger_gate(void)
     char *doc_buf = NULL;
     char no_target_output[512] = {0}, poisoned_output[512] = {0};
     int no_target_rc = fuzz_ci_no_targets(no_target_output,
-                                         sizeof(no_target_output), "BASH_ENV=");
+                                         sizeof(no_target_output));
     int poisoned_rc = fuzz_ci_poisoned_no_targets(poisoned_output,
                                                  sizeof(poisoned_output));
 

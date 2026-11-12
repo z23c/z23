@@ -20,7 +20,7 @@ if ! cd "$ROOT"; then
     exit 1
 fi
 KEY_TOOL="$SELF_DIR/build-epoch-key.sh"
-PUBLISH_TOOL="$SELF_DIR/publish-build-alias.sh"
+PUBLISH_TOOL="$ROOT/build/bin/publish-build-alias"
 OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
 IDENTITY_TOOL="$SELF_DIR/build-epoch-open-file-identity.sh"

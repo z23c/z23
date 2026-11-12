@@ -114,6 +114,11 @@ struct os_proc_cgroup_mem_stat {
 struct os_proc_mem {
     int64_t rss_bytes;         /* VmRSS */
     int64_t vsize_bytes;       /* VmSize */
+    /* VmSwap: pages of this process currently swapped out. The cheap statm
+     * read behind os_proc_resident_kib() carries no swap at all, so swap
+     * pressure is only visible through this snapshot. -1 off Linux (the
+     * Windows/Darwin arms have no VmSwap equivalent). */
+    int64_t swap_bytes;        /* VmSwap */
     int64_t cgroup_current;    /* cgroup v2 memory.current, -1 if unavailable */
     int64_t cgroup_high;       /* cgroup v2 memory.high, -1 if unset/unavailable */
     int64_t cgroup_max;        /* cgroup v2 memory.max, -1 if unset/unavailable */
@@ -351,6 +356,13 @@ bool os_proc_seccomp_filters(uint64_t pid, uint32_t *out);
 /* Test-only seam onto the Seccomp_filters status-text parser, so a test can
  * feed it a crafted or truncated buffer without a real /proc/<pid>/status. */
 bool os_proc_parse_seccomp_filters_for_test(const char *status, uint32_t *out);
+
+/* Test-only seam onto the "Label: NNN kB" status-field parser behind
+ * os_proc_mem_read's VmRSS/VmSize/VmSwap, for the same reason: a fixture
+ * /proc-format buffer stands in for a real /proc/<pid>/status. Returns the
+ * field's value in bytes, or -1 when the label is absent/unparseable. */
+int64_t os_proc_status_field_bytes_for_test(const char *status,
+                                            const char *label);
 #endif
 
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────

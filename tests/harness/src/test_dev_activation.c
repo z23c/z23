@@ -1846,6 +1846,12 @@ static bool persist_command_request(const char *root, const char *commit,
     base_request(&out->req, persist_command_sb, persist_command_artifact);
     snprintf(out->gen_root, sizeof(out->gen_root), "%s", persist_command_sb->gen_root);
     snprintf(out->datadir, sizeof(out->datadir), "%s", persist_command_sb->datadir);
+    /* Mirror the real constructor's artifact binding (req.artifact_path =
+     * out->artifact_path) so the adapter's staging-artifact normalization is
+     * exercised exactly as it is against dev_activation_request_from_cycle. */
+    snprintf(out->artifact_path, sizeof(out->artifact_path), "%s",
+             persist_command_artifact);
+    out->req.artifact_path = out->artifact_path;
     return true;
 }
 
@@ -1903,6 +1909,14 @@ static void persist_command_handle(const struct zcl_command_request *request,
 #ifdef PERSIST_TEST_DEV_BUILD
 #undef ZCL_DEV_BUILD
 #undef PERSIST_TEST_DEV_BUILD
+#endif
+
+#if !defined(_WIN32)
+/* The rollback entry point is defined by the included adapter above when the
+ * feature is present. Declared weak so a fail-then-pass run that builds the
+ * suite WITHOUT the feature asserts its absence instead of failing to link. */
+__attribute__((weak)) void zcl_native_handle_dev_generation_rollback(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply);
 #endif
 
 static int test_persistence_command(int branch)
@@ -1983,6 +1997,214 @@ static int test_persistence_command(int branch)
     sandbox_exit(&sb);
     return failures;
 }
+
+/* The engine's stage failure used to collapse every distinct refusing
+ * sub-step into one generic string; the typed failure must name the check
+ * that actually refused. */
+static int test_stage_failure_names_substep(void)
+{
+    int failures = 0;
+    struct sandbox sb;
+    sandbox_enter(&sb, "stage_detail");
+    TEST("dev_activation: stage failure names the refusing sub-step") {
+        struct fake_ctx c = {0};
+        snprintf(c.gen_root, sizeof(c.gen_root), "%s", sb.gen_root);
+        struct dev_activation_ops ops;
+        fake_ops_init(&ops, &c);
+        struct dev_activation_request req;
+        base_request(&req, &sb, "missing-artifact");
+        struct dev_activation_result r;
+        int rc = dev_activation_run(&req, &ops, &r);
+        ASSERT_EQ(rc, DEV_ACTIVATION_E_STAGE);
+        ASSERT_STR_EQ(r.verify_status, "stage_failed");
+        ASSERT(strstr(r.verify_detail, "candidate staging failed") != NULL);
+        ASSERT(strstr(r.verify_detail, "staging artifact open refused") !=
+               NULL);
+        ASSERT(strstr(r.verify_detail, "missing-artifact") != NULL);
+        ASSERT(strstr(r.failure_capsule, "staging artifact open refused") !=
+               NULL);
+        PASS();
+    } _test_next:;
+    sandbox_exit(&sb);
+    return failures;
+}
+
+#if !defined(_WIN32)
+/* The checkout's build/bin/zclassic23-dev is a Makefile migration alias
+ * SYMLINK to z23-dev; the staging engine opens artifacts O_NOFOLLOW, so the
+ * adapter must hand it the hard-linked regular file. */
+static int test_command_artifact_alias(void)
+{
+    int failures = 0;
+    struct sandbox sb;
+    sandbox_enter(&sb, "persist_alias");
+    struct platform_clock_source clock = {
+        .wall_unix = deploy_test_wall, .monotonic_us = deploy_test_wall };
+    platform_clock_set_source(&clock);
+    TEST("dev_activation: command stages through the symlinked dev alias") {
+        char bin_dir[PATH_MAX], regular[PATH_MAX], alias[PATH_MAX];
+        snprintf(bin_dir, sizeof(bin_dir), "%s/build/bin", sb.home);
+        mkpath(bin_dir);
+        snprintf(regular, sizeof(regular), "%s/z23-dev", bin_dir);
+        snprintf(alias, sizeof(alias), "%s/zclassic23-dev", bin_dir);
+        ASSERT(write_fake_binary(regular, 'A'));
+        ASSERT_EQ(symlink("z23-dev", alias), 0);
+
+        struct fake_ctx c = { .service_up = true };
+        snprintf(c.gen_root, sizeof(c.gen_root), "%s", sb.gen_root);
+        persist_command_sb = &sb;
+        persist_command_artifact = alias;
+        persist_command_ctx = &c;
+        struct zcl_command_context context = { .source_root = sb.home };
+        struct json_value input = {0};
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "idempotency_key", "alias"));
+        struct zcl_command_request request = { .context = &context,
+                                               .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_generation_activate.v1");
+        persist_command_handle(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")), "plan");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "activation_status")),
+                      "staged");
+        const char *candidate =
+            json_get_str(json_get(&reply.data, "candidate_generation"));
+        ASSERT(candidate && strncmp(candidate, "gen-", 4) == 0);
+        char marker[PATH_MAX];
+        snprintf(marker, sizeof(marker), "%s/%s/manifest.json", sb.gen_root,
+                 candidate);
+        char blob[512];
+        ASSERT(read_file(marker, blob, sizeof(blob)) > 0);
+        ASSERT(strstr(blob, regular) != NULL);
+        json_free(&input);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    platform_clock_clear_source();
+    persist_command_sb = NULL;
+    persist_command_ctx = NULL;
+    persist_command_artifact = NULL;
+    sandbox_exit(&sb);
+    return failures;
+}
+
+/* After a verified activation last-good == current, so the rollback target is
+ * the replaced previous_generation; the confirmed rollback restores it and
+ * records an accepted history marker for BOTH generations. */
+static int test_rollback_command(void)
+{
+    int failures = 0;
+    /* Resolve through a volatile pointer: a fail-then-pass build without the
+     * feature links the weak symbol as NULL and must FAIL here, not crash. */
+    void (*volatile rollback_entry)(const struct zcl_command_request *,
+                                    struct zcl_command_reply *) =
+        zcl_native_handle_dev_generation_rollback;
+    struct sandbox sb;
+    sandbox_enter(&sb, "persist_rollback");
+    struct platform_clock_source clock = {
+        .wall_unix = deploy_test_wall, .monotonic_us = deploy_test_wall };
+    platform_clock_set_source(&clock);
+    TEST("dev_activation: rollback command restores previous generation") {
+        ASSERT(rollback_entry != NULL);
+        char artA[PATH_MAX], genA[96], artB[PATH_MAX], genB[96];
+        ASSERT_EQ(seed_generation(&sb, 'A', artA, sizeof(artA), genA,
+                                  sizeof(genA)), DEV_ACTIVATION_OK);
+
+        struct fake_ctx c = { .service_up = true };
+        snprintf(c.gen_root, sizeof(c.gen_root), "%s", sb.gen_root);
+        persist_command_sb = &sb;
+        persist_command_artifact = artA;
+        persist_command_ctx = &c;
+        struct zcl_command_context context = { .source_root = sb.home };
+
+        /* Activate a SECOND generation through the command adapter so the
+         * accepted-history marker exists for it, exactly as a live
+         * activate->rollback cycle records both. */
+        snprintf(artB, sizeof(artB), "%s/cand_B", sb.home);
+        ASSERT(write_fake_binary(artB, 'B'));
+        persist_command_artifact = artB;
+        struct json_value input = {0};
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "idempotency_key", "rolltwo"));
+        struct zcl_command_request request = { .context = &context,
+                                               .input = &input };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_generation_activate.v1");
+        persist_command_handle(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const char *commit_input_text =
+            json_get_str(json_get(&reply.data, "commit_input"));
+        snprintf(genB, sizeof(genB), "%s",
+                 json_get_str(json_get(&reply.data, "candidate_generation")));
+        ASSERT(commit_input_text && genB[0] && strcmp(genB, genA) != 0);
+        json_free(&input);
+        ASSERT(json_read(&input, commit_input_text,
+                         strlen(commit_input_text)));
+        ASSERT(json_push_kv_bool(&input, "confirm", true));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.dev_generation_activate.v1");
+        persist_command_handle(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "committed");
+        char current[96];
+        ASSERT(fake_current_gen(&c, current, sizeof(current)));
+        ASSERT_STR_EQ(current, genB);
+
+        struct json_value plan_input = {0};
+        json_set_object(&plan_input);
+        struct zcl_command_request plan_request = { .context = &context,
+                                                    .input = &plan_input };
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.dev_generation_rollback.v1");
+        rollback_entry(&plan_request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")), "plan");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "rollback_generation")),
+                      genA);
+        zcl_command_reply_free(&reply);
+
+        json_free(&plan_input);
+        json_free(&input);
+        struct json_value commit_input = {0};
+        json_set_object(&commit_input);
+        ASSERT(json_push_kv_bool(&commit_input, "confirm", true));
+        struct zcl_command_request commit_request = { .context = &context,
+                                                      .input = &commit_input };
+        zcl_command_reply_init(&reply, "zcl.dev_generation_rollback.v1");
+        int starts_before = c.start_calls;
+        rollback_entry(&commit_request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "committed");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "restored_generation")),
+                      genA);
+        ASSERT(c.start_calls > starts_before);
+        ASSERT(fake_current_gen(&c, current, sizeof(current)));
+        ASSERT_STR_EQ(current, genA);
+
+        char markerA[PATH_MAX], markerB[PATH_MAX], blob[512];
+        snprintf(markerA, sizeof(markerA), "%s/accepted/%s.json", sb.gen_root,
+                 genA);
+        snprintf(markerB, sizeof(markerB), "%s/accepted/%s.json", sb.gen_root,
+                 genB);
+        ASSERT(read_file(markerA, blob, sizeof(blob)) > 0);
+        ASSERT(strstr(blob, "rollback_verified") != NULL);
+        ASSERT(read_file(markerB, blob, sizeof(blob)) > 0);
+        ASSERT(strstr(blob, "activated") != NULL);
+        json_free(&commit_input);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    platform_clock_clear_source();
+    persist_command_sb = NULL;
+    persist_command_ctx = NULL;
+    persist_command_artifact = NULL;
+    sandbox_exit(&sb);
+    return failures;
+}
+#endif
 
 #if !defined(_WIN32)
 static int test_fixture_unseal_links(void)
@@ -2074,6 +2296,11 @@ int test_dev_activation(void)
     failures += test_full_datadir_readiness_timeout();
     failures += test_stale_in_progress_refused();
     failures += test_in_progress_marker_cleared();
+    failures += test_stage_failure_names_substep();
+#if !defined(_WIN32)
+    failures += test_command_artifact_alias();
+    failures += test_rollback_command();
+#endif
     printf("=== dev_activation: %d failures ===\n", failures);
     return failures;
 }

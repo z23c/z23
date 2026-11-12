@@ -9,7 +9,19 @@
  *
  * Each row here REPLACES the portable row while closure grades a native
  * Linux epoch. CAP_NONE is an explicit empty override, not a capability
- * class. Ordering is alphabetical by source path and carries no meaning. */
+ * class. Ordering is alphabetical by source path and carries no meaning.
+ *
+ * A ZCL_MODULE_CAPABILITY_WHEN("MACRO[,MACRO]", path, caps, why) row is a
+ * feature-conditional arm of its path: it applies only when the graded
+ * build's real CFLAGS define every listed macro (the same make print-CFLAGS
+ * truth the compiled-out detector reads, never a host guess). Among the
+ * applicable arms the most specific one (longest macro list) wins and
+ * replaces the path's exact class; two applicable arms of equal specificity
+ * are a table error; with no applicable arm the unconditional row stays the
+ * exact declaration, and a path whose arms never apply and has no
+ * unconditional row declares nothing, keeping missing-row semantics
+ * fail-closed. Every arm joins the portable union, so the privilege scan
+ * still sees the reach of a state this host never built. */
 
 ZCL_MODULE_CAPABILITY("contexts/explorer/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_memory_guard.c", CAP_FS_WRITE|CAP_CLOCK, "")
@@ -40,3 +52,17 @@ ZCL_MODULE_CAPABILITY("tools/dev/dev_workspace.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/dev/mutation_run.c", CAP_FS_WRITE|CAP_PROCESS|CAP_FS_READ, "Linux borrows the supervised retirement owner; child stack privilege changes occur in the platform engine, not the mutation caller")
 ZCL_MODULE_CAPABILITY("tools/dev/devloop_watch.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "the Linux watcher forks its build/test child and journal sealer, performs retained filesystem I/O without raising process privileges, and reads its own and reaped children's CPU time (getrusage) for the per-cycle trace")
 ZCL_MODULE_CAPABILITY("tools/verify/fixed_result_key_v2.c", CAP_NONE, "the Linux arm of platform_dirfd_child_path formats a /proc/self/fd path and performs no filesystem call")
+ZCL_MODULE_CAPABILITY("contexts/wallet/views/src/wallet_gui.c", CAP_FS_WRITE, "the unconditional fallback arm: without HAVE_GTK the only external reach is the stderr diagnostic write")
+ZCL_MODULE_CAPABILITY_WHEN("HAVE_GTK", "contexts/wallet/views/src/wallet_gui.c", CAP_FS_WRITE|CAP_NETWORK, "the GTK-without-WebKit arm: gtk_init_check reaches CAP_NETWORK, the message-dialog and gtk_main reach is classified harmless, and the stderr diagnostic keeps CAP_FS_WRITE")
+ZCL_MODULE_CAPABILITY_WHEN("HAVE_GTK,HAVE_WEBKIT", "contexts/wallet/views/src/wallet_gui.c", CAP_FS_WRITE|CAP_NETWORK, "the WebKit arm: gtk_init_check and webkit_web_view_load_uri reach CAP_NETWORK, every other gtk_/g_/gdk_/jsc_ reach is classified harmless, and the stderr diagnostics keep CAP_FS_WRITE")
+ZCL_MODULE_CAPABILITY("contexts/wallet/views/src/wallet_gui_bot.c", CAP_NONE, "the unconditional fallback arm compiles an empty translation unit")
+ZCL_MODULE_CAPABILITY_WHEN("HAVE_GTK,HAVE_WEBKIT", "contexts/wallet/views/src/wallet_gui_bot.c", CAP_PROCESS, "the WebKit bot arm: webkit_web_view_run_javascript reaches CAP_PROCESS and every other reach is classified harmless")
+ZCL_MODULE_CAPABILITY("engine/composition/src/consensus_state_install_terminal.c", CAP_FS_WRITE, "the terminal arm reads private wallet history only through in-tree archive and private-directory helpers that carry their own rows; this TU's own external reach is the stderr diagnostic write")
+ZCL_MODULE_CAPABILITY("engine/services/src/build_fabric_worker.c", CAP_FS_READ|CAP_FS_WRITE, "the lease-expiry and execution-timing clock reads go through platform_time_wall_unix and platform_time_monotonic_us, whose own rows carry the clock reach; this TU's own reach is CAS and stage-file I/O")
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/resident_launch_mac.c", CAP_NONE, "the Darwin arm of the exact resident launch compiles only under __APPLE__; this host compiles an empty translation unit")
+ZCL_MODULE_CAPABILITY("tools/command/legacy_seed.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "the Linux seed driver lstats/opens the source datadir, takes its lock, writes only <target>.tmp and kill(pid,0)-probes the recorded pid; the receipt wall-clock stamp no longer compiles in this TU, so it reaches no clock symbol")
+ZCL_MODULE_CAPABILITY("tools/command/legacy_seed_copy.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "the Linux copier hashes and copies seed files with a bounded forked worker pool; the reflink ask this TU's portable row granted PRIVILEGE for no longer compiles in this TU")
+ZCL_MODULE_CAPABILITY("tools/command/native_mesh_terminal_hub_command.c", CAP_FS_READ|CAP_FS_WRITE, "the 127.0.0.1 listener, the per-connection confined session children and any clock reach live in the in-tree mesh-terminal-hub module whose own rows carry them; this command's own reach is the key-file read and its writes")
+ZCL_MODULE_CAPABILITY("tools/command/native_pair_renew_run.c", CAP_FS_READ|CAP_FS_WRITE, "credential randomness comes from in-tree rng_host_fill and the grant expiry from in-tree pair_now, whose own rows carry RANDOM and CLOCK; this TU's own reach is the owner-private route, unit-environment, marker and receipt file I/O")
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_action_root_store.c", CAP_FS_READ|CAP_FS_WRITE, "the compiler-driver probe reach runs through the in-tree spawn helpers that carry their own CAP_PROCESS rows; this TU's own reach is the content-addressed store's file I/O")
+ZCL_MODULE_CAPABILITY("tools/dev/devloop_reflex_runner_main.c", CAP_FS_WRITE|CAP_FS_READ|CAP_PROCESS|CAP_NETWORK|CAP_PRIVILEGE, "the clean-zygote runner's deadline and dlopen timing reads go through in-tree platform_time_monotonic_us, whose own row carries the clock reach; the fork, descriptor closure, confinement and control-socketpair reaches stay declared here")

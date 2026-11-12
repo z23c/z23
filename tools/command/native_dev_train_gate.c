@@ -18,6 +18,7 @@
 
 #include "base/safe_alloc.h"
 #include "dev_proof.h"
+#include "checkout_lock.h"
 #include "devloop.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
@@ -27,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
@@ -452,28 +454,46 @@ static void dtg_push_gate_row(struct json_value *rows, const char *token,
     json_free(&row);
 }
 
+/* Take the checkout lock in this process, then run the gate command. */
+static bool dtg_run_locked(const char *stack_dir, const char *token,
+                           const char *const argv[], int timeout_ms,
+                           struct zcl_devloop_process_result *out)
+{
+    char lock[PATH_MAX];
+    struct zcl_checkout_lock_hold hold;
+    bool (*run_fn)(const char *, const char *, const char *const[], int,
+                   struct zcl_devloop_process_result *) =
+        dtg_hooks.run ? dtg_hooks.run : dtg_run_default;
+    int n = snprintf(lock, sizeof lock, "%s/build/.checkout.lock", stack_dir);
+    int locked = 2;
+    bool ran;
+    memset(&hold, 0, sizeof hold);
+    if (n > 0 && (size_t)n < sizeof lock)
+        locked = zcl_checkout_lock_enter(&hold, "foreground", lock,
+                                         STDERR_FILENO);
+    ran = locked == 0 && run_fn(stack_dir, token, argv, timeout_ms, out);
+    zcl_checkout_lock_leave(&hold);
+    return ran;
+}
+
 /* Run one gate; true when it was green. */
 static bool dtg_run_one(const char *stack_dir, const struct dtg_gate *gate,
                         int timeout_ms,
                         struct zcl_dev_train_gate_report *report)
 {
-    const char *argv[] = {"tools/dev/checkout-lock.sh", "foreground",
-                          "build/.checkout.lock", "--", "make",
-                          "--no-print-directory", gate->target, NULL, NULL};
+    const char *argv[] = {"make", "--no-print-directory", gate->target, NULL,
+                          NULL};
     if (gate->bit == ZCL_DEV_TRAIN_GATE_VERIFY) {
         /* A verdict left by an earlier run must never name this run's groups. */
         char stale[PATH_MAX];
         (void)snprintf(stale, sizeof(stale), "%s/build/test-verdict.json",
                        stack_dir);
         (void)remove(stale);
-        argv[7] = "ONLY=@changed";
+        argv[3] = "ONLY=@changed";
     }
-    bool (*run_fn)(const char *, const char *, const char *const[], int,
-                   struct zcl_devloop_process_result *) =
-        dtg_hooks.run ? dtg_hooks.run : dtg_run_default;
     struct zcl_devloop_process_result *r =
         zcl_calloc(1, sizeof(*r), "train gate result");
-    bool ran = r && run_fn(stack_dir, gate->token, argv, timeout_ms, r);
+    bool ran = r && dtg_run_locked(stack_dir, gate->token, argv, timeout_ms, r);
     bool ok = ran && r->exit_code == 0 && !r->timed_out;
     if (ran) {
         dtg_write_log(stack_dir, gate->token, r, report->log_path,

@@ -14,7 +14,7 @@
  * (docs/ROM_DELIVERY.md, "Trust model"). This module adds a STRICTER,
  * OPTIONAL admission gate on top of that primitive, specifically for bundles
  * placed in a "designated replica" directory a second disk / second node
- * feeds via tools/scripts/rom-bundle-replicate.sh: register the bundle into
+ * feeds via tools/dev/rom_bundle_replicate.c: register the bundle into
  * the shared rom_seed catalog ONLY when an adjoining
  * consensus_state_replay_receipt.v1 file (config/consensus_state_replay_
  * receipt.h) self-verifies AND binds this exact bundle's whole-file SHA3-256

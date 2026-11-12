@@ -244,7 +244,7 @@ make simnet-replay CAP=build/wire-sweep-output
 
 `simnet-repro` is `wire_sweep --start=SEED --count=1 --verbose` — the
 single-seed slice of the same sweep loop `make wire-sweep` runs.
-`simnet-replay` (`tools/scripts/simnet_replay_capsule.sh`) recovers the
+`simnet-replay` (`tools/dev/simnet_replay_capsule.c`) recovers the
 seed from each capsule's filename and calls `wire_sweep` the same way;
 it does not need to parse the `.tape` file's contents because
 `wire_sweep_run_one(seed)` is a pure function of the scalar seed (the

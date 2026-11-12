@@ -151,8 +151,10 @@ ship_one_way_schema_decision() {
 
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
-# shellcheck source=tools/scripts/tor_stamp_lib.sh
-. "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"  # ZCL_TOR_STUB_REFUSAL, zcl_tor_require_full
+# ZCL_TOR_STUB_REFUSAL, zcl_tor_require_full: build/bin/tor-stamp.
+ZCL_TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the onion network; rebuild with make tor-full'
+zcl_tor_require_full() { "$REPO_ROOT/build/bin/tor-stamp" require-full "$@"; }
+zcl_tor_write_stamp_sidecar() { "$REPO_ROOT/build/bin/tor-stamp" write-sidecar "$@"; }
 # shellcheck source=tools/scripts/tor_provenance_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_provenance_lib.sh"  # zcl_tor_provenance_bin, zcl_tor_provenance_ensure_bin
 
@@ -1474,7 +1476,7 @@ else
         build/bin/z23-package-verify build/bin/z23-package-verify-dev \
         build/bin/zclassic23-package-verify \
         build/bin/zclassic23-package-verify-dev
-    make -j"$(nproc)" zclassic23 z23-package-verify dev-package-verifier >/dev/null || \
+    make -j"$(nproc)" zclassic23 z23-package-verify dev-package-verifier tor-stamp >/dev/null || \
         die "production build failed"
     CANDIDATE="$(mktemp "$(ship_scratch_root)/zclassic23.ship.XXXXXX")"
     WORKER_FILES=(); WORKER_SHAS=()

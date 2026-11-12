@@ -231,7 +231,7 @@ int t_remote_node_update_contract(void)
                != NULL);
         ASSERT(strstr(fast_ci, "tools/scripts/lane_recover.sh") != NULL);
         ASSERT(strstr(fast_ci,
-                      "tools/scripts/check_stable_publish_containment.sh")
+                      "tools/dev/stable_publish_containment.c")
                != NULL);
         ASSERT(strstr(fast_ci,
                       "platform/deploy/examples/z23-remote-test-node.service")
@@ -364,11 +364,13 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
     char *gate = NULL;
     char *evidence = NULL;
     char *service_args = NULL;
+    char *service_c = NULL;
     TEST("MVP reporters resolve the live service datadir and RPC port") {
         char scoreboard_path[PATH_MAX];
         char gate_path[PATH_MAX];
         char evidence_path[PATH_MAX];
         char service_args_path[PATH_MAX];
+        char service_c_path[PATH_MAX];
         ASSERT(repo_path(scoreboard_path, sizeof(scoreboard_path),
                          "tools/scripts/mvp_scoreboard.sh") == 0);
         ASSERT(repo_path(gate_path, sizeof(gate_path), "tools/mvp_gate.sh") == 0);
@@ -376,10 +378,13 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
                          "tools/scripts/soak_evidence.sh") == 0);
         ASSERT(repo_path(service_args_path, sizeof(service_args_path),
                          "tools/scripts/lib/service_args.sh") == 0);
+        ASSERT(repo_path(service_c_path, sizeof(service_c_path),
+                         "tools/dev/service_args.c") == 0);
         ASSERT(read_entire_file(scoreboard_path, &scoreboard) == 0);
         ASSERT(read_entire_file(gate_path, &gate) == 0);
         ASSERT(read_entire_file(evidence_path, &evidence) == 0);
         ASSERT(read_entire_file(service_args_path, &service_args) == 0);
+        ASSERT(read_entire_file(service_c_path, &service_c) == 0);
 
         ASSERT(strstr(scoreboard, "ZCL_NODE_UNIT=\"${ZCL_NODE_UNIT:-z23-node}\"")
                != NULL);
@@ -403,13 +408,12 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
                != NULL);
         ASSERT(strstr(service_args, "zcl_service_pid()") != NULL);
         ASSERT(strstr(service_args, "zcl_service_active_state()") != NULL);
+        ASSERT(strstr(service_args, "build/bin/service-args") != NULL);
         ASSERT(strstr(service_args, "zcl_service_restart_policy()") != NULL);
         ASSERT(strstr(service_args, "zcl_service_started_epoch()") != NULL);
         ASSERT(strstr(service_args, "zcl_service_restart_count()") != NULL);
-        ASSERT(strstr(service_args,
-                      "launchctl print \"gui/$uid/$label\"") != NULL);
-        ASSERT(strstr(service_args,
-                      "launchctl print \"user/$uid/$label\"") != NULL);
+        ASSERT(strstr(service_c, "gui/%s/%s") != NULL);
+        ASSERT(strstr(service_c, "user/%s/%s") != NULL);
         ASSERT(strstr(service_args,
                       "plutil -extract KeepAlive.Crashed raw -o - \"$plist\"")
                != NULL);
@@ -507,6 +511,7 @@ int t_mvp_reporters_resolve_live_service_rpc_contract(void)
     free(gate);
     free(evidence);
     free(service_args);
+    free(service_c);
     return failures;
 }
 

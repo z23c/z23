@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Signal contract of tools/agent/gate_receipt.c, the C23 receipt wrapper
- * behind tools/agent/gate-receipt.sh. Each case builds the wrapper into a
+ * behind build/bin/gate_receipt. Each case builds the wrapper into a
  * private fixture, starts it on a command that announces readiness through an
  * inherited pipe (never a pidfile), signals the wrapper, and checks that the
  * wrapper died of that signal, stopped and reaped its child, published no

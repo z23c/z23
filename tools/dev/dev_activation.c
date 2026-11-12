@@ -1269,10 +1269,17 @@ static int dev_run_locked(struct dev_activation_txn *txn, bool already_staged)
     if (!already_staged) {
         int st = dev_activation_stage_candidate(txn);
         if (st != DEV_ACTIVATION_OK) {
-            dev_set_status(r, "stage_failed", "stage_failed",
-                           "candidate staging failed");
-            snprintf(r->failure_capsule, sizeof(r->failure_capsule),
-                     "candidate staging failed");
+            /* The staging helper names its refusing sub-step in
+             * verify_detail; compose it under the generic stage failure so
+             * the typed error a caller sees says WHICH check refused
+             * instead of one string for every distinct cause. */
+            char detail[192];
+            snprintf(detail, sizeof(detail),
+                     "candidate staging failed%s%.150s",
+                     r->verify_detail[0] ? ": " : "", r->verify_detail);
+            dev_set_status(r, "stage_failed", "stage_failed", detail);
+            snprintf(r->failure_capsule, sizeof(r->failure_capsule), "%s",
+                     detail);
             (void)dev_persist_state(txn, DEV_ACTIVATION_E_INTERNAL);
             return st;
         }

@@ -422,7 +422,8 @@ static struct zcl_result pkgl_run_worker(const struct pkgl_ctx *ctx,
                                          const uint8_t root[32],
                                          const uint8_t lock_root[32],
                                          const uint8_t (*dep_roots)[32],
-                                         size_t dep_count)
+                                         size_t dep_count, char *out,
+                                         size_t out_cap)
 {
     if (dep_count > VCS_PACKAGE_BUILD_MAX_DEPS)
         return ZCL_ERR(-1, "%zu dependencies exceeds the worker bound",
@@ -468,8 +469,7 @@ static struct zcl_result pkgl_run_worker(const struct pkgl_ctx *ctx,
     }
     argv[argc] = NULL;
 
-    char out[8192];
-    int rc = zcl_spawn_capture(argv, out, sizeof(out), PKGL_BUILD_TIMEOUT_MS);
+    int rc = zcl_spawn_capture(argv, out, out_cap, PKGL_BUILD_TIMEOUT_MS);
     free(dep_args);
     if (rc != 0) {
         /* Trim the captured stdout to one line for the operator's detail. */
@@ -480,6 +480,43 @@ static struct zcl_result pkgl_run_worker(const struct pkgl_ctx *ctx,
                        out[0] ? ": " : "", out);
     }
     return ZCL_OK;
+}
+
+/* The first line beginning with the worker's test-failure-detail marker, or
+ * NULL: the worker prints it beside its verdict, and a failing test deserves
+ * its own words in the operator's detail. */
+static const char *pkgl_test_failure_detail(const char *worker_out)
+{
+    const char marker[] = "test-failure-detail=";
+    if (!worker_out)
+        return NULL;
+    const char *at = strstr(worker_out, marker);
+    if (!at)
+        return NULL;
+    at += sizeof marker - 1;
+    return at[0] ? at : NULL;
+}
+
+/* "verdict <class> (test exit <n>)[: <the worker's own failure line>]" for a
+ * receipt whose build did not pass. */
+static void pkgl_not_installable_detail(
+    const struct vcs_package_build_receipt *receipt, const char *worker_out,
+    char *detail, size_t cap)
+{
+    char why_line[192];
+    const char *why = pkgl_test_failure_detail(worker_out);
+    if (why) {
+        snprintf(why_line, sizeof(why_line), ": %s", why);
+        char *nl = strchr(why_line, '\n');
+        if (nl)
+            *nl = '\0';
+    } else {
+        why_line[0] = '\0';
+    }
+    snprintf(detail, cap, "verdict %s (test exit %u)%s",
+             vcs_package_build_result_string(
+                 (enum vcs_package_build_result)receipt->result_class),
+             receipt->test_exit_code, why_line);
 }
 
 static struct zcl_result pkgl_build_parse_report(
@@ -655,8 +692,10 @@ struct zcl_result pkgl_build_and_install(
     ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "stale staging is replaced");
     ZCL_CHECK(pkgl_mkdir_p(p.emit));
 
+    char worker_out[8192];
     struct zcl_result wr =
-        pkgl_run_worker(ctx, &p, root, lock_root, dep_roots, dep_count);
+        pkgl_run_worker(ctx, &p, root, lock_root, dep_roots, dep_count,
+                        worker_out, sizeof worker_out);
     if (!wr.ok) {
         pkgl_step_fail(step, "build-failed", wr.message);
         ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "failed build work removed");
@@ -679,11 +718,8 @@ struct zcl_result pkgl_build_and_install(
     step->state = VCS_PACKAGE_LIFECYCLE_BUILT;
     if (!vcs_package_build_installable(&receipt)) {
         char detail[PACKAGE_LIFECYCLE_DETAIL_MAX + 1u];
-        (void)snprintf(detail, sizeof(detail), "verdict %s (test exit %u)",
-                       vcs_package_build_result_string(
-                           (enum vcs_package_build_result)
-                               receipt.result_class),
-                       receipt.test_exit_code);
+        pkgl_not_installable_detail(&receipt, worker_out, detail,
+                                    sizeof(detail));
         pkgl_step_fail(step, "build-not-installable", detail);
         ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "failed build work removed");
         return ZCL_ERR(-1, "%s", detail);

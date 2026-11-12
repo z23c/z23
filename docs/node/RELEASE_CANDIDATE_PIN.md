@@ -47,7 +47,7 @@ git tag -a rc-20260728-75afb4361 -m 'proof lane candidate' 75afb4361
 # then append the observed triple to platform/deploy/release-candidates.jsonl
 ```
 
-`tools/release.sh` is deliberately left alone here: it refuses everything but
+`tools/dev/release_containment.c` is deliberately left alone here: it refuses everything but
 `--verify` by design, and that containment is not this page's to relax.
 
 ## `provenance` — how the row was obtained

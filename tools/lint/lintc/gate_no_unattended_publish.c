@@ -41,14 +41,14 @@ static const struct { const char *path; const char *reason; } k_nup_allow[] = {
     { "tools/githooks/pre-commit",
       "prints advice text naming the override command; performs no "
       "commit of its own" },
-    { "tools/scripts/hooks_status.sh",
+    { "tools/dev/hooks_status.c",
       "read-only `make hooks-status` reporter; prints the same override "
       "advice text as the native pre-push hook, performs no push of its "
       "own" },
     { "tools/lint/check_stable_publish_containment.sh",
       "lint fixture: the forbidden string is the input it tests" },
-    { "tools/scripts/check_stable_publish_containment.sh",
-      "lint fixture: the forbidden string is the input it tests" },
+    { "tools/dev/stable_publish_containment.c",
+      "lint fixture: the containment translator, performs no publish" },
     { "tools/lint/lintc/gate_no_unattended_publish.c",
       "this gate; a gate exempt from itself is a place to hide, so it is "
       "listed rather than skipped" },

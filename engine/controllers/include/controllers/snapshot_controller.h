@@ -65,6 +65,14 @@ bool snapshot_import_block_index(const char *snapshot_dir, const char *db_path,
 /* The snapshot import's UTXO worker, run on the caller's thread. */
 bool snapshot_import_utxos_for_test(const char *snapshot_dir, const char *db_path,
                                     int *out_count);
+/* The T1 block-index import's budget-derived page cache (the value it
+ * writes as PRAGMA cache_size, in KiB) for the current memory lane, and
+ * the pure form for a given effective-RAM size in bytes. Boundaries
+ * mirror node_db_turbo_cache_kib_for_ram: <=4 GiB — and unreadable RAM
+ * (ram <= 0) — take the 64 MiB constrained size, anything larger the
+ * 512 MiB bulk size. */
+int64_t snapshot_import_turbo_cache_kib_for_test(void);
+int64_t snapshot_import_turbo_cache_kib_for_ram_for_test(int64_t ram);
 #endif
 
 /* Process-lifetime count of rows quarantined by the per-row hash-bind /

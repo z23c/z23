@@ -4,7 +4,7 @@
  * runtime port of ./build/bin/z23-lint check-installed-acceptance-tools. Every
  * binary tools/dev/zcode_dht_acceptance.sh (the HARNESS) tests with
  * `[ -x ]` before it starts a node must be placed in the install prefix by
- * tools/dev/c23_commons_beta_acceptance.sh (the INSTALLER) OUTSIDE every
+ * tools/dev/c23_commons_beta.c (the INSTALLER) OUTSIDE every
  * conditional, so the public `make c23-commons-installed-acceptance`
  * target — which runs with every optional variable unset — never dies on
  * the harness's own precondition. Both lists are DERIVED from the scripts
@@ -36,7 +36,7 @@ enum {
 static const char k_atl_gate[] = "check-installed-acceptance-tools";
 static const char k_atl_harness[] = "tools/dev/zcode_dht_acceptance.sh";
 static const char k_atl_lifecycle[] = "tools/dev/node_lifecycle.sh";
-static const char k_atl_installer[] = "tools/dev/c23_commons_beta_acceptance.sh";
+static const char k_atl_installer[] = "tools/dev/c23_commons_beta.c";
 
 static FILE *atl_out, *atl_err;
 static const char *atl_harness_ov, *atl_lifecycle_ov, *atl_installer_ov;

@@ -104,6 +104,99 @@ static int fgl_case_graders(void)
     return failures;
 }
 
+/* Two calls of the shipped grader on the same inputs. Writes the first. */
+static bool fgl_g7_stable(int64_t median, int64_t cold, int samples,
+                          const char *fresh, const char *group,
+                          struct zcl_goal_result *out)
+{
+    struct zcl_goal_result again;
+    *out = zcl_goals_g7_grade(median, cold, samples, fresh, group);
+    again = zcl_goals_g7_grade(median, cold, samples, fresh, group);
+    return out->grade == again.grade &&
+           strcmp(out->evidence, again.evidence) == 0 &&
+           strcmp(out->next, again.next) == 0;
+}
+
+static int fgl_case_g7_grade(void)
+{
+    int failures = 0;
+    TEST("G7: latency bar, freshness and receipt labels, twice the same") {
+        struct zcl_goal_result r;
+        ASSERT(fgl_g7_stable(12, 345, 5, "fresh-verbatim",
+                             "codeindex_stale-pass", &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "median 12 ms over 5 warm samples"));
+        ASSERT(fgl_has(r.evidence, "first call 345 ms"));
+        ASSERT(fgl_has(r.evidence, "bar 50 ms"));
+        ASSERT(fgl_has(r.evidence,
+                       "freshness=fresh-verbatim+codeindex_stale-pass"));
+        ASSERT(fgl_has(r.evidence, "token reduction and MCP coverage are "
+                                   "not measured"));
+        ASSERT(fgl_has(r.next, "measure tokens per task with and without MCP "
+                               "and report the reduction"));
+        ASSERT(fgl_g7_stable(50, 80, 5, "fresh-verbatim",
+                             "codeindex_stale-pass", &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "median 50 ms over 5 warm samples"));
+        ASSERT(fgl_has(r.evidence, "first call 80 ms"));
+        ASSERT(fgl_g7_stable(51, 345, 5, "stale-warm-path",
+                             "codeindex_stale-pass", &r));
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_has(r.evidence, "median 51 ms over 5 warm samples"));
+        ASSERT(fgl_has(r.evidence, "first call 345 ms"));
+        ASSERT(fgl_has(r.evidence, "bar 50 ms"));
+        ASSERT(fgl_has(r.evidence,
+                       "freshness=stale-warm-path+codeindex_stale-pass"));
+        ASSERT(fgl_g7_stable(12, 345, 5, "stale-warm-path",
+                             "codeindex_stale-pass", &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence,
+                       "freshness=stale-warm-path+codeindex_stale-pass"));
+        ASSERT(fgl_g7_stable(12, 345, 5, "fresh-verbatim",
+                             "codeindex_stale-fail(exit 1)", &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence,
+                       "freshness=fresh-verbatim+codeindex_stale-fail(exit 1)"));
+        ASSERT(fgl_g7_stable(12, 345, 5, "no-verdict(FRESHNESS_CHECK)",
+                             "codeindex_stale-unrun(no-checkout)", &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "freshness=no-verdict(FRESHNESS_CHECK)+"
+                                   "codeindex_stale-unrun(no-checkout)"));
+        ASSERT(fgl_g7_stable(12, 345, 5, NULL, NULL, &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence,
+                       "freshness=no-verdict+codeindex_stale-unrun"));
+        ASSERT(fgl_g7_stable(12, 345, 5, "", "", &r));
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence,
+                       "freshness=no-verdict+codeindex_stale-unrun"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_g7_skip(void)
+{
+    int failures = 0;
+    TEST("G7: skipped probes are unmeasured and name the code lookup skip") {
+        struct zcl_goals_options o;
+        struct zcl_goal_result a, b;
+        fgl_options(&o);
+        a = zcl_goals_measure(&o, "G7");
+        b = zcl_goals_measure(&o, "G7");
+        ASSERT(a.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(b.grade == a.grade);
+        ASSERT(strcmp(a.evidence, b.evidence) == 0);
+        ASSERT(strcmp(a.next, b.next) == 0);
+        ASSERT(fgl_has(a.evidence, "code lookup probe skipped"));
+        ASSERT(!fgl_has(a.evidence, "freshness="));
+        ASSERT(fgl_has(a.next, "measure tokens per task with and without MCP "
+                               "and report the reduction"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #define FGL_ROW(note, state, ts) \
     "{\"tip\":\"t\",\"note\":\"" note "\",\"state\":\"" state \
     "\",\"ts\":\"" ts "\"}\n"
@@ -1732,6 +1825,8 @@ int test_fleet_goals(void)
     test_make_tmpdir(root, sizeof(root), "fleet_goals", "root");
     failures += fgl_case_catalog();
     failures += fgl_case_graders();
+    failures += fgl_case_g7_grade();
+    failures += fgl_case_g7_skip();
     failures += fgl_case_trains(root);
     failures += fgl_case_train_unknown_failure(root);
     failures += fgl_case_train_failure_time(root);

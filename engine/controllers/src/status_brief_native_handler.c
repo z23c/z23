@@ -325,6 +325,7 @@ struct status_brief_fields {
     const char *primary_blocker;
     int64_t active_conditions;
     int64_t rss_mb; bool rss_known;
+    int64_t swap_mb; bool swap_known;
     int64_t tip_advance_age_seconds; bool tip_age_known;
     struct status_brief_blocker_registry registry;
     struct status_brief_trust_tier trust_tier;
@@ -431,6 +432,7 @@ static char *status_brief_compose_body(const struct status_brief_fields *f,
     status_push_registry_fields(&root, &f->registry);
     json_push_kv_int(&root, "active_conditions", f->active_conditions);
     status_push_int_if_known(&root, "rss_mb", f->rss_known, f->rss_mb);
+    status_push_int_if_known(&root, "swap_mb", f->swap_known, f->swap_mb);
     status_push_int_if_known(&root, "tip_advance_age_seconds",
                              f->tip_age_known, f->tip_advance_age_seconds);
     status_push_trust_tier_fields(&root, &f->trust_tier);
@@ -498,6 +500,9 @@ static char *status_brief_build_schema_skew_body(
     (void)status_read_optional_nonnegative(json_get(agent, "resources"),
                                            "rss_mb", &f.rss_mb,
                                            &f.rss_known);
+    (void)status_read_optional_nonnegative(json_get(agent, "resources"),
+                                           "swap_mb", &f.swap_mb,
+                                           &f.swap_known);
     (void)status_read_optional_nonnegative(json_get(agent, "reducer"),
                                            "tip_advance_age_seconds",
                                            &f.tip_advance_age_seconds,
@@ -527,6 +532,7 @@ struct status_brief_raw {
     int64_t peer_count;
     int64_t active_conditions;
     int64_t rss_mb; bool rss_known;
+    int64_t swap_mb; bool swap_known;
     int64_t tip_advance_age_seconds; bool tip_age_known;
     int64_t first_call_budget_ms;
     bool chain_evidence_consistent;
@@ -577,6 +583,12 @@ static void status_brief_read_agent_views(const struct json_value *agent,
 static bool status_brief_resources_shape_ok(
     struct status_brief_raw *r, const struct json_value *resources)
 {
+    /* swap_mb is additive on zcl.node_resources.v1: read when present but
+     * never part of the shape verdict, so a node that predates the field
+     * still validates and the brief reports swap as unknown, not invalid. */
+    if (resources && resources->type == JSON_OBJ)
+        (void)status_read_optional_nonnegative(resources, "swap_mb",
+                                               &r->swap_mb, &r->swap_known);
     return resources && resources->type == JSON_OBJ &&
            status_schema_is(resources, "zcl.node_resources.v1") &&
            status_read_optional_nonnegative(resources, "rss_mb", &r->rss_mb,
@@ -856,6 +868,7 @@ static struct status_brief_fields status_brief_project(
         .primary_blocker = status_brief_primary_blocker(r),
         .active_conditions = r->active_conditions,
         .rss_mb = r->rss_mb, .rss_known = r->rss_known,
+        .swap_mb = r->swap_mb, .swap_known = r->swap_known,
         .tip_advance_age_seconds = r->tip_advance_age_seconds,
         .tip_age_known = r->tip_age_known,
         .schema_skew = NULL,

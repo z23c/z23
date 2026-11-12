@@ -391,12 +391,13 @@ out.
   another agent may have created.
 
 - **An interrupted mutant run can leave the mutant in a dirty tree.** The
-  acceptance script writes each candidate over the source file with `mv -f`
-  (`drive_candidate`, `tools/dev/reflex-hotfork-source-bundle-acceptance.sh:38-42`)
-  and restores it from a saved backup in an `EXIT INT TERM` trap (`:26-30`). A
-  `SIGKILL` or a host reset skips the trap. Before committing a tree a previous
-  run touched, diff each mutated file against its saved original and read the
-  whole `git diff` for the tree.
+  source-bundle acceptance writes each candidate over the owner file with
+  `rename` (`zcl_reflex_hotfork_source_bundle` in
+  `tools/dev/reflex_hotfork_source_bundle.c`) and restores the saved backup
+  on every return and on SIGINT or SIGTERM. A `SIGKILL` or a host reset
+  skips that restore. Before committing a tree a previous run touched, diff
+  each mutated file against its saved original and read the whole `git diff`
+  for the tree.
 
 - **`dev land submit` moves the lane HEAD before its gates run.** The qualify
   step calls `dlq_rebase`, which rebases the lane worktree onto `origin/main`

@@ -14,6 +14,7 @@
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 
 #include "lint_gate_selftests.h"
+#include "refresh_git_hooks.h"
 
 #include <sys/file.h>
 
@@ -495,7 +496,6 @@ int t_git_hooks_installer_idempotent(void)
 
 /* ── refresh: an armed checkout follows a rebuilt hook binary, an idle one
  * is never armed ───────────────────────────────────────────────────────── */
-#define HOOKS_REFRESH_REL "tools/scripts/refresh_git_hooks_if_armed.sh"
 #define HOOKS_INSTALLED_REL "build/githooks/z23-git-hook"
 #define HOOKS_CHUNK 4096
 
@@ -545,21 +545,58 @@ static int hooks_rebuild_copy(struct hooks_fx *fx)
     return bad | (chmod(fx->rebuilt, 0755) != 0); /* the refresh needs -x */
 }
 
-/* Runs the refresh step against root with the rebuilt binary as the hook
- * binary. Returns the script's exit code, or -1 on harness error. */
+/* Runs the shipped refresher against root with the rebuilt binary as the
+ * hook binary. The child inherits the isolated hook environment, then calls
+ * the C entry. Returns that entry's status, or -1 on harness error. */
+static int hooks_call_refresh(const char **envp, char *out, size_t cap)
+{
+    int pfd[2], status = 0;
+    size_t used = 0;
+    ssize_t got;
+    pid_t pid;
+    if (cap == 0 || pipe(pfd) != 0)
+        return -1;
+    pid = fork_with_retry();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(pfd[0]);
+        if (dup2(pfd[1], STDOUT_FILENO) < 0 || dup2(pfd[1], STDERR_FILENO) < 0)
+            _exit(127);
+        close(pfd[1]);
+        environ = (char **)envp;
+        _exit(zcl_refresh_git_hooks_if_armed());
+    }
+    close(pfd[1]);
+    while (used + 1 < cap) {
+        got = read(pfd[0], out + used, cap - 1 - used);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        used += (size_t)got;
+    }
+    out[used] = '\0';
+    close(pfd[0]);
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 static int hooks_refresh(struct hooks_fx *fx, const char *root, char *out,
                          size_t cap)
 {
-    char script[PATH_MAX];
-    const char *argv[] = {script, NULL};
     const char *saved = fx->bin_use;
     int rc;
-    if (dip_join(script, sizeof script, fx->src, HOOKS_REFRESH_REL) != 0)
-        return -1;
     fx->bin_use = fx->rebuilt;
     rc = hooks_env_build(&fx->ienv, fx, root) != 0
              ? -1
-             : hooks_spawn(argv, fx->ienv.vp, out, cap);
+             : hooks_call_refresh(fx->ienv.vp, out, cap);
     fx->bin_use = saved;
     return rc;
 }

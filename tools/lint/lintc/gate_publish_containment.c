@@ -13,7 +13,7 @@
  * (Phase-0 containment: no production path may create a network release
  * until immutable quality/release evidence and the signed stable publisher
  * exist). A textual tripwire, not a parser; the actual stable entrypoints
- * (tools/release.sh, the `release:`/`bootstrap-publish:` Makefile targets)
+ * (tools/dev/release_containment.c, the `release:`/`bootstrap-publish:` Makefile targets)
  * are separately asserted hard-contained by known_entrypoints_contained().
  *
  * Scan roots (existence-gated): Makefile Dockerfile Jenkinsfile Justfile
@@ -65,7 +65,7 @@
 static const char k_pgc_name[] = "check_stable_publish_containment";
 
 static const char *const k_pgc_self_rel[] = {
-    "tools/scripts/check_stable_publish_containment.sh",
+    "tools/dev/stable_publish_containment.c",
     "tools/lint/lintc/gate_publish_containment.c",
 };
 enum { PGC_N_SELF = (int)(sizeof k_pgc_self_rel / sizeof k_pgc_self_rel[0]) };
@@ -392,20 +392,20 @@ static int pgc_stat_exists(const char *root, const char *suffix, char *path,
 static int pgc_check_release_sh(const char *root, FILE *err)
 {
     char path[PGC_PATH];
-    int e = pgc_stat_exists(root, "tools/release.sh", path, sizeof path);
+    int e = pgc_stat_exists(root, "tools/dev/release_containment.c", path,
+                            sizeof path);
     if (e <= 0)
         return e < 0 ? 2 : 0;
     if (pgc_file_contains(path,
             "REFUSING: stable release build/package/sign/publish is "
             "contained"))
         return 0;
-    fputs("FAIL: tools/release.sh is not hard-contained\n", err);
+    fputs("FAIL: tools/dev/release_containment.c is not hard-contained\n", err);
     return 2;
 }
 
-/* Port of the shell's awk state machine: for EVERY line beginning
- * "release:", the line itself must read exactly "release:" and the line
- * right after it exactly "\t@./tools/release.sh". */
+/* Every "release:" line must name only the containment tool, and the next
+ * line must run that tool. A tree with no such line is not this check's. */
 static int pgc_release_target_ok(const char *path)
 {
     FILE *f = fopen(path, "r");
@@ -421,7 +421,7 @@ static int pgc_release_target_ok(const char *path)
         if (strncmp(line, "release:", 8) != 0)
             continue;
         seen = 1;
-        if (strcmp(line, "release:") != 0)
+        if (strcmp(line, "release: $(BIN_DIR)/release") != 0)
             bad = 1;
         ssize_t n2 = getline(&line, &cap, f);
         if (n2 <= 0) {
@@ -430,7 +430,7 @@ static int pgc_release_target_ok(const char *path)
         }
         if (n2 > 0 && line[n2 - 1] == '\n')
             line[n2 - 1] = '\0';
-        if (strcmp(line, "\t@./tools/release.sh") != 0)
+        if (strcmp(line, "\t@$(BIN_DIR)/release") != 0)
             bad = 1;
     }
     free(line);
@@ -448,8 +448,8 @@ static int pgc_check_release_target(const char *root, FILE *err)
         return 0; /* no ^release: line at all: nothing to check */
     if (pgc_release_target_ok(path))
         return 0;
-    fputs("FAIL: make release has prerequisites or bypasses contained "
-          "release.sh\n", err);
+    fputs("FAIL: make release does not run the contained "
+          "release tool\n", err);
     return 2;
 }
 

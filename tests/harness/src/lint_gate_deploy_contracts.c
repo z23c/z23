@@ -283,7 +283,7 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(repo_path(agent_status_path, sizeof(agent_status_path),
                          "tools/dev/agent-dev-status.sh") == 0);
         ASSERT(repo_path(clear_script_path, sizeof(clear_script_path),
-                         "tools/dev/agent-clear-stale-reindex.sh") == 0);
+                         "tools/dev/agent_clear_stale_reindex.c") == 0);
         ASSERT(repo_path(agent_doctor_path, sizeof(agent_doctor_path),
                          "tools/dev/agent-doctor.sh") == 0);
         ASSERT(repo_path(handoff_path, sizeof(handoff_path),
@@ -411,14 +411,16 @@ int t_dev_lane_deploy_contract(void)
         ASSERT(strstr(clear_script, "stale_marker_proven") != NULL);
         ASSERT(strstr(clear_script, "marker_anchor_above_served_height")
                != NULL);
-        ASSERT(strstr(clear_script, "mv \"$MARKER\" \"$archive\"") != NULL);
-        ASSERT(strstr(clear_script, "systemctl --user show") != NULL);
+        ASSERT(strstr(clear_script, "rename(cfg->marker, out->archive)") != NULL);
+        ASSERT(strstr(clear_script, "\"systemctl\"") != NULL);
+        ASSERT(strstr(clear_script, "\"--user\"") != NULL);
+        ASSERT(strstr(clear_script, "\"ActiveState\"") != NULL);
         ASSERT(strstr(clear_script, "getblockcount") != NULL);
         ASSERT(strstr(clear_script, "python") == NULL);
         ASSERT(strstr(agent_doctor, "deploy_blocker=") != NULL);
         ASSERT(strstr(makefile, "agent-clear-stale-dev-reindex:") != NULL);
         ASSERT(strstr(makefile,
-                      "tools/dev/agent-clear-stale-reindex.sh") != NULL);
+                      "tools/dev/agent_clear_stale_reindex.c") != NULL);
         ASSERT(strstr(script, "systemctl --user daemon-reload") != NULL);
         ASSERT(strstr(makefile,
                       "./tools/deploy_guard.sh canonical-deploy") != NULL);
@@ -707,7 +709,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "BUILD_MUTATION") != NULL);
         ASSERT(strstr(buf, "BUILD_COMPILER_ID") != NULL);
         ASSERT(strstr(buf, "compile-epoch-object.sh") != NULL);
-        ASSERT(strstr(buf, "publish-build-alias.sh") != NULL);
+        ASSERT(strstr(buf, "publish-build-alias$(ZCL_HOST_EXEEXT)") != NULL);
         ASSERT(strstr(buf, "check-build-epoch-integrity: $(LINTC_TOOL)") != NULL);
         ASSERT(strstr(buf, "COV_CFLAGS = $(filter-out -flto -flto=%")
                != NULL);

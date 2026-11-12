@@ -118,9 +118,27 @@ static void os_proc_trim_newline(char *s)
     }
 }
 
+/* Match one "Label: NNN kB" line of /proc/<pid>/status. The line must be
+ * NUL-terminated at its newline (as fgets leaves it) so sscanf can never
+ * run past it into the next line. Returns false when the line does not
+ * begin with `label` (keep scanning); true with the value in bytes — or -1
+ * when the label matched but the number did not parse — because the FIRST
+ * matching line decides, exactly as the file reader always has. */
+#if !defined(__APPLE__) && !defined(_WIN32)
+static bool os_proc_status_line_bytes(const char *line, const char *label,
+                                      int64_t *bytes)
+{
+    size_t label_len = strlen(label);
+    if (strncmp(line, label, label_len) != 0)
+        return false;
+    long long kb = 0;
+    *bytes = (sscanf(line + label_len, " %lld", &kb) == 1 && kb >= 0)
+        ? (int64_t)kb * 1024 : -1;
+    return true;
+}
+
 /* Read a single "Label: NNN kB" style line's value (in kB) from a
  * /proc/self/status-shaped file, returned as bytes. -1 if not found. */
-#if !defined(__APPLE__) && !defined(_WIN32)
 static int64_t os_proc_status_field_bytes(const char *path, const char *label)
 {
     FILE *f = fopen(path, "r");
@@ -128,19 +146,44 @@ static int64_t os_proc_status_field_bytes(const char *path, const char *label)
         return -1;
 
     char line[256];
-    size_t label_len = strlen(label);
     int64_t result = -1;
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, label, label_len) != 0)
-            continue;
-        long long kb = 0;
-        if (sscanf(line + label_len, " %lld", &kb) == 1 && kb >= 0)
-            result = (int64_t)kb * 1024;
-        break;
+        if (os_proc_status_line_bytes(line, label, &result))
+            break;
     }
     fclose(f);
     return result;
 }
+
+#ifdef ZCL_TESTING
+/* Test-only seam onto the same parser: one status text, line by line,
+ * through the identical line core above. */
+int64_t os_proc_status_field_bytes_for_test(const char *status,
+                                            const char *label)
+{
+    char line[256];
+    size_t len = 0;
+    for (const char *p = status; p && *p; p++) {
+        if (*p != '\n') {
+            if (len + 1 < sizeof(line))
+                line[len++] = *p;
+            continue;
+        }
+        line[len] = '\0';
+        int64_t result = -1;
+        if (os_proc_status_line_bytes(line, label, &result))
+            return result;
+        len = 0;
+    }
+    if (len > 0) {
+        line[len] = '\0';
+        int64_t result = -1;
+        if (os_proc_status_line_bytes(line, label, &result))
+            return result;
+    }
+    return -1;
+}
+#endif
 #endif
 
 #endif /* !_WIN32 */
@@ -343,6 +386,7 @@ bool os_proc_mem_read(struct os_proc_mem *out)
         return false;
     out->rss_bytes = (int64_t)counters.WorkingSetSize;
     out->vsize_bytes = (int64_t)counters.PagefileUsage;
+    out->swap_bytes = -1;
     out->cgroup_current = -1;
     out->cgroup_high = -1;
     out->cgroup_max = -1;
@@ -370,6 +414,9 @@ bool os_proc_mem_read(struct os_proc_mem *out)
     out->vsize_bytes = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
         (task_info_t)&basic, &basic_count) == KERN_SUCCESS
         ? (int64_t)basic.virtual_size : -1;
+    /* XNU's per-process swap usage (ri_swap_usage) needs a rusage_info
+     * version this arm does not request; report unreadable, never zero. */
+    out->swap_bytes = -1;
     out->cgroup_current = -1;
     out->cgroup_high = -1;
     out->cgroup_max = -1;
@@ -384,6 +431,9 @@ bool os_proc_mem_read(struct os_proc_mem *out)
 #else
     out->rss_bytes = os_proc_status_field_bytes("/proc/self/status", "VmRSS:");
     out->vsize_bytes = os_proc_status_field_bytes("/proc/self/status", "VmSize:");
+    /* VmSwap is what VmRSS hides: pages already out of RAM, so a small
+     * machine under pressure still reports a deceptively lean resident set. */
+    out->swap_bytes = os_proc_status_field_bytes("/proc/self/status", "VmSwap:");
 
     char dir[768];
     if (os_proc_cgroup_dir(dir, sizeof(dir))) {
@@ -406,7 +456,8 @@ bool os_proc_mem_read(struct os_proc_mem *out)
 
 /* Resident set in KiB. Linux reads field 2 of /proc/self/statm (pages, no
  * cgroup or meminfo work, so cheap enough to call twice around a trim); other
- * hosts fall back to os_proc_mem_read(). -1 on failure. */
+ * hosts fall back to os_proc_mem_read(). -1 on failure. statm carries no
+ * swap: swapped-out footprint is only in os_proc_mem_read's VmSwap field. */
 int64_t os_proc_resident_kib(void)
 {
 #if defined(__linux__)

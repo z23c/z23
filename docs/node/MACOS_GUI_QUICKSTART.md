@@ -58,7 +58,7 @@ make doctor
 `compile_commands.json`, and creates the gitignored caches. `make doctor` names
 anything this host is still missing with the exact line that installs it. A
 second checkout of the same repository (a worktree) needs its gitignored
-`vendor/` archives copied in before it can link — `tools/scripts/worktree_init.sh`
+`vendor/` archives copied in before it can link — `tools/dev/worktree_init.c`
 does that and tells you what is still missing; see
 [Troubleshooting](#troubleshooting).
 
@@ -68,7 +68,7 @@ builds them from pinned sources before doing anything else. Your GUI app links
 none of it — only Cocoa — but today's parse asks for it all the same, so the
 first command on a new clone pays a one-time minutes-scale vendor build. Copy a
 primed checkout's `vendor/` in first and the whole journey below is
-seconds-scale instead; that is what `tools/scripts/worktree_init.sh` does for a
+seconds-scale instead; that is what `tools/dev/worktree_init.c` does for a
 worktree.
 
 ## Scaffold it
@@ -242,7 +242,7 @@ targets in the lean set.
 missing `vendor/lib`.** Git carries only `vendor/lib/libsecp256k1.a`; every
 other archive and the generated OpenSSL/zlib headers under `vendor/include/`
 are build products of `make vendor`. In a fresh worktree run
-`tools/scripts/worktree_init.sh`, which copies the archives from the checkout
+`tools/dev/worktree_init.c`, which copies the archives from the checkout
 that built them and names anything still missing; failing that,
 `cp -a <primed-checkout>/vendor/include vendor/` and
 `cp -a <primed-checkout>/vendor/lib vendor/`, or `make vendor` to build from

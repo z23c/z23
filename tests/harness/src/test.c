@@ -1411,6 +1411,8 @@ static void run_full_suite_foundation(int *failures)
       *failures += test_device_host_shell(); }
     { extern int test_pair_renew(void);
       *failures += test_pair_renew(); }
+    { extern int test_pair_epoch(void);
+      *failures += test_pair_epoch(); }
     { extern int test_telegram(void);
       *failures += test_telegram(); }
     { extern int test_device_host_runtime(void);
