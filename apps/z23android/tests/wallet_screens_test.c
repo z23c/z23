@@ -2516,8 +2516,11 @@ static void test_receive_share(void)
     struct wallet_screen *s = snap();
     long copy = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_COPY_ADDRESS);
     long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST);
-    CHECK(copy >= 0 && share == copy + 1 &&
+    CHECK(copy >= 0 && share == copy + 2 &&
         !strcmp(text_at(s, share), "Share request: media"));
+    CHECK(share > copy && s->items[share - 1].kind == WALLET_ITEM_NOTE &&
+        !strcmp(text_at(s, share - 1),
+            "Share a photo or video with your ZCL request. Choose the recipient in Android's share sheet."));
     size_t next = (size_t)share + 1;
     CHECK(next < s->count && s->items[next].kind != WALLET_ITEM_NOTE);
     char expected[ZAPP_RECEIVE_CODE_MAX], code[ZAPP_RECEIVE_CODE_MAX];
