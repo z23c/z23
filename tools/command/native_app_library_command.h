@@ -40,6 +40,10 @@ void zcl_test_app_library_discover_worker_share(const struct app_launch_env *env
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path,
     app_library_preparer preparer, app_library_sharer sharer);
+void zcl_test_app_library_discover_worker_share_cap(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter,
+    app_confirm_presenter receive_presenter, void *context, const char *worker_path,
+    app_library_preparer preparer, app_library_sharer sharer, size_t data_cap);
 void zcl_test_app_library_native_at(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
     void *context, app_confirm_presenter notice);

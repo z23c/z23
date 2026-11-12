@@ -2110,9 +2110,70 @@ static bool arpt_head(const struct ak_fixture *f, const char *newer, const char 
 struct ak_draft_flow_view {
     struct ak_draft_view nav;
     struct ak_fixture *fixture;
-    bool keep, prompted_keep, advanced;
+    bool keep, prompted_keep, advanced, kept_card, share_menu, history, capped, share_failed, preview_stopped;
+    bool share_cancel, share_called;
+    unsigned preparations;
+    uint64_t prior_revision;
     char newer[65];
 };
+static bool ak_draft_kept_card(struct ak_draft_flow_view *v,
+    const struct zcl_present_model_v1 *model)
+{
+    struct app_selection saved; uint8_t expected[32];
+    const char *base = strrchr(v->fixture->world.bob_copy, '/');
+    return base && base[1] && strstr(model->summary, base + 1) &&
+        zcl_hex_decode_lower(v->nav.head, expected, sizeof(expected)) &&
+        app_selection_load(v->fixture->env.state_dir, AK_ROUTE, &saved) == APP_SELECTION_OK &&
+        saved.revision == v->prior_revision + 1 && !memcmp(saved.version, expected, sizeof(expected)) &&
+        !strcmp(saved.copy, v->fixture->world.bob_copy);
+}
+static const char *ak_draft_prior_action(const struct ak_draft_flow_view *v,
+    const struct zcl_present_model_v1 *model)
+{
+    if (!v->history || v->prompted_keep) return NULL;
+    if (!strcmp(model->request_id, "library-help")) return "back";
+    if (!v->preparations && model->action_count && !strcmp(model->actions[0].id, "draft")) return "help";
+    return NULL;
+}
+static bool ak_draft_press(const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event, const char *action)
+{
+    for (unsigned i = 0; i < model->action_count; ++i) if (!strcmp(model->actions[i].id, action)) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = i; return true;
+    }
+    return false;
+}
+static bool ak_draft_flow_library(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct ak_draft_flow_view *v = context;
+    if (!strcmp(model->request_id, "library-error")) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+    }
+    const char *prior_action = ak_draft_prior_action(v, model);
+    if (prior_action) return ak_draft_press(model, event, prior_action);
+    if (!v->keep || !v->prompted_keep)
+        return ak_draft_library(context, model, copy_text, event, why, cap);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (!v->kept_card) {
+        if (!ak_draft_kept_card(v, model)) return false;
+        for (unsigned i = 0; i < model->action_count; ++i) {
+            if (strcmp(model->actions[i].id, "share")) continue;
+            v->kept_card = true; event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+            event->action_index = i; return true;
+        }
+        return false;
+    }
+    v->share_menu = !strcmp(model->request_id, "library-share-options");
+    if (!v->share_menu) return false;
+    if (v->share_cancel && v->share_called) {
+        event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+    }
+    if (v->history) return ak_draft_press(model, event, "share-file");
+    event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+}
 static bool ak_draft_wait_worker(const struct zcl_present_window_live_view_v1 *live)
 {
     bool close = false, redraw = false;
@@ -2132,7 +2193,7 @@ static bool ak_draft_confirm_pages(struct ak_draft_flow_view *v, bool keep_view,
     if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
     for (uint32_t i = 1; i < count; ++i)
         if (!aj_receive_action(live, 2, &close, &redraw) || close) return false;
-    if (keep_view && v->keep) {
+    if (keep_view && v->keep && !v->history) {
         v->advanced = abc_put(v->fixture->world.bob_copy, "include/boost.h", "#define BOOST 9\n") &&
             abc_save(v->fixture->world.bob_copy, v->newer);
         if (!v->advanced) return false;
@@ -2155,7 +2216,9 @@ static bool ak_draft_flow_present(void *context, const struct zcl_present_model_
 }
 static bool ak_draft_stop_preview(struct ak_fixture *f, const struct zcl_command_reply *reply)
 {
-    const struct json_value *open = json_at(json_get(&reply->data, "operations"), 2);
+    const struct json_value *data = &reply->data;
+    if (!json_get(data, "operations")) data = json_get(json_get(data, "failure_facts"), "historical_keep");
+    const struct json_value *open = json_at(json_get(data, "operations"), 2);
     const struct json_value *pid = json_get(open, "pid"); char proc[64];
     if (!pid || pid->type != JSON_INT) return false;
     (void)snprintf(proc, sizeof(proc), "/proc/%lld/exe", (long long)json_get_int(pid));
@@ -2169,31 +2232,210 @@ static bool ak_draft_selection_result(struct ak_fixture *f, bool keep, const str
 {
     struct app_selection after;
     if (app_selection_load(f->env.state_dir, AK_ROUTE, &after) != APP_SELECTION_OK) return false;
+    if (keep && view->history) return after.revision == before->revision + 1 && !memcmp(after.version, head, 32);
     if (keep) return view->advanced && after.revision == before->revision + 1 &&
         !memcmp(after.version, head, 32) && arpt_head(f, view->newer, view->nav.head, reply);
     return after.revision == before->revision && !memcmp(after.version, before->version, 32) &&
         !strcmp(aso_string(&reply->data, "continuation"), "previewed");
 }
-static bool ak_draft_preview_keep(struct ak_fixture *f, bool keep)
+static void ak_draft_preparer(void *context, const struct app_selection *selection,
+    struct zcl_command_reply *reply)
 {
-    struct app_selection before; uint8_t head[32] = {0}; char worker[PATH_MAX];
+    struct ak_draft_flow_view *v = context; uint8_t version[32]; char hex[65];
+    ++v->preparations;
+    bool changed = v->preparations == 1;
+    if (changed) {
+        if (!app_saved_draft_head(selection, version, reply)) return;
+    } else memcpy(version, selection->version, sizeof(version));
+    zcl_hex_encode(version, sizeof(version), hex);
+    bool ok = json_push_kv_str(&reply->data, "version", hex) &&
+        json_push_kv_str(&reply->data, "copy", selection->copy) &&
+        json_push_kv_str(&reply->data, "datadir", selection->datadir) &&
+        json_push_kv_bool(&reply->data, "key_created", changed) &&
+        json_push_kv_bool(&reply->data, "changed", changed);
+    if (!ok) zcl_package_copy_fail(reply, "FIXTURE_FAILED", false, "Cannot prepare fixture receipt.", "fixture");
+    else reply->error.mutated = changed;
+}
+static void ak_draft_share_failure(void *context, const struct app_selection *selection,
+    const char *path, struct zcl_command_reply *reply)
+{
+    struct ak_draft_flow_view *v = context; uint8_t expected[32];
+    v->preview_stopped = ak_draft_stop_preview(v->fixture, reply);
+    v->share_called = true;
+    v->share_failed = zcl_hex_decode_lower(v->nav.head, expected, sizeof(expected)) &&
+        !memcmp(selection->version, expected, sizeof(expected)) &&
+        selection->revision == v->prior_revision + 1 && path && path[0] == '/';
+    zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+    if (v->share_cancel) {
+        if (!json_push_kv_str(&reply->data, "status", "canceled"))
+            zcl_package_copy_fail(reply, "FIXTURE_FAILED", false, "Cannot describe cancellation.", "fixture");
+        return;
+    }
+    zcl_package_copy_fail(reply, "FIXTURE_SHARE_FAILED", false, "Later share failed.", "fixture");
+}
+static bool ak_draft_history_identity(const struct json_value *kept,
+    const struct ak_draft_flow_view *view)
+{
+    struct app_selection saved; char image[65], record[65];
+    if (app_selection_load(view->fixture->env.state_dir, AK_ROUTE, &saved) != APP_SELECTION_OK) return false;
+    zcl_hex_encode(saved.image, 32, image); zcl_hex_encode(saved.record, 32, record);
+    const struct json_value *revision = json_get(kept, "selection_revision");
+    return !strcmp(aso_string(kept, "name"), AK_ROUTE) && revision && revision->type == JSON_INT &&
+        json_get_int(revision) == (int64_t)(view->prior_revision + 1) &&
+        !strcmp(aso_string(kept, "version"), view->nav.head) &&
+        !strcmp(aso_string(kept, "image_sha3"), image) && !strcmp(aso_string(kept, "record_id"), record);
+}
+static bool ak_draft_history_preparation(const struct json_value *facts,
+    const struct ak_draft_flow_view *view)
+{
+    const struct json_value *p = json_get(facts, "library_preparation");
+    if (!p) p = facts;
+    const struct json_value *changed = json_get(p, "changed");
+    return !strcmp(aso_string(p, "version"), view->nav.head) &&
+        !strcmp(aso_string(p, "copy"), view->fixture->world.bob_copy) &&
+        !strcmp(aso_string(p, "datadir"), view->fixture->world.bob_datadir) &&
+        changed && changed->type == JSON_BOOL && json_get_bool(changed);
+}
+static bool ak_draft_history_facts(const struct json_value *facts,
+    const struct ak_draft_flow_view *view)
+{
+    const struct json_value *kept = json_get(facts, "historical_keep");
+    const struct json_value *operations = json_get(kept, "operations");
+    if (!ak_draft_history_identity(kept, view) || !ak_draft_history_preparation(facts, view)) return false;
+    if (!operations) return json_get_bool(json_get(facts, "details_unavailable"));
+    const struct json_value *pid = json_get(json_at(operations, 2), "pid");
+    return !strcmp(aso_string(kept, "continuation"), "kept") && pid && pid->type == JSON_INT && json_get_int(pid) > 0;
+}
+static bool ak_draft_history_wire(struct zcl_command_reply *reply, const struct ak_draft_flow_view *view)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", NULL);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(reg, spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    ok = ok && !strcmp(aso_string(error, "code"), "FIXTURE_SHARE_FAILED") &&
+        json_get_bool(json_get(error, "mutated")) && ak_draft_history_facts(json_get(error, "facts"), view);
+    json_free(&doc); return ok;
+}
+static bool ak_draft_history_result(const struct ak_draft_flow_view *view,
+    struct zcl_command_reply *reply)
+{
+    return view->preparations == 2 && view->share_failed && reply->error.mutated &&
+        reply->status != ZCL_COMMAND_STATUS_PASSED && !strcmp(reply->error.code, "FIXTURE_SHARE_FAILED") &&
+        ak_draft_history_facts(json_get(&reply->data, "failure_facts"), view) && ak_draft_history_wire(reply, view);
+}
+static bool ak_draft_success_facts(const struct json_value *data, const struct ak_draft_flow_view *view)
+{
+    const struct json_value *kept = json_get(data, "historical_keep");
+    const struct json_value *preparation = json_get(data, "preparation");
+    const struct json_value *pid = json_get(json_at(json_get(kept, "operations"), 2), "pid");
+    return ak_draft_history_identity(kept, view) &&
+        !strcmp(aso_string(kept, "continuation"), "kept") && pid && pid->type == JSON_INT &&
+        json_get_int(pid) > 0 && json_get_bool(json_get(preparation, "changed")) &&
+        !strcmp(aso_string(preparation, "version"), view->nav.head);
+}
+static bool ak_draft_success_wire(struct zcl_command_reply *reply, const struct ak_draft_flow_view *view)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", NULL);
+    char wire[32768u + 1u]; /* app.library's complete success envelope. */
+    struct zcl_command_budget_fixture budget = {.budget_bytes = spec ? (size_t)spec->budget_bytes : 0};
+    size_t n = spec ? zcl_command_registry_test_reply_wire_fixture(reg, spec, reply, &budget, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n) &&
+        !strcmp(aso_string(&doc, "status"), "passed") && ak_draft_success_facts(json_get(&doc, "data"), view);
+    json_free(&doc); return ok;
+}
+static bool ak_draft_cap_facts(const struct json_value *facts, const char *head)
+{
+    if (json_get_bool(json_get(facts, "details_unavailable"))) return true;
+    const struct json_value *kept = json_get(facts, "kept");
+    const struct json_value *preparation = json_get(facts, "library_preparation");
+    return !strcmp(aso_string(kept, "version"), head) && json_get_bool(json_get(preparation, "changed"));
+}
+static bool ak_draft_cap_wire(struct zcl_command_reply *reply, const char *head)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", NULL);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(reg, spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    ok = ok && !strcmp(aso_string(error, "code"), "RESULT_TOO_LARGE") &&
+        json_get_bool(json_get(error, "mutated")) && ak_draft_cap_facts(json_get(error, "facts"), head);
+    json_free(&doc); return ok;
+}
+static bool ak_draft_cap_result(struct ak_fixture *f, bool keep, bool stopped,
+    const struct app_selection *before, const uint8_t head[32],
+    struct ak_draft_flow_view *view, struct zcl_command_reply *reply)
+{
+    return stopped && view->nav.valid && view->prompted_keep &&
+        !view->kept_card && !view->share_menu && view->preparations == 1 && !view->share_failed &&
+        reply->status != ZCL_COMMAND_STATUS_PASSED && reply->error.mutated &&
+        ak_draft_cap_wire(reply, view->nav.head) &&
+        ak_draft_selection_result(f, keep, before, head, view, reply);
+}
+static bool ak_draft_success_result(struct ak_fixture *f, bool keep, bool stopped,
+    const struct app_selection *before, const uint8_t head[32],
+    struct ak_draft_flow_view *view, struct zcl_command_reply *reply)
+{
+    return stopped && view->nav.valid && view->prompted_keep &&
+        view->kept_card && view->share_menu && view->preparations == 2 && view->share_failed &&
+        reply->status == ZCL_COMMAND_STATUS_PASSED && reply->error.mutated &&
+        ak_draft_success_facts(&reply->data, view) && ak_draft_success_wire(reply, view) &&
+        ak_draft_selection_result(f, keep, before, head, view, reply);
+}
+static bool ak_draft_flow_result(struct ak_fixture *f, bool keep, bool history, bool stopped,
+    const struct app_selection *before, const uint8_t head[32],
+    struct ak_draft_flow_view *view, struct zcl_command_reply *reply)
+{
+    if (view->capped) return ak_draft_cap_result(f, keep, stopped, before, head, view, reply);
+    if (view->share_cancel) return ak_draft_success_result(f, keep, stopped, before, head, view, reply);
+    return stopped && view->nav.valid && view->prompted_keep &&
+        (keep ? view->kept_card && view->share_menu : !view->kept_card && !view->share_menu) &&
+        (history ? ak_draft_history_result(view, reply) : reply->status == ZCL_COMMAND_STATUS_PASSED) &&
+        ak_draft_selection_result(f, keep, before, head, view, reply);
+}
+static bool ak_draft_preview_keep_variant(struct ak_fixture *f, bool keep, bool history, bool capped, bool share_cancel)
+{
+    struct app_selection before = {0}; uint8_t head[32] = {0}; char worker[PATH_MAX];
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
     bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
         app_saved_draft_head(&before, head, &reply) && realpath("build/bin/z23-dev", worker);
-    struct ak_draft_flow_view view = {.nav = {.valid = true}, .fixture = f, .keep = keep};
+    struct ak_draft_flow_view view = {.nav = {.valid = true}, .fixture = f, .keep = keep, .history = history,
+        .capped = capped, .share_cancel = share_cancel};
+    view.prior_revision = before.revision;
     zcl_hex_encode(head, 32, view.nav.head);
     zcl_native_bridge_ensure_rpc();
     char old_dir[512];
     (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
     int old_port = zcl_native_command_rpc_port();
     zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
-    if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
-        ak_draft_library, ak_draft_flow_present, &view, worker);
+    if (ok && capped) zcl_test_app_library_discover_worker_share_cap(&f->env, f->world.bob_datadir, &reply,
+        ak_draft_flow_library, ak_draft_flow_present, &view, worker, ak_draft_preparer, ak_draft_share_failure, 1500);
+    else if (ok && history) zcl_test_app_library_discover_worker_share(&f->env, f->world.bob_datadir, &reply,
+        ak_draft_flow_library, ak_draft_flow_present, &view, worker, ak_draft_preparer, ak_draft_share_failure);
+    else if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_draft_flow_library, ak_draft_flow_present, &view, worker);
     zcl_native_bridge_bind_rpc(old_dir, old_port);
-    bool stopped = ak_draft_stop_preview(f, &reply);
-    ok = ok && stopped && view.nav.valid && view.prompted_keep && reply.status == ZCL_COMMAND_STATUS_PASSED &&
-        ak_draft_selection_result(f, keep, &before, head, &view, &reply);
+    bool stopped = view.preview_stopped || ak_draft_stop_preview(f, &reply);
+    printf("  draft Keep: keep=%d card=%d share=%d stopped=%d status=%d\n",
+        keep, view.kept_card, view.share_menu, stopped, reply.status);
+    if (history) {
+        char data[2048]; size_t n = json_write(&reply.data, data, sizeof(data));
+        printf("  draft history: cap=%d preparations=%u share_failed=%d code=%s data_bytes=%zu data=%.*s\n",
+            capped, view.preparations, view.share_failed, reply.error.code, n,
+            (int)(n < sizeof(data) ? n : sizeof(data) - 1), data);
+    }
+    ok = ok && ak_draft_flow_result(f, keep, history, stopped, &before, head, &view, &reply);
     zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_draft_preview_keep(struct ak_fixture *f, bool keep)
+{
+    return ak_draft_preview_keep_variant(f, keep, false, false, false);
 }
 static bool ak_draft_stale_controls(struct ak_fixture *f)
 {
@@ -2517,6 +2759,32 @@ static int ak_draft_acceptance(struct ak_fixture *f)
     } _test_next:;
     return failures;
 }
+static int ak_draft_history_acceptance(struct ak_fixture *f, bool capped, bool share_cancel)
+{
+    int failures = 0; char blob[65];
+    TEST("My Apps retains prior preparation and kept preview after a later share failure") {
+        ASSERT(ak_received(f) && ak_environment(f) && ak_preview_keep(f));
+        ASSERT(ak_read_source(f, blob) && ak_edit_source(f, blob));
+        ASSERT(ak_draft_preview_keep_variant(f, true, true, capped, share_cancel));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int ak_draft_history_one(bool capped, bool share_cancel)
+{
+    struct ak_fixture history = {0};
+    int failures = ak_draft_history_acceptance(&history, capped, share_cancel);
+    if (!aso_cleanup_children()) failures++;
+    if (history.world.root[0]) (void)test_rm_rf_recursive(history.world.root);
+    return failures;
+}
+static int ak_draft_history_run(void)
+{
+    int failures = ak_draft_history_one(false, false);
+    failures += ak_draft_history_one(true, false);
+    failures += ak_draft_history_one(false, true);
+    return failures;
+}
 
 static int ak_routes(void)
 {
@@ -2539,6 +2807,7 @@ static int ak_routes(void)
     if (!failures) failures += ak_draft_acceptance(&draft);
     if (!aso_cleanup_children()) failures++;
     if (draft.world.root[0]) (void)test_rm_rf_recursive(draft.world.root);
+    if (!failures) failures += ak_draft_history_run();
     aso_env_restore(env, saved);
     if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);
     return failures;

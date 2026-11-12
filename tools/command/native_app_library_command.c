@@ -63,7 +63,7 @@ struct library {
     bool action_failed;
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
-    bool receive_failure, recovery_adoption, create_result;
+    bool receive_failure, recovery_adoption, create_result, draft_result;
     bool operation_canceled;
     bool share_review;
     struct json_value receive_receipt;
@@ -990,6 +990,17 @@ static void al_copy_adoption_facts(struct json_value *facts, const struct json_v
         if (v && !json_get(facts, key) && !al_fact_add(facts, key, v, cap)) *omitted = true;
     }
 }
+
+static void al_copy_draft_facts(struct json_value *facts, const struct json_value *data,
+    size_t cap, bool *omitted)
+{
+    const char *keys[] = {"kept", "name", "version", "continuation", "continuation_executed", "preview_opened", "operations"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const struct json_value *v = json_get(data, keys[i]);
+        if (!v) { if (!i) *omitted = true; continue; }
+        if (!json_get(facts, keys[i]) && !al_fact_add(facts, keys[i], v, cap)) *omitted = true;
+    }
+}
 static void al_bound_preparation(struct library *w, struct json_value *facts,
     const struct json_value *old, size_t cap, bool *omitted)
 {
@@ -1007,15 +1018,32 @@ static void al_bound_preparation(struct library *w, struct json_value *facts,
     if (!al_preparation_fact(facts, &w->preparation, cap)) *omitted = true;
     if (full) *omitted = true;
 }
+static bool al_compact_keep(struct json_value *facts, const struct json_value *receipt, size_t cap)
+{
+    static const char *const keys[] = {"name", "selection_revision", "version", "image_sha3", "record_id"};
+    struct json_value keep; json_init(&keep); json_set_object(&keep);
+    bool ok = al_recovery_fields(&keep, receipt, keys, sizeof(keys) / sizeof(keys[0])) &&
+        al_fact_add(facts, "historical_keep", &keep, cap);
+    json_free(&keep); return ok;
+}
+
+static void al_bound_history(struct library *w, struct json_value *facts, size_t cap, bool *omitted)
+{
+    const char *key = w->recovery_adoption ? "historical_adoption" : w->recovery_kept ? "historical_keep" : "historical_receive";
+    if (w->has_received && !w->recovery_ready) *omitted = true;
+    if (w->has_received && w->recovery_ready && !al_fact_add(facts, key, &w->receive_receipt, cap)) {
+        *omitted = true;
+        if (w->recovery_kept && !w->recovery_adoption) (void)al_compact_keep(facts, &w->receive_receipt, cap);
+    }
+}
+
 static void al_bound_failure(struct library *w, struct zcl_command_reply *reply)
 {
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     bool omitted = false;
     size_t cap = al_failure_facts_cap(reply, &omitted);
-    const char *historical = w->recovery_adoption ? "historical_adoption" : w->recovery_kept ? "historical_keep" : "historical_receive";
-    if (w->has_received && !w->recovery_ready) omitted = true;
-    if (w->has_received && w->recovery_ready &&
-        !al_fact_add(&facts, historical, &w->receive_receipt, cap)) omitted = true;
+    if (w->draft_result) al_copy_draft_facts(&facts, &reply->data, cap, &omitted);
+    al_bound_history(w, &facts, cap, &omitted);
     struct json_value *old = al_failure_facts(reply);
     al_bound_preparation(w, &facts, old, cap, &omitted);
     al_copy_failure_facts(&facts, old, cap, &omitted);
@@ -1035,6 +1063,26 @@ static void al_bound_result(struct library *w, struct zcl_command_reply *reply, 
     }
     if (reply->status != ZCL_COMMAND_STATUS_PASSED) al_bound_failure(w, reply);
 }
+static bool al_capture_draft(struct library *w, const struct json_value *data)
+{
+    static const char *const keys[] = {"continuation", "continuation_executed", "operations", "preview_opened"};
+    if (!al_capture_receive(w, data) || !w->recovery_kept ||
+        !al_optional_fields(&w->receive_receipt, data, keys, sizeof(keys) / sizeof(keys[0]))) return false;
+    size_t n = json_write(&w->receive_receipt, NULL, 0);
+    return n && n <= 8192u;
+}
+
+static bool al_draft_reply_fits(struct library *w, const struct json_value *data)
+{
+    size_t result = json_write(data, NULL, 0);
+    size_t history = json_write(&w->receive_receipt, NULL, 0);
+    size_t preparation = w->prepared_mutated ? json_write(&w->preparation, NULL, 0) : 0;
+    if (!result || !history || (w->prepared_mutated && !preparation) || preparation > 4096u) return false;
+    if (history > result) result = history;
+    return preparation <= w->data_cap && result <= w->data_cap - preparation &&
+        w->data_cap - preparation - result >= 128u;
+}
+
 static bool al_draft_action(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
 {
     const struct library_row *row = &w->rows[w->index];
@@ -1046,7 +1094,14 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
     bool prior_mutated = reply->error.mutated;
     zcl_command_reply_free(reply); *reply = attempt;
     reply->error.mutated |= prior_mutated;
-    return false;
+    const char *continuation = zcl_package_copy_str(&reply->data, "continuation");
+    w->draft_result = reply->status == ZCL_COMMAND_STATUS_PASSED && continuation && !strcmp(continuation, "kept");
+    if (!w->draft_result || w->has_received || w->has_discover_error) return false;
+    w->has_received = w->receive_current = true;
+    w->recovery_ready = al_capture_draft(w, &reply->data);
+    if (!w->recovery_ready || !al_draft_reply_fits(w, &reply->data)) return false;
+    if (!al_reload(w, env, reply)) return false;
+    return al_received_selection(w, &reply->data, reply);
 }
 static bool al_host_link(struct library *w, const struct app_launch_env *env,
     const char *exe, struct zcl_command_reply *reply)
@@ -1226,6 +1281,7 @@ static bool al_external(struct library *w, const struct app_launch_env *env, con
     app_library_presenter presenter, void *context, struct zcl_command_reply *reply, const char *id, bool *handled)
 {
     *handled = true;
+    if (strcmp(id, "draft")) w->draft_result = false;
     if (!strcmp(id, "create")) return al_create(w, env, datadir, context, reply);
     w->create_result = false;
     if (!strcmp(id, "discover")) { w->page = 8; return true; }
@@ -1297,7 +1353,7 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
     al_recovery(w, reply);
     reply->error.mutated |= w->has_received || w->any_mutated;
     if (!al_receive_recovery(w, reply))
-        al_fail(reply, "OUT_OF_MEMORY", "Receive completed, but its receipt could not be attached.");
+        al_fail(reply, "OUT_OF_MEMORY", "An earlier app operation completed, but its receipt could not be attached.");
     reply->data_schema = "zcl.app_open.v1";
     reply->next_count = 0;
     al_bound_result(w, reply, data_cap);
@@ -1377,6 +1433,11 @@ void zcl_test_app_library_discover_worker_share(const struct app_launch_env *env
     app_confirm_presenter receive_presenter, void *context, const char *worker_path,
     app_library_preparer preparer, app_library_sharer sharer)
 { al_run(env, reply, presenter, context, NULL, datadir, preparer, sharer, receive_presenter, NULL, worker_path, NULL, 30000u, NULL); }
+void zcl_test_app_library_discover_worker_share_cap(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter,
+    app_confirm_presenter receive_presenter, void *context, const char *worker_path,
+    app_library_preparer preparer, app_library_sharer sharer, size_t data_cap)
+{ al_run(env, reply, presenter, context, NULL, datadir, preparer, sharer, receive_presenter, NULL, worker_path, NULL, data_cap, NULL); }
 void zcl_test_app_library_native_at(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
     void *context, app_confirm_presenter notice)
