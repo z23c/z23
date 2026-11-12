@@ -27,6 +27,8 @@ struct inv_ev_cap_order {
     int index;
     const char *token;
     const char *header;
+    size_t token_len;
+    size_t header_len;
 };
 struct inv_ev_body_order { int index; const struct inv_body *body; };
 struct inv_ev_body_mark { bool reached; char group[128]; };
@@ -152,7 +154,8 @@ static int inv_ev_resolve_include(const struct inv_scan *scan,
             memcpy(relative + used, token, add + 1);
             int found = -1;
             for (int i = 0; i < cap_count; i++) {
-                if (strcmp(order[i].header, relative) != 0) continue;
+                if (order[i].header_len != used + add ||
+                    strcmp(order[i].header, relative) != 0) continue;
                 if (found >= 0) return -1;
                 found = order[i].index;
             }
@@ -163,7 +166,7 @@ static int inv_ev_resolve_include(const struct inv_scan *scan,
     size_t tn = strlen(token);
     for (int i = 0; i < cap_count; i++) {
         const char *candidate = order[i].token;
-        size_t cn = strlen(candidate);
+        size_t cn = order[i].token_len;
         if (cn < tn || strcmp(candidate + cn - tn, token) != 0 ||
             (cn > tn && candidate[cn - tn - 1] != '/')) continue;
         if (found >= 0) return -1;
@@ -236,6 +239,8 @@ static void inv_ev_fill_cap_order(const struct ci_inventory_report *report,
         caps[i].index = i;
         caps[i].token = report->capabilities[i].include_token;
         caps[i].header = report->capabilities[i].header;
+        caps[i].token_len = strlen(caps[i].token);
+        caps[i].header_len = strlen(caps[i].header);
     }
 }
 
