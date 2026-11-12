@@ -150,10 +150,18 @@ vendor_input_paths()
 # snapshots. A runtime capture error is fatal, never a fallback trigger.
 VENDOR_METADATA_TOOL="$(ZCL_BIN_DIR="$WORK/vendor-bin" \
     "$SELF_DIR/source-identity-batch-bootstrap.sh")"
-VENDOR_METADATA_MODE=stat-link
-if stat -Lc '%d' "$SELF_DIR" >/dev/null 2>&1; then
-    VENDOR_METADATA_MODE=stat-follow
-fi
+# The existing portable wrapper emits five colon-separated fields on BSD;
+# its GNU form adds formatted timestamps. Reuse that capability decision.
+vendor_metadata_mode()
+{
+    local stamp
+    stamp="$(artifact_stamp "$SELF_DIR")" || return 1
+    case "$stamp" in
+        *:*:*:*:*:*) printf 'stat-follow\n' ;;
+        *) printf 'stat-link\n' ;;
+    esac
+}
+VENDOR_METADATA_MODE="$(vendor_metadata_mode)" || fail 'cannot select vendor metadata mode'
 vendor_input_state()
 {
     local path stamp

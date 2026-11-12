@@ -1116,7 +1116,7 @@ static bool sia_epoch_shell_script(const char *work)
     if (snprintf(path, sizeof(path), "%s/metadata-check", work) >= (int)sizeof(path)) return false;
     FILE *out = fopen(path, "wb"); if (!out) return false;
     bool ok = fputs("#!/bin/bash\nset -o pipefail\nWORK=.\nVENDOR_METADATA_TOOL=./metadata-tool\nVENDOR_METADATA_MODE=stat-link\n", out) >= 0;
-    const char *const functions[] = {"fail()", "artifact_stamp()", "vendor_input_paths()",
+    const char *const functions[] = {"fail()", "artifact_stamp()", "vendor_metadata_mode()", "vendor_input_paths()",
                                      "vendor_input_state()", "vendor_inputs_unchanged()"};
     for (size_t i = 0; ok && i < sizeof(functions) / sizeof(functions[0]); ++i)
         ok = sia_epoch_extract(out, functions[i], false);
@@ -1125,6 +1125,9 @@ static bool sia_epoch_shell_script(const char *work)
     if (ok) ok = fputs(
         "SCENARIO=$1; export SCENARIO\n"
         "case $SCENARIO in\n"
+        " mode-gnu) artifact_stamp() { printf '1:2:3:4:5:mtime:ctime\\n'; }; [ \"$(vendor_metadata_mode)\" = stat-follow ]; exit $? ;;\n"
+        " mode-bsd) artifact_stamp() { printf '1:2:3:4:5\\n'; }; [ \"$(vendor_metadata_mode)\" = stat-link ]; exit $? ;;\n"
+        " mode-error) artifact_stamp() { return 1; }; if vendor_metadata_mode; then exit 4; fi; exit 0 ;;\n"
         " find|initial|final) find() { printf 'vendor/lib/a.a\\0'; return 1; } ;;\n"
         " helper) stat() { printf fallback > fallback-called; return 1; } ;;\n"
         " sort) sort() { printf partial; return 1; } ;;\n"
@@ -1182,7 +1185,7 @@ static int sia_epoch_metadata_failures(void)
         test_make_tmpdir(work, sizeof(work), "sia", "epoch-metadata-failures");
         ASSERT(sia_epoch_shell_setup(work));
         ASSERT_EQ(sia_epoch_shell_run(work, "good"), 0);
-        const char *const scenarios[] = {"find", "helper", "sort", "fallback"};
+        const char *const scenarios[] = {"mode-gnu", "mode-bsd", "mode-error", "find", "helper", "sort", "fallback"};
         for (size_t i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]); ++i) {
             int rc = sia_epoch_shell_run(work, scenarios[i]);
             if (rc != 0) fprintf(stderr, "epoch metadata scenario=%s rc=%d\n", scenarios[i], rc);
