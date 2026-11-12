@@ -5,6 +5,7 @@
 
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/vault_intent_controller.h"
 #include "controllers/sovereignty_controller.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "models/activerecord.h"
@@ -223,14 +224,14 @@ static int64_t query_total_spendable_balance(void) {
 
 /* Render the review table: amounts plus the t/z privacy pill and warning. */
 static size_t render_send_review_details(uint8_t *r, size_t max, size_t off,
-                                         const char *safe_addr, double amount,
-                                         double fee, double total_deducted,
-                                         double remaining, bool is_shielded) {
+                                         const char *safe_addr, int64_t amount,
+                                         int64_t fee, int64_t total_deducted,
+                                         int64_t remaining, bool is_shielded) {
     char amt_s[32], fee_s[32], tot_s[32], rem_s[32];
-    snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
-    snprintf(fee_s, sizeof(fee_s), "%.8f", fee);
-    snprintf(tot_s, sizeof(tot_s), "%.8f", total_deducted);
-    snprintf(rem_s, sizeof(rem_s), "%.8f", remaining);
+    zcl_format_zcl(amt_s, sizeof(amt_s), amount);
+    zcl_format_zcl(fee_s, sizeof(fee_s), fee);
+    zcl_format_zcl(tot_s, sizeof(tot_s), total_deducted);
+    zcl_format_zcl(rem_s, sizeof(rem_s), remaining);
 
     const char *pw = is_shielded
         ? "<div style='color:#fbbf24;font-size:13px;margin-top:4px'>"
@@ -259,10 +260,10 @@ static size_t render_send_review_details(uint8_t *r, size_t max, size_t off,
 
 /* Render the Cancel / Confirm button strip under the review table. */
 static size_t render_send_confirm_buttons(uint8_t *r, size_t max, size_t off,
-                                          const char *safe_addr, double amount,
+                                          const char *safe_addr, int64_t amount,
                                           bool is_shielded) {
     char amt_s[32];
-    snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
+    zcl_format_zcl(amt_s, sizeof(amt_s), amount);
     struct template_var bv[] = {
         { "address",   safe_addr },
         { "amount",    amt_s },
@@ -290,9 +291,10 @@ size_t serve_send_review(uint8_t *r, size_t max,
     if (!addr_ok)
         addr_err = classify_address_reject_reason(address);
 
-    double amount = strtod(amount_str, NULL);
+    int64_t amount = 0;
+    bool amount_ok = vault_intent_parse_zcl_amount(amount_str, &amount);
     const char *err_reason = review_rejection_reason(addr_ok, addr_err);
-    if (!addr_ok || amount <= 0) {
+    if (!addr_ok || !amount_ok) {
         struct template_var ev[] = {
             { "heading",   "Invalid Transaction" },
             { "message",   err_reason },
@@ -307,12 +309,12 @@ size_t serve_send_review(uint8_t *r, size_t max,
     }
 
     bool is_shielded = (strncmp(address, "zs1", 3) == 0);
-    double fee = FEE_ZCL;
-    double total_deducted = amount + fee;
+    int64_t fee = WALLET_VIEW_FEE_ZAT;
+    int64_t total_deducted = amount + fee;
 
     /* Query balance — use BOTH transparent and shielded */
     int64_t spendable = query_total_spendable_balance();
-    double remaining = (double)spendable / (double)ZATOSHI_PER_ZCL - total_deducted;
+    int64_t remaining = spendable - total_deducted;
 
     char safe_addr[256];
     html_escape(safe_addr, sizeof(safe_addr), address);
@@ -331,7 +333,7 @@ size_t serve_send_review(uint8_t *r, size_t max,
 /* Shielded send: delegate to zclassicd z_sendmany.
  * Try z-address first (z→z, fully private), fall back to
  * t-address (t→z, sender visible on-chain). */
-static bool send_shielded_via_zsendmany(const char *address, double amount,
+static bool send_shielded_via_zsendmany(const char *address, int64_t amount,
                                         char *txid_result, size_t txid_size,
                                         char *error_msg, size_t error_size) {
     char from_addr[256] = "";
@@ -341,16 +343,18 @@ static bool send_shielded_via_zsendmany(const char *address, double amount,
     wv_get_funded_zaddr(from_addr, sizeof(from_addr), &z_bal);
 
     /* Fall back to t-address if z-address has insufficient funds */
-    if (z_bal < amount + FEE_ZCL) {
+    if (z_bal < (double)amount / (double)ZATOSHI_PER_ZCL + FEE_ZCL) {
         from_addr[0] = '\0';
         wv_get_funded_taddr(from_addr, sizeof(from_addr));
     }
 
     if (from_addr[0]) {
-        char zp[1024];
+        char zp[1024], amount_s[32], fee_s[32];
+        zcl_format_zcl(amount_s, sizeof(amount_s), amount);
+        zcl_format_zcl(fee_s, sizeof(fee_s), WALLET_VIEW_FEE_ZAT);
         snprintf(zp, sizeof(zp),
-            "[\"%s\",[{\"address\":\"%s\",\"amount\":%.8f}],1,%.8f]",
-            from_addr, address, amount, FEE_ZCL);
+            "[\"%s\",[{\"address\":\"%s\",\"amount\":%s}],1,%s]",
+            from_addr, address, amount_s, fee_s);
         char rb[4096] = "";
         if (wv_rpc_call("z_sendmany", zp, rb, sizeof(rb)) > 0) {
             char rv[256] = "";
@@ -387,7 +391,7 @@ static bool send_shielded_via_zsendmany(const char *address, double amount,
 static size_t render_send_success_page(uint8_t *r, size_t max, size_t off,
                                        const char *address,
                                        const char *txid_result,
-                                       double amount) {
+                                       int64_t amount) {
     char safe_addr[256], safe_txid[256];
     html_escape(safe_addr, sizeof(safe_addr), address);
     html_escape(safe_txid, sizeof(safe_txid), txid_result);
@@ -425,7 +429,7 @@ static size_t render_send_success_page(uint8_t *r, size_t max, size_t off,
     wv_save_contact(address, address);
 
     char amt_s[32];
-    snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
+    zcl_format_zcl(amt_s, sizeof(amt_s), amount);
     struct template_var sv[] = {
         { "heading",   held ? "Send Held, Not Sent Yet"
                      : is_opid ? "&#x1F512; Send to Private Address Started"
@@ -464,8 +468,9 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
     /* Validate address: checksum verification */
     bool addr_ok = wv_validate_zcl_address(address);
 
-    double amount = strtod(amount_str, NULL);
-    if (!addr_ok || amount <= 0) {
+    int64_t amount = 0;
+    bool amount_ok = vault_intent_parse_zcl_amount(amount_str, &amount);
+    if (!addr_ok || !amount_ok) {
         struct template_var ev[] = {
             { "heading",    "Invalid Transaction" },
             { "message",    !addr_ok ? "Invalid address" : "Invalid amount" },
@@ -516,7 +521,6 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
     bool is_shielded = (strncmp(address, "zs1", 3) == 0);
     char txid_result[128] = "";
     char error_msg[256] = "";
-    int64_t amount_sat = (int64_t)(amount * 1e8 + 0.5);
     bool send_ok = false;
 
     if (is_shielded) {
@@ -524,7 +528,7 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
             txid_result, sizeof(txid_result),
             error_msg, sizeof(error_msg));
     } else {
-        send_ok = wallet_direct_sendtoaddress(address, amount_sat,
+        send_ok = wallet_direct_sendtoaddress(address, amount,
             txid_result, sizeof(txid_result),
             error_msg, sizeof(error_msg));
     }

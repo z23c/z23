@@ -382,9 +382,41 @@ int check_wallet_view_send_form_has_blur_validation_on_address_fiel(void)
     return failures;
 }
 
+static int check_send_exact_amount_validation(void)
+{
+    int failures = 0;
+    const char *bad[] = { "1abc", "nan", "inf", "1e3", "0.000000001" };
+    const char *paths[] = { "/wallet/send/review", "/wallet/send/confirm" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char body[256];
+        snprintf(body, sizeof(body),
+                 "address=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn&amount=%s",
+                 bad[i]);
+        for (size_t j = 0; j < sizeof(paths) / sizeof(paths[0]); j++) {
+            size_t n = wv_post(paths[j], body);
+            if (!n || !wv_has("Invalid amount") || wv_has("Spend Refused") ||
+                wv_has("Send Failed")) failures++;
+        }
+    }
+    const char *valid[] = { "0.00000001", "123.12345678" };
+    for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+        char body[256], hidden[80];
+        snprintf(body, sizeof(body),
+                 "address=t1YRBXKYLhrb4X8sTkBeRysAzBTMMHpUXrn&amount=%s",
+                 valid[i]);
+        snprintf(hidden, sizeof(hidden), "name='amount' value='%s'", valid[i]);
+        size_t n = wv_post("/wallet/send/review", body);
+        if (!n || !wv_has(hidden) || !wv_has("Confirm Send")) failures++;
+    }
+    printf("wallet_view: exact send amount validation... %s\n",
+           failures ? "FAIL" : "OK");
+    return failures;
+}
+
 int check_wallet_view_send_review_rejects_negative_amount(void)
 {
     int failures = 0;
+    failures += check_send_exact_amount_validation();
 
     printf("wallet_view: send review rejects negative amount... ");
     {
