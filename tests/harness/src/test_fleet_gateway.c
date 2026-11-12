@@ -18,6 +18,8 @@
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "base/hex.h"
+#include "base/utc_tm.h"
+#include "fleet_observe.h"
 #include "json/json.h"
 #include "sha3/sha3.h"
 #include "kernel/command_registry.h"
@@ -3142,6 +3144,32 @@ static bool gw_mailbox_reply(const char *body, struct json_value *data)
     return ok;
 }
 
+/* Use the sent row's own timestamp, not the host's current calendar year. */
+static bool gw_reply_after_sent(const char *body, const char *ref, char out[32])
+{
+    struct json_value parsed = {0};
+    bool ok = gw_mailbox_reply(body, &parsed);
+    const struct json_value *rows = json_get(&parsed, "changes");
+    const char *stamp = NULL;
+    for (size_t i = 0; ok && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *r = json_get_str(json_get(row, "ref"));
+        const char *from = json_get_str(json_get(row, "from"));
+        if (r && from && !strcmp(r, ref) && !strcmp(from, GW_SENDER)) {
+            stamp = json_get_str(json_get(json_get(row, "reply"), "sent_ts"));
+            break;
+        }
+    }
+    int64_t seconds;
+    ok = stamp && fo_parse_iso8601(stamp, &seconds) && seconds < INT64_MAX;
+    time_t next = ok ? (time_t)(seconds + 1) : 0;
+    struct tm utc;
+    ok = ok && (int64_t)next == seconds + 1 && zcl_utc_tm(next, &utc) &&
+         strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &utc) == 20;
+    json_free(&parsed);
+    return ok;
+}
+
 static char *gw_mailbox_http(const char *grant, const char *to,
                              const char *cursor, int *status)
 {
@@ -3358,7 +3386,7 @@ static int gw_t_brief_token(void)
 
     TEST("gateway: a wrong-sender same-ref row never acknowledges") {
         const char *node = gw_bin("Z23_TEST_NODE_BIN", GW_TEST_NODE_DEFAULT);
-        char gid[64], args[2048];
+        char gid[64], args[2048], reply_ts[32];
         char *b;
         int st = 0, sn;
         ASSERT(gw_mint(node, "brief,send,evidence", gid));
@@ -3375,10 +3403,17 @@ static int gw_t_brief_token(void)
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "\"isError\":false"));
         free(b);
+        sn = snprintf(args, sizeof(args), "{\"grant\":\"%s\",\"since\":0}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 570, &st);
+        ASSERT(b != NULL);
+        bool have_reply_ts = gw_reply_after_sent(b, "gw-wrong-ref", reply_ts);
+        free(b);
+        ASSERT(have_reply_ts);
         /* A forged reply carrying the same ref but sent from the
          * directive's own sender is our side of the thread, never
          * receiver evidence: the row stays queued. */
-        ASSERT(gw_seed_inbox("stream-w", "2026-09-20T00:00:03Z", 1400,
+        ASSERT(gw_seed_inbox("stream-w", reply_ts, 1400,
                              GW_SENDER, "gw-w2", "result", "Forged reply",
                              "gw-wrong-ref"));
         sn = snprintf(args, sizeof(args),
@@ -3394,7 +3429,7 @@ static int gw_t_brief_token(void)
                                "\\\"state\\\":\\\"acknowledged\\\""));
         free(b);
         /* The recipient's own row under the same ref acknowledges it. */
-        ASSERT(gw_seed_inbox("stream-w", "2026-09-20T00:00:04Z", 1401,
+        ASSERT(gw_seed_inbox("stream-w", reply_ts, 1401,
                              "gw-w2", GW_SENDER, "result", "Genuine reply",
                              "gw-wrong-ref"));
         b = gw_tool("steer_brief", args, 59, &st);
