@@ -1467,13 +1467,16 @@ static void fmc_row_tally(struct json_value *agents, struct json_value *work,
     }
 }
 
+static bool fmc_reply_compatible(const struct fmc_row *directive, const struct fmc_row *reply);
+
 /* True when the pulled rows carry a reply from this row's recipient under
  * the same ref: the row a transport brings back into inbox.<peer>.jsonl,
  * and the only proof available here that the directive left this host. A
  * row whose `from` is our own sender name is our side of the thread, never
  * receiver evidence — so a directive addressed to its own sender cannot
  * promote itself. Bounded by the pull the brief already holds; nothing is
- * accumulated. */
+ * accumulated. Only strictly later valid timestamps establish ordering;
+ * equal seconds are ambiguous, and stream sequence numbers are not comparable. */
 static bool fmc_rows_reply_from(const struct json_value *rows,
                                 const struct fmc_row *v)
 {
@@ -1487,7 +1490,8 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
             continue;
         if (strcmp(r.from, v->from) == 0)
             continue;
-        if (strcmp(r.from, v->to) == 0 && strcmp(r.ref, v->ref) == 0)
+        if (strcmp(r.from, v->to) == 0 && strcmp(r.ref, v->ref) == 0 &&
+            fmc_reply_compatible(v, &r))
             return true;
     }
     return false;
@@ -2875,11 +2879,47 @@ struct fmc_answer {
     const char *match;
 };
 
+static bool fmc_attempt_unique(const char *body)
+{
+    unsigned count = 0;
+    for (const char *p = body; p && *p; ) {
+        if (strncmp(p, "attempt=", 8) == 0 && ++count > 1) return false;
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+    return true;
+}
+
 static bool fmc_attempt_agrees(const char *a, const char *b)
 {
+    char buf[24];
+    bool has_a = fmc_body_kv(a, "attempt", buf, sizeof(buf));
+    bool has_b = fmc_body_kv(b, "attempt", buf, sizeof(buf));
     long long x = fmc_body_int(a, "attempt");
     long long y = fmc_body_int(b, "attempt");
-    return x < 0 || y < 0 || x == y;
+    if (!fmc_attempt_unique(a) || !fmc_attempt_unique(b) ||
+        (has_a && x < 0) || (has_b && y < 0)) return false;
+    return !has_a || !has_b || x == y;
+}
+
+static bool fmc_reply_calendar_valid(const char *ts)
+{
+    static const int days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (!fmc_ts_shape_ok(ts)) return false;
+    long long year = fmc_num(ts, 4), month = fmc_num(ts + 5, 2), day = fmc_num(ts + 8, 2);
+    if (month < 1 || month > 12 || day < 1) return false;
+    bool leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    return day <= days[month - 1] + (month == 2 && leap);
+}
+
+/* Later records can resolve an earlier directive; unknown or equal-second
+ * times cannot prove order, irrespective of sequence values from other streams. */
+static bool fmc_reply_compatible(const struct fmc_row *directive, const struct fmc_row *reply)
+{
+    long long dt = fmc_ts_unix(directive->ts), rt = fmc_ts_unix(reply->ts);
+    return dt >= 0 && rt >= 0 && rt > dt &&
+        fmc_reply_calendar_valid(directive->ts) && fmc_reply_calendar_valid(reply->ts) &&
+        fmc_attempt_agrees(directive->body, reply->body);
 }
 
 /* True when reply ref rref answers directive ref dref: equal, or dref
@@ -2905,12 +2945,10 @@ static bool fmc_ref_answers(const char *dref, const char *rref)
 static const char *fmc_answer_match(const struct fmc_row *d,
                                     const struct fmc_row *r)
 {
-    long long dt = fmc_ts_unix(d->ts), rt = fmc_ts_unix(r->ts);
     if (strcmp(r->kind, "result") != 0 || !fmc_ref_answers(d->ref, r->ref) ||
         strcmp(r->from, d->from) == 0)
         return NULL;
-    if ((dt >= 0 && rt >= 0 && rt < dt) ||
-        !fmc_attempt_agrees(d->body, r->body))
+    if (!fmc_reply_compatible(d, r))
         return NULL;
     if (strcmp(r->from, d->to) == 0)
         return "addressee";

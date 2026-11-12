@@ -4073,9 +4073,22 @@ static long long fmx_send_one(const char *gid, const char *from,
 
 /* Composite-watermark acceptance: the cursor_token a brief returns resumes
  * every contributing stream, not one global max seq. */
+struct fmx_reply_clock { const clock_iface_t *saved; int64_t wall; };
+static int64_t fmx_reply_wall(void *p)
+{
+    return ((struct fmx_reply_clock *)p)->wall;
+}
+static int64_t fmx_reply_mono(void *p)
+{
+    const clock_iface_t *saved = ((struct fmx_reply_clock *)p)->saved;
+    return saved->now_monotonic_ns(saved->self);
+}
+
 static int fmx_t_brief_watermark(void)
 {
     int failures = 0;
+    struct fmx_reply_clock c = {clock_default(), INT64_C(1789905600000)};
+    clock_iface_t clock = {fmx_reply_mono, fmx_reply_wall, &c};
 
     TEST("steer: equal timestamps order deterministically across polls") {
         struct fmx_call b;
@@ -4327,6 +4340,7 @@ static int fmx_t_brief_watermark(void)
         PASS();
     }
 
+    clock_set_default(&clock);
     TEST("steer: a real send with a receiver result is visible past the "
          "watermark") {
         struct fmx_call b;
@@ -4349,6 +4363,7 @@ static int fmx_t_brief_watermark(void)
         /* The receiver's result lands in its own stream under its own numbering.
          * The watermarked poll carries the result row; a full poll joins both and
          * flips the directive to acknowledged with the answer attached. */
+        c.wall += 1000;
         fmx_now_ts(now, sizeof(now));
         fmx_seed_inbox("box-b", now, 733, "worker-b", "oauth", "result",
                        "ref=vis-e2e\\nterminal=pass\\n", "vis-e2e");
@@ -4377,6 +4392,7 @@ static int fmx_t_brief_watermark(void)
 
 _test_next:;
     fmx_restore();
+    clock_set_default(c.saved);
     return failures;
 }
 
@@ -4435,9 +4451,184 @@ _test_next:;
 /* Request/result correlation: a directive is answered by a later result
  * on its ref from the other side, acked only by the receiver's own ack
  * cursor, and queued with neither. A reply is never read as an ack. */
+static void fmx_correlation_seed_bodies(const char *tag, const char *note_ts,
+                                        const char *note_kind,
+                                        const char *note_body,
+                                        const char *directive_body)
+{
+    fmx_isolate(tag);
+    fmx_prime_mail();
+    fmx_seed_inbox("self", "2026-01-02T00:00:00Z", 7, FMX_SENDER,
+                   "receiver", "directive", directive_body, "reused-ref");
+    fmx_state_file("steer", "sent.jsonl",
+                   "{\"key\":\"correlation\",\"seq\":7,\"to\":\"receiver\","
+                   "\"ref\":\"reused-ref\"}\n", true);
+    fmx_seed_inbox("receiver", note_ts, 8, "receiver", FMX_SENDER,
+                   note_kind, note_body, "reused-ref");
+}
+
+static void fmx_correlation_seed(const char *tag, const char *note_ts,
+                                 const char *note_kind, const char *note_body)
+{
+    fmx_correlation_seed_bodies(tag, note_ts, note_kind, note_body,
+                                "attempt=2\\n");
+}
+
+static bool fmx_correlation_evidence(const struct json_value *row)
+{
+    struct fmx_call e;
+    const char *const keys[] = {"stream", "row_offset", "seq", "row_sha3"};
+    bool ok = row != NULL;
+    fmx_evidence(&e, NULL, "mail", "reused-ref");
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const struct json_value *v = json_get(row, keys[i]);
+        ok = v && json_push_kv(&e.input, keys[i], v);
+    }
+    ok = ok && fmx_run(&e, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&e);
+    const struct json_value *object = ok ? fmx_get(&e, "object") : NULL;
+    ok = ok && object && strcmp(fmx_wstr(object, "from"), fmx_wstr(row, "from")) == 0 &&
+         strcmp(fmx_wstr(object, "ref"), fmx_wstr(row, "ref")) == 0 &&
+         strcmp(fmx_wstr(object, "stream"), fmx_wstr(row, "stream")) == 0 &&
+         strcmp(fmx_wstr(object, "row_sha3"), fmx_wstr(row, "row_sha3")) == 0 &&
+         fmx_wint(object, "row_offset") == fmx_wint(row, "row_offset") &&
+         fmx_wint(object, "seq") == fmx_wint(row, "seq");
+    if (!ok) fprintf(stderr, "correlation exact evidence identity mismatch\n");
+    fmx_end(&e);
+    return ok;
+}
+
+static bool fmx_correlation_latest(const struct fmx_call *brief)
+{
+    struct fmx_call e;
+    fmx_evidence(&e, NULL, "mail", "reused-ref");
+    bool ok = fmx_run(&e, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&e);
+    const char *observed = fmx_str(&e, "state");
+    const char *selected = fmx_change_state(fmx_arr(brief, "changes"),
+                                            fmx_obj_str(&e, "from"),
+                                            fmx_obj_str(&e, "ref"));
+    if (ok && strcmp(observed, selected) != 0) {
+        fprintf(stderr, "correlation latest evidence=%s brief=%s from=%s\n",
+                observed, selected, fmx_obj_str(&e, "from"));
+        ok = false;
+    }
+    fmx_end(&e);
+    return ok;
+}
+
+static bool fmx_correlation_observe(const char *state, const char *reply_state,
+                                    bool stale)
+{
+    struct fmx_call b;
+    const struct json_value *row, *reply;
+    bool ok;
+    fmx_brief(&b, NULL, 0);
+    ok = fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b);
+    row = ok ? fmx_change_row(&b, FMX_SENDER, "reused-ref") : NULL;
+    reply = row ? json_get(row, "reply") : NULL;
+    bool evidence_ok = fmx_correlation_evidence(row) && fmx_correlation_latest(&b);
+    bool blocker = fmx_blocker_has(&b, "reused-ref");
+    ok = row && reply && strcmp(fmx_wstr(row, "state"), state) == 0 &&
+         strcmp(fmx_wstr(reply, "state"), reply_state) == 0 &&
+         blocker == stale && evidence_ok;
+    if (!ok) fprintf(stderr, "correlation row=%s expected=%s reply=%s expected=%s blocker=%d expected=%d evidence=%d\n",
+                     fmx_wstr(row, "state"), state, fmx_wstr(reply, "state"),
+                     reply_state, blocker, stale, evidence_ok);
+    fmx_end(&b);
+    return ok;
+}
+
+static int fmx_t_recipient_correlation(void)
+{
+    int failures = 0;
+    const clock_iface_t *saved = clock_default();
+    clock_iface_t fixed = {fmx_activity_monotonic_ns, fmx_activity_wall_ms,
+                           (void *)saved};
+    clock_set_default(&fixed);
+    TEST("steer: older recipient note cannot acknowledge a reused ref") {
+        fmx_correlation_seed("recipient_old", "2026-01-01T00:00:00Z",
+                             "note", "attempt=2\\n");
+        ASSERT(fmx_correlation_observe("queued", "queued", true));
+        fmx_restore(); PASS();
+    }
+    TEST("steer: a later note from a different attempt cannot acknowledge") {
+        fmx_correlation_seed("recipient_attempt", "2026-01-03T00:00:00Z",
+                             "note", "attempt=1\\n");
+        ASSERT(fmx_correlation_observe("queued", "queued", true));
+        fmx_restore(); PASS();
+    }
+    TEST("steer: a later matching note acknowledges without being a result") {
+        fmx_correlation_seed("recipient_match", "2026-01-03T00:00:00Z",
+                             "note", "attempt=2\\n");
+        ASSERT(fmx_correlation_observe("acknowledged", "queued", false));
+        fmx_restore(); PASS();
+    }
+    TEST("steer: ambiguous time and malformed attempt cannot correlate") {
+        static const struct { const char *ts, *kind, *body; } cases[] = {
+            {"2026-01-02T00:00:00Z", "note", "attempt=2\\n"},
+            {"", "note", "attempt=2\\n"},
+            {"not-a-time", "note", "attempt=2\\n"},
+            {"2026-02-30T00:00:00Z", "note", "attempt=2\\n"},
+            {"2026-01-03T00:00:00Z", "note", "attempt=oops\\n"},
+            {"2026-01-03T00:00:00Z", "note", "attempt=2\\nattempt=2\\n"},
+            {"2026-01-03T00:00:00Z", "note", "attempt=2\\nattempt=oops\\n"},
+            {"2026-01-03T00:00:00Z", "note", "attempt=2\\nattempt=1\\n"},
+            {"2026-01-02T00:00:00Z", "result", "attempt=2\\n"},
+            {"", "result", "attempt=2\\n"},
+            {"not-a-time", "result", "attempt=2\\n"},
+            {"2026-02-30T00:00:00Z", "result", "attempt=2\\n"},
+            {"2026-01-03T00:00:00Z", "result", "attempt=oops\\n"},
+            {"2026-01-03T00:00:00Z", "result", "attempt=1\\n"},
+            {"2026-01-03T00:00:00Z", "result", "attempt=2\\nattempt=2\\n"},
+            {"2026-01-03T00:00:00Z", "result", "attempt=2\\nattempt=oops\\n"},
+            {"2026-01-03T00:00:00Z", "result", "attempt=2\\nattempt=1\\n"},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            fmx_correlation_seed("recipient_ambiguous", cases[i].ts,
+                                 cases[i].kind, cases[i].body);
+            bool ok = fmx_correlation_observe("queued", "queued", true);
+            if (!ok) fprintf(stderr, "correlation refusal case %zu failed\n", i);
+            fmx_restore();
+            ASSERT(ok);
+        }
+        PASS();
+    }
+    TEST("steer: duplicate directive attempts cannot correlate") {
+        static const char *const bodies[] = {
+            "attempt=2\\nattempt=2\\n",
+            "attempt=2\\nattempt=oops\\n",
+            "attempt=2\\nattempt=1\\n",
+        };
+        for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+            for (size_t j = 0; j < 2; j++) {
+                fmx_correlation_seed_bodies("directive_duplicate", "2026-01-03T00:00:00Z",
+                                            j ? "result" : "note", "attempt=2\\n", bodies[i]);
+                bool ok = fmx_correlation_observe("queued", "queued", true);
+                if (!ok) fprintf(stderr, "directive duplicate case %zu/%zu failed\n", i, j);
+                fmx_restore();
+                ASSERT(ok);
+            }
+        }
+        PASS();
+    }
+    TEST("steer: the receiver cursor still acknowledges a directive") {
+        fmx_correlation_seed("recipient_cursor", "2026-01-01T00:00:00Z",
+                             "note", "attempt=2\\n");
+        ASSERT(fmx_ack("receiver", 7));
+        ASSERT(fmx_correlation_observe("acknowledged", "acked", false));
+        fmx_restore(); PASS();
+    }
+_test_next:;
+    fmx_restore();
+    clock_set_default(saved);
+    return failures;
+}
+
 static int fmx_t_reply_correlation(void)
 {
     int failures = 0;
+    struct fmx_reply_clock c = {clock_default(), INT64_C(1789905600000)};
+    clock_iface_t clock = {fmx_reply_mono, fmx_reply_wall, &c};
+    clock_set_default(&clock);
 
     TEST("steer: a result on the ref answers a directive without acking it") {
         struct fmx_call b;
@@ -4459,6 +4650,7 @@ static int fmx_t_reply_correlation(void)
         ASSERT(strlen(fmx_wstr(r, "sent_ts")) == 20);
         fmx_end(&b);
         /* The origin's own result under the ref is not an answer. */
+        c.wall += 1000;
         fmx_now_ts(now, sizeof(now));
         fmx_seed_inbox("self", now, 700, "oauth", "A", "result",
                        "self note", "fd-link-a");
@@ -4505,6 +4697,7 @@ static int fmx_t_reply_correlation(void)
         ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
         ASSERT(fmx_send_one(gid, "oauth", "A", "go-A-20260918-v1",
                             "key-go-1") >= 1);
+        c.wall += 1000;
         fmx_now_ts(now, sizeof(now));
         /* Near misses are not answers: a longer token, another stem. */
         fmx_seed_inbox("near", now, 740, "box-user", "oauth", "result",
@@ -4559,6 +4752,7 @@ static int fmx_t_reply_correlation(void)
 
 _test_next:;
     fmx_restore();
+    clock_set_default(c.saved);
     return failures;
 }
 
@@ -4621,6 +4815,9 @@ static bool fmx_d_state_is(const char *ogid, const char *want,
 static int fmx_t_remote_round_trip(void)
 {
     int failures = 0;
+    struct fmx_reply_clock c = {clock_default(), INT64_C(1789905600000)};
+    clock_iface_t clock = {fmx_reply_mono, fmx_reply_wall, &c};
+    clock_set_default(&clock);
 
     TEST("steer: a remote agent reads its directive and answers it through "
         "the surface alone, once, and only to its origin") {
@@ -4646,6 +4843,7 @@ static int fmx_t_remote_round_trip(void)
         r = fmx_d_send(dgid, "D", "oauth", "ack", "key-d-badkind");
         ASSERT_STR_EQ(r.state, "refused");
         ASSERT(fmx_d_state_is(ogid, "queued", NULL));
+        c.wall += 1000;
         r = fmx_d_send(dgid, "D", "oauth", "result", "key-d-reply");
         ASSERT_STR_EQ(r.state, "queued");
         ASSERT(!r.duplicate);
@@ -4667,6 +4865,7 @@ static int fmx_t_remote_round_trip(void)
 
 _test_next:;
     fmx_restore();
+    clock_set_default(c.saved);
     return failures;
 }
 
@@ -6282,6 +6481,7 @@ int test_fleet_steer(void)
     failures += fmx_t_sessions();
     failures += fmx_t_session_edges();
     failures += fmx_t_reply_correlation();
+    failures += fmx_t_recipient_correlation();
     failures += fmx_t_remote_round_trip();
     failures += fmx_t_pool_unmeasured();
     failures += fmx_t_candidate_identity();
