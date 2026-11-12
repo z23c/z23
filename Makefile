@@ -645,6 +645,9 @@ else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),vendor-ready)
 # The audit tool compiles its declared sources directly with HOST_CC. Vendor
 # repair and audit still run; neither consumes profile objects or epochs.
 ZCL_EPOCH_PROFILES :=
+else ifneq ($(filter $(BIN_DIR)/zcode-package-registry-check zcode-package-registry-check,$(ZCL_EPOCH_SINGLE_GOAL)),)
+# This checker compiles its listed sources directly, without profile objects.
+ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter $(ZCL_ENGINE_UNIT_GOALS),$(ZCL_EPOCH_SINGLE_GOAL)),)
 # The engine dispatcher also compiles its listed sources directly. It still
 # captures source identity below and keeps its TLS inputs outside node epochs.

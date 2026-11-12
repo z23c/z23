@@ -499,7 +499,7 @@ static void engine_probe_setup(void)
     FILE *f = fopen(text("%s/engine.mk", work), "wb");
     if (!f) fail("cannot create engine probe Makefile");
     fprintf(f, "include %s/probe.mk\n", make_path(work));
-    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit vendor-ready z23-bootstrap install-selftest: $(ZCL_DEP_PROBE_OBJECTS)\n"
+    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit vendor-ready z23-bootstrap install-selftest $(BIN_DIR)/zcode-package-registry-check: $(ZCL_DEP_PROBE_OBJECTS)\n"
           "$(info ZCL_DEPFILES_PROBE=[$(ZCL_DEPFILE_PROFILES)])\n", f);
     bool bad = ferror(f) != 0;
     if (fclose(f) != 0) bad = true;
@@ -559,6 +559,10 @@ static size_t engine_probe_start(const struct engine_probe_case *c, const char *
     if (!strcmp(c->name, "alias")) {
         argv[n++] = "-W";
         argv[n++] = "tools/engine_unit.c";
+    }
+    if (!strcmp(c->name, "registry-source")) {
+        argv[n++] = "-W";
+        argv[n++] = "tools/zcode_package_registry_check.c";
     }
     if (!strcmp(c->name, "vendor-source") || !strcmp(c->name, "vendor-header")) {
         argv[n++] = "HOST_CC=VENDOR_HOST_CC_SENTINEL";
@@ -682,6 +686,44 @@ static void engine_scope_probes(void)
     probe_count = 0; /* all engine probes were reaped */
 }
 
+static bool registry_compile_output(const char *data)
+{
+    return strstr(data, "tools/zcode_package_registry_check.c") &&
+        strstr(data, "libsecp256k1") && strstr(data, "-std=c23") &&
+        strstr(data, "-lpthread") && strstr(data, " -lm");
+}
+static void registry_scope_probes(void)
+{
+    static const char all_epoch[] = "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23";
+    static const char all_dep[] = "build-only dev test-fast test-strict coverage fuzz node-c23";
+    const char *header = "contexts/explorer/views/include/views/site_css.h";
+    const char *tool = text("%s/engine-bin/zcode-package-registry-check", work);
+    const struct engine_probe_case cases[] = {
+        {"registry-source", "build/bin/zcode-package-registry-check", NULL, false, true, false, 0, "", ""},
+        {"registry-alias", "zcode-package-registry-check", NULL, false, false, false, 0, "", ""},
+        {"registry-custom", text("%s/custom-bin/zcode-package-registry-check", work), NULL, true, false, false, 0, "", ""},
+        {"registry-header-first", header, tool, false, false, false, 0, "", ""},
+        {"registry-header-last", tool, header, false, false, false, 0, "", ""},
+        {"registry-node", tool, "z23", false, false, false, 31, all_epoch, all_dep},
+        {"registry-unknown", tool, "zcl-depfile-unknown", false, false, false, 31, all_epoch, all_dep},
+        {"registry-capture", tool, NULL, false, false, true, 0, "", ""},
+    };
+    enum { count = sizeof(cases) / sizeof(cases[0]) };
+    size_t children[count]; const char *logs[count];
+    for (size_t i = 0; i < count; ++i) {
+        logs[i] = text("%s/%s.out", work, cases[i].name);
+        children[i] = engine_probe_start(&cases[i], logs[i]);
+    }
+    for (size_t i = 0; i < count; ++i) {
+        int rc = probe_wait(children[i]); char *data = output(logs[i]);
+        bool ok = engine_probe_output(&cases[i], data, rc);
+        if (!strcmp(cases[i].name, "registry-source")) ok = ok && registry_compile_output(data);
+        if (!ok) { fprintf(stderr, "registry scope case=%s rc=%d\n%s\n", cases[i].name, rc, data); free(data); fail("registry scope probe failed"); }
+        free(data);
+    }
+    probe_count = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) fail("usage: make-depfile-scope-selftest ROOT WORK");
@@ -694,6 +736,8 @@ int main(int argc, char **argv)
     profile_probes();
     text_rewind(persistent);
     engine_scope_probes();
+    text_rewind(persistent);
+    registry_scope_probes();
     text_rewind(persistent);
     binding_probes();
     consistency_probes();
