@@ -1977,6 +1977,43 @@ static int t_lint_table_rebuild(void)
     return bad;
 }
 
+static int t_registry_query_scope(void)
+{
+    static const char setup[] =
+        "set -eu; root=$1; work=$2; cd \"$root\"\n"
+        "mkdir -p \"$work/tmp\"; TMPDIR=$work/tmp; export TMPDIR\n"
+        "fail() { echo \"registry-query: $1\" >&2; exit 1; }\n"
+        "printf '%s\\n' '$(info EPOCH=[$(ZCL_EPOCH_PROFILES)])' '$(info DEP=[$(ZCL_DEPFILE_PROFILES)])' '.PHONY: fixture-expected fixture-unknown' 'fixture-expected:' '\t@printf \"%s\\n\" $(LIB_SRCS)' 'fixture-unknown:' '\t@:' > \"$work/probe.mk\"\n"
+        "printf '%s\\n' '$(error VENDOR_SENTINEL)' > \"$work/vendor.mk\"\n"
+        "make_probe() { make --no-print-directory -s -f \"$root/Makefile\" -f \"$work/probe.mk\" -o /dev/null -o z23 -o contexts/explorer/views/include/views/site_css.h \"BUILD_DIR=$work/build\" \"BIN_DIR=$work/build/bin\" VIEW_BOOTSTRAP_MK=/dev/null VIEW_GEN_HEADERS= VIEW_GEN_HEADERS_EARLY= 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000 BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000 zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000 \"$@\"; }\n";
+    static const char checks[] =
+        "make_probe VENDOR_LIBS= ZCL_TOR=stub print-zcode-monolith-lib-sources > \"$work/query\" 2>\"$work/query.err\" || fail query\n"
+        "grep -Fx 'EPOCH=[]' \"$work/query\" >/dev/null || fail query-epoch\n"
+        "grep -Fx 'DEP=[]' \"$work/query\" >/dev/null || fail query-dep\n"
+        "grep -v -e '^EPOCH=' -e '^DEP=' \"$work/query\" > \"$work/sources\"; test -s \"$work/sources\" || fail source-empty\n"
+        "make_probe VENDOR_LIBS= ZCL_TOR=stub fixture-expected > \"$work/expected\" 2>\"$work/expected.err\" || fail expected\n"
+        "grep -v -e '^EPOCH=' -e '^DEP=' \"$work/expected\" > \"$work/expected-sources\"; cmp \"$work/sources\" \"$work/expected-sources\" || fail source-list\n"
+        "make_probe -n VENDOR_LIBS= ZCL_TOR=stub contexts/explorer/views/include/views/site_css.h print-zcode-monolith-lib-sources > \"$work/header\" 2>&1 || fail header\n"
+        "grep -Fx 'EPOCH=[]' \"$work/header\" >/dev/null && grep -Fx 'DEP=[]' \"$work/header\" >/dev/null || fail header-profile\n"
+        "for goal in z23 fixture-unknown; do make_probe -n VENDOR_LIBS= ZCL_TOR=stub print-zcode-monolith-lib-sources \"$goal\" > \"$work/mixed\" 2>&1 || fail mixed; grep -Fx 'EPOCH=[build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23]' \"$work/mixed\" >/dev/null || fail mixed-epoch; grep -Fx 'DEP=[build-only dev test-fast test-strict coverage fuzz node-c23]' \"$work/mixed\" >/dev/null || fail mixed-dep; done\n"
+        "make_probe -n VENDOR_LIBS= ZCL_TOR=stub > \"$work/default\" 2>&1 || fail default; grep -Fx 'EPOCH=[node-c23]' \"$work/default\" >/dev/null && grep -Fx 'DEP=[node-c23]' \"$work/default\" >/dev/null || fail default-profile\n";
+    static const char bootstrap[] =
+        "make_probe -n VENDOR_LIBS=/missing/z23-vendor \"VENDOR_BOOTSTRAP_MK=$work/vendor.mk\" ZCL_TOR=stub print-zcode-monolith-lib-sources >\"$work/vendor-query\" 2>&1 || fail vendor-query\n"
+        "for goal in z23 fixture-unknown; do if make_probe -n VENDOR_LIBS=/missing/z23-vendor \"VENDOR_BOOTSTRAP_MK=$work/vendor.mk\" ZCL_TOR=stub print-zcode-monolith-lib-sources \"$goal\" >\"$work/vendor-mixed\" 2>&1; then fail vendor-mixed-accepted; fi; grep -F VENDOR_SENTINEL \"$work/vendor-mixed\" >/dev/null || fail vendor-mixed-reason; done\n"
+        "make_probe -n VENDOR_LIBS= ZCL_TOR=full 'ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)' print-zcode-monolith-lib-sources >\"$work/tor-query\" 2>&1 || fail tor-query\n"
+        "for goal in z23 fixture-unknown; do if make_probe -n VENDOR_LIBS= ZCL_TOR=full 'ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)' print-zcode-monolith-lib-sources \"$goal\" >\"$work/tor-mixed\" 2>&1; then fail tor-mixed-accepted; fi; grep -F TOR_SENTINEL \"$work/tor-mixed\" >/dev/null || fail tor-mixed-reason; done\n";
+    char script[sizeof(setup) + sizeof(checks) + sizeof(bootstrap) - 2];
+    memcpy(script, setup, sizeof(setup) - 1);
+    memcpy(script + sizeof(setup) - 1, checks, sizeof(checks) - 1);
+    memcpy(script + sizeof(setup) + sizeof(checks) - 2, bootstrap, sizeof(bootstrap));
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "registry_query", "scope");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "registry query fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_lint_private_header_rebuild(void)
 {
     static const char setup[] =
@@ -2412,6 +2449,7 @@ int test_make_lint_gates(void)
     printf("\n=== make_lint_gates tests ===\n");
 
     if (t_lint_table_rebuild() != 0 || t_lint_private_header_rebuild() != 0) return 1;
+    if (t_registry_query_scope() != 0) return 1;
     if (t_lint_command_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;

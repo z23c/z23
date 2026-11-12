@@ -484,7 +484,7 @@ VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest \
 	build/bin/z23-headless-run.exe
 # Build queries and game-only goals need no node vendor configure.
-ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs print-game-closure help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
+ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs print-zcode-monolith-lib-sources print-game-closure help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Public fixture observers link only the platform clock and system libraries.
 ZCL_PUBLIC_FIXTURE_GOALS := rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
@@ -637,7 +637,7 @@ else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify
 ZCL_EPOCH_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only dev rank-pair,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags print-zcode-monolith-lib-sources,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # Windows has no native proof producer yet.  Its ordinary developer binary
@@ -2191,7 +2191,10 @@ else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(words $(ZCL_PROFILE_GOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(ZCL_PROFILE_GOALS))
-ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
+ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),print-zcode-monolith-lib-sources)
+# This read-only query prints LIB_SRCS; it consumes no profile objects.
+ZCL_DEPFILE_PROFILES :=
+else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
 # The generator is compiled directly; no profile %.o depfile graph is consumed.
 ZCL_DEPFILE_PROFILES :=
 else ifneq ($(filter $(BIN_DIR)/zcode-package-registry-check zcode-package-registry-check,$(ZCL_DEPFILE_SINGLE_GOAL)),)
