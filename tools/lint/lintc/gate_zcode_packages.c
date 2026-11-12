@@ -328,22 +328,30 @@ static int zpr_run_codec_cursor(char *cap)
     }
     return 0;
 }
-static int zpr_run_codec_priv(char *cap, size_t capn)
+static int zpr_check_codec_priv(const char *cmd, char *cap, size_t capn)
 {
     char msg[1024];
     int code = 0;
+    if (capture_cmd(cmd, cap, capn, &code)) return 2;
+    if (code == 0)
+        return zpr_replay(cap) || zpr_fmt_codec_priv(msg, sizeof msg) || zpr_out(stderr, msg) ? 2 : 1;
+    if (code == 1) return 0;
+    if (ovf(snprintf(msg, sizeof msg,
+                    ZPRF "private-codec scan failed (git grep exit %d)", code), sizeof msg))
+        return 2;
+    return die("%s\n", msg);
+}
+static int zpr_run_codec_priv(char *cap, size_t capn)
+{
     char q0[RS_PATH + 8], q1[RS_PATH + 8], q2[RS_PATH + 8], gcmd[2048];
     if (sh_single_quote(k_zpr_codec[0], q0, sizeof q0)
         || sh_single_quote(k_zpr_codec[1], q1, sizeof q1)
         || sh_single_quote(k_zpr_codec[2], q2, sizeof q2)
         || ovf(snprintf(gcmd, sizeof gcmd,
                         "git grep -n -E 'vcs_(wr|rd)_u(16|32|64)le|#include \"vcs_priv.h\"' -- %s %s %s",
-                        q0, q1, q2), sizeof gcmd)
-        || capture_cmd(gcmd, cap, capn, &code))
+                        q0, q1, q2), sizeof gcmd))
         return 2;
-    if (code == 0)
-        return zpr_replay(cap) || zpr_fmt_codec_priv(msg, sizeof msg) || zpr_out(stderr, msg) ? 2 : 1;
-    return 0;
+    return zpr_check_codec_priv(gcmd, cap, capn);
 }
 static int zpr_run_success(int ns)
 {
@@ -417,6 +425,26 @@ static int zpr_st_codec(char *msg, size_t mcap, int *bad)
         || strcmp(msg, ZPRF "package release/recipe/lock restored a private codec");
     return 0;
 }
+static int zpr_st_codec_scan(int *bad)
+{
+    const struct { const char *cmd; size_t cap; int want; } cases[] = {
+        {"exit 1", 64, 0},
+        {"printf 'private codec fixture\\n'; exit 0", 64, 1},
+        {"exit 2", 64, 2},
+        {"exit 127", 64, 2},
+        {"printf 'overflow'; exit 1", 4, 2},
+    };
+    char output[64];
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int rc = zpr_check_codec_priv(cases[i].cmd, output, cases[i].cap);
+        if (rc != cases[i].want) {
+            fprintf(stderr, "private-codec scan fixture %zu: got %d, expected %d\n",
+                    i, rc, cases[i].want);
+            *bad = 1;
+        }
+    }
+    return 0;
+}
 static int zpr_st_excluded_hits(char mono[][RS_PATH], int *bad)
 {
     *bad |= !zpr_excluded("platform/modules/platform/src/os_sandbox_linux.c")
@@ -480,6 +508,7 @@ int check_zcode_package_registry_selftest(void)
     if (zpr_st_group_hits(msg, sizeof msg, chosen, sizeof chosen, mono, &bad)) return 2;
     if (zpr_st_host(msg, sizeof msg, ok, sizeof ok, &bad)) return 2;
     if (zpr_st_codec(msg, sizeof msg, &bad)) return 2;
+    if (zpr_st_codec_scan(&bad)) return 2;
     if (zpr_st_excluded_hits(mono, &bad)) return 2;
     if (zpr_st_captured_lines(&bad)) return 2;
     return st_ok(bad, "check_zcode_package_registry selftest: OK\n");
