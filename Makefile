@@ -636,6 +636,10 @@ else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),docs-capability-inventory)
 # This standalone tool uses its direct CC recipe and declared source/header
 # prerequisites, not node object epochs. Keep source/view/vendor preparation.
 ZCL_EPOCH_PROFILES :=
+else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),vendor-ready)
+# The audit tool compiles its declared sources directly with HOST_CC. Vendor
+# repair and audit still run; neither consumes profile objects or epochs.
+ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter $(ZCL_ENGINE_UNIT_GOALS),$(ZCL_EPOCH_SINGLE_GOAL)),)
 # The engine dispatcher also compiles its listed sources directly. It still
 # captures source identity below and keeps its TLS inputs outside node epochs.
@@ -2206,6 +2210,10 @@ ifneq ($(filter help print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLA
 ZCL_DEPFILE_PROFILES :=
 else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
 # The generator is compiled directly; no profile %.o depfile graph is consumed.
+ZCL_DEPFILE_PROFILES :=
+else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),vendor-ready)
+# Keep the audit tool's direct source/header prerequisites, not unrelated
+# profile depfiles. Mixed goals retain the conservative fallback.
 ZCL_DEPFILE_PROFILES :=
 else ifneq ($(filter $(ZCL_ENGINE_UNIT_GOALS),$(ZCL_DEPFILE_SINGLE_GOAL)),)
 # Match the direct-source engine recipe's empty epoch selection above.

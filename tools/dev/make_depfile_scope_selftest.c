@@ -492,7 +492,7 @@ static void engine_probe_setup(void)
     FILE *f = fopen(text("%s/engine.mk", work), "wb");
     if (!f) fail("cannot create engine probe Makefile");
     fprintf(f, "include %s/probe.mk\n", make_path(work));
-    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit: $(ZCL_DEP_PROBE_OBJECTS)\n"
+    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit vendor-ready: $(ZCL_DEP_PROBE_OBJECTS)\n"
           "$(info ZCL_DEPFILES_PROBE=[$(ZCL_DEPFILE_PROFILES)])\n", f);
     bool bad = ferror(f) != 0;
     if (fclose(f) != 0) bad = true;
@@ -517,6 +517,9 @@ static size_t engine_probe_start(const struct engine_probe_case *c, const char *
         "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000",
         "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000"};
     size_t n = 20;
+    /* An included Makefile is remade even with -n. Keep vendor repair inert. */
+    argv[n++] = "-o";
+    argv[n++] = "build/identity/vendor-inputs-ready.mk";
     const char *variables[] = {"ALL_OBJS=build-only.o", "DEV_OBJS=dev.o", "DEV_OBJ_COMPLETE=dev.complete",
         "TEST_PARALLEL_FAST_OBJS=test-fast.o", "TEST_PARALLEL_FAST_CANDIDATE=test-fast.candidate",
         "TEST_PARALLEL_FAST_LINK_RSP=test-fast.rsp", "TEST_PARALLEL_REL_OBJS=test-strict.o",
@@ -540,6 +543,12 @@ static size_t engine_probe_start(const struct engine_probe_case *c, const char *
         argv[n++] = "-W";
         argv[n++] = "tools/engine_unit.c";
     }
+    if (!strcmp(c->name, "vendor-source") || !strcmp(c->name, "vendor-header")) {
+        argv[n++] = "HOST_CC=VENDOR_HOST_CC_SENTINEL";
+        argv[n++] = "-W";
+        argv[n++] = !strcmp(c->name, "vendor-source") ? "tools/dep_audit.c" :
+                    "platform/modules/util/src/spawn_binary_internal.h";
+    }
     if (c->first) argv[n++] = c->first;
     if (c->second) argv[n++] = c->second;
     argv[n] = NULL;
@@ -556,6 +565,15 @@ static bool engine_probe_output(const struct engine_probe_case *c, const char *d
         if (present != ((c->mask & (1u << j)) != 0)) return false;
     }
     return true;
+}
+
+static bool vendor_audit_output(const char *data)
+{
+    const char *build = strstr(data, "tools/scripts/build_vendor.sh");
+    const char *audit = strstr(data, "NODE_SECP_ARCHIVE=");
+    return strstr(data, "VENDOR_HOST_CC_SENTINEL") && build && audit &&
+        !strstr(build + 1, "tools/scripts/build_vendor.sh") &&
+        !strstr(audit + 1, "NODE_SECP_ARCHIVE=") && strstr(audit, "/dep_audit");
 }
 
 static void engine_scope_probes(void)
@@ -575,8 +593,18 @@ static void engine_scope_probes(void)
         {"mixed-node", "engine-unit", "z23", false, false, false, 31, all_epoch, all_dep},
         {"mixed-unknown", "engine-unit", "zcl-depfile-unknown", false, false, false, 31, all_epoch, all_dep},
         {"capture", "engine-unit", NULL, false, false, true, 0, "", ""},
+        {"vendor-source", "vendor-ready", NULL, false, false, false, 0, "", ""},
+        {"vendor-header", "vendor-ready", NULL, false, false, false, 0, "", ""},
+        {"vendor-header-first", header, "vendor-ready", false, false, false, 0, "", ""},
+        {"vendor-header-last", "vendor-ready", header, false, false, false, 0, "", ""},
+        {"vendor-node", "vendor-ready", "z23", false, false, false, 31, all_epoch, all_dep},
+        {"vendor-unknown", "vendor-ready", "zcl-depfile-unknown", false, false, false, 31, all_epoch, all_dep},
+        {"vendor-default", NULL, NULL, false, false, false, 16, "node-c23", "node-c23"},
+        {"vendor-capture", "vendor-ready", NULL, false, false, true, 0, "", ""},
     };
     engine_probe_setup();
+    directory(text("%s/engine-bin", work));
+    put(text("%s/engine-bin/dep_audit", work), 0, "fixture\n");
     probe_count = 0;
     enum { count = sizeof(cases) / sizeof(cases[0]) };
     size_t children[count];
@@ -591,6 +619,11 @@ static void engine_scope_probes(void)
         if (!engine_probe_output(&cases[i], data, rc)) {
             fprintf(stderr, "engine scope case=%s rc=%d\n%s\n", cases[i].name, rc, data);
             free(data); fail("engine scope probe failed");
+        }
+        if ((!strcmp(cases[i].name, "vendor-source") || !strcmp(cases[i].name, "vendor-header")) &&
+            !vendor_audit_output(data)) {
+            fprintf(stderr, "vendor audit case=%s output:\n%s\n", cases[i].name, data);
+            free(data); fail("vendor source/header dry-run lost audit or vendor recipe");
         }
         if (!strcmp(cases[i].name, "alias") &&
             (!strstr(data, "-DZCL_BUILD_SOURCE_ID=") ||
