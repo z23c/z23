@@ -741,6 +741,21 @@ static bool dlx_pc_retry_attaches(void)
 static int dlx_case_history_precheck(void)
 {
     int failures = 0;
+    TEST("land: retained depfile failure runs the exact lane script once") {
+        ASSERT(dlx_pc_depfile_case(0)); PASS();
+    }
+    TEST("land: learned depfile script nonzero refuses before queueing") {
+        ASSERT(dlx_pc_depfile_case(1)); ASSERT(dlx_pc_depfile_case(2)); PASS();
+    }
+    TEST("land: learned depfile missing prerequisites remain unproven") {
+        ASSERT(dlx_pc_depfile_case(3)); ASSERT(dlx_pc_depfile_case(7)); PASS();
+    }
+    TEST("land: absent or similarly named history never executes depfile probe") {
+        ASSERT(dlx_pc_depfile_case(4)); ASSERT(dlx_pc_depfile_case(5)); PASS();
+    }
+    TEST("land: learned depfile timeout refuses and kills the script") {
+        ASSERT(dlx_pc_depfile_case(6)); PASS();
+    }
     TEST("land: retained failed train learns ship despite later landing and absent native gate") {
         ASSERT(dlx_pc_history_ship_pass());
         PASS();

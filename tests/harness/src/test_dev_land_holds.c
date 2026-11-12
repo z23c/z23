@@ -1025,6 +1025,141 @@ static bool dlx_pc_history_archive(const char *suffix, int days_ago,
            snprintf(archive, 1600, "%s/%s", wt, relative) < 1600;
 }
 
+#define DLX_DEPFILE_GATE "check-make-depfile-scope-selftest"
+#define DLX_DEPFILE_UNKNOWN "check-make-depfile-scope-selftest-extra"
+
+static bool dlx_pc_depfile_history(int mode)
+{
+    if (mode == 4) return true; /* No matching history. */
+    char archive[1600], failure[1024];
+    if (!dlx_pc_history_archive("cccccc", 1, "child_proof_failed_exit_2", archive))
+        return false;
+    const char *gate = mode == 5 ? DLX_DEPFILE_UNKNOWN : DLX_DEPFILE_GATE;
+    int n = snprintf(failure, sizeof(failure),
+        "child_proof_failed_exit_2\nlint %s: FAIL %s 1 ms (rc=1)\n%s",
+        gate, gate, mode == 5 ? "lint check-build-epoch-integrity: FAIL check-build-epoch-integrity 1 ms (rc=1)\n" : "");
+    return n > 0 && (size_t)n < sizeof(failure) && dlx_write(archive, failure);
+}
+
+static bool dlx_pc_depfile_files(const struct dlx_rig *rig, int mode)
+{
+    static const char script[] =
+        "#!/bin/sh\nprintf '%s\\n' \"$0\" >> build/depfile-ran\n"
+        "if [ -f build/depfile-timeout ]; then sleep 2; touch build/depfile-completed; fi\n"
+        "if [ -f build/depfile-exit ]; then exit \"$(cat build/depfile-exit)\"; fi\nexit 0\n";
+    if ((mode != 7 && !dlx_pc_owned_file(rig->clone, "tools/dev/make-depfile-scope-selftest.sh", script, 0755)) ||
+        !dlx_pc_owned_file(rig->clone, "Makefile", "# private precheck fixture\n", 0644) ||
+        !dlx_pc_owned_file(rig->clone, "tools/dev/make_depfile_scope_selftest.c", "/* fixture */\n", 0644))
+        return false;
+    if (mode == 3) return true; /* The last prerequisite is missing. */
+    return dlx_pc_owned_file(rig->clone, "tools/dev/make_depfile_scope_process.h", "/* fixture */\n", 0644);
+}
+
+static int dlx_pc_depfile_calls(const struct dlx_rig *rig)
+{
+    char path[1400], line[160];
+    if (snprintf(path, sizeof(path), "%s/build/depfile-ran", rig->clone) >= (int)sizeof(path)) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return errno == ENOENT ? 0 : -1;
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strcmp(line, "./tools/dev/make-depfile-scope-selftest.sh\n") != 0) { count = -1; break; }
+        count++;
+    }
+    if (ferror(f)) count = -1;
+    if (fclose(f) != 0) return -1;
+    return count;
+}
+
+static bool dlx_pc_depfile_timeout(struct dlx_call *c, int calls)
+{
+    const struct json_value *facts = json_get(&c->reply.data, "failure_facts");
+    const struct json_value *gate = json_get(facts, "gate");
+    const struct json_value *partial = json_get(facts, "partial");
+    return !dlx_ok(c) && dlx_queue_empty() && calls == 1 &&
+           !strcmp(dlx_err_code(c), "PRECHECK_TIMEOUT") &&
+           !strcmp(c->reply.error.evidence, DLX_DEPFILE_GATE) &&
+           gate && gate->type == JSON_STR && !strcmp(json_get_str(gate), DLX_DEPFILE_GATE) &&
+           partial && partial->type == JSON_BOOL && json_get_bool(partial);
+}
+
+static bool dlx_pc_depfile_failure(struct dlx_call *c, int mode, int calls)
+{
+    if (mode == 6) return dlx_pc_depfile_timeout(c, calls);
+    return !dlx_ok(c) && dlx_queue_empty() && calls == 1 &&
+           !strcmp(dlx_err_code(c), "PRECHECK_FAILED") &&
+           !strcmp(dlx_str(c, "gate"), DLX_DEPFILE_GATE);
+}
+
+static bool dlx_pc_depfile_missing(struct dlx_call *c, int mode, int calls)
+{
+    const char *missing = mode == 3 ? "tools/dev/make_depfile_scope_process.h" :
+                                      "tools/dev/make-depfile-scope-selftest.sh";
+    return dlx_ok(c) && dlx_queue_has_one() && calls == 0 &&
+           dlx_pc_has(dlx_arr(c, "precheck_skipped"), DLX_DEPFILE_GATE) &&
+           strstr(dlx_str(c, "precheck_unproven"), missing) != NULL;
+}
+
+static bool dlx_pc_depfile_unselected(struct dlx_call *c, int mode, int calls)
+{
+    if (!dlx_ok(c) || !dlx_queue_has_one() || calls != 0 ||
+        dlx_pc_has(dlx_arr(c, "precheck_ran"), DLX_DEPFILE_GATE)) return false;
+    if (mode == 4) return !dlx_pc_has(dlx_arr(c, "precheck_skipped"), DLX_DEPFILE_GATE);
+    return dlx_pc_has(dlx_arr(c, "precheck_skipped"), DLX_DEPFILE_UNKNOWN) &&
+           dlx_pc_has(dlx_arr(c, "precheck_skipped"), "check-build-epoch-integrity");
+}
+
+static bool dlx_pc_depfile_verdict(struct dlx_call *c, const struct dlx_rig *rig, int mode)
+{
+    int calls = dlx_pc_depfile_calls(rig);
+    if (mode == 0)
+        return dlx_ok(c) && dlx_queue_has_one() && calls == 1 &&
+               dlx_pc_has(dlx_arr(c, "precheck_ran"), DLX_DEPFILE_GATE);
+    if (mode == 1 || mode == 2 || mode == 6)
+        return dlx_pc_depfile_failure(c, mode, calls);
+    if (mode == 3 || mode == 7)
+        return dlx_pc_depfile_missing(c, mode, calls);
+    return dlx_pc_depfile_unselected(c, mode, calls);
+}
+
+static bool dlx_pc_depfile_setup(struct dlx_rig *rig, int mode)
+{
+    static const char *const tags[] = {"dep_pass", "dep_fail1", "dep_fail2", "dep_missing",
+                                      "dep_no_history", "dep_unknown", "dep_timeout", "dep_missing_script"};
+    if (mode < 0 || (size_t)mode >= sizeof(tags) / sizeof(tags[0])) return false;
+    if (!dlx_pc_rig(rig, tags[mode], true, "check-arm-symbol-single\n") ||
+        !dlx_pc_depfile_history(mode) || !dlx_pc_depfile_files(rig, mode)) return false;
+    if (mode == 1 || mode == 2)
+        return dlx_pc_file(rig, "depfile-exit", mode == 1 ? "1\n" : "2\n");
+    if (mode == 6) return dlx_pc_file(rig, "depfile-timeout", "1\n");
+    return true;
+}
+
+static bool dlx_pc_depfile_no_completion(const struct dlx_rig *rig)
+{
+    char path[1400];
+    platform_sleep_ms(2300); /* The killed script's two-second marker window. */
+    int n = snprintf(path, sizeof(path), "%s/build/depfile-completed", rig->clone);
+    return n > 0 && (size_t)n < sizeof(path) && !dlx_file_exists(path);
+}
+
+bool dlx_pc_depfile_case(int mode)
+{
+    struct dlx_rig rig; struct dlx_call c;
+    if (!dlx_pc_depfile_setup(&rig, mode)) { dlx_restore(); return false; }
+    if (mode == 6) zcl_dev_land_precheck_test_budget(500);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    zcl_dev_land_precheck_test_budget(0);
+    bool ok = ran && dlx_pc_depfile_verdict(&c, &rig, mode);
+    if (mode == 6) ok = dlx_pc_depfile_no_completion(&rig) && ok;
+    if (!ok) fprintf(stderr, "depfile precheck mode=%d ran=%d error=%s gate=%s calls=%d\n",
+                     mode, ran, dlx_err_code(&c), dlx_str(&c, "gate"), dlx_pc_depfile_calls(&rig));
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_ship_files(const struct dlx_rig *rig, bool ready)
 {
     static const char script[] = "#!/bin/sh\n"

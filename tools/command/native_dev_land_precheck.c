@@ -37,6 +37,8 @@
 #define PC_EVIDENCE_CAP 4096u
 #define PC_TEXT_CAP 1600u
 #define PC_SHIP_GATE "check-ship-remote-transaction"
+#define PC_DEPFILE_GATE "check-make-depfile-scope-selftest"
+#define PC_DEPFILE_SCRIPT "tools/dev/make-depfile-scope-selftest.sh"
 
 static const char *const k_pc_core[] = {
     "check-file-size-ceiling", "check-cyclomatic-complexity",
@@ -862,8 +864,8 @@ static int pc_size_run(struct pc_run *r)
 #endif
 }
 
-/* How a gate runs: the ship adapter, the canonical file-purpose command, the
- * size binary, or `z23-lint GATE`. */
+/* Canonical script adapters, the file-purpose command, the size binary,
+ * or `z23-lint GATE`. Script verdicts do not use lint's exit-2 convention. */
 static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
                         bool size)
 {
@@ -877,6 +879,9 @@ static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
     if (size)
         return pc_size_run(r);
     r->gate_output_available = true;
+    if (strcmp(gate, PC_DEPFILE_GATE) == 0)
+        return pc_run(r->wt, "./" PC_DEPFILE_SCRIPT, NULL,
+                      r->deadline, r->out, PC_OUT_CAP, &r->capture);
     return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP, &r->capture);
 }
 
@@ -896,6 +901,10 @@ static const struct {
     {"check-windows-cross-syntax", "build/gen/guest_kernel_data.c", R_OK},
     {"check-doc-claims", "build/bin/z23_bounded_run", X_OK},
     {"check-package-anatomy", "build/bin/z23_bounded_run", X_OK},
+    {PC_DEPFILE_GATE, PC_DEPFILE_SCRIPT, X_OK},
+    {PC_DEPFILE_GATE, "Makefile", R_OK},
+    {PC_DEPFILE_GATE, "tools/dev/make_depfile_scope_selftest.c", R_OK},
+    {PC_DEPFILE_GATE, "tools/dev/make_depfile_scope_process.h", R_OK},
 };
 #endif
 
@@ -903,8 +912,10 @@ static const struct {
 static const char *pc_missing_need(struct pc_run *r, const char *gate)
 {
 #if defined(_WIN32)
-    (void)r;
-    (void)gate;
+    if (strcmp(gate, PC_DEPFILE_GATE) == 0) {
+        (void)snprintf(r->out, PC_OUT_CAP, "depfile script adapter unavailable on Windows");
+        return PC_DEPFILE_SCRIPT;
+    }
     return NULL;
 #else
     char path[4096 + 80];
@@ -913,7 +924,7 @@ static const char *pc_missing_need(struct pc_run *r, const char *gate)
             continue;
         if (snprintf(path, sizeof(path), "%s/%s", r->wt, k_pc_needs[i].file) <
                 (int)sizeof(path) && pc_ship_file(path, k_pc_needs[i].mode))
-            return NULL;
+            continue;
         (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s",
                        k_pc_needs[i].file);
         return k_pc_needs[i].file;
@@ -930,13 +941,14 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                                       struct zcl_command_reply *reply)
 {
     bool ship = strcmp(gate, PC_SHIP_GATE) == 0;
+    bool script = ship || strcmp(gate, PC_DEPFILE_GATE) == 0;
     bool size = strcmp(gate, PC_SIZE_GATE) == 0 && !pc_known(list, gate);
     int rc;
     if (ship && !pc_ship_ready(r)) {
         pc_note_unproven(r, gate);
         return PC_GATE_SKIPPED;
     }
-    if (!ship && !size && !pc_known(list, gate)) {
+    if (!script && !size && !pc_known(list, gate)) {
         r->skipped[r->nskipped++] = gate;
         return PC_GATE_SKIPPED;
     }
@@ -952,7 +964,7 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                 r->out);
         return PC_GATE_REFUSED;
     }
-    if (!ship && rc == PC_EXIT_UNPROVEN) {
+    if (!script && rc == PC_EXIT_UNPROVEN) {
         pc_note_unproven(r, gate);
         return PC_GATE_SKIPPED;
     }
