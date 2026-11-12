@@ -5,6 +5,7 @@
 #endif
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
+#include "command/native_app_installed_copy.h"
 #include "command/native_app_discover.h"
 #include "command/native_app_host_browser.h"
 #include "command/native_app_receive_flow.h"
@@ -41,6 +42,7 @@ struct library {
     struct app_launch_registry registry;
     struct library_row rows[AL_ROWS];
     size_t count, index;
+    size_t data_cap;
     unsigned page;
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     char source_version[65];
@@ -54,13 +56,14 @@ struct library {
     const char *test_worker_path;
 #if defined(ZCL_TESTING)
     const struct app_network_test_hooks *network_test;
+    app_library_adopter adopter;
 #endif
     bool prepared_mutated;
     bool error_presented;
     bool action_failed;
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
-    bool receive_failure;
+    bool receive_failure, recovery_adoption, create_result;
     bool operation_canceled;
     bool share_review;
     struct json_value receive_receipt;
@@ -127,7 +130,8 @@ static void al_model(struct library *w)
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-%zu", w->index);
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
     if (!w->count) {
-        (void)snprintf(m->summary, sizeof(m->summary), "No apps yet. Install an app or open a shared app to get started.");
+        (void)snprintf(m->summary, sizeof(m->summary), "No apps yet. Create a copy or discover an app to get started.");
+        app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
         app_library_choice(m, "home", "Back", "Return to the home menu.");
         return;
     }
@@ -144,7 +148,8 @@ static void al_model(struct library *w)
         r->saved ? "Saved version " : "Installed app", r->saved ? version : "");
     app_library_choice(m, "choose", "Choose app", value);
     app_library_choice(m, "previous", "Previous app", w->index ? "Browse back." : "First app.");
-    app_library_choice(m, "next", "Next app", w->index + 1 < w->count ? "Browse forward." : "Last app.");
+    if (w->index + 1 < w->count) app_library_choice(m, "next", "Next app", "Browse forward.");
+    else app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
     app_library_choice(m, "home", "Back", "Return to the home menu.");
 }
 static void al_home(struct library *w)
@@ -721,6 +726,7 @@ static bool al_recovery_fields(struct json_value *out, const struct json_value *
 }
 static bool al_capture_receive(struct library *w, const struct json_value *data)
 {
+    w->recovery_adoption = false;
     static const char *const kept_keys[] = {"name", "selection_revision", "version", "image_sha3", "record_id"};
     static const char *const received_keys[] = {"destination", "release_id", "package_root", "publisher_fingerprint", "version"};
     const struct json_value *kept = json_get(data, "kept");
@@ -731,6 +737,33 @@ static bool al_capture_receive(struct library *w, const struct json_value *data)
         al_recovery_fields(&w->receive_receipt, data, received_keys, 5);
     size_t size = ok ? json_write(&w->receive_receipt, NULL, 0) : 0;
     return size && size <= (w->recovery_kept ? 2048u : 8192u);
+}
+
+static const char *const al_adoption_required[] = {"copy", "release_root", "package_root", "version"};
+static const char *const al_adoption_optional[] = {"root_commit", "namespace", "adopted", "executed",
+    "continuation", "continuation_executed", "continuation_error", "copy_progress_ui_failed",
+    "operations", "preview_opened", "kept"};
+
+static bool al_optional_fields(struct json_value *out, const struct json_value *data,
+                               const char *const *keys, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *v = json_get(data, keys[i]);
+        if (v && !json_push_kv(out, keys[i], v)) return false;
+    }
+    return true;
+}
+
+static bool al_capture_adoption(struct library *w, const struct json_value *data)
+{
+    json_free(&w->receive_receipt); json_init(&w->receive_receipt); json_set_object(&w->receive_receipt);
+    bool ok = al_recovery_fields(&w->receive_receipt, data, al_adoption_required,
+                                 sizeof(al_adoption_required) / sizeof(al_adoption_required[0])) &&
+        al_optional_fields(&w->receive_receipt, data, al_adoption_optional,
+                           sizeof(al_adoption_optional) / sizeof(al_adoption_optional[0]));
+    size_t size = ok ? json_write(&w->receive_receipt, NULL, 0) : 0;
+    w->recovery_adoption = true; w->recovery_kept = false;
+    return size && size <= 8192u;
 }
 static void al_resolve_discover_error(struct library *w)
 {
@@ -847,7 +880,7 @@ static bool al_receive_recovery(struct library *w, struct zcl_command_reply *rep
         for (size_t i = 0; i < reply->data.num_children; ++i)
             if (!strcmp(reply->data.keys[i], "failure_facts")) { container = &reply->data.children[i]; break; }
     }
-    const char *key = w->recovery_kept ? "historical_keep" : "historical_receive";
+    const char *key = w->recovery_adoption ? "historical_adoption" : w->recovery_kept ? "historical_keep" : "historical_receive";
     return w->recovery_ready && container->type == JSON_OBJ && !json_get(container, key) &&
         json_push_kv(container, key, &w->receive_receipt);
 }
@@ -944,6 +977,19 @@ static void al_copy_receive_locations(struct json_value *facts, const struct jso
         if (v && !json_get(facts, keys[i]) && !al_fact_add(facts, keys[i], v, cap)) *omitted = true;
     }
 }
+
+static void al_copy_adoption_facts(struct json_value *facts, const struct json_value *data,
+    size_t cap, bool *omitted)
+{
+    const char *const *groups[] = {al_adoption_required, al_adoption_optional};
+    const size_t counts[] = {sizeof(al_adoption_required) / sizeof(al_adoption_required[0]),
+                             sizeof(al_adoption_optional) / sizeof(al_adoption_optional[0])};
+    for (size_t group = 0; group < 2; ++group) for (size_t i = 0; i < counts[group]; ++i) {
+        const char *key = groups[group][i];
+        const struct json_value *v = json_get(data, key);
+        if (v && !json_get(facts, key) && !al_fact_add(facts, key, v, cap)) *omitted = true;
+    }
+}
 static void al_bound_preparation(struct library *w, struct json_value *facts,
     const struct json_value *old, size_t cap, bool *omitted)
 {
@@ -966,12 +1012,14 @@ static void al_bound_failure(struct library *w, struct zcl_command_reply *reply)
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     bool omitted = false;
     size_t cap = al_failure_facts_cap(reply, &omitted);
-    const char *historical = w->recovery_kept ? "historical_keep" : "historical_receive";
+    const char *historical = w->recovery_adoption ? "historical_adoption" : w->recovery_kept ? "historical_keep" : "historical_receive";
+    if (w->has_received && !w->recovery_ready) omitted = true;
     if (w->has_received && w->recovery_ready &&
         !al_fact_add(&facts, historical, &w->receive_receipt, cap)) omitted = true;
     struct json_value *old = al_failure_facts(reply);
     al_bound_preparation(w, &facts, old, cap, &omitted);
     al_copy_failure_facts(&facts, old, cap, &omitted);
+    if (w->create_result) al_copy_adoption_facts(&facts, &reply->data, cap, &omitted);
     if (w->receive_failure) al_copy_receive_locations(&facts, &reply->data, cap, &omitted);
     if (omitted) (void)json_push_kv_bool(&facts, "details_unavailable", true);
     if (old) { json_free(old); *old = facts; }
@@ -1109,10 +1157,77 @@ static bool al_navigation_result(struct library *w, unsigned action, const struc
         al_resolve_discover_error(w);
     return next;
 }
+
+/* Reserve prior evidence before asking the installed-copy flow to mutate. */
+static bool al_create_allowance(struct library *w, size_t *allowance)
+{
+    size_t reserve = 0;
+    if (w->has_discover_error || (w->has_received && !w->recovery_ready)) return false;
+    if (w->has_received) {
+        size_t n = json_write(&w->receive_receipt, NULL, 0);
+        if (!n || n > SIZE_MAX - reserve - 128u) return false;
+        reserve += n + 128u;
+    }
+    if (w->prepared_mutated) {
+        size_t n = json_write(&w->preparation, NULL, 0);
+        if (!n || n > SIZE_MAX - reserve - 128u) return false;
+        reserve += n + 128u;
+    }
+    if (reserve > 1450u || reserve >= w->data_cap) return false;
+    *allowance = w->data_cap - reserve;
+    return true;
+}
+
+static bool al_create_request(struct library *w, const char *datadir, void *context,
+                              size_t allowance, struct zcl_command_reply *result)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool built = json_push_kv_str(&input, "name", "skycombat") && json_push_kv_str(&input, "datadir", datadir);
+    if (!built) { json_free(&input); return al_fail(result, "OUT_OF_MEMORY", "Cannot prepare the template request."); }
+    struct zcl_command_request req = {.input = &input, .success_data_budget_provided = true, .success_data_budget = allowance};
+#if defined(ZCL_TESTING)
+    if (w->adopter) w->adopter(&req, result, w->notice, context);
+    else
+#endif
+        app_installed_copy_run(&req, result, w->notice, context);
+    json_free(&input);
+    return true;
+}
+
+static bool al_create(struct library *w, const struct app_launch_env *env,
+    const char *datadir, void *context, struct zcl_command_reply *reply)
+{
+    size_t allowance;
+    bool prior = w->has_received || w->prepared_mutated;
+    if (!al_create_allowance(w, &allowance))
+        return al_fail(reply, "RECOVERY_TOO_LARGE", "Prior recovery information cannot be safely retained while creating another copy.");
+    if (!datadir) datadir = zcl_native_command_datadir();
+    if (!datadir || datadir[0] != '/') return al_fail(reply, "MISSING_DATADIR", "An absolute app profile is required.");
+    struct zcl_command_reply result; zcl_command_reply_init(&result, "zcl.app_adopt.v1");
+    (void)al_create_request(w, datadir, context, allowance, &result);
+    const char *status = zcl_package_copy_str(&result.data, "status");
+    if (result.status == ZCL_COMMAND_STATUS_PASSED && !result.error.mutated && status && !strcmp(status, "canceled")) {
+        zcl_command_reply_free(&result); return true;
+    }
+    w->any_mutated |= result.error.mutated;
+    w->create_result = result.error.mutated;
+    if (prior) w->receive_current = false;
+    bool prior_mutated = reply->error.mutated;
+    zcl_command_reply_free(reply); *reply = result; reply->error.mutated |= prior_mutated;
+    if (prior || reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    w->has_received = w->receive_current = true;
+    w->recovery_ready = al_capture_adoption(w, &reply->data);
+    if (!w->recovery_ready) return false; /* preserve exact current receipt */
+    if (!al_reload(w, env, reply)) return false;
+    return al_received_selection(w, &reply->data, reply);
+}
+
 static bool al_external(struct library *w, const struct app_launch_env *env, const char *datadir,
     app_library_presenter presenter, void *context, struct zcl_command_reply *reply, const char *id, bool *handled)
 {
     *handled = true;
+    if (!strcmp(id, "create")) return al_create(w, env, datadir, context, reply);
+    w->create_result = false;
     if (!strcmp(id, "discover")) { w->page = 8; return true; }
     if (!strcmp(id, "catalog") || !strcmp(id, "open-link")) return al_discover(w, env, datadir, presenter, context, reply, !strcmp(id, "open-link"));
     if (!strcmp(id, "discover-back")) { w->page = 3; return true; }
@@ -1164,16 +1279,17 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
 static void al_run(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir,
     app_library_preparer preparer, app_library_sharer sharer, app_confirm_presenter notice,
-    app_library_revealer revealer, const char *test_worker_path, const void *network_test, size_t data_cap)
+    app_library_revealer revealer, const char *test_worker_path, const void *network_test, size_t data_cap, app_library_adopter adopter)
 {
     struct library *w = zcl_calloc(1, sizeof(*w), "app-library");
     if (!w) { al_fail(reply, "OUT_OF_MEMORY", "Cannot allocate My Apps."); return; }
+    w->data_cap = data_cap;
     w->preparer = preparer; w->sharer = sharer; w->notice = notice; w->revealer = revealer; w->prepare_context = context;
     w->test_worker_path = test_worker_path;
 #if defined(ZCL_TESTING)
-    w->network_test = network_test;
+    w->network_test = network_test; w->adopter = adopter;
 #else
-    (void)network_test;
+    (void)network_test; (void)adopter;
 #endif
     w->page = 3;
     al_loop(w, env, reply, presenter, context, exe, datadir);
@@ -1223,66 +1339,76 @@ void zcl_native_handle_app_library(const struct zcl_command_request *request,
         return;
     }
     size_t cap = request && request->success_data_budget_provided ? request->success_data_budget : 30000u;
-    al_run(&env, reply, al_present, NULL, NULL, datadir, NULL, NULL, NULL, NULL, NULL, NULL, cap);
+    al_run(&env, reply, al_present, NULL, NULL, datadir, NULL, NULL, NULL, NULL, NULL, NULL, cap, NULL);
 }
 #if defined(ZCL_TESTING)
+void zcl_test_app_library_create(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice,
+    void *context, app_library_adopter adopter, size_t data_cap)
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, notice, NULL, NULL, NULL, data_cap, adopter); }
+
+void zcl_test_app_library_create_prepared(const struct app_launch_env *env, const char *datadir,
+    struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice,
+    void *context, app_library_preparer preparer, app_library_adopter adopter, size_t data_cap)
+{ al_run(env, reply, presenter, context, NULL, datadir, preparer, NULL, notice, NULL, NULL, NULL, data_cap, adopter); }
+
 void zcl_test_app_library_network(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice, void *context,
     const struct app_network_test_hooks *hooks)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, notice, NULL, NULL, hooks, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, notice, NULL, NULL, hooks, 30000u, NULL); }
 void zcl_test_app_library_request(const struct app_launch_env *env, const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context)
 {
     const char *datadir;
     if (al_profile_input(request, &datadir, reply))
-        al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u);
+        al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u, NULL);
 }
 void zcl_test_app_library_discover(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u, NULL); }
 void zcl_test_app_library_discover_worker(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path)
-{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, worker_path, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, worker_path, NULL, 30000u, NULL); }
 void zcl_test_app_library_discover_worker_share(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context, const char *worker_path,
     app_library_preparer preparer, app_library_sharer sharer)
-{ al_run(env, reply, presenter, context, NULL, datadir, preparer, sharer, receive_presenter, NULL, worker_path, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, datadir, preparer, sharer, receive_presenter, NULL, worker_path, NULL, 30000u, NULL); }
 void zcl_test_app_library_native_at(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply, app_library_presenter presenter,
     void *context, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, notice, NULL, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, notice, NULL, NULL, NULL, 30000u, NULL); }
 void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer, app_library_sharer sharer,
     app_confirm_presenter notice, app_library_revealer revealer)
-{ al_run(env, reply, presenter, context, NULL, NULL, preparer, sharer, notice, revealer, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, NULL, preparer, sharer, notice, revealer, NULL, NULL, 30000u, NULL); }
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, "/fixture/z23", "/fixture", preparer, sharer, notice, NULL, NULL, NULL, 30000u, NULL); }
 void zcl_test_app_library_share(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice)
-{ al_run(env, reply, presenter, context, NULL, NULL, preparer, sharer, notice, NULL, NULL, NULL, 30000u); }
+{ al_run(env, reply, presenter, context, NULL, NULL, preparer, sharer, notice, NULL, NULL, NULL, 30000u, NULL); }
 void zcl_test_app_library_run(const struct app_launch_env *env,
     struct zcl_command_reply *reply, app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 30000u);
+    al_run(env, reply, presenter, context, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 30000u, NULL);
 }
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
-    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL, NULL, NULL, 30000u);
+    al_run(env, reply, presenter, context, exe, datadir, NULL, NULL, NULL, NULL, NULL, NULL, 30000u, NULL);
 }
 void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer)
 {
-    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL, NULL, NULL, 30000u);
+    al_run(env, reply, presenter, context, exe, datadir, preparer, NULL, NULL, NULL, NULL, NULL, 30000u, NULL);
 }
 
 #endif
