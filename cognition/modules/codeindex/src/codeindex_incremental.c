@@ -198,26 +198,111 @@ static bool incremental_source_root(struct ci_store *store, uint8_t out[32])
 
 bool ci_deps_include_edge_root(uint8_t out[32]);
 
-/* The include rows are reused, not rebuilt. They answer completely only
- * while the current scan produces exactly the edges they were built from.
- * The rebuild path patches only a generation whose edge root matches, and a
- * seeded one is stamped after its rows are verified, so a mismatch here means
- * the sources moved during this update: the answer refuses and the next
- * update rebuilds. The stored edge root is left as is, so it keeps describing
- * the rows. */
-static bool incremental_refresh_include_narrow(const char *root,
-                                               struct ci_store *store,
-                                               bool rescan_deps)
+struct include_expected_edges {
+    sqlite3_stmt *insert;
+    bool ok;
+};
+
+static void include_expected_edge(const char *source, const char *dependency,
+                               void *user)
 {
-    uint8_t exact[32];
-    uint8_t stat_root[32];
+    struct include_expected_edges *expected = user;
+    if (!expected->ok) return;
+    expected->ok = sqlite3_reset(expected->insert) == SQLITE_OK &&
+                   sqlite3_clear_bindings(expected->insert) == SQLITE_OK &&
+                   sqlite3_bind_text(expected->insert, 1, source, -1,
+                                     SQLITE_TRANSIENT) == SQLITE_OK &&
+                   sqlite3_bind_text(expected->insert, 2, dependency, -1,
+                                     SQLITE_TRANSIENT) == SQLITE_OK &&
+                   sqlite3_step(expected->insert) == SQLITE_DONE; // raw-sql-ok:codeindex-derived
+}
+
+/* Replace the staged include rows with a fresh parse of THIS checkout, then
+ * prove the table equals that parse. Prior rows may describe different depfiles or a different checkout,
+ * so they are never trusted. The
+ * join to files mirrors the cold builder's rule that only indexed sources get
+ * edges. */
+static bool include_rows_match(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK)
+        return false;
+    int rc = sqlite3_step(statement); // raw-sql-ok:codeindex-derived
+    bool equal = rc == SQLITE_ROW && sqlite3_column_int(statement, 0) == 1;
+    return sqlite3_finalize(statement) == SQLITE_OK && equal;
+}
+
+static bool reconcile_include_rows(const char *root, struct ci_store *staged,
+                                   uint8_t parsed_root[32], uint8_t parsed_stat[32])
+{
+    static const char create_sql[] =
+        "CREATE TEMP TABLE include_expected ("
+        "source TEXT NOT NULL, dep_path TEXT NOT NULL,"
+        "PRIMARY KEY(source,dep_path)) WITHOUT ROWID";
+    static const char rewrite_sql[] =
+        "DELETE FROM includes;"
+        " INSERT OR IGNORE INTO includes(file_id,dep_path)"
+        " SELECT f.id,e.dep_path FROM include_expected e"
+        " JOIN files f ON f.path=e.source";
+    static const char compare_sql[] =
+        "WITH actual AS ("
+        " SELECT f.path AS source,i.dep_path FROM includes i"
+        " LEFT JOIN files f ON f.id=i.file_id),"
+        " expected AS ("
+        " SELECT e.source,e.dep_path FROM include_expected e"
+        " JOIN files f ON f.path=e.source)"
+        " SELECT NOT EXISTS(SELECT * FROM actual EXCEPT SELECT * FROM expected)"
+        " AND NOT EXISTS(SELECT * FROM expected EXCEPT SELECT * FROM actual)";
+    sqlite3 *db = ci_store_db(staged);
+    sqlite3_stmt *insert = NULL;
+    bool ok = sqlite3_exec(db, create_sql, NULL, NULL, NULL) == SQLITE_OK &&
+              sqlite3_prepare_v2(db,
+                  "INSERT OR IGNORE INTO include_expected(source,dep_path)"
+                  " VALUES(?1,?2)", -1, &insert, NULL) == SQLITE_OK;
+    struct include_expected_edges expected = {.insert = insert, .ok = ok};
+    if (ok)
+        ok = ci_deps_scan_roots(root, include_expected_edge, &expected, parsed_root, parsed_stat) &&
+             expected.ok;
+    if (insert) sqlite3_finalize(insert);
+    if (ok)
+        ok = sqlite3_exec(db, rewrite_sql, NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = include_rows_match(db, compare_sql);
+    if (sqlite3_exec(db, "DROP TABLE IF EXISTS temp.include_expected", NULL,
+                     NULL, NULL) != SQLITE_OK)
+        ok = false;
+    return ok;
+}
+
+/* The reconciled rows match the fresh parse; seal its edge root. */
+static bool include_stamp_edge_root(struct ci_store *staged)
+{
     uint8_t edges[32];
-    uint8_t stored[32];
+    return ci_deps_include_edge_root(edges) &&
+           ci_store_meta_set(staged, "include_edge_root_sha3", edges,
+                             sizeof(edges));
+}
+
+/* Reconcile and seal from one scan; reject if its observed inventory does not
+ * match the depfile metadata captured at the beginning of this build. */
+bool ci_reconcile_includes(const char *root, struct ci_store *staged,
+                           const uint8_t expected_stat[32])
+{
+    uint8_t dep_root[32], dep_stat[32];
+    return reconcile_include_rows(root, staged, dep_root, dep_stat) &&
+           memcmp(dep_stat, expected_stat, 32) == 0 &&
+           ci_store_meta_set(staged, "dep_root_sha3", dep_root, 32) &&
+           include_stamp_edge_root(staged);
+}
+
+
+/* The latest reconciliation scan describes the include rows we just sealed.
+ * Preserve its unsafe flag and reason so incomplete input cannot look exact. */
+static bool incremental_refresh_include_narrow(struct ci_store *store)
+{
+    uint8_t edges[32], stored[32];
     size_t stored_len = 0;
     bool found = false;
-    if ((rescan_deps &&
-         !ci_deps_scan_roots(root, NULL, NULL, exact, stat_root)) ||
-        !ci_deps_include_edge_root(edges) ||
+    if (!ci_deps_include_edge_root(edges) ||
         !ci_store_meta_get(store, "include_edge_root_sha3", stored,
                            sizeof stored, &stored_len, &found))
         return false;
@@ -225,7 +310,6 @@ static bool incremental_refresh_include_narrow(const char *root,
                         memcmp(stored, edges, sizeof edges) == 0;
     const char *bit =
         (!rows_current || ci_deps_include_narrow_unsafe()) ? "1" : "0";
-    /* The depfile rule is the more specific evidence when both hold. */
     const char *cause = ci_deps_include_narrow_unsafe()
         ? ci_deps_include_narrow_cause()
         : (!rows_current ? "include_rows_stale" : "");
@@ -234,12 +318,10 @@ static bool incremental_refresh_include_narrow(const char *root,
                              strlen(cause));
 }
 
-static bool incremental_stamp_projection_and_counts(const char *root,
-                                                    struct ci_store *store,
-                                                    bool rescan_deps)
+static bool incremental_stamp_projection_and_counts(struct ci_store *store)
 {
     uint8_t projection_root[32];
-    return incremental_refresh_include_narrow(root, store, rescan_deps) &&
+    return incremental_refresh_include_narrow(store) &&
            ci_store_retrieval_projection_root(store, projection_root) &&
            ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
                              projection_root, sizeof(projection_root)) &&
@@ -267,6 +349,20 @@ static bool incremental_replace_changed(const char *root, struct ci_store *store
     return true;
 }
 
+/* Populate the private transaction, then seal the roots and projection that
+ * describe its updated source rows and freshly reconciled dependencies. */
+static bool incremental_refresh_contents(const char *root, struct ci_store *store,
+                                         const struct ci_merkle_leaf *changed,
+                                         int changed_count, const uint8_t dep_stat[32],
+                                         const uint8_t merkle_root[32], bool rescan_deps)
+{
+    return incremental_replace_changed(root, store, changed, changed_count) &&
+           ci_docs_refresh(store, root) &&
+           (!rescan_deps || ci_reconcile_includes(root, store, dep_stat)) &&
+           incremental_seal_roots(store, dep_stat, merkle_root) &&
+           incremental_stamp_projection_and_counts(store);
+}
+
 static bool incremental_build(const char *root, struct ci_store *store,
                               const struct ci_merkle_leaf *changed,
                               int changed_count, const uint8_t dep_stat[32],
@@ -276,13 +372,8 @@ static bool incremental_build(const char *root, struct ci_store *store,
         !dep_stat || !merkle_root)
         LOG_FAIL("codeindex", "invalid incremental store build");
     bool tx_open = ci_store_begin(store);
-    bool ok = tx_open;
-    ok = ok && incremental_replace_changed(root, store, changed,
-                                              changed_count) &&
-         ci_docs_refresh(store, root);
-    if (ok) ok = incremental_seal_roots(store, dep_stat, merkle_root);
-    if (ok)
-        ok = incremental_stamp_projection_and_counts(root, store, rescan_deps);
+    bool ok = tx_open && incremental_refresh_contents(root, store, changed,
+                   changed_count, dep_stat, merkle_root, rescan_deps);
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);
         LOG_FAIL("codeindex", "incremental changed-row replacement failed");

@@ -450,91 +450,6 @@ static bool seed_write_receipt(struct ci_store *staged, const char *kind,
            ci_store_meta_set(staged, "build_seed_files", files, (size_t)n);
 }
 
-struct seed_expected_edges {
-    sqlite3_stmt *insert;
-    bool ok;
-};
-
-static void seed_expected_edge(const char *source, const char *dependency,
-                               void *user)
-{
-    struct seed_expected_edges *expected = user;
-    if (!expected->ok) return;
-    expected->ok = sqlite3_reset(expected->insert) == SQLITE_OK &&
-                   sqlite3_clear_bindings(expected->insert) == SQLITE_OK &&
-                   sqlite3_bind_text(expected->insert, 1, source, -1,
-                                     SQLITE_TRANSIENT) == SQLITE_OK &&
-                   sqlite3_bind_text(expected->insert, 2, dependency, -1,
-                                     SQLITE_TRANSIENT) == SQLITE_OK &&
-                   sqlite3_step(expected->insert) == SQLITE_DONE; // raw-sql-ok:codeindex-derived
-}
-
-/* Replace the staged include rows with a fresh parse of THIS checkout, then
- * prove the table equals that parse. The donor's rows describe the depfiles of
- * its own build (checkout root, compiled units), which differ between
- * checkouts even at an identical source tree, so they are never trusted. The
- * join to files mirrors the cold builder's rule that only indexed sources get
- * edges. */
-static bool seed_reconcile_includes(const char *root, struct ci_store *staged,
-                                    uint8_t parsed_root[32])
-{
-    static const char create_sql[] =
-        "CREATE TEMP TABLE seed_expected ("
-        "source TEXT NOT NULL, dep_path TEXT NOT NULL,"
-        "PRIMARY KEY(source,dep_path)) WITHOUT ROWID";
-    static const char rewrite_sql[] =
-        "DELETE FROM includes;"
-        " INSERT OR IGNORE INTO includes(file_id,dep_path)"
-        " SELECT f.id,e.dep_path FROM seed_expected e"
-        " JOIN files f ON f.path=e.source";
-    static const char compare_sql[] =
-        "WITH actual AS ("
-        " SELECT f.path AS source,i.dep_path FROM includes i"
-        " LEFT JOIN files f ON f.id=i.file_id),"
-        " expected AS ("
-        " SELECT e.source,e.dep_path FROM seed_expected e"
-        " JOIN files f ON f.path=e.source)"
-        " SELECT NOT EXISTS(SELECT * FROM actual EXCEPT SELECT * FROM expected)"
-        " AND NOT EXISTS(SELECT * FROM expected EXCEPT SELECT * FROM actual)";
-    sqlite3 *db = ci_store_db(staged);
-    sqlite3_stmt *insert = NULL, *compare = NULL;
-    bool ok = sqlite3_exec(db, create_sql, NULL, NULL, NULL) == SQLITE_OK &&
-              sqlite3_prepare_v2(db,
-                  "INSERT OR IGNORE INTO seed_expected(source,dep_path)"
-                  " VALUES(?1,?2)", -1, &insert, NULL) == SQLITE_OK;
-    struct seed_expected_edges expected = {.insert = insert, .ok = ok};
-    if (ok)
-        ok = ci_deps_scan(root, seed_expected_edge, &expected, parsed_root) &&
-             expected.ok;
-    if (insert) sqlite3_finalize(insert);
-    if (ok)
-        ok = sqlite3_exec(db, rewrite_sql, NULL, NULL, NULL) == SQLITE_OK;
-    if (ok)
-        ok = sqlite3_prepare_v2(db, compare_sql, -1, &compare, NULL) ==
-                 SQLITE_OK &&
-             sqlite3_step(compare) == SQLITE_ROW && // raw-sql-ok:codeindex-derived
-             sqlite3_column_int(compare, 0) == 1;
-    if (compare) sqlite3_finalize(compare);
-    if (sqlite3_exec(db, "DROP TABLE IF EXISTS temp.seed_expected", NULL,
-                     NULL, NULL) != SQLITE_OK)
-        ok = false;
-    return ok;
-}
-
-bool ci_deps_include_edge_root(uint8_t out[32]);
-
-/* The rows were just shown equal to a fresh parse of this checkout, so the
- * edge root of that parse describes them. A donor written before edges were
- * rooted, or with a different root, is stamped with it here; its reused rows
- * then answer completely like rows this checkout built. */
-static bool seed_stamp_edge_root(struct ci_store *staged)
-{
-    uint8_t edges[32];
-    return ci_deps_include_edge_root(edges) &&
-           ci_store_meta_set(staged, "include_edge_root_sha3", edges,
-                             sizeof(edges));
-}
-
 static bool seed_refresh_staged(const char *root, int stagefd,
                                 const struct ci_merkle_leaf *current,
                                 int current_count,
@@ -549,11 +464,8 @@ static bool seed_refresh_staged(const char *root, int stagefd,
      * shortcut donor RANKING is allowed to take: what gets published is
      * verified against the rows it actually holds. */
     int changed = seed_distance(staged, current, current_count, scratch);
-    uint8_t dep_root[32];
     bool ok = changed >= 0 &&
-              seed_reconcile_includes(root, staged, dep_root) &&
-              ci_store_meta_set(staged, "dep_root_sha3", dep_root, 32) &&
-              seed_stamp_edge_root(staged) &&
+              ci_reconcile_includes(root, staged, dep_stat) &&
               ci_pages_discard(staged) &&
               ci_build_store_incremental_scanned(root, staged, scratch, changed,
                                          dep_stat, merkle_root) &&

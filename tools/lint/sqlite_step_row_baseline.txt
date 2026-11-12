@@ -8,7 +8,6 @@
 cognition/models/src/agent_session.c 1
 cognition/modules/codeindex/src/codeindex.c 1
 cognition/modules/codeindex/src/codeindex_pages.c 3
-cognition/modules/codeindex/src/codeindex_seed.c 1
 cognition/modules/codeindex/src/codeindex_store_read.c 3
 contexts/explorer/controllers/include/controllers/explorer_internal.h 3
 contexts/explorer/models/src/explorer_index.c 2

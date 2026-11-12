@@ -2,6 +2,7 @@
  * purpose: Bind codeindex scans to one stable source-file identity. */
 
 #include "codeindex_priv.h"
+#include "codeindex/codeindex_build.h"
 
 #include "platform/positioned_file.h"
 #include "util/log_macros.h"
@@ -10,6 +11,18 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ZCL_TESTING
+#include <stdatomic.h>
+static _Atomic uint64_t ci_test_source_scans;
+void codeindex_test_source_scans_reset(void)
+{
+    atomic_store_explicit(&ci_test_source_scans, 0, memory_order_relaxed);
+}
+uint64_t codeindex_test_source_scans(void)
+{
+    return atomic_load_explicit(&ci_test_source_scans, memory_order_relaxed);
+}
+#endif
 
 static bool ci_scan_open_stable_source(
     struct platform_positioned_file *file,
@@ -107,6 +120,9 @@ bool ci_scan_file(const char *root, const char *relpath,
     if (lines_out) *lines_out = 0;
     if (!root || !relpath || !on_sym || !on_ref)
         LOG_FAIL("codeindex", "null arg to scan_file");
+#ifdef ZCL_TESTING
+    (void)atomic_fetch_add_explicit(&ci_test_source_scans, 1, memory_order_relaxed);
+#endif
 
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;

@@ -321,6 +321,10 @@ bool ci_build_store_memory(const char *root, int64_t build_start_ms,
                            struct ci_store **out_store,
                            uint8_t source_stat_out[32],
                            uint8_t dep_stat_out[32]);
+/* Reconcile staged rows from one depfile scan; its stat root must match
+ * expected_stat before the resulting roots can be sealed. */
+bool ci_reconcile_includes(const char *root, struct ci_store *store,
+                           const uint8_t expected_stat[32]);
 bool ci_build_store_incremental(const char *root, struct ci_store *store,
                                 const struct ci_merkle_leaf *changed,
                                 int changed_count,

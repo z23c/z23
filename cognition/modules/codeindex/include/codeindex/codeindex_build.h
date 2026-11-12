@@ -63,6 +63,10 @@ void codeindex_test_remove_lock_directory_once(void);
 void codeindex_test_reset_exact_bytes_read(void);
 uint64_t codeindex_test_exact_bytes_read(void);
 
+/* Source-file scan attempts, independent of the depfile byte counter. */
+void codeindex_test_source_scans_reset(void);
+uint64_t codeindex_test_source_scans(void);
+
 /* Change-watched freshness memo proof: how many whole-tree freshness walks
  * codeindex_is_stale has run in this process, and a switch that makes arming
  * the change watch fail so the memo must fall back to walking every open. */

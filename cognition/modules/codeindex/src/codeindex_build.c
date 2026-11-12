@@ -692,68 +692,18 @@ static bool rebuild_generation_current(struct ci_store *store)
                sizeof(CI_SCHEMA_VERSION) - 1) == 0;
 }
 
-/* A rewritten depfile may have a new stat key but identical bytes. In that
- * case the stored include edges remain exact, so only the stat seal needs to
- * advance with the next incremental generation. A changed byte or an
- * unstable scan retains the full rebuild path. */
-static bool rebuild_deps_unchanged(struct ci_store *store,
-                                   const char *root,
-                                   const uint8_t current_dep_stat[32])
-{
-    uint8_t stored_dep_stat[32], stored_dep_root[32];
-    uint8_t scanned_dep_stat[32], scanned_dep_root[32];
-    size_t stat_len = 0, root_len = 0;
-    bool stat_found = false, root_found = false;
-    if (!store || !ci_store_meta_get(store, "dep_stat_root_sha3",
-                                      stored_dep_stat, sizeof(stored_dep_stat),
-                                      &stat_len, &stat_found) ||
-        !stat_found || stat_len != sizeof(stored_dep_stat))
-        return false;
-    if (memcmp(stored_dep_stat, current_dep_stat, 32) == 0) return true;
-    return ci_store_meta_get(store, "dep_root_sha3", stored_dep_root,
-                             sizeof(stored_dep_root), &root_len, &root_found) &&
-           root_found && root_len == sizeof(stored_dep_root) &&
-           ci_deps_scan_roots(root, NULL, NULL, scanned_dep_root,
-                              scanned_dep_stat) &&
-           memcmp(scanned_dep_stat, current_dep_stat, 32) == 0 &&
-           memcmp(scanned_dep_root, stored_dep_root, 32) == 0;
-}
-
-bool ci_deps_include_edge_root(uint8_t out[32]);
-
-/* A patch reuses the stored include rows, so it is taken only while they
- * record the edge root the current sources produce. A generation with no edge
- * root (written before edges were rooted) or a different one, such as after a
- * source edit that adds an include, is rebuilt from a fresh scan instead. */
-static bool rebuild_include_edges_current(struct ci_store *store,
-                                          const char *root)
-{
-    uint8_t stored[32], exact[32], stat_root[32], edges[32];
-    size_t stored_len = 0;
-    bool found = false;
-    return ci_store_meta_get(store, "include_edge_root_sha3", stored,
-                             sizeof(stored), &stored_len, &found) &&
-           found && stored_len == sizeof(stored) &&
-           ci_deps_scan_roots(root, NULL, NULL, exact, stat_root) &&
-           ci_deps_include_edge_root(edges) &&
-           memcmp(stored, edges, sizeof(edges)) == 0;
-}
-
 /* The one question that decides whether this checkout's OWN previous
  * generation can be patched: same derived layout, same compiler inputs, the
- * same include edges, and a Merkle refresh that named the changed leaves
+ * source inventory, and a Merkle refresh that named the changed leaves
  * instead of rescanning. */
 static bool rebuild_can_patch_in_place(struct codeindex *ci,
-                                       const struct ci_merkle_cost *cost,
-                                       const uint8_t current_dep_stat[32])
+                                       const struct ci_merkle_cost *cost)
 {
     bool valid = false;
     return ci->store && ci_store_retrieval_projection_is_valid(ci->store, &valid) && valid &&
            cost->snapshot_used && !cost->full_rescan &&
            !cost->inventory_changed &&
-           rebuild_generation_current(ci->store) &&
-           rebuild_deps_unchanged(ci->store, ci->root, current_dep_stat) &&
-           rebuild_include_edges_current(ci->store, ci->root);
+           rebuild_generation_current(ci->store);
 }
 
 /* The staging inode must still be the private single-linked regular file this
@@ -916,8 +866,7 @@ static bool ci_rebuild_note_changes(struct ci_rebuild_job *job)
      * none at all — seed from the nearest sibling checkout that does. */
     job->current_count = ci_merkle_leaves(job->merkle, NULL, 0);
     job->patchable = job->coalesce_if_fresh &&
-        rebuild_can_patch_in_place(job->ci, &job->merkle_cost,
-                                   job->current_dep_stat);
+        rebuild_can_patch_in_place(job->ci, &job->merkle_cost);
     job->seedable = job->coalesce_if_fresh && !job->ci->store && !job->prior_unavailable;
     if (!ci_rebuild_load_leaves(job))
         return false;

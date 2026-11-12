@@ -226,6 +226,7 @@ struct cis_observation {
     bool      seeded;
     char      donor_kind[32];
     long long files_refreshed;
+    uint64_t source_scans;
     int       file_count;
 };
 
@@ -697,6 +698,71 @@ static int cis_rank_case(const char *workspace, const char *name, bool past_regi
 }
 #endif
 
+static void cis_lifecycle_observe(const char *root, const char *phase,
+                                  struct cis_observation *out)
+{
+    printf("codeindex_seed: lifecycle phase=%s begin\n", phase);
+    fflush(stdout);
+    codeindex_test_source_scans_reset();
+    cis_observe(root, out);
+    out->source_scans = codeindex_test_source_scans();
+    printf("codeindex_seed: lifecycle phase=%s scans=%llu\n", phase,
+           (unsigned long long)out->source_scans);
+}
+
+static bool cis_lifecycle_valid(bool ready, const char *root,
+                                const struct cis_observation *out, const char *edge, int scans)
+{
+#if !defined(_WIN32)
+    if (scans < 0 ? out->source_scans == 0 : out->source_scans != (uint64_t)scans) return false;
+#else
+    (void)scans;
+#endif
+    if (!ready || !out->opened || !out->fresh) return false;
+    struct codeindex *index = codeindex_open(root);
+    if (!index) return false;
+    char paths[4][256] = {{0}};
+    int count = codeindex_includes_of_file(index, "lib/net/src/alpha.c", paths, 4);
+    bool ok = edge ? count == 1 && !strcmp(paths[0], edge) : count == 0;
+    codeindex_close(index);
+    return ok;
+}
+
+static int cis_depfile_lifecycle(const char *workspace)
+{
+    int failures = 0;
+    struct cis_repo repo;
+    struct cis_observation out = {0};
+    bool ready = cis_repo_make(workspace, "dep-lifecycle", cis_units, CIS_UNIT_COUNT, &repo);
+    if (ready) cis_lifecycle_observe(repo.main_root, "initial", &out);
+    CIS_CHECK("dep lifecycle starts fresh without edges", cis_lifecycle_valid(ready, repo.main_root, &out, NULL, -1));
+    bool wrote = ready && cis_write_file(repo.main_root, "build/obj/alpha.d",
+        "build/obj/alpha.o: lib/net/src/alpha.c lib/net/src/beta.c\n");
+    if (wrote) cis_lifecycle_observe(repo.main_root, "new-edge", &out);
+    CIS_CHECK("new depfile edge becomes fresh", cis_lifecycle_valid(wrote, repo.main_root, &out, "lib/net/src/beta.c", 0));
+    wrote = wrote && cis_write_file(repo.main_root, "build/obj/alpha.d",
+        "build/other/alpha.o: lib/net/src/alpha.c \\\n lib/net/src/beta.c\n");
+    if (wrote) cis_lifecycle_observe(repo.main_root, "same-edge-new-bytes", &out);
+    CIS_CHECK("same-edge depfile rewrite remains fresh", cis_lifecycle_valid(wrote, repo.main_root, &out, "lib/net/src/beta.c", 0));
+    wrote = wrote && cis_write_file(repo.main_root, "build/obj/alpha.d",
+        "build/obj/alpha.o: lib/net/src/alpha.c lib/net/src/gamma.c\n");
+    if (wrote) cis_lifecycle_observe(repo.main_root, "changed-edge", &out);
+    CIS_CHECK("changed depfile edge becomes fresh",
+              cis_lifecycle_valid(wrote, repo.main_root, &out, "lib/net/src/gamma.c", 0));
+    wrote = wrote && cis_write_unit(repo.main_root, cis_units[0], 7) && cis_write_file(repo.main_root,
+        "build/obj/alpha.d", "build/obj/alpha.o: lib/net/src/alpha.c lib/net/src/beta.c\n");
+    if (wrote) cis_lifecycle_observe(repo.main_root, "changed-source-and-edge", &out);
+    CIS_CHECK("combined source and depfile change remains fresh",
+              cis_lifecycle_valid(wrote, repo.main_root, &out, "lib/net/src/beta.c", 1) &&
+              cis_unit_is_revision(repo.main_root, cis_units[0], 7));
+    wrote = wrote && cis_drop_store(repo.main_root);
+    if (wrote) cis_lifecycle_observe(repo.main_root, "cold-control", &out);
+    CIS_CHECK("cold build agrees after source and depfile change",
+              cis_lifecycle_valid(wrote, repo.main_root, &out, "lib/net/src/beta.c", -1) &&
+              cis_unit_is_revision(repo.main_root, cis_units[0], 7));
+    return failures;
+}
+
 int test_codeindex_seed(void)
 {
     int failures = 0;
@@ -724,6 +790,7 @@ int test_codeindex_seed(void)
     failures += cis_foreign_donor(&foreign);
     failures += cis_owner_refusal(&repo);
     failures += cis_donor_pages(&repo); /* last: it imports a page hint into the donor */
+    failures += cis_depfile_lifecycle(workspace);
 #if !defined(_WIN32)
     failures += cis_rank_case(workspace, "rank-registry", true);
     failures += cis_rank_case(workspace, "rank-comparisons", false);

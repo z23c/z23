@@ -314,7 +314,7 @@ static bool cin_depfile_rewrite_changed(const char *live,
            cin_edit_both(live, reference, 0, 8) &&
            cin_agrees(live, reference, NULL) &&
            cin_include_is(live, "lib/net/src/gamma.c") &&
-           !cin_exists(live, "index.kv.spare");
+           cin_exists(live, "index.kv.spare");
 }
 
 static bool cin_count_includes(const char *root, int *present, int *missing)
@@ -789,7 +789,7 @@ static int cin_depfile_cases(const char *live, const char *reference)
               cin_depfile_seed(live, reference));
     CIN_CHECK("identical depfile rewrite preserves incremental include rows",
               cin_depfile_rewrite_same(live, reference));
-    CIN_CHECK("changed depfile bytes force a cold include rebuild",
+    CIN_CHECK("changed depfile bytes reconcile includes incrementally",
               cin_depfile_rewrite_changed(live, reference));
     return failures;
 }
@@ -958,12 +958,14 @@ static bool cin_fault_incremental(const char *root, const char *label)
     struct ci_store *store = NULL;
     bool ready = cin_fault_seed(root, &store);
     if (!store) return false;
-    bool seeded = ready && cin_fault_old_rows(ci_store_db(store));
+    uint8_t dep_stat[32];
+    bool seeded = ready && cin_fault_old_rows(ci_store_db(store)) &&
+                  ci_deps_stat_root_sha3(root, dep_stat);
     struct ci_merkle_leaf leaf = {0};
     (void)snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
     uint8_t digest[32] = {0};
     zcl_alloc_fault_fail_nth(label, 1);
-    bool ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, digest, digest);
+    bool ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, dep_stat, digest);
     bool consumed = zcl_alloc_fault_armed_label() == NULL;
     zcl_alloc_fault_clear();
     bool preserved = cin_fault_old_rows(ci_store_db(store));
@@ -996,14 +998,19 @@ static bool cin_incremental_control(const char *root)
     struct ci_store *store = NULL;
     bool ready = cin_fault_seed(root, &store);
     if (!store) return false;
-    bool seeded = ready && cin_fault_old_rows(ci_store_db(store));
+    uint8_t dep_stat[32];
+    bool seeded = ready && cin_fault_old_rows(ci_store_db(store)) &&
+                  ci_deps_stat_root_sha3(root, dep_stat);
     struct ci_merkle_leaf leaf = {0};
     (void)snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
     uint8_t digest[32] = {0};
-    bool ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, digest, digest);
+    bool refused = seeded &&
+        !ci_build_store_incremental(root, store, &leaf, 1, digest, digest) &&
+        cin_fault_old_rows(ci_store_db(store));
+    bool ok = refused && ci_build_store_incremental(root, store, &leaf, 1, dep_stat, digest);
     bool new_rows = cin_fault_new_rows(ci_store_db(store));
-    printf("codeindex_incremental: incremental control ready=%d seeded=%d returned=%d new_rows=%d\n",
-           ready, seeded, ok, new_rows);
+    printf("codeindex_incremental: incremental control ready=%d seeded=%d stale_refused=%d returned=%d new_rows=%d\n",
+           ready, seeded, refused, ok, new_rows);
     ci_store_close(store);
     return ok && new_rows;
 }
