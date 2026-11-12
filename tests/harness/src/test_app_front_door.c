@@ -27,6 +27,7 @@
 #include "test/app_seed_fixture.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "command/cli_confirm.h"
 #include "command/app_copy_build.h"
@@ -54,6 +55,7 @@ int test_app_front_door(void)
 #else
 
 #include <dirent.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -849,6 +851,253 @@ static int afd_b_receives(struct afd_world *w)
     return failures;
 }
 
+#if defined(ZCL_TESTING)
+struct afd_share_fault { unsigned nth; bool reached, tampered; };
+static void afd_share_after_sign(void *context, struct zcl_command_reply *inner)
+{
+    struct afd_share_fault *f = context;
+    f->reached = true;
+    if (f->nth && f->nth < 100) zcl_alloc_fault_fail_nth("json_push_kv_key", f->nth);
+    if (f->nth < 100 || f->nth == 102) return;
+    for (size_t i = 0; i < inner->data.num_children; ++i) {
+        if (strcmp(inner->data.keys[i], "share_file")) continue;
+        if (f->nth == 100) json_set_null(&inner->data.children[i]);
+        else json_set_str(&inner->data.children[i], "/fixture/wrong-output");
+        f->tampered = true; return;
+    }
+}
+static bool afd_share_verify(const char *path, const struct afd_world *w)
+{
+    struct afd_leaf l; afd_open_leaf(&l);
+    bool ok = json_push_kv_str(&l.in, "file", path) &&
+        afd_exec("zcode.package.bundle.verify", &l) && l.out.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(afd_get(&l, "package_root"), w->told_root) &&
+        !strcmp(afd_get(&l, "publisher_fingerprint"), w->told_fp);
+    afd_close_leaf(&l); return ok;
+}
+static bool afd_share_plan(struct afd_leaf *l, const struct afd_world *w, const char *path)
+{
+    afd_open_leaf(l);
+    return json_push_kv_str(&l->in, "copy", "tinyapp-1") &&
+        json_push_kv_str(&l->in, "datadir", w->a_datadir) && json_push_kv_str(&l->in, "output", path) &&
+        afd_exec("app.share-copy", l) && l->out.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(afd_get(l, "output"), path) && strlen(afd_get(l, "plan_id")) == 64;
+}
+static bool afd_share_confirm(struct afd_leaf *l, struct afd_share_fault *fault)
+{
+    char plan[65]; (void)snprintf(plan, sizeof(plan), "%s", afd_get(l, "plan_id"));
+    zcl_command_reply_free(&l->out); zcl_command_reply_init(&l->out, "zcl.test.app_front_door.v1");
+    if (!json_push_kv_str(&l->in, "plan_id", plan) || !json_push_kv_bool(&l->in, "confirm", true)) return false;
+    if (fault->nth == 102) {
+        l->req.success_data_budget_provided = true;
+        l->req.success_data_budget = 64;
+    }
+    zcl_test_app_share_copy(&l->req, &l->out, afd_share_after_sign, fault);
+    return true;
+}
+static bool afd_share_recovery_identity(const struct json_value *facts, const struct afd_world *w)
+{
+    const char *name = json_get_str(json_get(facts, "name"));
+    const char *release = json_get_str(json_get(facts, "release_id"));
+    const char *version = json_get_str(json_get(facts, "version"));
+    const char *root = json_get_str(json_get(facts, "package_root"));
+    const char *publisher = json_get_str(json_get(facts, "publisher_fingerprint"));
+    return name && *name && release && strlen(release) == 64 &&
+        version && strlen(version) == 64 && root && !strcmp(root, w->told_root) &&
+        publisher && !strcmp(publisher, w->told_fp);
+}
+static bool afd_share_optional_string(const struct json_value *value)
+{
+    return !value || value->type == JSON_STR;
+}
+static bool afd_share_compact_facts(const struct json_value *facts, const char *path)
+{
+    const struct json_value *requested = json_get(facts, "requested_output");
+    return requested && !strcmp(json_get_str(requested), path) && !json_get(facts, "share_file") &&
+        json_get_bool(json_get(facts, "details_unavailable")) && !json_get(facts, "package_root");
+}
+static bool afd_share_recovery_fields(const struct json_value *facts, const struct afd_world *w,
+    const char *path, unsigned nth)
+{
+    const struct json_value *requested_value = json_get(facts, "requested_output");
+    const struct json_value *file_value = json_get(facts, "share_file");
+    if (!afd_share_optional_string(requested_value) || !afd_share_optional_string(file_value)) return false;
+    bool omitted = json_get_bool(json_get(facts, "details_unavailable"));
+    size_t len = strlen(path);
+    if (len > 1000) return !requested_value && !file_value && omitted;
+    if (len > 600) return afd_share_compact_facts(facts, path);
+    if (!requested_value || strcmp(json_get_str(requested_value), path)) return false;
+    if (!afd_share_recovery_identity(facts, w)) return false;
+    if (nth == 100 || nth == 101) return !file_value && omitted;
+    return file_value && !strcmp(json_get_str(file_value), path) && !omitted;
+}
+static bool afd_share_error_fields(const struct json_value *error, const struct afd_world *w,
+    const char *path, unsigned nth)
+{
+    const char *code = json_get_str(json_get(error, "code"));
+    const char *action = json_get_str(json_get(error, "next_action"));
+    const struct json_value *retryable = json_get(error, "retryable");
+    return code && !strcmp(code, nth == 102 ? "OBSERVATION_TOO_LARGE" : "REPLY_FAILED") && action &&
+        !strcmp(action, "Inspect the exact output from the share plan before retrying.") &&
+        json_get_bool(json_get(error, "mutated")) && retryable && retryable->type == JSON_BOOL &&
+        !json_get_bool(retryable) && afd_share_recovery_fields(json_get(error, "facts"), w, path, nth);
+}
+static bool afd_share_error_wire(struct afd_leaf *l, const struct afd_world *w, const char *path, unsigned nth)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = afd_spec("app.share-copy");
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(reg, spec, &l->out, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && json_read(&doc, wire, n) &&
+        afd_share_error_fields(json_get(&doc, "error"), w, path, nth);
+    if (!ok) printf("  share wire mismatch nth=%u pathlen=%zu wirelen=%zu wire=%.*s\n",
+        nth, strlen(path), n, (int)(n < sizeof(wire) ? n : sizeof(wire) - 1), wire);
+    json_free(&doc); return ok;
+}
+static bool afd_share_response(const struct afd_leaf *l, const struct afd_world *w,
+    const char *path, unsigned nth)
+{
+    if (nth) return l->out.status != ZCL_COMMAND_STATUS_PASSED && l->out.error.mutated &&
+        !strcmp(l->out.error.code, nth == 102 ? "OBSERVATION_TOO_LARGE" : "REPLY_FAILED") && !l->out.error.retryable &&
+        !strcmp(l->out.error.next_action, "Inspect the exact output from the share plan before retrying.");
+    return l->out.status == ZCL_COMMAND_STATUS_PASSED && !strcmp(afd_get(l, "package_root"), w->told_root) &&
+        l->out.error.mutated && !strcmp(afd_get(l, "share_file"), path) &&
+        !strcmp(afd_get(l, "publisher_fingerprint"), w->told_fp) &&
+        afd_get(l, "publisher")[0] && afd_get(l, "next")[0];
+}
+static bool afd_share_full_response(struct afd_leaf *l, const struct afd_world *w,
+    const char *path, unsigned nth)
+{
+    if (!afd_share_response(l, w, path, nth)) return false;
+    if (!nth) return true;
+    return afd_share_error_wire(l, w, path, nth) &&
+        (strlen(path) >= sizeof(l->out.error.evidence) || !strcmp(l->out.error.evidence, path));
+}
+static bool afd_share_reply_one(const struct afd_world *w, unsigned nth, const char *output_dir)
+{
+    char path[APP_COPY_BUILD_PATH]; struct stat st; struct afd_leaf l; struct afd_share_fault fault = {.nth = nth};
+    int n = snprintf(path, sizeof(path), "%s/reply-fault-%u.z23share", output_dir, nth);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    bool plan = afd_share_plan(&l, w, path);
+    bool ran = plan && afd_share_confirm(&l, &fault);
+    bool consumed = fault.reached && (nth == 102 ? true : nth >= 100 ? fault.tampered :
+        (!nth || !zcl_alloc_fault_armed_label()));
+    zcl_alloc_fault_clear();
+    bool exists = stat(path, &st) == 0 && S_ISREG(st.st_mode);
+    bool valid = exists && afd_share_verify(path, w);
+    bool response = afd_share_full_response(&l, w, path, nth);
+    printf("  share reply nth=%u pathlen=%zu plan=%d ran=%d reached=%d consumed=%d file=%d verified=%d response=%d status=%d mutated=%d code=%s evidence=%s\n",
+        nth, strlen(path), plan, ran, fault.reached, consumed, exists, valid, response, l.out.status, l.out.error.mutated,
+        l.out.error.code, l.out.error.evidence);
+    afd_close_leaf(&l); return plan && ran && consumed && valid && response;
+}
+static bool afd_share_long_dir(const struct afd_world *w, char out[APP_COPY_BUILD_PATH], bool wide)
+{
+    char component[201]; size_t len = wide ? 200u : 110u;
+    for (size_t i = 0; i < len; ++i) component[i] = wide ? (i % 2 ? '\\' : '"') : 'x';
+    component[len] = 0;
+    int n = snprintf(out, APP_COPY_BUILD_PATH, "%s", w->root);
+    if (n < 0 || n >= APP_COPY_BUILD_PATH) return false;
+    for (int i = 0; i < (wide ? 7 : 3); ++i) {
+        size_t used = strlen(out);
+        n = snprintf(out + used, APP_COPY_BUILD_PATH - used, "/%s", component);
+        if (n < 0 || (size_t)n >= APP_COPY_BUILD_PATH - used || mkdir(out, 0700)) return false;
+    }
+    return strlen(out) > (wide ? 1000u : 255u);
+}
+static bool afd_share_medium_dir(const struct afd_world *w, char out[APP_COPY_BUILD_PATH])
+{
+    char component[201]; memset(component, 'm', 200); component[200] = 0;
+    int n = snprintf(out, APP_COPY_BUILD_PATH, "%s", w->root);
+    if (n < 0 || n >= APP_COPY_BUILD_PATH) return false;
+    for (int i = 0; i < 4; ++i) {
+        size_t used = strlen(out);
+        n = snprintf(out + used, APP_COPY_BUILD_PATH - used, "/%s", component);
+        if (n < 0 || (size_t)n >= APP_COPY_BUILD_PATH - used || mkdir(out, 0700)) return false;
+    }
+    return strlen(out) > 600 && strlen(out) < 950;
+}
+/* The harness cleanup has a shorter path buffer than these deliberate long
+ * names. Remove only this known output and the directories we created. */
+static bool afd_share_remove_long(const struct afd_world *w, char dir[APP_COPY_BUILD_PATH])
+{
+    size_t root_len = strlen(w->root);
+    if (strncmp(dir, w->root, root_len) || dir[root_len] != '/') return false;
+    char path[APP_COPY_BUILD_PATH];
+    int n = snprintf(path, sizeof(path), "%s/reply-fault-1.z23share", dir);
+    if (n < 0 || (size_t)n >= sizeof(path) || unlink(path) != 0) return false;
+    while (strlen(dir) > root_len) {
+        if (rmdir(dir) != 0) return false;
+        char *slash = strrchr(dir, '/');
+        if (!slash || (size_t)(slash - dir) < root_len) return false;
+        *slash = 0;
+    }
+    return !strcmp(dir, w->root);
+}
+static bool afd_share_long_case(const struct afd_world *w, unsigned kind)
+{
+    char dir[APP_COPY_BUILD_PATH] = {0};
+    bool made = kind == 1 ? afd_share_medium_dir(w, dir) : afd_share_long_dir(w, dir, kind == 2);
+    bool passed = made && afd_share_reply_one(w, 1, dir);
+    if (!passed) {
+        printf("  long share case %u failed; fixture retained at %s\n", kind, dir);
+        return false;
+    }
+    if (!afd_share_remove_long(w, dir)) {
+        printf("  long share case %u cleanup failed at %s: %s\n", kind, dir, strerror(errno));
+        return false;
+    }
+    return true;
+}
+static bool afd_share_default_plan(const struct afd_world *w, const char *moved, const char *name)
+{
+    struct afd_leaf l; afd_open_leaf(&l);
+    bool ran = json_push_kv_str(&l.in, "copy", moved) &&
+        json_push_kv_str(&l.in, "datadir", w->a_datadir) && afd_exec("app.share-copy", &l);
+    char truncated[AFD_PATH];
+    int n = snprintf(truncated, sizeof(truncated), "%s/%.95s", w->root, name);
+    struct stat st;
+    bool absent = n > 0 && (size_t)n < sizeof(truncated) && stat(truncated, &st) != 0 && errno == ENOENT;
+    bool ok = ran && l.out.status != ZCL_COMMAND_STATUS_PASSED && !l.out.error.mutated &&
+        !strcmp(l.out.error.code, "BAD_OUTPUT") && absent;
+    if (!ok) printf("  default leaf ran=%d status=%d mutated=%d code=%s absent=%d\n",
+        ran, l.out.status, l.out.error.mutated, l.out.error.code, absent);
+    afd_close_leaf(&l); return ok;
+}
+static bool afd_share_default_leaf_refusal(const struct afd_world *w)
+{
+    char name[121], moved[AFD_PATH], cwd[AFD_PATH];
+    memset(name, 'y', 120); name[120] = 0;
+    int n = snprintf(moved, sizeof(moved), "%s/copies/%s", w->a_datadir, name);
+    if (n < 0 || (size_t)n >= sizeof(moved) || !getcwd(cwd, sizeof(cwd)) || rename(w->a_copy, moved)) return false;
+    bool changed_dir = chdir(w->root) == 0;
+    bool ok = changed_dir && afd_share_default_plan(w, moved, name);
+    bool restored = rename(moved, w->a_copy) == 0;
+    if (changed_dir && chdir(cwd) != 0) restored = false;
+    if (!ok || !restored) printf("  default leaf changed_dir=%d ok=%d restored=%d\n", changed_dir, ok, restored);
+    return ok && restored;
+}
+static int afd_share_reply_faults(const struct afd_world *w)
+{
+    int failures = 0; char *old = NULL; bool captured = false;
+    TEST("signed share reply allocation failure retains a verifiable file and recovery path") {
+        captured = afd_route_env_capture("HOME", &old); ASSERT(captured);
+        ASSERT(setenv("HOME", w->a_home, 1) == 0);
+        bool ok = true; const unsigned cases[] = {0, 1, 8, 9, 10, 100, 101, 102};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+            if (!afd_share_reply_one(w, cases[i], w->root)) ok = false;
+        for (unsigned kind = 0; kind < 3; ++kind)
+            if (!afd_share_long_case(w, kind)) ok = false;
+        if (!afd_share_default_leaf_refusal(w)) ok = false;
+        ASSERT(ok); PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    if (captured && !afd_route_env_restore("HOME", old)) ++failures;
+    free(old); return failures;
+}
+#endif
+
 static int afd_changed_dependencies(struct afd_world *w)
 {
     int failures = 0;
@@ -1043,6 +1292,10 @@ int test_app_front_door(void)
     }
     if (!failures)
         failures += afd_changed_dependencies(&w);
+#if defined(ZCL_TESTING)
+    if (!failures)
+        failures += afd_share_reply_faults(&w);
+#endif
     if (!failures) {
         failures += afd_b_refusals(&w);
         failures += afd_b_plan_shows_root(&w);

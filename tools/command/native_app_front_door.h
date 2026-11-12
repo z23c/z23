@@ -40,6 +40,13 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#if defined(ZCL_TESTING)
+struct zcl_command_request;
+struct zcl_command_reply;
+void zcl_test_app_share_copy(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, void (*after_sign)(void *, struct zcl_command_reply *), void *context);
+#endif
+
 struct json_value;
 struct zcl_command_spec;
 

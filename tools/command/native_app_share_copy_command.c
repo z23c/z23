@@ -67,6 +67,7 @@ struct zsh {
     struct zcl_command_reply *reply;
     const char *datadir;
     const char *name;
+    size_t result_cap;
     char dir[APP_COPY_BUILD_PATH];
     char output[APP_COPY_BUILD_PATH];
     char store[APP_COPY_BUILD_PATH];    /* ~/.z23 */
@@ -85,6 +86,10 @@ struct zsh {
     bool rename;
     char inner_plan[65];
     uint8_t plan_id[32];
+#if defined(ZCL_TESTING)
+    void (*after_sign)(void *, struct zcl_command_reply *);
+    void *test_context;
+#endif
 };
 
 /* ── the copy, the key and the name ──────────────────────────────────── */
@@ -116,15 +121,19 @@ static bool zsh_output(struct zsh *z)
     const char *given = zcl_package_copy_str(z->input, "output");
     const char *base = strrchr(z->dir, '/');
     struct stat st;
-    (void)snprintf(leaf, sizeof(leaf), "%s%s", base ? base + 1 : z->dir,
-                   ZCL_PACKAGE_BUNDLE_SUFFIX);
-    bool ok = given ? snprintf(z->output, sizeof(z->output), "%s", given) > 0
+    int leaf_len = snprintf(leaf, sizeof(leaf), "%s%s", base ? base + 1 : z->dir,
+                            ZCL_PACKAGE_BUNDLE_SUFFIX);
+    int given_len = given ? snprintf(z->output, sizeof(z->output), "%s", given) : 0;
+    bool ok = given ? given_len > 0 && (size_t)given_len < sizeof(z->output)
                     : getcwd(cwd, sizeof(cwd)) &&
+                          leaf_len > 0 && (size_t)leaf_len < sizeof(leaf) &&
                           zcl_path_join(z->output, sizeof(z->output), cwd,
                                         leaf);
     if (!ok || z->output[0] != '/') {
+        const char *evidence = given && strlen(given) < sizeof(z->reply->error.evidence)
+            ? given : "output path unavailable or too long";
         zcl_package_copy_fail(z->reply, "BAD_OUTPUT", false, "output must "
-                              "be an absolute path", given ? given : leaf);
+                              "be an absolute bounded path", evidence);
         return false;
     }
     if (stat(z->output, &st) == 0) {
@@ -343,27 +352,26 @@ static void zsh_take_build(struct zsh *z)
 
 /* The friend opens the file in their own datadir, so that command carries
  * none; it names the file as written. */
-static void zsh_commit_next(const struct zsh *z, char *next, size_t cap)
+static bool zsh_commit_next(const struct zsh *z, char *next, size_t cap)
 {
     char friend_cmd[APP_COPY_BUILD_PATH + 32];
     char build[APP_COPY_BUILD_PATH + 64];
     const char *base = strrchr(z->output, '/');
-    (void)zcl_app_hint_neutral(friend_cmd, sizeof(friend_cmd), NULL, "open %s",
-                              base ? base + 1 : z->output);
+    if (!zcl_app_hint_neutral(friend_cmd, sizeof(friend_cmd), NULL, "open %s",
+                              base ? base + 1 : z->output)) return false;
     int n = snprintf(next, cap, "send the file; your friend needs %s; your "
                      "friend runs: %s", ZSH_FRIEND_NEEDS, friend_cmd);
-    if (n <= 0 || (size_t)n >= cap || z->opens_now ||
-        !zcl_app_hint(build, sizeof(build),
-                      zcl_package_copy_str(z->input, "datadir"), "build %s",
-                      z->name))
-        return;
-    (void)snprintf(next + n, cap - (size_t)n, "; run %s before opening your "
-                   "copy again", build);
+    if (n <= 0 || (size_t)n >= cap) return false;
+    if (z->opens_now) return true;
+    if (!zcl_app_hint(build, sizeof(build), zcl_package_copy_str(z->input, "datadir"),
+                      "build %s", z->name)) return false;
+    int appended = snprintf(next + n, cap - (size_t)n, "; run %s before opening your copy again", build);
+    return appended > 0 && (size_t)appended < cap - (size_t)n;
 }
 
 /* One line saying what the friend is asked to confirm, to pass on another
  * way: the shared release's own fingerprint and package root. */
-static void zsh_share_line(const struct zsh *z,
+static bool zsh_share_line(const struct zsh *z,
                            const struct zcl_command_reply *s, char *line,
                            size_t cap)
 {
@@ -371,38 +379,129 @@ static void zsh_share_line(const struct zsh *z,
     const char *full = zcl_app_inner_str(s, "publisher_fingerprint");
     const char *root = zcl_app_inner_str(s, "package_root");
     const char *semver = zcl_app_inner_str(s, "semver");
-    if (!full || !zcl_app_short_fingerprint(full, brief))
-        (void)snprintf(brief, sizeof(brief), "?");
-    (void)snprintf(line, cap, "share %s%s%s file %s. Your friend will be "
+    if (!full || !root || !zcl_app_short_fingerprint(full, brief)) return false;
+    int n = snprintf(line, cap, "share %s%s%s file %s. Your friend will be "
                    "asked to confirm: fingerprint %s (full %s), version root "
                    "%s. Tell them these another way so they can check.",
                    z->new_name, semver ? " " : "", semver ? semver : "",
                    z->output, brief, full ? full : "?", root ? root : "?");
+    return n > 0 && (size_t)n < cap;
 }
 
-static void zsh_commit_reply(struct zsh *z, const struct zcl_command_reply *s)
+static bool zsh_copy_identity(struct zsh *z, const struct zcl_command_reply *s)
+{
+    struct json_value *d = &z->reply->data;
+    const char *keys[] = {"name", "release_id", "package_root",
+                          "version", "share_file"};
+    const char *output = zcl_app_inner_str(s, "share_file");
+    const char *publisher = zcl_app_inner_str(s, "publisher_fingerprint");
+    char brief[ZCL_APP_SHORT_FINGERPRINT_LEN];
+    if (!output || strcmp(output, z->output) || !publisher ||
+        !zcl_app_short_fingerprint(publisher, brief) ||
+        !json_push_kv_str(d, "stage", "commit") || !json_push_kv_str(d, "copy", z->name)) return false;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const char *value = zcl_app_inner_str(s, keys[i]);
+        if (!value || !json_push_kv_str(d, keys[i], value)) return false;
+    }
+    const char *semver = zcl_app_inner_str(s, "semver");
+    if (semver && !json_push_kv_str(d, "semver", semver)) return false;
+    return json_push_kv_str(d, "publisher_fingerprint", publisher) &&
+        json_push_kv_str(d, "publisher", brief);
+}
+
+static bool zsh_commit_reply(struct zsh *z, const struct zcl_command_reply *s)
 {
     struct json_value *d = &z->reply->data;
     char line[APP_COPY_BUILD_PATH + 512];
     char next[2 * APP_COPY_BUILD_PATH + 512];
-    const char *keys[] = {"name", "semver", "release_id", "package_root",
-                          "version", "share_file"};
-    (void)json_push_kv_str(d, "stage", "commit");
-    (void)json_push_kv_str(d, "copy", z->name);
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
-        if (zcl_app_inner_str(s, keys[i]))
-            (void)json_push_kv_str(d, keys[i], zcl_app_inner_str(s, keys[i]));
-    zcl_app_push_publisher(d, zcl_app_inner_str(s, "publisher_fingerprint"));
-    (void)json_push_kv_bool(d, "renamed", z->rename);
-    (void)json_push_kv_bool(d, "opens_now", z->opens_now);
+    if (!zsh_copy_identity(z, s) || !json_push_kv_bool(d, "renamed", z->rename) ||
+        !json_push_kv_bool(d, "opens_now", z->opens_now)) return false;
     if (!z->opens_now && z->build_why[0])
-        (void)json_push_kv_str(d, "build_note", z->build_why);
-    (void)json_push_kv_str(d, "friend_needs", ZSH_FRIEND_NEEDS);
-    zsh_share_line(z, s, line, sizeof(line));
-    (void)json_push_kv_str(d, "share_line", line);
-    zsh_commit_next(z, next, sizeof(next));
-    (void)json_push_kv_str(d, "next", next);
-    (void)json_push_kv_bool(d, "executed", false);
+        if (!json_push_kv_str(d, "build_note", z->build_why)) return false;
+    return json_push_kv_str(d, "friend_needs", ZSH_FRIEND_NEEDS) &&
+        zsh_share_line(z, s, line, sizeof(line)) && json_push_kv_str(d, "share_line", line) &&
+        zsh_commit_next(z, next, sizeof(next)) && json_push_kv_str(d, "next", next) &&
+        json_push_kv_bool(d, "executed", false);
+}
+
+/* Match the library's conservative error-envelope reserve, but use the
+ * actual JSON-escaped error field lengths instead of a fixed facts cap. */
+static size_t zsh_error_facts_cap(const struct zcl_command_reply *reply)
+{
+    const struct zcl_command_error *e = &reply->error;
+    const char *fields[] = {e->code, e->code, e->message, e->phase, e->current_state,
+                            e->next_action, e->evidence, e->failure_id};
+    size_t reserve = 1000u + 50u;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        struct json_value v; json_init(&v); json_set_str(&v, fields[i]);
+        size_t n = v.type == JSON_STR ? json_write(&v, NULL, 0) : 0;
+        json_free(&v);
+        if (!n || n > ZCL_COMMAND_ERROR_BUDGET - reserve) return 0;
+        reserve += n;
+    }
+    return ZCL_COMMAND_ERROR_BUDGET - reserve;
+}
+
+static bool zsh_store_facts(struct zsh *z, struct json_value *facts, size_t cap)
+{
+    size_t n = json_write(facts, NULL, 0);
+    return n && n <= cap && json_push_kv(&z->reply->data, "failure_facts", facts);
+}
+
+static bool zsh_full_facts(struct zsh *z, const struct zcl_command_reply *inner,
+                           struct json_value *facts, bool *omitted)
+{
+    const char *keys[] = {"name", "release_id", "package_root", "version", "publisher_fingerprint"};
+    bool ok = json_push_kv_str(facts, "requested_output", z->output);
+    const char *file = zcl_app_inner_str(inner, "share_file");
+    *omitted = !file || strcmp(file, z->output);
+    if (ok && file && !strcmp(file, z->output)) ok = json_push_kv_str(facts, "share_file", file);
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const char *value = zcl_app_inner_str(inner, keys[i]);
+        if (value) ok = json_push_kv_str(facts, keys[i], value);
+        else *omitted = true;
+    }
+    const char *semver = zcl_app_inner_str(inner, "semver");
+    if (ok && semver) ok = json_push_kv_str(facts, "semver", semver);
+    return ok && (!*omitted || json_push_kv_bool(facts, "details_unavailable", true));
+}
+
+/* After failure, prefer full identity; if it cannot fit, retain the exact
+ * requested output alone and explicitly report the omitted details. */
+static bool zsh_failure_facts(struct zsh *z, const struct zcl_command_reply *inner)
+{
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    bool omitted = false;
+    bool ok = zsh_full_facts(z, inner, &facts, &omitted);
+    size_t cap = zsh_error_facts_cap(z->reply);
+    bool stored = ok && zsh_store_facts(z, &facts, cap);
+    if (!stored) {
+        json_free(&facts); json_init(&facts); json_set_object(&facts);
+        ok = json_push_kv_str(&facts, "requested_output", z->output) &&
+            json_push_kv_bool(&facts, "details_unavailable", true);
+        stored = ok && zsh_store_facts(z, &facts, cap);
+        if (!stored) {
+            json_free(&facts); json_init(&facts); json_set_object(&facts);
+            if (json_push_kv_bool(&facts, "details_unavailable", true))
+                (void)zsh_store_facts(z, &facts, cap);
+        }
+    }
+    json_free(&facts);
+    return stored && !omitted;
+}
+
+static void zsh_commit_unreported(struct zsh *z, const struct zcl_command_reply *inner, const char *code)
+{
+    const char *evidence = strlen(z->output) < sizeof(z->reply->error.evidence) ? z->output :
+        "Output path omitted; consult the original share plan.";
+    json_free(&z->reply->data); json_init(&z->reply->data); json_set_object(&z->reply->data);
+    zcl_package_copy_fail(z->reply, code, true,
+        "Share publication or file creation may have completed; inspect the output before retrying. Recovery details are unavailable.", evidence);
+    (void)snprintf(z->reply->error.next_action, sizeof(z->reply->error.next_action),
+        "Inspect the exact output from the share plan before retrying.");
+    if (zsh_failure_facts(z, inner))
+        (void)snprintf(z->reply->error.message, sizeof(z->reply->error.message),
+            "Share publication or file creation may have completed; inspect the output before retrying.");
 }
 
 /* One save of the edits and the rename together. */
@@ -461,16 +560,25 @@ static void zsh_commit(struct zsh *z)
     }
     json_free(&in);
     if (ok) {
+        z->reply->error.mutated = true;
         zsh_keep_build(z);
-        zsh_commit_reply(z, &inner);
+#if defined(ZCL_TESTING)
+        if (z->after_sign) z->after_sign(z->test_context, &inner);
+#endif
+        if (!zsh_commit_reply(z, &inner)) zsh_commit_unreported(z, &inner, "REPLY_FAILED");
+        else if (z->reply->status == ZCL_COMMAND_STATUS_PASSED) {
+            size_t n = json_write(&z->reply->data, NULL, 0);
+            if (!n || n > z->result_cap) zsh_commit_unreported(z, &inner, "OBSERVATION_TOO_LARGE");
+        }
     } else {
         zcl_app_inner_fail(z->reply, &inner, mutated);
     }
     zcl_command_reply_free(&inner);
 }
 
-void zcl_native_handle_app_share_copy(const struct zcl_command_request *request,
-                                 struct zcl_command_reply *reply)
+static void zsh_handle(const struct zcl_command_request *request,
+                       struct zcl_command_reply *reply,
+                       void (*after_sign)(void *, struct zcl_command_reply *), void *context)
 {
     struct zcl_command_reply inner;
     struct zsh *z = request && reply
@@ -484,6 +592,12 @@ void zcl_native_handle_app_share_copy(const struct zcl_command_request *request,
     }
     z->input = request->input;
     z->reply = reply;
+    z->result_cap = request->success_data_budget_provided ? request->success_data_budget : ZCL_COMMAND_RESULT_BUDGET;
+#if defined(ZCL_TESTING)
+    z->after_sign = after_sign; z->test_context = context;
+#else
+    (void)after_sign; (void)context;
+#endif
     z->name = zcl_package_copy_str(request->input, "copy");
     z->datadir = zcl_package_copy_datadir(request->input, reply, ZSH_COMMAND);
     if (z->datadir && zsh_state(z) && zsh_output(z) && zsh_key_read(z) &&
@@ -496,3 +610,17 @@ void zcl_native_handle_app_share_copy(const struct zcl_command_request *request,
     }
     free(z);
 }
+
+void zcl_native_handle_app_share_copy(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    zsh_handle(request, reply, NULL, NULL);
+}
+
+#if defined(ZCL_TESTING)
+void zcl_test_app_share_copy(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, void (*after_sign)(void *, struct zcl_command_reply *), void *context)
+{
+    zsh_handle(request, reply, after_sign, context);
+}
+#endif
