@@ -4,6 +4,9 @@
 #ifndef ZCL_TOOLS_DEV_PROOF_H
 #define ZCL_TOOLS_DEV_PROOF_H
 
+/* Configuration identity only; restart.env separately qualifies artifacts. */
+#define ZCL_DEV_PROOF_PLAN_REL "build/dev-proof/plan.env"
+
 #include "dev_proof_receipt.h"
 #include "vcs/build_action.h"
 
@@ -321,10 +324,10 @@ struct zcl_dev_proof_build_identity_v1 {
  * these four roots in the tree: the receipt's compiler_root/flags_root/
  * environment_root/build_graph_root and the warm-start donor seal both come
  * from this call, so the two can never disagree. Reads
- * <repo_root>/build/dev-loop/restart.env and captures the toolchain capsule;
+ * <repo_root>/build/dev-proof/plan.env and captures the toolchain capsule;
  * false means one of those was unavailable and no root was produced. `why`
  * (may be NULL) receives the exact cause -- for example
- * "restart_env_missing:<path> (make dev-bin)" when a fresh worktree never
+ * "proof_plan_missing:<path> (make dev-proof-plan)" when a fresh worktree never
  * ran the generator that writes that file. Defined on POSIX hosts, like the
  * rest of the proof worker. */
 bool zcl_dev_proof_build_identity_v1_capture(

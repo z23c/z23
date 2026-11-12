@@ -1333,8 +1333,8 @@ static int test_dev_land_train_never_amended(void)
             "fix-doc-counts:\n"
             "\t@mkdir -p build; echo counts >> build/regen-marks; "
             "echo drift >> docs/dev/CODEBASE_MAP.md\n"
-            "build/dev-loop/restart.env:\n"
-            "\t@mkdir -p build/dev-loop; echo plan >> $@\n", scratch));
+            "build/dev-proof/plan.env:\n"
+            "\t@mkdir -p build/dev-proof; echo plan >> $@\n", scratch));
         ASSERT(dlx_qp_push_main(&rig, "docs/agent/EXECUTOR_HEURISTICS.md",
                                 "orig\n", scratch));
         ASSERT(dlx_qp_push_main(&rig, "docs/dev/CODEBASE_MAP.md", "orig\n",

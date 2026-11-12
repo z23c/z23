@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.land preparation of the landing worktree's make products --
- *          the restart plan and the sealed proof's checker binaries --
+ *          the proof plan and the sealed proof's checker binaries --
  *          right before proof admission.
  *
  * Split out of tools/command/native_dev_land.c (which is at its file-size
@@ -31,7 +31,7 @@ int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
 void zcl_dev_land_prepare_log_for_test(void *path, const char *text);
 #endif
 
-/* Prepare the native Make restart plan after all landing inputs are ready.
+/* Prepare the native Make proof metadata after all landing inputs are ready.
  * Re-run its FORCE target even when a plan exists: earlier preparation may
  * have changed source metadata. Uses the bounded real Make adapter; false
  * leaves a diagnostic and never accepts a stale file after Make failure. */

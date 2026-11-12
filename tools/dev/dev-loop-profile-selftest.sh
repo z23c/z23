@@ -156,7 +156,7 @@ git -C "$ROOT" grep -q "printf 'TEST_BASE_RELOC=" -- Makefile ||
 git -C "$ROOT" grep -q -- '-Wl,--allow-multiple-definition' -- \
     tools/dev/devloop_restart_build.c ||
     fail 'overlay objects are not ordered ahead of the frozen base'
-git -C "$ROOT" grep -q '^dev-bin z23-dev zclassic23-dev: \$(Z23_DEV_BIN) \$(Z23_DEV_BIN_ALIAS)' -- Makefile ||
+git -C "$ROOT" grep -q '^dev-bin z23-dev zclassic23-dev dev-proof-producer: \$(Z23_DEV_BIN) \$(Z23_DEV_BIN_ALIAS)' -- Makefile ||
     fail 'dev-bin does not require both canonical and migration-alias outputs'
 git -C "$ROOT" grep -q '^$(Z23_DEV_BIN_ALIAS): $(Z23_DEV_BIN)$' -- Makefile ||
     fail 'development migration alias does not depend on the canonical output'

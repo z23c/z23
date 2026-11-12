@@ -605,6 +605,7 @@ ZCL_ENGINE_UNIT_GOALS := engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclas
 ZCL_EPOCH_ALL_PROFILES := build-only dev dev-asan dev-tsan test-fast \
 	test-strict test-asan test-tsan coverage node-c23
 ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
+ZCL_PROOF_PLAN_GOALS := dev-proof-plan $(BUILD_DIR)/dev-proof/plan.env
 # With no explicit goal GNU Make executes `.DEFAULT_GOAL := z23`; selecting
 # every compiler profile here did not make that node build safer.  It only
 # fingerprinted nine toolchain/flag combinations that the default recipe can
@@ -658,7 +659,7 @@ else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),dev-proof-bundle-prefork)
 # The standalone lint-tool closure includes the wiki qualifier, which shares
 # the public node object graph. Select its real epoch before acquiring leases.
 ZCL_EPOCH_PROFILES := dev test-fast node-c23
-else ifneq ($(filter dev-proof-bundle ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter dev-proof-bundle dev-proof-producer $(ZCL_PROOF_PLAN_GOALS) ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -857,6 +858,7 @@ ZCLASSIC23_BIN_ALIAS = $(Z23_BIN_ALIAS)
 ZCLASSIC23_DEV_BIN_ALIAS = $(Z23_DEV_BIN_ALIAS)
 ZCLASSIC23_CHAOS_BIN = $(Z23_CHAOS_BIN)
 DEV_RESTART_PLAN = $(BUILD_DIR)/dev-loop/restart.env
+DEV_PROOF_PLAN = $(BUILD_DIR)/dev-proof/plan.env
 TEST_ZCL_BIN = $(BIN_DIR)/test_zcl
 TEST_PARALLEL_BIN = $(BIN_DIR)/test_parallel
 ZCLASSIC_CLI_BIN = $(BIN_DIR)/zclassic-cli
@@ -2216,6 +2218,11 @@ ZCL_DEPFILE_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifneq ($(filter fast-compile dev-build-only dev-package-verifier rank-pair,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+ZCL_DEPFILE_PROFILES := dev
+else ifneq ($(filter $(ZCL_PROOF_PLAN_GOALS),$(ZCL_DEPFILE_SINGLE_GOAL)),)
+# The plan names both epochs but does not consume any object or depfile.
+ZCL_DEPFILE_PROFILES :=
+else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),dev-proof-producer)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
@@ -5511,7 +5518,7 @@ endif
 # a test. dev_proof.c admits these exact artifacts into its private generation
 # and invokes that admitted runner once; no fallback target may both build and
 # execute a suite.
-dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin $(DEV_RESTART_PLAN) zcl-nodectl \
+dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin $(DEV_RESTART_PLAN) $(DEV_PROOF_PLAN) zcl-nodectl \
 	z23-acme fbsh engine-unit $(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 
 # The proof worker needs both the runner bundle and every executable read by
@@ -6084,8 +6091,10 @@ ifneq ($(ZCL_HOST_WINDOWS),)
 # as an unconditional convenience prerequisite.
 DEV_PACKAGE_VERIFIER_TARGET =
 DEV_RESTART_PLAN_TARGET =
+DEV_PROOF_PLAN_TARGET =
 else
 DEV_RESTART_PLAN_TARGET = $(DEV_RESTART_PLAN)
+DEV_PROOF_PLAN_TARGET = $(DEV_PROOF_PLAN)
 endif
 # Headless z23-dev does not map GTK or WebKit. Those libraries load from
 # libz23walletgui.so only when -gui, --gui, or --self-test calls the loader.
@@ -6130,11 +6139,17 @@ DEV_LINK_LIBS := $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS)
 WALLET_GUI_SO :=
 WALLET_GUI_PIC_DIR :=
 endif
-dev-bin z23-dev zclassic23-dev: $(Z23_DEV_BIN) $(Z23_DEV_BIN_ALIAS) \
+dev-bin z23-dev zclassic23-dev dev-proof-producer: $(Z23_DEV_BIN) $(Z23_DEV_BIN_ALIAS) \
 	$(WALLET_GUI_SO) \
-	$(DEV_RESTART_PLAN_TARGET) \
+	$(DEV_PROOF_PLAN_TARGET) \
 	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
+# Proof setup needs a current producer and plan, but its isolated generation
+# admits or builds the test graph. Only the restart front doors require the
+# original checkout's full test object/RSP/reloc set.
+dev-bin z23-dev zclassic23-dev: $(DEV_RESTART_PLAN_TARGET)
+.PHONY: dev-proof-producer dev-proof-plan
+dev-proof-plan: $(DEV_PROOF_PLAN)
 
 # The name the mind's service unit executes. It is the SAME program, hard
 # linked: the resident is `dev mind serve`, and building a second binary that
@@ -6273,6 +6288,50 @@ $(DEV_PACKAGE_VERIFY_GUI_STUB_OBJ): contexts/wallet/views/src/wallet_gui.c \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_SESSION)" -- \
 	  $(CC) $(DEV_COMPILE_CFLAGS) -UHAVE_GTK -UHAVE_WEBKIT $(ZCL_TU_RANDOM_SEED)
 
+# DEV_BUILD_PLAN_BEGIN
+# One field producer for metadata identity and artifact-qualified restarts.
+# Merely naming an RSP/reloc path in the proof plan never admits its bytes.
+define zcl_dev_plan_fields
+{ \
+  printf 'CC=%s\n' '$(CC)'; \
+  printf 'COMPILER_ID=%s\n' '$(BUILD_COMPILER_ID)'; \
+  printf 'BASE_GENERATION=%s\n' '$(BUILD_MUTATION)'; \
+  printf 'DEV_CFLAGS=%s\n' '$(DEV_RESTART_CFLAGS)'; \
+  printf 'DEV_LDFLAGS=%s\n' '$(DEV_RESTART_LDFLAGS)'; \
+  printf 'DEV_LIBS=%s\n' '$(DEV_LINK_LIBS)'; \
+  printf 'DEV_OBJ_DIR=%s\n' '$(DEV_OBJ_DIR)'; \
+  printf 'DEV_LINK_RSP=%s\n' '$(DEV_LINK_RSP)'; \
+  printf 'DEV_BASE_RELOC=%s\n' '$(DEV_RESTART_BASE_RELOC)'; \
+  printf 'TEST_CFLAGS=%s\n' '$(TEST_FAST_CFLAGS)'; \
+  printf 'TEST_LDFLAGS=%s\n' '$(TEST_FAST_LDFLAGS)'; \
+  printf 'TEST_LIBS=%s\n' '$(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS)'; \
+  printf 'TEST_OBJ_DIR=%s\n' '$(TEST_FAST_OBJ_DIR)'; \
+  printf 'TEST_LINK_RSP=%s\n' '$(TEST_PARALLEL_FAST_LINK_RSP)'; \
+  printf 'TEST_BASE_RELOC=%s\n' '$(TEST_RESTART_BASE_RELOC)'; \
+}
+endef
+
+# Revalidate the identities normally checked by object-session publication,
+# without opening a lease or claiming to verify objects that may not exist.
+# Command-line frozen IDs still have to match the live inputs.
+# The final source check bypasses the parse-time session cache.
+$(DEV_PROOF_PLAN): Makefile FORCE
+	@set -eu; \
+	mkdir -p "$(dir $@)"; \
+	tmp="$$(mktemp "$(dir $@).plan.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(zcl_dev_plan_fields) >"$$tmp"; \
+	plan_compiler="$$($(ZCL_COMPILER_ID_ENV) $(BUILD_EPOCH_KEY_TOOL) compiler-id "$(CC)" "$(CXX)" "$(CURDIR)")"; \
+	[ "$$plan_compiler" = "$(BUILD_COMPILER_ID)" ] || { echo 'proof plan: compiler/toolchain changed' >&2; exit 1; }; \
+	plan_system="$$($(BUILD_EPOCH_KEY_TOOL) build-system-id)"; \
+	[ "$$plan_system" = "$(BUILD_SYSTEM_ID)" ] || { echo 'proof plan: build system changed' >&2; exit 1; }; \
+	plan_dev_epoch="$$($(BUILD_EPOCH_KEY_TOOL) key "$$plan_compiler" "$(DEV_PROFILE)" "$(DEV_EPOCH_COMPILE_FLAGS)" "$(DEV_EPOCH_LINK_FLAGS)" "$$plan_system")"; \
+	plan_test_epoch="$$($(BUILD_EPOCH_KEY_TOOL) key "$$plan_compiler" "$(TEST_FAST_PROFILE)" "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$$plan_system")"; \
+	[ "$$plan_dev_epoch" = "$(DEV_COMPILE_EPOCH)" ] && [ "$$plan_test_epoch" = "$(TEST_FAST_COMPILE_EPOCH)" ] || { echo 'proof plan: profile/flags changed' >&2; exit 1; }; \
+	ZCL_SOURCE_IDENTITY_SESSION= tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
+
 # This plan is the ONLY consumer that pulls the fast-test object tree into an
 # ordinary `make z23-dev`: TEST_PARALLEL_FAST_LINK_RSP and
 # TEST_RESTART_BASE_RELOC are built from all 3 263 of those objects. Writing
@@ -6297,23 +6356,7 @@ $(DEV_RESTART_PLAN): $(DEV_OBJ_COMPLETE) $(DEV_LINK_RSP) \
 	mkdir -p "$(dir $@)"; \
 	tmp="$$(mktemp "$(dir $@).restart.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	{ \
-	  printf 'CC=%s\n' '$(CC)'; \
-	  printf 'COMPILER_ID=%s\n' '$(BUILD_COMPILER_ID)'; \
-	  printf 'BASE_GENERATION=%s\n' '$(BUILD_MUTATION)'; \
-	  printf 'DEV_CFLAGS=%s\n' '$(DEV_RESTART_CFLAGS)'; \
-	  printf 'DEV_LDFLAGS=%s\n' '$(DEV_RESTART_LDFLAGS)'; \
-	  printf 'DEV_LIBS=%s\n' '$(DEV_LINK_LIBS)'; \
-	  printf 'DEV_OBJ_DIR=%s\n' '$(DEV_OBJ_DIR)'; \
-	  printf 'DEV_LINK_RSP=%s\n' '$(DEV_LINK_RSP)'; \
-	  printf 'DEV_BASE_RELOC=%s\n' '$(DEV_RESTART_BASE_RELOC)'; \
-	  printf 'TEST_CFLAGS=%s\n' '$(TEST_FAST_CFLAGS)'; \
-	  printf 'TEST_LDFLAGS=%s\n' '$(TEST_FAST_LDFLAGS)'; \
-	  printf 'TEST_LIBS=%s\n' '$(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS)'; \
-	  printf 'TEST_OBJ_DIR=%s\n' '$(TEST_FAST_OBJ_DIR)'; \
-	  printf 'TEST_LINK_RSP=%s\n' '$(TEST_PARALLEL_FAST_LINK_RSP)'; \
-	  printf 'TEST_BASE_RELOC=%s\n' '$(TEST_RESTART_BASE_RELOC)'; \
-	} >"$$tmp"; \
+	$(zcl_dev_plan_fields) >"$$tmp"; \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(TEST_FAST_SESSION)" "$(TEST_FAST_LEASE)" \
 	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
@@ -6322,6 +6365,7 @@ $(DEV_RESTART_PLAN): $(DEV_OBJ_COMPLETE) $(DEV_LINK_RSP) \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
 
+# DEV_BUILD_PLAN_END
 $(DEV_CANDIDATE_BIN): $(DEV_LINK_RSP) | $(WALLET_GUI_SO)
 
 # dev-asan: ASan/UBSan dev node for local memory/UB debugging. Same source

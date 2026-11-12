@@ -638,7 +638,7 @@ static bool rcv_plan(struct rcv_fixture *f, const char *extra)
         f->linked, rcmd_hex, f->linked, rcmd_hex, rcmd_hex, rcmd_hex,
         f->linked, rcmd_hex, rcmd_hex, rcmd_hex, extra);
     return n > 0 && (size_t)n < sizeof(plan) &&
-        rpp_text(f->linked, "build/dev-loop/restart.env", plan);
+        rpp_text(f->linked, "build/dev-proof/plan.env", plan);
 }
 
 static struct zcl_dev_acceptance_receipt_v1 rcv_claim(const struct rcv_fixture *f)
@@ -846,16 +846,16 @@ static bool rcv_bindings(struct rcv_fixture *f)
 static bool rcv_plan_refusals(struct rcv_fixture *f, unsigned signer)
 {
     char plan[4096];
-    if (!rpp_path(plan, sizeof(plan), f->linked, "build/dev-loop/restart.env") || unlink(plan)) return false;
+    if (!rpp_path(plan, sizeof(plan), f->linked, "build/dev-proof/plan.env") || unlink(plan)) return false;
     /* Detail contains the fixture path, so build the exact native evidence. */
     char missing[4608];
     char cause[4608];
-    int n = snprintf(cause, sizeof(cause), "restart_env_missing:%s (make dev-bin)", plan);
+    int n = snprintf(cause, sizeof(cause), "proof_plan_missing:%s (make dev-proof-plan)", plan);
     if (n < 0 || (size_t)n >= sizeof(cause)) return false;
     n = snprintf(missing, sizeof(missing), "remote_toolchain_unverifiable:%.95s", cause);
     if (n < 0 || (size_t)n >= sizeof(missing) ||
         !rcv_case(f, "missing plan refuses", f->receipt, missing, NULL, true) || access(plan, F_OK) == 0 ||
-        !rpp_text(f->linked, "build/dev-loop/restart.env", "broken\n") ||
+        !rpp_text(f->linked, "build/dev-proof/plan.env", "broken\n") ||
         !rcv_case(f, "corrupt plan refuses", f->receipt, signer == 0 ?
             "remote_toolchain_unverifiable:" : "remote_toolchain_unverifiable:capture_failed", NULL, true)) return false;
     return rcv_plan(f, "");

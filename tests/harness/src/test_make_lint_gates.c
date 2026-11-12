@@ -2444,6 +2444,68 @@ static int t_lint_command_rebuild(void)
     return bad;
 }
 
+static int t_proof_plan_metadata(void)
+{
+    static const char setup[] =
+        "set -eu; root=$1; work=$2; cd \"$work\"\n"
+        "fail() { echo \"proof-plan fixture: $1\" >&2; exit 1; }\n"
+        "awk '/^# DEV_BUILD_PLAN_BEGIN$/{on=1; next} /^# DEV_BUILD_PLAN_END$/{end=1; exit} on{print} END{if (!on || !end) exit 1}' \"$root/Makefile\" > block.mk || fail missing-block\n"
+        "cat > Fixture.mk <<'MAKE'\n"
+        "DEV_PROOF_PLAN=build/dev-proof/plan.env\nDEV_RESTART_PLAN=build/dev-loop/restart.env\n"
+        "BUILD_EPOCH_KEY_TOOL=./key\nBUILD_EPOCH_SESSION_TOOL=./session\n"
+        "BUILD_SOURCE_ID=source\nBUILD_CLEAN=1\nBUILD_MUTATION=mutation\nBUILD_COMPILER_ID=compiler\nBUILD_SYSTEM_ID=system\n"
+        "DEV_PROFILE=dev-v2\nTEST_FAST_PROFILE=test-fast-v2\nDEV_COMPILE_EPOCH=dev-epoch\nTEST_FAST_COMPILE_EPOCH=test-epoch\nDEV_EPOCH_COMPILE_FLAGS=devcompile\nDEV_EPOCH_LINK_FLAGS=devlinkepoch\nTEST_FAST_EPOCH_COMPILE_FLAGS=testcompile\nTEST_FAST_EPOCH_LINK_FLAGS=testlinkepoch\n"
+        "CC=cc\nCXX=cxx\nDEV_RESTART_CFLAGS=devflags\nDEV_RESTART_LDFLAGS=devlink\nDEV_LINK_LIBS=devlibs\nDEV_OBJ_DIR=build/devobj\nDEV_LINK_RSP=build/dev.rsp\nDEV_RESTART_BASE_RELOC=build/devreloc\n"
+        "TEST_FAST_CFLAGS=testflags\nTEST_FAST_LDFLAGS=testlink\nTOR_LIBS=tor\nLIBS=libs\nGTK_LIBS=gtk\nWEBKIT_LIBS=web\nTEST_FAST_OBJ_DIR=build/testobj\nTEST_PARALLEL_FAST_LINK_RSP=build/test.rsp\nTEST_RESTART_BASE_RELOC=build/testreloc\nDEV_OBJ_COMPLETE=build/devcomplete\n"
+        ".PHONY: FORCE\nFORCE:\n"
+        "build/devcomplete build/dev.rsp build/devreloc build/test.rsp build/testreloc:\n\t@mkdir -p build; echo artifact >> artifacts; touch $@\n"
+        "include block.mk\nMAKE\n"
+        "touch Makefile\n"
+        "printf '%s\\n' '#!/bin/sh' 'case \"$1\" in' 'compiler-id) case \"${DRIFT:-}\" in compiler) echo bad;; compiler-fail) exit 1;; compiler-empty) :;; *) echo compiler;; esac;;' 'build-system-id) test \"${DRIFT:-}\" != system || { echo bad; exit 0; }; echo system;;' 'key) case \"${DRIFT:-}\" in key-fail) exit 1;; key-empty) exit 0;; esac; case \"$3\" in dev-v2) test \"${DRIFT:-}\" != dev-epoch || { echo bad; exit 0; }; echo dev-epoch;; test-fast-v2) test \"${DRIFT:-}\" != test-epoch || { echo bad; exit 0; }; echo test-epoch;; *) exit 1;; esac;;' '*) exit 1;; esac' > key; chmod +x key\n"
+        "printf '%s\\n' '#!/bin/sh' 'echo session >> sessions' 'test \"${DRIFT:-}\" != session' > session; chmod +x session\n"
+        "mkdir -p tools/dev; printf '%s\\n' '#!/bin/sh' 'test \"$1\" = verify-record && test \"$2\" = source && test \"$3\" = 1 && test \"$4\" = mutation && test \"${DRIFT:-}\" != source' > tools/dev/source-identity.sh; chmod +x tools/dev/source-identity.sh\n";
+    static const char checks[] =
+        "make -s -f Fixture.mk build/dev-proof/plan.env || fail proof\n"
+        "test ! -e artifacts && test ! -e sessions || fail proof-built-objects\n"
+        "test \"$(wc -l < build/dev-proof/plan.env)\" -eq 15 || fail fields\n"
+        "make -s -f Fixture.mk build/dev-loop/restart.env || fail restart\n"
+        "test \"$(wc -l < artifacts)\" -eq 5 && test \"$(wc -l < sessions)\" -eq 1 || fail restart-deps\n"
+        "cmp build/dev-proof/plan.env build/dev-loop/restart.env || fail parity\n"
+        "make -s -f Fixture.mk DEV_RESTART_CFLAGS=changed build/dev-proof/plan.env || fail refresh\n"
+        "grep -Fx 'DEV_CFLAGS=changed' build/dev-proof/plan.env >/dev/null || fail changed-flags\n"
+        "cp build/dev-proof/plan.env old\n"
+        "for drift in source compiler system dev-epoch test-epoch compiler-fail compiler-empty key-fail key-empty; do if DRIFT=$drift make -s -f Fixture.mk build/dev-proof/plan.env >out 2>&1; then fail \"$drift-accepted\"; fi; cmp old build/dev-proof/plan.env || fail \"$drift-replaced\"; done\n"
+        "if DRIFT=session make -s -f Fixture.mk build/dev-loop/restart.env >out 2>&1; then fail session-accepted; fi\n";
+    static const char race[] =
+        "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\n"
+        "cp \"$root/tools/dev/source-identity.sh\" tools/dev/source-identity.sh\n"
+        "printf 'build/\\n' > .gitignore; printf 'int original = 1;\\n' > sample.c\n"
+        "cat >> Fixture.mk <<'MAKE'\n"
+        "ZCL_SOURCE_IDENTITY_SESSION := $(shell echo $$PPID):1\n"
+        "BUILD_SOURCE_RECORD := $(shell ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1 tools/dev/source-identity.sh capture-record)\n"
+        "BUILD_SOURCE_ID := $(word 1,$(BUILD_SOURCE_RECORD))\n"
+        "BUILD_CLEAN := $(word 2,$(BUILD_SOURCE_RECORD))\n"
+        "BUILD_MUTATION := $(word 3,$(BUILD_SOURCE_RECORD))\n"
+        ".PHONY: mutate\nmutate:\n\t@printf 'int changed = 2;\\n' > sample.c\n"
+        "$(DEV_PROOF_PLAN): mutate\nMAKE\n"
+        "git init -q && git config user.name fixture && git config user.email fixture@invalid && git config commit.gpgsign false && git add . && git commit -qm fixture || fail race-setup\n"
+        "printf 'prior-plan\\n' > build/dev-proof/plan.env; cp build/dev-proof/plan.env old-race\n"
+        "if ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1 make -s -f Fixture.mk build/dev-proof/plan.env >build/race.log 2>&1; then fail source-race-accepted; fi\n"
+        "cmp old-race build/dev-proof/plan.env || fail source-race-replaced\n"
+        "printf 'int original = 1;\\n' > sample.c\n"
+        "ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1 make -s -o mutate -f Fixture.mk build/dev-proof/plan.env || fail source-unchanged\n";
+    char script[sizeof(setup) + sizeof(checks) + sizeof(race) - 2];
+    memcpy(script, setup, sizeof(setup) - 1);
+    memcpy(script + sizeof(setup) - 1, checks, sizeof(checks) - 1);
+    memcpy(script + sizeof(setup) + sizeof(checks) - 2, race, sizeof(race));
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "proof_plan", "metadata");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "proof plan fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates(void)
 {
     char real_root[PATH_MAX];
@@ -2454,6 +2516,7 @@ int test_make_lint_gates(void)
 
     if (t_lint_table_rebuild() != 0 || t_lint_private_header_rebuild() != 0) return 1;
     if (t_registry_query_scope() != 0) return 1;
+    if (t_proof_plan_metadata() != 0) return 1;
     if (t_lint_command_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;

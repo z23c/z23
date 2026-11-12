@@ -759,20 +759,20 @@ int test_dev_land_final_plan_preparation(void)
         test_make_tmpdir(root, sizeof(root), "dev_land", "final_plan");
         ASSERT(dlx_write_dep(root, "Makefile",
             ".PHONY: FORCE\nFORCE:\n"
-            "build/dev-loop/restart.env: FORCE\n"
-            "\t@mkdir -p build/dev-loop\n"
-            "\t@cp prepared-input build/dev-loop/restart.env\n"));
+            "build/dev-proof/plan.env: FORCE\n"
+            "\t@mkdir -p build/dev-proof\n"
+            "\t@cp prepared-input build/dev-proof/plan.env\n"));
         ASSERT(dlx_write_dep(root, "prepared-input", "generation-one\n"));
         ASSERT(zcl_dev_land_restart_plan_prepare(root, why, sizeof(why)));
         ASSERT(dlx_write_dep(root, "prepared-input", "generation-two\n"));
         ASSERT(zcl_dev_land_restart_plan_prepare(root, why, sizeof(why)));
-        ASSERT((size_t)snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) < sizeof(path));
+        ASSERT((size_t)snprintf(path, sizeof(path), "%s/build/dev-proof/plan.env", root) < sizeof(path));
         ASSERT(dlx_slurp(path, body, sizeof(body), &len));
         ASSERT(len == strlen("generation-two\n"));
         ASSERT(memcmp(body, "generation-two\n", len) == 0);
         ASSERT(dlx_write_dep(root, "Makefile",
             ".PHONY: FORCE\nFORCE:\n"
-            "build/dev-loop/restart.env: FORCE\n"
+            "build/dev-proof/plan.env: FORCE\n"
             "\t@echo 'FAIL: final preparation refused' >&2\n\t@exit 1\n"));
         ASSERT(!zcl_dev_land_restart_plan_prepare(root, why, sizeof(why)));
         ASSERT(strstr(why, "final preparation refused") != NULL);

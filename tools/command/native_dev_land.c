@@ -6329,14 +6329,14 @@ int zcl_dev_land_lint_test(const char *const argv[], const char *log,
  * archives, build/githooks and, on Linux, the two hotswap rollback fixture
  * images) out of paths->root — this worktree — into the proof's private
  * generation; it never builds any of them itself. Separately, the receipt's
- * build-identity capture reads build/dev-loop/restart.env straight from
+ * build-identity capture reads build/dev-proof/plan.env straight from
  * paths->root. A bare `git worktree add` inherits none of this: vendored
  * archives are gitignored, the Tor submodule is not checked out into a
  * fresh worktree, and nothing has ever linked a test binary here — so
  * every one of them is missing the first time a fresh landing worktree
  * reaches this point, and the proof refuses by name
  * (`proof_generation_dependency_unavailable:<dep> (<fix>)` for the copied
- * set; `proof_toolchain_or_policy_unavailable` for the restart plan).
+ * set; `proof_toolchain_or_policy_unavailable` for the proof plan).
  * build/githooks is already handled: dl_wt_hooks_ensure() above arms it
  * unconditionally via `make install-hooks`, which every push needs
  * regardless of the proof. What is left is primed here, once per worktree
@@ -6697,7 +6697,7 @@ static bool dl_wt_submodule_ready(const char *wt, const char *subpath)
  * a landing worktree reaches here vendor/tor is a nonempty-once-copied-into,
  * uninitialised directory and tools/dev/source-identity.sh refuses outright
  * ("nonempty uninitialised gitlink would omit bytes: vendor/tor") the very
- * next time this worktree's own build/dev-loop/restart.env is captured.
+ * next time this worktree's own build/dev-proof/plan.env is captured.
  * This has to run, and succeed, before any vendor/tor entry below is
  * materialized — mirroring worktree-prime's ordering instead of inventing
  * a second one. It goes through dl_git(), the one git spawn seam this
@@ -6999,7 +6999,7 @@ static bool dl_wt_hotswap_ensure(const struct dl_dirs *d,
  * archives, hotswap fixtures) against a fixture checkout even though
  * ZCL_LAND_PROOF_STUB also skips lint and the proof itself in the same
  * step. Never read outside a test process, the same guard and reasoning as
- * dl_hooks_stub_dir() above. build/dev-loop/restart.env is not covered:
+ * dl_hooks_stub_dir() above. build/dev-proof/plan.env is not covered:
  * building it needs a real Makefile, which the throwaway git rigs this
  * unlocks for have none of. */
 #if !defined(_WIN32)
@@ -7325,7 +7325,7 @@ scan_failed:
 
 /* The copy-based dependencies (vendor archives, hotswap fixtures) run
  * whenever a real proof is about to be requested, or when a test forces
- * them on despite the proof stub. The restart plan always needs a real
+ * them on despite the proof stub. The proof plan always needs a real
  * `make` invocation against a real Makefile, so it stays gated on the
  * proof stub alone: no hermetic test rig here carries one. Any failure
  * refuses with the failing dependency's own typed reason; none of them
@@ -8342,9 +8342,9 @@ static bool dl_step_start_deps_failed(const struct dl_dirs *d,
                                       char *why, size_t why_cap)
 {
     /* The exact proof's own private generation only ever COPIES its
-     * dependencies out of this worktree, and reads the restart plan
+     * dependencies out of this worktree, and reads the proof plan
      * straight from it; it never builds any of them. The stub skips the
-     * make-based restart plan for the same reason it skips lint: it
+     * make-based proof plan for the same reason it skips lint: it
      * replaces the proof, not the worktree the proof would have used. */
     if (!dl_wt_proof_deps_ensure(d, row, row, dl_stub() != NULL, why, why_cap)) {
         if (strcmp(row->dimension, "preparation_persist") == 0) {
@@ -12600,7 +12600,7 @@ static int dl_producer_reproof_log(const char *root, const char *local,
         return -1;
     }
     if (dl_boundary_cancelled(row)) { free(buf); return DL_RECOVER_CANCELLED; }
-    const char *build[] = { make_program, jobs, "-C", root, "dev-bin", NULL };
+    const char *build[] = { make_program, jobs, "-C", root, "dev-proof-producer", NULL };
     rc = dl_spawn_scrubbed(build, buf, DL_LOG_CAP,
                            DL_PRODUCER_BUILD_TIMEOUT_MS, NULL);
     dl_producer_log_write(log_path, "producer build", buf);

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.land preparation of the landing worktree's make products --
- *          the restart plan and the sealed proof's checker binaries --
+ *          the proof plan and the sealed proof's checker binaries --
  *          right before proof admission.
  *
  * It rewrites no tracked file and makes no commit. (The regenerate-and-amend
@@ -14,6 +14,7 @@
  */
 
 #include "command/native_dev_land_prepare.h"
+#include "dev_proof.h"
 
 #include "base/safe_alloc.h"
 #include "platform/logical_cpu.h"
@@ -267,23 +268,23 @@ bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
     struct stat st;
     if (!wt || !why || why_cap == 0) return false;
     why[0] = '\0';
-    if (snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", wt) >=
+    if (snprintf(path, sizeof(path), "%s/" ZCL_DEV_PROOF_PLAN_REL, wt) >=
         (int)sizeof(path)) {
-        (void)snprintf(why, why_cap, "landing restart plan path too long");
+        (void)snprintf(why, why_cap, "landing proof plan path too long");
         return false;
     }
     /* Lint or dependency preparation may rewrite source metadata before this
      * runs. Mere existence says nothing about the
      * plan's BASE_GENERATION. The native target's FORCE prerequisite seals
      * this checkout after every preparation stage has finished. */
-    if (begin && !begin(context, "build/dev-loop/restart.env")) {
+    if (begin && !begin(context, ZCL_DEV_PROOF_PLAN_REL)) {
         (void)snprintf(why, why_cap, "preparation progress persistence refused");
         return false;
     }
-    if (dlp_make(wt, "build/dev-loop/restart.env", DLP_MAKE_IDLE_MS, DLP_MAKE_HARD_MS, false, sink, context, why, why_cap) != 0)
+    if (dlp_make(wt, ZCL_DEV_PROOF_PLAN_REL, DLP_MAKE_IDLE_MS, DLP_MAKE_HARD_MS, false, sink, context, why, why_cap) != 0)
         return false;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        (void)snprintf(why, why_cap, "landing restart plan not produced by make");
+        (void)snprintf(why, why_cap, "landing proof plan not produced by make");
         return false;
     }
     return true;

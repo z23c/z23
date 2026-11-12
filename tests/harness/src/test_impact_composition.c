@@ -9733,7 +9733,7 @@ static bool ic_write_build_plan_mutation(
         cflags, root, epoch, epoch, epoch, root, epoch, epoch, epoch,
         extra_line ? extra_line : "");
     return n > 0 && (size_t)n < (int)sizeof(plan) &&
-           ic_write(root, "build/dev-loop/restart.env", plan);
+           ic_write(root, "build/dev-proof/plan.env", plan);
 }
 
 static bool ic_write_build_plan(const char *root, const char *epoch,
@@ -9757,14 +9757,16 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
     static const char digest[] =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     static const char makefile[] =
-        ".PHONY: dev-bin docs-proof-tools\ndev-bin:\n"
+        ".PHONY: dev-proof-producer docs-proof-tools dev-bin\ndev-bin:\n\t@echo unexpected-dev-bin >&2; exit 1\n"
+        "build/dev-loop/restart.env:\n\t@echo unexpected-restart >&2; exit 1\n"
+        "dev-proof-producer:\n"
         "\t@set -e; printf '%s\\n' make > build/make-ran; test ! -f build/fail; "
         "if test -f build/no-op; then exit 0; fi; "
         "if test -f build/change-source; then echo changed >> sample.c; fi; "
         "set -- $$(tools/dev/source-identity.sh capture-record); "
         "sed \"s/^BASE_GENERATION=.*/BASE_GENERATION=$$3/\" "
-        "build/dev-loop/restart.env > build/dev-loop/restart.env.tmp && "
-        "mv build/dev-loop/restart.env.tmp build/dev-loop/restart.env\n"
+        "build/dev-proof/plan.env > build/dev-proof/plan.env.tmp && "
+        "mv build/dev-proof/plan.env.tmp build/dev-proof/plan.env\n"
         "build/hotswap/zcl_rollback_fixture_%.so:\n"
         "\t@mkdir -p build/hotswap; printf '%s\\n' '$*' > $@\n"
         "build/fixtures/rlc_child_%:\n"
@@ -9788,7 +9790,7 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
         "cd '%s' && chmod 700 tools/dev/source-identity.sh && git init -q && "
         "git config user.name fixture && git config user.email fixture@invalid && "
         "git config commit.gpgsign false && git add -A && git commit -qm first && "
-        "make --no-print-directory dev-bin docs-proof-tools && "
+        "make --no-print-directory dev-proof-producer docs-proof-tools && "
         "printf 'int value = 2;\\n' > sample.c && git add sample.c && "
         "git commit -qm second", root, root, root);
     if (n <= 0 || (size_t)n >= sizeof(cmd) || system(cmd) != 0) return false;
@@ -10257,12 +10259,12 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
                                                          why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_prepared_build_plan_source_changed");
         char plan_path[4096];
-        ASSERT(snprintf(plan_path, sizeof(plan_path), "%s/build/dev-loop/restart.env", root) <
+        ASSERT(snprintf(plan_path, sizeof(plan_path), "%s/build/dev-proof/plan.env", root) <
                (int)sizeof(plan_path));
         ASSERT(unlink(plan_path) == 0);
         ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log, why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_prepared_build_plan_invalid");
-        ASSERT(ic_write(root, "build/dev-loop/restart.env", "not-a-plan\n"));
+        ASSERT(ic_write(root, "build/dev-proof/plan.env", "not-a-plan\n"));
         ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log, why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_prepared_build_plan_invalid");
         static const char digest[] =
@@ -10273,6 +10275,9 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
         ASSERT(unlink(marker) == 0);
         ASSERT(zcl_dev_proof_test_original_plan_prepare(root, local, log,
                                                         why, sizeof(why)));
+        ASSERT(snprintf(marker, sizeof(marker), "%s/build/dev-loop/restart.env", root) <
+               (int)sizeof(marker));
+        ASSERT(access(marker, F_OK) != 0 && errno == ENOENT);
 #if defined(__linux__)
         ASSERT(ic_original_plan_recovers_fixtures(root, local, log));
 #endif
@@ -10545,15 +10550,15 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
     return failures;
 }
 
-/* A fresh `git worktree add` checkout never ran `make dev-bin`, so
- * build/dev-loop/restart.env does not exist there yet. Two landing trains
+/* A fresh checkout has no proof metadata until the proof plan target runs.
+ * Two landing trains
  * lost proof attempts to "proof_toolchain_or_policy_unavailable" without it
  * ever naming that file or the command that produces it; this pins the
  * exact refusal text so it cannot regress back into the umbrella reason. */
 static int test_pw_identity_names_missing_restart_env(void)
 {
     int failures = 0;
-    TEST("proof identity: absent restart.env names the path and the fix") {
+    TEST("proof identity: absent plan.env names the path and the fix") {
 #if defined(_WIN32)
         ASSERT(true);
 #else
@@ -10562,15 +10567,15 @@ static int test_pw_identity_names_missing_restart_env(void)
                          "no_restart_env");
         char expect_path[4096];
         ASSERT(snprintf(expect_path, sizeof(expect_path),
-                        "%s/build/dev-loop/restart.env", root) <
+                        "%s/build/dev-proof/plan.env", root) <
                (int)sizeof(expect_path));
         struct zcl_dev_proof_build_identity_v1 identity = {0};
-        char why[sizeof(expect_path) + sizeof("restart_env_missing: (make dev-bin)")] = {0};
+        char why[sizeof(expect_path) + sizeof("proof_plan_missing: (make dev-proof-plan)")] = {0};
         ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &identity, why,
                                                         sizeof(why)));
         char expect_why[sizeof(why)];
         ASSERT(snprintf(expect_why, sizeof(expect_why),
-                        "restart_env_missing:%s (make dev-bin)",
+                        "proof_plan_missing:%s (make dev-proof-plan)",
                         expect_path) < (int)sizeof(expect_why));
         ASSERT(strcmp(why, expect_why) == 0);
         /* A NULL why buffer must not crash the caller: it is the ordinary
@@ -16241,13 +16246,13 @@ static int test_pw_plan_rejects_hidden_fields(void)
         char root[4096], path[4096], plan[128], why[160];
         test_make_tmpdir(root, sizeof(root), "proof_plan", "hidden_fields");
         ASSERT(snprintf(plan, sizeof(plan), "BASE_GENERATION=%s", mutation) == 80);
-        ASSERT(ic_write(root, "build/dev-loop/restart.env", plan));
+        ASSERT(ic_write(root, "build/dev-proof/plan.env", plan));
         struct zcl_dev_proof_build_identity_v1 identity = {0};
         ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &identity, why,
                                                       sizeof(why)));
         ASSERT(zcl_dev_proof_build_plan_verify(root, &identity, mutation, why,
                                               sizeof(why)));
-        ASSERT(snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env",
+        ASSERT(snprintf(path, sizeof(path), "%s/build/dev-proof/plan.env",
                         root) < (int)sizeof(path));
         FILE *file = fopen(path, "ab");
         ASSERT(file != NULL);

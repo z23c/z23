@@ -4558,7 +4558,7 @@ static void proof_hash_plan_value(struct sha3_256_ctx *sha, const char *root,
 
 /* Which half of the build plan a key belongs to. A key this build has never
  * heard of goes to the build graph rather than nowhere: a line added to
- * build/dev-loop/restart.env tomorrow must change the identity, never slip
+ * build/dev-proof/plan.env tomorrow must change the identity, never slip
  * past it. */
 static bool proof_plan_key_is_flag(const char *key)
 {
@@ -4582,20 +4582,16 @@ static bool proof_plan_key_is_flag(const char *key)
  * whole reason two boxes can compare receipts at all. BASE_GENERATION is
  * retained canonically in the graph and returned separately for verification
  * against its own tree: inode/timestamp identity cannot survive a copy. */
-/* `make dev-bin` is the sole writer of the plan file (dev-linker-select.sh
- * plus the dev build's restart-env generator); a fresh `git worktree
- * add` checkout never ran it, and ten proof attempts folding this into
- * "proof_toolchain_or_policy_unavailable" never said so. Name the path
- * and the exact command the same way the vendor dependency check
- * further down names its own missing input. */
+/* The proof plan target shares the restart field producer without requiring
+ * its artifacts. Name the missing input and exact preparation command. */
 static void dp_plan_missing_why(const char *path, int saved, char *why,
                                 size_t why_len)
 {
     if (saved == ENOENT)
-        proof_whyf(why, why_len, "restart_env_missing:%s (make dev-bin)",
+        proof_whyf(why, why_len, "proof_plan_missing:%s (make dev-proof-plan)",
                    path);
     else
-        proof_whyf(why, why_len, "restart_env_unreadable:%s (%s)", path,
+        proof_whyf(why, why_len, "proof_plan_unreadable:%s (%s)", path,
                    proof_errno_name(saved));
 }
 
@@ -4669,7 +4665,7 @@ static bool proof_plan_roots(const char *root, uint8_t flags[32],
      * the plan, including the sysroot library paths. Refuse instead of
      * modelling it, exactly as zcc's prefix-map reader does. */
     if (!flags || !build_graph || root_len < 2u || root[0] != '/' ||
-        snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) >=
+        snprintf(path, sizeof(path), "%s/" ZCL_DEV_PROOF_PLAN_REL, root) >=
             (int)sizeof(path))
         return false;
     if (!dp_plan_body_read(path, body, sizeof(body), why, why_len))
@@ -10151,7 +10147,7 @@ static bool test_object_dir_relative(const struct proof_paths *paths,
                                      char object_dir[PATH_MAX])
 {
     char plan[PATH_MAX];
-    if (snprintf(plan, sizeof(plan), "%s/build/dev-loop/restart.env",
+    if (snprintf(plan, sizeof(plan), "%s/" ZCL_DEV_PROOF_PLAN_REL,
                  paths->root) >= (int)sizeof(plan))
         return false;
     FILE *file = fopen(plan, "r");
@@ -13388,7 +13384,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
 }
 
 /* A post-merge hook can queue before the submitting checkout has rebuilt its
- * restart.env. Prepare through the canonical build before copying or sealing
+ * proof plan. Prepare through the canonical build before copying or sealing
  * compiler inputs; preparation is not evidence and never relaxes the checks
  * that follow it. */
 static bool proof_original_plan_prepare(const struct proof_paths *paths,
@@ -13403,7 +13399,7 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
         return false;
     }
     const char *argv[] = {
-        "make", "--no-print-directory", jobs, "dev-bin", "docs-proof-tools",
+        "make", "--no-print-directory", jobs, "dev-proof-producer", "docs-proof-tools",
 #if defined(__linux__)
         "build/hotswap/zcl_rollback_fixture_a.so",
         "build/hotswap/zcl_rollback_fixture_b.so",
