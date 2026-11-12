@@ -591,6 +591,10 @@ BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell tools
 BUILD_INVOCATION_ID := $(if $(BUILD_EPOCH_CLEAN_ONLY),clean,$(strip $(shell printf '%s\0%s' '$(BUILD_INVOCATION_PID)' '$(BUILD_INVOCATION_START)' | sha256sum | awk '{print $$1}')))
 ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 
+BUILD_DIR = build
+BIN_DIR = $(BUILD_DIR)/bin
+ZCL_ENGINE_UNIT_GOALS := engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit
+
 # Deriving one compile epoch fingerprints the compiler, sysroot, flags, and
 # build-system inputs.  Doing that for every profile on every parse made a
 # warm one-group test pay for build-only, dev, strict, coverage, and sanitizer
@@ -630,6 +634,10 @@ ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),docs-capability-inventory)
 # This standalone tool uses its direct CC recipe and declared source/header
 # prerequisites, not node object epochs. Keep source/view/vendor preparation.
+ZCL_EPOCH_PROFILES :=
+else ifneq ($(filter $(ZCL_ENGINE_UNIT_GOALS),$(ZCL_EPOCH_SINGLE_GOAL)),)
+# The engine dispatcher also compiles its listed sources directly. It still
+# captures source identity below and keeps its TLS inputs outside node epochs.
 ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
@@ -739,8 +747,6 @@ $(error exact source capture failed; refusing to select a compile epoch. \
   copying archives into it)
 endif
 endif
-BUILD_DIR = build
-BIN_DIR = $(BUILD_DIR)/bin
 WINDOWS_HEADLESS_RUN_BIN = $(BIN_DIR)/z23-headless-run.exe
 
 .PHONY: windows-headless-run windows-headless-run-selftest
@@ -2198,6 +2204,9 @@ ifneq ($(filter help print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLA
 ZCL_DEPFILE_PROFILES :=
 else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
 # The generator is compiled directly; no profile %.o depfile graph is consumed.
+ZCL_DEPFILE_PROFILES :=
+else ifneq ($(filter $(ZCL_ENGINE_UNIT_GOALS),$(ZCL_DEPFILE_SINGLE_GOAL)),)
+# Match the direct-source engine recipe's empty epoch selection above.
 ZCL_DEPFILE_PROFILES :=
 else ifneq ($(filter $(BIN_DIR)/zcode-package-registry-check zcode-package-registry-check,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 # This checker links its listed sources directly, not profile %.o objects.

@@ -15,6 +15,7 @@
 #include "make_depfile_scope_process.h"
 
 static const char *root, *work;
+static size_t text_used;
 static const char *profiles[] = {"build-only", "dev", "test-fast", "test-strict", "node-c23"};
 static const char source_record[] =
     "0000000000000000000000000000000000000000000000000000000000000000 1 "
@@ -30,15 +31,21 @@ static void fail(const char *message)
 static char *text(const char *format, ...)
 {
     static char arena[1024][8192];
-    static size_t used;
-    if (used == 1024) fail("fixture string arena exhausted");
-    char *out = arena[used++];
+    if (text_used == 1024) fail("fixture string arena exhausted");
+    char *out = arena[text_used++];
     va_list args;
     va_start(args, format);
     int n = vsnprintf(out, 8192, format, args);
     va_end(args);
     if (n < 0 || n >= 8192) fail("fixture string overflow");
     return out;
+}
+
+/* Phase-local paths and argv expire only after every child is reaped. */
+static void text_rewind(size_t mark)
+{
+    if (probe_count) fail("cannot reuse fixture strings with outstanding probes");
+    text_used = mark;
 }
 
 /* Make syntax needs escaping even though process arguments use no shell. */
@@ -479,19 +486,141 @@ static void isolate_make_options(void)
     }
 }
 
+/* The directly compiled engine tool must not select unrelated object epochs. */
+static void engine_probe_setup(void)
+{
+    FILE *f = fopen(text("%s/engine.mk", work), "wb");
+    if (!f) fail("cannot create engine probe Makefile");
+    fprintf(f, "include %s/probe.mk\n", make_path(work));
+    fputs("engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit: $(ZCL_DEP_PROBE_OBJECTS)\n"
+          "$(info ZCL_DEPFILES_PROBE=[$(ZCL_DEPFILE_PROFILES)])\n", f);
+    bool bad = ferror(f) != 0;
+    if (fclose(f) != 0) bad = true;
+    if (bad) fail("engine probe Makefile write failed");
+}
+
+struct engine_probe_case {
+    const char *name, *first, *second;
+    bool custom, defaults, capture;
+    unsigned mask;
+    const char *epoch, *dep;
+};
+
+static size_t engine_probe_start(const struct engine_probe_case *c, const char *log)
+{
+    const char *argv[48] = {"make", "-f", text("%s/engine.mk", work),
+        "--no-print-directory", "-n", "-o", "/dev/null", "-o",
+        "contexts/explorer/views/include/views/site_css.h", "VIEW_BOOTSTRAP_MK=/dev/null",
+        "VIEW_GEN_HEADERS=", "VIEW_GEN_HEADERS_EARLY=", "VENDOR_LIBS=", "NODE_VENDOR_LIBS=",
+        "ZCL_TOR=stub", "ZCL_USE_CCACHE=0", "BUILD_EPOCH_CLEAN_ONLY=0",
+        "BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000",
+        "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000",
+        "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000"};
+    size_t n = 20;
+    const char *variables[] = {"ALL_OBJS=build-only.o", "DEV_OBJS=dev.o", "DEV_OBJ_COMPLETE=dev.complete",
+        "TEST_PARALLEL_FAST_OBJS=test-fast.o", "TEST_PARALLEL_FAST_CANDIDATE=test-fast.candidate",
+        "TEST_PARALLEL_FAST_LINK_RSP=test-fast.rsp", "TEST_PARALLEL_REL_OBJS=test-strict.o",
+        "TEST_PARALLEL_REL_CANDIDATE=test-strict.candidate", "TEST_PARALLEL_REL_LINK_RSP=test-strict.rsp",
+        "NODE_C23_OBJS=node-c23.o", "NODE_C23_PACKAGE_VERIFY_OBJ=node-c23.o", "NODE_C23_LINK_RSP=node-c23.rsp"};
+    for (size_t j = 0; j < sizeof(variables) / sizeof(variables[0]); ++j) {
+        const char *equal = strchr(variables[j], '=');
+        argv[n++] = text("%.*s=%s/%s", (int)(equal - variables[j]), variables[j], work, equal + 1);
+    }
+    if (c->custom) {
+        argv[n++] = text("BUILD_DIR=%s/custom-build", work);
+        if (strcmp(c->name, "custom-derived") != 0)
+            argv[n++] = text("BIN_DIR=%s/custom-bin", work);
+    } else if (!c->defaults) {
+        argv[n++] = text("BUILD_DIR=%s/engine-build", work);
+        argv[n++] = text("BIN_DIR=%s/engine-bin", work);
+    }
+    argv[n++] = c->capture ? "ZCL_SOURCE_IDENTITY_SESSION=$(error ENGINE_CAPTURE_SENTINEL)" :
+        "BUILD_SOURCE_RECORD=1111111111111111111111111111111111111111111111111111111111111111 1 2222222222222222222222222222222222222222222222222222222222222222";
+    if (!strcmp(c->name, "alias")) {
+        argv[n++] = "-W";
+        argv[n++] = "tools/engine_unit.c";
+    }
+    if (c->first) argv[n++] = c->first;
+    if (c->second) argv[n++] = c->second;
+    argv[n] = NULL;
+    return probe_start(argv, log, false);
+}
+
+static bool engine_probe_output(const struct engine_probe_case *c, const char *data, int rc)
+{
+    if (c->capture) return rc == 2 && strstr(data, "ENGINE_CAPTURE_SENTINEL") != NULL;
+    if (rc != 0 || !strstr(data, text("ZCL_EPOCH_PROBE=[%s]", c->epoch)) ||
+        !strstr(data, text("ZCL_DEPFILES_PROBE=[%s]", c->dep))) return false;
+    for (size_t j = 0; j < 5; ++j) {
+        bool present = strstr(data, text("ZCL_DEP_REBUILD=%s", profiles[j])) != NULL;
+        if (present != ((c->mask & (1u << j)) != 0)) return false;
+    }
+    return true;
+}
+
+static void engine_scope_probes(void)
+{
+    static const char all_epoch[] = "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23";
+    static const char all_dep[] = "build-only dev test-fast test-strict coverage fuzz node-c23";
+    const char *header = "contexts/explorer/views/include/views/site_css.h";
+    const struct engine_probe_case cases[] = {
+        {"alias", "engine-unit", NULL, false, true, false, 0, "", ""},
+        {"binary", "build/bin/z23-engine-unit", NULL, false, true, false, 0, "", ""},
+        {"legacy", "build/bin/zclassic23-engine-unit", NULL, false, true, false, 0, "", ""},
+        {"custom", text("%s/custom-bin/z23-engine-unit", work), NULL, true, false, false, 0, "", ""},
+        {"custom-legacy", text("%s/custom-bin/zclassic23-engine-unit", work), NULL, true, false, false, 0, "", ""},
+        {"custom-derived", text("%s/custom-build/bin/z23-engine-unit", work), NULL, true, false, false, 0, "", ""},
+        {"header-first", header, "engine-unit", false, false, false, 0, "", ""},
+        {"header-last", "engine-unit", header, false, false, false, 0, "", ""},
+        {"mixed-node", "engine-unit", "z23", false, false, false, 31, all_epoch, all_dep},
+        {"mixed-unknown", "engine-unit", "zcl-depfile-unknown", false, false, false, 31, all_epoch, all_dep},
+        {"capture", "engine-unit", NULL, false, false, true, 0, "", ""},
+    };
+    engine_probe_setup();
+    probe_count = 0;
+    enum { count = sizeof(cases) / sizeof(cases[0]) };
+    size_t children[count];
+    const char *logs[count];
+    for (size_t i = 0; i < count; ++i) {
+        logs[i] = text("%s/engine-%s.out", work, cases[i].name);
+        children[i] = engine_probe_start(&cases[i], logs[i]);
+    }
+    for (size_t i = 0; i < count; ++i) {
+        int rc = probe_wait(children[i]);
+        char *data = output(logs[i]);
+        if (!engine_probe_output(&cases[i], data, rc)) {
+            fprintf(stderr, "engine scope case=%s rc=%d\n%s\n", cases[i].name, rc, data);
+            free(data); fail("engine scope probe failed");
+        }
+        if (!strcmp(cases[i].name, "alias") &&
+            (!strstr(data, "-DZCL_BUILD_SOURCE_ID=") ||
+             !strstr(data, "1111111111111111111111111111111111111111111111111111111111111111") ||
+             !strstr(data, "-DZCL_BUILD_CLEAN=1") ||
+             !strstr(data, "vendor/lib/libssl.a") || !strstr(data, "vendor/lib/libcrypto.a"))) {
+            free(data); fail("engine dry compile lost source identity or TLS inputs");
+        }
+        free(data);
+    }
+    probe_count = 0; /* all engine probes were reaped */
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) fail("usage: make-depfile-scope-selftest ROOT WORK");
     root = argv[1]; work = argv[2];
     if (chdir(root) != 0) fail("cannot enter repository root");
     isolate_make_options();
+    size_t persistent = text_used; /* Windows environment strings stay alive. */
     probe_install_cleanup();
     setup();
     profile_probes();
+    text_rewind(persistent);
+    engine_scope_probes();
+    text_rewind(persistent);
     binding_probes();
     consistency_probes();
     tor_guard_probes();
     prime_guard_probes();
-    puts("make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true hot_module_scoped=true mixed_unknown_all=true default_node_c23=true epoch_depfile_consistent=true tunnel_binding_scoped=true");
+    puts("make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true hot_module_scoped=true mixed_unknown_all=true default_node_c23=true epoch_depfile_consistent=true tunnel_binding_scoped=true engine_scoped=true engine_source_capture=true");
     return 0;
 }
