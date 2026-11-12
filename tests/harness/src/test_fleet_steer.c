@@ -1423,12 +1423,26 @@ _test_next:;
     return failures;
 }
 
+struct fmx_reply_clock { const clock_iface_t *saved; int64_t wall; };
+static int64_t fmx_reply_wall(void *p)
+{
+    return ((struct fmx_reply_clock *)p)->wall;
+}
+static int64_t fmx_reply_mono(void *p)
+{
+    const clock_iface_t *saved = ((struct fmx_reply_clock *)p)->saved;
+    return saved->now_monotonic_ns(saved->self);
+}
+
 /* The sender's own outbox is never delivery: a row sent through steer stays
  * queued until the receiver writes something; rows this host did not send keep
  * the older reading. */
 static int fmx_t_sent_needs_receiver(void)
 {
     int failures = 0;
+    struct fmx_reply_clock c = {clock_default(), INT64_C(1893456000000)};
+    clock_iface_t clock = {fmx_reply_mono, fmx_reply_wall, &c};
+    clock_set_default(&clock);
 
     TEST("steer: a sent row is queued until the recipient answers") {
         struct fmx_call s, b;
@@ -1457,6 +1471,10 @@ static int fmx_t_sent_needs_receiver(void)
         /* Nothing has carried those bytes anywhere: the row sits in this host's
          * own outbox, so neither surface may call it delivered. */
         ASSERT(fmx_state_agrees(gid, "fence-sweep", "queued"));
+        fmx_evidence(&b, gid, "mail", "fence-sweep");
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_obj_str(&b, "ts"), "2030-01-01T00:00:00Z");
+        fmx_end(&b);
         /* A row a transport dropped here keeps the older reading even when the
          * peer's numbering collides with our seq: the receipt names a recipient. */
         fmx_seed_inbox("peer-host", "2026-09-16T00:00:00Z", seq, "peer-host",
@@ -1471,9 +1489,9 @@ static int fmx_t_sent_needs_receiver(void)
                                        "steer-caller", "fence-sweep"),
                       "queued");
         fmx_end(&b);
-        /* The recipient's own reply under the same ref is unforgeable receiver
+        /* A later recipient reply under the same ref supplies correlation
          * evidence: the sent row promotes to acknowledged. */
-        fmx_seed_inbox("fence-crew", "2026-12-31T00:00:00Z", 9001,
+        fmx_seed_inbox("fence-crew", "2030-01-01T00:00:01Z", 9001,
                        "fence-crew", "steer-caller", "result",
                        "north fence swept", "fence-sweep");
         fmx_brief(&b, gid, 0);
@@ -1497,6 +1515,7 @@ static int fmx_t_sent_needs_receiver(void)
 
 _test_next:;
     fmx_restore();
+    clock_set_default(c.saved);
     return failures;
 }
 
@@ -4073,17 +4092,6 @@ static long long fmx_send_one(const char *gid, const char *from,
 
 /* Composite-watermark acceptance: the cursor_token a brief returns resumes
  * every contributing stream, not one global max seq. */
-struct fmx_reply_clock { const clock_iface_t *saved; int64_t wall; };
-static int64_t fmx_reply_wall(void *p)
-{
-    return ((struct fmx_reply_clock *)p)->wall;
-}
-static int64_t fmx_reply_mono(void *p)
-{
-    const clock_iface_t *saved = ((struct fmx_reply_clock *)p)->saved;
-    return saved->now_monotonic_ns(saved->self);
-}
-
 static int fmx_t_brief_watermark(void)
 {
     int failures = 0;
