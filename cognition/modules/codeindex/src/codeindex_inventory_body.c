@@ -674,6 +674,12 @@ static void inv_walk_outside(struct inv_body_walk *w, const char *clean,
                              size_t i, int cur_line)
 {
     char c = clean[i];
+    /* Both segment consumers skip leading whitespace. Drop it as we walk
+     * so each newline cannot rescan an accumulating blanked preamble. */
+    if (i == w->segment && isspace((unsigned char)c)) {
+        w->segment = i + 1;
+        return;
+    }
     if (c == '(') { w->paren++; return; }
     if (c == ')') { if (w->paren > 0) w->paren--; return; }
     if (w->paren == 0 && c == '{') {
