@@ -722,8 +722,9 @@ int cyc_scan_text(const char *text, const char *path,
 }
 
 /* ── scope ───────────────────────────────────────────────────────────────
- * tracked .c, .h, .inc and .def from the repo root, minus vendor/, build/, test-tmp/,
- * and paths with a .z23-prefixed component. With
+ * tracked .c, .h, .inc and .def from the repo root, minus third-party vendor/,
+ * build/, test-tmp/, and paths with a .z23-prefixed component. The in-tree
+ * vendor/tor_stub.c is included. With
  * ZCL_CYCLOMATIC_ROOT set (the selftest fixture rail), walk that root
  * instead and report paths relative to it. */
 
@@ -737,6 +738,8 @@ struct cyc_walk {
 
 static int cyc_excluded(const char *p)
 {
+    if (strcmp(p, "vendor/tor_stub.c") == 0)
+        return 0;
     return strncmp(p, "vendor/", 7) == 0 || strncmp(p, "build/", 6) == 0
         || strncmp(p, "test-tmp/", 9) == 0
         || strncmp(p, ".z23", 4) == 0 || strstr(p, "/.z23") != NULL;

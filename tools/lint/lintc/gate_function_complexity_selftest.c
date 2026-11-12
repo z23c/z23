@@ -563,7 +563,8 @@ static int cyc_st_scope_files(const char *root)
     static const char *const paths[] = {
         "one.c", "two.h", "three.inc", "four.def", "ignored.txt",
         "tests/fixtures/five.inc", "vendor/ignored.h", "build/ignored.def",
-        "test-tmp/ignored.c", NULL
+        "test-tmp/ignored.c", "vendor/tor_stub.c", "vendor/tor_stub_extra.c",
+        "vendor/tor_stub.c.h", NULL
     };
     char dir[8192], path[8192];
     if (ovf(snprintf(dir, sizeof dir, "%s/vendor", root), sizeof dir) || csr_mkdirs(dir) ||
@@ -586,6 +587,8 @@ static int cyc_st_scope_contents(const char *s)
     return !strstr(s, "one.c:") || !strstr(s, "two.h:") ||
         !strstr(s, "three.inc:") || !strstr(s, "four.def:") ||
         !strstr(s, "tests/fixtures/five.inc:") || !strstr(s, "macro.h:") || !strstr(s, "over_cap") ||
+        !strstr(s, "vendor/tor_stub.c:") ||
+        strstr(s, "vendor/tor_stub_extra.c:") || strstr(s, "vendor/tor_stub.c.h:") ||
         strstr(s, "ignored") != NULL;
 }
 
@@ -679,8 +682,8 @@ static int cyc_st_scope_report(const char *root, const char *baseline)
     char report[8192];
     if (!bad && (cyc_check(root, baseline, "RATCHET", 1, 0, out, err) ||
                  csr_slurp(out, report, sizeof report) ||
-                 !strstr(report, "11 functions in 6 files") ||
-                 !strstr(report, "M>15: 6"))) bad = 1;
+                 !strstr(report, "13 functions in 7 files") ||
+                 !strstr(report, "M>15: 7"))) bad = 1;
     if (out) fclose(out);
     if (err) fclose(err);
     return bad;
@@ -709,10 +712,11 @@ static int cyc_st_scope(void)
         cyc_write_baseline(root, wb)) bad = 1;
     if (wb[0] && cyc_st_scope_baseline(wb)) bad = 1;
     if (!bad) bad = cyc_st_scope_report(root, wb);
-    if (!bad) bad = cyc_st_scope_git(root);
+    if (bad) fputs("check_cyclomatic_complexity selftest: fixture scope failed\n", stderr);
+    int git_bad = cyc_st_scope_git(root);
+    if (git_bad) fputs("check_cyclomatic_complexity selftest: Git-index scope failed\n", stderr);
     (void)rap_rm_rf(root);
-    if (bad) fputs("check_cyclomatic_complexity selftest: extension scope failed\n", stderr);
-    return bad;
+    return bad || git_bad;
 }
 
 /* Write one C function `name` with cyclomatic M = m (m - 1 if statements)
