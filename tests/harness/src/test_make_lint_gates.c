@@ -1984,11 +1984,12 @@ static int t_lint_private_header_rebuild(void)
         "fail() { echo \"private-header: $1\" >&2; exit 1; }\n"
         "mkdir -p tools/lint/lintc build/lintc-obj platform\n"
         "for f in lintc.h gates.def precheck_base.h; do : > tools/lint/lintc/$f; done\n"
-        "printf '#ifdef LINT_FIXTURE_CHECKER\n#include \"checker_only.h\"\n#endif\n#include \"direct.h\"\nint value(void) { return VALUE + EXTRA; }\n' > tools/lint/lintc/one.c\n"
+        "printf '#include \"gates.def\"\\n' > tools/lint/lintc/lintc.h; printf '#define GATE_VALUE 0\\n' > tools/lint/lintc/gates.def\n"
+        "printf '#ifdef LINT_FIXTURE_CHECKER\n#include \"checker_only.h\"\n#endif\n#include \"direct.h\"\nint value(void) { return VALUE + EXTRA + GATE_VALUE; }\n' > tools/lint/lintc/one.c\n"
         "printf '/* valid */\\n' > tools/lint/lintc/checker_only.h\n"
         "printf '#include <stdio.h>\\nint value(void); int main(void) { return printf(\"%%d\\\\n\", value()) < 0; }\\n' > tools/lint/lintc/two.c\n"
         "printf '#include \"precheck_base.h\"\\n#define EXTRA 1\\n' > tools/lint/lintc/direct.h\n"
-        "printf '#define VALUE 1\\n' > tools/lint/lintc/precheck_base.h\n"
+        "printf '#include \"lintc.h\"\\n#define VALUE 1\\n' > tools/lint/lintc/precheck_base.h\n"
         "printf '#!/bin/sh\\necho \"$*\" >> cc.log\\n[ ! -f cc.fail ] || exit 1\\nif [ -f cc.empty ]; then exit 0; fi\\nif [ -f cc.emptyobj ] || [ -f cc.emptydep ]; then\\n  prev=; for arg do case \"$prev\" in -o) obj=$arg;; -MF) dep=$arg;; esac; prev=$arg; done\\n  cc \"$@\" || exit; if [ -f cc.emptyobj ]; then : > \"$obj\"; else : > \"$dep\"; fi; exit 0\\nfi\\nexec cc \"$@\"\\n' > cc-trace; chmod +x cc-trace\n"
         "printf '#!/bin/sh\\n[ ! -f clang.fail ] || exit 1\\nif [ -f clang.empty ]; then prev=; for arg do [ \"$prev\" != -MF ] || : > \"$arg\"; prev=$arg; done; exit 0; fi\\nexec cc -DLINT_FIXTURE_CHECKER \"$@\"\\n' > clang-check; chmod +x clang-check\n"
         "printf 'LINTC_OBJS := build/lintc-obj/one.o build/lintc-obj/two.o\\nLINTC_NODE_OBJS := build/lintc-obj/node/platform/node.o\\n' > Fixture.mk\n"
@@ -2005,7 +2006,7 @@ static int t_lint_private_header_rebuild(void)
         ": > cc.log; make -s -f Fixture.mk build/lintc-obj/one.o build/lintc-obj/two.o >>log 2>&1 || fail direct-make\n"
         "cc build/lintc-obj/one.o build/lintc-obj/two.o -o probe; test \"$(./probe)\" = 3 || fail direct-output\n"
         "grep -q 'one.c' cc.log && ! grep -q 'two.c' cc.log || fail direct-scope\n"
-        "touch -t 200301010000 build/lintc-obj/one.o; printf '#define VALUE 5\\n' > tools/lint/lintc/precheck_base.h; touch -t 200401010000 tools/lint/lintc/precheck_base.h\n"
+        "touch -t 200301010000 build/lintc-obj/one.o; printf '#include \"lintc.h\"\\n#define VALUE 5\\n' > tools/lint/lintc/precheck_base.h; touch -t 200401010000 tools/lint/lintc/precheck_base.h\n"
         ": > cc.log; make -s -f Fixture.mk build/lintc-obj/one.o build/lintc-obj/two.o >>log 2>&1 || fail transitive-make\n"
         "cc build/lintc-obj/one.o build/lintc-obj/two.o -o probe; test \"$(./probe)\" = 7 || fail transitive-output\n"
         "grep -q 'one.c' cc.log && ! grep -q 'two.c' cc.log || fail transitive-scope\n"
@@ -2034,7 +2035,7 @@ static int t_lint_private_header_rebuild(void)
         "if make -s -f Fixture.mk build/lintc-obj/one.o >deleted-header.log 2>&1; then fail deleted-header-accepted; fi\n"
         "grep -q 'one.c' cc.log && grep -q 'precheck_base.h' deleted-header.log || fail deleted-header-diagnostic\n"
         "cmp -s saved.o build/lintc-obj/one.o && test ! -e build/lintc-obj/one.d || fail deleted-header-publication\n"
-        "printf '#define VALUE 5\\n' > tools/lint/lintc/precheck_base.h; touch -t 200401010000 tools/lint/lintc/precheck_base.h\n"
+        "printf '#include \"lintc.h\"\\n#define VALUE 5\\n' > tools/lint/lintc/precheck_base.h; touch -t 200401010000 tools/lint/lintc/precheck_base.h\n"
         "make -s -f Fixture.mk build/lintc-obj/one.o >>log 2>&1 || fail deleted-header-recovery\n"
         "cc build/lintc-obj/one.o build/lintc-obj/two.o -o probe; test \"$(./probe)\" = 7 || fail deleted-header-output\n"
         "printf '#include \"direct.h\"\\nint node_value(void) { return VALUE + EXTRA; }\\n' > platform/node.c\n"
@@ -2063,13 +2064,25 @@ static int t_lint_private_header_rebuild(void)
         "make -s -f Fixture.mk build/lintc-obj/one.o >>log 2>&1 || fail checker-empty-retry\n"
         "rm tools/lint/lintc/checker_only.h; make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o >>log 2>&1 || fail checker-disable\n"
         ": > cc.log; make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o >>log 2>&1 || fail checker-disable-warm; test ! -s cc.log || fail checker-disable-recompile\n";
+    static const char shared[] =
+        "make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o build/lintc-obj/two.o >>log 2>&1 || fail shared-setup\n"
+        "touch -t 201201010000 tools/lint/lintc/lintc.h tools/lint/lintc/gates.def; touch -t 202001010000 build/lintc-obj/one.o build/lintc-obj/two.o\n"
+        "printf '#define GATE_VALUE 1\\n' > tools/lint/lintc/gates.def; touch -t 202101010000 tools/lint/lintc/gates.def\n"
+        ": > cc.log; make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o build/lintc-obj/two.o >>log 2>&1 || fail gates-make\n"
+        "grep -q 'one.c' cc.log && ! grep -q 'two.c' cc.log || fail gates-scope\n"
+        "cc build/lintc-obj/one.o build/lintc-obj/two.o -o probe; test \"$(./probe)\" = 15 || fail gates-output\n"
+        "touch -t 202201010000 build/lintc-obj/one.o build/lintc-obj/two.o; touch -t 202301010000 tools/lint/lintc/lintc.h\n"
+        ": > cc.log; make -s -f Fixture.mk LINTC_CLANG= build/lintc-obj/one.o build/lintc-obj/two.o >>log 2>&1 || fail lintc-make\n"
+        "grep -q 'one.c' cc.log && ! grep -q 'two.c' cc.log || fail lintc-scope\n"
+        "cc build/lintc-obj/one.o build/lintc-obj/two.o -o probe; test \"$(./probe)\" = 15 || fail lintc-output\n";
     /* Keep each literal below the strict compiler's 4095-byte limit. */
-    char script[sizeof(setup) + sizeof(checks) + sizeof(recovery) + sizeof(checker) - 3];
+    char script[sizeof(setup) + sizeof(checks) + sizeof(recovery) + sizeof(checker) + sizeof(shared) - 4];
     memcpy(script, setup, sizeof(setup) - 1);
     memcpy(script + sizeof(setup) - 1, checks, sizeof(checks) - 1);
     memcpy(script + sizeof(setup) + sizeof(checks) - 2,
            recovery, sizeof(recovery) - 1);
-    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(recovery) - 3, checker, sizeof(checker));
+    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(recovery) - 3, checker, sizeof(checker) - 1);
+    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(recovery) + sizeof(checker) - 4, shared, sizeof(shared));
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_header", "rebuild");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);

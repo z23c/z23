@@ -15854,7 +15854,7 @@ endif
 ifneq ($(strip $(LINTC_NODE_OBJS)),)
 $(LINTC_NODE_OBJS): $$(call LINTC_COMMAND_STALE,$$@,$$(LINTC_NODE_COMMAND))
 endif
-build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def
+build/lintc-obj/%.o: tools/lint/lintc/%.c
 	@mkdir -p "$(dir $@)"
 	@set -eu; dep="$(@:.o=.d)"; record="$@.cmd"; o=; d=; c=; x=; s=; \
 	trap 'rm -f -- "$$o" "$$d" "$$c" "$$x"; if [ -n "$$s" ]; then rmdir -- "$$s"; fi' EXIT; trap 'exit 1' HUP INT TERM; \
