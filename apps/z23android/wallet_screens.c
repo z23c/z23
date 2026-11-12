@@ -560,13 +560,18 @@ static void funds_items(struct wallet_screen *s)
     button(s, WALLET_ACT_BACK, "Home");
 }
 
+static void share_request_items(struct wallet_screen *s)
+{
+    button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
+    note(s, "Share a photo or video with this request. You choose the recipient.");
+}
 static void receive_items(struct wallet_screen *s)
 {
 #ifdef ZAPP_SHARE_FIXTURE
     title(s, "Receive");
     (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
     (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, "t1 aaaa aaaa aaaa aaaa aaaa aaaa aaaa aaaa a");
-    button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
+    share_request_items(s);
     if (st.pending_share[0]) note(s, st.pending_share);
     if (st.d.note[0]) note(s, st.d.note);
     button(s, WALLET_ACT_BACK, "Back");
@@ -582,7 +587,7 @@ static void receive_items(struct wallet_screen *s)
         (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, d->code);
         (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, grouped);
         button(s, WALLET_ACT_COPY_ADDRESS, "Copy address");
-        button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
+        share_request_items(s);
         if (d->has_amount && zapp_zat_format(d->amount_zat, grouped, sizeof(grouped))) {
             snprintf(text, sizeof(text), "Asking for %s ZCL", grouped);
             line(s, text);

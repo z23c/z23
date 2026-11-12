@@ -2517,6 +2517,9 @@ static void test_receive_share(void)
     long copy = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_COPY_ADDRESS);
     long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST);
     CHECK(copy >= 0 && share == copy + 1 && !strcmp(text_at(s, share), "Share request"));
+    size_t help = (size_t)share + 1;
+    CHECK(help < s->count && s->items[help].kind == WALLET_ITEM_NOTE &&
+        !strcmp(text_at(s, help), "Share a photo or video with this request. You choose the recipient."));
     char expected[ZAPP_RECEIVE_CODE_MAX], code[ZAPP_RECEIVE_CODE_MAX];
     snprintf(expected, sizeof(expected), "%s", text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)));
     tap(WALLET_ACT_SHARE_REQUEST, 0, WALLET_SHARE);
