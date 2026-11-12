@@ -369,6 +369,25 @@ static int cache_proofs_synthetic(const char *base, const char *root,
     return rc ? rc : wcs_selftest_shared_store(base, stub, flags);
 }
 
+/* The real sweep follows this selftest in-process: preserve its cache policy. */
+static int cache_off_setup(const char *base, const char *root,
+                           const char *stub, const char *flags, const char *dir)
+{
+    const char *key = "ZCL_LINT_TU_CACHE", *prior = getenv(key);
+    char *saved = prior ? strdup(prior) : NULL;
+    if (prior && !saved) return sf_fail("cannot save caller cache policy");
+    int setup = setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "0", 1);
+    if (!setup) setup = setenv(key, "0", 1);
+    if (!setup)
+        wcs_cache_setup("tu-cache-selftest", stub, stub, flags, base, root, dir);
+    int restore = saved ? setenv(key, saved, 1) : unsetenv(key);
+    int force = setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "1", 1);
+    free(saved);
+    if (setup || restore || force)
+        return sf_fail("cannot configure disabled cache or restore caller policy");
+    return 0;
+}
+
 static int cache_proof_disabled(const char *base, const char *root,
                                 const char *srclist, const char *stub,
                                 const char *flags, const char *runs)
@@ -377,11 +396,7 @@ static int cache_proof_disabled(const char *base, const char *root,
     if (sjoin(cdoff, sizeof cdoff, base, "/cachedir-off")) return 2;
     if (sjoin(miss, sizeof miss, base, "/miss-off.txt")) return 2;
     if (sjoin(outdir, sizeof outdir, base, "/out")) return 2;
-    setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "0", 1);
-    setenv("ZCL_LINT_TU_CACHE", "0", 1);
-    wcs_cache_setup("tu-cache-selftest", stub, stub, flags, base, root, cdoff);
-    setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "1", 1);
-    unsetenv("ZCL_LINT_TU_CACHE");
+    if (cache_off_setup(base, root, stub, flags, cdoff) != 0) return 2;
     if (wcs_cache_on())
         return sf_fail("ZCL_LINT_TU_CACHE=0 did not disable the cache");
     if (wcs_cache_plan(srclist, miss, outdir, 1) != 0) return 2;
@@ -501,6 +516,45 @@ static int cache_proof_real(const char *gate_src, const char *cc,
     return cpr_replay(&s);
 }
 
+static int cache_policy_case(const char *base, const char *root,
+                             const char *srclist, const char *stub,
+                             const char *flags, const char *runs,
+                             const char *value, bool failure)
+{
+    const char *key = "ZCL_LINT_TU_CACHE";
+    if (value ? setenv(key, value, 1) != 0 : unsetenv(key) != 0) return 2;
+    int rc = cache_proof_disabled(base, root, srclist, stub, flags, runs);
+    const char *after = getenv(key);
+    bool same = value ? after && !strcmp(value, after) : after == NULL;
+    if (!same || (failure ? rc != 2 : rc != 0)) {
+        printf("FAIL: --self-test — cache policy input=%s path=%s rc=%d after=%s\n",
+               value ? value : "(unset)", failure ? "failure" : "success", rc,
+               after ? after : "(unset)");
+        return 1;
+    }
+    return 0;
+}
+
+static int cache_policy_proofs(const char *base, const char *root,
+                               const char *srclist, const char *stub,
+                               const char *flags, const char *runs)
+{
+    const char *key = "ZCL_LINT_TU_CACHE", *prior = getenv(key);
+    bool present = prior != NULL;
+    char *saved = present ? strdup(prior) : NULL;
+    if (present && !saved) return 2;
+    char missing[SFP];
+    int bad = sjoin(missing, sizeof missing, base, "/missing-srclist");
+    const char *const values[] = {NULL, "", "0", "1"};
+    if (!bad) for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+        bad |= cache_policy_case(base, root, srclist, stub, flags, runs, values[i], false);
+        bad |= cache_policy_case(base, root, missing, stub, flags, runs, values[i], true);
+    }
+    if (present ? setenv(key, saved, 1) != 0 : unsetenv(key) != 0) bad = 2;
+    free(saved);
+    return bad;
+}
+
 static int cache_selftest(const char *cc, const char *flags_nul,
                           const char *scratch, const char *real_src)
 {
@@ -536,7 +590,7 @@ static int cache_selftest(const char *cc, const char *flags_nul,
     setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "1", 1);
     int rc = cache_proofs_synthetic(base, root, srclist, stub, flags, runs);
     if (rc == 0)
-        rc = cache_proof_disabled(base, root, srclist, stub, flags, runs);
+        rc = cache_policy_proofs(base, root, srclist, stub, flags, runs);
     if (rc == 0)
         rc = cache_proof_real(
             "tools/lint/lintc/gate_windows_cross_syntax.c", cc, flags_nul,
