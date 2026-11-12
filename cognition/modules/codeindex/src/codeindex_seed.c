@@ -76,9 +76,7 @@
 #define CI_SEED_KIND_SIBLING "a sibling worktree"
 
 enum {
-    /* A build host accumulates registry entries for worktrees that no longer
-     * exist, so the candidate list is generous — a dead entry costs one failed
-     * open. */
+    /* Keep at most this many eligible images, newest siblings first. */
     CI_SEED_MAX_DONORS = 128,
     /* Opening a candidate generation and comparing it is the one part of the
      * search that scales with the size of the repository, so only this many
@@ -95,6 +93,8 @@ enum {
 struct ci_seed_donor {
     char        root[CI_PATH_MAX];
     const char *kind;
+    time_t      seconds;
+    long        nanoseconds;
 };
 
 struct ci_seed_candidates {
@@ -189,19 +189,54 @@ static bool seed_same_directory(const char *left, const char *right)
            a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
+/* Rank only private readable images; time affects availability, never trust. */
+static int seed_open_image(const char *donor_root);
+
+static bool seed_donor_newer(const struct ci_seed_donor *a,
+                             const struct ci_seed_donor *b)
+{
+    if (a->seconds != b->seconds) return a->seconds > b->seconds;
+    if (a->nanoseconds != b->nanoseconds) return a->nanoseconds > b->nanoseconds;
+    return strcmp(a->root, b->root) < 0;
+}
+
+static bool seed_donor_metadata(struct ci_seed_donor *donor, const char *root,
+                                const char *kind)
+{
+    int fd = seed_open_image(root);
+    if (fd < 0) return false;
+    struct stat st;
+    bool ok = fstat(fd, &st) == 0;
+    if (close(fd) != 0) ok = false;
+    if (!ok || strlen(root) >= sizeof(donor->root)) return false;
+    ci_cpy(donor->root, sizeof(donor->root), root);
+    donor->kind = kind;
+#if defined(__APPLE__)
+    donor->seconds = st.st_mtimespec.tv_sec;
+    donor->nanoseconds = st.st_mtimespec.tv_nsec;
+#else
+    donor->seconds = st.st_mtim.tv_sec;
+    donor->nanoseconds = st.st_mtim.tv_nsec;
+#endif
+    return true;
+}
+
 static void seed_push_donor(struct ci_seed_candidates *cands, const char *root,
                             const char *self, const char *kind)
 {
-    if (cands->count >= CI_SEED_MAX_DONORS) return;
     if (seed_same_directory(root, self)) return;
     for (int i = 0; i < cands->count; i++)
         if (strcmp(cands->items[i].root, root) == 0) return;
-    ci_cpy(cands->items[cands->count].root,
-           sizeof(cands->items[cands->count].root), root);
-    cands->items[cands->count].kind = kind;
-    cands->count++;
+    struct ci_seed_donor donor;
+    if (!seed_donor_metadata(&donor, root, kind)) return;
+    int start = cands->count && strcmp(cands->items[0].kind, CI_SEED_KIND_MAIN) == 0 ? 1 : 0;
+    int pos = start;
+    while (pos < cands->count && seed_donor_newer(&cands->items[pos], &donor)) pos++;
+    if (pos >= CI_SEED_MAX_DONORS) return;
+    int end = cands->count < CI_SEED_MAX_DONORS ? cands->count++ : CI_SEED_MAX_DONORS - 1;
+    for (int i = end; i > pos; i--) cands->items[i] = cands->items[i - 1];
+    cands->items[pos] = donor;
 }
-
 static void seed_collect_worktrees(const char *common, const char *self,
                                    struct ci_seed_candidates *cands)
 {
@@ -370,7 +405,7 @@ static int seed_changed_limit(int current_count)
 /* The nearest reconcilable donor, or -1. Nearest is fewest differing files —
  * that is exactly the count of files the refresh has to rescan, so it is the
  * cost being minimized and not a proxy for it. A donor that seals this exact
- * tree ends the search. Each candidate's image is opened once, and only the
+ * tree ends the search. Eligible images are first ranked by mtime; only the
  * first CI_SEED_MAX_COMPARISONS readable ones are compared at all, because
  * that comparison is the part of the search whose cost grows with the
  * repository. */

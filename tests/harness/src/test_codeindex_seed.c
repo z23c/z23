@@ -30,6 +30,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <time.h>
 
 #define CIS_CHECK(name, expression)                                    \
     do {                                                               \
@@ -550,6 +554,149 @@ static int cis_equal_edges_different_bytes(const struct cis_repo *repo)
     return failures;
 }
 
+#if !defined(_WIN32)
+enum { CIS_RANK_ENTRIES = 132 };
+struct cis_rank_paths { char roots[CIS_RANK_ENTRIES][PATH_MAX]; int count; };
+
+static bool cis_rank_register(const char *workspace, const struct cis_repo *repo,
+                              const char *tag)
+{
+    for (int i = 0; i < CIS_RANK_ENTRIES; i++) {
+        char name[32], root[PATH_MAX];
+        int a = snprintf(name, sizeof(name), "donor-%03d", i);
+        int b = snprintf(root, sizeof(root), "%s/%s-donor-%03d", workspace, tag, i);
+        if (a <= 0 || (size_t)a >= sizeof(name) || b <= 0 || (size_t)b >= sizeof(root) ||
+            !cis_register_worktree(repo->main_root, name, root)) return false;
+    }
+    return true;
+}
+
+static bool cis_rank_record(const char *registry, const char *name, char out[PATH_MAX])
+{
+    char record[PATH_MAX], line[PATH_MAX];
+    int n = snprintf(record, sizeof(record), "%s/%s/gitdir", registry, name);
+    if (n <= 0 || (size_t)n >= sizeof(record)) return false;
+    FILE *f = fopen(record, "r");
+    if (!f) return false;
+    bool read = fgets(line, sizeof(line), f) != NULL;
+    if (fclose(f) != 0) read = false;
+    size_t len = read ? strlen(line) : 0;
+    if (len < 7 || strcmp(line + len - 6, "/.git\n")) return false;
+    line[len - 6] = 0;
+    memcpy(out, line, len - 5);
+    return true;
+}
+
+/* Observe the fixture's actual registry order: POSIX does not order readdir. */
+static bool cis_rank_order(const struct cis_repo *repo, struct cis_rank_paths *paths)
+{
+    char registry[PATH_MAX];
+    int n = snprintf(registry, sizeof(registry), "%s/.git/worktrees", repo->main_root);
+    if (n <= 0 || (size_t)n >= sizeof(registry)) return false;
+    DIR *dir = opendir(registry);
+    if (!dir) return false;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "donor-", 6)) continue;
+        if (paths->count >= CIS_RANK_ENTRIES ||
+            !cis_rank_record(registry, entry->d_name, paths->roots[paths->count])) {
+            closedir(dir); return false;
+        }
+        paths->count++;
+    }
+    bool ok = closedir(dir) == 0;
+    return ok && paths->count == CIS_RANK_ENTRIES;
+}
+
+static bool cis_rank_copy_stream(FILE *in, FILE *out)
+{
+    char buf[8192];
+    for (;;) {
+        size_t got = fread(buf, 1, sizeof(buf), in);
+        if (got && fwrite(buf, 1, got, out) != got) return false;
+        if (got < sizeof(buf)) return !ferror(in);
+    }
+}
+
+static bool cis_rank_private(const char *path, bool directory)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || st.st_uid != geteuid() ||
+        (st.st_mode & (S_IWGRP | S_IWOTH))) return false;
+    if (directory) return S_ISDIR(st.st_mode);
+    return S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600 &&
+        st.st_nlink == 1 && st.st_size > 0;
+}
+
+static bool cis_rank_copy_image(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb"), *out = fopen(to, "wb");
+    bool ok = in && out && fchmod(fileno(out), 0600) == 0 &&
+        cis_rank_copy_stream(in, out);
+    if (in && fclose(in) != 0) ok = false;
+    if (out && fclose(out) != 0) ok = false;
+    return ok;
+}
+
+static bool cis_rank_copy(const char *from_root, const char *to_root, time_t when)
+{
+    char from[PATH_MAX], to[PATH_MAX], dir[PATH_MAX];
+    if (!cis_derived_path(from_root, "index.kv", from) ||
+        !cis_derived_path(to_root, "index.kv", to)) return false;
+    int n = snprintf(dir, sizeof(dir), "%s/.codeindex", to_root);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || !cis_ensure_tree(dir)) return false;
+    struct timespec times[2] = {{when, 0}, {when, 0}};
+    return cis_rank_copy_image(from, to) && utimensat(AT_FDCWD, to, times, 0) == 0 &&
+        cis_rank_private(dir, true) && cis_rank_private(to, false);
+}
+
+static bool cis_rank_old_donors(const struct cis_repo *foreign,
+                                const struct cis_rank_paths *paths)
+{
+    for (int i = 0; i < 16; i++)
+        if (!cis_rank_copy(foreign->main_root, paths->roots[i], 1000000000)) return false;
+    return true;
+}
+
+static bool cis_rank_prepare(const char *workspace, const char *name, bool past_registry,
+                             struct cis_repo *repo, struct cis_rank_paths *paths)
+{
+    struct cis_repo foreign;
+    struct cis_observation near = {0}, other = {0};
+    bool ready = cis_repo_make(workspace, name, cis_units, CIS_UNIT_COUNT, repo) &&
+        cis_repo_make(workspace, past_registry ? "rank-foreign-a" : "rank-foreign-b",
+                      cis_foreign_units, CIS_FOREIGN_COUNT, &foreign);
+    if (ready) { cis_observe(repo->main_root, &near); cis_observe(foreign.main_root, &other); }
+    ready = ready && near.opened && other.opened &&
+        cis_write_tree(repo->target_root, cis_units, CIS_UNIT_COUNT, 1) &&
+        cis_write_unit(repo->target_root, cis_units[0], 7) &&
+        cis_rank_register(workspace, repo, name) && cis_rank_order(repo, paths);
+    int selected = past_registry ? 129 : 17;
+    return ready && cis_rank_copy(repo->main_root, paths->roots[selected], 2000000000) &&
+        (past_registry || cis_rank_old_donors(&foreign, paths)) && cis_drop_store(repo->main_root);
+}
+
+static int cis_rank_case(const char *workspace, const char *name, bool past_registry)
+{
+    int failures = 0;
+    struct cis_repo repo;
+    struct cis_observation result = {0};
+    struct cis_rank_paths *paths = calloc(1, sizeof(*paths));
+    bool ready = paths && cis_rank_prepare(workspace, name, past_registry, &repo, paths);
+    if (ready) cis_observe(repo.target_root, &result);
+    printf("codeindex_seed: rank case=%s ready=%d seeded=%d refreshed=%lld\n",
+           name, ready, result.seeded, result.files_refreshed);
+    CIS_CHECK("late recent donor seeds a fresh generation", ready && result.opened &&
+              result.fresh && result.seeded && !strcmp(result.donor_kind, "a sibling worktree"));
+    CIS_CHECK("late donor refreshes exactly the changed unit", ready && result.files_refreshed == 1 &&
+              result.file_count == (int)CIS_UNIT_COUNT &&
+              cis_unit_is_revision(repo.target_root, cis_units[0], 7) &&
+              cis_unit_is_revision(repo.target_root, cis_units[1], 1));
+    free(paths);
+    return failures;
+}
+#endif
+
 int test_codeindex_seed(void)
 {
     int failures = 0;
@@ -577,5 +724,9 @@ int test_codeindex_seed(void)
     failures += cis_foreign_donor(&foreign);
     failures += cis_owner_refusal(&repo);
     failures += cis_donor_pages(&repo); /* last: it imports a page hint into the donor */
+#if !defined(_WIN32)
+    failures += cis_rank_case(workspace, "rank-registry", true);
+    failures += cis_rank_case(workspace, "rank-comparisons", false);
+#endif
     return failures;
 }
