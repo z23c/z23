@@ -49,6 +49,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3758,6 +3759,10 @@ static int ci_include_select_pages(struct ci_store *store)
     CI_CHECK("include partial page leaves cached statement idle", idle);
     CI_CHECK("include pages reuse one explicitly prepared select",
              cached && prepares - auto_reprepares == 1 && runs == 8197);
+    CI_CHECK("include page bindings do not recompile the select", auto_reprepares == 0);
+    CI_CHECK("include pages handle maximum integer limit and offset",
+             ci_include_page(store, "two.c", 0, INT_MAX, "z.h", NULL) &&
+             ci_include_page(store, "one.c", INT_MAX, 2, NULL, NULL));
     (void)sqlite3_set_authorizer(db, NULL, NULL);
     return failures;
 }

@@ -556,9 +556,11 @@ int ci_store_symbols_in_file(struct ci_store *s, const char *path,
 static bool ci_store_include_page_prepare(struct ci_store *s)
 {
     if (s->include_page_stmt) return true;
+    /* A bare LIMIT parameter makes SQLite recompile after each binding.
+     * Adding zero preserves our positive int cap without that plan dependency. */
     return sqlite3_prepare_v2(s->db,
         "SELECT i.dep_path FROM includes i JOIN files f ON f.id=i.file_id"
-        " WHERE f.path=? ORDER BY i.dep_path ASC LIMIT ? OFFSET ?",
+        " WHERE f.path=? ORDER BY i.dep_path ASC LIMIT (? + 0) OFFSET ?",
         -1, &s->include_page_stmt, NULL) == SQLITE_OK;
 }
 
