@@ -17581,6 +17581,14 @@ endif
 PROOF_LINT_TOOL_TARGETS :=
 ifneq ($(filter proof-lint-prebuild dev-proof-bundle-prefork,$(MAKECMDGOALS)),)
 PROOF_LINT_TOOL_TARGETS := $(shell ./build/bin/z23-lint check-standalone-tools-link --list-targets 2>/dev/null)
+ifeq ($(ZCL_PROOF_LINT_REQUIRE_LIST),1)
+ifneq ($(.SHELLSTATUS),0)
+$(error proof-lint-prebuild: standalone tool list command failed)
+endif
+ifeq ($(strip $(PROOF_LINT_TOOL_TARGETS)),)
+$(error proof-lint-prebuild: standalone tool list empty)
+endif
+endif
 endif
 proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready $(PROOF_LINT_TOOL_TARGETS)
 ifneq ($(strip $(PROOF_LINT_TOOL_TARGETS)),)

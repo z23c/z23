@@ -10670,6 +10670,8 @@ struct dp_worker {
     struct zcl_dev_proof_budget lint_budget;
     bool lint_reads_artifacts;
     bool bundle_built_prefork;
+    bool bundle_union_requested;
+    bool bundle_z23_covered;
     /* The shadow lane probed its store before the cold run and still owes
      * the post-run audit (dp_worker_shadow_audit). */
     bool shadow_probed;
@@ -11253,12 +11255,68 @@ static bool dp_receiver_begin(const struct dp_worker *w,
     return false;
 }
 
+static void dp_test_need_unbuildable(const struct dp_worker *w,
+                                     const char *target, char *why, size_t why_len);
+static bool dp_test_need_clear(const char *generation, const char *value);
+static bool dp_test_need_present(const char *generation, const char *value);
+
+/* Derive and clear the release need only for a newly built cold bundle. */
+static bool dp_bundle_prepare_z23(struct dp_worker *w, bool *selected,
+                                  char *why, size_t why_len)
+{
+    *selected = false;
+    if (!w->bundle_union_requested) return true;
+    const char *argv[PROOF_TEST_NEEDS_ARGV_CAP];
+    const char *values[PROOF_TEST_NEEDS_ARGV_CAP];
+    size_t targets = 0;
+    if (!proof_test_needs_argv(w->make_jobs, w->groups, w->changed, argv,
+                               values, PROOF_TEST_NEEDS_ARGV_CAP, &targets)) {
+        proof_why(why, why_len, "proof_test_needs_argv_invalid");
+        return false;
+    }
+    for (size_t i = 3; i < 3 + targets; i++) {
+        if (strcmp(argv[i], "z23") != 0 ||
+            strcmp(values[i], "build/bin/z23") != 0) continue;
+        if (!dp_test_need_clear(w->generation, values[i])) {
+            proof_why(why, why_len, "proof_test_need_clear_failed");
+            return false;
+        }
+        *selected = true;
+        break;
+    }
+    return true;
+}
+
+/* Prepare the real lint executable before the combined Make parses its
+ * standalone-tool closure. The Make guard checks that derivation itself. */
+static bool dp_bundle_lint_bootstrap(struct dp_worker *w, char *why,
+                                      size_t why_len)
+{
+    char log[PATH_MAX];
+    if (!dp_path_written(snprintf(log, sizeof(log), "%s.lint-build",
+                                  w->paths->bundle_log))) {
+        proof_why(why, why_len, "proof_bundle_lint_log_invalid");
+        return false;
+    }
+    struct zcl_dev_proof_budget budget =
+        proof_step_budget(w->paths, "bundle-lint-bootstrap", PROOF_BUNDLE_DEFAULT_MS);
+    const char *argv[] = {"make", "--no-print-directory", w->make_jobs,
+        "build/bin/z23-lint", "ZCL_TEST_WERROR=1", NULL};
+    if (run_step(w->paths, w->generation, log, argv,
+                 "bundle-lint-bootstrap", &budget, NULL) != 0) {
+        proof_why(why, why_len, "proof_bundle_lint_bootstrap_failed");
+        return false;
+    }
+    return true;
+}
+
 /* The bundle make, retried once after a recovery-admission race. `*rc` is
- * make's status; `*first_ms` times the first attempt only (a recovery
- * rerun is rare and stays visible in the retry log). False, with `why`
- * set, only when the retry log path does not fit. */
+ * make's status; `*first_ms` times this Make's first attempt only (a recovery
+ * rerun is rare and stays visible in the retry log). For the combined z23
+ * path, the caller separately reports total bootstrap and Make wall time.
+ * False, with `why` set, only when the retry log path does not fit. */
 static bool dp_worker_bundle_make(struct dp_worker *w, int *rc,
-                                  uint64_t *first_ms, char *why,
+                                  uint64_t *first_ms, bool z23, char *why,
                                   size_t why_len)
 {
     /* Both sets are needed before either dimension starts. One Make goal
@@ -11266,7 +11324,9 @@ static bool dp_worker_bundle_make(struct dp_worker *w, int *rc,
      * the same dev/test-fast epochs and depfiles as dev-proof-bundle. */
     const char *bundle_argv[] = {
         "make", "--no-print-directory", w->make_jobs,
-        "dev-proof-bundle-prefork", "ZCL_TEST_WERROR=1", NULL};
+        "dev-proof-bundle-prefork", z23 ? "z23" : "ZCL_TEST_WERROR=1",
+        z23 ? "ZCL_TEST_WERROR=1" : NULL,
+        z23 ? "ZCL_PROOF_LINT_REQUIRE_LIST=1" : NULL, NULL};
     struct zcl_dev_proof_budget bundle_budget =
         proof_step_budget(w->paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
     int64_t bundle_us0 = platform_time_monotonic_us();
@@ -11290,12 +11350,24 @@ static bool dp_worker_bundle_make(struct dp_worker *w, int *rc,
     return true;
 }
 
-/* The bundle make under the receiver. `*bundle_ms` is its wall time.
- * An include-graph refresh may already have run this very make (same argv,
- * same cold generation) and compiled everything; a second run would only
- * revisit the FORCE/PHONY targets, so the refresh's make stands as the
- * proof's one bundle build and its time is the one reported. The refresh is
- * not observed by the receiver and stays that way. */
+/* Record covered output only after Make and receiver acceptance succeed. */
+static bool dp_bundle_accept_z23(struct dp_worker *w, bool z23,
+                                 char *why, size_t why_len)
+{
+    if (z23 && !dp_test_need_present(w->generation, "build/bin/z23")) {
+        dp_test_need_unbuildable(w, "z23", why, why_len);
+        return false;
+    }
+    w->bundle_z23_covered = z23;
+    if (z23 && w->paths->phases[0])
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "bundle_test_need", "z23");
+    return true;
+}
+
+/* The bundle make under the receiver. `*bundle_ms` includes the lint
+ * bootstrap on the combined path. An earlier include-graph refresh stands
+ * as the bundle build without claiming coverage of later selected needs;
+ * it is not observed by the receiver and stays that way. */
 static bool dp_worker_bundle_build(struct dp_worker *w, uint64_t *bundle_ms,
                                    char *why, size_t why_len)
 {
@@ -11303,10 +11375,19 @@ static bool dp_worker_bundle_build(struct dp_worker *w, uint64_t *bundle_ms,
         *bundle_ms = w->refresh_bundle_ms;
         return true;
     }
+    bool z23 = false;
+    if (!dp_bundle_prepare_z23(w, &z23, why, why_len)) return false;
     struct zcl_verify_receiver rx;
     if (!dp_receiver_begin(w, &rx, why, why_len)) return false;
+    int64_t union_start = platform_time_monotonic_us();
+    if (z23 && !dp_bundle_lint_bootstrap(w, why, why_len)) {
+        (void)dp_receiver_end(w, &rx, NULL, 0);
+        return false;
+    }
     int bundle_rc = 0;
-    bool made = dp_worker_bundle_make(w, &bundle_rc, bundle_ms, why, why_len);
+    bool made = dp_worker_bundle_make(w, &bundle_rc, bundle_ms, z23, why, why_len);
+    if (z23)
+        *bundle_ms = (uint64_t)((platform_time_monotonic_us() - union_start) / 1000);
     bool received = dp_receiver_end(w, &rx, made ? why : NULL,
                                     made ? why_len : 0);
     if (!made) return false;
@@ -11315,6 +11396,7 @@ static bool dp_worker_bundle_build(struct dp_worker *w, uint64_t *bundle_ms,
         return false;
     }
     if (!received) return false;
+    if (!dp_bundle_accept_z23(w, z23, why, why_len)) return false;
     w->bundle_built_prefork = true;
     return true;
 }
@@ -11326,6 +11408,7 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
 {
     if (why && why_len > 0) why[0] = 0;
     uint64_t bundle_ms = 0;
+    w->bundle_union_requested = test_selected;
     if (!dp_worker_bundle_build(w, &bundle_ms, why, why_len)) return false;
 #if defined(__APPLE__)
     /* Compare the executed bundle's plan to the requested
@@ -11548,6 +11631,22 @@ const char *zcl_dev_proof_test_failed_need(const char *log, const char **argv,
 }
 #endif
 
+static void dp_test_needs_remove_covered(const struct dp_worker *w,
+    const char **argv, const char **values, size_t *targets)
+{
+    if (!w->bundle_z23_covered) return;
+    for (size_t i = 3; i < 3 + *targets; i++) {
+        if (strcmp(argv[i], "z23") != 0 ||
+            strcmp(values[i], "build/bin/z23") != 0) continue;
+        for (size_t j = i; j + 1 < 3 + *targets; j++) {
+            argv[j] = argv[j + 1]; values[j] = values[j + 1];
+        }
+        (*targets)--;
+        argv[3 + *targets] = NULL;
+        return;
+    }
+}
+
 /* Build, in the generation and from its own sources, every Make target a
  * selected group declares as a BUILD need (test_group_host_needs.def), alone
  * and before the fork like the prefork step. A tool never copied in from
@@ -11567,6 +11666,7 @@ static bool dp_worker_test_needs(struct dp_worker *w, char *why,
     }
     dp_test_needs_note(w->paths->phases, argv, values, targets,
                        dp_changed_links_release(w->changed));
+    dp_test_needs_remove_covered(w, argv, values, &targets);
     if (targets == 0) return true;
     /* A warm generation seeds build/bin by COPY from the submitting checkout
      * (warm_classify_rel), and these rules name only their own sources as
@@ -11658,6 +11758,47 @@ static bool dp_test_needs_bind(const struct dp_worker *w,
     sha3_256_finalize(&sha, helper_root);
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_bundle_union(const char *generation, const char *groups,
+    bool test_selected, bool bundle_already_built, bool changed_source,
+    bool *covered, uint8_t helper_root[32], char *why, size_t why_len)
+{
+    if (!generation || !groups || !covered || !helper_root) return false;
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof_bundle_union_seam");
+    if (!w) return false;
+    struct proof_paths paths = {0};
+    (void)snprintf(paths.root, sizeof(paths.root), "%s", generation);
+    (void)snprintf(paths.state, sizeof(paths.state), "%s", generation);
+    (void)snprintf(paths.key, sizeof(paths.key), "fixture");
+    (void)snprintf(paths.bundle_log, sizeof(paths.bundle_log),
+                   "%s/bundle-union.log", generation);
+    (void)snprintf(paths.test_needs_log, sizeof(paths.test_needs_log),
+                   "%s/test-needs.log", generation);
+    (void)snprintf(paths.phases, sizeof(paths.phases), "%s/phases.txt", generation);
+    (void)snprintf(w->make_jobs, sizeof(w->make_jobs), "-j1");
+    int n = snprintf(w->groups, sizeof(w->groups), "%s", groups);
+    const char *files[] = {"engine/example.c"};
+    const struct zcl_dev_proof_changed_set changed = {.files = files, .count = 1};
+    w->paths = &paths;
+    w->generation = generation;
+    w->changed = changed_source ? &changed : NULL;
+    w->bundle_built_prefork = bundle_already_built;
+    w->bundle_union_requested = test_selected;
+    uint64_t elapsed = 0;
+    *covered = false;
+    memset(helper_root, 0, 32);
+    bool ok = n >= 0 && (size_t)n < sizeof(w->groups) &&
+              dp_worker_bundle_build(w, &elapsed, why, why_len);
+    if (ok && test_selected)
+        ok = dp_worker_test_needs(w, why, why_len) &&
+             dp_test_needs_bind(w, helper_root, why, why_len);
+    *covered = w->bundle_z23_covered;
+    free(w);
+    return ok;
+}
+#endif
+
 
 static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
                               char *why, size_t why_len)

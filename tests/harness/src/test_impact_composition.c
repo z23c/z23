@@ -13890,6 +13890,266 @@ static int ic_bundle_invocations(const char *generation)
     return lines;
 }
 
+extern bool zcl_dev_proof_test_bundle_union(const char *, const char *, bool, bool, bool,
+                                             bool *, uint8_t [32], char *, size_t);
+
+static bool ic_union_read(const char *dir, const char *rel, char *out, size_t cap)
+{
+    char path[4352]; size_t n;
+    if (snprintf(path, sizeof(path), "%s/%s", dir, rel) >= (int)sizeof(path)) return false;
+    return pw_read_all(path, out, cap, &n);
+}
+/* Extract the actual list assignment/guard, not a fixture copy of its logic. */
+static bool ic_union_guard(char *out, size_t cap)
+{
+    FILE *f = fopen("Makefile", "rb");
+    if (!f) return false;
+    char line[4096]; size_t used = 0; bool started = false, ended = false, ok = true;
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        if (n == sizeof(line) - 1 && line[n - 1] != '\n') { ok = false; break; }
+        if (!started && !strcmp(line, "PROOF_LINT_TOOL_TARGETS :=\n")) started = true;
+        if (!started) continue;
+        if (!strncmp(line, "proof-lint-prebuild:", 20)) { ended = true; break; }
+        if (n >= cap - used) { ok = false; break; }
+        memcpy(out + used, line, n); used += n;
+    }
+    bool read_error = ferror(f) != 0;
+    if (fclose(f) != 0 || read_error) ok = false;
+    if (!ok || !started || !ended) return false;
+    out[used] = 0;
+    return true;
+}
+static bool ic_union_fixture(const char *generation, bool selected, unsigned mode, unsigned variant)
+{
+    const char *check = selected ? "test ! -e build/bin/z23" : "test -e build/bin/z23";
+    const char *node = mode == 1 ? "@:" : "@cp node-input build/bin/z23";
+    char makefile[8192], guard[4096];
+    if (!ic_union_guard(guard, sizeof(guard))) return false;
+    int n = snprintf(makefile, sizeof(makefile),
+        "%s\ndev-proof-bundle-prefork: $(PROOF_LINT_TOOL_TARGETS)\n"
+        ".PHONY: dev-proof-bundle-prefork z23 z23-acme zcl-rpc\n"
+        "build/bin/z23-lint: lint-source\n\t@echo bootstrap >> invocations\n"
+        "\t@if [ -e bootstrap-fail ]; then exit 1; fi; if [ ! -e bootstrap-no-output ]; then cp lint-source $@; chmod +x $@; fi\n"
+        "build/bin/lint-union-fixture:\n\t@echo lint-tool >> invocations\n\t@printf tool > $@\n"
+        "dev-proof-bundle-prefork:\n\t@%s\n\t@echo bundle >> invocations\n\t@%s\n"
+        "z23:\n\t@test ! -e build/bin/z23\n\t@echo node >> invocations\n\t%s\n"
+        "z23-acme:\n\t@test ! -e build/bin/z23-acme\n\t@echo acme >> invocations\n\t@cp acme-input build/bin/z23-acme\n"
+        "zcl-rpc:\n\t@test ! -e build/bin/zcl-rpc\n\t@echo rpc >> invocations\n\t@cp rpc-input build/bin/zcl-rpc\n",
+        guard, check, mode == 2 ? "exit 1" : ":", node);
+    return n > 0 && (size_t)n < sizeof(makefile) &&
+        ic_write(generation, "build/bin/z23", "stale") &&
+        ic_write(generation, "build/bin/z23-acme", "other") &&
+        ic_write(generation, "build/bin/zcl-rpc", "stale-rpc") &&
+        ic_write(generation, "node-input", variant == 1 ? "node-two" : "node-one") &&
+        ic_write(generation, "rpc-input", variant == 2 ? "rpc-two" : "rpc-one") &&
+        ic_write(generation, "lint-source",
+            "#!/bin/sh\n[ \"$1\" = check-standalone-tools-link ] && [ \"$2\" = --list-targets ] || exit 2\n"
+            "echo list >> invocations\n[ ! -e list-fail ] || exit 3\n"
+            "if [ -e list-fail-output ]; then printf '%s\\n' build/bin/lint-union-fixture; exit 3; fi\n"
+            "[ -e list-empty ] || printf '%s\\n' build/bin/lint-union-fixture\n") &&
+        ic_write(generation, "Makefile", makefile);
+}
+static int ic_union_log_count(const char *log, const char *line)
+{
+    int count = 0; size_t n = strlen(line);
+    for (const char *p = log; (p = strstr(p, line)); p += n) ++count;
+    return count;
+}
+static bool ic_union_expected_status(unsigned mode, bool ok, bool covered, const char *why)
+{
+    bool want_ok = mode == 0 || mode >= 3;
+    const char *expected_why = mode == 1 ? "test_need_unbuildable_z23" :
+                               mode == 2 ? "proof_bundle_build_failed" : "";
+    return ok == want_ok && covered == (mode == 0 || mode == 6) && !strcmp(why, expected_why);
+}
+static bool ic_union_bootstrap_log(unsigned mode, const char *log)
+{
+    bool bootstrap = mode < 3 || mode == 6;
+    return ic_union_log_count(log, "bootstrap\n") == (bootstrap ? 1 : 0) &&
+        ic_union_log_count(log, "list\n") == (bootstrap ? 1 : 0) &&
+        ic_union_log_count(log, "lint-tool\n") == (bootstrap ? 1 : 0);
+}
+static bool ic_union_expected_log(unsigned mode, const char *log)
+{
+    bool node = mode == 0 || mode == 1 || mode >= 5;
+    return ic_union_bootstrap_log(mode, log) && ic_union_log_count(log, "bundle\n") == (mode == 5 ? 0 : 1) &&
+        ic_union_log_count(log, "node\n") == (node ? 1 : 0) &&
+        ic_union_log_count(log, "acme\n") == 0 &&
+        ic_union_log_count(log, "rpc\n") == (mode == 0 || mode >= 4 ? 1 : 0);
+}
+static bool ic_union_expected_files(unsigned mode, unsigned variant, bool node_read,
+                                    const char *node, bool other_read, const char *other)
+{
+    bool other_built = mode == 0 || mode >= 4;
+    const char *expected_other = other_built ? (variant == 2 ? "rpc-two" : "rpc-one") : "stale-rpc";
+    const char *expected_node = variant == 1 ? "node-two" : "node-one";
+    if (!other_read || strcmp(other, expected_other)) return false;
+    if (mode == 0 || mode >= 5) return node_read && !strcmp(node, expected_node);
+    if (mode == 3 || mode == 4) return node_read && !strcmp(node, "stale");
+    return !node_read;
+}
+static bool ic_union_acme_untouched(const char *generation)
+{
+    char acme[32] = {0};
+    return ic_union_read(generation, "build/bin/z23-acme", acme, sizeof(acme)) && !strcmp(acme, "other");
+}
+static bool ic_union_case(unsigned mode, unsigned variant, uint8_t root[32])
+{
+    char generation[4096], why[512] = {0}, invocations[128] = {0}, node[32] = {0}, other[32] = {0};
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-union");
+    bool selected = mode < 3 || mode >= 5;
+    const char *groups = mode == 4 || mode == 6 ? "test_zcl_rpc" : "test_onion_pair_watch_live";
+    if (!ic_union_fixture(generation, selected && mode != 5, mode, variant)) return false;
+    bool covered = false;
+    bool ok = zcl_dev_proof_test_bundle_union(generation, groups, mode != 3, mode == 5, mode == 6,
+                                               &covered, root, why, sizeof(why));
+    bool logs = ic_union_read(generation, "invocations", invocations, sizeof(invocations));
+    bool other_ok = ic_union_read(generation, "build/bin/zcl-rpc", other, sizeof(other));
+    bool untouched = ic_union_acme_untouched(generation);
+    bool node_read = ic_union_read(generation, "build/bin/z23", node, sizeof(node));
+    bool result = ic_union_expected_status(mode, ok, covered, why) &&
+        ic_union_expected_log(mode, invocations) &&
+        ic_union_expected_files(mode, variant, node_read, node, other_ok, other);
+    if (!(result && logs && other_ok && untouched)) fprintf(stderr, "bundle union mode=%u ok=%d covered=%d node=%d other=%d untouched=%d why=%s invocations=%s\n",
+        mode, ok, covered, node_read, other_ok, untouched, why, invocations);
+    return result && logs && other_ok && untouched;
+}
+static bool ic_union_empty_needs(void)
+{
+    char generation[4096], why[512] = {0}, log[128] = {0}, node[32] = {0};
+    uint8_t root[32] = {0}; bool covered = false;
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-empty-needs");
+    if (!ic_union_fixture(generation, false, 3, 0)) return false;
+    bool ok = zcl_dev_proof_test_bundle_union(generation, "test_code_inventory", true, false, false,
+                                               &covered, root, why, sizeof(why));
+    bool valid = ok && !covered && !why[0] &&
+        ic_union_read(generation, "invocations", log, sizeof(log)) && !strcmp(log, "bundle\n") &&
+        ic_union_read(generation, "build/bin/z23", node, sizeof(node)) && !strcmp(node, "stale");
+    if (!valid) fprintf(stderr, "bundle empty needs ok=%d covered=%d why=%s log=%s\n", ok, covered, why, log);
+    return valid;
+}
+static bool ic_union_clear_failure(void)
+{
+    char generation[4096], why[512] = {0}, path[4352], sentinel[32] = {0}, log[64] = {0};
+    uint8_t root[32] = {0}; bool covered = false;
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-clear-failure");
+    if (!ic_union_fixture(generation, true, 0, 0) ||
+        snprintf(path, sizeof(path), "%s/build/bin/z23", generation) >= (int)sizeof(path) ||
+        unlink(path) || mkdir(path, 0700) || !ic_write(generation, "build/bin/z23/sentinel", "keep")) return false;
+    bool ok = zcl_dev_proof_test_bundle_union(generation, "test_onion_pair_watch_live", true, false, false,
+                                               &covered, root, why, sizeof(why));
+    bool valid = !ok && !covered && !strcmp(why, "proof_test_need_clear_failed") &&
+        !ic_union_read(generation, "invocations", log, sizeof(log)) &&
+        ic_union_read(generation, "build/bin/z23/sentinel", sentinel, sizeof(sentinel)) && !strcmp(sentinel, "keep");
+    if (!valid) fprintf(stderr, "bundle clear failure ok=%d covered=%d why=%s log=%s sentinel=%s\n", ok, covered, why, log, sentinel);
+    return valid;
+}
+static bool ic_union_retry_logs(const char *generation, char *log, size_t cap)
+{
+    return ic_union_read(generation, "invocations", log, cap) &&
+        ic_union_log_count(log, "bundle\n") == 2 && ic_union_log_count(log, "node\n") == 1 &&
+        ic_union_log_count(log, "bootstrap\n") == 1 && ic_union_log_count(log, "list\n") == 2 &&
+        ic_union_log_count(log, "lint-tool\n") == 1 && ic_union_log_count(log, "rpc\n") == 1;
+}
+static bool ic_union_retry(const uint8_t expected[32])
+{
+    char generation[4096], why[512] = {0}, log[128] = {0}, node[32] = {0}, rpc[32] = {0};
+    char guard[4096], makefile[8192];
+    uint8_t root[32] = {0}; bool covered = false;
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-retry");
+    if (!ic_union_fixture(generation, true, 0, 0)) return false;
+    if (!ic_union_guard(guard, sizeof(guard))) return false;
+    int size = snprintf(makefile, sizeof(makefile),
+        "%s\ndev-proof-bundle-prefork: $(PROOF_LINT_TOOL_TARGETS)\n"
+        "build/bin/z23-lint: lint-source\n\t@echo bootstrap >> invocations\n\t@cp lint-source $@; chmod +x $@\n"
+        "build/bin/lint-union-fixture:\n\t@echo lint-tool >> invocations\n\t@printf tool > $@\n"
+        ".PHONY: dev-proof-bundle-prefork z23 zcl-rpc\n"
+        "dev-proof-bundle-prefork:\n\t@test ! -e build/bin/z23\n\t@echo bundle >> invocations\n"
+        "\t@if [ ! -e retry-marker ]; then touch retry-marker; echo 'unverified compile epoch appeared after recovery admission; rerun make'; exit 1; fi\n"
+        "z23:\n\t@test ! -e build/bin/z23\n\t@echo node >> invocations\n\t@cp node-input build/bin/z23\n"
+        "zcl-rpc:\n\t@test ! -e build/bin/zcl-rpc\n\t@echo rpc >> invocations\n\t@cp rpc-input build/bin/zcl-rpc\n", guard);
+    if (size <= 0 || (size_t)size >= sizeof(makefile) || !ic_write(generation, "Makefile", makefile)) return false;
+    bool ok = zcl_dev_proof_test_bundle_union(generation, "test_onion_pair_watch_live", true, false, false,
+                                               &covered, root, why, sizeof(why));
+    bool valid = ok && covered && !why[0] && !memcmp(root, expected, 32) &&
+        ic_union_retry_logs(generation, log, sizeof(log)) &&
+        ic_union_read(generation, "build/bin/z23", node, sizeof(node)) && !strcmp(node, "node-one") &&
+        ic_union_read(generation, "build/bin/zcl-rpc", rpc, sizeof(rpc)) && !strcmp(rpc, "rpc-one");
+    if (!valid) fprintf(stderr, "bundle retry ok=%d covered=%d why=%s log=%s\n", ok, covered, why, log);
+    return valid;
+}
+static bool ic_union_warm_linter(const char *generation)
+{
+    char source[2048], path[4352];
+    if (!ic_union_read(generation, "lint-source", source, sizeof(source)) ||
+        !ic_write(generation, "build/bin/z23-lint", source)) return false;
+    if (snprintf(path, sizeof(path), "%s/build/bin/z23-lint", generation) >= (int)sizeof(path) ||
+        chmod(path, 0700) != 0) return false;
+    if (snprintf(path, sizeof(path), "%s/lint-source", generation) >= (int)sizeof(path)) return false;
+    struct utimbuf old = {1577836800, 1577836800};
+    return utime(path, &old) == 0;
+}
+static bool ic_union_bootstrap_failure(unsigned mode, bool ok, bool covered,
+                                       const char *why, const char *log)
+{
+    const char *want = mode == 0 ? "proof_bundle_lint_bootstrap_failed" : "proof_bundle_build_failed";
+    int lists = mode < 2 ? 0 : 1;
+    return !ok && !covered && !strcmp(why, want) &&
+        ic_union_log_count(log, "bootstrap\n") == 1 && ic_union_log_count(log, "list\n") == lists &&
+        ic_union_log_count(log, "bundle\n") == 0 && ic_union_log_count(log, "node\n") == 0;
+}
+static bool ic_union_warm_result(bool ok, bool covered, const char *why, bool node_read,
+    const char *node, const uint8_t root[32], const uint8_t expected[32], const char *log)
+{
+    return ok && covered && !why[0] && node_read && !strcmp(node, "node-one") &&
+        !memcmp(root, expected, 32) && ic_union_log_count(log, "bootstrap\n") == 0 &&
+        ic_union_log_count(log, "list\n") == 1 && ic_union_log_count(log, "lint-tool\n") == 1;
+}
+static bool ic_union_bootstrap_case(unsigned mode, const uint8_t expected[32])
+{
+    static const char *const marker[] = {"bootstrap-fail", "bootstrap-no-output", "list-fail", "list-empty", "list-fail-output"};
+    char generation[4096], why[512] = {0}, log[256] = {0}, node[32] = {0};
+    uint8_t root[32] = {0}; bool covered = false;
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-bootstrap");
+    if (!ic_union_fixture(generation, true, 0, 0)) return false;
+    if (mode < 5 && !ic_write(generation, marker[mode], "x")) return false;
+    if (mode == 5 && !ic_union_warm_linter(generation)) return false;
+    bool ok = zcl_dev_proof_test_bundle_union(generation, "test_onion_pair_watch_live", true, false, false,
+                                               &covered, root, why, sizeof(why));
+    bool have_log = ic_union_read(generation, "invocations", log, sizeof(log));
+    bool node_read = ic_union_read(generation, "build/bin/z23", node, sizeof(node));
+    bool valid = mode == 5 ? ic_union_warm_result(ok, covered, why, node_read, node, root, expected, log) :
+        !node_read && ic_union_bootstrap_failure(mode, ok, covered, why, log);
+    if (!valid || !have_log) fprintf(stderr, "bundle bootstrap mode=%u ok=%d covered=%d node=%d why=%s log=%s\n",
+                                     mode, ok, covered, node_read, why, log);
+    return valid && have_log;
+}
+static int test_ic_worker_bundle_union(void)
+{
+    int failures = 0;
+    TEST("proof bundle: only selected z23 joins its fresh prefork make") {
+#if !defined(_WIN32)
+        bool ok = true;
+        uint8_t roots[4][32] = {{0}};
+        for (unsigned i = 0; i < 7; ++i) ok = ic_union_case(i, 0, roots[0]) && ok;
+        ok = ic_union_case(0, 0, roots[0]) && ok;
+        ok = ic_union_case(0, 1, roots[1]) && ok;
+        ok = ic_union_case(0, 2, roots[2]) && ok;
+        ok = ic_union_case(5, 0, roots[3]) && ok;
+        ok = memcmp(roots[0], roots[1], 32) && memcmp(roots[0], roots[2], 32) && ok;
+        ok = !memcmp(roots[0], roots[3], 32) && ok;
+        ok = ic_union_empty_needs() && ok;
+        ok = ic_union_clear_failure() && ok;
+        ok = ic_union_retry(roots[0]) && ok;
+        for (unsigned i = 0; i < 6; ++i) ok = ic_union_bootstrap_case(i, roots[0]) && ok;
+        ASSERT(ok);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_worker_bundle_make_once(void)
 {
     int failures = 0;
@@ -17040,6 +17300,7 @@ int test_impact_composition(void)
     failures += test_ic_worker_plan_docs_before_refresh();
     failures += test_ic_worker_plan_graph_refresh_refuses();
     failures += test_ic_worker_bundle_make_once();
+    failures += test_ic_worker_bundle_union();
     printf("closure_generation_fixtures wall_us=%lld\n",
            (long long)(platform_time_monotonic_us() - closure_fixture_started_us));
     failures += test_ic_generation_docs_fresh_refuses_missing_tools();
