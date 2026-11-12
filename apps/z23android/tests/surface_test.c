@@ -264,7 +264,8 @@ static void share_text_is_clear(void)
     require(src, "ZAPP_SHARE_SEND_REQUEST", "send request id");
     require(src, "startActivityForResult", "chooser result callback");
     require(src, "if (request == ZAPP_SHARE_SEND_REQUEST)", "send result handling");
-    require(src, "if (result != -1) return_with_notice(\"Share cancelled. Nothing was sent.\");", "cancelled chooser notice");
+    require(src, "if (result == -1) return_with_notice(\"Android completed the share action. Delivery is not confirmed.\");", "confirmed chooser action without a delivery claim");
+    require(src, "else return_with_notice(\"Share sheet closed. Android does not confirm whether anything was sent.\");", "ambiguous chooser result does not assert cancellation");
     require(src, "return !ok;", "keep ShareActivity alive while the chooser is open");
     free(src);
     src = slurp("dexgen.c");

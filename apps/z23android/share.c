@@ -148,8 +148,9 @@ bool zapp_share_begin(JNIEnv *env, jobject activity)
 bool zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
 {
     if (request == ZAPP_SHARE_SEND_REQUEST) {
-        if (result != -1) return_with_notice("Share cancelled. Nothing was sent.");
-        else return_with_notice("");
+        /* Recipient launches and cancellations can share one result; neither result proves delivery. */
+        if (result == -1) return_with_notice("Android completed the share action. Delivery is not confirmed.");
+        else return_with_notice("Share sheet closed. Android does not confirm whether anything was sent.");
         zapp_share_destroy();
         return true;
     }
