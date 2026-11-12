@@ -52,6 +52,7 @@ trap 'err_report "$?" "$LINENO" "$BASH_COMMAND"' ERR
 cd "$(dirname "$0")/../.."
 
 BIN=build/bin/zcode-package-registry-check
+JSONQ=build/bin/jsonq
 CHECK_ONLY=0
 SELFTEST=0
 case "${1:-}" in
@@ -64,14 +65,10 @@ esac
 
 CORPUS_MANIFEST_ROOT=contexts/commons/packages
 PACKAGE_MANIFESTS=()
-EDGE_MANIFESTS=()
-EDGE_NAMES=()
-EDGE_ROOTS=()
 MISMATCH_MANIFESTS=()
 MISMATCH_NAMES=()
 MISMATCH_PINNED=()
 MISMATCH_EXPECTED=()
-declare -A ROOT_BY_NAME MANIFEST_BY_NAME
 
 registry_package_manifests() ( # $1 = repository root
     cd "$1" || return 2
@@ -145,71 +142,51 @@ discover_package_manifests() { # $1 = repository root
 # helper. Nothing here trusts registry membership: the manifest census is the
 # authority over what must be scanned.
 scan_corpus() { # $1 = repository root, $2 = checker command/function
-    local root="$1" deriver="$2" manifest dir out header name content line
-    local dep_name dep_root expected i
-    ROOT_BY_NAME=()
-    MANIFEST_BY_NAME=()
-    EDGE_MANIFESTS=()
-    EDGE_NAMES=()
-    EDGE_ROOTS=()
+    local root="$1" deriver="$2" out count i manifest name pinned expected field candidate known
     MISMATCH_MANIFESTS=()
     MISMATCH_NAMES=()
     MISMATCH_PINNED=()
     MISMATCH_EXPECTED=()
 
-    for manifest in "${PACKAGE_MANIFESTS[@]}"; do
-        dir="$root/${manifest%/zcode-package.json}"
-        if ! out=$("$deriver" --derive-dir "$dir" 2>&1); then
-            echo "FAIL: could not derive $manifest:" >&2
-            printf '%s\n' "$out" >&2
-            return 2
-        fi
-        # First line without a pipe: `printf | head -1` takes SIGPIPE when head exits
-        # before printf finishes, and pipefail then turns that into a silent exit.
-        header=${out%%$'\n'*}
-        name=${header%% *}
-        content=$(printf '%s\n' "$header" |
-            LC_ALL=C sed -n 's/.* content=\([0-9a-f]*\).*/\1/p')
-        if [[ ! "$name" =~ ^[a-z0-9][a-z0-9._+-]*/[a-z0-9][a-z0-9._+-]*$ ]] ||
-           [[ ! "$content" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "FAIL: malformed derivation header for $manifest: $header" >&2
-            return 2
-        fi
-        if [ -n "${ROOT_BY_NAME[$name]+present}" ]; then
-            echo "FAIL: duplicate package name $name in $manifest and ${MANIFEST_BY_NAME[$name]}" >&2
-            return 2
-        fi
-        ROOT_BY_NAME[$name]=$content
-        MANIFEST_BY_NAME[$name]=$manifest
-
-        while IFS= read -r line; do
-            [[ "$line" == dependency\ name=*\ root=* ]] || continue
-            dep_name=${line#dependency name=}
-            dep_name=${dep_name%% root=*}
-            dep_root=${line##* root=}
-            if [ -z "$dep_name" ] || [[ ! "$dep_root" =~ ^[0-9a-f]{64}$ ]]; then
-                echo "FAIL: malformed dependency derivation for $manifest: $line" >&2
+    # Capture the complete response before consuming it; failed derivations and
+    # failed writes must never contribute a partial graph or a CLEAN result.
+    if ! out=$("$deriver" --corpus "$root" "${PACKAGE_MANIFESTS[@]}"); then
+        echo "FAIL: could not derive the complete package corpus" >&2
+        return 2
+    fi
+    [ "$("$JSONQ" get schema <<< "$out")" = zcl.package_corpus.v1 ] &&
+        [ "$("$JSONQ" type manifest_count <<< "$out")" = number ] &&
+        [ "$("$JSONQ" type mismatches <<< "$out")" = array ] &&
+        [ "$("$JSONQ" get manifest_count <<< "$out")" = "${#PACKAGE_MANIFESTS[@]}" ] || {
+        echo "FAIL: incomplete or invalid package corpus response" >&2
+        return 2
+    }
+    count=$("$JSONQ" count mismatches <<< "$out") || return 2
+    for ((i = 0; i < count; i++)); do
+        for field in manifest name pinned expected; do
+            [ "$("$JSONQ" type "mismatches[$i].$field" <<< "$out")" = string ] || {
+                echo "FAIL: invalid corpus mismatch $i field $field" >&2
                 return 2
-            fi
-            EDGE_MANIFESTS+=("$manifest")
-            EDGE_NAMES+=("$dep_name")
-            EDGE_ROOTS+=("$dep_root")
-        done <<< "$out"
-    done
-
-    for i in "${!EDGE_NAMES[@]}"; do
-        name=${EDGE_NAMES[$i]}
-        expected=${ROOT_BY_NAME[$name]:-}
-        if [ -z "$expected" ]; then
-            echo "FAIL: ${EDGE_MANIFESTS[$i]} names undiscovered dependency $name" >&2
+            }
+        done
+        manifest=$("$JSONQ" get "mismatches[$i].manifest" <<< "$out") || return 2
+        name=$("$JSONQ" get "mismatches[$i].name" <<< "$out") || return 2
+        pinned=$("$JSONQ" get "mismatches[$i].pinned" <<< "$out") || return 2
+        expected=$("$JSONQ" get "mismatches[$i].expected" <<< "$out") || return 2
+        known=0
+        for candidate in "${PACKAGE_MANIFESTS[@]}"; do
+            [ "$manifest" != "$candidate" ] || known=1
+        done
+        if [ "$known" -ne 1 ] ||
+           [[ ! "$name" =~ ^[a-z0-9][a-z0-9._+-]*/[a-z0-9][a-z0-9._+-]*$ ]] ||
+           [[ ! "$pinned" =~ ^[0-9a-f]{64}$ ]] || [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "FAIL: invalid corpus mismatch $i values" >&2
             return 2
         fi
-        if [ "${EDGE_ROOTS[$i]}" != "$expected" ]; then
-            MISMATCH_MANIFESTS+=("${EDGE_MANIFESTS[$i]}")
-            MISMATCH_NAMES+=("$name")
-            MISMATCH_PINNED+=("${EDGE_ROOTS[$i]}")
-            MISMATCH_EXPECTED+=("$expected")
-        fi
+        MISMATCH_MANIFESTS+=("$manifest")
+        MISMATCH_NAMES+=("$name")
+        MISMATCH_PINNED+=("$pinned")
+        MISMATCH_EXPECTED+=("$expected")
     done
 }
 
@@ -272,35 +249,38 @@ rewrite_dependency_pin() { # $1 = manifest, $2 = name, $3 = root
     mv "$tmp" "$manifest"
 }
 
-fixture_derive() { # selftest-only deterministic stand-in for --derive-dir
-    local dir="$2" package=${2##*/} pinned root
-    pinned=$(LC_ALL=C sed -n 's/.*"root"[ \t]*:[ \t]*"\([0-9a-f]*\)".*/\1/p' \
-        "$dir/zcode-package.json")
-    pinned=${pinned%%$'\n'*}  # first match; no pipe, no GNU-only sed command
-    case "$package" in
-        zprng) printf 'zprng/zprng content=%064d\n' 0 | tr '0' '1' ;;
-        consumer)
-            [ "$pinned" = "$(printf '%064d' 0 | tr '0' '1')" ] &&
-                root=$(printf '%064d' 0 | tr '0' '2') ||
-                root=$(printf '%064d' 0 | tr '0' 'b')
-            printf 'fixture/consumer content=%s\n' "$root"
-            printf 'dependency name=zprng/zprng root=%s\n' "$pinned"
-            ;;
-        top)
-            [ "$pinned" = "$(printf '%064d' 0 | tr '0' '2')" ] &&
-                root=$(printf '%064d' 0 | tr '0' '3') ||
-                root=$(printf '%064d' 0 | tr '0' 'c')
-            printf 'fixture/top content=%s\n' "$root"
-            printf 'dependency name=fixture/consumer root=%s\n' "$pinned"
-            ;;
-        *) return 2 ;;
-    esac
+fixture_root() { # independently derive one real fixture directory
+    local out header
+    out=$("$BIN" --derive-dir "$1") || return 2
+    header=${out%%$'\n'*}
+    [[ "$header" =~ content=([0-9a-f]{64}) ]] || return 2
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+fixture_corpus_response() { # protocol fault injection; never derives a graph
+    printf '%s\n' "$fixture_corpus_json"
+}
+
+fixture_corpus_refusal() { # rejected native inputs must emit no usable JSON
+    local label="$1" root="$2"; shift 2
+    if "$BIN" --corpus "$root" "$@" > "$root/$label.out" 2> "$root/$label.err"; then
+        echo "SELFTEST FAILED: native corpus accepted $label" >&2
+        return 1
+    fi
+    [ ! -s "$root/$label.out" ] && [ -s "$root/$label.err" ] || {
+        echo "SELFTEST FAILED: native corpus refusal $label lacked a complete failure" >&2
+        return 1
+    }
 }
 
 run_selftest() {
     local tmp rounds i old_leaf old_consumer new_leaf new_consumer
     local top_dir=contexts/commons/modules/top
-    local v
+    local v fixture_corpus_json
+    [ -x "$BIN" ] && [ -x "$JSONQ" ] || {
+        echo "SELFTEST FAILED: build current helpers with make build/bin/zcode-package-registry-check first" >&2
+        return 2
+    }
     # The fixture is a throwaway git repository. Nothing from the caller's git
     # environment (GIT_DIR, GIT_INDEX_FILE, GIT_WORK_TREE, ...) may redirect its
     # git calls into the real repository, and no user, system or template config
@@ -312,17 +292,22 @@ run_selftest() {
     trap "rm -rf '$tmp'" EXIT
     old_leaf=$(printf '%064d' 0 | tr '0' 'a')
     old_consumer=$(printf '%064d' 0 | tr '0' 'b')
-    new_leaf=$(printf '%064d' 0 | tr '0' '1')
-    new_consumer=$(printf '%064d' 0 | tr '0' '2')
     mkdir -p "$tmp/$CORPUS_MANIFEST_ROOT"/{zprng,consumer} "$tmp/$top_dir" "$tmp/engine/composition"
     printf 'ZCODE_PACKAGE("fixture/top", "%s", 1,\n)\n' "$top_dir" \
         > "$tmp/engine/composition/fixture.def"
-    printf '{\n  "schema": 1,\n  "name": "zprng/zprng",\n  "dependencies": []\n}\n' \
+    printf '{\n  "schema": 1,\n  "name": "zprng/zprng",\n  "semver": "0.1.0",\n  "language": "c23",\n  "license": "Apache-2.0",\n  "dependencies": []\n}\n' \
         > "$tmp/$CORPUS_MANIFEST_ROOT/zprng/zcode-package.json"
-    printf '{\n  "schema": 1,\n  "name": "fixture/consumer",\n  "dependencies": [\n    {\n      "name": "zprng/zprng",\n      "root": "%s"\n    }\n  ]\n}\n' \
+    printf '{\n  "schema": 1,\n  "name": "fixture/consumer",\n  "semver": "0.1.0",\n  "language": "c23",\n  "license": "Apache-2.0",\n  "dependencies": [\n    {\n      "name": "zprng/zprng",\n      "root": "%s"\n    }\n  ]\n}\n' \
         "$old_leaf" > "$tmp/$CORPUS_MANIFEST_ROOT/consumer/zcode-package.json"
-    printf '{\n  "schema": 1,\n  "name": "fixture/top",\n  "dependencies": [\n    {\n      "root": "%s",\n      "name": "fixture/consumer"\n    }\n  ]\n}\n' \
+    printf '{\n  "schema": 1,\n  "name": "fixture/top",\n  "semver": "0.1.0",\n  "language": "c23",\n  "license": "Apache-2.0",\n  "dependencies": [\n    {\n      "root": "%s",\n      "name": "fixture/consumer"\n    }\n  ]\n}\n' \
         "$old_consumer" > "$tmp/$top_dir/zcode-package.json"
+    for i in "$CORPUS_MANIFEST_ROOT/zprng" "$CORPUS_MANIFEST_ROOT/consumer" "$top_dir"; do
+        mkdir -p "$tmp/$i/src" "$tmp/$i/include"
+        printf '%s\n' 'int fixture_value(void) { return 1; }' > "$tmp/$i/src/fixture.c"
+        awk '{ print } /"license":/ { print "  \"include_dir\": \"include\","; print "  \"source_dir\": \"src\"," }' \
+            "$tmp/$i/zcode-package.json" > "$tmp/$i/manifest.tmp"
+        mv "$tmp/$i/manifest.tmp" "$tmp/$i/zcode-package.json"
+    done
     git -C "$tmp" init -q ||
         { echo "SELFTEST FAILED: git init in fixture $tmp failed" >&2; return 1; }
     git -C "$tmp" add "$CORPUS_MANIFEST_ROOT" "$top_dir" engine/composition ||
@@ -365,9 +350,30 @@ run_selftest() {
     discover_package_manifests "$tmp"
     echo "  selftest ok: an unreadable tracked registry declaration refuses discovery"
 
+    for fixture_corpus_json in \
+        '{"schema":"zcl.package_corpus.v1","manifest_count":3,"mismatches":{}}' \
+        '{"schema":"zcl.package_corpus.v1","manifest_count":"3","mismatches":[]}' \
+        '{"schema":"zcl.package_corpus.v1","manifest_count":3,"mismatches":[{"manifest":true}]}' \
+        '{"schema":"zcl.package_corpus.v1","manifest_count":2,"mismatches":[]}' \
+        '{"schema":"zcl.package_corpus.v1","manifest_count":3,"mismatches":['; do
+        if scan_corpus "$tmp" fixture_corpus_response >/dev/null 2>&1; then
+            echo "SELFTEST FAILED: malformed corpus response was accepted" >&2
+            return 1
+        fi
+    done
+    echo "  selftest ok: malformed corpus responses refuse before repair or CLEAN"
+    fixture_corpus_refusal duplicate "$tmp" "$CORPUS_MANIFEST_ROOT/zprng/zcode-package.json" \
+        "$CORPUS_MANIFEST_ROOT/zprng/zcode-package.json"
+    fixture_corpus_refusal missing-dependency "$tmp" "$CORPUS_MANIFEST_ROOT/consumer/zcode-package.json"
+    mkdir -p "$tmp/broken"
+    printf '%s\n' '{' > "$tmp/broken/zcode-package.json"
+    fixture_corpus_refusal late-malformed "$tmp" "$CORPUS_MANIFEST_ROOT/zprng/zcode-package.json" \
+        broken/zcode-package.json
+    echo "  selftest ok: duplicate, missing and late malformed native inputs emit no partial JSON"
+    new_leaf=$(fixture_root "$tmp/$CORPUS_MANIFEST_ROOT/zprng")
     rounds=0
     while :; do
-        scan_corpus "$tmp" fixture_derive
+        scan_corpus "$tmp" "$BIN"
         [ "${#MISMATCH_NAMES[@]}" -gt 0 ] || break
         for i in "${!MISMATCH_NAMES[@]}"; do
             rewrite_dependency_pin "$tmp/${MISMATCH_MANIFESTS[$i]}" \
@@ -389,6 +395,7 @@ run_selftest() {
         echo "SELFTEST FAILED: consumer manifest does not pin the new leaf root $new_leaf; it holds: $(LC_ALL=C grep '"root"' "$tmp/$CORPUS_MANIFEST_ROOT/consumer/zcode-package.json" || true)" >&2
         return 1
     }
+    new_consumer=$(fixture_root "$tmp/$CORPUS_MANIFEST_ROOT/consumer")
     grep -q "$new_consumer" "$tmp/$top_dir/zcode-package.json" || {
         echo "SELFTEST FAILED: top manifest does not pin the new consumer root $new_consumer; it holds: $(LC_ALL=C grep '"root"' "$tmp/$top_dir/zcode-package.json" || true)" >&2
         return 1

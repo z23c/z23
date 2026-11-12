@@ -5424,7 +5424,8 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 		contexts/commons/modules/vcs/src/package_capsule.c contexts/commons/modules/vcs/src/package_release.c \
 		platform/modules/json/src/json.c platform/modules/codec/src/cursor.c platform/modules/sha3/src/sha3.c \
 		platform/modules/base/src/cleanse.c platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c \
-		platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c
+		platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c \
+        | $(BIN_DIR)/jsonq$(ZCL_HOST_EXEEXT)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    -O2 -Wall -Wextra -Werror -pedantic \

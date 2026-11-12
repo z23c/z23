@@ -210,11 +210,12 @@ static int zpr_take_match(char *text, regex_t *re, char v[][RS_PATH], int cap, i
 static int zpr_run_rederive(char *cap, size_t capn)
 {
     int code = 0;
-    if (capture_cmd("tools/scripts/zcode_registry_rederive.sh --selftest", cap, capn, &code)
+    /* Check rebuilds the native helpers before the real corpus fixture runs. */
+    if (capture_cmd("tools/scripts/zcode_registry_rederive.sh --check", cap, capn, &code)
         || zpr_replay(cap))
         return 2;
     if (code != 0) return 1;
-    if (capture_cmd("tools/scripts/zcode_registry_rederive.sh --check", cap, capn, &code)
+    if (capture_cmd("tools/scripts/zcode_registry_rederive.sh --selftest", cap, capn, &code)
         || zpr_replay(cap))
         return 2;
     if (code != 0) return 1;

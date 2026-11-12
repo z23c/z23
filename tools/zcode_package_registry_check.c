@@ -2,12 +2,15 @@
  * Purpose: rederive and verify the checked-in ZCODE package root projection. */
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
+#include "json/json.h"
 #include "vcs/package_prepare.h"
 
 #include <secp256k1.h>
 #include <secp256k1_recovery.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 struct registry_row {
@@ -254,15 +257,185 @@ static int check_all_rows(bool derive, const char *derive_name, bool *derived)
     return 0;
 }
 
+/* A bounded, per-invocation projection; never a durable registry authority. */
+#define CORPUS_MAX 1024u
+#define CORPUS_OUTPUT_MAX (16u * 1024u * 1024u)
+struct corpus_item {
+    const char *manifest;
+    char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
+    uint8_t root[32];
+    struct vcs_package_lock_node *deps;
+    size_t count;
+};
+static bool corpus_component_valid(const char *start, const char *end)
+{
+    size_t len = (size_t)(end - start);
+    return len && !(len == 1 && start[0] == '.') &&
+           !(len == 2 && start[0] == '.' && start[1] == '.');
+}
+static bool corpus_components_valid(const char *path)
+{
+    const char *component = path;
+    for (const unsigned char *p = (const unsigned char *)path; ; ++p) {
+        if (*p && (*p < 32 || *p == 127 || *p == '\\')) return false;
+        if (*p == '/' || !*p) {
+            if (!corpus_component_valid(component, (const char *)p)) return false;
+            if (!*p) return true;
+            component = (const char *)p + 1;
+        }
+    }
+}
+static bool corpus_path(const char *path, size_t *dirlen)
+{
+    static const char suffix[] = "/zcode-package.json";
+    size_t n = strlen(path), s = sizeof(suffix) - 1u;
+    if (n <= s || n >= 4096 || path[0] == '/' || strcmp(path + n - s, suffix)) return false;
+    if (!corpus_components_valid(path)) return false;
+    *dirlen = n - s;
+    return true;
+}
+static void corpus_free(struct corpus_item *items, size_t count)
+{
+    if (!items) return;
+    for (size_t i = 0; i < count; ++i) free(items[i].deps);
+    free(items);
+}
+static bool corpus_prepare(struct corpus_item *item, const char *root,
+                           const char *manifest, const uint8_t pubkey[33])
+{
+    size_t dirlen;
+    char dir[8192];
+    if (!corpus_path(manifest, &dirlen)) {
+        fprintf(stderr, "invalid corpus manifest: %s\n", manifest);
+        return false;
+    }
+    int n = snprintf(dir, sizeof(dir), "%s/%.*s", root, (int)dirlen, manifest);
+    if (n < 0 || (size_t)n >= sizeof(dir)) {
+        fprintf(stderr, "corpus path too long: %s\n", manifest);
+        return false;
+    }
+    struct vcs_package_prepare_options options = {
+        .dir = dir, .publisher_sequence = 1, .reward_address = "", .chain_id = "zclassic-main"};
+    memcpy(options.publisher_pubkey, pubkey, 33);
+    struct vcs_package_prepared prepared;
+    vcs_package_prepared_init(&prepared);
+    char detail[256] = {0};
+    enum vcs_package_prepare_error err = vcs_package_prepare(&options, &prepared, detail, sizeof(detail));
+    if (err != VCS_PACKAGE_PREPARE_OK || !prepared.lock.count) {
+        fprintf(stderr, "corpus prepare failed: %s (%s: %s)\n", manifest,
+                vcs_package_prepare_error_string(err), detail);
+        vcs_package_prepared_free(&prepared);
+        return false;
+    }
+    item->manifest = manifest;
+    memcpy(item->name, prepared.release.name, sizeof(item->name));
+    memcpy(item->root, prepared.package_root, 32);
+    item->count = prepared.lock.count - 1u;
+    if (item->count) {
+        item->deps = zcl_malloc(item->count * sizeof(*item->deps), "corpus.dependencies");
+        if (item->deps) memcpy(item->deps, prepared.lock.nodes, item->count * sizeof(*item->deps));
+    }
+    vcs_package_prepared_free(&prepared);
+    if (item->count && !item->deps) fprintf(stderr, "corpus dependency allocation failed: %s\n", manifest);
+    return !item->count || item->deps;
+}
+static bool corpus_unique(const struct corpus_item *items, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        for (size_t k = 0; k < i; ++k) {
+            if (!strcmp(items[i].name, items[k].name)) {
+                fprintf(stderr, "duplicate corpus package: %s\n", items[i].name);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+static bool corpus_mismatch(struct json_value *array, const struct corpus_item *item,
+                            const struct vcs_package_lock_node *dep, const uint8_t expected[32], size_t *used)
+{
+    char pinned[65], actual[65];
+    zcl_hex_encode(dep->root, 32, pinned);
+    zcl_hex_encode(expected, 32, actual);
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    bool ok = row.type == JSON_OBJ && json_push_kv_str(&row, "manifest", item->manifest) &&
+        json_push_kv_str(&row, "name", dep->name) && json_push_kv_str(&row, "pinned", pinned) &&
+        json_push_kv_str(&row, "expected", actual);
+    size_t n = ok ? json_write(&row, NULL, 0) : 0;
+    ok = n && *used < CORPUS_OUTPUT_MAX && n < CORPUS_OUTPUT_MAX - *used;
+    if (ok) ok = json_push_back(array, &row);
+    if (ok) *used += n + 1u;
+    json_free(&row);
+    return ok;
+}
+static bool corpus_compare(struct corpus_item *items, size_t count, struct json_value *mismatches)
+{
+    size_t used = 256u; /* Includes the fixed envelope, count, separators and newline. */
+    for (size_t i = 0; i < count; ++i) {
+        for (size_t d = 0; d < items[i].count; ++d) {
+            size_t k = 0;
+            while (k < count && strcmp(items[k].name, items[i].deps[d].name)) ++k;
+            if (k == count) {
+                fprintf(stderr, "missing corpus dependency: %s\n", items[i].deps[d].name);
+                return false;
+            }
+            if (memcmp(items[i].deps[d].root, items[k].root, 32) &&
+                !corpus_mismatch(mismatches, &items[i], &items[i].deps[d], items[k].root, &used)) return false;
+        }
+    }
+    return true;
+}
+static bool corpus_emit(struct json_value *mismatches, size_t count)
+{
+    struct json_value obj;
+    json_init(&obj);
+    json_set_object(&obj);
+    bool ok = obj.type == JSON_OBJ && json_push_kv_str(&obj, "schema", "zcl.package_corpus.v1") &&
+        json_push_kv_int(&obj, "manifest_count", (int64_t)count) && json_push_kv(&obj, "mismatches", mismatches);
+    size_t len = ok ? json_write(&obj, NULL, 0) : 0;
+    char *wire = len && len < CORPUS_OUTPUT_MAX ? zcl_malloc(len + 1u, "corpus.output") : NULL;
+    ok = ok && wire && json_write(&obj, wire, len + 1u) == len &&
+        fwrite(wire, 1, len, stdout) == len && putchar('\n') != EOF;
+    free(wire);
+    json_free(&obj);
+    return ok;
+}
+static int corpus_run(const char *root, char **manifests, size_t count)
+{
+    if (!root || !root[0] || !count || count > CORPUS_MAX) {
+        fprintf(stderr, "invalid corpus inputs\n");
+        return 2;
+    }
+    struct corpus_item *items = zcl_calloc(count, sizeof(*items), "corpus.items");
+    secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+    uint8_t pubkey[33];
+    bool ok = items && derive_fixture_public(ctx, pubkey);
+    for (size_t i = 0; ok && i < count; ++i) ok = corpus_prepare(&items[i], root, manifests[i], pubkey);
+    if (ctx) secp256k1_context_destroy(ctx);
+    struct json_value mismatches;
+    json_init(&mismatches);
+    json_set_array(&mismatches);
+    ok = ok && mismatches.type == JSON_ARR && corpus_unique(items, count) &&
+        corpus_compare(items, count, &mismatches) && corpus_emit(&mismatches, count);
+    if (!ok) fprintf(stderr, "corpus comparison failed\n");
+    json_free(&mismatches);
+    corpus_free(items, count);
+    return ok ? 0 : 1;
+}
+
 static int run_registry_check(int argc, char **argv)
 {
+    if (argc >= 4 && strcmp(argv[1], "--corpus") == 0)
+        return corpus_run(argv[2], argv + 3, (size_t)argc - 3u);
     bool derive = argc == 3 && strcmp(argv[1], "--derive") == 0;
     bool derive_dir = argc == 3 && strcmp(argv[1], "--derive-dir") == 0;
     const char *derive_name = derive ? argv[2] : NULL;
     if (argc != 1 && !derive && !derive_dir) {
         fprintf(stderr,
                 "usage: zcode-package-registry-check "
-                "[--derive NAME|--derive-dir DIR]\n");
+                "[--derive NAME|--derive-dir DIR|--corpus ROOT MANIFEST...]\n");
         return 2;
     }
     if (derive_dir)
