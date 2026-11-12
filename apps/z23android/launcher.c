@@ -155,10 +155,11 @@ static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *o
 {
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)zj_clean(env); return false; }
     memset(app, 0, sizeof(*app));
-    bool ok = resolve_names(env, info, &app->entry) && strcmp(app->entry.package, own);
+    bool ok = resolve_names(env, info, &app->entry);
+    bool current = ok && !strcmp(app->entry.package, own);
     if (ok) resolve_label(env, info, manager, app->entry.package, app->entry.label, sizeof(app->entry.label));
-    if (ok && zapp_home_is_z23_app(app->entry.package)) {
-        app->entry.same_signature = same_signature(env, manager, own, app->entry.package);
+    if (ok && (current || zapp_home_is_z23_app(app->entry.package))) {
+        app->entry.same_signature = current || same_signature(env, manager, own, app->entry.package);
         resolve_version(env, manager, &app->entry);
     }
     (*env)->PopLocalFrame(env, NULL);
@@ -167,30 +168,44 @@ static bool read_entry(JNIEnv *env, jobject info, jobject manager, const char *o
 static int by_label(const void *a, const void *b)
 {
     const struct zapp_launcher_app *x = a, *y = b;
-    int order = strcasecmp(x->entry.label, y->entry.label);
-    return order ? order : strcmp(x->entry.package, y->entry.package);
+    return zapp_home_app_compare(&x->entry, &y->entry);
 }
 static bool own_package(JNIEnv *env, jobject activity, char *out, size_t cap)
 {
     jstring name = (jstring)zj_object_property(env, activity, "getPackageName", "()Ljava/lang/String;");
     return name && zj_copy_utf(env, name, out, cap);
 }
-size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max)
+static size_t collect_launchers(JNIEnv *env, jobject manager, jobject list, const char *own,
+    struct zapp_launcher_app *apps, size_t max)
 {
     size_t count = 0;
-    char own[ZAPP_APP_PACKAGE_CAP] = "";
-    if (max > ZAPP_LAUNCHER_MAX) max = ZAPP_LAUNCHER_MAX;
-    if ((*env)->PushLocalFrame(env, 32) != JNI_OK) { (void)zj_clean(env); return 0; }
-    jobject manager = zj_object_property(env, activity, "getPackageManager", "()Landroid/content/pm/PackageManager;");
-    jobject list = manager && own_package(env, activity, own, sizeof(own)) ? query_launchers(env, manager) : NULL;
     jmethodID size = list ? zj_method(env, list, "size", "()I") : NULL;
     jmethodID get = size ? zj_method(env, list, "get", "(I)Ljava/lang/Object;") : NULL;
     jint total = get ? (*env)->CallIntMethod(env, list, size) : 0;
-    for (jint i = 0; zj_clean(env) && i < total && count < max; ++i) {
+    bool have_base = false;
+    for (jint i = 0; zj_clean(env) && i < total && (count < max || !have_base); ++i) {
         jobject info = (*env)->CallObjectMethod(env, list, get, i);
-        if (zj_clean(env) && info && read_entry(env, info, manager, own, &apps[count])) ++count;
+        struct zapp_launcher_app app;
+        if (zj_clean(env) && info && read_entry(env, info, manager, own, &app)) {
+            bool base = !strcmp(app.entry.package, "org.z23.nativeapp");
+            size_t slot = zapp_home_app_slot(&app.entry, count, max, have_base);
+            if (base) have_base = true;
+            if (slot < count) apps[slot] = app;
+            else if (slot < max) apps[count++] = app;
+        }
         if (info) (*env)->DeleteLocalRef(env, info);
     }
+    return count;
+}
+size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max)
+{
+    char own[ZAPP_APP_PACKAGE_CAP] = "";
+    if (max > ZAPP_LAUNCHER_MAX) max = ZAPP_LAUNCHER_MAX;
+    if (!max) return 0;
+    if ((*env)->PushLocalFrame(env, 32) != JNI_OK) { (void)zj_clean(env); return 0; }
+    jobject manager = zj_object_property(env, activity, "getPackageManager", "()Landroid/content/pm/PackageManager;");
+    jobject list = manager && own_package(env, activity, own, sizeof(own)) ? query_launchers(env, manager) : NULL;
+    size_t count = collect_launchers(env, manager, list, own, apps, max);
     (*env)->PopLocalFrame(env, NULL);
     qsort(apps, count, sizeof(*apps), by_label);
     return count;

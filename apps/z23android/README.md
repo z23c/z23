@@ -154,10 +154,10 @@ release:
 
 - Cards: typed JSON, `zcl.phone_card.v1`, `zcl.z23_app_card.v1` and
   `zcl.app_card.v1`. They carry no token, plan, pairing offer, key or path.
-  A signed Z23 app card also carries `version_name` when nonempty and
-  `version_code` when PackageManager reports it. This is install metadata, not
-  source identity or proof that an update activated.
-  <!-- claim: symbol-present zapp_home_app_card apps/z23android/home.c # version metadata on signed Z23 cards -->
+  A signed Z23 app card and the base app's plain card also carry `version_name`
+  when nonempty and `version_code` when PackageManager reports it. This is install
+  metadata, not source identity or proof that an update activated.
+  <!-- claim: symbol-present zapp_home_app_card apps/z23android/home.c # version metadata on signed Z23 and base-app cards -->
 - A layout recipe, `zcl.layout_recipe.v1` (see `docs/spec/short-video-network.md`
   section 5.4), plus an optional `theme` of `background`, `text`, `muted` and
   `accent`, each `#rrggbb`. Containers: `pager_vertical`, `list`, `grid`;
@@ -185,10 +185,13 @@ The apps list, the **Android home settings** entry and the footer **Apps** and
 **Settings** buttons are drawn by app code, not by the layout, so a bad layout
 never hides them. The Apps screen uses text labels only and does not load or draw
 installed-app icons; camera previews, QR codes and other functional media are unaffected.
-Signed Z23 rows also show the installed `versionName` and `versionCode` from
-PackageManager, or the numeric code alone when the name is empty. Version
-metadata helps check an APK update or rollback, but does not establish
-in-process hot swapping.
+The current base app's launcher entry appears first with its installed version.
+It is retained even when other apps fill the 256-entry limit first. Signed Z23
+rows also show the installed `versionName` and `versionCode` from PackageManager,
+or the numeric code alone when the name is empty. Version metadata helps check an
+APK update or rollback, but does not establish in-process hot swapping.
+<!-- claim: symbol-present zapp_home_app_slot apps/z23android/home.c # retain the base app when the launcher list reaches capacity -->
+<!-- claim: symbol-present zapp_home_app_compare apps/z23android/home.c # the current base app appears first with its installed version -->
 <!-- claim: symbol-present add_app_row apps/z23android/shell.c # text-only installed-app rows -->
 <!-- claim: symbol-present zapp_home_version_line apps/z23android/home.c # Apps shows installed version metadata -->
 To stop using Z23 as Home, open **Settings**, then

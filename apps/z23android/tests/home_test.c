@@ -295,6 +295,32 @@ static void z23_app_cards(void)
     }
     assert(!zapp_home_is_z23_app(NULL));
 }
+static void current_app_first(void)
+{
+    struct zapp_app_entry base = {.label = "Z23", .package = "org.z23.nativeapp", .same_signature = true,
+        .version_name = "0.1.0", .version_code = 1, .version_known = true};
+    struct zapp_app_entry clips = {.label = "Clips", .package = "org.z23.clips", .same_signature = true};
+    struct zapp_app_entry maps = {.label = "Maps", .package = "com.example.maps"};
+    assert(zapp_home_app_compare(&base, &clips) < 0 && zapp_home_app_compare(&base, &maps) < 0);
+    assert(zapp_home_app_compare(&clips, &maps) < 0 && zapp_home_app_compare(&maps, &clips) > 0);
+    assert(zapp_home_app_slot(&base, 0, 256, false) == 0);
+    assert(zapp_home_app_slot(&base, 1, 256, false) == 1);
+    assert(zapp_home_app_slot(&base, 1, 256, true) == SIZE_MAX);
+    assert(zapp_home_app_slot(&maps, 256, 256, false) == SIZE_MAX);
+    assert(zapp_home_app_slot(&base, 256, 256, false) == 255);
+    assert(zapp_home_app_slot(&base, 256, 256, true) == SIZE_MAX);
+    assert(zapp_home_app_slot(&base, 0, 0, false) == SIZE_MAX);
+    assert(!zapp_home_is_z23_app(base.package));
+    char text[512], version[ZAPP_APP_VERSION_LINE_CAP];
+    assert(!strcmp(zapp_home_version_line(&base, version, sizeof(version)), "0.1.0 (1)"));
+    assert(zapp_home_app_card(&base, text, sizeof(text)));
+    struct json_value card;
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && zapp_card_is(&card, "app") && !zapp_card_is(&card, "z23_app"));
+    assert(json_get_int(json_get(&card, "version_code")) == 1);
+    assert(!strcmp(json_get_str(json_get(&card, "version_name")), "0.1.0"));
+    json_free(&card);
+}
 static void z23_version_metadata(void)
 {
     struct zapp_app_entry app = {.label = "Clips", .package = "org.z23.clips", .same_signature = true,
@@ -776,6 +802,7 @@ int main(void)
     app_card_golden();
     z23_app_cards();
     z23_version_metadata();
+    current_app_first();
     long_version_name_is_cut_not_dropped();
     unsigned_z23_package_is_plain();
     label_fits_on_character_boundary();

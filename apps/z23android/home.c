@@ -4,6 +4,7 @@
 #include "json/json.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #define HOME_TILES \
     "{\"type\":\"action\",\"id\":\"wallet\"},{\"type\":\"action\",\"id\":\"receive\"},{\"type\":\"action\",\"id\":\"scan\"}," \
@@ -146,6 +147,10 @@ bool zapp_home_is_z23_app(const char *package)
     if (!strcmp(package, "org.z23.nativeapp")) return false;
     return strncmp(package, "org.z23.voicepreview", sizeof("org.z23.voicepreview") - 1) != 0;
 }
+static bool version_allowed(const struct zapp_app_entry *app)
+{
+    return app->same_signature && (zapp_home_is_z23_app(app->package) || !strcmp(app->package, "org.z23.nativeapp"));
+}
 size_t zapp_home_app_card(const struct zapp_app_entry *app, char *out, size_t cap)
 {
     struct json_value card;
@@ -154,7 +159,7 @@ size_t zapp_home_app_card(const struct zapp_app_entry *app, char *out, size_t ca
     json_push_kv_str(&card, "label", app->label);
     json_push_kv_str(&card, "package", app->package);
     json_push_kv_str(&card, "activity", app->activity);
-    if (app->same_signature && zapp_home_is_z23_app(app->package) && app->version_known) {
+    if (version_allowed(app) && app->version_known) {
         json_push_kv_int(&card, "version_code", app->version_code);
         if (app->version_name[0]) json_push_kv_str(&card, "version_name", app->version_name);
     }
@@ -164,10 +169,25 @@ const char *zapp_home_version_line(const struct zapp_app_entry *app, char *out, 
 {
     if (!out || !cap) return NULL;
     out[0] = 0;
-    if (!app || !app->same_signature || !app->version_known || !zapp_home_is_z23_app(app->package)) return out;
+    if (!app || !version_allowed(app) || !app->version_known) return out;
     if (app->version_name[0]) snprintf(out, cap, "%s (%lld)", app->version_name, (long long)app->version_code);
     else snprintf(out, cap, "%lld", (long long)app->version_code);
     return out;
+}
+int zapp_home_app_compare(const struct zapp_app_entry *a, const struct zapp_app_entry *b)
+{
+    bool a_base = !strcmp(a->package, "org.z23.nativeapp");
+    bool b_base = !strcmp(b->package, "org.z23.nativeapp");
+    if (a_base != b_base) return a_base ? -1 : 1;
+    int order = strcasecmp(a->label, b->label);
+    return order ? order : strcmp(a->package, b->package);
+}
+size_t zapp_home_app_slot(const struct zapp_app_entry *app, size_t count, size_t max, bool have_base)
+{
+    bool base = !strcmp(app->package, "org.z23.nativeapp");
+    if (base && have_base) return SIZE_MAX;
+    if (count < max) return count;
+    return base && count ? count - 1 : SIZE_MAX;
 }
 bool zapp_home_offer_jump(bool offer, bool on_scan_screen, bool *seen)
 {

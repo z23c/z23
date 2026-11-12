@@ -12,8 +12,9 @@ struct zapp_launcher_app {
     struct zapp_app_entry entry;
 };
 
-/* Lists the apps with a launcher entry other than this one, sorted by label, at most max (and
- * ZAPP_LAUNCHER_MAX). The UI uses text labels and does not load app icons. */
+/* Lists launcher apps, including this one. The current base app comes first, then case-insensitive
+ * label and package. At most max (and ZAPP_LAUNCHER_MAX); a full list retains the base in its last slot.
+ * The UI uses text labels and does not load app icons. */
 size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max);
 /* Starts one launcher activity class of a package. False when it cannot be started. */
 bool zapp_launcher_start(JNIEnv *env, jobject activity, const char *package, const char *activity_class);

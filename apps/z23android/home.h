@@ -32,12 +32,17 @@ size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *ou
 /* The plain node line the Home card shows for the view, copied into out. */
 const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t cap);
 /* One launchable app: zcl.z23_app_card.v1 for an org.z23.* app signed with this app's key, else
- * zcl.app_card.v1. Signed Z23 cards also carry version_code when known and version_name when nonempty.
+ * zcl.app_card.v1. Signed Z23 and base-app cards also carry version_code when known and version_name when nonempty.
  * Returns the JSON length or 0. */
 size_t zapp_home_app_card(const struct zapp_app_entry *app, char *out, size_t cap);
-/* Formats a signed Z23 app's installed version as "name (code)", or the numeric code alone
+/* Formats a signed Z23 or base app's installed version as "name (code)", or the numeric code alone
  * when the name is empty. Empty for other apps and unknown versions. */
 const char *zapp_home_version_line(const struct zapp_app_entry *app, char *out, size_t cap);
+/* Orders the current base app first, then apps by case-insensitive label and package. */
+int zapp_home_app_compare(const struct zapp_app_entry *a, const struct zapp_app_entry *b);
+/* Returns where to store an app, or SIZE_MAX when full or the base is already listed.
+ * The first base replaces the last ordinary app at capacity; later base entries are skipped. */
+size_t zapp_home_app_slot(const struct zapp_app_entry *app, size_t count, size_t max, bool have_base);
 /* Whether a package is one of the separate Z23 apps (org.z23.*), not the base app org.z23.nativeapp or a
  * voice preview build. */
 bool zapp_home_is_z23_app(const char *package);
