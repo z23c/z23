@@ -8529,8 +8529,10 @@ $(BIN_DIR)/arena_svg: tools/arena_svg.c \
 .PHONY: tools/arena-view tools/arena-frame arena-view-syntax
 tools/arena-view: $(BIN_DIR)/arena_view
 tools/arena-frame: $(BIN_DIR)/arena_frame
-RAYLIB_CFLAGS := $(shell pkg-config --cflags raylib 2>/dev/null)
-RAYLIB_LIBS := $(shell pkg-config --libs raylib 2>/dev/null)
+# Discover optional viewer flags only when consumed, once per Make process.
+# Availability still selects arena-view prerequisites during parsing below.
+RAYLIB_CFLAGS = $(eval RAYLIB_CFLAGS := $$(shell pkg-config --cflags raylib 2>/dev/null))$(RAYLIB_CFLAGS)
+RAYLIB_LIBS = $(eval RAYLIB_LIBS := $$(shell pkg-config --libs raylib 2>/dev/null))$(RAYLIB_LIBS)
 RAYLIB_PRESENT := $(shell pkg-config --exists raylib && echo yes)
 $(BIN_DIR)/arena_view: tools/arena_view.c \
 		contexts/commons/packages/zdogview/src/zdogview.c \
