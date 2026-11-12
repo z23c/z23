@@ -221,8 +221,10 @@ static bool query_total_spendable_balance(int64_t *out) {
     int64_t t_balance = wv_query_ground_truth_balance(db, NULL);
     int64_t z_balance = wv_query_shielded_balance(db, NULL);
     sqlite3_close(db);
-    if (!MoneyRange(t_balance) || !MoneyRange(z_balance))
+    if (!MoneyRange(t_balance) || !MoneyRange(z_balance)) {
+        LOG_WARN("wallet_view", "review balance projection out of money range");
         return false;
+    }
     *out = t_balance + z_balance;
     return true;
 }
