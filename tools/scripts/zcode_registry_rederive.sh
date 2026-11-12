@@ -73,12 +73,11 @@ MISMATCH_PINNED=()
 MISMATCH_EXPECTED=()
 declare -A ROOT_BY_NAME MANIFEST_BY_NAME
 
-registry_package_manifests() { # $1 = repository root
-    local root="$1" def
-    while IFS= read -r def; do
-        awk -F '"' '/^ZCODE_PACKAGE\(/ { print $4 "/zcode-package.json" }' "$root/$def"
-    done < <(git -C "$root" ls-files -- 'engine/composition/*.def')
-}
+registry_package_manifests() ( # $1 = repository root
+    cd "$1" || return 2
+    git ls-files -z -- 'engine/composition/*.def' |
+        xargs -0 awk -F '"' '/^ZCODE_PACKAGE\(/ { print $4 "/zcode-package.json" }'
+)
 
 # The filesystem glob is the working-tree discovery. Git's tracked list is an
 # independent coverage oracle: if discovery ever skips a checked-in manifest,
@@ -86,16 +85,19 @@ registry_package_manifests() { # $1 = repository root
 # included too, because re-derivation is about the actual on-disk tree.
 require_manifest_coverage() { # $1 = repository root, remaining = discovered
     local root="$1"; shift
-    local tracked candidate found
-    mapfile -t tracked < <(
-        { git -C "$root" ls-files -- "$CORPUS_MANIFEST_ROOT/*/zcode-package.json";
-          registry_package_manifests "$root"; } |
-            LC_ALL=C sort
-    )
-    [ "${#tracked[@]}" -gt 0 ] || {
+    local tracked candidate found listing
+    if ! listing=$(
+        { git -C "$root" ls-files -- "$CORPUS_MANIFEST_ROOT/*/zcode-package.json" &&
+          registry_package_manifests "$root"; } | LC_ALL=C sort
+    ); then
+        echo "FAIL: could not enumerate tracked package manifests under $root" >&2
+        return 2
+    fi
+    [ -n "$listing" ] || {
         echo "FAIL: no tracked package manifests under $CORPUS_MANIFEST_ROOT" >&2
         return 2
     }
+    mapfile -t tracked <<< "$listing"
     for candidate in "${tracked[@]}"; do
         found=0
         local discovered
@@ -111,23 +113,31 @@ require_manifest_coverage() { # $1 = repository root, remaining = discovered
 }
 
 discover_package_manifests() { # $1 = repository root
-    local root="$1" path
+    local root="$1" path listing
     local found=("$root"/$CORPUS_MANIFEST_ROOT/*/zcode-package.json)
+    if ! listing=$(registry_package_manifests "$root"); then
+        echo "FAIL: could not discover registry package manifests under $root" >&2
+        return 2
+    fi
     while IFS= read -r path; do
-        found+=("$root/$path")
-    done < <(registry_package_manifests "$root")
+        if [ -n "$path" ]; then found+=("$root/$path"); fi
+    done <<< "$listing"
     PACKAGE_MANIFESTS=()
     for path in "${found[@]}"; do
         [ -f "$path" ] || continue
         PACKAGE_MANIFESTS+=("${path#"$root"/}")
     done
-    mapfile -t PACKAGE_MANIFESTS < <(
+    if ! listing=$(
         printf '%s\n' "${PACKAGE_MANIFESTS[@]}" | LC_ALL=C sort -u
-    )
-    [ "${#PACKAGE_MANIFESTS[@]}" -gt 0 ] || {
+    ); then
+        echo "FAIL: could not sort discovered package manifests under $root" >&2
+        return 2
+    fi
+    [ -n "$listing" ] || {
         echo "FAIL: no package manifests discovered under $CORPUS_MANIFEST_ROOT" >&2
         return 2
     }
+    mapfile -t PACKAGE_MANIFESTS <<< "$listing"
     require_manifest_coverage "$root" "${PACKAGE_MANIFESTS[@]}"
 }
 
@@ -341,6 +351,19 @@ run_selftest() {
         return 1
     fi
     echo "  selftest ok: an omitted registered consumer outside the corpus fails coverage"
+
+    mv "$tmp/engine/composition/fixture.def" "$tmp/engine/composition/fixture.saved"
+    if discover_package_manifests "$tmp" >/dev/null 2>&1; then
+        echo "SELFTEST FAILED: unreadable tracked registry declaration reported complete coverage" >&2
+        return 1
+    fi
+    if require_manifest_coverage "$tmp" "${PACKAGE_MANIFESTS[@]}" >/dev/null 2>&1; then
+        echo "SELFTEST FAILED: unreadable tracked registry declaration passed the coverage oracle" >&2
+        return 1
+    fi
+    mv "$tmp/engine/composition/fixture.saved" "$tmp/engine/composition/fixture.def"
+    discover_package_manifests "$tmp"
+    echo "  selftest ok: an unreadable tracked registry declaration refuses discovery"
 
     rounds=0
     while :; do
