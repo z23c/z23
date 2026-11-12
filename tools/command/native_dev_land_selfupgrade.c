@@ -14,7 +14,7 @@
  * land directory):
  *     slots/<40-hex sha>/z23-dev   immutable build of that commit's main
  *     current                      symlink to the binary the unit execs
- *     upgrade.state                candidate, agree count, previous, trial
+ *     upgrade.state                candidate, agree count, last row, previous, trial
  * A slot path holds the commit sha, so a path names exactly one build. An
  * existing slot is never rewritten. A slot appears by rename.
  *
@@ -24,14 +24,14 @@
  * z23-dev (devbuild) and slot_install()s it. Building is not done here.
  *
  * Compare. On the next row, observe() runs the current binary and the
- * candidate on the same read-only decision args ("what would you do": the
- * rebase plan, the train membership, the verdict routing) and compares exit
- * status and stdout byte for byte. Neither run mutates a queue, a worktree
+ * candidate on the same read-only decision args and compares typed stable
+ * decision fields and the full row digest. Neither run mutates a queue, a worktree
  * or a remote: the decision mode the args select must be read-only, and the
  * driver keeps acting through the current binary alone. A launch failure, a
  * nonzero exit, an empty output or a difference is a DISAGREE and resets the
  * agree count to zero (fail closed: no evidence is never agreement). A change
- * of candidate sha also resets it.
+ * of candidate sha also resets it. A sequence counts only once and must
+ * exceed the candidate's previous high-water mark.
  *
  * Switch. After need_rows consecutive agreeing rows the pointer is replaced
  * with symlink-at-temp-name then rename(2), which is atomic: an exec sees the
@@ -47,16 +47,19 @@
  * ZCL_LAND_SELFUPGRADE=1. With it unset the land path calls none of this, so
  * how rows are proven and pushed is unchanged.
  *
- * Not here (follow-up): the read-only decision verb on dev land itself, the
- * post-landing hook that builds and installs the slot, and the unit exec'ing
+ * Not here (follow-up): the post-landing hook that builds and installs the
+ * slot, and the unit exec'ing
  * <root>/current.
  */
 
 #include "command/native_dev_land_selfupgrade.h"
 
+#include "json/json.h"
 #include "util/path_util.h"
 #include "util/spawn.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,6 +75,7 @@
 struct su_state {
     char candidate[SU_SHA_LEN + 1];
     int matches;
+    long long last_seq;
     char previous[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     char trial[SU_SHA_LEN + 1];
 };
@@ -242,28 +246,179 @@ static bool su_pointer_set(const char *root, const char *target)
     return true;
 }
 
-static void su_state_read(const char *root, struct su_state *s)
+/* Only the read-only, explicitly scoped decision verb may be executed. */
+static bool su_decimal(const char *s, long long *out)
+{
+    unsigned long long n = 0;
+    if (!s || !*s) return false;
+    for (; *s; ++s) {
+        unsigned d;
+        if (*s < '0' || *s > '9') return false;
+        d = (unsigned)(*s - '0');
+        if (n > ((unsigned long long)LLONG_MAX - d) / 10) return false;
+        n = n * 10 + d;
+    }
+    if (!n) return false;
+    *out = (long long)n;
+    return true;
+}
+
+static bool su_args(const char *const *a, long long *seq)
+{
+    if (!a || !a[0] || strcmp(a[0], "dev") || !a[1] || strcmp(a[1], "land") ||
+        !a[2] || strcmp(a[2], "decision") || !a[3] || strncmp(a[3], "--seq=", 6) ||
+        !su_decimal(a[3] + 6, seq)) return false;
+    return !a[4] || (!strcmp(a[4], "--json") && !a[5]);
+}
+
+/* Reject ambiguous members at every depth before calling json_get. */
+static bool su_unique(const struct json_value *v)
+{
+    if (v->type == JSON_OBJ) {
+        for (size_t i = 0; i < v->num_children; i++)
+            for (size_t j = i + 1; j < v->num_children; j++)
+                if (!strcmp(v->keys[i], v->keys[j])) return false;
+    }
+    for (size_t i = 0; i < v->num_children; i++)
+        if (!su_unique(&v->children[i])) return false;
+    return true;
+}
+
+static bool su_text_is(const struct json_value *v, const char *key, const char *want)
+{
+    const struct json_value *p = json_get(v, key);
+    return p && p->type == JSON_STR && p->val.s && !strcmp(p->val.s, want);
+}
+
+static bool su_row_sequence(const struct json_value *d, long long seq)
+{
+    const struct json_value *p = json_get(d, "seq"), *priority = json_get(d, "priority_seq");
+    return d && d->type == JSON_OBJ && p && p->type == JSON_INT && p->val.i == seq &&
+        priority && priority->type == JSON_INT && priority->val.i >= 1 && priority->val.i <= seq;
+}
+
+static bool su_row_identity(const struct json_value *d, long long seq)
+{
+    const struct json_value *hash = json_get(d, "row_sha3");
+    if (!su_row_sequence(d, seq) || !hash || hash->type != JSON_STR ||
+        !zcl_is_lower_hex(hash->val.s, 64) ||
+        !su_text_is(d, "scope", "observed_next_dispatch_only") ||
+        !su_text_is(d, "row_schema", "zcl.land.decision.row.v1")) return false;
+    if (!su_text_is(d, "dispatch", "prepare") && !su_text_is(d, "dispatch", "resume")) return false;
+    return true;
+}
+
+static bool su_row_phase(const struct json_value *d)
+{
+    return su_text_is(d, "phase", "") || su_text_is(d, "phase", "rebase") ||
+        su_text_is(d, "phase", "regen") || su_text_is(d, "phase", "prebuild") ||
+        su_text_is(d, "phase", "prove") || su_text_is(d, "phase", "push");
+}
+
+static bool su_decision_fields(const struct json_value *d, long long seq)
+{
+    static const char *const names[] = {"state", "phase", "tip", "base", "local"};
+    const struct json_value *p;
+    if (!su_row_identity(d, seq)) return false;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        p = json_get(d, names[i]);
+        if (!p || p->type != JSON_STR || !p->val.s) return false;
+    }
+    if (!su_text_is(d, "state", "queued") && !su_text_is(d, "state", "inflight")) return false;
+    if (!su_row_phase(d)) return false;
+    p = json_get(d, "tip");
+    if (!zcl_is_lower_hex(p->val.s, 40)) return false;
+    for (size_t i = 3; i < 5; i++) {
+        p = json_get(d, names[i]);
+        if (p->val.s[0] && !zcl_is_lower_hex(p->val.s, 40)) return false;
+    }
+    return true;
+}
+
+static bool su_read_decision(const char *s, long long seq, struct json_value *v)
+{
+    const struct json_value *ok;
+    /* Conservatively refuse even a literal escaped backslash before u0000. */
+    if (strstr(s, "\\u0000") || !json_read(v, s, strlen(s)) || v->type != JSON_OBJ || !su_unique(v)) return false;
+    ok = json_get(v, "ok");
+    return ok && ok->type == JSON_BOOL && ok->val.b &&
+        su_text_is(v, "schema", "zcl.result.v1") && su_text_is(v, "command", "dev.land.decision") &&
+        su_text_is(v, "status", "passed") && su_text_is(v, "data_schema", "zcl.land.v1") &&
+        su_decision_fields(json_get(v, "data"), seq);
+}
+
+static bool su_same_field(const struct json_value *a, const struct json_value *b, const char *name)
+{
+    const struct json_value *x = json_get(a, name), *y = json_get(b, name);
+    if (!x || !y || x->type != y->type) return false;
+    if (x->type == JSON_INT) return x->val.i == y->val.i;
+    return x->type == JSON_STR && x->val.s && y->val.s && !strcmp(x->val.s, y->val.s);
+}
+
+static bool su_same_decision(const struct json_value *a, const struct json_value *b)
+{
+    static const char *const names[] = {"seq", "priority_seq", "state", "phase", "tip", "base", "local", "dispatch", "scope", "row_schema", "row_sha3"};
+    a = json_get(a, "data"); b = json_get(b, "data");
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!su_same_field(a, b, names[i])) return false;
+    return true;
+}
+
+struct su_read_counts { int matches, seq, candidate, previous, trial; bool valid; };
+
+static bool su_state_number(const char *value, long long *out)
+{
+    *out = 0;
+    return !strcmp(value, "0") || su_decimal(value, out);
+}
+
+static void su_state_metadata(struct su_state *s, struct su_read_counts *c, const char *line)
+{
+    if (!strncmp(line, "candidate=", 10)) {
+        if (++c->candidate != 1 || (line[10] && !su_sha_ok(line + 10))) c->valid = false;
+        else (void)snprintf(s->candidate, sizeof s->candidate, "%s", line + 10);
+    } else if (!strncmp(line, "previous=", 9)) {
+        if (++c->previous != 1 || strlen(line + 9) >= sizeof s->previous) c->valid = false;
+        else (void)snprintf(s->previous, sizeof s->previous, "%s", line + 9);
+    } else if (!strncmp(line, "trial=", 6)) {
+        if (++c->trial != 1 || (line[6] && !su_sha_ok(line + 6))) c->valid = false;
+        else (void)snprintf(s->trial, sizeof s->trial, "%s", line + 6);
+    } else c->valid = false;
+}
+
+static void su_state_line(struct su_state *s, struct su_read_counts *c, char *line)
+{
+    long long n;
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strncmp(line, "matches=", 8) == 0) {
+        if (++c->matches != 1 || !su_state_number(line + 8, &n) || n > INT_MAX) c->valid = false;
+        else s->matches = (int)n;
+    } else if (strncmp(line, "last_seq=", 9) == 0) {
+        if (++c->seq != 1 || !su_state_number(line + 9, &n)) c->valid = false;
+        else s->last_seq = n;
+    } else su_state_metadata(s, c, line);
+}
+
+static bool su_state_read(const char *root, struct su_state *s)
 {
     char path[ZCL_LAND_SELFUPGRADE_PATH_MAX], line[2048];
     FILE *f;
+    struct su_read_counts c = { .valid = true };
     memset(s, 0, sizeof(*s));
     if (!zcl_path_join(path, sizeof(path), root, "upgrade.state"))
-        return;
+        return false;
     f = fopen(path, "r");
-    if (!f)
-        return;
+    if (!f) return errno == ENOENT;
     while (fgets(line, sizeof(line), f)) {
-        line[strcspn(line, "\r\n")] = '\0';
-        if (strncmp(line, "candidate=", 10) == 0 && su_sha_ok(line + 10))
-            (void)snprintf(s->candidate, sizeof(s->candidate), "%s", line + 10);
-        else if (strncmp(line, "matches=", 8) == 0)
-            s->matches = atoi(line + 8);
-        else if (strncmp(line, "previous=", 9) == 0)
-            (void)snprintf(s->previous, sizeof(s->previous), "%s", line + 9);
-        else if (strncmp(line, "trial=", 6) == 0 && su_sha_ok(line + 6))
-            (void)snprintf(s->trial, sizeof(s->trial), "%s", line + 6);
+        char *nl = strchr(line, '\n'), *cr = strchr(line, '\r');
+        if (!nl || (cr && cr + 1 != nl)) { c.valid = false; break; }
+        su_state_line(s, &c, line);
     }
+    if (ferror(f)) c.valid = false;
     fclose(f);
+    if (!c.valid || c.candidate != 1 || c.previous != 1 || c.trial != 1 || c.matches != 1) return false;
+    if (!c.seq) { s->matches = 0; s->last_seq = 0; return true; }
+    return c.seq == 1 && s->matches <= s->last_seq;
 }
 
 static bool su_state_write(const char *root, const struct su_state *s)
@@ -278,8 +433,8 @@ static bool su_state_write(const char *root, const struct su_state *s)
     f = fopen(tmp, "w");
     if (!f)
         return false;
-    ok = fprintf(f, "candidate=%s\nmatches=%d\nprevious=%s\ntrial=%s\n",
-                 s->candidate, s->matches, s->previous, s->trial) > 0;
+    ok = fprintf(f, "candidate=%s\nmatches=%d\nlast_seq=%lld\nprevious=%s\ntrial=%s\n",
+                 s->candidate, s->matches, s->last_seq, s->previous, s->trial) > 0;
     ok = (fclose(f) == 0) && ok;
     if (!ok || rename(tmp, path) != 0) {
         (void)unlink(tmp);
@@ -310,14 +465,17 @@ static bool su_decide(const char *bin, const char *const *args, char *out,
 }
 
 static bool su_agree(const char *current_bin, const char *cand_bin,
-                     const char *const *args)
+                     const char *const *args, long long seq)
 {
     char a[SU_OUT_MAX], b[SU_OUT_MAX];
-    int sa, sb;
-    if (!su_decide(current_bin, args, a, sizeof(a), &sa) ||
-        !su_decide(cand_bin, args, b, sizeof(b), &sb))
-        return false;
-    return strcmp(a, b) == 0;
+    struct json_value ja = {0}, jb = {0};
+    int sa, sb; bool same = false;
+    if (su_decide(current_bin, args, a, sizeof(a), &sa) &&
+        su_decide(cand_bin, args, b, sizeof(b), &sb) &&
+        su_read_decision(a, seq, &ja) && su_read_decision(b, seq, &jb))
+        same = su_same_decision(&ja, &jb);
+    json_free(&ja); json_free(&jb);
+    return same;
 }
 
 static enum zcl_land_selfupgrade_verdict
@@ -326,7 +484,8 @@ su_count(const char *root, struct su_state *s, bool agree, int need_rows,
 {
     char prev[ZCL_LAND_SELFUPGRADE_PATH_MAX] = "";
     struct su_state saved;
-    s->matches = agree ? s->matches + 1 : 0;
+    if (agree && s->matches < INT_MAX) s->matches++;
+    else if (!agree) s->matches = 0;
     if (!agree || s->matches < need_rows) {
         if (!su_state_write(root, s))
             return ZCL_LAND_SU_ERROR;
@@ -386,18 +545,22 @@ zcl_land_selfupgrade_observe(const char *root, const char *current_bin,
 #else
     char cand_bin[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     struct su_state s;
-    if (!current_bin || need_rows < 1 ||
+    long long seq;
+    if (!su_args(args, &seq) || !current_bin || need_rows < 1 ||
         !zcl_land_selfupgrade_slot_path(root, sha, cand_bin, sizeof(cand_bin)) ||
         access(cand_bin, X_OK) != 0)
         return ZCL_LAND_SU_ERROR;
-    su_state_read(root, &s);
+    if (!su_state_read(root, &s)) return ZCL_LAND_SU_ERROR;
     if (s.trial[0] && !su_trial_lapsed(root, &s))
         return ZCL_LAND_SU_ERROR; /* a switch is still awaiting its row */
     if (strcmp(s.candidate, sha) != 0) {
         snprintf(s.candidate, sizeof(s.candidate), "%s", sha);
         s.matches = 0;
+        s.last_seq = 0;
     }
-    return su_count(root, &s, su_agree(current_bin, cand_bin, args), need_rows,
+    bool fresh = seq > s.last_seq;
+    if (fresh) s.last_seq = seq;
+    return su_count(root, &s, fresh && su_agree(current_bin, cand_bin, args, seq), need_rows,
                     sha, cand_bin);
 #endif
 }
@@ -411,7 +574,7 @@ bool zcl_land_selfupgrade_row_result(const char *root, bool row_ok)
     char link[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     struct su_state s;
     bool restored = false;
-    su_state_read(root, &s);
+    if (!su_state_read(root, &s)) return false;
     if (!s.trial[0])
         return false;
     if (!row_ok) {

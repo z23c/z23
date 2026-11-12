@@ -40,9 +40,9 @@ bool zcl_land_selfupgrade_slot_install(const char *root, const char *sha,
 bool zcl_land_selfupgrade_pointer_read(const char *root, char *out,
                                        size_t cap);
 
-/* Run current and the slot candidate for sha on the same read-only decision
- * args (NULL-terminated, at most ARGS_MAX) and compare. Switch the pointer
- * after AGREE_ROWS consecutive agreeing rows. */
+/* Run current and candidate only with dev land decision --seq=<positive decimal>
+ * and optional --json. Compare typed decisions; distinct increasing sequences
+ * count once. Switch after need_rows consecutive agreeing rows. */
 enum zcl_land_selfupgrade_verdict
 zcl_land_selfupgrade_observe(const char *root, const char *current_bin,
                              const char *sha, const char *const *args,

@@ -8,6 +8,7 @@
 #include "test/test_core.h"
 
 #include "command/native_dev_land_selfupgrade.h"
+#include "util/spawn.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -19,22 +20,31 @@
 
 #define SHA_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define SHA_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-#define PLAN_X "rebase=ff train=2,3 route=push"
-#define PLAN_Y "rebase=ff train=2 route=push"
+#define PLAN_X "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define PLAN_Y "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-static const char *const g_args[] = {"decide", "--seq=7", NULL};
+static const char *const g_args[] = {"dev", "land", "decision", "--seq=7", NULL};
+static const char *const g_args8[] = {"dev", "land", "decision", "--seq=8", NULL};
+static const char *const g_args9[] = {"dev", "land", "decision", "--seq=9", NULL};
+static const char *const g_args10[] = {"dev", "land", "decision", "--seq=10", NULL};
 
-/* An executable that prints a fixed decision whatever its args. */
-static bool sul_script(const char *path, const char *decision)
+/* The sequence follows the request; optional padding reaches the capture edge. */
+static bool sul_script_mode(const char *path, const char *decision, bool padded)
 {
     FILE *f = fopen(path, "w");
     if (!f)
         return false;
     if (decision[0])
-        fprintf(f, "#!/bin/sh\necho '%s'\n", decision);
+        fprintf(f, "#!/bin/sh\nv='{\"schema\":\"zcl.result.v1\",\"command\":\"dev.land.decision\",\"request_id\":\"%s\",\"elapsed_ms\":'\"$$\"',\"ok\":true,\"status\":\"passed\",\"data_schema\":\"zcl.land.v1\",\"data\":{\"dispatch\":\"prepare\",\"scope\":\"observed_next_dispatch_only\",\"seq\":'\"${4#--seq=}\"',\"priority_seq\":1,\"state\":\"queued\",\"phase\":\"\",\"tip\":\"%s\",\"base\":\"%s\",\"local\":\"%s\",\"row_schema\":\"zcl.land.decision.row.v1\",\"row_sha3\":\"%s\"}}'\n%s\n", path, SHA_A, SHA_B, SHA_A, decision,
+                padded ? "printf '%*s%s' \"$((8191-${#v}))\" '' \"$v\"" : "printf '%s\\n' \"$v\"");
     else
         fprintf(f, "#!/bin/sh\nexit 0\n");
     return fclose(f) == 0 && chmod(path, 0755) == 0;
+}
+
+static bool sul_script(const char *path, const char *decision)
+{
+    return sul_script_mode(path, decision, false);
 }
 
 struct sul_rig {
@@ -113,6 +123,18 @@ static int sul_switch_cases(void)
         ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
         ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A,
                                                     g_args, 2),
+                  (int)ZCL_LAND_SU_DISAGREE);
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A,
+                                                    g_args8, 2),
+                  (int)ZCL_LAND_SU_AGREE);
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A,
+                                                    g_args, 2),
+                  (int)ZCL_LAND_SU_DISAGREE);
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A,
+                                                    g_args9, 2),
+                  (int)ZCL_LAND_SU_AGREE);
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A,
+                                                    g_args10, 2),
                   (int)ZCL_LAND_SU_SWITCHED);
         ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
         ASSERT_STR_EQ(ptr, slot);
@@ -172,11 +194,11 @@ static int sul_disagree_cases(void)
                   (int)ZCL_LAND_SU_AGREE);
         ASSERT(sul_script(r.cur, PLAN_Y)); /* the current driver changes */
         ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_B,
-                                                    g_args, 2),
+                                                    g_args8, 2),
                   (int)ZCL_LAND_SU_DISAGREE);
         ASSERT(sul_script(r.cur, PLAN_X));
         ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_B,
-                                                    g_args, 2),
+                                                    g_args9, 2),
                   (int)ZCL_LAND_SU_AGREE);
         ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
         PASS();
@@ -207,12 +229,86 @@ static bool sul_body(const char *path, const char *body)
     return fclose(f) == 0 && ok && chmod(path, 0755) == 0;
 }
 
+static bool sul_capture(const char *path, const char *seq, char *out, size_t cap)
+{
+    const char *argv[] = {path, "dev", "land", "decision", seq, NULL};
+    struct zcl_spawn_evidence e;
+    int rc = zcl_spawn_capture_evidence(argv, out, cap, 5000, &e);
+    return rc == 0 && e.exit_observed && e.exit_code == 0 && e.stdout_complete &&
+        !e.stdout_truncated && !e.timed_out && strlen(out) == e.stdout_observed;
+}
+
+static int sul_invalid_decisions(void)
+{
+    static const char *const edits[] = {
+        "s/\"ok\":true/\"ok\":true,\"ok\":true/",
+        "s/\"scope\":/\"scope\":\"observed_next_dispatch_only\",\"scope\":/",
+        "s/\"seq\":[0-9]*/\"seq\":0/",
+        "s/\"row_schema\":\"zcl.land.decision.row.v1\"/\"row_schema\":null/",
+        "s/\"dispatch\":\"prepare\"/\"dispatch\":\"none\"/",
+        "s/}$/}garbage/",
+        "s/.*/{/",
+    };
+    static const char *const needles[] = {
+        "\"ok\":true,\"ok\":true", "\"scope\":\"observed_next_dispatch_only\",\"scope\":",
+        "\"seq\":0", "\"row_schema\":null", "\"dispatch\":\"none\"", "}garbage", "{\n"
+    };
+    int failures = 0;
+    struct sul_rig r;
+    char body[1600], ptr[700], a[8192], b[8192];
+    if (!sul_rig_open(&r)) return 1;
+    TEST("selfupgrade: malformed or unscoped decisions cannot agree") {
+        for (size_t i = 0; i < sizeof edits / sizeof edits[0]; i++) {
+            char seq[32], sha[41], slot[700];
+            snprintf(seq, sizeof seq, "--seq=%zu", i + 10);
+            snprintf(sha, sizeof sha, "%040zx", i + 1);
+            const char *args[] = {"dev", "land", "decision", seq, NULL};
+            snprintf(body, sizeof body, "sh '%s' \"$@\" | sed -e 's/\"elapsed_ms\":[0-9]*/\"elapsed_ms\":0/' -e '%s'", r.src_x, edits[i]);
+            ASSERT(sul_body(r.cur, body));
+            ASSERT(sul_body(r.src_y, body));
+            ASSERT(zcl_land_selfupgrade_slot_install(r.root, sha, r.src_y));
+            ASSERT(zcl_land_selfupgrade_slot_path(r.root, sha, slot, sizeof slot));
+            ASSERT(sul_capture(r.cur, seq, a, sizeof a));
+            ASSERT(sul_capture(slot, seq, b, sizeof b));
+            ASSERT_STR_EQ(a, b);
+            ASSERT(strstr(a, needles[i]) != NULL);
+            ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, sha, args, 1),
+                      (int)ZCL_LAND_SU_DISAGREE);
+            ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof ptr));
+        }
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(r.root);
+    return failures;
+}
+
 static int sul_incomplete_cases(void)
 {
     int failures = 0;
     struct sul_rig r;
     char ptr[700];
     if (!sul_rig_open(&r)) return 1;
+    TEST("selfupgrade: mutating or ambiguous argv cannot spawn a driver") {
+        static const char *const bad[] = {"dev", "land", "submit", "--seq=7", NULL};
+        static const char *const extra[] = {"dev", "land", "decision", "--seq=7", "--unknown", NULL};
+        static const char *const duplicate[] = {"dev", "land", "decision", "--seq=7", "--seq=7", NULL};
+        const char *sha_d = "dddddddddddddddddddddddddddddddddddddddd";
+        char marker[700], body[800];
+        snprintf(marker, sizeof marker, "%s/spawned", r.root);
+        snprintf(body, sizeof body, "touch '%s'", marker);
+        ASSERT(sul_body(r.cur, body));
+        ASSERT(sul_body(r.src_x, body));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, sha_d, r.src_x));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, sha_d, bad, 1),
+                  (int)ZCL_LAND_SU_ERROR);
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, sha_d, extra, 1),
+                  (int)ZCL_LAND_SU_ERROR);
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, sha_d, duplicate, 1),
+                  (int)ZCL_LAND_SU_ERROR);
+        ASSERT(access(marker, F_OK) != 0);
+        PASS();
+    }
     TEST("selfupgrade: truncated matching prefixes never switch") {
         ASSERT(sul_body(r.cur, "printf '%08192dA' 0"));
         ASSERT(sul_body(r.src_x, "printf '%08192dB' 0"));
@@ -233,8 +329,8 @@ static int sul_incomplete_cases(void)
     }
     TEST("selfupgrade: complete output at buffer boundary agrees") {
         const char *sha_c = "cccccccccccccccccccccccccccccccccccccccc";
-        ASSERT(sul_body(r.cur, "printf '%08191d' 0"));
-        ASSERT(sul_body(r.src_x, "printf '%08191d' 0"));
+        ASSERT(sul_script_mode(r.cur, PLAN_X, true));
+        ASSERT(sul_script_mode(r.src_x, PLAN_X, true));
         ASSERT(zcl_land_selfupgrade_slot_install(r.root, sha_c, r.src_x));
         ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, sha_c, g_args, 1),
                   (int)ZCL_LAND_SU_SWITCHED);
@@ -255,6 +351,44 @@ static bool sul_write_state(const struct sul_rig *r, const char *body)
         return false;
     fputs(body, f);
     return fclose(f) == 0;
+}
+
+static int sul_legacy_cases(void)
+{
+    int failures = 0;
+    struct sul_rig r;
+    char ptr[700];
+    if (!sul_rig_open(&r)) return 1;
+    TEST("selfupgrade: legacy overflow counter cannot advance to a switch") {
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_A, r.src_x));
+        ASSERT(sul_write_state(&r, "candidate=" SHA_A "\nmatches=9999999999999999999999\nprevious=\ntrial=\n"));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args, 2),
+                  (int)ZCL_LAND_SU_ERROR);
+        ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof ptr));
+        PASS();
+    }
+    TEST("selfupgrade: duplicate state metadata cannot authorize a switch") {
+        ASSERT(sul_write_state(&r, "candidate=" SHA_A "\ncandidate=" SHA_A
+            "\nmatches=2\nlast_seq=100\nprevious=\ntrial=\n"));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args, 1),
+                  (int)ZCL_LAND_SU_ERROR);
+        ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof ptr));
+        PASS();
+    }
+    TEST("selfupgrade: valid legacy matches restart before distinct rows progress") {
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_A, r.src_x));
+        ASSERT(sul_write_state(&r, "candidate=" SHA_A "\nmatches=1\nprevious=\ntrial=\n"));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args, 2),
+                  (int)ZCL_LAND_SU_AGREE);
+        ASSERT(!zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof ptr));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args8, 2),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof ptr));
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(r.root);
+    return failures;
 }
 
 static int sul_durable_cases(void)
@@ -316,9 +450,10 @@ static int sul_durable_cases(void)
         const char *sha_c = "cccccccccccccccccccccccccccccccccccccccc";
         FILE *f;
         snprintf(bad, sizeof(bad), "%s/bad.sh", r.root);
-        f = fopen(bad, "w");
+        ASSERT(sul_script(bad, PLAN_X));
+        f = fopen(bad, "a");
         ASSERT(f != NULL);
-        fprintf(f, "#!/bin/sh\necho '%s'\nexit 3\n", PLAN_X);
+        fprintf(f, "exit 3\n");
         ASSERT_EQ(fclose(f), 0);
         ASSERT_EQ(chmod(bad, 0755), 0);
         ASSERT(zcl_land_selfupgrade_slot_install(r.root, sha_c, bad));
@@ -348,7 +483,9 @@ int test_dev_land_selfupgrade(void)
     failures += sul_pure_cases();
     failures += sul_switch_cases();
     failures += sul_disagree_cases();
+    failures += sul_invalid_decisions();
     failures += sul_incomplete_cases();
+    failures += sul_legacy_cases();
     failures += sul_durable_cases();
 #endif
     if (failures == 0)

@@ -19,6 +19,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "command/native_dev_land_selfupgrade.h"
 #if !defined(_WIN32)
 #include <poll.h>
 #endif
@@ -470,6 +471,58 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_decision_wire_script(struct dlx_call *c, const char *script)
+{
+    char wire[8192], body[9216];
+    enum zcl_command_exit code;
+    size_t n = zcl_command_registry_execute_json(zcl_command_catalog(),
+        c->request.spec, NULL, &c->input, false, "dev.land.decision", NULL,
+        0, 0, NULL, wire, sizeof(wire), &code);
+    if (!n || n >= sizeof(wire) || code != ZCL_COMMAND_EXIT_OK) return false;
+    int written = snprintf(body, sizeof(body), "#!/bin/sh\ncat <<'ZCL_DECISION_EOF'\n%.*s\nZCL_DECISION_EOF\n", (int)n, wire);
+    return written > 0 && (size_t)written < sizeof(body) &&
+        dlx_write(script, body) && chmod(script, 0700) == 0;
+}
+
+static int dlx_decision_selfupgrade_case(void)
+{
+    static const char sha[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char *const args[] = {"dev", "land", "decision", "--seq=674", NULL};
+    int failures = 0, lock = -1;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    char land[1400], root[1024], script[1200], slot[1200], ptr[1200];
+    TEST("land: native decision envelope drives typed selfupgrade comparison") {
+        ASSERT(dlx_scope_prepare(&t, "decision_selfupgrade", NULL));
+        dlx_landdir(land, sizeof(land));
+        lock = dlx_step_lock_take(land);
+        ASSERT(lock >= 0);
+        dlx_step_lock_release(lock); lock = -1;
+        test_make_tmpdir(root, sizeof(root), "dev_land_driver", "decision_selfupgrade");
+        ASSERT(snprintf(script, sizeof(script), "%s/driver", root) < (int)sizeof(script));
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(json_push_kv_int(&c.input, "seq", 674));
+        ASSERT(dlx_decision_wire_script(&c, script));
+        dlx_end(&c); opened = false;
+        ASSERT(zcl_land_selfupgrade_slot_install(root, sha, script));
+        ASSERT(zcl_land_selfupgrade_slot_path(root, sha, slot, sizeof(slot)));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(root, script, sha, args, 1),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        ASSERT(zcl_land_selfupgrade_pointer_read(root, ptr, sizeof(ptr)));
+        ASSERT_STR_EQ(ptr, slot);
+        ASSERT(zcl_land_selfupgrade_row_result(root, false));
+        ASSERT(!zcl_land_selfupgrade_pointer_read(root, ptr, sizeof(ptr)));
+        ASSERT(dlx_scope_unchanged(&t));
+        PASS();
+    }
+_test_next:;
+    if (lock >= 0) dlx_step_lock_release(lock);
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
 static int dlx_decision_queue_case(void)
 {
     int failures = 0, lock = -1;
@@ -669,7 +722,8 @@ _test_next:;
 
 static int test_dev_land_drive_seq_scope(void)
 {
-    return dlx_decision_row_hash_case() + dlx_decision_empty_hash_case() +
+    return dlx_decision_selfupgrade_case() +
+           dlx_decision_row_hash_case() + dlx_decision_empty_hash_case() +
            dlx_decision_encoding_failure_case() +
            dlx_decision_queue_case() + dlx_decision_terminal_case() +
            dlx_decision_unavailable_case() + dlx_decision_drift_case() +
