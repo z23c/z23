@@ -562,8 +562,7 @@ static void funds_items(struct wallet_screen *s)
 
 static void share_request_items(struct wallet_screen *s)
 {
-    button(s, WALLET_ACT_SHARE_REQUEST, "Share request");
-    note(s, "Share a photo or video with this request. You choose the recipient.");
+    button(s, WALLET_ACT_SHARE_REQUEST, "Share request\nChoose a photo or video and the recipient");
 }
 static void receive_items(struct wallet_screen *s)
 {
