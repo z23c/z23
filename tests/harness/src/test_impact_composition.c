@@ -62,6 +62,7 @@
 #include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
+#include "platform/clock.h"
 #include "platform/disk_space.h"
 #include "platform/file_clone.h"
 #include "platform/ram_scratch.h"
@@ -14050,6 +14051,35 @@ static int test_ic_generation_vendor_precheck_order(void)
     return failures;
 }
 
+/* Advance through the unchanged 30-second preparation deadline in this test.
+ * The step-share test retains real lock-release and expiry coverage; wall
+ * time here continues to use the prior clock. */
+static struct {
+    const clock_iface_t *prior;
+    int64_t monotonic_ns;
+    unsigned reads;
+} g_ic_defer_clock;
+
+static int64_t ic_defer_monotonic(void *self)
+{
+    (void)self;
+    g_ic_defer_clock.reads++;
+    g_ic_defer_clock.monotonic_ns += INT64_C(31000000000);
+    return g_ic_defer_clock.monotonic_ns;
+}
+
+static int64_t ic_defer_wall(void *self)
+{
+    (void)self;
+    return g_ic_defer_clock.prior->now_wall_ms(g_ic_defer_clock.prior->self);
+}
+
+static const clock_iface_t g_ic_defer_clock_iface = {
+    .now_monotonic_ns = ic_defer_monotonic,
+    .now_wall_ms = ic_defer_wall,
+    .self = NULL,
+};
+
 static int test_ic_landing_proof_defers_preparation(void)
 {
     int failures = 0;
@@ -14060,10 +14090,19 @@ static int test_ic_landing_proof_defers_preparation(void)
         ASSERT(lock >= 0);
         ASSERT(flock(lock, LOCK_EX | LOCK_NB) == 0);
         char why[256] = {0};
+        const clock_iface_t *prior = clock_default();
+        g_ic_defer_clock.prior = prior;
+        g_ic_defer_clock.monotonic_ns = prior->now_monotonic_ns(prior->self);
+        g_ic_defer_clock.reads = 0;
+        clock_set_default(&g_ic_defer_clock_iface);
         int claimed = zcl_dev_proof_queue_run_next(f.root, why, sizeof(why));
+        clock_set_default(prior);
+        bool clock_restored = clock_default() == prior;
         bool unchanged = ic_landing_request_unchanged(&f);
         ASSERT(flock(lock, LOCK_UN) == 0);
         ASSERT(close(lock) == 0);
+        ASSERT(g_ic_defer_clock.reads >= 2);
+        ASSERT(clock_restored);
         ASSERT_EQ(claimed, 0);
         ASSERT_STR_EQ(why, "proof_landing_preparation_busy");
         ASSERT(unchanged);
