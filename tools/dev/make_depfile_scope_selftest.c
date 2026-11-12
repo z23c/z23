@@ -221,50 +221,61 @@ static void profile_probes(void)
     probe_count = 0; /* all profile children were reaped; reuse the bounded slots */
 }
 
-static void binding_probes(void)
+struct binding_probe { size_t child; const char *log, *exporter; };
+
+static struct binding_probe binding_probe_start(size_t i)
 {
-    char *objects = text("%s/binding-objects", work);
+    char *base = text("%s/binding-%zu", work, i);
+    directory(base);
+    char *objects = text("%s/objects", base);
     directory(objects);
     const char *parts[] = {"platform", "modules", "base", "src"};
     char *parent = objects;
     for (size_t i = 0; i < 4; ++i) {parent = text("%s/%s", parent, parts[i]); directory(parent);}
     char *object = text("%s/cleanse.o", parent);
-    char *bin = text("%s/binding-bin", work);
+    char *bin = text("%s/bin", base);
     directory(bin);
     char *exporter = text("%s/native-tunnel-export", bin);
-    char *header = text("%s/binding-actual-include.h", work);
+    char *header = text("%s/actual-include.h", base);
     put(object, 1893456000, "");
     put(exporter, 1893456000, "");
     put(header, 0, "");
-    put(text("%s/binding.d", work), 0, "%s: %s\n", make_path(object), make_path(header));
-    char *makefile = text("%s/binding-probe.mk", work);
-    put(makefile, 0, "include %s/Makefile\ninclude %s/binding.d\n", make_path(root), make_path(work));
-    for (size_t i = 0; i < 3; ++i) {
-        const char *argv[48] = {"make", "-f", makefile, "--no-print-directory", "-n",
+    put(text("%s/binding.d", base), 0, "%s: %s\n", make_path(object), make_path(header));
+    char *makefile = text("%s/probe.mk", base);
+    put(makefile, 0, "include %s/Makefile\ninclude %s/binding.d\n", make_path(root), make_path(base));
+    const char *argv[48] = {"make", "-f", makefile, "--no-print-directory", "-n",
             "-o", "Makefile", "-o", "tools/native_tunnel_sources.def",
             "-o", "contexts/wallet/views/include/views/wallet_templates_gen.h",
             "-o", "contexts/explorer/views/include/views/site_css.h",
             "-o", "contexts/commons/views/include/views/install_script_gen.h",
             "ZCL_STANDALONE_CLEAN=1", text("BUILD_SOURCE_RECORD=%s", source_record),
-            "ZCL_EPOCH_PROFILES=", "ZCL_DEPFILE_PROFILES=", text("BUILD_DIR=%s/binding-build", work),
+            "ZCL_EPOCH_PROFILES=", "ZCL_DEPFILE_PROFILES=", text("BUILD_DIR=%s/build", base),
             text("BIN_DIR=%s", bin), text("OBJ_DIR=%s", objects), "BUILD_ONLY_LEASE=",
             "BUILD_FAST_EPOCH_OBJECT_PREREQ=", "BUILD_FAST_EPOCH_OBJECT_COMMAND=echo ZCL_BINDING_OBJECT_REBUILD",
             object, exporter, NULL};
-        size_t n = 27;
-        if (i) {argv[n++] = "-W"; argv[n++] = i == 1 ? "tools/dev/native_tunnel_export_binding.h" : header;}
-        argv[n] = NULL;
-        char *log = text("%s/binding-%zu.out", work, i);
-        size_t child = probe_start(argv, log, false);
-        int rc = probe_wait(child);
-        char *data = output(log);
+    size_t n = 27;
+    if (i) {argv[n++] = "-W"; argv[n++] = i == 1 ? "tools/dev/native_tunnel_export_binding.h" : header;}
+    argv[n] = NULL;
+    char *log = text("%s/probe.out", base);
+    return (struct binding_probe){probe_start(argv, log, false), log, exporter};
+}
+
+static void binding_probes(void)
+{
+    struct binding_probe probes[3];
+    for (size_t i = 0; i < 3; ++i) probes[i] = binding_probe_start(i);
+    for (size_t i = 0; i < 3; ++i) {
+        int rc = probe_wait(probes[i].child);
+        char *data = output(probes[i].log);
         bool rebuild = strstr(data, "ZCL_BINDING_OBJECT_REBUILD") != NULL;
-        bool link = strstr(data, text("-o %s", exporter)) != NULL;
+        bool link = strstr(data, text("-o %s", probes[i].exporter)) != NULL;
         if (rc != 0 || (i == 0 && (rebuild || link)) || (i == 1 && (rebuild || !link)) || (i == 2 && !rebuild)) {
             fprintf(stderr, "%s\n", data);
             fail(text("binding probe %zu failed (status=%d object=%d exporter=%d)", i, rc, rebuild, link));
         }
         free(data);
     }
+    probe_count = 0; /* All three isolated cases were reaped. */
 }
 
 static void profile_values(char *data, char **epoch, char **depfiles)
