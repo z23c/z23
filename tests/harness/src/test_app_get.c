@@ -3985,6 +3985,202 @@ static bool tag_kept_reference(const struct json_value *kept, const struct app_s
         !strcmp(name, selection->app) && !strcmp(v, version) && !strcmp(i, image) &&
         !strcmp(r, record) && json_get_int(revision) == (int64_t)selection->revision;
 }
+/* This is a real same-session Discover/Receive/Keep, followed by a real
+ * local save and draft preview/Keep; only the window presenter is scripted. */
+struct tag_second_keep {
+    struct tag_discover first, second;
+    struct app_launch_env *env;
+    struct app_selection prior, current;
+    char head[65]; unsigned step, mode;
+    int lists_before_guard;
+    bool edited, card, share, guard_requested;
+};
+static bool tag_second_save(struct tag_second_keep *s, const char *text, char version[65])
+{
+    if (!asf_put(s->prior.copy, "include/tiny.h", text)) return false;
+    struct asf_leaf leaf; asf_open(&leaf);
+    bool ok = json_push_kv_str(&leaf.in, "dir", s->prior.copy) &&
+        asf_plan_confirm("zcode.package.version.save", &leaf);
+    if (ok) (void)snprintf(version, 65, "%s", asf_get(&leaf, "version"));
+    asf_close(&leaf); return ok && strlen(version) == 64;
+}
+static bool tag_second_edit(struct tag_second_keep *s)
+{
+    if (!tag_kept_selection(s->env, &s->prior)) return false;
+    struct json_value first; json_init(&first);
+    bool ok = json_read(&first, s->first.first_result, strlen(s->first.first_result)) &&
+        tag_kept_reference(json_get(&first, "kept"), &s->prior);
+    json_free(&first);
+    if (!ok || !tag_second_save(s, "#define TINY_NAME \"tinyapp-edited\"\n", s->head)) return false;
+    char prior[65]; zcl_hex_encode(s->prior.version, 32, prior);
+    return strcmp(s->head, prior) != 0;
+}
+static bool tag_second_action(const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event, const char *id)
+{
+    for (unsigned i = 0; i < model->action_count; ++i) if (!strcmp(model->actions[i].id, id)) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = i; return true;
+    }
+    return false;
+}
+static bool tag_second_updated_card(struct tag_second_keep *s,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    tag_discover_capture(&s->second);
+    struct app_selection saved; uint8_t head[32];
+    s->card = tag_kept_selection(s->env, &saved) && zcl_hex_decode_lower(s->head, head, sizeof(head)) &&
+        saved.revision == s->prior.revision + 1 && !memcmp(saved.version, head, sizeof(head));
+    if (s->card) s->current = saved;
+    return s->card && tag_second_action(model, event, "share");
+}
+static bool tag_second_followup(struct tag_second_keep *s, const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event)
+{
+    if (!strcmp(model->request_id, "library-error")) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+    }
+    if (!strcmp(model->request_id, "library-share-options")) {
+        s->share = true;
+        if (!s->mode) {
+            event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+            event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+        }
+        if (!s->first.share_canceled) return tag_second_action(model, event, "share-file");
+        if (s->mode == 1) {
+            event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+            event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+        }
+        return tag_second_action(model, event, "share-back");
+    }
+    if (!strcmp(model->request_id, "library-home")) {
+        s->lists_before_guard = g_tag.lists;
+        s->guard_requested = true;
+        return tag_second_action(model, event, "discover");
+    }
+    if (!strcmp(model->request_id, "library-discover-options")) {
+        s->lists_before_guard = g_tag.lists;
+        return tag_second_action(model, event, "catalog");
+    }
+    if (model->action_count && !strcmp(model->actions[0].id, "open"))
+        return tag_second_action(model, event, "back");
+    return tag_second_action(model, event, "home");
+}
+static bool tag_second_card(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_second_keep *s = context;
+    tag_discover_capture(&s->first);
+    if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    if (s->first.kept && !s->edited && model->action_count && !strcmp(model->actions[0].id, "open")) {
+        s->edited = tag_second_edit(s);
+        return s->edited && tag_second_action(model, event, "back");
+    }
+    if (!s->edited) return tag_discover_card(&s->first, model, copy, event, why, cap);
+    if (s->card) return tag_second_followup(s, model, event);
+    if (s->step == 0) { ++s->step; return tag_second_action(model, event, "choose"); }
+    if (s->step == 1) { ++s->step; return tag_second_action(model, event, "change-options"); }
+    if (s->step == 2) { ++s->step; return tag_second_action(model, event, "draft"); }
+    return tag_second_updated_card(s, model, event);
+}
+static bool tag_second_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct tag_second_keep *s = context;
+    return tag_discover_receive(&s->first, model, pages, live, why, cap);
+}
+static bool tag_second_setup(struct tag_world *w, struct tag_world *fresh, struct tag_xdg *x,
+    struct app_launch_env *env, char worker[PATH_MAX], char why[256], bool *fixture_ready)
+{
+    if (!test_mkdtemp(fresh->root, sizeof(fresh->root), "app_get_two_keeps") ||
+        !tag_fixture_worker(w, worker) || !asf_journey_init(&fresh->j, "tinyapp", w->repo, fresh->root)) return false;
+    *fixture_ready = true;
+    return rmdir(fresh->j.b_datadir) == 0 && chmod(fresh->j.b_home, 0755) == 0 &&
+        tag_board_variant(fresh, NULL, NULL, false) && setenv("HOME", fresh->j.b_home, 1) == 0 &&
+        tag_xdg_enter(x, fresh->j.b_home) && app_launch_env_from_process(env, why, 256);
+}
+static bool tag_second_cleanup(struct tag_second_keep *s, const struct tag_world *fresh,
+    struct tag_xdg *x, bool fixture_ready, bool captured, char *saved_home)
+{
+    bool ok = true;
+    if (fixture_ready && (s->second.pid != s->first.pid || s->second.start != s->first.start) &&
+        !tag_stop_receipt(&s->second, fresh->j.b_datadir)) ok = false;
+    if (fixture_ready && !tag_stop_receipt(&s->first, fresh->j.b_datadir)) ok = false;
+    tag_xdg_leave(x);
+    if (captured && (saved_home ? setenv("HOME", saved_home, 1) : unsetenv("HOME"))) ok = false;
+    free(saved_home); return ok;
+}
+static bool tag_second_two_complete(const struct tag_second_keep *s)
+{
+    return s->first.kept && s->edited && s->second.kept && s->card &&
+        s->share && s->first.pid > 0 && s->second.pid > 0 && s->first.pid != s->second.pid;
+}
+static bool tag_second_outcome(const struct tag_second_keep *s, const struct zcl_command_reply *reply)
+{
+    if (!tag_second_two_complete(s)) return false;
+    if (!s->mode) return reply->status == ZCL_COMMAND_STATUS_PASSED && reply->error.mutated;
+    if (s->mode == 1) return reply->status == ZCL_COMMAND_STATUS_PASSED && reply->error.mutated && s->first.share_canceled;
+    return reply->status != ZCL_COMMAND_STATUS_PASSED && reply->error.mutated &&
+        !strcmp(reply->error.code, "RECOVERY_TOO_LARGE") && s->guard_requested &&
+        s->first.share_canceled && s->lists_before_guard == g_tag.lists;
+}
+static bool tag_second_facts(const struct tag_second_keep *s, const struct json_value *facts)
+{
+    const struct json_value *prior = json_get(facts, "historical_keep");
+    const struct json_value *second = json_get(facts, s->mode ? "historical_draft_keep" : "kept");
+    if (!tag_kept_reference(second, &s->current)) return false;
+    if (prior) return tag_kept_reference(prior, &s->prior);
+    return s->mode > 1 && json_get_bool(json_get(facts, "details_unavailable"));
+}
+static bool tag_second_wire(const struct tag_second_keep *s, struct zcl_command_reply *reply)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = asf_spec("app.library");
+    char wire[32768u + 1u]; /* app.library's complete success envelope. */
+    struct zcl_command_budget_fixture budget = {.budget_bytes = spec ? (size_t)spec->budget_bytes : 0};
+    if (s->mode > 1) budget.budget_bytes = ZCL_COMMAND_ERROR_BUDGET;
+    size_t n = spec ? zcl_command_registry_test_reply_wire_fixture(reg, spec, reply, &budget, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n <= budget.budget_bytes && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *container = s->mode > 1 ? json_get(json_get(&doc, "error"), "facts") : json_get(&doc, "data");
+    ok = ok && tag_second_facts(s, container);
+    json_free(&doc); return ok;
+}
+static int tag_second_keep_case(struct tag_world *w, unsigned mode)
+{
+    int failures = 0; struct tag_world fresh = *w; struct tag_xdg x = {0};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    struct app_launch_env env; char why[256], worker[PATH_MAX];
+    struct tag_second_keep s = {.first = {.keep = true, .reply = &reply}, .second = {.reply = &reply}, .env = &env, .mode = mode};
+    const char *home = getenv("HOME"); char *saved_home = home ? strdup(home) : NULL; bool captured = !home || saved_home;
+    bool fixture_ready = false;
+    TEST("Discover Receive Keep then draft Keep returns to the new selected card") {
+        ASSERT(captured && tag_second_setup(w, &fresh, &x, &env, worker, why, &fixture_ready));
+        int posts = g_tag.posts, enables = g_tag.enables;
+        zcl_test_app_library_discover_worker_share(&env, fresh.j.b_datadir, &reply,
+            tag_second_card, tag_second_present, &s, worker, tag_share_prepared_same, tag_cancelled_share);
+        tag_discover_capture(&s.first);
+        tag_discover_capture(&s.second);
+        printf("  two Keeps: first=%d edited=%d step=%u second=%d card=%d share=%d status=%d code=%s\n",
+            s.first.kept, s.edited, s.step, s.second.kept, s.card, s.share, reply.status, reply.error.code);
+        ASSERT(tag_second_outcome(&s, &reply));
+        ASSERT(tag_second_facts(&s, mode > 1 ? json_get(&reply.data, "failure_facts") : &reply.data));
+        ASSERT(tag_second_wire(&s, &reply));
+        ASSERT_EQ(g_tag.posts, posts); ASSERT_EQ(g_tag.enables, enables);
+        PASS();
+    } _test_next:;
+    if (!tag_second_cleanup(&s, &fresh, &x, fixture_ready, captured, saved_home)) ++failures;
+    zcl_command_reply_free(&reply); return failures;
+}
+static int tag_second_keep_cases(struct tag_world *w)
+{
+    int failures = tag_second_keep_case(w, 0);
+    failures += tag_second_keep_case(w, 1);
+    failures += tag_second_keep_case(w, 2);
+    return failures;
+}
 static void tag_oversized_share(void *context, const struct app_selection *selection,
     const char *path, struct zcl_command_reply *reply)
 {
@@ -4812,7 +5008,8 @@ static int tag_keep_cases(struct tag_world *w)
 #else
     bool ready = true;
 #endif
-    int failures = ready ? tag_library_kept_failure(w) : 1;
+    int failures = ready ? tag_second_keep_cases(w) : 1;
+    if (!failures) failures += tag_library_kept_failure(w);
     if (!failures) failures += tag_link_rebuild_cases(w);
     if (!failures) failures += tag_rebuild_case(w, false);
     if (!failures) failures += tag_rebuild_case(w, true);

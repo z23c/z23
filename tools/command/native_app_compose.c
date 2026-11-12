@@ -333,3 +333,31 @@ bool zcl_app_hint_neutral(char *out, size_t cap, const char *datadir,
     va_end(ap);
     return ok;
 }
+bool zcl_app_recovery_fields(struct json_value *out, const struct json_value *source,
+    const char *const *keys, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *v = json_get(source, keys[i]);
+        if (!v || !json_push_kv(out, keys[i], v)) return false;
+    }
+    return true;
+}
+
+bool zcl_app_optional_fields(struct json_value *out, const struct json_value *data,
+                               const char *const *keys, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *v = json_get(data, keys[i]);
+        if (v && !json_push_kv(out, keys[i], v)) return false;
+    }
+    return true;
+}
+
+bool zcl_app_fact_add(struct json_value *facts, const char *key, const struct json_value *value, size_t cap)
+{
+    struct json_value candidate; json_init(&candidate);
+    bool ok = json_copy_checked(&candidate, facts) && json_push_kv(&candidate, key, value);
+    size_t bytes = ok ? json_write(&candidate, NULL, 0) : 0;
+    if (bytes && bytes <= cap) { json_free(facts); *facts = candidate; return true; }
+    json_free(&candidate); return false;
+}

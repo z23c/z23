@@ -19,6 +19,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Checked receipt projection and bounded recovery-fact composition. */
+bool zcl_app_recovery_fields(struct json_value *out, const struct json_value *source,
+    const char *const *keys, size_t count);
+bool zcl_app_optional_fields(struct json_value *out, const struct json_value *source,
+    const char *const *keys, size_t count);
+bool zcl_app_fact_add(struct json_value *facts, const char *key,
+    const struct json_value *value, size_t cap);
+
 /* Run leaf `path` on `input` into `out`, which this initializes (the
  * caller always frees it). False when the leaf is not registered (*absent
  * true when given), its input contract refuses the input (INPUT_REFUSED in
