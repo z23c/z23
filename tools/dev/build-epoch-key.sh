@@ -607,9 +607,14 @@ compiler-id)
     [ -n "$program_dirs" ] ||
         fail 'driver reported no program search dirs'
     IFS=: read -r -a linker_dirs <<< "${program_dirs}:${PATH:-}"
+    declare -A seen_linker_dirs=()
     for linker_dir in "${linker_dirs[@]}"; do
         [ -n "$linker_dir" ] || linker_dir=.
         [ -d "$linker_dir" ] || continue
+        # Repeated PATH entries cannot add tools to this first-seen inventory.
+        # Keep literal spellings and their original traversal order intact.
+        case "${seen_linker_dirs[$linker_dir]+seen}" in seen) continue ;; esac
+        seen_linker_dirs["$linker_dir"]=1
         while IFS= read -r -d '' resolved; do
             [ -x "$resolved" ] && fingerprint_tool arbitrary-linker "$resolved"
         done < <(find "$linker_dir" -maxdepth 1 \( -type f -o -type l \) \
