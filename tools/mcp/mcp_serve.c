@@ -134,7 +134,8 @@ static const struct mcp_tool mcp_tools[] = {
      "\"datadir\":{\"type\":\"string\"},\"version\":{\"type\":\"string\"},"
      "\"env_root\":{\"type\":\"string\"},\"dependency_root\":{\"type\":\"string\"},"
      "\"image_sha3\":{\"type\":\"string\"},\"record_id\":{\"type\":\"string\"},"
-     "\"accept_execution\":{\"type\":\"boolean\"}},\"required\":[\"name\"]}",
+     "\"accept_execution\":{\"type\":\"boolean\"}},\"required\":[\"name\"],"
+     "\"additionalProperties\":false}",
      false},
     {"apps_keep",
      "Request native owner approval to Keep the exact previewed version. "
@@ -205,7 +206,7 @@ struct mcp_serve {
     char code_path[ZCL_COMMAND_MAX_PATH];
     char cli_path[ZCL_COMMAND_MAX_PATH];
     char suggest[DYM_MAX * (ZCL_COMMAND_MAX_PATH + 4) + 4];
-    char bad_arg[96];
+    char bad_arg[320];
     char *out;
     size_t out_cap;
 };
@@ -469,6 +470,16 @@ static bool refuse(struct mcp_refusal *why, const char *code,
     return false;
 }
 
+/* Same refusal with a detail line (e.g. the accepted key set), so a caller
+ * one key off can self-correct in one round trip. */
+static bool refuse_detail(struct mcp_refusal *why, const char *code,
+                          const char *message, const char *detail)
+{
+    (void)refuse(why, code, message);
+    why->detail = detail;
+    return false;
+}
+
 /* Edit distance between two dotted paths, capped at ZCL_COMMAND_MAX_PATH
  * bytes each (a longer given path compares by its first 128 bytes). */
 static size_t path_distance(const char *a, const char *b)
@@ -676,15 +687,88 @@ static bool is_app_tool(const struct mcp_tool *tool)
            tool == &mcp_tools[T_APPS_PERSONALIZE];
 }
 
-/* apps_list / apps_open as the z23_run arguments they stand for:
- * {path:"app.list",input:{}} or {path:"app.open",input:{name}}. run is
- * always initialized and must be freed. */
-static bool app_tool_selected_args(const struct json_value *args,
-                                   struct json_value *input)
+/* apps_open accepts its name plus exactly the selection keys its schema
+ * declares (expected_revision is not one of them: app.open never reads it). */
+static const char *const app_open_keys[] = {"name", "copy", "datadir", "version",
+    "env_root", "dependency_root", "image_sha3", "record_id", "accept_execution"};
+#define APP_OPEN_KEY_COUNT (sizeof(app_open_keys) / sizeof(app_open_keys[0]))
+
+/* Shown as the refusal detail, so a misspelled key can be corrected in one
+ * round trip instead of a tools/list re-read. */
+static const char app_open_keys_text[] =
+    "name, copy, datadir, version, env_root, dependency_root, image_sha3, "
+    "record_id, accept_execution";
+
+static bool app_open_key_type(bool boolean, const struct json_value *v)
 {
-    static const char *const keys[] = {"copy", "datadir", "version", "env_root",
-        "dependency_root", "image_sha3", "record_id", "accept_execution", "expected_revision"};
-    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+    return boolean ? v->type == JSON_BOOL : v->type == JSON_STR;
+}
+
+/* Strict gate for apps_open: unknown, duplicate and mistyped keys are
+ * refused before any dispatch, so a typo'd copy key can never launch the
+ * kept or installed app in place of the requested copy. */
+static bool app_open_argument_keys(struct mcp_serve *s,
+                                   const struct json_value *args,
+                                   struct mcp_refusal *why)
+{
+    if (!args || args->type != JSON_OBJ)
+        return refuse(why, "BAD_ARGUMENT",
+                      "apps_open requires an object whose name names one app");
+    unsigned seen = 0;
+    for (size_t i = 0; i < args->num_children; ++i) {
+        size_t j = 0;
+        while (j < APP_OPEN_KEY_COUNT && strcmp(args->keys[i], app_open_keys[j])) ++j;
+        if (j == APP_OPEN_KEY_COUNT || (seen & (1u << j))) {
+            snprintf(s->bad_arg, sizeof(s->bad_arg),
+                     "apps_open refuses unknown or duplicate key %.48s",
+                     args->keys[i]);
+            return refuse_detail(why, "BAD_ARGUMENT", s->bad_arg,
+                                 app_open_keys_text);
+        }
+        bool boolean = j + 1 == APP_OPEN_KEY_COUNT; /* accept_execution is last */
+        if (!app_open_key_type(boolean, &args->children[i])) {
+            snprintf(s->bad_arg, sizeof(s->bad_arg),
+                     "apps_open key %.48s must be a %s",
+                     args->keys[i], boolean ? "boolean" : "string");
+            return refuse(why, "BAD_ARGUMENT", s->bad_arg);
+        }
+        seen |= 1u << j;
+    }
+    return (seen & 1u) != 0 ||
+        refuse_detail(why, "BAD_ARGUMENT", "apps_open requires name",
+                      app_open_keys_text);
+}
+
+/* apps_list takes no arguments: it always lists the server-bound datadir. */
+static bool app_list_argument_keys(const struct json_value *args,
+                                   struct mcp_refusal *why)
+{
+    if (!args || args->type != JSON_OBJ)
+        return refuse(why, "BAD_ARGUMENT", "apps_list requires an empty object");
+    return args->num_children == 0 ||
+        refuse(why, "BAD_ARGUMENT",
+               "apps_list takes no arguments; it lists the bound datadir");
+}
+
+/* apps_open / apps_keep as the z23_run arguments they stand for:
+ * {path:"app.open",input:{name, selection}} or
+ * {path:"app.keep",input:{preview identity}}. run is always initialized and
+ * must be freed. Callers gate keys and types first (app_open_argument_keys /
+ * app_keep_argument_keys); expected_revision forwards for the Keep leaf
+ * only, since app.open never reads it. */
+static bool app_tool_selected_args(const struct json_value *args,
+                                   struct json_value *input, bool keep)
+{
+    static const char *const open_keys[] = {"copy", "datadir", "version",
+        "env_root", "dependency_root", "image_sha3", "record_id",
+        "accept_execution"};
+    static const char *const keep_keys[] = {"copy", "version", "env_root",
+        "dependency_root", "image_sha3", "record_id", "accept_execution",
+        "expected_revision", "datadir"}; /* name is pushed by the caller */
+    const char *const *keys = keep ? keep_keys : open_keys;
+    const size_t count = keep ? sizeof(keep_keys) / sizeof(keep_keys[0])
+                              : sizeof(open_keys) / sizeof(open_keys[0]);
+    for (size_t i = 0; i < count; ++i) {
         const struct json_value *value = json_get(args, keys[i]);
         if (value && !json_push_kv(input, keys[i], value)) return false;
     }
@@ -724,19 +808,28 @@ static bool app_adopt_run_args(const struct json_value *args,
     return ok || refuse(why, "OUT_OF_MEMORY", "cannot build the adoption request");
 }
 
-/* Only paths cross this bridge; the native window owns the trust decision. */
-static bool app_receive_inputs(const struct json_value *args, struct json_value *input,
-                               struct mcp_refusal *why)
+/* Only paths cross this bridge; the native window owns the trust decision.
+ * preview is a documented app.receive input, but it stays native-only here:
+ * the refusal names the MCP continuation so the assistant can go on
+ * (build the received copy with app.build, then apps_open it). */
+static bool app_receive_inputs(const struct json_value *args,
+                               struct json_value *input, struct mcp_refusal *why)
 {
     static const char *const keys[] = {"file", "datadir", "destination"};
-    if (!args || args->type != JSON_OBJ || args->num_children > 3)
+    if (!args || args->type != JSON_OBJ)
         return refuse(why, "BAD_ARGUMENT", "apps_receive requires file; datadir and destination are optional");
     unsigned seen = 0;
     for (size_t i = 0; i < args->num_children; ++i) {
         size_t j = 0;
         while (j < 3 && strcmp(args->keys[i], keys[j])) ++j;
-        if (j == 3 || (seen & (1u << j)))
-            return refuse(why, "BAD_ARGUMENT", "apps_receive accepts only file, datadir and destination");
+        if (j == 3 || (seen & (1u << j))) {
+            if (strcmp(args->keys[i], "preview"))
+                return refuse(why, "BAD_ARGUMENT", "apps_receive accepts only file, datadir and destination");
+            return refuse(why, "BAD_ARGUMENT",
+                          "apps_receive refuses preview: previewing is a native "
+                          "owner choice; build the received copy with z23_run "
+                          "app.build plan/confirm, then preview it with apps_open");
+        }
         const struct json_value *v = &args->children[i];
         const char *path = v->type == JSON_STR ? json_get_str(v) : NULL;
         if (!path || path[0] != '/' || strlen(path) > 4399)
@@ -806,23 +899,46 @@ static bool app_personalize_args(const struct json_value *args, struct json_valu
             json_push_kv(run, "input", args)) ||
         refuse(why, "OUT_OF_MEMORY", "cannot build the personalization request");
 }
-static bool app_keep_argument_keys(const struct json_value *args, struct mcp_refusal *why)
+/* Shown as the refusal detail for apps_keep key errors: the caller lifts the
+ * nine-field identity out of the apps_open preview reply, so naming the
+ * accepted set (and the offending or missing key in the message) saves a
+ * tools/list round trip at the native owner window. */
+static const char app_keep_keys_text[] =
+    "name, copy, version, env_root, dependency_root, image_sha3, record_id, "
+    "accept_execution, expected_revision, optional datadir";
+
+static bool app_keep_argument_keys(struct mcp_serve *s, const struct json_value *args,
+                                   struct mcp_refusal *why)
 {
     static const char *const keys[] = {"name", "copy", "version", "env_root",
         "dependency_root", "image_sha3", "record_id", "accept_execution",
         "expected_revision", "datadir"};
+    const size_t count = sizeof(keys) / sizeof(keys[0]);
+    const size_t required = count - 1; /* datadir is the one optional key */
     if (!args || args->type != JSON_OBJ)
         return refuse(why, "BAD_ARGUMENT", "apps_keep requires an exact preview identity object");
     unsigned seen = 0;
     for (size_t i = 0; i < args->num_children; ++i) {
         size_t j = 0;
-        while (j < sizeof(keys) / sizeof(keys[0]) && strcmp(args->keys[i], keys[j])) ++j;
-        if (j == sizeof(keys) / sizeof(keys[0]) || (seen & (1u << j)))
-            return refuse(why, "BAD_ARGUMENT", "apps_keep refuses unknown or duplicate keys and caller decisions");
+        while (j < count && strcmp(args->keys[i], keys[j])) ++j;
+        if (j == count || (seen & (1u << j))) {
+            snprintf(s->bad_arg, sizeof(s->bad_arg),
+                     "apps_keep refuses unknown or duplicate key %.48s",
+                     args->keys[i]);
+            return refuse_detail(why, "BAD_ARGUMENT", s->bad_arg, app_keep_keys_text);
+        }
         seen |= 1u << j;
     }
-    return (seen & 511u) == 511u ||
-        refuse(why, "BAD_ARGUMENT", "apps_keep requires every preview identity and expected_revision");
+    if ((seen & 511u) == 511u) return true;
+    size_t at = (size_t)snprintf(s->bad_arg, sizeof(s->bad_arg),
+                                 "apps_keep is missing required key(s):");
+    for (size_t j = 0; j < required; ++j) {
+        if (seen & (1u << j)) continue;
+        int w = snprintf(s->bad_arg + at, sizeof(s->bad_arg) - at, " %s", keys[j]);
+        if (w <= 0 || (size_t)w >= sizeof(s->bad_arg) - at) break;
+        at += (size_t)w;
+    }
+    return refuse_detail(why, "BAD_ARGUMENT", s->bad_arg, app_keep_keys_text);
 }
 static bool app_ordinary_encode(const struct json_value *args, const char *name,
     bool open, bool keep, struct json_value *run, struct mcp_refusal *why)
@@ -832,25 +948,27 @@ static bool app_ordinary_encode(const struct json_value *args, const char *name,
     json_set_object(&input);
     bool ok = json_push_kv_str(run, "path", keep ? "app.keep" : open ? "app.open" : "app.list") &&
               (!open || json_push_kv_str(&input, "name", name)) &&
-              (!open || app_tool_selected_args(args, &input)) &&
+              (!open || app_tool_selected_args(args, &input, keep)) &&
               json_push_kv(run, "input", &input);
     json_free(&input);
     return ok || refuse(why, "OUT_OF_MEMORY", "cannot build the app call");
 }
-static bool app_ordinary_run_args(const struct mcp_tool *tool,
+static bool app_ordinary_run_args(struct mcp_serve *s, const struct mcp_tool *tool,
                                   const struct json_value *args,
                                   struct json_value *run, struct mcp_refusal *why)
 {
     bool open = tool != &mcp_tools[T_APPS_LIST];
     bool keep = tool == &mcp_tools[T_APPS_KEEP];
-    if (keep && !app_keep_argument_keys(args, why)) return false;
+    if (keep && !app_keep_argument_keys(s, args, why)) return false;
+    if (open && !keep && !app_open_argument_keys(s, args, why)) return false;
+    if (!open && !app_list_argument_keys(args, why)) return false;
     const char *name = open ? arg_str(args, "name") : NULL;
     if (open && (!name || !name[0] || strlen(name) > 64))
         return refuse(why, "BAD_ARGUMENT",
                       "name must be a string of 1 to 64 bytes, e.g. skycombat");
     return app_ordinary_encode(args, name, open, keep, run, why);
 }
-static bool app_tool_run_args(const struct mcp_tool *tool,
+static bool app_tool_run_args(struct mcp_serve *s, const struct mcp_tool *tool,
                               const struct json_value *args,
                               struct json_value *run, struct mcp_refusal *why)
 {
@@ -859,7 +977,7 @@ static bool app_tool_run_args(const struct mcp_tool *tool,
     if (tool == &mcp_tools[T_APPS_RECEIVE]) return app_receive_run_args(args, run, why);
     if (tool == &mcp_tools[T_APPS_SHARE]) return app_share_run_args(args, run, why);
     if (tool == &mcp_tools[T_APPS_PERSONALIZE]) return app_personalize_args(args, run, why);
-    return app_ordinary_run_args(tool, args, run, why);
+    return app_ordinary_run_args(s, tool, args, run, why);
 }
 
 /* The plain z23_run policy, except that apps_open may run app.open itself
@@ -873,7 +991,7 @@ static bool app_tool_authority(struct mcp_serve *s, const struct mcp_tool *tool,
     const struct zcl_command_spec *spec = NULL;
     const struct json_value *input = NULL;
     bool alias = false;
-    bool ok = app_tool_run_args(tool, args, &run, why) &&
+    bool ok = app_tool_run_args(s, tool, args, &run, why) &&
               resolve_target(s, &mcp_tools[T_RUN], &run, &spec, &alias,
                              &input, why);
     bool allowed = (tool == &mcp_tools[T_APPS_OPEN] && mcp_policy_app_open(spec)) ||
@@ -1304,7 +1422,7 @@ static bool app_tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
     struct json_value run;
     struct mcp_refusal why = {0};
     bool handled = true;
-    if (!app_tool_run_args(tool, args, &run, &why)) {
+    if (!app_tool_run_args(s, tool, args, &run, &why)) {
         text_error(text, why.code, why.message);
         *is_error = true;
     } else {

@@ -237,6 +237,7 @@ static int case_apps_tools(struct ma *m, long *app_pid)
         ASSERT(ma_has(m, "\"name\":\"apps_share\""));
         ASSERT(ma_has(m, "\"name\":\"apps_personalize\""));
         ASSERT(ma_has(m, "\"required\":[\"name\"]"));
+        ASSERT(ma_has(m, "\"required\":[\"name\"],\"additionalProperties\":false}"));
     PASS(); }
     TEST("apps_list returns the launchable section") {
         ASSERT(ma_tool(m, 3, "apps_list", "{}"));
@@ -290,6 +291,43 @@ static int case_selected_forwarding(struct ma *m)
         ASSERT(ma_has(m, "BAD_SELECTED_APP"));
         ASSERT(ma_tool(m, 11, "apps_open", "{\"name\":\"fixtureapp\",\"image_sha3\":\"invalid\"}"));
         ASSERT(ma_has(m, "EXECUTION_CONFIRMATION_REQUIRED"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* apps_open with extra keys injected after name: refused before dispatch,
+ * so no app is launched and the reply never carries a pid. */
+static bool ma_open_injection(struct ma *m, unsigned id, const char *body)
+{
+    char args[512];
+    int n = snprintf(args, sizeof(args), "{\"name\":\"fixtureapp\",%s}", body);
+    return n > 0 && (size_t)n < sizeof(args) &&
+        ma_tool(m, (int)id, "apps_open", args) &&
+        ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT") &&
+        !ma_has(m, "\\\"pid\\\"");
+}
+static int case_open_list_gates(struct ma *m)
+{
+    int failures = 0;
+    TEST("apps_open refuses misspelled, undeclared, duplicate and mistyped keys; apps_list takes none") {
+        ASSERT(ma_open_injection(m, 40, "\"accept_execution\":true,\"cop\":\"/missing\""));
+        ASSERT(ma_has(m, "duplicate key cop\\\""));
+        ASSERT(ma_has(m, "image_sha3, record_id, accept_execution"));
+        ASSERT(ma_open_injection(m, 41, "\"accept_execution\":true,\"expected_revision\":1"));
+        ASSERT(ma_has(m, "duplicate key expected_revision"));
+        ASSERT(ma_open_injection(m, 42, "\"accept_execution\":true,\"name\":\"fixtureapp\""));
+        ASSERT(ma_has(m, "duplicate key name"));
+        ASSERT(ma_open_injection(m, 43, "\"accept_execution\":true,\"copy\":5"));
+        ASSERT(ma_has(m, "key copy must be a string"));
+        ASSERT(ma_open_injection(m, 44, "\"copy\":\"/c\",\"accept_execution\":\"yes\""));
+        ASSERT(ma_has(m, "key accept_execution must be a boolean"));
+        ASSERT(ma_tool(m, 45, "apps_list", "{\"datadir\":\"/other\"}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 46, "apps_list", "{\"name\":\"fixtureapp\"}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 47, "apps_list", "{}"));
+        ASSERT(ma_has(m, "\"isError\":false") && ma_has(m, "launchable"));
         PASS();
     } _test_next:;
     return failures;
@@ -357,6 +395,16 @@ static int case_keep_decisions(struct ma *m)
         ASSERT(ma_keep_injection(m, 243, "\"expected_revision\":1"));
         ASSERT(ma_keep_injection(m, 244, "\"name\":\"other\""));
         ASSERT(ma_keep_injection(m, 245, "\"unknown\":true"));
+        ASSERT(ma_keep_injection(m, 247, "\"image_sha\":\"deadbeef\""));
+        ASSERT(ma_has(m, "duplicate key image_sha\\\""));
+        ASSERT(ma_has(m, "image_sha3, record_id"));
+        ASSERT(ma_tool(m, 248, "apps_keep",
+            "{\"name\":\"fixtureapp\",\"copy\":\"/missing-copy\",\"version\":\"v\","
+            "\"env_root\":\"e\",\"dependency_root\":\"d\",\"image_sha3\":\"i\","
+            "\"accept_execution\":true,\"expected_revision\":0}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_has(m, "missing required key(s): record_id"));
+        ASSERT(ma_has(m, "image_sha3, record_id"));
         ASSERT(ma_tool(m, 246, "z23_run",
             "{\"path\":\"app keep\",\"input\":{\"confirm\":true,\"plan_id\":\"invented\",\"accept_execution\":true}}"));
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "KEEP_NATIVE_CONFIRMATION_REQUIRED"));
@@ -463,6 +511,23 @@ static int case_receive_injections(struct ma *m)
         ASSERT(n > 0 && (size_t)n < sizeof(args));
         ASSERT(ma_tool(m, 31, "apps_receive", args));
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        n = snprintf(args, sizeof(args),
+            "{\"file\":\"%s/missing\",\"datadir\":\"%s/data\",\"destination\":\"%s/copy\","
+            "\"preview\":true}", m->root, m->root, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 32, "apps_receive", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_has(m, "refuses preview"));
+        ASSERT(ma_has(m, "z23_run app.build plan/confirm"));
+        ASSERT(ma_has(m, "preview it with apps_open"));
+        n = snprintf(args, sizeof(args),
+            "{\"file\":\"%s/missing\",\"datadir\":\"%s/data\",\"destination\":\"%s/copy\","
+            "\"confirm\":true}", m->root, m->root, m->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(args));
+        ASSERT(ma_tool(m, 33, "apps_receive", args));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_has(m, "accepts only file, datadir and destination"));
+        ASSERT(!ma_has(m, "app.build"));
         PASS();
     } _test_next:;
     return failures;
@@ -773,6 +838,7 @@ int test_mcp_serve_apps(void)
     PASS(); }
     failures += case_apps_tools(&m, &app_pid);
     failures += case_selected_forwarding(&m);
+    failures += case_open_list_gates(&m);
     failures += case_keep_forwarding(&m);
     failures += case_keep_decisions(&m);
     failures += case_adopt_request(&m);
