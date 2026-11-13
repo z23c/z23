@@ -27,6 +27,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <utime.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define CIN_CHECK(name, expression)                                    \
     do {                                                               \
@@ -953,6 +956,33 @@ static bool cin_fault_old_rows(sqlite3 *db)
     return sqlite3_finalize(stmt) == SQLITE_OK && ok;
 }
 
+#if !defined(_WIN32)
+static bool cin_fault_call(const char *root, struct ci_store *store,
+                           const struct ci_merkle_leaf *leaf,
+                           const uint8_t dep_stat[32], const uint8_t digest[32],
+                           bool *called)
+{
+    FILE *capture = tmpfile();
+    int saved = capture ? dup(STDERR_FILENO) : -1;
+    if (saved < 0) { if (capture) fclose(capture); return false; }
+    fflush(stderr);
+    if (dup2(fileno(capture), STDERR_FILENO) < 0) {
+        close(saved); fclose(capture); return false;
+    }
+    *called = ci_build_store_incremental(root, store, leaf, 1, dep_stat, digest);
+    fflush(stderr);
+    bool restored = dup2(saved, STDERR_FILENO) >= 0;
+    close(saved);
+    rewind(capture);
+    char text[4096]; size_t n = fread(text, 1, sizeof text - 1, capture);
+    bool read_ok = !ferror(capture);
+    text[n] = '\0';
+    bool closed = fclose(capture) == 0;
+    return restored && read_ok && closed &&
+           strstr(text, "incremental stage=scan path=lib/net/src/fault.c") != NULL;
+}
+#endif
+
 static bool cin_fault_incremental(const char *root, const char *label)
 {
     struct ci_store *store = NULL;
@@ -965,14 +995,20 @@ static bool cin_fault_incremental(const char *root, const char *label)
     (void)snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
     uint8_t digest[32] = {0};
     zcl_alloc_fault_fail_nth(label, 1);
-    bool ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, dep_stat, digest);
+    bool ok = false;
+#if !defined(_WIN32)
+    bool diagnostic = seeded && cin_fault_call(root, store, &leaf, dep_stat, digest, &ok);
+#else
+    bool diagnostic = true;
+    ok = seeded && ci_build_store_incremental(root, store, &leaf, 1, dep_stat, digest);
+#endif
     bool consumed = zcl_alloc_fault_armed_label() == NULL;
     zcl_alloc_fault_clear();
     bool preserved = cin_fault_old_rows(ci_store_db(store));
     printf("codeindex_incremental: incremental fault %s ready=%d seeded=%d consumed=%d returned=%d old_rows=%d\n",
            label, ready, seeded, consumed, ok, preserved);
     ci_store_close(store);
-    return ready && seeded && consumed && !ok && preserved;
+    return ready && seeded && consumed && !ok && preserved && diagnostic;
 }
 
 static bool cin_fault_new_rows(sqlite3 *db)

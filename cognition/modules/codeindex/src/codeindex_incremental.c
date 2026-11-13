@@ -145,18 +145,18 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
 {
     sqlite3 *db = ci_store_db(store);
     if (!incremental_delete_file_rows(db, path))
-        return false;
+        LOG_FAIL("codeindex", "incremental stage=delete_rows path=%s", path);
 
     uint8_t content_sha3[32];
     char purpose[CI_FILE_PURPOSE_MAX] = "";
     int lines = 0;
     if (!incremental_scan_file_into_store(root, store, path, content_sha3,
                                           purpose, &lines))
-        return false;
+        LOG_FAIL("codeindex", "incremental stage=scan path=%s", path);
 
     int64_t mtime_ns = 0;
     if (!incremental_file_mtime_ns(root, path, &mtime_ns))
-        return false;
+        LOG_FAIL("codeindex", "incremental stage=file_metadata path=%s", path);
 
     struct ci_file file;
     memset(&file, 0, sizeof(file));
@@ -165,8 +165,10 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
     ci_cpy(file.purpose, sizeof(file.purpose), purpose);
     file.line_count = lines;
     if (!incremental_update_file_row(db, path, &file, content_sha3, mtime_ns))
-        return false;
-    return ci_store_scan_shard_refresh(store, path);
+        LOG_FAIL("codeindex", "incremental stage=update_file path=%s", path);
+    if (!ci_store_scan_shard_refresh(store, path))
+        LOG_FAIL("codeindex", "incremental stage=scan_shard path=%s", path);
+    return true;
 }
 
 static bool incremental_source_root(struct ci_store *store, uint8_t out[32])
@@ -356,11 +358,17 @@ static bool incremental_refresh_contents(const char *root, struct ci_store *stor
                                          int changed_count, const uint8_t dep_stat[32],
                                          const uint8_t merkle_root[32], bool rescan_deps)
 {
-    return incremental_replace_changed(root, store, changed, changed_count) &&
-           ci_docs_refresh(store, root) &&
-           (!rescan_deps || ci_reconcile_includes(root, store, dep_stat)) &&
-           incremental_seal_roots(store, dep_stat, merkle_root) &&
-           incremental_stamp_projection_and_counts(store);
+    if (!incremental_replace_changed(root, store, changed, changed_count))
+        LOG_FAIL("codeindex", "incremental stage=changed_file");
+    if (!ci_docs_refresh(store, root))
+        LOG_FAIL("codeindex", "incremental stage=docs_refresh");
+    if (rescan_deps && !ci_reconcile_includes(root, store, dep_stat))
+        LOG_FAIL("codeindex", "incremental stage=includes_reconcile");
+    if (!incremental_seal_roots(store, dep_stat, merkle_root))
+        LOG_FAIL("codeindex", "incremental stage=seal_roots");
+    if (!incremental_stamp_projection_and_counts(store))
+        LOG_FAIL("codeindex", "incremental stage=projection_counts");
+    return true;
 }
 
 static bool incremental_build(const char *root, struct ci_store *store,
@@ -372,6 +380,8 @@ static bool incremental_build(const char *root, struct ci_store *store,
         !dep_stat || !merkle_root)
         LOG_FAIL("codeindex", "invalid incremental store build");
     bool tx_open = ci_store_begin(store);
+    if (!tx_open)
+        LOG_FAIL("codeindex", "incremental stage=begin");
     bool ok = tx_open && incremental_refresh_contents(root, store, changed,
                    changed_count, dep_stat, merkle_root, rescan_deps);
     if (!ok) {
