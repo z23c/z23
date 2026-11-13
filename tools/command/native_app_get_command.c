@@ -129,6 +129,10 @@ struct ag_one {
     uint8_t plan[32];
     struct zcl_command_reply inner;
     bool created;
+    /* Set by the fetch worker so a caller that could not show the
+     * download window can still use the fetch that already ran. */
+    bool fetch_ran, fetch_ok;
+    int64_t fetch_timeout_s;
 };
 
 struct ag_private_stage {
@@ -276,25 +280,32 @@ static void ag_orphan_sweep(const char *datadir)
 #endif
 }
 
-static bool ag_stage(struct ag_one *s, int64_t timeout_s)
+/* ag_stage outcome: the carrier is staged and hash-verified (AG_STAGED),
+ * the download window was closed so nothing is received (AG_CANCELED), or
+ * the fetch or verification failed and the reply says why (AG_FAILED). */
+enum ag_stage_result { AG_STAGED, AG_CANCELED, AG_FAILED };
+/* ag_stage_fetch outcome: staged, canceled by the download window, or
+ * failed with the refusal already forwarded to the reply. */
+enum ag_stage_fetch { AG_FETCH_STAGED, AG_FETCH_CANCELED, AG_FETCH_FAILED };
+static enum ag_stage_fetch ag_stage_fetch(struct ag_one *s, int64_t timeout_s);
+
+static enum ag_stage_result ag_stage(struct ag_one *s, int64_t timeout_s)
 {
     int n = snprintf(s->dir, sizeof(s->dir), "%s/.app-get-%s", s->datadir, s->token);
     if (n <= 0 || (size_t)n >= sizeof(s->dir) ||
         snprintf(s->path, sizeof(s->path), "%s/offer.z23share", s->dir) >= (int)sizeof(s->path) ||
         !platform_private_directory_create(s->dir)) {
         zcl_package_copy_fail(s->reply, "TEMP_UNAVAILABLE", false, "cannot create private get directory", AG_COMMAND);
-        return false;
+        return AG_FAILED;
     }
     s->created = true;
-    bool fetched = ag_fetch(s->row, s->path, timeout_s, &s->inner);
-    if (!fetched) zcl_app_inner_fail(s->reply, &s->inner, false);
-    zcl_command_reply_free(&s->inner);
-    if (!fetched) return false;
+    enum ag_stage_fetch fetched = ag_stage_fetch(s, timeout_s);
+    if (fetched != AG_FETCH_STAGED) return fetched == AG_FETCH_CANCELED ? AG_CANCELED : AG_FAILED;
     if (!ag_hash(s->path, &s->row->offer)) {
         zcl_package_copy_fail(s->reply, "SHA256_MISMATCH", false, "fetched bytes do not match the offer", AG_COMMAND);
-        return false;
+        return AG_FAILED;
     }
-    return true;
+    return AG_STAGED;
 }
 
 static bool ag_receive_plan(struct ag_one *s)
@@ -753,8 +764,12 @@ static bool ag_plan_one(const struct zcl_app_offer_row *row, const char *datadir
                         const struct json_value *input, const char *token, int64_t timeout_s,
                         struct zcl_command_reply *reply)
 {
-    struct ag_one s = {.row = row, .datadir = datadir, .input = input, .token = token, .reply = reply};
-    if (!ag_stage(&s, timeout_s)) {
+    struct ag_one s = {.row = row, .datadir = datadir, .input = input, .token = token,
+        .reply = reply, .fetch_timeout_s = timeout_s};
+    enum ag_stage_result staged = ag_stage(&s, timeout_s);
+    if (staged == AG_CANCELED) return ag_cleanup(s.dir, s.path, reply, false);
+    if (staged == AG_FAILED) {
+        zcl_command_reply_free(&s.inner);
         if (s.created) (void)ag_cleanup(s.dir, s.path, reply, false);
         return false;
     }
@@ -800,8 +815,68 @@ static void ag_consume_host(struct ag_one *s, struct ag_private_stage *private, 
 static bool ag_progress_fetch(void *work)
 {
     struct ag_one *s = work;
-    return ag_fetch(s->row, s->path, AG_BUDGET_MS / 1000, &s->inner);
+    s->fetch_ran = true;
+    return s->fetch_ok = ag_fetch(s->row, s->path,
+        s->fetch_timeout_s > 0 ? s->fetch_timeout_s : AG_BUDGET_MS / 1000, &s->inner);
 }
+/* Forward the fetch worker's own refusal; nothing may override it. */
+static void ag_fetch_refused(struct ag_one *s)
+{
+    zcl_app_inner_fail(s->reply, &s->inner, false);
+    zcl_command_reply_free(&s->inner);
+}
+/* The window could not be shown. The worker may already have fetched, and
+   that outcome — not a second fetch — is the honest one. */
+static bool ag_unshown_fetch(struct ag_one *s)
+{
+    return s->fetch_ran ? s->fetch_ok : ag_progress_fetch(s);
+}
+/* The confirmed half re-fetches the carrier with no output of its own for
+ * up to the whole fetch budget. Surface the same bounded download window
+ * the Discover room shows (app_fetch_progress_run), so the wait is visible
+ * and closing the window cancels before any receive plan runs. A caller
+ * that cannot show the window keeps the plain silent fetch instead of
+ * failing the get. */
+#ifdef ZCL_TESTING
+/* Injected only by tests; NULL shows the default native download window. */
+static app_confirm_presenter ag_confirm_presenter;
+static void *ag_confirm_presenter_context;
+#endif
+static enum ag_stage_fetch ag_confirmed_fetch(struct ag_one *s)
+{
+    enum app_fetch_progress_result result;
+#ifdef ZCL_TESTING
+    result = app_fetch_progress_run(ag_progress_fetch, s,
+        ag_confirm_presenter, ag_confirm_presenter_context);
+#else
+    result = app_fetch_progress_run(ag_progress_fetch, s, NULL, NULL);
+#endif
+    if (result == APP_FETCH_CLOSED) {
+        zcl_command_reply_free(&s->inner);
+        if (json_push_kv_str(&s->reply->data, "status", "canceled")) return AG_FETCH_CANCELED;
+        zcl_package_copy_fail(s->reply, "ALLOC", false, "Cannot report that the download was closed.", AG_COMMAND);
+        return AG_FETCH_FAILED;
+    }
+    if (result == APP_FETCH_UNAVAILABLE) result = ag_unshown_fetch(s) ? APP_FETCH_OK : APP_FETCH_FAILED;
+    if (result != APP_FETCH_OK) ag_fetch_refused(s);
+    return result == APP_FETCH_OK ? AG_FETCH_STAGED : AG_FETCH_FAILED;
+}
+static enum ag_stage_fetch ag_stage_fetch(struct ag_one *s, int64_t timeout_s)
+{
+    if (!zcl_package_copy_confirmed(s->input)) {
+        if (ag_fetch(s->row, s->path, timeout_s, &s->inner)) return AG_FETCH_STAGED;
+        ag_fetch_refused(s);
+        return AG_FETCH_FAILED;
+    }
+    return ag_confirmed_fetch(s);
+}
+#ifdef ZCL_TESTING
+void zcl_test_app_get_confirm_presenter(app_confirm_presenter presenter, void *context)
+{
+    ag_confirm_presenter = presenter;
+    ag_confirm_presenter_context = context;
+}
+#endif
 static enum app_fetch_progress_result ag_run_fetch(struct ag_one *s, bool progress,
     app_confirm_presenter presenter, void *presenter_context)
 {

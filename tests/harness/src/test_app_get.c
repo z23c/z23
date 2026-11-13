@@ -161,6 +161,7 @@ static bool tag_capture_signed_post(struct zcl_command_reply *out);
 extern bool zcl_app_get_host_reply_valid_for_testing(const struct json_value *, const char *);
 extern void zcl_test_app_get_host_enabled(const char *, const char *, const char *, struct zcl_command_reply *);
 extern bool zcl_test_app_publish_next(char *, size_t, const char *, const char *, const char *, const char *);
+extern void zcl_test_app_get_confirm_presenter(app_confirm_presenter presenter, void *context);
 
 static bool tag_host_reply_case(const char *ok_field, const char *host,
                                 const char *carrier, const char *generation)
@@ -4746,9 +4747,64 @@ static int tag_get_observations(struct tag_world *w)
     if (opened) asf_close(&leaf);
     return failures;
 }
+/* The confirmed get's fetch must not be silent: it shows the same bounded
+ * download window Discover shows, and closing it cancels before Receive. */
+static bool tag_confirm_progress_presenter(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct tag_discover *d = context; (void)pages;
+    if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    if (strcmp(model->request_id, "discover-fetch-progress")) return false;
+    return tag_fetch_present(d, model, live);
+}
+static int tag_confirm_progress(struct tag_world *w)
+{
+    int failures = 0; struct asf_leaf leaf; bool opened = false;
+    char token[33], plan[65], offer[65];
+    struct tag_discover d = {0}, child = {0};
+    TEST("app get: the confirmed fetch shows the download window; closing it cancels before Receive") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
+        asf_open(&leaf); opened = true;
+        ASSERT(json_push_kv_str(&leaf.in, "datadir", w->j.b_datadir) &&
+            json_push_kv_str(&leaf.in, "name", w->name));
+        ASSERT(asf_pass("app.get", &leaf));
+        ASSERT(tag_get_plan_ids(&leaf, token, plan, offer));
+        d.fetch_close = true;
+        atomic_store(&tag_fetch_progress_seen, false);
+        atomic_store(&tag_fetch_progress_entered, false);
+        atomic_store(&tag_fetch_progress_release, false);
+        tag_require_fetch_progress = true;
+        zcl_test_app_get_confirm_presenter(tag_confirm_progress_presenter, &d);
+        zcl_command_reply_free(&leaf.out);
+        zcl_command_reply_init(&leaf.out, "zcl.app_get.v1");
+        ASSERT(json_push_kv_str(&leaf.in, "token", token) && json_push_kv_str(&leaf.in, "offer_id", offer) &&
+            json_push_kv_str(&leaf.in, "plan_id", plan) && json_push_kv_bool(&leaf.in, "confirm", true));
+        bool passed = asf_pass("app.get", &leaf);
+        zcl_test_app_get_confirm_presenter(NULL, NULL);
+        tag_require_fetch_progress = false;
+        atomic_store(&tag_fetch_progress_release, true);
+        const struct json_value *pid = json_get(&leaf.out.data, "pid");
+        if (pid && pid->type == JSON_INT) child.pid = (long)json_get_int(pid);
+        ASSERT(passed);
+        /* the confirm half was no longer silent: the download window showed */
+        ASSERT(atomic_load(&tag_fetch_progress_seen));
+        const char *status = zcl_package_copy_str(&leaf.out.data, "status");
+        ASSERT(status && !strcmp(status, "canceled"));
+        ASSERT(!json_get(&leaf.out.data, "copy") && !json_get(&leaf.out.data, "executed"));
+        ASSERT(!leaf.out.error.mutated);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        PASS();
+    } _test_next:;
+    if (child.pid > 1) (void)asf_alive_then_stop(child.pid);
+    if (opened) asf_close(&leaf);
+    return failures;
+}
 static int tag_b_journeys(struct tag_world *w)
 {
     int failures = tag_b_get(w);
+    if (!failures) failures += tag_confirm_progress(w);
     return failures ? failures : tag_get_observations(w);
 }
 
