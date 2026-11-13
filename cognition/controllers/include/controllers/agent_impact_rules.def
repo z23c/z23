@@ -71,6 +71,9 @@ AGENT_IMPACT_RULE("tools/command/native_devagent_pace.c|tests/harness/src/test_d
  * like the lane-discipline leaves above. */
 AGENT_IMPACT_RULE("tools/command/native_devagent_ticketkey.c|tests/harness/src/test_devagent_ticketkey.c", "devagent_ticketkey command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|engine/entry/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|engine/composition/launchd/*|docs/agent/AGENT_API.md|docs/dev/BUILD.md|docs/dev/CODEBASE_MAP.md|docs/node/HOW_THE_NODE_WORKS.md|docs/node/GETTING_STARTED.md|docs/dev/fast-path.md|docs/RUNBOOK.md|tests/harness/src/test_make_lint_gates.c|tests/harness/src/lint_gate_*.c|tests/harness/src/lint_gate_selftests.h", "make_lint_gates")
+/* Sensor recipes and compile flags live in Makefile. Path-based impact must
+ * retain semantic runtime acceptance for every edit to that build authority. */
+AGENT_IMPACT_RULE("Makefile", "semantic_manifest semantic_sensor semantic_facts semantic_facts_live semantic_consumer semantic_consumer_live semantic_facts_fuzz")
 /* The host janitor: the sweep engine, the leaf over it, the hourly script
  * and its fixture regression all answer to one acceptance bar, so a change
  * to any of them runs the group that proves the janitor never deletes work

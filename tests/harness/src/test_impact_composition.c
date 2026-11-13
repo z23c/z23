@@ -12222,6 +12222,44 @@ static bool ic_pr69_sensor_maps(const char *path, const char *group)
     return false;
 }
 
+struct ic_make_lint_family {
+    const struct zcl_devloop_plan *plan;
+    size_t count;
+    bool all_selected;
+};
+static bool ic_make_lint_family_member(const char *id, void *ctx)
+{
+    struct ic_make_lint_family *family = ctx;
+    family->count++;
+    if (strcmp(zcl_devloop_plan_selects_answer(family->plan, id), "selected") != 0) {
+        fprintf(stderr, "Makefile impact misses lint family group %s\n", id);
+        family->all_selected = false;
+    }
+    return true;
+}
+static int test_ic_makefile_semantic_floor(void)
+{
+    int failures = 0;
+    struct zcl_devloop_plan *plan = calloc(1, sizeof(*plan));
+    TEST("Makefile changes select semantic runtime and the complete lint family") {
+        static const char *const groups[] = {
+            "test_semantic_manifest", "test_semantic_sensor", "test_semantic_facts",
+            "test_semantic_facts_live", "test_semantic_consumer",
+            "test_semantic_consumer_live", "test_semantic_facts_fuzz"
+        };
+        const char *files[] = {"Makefile"};
+        ASSERT(plan != NULL);
+        ASSERT(zcl_devloop_plan_files(files, 1, plan));
+        struct ic_make_lint_family family = {plan, 0, true};
+        ASSERT(zcl_test_group_family_expand("make_lint_gates", ic_make_lint_family_member, &family));
+        ASSERT(family.count > 0 && family.all_selected);
+        ASSERT(ic_selects_all(plan, groups, sizeof(groups) / sizeof(groups[0])));
+        PASS();
+    } _test_next:;
+    free(plan);
+    return failures;
+}
+
 static int test_ic_pr69_sensor_routes(void)
 {
     int failures = 0;
@@ -17412,6 +17450,7 @@ int test_impact_composition(void)
     failures += test_ic_app_sync_wire_route();
     failures += test_ic_app_sync_service_route();
     failures += test_ic_pr69_sensor_routes();
+    failures += test_ic_makefile_semantic_floor();
     failures += test_ic_local_selection_build_needs();
     failures += test_ic_proof_prefork_builds_the_shared_targets();
     failures += test_ic_generation_docs_tools_builds_the_checker_binaries();
