@@ -292,8 +292,8 @@ static bool ci_closure_add_file(struct ci_closure_ctx *c, const char *path,
 /* ── linkage identity ──────────────────────────────────────────────────
  * A frontier key is "name" for a symbol walked by name (external linkage, or
  * anything whose linkage the index cannot prove file-local), and
- * "name@path" for a static function whose defining file is the .c `path`.
- * '@' never occurs in a C identifier, so the first '@' splits a key. */
+ * "name@path" for a static function and "name#path" for a macro whose
+ * defining file is the .c `path`. Neither delimiter occurs in an identifier. */
 #define CI_CLOSURE_KEY_MAX 400
 
 static bool ci_path_is_c(const char *path)
@@ -305,15 +305,16 @@ static bool ci_path_is_c(const char *path)
 /* A header-defined static (`static inline` in a .h) is defined in EVERY
  * includer, so its callers live in files other than its own: it stays on the
  * name walk. Only a static whose own file is a .c translation unit is keyed
- * file-local. */
+ * file-local. A .c macro uses a distinct key and conservative include check. */
 static bool ci_closure_key(const char *name, char kind, const char *def_path,
                            const char *decl_path, char key[CI_CLOSURE_KEY_MAX])
 {
     const char *path = NULL;
-    if (kind == 't')
+    if (kind == 't' || kind == 'M')
         path = (def_path && def_path[0]) ? def_path : decl_path;
     int n = (path && ci_path_is_c(path))
-        ? snprintf(key, CI_CLOSURE_KEY_MAX, "%s@%s", name, path)
+        ? snprintf(key, CI_CLOSURE_KEY_MAX, "%s%c%s", name,
+                   kind == 'M' ? '#' : '@', path)
         : snprintf(key, CI_CLOSURE_KEY_MAX, "%s", name);
     if (n < 0 || (size_t)n >= CI_CLOSURE_KEY_MAX)
         LOG_FAIL("codeindex", "closure key overflow for %s", name);
@@ -432,6 +433,7 @@ struct ci_static_scope {
     bool        last_keep;
     bool        includers_loaded;
     bool        includers_unbounded;
+    bool        includers_complete;
     int         n_includers;
 };
 
@@ -452,6 +454,7 @@ static bool ci_static_includer(struct ci_closure_ctx *c, struct codeindex *ci,
         /* A clipped include answer cannot prove a file is NOT an includer. An
          * absent graph can: the definition check alone is sound without it. */
         scope->includers_unbounded = dim == CODEINDEX_INCLUDE_DIM_TRUNCATED;
+        scope->includers_complete = dim == CODEINDEX_INCLUDE_DIM_COMPLETE;
     }
     if (scope->includers_unbounded) {
         *includes = true;
@@ -462,6 +465,32 @@ static bool ci_static_includer(struct ci_closure_ctx *c, struct codeindex *ci,
             *includes = true;
             break;
         }
+    return true;
+}
+
+/* A macro defined in a C file may reach another TU only through that file.
+ * Unknown or incomplete dependency coverage cannot exclude any caller. */
+static bool ci_macro_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
+                               struct ci_static_scope *scope, const char *file,
+                               bool *keep)
+{
+    *keep = true;
+    if (strcmp(file, scope->path) == 0 || !ci_path_is_c(file)) return true;
+    if (strcmp(file, scope->last_file) == 0) {
+        *keep = scope->last_keep;
+        return true;
+    }
+    char probe[1][256];
+    int recorded = codeindex_includes_of_file(ci, file, probe, 1);
+    if (recorded < 0)
+        LOG_FAIL("codeindex", "includes_of_file failed for %s", file);
+    if (recorded > 0) {
+        bool includes = true;
+        if (!ci_static_includer(c, ci, scope, file, &includes)) return false;
+        if (scope->includers_complete) *keep = includes;
+    }
+    snprintf(scope->last_file, sizeof(scope->last_file), "%s", file);
+    scope->last_keep = *keep;
     return true;
 }
 
@@ -500,6 +529,29 @@ static bool ci_static_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
     return true;
 }
 
+static bool ci_closure_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
+                                 struct ci_static_scope *scope, bool macro,
+                                 const char *file, bool *keep)
+{
+    if (!scope->path) return true;
+    return macro ? ci_macro_ref_binds(c, ci, scope, file, keep)
+                 : ci_static_ref_binds(c, ci, scope, file, keep);
+}
+
+static bool ci_closure_key_scope(char *name, struct ci_static_scope *scope)
+{
+    char *at = strchr(name, '@');
+    char *macro_at = strchr(name, '#');
+    bool macro = macro_at && (!at || macro_at < at);
+    if (macro) at = macro_at;
+    if (at) {
+        *at = '\0';
+        scope->name = name;
+        scope->path = at + 1;
+    }
+    return macro;
+}
+
 /* Expand one symbol: pull its callers, record their files, queue new callers. */
 static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
                                      struct codeindex *ci, const char *key,
@@ -509,13 +561,8 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
 {
     char name[CI_CLOSURE_KEY_MAX];
     snprintf(name, sizeof(name), "%s", key);
-    char *at = strchr(name, '@');
     struct ci_static_scope scope = {0};
-    if (at) {
-        *at = '\0';
-        scope.name = name;
-        scope.path = at + 1;
-    }
+    bool macro = ci_closure_key_scope(name, &scope);
     /* Distinct file and enclosing edges, filtered below for a static. */
     int nc = ci_store_caller_edges(ci->store, name, c->refbuf, CI_CLOSURE_QUERY_BATCH);
     if (nc < 0)
@@ -529,8 +576,7 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
     for (int i = 0; i < nc; i++) {
         const struct ci_ref *ref = &c->refbuf[i];
         bool keep = true;
-        if (scope.path && !ci_static_ref_binds(c, ci, &scope, ref->ref_file,
-                                               &keep))
+        if (!ci_closure_ref_binds(c, ci, &scope, macro, ref->ref_file, &keep))
             return false;
         if (!keep)
             continue;  /* a same-named function of another TU */

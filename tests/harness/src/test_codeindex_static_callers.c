@@ -161,12 +161,49 @@ static bool sc_write_fixture_static_inline(void)
     return ok;
 }
 
+static bool sc_write_fixture_macro_includes(void)
+{
+    return sc_write(SC_SRC "sc_macro.c",
+        "static int fdopen(int x) { return x; }\n"
+        "#define fdopen(x) ((x) + 1)\nint sc_macro_user(void) { return fdopen(1); }\n") &&
+        sc_write(SC_INC "sc_macro_other.h", "/* independent prerequisite */\n") &&
+        sc_write(SC_SRC "sc_macro_other.c",
+        "#include \"net/sc_macro_other.h\"\n"
+        "int fdopen(int x) { return x; }\nint sc_macro_other(void) { return fdopen(2); }\n") &&
+        sc_write("build/obj/sc_macro_other.d",
+        "build/obj/sc_macro_other.o: " SC_SRC "sc_macro_other.c " SC_INC "sc_macro_other.h\n") &&
+        sc_write(SC_SRC "sc_macro_inc.c",
+        "#include \"sc_macro.c\"\nint sc_macro_inc(void) { return fdopen(3); }\n") &&
+        sc_write("build/obj/sc_macro_inc.d",
+        "build/obj/sc_macro_inc.o: " SC_SRC "sc_macro_inc.c " SC_SRC "sc_macro.c\n") &&
+        sc_write(SC_SRC "sc_macro_unknown.c", "int sc_macro_unknown(void) { return fdopen(4); }\n") &&
+        sc_write(SC_SRC "sc_macro_undef.c",
+        "#include \"sc_macro.c\"\n#undef fdopen\n"
+        "int sc_macro_undef(void) { return fdopen(5); }\n") &&
+        sc_write("build/obj/sc_macro_undef.d",
+        "build/obj/sc_macro_undef.o: " SC_SRC "sc_macro_undef.c " SC_SRC "sc_macro.c\n");
+}
+static bool sc_write_fixture_macro_other(void)
+{
+    return sc_write(SC_SRC "sc_macro_twin.c",
+        "static int fdopen(int x) { return x; }\nint sc_macro_twin(void) { return fdopen(7); }\n") &&
+        sc_write(SC_INC "sc_macro_fragment.h",
+        "static inline int sc_macro_fragment(void) { return fdopen(8); }\n") &&
+        sc_write(SC_INC "sc_macro_header.h", "#define sc_header_macro(x) ((x) + 1)\n") &&
+        sc_write(SC_SRC "sc_macro_header_user.c",
+        "int sc_macro_header_user(void) { return sc_header_macro(6); }\n") &&
+        sc_write("build/obj/sc_macro_header_user.d",
+        "build/obj/sc_macro_header_user.o: " SC_SRC "sc_macro_header_user.c\n");
+}
+
 static bool sc_write_fixture(void)
 {
     return sc_write_fixture_two_tus() &&
            sc_write_fixture_reach() &&
            sc_write_fixture_static_caller() &&
-           sc_write_fixture_static_inline();
+           sc_write_fixture_static_inline() &&
+           sc_write_fixture_macro_includes() &&
+           sc_write_fixture_macro_other();
 }
 
 /* Run the store walk (or, with `overlay`, the fresh-bytes walk) for one
@@ -323,6 +360,105 @@ static int test_sc_overlay_keys_seeds_the_same_way(struct codeindex *ci)
     TEST("codeindex_static_callers: the overlay walk returns the identical "
          "file-scoped set") {
         ASSERT(sc_closure_is(ci, SC_SRC "sc_x.c", true, g_sc_x_want));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool sc_macro_recorded_graph(struct codeindex *ci)
+{
+    char paths[16][256];
+    int forward = codeindex_includes_of_file(ci, SC_SRC "sc_macro_other.c", paths, 16);
+    bool header = false;
+    for (int i = 0; i < forward && i < 16; ++i)
+        if (!strcmp(paths[i], SC_INC "sc_macro_other.h")) header = true;
+    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    int reverse = codeindex_reverse_includes(ci, SC_SRC "sc_macro.c", paths, 16, &dim);
+    bool includer = false;
+    for (int i = 0; i < reverse && i < 16; ++i)
+        if (!strcmp(paths[i], SC_SRC "sc_macro_inc.c")) includer = true;
+    bool ok = forward > 0 && header && reverse >= 0 && includer && dim == CODEINDEX_INCLUDE_DIM_COMPLETE;
+    if (!ok) fprintf(stderr, "macro graph forward=%d header=%d reverse=%d includer=%d dim=%d\n",
+                     forward, header, reverse, includer, (int)dim);
+    return ok;
+}
+static int test_sc_macro_scoping(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: C macro scope retains real includers") {
+        bool has = false;
+        ASSERT(sc_macro_recorded_graph(ci));
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_SRC "sc_macro.c", &has) && has);
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_SRC "sc_macro_inc.c", &has) && has);
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_SRC "sc_macro_unknown.c", &has) && has);
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_SRC "sc_macro_undef.c", &has) && has);
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_SRC "sc_macro_twin.c", &has) && has);
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_INC "sc_macro_fragment.h", &has) && has);
+        ASSERT(sc_closure_has(ci, SC_SRC "sc_macro.c", SC_SRC "sc_macro_other.c", &has) && !has);
+        ASSERT(sc_closure_has(ci, SC_INC "sc_macro_header.h", SC_SRC "sc_macro_header_user.c", &has) && has);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Work on a private in-memory copy; never modify the opened fixture index. */
+static struct ci_store *sc_macro_copy_store(struct codeindex *ci)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) return NULL;
+    sqlite3 *db = ci_store_db(store);
+    sqlite3_backup *backup = sqlite3_backup_init(db, "main", ci_store_db(ci->store), "main");
+    bool ok = backup && sqlite3_backup_step(backup, -1) == SQLITE_DONE;
+    if (backup && sqlite3_backup_finish(backup) != SQLITE_OK) ok = false;
+    if (!ok) { ci_store_close(store); return NULL; }
+    return store;
+}
+static bool sc_macro_untrusted_setup(sqlite3 *db, unsigned mode)
+{
+    static const char *const sql[] = {
+        "DELETE FROM meta WHERE k='include_narrow_unsafe'",
+        "UPDATE meta SET v=x'31' WHERE k='include_narrow_unsafe'",
+        "DELETE FROM includes",
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4097) "
+        "INSERT INTO files(path,\"group\",purpose,content_sha3,mtime,line_count) "
+        "SELECT printf('macro-synthetic-%d.c',x),'','','',0,0 FROM n;"
+        "INSERT INTO includes(file_id,dep_path) SELECT id,'" SC_SRC "sc_macro.c' "
+        "FROM files WHERE path LIKE 'macro-synthetic-%.c'"
+    };
+    return mode < sizeof(sql) / sizeof(sql[0]) &&
+           sqlite3_exec(db, sql[mode], NULL, NULL, NULL) == SQLITE_OK;
+}
+static bool sc_macro_untrusted_dim(struct codeindex *ci, unsigned mode,
+                                   enum codeindex_include_dim *dim)
+{
+    char (*out)[256] = calloc(4096, sizeof(*out));
+    if (!out) return false;
+    int n = codeindex_reverse_includes(ci, SC_SRC "sc_macro.c", out, 4096, dim);
+    free(out);
+    return n >= 0 && *dim == (mode == 2 ? CODEINDEX_INCLUDE_DIM_UNAVAILABLE : CODEINDEX_INCLUDE_DIM_TRUNCATED);
+}
+/* Check the actual include verdict before checking conservative retention. */
+static bool sc_macro_untrusted(struct codeindex *ci, unsigned mode)
+{
+    struct ci_store *store = sc_macro_copy_store(ci);
+    if (!store) return false;
+    bool ok = sc_macro_untrusted_setup(ci_store_db(store), mode);
+    struct codeindex copy = *ci; copy.store = store;
+    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_COMPLETE;
+    if (ok) ok = sc_macro_untrusted_dim(&copy, mode, &dim);
+    bool has = false;
+    if (ok) ok = sc_closure_has(&copy, SC_SRC "sc_macro.c", SC_SRC "sc_macro_other.c", &has) && has;
+    ci_store_close(store);
+    if (!ok) fprintf(stderr, "macro untrusted include mode=%u dim=%d retained=%d\n", mode, (int)dim, has);
+    return ok;
+}
+static int test_sc_macro_untrusted(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: incomplete macro include graphs retain callers") {
+        bool ok = true;
+        for (unsigned mode = 0; mode < 4; ++mode) ok = sc_macro_untrusted(ci, mode) && ok;
+        ASSERT(ok);
         PASS();
     } _test_next:;
     return failures;
@@ -510,6 +646,8 @@ int test_codeindex_static_callers(void)
         failures += test_sc_includers_never_dropped(ci);
         failures += test_sc_header_static_inline_does_not_shrink(ci);
         failures += test_sc_overlay_keys_seeds_the_same_way(ci);
+        failures += test_sc_macro_scoping(ci);
+        failures += test_sc_macro_untrusted(ci);
         codeindex_close(ci);
     }
      TEST_DISCARD(system("rm -rf " SC_FIX));
