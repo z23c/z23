@@ -653,6 +653,14 @@ static int case_daily_cap(void)
     CI_CHECK("the cap refuses the model call", ci_has_events(&e, "daily model cap"));
     (void)snprintf(unit, sizeof(unit), "%s/units/%s", e.state, s);
     CI_CHECK("no unit is created at the cap", !ci_exists(unit));
+    CI_CHECK("capped question remains pending", !ci_state_has(&e, "seen.txt", s));
+    CI_CHECK("a fixture answer is staged",
+             ci_model_reply(&e, "ANSWER: run make z23 as the build target"));
+    CI_CHECK("fixture budget becomes available", ci_wf(calls, "0\n"));
+    CI_CHECK("pending question is answered after admission", ci_pass(&e) == 0 &&
+             ci_events_count(&e, "ANSWERED") == 1 && ci_state_has(&e, "seen.txt", s));
+    CI_CHECK("admitted answer is not repeated", ci_pass(&e) == 0 &&
+             ci_events_count(&e, "ANSWERED") == 1);
     return failures;
 }
 
@@ -969,6 +977,20 @@ static int ci_bulk_resumed_failure(const struct ci_env *e, const struct ci_run_o
     return failures;
 }
 
+/* Pagination spans more than a day's quota. Simulate renewed admission between
+ * passes; capped questions must stay pending, not count as completed work. */
+static int ci_bulk_admitted_pass(const struct ci_env *e, const struct ci_run_opts *opts)
+{
+    char day[16], path[700];
+    const time_t now = time(NULL);
+    struct tm tm;
+    if (!gmtime_r(&now, &tm) || !strftime(day, sizeof(day), "%Y%m%d", &tm)) return -1;
+    (void)mkdir(e->state, 0700);
+    (void)snprintf(path, sizeof(path), "%s/calls-%s", e->state, day);
+    if (!ci_wf(path, "0\n")) return -1;
+    return ci_pass_with(e, opts);
+}
+
 static int case_live_backlog(void)
 {
     struct ci_env e; char bin[700], ids[55][65];
@@ -978,13 +1000,13 @@ static int case_live_backlog(void)
     const struct ci_run_opts live = {.live_list = true, .z23 = bin, .fsize = -1};
     bool passes = true, advanced = false;
     for (int i = 0; i < 20; ++i) {
-        if (ci_pass_with(&e, &live) != 0) { passes = false; break; }
+        if (ci_bulk_admitted_pass(&e, &live) != 0) { passes = false; break; }
         if (ci_state_has(&e, "crawl-cursor", ids[49])) { advanced = true; break; }
     }
     CI_CHECK("bounded first chunk is handled before advancing", passes && advanced && ci_events_count(&e, "ESCALATE ") == 50);
     failures += ci_bulk_resumed_failure(&e, &live, bin);
     for (int i = 0; i < 8 && ci_events_count(&e, "ESCALATE ") < 55; ++i)
-        if (ci_pass_with(&e, &live) != 0) { passes = false; break; }
+        if (ci_bulk_admitted_pass(&e, &live) != 0) { passes = false; break; }
     CI_CHECK("bounded backlog eventually handles every post once", passes &&
              ci_events_count(&e, "ESCALATE ") == 55 && ci_bulk_seen_once(&e, ids));
     return failures;
@@ -1202,6 +1224,11 @@ static int case_responder_guard(void)
     CI_CHECK("a primary checkout is refused", ci_has_events(&e, "not a linked worktree"));
     CI_CHECK("the model is never run on it", !ci_run_log_has(&e, "engine rc="));
     CI_CHECK("nothing is answered", !ci_has_events(&e, "ANSWERED"));
+    CI_CHECK("unready question remains pending", !ci_state_has(&e, "seen.txt", g));
+    CI_CHECK("ready responder answers pending question", ci_pass(&e) == 0 &&
+             ci_events_count(&e, "ANSWERED") == 1 && ci_state_has(&e, "seen.txt", g));
+    CI_CHECK("recovered answer is not repeated", ci_pass(&e) == 0 &&
+             ci_events_count(&e, "ANSWERED") == 1);
     return failures;
 }
 

@@ -1001,19 +1001,23 @@ static bool ci_handle(struct ci *t, const struct json_value *post, size_t ctx_le
     const char *host = ci_str(post, "host");
     const char *kind = ci_str(post, "kind");
     const char *agent = ci_str(post, "agent");
-    if (!ci_mark_seen(t, id))
+    if (ci_ours(host, agent)) {
+        (void)ci_mark_seen(t, id);
         return false;
-    if (ci_ours(host, agent))
-        return false;
-    ci_say(t, "NEW %s kind=%s agent=%s host=%.12s", id, kind, agent, host);
-    if (!ci_take_call(t)) {
-        ci_ack(t, id, "daily model cap reached");
-        return true;
     }
+    ci_say(t, "NEW %s kind=%s agent=%s host=%.12s", id, kind, agent, host);
     if (!ci_responder_ready(t)) {
         ci_ack(t, id, "responder checkout failed, dirty or not a linked worktree");
         return true;
     }
+    if (!ci_take_call(t)) {
+        ci_ack(t, id, "daily model cap reached");
+        return true;
+    }
+    /* Temporary admission refusals leave the question pending. Once admitted,
+     * record before dispatch so an ambiguous model/post result is never retried. */
+    if (!ci_mark_seen(t, id))
+        return false;
     ci_answer(t, post, ctx_len);
     return true;
 }
