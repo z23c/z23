@@ -2725,7 +2725,7 @@ static bool al_keep_route_name(const char *copy_dir, const char *datadir,
         sha3_256_finalize(&sha, digest);
         zcl_hex_encode(digest, 32, hex);
         ok = snprintf(out, APP_SELECTION_ID_MAX + 1, "kept:received-%.18s", hex) <
-            APP_SELECTION_ID_MAX + 1;
+            (int)(APP_SELECTION_ID_MAX + 1);
         zcl_package_copy_close(&copy);
     }
     zcl_command_reply_free(&why);
