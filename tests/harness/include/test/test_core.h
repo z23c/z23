@@ -437,12 +437,14 @@ long long test_forked_exec_data_mb(long long budget_mb);
  * and the tail. test_note: one formatted line (cut at ~1 KiB).
  * test_note_bytes: a labelled buffer, escaped, head+tail kept when long.
  * test_note_child: a child's exit status (negative: spawn/timeout failure)
- * and its captured output. */
+ * and its captured output. test_note_response_body: the reply captured into
+ * the caller's buffer. NULL or empty notes nothing. */
 #define TEST_EVIDENCE_CAP 4096
 void test_evidence_reset(void);
 void test_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void test_note_bytes(const char *label, const void *buf, size_t len);
 void test_note_child(const char *label, int rc, const char *out);
+void test_note_response_body(const void *body, size_t cap);
 
 /* Last observed bytes of a merged child stream; not necessarily the final
  * child output unless the caller independently observed EOF. */

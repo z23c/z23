@@ -55,6 +55,7 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
               (unsigned long long)evidence.stderr_observed, evidence.stderr_complete);
     test_note_bytes("stdout tail", evidence.stdout_tail, evidence.stdout_len);
     test_note_bytes("stderr tail", evidence.stderr_tail, evidence.stderr_len);
+    test_note_response_body(out, out_size);
     return rc;
 #else
     if (timeout_ms > INT_MAX) return -1;
@@ -68,6 +69,7 @@ static inline int test_host_tool_capture(const char *const argv[], char *out,
               (unsigned long long)evidence.stderr_observed, evidence.stderr_complete);
     test_note_bytes("stdout tail", evidence.stdout_tail, evidence.stdout_len);
     test_note_bytes("stderr tail", evidence.stderr_tail, evidence.stderr_len);
+    test_note_response_body(out, out_size);
     return rc;
 #endif
 }

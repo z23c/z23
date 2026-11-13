@@ -71,6 +71,48 @@ static int fr_child_capture(void)
     return failures;
 }
 
+/* Prefix is the captured reply. Padding pushes it out of the 512-byte
+ * stdout tail, so the tail is the child's own output and the reply is a
+ * separate observation. */
+static int fr_capture_observed(bool fail)
+{
+    int failures = 0;
+    TEST(fail ? "recorder: observed failure" : "recorder: observed pass") {
+        const char *argv[] = {
+            "/bin/sh", "-c",
+            "printf RESP-BODY-MARKER; "
+            "dd if=/dev/zero bs=3000 count=1 2>/dev/null | tr '\\0' p; "
+            "printf CHILD-OUT-TAIL; exit 13",
+            NULL};
+        char out[64];
+        int rc = test_host_tool_capture(argv, out, sizeof(out), 5000);
+        if (fail) ASSERT(1 == 2);
+        ASSERT(rc == 13);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fr_child_observed_fail(void)
+{
+    return fr_capture_observed(true);
+}
+
+static int fr_child_observed_pass(void)
+{
+    return fr_capture_observed(false);
+}
+
+static int fr_child_bare(void)
+{
+    int failures = 0;
+    TEST("recorder: bare failure") {
+        ASSERT(1 == 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool fr_run(int (*body)(void), char *out, size_t cap, int *failures)
 {
     char path[PATH_MAX];
@@ -177,6 +219,75 @@ static int fr_test_child_tails(void)
     return failures;
 }
 
+static bool fr_frame_has(const char *out, const char *marker)
+{
+    const char *begin = strstr(out, "--- evidence ");
+    const char *end = strstr(out, "--- end evidence ---");
+    const char *hit = begin ? strstr(begin, marker) : NULL;
+    return begin && end && hit && hit < end;
+}
+
+static int fr_test_observed_failure_prints_all_three(void)
+{
+    int failures = 0;
+    TEST("failure recorder: a failing assertion prints exit, child output, and response body") {
+        char out[FR_OUT_CAP];
+        int child = 0;
+        const char *begin;
+        const char *end;
+        ASSERT(fr_run(fr_child_observed_fail, out, sizeof(out), &child));
+        ASSERT(child == 1);
+        ASSERT(strstr(out, "FAIL at") != NULL);
+        ASSERT(fr_frame_has(out, "exit=13"));
+        ASSERT(fr_frame_has(out, "CHILD-OUT-TAIL"));
+        ASSERT(fr_frame_has(out, "RESP-BODY-MARKER"));
+        ASSERT(fr_frame_has(out, "response body"));
+        begin = strstr(out, "--- evidence ");
+        end = strstr(out, "--- end evidence ---");
+        ASSERT(begin != NULL && end != NULL && end > begin);
+        ASSERT((size_t)(end - begin) <= TEST_EVIDENCE_CAP + 256);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fr_test_observed_pass_prints_nothing(void)
+{
+    int failures = 0;
+    TEST("failure recorder: a pass that recorded exit, output, and body prints none") {
+        char out[FR_OUT_CAP];
+        int child = -1;
+        ASSERT(fr_run(fr_child_observed_pass, out, sizeof(out), &child));
+        ASSERT(child == 0);
+        ASSERT(strstr(out, "--- evidence ") == NULL);
+        ASSERT(strstr(out, "RESP-BODY-MARKER") == NULL);
+        ASSERT(strstr(out, "CHILD-OUT-TAIL") == NULL);
+        ASSERT(strstr(out, "exit=13") == NULL);
+        ASSERT(strstr(out, "response body") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fr_test_bare_failure_invents_nothing(void)
+{
+    int failures = 0;
+    TEST("failure recorder: a failure with no observation invents none") {
+        char out[FR_OUT_CAP];
+        int child = 0;
+        ASSERT(fr_run(fr_child_bare, out, sizeof(out), &child));
+        ASSERT(child == 1);
+        ASSERT(strstr(out, "FAIL at") != NULL);
+        ASSERT(strstr(out, "--- evidence ") == NULL);
+        ASSERT(strstr(out, "RESP-BODY-MARKER") == NULL);
+        ASSERT(strstr(out, "CHILD-OUT-TAIL") == NULL);
+        ASSERT(strstr(out, "exit=") == NULL);
+        ASSERT(strstr(out, "response body") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fr_test_bytes_escape_and_cut(void)
 {
     int failures = 0;
@@ -231,6 +342,9 @@ int test_failure_recorder(void)
     failures += fr_test_pass_prints_nothing();
     failures += fr_test_cap_keeps_head_and_tail();
     failures += fr_test_child_tails();
+    failures += fr_test_observed_failure_prints_all_three();
+    failures += fr_test_observed_pass_prints_nothing();
+    failures += fr_test_bare_failure_invents_nothing();
     failures += fr_test_bytes_escape_and_cut();
     failures += fr_test_long_file();
     printf("Failure recorder: %d failures\n", failures);

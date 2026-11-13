@@ -968,6 +968,19 @@ void test_note_child(const char *label, int rc, const char *out)
     if (out) test_note_bytes("output", out, strlen(out));
 }
 
+/* The bytes a capture left in the caller's buffer. Spawn capture
+ * NUL-terminates that buffer; an empty or missing reply notes nothing,
+ * so a failure that observed no body does not invent one. */
+void test_note_response_body(const void *body, size_t cap)
+{
+    const char *text = body;
+    size_t n = 0;
+    if (!text || cap == 0) return;
+    while (n < cap && text[n] != '\0') n++;
+    if (n == 0) return;
+    test_note_bytes("response body", text, n);
+}
+
 /* Appends n bytes of src (or a formatted gap) to out at *used, never past
  * cap - 1. */
 static void evidence_put(char *out, size_t cap, size_t *used, const char *src,
