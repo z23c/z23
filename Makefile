@@ -496,7 +496,7 @@ ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 # Keep configured values (including deferred variable references) conservative:
 # the packer links zlib. Mixed node goals still require normal bootstrap.
 ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1840,7 +1840,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
-	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint \
+	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
@@ -9513,7 +9513,7 @@ $(BIN_DIR)/p2p_version_probe: tools/p2p_version_probe.c \
 	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -Iplatform/modules/support/include -Ivendor/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -o $@ $^ -lpthread -lm
+	    -o $@ $^ $(if $(filter Android,$(ZCL_HOST_OS)),,-lpthread) -lm
 
 # rom-bundle-replicate: copy a verified consensus-state bundle + its replay
 # receipt + a producing-binary hash record to a second directory, verified
