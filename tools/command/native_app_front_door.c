@@ -438,6 +438,18 @@ static int fd_decide(struct fd_run *r)
     zcl_command_reply_free(&r->reply);
     if (!zcl_app_inner_call(r->verb->path, &r->in, &r->reply, NULL))
         return fd_refused(r);
+    /* Closing the download window cancels a confirmed get before Receive:
+     * the leaf still answers PASSED, but its data carries status "canceled"
+     * and nothing was received, so the decline's outcome is the truth. */
+    const struct json_value *status = json_get(&r->reply.data, "status");
+    if (status && status->type == JSON_STR &&
+        strcmp(json_get_str(status), "canceled") == 0) {
+        (void)fprintf(r->out,
+                      "z23 app %s %s: download window closed; nothing was "
+                      "received\n%s\n", r->door->verb, r->door->target,
+                      changed);
+        return 1;
+    }
     fd_key_note(r);
     fd_print_done(r);
     return 0;

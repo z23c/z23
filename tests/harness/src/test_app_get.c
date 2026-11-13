@@ -4971,10 +4971,56 @@ static int tag_confirm_progress(struct tag_world *w)
     if (opened) asf_close(&leaf);
     return failures;
 }
+/* The front door must not print "done: z23 app get NAME" when the user
+ * closes the confirmed-get download window: closing it canceled the fetch
+ * before Receive, so the door reports nothing changed and exits nonzero,
+ * exactly like a declined y/N. */
+static int tag_door_confirm_cancel(struct tag_world *w)
+{
+    int failures = 0; struct tag_discover d = {0};
+    TEST("app get: closing the confirmed download window at the door reports nothing changed and exits 1") {
+        char text[2048];
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
+        const char *words[5] = {"z23", "app", "get", w->name, "--yes"};
+        d.fetch_close = true;
+        /* No require handshake here: the door's plan half runs an
+         * unconfirmed plain fetch that would block on it. The seen flag
+         * still proves the confirmed half showed the download window. */
+        atomic_store(&tag_fetch_progress_seen, false);
+        atomic_store(&tag_fetch_progress_release, false);
+        zcl_test_app_get_confirm_presenter(tag_confirm_progress_presenter, &d);
+        FILE *out = tmpfile(); ASSERT(out != NULL);
+        int saved = dup(STDOUT_FILENO), rc = -1;
+        ASSERT(saved >= 0 && fflush(stdout) == 0 &&
+               dup2(fileno(out), STDOUT_FILENO) >= 0);
+        bool handled = zcl_app_front_door_try(asf_spec("app.get"), words, 5, 3,
+                                              w->j.b_datadir, &rc);
+        (void)fflush(stdout);
+        bool restored = dup2(saved, STDOUT_FILENO) >= 0;
+        close(saved);
+        rewind(out);
+        size_t n = fread(text, 1, sizeof(text) - 1u, out);
+        text[n] = '\0';
+        fclose(out);
+        zcl_test_app_get_confirm_presenter(NULL, NULL);
+        atomic_store(&tag_fetch_progress_release, true);
+        ASSERT(handled && restored);
+        ASSERT(atomic_load(&tag_fetch_progress_seen));
+        ASSERT_EQ(rc, 1);
+        ASSERT(strstr(text, "download window closed") != NULL);
+        ASSERT(strstr(text, "nothing changed") != NULL);
+        ASSERT(strstr(text, "done:") == NULL);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int tag_b_journeys(struct tag_world *w)
 {
     int failures = tag_b_get(w);
     if (!failures) failures += tag_confirm_progress(w);
+    if (!failures) failures += tag_door_confirm_cancel(w);
     return failures ? failures : tag_get_observations(w);
 }
 
