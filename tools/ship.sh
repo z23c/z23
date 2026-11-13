@@ -149,6 +149,57 @@ ship_one_way_schema_decision() {
     return 2
 }
 
+
+# Read the live rollback identity each time; an early check never authorizes activation.
+ship_remote_schema_check() {
+    local host="$1" prior_commit
+    prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" "node_unit=$REMOTE_NODE_UNIT; "'
+        pid="$(systemctl --user show "$node_unit" -p MainPID --value)" || exit 1
+        if [ -r "/proc/$pid/environ" ]; then
+            tr "\0" "\n" < "/proc/$pid/environ" |
+                sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"
+        else
+            # No procfs (Darwin fixture host): ps prints the environment
+            # NUL-flattened; whole-word match keeps values with spaces whole.
+            ps -wwE -p "$pid" -o args= 2>/dev/null |
+                tr " " "\n" |
+                sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p" | head -1
+        fi' | tail -1)" || die "$host cannot read the running rollback commit"
+    case "$prior_commit" in
+        ''|*[!0-9a-f]*) die "$host has no exact rollback build commit; refusing a schema-unsafe restart" ;;
+    esac
+    git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
+        die "$host rollback commit $prior_commit is unavailable locally"
+    SHIP_REMOTE_ONE_WAY=0
+    local schema_changed schema_rc=0
+    schema_changed="$(ship_schema_files_changed "$REPO_ROOT" "$prior_commit" "$HEAD_SHA")" || die "$host cannot compare persistent-schema code"
+    ship_one_way_schema_decision "$schema_changed" "${ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA:-0}" || schema_rc=$?
+    if [ "$schema_rc" -ne 0 ]; then
+        # A FORWARD-ONLY deploy is a deliberate act, in the same shape as
+        # ZCL_SHIP_ALLOW_PROOF_SERVER above: refuse by default, proceed only
+        # when the operator names the risk. It is not a way to make a red
+        # ship green -- it changes what the run PROMISES, not what it checks.
+        #
+        # Measured 2026-08-29: schema_migration_apply skips every migration
+        # whose version is <= the recorded one and has NO guard for a database
+        # newer than the binary, so an older build does not refuse a migrated
+        # database -- it runs against a schema it does not know. That is why
+        # the rollback itself is the unsafe act, and why this flag also
+        # DISARMS the automatic rollback below rather than merely permitting
+        # the deploy. Allowing the deploy while leaving rollback armed would
+        # be strictly worse than refusing.
+        if [ "$schema_rc" -ne 2 ]; then
+            die "$host candidate changes persistent-schema code; automatic binary rollback is not safe (deliberate forward-only deploy: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1, which also disarms rollback)"
+        fi
+        SHIP_REMOTE_ONE_WAY=1
+        say "rollback   $host FORWARD-ONLY: schema code changed since ${prior_commit:0:12};"
+        say "           automatic rollback is DISARMED for this host and the previous"
+        say "           binary will not be able to read the migrated database"
+    else
+        say "rollback   $host persistent-schema code unchanged from ${prior_commit:0:12}"
+    fi
+}
+
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
 # ZCL_TOR_STUB_REFUSAL, zcl_tor_require_full: build/bin/tor-stamp.
@@ -1518,6 +1569,16 @@ for host in "${DEPLOY_HOSTS[@]}"; do
     say "remote     $host  $r_arch  glibc $r_libc  x86-64-v3 ok"
 done
 
+# Reject a known unsafe rollback before expensive qualification and staging.
+# The deploy leg repeats this check against the then-running process.
+if [ "$DRY_RUN" -eq 0 ] && [[ " $TARGETS " == *" remote "* ]]; then
+    case "$REMOTE_NODE_UNIT" in
+        z23-node.service|zclassic23.service) ;;
+        *) die "unsupported ZCL_SHIP_NODE_UNIT" ;;
+    esac
+    for host in "${DEPLOY_HOSTS[@]}"; do ship_remote_schema_check "$host"; done
+fi
+
 # ── 2. Gate ─────────────────────────────────────────────────────────────────
 # Keyed on the source identity, so re-shipping an already-proven tree is free
 # but a single changed byte re-gates. Require process success and a native verdict.
@@ -2070,48 +2131,8 @@ REMOTE_HASH
     # A process rollback after a forward schema migration is not recovery.
     # Prove that the persistent-schema implementation is byte-equivalent
     # between the running release and this candidate before any transfer.
-    prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" "node_unit=$REMOTE_NODE_UNIT; "'
-        pid="$(systemctl --user show "$node_unit" -p MainPID --value)" || exit 1
-        if [ -r "/proc/$pid/environ" ]; then
-            tr "\0" "\n" < "/proc/$pid/environ" |
-                sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"
-        else
-            # No procfs (Darwin fixture host): ps prints the environment
-            # NUL-flattened; whole-word match keeps values with spaces whole.
-            ps -wwE -p "$pid" -o args= 2>/dev/null |
-                tr " " "\n" |
-                sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p" | head -1
-        fi' | tail -1)"
-    case "$prior_commit" in
-        ''|*[!0-9a-f]*) die "$host has no exact rollback build commit; refusing a schema-unsafe restart" ;;
-    esac
-    git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
-        die "$host rollback commit $prior_commit is unavailable locally"
-    one_way_schema=0
-    if [ -n "$(ship_schema_files_changed "$REPO_ROOT" "$prior_commit" "$HEAD_SHA")" ]; then
-        # A FORWARD-ONLY deploy is a deliberate act, in the same shape as
-        # ZCL_SHIP_ALLOW_PROOF_SERVER above: refuse by default, proceed only
-        # when the operator names the risk. It is not a way to make a red
-        # ship green -- it changes what the run PROMISES, not what it checks.
-        #
-        # Measured 2026-08-29: schema_migration_apply skips every migration
-        # whose version is <= the recorded one and has NO guard for a database
-        # newer than the binary, so an older build does not refuse a migrated
-        # database -- it runs against a schema it does not know. That is why
-        # the rollback itself is the unsafe act, and why this flag also
-        # DISARMS the automatic rollback below rather than merely permitting
-        # the deploy. Allowing the deploy while leaving rollback armed would
-        # be strictly worse than refusing.
-        if [ "${ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA:-0}" != "1" ]; then
-            die "$host candidate changes persistent-schema code; automatic binary rollback is not safe (deliberate forward-only deploy: ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1, which also disarms rollback)"
-        fi
-        one_way_schema=1
-        say "rollback   $host FORWARD-ONLY: schema code changed since ${prior_commit:0:12};"
-        say "           automatic rollback is DISARMED for this host and the previous"
-        say "           binary will not be able to read the migrated database"
-    else
-        say "rollback   $host persistent-schema code unchanged from ${prior_commit:0:12}"
-    fi
+    ship_remote_schema_check "$host"
+    one_way_schema="$SHIP_REMOTE_ONE_WAY"
 
     release_root="$(ssh "${SSH_OPTS[@]}" "$host" 'printf "%s\n" "$HOME/.local/lib/z23/releases"')/$RELEASE_ID"
     node_incoming="${release_root}.incoming.$run_id"

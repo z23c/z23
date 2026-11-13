@@ -70,6 +70,7 @@ static const char dsx_ssh_shim[] =
     "printf '%s\\n' \"$*\" >> \"$SHIP_FIXTURE_SSH_LOG\"\n"
     "case \"$*\" in\n"
     "  *cpuinfo*) printf '%s||2.99\\n' \"$(uname -m)\"; exit 0 ;;\n"
+    "  *ZCL_AGENT_EXPECT_BUILD_COMMIT*) cat \"$HOME/ship-prior\"; exit $? ;;\n"
     "  *readlink*) printf '/opt/shipfix/zclassic23\\n'; exit 0 ;;\n"
     "  *' true') exit 0 ;;\n"
     "esac\n"
@@ -1044,6 +1045,98 @@ _test_next:
     return failures;
 }
 
+/* Exercise the real shared guard twice, while verifying its final deploy
+ * caller remains wired to a fresh invocation. All SSH stays in the shim. */
+static int dsx_schema_recheck(const struct dsx *fx, const char *old, char *out, size_t cap)
+{
+    static const char script[] =
+        "exec 2>&1; set -eo pipefail; REPO_ROOT=$PWD; HEAD_SHA=$(git rev-parse HEAD); "
+        "REMOTE_NODE_UNIT=zclassic23.service; SSH_OPTS=(); "
+        "die() { printf 'REFUSE: %s\\n' \"$*\" >&2; exit 1; }; say() { :; }; "
+        "eval \"$(sed -n '/^ship_schema_version_of() {/,/^}/p; /^ship_schema_files_changed() {/,/^}/p; /^ship_one_way_schema_decision() {/,/^}/p; /^ship_remote_schema_check() {/,/^}/p' tools/ship.sh)\"; "
+        "sed -n '/^deploy_remote() {/,/^}/p' tools/ship.sh | grep -F 'ship_remote_schema_check \"$host\"' >/dev/null; "
+        "ship_remote_schema_check shipfix-a; printf 'early-ok\\n'; "
+        "printf '%s' \"$1\" > \"$HOME/ship-prior\"; ship_remote_schema_check shipfix-a; printf 'final-incorrectly-accepted\\n'";
+    char vars[12][DSX_PATH];
+    const char *envp[13], *argv[24];
+    size_t n = 0;
+    dsx_sh_env(fx, "shipfix-a", NULL, false, vars, envp);
+    argv[n++] = "env"; argv[n++] = "-i";
+    for (size_t i = 0; envp[i]; i++) argv[n++] = envp[i];
+    argv[n++] = "bash"; argv[n++] = "-c"; argv[n++] = script;
+    argv[n++] = "ship-schema-recheck"; argv[n++] = old; argv[n] = NULL;
+    return dsx_run(fx->repo, argv, out, cap);
+}
+
+/* A real non-dry ship must refuse a known schema change before fake Make
+ * reaches lint/build; the private fixture remote has no service or node. */
+static int dsx_case_remote_schema_preflight(struct dsx_sh *sh)
+{
+    int failures = 0;
+    struct dsx fx = {0};
+    char prior[42], head[42], path[DSX_PATH + 64];
+    dsx_paths(&fx);
+    dsx_fixture(&fx);
+    dsx_origin_tip(&fx, prior);
+    (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_HEADER, fx.repo);
+    dsx_write(path, "#define NODE_DB_SCHEMA_LATEST 88\n", 0644);
+    dsx_commit(&fx, "schema version bump");
+    dsx_git(&fx, (const char *const[]){"push", "-q", "origin", "HEAD:main", NULL});
+    dsx_origin_tip(&fx, head);
+    (void)snprintf(path, sizeof(path), "%s/ship-prior", fx.home);
+    dsx_write(path, prior, 0600);
+    TEST("ship: remote schema refusal precedes lint and build") {
+        dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, false, "--targets=remote", NULL, false);
+        if (!strstr(sh->text, "candidate changes persistent-schema code; automatic binary rollback is not safe"))
+            fprintf(stderr, "schema preflight rc=%d output:\n%s\n", sh->rc, sh->text);
+        ASSERT_EQ(sh->rc, 1);
+        ASSERT(strstr(sh->text, "candidate changes persistent-schema code; automatic binary rollback is not safe") != NULL);
+        ASSERT(strstr(sh->text, "make lint failed") == NULL);
+        PASS();
+    }
+    TEST("ship: explicit forward-only acceptance reaches the heavy gate") {
+        dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, true, "--targets=remote", NULL, false);
+        ASSERT(strstr(sh->text, "make lint failed") != NULL);
+        PASS();
+    }
+    TEST("ship: unchanged remote schema reaches the heavy gate") {
+        dsx_write(path, head, 0600);
+        dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, false, "--targets=remote", NULL, false);
+        ASSERT(strstr(sh->text, "make lint failed") != NULL);
+        PASS();
+    }
+    TEST("ship: missing remote identity refuses before the heavy gate") {
+        dsx_write(path, "", 0600);
+        dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, false, "--targets=remote", NULL, false);
+        ASSERT_EQ(sh->rc, 1);
+        ASSERT(strstr(sh->text, "has no exact rollback build commit") != NULL);
+        ASSERT(strstr(sh->text, "make lint failed") == NULL);
+        PASS();
+    }
+    TEST("ship: remote identity read failure refuses before the heavy gate") {
+        ASSERT(unlink(path) == 0);
+        dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, false, "--targets=remote", NULL, false);
+        ASSERT_EQ(sh->rc, 1);
+        ASSERT(strstr(sh->text, "cannot read the running rollback commit") != NULL);
+        ASSERT(strstr(sh->text, "make lint failed") == NULL);
+        PASS();
+    }
+    TEST("ship: final check rereads a changed remote identity") {
+        char output[2048];
+        dsx_write(path, head, 0600);
+        ASSERT(dsx_schema_recheck(&fx, prior, output, sizeof(output)) != 0);
+        if (!strstr(output, "candidate changes persistent-schema code; automatic binary rollback is not safe"))
+            fprintf(stderr, "schema recheck output:\n%s\n", output);
+        ASSERT(strstr(output, "early-ok") != NULL);
+        ASSERT(strstr(output, "candidate changes persistent-schema code; automatic binary rollback is not safe") != NULL);
+        ASSERT(strstr(output, "final-incorrectly-accepted") == NULL);
+        PASS();
+    }
+
+_test_next:
+    return failures;
+}
+
 int test_dev_ship(void);
 int test_dev_ship(void)
 {
@@ -1061,6 +1154,7 @@ int test_dev_ship(void)
     failures += dsx_case_dirty_behind(&fx, sh);
     failures += dsx_case_ahead(&fx, sh);
     failures += dsx_case_containment(&fx);
+    failures += dsx_case_remote_schema_preflight(sh);
     dsx_env_leave(&fx);
     free(sh);
     printf(failures == 0 ? "test_dev_ship: all passed\n"
