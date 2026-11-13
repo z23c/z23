@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <dirent.h>
 /* Windows must explicitly refuse. Retain original scratch on any detected
  * replacement or uncertain child reaping; report cleanup failure truthfully. */
 
@@ -210,11 +211,62 @@ static bool an_retryable(const struct zcl_command_reply *reply)
 {
     return !strcmp(reply->error.code, "NETWORK_UNAVAILABLE") || !strcmp(reply->error.code, "NETWORK_TIMEOUT");
 }
+/* A killed or crashed open-link leaves its worker scratch directory
+ * <anchor>/.app-network-<token> behind and nothing in-process ever removes
+ * it. Sweep only an exact-shaped orphan: a ".app-network-" + 32-hex token
+ * name, a directory owned by this euid and private (0700), and cold for a
+ * full day — a live open-link (one fetch budget) can never look that old,
+ * so no concurrent scratch is touched. Links are never followed: the leaf
+ * is checked without following, reopened O_NOFOLLOW, and the opened
+ * descriptor is re-verified against the same guards before anything is
+ * removed. The worker's carrier store is removed only through the shared
+ * bounded tree remover, and the directory itself is unlinked only if that
+ * emptied it — a directory that will not empty stays whole. Best effort:
+ * a sweep that cannot run never fails the journey. */
+#define AN_ORPHAN_AGE_S ((int64_t)24 * 60 * 60)
+static bool an_orphan_leaf(const char *name)
+{
+    uint8_t token[16];
+    return strlen(name) == 45 && strncmp(name, ".app-network-", 13) == 0 &&
+           zcl_hex_decode_lower(name + 13, token, sizeof(token));
+}
+static bool an_orphan_dead(const struct stat *st)
+{
+    return S_ISDIR(st->st_mode) && st->st_uid == geteuid() &&
+           (st->st_mode & 07777) == 0700 &&
+           platform_time_wall_unix() - (int64_t)st->st_mtime >= AN_ORPHAN_AGE_S;
+}
+static void an_orphan_sweep(const char *anchor)
+{
+    DIR *dir = opendir(anchor);
+    if (!dir) return;
+    int fd = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        struct stat st, held;
+        if (!an_orphan_leaf(entry->d_name) ||
+            fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !an_orphan_dead(&st))
+            continue;
+        int root = openat(fd, entry->d_name,
+                          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (root < 0 || fstat(root, &held) != 0 || held.st_dev != st.st_dev ||
+            held.st_ino != st.st_ino || !an_orphan_dead(&held)) {
+            if (root >= 0) close(root);
+            continue;
+        }
+        (void)zcl_tree_remove_contents_fd(root);
+        (void)unlinkat(fd, entry->d_name, AT_REMOVEDIR); /* only if emptied */
+        close(root);
+    }
+    closedir(dir);
+}
 static struct an_scratch *an_job_scratch(const char *datadir, uint8_t random[18],
     struct zcl_command_reply *reply)
 {
     char anchor[AG_PATH], token[33];
     if (!app_receive_profile_validate(datadir, anchor, sizeof(anchor), reply)) return NULL;
+    an_orphan_sweep(anchor); /* day-cold .app-network- orphans beside the anchor */
     if (!rng_host_fill(random, 18)) {
         zcl_package_copy_fail(reply, "NETWORK_UNAVAILABLE", false, "Cannot prepare a private connection.", "app.library"); return NULL;
     }

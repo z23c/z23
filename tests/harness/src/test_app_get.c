@@ -4735,6 +4735,142 @@ static int tag_orphan_sweep_bytes(struct tag_world *w)
     return failures;
 }
 
+/* The open-link worker scratch <anchor>/.app-network-<token> gets the same
+ * guarded day-old sweep as the .app-get- staging beside the same anchor:
+ * exact shape, day cold, 0700, euid, links never followed, and the sweep
+ * never fails the journey. */
+#define TAG_NET_ORPHAN_OLD "66666666666666666666666666666666"
+#define TAG_NET_ORPHAN_LIVE "77777777777777777777777777777777"
+#define TAG_NET_ORPHAN_WIDE "88888888888888888888888888888888"
+#define TAG_NET_ORPHAN_LINK "99999999999999999999999999999999"
+#define TAG_NET_ORPHAN_SHORT "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" /* 30 hex: wrong shape */
+/* Make <datadir>/.app-network-<token> shaped like the worker's scratch,
+ * holding a fetched carrier store, with an mtime `age_s` seconds old. */
+static bool tag_net_orphan_make(const char *datadir, const char *token,
+                                mode_t mode, int64_t age_s)
+{
+    char dir[TAG_PATH], store[TAG_PATH], file[TAG_PATH];
+    int n = snprintf(dir, sizeof(dir), "%s/.app-network-%s", datadir, token);
+    int s = snprintf(store, sizeof(store), "%s/store", dir);
+    int f = snprintf(file, sizeof(file), "%s/carrier.bin", store);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || s <= 0 || (size_t)s >= sizeof(store) ||
+        f <= 0 || (size_t)f >= sizeof(file) || mkdir(dir, 0700) != 0 ||
+        chmod(dir, mode) != 0 || mkdir(store, 0700) != 0)
+        return false;
+    FILE *out = fopen(file, "wb");
+    bool ok = out && fwrite("carrier\n", 1, 8, out) == 8 && fclose(out) == 0;
+    if (age_s > 0) {
+        struct timespec cold[2];
+        cold[0].tv_sec = cold[1].tv_sec = platform_time_wall_unix() - age_s;
+        cold[0].tv_nsec = cold[1].tv_nsec = 0;
+        ok = utimensat(AT_FDCWD, dir, cold, AT_SYMLINK_NOFOLLOW) == 0 && ok;
+    }
+    return ok;
+}
+static bool tag_net_orphan_path(const char *d, const char *tok, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s/.app-network-%s", d, tok);
+    return n > 0 && (size_t)n < cap;
+}
+static bool tag_net_orphan_store_kept(const char *d, const char *tok)
+{
+    char dir[TAG_PATH], store[TAG_PATH];
+    if (!tag_net_orphan_path(d, tok, dir, sizeof(dir))) return false;
+    int n = snprintf(store, sizeof(store), "%s/store/carrier.bin", dir);
+    if (n <= 0 || (size_t)n >= sizeof(store)) return false;
+    struct stat st;
+    return stat(dir, &st) == 0 && S_ISDIR(st.st_mode) && access(store, R_OK) == 0;
+}
+static bool tag_net_orphan_kept(const char *d, const char *tok)
+{
+    char dir[TAG_PATH];
+    if (!tag_net_orphan_path(d, tok, dir, sizeof(dir))) return false;
+    struct stat st;
+    return stat(dir, &st) == 0 && S_ISDIR(st.st_mode);
+}
+/* The link leaf stays a link and its sentinel target stays untouched. */
+static bool tag_net_orphan_link_make(const char *d, char *linked, size_t linked_cap,
+                                     char *sentinel, size_t sentinel_cap)
+{
+    int s = snprintf(sentinel, sentinel_cap, "%s/net-orphan-sentinel", d);
+    if (s <= 0 || (size_t)s >= sentinel_cap || mkdir(sentinel, 0700) != 0) return false;
+    int n = snprintf(linked, linked_cap, "%s/.app-network-%s", d, TAG_NET_ORPHAN_LINK);
+    if (n <= 0 || (size_t)n >= linked_cap || symlink(sentinel, linked) != 0) return false;
+    struct timespec cold[2];
+    cold[0].tv_sec = cold[1].tv_sec = platform_time_wall_unix() - 26 * 3600;
+    cold[0].tv_nsec = cold[1].tv_nsec = 0;
+    return utimensat(AT_FDCWD, linked, cold, AT_SYMLINK_NOFOLLOW) == 0;
+}
+static bool tag_net_orphan_fixture(const char *d, char *linked, size_t linked_cap,
+                                   char *sentinel, size_t sentinel_cap)
+{
+    return tag_net_orphan_make(d, TAG_NET_ORPHAN_OLD, 0700, 26 * 3600) &&
+        tag_net_orphan_make(d, TAG_NET_ORPHAN_LIVE, 0700, 0) &&
+        tag_net_orphan_make(d, TAG_NET_ORPHAN_WIDE, 0755, 26 * 3600) &&
+        tag_net_orphan_make(d, TAG_NET_ORPHAN_SHORT, 0700, 26 * 3600) &&
+        tag_net_orphan_link_make(d, linked, linked_cap, sentinel, sentinel_cap);
+}
+static bool tag_net_orphan_link_kept(const char *linked, const char *sentinel)
+{
+    struct stat st;
+    return lstat(linked, &st) == 0 && S_ISLNK(st.st_mode) &&
+        stat(sentinel, &st) == 0 && S_ISDIR(st.st_mode);
+}
+static bool tag_net_orphan_clean(const char *d, const char *linked, const char *sentinel)
+{
+    char dir[TAG_PATH], store[TAG_PATH], file[TAG_PATH];
+    if (!tag_net_orphan_path(d, TAG_NET_ORPHAN_LIVE, dir, sizeof(dir))) return false;
+    int s = snprintf(store, sizeof(store), "%s/store", dir);
+    int f = snprintf(file, sizeof(file), "%s/store/carrier.bin", dir);
+    return f > 0 && (size_t)f < sizeof(file) && s > 0 && (size_t)s < sizeof(store) &&
+        unlink(file) == 0 && rmdir(store) == 0 && rmdir(dir) == 0 &&
+        tag_net_orphan_path(d, TAG_NET_ORPHAN_WIDE, dir, sizeof(dir)) && rmdir(dir) == 0 &&
+        tag_net_orphan_path(d, TAG_NET_ORPHAN_SHORT, dir, sizeof(dir)) && rmdir(dir) == 0 &&
+        unlink(linked) == 0 && rmdir(sentinel) == 0;
+}
+static bool tag_net_orphan_worker(void *context, const struct app_network_job_args *args,
+    struct app_network_job_result *result)
+{
+    (void)context; (void)args;
+    result->error = APP_NETWORK_CHANGED_OFFER; /* not retryable: exactly one job */
+    return true;
+}
+static int tag_network_orphan_sweep(struct tag_world *w)
+{
+    int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
+    struct zcl_command_reply why, reply; struct tag_link_fixture f = {0};
+    bool shown = false;
+    TEST("app open-link sweeps a day-old .app-network- scratch orphan beside the "
+         "profile; fresh, misshaped, permissive and linked entries stay") {
+        const char *d = w->j.b_datadir;
+        char linked[TAG_PATH], sentinel[TAG_PATH];
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u); f.row = rows[0];
+        ASSERT(tag_net_orphan_fixture(d, linked, sizeof(linked), sentinel, sizeof(sentinel)));
+        struct app_network_test_hooks hooks = {.form = tag_link_form,
+            .worker = tag_net_orphan_worker, .receive = tag_link_receive};
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        (void)zcl_test_app_network_open_link(d, tag_link_cards, tag_link_late_notice,
+            &f, &reply, &shown, &hooks);
+        char old[TAG_PATH];
+        ASSERT(tag_net_orphan_path(d, TAG_NET_ORPHAN_OLD, old, sizeof(old)));
+        struct stat st;
+        ASSERT(lstat(old, &st) != 0 && errno == ENOENT); /* swept, store and all */
+        ASSERT(tag_net_orphan_store_kept(d, TAG_NET_ORPHAN_LIVE)); /* fresh: untouched */
+        ASSERT(tag_net_orphan_kept(d, TAG_NET_ORPHAN_WIDE));       /* permissive: untouched */
+        ASSERT(tag_net_orphan_kept(d, TAG_NET_ORPHAN_SHORT));      /* misshaped: untouched */
+        ASSERT(tag_net_orphan_link_kept(linked, sentinel));        /* link never followed */
+        PASS();
+    } _test_next:;
+    char linked[TAG_PATH], sentinel[TAG_PATH];
+    if (tag_net_orphan_path(w->j.b_datadir, TAG_NET_ORPHAN_LINK, linked, sizeof(linked)) &&
+        snprintf(sentinel, sizeof(sentinel), "%s/net-orphan-sentinel", w->j.b_datadir) > 0)
+        (void)tag_net_orphan_clean(w->j.b_datadir, linked, sentinel);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
 static int tag_failed_fetch_cleanup(struct tag_world *w)
 {
     int failures = 0;
@@ -5534,6 +5670,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_orphan_sweep(w);
     failures += tag_orphan_sweep_discover(w);
     failures += tag_orphan_sweep_bytes(w);
+    failures += tag_network_orphan_sweep(w);
     failures += tag_b_journeys(w);
     if (failures == 0) failures += tag_exact_tests(w);
     if (failures == 0) failures += tag_rebuild_outcomes(w);
