@@ -1915,21 +1915,36 @@ static int test_tor_stop_hands_off_to_tor_thread(void)
     return why ? 1 : 0;
 }
 
-/* Wait for the persistent service to be installed: the monitor sets dial-ready
- * only after it. A failed install ends the wait at once; the limit catches a
- * hang, it does not measure anything. */
+static bool persist_not_dial_ready(const char *reason,
+                                   const struct tor_onion_port_map *map)
+{
+    fprintf(stderr, "persistent service readiness: reason=%s map=%s complete=%d "
+            "persistent=%d routes=%d/%d enabled_now=%d serves_onion_now=%d "
+            "service_violated_now=%d dial_ready_now=%d\n", reason,
+            tor_onion_port_map_state_name(map->state), map->complete,
+            map->persistent_identity, map->installed_route_count,
+            map->expected_route_count, tor_integration_is_enabled(),
+            tor_integration_serves_onion(), tor_integration_service_violated(),
+            tor_integration_is_dial_ready());
+    return false;
+}
+
+/* Wait for dial readiness before checking the exact persistent service slot.
+ * A failed port map ends the wait at once; the limit catches a hang. Failure
+ * observations distinguish installation from readiness without changing either
+ * requirement. Getters taken after the last poll are labelled as such. */
 static bool persist_wait_installed(void)
 {
+    struct tor_onion_port_map map;
     for (int i = 0; i < 1200; i++) {
-        struct tor_onion_port_map map;
         tor_integration_port_map_snapshot(&map);
         if (map.state == TOR_ONION_PORT_MAP_FAILED)
-            return false;
+            return persist_not_dial_ready("port-map-failed", &map);
         if (tor_integration_is_dial_ready())
             return true;
         platform_sleep_ms(100); /* real-clock: the monitor installs on its own thread */
     }
-    return false;
+    return persist_not_dial_ready("dial-readiness-timeout", &map);
 }
 
 extern void *dynhost_get_global_service(void) ZCL_WEAK_IMPORT;
@@ -1975,7 +1990,7 @@ static int test_tor_persist_install_with_loop_running(void)
     else if (!wait_tor_main_loop(tmpdir, 90))
         why = "tor main loop never reached";
     else if (!persist_wait_installed())
-        why = "the persistent identity was not installed";
+        why = "persistent service did not become dial-ready (see readiness evidence)";
     else
         why = persist_slot_problem(tmpdir);
     tor_integration_stop();
