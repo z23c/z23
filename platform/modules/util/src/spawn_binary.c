@@ -1,8 +1,56 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
- * Exact bounded capture validation, using the single process owner in spawn.c. */
+ * Exact bounded capture validation and private capture pipe support. */
+#define _GNU_SOURCE
 #include "util/spawn.h"
 #include "spawn_binary_internal.h"
 #include <string.h>
+#ifndef _WIN32
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+/* Non-Linux fallback is close-on-exec but cannot make pipe creation atomic
+ * against unrelated threads that fork before fcntl has completed. */
+static bool private_pipe_create(int p[2])
+{
+#if defined(__linux__)
+    return pipe2(p, O_CLOEXEC) == 0;
+#else
+    if (pipe(p) != 0) return false;
+    if (fcntl(p[0], F_SETFD, FD_CLOEXEC) == 0 &&
+        fcntl(p[1], F_SETFD, FD_CLOEXEC) == 0) return true;
+    int saved = errno;
+    close(p[0]); close(p[1]); p[0] = p[1] = -1; errno = saved;
+    return false;
+#endif
+}
+bool zcl_spawn_private_pipe(int p[2])
+{
+    if (!private_pipe_create(p)) return false;
+    for (int i = 0; i < 2; i++) {
+        if (p[i] > STDERR_FILENO) continue;
+        int fd = fcntl(p[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        if (fd < 0) {
+            int saved = errno;
+            close(p[0]); close(p[1]); p[0] = p[1] = -1; errno = saved;
+            return false;
+        }
+        close(p[i]); p[i] = fd;
+    }
+    return true;
+}
+#ifdef ZCL_TESTING
+static _Thread_local void (*private_hook)(const int *, size_t, void *);
+static _Thread_local void *private_context;
+void zcl_spawn_evidence_test_prefork(void (*hook)(const int *, size_t, void *), void *context)
+{
+    private_hook = hook; private_context = context;
+}
+void zcl_spawn_private_prefork(const int *fds, size_t count)
+{
+    if (private_hook) private_hook(fds, count, private_context);
+}
+#endif
+#endif
 
 /* One exact capture for both stderr dispositions: the success predicate
  * and every observation field are the same, so only the child's stderr

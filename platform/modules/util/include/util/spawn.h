@@ -178,6 +178,7 @@ int zcl_spawn_capture_evidence(const char *const argv[], char *buf, size_t cap,
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 void zcl_spawn_evidence_test_hook(void (*hook)(int, int, void *), void *context);
 void zcl_spawn_evidence_test_fail_io(bool enabled);
+void zcl_spawn_evidence_test_prefork(void (*hook)(const int *, size_t, void *), void *context);
 #endif
 
 /* The same capture with the child started in `cwd`. A NULL `cwd` is exactly

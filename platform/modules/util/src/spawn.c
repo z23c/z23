@@ -792,8 +792,8 @@ static bool spawn_capture_anchor_prepare(struct spawn_capture_anchor *anchor)
     anchor->enabled = (disposition.sa_flags & SA_NOCLDWAIT) != 0 ||
                       disposition.sa_handler == SIG_IGN;
     if (!anchor->enabled) return true;
-    if (pipe(anchor->hold) == 0 && pipe(anchor->ready) == 0 &&
-        pipe(anchor->go) == 0)
+    if (zcl_spawn_private_pipe(anchor->hold) && zcl_spawn_private_pipe(anchor->ready) &&
+        zcl_spawn_private_pipe(anchor->go))
         return true;
     int saved = errno;
     spawn_capture_anchor_close(anchor);
@@ -1118,18 +1118,6 @@ void zcl_spawn_evidence_test_fail_io(bool enabled)
 }
 #endif
 
-static bool spawn_evidence_pipe(int p[2])
-{
-    if (pipe(p) != 0) return false;
-    for (int i = 0; i < 2; i++) {
-        if (p[i] > STDERR_FILENO) continue;
-        int fd = fcntl(p[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-        if (fd < 0) { close(p[0]); close(p[1]); return false; }
-        close(p[i]); p[i] = fd;
-    }
-    return true;
-}
-
 static void spawn_evidence_tail(unsigned char *out, size_t *used,
                                 const unsigned char *data, size_t n)
 {
@@ -1262,11 +1250,16 @@ static void spawn_evidence_child(int out, int err)
 static pid_t spawn_evidence_launch(const char *const argv[], int out[2], int err[2],
                                    struct spawn_capture_anchor *anchor)
 {
-    if (!spawn_evidence_pipe(out)) return -1;
-    if (!spawn_evidence_pipe(err)) { close(out[0]); close(out[1]); return -1; }
+    if (!zcl_spawn_private_pipe(out)) return -1;
+    if (!zcl_spawn_private_pipe(err)) { close(out[0]); close(out[1]); return -1; }
     if (!spawn_capture_anchor_prepare(anchor)) {
         close(out[0]); close(out[1]); close(err[0]); close(err[1]); return -1;
     }
+#if defined(ZCL_TESTING)
+    int fds[] = {out[0], out[1], err[0], err[1], anchor->hold[0], anchor->hold[1],
+                 anchor->ready[0], anchor->ready[1], anchor->go[0], anchor->go[1]};
+    zcl_spawn_private_prefork(fds, sizeof fds / sizeof fds[0]);
+#endif
     pid_t pid = fork();
     if (pid < 0) {
         spawn_capture_anchor_close(anchor);

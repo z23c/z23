@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("platform/modules/util/src/spawn_binary.c", CAP_FS_WRITE, "sets close-on-exec flags and relocates private capture pipe descriptors above standard input/output/error with fcntl")

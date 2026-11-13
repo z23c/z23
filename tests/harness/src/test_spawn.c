@@ -20,6 +20,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/wait.h>
 #endif
 #include <time.h>
@@ -1044,6 +1045,145 @@ static void spawn_evidence_exit_barrier(int pid, int phase, void *context)
         nanosleep(&(struct timespec){.tv_nsec = 1000000}, NULL);
 }
 
+#if defined(__linux__)
+struct spawn_prefork_probe { int checked, inherited, errors; };
+static int spawn_prefork_wait(pid_t child, int64_t deadline, int *status)
+{
+    for (;;) {
+        pid_t rc = waitpid(child, status, WNOHANG);
+        if (rc == child) return 0;
+        if (rc < 0 && errno != EINTR) return -1;
+        int64_t now = platform_time_monotonic_ms();
+        if (now <= 0 || now >= deadline) break;
+        (void)poll(NULL, 0, 10);
+    }
+    (void)kill(child, SIGKILL);
+    while (waitpid(child, status, 0) < 0 && errno == EINTR) {}
+    return -1;
+}
+static ssize_t spawn_prefork_read(int fd, char *out, size_t cap, int64_t deadline)
+{
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    for (;;) {
+        int64_t now = platform_time_monotonic_ms();
+        if (now <= 0 || now >= deadline) return -1;
+        int rc = poll(&p, 1, (int)(deadline - now));
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return -1;
+        ssize_t n = read(fd, out, cap);
+        if (n < 0 && errno == EINTR) continue;
+        return n;
+    }
+}
+static ssize_t spawn_prefork_exec_read(const char *path, char *actual, size_t cap)
+{
+    int output[2];
+    if (pipe(output) != 0) return -1;
+    int64_t started = platform_time_monotonic_ms();
+    if (started <= 0) { close(output[0]); close(output[1]); return -1; }
+    pid_t child = fork();
+    if (child == 0) {
+        close(output[0]);
+        if (dup2(output[1], STDOUT_FILENO) < 0) _exit(127);
+        close(output[1]);
+        execl("/usr/bin/readlink", "readlink", path, (char *)NULL);
+        _exit(127);
+    }
+    close(output[1]);
+    if (child < 0) { close(output[0]); return -1; }
+    int64_t deadline = started + 2000;
+    ssize_t got = spawn_prefork_read(output[0], actual, cap, deadline);
+    close(output[0]);
+    int status = 0;
+    if (spawn_prefork_wait(child, deadline, &status) != 0 || got < 0 || !WIFEXITED(status)) return -1;
+    if (WEXITSTATUS(status) == 1 && got == 0) return 0;
+    return WEXITSTATUS(status) == 0 ? got : -1;
+}
+static int spawn_prefork_exec_match(int fd)
+{
+    char path[64], expected[128], actual[128];
+    if (snprintf(path, sizeof path, "/proc/self/fd/%d", fd) >= (int)sizeof path)
+        return -1;
+    ssize_t n = readlink(path, expected, sizeof expected - 1);
+    if (n <= 0 || n >= (ssize_t)sizeof expected - 1) return -1;
+    expected[n] = '\0';
+    ssize_t got = spawn_prefork_exec_read(path, actual, sizeof actual - 1);
+    if (got == 0) return 0;
+    if (got < 0 || got >= (ssize_t)sizeof actual - 1) return -1;
+    if (actual[got - 1] != '\n') return -1;
+    actual[got - 1] = '\0';
+    return strcmp(actual, expected) == 0 ? 1 : 0;
+}
+static void spawn_prefork_inspect(const int *fds, size_t count, void *context)
+{
+    struct spawn_prefork_probe *p = context;
+    struct sigaction saved, normal = {.sa_handler = SIG_DFL};
+    bool anchored = count > 4 && fds[4] >= 0;
+    if (anchored && (sigaction(SIGCHLD, NULL, &saved) != 0 ||
+                     sigaction(SIGCHLD, &normal, NULL) != 0)) { p->errors++; return; }
+    for (size_t i = 0; i < count; i++) {
+        if (fds[i] < 0) continue;
+        int match = spawn_prefork_exec_match(fds[i]);
+        if (match < 0) { p->errors++; continue; }
+        p->checked++;
+        if (match) p->inherited++;
+    }
+    if (anchored && sigaction(SIGCHLD, &saved, NULL) != 0) p->errors++;
+}
+
+static bool spawn_prefork_evidence_ok(int rc, const struct zcl_spawn_evidence *e,
+                                     const char *out, bool anchored)
+{
+    /* Legacy capture returns zero for ECHILD; evidence must still say unknown. */
+    bool status_ok = anchored ? rc == 0 && !e->exit_observed && e->exit_code == -1 :
+        rc == 0 && e->exit_observed && e->exit_code == 0;
+    return status_ok && e->stdout_complete && e->stderr_complete && !strcmp(out, "OUT") &&
+        e->stdout_len == 3 && !memcmp(e->stdout_tail, "OUT", 3) &&
+        e->stderr_len == 3 && !memcmp(e->stderr_tail, "ERR", 3);
+}
+static bool spawn_prefork_case(int mask, bool anchored)
+{
+    struct sigaction saved, no_wait = {.sa_handler = SIG_DFL, .sa_flags = SA_NOCLDWAIT};
+    if (anchored && (sigaction(SIGCHLD, NULL, &saved) != 0 ||
+                     sigaction(SIGCHLD, &no_wait, NULL) != 0)) return false;
+    if (mask & 1) close(STDOUT_FILENO);
+    if (mask & 2) close(STDERR_FILENO);
+    struct spawn_prefork_probe p = {0};
+    struct zcl_spawn_evidence e; char out[64];
+    const char *argv[] = {"/bin/sh", "-c", "printf OUT; printf ERR >&2", NULL};
+    zcl_spawn_evidence_test_prefork(spawn_prefork_inspect, &p);
+    int rc = zcl_spawn_capture_evidence(argv, out, sizeof out, 3000, &e);
+    zcl_spawn_evidence_test_prefork(NULL, NULL);
+    bool restored = !anchored || sigaction(SIGCHLD, &saved, NULL) == 0;
+    return restored && p.checked == (anchored ? 10 : 4) && !p.errors && !p.inherited &&
+        spawn_prefork_evidence_ok(rc, &e, out, anchored);
+}
+
+static bool spawn_prefork_isolated(int mask, bool anchored)
+{
+    pid_t child = fork();
+    if (child == 0) _exit(spawn_prefork_case(mask, anchored) ? 0 : 1);
+    if (child < 0) return false;
+    int status = 0; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int test_spawn_evidence_prefork_descriptors(void)
+{
+    int failures = 0;
+    TEST("spawn: concurrent exec cannot inherit evidence capture pipes") {
+        ASSERT(spawn_prefork_isolated(0, false));
+        ASSERT(spawn_prefork_isolated(0, true));
+        ASSERT(spawn_prefork_isolated(1, false));
+        ASSERT(spawn_prefork_isolated(2, false));
+        ASSERT(spawn_prefork_isolated(3, false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_spawn_evidence_exited_buffer(void)
 {
     int failures = 0;
@@ -1125,6 +1265,9 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_evidence_flood_timeout();
     failures += test_spawn_evidence_unknown_status();
     failures += test_spawn_evidence_exited_buffer();
+#if defined(__linux__)
+    failures += test_spawn_evidence_prefork_descriptors();
+#endif
     failures += test_spawn_evidence_io_failure();
     failures += test_receive_job_invalid();
     failures += test_receive_job_selected_instance();

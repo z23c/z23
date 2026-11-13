@@ -1189,7 +1189,7 @@ AGENT_IMPACT_RULE("platform/modules/util/src/hw_profile.c|platform/modules/util/
 AGENT_IMPACT_RULE("platform/modules/util/src/hw_bench.c|platform/modules/util/include/util/hw_bench.h|tests/harness/src/test_hw_bench.c", "hw_bench hw_profile make_lint_gates")
 
 /* os-substrate Rung 0 (lane L2): no-shell process-spawn primitives. */
-AGENT_IMPACT_RULE("platform/modules/util/include/util/spawn.h|platform/modules/util/src/spawn.c|tests/harness/src/test_spawn.c", "spawn make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/include/util/spawn.h|platform/modules/util/src/spawn.c|platform/modules/util/src/spawn_binary.c|platform/modules/util/src/spawn_binary.c.capabilities.def|platform/modules/util/src/spawn_binary_internal.h|tests/harness/src/test_spawn.c", "spawn make_lint_gates")
 AGENT_IMPACT_RULE("engine/conditions/src/blocker_stall_meta_detector.c|engine/conditions/include/conditions/blocker_stall_meta_detector.h|tests/harness/src/test_blocker_meta_detector.c", "blocker_meta_detector condition_engine make_lint_gates")
 
 /* wf/test-storage-util: focused coverage added for previously-untested pure
