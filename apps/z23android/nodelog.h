@@ -59,6 +59,8 @@ bool zapp_console_rotate(const char *file, off_t cap);
 void zapp_nodelog_stop(struct zapp_nodelog *l);
 /* What the node is doing after the latest boot stage it reported, as a short plain phrase. */
 const char *zapp_nodelog_stage(struct zapp_nodelog *l);
+/* NULL unless the current observed stage is before readiness. */
+const char *zapp_nodelog_startup_stage(struct zapp_nodelog *l);
 /* Bounded coherent snapshot of the current child replay, if present. */
 bool zapp_nodelog_replay(struct zapp_nodelog *l, struct zapp_replay_progress *out);
 bool zapp_nodelog_replay_visible(bool responding, bool running, bool stopping, bool has_progress);

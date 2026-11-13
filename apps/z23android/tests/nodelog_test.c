@@ -470,9 +470,27 @@ static void replay_progress_cases(void)
     assert(!zapp_nodelog_replay(&l, &p));
 }
 
+static void startup_stage_cases(void)
+{
+    struct zapp_nodelog l;
+    zapp_nodelog_init(&l, NULL, NULL);
+    assert(!zapp_nodelog_startup_stage(&l));
+    zapp_nodelog_line(&l, "[boot-stage] a -> unknown", 0);
+    assert(!zapp_nodelog_startup_stage(&l));
+    zapp_nodelog_line(&l, "[boot-stage] init -> crypto_ready", 1);
+    assert(!strcmp(zapp_nodelog_startup_stage(&l), "opening the database"));
+    zapp_nodelog_line(&l, "[boot-stage] services_running -> ready", 2);
+    assert(!zapp_nodelog_startup_stage(&l));
+    zapp_nodelog_line(&l, "[boot-stage] ready -> shutdown_requested", 3);
+    assert(!zapp_nodelog_startup_stage(&l));
+    zapp_nodelog_line(&l, "[boot-stage] shutdown_requested -> shutdown_complete", 4);
+    assert(!zapp_nodelog_startup_stage(&l));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    startup_stage_cases();
     replay_progress_cases();
     count = 0;
     filter_cases();

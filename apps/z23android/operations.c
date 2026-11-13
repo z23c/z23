@@ -858,6 +858,22 @@ bool zapp_node_replay_progress(struct zapp_runtime *r, const struct zapp_node_id
     return ok;
 }
 
+bool zapp_node_boot_stage(struct zapp_runtime *r, const struct zapp_node_identity *id, char *out, size_t cap)
+{
+    if (!r || !id || !out || !cap) return false;
+    out[0] = 0;
+    pthread_mutex_lock(&r->mutex);
+    bool ok = !r->stopping && !r->stop_sent && r->start_epoch == id->epoch &&
+        r->node == id->pid && r->log.started && r->log.pid == id->pid && running_locked(r);
+    if (ok) {
+        const char *stage = zapp_nodelog_startup_stage(&r->log);
+        ok = stage != NULL;
+        if (ok) snprintf(out, cap, "%s", stage);
+    }
+    pthread_mutex_unlock(&r->mutex);
+    return ok;
+}
+
 bool zapp_node_handoff_stop(struct zapp_runtime *r, const struct zapp_node_identity *id, uint64_t *epoch)
 {
     if (!r || !id || !epoch) return false;
@@ -896,11 +912,6 @@ bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
 bool zapp_node_stop_for_setup(struct zapp_runtime *r, char *out, size_t cap)
 {
     return request_stop(r, out, cap, false);
-}
-
-const char *zapp_node_stage(struct zapp_runtime *r)
-{
-    return zapp_nodelog_stage(&r->log);
 }
 
 void zapp_runtime_signal_stop(struct zapp_runtime *r)

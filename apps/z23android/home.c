@@ -7,34 +7,26 @@
 #include <strings.h>
 
 #define HOME_TILES \
-    "{\"type\":\"action\",\"id\":\"wallet\"},{\"type\":\"action\",\"id\":\"receive\"},{\"type\":\"action\",\"id\":\"scan\"}," \
-    "{\"type\":\"action\",\"id\":\"assistant\"}"
+    "{\"type\":\"action\",\"id\":\"wallet\"},{\"type\":\"action\",\"id\":\"receive\"}"
 #define HOME_PHONE_TEXT \
-    "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"caption\",\"lines\":2}," \
+    "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"title\",\"lines\":2}," \
     "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":3}," \
-    "{\"type\":\"action\",\"id\":\"node_toggle\",\"field\":\"node_button\",\"lines\":1}"
-#define HOME_Z23_APPS(columns) \
-    "{\"type\":\"grid\",\"columns\":" columns ",\"card\":\"z23_app\",\"children\":[" \
-    "{\"type\":\"action\",\"id\":\"launch\",\"field\":\"label\"}]}"
+    "{\"type\":\"action\",\"id\":\"node_start_home\",\"field\":\"home_start\",\"lines\":1}"
 
-/* Primary actions and the phone card precede installed apps. Apps and Settings stay in the fixed bar. */
+/* Node status and wallet actions are the built-in home. */
 static const char default_layout[] =
     "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"default\","
     "\"theme\":{\"background\":\"#000000\",\"text\":\"#ffffff\",\"muted\":\"#9a9a9a\",\"accent\":\"#3ddc97\"},"
     "\"screens\":{\"home\":{\"container\":\"list\",\"children\":["
-    "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]},"
     "{\"type\":\"column\",\"card\":\"phone\",\"children\":[" HOME_PHONE_TEXT "]},"
-    HOME_Z23_APPS("2") "]}}}";
-/* The light layout keeps the same primary actions, followed by every launchable app. */
+    "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]}]}}}";
+/* The light layout presents the same actions. */
 static const char classic_layout[] =
     "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"classic\","
     "\"theme\":{\"background\":\"#f7f5ef\",\"text\":\"#262b2b\",\"muted\":\"#5f6662\",\"accent\":\"#235e50\"},"
     "\"screens\":{\"home\":{\"container\":\"list\",\"children\":["
-    "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]},"
     "{\"type\":\"column\",\"card\":\"phone\",\"children\":[" HOME_PHONE_TEXT "]},"
-    HOME_Z23_APPS("2") ","
-    "{\"type\":\"column\",\"card\":\"app\",\"children\":["
-    "{\"type\":\"action\",\"id\":\"launch\",\"field\":\"label\"}]}]}}}";
+    "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]}]}}}";
 static const struct { const char *name, *document; } layouts[] = {
     {"default", default_layout}, {"classic", classic_layout},
 };
@@ -115,6 +107,7 @@ static const char *plain_node_line(const struct zapp_view *view, char *out, size
     else if (!view->node_process_running) snprintf(out, cap, "Node stopped");
     else if (view->node_stopping) snprintf(out, cap, "Stopping…\nYou can use Z23");
     else if (view->node_wallet_replaying && !view->node_running) snprintf(out, cap, "%s", view->node_wallet_replay);
+    else if (!view->node_running && view->node_boot_stage[0]) snprintf(out, cap, "Starting node…\n%s", view->node_boot_stage);
     else if (view->pace == ZAPP_PACE_PAUSE) snprintf(out, cap, "%s", ZAPP_PAUSED_LINE);
     else if (!view->node_running) snprintf(out, cap, "%s", view->node_seen_height ?
         "Your node is running but has not replied yet" : "Starting node…\nYou can use Z23");
@@ -138,6 +131,7 @@ size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *ou
         "");
     json_push_kv_str(&card, "pace", pace_name(view->pace));
     json_push_kv_str(&card, "node_button", preview ? "" : zapp_home_node_label(view));
+    json_push_kv_str(&card, "home_start", !preview && !view->node_process_running && !view->node_starting && !view->node_stopping && !view->node_installing ? "Start node" : "");
     return finish(&card, out, cap);
 }
 bool zapp_home_is_z23_app(const char *package)

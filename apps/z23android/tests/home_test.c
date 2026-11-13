@@ -216,7 +216,7 @@ static void phone_card_golden(void)
     fill_secrets(&view);
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Catching up: 800 blocks to go\","
-        "\"sync\":\"\",\"pace\":\"normal\",\"node_button\":\"Stop node\"}"));
+        "\"sync\":\"\",\"pace\":\"normal\",\"node_button\":\"Stop node\",\"home_start\":\"\"}"));
     view.pace = ZAPP_PACE_GENTLE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(strstr(card, "\"node_line\":\"800 blocks left\\nKeeping phone cool\"") && strstr(card, "\"pace\":\"gentle\""));
@@ -230,7 +230,7 @@ static void phone_card_omits_secrets(void)
     fill_secrets(&view);
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Node stopped\",\"sync\":\"\","
-        "\"pace\":\"normal\",\"node_button\":\"Start node\"}"));
+        "\"pace\":\"normal\",\"node_button\":\"Start node\",\"home_start\":\"Start node\"}"));
     static const char *const secrets[] = {"FLEET-TOKEN", "RECEIPT", "PLAN-ID", "OPS-TEXT", "PAIR-OFFER", "PAIRCD",
         "TRANSCRIPT", "CONNECTION-PATH", "/data/", "fleet_token", "ops_plan", "pair_offer", "key"};
     for (size_t i = 0; i < sizeof(secrets) / sizeof(secrets[0]); ++i) assert(!strstr(card, secrets[i]));
@@ -251,6 +251,28 @@ static void phone_card_never_shows_wallet(void)
     assert(strstr(card, "\"sync\":\"\"") && !strstr(card, "WALLET") && !strstr(card, "ZCL"));
     assert(!strstr(card, "Balance") && !strstr(card, "Wallet") && !strstr(card, "balance"));
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && !strstr(card, "WALLET"));
+}
+static void home_start_states(void)
+{
+    struct zapp_view v = {0};
+    char card[1024];
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "\"home_start\":\"Start node\""));
+    v.node_starting = true;
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "\"home_start\":\"\""));
+    v.node_starting = false; v.node_process_running = true;
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "\"home_start\":\"\""));
+    snprintf(v.node_boot_stage, sizeof(v.node_boot_stage), "opening the database");
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "opening the database"));
+    v.node_running = true;
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && !strstr(card, "opening the database"));
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "\"home_start\":\"\""));
+    v.node_stopping = true;
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && !strstr(card, "opening the database"));
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "\"home_start\":\"\""));
+    v.node_process_running = v.node_running = v.node_stopping = false; v.node_installing = true;
+    assert(zapp_home_phone_card(&v, false, card, sizeof(card)) && strstr(card, "\"home_start\":\"\""));
+    v.node_installing = false;
+    assert(zapp_home_phone_card(&v, true, card, sizeof(card)) && strstr(card, "\"home_start\":\"\""));
 }
 static void wallet_tile_has_no_amount(void)
 {
@@ -465,20 +487,15 @@ static void worst_case_card_fits(void)
 }
 static void scrollable_home_grid(const struct zapp_node *home)
 {
-    /* Primary and app grids must retain their row heights inside a scrollable Home. */
-    assert(home->kind == ZAPP_NODE_LIST && home->child_count >= 3);
-    assert(home->children[0].kind == ZAPP_NODE_GRID && home->children[0].child_count == 4);
-    assert(!strcmp(home->children[0].children[0].id, "wallet") &&
-           !strcmp(home->children[0].children[1].id, "receive") &&
-           !strcmp(home->children[0].children[2].id, "scan") &&
-           !strcmp(home->children[0].children[3].id, "assistant"));
-    assert(home->children[1].kind == ZAPP_NODE_COLUMN && !strcmp(home->children[1].card, "phone"));
-    assert(home->children[1].child_count == 3 && !strcmp(home->children[1].children[2].id, "node_toggle"));
-    assert(home->children[2].kind == ZAPP_NODE_GRID && !strcmp(home->children[2].card, "z23_app"));
+    assert(home->kind == ZAPP_NODE_LIST && home->child_count == 2);
+    assert(home->children[0].kind == ZAPP_NODE_COLUMN && !strcmp(home->children[0].card, "phone"));
+    assert(home->children[0].child_count == 3 && !strcmp(home->children[0].children[2].id, "node_start_home"));
+    assert(home->children[1].kind == ZAPP_NODE_GRID && home->children[1].child_count == 2);
+    assert(!strcmp(home->children[1].children[0].id, "wallet") && !strcmp(home->children[1].children[1].id, "receive"));
 }
 static void built_in_layouts(void)
 {
-    static const char *const tiles[] = {"scan", "assistant", "receive"};
+    static const char *const tiles[] = {"wallet", "receive"};
     assert(zapp_home_layout_count() == 2 && !strcmp(zapp_home_layout_name(0), "default"));
     assert(!strcmp(zapp_home_layout_name(1), "classic") && !zapp_home_layout_name(2) && !zapp_home_layout("other"));
     for (size_t i = 0; i < zapp_home_layout_count(); ++i) {
@@ -492,7 +509,7 @@ static void built_in_layouts(void)
         for (size_t t = 0; t < sizeof(tiles) / sizeof(tiles[0]); ++t) {
             assert(strstr(document, tiles[t]));
             assert(zapp_home_action_label(tiles[t]));
-            assert(strstr(document, "\"card\":\"z23_app\""));
+            assert(!strstr(document, "\"card\":\"z23_app\"") && !strstr(document, "\"id\":\"scan\"") && !strstr(document, "\"id\":\"assistant\""));
             assert(!strstr(document, "\"record\"") && !strstr(document, "\"watch\"") && !strstr(document, "\"apps\"") && !strstr(document, "\"settings\""));
         }
         zapp_layout_free(layout);
@@ -791,6 +808,7 @@ int main(void)
     dark_by_default();
     phone_card_golden();
     node_button_states();
+    home_start_states();
     plain_node_line_states();
     plain_node_line_verdicts();
     assistant_and_home_agree();

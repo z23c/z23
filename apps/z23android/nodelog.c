@@ -16,19 +16,19 @@
 #endif
 
 /* Boot stages in node order, with what the node is doing once it reports that stage. */
-static const struct { const char *name, *doing; } stages[] = {
-    {"init", "locking the data folder"},
-    {"datadir_locked", "preparing cryptography"},
-    {"crypto_ready", "opening the database"},
-    {"db_open", "loading the wallet"},
-    {"wallet_loaded", "loading the block index"},
-    {"block_index_loaded", "finding the chain tip"},
-    {"chain_tip_resolved", "connecting to the network"},
-    {"network_ready", "starting services"},
-    {"services_running", "finishing startup"},
-    {"ready", "running"},
-    {"shutdown_requested", "saving data and stopping"},
-    {"shutdown_complete", "stopped"},
+static const struct { const char *name, *doing; bool startup; } stages[] = {
+    {"init", "locking the data folder", true},
+    {"datadir_locked", "preparing cryptography", true},
+    {"crypto_ready", "opening the database", true},
+    {"db_open", "loading the wallet", true},
+    {"wallet_loaded", "loading the block index", true},
+    {"block_index_loaded", "finding the chain tip", true},
+    {"chain_tip_resolved", "connecting to the network", true},
+    {"network_ready", "starting services", true},
+    {"services_running", "finishing startup", true},
+    {"ready", "running", false},
+    {"shutdown_requested", "saving data and stopping", false},
+    {"shutdown_complete", "stopped", false},
 };
 #define STAGES (sizeof(stages) / sizeof(stages[0]))
 
@@ -662,6 +662,12 @@ bool zapp_console_rotate(const char *file, off_t cap)
     if (lstat(file, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= cap) return true;
     if (snprintf(rotated, sizeof(rotated), "%s.1", file) >= (int)sizeof(rotated)) return false;
     return rename(file, rotated) == 0;
+}
+
+const char *zapp_nodelog_startup_stage(struct zapp_nodelog *l)
+{
+    int stage = atomic_load(&l->stage);
+    return stage > 0 && (size_t)stage <= STAGES && stages[stage - 1].startup ? stages[stage - 1].doing : NULL;
 }
 
 const char *zapp_nodelog_stage(struct zapp_nodelog *l)

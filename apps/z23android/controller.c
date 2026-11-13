@@ -377,6 +377,7 @@ static bool observe_installer(struct controller *c)
     c->view.node_running = false;
     c->view.node_process_running = true;
     c->view.node_installing = true;
+    c->view.node_boot_stage[0] = 0;
     c->view.node_stopping = stopping;
     c->view.node_serving = false;
     c->view.chain_state = ZAPP_CHAIN_NONE;
@@ -426,6 +427,8 @@ static void observe_node_work(struct controller *c)
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
     struct zapp_replay_progress replay = {0};
+    char boot_stage[96] = "";
+    if (!n.responding && managed) (void)zapp_node_boot_stage(&c->runtime, &observed, boot_stage, sizeof(boot_stage));
     bool replaying = !n.responding && managed &&
         zapp_node_replay_progress(&c->runtime, &observed, &replay);
     enum zapp_pace pace = n.responding ? read_node_pace(c) : ZAPP_PACE_NORMAL;
@@ -465,6 +468,8 @@ static void observe_node_work(struct controller *c)
     c->view.node_wallet_replaying = !c->handoff_wait && !zapp_restart_notice(&c->restart) &&
         zapp_nodelog_replay_visible(n.responding, process_running, stopping, replaying);
     c->view.node_wallet_replay[0] = 0;
+    copy_text(c->view.node_boot_stage, sizeof(c->view.node_boot_stage),
+              !n.responding && process_running && !stopping && !c->handoff_wait && !zapp_restart_notice(&c->restart) ? boot_stage : "");
     if (c->view.node_wallet_replaying)
         zapp_nodelog_replay_text(&replay, c->view.node_wallet_replay, sizeof(c->view.node_wallet_replay));
     c->view.pace = pace;

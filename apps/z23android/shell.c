@@ -36,8 +36,8 @@
 #define WHITE 0xffffffffu
 #define GRAVITY_CENTER_HORIZONTAL 1
 
-enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_PEER_MODE, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum screen { SCREEN_HOME, SCREEN_MORE, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
+enum command { CMD_HOME, CMD_MORE, CMD_MORE_SCAN, CMD_MORE_ASSISTANT, CMD_MORE_START, CMD_MORE_STOP, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_PEER_MODE, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -53,12 +53,12 @@ static struct {
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
     jobject fleet_review_scroll, fleet_review_hint, fleet_review_status, fleet_start_button, fleet_result_scroll;
-    jobject camera_retry, camera_settings;
+    jobject camera_retry, camera_settings, more_start, more_stop;
     jobject paste_panel, paste_field, paste_review, paste_error;
     char fleet_receipt[8192];
     char fleet_result_shown[ZAPP_NOTICE_CAP];
     bool fleet_review_started, fleet_qr_shown, fleet_start_requested, fleet_result_valid;
-    enum screen current, before_scan;
+    enum screen current, before_scan, tool_origin;
     enum wallet_page wallet_entry;
     bool receive_from_home;
     bool send_from_wallet;
@@ -251,7 +251,7 @@ static bool build_outcome(JNIEnv *env, jobject root)
         zj_visible(env, panel, false) && zj_append(env, panel, outcome) &&
         button(env, panel, "Dismiss", CMD_OUTCOME_DISMISS, 0, 0) && zj_append(env, root, panel);
 }
-/* Notice and scan outcome bars, the layout's host, and a footer that always offers Apps and Settings. */
+/* Notice, layout and secondary actions. */
 static bool build_home(JNIEnv *env, jobject root)
 {
     jobject host = zj_widget(env, "android/widget/FrameLayout", shell.activity);
@@ -259,7 +259,24 @@ static bool build_home(JNIEnv *env, jobject root)
     bool ok = host && footer && add_notice(env, root, SCREEN_HOME) && build_outcome(env, root) && zj_padding(env, host, 20, 24) && zj_margins(env, host, MATCH, 0, 1.0f, 0, 0, 0, 0) &&
         zapp_surface_create(env, shell.activity, host) &&
         zj_append(env, root, host) && zj_append(env, root, footer) &&
-        button(env, footer, "Play", CMD_PLAY, 0, 1) && button(env, footer, "Apps", CMD_APPS, 0, 1) && button(env, footer, "Settings", CMD_SETTINGS, 0, 1);
+        button(env, footer, "More", CMD_MORE, 0, 1);
+    return ok;
+}
+static jobject scroll_column(JNIEnv *env, jobject root, int padding_dp);
+static bool build_more(JNIEnv *env, jobject root)
+{
+    jobject content = add_notice(env, root, SCREEN_MORE) ? scroll_column(env, root, 12) : NULL;
+    bool ok = content && button(env, content, "Home", CMD_HOME, 0, 0) &&
+        button(env, content, "Scan", CMD_MORE_SCAN, 0, 0) &&
+        button(env, content, "Assistant", CMD_MORE_ASSISTANT, 0, 0) &&
+        button(env, content, "Apps", CMD_APPS, 0, 0) &&
+        button(env, content, "Play", CMD_PLAY, 0, 0) &&
+        button(env, content, "Settings", CMD_SETTINGS, 0, 0) &&
+        button(env, content, "Start node", CMD_MORE_START, 0, 0);
+    if (ok) shell.more_start = shell.navs[shell.nav_count - 1].view;
+    if (ok) ok = button(env, content, "Stop node", CMD_MORE_STOP, 0, 0);
+    if (ok) shell.more_stop = shell.navs[shell.nav_count - 1].view;
+    if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
 static bool build_apps(JNIEnv *env, jobject root)
@@ -534,8 +551,9 @@ static bool attach_wallet_pages(JNIEnv *env, jobject stage, jobject wallet, jobj
 
 static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
 {
+    jobject more = column(env, DARK, 12, false);
     jobject wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
-    return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) &&
+    return more && build_home(env, home) && build_more(env, more) && add_screen(env, stage, SCREEN_MORE, more) && build_apps(env, apps) && build_settings(env, settings) &&
            add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
            attach_wallet_pages(env, stage, wallet, send, setup);
@@ -765,9 +783,19 @@ static void set_protection(JNIEnv *env, enum screen next)
     if ((shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_FLEET_REVIEW || (shell.current == SCREEN_SCAN && shell.paste_mode)) && next != SCREEN_ASSISTANT && next != SCREEN_FLEET_REVIEW && !wallet_screen(next) && next != SCREEN_SCAN) (void)protect_window(env, false);
 }
 /* What a screen does as it comes into view. */
+static void update_more_node(JNIEnv *env)
+{
+    char text[32] = "";
+    (void)zapp_card_field(&shell.phone, "node_button", text, sizeof(text));
+    char start[32] = "";
+    (void)zapp_card_field(&shell.phone, "home_start", start, sizeof(start));
+    if (shell.more_start) (void)zj_visible(env, shell.more_start, !strcmp(start, "Start node"));
+    if (shell.more_stop) (void)zj_visible(env, shell.more_stop, !strcmp(text, "Stop node"));
+}
 static void enter_screen(JNIEnv *env, enum screen next, enum wallet_page page, enum screen origin)
 {
     if (next == SCREEN_WALLET) shell.receive_from_home = page == WALLET_PAGE_RECEIVE && origin == SCREEN_HOME;
+    if (next == SCREEN_MORE) update_more_node(env);
     if (next == SCREEN_APPS) { refresh_apps(env); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) { zapp_shell_immersive(env); show_scan_screen(env, ZAPP_CAMERA_GRANTED); }
@@ -799,6 +827,8 @@ static void go(JNIEnv *env, enum screen next)
 {
     enum wallet_page page = shell.wallet_entry ? shell.wallet_entry : WALLET_PAGE_FUNDS;
     enum screen origin = shell.current;
+    if (next == SCREEN_APPS || next == SCREEN_SETTINGS || next == SCREEN_ASSISTANT || next == SCREEN_GAME)
+        if (origin != SCREEN_SCAN) shell.tool_origin = origin == SCREEN_MORE ? SCREEN_MORE : SCREEN_HOME;
     shell.wallet_entry = WALLET_PAGE_FUNDS;
     next = screen_for(next);
     if (!ensure_screen(env, next)) {
@@ -869,7 +899,8 @@ static void back(JNIEnv *env)
         else go(env, SCREEN_HOME);
     } else if (shell.current == SCREEN_SEND) {
         go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
-    } else if (shell.current != SCREEN_HOME) go(env, SCREEN_HOME);
+    } else if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_ASSISTANT || shell.current == SCREEN_GAME) go(env, shell.tool_origin);
+    else if (shell.current != SCREEN_HOME) go(env, SCREEN_HOME);
     else set_outcome(env, "");
 }
 static void choose_layout(JNIEnv *env, size_t index)
@@ -988,6 +1019,11 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     if (run_fleet_nav(env, nav)) return;
     switch (nav->command) {
     case CMD_HOME: go(env, SCREEN_HOME); break;
+    case CMD_MORE: go(env, SCREEN_MORE); break;
+    case CMD_MORE_SCAN: begin_scan(env); break;
+    case CMD_MORE_ASSISTANT: go(env, SCREEN_ASSISTANT); break;
+    case CMD_MORE_START: shell.send("node_start", ""); break;
+    case CMD_MORE_STOP: shell.send("node_stop", ""); break;
     case CMD_APPS: go(env, SCREEN_APPS); break;
     case CMD_SETTINGS: go(env, SCREEN_SETTINGS); break;
     case CMD_PLAY: go(env, SCREEN_GAME); break;
@@ -1017,6 +1053,7 @@ static void run_tile(JNIEnv *env, const struct target *target)
     else if (!strcmp(target->id, "wallet")) go(env, shell.preview || zapp_setup_state(shell.files) == ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP);
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
     else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
+    else if (!strcmp(target->id, "node_start_home")) shell.send("node_start", "");
     else if (!strcmp(target->id, "node_toggle")) {
         char label[32] = "";
         (void)zapp_card_field(&shell.phone, "node_button", label, sizeof(label));
@@ -1390,6 +1427,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     render_fleet_review(env, view);
     if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
+    if (shell.current == SCREEN_MORE) update_more_node(env);
     if (strcmp(shell.node_notice, view->node_action_notice)) {
         snprintf(shell.node_notice, sizeof(shell.node_notice), "%s", view->node_action_notice);
         show_notice(env);
@@ -1499,7 +1537,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_MORE], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     if (shell.phone_ok) json_free(&shell.phone);

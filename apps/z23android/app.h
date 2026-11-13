@@ -45,6 +45,7 @@ struct zapp_view {
     bool node_installing; /* A one-time state install is running. */
     bool node_wallet_replaying;
     char node_wallet_replay[96];
+    char node_boot_stage[96];
     bool node_wanted;
     bool node_stopping; /* A stop was sent to the node process that is still running. */
     bool node_serving;  /* The node's boot status says it serves (zapp_node_serving), read while it answers. */

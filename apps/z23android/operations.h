@@ -82,6 +82,7 @@ bool zapp_node_resume_if_wanted(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_resume_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap);
 struct zapp_node_identity { pid_t pid; int pidfd; uint64_t epoch, start_token; };
 void zapp_node_identity_close(struct zapp_node_identity *id);
+bool zapp_node_boot_stage(struct zapp_runtime *r, const struct zapp_node_identity *id, char *out, size_t cap);
 bool zapp_node_replay_progress(struct zapp_runtime *r, const struct zapp_node_identity *id,
     struct zapp_replay_progress *out);
 bool zapp_node_identity(struct zapp_runtime *r, struct zapp_node_identity *id);
@@ -94,7 +95,6 @@ bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_stop_for_setup(struct zapp_runtime *r, char *out, size_t cap);
 /* What the node is doing after its latest boot stage, as a short plain phrase such as "opening the
  * database"; "starting the node" before it reports one. */
-const char *zapp_node_stage(struct zapp_runtime *r);
 /* True after the owner chose Start node, until Stop node runs; always false in the preview package. */
 bool zapp_node_wanted(const struct zapp_runtime *r);
 /* The pace last written by zapp_node_pace_write, normal before the first write. */
