@@ -4596,7 +4596,7 @@ static bool epoch_lookup_same(int parent_fd, const char *name,
            S_ISREG(now.st_mode) && epoch_same_stamp(expected, &now);
 }
 
-static bool epoch_authority_roots_same(
+static const char *epoch_authority_roots_reason(
     const struct epoch_authority *authority)
 {
     struct stat epoch_now, object_root_now, admission_now;
@@ -4604,13 +4604,13 @@ static bool epoch_authority_roots_same(
     int root = epoch_open_path_dir(authority->epoch_path);
     int admission = epoch_open_relative_dir(authority->object_root_fd,
                                             ".epoch-admission", false);
-    bool root_ok = object_root >= 0 &&
+    bool object_ok = object_root >= 0 &&
                    fstat(object_root, &object_root_now) == 0 &&
                    epoch_same_identity(&authority->object_root_stamp,
-                                       &object_root_now) &&
-                   root >= 0 && fstat(root, &epoch_now) == 0 &&
-                   epoch_same_identity(&authority->epoch_stamp, &epoch_now) &&
-                   admission >= 0 && fstat(admission, &admission_now) == 0 &&
+                                       &object_root_now);
+    bool epoch_ok = object_ok && root >= 0 && fstat(root, &epoch_now) == 0 &&
+                   epoch_same_identity(&authority->epoch_stamp, &epoch_now);
+    bool admission_ok = epoch_ok && admission >= 0 && fstat(admission, &admission_now) == 0 &&
                    epoch_same_identity(&authority->admission_dir_stamp,
                                        &admission_now);
     if (object_root >= 0)
@@ -4619,18 +4619,23 @@ static bool epoch_authority_roots_same(
         close(root);
     if (admission >= 0)
         close(admission);
-    return root_ok;
+    if (!object_ok) return "object_root";
+    if (!epoch_ok) return "epoch_root";
+    if (!admission_ok) return "admission_directory";
+    return NULL;
 }
 
-static bool epoch_authority_current(const struct epoch_authority *authority)
+static const char *epoch_authority_reason(const struct epoch_authority *authority)
 {
     struct stat session_now;
-    bool root_ok = epoch_authority_roots_same(authority);
-    return root_ok && fstat(authority->session_fd, &session_now) == 0 &&
-           S_ISREG(session_now.st_mode) &&
-           epoch_same_stamp(&authority->stamp, &session_now) &&
-           epoch_lookup_same(authority->session_parent_fd,
-                             authority->session_leaf, &authority->stamp);
+    const char *reason = epoch_authority_roots_reason(authority);
+    if (reason) return reason;
+    if (fstat(authority->session_fd, &session_now) != 0 ||
+        !S_ISREG(session_now.st_mode) ||
+        !epoch_same_stamp(&authority->stamp, &session_now)) return "session_stamp";
+    if (!epoch_lookup_same(authority->session_parent_fd,
+                           authority->session_leaf, &authority->stamp)) return "session_lookup";
+    return NULL;
 }
 
 static bool epoch_names(const char *base, struct epoch_artifacts *artifacts)
@@ -4810,17 +4815,17 @@ static bool epoch_compile_complete(int rc, bool coverage,
     return false;
 }
 
-static bool epoch_stage_current(const struct epoch_authority *authority,
-                                const struct epoch_artifacts *artifacts)
+static const char *epoch_stage_reason(const struct epoch_authority *authority,
+                                      const struct epoch_artifacts *artifacts)
 {
     struct stat parent_now, staging_now, named_staging;
     int parent = epoch_open_relative_dir(authority->epoch_fd,
                                          artifacts->parent_relative, false);
-    bool ok = fstat(artifacts->parent_fd, &parent_now) == 0 &&
+    bool parent_ok = fstat(artifacts->parent_fd, &parent_now) == 0 &&
               epoch_same_identity(&artifacts->parent_stamp, &parent_now) &&
               parent >= 0 && fstat(parent, &parent_now) == 0 &&
-              epoch_same_identity(&artifacts->parent_stamp, &parent_now) &&
-              fstat(artifacts->staging_fd, &staging_now) == 0 &&
+              epoch_same_identity(&artifacts->parent_stamp, &parent_now);
+    bool staging_ok = parent_ok && fstat(artifacts->staging_fd, &staging_now) == 0 &&
               epoch_same_identity(&artifacts->staging_stamp, &staging_now) &&
               fstatat(artifacts->parent_fd, artifacts->staging_name,
                       &named_staging, AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -4828,7 +4833,15 @@ static bool epoch_stage_current(const struct epoch_authority *authority,
               epoch_same_identity(&artifacts->staging_stamp, &named_staging);
     if (parent >= 0)
         close(parent);
-    return ok && epoch_authority_current(authority);
+    if (!parent_ok) return "object_parent";
+    if (!staging_ok) return "staging_directory";
+    return epoch_authority_reason(authority);
+}
+
+static bool epoch_stage_current(const struct epoch_authority *authority,
+                                const struct epoch_artifacts *artifacts)
+{
+    return epoch_stage_reason(authority, artifacts) == NULL;
 }
 
 static int epoch_unverified_state(const struct epoch_authority *authority)
@@ -5294,10 +5307,13 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
                                     &artifacts, compiler_argc, cc);
     free(cc);
     bool complete = epoch_compile_complete(rc, coverage, &artifacts);
-    if (!complete || !epoch_stage_current(authority, &artifacts)) {
+    const char *reason = complete ? epoch_stage_reason(authority, &artifacts) : NULL;
+    if (!complete || reason) {
         epoch_abort_stage(&artifacts, lock_fd);
         if (rc != 0)
             return rc;
+        if (reason)
+            fprintf(stderr, "zcc --epoch-object: authority_reason=%s\n", reason);
         return epoch_fail(!complete ? "compiler did not create a complete object"
                                    : "compile authority changed during compilation");
     }

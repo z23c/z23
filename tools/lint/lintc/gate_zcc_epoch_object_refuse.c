@@ -267,11 +267,19 @@ static void p3_swap_prep(const char *script, const char *parent,
         zeo_bail(1);
 }
 
+static void p3_reason(const char *path, const char *expected)
+{
+    char text[1024]; size_t len = 0;
+    if (zeo_read_file(path, text, sizeof text, &len) != 0 ||
+        !strstr(text, expected))
+        zeo_fail("native refusal omitted the expected authority reason");
+}
+
 static void p3_swap(struct zeo *z)
 {
     char container[ZEO_PATH], parent[ZEO_PATH], saved[ZEO_PATH];
     char escape[ZEO_PATH], done[ZEO_PATH], obj[ZEO_PATH], dep[ZEO_PATH];
-    char script[ZEO_PATH];
+    char script[ZEO_PATH], err[ZEO_PATH];
     if (ovf(snprintf(container, sizeof container, "%s/swap-container",
                      z->object_root), sizeof container) ||
         ovf(snprintf(parent, sizeof parent, "%s/parent", container),
@@ -282,7 +290,8 @@ static void p3_swap(struct zeo *z)
         zeo_join(done, sizeof done, z->work, "swap-compiler-complete") ||
         ovf(snprintf(obj, sizeof obj, "%s/swap.o", parent), sizeof obj) ||
         zeo_dep_of(dep, sizeof dep, obj) ||
-        zeo_join(script, sizeof script, z->work, "swap-compiler.sh"))
+        zeo_join(script, sizeof script, z->work, "swap-compiler.sh") ||
+        zeo_join(err, sizeof err, z->work, "swap-error.log"))
         zeo_bail(2);
     p3_swap_prep(script, parent, escape);
     const char *const env[4] = { parent, saved, escape, done };
@@ -292,9 +301,10 @@ static void p3_swap(struct zeo *z)
                     (char *)"-Wall", (char *)"-Wextra", (char *)"-Werror",
                     z->seed, NULL };
     int rc = 0;
-    if (zeo_compile_x(z, NULL, "dep", obj, cc, "/dev/null", "/dev/null",
+    if (zeo_compile_x(z, NULL, "dep", obj, cc, "/dev/null", err,
                       NULL, &rc) != 0)
         zeo_bail(1);
+    p3_reason(err, "authority_reason=object_parent");
     p3_swap_env(env, 0);
     const char *const chk[6] = { parent, saved, escape, done, obj, dep };
     p3_swap_check(rc, chk);
@@ -305,8 +315,9 @@ static void p3_swap(struct zeo *z)
 
 static void p3_aba(struct zeo *z)
 {
-    char script[ZEO_PATH];
-    if (zeo_join(script, sizeof script, z->work, "aba-compiler.sh"))
+    char script[ZEO_PATH], err[ZEO_PATH];
+    if (zeo_join(script, sizeof script, z->work, "aba-compiler.sh") ||
+        zeo_join(err, sizeof err, z->work, "aba-error.log"))
         zeo_bail(2);
     if (zeo_write_file(script, k_aba_sh) != 0 || chmod(script, 0755) != 0)
         zeo_bail(1);
@@ -330,8 +341,10 @@ static void p3_aba(struct zeo *z)
         cc[7] = NULL;
         int rc = 0;
         if (zeo_backend_x(z, native, "dep", obj, cc, "/dev/null",
-                          "/dev/null", NULL, &rc) != 0)
+                          native ? err : "/dev/null", NULL, &rc) != 0)
             zeo_bail(1);
+        if (native)
+            p3_reason(err, "authority_reason=session_stamp");
         if (rc == 0)
             zeo_failf("%s published after its session changed", b);
         if (zeo_exists(obj))
