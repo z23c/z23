@@ -1657,7 +1657,8 @@ static const char *al_create_first_card(struct al_create_view *s,
         return "home";
     }
     s->valid = al_create_action(m, "next", "Next app") >= 0 &&
-        al_create_action(m, "create", NULL) < 0;
+        al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
+        al_create_action(m, "previous", NULL) < 0;
     return "next";
 }
 static bool al_create_last_card(const struct zcl_present_model_v1 *m)
@@ -1973,19 +1974,24 @@ static bool al_create_case_result(const struct al_create_fixture *s, struct zcl_
     if (mode == 2 || mode == 8) return al_create_preview_result(r, mode);
     return al_create_failure_result(s, r);
 }
-static bool al_create_run_case(unsigned mode)
+static bool al_create_run_catalog_case(unsigned mode, unsigned count)
 {
     static struct al_fx f; struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.app_open.v1");
     struct al_create_fixture s = {.f = &f, .mode = mode, .valid = true};
     bool setup = al_setup(&f) && al_write_file(f.env.config_path, "", 0600) &&
         app_launch_state_dir_ready(f.env.state_dir);
+    if (setup && count) setup = al_library_catalog(&f, count);
     if (setup) zcl_test_app_library_create(&f.env, f.root, &reply, al_create_flow_present,
         al_create_notice, &s, al_create_adopt, mode == 6 ? 0 : 30000);
     bool ok = setup && al_create_case_result(&s, &reply);
     printf("  create mode=%u setup=%d valid=%d calls=%u steps=%u notices=%u kept=%d status=%d mutated=%d code=%s\n",
         mode, setup, s.valid, s.calls, s.step, s.recovery_notices, s.saw_kept, reply.status, reply.error.mutated, reply.error.code);
     zcl_command_reply_free(&reply); return ok;
+}
+static bool al_create_run_case(unsigned mode)
+{
+    return al_create_run_catalog_case(mode, 0);
 }
 static bool al_create_real_tiny_budget(const char *datadir)
 {
@@ -2046,6 +2052,9 @@ static int case_library_create_flow(void)
         if (!al_create_run_case(15)) ok = false;
         if (!al_create_real_tiny_budget("/fixture-profile")) ok = false;
         if (!al_create_history_case()) ok = false;
+        /* Select Create directly on the first of two cards; cancellation
+         * reaches the existing adoption flow without mutating the app. */
+        ASSERT(al_create_run_catalog_case(0, 2));
         ASSERT(ok); PASS();
     } _test_next:;
     return failures;

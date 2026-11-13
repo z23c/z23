@@ -153,7 +153,9 @@ static void al_model(struct library *w)
     (void)snprintf(value, sizeof(value), "%s%.12s",
         r->saved ? "Saved version " : "Installed app", r->saved ? version : "");
     app_library_choice(m, "choose", "Choose app", value);
-    app_library_choice(m, "previous", "Previous app", w->index ? "Browse back." : "First app.");
+    if (!w->index && w->count > 1)
+        app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
+    else app_library_choice(m, "previous", "Previous app", w->index ? "Browse back." : "First app.");
     if (w->index + 1 < w->count) app_library_choice(m, "next", "Next app", "Browse forward.");
     else app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
     app_library_choice(m, "home", "Back", "Return to the home menu.");
