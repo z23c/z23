@@ -10,11 +10,10 @@
  *      handled per pass; posts from a maintainer host, and posts naming a
  *      maintainer agent (the lead, the responder, maintainer-*), are marked
  *      seen and skipped; only contributor posts are answered
- *   -> kind need: the fixed received note and an escalate row, no model
- *   -> otherwise: day cap (20 model calls per UTC day) -> responder checkout
+ *   -> day cap (20 model calls per UTC day) -> responder checkout
  *      at origin/main, clean -> one read-only engine-unit dispatch under the
  *      Haiku one-shot flock -> the LAST non-empty line of the reply must be
- *      `ANSWER: text` (or `ESCALATE: why`); text after it is never posted;
+ *      `ANSWER: text`, `ESCALATE: why`, or `IGNORE: why`; text after it is never posted;
  *      the answer passes the filter -> posted as kind note, ref = the
  *      contributor's post.
  *
@@ -28,8 +27,7 @@
  * posts, only kind note, never kind result, never on another's behalf. Every
  * program runs through zcl_spawn_capture-style argv (no shell). Fail closed:
  * an unreadable or malformed --fixture-list exits 1; any other doubt is the
- * fixed note plus
- * an escalate row. --dry-run logs the post it would make instead of making it.
+ * local escalation row. --dry-run logs the post it would make instead of making it.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -142,15 +140,19 @@ static const char k_prompt_rules[] =
     "- The owner does not read or relay this room. Never ask them to do "
     "anything.\n\n"
     "Decide one, and make it the LAST line of your reply (nothing after it):\n"
-    "- If the post asks something you can answer with confidence from the code "
-    "or the docs: one line 'ANSWER: <the whole answer on this one line>'.\n"
-    "- Otherwise (a design or policy decision, a request to run or review "
-    "something, anything you are not sure of): one line 'ESCALATE: <short "
-    "reason>'.\n\n";
+    "- First identify any unresolved technical question or request for help "
+    "or action in the post and thread. Accompanying status does not cancel it.\n"
+    "- If there is no unresolved request, or it is already answered or "
+    "resolved: one line 'IGNORE: <short reason>'.\n"
+    "- If an unresolved technical request can be answered with confidence "
+    "from the code or docs: one line 'ANSWER: <the whole answer on this one line>'.\n"
+    "- If an unresolved technical request needs a design or policy decision, "
+    "an action or review, or evidence you cannot verify: one line "
+    "'ESCALATE: <short reason>'.\n\n";
 
 static const char k_answer_prefix[] =
-    "Automated maintainer responder (the lead agent reviews every answer and "
-    "follows up here if needed): ";
+    "Automated maintainer responder: ";
+
 static_assert(sizeof(k_answer_prefix) - 1 + CI_ANSWER <= CI_SITE_LEAD,
               "an answer post must fit the public page preview whole");
 
@@ -738,7 +740,8 @@ static bool ci_marker_not_last(const char *s, size_t len)
 {
     const char *rest = NULL, *le = NULL;
     return ci_first_line(s, s + len, "ANSWER:", &rest, &le) ||
-           ci_first_line(s, s + len, "ESCALATE:", &rest, &le);
+           ci_first_line(s, s + len, "ESCALATE:", &rest, &le) ||
+           ci_first_line(s, s + len, "IGNORE:", &rest, &le);
 }
 
 static char *ci_read_reply(const char *path, size_t *len)
@@ -796,26 +799,11 @@ static void ci_escalate_row(struct ci *t, const char *id, const char *why)
     t->io_fail = true;
 }
 
-/* The bridge's ack: the fixed received note, then one escalate row for the
- * lead. The row is written whether or not the note went out (a failed note
- * is never retried, so the lead must see the post); the post is already
- * recorded as seen. */
+/* Unanswered or unclassified posts go to the existing local lead ledger.
+ * No public placeholder claims that the lead has seen or will answer it. */
 static void ci_ack(struct ci *t, const char *id, const char *why)
 {
-    char text[512], row_why[320];
-    const bool posted =
-        ci_fmt(text, sizeof(text),
-               "Received (post %s). The maintainer lead agent will answer here, "
-               "with ref = your post. Nothing needs to be sent anywhere else; "
-               "Rhett does not relay this room.",
-               id) &&
-        ci_post(t, id, text);
-    if (!posted)
-        ci_say(t, "POST FAILED %s (received note)", id);
-    if (posted || !ci_fmt(row_why, sizeof(row_why), "received note not posted; %s", why))
-        ci_escalate_row(t, id, why);
-    else
-        ci_escalate_row(t, id, row_why);
+    ci_escalate_row(t, id, why);
     ci_say(t, "ESCALATE %s: %s", id, why);
 }
 
@@ -824,6 +812,11 @@ static void ci_publish(struct ci *t, const char *id, const char *reply, size_t r
     char why[256], answer[CI_ANSWER + 1], text[CI_ANSWER + 256];
     const char *rest = NULL;
     size_t n = 0;
+    if (ci_marker(reply, rlen, "IGNORE:", &rest, &n)) {
+        if (n == 0) ci_ack(t, id, "ignore missing reason");
+        else ci_say(t, "IGNORED %s", id);
+        return;
+    }
     if (ci_marker(reply, rlen, "ESCALATE:", &rest, &n)) {
         n = n < sizeof(why) - 1 ? n : sizeof(why) - 1;
         memcpy(why, rest, n);
@@ -833,7 +826,7 @@ static void ci_publish(struct ci *t, const char *id, const char *reply, size_t r
     }
     if (!ci_marker(reply, rlen, "ANSWER:", &rest, &n)) {
         ci_ack(t, id, ci_marker_not_last(reply, rlen)
-                          ? "reply has text after its ANSWER/ESCALATE line"
+                          ? "reply has text after its ANSWER/ESCALATE/IGNORE line"
                           : "answer missing or refused by the filter");
         return;
     }
@@ -931,6 +924,8 @@ static int ci_dispatch(struct ci *t, const char *unit, const char *eu,
     argv[n++] = O(t, CI_O_ENGINE_UNIT);
     argv[n++] = "--engine";
     argv[n++] = O(t, CI_O_ENGINE);
+    argv[n++] = "--kind";
+    argv[n++] = "contrib-help";
     argv[n++] = "--task";
     argv[n++] = task;
     argv[n++] = "--no-group";
@@ -975,13 +970,14 @@ static void ci_answer(struct ci *t, const struct json_value *post, size_t ctx_le
         ci_ack(t, id, "responder unit could not be written");
         return;
     }
-    if (ci_dispatch(t, unit, eu, task) < 0) {
-        ci_ack(t, id, "responder model could not start");
-        return;
-    }
+    const int dispatch_rc = ci_dispatch(t, unit, eu, task);
     if (!ci_clean(t, O(t, CI_O_RESPONDER))) {
         ci_revert(t);
         ci_ack(t, id, "responder model tried to edit files");
+        return;
+    }
+    if (dispatch_rc != 0) {
+        ci_ack(t, id, "responder model failed");
         return;
     }
     size_t rlen = 0;
@@ -1010,10 +1006,6 @@ static bool ci_handle(struct ci *t, const struct json_value *post, size_t ctx_le
     if (ci_ours(host, agent))
         return false;
     ci_say(t, "NEW %s kind=%s agent=%s host=%.12s", id, kind, agent, host);
-    if (strcmp(kind, "need") == 0) {
-        ci_ack(t, id, "review request (need); reviews go through the lead's gates");
-        return true;
-    }
     if (!ci_take_call(t)) {
         ci_ack(t, id, "daily model cap reached");
         return true;

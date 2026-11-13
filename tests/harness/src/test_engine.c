@@ -1190,6 +1190,7 @@ static int case_effect_per_kind(void)
         { "port-arm", ENGINE_PROMPT_EFFECT_EDIT },
         { "doc-claim", ENGINE_PROMPT_EFFECT_EDIT },
         { "review", ENGINE_PROMPT_EFFECT_REPORT },
+        { "contrib-help", ENGINE_PROMPT_EFFECT_REPORT },
         { "c23-byte-validator", ENGINE_PROMPT_EFFECT_EDIT },
         { "c23-command-handler", ENGINE_PROMPT_EFFECT_EDIT },
         { "c23-model-save", ENGINE_PROMPT_EFFECT_EDIT },

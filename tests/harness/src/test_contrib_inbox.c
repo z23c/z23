@@ -8,7 +8,7 @@
  *
  * Scenarios: maintainer and own posts are ignored (any post from a maintainer
  * host, and any maintainer agent on any host, lead included); a contributor
- * post is answered; a need is acknowledged and never modelled; a
+ * post is answered; requests are classified and updates ignored; a
  * question is answered once; an answer with an IPv4, or an unknown 64-hex, is
  * refused; a known 64-hex passes; an ESCALATE reply is queued; a repeat pass
  * posts nothing new; the daily cap stops model calls; four posts per pass at
@@ -136,6 +136,10 @@ static bool ci_setup(struct ci_env *e, const char *tag)
     (void)snprintf(e->lock, sizeof(e->lock), "%s/haiku.lock", e->d);
     const char *const bare[] = { "git", "init", "-q", "--bare", e->origin, NULL };
     const char *const init[] = { "git", "init", "-q", e->mainrepo, NULL };
+    char ignore[700];
+    if (snprintf(ignore, sizeof(ignore), "%s/.gitignore", e->mainrepo) >= (int)sizeof(ignore))
+        return false;
+    const char *const add[] = { "git", "-C", e->mainrepo, "add", "--", ".gitignore", NULL };
     const char *const commit[] = { "git", "-C", e->mainrepo, "-c", "user.name=ci",
                                    "-c", "user.email=ci@example.invalid", "-c",
                                    "commit.gpgsign=false", "commit", "-q",
@@ -145,7 +149,8 @@ static bool ci_setup(struct ci_env *e, const char *tag)
     const char *const push[] = { "git", "-C", e->mainrepo, "push", "-q", "origin",
                                  "HEAD:refs/heads/main", NULL };
     const char *const fetch[] = { "git", "-C", e->mainrepo, "fetch", "-q", "origin", NULL };
-    return ci_git(bare) && ci_git(init) && ci_git(commit) && ci_git(remote) &&
+    return ci_git(bare) && ci_git(init) && ci_wf(ignore, ".zvcs/\n") && ci_git(add) &&
+           ci_git(commit) && ci_git(remote) &&
            ci_git(push) && ci_git(fetch);
 }
 
@@ -208,6 +213,7 @@ struct ci_run_opts {
     bool live;             /* no --dry-run: the post goes to the --z23 program */
     bool live_list;        /* fetch through the supplied isolated fake z23 */
     const char *z23;       /* the fake poster, e.g. /bin/false */
+    const char *engine;    /* isolated failing engine fixture, when set */
     const char *responder; /* overrides the scenario's responder path */
     long fsize;            /* RLIMIT_FSIZE for the tool, or -1 for none */
 };
@@ -250,7 +256,7 @@ static int ci_pass_with(const struct ci_env *e, const struct ci_run_opts *o)
     if (!o->live_list) { argv[n++] = "--fixture-list"; argv[n++] = e->list; }
     const char *const rest[] = {
         "--state-dir", e->state, "--fixture-reply",
-        e->reply, "--engine", "fixture", "--engine-unit", engine, "--main",
+        e->reply, "--engine", "fixture", "--engine-unit", o->engine ? o->engine : engine, "--main",
         e->mainrepo, "--haiku-lock", e->lock, "--engine-timeout-s", "60",
         "--responder", o->responder ? o->responder : e->resp,
     };
@@ -310,6 +316,8 @@ static bool ci_setup_list_one(struct ci_env *e, const char *tag,
     list[0] = entry;
     return ci_list(e, list, 1);
 }
+
+static bool ci_state_has(const struct ci_env *e, const char *leaf, const char *needle);
 
 /* ── cases ───────────────────────────────────────────────────────────── */
 
@@ -406,16 +414,74 @@ static int case_need_acknowledged(void)
     CI_CHECK("a need post is staged",
              ci_setup_list_one(&e, "need", d, CI_OUTSIDE, "outsider", "need",
                                "please review my change"));
+    CI_CHECK("the request classification is staged", ci_model_reply(&e, "ESCALATE: review requires maintainer"));
     CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
-    CI_CHECK("the need is escalated", ci_has_events(&e, "ESCALATE"));
-    CI_CHECK("the received note is the only post",
-             ci_events_count(&e, "DRY post ref=") == 1);
+    CI_CHECK("the need is locally escalated", ci_state_has(&e, "escalate.tsv", d));
+    CI_CHECK("the request is not publicly acknowledged", ci_events_count(&e, "DRY post ref=") == 0);
     (void)snprintf(unit, sizeof(unit), "%s/units/%s", e.state, d);
-    CI_CHECK("the model is never dispatched for a need", !ci_exists(unit));
-    char full[96];
-    (void)snprintf(full, sizeof(full), "Received (post %s).", d);
-    CI_CHECK("the received note names the post by its full id",
-             ci_has_events(&e, full));
+    CI_CHECK("the model classifies the need", ci_exists(unit));
+    return failures;
+}
+
+static int case_status_ignored(void)
+{
+    struct ci_env e;
+    char id[65];
+    char log[800], prompt[800];
+    ci_hex64(id, '9');
+    int failures = 0;
+    CI_CHECK("a status update is staged", ci_setup_list_one(&e, "ignored", id, CI_OUTSIDE,
+             "outsider", "note", "build completed; no action needed"));
+    CI_CHECK("the ignore classification is staged", ci_model_reply(&e, "IGNORE: status only"));
+    CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
+    (void)snprintf(log, sizeof(log), "%s/units/%s/engine.log", e.state, id);
+    (void)snprintf(prompt, sizeof(prompt), "%s/units/%s/eu/prompt.txt", e.state, id);
+    CI_CHECK("read-only fixture completed as a report", ci_file_has(log, "\"verdict\":\"REPORTED\""));
+    CI_CHECK("report protocol preserves the decision line", ci_file_has(prompt, "omit the state block"));
+    CI_CHECK("status cannot mask an unresolved request", ci_file_has(prompt, "Accompanying status does not cancel it"));
+    CI_CHECK("the ignored update is recorded", ci_has_events(&e, "IGNORED "));
+    CI_CHECK("no public acknowledgment or escalation is emitted",
+             !ci_has_events(&e, "DRY post") && !ci_has_events(&e, "ESCALATE "));
+    CI_CHECK("the ignored update is not replayed", ci_pass(&e) == 0 && ci_events_count(&e, "IGNORED ") == 1);
+    return failures;
+}
+
+static bool ci_bad_ignore(const char *tag, char digit, const char *reply)
+{
+    struct ci_env e;
+    char id[65];
+    ci_hex64(id, digit);
+    return ci_setup_list_one(&e, tag, id, CI_OUTSIDE, "outsider", "note", "status") &&
+           ci_model_reply(&e, reply) && ci_pass(&e) == 0 &&
+           ci_state_has(&e, "escalate.tsv", id) && !ci_has_events(&e, "IGNORED ") &&
+           !ci_has_events(&e, "DRY post");
+}
+
+static int case_ignore_malformed(void)
+{
+    int failures = 0;
+    CI_CHECK("empty ignore escalates privately", ci_bad_ignore("ignore-empty", 'a', "IGNORE:"));
+    CI_CHECK("whitespace ignore escalates privately", ci_bad_ignore("ignore-space", 'b', "IGNORE:   "));
+    CI_CHECK("nonfinal ignore escalates privately", ci_bad_ignore("ignore-trail", 'c', "IGNORE: reason\\ntrailing"));
+    return failures;
+}
+
+static int case_model_failure_no_post(void)
+{
+    struct ci_env e;
+    char id[65], fake[700];
+    ci_hex64(id, 'b');
+    int failures = 0;
+    CI_CHECK("a request is staged", ci_setup_list_one(&e, "enginefail", id, CI_OUTSIDE,
+             "outsider", "question", "how do I build"));
+    (void)snprintf(fake, sizeof fake, "%s/engine-fail", e.d);
+    CI_CHECK("a failing engine writes an answer", ci_wf(fake,
+        "#!/bin/sh\nwhile [ \"$1\" != --state-dir ]; do shift || exit 3; done\n"
+        "shift; printf 'ANSWER: run make z23\\n' > \"$1/reply.txt\"\nexit 7\n") && chmod(fake, 0700) == 0);
+    const struct ci_run_opts opts = { .engine = fake, .fsize = -1 };
+    CI_CHECK("the pass handles the failed engine", ci_pass_with(&e, &opts) == 0);
+    CI_CHECK("failed engine output is not published", !ci_has_events(&e, "ANSWERED") && !ci_has_events(&e, "DRY post"));
+    CI_CHECK("failure is locally escalated", ci_state_has(&e, "escalate.tsv", id));
     return failures;
 }
 
@@ -539,7 +605,7 @@ static int case_escalate_reply(void)
     CI_CHECK("the escalation reason is queued",
              ci_file_has(ci_path(&e, esc, sizeof(esc), "escalate.tsv"),
                          "policy decision for the lead"));
-    CI_CHECK("nothing is answered", !ci_has_events(&e, "ANSWERED"));
+    CI_CHECK("nothing is publicly posted", !ci_has_events(&e, "ANSWERED") && !ci_has_events(&e, "DRY post"));
     return failures;
 }
 
@@ -1042,7 +1108,7 @@ static int case_events_unwritable(void)
 }
 
 /* The marker must be the last non-empty line: model text after it is never
- * posted, the fixed note and an escalate row go out instead. Text before it
+ * posted; only a local escalation row is recorded. Text before it
  * is fine. */
 static int case_text_after_marker(void)
 {
@@ -1060,7 +1126,7 @@ static int case_text_after_marker(void)
     CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
     CI_CHECK("the model text is never posted", !ci_has_events(&e, "TRAILING-MODEL-TEXT"));
     CI_CHECK("the answer is not posted", !ci_has_events(&e, "ANSWERED"));
-    CI_CHECK("the fixed note is posted instead", ci_has_events(&e, "Received (post "));
+    CI_CHECK("no public note is posted", !ci_has_events(&e, "DRY post"));
     CI_CHECK("an escalate row names the post", ci_state_has(&e, "escalate.tsv", g));
 
     CI_CHECK("a second question is staged",
@@ -1174,6 +1240,7 @@ static int case_post_failure(void)
     CI_CHECK("a need post is staged",
              ci_setup_list_one(&e, "postfail", g, CI_OUTSIDE, "outsider", "need",
                                "please review"));
+    CI_CHECK("an answer is staged", ci_model_reply(&e, "ANSWER: run make z23"));
     CI_CHECK("the first pass exits 0", ci_pass_with(&e, &broken) == 0);
     CI_CHECK("the failed note is logged", ci_has_events(&e, "POST FAILED"));
     CI_CHECK("an escalate row names the post", ci_state_has(&e, "escalate.tsv", g));
@@ -1218,6 +1285,9 @@ int test_contrib_inbox(void)
     failures += case_lead_on_maint_host_ignored();
     failures += case_own_agent_any_host_ignored();
     failures += case_need_acknowledged();
+    failures += case_status_ignored();
+    failures += case_ignore_malformed();
+    failures += case_model_failure_no_post();
     failures += case_question_answered();
     failures += case_refusals();
     failures += case_long_answer_refused();

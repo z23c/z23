@@ -17,10 +17,13 @@
 #include <unistd.h>
 #include "lintc.h"
 
+/* The shared parser supports 128 calls and refuses additional input. A
+ * template kind must occupy at least one call, so its distinct-kind bound
+ * can never exceed the same call limit. Keep the boundary selftest in sync. */
 enum {
-    DEF_SLURP = 65536, DEF_CALLS = 96, DEF_LITS = 16, DEF_LIT_W = 2048,
+    DEF_SLURP = 65536, DEF_CALLS = 128, DEF_LITS = 16, DEF_LIT_W = 2048,
     DEF_RAW = 8192, DEF_STANCE = 4096, DEF_LS = 262144, PRT_ROWS = DEF_CALLS,
-    PRT_KINDS = 24, PRT_ALWAYS = 16, PRT_FIELD = 96, PR_STANCE_MIN = 40,
+    PRT_KINDS = PRT_ROWS, PRT_ALWAYS = 16, PRT_FIELD = 96, PR_STANCE_MIN = 40,
     PR_STANCE_MAX = 700, PRT_SEC_FLOOR = 3
 };
 
