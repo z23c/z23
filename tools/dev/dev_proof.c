@@ -11877,18 +11877,6 @@ bool zcl_dev_proof_test_release_readmit(const char *submit, const char *generati
 #endif
 
 
-static bool dp_worker_bind_test_helpers(struct dp_worker *w,
-                                        char *why, size_t why_len)
-{
-    if (!test_helpers_hash(w->generation, w->generation_binary, w->admitted,
-                           w->depfile_root, w->helper_root, why, why_len))
-        return false;
-    int64_t bind_us = platform_time_monotonic_us();
-    bool bound = dp_test_needs_bind(w, w->helper_root, why, why_len);
-    dp_stage_timing_note(w->paths, "test_needs_bind_ms", bind_us);
-    return bound;
-}
-
 static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
                               char *why, size_t why_len)
 {
@@ -11912,11 +11900,19 @@ static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
         return false;
     dp_stage_timing_note(w->paths, "prefork_make_ms", stage_us);
     stage_us = platform_time_monotonic_us();
-    if (test_selected && !dp_worker_test_needs(w, why, why_len)) return false;
-    if (test_selected && !dp_restore_public_alias(w, why, why_len)) return false;
+    if (test_selected && (!dp_worker_test_needs(w, why, why_len) ||
+                          !dp_restore_public_alias(w, why, why_len))) return false;
     dp_stage_timing_note(w->paths, "prefork_test_needs_ms", stage_us);
     stage_us = platform_time_monotonic_us();
-    if (test_selected && !dp_worker_bind_test_helpers(w, why, why_len)) return false;
+    if (test_selected) {
+        if (!test_helpers_hash(w->generation, w->generation_binary, w->admitted,
+                               w->depfile_root, w->helper_root, why, why_len))
+            return false;
+        int64_t bind_us = platform_time_monotonic_us();
+        bool bound = dp_test_needs_bind(w, w->helper_root, why, why_len);
+        dp_stage_timing_note(w->paths, "test_needs_bind_ms", bind_us);
+        if (!bound) return false;
+    }
     dp_stage_timing_note(w->paths, "prefork_helper_hash_ms", stage_us);
     proof_phase_mark(w->phases, "prefork_inputs_and_build");
     return true;
