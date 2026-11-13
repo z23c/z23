@@ -242,6 +242,60 @@ static int x11_mode_tools(struct stl_x11_ctx *c, int list, int present)
     return x11_mode_tool(c, "native_ui_driver", list, present) ||
         x11_mode_tool(c, "native_ui_driver_readiness", list, present);
 }
+
+/* Count the four distinct compiler actions used by one qualification. */
+static int x11_probe_kind(const char *line)
+{
+    if (strstr(line, "-Wl,-l:libX11.so.6")) return 1;
+    if (strstr(line, "-c tools/native_ui_driver.c")) return 2;
+    if (strstr(line, "-c tests/fixtures/native_ui_driver_readiness.c")) return 3;
+    if (strstr(line, "/probe.c")) return 0;
+    return -1;
+}
+
+static int x11_probe_counts(const char *path, int covers)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    unsigned count[4] = {0};
+    char line[8192];
+    int bad = 0;
+    while (fgets(line, sizeof line, f)) {
+        int kind = x11_probe_kind(line);
+        if (kind < 0 || !strchr(line, '\n')) { bad = 1; break; }
+        count[kind]++;
+    }
+    if (ferror(f)) bad = 1;
+    if (fclose(f) != 0) bad = 1;
+    if (count[0] != 1 || count[1] != 1 ||
+        count[2] != (unsigned)covers || count[3] != (unsigned)covers)
+        bad = 1;
+    if (bad)
+        fprintf(stderr, "FAIL X11 compiler counts: baseline=%u link=%u driver=%u readiness=%u\n",
+                count[0], count[1], count[2], count[3]);
+    return bad;
+}
+
+static int x11_once_case(struct stl_x11_ctx *c, const char *fault,
+                         int expected, int covers)
+{
+    struct stl_x11_run run = { .mode = "--list-targets", .fault = fault };
+    if (csr_write(c->cclog, "") != 0 ||
+        x11_check(c, fault, expected, &run) != 0 ||
+        x11_probe_counts(c->cclog, covers) != 0)
+        return 1;
+    if (expected != 0)
+        return x11_fh(c->err, "FATAL - X11 runtime qualification failed");
+    return x11_mode_tools(c, 1, covers == 0);
+}
+
+static int x11_phase_once(struct stl_x11_ctx *c)
+{
+    return x11_once_case(c, "absent", 0, 1) ||
+        x11_once_case(c, "present", 0, 0) ||
+        x11_once_case(c, "generic-link", 2, 0);
+}
+
 static int x11_phase_modes(struct stl_x11_ctx *c)
 {
     char lb[256];
@@ -608,7 +662,9 @@ static int x11_phase_tail(struct stl_x11_ctx *c)
 
 static int x11_phases(struct stl_x11_ctx *c)
 {
-    int rc = x11_phase_modes(c);
+    int rc = x11_phase_once(c);
+    if (rc == 0)
+        rc = x11_phase_modes(c);
     if (rc == 0)
         rc = x11_phase_ci_a(c);
     if (rc == 0)

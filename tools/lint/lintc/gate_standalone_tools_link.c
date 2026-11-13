@@ -181,8 +181,16 @@ static const struct stl_winonly *stl_winonly_find(const char *name)
 
 enum { STL_BUILD = 0, STL_SKIP = 1, STL_FATAL = 2 };
 
+/* Both UI tools share one qualification during this partition. */
+static int stl_x11_partition_result(int *result)
+{
+    if (*result < 0)
+        *result = stl_x11_linkable();
+    return *result;
+}
+
 /* Host-specific exemption of one non-exempt tool: STL_BUILD to build it. */
-static int stl_host_route(const char *name, const struct stl_host *h)
+static int stl_host_route(const char *name, const struct stl_host *h, int *x11_result)
 {
     const char *why = h->darwin
         ? stl_pair_find(k_darwin, sizeof k_darwin / sizeof k_darwin[0], name) : NULL;
@@ -193,7 +201,7 @@ static int stl_host_route(const char *name, const struct stl_host *h)
     if (h->linux_os && (strcmp(name, "native_ui_driver") == 0 ||
                        strcmp(name, "native_ui_driver_readiness") == 0)) {
         /* Probe these X11 tools; inherited env cannot manufacture an exemption. */
-        int rc = stl_x11_linkable();
+        int rc = stl_x11_partition_result(x11_result);
         if (rc == 1) {
             fprintf(stderr, "[check_standalone_tools_link] no-x11-runtime-exempt %s: "
                     "SONAME absent; canonical strict object compiled\n", name);
@@ -229,6 +237,7 @@ static int stl_partition(struct stl_names *tools, const struct stl_names *fuzz,
 {
     qsort(tools->n, (size_t)tools->count, STL_NAME, stl_cmp);
     *nt = 0;
+    int x11_result = -1;
     for (int i = 0; i < tools->count; i++) {
         const char *name = tools->n[i];
         if (h->darwin && strncmp(name, "fuzz_", 5) == 0 && !stl_exempt(name, fuzz)) {
@@ -238,7 +247,7 @@ static int stl_partition(struct stl_names *tools, const struct stl_names *fuzz,
         }
         if (stl_exempt(name, fuzz))
             continue;
-        int r = stl_host_route(name, h);
+        int r = stl_host_route(name, h, &x11_result);
         if (r == STL_FATAL)
             return 2;
         if (r == STL_BUILD)
