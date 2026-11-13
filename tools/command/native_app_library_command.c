@@ -560,7 +560,8 @@ static bool al_share_result(struct library *w, struct app_confirm *notice,
     }
     const char *file = zcl_package_copy_str(&reply->data, "share_file");
     if (!file || strcmp(file, w->shared_path))
-        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true, "Share completed but its file location could not be verified.", w->shared_path);
+        al_share_notice_failure(w, reply, "SHARE_RESULT_MISMATCH",
+            "Share completed but its file location could not be verified.");
     else if (!app_confirm_show(notice, w->notice, w->prepare_context, why, cap))
         al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "Share file created; its location is in evidence.");
     else if (al_reveal_enabled(notice) && !(w->revealer ? w->revealer : al_reveal_native)(w->prepare_context, w->shared_path)) {

@@ -808,7 +808,7 @@ struct al_library_script {
     struct al_fx *change_fixture;
     unsigned change_at;
     unsigned preparations;
-    unsigned share_calls; bool share_cancel, fail_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
+    unsigned share_calls; bool share_cancel, fail_share_result, mismatch_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     bool cancel_preparation, stale_preparation;
     bool bad_preparation, fail_preparation, saw_share_review;
     unsigned share_choice, canceled_prepare_menu;
@@ -1192,6 +1192,15 @@ static void al_library_share(void *context, const struct app_selection *selectio
     if (s->share_cancel) { (void)json_push_kv_str(&reply->data, "status", "canceled"); return; }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0 || close(fd)) { s->valid = false; return; }
+    if (s->mismatch_share_result) {
+        /* The file exists at the requested path, but the result names another. */
+        char other[ZCL_PRESENT_COPY_TEXT_MAX + 8];
+        int n = snprintf(other, sizeof(other), "%s.mismatch", path);
+        s->valid = s->valid && n > 0 && (size_t)n < sizeof(other) &&
+            json_push_kv_str(&reply->data, "share_file", other);
+        reply->error.mutated = true;
+        return;
+    }
     s->valid = s->valid && json_push_kv_str(&reply->data, "share_file", path);
     reply->error.mutated = true;
 }
@@ -1396,6 +1405,19 @@ static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *repl
         ASSERT(output && !strcmp(output, s->shared));
         ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
         ASSERT(al_share_snapshot_stale(f, home));
+        PASS();
+    }
+    TEST("Share retains the file location when the result names another file") {
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .mismatch_share_result = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
+        ASSERT(reply->error.mutated && !strcmp(reply->error.code, "SHARE_RESULT_MISMATCH"));
+        ASSERT(s->valid && s->errors == 1 && s->share_calls == 1);
+        ASSERT(access(s->shared, F_OK) == 0);
+        ASSERT(!strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared));
+        const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
+        ASSERT(output && !strcmp(output, s->shared));
+        ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
         PASS();
     } _test_next:;
     return failures;
