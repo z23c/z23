@@ -15,6 +15,8 @@ typedef void (*app_library_preparer)(void *, const struct app_selection *,
     struct zcl_command_reply *);
 typedef void (*app_library_adopter)(const struct zcl_command_request *, struct zcl_command_reply *,
     app_confirm_presenter, void *);
+typedef void (*app_library_host)(void *context, const struct app_selection *selection, const char *exe,
+    app_confirm_presenter notice, struct zcl_command_reply *reply);
 #if defined(ZCL_TESTING)
 void zcl_test_app_library_create(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice,
@@ -50,6 +52,9 @@ void zcl_test_app_library_native_at(const struct app_launch_env *env, const char
 void zcl_test_app_library_reveal(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer, app_library_sharer sharer,
     app_confirm_presenter notice, app_library_revealer revealer);
+void zcl_test_app_library_host(const struct app_launch_env *env, struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context, app_library_preparer preparer,
+    app_library_sharer sharer, app_confirm_presenter notice, app_library_host host);
 void zcl_test_app_library_refresh(const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer,
     app_library_sharer sharer, app_confirm_presenter notice);

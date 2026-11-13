@@ -812,6 +812,7 @@ struct al_library_script {
     unsigned change_at;
     unsigned preparations;
     unsigned share_calls; bool share_cancel, fail_share_result, mismatch_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
+    bool fail_after_file; unsigned host_calls; bool cancel_host;
     bool cancel_preparation, stale_preparation;
     bool bad_preparation, fail_preparation, saw_share_review;
     unsigned share_choice, canceled_prepare_menu;
@@ -919,7 +920,8 @@ static void al_library_share_menu(struct al_library_script *s,
         event->action_index = 3;
     } else if (s->second_preparation == 2 && s->preparations >= 2) {
         ++s->canceled_prepare_menu; event->action_index = 3;
-    } else event->action_index = s->share_cancel && s->share_calls ? 3 : s->share_choice;
+    } else if (s->host_calls) event->action_index = 3; /* after one hosting attempt, leave the menu */
+    else event->action_index = s->share_cancel && s->share_calls ? 3 : s->share_choice;
 }
 static void al_library_error_card(struct al_library_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
@@ -1195,6 +1197,13 @@ static void al_library_share(void *context, const struct app_selection *selectio
     if (s->share_cancel) { (void)json_push_kv_str(&reply->data, "status", "canceled"); return; }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0 || close(fd)) { s->valid = false; return; }
+    if (s->fail_after_file) {
+        /* The real leaf shape: the file exists at the planned path, then the
+         * reply fails (SHARE_RESULT_MISMATCH), with no share_file key. */
+        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true,
+            "The local share was created but its result could not be verified.", path);
+        return;
+    }
     if (s->mismatch_share_result) {
         /* The file exists at the requested path, but the result names another. */
         char other[ZCL_PRESENT_COPY_TEXT_MAX + 8];
@@ -1212,6 +1221,17 @@ static bool al_fake_reveal(void *context, const char *path)
     struct al_library_script *s = context; ++s->reveal_calls;
     (void)snprintf(s->revealed, sizeof(s->revealed), "%s", path);
     return !s->reveal_fail;
+}
+/* Share-link host stand-in: completes, cancels, or fails the hosting reply. */
+static void al_library_host(void *context, const struct app_selection *selection, const char *exe,
+    app_confirm_presenter notice, struct zcl_command_reply *reply)
+{
+    struct al_library_script *s = context;
+    (void)notice; ++s->host_calls;
+    s->valid = s->valid && selection->revision > 0 && exe && exe[0] == '/';
+    if (s->cancel_host) { s->valid = s->valid && json_push_kv_str(&reply->data, "status", "canceled"); return; }
+    s->valid = s->valid && json_push_kv_str(&reply->data, "host_status", "stopped") &&
+        json_push_kv_bool(&reply->data, "was_available", true);
 }
 #if defined(__APPLE__) || defined(__linux__)
 static bool al_check_reveal_argv(void *context, const char *image, const char *const *argv)
@@ -1393,6 +1413,8 @@ static int al_share_success_test(struct al_fx *f, struct zcl_command_reply *repl
     } _test_next:;
     return failures;
 }
+static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s);
 static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s, const char *home)
 {
@@ -1416,6 +1438,27 @@ static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *repl
         zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
         ASSERT(reply->error.mutated && !strcmp(reply->error.code, "SHARE_RESULT_MISMATCH"));
         ASSERT(s->valid && s->errors == 1 && s->share_calls == 1);
+        ASSERT(access(s->shared, F_OK) == 0);
+        ASSERT(!strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared));
+        const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
+        ASSERT(output && !strcmp(output, s->shared));
+        ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
+        PASS();
+    } _test_next:;
+    failures += al_share_leaf_failure_test(f, reply, s);
+    return failures;
+}
+static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s)
+{
+    int failures = 0;
+    TEST("Share keeps the card location when the leaf fails after creating the file") {
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .fail_after_file = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
+        ASSERT(reply->status != ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(reply->error.mutated && !strcmp(reply->error.code, "SHARE_RESULT_MISMATCH"));
+        ASSERT(s->valid && s->errors == 1 && s->share_calls == 1 && s->notice_calls == 0);
         ASSERT(access(s->shared, F_OK) == 0);
         ASSERT(!strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared));
         const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
@@ -1458,6 +1501,34 @@ static int al_share_followups(struct al_fx *f, struct zcl_command_reply *reply,
     int failures = al_share_success_test(f, reply, s, before);
     if (!failures) failures += al_share_failure_test(f, reply, s, home);
     if (!failures) failures += al_share_refusal_test(f, reply, s, root, home, invalid, made);
+    return failures;
+}
+static int al_host_link_test(struct al_fx *f, struct zcl_command_reply *reply)
+{
+    int failures = 0;
+    TEST("A completed share-link ends the room with its receipt intact") {
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        struct al_library_script s = {.actions = {0, 2}, .count = 2, .valid = true, .share_choice = 1};
+        zcl_test_app_library_host(&f->env, reply, al_library_present, &s,
+            al_library_prepared_same, NULL, NULL, al_library_host);
+        ASSERT(s.valid && s.errors == 0 && s.host_calls == 1);
+        ASSERT(reply->status == ZCL_COMMAND_STATUS_PASSED && !reply->error.mutated);
+        ASSERT(!strcmp(json_get_str(json_get(&reply->data, "host_status")), "stopped"));
+        ASSERT(json_get_bool(json_get(&reply->data, "was_available")));
+        ASSERT(!json_get(&reply->data, "status"));
+        PASS();
+    }
+    TEST("A canceled share-link keeps the room open for more sharing") {
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        struct al_library_script s = {.actions = {0, 2, 3, 3}, .count = 4, .valid = true,
+            .share_choice = 1, .cancel_host = true};
+        zcl_test_app_library_host(&f->env, reply, al_library_present, &s,
+            al_library_prepared_same, NULL, NULL, al_library_host);
+        ASSERT(s.valid && s.errors == 0 && s.host_calls == 1);
+        ASSERT(reply->status == ZCL_COMMAND_STATUS_PASSED && !reply->error.mutated);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply->data, "status")), "canceled");
+        PASS();
+    } _test_next:;
     return failures;
 }
 
@@ -1549,6 +1620,7 @@ static int case_library_share(struct al_fx *f)
         PASS();
     } _test_next:;
     if (!failures) failures += al_share_followups(f, &reply, &s, &before, root, home, invalid, &made_invalid);
+    if (!failures) failures += al_host_link_test(f, &reply);
     if (!failures) failures += al_refresh_checks(f, &reply, home);
     if (s.shared[0]) (void)unlink(s.shared);
     if (occupied[0]) (void)unlink(occupied);
