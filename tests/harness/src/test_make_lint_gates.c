@@ -1922,13 +1922,36 @@ static int t_ci_install_jobserver(void)
     return bad;
 }
 
+/* Run the actual target recipe with private stubs; the production ratchet must
+ * run after its fixtures and a refusal must propagate through Make. */
+static int t_shell_host_assumptions_recipe(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p build/bin tools/scripts\n"
+        "printf '.PHONY: check-shell-host-assumptions\\ncheck-shell-host-assumptions:\\n' > Makefile\n"
+        "awk '/^check-shell-host-assumptions:/{f=1;next} f && /^\\t/{print;next} f{exit}' \"$1/Makefile\" >> Makefile\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$*\" >> calls\\n[ \"${FAIL_RATCHET:-0}\" = 0 ] || [ \"$#\" != 1 ]\\n' > build/bin/z23-lint\n"
+        "printf '#!/bin/sh\\nexit 0\\n' > build/bin/isolated-readiness-selftest; cp build/bin/isolated-readiness-selftest build/bin/service-args\n"
+        "cp build/bin/isolated-readiness-selftest tools/scripts/port_probe.sh; cp build/bin/isolated-readiness-selftest tools/scripts/commons_fix_admit.sh; cp build/bin/isolated-readiness-selftest tools/scripts/two_node_peer_tip_selftest.sh\n"
+        "chmod +x build/bin/* tools/scripts/*\n"
+        "make --no-print-directory BIN_DIR=build/bin check-shell-host-assumptions > pass.log 2>&1 || { cat pass.log; exit 1; }\n"
+        "printf 'check-shell-host-assumptions --selftest\\ncheck-shell-host-assumptions\\n' > expected; cmp expected calls\n"
+        "rm calls; if FAIL_RATCHET=1 make --no-print-directory BIN_DIR=build/bin check-shell-host-assumptions > fail.log 2>&1; then echo 'ratchet failure accepted' >&2; exit 1; fi\n"
+        "cmp expected calls\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "shell_host");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates_realroot(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 

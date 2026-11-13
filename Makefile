@@ -16290,6 +16290,7 @@ check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN) $(DEV_PACKAGE_VERIFY_BI
 	@$(BIN_DIR)/isolated-readiness-selftest
 	@$(BIN_DIR)/service-args --selftest
 	@bash tools/scripts/two_node_peer_tip_selftest.sh
+	@./build/bin/z23-lint check-shell-host-assumptions
 $(BIN_DIR)/service-args: tools/dev/service_args.c tools/dev/service_args_main.c \
 		tools/dev/service_args.h
 	@mkdir -p "$(dir $@)"
@@ -16299,7 +16300,6 @@ $(BIN_DIR)/service-args: tools/dev/service_args.c tools/dev/service_args_main.c 
 	    -Itools/dev \
 	    -o "$@.tmp" tools/dev/service_args.c tools/dev/service_args_main.c && \
 	    mv -f "$@.tmp" "$@"
-	@./build/bin/z23-lint check-shell-host-assumptions
 
 $(BIN_DIR)/isolated-readiness-selftest: \
 		tools/dev/isolated_readiness_selftest.c \
