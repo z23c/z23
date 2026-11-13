@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 #include "base/result.h"
+#include "jobs/node_pace.h"
 #include "services/node_db_catchup_service.h"
 #include "services/node_db_catchup_wallet_replay.h"
 #include "config/boot_wallet_cutover_replay.h"
@@ -5989,6 +5990,130 @@ static int ndc_check_utxo_reemit_restart(void)
 }
 
 
+struct ndc_pace_run {
+    struct node_db *db; const struct active_chain *chain; struct wallet *wallet; const char *dir; int result;
+};
+struct ndc_pace_fixture {
+    char dir[256], refdir[256];
+    struct node_db db, ref;
+    struct wallet *wallet, *ref_wallet;
+    bool opened;
+};
+static void *ndc_pace_walk(void *arg)
+{
+    struct ndc_pace_run *run = arg;
+    run->result = node_db_catchup_service_run(run->db, run->chain, run->wallet, run->dir);
+    return NULL;
+}
+static struct wallet *ndc_pace_wallet(void)
+{
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "pace wallet");
+    if (w) { wallet_init(w); w->keystore.keys[0].used = true; w->keystore.num_keys = 1; }
+    return w;
+}
+static bool ndc_pace_open(struct ndc_fix_ctx *fx, struct ndc_pace_fixture *p)
+{
+    char path[512], refpath[512];
+    test_make_tmpdir(p->dir, sizeof(p->dir), "node_db_catchup", "pace");
+    test_make_tmpdir(p->refdir, sizeof(p->refdir), "node_db_catchup", "pace_ref");
+    snprintf(path, sizeof(path), "%s/node.db", p->dir);
+    snprintf(refpath, sizeof(refpath), "%s/node.db", p->refdir);
+    p->wallet = ndc_pace_wallet(); p->ref_wallet = ndc_pace_wallet();
+    p->opened = p->wallet && p->ref_wallet && fx->built &&
+        node_db_open(&p->db, path) && node_db_open(&p->ref, refpath);
+    node_pace_set_datadir(NULL); node_db_catchup_lock_guard_test_reset();
+    return p->opened;
+}
+static int ndc_pace_entry(struct ndc_fix_ctx *fx, struct ndc_pace_fixture *p)
+{
+    int failures = 0;
+    node_pace_set(NODE_PACE_PAUSE);
+    int before = p->opened ? node_db_sync_get_tip_height(&p->db) : -1;
+    int paused = p->opened ? node_db_catchup_service_run(&p->db, &fx->ac, p->wallet, fx->dirF) : -1;
+    NDC_CHECK("paused entry leaves projection unchanged", p->opened && paused == 0 &&
+              node_db_sync_get_tip_height(&p->db) == before && !node_db_catchup_service_active());
+    return failures;
+}
+static int ndc_pace_midwalk(struct ndc_fix_ctx *fx, struct ndc_pace_fixture *p, int *prefix)
+{
+    int failures = 0;
+    node_pace_set(NODE_PACE_NORMAL);
+    node_db_catchup_lock_guard_test_set_batch_size(2);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(150);
+    struct ndc_pace_run run = {.db = &p->db, .chain = &fx->ac, .wallet = p->wallet, .dir = fx->dirF, .result = -1};
+    pthread_t thread; bool started = p->opened && pthread_create(&thread, NULL, ndc_pace_walk, &run) == 0;
+    for (int i = 0; started && i < 1000 && node_db_catchup_lock_guard_test_batch_commits() < 1; i++) platform_sleep_ms(2);
+    bool reached = node_db_catchup_lock_guard_test_batch_commits() >= 1;
+    node_pace_set(NODE_PACE_PAUSE);
+    if (started) pthread_join(thread, NULL);
+    *prefix = p->opened ? node_db_sync_get_tip_height(&p->db) : -1;
+    NDC_CHECK("mid-pass pause commits only walked prefix", started && reached && run.result > 0 &&
+              run.result < NDC_FIX_N && *prefix == run.result &&
+              !node_db_catchup_service_active() && node_db_catchup_lock_guard_test_abort_streak() == 0);
+    return failures;
+}
+static int ndc_pace_resume(struct ndc_fix_ctx *fx, struct ndc_pace_fixture *p, int prefix)
+{
+    int failures = 0;
+    node_pace_set(NODE_PACE_NORMAL); node_db_catchup_lock_guard_test_set_height_delay_ms(0);
+    int resumed = p->opened ? node_db_catchup_service_run(&p->db, &fx->ac, p->wallet, fx->dirF) : -1;
+    int reference = p->opened ? node_db_catchup_service_run(&p->ref, &fx->ac, p->ref_wallet, fx->dirF) : -1;
+    uint8_t a[32], b[32];
+    bool receipts = p->opened && db_view_integrity_get(&p->db, NDC_FIX_N, a) &&
+        db_view_integrity_get(&p->ref, NDC_FIX_N, b);
+    NDC_CHECK("resume matches uninterrupted projection and receipt", p->opened &&
+              resumed == NDC_FIX_N - prefix && reference == NDC_FIX_N &&
+              ndc_restart_projection_equal(p->db.db, p->ref.db) && receipts && !memcmp(a, b, 32));
+    return failures;
+}
+static void ndc_pace_close(struct ndc_pace_fixture *p)
+{
+    node_db_catchup_lock_guard_test_reset(); node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
+    if (p->db.open) node_db_close(&p->db);
+    if (p->ref.open) node_db_close(&p->ref);
+    if (p->wallet) { wallet_free(p->wallet); free(p->wallet); }
+    if (p->ref_wallet) { wallet_free(p->ref_wallet); free(p->ref_wallet); }
+    test_cleanup_tmpdir(p->dir); test_cleanup_tmpdir(p->refdir);
+}
+static int ndc_check_pace_pause(struct ndc_fix_ctx *fx)
+{
+    int failures = 0, prefix = -1; struct ndc_pace_fixture p = {0};
+    (void)ndc_pace_open(fx, &p);
+    failures += ndc_pace_entry(fx, &p);
+    failures += ndc_pace_midwalk(fx, &p, &prefix);
+    failures += ndc_pace_resume(fx, &p, prefix);
+    ndc_pace_close(&p); return failures;
+}
+static void ndc_pace_set_missing(struct ndc_fix_ctx *fx, uint32_t *statuses, bool restore)
+{
+    for (int i = 1; i <= NDC_FIX_N; i++) {
+        if (restore) fx->slots[i].nStatus = statuses[i];
+        else { statuses[i] = fx->slots[i].nStatus; fx->slots[i].nStatus &= ~BLOCK_HAVE_DATA; }
+    }
+}
+static int ndc_check_pace_sparse(struct ndc_fix_ctx *fx)
+{
+    int failures = 0; char dir[256], path[512];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "pace_sparse");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0}; bool opened = fx->built && node_db_open(&db, path);
+    int before = opened ? node_db_sync_get_tip_height(&db) : -1;
+    uint32_t statuses[NDC_FIX_N + 1]; ndc_pace_set_missing(fx, statuses, false);
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_NORMAL);
+    node_db_catchup_lock_guard_test_reset(); node_db_catchup_lock_guard_test_set_height_delay_ms(200);
+    struct ndc_pace_run run = {.db = &db, .chain = &fx->ac, .dir = fx->dirF, .result = -1};
+    pthread_t thread; bool started = opened && pthread_create(&thread, NULL, ndc_pace_walk, &run) == 0;
+    for (int i = 0; started && i < 1000 && !node_db_catchup_service_active(); i++) platform_sleep_ms(2);
+    bool active = node_db_catchup_service_active(); node_pace_set(NODE_PACE_PAUSE);
+    if (started) pthread_join(thread, NULL);
+    NDC_CHECK("paused sparse walk leaves cursor and outcome unchanged", started && active && run.result == 0 &&
+              node_db_sync_get_tip_height(&db) == before && !node_db_catchup_service_active() &&
+              node_db_catchup_lock_guard_test_abort_streak() == 0);
+    ndc_pace_set_missing(fx, statuses, true); node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
+    node_db_catchup_lock_guard_test_reset(); if (db.open) node_db_close(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
@@ -6025,6 +6150,8 @@ int test_node_db_catchup_service(void)
     struct ndc_fix_ctx fx = {0};
     failures += ndc_prepare_five_block_fixture(&fx);
     failures += ndc_check_service_conflict_rollback(&fx);
+    failures += ndc_check_pace_pause(&fx);
+    failures += ndc_check_pace_sparse(&fx);
     failures += ndc_check_batch_cap_two(&fx);
     failures += ndc_check_default_cap_one_commit(&fx);
     failures += ndc_check_busy_snapshot_restart(&fx);

@@ -10,7 +10,7 @@ On 2026-11-13, the Android ARM64 target built successfully with NDK r30 and
 API 35 through the normal development build admission. The output was an
 AArch64 Android PIE with SHA-256
 `9053d9dbf54d367ba68f9ed91eb693fefe3fdd641501a4c1dd189e5689d1ba47`.
-This records build evidence only; a peer exchange was not tested.
+This build result alone does not establish a peer exchange.
 
 The original Android target link failed because `-lpthread` was unavailable;
 an earlier attempt entered unrelated vendor setup. The successful command was:

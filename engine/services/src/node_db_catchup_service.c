@@ -12,6 +12,7 @@
 #include "platform/time_compat.h"
 #include "controllers/sync_controller.h"
 #include "services/node_db_catchup_service.h"
+#include "jobs/node_pace.h"
 #include "services/node_db_catchup_lock_guard.h"
 #include "config/db_service.h"
 #include "services/db_maintenance.h"
@@ -994,7 +995,8 @@ enum catchup_step {
 static enum catchup_step catchup_walk_locate(struct catchup_pass *ps, int h,
                                              const struct block_index **out)
 {
-    if (g_shutdown_requested)
+    node_pace_poll();
+    if (g_shutdown_requested || node_pace_get() == NODE_PACE_PAUSE)
         return CATCHUP_STEP_STOP;
 #ifdef ZCL_TESTING
     node_db_catchup_lock_guard_test_height_delay();
@@ -1205,7 +1207,8 @@ static void catchup_close_abort(struct catchup_pass *ps)
 static void catchup_final_tip(struct catchup_pass *ps)
 {
     /* Final commit */
-    if (!ps->cb.tx_open || ps->failed)
+    if (!ps->cb.tx_open || ps->failed ||
+        (ps->interrupted && ps->indexed == 0))
         return;
     if (catchup_tip_hashed(ps->last_indexed_tip)) {
         if (!node_db_sync_set_tip(ps->ndb,
@@ -1394,6 +1397,9 @@ int node_db_catchup_service_run(struct node_db *ndb,
     if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
     (void)node_db_catchup_service_restore_owed(ndb);
+    node_pace_poll();
+    if (node_pace_get() == NODE_PACE_PAUSE)
+        return 0;
 
     int db_tip = 0;
     int chain_tip = 0;
