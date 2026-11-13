@@ -2663,7 +2663,6 @@ static bool al_keep_checkout(struct al_keep_world *w)
     return ok;
 }
 
-struct al_keep_xdg { char *config, *state, *home; bool entered; };
 
 static bool al_keep_xdg_enter(struct al_keep_xdg *x, const char *home)
 {
@@ -3053,7 +3052,7 @@ static int case_library_keep_receipt(void)
     } _test_next:;
     zcl_command_reply_free(&reply);
     al_keep_xdg_leave(&w.xdg);
-    /* DEBUG: if (w.root[0] && test_rm_rf_recursive(w.root) != 0) ++failures; */
+    if (w.root[0] && test_rm_rf_recursive(w.root) != 0) ++failures;
     return failures;
 }
 
