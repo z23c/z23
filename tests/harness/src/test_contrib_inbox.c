@@ -217,23 +217,25 @@ struct ci_run_opts {
     const char *responder; /* overrides the scenario's responder path */
     const char *telegram_group; /* opt-in group consumer over isolated fixtures */
     long fsize;            /* RLIMIT_FSIZE for the tool, or -1 for none */
+    int timeout_ms;        /* zero preserves the standard fixture deadline */
 };
 
 /* Spawn with the tool's file size limit lowered, so an append past it fails
  * with EFBIG the way a full disk would. SIGXFSZ is ignored across the spawn. */
 static int ci_spawn_limited(const char *const argv[], char *out, size_t cap,
-                            long fsize, bool *timed_out)
+                            long fsize, int timeout_ms, bool *timed_out)
 {
     struct rlimit old, lim;
+    const int deadline = timeout_ms > 0 ? timeout_ms : 120000;
     if (fsize < 0)
-        return zcl_spawn_capture_merged_observed(argv, out, cap, 120000, timed_out);
+        return zcl_spawn_capture_merged_observed(argv, out, cap, deadline, timed_out);
     (void)getrlimit(RLIMIT_FSIZE, &old);
     lim = old;
     lim.rlim_cur = (rlim_t)fsize;
     void (*const old_sig)(int) = signal(SIGXFSZ, SIG_IGN);
     (void)setrlimit(RLIMIT_FSIZE, &lim);
     const int rc =
-        zcl_spawn_capture_merged_observed(argv, out, cap, 120000, timed_out);
+        zcl_spawn_capture_merged_observed(argv, out, cap, deadline, timed_out);
     (void)setrlimit(RLIMIT_FSIZE, &old);
     (void)signal(SIGXFSZ, old_sig);
     return rc;
@@ -273,7 +275,7 @@ static int ci_pass_with(const struct ci_env *e, const struct ci_run_opts *o)
     }
     argv[n] = NULL;
     bool timed_out = false;
-    const int rc = ci_spawn_limited(argv, out, sizeof(out), o->fsize, &timed_out);
+    const int rc = ci_spawn_limited(argv, out, sizeof(out), o->fsize, o->timeout_ms, &timed_out);
     (void)snprintf(logp, sizeof(logp), "%s/run.log", e->d);
     FILE *f = fopen(logp, "w");
     if (f) {
@@ -1381,6 +1383,59 @@ static bool ci_tg_fake(const char *bin, bool fail_send)
     return n > 0 && (size_t)n < sizeof script && ci_wf(bin, script) && chmod(bin, 0700) == 0;
 }
 
+static int ci_tg_busy_checks(const struct ci_env *e, const char *sent,
+                             const char *calls, const char *unit, int busy_rc)
+{
+    int failures = 0;
+    CI_CHECK("busy model pass exits normally", busy_rc == 0);
+    CI_CHECK("busy model leaves batch pending", !ci_state_has(e, "seen.txt", "tg:7777777777:-100123:20:7") &&
+             ci_count(sent, "send") == 0 && ci_count(sent, "inbox") == 0);
+    CI_CHECK("busy model does not bill or dispatch", ci_file_has(calls, "0\n") && !ci_exists(unit));
+    CI_CHECK("busy model does not prepare responder", !ci_exists(e->resp));
+    return failures;
+}
+
+static int ci_tg_released_checks(const struct ci_env *e, struct ci_run_opts *opts,
+                                 const char *sent, const char *calls)
+{
+    int failures = 0;
+    opts->timeout_ms = 0;
+    CI_CHECK("released model handles and acknowledges once", ci_pass_with(e, opts) == 0 &&
+             ci_state_has(e, "seen.txt", "tg:7777777777:-100123:20:7") &&
+             ci_count(sent, "send") == 1 && ci_count(sent, "inbox") == 1 && ci_file_has(calls, "1\n"));
+    CI_CHECK("replay does not send again", ci_pass_with(e, opts) == 0 && ci_count(sent, "send") == 1);
+    int fd = open(e->lock, O_RDWR | O_CLOEXEC);
+    CI_CHECK("model lock released after answer", fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+    if (fd >= 0) (void)close(fd);
+    return failures;
+}
+
+static int case_telegram_busy_model(void)
+{
+    struct ci_env e;
+    char bin[700], sent[740], calls[700], day[16], unit[900];
+    int failures = 0;
+    if (!ci_setup(&e, "telegram-model-busy")) return 1;
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    (void)snprintf(unit, sizeof unit, "%s/units/tg:7777777777:-100123:20:7", e.state);
+    time_t now = time(NULL); struct tm tm;
+    if (!gmtime_r(&now, &tm) || !strftime(day, sizeof day, "%Y%m%d", &tm)) return 1;
+    (void)snprintf(calls, sizeof calls, "%s/calls-%s", e.state, day);
+    CI_CHECK("busy model fixture", ci_tg_fake(bin, false) &&
+             ci_tg_single_row(&e, "7777777777", "-100123") &&
+             ci_model_reply(&e, "ANSWER: run make z23 as the build target"));
+    CI_CHECK("seed unchanged budget", mkdir(e.state, 0700) == 0 && ci_wf(calls, "0\n"));
+    int fd = open(e.lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) { if (fd >= 0) close(fd); return failures + 1; }
+    struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1, .timeout_ms = 2000};
+    int busy_rc = ci_pass_with(&e, &opts);
+    failures += ci_tg_busy_checks(&e, sent, calls, unit, busy_rc);
+    CI_CHECK("release model lock", close(fd) == 0);
+    failures += ci_tg_released_checks(&e, &opts, sent, calls);
+    return failures;
+}
+
 static int ci_tg_disposition_case(const char *tag, const char *reply, bool fail_send)
 {
     struct ci_env e;
@@ -1543,6 +1598,7 @@ int test_contrib_inbox(void)
     failures += case_post_failure();
     failures += case_malformed_fixture();
     failures += case_telegram_replay();
+    failures += case_telegram_busy_model();
     failures += case_telegram_batch_bound();
     failures += case_telegram_ack_failure();
     failures += ci_tg_disposition_case("tg-ignore", "IGNORE: resolved", false);

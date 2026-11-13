@@ -343,14 +343,15 @@ static bool ci_init(struct ci *t, int argc, char **argv)
 }
 
 /* 0 on success, -1 on error, -2 when another pass holds the lock. */
-static int ci_lock_pass(const struct ci *t)
+static int ci_lock_file(const char *path)
 {
-    const int fd = open(t->run_lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    const int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (fd < 0)
         return -1;
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        const int rc = errno == EWOULDBLOCK || errno == EAGAIN ? -2 : -1;
         (void)close(fd);
-        return -2;
+        return rc;
     }
     return fd;
 }
@@ -943,13 +944,6 @@ static int ci_dispatch(struct ci *t, const char *unit, const char *eu,
     const long secs = strtol(O(t, CI_O_ENGINE_TIMEOUT_S), NULL, 10);
     if (secs <= 0 || secs > 86400)
         return -1;
-    const int lock = open(O(t, CI_O_HAIKU_LOCK), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (lock < 0)
-        return -1;
-    if (flock(lock, LOCK_EX) != 0) {
-        (void)close(lock);
-        return -1;
-    }
     char log[CI_PATH];
     const char *argv[32];
     size_t n = 0;
@@ -984,7 +978,6 @@ static int ci_dispatch(struct ci *t, const char *unit, const char *eu,
     const int rc = ci_run(argv, NULL, timeout_ms, true, t->buf, CI_BUF);
     if (ci_fmt(log, sizeof(log), "%s/engine.log", unit))
         (void)ci_write(log, t->buf, strlen(t->buf), "wb");
-    (void)close(lock);
     ci_say(t, "engine rc=%d", rc);
     return rc;
 }
@@ -1029,20 +1022,10 @@ static void ci_answer(struct ci *t, const struct json_value *post, size_t ctx_le
     free(reply);
 }
 
-/* One post: true when it used one of the pass's four slots. */
-static bool ci_handle(struct ci *t, const struct json_value *post, size_t ctx_len)
+/* Shared model lock is held through admission, dispatch and publication. */
+static bool ci_handle_admitted(struct ci *t, const struct json_value *post, size_t ctx_len)
 {
     const char *id = ci_str(post, "id");
-    if ((!t->telegram_group && !ci_hex_id(id)) || ci_seen(t, id))
-        return false;
-    const char *host = ci_str(post, "host");
-    const char *kind = ci_str(post, "kind");
-    const char *agent = ci_str(post, "agent");
-    if (ci_ours(host, agent)) {
-        (void)ci_mark_seen(t, id);
-        return false;
-    }
-    ci_say(t, "NEW %s kind=%s agent=%s host=%.12s", id, kind, agent, host);
     if (!ci_responder_ready(t)) {
         ci_ack(t, id, "responder checkout failed, dirty or not a linked worktree");
         return true;
@@ -1057,6 +1040,24 @@ static bool ci_handle(struct ci *t, const struct json_value *post, size_t ctx_le
         return false;
     ci_answer(t, post, ctx_len);
     return true;
+}
+
+/* Busy requests use a pass slot but remain pending, unbilled and unseen. */
+static bool ci_handle(struct ci *t, const struct json_value *post, size_t ctx_len)
+{
+    const char *id = ci_str(post, "id"), *host = ci_str(post, "host");
+    const char *kind = ci_str(post, "kind"), *agent = ci_str(post, "agent");
+    if ((!t->telegram_group && !ci_hex_id(id)) || ci_seen(t, id)) return false;
+    if (ci_ours(host, agent)) { (void)ci_mark_seen(t, id); return false; }
+    ci_say(t, "NEW %s kind=%s agent=%s host=%.12s", id, kind, agent, host);
+    const int lock = ci_lock_file(O(t, CI_O_HAIKU_LOCK));
+    if (lock < 0) {
+        ci_ack(t, id, lock == -2 ? "shared model is busy; retry next pass" : "shared model lock unavailable");
+        return true;
+    }
+    bool handled = ci_handle_admitted(t, post, ctx_len);
+    (void)close(lock);
+    return handled;
 }
 
 /* ── one pass ────────────────────────────────────────────────────────── */
@@ -1477,7 +1478,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "contrib-inbox: cannot start; check the options and state dir\n");
         return 1;
     }
-    const int lock = ci_lock_pass(&t);
+    const int lock = ci_lock_file(t.run_lock);
     if (lock == -2)
         return 0;
     if (lock < 0) {
