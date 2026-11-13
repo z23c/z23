@@ -2608,6 +2608,25 @@ static int t_test_debug_profile(void)
     return bad;
 }
 
+static int t_hotswap_ledger_dependencies(void)
+{
+    static const char script[] =
+        "set -eu; root=$1; work=$2; cd \"$work\"\n"
+        "mkdir -p build/bin\n"
+        "printf '%s\\n' 'LINTC_TOOL=build/bin/z23-lint' 'Z23_DEV_BIN=build/bin/z23-dev' 'JSONQ_BIN=build/bin/jsonq' > Fixture.mk\n"
+        "awk '/^check-hotswap-candidates-ledger:/{on=1; found=1} on && /^$/{exit} on{print} END{if(!found) exit 1}' \"$root/Makefile\" >> Fixture.mk\n"
+        "printf 'build/bin/z23-dev build/bin/jsonq:\\n\\t@mkdir -p build/bin; touch $@; chmod +x $@\\n' >> Fixture.mk\n"
+        "printf 'build/bin/z23-lint:\\n\\t@mkdir -p build/bin; printf \"#!/bin/sh\\\\n[ -x build/bin/z23-dev ] && [ -x build/bin/jsonq ] || exit 9\\\\necho called >> calls\\\\n\" > $@; chmod +x $@\\n' >> Fixture.mk\n"
+        "make -s -f Fixture.mk check-hotswap-candidates-ledger || exit 1\n"
+        "test \"$(wc -l < calls)\" -eq 2\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "hotswap_ledger", "needs");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "hotswap ledger needs fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates(void)
 {
     char real_root[PATH_MAX];
@@ -2621,6 +2640,7 @@ int test_make_lint_gates(void)
     if (t_registry_query_scope() != 0) return 1;
     if (t_proof_plan_metadata() != 0) return 1;
     if (t_test_debug_profile() != 0) return 1;
+    if (t_hotswap_ledger_dependencies() != 0) return 1;
     if (t_lint_command_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;

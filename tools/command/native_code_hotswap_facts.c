@@ -154,6 +154,25 @@ static bool hf_path_valid(const char *path)
     }
 }
 
+static bool hf_input_array(const struct json_value *input, const char *key,
+                           size_t cap, bool (*valid)(const char *))
+{
+    const struct json_value *array = json_get(input, key);
+    if (!array || array->type != JSON_ARR || json_size(array) > cap) return false;
+    for (size_t i = 0; i < json_size(array); i++) {
+        const struct json_value *v = json_at(array, i);
+        if (!v || v->type != JSON_STR || !valid(json_get_str(v))) return false;
+    }
+    return true;
+}
+
+static bool hf_input_valid(const struct json_value *input)
+{
+    return input && input->type == JSON_OBJ &&
+        hf_input_array(input, "symbols", HF_SYMBOLS, hf_ident) &&
+        hf_input_array(input, "paths", HF_PATHS, hf_path_valid);
+}
+
 static bool hf_path(struct hf_state *s, const char *path)
 {
     if (!hf_path_valid(path)) return false;
@@ -265,6 +284,12 @@ static bool hf_observe(struct hf_state *s, const struct json_value *input,
 void zcl_native_handle_code_hotswap_facts(const struct zcl_command_request *request,
                                            struct zcl_command_reply *reply)
 {
+    if (!request || !hf_input_valid(request->input)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INVALID, "HOTSWAP_FACTS_INVALID_INPUT", "validate", false, false,
+            "symbols and paths must be bounded arrays of valid identifiers and paths", "");
+        return;
+    }
     struct hf_state *s = zcl_calloc(1, sizeof(*s), "hotswap facts state");
     struct json_value result = {0};
     if (!s) {

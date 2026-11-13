@@ -3406,7 +3406,7 @@ AGENT_IMPACT_RULE("cognition/modules/science/src/*.c|cognition/modules/science/i
  * read-latency contract, so a slow walk here shows up there. */
 AGENT_IMPACT_RULE("tools/command/native_code_corpus_command.c", "science command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_code_count_command.c|tests/harness/src/test_code_count.c", "code_count command_registry_catalog native_api_contract command_registry_latency")
-AGENT_IMPACT_RULE("tools/command/native_code_hotswap_facts.c|tools/dev/hotswap_shape_policy.h|tools/dev/hotswap-candidates.sh|tests/harness/src/test_code_hotswap_facts.c", "code_hotswap_facts codeindex_pages_bounds codeindex_static_callers command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_code_hotswap_facts.c|tools/dev/hotswap_shape_policy.h|tools/dev/hotswap-candidates.sh|tests/harness/src/test_code_hotswap_facts.c", "code_hotswap_facts codeindex_pages_bounds codeindex_static_callers command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/chainlog/src/*.c|engine/modules/chainlog/include/chainlog/*.h|tests/harness/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along

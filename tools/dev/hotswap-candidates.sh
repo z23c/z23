@@ -320,8 +320,8 @@ facts_batch() {
     local identity="" census=""
     quoted="$(printf '%s' "$path" | sed 's/\\/\\\\/g; s/"/\\"/g')" || die "cannot encode path"
     input="{\"symbols\":[${names%,}],\"paths\":[$([ -z "$path" ] || printf '"%s"' "$quoted")]}"
-    result="$("$ROOT/build/bin/z23" code hotswap-facts --input="$input")" || \
-        die "native indexed facts unavailable; build the current z23 binary and retry"
+    result="$("$ROOT/build/bin/z23-dev" code hotswap-facts --input="$input")" || \
+        die "native indexed facts unavailable; build the current z23-dev binary and retry"
     printf '%s' "$result" | "$ROOT/build/bin/jsonq" eq ok true || die "native facts refused the query"
     printf '%s' "$result" | "$ROOT/build/bin/jsonq" eq data.schema zcl.code_hotswap_facts.v1 || die "unknown native facts schema"
     records="$(printf '%s' "$result" | "$ROOT/build/bin/jsonq" get data.text)" || \

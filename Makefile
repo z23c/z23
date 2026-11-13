@@ -14432,7 +14432,7 @@ check-hotswap-swappable-shape: $(LINTC_TOOL)
 # runtime-publication form must stay unreachable now that the bare goal prints
 # a ledger. --selftest runs first and proves the gate fires on seeded
 # violations of both classes.
-check-hotswap-candidates-ledger: $(LINTC_TOOL)
+check-hotswap-candidates-ledger: $(LINTC_TOOL) $(Z23_DEV_BIN) $(JSONQ_BIN)
 	@echo "══ LINT: hot-swap candidate ledger agrees with the gates; make hotswap still refuses ══"
 	@./build/bin/z23-lint check-hotswap-candidates-ledger --selftest
 	@./build/bin/z23-lint check-hotswap-candidates-ledger

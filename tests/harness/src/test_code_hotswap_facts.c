@@ -7,6 +7,8 @@
 #include "codeindex/codeindex.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include <errno.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,6 +151,34 @@ static bool hft_refreshed(const struct json_value *wire)
         hft_row(symbols, "name", "hft_replacement", "path", "engine/controllers/src/advice.c");
 }
 
+static bool hft_path_absent(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) != 0 && errno == ENOENT;
+}
+
+static bool hft_invalid_fresh(void)
+{
+    char root[PATH_MAX] = {0}, index[PATH_MAX];
+    test_make_tmpdir(root, sizeof root, "code_hotswap_facts", "invalid_fresh");
+    int n = snprintf(index, sizeof index, "%s/.codeindex", root);
+    if (!root[0] || n <= 0 || (size_t)n >= sizeof index) return false;
+    bool absent = hft_path_absent(index);
+    struct json_value input = {0}, wire = {0};
+    json_set_object(&input);
+    bool called = hft_call(root, &input, &wire, 0);
+    bool refused = called && !json_get_bool(json_get(&wire, "ok"));
+    const char *code = json_get_str(json_get(json_get(&wire, "error"), "code"));
+    bool code_ok = strcmp(code, "HOTSWAP_FACTS_INVALID_INPUT") == 0;
+    bool still_absent = hft_path_absent(index);
+    if (!absent || !called || !refused || !code_ok || !still_absent)
+        fprintf(stderr, "hotswap invalid fresh: absent=%d called=%d refused=%d code=%s code_ok=%d still_absent=%d\n",
+                absent, called, refused, code, code_ok, still_absent);
+    json_free(&wire); json_free(&input);
+    bool removed = test_rm_rf_recursive(root) == 0;
+    return absent && refused && code_ok && still_absent && removed;
+}
+
 static bool hft_run(const char *root, unsigned mode, bool success)
 {
     struct json_value input, wire; json_init(&input); json_init(&wire);
@@ -175,6 +205,7 @@ int test_code_hotswap_facts(void)
     struct codeindex *index = ready ? codeindex_open(root) : NULL;
     ready = ready && index != NULL; codeindex_close(index);
     TEST("code.hotswap-facts: native bounded advisory from isolated index") {
+        ASSERT(hft_invalid_fresh());
         ASSERT(ready);
         ASSERT(hft_run(root, 0, true));
         ASSERT(hft_run(root, 1, false));
