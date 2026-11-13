@@ -874,6 +874,49 @@ static int test_native_bridge_resident_binding(void)
     return failures;
 }
 
+static char *status_full_height_mock_rpc(const char *method, const char *params_json)
+{
+    (void)params_json;
+    if (strcmp(method, "getblockcount") == 0) return strdup("100");
+    if (strcmp(method, "getpeerinfo") == 0)
+        return strdup("[{\"startingheight\":105,\"best_height\":1000000}]");
+    if (strcmp(method, "getblockchaininfo") == 0)
+        return strdup("{\"best_header_height\":110}");
+    if (strcmp(method, "healthcheck") == 0) return strdup("{}");
+    return strdup("null");
+}
+
+static int test_status_full_advertised_height(void)
+{
+    int failures = 0;
+    struct json_value args = {0}, data = {0};
+    char *body = NULL;
+    TEST("full status: peer height cannot raise validated sync target") {
+        json_set_object(&args);
+        ASSERT(json_push_kv_bool(&args, "full", true));
+        node_rpc_client_set_test_hook(status_full_height_mock_rpc);
+        struct zcl_native_body_err err = {0};
+        body = zcl_native_status_body(&args, &err);
+        ASSERT(body != NULL);
+        ASSERT(json_read(&data, body, strlen(body)) && data.type == JSON_OBJ);
+        ASSERT_EQ(json_get_int(json_get(&data, "max_peer_height")), 1000000);
+        ASSERT_STR_EQ(json_get_str(json_get(&data, "max_peer_height_trust")),
+                      "untrusted_peer_advertisement");
+        ASSERT_EQ(json_get_int(json_get(&data, "height")), 100);
+        ASSERT_EQ(json_get_int(json_get(&data, "header_height")), 110);
+        ASSERT_EQ(json_get_int(json_get(&data, "target_height")), 110);
+        ASSERT_STR_EQ(json_get_str(json_get(&data, "target_height_source")),
+                      "target_node.validated_header_tip");
+        ASSERT_EQ(json_get_int(json_get(&data, "sync_gap")), 10);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    free(body);
+    json_free(&data);
+    json_free(&args);
+    return failures;
+}
+
 static int test_status_frontdoor_preserves_rpc_error(void)
 {
     int failures = 0;
@@ -4915,6 +4958,7 @@ int test_native_api_contract(void)
     failures += test_zslp_plan_requires_named_inputs();
     failures += test_native_bridge_resident_binding();
     failures += test_status_frontdoor_preserves_rpc_error();
+    failures += test_status_full_advertised_height();
     failures += test_status_brief_body_schema_skew_tolerance();
     failures += test_status_brief_body_front_door_deadline();
     failures += test_vault_proof_commit_uses_long_rpc_deadline();

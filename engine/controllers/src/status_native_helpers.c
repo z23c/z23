@@ -350,11 +350,14 @@ static void status_peer_survey_add(struct peer_survey *s,
     } else {
         s->ready_known = false;
     }
-    int64_t h = 0;
-    if (status_read_height(peer, "startingheight", &h)) {
-        if (!s->max_height_known || h > s->max_height)
-            s->max_height = (int)h;
-        s->max_height_known = true;
+    static const char *const height_keys[] = {"startingheight", "best_height"};
+    for (size_t i = 0; i < sizeof(height_keys) / sizeof(height_keys[0]); i++) {
+        int64_t h = 0;
+        if (status_read_height(peer, height_keys[i], &h)) {
+            if (!s->max_height_known || h > s->max_height)
+                s->max_height = (int)h;
+            s->max_height_known = true;
+        }
     }
 }
 

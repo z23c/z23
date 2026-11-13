@@ -234,6 +234,37 @@ static int test_peer_survey_counts_sync_states_as_ready(void)
     return 0;
 }
 
+static int test_peer_survey_heights(void)
+{
+    static const struct {
+        const char *json;
+        bool known;
+        int height;
+    } cases[] = {
+        {"[{\"startingheight\":3318238,\"best_height\":3318273}]", true, 3318273},
+        {"[{\"startingheight\":100,\"best_height\":90},{\"best_height\":110}]", true, 110},
+        {"[{\"startingheight\":100},{\"best_height\":-1}]", true, 100},
+        {"[{\"startingheight\":\"999\",\"best_height\":2147483648}]", false, 0},
+        {"[{\"startingheight\":-1,\"best_height\":null}]", false, 0},
+        {"[{\"startingheight\":1,\"best_height\":2147483647}]", true, 2147483647},
+    };
+    printf("status_frontdoor: peer survey reports valid highest height... ");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct json_value peers = {0};
+        struct peer_survey survey;
+        if (!status_parse_json(&peers, cases[i].json)) return 1;
+        status_peer_survey(&peers, &survey);
+        json_free(&peers);
+        if (survey.max_height_known != cases[i].known ||
+            (cases[i].known && survey.max_height != cases[i].height)) {
+            printf("FAIL (case %zu)\n", i);
+            return 1;
+        }
+    }
+    printf("OK\n");
+    return 0;
+}
+
 static bool frontdoor_push_blocker(struct json_value *arr, const char *id,
                                    const char *cls, bool capability_only,
                                    int64_t age_us)
@@ -287,6 +318,7 @@ int test_status_frontdoor(void)
     failures += test_basic_shape();
     failures += test_completes_under_held_lock();
     failures += test_peer_survey_counts_sync_states_as_ready();
+    failures += test_peer_survey_heights();
     failures += test_dominant_blocker_skips_capability_only();
     return failures;
 }
