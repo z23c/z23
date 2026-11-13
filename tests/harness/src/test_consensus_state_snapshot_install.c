@@ -6889,6 +6889,7 @@ static int csi_old_retry_crash_case(void)
 }
 
 #include "consensus_state_real_postcommit_test.h"
+#include "consensus_state_checkpoint_real_test.h"
 #include "consensus_state_bundle_v2_validation_test.h"
 #include "consensus_state_pool_fixture.h"
 #endif
@@ -7093,6 +7094,16 @@ static int csi_stage_swap_case(void)
 int test_snapshot_install_recovery(void)
 {
 #if !defined(_WIN32)
+    const char *checkpoint_mode = getenv("ZCL_TEST_CHECKPOINT_REAL");
+    if (checkpoint_mode && !strcmp(checkpoint_mode, "1")) {
+        fputs("snapshot install ordinary suite: NOTRUN (real fixture selected)\n", stderr);
+        return csi_checkpoint_real();
+    }
+    if (checkpoint_mode && strcmp(checkpoint_mode, "0")) {
+        fputs("checkpoint real fixture: invalid selector; expected 0 or 1\n", stderr);
+        return 1;
+    }
+    fputs("checkpoint real fixture: NOTRUN (opt-in required)\n", stderr);
     int failures = 0;
     failures += csi_projection_populated_stop_case(false);
     failures += csi_projection_populated_stop_case(true);

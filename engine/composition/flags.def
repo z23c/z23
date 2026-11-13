@@ -2505,6 +2505,18 @@ Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_runtime", "-", "-",
           "the operator's real default datadir, exported by the test runners before they swap HOME; the request writers in storage/boot_auto_reindex.c refuse any write at or under it while ZCL_TEST_HARNESS is set; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
 Z23_FLAG("ZCL_TEST_HARNESS", "env_runtime", "-", "-",
           "set to 1 by the test runners (tests/harness/src/test_home_isolation.c); arms the canonical-datadir writer guard in storage/boot_auto_reindex.c, absent in production; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_BLOCK", "env_test", "-", "-",
+          "raw checkpoint block for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_BUNDLE", "env_test", "-", "-",
+          "public bundle for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_INDEX", "env_test", "-", "-",
+          "public flat index for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_PARAMS", "env_test", "-", "-",
+          "parameter directory for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_REAL", "env_test", "-", "-",
+          "0 or unset runs the ordinary suite; 1 selects the real checkpoint install fixture; other values refuse; first use tests/harness/src/test_consensus_state_snapshot_install.c:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_SCRATCH", "env_test", "-", "-",
+          "private scratch root for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
 Z23_FLAG("ZCL_TEST_LEAK_CHECK", "env_test", "-", "-",
           "report|fail: an ASan test child runs LeakSanitizer before _exit (report prints LEAKS group=<name>; fail also fails the group); set by make t-asan LEAK_CHECK=<mode>; first use tests/harness/src/test_parallel.c:auto")
 Z23_FLAG("ZCL_TEST_TMPFS", "env_test", "-", "-",
