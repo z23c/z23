@@ -2026,6 +2026,69 @@ static bool ruf_stage(const char *stage, bool ok)
 }
 static void ruf_log_evidence(const struct ru_run *r, const char *name,
                              const char *label, off_t start, bool tail);
+/* A bounded failure-only snapshot: process names and wait channels, never
+ * command lines, environments, or fixture contents. */
+static bool ruf_proc_read(long pid, long tid, const char *leaf, char *out, size_t cap)
+{
+    char path[128];
+    int n = snprintf(path, sizeof(path), "/proc/%ld/task/%ld/%s", pid, tid, leaf);
+    if (n <= 0 || (size_t)n >= sizeof(path) || cap < 2) return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    ssize_t got = read(fd, out, cap - 1);
+    bool ok = close(fd) == 0 && got >= 0 && (size_t)got < cap - 1;
+    if (!ok) return false;
+    out[got] = 0;
+    while (got > 0 && (out[got - 1] == '\n' || out[got - 1] == '\r')) out[--got] = 0;
+    return true;
+}
+static void ruf_proc_task(long pid, long tid, const char *kind)
+{
+    char name[128] = "<unavailable>", wait[128] = "<unavailable>";
+    (void)ruf_proc_read(pid, tid, "comm", name, sizeof(name));
+    (void)ruf_proc_read(pid, tid, "wchan", wait, sizeof(wait));
+    fprintf(stderr, "RECEIVE_PROC kind=%s pid=%ld tid=%ld comm=%s wchan=%s\n", kind, pid, tid, name, wait);
+}
+static void ruf_proc_children(long pid, long tid)
+{
+    char children[512];
+    if (!ruf_proc_read(pid, tid, "children", children, sizeof(children))) {
+        fprintf(stderr, "RECEIVE_PROC children pid=%ld tid=%ld unavailable_or_truncated\n", pid, tid);
+        return;
+    }
+    char *at = children;
+    for (unsigned count = 0; *at && count < 8; ++count) {
+        char *end; errno = 0; long child = strtol(at, &end, 10);
+        if (end == at || errno || child <= 1 || child > INT_MAX) break;
+        ruf_proc_task(child, child, "child");
+        at = end;
+    }
+}
+static void ruf_cli_failure(struct ru_run *r)
+{
+    int saved_errno = errno;
+    bool verified = ru_image_live(&r->server);
+    fprintf(stderr, "RECEIVE_PROC cli_pid=%ld identity_verified=%d\n", (long)r->server.pid, verified);
+    if (verified) {
+        char path[64];
+        (void)snprintf(path, sizeof(path), "/proc/%ld/task", (long)r->server.pid);
+        DIR *dir = opendir(path);
+        if (dir) {
+            struct dirent *ent; unsigned count = 0;
+            while (count < 16 && (ent = readdir(dir)) != NULL) {
+                char *end; errno = 0; long tid = strtol(ent->d_name, &end, 10);
+                if (end == ent->d_name || *end || errno || tid <= 0 || tid > INT_MAX) continue;
+                ruf_proc_task((long)r->server.pid, tid, "thread");
+                ruf_proc_children((long)r->server.pid, tid);
+                ++count;
+            }
+            if (count == 16) fprintf(stderr, "RECEIVE_PROC threads_at_limit=16\n");
+            (void)closedir(dir);
+        } else fprintf(stderr, "RECEIVE_PROC tasks=unavailable\n");
+    }
+    ruf_log_evidence(r, "receive-flow-cli.log", "RECEIVE_FLOW_CLI_TAIL", 0, true);
+    errno = saved_errno;
+}
 static void ruf_display_failure(struct ru_run *r)
 {
     int saved_errno = errno;
@@ -2087,6 +2150,7 @@ static bool ruf_driver(struct ru_run *r, const char *title, const char *action, 
             title, action, waited, code, stopped);
         ruf_log_evidence(r, "receive-flow-driver.log", "RECEIVE_FLOW_DRIVER_OUTPUT", start, false);
         ruf_display_failure(r);
+        ruf_cli_failure(r);
         fputs("--- end evidence ---\n", stderr);
     }
     return ok && stopped;
