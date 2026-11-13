@@ -124,3 +124,13 @@ At paused node pace, network serving callbacks defer eligibility checks. Boot
 publication checks retain their existing behavior. The focused
 `snapshot_sync_service` group passed with no skips after the change; the parent
 failed the pause assertion. Device performance remains unmeasured.
+
+## Startup pacing of serving checks
+
+A sampled startup wait showed leaf-store preparation waiting on the progress
+store mutex while a network thread computed the serving frontier. Network
+serving callbacks now defer eligibility checks until the application is running;
+boot publication checks remain independent.
+<!-- claim: symbol-present net_port_deferred engine/composition/src/boot_net_runtime_port.c # startup serving gate -->
+The parent failed the startup refusal fixture; the candidate passed the focused
+`snapshot_sync_service` group with no skips. Device benefit is unmeasured.

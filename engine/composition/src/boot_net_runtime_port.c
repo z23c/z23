@@ -18,6 +18,7 @@
  */
 
 #include "config/runtime.h"
+#include "config/boot.h"
 #include "config/db_service.h"
 #include "config/boot_snapshot_offer.h"
 #include "net/net_runtime_port.h"
@@ -48,21 +49,31 @@ static bool net_port_cooling(char *reason, size_t size)
     return true;
 }
 
+static bool net_port_deferred(char *reason, size_t size)
+{
+    if (!app_is_running()) {
+        if (reason && size)
+            (void)snprintf(reason, size, "node_not_running");
+        return true;
+    }
+    return net_port_cooling(reason, size);
+}
+
 static bool net_port_block_can_serve(char *reason, size_t size)
 {
-    return !net_port_cooling(reason, size) &&
+    return !net_port_deferred(reason, size) &&
            boot_block_swarm_state_can_serve(reason, size);
 }
 
 static bool net_port_snapshot_sovereign(char *reason, size_t size)
 {
-    return !net_port_cooling(reason, size) &&
+    return !net_port_deferred(reason, size) &&
            boot_snapshot_offer_state_is_sovereign(reason, size);
 }
 
 static bool net_port_snapshot_eligible(const char *datadir, char *reason, size_t size)
 {
-    return !net_port_cooling(reason, size) &&
+    return !net_port_deferred(reason, size) &&
            boot_snapshot_offer_artifact_is_eligible(datadir, reason, size);
 }
 

@@ -8,6 +8,7 @@
 #include "services/snapshot_manifest.h"
 #include "config/db_service.h"
 #include "config/boot_snapshot_offer.h"
+#include "config/boot.h"
 #include "config/runtime.h"
 #include "framework/condition.h"
 #include "conditions/snapshot_offer_ready.h"
@@ -87,6 +88,16 @@ static int test_snapshot_offer_trust_policy(void)
         boot_snapshot_offer_test_set_trust_override(1);
         boot_snapshot_offer_test_set_publication_override(-1);
         enum node_pace saved_pace = node_pace_get();
+        bool saved_running = app_test_set_running(false);
+        node_pace_set(NODE_PACE_NORMAL);
+        char starting_block_reason[96] = {0};
+        char starting_snapshot_reason[96] = {0};
+        char starting_artifact_reason[96] = {0};
+        bool starting_block = net_runtime_block_state_can_serve(starting_block_reason, sizeof(starting_block_reason));
+        bool starting_snapshot = net_runtime_snapshot_state_is_sovereign(starting_snapshot_reason, sizeof(starting_snapshot_reason));
+        bool starting_artifact = net_runtime_snapshot_artifact_is_eligible(NULL, starting_artifact_reason, sizeof(starting_artifact_reason));
+        bool starting_direct = boot_block_swarm_state_can_serve(NULL, 0);
+        (void)app_test_set_running(true);
         node_pace_set(NODE_PACE_PAUSE);
         reason[0] = 0;
         bool paused_block = net_runtime_block_state_can_serve(reason, sizeof(reason));
@@ -107,6 +118,11 @@ static int test_snapshot_offer_trust_policy(void)
         boot_snapshot_offer_test_set_trust_override(1);
         boot_snapshot_offer_test_set_publication_override(-1);
         node_pace_set(saved_pace);
+        (void)app_test_set_running(saved_running);
+        ASSERT(!starting_block && strcmp(starting_block_reason, "node_not_running") == 0);
+        ASSERT(!starting_snapshot && strcmp(starting_snapshot_reason, "node_not_running") == 0);
+        ASSERT(!starting_artifact && strcmp(starting_artifact_reason, "node_not_running") == 0);
+        ASSERT(starting_direct);
         ASSERT(!paused_block && block_reason);
         ASSERT(!paused_snapshot && snapshot_reason);
         ASSERT(!paused_artifact && artifact_reason);

@@ -3724,4 +3724,7 @@ void app_shutdown_offline_unclean(void)
 }
 
 bool app_is_running(void) { return atomic_load(&g_running); }
+#ifdef ZCL_TESTING
+bool app_test_set_running(bool running) { return atomic_exchange(&g_running, running); }
+#endif
 /* app_add_node, app_start_metrics, app_stop_metrics: boot_services.c */

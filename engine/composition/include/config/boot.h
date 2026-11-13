@@ -1326,6 +1326,9 @@ bool boot_dispatch_blocks_table_hydrate(struct node_db *ndb,
                                         struct main_state *ms);
 
 bool app_is_running(void);
+#ifdef ZCL_TESTING
+bool app_test_set_running(bool running);
+#endif
 /* Dial host[:port] and keep it on the addnode list. */
 void app_add_node(const char *host, int port);
 /* The same, for a target the operator named (-addnode=, -connect=,
