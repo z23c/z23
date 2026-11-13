@@ -325,8 +325,11 @@ static bool pe_take_str(struct pe_view *r, char *out, size_t cap)
     uint32_t n;
     const uint8_t *b;
     if (!pe_take_u32(r, &n)) return false;
-    if (n >= cap || !pe_take(r, (const void **)&b, n))
+    if (n >= cap || !pe_take(r, (const void **)&b, n)) {
         LOG_FAIL(PE_TAG, "an archive field of %u bytes is truncated or does not fit %zu", (unsigned)n, cap);
+        return false; /* b is unassigned here; the old fall-through read it
+                        uninitialized and could write past cap */
+    }
     memcpy(out, b, n);
     out[n] = 0;
     return true;
