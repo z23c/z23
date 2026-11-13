@@ -4602,6 +4602,66 @@ static int tag_orphan_sweep(struct tag_world *w)
     } _test_next:;
     return failures;
 }
+/* The room entries stage under the profile anchor, not the get datadir, so
+ * each entry must sweep its own anchor; the sweep keeps the same guards
+ * (exact shape, day cold, 0700, euid) it has in the CLI leaf. */
+static bool tag_orphan_room_checks(const char *d, char *linked, const char *sentinel)
+{
+    return tag_orphan_removed(d) &&                /* orphan swept, file and all */
+        tag_orphan_kept(d, TAG_ORPHAN_LIVE) &&     /* fresh: untouched */
+        tag_orphan_kept(d, TAG_ORPHAN_WIDE) &&     /* permissive: untouched */
+        tag_orphan_kept(d, "short") &&             /* misshaped: untouched */
+        tag_orphan_link_kept(linked) &&            /* link never followed */
+        tag_orphan_sentinel_kept(sentinel);        /* link target intact */
+}
+static int tag_orphan_sweep_discover(struct tag_world *w)
+{
+    int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
+    struct zcl_command_reply why, reply;
+    TEST("app get: the Discover receive sweeps a day-old orphan beside the "
+         "profile; fresh, misshaped, permissive and linked entries stay") {
+        const char *d = w->j.b_datadir;
+        char linked[TAG_PATH], sentinel[TAG_PATH];
+        struct tag_consumer c = {.world = w};
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u);
+        ASSERT(tag_orphan_fixture(d, linked, sizeof(linked), sentinel, sizeof(sentinel)));
+        zcl_command_reply_init(&reply, "zcl.app_get.stage.v1");
+        bool done = app_get_stage_consume(&rows[0], d, tag_consume, &c, &reply);
+        bool passed = done && reply.status == ZCL_COMMAND_STATUS_PASSED && c.calls == 1;
+        zcl_command_reply_free(&reply);
+        ASSERT(passed);
+        ASSERT(tag_orphan_room_checks(d, linked, sentinel));
+        ASSERT(tag_orphan_clean(d, linked, sentinel)); /* no staging left behind */
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static int tag_orphan_sweep_bytes(struct tag_world *w)
+{
+    int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
+    struct zcl_command_reply why, reply;
+    TEST("app get: the direct-link byte receive sweeps a day-old orphan beside "
+         "the profile; fresh, misshaped, permissive and linked entries stay") {
+        const char *d = w->j.b_datadir;
+        char linked[TAG_PATH], sentinel[TAG_PATH];
+        struct tag_consumer c = {.world = w};
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u);
+        ASSERT(tag_orphan_fixture(d, linked, sizeof(linked), sentinel, sizeof(sentinel)));
+        zcl_command_reply_init(&reply, "zcl.app_get.stage.v1");
+        bool done = app_get_stage_consume_bytes(&rows[0], d, g_tag.bytes, g_tag.len,
+            tag_consume_bytes, &c, &reply);
+        bool passed = done && reply.status == ZCL_COMMAND_STATUS_PASSED && c.calls == 1;
+        zcl_command_reply_free(&reply);
+        ASSERT(passed);
+        ASSERT(tag_orphan_room_checks(d, linked, sentinel));
+        ASSERT(tag_orphan_clean(d, linked, sentinel)); /* no staging left behind */
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 static int tag_failed_fetch_cleanup(struct tag_world *w)
 {
@@ -5354,6 +5414,8 @@ static int tag_world_cases(struct tag_world *w)
     if (failures == 0) failures += tag_keep_cases(w);
     failures += tag_failed_fetch_cleanup(w);
     failures += tag_orphan_sweep(w);
+    failures += tag_orphan_sweep_discover(w);
+    failures += tag_orphan_sweep_bytes(w);
     failures += tag_b_journeys(w);
     if (failures == 0) failures += tag_exact_tests(w);
     if (failures == 0) failures += tag_rebuild_outcomes(w);

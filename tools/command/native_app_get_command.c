@@ -1037,6 +1037,7 @@ bool app_get_stage_consume_bytes(const struct zcl_app_offer_row *selected,
         return false;
     }
     if (!app_receive_profile_validate(datadir, anchor, sizeof(anchor), reply)) return false;
+    ag_orphan_sweep(anchor); /* room staging lives beside the profile, not the datadir */
     uint8_t random[16]; char token[33];
     if (!rng_host_fill(random, sizeof(random))) {
         zcl_package_copy_fail(reply, "BAD_TOKEN", false, "cannot create a fresh staging token", AG_COMMAND);
@@ -1083,6 +1084,7 @@ static bool ag_stage_consume(const struct zcl_app_offer_row *selected, const cha
         zcl_package_copy_fail(reply, "BAD_INPUT", false, "a valid selected offer and absolute datadir are required", AG_COMMAND); return false;
     }
     if (!app_receive_profile_validate(datadir, anchor, sizeof(anchor), reply)) return false;
+    ag_orphan_sweep(anchor); /* room staging lives beside the profile, not the datadir */
     struct zcl_app_offer_row *row = zcl_calloc(1, sizeof(*row), "app.get.offer");
     if (!row) { zcl_package_copy_fail(reply, "ALLOC", false, "offer allocation", AG_COMMAND); return false; }
     bool ok = ag_find_selected(selected, row, reply);
