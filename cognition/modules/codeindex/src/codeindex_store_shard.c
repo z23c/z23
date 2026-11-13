@@ -57,8 +57,11 @@ bool ci_scan_shard_writer_open(struct ci_scan_shard_writer *writer,
     if (!writer || !store) return false;
     memset(writer, 0, sizeof(*writer));
     sqlite3 *db = ci_store_db(store);
+    /* Merge the two indexed paths without repeating symbols that match both.
+     * IS NOT preserves malformed NULL definition paths for validation. */
     static const char symbol_sql[] =
-        "SELECT " CI_SYM_COLS " FROM symbols WHERE def_path=?1 OR decl_path=?1 ORDER BY "
+        "SELECT " CI_SYM_COLS " FROM symbols WHERE def_path=?1 UNION ALL "
+        "SELECT " CI_SYM_COLS " FROM symbols WHERE decl_path=?1 AND def_path IS NOT ?1 ORDER BY "
         "name COLLATE BINARY,kind COLLATE BINARY,def_path COLLATE BINARY,def_line,"
         "decl_path COLLATE BINARY,decl_line,signature COLLATE BINARY,"
         "doc COLLATE BINARY,guard COLLATE BINARY,\"group\" COLLATE BINARY,"

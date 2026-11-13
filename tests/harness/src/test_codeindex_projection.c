@@ -5,6 +5,7 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 #include "config/file_ops.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
@@ -14,6 +15,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define CIP_CHECK(name, expression)                                    \
     do {                                                               \
@@ -260,9 +262,327 @@ struct cip_poison {
     const char *sql;
 };
 
+static bool cip_symbol_put(struct ci_store *s, const char *name, const char *def, const char *decl)
+{
+    struct ci_symbol sym = {0};
+    snprintf(sym.name, sizeof sym.name, "%s", name);
+    snprintf(sym.def_path, sizeof sym.def_path, "%s", def);
+    snprintf(sym.decl_path, sizeof sym.decl_path, "%s", decl);
+    sym.kind = 'T'; sym.def_line = *def ? 1 : 0; sym.decl_line = *decl ? 2 : 0;
+    return ci_store_put_symbol(s, &sym);
+}
+
+static bool cip_symbol_seed(struct ci_store *s)
+{
+    struct ci_file file = {0}; uint8_t sha[32] = {0}; int64_t id;
+    snprintf(file.path, sizeof file.path, "a.c");
+    return ci_store_put_file(s, &file, sha, 0, &id) &&
+        cip_symbol_put(s, "alpha", "a.c", "") &&
+        cip_symbol_put(s, "beta", "", "a.c") &&
+        cip_symbol_put(s, "both", "a.c", "a.c") &&
+        cip_symbol_put(s, "dup", "a.c", "") &&
+        cip_symbol_put(s, "dup", "a.c", "") &&
+        cip_symbol_put(s, "nullable", "", "a.c") &&
+        cip_symbol_put(s, "blobpath", "", "a.c") &&
+        cip_symbol_put(s, "other", "b.c", "b.c");
+}
+
+static bool cip_column_equal(sqlite3_stmt *a, sqlite3_stmt *b, int col)
+{
+    int type = sqlite3_column_type(a, col);
+    if (type != sqlite3_column_type(b, col)) return false;
+    if (type == SQLITE_NULL) return true;
+    if (type == SQLITE_INTEGER) return sqlite3_column_int64(a, col) == sqlite3_column_int64(b, col);
+    if (type != SQLITE_TEXT && type != SQLITE_BLOB) return false;
+    int len = sqlite3_column_bytes(a, col);
+    if (len != sqlite3_column_bytes(b, col)) return false;
+    const void *av = sqlite3_column_blob(a, col), *bv = sqlite3_column_blob(b, col);
+    return len == 0 || (av && bv && memcmp(av, bv, (size_t)len) == 0);
+}
+
+static bool cip_symbol_rows_equal(sqlite3_stmt *a, sqlite3_stmt *b)
+{
+    for (int col = 0; col < 13; ++col)
+        if (!cip_column_equal(a, b, col)) return false;
+    return true;
+}
+
+static bool cip_symbol_compare_rows(sqlite3_stmt *ref, sqlite3_stmt *actual)
+{
+    static const char *const names[] = {"alpha", "beta", "blobpath", "both", "dup", "dup", "nullable"};
+    int ar = SQLITE_ERROR, br = SQLITE_ERROR, rows = 0;
+    bool ok = true;
+    while (ok) {
+        ar = sqlite3_step(ref); br = sqlite3_step(actual);
+        if (ar != SQLITE_ROW || br != SQLITE_ROW) break;
+        const unsigned char *name = sqlite3_column_text(ref, 0);
+        ok = rows < 7 && name && !strcmp((const char *)name, names[rows]) && cip_symbol_rows_equal(ref, actual);
+        ++rows;
+    }
+    if (!ok || ar != SQLITE_DONE || br != SQLITE_DONE || rows != 7)
+        fprintf(stderr, "shard symbol parity rows=%d ref=%d actual=%d\n", rows, ar, br);
+    return ok && ar == SQLITE_DONE && br == SQLITE_DONE && rows == 7;
+}
+
+static bool cip_symbol_compare(struct ci_store *s)
+{
+    static const char sql[] = "SELECT " CI_SYM_COLS " FROM symbols WHERE def_path=?1 OR decl_path=?1 ORDER BY "
+        "name COLLATE BINARY,kind COLLATE BINARY,def_path COLLATE BINARY,def_line,"
+        "decl_path COLLATE BINARY,decl_line,signature COLLATE BINARY,doc COLLATE BINARY,"
+        "guard COLLATE BINARY,\"group\" COLLATE BINARY,partial,row_sha3";
+    sqlite3_stmt *ref = NULL; struct ci_scan_shard_writer w = {0};
+    bool ok = ci_scan_shard_writer_open(&w, s, false) &&
+        sqlite3_prepare_v2(ci_store_db(s), sql, -1, &ref, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(ref, 1, "a.c", -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(w.symbols, 1, "a.c", -1, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = cip_symbol_compare_rows(ref, w.symbols);
+    bool closed = !ref || sqlite3_finalize(ref) == SQLITE_OK;
+    if (!ci_scan_shard_writer_close(&w)) closed = false;
+    return ok && closed;
+}
+
+static bool cip_symbol_bad_hash(struct ci_store *s, const char *sql)
+{
+    sqlite3 *db = ci_store_db(s);
+    if (sqlite3_exec(db, "SAVEPOINT poison", NULL, NULL, NULL) != SQLITE_OK) return false;
+    bool changed = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK && sqlite3_changes(db) == 1;
+    bool refused = changed && !ci_store_scan_shard_refresh(s, "a.c");
+    bool restored = sqlite3_exec(db, "ROLLBACK TO poison; RELEASE poison", NULL, NULL, NULL) == SQLITE_OK;
+    return refused && restored && ci_store_scan_shard_refresh(s, "a.c");
+}
+
+static bool cip_symbol_query_fixture(void)
+{
+    struct ci_store *s = ci_store_open_path(":memory:");
+    if (!s) return false;
+    bool ok = cip_symbol_seed(s) && ci_store_scan_shard_refresh(s, "a.c");
+    sqlite3 *db = ci_store_db(s);
+    /* Nullable copy permits observing SQL three-valued logic and raw types;
+     * it is not a claim that all malformed fields are rejected today. */
+    ok = ok && sqlite3_exec(db, "CREATE TABLE nullable_symbols AS SELECT * FROM symbols;"
+        "DROP TABLE symbols; ALTER TABLE nullable_symbols RENAME TO symbols;"
+        "UPDATE symbols SET def_path=NULL WHERE name='nullable';"
+        "UPDATE symbols SET def_path=x'' WHERE name='blobpath'", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = cip_symbol_compare(s) && ci_store_scan_shard_refresh(s, "a.c");
+    if (ok) ok = cip_symbol_bad_hash(s, "UPDATE symbols SET row_sha3=NULL WHERE name='alpha'");
+    if (ok) ok = cip_symbol_bad_hash(s, "UPDATE symbols SET row_sha3='invalid' WHERE name='alpha'");
+    ci_store_close(s);
+    return ok;
+}
+
+static bool cip_shard_ref_row(sqlite3_stmt *stmt, int row)
+{
+    static const char *const names[] = {"projection_aux", "projection_leaf", "projection_leaf"};
+    static const int lines[] = {12, 8, 12};
+    static const char *const enclosing[] = {"projection_main", "projection_aux", "projection_main"};
+    if (row < 0 || row >= 3) return false;
+    const unsigned char *name = sqlite3_column_text(stmt, 0);
+    const unsigned char *caller = sqlite3_column_text(stmt, 2);
+    return name && caller && strcmp((const char *)name, names[row]) == 0 &&
+        sqlite3_column_int(stmt, 1) == lines[row] &&
+        strcmp((const char *)caller, enclosing[row]) == 0;
+}
+
+/* Run the production shard writer's prepared query, not a copied SQL string. */
+static bool cip_shard_ref_sort(struct codeindex *index, bool expect_sort)
+{
+    struct ci_scan_shard_writer writer = {0};
+    if (!ci_scan_shard_writer_open(&writer, index->store, false)) return false;
+    sqlite3_stmt *stmt = writer.refs;
+    bool ok = sqlite3_bind_text(stmt, 1, "lib/net/src/projection.c", -1, SQLITE_STATIC) == SQLITE_OK;
+    int rc = SQLITE_ERROR, rows = 0;
+    while (ok && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        ok = cip_shard_ref_row(stmt, rows);
+        ++rows;
+    }
+    int sorts = sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_SORT, 0);
+    bool closed = ci_scan_shard_writer_close(&writer);
+    bool sort_ok = expect_sort ? sorts > 0 : sorts == 0;
+    if (!ok || rc != SQLITE_DONE || rows != 3 || !sort_ok || !closed)
+        fprintf(stderr, "shard refs rows=%d rc=%d sorts=%d closed=%d\n", rows, rc, sorts, closed);
+    return ok && rc == SQLITE_DONE && rows == 3 && sort_ok && closed;
+}
+
+static bool cip_shard_ref_order(struct codeindex *index)
+{
+    return cip_shard_ref_sort(index, false);
+}
+
+static bool cip_legacy_ref_index(const char *root)
+{
+    char path[PATH_MAX]; sqlite3 *db = NULL;
+    if (!cip_index_path(root, path) || sqlite3_open(path, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    bool ok = sqlite3_exec(db,
+        "DROP INDEX IF EXISTS idx_refs_file_ordered; DROP INDEX IF EXISTS idx_refs_file;"
+        "CREATE INDEX idx_refs_file ON refs(ref_file)", NULL, NULL, NULL) == SQLITE_OK;
+    return sqlite3_close(db) == SQLITE_OK && ok;
+}
+
+static bool cip_index_names(struct codeindex *ci, bool upgraded)
+{
+    sqlite3 *db = ci_store_db(ci->store); sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT (SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file'),"
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file_ordered')";
+    bool ok = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == !upgraded &&
+        sqlite3_column_int(stmt, 1) == upgraded;
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool cip_append(const char *root, const char *suffix, const char *text)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s/lib/net/src/%s", root, suffix);
+    if (n <= 0 || (size_t)n >= sizeof path) return false;
+    FILE *f = fopen(path, "ab"); if (!f) return false;
+    bool ok = fputs(text, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool cip_old_generation_ok(struct codeindex *old, const uint8_t source[32],
+                                  const uint8_t projection[32])
+{
+    bool valid = false;
+    return cip_generation_matches(old, source, projection) &&
+        ci_store_retrieval_projection_is_valid(old->store, &valid) && valid &&
+        cip_index_names(old, false) && cip_shard_ref_sort(old, true);
+}
+
+static bool cip_upgrade_next_ok(struct codeindex *next, const uint8_t source[32],
+                                const uint8_t projection[32], bool *current)
+{
+    uint8_t new_source[32], new_projection[32];
+    return next && codeindex_test_source_scans() == 1 &&
+        codeindex_source_root_sha3(next, new_source) &&
+        codeindex_retrieval_projection_root_sha3(next, new_projection) &&
+        memcmp(source, new_source, 32) != 0 && memcmp(projection, new_projection, 32) != 0 &&
+        codeindex_retrieval_projection_is_current(next, current) && *current &&
+        cip_queries_intact(next) && cip_index_names(next, true) && cip_shard_ref_order(next);
+}
+
+static bool cip_upgrade_step(const char *root, const char *comment,
+                             struct codeindex *old, const uint8_t source[32],
+                             const uint8_t projection[32])
+{
+    if (!cip_append(root, "projection.c", comment)) return false;
+    codeindex_test_source_scans_reset();
+    struct codeindex *next = codeindex_open(root);
+    bool current = false;
+    bool ok = cip_upgrade_next_ok(next, source, projection, &current) &&
+              cip_old_generation_ok(old, source, projection);
+    if (!ok) fprintf(stderr, "legacy refs upgrade: next=%d scans=%llu current=%d\n",
+                     next != NULL, (unsigned long long)codeindex_test_source_scans(), current);
+    codeindex_close(next);
+    return ok;
+}
+
+static bool cip_incremental_ref_upgrade(const char *workspace)
+{
+    char root[PATH_MAX], spare[PATH_MAX];
+    int n = snprintf(root, sizeof root, "%s/legacy-index", workspace);
+    if (n <= 0 || (size_t)n >= sizeof root || !cip_write(root) ||
+        !cip_append(root, "second.c", "int second(void) { return 1; }\n")) return false;
+    struct codeindex *initial = codeindex_open(root);
+    uint8_t source[32], projection[32];
+    bool ok = initial && codeindex_source_root_sha3(initial, source) &&
+        codeindex_retrieval_projection_root_sha3(initial, projection);
+    codeindex_close(initial);
+    if (!ok || !cip_legacy_ref_index(root)) return false;
+    struct codeindex *old = codeindex_open_existing(root);
+    ok = old && cip_old_generation_ok(old, source, projection);
+    n = snprintf(spare, sizeof spare, "%s/.codeindex/index.kv.spare", root);
+    ok = ok && n > 0 && (size_t)n < sizeof spare;
+    if (ok) ok = cip_upgrade_step(root, "/* first edit */\n", old, source, projection);
+    struct stat st;
+    if (ok) ok = stat(spare, &st) == 0;
+    if (ok) ok = cip_upgrade_step(root, "/* second edit */\n", old, source, projection);
+    codeindex_close(old);
+    return ok;
+}
+
+/* Both conflicting names are legal SQLite schema but unusable as our index. */
+static bool cip_conflicting_ref_index(const char *root, bool table_collision)
+{
+    char path[PATH_MAX]; sqlite3 *db = NULL;
+    if (!cip_index_path(root, path) || sqlite3_open(path, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    const char *sql = table_collision
+        ? "CREATE TABLE idx_refs_file_ordered(v INTEGER)"
+        : "CREATE INDEX idx_refs_file_ordered ON refs(ref_line)";
+    bool ok = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    return sqlite3_close(db) == SQLITE_OK && ok;
+}
+
+static bool cip_published_unchanged(const char *root, const struct stat *before,
+                                    const uint8_t source[32], const uint8_t projection[32])
+{
+    char path[PATH_MAX]; struct stat after;
+    if (!cip_index_path(root, path) || stat(path, &after) != 0 ||
+        before->st_dev != after.st_dev || before->st_ino != after.st_ino) return false;
+    struct codeindex *view = codeindex_open_existing(root);
+    bool valid = false;
+    bool ok = view && cip_generation_matches(view, source, projection) &&
+        ci_store_retrieval_projection_is_valid(view->store, &valid) && valid;
+    codeindex_close(view);
+    return ok;
+}
+
+static bool cip_conflict_setup(const char *root, bool table_collision,
+                               uint8_t source[32], uint8_t projection[32])
+{
+    if (!cip_write(root) || !cip_append(root, "second.c", "int second(void) { return 1; }\n")) return false;
+    struct codeindex *initial = codeindex_open(root);
+    bool ok = initial && codeindex_source_root_sha3(initial, source) &&
+        codeindex_retrieval_projection_root_sha3(initial, projection);
+    codeindex_close(initial);
+    return ok && cip_legacy_ref_index(root) && cip_conflicting_ref_index(root, table_collision);
+}
+
+static bool cip_conflicting_upgrade(const char *workspace, bool table_collision)
+{
+    char root[PATH_MAX], path[PATH_MAX];
+    uint8_t source[32], projection[32];
+    int n = snprintf(root, sizeof root, "%s/conflict-%d", workspace, table_collision);
+    if (n <= 0 || (size_t)n >= sizeof root || !cip_conflict_setup(root, table_collision, source, projection)) return false;
+    struct stat before;
+    bool ok = cip_index_path(root, path) && stat(path, &before) == 0 &&
+        cip_published_unchanged(root, &before, source, projection) &&
+        cip_append(root, "projection.c", "/* conflicting index edit */\n");
+    codeindex_test_source_scans_reset();
+    struct codeindex *attempt = ok ? codeindex_open(root) : NULL;
+    bool refused = ok && !attempt;
+    codeindex_close(attempt);
+    bool unchanged = ok && cip_published_unchanged(root, &before, source, projection);
+    if (!refused || !unchanged)
+        fprintf(stderr, "conflicting refs index table=%d setup=%d refused=%d unchanged=%d scans=%llu\n",
+                table_collision, ok, refused, unchanged,
+                (unsigned long long)codeindex_test_source_scans());
+    return refused && unchanged;
+}
+
+static int cip_check_index_migration(bool ready, const char *workspace)
+{
+    int failures = 0;
+    CIP_CHECK("legacy reference index upgrades during incremental publication",
+              ready && cip_incremental_ref_upgrade(workspace));
+    CIP_CHECK("wrong-shape reference index refuses staged publication",
+              ready && cip_conflicting_upgrade(workspace, false));
+    CIP_CHECK("index-name table collision refuses staged publication",
+              ready && cip_conflicting_upgrade(workspace, true));
+    return failures;
+}
+
 int test_codeindex_projection_integrity(void)
 {
     int failures = 0;
+    CIP_CHECK("shard symbol query preserves typed OR rows and rejects corrupt hashes",
+              cip_symbol_query_fixture());
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
     char first[PATH_MAX], second[PATH_MAX];
@@ -280,8 +600,12 @@ int test_codeindex_projection_integrity(void)
               memcmp(projection_root, second_projection, 32) == 0);
     CIP_CHECK("baseline retrieval queries are intact",
               rooted && cip_queries_intact(one));
+    CIP_CHECK("shard reference ordering needs no sort and preserves projection",
+              rooted && cip_shard_ref_order(one) &&
+              cip_generation_matches(one, source_root, projection_root));
     codeindex_close(one);
     codeindex_close(two);
+    failures += cip_check_index_migration(ready, workspace);
 
     struct codeindex *existing = cip_open_after_sql(
         rooted,

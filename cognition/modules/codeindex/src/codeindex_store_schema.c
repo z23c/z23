@@ -5,6 +5,7 @@
 
 #include <sqlite3.h>
 #include <stdio.h>
+#include <string.h>
 
 bool ci_store_apply_pragmas(sqlite3 *db)
 {
@@ -22,6 +23,66 @@ bool ci_store_apply_pragmas(sqlite3 *db)
             if (err) sqlite3_free(err);
             return false;
         }
+    }
+    return true;
+}
+
+static bool ci_ref_index_list(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA index_list('refs')", -1, &st, NULL) != SQLITE_OK) return false;
+    bool found = false, ok = true;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
+        const unsigned char *name = sqlite3_column_text(st, 1);
+        if (!name) { ok = false; break; }
+        if (strcmp((const char *)name, "idx_refs_file_ordered") == 0) {
+            if (found || sqlite3_column_int(st, 2) != 0 ||
+                sqlite3_column_int(st, 4) != 0) { ok = false; break; }
+            found = true;
+        }
+    }
+    if (rc != SQLITE_DONE) ok = false;
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    return ok && found;
+}
+
+static bool ci_ref_index_columns(sqlite3 *db)
+{
+    static const char *const names[] = {"ref_file", "callee_name", "ref_line", "enclosing"};
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA index_xinfo('idx_refs_file_ordered')", -1, &st, NULL) != SQLITE_OK) return false;
+    size_t count = 0;
+    bool ok = true;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
+        if (!sqlite3_column_int(st, 5)) continue;
+        const unsigned char *name = sqlite3_column_text(st, 2);
+        const unsigned char *collation = sqlite3_column_text(st, 4);
+        if (count >= sizeof(names) / sizeof(names[0]) || !name || !collation ||
+            strcmp((const char *)name, names[count]) != 0 ||
+            strcmp((const char *)collation, "BINARY") != 0 ||
+            sqlite3_column_int(st, 3) != 0) { ok = false; break; }
+        count++;
+    }
+    if (rc != SQLITE_DONE || count != sizeof(names) / sizeof(names[0])) ok = false;
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+bool ci_store_ensure_ref_order_index(sqlite3 *db)
+{
+    static const char *const create =
+        "CREATE INDEX IF NOT EXISTS idx_refs_file_ordered ON refs(ref_file,"
+        "callee_name COLLATE BINARY,ref_line,enclosing COLLATE BINARY)";
+    if (!db || sqlite3_exec(db, create, NULL, NULL, NULL) != SQLITE_OK ||
+        !ci_ref_index_list(db) || !ci_ref_index_columns(db)) {
+        fprintf(stderr, "[codeindex] ref index creation or verification failed\n");
+        return false;
+    }
+    if (sqlite3_exec(db, "DROP INDEX IF EXISTS idx_refs_file", NULL, NULL, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[codeindex] legacy ref index removal failed\n");
+        return false;
     }
     return true;
 }
@@ -69,7 +130,6 @@ bool ci_store_ensure_schema(sqlite3 *db)
         "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);"
         "CREATE INDEX IF NOT EXISTS idx_refs_callee ON refs(callee_name);"
         "CREATE INDEX IF NOT EXISTS idx_refs_enclosing ON refs(enclosing);"
-        "CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(ref_file);"
         "CREATE INDEX IF NOT EXISTS idx_files_group ON files(\"group\");"
         /* The capability query asks "which symbols does this FILE own" once
          * per ranked candidate. Without these two it is a full 69k-row scan
@@ -85,5 +145,5 @@ bool ci_store_ensure_schema(sqlite3 *db)
         if (err) sqlite3_free(err);
         return false;
     }
-    return true;
+    return ci_store_ensure_ref_order_index(db);
 }

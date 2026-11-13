@@ -539,6 +539,10 @@ struct ci_store *ci_store_open_rw_fd(int fd)
         ci_store_close(s);
         return NULL;
     }
+    if (!ci_store_ensure_ref_order_index(s->db)) {
+        ci_store_close(s);
+        return NULL;
+    }
     return s;
 #endif
 }

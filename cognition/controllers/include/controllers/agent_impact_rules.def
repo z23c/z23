@@ -3571,7 +3571,7 @@ AGENT_IMPACT_RULE("engine/composition/src/boot_snapshot_import.c|engine/composit
 AGENT_IMPACT_RULE("tests/harness/src/test_leaf_smoke.c", "leaf_smoke")
 AGENT_IMPACT_RULE("tests/harness/src/test_build_fabric_executor_attach.c", "build_fabric_attach")
 AGENT_IMPACT_RULE("tests/harness/src/test_checkpoints_progress.c", "checkpoints_progress_boundary_crossover checkpoints_progress_zero_defenses checkpoints_progress_sigcheck_factor checkpoints_progress_regression_seal")
-AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_projection.c|cognition/modules/codeindex/src/codeindex_store_shard.c", "codeindex_projection_integrity")
+AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_projection.c|cognition/modules/codeindex/src/codeindex_store_shard.c|cognition/modules/codeindex/src/codeindex_store_schema.c", "codeindex_projection_integrity")
 AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_store_exact.c|cognition/modules/codeindex/src/codeindex_store_read.c", "codeindex_static_callers codeindex_pages_bounds codeindex")
 AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_inventory_schema.c|cognition/modules/codeindex/src/codeindex_scan_docs.c|cognition/modules/codeindex/src/codeindex_docs_read.c|cognition/modules/codeindex/include/codeindex/codeindex_docs.h", "codeindex_inventory_schema codeindex codeindex_projection_integrity")
 AGENT_IMPACT_RULE("tools/command/native_code_pages.c|tools/command/native_code_pages.h", "codeindex_inventory_schema codeindex command_registry_catalog native_api_contract")

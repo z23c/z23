@@ -799,7 +799,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_exact.c",
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_hash.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_identity.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_read.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_schema.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_schema.c", CAP_FS_READ|CAP_FS_WRITE, "Inspect staged reference index shape before schema migration")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_store_shard.c", CAP_FS_READ|CAP_FS_WRITE, "derives and seals per-file rows in the private code-index store")
 ZCL_MODULE_CAPABILITY("core/modules/coins/src/coins.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/coins/src/coins_view.c", CAP_FS_WRITE, "")
