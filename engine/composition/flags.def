@@ -696,6 +696,8 @@ Z23_FLAG("ZCL_DEV_HISTORY_COMMITS", "env_build", "100", "-",
           "undocumented; first use tools/dev/dev-loop-history-bench.sh:auto")
 Z23_FLAG("ZCL_DEV_HISTORY_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/dev-loop-history-bench.sh:auto")
+Z23_FLAG("ZCL_DEV_LINKER", "env_build", "-", "-",
+          "Make development-linker override; unset selects a host linker, explicit empty uses the compiler default")
 Z23_FLAG("ZCL_DEV_LINKER_PLAN", "env_build", "-", "-",
           "undocumented; first use tools/dev/dev-linker-shootout.sh:auto")
 Z23_FLAG("ZCL_DEV_LINKER_RECEIPT", "env_build", "-", "-",

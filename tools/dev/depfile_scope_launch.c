@@ -7,15 +7,19 @@
 #include "depfile_scope_launch.h"
 
 #include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #if !defined(_WIN32)
 #include <dirent.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -89,18 +93,116 @@ static int dsl_wait(pid_t pid)
     }
 }
 
-static int dsl_run(char *const argv[])
+static int dsl_run(char *const argv[], const char *linker)
 {
     pid_t pid = fork();
     int rc;
     if (pid < 0)
         return 127;
     if (pid == 0) {
+        if (linker && setenv("ZCL_DEV_LINKER", linker, 1) != 0)
+            _exit(127);
         execvp(argv[0], argv);
         _exit(127);
     }
     rc = dsl_wait(pid);
     return rc;
+}
+
+/* Successful empty output is a valid default-linker selection. */
+static bool dsl_linker_text(char *out, size_t n)
+{
+    while (n && out[n - 1] == '\n') --n;
+    for (size_t i = 0; i < n; ++i)
+        if ((unsigned char)out[i] < 32 || (unsigned char)out[i] > 126) return false;
+    out[n] = '\0';
+    return !strcmp(out, "") || !strcmp(out, "-fuse-ld=mold") ||
+        !strcmp(out, "-fuse-ld=lld") ||
+        !strcmp(out, "-fuse-ld=gold -Wl,--threads -Wl,--thread-count=9");
+}
+
+/* The selector's process group is contained on interruption or overrun. */
+static int64_t dsl_now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0 || ts.tv_sec < 0 || // platform-ok: standalone fixture launcher links no platform clock; deadline needs host time
+        ts.tv_sec > (INT64_MAX - 999) / 1000) return -1;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static bool dsl_linker_read(int fd, pid_t child, char *out, size_t cap, int64_t deadline)
+{
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    size_t used = 0;
+    while (!dsl_stop) {
+        int64_t now = dsl_now_ms();
+        if (now < 0 || now >= deadline) break;
+        int rc = poll(&p, 1, 100);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0) break;
+        if (!rc) continue;
+        char buf[128];
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) break;
+        if (!n) return dsl_linker_text(out, used);
+        if ((size_t)n >= cap - used) break;
+        memcpy(out + used, buf, (size_t)n); used += (size_t)n;
+    }
+    (void)kill(-child, SIGKILL); (void)kill(child, SIGKILL);
+    return false;
+}
+
+static bool dsl_linker_wait(pid_t child, int64_t deadline)
+{
+    while (!dsl_stop) {
+        int status = 0;
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (got < 0 && errno != EINTR) return false;
+        int64_t now = dsl_now_ms();
+        if (now < 0 || now >= deadline) break;
+        (void)poll(NULL, 0, 100);
+    }
+    (void)kill(-child, SIGKILL); (void)kill(child, SIGKILL);
+    while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+    return false;
+}
+
+static bool dsl_linker_select(const char *root, char *out, size_t cap)
+{
+    int p[2];
+    int64_t start = dsl_now_ms();
+    if (start < 0 || start > INT64_MAX - 10000) return false;
+    if (pipe(p) != 0) return false;
+    if (p[1] <= STDERR_FILENO) { close(p[0]); close(p[1]); return false; }
+    pid_t child = fork();
+    if (child < 0) { close(p[0]); close(p[1]); return false; }
+    if (!child) {
+        if (setpgid(0, 0) != 0) _exit(127);
+        close(p[0]);
+        if (chdir(root) != 0 || dup2(p[1], STDOUT_FILENO) < 0) _exit(127);
+        close(p[1]);
+        execl("./tools/dev/dev-linker-select.sh", "dev-linker-select.sh", (char *)NULL);
+        _exit(127);
+    }
+    (void)setpgid(child, child);
+    close(p[1]);
+    bool valid = dsl_linker_read(p[0], child, out, cap, start + 10000);
+    close(p[0]);
+    return dsl_linker_wait(child, start + 10000) && valid;
+}
+
+static bool dsl_linker_allowed(void)
+{
+    if (getenv("ZCL_DEV_LINKER")) return false;
+    const char *const controls[] = {"MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS",
+                                    "MAKEOVERRIDES", "MAKEFILES"};
+    for (size_t i = 0; i < sizeof controls / sizeof controls[0]; ++i) {
+        const char *v = getenv(controls[i]);
+        if (v && *v) return false;
+    }
+    return true;
 }
 
 static int dsl_arm(struct sigaction *old_hup, struct sigaction *old_int,
@@ -130,6 +232,7 @@ static int dsl_launch(const char *root)
     char work[PATH_MAX];
     char target[PATH_MAX];
     char bindir[PATH_MAX];
+    char linker[256]; const char *selected = NULL;
     const char *tmp = getenv("TMPDIR");
     char *make_argv[8];
     char *tool_argv[4];
@@ -141,6 +244,9 @@ static int dsl_launch(const char *root)
         return 2;
     if (mkdtemp(work) == NULL)
         return 2;
+    if (dsl_linker_allowed() && dsl_linker_select(root, linker, sizeof linker))
+        selected = linker;
+    if (dsl_stop) { (void)dsl_rm_tree(work); return 1; }
     if (snprintf(target, sizeof target, "%s/bin/make-depfile-scope-selftest",
                  work) >= (int)sizeof target ||
         snprintf(bindir, sizeof bindir, "BIN_DIR=%s/bin", work) >=
@@ -156,13 +262,13 @@ static int dsl_launch(const char *root)
     make_argv[5] = bindir;
     make_argv[6] = target;
     make_argv[7] = NULL;
-    rc = dsl_run(make_argv);
+    rc = dsl_run(make_argv, selected);
     if (rc == 0) {
         tool_argv[0] = target;
         tool_argv[1] = (char *)root;
         tool_argv[2] = work;
         tool_argv[3] = NULL;
-        rc = dsl_run(tool_argv);
+        rc = dsl_run(tool_argv, selected);
     }
     (void)dsl_rm_tree(work);
     return rc;
