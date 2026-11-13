@@ -174,9 +174,101 @@ static void opw_note_output_growth(const char *out_path, off_t *last_size,
 {
     struct stat st;
     if (stat(out_path, &st) == 0 && st.st_size != *last_size) {
+        if (st.st_size > 0 && st.st_size > *last_size) {
+            printf("[onion_pair_watch_live] captured output grew to %lld bytes\n",
+                   (long long)st.st_size);
+            fflush(stdout);
+        }
         *last_size = st.st_size;
         *last_progress_ns = opw_now_ns();
     }
+}
+
+/* Hermetic check of the same observer used by the live watcher. */
+static off_t opw_progress_bytes(FILE *progress)
+{
+    struct stat st;
+    return fstat(fileno(progress), &st) == 0 ? st.st_size : -1;
+}
+
+static bool opw_growth_again(const char *path, FILE *capture, FILE *progress,
+                             off_t *size, int64_t *last, off_t emitted)
+{
+    if (ftruncate(fileno(capture), 0) != 0 || fseek(capture, 0, SEEK_SET) != 0) return false;
+    opw_note_output_growth(path, size, last);
+    if (opw_progress_bytes(progress) != emitted || *size != 0) return false;
+    if (fputs("xy", capture) < 0 || fflush(capture) != 0) return false;
+    opw_note_output_growth(path, size, last);
+    return *size == 2 && opw_progress_bytes(progress) > emitted;
+}
+
+static bool opw_growth_exercise(const char *path, const char *missing,
+                                FILE *capture, FILE *progress)
+{
+    off_t size = -1;
+    int64_t last = 0;
+    opw_note_output_growth(path, &size, &last);
+    bool ok = size == 0 && opw_progress_bytes(progress) == 0;
+    if (ok) ok = fputs("x", capture) >= 0 && fflush(capture) == 0;
+    if (ok) opw_note_output_growth(path, &size, &last);
+    off_t emitted = opw_progress_bytes(progress);
+    if (ok && emitted <= 0) {
+        fprintf(stderr, "capture-growth observer: size=%lld emitted=%lld\n",
+                (long long)size, (long long)emitted);
+        ok = false;
+    }
+    int64_t observed = last;
+    if (ok) opw_note_output_growth(path, &size, &last);
+    if (ok) ok = last == observed && opw_progress_bytes(progress) == emitted;
+    if (ok) opw_note_output_growth(missing, &size, &last);
+    if (ok) ok = last == observed && size == 1 && opw_progress_bytes(progress) == emitted;
+    if (ok) ok = opw_growth_again(path, capture, progress, &size, &last, emitted);
+    return ok;
+}
+
+struct opw_fixture {
+    char tmpdir[512], path[PATH_MAX], missing[PATH_MAX];
+    FILE *capture, *progress;
+    int saved;
+};
+
+static bool opw_fixture_open(struct opw_fixture *f)
+{
+    f->saved = -1;
+    if (!test_mkdtemp(f->tmpdir, sizeof(f->tmpdir), "zcl_opw_progress")) return false;
+    int n = snprintf(f->path, sizeof(f->path), "%s/capture", f->tmpdir);
+    int m = snprintf(f->missing, sizeof(f->missing), "%s/missing", f->tmpdir);
+    if (n <= 0 || (size_t)n >= sizeof(f->path) || m <= 0 || (size_t)m >= sizeof(f->missing)) return false;
+    f->capture = fopen(f->path, "w+");
+    f->progress = tmpfile();
+    if (!f->capture || !f->progress || fflush(stdout) != 0) return false;
+    f->saved = dup(STDOUT_FILENO);
+    return f->saved >= 0 && dup2(fileno(f->progress), STDOUT_FILENO) >= 0;
+}
+
+static bool opw_fixture_close(struct opw_fixture *f)
+{
+    bool ok = true;
+    if (f->saved >= 0) {
+        if (fflush(stdout) != 0) ok = false;
+        if (dup2(f->saved, STDOUT_FILENO) < 0) ok = false;
+        if (close(f->saved) != 0) ok = false;
+    }
+    if (f->capture && fclose(f->capture) != 0) ok = false;
+    if (f->progress && fclose(f->progress) != 0) ok = false;
+    if (f->capture && unlink(f->path) != 0) ok = false;
+    if (f->tmpdir[0] && rmdir(f->tmpdir) != 0) ok = false;
+    return ok;
+}
+
+int test_onion_pair_watch_progress(void)
+{
+    struct opw_fixture f = {0};
+    bool ok = opw_fixture_open(&f);
+    if (ok) ok = opw_growth_exercise(f.path, f.missing, f.capture, f.progress);
+    if (!opw_fixture_close(&f)) ok = false;
+    printf("onion_pair_watch_progress: %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
 }
 
 /* Wedge recovery for a child that went silent: SIGTERM its process group,
