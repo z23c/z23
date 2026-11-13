@@ -4,6 +4,7 @@
 #endif
 #include "test/test_core.h"
 #include "command/native_app_adopt.h"
+#include "command/native_app_confirm.h"
 #include "command/native_command.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
@@ -301,6 +302,7 @@ static bool ad_nav(const struct zcl_present_window_live_view_v1 *live,
 }
 static bool ad_visit(const struct zcl_present_window_live_view_v1 *live, uint32_t pages)
 {
+    if (!ad_nav(live, ZCL_PRESENT_INPUT_PAGE_UP, 1, true)) return false;
     if (!ad_nav(live, ZCL_PRESENT_INPUT_PAGE_UP, 1, false)) return false;
     for (uint32_t i = 1; i < pages; ++i) {
         if (!ad_nav(live, ZCL_PRESENT_INPUT_PAGE_DOWN, 2, true)) return false;
@@ -340,7 +342,9 @@ static bool ad_present_confirmation(struct ad_fake *f,
     const struct zcl_present_window_live_view_v1 *live, uint32_t pages)
 {
     bool close = false, redraw = false;
-    if (!ad_action(live, 3, &close, &redraw) || close) return false;
+    if (!ad_action(live, 3, &close, &redraw) || close || !redraw) return false;
+    const struct app_confirm *view = live->owner.context;
+    if (view->confirmed || view->page_index != 1 || (view->visited & 3u) != 3u) return false;
     f->safe = true;
     if (f->decision == AD_EARLY) return true;
     f->all_pages = ad_visit(live, pages);

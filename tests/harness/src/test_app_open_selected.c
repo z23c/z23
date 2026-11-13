@@ -9,6 +9,7 @@
 #include "chain/chainparams.h"
 #include "command/app_image.h"
 #include "command/native_app_launch.h"
+#include "command/native_app_confirm.h"
 #include "command/app_selection.h"
 #include "command/native_app_receive_command.h"
 #include "command/native_app_receive_preview.h"
@@ -788,6 +789,14 @@ static bool aso_keep_mutate(struct aso_keep_view *v)
     }
     return true;
 }
+/* Confirm before the last page refuses approval and guides to page one. */
+static bool aj_receive_early_guided(const struct zcl_present_window_live_view_v1 *live)
+{
+    bool close = false, redraw = false;
+    if (!aj_receive_action(live, 3, &close, &redraw) || close || !redraw) return false;
+    const struct app_confirm *view = live->owner.context;
+    return !view->confirmed && view->page_index == 1 && (view->visited & 3u) == 3u;
+}
 static bool aso_keep_choose(const struct zcl_present_window_live_view_v1 *live,
     unsigned mode, uint32_t count)
 {
@@ -798,8 +807,8 @@ static bool aso_keep_choose(const struct zcl_present_window_live_view_v1 *live,
         live->owner.update(live->owner.context, &event, true, &redraw, &close);
         return close;
     }
-    if (count > 1 && (!aj_receive_action(live, 3, &close, &redraw) || close)) return false;
-    for (uint32_t i = 1; i < count; ++i)
+    if (count > 1 && !aj_receive_early_guided(live)) return false;
+    for (uint32_t i = 2; i < count; ++i)
         if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return aj_receive_action(live, 3, &close, &redraw) && close;
 }
@@ -1484,8 +1493,8 @@ static bool aj_receive_present(void *context, const struct zcl_present_model_v1 
         aj_receive_fields(model, view);
     if (!view->observed) return false;
     bool close = false, redraw = false;
-    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
-    for (uint32_t i = 1; i < count; ++i)
+    if (!aj_receive_early_guided(live)) return false;
+    for (uint32_t i = 2; i < count; ++i)
         if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
     view->visited = true;
     view->confirmed = aj_receive_action(live, 3, &close, &redraw) && close;
@@ -1586,8 +1595,8 @@ static bool aj_share_present(void *context, const struct zcl_present_model_v1 *m
         aj_share_fields(model, view);
     if (!view->observed) return false;
     bool close = false, redraw = false;
-    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
-    for (uint32_t i = 1; i < count; ++i)
+    if (!aj_receive_early_guided(live)) return false;
+    for (uint32_t i = 2; i < count; ++i)
         if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
     view->visited = true;
     view->confirmed = aj_receive_action(live, 3, &close, &redraw) && close;
@@ -2223,12 +2232,17 @@ static bool ak_draft_stop_preview(struct ak_fixture *f, const struct zcl_command
     const struct json_value *data = &reply->data;
     if (!json_get(data, "operations")) data = json_get(json_get(data, "failure_facts"), "historical_keep");
     const struct json_value *open = json_at(json_get(data, "operations"), 2);
-    const struct json_value *pid = json_get(open, "pid"); char proc[64];
-    if (!pid || pid->type != JSON_INT) return false;
-    (void)snprintf(proc, sizeof(proc), "/proc/%lld/exe", (long long)json_get_int(pid));
-    ssize_t n = readlink(proc, f->build.image_path, sizeof(f->build.image_path) - 1);
-    if (n <= 0) return false;
-    f->build.image_path[n] = 0; aso_track_ready(open, &f->build);
+    const struct json_value *pid = json_get(open, "pid");
+    const char *image = aso_string(open, "image_sha3"); uint8_t digest[32];
+    uint64_t expected = 0, actual = 0; char path[APP_LAUNCH_PATH_MAX];
+    if (!pid || pid->type != JSON_INT || json_get_int(pid) <= 1 || json_get_int(pid) > LONG_MAX ||
+        !aj_start_token(open, &expected) || !zcl_hex_decode_lower(image, digest, sizeof(digest))) return false;
+    int n = snprintf(f->build.image_path, sizeof(f->build.image_path), "%s/app_build/images/%s",
+                     f->world.bob_datadir, image);
+    if (n <= 0 || (size_t)n >= sizeof(f->build.image_path) ||
+        !app_proc_identity((long)json_get_int(pid), path, &actual) || actual != expected ||
+        strcmp(path, f->build.image_path)) return false;
+    aso_track_ready(open, &f->build);
     return aso_cleanup_children();
 }
 static bool ak_draft_selection_result(struct ak_fixture *f, bool keep, const struct app_selection *before,
@@ -2942,8 +2956,8 @@ static bool rr_consent_pages(struct rr_consent *view,
 {
     bool close = false, redraw = false;
     if (view->cancel) return aj_receive_action(live, 0, &close, &redraw) && close;
-    if (!aj_receive_action(live, 3, &close, &redraw) || close) return false;
-    for (uint32_t i = 1; i < count; ++i)
+    if (!aj_receive_early_guided(live)) return false;
+    for (uint32_t i = 2; i < count; ++i)
         if (!aj_receive_action(live, 2, &close, &redraw) || close || !redraw) return false;
     view->confirmed = aj_receive_action(live, 3, &close, &redraw) && close;
     return view->confirmed;

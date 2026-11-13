@@ -151,7 +151,22 @@ static void ac_update(void *context, const struct zcl_present_window_event_v1 *e
         if (event->action_index == 3) {
             uint32_t all = (1u << w->page_count) - 1u;
             w->confirmed = w->visited == all;
-            if (w->confirmed) *allow_close = true;
+            if (w->confirmed) {
+                *allow_close = true;
+                return;
+            }
+            /* Refused confirm: guide to the first unseen page instead of a
+             * silent no-op. The page is rendered before the next press, so
+             * marking it visited matches the paging actions; confirm still
+             * refuses until every page has been shown. */
+            for (uint32_t page = 0; page < w->page_count; ++page) {
+                if (w->visited & (1u << page)) continue;
+                w->page_index = page;
+                w->page.pixels = w->bitmaps[page].pixels;
+                w->visited |= 1u << page;
+                *redraw = true;
+                break;
+            }
             return;
         }
         w->confirmed = false;

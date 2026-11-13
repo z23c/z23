@@ -167,6 +167,7 @@ struct rt_presenter {
     struct receive_fixture *fixture;
     enum rt_decision decision;
     bool observed, visited, swapped;
+    bool early_guided;/* refused confirm redraws and jumps to the first unseen page */
 };
 static bool rt_absent(const struct receive_fixture *f);
 static bool rt_action(const struct zcl_present_window_live_view_v1 *live,
@@ -242,6 +243,24 @@ static bool rt_progress_present(const struct zcl_present_model_v1 *m,
     } while (platform_time_monotonic_ms() < end);
     return false;
 }
+/* Press the confirm action on a multi-page consent: the refusal must guide
+ * (redraw, first unseen page marked visited) and the remaining Next presses
+ * start from the page the refusal landed on. */
+static bool rt_page_through(struct rt_presenter *p,
+    const struct zcl_present_window_live_view_v1 *live, uint32_t count)
+{
+    bool close = false, redraw = false;
+    if (!rt_action(live, 3, &close, &redraw) || close) return false;
+    if (p->decision == RT_EARLY) {
+        const struct app_confirm *w = live->owner.context;
+        p->early_guided = redraw && !w->confirmed &&
+            w->page_index == 1 && (w->visited & 3u) == 3u;
+        return true;
+    }
+    for (uint32_t i = 2; i < count; ++i)
+        if (!rt_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    return true;
+}
 static bool rt_present(void *context, const struct zcl_present_model_v1 *m,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
@@ -258,10 +277,8 @@ static bool rt_present(void *context, const struct zcl_present_model_v1 *m,
         live->owner.update(live->owner.context, &event, true, &redraw, &close);
         return close;
     }
-    if (!rt_action(live, 3, &close, &redraw) || close) return false;
-    if (p->decision == RT_EARLY) return true;
-    for (uint32_t i = 1; i < count; ++i)
-        if (!rt_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    if (!rt_page_through(p, live, count)) return false;
+    if (p->decision == RT_EARLY) return p->early_guided;
     p->visited = true;
     return rt_finish(p, live);
 }
@@ -304,6 +321,7 @@ static bool rt_attempt(struct receive_fixture *f, enum rt_decision decision)
     struct rt_presenter p = {.fixture = f, .decision = decision};
     zcl_test_app_receive_run(&request, &reply, rt_present, &p);
     bool ok = p.observed && rt_expected_reply(&p, &reply);
+    if (decision == RT_EARLY) ok = ok && p.early_guided;
     if (decision != RT_CONFIRM) ok = ok && !reply.error.mutated && rt_absent(f);
     if (p.swapped) {
         if (rename(f->file, f->alternate) || rename(f->backup, f->file)) ok = false;
@@ -1226,6 +1244,17 @@ static int rt_wrap_cases(void)
     } _test_next:;
     return failures;
 }
+static int rg_cases(void)
+{
+    int failures = 0;
+    TEST("refused confirm guides to the first unvisited consent page instead of a silent no-op") {
+        struct receive_fixture f;
+        ASSERT(rt_setup(&f));
+        ASSERT(rt_attempt(&f, RT_EARLY));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int rr_cases(void)
 {
     int failures = 0;
@@ -1406,6 +1435,7 @@ int test_app_receive(void)
         ASSERT(rt_received(&f));
         PASS();
     } _test_next:;
+    failures += rg_cases();
     failures += rr_cases();
     failures += rp_cases();
     failures += rpb_receipt_reserve();
@@ -1680,10 +1710,14 @@ static bool ru_pages(struct ru_run *r, uint32_t count)
     if (!ru_driver(r, "--key=tab", true)) return false;
     /* Three more Tabs reach Confirm=3. */
     for (unsigned i = 0; i < 3; ++i) if (!ru_driver(r, "--key=tab", true)) return false;
-    if (!ru_driver(r, "--key=enter", false) || !ru_window(r, true) || !ru_pending(r)) return false;
-    /* From Confirm, wrap Cancel -> Back -> Next. Enter keeps Next focus. */
+    /* The refused confirm now guides: it jumps to the first unseen page, so
+     * the pixels change instead of the window sitting silent. */
+    if (!ru_driver(r, "--key=enter", true) || !ru_window(r, true) || !ru_pending(r)) return false;
+    /* From Confirm, wrap Cancel -> Back -> Next. Enter keeps Next focus.
+     * The refused confirm already landed on page 1, so the remaining
+     * Next presses cover pages 2..count-1. */
     for (unsigned i = 0; i < 3; ++i) if (!ru_driver(r, "--key=tab", true)) return false;
-    for (uint32_t page = 1; page < count; ++page)
+    for (uint32_t page = 2; page < count; ++page)
         if (!ru_driver(r, "--key=enter", true) || !ru_pending(r)) return false;
     return ru_driver(r, "--key=tab", true) && ru_driver(r, "--key=enter", false);
 }

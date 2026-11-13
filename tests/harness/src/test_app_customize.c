@@ -5,6 +5,7 @@
 #include "base/hex.h"
 #include "chain/chainparams.h"
 #include "command/native_app_launch.h"
+#include "command/native_app_confirm.h"
 #include "command/native_app_personalize_command.h"
 #if defined(ZCL_TESTING)
 #include "command/native_app_personalize_view.h"
@@ -2185,6 +2186,13 @@ static bool ast_observe(struct ast_present *p, const struct zcl_present_model_v1
         (!p->package || ast_field(model, "Package: ", p->package)) &&
         zcl_present_model_page_count_v1(model, count, why, cap);
 }
+static bool ast_early_guided(const struct zcl_present_window_live_view_v1 *live)
+{
+    bool close = false, redraw = false;
+    if (!ast_action(live, 3, &close, &redraw) || close || !redraw) return false;
+    const struct app_confirm *view = live->owner.context;
+    return !view->confirmed && view->page_index == 1 && (view->visited & 3u) == 3u;
+}
 static bool ast_presenter(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
@@ -2194,8 +2202,8 @@ static bool ast_presenter(void *context, const struct zcl_present_model_v1 *mode
     if (!p->observed || p->fail) return false;
     bool close = false, redraw = false;
     if (!p->confirm) return ast_action(live, 0, &close, &redraw) && close;
-    if (count > 1 && (!ast_action(live, 3, &close, &redraw) || close)) return false;
-    for (uint32_t i = 1; i < count; ++i)
+    if (count > 1 && !ast_early_guided(live)) return false;
+    for (uint32_t i = 2; i < count; ++i)
         if (!ast_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return ast_inject(p) && ast_action(live, 3, &close, &redraw) && close;
 }
@@ -2252,10 +2260,10 @@ static bool apbt_inject(struct apbt_present *p)
     p->injected = true;
     return act_preserved(p->f, true); /* Preserve the concurrent writer's new state. */
 }
-static bool apbt_visit(const struct zcl_present_window_live_view_v1 *live, uint32_t count)
+static bool apbt_visit(const struct zcl_present_window_live_view_v1 *live, uint32_t count, uint32_t start)
 {
     bool close = false, redraw = false;
-    for (uint32_t i = 1; i < count; ++i)
+    for (uint32_t i = start; i < count; ++i)
         if (!ast_action(live, 2, &close, &redraw) || close || !redraw) return false;
     return true;
 }
@@ -2279,9 +2287,9 @@ static bool apbt_presenter(void *context, const struct zcl_present_model_v1 *mod
     if (!p->observed || p->mode == APBT_HEADLESS) return false;
     bool close = false, redraw = false;
     if (p->mode == APBT_CANCEL) return ast_action(live, 0, &close, &redraw) && close;
-    if (!ast_action(live, 3, &close, &redraw) || close) return false;
+    if (!ast_early_guided(live)) return false;
     if (p->mode == APBT_EARLY) return true;
-    if (!apbt_visit(live, count)) return false;
+    if (!apbt_visit(live, count, 2)) return false;
     return apbt_confirm_after_pages(p, live, &close, &redraw);
 }
 static bool apbt_run(struct apbt_present *p, struct json_value *input, struct zcl_command_reply *reply)
@@ -2423,7 +2431,7 @@ static bool asb_presenter(void *context, const struct zcl_present_model_v1 *mode
         !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
     bool close = false, redraw = false;
     if (!p->confirm) return ast_action(live, 0, &close, &redraw) && close;
-    return apbt_visit(live, count) && ast_action(live, 3, &close, &redraw) && close;
+    return apbt_visit(live, count, 1) && ast_action(live, 3, &close, &redraw) && close;
 }
 static bool asb_prepared(struct ac_fixture *f, struct abc_leaf *l, bool expect_view, struct asb_source *source)
 {
