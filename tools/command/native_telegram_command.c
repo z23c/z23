@@ -584,8 +584,14 @@ static void tg_inbox_poll(struct zcl_command_reply *reply, const struct tg_confi
 
 static bool tg_inbox_options(const struct zcl_command_request *request,
                              struct zcl_command_reply *reply, const struct tg_config *cfg,
-                             bool *reliable, int64_t *group, const char **ack)
+                             bool *reliable, int64_t *group, const char **ack, int64_t *bot_id)
 {
+    if (!tg_parse_i64(cfg->token, strcspn(cfg->token, ":"), bot_id) || *bot_id <= 0) {
+        tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_BOT_ID", "credentials",
+                false, false, "the configured bot identity must be positive",
+                "configure a valid bot token");
+        return false;
+    }
     const struct json_value *in = request ? request->input : NULL;
     const struct json_value *r = json_get(in, "reliable");
     const struct json_value *g = json_get(in, "group_chat_id");
@@ -617,6 +623,17 @@ static void tg_inbox_locked(struct zcl_command_reply *reply, const struct tg_con
         tg_inbox_poll(reply, cfg, dir, wait_s, reliable, group);
 }
 
+static bool tg_inbox_wait(const struct zcl_command_request *request,
+                           struct zcl_command_reply *reply, int64_t *seconds)
+{
+    const struct json_value *wait = request && request->input ? json_get(request->input, "wait_s") : NULL;
+    *seconds = wait && wait->type == JSON_INT ? json_get_int(wait) : 0;
+    if (*seconds >= 0 && *seconds <= TG_WAIT_MAX) return true;
+    tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_WAIT", "normalize", false, false,
+            "wait_s must be 0..50", "z23 telegram inbox --wait_s=30");
+    return false;
+}
+
 void zcl_native_handle_ops_telegram_inbox(const struct zcl_command_request *request,
                                           struct zcl_command_reply *reply)
 {
@@ -625,16 +642,14 @@ void zcl_native_handle_ops_telegram_inbox(const struct zcl_command_request *requ
     struct platform_process_lock lock;
     bool reliable = false;
     int64_t group = 0;
+    int64_t bot_id = 0;
     const char *ack = NULL;
-    const struct json_value *wait = request && request->input ? json_get(request->input, "wait_s") : NULL;
-    int64_t wait_s = wait && wait->type == JSON_INT ? json_get_int(wait) : 0;
+    int64_t wait_s = 0;
     if (!reply || !tg_load(reply, &cfg))
         return;
     platform_process_lock_init(&lock);
-    if (!tg_inbox_options(request, reply, &cfg, &reliable, &group, &ack)) { }
-    else if (wait_s < 0 || wait_s > TG_WAIT_MAX)
-        tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_WAIT", "normalize", false, false,
-                "wait_s must be 0..50", "z23 telegram inbox --wait_s=30");
+    if (!tg_inbox_options(request, reply, &cfg, &reliable, &group, &ack, &bot_id) ||
+        !tg_inbox_wait(request, reply, &wait_s)) { }
     else if (!cfg.has_chat && cfg.allow_count == 0)
         tg_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "TELEGRAM_NO_ALLOWLIST", "allowlist", false, false,
                 "no TELEGRAM_CHAT_ID or TELEGRAM_ALLOW_FROM user is configured", "z23 telegram configure < telegram.env");
@@ -645,6 +660,13 @@ void zcl_native_handle_ops_telegram_inbox(const struct zcl_command_request *requ
                 "another process on this host is polling this bot", "wait for it to finish");
     else
         tg_inbox_locked(reply, &cfg, dir, wait_s, reliable, group, ack);
+    /* Bind deliveries to the exact credentials used above, without getMe or
+     * changing persisted batch bytes/receipts (including older pending batches).
+     * Like inbox emission, allocation may fail after an ACK has committed;
+     * consumers must retain their durable dispositions on an uncertain ACK. */
+    if (reliable && reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        !json_push_kv_int(&reply->data, "bot_id", bot_id))
+        tg_internal(reply, "inbox_identity");
     platform_process_lock_release(&lock);
     memory_cleanse(&cfg, sizeof(cfg));
 }
