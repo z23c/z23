@@ -323,12 +323,14 @@ static bool pe_take_u64(struct pe_view *r, uint64_t *out)
 static bool pe_take_str(struct pe_view *r, char *out, size_t cap)
 {
     uint32_t n;
-    const uint8_t *b;
+    /* pe_take assigns *out only on success; the defensive init keeps LTO
+     * builds from reading the maybe-uninitialized fall-through the old
+     * code actually had. */
+    const uint8_t *b = NULL;
     if (!pe_take_u32(r, &n)) return false;
     if (n >= cap || !pe_take(r, (const void **)&b, n)) {
         LOG_FAIL(PE_TAG, "an archive field of %u bytes is truncated or does not fit %zu", (unsigned)n, cap);
-        return false; /* b is unassigned here; the old fall-through read it
-                        uninitialized and could write past cap */
+        return false;
     }
     memcpy(out, b, n);
     out[n] = 0;
