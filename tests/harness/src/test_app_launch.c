@@ -17,6 +17,9 @@
 #endif
 
 #include "test/test_core.h"
+#include "test/app_seed_fixture.h"
+
+#include <dirent.h>
 
 #include "command/native_app_launch.h"
 #include "command/native_app_share_command.h"
@@ -2598,6 +2601,462 @@ static int case_discover_page_view(void)
     return failures;
 }
 
+/* ── A successful draft Keep with a pending Discover error ─────────────
+ * The Keep advanced the selection on disk, so the error reply the caller
+ * sees must still carry the kept receipt as bounded failure facts instead
+ * of reporting the old Discover error with zero keep evidence. ── */
+
+static const char k_al_keep_makefile[] =
+    ".PHONY: app print-app-closure\n"
+    "print-app-closure:\n"
+    "\t@printf '%s\\n' Makefile include/tiny.h src/main.c\n"
+    "app:\n"
+    "\tcc -std=c2x -O2 -Iinclude -MD -MF $(APP_OUT)/main.d -c src/main.c "
+    "-o $(APP_OUT)/main.o\n"
+    "\tcc -o $(APP_OUT)/app $(APP_OUT)/main.o\n";
+
+static const char k_al_keep_meta[] =
+    "{\n  \"schema\": 1,\n  \"name\": \"stub/tinyapp\",\n"
+    "  \"semver\": \"0.1.0\",\n  \"language\": \"c23\",\n"
+    "  \"license\": \"Apache-2.0\",\n  \"include_dir\": \"include\",\n"
+    "  \"source_dir\": \"src\",  \"dependencies\": []\n}\n";
+
+static const char k_al_keep_main[] =
+    "#include <stdio.h>\n#include <unistd.h>\n#include \"tiny.h\"\n"
+    "int main(void) { puts(TINY_NAME \" ready\"); fflush(stdout);\n"
+    "    pause(); return 0; }\n";
+
+struct al_keep_xdg { char *config, *state, *home; bool entered; };
+
+struct al_keep_world {
+    char root[512], repo[600], worker[PATH_MAX], license[4096];
+    char route[APP_SELECTION_ID_MAX + 1], copy_dir[PATH_MAX];
+    struct al_keep_xdg xdg;
+    struct asf_journey j;
+};
+
+/* The stub checkout app.seed accepts, mirroring the app_get journey tree. */
+static bool al_keep_checkout(struct al_keep_world *w)
+{
+    static const char *const tree[][2] = {
+        {"", NULL}, {"engine", NULL}, {"engine/composition", NULL},
+        {"engine/composition/commands", NULL}, {"tools", NULL},
+        {"tools/dev", NULL}, {"apps", NULL}, {"apps/tinyapp", NULL},
+        {"apps/tinyapp/include", NULL}, {"apps/tinyapp/src", NULL},
+        {"Makefile", "# fixture checkout\n"},
+        {"engine/composition/commands/root.def", "\n"},
+        {"tools/dev/test_group_catalog.def", "\n"},
+        {"apps/tinyapp/zcode-package.json", k_al_keep_meta},
+        {"apps/tinyapp/include/tiny.h", "#define TINY_NAME \"tinyapp\"\n"},
+        {"apps/tinyapp/src/main.c", k_al_keep_main},
+        {"apps/tinyapp/Makefile", k_al_keep_makefile},
+        {"apps/tinyapp/LICENSE", ""}};
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(tree) / sizeof(tree[0]); ++i) {
+        char path[PATH_MAX];
+        const char *text = tree[i][1];
+        if (text && !strcmp(tree[i][0], "apps/tinyapp/LICENSE")) text = w->license;
+        ok = snprintf(path, sizeof(path), "%s/%s", w->repo, tree[i][0]) < (int)sizeof(path);
+        ok = ok && (text ? asf_put(w->repo, tree[i][0], text)
+                         : mkdir(path, 0700) == 0);
+    }
+    return ok;
+}
+
+struct al_keep_xdg { char *config, *state, *home; bool entered; };
+
+static bool al_keep_xdg_enter(struct al_keep_xdg *x, const char *home)
+{
+    memset(x, 0, sizeof(*x));
+    const char *config = getenv("XDG_CONFIG_HOME"), *state = getenv("XDG_STATE_HOME");
+    const char *own = getenv("HOME");
+    x->config = config ? strdup(config) : NULL;
+    x->state = state ? strdup(state) : NULL;
+    x->home = own ? strdup(own) : NULL;
+    if ((config && !x->config) || (state && !x->state) || (own && !x->home)) return false;
+    x->entered = true;
+    return setenv("XDG_CONFIG_HOME", home, 1) == 0 &&
+        setenv("XDG_STATE_HOME", home, 1) == 0 && setenv("HOME", home, 1) == 0;
+}
+
+static void al_keep_xdg_leave(struct al_keep_xdg *x)
+{
+    if (!x->entered) return;
+    if (x->config) (void)setenv("XDG_CONFIG_HOME", x->config, 1);
+    else (void)unsetenv("XDG_CONFIG_HOME");
+    if (x->state) (void)setenv("XDG_STATE_HOME", x->state, 1);
+    else (void)unsetenv("XDG_STATE_HOME");
+    if (x->home) (void)setenv("HOME", x->home, 1);
+    else (void)unsetenv("HOME");
+    free(x->config);
+    free(x->state);
+    free(x->home);
+    memset(x, 0, sizeof(*x));
+}
+
+/* The kept route name a receive of this copy commits under: the same
+ * framed fork/copy/datadir hash the receive route domain names. */
+static bool al_keep_route_name(const char *copy_dir, const char *datadir,
+    char out[APP_SELECTION_ID_MAX + 1])
+{
+    struct zcl_package_copy copy;
+    struct zcl_command_reply why;
+    struct sha3_256_ctx sha;
+    uint8_t digest[32];
+    char hex[65], canonical[PATH_MAX], home[PATH_MAX];
+    zcl_command_reply_init(&why, "zcl.test.app_launch.v1");
+    bool ok = realpath(copy_dir, canonical) && realpath(datadir, home);
+    if (!ok)
+        printf("  [keep-receipt: route paths unavailable (%s, %s)]\n", copy_dir, datadir);
+    if (ok) {
+        /* READ opens the copy's own selected version. */
+        ok = zcl_package_copy_open_selected_as(canonical, ZCL_PACKAGE_COPY_READ,
+            &copy, &why, "test.app_launch", NULL);
+        if (!ok)
+            printf("  [keep-receipt: route copy open refused: %s (%.120s)]\n",
+                   why.error.code, why.error.message);
+    }
+    if (ok) {
+        sha3_256_init(&sha);
+        sha3_256_write(&sha, (const unsigned char *)"zcl.app.receive.route.v1",
+            sizeof("zcl.app.receive.route.v1"));
+        sha3_256_write(&sha, copy.fork_version, 32);
+        sha3_256_write(&sha, (const unsigned char *)canonical, strlen(canonical) + 1);
+        sha3_256_write(&sha, (const unsigned char *)home, strlen(home) + 1);
+        sha3_256_finalize(&sha, digest);
+        zcl_hex_encode(digest, 32, hex);
+        ok = snprintf(out, APP_SELECTION_ID_MAX + 1, "kept:received-%.18s", hex) <
+            APP_SELECTION_ID_MAX + 1;
+        zcl_package_copy_close(&copy);
+    }
+    zcl_command_reply_free(&why);
+    return ok;
+}
+
+/* The keep input names the exact build identity the build leaf just named. */
+static bool al_keep_input_from_build(struct asf_leaf *keep, const struct asf_leaf *build,
+    const char *route, const char *copy_dir, const char *datadir)
+{
+    asf_open(keep);
+    return json_push_kv_str(&keep->in, "name", route) &&
+        json_push_kv_str(&keep->in, "version", asf_get(build, "version")) &&
+        json_push_kv_str(&keep->in, "copy", copy_dir) &&
+        json_push_kv_str(&keep->in, "datadir", datadir) &&
+        json_push_kv_str(&keep->in, "env_root", asf_get(build, "env_root")) &&
+        json_push_kv_str(&keep->in, "dependency_root", asf_get(build, "dependency_root")) &&
+        json_push_kv_str(&keep->in, "image_sha3", asf_get(build, "image_sha3")) &&
+        json_push_kv_str(&keep->in, "record_id", asf_get(build, "record_id")) &&
+        json_push_kv_int(&keep->in, "expected_revision", 0) &&
+        json_push_kv_bool(&keep->in, "accept_execution", true);
+}
+
+/* Keep B's received copy through the app.keep leaf: the build leaf names its
+ * exact roots, and keep pins them as B's saved choice (revision 1). */
+static bool al_keep_received_kept(struct al_keep_world *w)
+{
+    char route[APP_SELECTION_ID_MAX + 1], copy_dir[PATH_MAX];
+    struct asf_leaf build, keep;
+    int n = snprintf(copy_dir, sizeof(copy_dir), "%s/copies/%s", w->j.b_datadir, w->j.b_copy);
+    if (n <= 0 || (size_t)n >= sizeof(copy_dir)) return false;
+    (void)snprintf(w->copy_dir, sizeof(w->copy_dir), "%s", copy_dir);
+    asf_build(&build, copy_dir, w->j.b_datadir);
+    bool ok = build.out.status == ZCL_COMMAND_STATUS_PASSED;
+    if (!ok)
+        printf("  [keep-receipt: B's app.build refused: %s]\n", build.out.error.code);
+    ok = ok && al_keep_route_name(copy_dir, w->j.b_datadir, route);
+    if (ok) (void)snprintf(w->route, sizeof(w->route), "%s", route);
+    if (!ok && build.out.status == ZCL_COMMAND_STATUS_PASSED)
+        printf("  [keep-receipt: B's kept route name failed]\n");
+    if (ok) {
+        ok = al_keep_input_from_build(&keep, &build, route, copy_dir, w->j.b_datadir) &&
+            asf_exec("app.keep", &keep) &&
+            keep.out.status == ZCL_COMMAND_STATUS_PASSED &&
+            !strcmp(asf_get(&keep, "status"), "kept");
+        if (!ok)
+            printf("  [keep-receipt: B's app.keep refused: %s]\n", keep.out.error.code);
+        asf_close(&keep);
+    }
+    asf_close(&build);
+    return ok;
+}
+
+/* A: seed, copy, one edit, then save, build, open and share. */
+static bool al_keep_a_side(struct al_keep_world *w)
+{
+    if (!al_keep_xdg_enter(&w->xdg, w->j.a_home)) return false;
+    bool ok = asf_journey_copy(&w->j) &&
+        asf_put(w->j.a_copy, "include/tiny.h", "#define TINY_NAME \"tinyapp-shared\"\n") &&
+        asf_journey_save_build_open(&w->j) && asf_journey_share(&w->j);
+    al_keep_xdg_leave(&w->xdg);
+    return ok;
+}
+
+/* B: receive A's share in her own home, then keep it (revision 1). */
+static bool al_keep_b_side(struct al_keep_world *w)
+{
+    if (!al_keep_xdg_enter(&w->xdg, w->j.b_home)) return false;
+    bool ok = asf_journey_receive(&w->j) && al_keep_received_kept(w);
+    if (!ok) al_keep_xdg_leave(&w->xdg);
+    return ok;
+}
+
+/* Real received and kept tinyapp in B's home, every step through the typed
+ * leaves. A's HOME and XDG roots are entered for A's steps, B's for hers,
+ * so B's receive commits its state into her own home instead of A's or the
+ * runner's. */
+static bool al_keep_world_init(struct al_keep_world *w)
+{
+    memset(w, 0, sizeof(*w));
+    FILE *f = fopen("apps/skycombat/LICENSE", "rb");
+    size_t n = f ? fread(w->license, 1, sizeof(w->license) - 1u, f) : 0;
+    if (f) (void)fclose(f);
+    w->license[n] = 0;
+    if (!n || !test_mkdtemp(w->root, sizeof(w->root), "app_launch_keep") ||
+        !realpath("build/bin/z23-dev", w->worker))
+        return false;
+    (void)snprintf(w->repo, sizeof(w->repo), "%s/repo", w->root);
+    return al_keep_checkout(w) &&
+        asf_journey_init(&w->j, "tinyapp", w->repo, w->root) &&
+        al_keep_a_side(w) && al_keep_b_side(w);
+}
+
+struct al_keep_script {
+    bool valid, saw_review, saw_preview, kept_card;
+    unsigned home_calls, errors, notices, cards;
+    char last_summary[241], card_value[128];
+};
+
+/* The node's board refusal, verbatim, so Discover fails with the real
+ * named error instead of an offline transport guess. */
+static char *al_keep_board_down(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "fleet_board")) return NULL;
+    return strdup("{\"ok\":false,\"code\":\"NODE_DB_UNAVAILABLE\",\"message\":"
+        "\"the node database is not open; the board lives in it\"}");
+}
+
+static bool al_keep_press(const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event, const char *id)
+{
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, id)) {
+            event->struct_size = sizeof(*event);
+            event->abi_version = ZCL_PRESENT_ABI_V1;
+            event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+            event->action_index = i;
+            return true;
+        }
+    return false;
+}
+
+/* home(discover) -> options(catalog) -> error(back) -> home(myapps)
+ * -> list(choose) -> card(change-options) -> page(draft). */
+static bool al_keep_room(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct al_keep_script *s = context;
+    (void)copy;
+    s->valid = s->valid && zcl_present_model_validate_v1(model, why, cap);
+    (void)snprintf(s->last_summary, sizeof(s->last_summary), "%s", model->summary);
+    event->struct_size = sizeof(*event);
+    event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(model->request_id, "library-home")) {
+        ++s->home_calls;
+        return al_keep_press(model, event, s->home_calls == 1 ? "discover" : "myapps");
+    }
+    if (!strcmp(model->request_id, "library-discover-options"))
+        return al_keep_press(model, event, "catalog");
+    if (!strcmp(model->request_id, "discover-error")) {
+        ++s->errors;
+        return al_keep_press(model, event, "back");
+    }
+    if (!strncmp(model->request_id, "library-", 8) && model->action_count) {
+        if (!strcmp(model->actions[0].id, "choose"))
+            return al_keep_press(model, event, "choose");
+        if (!strcmp(model->actions[0].id, "open")) {
+            /* The second app card is the kept one: this visit proves the room
+             * stayed open after the Keep instead of ejecting the user. */
+            if (++s->cards >= 2) {
+                s->kept_card = true;
+                if (model->item_count)
+                    (void)snprintf(s->card_value, sizeof(s->card_value), "%s", model->items[0].value);
+                event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+                return true;
+            }
+            return al_keep_press(model, event, "change-options");
+        }
+        if (!strcmp(model->actions[0].id, "draft"))
+            return al_keep_press(model, event, "draft");
+    }
+    s->valid = false;
+    event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+    return true;
+}
+
+/* The draft flow's own windows: press continue on each choice (every page
+ * must be visited before Keep confirms) and wait out each progress window. */
+static bool al_keep_notice(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct al_keep_script *s = context;
+    (void)pages;
+    s->valid = s->valid && zcl_present_model_validate_v1(model, why, cap);
+    ++s->notices;
+    s->saw_review |= model->action_count == 4 && !strcmp(model->title, "Review unkept changes");
+    s->saw_preview |= model->action_count == 4 && !strcmp(model->title, "Preview opened");
+    bool redraw = false, close = false;
+    if (model->action_count == 4 && !strcmp(model->actions[3].id, "continue")) {
+        for (unsigned i = 0; i < 16 && !close; ++i) {
+            struct zcl_present_window_event_v1 event = {
+                .outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 3};
+            live->owner.update(live->owner.context, &event, false, &redraw, &close);
+        }
+        s->valid = s->valid && close;
+        return close;
+    }
+    if (!model->action_count) {
+        const int64_t end = platform_time_monotonic_ms() + 120000;
+        do {
+            live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+            if (close) return true;
+            platform_sleep_ms(1); /* real-clock: waiting on this owner's worker */
+        } while (platform_time_monotonic_ms() < end);
+        s->valid = false;
+        return false;
+    }
+    s->valid = false;
+    return false;
+}
+
+/* Stop the app the draft preview opened, identified by its kept image. */
+static bool al_keep_stop_app(const struct json_value *kept, const char *datadir)
+{
+    const char *image = zcl_package_copy_str(kept, "image_sha3");
+    char path[PATH_MAX], resolved[PATH_MAX];
+    if (!image || strlen(image) != 64 ||
+        snprintf(path, sizeof(path), "%s/app_build/images/%s", datadir, image) >= (int)sizeof(path) ||
+        !realpath(path, resolved))
+        return false;
+    DIR *d = opendir("/proc");
+    bool stopped = false;
+    struct dirent *e;
+    while (d && !stopped && (e = readdir(d))) {
+        char link[128], exe[PATH_MAX];
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int n = snprintf(link, sizeof(link), "/proc/%.60s/exe", e->d_name);
+        ssize_t len = n > 0 && n < (int)sizeof(link) ? readlink(link, exe, sizeof(exe) - 1) : -1;
+        if (len <= 0) continue;
+        exe[len] = 0;
+        if (!strcmp(exe, resolved)) stopped = asf_alive_then_stop(strtol(e->d_name, NULL, 10));
+    }
+    if (d) (void)closedir(d);
+    return stopped;
+}
+
+/* The kept receipt names exactly the selection now on disk. */
+static bool al_keep_receipt_matches(const struct json_value *kept,
+    const struct app_selection *after)
+{
+    char version[65], image[65], record[65];
+    zcl_hex_encode(after->version, 32, version);
+    zcl_hex_encode(after->image, 32, image);
+    zcl_hex_encode(after->record, 32, record);
+    const struct json_value *revision = json_get(kept, "selection_revision");
+    return !strcmp(zcl_package_copy_str(kept, "name"), after->app) &&
+        !strcmp(zcl_package_copy_str(kept, "version"), version) &&
+        !strcmp(zcl_package_copy_str(kept, "image_sha3"), image) &&
+        !strcmp(zcl_package_copy_str(kept, "record_id"), record) &&
+        revision && revision->type == JSON_INT &&
+        json_get_int(revision) == (int64_t)after->revision;
+}
+
+static bool al_keep_edit(const struct al_keep_world *w, const struct app_selection *prior,
+    char head[65])
+{
+    char prior_version[65];
+    zcl_hex_encode(prior->version, 32, prior_version);
+    struct asf_leaf leaf;
+    asf_open(&leaf);
+    bool ok = asf_put(w->copy_dir, "include/tiny.h", "#define TINY_NAME \"tinyapp-edited\"\n") &&
+        json_push_kv_str(&leaf.in, "dir", w->copy_dir) &&
+        asf_plan_confirm("zcode.package.version.save", &leaf);
+    if (ok) (void)snprintf(head, 65, "%s", asf_get(&leaf, "version"));
+    asf_close(&leaf);
+    return ok && strlen(head) == 64 && strcmp(head, prior_version) != 0;
+}
+
+static int case_library_keep_receipt(void)
+{
+    int failures = 0;
+    static struct al_keep_world w;
+    struct al_keep_script s = {.valid = true};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    if (!al_keep_world_init(&w)) {
+        if (w.root[0]) (void)test_rm_rf_recursive(w.root);
+        printf("  [keep-receipt: the tinyapp journey fixture could not be built]\n");
+        return 1;
+    }
+    TEST("A pending Discover error does not bury a successful draft Keep") {
+        struct app_launch_env env;
+        char why[256];
+        ASSERT(app_launch_env_from_process(&env, why, sizeof(why)));
+        env.desktop = true; /* the draft preview opens the built app */
+
+        struct app_selection prior, after;
+        ASSERT(app_selection_load(env.state_dir, w.route, &prior) == APP_SELECTION_OK);
+        char head[65];
+        ASSERT(al_keep_edit(&w, &prior, head));
+        node_rpc_client_set_test_hook(al_keep_board_down);
+        /* The draft preview jobs spawn the worker with the bridge's datadir
+         * and port; point them at B's profile for the room run. The preview
+         * open needs a desktop session name: a synthetic one, as this child
+         * has no windows and proves no GUI behavior. */
+        char old_dir[PATH_MAX];
+        (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        const char *saved_display = getenv("DISPLAY");
+        char *old_display = saved_display ? strdup(saved_display) : NULL;
+        ASSERT(setenv("DISPLAY", ":synthetic-nonvisual", 1) == 0);
+        zcl_native_bridge_bind_rpc(w.j.b_datadir, 39471);
+        zcl_test_app_library_discover_worker(&env, w.j.b_datadir, &reply,
+            al_keep_room, al_keep_notice, &s, w.worker);
+        if (old_display) (void)setenv("DISPLAY", old_display, 1);
+        else (void)unsetenv("DISPLAY");
+        free(old_display);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(s.valid && s.errors == 1 && s.home_calls == 2);
+        ASSERT(s.saw_review && s.saw_preview);
+        /* The defect: with the old guard the room closed after the Keep and
+         * the caller got a kept reply also marked canceled, with the session's
+         * receipts lost. The room must return to the kept card instead. */
+        ASSERT(s.kept_card);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && reply.error.mutated);
+        ASSERT(reply.error.code[0] == '\0');
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "continuation")), "kept");
+        ASSERT(!json_get(&reply.data, "status")); /* not a canceled session */
+        const struct json_value *kept = json_get(&reply.data, "kept");
+        ASSERT(kept);
+        ASSERT(app_selection_load(env.state_dir, w.route, &after) == APP_SELECTION_OK);
+        ASSERT(after.revision == prior.revision + 1);
+        char version[65];
+        zcl_hex_encode(after.version, 32, version);
+        ASSERT_STR_EQ(version, head);
+        ASSERT(al_keep_receipt_matches(kept, &after));
+        ASSERT(!json_get(&reply.data, "failure_facts"));
+        ASSERT(al_keep_stop_app(kept, w.j.b_datadir));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    al_keep_xdg_leave(&w.xdg);
+    /* DEBUG: if (w.root[0] && test_rm_rf_recursive(w.root) != 0) ++failures; */
+    return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -2638,6 +3097,7 @@ _test_next:
     failures += case_library_profile_input();
     failures += case_library_builtin_help();
     failures += case_library_bounds();
+    failures += case_library_keep_receipt();
     al_kill_all();
     return failures;
 }

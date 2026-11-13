@@ -1095,7 +1095,7 @@ static bool al_preview_succeeded(const struct library *w, const struct zcl_comma
         json_get_bool(opened) && executed && executed->type == JSON_BOOL && json_get_bool(executed) &&
         !json_get(&reply->data, "continuation_error");
 }
-static bool al_finish_draft_keep(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+static bool al_store_draft_receipt(struct library *w, struct zcl_command_reply *reply)
 {
     struct json_value receipt; json_init(&receipt);
     if (!al_capture_draft(&receipt, &reply->data) || !al_draft_reply_fits(w, &reply->data, &receipt)) {
@@ -1106,6 +1106,11 @@ static bool al_finish_draft_keep(struct library *w, const struct app_launch_env 
         json_free(&w->receive_receipt); w->receive_receipt = receipt;
         w->has_received = w->receive_current = w->recovery_ready = w->recovery_kept = true;
     }
+    return true;
+}
+static bool al_finish_draft_keep(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+{
+    if (!al_store_draft_receipt(w, reply)) return false;
     if (!al_reload(w, env, reply)) return false;
     return al_received_selection(w, &reply->data, reply);
 }
@@ -1134,7 +1139,13 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
     if (al_preview_succeeded(w, reply)) {
         w->preview_current = true; w->operation_canceled = true; w->page = 1; return true;
     }
-    if (!w->draft_result || w->has_discover_error) return false;
+    /* A kept draft completes like any other keep, even with a Discover error
+     * pending: the keep already advanced the selection on disk, so store its
+     * receipt and show the kept card instead of ejecting the user with a
+     * receipt-less kept reply. A completed operation resolves the pending
+     * error; if one ever survives, the stored receipt still reaches the
+     * caller through the bounded failure facts. */
+    if (!w->draft_result) return false;
     return al_finish_draft_keep(w, env, reply);
 }
 static bool al_host_link(struct library *w, const struct app_launch_env *env,
