@@ -2788,6 +2788,17 @@ static int case_discover_page_view(void)
         ASSERT(adv_has_action(&m, "next", "More apps"));
         ASSERT(strstr(m.summary, "page") || strstr(m.summary, "Page"));
         ASSERT(app_discover_page_view(&m, &row, 0, 1, false, false));
+        ASSERT(m.action_count == 3 && !adv_has_action(&m, "previous", NULL));
+        ASSERT(adv_has_action(&m, "review", NULL) && adv_has_action(&m, "back", NULL));
+        ASSERT(app_discover_page_view(&m, &row, 0, 2, false, false));
+        ASSERT(m.action_count == 3 && !adv_has_action(&m, "previous", NULL));
+        ASSERT(adv_has_action(&m, "next", "Next") && adv_has_action(&m, "back", NULL));
+        ASSERT(app_discover_page_view(&m, &row, 1, 2, false, false));
+        ASSERT(m.action_count == 4 && adv_has_action(&m, "previous", "Previous"));
+        ASSERT(app_discover_page_view(&m, &row, 0, 1, false, true));
+        ASSERT(m.action_count == 3 && !adv_has_action(&m, "previous", NULL));
+        ASSERT(adv_has_action(&m, "next", "More apps") && adv_has_action(&m, "back", NULL));
+        ASSERT(app_discover_page_view(&m, &row, 0, 1, false, false));
         ASSERT(zcl_present_model_validate_v1(&m, why, sizeof(why)) && m.action_count <= 4);
         ASSERT(adv_has_action(&m, "refresh", "Refresh"));
         ASSERT(!adv_has_action(&m, "next", NULL));

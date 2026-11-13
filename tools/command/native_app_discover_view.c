@@ -111,6 +111,12 @@ bool app_discover_page_view(struct zcl_present_model_v1 *model,
             else
                 app_confirm_action(&model->actions[2], ZCL_PRESENT_ACTION_SELECT, "refresh", "Refresh");
         }
+        if (!index && !previous_page) {
+            model->actions[1] = model->actions[2];
+            model->actions[2] = model->actions[3];
+            memset(&model->actions[3], 0, sizeof(model->actions[3]));
+            model->action_count = 3;
+        }
     }
     char why[256]; uint32_t pages;
     return zcl_present_model_validate_v1(model, why, sizeof(why)) &&
