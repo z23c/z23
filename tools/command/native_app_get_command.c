@@ -244,14 +244,25 @@ bool app_private_stage_close(struct app_private_stage *s)
  * nothing beyond the staged carrier, and cold for a full day — a live get
  * (one fetch budget plus its build) can never look that old, so no
  * concurrent staging is touched. Anything else (short or non-hex names,
- * links, permissive modes, extra content, young dirs) is left alone, and
- * a directory that will not empty is left whole. Best effort: a sweep
- * that cannot run never fails the get. */
+ * links, permissive modes, young dirs) is left alone. An old private dir
+ * with content beyond its carrier is enumerated first and left fully
+ * whole — carrier included — so a swept husk can never outlive its own
+ * guard. Best effort: a sweep that cannot run never fails the get. */
 #define AG_ORPHAN_AGE_S ((int64_t)24 * 60 * 60)
 static bool ag_orphan_leaf(const char *name)
 {
     return strlen(name) == 41 && strncmp(name, ".app-get-", 9) == 0 &&
            ag_hex(name + 9, 16);
+}
+/* True when the open staging directory holds nothing but its carrier. */
+static bool ag_orphan_sole_carrier(DIR *inner)
+{
+    struct dirent *e;
+    while ((e = readdir(inner)) != NULL)
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0 &&
+            strcmp(e->d_name, "offer.z23share") != 0)
+            return false;
+    return true;
 }
 static void ag_orphan_sweep(const char *datadir)
 {
@@ -271,6 +282,14 @@ static void ag_orphan_sweep(const char *datadir)
             (st.st_mode & 07777) != 0700 ||
             platform_time_wall_unix() - (int64_t)st.st_mtime < AG_ORPHAN_AGE_S)
             continue;
+        int inner_fd = openat(fd, entry->d_name,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (inner_fd < 0) continue;
+        DIR *inner = fdopendir(inner_fd);
+        if (!inner) { close(inner_fd); continue; }
+        bool sole = ag_orphan_sole_carrier(inner);
+        closedir(inner); /* closes inner_fd with it */
+        if (!sole) continue; /* extra content: the whole dir stays intact */
         (void)snprintf(carrier, sizeof(carrier), "%s/offer.z23share",
                        entry->d_name);
         (void)unlinkat(fd, carrier, 0);

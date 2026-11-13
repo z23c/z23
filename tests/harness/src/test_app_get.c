@@ -4517,10 +4517,51 @@ static bool tag_orphan_rmdir(const char *dir)
 #define TAG_ORPHAN_LIVE "22222222222222222222222222222222"
 #define TAG_ORPHAN_WIDE "33333333333333333333333333333333"
 #define TAG_ORPHAN_LINK "44444444444444444444444444444444"
+#define TAG_ORPHAN_EXTRA "55555555555555555555555555555555"
 static bool tag_orphan_path(const char *d, const char *tok, char *out, size_t cap)
 {
     int n = snprintf(out, cap, "%s/.app-get-%s", d, tok);
     return n > 0 && (size_t)n < cap;
+}
+/* The extra-content orphan: a day-cold private dir holding its carrier
+ * PLUS one more file. The sweep must leave the whole directory — carrier
+ * and stray file alike — exactly as it found it. */
+static bool tag_orphan_extra_file(const char *d, char *out, size_t cap)
+{
+    char dir[TAG_PATH];
+    if (!tag_orphan_path(d, TAG_ORPHAN_EXTRA, dir, sizeof(dir))) return false;
+    int n = snprintf(out, cap, "%s/notes.txt", dir);
+    return n > 0 && (size_t)n < cap;
+}
+/* Drop `path` to `unix` seconds ago (the day-cold stamp for orphans). */
+static bool tag_orphan_cool(const char *path)
+{
+    struct timespec cold[2];
+    cold[0].tv_sec = cold[1].tv_sec = platform_time_wall_unix() - 26 * 3600;
+    cold[0].tv_nsec = cold[1].tv_nsec = 0;
+    return utimensat(AT_FDCWD, path, cold, AT_SYMLINK_NOFOLLOW) == 0;
+}
+/* Write the stray file beside the carrier and re-cool the dir the stray
+ * write re-warmed. */
+static bool tag_orphan_extra_stray(const char *d)
+{
+    char stray[TAG_PATH];
+    FILE *out;
+    if (!tag_orphan_extra_file(d, stray, sizeof(stray))) return false;
+    out = fopen(stray, "wb");
+    if (!(out && fwrite("stray\n", 1, 6, out) == 6 && fclose(out) == 0))
+        return false;
+    char dir[TAG_PATH];
+    return tag_orphan_path(d, TAG_ORPHAN_EXTRA, dir, sizeof(dir)) &&
+           tag_orphan_cool(dir);
+}
+/* A cold symlink-shaped leaf pointing at the sentinel: never followed. */
+static bool tag_orphan_link_make(const char *d, char *linked, size_t linked_cap,
+                                 const char *sentinel)
+{
+    int n = snprintf(linked, linked_cap, "%s/.app-get-%s", d, TAG_ORPHAN_LINK);
+    return n > 0 && (size_t)n < linked_cap && symlink(sentinel, linked) == 0 &&
+           tag_orphan_cool(linked);
 }
 static bool tag_orphan_fixture(const char *d, char *linked, size_t linked_cap,
                                char *sentinel, size_t sentinel_cap)
@@ -4533,15 +4574,11 @@ static bool tag_orphan_fixture(const char *d, char *linked, size_t linked_cap,
     if (!tag_orphan_make(d, TAG_ORPHAN_OLD, 0700, 26 * 3600, "stale carrier\n") ||
         !tag_orphan_make(d, TAG_ORPHAN_LIVE, 0700, 0, "live carrier\n") ||
         !tag_orphan_make(d, TAG_ORPHAN_WIDE, 0755, 26 * 3600, "foreign mode\n") ||
+        !tag_orphan_make(d, TAG_ORPHAN_EXTRA, 0700, 26 * 3600, "staged carrier\n") ||
         !tag_orphan_make(d, "short", 0700, 26 * 3600, "wrong shape\n"))
         return false;
-    n = snprintf(linked, linked_cap, "%s/.app-get-%s", d, TAG_ORPHAN_LINK);
-    if (n <= 0 || (size_t)n >= linked_cap || symlink(sentinel, linked) != 0)
-        return false;
-    struct timespec cold[2];
-    cold[0].tv_sec = cold[1].tv_sec = platform_time_wall_unix() - 26 * 3600;
-    cold[0].tv_nsec = cold[1].tv_nsec = 0;
-    return utimensat(AT_FDCWD, linked, cold, AT_SYMLINK_NOFOLLOW) == 0;
+    return tag_orphan_extra_stray(d) &&
+           tag_orphan_link_make(d, linked, linked_cap, sentinel);
 }
 static bool tag_orphan_removed(const char *d)
 {
@@ -4566,22 +4603,55 @@ static bool tag_orphan_sentinel_kept(const char *sentinel)
     size_t got = in ? fread(text, 1, sizeof(text) - 1u, in) : 0;
     return in && fclose(in) == 0 && got == 5 && strcmp(text, "stay\n") == 0;
 }
+static bool tag_orphan_file_kept(const char *path, const char *text)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    char buf[16] = {0};
+    FILE *in = fopen(path, "rb");
+    size_t got = in ? fread(buf, 1, sizeof(buf) - 1u, in) : 0;
+    return in && fclose(in) == 0 && got == strlen(text) && strcmp(buf, text) == 0;
+}
+/* The extra-content orphan stayed whole: directory, carrier and stray
+ * file all exactly as the fixture left them. */
+static bool tag_orphan_extra_kept(const char *d)
+{
+    char dir[TAG_PATH], carrier[TAG_PATH], stray[TAG_PATH];
+    int n, c;
+    if (!tag_orphan_path(d, TAG_ORPHAN_EXTRA, dir, sizeof(dir))) return false;
+    n = snprintf(stray, sizeof(stray), "%s/notes.txt", dir);
+    c = snprintf(carrier, sizeof(carrier), "%s/offer.z23share", dir);
+    return tag_orphan_dir(dir) &&
+        c > 0 && (size_t)c < sizeof(carrier) &&
+        tag_orphan_file_kept(carrier, "staged carrier\n") &&
+        n > 0 && (size_t)n < sizeof(stray) && tag_orphan_file_kept(stray, "stray\n");
+}
 static bool tag_orphan_drop(const char *d, const char *tok)
 {
     char dir[TAG_PATH];
     return tag_orphan_path(d, tok, dir, sizeof(dir)) && tag_orphan_rmdir(dir);
 }
+static bool tag_orphan_extra_drop(const char *d)
+{
+    char dir[TAG_PATH], stray[TAG_PATH];
+    int n;
+    if (!tag_orphan_path(d, TAG_ORPHAN_EXTRA, dir, sizeof(dir))) return false;
+    n = snprintf(stray, sizeof(stray), "%s/notes.txt", dir);
+    return n > 0 && (size_t)n < sizeof(stray) && unlink(stray) == 0 &&
+        tag_orphan_rmdir(dir);
+}
 static bool tag_orphan_clean(const char *d, const char *linked, const char *sentinel)
 {
-    return tag_orphan_drop(d, TAG_ORPHAN_LIVE) && tag_orphan_drop(d, TAG_ORPHAN_WIDE) &&
-        tag_orphan_drop(d, "short") && unlink(linked) == 0 && unlink(sentinel) == 0 &&
+    return tag_orphan_extra_drop(d) && tag_orphan_drop(d, TAG_ORPHAN_LIVE) &&
+        tag_orphan_drop(d, TAG_ORPHAN_WIDE) && tag_orphan_drop(d, "short") &&
+        unlink(linked) == 0 && unlink(sentinel) == 0 &&
         tag_glob(d, ".app-get-*") == 0u;
 }
 static int tag_orphan_sweep(struct tag_world *w)
 {
     int failures = 0;
     TEST("app get: a day-old orphan .app-get- staging dir is swept; fresh, "
-         "misshaped, permissive and linked entries stay") {
+         "misshaped, permissive, linked and extra-content entries stay") {
         const char *d = w->j.b_datadir;
         char linked[TAG_PATH], sentinel[TAG_PATH];
         ASSERT(tag_board_variant(w, NULL, NULL, false));
@@ -4595,6 +4665,7 @@ static int tag_orphan_sweep(struct tag_world *w)
         ASSERT(tag_orphan_kept(d, TAG_ORPHAN_LIVE));   /* fresh: untouched */
         ASSERT(tag_orphan_kept(d, TAG_ORPHAN_WIDE));   /* permissive: untouched */
         ASSERT(tag_orphan_kept(d, "short"));           /* misshaped: untouched */
+        ASSERT(tag_orphan_extra_kept(d));              /* extra content: dir whole */
         ASSERT(tag_orphan_link_kept(linked));          /* link never followed */
         ASSERT(tag_orphan_sentinel_kept(sentinel));    /* link target intact */
         ASSERT(tag_orphan_clean(d, linked, sentinel)); /* no staging left behind */
@@ -4611,6 +4682,7 @@ static bool tag_orphan_room_checks(const char *d, char *linked, const char *sent
         tag_orphan_kept(d, TAG_ORPHAN_LIVE) &&     /* fresh: untouched */
         tag_orphan_kept(d, TAG_ORPHAN_WIDE) &&     /* permissive: untouched */
         tag_orphan_kept(d, "short") &&             /* misshaped: untouched */
+        tag_orphan_extra_kept(d) &&                /* extra content: dir whole */
         tag_orphan_link_kept(linked) &&            /* link never followed */
         tag_orphan_sentinel_kept(sentinel);        /* link target intact */
 }
@@ -4619,7 +4691,7 @@ static int tag_orphan_sweep_discover(struct tag_world *w)
     int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
     struct zcl_command_reply why, reply;
     TEST("app get: the Discover receive sweeps a day-old orphan beside the "
-         "profile; fresh, misshaped, permissive and linked entries stay") {
+         "profile; fresh, misshaped, permissive, linked and extra-content entries stay") {
         const char *d = w->j.b_datadir;
         char linked[TAG_PATH], sentinel[TAG_PATH];
         struct tag_consumer c = {.world = w};
@@ -4643,7 +4715,7 @@ static int tag_orphan_sweep_bytes(struct tag_world *w)
     int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
     struct zcl_command_reply why, reply;
     TEST("app get: the direct-link byte receive sweeps a day-old orphan beside "
-         "the profile; fresh, misshaped, permissive and linked entries stay") {
+         "the profile; fresh, misshaped, permissive, linked and extra-content entries stay") {
         const char *d = w->j.b_datadir;
         char linked[TAG_PATH], sentinel[TAG_PATH];
         struct tag_consumer c = {.world = w};
