@@ -740,17 +740,37 @@ static void bp_stage_emit(char stage)
 #endif
 }
 
+static bool bp_auth_order(char stage, unsigned *next)
+{
+    static const char order[] = "RCLKHUTV";
+    if (!strchr(order, stage)) return true;
+    if (*next >= sizeof(order) - 1 || order[*next] != stage) return false;
+    ++*next;
+    return true;
+}
+
+static unsigned bp_auth_seen(char stage)
+{
+    switch (stage) {
+    case 'P': return 1u;
+    case 'R': return 2u;
+    case 'U': return 4u;
+    case 'T': return 8u;
+    case 'V': return 16u;
+    default: return 0u;
+    }
+}
+
 static bool bp_stage_report(int fd, const char *label, bool failed)
 {
     struct bp_stage_event event, first = {0};
     char text[512]; size_t used = 0; unsigned seen = 0;
+    unsigned next = 0; bool ordered = true; char last = '-';
     if (fd < 0) return true;
     while (read(fd, &event, sizeof(event)) == (ssize_t)sizeof(event)) {
-        if (event.stage == 'P') seen |= 1u;
-        if (event.stage == 'R') seen |= 2u;
-        if (event.stage == 'U') seen |= 4u;
-        if (event.stage == 'T') seen |= 8u;
-        if (event.stage == 'V') seen |= 16u;
+        if (!bp_auth_order(event.stage, &next)) ordered = false;
+        last = event.stage;
+        seen |= bp_auth_seen(event.stage);
         if (!first.when_us) first = event;
         int n = snprintf(text + used, sizeof(text) - used, "%s%c:%lld",
             used ? "," : "", event.stage,
@@ -761,9 +781,11 @@ static bool bp_stage_report(int fd, const char *label, bool failed)
     if (used) fprintf(stderr, "%scheckpoint %s stage_ms=%s "
         "(c=child-entry,s=seed-start,r=reload-done,a=auth-start,A=auth-return,"
         "p=peer-start,P=peer-ok,F=peer-failed,R/x=receive-ok/fail,"
-        "U/u=unlock-ok/fail,T/t=arm-ok/fail,V/v=verify-ok/fail,j=join-start,J=join-return)\n",
-        failed ? "FAIL " : "", label, text);
-    return seen == 31u;
+        "C=passphrase-ok,L=transition-acquired,K=keys-reloaded,H=HD-restore-returned,"
+        "U/u=unlock-ok/fail,T/t=arm-ok/fail,V/v=verify-ok/fail,j=join-start,J=join-return) "
+        "last=%c auth_ordered=%d auth_steps=%u\n",
+        failed ? "FAIL " : "", label, text, last, ordered, next);
+    return seen == 31u && ordered && next == 8u;
 }
 
 bool boot_test_pending_checkpoint_due(int64_t last, int64_t now);
@@ -890,8 +912,10 @@ static bool bp_transparent_seed_reload(struct wallet_sqlite *ws, struct wallet *
     bp_stage_emit('r'); /* locked reload finished */
     if (!readiness || !loaded || w->has_master_key || !locked) return false;
     boot_test_auth_observer(bp_stage_emit);
+    wallet_lock_test_unlock_observer(bp_stage_emit);
     bool authenticated = bp_checkpoint_auth(w, ws, deadline);
     boot_test_auth_observer(NULL);
+    wallet_lock_test_unlock_observer(NULL);
     fprintf(stderr, "seeded-skip fixture: authenticated=%d master=%d seed=%d sapling=%zu transparent=%zu watch=%zu scripts=%zu\n",
             authenticated, w->has_master_key, w->sapling_keys.has_seed, w->sapling_keys.num_keys,
             w->keystore.num_keys, w->keystore.num_watching, w->keystore.num_scripts);
@@ -1306,16 +1330,42 @@ static bool bp_checkpoint_reopen(const char *dir, int expected, bool fixed_diges
     if (db.open) node_db_close(&db);
     return ok;
 }
-static bool bp_checkpoint_extra(int mode, const char *label)
+#if defined(__linux__)
+static bool bp_trace_open(int trace[2])
 {
-    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "boot_phase", label);
-    int trace[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, trace) != 0) return false;
+    if (fcntl(trace[0], F_SETFL, O_NONBLOCK) == 0 &&
+        fcntl(trace[1], F_SETFL, O_NONBLOCK) == 0) return true;
+    close(trace[0]); close(trace[1]); trace[0] = trace[1] = -1;
+    return false;
+}
+#endif
+
+static bool bp_checkpoint_trace(int mode, const char *label, const char *dir,
+                                int trace[2])
+{
+    (void)label; (void)dir;
+#if defined(__linux__)
+    if (mode == 6 && !bp_trace_open(trace)) {
+        fprintf(stderr, "\nFAIL checkpoint %s: trace channel unavailable\n", label);
+        test_rm_rf(dir); return false;
+    }
+#else
     if (mode == 6 && socketpair(AF_UNIX, SOCK_DGRAM, 0, trace) == 0) {
         if (fcntl(trace[0], F_SETFL, O_NONBLOCK) != 0 ||
             fcntl(trace[1], F_SETFL, O_NONBLOCK) != 0) {
             close(trace[0]); close(trace[1]); trace[0] = trace[1] = -1;
         }
     }
+#endif
+    return true;
+}
+
+static bool bp_checkpoint_extra(int mode, const char *label)
+{
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "boot_phase", label);
+    int trace[2] = {-1, -1};
+    if (!bp_checkpoint_trace(mode, label, dir, trace)) return false;
     pid_t parent = getpid(); pid_t child = fork();
     if (!child) {
         if (trace[0] >= 0) close(trace[0]);

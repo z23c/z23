@@ -52,6 +52,20 @@ static bool  g_encrypted_at_rest;   /* the wallet uses WKS1 at-rest wrapping */
 static bool  g_live_wallet;         /* this process serves a wallet of its own */
 static uint64_t g_timeout_generation;
 #ifdef ZCL_TESTING
+static _Thread_local void (*g_unlock_observer)(char);
+void wallet_lock_test_unlock_observer(void (*observer)(char))
+{
+    g_unlock_observer = observer;
+}
+static void wlk_observe(char stage)
+{
+    if (g_unlock_observer) g_unlock_observer(stage);
+}
+#else
+#define wlk_observe(stage) ((void)0)
+#endif
+
+#ifdef ZCL_TESTING
 /* Test-only seam, compiled out of production. When nonzero, the nth
  * wallet_lock_is_unlocked() call after arming reports unlocked and then
  * forces the wallet locked. */
@@ -343,7 +357,9 @@ static bool wlk_reload(struct wallet *w, struct wallet_sqlite *ws)
     bool sapling_ok = wallet_sqlite_read_sapling_keys(ws, w);
     if (!rr.ok || !sapling_ok)
         return false;
+    wlk_observe('K');
     wlk_restore_hd(w);
+    wlk_observe('H');
     return true;
 }
 
@@ -400,8 +416,10 @@ struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
         struct zcl_result c = wlk_check_passphrase(ws, passphrase);
         if (!c.ok)
             return c;
+        wlk_observe('C');
     }
     pthread_mutex_lock(&g_transition);
+    wlk_observe('L');
     struct zcl_result r;
     if (!w || !ws) {
         /* Register-only unlock (no keystore wired / unit test): accept. */
@@ -614,6 +632,7 @@ void wallet_lock_reset_for_test(void)
 #ifdef ZCL_TESTING
     g_flip_after_unlock_checks = 0;
     g_unlock_entries = 0;
+    g_unlock_observer = NULL;
 #endif
     g_encrypted_at_rest = false;
     g_live_wallet = false;

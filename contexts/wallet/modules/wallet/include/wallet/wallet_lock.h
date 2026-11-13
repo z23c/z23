@@ -171,6 +171,9 @@ void wallet_lock_status_json(struct json_value *out);
 void wallet_lock_reset_for_test(void);
 
 #ifdef ZCL_TESTING
+/* Thread-local diagnostic observer; callbacks must be nonblocking and must
+ * not re-enter wallet APIs, because unlock may hold the transition lock. */
+void wallet_lock_test_unlock_observer(void (*observer)(char));
 /* Reports an auto-lock timer blocked on the transition lease. */
 void wallet_lock_timer_test_blocked_hook(void (*hook)(void *), void *ctx);
 /* Test-only: after `n` further wallet_lock_is_unlocked() calls, the wallet is
