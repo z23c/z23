@@ -21,6 +21,7 @@
 #include "platform/directory_transaction.h"
 #include <fcntl.h>
 #include "platform/toolchain.h"
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -230,6 +231,49 @@ bool app_private_stage_close(struct app_private_stage *s)
 {
     if (!s) return false;
     bool ok = ag_private_cleanup(&s->private, &s->one); free(s); return ok;
+}
+
+/* An interrupted get (Ctrl-C, crash, kill) leaves its private staging
+ * directory <datadir>/.app-get-<token> behind and nothing in-process ever
+ * removes it. Sweep only an exact-shaped orphan: a ".app-get-" + 32-hex
+ * token name, a directory owned by this euid and private (0700), holding
+ * nothing beyond the staged carrier, and cold for a full day — a live get
+ * (one fetch budget plus its build) can never look that old, so no
+ * concurrent staging is touched. Anything else (short or non-hex names,
+ * links, permissive modes, extra content, young dirs) is left alone, and
+ * a directory that will not empty is left whole. Best effort: a sweep
+ * that cannot run never fails the get. */
+#define AG_ORPHAN_AGE_S ((int64_t)24 * 60 * 60)
+static bool ag_orphan_leaf(const char *name)
+{
+    return strlen(name) == 41 && strncmp(name, ".app-get-", 9) == 0 &&
+           ag_hex(name + 9, 16);
+}
+static void ag_orphan_sweep(const char *datadir)
+{
+#if defined(_WIN32)
+    (void)datadir;
+#else
+    DIR *dir = opendir(datadir);
+    if (!dir) return;
+    int fd = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        struct stat st;
+        char carrier[64];
+        if (!ag_orphan_leaf(entry->d_name) ||
+            fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+            (st.st_mode & 07777) != 0700 ||
+            platform_time_wall_unix() - (int64_t)st.st_mtime < AG_ORPHAN_AGE_S)
+            continue;
+        (void)snprintf(carrier, sizeof(carrier), "%s/offer.z23share",
+                       entry->d_name);
+        (void)unlinkat(fd, carrier, 0);
+        (void)unlinkat(fd, entry->d_name, AT_REMOVEDIR); /* only if empty */
+    }
+    closedir(dir);
+#endif
 }
 
 static bool ag_stage(struct ag_one *s, int64_t timeout_s)
@@ -1140,6 +1184,7 @@ void zcl_native_handle_app_get(const struct zcl_command_request *request,
     r.offer = zcl_package_copy_str(r.input, "offer_id");
     r.datadir = zcl_package_copy_datadir(r.input, reply, AG_COMMAND);
     if (!r.datadir || !ag_validate(&r)) return;
+    ag_orphan_sweep(r.datadir);
     if (!ag_load_rows(&r)) { free(r.rows); return; }
     if (!r.name) {
         if (!ag_list(reply, r.rows, r.count)) zcl_package_copy_fail(reply, "ALLOC", false, "catalog output", AG_COMMAND);

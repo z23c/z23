@@ -4361,6 +4361,137 @@ static int tag_discover_empty_cases(struct tag_world *w)
     g_tag.malformed_board = false; return failures;
 }
 
+/* Make <datadir>/.app-get-<token> shaped exactly like the leaf's staging,
+ * with `content` as its staged carrier and an mtime `age_s` seconds old. */
+static bool tag_orphan_make(const char *datadir, const char *token, mode_t mode,
+                            int64_t age_s, const char *content)
+{
+    char dir[TAG_PATH], file[TAG_PATH];
+    int n = snprintf(dir, sizeof(dir), "%s/.app-get-%s", datadir, token);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || mkdir(dir, 0700) != 0 ||
+        chmod(dir, mode) != 0)
+        return false;
+    bool ok = true;
+    if (content) {
+        int f = snprintf(file, sizeof(file), "%s/offer.z23share", dir);
+        FILE *out = f > 0 && (size_t)f < sizeof(file) ? fopen(file, "wb") : NULL;
+        ok = out && fwrite(content, 1, strlen(content), out) == strlen(content) &&
+             fclose(out) == 0;
+    }
+    if (age_s > 0) {
+        struct timespec cold[2];
+        cold[0].tv_sec = cold[1].tv_sec = platform_time_wall_unix() - age_s;
+        cold[0].tv_nsec = cold[1].tv_nsec = 0;
+        ok = utimensat(AT_FDCWD, dir, cold, AT_SYMLINK_NOFOLLOW) == 0 && ok;
+    }
+    return ok;
+}
+static bool tag_orphan_gone(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+static bool tag_orphan_dir(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+static bool tag_orphan_rmdir(const char *dir)
+{
+    char file[TAG_PATH];
+    int n = snprintf(file, sizeof(file), "%s/offer.z23share", dir);
+    return n > 0 && (size_t)n < sizeof(file) && unlink(file) == 0 && rmdir(dir) == 0;
+}
+#define TAG_ORPHAN_OLD "11111111111111111111111111111111"
+#define TAG_ORPHAN_LIVE "22222222222222222222222222222222"
+#define TAG_ORPHAN_WIDE "33333333333333333333333333333333"
+#define TAG_ORPHAN_LINK "44444444444444444444444444444444"
+static bool tag_orphan_path(const char *d, const char *tok, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s/.app-get-%s", d, tok);
+    return n > 0 && (size_t)n < cap;
+}
+static bool tag_orphan_fixture(const char *d, char *linked, size_t linked_cap,
+                               char *sentinel, size_t sentinel_cap)
+{
+    int n = snprintf(sentinel, sentinel_cap, "%s/orphan-sentinel.txt", d);
+    if (n <= 0 || (size_t)n >= sentinel_cap) return false;
+    FILE *out = fopen(sentinel, "wb");
+    bool wrote = out && fwrite("stay\n", 1, 5, out) == 5 && fclose(out) == 0;
+    if (!wrote) return false;
+    if (!tag_orphan_make(d, TAG_ORPHAN_OLD, 0700, 26 * 3600, "stale carrier\n") ||
+        !tag_orphan_make(d, TAG_ORPHAN_LIVE, 0700, 0, "live carrier\n") ||
+        !tag_orphan_make(d, TAG_ORPHAN_WIDE, 0755, 26 * 3600, "foreign mode\n") ||
+        !tag_orphan_make(d, "short", 0700, 26 * 3600, "wrong shape\n"))
+        return false;
+    n = snprintf(linked, linked_cap, "%s/.app-get-%s", d, TAG_ORPHAN_LINK);
+    if (n <= 0 || (size_t)n >= linked_cap || symlink(sentinel, linked) != 0)
+        return false;
+    struct timespec cold[2];
+    cold[0].tv_sec = cold[1].tv_sec = platform_time_wall_unix() - 26 * 3600;
+    cold[0].tv_nsec = cold[1].tv_nsec = 0;
+    return utimensat(AT_FDCWD, linked, cold, AT_SYMLINK_NOFOLLOW) == 0;
+}
+static bool tag_orphan_removed(const char *d)
+{
+    char dir[TAG_PATH];
+    return tag_orphan_path(d, TAG_ORPHAN_OLD, dir, sizeof(dir)) &&
+           tag_orphan_gone(dir);
+}
+static bool tag_orphan_kept(const char *d, const char *tok)
+{
+    char dir[TAG_PATH];
+    return tag_orphan_path(d, tok, dir, sizeof(dir)) && tag_orphan_dir(dir);
+}
+static bool tag_orphan_link_kept(const char *linked)
+{
+    struct stat st;
+    return lstat(linked, &st) == 0 && S_ISLNK(st.st_mode);
+}
+static bool tag_orphan_sentinel_kept(const char *sentinel)
+{
+    char text[8] = {0};
+    FILE *in = fopen(sentinel, "rb");
+    size_t got = in ? fread(text, 1, sizeof(text) - 1u, in) : 0;
+    return in && fclose(in) == 0 && got == 5 && strcmp(text, "stay\n") == 0;
+}
+static bool tag_orphan_drop(const char *d, const char *tok)
+{
+    char dir[TAG_PATH];
+    return tag_orphan_path(d, tok, dir, sizeof(dir)) && tag_orphan_rmdir(dir);
+}
+static bool tag_orphan_clean(const char *d, const char *linked, const char *sentinel)
+{
+    return tag_orphan_drop(d, TAG_ORPHAN_LIVE) && tag_orphan_drop(d, TAG_ORPHAN_WIDE) &&
+        tag_orphan_drop(d, "short") && unlink(linked) == 0 && unlink(sentinel) == 0 &&
+        tag_glob(d, ".app-get-*") == 0u;
+}
+static int tag_orphan_sweep(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app get: a day-old orphan .app-get- staging dir is swept; fresh, "
+         "misshaped, permissive and linked entries stay") {
+        const char *d = w->j.b_datadir;
+        char linked[TAG_PATH], sentinel[TAG_PATH];
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(tag_orphan_fixture(d, linked, sizeof(linked), sentinel, sizeof(sentinel)));
+        struct asf_leaf l;
+        asf_open(&l);
+        ASSERT(json_push_kv_str(&l.in, "datadir", d));
+        ASSERT(asf_pass("app.get", &l));
+        asf_close(&l);
+        ASSERT(tag_orphan_removed(d));                 /* orphan swept, file and all */
+        ASSERT(tag_orphan_kept(d, TAG_ORPHAN_LIVE));   /* fresh: untouched */
+        ASSERT(tag_orphan_kept(d, TAG_ORPHAN_WIDE));   /* permissive: untouched */
+        ASSERT(tag_orphan_kept(d, "short"));           /* misshaped: untouched */
+        ASSERT(tag_orphan_link_kept(linked));          /* link never followed */
+        ASSERT(tag_orphan_sentinel_kept(sentinel));    /* link target intact */
+        ASSERT(tag_orphan_clean(d, linked, sentinel)); /* no staging left behind */
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int tag_failed_fetch_cleanup(struct tag_world *w)
 {
     int failures = 0;
@@ -5055,6 +5186,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_discover_empty_cases(w);
     if (failures == 0) failures += tag_keep_cases(w);
     failures += tag_failed_fetch_cleanup(w);
+    failures += tag_orphan_sweep(w);
     failures += tag_b_journeys(w);
     if (failures == 0) failures += tag_exact_tests(w);
     if (failures == 0) failures += tag_rebuild_outcomes(w);
