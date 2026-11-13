@@ -79,7 +79,7 @@ int main(void)
     }
     assert(done);
     char status[160]; zapp_game_status(status, sizeof(status));
-    assert(!strcmp(status, "Start your laptop's Z23 game host and connect USB. For pairing: Back > Scan its QR code, compare the codes and Accept. Then Home > Play."));
+    assert(!strcmp(status, "Start your laptop's Z23 game host and connect USB. For pairing: Back > Scan its QR code, compare the codes and Accept. Then open More > Play."));
     assert(strstr(failure_text(true, true), "Back > Play") && strstr(failure_text(true, true), "compare codes"));
     assert(strstr(failure_text(false, false), "on this phone") && !strstr(failure_text(false, false), "USB"));
     puts("game control and decode passed"); return 0;

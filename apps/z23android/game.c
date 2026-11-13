@@ -162,7 +162,7 @@ static const char *failure_text(bool allocated, bool started)
 {
     if (!allocated) return "Could not start Play on this phone. Go Back and try again.";
     if (started) return "Game disconnected. Check laptop game host and USB. Back > Play to retry. If pairing changed: Back > Scan QR, compare codes and Accept.";
-    return "Start your laptop's Z23 game host and connect USB. For pairing: Back > Scan its QR code, compare the codes and Accept. Then Home > Play.";
+    return "Start your laptop's Z23 game host and connect USB. For pairing: Back > Scan its QR code, compare the codes and Accept. Then open More > Play.";
 }
 static void *run(void *unused)
 {
