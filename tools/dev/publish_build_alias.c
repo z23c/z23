@@ -339,7 +339,7 @@ static int pba_copy(const char *src, const char *dst)
     char buf[65536];
     if (in < 0 || fstat(in, &st) != 0)
         return -1;
-    out = open(dst, O_WRONLY | O_TRUNC, 0600);
+    out = open(dst, O_WRONLY | O_TRUNC);
     if (out < 0) {
         (void)close(in);
         return -1;
