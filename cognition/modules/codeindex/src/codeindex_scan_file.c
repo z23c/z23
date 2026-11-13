@@ -154,6 +154,6 @@ bool ci_scan_file(const char *root, const char *relpath,
     bool scanned = ci_scan_text(buf, len, relpath, is_header, group, on_sym,
                                 on_ref, user, purpose_out);
     free(buf);
-    if (!scanned) LOG_FAIL("codeindex", "scanner setup failed for %s", relpath);
+    if (!scanned) LOG_FAIL("codeindex", "scanner failed or exceeded emission capacity for %s", relpath);
     return true;
 }

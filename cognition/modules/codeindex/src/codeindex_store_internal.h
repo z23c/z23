@@ -6,11 +6,10 @@
  *
  * codeindex_store.c owns the WRITE half: the row hash, pragmas + schema,
  * open/close, the canonical-generation binding, transaction control, and
- * every `ci_store_put_*`. codeindex_store_read.c owns the READ half: every
- * query that steps rows back out (`ci_store_meta_get`, the symbol/ref/file/
- * group lookups, and the include-edge count). The split happened when the
- * combined file passed the 800-line shape ceiling; the handle layout is all
- * and checked read cleanup cross that seam; only the store, store-read, and
+ * every `ci_store_put_*`. codeindex_store_read.c owns general read queries;
+ * codeindex_store_exact.c owns checked exact-name symbol queries. These splits keep
+ * each file within the 800-line shape ceiling. The handle layout and checked
+ * read cleanup cross that seam; only the store, store-read, store-exact, and
  * store-identity translation units may include this header. The handle stays
  * OPAQUE to the rest of cognition/modules/codeindex, which reaches it through the
  * ci_store_db()/ci_store_lock()/ci_store_unlock() accessors in

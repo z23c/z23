@@ -97,6 +97,29 @@ ZCL_COMMAND_BRANCH("code.firsthour", "code",
                    ZCL_COMMAND_LAYER_CODE)
 
 ZCL_COMMAND_READY_READ(
+    "code.hotswap-facts", "code.firsthour", "",
+    "Inspect provisional hot-swap ownership and shape facts",
+    "Requires at most 128 symbols and 64 paths per request. Reads a "
+    "current source-qualified index, reports unique indexed definitions "
+    "and shared lexical shape classifications, and counts indexed allowed "
+    "shape C files. Ownership is provisional: semantic completeness is "
+    "unproven and no registration or runtime activation is authorized. "
+    "Ambiguous or incomplete symbol results are unknown. Source, projection, "
+    "census or response-bound failures refuse the request. Consumers batching "
+    "requests must require identical source and projection roots.", 65536,
+    "code,hotswap,advisory,shape,index,ownership",
+    "zcl.code_hotswap_facts.input.v1", "zcl.code_hotswap_facts.v1",
+    "symbols,paths", "",
+    "z23 code hotswap-facts --input='{\"symbols\":[],\"paths\":[]}'",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_hotswap_facts)
+
+ZCL_COMMAND_READY_READ(
     "code.owner", "code.firsthour", "",
     "Name the room that owns a path",
     "The physical authority that owns one repo-relative path: the first path "

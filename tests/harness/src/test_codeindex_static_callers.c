@@ -758,10 +758,102 @@ static int test_sc_caller_edge_query(void)
     return failures;
 }
 
+static bool sc_exact_put(struct ci_store *s, const char *name, char kind,
+                         const char *def, const char *decl)
+{
+    struct ci_symbol sym = {0};
+    snprintf(sym.name, sizeof(sym.name), "%s", name);
+    snprintf(sym.def_path, sizeof(sym.def_path), "%s", def);
+    snprintf(sym.decl_path, sizeof(sym.decl_path), "%s", decl);
+    sym.kind = kind;
+    sym.def_line = *def ? 1 : 0;
+    sym.decl_line = *decl ? 1 : 0;
+    return ci_store_put_symbol(s, &sym);
+}
+
+static bool sc_exact_order(const struct ci_symbol *rows)
+{
+    return rows[0].kind == 'T' && !strcmp(rows[0].def_path, "a.c") &&
+           rows[1].kind == 't' && !strcmp(rows[1].def_path, "b.c") &&
+           !rows[2].def_path[0] && !strcmp(rows[2].decl_path, "api.h");
+}
+
+static bool sc_exact_cases(struct codeindex *ci)
+{
+    struct ci_symbol rows[4]; int n = -1;
+    if (codeindex_find_exact_checked(ci, "missing", rows, 4, &n) != CODEINDEX_EXACT_COMPLETE || n != 0) return false;
+    if (codeindex_find_exact_checked(ci, "single", rows, 4, &n) != CODEINDEX_EXACT_COMPLETE || n != 1 || strcmp(rows[0].def_path, "only.c")) return false;
+    if (codeindex_find_exact_checked(ci, "shared", rows, 3, &n) != CODEINDEX_EXACT_COMPLETE || n != 3) return false;
+    if (!sc_exact_order(rows)) return false;
+    n = -1;
+    if (codeindex_find_exact_checked(ci, "shared", rows, 2, &n) != CODEINDEX_EXACT_TRUNCATED || n != 0) return false;
+    n = -1;
+    return codeindex_find_exact_checked(ci, "shared", rows, 0, &n) == CODEINDEX_EXACT_ERROR && n == 0;
+}
+
+struct sc_exact_interrupt { sqlite3 *db; int rows, requests; };
+static int sc_exact_trace(unsigned kind, void *ctx, void *stmt, void *detail)
+{
+    (void)detail;
+    struct sc_exact_interrupt *f = ctx;
+    const char *sql = sqlite3_sql(stmt);
+    if (kind == SQLITE_TRACE_ROW && sql && strstr(sql, "FROM symbols WHERE name=?") && ++f->rows == 1) {
+        ++f->requests;
+        sqlite3_interrupt(f->db);
+    }
+    return 0;
+}
+
+static bool sc_exact_step_error(struct codeindex *ci)
+{
+    sqlite3 *db = ci_store_db(ci->store);
+    struct sc_exact_interrupt f = {.db = db};
+    if (sqlite3_trace_v2(db, SQLITE_TRACE_ROW, sc_exact_trace, &f) != SQLITE_OK) return false;
+    struct ci_symbol rows[4]; int n = -1;
+    enum codeindex_exact_status status = codeindex_find_exact_checked(ci, "shared", rows, 4, &n);
+    bool cleared = sqlite3_trace_v2(db, 0, NULL, NULL) == SQLITE_OK;
+    if (!cleared || f.rows < 1 || f.requests != 1 || status != CODEINDEX_EXACT_ERROR || n != 0)
+        fprintf(stderr, "checked exact step: rows=%d interrupts=%d status=%d count=%d\n", f.rows, f.requests, status, n);
+    return cleared && f.rows >= 1 && f.requests == 1 && status == CODEINDEX_EXACT_ERROR && n == 0;
+}
+
+static bool sc_exact_corrupt(struct codeindex *ci)
+{
+    sqlite3 *db = ci_store_db(ci->store);
+    if (sqlite3_exec(db, "UPDATE symbols SET row_sha3=zeroblob(32) WHERE name='shared' AND decl_path='api.h'", NULL, NULL, NULL) != SQLITE_OK) return false;
+    struct ci_symbol rows[4]; int n = -1;
+    enum codeindex_exact_status status = codeindex_find_exact_checked(ci, "shared", rows, 2, &n);
+    if (status != CODEINDEX_EXACT_CORRUPT || n != 0)
+        fprintf(stderr, "checked exact corrupt sentinel: status=%d count=%d\n", status, n);
+    return status == CODEINDEX_EXACT_CORRUPT && n == 0;
+}
+
+static int test_sc_exact_checked(void)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: exact enumeration refuses incomplete evidence") {
+        struct ci_store *store = ci_store_open_path(":memory:");
+        ASSERT(store != NULL);
+        struct codeindex ci = {.store = store};
+        bool seeded = sc_exact_put(store, "single", 'T', "only.c", "") &&
+            sc_exact_put(store, "shared", 'T', "a.c", "") &&
+            sc_exact_put(store, "shared", 't', "b.c", "") &&
+            sc_exact_put(store, "shared", 'T', "", "api.h");
+        bool cases = seeded && sc_exact_cases(&ci);
+        bool step = seeded && sc_exact_step_error(&ci);
+        bool corrupt = seeded && sc_exact_corrupt(&ci);
+        ci_store_close(store);
+        ASSERT(cases && step && corrupt);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_codeindex_static_callers(void)
 {
     int failures = test_sc_cause_labels() + test_sc_cause_value();
     failures += test_sc_caller_edge_query();
+    failures += test_sc_exact_checked();
     struct codeindex *ci = NULL;
     TEST("codeindex_static_callers: fixture tree indexes") {
          TEST_DISCARD(system("rm -rf " SC_FIX));

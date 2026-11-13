@@ -57,12 +57,6 @@ SERVICES_DEF="${ZCL_HOTSWAP_SERVICES:-engine/composition/hotswap_services.def}"
 CMD_DEF_DIR="${ZCL_HOTSWAP_COMMAND_DEF_DIR:-engine/composition/commands}"
 BRIDGE_TU="${ZCL_HOTSWAP_BRIDGE_TU:-tools/command/native_command.c}"
 
-# The shape roots, copied verbatim from the two gates that enforce them:
-#   build/bin/z23-lint check-hotswap-swappable-shape  (ALLOWED / FORBIDDEN)
-#   build/bin/z23-lint check-hotswap-eligible-scope   (FORBIDDEN)
-SHAPE_ALLOWED='^(app/controllers|app/views|app/conditions)/'
-SHAPE_FORBIDDEN='^(core|lib/consensus|lib/validation|lib/storage|lib/net|lib/coins|lib/chain|lib/mining|app/jobs|lib/kernel|lib/supervisor|app/supervisors|domain/consensus)/'
-
 die() { echo "hotswap-candidates: $*" >&2; exit 2; }
 
 for f in "$SWAPPABLE_DEF" "$ELIGIBLE_DEF" "$ISLANDS_DEF" "$DENIED_DEF" \
@@ -70,6 +64,9 @@ for f in "$SWAPPABLE_DEF" "$ELIGIBLE_DEF" "$ISLANDS_DEF" "$DENIED_DEF" \
     [ -r "$f" ] || die "FATAL — required manifest '$f' missing/unreadable (refusing to answer off a hollow parse)"
 done
 [ -d "$CMD_DEF_DIR" ] || die "FATAL — command catalog dir '$CMD_DEF_DIR' missing"
+PARSED_INPUTS="$(sha256sum -- "$SWAPPABLE_DEF" "$ELIGIBLE_DEF" "$ISLANDS_DEF" \
+    "$DENIED_DEF" "$PROBE_DEF" "$SERVICES_DEF" "$BRIDGE_TU" "$CMD_DEF_DIR"/*.def)" || \
+    die "cannot bind advisory manifests to their source bytes"
 
 # ── Build-free macro walker ────────────────────────────────────────────────
 # Same COLUMN-1, paren-depth, string-literal-aware walk the lint gates use, so
@@ -306,39 +303,79 @@ done < <(LC_ALL=C awk "$BRIDGE_TABLE_AWK" "$BRIDGE_TU")
 [ "${#BRIDGE_BODY[@]}" -ge 1 ] || die "FATAL — parsed zero g_bridge_native_body[] bindings from $BRIDGE_TU"
 
 # ── Symbol -> defining .c file, and leaf -> owning translation unit ───────
-# Built LAZILY. The scan below is the only expensive thing this tool does
-# (~1.2 s: one awk pass over every app/, tools/ and lib/ .c). The paths that
+# Built LAZILY from source-qualified native index facts. The paths that
 # do not need it — `--leaf <denied>`, `--leaf <not-READY_READ>` — answer from
 # the manifests alone and must stay instant, and the lint gate that drives
 # this tool several times per run pays the cost once per invocation instead
 # of unconditionally.
 declare -A SYM_FILE=() LEAF_BODY_TU=() LEAF_OWNER=() LEAF_BLOCK=()
 declare -A TU_LEAVES=() NAT_LEAVES=()
+declare -A SYM_UNKNOWN=() PATH_CLASS=()
+FACTS_ID=""; FACTS_CENSUS=""
+
+# Transport only: the native command owns symbol resolution, shape policy and
+# the census. All batches must name the same source and index projection.
+facts_batch() {
+    local names="$1" path="${2:-}" quoted input result records kind a b
+    local identity="" census=""
+    quoted="$(printf '%s' "$path" | sed 's/\\/\\\\/g; s/"/\\"/g')" || die "cannot encode path"
+    input="{\"symbols\":[${names%,}],\"paths\":[$([ -z "$path" ] || printf '"%s"' "$quoted")]}"
+    result="$("$ROOT/build/bin/z23" code hotswap-facts --input="$input")" || \
+        die "native indexed facts unavailable; build the current z23 binary and retry"
+    printf '%s' "$result" | "$ROOT/build/bin/jsonq" eq ok true || die "native facts refused the query"
+    printf '%s' "$result" | "$ROOT/build/bin/jsonq" eq data.schema zcl.code_hotswap_facts.v1 || die "unknown native facts schema"
+    records="$(printf '%s' "$result" | "$ROOT/build/bin/jsonq" get data.text)" || \
+        die "native facts response is incomplete"
+    while IFS=$'\t' read -r kind a b; do
+        case "$kind" in
+            identity)
+                [ -z "$identity" ] || die "duplicate source identity"
+                case "$a$b" in *[!0-9a-f]*) die "invalid source identity" ;; esac
+                [ "${#a}" -eq 64 ] && [ "${#b}" -eq 64 ] || die "invalid source root length"
+                identity="$a:$b" ;;
+            census) [ -z "$census" ] || die "duplicate census"; census="$a" ;;
+            owner)
+                [ -n "$a" ] && [ -n "$b" ] || die "empty indexed owner"
+                [ -z "${SYM_UNKNOWN[$a]:-}" ] || die "conflicting indexed owner"
+                [ -z "${SYM_FILE[$a]:-}" ] || [ "${SYM_FILE[$a]}" = "$b" ] || die "indexed owner changed"
+                SYM_FILE["$a"]="$b" ;;
+            unknown)
+                [ -n "$a" ] && [ -n "$b" ] || die "empty unknown symbol"
+                [ -z "${SYM_FILE[$a]:-}" ] || die "conflicting unknown symbol"
+                SYM_UNKNOWN["$a"]="$b" ;;
+            allowed|forbidden|other|path_unknown)
+                [ -n "$a" ] || die "empty classified path"
+                [ -z "${PATH_CLASS[$a]:-}" ] || [ "${PATH_CLASS[$a]}" = "$kind" ] || die "path classification changed"
+                PATH_CLASS["$a"]="$kind" ;;
+            *) die "unexpected native fact record '$kind'" ;;
+        esac
+    done <<< "$records"
+    [ "${#identity}" -eq 129 ] || die "native facts omitted source identity"
+    case "$census" in ''|*[!0-9]*) die "native facts omitted census" ;; esac
+    [ "$census" -gt 0 ] || die "native facts returned an empty census"
+    [ -z "$FACTS_ID" ] || [ "$FACTS_ID" = "$identity" ] || die "source changed between fact batches"
+    [ -z "$FACTS_CENSUS" ] || [ "$FACTS_CENSUS" = "$census" ] || die "census changed between fact batches"
+    FACTS_ID="$identity"; FACTS_CENSUS="$census"
+    printf '%s\n' "$PARSED_INPUTS" | sha256sum --check --status || die "parsed manifests changed during advice"
+}
+
 OWNERSHIP_RESOLVED=0
 resolve_ownership() {
     [ "$OWNERSHIP_RESOLVED" = 1 ] && return 0
-    OWNERSHIP_RESOLVED=1
     local sym file leaf handler body_tu owner other cur tu
-    local sym_defs=0
-
-while IFS=$'\t' read -r sym file; do
-    [ -n "$sym" ] || continue
-    [ -n "${SYM_FILE[$sym]:-}" ] && continue
-    SYM_FILE["$sym"]="$file"
-    sym_defs=$((sym_defs + 1))
-done < <(LC_ALL=C find app tools lib -name '*.c' -type f -print0 2>/dev/null \
-    | LC_ALL=C xargs -0 awk '
-        /^[A-Za-z_]/ {
-            line = $0
-            p = index(line, "(")
-            if (p < 2) next
-            head = substr(line, 1, p - 1)
-            if (match(head, /[A-Za-z_][A-Za-z0-9_]*[ \t]*$/)) {
-                s = substr(head, RSTART, RLENGTH); gsub(/[ \t]/, "", s)
-                if (s != "" && head != s) print s "\t" FILENAME
-            }
-        }')
-[ "$sym_defs" -ge 1 ] || die "FATAL — symbol index is empty (the definition scan found nothing)"
+    local names="" count=0
+    local -A seen_symbols=()
+    for leaf in "${!READY_READ[@]}"; do
+        sym="${LEAF_HANDLER[$leaf]:-}"
+        [ "$sym" != zcl_native_bridge_command ] || sym="${BRIDGE_BODY[$leaf]:-}"
+        [ -n "$sym" ] || continue
+        [ -z "${seen_symbols[$sym]:-}" ] || continue
+        seen_symbols["$sym"]=1
+        names="$names\"$sym\","; count=$((count + 1))
+        if [ "$count" -eq 128 ]; then facts_batch "$names"; names=""; count=0; fi
+    done
+    [ "$count" -eq 0 ] || facts_batch "$names"
+    [ -n "$FACTS_ID" ] || facts_batch ""
 
 for leaf in "${!READY_READ[@]}"; do
     handler="${LEAF_HANDLER[$leaf]:-}"
@@ -361,7 +398,7 @@ for leaf in "${!READY_READ[@]}"; do
     fi
     body_tu="${SYM_FILE[$sym]:-}"
     if [ -z "$body_tu" ]; then
-        LEAF_BLOCK["$leaf"]="handler symbol '$sym' has no definition site in app/, tools/ or lib/"
+        LEAF_BLOCK["$leaf"]="handler symbol '$sym' has no unique indexed definition (${SYM_UNKNOWN[$sym]:-unknown}); semantic completeness is unproven"
         continue
     fi
     LEAF_BODY_TU["$leaf"]="$body_tu"
@@ -392,6 +429,7 @@ for tu in "${swap_tu_order[@]}"; do
     done
 done
 
+OWNERSHIP_RESOLVED=1
 }
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -470,6 +508,7 @@ swappable_command_for() {  # tu
 # Prints a full report. Returns 0 SWAPPABLE, 1 ELIGIBLE, 2 BLOCKED.
 verdict_tu() {
     resolve_ownership
+    printf '%s\n' "$PARSED_INPUTS" | sha256sum --check --status || die "parsed manifests changed before advice"
     local tu="$1" verbose="${2:-1}"
     local leaves="${TU_LEAVES[$tu]:-}"
     local owner statics l reason bad
@@ -546,11 +585,12 @@ verdict_tu() {
         *) bad="not a .c translation unit"; LAST_BLOCK_CLASS="shape" ;;
     esac
     [ -z "$bad" ] && [ ! -f "$tu" ] && { bad="file does not exist"; LAST_BLOCK_CLASS="missing"; }
-    [ -z "$bad" ] && [[ "$tu" =~ $SHAPE_FORBIDDEN ]] && \
-        { bad="under a forbidden consensus/state/supervisor root — z23-lint check-hotswap-swappable-shape FORBIDDEN='$SHAPE_FORBIDDEN'. Consensus, validation, storage, net, coins, chain, mining, reducer stages, the kernel and supervisors are NEVER hot-swappable, not even in dev."
+    [ -n "$bad" ] || [ -n "${PATH_CLASS[$tu]:-}" ] || facts_batch "" "$tu"
+    [ -z "$bad" ] && [ "${PATH_CLASS[$tu]:-}" = forbidden ] && \
+        { bad="under a forbidden consensus/state/supervisor root — native policy shared with check-hotswap-swappable-shape. Consensus, validation, storage, net, coins, chain, mining, reducer stages, the kernel and supervisors are NEVER hot-swappable, not even in dev."
           LAST_BLOCK_CLASS="forbidden-root"; }
-    [ -z "$bad" ] && [[ ! "$tu" =~ $SHAPE_ALLOWED ]] && \
-        { bad="not under an allowed shape-leaf folder (engine/controllers/, contexts/explorer/views/, engine/conditions/) — a swappable TU must be a controller/view/condition LEAF. check_hotswap_swappable_shape.sh ALLOWED='$SHAPE_ALLOWED'."
+    [ -z "$bad" ] && [ "${PATH_CLASS[$tu]:-}" != allowed ] && \
+        { bad="no allowed indexed shape-leaf classification (${PATH_CLASS[$tu]:-unknown}) — a swappable TU must be a controller/view/condition LEAF under the native policy shared with check-hotswap-swappable-shape."
           LAST_BLOCK_CLASS="not-a-shape-leaf"; }
     if [ -z "$bad" ] && [ -z "$leaves" ]; then
         bad="owns no ZCL_COMMAND_READY_READ command leaf, so a module built from it would re-point nothing"
@@ -640,9 +680,10 @@ verdict_tu() {
         pl="$(probe_leaf_for_tu "$tu" "$ok_leaves")"
         args="$(probe_args_for_leaf "$pl")"
         pin="${PROBE_CASE_INPUT[$pl]:-}"
-        echo "VERDICT: ELIGIBLE — passes every MECHANICAL rule, NOT registered"
+        echo "VERDICT: ELIGIBLE — provisional indexed mechanical candidate, NOT registered"
         echo "  file:   $tu"
         echo "  leaves: $ok_leaves"
+        echo "  ownership_basis: indexed_definitions; semantic_completeness: unproven"
         [ -n "$denied_hits$nonready_hits$claimed_hits" ] && {
             echo "  excluded from the row above:"
             [ -n "$denied_hits" ] && printf '%s\n' "$denied_hits"
@@ -715,15 +756,15 @@ verdict_tu() {
 # ── Ledger ─────────────────────────────────────────────────────────────────
 print_summary() {
     local pct_leaf pct_tu ctl_total
-    ctl_total="$(LC_ALL=C find app/controllers -name '*.c' -type f 2>/dev/null | LC_ALL=C wc -l)"
-    [ "$ctl_total" -ge 1 ] 2>/dev/null || ctl_total=0
+    ctl_total="$FACTS_CENSUS"
     pct_leaf="$(LC_ALL=C awk -v a="$swap_leaf_total" -v b="$ready_read_total" 'BEGIN{ if (b) printf "%.1f", 100*a/b; else printf "0.0" }')"
     pct_tu="$(LC_ALL=C awk -v a="${#swap_tu_order[@]}" -v b="$ctl_total" 'BEGIN{ if (b) printf "%.1f", 100*a/b; else printf "0.0" }')"
-    echo "SUMMARY: leaves ${swap_leaf_total}/${ready_read_total} READY_READ covered (${pct_leaf}%) | TUs ${#swap_tu_order[@]}/${ctl_total} app/controllers TUs registered (${pct_tu}%) + ${island_member_total} island member(s) | eligible-not-registered ${ELIGIBLE_COUNT:-0} TU(s)/${ELIGIBLE_LEAF_COUNT:-0} leaf/leaves | blocked ${BLOCKED_COUNT:-0} TU(s) | ${WITHHELD_COUNT:-0} leaf/leaves owned by a registered TU but unlisted and unexplained"
+    echo "SUMMARY: leaves ${swap_leaf_total}/${ready_read_total} READY_READ covered (${pct_leaf}%) | TUs ${#swap_tu_order[@]}/${ctl_total} indexed allowed-shape TUs registered (${pct_tu}%) + ${island_member_total} island member(s) | eligible-not-registered ${ELIGIBLE_COUNT:-0} TU(s)/${ELIGIBLE_LEAF_COUNT:-0} leaf/leaves | blocked ${BLOCKED_COUNT:-0} TU(s) | ${WITHHELD_COUNT:-0} leaf/leaves owned by a registered TU but unlisted and unexplained"
 }
 
 ledger() {
     resolve_ownership
+    printf '%s\n' "$PARSED_INPUTS" | sha256sum --check --status || die "parsed manifests changed before ledger"
     local tu rc
     local -a elig=() blocked=()
     declare -A BLOCK_CLASS=()
@@ -733,6 +774,7 @@ ledger() {
     echo "derived from $SWAPPABLE_DEF, $ELIGIBLE_DEF, $ISLANDS_DEF,"
     echo "$DENIED_DEF, $PROBE_DEF, $CMD_DEF_DIR/*.def and $BRIDGE_TU."
     echo "Nothing below is hardcoded: add a .def row and this ledger moves."
+    echo "Ownership basis: indexed definitions; semantic completeness: unproven."
     echo
     echo "── SWAPPABLE (registered; the ~9s loop works TODAY) ─────────────────"
     for tu in "${swap_tu_order[@]}"; do
@@ -771,7 +813,7 @@ ledger() {
     done
 
     echo
-    echo "── ELIGIBLE (every mechanical rule passes; NOT registered) ──────────"
+    echo "── ELIGIBLE (provisional indexed mechanical candidates; NOT registered) ──"
     echo "   Mechanical only. A human still has to argue each one is off the"
     echo "   consensus path before it may be registered — see any single-file"
     echo "   report for the exact rows and the standing rule."
@@ -814,12 +856,12 @@ ledger() {
                 echo "  RULE: not under an allowed shape-leaf folder (engine/controllers/,"
                 echo "        contexts/explorer/views/, engine/conditions/). A swappable TU must be a"
                 echo "        controller/view/condition LEAF — check_hotswap_swappable_shape.sh"
-                echo "        ALLOWED='$SHAPE_ALLOWED'"
+                echo "        uses the native shared shape policy."
                 echo "        $n TU(s):" ;;
               forbidden-root)
                 echo "  RULE: under a forbidden consensus/state/supervisor root —"
                 echo "        check_hotswap_swappable_shape.sh"
-                echo "        FORBIDDEN='$SHAPE_FORBIDDEN'"
+                echo "        uses the native shared forbidden-root policy."
                 echo "        $n TU(s):" ;;
               mutable-static)
                 echo "  RULE: defines a mutable file-scope static (a module .so gets its own"

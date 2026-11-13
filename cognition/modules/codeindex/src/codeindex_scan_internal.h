@@ -42,6 +42,7 @@ struct scan_ctx {
     void       *user;
     int         syms_emitted;
     int         refs_emitted;
+    bool        saturated;     /* an eligible symbol or reference was omitted */
 
     /* doc comments: end offset + first line */
     struct { size_t start_off; size_t end_off; char firstline[256]; } *comments;

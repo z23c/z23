@@ -312,7 +312,7 @@ static void emit_sym(struct scan_ctx *c, const char *name, char kind,
 {
     if (!name || !name[0]) return;
     if (is_reserved_name(name)) return;
-    if (c->syms_emitted >= CI_MAX_SYMS_PER_FILE) return;
+    if (c->syms_emitted >= CI_MAX_SYMS_PER_FILE) { c->saturated = true; return; }
     struct ci_symbol s;
     memset(&s, 0, sizeof(s));
     snprintf(s.name, sizeof(s.name), "%s", name);
@@ -619,12 +619,15 @@ static void scan_ref_ident(struct scan_ctx *c, size_t *i)
         if (n < sizeof(nm)) {
             memcpy(nm, c->clean + s, n);
             nm[n] = '\0';
-            if (!is_keyword(nm) &&
-                c->refs_emitted < CI_MAX_REFS_PER_FILE) {
-                int rl = line_of(c, s);
-                c->on_ref(nm, c->relpath, rl,
-                          enclosing_for_line(c, rl), c->user);
-                c->refs_emitted++;
+            if (!is_keyword(nm)) {
+                if (c->refs_emitted >= CI_MAX_REFS_PER_FILE)
+                    c->saturated = true;
+                else {
+                    int rl = line_of(c, s);
+                    c->on_ref(nm, c->relpath, rl,
+                              enclosing_for_line(c, rl), c->user);
+                    c->refs_emitted++;
+                }
             }
         }
     }
@@ -836,7 +839,7 @@ static void emit_define(struct scan_ctx *c, const struct guard_stack *gs,
     if (c->syms_emitted < CI_MAX_SYMS_PER_FILE) {
         c->on_sym(&ms, c->user);
         c->syms_emitted++;
-    }
+    } else c->saturated = true;
 }
 
 /* Handle the directive whose '#' is at t on line l. */
@@ -1031,7 +1034,7 @@ bool ci_scan_text(const char *src, size_t len, const char *relpath,
     free(c.pp_line);
     free(c.comments);
     free(c.funcs);
-    return ready;
+    return ready && !c.saturated;
 }
 
 void codeindex_text_purpose(const char *src, size_t len, const char *relpath,

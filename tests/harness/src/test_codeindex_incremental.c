@@ -1077,6 +1077,71 @@ static int cin_scan_allocation_cases(const char *workspace)
     return failures;
 }
 
+/* Generated source only: the limit is exercised through the real scanner. */
+static char *cin_saturation_source(unsigned kind, int count)
+{
+    size_t cap = (size_t)count * 32 + 64, used = 0;
+    char *src = malloc(cap);
+    if (!src) return NULL;
+    if (kind == 2) used = (size_t)snprintf(src, cap, "int wrapper(void) {\n");
+    for (int i = 0; i < count; ++i) {
+        const char *fmt = kind == 0 ? "int symbol_%d;\n" :
+                          kind == 1 ? "#define MACRO_%d 1\n" : "callee_%d();\n";
+        int n = snprintf(src + used, cap - used, fmt, i);
+        if (n < 0 || (size_t)n >= cap - used) { free(src); return NULL; }
+        used += (size_t)n;
+    }
+    if (kind == 2) snprintf(src + used, cap - used, "return 0;\n}\n");
+    return src;
+}
+
+static bool cin_saturation_scan(unsigned kind, int count, bool expected)
+{
+    char *src = cin_saturation_source(kind, count);
+    if (!src) return false;
+    struct cin_scan_counts observed = {0};
+    bool ok = ci_scan_text(src, strlen(src), "lib/net/src/saturation.c", false,
+                           "net", cin_fault_symbol, cin_fault_ref, &observed, NULL);
+    free(src);
+    int rows = kind == 2 ? observed.refs : observed.symbols;
+    bool matched = ok == expected && rows == 20000;
+    if (!matched) fprintf(stderr, "scanner saturation kind=%u input=%d returned=%d symbols=%d refs=%d\n",
+                          kind, count, ok, observed.symbols, observed.refs);
+    return matched;
+}
+
+static bool cin_saturation_rollback(const char *root)
+{
+    struct ci_store *store = NULL;
+    if (!cin_fault_seed(root, &store)) { if (store) ci_store_close(store); return false; }
+    char *src = cin_saturation_source(0, 20001);
+    bool ready = src && cin_write_file(root, "lib/net/src/fault.c", src);
+    free(src);
+    uint8_t dep_stat[32], digest[32] = {0};
+    struct ci_merkle_leaf leaf = {0};
+    snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
+    ready = ready && cin_fault_old_rows(ci_store_db(store)) && ci_deps_stat_root_sha3(root, dep_stat);
+    bool refused = ready && !ci_build_store_incremental(root, store, &leaf, 1, dep_stat, digest);
+    bool old_rows = cin_fault_old_rows(ci_store_db(store));
+    ci_store_close(store);
+    if (!refused || !old_rows) fprintf(stderr, "scanner saturation rollback ready=%d refused=%d old_rows=%d\n", ready, refused, old_rows);
+    return refused && old_rows;
+}
+
+static int cin_saturation_cases(const char *workspace)
+{
+    int failures = 0;
+    char root[PATH_MAX];
+    int n = snprintf(root, sizeof root, "%s/scan-saturation", workspace);
+    bool ready = n > 0 && (size_t)n < sizeof root;
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        CIN_CHECK("scanner exact emission limit succeeds", cin_saturation_scan(kind, 20000, true));
+        CIN_CHECK("scanner over emission limit refuses", cin_saturation_scan(kind, 20001, false));
+    }
+    CIN_CHECK("scanner overflow rolls back prior generation", ready && cin_saturation_rollback(root));
+    return failures;
+}
+
 int test_codeindex_incremental(void)
 {
     int failures = 0;
@@ -1098,6 +1163,7 @@ int test_codeindex_incremental(void)
     failures += cin_vanished_cases(workspace);
     failures += cin_source_line_cases(workspace);
     failures += cin_scan_allocation_cases(workspace);
+    failures += cin_saturation_cases(workspace);
     failures += cin_edit_cases(live, reference);
     failures += cin_inventory_cases(live, reference, baseline_files);
     failures += cin_snapshot_cases(live, reference);

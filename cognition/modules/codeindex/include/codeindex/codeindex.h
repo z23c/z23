@@ -292,6 +292,20 @@ int codeindex_find(struct codeindex *ci, const char *query,
 int codeindex_find_exact(struct codeindex *ci, const char *name,
                           struct ci_symbol *out, int cap);
 
+enum codeindex_exact_status {
+    CODEINDEX_EXACT_COMPLETE,
+    CODEINDEX_EXACT_TRUNCATED,
+    CODEINDEX_EXACT_CORRUPT,
+    CODEINDEX_EXACT_ERROR,
+};
+
+/* Checked exact-name enumeration. Only COMPLETE publishes count and rows;
+ * callers must ignore out on every other status. TRUNCATED means at least
+ * one more row exists. CORRUPT denotes a row that failed verification. */
+enum codeindex_exact_status codeindex_find_exact_checked(
+    struct codeindex *ci, const char *name, struct ci_symbol *out, int cap,
+    int *count);
+
 /* Ranked literal substring search over names, signatures, definition/
  * declaration paths, and indexed documentation. Exact/prefix/name matches
  * precede signature, path, and doc matches; ties are byte-stable. */

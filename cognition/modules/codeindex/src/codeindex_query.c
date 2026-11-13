@@ -92,6 +92,16 @@ int codeindex_find_exact(struct codeindex *ci, const char *name,
     return ci_store_find_symbols_exact(ci->store, name, out, cap);
 }
 
+enum codeindex_exact_status codeindex_find_exact_checked(
+    struct codeindex *ci, const char *name, struct ci_symbol *out, int cap,
+    int *count)
+{
+    if (count) *count = 0;
+    if (!ci || !ci->store || !name || !out || cap <= 0 || !count)
+        return CODEINDEX_EXACT_ERROR;
+    return ci_store_find_symbols_exact_checked(ci->store, name, out, cap, count);
+}
+
 int codeindex_search_text(struct codeindex *ci, const char *query,
                           struct ci_search_hit *out, int cap)
 {

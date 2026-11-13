@@ -3406,6 +3406,7 @@ AGENT_IMPACT_RULE("cognition/modules/science/src/*.c|cognition/modules/science/i
  * read-latency contract, so a slow walk here shows up there. */
 AGENT_IMPACT_RULE("tools/command/native_code_corpus_command.c", "science command_registry_catalog command_registry_latency native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_code_count_command.c|tests/harness/src/test_code_count.c", "code_count command_registry_catalog native_api_contract command_registry_latency")
+AGENT_IMPACT_RULE("tools/command/native_code_hotswap_facts.c|tools/dev/hotswap_shape_policy.h|tools/dev/hotswap-candidates.sh|tests/harness/src/test_code_hotswap_facts.c", "code_hotswap_facts codeindex_pages_bounds codeindex_static_callers command_registry_catalog native_api_contract make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/chainlog/src/*.c|engine/modules/chainlog/include/chainlog/*.h|tests/harness/src/test_chainlog.c", "chainlog dev_platform make_lint_gates")
 /* Test-group determinism: the classifier, the perturbation vocabulary, the
  * per-group verdict, and the scan that drives them. The lint gate rides along
@@ -3571,6 +3572,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_leaf_smoke.c", "leaf_smoke")
 AGENT_IMPACT_RULE("tests/harness/src/test_build_fabric_executor_attach.c", "build_fabric_attach")
 AGENT_IMPACT_RULE("tests/harness/src/test_checkpoints_progress.c", "checkpoints_progress_boundary_crossover checkpoints_progress_zero_defenses checkpoints_progress_sigcheck_factor checkpoints_progress_regression_seal")
 AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_projection.c", "codeindex_projection_integrity")
+AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_store_exact.c|cognition/modules/codeindex/src/codeindex_store_read.c", "codeindex_static_callers codeindex_pages_bounds codeindex")
 AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_inventory_schema.c|cognition/modules/codeindex/src/codeindex_scan_docs.c|cognition/modules/codeindex/src/codeindex_docs_read.c|cognition/modules/codeindex/include/codeindex/codeindex_docs.h", "codeindex_inventory_schema codeindex codeindex_projection_integrity")
 AGENT_IMPACT_RULE("tools/command/native_code_pages.c|tools/command/native_code_pages.h", "codeindex_inventory_schema codeindex command_registry_catalog native_api_contract")
 AGENT_IMPACT_RULE("tests/harness/src/test_codeindex_pages_bounds.c|cognition/modules/codeindex/src/codeindex_pages.c|cognition/modules/codeindex/include/codeindex/codeindex_pages.h|cognition/modules/codeindex/src/codeindex_build.c|cognition/modules/codeindex/src/codeindex_store.c|cognition/modules/codeindex/src/codeindex_store_hash.c|cognition/modules/codeindex/src/codeindex_priv.h|cognition/modules/codeindex/src/codeindex_seed.c|tests/harness/src/test_codeindex_seed.c", "codeindex_pages_bounds codeindex_seed codeindex_inventory_schema codeindex_projection_integrity codeindex")

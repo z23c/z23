@@ -9,6 +9,7 @@
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
 #include "codeindex/codeindex_pages.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 #include "config/file_ops.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
@@ -202,6 +203,100 @@ static bool cpb_import_then_legacy(const char *root)
     return imported && cpb_legacy_prior(root);
 }
 
+struct cpb_interrupt { sqlite3 *db; int rows; };
+
+static int cpb_interrupt_row(unsigned event, void *ctx, void *statement, void *unused)
+{
+    (void)statement; (void)unused;
+    struct cpb_interrupt *fault = ctx;
+    if (event == SQLITE_TRACE_ROW && ++fault->rows == 1)
+        sqlite3_interrupt(fault->db);
+    return 0;
+}
+
+static bool cpb_page_fault(sqlite3 *db, struct codeindex *ci, const char *sql)
+{
+    struct ci_file rows[4];
+    if (sqlite3_exec(db, "SAVEPOINT page_fault", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    bool changed = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    bool refused = changed && codeindex_files_page(ci, 0, rows, 4) < 0;
+    bool restored = sqlite3_exec(db, "ROLLBACK TO page_fault; RELEASE page_fault", NULL, NULL, NULL) == SQLITE_OK;
+    if (!changed || !refused || !restored)
+        fprintf(stderr, "file page fault: changed=%d refused=%d restored=%d sql=%s\n", changed, refused, restored, sql);
+    return refused && restored;
+}
+
+/* Corrupt only a private writable copy; codeindex_open returns a read-only store. */
+static struct ci_store *cpb_writable_copy(struct codeindex *ci)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) return NULL;
+    sqlite3_backup *backup = sqlite3_backup_init(ci_store_db(store), "main", ci_store_db(ci->store), "main");
+    bool ok = backup && sqlite3_backup_step(backup, -1) == SQLITE_DONE;
+    if (backup && sqlite3_backup_finish(backup) != SQLITE_OK) ok = false;
+    if (!ok) { ci_store_close(store); return NULL; }
+    return store;
+}
+
+static bool cpb_file_count_fault(struct codeindex *ci)
+{
+    sqlite3 *db = ci_store_db(ci->store);
+    if (codeindex_file_count(ci) != 1) return false;
+    struct cpb_interrupt fault = {.db = db};
+    if (sqlite3_trace_v2(db, SQLITE_TRACE_ROW, cpb_interrupt_row, &fault) != SQLITE_OK) return false;
+    int interrupted = codeindex_file_count(ci);
+    bool cleared = sqlite3_trace_v2(db, 0, NULL, NULL) == SQLITE_OK;
+    int recovered = codeindex_file_count(ci);
+    bool ok = fault.rows == 1 && interrupted < 0 && cleared && recovered == 1;
+    if (!ok) fprintf(stderr, "file count interrupt rows=%d rc=%d cleared=%d recovered=%d\n",
+                     fault.rows, interrupted, cleared, recovered);
+    return ok;
+}
+
+static bool cpb_file_page_faults(struct codeindex *ci)
+{
+    sqlite3 *db = ci_store_db(ci->store);
+    struct ci_file rows[4];
+    bool ok = db && codeindex_files_page(ci, 0, rows, 4) == 1 &&
+        strcmp(rows[0].path, "lib/net/src/net.c") == 0 &&
+        codeindex_files_page(ci, 1, rows, 4) == 0;
+    struct cpb_interrupt fault = {.db = db};
+    if (ok) ok = sqlite3_trace_v2(db, SQLITE_TRACE_ROW, cpb_interrupt_row, &fault) == SQLITE_OK;
+    if (ok) {
+        int interrupted = codeindex_files_page(ci, 0, rows, 4);
+        ok = interrupted < 0 && fault.rows == 1;
+        if (!ok) fprintf(stderr, "file page interrupt: rc=%d rows=%d\n", interrupted, fault.rows);
+    }
+    if (db && sqlite3_trace_v2(db, 0, NULL, NULL) != SQLITE_OK) ok = false;
+    if (ok) ok = cpb_page_fault(db, ci, "UPDATE files SET path=printf('%0300d',1)");
+    if (ok) ok = cpb_page_fault(db, ci, "UPDATE files SET purpose=CAST(x'610062' AS TEXT)");
+    if (ok) ok = cpb_page_fault(db, ci, "UPDATE files SET line_count=-1");
+    if (ok) ok = cpb_page_fault(db, ci, "UPDATE files SET line_count=2147483648");
+    if (ok) ok = codeindex_files_page(ci, 0, rows, 4) == 1;
+    return ok;
+}
+
+static bool cpb_file_pages(const char *root)
+{
+    struct codeindex *ci = codeindex_open(root);
+    if (!ci) return false;
+    struct ci_file rows[4];
+    bool original = codeindex_files_page(ci, 0, rows, 4) == 1 &&
+        !strcmp(rows[0].path, "lib/net/src/net.c") &&
+        codeindex_files_page(ci, 1, rows, 4) == 0;
+    struct ci_store *store = original ? cpb_writable_copy(ci) : NULL;
+    struct codeindex copy = *ci;
+    copy.store = store;
+    bool pages = store && cpb_file_page_faults(&copy);
+    bool count = store && cpb_file_count_fault(&copy);
+    bool ok = pages && count;
+    if (store) ci_store_close(store);
+    codeindex_close(ci);
+    if (!ok) fprintf(stderr, "file page fixture: original=%d writable_copy=%d\n", original, store != NULL);
+    return ok;
+}
+
 int test_codeindex_pages_bounds(void)
 {
     int failures = 0;
@@ -213,5 +308,7 @@ int test_codeindex_pages_bounds(void)
               cpb_in_fresh_root(cpb_import_then_legacy));
     CPB_CHECK("an incremental refresh after an import keeps the hint and stays valid",
               cpb_in_fresh_root(cpb_incremental));
+    CPB_CHECK("file pages refuse interrupted and malformed rows, then recover",
+              cpb_in_fresh_root(cpb_file_pages));
     return failures;
 }

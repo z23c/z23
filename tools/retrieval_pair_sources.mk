@@ -39,6 +39,7 @@ cognition/modules/codeindex/src/codeindex_semantic_candidate.c \
 cognition/modules/codeindex/src/codeindex_source_universe.c \
 cognition/modules/codeindex/src/codeindex_spare.c \
 cognition/modules/codeindex/src/codeindex_store.c \
+cognition/modules/codeindex/src/codeindex_store_exact.c \
 cognition/modules/codeindex/src/codeindex_store_hash.c \
 cognition/modules/codeindex/src/codeindex_store_identity.c \
 cognition/modules/codeindex/src/codeindex_store_read.c \

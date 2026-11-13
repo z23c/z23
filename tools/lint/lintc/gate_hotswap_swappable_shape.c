@@ -45,6 +45,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "../../dev/hotswap_shape_policy.h"
 #include "lintc_text.h"
 #include "util/str_suffix.h"
 
@@ -549,14 +550,9 @@ static int hsw_compile_regexes(regex_t *forbidden, regex_t *allowed,
                                regex_t *island_allowed)
 {
     static const char *const pats[] = {
-        "^(engine|cognition|contexts/[^/]+)/(controllers|views|conditions)/",
-        "^(engine|cognition|contexts/[^/]+)/(controllers|views|conditions|"
-            "services)/.+\\.c$|^contexts/commons/modules/metaverse/src/.+\\.c$|"
-            "^platform/modules/encoding/src/.+\\.c$|"
-            "^contexts/commons/modules/vcs/src/package_policy\\.c$",
-        "^(core/(consensus|modules/(validation|net|coins|chain|mining))|"
-            "engine/(reducer|jobs|supervisors|modules/(storage|kernel|"
-            "supervisor)))/",
+        ZCL_HOTSWAP_SHAPE_ALLOWED,
+        ZCL_HOTSWAP_ISLAND_ALLOWED,
+        ZCL_HOTSWAP_SHAPE_FORBIDDEN,
     };
     int err = reg_fail(allowed, regcomp(allowed, pats[0], REG_EXTENDED));
     if (err)

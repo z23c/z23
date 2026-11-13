@@ -21,6 +21,7 @@
 #include <sqlite3.h>
 
 #include <pthread.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -395,14 +396,48 @@ int ci_store_file_count(struct ci_store *s)
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare file_count");
     }
-    int n = 0;
+    int n = -1;
     int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
-    bool ok = rc == SQLITE_ROW;
-    if (ok) n = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    bool ok = rc == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_INTEGER;
+    if (ok) {
+        sqlite3_int64 count = sqlite3_column_int64(stmt, 0);
+        ok = count >= 0 && count <= INT_MAX;
+        if (ok) n = (int)count;
+    }
+    if (ok) ok = sqlite3_step(stmt) == SQLITE_DONE;  // raw-sql-ok:codeindex-derived
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
     pthread_mutex_unlock(&s->lock);
     if (!ok) LOG_ERR("codeindex", "step file_count");
     return n;
+}
+
+static bool ci_file_page_row(sqlite3_stmt *stmt, struct ci_file *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (sqlite3_column_type(stmt, 0) != SQLITE_TEXT ||
+        sqlite3_column_type(stmt, 1) != SQLITE_TEXT ||
+        sqlite3_column_type(stmt, 2) != SQLITE_TEXT ||
+        sqlite3_column_type(stmt, 3) != SQLITE_INTEGER ||
+        !ci_edge_column(stmt, 0, out->path, sizeof(out->path)) ||
+        !ci_edge_column(stmt, 1, out->group, sizeof(out->group)) ||
+        !ci_edge_column(stmt, 2, out->purpose, sizeof(out->purpose)) ||
+        !out->path[0]) return false;
+    sqlite3_int64 lines = sqlite3_column_int64(stmt, 3);
+    if (lines < 0 || lines > INT_MAX) return false;
+    out->line_count = (int)lines;
+    return true;
+}
+
+static int ci_file_page_rows(sqlite3_stmt *stmt, struct ci_file *out, int cap)
+{
+    int n = 0;
+    for (;;) {
+        int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
+        if (rc == SQLITE_DONE) return n;
+        if (rc != SQLITE_ROW || n >= cap || !ci_file_page_row(stmt, &out[n]))
+            return -1;
+        n++;
+    }
 }
 
 int ci_store_files_page(struct ci_store *s, int offset,
@@ -419,23 +454,13 @@ int ci_store_files_page(struct ci_store *s, int offset,
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare files_page");
     }
-    sqlite3_bind_int(stmt, 1, cap);  // raw-sql-ok:codeindex-derived
-    sqlite3_bind_int(stmt, 2, offset);  // raw-sql-ok:codeindex-derived
-    int n = 0;
-    int rc;
-    while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
-        memset(&out[n], 0, sizeof(out[n]));
-        ci_cpy(out[n].path, sizeof(out[n].path),
-               (const char *)sqlite3_column_text(stmt, 0));
-        ci_cpy(out[n].group, sizeof(out[n].group),
-               (const char *)sqlite3_column_text(stmt, 1));
-        ci_cpy(out[n].purpose, sizeof(out[n].purpose),
-               (const char *)sqlite3_column_text(stmt, 2));
-        out[n].line_count = sqlite3_column_int(stmt, 3);
-        n++;
-    }
-    sqlite3_finalize(stmt);
+    int n = -1;
+    if (sqlite3_bind_int(stmt, 1, cap) == SQLITE_OK &&  // raw-sql-ok:codeindex-derived
+        sqlite3_bind_int(stmt, 2, offset) == SQLITE_OK)  // raw-sql-ok:codeindex-derived
+        n = ci_file_page_rows(stmt, out, cap);
+    if (sqlite3_finalize(stmt) != SQLITE_OK) n = -1;
     pthread_mutex_unlock(&s->lock);
+    if (n < 0) LOG_ERR("codeindex", "read files_page failed");
     return n;
 }
 

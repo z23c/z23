@@ -56,8 +56,9 @@
  * and the docs table (prose of docs tree .md, AGENTS.md and README.md) join the
  * sealed rows, so a ret6 store lacks the lines and the prose a reader now
  * expects and must be recomputed, not read as if they were zero or absent. */
-/* ret8 seals the unsigned, source-bound page-hint projection. */
-#define CI_SCHEMA_VERSION "ret8"
+/* ret8 seals the unsigned, source-bound page-hint projection.
+ * ret9 refuses scans that would silently omit symbols or references. */
+#define CI_SCHEMA_VERSION "ret9"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 
@@ -203,6 +204,9 @@ int  ci_store_defs_by_name(struct ci_store *s, const char *name,
                            struct ci_symbol *out, int cap);
 int ci_store_find_symbols_exact(struct ci_store *s, const char *name,
                                 struct ci_symbol *out, int cap);
+enum codeindex_exact_status ci_store_find_symbols_exact_checked(
+    struct ci_store *s, const char *name, struct ci_symbol *out, int cap,
+    int *count);
 int  ci_store_find_symbols(struct ci_store *s, const char *q,
                            struct ci_symbol *out, int cap);
 int  ci_store_search_text(struct ci_store *s, const char *q,
