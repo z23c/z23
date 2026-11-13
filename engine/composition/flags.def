@@ -2545,6 +2545,8 @@ Z23_FLAG("ZCL_TEST_COLD_PUBLIC_REQUIRED", "env_test", "-", "-",
           "require the public-chain cold-prefix fixture; first use tests/harness/src/consensus_state_cold_adoption_test.h:auto")
 Z23_FLAG("ZCL_TEST_COLD_RETAINED", "env_test", "-", "-",
           "retained private archive fixture for cold-prefix tests; first use tests/harness/src/consensus_state_real_postcommit_test.h:auto")
+Z23_FLAG("ZCL_TEST_DEBUG_LEVEL", "make_var", "1", "-",
+          "first use Makefile:auto; select test-fast line-level debug information (1) or full local/type debug information (2).")
 Z23_FLAG("ZCL_TEST_DERIVE_PUBLIC_PROJECTION", "env_test", "-", "-",
           "derive a private test projection from retained public rows; first use tests/harness/src/consensus_state_empty_retire_test.h:auto")
 Z23_FLAG("ZCL_TEST_PUBLIC_FLAT", "env_test", "-", "-",

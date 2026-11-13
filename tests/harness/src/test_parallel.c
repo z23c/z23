@@ -1162,9 +1162,10 @@ static bool retry_probe_parse(const char *arg)
 {
     static const char *const flags[] = {
         "--retry-evidence-probe", "--retry-evidence-unobserved",
-        "--retry-evidence-rename-failure", "--retry-evidence-always-fail"
+        "--retry-evidence-rename-failure", "--retry-evidence-always-fail",
+        "--retry-evidence-signal"
     };
-    for (unsigned i = 0; i < 4; i++) {
+    for (unsigned i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
         if (strcmp(arg, flags[i]) == 0) {
             g_retry_evidence_probe = i + 1;
             return true;
@@ -1178,21 +1179,29 @@ static bool retry_probe_options(int argc, char **argv)
     static const char *const allowed[] = {
         "--jobs=2", "--verbose", "--no-cache", "--exact=test_hex_codec",
         "--retry-evidence-probe", "--retry-evidence-unobserved",
-        "--retry-evidence-rename-failure", "--diagnostic-once", "--retry-evidence-always-fail"
+        "--retry-evidence-rename-failure", "--diagnostic-once", "--retry-evidence-always-fail",
+        "--retry-evidence-signal"
     };
-    unsigned seen[9] = {0};
+    unsigned seen[10] = {0};
     for (int i = 1; i < argc; i++) {
         size_t j = 0;
-        while (j < 9 && strcmp(argv[i], allowed[j]) != 0) j++;
-        if (j == 9 || seen[j]++) return false;
+        while (j < 10 && strcmp(argv[i], allowed[j]) != 0) j++;
+        if (j == 10 || seen[j]++) return false;
     }
     return seen[2] == 1 && seen[3] == 1 &&
-        seen[4] + seen[5] + seen[6] + seen[8] == 1 && !getenv("ZCL_TEST_CACHE_DUMP");
+        seen[4] + seen[5] + seen[6] + seen[8] + seen[9] == 1 &&
+        (!seen[9] || seen[7] == 1) && !getenv("ZCL_TEST_CACHE_DUMP");
 }
 
 static bool retry_probe_admit(int argc, char **argv)
 {
     if (!g_retry_evidence_probe) return true;
+#if !defined(__linux__)
+    if (g_retry_evidence_probe == 5) {
+        fprintf(stderr, "retry evidence signal fixture requires Linux\n");
+        return false;
+    }
+#endif
     if (!retry_probe_options(argc, argv)) {
         fprintf(stderr, "retry evidence fixture requires --no-cache and exact test_hex_codec only\n");
         return false;
@@ -1235,8 +1244,26 @@ static int retry_probe_result(bool ok, unsigned count)
     return count == 0 ? 1 : 0;
 }
 
+#if defined(__linux__)
+/* Global and non-tail-called so -rdynamic can expose the actual crash frame. */
+__attribute__((noinline)) void runner_signal_probe_frame(void)
+{
+    (void)raise(SIGABRT);
+    volatile sig_atomic_t returned = 1;
+    (void)returned;
+}
+#endif
+
 static int retry_evidence_probe(const char *out_path)
 {
+#if defined(__linux__)
+    if (g_retry_evidence_probe == 5) {
+        const struct rlimit no_core = {.rlim_cur = 0, .rlim_max = 0};
+        if (setrlimit(RLIMIT_CORE, &no_core) != 0) return 2;
+        runner_signal_probe_frame();
+        return 2;
+    }
+#endif
     FILE *f = fopen("retry-evidence-count", "r");
     unsigned count = 0;
     if (f) {
@@ -3812,7 +3839,8 @@ static bool cli_diagnostic_arg(const char *a)
         (strncmp(a, "-j", 2) == 0 && a[2]) || strncmp(a, "--timeout=", 10) == 0 ||
         strcmp(a, "--verbose") == 0 || strcmp(a, "-v") == 0 ||
         strcmp(a, "--no-cache") == 0 || strcmp(a, "--list-build-needs") == 0 ||
-        strcmp(a, "--retry-evidence-probe") == 0;
+        strcmp(a, "--retry-evidence-probe") == 0 ||
+        strcmp(a, "--retry-evidence-signal") == 0;
 }
 
 /* Diagnostic mode admits only one exact group and a closed set of harmless
@@ -4402,10 +4430,22 @@ static int report_cache_accounting(struct run_ctx *c, int *observation_refused)
     return audit_diverged;
 }
 
+static void retry_signal_report(const struct group_result *results)
+{
+    if (g_retry_evidence_probe != 5) return;
+    for (size_t i = 0; i < g_num_groups; ++i) {
+        if (strcmp(g_groups[i].name, "test_hex_codec") != 0) continue;
+        printf("CRASH-PROBE-PARENT group=%s signaled=%d signal=%d\n",
+               g_groups[i].name, results[i].signaled, results[i].exit_code);
+        return;
+    }
+}
+
 static int run_report(struct run_ctx *c)
 {
     report_tally(c);
     if (c->o.diagnostic_once) {
+        retry_signal_report(c->results);
         printf("DIAGNOSTIC ONLY: group=%s failed=%d; not acceptance evidence\n",
                c->o.only, c->failed_groups);
         free(c->slots);

@@ -3289,6 +3289,106 @@ static int test_runner_retry_evidence(void)
            tgs_retry_case("--retry-evidence-rename-failure", true);
 }
 
+#if !defined(_WIN32)
+static int tgs_signal_run(const char *root, const char *exe,
+                          const char *const *options, char *out, size_t cap)
+{
+    if (cap) out[0] = '\0';
+    const char *argv[20] = {"/bin/sh", "-c",
+        "ulimit -c 0 || exit 125; ZCL_TEST_CACHE=1; ZCL_TESTCACHE_STORE_ROOT=\"$1/cache\"; "
+        "ZCL_TEST_TIMING_DIR=\"$1/timing\"; ZCL_DEV_OBSERVATION_STORE=\"$1/observations\"; "
+        "export ZCL_TEST_CACHE ZCL_TESTCACHE_STORE_ROOT ZCL_TEST_TIMING_DIR ZCL_DEV_OBSERVATION_STORE; "
+        "shift; exec \"$@\"", "tgs-signal", root, exe};
+    size_t n = 6;
+    for (size_t i = 0; options[i]; ++i) {
+        if (n + 1 >= sizeof argv / sizeof argv[0]) return -1;
+        argv[n++] = options[i];
+    }
+    argv[n] = NULL;
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, root, out, cap, 60000, &timed_out);
+    return timed_out ? -1 : rc;
+}
+
+#if defined(__linux__)
+static bool tgs_signal_no_artifacts(const char *root)
+{
+    const char *const names[] = {"cache", "timing", "observations", "build/test-verdict.json"};
+    char path[PATH_MAX + 64];
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        int n = snprintf(path, sizeof path, "%s/%s", root, names[i]);
+        if (n < 0 || (size_t)n >= sizeof path || access(path, F_OK) == 0 || errno != ENOENT)
+            return false;
+    }
+    return true;
+}
+
+static bool tgs_signal_refusals(const char *root, const char *exe)
+{
+    static const char *const cases[][8] = {
+        {"--retry-evidence-signal", "--no-cache", "--exact=test_hex_codec", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--exact=test_hex_codec", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_codec_cursor", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec,test_codec_cursor", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", "--cache", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", "--cache-probe-only", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", "--selection-only", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", "--list", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", "--emit-observations", NULL},
+        {"--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", "--activate-proof-contracts", NULL},
+        {"--retry-evidence-signal", "--retry-evidence-probe", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", NULL},
+        {"--retry-evidence-signal", "--retry-evidence-signal", "--diagnostic-once", "--no-cache", "--exact=test_hex_codec", NULL},
+    };
+    char out[8192];
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        int rc = tgs_signal_run(root, exe, cases[i], out, sizeof out);
+        if (rc != 2 || strstr(out, "[fatal-signal]")) {
+            fprintf(stderr, "signal probe admission case=%zu rc=%d output=%s\n", i, rc, out);
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+static int test_runner_signal_diagnostic(void)
+{
+    int failures = 0;
+    char root[PATH_MAX] = {0}, exe[PATH_MAX], out[65536];
+    bool made = test_mkdtemp(root, sizeof root, "tgs_signal") != NULL;
+    TEST("runner: crash diagnostics preserve fatal signal evidence without acceptance") {
+        ASSERT(made && os_proc_exe_path(exe, sizeof exe));
+        const char *args[] = {"--diagnostic-once", "--no-cache", "--retry-evidence-signal",
+                              "--exact=test_hex_codec", NULL};
+        int rc = tgs_signal_run(root, exe, args, out, sizeof out);
+#if defined(__linux__)
+        if (rc != 3 || !strstr(out, "runner_signal_probe_frame"))
+            fprintf(stderr, "signal probe rc=%d output:\n%s\n", rc, out);
+        ASSERT_EQ(rc, 3);
+        ASSERT(strstr(out, "test_hex_codec (SIGNALED") != NULL);
+        ASSERT(strstr(out, "CRASH-PROBE-PARENT group=test_hex_codec signaled=1 signal=6") != NULL);
+        ASSERT(strstr(out, "[fatal-signal] sig=6") != NULL);
+        ASSERT(strstr(out, "runner_signal_probe_frame") != NULL);
+        ASSERT(strstr(out, "[fatal-signal] end") != NULL);
+        ASSERT(strstr(out, "DIAGNOSTIC ONLY: group=test_hex_codec failed=1") != NULL);
+        ASSERT(strstr(out, "SUITE VERDICT") == NULL);
+        ASSERT(strstr(out, "zcl.test_phase_receipt.v1") == NULL);
+        ASSERT(strstr(out, "[rerun-alone]") == NULL);
+        ASSERT(tgs_signal_no_artifacts(root));
+        ASSERT(tgs_signal_refusals(root, exe));
+        ASSERT(tgs_signal_no_artifacts(root));
+#else
+        ASSERT_EQ(rc, 2);
+        ASSERT(strstr(out, "[fatal-signal]") == NULL);
+#endif
+        PASS();
+    } _test_next:;
+    if (made && test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
+#endif
+
 static int test_runner_diagnostic_once(void)
 {
     int failures = 0;
@@ -4128,6 +4228,9 @@ int test_test_group_selector(void)
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();
     failures += test_runner_diagnostic_once();
+#if !defined(_WIN32)
+    failures += test_runner_signal_diagnostic();
+#endif
     failures += test_runner_retry_probe_bounds();
     failures += test_runner_state_setup_refuses();
     failures += test_runner_group_home_is_private();

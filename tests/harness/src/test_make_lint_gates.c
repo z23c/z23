@@ -2566,6 +2566,43 @@ static int t_proof_plan_metadata(void)
     return bad;
 }
 
+static int t_test_debug_profile(void)
+{
+    static const char script[] =
+        "set -eu; root=$1; work=$2; cd \"$work\"\n"
+        "fail() { echo \"test debug profile: $1\" >&2; exit 1; }\n"
+        "awk '/^define zcl_compile_epoch$/{on=1} on{print} on && /^endef$/{found=1; exit} END{if(!found) exit 1}' \"$root/Makefile\" > epoch.mk || fail epoch-block\n"
+        "awk '/^# Test profiles drop -Werror/{on=1} on && /^TEST_FAST_OBJ_DIR =/{found=1; exit} on{print} END{if(!found) exit 1}' \"$root/Makefile\" > profile.mk || fail profile-block\n"
+        "awk '/^define zcl_dev_plan_fields$/{on=1} on{print} on && /^endef$/{found=1; exit} END{if(!found) exit 1}' \"$root/Makefile\" > plan.mk || fail plan-block\n"
+        "zero=0000000000000000000000000000000000000000000000000000000000000000\n"
+        "printf 'BUILD_EPOCH_KEY_TOOL := %s/tools/dev/build-epoch-key.sh\\n' \"$root\" > Fixture.mk\n"
+        "cat >> Fixture.mk <<'MAKE'\n"
+        ".DEFAULT_GOAL := all\n"
+        "CACHED_CFLAGS := -O2 -g -gno-record-gcc-switches -DPROFILE_FIXTURE -Werror\nZCL_LTO_FLAG := -flto\nZCL_EPOCH_DEPFILE_ID := deps=-MMD,-MP\n"
+        "ZCL_EPOCH_PROFILES := test-fast\nZCL_TEST_WINDOWS_COMPAT_FLAGS :=\n"
+        "BUILD_COMPILER_ID := 0000000000000000000000000000000000000000000000000000000000000000\n"
+        "BUILD_SYSTEM_ID := 0000000000000000000000000000000000000000000000000000000000000000\n"
+        "include epoch.mk\ninclude profile.mk\ninclude plan.mk\n"
+        "all:\n\t@printf '%s\\n' '$(TEST_FAST_CFLAGS)' > flags\n"
+        "\t@printf '%s\\n' '$(TEST_FAST_EPOCH_COMPILE_FLAGS)' > epoch-flags\n"
+        "\t@printf '%s\\n' '$(TEST_FAST_COMPILE_EPOCH)' > epoch\n"
+        "\t@$(zcl_dev_plan_fields) > plan\nMAKE\n"
+        "hasflag() { awk -v flag=\"$2\" '{for(i=1;i<=NF;i++) if($i==flag) found=1} END{exit !found}' \"$1\"; }\n"
+        "checkflags() { hasflag flags \"$1\" || fail missing-debug; if hasflag flags \"$2\"; then fail wrong-debug; fi; hasflag flags -gno-record-gcc-switches && hasflag flags -DPROFILE_FIXTURE || fail lost-input-flags; grep -Fx \"TEST_CFLAGS=$(cat flags)\" plan >/dev/null || fail plan-flags; grep -F -- \"$1\" epoch-flags >/dev/null || fail epoch-flags; }\n"
+        "make -s -f Fixture.mk || fail default; checkflags -g1 -g; if hasflag flags -Werror; then fail unexpected-werror; fi; cp flags flags-default; cp epoch epoch-default\n"
+        "test -s epoch && test \"$(cat epoch)\" != \"$zero\" || fail epoch-empty\n"
+        "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=1 || fail explicit-one; checkflags -g1 -g; cmp flags-default flags || fail flags-default-one; cmp epoch-default epoch || fail epoch-default-one\n"
+        "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=2 || fail explicit-two; checkflags -g -g1; awk '{for(i=1;i<=NF;i++) {if($i==\"-g1\") $i=\"-g\"} $1=$1; print}' flags-default > normalized-default; awk '{$1=$1; print}' flags > normalized-two; cmp normalized-default normalized-two || fail changed-unrelated-flags; if cmp -s epoch-default epoch; then fail same-epoch; fi\n"
+        "make -s -f Fixture.mk ZCL_TEST_WERROR=1 || fail werror; hasflag flags -Werror || fail missing-werror; checkflags -g1 -g\n"
+        "for bad in '' 0 3 text '1 2'; do if make -s -f Fixture.mk \"ZCL_TEST_DEBUG_LEVEL=$bad\" > bad.log 2>&1; then fail invalid-accepted; fi; grep -F 'ZCL_TEST_DEBUG_LEVEL must be 1 or 2' bad.log >/dev/null || fail wrong-invalid-reason; done\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "test_debug", "profile");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "test debug profile fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates(void)
 {
     char real_root[PATH_MAX];
@@ -2578,6 +2615,7 @@ int test_make_lint_gates(void)
     if (t_secure_release_host_support_rebuild() != 0) return 1;
     if (t_registry_query_scope() != 0) return 1;
     if (t_proof_plan_metadata() != 0) return 1;
+    if (t_test_debug_profile() != 0) return 1;
     if (t_lint_command_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;
