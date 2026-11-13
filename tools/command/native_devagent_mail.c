@@ -37,6 +37,9 @@
  *           scalar refuses when multiple .jsonl streams make its sequence
  *           space ambiguous); or the `next_since` token a previous page
  *           returned, which resumes exactly where that page stopped.
+ *           A successful post also returns next_since, parked at the end of
+ *           every stream including the row just written, so a later pull
+ *           does not replay that row and does not depend on the scalar.
  *   from    post: optional sender name (default $BOARD_AGENT, then $USER,
  *           then "local"). pull: optional exact-match sender filter.
  *   cursor  ack only: required. A non-negative integer (also as the second
@@ -1114,6 +1117,9 @@ static void dvm_post_delivery(struct zcl_command_reply *reply, const char *to,
         (void)json_push_kv_str(&reply->data, "hint", where.hint);
 }
 
+static void dvm_post_attach_resume(struct zcl_command_reply *reply,
+                                   const char *maildir);
+
 static void dvm_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply, const char *maildir)
 {
@@ -1211,6 +1217,7 @@ static void dvm_post(const struct zcl_command_request *req,
     (void)json_push_kv_int(&reply->data, "cursor", seq);
     (void)json_push_kv_str(&reply->data, "outbox", outbox);
     dvm_post_delivery(reply, to, ref);
+    dvm_post_attach_resume(reply, maildir);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -1726,6 +1733,55 @@ static void dvm_pull_page(struct dvm_pull_state *ps,
     }
 }
 
+/* Byte length of a stream, accepted as a resume offset only when the file
+ * is empty or its last byte is a newline. */
+static bool dvm_file_end(const char *path, long long *end)
+{
+    FILE *f = fopen(path, "rb");
+    struct stat st;
+    int last = 0;
+    if (!f) return false;
+    if (fstat(fileno(f), &st) != 0 || st.st_size < 0) {
+        fclose(f);
+        return false;
+    }
+    *end = (long long)st.st_size;
+    if (*end == 0) {
+        fclose(f);
+        return true;
+    }
+    if (fseek(f, (long)(*end - 1), SEEK_SET) != 0 || (last = fgetc(f)) < 0) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    return last == '\n';
+}
+
+/* Record one directory entry. A non-stream is skipped. A stream that cannot
+ * be parked on a line boundary fails the token. */
+static bool dvm_resume_add(struct dvm_pull_state *ps, const char *maildir,
+                           const char *name)
+{
+    struct dvm_stream *s;
+    long long end = 0;
+    size_t n;
+    int w;
+    if (!dvm_is_stream_name(name)) return true;
+    if (!dvm_cursor_name_ok(name) || ps->nstreams >= DVM_STREAMS_MAX)
+        return false;
+    s = &ps->streams[ps->nstreams];
+    n = strlen(name);
+    if (n >= sizeof(s->name)) return false;
+    memcpy(s->name, name, n + 1);
+    w = snprintf(s->path, sizeof(s->path), "%s/%s", maildir, name);
+    if (w <= 0 || (size_t)w >= sizeof(s->path)) return false;
+    if (!dvm_file_end(s->path, &end)) return false;
+    s->off = end;
+    ps->nstreams++;
+    return true;
+}
+
 /* "<floor>|<name>:<offset>,..." over every stream, in name order. */
 static bool dvm_token_build(const struct dvm_pull_state *ps, long long floor,
                             char *out, size_t cap)
@@ -1743,6 +1799,42 @@ static bool dvm_token_build(const struct dvm_pull_state *ps, long long floor,
         used += (size_t)n;
     }
     return true;
+}
+
+/* Park every current stream at its end. Floor stays 0: a positive scalar
+ * floor is refused once a second stream exists. */
+static bool dvm_post_resume_token(const char *maildir, char *token, size_t cap)
+{
+    DIR *d = opendir(maildir);
+    struct dirent *ent;
+    struct dvm_pull_state ps;
+    bool add_ok = true;
+    bool ok = false;
+    if (!d) return false;
+    memset(&ps, 0, sizeof(ps));
+    ps.streams = (struct dvm_stream *)zcl_calloc(
+        DVM_STREAMS_MAX, sizeof(*ps.streams), "devagent_mail.resume");
+    if (!ps.streams) {
+        closedir(d);
+        return false;
+    }
+    while (add_ok && (ent = readdir(d)) != NULL)
+        add_ok = dvm_resume_add(&ps, maildir, ent->d_name);
+    if (add_ok && ps.nstreams > 1)
+        qsort(ps.streams, ps.nstreams, sizeof(*ps.streams), dvm_stream_name_cmp);
+    if (add_ok && ps.nstreams > 0)
+        ok = dvm_token_build(&ps, 0, token, cap);
+    free(ps.streams);
+    closedir(d);
+    return ok;
+}
+
+static void dvm_post_attach_resume(struct zcl_command_reply *reply,
+                                   const char *maildir)
+{
+    char token[DVM_TOKEN_CAP];
+    if (!dvm_post_resume_token(maildir, token, sizeof(token))) return;
+    (void)json_push_kv_str(&reply->data, "next_since", token);
 }
 
 static bool dvm_prefix_streams(struct dvm_pull_state *ps, const char *token)

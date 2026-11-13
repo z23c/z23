@@ -2146,6 +2146,67 @@ static int test_mail_read_side_checks(void)
     return failures;
 }
 
+/* A post beside a second stream cannot resume by the scalar cursor. The
+ * reply's next_since token is parked past every current row, so a pull of
+ * that token is empty and the next post is the only row it returns. */
+static int test_mail_post_resume_token(void)
+{
+    int failures = 0;
+    TEST("mail: a post beside another stream returns a pullable next_since") {
+        struct dvx_call c, p;
+        char token[4096];
+        const char *got;
+        long long cursor;
+        dvx_isolate("post_resume");
+        dvx_import_stream("inbox.peer",
+            "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\","
+            "\"to\":\"*\",\"kind\":\"note\",\"body\":\"old-inbox\","
+            "\"ref\":\"\"}\n");
+        dvx_post(&c, "alice", "*", "note", "posted-marker");
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        got = dvx_str(&c, "next_since");
+        ASSERT(strchr(got, '|') != NULL);
+        ASSERT(strstr(got, "outbox.jsonl:") != NULL);
+        ASSERT(strstr(got, "inbox.peer.jsonl:") != NULL);
+        ASSERT(strlen(got) < sizeof(token));
+        memcpy(token, got, strlen(got) + 1);
+        cursor = dvx_int(&c, "cursor");
+        dvx_end(&c);
+        dvx_pull(&p, cursor, NULL, NULL);
+        ASSERT(dvx_run(&p));
+        ASSERT(!dvx_ok(&p));
+        ASSERT_STR_EQ(p.reply.error.code, "MAIL_CURSOR_AMBIGUOUS");
+        dvx_end(&p);
+        dvx_pull_token(&p, token, NULL);
+        ASSERT(dvx_run(&p));
+        ASSERT(dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 0);
+        dvx_end(&p);
+        dvx_post(&c, "alice", "*", "note", "after-marker");
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_pull_token(&p, token, NULL);
+        ASSERT(dvx_run(&p));
+        ASSERT(dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 1);
+        {
+            const struct json_value *rows = dvx_arr(&p, "rows");
+            const struct json_value *row;
+            ASSERT(rows != NULL);
+            row = &rows->children[0];
+            ASSERT_STR_EQ(json_get_str(json_get(row, "body")), "after-marker");
+        }
+        dvx_end(&p);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+
 /* The post, ack and body-refusal checks, in original order. A failed test
  * ends this group, as its jump to the end of the original function did. */
 static int test_mail_post_ack_checks(void)
@@ -2155,6 +2216,8 @@ static int test_mail_post_ack_checks(void)
     failures += test_mail_leaf_registered();
     if (failures) return failures;
     failures += test_mail_first_post_roundtrip();
+    if (failures) return failures;
+    failures += test_mail_post_resume_token();
     if (failures) return failures;
     failures += test_mail_ack_persists_cursor();
     if (failures) return failures;
