@@ -68,7 +68,9 @@ bool app_discover_view(struct zcl_present_model_v1 *model,
 static void adv_empty_page(struct zcl_present_model_v1 *m, bool previous_page, bool has_more)
 {
     (void)snprintf(m->summary, sizeof(m->summary), "%s",
-        previous_page && has_more ? "No verified apps on this page. Browse another page or go back." :
+        previous_page && has_more ? "No verified apps on this page. Choose More apps, Previous page or Back." :
+        has_more ? "No verified apps on this page. Choose More apps, Refresh or Back." :
+        previous_page ? "No verified apps on this page. Choose Previous page, Refresh or Back." :
         "No verified apps on this page. Refresh or go back.");
     m->action_count = 0;
     if (has_more)

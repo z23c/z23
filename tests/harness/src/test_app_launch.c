@@ -2710,6 +2710,12 @@ static bool adv_has_action(const struct zcl_present_model_v1 *m,
             return !label || !strcmp(m->actions[i].label, label);
     return false;
 }
+static bool adv_empty_guidance(const struct zcl_present_model_v1 *m, bool previous, bool more)
+{
+    return (strstr(m->summary, "Refresh") != NULL) == !(previous && more) &&
+        (strstr(m->summary, "More apps") != NULL) == more &&
+        (strstr(m->summary, "Previous page") != NULL) == previous;
+}
 static bool adv_empty_page(bool previous, bool more)
 {
     struct zcl_present_model_v1 m; char why[256];
@@ -2717,7 +2723,7 @@ static bool adv_empty_page(bool previous, bool more)
         !zcl_present_model_validate_v1(&m, why, sizeof(why))) return false;
     return m.action_count == (previous || more ? 3u : 2u) &&
         m.action_count <= 4 && !adv_has_action(&m, "review", NULL) &&
-        (strstr(m.summary, "Refresh") != NULL) == !(previous && more) &&
+        adv_empty_guidance(&m, previous, more) &&
         adv_has_action(&m, "back", NULL) &&
         adv_has_action(&m, "next", "More apps") == more &&
         adv_has_action(&m, "previous", "Previous page") == previous &&
