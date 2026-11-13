@@ -6,6 +6,10 @@
  * Core gates run directly; file-purpose uses the canonical runner command.
  */
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "command/native_dev_land_precheck.h"
 
 #include "command/native_command.h"
@@ -38,7 +42,7 @@
 #define PC_TEXT_CAP 1600u
 #define PC_SHIP_GATE "check-ship-remote-transaction"
 #define PC_DEPFILE_GATE "check-make-depfile-scope-selftest"
-#define PC_DEPFILE_SCRIPT "tools/dev/make-depfile-scope-selftest.sh"
+#define PC_DEPFILE_BIN "build/bin/depfile-scope-launch"
 
 static const char *const k_pc_core[] = {
     "check-file-size-ceiling", "check-cyclomatic-complexity",
@@ -881,7 +885,7 @@ static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
         return pc_size_run(r);
     r->gate_output_available = true;
     if (strcmp(gate, PC_DEPFILE_GATE) == 0)
-        return pc_run(r->wt, "./" PC_DEPFILE_SCRIPT, NULL,
+        return pc_run(r->wt, "./" PC_DEPFILE_BIN, NULL,
                       r->deadline, r->out, PC_OUT_CAP, &r->capture);
     return pc_run(r->wt, r->bin, gate, r->deadline, r->out, PC_OUT_CAP, &r->capture);
 }
@@ -902,11 +906,31 @@ static const struct {
     {"check-windows-cross-syntax", "build/gen/guest_kernel_data.c", R_OK},
     {"check-doc-claims", "build/bin/z23_bounded_run", X_OK},
     {"check-package-anatomy", "build/bin/z23_bounded_run", X_OK},
-    {PC_DEPFILE_GATE, PC_DEPFILE_SCRIPT, X_OK},
+    {PC_DEPFILE_GATE, PC_DEPFILE_BIN, X_OK},
     {PC_DEPFILE_GATE, "Makefile", R_OK},
     {PC_DEPFILE_GATE, "tools/dev/make_depfile_scope_selftest.c", R_OK},
     {PC_DEPFILE_GATE, "tools/dev/make_depfile_scope_process.h", R_OK},
 };
+
+/* The launcher derives its root from its executable location. This is a
+ * point-in-time location check, not executable freshness or identity proof. */
+static bool pc_depfile_lane_launcher(const char *wt)
+{
+    char path[4096 + 80], expected[4096 + 80];
+    int n = snprintf(path, sizeof(path), "%s/%s", wt, PC_DEPFILE_BIN);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    char *root = realpath(wt, NULL);
+    char *actual = realpath(path, NULL);
+    bool ok = false;
+    if (root && actual) {
+        n = snprintf(expected, sizeof(expected), "%s/%s", root, PC_DEPFILE_BIN);
+        ok = n > 0 && (size_t)n < sizeof(expected) && strcmp(expected, actual) == 0;
+    }
+    free(root);
+    free(actual);
+    return ok;
+}
 #endif
 
 /* The first lane file `gate` needs that is absent (named in r->out), or NULL. */
@@ -914,8 +938,8 @@ static const char *pc_missing_need(struct pc_run *r, const char *gate)
 {
 #if defined(_WIN32)
     if (strcmp(gate, PC_DEPFILE_GATE) == 0) {
-        (void)snprintf(r->out, PC_OUT_CAP, "depfile script adapter unavailable on Windows");
-        return PC_DEPFILE_SCRIPT;
+        (void)snprintf(r->out, PC_OUT_CAP, "depfile launcher adapter unavailable on Windows");
+        return PC_DEPFILE_BIN;
     }
     return NULL;
 #else
@@ -929,6 +953,11 @@ static const char *pc_missing_need(struct pc_run *r, const char *gate)
         (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s",
                        k_pc_needs[i].file);
         return k_pc_needs[i].file;
+    }
+    if (strcmp(gate, PC_DEPFILE_GATE) == 0 && !pc_depfile_lane_launcher(r->wt)) {
+        (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s (noncanonical launcher)",
+                       PC_DEPFILE_BIN);
+        return PC_DEPFILE_BIN;
     }
     return NULL;
 #endif

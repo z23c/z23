@@ -797,6 +797,11 @@ static int dlx_case_history_precheck(void)
     TEST("land: learned depfile missing prerequisites remain unproven") {
         ASSERT(dlx_pc_depfile_case(3)); ASSERT(dlx_pc_depfile_case(7)); PASS();
     }
+    TEST("land: noncanonical depfile launchers remain unproven") {
+        bool launcher = dlx_pc_depfile_case(8);
+        bool directory = dlx_pc_depfile_case(9);
+        ASSERT(launcher); ASSERT(directory); PASS();
+    }
     TEST("land: absent or similarly named history never executes depfile probe") {
         ASSERT(dlx_pc_depfile_case(4)); ASSERT(dlx_pc_depfile_case(5)); PASS();
     }

@@ -1047,7 +1047,10 @@ static bool dlx_pc_depfile_files(const struct dlx_rig *rig, int mode)
         "#!/bin/sh\nprintf '%s\\n' \"$0\" >> build/depfile-ran\n"
         "if [ -f build/depfile-timeout ]; then sleep 2; touch build/depfile-completed; fi\n"
         "if [ -f build/depfile-exit ]; then exit \"$(cat build/depfile-exit)\"; fi\nexit 0\n";
-    if ((mode != 7 && !dlx_pc_owned_file(rig->clone, "tools/dev/make-depfile-scope-selftest.sh", script, 0755)) ||
+    char old[1400]; struct stat st;
+    if (snprintf(old, sizeof(old), "%s/tools/dev/make-depfile-scope-selftest.sh", rig->clone) >= (int)sizeof(old) ||
+        lstat(old, &st) == 0 || errno != ENOENT) return false;
+    if ((mode != 7 && !dlx_pc_owned_file(rig->clone, "build/bin/depfile-scope-launch", script, 0755)) ||
         !dlx_pc_owned_file(rig->clone, "Makefile", "# private precheck fixture\n", 0644) ||
         !dlx_pc_owned_file(rig->clone, "tools/dev/make_depfile_scope_selftest.c", "/* fixture */\n", 0644))
         return false;
@@ -1063,7 +1066,7 @@ static int dlx_pc_depfile_calls(const struct dlx_rig *rig)
     if (!f) return errno == ENOENT ? 0 : -1;
     int count = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (strcmp(line, "./tools/dev/make-depfile-scope-selftest.sh\n") != 0) { count = -1; break; }
+        if (strcmp(line, "./build/bin/depfile-scope-launch\n") != 0) { count = -1; break; }
         count++;
     }
     if (ferror(f)) count = -1;
@@ -1094,7 +1097,7 @@ static bool dlx_pc_depfile_failure(struct dlx_call *c, int mode, int calls)
 static bool dlx_pc_depfile_missing(struct dlx_call *c, int mode, int calls)
 {
     const char *missing = mode == 3 ? "tools/dev/make_depfile_scope_process.h" :
-                                      "tools/dev/make-depfile-scope-selftest.sh";
+                                      "build/bin/depfile-scope-launch";
     return dlx_ok(c) && dlx_queue_has_one() && calls == 0 &&
            dlx_pc_has(dlx_arr(c, "precheck_skipped"), DLX_DEPFILE_GATE) &&
            strstr(dlx_str(c, "precheck_unproven"), missing) != NULL;
@@ -1117,18 +1120,37 @@ static bool dlx_pc_depfile_verdict(struct dlx_call *c, const struct dlx_rig *rig
                dlx_pc_has(dlx_arr(c, "precheck_ran"), DLX_DEPFILE_GATE);
     if (mode == 1 || mode == 2 || mode == 6)
         return dlx_pc_depfile_failure(c, mode, calls);
-    if (mode == 3 || mode == 7)
+    if (mode == 3 || mode == 7 || mode == 8 || mode == 9)
         return dlx_pc_depfile_missing(c, mode, calls);
     return dlx_pc_depfile_unselected(c, mode, calls);
+}
+
+/* Move the executable or its containing directory outside the checkout,
+ * keeping it runnable through the lane spelling if the guard is missing. */
+static bool dlx_pc_depfile_noncanonical(const struct dlx_rig *rig, int mode)
+{
+    char path[1400], dest[1400];
+    const char *suffix = mode == 8 ? "build/bin/depfile-scope-launch" : "build/bin";
+    const char *external = mode == 8 ? "external-launcher" : "external-bin";
+    if (snprintf(path, sizeof(path), "%s/%s", rig->clone, suffix) >= (int)sizeof(path) ||
+        snprintf(dest, sizeof(dest), "%s/../%s", rig->clone, external) >= (int)sizeof(dest)) return false;
+    if (rename(path, dest) != 0) return false;
+    char *target = realpath(dest, NULL);
+    if (!target) return false;
+    bool ok = symlink(target, path) == 0;
+    free(target);
+    return ok;
 }
 
 static bool dlx_pc_depfile_setup(struct dlx_rig *rig, int mode)
 {
     static const char *const tags[] = {"dep_pass", "dep_fail1", "dep_fail2", "dep_missing",
-                                      "dep_no_history", "dep_unknown", "dep_timeout", "dep_missing_script"};
+                                      "dep_no_history", "dep_unknown", "dep_timeout", "dep_missing_launcher",
+                                      "dep_symlink_launcher", "dep_symlink_bin"};
     if (mode < 0 || (size_t)mode >= sizeof(tags) / sizeof(tags[0])) return false;
     if (!dlx_pc_rig(rig, tags[mode], true, "check-arm-symbol-single\n") ||
         !dlx_pc_depfile_history(mode) || !dlx_pc_depfile_files(rig, mode)) return false;
+    if (mode == 8 || mode == 9) return dlx_pc_depfile_noncanonical(rig, mode);
     if (mode == 1 || mode == 2)
         return dlx_pc_file(rig, "depfile-exit", mode == 1 ? "1\n" : "2\n");
     if (mode == 6) return dlx_pc_file(rig, "depfile-timeout", "1\n");

@@ -25,9 +25,11 @@
  * even without a native lint entry. Missing prerequisites are unproven;
  * any nonzero executed script verdict, including exit 2, refuses submission.
  * Learned check-make-depfile-scope-selftest likewise runs the canonical
- * tools/dev/make-depfile-scope-selftest.sh in the lane. Its checked source
- * prerequisites must be present; the script builds a fresh private fixture.
- * Missing lane inputs are unproven, while started script/toolchain failures
+ * build/bin/depfile-scope-launch in the lane. Its checked source prerequisites
+ * must be present; the launcher builds a fresh private fixture. Its resolved
+ * executable location must be in this lane (a point-in-time location check,
+ * not source qualification). Missing or noncanonical inputs are unproven,
+ * while started launcher/toolchain failures, including exit 2,
  * refuse. It neither runs nor qualifies the unrelated build-epoch probe.
  */
 #ifndef ZCL_NATIVE_DEV_LAND_PRECHECK_H
