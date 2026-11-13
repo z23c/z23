@@ -679,7 +679,7 @@ else ifneq ($(filter dev-proof-bundle dev-proof-producer $(ZCL_PROOF_PLAN_GOALS)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter lint lint-preflight,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint lint-preflight lint-fast-preflight,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # The lint umbrellas name the dev node and confined package verifier as cold
 # prerequisites below.  Their compile epoch must therefore be selected at
 # parse time just as it is for dev-package-verifier; a zero epoch would acquire
@@ -2357,7 +2357,7 @@ else ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),dev-proof-producer)
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter lint lint-preflight,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter lint lint-preflight lint-fast-preflight,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 # Keep in step with the matching ZCL_EPOCH_PROFILES branch: these umbrellas
 # compile and link the dev node and package verifier, so a header edit must
 # invalidate those objects.  An empty profile relinked stale objects.
@@ -5561,7 +5561,7 @@ endif
 .PHONY: check-capability-closure
 # Make already captured this exact record before dispatching lint. Pass it to
 # the read-only CFLAGS query so that query does not walk the source tree again.
-check-capability-closure lint lint-preflight: export ZCL_CAP_CLOSURE_SOURCE_RECORD := $(BUILD_SOURCE_RECORD)
+check-capability-closure lint lint-preflight lint-fast-preflight: export ZCL_CAP_CLOSURE_SOURCE_RECORD := $(BUILD_SOURCE_RECORD)
 check-capability-closure: $(BIN_DIR)/z23-lint
 	@./build/bin/z23-lint capability-closure-data --selftest
 	@./build/bin/z23-lint check-capability-closure --selftest
@@ -7486,6 +7486,28 @@ lint-preflight: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(LINTC_TOOL) $(TOOLGEN
 	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PREFLIGHT_GATES)
 	@echo "lint-preflight: OK"
 endif
+
+# Run the fast and preflight gate union once, then the existing fast
+# differential precheck. Preserve fast-list order and append preflight-only
+# gates in their original order.
+LINT_FAST_PREFLIGHT_GATES = $(LINT_FAST_GATES) $(filter-out $(LINT_FAST_GATES),$(LINT_PREFLIGHT_GATES))
+.PHONY: lint-fast-preflight
+lint-fast-preflight: LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip $(filter $(LINT_FAST_PRECHECK_NATIVE),$(LINT_FAST_PREFLIGHT_GATES) $(LINT_FAST_PRECHECK_HEAVY))))
+ifeq ($(ZCL_LINT_SERIAL),1)
+lint-fast-preflight: $(LINT_FAST_PREFLIGHT_GATES) $(LINTC_TOOL) $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN)
+	@$(LINT_FAST_PRECHECK_RUN)
+	@echo "lint-fast-preflight: OK (serial)"
+else
+lint-fast-preflight: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
+        $(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \
+        $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN) \
+        $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)
+	@rc=0; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_PREFLIGHT_GATES) || { echo "lint-fast-preflight: precheck skipped after gate failure"; exit 1; }; \
+	$(LINT_FAST_PRECHECK_RUN) || rc=1; \
+	[ "$$rc" = 0 ] || exit 1
+	@echo "lint-fast-preflight: OK"
+endif
+
 
 # Cache-aware agent/operator loop:
 #   make fast-ci
@@ -14768,7 +14790,7 @@ lab-peer: $(LAB_PEER_BIN) $(LAB_PEER_FAKE_BIN)
 CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/tools/lab_peer_shadow.o $(DEV_OBJ_DIR)/tools/lab_peer_fake.o
 # Every path that runs the gate (the make target, parallel lint, lint-preflight)
 # builds them first.
-check-capability-closure lint lint-preflight: $(CAPABILITY_STANDALONE_OBJS)
+check-capability-closure lint lint-preflight lint-fast-preflight: $(CAPABILITY_STANDALONE_OBJS)
 # A standalone capability object can finish after either dev binary's own
 # aggregate verification. Verify once more after every preflight epoch writer
 # has drained, so a successful preflight does not leave its epoch unverified.
@@ -14781,7 +14803,7 @@ lint-preflight-epoch-verify: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(CAPABILI
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(DEV_PROFILE)" "$(DEV_EPOCH_COMPILE_FLAGS)" \
 	  "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null
-lint-preflight: lint-preflight-epoch-verify
+lint-preflight lint-fast-preflight: lint-preflight-epoch-verify
 # lint-preflight-epoch-verify fixture end
 endif
 $(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
@@ -18321,7 +18343,7 @@ native-tunnel-static: $(BIN_DIR)/tunnel-static
 TUNNEL_EXPORT_BINDING := tools/dev/native_tunnel_export_binding.h
 .PHONY: native-tunnel-export-binding check-native-tunnel-export-binding
 native-tunnel-export-binding: $(TUNNEL_EXPORT_BINDING)
-lint lint-fast: check-native-tunnel-export-binding
+lint lint-fast lint-fast-preflight: check-native-tunnel-export-binding
 # Stamp-gated like the view headers (see GEN_STAMP_DIR): this one depends on the
 # whole Makefile, so every Makefile edit or fresh checkout left the unchanged
 # header permanently older than its input and restarted every later parse.

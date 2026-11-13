@@ -1023,6 +1023,12 @@ ratchets) are not in `lint-fast`'s subset. On a maintainer host run
 on that kind of change before submitting — it selects those gates and capability-inventory
 freshness from the full lint umbrella.
 
+When a change needs both fast lint and preflight, run
+`DEVBUILD_CLASS=normal devbuild --wait make lint-fast-preflight`.
+This target combines their gate lists and retains the fast differential
+precheck.
+<!-- claim: symbol-present lint-fast-preflight Makefile # combined fast and preflight target -->
+
 `lint-fast` also checks generated capability-inventory freshness and package
 registry roots, including dependency pins. Both remain full-lint gates.
 

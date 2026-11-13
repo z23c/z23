@@ -1794,10 +1794,27 @@ static int t_lint_fast_tor_graph(void)
         "rc=0; fixture_make -n -p -q dev-bin z23 > pair.log 2>&1 || rc=$?\n"
         "if [ \"$rc\" -gt 1 ] || grep -F 'mixed fast-test and dev/node build goals cannot share one Make' pair.log >/dev/null; then echo \"direct build pair refused rc=$rc\" >&2; exit 1; fi\n"
         "grep '^dev-bin:' pair.log >/dev/null; grep '^z23:' pair.log >/dev/null\n";
+    static const char union_checks[] =
+        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$1\" >> \"$HOME/calls\"\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/$1-args\"\\nprintf \"%%s\\\\n\" \"${ZCL_CAP_CLOSURE_SOURCE_RECORD:-}\" > \"$HOME/$1-record\"\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
+        "chmod +x stub-lint\n"
+        "printf '%s\\n' '.PHONY: fixture-a fixture-b fixture-c' 'fixture-a fixture-b fixture-c:' '\t@printf \"%s\\\\n\" \"$@\" >> \"$(HOME)/serial-calls\"; test \"$(FAIL_GATE)\" != 1' >> overlay.mk\n"
+        "union_make() { fixture_make -o lint-preflight-epoch-verify -o check-native-tunnel-export-binding Z23_DEV_BIN=/dev/null DEV_PACKAGE_VERIFY_BIN=/dev/null CAPABILITY_STANDALONE_OBJS= 'LINT_FAST_GATES=fixture-a fixture-b' 'LINT_PREFLIGHT_GATES=fixture-b fixture-c' 'LINT_FAST_PRECHECK_NATIVE=fixture-a fixture-b fixture-c' \"$@\"; }\n"
+        "rm -f \"$HOME/calls\"; union_make lint-fast-preflight > union.log 2>&1 || { cat union.log >&2; exit 1; }\n"
+        "printf 'run\\nprecheck\\n' > expected-calls; cmp expected-calls \"$HOME/calls\"\n"
+        "printf 'fixture-a\\nfixture-b\\nfixture-c\\n' > expected-union; tail -n +6 \"$HOME/run-args\" > actual-union; cmp expected-union actual-union\n"
+        "grep -Fx -- '--skip=fixture-a,fixture-b,fixture-c' \"$HOME/precheck-args\" >/dev/null\n"
+        "grep -F '0000000000000000' \"$HOME/run-record\" >/dev/null\n"
+        "rm -f \"$HOME/calls\"; if FAIL_STAGE=run union_make lint-fast-preflight > union-fail.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ]\n"
+        "rm -f \"$HOME/calls\"; if FAIL_STAGE=precheck union_make lint-fast-preflight > union-precheck-fail.log 2>&1; then exit 1; fi\n"
+        "rm -f \"$HOME/calls\" \"$HOME/serial-calls\"; union_make -j1 lint-fast-preflight ZCL_LINT_SERIAL=1 > union-serial.log 2>&1\n"
+        "cmp expected-union \"$HOME/serial-calls\"; [ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
+        "rm -f \"$HOME/calls\"; if union_make -j1 lint-fast-preflight ZCL_LINT_SERIAL=1 FAIL_GATE=1 > union-serial-fail.log 2>&1; then exit 1; fi\n"
+        "[ ! -e \"$HOME/calls\" ]\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "tor_graph");
-    char combined[sizeof(script) + sizeof(checks) + sizeof(epoch_checks)];
-    int n = snprintf(combined, sizeof(combined), "%s%s%s", script, checks, epoch_checks);
+    char combined[sizeof(script) + sizeof(checks) + sizeof(epoch_checks) + sizeof(union_checks)];
+    int n = snprintf(combined, sizeof(combined), "%s%s%s%s", script, checks, union_checks, epoch_checks);
     if (n < 0 || (size_t)n >= sizeof(combined)) return 1;
     int bad = build_needs_fixture_run(repo_root(), fixture, combined);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;

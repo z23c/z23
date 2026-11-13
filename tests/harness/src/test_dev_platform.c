@@ -13094,20 +13094,42 @@ static int test_epoch_owner_is_nearest_make(void)
     return failures;
 }
 
-struct epn_preflight_scan { int pre, standalone, begin, end; bool block; };
+struct epn_preflight_scan { int pre, standalone, begin, end, combined, continuation; bool block; };
+
+static const char *const epn_combined_prereqs[] = {
+    "lint-fast-preflight: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \\\n",
+    "        $(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \\\n",
+    "        $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN) \\\n",
+    "        $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)\n"
+};
 
 static bool epn_preflight_line(struct epn_preflight_scan *s, const char *line, FILE *out)
 {
     if (!strchr(line, '\n')) return false;
+    if (s->continuation) {
+        if (strcmp(line, epn_combined_prereqs[s->continuation])) return false;
+        if (++s->continuation == 4) s->continuation = 0;
+        return fputs(line, out) != EOF;
+    }
+    if (!strcmp(line, epn_combined_prereqs[0])) {
+        s->combined++; s->continuation = 1;
+        return fputs(line, out) != EOF;
+    }
     if (!strcmp(line, "# lint-preflight-epoch-verify fixture begin\n")) { s->block = true; s->begin++; }
     bool select = s->block;
     if (!strncmp(line, "lint-preflight: $(Z23_DEV_BIN)", 29)) { s->pre++; select = true; }
-    if (!strcmp(line, "check-capability-closure lint lint-preflight: $(CAPABILITY_STANDALONE_OBJS)\n")) {
+    if (!strcmp(line, "check-capability-closure lint lint-preflight lint-fast-preflight: $(CAPABILITY_STANDALONE_OBJS)\n")) {
         s->standalone++; select = true;
     }
     if (select && fputs(line, out) == EOF) return false;
     if (!strcmp(line, "# lint-preflight-epoch-verify fixture end\n")) { s->block = false; s->end++; }
     return true;
+}
+
+static bool epn_preflight_complete(const struct epn_preflight_scan *scan)
+{
+    return !scan->block && !scan->continuation && scan->combined == 1 &&
+           scan->pre == 1 && scan->standalone == 1 && scan->begin == 1 && scan->end == 1;
 }
 
 /* Include the repository's actual preflight edges and verification recipe;
@@ -13129,7 +13151,7 @@ static bool epn_preflight_edges(const char *root)
     if (ferror(in)) ok = false;
     if (fclose(in)) ok = false;
     if (fclose(out)) ok = false;
-    return ok && !scan.block && scan.pre == 1 && scan.standalone == 1 && scan.begin == 1 && scan.end == 1;
+    return ok && epn_preflight_complete(&scan);
 }
 
 static bool epn_preflight_tools(const char *cwd, const char *root)
@@ -13158,11 +13180,11 @@ static bool epn_preflight_makefile(const char *root)
         "O := objects\nD := $(O)/epochs/$(E)\nSESSION := $(D)/.build-session\nLEASE := $(D)/.leases/fixture\n"
         "Z23_DEV_BIN := verified\nDEV_PACKAGE_VERIFY_BIN := verified\nLINTC_TOOL := verified\n"
         "TOOLGEN_BIN := verified\nCAPABILITY_INVENTORY_TOOL := verified\nCAPABILITY_STANDALONE_OBJS := writer\n"
-        "include actual-edges.mk\n.PHONY: lint-preflight acquire verified writer\n"
+        "include actual-edges.mk\n.PHONY: lint-preflight lint-fast-preflight acquire verified writer\n"
         "acquire:\n\t@tools/dev/build-epoch-session.sh acquire $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n"
         "verified: acquire\n\t@tools/dev/build-epoch-session.sh verify $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n\t@printf 'x\\n' > barrier\n"
         "writer: acquire\n\t@read token < barrier\n\t@tools/dev/compile-epoch-object.sh dep $(D)/standalone.o fixture.c $(S) 1 $(M) $(E) $(C) $(SESSION) -- cc -std=c23 -O2\n"
-        "lint-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified\n"
+        "lint-preflight lint-fast-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified\n"
         "BUILD_EPOCH_SESSION_TOOL := tools/dev/build-epoch-session.sh\nDEV_SESSION := $(SESSION)\nDEV_LEASE := $(LEASE)\nDEV_OBJ_ROOT := $(O)\nBIN_DIR := unused\nBUILD_EPOCH_KEEP := 1\n"
         "BUILD_SOURCE_ID := $(S)\nBUILD_CLEAN := 1\nBUILD_MUTATION := $(M)\nBUILD_COMPILER_ID := $(C)\nDEV_COMPILE_EPOCH := $(E)\nDEV_PROFILE := fixture-v1\nDEV_EPOCH_COMPILE_FLAGS := -O2\nDEV_EPOCH_LINK_FLAGS := -\n";
     char fifo[PATH_MAX];
@@ -13170,29 +13192,37 @@ static bool epn_preflight_makefile(const char *root)
         snprintf(fifo, sizeof(fifo), "%s/barrier", root) < (int)sizeof(fifo) && mkfifo(fifo, 0600) == 0;
 }
 
+static bool epn_preflight_case(const char *cwd, const char *goal)
+{
+    char root[PATH_MAX], command[PATH_MAX + 128];
+    if (!test_mkdtemp(root, sizeof(root), "epoch_preflight") ||
+        !epn_preflight_edges(root) || !epn_preflight_tools(cwd, root) ||
+        !epn_preflight_makefile(root) ||
+        snprintf(command, sizeof(command),
+                 "cd '%s' && MAKEFLAGS= MFLAGS= make -s -j2 -f fixture.mk %s >make.log 2>&1",
+                 root, goal) >= (int)sizeof(command)) return false;
+    if (!dp_hs_run(command)) {
+        char path[PATH_MAX], output[8192];
+        if (snprintf(path, sizeof(path), "%s/make.log", root) < (int)sizeof(path) &&
+            dp_hf_slurp(path, output, sizeof(output))) fprintf(stderr, "preflight fixture: %s\n", output);
+        return false;
+    }
+    return test_rm_rf_recursive(root) == 0;
+}
+
 static int test_epoch_preflight_final_verify(void)
 {
     int failures = 0;
-    TEST("dev platform: preflight verifies after every standalone epoch writer") {
-        char cwd[PATH_MAX], root[PATH_MAX], command[PATH_MAX + 96];
+    TEST("dev platform: both preflight targets verify after every standalone epoch writer") {
+        char cwd[PATH_MAX];
         ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
-        ASSERT(test_mkdtemp(root, sizeof(root), "epoch_preflight") != NULL);
-        ASSERT(epn_preflight_edges(root));
-        ASSERT(epn_preflight_tools(cwd, root));
-        ASSERT(epn_preflight_makefile(root));
-        ASSERT(snprintf(command, sizeof(command), "cd '%s' && MAKEFLAGS= MFLAGS= make -s -j2 -f fixture.mk lint-preflight >make.log 2>&1", root) < (int)sizeof(command));
-        bool ran = dp_hs_run(command);
-        if (!ran) {
-            char path[PATH_MAX], output[8192];
-            if (snprintf(path, sizeof(path), "%s/make.log", root) < (int)sizeof(path) &&
-                dp_hf_slurp(path, output, sizeof(output))) fprintf(stderr, "preflight fixture: %s\n", output);
-        }
-        ASSERT(ran);
-        ASSERT(test_rm_rf_recursive(root) == 0);
+        ASSERT(epn_preflight_case(cwd, "lint-preflight"));
+        ASSERT(epn_preflight_case(cwd, "lint-fast-preflight"));
         PASS();
     } _test_next:;
     return failures;
 }
+
 #endif
 
 int test_dev_platform(void)

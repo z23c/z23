@@ -136,7 +136,7 @@ static void setup(void)
 
 static bool profile_bundle_query(const char *name)
 {
-    return strstr(name, "bundle") != NULL;
+    return strstr(name, "bundle") != NULL || strstr(name, "union") != NULL;
 }
 
 static bool profile_probe_ok(const char *name, int rc)
@@ -148,7 +148,7 @@ static void profile_bundle_dep_assert(const char *name, unsigned mask, const cha
 {
     const char *expected = mask == 31 ?
         "build-only dev test-fast test-strict coverage fuzz node-c23" :
-        "dev test-fast node-c23";
+        mask == 2 ? "dev" : "dev test-fast node-c23";
     if (!strstr(data, text("ZCL_DEP_PROFILES_PROBE=[%s]", expected)))
         fail(text("probe=%s depfile profiles expected=[%s]", name, expected));
 }
@@ -183,6 +183,8 @@ static void profile_probes(void)
         {"bundle-repeat", 22, {"z23", "dev-proof-bundle-prefork", "z23"}, "dev test-fast node-c23"},
         {"bundle-header", 22, {"dev-proof-bundle-prefork", "z23", "contexts/explorer/views/include/views/site_css.h"}, "dev test-fast node-c23"},
         {"bundle-unknown", 31, {"dev-proof-bundle-prefork", "z23", "zcl-depfile-unknown"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"},
+        {"union-header", 2, {"lint-fast-preflight", "contexts/explorer/views/include/views/site_css.h"}, "dev"},
+        {"union-mixed", 31, {"lint-fast-preflight", "zcl-depfile-unknown"}, "build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23"},
         {"mixed", 31, {"fast-compile", "build-only"}, NULL},
         {"unknown", 31, {"zcl-depfile-unknown"}, NULL}, {"default", 16, {NULL}, NULL},
         {"header-node", 16, {"contexts/explorer/views/include/views/site_css.h", "z23"}, "node-c23"},
@@ -336,7 +338,7 @@ static void profile_values(char *data, char **epoch, char **depfiles)
 
 static void consistency_probes(void)
 {
-    const char *goals[] = {"lint", "lint-preflight", "ff", "dev-bin", "dev-proof-bundle",
+    const char *goals[] = {"lint", "lint-preflight", "lint-fast-preflight", "ff", "dev-bin", "dev-proof-bundle",
         "fast-compile", "dev-build-only", "dev-package-verifier"};
     char *makefile = text("%s/consistency.mk", work);
     /* Read the real goal-dependent values after inclusion without dumping
@@ -345,9 +347,10 @@ static void consistency_probes(void)
     put(makefile, 0, "include %s/Makefile\n"
         "$(info ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_PROFILES))\n"
         "$(info ZCL_DEPFILE_PROFILES := $(ZCL_DEPFILE_PROFILES))\n", make_path(root));
-    size_t children[8];
-    const char *logs[8];
-    for (size_t i = 0; i < 8; ++i) {
+    enum { count = sizeof(goals) / sizeof(goals[0]) };
+    size_t children[count];
+    const char *logs[count];
+    for (size_t i = 0; i < count; ++i) {
         /* Query parsed profile selection without printing or running recipes.
          * Keep bootstrap vendor inputs disabled, as in the old dry-run. */
         const char *argv[] = {"make", "-f", makefile, "-q", "--no-print-directory",
@@ -357,8 +360,8 @@ static void consistency_probes(void)
     }
     /* Query status may report stale targets or missing unrelated prerequisites.
      * The computed variable records remain the authority, as for the old -pn. */
-    for (size_t i = 0; i < 8; ++i) (void)probe_wait(children[i]);
-    for (size_t i = 0; i < 8; ++i) {
+    for (size_t i = 0; i < count; ++i) (void)probe_wait(children[i]);
+    for (size_t i = 0; i < count; ++i) {
         char *data = output(logs[i]);
         char *epoch = NULL, *depfiles = NULL;
         profile_values(data, &epoch, &depfiles);
