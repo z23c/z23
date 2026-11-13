@@ -544,7 +544,7 @@ ship_hardlink_tool_path() {
     # catches a STALE binary (source changed, binary did not get relinked),
     # which otherwise runs happily and answers with its old command-line
     # surface instead of refusing to run at all.
-    $SHIP_MAKE build/bin/check_no_hardlink_seeding ||
+    $SHIP_MAKE build/bin/check_no_hardlink_seeding >&2 ||
         die "prepare hardlinks FAILED — make build/bin/check_no_hardlink_seeding did not succeed"
     [ -x "$tool" ] ||
         die "prepare hardlinks FAILED — $tool still missing after the build"
@@ -970,6 +970,9 @@ REMOTE_ARGS
                 chmod 755 "$prep_root/build/bin/z23-tor-provenance" ;;
             tor-ready)
                 printf 'fixture provenance\n' > "$prep_root/vendor/tor/.provenance" ;;
+            build/bin/check_no_hardlink_seeding)
+                printf 'fixture vendor build output\n'
+                [ "${SELFTEST_HARDLINK_FAIL:-0}" != 1 ] || return 19 ;;
         esac
     }
     SHIP_MAKE=selftest_fake_make
@@ -1008,6 +1011,26 @@ REMOTE_ARGS
         printf '  Build it first:  make build/bin/check_no_hardlink_seeding\n' >&2
         exit 1
     fi
+    # The real make recipe can emit vendor status on stdout. The executable
+    # path returned through command substitution must remain a single path,
+    # while the build's progress and a nonzero status remain observable.
+    SHIP_HARDLINK_TOOL=""
+    : > "$prep_calls"
+    tool_path="$(ship_hardlink_tool_path 2>"$prep_root/hardlink-build.err")"
+    [ "$tool_path" = "$REPO_ROOT/build/bin/check_no_hardlink_seeding" ] ||
+        die "selftest hardlink tool path contains build output"
+    grep -qx 'build/bin/check_no_hardlink_seeding' "$prep_calls"
+    grep -qx 'fixture vendor build output' "$prep_root/hardlink-build.err"
+    : > "$prep_calls"
+    SELFTEST_HARDLINK_FAIL=1
+    prep_refuse_rc=0
+    ( ship_hardlink_tool_path ) >"$prep_root/hardlink-fail.out" 2>"$prep_root/hardlink-fail.err" || prep_refuse_rc=$?
+    unset SELFTEST_HARDLINK_FAIL
+    [ "$prep_refuse_rc" -ne 0 ] && [ ! -s "$prep_root/hardlink-fail.out" ]
+    grep -qx 'build/bin/check_no_hardlink_seeding' "$prep_calls"
+    grep -q 'make build/bin/check_no_hardlink_seeding did not succeed' "$prep_root/hardlink-fail.err"
+    SHIP_HARDLINK_TOOL="$REPO_ROOT/build/bin/check_no_hardlink_seeding"
+
     # Fixtures live under $prep_root/vendor/hl-* — inside the tool's own
     # scan scope (vendor/, build/hotswap/, build/githooks/ beneath the given
     # root), same as $prep_root/vendor/tor already is above.
