@@ -9,8 +9,7 @@
  * boot_snapshot_offer_state_is_sovereign,
  * boot_snapshot_offer_artifact_is_eligible), which made the two layers
  * mutually dependent. core/modules/net now declares what it needs; this file supplies
- * it. Nothing here is new policy — each adapter forwards to the function
- * core/modules/net previously called directly.
+ * it. Serving callbacks defer optional work while the host requests cooling.
  *
  * Registration runs from a constructor rather than app_init_services so
  * that every binary linking the composition root — node, test runner —
@@ -22,6 +21,8 @@
 #include "config/db_service.h"
 #include "config/boot_snapshot_offer.h"
 #include "net/net_runtime_port.h"
+#include "jobs/node_pace.h"
+#include <stdio.h>
 
 static struct node_db *net_port_node_db(
     const struct app_runtime_context *runtime)
@@ -37,12 +38,40 @@ static struct snapshot_sync_service *net_port_snapshot_sync(
     return runtime ? runtime->snapshot_sync : NULL;
 }
 
+static bool net_port_cooling(char *reason, size_t size)
+{
+    node_pace_poll();
+    if (node_pace_get() != NODE_PACE_PAUSE)
+        return false;
+    if (reason && size)
+        (void)snprintf(reason, size, "node_cooling");
+    return true;
+}
+
+static bool net_port_block_can_serve(char *reason, size_t size)
+{
+    return !net_port_cooling(reason, size) &&
+           boot_block_swarm_state_can_serve(reason, size);
+}
+
+static bool net_port_snapshot_sovereign(char *reason, size_t size)
+{
+    return !net_port_cooling(reason, size) &&
+           boot_snapshot_offer_state_is_sovereign(reason, size);
+}
+
+static bool net_port_snapshot_eligible(const char *datadir, char *reason, size_t size)
+{
+    return !net_port_cooling(reason, size) &&
+           boot_snapshot_offer_artifact_is_eligible(datadir, reason, size);
+}
+
 static const struct net_runtime_port g_net_runtime_port = {
     .node_db = net_port_node_db,
     .snapshot_sync = net_port_snapshot_sync,
-    .block_state_can_serve = boot_block_swarm_state_can_serve,
-    .snapshot_state_is_sovereign = boot_snapshot_offer_state_is_sovereign,
-    .snapshot_artifact_is_eligible = boot_snapshot_offer_artifact_is_eligible,
+    .block_state_can_serve = net_port_block_can_serve,
+    .snapshot_state_is_sovereign = net_port_snapshot_sovereign,
+    .snapshot_artifact_is_eligible = net_port_snapshot_eligible,
 };
 
 __attribute__((constructor))

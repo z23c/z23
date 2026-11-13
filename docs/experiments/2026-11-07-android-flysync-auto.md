@@ -116,3 +116,11 @@ pending cutover without a historical archive. The shortcut checks durable rows
 and loaded wallet state, then repeats that proof inside final publication.
 Focused startup and publication fixtures passed, including refusal after a
 wallet change before commit. Actual-device completion remains pending.
+
+## Thermal pacing of serving checks
+
+<!-- claim: symbol-present net_port_cooling engine/composition/src/boot_net_runtime_port.c # thermal serving gate -->
+At paused node pace, network serving callbacks defer eligibility checks. Boot
+publication checks retain their existing behavior. The focused
+`snapshot_sync_service` group passed with no skips after the change; the parent
+failed the pause assertion. Device performance remains unmeasured.

@@ -16,10 +16,12 @@
 #include "core/serialize.h"
 #include "net/fast_sync.h"
 #include "net/net.h"
+#include "net/net_runtime_port.h"
 #include "chain/mmb.h"
 #include "chain/mmr.h"
 #include "chain/checkpoints.h"
 #include "jobs/stage_helpers.h"
+#include "jobs/node_pace.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
@@ -84,6 +86,32 @@ static int test_snapshot_offer_trust_policy(void)
         char reason[96] = {0};
         boot_snapshot_offer_test_set_trust_override(1);
         boot_snapshot_offer_test_set_publication_override(-1);
+        enum node_pace saved_pace = node_pace_get();
+        node_pace_set(NODE_PACE_PAUSE);
+        reason[0] = 0;
+        bool paused_block = net_runtime_block_state_can_serve(reason, sizeof(reason));
+        bool block_reason = strcmp(reason, "node_cooling") == 0;
+        reason[0] = 0;
+        bool paused_snapshot = net_runtime_snapshot_state_is_sovereign(reason, sizeof(reason));
+        bool snapshot_reason = strcmp(reason, "node_cooling") == 0;
+        reason[0] = 0;
+        bool paused_artifact = net_runtime_snapshot_artifact_is_eligible(NULL, reason, sizeof(reason));
+        bool artifact_reason = strcmp(reason, "node_cooling") == 0;
+        bool direct_allowed = boot_block_swarm_state_can_serve(reason, sizeof(reason));
+        node_pace_set(NODE_PACE_GENTLE);
+        bool gentle_allowed = net_runtime_block_state_can_serve(reason, sizeof(reason));
+        node_pace_set(NODE_PACE_NORMAL);
+        bool normal_allowed = net_runtime_block_state_can_serve(reason, sizeof(reason));
+        boot_snapshot_offer_test_set_trust_override(0);
+        bool resumed_refused = !net_runtime_block_state_can_serve(reason, sizeof(reason));
+        boot_snapshot_offer_test_set_trust_override(1);
+        boot_snapshot_offer_test_set_publication_override(-1);
+        node_pace_set(saved_pace);
+        ASSERT(!paused_block && block_reason);
+        ASSERT(!paused_snapshot && snapshot_reason);
+        ASSERT(!paused_artifact && artifact_reason);
+        ASSERT(direct_allowed);
+        ASSERT(gentle_allowed && normal_allowed && resumed_refused);
         ASSERT(boot_block_swarm_state_can_serve(reason, sizeof(reason)));
         ASSERT(!boot_snapshot_offer_state_is_sovereign(reason,
                                                         sizeof(reason)));
