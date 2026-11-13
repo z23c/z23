@@ -1062,7 +1062,9 @@ partial command; the line directs the operator to `z23 status --format=json`
 instead. `--format=json` returns the same fields in `zcl.result.v1`.
 When a typed node blocker owns the verdict, `next_action` is
 `z23 core sync blockers` — inspect the named blocker. It does not send the
-agent into snapshot surgery, and `review_required_*` posture sets
+agent into snapshot surgery. The transient `review_required_progress_store_busy`
+blocker instead sets `retryable` and directs a read-only `z23 status --format=json`
+retry. All `review_required_*` postures set
 `owner_review_required` so agents do not treat inspection as permission to
 mutate the live datadir. `z23 ops snapshot` remains the composite diagnostic
 when an operator asked for it.

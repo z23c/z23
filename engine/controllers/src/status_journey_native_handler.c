@@ -118,9 +118,15 @@ _Static_assert(sizeof(g_journey_reasons) / sizeof(g_journey_reasons[0]) ==
  * Snapshot is a composite diagnostic; it is not the first action, and it is
  * never a permission to mutate a live datadir. review_required_* posture
  * names stay owner-reviewed. */
+static bool journey_progress_store_busy(const char *blocker)
+{
+    return blocker && strcmp(blocker, "review_required_progress_store_busy") == 0;
+}
+
 static const char *journey_typed_blocker_next_action(const char *blocker)
 {
-    (void)blocker;
+    if (journey_progress_store_busy(blocker))
+        return "z23 status --format=json";
     return "z23 core sync blockers";
 }
 
@@ -424,7 +430,10 @@ static void journey_render_reason(struct json_value *out,
         node_status_reason_status(reason_row->node_reason));
     (void)json_push_kv_str(
         out, "summary", node_status_reason_summary(reason_row->node_reason));
-    (void)json_push_kv_bool(out, "retryable", reason_row->retryable);
+    (void)json_push_kv_bool(out, "retryable",
+                            reason_row->retryable ||
+                                (reason == JOURNEY_NODE_TYPED_BLOCKER &&
+                                 journey_progress_store_busy(f->primary_blocker)));
     (void)json_push_kv_bool(
         out, "human_action_required",
         node_status_reason_operator_needed(reason_row->node_reason, 0));

@@ -2488,6 +2488,7 @@ static char *status_brief_mock_rpc(const char *method,
 
 static bool g_status_journey_plaintext;
 static bool g_status_journey_typed_blocker;
+static bool g_status_journey_progress_busy;
 static bool g_status_journey_witness_ready = true;
 static bool g_status_journey_live_prover;
 
@@ -2578,7 +2579,9 @@ static char *status_journey_mock_rpc(const char *method,
                 "\"nullifier_backfill_gap\":false}}",
             g_status_journey_typed_blocker ? "false" : "true",
             g_status_journey_typed_blocker
-                ? "review_required_bootstrap_trust" : "none"
+                ? (g_status_journey_progress_busy ? "review_required_progress_store_busy"
+                                                  : "review_required_bootstrap_trust")
+                : "none"
         );
         return strdup(body);
     }
@@ -2840,6 +2843,24 @@ static int test_status_journey_safe_money_frontdoor(void)
         ASSERT_STR_EQ(json_get_str(json_get(data, "next_action")),
                       "z23 core sync blockers");
         ASSERT(json_get_bool(json_get(data, "owner_review_required")));
+        ASSERT(!json_get_bool(json_get(data, "retryable")));
+        json_free(&root);
+
+        g_status_journey_progress_busy = true;
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_read(&root, out, strlen(out)) && root.type == JSON_OBJ);
+        data = json_get(&root, "data");
+        ASSERT(!json_get_bool(json_get(data, "node_healthy")));
+        ASSERT_STR_EQ(json_get_str(json_get(data, "primary_blocker")),
+                      "review_required_progress_store_busy");
+        ASSERT_STR_EQ(json_get_str(json_get(data, "error_code")),
+                      "NODE_TYPED_BLOCKER");
+        ASSERT_STR_EQ(json_get_str(json_get(data, "next_action")),
+                      "z23 status --format=json");
+        ASSERT(json_get_bool(json_get(data, "retryable")));
+        ASSERT(json_get_bool(json_get(data, "owner_review_required")));
         json_free(&root);
         PASS();
     } _test_next:;
@@ -2848,6 +2869,7 @@ static int test_status_journey_safe_money_frontdoor(void)
     sapling_note_proving_pair_dir(NULL);
     g_status_journey_plaintext = false;
     g_status_journey_typed_blocker = false;
+    g_status_journey_progress_busy = false;
     g_status_journey_witness_ready = true;
     node_rpc_client_set_test_hook(NULL);
     return failures;
