@@ -14739,7 +14739,19 @@ ENGINE_UNIT_INCLUDES = -Iplatform/modules/base/include -Iengine/modules/engine/i
 	-Iplatform/modules/platform/include -Iplatform/modules/util/include -Itools/acme -Ivendor/include
 .PHONY: engine-unit
 engine-unit: $(ENGINE_UNIT_BIN)
-$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) $(SPAWN_BINARY_HEADERS) \
+# Track the current embedded identity, including a return to an older source.
+# Historical identity stamps alone can be older than the last built binary.
+# Comparing contents keeps unchanged invocations from recompiling the tool.
+ENGINE_UNIT_IDENTITY_STAMP := $(BUILD_DIR)/engine-unit/identity.stamp
+$(ENGINE_UNIT_IDENTITY_STAMP): FORCE $(BUILD_IDENTITY_STAMP)
+	@set -eu; \
+	mkdir -p "$(dir $@)"; \
+	tmp="$$(mktemp "$(dir $@).stamp.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	printf '%s\n' 'source=$(BUILD_SOURCE_ID)' 'clean=$(BUILD_CLEAN)' > "$$tmp"; \
+	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then rm -f -- "$$tmp"; else mv -f -- "$$tmp" "$@"; fi; \
+	trap - EXIT HUP INT TERM
+$(ENGINE_UNIT_BIN): $(ENGINE_UNIT_IDENTITY_STAMP) $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) $(SPAWN_BINARY_HEADERS) \
     engine/composition/prompt_templates.def \
     engine/modules/engine/include/engine/prompt_sections.def
 	@mkdir -p $(dir $@)

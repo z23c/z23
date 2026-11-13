@@ -2016,6 +2016,43 @@ static int t_lint_table_rebuild(void)
     return bad;
 }
 
+static int t_engine_unit_identity_rebuild(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "mkdir -p engine/composition engine/modules/engine/include/engine\n"
+        "for f in fixture.c source-identity.stamp engine/composition/prompt_templates.def engine/modules/engine/include/engine/prompt_sections.def; do : > \"$f\"; done\n"
+        "cat > Fixture.mk <<'MAKE'\n"
+        "BUILD_DIR := build\nBIN_DIR := build/bin\nBUILD_IDENTITY_STAMP := source-identity.stamp\n"
+        "BUILD_IDENTITY_CPPFLAGS = -DZCL_BUILD_SOURCE_ID=\\\"$(BUILD_SOURCE_ID)\\\" -DZCL_BUILD_CLEAN=$(BUILD_CLEAN)\n"
+        ".PHONY: FORCE\nFORCE:\nMAKE\n"
+        "awk '/^ENGINE_UNIT_BIN =/{on=1; found=1} /^# .*z23-loop-tick:/{on=0} on{print} END{if(!found) exit 1}' \"$1/Makefile\" >> Fixture.mk\n"
+        "cat > compiler <<'COMPILER'\n"
+        "set -eu\nsource=\nclean=\nout=\n"
+        "while [ $# -gt 0 ]; do case $1 in -DZCL_BUILD_SOURCE_ID=*) source=$1;; -DZCL_BUILD_CLEAN=*) clean=$1;; -o) shift; out=$1;; esac; shift; done\n"
+        "test -n \"$source\"; test -n \"$clean\"; test -n \"$out\"\n"
+        "printf '%s\\n' \"$source\" \"$clean\" > \"$out\"\n"
+        "printf 'compile\\n' >> calls\nCOMPILER\n"
+        "a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "check() {\n"
+        "  make -s -f Fixture.mk engine-unit 'ENGINE_UNIT_SRCS=fixture.c' 'ENGINE_UNIT_INCLUDES=' 'NODE_VENDOR_LIBS=' 'SPAWN_BINARY_HEADERS=' 'CC=sh ./compiler' \"BUILD_SOURCE_ID=$1\" \"BUILD_CLEAN=$2\" >> log 2>&1 || { cat log >&2; return 1; }\n"
+        "  test \"$(wc -l < calls)\" -eq \"$3\" || { echo \"engine identity compile count: expected $3\" >&2; cat log >&2; return 1; }\n"
+        "  printf '%s\\n' \"-DZCL_BUILD_SOURCE_ID=\\\"$1\\\"\" \"-DZCL_BUILD_CLEAN=$2\" > expected\n"
+        "  cmp expected build/bin/z23-engine-unit\n"
+        "}\n"
+        "check \"$a\" 1 1; check \"$a\" 1 1\n"
+        "check \"$b\" 1 2; check \"$b\" 1 2\n"
+        "check \"$a\" 1 3; check \"$a\" 1 3\n"
+        "check \"$a\" 0 4; check \"$a\" 0 4; check \"$a\" 1 5\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "engine_identity", "rebuild");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "engine identity fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_secure_release_host_support_rebuild(void)
 {
     static const char script[] =
@@ -2636,6 +2673,7 @@ int test_make_lint_gates(void)
     printf("\n=== make_lint_gates tests ===\n");
 
     if (t_lint_table_rebuild() != 0 || t_lint_private_header_rebuild() != 0) return 1;
+    if (t_engine_unit_identity_rebuild() != 0) return 1;
     if (t_secure_release_host_support_rebuild() != 0) return 1;
     if (t_registry_query_scope() != 0) return 1;
     if (t_proof_plan_metadata() != 0) return 1;
