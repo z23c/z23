@@ -179,7 +179,8 @@ compiler-id)
     # SET changed, not just a value inside it, so every developer's epochs
     # recompile once. That is the correct price for an identity that no
     # longer moves when an unrelated file does.
-    printf 'zcl.build_compiler_identity.v6\0cc_command\0%s\0cxx_command\0%s\0' \
+    # v7 inventories implicit C++ headers in C++ mode as well as C headers.
+    printf 'zcl.build_compiler_identity.v7\0cc_command\0%s\0cxx_command\0%s\0' \
         "$CC_COMMAND" "$CXX_COMMAND" \
         >> "$PREIMAGE"
 
@@ -651,7 +652,7 @@ compiler-id)
         # unchanged toolchain, which is precisely what the gate then reported
         # as "compiler/toolchain changed during build". Fail closed.
         set +e
-        output="$("${argv_ref[@]}" -E -x c -v - </dev/null 2>&1)"
+        output="$("${argv_ref[@]}" -E -x "$2" -v - </dev/null 2>&1)"
         probe_rc=$?
         set -e
         [ "$probe_rc" -eq 0 ] ||
@@ -669,8 +670,8 @@ compiler-id)
             [ -d "$root" ] && printf '%s\0' "$root" >> "$WORK/search-roots"
         done <<< "$output"
     }
-    collect_search_roots CC_ARGV
-    collect_search_roots CXX_ARGV
+    collect_search_roots CC_ARGV c
+    collect_search_roots CXX_ARGV c++
     for env_name in CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH COMPILER_PATH \
             LIBRARY_PATH SDKROOT; do
         [[ -v "$env_name" ]] || continue

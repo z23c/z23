@@ -968,13 +968,22 @@ cat > "$SHIM_CC" <<'SHIM_EOF'
 #   SHIMCC_FLAKE_ALWAYS every verbose preprocessing probe fails
 #   SHIMCC_FLAKE_ONCE   sentinel path: the first verbose probe fails, once
 #   SHIMCC_NO_SEARCH    verbose probe succeeds but reports no search roots
+#   SHIMCC_CXX_ROOT     additional implicit root reported only for -x c++
+#   SHIMCC_CXX_FAIL_SECOND  counter path; fail the second C++ verbose probe
 #   SHIMCC_VERSION_TALLY     path one line is appended to per --version probe
 #   SHIMCC_VERSION_COUNTDOWN path holding N: the next N --version probes
 #                            answer as toolchain 2, every later one as 1
 set -u
 verbose=0
 preprocess=0
+language=
+want_language=0
 for arg in "$@"; do
+    if [ "$want_language" = 1 ]; then
+        language=$arg
+        want_language=0
+        continue
+    fi
     case "$arg" in
         --version)
             if [ -n "${SHIMCC_VERSION_TALLY:-}" ]; then
@@ -1014,9 +1023,18 @@ for arg in "$@"; do
             exit 0 ;;
         -v) verbose=1 ;;
         -E) preprocess=1 ;;
+        -x) want_language=1 ;;
     esac
 done
 if [ "$verbose" = 1 ] && [ "$preprocess" = 1 ]; then
+    if [ "$language" = c++ ] && [ -n "${SHIMCC_CXX_FAIL_SECOND:-}" ]; then
+        seen=$(cat "$SHIMCC_CXX_FAIL_SECOND" 2>/dev/null || printf 0)
+        printf '%s\n' "$((seen + 1))" > "$SHIMCC_CXX_FAIL_SECOND"
+        if [ "$seen" -ge 1 ]; then
+            printf 'C++ root probe intentionally failed\n' >&2
+            exit 1
+        fi
+    fi
     if [ -n "${SHIMCC_FLAKE_ONCE:-}" ] && [ -e "$SHIMCC_FLAKE_ONCE" ]; then
         rm -f -- "$SHIMCC_FLAKE_ONCE"
         printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
@@ -1032,6 +1050,9 @@ if [ "$verbose" = 1 ] && [ "$preprocess" = 1 ]; then
         [ -z "${SHIMCC_CRLF:-}" ] || eol='\r\n'
         printf '#include <...> search starts here:%b' "$eol" >&2
         printf ' %s/include%b' "$SHIMCC_ROOT" "$eol" >&2
+        if [ "$language" = c++ ] && [ -n "${SHIMCC_CXX_ROOT:-}" ]; then
+            printf ' %s%b' "$SHIMCC_CXX_ROOT" "$eol" >&2
+        fi
         printf 'End of search list.%b' "$eol" >&2
     fi
     exit 0
@@ -1103,6 +1124,32 @@ shim_compiler_id()
 {
     shim_env "$@" "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" "$ROOT"
 }
+
+phase cxx-only-search-root
+CXX_ONLY_ROOT="$SHIM_DIR/cxx-only"
+CXX_ONLY_HEADER="$CXX_ONLY_ROOT/cxx-header.h"
+CXX_ONLY_MTIME="$SHIM_DIR/cxx-header.mtime"
+mkdir -p "$CXX_ONLY_ROOT"
+printf '#define CXX_ONLY_HEADER 1\n' > "$CXX_ONLY_HEADER"
+touch -r "$CXX_ONLY_HEADER" "$CXX_ONLY_MTIME"
+CXX_ID_A="$(shim_compiler_id SHIMCC_CXX_ROOT="$CXX_ONLY_ROOT")" || fail 'C++ root fingerprint failed'
+[ "$(shim_compiler_id SHIMCC_CXX_ROOT="$CXX_ONLY_ROOT")" = "$CXX_ID_A" ] ||
+    fail 'unchanged C++ root changed compiler fingerprint'
+printf '#define CXX_ONLY_HEADER 2\n' > "$CXX_ONLY_HEADER"
+touch -r "$CXX_ONLY_MTIME" "$CXX_ONLY_HEADER"
+CXX_ID_B="$(shim_compiler_id SHIMCC_CXX_ROOT="$CXX_ONLY_ROOT")" || fail 'changed C++ root fingerprint failed'
+[ "$CXX_ID_B" != "$CXX_ID_A" ] || fail 'C++-only header edit omitted from compiler fingerprint'
+printf '#define CXX_ONLY_HEADER 1\n' > "$CXX_ONLY_HEADER"
+touch -r "$CXX_ONLY_MTIME" "$CXX_ONLY_HEADER"
+CXX_ID_A2="$(shim_compiler_id SHIMCC_CXX_ROOT="$CXX_ONLY_ROOT")" || fail 'restored C++ root fingerprint failed'
+[ "$CXX_ID_A2" != "$CXX_ID_A" ] && [ "$CXX_ID_A2" != "$CXX_ID_B" ] ||
+    fail 'C++-only header edit/revert ABA omitted from compiler fingerprint'
+CXX_PROBE_COUNT="$SHIM_DIR/cxx-probe-count"
+if shim_compiler_id SHIMCC_CXX_ROOT="$CXX_ONLY_ROOT" SHIMCC_CXX_FAIL_SECOND="$CXX_PROBE_COUNT" >"$SHIM_DIR/cxx-fail.out" 2>"$SHIM_DIR/cxx-fail.err"; then
+    fail 'failed C++ root probe yielded a compiler fingerprint'
+fi
+[ ! -s "$SHIM_DIR/cxx-fail.out" ] && grep -F 'C++ root probe intentionally failed' "$SHIM_DIR/cxx-fail.err" >/dev/null ||
+    fail 'failed C++ root probe did not refuse without a digest'
 
 # Sessions and publishers still execute their real helpers and derive a fresh
 # identity each time, over the bounded driver's actual fixture inputs. Only
