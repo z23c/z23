@@ -10672,6 +10672,7 @@ struct dp_worker {
     bool bundle_built_prefork;
     bool bundle_union_requested;
     bool bundle_z23_covered;
+    uint8_t bundle_z23_hash[32];
     /* The shadow lane probed its store before the cold run and still owes
      * the post-run audit (dp_worker_shadow_audit). */
     bool shadow_probed;
@@ -11350,11 +11351,51 @@ static bool dp_worker_bundle_make(struct dp_worker *w, int *rc,
     return true;
 }
 
+/* Bind the regular executable actually built in this generation. */
+static bool dp_bundle_z23_hash(const char *generation, uint8_t out[32])
+{
+    char path[PATH_MAX];
+    struct stat st;
+    return dp_path_written(snprintf(path, sizeof(path), "%s/build/bin/z23",
+                                    generation)) &&
+           lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           access(path, X_OK) == 0 &&
+           hash_file("zcl.dev_proof_bundle_z23.v1", path, out);
+}
+
+/* Re-admission can replace Make's public alias with the dev stand-in. Only a
+ * verified covered release gets restored, after admission and other builds. */
+static bool dp_restore_public_alias(const struct dp_worker *w,
+                                    char *why, size_t why_len)
+{
+    if (!w->bundle_z23_covered) return true;
+    char source[PATH_MAX], target[PATH_MAX];
+    uint8_t source_hash[32], target_hash[32];
+    struct stat target_st;
+    if (!dp_path_written(snprintf(source, sizeof(source), "%s/build/bin/z23",
+                                  w->generation)) ||
+        !dp_path_written(snprintf(target, sizeof(target), "%s/build/bin/zclassic23",
+                                  w->generation)) ||
+        !dp_bundle_z23_hash(w->generation, source_hash) ||
+        memcmp(source_hash, w->bundle_z23_hash, sizeof(source_hash)) != 0 ||
+        !dependency_materialize(source, target) ||
+        lstat(target, &target_st) != 0 || !S_ISREG(target_st.st_mode) ||
+        access(target, X_OK) != 0 ||
+        !hash_file("zcl.dev_proof_bundle_z23.v1", target, target_hash) ||
+        memcmp(source_hash, target_hash, sizeof(source_hash)) != 0 ||
+        !dp_bundle_z23_hash(w->generation, source_hash) ||
+        memcmp(source_hash, w->bundle_z23_hash, sizeof(source_hash)) != 0) {
+        proof_why(why, why_len, "proof_release_alias_restore_failed");
+        return false;
+    }
+    return true;
+}
+
 /* Record covered output only after Make and receiver acceptance succeed. */
 static bool dp_bundle_accept_z23(struct dp_worker *w, bool z23,
                                  char *why, size_t why_len)
 {
-    if (z23 && !dp_test_need_present(w->generation, "build/bin/z23")) {
+    if (z23 && !dp_bundle_z23_hash(w->generation, w->bundle_z23_hash)) {
         dp_test_need_unbuildable(w, "z23", why, why_len);
         return false;
     }
@@ -11800,6 +11841,54 @@ bool zcl_dev_proof_test_bundle_union(const char *generation, const char *groups,
 #endif
 
 
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_release_readmit(const char *submit, const char *generation,
+    const char *source_id, bool covered,
+    void (*after_admit)(const char *generation, void *ctx), void *ctx,
+    uint8_t helper_root[32],
+    char *why, size_t why_len)
+{
+    if (!submit || !generation || !source_id || !helper_root || strlen(source_id) != 64)
+        return false;
+    struct proof_paths paths = {0};
+    struct dev_source_record expected = {0};
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof_release_alias_seam");
+    if (!w) return false;
+    char targets[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX];
+    uint8_t depfile_root[32] = {0};
+    int n = snprintf(paths.root, sizeof(paths.root), "%s", submit);
+    memcpy(expected.source_id, source_id, 65);
+    w->generation = generation;
+    w->bundle_z23_covered = covered;
+    bool ok = dp_path_written(n);
+    if (ok && covered && !dp_bundle_z23_hash(generation, w->bundle_z23_hash)) {
+        proof_why(why, why_len, "proof_release_alias_capture_failed");
+        ok = false;
+    }
+    if (ok) ok = proof_admitted_executables_prepare(&paths, generation, &expected,
+                                                     targets, why, why_len);
+    if (ok && after_admit) after_admit(generation, ctx);
+    if (ok) ok = dp_restore_public_alias(w, why, why_len);
+    if (ok) ok = test_helpers_hash(generation, targets[PROOF_ADMITTED_DEV_NODE],
+                                    targets, depfile_root, helper_root, why, why_len);
+    free(w);
+    return ok;
+}
+#endif
+
+
+static bool dp_worker_bind_test_helpers(struct dp_worker *w,
+                                        char *why, size_t why_len)
+{
+    if (!test_helpers_hash(w->generation, w->generation_binary, w->admitted,
+                           w->depfile_root, w->helper_root, why, why_len))
+        return false;
+    int64_t bind_us = platform_time_monotonic_us();
+    bool bound = dp_test_needs_bind(w, w->helper_root, why, why_len);
+    dp_stage_timing_note(w->paths, "test_needs_bind_ms", bind_us);
+    return bound;
+}
+
 static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
                               char *why, size_t why_len)
 {
@@ -11824,17 +11913,10 @@ static bool dp_worker_prefork(struct dp_worker *w, bool test_selected,
     dp_stage_timing_note(w->paths, "prefork_make_ms", stage_us);
     stage_us = platform_time_monotonic_us();
     if (test_selected && !dp_worker_test_needs(w, why, why_len)) return false;
+    if (test_selected && !dp_restore_public_alias(w, why, why_len)) return false;
     dp_stage_timing_note(w->paths, "prefork_test_needs_ms", stage_us);
     stage_us = platform_time_monotonic_us();
-    if (test_selected) {
-        if (!test_helpers_hash(w->generation, w->generation_binary, w->admitted,
-                               w->depfile_root, w->helper_root, why, why_len))
-            return false;
-        int64_t bind_us = platform_time_monotonic_us();
-        bool bound = dp_test_needs_bind(w, w->helper_root, why, why_len);
-        dp_stage_timing_note(w->paths, "test_needs_bind_ms", bind_us);
-        if (!bound) return false;
-    }
+    if (test_selected && !dp_worker_bind_test_helpers(w, why, why_len)) return false;
     dp_stage_timing_note(w->paths, "prefork_helper_hash_ms", stage_us);
     proof_phase_mark(w->phases, "prefork_inputs_and_build");
     return true;

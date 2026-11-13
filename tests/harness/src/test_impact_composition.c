@@ -13892,6 +13892,132 @@ static int ic_bundle_invocations(const char *generation)
 
 extern bool zcl_dev_proof_test_bundle_union(const char *, const char *, bool, bool, bool,
                                              bool *, uint8_t [32], char *, size_t);
+extern bool zcl_dev_proof_test_release_readmit(const char *, const char *, const char *,
+                                               bool, void (*)(const char *, void *), void *,
+                                               uint8_t [32], char *, size_t);
+
+static bool ic_union_read(const char *, const char *, char *, size_t);
+static const char ic_release_source_id[] =
+    "1111111111111111111111111111111111111111111111111111111111111111";
+
+static bool ic_release_public(const char *generation, const char *contents)
+{
+    char path[4352];
+    return ic_write(generation, "build/bin/z23", contents) &&
+           snprintf(path, sizeof(path), "%s/build/bin/z23", generation) < (int)sizeof(path) &&
+           chmod(path, 0755) == 0;
+}
+
+static bool ic_release_helpers(const char *generation)
+{
+    static const char *const paths[] = {
+        "build/bin/zcl-nodectl", "build/bin/z23-acme", "build/bin/fbsh",
+        "build/bin/file_size_policy", "build/bin/fleet-board-bridge",
+        "build/bin/z23-git-hook", "build/bin/z23-lint"
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+        if (!ic_write(generation, paths[i], "fixed-helper")) return false;
+    return true;
+}
+
+/* Tiny fixture executable emits a valid source record through real fd exec. */
+static bool ic_release_fixture(const char *submit, const char *generation)
+{
+    if (!ic_write(submit, "fixture.c", "#include <stdio.h>\nint main(void) { puts(\""
+                  "1111111111111111111111111111111111111111111111111111111111111111 1 "
+                  "1111111111111111111111111111111111111111111111111111111111111111\"); return 0; }\n") ||
+        !ic_write(submit, "build/bin/z23-dev", "") ||
+        !ic_write(submit, "build/bin/z23-package-verify-dev", "") ||
+        !ic_release_public(generation, "public-one") ||
+        !ic_release_helpers(generation)) return false;
+    const char *a[] = {"cc", "-std=c23", "fixture.c", "-o", "build/bin/z23-dev", NULL};
+    const char *b[] = {"cc", "-std=c23", "fixture.c", "-o", "build/bin/z23-package-verify-dev", NULL};
+    struct zcl_devloop_process_result result = {0};
+    return zcl_devloop_process_run(submit, a, 30000, &result) && !result.timed_out &&
+           !result.term_signal && result.exit_code == 0 &&
+           zcl_devloop_process_run(submit, b, 30000, &result) && !result.timed_out &&
+           !result.term_signal && result.exit_code == 0;
+}
+struct ic_release_fault { unsigned mode; bool invoked, prepared; };
+static void ic_release_after_admit(const char *generation, void *ctx)
+{
+    struct ic_release_fault *fault = ctx;
+    char path[4352];
+    fault->invoked = true;
+    if (fault->mode == 0) {
+        fault->prepared = ic_write(generation, "build/bin/z23", "changed-after-capture");
+        return;
+    }
+    if (snprintf(path, sizeof(path), "%s/build/bin/zclassic23", generation) >= (int)sizeof(path)) return;
+    fault->prepared = unlink(path) == 0 && mkdir(path, 0700) == 0 &&
+                      ic_write(generation, "build/bin/zclassic23/sentinel", "keep");
+}
+static bool ic_release_fault_case(const char *submit, const char *generation, unsigned mode)
+{
+    char why[512] = {0}, sentinel[32] = {0}; uint8_t root[32];
+    struct ic_release_fault fault = {.mode = mode};
+    if (!ic_release_public(generation, "public-one")) return false;
+    bool ok = zcl_dev_proof_test_release_readmit(submit, generation, ic_release_source_id,
+        true, ic_release_after_admit, &fault, root, why, sizeof(why));
+    bool valid = !ok && fault.invoked && fault.prepared &&
+                 !strcmp(why, "proof_release_alias_restore_failed");
+    if (mode == 1) valid = valid && ic_union_read(generation, "build/bin/zclassic23/sentinel",
+                                                   sentinel, sizeof(sentinel)) && !strcmp(sentinel, "keep");
+    if (!valid) fprintf(stderr, "release fault mode=%u ok=%d invoked=%d prepared=%d why=%s sentinel=%s\n",
+                        mode, ok, fault.invoked, fault.prepared, why, sentinel);
+    return valid;
+}
+static int test_ic_release_readmission_alias(void)
+{
+    int failures = 0; char submit[4096] = {0}, generation[4096] = {0};
+#if !defined(_WIN32)
+    const char *original = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = original ? strdup(original) : NULL;
+    bool modified = false;
+#endif
+    TEST("proof readmission preserves a freshly built public node alias") {
+#if !defined(_WIN32)
+        char why[512] = {0}, alias[64] = {0}, path[4352];
+        uint8_t public_root[32], dev_root[32], changed_root[32];
+        ASSERT(!original || saved);
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        modified = true;
+        test_make_tmpdir(submit, sizeof(submit), "impact_composition", "release-admit-submit");
+        test_make_tmpdir(generation, sizeof(generation), "impact_composition", "release-admit-generation");
+        ASSERT(ic_release_fixture(submit, generation));
+        ASSERT(zcl_dev_proof_test_release_readmit(submit, generation, ic_release_source_id,
+                                                   true, NULL, NULL, public_root, why, sizeof(why)));
+        ASSERT(ic_union_read(generation, "build/bin/zclassic23", alias, sizeof(alias)) && !strcmp(alias, "public-one"));
+        ASSERT(zcl_dev_proof_test_release_readmit(submit, generation, ic_release_source_id,
+                                                   false, NULL, NULL, dev_root, why, sizeof(why)));
+        ASSERT(memcmp(public_root, dev_root, sizeof(public_root)) != 0);
+        ASSERT(ic_write(generation, "build/bin/z23", "public-two"));
+        ASSERT(zcl_dev_proof_test_release_readmit(submit, generation, ic_release_source_id,
+                                                   true, NULL, NULL, changed_root, why, sizeof(why)));
+        ASSERT(ic_union_read(generation, "build/bin/zclassic23", alias, sizeof(alias)) && !strcmp(alias, "public-two"));
+        ASSERT(memcmp(public_root, changed_root, sizeof(public_root)) != 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/build/bin/z23", generation) < (int)sizeof(path));
+        ASSERT(unlink(path) == 0);
+        ASSERT(!zcl_dev_proof_test_release_readmit(submit, generation, ic_release_source_id,
+                                                    true, NULL, NULL, changed_root, why, sizeof(why)));
+        ASSERT(strcmp(why, "proof_release_alias_capture_failed") == 0);
+        ASSERT(ic_release_fault_case(submit, generation, 0));
+        ASSERT(ic_release_fault_case(submit, generation, 1));
+#endif
+        PASS();
+    } _test_next:;
+#if !defined(_WIN32)
+    if (modified && (saved ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) :
+                             unsetenv("ZCL_DEVLOOP_TEST_PROCESS")) != 0) {
+        fprintf(stderr, "release admission fixture: cannot restore process opt-in\n");
+        failures++;
+    }
+    free(saved);
+#endif
+    if (submit[0]) test_rm_rf_recursive(submit);
+    if (generation[0]) test_rm_rf_recursive(generation);
+    return failures;
+}
 
 static bool ic_union_read(const char *dir, const char *rel, char *out, size_t cap)
 {
@@ -13923,7 +14049,7 @@ static bool ic_union_guard(char *out, size_t cap)
 static bool ic_union_fixture(const char *generation, bool selected, unsigned mode, unsigned variant)
 {
     const char *check = selected ? "test ! -e build/bin/z23" : "test -e build/bin/z23";
-    const char *node = mode == 1 ? "@:" : "@cp node-input build/bin/z23";
+    const char *node = mode == 1 ? "@:" : "@cp node-input build/bin/z23 && chmod +x build/bin/z23";
     char makefile[8192], guard[4096];
     if (!ic_union_guard(guard, sizeof(guard))) return false;
     int n = snprintf(makefile, sizeof(makefile),
@@ -14067,7 +14193,7 @@ static bool ic_union_retry(const uint8_t expected[32])
         ".PHONY: dev-proof-bundle-prefork z23 zcl-rpc\n"
         "dev-proof-bundle-prefork:\n\t@test ! -e build/bin/z23\n\t@echo bundle >> invocations\n"
         "\t@if [ ! -e retry-marker ]; then touch retry-marker; echo 'unverified compile epoch appeared after recovery admission; rerun make'; exit 1; fi\n"
-        "z23:\n\t@test ! -e build/bin/z23\n\t@echo node >> invocations\n\t@cp node-input build/bin/z23\n"
+        "z23:\n\t@test ! -e build/bin/z23\n\t@echo node >> invocations\n\t@cp node-input build/bin/z23 && chmod +x build/bin/z23\n"
         "zcl-rpc:\n\t@test ! -e build/bin/zcl-rpc\n\t@echo rpc >> invocations\n\t@cp rpc-input build/bin/zcl-rpc\n", guard);
     if (size <= 0 || (size_t)size >= sizeof(makefile) || !ic_write(generation, "Makefile", makefile)) return false;
     bool ok = zcl_dev_proof_test_bundle_union(generation, "test_onion_pair_watch_live", true, false, false,
@@ -17301,6 +17427,7 @@ int test_impact_composition(void)
     failures += test_ic_worker_plan_graph_refresh_refuses();
     failures += test_ic_worker_bundle_make_once();
     failures += test_ic_worker_bundle_union();
+    failures += test_ic_release_readmission_alias();
     printf("closure_generation_fixtures wall_us=%lld\n",
            (long long)(platform_time_monotonic_us() - closure_fixture_started_us));
     failures += test_ic_generation_docs_fresh_refuses_missing_tools();
