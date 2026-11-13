@@ -17926,15 +17926,17 @@ $(BIN_DIR)/make-help: \
 		tools/dev/dev_script_dir.c tools/dev/dev_script_dir.h \
 		platform/modules/platform/src/os_proc.c
 	@mkdir -p "$(dir $@)"
+	@set -e; tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	    trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	    $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \
 	    -Itools/dev -Iplatform/modules/platform/include \
 	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
-	    -o "$@.tmp" tools/dev/make_help.c \
+	    -o "$$tmp" tools/dev/make_help.c \
 	    tools/dev/make_help_main.c \
 	    tools/dev/dev_script_dir.c \
-	    platform/modules/platform/src/os_proc.c && mv -f "$@.tmp" "$@"
+	    platform/modules/platform/src/os_proc.c; mv -f "$$tmp" "$@"
 
 help: $(BIN_DIR)/make-help
 	@$(BIN_DIR)/make-help
