@@ -14,6 +14,7 @@ enum { STL_NAME = 128, STL_MAX = 1024, STL_LINE = 8192, STL_PATH = 1024,
        STL_TGT = STL_NAME + 16 };
 
 extern const char k_stl_gate[];
+int stl_macos_launcher_route_selftest(void);
 
 struct stl_names { char n[STL_MAX][STL_NAME]; int count; };
 

@@ -189,9 +189,21 @@ static int stl_x11_partition_result(int *result)
     return *result;
 }
 
+static int stl_macos_launcher_host(const struct stl_host *h)
+{
+    if (h->darwin) return STL_BUILD;
+    if (h->linux_os || h->windows) {
+        fprintf(stderr, "[check_standalone_tools_link] non-Darwin-exempt z23-app-macos: native AppKit SDK is available only on macOS\n");
+        return STL_SKIP;
+    }
+    fprintf(stderr, "%s: FATAL — cannot classify host for native macOS app launcher\n", k_stl_gate);
+    return STL_FATAL;
+}
+
 /* Host-specific exemption of one non-exempt tool: STL_BUILD to build it. */
 static int stl_host_route(const char *name, const struct stl_host *h, int *x11_result)
 {
+    if (strcmp(name, "z23-app-macos") == 0) return stl_macos_launcher_host(h);
     const char *why = h->darwin
         ? stl_pair_find(k_darwin, sizeof k_darwin / sizeof k_darwin[0], name) : NULL;
     if (why) {
@@ -224,6 +236,22 @@ static int stl_host_route(const char *name, const struct stl_host *h, int *x11_r
     if (w && !h->windows)
         return stl_winonly_skip(w) == 0 ? STL_SKIP : STL_FATAL;
     return STL_BUILD;
+}
+
+/* Exercise the same routing used by the real derived target partition. */
+int stl_macos_launcher_route_selftest(void)
+{
+    const struct stl_host mac = {.darwin = 1}, linux_host = {.linux_os = 1};
+    const struct stl_host windows = {.windows = 1}, unknown = {0};
+    int x11 = -1;
+    return stl_host_route("z23-app-macos", &mac, &x11) == STL_BUILD &&
+        stl_host_route("z23-app-macos", &linux_host, &x11) == STL_SKIP &&
+        stl_host_route("z23-app-macos", &windows, &x11) == STL_SKIP &&
+        stl_host_route("z23-app-macos", &unknown, &x11) == STL_FATAL &&
+        stl_host_route("z23-app-macos-other", &linux_host, &x11) == STL_BUILD &&
+        stl_host_route("z23-app-macos-other", &mac, &x11) == STL_BUILD &&
+        stl_host_route("z23-app-macos-other", &windows, &x11) == STL_BUILD &&
+        stl_host_route("z23-app-macos-other", &unknown, &x11) == STL_BUILD;
 }
 
 static int stl_cmp(const void *a, const void *b)

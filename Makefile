@@ -18463,3 +18463,20 @@ wiki-runtime-compile-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN)
 	  tools/dev/wiki_runtime.c tools/dev/wiki_runtime_main.c
 	@$(CC) $(TEST_FAST_CFLAGS) -Wno-deprecated-declarations -fsyntax-only \
 	  tools/dev/wiki_runtime.c tests/harness/src/test_wiki_runtime.c
+
+# Native Finder entry for app-only macOS releases. This launcher never starts
+# a node: it forwards document events to the existing Receive preview flow.
+.PHONY: z23-app-macos
+ifeq ($(ZCL_HOST_OS),Darwin)
+z23-app-macos: $(BIN_DIR)/z23-app-macos
+$(BIN_DIR)/z23-app-macos: tools/z23_app_macos.c tools/z23_app_macos_install.c tools/z23_app_macos_install.h platform/modules/util/src/write_all.c platform/modules/util/include/util/write_all.h
+	@mkdir -p "$(dir $@)"
+	@set -e; tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_PLATFORM_CPPFLAGS) -Iplatform/modules/util/include -framework AppKit -lobjc -o "$$tmp" \
+	    tools/z23_app_macos.c tools/z23_app_macos_install.c platform/modules/util/src/write_all.c; mv -f "$$tmp" "$@"
+else
+z23-app-macos:
+	@echo 'z23-app-macos requires a native macOS SDK' >&2; exit 1
+endif

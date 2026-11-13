@@ -290,6 +290,7 @@ RELEASE_MEMBERS_LEGACY="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify z
 RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 z23-package-verify zclassic23-package-verify z23-acme zclassic23-acme"
 APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
 APP_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
+APP_MACOS_MEMBERS="z23-app-macos Z23Apps-Info.plist"
 APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
 REMOTE_CARD_MAX_BYTES=$((64 * 1024))
 
@@ -301,6 +302,8 @@ payload_max_bytes() {
         z23-acme|zclassic23-acme) printf '%s\n' "$REMOTE_ACME_MAX_BYTES" ;;
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
         z23-skycombat|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
+        z23-app-macos) printf '%s\n' "$((4 * 1024 * 1024))" ;;
+        Z23Apps-Info.plist) printf '%s\n' 65536 ;;
         installed-source.json) printf '%s\n' 4096 ;;
         app-toolchain.json) printf '%s\n' 4096 ;;
         app-toolchain.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
@@ -341,6 +344,7 @@ RELEASE_NAMES_APP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanife
 RELEASE_NAMES_APP_DESKTOP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\norg.zclassic.SkyCombat.desktop\norg.zclassic.ZClassic23.desktop\norg.zclassic.ZClassic23.svg\norg.zclassic.ZClassic23.xml\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 
 RELEASE_NAMES_APP_TOOLCHAIN="$(printf '%s\n' "$RELEASE_NAMES_APP_DESKTOP" app-toolchain.json app-toolchain.bundle | LC_ALL=C sort)"
+RELEASE_NAMES_APP_MACOS="$(printf '%s\n' "$RELEASE_NAMES_APP" z23-app-macos Z23Apps-Info.plist | LC_ALL=C sort)"
 
 validate_manifest_contract() {
     local manifest="$1" bytes lines matching names dir name twin
@@ -350,12 +354,12 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
         "$manifest" || true)"
-    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ]; } && [ "$matching" -eq "$lines" ] \
-        || die "SHA256SUMS must contain exactly five (legacy), seven (current), thirteen (app), seventeen (Linux app desktop), or nineteen (Linux app toolchain) strict lowercase SHA-256 rows"
+    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 15 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ]; } && [ "$matching" -eq "$lines" ] \
+        || die "SHA256SUMS must contain exactly five (legacy), seven (current), thirteen (app), fifteen (macOS apps), seventeen (Linux app desktop), or nineteen (Linux app toolchain) strict lowercase SHA-256 rows"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
-    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
+    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_MACOS" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
     # says so with one digest in two rows. The same holds for each helper
@@ -762,6 +766,9 @@ has_app_source() {
 
 app_payload_members() {
     printf '%s\n' "$APP_SOURCE_MEMBERS"
+    if [ -n "$(manifest_digest_of "$1" z23-app-macos)" ]; then
+        printf '%s\n' "$APP_MACOS_MEMBERS"
+    fi
     if [ -n "$(manifest_digest_of "$1" org.zclassic.ZClassic23.desktop)" ]; then
         printf '%s\n' "$APP_DESKTOP_MEMBERS"
     fi
@@ -775,7 +782,7 @@ app_payload_members() {
 install_app_members() {
     local stage="$1" dest="$2" name
     for name in $(app_payload_members "$stage"); do
-        if [ "$name" = z23-skycombat ]; then
+        if [ "$name" = z23-skycombat ] || [ "$name" = z23-app-macos ]; then
             install -m 555 "$stage/$name" "$dest/$name" || die "could not install $name"
         else
             install -m 444 "$stage/$name" "$dest/$name" || die "could not install $name"
@@ -968,6 +975,9 @@ macos_generation_matches() {
     for name in $(manifest_members "$stage") SHA256SUMS; do
         cmp -s "$stage/$name" "$generation/$name" || return 1
     done
+    if [ -n "$(manifest_digest_of "$generation" z23-app-macos)" ]; then
+        "$generation/z23-app-macos" --check-bundle "$generation" || return 1
+    fi
     [ -L "$generation/zclassic23" ] \
         && [ "$(readlink "$generation/zclassic23")" = z23 ]
 }
@@ -1066,6 +1076,12 @@ install_payload_macos_generation() {
         # whether the directory name still equals what SHA256SUMS records.
         install -m 444 "$stage/SHA256SUMS" "$MACOS_INCOMING/SHA256SUMS"
         if has_app_source "$stage"; then install_app_members "$stage" "$MACOS_INCOMING"; fi
+        if [ -n "$(manifest_digest_of "$stage" z23-app-macos)" ]; then
+            "$MACOS_INCOMING/z23-app-macos" --assemble "$MACOS_INCOMING" \
+                || die "could not assemble the verified macOS app bundle"
+            "$MACOS_INCOMING/z23-app-macos" --check-bundle "$MACOS_INCOMING" \
+                || die "macOS app bundle differs from the verified release"
+        fi
         ln -s z23 "$MACOS_INCOMING/zclassic23" \
             || die "could not create the macOS generation node alias"
         # APFS refuses to rename the generation after its owner-write bit is
@@ -1435,6 +1451,9 @@ install_from_source() {
     fi
     local install_platform
     install_platform="${Z23_INSTALL_TEST_PLATFORM:-$(uname -s)}"
+    if [ -n "$(manifest_digest_of "$INSTALL_STAGE" z23-app-macos)" ] && [ "$install_platform" != Darwin ]; then
+        die "the macOS app launcher requires a Darwin installation"
+    fi
     if [ "$install_platform" = Darwin ]; then
         install_payload_macos_generation "$INSTALL_STAGE" "$prefix"
         # Self-check, not re-verification: the ID above was already derived
@@ -1460,6 +1479,14 @@ install_from_source() {
     fi
     if [ "$APPS_ONLY" = 1 ] && [ "$install_platform" = Linux ]; then
         install_app_desktop "$prefix" || say "desktop registration incomplete; use the printed app command or app receive --file=PATH --preview"
+    fi
+    if [ "$APPS_ONLY" = 1 ] && [ "$install_platform" = Darwin ] && \
+        [ -n "$(manifest_digest_of "$MACOS_GENERATION" z23-app-macos)" ]; then
+        if "$MACOS_GENERATION/z23-app-macos" --register "$prefix"; then
+            say "Z23 Apps added to Applications; open shared app files with Z23 Apps"
+        else
+            say "Finder registration incomplete; use app receive --file=PATH --preview"
+        fi
     fi
     say "installed $prefix/bin/z23"
     printf '%s\n' "$NEXT_COMMAND"
@@ -3061,6 +3088,25 @@ selftest_app_source() {
     done
 }
 
+selftest_macos_app_manifest() {
+    local app="$SELFTEST_TMP/mac-app-manifest" name rc
+    mkdir -p "$app"
+    cp "$SELFTEST_TMP/app-release/"* "$app/"
+    for name in $APP_MACOS_MEMBERS; do printf 'inert %s\n' "$name" >"$app/$name"; done
+    (cd "$app" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS $APP_MACOS_MEMBERS >SHA256SUMS)
+    validate_manifest_contract "$app/SHA256SUMS"
+    verify_strict "$app"
+    for name in $APP_MACOS_MEMBERS; do
+        grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
+        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: partial macOS app set accepted"
+        printf 'tamper\n' >>"$app/$name"
+        rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || die "selftest: macOS app member tampering accepted"
+        printf 'inert %s\n' "$name" >"$app/$name"
+    done
+}
+
 selftest_app_toolchain() {
     local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/kit-release" prefix="$SELFTEST_TMP/kit-prefix" name id rc
     mkdir -p "$app"
@@ -3351,6 +3397,7 @@ selftest() {
     selftest_current_release
     selftest_install_directory_modes
     selftest_app_source
+    selftest_macos_app_manifest
     selftest_app_toolchain
     selftest_app_mode
     selftest_local_manifest_refusals

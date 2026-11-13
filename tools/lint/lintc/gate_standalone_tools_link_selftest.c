@@ -484,6 +484,7 @@ int check_standalone_tools_link_selftest(void)
     if (stl_mkdtemp(dir, sizeof dir, "z23-lint-stl-selftest") != 0)
         return st_ok(1, "check_standalone_tools_link selftest: no scratch directory\n");
     int bad = stl_st_invalid_jobs(dir);
+    bad |= stl_st_expect("macOS launcher host route", stl_macos_launcher_route_selftest(), 1);
     bad |= stl_st_job_selection();
     bad |= stl_st_make_jobs(dir);
     bad |= stl_st_scan(dir);

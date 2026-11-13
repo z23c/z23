@@ -68,6 +68,7 @@ APP_VERIFIER="$REPO_ROOT/build/bin/z23-dev"
 APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
 APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
 LINUX_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
+DARWIN_APP_MEMBERS="z23-app-macos Z23Apps-Info.plist"
 zcl_tor_write_stamp_sidecar() { "$REPO_ROOT/build/bin/tor-stamp" write-sidecar "$@"; }
 
 die() { printf 'build_release: REFUSE: %s\n' "$*" >&2; exit 1; }
@@ -297,6 +298,7 @@ write_sha256sums() {
         case "$platform" in linux-x86_64|darwin-arm64) ;; *) die "app source requires a POSIX release" ;; esac
         members="$members $APP_MEMBERS"
         [ "$platform" != linux-x86_64 ] || members="$members $LINUX_DESKTOP_MEMBERS"
+        [ "$platform" != darwin-arm64 ] || members="$members $DARWIN_APP_MEMBERS"
     fi
     if [ "$with_kit" = 1 ]; then
         [ "$with_app" = 1 ] && [ "$platform" = linux-x86_64 ] \
@@ -320,7 +322,7 @@ write_sha256sums() {
 # packaging refuses rather than silently shipping checksummed files and
 # an unchecked one.
 #
-# App-capable Linux releases contain seventeen members; Darwin retains thirteen.
+# App-capable Linux releases contain seventeen members; Darwin contains fifteen.
 # The installer must accept both sets along with seven and five node-only sets.
 # tools/scripts/deploy_z23_release.sh still accepts only seven/five: use
 # explicit --node-only for that legacy deployment path. It must refuse the
@@ -528,6 +530,12 @@ package_from_bin() {
         [ "$(platform_of_binary "$APP_SOURCE/image")" = "$platform" ] \
             || die "game image platform differs from node release"
         assert_platform_minimum_os "$platform" "$APP_SOURCE/image"
+        if [ "$platform" = darwin-arm64 ]; then
+            [ -f "$bin_dir/z23-app-macos" ] || die "no z23-app-macos in $bin_dir — build first: make z23-app-macos"
+            [ "$(platform_of_binary "$bin_dir/z23-app-macos")" = "$platform" ] \
+                || die "z23-app-macos platform differs from node release"
+            assert_platform_minimum_os "$platform" "$bin_dir/z23-app-macos"
+        fi
     fi
     if [ -n "$APP_TOOLCHAIN" ]; then
         [ "$platform" = linux-x86_64 ] || die "app toolchain requires the Linux app release"
@@ -545,7 +553,7 @@ package_from_bin() {
         [ "$(cd "$out_dir" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
     fi
     [ -z "$APP_TOOLCHAIN" ] || [ "$out_dir" != "$APP_TOOLCHAIN" ] || die "release output must differ from toolchain input"
-    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $APP_TOOLCHAIN_MEMBERS; do rm -f -- "$out_dir/$member"; done
+    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $DARWIN_APP_MEMBERS $APP_TOOLCHAIN_MEMBERS; do rm -f -- "$out_dir/$member"; done
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
@@ -578,6 +586,23 @@ package_from_bin() {
                 || die "could not copy $member"
             chmod 644 "$out_dir/$member"
         done
+    fi
+    if [ -n "$APP_SOURCE" ] && [ "$platform" = darwin-arm64 ]; then
+        strip_binary "$platform" "$bin_dir/z23-app-macos" "$out_dir/z23-app-macos" \
+            || die "strip failed for z23-app-macos"
+        chmod 755 "$out_dir/z23-app-macos"
+        codesign --force --sign - --timestamp=none "$out_dir/z23-app-macos" \
+            || die "could not ad-hoc sign z23-app-macos"
+        codesign --verify --strict "$out_dir/z23-app-macos" \
+            || die "z23-app-macos signature verification failed"
+        assert_platform_minimum_os "$platform" "$out_dir/z23-app-macos"
+        bash "$NODE_AUDIT" "$out_dir/z23-app-macos" \
+            || die "z23-app-macos failed the C23 Mach-O audit"
+        cp -f -- "$REPO_ROOT/platform/packaging/macos/Z23Apps-Info.plist" "$out_dir/Z23Apps-Info.plist" \
+            || die "could not copy Z23Apps-Info.plist"
+        chmod 644 "$out_dir/Z23Apps-Info.plist"
+        plutil -lint "$out_dir/Z23Apps-Info.plist" >/dev/null \
+            || die "Z23Apps-Info.plist is invalid"
     fi
     local with_app=0 with_kit=0
     [ -z "$APP_SOURCE" ] || with_app=1
@@ -791,26 +816,30 @@ package_front_door() {
 }
 
 selftest_app_source() {
-    local tmp="$1" name rc=0
+    local tmp="$1" name platform members rows rc=0
     mkdir -p "$tmp/app-sums"
     cp "$tmp/sums/"* "$tmp/app-sums/"
-    for name in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS; do printf 'inert %s\n' "$name" >"$tmp/app-sums/$name"; done
-    write_sha256sums "$tmp/app-sums" linux-x86_64 1
-    [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq 17 ] || die "selftest: Linux app set must have seventeen rows"
-    write_sha256sums "$tmp/app-sums" darwin-arm64 1
-    [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq 13 ] || die "selftest: Darwin app set must have thirteen rows"
-    write_sha256sums "$tmp/app-sums" linux-x86_64 1
-    (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null) || die "selftest: extended checksum set failed"
-    for name in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS; do
-        mv "$tmp/app-sums/$name" "$tmp/app-sums/$name.held"
-        rc=0; (write_sha256sums "$tmp/app-sums" linux-x86_64 1) >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || die "selftest: missing app member accepted: $name"
-        mv "$tmp/app-sums/$name.held" "$tmp/app-sums/$name"
+    for name in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $DARWIN_APP_MEMBERS; do printf 'inert %s\n' "$name" >"$tmp/app-sums/$name"; done
+    for platform in linux-x86_64 darwin-arm64; do
+        case "$platform" in
+            linux-x86_64) members="$APP_MEMBERS $LINUX_DESKTOP_MEMBERS"; rows=17 ;;
+            darwin-arm64) members="$APP_MEMBERS $DARWIN_APP_MEMBERS"; rows=15 ;;
+        esac
+        write_sha256sums "$tmp/app-sums" "$platform" 1
+        [ "$(wc -l <"$tmp/app-sums/SHA256SUMS")" -eq "$rows" ] || die "selftest: wrong $platform app member count"
+        (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null) || die "selftest: $platform app checksums failed"
+        for name in $members; do
+            mv "$tmp/app-sums/$name" "$tmp/app-sums/$name.held"
+            rc=0; (write_sha256sums "$tmp/app-sums" "$platform" 1) >/dev/null 2>&1 || rc=$?
+            [ "$rc" -ne 0 ] || die "selftest: missing $platform app member accepted: $name"
+            mv "$tmp/app-sums/$name.held" "$tmp/app-sums/$name"
+            write_sha256sums "$tmp/app-sums" "$platform" 1
+            printf 'tamper\n' >>"$tmp/app-sums/$name"
+            rc=0; (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null 2>&1) || rc=$?
+            [ "$rc" -ne 0 ] || die "selftest: tampered $platform app member accepted: $name"
+            printf 'inert %s\n' "$name" >"$tmp/app-sums/$name"
+        done
     done
-    write_sha256sums "$tmp/app-sums" linux-x86_64 1
-    printf 'tamper\n' >>"$tmp/app-sums/app-build.wire"
-    rc=0; (cd "$tmp/app-sums" && sha256_check SHA256SUMS >/dev/null 2>&1) || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: app record tamper accepted"
     rc=0; (write_sha256sums "$tmp/app-sums" windows-x86_64 1) >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ] || die "selftest: app source allowed on Windows"
     rc=0; (APP_SOURCE="$tmp/app-sums"; APP_SOURCE_SHA3=""; app_source_options) >/dev/null 2>&1 || rc=$?
