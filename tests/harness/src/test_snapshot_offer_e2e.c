@@ -25,6 +25,7 @@
 #include "chain/mmr.h"
 #include "coins/coins_view.h"
 #include "coins/utxo_commitment.h"
+#include "config/boot.h"
 #include "config/boot_flyclient.h"
 #include "config/boot_internal.h"
 #include "config/boot_snapshot_offer.h"
@@ -853,6 +854,8 @@ static int e2e_case_genesis_cursor_refuses(void)
 int test_snapshot_offer_e2e(void)
 {
     int failures = 0;
+    /* Both fixtures model running nodes; keep the real startup serving gate. */
+    bool saved_running = app_test_set_running(true);
 
     failures += e2e_case_genesis_cursor_refuses();
 
@@ -864,5 +867,6 @@ int test_snapshot_offer_e2e(void)
     failures += e2e_case_too_long_chain_claim();
     failures += e2e_case_proof_over_nonzero_root();
     failures += e2e_case_cursor_shapes_refuse();
+    (void)app_test_set_running(saved_running);
     return failures;
 }

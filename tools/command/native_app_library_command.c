@@ -554,7 +554,7 @@ static void al_recovery(struct library *w, struct zcl_command_reply *reply)
         char original[sizeof(reply->error.message)];
         memcpy(original, reply->error.message, sizeof(original));
         (void)snprintf(reply->error.message, sizeof(reply->error.message),
-            "Last prepared draft %.64s was saved; AI setup stopped. %.100s",
+            "Last prepared draft %.64s was saved; the operation stopped. %.100s",
             w->prepared_version[0] ? w->prepared_version : "(identity unavailable)", original);
         (void)snprintf(reply->error.evidence, sizeof(reply->error.evidence),
             "Last of %u completed mutating preparations: %.64s; %s. Inspect this copy before retrying.",

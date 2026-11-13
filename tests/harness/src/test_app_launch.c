@@ -1416,6 +1416,38 @@ static int al_share_success_test(struct al_fx *f, struct zcl_command_reply *repl
 }
 static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s);
+static bool al_preparation_wire(struct zcl_command_reply *reply,
+    const struct app_selection *selection, const char *visible);
+static bool al_share_review_failure(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    if (strstr(model->summary, "Review, preview and Keep the prepared draft")) {
+        (void)snprintf(why, cap, "Fixture share review failed.");
+        return false;
+    }
+    return al_library_present(context, model, copy_text, event, why, cap);
+}
+
+static int al_share_prepared_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s)
+{
+    int failures = 0;
+    TEST("Share recovery names the stopped operation after preparation saves") {
+        struct app_selection saved;
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &saved) == APP_SELECTION_OK);
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true};
+        zcl_test_app_library_share(&f->env, reply, al_share_review_failure, s,
+            al_library_prepare, al_library_share, al_library_notice);
+        ASSERT(s->valid && s->preparations == 1 && s->share_calls == 0 && s->errors == 1);
+        ASSERT(reply->error.mutated && !strcmp(reply->error.code, "PRESENTATION_FAILED"));
+        ASSERT(strstr(s->error_summary, "Fixture share review failed."));
+        ASSERT(!strstr(s->error_summary, "AI setup stopped"));
+        ASSERT(al_preparation_wire(reply, &saved, s->error_summary));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s, const char *home)
 {
@@ -1447,6 +1479,7 @@ static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *repl
         PASS();
     } _test_next:;
     failures += al_share_leaf_failure_test(f, reply, s);
+    failures += al_share_prepared_failure_test(f, reply, s);
     return failures;
 }
 static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
@@ -2093,7 +2126,7 @@ static bool al_preparation_wire(struct zcl_command_reply *reply,
     }
     ok = ok && reply->error.mutated && json_get_bool(json_get(error, "mutated")) &&
         al_preparation_identity(facts, selection, version) &&
-        strstr(visible, version) && strstr(visible, "was saved; AI setup stopped");
+        strstr(visible, version) && strstr(visible, "was saved; the operation stopped");
     json_free(&doc); return ok;
 }
 static bool al_setup_request_valid(const struct json_value *setup)

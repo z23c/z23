@@ -10,3 +10,4 @@ local_patch=RGFW_NO_XINPUT2 guard; unused optional XRandR/XInput2 compile closur
 local_patch_x11_clipboard=patches/x11-clipboard-length.patch sends UTF8_STRING and MULTIPLE text without the internal NUL terminator
 local_patch_x11_atoms=patches/x11-atom-display-lifetime.patch interns X11 atoms on the current display so reinitialization after server reset never reuses stale IDs
 local_patch_x11_key_modifiers=patches/x11-key-modifiers.patch snapshots modifiers into queued X11 key press and release events so clipboard and navigation handlers observe the state at event time
+local_patch_macos_event_wait=patches/macos-event-wait.patch converts finite event waits from milliseconds to seconds and maps negative waits to distantFuture

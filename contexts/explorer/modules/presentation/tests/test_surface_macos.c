@@ -15,6 +15,7 @@ enum { WIDTH = 32, HEIGHT = 24, GUARD = WIDTH * HEIGHT + 64,
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 /* Read the actual image attached by RGFW before AppKit's event pump can
  * replace layer contents. This is backing-image evidence, not a screenshot. */
@@ -135,6 +136,57 @@ static bool collision_then_retry(void)
     return unexpected == NULL;
 }
 
+/* Replace only NSDate's deadline factories during this synchronous probe.
+ * Returning distantPast bounds every wait without relying on wall time. */
+static double wait_interval_seen;
+static unsigned wait_interval_calls, wait_future_calls;
+enum wait_factory { WAIT_NONE, WAIT_INTERVAL, WAIT_FUTURE };
+static enum wait_factory wait_first_factory;
+static IMP wait_original_interval, wait_original_future;
+static id wait_past(id cls)
+{ return ((id (*)(id, SEL))objc_msgSend)(cls, sel_registerName("distantPast")); }
+static id wait_interval_probe(id cls, SEL selector, double interval)
+{
+    if (!pthread_main_np())
+        return ((id (*)(id, SEL, double))wait_original_interval)(cls, selector, interval);
+    if (wait_first_factory == WAIT_NONE) wait_first_factory = WAIT_INTERVAL;
+    if (!wait_interval_calls++) wait_interval_seen = interval;
+    return wait_past(cls);
+}
+static id wait_future_probe(id cls, SEL selector)
+{
+    if (!pthread_main_np()) return ((id (*)(id, SEL))wait_original_future)(cls, selector);
+    if (wait_first_factory == WAIT_NONE) wait_first_factory = WAIT_FUTURE;
+    ++wait_future_calls;
+    return wait_past(cls);
+}
+static bool wait_unit_case(int value, double expected, bool future)
+{
+    wait_interval_calls = 0; wait_future_calls = 0; wait_interval_seen = -1.0; wait_first_factory = WAIT_NONE;
+    RGFW_waitForEvent(value);
+    if (future) return wait_first_factory == WAIT_FUTURE && wait_future_calls > 0;
+    return wait_first_factory == WAIT_INTERVAL && wait_interval_calls > 0 && wait_interval_seen == expected;
+}
+static bool wait_units(void)
+{
+    Class date = objc_getClass("NSDate");
+    Method interval = class_getClassMethod(date, sel_registerName("dateWithTimeIntervalSinceNow:"));
+    Method future = class_getClassMethod(date, sel_registerName("distantFuture"));
+    if (!interval || !future) return false;
+    wait_original_interval = method_getImplementation(interval);
+    wait_original_future = method_getImplementation(future);
+    (void)method_setImplementation(interval, (IMP)wait_interval_probe);
+    (void)method_setImplementation(future, (IMP)wait_future_probe);
+    bool twenty = wait_unit_case(20, 0.020, false);
+    bool zero = wait_unit_case(0, 0.0, false);
+    bool forever = wait_unit_case(-1, 0.0, true);
+    (void)method_setImplementation(interval, wait_original_interval);
+    (void)method_setImplementation(future, wait_original_future);
+    if (!twenty || !zero || !forever)
+        fprintf(stderr, "macOS wait deadline units: 20ms=%d zero=%d forever=%d\n", twenty, zero, forever);
+    return twenty && zero && forever;
+}
+
 int main(void)
 {
     if (!collision_then_retry()) return 1;
@@ -145,6 +197,8 @@ int main(void)
         RGFW_formatRGBA8, RGFW_formatARGB8, RGFW_formatBGRA8, RGFW_formatABGR8 };
     for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
         failures += blit_format(window, formats[i]);
+    if (!wait_units()) failures++;
+
     RGFW_window_close(window);
     if (!failures) puts("macOS surface smoke: six formats preserve source pixels and guards");
     return failures ? 1 : 0;

@@ -44,6 +44,7 @@ vendor/rgfw/RGFW.h -text
 # This patch must retain the pinned header's CRLF context and replacement bytes.
 vendor/rgfw/patches/macos-owned-bitmap.patch -text
 vendor/rgfw/patches/macos-reuse-classes.patch -text
+vendor/rgfw/patches/macos-event-wait.patch -text
 vendor/rgfw/patches/x11-library-lifetime.patch -text
 vendor/rgfw/patches/x11-display-failure.patch -text
 vendor/qrcodegen/** -whitespace

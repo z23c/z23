@@ -43,6 +43,7 @@
 #include "platform/clock.h"
 #include "util/spawn.h"
 #include "contrib_inbox_telegram.h"
+#include "contrib_inbox_process.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -94,7 +95,8 @@ enum { CI_FETCH_OK, CI_FETCH_QUIET, CI_FETCH_BAD };
     X(FIXTURE_LIST, "--fixture-list", "")                                    \
     X(FIXTURE_REPLY, "--fixture-reply", "")                                  \
     X(TELEGRAM_GROUP, "--telegram-group", "")                                \
-    X(ENGINE_TIMEOUT_S, "--engine-timeout-s", "900")
+    X(ENGINE_TIMEOUT_S, "--engine-timeout-s", "900")                           \
+    X(PASS_TIMEOUT_S, "--pass-timeout-s", "1200")
 
 enum ci_opt {
 #define X(id, flag, dflt) CI_O_##id,
@@ -164,6 +166,7 @@ static_assert(sizeof(k_answer_prefix) - 1 + CI_ANSWER <= CI_SITE_LEAD,
               "an answer post must fit the public page preview whole");
 
 struct ci {
+    struct ci_process_budget budget;
     char opt[CI_O_COUNT][CI_PATH];
     bool dry;
     int64_t telegram_group, telegram_bot, telegram_update, telegram_message, telegram_next;
@@ -339,7 +342,9 @@ static bool ci_init(struct ci *t, int argc, char **argv)
     t->ctx = zcl_malloc(CI_CTX, "contrib_inbox_ctx");
     if (!t->buf || !t->list || !t->ctx)
         return false;
-    return ci_parse(t, argc, argv) && ci_paths(t) && ci_state_dir(t);
+    return ci_parse(t, argc, argv) &&
+        ci_process_budget_start_at(&t->budget, O(t, CI_O_PASS_TIMEOUT_S), (clock_now_monotonic_ns() / 1000)) &&
+        ci_paths(t) && ci_state_dir(t);
 }
 
 /* 0 on success, -1 on error, -2 when another pass holds the lock. */
@@ -358,17 +363,9 @@ static int ci_lock_file(const char *path)
 
 /* ── children (argv only) ────────────────────────────────────────────── */
 
-static int ci_run(const char *const argv[], const char *cwd, int timeout_ms,
-                  bool merged, char *out, size_t cap)
+static bool ci_budget_ready(const struct ci *t)
 {
-    bool timed_out = false;
-    out[0] = '\0';
-    const int rc =
-        merged ? zcl_spawn_capture_merged_in_dir_observed(argv, cwd, out, cap,
-                                                          timeout_ms, &timed_out)
-               : zcl_spawn_capture_in_dir_observed(argv, cwd, out, cap,
-                                                   timeout_ms, &timed_out);
-    return timed_out ? 124 : rc;
+    return ci_process_budget_remaining_at(&t->budget, (clock_now_monotonic_ns() / 1000), 1) > 0;
 }
 
 static bool ci_ok_field(const struct json_value *root)
@@ -515,7 +512,7 @@ static bool ci_take_call(const struct ci *t)
 static bool ci_clean(struct ci *t, const char *dir)
 {
     const char *const st[] = { O(t, CI_O_GIT), "-C", dir, "status", "--porcelain", NULL };
-    if (ci_run(st, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
+    if (ci_process_run(&t->budget, st, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
         return false;
     for (const char *p = t->buf; *p; p++)
         if (!isspace((unsigned char)*p))
@@ -535,7 +532,7 @@ static bool ci_git_path(struct ci *t, const char *dir, const char *what,
 {
     const char *const argv[] = { O(t, CI_O_GIT), "-C", dir, "rev-parse",
                                  "--path-format=absolute", what, NULL };
-    if (ci_run(argv, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
+    if (ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
         return false;
     t->buf[strcspn(t->buf, "\r\n")] = '\0';
     return t->buf[0] == '/' && ci_fmt(out, cap, "%s", t->buf);
@@ -561,7 +558,7 @@ static bool ci_responder_ready(struct ci *t)
     if (!is_dir_path(w)) {
         const char *const add[] = { O(t, CI_O_GIT), "-C", O(t, CI_O_MAIN), "worktree",
                                     "add", "-q", "--detach", w, "origin/main", NULL };
-        if (ci_run(add, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
+        if (ci_process_run(&t->budget, add, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
             return false;
     }
     if (!ci_linked(t, w))
@@ -570,21 +567,21 @@ static bool ci_responder_ready(struct ci *t)
                                   "main", NULL };
     const char *const co[] = { O(t, CI_O_GIT), "-C", w, "checkout", "-q", "--detach",
                                "origin/main", NULL };
-    if (ci_run(fetch, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0 ||
-        ci_run(co, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
+    if (ci_process_run(&t->budget, fetch, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0 ||
+        ci_process_run(&t->budget, co, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) != 0)
         return false;
     return ci_clean(t, w);
 }
 
-static void ci_revert(struct ci *t)
+static bool ci_revert(struct ci *t)
 {
     const char *w = O(t, CI_O_RESPONDER);
     if (!ci_linked(t, w))
-        return; /* never reset or clean a checkout that is not a linked worktree */
+        return false; /* never clean a checkout without linked-worktree proof */
     const char *const co[] = { O(t, CI_O_GIT), "-C", w, "checkout", "-q", "--", ".", NULL };
     const char *const cl[] = { O(t, CI_O_GIT), "-C", w, "clean", "-fdq", NULL };
-    (void)ci_run(co, NULL, CI_SHORT_MS, false, t->buf, CI_BUF);
-    (void)ci_run(cl, NULL, CI_SHORT_MS, false, t->buf, CI_BUF);
+    return ci_process_run(&t->budget, co, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) == 0 &&
+        ci_process_run(&t->budget, cl, NULL, CI_SHORT_MS, false, t->buf, CI_BUF) == 0;
 }
 
 /* ── the filter: what may leave this host ────────────────────────────── */
@@ -793,7 +790,7 @@ static bool ci_telegram_post(struct ci *t, const char *text)
     json_free(&input);
     if (!n || n >= sizeof wire || !ci_fmt(arg, sizeof arg, "--input=%s", wire)) return false;
     const char *const argv[] = {O(t, CI_O_Z23), "ops", "telegram", "send", arg, NULL};
-    int rc = ci_run(argv, NULL, CI_SHORT_MS, true, t->buf, CI_BUF);
+    int rc = ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, true, t->buf, CI_BUF);
     if (!ci_write(t->post_json, t->buf, strlen(t->buf), "wb")) {
         ci_say(t, "Telegram send result could not be retained");
         t->io_fail = true;
@@ -816,7 +813,7 @@ static bool ci_post(struct ci *t, const char *ref, const char *text)
         O(t, CI_O_Z23), "fleet", "board", "post", "note", text, "--room=contrib",
         "--agent=claude-r1-responder", refarg, NULL,
     };
-    const int rc = ci_run(argv, NULL, CI_SHORT_MS, true, t->buf, CI_BUF);
+    const int rc = ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, true, t->buf, CI_BUF);
     (void)ci_write(t->post_json, t->buf, strlen(t->buf), "wb");
     return rc == 0 && ci_reply_ok(t->buf);
 }
@@ -941,41 +938,12 @@ static bool ci_write_task(const struct ci *t, const char *unit, const char *id,
 static int ci_dispatch(struct ci *t, const char *unit, const char *eu,
                        const char *task)
 {
-    const long secs = strtol(O(t, CI_O_ENGINE_TIMEOUT_S), NULL, 10);
-    if (secs <= 0 || secs > 86400)
-        return -1;
     char log[CI_PATH];
-    const char *argv[32];
-    size_t n = 0;
-    argv[n++] = O(t, CI_O_ENVP);
-    argv[n++] = "-u";
-    argv[n++] = "CLAUDECODE";
-    argv[n++] = "-u";
-    argv[n++] = "CLAUDE_CODE_ENTRYPOINT";
-    argv[n++] = O(t, CI_O_ENGINE_UNIT);
-    argv[n++] = "--engine";
-    argv[n++] = O(t, CI_O_ENGINE);
-    argv[n++] = "--kind";
-    argv[n++] = "contrib-help";
-    argv[n++] = "--task";
-    argv[n++] = task;
-    argv[n++] = "--no-group";
-    argv[n++] = "--worktree";
-    argv[n++] = O(t, CI_O_RESPONDER);
-    argv[n++] = "--yes-dispatch";
-    argv[n++] = "--rounds";
-    argv[n++] = "1";
-    argv[n++] = "--state-dir";
-    argv[n++] = eu;
-    argv[n++] = "--timeout";
-    argv[n++] = O(t, CI_O_ENGINE_TIMEOUT_S);
-    if (O(t, CI_O_FIXTURE_REPLY)[0]) {
-        argv[n++] = "--fixture-reply";
-        argv[n++] = O(t, CI_O_FIXTURE_REPLY);
-    }
-    argv[n] = NULL;
-    const int timeout_ms = (int)(secs * 1000) + 60000;
-    const int rc = ci_run(argv, NULL, timeout_ms, true, t->buf, CI_BUF);
+    const struct ci_process_engine engine = {
+        .env = O(t, CI_O_ENVP), .binary = O(t, CI_O_ENGINE_UNIT), .engine = O(t, CI_O_ENGINE),
+        .worktree = O(t, CI_O_RESPONDER), .unit = eu, .task = task,
+        .timeout = O(t, CI_O_ENGINE_TIMEOUT_S), .fixture = O(t, CI_O_FIXTURE_REPLY)};
+    const int rc = ci_process_engine_run(&t->budget, &engine, t->buf, CI_BUF);
     if (ci_fmt(log, sizeof(log), "%s/engine.log", unit))
         (void)ci_write(log, t->buf, strlen(t->buf), "wb");
     ci_say(t, "engine rc=%d", rc);
@@ -987,6 +955,21 @@ static bool ci_unit_dirs(const struct ci *t, const char *id, char *unit,
 {
     return ci_fmt(unit, ucap, "%s/%s", t->units, id) &&
            ci_fmt(eu, ecap, "%s/eu", unit) && ci_mkdir(unit) && ci_mkdir(eu);
+}
+
+static bool ci_model_cleanup(struct ci *t, const char *id)
+{
+    struct ci_process_budget pass = t->budget;
+    bool clean = ci_process_budget_start_at(&t->budget, "30", (clock_now_monotonic_ns() / 1000)) &&
+        ci_clean(t, O(t, CI_O_RESPONDER));
+    if (!clean) {
+        bool restored = ci_revert(t) && ci_clean(t, O(t, CI_O_RESPONDER));
+        if (!restored) t->io_fail = true;
+        ci_ack(t, id, restored ? "responder checkout changed; restored without publishing" :
+            "responder cleanup unresolved; inspect checkout before reuse");
+    }
+    t->budget = pass;
+    return clean;
 }
 
 static void ci_answer(struct ci *t, const struct json_value *post, size_t ctx_len)
@@ -1001,15 +984,12 @@ static void ci_answer(struct ci *t, const struct json_value *post, size_t ctx_le
         return;
     }
     const int dispatch_rc = ci_dispatch(t, unit, eu, task);
-    if (!ci_clean(t, O(t, CI_O_RESPONDER))) {
-        ci_revert(t);
-        ci_ack(t, id, "responder model tried to edit files");
-        return;
-    }
+    if (!ci_model_cleanup(t, id)) return;
     if (dispatch_rc != 0) {
         ci_ack(t, id, "responder model failed");
         return;
     }
+    if (!ci_budget_ready(t)) { ci_ack(t, id, "pass deadline reached after model attempt"); return; }
     size_t rlen = 0;
     char *reply = NULL;
     if (ci_fmt(reply_path, sizeof(reply_path), "%s/reply.txt", eu))
@@ -1026,10 +1006,12 @@ static void ci_answer(struct ci *t, const struct json_value *post, size_t ctx_le
 static bool ci_handle_admitted(struct ci *t, const struct json_value *post, size_t ctx_len)
 {
     const char *id = ci_str(post, "id");
+    if (!ci_budget_ready(t)) { ci_ack(t, id, "pass deadline reached before admission"); return true; }
     if (!ci_responder_ready(t)) {
         ci_ack(t, id, "responder checkout failed, dirty or not a linked worktree");
         return true;
     }
+    if (!ci_budget_ready(t)) { ci_ack(t, id, "pass deadline reached before admission"); return true; }
     if (!ci_take_call(t)) {
         ci_ack(t, id, "daily model cap reached");
         return true;
@@ -1220,7 +1202,7 @@ static bool ci_fetch_live(struct ci *t, const struct ci_cursor *cursor, size_t l
         O(t, CI_O_Z23), "fleet", "board", "list", "--room=contrib", count,
         cursor->time ? time : NULL, cursor->time ? id : NULL, NULL,
     };
-    if (ci_run(argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) != 0) return false;
+    if (ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) != 0) return false;
     *len = strlen(t->list);
     return true;
 }
@@ -1276,7 +1258,7 @@ static bool ci_walk(struct ci *t, const struct ci_list *l)
         return false;
     }
     int handled = 0;
-    for (size_t i = l->n; i-- > 0 && handled < CI_PER_PASS && !t->io_fail;)
+    for (size_t i = l->n; i-- > 0 && handled < CI_PER_PASS && !t->io_fail && ci_budget_ready(t);)
         handled += ci_handle(t, l->posts[i], ctx_len) ? 1 : 0;
     return !t->io_fail;
 }
@@ -1324,7 +1306,7 @@ static bool ci_tg_inbox_call(struct ci *t, const char *receipt)
     if (!ok) return false;
     if (receipt && t->dry) { ci_say(t, "DRY telegram ACK %s", receipt); return !t->io_fail; }
     const char *const argv[] = {O(t, CI_O_Z23), "ops", "telegram", "inbox", arg, NULL};
-    ok = ci_run(argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) == 0 && ci_reply_ok(t->list);
+    ok = ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) == 0 && ci_reply_ok(t->list);
     return ok && (!receipt || ci_telegram_ack_confirmed(t->list, t->telegram_bot, t->telegram_next));
 }
 
@@ -1444,7 +1426,7 @@ static int ci_tg_process(struct ci *t, const struct json_value *data)
     const struct json_value *rows = json_get(data, "messages");
     if (!ci_tg_context(t, rows)) return 1;
     int handled = 0;
-    for (size_t i = 0; i < json_size(rows) && handled < CI_PER_PASS && !t->io_fail; ++i)
+    for (size_t i = 0; i < json_size(rows) && handled < CI_PER_PASS && !t->io_fail && ci_budget_ready(t); ++i)
         handled += ci_tg_handle(t, json_at(rows, i)) ? 1 : 0;
     if (t->io_fail) return 1;
     bool done = ci_tg_all_disposed(t, rows);

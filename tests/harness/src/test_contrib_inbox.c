@@ -20,6 +20,7 @@
 
 #include "test/test_core.h"
 #include "util/spawn.h"
+#include "../../../tools/contrib_inbox_process.h"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -39,6 +40,53 @@
         if (!ci_ok_) failures++;                                             \
         printf("contrib_inbox: %s %s\n", ci_ok_ ? "OK  " : "FAIL", (name));  \
     } while (0)
+
+static int case_process_budget_parse(void)
+{
+    int failures = 0;
+    struct ci_process_budget budget;
+    const char *bad[] = {"", "0", "-1", "+1", "1x", " 1", "86401",
+                         "999999999999999999999999"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i)
+        CI_CHECK("invalid budget refused",
+                 !ci_process_budget_start_at(&budget, bad[i], 1000000));
+    CI_CHECK("null seconds refused", !ci_process_budget_start_at(&budget, NULL, 1000000));
+    CI_CHECK("null budget refused", !ci_process_budget_start_at(NULL, "1", 1000000));
+    CI_CHECK("zero clock refused", !ci_process_budget_start_at(&budget, "1", 0));
+    CI_CHECK("negative clock refused", !ci_process_budget_start_at(&budget, "1", -1));
+    CI_CHECK("deadline overflow refused", !ci_process_budget_start_at(&budget, "1", INT64_MAX - 999999));
+    CI_CHECK("maximum seconds accepted", ci_process_budget_start_at(&budget, "86400", 1));
+    CI_CHECK("maximum deadline exact", budget.deadline_us == INT64_C(86400000001));
+    CI_CHECK("leading zeros accepted", ci_process_budget_start_at(&budget, "0001", 1000000));
+    CI_CHECK("one second deadline exact", budget.deadline_us == 2000000);
+    return failures;
+}
+
+static int case_process_budget_remaining(void)
+{
+    int failures = 0;
+    struct ci_process_budget budget = {0};
+    CI_CHECK("unstarted budget refused", ci_process_budget_remaining_at(&budget, 1, 1000) == 0);
+    CI_CHECK("valid budget starts", ci_process_budget_start_at(&budget, "2", 1000000));
+    CI_CHECK("null budget refused", ci_process_budget_remaining_at(NULL, 1000000, 1000) == 0);
+    CI_CHECK("invalid clock refused", ci_process_budget_remaining_at(&budget, 0, 1000) == 0);
+    CI_CHECK("backwards clock refused", ci_process_budget_remaining_at(&budget, 999999, 1000) == 0);
+    CI_CHECK("zero request refused", ci_process_budget_remaining_at(&budget, 1000000, 0) == 0);
+    CI_CHECK("negative request refused", ci_process_budget_remaining_at(&budget, 1000000, -1) == 0);
+    CI_CHECK("requested cap honored", ci_process_budget_remaining_at(&budget, 1000000, 500) == 500);
+    CI_CHECK("initial remaining", ci_process_budget_remaining_at(&budget, 1000000, 5000) == 2000);
+    CI_CHECK("remaining decreases", ci_process_budget_remaining_at(&budget, 1500500, 5000) == 1499);
+    CI_CHECK("one millisecond remains", ci_process_budget_remaining_at(&budget, 2999000, 5000) == 1);
+    CI_CHECK("submillisecond refused", ci_process_budget_remaining_at(&budget, 2999001, 5000) == 0);
+    CI_CHECK("exact expiry refused", ci_process_budget_remaining_at(&budget, 3000000, 5000) == 0);
+    CI_CHECK("after expiry refused", ci_process_budget_remaining_at(&budget, 3000001, 5000) == 0);
+    return failures;
+}
+
+static int case_process_budget(void)
+{
+    return case_process_budget_parse() + case_process_budget_remaining();
+}
 
 static const char CI_BIN[] = "build/bin/z23-contrib-inbox";
 static const char CI_ENGINE[] = "build/bin/z23-engine-unit";
@@ -218,6 +266,8 @@ struct ci_run_opts {
     const char *telegram_group; /* opt-in group consumer over isolated fixtures */
     long fsize;            /* RLIMIT_FSIZE for the tool, or -1 for none */
     int timeout_ms;        /* zero preserves the standard fixture deadline */
+    const char *pass_timeout;
+    const char *git;
 };
 
 /* Spawn with the tool's file size limit lowered, so an append past it fails
@@ -251,7 +301,7 @@ static int ci_pass_with(const struct ci_env *e, const struct ci_run_opts *o)
     if (!test_abs_path(CI_BIN, bin, sizeof(bin)) ||
         !test_abs_path(CI_ENGINE, engine, sizeof(engine)))
         return -1;
-    const char *argv[32];
+    const char *argv[40];
     size_t n = 0;
     argv[n++] = bin;
     if (!o->live)
@@ -273,6 +323,8 @@ static int ci_pass_with(const struct ci_env *e, const struct ci_run_opts *o)
         argv[n++] = "--telegram-group";
         argv[n++] = o->telegram_group;
     }
+    if (o->pass_timeout) { argv[n++] = "--pass-timeout-s"; argv[n++] = o->pass_timeout; }
+    if (o->git) { argv[n++] = "--git"; argv[n++] = o->git; }
     argv[n] = NULL;
     bool timed_out = false;
     const int rc = ci_spawn_limited(argv, out, sizeof(out), o->fsize, o->timeout_ms, &timed_out);
@@ -1436,6 +1488,105 @@ static int case_telegram_busy_model(void)
     return failures;
 }
 
+static int ci_tg_invalid_deadline(struct ci_env *e, struct ci_run_opts *opts, const char *sent)
+{
+    int failures = 0;
+    const char *values[] = {"0", "-1", "nonnumeric", "999999999999999999999999999999"};
+    for (size_t i = 0; i < sizeof values / sizeof values[0]; ++i) {
+        opts->pass_timeout = values[i];
+        CI_CHECK("invalid pass deadline refuses", ci_pass_with(e, opts) != 0);
+        CI_CHECK("invalid deadline has no message effects", !ci_state_has(e, "seen.txt", "tg:") &&
+                 ci_count(sent, "inbox") == 0 && ci_count(sent, "send") == 0 && !ci_exists(e->resp));
+    }
+    return failures;
+}
+
+static int ci_tg_deadline_checks(struct ci_env *e, struct ci_run_opts *opts,
+                                 const char *sent, const char *called)
+{
+    int failures = 0;
+    opts->pass_timeout = "1"; opts->timeout_ms = 5000;
+    CI_CHECK("deadline-limited pass returns normally", ci_pass_with(e, opts) == 0);
+    CI_CHECK("slow git readiness was reached", ci_exists(called));
+    CI_CHECK("deadline leaves question pending", !ci_state_has(e, "seen.txt", "tg:7777777777:-100123:20:7") &&
+             ci_count(sent, "inbox") == 0 && ci_count(sent, "send") == 0);
+    char unit[900];
+    (void)snprintf(unit, sizeof unit, "%s/units/tg:7777777777:-100123:20:7", e->state);
+    CI_CHECK("deadline precedes model unit", !ci_exists(unit));
+    return failures;
+}
+
+static int case_telegram_git_deadline(void)
+{
+    struct ci_env e;
+    char bin[700], sent[740], git[700], called[740], calls[700], day[16];
+    int failures = 0;
+    if (!ci_setup(&e, "telegram-git-deadline")) return 1;
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    (void)snprintf(git, sizeof git, "%s/slow-git", e.d);
+    (void)snprintf(called, sizeof called, "%s.called", git);
+    time_t now = time(NULL); struct tm tm;
+    if (!gmtime_r(&now, &tm) || !strftime(day, sizeof day, "%Y%m%d", &tm)) return 1;
+    (void)snprintf(calls, sizeof calls, "%s/calls-%s", e.state, day);
+    CI_CHECK("deadline fixture", ci_tg_fake(bin, false) && ci_tg_single_row(&e, "7777777777", "-100123") &&
+             ci_model_reply(&e, "ANSWER: run make z23 as the build target"));
+    CI_CHECK("slow git fixture", ci_wf(git, "#!/bin/sh\nprintf x > \"$0.called\"\nsleep 10\n") && chmod(git, 0700) == 0);
+    CI_CHECK("seed unchanged deadline budget", mkdir(e.state, 0700) == 0 && ci_wf(calls, "0\n"));
+    struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1};
+    failures += ci_tg_invalid_deadline(&e, &opts, sent);
+    opts.git = git;
+    failures += ci_tg_deadline_checks(&e, &opts, sent, called);
+    CI_CHECK("deadline leaves model budget unchanged", ci_file_has(calls, "0\n"));
+    opts.git = NULL; opts.pass_timeout = NULL;
+    failures += ci_tg_released_checks(&e, &opts, sent, calls);
+    return failures;
+}
+
+static bool ci_tg_two_questions(const struct ci_env *e)
+{
+    return ci_wf(e->list,
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\",\"bot_id\":7777777777,"
+        "\"receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"count\":2,\"dropped\":0,\"more\":false,\"next_offset\":22,\"messages\":["
+        "{\"update_id\":20,\"chat_id\":-100123,\"chat_type\":\"supergroup\",\"message_id\":7,"
+        "\"from_id\":555,\"kind\":\"text\",\"text\":\"how do I build?\",\"truncated\":false},"
+        "{\"update_id\":21,\"chat_id\":-100123,\"chat_type\":\"supergroup\",\"message_id\":8,"
+        "\"from_id\":555,\"kind\":\"text\",\"text\":\"how do I test?\",\"truncated\":false}]}}");
+}
+
+static int case_telegram_unresolved_cleanup(void)
+{
+    struct ci_env e;
+    char bin[700], sent[740], git[700], engine[700], marker[740], calls[700], day[16];
+    int failures = 0;
+    if (!ci_setup(&e, "telegram-unresolved-cleanup")) return 1;
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    (void)snprintf(git, sizeof git, "%s/fake-git", e.d);
+    (void)snprintf(engine, sizeof engine, "%s/fake-engine", e.d);
+    (void)snprintf(marker, sizeof marker, "%s/engine-ran", e.d);
+    time_t now = time(NULL); struct tm tm;
+    if (!gmtime_r(&now, &tm) || !strftime(day, sizeof day, "%Y%m%d", &tm)) return 1;
+    (void)snprintf(calls, sizeof calls, "%s/calls-%s", e.state, day);
+    CI_CHECK("cleanup fixture and two questions", ci_tg_fake(bin, false) && ci_tg_two_questions(&e));
+    CI_CHECK("engine marks actual dispatch", ci_wf(engine,
+        "#!/bin/sh\nprintf 'run\\n' >> \"${0%/*}/engine-ran\"\n"
+        "while [ \"$1\" != --state-dir ]; do shift || exit 3; done\n"
+        "shift; printf 'ANSWER: run make z23\\n' > \"$1/reply.txt\"\n") && chmod(engine, 0700) == 0);
+    CI_CHECK("git refuses only after dispatch", ci_wf(git,
+        "#!/bin/sh\nif [ -e \"${0%/*}/engine-ran\" ]; then exit 1; fi\nexec git \"$@\"\n") && chmod(git, 0700) == 0);
+    struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1,
+                               .git = git, .engine = engine};
+    CI_CHECK("unresolved cleanup fails pass", ci_pass_with(&e, &opts) != 0);
+    CI_CHECK("first question remains seen", ci_state_has(&e, "seen.txt", "tg:7777777777:-100123:20:7"));
+    CI_CHECK("second question stays unseen", !ci_state_has(&e, "seen.txt", "tg:7777777777:-100123:21:8"));
+    CI_CHECK("one dispatch and one charge", ci_count(marker, "run") == 1 && ci_file_has(calls, "1\n"));
+    CI_CHECK("unresolved cleanup leaves batch unacknowledged", ci_count(sent, "inbox") == 0 && ci_count(sent, "send") == 0);
+    CI_CHECK("cleanup reason retained", ci_state_has(&e, "escalate.tsv", "responder cleanup unresolved"));
+    return failures;
+}
+
 static int ci_tg_disposition_case(const char *tag, const char *reply, bool fail_send)
 {
     struct ci_env e;
@@ -1599,6 +1750,9 @@ int test_contrib_inbox(void)
     failures += case_malformed_fixture();
     failures += case_telegram_replay();
     failures += case_telegram_busy_model();
+    failures += case_telegram_git_deadline();
+    failures += case_process_budget();
+    failures += case_telegram_unresolved_cleanup();
     failures += case_telegram_batch_bound();
     failures += case_telegram_ack_failure();
     failures += ci_tg_disposition_case("tg-ignore", "IGNORE: resolved", false);

@@ -652,8 +652,8 @@ ifneq ($(filter help dev-package-verifier-ensure,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # Neither goal compiles. Ensure still captures source and its nested verifier
 # make selects the dev profile; do not freeze zero toolchain IDs into it.
 ZCL_EPOCH_PROFILES :=
-else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),docs-capability-inventory)
-# This standalone tool uses its direct CC recipe and declared source/header
+else ifneq ($(filter docs-capability-inventory presentation-macos-smoke,$(ZCL_EPOCH_SINGLE_GOAL)),)
+# These standalone targets use direct CC recipes and declared source/header
 # prerequisites, not node object epochs. Keep source/view/vendor preparation.
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),vendor-ready)
@@ -3753,7 +3753,7 @@ TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard tests/harness/src/*.c))
 TEST_SRCS += contexts/commons/packages/zmap/src/zmap.c
 # test_skycombat_macho_loader.c already includes the actual zsha256 source.
-TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
+TEST_DEV_EXECUTOR_SRCS = tools/contrib_inbox_process.c tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/component_receiver.c \
 	tools/dev/devloop_app_scaffold.c \
 	tools/dev/devloop_hotfork_shape.c \
@@ -14777,11 +14777,11 @@ endif
 ifeq ($(ZCL_HOST_WINDOWS),)
 CONTRIB_INBOX_BIN = $(BIN_DIR)/z23-contrib-inbox
 CONTRIB_INBOX_SRCS = tools/contrib_inbox.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
-CONTRIB_INBOX_SRCS += tools/contrib_inbox_telegram.c platform/modules/platform/src/directory_transaction.c platform/modules/platform/src/private_directory.c
+CONTRIB_INBOX_SRCS += tools/contrib_inbox_process.c tools/contrib_inbox_telegram.c platform/modules/platform/src/directory_transaction.c platform/modules/platform/src/private_directory.c
 CONTRIB_INBOX_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: contrib-inbox
 contrib-inbox: $(CONTRIB_INBOX_BIN)
-$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS) $(SPAWN_BINARY_HEADERS) tools/contrib_inbox_telegram.h platform/modules/platform/include/platform/directory_transaction.h platform/modules/platform/include/platform/private_directory.h platform/modules/platform/include/platform/rename_compat.h platform/modules/base/include/base/hex.h
+$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS) $(SPAWN_BINARY_HEADERS) tools/contrib_inbox_process.h tools/contrib_inbox_telegram.h platform/modules/platform/include/platform/directory_transaction.h platform/modules/platform/include/platform/private_directory.h platform/modules/platform/include/platform/rename_compat.h platform/modules/base/include/base/hex.h
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
