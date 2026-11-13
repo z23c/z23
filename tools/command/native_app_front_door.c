@@ -440,13 +440,18 @@ static int fd_decide(struct fd_run *r)
         return fd_refused(r);
     /* Closing the download window cancels a confirmed get before Receive:
      * the leaf still answers PASSED, but its data carries status "canceled"
-     * and nothing was received, so the decline's outcome is the truth. */
+     * and nothing was received, so the decline's outcome is the truth.
+     * Other verbs can also report a canceled confirm half; their wording
+     * stays verb-neutral. */
     const struct json_value *status = json_get(&r->reply.data, "status");
     if (status && status->type == JSON_STR &&
         strcmp(json_get_str(status), "canceled") == 0) {
+        bool get = strcmp(r->door->verb, "get") == 0;
         (void)fprintf(r->out,
-                      "z23 app %s %s: download window closed; nothing was "
-                      "received\n%s\n", r->door->verb, r->door->target,
+                      "z23 app %s %s: %s\n%s\n", r->door->verb,
+                      r->door->target,
+                      get ? "download window closed; nothing was received"
+                          : "canceled before completion; nothing changed",
                       changed);
         return 1;
     }
