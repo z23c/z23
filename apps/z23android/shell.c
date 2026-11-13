@@ -1024,8 +1024,8 @@ static bool run_more_nav(JNIEnv *env, enum command command)
     case CMD_MORE: go(env, SCREEN_MORE); return true;
     case CMD_MORE_SCAN: begin_scan(env); return true;
     case CMD_MORE_ASSISTANT: go(env, SCREEN_ASSISTANT); return true;
-    case CMD_MORE_START: shell.send("node_start", ""); return true;
-    case CMD_MORE_STOP: shell.send("node_stop", ""); return true;
+    case CMD_MORE_START: shell.send("node_start", ""); go(env, SCREEN_HOME); return true;
+    case CMD_MORE_STOP: shell.send("node_stop", ""); go(env, SCREEN_HOME); return true;
     case CMD_PLAY: go(env, SCREEN_GAME); return true;
     default: return false;
     }
