@@ -3152,6 +3152,7 @@ static bool ast_publish_library_notice(void *context, const struct zcl_present_m
             "3333333333333333333333333333333333333333333333333333333333333333");
         return n > 0 && (size_t)n < sizeof(expected) && pages && pages->page_count == 1 &&
             pages->pages && pages->pages[0].copy_text && !strcmp(pages->pages[0].copy_text, expected) &&
+            ast_field(m, "App link: ", expected) &&
             !strcmp(m->summary, "Available while this node hosts it, for up to 24 hours. Press C to copy the app link; keep this window open while pasting.") &&
             ast_action(live, 0, &close, &redraw) && close;
     }

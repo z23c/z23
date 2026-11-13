@@ -828,6 +828,7 @@ static void al_publish_notice(struct library *w, struct zcl_command_reply *reply
         app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
     }
     bool shown = v && post && root && next && next[0] && strlen(next) <= ZCL_PRESENT_COPY_TEXT_MAX &&
+        app_confirm_field(&v->model, "App link: ", next) &&
         app_confirm_field(&v->model, "Offer: ", post) &&
         app_confirm_field(&v->model, "Package: ", root) && app_confirm_prepare(v, why, sizeof(why)) &&
         app_confirm_show(v, w->notice, w->prepare_context, why, sizeof(why));
