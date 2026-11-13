@@ -803,6 +803,7 @@ struct al_library_script {
     char last_summary[241];
     char error_summary[241];
     char error_title[241];
+    char error_copy[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     struct al_fx *change_fixture;
     unsigned change_at;
@@ -920,6 +921,7 @@ static void al_library_share_menu(struct al_library_script *s,
 static void al_library_error_card(struct al_library_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {
+    s->valid = s->valid && model->action_count == 1 && !strcmp(model->actions[0].id, "close");
     ++s->errors; event->action_index = 0;
     (void)snprintf(s->error_summary, sizeof(s->error_summary), "%s", model->summary);
     (void)snprintf(s->error_title, sizeof(s->error_title), "%s", model->title);
@@ -971,6 +973,8 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
 {
     struct al_library_script *s = context;
     s->valid = s->valid && al_library_render(model, why, cap);
+    if (!strcmp(model->request_id, "library-error") && copy_text)
+        (void)snprintf(s->error_copy, sizeof(s->error_copy), "%s", copy_text);
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
     bool handled = false;
@@ -1242,6 +1246,10 @@ static int al_reveal_tests(struct al_fx *f, struct zcl_command_reply *reply)
                 ASSERT(!strcmp(reply->error.code, "REVEAL_FAILED") && s.notice_calls == 2);
                 ASSERT(s.errors == (mode == 3 ? 1u : 0u));
                 ASSERT(!strcmp(zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output"), s.shared));
+                if (mode == 3) {
+                    ASSERT(!strcmp(s.error_title, "Share file created"));
+                    ASSERT(!strcmp(s.error_copy, s.shared));
+                }
             }
             ASSERT(unlink(s.shared) == 0);
         }
@@ -1382,6 +1390,8 @@ static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *repl
         *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .fail_share_result = true};
         zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
         ASSERT(reply->error.mutated && !strcmp(reply->error.code, "PRESENTATION_FAILED"));
+        ASSERT(s->valid && s->errors == 1 && s->share_calls == 1);
+        ASSERT(!strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared));
         const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
         ASSERT(output && !strcmp(output, s->shared));
         ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;

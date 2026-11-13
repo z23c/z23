@@ -65,6 +65,7 @@ struct library {
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure, recovery_adoption, create_result, draft_result, publish_result;
+    bool share_result;
     bool operation_canceled;
     bool preparation_canceled;
     bool share_review;
@@ -234,19 +235,29 @@ static bool al_received_error_view(struct library *w, const struct zcl_command_r
     }
     return false;
 }
+static const char *al_error_copy(const struct library *w, const struct zcl_command_reply *reply)
+{
+    const char *key = w->publish_result ? "public_link" : w->share_result ? "output" : NULL;
+    const char *copy = key && reply->error.mutated ?
+        zcl_package_copy_str(json_get(&reply->data, "failure_facts"), key) : NULL;
+    if (copy && w->share_result && strcmp(copy, w->shared_path)) copy = NULL;
+    if (copy && (!copy[0] || strnlen(copy, ZCL_PRESENT_COPY_TEXT_MAX + 1) > ZCL_PRESENT_COPY_TEXT_MAX)) copy = NULL;
+    return copy;
+}
 static void al_error_view(struct library *w, const struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context)
 {
     if (w->receive_failure && al_received_error_view(w, reply, context)) return;
-    const char *copy = w->publish_result && reply->error.mutated ?
-        zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "public_link") : NULL;
-    if (copy && (!copy[0] || strnlen(copy, ZCL_PRESENT_COPY_TEXT_MAX + 1) > ZCL_PRESENT_COPY_TEXT_MAX)) copy = NULL;
+    const char *copy = al_error_copy(w, reply);
     zcl_present_model_init_v1(&w->model, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-error");
     (void)snprintf(w->model.title, sizeof(w->model.title), "%s",
-        w->publish_result ? "Offer published" : w->action_failed ? "Could not complete this action" : "Could not open My Apps");
+        w->publish_result ? "Offer published" : w->share_result ? "Share file created" :
+        w->action_failed ? "Could not complete this action" : "Could not open My Apps");
     (void)snprintf(w->model.summary, sizeof(w->model.summary), "%s", reply->error.message);
-    app_library_choice(&w->model, "close", "Close", copy ? "Press C to copy the published app link." : "No other app will be opened.");
+    app_library_choice(&w->model, "close", "Close", copy ?
+        (w->publish_result ? "Press C to copy the published app link." : "Press C to copy the share file location.") :
+        "No other app will be opened.");
     struct zcl_present_window_event_v1 event = {0};
     char why[256];
     (void)presenter(context, &w->model, copy, &event, why, sizeof(why));
@@ -479,6 +490,7 @@ static bool al_share_path(struct library *w, const struct library_row *row, stru
 static void al_share_notice_failure(struct library *w, struct zcl_command_reply *reply,
     const char *code, const char *message)
 {
+    w->share_result = true;
     zcl_package_copy_fail(reply, code, true, message, w->shared_path);
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     if (json_push_kv_str(&facts, "output", w->shared_path)) (void)json_push_kv(&reply->data, "failure_facts", &facts);
