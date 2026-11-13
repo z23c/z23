@@ -1610,7 +1610,7 @@ static int case_library_create_view(void)
 }
 
 struct al_create_fixture {
-    struct al_fx *f; unsigned step, calls, mode, preparations; bool valid, saw_kept;
+    struct al_fx *f; unsigned step, calls, mode, preparations, recovery_notices; bool valid, saw_kept;
     struct app_selection saved;
 };
 static bool al_create_notice(void *context, const struct zcl_present_model_v1 *model,
@@ -1622,7 +1622,10 @@ static bool al_create_notice(void *context, const struct zcl_present_model_v1 *m
 static bool al_create_facts(struct al_create_fixture *s, struct zcl_command_reply *r)
 {
     char hex[65]; memset(hex, 'a', 64); hex[64] = 0;
-    return json_push_kv_str(&r->data, "copy", s->f->root) &&
+    char long_copy[ZCL_PRESENT_COPY_TEXT_MAX + 2];
+    memset(long_copy, 'x', sizeof(long_copy) - 1); long_copy[0] = '/'; long_copy[sizeof(long_copy) - 1] = 0;
+    const char *copy = s->mode == 14 ? "relative-copy" : s->mode == 15 ? long_copy : s->f->root;
+    return json_push_kv_str(&r->data, "copy", copy) &&
         json_push_kv_str(&r->data, "release_root", hex) &&
         json_push_kv_str(&r->data, "package_root", hex) &&
         json_push_kv_str(&r->data, "version", hex);
@@ -1660,11 +1663,15 @@ static bool al_create_operations(struct zcl_command_reply *r)
         json_push_back(&items, &row) && json_push_kv(&r->data, "operations", &items);
     json_free(&row); json_free(&items); return ok;
 }
+static bool al_create_progress_mode(unsigned mode)
+{
+    return mode == 10 || mode == 12 || mode == 13 || mode == 14 || mode == 15;
+}
 static bool al_create_continuation_data(struct zcl_command_reply *r, unsigned mode)
 {
     if (!json_push_kv_bool(&r->data, "continuation_executed", false)) return false;
     if (mode == 9 && !al_create_operations(r)) return false;
-    if (mode == 10) return json_push_kv_str(&r->data, "continuation", "adopted") &&
+    if (al_create_progress_mode(mode)) return json_push_kv_str(&r->data, "continuation", "adopted") &&
         json_push_kv_bool(&r->data, "copy_progress_ui_failed", true);
     struct json_value error; json_init(&error); json_set_object(&error);
     bool ok = json_push_kv_str(&error, "code", "PREVIEW_CLEANUP_FAILED") &&
@@ -1679,7 +1686,7 @@ static bool al_create_continuation_data(struct zcl_command_reply *r, unsigned mo
 static void al_create_committed(struct al_create_fixture *s, struct zcl_command_reply *r)
 {
     s->valid = s->valid && al_create_facts(s, r); r->error.mutated = true;
-    if (s->mode == 9 || s->mode == 10) {
+    if (s->mode == 9 || al_create_progress_mode(s->mode)) {
         s->valid = s->valid && al_create_continuation_data(r, s->mode); return;
     }
     if (s->mode == 7) {
@@ -1725,11 +1732,24 @@ static const char *al_create_flow_action(struct al_create_fixture *s, const stru
     }
     return NULL;
 }
+static bool al_create_recovery_valid(const struct al_create_fixture *s,
+                                     const struct zcl_present_model_v1 *m, const char *copy)
+{
+    return copy && !strcmp(copy, s->f->root) && !strcmp(m->title, "Your copy was saved") &&
+        m->action_count == 1 && !strcmp(m->actions[0].id, "close");
+}
 static bool al_create_flow_present(void *context, const struct zcl_present_model_v1 *m,
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
-    struct al_create_fixture *s = context; (void)copy;
+    struct al_create_fixture *s = context;
     if (++s->step > 8 || !zcl_present_model_validate_v1(m, why, cap)) return false;
+    if (!strcmp(m->request_id, "library-created-copy")) {
+        ++s->recovery_notices;
+        s->valid = s->valid && al_create_recovery_valid(s, m, copy);
+        if (s->mode == 13) return false; /* failure must retain the committed reply */
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true;
+    }
     if (s->mode == 5 && s->calls && strcmp(m->request_id, "library-error")) return false;
     const char *action = al_create_flow_action(s, m);
     int i = action ? al_create_action(m, action, NULL) : -1;
@@ -1789,13 +1809,69 @@ static bool al_create_failure_result(const struct al_create_fixture *s, const st
             al_create_failure_wire((struct zcl_command_reply *)r, s->f->root, mode);
     return r->status != ZCL_COMMAND_STATUS_PASSED && !r->error.mutated;
 }
-static bool al_create_case_result(const struct al_create_fixture *s, const struct zcl_command_reply *r)
+static bool al_create_progress_roots(const struct json_value *data)
+{
+    static const char expected[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char *keys[] = {"version", "release_root", "package_root"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const char *value = zcl_package_copy_str(data, keys[i]);
+        if (!value || strcmp(value, expected)) return false;
+    }
+    return true;
+}
+static bool al_create_progress_continuation(const struct json_value *data)
+{
+    const char *continuation = zcl_package_copy_str(data, "continuation");
+    const struct json_value *executed = json_get(data, "continuation_executed");
+    return continuation && !strcmp(continuation, "adopted") && executed &&
+        executed->type == JSON_BOOL && !json_get_bool(executed);
+}
+static bool al_create_progress_wire(struct zcl_command_reply *r, const char *expected)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", NULL);
+    char wire[32768u + 1u];
+    struct zcl_command_budget_fixture budget = {.budget_bytes = spec ? (size_t)spec->budget_bytes : 0};
+    size_t n = spec ? zcl_command_registry_test_reply_wire_fixture(reg, spec, r, &budget, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *data = json_get(&doc, "data");
+    const char *copy = zcl_package_copy_str(data, "copy");
+    const char *status = zcl_package_copy_str(&doc, "status");
+    ok = ok && status && !strcmp(status, "passed") && copy && !strcmp(copy, expected) &&
+        al_create_progress_roots(data) && al_create_progress_continuation(data) &&
+        json_get_bool(json_get(data, "copy_progress_ui_failed"));
+    json_free(&doc); return ok;
+}
+static bool al_create_copy_matches(const struct al_create_fixture *s, const char *copy)
+{
+    if (!copy) return false;
+    if (s->mode == 14) return !strcmp(copy, "relative-copy");
+    if (s->mode == 15) return copy[0] == '/' && strlen(copy) == ZCL_PRESENT_COPY_TEXT_MAX + 1 &&
+        strspn(copy + 1, "x") == ZCL_PRESENT_COPY_TEXT_MAX;
+    return !strcmp(copy, s->f->root);
+}
+static bool al_create_progress_result(const struct al_create_fixture *s, struct zcl_command_reply *r)
+{
+    const char *copy = zcl_package_copy_str(&r->data, "copy");
+    const char *continuation = zcl_package_copy_str(&r->data, "continuation");
+    const struct json_value *executed = json_get(&r->data, "continuation_executed");
+    unsigned notices = s->mode >= 14 ? 0u : 1u;
+    return r->status == ZCL_COMMAND_STATUS_PASSED && r->error.mutated &&
+        s->recovery_notices == notices && al_create_copy_matches(s, copy) &&
+        continuation && !strcmp(continuation, "adopted") &&
+        json_get_bool(json_get(&r->data, "copy_progress_ui_failed")) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        al_create_progress_wire(r, copy);
+}
+static bool al_create_case_result(const struct al_create_fixture *s, struct zcl_command_reply *r)
 {
     unsigned mode = s->mode;
     unsigned expected_calls = mode == 6 ? 0u : ((mode == 9 || mode == 10) ? 2u : 1u);
     if (!s->valid || s->calls != expected_calls) return false;
     if (mode == 0) return r->status == ZCL_COMMAND_STATUS_PASSED && !r->error.mutated;
     if (mode == 1) return al_create_kept_result(s, r);
+    if (mode >= 12 && mode <= 15) return al_create_progress_result(s, r);
     if (mode == 2 || mode == 8) return al_create_preview_result(r, mode);
     return al_create_failure_result(s, r);
 }
@@ -1809,8 +1885,8 @@ static bool al_create_run_case(unsigned mode)
     if (setup) zcl_test_app_library_create(&f.env, f.root, &reply, al_create_flow_present,
         al_create_notice, &s, al_create_adopt, mode == 6 ? 0 : 30000);
     bool ok = setup && al_create_case_result(&s, &reply);
-    printf("  create mode=%u setup=%d valid=%d calls=%u steps=%u kept=%d status=%d mutated=%d code=%s\n",
-        mode, setup, s.valid, s.calls, s.step, s.saw_kept, reply.status, reply.error.mutated, reply.error.code);
+    printf("  create mode=%u setup=%d valid=%d calls=%u steps=%u notices=%u kept=%d status=%d mutated=%d code=%s\n",
+        mode, setup, s.valid, s.calls, s.step, s.recovery_notices, s.saw_kept, reply.status, reply.error.mutated, reply.error.code);
     zcl_command_reply_free(&reply); return ok;
 }
 static bool al_create_real_tiny_budget(const char *datadir)
@@ -1866,6 +1942,10 @@ static int case_library_create_flow(void)
     TEST("My Apps create preserves native adoption outcomes") {
         bool ok = true;
         for (unsigned mode = 0; mode <= 10; ++mode) if (!al_create_run_case(mode)) ok = false;
+        if (!al_create_run_case(12)) ok = false;
+        if (!al_create_run_case(13)) ok = false;
+        if (!al_create_run_case(14)) ok = false;
+        if (!al_create_run_case(15)) ok = false;
         if (!al_create_real_tiny_budget("/fixture-profile")) ok = false;
         if (!al_create_history_case()) ok = false;
         ASSERT(ok); PASS();

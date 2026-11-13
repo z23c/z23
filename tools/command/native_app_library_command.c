@@ -1282,8 +1282,45 @@ static bool al_create_request(struct library *w, const char *datadir, void *cont
     return true;
 }
 
+/* The committed result remains authoritative even if this best-effort
+ * recovery notice cannot be shown; never invent or shorten its copy path. */
+static bool al_created_copy_notice(struct library *w, const struct zcl_command_reply *reply,
+    app_library_presenter presenter, void *context)
+{
+    const struct json_value *failed = json_get(&reply->data, "copy_progress_ui_failed");
+    const char *continuation = zcl_package_copy_str(&reply->data, "continuation");
+    if (!failed || failed->type != JSON_BOOL || !json_get_bool(failed) ||
+        reply->status != ZCL_COMMAND_STATUS_PASSED || !w->create_result || !reply->error.mutated ||
+        !continuation || strcmp(continuation, "adopted")) return true;
+    const char *copy = zcl_package_copy_str(&reply->data, "copy");
+    if (!copy || copy[0] != '/' || strnlen(copy, ZCL_PRESENT_COPY_TEXT_MAX + 1) > ZCL_PRESENT_COPY_TEXT_MAX ||
+        !zutf8_validate(copy)) return false;
+    zcl_present_model_init_v1(&w->model, ZCL_PRESENT_MODEL_CHOICE);
+    (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-created-copy");
+    (void)snprintf(w->model.title, sizeof(w->model.title), "Your copy was saved");
+    (void)snprintf(w->model.summary, sizeof(w->model.summary),
+        "Preview was not opened. Press C to copy the saved copy's location.");
+    app_library_choice(&w->model, "close", "Close", "Return to My Apps.");
+    struct zcl_present_window_event_v1 event = {0}; char why[256] = {0};
+    return zcl_present_model_validate_v1(&w->model, why, sizeof(why)) &&
+        presenter(context, &w->model, copy, &event, why, sizeof(why)) &&
+        al_event_valid(&event, w->model.action_count);
+}
+
+static bool al_create_finish(struct library *w, const struct app_launch_env *env,
+    struct zcl_command_reply *reply, bool prior, app_library_presenter presenter, void *context)
+{
+    if (!al_created_copy_notice(w, reply, presenter, context)) return false;
+    if (prior || reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    w->has_received = w->receive_current = true;
+    w->recovery_ready = al_capture_adoption(w, &reply->data);
+    if (!w->recovery_ready) return false; /* preserve exact current receipt */
+    if (!al_reload(w, env, reply)) return false;
+    return al_received_selection(w, &reply->data, reply);
+}
+
 static bool al_create(struct library *w, const struct app_launch_env *env,
-    const char *datadir, void *context, struct zcl_command_reply *reply)
+    const char *datadir, app_library_presenter presenter, void *context, struct zcl_command_reply *reply)
 {
     size_t allowance;
     bool prior = w->has_received || w->prepared_mutated;
@@ -1303,12 +1340,7 @@ static bool al_create(struct library *w, const struct app_launch_env *env,
     w->draft_current = false;
     bool prior_mutated = reply->error.mutated;
     zcl_command_reply_free(reply); *reply = result; reply->error.mutated |= prior_mutated;
-    if (prior || reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
-    w->has_received = w->receive_current = true;
-    w->recovery_ready = al_capture_adoption(w, &reply->data);
-    if (!w->recovery_ready) return false; /* preserve exact current receipt */
-    if (!al_reload(w, env, reply)) return false;
-    return al_received_selection(w, &reply->data, reply);
+    return al_create_finish(w, env, reply, prior, presenter, context);
 }
 
 static bool al_external(struct library *w, const struct app_launch_env *env, const char *datadir,
@@ -1316,7 +1348,7 @@ static bool al_external(struct library *w, const struct app_launch_env *env, con
 {
     *handled = true;
     if (strcmp(id, "draft")) w->draft_result = false;
-    if (!strcmp(id, "create")) return al_create(w, env, datadir, context, reply);
+    if (!strcmp(id, "create")) return al_create(w, env, datadir, presenter, context, reply);
     w->create_result = false;
     if (!strcmp(id, "discover")) { w->page = 8; return true; }
     if (!strcmp(id, "catalog") || !strcmp(id, "open-link")) return al_discover(w, env, datadir, presenter, context, reply, !strcmp(id, "open-link"));
