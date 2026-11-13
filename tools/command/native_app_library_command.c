@@ -182,10 +182,124 @@ static void al_discover_options(struct library *w)
     app_library_choice(m, "discover-back", "Back", "Return to My Apps.");
 }
 
+struct al_help_view {
+    struct zcl_present_model_v1 model;
+    struct zcl_present_model_bitmap_v1 bitmap;
+    struct zcl_present_window_v1 page;
+    struct zcl_present_window_event_v1 result;
+    const char *text;
+    bool (*copy)(const char *, void *);
+    void *copy_context;
+    bool dirty, failed;
+};
+static bool al_help_render(struct al_help_view *view)
+{
+    struct zcl_present_model_bitmap_v1 bitmap = {0}; char why[128];
+    if (!zcl_present_model_render_v1(&view->model, &bitmap, why, sizeof(why))) return false;
+    zcl_present_model_bitmap_free_v1(&view->bitmap); view->bitmap = bitmap;
+    view->page.pixels = bitmap.pixels; view->page.width = bitmap.width; view->page.height = bitmap.height;
+    return true;
+}
+static void al_help_update(void *context, const struct zcl_present_window_event_v1 *event,
+    bool close_requested, bool *redraw, bool *allow_close)
+{
+    struct al_help_view *view = context;
+    *redraw = view->dirty; view->dirty = false;
+    if (*redraw && !al_help_render(view)) view->failed = true;
+    bool action = event->outcome == ZCL_PRESENT_WINDOW_ACTION && event->action_index >= 2 &&
+        event->action_index < view->model.action_count;
+    *allow_close = close_requested || action || view->failed;
+    if (action) view->result = *event;
+}
+static bool al_help_activate(struct al_help_view *view, uint32_t selected, uint32_t *action)
+{
+    if (selected >= view->model.action_count) return false;
+    if (selected == 0) {
+        bool copied = view->copy(view->text, view->copy_context);
+        (void)snprintf(view->model.summary, sizeof(view->model.summary), "%s", copied ?
+            "Copied. Paste into your AI; keep this window open. Setup has not connected it yet." :
+            "Could not copy AI setup. Try again; keep this window open.");
+        view->dirty = true;
+    } else if (selected >= 2) *action = selected;
+    return true;
+}
+static bool al_help_click(struct al_help_view *view, const struct zcl_present_input_v1 *input,
+    uint32_t *focus, uint32_t *action)
+{
+    uint32_t hit = UINT32_MAX;
+    if (zcl_present_window_action_at_v1(view->page.width, view->page.height,
+        (int32_t)view->page.width, (int32_t)view->page.height,
+        (int32_t)input->x, (int32_t)input->y, view->model.action_count, &hit)) {
+        *focus = hit; return al_help_activate(view, hit, action);
+    }
+    return true;
+}
+static bool al_help_text(struct al_help_view *view, uint32_t character,
+    uint32_t *focus, uint32_t *action)
+{
+    if (character == ' ') {
+        if (*focus >= view->model.action_count) *focus = 0;
+        return al_help_activate(view, *focus, action);
+    }
+    if (character == 'c' || character == 'C') return al_help_activate(view, 0, action);
+    if (character >= '1' && character <= '4')
+        return al_help_activate(view, character - '1', action);
+    return false;
+}
+static bool al_help_input(void *context, const struct zcl_present_input_v1 *input,
+    uint32_t *focus, uint32_t *action)
+{
+    struct al_help_view *view = context; *action = UINT32_MAX;
+    uint32_t count = view->model.action_count;
+    if (input->key == ZCL_PRESENT_INPUT_TAB) {
+        if (*focus >= count) *focus = input->shift ? 0 : count - 1;
+        *focus = input->shift ? (*focus ? *focus - 1 : count - 1) : (*focus + 1) % count;
+        return true;
+    }
+    if (input->key == ZCL_PRESENT_INPUT_ENTER) {
+        if (*focus >= count) *focus = 0;
+        return al_help_activate(view, *focus, action);
+    }
+    if (input->key == ZCL_PRESENT_INPUT_TEXT)
+        return al_help_text(view, input->character, focus, action);
+    if (input->key == ZCL_PRESENT_INPUT_CLICK) return al_help_click(view, input, focus, action);
+    return false;
+}
+static bool al_help_copy(const char *text, void *context)
+{ (void)context; return zcl_present_window_copy_text_v1(text); }
+static bool al_help_present(const struct zcl_present_model_v1 *model, const char *text,
+    struct zcl_present_window_event_v1 *event, app_confirm_presenter presenter, void *context,
+    bool (*copy)(const char *, void *), char *why, size_t cap)
+{
+    struct al_help_view view = {.model = *model, .text = text, .copy = copy, .copy_context = context,
+        .result = {.struct_size = sizeof(view.result), .abi_version = ZCL_PRESENT_ABI_V1,
+            .outcome = ZCL_PRESENT_WINDOW_DISMISSED, .action_index = UINT32_MAX}};
+    if (!al_help_render(&view)) return false;
+    view.page.struct_size = sizeof(view.page); view.page.abi_version = ZCL_PRESENT_ABI_V1;
+    view.page.title = "Change with your AI"; view.page.pixel_format = ZCL_PRESENT_RGB8;
+    const struct zcl_present_window_pages_v1 pages = {.struct_size = sizeof(pages),
+        .abi_version = ZCL_PRESENT_ABI_V1, .pages = &view.page, .page_count = 1};
+    const struct zcl_present_window_live_view_v1 live = {
+        .owner = {.context = &view, .update = al_help_update}, .input = al_help_input};
+    bool ok = presenter ? presenter(context, &view.model, &pages, &live, why, cap) :
+        zcl_present_window_run_live_view_v1(&pages, model->action_count, &live, why, cap);
+    *event = view.result;
+    zcl_present_model_bitmap_free_v1(&view.bitmap);
+    if (view.failed && why && cap) (void)snprintf(why, cap, "Cannot redraw AI copy feedback.");
+    return ok && !view.failed;
+}
+#if defined(ZCL_TESTING)
+bool zcl_test_app_library_help_present(const struct zcl_present_model_v1 *model, const char *text,
+    struct zcl_present_window_event_v1 *event, app_confirm_presenter presenter, void *context,
+    bool (*copy)(const char *, void *), char *why, size_t cap)
+{ return al_help_present(model, text, event, presenter, context, copy, why, cap); }
+#endif
 static bool al_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     (void)context;
+    if (copy_text && copy_text[0] && !strcmp(model->request_id, "library-help"))
+        return al_help_present(model, copy_text, event, NULL, NULL, al_help_copy, why, cap);
     struct zcl_present_model_bitmap_v1 bitmap = {0};
     if (!zcl_present_model_render_v1(model, &bitmap, why, cap)) return false;
     struct zcl_present_window_v1 window = {.struct_size = sizeof(window), .abi_version = ZCL_PRESENT_ABI_V1,
@@ -641,7 +755,7 @@ static void al_detail_model(struct library *w)
         char version[65] = {0};
         if (r->saved) (void)snprintf(version, sizeof(version), "%s", w->source_version);
         char first[33]; (void)snprintf(first, sizeof(first), "%.32s", version);
-        app_library_choice(m, "setup", w->setup[0] ? "Press C to copy AI setup" : "No editable source", r->saved ? first : "No saved version yet.");
+        app_library_choice(m, "setup", w->setup[0] ? "Copy AI setup (C)" : "No editable source", r->saved ? first : "No saved version yet.");
         app_library_choice(m, "version", r->saved ? "Paste into AI; keep this open" : w->setup[0] ? "Make my copy first" : "Source needed",
             r->saved ? version + 32 : w->setup[0] ? "Ask your AI to request a copy." : "Ask the app author for source.");
     }

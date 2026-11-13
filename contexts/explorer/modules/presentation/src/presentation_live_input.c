@@ -1,7 +1,18 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
  * Translate native window events for a live presentation owner. */
 #include "presentation_live_input_internal.h"
+#include "presentation_validate_internal.h"
+
 #include <stddef.h>
+#if defined(__APPLE__)
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
+
+#if defined(__APPLE__)
+#define RGFW_NATIVE
+#endif
+
 #define RGFW_NO_API
 #define RGFW_NO_IOKIT
 #define RGFWDEF extern
@@ -113,4 +124,31 @@ int32_t present_live_hover_step(const RGFW_event *event,
     if (event->type != RGFW_keyPressed) return 0;
     return present_live_hover_key_step(event, item_count, absolute,
                                         next_hover);
+}
+
+bool zcl_present_window_copy_ascii_v1(const char *text)
+{
+    size_t n = 0;
+    return present_copy_ascii_length(text, &n) && zcl_present_window_copy_text_v1(text);
+}
+
+/* Retire Cocoa's window and raw callback pointers before RGFW frees the C window. */
+void present_live_window_close(RGFW_window *window)
+{
+#if defined(__APPLE__)
+    RGFW_window_src *source = RGFW_window_getSrc(window);
+    id native = (id)source->window;
+    id view = (id)source->view;
+    id delegate = ((id (*)(id, SEL))objc_msgSend)(native, sel_registerName("delegate"));
+    if (delegate) object_setInstanceVariable(delegate, "RGFW_window", NULL);
+    if (view) object_setInstanceVariable(view, "RGFW_window", NULL);
+    ((void (*)(id, SEL, id))objc_msgSend)(native, sel_registerName("setDelegate:"), nil);
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(native, sel_registerName("setReleasedWhenClosed:"), NO);
+    ((void (*)(id, SEL))objc_msgSend)(native, sel_registerName("close"));
+    /* RGFW allocates and explicitly retains the window, and allocates the delegate. */
+    ((void (*)(id, SEL))objc_msgSend)(delegate, sel_registerName("release"));
+    ((void (*)(id, SEL))objc_msgSend)(native, sel_registerName("release"));
+    ((void (*)(id, SEL))objc_msgSend)(native, sel_registerName("release"));
+#endif
+    RGFW_window_close(window);
 }

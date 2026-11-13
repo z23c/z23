@@ -4,6 +4,10 @@
 #define ZCL_PRESENTATION_LIVE_TEST_INTERNAL_H
 static bool present_test_fail_redraw;
 static struct zcl_present_window_event_v1 present_test_final_event;
+static bool present_test_copy_matches;
+bool zcl_present_test_copy_matches(void);
+bool zcl_present_test_copy_matches(void) { return present_test_copy_matches; }
+
 #if defined(__linux__) && defined(RGFW_X11)
 /* Called after the fixture's sole window closes, not merely at startup.
  * Every dynamically loaded extension must retire both handle and callables. */

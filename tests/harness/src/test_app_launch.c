@@ -24,6 +24,7 @@
 #include "command/native_app_launch.h"
 #include "command/native_app_share_command.h"
 #include "command/native_app_library_command.h"
+#include "command/native_app_host_browser.h"
 #include "command/native_app_installed_copy.h"
 #include "command/native_app_discover_view.h"
 #include "command/native_app_share_reveal.h"
@@ -2097,6 +2098,85 @@ static bool al_setup_request_valid(const struct json_value *setup)
         strstr(request, "explicit Keep and Share");
 }
 
+struct al_help_probe { unsigned copies, exit_action; bool exact; };
+static const char al_help_payload[] = "{\"command\":\"/caf\xc3\xa9/z23\",\"revision\":7}";
+static bool al_help_copy_probe(const char *text, void *context)
+{
+    struct al_help_probe *probe = context;
+    probe->exact = !strcmp(text, al_help_payload);
+    return ++probe->copies != 1; /* First copy fails, retry succeeds. */
+}
+static bool al_help_pump(const struct zcl_present_window_live_view_v1 *live,
+    uint32_t action, bool close, bool expected_redraw, bool expected_close)
+{
+    struct zcl_present_window_event_v1 event = {.struct_size = sizeof(event),
+        .abi_version = ZCL_PRESENT_ABI_V1, .outcome = action == UINT32_MAX ?
+        ZCL_PRESENT_WINDOW_DISMISSED : ZCL_PRESENT_WINDOW_ACTION, .action_index = action};
+    bool redraw = false, allow_close = false;
+    live->owner.update(live->owner.context, &event, close, &redraw, &allow_close);
+    return redraw == expected_redraw && allow_close == expected_close;
+}
+static bool al_help_copy_inputs(struct al_help_probe *probe, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live)
+{
+    uint32_t width = (ZCL_PRESENT_MODEL_ACTION_WIDTH - 3u * ZCL_PRESENT_MODEL_ACTION_GAP) / 4u;
+    struct zcl_present_input_v1 inputs[] = {
+        {.key = ZCL_PRESENT_INPUT_ENTER},
+        {.key = ZCL_PRESENT_INPUT_CLICK, .x = ZCL_PRESENT_MODEL_ACTION_X + width / 2u,
+            .y = ZCL_PRESENT_MODEL_ACTION_Y + ZCL_PRESENT_MODEL_ACTION_HEIGHT / 2u},
+        {.key = ZCL_PRESENT_INPUT_TEXT, .character = ' '},
+        {.key = ZCL_PRESENT_INPUT_TEXT, .character = '1'}, {.key = ZCL_PRESENT_INPUT_TEXT, .character = 'c'}
+    };
+    uint32_t focus = UINT32_MAX;
+    for (unsigned i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i) {
+        uint32_t action = UINT32_MAX;
+        if (!live->input(live->owner.context, &inputs[i], &focus, &action) || action != UINT32_MAX ||
+            probe->copies != i + 1 || !probe->exact || !al_help_pump(live, action, false, true, false)) return false;
+        if (!strstr(model->summary, i ? "Copied." : "Could not copy") || !pages->pages[0].pixels) return false;
+    }
+    return true;
+}
+static bool al_help_live_probe(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)why; (void)cap;
+    struct al_help_probe *probe = context;
+    if (!al_help_copy_inputs(probe, model, pages, live)) return false;
+    uint32_t focus = 1, action = UINT32_MAX;
+    struct zcl_present_input_v1 input = {.key = ZCL_PRESENT_INPUT_ENTER};
+    if (!live->input(live->owner.context, &input, &focus, &action) || action != UINT32_MAX ||
+        !al_help_pump(live, action, false, false, false) || probe->copies != 5) return false;
+    if (probe->exit_action == UINT32_MAX) return al_help_pump(live, UINT32_MAX, true, false, true);
+    input.key = ZCL_PRESENT_INPUT_TAB;
+    if (!live->input(live->owner.context, &input, &focus, &action) || focus != 2) return false;
+    focus = probe->exit_action; input.key = ZCL_PRESENT_INPUT_ENTER;
+    return live->input(live->owner.context, &input, &focus, &action) && action == probe->exit_action &&
+        al_help_pump(live, action, true, false, true) && probe->copies == 5;
+}
+static int case_library_help_copy(void)
+{
+    int failures = 0;
+    TEST("AI setup mouse and keyboard copy retain window, show failure/retry and preserve navigation") {
+        struct zcl_present_model_v1 model; zcl_present_model_init_v1(&model, ZCL_PRESENT_MODEL_STATUS_CARD);
+        (void)snprintf(model.request_id, sizeof(model.request_id), "library-help");
+        (void)snprintf(model.title, sizeof(model.title), "Change with your AI");
+        const char *ids[] = {"setup", "version", "back", "cancel"};
+        for (unsigned i = 0; i < 4; ++i) app_library_choice(&model, ids[i], ids[i], "AI setup");
+        const unsigned exits[] = {2, 3, UINT32_MAX};
+        for (unsigned i = 0; i < 3; ++i) {
+            struct al_help_probe probe = {.exit_action = exits[i]};
+            struct zcl_present_window_event_v1 event = {0}; char why[128] = {0};
+            ASSERT(zcl_test_app_library_help_present(&model, al_help_payload, &event,
+                al_help_live_probe, &probe, al_help_copy_probe, why, sizeof(why)));
+            ASSERT(probe.copies == 5 && probe.exact && event.action_index == exits[i]);
+            ASSERT(event.struct_size == sizeof(event) && event.abi_version == ZCL_PRESENT_ABI_V1);
+            ASSERT(event.outcome == (i == 2 ? ZCL_PRESENT_WINDOW_DISMISSED : ZCL_PRESENT_WINDOW_ACTION));
+        }
+    PASS(); }
+_test_next:;
+    return failures;
+}
 static int case_library_help(void)
 {
     int failures = 0;
@@ -3159,6 +3239,7 @@ _test_next:
     failures += case_library_create_flow();
     failures += case_library_share(&f);
     failures += case_library_help();
+    failures += case_library_help_copy();
     failures += case_library_prepare_stop();
     failures += case_library_share_prepare();
     failures += case_library_setup_stop();

@@ -4,6 +4,8 @@
 #define ZCL_PRESENTATION_LIVE_INPUT_INTERNAL_H
 #include "presentation/presentation.h"
 struct RGFW_window;
+void present_live_window_close(struct RGFW_window *window);
+
 union RGFW_event;
 /* Translate hover keys/scroll without changing the caller's initialized
  * absolute/next outputs for relative steps or unrelated events. */

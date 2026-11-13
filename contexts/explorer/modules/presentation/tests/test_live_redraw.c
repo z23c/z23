@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #if defined(__APPLE__)
 #include <objc/runtime.h>
+#include <objc/message.h>
+
 #elif defined(__linux__)
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -206,8 +208,67 @@ static bool host_copy_api_cases(void)
     bool ok = zcl_present_window_run_actions_v1(&page, 1, host_copy_ready, &probe, &event, error, sizeof(error));
     return ok && probe.written && probe.rejected && probe.pasted;
 }
+struct text_copy_probe { bool unicode, control, maximum, over; };
+static void text_copy_ready(void *context)
+{
+    struct text_copy_probe *probe = context;
+    char text[ZCL_PRESENT_COPY_TEXT_MAX + 2u];
+    probe->unicode = zcl_present_window_copy_text_v1("caf\xc3\xa9 / \xe2\x9c\x93");
+    probe->control = zcl_present_window_copy_text_v1("line one\nline two\tend");
+    memset(text, 'x', ZCL_PRESENT_COPY_TEXT_MAX);
+    text[ZCL_PRESENT_COPY_TEXT_MAX] = 0;
+    probe->maximum = zcl_present_window_copy_text_v1(text);
+    text[ZCL_PRESENT_COPY_TEXT_MAX] = 'x'; text[ZCL_PRESENT_COPY_TEXT_MAX + 1u] = 0;
+    probe->over = !zcl_present_window_copy_text_v1(text);
+}
+static bool text_copy_api_cases(void)
+{
+    if (zcl_present_window_copy_text_v1("outside-window") || zcl_present_window_copy_text_v1(NULL)) return false;
+    static uint8_t pixels[16 * 16 * 3]; struct text_copy_probe probe = {0};
+    struct zcl_present_window_v1 page = {.struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Text copy", .pixels = pixels, .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8};
+    struct zcl_present_window_event_v1 event = {0}; char error[256] = {0};
+    zcl_present_test_script(0, 0, false);
+    bool ok = zcl_present_window_run_actions_v1(&page, 1, text_copy_ready, &probe, &event, error, sizeof(error));
+    return ok && probe.unicode && probe.control && probe.maximum && probe.over;
+}
 #endif
 
+#if defined(__APPLE__)
+struct mac_window_probe { id window; unsigned long matches; };
+static void mac_window_ready(void *context)
+{
+    struct mac_window_probe *probe = context;
+    id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSApplication"), sel_registerName("sharedApplication"));
+    id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
+    unsigned long count = ((unsigned long (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count"));
+    for (unsigned long i = 0; i < count; ++i) {
+        id window = ((id (*)(id, SEL, unsigned long))objc_msgSend)(windows, sel_registerName("objectAtIndex:"), i);
+        id title = ((id (*)(id, SEL))objc_msgSend)(window, sel_registerName("title"));
+        const char *text = ((const char *(*)(id, SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
+        BOOL visible = ((BOOL (*)(id, SEL))objc_msgSend)(window, sel_registerName("isVisible"));
+        if (!text || strcmp(text, "Window teardown") || !visible) continue;
+        probe->window = window; ++probe->matches;
+    }
+    if (probe->matches == 1) ((id (*)(id, SEL))objc_msgSend)(probe->window, sel_registerName("retain"));
+    else probe->window = nil;
+}
+static bool mac_window_closed(void)
+{
+    static uint8_t pixels[16 * 16 * 3]; struct mac_window_probe probe = {0};
+    struct zcl_present_window_v1 page = {.struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Window teardown", .pixels = pixels, .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8};
+    struct zcl_present_window_event_v1 event = {0}; char error[256] = {0};
+    zcl_present_test_script(0, 0, false);
+    bool ok = zcl_present_window_run_actions_v1(&page, 1, mac_window_ready, &probe, &event, error, sizeof(error));
+    bool hidden = probe.window && !((BOOL (*)(id, SEL))objc_msgSend)(probe.window, sel_registerName("isVisible"));
+    if (!ok || !hidden) fprintf(stderr, "mac window teardown: ok=%d captured=%d matches=%lu hidden=%d error=%s\n",
+        ok, probe.window != nil, probe.matches, hidden, error);
+
+    if (probe.window) ((void (*)(id, SEL))objc_msgSend)(probe.window, sel_registerName("release"));
+    return ok && hidden;
+}
+#endif
 static bool clipboard_roundtrip(const char *text)
 {
     static uint8_t pixels[16 * 16 * 3];
@@ -234,9 +295,9 @@ static bool clipboard_roundtrip(const char *text)
 static const char *clipboard_fixture(unsigned which, char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u])
 {
     if (which == 0) return "";
-    if (which == 1) return "quoted \\\"path\\\" / caf\xc3\xa9 / \xe2\x9c\x93";
+    if (which == 1 || which == 6) return "quoted \\\"path\\\" / caf\xc3\xa9 / \xe2\x9c\x93";
     if (which == 3 || which == 5) return "http://example.onion/board/apps/v1";
-    if (which == 4) return "bad\nlink";
+    if (which == 4 || which == 7) return "bad\nlink";
     memset(maximum, 'x', ZCL_PRESENT_COPY_TEXT_MAX); maximum[ZCL_PRESENT_COPY_TEXT_MAX] = 0;
     return maximum;
 }
@@ -245,6 +306,10 @@ static void clipboard_api_owner_ready(void *context)
     const char *text = context;
     if (!zcl_present_window_copy_ascii_v1(text)) _exit(2);
 }
+static void clipboard_text_owner_ready(void *context)
+{
+    if (!zcl_present_window_copy_text_v1(context)) _exit(2);
+}
 static int clipboard_owner(unsigned which)
 {
     static uint8_t pixels[16 * 16 * 3]; char maximum[ZCL_PRESENT_COPY_TEXT_MAX + 1u];
@@ -252,14 +317,15 @@ static int clipboard_owner(unsigned which)
         .struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
         .title = "External clipboard owner", .pixels = pixels,
         .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8,
-        .copy_text = which == 5 ? NULL : clipboard_fixture(which, maximum),
+        .copy_text = which >= 5 ? NULL : clipboard_fixture(which, maximum),
     };
     const char *text = clipboard_fixture(which, maximum);
     struct zcl_present_window_event_v1 event = {0}; char error[256] = {0};
     /* C copies; the unrelated second key leaves the window running. */
     zcl_present_test_script(UINT_MAX, 200, false);
     return zcl_present_window_run_actions_v1(&page, 1,
-        which == 5 ? clipboard_api_owner_ready : NULL, (void *)text, &event, error, sizeof(error)) ? 0 : 1;
+        which == 5 ? clipboard_api_owner_ready : which >= 6 ? clipboard_text_owner_ready : NULL,
+        (void *)text, &event, error, sizeof(error)) ? 0 : 1;
 }
 static bool clipboard_wait_owner(Display *d, Atom selection)
 {
@@ -394,7 +460,7 @@ static void live_redraw_watchdog(int signal_number)
 static bool linux_clipboard_cases(const char *executable)
 {
     bool external_ok = true;
-    for (unsigned i = 0; i < 6; ++i) {
+    for (unsigned i = 0; i < 9; ++i) {
         fprintf(stderr, "live-redraw: external clipboard case %u\n", i);
         if (!clipboard_external(executable, i)) external_ok = false;
     }
@@ -429,34 +495,39 @@ int main(int argc, char **argv)
     if (argc == 3 && !strcmp(argv[1], "--clipboard-owner")) {
         (void)alarm(30);
         unsigned which = (unsigned)strtoul(argv[2], NULL, 10);
-        return which < 6 ? clipboard_owner(which) : 1;
+        return which < 9 ? clipboard_owner(which) : 1;
     }
 #else
     (void)argc; (void)argv;
 #endif
 #if defined(__APPLE__) || defined(__linux__)
-    if (!initialization_failure()) return 1;
+    if (!initialization_failure()) { fputs("live-redraw: initialization failure case failed\n", stderr); return 1; }
 #endif
 #if defined(__linux__)
     fputs("live-redraw: native redraw cases\n", stderr);
 #endif
-    if (!live_redraw_cases()) return 1;
+    if (!live_redraw_cases()) { fputs("live-redraw: redraw cases failed\n", stderr); return 1; }
+#if defined(__APPLE__)
+    if (!mac_window_closed()) { fputs("live-redraw: mac window close case failed\n", stderr); return 1; }
+#endif
+
 #if defined(__linux__)
     fputs("live-redraw: clipboard owner round trips after window closes\n", stderr);
 #endif
-    if (!clipboard_roundtrip_cases()) return 1;
+    if (!clipboard_roundtrip_cases()) { fputs("live-redraw: clipboard roundtrip cases failed\n", stderr); return 1; }
 #if defined(__APPLE__) || defined(__linux__)
-    if (!host_copy_api_cases()) return 1;
+    if (!host_copy_api_cases()) { fputs("live-redraw: ASCII copy API cases failed\n", stderr); return 1; }
+    if (!text_copy_api_cases()) { fputs("live-redraw: text copy API cases failed\n", stderr); return 1; }
 #endif
 #if defined(__APPLE__)
     if (!clipboard_roundtrip("http://example.onion/board/apps/v1") ||
-        !paste_probe_run("keep", true, "keephttp://example.onion/board/apps/v1")) return 1;
+        !paste_probe_run("keep", true, "keephttp://example.onion/board/apps/v1")) { fputs("live-redraw: link copy or paste failed\n", stderr); return 1; }
     char full[ZCL_PRESENT_WINDOW_FORM_VALUE_MAX + 1u];
     memset(full, 'x', sizeof(full) - 1); full[sizeof(full) - 1] = 0;
-    if (!paste_probe_run(full, false, full)) return 1;
+    if (!paste_probe_run(full, false, full)) { fputs("live-redraw: full paste refusal failed\n", stderr); return 1; }
 #endif
 #if defined(__linux__)
-    if (!linux_clipboard_cases(argv[0])) return 1;
+    if (!linux_clipboard_cases(argv[0])) { fputs("live-redraw: Linux clipboard cases failed\n", stderr); return 1; }
 #endif
     puts("clipboard: JSON closing byte, empty, UTF8 and maximum text roundtrip exactly");
     puts("live redraw: failure and terminal cancel reject queued confirm; successful redraw proceeds");

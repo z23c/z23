@@ -18,6 +18,9 @@ typedef void (*app_library_adopter)(const struct zcl_command_request *, struct z
 typedef void (*app_library_host)(void *context, const struct app_selection *selection, const char *exe,
     app_confirm_presenter notice, struct zcl_command_reply *reply);
 #if defined(ZCL_TESTING)
+bool zcl_test_app_library_help_present(const struct zcl_present_model_v1 *model, const char *text,
+    struct zcl_present_window_event_v1 *event, app_confirm_presenter presenter, void *context,
+    bool (*copy)(const char *, void *), char *why, size_t cap);
 void zcl_test_app_library_create(const struct app_launch_env *env, const char *datadir,
     struct zcl_command_reply *reply, app_library_presenter presenter, app_confirm_presenter notice,
     void *context, app_library_adopter adopter, size_t data_cap);

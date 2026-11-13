@@ -629,7 +629,7 @@ static const char *present_pages_open(struct present_pages_run *run)
                                  run->action_count, run->focused_control,
                                  run->form, run->canvas, run->hover,
                                  run->hover_index, run->required_invalid)) {
-        RGFW_window_close(run->window);
+        present_live_window_close(run->window);
         return "native bitmap surface creation failed";
     }
 
@@ -1177,11 +1177,12 @@ static void present_pages_number_keys(struct present_pages_run *run,
 
 /* Synchronous UI-thread copy. Availability and Stop are serialized by the
  * trusted live owner; this function confirms the platform clipboard result. */
-bool zcl_present_window_copy_ascii_v1(const char *text)
+bool zcl_present_window_copy_text_v1(const char *text)
 {
 #if defined(__APPLE__) || (defined(__linux__) && defined(RGFW_X11))
     if (!text || !RGFW_getInfo() || !RGFW_getInfo()->root) return false;
-    size_t n = 0; if (!present_copy_ascii_length(text, &n)) return false;
+    size_t n = strnlen(text, ZCL_PRESENT_COPY_TEXT_MAX + 1u);
+    if (n > ZCL_PRESENT_COPY_TEXT_MAX) return false;
 #if defined(__linux__)
 #if defined(RGFW_WAYLAND)
     if (RGFW_usingWayland()) return false;
@@ -1202,11 +1203,7 @@ bool zcl_present_window_copy_ascii_v1(const char *text)
 #endif
 }
 
-#if defined(ZCL_TESTING)
-static bool present_test_copy_matches;
-bool zcl_present_test_copy_matches(void);
-bool zcl_present_test_copy_matches(void) { return present_test_copy_matches; }
-#endif
+
 static void present_pages_plain_key(struct present_pages_run *run,
     const RGFW_event *event)
 {
@@ -1356,7 +1353,7 @@ static bool present_run_pages_actions(
     present_pages_loop(&run);
     RGFW_surface_free(run.surface);
     free(run.scaled_pixels);
-    RGFW_window_close(run.window);
+    present_live_window_close(run.window);
 #if defined(ZCL_TESTING)
     present_test_final_event = *result;
 #endif

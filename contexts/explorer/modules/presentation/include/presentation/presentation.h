@@ -193,6 +193,13 @@ bool zcl_present_window_run_pages_hover_copy_v1(
     const struct zcl_present_window_copy_v1 *copy,
     uint32_t initial_page, char *error, size_t error_cap);
 
+/* Copy a NUL-terminated bounded text byte string synchronously from the UI
+ * thread while a presentation window is active. Returns true only after a
+ * platform clipboard ownership/content check. X11 selection ownership lasts
+ * only while the window stays open. Unsupported backends refuse. This does
+ * not validate UTF-8; the platform must preserve the supplied bytes. */
+bool zcl_present_window_copy_text_v1(const char *text);
+
 /* Copy a nonempty bounded printable-ASCII string synchronously from the UI
  * thread while a presentation window is active. Returns true only after a
  * platform clipboard ownership/content check. X11 selection ownership lasts
