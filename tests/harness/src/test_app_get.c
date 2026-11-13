@@ -157,6 +157,7 @@ static bool tag_require_fetch_progress;
 static atomic_bool tag_fetch_progress_seen;
 static atomic_bool tag_fetch_progress_release;
 static atomic_bool tag_fetch_progress_entered, tag_fetch_progress_timeout;
+static atomic_bool tag_fetch_progress_skip_once, tag_fetch_progress_skipped;
 static int g_tag_rpc_mode;
 static bool tag_capture_signed_post(struct zcl_command_reply *out);
 
@@ -508,6 +509,10 @@ static bool tag_post_capture(const struct json_value *in,
 static void tag_wait_fetch_progress(void)
 {
     if (tag_require_fetch_progress) {
+        if (atomic_exchange(&tag_fetch_progress_skip_once, false)) {
+            atomic_store(&tag_fetch_progress_skipped, true);
+            return;
+        }
         atomic_store(&tag_fetch_progress_entered, true);
         int64_t end = platform_time_monotonic_ms() + 30000;
         while (!atomic_load(&tag_fetch_progress_release) && platform_time_monotonic_ms() < end)
@@ -5326,16 +5331,21 @@ static int tag_door_confirm_cancel(struct tag_world *w)
         ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
         const char *words[5] = {"z23", "app", "get", w->name, "--yes"};
         d.fetch_close = true;
-        /* No require handshake here: the door's plan half runs an
-         * unconfirmed plain fetch that would block on it. The seen flag
-         * still proves the confirmed half showed the download window. */
+        /* Let the plan fetch pass, then hold the confirmed fetch until
+         * the presenter observes it and sends Close. */
         atomic_store(&tag_fetch_progress_seen, false);
+        atomic_store(&tag_fetch_progress_entered, false);
+        atomic_store(&tag_fetch_progress_timeout, false);
         atomic_store(&tag_fetch_progress_release, false);
-        zcl_test_app_get_confirm_presenter(tag_confirm_progress_presenter, &d);
+        atomic_store(&tag_fetch_progress_skip_once, true);
+        atomic_store(&tag_fetch_progress_skipped, false);
+        int fetches = g_tag.fetches;
         FILE *out = tmpfile(); ASSERT(out != NULL);
         int saved = dup(STDOUT_FILENO), rc = -1;
         ASSERT(saved >= 0 && fflush(stdout) == 0 &&
                dup2(fileno(out), STDOUT_FILENO) >= 0);
+        tag_require_fetch_progress = true;
+        zcl_test_app_get_confirm_presenter(tag_confirm_progress_presenter, &d);
         bool handled = zcl_app_front_door_try(asf_spec("app.get"), words, 5, 3,
                                               w->j.b_datadir, &rc);
         (void)fflush(stdout);
@@ -5346,8 +5356,14 @@ static int tag_door_confirm_cancel(struct tag_world *w)
         text[n] = '\0';
         fclose(out);
         zcl_test_app_get_confirm_presenter(NULL, NULL);
+        tag_require_fetch_progress = false;
         atomic_store(&tag_fetch_progress_release, true);
         ASSERT(handled && restored);
+        ASSERT(atomic_load(&tag_fetch_progress_skipped));
+        ASSERT(!atomic_load(&tag_fetch_progress_skip_once));
+        ASSERT(atomic_load(&tag_fetch_progress_entered));
+        ASSERT(!atomic_load(&tag_fetch_progress_timeout));
+        ASSERT_EQ(g_tag.fetches, fetches + 2);
         ASSERT(atomic_load(&tag_fetch_progress_seen));
         ASSERT_EQ(rc, 1);
         ASSERT(strstr(text, "download window closed") != NULL);
@@ -5356,6 +5372,11 @@ static int tag_door_confirm_cancel(struct tag_world *w)
         ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
         PASS();
     } _test_next:;
+    zcl_test_app_get_confirm_presenter(NULL, NULL);
+    tag_require_fetch_progress = false;
+    atomic_store(&tag_fetch_progress_skip_once, false);
+    atomic_store(&tag_fetch_progress_skipped, false);
+    atomic_store(&tag_fetch_progress_release, true);
     return failures;
 }
 static int tag_b_journeys(struct tag_world *w)
