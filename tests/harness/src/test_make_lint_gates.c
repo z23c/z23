@@ -2060,16 +2060,21 @@ static int t_registry_query_scope(void)
     static const char query_profiles[] =
         "for goal in help print-CFLAGS; do make_probe -n VENDOR_LIBS= ZCL_TOR=stub \"$goal\" > \"$work/pure-$goal\" 2>&1 || fail \"$goal-run\"; grep -Fx 'EPOCH=[]' \"$work/pure-$goal\" >/dev/null && grep -Fx 'DEP=[]' \"$work/pure-$goal\" >/dev/null || fail \"$goal-profile\"; done\n"
         "for goals in 'contexts/explorer/views/include/views/site_css.h print-node-c23-srcs' 'print-game-closure contexts/explorer/views/include/views/site_css.h'; do make_probe -n VENDOR_LIBS= ZCL_TOR=stub $goals > \"$work/pure-header\" 2>&1 || fail pure-header; grep -Fx 'EPOCH=[]' \"$work/pure-header\" >/dev/null && grep -Fx 'DEP=[]' \"$work/pure-header\" >/dev/null || fail pure-header-profile; done\n";
+    static const char x11_profiles[] =
+        "for goal in zcl-x11-baseline zcl-x11-cover; do make_probe -n -o \"$goal\" VENDOR_LIBS= ZCL_TOR=stub \"$goal\" > \"$work/x11\" 2>&1 || fail x11-run; grep -Fx 'EPOCH=[]' \"$work/x11\" >/dev/null && grep -Fx 'DEP=[]' \"$work/x11\" >/dev/null || fail x11-profile; done\n"
+        "for goals in 'zcl-x11-baseline z23' 'zcl-x11-cover fixture-unknown' 'zcl-x11-baseline contexts/explorer/views/include/views/site_css.h' 'zcl-x11-cover zcl-x11-cover' 'zcl-x11-baseline zcl-x11-cover'; do make_probe -n -o zcl-x11-baseline -o zcl-x11-cover VENDOR_LIBS= ZCL_TOR=stub ZCL_X11_PROBE_ONLY=1 $goals > \"$work/x11-mixed\" 2>&1 || fail x11-mixed-run; grep -Fx 'EPOCH=[build-only dev dev-asan dev-tsan test-fast test-strict test-asan test-tsan coverage node-c23]' \"$work/x11-mixed\" >/dev/null && grep -Fx 'DEP=[build-only dev test-fast test-strict coverage fuzz node-c23]' \"$work/x11-mixed\" >/dev/null || fail x11-mixed-profile; done\n"
+        "if make_probe -n -o zcl-x11-cover VENDOR_LIBS= ZCL_TOR=stub CC=/bin/false zcl-x11-cover > \"$work/x11-compiler\" 2>&1; then fail x11-compiler-accepted; fi; grep -F 'C23 toolchain check failed' \"$work/x11-compiler\" >/dev/null || fail x11-compiler-reason\n";
     static const char bootstrap[] =
         "make_probe -n VENDOR_LIBS=/missing/z23-vendor \"VENDOR_BOOTSTRAP_MK=$work/vendor.mk\" ZCL_TOR=stub print-zcode-monolith-lib-sources >\"$work/vendor-query\" 2>&1 || fail vendor-query\n"
         "for goal in z23 fixture-unknown; do if make_probe -n VENDOR_LIBS=/missing/z23-vendor \"VENDOR_BOOTSTRAP_MK=$work/vendor.mk\" ZCL_TOR=stub print-zcode-monolith-lib-sources \"$goal\" >\"$work/vendor-mixed\" 2>&1; then fail vendor-mixed-accepted; fi; grep -F VENDOR_SENTINEL \"$work/vendor-mixed\" >/dev/null || fail vendor-mixed-reason; done\n"
         "make_probe -n VENDOR_LIBS= ZCL_TOR=full 'ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)' print-zcode-monolith-lib-sources >\"$work/tor-query\" 2>&1 || fail tor-query\n"
         "for goal in z23 fixture-unknown; do if make_probe -n VENDOR_LIBS= ZCL_TOR=full 'ZCL_TOR_READY_PROBE=$(error TOR_SENTINEL)' print-zcode-monolith-lib-sources \"$goal\" >\"$work/tor-mixed\" 2>&1; then fail tor-mixed-accepted; fi; grep -F TOR_SENTINEL \"$work/tor-mixed\" >/dev/null || fail tor-mixed-reason; done\n";
-    char script[sizeof(setup) + sizeof(checks) + sizeof(query_profiles) + sizeof(bootstrap) - 3];
+    char script[sizeof(setup) + sizeof(checks) + sizeof(query_profiles) + sizeof(x11_profiles) + sizeof(bootstrap) - 4];
     memcpy(script, setup, sizeof(setup) - 1);
     memcpy(script + sizeof(setup) - 1, checks, sizeof(checks) - 1);
     memcpy(script + sizeof(setup) + sizeof(checks) - 2, query_profiles, sizeof(query_profiles) - 1);
-    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(query_profiles) - 3, bootstrap, sizeof(bootstrap));
+    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(query_profiles) - 3, x11_profiles, sizeof(x11_profiles) - 1);
+    memcpy(script + sizeof(setup) + sizeof(checks) + sizeof(query_profiles) + sizeof(x11_profiles) - 4, bootstrap, sizeof(bootstrap));
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "registry_query", "scope");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);

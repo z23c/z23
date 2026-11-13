@@ -615,6 +615,11 @@ ZCL_PROOF_BUNDLE_NODE_ONLY := $(if $(filter dev-proof-bundle-prefork,$(ZCL_PROFI
 # These release harnesses compile declared sources directly. Only their exact
 # raw goal set may omit object profiles; retain source, vendor and Tor setup.
 ZCL_RELEASE_HARNESS_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out z23-bootstrap install-selftest,$(MAKECMDGOALS))),,1),)
+# These private X11 probes compile temporary files with the canonical UI
+# recipe flags, without profile objects. Keep source capture, toolchain and
+# vendor/view preparation. Raw mixed or repeated goals stay conservative;
+# inherited command-line variables cannot manufacture this classification.
+override ZCL_X11_PROBE_ONLY := $(if $(filter 1,$(words $(MAKECMDGOALS))),$(if $(filter zcl-x11-baseline zcl-x11-cover,$(MAKECMDGOALS)),1,))
 # With no explicit goal GNU Make executes `.DEFAULT_GOAL := z23`; selecting
 # every compiler profile here did not make that node build safer.  It only
 # fingerprinted nine toolchain/flag combinations that the default recipe can
@@ -636,6 +641,8 @@ ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_RELEASE_HARNESS_ONLY),1)
+ZCL_EPOCH_PROFILES :=
+else ifeq ($(ZCL_X11_PROBE_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_PROOF_BUNDLE_NODE_ONLY),1)
 ZCL_EPOCH_PROFILES := dev test-fast node-c23
@@ -2323,6 +2330,8 @@ ZCL_DEPFILE_PROFILES :=
 else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(ZCL_RELEASE_HARNESS_ONLY),1)
+ZCL_DEPFILE_PROFILES :=
+else ifeq ($(ZCL_X11_PROBE_ONLY),1)
 ZCL_DEPFILE_PROFILES :=
 else ifeq ($(ZCL_PROOF_BUNDLE_NODE_ONLY),1)
 ZCL_DEPFILE_PROFILES := dev test-fast node-c23
