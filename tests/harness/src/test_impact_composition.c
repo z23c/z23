@@ -5284,6 +5284,66 @@ static int test_ic_proof_base_probe_cancels_superseded_worker(void)
 }
 #endif
 
+static int test_ic_proof_fractional_banners(void)
+{
+    int failures = 0;
+    TEST("proof budget: fractional banner durations are exact and bounded") {
+        static const struct { const char *value; bool ok; int64_t ms; } cases[] = {
+            {"0.423s", true, 423}, {"1.2s", true, 1200},
+            {"1.02s", true, 1020}, {"12s", true, 12000},
+            {"9223372036854775.807s", true, INT64_MAX},
+            {"9223372036854775.808s", false, 0},
+            {"9223372036854776s", false, 0},
+            {"unknown", false, 0}, {"1.s", false, 0},
+            {"1.0000s", false, 0}, {"1.23sx", false, 0},
+            {"-1s", false, 0}, {"+1s", false, 0},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char line[256], group[PROOF_TIMING_KEY_MAX];
+            int64_t ms = -1;
+            ASSERT(snprintf(line, sizeof(line),
+                "==================== alpha (PASS, %s) ====================\n",
+                cases[i].value) > 0);
+            bool ok = zcl_dev_proof_timing_parse_group_line(line, group, sizeof(group), &ms);
+            ASSERT(ok == cases[i].ok);
+            if (ok) ASSERT(ms == cases[i].ms && strcmp(group, "alpha") == 0);
+        }
+        char state[4096], log[4096];
+        ic_budget_fixture("fractional", state);
+        snprintf(log, sizeof(log), "%s/test.log", state);
+        ASSERT(ic_write(state, "test.log",
+            "==================== alpha (PASS, 0.423s) ====================\n"
+            "==================== beta (PASS, unknown) ====================\n"));
+        ASSERT(zcl_dev_proof_timing_ingest_test_log(state, log) == 1);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "alpha", 1) == 60846);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "beta", 77) == 77);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_timing_saturates(void)
+{
+    int failures = 0;
+    TEST("proof budget: huge retained timings saturate before the existing ceiling") {
+        char state[4096];
+        const int64_t edge = (INT64_MAX - 60000) / 2;
+        ic_budget_fixture("saturating", state);
+        ASSERT(zcl_dev_proof_timing_note(state, "edge", edge));
+        ASSERT(zcl_dev_proof_timing_note(state, "overflow", edge + 1));
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "edge", 1) == edge * 2 + 60000);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "overflow", 1) == INT64_MAX);
+        struct zcl_dev_proof_budget one = zcl_dev_proof_test_budget(state, "overflow", 1);
+        struct zcl_dev_proof_budget two = zcl_dev_proof_test_budget(state, "edge,overflow", 2);
+        struct zcl_dev_proof_budget step = zcl_dev_proof_step_budget(state, "overflow", 1);
+        ASSERT(one.budget_ms == one.ceiling_ms);
+        ASSERT(two.budget_ms == two.ceiling_ms);
+        ASSERT(step.budget_ms == step.ceiling_ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_reads_the_harness_banners(void)
 {
     int failures = 0;
@@ -17488,6 +17548,8 @@ int test_impact_composition(void)
     failures += test_ic_proof_ceiling_speaks_before_silence();
     failures += test_ic_proof_interruption_is_not_a_verdict();
     failures += test_ic_proof_reads_the_harness_banners();
+    failures += test_ic_proof_fractional_banners();
+    failures += test_ic_proof_timing_saturates();
 #if !defined(_WIN32)
     failures += test_ic_proof_run_watched_kills_only_the_silent();
     failures += test_ic_proof_budget_cancellation();

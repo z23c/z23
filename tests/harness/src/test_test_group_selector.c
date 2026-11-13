@@ -4,6 +4,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "test/test_core.h"
+#include "test/runner_timing.h"
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
 #include "test/test_verdict_json.h"
@@ -284,6 +285,24 @@ static int capture_command_ends(const char *command, char *head,
     if (status < 0 || !WIFEXITED(status))
         return -1;
     return WEXITSTATUS(status);
+}
+
+static int test_runner_timing_arithmetic(void)
+{
+    int failures = 0;
+    TEST("runner: monotonic child duration checks subsecond and invalid clocks") {
+        struct runner_timing t = {.start_us = 1000000};
+        runner_timing_finish(&t, 1423000); ASSERT(t.valid && t.elapsed_ms == 423);
+        runner_timing_finish(&t, 1000999); ASSERT(t.valid && t.elapsed_ms == 0);
+        runner_timing_finish(&t, 1000000); ASSERT(t.valid && t.elapsed_ms == 0);
+        runner_timing_finish(&t, 999999); ASSERT(!t.valid);
+        t.start_us = 0; runner_timing_finish(&t, 5); ASSERT(!t.valid);
+        t.start_us = -1; runner_timing_finish(&t, INT64_MAX); ASSERT(!t.valid);
+        t.start_us = 1; runner_timing_finish(&t, INT64_MAX);
+        ASSERT(t.valid && t.elapsed_ms == (INT64_MAX - 1) / 1000);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_selector_predicate(void)
@@ -1678,6 +1697,10 @@ static int tgs_runner_positive_timing(void)
     ASSERT(strcmp(json_get_str(json_get(timing_row, "name")),
                   "test_hex_codec") == 0);
     ASSERT(json_get_bool(json_get(timing_row, "measured")));
+    ASSERT(json_get_bool(json_get(timing_row, "timing_valid")));
+    const struct json_value *elapsed = json_get(timing_row, "ms");
+    ASSERT(elapsed && elapsed->type == JSON_INT && json_get_int(elapsed) >= 0);
+
     const struct json_value *key_valid = json_get(timing_row, "key_valid");
     ASSERT(key_valid && key_valid->type == JSON_BOOL &&
            !json_get_bool(key_valid));
@@ -2554,6 +2577,63 @@ int test_selector_exclusive_fixture(void)
     return 0;
 }
 
+static bool tgs_cached_timings(void)
+{
+    struct json_value timing = {0};
+    if (!selector_timing_read(&timing)) return false;
+    const struct json_value *rows = json_get(&timing, "groups");
+    bool ok = rows && rows->type == JSON_ARR && json_size(rows) == 2;
+    for (size_t i = 0; ok && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i), *ms = json_get(row, "ms");
+        ok = json_get_bool(json_get(row, "cached")) &&
+             !json_get_bool(json_get(row, "measured")) &&
+             !json_get_bool(json_get(row, "timing_valid")) && ms && json_is_null(ms);
+    }
+    json_free(&timing);
+    return ok;
+}
+
+static bool tgs_retry_timing(void)
+{
+    struct json_value timing = {0};
+    if (!selector_timing_read(&timing)) return false;
+    const struct json_value *rows = json_get(&timing, "groups");
+    const struct json_value *row = rows ? json_at(rows, 0) : NULL;
+    const struct json_value *ms = row ? json_get(row, "ms") : NULL;
+    bool ok = rows && json_size(rows) == 1 && ms && ms->type == JSON_INT &&
+        json_get_int(ms) >= 0 && json_get_bool(json_get(row, "measured")) &&
+        json_get_bool(json_get(row, "timing_valid")) && !json_get_bool(json_get(row, "cached"));
+    json_free(&timing);
+    return ok;
+}
+
+static bool tgs_measured_timing(const struct json_value *row)
+{
+    const struct json_value *ms = json_get(row, "ms");
+    return ms && ms->type == JSON_INT && json_get_int(ms) >= 0 &&
+        json_get_bool(json_get(row, "measured")) &&
+        json_get_bool(json_get(row, "timing_valid")) &&
+        !json_get_bool(json_get(row, "cached"));
+}
+
+static bool tgs_both_phase_timings(void)
+{
+    struct json_value timing = {0};
+    if (!selector_timing_read(&timing)) return false;
+    const struct json_value *rows = json_get(&timing, "groups");
+    bool pool = false, exclusive = false, ok = rows && rows->type == JSON_ARR;
+    for (size_t i = 0; ok && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *name = json_get_str(json_get(row, "name"));
+        if (!name || !tgs_measured_timing(row)) { ok = false; break; }
+        if (strcmp(name, "test_hex_codec") == 0) pool = true;
+        else if (strcmp(name, "test_selector_exclusive_fixture") == 0) exclusive = true;
+        else ok = false;
+    }
+    json_free(&timing);
+    return ok && pool && exclusive;
+}
+
 static int test_failure_priority_phase_barrier(void)
 {
     int failures = 0;
@@ -2576,6 +2656,7 @@ static int test_failure_priority_phase_barrier(void)
         ASSERT(fixture && fixture < done);
         ASSERT(strstr(out, "selector exclusive fixture executed") != NULL);
         ASSERT(tgs_dispatch_pos(out, "test_hex_codec") != SIZE_MAX);
+        ASSERT(tgs_both_phase_timings());
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();
     } _test_next:;
@@ -2599,6 +2680,7 @@ static int test_failure_priority_cached_groups(void)
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "groups_cached=2") != NULL);
+        ASSERT(tgs_cached_timings());
         ASSERT(tgs_dispatch_pos(out, "test_hex_codec") == SIZE_MAX);
         ASSERT(tgs_dispatch_pos(out, "test_codec_cursor") == SIZE_MAX);
         ASSERT(test_rm_rf_recursive(root) == 0);
@@ -3176,6 +3258,7 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
             "%s --exact=test_hex_codec 2>&1", root, exe, mode);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         int rc = capture_command(command, out, sizeof(out));
+        ASSERT(tgs_retry_timing());
         n = snprintf(count_path, sizeof(count_path), "%s/retry-evidence-count", root);
         ASSERT(n > 0 && (size_t)n < sizeof(count_path));
         FILE *f = fopen(count_path, "r");
@@ -4061,6 +4144,7 @@ int test_test_group_selector(void)
         failures += test_cleanup_symlink_boundary(mode);
 #endif
     failures += test_selector_predicate();
+    failures += test_runner_timing_arithmetic();
     failures += test_registry_exact_resolution();
     failures += test_exact_set_diagnostics();
     failures += test_exact_set_mixed();

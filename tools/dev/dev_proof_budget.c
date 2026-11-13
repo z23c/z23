@@ -246,6 +246,7 @@ static int64_t allowance_from_samples(const struct timing_row *row)
     int64_t worst = 0;
     for (size_t i = 0; i < row->count; i++)
         if (row->samples[i] > worst) worst = row->samples[i];
+    if (worst > (INT64_MAX - 60000) / 2) return INT64_MAX;
     return worst * 2 + 60000;
 }
 
@@ -287,19 +288,55 @@ static const char *group_line_seconds_field(const char *status,
     return seconds;
 }
 
-static bool group_line_seconds_value(const char *seconds, const char *close,
-                                     long long *value_out)
+/* Decimal seconds are bounded before multiplication; accept at most three
+ * fractional digits so conversion to milliseconds is exact. */
+static bool group_line_whole(const char **cursor, const char *close,
+                             int64_t *whole)
 {
-    char *end = NULL;
-    errno = 0;
-    long long value = strtoll(seconds, &end, 10);
-    if (errno || end == seconds || value < 0 || end >= close || *end != 's')
-        return false;
-    if (end + 1 != close) return false;
-    *value_out = value;
+    const char *p = *cursor;
+    if (p >= close || *p < '0' || *p > '9') return false;
+    int64_t value = 0;
+    const int64_t limit = INT64_MAX / 1000;
+    while (p < close && *p >= '0' && *p <= '9') {
+        int digit = *p++ - '0';
+        if (value > (limit - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    *cursor = p;
+    *whole = value;
     return true;
 }
-
+static bool group_line_fraction(const char **cursor, const char *close,
+                                int64_t *fraction)
+{
+    const char *p = *cursor;
+    *fraction = 0;
+    if (p >= close || *p != '.') return true;
+    p++;
+    unsigned digits = 0;
+    while (p < close && *p >= '0' && *p <= '9') {
+        if (++digits > 3) return false;
+        *fraction = *fraction * 10 + (*p++ - '0');
+    }
+    if (digits == 0) return false;
+    while (digits++ < 3) *fraction *= 10;
+    *cursor = p;
+    return true;
+}
+static bool group_line_seconds_value(const char *seconds, const char *close,
+                                     int64_t *ms_out)
+{
+    const char *p = seconds;
+    int64_t whole = 0, fraction = 0;
+    if (!group_line_whole(&p, close, &whole) ||
+        !group_line_fraction(&p, close, &fraction) ||
+        p >= close || *p != 's' || p + 1 != close)
+        return false;
+    if (whole == INT64_MAX / 1000 && fraction > INT64_MAX % 1000)
+        return false;
+    *ms_out = whole * 1000 + fraction;
+    return true;
+}
 bool zcl_dev_proof_timing_parse_group_line(const char *line, char *group,
                                            size_t group_size, int64_t *ms)
 {
@@ -318,11 +355,11 @@ bool zcl_dev_proof_timing_parse_group_line(const char *line, char *group,
     if (!close) return false;
     const char *seconds = group_line_seconds_field(status, close);
     if (!seconds) return false;
-    long long value = 0;
+    int64_t value = 0;
     if (!group_line_seconds_value(seconds, close, &value)) return false;
     memcpy(group, name, name_len);
     group[name_len] = '\0';
-    *ms = (int64_t)value * 1000;
+    *ms = value;
     return true;
 }
 
@@ -367,6 +404,13 @@ size_t zcl_dev_proof_timing_ingest_test_log(const char *state_dir,
 
 /* ── Budgets ───────────────────────────────────────────────────────────── */
 
+/* Budget increments are nonnegative; saturation keeps an overflowing
+ * historical total conservative until budget_make applies its ceiling. */
+static int64_t budget_add(int64_t value, int64_t increment)
+{
+    if (value > INT64_MAX - increment) return INT64_MAX;
+    return value + increment;
+}
 struct zcl_dev_proof_budget zcl_dev_proof_test_budget(const char *state_dir,
                                                       const char *groups_csv,
                                                       uint32_t groups)
@@ -390,8 +434,9 @@ struct zcl_dev_proof_budget zcl_dev_proof_test_budget(const char *state_dir,
                 key[len] = '\0';
                 const struct timing_row *row =
                     table ? timing_find(table, key) : NULL;
-                planned += row && row->count ? allowance_from_samples(row)
-                                             : PROOF_TEST_GROUP_DEFAULT_MS;
+                int64_t add = row && row->count ? allowance_from_samples(row)
+                                                 : PROOF_TEST_GROUP_DEFAULT_MS;
+                planned = budget_add(planned, add);
                 counted++;
             }
             if (!end) break;
@@ -401,8 +446,8 @@ struct zcl_dev_proof_budget zcl_dev_proof_test_budget(const char *state_dir,
     free(table);
     /* A selector we could not read is never a reason to shrink the budget. */
     if (counted < groups)
-        planned += (int64_t)(groups - counted) * PROOF_TEST_GROUP_DEFAULT_MS;
-    return zcl_dev_proof_budget_make(planned + PROOF_TEST_FLOOR_MS,
+        planned = budget_add(planned, (int64_t)(groups - counted) * PROOF_TEST_GROUP_DEFAULT_MS);
+    return zcl_dev_proof_budget_make(budget_add(planned, PROOF_TEST_FLOOR_MS),
                                      PROOF_TEST_FLOOR_MS);
 }
 
@@ -412,7 +457,7 @@ struct zcl_dev_proof_budget zcl_dev_proof_step_budget(const char *state_dir,
 {
     int64_t planned =
         zcl_dev_proof_timing_allowance_ms(state_dir, key, fallback_ms);
-    return zcl_dev_proof_budget_make(planned + PROOF_STEP_FLOOR_MS,
+    return zcl_dev_proof_budget_make(budget_add(planned, PROOF_STEP_FLOOR_MS),
                                      PROOF_STEP_FLOOR_MS);
 }
 

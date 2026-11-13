@@ -56,6 +56,7 @@
 #include "session/agent_broker.h"
 #include "devloop_reflex_runner.h"
 #include "test/runner_admission.h"
+#include "test/runner_timing.h"
 #include "test/selection_build_needs.h"
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
@@ -332,7 +333,7 @@ struct group_result {
     int status;          /* -1 if not yet run, else wait-status from waitpid */
     int signaled;        /* 1 if killed by a signal */
     int exit_code;       /* only valid if signaled == 0 */
-    double wall_seconds; /* 0 until measured */
+    struct runner_timing timing; /* precise child duration; validity is explicit */
     time_t start;
     char out_path[128];  /* owned by the slot; copied here on reap */
     int skipped;         /* 1 if selector/params gate excluded it (not run) */
@@ -1906,6 +1907,9 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
     char out_path[128];
     make_tempfile_path(out_path, sizeof(out_path), idx, parent_pid);
     results[idx].start = platform_time_wall_time_t();
+    results[idx].timing = (struct runner_timing){
+        .start_us = platform_time_monotonic_us()
+    };
 
     zcl_child_t child = ZCL_CHILD_NONE;
     if (child_spawn(idx, out_path, activate_proof_contracts, &child) != 0) {
@@ -1931,6 +1935,7 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
         int pr = child_poll(child, &status);
         if (pr == 1) {
             successfully_reaped = true;
+            runner_timing_finish(&results[idx].timing, platform_time_monotonic_us());
             break;
         }
         if (pr < 0) {
@@ -1962,8 +1967,6 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
         results[idx].exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
     memcpy(results[idx].out_path, out_path, sizeof(results[idx].out_path));
-    time_t now = platform_time_wall_time_t();
-    results[idx].wall_seconds = (double)(now - results[idx].start);
     if (successfully_reaped)
         results[idx].measured = 1;
 }
@@ -2019,6 +2022,9 @@ static bool phase_dispatch_ready(const struct phase_run *pr, size_t *next_pos)
                            sizeof(pr->slots[slot].out_path),
                            next_idx, pr->parent_pid);
         pr->results[next_idx].start = platform_time_wall_time_t();
+        pr->results[next_idx].timing = (struct runner_timing){
+            .start_us = platform_time_monotonic_us()
+        };
         if (child_spawn(next_idx, pr->slots[slot].out_path,
                         pr->activate_proof_contracts,
                         &pr->slots[slot].pid) != 0)
@@ -2069,6 +2075,7 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
 {
     size_t idx = pr->slots[slot].group_idx;
     struct group_result *r = &pr->results[idx];
+    runner_timing_finish(&r->timing, platform_time_monotonic_us());
     child_close(pr->slots[slot].pid);
     if (peak_bytes >= (INT64_C(256) << 20))
         printf("test_parallel: peak RSS group=%s %lld MiB\n",
@@ -2086,16 +2093,15 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
     }
     memcpy(r->out_path, pr->slots[slot].out_path,
            sizeof(r->out_path));
-    time_t now = platform_time_wall_time_t();
-    r->wall_seconds = (double)(now - r->start);
     r->measured = 1;
+    char elapsed_label[32];
     if (pr->verbose)
-        printf("[done    ] [%zu] %s (%s, %.0fs)\n",
+        printf("[done    ] [%zu] %s (%s, %s)\n",
                idx, g_groups[idx].name,
                r->wedged ? "WEDGED (no output)" :
                r->signaled ? "SIGNALED" :
                (r->exit_code == 0 ? "PASS" : "FAIL"),
-               r->wall_seconds);
+               runner_timing_label(&r->timing, elapsed_label));
     pr->slots[slot].pid = ZCL_CHILD_NONE;
 }
 
@@ -2446,15 +2452,14 @@ static void timing_sort_slowest_first(size_t *order,
 {
     for (size_t i = 0; i < group_count; i++)
         order[i] = i;
-    /* Insertion sort by wall_seconds descending; skipped groups (never
-     * measured) sort last. */
+    /* Valid durations sort slowest first; unknowns sort last, ties stay stable. */
     for (size_t a = 1; a < group_count; a++) {
         size_t key = order[a];
-        double key_w = results[key].skipped ? -1.0 : results[key].wall_seconds;
+        int64_t key_w = results[key].timing.valid ? results[key].timing.elapsed_ms : -1;
         size_t b = a;
         while (b > 0) {
             size_t prev = order[b - 1];
-            double prev_w = results[prev].skipped ? -1.0 : results[prev].wall_seconds;
+            int64_t prev_w = results[prev].timing.valid ? results[prev].timing.elapsed_ms : -1;
             if (prev_w >= key_w) break;
             order[b] = order[b - 1];
             b--;
@@ -2539,18 +2544,20 @@ static void timing_write_group_row(FILE *fp, const struct group_result *r,
                                    const struct testcache_probe *probe,
                                    bool activate_proof_contracts)
 {
-    long long ms = (long long)(r->wall_seconds * 1000.0);
     int rc = r->signaled ? -r->exit_code : r->exit_code;
     bool key_valid = !g_hotswap_module_active && probe && probe->key_valid;
     bool measured = r->measured != 0;
     enum zcl_test_proof_contract contract = activate_proof_contracts
         ? zcl_test_group_proof_contract(name)
         : ZCL_TEST_PROOF_NONE;
+    fprintf(fp, "    {\"name\":\"%s\",\"ms\":", name);
+    if (r->timing.valid) fprintf(fp, "%lld", (long long)r->timing.elapsed_ms);
+    else fputs("null", fp);
     fprintf(fp,
-            "    {\"name\":\"%s\",\"ms\":%lld,\"rc\":%d,"
+            ",\"timing_valid\":%s,\"rc\":%d,"
             "\"signaled\":%s,\"cached\":%s,\"measured\":%s,"
             "\"key_valid\":%s,\"input_key\":",
-            name, ms, rc,
+            r->timing.valid ? "true" : "false", rc,
             r->signaled ? "true" : "false",
             r->cached ? "true" : "false",
             measured ? "true" : "false",
@@ -3125,6 +3132,8 @@ static const char *observation_ineligible_reason(
 {
     if (!result->measured || result->cached)
         return "observation_not_independently_executed";
+    if (!result->timing.valid)
+        return "observation_timing_unavailable";
     if (result->skip_markers || result->env_unobserved ||
         result->load_flaky || result->load_unobserved || result->wedged)
         return "observation_execution_incomplete";
@@ -3142,8 +3151,7 @@ static bool emit_one_group_observation(const char *name,
             ? ZCL_DEV_VERDICT_LEAF_PASS : ZCL_DEV_VERDICT_LEAF_FAIL;
     uint8_t root[ZCL_DEV_PROOF_ROOT_BYTES];
     char why[96] = {0};
-    uint64_t elapsed_ms = result->wall_seconds > 0
-        ? (uint64_t)(result->wall_seconds * 1000.0) : 0;
+    uint64_t elapsed_ms = (uint64_t)result->timing.elapsed_ms;
     if (!zcl_dev_observation_record(store_root, probe->key, name,
             verdict, elapsed_ms, root, why, sizeof(why))) {
         printf("OBSERVATION REFUSE group=%s reason=%s\n", name,
@@ -3185,7 +3193,7 @@ static bool observation_known_denylist_omission(const char *name,
 {
     return probe && testcache_group_is_denylisted(name) &&
            probe->code == TESTCACHE_R_EXTERNAL_INPUT && !probe->key_valid &&
-           result->measured && !result->cached && !result->skip_markers &&
+           result->measured && result->timing.valid && !result->cached && !result->skip_markers &&
            !result->env_unobserved && !result->load_flaky &&
            !result->load_unobserved && !result->wedged;
 }
@@ -3396,12 +3404,13 @@ static void print_group_banner(const char *name,
                                const struct group_result *r, bool pass,
                                const char *skip_note)
 {
-    printf("\n==================== %s (%s%s, %.0fs) ====================\n",
+    char elapsed_label[32];
+    printf("\n==================== %s (%s%s, %s) ====================\n",
            name,
            r->wedged ? "WEDGED-NO-OUTPUT" :
            r->signaled ? "SIGNALED" :
            (pass ? "PASS" : "FAIL"),
-           skip_note, r->wall_seconds);
+           skip_note, runner_timing_label(&r->timing, elapsed_label));
 }
 
 static void tally_group(struct group_result *r, const char *name,
