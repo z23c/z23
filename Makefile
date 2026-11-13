@@ -9064,7 +9064,7 @@ $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest: $(CLAN
 	rm -f $$probe $$probe.c; \
 	echo "clang-manifest: clang_getTypePrettyPrinted exported: $$pretty"; \
 	echo "$(CC) -DCM_TYPE_PRETTY_PRINTED=$$pretty ... -o $@"; \
-	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O3 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) -DCM_TYPE_PRETTY_PRINTED=$$pretty \
 	    $(CLANG_MANIFEST_RESOURCE_CPPFLAG) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
