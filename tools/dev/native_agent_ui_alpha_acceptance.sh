@@ -6,7 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-NODE_BIN="$REPO_ROOT/build/bin/zclassic23"
+# The host execs os_proc_exe_path(), which resolves the public binary alias.
+NODE_BIN="$(readlink -f "$REPO_ROOT/build/bin/zclassic23")"
 DRIVER_BIN="$REPO_ROOT/build/bin/native_ui_driver"
 RUN_ROOT="$(mktemp -d /tmp/zcl23-native-ui-alpha.XXXXXX)"
 RUNTIME_DIR="$RUN_ROOT/runtime"
