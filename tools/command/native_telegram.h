@@ -19,6 +19,10 @@ struct zcl_command_reply;
 /* Largest text one send accepts: four full chunks fit the input frame. */
 #define TG_TEXT_MAX 12000u
 #define TG_KEY_MAX 64u
+#define TG_PENDING_MAX 32768u
+#define TG_INBOX_ENCODED_TEXT_MAX 7000u
+#define TG_INBOX_TEXT_MAX 3000u
+#define TG_INBOX_USERNAME_MAX 128u
 
 struct tg_config {
     char token[TG_TOKEN_MAX];
@@ -56,6 +60,21 @@ bool tg_state_dir(char *out, size_t cap);
 bool tg_atomic_write_private(const char *path, const char *data, size_t len);
 bool tg_offset_load(const char *dir, const char *token, int64_t *offset);
 bool tg_offset_store(const char *dir, const char *token, int64_t offset);
+/* Private reliable inbox batch; 1 read, 0 absent, -1 unavailable. */
+int tg_pending_read(const char *dir, const char *token, char *out, size_t cap);
+bool tg_pending_write(const char *dir, const char *token, const char *data, size_t len);
+bool tg_pending_delete(const char *dir, const char *token);
+bool tg_state_sync(const char *dir);
+bool tg_batch_save(const struct tg_config *cfg, const char *dir, int64_t group,
+                   const struct json_value *data, char receipt[65]);
+bool tg_batch_validate(const struct tg_config *cfg, int64_t group,
+                       const struct json_value *record, int64_t *next);
+size_t tg_encoded_cut(const char *text, size_t limit);
+bool tg_inbox_options_valid(const struct tg_config *cfg, const struct json_value *r,
+                            const struct json_value *g, const struct json_value *a,
+                            bool reliable, int64_t group, const char *ack);
+bool tg_inbox_item(struct json_value *item, int64_t update_id, const struct json_value *msg,
+                   size_t *bytes, bool reliable);
 /* The request hash binds a key to one chat and text; hash is 32 hex characters. */
 #define TG_HASH_HEX 33
 void tg_request_hash(int64_t chat_id, const char *text, char hash[TG_HASH_HEX]);

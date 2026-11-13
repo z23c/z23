@@ -2,6 +2,7 @@
  * Purpose: Telegram credentials file, outbound text guard and message chunking. */
 #include "command/native_telegram.h"
 #include "base/cleanse.h"
+#include "base/hex.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -366,4 +367,90 @@ size_t tg_chunk_len(const char *text, size_t len)
         used += n;
     }
     return used;
+}
+bool tg_inbox_options_valid(const struct tg_config *cfg,
+                                   const struct json_value *r, const struct json_value *g,
+                                   const struct json_value *a, bool reliable,
+                                   int64_t group, const char *ack)
+{
+    uint8_t digest[32];
+    if (r && r->type != JSON_BOOL) return false;
+    if (g && (g->type != JSON_INT || group >= 0 || !reliable || !tg_allowed(cfg, group)))
+        return false;
+    return !a || (a->type == JSON_STR && reliable &&
+                  zcl_hex_decode_lower(ack, digest, sizeof digest));
+}
+/* Leave room for envelope and metadata even when JSON escapes expand text. */
+size_t tg_encoded_cut(const char *text, size_t limit)
+{
+    size_t i = 0, encoded = 0;
+    while (i < limit) {
+        unsigned char c = (unsigned char)text[i];
+        size_t cost = c < 0x20 ? 6u : (c == '"' || c == '\\' ? 2u : 1u);
+        if (cost > TG_INBOX_ENCODED_TEXT_MAX - encoded) break;
+        encoded += cost;
+        i++;
+    }
+    while (i > 0 && ((unsigned char)text[i] & 0xc0) == 0x80) i--;
+    return i;
+}
+
+static size_t tg_text_cut(const char *text, size_t len)
+{
+    if (len <= TG_INBOX_TEXT_MAX)
+        return len;
+    size_t cut = TG_INBOX_TEXT_MAX;
+    while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80)
+        cut--;
+    return cut;
+}
+
+static bool tg_item_identity(struct json_value *item, int64_t update_id,
+                             const struct json_value *msg)
+{
+    const struct json_value *from = json_get(msg, "from");
+    const struct json_value *chat = json_get(msg, "chat");
+    return json_push_kv_int(item, "update_id", update_id) &&
+           json_push_kv_int(item, "chat_id", json_get_int(json_get(chat, "id"))) &&
+           json_push_kv_str(item, "chat_type", json_get_str(json_get(chat, "type"))) &&
+           json_push_kv_int(item, "message_id", json_get_int(json_get(msg, "message_id"))) &&
+           json_push_kv_int(item, "from_id", json_get_int(json_get(from, "id")));
+}
+
+static size_t tg_username_cut(const char *username, size_t len)
+{
+    if (len <= TG_INBOX_USERNAME_MAX) return len;
+    size_t cut = TG_INBOX_USERNAME_MAX;
+    while (cut > 0 && ((unsigned char)username[cut] & 0xc0) == 0x80) cut--;
+    return cut;
+}
+
+bool tg_inbox_item(struct json_value *item, int64_t update_id, const struct json_value *msg,
+                          size_t *bytes, bool reliable)
+{
+    const struct json_value *from = json_get(msg, "from");
+    bool plain = json_get(msg, "text") != NULL;
+    const char *text = json_get_str(json_get(msg, plain ? "text" : "caption"));
+    char shown[TG_INBOX_TEXT_MAX + 1];
+    size_t len = strlen(text), cut = tg_text_cut(text, len);
+    if (reliable) cut = tg_encoded_cut(text, cut);
+    const char *username = json_get_str(json_get(from, "username"));
+    char shown_user[TG_INBOX_USERNAME_MAX + 1];
+    size_t user_len = strlen(username), user_cut = user_len;
+    if (reliable) user_cut = tg_username_cut(username, user_len);
+    if (reliable) {
+        memcpy(shown_user, username, user_cut);
+        shown_user[user_cut] = 0;
+        username = shown_user;
+    }
+    memcpy(shown, text, cut);
+    shown[cut] = 0;
+    *bytes += cut + 160;
+    json_set_object(item);
+    return tg_item_identity(item, update_id, msg) &&
+           json_push_kv_str(item, "username", username) &&
+           (!reliable || json_push_kv_bool(item, "username_truncated", user_cut < user_len)) &&
+           json_push_kv_int(item, "date", json_get_int(json_get(msg, "date"))) &&
+           json_push_kv_str(item, "kind", plain ? "text" : "other") &&
+           json_push_kv_str(item, "text", shown) && json_push_kv_bool(item, "truncated", cut < len);
 }

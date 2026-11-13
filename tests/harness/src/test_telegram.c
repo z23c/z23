@@ -16,6 +16,7 @@
 #include "domain/encoding/base58.h"
 #include "domain/wallet/mnemonic.h"
 #include <stdio.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -367,6 +368,385 @@ static int tgt_case_5(void)
     } TEST_END
     return failures;
 }
+
+static const char tgt_reliable_updates[] =
+    "{\"ok\":true,\"result\":["
+    "{\"update_id\":20,\"message\":{\"message_id\":7,\"date\":10,\"text\":\"group human\","
+      "\"from\":{\"id\":555,\"is_bot\":false},\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}},"
+    "{\"update_id\":21,\"message\":{\"message_id\":8,\"date\":11,\"text\":\"bot\","
+      "\"from\":{\"id\":556,\"is_bot\":true},\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}},"
+    "{\"update_id\":22,\"message\":{\"message_id\":9,\"date\":12,\"text\":\"anonymous\","
+      "\"sender_chat\":{\"id\":-100123},\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}},"
+    "{\"update_id\":23,\"message\":{\"message_id\":10,\"date\":13,\"text\":\"other group\","
+      "\"from\":{\"id\":557,\"is_bot\":false},\"chat\":{\"id\":-100124,\"type\":\"supergroup\"}}},"
+    "{\"update_id\":24,\"message\":{\"message_id\":13,\"date\":16,\"text\":\"unknown bot status\","
+      "\"from\":{\"id\":560},\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}},"
+    "{\"update_id\":25,\"message\":{\"message_id\":14,\"date\":17,\"text\":\"channel\","
+      "\"from\":{\"id\":561,\"is_bot\":false},\"sender_chat\":{\"id\":-5},"
+      "\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}}]}";
+
+static bool tgt_reliable_refused(const char *request, int calls)
+{
+    bool ok = tgt_call("ops.telegram.inbox", request, &r, &clean) &&
+              r.status == ZCL_COMMAND_STATUS_FAILED && g_fake.calls == calls && clean;
+    json_free(&r.data);
+    return ok;
+}
+
+static bool tgt_reliable_locked(const char *request, const char *ack)
+{
+    char dir[1100], path[1200];
+    struct platform_process_lock lock;
+    if (!tg_state_dir(dir, sizeof(dir)) ||
+        snprintf(path, sizeof(path), "%s/poll.lock", dir) >= (int)sizeof(path)) return false;
+    platform_process_lock_init(&lock);
+    if (!platform_process_lock_try_acquire(&lock, path, true)) return false;
+    int calls = g_fake.calls;
+    bool replay = tgt_reliable_refused(request, calls);
+    bool acknowledge = tgt_reliable_refused(ack, calls);
+    bool legacy = tgt_reliable_refused("{}", calls);
+    platform_process_lock_release(&lock);
+    return replay && acknowledge && legacy;
+}
+
+static bool tgt_reliable_corrupt(const char *request, int calls, int64_t expected_offset)
+{
+    char dir[1100], path[1200]; int64_t offset = -1;
+    if (!tg_state_dir(dir, sizeof(dir)) ||
+        snprintf(path, sizeof(path), "%s/pending-7777777777", dir) >= (int)sizeof(path) ||
+        !tgt_write_file(path, "not a valid pending batch\n", 0600)) return false;
+    bool ok = tgt_call("ops.telegram.inbox", request, &r, &clean) &&
+              tgt_failed(&r, "TELEGRAM_PENDING_REFUSED") && g_fake.calls == calls && clean &&
+              tg_offset_load(dir, TGT_CANARY, &offset) && offset == expected_offset;
+    json_free(&r.data);
+    if (unlink(path) != 0) ok = false;
+    return ok;
+}
+
+static bool tgt_reliable_item(const struct zcl_command_reply *reply)
+{
+    const struct json_value *item = json_at(json_get(&reply->data, "messages"), 0);
+    return item && json_get_int(json_get(item, "update_id")) == 20 &&
+           json_get_int(json_get(item, "message_id")) == 7 &&
+           json_get_int(json_get(item, "from_id")) == 555 &&
+           json_get_int(json_get(item, "chat_id")) == -100123 &&
+           !strcmp(json_get_str(json_get(item, "chat_type")), "supergroup") &&
+           !strcmp(json_get_str(json_get(item, "text")), "group human");
+}
+
+static bool tgt_reliable_replay_equals(const char *request, const char *expected, size_t length, int calls)
+{
+    char replay[8192];
+    bool ok = tgt_call("ops.telegram.inbox", request, &r, &clean) &&
+              r.status == ZCL_COMMAND_STATUS_PASSED && g_fake.calls == calls && clean &&
+              json_write(&r.data, replay, sizeof(replay)) == length && !strcmp(replay, expected);
+    json_free(&r.data);
+    return ok;
+}
+
+static bool tgt_reliable_ack_write_failure(const char *request, const char *ack,
+                                           const char *expected, size_t length)
+{
+    char dir[1100], path[1200]; int64_t offset = -1;
+    if (!tg_state_dir(dir, sizeof(dir)) ||
+        snprintf(path, sizeof(path), "%s/offset-7777777777", dir) >= (int)sizeof(path) ||
+        mkdir(path, 0700) != 0) return false;
+    int calls = g_fake.calls;
+    bool refused = tgt_reliable_refused(ack, calls);
+    bool removed = rmdir(path) == 0;
+    bool unchanged = tg_offset_load(dir, TGT_CANARY, &offset) && offset == 0;
+    bool replayed = tgt_reliable_replay_equals(request, expected, length, calls);
+    return refused && removed && unchanged && replayed;
+}
+
+static bool tgt_reliable_private_pending(const char *request, const char *expected, size_t length)
+{
+    char dir[1100], path[1200];
+    if (!tg_state_dir(dir, sizeof(dir)) ||
+        snprintf(path, sizeof(path), "%s/pending-7777777777", dir) >= (int)sizeof(path) ||
+        chmod(path, 0644) != 0) return false;
+    int calls = g_fake.calls;
+    bool refused = tgt_reliable_refused(request, calls);
+    bool restored = chmod(path, 0600) == 0;
+    bool replayed = tgt_reliable_replay_equals(request, expected, length, calls);
+    return refused && restored && replayed;
+}
+
+static int tgt_reliable_replay_case(void)
+{
+    int failures = 0;
+    const char *old_state = getenv("XDG_STATE_HOME");
+    char *saved = old_state ? strdup(old_state) : NULL;
+    char state[PLATFORM_TEMP_PATH_MAX + 32], receipt[65] = {0};
+    char first[8192], replay[8192], ack[256];
+    bool changed = false;
+    TEST_CASE("telegram reliable group inbox replays until exact acknowledgment") {
+        ASSERT(!old_state || saved);
+        ASSERT(snprintf(state, sizeof(state), "%s/reliable-state", g_root) < (int)sizeof(state));
+        ASSERT(setenv("XDG_STATE_HOME", state, 1) == 0); changed = true;
+        ASSERT(tgt_write_file(g_env, "TELEGRAM_BOT_TOKEN=" TGT_CANARY
+               "\nTELEGRAM_CHAT_ID=4242\nTELEGRAM_ALLOW_FROM=99,100,-100123\n", 0600));
+        memset(&g_fake, 0, sizeof(g_fake));
+        ASSERT(tgt_reliable_refused("{\"reliable\":true,\"group_chat_id\":-100124}", 0));
+        ASSERT(tgt_reliable_refused("{\"reliable\":true,\"group_chat_id\":\"-100123\"}", 0));
+        tgt_script(200, tgt_reliable_updates);
+        const char *request = "{\"reliable\":true,\"group_chat_id\":-100123,\"wait_s\":0}";
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT_EQ(tgt_int(&r, "count"), 1);
+        ASSERT_EQ(tgt_int(&r, "dropped"), 5);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 26);
+        ASSERT(tgt_reliable_item(&r));
+        const char *value = json_get_str(json_get(&r.data, "receipt"));
+        ASSERT(strlen(value) == 64 && strspn(value, "0123456789abcdef") == 64);
+        memcpy(receipt, value, sizeof(receipt));
+        size_t n = json_write(&r.data, first, sizeof(first));
+        ASSERT(n > 0 && n < sizeof(first));
+        ASSERT(clean); json_free(&r.data);
+        /* Treat the first reply as lost; retry must not contact Telegram. */
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(json_write(&r.data, replay, sizeof(replay)) == n && !strcmp(first, replay));
+        json_free(&r.data);
+        ASSERT(tgt_reliable_refused("{}", 1));
+        ASSERT(tgt_reliable_refused("{\"reliable\":true}", 1));
+        ASSERT(tgt_reliable_refused("{\"reliable\":true,\"group_chat_id\":-100123,\"ack\":17}", 1));
+        ASSERT(tgt_reliable_refused("{\"reliable\":true,\"group_chat_id\":-100123,\"ack\":\"0000000000000000000000000000000000000000000000000000000000000000\"}", 1));
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(json_write(&r.data, replay, sizeof(replay)) == n && !strcmp(first, replay));
+        json_free(&r.data);
+        ASSERT(snprintf(ack, sizeof(ack), "{\"reliable\":true,\"group_chat_id\":-100123,\"ack\":\"%s\"}", receipt) < (int)sizeof(ack));
+        ASSERT(tgt_reliable_locked(request, ack));
+        ASSERT(tgt_reliable_ack_write_failure(request, ack, first, n));
+        ASSERT(tgt_reliable_private_pending(request, first, n));
+        ASSERT(tgt_call("ops.telegram.inbox", ack, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT_EQ(tgt_int(&r, "count"), 0);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 26);
+        ASSERT(json_get(&r.data, "receipt") == NULL);
+        json_free(&r.data);
+        /* A repeated Bot API payload below the committed offset is already
+         * acknowledged and may be discarded without moving the cursor. */
+        tgt_script(200, tgt_reliable_updates);
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 2);
+        ASSERT_EQ(tgt_int(&r, "count"), 0);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 26);
+        ASSERT(strstr(g_fake.body[1], "\"offset\":26") != NULL);
+        ASSERT(clean);
+        json_free(&r.data);
+        ASSERT(tgt_reliable_corrupt(request, 2, 26));
+    } TEST_END
+    json_free(&r.data);
+    if (changed && (saved ? setenv("XDG_STATE_HOME", saved, 1) : unsetenv("XDG_STATE_HOME")) != 0) failures++;
+    if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600)) failures++;
+    free(saved);
+    return failures;
+}
+
+/* Quote characters double in JSON. Three valid messages fit the transport
+ * response but their encoded inbox items do not all fit one 10,000-byte batch. */
+static bool tgt_reliable_escaped_updates(char *out, size_t cap, int first, int count)
+{
+    char escaped[4401];
+    for (size_t i = 0; i < 2200; ++i) { escaped[i * 2] = '\\'; escaped[i * 2 + 1] = '"'; }
+    escaped[4400] = 0;
+    int n = snprintf(out, cap, "{\"ok\":true,\"result\":[");
+    if (n < 0 || (size_t)n >= cap) return false;
+    size_t used = (size_t)n;
+    for (int i = 0; i < count; ++i) {
+        n = snprintf(out + used, cap - used,
+            "%s{\"update_id\":%d,\"message\":{\"message_id\":%d,\"date\":1,\"text\":\"%s\","
+            "\"from\":{\"id\":555,\"is_bot\":false},\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}}",
+            i ? "," : "", first + i, first + i, escaped);
+        if (n < 0 || (size_t)n >= cap - used) return false;
+        used += (size_t)n;
+    }
+    n = snprintf(out + used, cap - used, "]}");
+    return n > 0 && (size_t)n < cap - used;
+}
+
+static int tgt_reliable_encoded_budget_case(void)
+{
+    int failures = 0;
+    const char *old_state = getenv("XDG_STATE_HOME");
+    char *saved = old_state ? strdup(old_state) : NULL;
+    char state[PLATFORM_TEMP_PATH_MAX + 32], receipt[65] = {0}, ack[256];
+    static char updates[TGT_BODY];
+    bool changed = false;
+    TEST_CASE("telegram reliable inbox preserves an update beyond the encoded budget") {
+        ASSERT(!old_state || saved);
+        ASSERT(snprintf(state, sizeof(state), "%s/encoded-state", g_root) < (int)sizeof(state));
+        ASSERT(setenv("XDG_STATE_HOME", state, 1) == 0); changed = true;
+        ASSERT(tgt_write_file(g_env, "TELEGRAM_BOT_TOKEN=" TGT_CANARY
+               "\nTELEGRAM_CHAT_ID=4242\nTELEGRAM_ALLOW_FROM=99,100,-100123\n", 0600));
+        memset(&g_fake, 0, sizeof(g_fake));
+        ASSERT(tgt_reliable_escaped_updates(updates, sizeof(updates), 100, 3));
+        tgt_script(200, updates);
+        const char *request = "{\"reliable\":true,\"group_chat_id\":-100123,\"wait_s\":0}";
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "count"), 2);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 102);
+        ASSERT(json_get_bool(json_get(&r.data, "more")));
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&r.data, "messages"), 1), "update_id")), 101);
+        const char *value = json_get_str(json_get(&r.data, "receipt"));
+        ASSERT(strlen(value) == 64 && strspn(value, "0123456789abcdef") == 64);
+        memcpy(receipt, value, sizeof(receipt)); json_free(&r.data);
+        ASSERT(snprintf(ack, sizeof(ack), "{\"reliable\":true,\"group_chat_id\":-100123,\"ack\":\"%s\"}", receipt) < (int)sizeof(ack));
+        ASSERT(tgt_call("ops.telegram.inbox", ack, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 1); json_free(&r.data);
+        ASSERT(tgt_reliable_escaped_updates(updates, sizeof(updates), 102, 1));
+        tgt_script(200, updates);
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 2);
+        ASSERT(strstr(g_fake.body[1], "\"offset\":102") != NULL);
+        ASSERT_EQ(tgt_int(&r, "count"), 1);
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&r.data, "messages"), 0), "update_id")), 102);
+        ASSERT_EQ(strlen(json_get_str(json_get(json_at(json_get(&r.data, "messages"), 0), "text"))), 2200);
+        ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    if (changed && (saved ? setenv("XDG_STATE_HOME", saved, 1) : unsetenv("XDG_STATE_HOME")) != 0) failures++;
+    if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600)) failures++;
+    free(saved);
+    return failures;
+}
+
+static bool tgt_reliable_controls_update(char *out, size_t cap)
+{
+    char username[201]; memset(username, 'u', sizeof(username) - 1); username[200] = 0;
+    int n = snprintf(out, cap, "{\"ok\":true,\"result\":[{\"update_id\":30,\"message\":{"
+        "\"message_id\":30,\"date\":1,\"from\":{\"id\":555,\"is_bot\":false,\"username\":\"%s\"},"
+        "\"chat\":{\"id\":-100123,\"type\":\"supergroup\"},\"text\":\"", username);
+    if (n < 0 || (size_t)n >= cap || cap - (size_t)n <= 18005) return false;
+    size_t used = (size_t)n;
+    for (size_t i = 0; i < 3000; ++i) { memcpy(out + used, "\\u0001", 6); used += 6; }
+    n = snprintf(out + used, cap - used, "\"}}]}");
+    return n > 0 && (size_t)n < cap - used;
+}
+
+static bool tgt_reliable_control_item(const struct zcl_command_reply *reply)
+{
+    const struct json_value *item = json_at(json_get(&reply->data, "messages"), 0);
+    if (!item || !json_get_bool(json_get(item, "truncated")) ||
+        !json_get_bool(json_get(item, "username_truncated"))) return false;
+    const char *text = json_get_str(json_get(item, "text"));
+    size_t len = strlen(text);
+    if (len == 0 || len >= 3000 || strlen(json_get_str(json_get(item, "username"))) != 128) return false;
+    for (size_t i = 0; i < len; ++i) if ((unsigned char)text[i] != 1) return false;
+    return true;
+}
+
+static int tgt_reliable_single_escaped_case(void)
+{
+    int failures = 0; const char *old_state = getenv("XDG_STATE_HOME");
+    char *saved = old_state ? strdup(old_state) : NULL;
+    char state[PLATFORM_TEMP_PATH_MAX + 32], receipt[65], ack[256];
+    static char update[TGT_BODY]; bool changed = false;
+    TEST_CASE("telegram reliable inbox returns an ackable prefix for heavily escaped text") {
+        ASSERT(!old_state || saved);
+        ASSERT(snprintf(state, sizeof(state), "%s/control-state", g_root) < (int)sizeof(state));
+        ASSERT(setenv("XDG_STATE_HOME", state, 1) == 0); changed = true;
+        ASSERT(tgt_write_file(g_env, "TELEGRAM_BOT_TOKEN=" TGT_CANARY
+               "\nTELEGRAM_CHAT_ID=4242\nTELEGRAM_ALLOW_FROM=99,100,-100123\n", 0600));
+        memset(&g_fake, 0, sizeof(g_fake));
+        ASSERT(tgt_reliable_controls_update(update, sizeof(update)));
+        tgt_script(200, update);
+        const char *request = "{\"reliable\":true,\"group_chat_id\":-100123,\"wait_s\":0}";
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "count"), 1);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 31);
+        ASSERT(tgt_reliable_control_item(&r));
+        const char *value = json_get_str(json_get(&r.data, "receipt"));
+        ASSERT(strlen(value) == 64 && strspn(value, "0123456789abcdef") == 64);
+        memcpy(receipt, value, sizeof(receipt)); json_free(&r.data);
+        ASSERT(snprintf(ack, sizeof(ack), "{\"reliable\":true,\"group_chat_id\":-100123,\"ack\":\"%s\"}", receipt) < (int)sizeof(ack));
+        ASSERT(tgt_call("ops.telegram.inbox", ack, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 31);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    if (changed && (saved ? setenv("XDG_STATE_HOME", saved, 1) : unsetenv("XDG_STATE_HOME")) != 0) failures++;
+    if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600)) failures++;
+    free(saved);
+    return failures;
+}
+
+static bool tgt_reliable_empty_state(void)
+{
+    char dir[1100], path[1200]; struct stat st; int64_t offset = -1;
+    if (!tg_state_dir(dir, sizeof(dir)) ||
+        snprintf(path, sizeof(path), "%s/pending-7777777777", dir) >= (int)sizeof(path)) return false;
+    errno = 0;
+    if (lstat(path, &st) == 0 || errno != ENOENT) return false;
+    return tg_offset_load(dir, TGT_CANARY, &offset) && offset == 0;
+}
+
+static bool tgt_reliable_bad_batch(const char *request, const char *payload, unsigned index)
+{
+    int calls = g_fake.calls;
+    tgt_script(200, payload);
+    bool ran = tgt_call("ops.telegram.inbox", request, &r, &clean);
+    bool ok = ran && r.status == ZCL_COMMAND_STATUS_FAILED && clean &&
+              g_fake.calls == calls + 1 && tgt_reliable_empty_state();
+    if (!ok) fprintf(stderr, "reliable invalid batch=%u ran=%d status=%d code=%s calls=%d\n",
+                     index, ran, (int)r.status, r.error.code, g_fake.calls);
+    json_free(&r.data);
+    return ok;
+}
+
+#define TGT_RELIABLE_HUMAN "\"message\":{\"message_id\":7,\"date\":1,\"text\":\"eligible\",\"from\":{\"id\":555,\"is_bot\":false},\"chat\":{\"id\":-100123,\"type\":\"supergroup\"}}"
+static int tgt_reliable_invalid_batch_case(void)
+{
+    static const char *const payloads[] = {
+        "{\"ok\":true,\"result\":[{\"update_id\":11," TGT_RELIABLE_HUMAN "},{\"update_id\":10," TGT_RELIABLE_HUMAN "}]}",
+        "{\"ok\":true,\"result\":[{\"update_id\":\"bad\"," TGT_RELIABLE_HUMAN "},{\"update_id\":12," TGT_RELIABLE_HUMAN "}]}",
+        "{\"ok\":true,\"result\":[{" TGT_RELIABLE_HUMAN "},{\"update_id\":12," TGT_RELIABLE_HUMAN "}]}",
+        "{\"ok\":true,\"result\":[{\"update_id\":11," TGT_RELIABLE_HUMAN "},{\"update_id\":11," TGT_RELIABLE_HUMAN "}]}",
+        "{\"ok\":true,\"result\":[{\"update_id\":9223372036854775807," TGT_RELIABLE_HUMAN "},{\"update_id\":12," TGT_RELIABLE_HUMAN "}]}"
+    };
+    int failures = 0; const char *old_state = getenv("XDG_STATE_HOME");
+    char *saved = old_state ? strdup(old_state) : NULL;
+    char state[PLATFORM_TEMP_PATH_MAX + 32]; bool changed = false;
+    TEST_CASE("telegram reliable inbox refuses invalid fresh update ordering without advancing") {
+        ASSERT(!old_state || saved);
+        ASSERT(snprintf(state, sizeof(state), "%s/invalid-order-state", g_root) < (int)sizeof(state));
+        ASSERT(setenv("XDG_STATE_HOME", state, 1) == 0); changed = true;
+        ASSERT(tgt_write_file(g_env, "TELEGRAM_BOT_TOKEN=" TGT_CANARY
+               "\nTELEGRAM_CHAT_ID=4242\nTELEGRAM_ALLOW_FROM=99,100,-100123\n", 0600));
+        memset(&g_fake, 0, sizeof(g_fake));
+        const char *request = "{\"reliable\":true,\"group_chat_id\":-100123,\"wait_s\":0}";
+        bool ok = true;
+        for (unsigned i = 0; i < sizeof(payloads) / sizeof(payloads[0]); ++i)
+            ok = tgt_reliable_bad_batch(request, payloads[i], i) && ok;
+        ASSERT(ok);
+        tgt_script(200, tgt_reliable_updates);
+        ASSERT(tgt_call("ops.telegram.inbox", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "count"), 1);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 26);
+        ASSERT_EQ(g_fake.calls, 6);
+        ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    if (changed && (saved ? setenv("XDG_STATE_HOME", saved, 1) : unsetenv("XDG_STATE_HOME")) != 0) failures++;
+    if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600)) failures++;
+    free(saved);
+    return failures;
+}
+#undef TGT_RELIABLE_HUMAN
 
 static int tgt_case_6(void)
 {
@@ -749,6 +1129,10 @@ int test_telegram(void)
     failures += tgt_explicit_target_refusal_case();
     failures += tgt_explicit_group_case();
     failures += tgt_case_5() + tgt_case_6() + tgt_case_mono() + tgt_case_7();
+    failures += tgt_reliable_replay_case();
+    failures += tgt_reliable_encoded_budget_case();
+    failures += tgt_reliable_single_escaped_case();
+    failures += tgt_reliable_invalid_batch_case();
     failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet() + tgt_case_testnet_wif();
     failures += tgt_legacy_sent_case();
     failures += tgt_legacy_sent_next_case();

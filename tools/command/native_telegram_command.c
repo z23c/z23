@@ -5,6 +5,7 @@
 #include "command/native_telegram.h"
 #include "base/cleanse.h"
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 #include "platform/process_lock.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +18,6 @@
 
 #define TG_SEND_BODY_MAX (112u * 1024u)
 #define TG_INBOX_LIMIT 10
-#define TG_INBOX_TEXT_MAX 3000u
 #define TG_INBOX_BUDGET 10000u
 #define TG_WAIT_MAX 50
 
@@ -376,47 +376,37 @@ struct tg_inbox {
     size_t bytes;
     int64_t dropped;
     int64_t next_offset;
+    int64_t start_offset;
     bool more;
+    int64_t group;
+    bool reliable;
+    bool failed;
 };
 
-static size_t tg_text_cut(const char *text, size_t len)
+static bool tg_group_wanted(const struct json_value *msg, const struct json_value *from,
+                            const struct json_value *chat, int64_t group)
 {
-    if (len <= TG_INBOX_TEXT_MAX)
-        return len;
-    size_t cut = TG_INBOX_TEXT_MAX;
-    while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80)
-        cut--;
-    return cut;
+    const char *type = json_get_str(json_get(chat, "type"));
+    const struct json_value *chat_id = json_get(chat, "id");
+    const struct json_value *bot = json_get(from, "is_bot");
+    return group < 0 && chat_id && chat_id->type == JSON_INT &&
+           json_get_int(chat_id) == group &&
+           (!strcmp(type, "group") || !strcmp(type, "supergroup")) &&
+           bot && bot->type == JSON_BOOL && !json_get_bool(bot) &&
+           !json_get(msg, "sender_chat");
 }
 
-static bool tg_inbox_item(struct json_value *item, int64_t update_id, const struct json_value *msg,
-                          size_t *bytes)
+static bool tg_inbox_wanted(const struct tg_config *cfg, const struct json_value *msg,
+                            int64_t group)
 {
     const struct json_value *from = json_get(msg, "from");
-    bool plain = json_get(msg, "text") != NULL;
-    const char *text = json_get_str(json_get(msg, plain ? "text" : "caption"));
-    char shown[TG_INBOX_TEXT_MAX + 1];
-    size_t len = strlen(text), cut = tg_text_cut(text, len);
-    memcpy(shown, text, cut);
-    shown[cut] = 0;
-    *bytes += cut + 160;
-    json_set_object(item);
-    return json_push_kv_int(item, "update_id", update_id) &&
-           json_push_kv_int(item, "message_id", json_get_int(json_get(msg, "message_id"))) &&
-           json_push_kv_int(item, "from_id", json_get_int(json_get(from, "id"))) &&
-           json_push_kv_str(item, "username", json_get_str(json_get(from, "username"))) &&
-           json_push_kv_int(item, "date", json_get_int(json_get(msg, "date"))) &&
-           json_push_kv_str(item, "kind", plain ? "text" : "other") &&
-           json_push_kv_str(item, "text", shown) && json_push_kv_bool(item, "truncated", cut < len);
-}
-
-/* Direct messages from an allowlisted user only; everything else is dropped. */
-static bool tg_inbox_wanted(const struct tg_config *cfg, const struct json_value *msg)
-{
-    const struct json_value *from = json_get(msg, "from");
-    const char *type = json_get_str(json_get(json_get(msg, "chat"), "type"));
-    return msg && from && !strcmp(type, "private") &&
-           tg_allowed(cfg, json_get_int(json_get(from, "id")));
+    const struct json_value *chat = json_get(msg, "chat");
+    const struct json_value *id = json_get(from, "id");
+    const char *type = json_get_str(json_get(chat, "type"));
+    if (!msg || !from || !id || id->type != JSON_INT || json_get_int(id) <= 0)
+        return false;
+    if (!strcmp(type, "private")) return tg_allowed(cfg, json_get_int(id));
+    return tg_group_wanted(msg, from, chat, group);
 }
 
 /* Offsets only move forward: an update needs an integer id of at least next_offset - 1
@@ -427,7 +417,19 @@ static bool tg_update_id(const struct tg_inbox *box, const struct json_value *up
     if (!v || v->type != JSON_INT)
         return false;
     *id = json_get_int(v);
-    return *id < INT64_MAX && *id >= box->next_offset - 1;
+    return *id < INT64_MAX && *id >= box->next_offset - (box->reliable ? 0 : 1);
+}
+
+static bool tg_inbox_invalid_id(struct tg_inbox *box, const struct json_value *update)
+{
+    const struct json_value *id = json_get(update, "update_id");
+    if (box->reliable && (!id || id->type != JSON_INT ||
+        json_get_int(id) < 0 || json_get_int(id) >= box->start_offset)) {
+        box->failed = true;
+        return false;
+    }
+    box->dropped++;
+    return true;
 }
 
 static bool tg_inbox_take(struct tg_inbox *box, const struct tg_config *cfg,
@@ -436,19 +438,32 @@ static bool tg_inbox_take(struct tg_inbox *box, const struct tg_config *cfg,
     const struct json_value *msg = json_get(update, "message");
     int64_t update_id = 0;
     struct json_value item = {0};
-    if (!tg_update_id(box, update, &update_id)) {
-        box->dropped++;
-        return true;
-    }
-    if (msg && tg_inbox_wanted(cfg, msg)) {
+    if (!tg_update_id(box, update, &update_id))
+        return tg_inbox_invalid_id(box, update);
+    if (msg && tg_inbox_wanted(cfg, msg, box->group)) {
         if (box->bytes >= TG_INBOX_BUDGET && json_size(&box->list) > 0) {
             box->more = true;
             return false;
         }
-        bool ok = tg_inbox_item(&item, update_id, msg, &box->bytes) && json_push_back(&box->list, &item);
+        size_t old_bytes = box->bytes;
+        bool ok = tg_inbox_item(&item, update_id, msg, &box->bytes, box->reliable);
+        if (ok && box->reliable) {
+            size_t encoded = json_write(&item, NULL, 0);
+            box->bytes = old_bytes;
+            if (encoded == 0 || encoded + 1 > TG_INBOX_BUDGET - old_bytes) {
+                box->more = json_size(&box->list) > 0;
+                box->failed = !box->more;
+                json_free(&item);
+                return false;
+            }
+            box->bytes += encoded + 1;
+        }
+        ok = ok && json_push_back(&box->list, &item);
         json_free(&item);
-        if (!ok)
+        if (!ok) {
+            box->failed = true;
             return false;
+        }
     } else {
         box->dropped++;
     }
@@ -467,6 +482,45 @@ static bool tg_inbox_emit(struct zcl_command_reply *reply, struct tg_inbox *box)
            json_push_kv(&reply->data, "messages", &box->list);
 }
 
+static bool tg_batch_ack(struct zcl_command_reply *reply, const struct tg_config *cfg,
+                         const char *dir, int64_t next, const char *ack,
+                         const char *receipt)
+{
+    int64_t offset = 0;
+    if (strcmp(ack, receipt) || !tg_offset_load(dir, cfg->token, &offset) ||
+        (offset < next && !tg_offset_store(dir, cfg->token, next)) ||
+        !tg_state_sync(dir) || !tg_pending_delete(dir, cfg->token)) return false;
+    struct tg_inbox empty = {.next_offset = next};
+    json_set_array(&empty.list);
+    bool ok = tg_inbox_emit(reply, &empty);
+    json_free(&empty.list);
+    return ok;
+}
+
+/* 1 handled, 0 no batch, -1 refused. The lock is held by the caller. */
+static int tg_batch_existing(struct zcl_command_reply *reply, const struct tg_config *cfg,
+                             const char *dir, bool reliable, int64_t group, const char *ack)
+{
+    char wire[TG_PENDING_MAX];
+    int found = tg_pending_read(dir, cfg->token, wire, sizeof wire);
+    if (found <= 0) return found;
+    struct json_value record = {0};
+    int64_t next = 0;
+    bool ok = reliable && json_read(&record, wire, strlen(wire)) &&
+              record.type == JSON_OBJ && tg_batch_validate(cfg, group, &record, &next);
+    const char *receipt = json_get_str(json_get(&record, "receipt"));
+    if (ok && ack && ack[0]) {
+        ok = tg_batch_ack(reply, cfg, dir, next, ack, receipt);
+    } else if (ok) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        ok = json_copy_checked(&reply->data, json_get(&record, "batch")) &&
+             json_push_kv_str(&reply->data, "receipt", receipt);
+    }
+    json_free(&record);
+    return ok ? 1 : -1;
+}
+
 static bool tg_inbox_request(char *body, size_t cap, int64_t offset, int64_t wait_s)
 {
     struct json_value req = {0}, allowed = {0}, kind = {0};
@@ -482,13 +536,33 @@ static bool tg_inbox_request(char *body, size_t cap, int64_t offset, int64_t wai
     return ok;
 }
 
+static void tg_inbox_finish(struct zcl_command_reply *reply, const struct tg_config *cfg,
+                            const char *dir, struct tg_inbox *box, int64_t offset)
+{
+    char receipt[65];
+    if (box->failed || box->list.type != JSON_ARR) {
+        tg_internal(reply, "inbox");
+    } else if (box->reliable) {
+        if (!tg_inbox_emit(reply, box) || (box->next_offset != offset &&
+            (!tg_batch_save(cfg, dir, box->group, &reply->data, receipt) ||
+             !json_push_kv_str(&reply->data, "receipt", receipt))))
+            tg_internal(reply, "state");
+    } else if (box->next_offset != offset && !tg_offset_store(dir, cfg->token, box->next_offset)) {
+        tg_internal(reply, "state");
+    } else if (!tg_inbox_emit(reply, box)) {
+        tg_internal(reply, "inbox");
+    }
+}
+
 static void tg_inbox_poll(struct zcl_command_reply *reply, const struct tg_config *cfg,
-                          const char *dir, int64_t wait_s)
+                          const char *dir, int64_t wait_s, bool reliable, int64_t group)
 {
     char body[256];
     int64_t offset = 0;
     struct json_value doc;
     struct tg_inbox box = {0};
+    box.reliable = reliable;
+    box.group = group;
     if (!tg_offset_load(dir, cfg->token, &offset) || !tg_inbox_request(body, sizeof(body), offset, wait_s)) {
         tg_internal(reply, "state");
         return;
@@ -497,17 +571,50 @@ static void tg_inbox_poll(struct zcl_command_reply *reply, const struct tg_confi
         return;
     const struct json_value *updates = json_get(&doc, "result");
     box.next_offset = offset;
+    box.start_offset = offset;
     json_set_array(&box.list);
     for (size_t i = 0; updates && i < json_size(updates); i++) {
         if (!tg_inbox_take(&box, cfg, json_at(updates, i)))
             break;
     }
     json_free(&doc);
-    if (box.next_offset != offset && !tg_offset_store(dir, cfg->token, box.next_offset))
-        tg_internal(reply, "state");
-    else if (!tg_inbox_emit(reply, &box))
-        tg_internal(reply, "inbox");
+    tg_inbox_finish(reply, cfg, dir, &box, offset);
     json_free(&box.list);
+}
+
+static bool tg_inbox_options(const struct zcl_command_request *request,
+                             struct zcl_command_reply *reply, const struct tg_config *cfg,
+                             bool *reliable, int64_t *group, const char **ack)
+{
+    const struct json_value *in = request ? request->input : NULL;
+    const struct json_value *r = json_get(in, "reliable");
+    const struct json_value *g = json_get(in, "group_chat_id");
+    const struct json_value *a = json_get(in, "ack");
+    *reliable = r && r->type == JSON_BOOL && json_get_bool(r);
+    *group = g && g->type == JSON_INT ? json_get_int(g) : 0;
+    *ack = a && a->type == JSON_STR ? json_get_str(a) : NULL;
+    if (!tg_inbox_options_valid(cfg, r, g, a, *reliable, *group, *ack)) {
+        tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_INBOX_OPTIONS", "normalize",
+                false, false, "invalid reliable inbox group or acknowledgment", "z23 telegram inbox");
+        return false;
+    }
+    return true;
+}
+
+static void tg_inbox_locked(struct zcl_command_reply *reply, const struct tg_config *cfg,
+                            const char *dir, int64_t wait_s, bool reliable,
+                            int64_t group, const char *ack)
+{
+    if (!tg_state_sync(dir)) {
+        tg_internal(reply, "state");
+        return;
+    }
+    int pending = tg_batch_existing(reply, cfg, dir, reliable, group, ack);
+    if (pending < 0 || (pending == 0 && ack))
+        tg_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "TELEGRAM_PENDING_REFUSED", "state",
+                false, false, "pending batch or acknowledgment cannot be accepted", "z23 telegram inbox");
+    else if (pending == 0)
+        tg_inbox_poll(reply, cfg, dir, wait_s, reliable, group);
 }
 
 void zcl_native_handle_ops_telegram_inbox(const struct zcl_command_request *request,
@@ -516,12 +623,16 @@ void zcl_native_handle_ops_telegram_inbox(const struct zcl_command_request *requ
     struct tg_config cfg;
     char dir[TG_PATH_MAX], lock_path[TG_PATH_MAX + 16];
     struct platform_process_lock lock;
+    bool reliable = false;
+    int64_t group = 0;
+    const char *ack = NULL;
     const struct json_value *wait = request && request->input ? json_get(request->input, "wait_s") : NULL;
     int64_t wait_s = wait && wait->type == JSON_INT ? json_get_int(wait) : 0;
     if (!reply || !tg_load(reply, &cfg))
         return;
     platform_process_lock_init(&lock);
-    if (wait_s < 0 || wait_s > TG_WAIT_MAX)
+    if (!tg_inbox_options(request, reply, &cfg, &reliable, &group, &ack)) { }
+    else if (wait_s < 0 || wait_s > TG_WAIT_MAX)
         tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_WAIT", "normalize", false, false,
                 "wait_s must be 0..50", "z23 telegram inbox --wait_s=30");
     else if (!cfg.has_chat && cfg.allow_count == 0)
@@ -533,7 +644,7 @@ void zcl_native_handle_ops_telegram_inbox(const struct zcl_command_request *requ
         tg_fail(reply, ZCL_COMMAND_EXIT_TRANSIENT, "POLL_LOCKED", "lock", true, false,
                 "another process on this host is polling this bot", "wait for it to finish");
     else
-        tg_inbox_poll(reply, &cfg, dir, wait_s);
+        tg_inbox_locked(reply, &cfg, dir, wait_s, reliable, group, ack);
     platform_process_lock_release(&lock);
     memory_cleanse(&cfg, sizeof(cfg));
 }

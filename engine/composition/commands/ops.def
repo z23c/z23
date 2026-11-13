@@ -1631,9 +1631,9 @@ ZCL_COMMAND_READY_COMMAND(
 ZCL_COMMAND_READY_READ(
     "ops.telegram.inbox", "ops.telegram", "telegram.inbox",
     "Take new direct messages from allowlisted users",
-    "One getUpdates call from the offset saved under the z23 state root, waiting up to wait_s seconds (0..50). Returns direct messages from TELEGRAM_CHAT_ID and TELEGRAM_ALLOW_FROM users only; every other update is dropped and counted. The offset advances past what is returned, so each message is delivered once; more=true means call again. An exclusive local lock keeps two processes on one host from polling. Telegram allows one poller per bot across all hosts: a second one gets POLLER_CONFLICT.",
+    "One getUpdates call from the saved offset. By default returns allowlisted direct messages and advances the offset. With reliable=true, one private pending batch is replayed until its receipt is acknowledged with ack; only acknowledgment advances the offset. An optional negative group_chat_id must be explicitly allowed and reliable mode enabled; human messages in that group are untrusted input. Pending batches block legacy polls and filter changes. One poller per bot is required across hosts.",
     ZCL_COMMAND_EXTENDED_LIST_BUDGET, "telegram,inbox,receive,poll,messages",
-    "zcl.telegram.inbox.input.v1", "zcl.telegram.inbox.v1", "wait_s", "",
+    "zcl.telegram.inbox.input.v1", "zcl.telegram.inbox.v1", "wait_s,reliable,group_chat_id,ack", "",
     "z23 telegram inbox --wait_s=30",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
