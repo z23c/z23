@@ -905,6 +905,35 @@ static int tgt_status_case(void)
     return failures;
 }
 
+static int tgt_status_privacy_case(void)
+{
+    int failures = 0;
+    TEST_CASE("telegram status preserves known group privacy facts without inventing unknown values") {
+        const char *extra[] = {",\"can_read_all_group_messages\":true",
+            ",\"can_read_all_group_messages\":false", "",
+            ",\"can_read_all_group_messages\":\"true\""};
+        for (size_t i = 0; i < sizeof(extra) / sizeof(extra[0]); ++i) {
+            char body[512];
+            memset(&g_fake, 0, sizeof(g_fake));
+            snprintf(body, sizeof(body), "{\"ok\":true,\"result\":{\"id\":7777777777,"
+                "\"username\":\"Vibecodercbot\",\"first_name\":\"Vibebot\"%s}}", extra[i]);
+            tgt_script(200, body);
+            ASSERT(tgt_call("ops.telegram.status", "{}", &r, &clean));
+            ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+            const struct json_value *value = json_get(json_get(&r.data, "bot"), "can_read_all_group_messages");
+            if (i < 2) {
+                ASSERT(value && value->type == JSON_BOOL);
+                ASSERT_EQ(json_get_bool(value), i == 0);
+            } else ASSERT(!value);
+            ASSERT(clean);
+            ASSERT_EQ(g_fake.calls, 1);
+            ASSERT_STR_EQ(g_fake.method[0], "getMe");
+            json_free(&r.data);
+        }
+    } TEST_END
+    return failures;
+}
+
 static int tgt_case_9(void)
 {
     int failures = 0;
@@ -1346,6 +1375,7 @@ int test_telegram(void)
     failures += tgt_reply_chunks_case();
     failures += tgt_reply_missing_parent_case();
     failures += tgt_reply_legacy_case();
+    failures += tgt_status_privacy_case();
     failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet() + tgt_case_testnet_wif();
     failures += tgt_legacy_sent_case();
     failures += tgt_legacy_sent_next_case();

@@ -147,6 +147,10 @@ static bool tg_status_emit(struct zcl_command_reply *reply, const struct tg_conf
     bool ok = json_push_kv_int(&bot, "id", json_get_int(json_get(result, "id"))) &&
               json_push_kv_str(&bot, "username", json_get_str(json_get(result, "username"))) &&
               json_push_kv_str(&bot, "name", json_get_str(json_get(result, "first_name")));
+    /* Preserve the reported privacy fact; absence is not a negative answer. */
+    const struct json_value *privacy = json_get(result, "can_read_all_group_messages");
+    if (privacy && privacy->type == JSON_BOOL)
+        ok = ok && json_push_kv_bool(&bot, "can_read_all_group_messages", json_get_bool(privacy));
     ok = ok && json_push_kv_str(&reply->data, "schema", "zcl.telegram.status.v1") &&
          json_push_kv_bool(&reply->data, "credentials_private", true) &&
          json_push_kv_bool(&reply->data, "chat_configured", cfg->has_chat) &&
