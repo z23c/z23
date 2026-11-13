@@ -9,4 +9,4 @@ review-required blockers retain their inspection guidance.
 Focused reproduction: `devbuild --wait make t-fast ONLY=command_registry_catalog`.
 2026-11-13: PASS, one group, zero failures or skips. The fixture checks both
 the busy and bootstrap-trust cases. Runtime qualification
-on a phone remains unmeasured; the installed phone source identity is unknown.
+on a phone remains unmeasured; the candidate is not installed on the phone.
