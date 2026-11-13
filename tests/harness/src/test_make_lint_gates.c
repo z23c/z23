@@ -1976,6 +1976,27 @@ static int t_lint_table_rebuild(void)
     return bad;
 }
 
+static int t_secure_release_host_support_rebuild(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "mkdir -p tools/dev platform/modules/platform/src build/bin\n"
+        "for f in tools/dev/secure_release_regressions.c tools/dev/secure_release_regressions_main.c tools/dev/secure_release_regressions.h tools/dev/dev_script_dir.c tools/dev/dev_script_dir.h platform/modules/platform/src/os_proc.c; do : > \"$f\"; touch -t 200101010000 \"$f\"; done\n"
+        ": > build/bin/secure-release-regressions-selftest; touch -t 200201010000 build/bin/secure-release-regressions-selftest\n"
+        "printf 'BIN_DIR := build/bin\\nHOST_CC := cc\\n' > Fixture.mk\n"
+        "awk '/^\\$\\(BIN_DIR\\)\\/secure-release-regressions-selftest:/{on=1; found=1} on && /^$/{exit} on{print} END{if(!found) exit 1}' \"$1/Makefile\" >> Fixture.mk\n"
+        "make -s -n -f Fixture.mk -W tools/dev/secure_release_regressions.c build/bin/secure-release-regressions-selftest > control.log 2>&1\n"
+        "grep -F 'platform/modules/platform/src/os_proc.c' control.log >/dev/null || { echo 'secure release control missing compile' >&2; exit 1; }\n"
+        "make -s -n -f Fixture.mk -W platform/modules/platform/src/os_proc.c build/bin/secure-release-regressions-selftest > changed.log 2>&1\n"
+        "grep -F 'platform/modules/platform/src/os_proc.c' changed.log >/dev/null || { echo 'secure release os_proc change did not rebuild wrapper' >&2; exit 1; }\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "secure_release", "host_support");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "secure release host support fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_registry_query_scope(void)
 {
     static const char setup[] =
@@ -2514,6 +2535,7 @@ int test_make_lint_gates(void)
     printf("\n=== make_lint_gates tests ===\n");
 
     if (t_lint_table_rebuild() != 0 || t_lint_private_header_rebuild() != 0) return 1;
+    if (t_secure_release_host_support_rebuild() != 0) return 1;
     if (t_registry_query_scope() != 0) return 1;
     if (t_proof_plan_metadata() != 0) return 1;
     if (t_lint_command_rebuild() != 0) return 1;

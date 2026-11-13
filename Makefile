@@ -5724,7 +5724,8 @@ $(BIN_DIR)/secure-release-regressions-selftest: \
 		tools/dev/secure_release_regressions.c \
 		tools/dev/secure_release_regressions_main.c \
 		tools/dev/secure_release_regressions.h \
-		tools/dev/dev_script_dir.c tools/dev/dev_script_dir.h
+		tools/dev/dev_script_dir.c tools/dev/dev_script_dir.h \
+		platform/modules/platform/src/os_proc.c
 	@mkdir -p "$(dir $@)"
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
