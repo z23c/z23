@@ -12993,7 +12993,7 @@ static bool ic_test_log_case(const char *dir, const char *name,
         return false;
     memset(dim, 0, sizeof(*dim));
     dim->selected = selected;
-    return zcl_dev_proof_test_log_account(path, dim);
+    return zcl_dev_proof_test_log_account(path, dim, NULL, 0);
 }
 
 /* The receipt's test dimension records reused == 0. A run that reports any

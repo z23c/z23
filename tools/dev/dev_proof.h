@@ -814,9 +814,12 @@ size_t zcl_dev_proof_test_dimension_argv(const char *binary, const char *only,
 /* Seam for the test-dimension accounting: the exact reader that turns the
  * runner's SUITE VERDICT line into the receipt's test counts. `dim->selected`
  * is the input; it refuses a log with any failed, skipped, unobserved or
- * cached (reused) group. */
+ * cached (reused) group. On a refusal, `why` (when non-NULL) receives the
+ * same text the land outcome carries: the reuse sentence, or
+ * test_accounting_incomplete plus the first count that mismatched. */
 bool zcl_dev_proof_test_log_account(const char *path,
-                                    struct zcl_dev_proof_dimension *dim);
+                                    struct zcl_dev_proof_dimension *dim,
+                                    char *why, size_t why_len);
 /* Seam for the host-size decision: true when a host with `available_cpus`
  * finishes the test child before starting lint. */
 bool zcl_dev_proof_test_lint_waits_for_tests(uint32_t available_cpus);

@@ -9551,13 +9551,69 @@ static bool dp_test_verdict_counts(const char *verdict,
            parse_uint_field(verdict, "env_unobserved=", &counts->unobserved);
 }
 
+/* The first conjunct test_log_account refused. A bare
+ * test_accounting_incomplete made the author open the land worktree log
+ * after the compile, lint and test had already run. */
+static void dp_test_account_why(const struct dp_test_counts *counts,
+                                uint32_t selected, char *why, size_t why_len)
+{
+    char msg[160];
+    if ((uint64_t)counts->total !=
+        (uint64_t)counts->ran + counts->reused + counts->gated) {
+        (void)snprintf(msg, sizeof msg,
+                       "test_accounting_incomplete:groups_total=%u ran=%u "
+                       "cached=%u gated=%u",
+                       (unsigned)counts->total, (unsigned)counts->ran,
+                       (unsigned)counts->reused, (unsigned)counts->gated);
+        proof_why(why, why_len, msg);
+        return;
+    }
+    if (counts->ran != selected) {
+        (void)snprintf(msg, sizeof msg,
+                       "test_accounting_incomplete:groups_ran=%u selected=%u",
+                       (unsigned)counts->ran, (unsigned)selected);
+        proof_why(why, why_len, msg);
+        return;
+    }
+    if (counts->failed != 0) {
+        (void)snprintf(msg, sizeof msg,
+                       "test_accounting_incomplete:groups_failed=%u",
+                       (unsigned)counts->failed);
+        proof_why(why, why_len, msg);
+        return;
+    }
+    if (counts->skipped != 0) {
+        (void)snprintf(msg, sizeof msg,
+                       "test_accounting_incomplete:self_skips=%u",
+                       (unsigned)counts->skipped);
+        proof_why(why, why_len, msg);
+        return;
+    }
+    if (counts->unobserved != 0) {
+        (void)snprintf(msg, sizeof msg,
+                       "test_accounting_incomplete:env_unobserved=%u",
+                       (unsigned)counts->unobserved);
+        proof_why(why, why_len, msg);
+        return;
+    }
+    proof_why(why, why_len, "test_accounting_incomplete");
+}
+
 static bool test_log_account(const char *path,
-                             struct zcl_dev_proof_dimension *dim)
+                             struct zcl_dev_proof_dimension *dim,
+                             char *why, size_t why_len)
 {
     char verdict[4096] = {0};
-    if (!dp_test_verdict_read(path, verdict, sizeof(verdict))) return false;
     struct dp_test_counts counts = {0};
-    if (!dp_test_verdict_counts(verdict, &counts)) return false;
+    bool ok;
+    if (!dp_test_verdict_read(path, verdict, sizeof verdict)) {
+        proof_why(why, why_len, "test_accounting_incomplete:no_suite_verdict");
+        return false;
+    }
+    if (!dp_test_verdict_counts(verdict, &counts)) {
+        proof_why(why, why_len, "test_accounting_incomplete:verdict_fields");
+        return false;
+    }
     dim->ran = counts.ran;
     dim->reused = counts.reused;
     dim->failed = counts.failed;
@@ -9566,18 +9622,27 @@ static bool test_log_account(const char *path,
      * count means some verdict was admitted without executing, and no
      * verifier outside the candidate's trust domain exists to vouch for
      * it. Refuse rather than record it as reuse. */
-    return (uint64_t)counts.total ==
-               (uint64_t)counts.ran + counts.reused + counts.gated &&
-           counts.reused == 0 && counts.ran == dim->selected &&
-           counts.failed == 0 && counts.skipped == 0 &&
-           counts.unobserved == 0;
+    if (counts.reused != 0) {
+        proof_why(why, why_len, "test_reuse_unqualified_no_verifier_account");
+        return false;
+    }
+    ok = (uint64_t)counts.total ==
+             (uint64_t)counts.ran + counts.reused + counts.gated &&
+         counts.ran == dim->selected && counts.failed == 0 &&
+         counts.skipped == 0 && counts.unobserved == 0;
+    if (!ok)
+        dp_test_account_why(&counts, dim->selected, why, why_len);
+    return ok;
 }
 
 #if defined(ZCL_TESTING)
 bool zcl_dev_proof_test_log_account(const char *path,
-                                    struct zcl_dev_proof_dimension *dim)
+                                    struct zcl_dev_proof_dimension *dim,
+                                    char *why, size_t why_len)
 {
-    return path && dim && test_log_account(path, dim);
+    if (why && why_len)
+        why[0] = '\0';
+    return path && dim && test_log_account(path, dim, why, why_len);
 }
 #endif
 
@@ -9651,13 +9716,8 @@ static bool dimension_finish(const struct proof_paths *paths,
          * accounting, so the next proof plans from what just happened even
          * when the accounting then refuses the run. */
         (void)zcl_dev_proof_timing_ingest_test_log(paths->state, run->log);
-        if (!test_log_account(run->log, run->dim)) {
-            proof_why(why, why_len,
-                      run->dim->reused
-                          ? "test_reuse_unqualified_no_verifier_account"
-                          : "test_accounting_incomplete");
+        if (!test_log_account(run->log, run->dim, why, why_len))
             return false;
-        }
     } else {
         run->dim->ran = run->dim->selected;
     }

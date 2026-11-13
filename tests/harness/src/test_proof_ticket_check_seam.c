@@ -778,8 +778,106 @@ static int seam_case_cached(void)
                        "groups_cached=1 groups_gated=0 groups_failed=0 "
                        "self_skips=0 env_unobserved=0\n") > 0);
         ASSERT(fclose(f) == 0);
-        ASSERT(!zcl_dev_proof_test_log_account(path, &dim));
+        ASSERT(!zcl_dev_proof_test_log_account(path, &dim, NULL, 0));
         printf("check_seam case=groups_cached accounted=0\n");
+    } TEST_END
+    return failures;
+}
+
+/* The land outcome is this string. A bare test_accounting_incomplete is a
+ * miss: the author already paid for the whole proof. */
+static int seam_account_is(const char *dir, const char *body,
+                           uint32_t selected, const char *want)
+{
+    char path[SEAM_PATH];
+    char why[160];
+    struct zcl_dev_proof_dimension dim = {.selected = selected};
+    FILE *f;
+    if (snprintf(path, sizeof path, "%s/verdict.log", dir) >= (int)sizeof path)
+        return 1;
+    f = fopen(path, "w");
+    if (!f)
+        return 1;
+    if (body && fprintf(f, "%s", body) < 0) {
+        fclose(f);
+        return 1;
+    }
+    if (fclose(f) != 0)
+        return 1;
+    why[0] = 'x';
+    if (want) {
+        if (zcl_dev_proof_test_log_account(path, &dim, why, sizeof why) ||
+            strcmp(why, want) != 0) {
+            printf("account why got=\"%s\" want=\"%s\"\n", why, want);
+            return 1;
+        }
+        return 0;
+    }
+    return zcl_dev_proof_test_log_account(path, &dim, why, sizeof why) &&
+                   why[0] == '\0'
+               ? 0
+               : 1;
+}
+
+static int seam_case_account_why(void)
+{
+    int failures = 0;
+    TEST_CASE("check seam: accounting refusal names the mismatched count") {
+        char dir[SEAM_PATH];
+        char *made = test_mkdtemp(dir, sizeof(dir), "z23-check-seam-why");
+        const char *cold =
+            "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+            "groups_cached=0 groups_gated=0 groups_failed=0 self_skips=0 "
+            "env_unobserved=0\n";
+        ASSERT(made != NULL);
+        ASSERT(seam_account_is(dir, NULL, 1,
+                               "test_accounting_incomplete:no_suite_verdict") ==
+               0);
+        ASSERT(seam_account_is(dir, "SUITE VERDICT mode=cold groups_total=1\n",
+                               1, "test_accounting_incomplete:verdict_fields") ==
+               0);
+        ASSERT(seam_account_is(
+                   dir,
+                   "SUITE VERDICT mode=cold groups_total=2 groups_ran=1 "
+                   "groups_cached=0 groups_gated=0 groups_failed=0 "
+                   "self_skips=0 env_unobserved=0\n",
+                   1,
+                   "test_accounting_incomplete:groups_total=2 ran=1 cached=0 "
+                   "gated=0") == 0);
+        ASSERT(seam_account_is(
+                   dir,
+                   "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+                   "groups_cached=0 groups_gated=0 groups_failed=0 "
+                   "self_skips=0 env_unobserved=0\n",
+                   2, "test_accounting_incomplete:groups_ran=1 selected=2") ==
+               0);
+        ASSERT(seam_account_is(
+                   dir,
+                   "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+                   "groups_cached=0 groups_gated=0 groups_failed=1 "
+                   "self_skips=0 env_unobserved=0\n",
+                   1, "test_accounting_incomplete:groups_failed=1") == 0);
+        ASSERT(seam_account_is(
+                   dir,
+                   "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+                   "groups_cached=0 groups_gated=0 groups_failed=0 "
+                   "self_skips=1 env_unobserved=0\n",
+                   1, "test_accounting_incomplete:self_skips=1") == 0);
+        ASSERT(seam_account_is(
+                   dir,
+                   "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+                   "groups_cached=0 groups_gated=0 groups_failed=0 "
+                   "self_skips=0 env_unobserved=3\n",
+                   1, "test_accounting_incomplete:env_unobserved=3") == 0);
+        ASSERT(seam_account_is(
+                   dir,
+                   "SUITE VERDICT mode=cold groups_total=1 groups_ran=0 "
+                   "groups_cached=1 groups_gated=0 groups_failed=0 "
+                   "self_skips=0 env_unobserved=0\n",
+                   1, "test_reuse_unqualified_no_verifier_account") == 0);
+        ASSERT(seam_account_is(dir, cold, 1, NULL) == 0);
+        printf("check_seam case=account_why\n");
+        test_rm_rf(dir);
     } TEST_END
     return failures;
 }
@@ -800,5 +898,6 @@ int test_proof_ticket_check_seam(void)
     failures += seam_case_derived();
     failures += seam_case_same_uid();
     failures += seam_case_cached();
+    failures += seam_case_account_why();
     return failures;
 }
