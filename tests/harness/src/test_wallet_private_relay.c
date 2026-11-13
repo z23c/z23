@@ -2105,21 +2105,53 @@ static void wprt_chain_reports(struct wprt_fx *f, const struct uint256 *a,
         transaction_free(&s2.tx);
 }
 
+static void wprt_chain_delivery(struct wprt_fx *f, struct p2p_node *onion,
+                                const struct uint256 *a, const struct uint256 *b,
+                                const struct wprt_seen_observation *before_a,
+                                const struct wprt_seen_observation *before_b,
+                                bool ok, int *failures)
+{
+    size_t count = onion ? wprt_count(onion, "tx") : 0;
+    bool silent = wprt_clearnet_silent(f);
+    if (!ok || count != 2 || !silent) {
+        struct wprt_seen_observation after_a = wprt_seen_observe(a, ok);
+        struct wprt_seen_observation after_b = wprt_seen_observe(b, ok);
+        printf("[chained ok=%d count=%zu silent=%d now=%lld] ", ok, count,
+               silent, (long long)wprt_clock());
+        wprt_seen_observation_print("before_a", before_a);
+        wprt_seen_observation_print("before_b", before_b);
+        wprt_seen_observation_print("after_a", &after_a);
+        wprt_seen_observation_print("after_b", &after_b);
+        putchar('\n');
+    }
+    wprt_report("both chained sends reach the one onion peer and nobody else",
+                ok && count == 2 && silent, failures);
+}
+
 static int wprt_case_chained(void)
 {
     int failures = 0;
     struct wprt_fx f;
     bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
     struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    platform_socket_t sink = PLATFORM_SOCKET_INVALID;
+    bool transport_ok = wprt_backpressured_peer(onion, &sink);
     struct uint256 a, b;
-    ok = ok && onion && wprt_rpc_send(&f, false, 60.0, &a) &&
+    /* Select the same delay for both sends, so they are due in one tick. */
+    wprt_fill = 5;
+    ok = ok && onion && transport_ok && wprt_rpc_send(&f, false, 60.0, &a) &&
          wprt_rpc_send(&f, true, 60.0, &b);
+    struct wprt_seen_observation before_a = wprt_seen_observe(&a, ok);
+    struct wprt_seen_observation before_b = wprt_seen_observe(&b, ok);
+    wprt_report("both chained sends are scheduled for the same tick",
+                ok && before_a.found && before_b.found &&
+                    before_a.due_ms == before_b.due_ms, &failures);
     wprt_chain_reports(&f, &a, &b, ok, &failures);
     wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
-    wprt_report("both chained sends reach the one onion peer and nobody else",
-                ok && wprt_count(onion, "tx") == 2 && wprt_clearnet_silent(&f),
-                &failures);
+    wprt_chain_delivery(&f, onion, &a, &b, &before_a, &before_b, ok, &failures);
     wprt_close(&f);
+    if (sink != PLATFORM_SOCKET_INVALID) platform_socket_close(sink);
+    wprt_fill = -1;
     return failures;
 }
 
