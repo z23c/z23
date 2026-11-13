@@ -180,6 +180,7 @@ struct tg_send_in {
     const char *text;
     const char *key;
     int64_t chat_id;
+    int64_t reply_to;
     char hash[TG_HASH_HEX];
 };
 
@@ -189,6 +190,21 @@ static const char *tg_input_str(const struct zcl_command_request *request, const
     if (!v || v->type != JSON_STR)
         return NULL;
     return json_get_str(v);
+}
+
+static bool tg_send_reply_parse(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply, struct tg_send_in *in)
+{
+    const struct json_value *id = json_get(request->input, "reply_to_message_id");
+    if (!id) return true;
+    if (id->type != JSON_INT || json_get_int(id) <= 0) {
+        tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "TELEGRAM_BAD_REPLY_ID", "normalize", false, false,
+                "reply_to_message_id must be a positive integer in the target chat",
+                "omit reply_to_message_id or provide the original message id");
+        return false;
+    }
+    in->reply_to = json_get_int(id);
+    return true;
 }
 
 static bool tg_send_parse(const struct zcl_command_request *request, struct zcl_command_reply *reply,
@@ -219,7 +235,7 @@ static bool tg_send_parse(const struct zcl_command_request *request, struct zcl_
         }
         in->chat_id = json_get_int(chat);
     }
-    return true;
+    return tg_send_reply_parse(request, reply, in);
 }
 
 /* The chat must be an allowlisted id: a bot answers its owner, not strangers. */
@@ -237,8 +253,20 @@ static bool tg_send_target(struct zcl_command_reply *reply, const struct tg_conf
     return true;
 }
 
+static bool tg_reply_parameters(struct json_value *request, int64_t parent)
+{
+    if (!parent) return true;
+    struct json_value parameters = {0};
+    json_set_object(&parameters);
+    bool ok = json_push_kv_int(&parameters, "message_id", parent) &&
+        json_push_kv_bool(&parameters, "allow_sending_without_reply", false) &&
+        json_push_kv(request, "reply_parameters", &parameters);
+    json_free(&parameters);
+    return ok;
+}
+
 static bool tg_send_chunk(struct zcl_command_reply *reply, const struct tg_config *cfg,
-                          int64_t chat_id, const char *text, size_t len, bool mutated,
+                          const struct tg_send_in *in, const char *text, size_t len, bool mutated,
                           int64_t *message_id)
 {
     struct json_value doc, req = {0};
@@ -249,7 +277,8 @@ static bool tg_send_chunk(struct zcl_command_reply *reply, const struct tg_confi
         memcpy(chunk, text, len);
         chunk[len] = '\0';
         json_set_object(&req);
-        ok = json_push_kv_int(&req, "chat_id", chat_id) && json_push_kv_str(&req, "text", chunk) &&
+        ok = json_push_kv_int(&req, "chat_id", in->chat_id) && json_push_kv_str(&req, "text", chunk) &&
+             tg_reply_parameters(&req, in->reply_to) &&
              json_write(&req, body, TG_SEND_BODY_MAX) < TG_SEND_BODY_MAX;
     }
     json_free(&req);
@@ -276,7 +305,7 @@ static bool tg_send_all(struct zcl_command_reply *reply, const struct tg_config 
         size_t n = tg_chunk_len(in->text + at, len - at);
         struct json_value id = {0};
         int64_t message_id = 0;
-        if (n == 0 || !tg_send_chunk(reply, cfg, in->chat_id, in->text + at, n, at > 0, &message_id))
+        if (n == 0 || !tg_send_chunk(reply, cfg, in, in->text + at, n, at > 0, &message_id))
             return false;
         json_set_int(&id, message_id);
         if (!json_push_back(ids, &id)) {
@@ -306,12 +335,12 @@ static bool tg_send_duplicate(struct zcl_command_reply *reply, const char *dir,
 {
     int64_t first = 0, count = 0;
     struct json_value ids = {0};
-    enum tg_sent seen = in->key ? tg_sent_lookup(dir, in->key, in->hash, &first, &count) : TG_SENT_NONE;
+    enum tg_sent seen = in->key ? tg_sent_lookup(dir, in->key, in->hash, in->reply_to > 0, &first, &count) : TG_SENT_NONE;
     if (seen == TG_SENT_NONE)
         return false;
     if (seen == TG_SENT_DIFFERENT) {
         tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "IDEMPOTENCY_KEY_REUSED", "idempotency", false, false,
-                "idempotency_key was already used for a different chat or text",
+                "idempotency_key does not match this chat, text and reply target",
                 "use a new idempotency_key for a different message");
         return true;
     }
@@ -333,7 +362,7 @@ static void tg_send_run(struct zcl_command_reply *reply, const struct tg_config 
     char dir[TG_PATH_MAX];
     struct json_value ids = {0};
     bool have_dir = tg_state_dir(dir, sizeof(dir));
-    tg_request_hash(in->chat_id, in->text, in->hash);
+    tg_request_hash(in->chat_id, in->text, in->reply_to, in->hash);
     if (in->key && !have_dir) {
         tg_internal(reply, "state");
         return;

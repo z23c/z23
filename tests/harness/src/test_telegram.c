@@ -177,6 +177,7 @@ static int tgt_case_0(void)
         ASSERT(json_read(&b, g_fake.body[0], strlen(g_fake.body[0])));
         ASSERT_EQ(strlen(json_get_str(json_get(&b, "text"))), 4096);
         ASSERT_EQ(json_get_int(json_get(&b, "chat_id")), 4242);
+        ASSERT(json_get(&b, "reply_parameters") == NULL);
         json_free(&b);
         ASSERT_EQ(json_get_int(json_at(json_get(&r.data, "message_ids"), 2)), 3);
         json_free(&r.data);
@@ -1030,6 +1031,132 @@ static int tgt_case_testnet_wif(void)
     return failures;
 }
 
+static bool tgt_reply_body(size_t index, int64_t parent)
+{
+    struct json_value body = {0};
+    bool ok = json_read(&body, g_fake.body[index], strlen(g_fake.body[index]));
+    const struct json_value *reply = json_get(&body, "reply_parameters");
+    const struct json_value *id = json_get(reply, "message_id");
+    const struct json_value *fallback = json_get(reply, "allow_sending_without_reply");
+    ok = ok && reply && reply->type == JSON_OBJ && id && id->type == JSON_INT &&
+        json_get_int(id) == parent && fallback && fallback->type == JSON_BOOL &&
+        !json_get_bool(fallback) && !json_get(reply, "chat_id");
+    json_free(&body);
+    return ok;
+}
+
+static int tgt_reply_target_case(void)
+{
+    int failures = 0;
+    const char *request = "{\"text\":\"reply body\",\"reply_to_message_id\":7,\"idempotency_key\":\"reply-target-v1\"}";
+    TEST_CASE("telegram replies bind the parent and refuse retargeted retries") {
+        memset(&g_fake, 0, sizeof g_fake);
+        ASSERT(tgt_call("ops.telegram.send", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(tgt_reply_body(0, 7));
+        ASSERT(clean); json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", request, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&r.data, "duplicate")));
+        ASSERT_EQ(g_fake.calls, 1); json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"reply body\",\"reply_to_message_id\":8,\"idempotency_key\":\"reply-target-v1\"}", &r, &clean));
+        ASSERT(tgt_failed(&r, "IDEMPOTENCY_KEY_REUSED"));
+        ASSERT_EQ(g_fake.calls, 1); json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"reply body\",\"idempotency_key\":\"reply-target-v1\"}", &r, &clean));
+        ASSERT(tgt_failed(&r, "IDEMPOTENCY_KEY_REUSED"));
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    return failures;
+}
+
+static int tgt_reply_invalid_case(void)
+{
+    int failures = 0;
+    static const char *const values[] = {"0", "-1", "true", "null", "\"7\""};
+    TEST_CASE("telegram invalid reply targets never reach transport") {
+        memset(&g_fake, 0, sizeof g_fake);
+        for (size_t i = 0; i < sizeof values / sizeof values[0]; ++i) {
+            char request[160];
+            snprintf(request, sizeof request, "{\"text\":\"reply body\",\"reply_to_message_id\":%s}", values[i]);
+            ASSERT(tgt_call("ops.telegram.send", request, &r, &clean));
+            ASSERT(tgt_failed(&r, "TELEGRAM_BAD_REPLY_ID"));
+            ASSERT(clean); json_free(&r.data);
+        }
+        ASSERT_EQ(g_fake.calls, 0);
+    } TEST_END
+    json_free(&r.data);
+    return failures;
+}
+
+static int tgt_reply_chunks_case(void)
+{
+    int failures = 0;
+    char *text = malloc(9001), *input = malloc(9200);
+    TEST_CASE("all Telegram reply chunks retain the requested parent") {
+        ASSERT(text && input);
+        memset(text, 'a', 9000); text[9000] = '\0';
+        snprintf(input, 9200, "{\"text\":\"%s\",\"reply_to_message_id\":7}", text);
+        memset(&g_fake, 0, sizeof g_fake);
+        ASSERT(tgt_call("ops.telegram.send", input, &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_fake.calls, 3);
+        ASSERT_EQ(tgt_int(&r, "chunks"), 3);
+        ASSERT(tgt_reply_body(0, 7));
+        ASSERT(tgt_reply_body(1, 7));
+        ASSERT(tgt_reply_body(2, 7));
+        ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    free(input); free(text);
+    return failures;
+}
+
+static int tgt_reply_missing_parent_case(void)
+{
+    int failures = 0;
+    TEST_CASE("missing Telegram parent refuses without an unthreaded fallback") {
+        memset(&g_fake, 0, sizeof g_fake);
+        tgt_script(400, "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: reply message not found\"}");
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"hello\",\"reply_to_message_id\":7}", &r, &clean));
+        ASSERT(tgt_failed(&r, "TELEGRAM_REJECTED"));
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(tgt_reply_body(0, 7));
+        ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    return failures;
+}
+
+static int tgt_reply_legacy_case(void)
+{
+    int failures = 0;
+    char dir[1100], path[1200], hash[TG_HASH_HEX];
+    TEST_CASE("hashless legacy key cannot authorize a threaded reply") {
+        ASSERT(tg_state_dir(dir, sizeof dir));
+        ASSERT(snprintf(path, sizeof path, "%s/sent", dir) < (int)sizeof path);
+        FILE *f = fopen(path, "a");
+        ASSERT(f);
+        bool wrote = fputs("legacy-thread-case 77 2\n", f) >= 0;
+        wrote = fclose(f) == 0 && wrote;
+        ASSERT(wrote);
+        tg_request_hash(4242, "hello", 0, hash);
+        ASSERT_STR_EQ(hash, "1d17f7bcc6e4d9234a3bd728709c39b2");
+        memset(&g_fake, 0, sizeof g_fake);
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"hello\",\"reply_to_message_id\":7,\"idempotency_key\":\"legacy-thread-case\"}", &r, &clean));
+        ASSERT(tgt_failed(&r, "IDEMPOTENCY_KEY_REUSED"));
+        ASSERT_EQ(g_fake.calls, 0); json_free(&r.data);
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"hello\",\"idempotency_key\":\"legacy-thread-case\"}", &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&r.data, "duplicate")));
+        ASSERT_EQ(g_fake.calls, 0); ASSERT(clean);
+    } TEST_END
+    json_free(&r.data);
+    return failures;
+}
+
 static int tgt_registry_cases(void)
 {
     int failures = 0;
@@ -1065,11 +1192,11 @@ static int tgt_legacy_sent_case(void)
     int failures = 0;
     char path[PLATFORM_TEMP_PATH_MAX + 16], hash[TG_HASH_HEX];
     int64_t first = 0, count = 0;
-    tg_request_hash(-100123, "hello", hash);
+    tg_request_hash(-100123, "hello", 0, hash);
     snprintf(path, sizeof(path), "%s/sent", g_root);
     TEST_CASE("legacy sent record without a hash dedups on the key") {
         ASSERT(tgt_write_file(path, "legacy1 77 2\n", 0600));
-        ASSERT_EQ(tg_sent_lookup(g_root, "legacy1", hash, &first, &count), TG_SENT_SAME);
+        ASSERT_EQ(tg_sent_lookup(g_root, "legacy1", hash, false, &first, &count), TG_SENT_SAME);
         ASSERT_EQ(first, 77);
         ASSERT_EQ(count, 2);
     } TEST_END
@@ -1082,15 +1209,15 @@ static int tgt_legacy_sent_next_case(void)
     int failures = 0;
     char path[PLATFORM_TEMP_PATH_MAX + 16], hash[TG_HASH_HEX];
     int64_t first = 0, count = 0;
-    tg_request_hash(-100123, "hello", hash);
+    tg_request_hash(-100123, "hello", 0, hash);
     snprintf(path, sizeof(path), "%s/sent", g_root);
     TEST_CASE("legacy record followed by another record does not read its key as a hash") {
         ASSERT(tgt_write_file(path, "legacy1 77 2\nnext 5 1 0123456789abcdef0123456789abcdef\n",
                               0600));
-        ASSERT_EQ(tg_sent_lookup(g_root, "legacy1", hash, &first, &count), TG_SENT_SAME);
+        ASSERT_EQ(tg_sent_lookup(g_root, "legacy1", hash, false, &first, &count), TG_SENT_SAME);
         ASSERT_EQ(first, 77);
         ASSERT_EQ(count, 2);
-        ASSERT_EQ(tg_sent_lookup(g_root, "next", hash, &first, &count), TG_SENT_DIFFERENT);
+        ASSERT_EQ(tg_sent_lookup(g_root, "next", hash, false, &first, &count), TG_SENT_DIFFERENT);
         ASSERT_EQ(first, 5);
     } TEST_END
     return failures;
@@ -1214,6 +1341,11 @@ int test_telegram(void)
     failures += tgt_reliable_encoded_budget_case();
     failures += tgt_reliable_single_escaped_case();
     failures += tgt_reliable_invalid_batch_case();
+    failures += tgt_reply_target_case();
+    failures += tgt_reply_invalid_case();
+    failures += tgt_reply_chunks_case();
+    failures += tgt_reply_missing_parent_case();
+    failures += tgt_reply_legacy_case();
     failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet() + tgt_case_testnet_wif();
     failures += tgt_legacy_sent_case();
     failures += tgt_legacy_sent_next_case();

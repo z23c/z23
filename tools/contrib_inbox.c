@@ -780,14 +780,14 @@ static char *ci_read_reply(const char *path, size_t *len)
 
 static bool ci_telegram_post(struct ci *t, const char *text)
 {
-    char wire[2048], arg[2100], key[64], body[CI_ANSWER + 256];
+    char wire[2048], arg[2100], key[64];
     struct json_value input = {0};
     json_set_object(&input);
     bool ok = ci_fmt(key, sizeof key, "tg-%lld-%lld", (long long)t->telegram_bot,
                      (long long)t->telegram_update) &&
-        ci_fmt(body, sizeof body, "Reply to message %lld: %s", (long long)t->telegram_message, text) &&
         json_push_kv_int(&input, "chat_id", t->telegram_group) &&
-        json_push_kv_str(&input, "text", body) && json_push_kv_str(&input, "idempotency_key", key);
+        json_push_kv_int(&input, "reply_to_message_id", t->telegram_message) &&
+        json_push_kv_str(&input, "text", text) && json_push_kv_str(&input, "idempotency_key", key);
     size_t n = ok ? json_write(&input, wire, sizeof wire) : 0;
     json_free(&input);
     if (!n || n >= sizeof wire || !ci_fmt(arg, sizeof arg, "--input=%s", wire)) return false;

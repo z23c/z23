@@ -1617,11 +1617,11 @@ ZCL_COMMAND_READY_READ(
     zcl_native_handle_ops_telegram_status)
 ZCL_COMMAND_READY_COMMAND(
     "ops.telegram.send", "ops.telegram", "telegram.send",
-    "Send a text message to the owner chat",
-    "Sends text through the bot to a nonzero signed-integer chat_id. Omit chat_id to use TELEGRAM_CHAT_ID; the chat must be TELEGRAM_CHAT_ID or listed in TELEGRAM_ALLOW_FROM. Text over 4096 UTF-16 units is split on character boundaries into several messages, up to 12000 bytes in all. Text that holds the bot token, an API key, a private key or seed phrase mention, or an onion address is refused with TELEGRAM_SECRET_REFUSED before any request. idempotency_key (1..64 of letters, digits . _ : -) makes a retry return the first send's message ids without sending again; MCP callers must supply it. A number or true/false as --text is read as a number or flag: pass such text with --input.",
+    "Send text or reply in an allowed chat",
+    "Sends text through the bot to a nonzero signed-integer chat_id. Omit chat_id to use TELEGRAM_CHAT_ID; the chat must be TELEGRAM_CHAT_ID or listed in TELEGRAM_ALLOW_FROM. Optional positive reply_to_message_id targets a message in that same chat; every chunk replies to it and a missing original message refuses the send. Text over 4096 UTF-16 units is split on character boundaries into several messages, up to 12000 bytes in all. Text that holds the bot token, an API key, a private key or seed phrase mention, or an onion address is refused with TELEGRAM_SECRET_REFUSED before any request. idempotency_key (1..64 of letters, digits . _ : -) prevents repeating a recorded send and binds chat, text and reply target; MCP callers must supply it. Hashless legacy keys cannot prove a reply target and are refused for replies. A number or true/false as --text is read as a number or flag: pass such text with --input.",
     ZCL_COMMAND_RESULT_BUDGET, "telegram,send,message,notify,chat",
     "zcl.telegram.send.input.v1", "zcl.telegram.send.v1",
-    "text,chat_id,idempotency_key", "text",
+    "text,chat_id,idempotency_key,reply_to_message_id", "text",
     "z23 telegram send --text='build finished' --idempotency_key=build-42",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,

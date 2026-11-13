@@ -75,12 +75,13 @@ bool tg_inbox_options_valid(const struct tg_config *cfg, const struct json_value
                             bool reliable, int64_t group, const char *ack);
 bool tg_inbox_item(struct json_value *item, int64_t update_id, const struct json_value *msg,
                    size_t *bytes, bool reliable);
-/* The request hash binds a key to one chat and text; hash is 32 hex characters. */
+/* The request hash binds chat, text and optional reply parent; zero preserves
+ * the historical no-reply hash. Hash is 32 hex characters. */
 #define TG_HASH_HEX 33
-void tg_request_hash(int64_t chat_id, const char *text, char hash[TG_HASH_HEX]);
+void tg_request_hash(int64_t chat_id, const char *text, int64_t reply_to, char hash[TG_HASH_HEX]);
 enum tg_sent { TG_SENT_NONE = 0, TG_SENT_SAME, TG_SENT_DIFFERENT };
 enum tg_sent tg_sent_lookup(const char *dir, const char *key, const char *hash,
-                            int64_t *first_id, int64_t *count);
+                            bool require_bound, int64_t *first_id, int64_t *count);
 bool tg_sent_record(const char *dir, const char *key, const char *hash, int64_t first_id,
                     int64_t count);
 bool tg_key_valid(const char *key);

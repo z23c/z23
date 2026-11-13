@@ -1472,6 +1472,8 @@ static int case_telegram_replay(void)
     const struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1};
     CI_CHECK("telegram mixed batch consumed", ci_pass_with(&e, &opts) == 0);
     CI_CHECK("only group gets one answer", ci_count(sent, "send") == 1);
+    CI_CHECK("answer uses a native reply target", ci_file_has(sent, "reply_to_message_id\":7") &&
+             !ci_file_has(sent, "Reply to message"));
     CI_CHECK("batch is acknowledged after retention", ci_count(sent, "inbox") == 1);
     (void)snprintf(retained, sizeof retained, "%s/units/tg-batch-%s/inbox.json", e.state, receipt);
     CI_CHECK("private message is retained", ci_file_has(retained, "private retained request"));

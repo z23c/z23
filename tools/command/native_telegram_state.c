@@ -238,12 +238,13 @@ static bool tg_sent_path(const char *dir, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
-void tg_request_hash(int64_t chat_id, const char *text, char hash[TG_HASH_HEX])
+void tg_request_hash(int64_t chat_id, const char *text, int64_t reply_to, char hash[TG_HASH_HEX])
 {
     struct sha3_256_ctx ctx;
     uint8_t digest[32];
-    char head[32];
-    int n = snprintf(head, sizeof(head), "%lld\n", (long long)chat_id);
+    char head[96];
+    int n = reply_to > 0 ? snprintf(head, sizeof head, "zcl.telegram.reply.v1:%lld:%lld\n",
+        (long long)chat_id, (long long)reply_to) : snprintf(head, sizeof head, "%lld\n", (long long)chat_id);
     sha3_256_init(&ctx);
     sha3_256_write(&ctx, (const unsigned char *)head, (size_t)n);
     sha3_256_write(&ctx, (const unsigned char *)text, strlen(text));
@@ -252,7 +253,7 @@ void tg_request_hash(int64_t chat_id, const char *text, char hash[TG_HASH_HEX])
 }
 
 enum tg_sent tg_sent_lookup(const char *dir, const char *key, const char *hash,
-                            int64_t *first_id, int64_t *count)
+                            bool require_bound, int64_t *first_id, int64_t *count)
 {
     char path[TG_PATH_MAX + 16], buf[TG_SENT_BYTES];
     size_t len = 0, klen = strlen(key);
@@ -271,7 +272,7 @@ enum tg_sent tg_sent_lookup(const char *dir, const char *key, const char *hash,
             *first_id = id;
             *count = chunks;
             if (stored[0] == '\0')
-                return TG_SENT_SAME;
+                return require_bound ? TG_SENT_DIFFERENT : TG_SENT_SAME;
             return strcmp(stored, hash) == 0 ? TG_SENT_SAME : TG_SENT_DIFFERENT;
         }
         if (!nl)
