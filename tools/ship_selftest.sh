@@ -1128,12 +1128,18 @@ if str_contains "$SHIP_TEXT" 'remote did not come back healthy'; then
 else
     pass "an unanswered host is no longer a failed deploy"
 fi
-if str_contains "$SHIP_TEXT" 'hotswap_module=|HOTSWAP MODULE' &&
-   str_contains "$SHIP_TEXT" 'linked candidate remains unproven'; then
+# Verify the native validator's real decision on a linked versus hot-swapped
+# verdict, and retain the ship caller's connection to that validator.
+printf 'SUITE VERDICT mode=cold groups_total=1 groups_ran=1 groups_cached=0 groups_gated=0 groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=34e55dd75397\nALL TESTS PASSED \342\200\224 0/1 groups failed\n' > "$SANDBOX/suite-linked.log"
+printf 'SUITE VERDICT mode=cold groups_total=1 groups_ran=1 groups_cached=0 groups_gated=0 groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=34e55dd75397 hotswap_module=abcdef012345 hotswap_source=fixture\nALL TESTS PASSED \342\200\224 0/1 groups failed (HOTSWAP MODULE abcdef012345)\n' > "$SANDBOX/suite-hotswap.log"
+if str_contains "$SHIP_TEXT" 'check-hosted-suite-verdict --ship "$1"' &&
+   "$ROOT/build/bin/z23-lint" check-hosted-suite-verdict --ship "$SANDBOX/suite-linked.log" >/dev/null 2>&1 &&
+   ! "$ROOT/build/bin/z23-lint" check-hosted-suite-verdict --ship "$SANDBOX/suite-hotswap.log" >/dev/null 2>&1; then
     pass "shipping rejects a hot-swap-stamped suite transcript"
 else
     fail "shipping can mistake a hot-swap module run for linked-binary proof"
 fi
+
 
 printf '\n'
 if [ "$FAILS" -eq 0 ]; then

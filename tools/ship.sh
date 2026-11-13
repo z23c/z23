@@ -447,7 +447,16 @@ ship_refuse_dev_artifact() {
 # instead of surfacing it.
 #
 # The suite must not inherit the canonical-deployment authorization.
-ship_run_test_suite() { env -u ZCL_DEPLOY_ALLOW_CANONICAL make test-parallel; }
+ship_run_test_suite() { env -u ZCL_DEPLOY_ALLOW_CANONICAL make test-parallel TEST_PARALLEL_ARGS=--no-cache; }
+
+# Require the outer process to finish successfully and its native verdict.
+ship_suite_accept() {
+    if [ "$2" -ne 0 ]; then
+        printf 'ship: suite command exited %s\n' "$2" >&2
+        return 1
+    fi
+    "$REPO_ROOT/build/bin/z23-lint" check-hosted-suite-verdict --ship "$1"
+}
 
 # $SHIP_MAKE is the make invocation, indirected so the selftest can substitute
 # a recording fake instead of running a real build.
@@ -801,10 +810,20 @@ REMOTE_ARGS
         [ "$rollback" = "$expected" ]
         [ ! -e "$test_tmp/transport-injected" ]
     )
+    # A nested result is not the outer verdict, and unrelated fixture text
+    # cannot turn a valid outer run into a failure.
+    printf '  image child: ALL TESTS PASSED\n' > "$test_tmp/suite-nested.log"
+    printf 'fixture: SOME TESTS FAILED\nSUITE VERDICT mode=cold groups_total=1600 groups_ran=1586 groups_cached=0 groups_gated=14 groups_failed=0 self_skips=19 env_unobserved=4 load_flaky=1 toolkey=34e55dd75397\nALL TESTS PASSED \342\200\224 0/1586 groups failed\n' > "$test_tmp/suite-valid.log"
+    printf 'SUITE VERDICT mode=cold groups_total=1 groups_ran=1 groups_cached=0 groups_gated=0 groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=34e55dd75397 hotswap_module=abcdef012345 hotswap_source=fixture\nALL TESTS PASSED \342\200\224 0/1 groups failed (HOTSWAP MODULE abcdef012345)\n' > "$test_tmp/suite-hotswap.log"
+    refute ship_suite_accept "$test_tmp/suite-nested.log" 7
+    refute ship_suite_accept "$test_tmp/suite-hotswap.log" 0
+    refute ship_suite_accept "$test_tmp/suite-valid.log" 7
+    ship_suite_accept "$test_tmp/suite-valid.log" 0 >/dev/null
+
     mkdir "$test_tmp/suite-bin"
-    printf '#!/bin/sh\n[ "$1" = test-parallel ] && [ "${ZCL_DEPLOY_ALLOW_CANONICAL+x}" != x ]\n' > "$test_tmp/suite-bin/make"
+    printf '#!/bin/sh\n[ "$1" = test-parallel ] && [ "$2" = TEST_PARALLEL_ARGS=--no-cache ] && [ "${ZCL_DEPLOY_ALLOW_CANONICAL+x}" != x ]\n' > "$test_tmp/suite-bin/make"
     chmod 700 "$test_tmp/suite-bin/make"
-    ( export ZCL_DEPLOY_ALLOW_CANONICAL=1; PATH="$test_tmp/suite-bin:$PATH" ship_run_test_suite; [ "$ZCL_DEPLOY_ALLOW_CANONICAL" = 1 ] )
+    ( export ZCL_DEPLOY_ALLOW_CANONICAL=1 TEST_PARALLEL_ARGS=--only=fixture; PATH="$test_tmp/suite-bin:$PATH" ship_run_test_suite; [ "$ZCL_DEPLOY_ALLOW_CANONICAL" = 1 ] )
 
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"real_tor"}}}}'\''\n' > "$test_tmp/real"
     printf '#!/bin/sh\nprintf '\''%%s\\n'\'' '\''{"data":{"values":{"tor":{"tor_build":"stub_tor"}}}}'\''\n' > "$test_tmp/stub"
@@ -1398,7 +1417,7 @@ done
 
 # ── 2. Gate ─────────────────────────────────────────────────────────────────
 # Keyed on the source identity, so re-shipping an already-proven tree is free
-# but a single changed byte re-gates. The token, never the exit code, decides.
+# but a single changed byte re-gates. Require process success and a native verdict.
 step "Gate"
 
 SOURCE_ID="$(tools/dev/source-identity.sh capture 2>/dev/null || true)"
@@ -1414,7 +1433,8 @@ else
     make lint >/dev/null || die "make lint failed"
     say "gate       make test-parallel"
     suite_log="$(mktemp "$(ship_scratch_root)/zclassic23.ship.suite-log.XXXXXX")"
-    ship_run_test_suite >"$suite_log" 2>&1 || true
+    suite_rc=0
+    ship_run_test_suite >"$suite_log" 2>&1 || suite_rc=$?
     # A failing gate costs ~25 minutes to produce. Deleting its log on the way
     # out spends that again on the next run: the five lines a `grep | head -5`
     # can show are rarely the ones that name the cause, and a group that dies
@@ -1427,13 +1447,8 @@ else
             && suite_log="$GATE_CACHE_DIR/last-failed-suite.log"
         printf 'ship: suite log kept at %s\n' "$suite_log" >&2
     }
-    if grep -Eq 'hotswap_module=|HOTSWAP MODULE' "$suite_log"; then
-        grep -E 'SUITE VERDICT|HOTSWAP MODULE' "$suite_log" | head -5 >&2
-        keep_suite_log
-        die "full suite used a hot-swap module — linked candidate remains unproven"
-    elif grep -q 'ALL TESTS PASSED' "$suite_log" && \
-       ! grep -q 'SOME TESTS FAILED' "$suite_log"; then
-        say "gate       $(grep -m1 'ALL TESTS PASSED' "$suite_log")"
+    if suite_verdict="$(ship_suite_accept "$suite_log" "$suite_rc")"; then
+        say "gate       $suite_verdict"
         mkdir -p "$GATE_CACHE_DIR"
         [ -n "$SOURCE_ID" ] && date -u +%Y-%m-%dT%H:%M:%SZ > "$gate_stamp"
         rm -f "$suite_log"

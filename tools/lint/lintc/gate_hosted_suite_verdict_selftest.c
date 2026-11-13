@@ -167,6 +167,65 @@ static int hsv_selftest_rejections(void)
     return 0;
 }
 
+int check_hosted_suite_verdict_run(int argc, char **argv);
+
+/* Exercise the public command's ship policy on real runner-shaped records. */
+static int hsv_ship_case(const char *body, bool accepted)
+{
+    char path[4096];
+    if (snprintf(path, sizeof path, "%s/ship.log", g_hsv_fixture_dir) >= (int)sizeof path)
+        return -1;
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    bool wrote = fputs(body, f) >= 0;
+    if (fclose(f) != 0 || !wrote) return -1;
+    char *args[] = { "--ship", path };
+    FILE *saved = g_hsv_err;
+    g_hsv_err = NULL;
+    int rc = check_hosted_suite_verdict_run(2, args);
+    g_hsv_err = saved;
+    return (rc == 0) == accepted ? 0 : -1;
+}
+
+#define HSV_SHIP_VERDICT \
+    "SUITE VERDICT mode=cold groups_total=1600 groups_ran=1586 " \
+    "groups_cached=0 groups_gated=14 groups_failed=0 self_skips=19 " \
+    "env_unobserved=4 load_flaky=0 toolkey=34e55dd75397\n"
+#define HSV_SHIP_HEAD "ALL TESTS PASSED \xE2\x80\x94 0/1586 groups failed"
+#define HSV_ONE_HEAD "ALL TESTS PASSED \xE2\x80\x94 0/1 groups failed\n"
+
+static int hsv_ship_cases(void)
+{
+    static const struct { const char *body; bool accepted; } cases[] = {
+        { "fixture: SOME TESTS FAILED\n" HSV_SHIP_VERDICT HSV_SHIP_HEAD "\n", true },
+        { HSV_SHIP_VERDICT HSV_SHIP_VERDICT HSV_SHIP_HEAD "\n", false },
+        { HSV_SHIP_HEAD "\nSUITE VERDICT mode=cold", false },
+        { "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+          "groups_cached=18446744073709551616 groups_gated=0 groups_failed=0 "
+          "self_skips=0 env_unobserved=0 load_flaky=0 toolkey=34e55dd75397\n" HSV_ONE_HEAD, false },
+        { "SUITE VERDICT mode=cold groups_total=1 groups_ran=18446744073709551615 "
+          "groups_cached=0 groups_gated=2 groups_failed=0 "
+          "self_skips=0 env_unobserved=0 load_flaky=0 toolkey=34e55dd75397\n" HSV_ONE_HEAD, false },
+        { HSV_SHIP_VERDICT HSV_SHIP_HEAD " [--exact filtered]\n", false },
+        { HSV_SHIP_VERDICT HSV_SHIP_HEAD " [--only filtered]\n", false },
+        { HSV_SHIP_VERDICT HSV_SHIP_HEAD " [--exact filtered] \t\r\n", false },
+        { HSV_SHIP_VERDICT HSV_SHIP_HEAD " [--only filtered]\r\n", false },
+        { "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+          "groups_cached=0 groups_gated=0 groups_failed=-1 "
+          "self_skips=0 env_unobserved=0 load_flaky=0 toolkey=34e55dd75397\n" HSV_ONE_HEAD, false },
+        { "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+          "groups_cached=0 groups_gated=0 groups_failed=0 "
+          "self_skips=0 env_unobserved=0 toolkey=34e55dd75397\n" HSV_ONE_HEAD, false },
+        { "  image child: ALL TESTS PASSED\n", false }
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        if (hsv_ship_case(cases[i].body, cases[i].accepted) != 0) return -1;
+    return 0;
+}
+#undef HSV_SHIP_VERDICT
+#undef HSV_SHIP_HEAD
+#undef HSV_ONE_HEAD
+
 /* Exercise the real release wrapper, replacing only its make subprocesses. */
 static int hsv_wrapper_make(void)
 {
@@ -304,6 +363,8 @@ static int hsv_run(int ready_fd)
         hsv_cleanup();
     if (!failed)
         failed = hsv_selftest_rejections() != 0;
+    if (!failed)
+        failed = hsv_ship_cases() != 0;
     if (!failed)
         failed = hsv_wrapper_cases() != 0;
     hsv_cleanup();

@@ -30,12 +30,12 @@
 
 static const char *const k_hsv_fields[] = {
     "mode", "groups_total", "groups_ran", "groups_cached", "groups_gated",
-    "groups_failed", "self_skips", "env_unobserved", "toolkey"
+    "groups_failed", "self_skips", "env_unobserved", "toolkey", "load_flaky"
 };
 enum { HSV_FIELDS = sizeof k_hsv_fields / sizeof k_hsv_fields[0] };
 enum { HSV_MODE = 0, HSV_TOTAL = 1, HSV_RAN = 2, HSV_CACHED = 3,
        HSV_GATED = 4, HSV_FAILED = 5, HSV_SKIPS = 6, HSV_UNOBS = 7,
-       HSV_TOOLKEY = 8 };
+       HSV_TOOLKEY = 8, HSV_LOAD_FLAKY = 9 };
 
 static const char k_hsv_verdict_prefix[] = "SUITE VERDICT ";
 static const char k_hsv_pass_prefix[] = "ALL TESTS PASSED \xE2\x80\x94 ";
@@ -64,50 +64,61 @@ static bool hsv_prefix_at(const char *line, size_t len, const char *pre)
     return len >= n && memcmp(line, pre, n) == 0;
 }
 
-/* Read the whole file. Returns NULL with a message already printed when the
- * file cannot be read (the script's `[ -r "$log" ]` guard). */
+/* Keep only verdict/headline lines: suite output can be arbitrarily large.
+ * Candidate lines must be complete and bounded; unrelated long lines are
+ * discarded without affecting their interpretation. */
+static bool hsv_candidate(const char *line)
+{
+    return strncmp(line, k_hsv_verdict_prefix, strlen(k_hsv_verdict_prefix)) == 0 ||
+           strncmp(line, k_hsv_pass_prefix, strlen(k_hsv_pass_prefix)) == 0 ||
+           strncmp(line, k_hsv_cached_prefix, strlen(k_hsv_cached_prefix)) == 0 ||
+           strncmp(line, k_hsv_failed_prefix, strlen(k_hsv_failed_prefix)) == 0;
+}
+
+static bool hsv_record_line(char *out, size_t cap, size_t *used,
+                            char *line, size_t len, bool complete)
+{
+    line[len] = '\0';
+    if (!hsv_candidate(line)) return true;
+    if (!complete || len + 1 >= cap - *used) return false;
+    memcpy(out + *used, line, len);
+    *used += len;
+    out[(*used)++] = '\n';
+    return true;
+}
+
 static char *hsv_read_file(const char *path, size_t *out_size)
 {
+    enum { HSV_LINE_CAP = 4096, HSV_OUTPUT_CAP = 65536 };
+    char line[HSV_LINE_CAP];
+    size_t len = 0, used = 0;
+    bool overflow = false, ok = true;
     FILE *f = fopen(path, "rb");
-    char *buf;
-    size_t cap = 1 << 16, used = 0;
+    char *out = zcl_malloc(HSV_OUTPUT_CAP, "hsv_log_buffer");
     *out_size = 0;
-    if (!f) {
-        hsv_fail("suite log is not readable: %s", path);
-        return NULL;
+    if (!f || !out) goto fail;
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == 0) { ok = false; break; }
+        if (c == '\n') {
+            if (!hsv_record_line(out, HSV_OUTPUT_CAP, &used, line, len, !overflow)) {
+                ok = false; break;
+            }
+            len = 0; overflow = false;
+        } else if (len < sizeof(line) - 1) line[len++] = (char)c;
+        else overflow = true;
     }
-    buf = zcl_malloc(cap, "hsv_log_buffer");
-    if (!buf) {
-        fclose(f);
-        hsv_fail("suite log is not readable: %s", path);
-        return NULL;
-    }
-    for (;;) {
-        size_t got;
-        if (used == cap) {
-            char *grown;
-            if (cap > (size_t)-1 / 2)
-                break;
-            cap *= 2;
-            grown = zcl_realloc(buf, cap, "hsv_log_buffer");
-            if (!grown)
-                break;
-            buf = grown;
-        }
-        got = fread(buf + used, 1, cap - used, f);
-        used += got;
-        if (got == 0)
-            break;
-    }
-    fclose(f);
-    if (used == cap) {
-        free(buf);
-        hsv_fail("suite log is not readable: %s", path);
-        return NULL;
-    }
-    buf[used] = '\0';
-    *out_size = used;
-    return buf;
+    if (ferror(f) || (len && !hsv_record_line(out, HSV_OUTPUT_CAP, &used, line, len, false)))
+        ok = false;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) { free(out); hsv_fail("suite log has invalid or incomplete candidate line"); return NULL; }
+    out[used] = '\0'; *out_size = used;
+    return out;
+fail:
+    if (f) fclose(f);
+    free(out);
+    hsv_fail("suite log is not readable: %s", path);
+    return NULL;
 }
 
 /* Parse a digits-only string with the same 64-bit wrap arithmetic bash used
@@ -200,8 +211,15 @@ struct hsv_scan {
     size_t verdict_count;
     char *verdict_line;        /* owned copy of the first verdict line */
     size_t pass_headlines;
-    bool cached_headline, failed_headline;
+    bool cached_headline, failed_headline, filtered_headline;
 };
+
+static bool hsv_suffix_at(const char *line, size_t len, const char *suffix)
+{
+    size_t n = strlen(suffix);
+    while (len && (line[len - 1] == ' ' || line[len - 1] == '\t' || line[len - 1] == '\r')) len--;
+    return len >= n && memcmp(line + len - n, suffix, n) == 0;
+}
 
 static void hsv_scan_lines(char *buf, size_t size, struct hsv_scan *sc)
 {
@@ -225,8 +243,11 @@ static void hsv_scan_lines(char *buf, size_t size, struct hsv_scan *sc)
                 sc->verdict_line = line;
             }
         }
-        if (hsv_prefix_at(line, len, k_hsv_pass_prefix))
+        if (hsv_prefix_at(line, len, k_hsv_pass_prefix)) {
             sc->pass_headlines++;
+            sc->filtered_headline = hsv_suffix_at(line, len, " [--exact filtered]") ||
+                                    hsv_suffix_at(line, len, " [--only filtered]");
+        }
         if (hsv_prefix_at(line, len, k_hsv_cached_prefix))
             sc->cached_headline = true;
         if (hsv_prefix_at(line, len, k_hsv_failed_prefix))
@@ -242,7 +263,7 @@ static void hsv_scan_lines(char *buf, size_t size, struct hsv_scan *sc)
 static void hsv_validate_fields(const struct hsv_values *vals, int *bad)
 {
     for (int i = 0; i < (int)HSV_FIELDS; i++)
-        if (!vals->present[i]) {
+        if (i != HSV_LOAD_FLAKY && !vals->present[i]) {
             hsv_fail("suite verdict is missing field: %s", k_hsv_fields[i]);
             *bad = 1;
         }
@@ -258,6 +279,10 @@ static void hsv_validate_fields(const struct hsv_values *vals, int *bad)
                      k_hsv_fields[i], s);
             *bad = 1;
         }
+    }
+    if (vals->present[HSV_LOAD_FLAKY] && !lct_is_digits(vals->v[HSV_LOAD_FLAKY])) {
+        hsv_fail("suite load_flaky is not a non-negative integer");
+        *bad = 1;
     }
     if (!hsv_is_lower_hex12(hsv_show(vals, HSV_TOOLKEY))) {
         hsv_fail("suite toolkey is not 12 lowercase hex characters: %s",
@@ -311,7 +336,60 @@ static void hsv_validate_counts(const struct hsv_values *vals, int *bad)
     }
 }
 
-int hsv_check_log(const char *path, FILE *out)
+/* Ship never permits wraparound to turn an invalid count into zero. */
+static bool hsv_ship_number(const char *s, uint64_t *out)
+{
+    if (!s || !lct_is_digits(s)) return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(s, &end, 10);
+    if (errno == ERANGE || !end || *end || value > UINT64_MAX) return false;
+    *out = (uint64_t)value;
+    return true;
+}
+
+static void hsv_ship_counts(const struct hsv_values *vals, int *bad)
+{
+    uint64_t counts[HSV_FIELDS] = {0};
+    for (int i = HSV_TOTAL; i <= HSV_UNOBS; i++) {
+        if (!hsv_ship_number(vals->v[i], &counts[i])) {
+            hsv_fail("invalid ship count: %s", k_hsv_fields[i]);
+            *bad = 1; return;
+        }
+    }
+    if (!vals->present[HSV_LOAD_FLAKY] ||
+        !hsv_ship_number(vals->v[HSV_LOAD_FLAKY], &counts[HSV_LOAD_FLAKY])) {
+        hsv_fail("missing or invalid ship load_flaky"); *bad = 1; return;
+    }
+    uint64_t ran = counts[HSV_RAN], gated = counts[HSV_GATED];
+    if (!counts[HSV_TOTAL] || !ran || counts[HSV_CACHED] || counts[HSV_FAILED] ||
+        ran > UINT64_MAX - gated || ran + gated != counts[HSV_TOTAL] ||
+        counts[HSV_SKIPS] > ran) {
+        hsv_fail("ship suite counts are incomplete or failed"); *bad = 1;
+    }
+}
+
+static void hsv_check_headlines(const struct hsv_scan *sc, bool ship, int *bad)
+{
+    if (sc->pass_headlines != 1) {
+        hsv_fail("expected exactly one cold ALL TESTS PASSED headline");
+        *bad = 1;
+    }
+    if (ship && sc->filtered_headline) {
+        hsv_fail("filtered suite is not full-suite evidence");
+        *bad = 1;
+    }
+    if (sc->cached_headline) {
+        hsv_fail("cached pass headline is not hosted cold-suite evidence");
+        *bad = 1;
+    }
+    if (sc->failed_headline) {
+        hsv_fail("failure headline is present");
+        *bad = 1;
+    }
+}
+
+static int hsv_check_log_mode(const char *path, FILE *out, bool ship)
 {
     size_t size;
     char *buf = hsv_read_file(path, &size);
@@ -334,21 +412,15 @@ int hsv_check_log(const char *path, FILE *out)
                          &vals, &bad);
     }
     hsv_validate_fields(&vals, &bad);
-    if (!bad)
-        hsv_validate_counts(&vals, &bad);
-    if (sc.pass_headlines != 1) {
-        hsv_fail("expected exactly one cold ALL TESTS PASSED headline");
-        bad = 1;
-    }
-    if (sc.cached_headline) {
-        hsv_fail("cached pass headline is not hosted cold-suite evidence");
-        bad = 1;
-    }
-    if (sc.failed_headline) {
-        hsv_fail("failure headline is present");
-        bad = 1;
-    }
-    if (!bad && out)
+    if (!bad && ship) hsv_ship_counts(&vals, &bad);
+    if (!bad && !ship) hsv_validate_counts(&vals, &bad);
+    hsv_check_headlines(&sc, ship, &bad);
+    if (!bad && out && ship)
+        fprintf(out, "ship-suite-verdict: PASS: groups_total=%s groups_ran=%s "
+                "groups_gated=%s self_skips=%s env_unobserved=%s load_flaky=%s\n",
+                vals.v[HSV_TOTAL], vals.v[HSV_RAN], vals.v[HSV_GATED],
+                vals.v[HSV_SKIPS], vals.v[HSV_UNOBS], vals.v[HSV_LOAD_FLAKY]);
+    if (!bad && out && !ship)
         fprintf(out,
             "hosted-suite-verdict: PASS: cold groups_total=%s groups_ran=%s "
             "groups_gated=%s self_skips=%s\n",
@@ -358,13 +430,25 @@ int hsv_check_log(const char *path, FILE *out)
     return bad ? 1 : 0;
 }
 
+int hsv_check_log(const char *path, FILE *out)
+{
+    return hsv_check_log_mode(path, out, false);
+}
+
+static int hsv_check_ship_log(const char *path, FILE *out)
+{
+    return hsv_check_log_mode(path, out, true);
+}
+
 int check_hosted_suite_verdict_run(int argc, char **argv)
 {
     g_hsv_err = stderr;
     if (argc == 1 && strcmp(argv[0], "--self-test") == 0)
         return check_hosted_suite_verdict_selftest();
+    if (argc == 2 && strcmp(argv[0], "--ship") == 0 && argv[1][0])
+        return hsv_check_ship_log(argv[1], stdout);
     if (argc == 1 && argv[0][0])
         return hsv_check_log(argv[0], stdout);
-    hsv_fail("usage: z23-lint check-hosted-suite-verdict --self-test | LOG");
+    hsv_fail("usage: z23-lint check-hosted-suite-verdict --self-test | [--ship] LOG");
     return 2;
 }
