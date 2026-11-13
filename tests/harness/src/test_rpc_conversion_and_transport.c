@@ -33,10 +33,11 @@
 #include "kernel/command_registry.h"
 #include <fcntl.h>
 #include <pthread.h>
-#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "test/test_rpc_priv.h"
 /* ZCL_TESTING seam in tools/command/native_fleet_board_command.c. */
@@ -1299,47 +1300,25 @@ static void rt_case_real(const char *dir, const char *nodir)
 }
 static volatile sig_atomic_t rt_signal_count;
 static void rt_noop_signal(int sig) { (void)sig; rt_signal_count++; }
-struct rt_signal_sender {
-    pthread_t target;
-    atomic_bool ready;
-    atomic_bool start;
-    int64_t started, first_sent, last_sent;
-    int sent, failed;
-};
-
-/* Ten SIGUSR1s at real 20ms intervals. Sleep coalescing on background Mac
- * threads can exceed the entire 40ms verdict window, so yield against a
- * monotonic schedule for this bounded 200ms stimulus instead. */
-static void *rt_signal_loop(void *target)
-{
-    struct rt_signal_sender *sender = target;
-    atomic_store(&sender->ready, true);
-    while (!atomic_load(&sender->start)) sched_yield();
-    const int64_t start = rt_now();
-    sender->started = start;
-    for (int i = 1; i <= 10; i++) {
-        while (rt_now() < start + i * 20) sched_yield();
-        if (pthread_kill(sender->target, SIGUSR1) == 0) {
-            int64_t sent_at = rt_now();
-            if (!sender->sent) sender->first_sent = sent_at;
-            sender->last_sent = sent_at;
-            sender->sent++;
-        } else sender->failed++;
-    }
-    return NULL;
-}
-
 struct rt_connect_wait {
     platform_socket_t fd;
     int interrupted;
     int calls;
+    bool timer_failed;
     int64_t first_entry, last_exit;
 };
 
 static int rt_connect_wait_real(int wait_ms, void *ctx)
 {
     struct rt_connect_wait *wait = ctx;
-    if (!wait->calls) wait->first_entry = rt_now();
+    if (!wait->calls) {
+        wait->first_entry = rt_now();
+        const struct itimerval timer = { .it_interval = {0, 1000}, .it_value = {0, 1000} };
+        if (setitimer(ITIMER_REAL, &timer, NULL) != 0) {
+            wait->timer_failed = true;
+            return -1;
+        }
+    }
     wait->calls++;
     int result = platform_socket_wait_writable(wait->fd, wait_ms);
     int saved_errno = errno;
@@ -1350,16 +1329,10 @@ static int rt_connect_wait_real(int wait_ms, void *ctx)
     return result;
 }
 
-static void rt_signal_timing(const struct rt_signal_sender *sender,
-                             const struct rt_connect_wait *wait, int64_t t0)
+static void rt_signal_timing(const struct rt_connect_wait *wait, int64_t t0)
 {
-    printf("  signal timing ms: sender_start=%lld first_send_return=%lld last_send_return=%lld "
-           "sent=%d send_failed=%d wait_entry=%lld wait_exit=%lld calls=%d "
+    printf("  signal timing ms: wait_entry=%lld wait_exit=%lld calls=%d "
            "eintr=%d handled=%d (-1 means absent)\n",
-           (long long)(sender->started ? sender->started - t0 : -1),
-           (long long)(sender->sent ? sender->first_sent - t0 : -1),
-           (long long)(sender->sent ? sender->last_sent - t0 : -1),
-           sender->sent, sender->failed,
            (long long)(wait->calls ? wait->first_entry - t0 : -1),
            (long long)(wait->calls ? wait->last_exit - t0 : -1),
            wait->calls, wait->interrupted, (int)rt_signal_count);
@@ -1368,39 +1341,24 @@ static void rt_signal_timing(const struct rt_signal_sender *sender,
 static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
                                   platform_socket_t fd, int pass)
 {
-    pthread_t signaler;
-    struct rt_signal_sender sender = { .target = pthread_self() };
     struct rt_connect_wait wait = { .fd = fd };
     rt_signal_count = 0;
-    if (pthread_create(&signaler, NULL, rt_signal_loop, &sender) != 0) {
-        rt_expect(false, "real-signal sender setup", 0, 0);
-        return false;
-    }
-    const int64_t ready_until = rt_now() + 1000;
-    while (!atomic_load(&sender.ready) && rt_now() < ready_until)
-        sched_yield();
-    if (!atomic_load(&sender.ready)) {
-        atomic_store(&sender.start, true);
-        pthread_join(signaler, NULL);
-        rt_expect(false, "real-signal sender ready before deadline measurement", 0, 0);
-        return false;
-    }
     node_rpc_test_set_connect_wait(rt_connect_wait_real, &wait);
     int64_t t0 = rt_now();
-    atomic_store(&sender.start, true);
     char *b = pass ? rt_relative40(dir, port, 0) : rt_until(dir, port, 40);
     int64_t ms = rt_now() - t0;
     node_rpc_test_set_connect_wait(NULL, NULL);
-    pthread_join(signaler, NULL);
+    const struct itimerval stopped = {0};
+    bool timer_ok = setitimer(ITIMER_REAL, &stopped, NULL) == 0 && !wait.timer_failed;
     printf("  real-signal connect-phase: interrupted=%d\n", wait.interrupted);
-    bool matched = wait.interrupted > 0 && rt_has(b, "connect timed out") && ms >= 35 && ms < 150;
+    bool matched = timer_ok && wait.interrupted > 0 && rt_has(b, "connect timed out") && ms >= 35 && ms < 150;
     const char *name = pass ? "same for the relative-deadline entry"
                             : "40ms + real signals: connect phase keeps original deadline";
     char failure_name[192];
     if (!matched) {
-        rt_signal_timing(&sender, &wait, t0);
-        snprintf(failure_name, sizeof failure_name, "%s interrupted=%d timeout_match=%d",
-                 name, wait.interrupted, rt_has(b, "connect timed out"));
+        rt_signal_timing(&wait, t0);
+        snprintf(failure_name, sizeof failure_name, "%s interrupted=%d timeout_match=%d timer_ok=%d",
+                 name, wait.interrupted, rt_has(b, "connect timed out"), timer_ok);
         name = failure_name;
     }
     rt_expect(matched, name, ms, 0);
@@ -1411,9 +1369,9 @@ static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
 /* A full local stream supplies a real nonwritable descriptor to the production
  * connect-phase loop. TCP backlog saturation is not portable: a kernel may
  * complete handshakes despite the requested accept queue limit. The clock,
- * poll and SIGUSR1 interruptions here are real; only connect readiness is
+ * poll and SIGALRM interruptions here are real; only connect readiness is
  * controlled. Healthy TCP connections are exercised by rt_case_real. */
-static void rt_case_connect_eintr(const char *dir)
+static void rt_case_connect_eintr_child(const char *dir)
 {
     platform_socket_t listener = PLATFORM_SOCKET_INVALID;
     platform_socket_t pair[2] = { PLATFORM_SOCKET_INVALID, PLATFORM_SOCKET_INVALID };
@@ -1436,9 +1394,12 @@ static void rt_case_connect_eintr(const char *dir)
         rt_expect(false, "real-signal connect-phase descriptor remains nonwritable", 0, 0);
         goto cleanup;
     }
-    struct sigaction act = { .sa_handler = rt_noop_signal }, old;
+    struct sigaction act = { .sa_handler = rt_noop_signal };
+    sigset_t alarms;
     sigemptyset(&act.sa_mask);
-    if (sigaction(SIGUSR1, &act, &old) != 0) {
+    sigemptyset(&alarms);
+    sigaddset(&alarms, SIGALRM);
+    if (sigaction(SIGALRM, &act, NULL) != 0 || sigprocmask(SIG_UNBLOCK, &alarms, NULL) != 0) {
         rt_expect(false, "real-signal handler setup", 0, 0);
         goto cleanup;
     }
@@ -1446,12 +1407,51 @@ static void rt_case_connect_eintr(const char *dir)
         if (!rt_connect_eintr_pass(dir, port, pair[0], pass))
             break;
     }
-    sigaction(SIGUSR1, &old, NULL);
 cleanup:
     node_rpc_test_set_connect_wait(NULL, NULL);
     platform_socket_close(pair[0]);
     platform_socket_close(pair[1]);
     platform_socket_close(listener);
+}
+
+/* Bound the isolated fixture without changing either 40ms RPC deadline. */
+static bool rt_reap_signal_child(pid_t pid, int *status)
+{
+    int64_t deadline = rt_now() + 10000;
+    bool killed = false;
+    for (;;) {
+        pid_t r = waitpid(pid, status, WNOHANG);
+        if (r == pid) return !killed;
+        if (r < 0 && errno != EINTR) return false;
+        if (rt_now() >= deadline) {
+            if (killed) {
+                fprintf(stderr, "real-signal fixture killed child exit unobserved\n");
+                return false;
+            }
+            fprintf(stderr, "real-signal fixture child exceeded supervisor deadline\n");
+            if (kill(pid, SIGKILL) != 0 && errno != ESRCH) return false;
+            killed = true;
+            deadline = rt_now() + 30000;
+        }
+        platform_sleep_ms(10); /* real-clock: supervises an OS child process */
+    }
+}
+
+/* Prior fixture workers have joined. The child owns its kernel timer and
+ * signal disposition; neither changes the parent's signal state. */
+static void rt_case_connect_eintr(const char *dir)
+{
+    int before = g_rt_failures, status = 0;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        rt_case_connect_eintr_child(dir);
+        fflush(NULL);
+        _exit(g_rt_failures == before ? 0 : 1);
+    }
+    bool ok = pid > 0 && rt_reap_signal_child(pid, &status) &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok) rt_expect(false, "isolated real-signal fixture", 0, 0);
 }
 
 /* Scripted transport (node_rpc_test_script): fake clock and polls drive the production
