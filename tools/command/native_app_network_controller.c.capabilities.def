@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_app_network_controller.c", CAP_FS_WRITE|CAP_CLOCK, "Checked allocation reports failure to stderr; waits for the owned worker completion.")
+ZCL_MODULE_CAPABILITY("tools/command/native_app_network_controller.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "Checked allocation reports failure to stderr; waits for the owned worker completion. The day-old scratch orphan sweep reads the anchor directory and re-verifies each candidate before deleting it.")
