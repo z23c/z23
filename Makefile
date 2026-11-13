@@ -14777,10 +14777,11 @@ endif
 ifeq ($(ZCL_HOST_WINDOWS),)
 CONTRIB_INBOX_BIN = $(BIN_DIR)/z23-contrib-inbox
 CONTRIB_INBOX_SRCS = tools/contrib_inbox.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+CONTRIB_INBOX_SRCS += tools/contrib_inbox_telegram.c platform/modules/platform/src/directory_transaction.c platform/modules/platform/src/private_directory.c
 CONTRIB_INBOX_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: contrib-inbox
 contrib-inbox: $(CONTRIB_INBOX_BIN)
-$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS) $(SPAWN_BINARY_HEADERS)
+$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS) $(SPAWN_BINARY_HEADERS) tools/contrib_inbox_telegram.h platform/modules/platform/include/platform/directory_transaction.h platform/modules/platform/include/platform/private_directory.h platform/modules/platform/include/platform/rename_compat.h platform/modules/base/include/base/hex.h
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \

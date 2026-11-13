@@ -215,6 +215,7 @@ struct ci_run_opts {
     const char *z23;       /* the fake poster, e.g. /bin/false */
     const char *engine;    /* isolated failing engine fixture, when set */
     const char *responder; /* overrides the scenario's responder path */
+    const char *telegram_group; /* opt-in group consumer over isolated fixtures */
     long fsize;            /* RLIMIT_FSIZE for the tool, or -1 for none */
 };
 
@@ -265,6 +266,10 @@ static int ci_pass_with(const struct ci_env *e, const struct ci_run_opts *o)
     if (o->z23) {
         argv[n++] = "--z23";
         argv[n++] = o->z23;
+    }
+    if (o->telegram_group) {
+        argv[n++] = "--telegram-group";
+        argv[n++] = o->telegram_group;
     }
     argv[n] = NULL;
     bool timed_out = false;
@@ -1288,6 +1293,200 @@ static int case_post_failure(void)
     return failures;
 }
 
+static int ci_tg_retention_checks(const struct ci_env *e, const struct ci_run_opts *opts,
+                                  const char *retained, const char *sent)
+{
+    int failures = 0;
+    char saved[1000];
+    (void)snprintf(saved, sizeof saved, "%s.saved", retained);
+    CI_CHECK("retain original bytes for fixture", rename(retained, saved) == 0);
+    CI_CHECK("tampered retained bytes", ci_wf(retained, "tampered"));
+    CI_CHECK("tampering refuses without send or ACK", ci_pass_with(e, opts) != 0 &&
+             ci_count(sent, "send") == 1 && ci_count(sent, "inbox") == 2);
+    CI_CHECK("restore retained bytes", unlink(retained) == 0 && rename(saved, retained) == 0);
+    CI_CHECK("make retained file nonprivate", chmod(retained, 0644) == 0);
+    CI_CHECK("nonprivate retention refuses without send or ACK", ci_pass_with(e, opts) != 0 &&
+             ci_count(sent, "send") == 1 && ci_count(sent, "inbox") == 2);
+    CI_CHECK("restore private mode", chmod(retained, 0600) == 0);
+    CI_CHECK("move retained target", rename(retained, saved) == 0);
+    CI_CHECK("replace retained file with symlink", symlink(saved, retained) == 0);
+    CI_CHECK("symlink retention refuses without send or ACK", ci_pass_with(e, opts) != 0 &&
+             ci_count(sent, "send") == 1 && ci_count(sent, "inbox") == 2);
+    CI_CHECK("restore retained file", unlink(retained) == 0 && rename(saved, retained) == 0);
+    return failures;
+}
+
+static bool ci_tg_five_rows(const struct ci_env *e)
+{
+    FILE *f = fopen(e->list, "wb");
+    if (!f) return false;
+    bool ok = fprintf(f, "{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\","
+        "\"bot_id\":7777777777,\"receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"count\":5,\"dropped\":0,\"more\":false,\"next_offset\":25,\"messages\":[") > 0;
+    for (int i = 0; i < 5; ++i)
+        if (fprintf(f, "%s{\"update_id\":%d,\"chat_id\":4242,\"chat_type\":\"private\","
+            "\"message_id\":%d,\"from_id\":4242,\"kind\":\"text\","
+            "\"text\":\"private retained request\",\"truncated\":false}", i ? "," : "", 20+i, 7+i) < 0)
+            ok = false;
+    if (fputs("]}}", f) == EOF) ok = false;
+    return fclose(f) == 0 && ok;
+}
+
+static int case_telegram_batch_bound(void)
+{
+    struct ci_env e;
+    int failures = 0;
+    char bin[700], sent[740];
+    CI_CHECK("bounded Telegram fixture", ci_setup(&e, "telegram-bound"));
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    CI_CHECK("bounded Telegram transport", ci_wf(bin,
+        "#!/bin/sh\nprintf '%s\\n' \"$3 $4\" >> \"$0.sent\"\n"
+        "case \"$3\" in inbox) printf '%s\\n' '{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\",\"bot_id\":7777777777,\"count\":0,\"next_offset\":25}}';; "
+        "send) printf '%s\\n' '{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.send.v1\",\"chat_id\":-100123,\"message_ids\":[41]}}';; esac\n") && chmod(bin, 0700) == 0);
+    CI_CHECK("five retained rows", ci_tg_five_rows(&e));
+    const struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1};
+    CI_CHECK("first pass handles at most four", ci_pass_with(&e, &opts) == 0 &&
+             ci_count(sent, "inbox") == 0 && ci_count(sent, "send") == 0 &&
+             !ci_state_has(&e, "seen.txt", "tg:7777777777:4242:24:11"));
+    CI_CHECK("second pass acknowledges complete batch", ci_pass_with(&e, &opts) == 0 &&
+             ci_count(sent, "inbox") == 1 && ci_count(sent, "send") == 0 &&
+             ci_file_has(sent, "-100123") &&
+             ci_file_has(sent, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    CI_CHECK("all private rows locally disposed", ci_state_has(&e, "seen.txt", "tg:7777777777:4242:24:11"));
+    return failures;
+}
+
+static bool ci_tg_single_row(const struct ci_env *e, const char *bot, const char *chat)
+{
+    char json[2048];
+    int n = snprintf(json, sizeof json,
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\",\"bot_id\":%s,"
+        "\"receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"count\":1,\"dropped\":0,\"more\":false,\"next_offset\":21,\"messages\":["
+        "{\"update_id\":20,\"chat_id\":%s,\"chat_type\":\"supergroup\",\"message_id\":7,"
+        "\"from_id\":555,\"kind\":\"text\",\"text\":\"how do I build?\",\"truncated\":false}]}}", bot, chat);
+    return n > 0 && (size_t)n < sizeof json && ci_wf(e->list, json);
+}
+
+static bool ci_tg_fake(const char *bin, bool fail_send)
+{
+    const char *send = fail_send ? "exit 1" :
+        "printf '%s\\n' '{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.send.v1\",\"chat_id\":-100123,\"message_ids\":[41]}}'";
+    char script[2048];
+    int n = snprintf(script, sizeof script,
+        "#!/bin/sh\nprintf '%%s\\n' \"$3 $4\" >> \"$0.sent\"\n"
+        "case \"$3\" in inbox) printf '%%s\\n' '{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\","
+        "\"bot_id\":7777777777,\"count\":0,\"next_offset\":21}}';; send) %s;; esac\n", send);
+    return n > 0 && (size_t)n < sizeof script && ci_wf(bin, script) && chmod(bin, 0700) == 0;
+}
+
+static int ci_tg_disposition_case(const char *tag, const char *reply, bool fail_send)
+{
+    struct ci_env e;
+    int failures = 0;
+    char bin[700], sent[740];
+    CI_CHECK("disposition fixture", ci_setup(&e, tag));
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    CI_CHECK("disposition transport", ci_tg_fake(bin, fail_send));
+    CI_CHECK("disposition input", ci_tg_single_row(&e, "7777777777", "-100123"));
+    CI_CHECK("disposition model", ci_model_reply(&e, reply));
+    const struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1};
+    CI_CHECK("disposition completes", ci_pass_with(&e, &opts) == 0);
+    CI_CHECK("disposition ACKs exact receipt", ci_count(sent, "inbox") == 1 &&
+             ci_file_has(sent, "group_chat_id\":-100123") &&
+             ci_file_has(sent, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    CI_CHECK("disposition sends at most once", ci_count(sent, "send") == (fail_send ? 1 : 0));
+    CI_CHECK("disposition recorded", ci_state_has(&e, "seen.txt", "tg:7777777777:-100123:20:7"));
+    if (!strcmp(reply, "IGNORE: resolved"))
+        CI_CHECK("ignore classified", ci_has_events(&e, "IGNORED "));
+    if (!strcmp(reply, "ESCALATE: needs review"))
+        CI_CHECK("escalation retained", ci_state_has(&e, "escalate.tsv", "needs review"));
+    if (fail_send)
+        CI_CHECK("ambiguous send retained for review", ci_state_has(&e, "escalate.tsv", "answer post failed; not retried"));
+    CI_CHECK("disposition replay does not resend", ci_pass_with(&e, &opts) == 0 &&
+             ci_count(sent, "send") == (fail_send ? 1 : 0) && ci_count(sent, "inbox") == 2);
+    return failures;
+}
+
+static int case_telegram_ack_failure(void)
+{
+    struct ci_env e;
+    int failures = 0;
+    char bin[700], sent[740];
+    CI_CHECK("ACK failure fixture", ci_setup(&e, "telegram-ack-failure"));
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    CI_CHECK("ACK failure input", ci_tg_single_row(&e, "7777777777", "-100123"));
+    CI_CHECK("ACK failure model", ci_model_reply(&e, "ANSWER: run make z23"));
+    struct ci_run_opts opts = {.live = true, .z23 = "/bin/false", .telegram_group = "-100123", .fsize = -1};
+    CI_CHECK("uncertain ACK fails pass but retains attempt", ci_pass_with(&e, &opts) != 0 &&
+             ci_state_has(&e, "seen.txt", "tg:7777777777:-100123:20:7"));
+    CI_CHECK("transport recovers", ci_tg_fake(bin, false));
+    opts.z23 = bin;
+    CI_CHECK("replay ACKs without retrying uncertain send", ci_pass_with(&e, &opts) == 0 &&
+             ci_count(sent, "inbox") == 1 && ci_count(sent, "send") == 0);
+    return failures;
+}
+
+static int ci_tg_invalid_case(const char *tag, const char *bot, const char *chat)
+{
+    struct ci_env e;
+    int failures = 0;
+    char bin[700], sent[740];
+    CI_CHECK("invalid Telegram fixture", ci_setup(&e, tag));
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    CI_CHECK("invalid Telegram transport", ci_tg_fake(bin, false));
+    CI_CHECK("invalid Telegram input", ci_tg_single_row(&e, bot, chat));
+    const struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1};
+    CI_CHECK("invalid identity refuses without side effects", ci_pass_with(&e, &opts) != 0 &&
+             ci_count(sent, "inbox") == 0 && ci_count(sent, "send") == 0 &&
+             !ci_state_has(&e, "seen.txt", "tg:"));
+    return failures;
+}
+
+static int case_telegram_replay(void)
+{
+    struct ci_env e;
+    int failures = 0;
+    char bin[700], sent[740], retained[900], task[900];
+    const char *receipt = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    CI_CHECK("telegram fixture directory", ci_setup(&e, "telegram-replay"));
+    (void)snprintf(bin, sizeof bin, "%s/fake-telegram", e.d);
+    (void)snprintf(sent, sizeof sent, "%s.sent", bin);
+    CI_CHECK("telegram transport fixture", ci_wf(bin,
+        "#!/bin/sh\nprintf '%s\\n' \"$3 $4\" >> \"$0.sent\"\n"
+        "case \"$3\" in inbox) printf '%s\\n' '{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\",\"bot_id\":7777777777,\"count\":0,\"next_offset\":22}}';; "
+        "send) printf '%s\\n' '{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.send.v1\",\"chat_id\":-100123,\"message_ids\":[41]}}';; esac\n") && chmod(bin, 0700) == 0);
+    CI_CHECK("telegram mixed batch fixture", ci_wf(e.list,
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.telegram.inbox.v1\",\"bot_id\":7777777777,"
+        "\"receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"count\":2,\"dropped\":0,\"more\":false,\"next_offset\":22,\"messages\":["
+        "{\"update_id\":20,\"chat_id\":-100123,\"chat_type\":\"supergroup\",\"message_id\":7,"
+        "\"from_id\":555,\"kind\":\"text\",\"text\":\"how do I build?\",\"truncated\":false},"
+        "{\"update_id\":21,\"chat_id\":4242,\"chat_type\":\"private\",\"message_id\":8,"
+        "\"from_id\":4242,\"kind\":\"text\",\"text\":\"private retained request\",\"truncated\":false}]}}"));
+    CI_CHECK("telegram answer fixture", ci_model_reply(&e, "ANSWER: run make z23 as the build target"));
+    const struct ci_run_opts opts = {.live = true, .z23 = bin, .telegram_group = "-100123", .fsize = -1};
+    CI_CHECK("telegram mixed batch consumed", ci_pass_with(&e, &opts) == 0);
+    CI_CHECK("only group gets one answer", ci_count(sent, "send") == 1);
+    CI_CHECK("batch is acknowledged after retention", ci_count(sent, "inbox") == 1);
+    (void)snprintf(retained, sizeof retained, "%s/units/tg-batch-%s/inbox.json", e.state, receipt);
+    CI_CHECK("private message is retained", ci_file_has(retained, "private retained request"));
+    (void)snprintf(task, sizeof task, "%s/units/tg:7777777777:-100123:20:7/task.txt", e.state);
+    CI_CHECK("group task excludes private content", ci_file_has(task, "how do I build?") &&
+             !ci_file_has(task, "private retained request"));
+    CI_CHECK("ACK has configured group and exact receipt", ci_file_has(sent, "group_chat_id\":-100123") &&
+             ci_file_has(sent, receipt));
+    CI_CHECK("private message has local disposition", ci_state_has(&e, "escalate.tsv", "private Telegram message retained"));
+    CI_CHECK("lost acknowledgment replay is safe", ci_pass_with(&e, &opts) == 0 &&
+             ci_count(sent, "send") == 1 && ci_count(sent, "inbox") == 2);
+    failures += ci_tg_retention_checks(&e, &opts, retained, sent);
+    return failures;
+}
+
 static int case_malformed_fixture(void)
 {
     struct ci_env e;
@@ -1341,5 +1540,15 @@ int test_contrib_inbox(void)
     failures += case_fetch_failure();
     failures += case_post_failure();
     failures += case_malformed_fixture();
+    failures += case_telegram_replay();
+    failures += case_telegram_batch_bound();
+    failures += case_telegram_ack_failure();
+    failures += ci_tg_disposition_case("tg-ignore", "IGNORE: resolved", false);
+    failures += ci_tg_disposition_case("tg-escalate", "ESCALATE: needs review", false);
+    failures += ci_tg_disposition_case("tg-send-ambiguous", "ANSWER: run make z23", true);
+    failures += ci_tg_invalid_case("tg-bad-bot", "0", "-100123");
+    failures += ci_tg_invalid_case("tg-bot-type", "\"bad\"", "-100123");
+    failures += ci_tg_invalid_case("tg-wrong-group", "7777777777", "-100999");
+    failures += ci_tg_invalid_case("tg-group-type", "7777777777", "\"bad\"");
     return failures;
 }
