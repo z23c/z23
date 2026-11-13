@@ -14746,6 +14746,7 @@ ENGINE_UNIT_IDENTITY_STAMP := $(BUILD_DIR)/engine-unit/identity.stamp
 $(ENGINE_UNIT_IDENTITY_STAMP): FORCE $(BUILD_IDENTITY_STAMP)
 	@set -eu; \
 	mkdir -p "$(dir $@)"; \
+	ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	tmp="$$(mktemp "$(dir $@).stamp.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	printf '%s\n' 'source=$(BUILD_SOURCE_ID)' 'clean=$(BUILD_CLEAN)' > "$$tmp"; \

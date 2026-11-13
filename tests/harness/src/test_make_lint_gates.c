@@ -2020,13 +2020,16 @@ static int t_engine_unit_identity_rebuild(void)
 {
     static const char script[] =
         "set -eu; cd \"$2\"\n"
-        "mkdir -p engine/composition engine/modules/engine/include/engine\n"
+        "mkdir -p engine/composition engine/modules/engine/include/engine tools/dev\n"
         "for f in fixture.c source-identity.stamp engine/composition/prompt_templates.def engine/modules/engine/include/engine/prompt_sections.def; do : > \"$f\"; done\n"
         "cat > Fixture.mk <<'MAKE'\n"
         "BUILD_DIR := build\nBIN_DIR := build/bin\nBUILD_IDENTITY_STAMP := source-identity.stamp\n"
         "BUILD_IDENTITY_CPPFLAGS = -DZCL_BUILD_SOURCE_ID=\\\"$(BUILD_SOURCE_ID)\\\" -DZCL_BUILD_CLEAN=$(BUILD_CLEAN)\n"
         ".PHONY: FORCE\nFORCE:\nMAKE\n"
         "awk '/^ENGINE_UNIT_BIN =/{on=1; found=1} /^# .*z23-loop-tick:/{on=0} on{print} END{if(!found) exit 1}' \"$1/Makefile\" >> Fixture.mk\n"
+        "cat > tools/dev/source-identity.sh <<'VERIFY'\n"
+        "#!/bin/sh\nset -eu\ntest $# -eq 4; test \"$1\" = verify-record; test \"$2\" = \"$EXPECT_SOURCE\"; test \"$3\" = 1; test \"$4\" = \"$EXPECT_MUTATION\"\nVERIFY\n"
+        "chmod +x tools/dev/source-identity.sh\n"
         "cat > compiler <<'COMPILER'\n"
         "set -eu\nsource=\nclean=\nout=\n"
         "while [ $# -gt 0 ]; do case $1 in -DZCL_BUILD_SOURCE_ID=*) source=$1;; -DZCL_BUILD_CLEAN=*) clean=$1;; -o) shift; out=$1;; esac; shift; done\n"
@@ -2035,8 +2038,10 @@ static int t_engine_unit_identity_rebuild(void)
         "printf 'compile\\n' >> calls\nCOMPILER\n"
         "a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "EXPECT_MUTATION=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; export EXPECT_MUTATION\n"
+        "build() { EXPECT_SOURCE=$1; export EXPECT_SOURCE; make -s -f Fixture.mk engine-unit 'ENGINE_UNIT_SRCS=fixture.c' 'ENGINE_UNIT_INCLUDES=' 'NODE_VENDOR_LIBS=' 'SPAWN_BINARY_HEADERS=' 'CC=sh ./compiler' \"BUILD_SOURCE_ID=$1\" \"BUILD_CLEAN=$2\" \"BUILD_MUTATION=$EXPECT_MUTATION\" >> log 2>&1; }\n"
         "check() {\n"
-        "  make -s -f Fixture.mk engine-unit 'ENGINE_UNIT_SRCS=fixture.c' 'ENGINE_UNIT_INCLUDES=' 'NODE_VENDOR_LIBS=' 'SPAWN_BINARY_HEADERS=' 'CC=sh ./compiler' \"BUILD_SOURCE_ID=$1\" \"BUILD_CLEAN=$2\" >> log 2>&1 || { cat log >&2; return 1; }\n"
+        "  build \"$1\" \"$2\" || { cat log >&2; return 1; }\n"
         "  test \"$(wc -l < calls)\" -eq \"$3\" || { echo \"engine identity compile count: expected $3\" >&2; cat log >&2; return 1; }\n"
         "  printf '%s\\n' \"-DZCL_BUILD_SOURCE_ID=\\\"$1\\\"\" \"-DZCL_BUILD_CLEAN=$2\" > expected\n"
         "  cmp expected build/bin/z23-engine-unit\n"
@@ -2044,7 +2049,8 @@ static int t_engine_unit_identity_rebuild(void)
         "check \"$a\" 1 1; check \"$a\" 1 1\n"
         "check \"$b\" 1 2; check \"$b\" 1 2\n"
         "check \"$a\" 1 3; check \"$a\" 1 3\n"
-        "check \"$a\" 0 4; check \"$a\" 0 4; check \"$a\" 1 5\n";
+        "if build \"$a\" 0; then echo 'engine identity accepted incomplete source record' >&2; exit 1; fi\n"
+        "test \"$(wc -l < calls)\" -eq 3; check \"$a\" 1 3\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "engine_identity", "rebuild");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
