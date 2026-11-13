@@ -96,15 +96,21 @@ static void responding_node_line(const struct zapp_view *view, char *out, size_t
     else snprintf(out, cap, "Connected, checking the chain");
 }
 
-/* Plain node status; up to date is shown only for the CURRENT verdict. */
-static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+static bool early_node_line(const struct zapp_view *view, char *out, size_t cap)
 {
     if (view->node_stopping && view->node_installing) snprintf(out, cap, "Stopping…\nYou can use Z23");
     else if (view->node_installing) snprintf(out, cap, "Fast sync\n%s",
         view->node_wallet_replaying ? view->node_wallet_replay : "Preparing your wallet");
     else if (!view->node_process_running && view->node_starting && !view->node_stopping)
         snprintf(out, cap, "Starting node…\nYou can use Z23");
-    else if (!view->node_process_running) snprintf(out, cap, "Node stopped");
+    else return false;
+    return true;
+}
+/* Plain node status; up to date is shown only for the CURRENT verdict. */
+static const char *plain_node_line(const struct zapp_view *view, char *out, size_t cap)
+{
+    if (early_node_line(view, out, cap)) return out;
+    if (!view->node_process_running) snprintf(out, cap, "Node stopped");
     else if (view->node_stopping) snprintf(out, cap, "Stopping…\nYou can use Z23");
     else if (view->node_wallet_replaying && !view->node_running) snprintf(out, cap, "%s", view->node_wallet_replay);
     else if (!view->node_running && view->node_boot_stage[0]) snprintf(out, cap, "Starting node…\n%s", view->node_boot_stage);

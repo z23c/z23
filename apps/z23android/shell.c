@@ -823,12 +823,16 @@ static void clear_page_state(JNIEnv *env, enum screen next)
         shell.fleet_qr_shown = false;
     }
 }
+static void note_tool_origin(enum screen next, enum screen origin)
+{
+    if (next == SCREEN_APPS || next == SCREEN_SETTINGS || next == SCREEN_ASSISTANT || next == SCREEN_GAME)
+        if (origin != SCREEN_SCAN) shell.tool_origin = origin == SCREEN_MORE ? SCREEN_MORE : SCREEN_HOME;
+}
 static void go(JNIEnv *env, enum screen next)
 {
     enum wallet_page page = shell.wallet_entry ? shell.wallet_entry : WALLET_PAGE_FUNDS;
     enum screen origin = shell.current;
-    if (next == SCREEN_APPS || next == SCREEN_SETTINGS || next == SCREEN_ASSISTANT || next == SCREEN_GAME)
-        if (origin != SCREEN_SCAN) shell.tool_origin = origin == SCREEN_MORE ? SCREEN_MORE : SCREEN_HOME;
+    note_tool_origin(next, origin);
     shell.wallet_entry = WALLET_PAGE_FUNDS;
     next = screen_for(next);
     if (!ensure_screen(env, next)) {
@@ -1014,19 +1018,25 @@ static void choose_peer_mode(JNIEnv *env, size_t mode)
     else shell.action_notice[0] = 0;
     settings_status(env); show_notice(env);
 }
+static bool run_more_nav(JNIEnv *env, enum command command)
+{
+    switch (command) {
+    case CMD_MORE: go(env, SCREEN_MORE); return true;
+    case CMD_MORE_SCAN: begin_scan(env); return true;
+    case CMD_MORE_ASSISTANT: go(env, SCREEN_ASSISTANT); return true;
+    case CMD_MORE_START: shell.send("node_start", ""); return true;
+    case CMD_MORE_STOP: shell.send("node_stop", ""); return true;
+    case CMD_PLAY: go(env, SCREEN_GAME); return true;
+    default: return false;
+    }
+}
 static void run_nav(JNIEnv *env, const struct nav *nav)
 {
-    if (run_fleet_nav(env, nav)) return;
+    if (run_fleet_nav(env, nav) || run_more_nav(env, nav->command)) return;
     switch (nav->command) {
     case CMD_HOME: go(env, SCREEN_HOME); break;
-    case CMD_MORE: go(env, SCREEN_MORE); break;
-    case CMD_MORE_SCAN: begin_scan(env); break;
-    case CMD_MORE_ASSISTANT: go(env, SCREEN_ASSISTANT); break;
-    case CMD_MORE_START: shell.send("node_start", ""); break;
-    case CMD_MORE_STOP: shell.send("node_stop", ""); break;
     case CMD_APPS: go(env, SCREEN_APPS); break;
     case CMD_SETTINGS: go(env, SCREEN_SETTINGS); break;
-    case CMD_PLAY: go(env, SCREEN_GAME); break;
     case CMD_HOME_SETTINGS: open_home_settings(env); break;
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_PEER_MODE: choose_peer_mode(env, nav->arg); break;
@@ -1045,6 +1055,13 @@ static void launch(JNIEnv *env, const char *package, const char *activity, const
     snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open %.100s.", name);
     show_notice(env);
 }
+static void run_node_toggle(void)
+{
+    char label[32] = "";
+    (void)zapp_card_field(&shell.phone, "node_button", label, sizeof(label));
+    const char *action = zapp_home_node_action_for_label(label);
+    if (action[0]) shell.send(action, "");
+}
 static void run_tile(JNIEnv *env, const struct target *target)
 {
     char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
@@ -1054,12 +1071,7 @@ static void run_tile(JNIEnv *env, const struct target *target)
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
     else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
     else if (!strcmp(target->id, "node_start_home")) shell.send("node_start", "");
-    else if (!strcmp(target->id, "node_toggle")) {
-        char label[32] = "";
-        (void)zapp_card_field(&shell.phone, "node_button", label, sizeof(label));
-        const char *action = zapp_home_node_action_for_label(label);
-        if (action[0]) shell.send(action, "");
-    }
+    else if (!strcmp(target->id, "node_toggle")) run_node_toggle();
     else if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&
              target->card <= shell.app_count && zapp_card_field(&shell.app_cards[target->card - 1], "package", package, sizeof(package))) {
         (void)zapp_card_field(&shell.app_cards[target->card - 1], "label", name, sizeof(name));
@@ -1410,17 +1422,19 @@ static void restore_camera_settings(JNIEnv *env)
     resume_scan(env);
 }
 
+static void render_initial(JNIEnv *env, const struct zapp_view *view)
+{
+    shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
+    if (view->scanning && view->scan_paste) zapp_controller_cancel_scan();
+    if (!shell.preview && zapp_setup_ui_resume_needed()) go(env, SCREEN_SETUP);
+    else if (camera_settings_pending) restore_camera_settings(env);
+}
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!shell.activity || !view) return;
     /* A payment kept from the activity that was replaced is shown with its progress or outcome. */
     if (zapp_send_ui_take_reshow()) go(env, SCREEN_SEND);
-    if (!shell.rendered) {
-        shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
-        if (view->scanning && view->scan_paste) zapp_controller_cancel_scan();
-        if (!shell.preview && zapp_setup_ui_resume_needed()) go(env, SCREEN_SETUP);
-        else if (camera_settings_pending) restore_camera_settings(env);
-    }
+    if (!shell.rendered) render_initial(env, view);
     bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
     shell.scans_seen = view->scans_done;
     render_scan(env, view, finished, dismissed);

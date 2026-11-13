@@ -493,6 +493,11 @@ static void scrollable_home_grid(const struct zapp_node *home)
     assert(home->children[1].kind == ZAPP_NODE_GRID && home->children[1].child_count == 2);
     assert(!strcmp(home->children[1].children[0].id, "wallet") && !strcmp(home->children[1].children[1].id, "receive"));
 }
+static void assert_home_excludes_secondary(const char *document)
+{
+    assert(!strstr(document, "\"card\":\"z23_app\"") && !strstr(document, "\"id\":\"scan\"") && !strstr(document, "\"id\":\"assistant\""));
+    assert(!strstr(document, "\"record\"") && !strstr(document, "\"watch\"") && !strstr(document, "\"apps\"") && !strstr(document, "\"settings\""));
+}
 static void built_in_layouts(void)
 {
     static const char *const tiles[] = {"wallet", "receive"};
@@ -509,8 +514,7 @@ static void built_in_layouts(void)
         for (size_t t = 0; t < sizeof(tiles) / sizeof(tiles[0]); ++t) {
             assert(strstr(document, tiles[t]));
             assert(zapp_home_action_label(tiles[t]));
-            assert(!strstr(document, "\"card\":\"z23_app\"") && !strstr(document, "\"id\":\"scan\"") && !strstr(document, "\"id\":\"assistant\""));
-            assert(!strstr(document, "\"record\"") && !strstr(document, "\"watch\"") && !strstr(document, "\"apps\"") && !strstr(document, "\"settings\""));
+            assert_home_excludes_secondary(document);
         }
         zapp_layout_free(layout);
     }

@@ -409,6 +409,17 @@ static void observe_replay_status(bool responding, bool running, bool stopping, 
 #ifdef ZAPP_CONTROLLER_TEST
 static int node_observations_for_test;
 #endif
+static void observe_startup_view(struct controller *c, const struct node_reading *n,
+    bool running, bool stopping, bool replaying, const struct zapp_replay_progress *replay, const char *stage)
+{
+    c->view.node_wallet_replaying = !c->handoff_wait && !zapp_restart_notice(&c->restart) &&
+        zapp_nodelog_replay_visible(n->responding, running, stopping, replaying);
+    c->view.node_wallet_replay[0] = 0;
+    copy_text(c->view.node_boot_stage, sizeof(c->view.node_boot_stage),
+        !n->responding && running && !stopping && !c->handoff_wait && !zapp_restart_notice(&c->restart) ? stage : "");
+    if (c->view.node_wallet_replaying)
+        zapp_nodelog_replay_text(replay, c->view.node_wallet_replay, sizeof(c->view.node_wallet_replay));
+}
 static void observe_node_work(struct controller *c)
 {
 #ifdef ZAPP_CONTROLLER_TEST
@@ -465,13 +476,7 @@ static void observe_node_work(struct controller *c)
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
     c->view.node_installing = installing;
-    c->view.node_wallet_replaying = !c->handoff_wait && !zapp_restart_notice(&c->restart) &&
-        zapp_nodelog_replay_visible(n.responding, process_running, stopping, replaying);
-    c->view.node_wallet_replay[0] = 0;
-    copy_text(c->view.node_boot_stage, sizeof(c->view.node_boot_stage),
-              !n.responding && process_running && !stopping && !c->handoff_wait && !zapp_restart_notice(&c->restart) ? boot_stage : "");
-    if (c->view.node_wallet_replaying)
-        zapp_nodelog_replay_text(&replay, c->view.node_wallet_replay, sizeof(c->view.node_wallet_replay));
+    observe_startup_view(c, &n, process_running, stopping, replaying, &replay, boot_stage);
     c->view.pace = pace;
     c->view.node_wanted = wanted;
     c->view.node_stopping = stopping;
