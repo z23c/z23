@@ -1007,6 +1007,89 @@ static bool al_selection(struct al_fx *f, const char *name, struct app_selection
     for (size_t i = 0; i < 8; ++i) memset(roots[i], 1, 32);
     return app_selection_save(f->env.state_dir, 0, &s, saved) == APP_SELECTION_OK;
 }
+/* Drives the un-kept share journey: home -> app list -> card -> Share.
+ * Records whether the room shows the share-options page or an error card
+ * (the old dead end) or returns to the same app card (the fixed journey). */
+struct al_unsaved_share_script {
+    unsigned calls;
+    bool valid, saw_keep_hint, returned_to_card, saw_share_options, saw_error;
+};
+static bool al_unsaved_share_has(const struct zcl_present_model_v1 *model, const char *id)
+{
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, id)) return true;
+    return false;
+}
+/* App list: choose the first app card. */
+static bool al_unsaved_share_enter(struct al_unsaved_share_script *s,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    if (s->calls != 1) return false;
+    for (unsigned i = 0; i < model->action_count; ++i) {
+        if (strcmp(model->actions[i].id, "choose")) continue;
+        event->action_index = i; ++s->calls; return true;
+    }
+    return false;
+}
+/* App card: press Share and confirm the honest "Keep a version first." hint. */
+static bool al_unsaved_share_press(struct al_unsaved_share_script *s,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    if (s->calls != 2) return false;
+    for (unsigned i = 0; i < model->action_count; ++i) {
+        if (strcmp(model->actions[i].id, "share")) continue;
+        s->saw_keep_hint = s->saw_keep_hint ||
+            (i < model->item_count && !strcmp(model->items[i].value, "Keep a version first."));
+        event->action_index = i; ++s->calls; return true;
+    }
+    return false;
+}
+/* After the refused share the room must show this app card again. */
+static bool al_unsaved_share_step_back(struct al_unsaved_share_script *s,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    if (s->calls != 3) return false;
+    for (unsigned i = 0; i < model->action_count; ++i) {
+        if (strcmp(model->actions[i].id, "back")) continue;
+        s->returned_to_card = s->returned_to_card || !al_unsaved_share_has(model, "share-file");
+        event->action_index = i; ++s->calls; return true;
+    }
+    return false;
+}
+static bool al_unsaved_share_home(struct al_unsaved_share_script *s,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    if (strcmp(model->request_id, "library-home")) return false;
+    s->valid = s->valid && s->calls == 0 && model->action_count == 4 &&
+        !strcmp(model->actions[0].id, "myapps");
+    event->action_index = 0; ++s->calls; return true;
+}
+static bool al_unsaved_share_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy_text;
+    struct al_unsaved_share_script *s = context;
+    s->valid = s->valid && al_library_render(model, why, cap);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(model->request_id, "library-error")) {
+        s->saw_error = true; event->action_index = 0; return true;
+    }
+    if (!strcmp(model->request_id, "library-share-options")) {
+        s->saw_share_options = true;
+        /* Old dead end: take the first share action so the room refuses. */
+        s->valid = s->valid && al_unsaved_share_has(model, "share-file");
+        event->action_index = 0; return true;
+    }
+    if (al_unsaved_share_home(s, model, event)) return true;
+    if (al_unsaved_share_enter(s, model, event)) return true;
+    if (al_unsaved_share_press(s, model, event)) return true;
+    if (al_unsaved_share_step_back(s, model, event)) return true;
+    /* Journey finished: dismiss on the app list after stepping back. */
+    if (s->calls < 4) s->valid = false;
+    event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+    return true;
+}
 static int al_hex_digit(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -1214,6 +1297,19 @@ static int case_library(struct al_fx *f)
         ASSERT(s.valid && s.calls == 1 && s.errors == 1);
         ASSERT_STR_EQ(reply.error.code, "INVALID_SELECTION");
         ASSERT(!json_get(&reply.data, "pid"));
+    PASS(); }
+    TEST("Share on an un-kept app stays on its card instead of ejecting the user") {
+        struct app_selection unused;
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &unused) != APP_SELECTION_OK);
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        struct al_unsaved_share_script s = {.valid = true};
+        zcl_test_app_library_run(&f->env, &reply, al_unsaved_share_present, &s);
+        ASSERT(s.valid && s.saw_keep_hint && s.returned_to_card);
+        ASSERT(!s.saw_share_options && !s.saw_error);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(reply.error.code[0] == '\0');
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
     PASS(); }
     TEST("My Apps absent snapshot refuses a concurrent Keep, including catalog IDs") {
         struct app_selection saved;

@@ -1140,6 +1140,11 @@ static bool al_change_page(struct library *w, const char *id)
         {"change-options", 7}, {"share", 6}, {"share-back", 1},
         {"more-sharing", 9}, {"more-share-back", 6}
     };
+    /* An un-kept app cannot be shared yet: stay on its card instead of
+     * opening the share menu that could only refuse and end the room. */
+    if (!strcmp(id, "share") && !w->rows[w->index].saved) {
+        w->share_review = false; w->page = 1; return true;
+    }
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
         if (!strcmp(id, routes[i].id)) { w->share_review = false; w->page = routes[i].page; return true; }
     }
@@ -1152,6 +1157,12 @@ static bool al_share_dispatch(struct library *w, const char *id, const struct ap
 {
     bool prior_current = w->receive_current;
     w->receive_current = false;
+    /* Stale share selection on an un-kept row: return to the app card and
+     * keep the room open rather than refusing the whole session out. */
+    if (!w->rows[w->index].saved) {
+        w->receive_current = prior_current;
+        w->page = 1; w->operation_canceled = true; return true;
+    }
     if (!al_share_prepare(w, env, reply)) {
         if (w->preparation_canceled) w->receive_current = prior_current;
         return w->operation_canceled;
