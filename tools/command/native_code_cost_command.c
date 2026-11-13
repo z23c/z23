@@ -8,6 +8,7 @@
 #include "json/json.h"
 #include "util/safe_alloc.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -123,6 +124,109 @@ static const struct json_value *cost_timing_find(
     return NULL;
 }
 
+/* A timing row only measures a group when its duration is a nonnegative
+ * integer. Missing, mistyped and negative durations remain unmeasured. */
+static bool cost_valid_ms(const struct json_value *row)
+{
+    const struct json_value *ms = row ? json_get(row, "ms") : NULL;
+    return ms && ms->type == JSON_INT && json_get_int(ms) >= 0;
+}
+
+struct cost_totals { long long ms; size_t measured; bool overflow; };
+
+static void cost_add_ms(struct cost_totals *totals, long long value)
+{
+    if ((value > 0 && totals->ms > LLONG_MAX - value) ||
+        (value < 0 && totals->ms < LLONG_MIN - value))
+        totals->overflow = true;
+    else if (!totals->overflow)
+        totals->ms += value;
+}
+
+static void cost_group_collect(const struct agent_impact_acc *acc, size_t shown,
+                               const struct json_value *timing,
+                               struct json_value *names, struct json_value *groups,
+                               struct cost_totals *totals)
+{
+    for (size_t i = 0; i < acc->groups_len; i++) {
+        const struct json_value *t = timing ? cost_timing_find(timing, acc->groups[i]) : NULL;
+        if (!cost_valid_ms(t)) t = NULL;
+        if (t) { cost_add_ms(totals, json_get_int(json_get(t, "ms"))); totals->measured++; }
+        if (i >= shown) continue;
+        struct json_value item, row;
+        json_init(&item); json_set_str(&item, acc->groups[i]);
+        (void)json_push_back(names, &item); json_free(&item);
+        json_init(&row); json_set_object(&row);
+        (void)json_push_kv_str(&row, "name", acc->groups[i]);
+        if (t) {
+            (void)json_push_kv_int(&row, "ms", json_get_int(json_get(t, "ms")));
+            (void)json_push_kv_int(&row, "rc", json_get_int(json_get(t, "rc")));
+            (void)json_push_kv_bool(&row, "cached", json_get_bool(json_get(t, "cached")));
+            (void)json_push_kv_bool(&row, "measured", true);
+        } else {
+            (void)json_push_kv_bool(&row, "measured", false);
+        }
+        (void)json_push_back(groups, &row); json_free(&row);
+    }
+}
+
+static void cost_group_count(struct json_value *data, const struct agent_impact_acc *acc,
+                             size_t shown)
+{
+    (void)json_push_kv_int(data, "test_groups_retained_count", (int64_t)acc->groups_len);
+    (void)json_push_kv_bool(data, "test_groups_lost", acc->groups_lost);
+    (void)json_push_kv_bool(data, "test_groups_truncated", shown < acc->groups_len || acc->groups_lost);
+    if (acc->groups_lost) {
+        struct json_value unknown;
+        json_init(&unknown); json_set_null(&unknown);
+        (void)json_push_kv(data, "total_groups", &unknown); json_free(&unknown);
+    } else {
+        (void)json_push_kv_int(data, "total_groups", (int64_t)acc->groups_len);
+    }
+}
+
+/* Totals cover retained groups, including entries beyond the displayed rows.
+ * Missing groups or an overflowing sum are explicitly unknown. */
+static void cost_summary(char summary[320], const char *route,
+                         const struct agent_impact_acc *acc,
+                         const struct cost_totals *totals)
+{
+    char route_part[128];
+    if (acc->groups_len > 1) {
+        (void)snprintf(route_part, sizeof(route_part),
+                       "routes to group %s (+%zu more)", route, acc->groups_len - 1);
+    } else {
+        (void)snprintf(route_part, sizeof(route_part),
+                       "routes to group %s", route);
+    }
+    if (totals->overflow) {
+        (void)snprintf(summary, 320,
+                       "%s; measured total unavailable (sum overflow)%s", route_part,
+                       acc->groups_lost ? " (additional groups unknown)" : "");
+    } else if (totals->measured > 0) {
+        (void)snprintf(summary, 320,
+                       "%s; last measured %.1fs across %zu/%zu retained groups%s",
+                       route_part, (double)totals->ms / 1000.0, totals->measured,
+                       acc->groups_len, acc->groups_lost ? " (additional groups unknown)" : "");
+    } else {
+        (void)snprintf(summary, 320,
+                       "%s; not measured in this checkout yet%s "
+                       "(run make t-fast ONLY=%s)", route_part,
+                       acc->groups_lost ? " (additional groups unknown)" : "", route);
+    }
+}
+
+static void cost_total_emit(struct json_value *data, const struct cost_totals *totals)
+{
+    if (totals->overflow) {
+        struct json_value unknown;
+        json_init(&unknown); json_set_null(&unknown);
+        (void)json_push_kv(data, "total_ms", &unknown); json_free(&unknown);
+    } else {
+        (void)json_push_kv_int(data, "total_ms", totals->ms);
+    }
+}
+
 void zcl_native_handle_code_cost(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -155,65 +259,24 @@ void zcl_native_handle_code_cost(
     json_init(&groups);
     json_set_array(&groups);
 
-    long long total_ms = 0;
-    size_t measured = 0;
-    for (size_t i = 0; i < shown; i++) {
-        struct json_value item;
-        json_init(&item);
-        json_set_str(&item, acc.groups[i]);
-        (void)json_push_back(&names, &item);
-        json_free(&item);
-
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "name", acc.groups[i]);
-        const struct json_value *t =
-            have_timing ? cost_timing_find(&timing, acc.groups[i]) : NULL;
-        if (t) {
-            (void)json_push_kv_int(&row, "ms",
-                                   json_get_int(json_get(t, "ms")));
-            (void)json_push_kv_int(&row, "rc",
-                                   json_get_int(json_get(t, "rc")));
-            (void)json_push_kv_bool(&row, "cached",
-                                    json_get_bool(json_get(t, "cached")));
-            (void)json_push_kv_bool(&row, "measured", true);
-            total_ms += json_get_int(json_get(t, "ms"));
-            measured++;
-        } else {
-            (void)json_push_kv_bool(&row, "measured", false);
-        }
-        (void)json_push_back(&groups, &row);
-        json_free(&row);
-    }
+    struct cost_totals totals = {0};
+    cost_group_collect(&acc, shown, have_timing ? &timing : NULL,
+                       &names, &groups, &totals);
 
     char summary[320];
-    char route_part[128];
-    if (shown > 1) {
-        (void)snprintf(route_part, sizeof(route_part),
-                       "routes to group %s (+%zu more)", route, shown - 1);
-    } else {
-        (void)snprintf(route_part, sizeof(route_part),
-                       "routes to group %s", route);
-    }
-    if (measured > 0) {
-        (void)snprintf(summary, sizeof(summary),
-                       "%s; last measured %.1fs across %zu/%zu groups",
-                       route_part, (double)total_ms / 1000.0, measured, shown);
-    } else {
-        (void)snprintf(summary, sizeof(summary),
-                       "%s; not measured in this checkout yet "
-                       "(run make t-fast ONLY=%s)", route_part, route);
-    }
+    cost_summary(summary, route, &acc, &totals);
 
     (void)json_push_kv_str(&reply->data, "path", path);
     (void)json_push_kv_str(&reply->data, "route", route);
     (void)json_push_kv_bool(&reply->data, "consensus_risk", crisk);
     (void)json_push_kv(&reply->data, "test_groups", &names);
     (void)json_push_kv(&reply->data, "groups", &groups);
-    (void)json_push_kv_int(&reply->data, "total_ms", total_ms);
-    (void)json_push_kv_int(&reply->data, "measured_groups", (int64_t)measured);
-    (void)json_push_kv_int(&reply->data, "total_groups", (int64_t)shown);
+    cost_total_emit(&reply->data, &totals);
+    (void)json_push_kv_int(&reply->data, "measured_groups", (int64_t)totals.measured);
+    cost_group_count(&reply->data, &acc, shown);
+    (void)json_push_kv_bool(&reply->data, "timing_complete",
+                            have_timing && !acc.groups_lost && !totals.overflow &&
+                            totals.measured == acc.groups_len);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     json_free(&names);

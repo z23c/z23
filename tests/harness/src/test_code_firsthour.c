@@ -23,6 +23,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "controllers/agent_impact_rules.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
 
@@ -313,7 +314,124 @@ static int test_fh_cost_measured(void)
     return failures;
 }
 
+/* Measure a retained group beyond the display limit, proving the aggregate
+ * covers the complete retained route rather than merely visible rows. */
+static int test_fh_cost_hidden_group(void)
+{
+    int failures = 0;
+    TEST("code_firsthour: cost counts and measures retained groups beyond the displayed twelve") {
+        struct agent_impact_acc acc = {0};
+        bool risk = false;
+        ASSERT(zcl_native_code_route_for_path("tools/ship.sh", &acc, &risk) != NULL);
+        ASSERT(acc.groups_len > 12 && !acc.groups_lost);
+        char json[512];
+        int n = snprintf(json, sizeof(json),
+                         "{\"schema\":\"zcl.test_timing.v1\",\"groups\":[{\"name\":\"test_%s\",\"ms\":12345,\"rc\":0,\"cached\":false}]}",
+                         acc.groups[12]);
+        ASSERT(n > 0 && (size_t)n < sizeof(json));
+        ASSERT(fh_mk_write(FH_FIX, ".cache/test-timing/last-run.json", json));
+        struct zcl_command_reply cost;
+        fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
+                "tools/ship.sh", NULL, &cost);
+        ASSERT(cost.status != ZCL_COMMAND_STATUS_FAILED);
+        const struct json_value *rows = json_get(&cost.data, "groups");
+        ASSERT(rows && rows->type == JSON_ARR && rows->num_children == 12);
+        ASSERT(json_get_int(json_get(&cost.data, "total_groups")) == (int64_t)acc.groups_len);
+        ASSERT(json_get_int(json_get(&cost.data, "test_groups_retained_count")) == (int64_t)acc.groups_len);
+        ASSERT(json_get_bool(json_get(&cost.data, "test_groups_truncated")));
+        ASSERT(!json_get_bool(json_get(&cost.data, "test_groups_lost")));
+        ASSERT(!json_get_bool(json_get(&cost.data, "timing_complete")));
+        ASSERT(json_get_int(json_get(&cost.data, "measured_groups")) == 1);
+        ASSERT(json_get_int(json_get(&cost.data, "total_ms")) == 12345);
+        for (size_t i = 0; i < rows->num_children; i++)
+            ASSERT(!json_get_bool(json_get(json_at(rows, i), "measured")));
+        zcl_command_reply_free(&cost);
+        n = snprintf(json, sizeof(json),
+                     "{\"groups\":[{\"name\":\"test_%s\",\"ms\":1,\"rc\":0,\"cached\":false}]}",
+                     acc.groups[0]);
+        ASSERT(n > 0 && (size_t)n < sizeof(json));
+        ASSERT(fh_mk_write(FH_FIX, ".cache/test-timing/last-run.json", json));
+        fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
+                "tools/ship.sh", NULL, &cost);
+        ASSERT(json_get_int(json_get(&cost.data, "measured_groups")) == 1);
+        ASSERT(json_get_int(json_get(&cost.data, "total_groups")) == (int64_t)acc.groups_len);
+        ASSERT(!json_get_bool(json_get(&cost.data, "timing_complete")));
+        zcl_command_reply_free(&cost);
+        n = snprintf(json, sizeof(json),
+                     "{\"groups\":[{\"name\":\"test_%s\",\"ms\":9223372036854775807},{\"name\":\"test_%s\",\"ms\":1}]}",
+                     acc.groups[0], acc.groups[12]);
+        ASSERT(n > 0 && (size_t)n < sizeof(json));
+        ASSERT(fh_mk_write(FH_FIX, ".cache/test-timing/last-run.json", json));
+        fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
+                "tools/ship.sh", NULL, &cost);
+        const struct json_value *total = json_get(&cost.data, "total_ms");
+        ASSERT(total && total->type == JSON_NULL);
+        ASSERT(!json_get_bool(json_get(&cost.data, "timing_complete")));
+        ASSERT(strstr(json_get_str(json_get(&cost.data, "summary")), "overflow") != NULL);
+        zcl_command_reply_free(&cost);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Build a real timing artifact for the entire retained route. Variant 0 is
+ * complete; 1/2/3 omit, mistype or negate one selected duration. */
+static bool fh_cost_full_artifact(const struct agent_impact_acc *acc,
+                                  size_t invalid_index, unsigned variant)
+{
+    char text[32768];
+    size_t used = 0;
+    int n = snprintf(text, sizeof(text), "{\"groups\":[");
+    if (n < 0 || (size_t)n >= sizeof(text)) return false;
+    used = (size_t)n;
+    for (size_t i = 0; i < acc->groups_len; i++) {
+        const char *ms = i != invalid_index || variant == 0 ? ",\"ms\":1" :
+                         variant == 1 ? "" : variant == 2 ? ",\"ms\":\"bad\"" : ",\"ms\":-1";
+        n = snprintf(text + used, sizeof(text) - used, "%s{\"name\":\"test_%s\"%s}",
+                     i ? "," : "", acc->groups[i], ms);
+        if (n < 0 || (size_t)n >= sizeof(text) - used) return false;
+        used += (size_t)n;
+    }
+    n = snprintf(text + used, sizeof(text) - used, "]}");
+    return n > 0 && (size_t)n < sizeof(text) - used &&
+           fh_mk_write(FH_FIX, ".cache/test-timing/last-run.json", text);
+}
+
+static int test_fh_cost_duration_validity(void)
+{
+    int failures = 0;
+    TEST("code_firsthour: complete timing requires every retained duration to be valid") {
+        struct agent_impact_acc acc = {0};
+        bool risk = false;
+        ASSERT(zcl_native_code_route_for_path("tools/ship.sh", &acc, &risk) != NULL);
+        ASSERT(acc.groups_len > 12 && !acc.groups_lost);
+        for (unsigned variant = 0; variant <= 3; variant++) {
+            ASSERT(fh_cost_full_artifact(&acc, acc.groups_len - 1, variant));
+            struct zcl_command_reply cost;
+            fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
+                    "tools/ship.sh", NULL, &cost);
+            ASSERT(cost.status != ZCL_COMMAND_STATUS_FAILED);
+            ASSERT(json_get_bool(json_get(&cost.data, "timing_complete")) == (variant == 0));
+            ASSERT(json_get_int(json_get(&cost.data, "measured_groups")) ==
+                   (int64_t)(acc.groups_len - (variant != 0)));
+            ASSERT(json_get_int(json_get(&cost.data, "total_ms")) ==
+                   (int64_t)(acc.groups_len - (variant != 0)));
+            zcl_command_reply_free(&cost);
+        }
+        ASSERT(fh_cost_full_artifact(&acc, 0, 2));
+        struct zcl_command_reply cost;
+        fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
+                "tools/ship.sh", NULL, &cost);
+        const struct json_value *row = json_at(json_get(&cost.data, "groups"), 0);
+        ASSERT(row && !json_get_bool(json_get(row, "measured")) && !json_get(row, "ms"));
+        zcl_command_reply_free(&cost);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── 3: code recent ── */
+
 static bool fh_git(const char *args)
 {
     char cmd[4096];
@@ -428,6 +546,8 @@ int test_code_firsthour(void)
     failures += test_fh_owner_missing_path();
     failures += test_fh_cost_unmeasured();
     failures += test_fh_cost_measured();
+    failures += test_fh_cost_hidden_group();
+    failures += test_fh_cost_duration_validity();
     failures += test_fh_recent_history();
     failures += test_fh_recent_bogus_since();
     failures += test_fh_recent_missing_inputs();
