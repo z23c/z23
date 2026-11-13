@@ -2360,6 +2360,10 @@ static int tag_identity_selection(struct tag_world *w)
         ASSERT(asf_refusal(&l, "AMBIGUOUS"));
         ASSERT(strstr(asf_get(&l, "choice_a"), "--publisher=") != NULL);
         ASSERT(strstr(asf_get(&l, "choice_b"), "--root=") != NULL);
+        ASSERT(strstr(asf_get(&l, "choice_a"), "-datadir=") != NULL);
+        ASSERT(strstr(asf_get(&l, "choice_a"), w->j.b_datadir) != NULL);
+        ASSERT(strstr(asf_get(&l, "choice_b"), "-datadir=") != NULL);
+        ASSERT(strstr(asf_get(&l, "choice_b"), w->j.b_datadir) != NULL);
         asf_close(&l);
         asf_open(&l);
         ASSERT(json_push_kv_str(&l.in, "datadir", w->j.b_datadir));
@@ -2369,6 +2373,47 @@ static int tag_identity_selection(struct tag_world *w)
         ASSERT(asf_pass("app.get", &l));
         ASSERT(strcmp(asf_get(&l, "package_root"), w->offer.root) == 0);
         asf_close(&l);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The plan-only next command must repeat the identity the door consumed,
+ * so pasting it back lands on the same offer from any directory. */
+static int tag_get_plan_hint(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app get: the plan-only next command keeps the identity selectors") {
+        char root_sel[80], publisher_sel[96], text[2048];
+        ASSERT(snprintf(root_sel, sizeof(root_sel), "--root=%s",
+                        w->offer.root) < (int)sizeof(root_sel));
+        ASSERT(snprintf(publisher_sel, sizeof(publisher_sel), "--publisher=%s",
+                        w->offer.publisher) < (int)sizeof(publisher_sel));
+        const char *words[6] = {"z23", "app", "get", w->name, root_sel,
+                                publisher_sel};
+        FILE *out = tmpfile(); ASSERT(out != NULL);
+        int saved = dup(STDOUT_FILENO), rc = -1;
+        ASSERT(saved >= 0 && fflush(stdout) == 0 &&
+               dup2(fileno(out), STDOUT_FILENO) >= 0);
+        bool handled = zcl_app_front_door_try(asf_spec("app.get"), words, 6, 3,
+                                              w->j.b_datadir, &rc);
+        (void)fflush(stdout);
+        bool restored = dup2(saved, STDOUT_FILENO) >= 0;
+        close(saved);
+        rewind(out);
+        size_t n = fread(text, 1, sizeof(text) - 1u, out);
+        text[n] = '\0';
+        fclose(out);
+        ASSERT(handled && restored && rc == 0);
+        const char *next =
+            strstr(text, "nothing changed (no terminal to ask). next: ");
+        ASSERT(next != NULL);
+        ASSERT(strstr(next, "-datadir=") != NULL);
+        ASSERT(strstr(next, w->j.b_datadir) != NULL);
+        ASSERT(strstr(next, w->name) != NULL);
+        ASSERT(strstr(next, root_sel) != NULL);
+        ASSERT(strstr(next, publisher_sel) != NULL);
+        ASSERT(strstr(next, " --yes") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -2392,6 +2437,8 @@ static int tag_endpoint_limit(struct tag_world *w)
         g_tag.fetch_failures = 0;
         ASSERT(answered);
         ASSERT(asf_refusal(&l, "ATTEMPT_LIMIT"));
+        ASSERT(strstr(asf_get(&l, "next_offer"), "-datadir=") != NULL);
+        ASSERT(strstr(asf_get(&l, "next_offer"), w->j.b_datadir) != NULL);
         const char *selector = strstr(asf_get(&l, "next_offer"), "--offer=");
         ASSERT(selector && strlen(selector + 8) == 64);
         (void)snprintf(offer, sizeof(offer), "%s", selector + 8);
@@ -5283,6 +5330,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_catalog(w);
     failures += tag_dropped(w);
     failures += tag_identity_selection(w);
+    failures += tag_get_plan_hint(w);
     failures += tag_endpoint_limit(w);
     failures += tag_refusals(w);
     failures += tag_b_plan(w);

@@ -399,12 +399,28 @@ static void fd_key_note(struct fd_run *r)
 /* Plan printed; now plan-only, a no, or the confirm. */
 static int fd_decide(struct fd_run *r)
 {
-    char q[1024], hint[FD_PATH + 128];
+    char q[1024], hint[FD_PATH + 512];
     const char *changed = "nothing changed";
     if (r->door->confirm.mode == ZCL_CLI_CONFIRM_PLAN_ONLY) {
-        if (!zcl_app_hint(hint, sizeof(hint), r->door->datadir,
-                          "%s %s --yes", r->door->verb, r->door->target))
-            hint[0] = '\0';
+        /* Repeat the identity the door consumed, so the pasted next
+         * command lands on the same offer (an app.get without selectors
+         * can hit a different one, or AMBIGUOUS). One whole word per %s:
+         * app_hint_word escapes arguments, not the literal syntax. */
+        bool built;
+        if (r->door->root && r->door->publisher && r->door->offer_id)
+            built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                                 "%s %s --root=%s --publisher=%s --offer=%s --yes",
+                                 r->door->verb, r->door->target, r->door->root,
+                                 r->door->publisher, r->door->offer_id);
+        else if (r->door->root && r->door->publisher)
+            built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                                 "%s %s --root=%s --publisher=%s --yes",
+                                 r->door->verb, r->door->target, r->door->root,
+                                 r->door->publisher);
+        else
+            built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                                 "%s %s --yes", r->door->verb, r->door->target);
+        if (!built) hint[0] = '\0';
         (void)fprintf(r->out, "%s (no terminal to ask). next: %s\n", changed,
                       hint);
         return 0;

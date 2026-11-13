@@ -1155,15 +1155,19 @@ static bool ag_token(struct ag_request *r)
 static void ag_ambiguous(struct ag_request *r, const struct zcl_app_offer *a,
                          const struct zcl_app_offer *b)
 {
-    char first[512], second[512];
-    int x = snprintf(first, sizeof(first), "z23 app get %s --root=%s --publisher=%s",
-                     r->name, a->root, a->publisher);
-    int y = snprintf(second, sizeof(second), "z23 app get %s --root=%s --publisher=%s",
-                     r->name, b->root, b->publisher);
+    /* zcl_app_hint embeds -datadir, so the suggested command still works
+     * when the shell is not in the node's datadir. */
+    char first[4900], second[4900];
+    bool x = zcl_app_hint(first, sizeof(first), r->datadir,
+                          "get %s --root=%s --publisher=%s",
+                          r->name, a->root, a->publisher);
+    bool y = zcl_app_hint(second, sizeof(second), r->datadir,
+                          "get %s --root=%s --publisher=%s",
+                          r->name, b->root, b->publisher);
     zcl_package_copy_fail(r->reply, "AMBIGUOUS", false,
                           "multiple app identities match; select an exact root and publisher", AG_COMMAND);
-    if (x > 0 && (size_t)x < sizeof(first)) (void)json_push_kv_str(&r->reply->data, "choice_a", first);
-    if (y > 0 && (size_t)y < sizeof(second)) (void)json_push_kv_str(&r->reply->data, "choice_b", second);
+    if (x) (void)json_push_kv_str(&r->reply->data, "choice_a", first);
+    if (y) (void)json_push_kv_str(&r->reply->data, "choice_b", second);
 }
 
 static const struct zcl_app_offer *ag_identity(struct ag_request *r)
@@ -1185,12 +1189,14 @@ static const struct zcl_app_offer *ag_identity(struct ag_request *r)
 static void ag_limit(struct ag_request *r, const struct zcl_app_offer *identity,
                      const struct zcl_app_offer_row *row)
 {
-    char next[768];
-    int n = snprintf(next, sizeof(next), "z23 app get %s --root=%s --publisher=%s --offer=%s",
-                     r->name, identity->root, identity->publisher, row->post_id);
+    char next[4900];
+    bool built = zcl_app_hint(next, sizeof(next), r->datadir,
+                              "get %s --root=%s --publisher=%s --offer=%s",
+                              r->name, identity->root, identity->publisher,
+                              row->post_id);
     zcl_package_copy_fail(r->reply, "ATTEMPT_LIMIT", false,
                           "automatic endpoint limit reached; select another offer", AG_COMMAND);
-    if (n > 0 && (size_t)n < sizeof(next)) (void)json_push_kv_str(&r->reply->data, "next_offer", next);
+    if (built) (void)json_push_kv_str(&r->reply->data, "next_offer", next);
 }
 
 static bool ag_attempt(struct ag_request *r, const struct zcl_app_offer_row *row,
