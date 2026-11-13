@@ -292,8 +292,8 @@ static bool ci_closure_add_file(struct ci_closure_ctx *c, const char *path,
 /* ── linkage identity ──────────────────────────────────────────────────
  * A frontier key is "name" for a symbol walked by name (external linkage, or
  * anything whose linkage the index cannot prove file-local), and
- * "name@path" for a static function and "name#path" for a macro whose
- * defining file is the .c `path`. Neither delimiter occurs in an identifier. */
+ * "name@path" for a static function and "name#path" for a macro or
+ * declaration in the .c `path`. Neither delimiter occurs in an identifier. */
 #define CI_CLOSURE_KEY_MAX 400
 
 static bool ci_path_is_c(const char *path)
@@ -343,6 +343,15 @@ static bool ci_closure_queue_symbol(struct ci_closure_ctx *c,
                                     bool *truncated)
 {
     char key[CI_CLOSURE_KEY_MAX];
+    bool local_decl = sym->kind == 'T' && !sym->def_path[0] &&
+        sym->def_line == 0 && sym->decl_line > 0 && !sym->partial &&
+        ci_path_is_c(sym->decl_path);
+    if (local_decl) {
+        int n = snprintf(key, sizeof(key), "%s#%s", sym->name, sym->decl_path);
+        if (n < 0 || (size_t)n >= sizeof(key))
+            LOG_FAIL("codeindex", "closure key overflow for %s", sym->name);
+        return ci_closure_queue(c, key, frontier, truncated);
+    }
     return ci_closure_key(sym->name, sym->kind, sym->def_path, sym->decl_path,
                           key) &&
            ci_closure_queue(c, key, frontier, truncated);
@@ -468,8 +477,9 @@ static bool ci_static_includer(struct ci_closure_ctx *c, struct codeindex *ci,
     return true;
 }
 
-/* A macro defined in a C file may reach another TU only through that file.
- * Unknown or incomplete dependency coverage cannot exclude any caller. */
+/* A macro or function declaration in a C file may reach another TU only
+ * through that file. Unknown or incomplete dependency coverage cannot
+ * exclude any caller. */
 static bool ci_macro_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
                                struct ci_static_scope *scope, const char *file,
                                bool *keep)

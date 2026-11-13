@@ -196,6 +196,21 @@ static bool sc_write_fixture_macro_other(void)
         "build/obj/sc_macro_header_user.o: " SC_SRC "sc_macro_header_user.c\n");
 }
 
+static bool sc_write_fixture_decl(void)
+{
+    return sc_write(SC_INC "sc_decl_other.h", "/* independent */\n") &&
+        sc_write(SC_SRC "sc_decl.c", "int sc_decl_target(void);\nint sc_decl_local(void) { return sc_decl_target(); }\n") &&
+        sc_write(SC_SRC "sc_decl_parent.c", "int sc_decl_local(void);\nint sc_decl_parent(void) { return sc_decl_local(); }\n") &&
+        sc_write(SC_SRC "sc_decl_other.c", "#include \"net/sc_decl_other.h\"\nint sc_decl_target(void);\nint sc_decl_other(void) { return sc_decl_target(); }\n") &&
+        sc_write("build/obj/sc_decl_other.d", "build/obj/sc_decl_other.o: " SC_SRC "sc_decl_other.c " SC_INC "sc_decl_other.h\n") &&
+        sc_write(SC_SRC "sc_decl_inc.c", "#include \"sc_decl.c\"\nint sc_decl_inc(void) { return sc_decl_target(); }\n") &&
+        sc_write("build/obj/sc_decl_inc.d", "build/obj/sc_decl_inc.o: " SC_SRC "sc_decl_inc.c " SC_SRC "sc_decl.c\n") &&
+        sc_write(SC_SRC "sc_decl_unknown.c", "int sc_decl_target(void);\nint sc_decl_unknown(void) { return sc_decl_target(); }\n") &&
+        sc_write(SC_SRC "sc_decl_def.c", "int sc_decl_target(void) { return 1; }\n") &&
+        sc_write(SC_INC "sc_decl_header.h", "int sc_decl_target(void);\n") &&
+        sc_write(SC_SRC "sc_decl_mixed.c", "int sc_decl_target(void);\nint sc_decl_target(void) { return 1; }\n");
+}
+
 static bool sc_write_fixture(void)
 {
     return sc_write_fixture_two_tus() &&
@@ -203,7 +218,7 @@ static bool sc_write_fixture(void)
            sc_write_fixture_static_caller() &&
            sc_write_fixture_static_inline() &&
            sc_write_fixture_macro_includes() &&
-           sc_write_fixture_macro_other();
+           sc_write_fixture_macro_other() && sc_write_fixture_decl();
 }
 
 /* Run the store walk (or, with `overlay`, the fresh-bytes walk) for one
@@ -254,6 +269,56 @@ static bool sc_closure_has(struct codeindex *ci, const char *changed_path,
         if (strcmp(out[i], needle) == 0)
             *has = true;
     return n >= 0 && !truncated;
+}
+
+static bool sc_decl_has(struct codeindex *ci, const char *changed_path,
+                        const char *needle, bool overlay, bool expected)
+{
+    char changed[1][256], out[SC_OUT_CAP][256];
+    snprintf(changed[0], sizeof(changed[0]), "%s", changed_path);
+    bool truncated = true, has = false;
+    int n = overlay ? codeindex_impact_closure_overlay(ci, SC_FIX, changed, 1, 0, out, SC_OUT_CAP, &truncated)
+                    : codeindex_impact_closure(ci, changed, 1, 0, out, SC_OUT_CAP, &truncated);
+    for (int i = 0; i < n; ++i) if (!strcmp(out[i], needle)) has = true;
+    if (n < 0 || truncated || has != expected)
+        fprintf(stderr, "decl closure changed=%s needle=%s overlay=%d n=%d truncated=%d has=%d expected=%d\n",
+                changed_path, needle, overlay, n, truncated, has, expected);
+    return n >= 0 && !truncated && has == expected;
+}
+
+static bool sc_decl_graph(struct codeindex *ci)
+{
+    char paths[16][256];
+    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    int n = codeindex_includes_of_file(ci, SC_SRC "sc_decl_other.c", paths, 16);
+    bool header = false, includer = false, other = false;
+    for (int i = 0; i < n; ++i) if (!strcmp(paths[i], SC_INC "sc_decl_other.h")) header = true;
+    n = codeindex_reverse_includes(ci, SC_SRC "sc_decl.c", paths, 16, &dim);
+    for (int i = 0; i < n; ++i) {
+        if (!strcmp(paths[i], SC_SRC "sc_decl_inc.c")) includer = true;
+        if (!strcmp(paths[i], SC_SRC "sc_decl_other.c")) other = true;
+    }
+    return header && n >= 0 && includer && !other && dim == CODEINDEX_INCLUDE_DIM_COMPLETE;
+}
+
+static int test_sc_decl_scope(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: C declaration seeds retain real users only") {
+        ASSERT(sc_decl_graph(ci));
+        for (int overlay = 0; overlay < 2; ++overlay) {
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl.c", SC_SRC "sc_decl.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl.c", SC_SRC "sc_decl_parent.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl.c", SC_SRC "sc_decl_inc.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl.c", SC_SRC "sc_decl_unknown.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl.c", SC_SRC "sc_decl_other.c", overlay, false));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl_def.c", SC_SRC "sc_decl_other.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_INC "sc_decl_header.h", SC_SRC "sc_decl_other.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_decl_mixed.c", SC_SRC "sc_decl_other.c", overlay, true));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static const char *const g_sc_x_want[] = {
@@ -464,6 +529,71 @@ static int test_sc_macro_untrusted(struct codeindex *ci)
     return failures;
 }
 
+static bool sc_decl_untrusted(struct codeindex *ci, unsigned mode)
+{
+    struct ci_store *store = sc_macro_copy_store(ci);
+    if (!store) return false;
+    bool ok = sc_macro_untrusted_setup(ci_store_db(store), mode);
+    struct codeindex copy = *ci;
+    copy.store = store;
+    char (*out)[256] = calloc(4096, sizeof(*out));
+    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_COMPLETE;
+    if (!out) ok = false;
+    if (ok) {
+        int n = codeindex_reverse_includes(&copy, SC_SRC "sc_decl.c", out, 4096, &dim);
+        ok = n < 0 || dim != CODEINDEX_INCLUDE_DIM_COMPLETE;
+    }
+    if (ok) ok = sc_decl_has(&copy, SC_SRC "sc_decl.c", SC_SRC "sc_decl_other.c", false, true);
+    if (ok) ok = sc_decl_has(&copy, SC_SRC "sc_decl.c", SC_SRC "sc_decl_other.c", true, true);
+    free(out);
+    ci_store_close(store);
+    return ok;
+}
+
+static int test_sc_decl_untrusted(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: untrusted declaration include graphs retain callers") {
+        for (unsigned mode = 0; mode < 3; ++mode) ASSERT(sc_decl_untrusted(ci, mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool sc_decl_invalid(struct codeindex *ci, unsigned mode)
+{
+    struct ci_store *store = sc_macro_copy_store(ci);
+    if (!store) return false;
+    struct codeindex copy = *ci; copy.store = store;
+    struct ci_symbol rows[32];
+    int n = ci_store_symbols_in_file(store, SC_SRC "sc_decl.c", rows, 32);
+    bool ok = false;
+    for (int i = 0; i < n; ++i) {
+        if (strcmp(rows[i].name, "sc_decl_target")) continue;
+        sqlite3 *db = ci_store_db(store);
+        ok = sqlite3_exec(db, "DELETE FROM symbols WHERE name='sc_decl_target' AND decl_path='" SC_SRC "sc_decl.c'", NULL, NULL, NULL) == SQLITE_OK;
+        if (mode == 0) rows[i].partial = true;
+        if (mode == 1) rows[i].decl_line = 0;
+        if (mode == 2) rows[i].def_line = 1;
+        if (mode == 3) rows[i].def_line = -1;
+        ok = ok && ci_store_put_symbol(store, &rows[i]);
+        if (ok) ok = sc_decl_has(&copy, SC_SRC "sc_decl.c", SC_SRC "sc_decl_other.c", false, true);
+        break;
+    }
+    ci_store_close(store);
+    return ok;
+}
+
+static int test_sc_decl_invalid(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: incomplete declaration rows stay global") {
+        for (unsigned mode = 0; mode < 4; ++mode) ASSERT(sc_decl_invalid(ci, mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_sc_cause_labels(void)
 {
     int failures = 0;
@@ -648,6 +778,9 @@ int test_codeindex_static_callers(void)
         failures += test_sc_overlay_keys_seeds_the_same_way(ci);
         failures += test_sc_macro_scoping(ci);
         failures += test_sc_macro_untrusted(ci);
+        failures += test_sc_decl_scope(ci);
+        failures += test_sc_decl_untrusted(ci);
+        failures += test_sc_decl_invalid(ci);
         codeindex_close(ci);
     }
      TEST_DISCARD(system("rm -rf " SC_FIX));
