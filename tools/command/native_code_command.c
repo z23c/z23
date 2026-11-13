@@ -68,7 +68,9 @@ const char *zcl_native_source_root(const struct zcl_command_request *request)
 struct codeindex *code_open(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
-    struct codeindex *ci = codeindex_open(zcl_native_source_root(request));
+    struct codeindex *ci = request && request->context && request->context->one_shot_process
+        ? codeindex_open_one_shot(zcl_native_source_root(request))
+        : codeindex_open(zcl_native_source_root(request));
     if (!ci) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",

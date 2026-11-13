@@ -151,7 +151,7 @@ bool codeindex_is_stale(struct codeindex *ci, bool *stale)
 {
     if (stale) *stale = true;
     if (!ci || !ci->store) LOG_FAIL("codeindex", "null arg to is_stale");
-    if (ci_fresh_memo_hit(ci)) {
+    if (!ci->one_shot && ci_fresh_memo_hit(ci)) {
         /* Same bookkeeping the uncached fresh path does. */
         ci_merkle_free(ci->pending_merkle);
         ci->pending_merkle = NULL;
@@ -163,7 +163,7 @@ bool codeindex_is_stale(struct codeindex *ci, bool *stale)
     }
     /* Arm the change watch BEFORE the walk so an edit that lands during or
      * after it is still reported to the memo. */
-    struct ci_fresh_watch *watch = ci_fresh_arm(ci->root);
+    struct ci_fresh_watch *watch = ci->one_shot ? NULL : ci_fresh_arm(ci->root);
     ci_test_note_freshness_walk();
     memset(ci->fresh_merkle, 0, sizeof(ci->fresh_merkle));
     memset(ci->fresh_dep, 0, sizeof(ci->fresh_dep));

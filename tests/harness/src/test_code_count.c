@@ -13,6 +13,8 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "codeindex/codeindex.h"
+#include "codeindex/codeindex_build.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -28,6 +30,110 @@ struct cc_fix {
     char dir[512];
     char commit1[64];
 };
+
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static bool cct_write(const struct cc_fix *fx, const char *rel, const char *text);
+
+static bool cct_impact_wire(const char *text, size_t n)
+{
+    struct json_value wire; json_init(&wire);
+    bool parsed = json_read(&wire, text, n);
+    const struct json_value *data = json_get(&wire, "data");
+    const struct json_value *includes = json_get(data, "direct_includes");
+    bool ok = parsed && json_get_bool(json_get(&wire, "ok")) &&
+        !strcmp(json_get_str(json_get(&wire, "status")),
+                zcl_command_status_name(ZCL_COMMAND_STATUS_PASSED)) &&
+        !strcmp(json_get_str(json_get(&wire, "data_schema")), "zcl.code_impact.v1") &&
+        !strcmp(json_get_str(json_get(data, "path")), "src/impact.c") &&
+        includes && includes->type == JSON_INT && json_get_int(includes) == 1;
+    json_free(&wire); return ok;
+}
+
+static bool cct_dispatch_impact(const struct zcl_native_standalone_runtime *runtime)
+{
+    FILE *out = tmpfile();
+    int saved = out ? dup(STDOUT_FILENO) : -1;
+    if (saved < 0) { if (out) fclose(out); return false; }
+    fflush(stdout);
+    if (dup2(fileno(out), STDOUT_FILENO) < 0) {
+        close(saved); fclose(out); return false;
+    }
+    const char *args[] = {"impact", "src/impact.c"};
+    int rc = zcl_native_command_main_standalone("code", args, 2, "", 0,
+                                                 CHAIN_MAIN, false, runtime);
+    fflush(stdout);
+    bool restored = dup2(saved, STDOUT_FILENO) >= 0;
+    close(saved);
+    rewind(out);
+    char text[4096]; size_t n = fread(text, 1, sizeof text - 1, out);
+    bool read_ok = !ferror(out); text[n] = '\0';
+    bool closed = fclose(out) == 0;
+    return restored && read_ok && closed && rc == 0 && cct_impact_wire(text, n);
+}
+
+static bool cct_oneshot_check(const struct zcl_native_standalone_runtime *runtime,
+                              uint64_t walks, uint64_t seals, uint64_t expected)
+{
+    bool dispatched = cct_dispatch_impact(runtime);
+    uint64_t actual_walks = codeindex_test_freshness_walks();
+    uint64_t actual_seals = codeindex_test_freshness_seals();
+    bool ok = dispatched && actual_walks == walks + expected && actual_seals == seals;
+    if (!ok) printf("code.impact one-shot dispatch=%d walks_delta=%llu expected=%llu seals_delta=%lld\n",
+                    dispatched, (unsigned long long)(actual_walks - walks),
+                    (unsigned long long)expected, (long long)(actual_seals - seals));
+    return ok;
+}
+
+static bool cct_policy_calls(void)
+{
+    struct zcl_native_standalone_runtime normal = {0};
+    struct zcl_native_standalone_runtime once = {.one_shot_process = true};
+    if (!cct_dispatch_impact(&normal)) {
+        printf("code.impact normal dispatch failed\n"); return false;
+    }
+    uint64_t walks = codeindex_test_freshness_walks();
+    uint64_t seals = codeindex_test_freshness_seals();
+    if (!cct_dispatch_impact(NULL) || codeindex_test_freshness_walks() != walks ||
+        codeindex_test_freshness_seals() != seals) {
+        printf("code.impact null runtime did not reuse memo\n"); return false;
+    }
+    if (!cct_dispatch_impact(&normal) || codeindex_test_freshness_walks() != walks ||
+        codeindex_test_freshness_seals() != seals) {
+        printf("code.impact false runtime did not reuse memo\n"); return false;
+    }
+    for (uint64_t i = 1; i <= 2; i++)
+        if (!cct_oneshot_check(&once, walks, seals, i)) return false;
+    return true;
+}
+
+static bool cct_dispatch_policy(const struct cc_fix *fx)
+{
+    const char *previous = getenv("ZCL_DEV_SOURCE_ROOT");
+    char *saved = previous ? strdup(previous) : NULL;
+    if (previous && !saved) return false;
+    bool ok = cct_write(fx, "src/impact_fixture.h", "#define IMPACT_VALUE 1\n") &&
+              cct_write(fx, "src/impact.c", "#include \"impact_fixture.h\"\nint impact_fixture(void) { return IMPACT_VALUE; }\n") &&
+              cct_write(fx, "build/fixture.d", "build/fixture.o: src/impact.c src/impact_fixture.h\n") &&
+              setenv("ZCL_DEV_SOURCE_ROOT", fx->dir, 1) == 0;
+    struct codeindex *ci = ok ? codeindex_open(fx->dir) : NULL;
+    ok = ok && ci != NULL;
+    if (!ok) printf("code.impact one-shot fixture/index setup failed\n");
+    codeindex_close(ci);
+    if (ok) ok = cct_policy_calls();
+    int restored = saved ? setenv("ZCL_DEV_SOURCE_ROOT", saved, 1) : unsetenv("ZCL_DEV_SOURCE_ROOT");
+    free(saved);
+    return ok && restored == 0;
+}
+
+static bool cct_isolated_dispatch_policy(void)
+{
+    struct cc_fix fx = {0};
+    if (!test_mkdtemp(fx.dir, sizeof fx.dir, "code_impact_policy")) return false;
+    bool ok = cct_dispatch_policy(&fx);
+    bool cleaned = test_rm_rf_recursive(fx.dir) == 0;
+    return ok && cleaned;
+}
+#endif
 
 static int cct_git(const struct cc_fix *fx, char *out, size_t cap,
                    const char *a, const char *b, const char *c, const char *d)
@@ -585,6 +691,13 @@ int test_code_count(void)
         ASSERT(spec->input_keys && strstr(spec->input_keys, "exclude") != NULL);
         PASS();
     }
+
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    TEST("code.impact: standalone one-shot freshness is explicit") {
+        ASSERT(cct_isolated_dispatch_policy());
+        PASS();
+    }
+#endif
 
 _test_next:;
     if (fx.dir[0])

@@ -5302,6 +5302,7 @@ static bool nc_main_execute(struct nc_main_state *st,
         operator_lane = "dev";
 #endif
     struct zcl_command_context ctx = {
+        .one_shot_process = runtime && runtime->one_shot_process,
         .registry = reg,
         .source_root = getenv("ZCL_DEV_SOURCE_ROOT"),
         .operator_lane = operator_lane,

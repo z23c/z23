@@ -793,7 +793,7 @@ static bool ci_rebuild_coalesce_fresh(struct ci_rebuild_job *job, int dirfd)
         struct ci_store *fresh = ci_store_open(job->ci->root);
         if (fresh) {
             bool stale = true;
-            struct codeindex fresh_view = {.store = fresh};
+            struct codeindex fresh_view = {.store = fresh, .one_shot = job->ci->one_shot};
             (void)snprintf(fresh_view.root, sizeof(fresh_view.root), "%s",
                            job->ci->root);
             bool checked = codeindex_is_stale(&fresh_view, &stale);

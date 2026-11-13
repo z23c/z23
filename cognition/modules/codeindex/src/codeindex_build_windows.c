@@ -592,7 +592,7 @@ static bool windows_adopt_fresh_store(struct codeindex *ci)
     struct ci_store *fresh = ci_store_open(ci->root);
     if (fresh) {
         bool stale = true;
-        struct codeindex view = {.store = fresh};
+        struct codeindex view = {.store = fresh, .one_shot = ci->one_shot};
         (void)snprintf(view.root, sizeof(view.root), "%s", ci->root);
         if (codeindex_is_stale(&view, &stale) && !stale) {
             struct ci_store *old = ci->store;

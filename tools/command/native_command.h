@@ -64,6 +64,7 @@ void zcl_native_handle_regtest_mine(const struct zcl_command_request *request,
  * never infer ownership. end must also handle a partially failed begin.
  * Runtime storage outlives dispatch; scope restoration precedes output. */
 struct zcl_native_standalone_runtime {
+    bool one_shot_process; /* True only at an exiting argv entrypoint. */
     bool (*begin)(void *);
     bool (*end)(void *);
     bool (*cancelled)(void *);

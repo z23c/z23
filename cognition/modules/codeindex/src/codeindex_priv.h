@@ -80,6 +80,7 @@ bool ci_store_same_inode(struct ci_store *a, struct ci_store *b);
 struct ci_merkle;
 struct ci_merkle_leaf;
 struct codeindex {
+    bool one_shot;
     struct ci_store *store;
     struct ci_merkle *pending_merkle;
     bool              pending_merkle_snapshot_used;

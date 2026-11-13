@@ -129,6 +129,8 @@ struct ci_search_hit {
  * missing or the source tree's staleness stamp no longer matches, this
  * rebuilds it before returning. NULL on hard failure. */
 struct codeindex *codeindex_open(const char *root);
+/* Full freshness with no future-open memo for a one-request process. */
+struct codeindex *codeindex_open_one_shot(const char *root);
 /* Open with exact SOURCE freshness but without treating compiler depfile
  * movement as staleness. This is only for queries whose answer is derived
  * entirely from source rows (for example code.group); include/dependency

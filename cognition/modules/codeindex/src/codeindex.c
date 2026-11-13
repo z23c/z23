@@ -69,10 +69,11 @@ static bool ci_refresh_or_refuse(struct codeindex *ci, const char *root)
     return ci_codeindex_refresh(ci);
 }
 
-struct codeindex *codeindex_open(const char *root)
+static struct codeindex *codeindex_open_full(const char *root, bool one_shot)
 {
     struct codeindex *ci = codeindex_alloc(root);
     if (!ci) return NULL;
+    ci->one_shot = one_shot;
     bool stale = true;
     ci->store = ci_store_open(root);
     if (ci->store && !codeindex_is_stale(ci, &stale)) {
@@ -93,6 +94,12 @@ struct codeindex *codeindex_open(const char *root)
     }
     return ci;
 }
+
+struct codeindex *codeindex_open(const char *root)
+{ return codeindex_open_full(root, false); }
+
+struct codeindex *codeindex_open_one_shot(const char *root)
+{ return codeindex_open_full(root, true); }
 
 struct codeindex *codeindex_open_source_view(const char *root)
 {

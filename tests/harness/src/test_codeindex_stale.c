@@ -1024,10 +1024,88 @@ static int test_cis_memo_existing_shared_mapping(void)
 }
 #endif
 
+/* A one-shot reader still performs full source/depfile freshness, but does
+ * not spend work arming a process-local memo that it will never use. */
+static int test_cis_one_shot_full_freshness(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: one-shot walks fully without enrolling a memo") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "oneshot");
+        ASSERT(cis_seed(dir));
+        ASSERT(cis_write(dir, "build/foo.d", "build/foo.o: core/modules/net/src/foo.c\n"));
+        ci = codeindex_open(dir);
+        ASSERT(ci != NULL);
+        codeindex_close(ci); ci = NULL;
+        uint64_t walks = codeindex_test_freshness_walks();
+        uint64_t seals = codeindex_test_freshness_seals();
+        ci = codeindex_open_one_shot(dir);
+        ASSERT(ci != NULL);
+        ASSERT(codeindex_test_freshness_walks() > walks);
+        ASSERT(codeindex_test_freshness_seals() == seals);
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_seals() == seals);
+        ASSERT(cis_write(dir, "core/modules/net/src/foo.c", "int foo(void) { return 42; }\n"));
+        ASSERT(cis_verdict(ci, true));
+        codeindex_close(ci); ci = NULL;
+        ci = codeindex_open_one_shot(dir);
+        ASSERT(ci != NULL && cis_verdict(ci, false));
+        ASSERT(cis_write(dir, "build/foo.d", "build/foo.o: core/modules/net/src/foo.c core/modules/net/include/net/foo.h\n"));
+        ASSERT(cis_verdict(ci, true));
+        codeindex_close(ci); ci = NULL;
+        ci = codeindex_open_one_shot(dir);
+        ASSERT(ci != NULL && cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_seals() == seals);
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_cis_one_shot_refusals(void)
+{
+    int failures = 0;
+    char dir[256] = {0}, index_dir[512];
+    struct codeindex *ci = NULL;
+    bool claimed = false;
+    TEST("codeindex stale: one-shot preserves owner and unsafe-store refusals") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "oneshotrefuse");
+        ASSERT(cis_seed(dir));
+        ci = codeindex_open(dir);
+        ASSERT(ci != NULL);
+        codeindex_close(ci); ci = NULL;
+        ASSERT(cis_write(dir, "core/modules/net/src/foo.c", "int foo(void) { return 88; }\n"));
+        claimed = codeindex_owner_claim(dir, 424242, 4000000000LL);
+        ASSERT(claimed);
+        ci = codeindex_open_one_shot(dir);
+        ASSERT(ci == NULL);
+        struct codeindex_stale_refusal refusal = {0};
+        ASSERT(codeindex_last_stale_refusal(&refusal));
+        ASSERT(refusal.recorded && refusal.owner_present && refusal.owner_pid == 424242);
+        ASSERT(codeindex_owner_release(dir, 424242)); claimed = false;
+        ASSERT((size_t)snprintf(index_dir, sizeof(index_dir), "%s/.codeindex", dir) < sizeof(index_dir));
+        ASSERT(chmod(index_dir, 0777) == 0);
+        ci = codeindex_open_one_shot(dir);
+        ASSERT(ci == NULL);
+        ASSERT(chmod(index_dir, 0755) == 0);
+        ci = codeindex_open_one_shot(dir);
+        ASSERT(ci != NULL && cis_verdict(ci, false));
+        PASS();
+    } _test_next:;
+    if (claimed) (void)codeindex_owner_release(dir, 424242);
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_codeindex_stale(void)
 {
     int failures = 0;
     failures += test_cis_null_refuses();
+    failures += test_cis_one_shot_full_freshness();
+    failures += test_cis_one_shot_refusals();
     failures += test_cis_fresh_index_is_current();
     failures += test_cis_source_edit_stales_then_rebuild_clears();
     failures += test_cis_deleted_source_stales();

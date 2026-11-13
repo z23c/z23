@@ -281,6 +281,7 @@ struct zcl_command_context {
      * exempt — a zero-init context is unaffected. */
     const char *agent_session;
     const struct zcl_command_invocation_runtime *invocation;
+    bool one_shot_process; /* Internal argv process exits after this dispatch. */
     bool dev_build;
     /* MCP front door: a mutating leaf with a plan/confirm flow plans first
      * here and writes only on plan_id + confirm:true. The CLI leaves it false. */

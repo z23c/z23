@@ -114,7 +114,7 @@ int cli_native_registry_dispatch(const char *method,
 #if !defined(_WIN32)
         struct cli_compare_signals signals = {0};
         const struct zcl_native_standalone_runtime runtime = {
-            .begin = cli_compare_scope_begin, .end = cli_compare_scope_end,
+            .one_shot_process = true, .begin = cli_compare_scope_begin, .end = cli_compare_scope_end,
             .cancelled = cli_compare_scope_cancelled, .reserve_cleanup = cli_compare_reserve,
             .cleanup = cli_compare_cleanup, .context = &signals
         };
