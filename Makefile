@@ -14796,6 +14796,24 @@ $(LAB_PEER_BIN): $(LAB_PEER_SRCS) $(SPAWN_BINARY_HEADERS)
 	    $(BUILD_IDENTITY_CPPFLAGS) \
 	    $(LAB_PEER_INCLUDES) \
 	    -o $@ $(LAB_PEER_SRCS) -lpthread
+
+# The live two-node stranger app journey acceptance (FORWARD_PLAN item 2's
+# number). Opt-in like commons-demo: two real regtest daemons with real Tor
+# circuits, the public apps board over P2P and the package swarm over Tor.
+APP_JOURNEY_LIVE_BIN = $(BIN_DIR)/app_journey_live
+APP_JOURNEY_LIVE_SRCS = tools/app_journey_live.c platform/modules/json/src/json.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+APP_JOURNEY_LIVE_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
+.PHONY: app-journey-live
+app-journey-live: zclassic23 $(APP_JOURNEY_LIVE_BIN)
+	$(APP_JOURNEY_LIVE_BIN)
+CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/app_journey_live.o
+$(APP_JOURNEY_LIVE_BIN): $(APP_JOURNEY_LIVE_SRCS)
+	mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(BUILD_IDENTITY_CPPFLAGS) \
+	    $(APP_JOURNEY_LIVE_INCLUDES) \
+	    -o $@ $(APP_JOURNEY_LIVE_SRCS) -lpthread
 endif
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────

@@ -3596,6 +3596,7 @@ AGENT_IMPACT_RULE("tools/command/native_telegram.h|tools/command/native_telegram
 AGENT_IMPACT_RULE("contexts/clips/modules/clips_codec/*|tests/harness/src/test_clips_record.c|tests/harness/src/test_clips_manifest.c", "clips_record clips_manifest make_lint_gates")
 AGENT_IMPACT_RULE("contexts/clips/modules/clips_rating/*|tests/harness/src/test_clips_rating.c", "clips_rating make_lint_gates")
 AGENT_IMPACT_RULE("tools/lab_peer.c|tools/lab_peer_shadow.c|tools/lab_peer_shadow.h|tools/lab_peer_fake.c|tests/harness/src/test_lab_peer.c|tests/harness/src/lab_peer_shadow_cases.c|tests/harness/src/lab_peer_live_cases.c", "lab_peer make_lint_gates")
+AGENT_IMPACT_RULE("tools/app_journey_live.c", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/base/include/base/log_macros.h|platform/modules/util/include/util/log_macros.h|tests/harness/src/test_log_macros_in_base.c", "log_macros_in_base log_macros_in")
 AGENT_IMPACT_RULE("tools/command/native_tip_agreement_judge.c|tools/command/native_tip_agreement_judge.c.capabilities.def|tools/command/native_evidence_judge.h|tools/command/native_evidence_judge_command.c|tests/harness/src/test_tip_agreement_judge.c|tests/harness/src/test_tip_agreement_judge_rows.h", "tip_agreement_judge evidence_judge make_lint_gates")
 /* The CAS-backed pair command reuses the maintained science measurement. */
