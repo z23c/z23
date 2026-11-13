@@ -422,6 +422,8 @@ struct pc_run {
     char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
     bool gate_output_available;
+    struct json_value windows_capture;
+    bool windows_capture_seen, windows_capture_ok;
     char land[4096];
     struct zcl_spawn_evidence capture;
 };
@@ -976,6 +978,26 @@ static int pc_gate_timed(struct pc_run *r, const char *gate, bool ship, bool siz
     return rc;
 }
 
+/* Retention is diagnostic only: the gate verdict stays the child's result. */
+static void pc_capture_windows_success(struct pc_run *r, const char *gate)
+{
+    if (strcmp(gate, "check-windows-cross-syntax") != 0) return;
+    r->windows_capture_seen = true;
+    json_set_object(&r->windows_capture);
+    r->windows_capture_ok = r->windows_capture.type == JSON_OBJ &&
+        pc_capture_facts(r, gate, &r->windows_capture, false);
+}
+
+static bool pc_timing_capture(const struct pc_run *r, const char *gate,
+                              struct json_value *item)
+{
+    if (!r->windows_capture_seen || strcmp(gate, "check-windows-cross-syntax") != 0)
+        return true;
+    if (!r->windows_capture_ok)
+        return json_push_kv_bool(item, "capture_unavailable", true);
+    return json_push_kv(item, "capture", &r->windows_capture);
+}
+
 /* Passing-gate observations on successful submissions; unavailable clocks are null. */
 static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
 {
@@ -987,7 +1009,8 @@ static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
         if (r->elapsed_ms[i] >= 0) json_set_int(&elapsed, r->elapsed_ms[i]);
         else json_set_null(&elapsed);
         ok = item.type == JSON_OBJ && json_push_kv_str(&item, "gate", r->ran[i]) &&
-            json_push_kv(&item, "elapsed_ms", &elapsed) && json_push_back(&list, &item);
+            json_push_kv(&item, "elapsed_ms", &elapsed) &&
+            pc_timing_capture(r, r->ran[i], &item) && json_push_back(&list, &item);
         json_free(&elapsed); json_free(&item);
     }
     if (ok) ok = json_push_kv(&reply->data, "precheck_timings", &list);
@@ -1032,6 +1055,7 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         pc_gate_failed(r, gate, rc, reply);
         return PC_GATE_REFUSED;
     }
+    pc_capture_windows_success(r, gate);
     r->ran[r->nran++] = gate;
     return PC_GATE_RAN;
 }
@@ -1130,6 +1154,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     char ledger[4096 + 32], dir[4096];
     bool ok;
     r = zcl_calloc(1, sizeof(*r), "dev_land_precheck.run");
+    json_init(&r->windows_capture);
     r->leaf = leaf;
     r->wt = wt;
     if (snprintf(r->bin, sizeof(r->bin), "%s/build/bin/z23-lint", wt) >=
@@ -1180,6 +1205,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     }
     free(r->out);
     free(g);
+    json_free(&r->windows_capture);
     free(r);
     return ok;
 }

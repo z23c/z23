@@ -495,6 +495,136 @@ static bool dlx_pc_retention_wire(const struct dlx_call *call, bool large)
     return ok;
 }
 
+static const struct json_value *dlx_pc_success_capture(const struct dlx_call *c)
+{
+    const struct json_value *list = dlx_arr(c, "precheck_timings");
+    for (size_t i = 0; i < json_size(list); i++) {
+        const struct json_value *row = json_at(list, i);
+        const char *gate = json_get_str(json_get(row, "gate"));
+        if (gate && !strcmp(gate, "check-windows-cross-syntax"))
+            return json_get(row, "capture");
+    }
+    return NULL;
+}
+
+static const char dlx_pc_success_text[] = "tu-cache: 9 hit, 2 miss, 1 stored\n";
+
+static bool dlx_pc_success_capture_file(const struct json_value *facts, bool large)
+{
+    char path[4096], bytes[128];
+    if (!dlx_pc_diagnostic_path(facts, path, sizeof(path))) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes) - 1, f);
+    bytes[n] = 0;
+    struct stat st;
+    bool text_ok = large ? n >= sizeof(dlx_pc_success_text) - 1 &&
+        memcmp(bytes, dlx_pc_success_text, sizeof(dlx_pc_success_text) - 1) == 0 :
+        n == sizeof(dlx_pc_success_text) - 1 &&
+        memcmp(bytes, dlx_pc_success_text, sizeof(dlx_pc_success_text)) == 0;
+    bool ok = fstat(fileno(f), &st) == 0 && (st.st_mode & 0777) == 0600 &&
+        !ferror(f) && text_ok && st.st_size == (large ? 131071 : (off_t)n);
+    fclose(f);
+    return ok;
+}
+
+static bool dlx_pc_success_setup(struct dlx_rig *rig, bool large, bool unavailable)
+{
+    char path[1400], rows[512], root[512];
+    if (!dlx_pc_rig(rig, "precheck_success_capture", true,
+                    "check-windows-cross-syntax\n")) return false;
+    dlx_pc_row(rows, sizeof(rows), 1, "failed", "lint", 1,
+               "check-windows-cross-syntax failed");
+    if (!dlx_pc_outcomes(rows) || !dlx_write_dep(rig->clone, "build/gen/guest_kernel_data.c", "fixture\n")) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig->clone);
+    if (!dlx_write(path, large ?
+        "#!/bin/sh\nif [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\nprintf 'tu-cache: 9 hit, 2 miss, 1 stored\\n'; printf '%0132000d' 0\n" :
+        "#!/bin/sh\nif [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\nprintf 'tu-cache: 9 hit, 2 miss, 1 stored\\n'\n") || chmod(path, 0755) != 0) return false;
+    if (!unavailable) return true;
+    if (!platform_state_root(root, sizeof(root))) return false;
+    (void)snprintf(path, sizeof(path), "%s/land/logs", root);
+    return dlx_write(path, "not a directory");
+}
+
+static bool dlx_pc_success_sizes_ok(const struct json_value *facts, bool large, bool unavailable)
+{
+    int64_t observed = (int64_t)(sizeof(dlx_pc_success_text) - 1) + (large ? 132000 : 0);
+    int64_t stored = unavailable ? 0 : large ? 131071 : observed;
+    return dlx_pc_fact_type(facts, "observed", JSON_INT) &&
+        dlx_pc_fact_type(facts, "stderr", JSON_INT) &&
+        dlx_pc_fact_type(facts, "bytes", JSON_INT) &&
+        dlx_pc_fact_type(facts, "retained", JSON_BOOL) &&
+        dlx_pc_fact_type(facts, "truncated", JSON_BOOL) &&
+        dlx_pc_fact_type(facts, "stream_complete", JSON_BOOL) &&
+        dlx_pc_fact_type(facts, "capture_complete", JSON_BOOL) &&
+        json_get_int(json_get(facts, "observed")) == observed &&
+        json_get_int(json_get(facts, "stderr")) == 0 &&
+        json_get_int(json_get(facts, "bytes")) == stored &&
+        json_get_bool(json_get(facts, "stream_complete"));
+}
+
+static bool dlx_pc_success_facts_ok(const struct json_value *facts, bool large, bool unavailable)
+{
+    return facts && facts->type == JSON_OBJ &&
+        dlx_pc_success_sizes_ok(facts, large, unavailable) &&
+        json_get_bool(json_get(facts, "retained")) == !unavailable &&
+        json_get_bool(json_get(facts, "truncated")) == large &&
+        json_get_bool(json_get(facts, "capture_complete")) == !large &&
+        (unavailable ? !json_get(facts, "ref") : dlx_pc_success_capture_file(facts, large));
+}
+
+static bool dlx_pc_success_capture_case(bool large, bool unavailable)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    if (!dlx_pc_success_setup(&rig, large, unavailable)) {
+        fprintf(stderr, "success capture: setup failed large=%d unavailable=%d\n", large, unavailable);
+        dlx_restore(); return false;
+    }
+    bool ran;
+    if (unavailable) {
+        /* A blocked logs pathname prevents submit's directory initialization.
+         * Exercise the same precheck directly to isolate retention failure. */
+        char note[32] = "";
+        dlx_begin(&c, NULL);
+        ran = zcl_dev_land_precheck("dev.land.send", rig.clone, NULL, NULL,
+                                    rig.tip, false, note, sizeof(note), &c.reply);
+    } else {
+        dlx_pc_submit(&c, &rig, NULL, NULL);
+        ran = dlx_run(&c) && dlx_ok(&c);
+    }
+    const struct json_value *facts = dlx_pc_success_capture(&c);
+    bool facts_ok = dlx_pc_success_facts_ok(facts, large, unavailable);
+    if (!ran || !facts_ok)
+        fprintf(stderr, "success capture: ran=%d facts_ok=%d present=%d large=%d unavailable=%d\n",
+                ran, facts_ok, facts != NULL, large, unavailable);
+    dlx_end(&c);
+    dlx_restore();
+    return ran && facts_ok;
+}
+
+static bool dlx_pc_success_not_recorded(bool fail)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char rows[512];
+    if (!dlx_pc_rig(&rig, "precheck_success_negative", true,
+                    "check-windows-cross-syntax\n")) return false;
+    dlx_pc_row(rows, sizeof(rows), 1, "failed", "lint", 1,
+               "check-windows-cross-syntax failed");
+    bool setup = dlx_pc_outcomes(rows);
+    if (fail) setup = setup && dlx_write_dep(rig.clone, "build/gen/guest_kernel_data.c", "fixture\n") &&
+        dlx_pc_file(&rig, "precheck-fail", "check-windows-cross-syntax");
+    if (!setup) { dlx_restore(); return false; }
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    bool ok = ran && (fail ? !dlx_ok(&c) : dlx_ok(&c)) &&
+        !dlx_pc_success_capture(&c);
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_retained_failure(bool large)
 {
     struct dlx_rig rig;
@@ -1130,6 +1260,14 @@ int dlx_case_precheck(void)
 {
     int failures = dlx_case_history_precheck() + dlx_pc_mode_cases() +
                    dlx_pc_ratchet_cases();
+    TEST("land: passing Windows precheck retains bounded private evidence best-effort") {
+        ASSERT(dlx_pc_success_capture_case(false, false));
+        ASSERT(dlx_pc_success_capture_case(true, false));
+        ASSERT(dlx_pc_success_capture_case(false, true));
+        ASSERT(dlx_pc_success_not_recorded(false));
+        ASSERT(dlx_pc_success_not_recorded(true));
+        PASS();
+    }
     TEST("land: a gate whose lane prerequisite is absent is unproven, not refused") {
         ASSERT(dlx_pc_need_case("need_cookbook_absent", "check-cookbook",
                                 "build/bin/z23-dev", false));
