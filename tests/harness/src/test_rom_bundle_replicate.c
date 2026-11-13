@@ -38,9 +38,12 @@ static int rbr_read(const char *path, char *buf, size_t cap)
     if (fp == NULL)
         return -1;
     n = fread(buf, 1, cap - 1, fp);
-    fclose(fp);
+    int extra = fgetc(fp);
+    int failed = ferror(fp) || extra != EOF;
+    if (fclose(fp) != 0)
+        failed = 1;
     buf[n] = '\0';
-    return 0;
+    return failed ? -1 : 0;
 }
 
 static int rbr_capture(const char *scratch, const char *repo, int argc, char **argv,
@@ -353,7 +356,7 @@ static int test_rbr_long(const char *root)
     char opt_d[PATH_MAX];
     char opt_s[PATH_MAX];
     char opt_bin[PATH_MAX];
-    char out[4096];
+    char out[16 * PATH_MAX];
     char err[512];
     char body[64];
     char *argv[6];

@@ -403,9 +403,11 @@ static size_t read_file(const char *path, char *buf, size_t buf_sz)
     if (!f)
         return 0;
     size_t n = fread(buf, 1, buf_sz - 1, f);
-    fclose(f);
+    int extra = fgetc(f);
+    bool complete = extra == EOF && !ferror(f);
+    if (fclose(f) != 0) complete = false;
     buf[n] = 0;
-    return n;
+    return complete ? n : 0;
 }
 
 /* mkdir -p a path (best-effort, mirrors the lock-test inline helper). */
@@ -2036,8 +2038,13 @@ static int test_stage_failure_names_substep(void)
 static int test_command_artifact_alias(void)
 {
     int failures = 0;
+    struct json_value manifest = {0};
     struct sandbox sb;
-    sandbox_enter(&sb, "persist_alias");
+    /* Keep the manifest larger than the old 512-byte capture even in a short
+     * proof checkout: the complete source_artifact field must be checked. */
+    sandbox_enter(&sb, "persist_alias_"
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     struct platform_clock_source clock = {
         .wall_unix = deploy_test_wall, .monotonic_us = deploy_test_wall };
     platform_clock_set_source(&clock);
@@ -2074,13 +2081,16 @@ static int test_command_artifact_alias(void)
         char marker[PATH_MAX];
         snprintf(marker, sizeof(marker), "%s/%s/manifest.json", sb.gen_root,
                  candidate);
-        char blob[512];
-        ASSERT(read_file(marker, blob, sizeof(blob)) > 0);
-        ASSERT(strstr(blob, regular) != NULL);
+        char blob[8192]; /* Matches the staging writer's bounded manifest. */
+        size_t n = read_file(marker, blob, sizeof(blob));
+        ASSERT(n > 0);
+        ASSERT(json_read(&manifest, blob, n));
+        ASSERT_STR_EQ(json_get_str(json_get(&manifest, "source_artifact")), regular);
         json_free(&input);
         zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
+    json_free(&manifest);
     platform_clock_clear_source();
     persist_command_sb = NULL;
     persist_command_ctx = NULL;
@@ -2184,7 +2194,7 @@ static int test_rollback_command(void)
         ASSERT(fake_current_gen(&c, current, sizeof(current)));
         ASSERT_STR_EQ(current, genA);
 
-        char markerA[PATH_MAX], markerB[PATH_MAX], blob[512];
+        char markerA[PATH_MAX], markerB[PATH_MAX], blob[8192];
         snprintf(markerA, sizeof(markerA), "%s/accepted/%s.json", sb.gen_root,
                  genA);
         snprintf(markerB, sizeof(markerB), "%s/accepted/%s.json", sb.gen_root,
