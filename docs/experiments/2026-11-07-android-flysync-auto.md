@@ -134,3 +134,9 @@ boot publication checks remain independent.
 <!-- claim: symbol-present net_port_deferred engine/composition/src/boot_net_runtime_port.c # startup serving gate -->
 The parent failed the startup refusal fixture; the candidate passed the focused
 `snapshot_sync_service` group with no skips. Device benefit is unmeasured.
+
+<!-- claim: symbol-present app_test_set_running tests/harness/src/test_block_swarm_loopback.c # running serving fixture -->
+The native train proof exposed three serving groups whose fixtures did not
+start the application. Those fixtures now set and restore the existing running
+state around serving checks. The three focused groups passed with no skips;
+the startup refusal fixture remains in place.

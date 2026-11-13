@@ -81,6 +81,7 @@
 #include "coins/coins_view.h"
 #include "coins/utxo_commitment.h"
 #include "config/boot_snapshot_offer.h"
+#include "config/boot.h"
 #include "config/runtime.h"
 #include "core/serialize.h"
 #include "event/event.h"
@@ -1020,6 +1021,7 @@ static int test_snapshot_offer_serving(void)
 int test_snapshot_serve_loopback(void)
 {
     int failures = 0;
+    bool saved_running = app_test_set_running(true);
 
     /* Start the serve-side puzzle census from zero — but only ONCE, before
      * both runs. Resetting between them would clear the single-use ring and
@@ -1059,5 +1061,6 @@ int test_snapshot_serve_loopback(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    (void)app_test_set_running(saved_running);
     return failures;
 }

@@ -10,6 +10,7 @@
 #include "core/utiltime.h"
 #include "net/p2p_message.h"
 #include "config/boot_snapshot_offer.h"
+#include "config/boot.h"
 #include "primitives/transaction.h"
 #include "chain/chainparams.h"
 #include "net/version.h"
@@ -7438,10 +7439,14 @@ int test_net(void)
     failures += test_net_block_already_seen_dedup_checks();
     failures += test_net_block_dedupe_snapshot_defer();
     failures += test_net_snapshot_offer_gate_duplicate_offers();
+    bool saved_running = app_test_set_running(true);
     failures += test_net_parallel_sync_and_swarm_fixture();
+    (void)app_test_set_running(saved_running);
     failures += test_net_peer_strategy_transport_selection_basics();
     failures += test_net_peer_strategy_get_addresses_both();
+    saved_running = app_test_set_running(true);
     failures += test_net_msg_processor_cache_versioning();
+    (void)app_test_set_running(saved_running);
     failures += test_net_net_peer_misbehaving_accumulates_score();
     failures += test_net_char_disconnect_reason_name();
     failures += test_net_char_receive_bytes_valid_frames();

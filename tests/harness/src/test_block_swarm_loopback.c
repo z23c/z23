@@ -46,6 +46,7 @@
 #include "chain/chainparams.h"
 #include "coins/coins_view.h"
 #include "config/boot_snapshot_offer.h"
+#include "config/boot.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
 #include "net/download.h"
@@ -1474,6 +1475,7 @@ static int test_block_swarm_past_peer_manifest(void)
 int test_block_swarm_loopback(void)
 {
     int failures = 0;
+    bool saved_running = app_test_set_running(true);
     /* The fixtures never booted the runtime port, so the sovereignty
      * predicate reads "not sovereign"; declare the process sovereign for the
      * group (sovereignty_gate flips the override internally and restores it).
@@ -1491,5 +1493,6 @@ int test_block_swarm_loopback(void)
     failures += test_block_swarm_past_peer_manifest();
     { extern int block_swarm_manifest_refusal_tests(void); failures += block_swarm_manifest_refusal_tests(); }
     boot_snapshot_offer_test_set_trust_override(-1);
+    (void)app_test_set_running(saved_running);
     return failures;
 }
