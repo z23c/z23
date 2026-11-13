@@ -4819,6 +4819,10 @@ static bool tag_net_orphan_link_kept(const char *linked, const char *sentinel)
 static bool tag_net_orphan_clean(const char *d, const char *linked, const char *sentinel)
 {
     char dir[TAG_PATH], store[TAG_PATH], file[TAG_PATH];
+    /* The day-old orphan is already gone on a green run; on a failing run
+     * it must not outlive the test. Tolerant: absent or non-empty is fine. */
+    if (tag_net_orphan_path(d, TAG_NET_ORPHAN_OLD, dir, sizeof(dir)))
+        (void)rmdir(dir);
     if (!tag_net_orphan_path(d, TAG_NET_ORPHAN_LIVE, dir, sizeof(dir))) return false;
     int s = snprintf(store, sizeof(store), "%s/store", dir);
     int f = snprintf(file, sizeof(file), "%s/store/carrier.bin", dir);
@@ -4838,7 +4842,9 @@ static bool tag_net_orphan_worker(void *context, const struct app_network_job_ar
 static int tag_network_orphan_sweep(struct tag_world *w)
 {
     int failures = 0; struct zcl_app_offer_row rows[4]; size_t count = 0;
-    struct zcl_command_reply why, reply; struct tag_link_fixture f = {0};
+    struct zcl_command_reply why; struct tag_link_fixture f = {0};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1"); /* freed below on every path */
     bool shown = false;
     TEST("app open-link sweeps a day-old .app-network- scratch orphan beside the "
          "profile; fresh, misshaped, permissive and linked entries stay") {
