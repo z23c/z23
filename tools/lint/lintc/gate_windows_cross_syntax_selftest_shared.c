@@ -50,9 +50,23 @@ static int sh_fail(const char *msg)
 }
 
 /* One tree: src/shared.h plus SH_UNITS units that include it. */
+static int sh_producers(const char *tree)
+{
+    static const char *const names[] = { "cache", "digest", "sweep" };
+    char path[SH_P];
+    shp(path, sizeof path, "%s/tools/lint/lintc", tree);
+    if (csr_mkdirs(path) != 0) return 2;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        shp(path, sizeof path, "%s/tools/lint/lintc/gate_windows_cross_syntax_%s.c", tree, names[i]);
+        if (csr_write(path, "/* producer fixture */\n") != 0) return 2;
+    }
+    return 0;
+}
+
 static int sh_tree(const char *tree, const char *list)
 {
     char p[SH_P], text[128];
+    if (sh_producers(tree) != 0) return 2;
     shp(p, sizeof p, "%s/src", tree);
     if (csr_mkdirs(p) != 0) return 2;
     shp(p, sizeof p, "%s/src/shared.h", tree);
@@ -163,6 +177,23 @@ static int sh_cc_identity(struct sh_env *e, const char *stub,
                      h, m, s, 0, SH_UNITS, SH_UNITS);
 }
 
+static int sh_producer_cases(struct sh_env *e, const char *stub, const char *flags)
+{
+    int h, m, s, rc;
+    char p[SH_P];
+    shp(p, sizeof p, "%s/tools/lint/lintc/gate_windows_cross_syntax_sweep.c", e->tree[1]);
+    if (csr_write(p, "/* changed producer */\n") != 0) return 2;
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_expect("a changed sweep producer", h, m, s, 0, SH_UNITS, SH_UNITS)) != 0) return rc;
+    if (csr_write(p, "/* producer fixture */\n") != 0) return 2;
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_expect("a restored sweep producer", h, m, s, SH_UNITS, 0, 0)) != 0) return rc;
+    if (unlink(p) != 0) return 2;
+    wcs_cache_setup("tu-cache-shared-selftest", stub, stub, flags, e->work[1], ".", NULL);
+    if (wcs_cache_on()) return sh_fail("missing sweep producer enabled cache");
+    return csr_write(p, "/* producer fixture */\n") == 0 ? 0 : 2;
+}
+
 static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
 {
     int h, m, s, rc;
@@ -180,6 +211,7 @@ static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
     if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
     if ((rc = sh_expect("an identical tree at another path", h, m, s,
                         SH_UNITS, 0, 0)) != 0) return rc;
+    if ((rc = sh_producer_cases(e, stub, flags)) != 0) return rc;
     shp(p, sizeof p, "%s/src/shared.h", e->tree[1]);
     if (csr_write(p, "#define SHARED_ST 2\n") != 0) return 2;
     if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;

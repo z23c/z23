@@ -4,7 +4,7 @@
  * check-windows-cross-syntax gate, ported from tools/lint/tu_result_cache.sh
  * (deleted). Each entry is <cache>/<gate>/<salt>/<src>.<sha>: line 1 is
  * "<rc> <haslog>", the byte-exact compiler log follows. The salt folds the
- * gate identity, both gate source files, the compiler version line, the sha256 of
+ * gate identity, the production source files, the compiler version line, the sha256 of
  * the compiler binary itself (realpath), the flag list and the include-set digest of the whole tree, so a hit replays
  * exactly what a fresh compile would have written. Fail-safe, not
  * fail-open: every failure mode disables the cache with a reason; none can
@@ -230,6 +230,39 @@ static int cache_env_off(const char *cachedir)
     return 0;
 }
 
+static int cache_producer_sha(char out[WCS_SHA])
+{
+    static const char *const files[] = {
+        "tools/lint/lintc/gate_windows_cross_syntax_cache.c",
+        "tools/lint/lintc/gate_windows_cross_syntax_digest.c",
+        "tools/lint/lintc/gate_windows_cross_syntax_sweep.c"
+    };
+    char hashes[3 * WCS_SHA], sha[WCS_SHA];
+    size_t used = 0;
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+        if (wcs_sha_file(files[i], sha) != 0 || strcmp(sha, "absent") == 0)
+            return -1;
+        memcpy(hashes + used, sha, 64);
+        used += 64;
+    }
+    wcs_sha_str(hashes, used, out);
+    return 0;
+}
+
+/* Bind the producer implementation, gate entry point and effective flags. */
+static bool cache_input_identity(const char *script_path, const char *flags_nul,
+                                 char libsha[WCS_SHA], char gsha[WCS_SHA],
+                                 char fsha[WCS_SHA])
+{
+    if (cache_producer_sha(libsha) != 0 || wcs_sha_file(script_path, gsha) != 0 ||
+        strcmp(gsha, "absent") == 0 || wcs_sha_file(flags_nul, fsha) != 0 ||
+        strcmp(fsha, "absent") == 0) {
+        c_off("producer or flags cannot be hashed");
+        return false;
+    }
+    return true;
+}
+
 int wcs_cache_setup(const char *gate, const char *script_path,
                     const char *cc, const char *flags_nul,
                     const char *scratch, const char *root,
@@ -253,9 +286,7 @@ int wcs_cache_setup(const char *gate, const char *script_path,
         c_off_fmt("could not digest the include set under '%s'", root);
         return 0;
     }
-    wcs_sha_file("tools/lint/lintc/gate_windows_cross_syntax_cache.c", libsha);
-    wcs_sha_file(script_path, gsha);
-    wcs_sha_file(flags_nul, fsha);
+    if (!cache_input_identity(script_path, flags_nul, libsha, gsha, fsha)) return 0;
     if (ovf(snprintf(input, sizeof input,
                      "tu-result-cache/v3\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
                      gate, libsha, gsha, ccid, ccbin, fsha, dg),
