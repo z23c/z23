@@ -4,8 +4,8 @@
  * Each new post from a key that is not one of ours gets exactly one outcome,
  * recorded as one line in STATE/events.log:
  *
- *   lock -> `z23 fleet board list --room=contrib --cursor=N`, page by page until a
- *      page holds no unseen post (or --fixture-list, page N at PATH.N)
+ *   lock -> `z23 fleet board list --room=contrib`, bounded pages from a
+ *      durable compound cursor (or --fixture-list, page N at PATH.N)
  *   -> walk the posts oldest first, skipping STATE/seen.txt; at most four
  *      handled per pass; posts from a maintainer host, and posts naming a
  *      maintainer agent (the lead, the responder, maintainer-*), are marked
@@ -1035,104 +1035,235 @@ static const struct json_value *ci_posts_of(const struct json_value *root)
     return (p && p->type == JSON_ARR) ? p : NULL;
 }
 
-/* The board list is byte-budgeted: about three posts a page, newest first,
- * with `_page.next_cursor` naming the next page. The pass reads pages until
- * one holds no unseen post, so a burst between passes is never skipped. A
- * fixture list names page 0; page N is the same path with ".N" appended. */
+/* Pages are newest first. A fixture's page N uses its ordinal as suffix. */
 enum { CI_PAGES = 17 };
+
+struct ci_cursor { int64_t time; char id[65]; }; // hardening-ok: board pagination key, not a byte-stream reader
 
 struct ci_list {
     struct json_value roots[CI_PAGES];
     size_t pages;
     const struct json_value *posts[CI_POST_LIMIT];
     size_t n;
+    struct ci_cursor next;
 };
 
-static int64_t ci_next_cursor(const struct json_value *root)
+static bool ci_cursor_before(const struct ci_cursor *next, const struct ci_cursor *prior)
 {
-    const struct json_value *page = json_get(root, "_page");
-    const struct json_value *c = page ? json_get(page, "next_cursor") : NULL;
-    return (c && c->type == JSON_INT) ? json_get_int(c) : -1;
+    return !prior->time || next->time < prior->time ||
+           (next->time == prior->time && strcmp(next->id, prior->id) < 0);
 }
 
-static int ci_fetch_page(struct ci *t, int64_t cursor, struct json_value *root)
+static bool ci_row_cursor(const struct json_value *row, struct ci_cursor *cursor)
+{
+    const struct json_value *time = json_get(row, "created_at");
+    const char *id = ci_str(row, "id");
+    if (!time || time->type != JSON_INT || json_get_int(time) <= 0 ||
+        strlen(id) != 64 || !ci_hex_id(id)) return false;
+    cursor->time = json_get_int(time);
+    memcpy(cursor->id, id, sizeof cursor->id);
+    return true;
+}
+
+/* Invalid or out-of-order rows must not move the durable crawl boundary. */
+static bool ci_page_order(const struct json_value *posts, const struct ci_cursor *prior)
+{
+    struct ci_cursor prev = *prior;
+    for (size_t i = 0; i < json_size(posts); i++) {
+        struct ci_cursor row = {0};
+        if (!ci_row_cursor(json_at(posts, i), &row) || !ci_cursor_before(&row, &prev))
+            return false;
+        prev = row;
+    }
+    return true;
+}
+
+static bool ci_cursor_parse(char *text, struct ci_cursor *cursor)
+{
+    char *end;
+    if (memcmp(text, "v1\n", 3) || text[3] < '0' || text[3] > '9') return false;
+    errno = 0;
+    long long time = strtoll(text + 3, &end, 10);
+    if (errno || end == text + 3 || (end > text + 4 && text[3] == '0') ||
+        *end++ != '\n' || time < 0) return false;
+    if (time == 0) return strcmp(end, "-\n") == 0;
+    if (strlen(end) != 65 || end[64] != '\n') return false;
+    end[64] = '\0';
+    if (!ci_hex_id(end)) return false;
+    cursor->time = (int64_t)time;
+    memcpy(cursor->id, end, sizeof cursor->id);
+    return true;
+}
+
+/* Read a private, complete cursor record. Absence means the head. */
+static bool ci_cursor_read(const struct ci *t, struct ci_cursor *cursor)
+{
+    char path[CI_PATH], text[128];
+    if (!ci_fmt(path, sizeof path, "%s/crawl-cursor", O(t, CI_O_STATE))) return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return errno == ENOENT;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 077) || st.st_size <= 0 || st.st_size >= (off_t)sizeof text) {
+        close(fd); return false;
+    }
+    ssize_t n = read(fd, text, sizeof text - 1);
+    bool closed = close(fd) == 0;
+    if (!closed || n != st.st_size || n < 7 || memchr(text, '\0', (size_t)n)) return false;
+    text[n] = '\0';
+    return ci_cursor_parse(text, cursor);
+}
+
+/* Rename only after file fsync; sync the private directory before returning. */
+static bool ci_cursor_write(const struct ci *t, const struct ci_cursor *cursor)
+{
+    char path[CI_PATH], tmp[CI_PATH], text[128];
+    const char *dir = O(t, CI_O_STATE);
+    if (!ci_fmt(path, sizeof path, "%s/crawl-cursor", dir) ||
+        !ci_fmt(tmp, sizeof tmp, "%s/.crawl-cursor.XXXXXX", dir) ||
+        !ci_fmt(text, sizeof text, "v1\n%lld\n%s\n", (long long)cursor->time,
+                cursor->time ? cursor->id : "-")) return false;
+    int fd = mkstemp(tmp);
+    if (fd < 0) return false;
+    size_t len = strlen(text);
+    bool ok = fchmod(fd, 0600) == 0 && write(fd, text, len) == (ssize_t)len && fsync(fd) == 0;
+    ok = close(fd) == 0 && ok;
+    if (ok) ok = rename(tmp, path) == 0;
+    if (!ok) { (void)unlink(tmp); return false; }
+    fd = open(dir, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) return false;
+    ok = fsync(fd) == 0;
+    return close(fd) == 0 && ok;
+}
+
+static bool ci_cursor_last(const struct json_value *posts,
+                           const struct json_value *time, const char *id)
+{
+    size_t count = json_size(posts);
+    if (!count || !time || time->type != JSON_INT || json_get_int(time) <= 0 ||
+        strlen(id) != 64 || !ci_hex_id(id)) return false;
+    const struct json_value *last = json_at(posts, count - 1);
+    const struct json_value *last_time = json_get(last, "created_at");
+    return last_time && last_time->type == JSON_INT &&
+           json_get_int(last_time) == json_get_int(time) && !strcmp(ci_str(last, "id"), id);
+}
+
+/* A continuation must be the last returned post and move strictly backward. */
+static bool ci_page_cursor(const struct json_value *root, const struct ci_cursor *prior,
+                           struct ci_cursor *next, bool *more)
+{
+    const struct json_value *data = json_get(root, "data");
+    const struct json_value *posts = ci_posts_of(root);
+    const struct json_value *m = json_get(data, "has_more");
+    if (!posts || !m || m->type != JSON_BOOL) return false;
+    *more = json_get_bool(m);
+    if (!*more) return true;
+    const struct json_value *time = json_get(data, "next_created_at");
+    const char *id = json_get_str(json_get(data, "next_id"));
+    if (!ci_cursor_last(posts, time, id)) return false;
+    next->time = json_get_int(time);
+    memcpy(next->id, id, sizeof next->id);
+    return ci_cursor_before(next, prior);
+}
+
+static bool ci_fetch_fixture(struct ci *t, size_t page, size_t *len)
+{
+    char path[CI_PATH + 24];
+    int n = page ? snprintf(path, sizeof(path), "%s.%zu", O(t, CI_O_FIXTURE_LIST), page)
+                 : snprintf(path, sizeof(path), "%s", O(t, CI_O_FIXTURE_LIST));
+    return n >= 0 && (size_t)n < sizeof path && ci_read_file(path, t->list, CI_LIST, len);
+}
+
+static bool ci_fetch_live(struct ci *t, const struct ci_cursor *cursor, size_t limit,
+                          size_t *len)
+{
+    char time[64], id[80], count[32];
+    if (!ci_fmt(count, sizeof count, "--limit=%zu", limit)) return false;
+    if (cursor->time &&
+        (!ci_fmt(time, sizeof time, "--before_created_at=%lld", (long long)cursor->time) ||
+         !ci_fmt(id, sizeof id, "--before_id=%s", cursor->id))) return false;
+    const char *const argv[] = {
+        O(t, CI_O_Z23), "fleet", "board", "list", "--room=contrib", count,
+        cursor->time ? time : NULL, cursor->time ? id : NULL, NULL,
+    };
+    if (ci_run(argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) != 0) return false;
+    *len = strlen(t->list);
+    return true;
+}
+
+static int ci_fetch_page(struct ci *t, size_t page, const struct ci_cursor *cursor,
+                         size_t limit, struct json_value *root)
 {
     size_t len = 0;
-    if (O(t, CI_O_FIXTURE_LIST)[0]) {
-        char path[CI_PATH + 24];
-        (void)snprintf(path, sizeof(path), cursor ? "%s.%lld" : "%s",
-                       O(t, CI_O_FIXTURE_LIST), (long long)cursor);
-        if (!ci_read_file(path, t->list, CI_LIST, &len))
-            return cursor ? CI_FETCH_QUIET : CI_FETCH_BAD;
-    } else {
-        char cur[40];
-        (void)snprintf(cur, sizeof(cur), "--cursor=%lld", (long long)cursor);
-        const char *const argv[] = {
-            O(t, CI_O_Z23), "fleet", "board", "list", "--room=contrib", cur,
-            NULL,
-        };
-        if (ci_run(argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) != 0)
-            return CI_FETCH_QUIET;
-        len = strlen(t->list);
-    }
-    /* A fixture's page 0 that is not a board list is a broken test input. */
-    const int bad = (O(t, CI_O_FIXTURE_LIST)[0] && !cursor) ? CI_FETCH_BAD
-                                                           : CI_FETCH_QUIET;
+    bool fetched = O(t, CI_O_FIXTURE_LIST)[0]
+        ? ci_fetch_fixture(t, page, &len) : ci_fetch_live(t, cursor, limit, &len);
+    if (!fetched) return CI_FETCH_BAD;
     if (!json_read(root, t->list, len) || !ci_ok_field(root))
-        return bad;
+        return CI_FETCH_BAD;
     const struct json_value *posts = ci_posts_of(root);
     if (!posts)
-        return bad;
-    return json_size(posts) > 0 ? CI_FETCH_OK : CI_FETCH_QUIET;
+        return CI_FETCH_BAD;
+    return CI_FETCH_OK;
 }
 
-/* Collects posts newest first across pages. Only an unreadable page 0 of a
- * fixture is BAD; a later page that fails ends the walk with what was read. */
-static int ci_fetch(struct ci *t, struct ci_list *l)
+/* Do not process a partial fetch: a later page can contain older unseen work. */
+static int ci_fetch(struct ci *t, struct ci_list *l, const struct ci_cursor *start)
 {
-    int64_t cursor = 0;
+    struct ci_cursor cursor = *start;
+    bool more = false;
     while (l->pages < CI_PAGES && l->n < CI_POST_LIMIT) {
-        struct json_value *root = &l->roots[l->pages++];
+        size_t page = l->pages++;
+        struct json_value *root = &l->roots[page];
         json_init(root);
-        const int got = ci_fetch_page(t, cursor, root);
-        if (got != CI_FETCH_OK)
-            return l->n > 0 ? CI_FETCH_OK : got;
+        if (ci_fetch_page(t, page, &cursor, CI_POST_LIMIT - l->n, root) != CI_FETCH_OK)
+            return CI_FETCH_BAD;
         const struct json_value *posts = ci_posts_of(root);
-        bool unseen = false;
-        for (size_t i = 0; i < json_size(posts) && l->n < CI_POST_LIMIT; i++) {
+        struct ci_cursor next = {0};
+        if (!ci_page_cursor(root, &cursor, &next, &more) || !ci_page_order(posts, &cursor) ||
+            json_size(posts) > CI_POST_LIMIT - l->n) return CI_FETCH_BAD;
+        for (size_t i = 0; i < json_size(posts); i++) {
             const struct json_value *p = json_at(posts, i);
-            unseen = unseen || !ci_seen(t, ci_str(p, "id"));
             l->posts[l->n++] = p;
         }
-        cursor = ci_next_cursor(root);
-        if (!unseen || cursor <= 0)
-            break;
+        cursor = next;
+        if (!more) break;
     }
+    l->next = cursor;
     return l->n > 0 ? CI_FETCH_OK : CI_FETCH_QUIET;
 }
 
-static void ci_walk(struct ci *t, const struct ci_list *l)
+static bool ci_walk(struct ci *t, const struct ci_list *l)
 {
     size_t ctx_len = 0;
     if (l->n >= CI_POST_LIMIT)
         ci_say(t, "note: the pass reads the newest %d posts", CI_POST_LIMIT);
     if (!ci_thread(t, l->posts, l->n, &ctx_len)) {
         ci_say(t, "stop: the thread is too large to answer safely");
-        return;
+        return false;
     }
     int handled = 0;
     for (size_t i = l->n; i-- > 0 && handled < CI_PER_PASS && !t->io_fail;)
         handled += ci_handle(t, l->posts[i], ctx_len) ? 1 : 0;
+    return !t->io_fail;
 }
 
 static int ci_pass(struct ci *t)
 {
     static struct ci_list l;
+    struct ci_cursor start = {0};
     l.pages = 0;
     l.n = 0;
-    const int got = ci_fetch(t, &l);
-    if (got == CI_FETCH_OK)
-        ci_walk(t, &l);
+    memset(&l.next, 0, sizeof l.next);
+    const int got = ci_cursor_read(t, &start) ? ci_fetch(t, &l, &start) : CI_FETCH_BAD;
+    if (got == CI_FETCH_BAD)
+        fprintf(stderr, "contrib-inbox: board fetch incomplete or malformed; no posts processed\n");
+    if (got == CI_FETCH_OK && !ci_walk(t, &l)) t->io_fail = true;
+    if (got != CI_FETCH_BAD && !t->io_fail) {
+        bool done = true;
+        for (size_t i = 0; i < l.n; i++)
+            if (!ci_seen(t, ci_str(l.posts[i], "id"))) done = false;
+        if (done && !t->io_fail && !ci_cursor_write(t, &l.next)) t->io_fail = true;
+    }
     for (size_t i = 0; i < l.pages; i++)
         json_free(&l.roots[i]);
     return (got == CI_FETCH_BAD || t->io_fail) ? 1 : 0;

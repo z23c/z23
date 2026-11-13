@@ -161,8 +161,7 @@ static void ci_entry(char *out, size_t cap, const char *id, const char *host,
 }
 
 /* Write a list reply, newest post first, from n prebuilt entries. */
-/* One page of the board list, as the board pages it: page `cursor` lives at
- * list.json (0) or list.json.<cursor>, and `next` > 0 names the next page. */
+/* Fixture pages use ordinal suffixes; the wire cursor comes from the last post. */
 static bool ci_list_page(const struct ci_env *e, int cursor,
                          const char *const entries[], int n, int next)
 {
@@ -173,12 +172,13 @@ static bool ci_list_page(const struct ci_env *e, int cursor,
     for (int i = 0; i < n && len < sizeof(body) - 1024; i++)
         len += (size_t)snprintf(body + len, sizeof(body) - len, "%s%s",
                                 i ? "," : "", entries[i]);
-    if (next > 0)
+    if (next > 0) {
+        if (n == 0 || strncmp(entries[n - 1], "{\"id\":\"", 7) != 0 || strlen(entries[n - 1]) < 71) return false;
         (void)snprintf(body + len, sizeof(body) - len,
-                       "]},\"_page\":{\"truncated\":true,\"next_cursor\":%d}}\n",
-                       next);
-    else
-        (void)snprintf(body + len, sizeof(body) - len, "]}}\n");
+                       "],\"has_more\":true,\"next_created_at\":1,\"next_id\":\"%.*s\"}}\n",
+                       64, entries[n - 1] + 7);
+    } else
+        (void)snprintf(body + len, sizeof(body) - len, "],\"has_more\":false}}\n");
     if (cursor == 0)
         return ci_wf(e->list, body);
     (void)snprintf(path, sizeof(path), "%s.%d", e->list, cursor);
@@ -206,6 +206,7 @@ static bool ci_model_reply(const struct ci_env *e, const char *content)
 /* How one pass differs from the default dry run. */
 struct ci_run_opts {
     bool live;             /* no --dry-run: the post goes to the --z23 program */
+    bool live_list;        /* fetch through the supplied isolated fake z23 */
     const char *z23;       /* the fake poster, e.g. /bin/false */
     const char *responder; /* overrides the scenario's responder path */
     long fsize;            /* RLIMIT_FSIZE for the tool, or -1 for none */
@@ -246,8 +247,9 @@ static int ci_pass_with(const struct ci_env *e, const struct ci_run_opts *o)
     argv[n++] = bin;
     if (!o->live)
         argv[n++] = "--dry-run";
+    if (!o->live_list) { argv[n++] = "--fixture-list"; argv[n++] = e->list; }
     const char *const rest[] = {
-        "--state-dir", e->state, "--fixture-list", e->list, "--fixture-reply",
+        "--state-dir", e->state, "--fixture-reply",
         e->reply, "--engine", "fixture", "--engine-unit", engine, "--main",
         e->mainrepo, "--haiku-lock", e->lock, "--engine-timeout-s", "60",
         "--responder", o->responder ? o->responder : e->resp,
@@ -319,7 +321,7 @@ static int case_maintainer_ignored(void)
     ci_hex64(b, 'b');
     int failures = 0;
     char m1[2048], m2[2048];
-    const char *list[2] = { m1, m2 };
+    const char *list[2] = { m2, m1 };
     if (!ci_setup(&e, "maint"))
         return 1;
     ci_entry(m1, sizeof(m1), a, CI_MAINT, "maintainer-owner", "question", "maint words");
@@ -600,7 +602,7 @@ static int case_four_per_pass(void)
         ci_hex64(ids[i], (char)('1' + i));
         ci_entry(entries[i], sizeof(entries[i]), ids[i], CI_OUTSIDE,
                  "outsider", "need", "please review");
-        list[i] = entries[i];
+        list[4 - i] = entries[i];
     }
     CI_CHECK("five needs are staged", ci_list(&e, list, 5));
     CI_CHECK("the first pass exits 0", ci_pass(&e) == 0);
@@ -611,16 +613,14 @@ static int case_four_per_pass(void)
     return failures;
 }
 
-/* The board returns about three posts a page. A pass must follow
- * next_cursor while a page still holds unseen posts, or the oldest post of a
- * burst is never read. A next page that cannot be read ends the walk with
- * what was read. */
+/* A pass must follow the native page cursor and must not consume a partial
+ * snapshot when a later page cannot be read. */
 static int case_pages_followed(void)
 {
     struct ci_env e;
     char entries[4][2048];
     char ids[4][65];
-    const char *page0[3], *page3[1];
+    const char *page0[3], *page1[1];
     int failures = 0;
     CI_CHECK("the state dir is ready", ci_setup(&e, "pages"));
     for (int i = 0; i < 4; i++) {
@@ -631,9 +631,9 @@ static int case_pages_followed(void)
     page0[0] = entries[3];
     page0[1] = entries[2];
     page0[2] = entries[1];
-    page3[0] = entries[0];
-    CI_CHECK("page 0 names page 3", ci_list_page(&e, 0, page0, 3, 3));
-    CI_CHECK("page 3 is the last", ci_list_page(&e, 3, page3, 1, 0));
+    page1[0] = entries[0];
+    CI_CHECK("page 0 names another page", ci_list_page(&e, 0, page0, 3, 1));
+    CI_CHECK("page 1 is the last", ci_list_page(&e, 1, page1, 1, 0));
     CI_CHECK("the pass exits 0", ci_pass(&e) == 0);
     CI_CHECK("the post on the second page is read",
              ci_events_count(&e, "ESCALATE ") == 4 &&
@@ -642,10 +642,9 @@ static int case_pages_followed(void)
     struct ci_env f;
     CI_CHECK("a second state dir is ready", ci_setup(&f, "pages_gap"));
     CI_CHECK("page 0 names a page that is missing",
-             ci_list_page(&f, 0, page0, 3, 3));
-    CI_CHECK("a missing later page is not fatal", ci_pass(&f) == 0);
-    CI_CHECK("page 0 is still handled",
-             ci_events_count(&f, "ESCALATE ") == 3);
+             ci_list_page(&f, 0, page0, 3, 1));
+    CI_CHECK("a missing later page fails closed", ci_pass(&f) != 0);
+    CI_CHECK("no partial page is handled", ci_events_count(&f, "ESCALATE ") == 0);
     return failures;
 }
 
@@ -694,6 +693,235 @@ static bool ci_state_has(const struct ci_env *e, const char *leaf, const char *n
 {
     char p[800];
     return ci_file_has(ci_path(e, p, sizeof(p), leaf), needle);
+}
+
+/* A local executable stands in for the board CLI, records the real argv and
+ * serves fixture pages only when the native timestamp/id cursor is supplied. */
+static bool ci_fake_board(struct ci_env *e, char *bin, size_t cap)
+{
+    static const char script[] =
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$0.args\"\n"
+        "[ \"$1\" = fleet ] && [ \"$2\" = board ] && [ \"$3\" = list ] || exit 9\n"
+        "[ ! -e \"$0.fail-first\" ] || exit 8\n"
+        "case \" $* \" in\n"
+        " *' --before_created_at='*)\n"
+        "  case \" $* \" in *' --before_created_at=1 '*) :;; *) exit 7;; esac\n"
+        "  case \" $* \" in *' --before_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb '*) :;; *) exit 7;; esac\n"
+        "  [ ! -e \"$0.fail-later\" ] || exit 6; cat \"$0.page0.1\" ;;\n"
+        " *' --before_id='*) exit 7 ;;\n"
+        " *) cat \"$0.page0\" ;;\n"
+        "esac\n";
+    if (snprintf(bin, cap, "%s/fake-z23", e->d) >= (int)cap ||
+        snprintf(e->list, sizeof(e->list), "%s.page0", bin) >= (int)sizeof(e->list)) return false;
+    return ci_wf(bin, script) && chmod(bin, 0700) == 0;
+}
+
+static int case_live_cursor(void)
+{
+    struct ci_env e; char bin[700], entries[4][2048], ids[4][65], args[750];
+    const char *page0[3], *page1[1]; int failures = 0;
+    if (!ci_setup(&e, "live_cursor")) return 1;
+    for (int i = 0; i < 4; ++i) {
+        ci_hex64(ids[i], (char)('a' + i));
+        ci_entry(entries[i], sizeof(entries[i]), ids[i], CI_OUTSIDE, "outsider", "need", "please review");
+    }
+    page0[0] = entries[3]; page0[1] = entries[2]; page0[2] = entries[1]; page1[0] = entries[0];
+    CI_CHECK("the fake board executable is ready", ci_fake_board(&e, bin, sizeof(bin)));
+    CI_CHECK("the first real-metadata page is ready", ci_list_page(&e, 0, page0, 3, 1));
+    CI_CHECK("the second real-metadata page is ready", ci_list_page(&e, 1, page1, 1, 0));
+    const struct ci_run_opts live = {.live_list = true, .z23 = bin, .fsize = -1};
+    CI_CHECK("the live-list pass succeeds", ci_pass_with(&e, &live) == 0);
+    CI_CHECK("all four pages' posts are handled", ci_events_count(&e, "ESCALATE ") == 4 && ci_has_events(&e, ids[0]));
+    (void)snprintf(args, sizeof(args), "%s.args", bin);
+    CI_CHECK("the second fetch carries the real cursor", ci_file_has(args, "--before_created_at=1") &&
+             ci_file_has(args, "--before_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") &&
+             !ci_file_has(args, "--cursor="));
+    return failures;
+}
+
+static int case_live_fetch_refusal(unsigned mode)
+{
+    struct ci_env e; char bin[700], path[750], entry[2048], id[65]; int failures = 0;
+    char tag[48]; (void)snprintf(tag, sizeof(tag), "live_fetch_%u", mode);
+    if (!ci_setup(&e, tag) || !ci_fake_board(&e, bin, sizeof(bin))) return 1;
+    ci_hex64(id, 'b');
+    ci_entry(entry, sizeof(entry), id, CI_OUTSIDE, "outsider", "need", "please review");
+    const char *posts[] = {entry};
+    bool ready = mode == 1 ? ci_wf(e.list, "{\"ok\":false,\"error\":{\"code\":\"NO_BOARD\"}}\n") :
+                 mode == 2 ? ci_wf(e.list, "not JSON\n") : ci_list_page(&e, 0, posts, 1, mode == 3 ? 1 : 0);
+    (void)snprintf(path, sizeof(path), "%s.%s", bin, mode == 0 ? "fail-first" : "fail-later");
+    if (mode == 0 || mode == 3) ready = ci_wf(path, "x") && ready;
+    CI_CHECK("failure fixture is ready", ready);
+    const struct ci_run_opts live = {.live_list = true, .z23 = bin, .fsize = -1};
+    CI_CHECK("board fetch failure is not quiet success", ci_pass_with(&e, &live) != 0);
+    CI_CHECK("failed fetch consumes no seen post", !ci_state_has(&e, "seen.txt", id));
+    CI_CHECK("failed fetch posts nothing", ci_events_count(&e, "ESCALATE ") == 0);
+    return failures;
+}
+
+static int case_live_fetch_failures(void)
+{
+    int failures = 0;
+    for (unsigned mode = 0; mode < 4; ++mode) failures += case_live_fetch_refusal(mode);
+    return failures;
+}
+
+/* Every item in a board page must descend strictly from the requested tuple,
+ * including items before a valid continuation or on the final page. */
+static bool ci_bad_order_page(struct ci_env *e, unsigned mode)
+{
+    char a[65], b[65], c[65], bad[65], ea[2048], eb[2048], ec[2048], ex[2048];
+    ci_hex64(a, 'a'); ci_hex64(b, 'b'); ci_hex64(c, 'c'); ci_hex64(bad, 'g');
+    ci_entry(ea, sizeof(ea), a, CI_OUTSIDE, "outsider", "need", "review a");
+    ci_entry(eb, sizeof(eb), b, CI_OUTSIDE, "outsider", "need", "review b");
+    ci_entry(ec, sizeof(ec), c, CI_OUTSIDE, "outsider", "need", "review c");
+    ci_entry(ex, sizeof(ex), bad, CI_OUTSIDE, "outsider", "need", "invalid id");
+    const char *duplicate[] = {eb, eb}, *ascending[] = {ea, eb};
+    const char *first[] = {eb}, *equal[] = {eb}, *newer[] = {ec}, *invalid[] = {ex};
+    if (mode == 0) return ci_list_page(e, 0, duplicate, 2, 0);
+    if (mode == 1) return ci_list_page(e, 0, ascending, 2, 0);
+    if (mode == 2 || mode == 3)
+        return ci_list_page(e, 0, first, 1, 1) && ci_list_page(e, 1, mode == 2 ? equal : newer, 1, 0);
+    if (mode == 4) return ci_list_page(e, 0, invalid, 1, 0);
+    if (mode == 5) {
+        char *time = strstr(eb, "\"created_at\":1");
+        if (!time) return false;
+        time[strlen("\"created_at\":")] = '0';
+        return ci_list_page(e, 0, first, 1, 0);
+    }
+    return ci_wf(e->list, "{\"ok\":true,\"data\":{\"posts\":[],\"has_more\":true,\"next_created_at\":1,\"next_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}\n");
+}
+
+static int ci_bad_order_case(unsigned mode)
+{
+    struct ci_env e; char bin[700], tag[48], seen[800], cursor[800]; int failures = 0;
+    (void)snprintf(tag, sizeof(tag), "bad_order_%u", mode);
+    if (!ci_setup(&e, tag) || !ci_fake_board(&e, bin, sizeof(bin)) || !ci_bad_order_page(&e, mode)) return 1;
+    const struct ci_run_opts live = {.live_list = true, .z23 = bin, .fsize = -1};
+    CI_CHECK("invalid board ordering refuses the pass", ci_pass_with(&e, &live) != 0);
+    struct stat st;
+    ci_path(&e, seen, sizeof(seen), "seen.txt"); ci_path(&e, cursor, sizeof(cursor), "crawl-cursor");
+    CI_CHECK("invalid page has no seen or cursor writes", stat(seen, &st) == 0 && st.st_size == 0 && !ci_exists(cursor));
+    CI_CHECK("invalid page posts nothing", ci_events_count(&e, "ESCALATE ") == 0);
+    if (failures) fprintf(stderr, "invalid board ordering fixture mode=%u\n", mode);
+    return failures;
+}
+
+static int case_bad_order(void)
+{
+    int failures = 0;
+    for (unsigned mode = 0; mode < 7; ++mode) failures += ci_bad_order_case(mode);
+    return failures;
+}
+
+static int case_late_older_post(void)
+{
+    struct ci_env e; char entries[5][2048], ids[5][65]; int failures = 0;
+    if (!ci_setup(&e, "late_old")) return 1;
+    for (int i = 0; i < 5; ++i) {
+        ci_hex64(ids[i], i == 4 ? '0' : (char)('d' - i));
+        ci_entry(entries[i], sizeof(entries[i]), ids[i], CI_OUTSIDE, "outsider", "need", "please review");
+    }
+    const char *head[] = {entries[0], entries[1]};
+    const char *old[] = {entries[2], entries[3]};
+    const char *late[] = {entries[2], entries[3], entries[4]};
+    CI_CHECK("late-old first page is ready", ci_list_page(&e, 0, head, 2, 1));
+    CI_CHECK("late-old second page is ready", ci_list_page(&e, 1, old, 2, 0));
+    CI_CHECK("initial burst is fully handled", ci_pass(&e) == 0 && ci_events_count(&e, "ESCALATE ") == 4);
+    CI_CHECK("older post arrives behind seen head", ci_list_page(&e, 1, late, 3, 0));
+    CI_CHECK("seen head does not hide older post", ci_pass(&e) == 0 && ci_events_count(&e, "ESCALATE ") == 5 &&
+             ci_state_has(&e, "seen.txt", ids[4]));
+    return failures;
+}
+
+static bool ci_bulk_pages(struct ci_env *e, char ids[55][65])
+{
+    char entries[5][2048]; const char *posts[5];
+    for (int page = 0; page < 11; ++page) {
+        for (int i = 0; i < 5; ++i) {
+            int index = page * 5 + i;
+            (void)snprintf(ids[index], 65, "%064x", 55 - index);
+            ci_entry(entries[i], sizeof(entries[i]), ids[index], CI_OUTSIDE, "outsider", "need", "please review");
+            posts[i] = entries[i];
+        }
+        if (!ci_list_page(e, page, posts, 5, page < 10 ? page + 1 : 0)) return false;
+    }
+    return true;
+}
+
+static bool ci_bulk_board(const char *bin, char ids[55][65])
+{
+    FILE *f = fopen(bin, "wb");
+    if (!f) return false;
+    bool ok = fprintf(f, "#!/bin/sh\nprintf '%%s\\n' \"$*\" >> \"$0.args\"\n"
+        "[ ! -e \"$0.fail\" ] || exit 8\nbefore=\n"
+        "for arg do case \"$arg\" in --before_id=*) before=${arg#--before_id=};; esac; done\n"
+        "if [ -z \"$before\" ]; then cat \"$0.page0\"; exit $?; fi\n"
+        "case \" $* \" in *' --before_created_at=1 '*) :;; *) exit 7;; esac\ncase \"$before\" in\n") >= 0;
+    for (int page = 1; ok && page < 11; ++page)
+        ok = fprintf(f, " %s) cat \"$0.page0.%d\" ;;\n", ids[page * 5 - 1], page) >= 0;
+    if (ok) ok = fputs(" *) exit 6 ;;\nesac\n", f) >= 0;
+    if (fclose(f) != 0) ok = false;
+    return ok && chmod(bin, 0700) == 0;
+}
+
+static bool ci_bulk_seen_once(const struct ci_env *e, char ids[55][65])
+{
+    char path[800]; ci_path(e, path, sizeof(path), "seen.txt");
+    for (int i = 0; i < 55; ++i) if (ci_count(path, ids[i]) != 1) return false;
+    return true;
+}
+
+static bool ci_cursor_read(const char *path, char *out, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(out, 1, cap - 1, f);
+    bool ok = feof(f) && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    out[n] = 0;
+    return ok;
+}
+static bool ci_cursor_unchanged(const char *path, const char *before)
+{
+    char after[256];
+    return ci_cursor_read(path, after, sizeof(after)) && strcmp(before, after) == 0;
+}
+
+static int ci_bulk_resumed_failure(const struct ci_env *e, const struct ci_run_opts *live,
+                                   const char *bin)
+{
+    int failures = 0; char marker[750], cursor[800], before[256] = {0};
+    (void)snprintf(marker, sizeof(marker), "%s.fail", bin);
+    ci_path(e, cursor, sizeof(cursor), "crawl-cursor");
+    CI_CHECK("the advanced cursor is readable", ci_cursor_read(cursor, before, sizeof(before)));
+    CI_CHECK("the resumed fetch failure is armed", ci_wf(marker, "x"));
+    CI_CHECK("failed resumed fetch does not advance or consume", ci_pass_with(e, live) != 0 &&
+             ci_cursor_unchanged(cursor, before) && ci_events_count(e, "ESCALATE ") == 50);
+    CI_CHECK("the resumed fetch failure is removed", unlink(marker) == 0);
+    return failures;
+}
+
+static int case_live_backlog(void)
+{
+    struct ci_env e; char bin[700], ids[55][65];
+    int failures = 0;
+    if (!ci_setup(&e, "live_backlog") || !ci_fake_board(&e, bin, sizeof(bin)) ||
+        !ci_bulk_pages(&e, ids) || !ci_bulk_board(bin, ids)) return 1;
+    const struct ci_run_opts live = {.live_list = true, .z23 = bin, .fsize = -1};
+    bool passes = true, advanced = false;
+    for (int i = 0; i < 20; ++i) {
+        if (ci_pass_with(&e, &live) != 0) { passes = false; break; }
+        if (ci_state_has(&e, "crawl-cursor", ids[49])) { advanced = true; break; }
+    }
+    CI_CHECK("bounded first chunk is handled before advancing", passes && advanced && ci_events_count(&e, "ESCALATE ") == 50);
+    failures += ci_bulk_resumed_failure(&e, &live, bin);
+    for (int i = 0; i < 8 && ci_events_count(&e, "ESCALATE ") < 55; ++i)
+        if (ci_pass_with(&e, &live) != 0) { passes = false; break; }
+    CI_CHECK("bounded backlog eventually handles every post once", passes &&
+             ci_events_count(&e, "ESCALATE ") == 55 && ci_bulk_seen_once(&e, ids));
+    return failures;
 }
 
 /* A ledger that cannot be written must never mean a public reply: with the
@@ -1000,6 +1228,11 @@ int test_contrib_inbox(void)
     failures += case_daily_cap();
     failures += case_four_per_pass();
     failures += case_pages_followed();
+    failures += case_live_cursor();
+    failures += case_live_fetch_failures();
+    failures += case_bad_order();
+    failures += case_late_older_post();
+    failures += case_live_backlog();
     failures += case_lock_held();
     failures += case_missing_fixture();
     failures += case_seen_unwritable();
