@@ -629,3 +629,7 @@ ZCL_TEST_GROUP_BUILD_NEED("test_app_receive_ui", "build/bin/z23-dev", "dev-bin")
 ZCL_TEST_GROUP_BUILD_NEED("test_app_receive_ui", "build/bin/native_ui_driver", "native-ui-driver")
 #endif
 ZCL_TEST_GROUP_BUILD_NEED("test_app_host_worker", "build/bin/z23-dev", "dev-bin")
+
+/* The job-budget CLI checks execute the source-built native lint binary. */
+ZCL_TEST_GROUP_BUILD_NEED("test_lint_run", "build/bin/z23-lint",
+                          "build/bin/z23-lint")

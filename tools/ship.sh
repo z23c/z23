@@ -446,6 +446,20 @@ ship_refuse_dev_artifact() {
 # existing preflight refusal, because rebuilding it there would hide drift
 # instead of surfacing it.
 #
+# The lint invocation is separately testable without running a full gate.
+# Always validate the native budget; preserve caller Make controls when set.
+ship_run_make() (
+    make build/bin/z23-lint >&2 || exit $?
+    jobs="$("$REPO_ROOT/build/bin/z23-lint" build-jobs)" || exit $?
+    [ -n "$jobs" ] || { printf 'ship: native build job count is empty\n' >&2; exit 1; }
+    if [ -n "${MAKEFLAGS:-}${MFLAGS:-}${GNUMAKEFLAGS:-}" ]; then
+        make "$@"
+    else
+        make "$jobs" "$@"
+    fi
+)
+ship_run_lint() { ship_run_make lint; }
+
 # The suite must not inherit the canonical-deployment authorization.
 ship_run_test_suite() { env -u ZCL_DEPLOY_ALLOW_CANONICAL make test-parallel TEST_PARALLEL_ARGS=--no-cache; }
 
@@ -819,6 +833,72 @@ REMOTE_ARGS
     refute ship_suite_accept "$test_tmp/suite-hotswap.log" 0
     refute ship_suite_accept "$test_tmp/suite-valid.log" 7
     ship_suite_accept "$test_tmp/suite-valid.log" 0 >/dev/null
+
+    # The shared Make helper must use the native authority after a fresh
+    # lint-tool build, and must preserve caller-owned jobserver controls.
+    mkdir -p "$test_tmp/jobs-bin" "$test_tmp/jobs-root/build/bin"
+    cat > "$test_tmp/jobs-bin/make" <<'SHIP_MAKE_FAKE'
+#!/bin/sh
+printf 'make:%s\n' "$*" >> "$SHIP_JOBS_CALLS"
+printf '%s\n%s\n%s\n' "${MAKEFLAGS:-}" "${MFLAGS:-}" "${GNUMAKEFLAGS:-}" > "$SHIP_JOBS_FLAGS"
+case "${SHIP_JOBS_FAIL:-}:$1" in
+    bootstrap:build/bin/z23-lint|lint:-j3) exit 7 ;;
+esac
+SHIP_MAKE_FAKE
+    cat > "$test_tmp/jobs-root/build/bin/z23-lint" <<'SHIP_JOBS_FAKE'
+#!/bin/sh
+printf 'query:%s\n' "$*" >> "$SHIP_JOBS_CALLS"
+[ "$#" = 1 ] && [ "$1" = build-jobs ] || exit 2
+[ "${SHIP_JOBS_FAIL:-}" != query ] || exit 2
+printf '%s\n' -j3
+SHIP_JOBS_FAKE
+    chmod 700 "$test_tmp/jobs-bin/make" "$test_tmp/jobs-root/build/bin/z23-lint"
+    SHIP_JOBS_CALLS="$test_tmp/jobs.calls"; SHIP_JOBS_FLAGS="$test_tmp/jobs.flags"
+    export SHIP_JOBS_CALLS SHIP_JOBS_FLAGS
+    : > "$SHIP_JOBS_CALLS"
+    ( unset MAKEFLAGS MFLAGS GNUMAKEFLAGS; REPO_ROOT="$test_tmp/jobs-root"; PATH="$test_tmp/jobs-bin"; ship_run_lint )
+    printf 'make:build/bin/z23-lint\nquery:build-jobs\nmake:-j3 lint\n' > "$test_tmp/jobs.expected"
+    cmp "$test_tmp/jobs.expected" "$SHIP_JOBS_CALLS"
+    : > "$SHIP_JOBS_CALLS"
+    ( unset MAKEFLAGS MFLAGS GNUMAKEFLAGS; REPO_ROOT="$test_tmp/jobs-root"; PATH="$test_tmp/jobs-bin"; ship_run_make zclassic23 tor-stamp )
+    printf 'make:build/bin/z23-lint\nquery:build-jobs\nmake:-j3 zclassic23 tor-stamp\n' > "$test_tmp/jobs.expected"
+    cmp "$test_tmp/jobs.expected" "$SHIP_JOBS_CALLS"
+    for inherited in serial jobserver mflags gnumakeflags; do
+        : > "$SHIP_JOBS_CALLS"
+        ( unset MAKEFLAGS MFLAGS GNUMAKEFLAGS
+          case "$inherited" in
+              serial) MAKEFLAGS=-j1; export MAKEFLAGS ;;
+              jobserver) MAKEFLAGS='-j2 --jobserver-auth=3,4'; export MAKEFLAGS ;;
+              mflags) MFLAGS=-j3; export MFLAGS ;;
+              gnumakeflags) GNUMAKEFLAGS=-j4; export GNUMAKEFLAGS ;;
+          esac
+          REPO_ROOT="$test_tmp/jobs-root"; PATH="$test_tmp/jobs-bin"; ship_run_lint )
+        printf 'make:build/bin/z23-lint\nquery:build-jobs\nmake:lint\n' > "$test_tmp/jobs.expected"
+        cmp "$test_tmp/jobs.expected" "$SHIP_JOBS_CALLS"
+        case "$inherited" in
+            serial) [ "$(sed -n '1p' "$SHIP_JOBS_FLAGS")" = -j1 ] ;;
+            jobserver) [ "$(sed -n '1p' "$SHIP_JOBS_FLAGS")" = '-j2 --jobserver-auth=3,4' ] ;;
+            mflags) [ "$(sed -n '2p' "$SHIP_JOBS_FLAGS")" = -j3 ] ;;
+            gnumakeflags) [ "$(sed -n '3p' "$SHIP_JOBS_FLAGS")" = -j4 ] ;;
+        esac
+    done
+    for fail in bootstrap query lint; do
+        : > "$SHIP_JOBS_CALLS"
+        ( unset MAKEFLAGS MFLAGS GNUMAKEFLAGS; REPO_ROOT="$test_tmp/jobs-root"; PATH="$test_tmp/jobs-bin"; SHIP_JOBS_FAIL="$fail"; export SHIP_JOBS_FAIL; refute ship_run_lint )
+        if [ "$fail" = bootstrap ]; then
+            printf 'make:build/bin/z23-lint\n' > "$test_tmp/jobs.expected"
+        elif [ "$fail" = query ]; then
+            printf 'make:build/bin/z23-lint\nquery:build-jobs\n' > "$test_tmp/jobs.expected"
+        else
+            printf 'make:build/bin/z23-lint\nquery:build-jobs\nmake:-j3 lint\n' > "$test_tmp/jobs.expected"
+        fi
+        cmp "$test_tmp/jobs.expected" "$SHIP_JOBS_CALLS"
+    done
+    : > "$SHIP_JOBS_CALLS"
+    ( unset MFLAGS GNUMAKEFLAGS; MAKEFLAGS=-j1; export MAKEFLAGS; REPO_ROOT="$test_tmp/jobs-root"; PATH="$test_tmp/jobs-bin"; SHIP_JOBS_FAIL=query; export SHIP_JOBS_FAIL; refute ship_run_lint )
+    printf 'make:build/bin/z23-lint\nquery:build-jobs\n' > "$test_tmp/jobs.expected"
+    cmp "$test_tmp/jobs.expected" "$SHIP_JOBS_CALLS"
+    unset SHIP_JOBS_CALLS SHIP_JOBS_FLAGS
 
     mkdir "$test_tmp/suite-bin"
     printf '#!/bin/sh\n[ "$1" = test-parallel ] && [ "$2" = TEST_PARALLEL_ARGS=--no-cache ] && [ "${ZCL_DEPLOY_ALLOW_CANONICAL+x}" != x ]\n' > "$test_tmp/suite-bin/make"
@@ -1453,7 +1533,7 @@ elif [ "$DRY_RUN" -eq 1 ]; then
     say "gate       (dry run — would run lint + full suite)"
 else
     say "gate       make lint"
-    make lint >/dev/null || die "make lint failed"
+    ship_run_lint >/dev/null || die "make lint failed"
     say "gate       make test-parallel"
     suite_log="$(mktemp "$(ship_scratch_root)/zclassic23.ship.suite-log.XXXXXX")"
     suite_rc=0
@@ -1514,7 +1594,7 @@ else
         build/bin/z23-package-verify build/bin/z23-package-verify-dev \
         build/bin/zclassic23-package-verify \
         build/bin/zclassic23-package-verify-dev
-    make -j"$(nproc)" zclassic23 z23-package-verify dev-package-verifier tor-stamp >/dev/null || \
+    ship_run_make zclassic23 z23-package-verify dev-package-verifier tor-stamp >/dev/null || \
         die "production build failed"
     CANDIDATE="$(mktemp "$(ship_scratch_root)/zclassic23.ship.XXXXXX")"
     WORKER_FILES=(); WORKER_SHAS=()

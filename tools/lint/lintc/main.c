@@ -9,6 +9,7 @@
 #endif
 #include <stdio.h>
 #include <string.h>
+#include "platform/logical_cpu.h"
 #include "lintc.h"
 #include "lintc_commands.h"
 #include "premise.h"
@@ -26,12 +27,27 @@ const struct lint_gate *lint_gate_table(size_t *n)
     return k_gates;
 }
 
+/* Expose the same checked CPU, memory and optional-cap policy as native
+ * Make-spawning callers, without introducing another sizing authority. */
+static int build_jobs_main(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 0) return die("z23-lint: usage: z23-lint build-jobs\n", "");
+    char jobs[16];
+    if (!platform_build_jobs_arg(jobs))
+        return die("z23-lint: invalid ZCL_BUILD_MAX_JOBS or job count\n", "");
+    if (printf("%s\n", jobs) < 0 || fflush(stdout) != 0)
+        return die("z23-lint: build-jobs output failed\n", "");
+    return 0;
+}
+
 /* Subcommands (premise selection, module-linkgraph); they are tools, not
  * gates, so --list and the gate table never name them. */
 static const struct {
     const char *name;
     int (*main)(int argc, char **argv);
 } k_tools[] = {
+    { "build-jobs", build_jobs_main },
     { "select", lint_select_main },
     { "unit-exec", lint_unit_exec_main },
     { "premise", lint_premise_main },

@@ -16,6 +16,7 @@
 #include "lint/lintc/run_priv.h"
 
 #include <limits.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -802,9 +803,61 @@ static int test_lrun_seal(void)
     return failures;
 }
 
+/* The actual public tool must use the platform's checked build-job cap. */
+static void lrun_build_jobs_child(FILE *capture, const char *cap, bool extra)
+{
+    int nullfd = open("/dev/null", O_WRONLY);
+    if (nullfd < 0 || dup2(fileno(capture), STDOUT_FILENO) < 0 ||
+        dup2(nullfd, STDERR_FILENO) < 0 || setenv("ZCL_BUILD_MAX_JOBS", cap, 1) != 0)
+        _exit(125);
+    close(nullfd);
+    if (extra) execl("build/bin/z23-lint", "z23-lint", "build-jobs", "extra", (char *)NULL);
+    else execl("build/bin/z23-lint", "z23-lint", "build-jobs", (char *)NULL);
+    _exit(125);
+}
+
+static int lrun_build_jobs(const char *cap, bool extra, char *out, size_t size)
+{
+    FILE *capture = tmpfile();
+    if (!capture || size < 2) { if (capture) fclose(capture); return -1; }
+    pid_t pid = fork();
+    if (pid == 0) lrun_build_jobs_child(capture, cap, extra);
+    if (pid < 0) { fclose(capture); return -1; }
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    int result = -1;
+    if (waited == pid && WIFEXITED(status) && fseek(capture, 0, SEEK_SET) == 0) {
+        size_t n = fread(out, 1, size - 1, capture);
+        out[n] = '\0';
+        if (!ferror(capture) && feof(capture)) result = WEXITSTATUS(status);
+    }
+    fclose(capture);
+    return result;
+}
+
+static int test_lrun_build_jobs(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: build-jobs respects the native cap and refuses invalid inputs") {
+        char out[128];
+        ASSERT_EQ(lrun_build_jobs("1", false, out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "-j1\n");
+        const char *invalid[] = {"", "0", "bad", "4294967296"};
+        for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+            ASSERT(lrun_build_jobs(invalid[i], false, out, sizeof(out)) > 0);
+            ASSERT_STR_EQ(out, "");
+        }
+        ASSERT(lrun_build_jobs("1", true, out, sizeof(out)) > 0);
+        ASSERT_STR_EQ(out, "");
+    } TEST_END
+    return failures;
+}
+
 int test_lint_run(void)
 {
     int failures = 0;
+    failures += test_lrun_build_jobs();
     failures += test_lrun_seal();
     failures += test_lrun_verdicts();
     failures += test_lrun_green();
