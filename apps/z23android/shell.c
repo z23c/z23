@@ -283,6 +283,13 @@ static jobject scroll_column(JNIEnv *env, jobject root, int padding_dp)
     if (!ok && content) { (*env)->DeleteLocalRef(env, content); content = NULL; }
     return content;
 }
+static bool settings_network(JNIEnv *env, jobject content)
+{
+    return label(env, content, "Network for next start", 20.0f, WHITE) &&
+        label(env, content, "Tor + direct peers exposes your IP address to direct peers. The running node keeps its mode until stopped and started.", 15.0f, WHITE) &&
+        button(env, content, "Tor only", CMD_PEER_MODE, 0, 0) &&
+        button(env, content, "Tor + direct peers", CMD_PEER_MODE, 1, 0);
+}
 static bool build_settings(JNIEnv *env, jobject root)
 {
     jobject status = zj_widget(env, "android/widget/TextView", shell.activity);
@@ -294,10 +301,7 @@ static bool build_settings(JNIEnv *env, jobject root)
         snprintf(text, sizeof(text), "Layout: %s", zapp_home_layout_name(i));
         ok = button(env, content, text, CMD_LAYOUT, i, 0);
     }
-    ok = ok && label(env, content, "Network for next start", 20.0f, WHITE) &&
-        label(env, content, "Tor + direct peers exposes your IP address to direct peers. The running node keeps its mode until stopped and started.", 15.0f, WHITE) &&
-        button(env, content, "Tor only", CMD_PEER_MODE, 0, 0) &&
-        button(env, content, "Tor + direct peers", CMD_PEER_MODE, 1, 0);
+    ok = ok && settings_network(env, content);
     ok = ok && button(env, content, "Android home settings", CMD_HOME_SETTINGS, 0, 0) && button(env, content, "Home", CMD_HOME, 0, 0);
     if (status) (*env)->DeleteLocalRef(env, status);
     if (content) (*env)->DeleteLocalRef(env, content);
@@ -972,6 +976,13 @@ static bool run_fleet_nav(JNIEnv *env, const struct nav *nav)
     default: return false;
     }
 }
+static void choose_peer_mode(JNIEnv *env, size_t mode)
+{
+    if (!zapp_direct_peers_save(shell.files, mode == 1))
+        snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not save network choice.");
+    else shell.action_notice[0] = 0;
+    settings_status(env); show_notice(env);
+}
 static void run_nav(JNIEnv *env, const struct nav *nav)
 {
     if (run_fleet_nav(env, nav)) return;
@@ -982,11 +993,7 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_PLAY: go(env, SCREEN_GAME); break;
     case CMD_HOME_SETTINGS: open_home_settings(env); break;
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
-    case CMD_PEER_MODE:
-        if (!zapp_direct_peers_save(shell.files, nav->arg == 1))
-            snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not save network choice.");
-        else shell.action_notice[0] = 0;
-        settings_status(env); show_notice(env); break;
+    case CMD_PEER_MODE: choose_peer_mode(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
     case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
     case CMD_CAMERA_RETRY: retry_camera(env); break;
