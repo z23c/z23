@@ -249,15 +249,17 @@ logcat. Outside the wallet screens the app runs one read-only node command, `cor
 A fleet height counts as evidence only while the report is no more than 180
 seconds old (its `observed_at`).
 
-The phone node always runs in private mode: it starts with `-onlynet=onion
--bind=127.0.0.1`, so it dials only Tor onion peers, resolves no DNS seed, and
-never falls back to clearnet. Its dial targets are the built-in onion seeds of
+The phone node defaults to Tor only: it starts with `-onlynet=onion
+-bind=127.0.0.1`, so it dials only onion peers and resolves no DNS seed.
+Settings can select Tor + direct peers for the next start; direct peers see the
+the phone IP address. The running node keeps its mode until stopped and started.
+The choice never enables a fallback automatically. Its dial targets are the built-in onion seeds of
 the chain parameters, the onion directory those seeds publish, and
 the fleet onion peers (`-addnode=<56 characters>.onion:<port>`) that the paired
 laptop host names in an `onion` field of its fleet report. The app keeps those
 in `fleet-onion-peers` beside the node data and passes only entries that pass
 a strict `.onion:port` check. With fewer than two onion peers the node line
-reads "Private · waiting for onion peers (1 of 2)".
+reads "Waiting for onion peers (1 of 2)".
 
 Under the fleet list in **More**, **Host** selects one fleet host, **Show errors**
 lists its last five `ERROR` log lines from the past 24 hours (`z23 ops logs`, read-only), and **Plugins**

@@ -4,9 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Private mode is the phone node's only mode: it dials Tor onion peers and nothing else, does no DNS
- * seeding and never falls back to clearnet. These arguments are the node's -onlynet=onion contract
- * (engine/composition: app_onlynet_onion_refusal), plus the owner's fleet onion peers as -addnode. */
+/* Tor remains enabled in both modes; direct peers require explicit opt-in. */
 enum { ZAPP_ONION_PEER_MAX = 72, ZAPP_PRIVATE_PEERS_MAX = 8, ZAPP_PRIVATE_ARGV_MAX = 12, ZAPP_FLEET_NAME_MAX = 15,
        ZAPP_ROSTER_MAX = ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1 + ZAPP_FLEET_NAME_MAX + 1) + 1 };
 
@@ -40,4 +38,7 @@ struct zapp_private_args {
  * for none). Invalid, repeated and surplus lines are dropped. A node started with these dials no clearnet
  * host and resolves no DNS seed. */
 void zapp_private_args(struct zapp_private_args *a, const char *roster_text);
+void zapp_peer_args(struct zapp_private_args *a, const char *roster_text, bool direct);
+bool zapp_direct_peers_load(const char *directory);
+bool zapp_direct_peers_save(const char *directory, bool enabled);
 #endif

@@ -10,6 +10,7 @@
 #include "jni_util.h"
 #include "launcher.h"
 #include "layout.h"
+#include "private.h"
 #include "secure_window.h"
 #include "share.h"
 #include "surface.h"
@@ -36,7 +37,7 @@
 #define GRAVITY_CENTER_HORIZONTAL 1
 
 enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_PEER_MODE, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -293,6 +294,10 @@ static bool build_settings(JNIEnv *env, jobject root)
         snprintf(text, sizeof(text), "Layout: %s", zapp_home_layout_name(i));
         ok = button(env, content, text, CMD_LAYOUT, i, 0);
     }
+    ok = ok && label(env, content, "Network for next start", 20.0f, WHITE) &&
+        label(env, content, "Tor + direct peers exposes your IP address to direct peers. The running node keeps its mode until stopped and started.", 15.0f, WHITE) &&
+        button(env, content, "Tor only", CMD_PEER_MODE, 0, 0) &&
+        button(env, content, "Tor + direct peers", CMD_PEER_MODE, 1, 0);
     ok = ok && button(env, content, "Android home settings", CMD_HOME_SETTINGS, 0, 0) && button(env, content, "Home", CMD_HOME, 0, 0);
     if (status) (*env)->DeleteLocalRef(env, status);
     if (content) (*env)->DeleteLocalRef(env, content);
@@ -661,6 +666,8 @@ static void settings_status(JNIEnv *env)
     char text[400];
     if (shell.user_layout) snprintf(text, sizeof(text), "Using layouts/home.json from the app's files folder. Delete it to use a built-in layout.");
     else snprintf(text, sizeof(text), "Using the built-in %s layout.%s", shell.builtin, shell.layout_notice[0] ? " The layout file was not used." : "");
+    size_t used = strlen(text);
+    snprintf(text + used, sizeof(text) - used, "\nNext start: %s", zapp_direct_peers_load(shell.files) ? "Tor + direct peers" : "Tor only");
     (void)zj_text(env, shell.status_view, text);
 }
 /* Adds the text-only list row of app i, including its installed version when known. */
@@ -975,6 +982,11 @@ static void run_nav(JNIEnv *env, const struct nav *nav)
     case CMD_PLAY: go(env, SCREEN_GAME); break;
     case CMD_HOME_SETTINGS: open_home_settings(env); break;
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
+    case CMD_PEER_MODE:
+        if (!zapp_direct_peers_save(shell.files, nav->arg == 1))
+            snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not save network choice.");
+        else shell.action_notice[0] = 0;
+        settings_status(env); show_notice(env); break;
     case CMD_SCAN_CANCEL: back(env); break;
     case CMD_CAMERA_SETTINGS: open_camera_settings(env); break;
     case CMD_CAMERA_RETRY: retry_camera(env); break;

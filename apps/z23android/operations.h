@@ -19,6 +19,7 @@ struct zapp_runtime {
     char temporary_root[1024];
     char executable[1024];
     pid_t node;
+    bool running_onion_only;
     pid_t installer;
     bool stopping;
     /* The preview package never runs a node. */
@@ -54,6 +55,7 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
 void zapp_runtime_signal_stop(struct zapp_runtime *r);
 void zapp_runtime_destroy(struct zapp_runtime *r);
 bool zapp_node_running(struct zapp_runtime *r);
+bool zapp_node_running_onion_only(struct zapp_runtime *r);
 bool zapp_node_installing(struct zapp_runtime *r);
 /* A true return binds this snapshot to the active installer ticket. */
 bool zapp_installer_observe(struct zapp_runtime *r, struct zapp_replay_progress *out, bool *has_progress);

@@ -306,6 +306,14 @@ static bool remember_on(const struct zapp_runtime *r, bool on)
     int fd = open(marker, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     return fd >= 0 && close(fd) == 0;
 }
+bool zapp_node_running_onion_only(struct zapp_runtime *r)
+{
+    if (!r) return false;
+    pthread_mutex_lock(&r->mutex);
+    bool result = r->node > 0 && r->running_onion_only;
+    pthread_mutex_unlock(&r->mutex);
+    return result;
+}
 bool zapp_node_wanted(const struct zapp_runtime *r)
 {
     char marker[1100];
@@ -395,7 +403,7 @@ static int spawn_node(struct zapp_runtime *r)
     int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : 0;
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    /* Tor only: the node dials onion peers, resolves no DNS seed and never falls back to clearnet. */
+    /* Direct peers require an explicit saved preference. */
     char params[1200], roster[ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1) + 1];
     char *argv[12 + ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX + 1] = {
         r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist", "-flysync-auto", "-nolegacyimport", "-nolegacyutxoimport"};
@@ -407,9 +415,11 @@ static int spawn_node(struct zapp_runtime *r)
     argv[argc++] = "-walletbackup=0";
     argv[argc++] = "-wallet-startup-auth-fd=198";
     (void)zapp_private_roster_load(r->directory, roster, sizeof(roster));
-    zapp_private_args(&private_mode, roster);
+    bool direct = zapp_direct_peers_load(r->files);
+    zapp_peer_args(&private_mode, roster, direct);
     for (size_t i = 0; i < private_mode.argc; i++) argv[argc++] = private_mode.argv[i];
     int rc = spawn_node_with_auth(r, argv, in, fd);
+    if (!rc) r->running_onion_only = !direct;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);
     if (!rc) (void)zapp_nodelog_start(&r->log, log, offset < 0 ? 0 : offset, r->node, cap);

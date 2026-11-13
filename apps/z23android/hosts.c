@@ -101,7 +101,7 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
     else if (height < 0) snprintf(out, cap, "Node running%s%s", count, onion);
     else if (v.onion_wait)
-        snprintf(out, cap, "Private · waiting for onion peers (%s)%s", onion_count(peers, ratio, sizeof(ratio)), onion);
+        snprintf(out, cap, "Waiting for onion peers (%s)%s", onion_count(peers, ratio, sizeof(ratio)), onion);
     else if (v.state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
     else if (v.state == ZAPP_CHAIN_BEHIND)
         snprintf(out, cap, "Behind · %s of %s%s", zapp_grouped(height, at), zapp_grouped(v.reference, top), onion);

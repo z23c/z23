@@ -252,15 +252,15 @@ static void private_line_tests(void)
     const struct zapp_chain_evidence tor = {.fleet_height = -1, .quiet_secs = 0, .onion_only = true};
     const struct zapp_chain_evidence tor_fleet = {.fleet_height = 3304002, .quiet_secs = 0, .onion_only = true};
     assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 3304001, 1, &tor, line, sizeof(line)),
-                   "Private · waiting for onion peers (1 of 2) · onion starting"));
+                   "Waiting for onion peers (1 of 2) · onion starting"));
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 0, &tor, line, sizeof(line)),
-                   "Private · waiting for onion peers (0 of 2) · onion ready"));
+                   "Waiting for onion peers (0 of 2) · onion ready"));
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 0, 1, &tor, line, sizeof(line)),
-                   "Private · waiting for onion peers (1 of 2) · onion ready"));
+                   "Waiting for onion peers (1 of 2) · onion ready"));
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304020, 1, &tor, line, sizeof(line)),
-                   "Private · waiting for onion peers (1 of 2) · onion ready"));
+                   "Waiting for onion peers (1 of 2) · onion ready"));
     assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, -1, &tor, line, sizeof(line)),
-                   "Private · waiting for onion peers (count unknown) · onion ready"));
+                   "Waiting for onion peers (count unknown) · onion ready"));
     assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, -1, &tor, long_line, sizeof(long_line)),
                    "Private mode dials only onion peers. The node has not reported its peer count."));
     /* At the floor the ordinary rule applies; so does a fleet height that agrees. */

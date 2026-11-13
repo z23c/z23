@@ -99,10 +99,10 @@ size_t zapp_private_roster_load(const char *directory, char *out, size_t cap)
     out[n > 0 ? n : 0] = 0;
     return n > 0 ? (size_t)n : 0;
 }
-void zapp_private_args(struct zapp_private_args *a, const char *roster_text)
+void zapp_peer_args(struct zapp_private_args *a, const char *roster_text, bool direct)
 {
     memset(a, 0, sizeof(*a));
-    a->argv[a->argc++] = "-onlynet=onion";
+    if (!direct) a->argv[a->argc++] = "-onlynet=onion";
     a->argv[a->argc++] = "-bind=127.0.0.1";
     size_t peers = 0;
     for (const char *line = roster_text; line && *line && peers < ZAPP_PRIVATE_PEERS_MAX;) {
@@ -121,6 +121,11 @@ void zapp_private_args(struct zapp_private_args *a, const char *roster_text)
         line += strcspn(line, "\n");
         line += *line == '\n';
     }
+}
+
+void zapp_private_args(struct zapp_private_args *a, const char *roster_text)
+{
+    zapp_peer_args(a, roster_text, false);
 }
 
 static bool receipt_valid(const char *token, size_t n)
@@ -209,4 +214,36 @@ size_t zapp_fleet_receipt_load(const char *directory, char *out, size_t cap)
     memcpy(out, buf, n);
     out[n] = 0;
     return n;
+}
+
+/* Missing, unreadable and malformed preferences always select onion only. */
+bool zapp_direct_peers_load(const char *directory)
+{
+    int dir = directory ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (dir < 0) return false;
+    int fd = openat(dir, "direct-peers", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    close(dir);
+    if (fd < 0) return false;
+    struct stat st;
+    char buf[7]; size_t n = 0;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && receipt_read(fd, buf, sizeof(buf), &n);
+    if (close(fd) != 0) ok = false;
+    return ok && n == 6 && !memcmp(buf, "allow\n", 6);
+}
+
+bool zapp_direct_peers_save(const char *directory, bool enabled)
+{
+    int dir = directory ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (dir < 0) return false;
+    char temp[80];
+    int fd = receipt_temp_open(dir, temp, sizeof(temp));
+    if (fd < 0) { close(dir); return false; }
+    const char *value = enabled ? "allow\n" : "deny\n";
+    bool ok = receipt_write(fd, value, strlen(value)) && fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    bool renamed = ok && renameat(dir, temp, dir, "direct-peers") == 0;
+    if (!renamed) (void)unlinkat(dir, temp, 0);
+    ok = renamed && fsync(dir) == 0;
+    if (close(dir) != 0) ok = false;
+    return ok;
 }

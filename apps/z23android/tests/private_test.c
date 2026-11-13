@@ -110,6 +110,23 @@ static void receipt(const char *dir)
     assert(zapp_fleet_receipt_load(dir, out, sizeof(out)) == 0 && !out[0]);
     assert(unlink(path) == 0); assert(unlink(target) == 0);
 }
+static void peer_mode(const char *dir)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/direct-peers", dir);
+    struct zapp_private_args args;
+    zapp_peer_args(&args, NULL, true);
+    assert(args.argc == 1 && !strcmp(args.argv[0], "-bind=127.0.0.1") && !args.argv[1]);
+    assert(!zapp_direct_peers_load(dir));
+    assert(zapp_direct_peers_save(dir, true));
+    assert(zapp_direct_peers_load(dir));
+    int fd = open(path, O_WRONLY | O_TRUNC); assert(fd >= 0);
+    assert(write(fd, "allow\nX", 7) == 7); assert(close(fd) == 0);
+    assert(!zapp_direct_peers_load(dir));
+    assert(zapp_direct_peers_save(dir, false));
+    assert(!zapp_direct_peers_load(dir));
+    assert(unlink(path) == 0);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -118,6 +135,7 @@ int main(int argc, char **argv)
     roster(argv[1]);
     named_roster();
     receipt(argv[1]);
+    peer_mode(argv[1]);
     puts("private tests passed");
     return 0;
 }

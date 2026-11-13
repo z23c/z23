@@ -4,6 +4,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "operations.h"
+#include "private.h"
 #include "params.h"
 #include "setup_state.h"
 #include "startup_auth.h"
@@ -110,6 +111,13 @@ static int orphan(const char *mode, const char *data)
  * -addnode for the fleet peer the test supplies. Returns 0 when argv from index first on is exactly that. */
 static int private_tail(int argc, char **argv, int first, const char *peer)
 {
+    bool direct = getenv("ZAPP_TEST_DIRECT") != NULL;
+    if (direct) {
+        if (argc != first + 1 + (peer ? 1 : 0) || strcmp(argv[first], "-bind=127.0.0.1")) return 8;
+        if (peer) { char expected[200]; snprintf(expected, sizeof(expected), "-addnode=%s", peer);
+            if (strcmp(argv[first + 1], expected)) return 9; }
+        return 0;
+    }
     if (argc != first + 2 + (peer ? 1 : 0) || strcmp(argv[first], "-onlynet=onion") ||
         strcmp(argv[first + 1], "-bind=127.0.0.1")) return 8;
     if (peer) {
@@ -650,8 +658,23 @@ static void roster_case(struct zapp_runtime *r)
     assert(snprintf(expect, sizeof(expect), "-paramsdir=%s/params", r->files) > 0);
     assert(setenv("ZAPP_TEST_PARAMS_ARG", expect, 1) == 0);
     assert(zapp_node_start(r, out, sizeof(out)));
+    assert(zapp_node_running_onion_only(r));
+    assert(zapp_direct_peers_save(r->files, true));
+    assert(zapp_node_running_onion_only(r));
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
+    assert(setenv("ZAPP_TEST_DIRECT", "1", 1) == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(!zapp_node_running_onion_only(r));
+    assert(zapp_direct_peers_save(r->files, false));
+    assert(!zapp_node_running_onion_only(r));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    assert(zapp_direct_peers_save(r->files, false));
+    assert(unsetenv("ZAPP_TEST_DIRECT") == 0);
+    char choice[1200];
+    assert(snprintf(choice, sizeof(choice), "%s/direct-peers", r->files) > 0);
+    assert(unlink(choice) == 0);
     assert(unsetenv("ZAPP_TEST_ADDNODE") == 0 && unlink(file) == 0);
 }
 static void start_expecting(struct zapp_runtime *r, const char *argument)

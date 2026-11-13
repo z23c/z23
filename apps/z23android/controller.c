@@ -349,7 +349,7 @@ static struct zapp_chain_evidence observe_chain_evidence(struct controller *c, c
     const bool fleet_current = !c->view.fleet_stale && c->fleet_height_at && now - c->fleet_height_at <= ZAPP_FLEET_MAX_AGE_SECS;
     if (!n->responding) c->height_moved_at = 0;
     else if (n->height != c->seen_height || !c->height_moved_at) c->height_moved_at = now;
-    struct zapp_chain_evidence evidence = {.onion_only = true, .fleet_height = fleet_current ? c->fleet_height : -1,
+    struct zapp_chain_evidence evidence = {.onion_only = zapp_node_running_onion_only(&c->runtime), .fleet_height = fleet_current ? c->fleet_height : -1,
         .quiet_secs = n->responding && c->height_moved_at ? now - c->height_moved_at : -1};
     pthread_mutex_unlock(&c->lock);
     return evidence;
