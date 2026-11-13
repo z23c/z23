@@ -15,4 +15,6 @@ bool app_discover_view(struct zcl_present_model_v1 *model,
 bool app_discover_page_view(struct zcl_present_model_v1 *model,
     const struct zcl_app_offer_row *row, size_t index, size_t count,
     bool previous_page, bool has_more);
+/* Keep the copy hint when a command cannot fit the text renderer. */
+bool app_discover_host_stop_fields(struct zcl_present_model_v1 *model, const char *stop);
 #endif

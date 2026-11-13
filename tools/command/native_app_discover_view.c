@@ -6,6 +6,19 @@
 #include <stdio.h>
 #include <string.h>
 
+bool app_discover_host_stop_fields(struct zcl_present_model_v1 *model, const char *stop)
+{
+    bool available = stop && *stop;
+    if (!app_confirm_field(model, "Stop: ", available ? "Press C to copy the stop command." :
+            "No confirmed stop command is available.")) return false;
+    uint32_t count = model->item_count;
+    if (available && !app_confirm_field(model, "Stop command: ", stop)) {
+        memset(&model->items[count], 0, (model->item_count - count) * sizeof(model->items[0]));
+        model->item_count = count;
+    }
+    return true;
+}
+
 bool app_discover_present_event(app_library_presenter presenter, void *context,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {

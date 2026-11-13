@@ -42,6 +42,8 @@
 #include "command/native_app_network_controller.h"
 #include "command/native_app_network_lifeline.h"
 #include "command/native_app_discover.h"
+#include "command/native_app_discover_view.h"
+#include "command/native_app_confirm.h"
 #include "command/app_selection.h"
 #include "config/command_catalog.h"
 #include "config/boot.h"
@@ -2864,7 +2866,7 @@ struct tag_discover {
     bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown, host_original, host_prompted, host_identity, fail_host_result;
     bool report_rebuild, report_prompted, report_count_visible, close_keep, report_result, fetch_close, fetch_presenter_fail;
     bool report_result_unavailable, report_result_count, report_result_one, report_result_two, report_result_publish; int comparison_mode;
-    bool cancel_after_error, share_canceled;
+    bool cancel_after_error, share_canceled, host_stop_visible;
     struct zcl_command_reply *reply; char first_result[8192], image[65]; long pid; uint64_t start;
     struct tag_consumer swap;
 };
@@ -3106,6 +3108,59 @@ static void tag_discover_report_result(struct tag_discover *d, const struct zcl_
     for (unsigned i = 0; i < model->action_count; ++i)
         if (!strcmp(model->actions[i].id, "publish")) d->report_result_publish = true;
 }
+static bool tag_host_stop_visible(const struct zcl_present_model_v1 *model, const char *copy)
+{
+    char text[4700] = {0}; size_t used = 0; bool found = false;
+    if (!copy || !strstr(copy, "host stop ")) return false;
+    for (uint32_t i = 0; i < model->item_count; ++i) {
+        const char *part = model->items[i].value;
+        if (!found) {
+            if (strncmp(part, "Stop command: ", 14)) continue;
+            part += 14; found = true;
+        } else {
+            if (strncmp(part, "  ", 2)) break;
+            part += 2;
+        }
+        size_t n = strlen(part); if (n >= sizeof(text) - used) return false;
+        memcpy(text + used, part, n + 1); used += n;
+    }
+    return found && !strcmp(text, copy);
+}
+static int tag_host_stop_fallback(void)
+{
+    int failures = 0; char long_stop[3000], why[256];
+    memset(long_stop, 'x', sizeof(long_stop) - 1); long_stop[sizeof(long_stop) - 1] = 0;
+    const char *cases[] = {"z23 --datadir='/tmp/\xc3\xa9' host stop --generation=1", long_stop, NULL, ""};
+    TEST("Unsupported or missing hosting stop text preserves a complete result hint") {
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            struct zcl_present_model_v1 model, expected;
+            zcl_present_model_init_v1(&model, ZCL_PRESENT_MODEL_STATUS_CARD);
+            (void)snprintf(model.request_id, sizeof(model.request_id), "host-stop-fallback");
+            (void)snprintf(model.title, sizeof(model.title), "Hosting result");
+            expected = model;
+            ASSERT(app_confirm_field(&expected, "Stop: ", i < 2 ?
+                "Press C to copy the stop command." : "No confirmed stop command is available."));
+            ASSERT(app_discover_host_stop_fields(&model, cases[i]));
+            ASSERT(zcl_present_model_validate_v1(&model, why, sizeof(why)));
+            ASSERT_EQ(model.item_count, expected.item_count);
+            ASSERT(!memcmp(model.items, expected.items, sizeof(model.items)));
+            for (uint32_t j = model.item_count; j < ZCL_PRESENT_MODEL_ITEMS_MAX; ++j)
+                ASSERT_EQ(model.items[j].value[0], 0);
+        }
+        ASSERT_EQ(strlen(long_stop), sizeof(long_stop) - 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+static bool tag_discover_host_result(struct tag_discover *d,
+    const struct zcl_present_model_v1 *model, const struct zcl_present_window_pages_v1 *pages)
+{
+    if (strcmp(model->request_id, "discover-host-result")) return true;
+    if (d->fail_host_result) return false;
+    d->host_stop_visible = pages && pages->page_count &&
+        tag_host_stop_visible(model, pages->pages[0].copy_text);
+    return true;
+}
 static bool tag_discover_receive(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
@@ -3113,7 +3168,7 @@ static bool tag_discover_receive(void *context, const struct zcl_present_model_v
     struct tag_discover *d = context; (void)pages;
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (!strcmp(model->request_id, "discover-fetch-progress")) return tag_fetch_present(d, model, live);
-    if (d->fail_host_result && !strcmp(model->request_id, "discover-host-result")) return false;
+    if (!tag_discover_host_result(d, model, pages)) return false;
     if (!strcmp(model->request_id, "discover-rebuild-result")) tag_discover_report_result(d, model);
     if (!strcmp(model->request_id, "discover-report-rebuild")) return tag_discover_report_choice(d, model, live, why, cap);
     if (!strcmp(model->request_id, "library-recovery")) d->recovery_shown = true;
@@ -4060,7 +4115,7 @@ static int tag_library_kept_failure(struct tag_world *w)
         tag_discover_failure_diagnostic(&d, &reply, wire, sizeof(wire));
         ASSERT(d.pid > 0); ASSERT(tag_rebuild_controls_seen && tag_rebuild_controls_ok); ASSERT(d.report_prompted); ASSERT(d.report_count_visible); ASSERT_EQ(g_tag.posts, posts + 1);
         ASSERT(tag_rebuild_post_identity(w, &d));
-        ASSERT(d.host_prompted && d.host_identity); ASSERT_EQ(g_tag.offers, offers + 1);
+        ASSERT(d.host_prompted && d.host_identity); ASSERT(d.host_stop_visible); ASSERT_EQ(g_tag.offers, offers + 1);
         ASSERT_EQ(g_tag.enables, enables + 1); ASSERT(strstr(g_tag.enable_text, w->offer.root));
         ASSERT(tag_kept_selection(&env, &selection));
         ASSERT_EQ(d.detail, 3); ASSERT(d.share_canceled); ASSERT_EQ(d.errors, 1);
@@ -5703,6 +5758,7 @@ int test_app_get(void)
     failures += tag_network_retry();
     failures += tag_network_test();
     failures += tag_process_observation();
+    failures += tag_host_stop_fallback();
     failures += tag_recovery_serialization();
     failures += tag_recovery_limits();
     memset(&g_tag, 0, sizeof(g_tag));

@@ -187,7 +187,7 @@ static bool ad_host_result(struct discover *d, struct zcl_command_reply *reply)
     app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
     app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
     char why[256] = {0};
-    bool ready = app_confirm_field(&v->model, "Stop: ", stop ? "Press C to copy the stop command." : "No confirmed stop command is available.") &&
+    bool ready = app_discover_host_stop_fields(&v->model, stop) &&
         app_confirm_prepare(v, why, sizeof(why));
     bool shown = ready && app_confirm_show(v, d->receive_presenter, d->context, why, sizeof(why));
     app_confirm_free(v); free(v);
