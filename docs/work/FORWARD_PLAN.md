@@ -128,8 +128,14 @@ order of size.
    - A received copy builds with z23, `cc` and `make` alone: no system
      `-dev` package (owner rule 2026-11-08).
 
-   Lane `stranger-app-get-1108` holds the first slice. Number: stranger to
-   stranger journeys proven live between two isolated nodes. Before: 0.
+   Lane `stranger-app-get-1108` held the first slice. Number: stranger to
+   stranger journeys proven live between two isolated nodes. Before: 0;
+   after: 1 — `make app-journey-live` (`tools/app_journey_live.c`) PASSed
+   live on 2026-11-13 and landed as b1cff52d46: two isolated regtest nodes
+   with real Tor, CREATE→MODIFY→SHARE→DISCOVER end to end, B types one
+   name (zero hex), B's rebuilt image equals A's local build, B posts the
+   signed rebuild report and hosts the carrier, and B still serves after
+   A dies. The next journeys raise the count.
 3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap
