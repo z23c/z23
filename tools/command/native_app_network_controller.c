@@ -435,7 +435,7 @@ static bool an_card(struct an_controller *c, struct zcl_app_offer_row *rows,
     size_t index = 0; *review = false; *refresh = false;
     for (;;) {
         struct zcl_present_model_v1 model; struct zcl_present_window_event_v1 event = {0};
-        if (!app_discover_view(&model, count ? &rows[index] : NULL, index, count)) {
+        if (!app_discover_page_view(&model, count ? &rows[index] : NULL, index, count, false, false)) {
             zcl_package_copy_fail(reply, "PRESENTATION_FAILED", false, "Cannot prepare the advertisement.", "app.library"); return false;
         }
         if (!count) snprintf(model.summary, sizeof(model.summary), "No offers available from this source. Refresh or go back.");

@@ -3344,6 +3344,79 @@ static int tag_library_discover(struct tag_world *w)
     tag_xdg_leave(&x);
     return failures;
 }
+struct tag_catalog_navigation { struct zcl_app_offer_row row; unsigned jobs, cards, notices; };
+static bool tag_catalog_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
+{
+    (void)context; (void)why; (void)cap;
+    int n = snprintf(out, 257, "http://%s/board/apps/v1", TAG_ONION);
+    *submitted = n > 0 && n < 257; return *submitted;
+}
+static bool tag_catalog_job(void *context, const char *mode, const char *url, const char *carrier,
+    const struct zcl_app_offer_row *selected, struct app_network_job_result *result,
+    struct zcl_command_reply *reply)
+{
+    struct tag_catalog_navigation *f = context; struct app_network_link link; (void)reply;
+    if (strcmp(mode, "catalog") || selected || carrier || !app_network_link_parse(url, &link) || link.exact) return false;
+    if (++f->jobs > 2) return false;
+    result->error = APP_NETWORK_OK; result->rows[0] = f->row;
+    result->count = f->jobs == 1 ? 2 : 1; result->incomplete = f->jobs == 1;
+    result->rows[1] = f->row;
+    (void)snprintf(result->rows[0].offer.name, sizeof(result->rows[0].offer.name), "%s",
+        f->jobs == 1 ? "first/app" : "refreshed/app");
+    (void)snprintf(result->rows[1].offer.name, sizeof(result->rows[1].offer.name), "second/app");
+    return true;
+}
+static bool tag_catalog_refreshed(const struct zcl_present_model_v1 *model)
+{
+    for (uint32_t i = 0; i < model->item_count; ++i)
+        if (!strcmp(model->items[i].value, "App: refreshed/app")) return true;
+    return false;
+}
+static bool tag_catalog_cards(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_catalog_navigation *f = context; (void)copy;
+    if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(model->request_id, "app-network-notice")) {
+        ++f->notices; event->action_index = 1;
+        return !strcmp(model->title, "Some offers shown") && strstr(model->summary, "not a complete list");
+    }
+    static const char *const actions[] = {"next", "previous", "next", "refresh", "back"};
+    static const char *const ids[] = {"discover-0", "discover-1", "discover-0", "discover-1", "discover-0"};
+    if (f->cards >= 5 || strcmp(model->request_id, ids[f->cards])) return false;
+    if (f->cards == 4 && !tag_catalog_refreshed(model)) return false;
+    uint32_t selected = model->action_count;
+    for (uint32_t i = 0; i < model->action_count; ++i) {
+        const char *id = model->actions[i].id;
+        if (!strcmp(model->request_id, "discover-0") && !strcmp(id, "previous")) return false;
+        if (!strcmp(id, actions[f->cards])) selected = i;
+    }
+    if (selected == model->action_count) return false;
+    ++f->cards; event->action_index = selected; return true;
+}
+static int tag_catalog_navigation_case(struct tag_world *w)
+{
+    int failures = 0; struct tag_catalog_navigation f = {0};
+    struct zcl_command_reply why, reply; size_t count = 0; bool shown = false;
+    struct zcl_app_offer_row rows[4];
+    TEST("network Discover refreshes populated results and preserves the incomplete-sample notice") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u); f.row = rows[0];
+        struct app_network_test_hooks hooks = {.form = tag_catalog_form, .job = tag_catalog_job};
+        int offers = g_tag.offers, posts = g_tag.posts, enables = g_tag.enables;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        ASSERT(!zcl_test_app_network_open_link(w->j.b_datadir, tag_catalog_cards, NULL,
+            &f, &reply, &shown, &hooks));
+        ASSERT_EQ(f.cards, 5u); ASSERT_EQ(f.jobs, 2u); ASSERT_EQ(f.notices, 1u);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts); ASSERT_EQ(g_tag.enables, enables);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    return failures;
+}
 struct tag_link_fixture { struct tag_discover discover; struct zcl_app_offer_row row; unsigned homes, jobs, errors, mode; bool action_error_title; };
 static bool tag_link_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
 {
@@ -5717,6 +5790,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_discover_fetch_close(w);
     failures += tag_fetch_native_profile(w);
     failures += tag_library_discover(w);
+    failures += tag_catalog_navigation_case(w);
     failures += tag_library_link_cancel(w);
     failures += tag_library_link_fault(w, 1);
     failures += tag_library_link_fault(w, 2);
