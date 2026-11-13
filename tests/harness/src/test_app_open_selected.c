@@ -3101,26 +3101,106 @@ static bool rr_personalize(struct rr_cycle *r)
     json_free(&setup); zcl_command_reply_free(&reply);
     return ok && aj_parent_is(&r->owner, r->personal, r->head) && rr_preserved(r, r->personal);
 }
+/* Use the exported literal MCP setup for each short-lived tool session. */
+static bool rr_mcp_start(struct rr_cycle *r, struct aso_mcp *m)
+{
+    struct json_value setup = {0}; char exe[PATH_MAX]; const char *a, *b, *c;
+    bool ok = json_read(&setup, r->mcp_setup, strlen(r->mcp_setup)) &&
+        realpath("build/bin/z23-dev", exe) &&
+        rr_setup_args(&setup, exe, r->owner.alice_datadir, &a, &b, &c) &&
+        aso_mcp_spawn_args(m, exe, a, b, c) && aso_mcp_init(m);
+    json_free(&setup); return ok;
+}
+static bool rr_mcp_tool(struct aso_mcp *m, const char *tool,
+                        const struct json_value *input, struct json_value *doc, bool *error)
+{
+    struct json_value req = {0}, params = {0}, result = {0};
+    json_set_object(&req); json_set_object(&params);
+    bool ok = json_push_kv_str(&params, "name", tool) && json_push_kv(&params, "arguments", input) &&
+        json_push_kv_str(&req, "jsonrpc", "2.0") && json_push_kv_int(&req, "id", 9) &&
+        json_push_kv_str(&req, "method", "tools/call") && json_push_kv(&req, "params", &params);
+    char wire[8192]; size_t n = ok ? json_write(&req, wire, sizeof(wire)) : 0;
+    ok = n && n < sizeof(wire) && aso_mcp_send(m, wire, true) &&
+        json_read(&result, m->line, strlen(m->line)) && aj_mcp_result(&result, doc, error);
+    json_free(&result); json_free(&params); json_free(&req); return ok;
+}
+static bool rr_preview_open(struct rr_cycle *r, struct aso_mcp *m)
+{
+    struct json_value doc = {0}; bool error = false;
+    struct abc_leaf leaf; bool opened = ak_request(&leaf, &r->bob, true);
+    bool ok = opened && rr_mcp_tool(m, "apps_open", &leaf.in, &doc, &error) && !error;
+    const struct json_value *data = json_get(&doc, "data");
+    if (ok) {
+        aso_track_ready(data, &r->bob.build);
+        ok = !strcmp(aso_string(data, "name"), AK_ROUTE) &&
+            !strcmp(aso_string(data, "status"), "opened") &&
+            !strcmp(aso_string(data, "ready_basis"), "alive") &&
+            aso_build_facts_match(data, &r->bob.build) && aj_live_identity(data, &r->bob.build);
+    }
+    abc_close(&leaf); json_free(&doc); return ok;
+}
 static bool rr_preview(struct rr_cycle *r, const char *version)
 {
+    struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
     struct aso_build built = {0};
-    if (!ak_build_saved_tuple(&r->owner, version, &built) || !rr_preserved(r, version)) return false;
-    if (!strcmp(version, r->edited) && !strcmp(built.image, r->bob.build.image)) return false;
-    r->bob.build = built;
-    struct abc_leaf leaf;
-    bool ok = ak_request(&leaf, &r->bob, true) && abc_exec("app.open", &leaf) && ak_opened(&leaf, &r->bob);
-    abc_close(&leaf);
-    bool clean = aso_cleanup_children();
-    return ok && clean && rr_preserved(r, version);
+    bool ok = rr_mcp_start(r, &m) && aj_build(&m, &r->owner, version, &built) && rr_preserved(r, version);
+    if (ok && !strcmp(version, r->edited) && !strcmp(built.image, r->bob.build.image)) ok = false;
+    if (ok) { r->bob.build = built; ok = rr_preview_open(r, &m); }
+    bool closed = aso_mcp_close(&m), clean = aso_cleanup_children();
+    return ok && closed && clean && rr_preserved(r, version);
+}
+struct rr_keep_view { const struct rr_cycle *cycle; char current[65]; bool cancel, observed; };
+static bool rr_keep_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rr_keep_view *v = context; uint32_t count = 0;
+    if (!pages || !pages->pages[0].pixels || strcmp(model->request_id, "keep-app") ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap) ||
+        !aj_receive_field(model, "Currently kept: ", v->current) ||
+        !aj_receive_field(model, "Saved app: ", AK_ROUTE) ||
+        !aj_receive_field(model, "Version to keep: ", v->cycle->bob.build.version) ||
+        !aj_receive_field(model, "Exact app image: ", v->cycle->bob.build.image)) return false;
+    v->observed = true;
+    return aso_keep_choose(live, v->cancel ? 1u : 0u, count);
+}
+static bool rr_keep_choice(struct rr_cycle *r, int64_t revision, bool cancel)
+{
+    struct abc_leaf leaf; bool ok = ak_request(&leaf, &r->bob, true) &&
+        json_push_kv_int(&leaf.in, "expected_revision", revision);
+    struct zcl_command_context ctx = {.plan_first = true};
+    struct zcl_command_request request = {.input = &leaf.in, .context = &ctx};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_keep.v1");
+    struct rr_keep_view view = {.cycle = r, .cancel = cancel};
+    struct app_selection before;
+    ok = ok && app_selection_load(r->bob.env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
+        before.revision == (uint64_t)revision;
+    if (ok) zcl_hex_encode(before.version, 32, view.current);
+    if (ok) zcl_native_app_keep_present(&request, &reply, rr_keep_present, &view);
+    ok = ok && view.observed && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&reply.data, "status"), cancel ? "canceled" : "kept") &&
+        (cancel || aso_revision_is(&reply.data, revision + 1));
+    zcl_command_reply_free(&reply); abc_close(&leaf); return ok;
+}
+/* A stale wire request must fail before presenting any owner dialog. */
+static bool rr_keep_stale_wire(struct rr_cycle *r, int64_t revision)
+{
+    struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
+    struct abc_leaf leaf; struct json_value doc = {0}; bool error = false;
+    bool input = ak_request(&leaf, &r->bob, true) &&
+        json_push_kv_int(&leaf.in, "expected_revision", revision);
+    bool ok = input && rr_mcp_start(r, &m) &&
+        rr_mcp_tool(&m, "apps_keep", &leaf.in, &doc, &error) && error &&
+        aso_code_is(&doc, "SELECTION_STALE") && rr_preserved(r, r->bob.build.version);
+    json_free(&doc); abc_close(&leaf);
+    bool closed = aso_mcp_close(&m); return ok && closed;
 }
 static bool rr_keep(struct rr_cycle *r, int64_t revision)
 {
-    struct abc_leaf leaf;
-    bool ok = ak_request(&leaf, &r->bob, true) && json_push_kv_int(&leaf.in, "expected_revision", revision) &&
-        abc_pass("app.keep", &leaf) && aso_revision_is(&leaf.out.data, revision + 1);
-    abc_close(&leaf);
-    return ok && rr_keep_hash(&r->bob, r->keep) && ak_restart(&r->bob) &&
-        rr_preserved(r, r->bob.build.version);
+    bool ok = rr_keep_choice(r, revision, true) && rr_preserved(r, r->bob.build.version) &&
+        rr_keep_choice(r, revision, false);
+    return ok && rr_keep_hash(&r->bob, r->keep) && rr_keep_stale_wire(r, revision) &&
+        ak_restart(&r->bob) && rr_preserved(r, r->bob.build.version);
 }
 static bool rr_read(struct rr_cycle *r, int64_t revision, const char *content, char blob[65])
 {

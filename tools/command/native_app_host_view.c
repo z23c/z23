@@ -40,6 +40,7 @@ static bool ahv_render(struct ahv *v, const struct app_host_snapshot *s)
     if (s->available && v->copy_feedback && !app_confirm_field(&model, "Copy: ",
         v->copy_feedback == 1 ? "Copied. Send the link to your friend." : "Could not copy the link. Try again.")) return false;
     if (s->available && !app_confirm_field(&model, "Sharing: ", "Keep this window open while your friend receives it.")) return false;
+    if (s->available && !app_confirm_field(&model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.")) return false;
     struct zcl_present_model_bitmap_v1 bitmap = {0}; char why[128];
     if (!zcl_present_model_render_v1(&model, &bitmap, why, sizeof(why))) return false;
     zcl_present_model_bitmap_free_v1(&v->bitmap); v->bitmap = bitmap; v->model = model;

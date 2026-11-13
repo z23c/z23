@@ -52,6 +52,7 @@ static bool ahf_confirm(struct app_confirm *v, const struct ahf_identity *id,
         app_confirm_field(&v->model, "Publisher: ", id->publisher) &&
         app_confirm_field(&v->model, "Release: ", id->release) &&
         app_confirm_field(&v->model, "Availability: ", "Anyone with the link can receive this version while this window stays open, for up to 24 hours.") &&
+        app_confirm_field(&v->model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.") &&
         app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, presenter, ctx, why, sizeof(why));
 }
 static bool ahf_file_same(const struct stat *a, const struct stat *b)
@@ -214,6 +215,35 @@ static struct an_scratch *ahf_scratch(const char *datadir, struct zcl_command_re
     if (created && !clean) ahf_cleanup_unconfirmed(reply, scratch->path);
     free(scratch); return NULL;
 }
+/* Stop pressed while still connecting: the link never existed. Say so.
+ * Stays PASSED (a user cancel) and keeps the was_available fact, but never
+ * returns silently: if the notice cannot be shown the reply fails closed. */
+static bool ahf_never_ready_notice(const struct ahf_identity *identity,
+    app_confirm_presenter presenter, void *ctx, struct zcl_command_reply *reply)
+{
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "app.host.never_ready");
+    char why[256] = {0};
+    if (v) {
+        zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+        v->window_title = "Share a link";
+        (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "app-host-never-ready");
+        (void)snprintf(v->model.title, sizeof(v->model.title), "The link never became available.");
+        (void)snprintf(v->model.summary, sizeof(v->model.summary),
+            "Sharing stopped before the private link was ready. Once this node is fully started, open My Apps and try Share a link again.");
+        v->model.action_count = 4;
+        app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+        app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+        app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+        app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
+    }
+    bool shown = v && app_confirm_field(&v->model, "App: ", identity->name) &&
+        app_confirm_field(&v->model, "Saved version: ", identity->semver) &&
+        app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, presenter, ctx, why, sizeof(why));
+    if (v) { app_confirm_free(v); free(v); }
+    if (shown) return true;
+    ahf_failure(reply, "HOST_NEVER_READY", "Sharing stopped before the link became available.", NULL, identity, true);
+    return false;
+}
 static bool ahf_host(struct an_scratch *scratch, const struct ahf_identity *identity,
     const char *self, app_confirm_presenter presenter, void *ctx,
     struct zcl_command_reply *reply, struct app_host_job_result *result, bool *retain)
@@ -240,6 +270,8 @@ static bool ahf_host(struct an_scratch *scratch, const struct ahf_identity *iden
         (!result->ready && result->outcome != APP_HOST_STOPPED)) {
         ahf_failure(reply, "HOST_UNAVAILABLE", "Sharing ended unexpectedly or could not start.", scratch->path, identity, true); return false;
     }
+    /* A stop after the link was available stays a plain success. */
+    if (!result->ready) return ahf_never_ready_notice(identity, presenter, ctx, reply);
     return true;
 }
 static void ahf_success(struct zcl_command_reply *reply, const struct ahf_identity *identity,

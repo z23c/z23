@@ -584,6 +584,7 @@ struct host_flow_fixture {
     char package[65], publisher[67], release[65], version[65], app_name[256], semver[256];
     struct app_launch_env env; struct app_selection selection, changed;
     bool stale, presented, identity_ok, cas_ok;
+    bool stop_connecting, window_shown, never_ready, never_ready_ok;
 };
 static bool host_flow_field(const struct zcl_present_model_v1 *model, const char *label, const char *expected)
 {
@@ -598,40 +599,112 @@ static bool host_flow_field(const struct zcl_present_model_v1 *model, const char
     }
     return found && !strcmp(value, expected);
 }
-static bool host_flow_events(bool stale, const struct zcl_present_model_v1 *model,
+static bool host_flow_events(const struct host_flow_fixture *f, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
     uint32_t count = 0; if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
     bool redraw = false, close = false;
-    if (stale) {
+    bool approve = f->stale || f->stop_connecting;
+    if (f->stale) {
         if (count < 2) return false;
         struct zcl_present_window_event_v1 early = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 3};
         live->owner.update(live->owner.context, &early, true, &redraw, &close);
         if (close) return false;
     }
-    if (stale) for (uint32_t i = 1; i < count; ++i) {
+    if (approve) for (uint32_t i = 1; i < count; ++i) {
         struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 2};
         live->owner.update(live->owner.context, &e, true, &redraw, &close); if (close) return false;
     }
-    struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = stale ? 3u : 0u};
+    struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = approve ? 3u : 0u};
     live->owner.update(live->owner.context, &e, true, &redraw, &close); return close;
+}
+/* Hosting window: press Stop while the summary still says "Connecting." and
+ * wait for the owner to finish so the flow sees the stop-terminated result. */
+static bool host_flow_stop_window(struct host_flow_fixture *f,
+    const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)why; (void)cap;
+    f->window_shown = true;
+    if (strcmp(model->summary, "Connecting. Please wait.")) {
+        fprintf(stderr, "host flow stop: unexpected initial window summary: %s\n", model->summary);
+        return false;
+    }
+    /* Wait for the spawned fake worker to enter its never-ready phase before
+     * stopping it; otherwise Stop can win the fork/exec scheduling race. */
+    bool started = false;
+    for (unsigned i = 0; i < 500; ++i) {
+        if (access(f->sentinel, F_OK) == 0) { started = true; break; }
+        const struct timespec tick = {.tv_nsec = 10000000};
+        (void)nanosleep(&tick, NULL); /* real-clock: bounded worker-start poll */
+    }
+    if (!started) { fprintf(stderr, "host flow stop: worker sentinel not observed before Stop\n"); return false; }
+    uint32_t focus = 0, action = UINT32_MAX;
+    struct zcl_present_input_v1 stop = {.key = ZCL_PRESENT_INPUT_TEXT, .character = 'q'};
+    if (!live->input(live->owner.context, &stop, &focus, &action)) return false;
+    for (int i = 0; i < 3000; ++i) {
+        bool redraw = false, close = false;
+        struct zcl_present_window_event_v1 idle = {0};
+        live->owner.update(live->owner.context, &idle, false, &redraw, &close);
+        if (close) return true;
+        const struct timespec tick = {.tv_nsec = 10000000};
+        (void)nanosleep(&tick, NULL); /* real-clock: bounded poll for a real spawned worker's stop-kill */
+    }
+    return false;
+}
+static bool host_flow_notice_close(const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+    if (!model->action_count || model->action_count > ZCL_PRESENT_WINDOW_ACTIONS_MAX ||
+        strcmp(model->actions[0].label, "Close")) return false;
+    uint32_t width = (ZCL_PRESENT_MODEL_ACTION_WIDTH -
+        ZCL_PRESENT_MODEL_ACTION_GAP * (model->action_count - 1u)) / model->action_count;
+    struct zcl_present_input_v1 click = {.key = ZCL_PRESENT_INPUT_CLICK,
+        .x = ZCL_PRESENT_MODEL_ACTION_X + width / 2u,
+        .y = ZCL_PRESENT_MODEL_ACTION_Y + ZCL_PRESENT_MODEL_ACTION_HEIGHT / 2u};
+    uint32_t focus = 0, action = UINT32_MAX;
+    if (!live->input(live->owner.context, &click, &focus, &action) || action != 0) return false;
+    bool redraw = false, close = false;
+    struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = action};
+    live->owner.update(live->owner.context, &event, false, &redraw, &close);
+    return close;
+}
+/* Never-ready notice card: verify its text, then click the rendered Close button. */
+static bool host_flow_never_ready(struct host_flow_fixture *f, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    f->never_ready = true;
+    f->never_ready_ok = !strcmp(model->title, "The link never became available.") &&
+        host_flow_field(model, "App: ", f->app_name) &&
+        host_flow_field(model, "Saved version: ", f->semver);
+    if (!f->never_ready_ok) return false;
+    uint32_t count = 0; if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    bool redraw = false, close = false;
+    for (uint32_t i = 1; i < count; ++i) {
+        struct zcl_present_window_event_v1 e = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = 2};
+        live->owner.update(live->owner.context, &e, true, &redraw, &close); if (close) return false;
+    }
+    return host_flow_notice_close(model, live);
 }
 static bool host_flow_present(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
 {
     (void)pages; struct host_flow_fixture *f = context; f->presented = true;
+    if (!strcmp(model->request_id, "app-host-window")) return host_flow_stop_window(f, model, live, why, cap);
+    if (!strcmp(model->request_id, "app-host-never-ready")) return host_flow_never_ready(f, model, live, why, cap);
     f->identity_ok = host_flow_field(model, "App: ", f->app_name) && host_flow_field(model, "Version: ", f->semver) &&
         host_flow_field(model, "Publisher: ", f->publisher) &&
         host_flow_field(model, "Package: ", f->package) && host_flow_field(model, "Release: ", f->release) &&
         host_flow_field(model, "Saved version: ", f->version) &&
-        host_flow_field(model, "Availability: ", "Anyone with the link can receive this version while this window stays open, for up to 24 hours.");
+        host_flow_field(model, "Availability: ", "Anyone with the link can receive this version while this window stays open, for up to 24 hours.") &&
+        host_flow_field(model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.");
     if (!f->identity_ok) return false;
     if (f->stale) {
         f->cas_ok = app_selection_save(f->env.state_dir, f->selection.revision, &f->selection, &f->changed) == APP_SELECTION_OK;
         if (!f->cas_ok) return false;
     }
-    return host_flow_events(f->stale, model, live, why, cap);
+    return host_flow_events(f, model, live, why, cap);
 }
 static bool host_flow_no_scratch(const char *dir)
 {
@@ -780,7 +853,12 @@ static bool host_flow_paths(struct host_flow_fixture *f)
 static bool host_flow_worker(struct host_flow_fixture *f)
 {
     FILE *fp = fopen(f->worker, "w"); if (!fp) return false;
-    int n = fprintf(fp, "#!/bin/sh\n: > '%s'\n", f->sentinel); int closed = fclose(fp);
+    /* The never-ready mode keeps the worker alive until Stop ends it, so the
+     * job observes a stop-terminated, never-ready run exactly like a real
+     * worker still bootstrapping its onion. */
+    int n = f->stop_connecting ? fprintf(fp, "#!/bin/sh\n: > '%s'\nsleep 30\n", f->sentinel) :
+        fprintf(fp, "#!/bin/sh\n: > '%s'\n", f->sentinel);
+    int closed = fclose(fp);
     return n > 0 && closed == 0 && chmod(f->worker, 0700) == 0;
 }
 static bool host_flow_setup(struct host_flow_fixture *f)
@@ -840,6 +918,71 @@ static bool host_flow_case(bool stale)
 {
     pid_t pid = fork(); if (pid < 0) return false;
     if (!pid) _exit(host_flow_child(stale) ? 0 : 2);
+    int status = 0; pid_t done; do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
+    return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+/* Stop while still connecting: PASSED (a user cancel) with was_available
+ * false, but the never-ready notice card must have been shown. */
+static bool host_flow_stop_reply(struct host_flow_fixture *f, struct zcl_command_reply *reply)
+{
+    const struct json_value *was = json_get(&reply->data, "was_available");
+    const char *host_status = json_get_str(json_get(&reply->data, "host_status"));
+    bool status_absent = zcl_package_copy_str(&reply->data, "status") == NULL;
+    bool stopped = host_status && !strcmp(host_status, "stopped");
+    bool unavailable = was && was->type == JSON_BOOL && !json_get_bool(was);
+    bool ok = f->presented && f->window_shown && f->never_ready && f->never_ready_ok && f->identity_ok &&
+        reply->error.mutated && reply->status == ZCL_COMMAND_STATUS_PASSED && status_absent && stopped && unavailable;
+    if (!ok)
+        fprintf(stderr, "host flow stop reply: presented=%d window=%d notice=%d notice_ok=%d identity=%d mutated=%d passed=%d status_absent=%d stopped=%d unavailable=%d\n",
+            f->presented, f->window_shown, f->never_ready, f->never_ready_ok, f->identity_ok,
+            reply->error.mutated, reply->status == ZCL_COMMAND_STATUS_PASSED, status_absent, stopped, unavailable);
+    return ok;
+}
+static bool host_flow_stop_state(struct host_flow_fixture *f, const struct host_flow_disk *before)
+{
+    struct host_flow_disk after = {0};
+    bool loaded = app_selection_load(f->env.state_dir, f->selection.app, &f->changed) == APP_SELECTION_OK;
+    bool same = loaded && host_flow_selection_same(&f->changed, &f->selection);
+    bool sentinel = access(f->sentinel, F_OK) == 0;
+    bool scratch = host_flow_no_scratch(f->data);
+    bool snapshot = host_flow_disk_snapshot(f, &after);
+    bool share_same = snapshot && !memcmp(before->share, after.share, sizeof(after.share));
+    bool key_same = snapshot && !memcmp(before->key, after.key, sizeof(after.key));
+    bool version_same = snapshot && !memcmp(before->version, after.version, sizeof(after.version));
+    bool ok = loaded && same && sentinel && scratch && snapshot && share_same && key_same && version_same;
+    if (!ok)
+        fprintf(stderr, "host flow stop state: selection_load=%d selection_same=%d sentinel=%d scratch_clean=%d disk_snapshot=%d share_same=%d key_same=%d version_same=%d\n",
+            loaded, same, sentinel, scratch, snapshot, share_same, key_same, version_same);
+    return ok;
+}
+static bool host_flow_stop_result(struct host_flow_fixture *f, struct zcl_command_reply *reply,
+                                  const struct host_flow_disk *before)
+{
+    bool reply_ok = host_flow_stop_reply(f, reply);
+    bool state_ok = host_flow_stop_state(f, before);
+    return reply_ok && state_ok;
+}
+static bool host_flow_stop_child(void)
+{
+    struct host_flow_fixture f = {.stop_connecting = true}; struct host_flow_disk before = {0};
+    bool setup = host_flow_setup(&f);
+    bool snapshot = setup && host_flow_disk_snapshot(&f, &before);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.host.v1");
+    bool ok = false;
+    if (snapshot) {
+        app_host_flow(&f.selection, f.worker, host_flow_present, &f, &reply);
+        ok = host_flow_stop_result(&f, &reply, &before);
+    }
+    if (!ok) fprintf(stderr, "host flow stop: setup=%d snapshot=%d presented=%d window=%d notice=%d notice_ok=%d identity=%d status=%d code=%s mutated=%d\n",
+        setup, snapshot, f.presented, f.window_shown, f.never_ready, f.never_ready_ok, f.identity_ok,
+        reply.status, reply.error.code, reply.error.mutated);
+    zcl_command_reply_free(&reply); if (f.root[0] && test_rm_rf_recursive(f.root) != 0) ok = false;
+    return ok;
+}
+static bool host_flow_stop_case(void)
+{
+    pid_t pid = fork(); if (pid < 0) return false;
+    if (!pid) _exit(host_flow_stop_child() ? 0 : 2);
     int status = 0; pid_t done; do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
     return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
@@ -1398,27 +1541,42 @@ static bool host_view_notice(const struct zcl_present_model_v1 *model, const cha
         if (strstr(model->items[i].value, text)) return true;
     return false;
 }
-static bool host_view_present(void *context, const struct zcl_present_model_v1 *model,
-    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
-    char *why, size_t cap)
+static bool host_view_copy_check(struct host_view_probe *p, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, uint32_t *focus, char *why, size_t cap)
 {
-    (void)pages; (void)why; (void)cap; struct host_view_probe *p = context;
     if (!host_view_wait(model, live, false)) return false;
-    uint32_t focus = 0;
+    if (!host_flow_field(model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.")) return false;
+    uint32_t page_count = 0;
+    if (!zcl_present_model_page_count_v1(model, &page_count, why, cap) || page_count != 1) return false;
     int copy_key = p->numbered ? '1' : 'c';
-    if (!host_view_key(live, &focus, copy_key)) return false;
+    if (!host_view_key(live, focus, copy_key)) return false;
     bool redraw = false, allow = false; struct zcl_present_window_event_v1 event = {0};
     live->owner.update(live->owner.context, &event, false, &redraw, &allow);
     if (allow || !strstr(model->summary, "Available while")) return false;
     p->feedback = host_view_notice(model, "Copied. Send the link");
-    if (!host_view_key(live, &focus, p->numbered ? '2' : 'q')) return false;
+    if (!zcl_present_model_page_count_v1(model, &page_count, why, cap) || page_count != 1) return false;
+    return true;
+}
+static bool host_view_stop_check(struct host_view_probe *p, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, uint32_t *focus)
+{
+    bool redraw = false, allow = false; struct zcl_present_window_event_v1 event = {0};
+    if (!host_view_key(live, focus, p->numbered ? '2' : 'q')) return false;
     live->owner.update(live->owner.context, &event, false, &redraw, &allow);
     if (strstr(model->summary, "Connecting")) return false;
     if (!host_view_wait(model, live, true)) return false;
-    if (!host_view_key(live, &focus, copy_key)) return false;
+    if (!host_view_key(live, focus, p->numbered ? '1' : 'c')) return false;
     live->owner.update(live->owner.context, &event, false, &redraw, &allow);
     if (host_view_notice(model, "Copied.") || host_view_notice(model, "Try again")) return false;
     return p->valid && p->feedback && p->copies == 1;
+}
+static bool host_view_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    (void)pages; struct host_view_probe *p = context;
+    uint32_t focus = 0;
+    return host_view_copy_check(p, model, live, &focus, why, cap) && host_view_stop_check(p, model, live, &focus);
 }
 struct host_ready_fixture_data {
     char root[512], path[700], release[65], line[8300];
@@ -1827,6 +1985,9 @@ static int host_ready_frame_tests(void)
     }
     TEST("host confirmation Cancel and stale revision never start a worker") {
         ASSERT(host_flow_case(false)); ASSERT(host_flow_case(true)); PASS();
+    }
+    TEST("stop while connecting shows a never-ready notice, not a silent return") {
+        ASSERT(host_flow_stop_case()); PASS();
     }
     TEST("app host failure wire preserves signer facts and only unconfirmed cleanup path") {
         ASSERT(host_cleanup_failure_wire(false)); ASSERT(host_cleanup_failure_wire(true)); PASS();
