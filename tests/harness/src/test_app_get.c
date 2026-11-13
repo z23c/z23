@@ -271,6 +271,69 @@ static int tag_busy_onion_bridge(void)
     return failures;
 }
 
+/* A node that is up but refusing the board listing answers fleet_board with
+ * its own fb_error body inside the JSON-RPC result; only transport errors
+ * carry the {"error":{...}} envelope. Exercise the real board listing
+ * through the CLI bridge, not the offer stub. */
+static int g_tag_board_mode;
+static char *tag_board_rpc(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "fleet_board")) return strdup("null");
+    if (g_tag_board_mode == 1)
+        return strdup("{\"ok\":false,\"code\":\"NODE_DB_UNAVAILABLE\","
+                      "\"message\":\"the node database is not open; "
+                      "the board lives in it\"}");
+    if (g_tag_board_mode == 2)
+        return strdup("{\"error\":{\"code\":-32000,\"message\":\"offline\"}}");
+    if (g_tag_board_mode == 3) return strdup("{\"ok\":true}");
+    return NULL;
+}
+
+static int tag_board_refusal_bridge(void)
+{
+    int failures = 0;
+    TEST("app catalog: a running node's own board refusal names the node's message; silence still says start the node") {
+        struct zcl_app_offer_row *rows = calloc(ZCL_APP_OFFER_ROWS_MAX, sizeof(*rows));
+        struct zcl_app_offer_page page;
+        struct zcl_command_reply why;
+        ASSERT(rows);
+        node_rpc_client_set_test_hook(tag_board_rpc);
+        g_tag_board_mode = 1;
+        bool app_ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why);
+        bool names_db = !app_ok &&
+            !strcmp(why.error.code, "BOARD_UNREADABLE") &&
+            strstr(why.error.message, "NODE_DB_UNAVAILABLE") &&
+            strstr(why.error.message, "the node database is not open");
+        zcl_command_reply_free(&why);
+        g_tag_board_mode = 2;
+        bool transport_ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why);
+        bool names_transport = !transport_ok &&
+            !strcmp(why.error.code, "BOARD_UNREADABLE") &&
+            strstr(why.error.message, "offline");
+        zcl_command_reply_free(&why);
+        g_tag_board_mode = 3;
+        bool unexplained_ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why);
+        bool ok_body_start_node = !unexplained_ok &&
+            !strcmp(why.error.code, "BOARD_UNREADABLE") &&
+            strstr(why.error.message, "did not answer");
+        zcl_command_reply_free(&why);
+        g_tag_board_mode = 0;
+        bool silent_ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why);
+        bool silent_start_node = !silent_ok &&
+            !strcmp(why.error.code, "BOARD_UNREADABLE") &&
+            strstr(why.error.message, "start the node");
+        node_rpc_client_set_test_hook(NULL);
+        zcl_command_reply_free(&why);
+        free(rows);
+        ASSERT(names_db); ASSERT(names_transport);
+        ASSERT(ok_body_start_node); ASSERT(silent_start_node);
+        PASS();
+    } _test_next:;
+    g_tag_board_mode = 0;
+    return failures;
+}
+
 static void tag_sha(const uint8_t *b, size_t n, char hex[65])
 {
     uint8_t d[32];
@@ -5273,6 +5336,7 @@ int test_app_get(void)
     failures += tag_recovery_limits();
     memset(&g_tag, 0, sizeof(g_tag));
     failures += tag_busy_onion_bridge();
+    failures += tag_board_refusal_bridge();
     tag_board_reset();
     zcl_app_offer_set_call(tag_call);
     failures += tag_rebuild_catalog();

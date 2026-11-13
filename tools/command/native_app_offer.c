@@ -446,8 +446,28 @@ void zcl_app_offer_age(int64_t created_at, int64_t now, char *out,
 
 /* ── the transport seam ──────────────────────────────────────────────── */
 
+/* The message (with its code, when present) of an application refusal body
+ * inside the JSON-RPC result: the node's fleet_board RPC answers
+ * {"ok":false,"code":...,"message":...} where a transport error would carry
+ * the {"error":{...}} envelope. An ok:true body that merely misses its
+ * payload is not a refusal and stays unexplained. */
+static const char *zao_result_refusal(const struct json_value *body,
+                                      const char **label)
+{
+    *label = NULL;
+    const struct json_value *ok = json_get(body, "ok");
+    if (ok && !(ok->type == JSON_BOOL && !ok->val.b))
+        return NULL;
+    const struct json_value *code = json_get(body, "code");
+    *label = code && code->type == JSON_STR ? json_get_str(code) : NULL;
+    const struct json_value *msg = json_get(body, "message");
+    return msg && msg->type == JSON_STR ? json_get_str(msg) : NULL;
+}
+
 /* The node RPC's own error message from a parsed refusal body, or an empty
- * string when the body holds none. Called while the reply object is alive. */
+ * string when the body holds none. Two shapes carry one: the transport
+ * envelope {"error":{...}} and the application refusal above. Called while
+ * the reply object is alive. */
 static void zao_board_refusal_reason(const struct json_value *body,
                                      char *reason, size_t cap)
 {
@@ -457,9 +477,15 @@ static void zao_board_refusal_reason(const struct json_value *body,
     const struct json_value *err = json_get(body, "error");
     const struct json_value *msg =
         err && err->type == JSON_OBJ ? json_get(err, "message") : NULL;
-    const char *text =
-        msg && msg->type == JSON_STR ? json_get_str(msg) : NULL;
-    if (text)
+    const char *label = NULL;
+    const char *text = msg && msg->type == JSON_STR
+        ? json_get_str(msg)
+        : zao_result_refusal(body, &label);
+    if (!text)
+        return;
+    if (label && *label)
+        (void)snprintf(reason, cap, "%s: %s", label, text);
+    else
         (void)snprintf(reason, cap, "%s", text);
 }
 
