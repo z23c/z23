@@ -27,6 +27,18 @@ static void shard_i32(struct sha3_256_ctx *sha, int value)
     sha3_256_write(sha, encoded, sizeof(encoded));
 }
 
+/* Preserve the C-string preimage, but refuse SQLite TEXT with hidden bytes. */
+static bool shard_text_column(struct sha3_256_ctx *sha,
+                               sqlite3_stmt *statement, int column)
+{
+    if (sqlite3_column_type(statement, column) != SQLITE_TEXT) return false;
+    const unsigned char *text = sqlite3_column_text(statement, column);
+    int length = sqlite3_column_bytes(statement, column);
+    if (!text || length < 0 || memchr(text, 0, (size_t)length)) return false;
+    sha3_256_write(sha, text, (size_t)length + 1);
+    return true;
+}
+
 bool ci_scan_shard_writer_close(struct ci_scan_shard_writer *writer)
 {
     if (!writer) return false;
@@ -82,15 +94,18 @@ static bool shard_digest_file(struct ci_scan_shard_writer *writer,
     bool ok = sqlite3_bind_text(statement, 1, path, -1,
                                 SQLITE_TRANSIENT) == SQLITE_OK;
     int rc = ok ? sqlite3_step(statement) : SQLITE_ERROR; // raw-sql-ok:codeindex-derived
+    bool integer = rc == SQLITE_ROW && sqlite3_column_type(statement, 3) == SQLITE_INTEGER;
+    sqlite3_int64 lines = integer ? sqlite3_column_int64(statement, 3) : -1;
     if (rc == SQLITE_ROW && sqlite3_column_type(statement, 0) == SQLITE_TEXT &&
         sqlite3_column_type(statement, 1) == SQLITE_TEXT &&
         sqlite3_column_type(statement, 2) == SQLITE_BLOB &&
         sqlite3_column_bytes(statement, 2) == 32 &&
-        sqlite3_column_type(statement, 3) == SQLITE_INTEGER) {
-        shard_text(sha, sqlite3_column_text(statement, 0));
-        shard_text(sha, sqlite3_column_text(statement, 1));
+        integer &&
+        lines >= 0 && lines <= INT32_MAX) {
+        ok = shard_text_column(sha, statement, 0) &&
+             shard_text_column(sha, statement, 1);
         sha3_256_write(sha, sqlite3_column_blob(statement, 2), 32);
-        shard_i32(sha, sqlite3_column_int(statement, 3));
+        shard_i32(sha, (int32_t)lines);
     } else {
         ok = false;
     }
@@ -126,19 +141,20 @@ static bool shard_digest_refs(struct ci_scan_shard_writer *writer,
                                 SQLITE_TRANSIENT) == SQLITE_OK;
     int rc = SQLITE_ERROR;
     while (ok && (rc = sqlite3_step(statement)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
-        sqlite3_int64 ref_line = sqlite3_column_int64(statement, 1);
-        if (sqlite3_column_type(statement, 0) != SQLITE_TEXT ||
-            sqlite3_column_type(statement, 1) != SQLITE_INTEGER ||
-            ref_line < 0 || ref_line > INT32_MAX ||
-            sqlite3_column_type(statement, 2) != SQLITE_TEXT) {
+        if (sqlite3_column_type(statement, 1) != SQLITE_INTEGER) {
             ok = false;
             break;
         }
-        shard_text(sha, sqlite3_column_text(statement, 0));
+        sqlite3_int64 ref_line = sqlite3_column_int64(statement, 1);
+        if (ref_line < 0 || ref_line > INT32_MAX ||
+            !shard_text_column(sha, statement, 0)) {
+            ok = false;
+            break;
+        }
         uint8_t line[4];
         zcl_write_i32_le(line, (int32_t)ref_line);
         sha3_256_write(sha, line, sizeof(line));
-        shard_text(sha, sqlite3_column_text(statement, 2));
+        ok = shard_text_column(sha, statement, 2);
     }
     if (rc != SQLITE_DONE) ok = false;
     return shard_statement_reset(statement) && ok;

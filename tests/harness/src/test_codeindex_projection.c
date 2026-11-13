@@ -191,10 +191,33 @@ static bool cip_logical_root_preserved(struct codeindex *existing,
            cip_generation_matches(existing, source_root, projection_root);
 }
 
+/* Confirm SQLite retained a TEXT value with a byte suffix after its NUL. */
+static bool cip_nul_shape(const char *root, const char *mutation)
+{
+    const char *sql = NULL;
+    if (strstr(mutation, "SET callee_name="))
+        sql = "SELECT count(*) FROM refs WHERE typeof(callee_name)='text' AND instr(callee_name,char(0))>0 AND length(CAST(callee_name AS BLOB))>length(callee_name)";
+    else if (strstr(mutation, "SET enclosing="))
+        sql = "SELECT count(*) FROM refs WHERE typeof(enclosing)='text' AND instr(enclosing,char(0))>0 AND length(CAST(enclosing AS BLOB))>length(enclosing)";
+    else if (strstr(mutation, "SET purpose="))
+        sql = "SELECT count(*) FROM files WHERE typeof(purpose)='text' AND instr(purpose,char(0))>0 AND length(CAST(purpose AS BLOB))>length(purpose)";
+    else if (strstr(mutation, "SET \"group\"="))
+        sql = "SELECT count(*) FROM files WHERE typeof(\"group\")='text' AND instr(\"group\",char(0))>0 AND length(CAST(\"group\" AS BLOB))>length(\"group\")";
+    if (!sql) return false;
+    char path[PATH_MAX]; sqlite3 *db = NULL; sqlite3_stmt *stmt = NULL;
+    bool ok = cip_index_path(root, path) && sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1;
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) sqlite3_close(db);
+    return ok;
+}
+
 /* Applies one poison statement and confirms SQLite still self-checks. */
 static bool cip_poison_applied(const char *root, const char *sql)
 {
-    return cip_exec_one(root, sql) && cip_quick_check(root);
+    return cip_exec_one(root, sql) && cip_quick_check(root) &&
+           (!strstr(sql, "char(0)") || cip_nul_shape(root, sql));
 }
 
 /* True when the reopened index reports its projection no longer current. */
@@ -318,6 +341,24 @@ int test_codeindex_projection_integrity(void)
          "UPDATE refs SET enclosing=X'61' "
          "WHERE rowid=(SELECT MIN(rowid) FROM refs "
          "WHERE enclosing='projection_main')"},
+        {"reference callee embedded NUL suffix",
+         "UPDATE refs SET callee_name=callee_name||char(0)||'suffix' "
+         "WHERE rowid=(SELECT MIN(rowid) FROM refs WHERE enclosing='projection_main')"},
+        {"reference enclosing embedded NUL suffix",
+         "UPDATE refs SET enclosing=enclosing||char(0)||'suffix' "
+         "WHERE rowid=(SELECT MIN(rowid) FROM refs WHERE enclosing='projection_main')"},
+        {"file group embedded NUL suffix",
+         "UPDATE files SET \"group\"=\"group\"||char(0)||'suffix' "
+         "WHERE path='lib/net/src/projection.c'"},
+        {"file purpose embedded NUL suffix",
+         "UPDATE files SET purpose=purpose||char(0)||'suffix' "
+         "WHERE path='lib/net/src/projection.c'"},
+        {"file line count exceeds int32",
+         "UPDATE files SET line_count=line_count+4294967296 "
+         "WHERE path='lib/net/src/projection.c'"},
+        {"file line count has a text suffix",
+         "UPDATE files SET line_count=CAST(line_count AS TEXT)||'suffix' "
+         "WHERE path='lib/net/src/projection.c'"},
     };
     for (size_t i = 0; rooted && i < sizeof(poisons) / sizeof(poisons[0]); i++) {
         bool poisoned = cip_poison_applied(first, poisons[i].sql);
