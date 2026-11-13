@@ -66,7 +66,7 @@ struct library {
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure, recovery_adoption, create_result, draft_result, publish_result;
     bool share_result;
-    bool operation_canceled;
+    bool operation_canceled, preview_current;
     bool preparation_canceled;
     bool share_review;
     struct json_value receive_receipt;
@@ -1085,22 +1085,18 @@ static bool al_draft_reply_fits(struct library *w, const struct json_value *data
         w->data_cap - preparation - result >= 128u;
 }
 
-static bool al_draft_action(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+static bool al_preview_succeeded(const struct library *w, const struct zcl_command_reply *reply)
 {
-    if (!al_history_available(w))
-        return al_fail(reply, "RECOVERY_TOO_LARGE", "Reopen My Apps before keeping another draft so both earlier receipts remain available.");
-    const struct library_row *row = &w->rows[w->index];
-    if (!row->saved || !al_current(row, env, reply)) return false;
-    w->receive_current = false;
-    struct zcl_command_reply attempt;
-    zcl_command_reply_init(&attempt, "zcl.app_library.v1");
-    app_saved_draft_flow_run(&row->selection, &attempt, w->notice, w->prepare_context, w->test_worker_path);
-    bool prior_mutated = reply->error.mutated;
-    zcl_command_reply_free(reply); *reply = attempt;
-    reply->error.mutated |= prior_mutated;
     const char *continuation = zcl_package_copy_str(&reply->data, "continuation");
-    w->draft_result = reply->status == ZCL_COMMAND_STATUS_PASSED && continuation && !strcmp(continuation, "kept");
-    if (!w->draft_result || w->has_discover_error) return false;
+    const struct json_value *opened = json_get(&reply->data, "preview_opened");
+    const struct json_value *executed = json_get(&reply->data, "continuation_executed");
+    return reply->status == ZCL_COMMAND_STATUS_PASSED && !w->has_discover_error &&
+        continuation && !strcmp(continuation, "previewed") && opened && opened->type == JSON_BOOL &&
+        json_get_bool(opened) && executed && executed->type == JSON_BOOL && json_get_bool(executed) &&
+        !json_get(&reply->data, "continuation_error");
+}
+static bool al_finish_draft_keep(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+{
     struct json_value receipt; json_init(&receipt);
     if (!al_capture_draft(&receipt, &reply->data) || !al_draft_reply_fits(w, &reply->data, &receipt)) {
         json_free(&receipt); return false;
@@ -1112,6 +1108,34 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
     }
     if (!al_reload(w, env, reply)) return false;
     return al_received_selection(w, &reply->data, reply);
+}
+static bool al_draft_action(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+{
+    if (!al_history_available(w))
+        return al_fail(reply, "RECOVERY_TOO_LARGE", "Reopen My Apps before keeping another draft so both earlier receipts remain available.");
+    const struct library_row *row = &w->rows[w->index];
+    if (!row->saved || !al_current(row, env, reply)) return false;
+    w->receive_current = false;
+    struct zcl_command_reply attempt;
+    zcl_command_reply_init(&attempt, "zcl.app_library.v1");
+    app_saved_draft_flow_run(&row->selection, &attempt, w->notice, w->prepare_context, w->test_worker_path);
+    bool canceled_without_mutation = !attempt.error.mutated;
+    bool prior_mutated = reply->error.mutated;
+    zcl_command_reply_free(reply); *reply = attempt;
+    reply->error.mutated |= prior_mutated;
+    const char *continuation = zcl_package_copy_str(&reply->data, "continuation");
+    w->draft_result = reply->status == ZCL_COMMAND_STATUS_PASSED && continuation && !strcmp(continuation, "kept");
+    const char *status = zcl_package_copy_str(&reply->data, "status");
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED && canceled_without_mutation &&
+        status && !strcmp(status, "canceled")) {
+        json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+        w->operation_canceled = true; w->page = 1; return true;
+    }
+    if (al_preview_succeeded(w, reply)) {
+        w->preview_current = true; w->operation_canceled = true; w->page = 1; return true;
+    }
+    if (!w->draft_result || w->has_discover_error) return false;
+    return al_finish_draft_keep(w, env, reply);
 }
 static bool al_host_link(struct library *w, const struct app_launch_env *env,
     const char *exe, struct zcl_command_reply *reply)
@@ -1370,6 +1394,15 @@ static void al_page_model(struct library *w)
     else if (w->page) al_detail_model(w);
     else al_model(w);
 }
+/* Keep a preview reply for dismissal, but start a later operation cleanly. */
+static void al_leave_preview(struct library *w, struct zcl_command_reply *reply, const char *id)
+{
+    if (!w->preview_current || !(al_receipt_operation(id) || !strcmp(id, "catalog") ||
+        !strcmp(id, "open-link") || !strcmp(id, "hosting") || !strcmp(id, "create"))) return;
+    w->any_mutated |= reply->error.mutated;
+    json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+    w->preview_current = false;
+}
 static void al_loop(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir)
 {
@@ -1387,9 +1420,11 @@ static void al_loop(struct library *w, const struct app_launch_env *env, struct 
             al_fail(reply, "INVALID_SELECTION", "The app selection was not recognized. Nothing was opened."); break;
         }
         if (event.outcome == ZCL_PRESENT_WINDOW_DISMISSED || !strcmp(w->model.actions[event.action_index].id, "cancel")) {
-            if (!w->has_received) (void)json_push_kv_str(&reply->data, "status", "canceled");
+            if (!w->has_received && !w->preview_current) (void)json_push_kv_str(&reply->data, "status", "canceled");
             break;
         }
+        const char *id = w->model.actions[event.action_index].id;
+        al_leave_preview(w, reply, id);
         bool handled = false;
         bool draft_result = w->draft_result;
         if (!al_external(w, env, datadir, presenter, context, reply, w->model.actions[event.action_index].id, &handled)) {

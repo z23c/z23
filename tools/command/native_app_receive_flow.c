@@ -394,7 +394,7 @@ static void arf_notice(struct receive_flow *f)
 {
     struct app_confirm *view = zcl_calloc(1, sizeof(*view), "receive-flow/error");
     if (!view) return;
-    arf_model(f, view, "The next step did not finish", f->adopted ? "Your adopted copy is retained. Nothing is retried automatically." : "Your received copy is retained. Nothing is retried automatically.");
+    arf_model(f, view, "The next step did not finish", f->draft ? "Your unkept draft is retained. Nothing is retried automatically." : f->adopted ? "Your adopted copy is retained. Nothing is retried automatically." : "Your received copy is retained. Nothing is retried automatically.");
     arf_actions(view, "Close");
     char excerpt[192]; size_t n = strnlen(f->reply->error.message, sizeof(excerpt) - 1);
     for (size_t i = 0; i < n; ++i) {
@@ -403,7 +403,8 @@ static void arf_notice(struct receive_flow *f)
     }
     excerpt[n] = 0;
     char why[256] = {0};
-    if (app_confirm_field(&view->model, "Message excerpt: ", n ? excerpt : "The result could not be retained.") &&
+    if ((!f->draft || arf_fields(f, view)) &&
+        app_confirm_field(&view->model, "Message excerpt: ", n ? excerpt : "The result could not be retained.") &&
         app_confirm_prepare(view, why, sizeof(why)))
         (void)app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
     app_confirm_free(view); free(view);
