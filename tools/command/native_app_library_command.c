@@ -1638,7 +1638,7 @@ static bool al_created_copy_notice(struct library *w, const struct zcl_command_r
     (void)snprintf(w->model.title, sizeof(w->model.title), "Your copy was saved");
     (void)snprintf(w->model.summary, sizeof(w->model.summary),
         "Preview was not opened. Press C to copy the saved copy's location.");
-    app_library_choice(&w->model, "close", "Close", "Return to My Apps.");
+    app_library_choice(&w->model, "close", "Close", "Close this notice.");
     struct zcl_present_window_event_v1 event = {0}; char why[256] = {0};
     return zcl_present_model_validate_v1(&w->model, why, sizeof(why)) &&
         presenter(context, &w->model, copy, &event, why, sizeof(why)) &&
