@@ -18,7 +18,7 @@ public availability. Pins identify an individual release; they are not policy
 constants and should be reverified for each qualification.
 
 The 2026-11-14 Linux x86_64 qualification used two fresh HOME/XDG profiles, a
-local graphical desktop, and an installed compiler kit. Editing used an existing
+local graphical desktop, and host C compiler and build tools. Editing used an existing
 local-MCP assistant. The friend needed the app installation, but no assistant,
 account, or node service. This is not an all-platform or human usability study.
 Use isolated fixtures, admitted jobs, and a bounded lifetime; do not start or
@@ -34,6 +34,23 @@ retain failed logs and do not weaken the resolver to make the test pass.
 <!-- claim: symbol-present ZCL_TEST_TMPROOT tests/harness/include/test/test_core.h # private fixture root override -->
 See `tools/command/app_installed_source_resolve.c` and
 `tests/harness/src/test_app_seed_skycombat.c` at the source being qualified.
+
+## Qualify build prerequisites
+
+Sky Combat carries its Linux X11/GL compile-time headers in the source copy and
+loads the window-system libraries at runtime. Do not tell recipients to install
+X11/GL development packages for this app. A compiler and make are still needed;
+a working graphical session and runtime libraries are separate launch inputs.
+<!-- claim: symbol-present SKYCOMBAT_X11_INPUTS apps/skycombat/skycombat.mk # vendored window-system header closure -->
+<!-- claim: symbol-present RGFW_USE_XDL apps/skycombat/skycombat.mk # runtime window-system loading -->
+
+To qualify this boundary, hide the host X11/GL include directories inside an
+isolated mount namespace, keep the received source read-only, and build into a
+fresh output directory under host admission. Record mount evidence, compiler
+identity, dependency files and the output hash. Check that no system X11/GL
+header appears in the dependency files, then verify the host directories remain
+unchanged after exit. This proves that build prerequisite boundary; it does not
+qualify a bundled compiler kit, every app, or GUI launch without runtime libraries.
 
 ## Run the journey
 

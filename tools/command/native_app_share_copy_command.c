@@ -346,9 +346,8 @@ static void zsh_take_build(struct zsh *z)
     zcl_command_reply_free(&why);
 }
 
-#define ZSH_FRIEND_NEEDS                                                      \
-    "Z23 (install instructions: https://z23.sh), a C compiler and, " \
-    "on Linux, the X11 and GL development headers"
+#define ZSH_FRIEND_NEEDS \
+    "Z23 (install instructions: https://z23.sh), a C compiler, make and any app-specific build dependencies"
 
 /* The friend opens the file in their own datadir, so that command carries
  * none; it names the file as written. */
