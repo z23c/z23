@@ -175,6 +175,16 @@ static bool ci_strset_add(struct ci_strset *set, const char *s, bool *added)
     return true;
 }
 
+static bool ci_strset_has(const struct ci_strset *set, const char *s)
+{
+    size_t j = (size_t)ci_str_hash(s) & (set->cap - 1);
+    while (set->slots[j]) {
+        if (!strcmp(set->slots[j], s)) return true;
+        j = (j + 1) & (set->cap - 1);
+    }
+    return false;
+}
+
 /* ── a growable name list (traversal frontier + impacted-file accumulator) ── */
 struct ci_strlist {
     char  **items;   /* owns each string */
@@ -235,6 +245,7 @@ struct ci_closure_ctx {
     struct ci_strset  seen_syms;   /* symbol identity keys queued/visited */
     struct ci_strset  seen_sites;  /* (enclosing, file) pairs already resolved */
     struct ci_strset  seen_files;  /* impacted files already collected */
+    struct ci_strset  expanded_defs; /* definition files with complete includes */
     struct ci_strlist files;       /* impacted files (unsorted; deduped) */
     struct ci_ref    *refbuf;      /* CI_CLOSURE_QUERY_BATCH rows */
     struct ci_symbol *symbuf;      /* CI_CLOSURE_QUERY_BATCH rows */
@@ -263,6 +274,7 @@ static void ci_closure_ctx_free(struct ci_closure_ctx *c)
     ci_strset_free(&c->seen_syms);
     ci_strset_free(&c->seen_sites);
     ci_strset_free(&c->seen_files);
+    ci_strset_free(&c->expanded_defs);
     ci_strlist_free(&c->files);
     free(c->refbuf);
     free(c->symbuf);
@@ -1050,6 +1062,7 @@ static bool ci_fwd_record_file(struct ci_closure_ctx *c, struct codeindex *ci,
 {
     if (!ci_closure_add_file(c, path, hit_cap))
         return false;
+    if (ci_strset_has(&c->expanded_defs, path)) return true;
 
     int ni = codeindex_includes_of_file(ci, path, c->incbuf,
                                         CI_CLOSURE_QUERY_BATCH);
@@ -1061,7 +1074,8 @@ static bool ci_fwd_record_file(struct ci_closure_ctx *c, struct codeindex *ci,
         if (!ci_closure_add_file(c, c->incbuf[i], hit_cap))
             return false;
     }
-    return true;
+    bool added = false;
+    return ni == CI_CLOSURE_QUERY_BATCH || ci_strset_add(&c->expanded_defs, path, &added);
 }
 
 /* Record EVERY definition row of `sym`, any kind, so a name defined in several
@@ -1139,7 +1153,8 @@ static bool ci_fwd_expand_level(struct ci_closure_ctx *c, struct codeindex *ci,
 static const char *ci_forward_init(struct ci_closure_ctx *c)
 {
     if (!ci_strset_init(&c->seen_syms, 1024) ||
-        !ci_strset_init(&c->seen_files, 1024)) {
+        !ci_strset_init(&c->seen_files, 1024) ||
+        !ci_strset_init(&c->expanded_defs, 1024)) {
         ci_closure_ctx_free(c);
         return "forward closure set init failed";
     }

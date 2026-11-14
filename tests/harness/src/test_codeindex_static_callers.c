@@ -706,6 +706,73 @@ static int test_sc_forward_closure_all_definitions(void)
     return failures;
 }
 
+static int sc_fwd_trace(unsigned kind, void *context, void *stmt, void *unused)
+{
+    (void)unused;
+    const char *sql = sqlite3_sql(stmt);
+    if (kind == SQLITE_TRACE_STMT && sql && strstr(sql, "SELECT i.dep_path FROM includes"))
+        ++*(int *)context;
+    return 0;
+}
+static bool sc_fwd_dedup_case(struct codeindex *ci, bool changed)
+{
+    sqlite3 *db = ci_store_db(ci->store); char out[SC_OUT_CAP][256];
+    bool truncated = false, found = false; int queries = 0;
+    if (sqlite3_trace_v2(db, SQLITE_TRACE_STMT, sc_fwd_trace, &queries) != SQLITE_OK) return false;
+    int n = codeindex_forward_closure(ci, "seed_fn", out, SC_OUT_CAP, &truncated, &found);
+    bool clear = sqlite3_trace_v2(db, 0, NULL, NULL) == SQLITE_OK;
+    bool ok = clear && n == (changed ? 4 : 3) && found && !truncated && queries == 2 &&
+        sc_fwd_has(out, n, SC_SRC "seed.c") && sc_fwd_has(out, n, SC_INC "defs.h") &&
+        sc_fwd_has(out, n, SC_INC "leaf.h") && (!changed || sc_fwd_has(out, n, SC_INC "late.h"));
+    if (!ok) fprintf(stderr, "forward dedup: n=%d found=%d truncated=%d queries=%d\n", n, found, truncated, queries);
+    return ok;
+}
+static bool sc_fwd_limits(struct codeindex *ci)
+{
+    enum { LIMIT_OUT_CAP = 4200 };
+    sqlite3 *db = ci_store_db(ci->store);
+    char (*out)[256] = calloc(LIMIT_OUT_CAP, sizeof(*out));
+    if (!out) return false;
+    const char *sql = "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096) "
+        "INSERT INTO includes SELECT id,printf('overflow/%04d',x) FROM files,n WHERE path='" SC_INC "defs.h'";
+    if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) { free(out); return false; }
+    bool truncated = false, found = false;
+    int n = codeindex_forward_closure(ci, "seed_fn", out, LIMIT_OUT_CAP, &truncated, &found);
+    if (n < 0 || n >= LIMIT_OUT_CAP || !found || !truncated) { free(out); return false; }
+    if (sqlite3_exec(db, "DROP TABLE includes", NULL, NULL, NULL) != SQLITE_OK) { free(out); return false; }
+    truncated = false; found = false;
+    bool ok = codeindex_forward_closure(ci, "seed_fn", out, LIMIT_OUT_CAP, &truncated, &found) < 0;
+    free(out); return ok;
+}
+static int test_sc_forward_dedup(void)
+{
+    int failures = 0; struct codeindex *ci = NULL; struct ci_store *store = NULL;
+    TEST("codeindex_static_callers: forward include expansion is per definition file and per call") {
+        TEST_DISCARD(system("rm -rf " SC_FWD_FIX));
+        ASSERT(sc_fwd_write(SC_SRC "seed.c", "#include \"net/defs.h\"\nint seed_fn(void) { return one() + two(); }\n"));
+        ASSERT(sc_fwd_write(SC_INC "defs.h", "#include \"net/leaf.h\"\nint one(void) { return 1; }\nint two(void) { return 2; }\n"));
+        ASSERT(sc_fwd_write(SC_INC "leaf.h", "/* leaf */\n"));
+        ci = codeindex_open(SC_FWD_FIX); ASSERT(ci != NULL);
+        store = sc_macro_copy_store(ci); ASSERT(store != NULL);
+        struct codeindex copy = {.store = store};
+        sqlite3 *db = ci_store_db(store);
+        ASSERT_EQ(sqlite3_exec(db, "INSERT OR IGNORE INTO includes SELECT id,'" SC_INC "defs.h' FROM files WHERE path='" SC_SRC "seed.c';"
+            "INSERT OR IGNORE INTO includes SELECT id,'" SC_INC "leaf.h' FROM files WHERE path='" SC_INC "defs.h';", NULL, NULL, NULL), SQLITE_OK);
+        char edges[4][256];
+        ASSERT_EQ(codeindex_includes_of_file(&copy, SC_SRC "seed.c", edges, 4), 1);
+        ASSERT_EQ(codeindex_includes_of_file(&copy, SC_INC "defs.h", edges, 4), 1);
+        ASSERT(sc_fwd_dedup_case(&copy, false));
+        ASSERT_EQ(sqlite3_exec(db, "INSERT INTO includes SELECT id,'" SC_INC "late.h' FROM files WHERE path='" SC_INC "defs.h'", NULL, NULL, NULL), SQLITE_OK);
+        ASSERT(sc_fwd_dedup_case(&copy, true));
+        ASSERT(sc_fwd_limits(&copy));
+        PASS();
+    } _test_next:;
+    if (store) ci_store_close(store);
+    if (ci) codeindex_close(ci);
+    TEST_DISCARD(system("rm -rf " SC_FWD_FIX));
+    return failures;
+}
+
 static int test_sc_caller_edge_query(void)
 {
     int failures = 0;
@@ -853,6 +920,7 @@ int test_codeindex_static_callers(void)
 {
     int failures = test_sc_cause_labels() + test_sc_cause_value();
     failures += test_sc_caller_edge_query();
+    failures += test_sc_forward_dedup();
     failures += test_sc_exact_checked();
     struct codeindex *ci = NULL;
     TEST("codeindex_static_callers: fixture tree indexes") {
