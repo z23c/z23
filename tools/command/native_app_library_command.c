@@ -137,6 +137,16 @@ void app_library_choice(struct zcl_present_model_v1 *m, const char *id,
     app_confirm_action(&m->actions[i], ZCL_PRESENT_ACTION_SELECT, id, label);
     m->action_count = m->item_count;
 }
+static size_t al_name_prefix(const char *text, size_t cap)
+{
+    size_t len = strnlen(text, cap), at = 0;
+    while (at < len) {
+        uint32_t scalar; size_t consumed = 0;
+        if (zutf8_decode_n(text + at, len - at, &scalar, &consumed) != ZUTF8_OK) break;
+        at += consumed;
+    }
+    return at;
+}
 static void al_model(struct library *w)
 {
     struct zcl_present_model_v1 *m = &w->model;
@@ -157,7 +167,8 @@ static void al_model(struct library *w)
     } else if (!strcmp(name, "skycombat")) name = "Sky Combat";
     char value[ZCL_PRESENT_MODEL_VALUE_MAX + 1], version[65];
     zcl_hex_encode(r->selection.version, 32, version);
-    (void)snprintf(m->summary, sizeof(m->summary), "App %zu of %zu. %.72s", w->index + 1, w->count, name);
+    (void)snprintf(m->summary, sizeof(m->summary), "App %zu of %zu. %.*s", w->index + 1, w->count,
+                   (int)al_name_prefix(name, 72), name);
     (void)snprintf(value, sizeof(value), "%s%.12s",
         r->saved ? "Saved version " : "Installed app", r->saved ? version : "");
     app_library_choice(m, "choose", "Choose app", value);

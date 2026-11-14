@@ -42,6 +42,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
+#include "zutf8/zutf8.h"
 
 #if !defined(_WIN32)
 #include <errno.h>
@@ -1016,6 +1017,47 @@ static bool al_selection(struct al_fx *f, const char *name, struct app_selection
     uint8_t *roots[] = {s.fork, s.parent, s.version, s.package, s.env, s.dependencies, s.record, s.image};
     for (size_t i = 0; i < 8; ++i) memset(roots[i], 1, 32);
     return app_selection_save(f->env.state_dir, 0, &s, saved) == APP_SELECTION_OK;
+}
+struct al_utf8_summary { unsigned calls; bool valid; char summary[241]; };
+static bool al_utf8_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy; (void)why; (void)cap; struct al_utf8_summary *v = context;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (!v->calls++) { event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true; }
+    v->valid = zutf8_validate(model->summary);
+    (void)snprintf(v->summary, sizeof(v->summary), "%s", model->summary);
+    event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+}
+static bool al_utf8_name_case(struct al_fx *f, struct app_selection *selection, size_t ascii)
+{
+    char name[80], path[PATH_MAX]; memset(name, 'a', ascii);
+    name[ascii] = (char)0xc3; name[ascii+1] = (char)0xa9; name[ascii+2] = 0;
+    if (!al_path(path, sizeof(path), f->root, name) || mkdir(path, 0700) != 0) return false;
+    struct app_selection next = *selection;
+    if (strlen(path) >= sizeof(next.copy)) return false;
+    memcpy(next.copy, path, strlen(path) + 1);
+    if (app_selection_save(f->env.state_dir, selection->revision, &next, selection) != APP_SELECTION_OK) return false;
+    struct al_utf8_summary view = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_test_app_library_run(&f->env, &reply, al_utf8_present, &view);
+    if (ascii == 71) name[ascii] = 0;
+    const char *label = strstr(view.summary, ". ");
+    bool ok = view.calls == 2 && view.valid && label && !strcmp(label + 2, name) &&
+        reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated;
+    if (!ok) fprintf(stderr, "UTF-8 summary ascii=%zu calls=%u valid=%d summary=%s\n", ascii, view.calls, view.valid, view.summary);
+    zcl_command_reply_free(&reply); return ok;
+}
+static int case_library_utf8_summary(void)
+{
+    int failures = 0; static struct al_fx f; struct app_selection saved;
+    TEST("My Apps keeps complete UTF-8 characters at its copy-name limit") {
+        ASSERT(al_setup(&f) && app_launch_state_dir_ready(f.env.state_dir) && al_selection(&f, "fixtureapp", &saved));
+        ASSERT(al_utf8_name_case(&f, &saved, 70));
+        ASSERT(al_utf8_name_case(&f, &saved, 71));
+        PASS();
+    } _test_next:;
+    return failures;
 }
 /* Drives the un-kept share journey: home -> app list -> card -> Share.
  * Records whether the room shows the share-options page or an error card
@@ -3310,6 +3352,7 @@ _test_next:
     failures += case_resident_app(&f, f.bin_silent, "silent", false, false);
     failures += case_resident_mutation(&f);
     failures += case_library(&f);
+    failures += case_library_utf8_summary();
     failures += case_library_create_view();
     failures += case_library_create_flow();
     failures += case_library_share(&f);
