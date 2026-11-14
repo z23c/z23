@@ -642,6 +642,10 @@ static const char *runtime_terminal_field(const char *line, const char *const *v
     }
     return "unknown";
 }
+static int runtime_exit_code(const struct runtime_process *process)
+{ return process->reaped && WIFEXITED(process->status) ? WEXITSTATUS(process->status) : -1; }
+static int runtime_signal_number(const struct runtime_process *process)
+{ return process->reaped && WIFSIGNALED(process->status) ? WTERMSIG(process->status) : 0; }
 static void runtime_terminal_failure(const struct runtime_process *process, bool read_ok)
 {
     static const char *const results[] = {"ready", "wait", "progress", "eof", "refused", "deadline", "io_error", "cancelled", "unsupported", "invalid"};
@@ -654,16 +658,36 @@ static void runtime_terminal_failure(const struct runtime_process *process, bool
     if (cleanup && end && cleanup >= end) cleanup = NULL;
     const char *name = runtime_terminal_field(result ? result + 8 : NULL, results, sizeof(results) / sizeof(results[0]));
     const char *done = runtime_terminal_field(cleanup ? cleanup + 18 : NULL, clean, sizeof(clean) / sizeof(clean[0]));
-    int exit_code = process->reaped && WIFEXITED(process->status) ? WEXITSTATUS(process->status) : -1;
-    int signal_no = process->reaped && WIFSIGNALED(process->status) ? WTERMSIG(process->status) : 0;
     fprintf(stderr, "runtime terminal: result=%s cleanup=%s read_ok=%d buffer_full=%d reaped=%d exit=%d signal=%d custody_lost=%d\n",
             name, done, read_ok, process->diagnostic_used >= sizeof(process->diagnostic_text) - 1,
-            process->reaped, exit_code, signal_no, process->custody_lost);
+            process->reaped, runtime_exit_code(process), runtime_signal_number(process), process->custody_lost);
+}
+
+/* One byte per successful read can fill the buffer; the extra 32 calls bound
+ * repeated EINTR without making a successful, short-read stream fail. */
+static bool runtime_terminal_drain(struct runtime_process *process,
+                                   ssize_t (*reader)(int, void *, size_t))
+{
+    size_t budget = sizeof(process->diagnostic_text) + 32;
+    while (budget--) {
+        if (process->diagnostic_used >= sizeof(process->diagnostic_text) - 1) return false;
+        ssize_t n = reader(process->diagnostics, process->diagnostic_text + process->diagnostic_used,
+                           sizeof(process->diagnostic_text) - 1 - process->diagnostic_used);
+        if (n > 0) {
+            process->diagnostic_used += (size_t)n;
+            process->diagnostic_text[process->diagnostic_used] = 0;
+            continue;
+        }
+        if (n == 0 || (n < 0 && errno == EAGAIN)) return true;
+        if (n < 0 && errno == EINTR) continue;
+        return false;
+    }
+    return false;
 }
 
 static bool runtime_terminal(struct runtime_process *process, const char *result)
 {
-    bool read_ok = runtime_diagnostics(process);
+    bool read_ok = runtime_terminal_drain(process, read);
     char expected[64];
     int length = snprintf(expected, sizeof(expected), "result=%s cleanup_complete=1", result);
     bool ok = read_ok && length > 0 && (size_t)length < sizeof(expected) &&
@@ -1857,10 +1881,40 @@ static int runtime_long_caps_limits(void)
     } TEST_END
     return failures;
 }
+static int terminal_read_mode, terminal_read_step;
+static ssize_t terminal_read_fixture(int fd, void *out, size_t cap)
+{
+    (void)fd;
+    if (terminal_read_mode == 1) { errno = EAGAIN; return -1; }
+    if (terminal_read_mode == 2) { errno = EIO; return -1; }
+    if (terminal_read_mode == 3 || terminal_read_step++ == 0) { errno = EINTR; return -1; }
+    const char *part = terminal_read_step == 2 ? "event=HOST_RUNTIME_TERMINAL result=ref" :
+                       terminal_read_step == 3 ? "used cleanup_complete=1\n" : NULL;
+    if (!part) return 0;
+    size_t n = strlen(part); if (n > cap) { errno = ENOBUFS; return -1; }
+    memcpy(out, part, n); return (ssize_t)n;
+}
+static int runtime_terminal_drain_cases(void)
+{
+    int failures = 0; struct runtime_process p;
+    TEST_CASE("HOST runtime: terminal diagnostics drain split reads and bound failures") {
+        runtime_process_init(&p); terminal_read_mode = 0; terminal_read_step = 0;
+        ASSERT(runtime_terminal_drain(&p, terminal_read_fixture));
+        ASSERT(strstr(p.diagnostic_text, "result=refused cleanup_complete=1") != NULL);
+        runtime_process_init(&p); terminal_read_mode = 1; terminal_read_step = 0;
+        ASSERT(runtime_terminal_drain(&p, terminal_read_fixture)); ASSERT(p.diagnostic_used == 0);
+        terminal_read_mode = 2; ASSERT(!runtime_terminal_drain(&p, terminal_read_fixture));
+        terminal_read_mode = 3; ASSERT(!runtime_terminal_drain(&p, terminal_read_fixture));
+        p.diagnostic_used = sizeof(p.diagnostic_text) - 1; terminal_read_mode = 0;
+        ASSERT(!runtime_terminal_drain(&p, terminal_read_fixture));
+    } TEST_END
+    return failures;
+}
+
 int test_device_host_runtime(void);
 int test_device_host_runtime(void)
 {
-    int failures = runtime_typed_outputs() + runtime_binary_sessions(false) + runtime_raw_refusals(false) +
+    int failures = runtime_terminal_drain_cases() + runtime_typed_outputs() + runtime_binary_sessions(false) + runtime_raw_refusals(false) +
         runtime_binary_sessions(true) + runtime_raw_refusals(true) + runtime_hub_hop() +
         runtime_hub_connect(false) + runtime_hub_connect(true);
     for (unsigned field = 0; field < 3; ++field)

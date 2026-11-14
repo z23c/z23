@@ -32,3 +32,15 @@ terminal and cleanup values, read/buffer state and child exit status; the
 assertion and deadlines remain unchanged. The strict focused group passed 1/1
 with no skips or retries in 10.399 seconds of test-body time. This run did not
 reproduce the failure and therefore does not establish its cause.
+
+The first diagnostic-only candidate was rejected by the complexity preflight
+before producer bootstrap; its concurrent lint was stopped and has no verdict.
+A literal helper extraction passed the complexity gate. The terminal fixture
+previously made one nonblocking diagnostic read, which could stop on an
+interrupted or short read. A terminal-only bounded drain now retries interrupted
+reads and consumes fragments while retaining the same assertion and deadlines.
+A deterministic scripted interrupted/split-read case passed, as did its
+EAGAIN, error, full-buffer and call-budget checks. The strict focused group
+passed 1/1 with no skips or retries in 9.699 seconds of test-body time. This
+fixture defect is established independently; it is not an identified cause of
+the earlier load-flaky result.
