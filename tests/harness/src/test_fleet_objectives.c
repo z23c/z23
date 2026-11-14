@@ -335,6 +335,88 @@ _test_next:;
 #define FOX_MIDNIGHT 1792627200LL
 #define FOX_DAY 86400LL
 
+static int fox_case_window_snapshot(void)
+{
+    int failures = 0;
+    char root[512], path[1024];
+    struct zcl_objectives_window_cache cache = {0}, fresh = {0};
+    struct zcl_objectives_options o = {0};
+    struct zcl_objective_value a, b;
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "window_snapshot");
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", root);
+    o.outcomes = path; o.now = FOX_NOW; o.window_cache = &cache;
+    TEST("objectives: window observation retains first ledger and time") {
+        ASSERT(fox_write(path, "{\"state\":\"landed\",\"landed_at\":1792627200}\n"));
+        a = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(a.measured && a.value == 1);
+        ASSERT(fox_write(path, "{\"state\":\"failed\",\"landed_at\":1792627200}\n"));
+        b = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(b.measured && b.value == 100);
+        o.window_cache = &fresh;
+        b = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(b.measured && b.value == 0);
+        o.window_cache = NULL;
+        b = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(b.measured && b.value == 0);
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+static int fox_case_window_failures(void)
+{
+    int failures = 0;
+    char root[512], path[1024];
+    struct zcl_objectives_window_cache cache = {0}, fresh = {0};
+    struct zcl_objectives_options o = {0};
+    struct zcl_objective_value a, b;
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "window_failures");
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", root);
+    o.outcomes = path; o.now = FOX_NOW; o.window_cache = &cache;
+    TEST("objectives: failed observation remains failed after repair") {
+        cache = (struct zcl_objectives_window_cache){0}; o.window_cache = &cache;
+        ASSERT(fox_write(path, "{broken\n"));
+        a = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(!a.measured && a.reason[0]);
+        ASSERT(fox_write(path, ""));
+        b = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(!b.measured && strcmp(a.reason, b.reason) == 0);
+        o.window_cache = NULL;
+        b = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(b.measured && b.value == 0);
+        PASS();
+    }
+    TEST("objectives: missing and empty window observations remain distinct") {
+        cache = (struct zcl_objectives_window_cache){0}; o.window_cache = &cache;
+        ASSERT(remove(path) == 0);
+        a = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(!a.measured && a.reason[0]);
+        ASSERT(fox_write(path, ""));
+        b = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(!b.measured && strcmp(a.reason, b.reason) == 0);
+        fresh = (struct zcl_objectives_window_cache){0}; o.window_cache = &fresh;
+        a = zcl_objectives_measure(&o, "landed_rows_today");
+        b = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(a.measured && a.value == 0 && !b.measured &&
+               strcmp(b.reason, "no landed or failed outcome in 7 days") == 0);
+        PASS();
+    }
+    TEST("objectives: shared window includes the exact seven-day boundary") {
+        cache = (struct zcl_objectives_window_cache){0}; o.window_cache = &cache;
+        ASSERT(fox_write(path, "{\"state\":\"landed\",\"ts\":\"2026-10-15T10:00:00Z\"}\n"
+                               "{\"state\":\"failed\",\"ts\":\"2026-10-15T09:59:59Z\"}\n"));
+        a = zcl_objectives_measure(&o, "landed_rows_today");
+        b = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(a.measured && a.value == 0 && b.measured && b.value == 100);
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int fox_case_windows(void)
 {
     int failures = 0;
@@ -1425,6 +1507,8 @@ int test_fleet_objectives(void)
     failures += fox_case_screen();
     failures += fox_case_next();
     failures += fox_case_node_cache();
+    failures += fox_case_window_snapshot();
+    failures += fox_case_window_failures();
     failures += fox_case_attempt_allocations();
     failures += fox_repair_cases();
     char root[512];

@@ -65,6 +65,14 @@ struct zcl_objectives_node_cache {
 };
 void zcl_objectives_node_cache_free(struct zcl_objectives_node_cache *cache);
 
+/* One request's first outcome-window observation, including failures and the
+ * observation time. Zero before use; do not reuse across requests or inputs. */
+struct zcl_objectives_window_cache {
+    bool filled, ok;
+    int64_t end, today_start, week_start, landed_today, landed_week, failed_week;
+    char reason[ZCL_OBJECTIVES_REASON_MAX];
+};
+
 struct zcl_objectives_options {
     const char *outcomes;     /* outcomes.jsonl */
     const char *attempts_dir; /* the proof attempts directory */
@@ -82,6 +90,7 @@ struct zcl_objectives_options {
                                * connect and total; 0 keeps the status
                                * front door's own deadline */
     struct zcl_objectives_node_cache *node_cache; /* NULL fetches per row */
+    struct zcl_objectives_window_cache *window_cache; /* NULL reads per row */
     int64_t now;              /* unix seconds the day and window readers
                                * count from; 0 reads the wall clock */
     const char *session;      /* the lead's Claude Code transcript (.jsonl);

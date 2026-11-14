@@ -920,9 +920,9 @@ static void obj_window_row(const struct json_value *row, void *user)
         w->landed_today++;
 }
 
-static bool obj_outcomes_window(const struct zcl_objectives_options *options,
-                                struct obj_window *w,
-                                struct zcl_objective_value *v)
+static bool obj_outcomes_window_read(const struct zcl_objectives_options *options,
+                                     struct obj_window *w,
+                                     struct zcl_objective_value *v)
 {
     char path[512];
     const char *use;
@@ -937,6 +937,31 @@ static bool obj_outcomes_window(const struct zcl_objectives_options *options,
     }
     return zcl_objectives_ledger_walk(use, obj_window_row, w, v->reason,
                                       sizeof(v->reason));
+}
+
+/* A request shares its first complete observation, including a read failure.
+ * NULL preserves independent reads for callers measuring individual rows. */
+static bool obj_outcomes_window(const struct zcl_objectives_options *options,
+                                struct obj_window *w,
+                                struct zcl_objective_value *v)
+{
+    struct zcl_objectives_window_cache *c = options ? options->window_cache : NULL;
+    if (!c)
+        return obj_outcomes_window_read(options, w, v);
+    if (!c->filled) {
+        c->ok = obj_outcomes_window_read(options, w, v);
+        c->end = w->end; c->today_start = w->today_start; c->week_start = w->week_start;
+        c->landed_today = w->landed_today; c->landed_week = w->landed_week;
+        c->failed_week = w->failed_week;
+        (void)snprintf(c->reason, sizeof(c->reason), "%s", v->reason);
+        c->filled = true;
+    } else {
+        w->end = c->end; w->today_start = c->today_start; w->week_start = c->week_start;
+        w->landed_today = c->landed_today; w->landed_week = c->landed_week;
+        w->failed_week = c->failed_week;
+        (void)snprintf(v->reason, sizeof(v->reason), "%s", c->reason);
+    }
+    return c->ok;
 }
 
 static struct zcl_objective_value obj_landed_rows_today(

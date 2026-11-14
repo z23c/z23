@@ -196,6 +196,7 @@ void dl_objectives_snapshot(const struct dl_dirs *d, const struct dl_row *r,
 {
     struct dlo_paths paths;
     struct zcl_objectives_node_cache node_cache = {0};
+    struct zcl_objectives_window_cache window_cache = {0};
     struct zcl_objectives_options options;
     char *line;
     size_t len = 0;
@@ -217,6 +218,7 @@ void dl_objectives_snapshot(const struct dl_dirs *d, const struct dl_row *r,
      * node; unset, they read the local node and datadir. */
     options.node_budget_ms = DLO_NODE_BUDGET_MS;
     options.node_cache = &node_cache;
+    options.window_cache = &window_cache;
     options.brief = getenv("ZCL_LAND_OBJECTIVES_BRIEF");
     options.datadir = getenv("ZCL_LAND_OBJECTIVES_DATADIR");
     line = dlo_line(r, &options, &len);
