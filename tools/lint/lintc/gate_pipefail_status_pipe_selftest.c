@@ -17,12 +17,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/wait.h>
 #include "lintc.h"
 #include "gate_pipefail_status_pipe_priv.h"
 
 #define PSPS_GATE "check_pipefail_status_pipe"
 
 enum { PSPS_PATH = 1024 };
+
+static pid_t psps_failed_fork(void) { errno = EAGAIN; return -1; }
+static int psps_spawn_failure(void)
+{
+    pid_t child = fork();
+    if (child < 0) return 2;
+    if (!child) _exit(0);
+    int rc = psp_git_ls_sh_with(psps_failed_fork), st = 0;
+    pid_t got;
+    do { got = waitpid(child, &st, 0); } while (got < 0 && errno == EINTR);
+    if (!rc || got != child || !WIFEXITED(st) || WEXITSTATUS(st)) {
+        fputs(PSPS_GATE " selftest: failed spawn consumed another child or passed\n", stderr);
+        return 1;
+    }
+    return 0;
+}
 
 static const char k_psps_plain[] =
     "#!/usr/bin/env bash\nset -euo pipefail\nexport LC_ALL=C\n"
@@ -133,6 +151,8 @@ static int psps_strstr(const char *h, const char *n)
 /* hollowness guards: each fixture really carries its claimed shape */
 static int psps_guards(void)
 {
+    int rc = psps_spawn_failure();
+    if (rc) return rc;
     if (strcmp(k_psps_reindented, k_psps_plain) == 0 ||
         strcmp(k_psps_cmd_reind, k_psps_cmd_quiet) == 0) {
         fputs(PSPS_GATE ": SELFTEST FAILED — a reindented fixture is "

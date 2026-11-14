@@ -66,7 +66,7 @@ static int cps_fail(const char *msg)
 }
 
 
-static int cps_cov_case(const char *self, int want, const char *msg,
+static int cps_cov_case_with(pid_t (*spawn)(void), const char *self, int want, const char *msg,
                         const char *var1, const char *val1, const char *var2,
                         const char *val2)
 {
@@ -79,8 +79,8 @@ static int cps_cov_case(const char *self, int want, const char *msg,
     av[0] = (char *)self;
     av[1] = (char *)"check-clang-portability";
     av[2] = NULL;
-    int rc = 127;
-    pid_t pid = fork();
+    int rc;
+    pid_t pid = spawn();
     if (pid == 0) {
         int dn = open("/dev/null", O_WRONLY);
         if (dn >= 0) {
@@ -90,15 +90,17 @@ static int cps_cov_case(const char *self, int want, const char *msg,
         execv(self, av);
         _exit(127);
     }
-    int st;
-    waitpid(pid, &st, 0);
-    rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+    int st = 0; pid_t waited = -1;
+    if (pid > 0) {
+        do { waited = waitpid(pid, &st, 0); } while (waited < 0 && errno == EINTR);
+    }
+    rc = waited == pid && pid > 0 && WIFEXITED(st) ? WEXITSTATUS(st) : -1;
     unsetenv("ZCL_INTERNAL_CLANG_COVERAGE_SELFTEST");
     if (var1)
         unsetenv(var1);
     if (var2)
         unsetenv(var2);
-    if (rc != want) {
+    if (rc < 0 || rc != want) {
         char m[256];
         cps_snp(m, "%s (wanted exit %d, got %d)", msg, want, rc);
         return cps_fail(m);
@@ -106,8 +108,27 @@ static int cps_cov_case(const char *self, int want, const char *msg,
     return 0;
 }
 
+static int cps_cov_case(const char *self, int want, const char *msg,
+                        const char *var1, const char *val1, const char *var2, const char *val2)
+{ return cps_cov_case_with(fork, self, want, msg, var1, val1, var2, val2); }
+
+static pid_t cps_failed_fork(void) { errno = EAGAIN; return -1; }
+static int cps_spawn_failure(const char *self)
+{
+    pid_t child = fork();
+    if (child < 0) return 2;
+    if (!child) _exit(0);
+    fputs("--self-test: expecting failed-spawn refusal next\n", stderr);
+    int rc = cps_cov_case_with(cps_failed_fork, self, 0, "failed fork", NULL, NULL, NULL, NULL);
+    int st = 0; pid_t got;
+    do { got = waitpid(child, &st, 0); } while (got < 0 && errno == EINTR);
+    return rc != 0 && got == child && WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 :
+        cps_fail("failed spawn consumed another child or passed");
+}
+
 static int cps_cov_selftests(const char *self, struct cp_ctx *c)
 {
+    if (cps_spawn_failure(self)) return 1;
     /* (a) CORE_CONTEXTS emptied in a truncated Makefile copy */
     char shortmk[CP_PATH];
     if (ovf(snprintf(shortmk, sizeof shortmk, "%s/Makefile.core_contexts_emptied",

@@ -8,6 +8,7 @@
 #define GATE_PIPEFAIL_STATUS_PIPE_PRIV_H
 
 #include <stdio.h>
+#include <sys/types.h>
 
 #define PSP_GATE "check_pipefail_status_pipe"
 #define PSP_SEP '\001'
@@ -17,6 +18,7 @@ enum { PSP_LINE = 8192, PSP_STMT = 65536, PSP_STAGE = 8192,
        PSP_ROWS = 1024, PSP_ROW = 512, PSP_VAL = 32 };
 
 int psp_main(FILE *out, FILE *err);
+int psp_git_ls_sh_with(pid_t (*spawn)(void));
 int psp_err2(const char *what, const char *arg, long n);
 int psp_each_line(const char *path, int (*cb)(void *, const char *, size_t),
                   void *ctx);

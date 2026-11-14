@@ -82,12 +82,20 @@ static void psp_glob_env(const char *spec)
     }
 }
 
-static int psp_git_ls_sh(void)
+static bool psp_wait_ok(pid_t pid)
+{
+    int st = 0; pid_t waited;
+    do { waited = waitpid(pid, &st, 0); } while (waited < 0 && errno == EINTR);
+    return waited == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+int psp_git_ls_sh_with(pid_t (*spawn)(void))
 {
     int fd[2];
     if (pipe(fd) != 0)
         return 1;
-    pid_t pid = fork();
+    pid_t pid = spawn();
+    if (pid < 0) { close(fd[0]); close(fd[1]); return 1; }
     if (pid == 0) {
         dup2(fd[1], STDOUT_FILENO);
         close(fd[0]);
@@ -105,9 +113,8 @@ static int psp_git_ls_sh(void)
            (r = read(fd[0], buf + got, sizeof buf - 1 - got)) > 0)
         got += (size_t)r;
     close(fd[0]);
-    int st = 0;
-    waitpid(pid, &st, 0);
-    if (r < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+    bool waited = psp_wait_ok(pid);
+    if (r < 0 || !waited)
         return 1;
     buf[got] = '\0';
     char *save = NULL;
@@ -119,6 +126,8 @@ static int psp_git_ls_sh(void)
     }
     return 0;
 }
+
+static int psp_git_ls_sh(void) { return psp_git_ls_sh_with(fork); }
 
 /* ── baseline (kv file: <path> <count>, '#' comments) ────────────────── */
 static void psp_trim(char *s)
