@@ -67,7 +67,7 @@ offline. macOS, Windows and the rest are in
 ## Try an app
 
 Sky Combat is a flight game included in app-capable Z23 releases. On Linux
-x86_64 with glibc 2.38 or newer, use the pinned installer and release below.
+x86_64-v3 with glibc 2.38 or newer, use the pinned installer and release below.
 This installs apps without a node service. The two SHA-256 values below are
 recorded here; check them against a trusted copy of this guide before use.
 
@@ -75,7 +75,7 @@ recorded here; check them against a trusted copy of this guide before use.
 (
     set -eu
     installer_sha=38bd7dec41b07807d6dc1c3534f278362294085d3605a5e8232f1f7a1a8f9969
-    manifest_sha=9f59465f57c3839be2a1d7c513e0eac807b00a598598933aa7c2d56268321799
+    manifest_sha=8f8783d43a3db353b342ec1d1adc1ca67d65cb92c08ec5a03af762ee43157c8c
     install_tmp=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$install_tmp"' 0
     curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 --max-filesize 1048576 \
@@ -104,24 +104,23 @@ To change it, open My Apps with the installed executable:
 If you chose another installation prefix, use the executable path printed by
 the installer. Keep the same app-data directory for My Apps and your assistant.
 
-Select Sky Combat and choose **Change with your AI**. Press **C** to copy the
-setup into your assistant's local MCP settings, keeping the window open while
-pasting. Use the command and arguments literally; they bind your assistant to
-the same app-data directory. For a fresh installation, ask the assistant to
-call `apps_adopt` with `name: "skycombat"`. Review **Make my copy**, then use
-the offered **Build and preview** and **Keep this version** choices. Canceling
-any step does not mean a version was kept.
+From the home screen choose **My apps → Create from Sky Combat**. Review
+**Make my copy**, then choose **Build and preview** and explicitly **Keep this
+version**. Canceling or a failed step does not mean a version was kept.
 
-After that first Keep, your assistant can continue using the kept-copy receipt
-and verify its source; you do not need to copy the setup again. If the receipt
-is missing or the copy has changed, return to My Apps, select the kept copy,
-and choose **Change with your AI** (or **Change → Change with your AI**).
-Press **C** and give that fresh setup to your connected assistant, keeping the
-window open while pasting. Use this setup path for an existing or received copy
-as well. Ask it to change your copy. After it saves the draft, return to My Apps,
+To change the kept copy, select it in My Apps and choose **Change with your AI**
+(or **Change → Change with your AI** when a draft is waiting). Press **C** to
+copy the setup into your assistant's local MCP settings, keeping the window
+open while pasting. Use the command and arguments literally; they bind your
+assistant to the same app-data directory. Reconnect its Z23 server and ask it
+to use `apps_list`, then use the copied setup to identify and read the kept copy
+and its source. If the selection changes or setup is stale, return to the app
+card and copy fresh setup. For a received copy, review any personal-copy
+confirmation before approving.
+
+Ask for a small change. After the assistant saves the draft, return to My Apps,
 select the kept copy and choose **Change → Review unkept changes**. Review the
-exact saved draft, choose **Build and preview**, then explicitly choose
-**Keep this version**.
+exact draft, choose **Build and preview**, then explicitly **Keep this version**.
 Your previous kept version remains available until you approve the new one.
 
 To send that kept version, choose **Share this version → Create share file**,
@@ -152,10 +151,12 @@ Keep choices.
 Compare the publisher identity through a separate trusted channel. Link opening
 and sharing currently refuse on Windows.
 
-A graphical desktop and an available build toolchain are needed for previews.
-The pinned release above requires GNU make and a C23-capable host compiler; it
-does not bundle a compiler kit. Sky Combat includes its X11/GL build headers;
-its graphical preview still needs the corresponding runtime libraries. See
+A graphical desktop and the corresponding runtime libraries are needed for
+previews. The pinned Linux x86_64-v3 release includes a verified compiler kit;
+Sky Combat includes its X11/GL build headers. Optional compiler-kit source and
+notices are available in [seven verified parts](https://z23.sh/release/sources/7a2362f9b69a39f6ffecc886d1e55ca6e8a41a66974b3fc46f22e34a9e78c6bf/README.txt)
+(409,611,302 bytes reconstructed; SHA-256
+`4abb81f03215e8f76711fd1eacb57a57e7bda8efb5de6d2b62288eb251d6f7e5`). See
 [Try, change and share an app](docs/commons/PLUGIN_APPS.md#try-change-and-share-an-app)
 for setup and platform details, and [Sky Combat](docs/commons/GAME.md) for controls.
 
