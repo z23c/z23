@@ -1038,8 +1038,48 @@ static int test_guide_tree_render(void)
     return failures;
 }
 
-/* ── unit: brief colorization ──────────────────────────────────────── */
+static int test_code_guide_brief(void)
+{
+    int failures = 0;
+    TEST("code.guide renders populated and empty brief data") {
+        const char *doc = "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\",\"ok\":true,\"data\":{"
+            "\"schema\":\"zcl.code_guide_brief.v1\","
+            "\"owners\":[{\"file\":\"tools/AGENTS.md\",\"rules\":[\"Use C23\"]}],"
+            "\"tests\":[\"cli_render\"],\"lessons\":[{\"slug\":\"lesson-one\",\"rule\":\"Check first\"}],"
+            "\"next\":[\"make lint-fast\"],\"tests_unmapped\":true,\"lessons_unavailable\":\"wiki unavailable\",\"lessons_capped\":true,\"truncated\":true,\"cut\":[\"owner_rules\"]}}";
+        const char *empty = "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\",\"ok\":true,\"data\":{"
+            "\"schema\":\"zcl.code_guide_brief.v1\",\"owners\":[],\"lessons_capped\":false,\"truncated\":false}}";
+        struct zcl_cli_render_env e = cr_env(80, false); char out[8192];
+        ASSERT(zcl_cli_render_doc(doc, strlen(doc), "code.guide", &e, out, sizeof(out)) > 0);
+        ASSERT(strstr(out, "tools/AGENTS.md") && strstr(out, "Use C23") && strstr(out, "cli_render"));
+        ASSERT(strstr(out, "lesson-one") && strstr(out, "Check first") && strstr(out, "make lint-fast"));
+        ASSERT(strstr(out, "capped") && strstr(out, "truncated") && strstr(out, "owner_rules"));
+        ASSERT(strstr(out, "mapped") && strstr(out, "wiki unavailable"));
+        ASSERT(!strstr(out, "prove") && cr_max_line_width(out) <= 80);
+        ASSERT(zcl_cli_render_doc(empty, strlen(empty), "code.guide", &e, out, sizeof(out)) > 0);
+        ASSERT(!strstr(out, "capped") && !strstr(out, "truncated") && !strstr(out, "prove"));
+        const char *long_doc = "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\",\"ok\":true,\"data\":{"
+            "\"schema\":\"zcl.code_guide_brief.v1\",\"owners\":[{\"file\":\"owner\",\"rules\":[\"Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda omega\"]}],"
+            "\"next\":[\"make very-long-command WITH=abcdefghijklmnopqrstuvwxyz0123456789 END=yes\"]}}";
+        e = cr_env(40, false); char recovered[256];
+        ASSERT(zcl_cli_render_doc(long_doc, strlen(long_doc), "code.guide", &e, out, sizeof(out)) > 0);
+        ASSERT(cr_max_line_width(out) <= 40 && !strstr(out, "\xE2\x80\xA6"));
+        ASSERT(cr_recover_command(out, "  next    ", recovered, sizeof(recovered)));
+        ASSERT(!strcmp(recovered, "make very-long-command WITH=abcdefghijklmnopqrstuvwxyz0123456789 END=yes"));
+        char *w = out;
+        for (const char *r = out; *r;) {
+            if (!strncmp(r, "\n          ", 11)) { *w++ = ' '; r += 11; }
+            else *w++ = *r++;
+        }
+        *w = 0;
+        ASSERT(strstr(out, "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda omega"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
+
+/* ── unit: brief colorization ──────────────────────────────────────── */
 static int test_brief_render(void)
 {
     int failures = 0;
@@ -1839,6 +1879,7 @@ int test_cli_render(void)
     failures += test_dispatch_fallback_boundaries();
     failures += test_data_tree_render();
     failures += test_guide_tree_render();
+    failures += test_code_guide_brief();
     failures += test_app_hint_shell_words();
     failures += test_app_hint_program_path();
     failures += test_brief_render();

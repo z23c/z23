@@ -1592,13 +1592,80 @@ static void render_yardsale_guide(struct buf *b, const struct zcl_cli_render_env
     yardsale_stories(b, e, layers, rows);
 }
 
-/* code.guide is a recipe, not a schema dump: four copyable commands. */
+static void code_guide_strings(struct buf *b, const struct zcl_cli_render_env *e,
+                               const struct json_value *items, const char *label)
+{
+    if (!items || items->type != JSON_ARR) return;
+    size_t count = items->num_children < 16 ? items->num_children : 16;
+    for (size_t i = 0; i < count; ++i) {
+        const char *value = json_get_str(json_at(items, i));
+        if (value && value[0]) {
+            if (!strcmp(label, "next")) emit_kv_command(b, e, 6, label, value);
+            else emit_kv_wrap(b, e, 6, label, value);
+        }
+    }
+    if (items->num_children > count) emit_kv_wrap(b, e, 6, "more", "Additional items omitted from text.");
+}
+static void code_guide_owners(struct buf *b, const struct zcl_cli_render_env *e,
+                              const struct json_value *owners)
+{
+    if (!owners || owners->type != JSON_ARR) return;
+    size_t count = owners->num_children < 16 ? owners->num_children : 16;
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *owner = json_at(owners, i);
+        const char *file = json_get_str(json_get(owner, "file"));
+        if (file && file[0]) emit_kv_wrap(b, e, 6, "owner", file);
+        code_guide_strings(b, e, json_get(owner, "rules"), "rule");
+    }
+    if (owners->num_children > count) emit_kv_wrap(b, e, 6, "more", "Additional owners omitted from text.");
+}
+static void code_guide_lessons(struct buf *b, const struct zcl_cli_render_env *e,
+                               const struct json_value *lessons)
+{
+    if (!lessons || lessons->type != JSON_ARR) return;
+    size_t count = lessons->num_children < 16 ? lessons->num_children : 16;
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *lesson = json_at(lessons, i);
+        const char *slug = json_get_str(json_get(lesson, "slug"));
+        const char *rule = json_get_str(json_get(lesson, "rule"));
+        if (slug && slug[0]) emit_kv_wrap(b, e, 6, "lesson", slug);
+        if (rule && rule[0]) emit_kv_wrap(b, e, 6, "rule", rule);
+    }
+    if (lessons->num_children > count) emit_kv_wrap(b, e, 6, "more", "Additional lessons omitted from text.");
+}
+static void render_code_guide_brief(struct buf *b, const struct zcl_cli_render_env *e,
+                                    const struct json_value *data)
+{
+    code_guide_owners(b, e, json_get(data, "owners"));
+    code_guide_strings(b, e, json_get(data, "tests"), "test");
+    code_guide_lessons(b, e, json_get(data, "lessons"));
+    code_guide_strings(b, e, json_get(data, "next"), "next");
+    const struct json_value *unmapped = json_get(data, "tests_unmapped");
+    const char *unavailable = json_get_str(json_get(data, "lessons_unavailable"));
+    if (unmapped && unmapped->type == JSON_BOOL && json_get_bool(unmapped))
+        emit_kv_wrap(b, e, 6, "note", "Some tests could not be mapped.");
+    if (unavailable && unavailable[0]) emit_kv_wrap(b, e, 6, "wiki", unavailable);
+    const struct json_value *capped = json_get(data, "lessons_capped");
+    const struct json_value *truncated = json_get(data, "truncated");
+    if (capped && capped->type == JSON_BOOL && json_get_bool(capped))
+        emit_kv_wrap(b, e, 6, "note", "Wiki lessons are capped.");
+    if (truncated && truncated->type == JSON_BOOL && json_get_bool(truncated))
+        emit_kv_wrap(b, e, 6, "note", "Guide is truncated; some context omitted.");
+    code_guide_strings(b, e, json_get(data, "cut"), "cut");
+}
+
+/* Legacy code.guide retains its copyable recipe. */
 static void render_code_guide(struct buf *b, const struct zcl_cli_render_env *e,
                               const struct json_value *root)
 {
     emit_header(b, e, "code.guide");
     buf_putc(b, '\n');
     const struct json_value *data = json_get(root, "data");
+    const char *schema = json_get_str(json_get(data, "schema"));
+    if (schema && !strcmp(schema, "zcl.code_guide_brief.v1")) {
+        render_code_guide_brief(b, e, data);
+        return;
+    }
     emit_kv(b, e, 6, "run",
             json_get_str(json_get(data, "start_command")));
     emit_kv(b, e, 6, "prove",
