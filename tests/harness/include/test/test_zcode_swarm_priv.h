@@ -142,14 +142,17 @@ int t_swarm_bundle_transfer(void);
 
 /* test_zcode_swarm_provider_and_receipts.c — provider-directed
  * downloads, the bounded-provider/legacy-record/event-driven-schedule
- * paths, dual-signed receipt exchange and session, and peer_offer. */
+ * paths, dual-signed receipt exchange, and peer_offer. */
 int t_swarm_provider_restricted(void);
 int t_swarm_bounded_provider(void);
 int t_swarm_legacy_record(void);
 int t_swarm_linked_record(void);
 int t_swarm_event_driven_schedule(void);
 int t_swarm_receipt_exchange(void);
-int t_swarm_receipt_session(void);
 int t_swarm_peer_offer(void);
+
+/* test_zcode_swarm_receipt_session.c — receipt identity, delayed verification,
+ * reciprocal settlement, replay refusal and persistence. */
+int t_swarm_receipt_session(void);
 
 #endif
