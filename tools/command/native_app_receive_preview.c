@@ -441,7 +441,7 @@ bool app_receive_preview_create_adopted(const struct json_value *d, const char *
     arp_route(&p->choice, true); *out = p; return true;
 }
 
-static bool arp_draft_head(const struct app_selection *s, uint8_t head[32],
+static enum app_saved_draft_state arp_draft_state(const struct app_selection *s, uint8_t head[32],
     enum zcl_package_copy_adoption *trust, struct zcl_command_reply *r)
 {
     struct zcl_package_copy copy = {0}; char version[65];
@@ -452,20 +452,25 @@ static bool arp_draft_head(const struct app_selection *s, uint8_t head[32],
         *trust = zcl_package_copy_adopted(s->datadir, &copy, NULL);
         ok = (*trust == ZCL_PACKAGE_COPY_ADOPTED || *trust == ZCL_PACKAGE_COPY_RECEIVED_TRUSTED) &&
             !memcmp(copy.fork_version, s->fork, 32) && !memcmp(copy.parent_release, s->parent, 32) &&
-            !memcmp(copy.selected_version, s->version, 32) && memcmp(copy.head_version, s->version, 32) &&
+            !memcmp(copy.selected_version, s->version, 32) &&
             arp_trust(s, &copy, *trust);
         if (ok) memcpy(head, copy.head_version, 32);
     }
     zcl_package_copy_close(&copy);
-    return ok;
+    return !ok ? APP_DRAFT_UNAVAILABLE : !memcmp(head, s->version, 32) ? APP_DRAFT_NONE : APP_DRAFT_AVAILABLE;
 }
-bool app_saved_draft_available(const struct app_selection *selection)
+static bool arp_draft_head(const struct app_selection *s, uint8_t head[32],
+    enum zcl_package_copy_adoption *trust, struct zcl_command_reply *r)
 {
-    if (!selection) return false;
+    return arp_draft_state(s, head, trust, r) == APP_DRAFT_AVAILABLE;
+}
+enum app_saved_draft_state app_saved_draft_state(const struct app_selection *selection)
+{
+    if (!selection) return APP_DRAFT_UNAVAILABLE;
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
     uint8_t head[32]; enum zcl_package_copy_adoption trust;
-    bool ok = arp_draft_head(selection, head, &trust, &reply);
-    zcl_command_reply_free(&reply); return ok;
+    enum app_saved_draft_state state = arp_draft_state(selection, head, &trust, &reply);
+    zcl_command_reply_free(&reply); return state;
 }
 bool app_saved_draft_head(const struct app_selection *selection, uint8_t head[32],
     struct zcl_command_reply *r)

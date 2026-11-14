@@ -762,7 +762,11 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
 }
 static void al_change_choice(struct zcl_present_model_v1 *m, const struct library_row *r)
 {
-    if (r->saved && app_saved_draft_available(&r->selection))
+    enum app_saved_draft_state state = r->saved ? app_saved_draft_state(&r->selection) : APP_DRAFT_NONE;
+    if (state == APP_DRAFT_UNAVAILABLE) {
+        (void)snprintf(m->summary, sizeof(m->summary), "Saved source could not be verified. Restore access to the copy, then retry.");
+        app_library_choice(m, "help", "Retry source access", "Check the saved copy again.");
+    } else if (state == APP_DRAFT_AVAILABLE)
         app_library_choice(m, "change-options", "Change", "Review unkept changes or connect your assistant.");
     else app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
 }
@@ -1505,6 +1509,10 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
     if (!strcmp(id, "share-original")) { w->receive_current = false; return al_host_original(w, env, reply); }
     if (!strcmp(id, "help")) {
         w->receive_current = false;
+        if (w->page == 1 && w->rows[w->index].saved &&
+            app_saved_draft_state(&w->rows[w->index].selection) == APP_DRAFT_AVAILABLE) {
+            w->page = 7; return true;
+        }
         if (!al_setup(w, env, exe, datadir, reply)) return false;
         w->page = 2; return true;
     }

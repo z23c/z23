@@ -40,7 +40,8 @@ bool app_receive_preview_create_adopted(const struct json_value *adopt_data,
     const char *datadir, struct app_receive_preview **out,
     struct zcl_command_reply *failure);
 /* A kept choice and its locally verified HEAD; no caller supplies a draft hash. */
-bool app_saved_draft_available(const struct app_selection *selection);
+enum app_saved_draft_state { APP_DRAFT_UNAVAILABLE, APP_DRAFT_NONE, APP_DRAFT_AVAILABLE };
+enum app_saved_draft_state app_saved_draft_state(const struct app_selection *selection);
 /* Read-only eligibility; the confirmed action revalidates the full selection. */
 bool app_received_original_available(const struct app_selection *selection);
 struct app_received_original {

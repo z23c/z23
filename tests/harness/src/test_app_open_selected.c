@@ -2076,6 +2076,72 @@ static bool ak_edit_source(struct ak_fixture *f, const char *blob)
         selection.revision == 1 && !memcmp(selection.version, version, 32);
 }
 struct ak_draft_view { bool valid, prompted, returned, share_menu; unsigned calls; char head[65]; };
+struct ak_draft_availability { int mode; bool seen, restored, review, setup; const char *original, *moved; };
+static bool ak_draft_availability_detail(struct ak_draft_availability *v,
+    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
+{
+    const char *wanted = v->mode == 2 ? "change-options" : "help";
+    v->seen = model->action_count > 1 && !strcmp(model->actions[1].id, wanted) &&
+        ((v->mode != 1 && v->mode != 3) || (!strcmp(model->actions[1].label, "Retry source access") &&
+         !strcmp(model->summary, "Saved source could not be verified. Restore access to the copy, then retry.")));
+    if (!v->seen) fprintf(stderr, "draft availability action=%s summary=%s\n", model->actions[1].id, model->summary);
+    if (v->mode == 3 && v->seen) v->restored = rename(v->moved, v->original) == 0;
+    event->outcome = (v->mode == 1 || (v->mode == 3 && v->restored)) && v->seen ? ZCL_PRESENT_WINDOW_ACTION : ZCL_PRESENT_WINDOW_DISMISSED;
+    event->action_index = 1; return true;
+}
+static bool ak_draft_availability_card(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)why; (void)cap;
+    struct ak_draft_availability *v = context;
+    if (copy && copy[0]) v->setup = true;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (v->mode == 3 && v->restored && model->action_count && !strcmp(model->actions[0].id, "draft")) {
+        v->review = true; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
+    }
+    if (!strcmp(model->request_id, "library-error")) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    if (model->action_count && !strcmp(model->actions[0].id, "open"))
+        return ak_draft_availability_detail(v, model, event);
+    const char *id = !strcmp(model->request_id, "library-home") ? "myapps" : "choose";
+    for (unsigned i = 0; i < model->action_count; ++i) if (!strcmp(model->actions[i].id, id)) {
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = i; return true;
+    }
+    return false;
+}
+static bool ak_draft_availability_case(struct ak_fixture *f, int mode, const char *moved)
+{
+    struct ak_draft_availability view = {.mode = mode, .original = f->world.bob_copy, .moved = moved};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_test_app_library_native_at(&f->env, NULL, f->world.bob_datadir, &reply,
+        ak_draft_availability_card, &view, NULL);
+    bool ok = view.seen && !view.setup && !reply.error.mutated && (mode == 1 ?
+        reply.status != ZCL_COMMAND_STATUS_PASSED && !strcmp(reply.error.code, "COPY_CHANGED") :
+        reply.status == ZCL_COMMAND_STATUS_PASSED);
+    if (mode == 3) ok = ok && view.restored && view.review;
+    if (!ok) fprintf(stderr, "draft availability mode=%d seen=%d restored=%d review=%d setup=%d status=%d code=%s message=%s\n",
+        mode, view.seen, view.restored, view.review, view.setup, reply.status, reply.error.code, reply.error.message);
+    if (mode == 3 && !view.restored) (void)rename(moved, f->world.bob_copy);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_draft_selection_unchanged(struct ak_fixture *f, const struct app_selection *before)
+{
+    struct app_selection after;
+    return app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        before->revision == after.revision && !memcmp(before->version, after.version, 32) && !strcmp(before->copy, after.copy);
+}
+static bool ak_draft_unavailable(struct ak_fixture *f)
+{
+    struct app_selection before; char moved[PATH_MAX];
+    if (app_selection_load(f->env.state_dir, AK_ROUTE, &before) != APP_SELECTION_OK) return false;
+    int n = snprintf(moved, sizeof(moved), "%s.unavailable", before.copy);
+    if (n <= 0 || (size_t)n >= sizeof(moved) || rename(before.copy, moved)) return false;
+    bool unavailable = ak_draft_availability_case(f, 1, NULL);
+    bool restored = rename(moved, before.copy) == 0;
+    bool retry = restored && rename(before.copy, moved) == 0 && ak_draft_availability_case(f, 3, moved);
+    if (access(moved, F_OK) == 0 && rename(moved, before.copy) != 0) restored = false;
+    bool selection = restored && ak_draft_selection_unchanged(f, &before);
+    return unavailable && retry && selection && ak_draft_availability_case(f, 2, NULL);
+}
 static bool ak_draft_library(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -2126,7 +2192,7 @@ static bool ak_draft_cancel(struct ak_fixture *f)
     struct app_selection kept; uint8_t head[32] = {0}, before[6][32], after[6][32];
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
     bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &kept) == APP_SELECTION_OK &&
-        app_saved_draft_available(&kept) && app_saved_draft_head(&kept, head, &reply) && ak_discovery_state(f, before);
+        app_saved_draft_state(&kept) == APP_DRAFT_AVAILABLE && app_saved_draft_head(&kept, head, &reply) && ak_discovery_state(f, before);
     struct ak_draft_view view = {.valid = true}; zcl_hex_encode(head, 32, view.head);
     if (ok) zcl_test_app_library_native_at(&f->env, NULL, f->world.bob_datadir, &reply,
         ak_draft_library, &view, ak_draft_cancel_present);
@@ -3009,7 +3075,9 @@ static int ak_draft_acceptance(struct ak_fixture *f)
     int failures = 0; char blob[65];
     TEST("My Apps reviews an unkept draft and keeps the exact preview despite a newer edit") {
         ASSERT(ak_received(f) && ak_environment(f) && ak_preview_keep(f));
+        ASSERT(ak_draft_availability_case(f, 0, NULL));
         ASSERT(ak_read_source(f, blob) && ak_edit_source(f, blob));
+        ASSERT(ak_draft_unavailable(f));
         ASSERT(ak_draft_failure_notice(f));
         ASSERT(ak_draft_preview_keep(f, false));
         ASSERT(ak_draft_preview_keep_variant(f, false, false, false, false, false, true));
