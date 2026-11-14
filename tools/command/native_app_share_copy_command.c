@@ -347,8 +347,8 @@ static void zsh_take_build(struct zsh *z)
 }
 
 #define ZSH_FRIEND_NEEDS                                                      \
-    "z23 built from a clone (make z23, about 3 minutes), a C compiler and, " \
-    "on Linux, the X11 and GL headers"
+    "Z23 (install instructions: https://z23.sh), a C compiler and, " \
+    "on Linux, the X11 and GL development headers"
 
 /* The friend opens the file in their own datadir, so that command carries
  * none; it names the file as written. */
