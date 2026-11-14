@@ -48,7 +48,16 @@ struct zcl_dev_proof_step_report {
     int64_t last_progress_age_ms;
     enum zcl_dev_proof_kill_cause cause;
     int rc;
+    /* wait4 usage for this child and descendants it reaped, when available. */
+    bool cpu_available;
+    int64_t cpu_user_us, cpu_system_us;
 };
+
+#if defined(ZCL_TESTING) && (defined(__linux__) || defined(__APPLE__))
+void zcl_dev_proof_test_cpu_sample(struct zcl_dev_proof_step_report *report,
+                                   int64_t user_s, int64_t user_us,
+                                   int64_t system_s, int64_t system_us);
+#endif
 
 const char *zcl_dev_proof_kill_cause_name(enum zcl_dev_proof_kill_cause cause);
 

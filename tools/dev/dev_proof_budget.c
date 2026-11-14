@@ -483,11 +483,17 @@ bool zcl_dev_proof_phase_record(const char *phases_path, const char *step,
     int written = fprintf(
         f,
         "step=%s budget_ms=%lld elapsed_ms=%lld last_progress_age_ms=%lld "
-        "cause=%s exit=%d\n",
+        "cause=%s exit=%d",
         step, (long long)report->budget_ms, (long long)report->elapsed_ms,
         (long long)report->last_progress_age_ms,
         zcl_dev_proof_kill_cause_name(report->cause), report->rc);
-    bool ok = written > 0 && fflush(f) == 0;
+    bool ok = written > 0;
+    if (ok && report->cpu_available)
+        ok = fprintf(f, " cpu_user_us=%lld cpu_system_us=%lld",
+                     (long long)report->cpu_user_us,
+                     (long long)report->cpu_system_us) > 0;
+    if (ok) ok = fputc('\n', f) != EOF;
+    if (ok) ok = fflush(f) == 0;
     return fclose(f) == 0 && ok;
 }
 
@@ -651,17 +657,54 @@ static int proof_step_wait_owned(pid_t child, siginfo_t *info)
     return rc;
 }
 
-static bool proof_step_reap_owned(pid_t child, int *status)
+#if defined(__linux__) || defined(__APPLE__)
+static void proof_step_usage(struct zcl_dev_proof_step_report *report,
+                             const struct rusage *usage)
+{
+    report->cpu_user_us = (int64_t)usage->ru_utime.tv_sec * 1000000 + usage->ru_utime.tv_usec;
+    report->cpu_system_us = (int64_t)usage->ru_stime.tv_sec * 1000000 + usage->ru_stime.tv_usec;
+    report->cpu_available = true;
+}
+
+#if defined(ZCL_TESTING)
+void zcl_dev_proof_test_cpu_sample(struct zcl_dev_proof_step_report *report,
+                                   int64_t user_s, int64_t user_us,
+                                   int64_t system_s, int64_t system_us)
+{
+    struct rusage usage = {0};
+    usage.ru_utime.tv_sec = user_s; usage.ru_utime.tv_usec = user_us;
+    usage.ru_stime.tv_sec = system_s; usage.ru_stime.tv_usec = system_us;
+    proof_step_usage(report, &usage);
+}
+#endif
+#endif
+
+static pid_t proof_step_wait_usage(pid_t child, int *status, int flags,
+                                   struct zcl_dev_proof_step_report *report)
+{
+#if defined(__linux__) || defined(__APPLE__)
+    struct rusage usage = {0};
+    pid_t got = wait4(child, status, flags, &usage);
+    if (got == child && report) proof_step_usage(report, &usage);
+    return got;
+#else
+    (void)report;
+    return waitpid(child, status, flags);
+#endif
+}
+
+static bool proof_step_reap_owned(pid_t child, int *status,
+                                  struct zcl_dev_proof_step_report *report)
 {
     pid_t got;
-    do { got = waitpid(child, status, 0); } while (got < 0 && errno == EINTR);
+    do { got = proof_step_wait_usage(child, status, 0, report); } while (got < 0 && errno == EINTR);
     if (got == child) return true;
     zcl_devloop_process_cleanup_uncertain_mark();
     return false;
 }
 #if defined(ZCL_TESTING)
 bool zcl_dev_proof_test_reap_invalid(void)
-{ int status; return proof_step_reap_owned(getpid(), &status); }
+{ int status; return proof_step_reap_owned(getpid(), &status, NULL); }
 #endif
 
 void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step)
@@ -682,7 +725,7 @@ void zcl_dev_proof_step_cancel(struct zcl_dev_proof_step *step)
     (void)kill(-child, SIGKILL);
     (void)kill(child, SIGKILL);
     int status;
-    if (!proof_step_reap_owned(child, &status)) {
+    if (!proof_step_reap_owned(child, &status, &step->report)) {
         step->report.rc = -1; step->finished = true; return;
     }
     step->report.cause = ZCL_DEV_PROOF_KILL_CANCELLED;
@@ -707,7 +750,7 @@ static bool proof_step_poll_live(struct zcl_dev_proof_step *step, pid_t child)
     platform_sleep_ms(100);
     (void)kill(-child, SIGKILL); (void)kill(child, SIGKILL);
     int status;
-    if (!proof_step_reap_owned(child, &status)) {
+    if (!proof_step_reap_owned(child, &status, &step->report)) {
         step->report.rc = -1; step->finished = true; return true;
     }
     step->report.rc = cause == ZCL_DEV_PROOF_KILL_CANCELLED ? 130 : 124;
@@ -733,7 +776,7 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
     if (step->finished) return true;
     int status = 0;
     pid_t child = (pid_t)step->child;
-    pid_t got = waitpid(child, &status, WNOHANG);
+    pid_t got = proof_step_wait_usage(child, &status, WNOHANG, &step->report);
     if (got == child) {
         int64_t now_us = platform_time_monotonic_us();
         (void)log_progress_mark(step->log_path, &step->seen_size,

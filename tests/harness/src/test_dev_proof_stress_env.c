@@ -32,6 +32,9 @@
  * same getenv() every guard above reads, unconditionally, regardless of
  * what the variable held before the call. */
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 
 #include "dev_proof.h"
@@ -39,14 +42,15 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <errno.h>
 #if defined(__linux__) || defined(__APPLE__)
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
 #if defined(__APPLE__)
 #include <fcntl.h>
-#include <stdio.h>
-#include <sys/resource.h>
 #endif
 
 #if defined(__linux__) && defined(__x86_64__)
@@ -211,11 +215,72 @@ static int test_dps_mac_child_descriptors(void)
 }
 #endif
 
+#if defined(__linux__) || defined(__APPLE__)
+static bool dps_read_phase(const char *path, char *body, size_t cap)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    size_t n = fread(body, 1, cap - 1, fp);
+    bool ok = n > 0 && !ferror(fp);
+    body[n] = '\0';
+    return fclose(fp) == 0 && ok;
+}
+
+static bool dps_owned_cpu(const char *log, struct zcl_dev_proof_step_report *report)
+{
+    struct zcl_dev_proof_step step = {0};
+    const struct zcl_dev_proof_budget budget = {5000, 5000, 5000};
+    const char *argv[] = {"/bin/sh", "-c", "exit 7", NULL};
+    if (!zcl_dev_proof_step_start(&step, ".", log, argv, &budget)) return false;
+    bool ok = !step.report.cpu_available;
+    pid_t other = fork();
+    if (other == 0) _exit(0);
+    int status = 0;
+    pid_t got = -1;
+    if (other > 0) do { got = waitpid(other, &status, 0); } while (got < 0 && errno == EINTR);
+    if (other < 0 || got != other || !WIFEXITED(status)) ok = false;
+    (void)zcl_dev_proof_steps_wait(&step, 1);
+    if (!step.finished) zcl_dev_proof_step_cancel(&step);
+    *report = step.report;
+    return ok && step.finished && report->rc == 7 && report->cpu_available &&
+           report->cpu_user_us >= 0 && report->cpu_system_us >= 0;
+}
+
+static int test_dps_step_cpu(void)
+{
+    int failures = 0;
+    TEST_CASE("dev_proof: watched child CPU is present only after owned reap") {
+        char root[4096], log[4096], phases[4096], body[2048] = {0};
+        test_make_tmpdir(root, sizeof(root), "proof_cpu", "child");
+        ASSERT(snprintf(log, sizeof(log), "%s/log", root) > 0);
+        ASSERT(snprintf(phases, sizeof(phases), "%s/phases", root) > 0);
+        struct zcl_dev_proof_step_report report = {0};
+        ASSERT(zcl_dev_proof_phase_record(phases, "unavailable", &report));
+        ASSERT(dps_read_phase(phases, body, sizeof(body)) && !strstr(body, "cpu_user_us="));
+        ASSERT(dps_owned_cpu(log, &report));
+        zcl_dev_proof_test_cpu_sample(&report, 2, 123, 3, 456);
+        ASSERT(report.cpu_available && report.cpu_user_us == 2000123 && report.cpu_system_us == 3000456);
+        ASSERT(zcl_dev_proof_phase_record(phases, "bundle", &report));
+        zcl_dev_proof_test_cpu_sample(&report, 4, 789, 5, 678);
+        ASSERT(zcl_dev_proof_phase_record(phases, "bundle", &report));
+        memset(body, 0, sizeof(body));
+        ASSERT(dps_read_phase(phases, body, sizeof(body)));
+        ASSERT(strstr(body, "cpu_user_us=2000123") && strstr(body, "cpu_system_us=3000456"));
+        ASSERT(strstr(body, "cpu_user_us=4000789") && strstr(body, "cpu_system_us=5000678"));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+    } TEST_END
+    return failures;
+}
+#endif
+
 int test_dev_proof_stress_env(void)
 {
     int failures = 0;
     failures += test_dps_absent_becomes_present();
     failures += test_dps_unconditional_overwrite();
+#if defined(__linux__) || defined(__APPLE__)
+    failures += test_dps_step_cpu();
+#endif
 #if defined(__linux__) && defined(__x86_64__)
     failures += test_dps_clang_runtime();
 #endif
