@@ -14,10 +14,13 @@
 #include <limits.h>
 #include <dirent.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <utime.h>
 #include "lintc.h"
@@ -293,4 +296,46 @@ int wcs_selftest_shared_store(const char *base, const char *stub,
     free(old_home); free(old_xdg); free(old_dir); free(old_off);
     rap_rm_rf(sbase);
     return rc;
+}
+static void worker_test_child(int mode, int index, const char *missing)
+{
+    if (index == 0 && mode == 2) raise(SIGKILL);
+    if (index == 0 && mode == 3) wcs_worker_child(missing, 1, 0);
+    if (index == 0 && mode == 4) wcs_worker_child(".", 1, 0);
+    _exit(index == 0 && mode == 1 ? 7 : 0);
+}
+
+static int worker_status_case(int mode)
+{
+    pid_t pids[2];
+    char missing[WCS_PATH];
+    struct stat st;
+    if (snprintf(missing, sizeof missing, "%s/worker-list-absent", g_wcs_work) >= (int)sizeof missing ||
+        stat(missing, &st) == 0 || errno != ENOENT) return 2;
+    for (int i = 0; i < 2; i++) {
+        pids[i] = fork();
+        if (pids[i] < 0) { wcs_reap_workers(pids, i); return 2; }
+        if (pids[i] == 0) worker_test_child(mode, i, missing);
+    }
+    int rc = wcs_reap_workers(pids, 2);
+    for (int i = 0; i < 2; i++) {
+        int st2;
+        if (waitpid(pids[i], &st2, WNOHANG) != -1 || errno != ECHILD) return 1;
+    }
+    return (mode == 0 ? rc == 0 : rc != 0) ? 0 : 1;
+}
+
+int wcs_worker_status_test(void)
+{
+    pid_t other = fork();
+    if (other < 0) return 2;
+    if (other == 0) _exit(42);
+    int failed = 0;
+    for (int mode = 0; mode < 5; mode++)
+        if (worker_status_case(mode)) failed = 1;
+    int st; pid_t waited;
+    do { waited = waitpid(other, &st, 0); } while (waited < 0 && errno == EINTR);
+    if (waited != other || !WIFEXITED(st) || WEXITSTATUS(st) != 42) failed = 1;
+    if (failed) fprintf(stderr, "worker ownership or status check failed\n");
+    return failed;
 }

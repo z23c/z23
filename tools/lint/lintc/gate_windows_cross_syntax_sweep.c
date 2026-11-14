@@ -317,10 +317,13 @@ static void compile_one(char *src, size_t l)
     wcs_cache_compile(log, rcf, g_wcs_cc, cargv, src);
 }
 
-static void worker_child(const char *misslist, int jobs, int k)
+void wcs_worker_child(const char *misslist, int jobs, int k)
 {
     FILE *mf = fopen(misslist, "r");
-    if (!mf) _exit(0);
+    if (!mf) {
+        fprintf(stderr, "%s: worker %d cannot open %s: %s\n", k_wcs_gate, k, misslist, strerror(errno));
+        _exit(2);
+    }
     static char src[WCS_PATH];
     int i = 0;
     while (fgets(src, sizeof src, mf)) {
@@ -329,20 +332,31 @@ static void worker_child(const char *misslist, int jobs, int k)
         if (l && (i % jobs) == k) compile_one(src, l);
         i++;
     }
-    fclose(mf);
-    _exit(0);
+    int failed = ferror(mf);
+    if (failed) fprintf(stderr, "%s: worker %d cannot read %s\n", k_wcs_gate, k, misslist);
+    if (fclose(mf) != 0) failed = 1;
+    if (failed) fprintf(stderr, "%s: worker %d failed reading or closing %s\n", k_wcs_gate, k, misslist);
+    _exit(failed ? 2 : 0);
 }
 
 /* Retries wait only on EINTR; any other wait error, or a failed fork, is
  * returned as 2 after the children already started are reaped. */
-static int reap_children(int started)
+int wcs_reap_workers(const pid_t *pids, int count)
 {
     int rc = 0;
-    for (int k = 0; k < started; k++) {
+    for (int k = 0; k < count; k++) {
         int st;
+        if (pids[k] <= 0) { fprintf(stderr, "%s: invalid worker pid\n", k_wcs_gate); rc = 2; continue; }
         for (;;) {
-            if (wait(&st) >= 0) break;
+            if (waitpid(pids[k], &st, 0) == pids[k]) {
+                if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+                    fprintf(stderr, "%s: worker %ld failed (status %d)\n", k_wcs_gate, (long)pids[k], st);
+                    rc = 2;
+                }
+                break;
+            }
             if (errno == EINTR) continue;
+            fprintf(stderr, "%s: cannot wait for worker %ld: %s\n", k_wcs_gate, (long)pids[k], strerror(errno));
             rc = 2;
             break;
         }
@@ -357,17 +371,18 @@ static int worker_run(int jobs)
             sizeof misslist))
         return 2;
     int started = 0;
+    pid_t pids[32];
     for (int k = 0; k < jobs; k++) {
         pid_t pid = fork();
         if (pid < 0) {
             fprintf(stderr, "%s: fork failed for worker %d\n", k_wcs_gate, k);
-            reap_children(started);
+            wcs_reap_workers(pids, started);
             return 2;
         }
-        if (pid == 0) worker_child(misslist, jobs, k);
-        started++;
+        if (pid == 0) wcs_worker_child(misslist, jobs, k);
+        pids[started++] = pid;
     }
-    return reap_children(started);
+    return wcs_reap_workers(pids, started);
 }
 
 static int jobs_from_env(void)

@@ -775,6 +775,7 @@ int wcs_selftest_phase(void)
     if (ovf(snprintf(flagsnul, sizeof flagsnul, "%s/flags.nul", g_wcs_work),
             sizeof flagsnul))
         return 2;
+    if (wcs_worker_status_test()) return 1;
     return cache_selftest(g_wcs_cc, flagsnul, g_wcs_work, g_wcs_src[0]);
 }
 

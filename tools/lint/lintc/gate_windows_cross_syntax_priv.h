@@ -10,6 +10,7 @@
 #define WCS_PRIV_H
 
 #include <stddef.h>
+#include <sys/types.h>
 
 enum {
     WCS_PATH = 1024,
@@ -52,6 +53,9 @@ int wcs_compile_kind(const char *log, const char *rc, char *kind,
 
 /* compile sweep (gate_windows_cross_syntax_sweep.c) */
 int wcs_sweep(void);
+int wcs_reap_workers(const pid_t *pids, int count);
+void wcs_worker_child(const char *misslist, int jobs, int index);
+int wcs_worker_status_test(void);
 extern const char k_wcs_baseline[];
 
 /* sha256 + include digest (gate_windows_cross_syntax_digest.c), per-TU result cache (gate_windows_cross_syntax_cache.c) */
