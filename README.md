@@ -75,7 +75,7 @@ recorded here; check them against a trusted copy of this guide before use.
 (
     set -eu
     installer_sha=38bd7dec41b07807d6dc1c3534f278362294085d3605a5e8232f1f7a1a8f9969
-    manifest_sha=3725eb757e8df4c9be9f74177d7e4d0d513db0b792b8415632f2c70b652f7d85
+    manifest_sha=c894843357c2cfbbed253854852802b067fc1a8dc10086d50c9684a964a1d52e
     install_tmp=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$install_tmp"' 0
     curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 --max-filesize 1048576 \

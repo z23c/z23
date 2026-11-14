@@ -32,6 +32,15 @@ the selected source before retrying; never repeat a mutation whose result
 is unknown.
 <!-- claim: symbol-present app_launch_env_from_process tools/command/native_app_launch_registry.c # app registry and state follow the process environment -->
 
+For physical UI navigation, key delivery does not prove the next screen is ready.
+When consecutive pages reuse a window title, observe the redrawn state before
+sending the next key. Use `--expect-pixels-change` only when that navigation
+should change the window contents. Compare the copied AI setup name, revision
+and version with the kept receipt before calling its tools. When capturing
+frames with ffmpeg from the command terminal, pass `-nostdin` so it cannot
+consume subsequent commands.
+<!-- claim: symbol-present pixels_changed_after_send tools/native_ui_driver.c # explicit post-delivery redraw observation -->
+
 For installed-source fixtures, choose an owner-private temporary root whose
 ancestors meet the resolver's ownership and permissions checks. In the recorded
 run, a world-writable temporary directory and a checkout with group-writable
