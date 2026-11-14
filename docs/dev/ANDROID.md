@@ -24,7 +24,9 @@ make -j4 ZCL_TARGET=android-arm64 z23
 On managed development hosts, run the make command through the installed
 build-admission command. The first build fetches and builds the pinned
 dependencies. Target archives are separate from host archives. Host tools
-generate source; the NDK compiles the Android executable.
+generate source; the NDK compiles the Android executable. The app guide
+describes `make aligned-apk` for an unsigned package to sign separately.
+<!-- claim: symbol-present aligned-apk apps/z23android/Makefile # unsigned aligned app package -->
 <!-- claim: symbol-present ZCL_CROSS_TRIPLE Makefile # target archive selection -->
 <!-- claim: symbol-present HOST_CC Makefile # native generators -->
 

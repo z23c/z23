@@ -46,7 +46,7 @@ endif
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: check-probe dexgen test-dexgen test-watch apk native install launch check-config check-node check-params prepare-quirc test bridge test-bridge
+.PHONY: check-probe dexgen test-dexgen test-watch apk aligned-apk native install launch check-config check-node check-params prepare-quirc test bridge test-bridge
 prepare-quirc:
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
@@ -326,7 +326,7 @@ $(KEYSTORE): | check-signer-input
 	  -alias z23-development -keypass android -dname 'CN=Z23 Development' \
 	  -keyalg RSA -keysize 3072 -validity 3650 -noprompt
 
-apk: check-signer-input check-probe stage-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen $(KEYSTORE)
+aligned-apk: check-probe stage-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
 	rm -rf '$(BUILD_DIR)/assets'
@@ -337,6 +337,8 @@ apk: check-signer-input check-probe stage-node $(if $(filter 1,$(PACK_PARAMS)),c
 	cp '$(BUILD_DIR)/resources.apk' '$(BUILD_DIR)/unsigned.apk'
 	'$(JAVA_HOME)/bin/jar' uf '$(BUILD_DIR)/unsigned.apk' -C '$(BUILD_DIR)/package' classes.dex -C '$(BUILD_DIR)/package' lib
 	'$(TOOLS)/zipalign' -f -P 16 4 '$(BUILD_DIR)/unsigned.apk' '$(BUILD_DIR)/aligned.apk'
+
+apk: check-signer-input aligned-apk $(KEYSTORE)
 	'$(TOOLS)/apksigner' sign --ks '$(KEYSTORE)' --ks-key-alias z23-development \
 	  --ks-pass pass:android --key-pass pass:android --out '$(APK)' '$(BUILD_DIR)/aligned.apk'
 	'$(TOOLS)/apksigner' verify --verbose '$(APK)'

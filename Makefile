@@ -81,8 +81,8 @@ ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
 # A cross target selects the node link only. Tests, dev tooling, benchmarks
 # and every other goal in this file stay host-targeted and are not built under
 # a cross target -- one of them would link host archives into a Windows binary
-# and the mismatch is exactly the silent kind. `make ZCL_TARGET=... release`
-# is the supported entry point.
+# and the mismatch is exactly the silent kind. For Android, use
+# `make ZCL_TARGET=android-arm64 z23`.
 ZCL_TARGET ?= host
 ZCL_BUILD_OS := $(shell uname -s 2>/dev/null)
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)

@@ -29,6 +29,10 @@ cd apps/z23android
 make apk SDK_ROOT="$ANDROID_SDK_ROOT" ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" JAVA_HOME="$JAVA_HOME"
 ```
 
+For an unsigned, aligned package to sign on another machine, run `make
+aligned-apk` with the same variables instead of `make apk`. The output is
+`build/android-app/aligned.apk`; this target does not create or use a key.
+
 On managed development hosts, use the host's build admission command for
 both builds. The APK is `build/android-app/z23.apk` at the repository root.
 The app build creates `build/android-app/development.keystore` if it does not
