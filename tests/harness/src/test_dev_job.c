@@ -628,6 +628,20 @@ static void dj_android_status(struct dj_call *c, const char *id)
     (void)json_push_kv_int(&c->input, "timeout_s", 1);
     zcl_native_handle_dev_android_status(&c->request, &c->reply);
 }
+static bool dj_android_follow_status(const struct dj_call *from, const char *id)
+{
+    if (from->reply.next_count != 1 || strcmp(from->reply.next[0].command, "dev.android.status")) return false;
+    struct dj_call next; dj_begin(&next);
+    const char *wire = from->reply.next[0].input_json;
+    bool ok = json_read(&next.input, wire, strlen(wire)) &&
+              json_get_str(json_get(&next.input, "job_id")) &&
+              !strcmp(json_get_str(json_get(&next.input, "job_id")), id);
+    if (ok) {
+        zcl_native_handle_dev_android_status(&next.request, &next.reply);
+        ok = dj_ok(&next) && dj_str(&next, "state") && !strcmp(dj_str(&next, "state"), "running");
+    }
+    dj_end(&next); return ok;
+}
 static bool dj_android_default_cwd(const char *lane)
 {
     int old = open(".", O_RDONLY);
@@ -664,7 +678,10 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
     TEST("dev.android: running and lost states are the native job states") {
         unsigned before = g_launch_count;
         g_no_child = true; ASSERT(dj_android_prepare_hostile(&c, lane));
-        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id"));
+        ASSERT(dj_ok(&c)); ASSERT_EQ(c.reply.next_count, 1); ASSERT_STR_EQ(c.reply.next[0].command, "dev.android.status");
+        ASSERT_STR_EQ(dj_str(&c, "next"), "dev.android.status");
+        snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id"));
+        ASSERT(dj_android_follow_status(&c, id));
         char original[2048]; snprintf(original, sizeof(original), "%s", dj_str(&c, "output_dir"));
         struct json_value handle; ASSERT(zcl_dev_job_read_handle(id, &handle));
         const struct json_value *argv = json_get(&handle, "argv");
@@ -672,12 +689,17 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         ASSERT_STR_EQ(json_get_str(json_at(argv, 19)), "BUILD_TOOLS_VERSION=35.0.0"); json_free(&handle);
         dj_android_input(&duplicate, lane, true); zcl_native_handle_dev_android_prepare(&duplicate.request, &duplicate.reply);
         ASSERT(dj_ok(&duplicate)); ASSERT_STR_EQ(dj_str(&duplicate, "state"), "attached");
+        ASSERT_EQ(duplicate.reply.next_count, 1); ASSERT_STR_EQ(duplicate.reply.next[0].command, "dev.android.status");
+        ASSERT_STR_EQ(dj_str(&duplicate, "next"), "dev.android.status");
+        ASSERT(dj_android_follow_status(&duplicate, id));
         ASSERT_STR_EQ(dj_str(&duplicate, "job_id"), id); ASSERT_STR_EQ(dj_str(&duplicate, "output_dir"), original);
         ASSERT_EQ(g_launch_count, before + 1);
         dj_end(&duplicate);
         dj_begin(&s); (void)json_push_kv_str(&s.input, "job_id", id);
         zcl_native_handle_dev_android_status(&s.request, &s.reply);
-        ASSERT_STR_EQ(dj_str(&s, "state"), "running"); ASSERT_EQ(dj_int(&s, "timeout_s"), 1); dj_end(&s);
+        ASSERT_STR_EQ(dj_str(&s, "state"), "running"); ASSERT_EQ(dj_int(&s, "timeout_s"), 1);
+        ASSERT_EQ(s.reply.next_count, 1); ASSERT_STR_EQ(s.reply.next[0].command, "dev.android.status");
+        ASSERT_STR_EQ(dj_str(&s, "next"), "dev.android.status"); ASSERT(dj_android_follow_status(&s, id)); dj_end(&s);
         dj_write_pid(id, 999999); hooks->pid_liveness = dj_dead_observation;
         dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "lost"); dj_end(&s);
         hooks->pid_liveness = NULL; g_no_child = false; dj_end(&c); PASS();

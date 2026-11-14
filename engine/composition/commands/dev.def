@@ -3094,7 +3094,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "dev.android.prepare", "dev.android", "",
     "Start an unsigned Android package job",
     "Use the existing Android node and build an unsigned aligned APK in a unique directory through the native job engine.", 4096,
-    "android,package,build", "zcl.dev_android.input.v1", "zcl.dev_job.v1",
+    "android,package,build", "zcl.dev_android.input.v1", "zcl.dev_android.v1",
     "cwd,node_bin,node_source,node_debug,sdk_root,ndk_root,java_home,params_dir", "",
     "z23-dev dev android prepare --node_bin=<path> --node_source=<commit>",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
