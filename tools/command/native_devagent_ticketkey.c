@@ -510,6 +510,20 @@ static bool dvt_list_names_group(const char *joined, const char *group)
     return false;
 }
 
+/* A partial list cannot be used as a memo entry. The caller can still
+ * decide membership from the complete accumulator when this buffer fills. */
+static bool dvt_join_group(char *joined, size_t cap, size_t *pos,
+                           const char *name)
+{
+    size_t len = strlen(name);
+    size_t separator = *pos ? 1 : 0;
+    if (*pos >= cap || separator + len >= cap - *pos) return false;
+    if (separator) joined[(*pos)++] = ' ';
+    memcpy(joined + *pos, name, len + 1);
+    *pos += len;
+    return true;
+}
+
 /* True when the router says group G owns `path`: the routed verdict or any
  * matched shared-rule group names G. The memo above makes repeat lookups
  * free; every distinct path is still decided by the shared-rule resolver,
@@ -524,26 +538,22 @@ static bool dvt_owned_by_group(const char *path, const char *group,
     char joined[32 * ZCL_AGENT_IMPACT_GROUP_MAX + 32];
     size_t pos = 0;
     size_t i;
+    bool complete = true, matched = false;
     if (cached)
         return dvt_list_names_group(cached, group);
     memset(&acc, 0, sizeof(acc));
     routed = zcl_native_code_route_snapshot(path, &acc, &crisk, snapshot);
     joined[0] = '\0';
     if (routed && routed[0]) {
-        (void)snprintf(joined + pos, sizeof(joined) - pos, "%s", routed);
-        pos = strlen(joined);
+        matched = dvt_list_names_group(routed, group);
+        complete = dvt_join_group(joined, sizeof(joined), &pos, routed);
     }
     for (i = 0; i < acc.groups_len; i++) {
-        if (pos + 1 + strlen(acc.groups[i]) + 1 < sizeof(joined)) {
-            if (pos > 0)
-                joined[pos++] = ' ';
-            (void)snprintf(joined + pos, sizeof(joined) - pos, "%s",
-                           acc.groups[i]);
-            pos = strlen(joined);
-        }
+        if (dvt_list_names_group(acc.groups[i], group)) matched = true;
+        if (complete) complete = dvt_join_group(joined, sizeof(joined), &pos, acc.groups[i]);
     }
-    if (snapshot) dvt_memo_put(path, joined);
-    return dvt_list_names_group(joined, group);
+    if (snapshot && complete) dvt_memo_put(path, joined);
+    return matched;
 }
 
 /* Sorted unique closure paths; vendor[i] marks a path-only entry and

@@ -24,6 +24,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/spawn.h"
+#include "test_group_catalog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -192,6 +193,96 @@ static bool dvt_snapshot_fixture(void)
     return zcl_spawn_capture(init, output, sizeof(output), 30000) == 0 &&
            zcl_spawn_capture(add, output, sizeof(output), 30000) == 0 &&
            zcl_spawn_capture(commit, output, sizeof(output), 30000) == 0;
+}
+
+static bool dvt_many_referrers(void)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < zcl_test_group_catalog_count() && count < 120; ++i) {
+        const char *id = zcl_test_group_catalog_at(i);
+        if (strncmp(id, "test_", 5) || strlen(id) < 27 || strlen(id) >= 63) continue;
+        char path[256];
+        if (snprintf(path, sizeof(path), "tests/harness/src/%s.c", id) >= (int)sizeof(path) ||
+            !dvt_fixture_write(path, "const char *probe = \"ticket_snapshot_probe\";\n")) return false;
+        count++;
+    }
+    return count == 120;
+}
+
+static bool dvt_large_groups_target(char group[64], char early[64])
+{
+    struct agent_impact_snapshot *snapshot = agent_impact_snapshot_create();
+    struct agent_impact_acc acc = {0};
+    bool ok = snapshot && agent_impact_name_routes_snapshot("tools/ticket_snapshot_probe.c", &acc, snapshot);
+    size_t bytes = 0;
+    for (size_t i = 0; i < acc.groups_len; ++i) bytes += strlen(acc.groups[i]) + 1;
+    if (ok && acc.groups_len && bytes - strlen(acc.groups[acc.groups_len - 1]) - 1 > 2080 && !acc.groups_lost) {
+        (void)snprintf(group, 64, "%s", acc.groups[acc.groups_len - 1]);
+        (void)snprintf(early, 64, "%s", acc.groups[0]);
+    } else ok = false;
+    printf("[joined fixture groups=%zu bytes=%zu limit=2080 lost=%d target=%s] ",
+           acc.groups_len, bytes, acc.groups_lost, ok ? group : "none");
+    agent_impact_snapshot_free(snapshot);
+    return ok;
+}
+
+static bool dvt_large_commit(void)
+{
+    char output[2048];
+    const char *add[] = {"git", "add", ".", NULL};
+    const char *commit[] = {"git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture update", NULL};
+    return zcl_spawn_capture(add, output, sizeof(output), 30000) == 0 &&
+           zcl_spawn_capture(commit, output, sizeof(output), 30000) == 0;
+}
+
+static bool dvt_large_call(const char *group, char key[65], bool *member)
+{
+    struct dvt_call c;
+    dvt_begin(&c);
+    (void)json_push_kv_str(&c.input, "group", group);
+    bool ok = dvt_run(&c) && dvt_ok(&c);
+    *member = dvt_files_contains(&c, "tools/ticket_snapshot_probe.c");
+    (void)snprintf(key, 65, "%s", dvt_str(&c, "key"));
+    dvt_end(&c);
+    return ok;
+}
+
+static bool dvt_large_groups_calls(const char *group, const char *early)
+{
+    char first[65] = {0}, repeat[65] = {0}, changed[65] = {0};
+    char earlier_key[65] = {0};
+    bool a = false, b = false, c = false, prior = false;
+    bool x = dvt_large_call(group, first, &a);
+    bool w = dvt_large_call(early, earlier_key, &prior);
+    bool y = dvt_large_call(group, repeat, &b);
+    bool edit = dvt_fixture_write("tools/ticket_snapshot_probe.c", "int probe(void){return 2;}\n") && dvt_large_commit();
+    bool z = edit && dvt_large_call(group, changed, &c);
+    printf("[joined calls=%d/%d/%d/%d membership=%d/%d/%d/%d same=%d changed=%d] ", x, w, y, z, a, prior, b, c,
+           strcmp(first, repeat) == 0, strcmp(first, changed) != 0);
+    return x && w && y && z && a && prior && b && c && strcmp(first, repeat) == 0 && strcmp(first, changed) != 0;
+}
+
+static bool dvt_large_groups_fixture(void)
+{
+    char saved[PATH_MAX], root[PATH_MAX], group[64] = {0}, early[64] = {0};
+    if (!getcwd(saved, sizeof(saved))) return false;
+    test_make_tmpdir(root, sizeof(root), "ticket_snapshot", "many_groups");
+    bool ok = chdir(root) == 0 && dvt_snapshot_fixture() && dvt_many_referrers() &&
+              dvt_large_commit() && dvt_large_groups_target(group, early);
+    if (ok) ok = dvt_large_groups_calls(group, early);
+    bool restored = chdir(saved) == 0;
+    return restored && test_rm_rf_recursive(root) == 0 && ok;
+}
+
+static int dvt_large_groups_test(void)
+{
+    int failures = 0;
+    TEST("ticketkey: late routed group retains probe and observes tip edits") {
+        ASSERT(dvt_large_groups_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static bool dvt_probe_membership(bool expected)
@@ -488,7 +579,9 @@ static int dvt_referrer_mutation_test(void)
 int test_devagent_ticketkey(void);
 int test_devagent_ticketkey(void)
 {
-    int failures = dvt_referrer_mutation_test();
+    int failures = dvt_large_groups_test();
+    if (failures) return failures;
+    failures = dvt_referrer_mutation_test();
 
     TEST("ticketkey: current checkout fits the bounded snapshot") {
         struct agent_impact_snapshot *snapshot = agent_impact_snapshot_create();
