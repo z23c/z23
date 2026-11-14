@@ -566,6 +566,11 @@ static void share_request_items(struct wallet_screen *s)
     note(s, "You choose where to share it.");
     button(s, WALLET_ACT_SHARE_REQUEST, "Share with photos or videos");
 }
+static void receive_address_actions(struct wallet_screen *s, const struct data *d)
+{
+    if ((d->address_unavailable || d->address_read_failed) && !d->address_pending) button(s, WALLET_ACT_RETRY_ADDRESS, "Retry");
+    else if (!d->address_pending && !d->address_unavailable && !d->address_read_failed && !d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
+}
 static void receive_items(struct wallet_screen *s)
 {
 #ifdef ZAPP_SHARE_FIXTURE
@@ -594,8 +599,7 @@ static void receive_items(struct wallet_screen *s)
             line(s, text);
         }
     } else if (d->address_pending) line(s, "Loading your receiving address…");
-    if ((d->address_unavailable || d->address_read_failed) && !d->address_pending) button(s, WALLET_ACT_RETRY_ADDRESS, "Retry");
-    else if (!d->address_pending && !d->address_unavailable && !d->address_read_failed && !d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
+    receive_address_actions(s, d);
     (void)add(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE, "Amount in ZCL (optional)");
     button(s, WALLET_ACT_SET_AMOUNT, "Set amount");
     button(s, WALLET_ACT_BACK, "Back");
@@ -1060,19 +1064,23 @@ static void address_unavailable(void)
          "The receive address cannot be checked. Retry or check your wallet.");
 }
 
-static void address_failure(const struct json_value *data, bool missing, bool latest, bool preserve_share)
+static void latest_address_failure(const struct json_value *data, bool missing)
 {
-    if (preserve_share) return;
-    clear_committed_share_notice();
-    if (latest && st.d.address_unavailable) address_unavailable();
-    else if (latest && st.d.address_fallback && (missing || (data && typed(data, "address", JSON_NULL)))) st.d.note[0] = 0;
-    else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
-    else if (latest && missing) copy(st.d.note, sizeof(st.d.note), "This node cannot report its latest address yet. Tap New address to make one.");
-    else if (latest) {
+    if (st.d.address_unavailable) address_unavailable();
+    else if (st.d.address_fallback && (missing || (data && typed(data, "address", JSON_NULL)))) st.d.note[0] = 0;
+    else if (data && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
+    else if (missing) copy(st.d.note, sizeof(st.d.note), "This node cannot report its latest address yet. Tap New address to make one.");
+    else {
         st.d.address_read_failed = true;
         copy(st.d.note, sizeof(st.d.note), st.d.address[0] ?
              "Could not refresh your receiving address." : "Your receiving address is not available yet.");
     }
+}
+static void address_failure(const struct json_value *data, bool missing, bool latest, bool preserve_share)
+{
+    if (preserve_share) return;
+    clear_committed_share_notice();
+    if (latest) latest_address_failure(data, missing);
     else if (missing) {
         st.d.no_receive = true;
         copy(st.d.note, sizeof(st.d.note), "This build cannot make a new address.");
