@@ -4,6 +4,7 @@
 #define ZCL_TEST_SEMANTIC_FUZZ_CASE_PRIV_H
 
 #include "test/semantic_fuzz.h"
+#include "test/semantic_fuzz_session.h"
 
 #include "base/format_attribute.h"
 
@@ -11,6 +12,8 @@
 #include <sys/types.h>
 
 #define SFZ_ARGV_MAX 48
+#define SFZ_TOOLCHAIN_ID \
+    "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f"
 struct sfz_job {
     const char *argv[SFZ_ARGV_MAX];
     char s[4][PATH_MAX];
@@ -19,7 +22,11 @@ struct sfz_job {
     int64_t deadline;
     int status;
     bool killed;
+    bool cancelled;
     bool live;
+    bool sensor;
+    int session_slot;
+    unsigned session_seq;
 };
 
 /* A sorted set of repo-relative paths. */
@@ -45,6 +52,8 @@ struct sfz_run {
     struct sfz_paths tus;     /* src/ .c files on either side */
     bool header_changed;      /* a changed file is not a .c */
     size_t killed;            /* compile or sensor runs killed at their deadline */
+    struct sfz_session sessions[2];
+    bool session_cleanup_failed;
     unsigned test_budget_s;   /* zero retains the normal job deadline */
     /* the whole environment of every compile, sensor and gcc run */
     char env_path[4096], env_home[PATH_MAX + 8], env_tmp[PATH_MAX + 8];

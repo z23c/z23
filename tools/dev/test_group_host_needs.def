@@ -355,6 +355,8 @@ ZCL_TEST_GROUP_NEED("test_semantic_facts_fuzz", ZCL_HOST_NEED_C23_TOOLCHAIN,
                     "bound-libclang18-full-c23")
 ZCL_TEST_GROUP_BUILD_NEED("test_semantic_facts_fuzz",
                           "build/bin/z23-clang-manifest", "clang-manifest")
+ZCL_TEST_GROUP_BUILD_NEED("test_semantic_facts_fuzz",
+                          "build/bin/z23-fuzz-session-responder", "build/bin/z23-fuzz-session-responder")
 
 /* tests/harness/src/test_fleet_gateway.c: every shard spawns the gateway
  * build/bin/z23-fleet-gateway, which fork/execs the node by its

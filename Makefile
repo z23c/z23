@@ -9023,6 +9023,9 @@ CLANG_MANIFEST_SRCS := tools/sensors/clang_manifest.c \
 	tools/sensors/clang_manifest_tokens.c \
 	$(CLANG_MANIFEST_CORE_SRCS)
 clang-manifest: $(BIN_DIR)/z23-clang-manifest $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest-warm-fixture $(BIN_DIR)/z23-clang-manifest-cc-fixture
+$(BIN_DIR)/z23-fuzz-session-responder: tests/fixtures/semantic_sensor/fuzz_session_responder.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) -o $@ $< $(HARDEN_LDFLAGS)
 $(BIN_DIR)/z23-clang-manifest-cc-fixture: $(CLANG_MANIFEST_CORE_SRCS) $(CLANG_MANIFEST_CORE_HDRS) tests/fixtures/semantic_sensor/cc_snapshot.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \

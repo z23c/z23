@@ -255,12 +255,34 @@ static void envp_init(struct sfz_run *r)
     r->envp[n] = NULL;
 }
 
-static pid_t job_start(struct sfz_job *j, const char *cwd,
-                       const char *const *envp, unsigned budget_s)
+static void job_sensor_child(struct sfz_run *r, struct sfz_job *j, const char *cwd)
+{
+    if (r->env->outcome_fd > 2) close(r->env->outcome_fd);
+    for (int i = 0; i < 2; ++i) if (i != j->session_slot && r->sessions[i].pid > 0) {
+        close(r->sessions[i].input); close(r->sessions[i].output);
+    }
+    for (int i = 0; i < 2; ++i) if (r->sessions[i].pid > 0) close(r->sessions[i].owner);
+    (void)signal(SIGPIPE, SIG_DFL);
+    int fd = open(j->log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0) _exit(1);
+    close(fd);
+    if (chdir(cwd) != 0 || (unlink(j->argv[7]) != 0 && errno != ENOENT)) _exit(1);
+    _exit(sfz_session_exchange(&r->sessions[j->session_slot], j->argv, j->session_seq, j->deadline) ? 0 : 1);
+}
+
+static void job_close_sessions(const struct sfz_run *r)
+{
+    if (r->env->outcome_fd > 2) close(r->env->outcome_fd);
+    for (int i = 0; i < 2; ++i) if (r->sessions[i].pid > 0) {
+        close(r->sessions[i].input); close(r->sessions[i].output); close(r->sessions[i].owner);
+    }
+}
+
+static pid_t job_start(struct sfz_run *r, struct sfz_job *j, const char *cwd,
+                       const char *const *envp)
 {
     pid_t parent = getpid();
     pid_t pid = fork();
-    j->deadline = clock_now_monotonic_ns() + (int64_t)budget_s * 1000000000;
     if (pid != 0)
         return pid;
 #if defined(__linux__)
@@ -270,6 +292,8 @@ static pid_t job_start(struct sfz_job *j, const char *cwd,
 #else
     (void)parent;
 #endif
+    if (j->sensor) job_sensor_child(r, j, cwd);
+    job_close_sessions(r);
     int fd = open(j->log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {
         (void)dup2(fd, STDOUT_FILENO);
@@ -316,7 +340,9 @@ static bool job_check(struct sfz_job *j)
 
 static void job_complain(const struct sfz_job *j, unsigned budget_s)
 {
-    if (j->killed)
+    if (j->cancelled)
+        fprintf(stderr, "sfz: %s cancelled after a sensor failure (log %s)\n", j->argv[0], j->log);
+    else if (j->killed)
         fprintf(stderr, "sfz: %s killed after %u s (log %s)\n", j->argv[0],
                 budget_s, j->log);
     else
@@ -327,11 +353,23 @@ static void job_complain(const struct sfz_job *j, unsigned budget_s)
 static void job_launch(struct sfz_run *r, struct sfz_job *j,
                        unsigned budget, size_t *live)
 {
-    j->pid = job_start(j, r->tree, r->envp, budget);
+    j->deadline = clock_now_monotonic_ns() + (int64_t)budget * 1000000000;
+    if (j->sensor) {
+        int slot = !r->sessions[0].busy ? 0 : !r->sessions[1].busy ? 1 : -1;
+        if (slot < 0) return;
+        struct sfz_session *s = &r->sessions[slot];
+        char log[PATH_MAX];
+        int n = snprintf(log, sizeof(log), "%s/session-%d.log", r->log, slot);
+        if (n < 0 || (size_t)n >= sizeof(log) ||
+            (!s->pid && !sfz_session_start(s, r->sessions, r->env->sensor, r->tree, r->envp, log, j->deadline, r->env->outcome_fd))) return;
+        s->busy = true; j->session_slot = slot; j->session_seq = ++s->seq;
+    }
+    j->pid = job_start(r, j, r->tree, r->envp);
     if (j->pid > 0) {
         j->live = true;
         (*live)++;
     } else {
+        if (j->sensor && !sfz_session_stop(&r->sessions[j->session_slot])) r->session_cleanup_failed = true;
         fprintf(stderr, "sfz: fork failed for %s\n", j->argv[0]);
     }
 }
@@ -351,6 +389,44 @@ static size_t job_report(struct sfz_run *r, struct sfz_job *jobs, size_t n,
 }
 
 /* Run owned jobs up to the cap, reusing slots when any child completes. */
+static bool jobs_collect(struct sfz_run *r, struct sfz_job *jobs, size_t next, size_t *live)
+{
+    bool failed = false;
+    for (size_t k = 0; k < next; k++) if (jobs[k].live && job_check(&jobs[k])) {
+        jobs[k].live = false; (*live)--;
+        if (jobs[k].sensor) {
+            r->sessions[jobs[k].session_slot].busy = false;
+            if (jobs[k].status != 0) failed = true;
+        }
+    }
+    return failed;
+}
+static void jobs_cancel(struct sfz_run *r, struct sfz_job *jobs, size_t next)
+{
+    for (size_t k = 0; k < next; ++k) if (jobs[k].live && jobs[k].sensor) {
+        job_kill_reap(&jobs[k]); jobs[k].live = false; jobs[k].cancelled = true;
+    }
+    for (int k = 0; k < 2; ++k) if (!sfz_session_stop(&r->sessions[k])) r->session_cleanup_failed = true;
+    for (;;) {
+        bool active = false;
+        for (size_t k = 0; k < next; ++k) if (jobs[k].live) {
+            if (job_check(&jobs[k])) jobs[k].live = false;
+            else active = true;
+        }
+        if (!active) break;
+        (void)poll(NULL, 0, 5);
+    }
+}
+static bool jobs_fill(struct sfz_run *r, struct sfz_job *jobs, size_t n,
+                      size_t *next, size_t *live, size_t par, unsigned budget)
+{
+    while (*next < n && *live < par) {
+        struct sfz_job *j = &jobs[(*next)++];
+        job_launch(r, j, budget, live);
+        if (j->sensor && j->pid <= 0) return false;
+    }
+    return true;
+}
 size_t sfz_run_jobs(struct sfz_run *r, struct sfz_job *jobs, size_t n)
 {
     if (r->env->jobs <= 0) {
@@ -358,22 +434,20 @@ size_t sfz_run_jobs(struct sfz_run *r, struct sfz_job *jobs, size_t n)
         return n ? n : 1;
     }
     size_t par = (size_t)r->env->jobs, next = 0, live = 0;
+    bool sensor_failed = false;
     unsigned budget = r->test_budget_s ? r->test_budget_s : SFZ_JOB_BUDGET_S;
     for (size_t k = 0; k < n; k++) {
         jobs[k].pid = 0;
         jobs[k].status = -1;
-        jobs[k].killed = jobs[k].live = false;
+        jobs[k].killed = jobs[k].cancelled = jobs[k].live = false;
     }
     while (next < n || live) {
-        while (next < n && live < par) {
-            struct sfz_job *j = &jobs[next++];
-            job_launch(r, j, budget, &live);
+        sensor_failed = !jobs_fill(r, jobs, n, &next, &live, par, budget);
+        sensor_failed = jobs_collect(r, jobs, next, &live) || sensor_failed;
+        if (sensor_failed) {
+            jobs_cancel(r, jobs, next);
+            break;
         }
-        for (size_t k = 0; k < next; k++)
-            if (jobs[k].live && job_check(&jobs[k])) {
-                jobs[k].live = false;
-                live--;
-            }
         if (live && (next == n || live == par))
             (void)poll(NULL, 0, 5);
     }
@@ -474,6 +548,7 @@ static bool compile_job(struct sfz_job *j, const char *tool, const char *mode,
                         const struct sfz_flags *f, const char *tu, const char *obj,
                         size_t ordinal)
 {
+    j->sensor = false;
     size_t k = 0;
     int a = snprintf(j->s[0], sizeof(j->s[0]), "build/deps/tu-%zu.d", ordinal);
     int b = snprintf(j->s[1], sizeof(j->s[1]), "%s.o", tu);
@@ -503,8 +578,6 @@ static bool compile_job(struct sfz_job *j, const char *tool, const char *mode,
  * sides). Both sides of every case run the same sensor, so a fixed
  * identity is one known value shared by every pair; without --cc IDENTITY
  * says "object-cc unknown" and the plan can never narrow past a TU. */
-#define SFZ_TOOLCHAIN_ID \
-    "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f"
 
 /* sensor emit --root . --source <tu> --out facts/<tu>.<phase>.zsm --facts
  * --cc <cc> --toolchain-id <id> -- flags */
@@ -512,6 +585,7 @@ static bool sensor_job(struct sfz_job *j, const char *sensor, const char *cc,
                        const char *phase, const struct sfz_flags *f,
                        const char *tu)
 {
+    j->sensor = true;
     size_t k = 0;
     int n = snprintf(j->s[2], sizeof(j->s[2]), "facts/%s.%s.zsm", tu, phase);
     if (n < 0 || (size_t)n >= sizeof(j->s[2]))
@@ -565,6 +639,7 @@ static bool phase_job(struct sfz_run *r, struct sfz_job *jobs, size_t k,
               job_log(&jobs[2 * k], r, tu, "cc", ph) &&
               sensor_job(&jobs[2 * k + 1], r->env->sensor, cc, ph, fs, tu) &&
               job_log(&jobs[2 * k + 1], r, tu, "sensor", ph);
+    if (r->env->cold_sensor) jobs[2 * k + 1].sensor = false;
     int n = snprintf(sensor_path, sizeof sensor_path, "%s/%s", r->tree,
                      jobs[2 * k + 1].s[2]);
     return ok && n >= 0 && (size_t)n < sizeof sensor_path && sfz_parent(sensor_path);
@@ -716,6 +791,8 @@ bool sfz_run_case(const struct sfz_env *env, const struct sfz_case *c,
     struct sfz_run r = {.env = env, .c = c, .out = out};
     memset(out, 0, sizeof(*out));
     run_case(&r);
+    for (int i = 0; i < 2; ++i) if (!sfz_session_stop(&r.sessions[i])) r.session_cleanup_failed = true;
+    if (r.session_cleanup_failed) { out->status = SFZ_ERROR; sfz_why(out, "session guard cleanup incomplete\n"); }
     sfz_paths_free(&r.changed);
     sfz_paths_free(&r.tus);
     if (out->status == SFZ_PASS || out->status == SFZ_NOOP)

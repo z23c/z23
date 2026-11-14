@@ -1822,6 +1822,13 @@ counts a TU as changed only when its object bytes differ.
 
 ### Differential fuzzing: `semantic_facts_fuzz`
 
+Each case reuses bounded `session --no-warm` processes for fresh cold parses;
+compiler and sensor work share the case's active-operation cap, while idle
+sessions and their guards are additional processes. Per-request failure
+refuses the case. The existing compiler timeout path supervises its direct
+driver and does not establish complete compiler-descendant custody.
+<!-- claim: symbol-present sfz_session_exchange tests/harness/src/semantic_fuzz_session.c # bounded fuzz sensor requests -->
+
 `semantic_facts_fuzz` holds the whole chain (sensor, facts, `.c` path,
 consumer, closure) to a cold compiler. A case is a small C23 project of
 three to eight TUs and one to four headers before and after one edit:

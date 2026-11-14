@@ -7,7 +7,7 @@
  * fixed reproducers (semantic_fuzz_repro.c), every one of which runs every
  * time. For each case every TU is compiled (the clang of the LLVM the
  * sensor links, -std=c23 -O1 -ffunction-sections, the project's flags) and
- * sensed (build/bin/z23-clang-manifest emit --facts) on both sides, the
+ * sensed with a fresh cold parse (a `session --no-warm` request) on both sides, the
  * change set is planned in process from the facts directory exactly as
  * dev.change.plan {"facts":...} plans it, and two oracles judge the plan:
  *
@@ -67,6 +67,9 @@
 #include "devloop.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
+#include "json/json.h"
+#include "vcs/semantic_manifest.h"
 
 #include "platform/clock.h"
 
@@ -80,10 +83,14 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 
 #define SFZ_SENSOR "build/bin/z23-clang-manifest"
 /* Cases run SFZ_CASES_AT_ONCE at once, each compiling and sensing
- * SFZ_JOBS files at once: SFZ_CASES_AT_ONCE * SFZ_JOBS processes in all.
+ * SFZ_JOBS files at once: SFZ_CASES_AT_ONCE * SFZ_JOBS active operations.
+ * Retained idle sensor sessions and their guards are additional processes.
  * A devbuild lane reserves dozens of CPUs; 4 badly underused one, so this
  * is raised toward that, capped well under a lane's full width so a case's
  * own SFZ_JOBS burst and other lint/test workers sharing the box still
@@ -437,7 +444,9 @@ static void item_start(const struct sfz_env *env, struct sfz_item *it)
     it->pid = fork();
     if (it->pid == 0) {
         (void)close(p[0]);
-        (void)sfz_run_case(env, &it->c, &it->o);
+        struct sfz_env child_env = *env;
+        child_env.outcome_fd = p[1];
+        (void)sfz_run_case(&child_env, &it->c, &it->o);
         _exit(write_all(p[1], &it->o, sizeof(it->o)) ? 0 : 1);
     }
     (void)close(p[1]);
@@ -924,6 +933,267 @@ static bool sfz_pool_cap(void)
     return ok;
 }
 
+static bool sfz_session_failure_setup(struct sfz_run *r, struct sfz_job *jobs, struct sfz_env *env,
+                                      const char *root, const char *mode, bool missing)
+{
+    char sensor[PATH_MAX];
+    bool setup = realpath("build/bin/z23-fuzz-session-responder", sensor) && sfz_put(root, "mode", mode, strlen(mode));
+    if (setup) {
+        (void)snprintf(env->sensor, sizeof(env->sensor), "%s", missing ? "/missing-sfz-responder" : sensor);
+        r->env = env; r->test_budget_s = 1;
+        (void)snprintf(r->tree, sizeof(r->tree), "%s", root);
+        (void)snprintf(r->log, sizeof(r->log), "%s", root);
+        (void)snprintf(jobs[0].log, sizeof(jobs[0].log), "%s/sensor.log", root);
+        const char *args[] = {env->sensor, "emit", "--root", ".", "--source", "a.c", "--out", "out.zsm", "--", NULL};
+        for (size_t i = 0; args[i]; ++i) jobs[0].argv[i] = args[i];
+        jobs[0].sensor = true;
+        setup = sfz_pool_job(&jobs[1], root, 1, "exit 0");
+    }
+    return setup;
+}
+static bool sfz_session_failure_case(const char *mode, bool missing)
+{
+    char root[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof(root), "sfz_session_failure")) return false;
+    struct sfz_env env = {.jobs = 1};
+    struct sfz_run *r = zcl_calloc(1, sizeof(*r), "sfz.session.test");
+    struct sfz_job *jobs = zcl_calloc(2, sizeof(*jobs), "sfz.session.jobs");
+    bool setup = r && jobs && sfz_session_failure_setup(r, jobs, &env, root, mode, missing);
+    size_t bad = setup ? sfz_run_jobs(r, jobs, 2) : 0;
+    bool ok = setup && bad == 2 && jobs[0].status != 0 && jobs[1].pid == 0 &&
+        !r->sessions[0].pid && !r->sessions[1].pid && sfz_pool_reaped(jobs, 2);
+    if (!ok) printf("[session failure mode=%s missing=%d bad=%zu]\n", mode, missing, bad);
+    free(jobs); free(r); (void)test_rm_rf_recursive(root); return ok;
+}
+
+static bool sfz_session_failures(void)
+{
+    static const char *const modes[] = {"exit", "partial", "extra", "refuse", "hang"};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
+        if (!sfz_session_failure_case(modes[i], false)) return false;
+    return sfz_session_failure_case("exit", true);
+}
+
+static bool sfz_sensor_test_job(struct sfz_job *j, const struct sfz_env *env,
+                                const char *root, const char *source, const char *out, bool session)
+{
+    if (!sfz_pool_job(j, root, 0, "")) return false;
+    const char *args[] = {env->sensor, "emit", "--root", ".", "--source", source, "--out", out,
+        "--facts", "--cc", env->clang, "--toolchain-id",
+        SFZ_TOOLCHAIN_ID, "--", "-std=c23", "-ffreestanding", NULL};
+    for (size_t i = 0; i <= 16; ++i) j->argv[i] = args[i];
+    j->sensor = session; return true;
+}
+static void sfz_session_test_env(struct sfz_run *r, struct sfz_env *env, const char *root)
+{
+    r->env = env; r->test_budget_s = 30;
+    (void)snprintf(r->tree, sizeof(r->tree), "%s", root);
+    (void)snprintf(r->log, sizeof(r->log), "%s", root);
+    (void)snprintf(r->env_home, sizeof(r->env_home), "HOME=%s", root);
+    (void)snprintf(r->env_tmp, sizeof(r->env_tmp), "TMPDIR=%s", root);
+    r->envp[0] = "PATH=/usr/bin:/bin"; r->envp[1] = "LC_ALL=C";
+    r->envp[2] = r->env_home; r->envp[3] = r->env_tmp; r->envp[4] = NULL;
+}
+static bool sfz_session_template(const char *root)
+{
+    char path[PATH_MAX], reply[1024], hex[65], why[128]; uint8_t *bytes = NULL, digest[32]; size_t n = 0;
+    if (snprintf(path, sizeof(path), "%s/valid.zsm", root) >= (int)sizeof(path) ||
+        !sfz_slurp(path, &bytes, &n) || !vcs_semantic_root_v1(bytes, n, digest, why, sizeof(why))) { free(bytes); return false; }
+    free(bytes); zcl_hex_encode(digest, 32, hex);
+    struct json_value v; json_init(&v); json_set_object(&v);
+    bool ok = json_push_kv_int(&v, "seq", 1) && json_push_kv_bool(&v, "ok", true) &&
+        json_push_kv_str(&v, "source", "a.c") && json_push_kv_str(&v, "out", "out.zsm") &&
+        json_push_kv_str(&v, "root", hex) && json_push_kv_int(&v, "bytes", (int64_t)n) &&
+        json_push_kv_str(&v, "written", "cold") && json_push_kv_str(&v, "trust", "cold");
+    size_t written = ok ? json_write(&v, reply, sizeof(reply) - 1) : 0; json_free(&v);
+    if (!written || written + 1 >= sizeof(reply)) return false;
+    reply[written++] = '\n'; return sfz_put(root, "reply", reply, written);
+}
+static bool sfz_bytes_contain(const uint8_t *bytes, size_t n, const char *text)
+{
+    size_t len = strlen(text);
+    for (size_t i = 0; i + len <= n; ++i) if (!memcmp(bytes + i, text, len)) return true;
+    return false;
+}
+static bool sfz_session_fixture_mode(struct sfz_run *r, struct sfz_job *job,
+                                     const char *root, const char *mode, bool expect_ok)
+{
+    if (!sfz_put(root, "mode", mode, strlen(mode)) ||
+        !sfz_sensor_test_job(job, r->env, root, "a.c", "out.zsm", true)) return false;
+    size_t bad = sfz_run_jobs(r, job, 1);
+    bool matched = expect_ok ? bad == 0 : bad == 1;
+    if (!expect_ok) {
+        uint8_t *log = NULL; size_t n = 0;
+        matched = matched && sfz_slurp(job->log, &log, &n) &&
+            sfz_bytes_contain(log, n, "response frame or manifest identity invalid");
+        free(log);
+    }
+    bool stopped = sfz_session_stop(&r->sessions[0]);
+    if (!matched || !stopped) {
+        uint8_t *log = NULL; size_t n = 0;
+        if (sfz_slurp(job->log, &log, &n)) printf("[session mode=%s bad=%zu stopped=%d log=%.*s]\n", mode, bad, stopped, (int)(n < 2048 ? n : 2048), (char *)log);
+        else printf("[session mode=%s bad=%zu stopped=%d log unavailable]\n", mode, bad, stopped);
+        free(log);
+    }
+    return stopped && matched;
+}
+static bool sfz_session_valid_extra(struct sfz_group *g)
+{
+    char root[PATH_MAX], fake[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof(root), "sfz_valid_extra")) return false;
+    struct sfz_env env = g->env; env.jobs = 1;
+    struct sfz_run *r = zcl_calloc(1, sizeof(*r), "sfz.session.valid");
+    struct sfz_job *job = zcl_calloc(1, sizeof(*job), "sfz.session.valid.job");
+    bool ok = r && job && realpath("build/bin/z23-fuzz-session-responder", fake) &&
+        sfz_put(root, "a.c", "int f(void) { return 1; }\n", sizeof("int f(void) { return 1; }\n") - 1);
+    if (ok) {
+        sfz_session_test_env(r, &env, root);
+        ok = sfz_sensor_test_job(job, &env, root, "a.c", "valid.zsm", false) &&
+             sfz_run_jobs(r, job, 1) == 0 && sfz_session_template(root);
+    }
+    if (ok) {
+        (void)snprintf(env.sensor, sizeof(env.sensor), "%s", fake);
+        ok = sfz_session_fixture_mode(r, job, root, "valid", true) &&
+             sfz_session_fixture_mode(r, job, root, "valid-extra", false);
+    }
+    if (r) { (void)sfz_session_stop(&r->sessions[0]); (void)sfz_session_stop(&r->sessions[1]); }
+    if (!ok) printf("[session valid/extra fixture failed: %s]\n", root);
+    free(job); free(r); if (ok) (void)test_rm_rf_recursive(root); return ok;
+}
+static bool sfz_session_compare(const char *root, const char *first, const char *second, bool equal)
+{
+    char a[PATH_MAX], b[PATH_MAX]; uint8_t *x = NULL, *y = NULL; size_t xn = 0, yn = 0;
+    bool ok = snprintf(a, sizeof(a), "%s/%s", root, first) < (int)sizeof(a) &&
+        snprintf(b, sizeof(b), "%s/%s", root, second) < (int)sizeof(b) &&
+        sfz_slurp(a, &x, &xn) && sfz_slurp(b, &y, &yn);
+    if (ok) ok = (xn == yn && !memcmp(x, y, xn)) == equal;
+    free(x); free(y); return ok;
+}
+static bool sfz_session_changed(struct sfz_run *r, struct sfz_job *jobs,
+                                struct sfz_env *env, const char *root, pid_t guard)
+{
+    char before[PATH_MAX], out[PATH_MAX];
+    return snprintf(before, sizeof(before), "%s/before.zsm", root) < (int)sizeof(before) &&
+        snprintf(out, sizeof(out), "%s/out.zsm", root) < (int)sizeof(out) && rename(out, before) == 0 &&
+        sfz_put(root, "a.c", "int f(void) { return 2; }\n", sizeof("int f(void) { return 2; }\n") - 1) &&
+        sfz_sensor_test_job(&jobs[0], env, root, "a.c", "cold.zsm", false) && sfz_run_jobs(r, jobs, 1) == 0 &&
+        sfz_sensor_test_job(&jobs[0], env, root, "a.c", "out.zsm", true) && sfz_run_jobs(r, jobs, 1) == 0 &&
+        r->sessions[0].pid == guard && sfz_session_compare(root, "cold.zsm", "out.zsm", true) &&
+        sfz_session_compare(root, "before.zsm", "out.zsm", false);
+}
+static bool sfz_session_refused(struct sfz_run *r, struct sfz_job *jobs,
+                                struct sfz_env *env, const char *root, pid_t guard)
+{
+    bool ok = sfz_sensor_test_job(&jobs[0], env, root, "missing.c", "out.zsm", true) &&
+             sfz_pool_job(&jobs[1], root, 1, "exit 0") && sfz_run_jobs(r, jobs, 2) == 2 &&
+             jobs[1].pid == 0 && !r->sessions[0].pid;
+    int st; errno = 0;
+    return ok && guard > 0 && waitpid(guard, &st, WNOHANG) == -1 && errno == ECHILD;
+}
+static bool sfz_session_reuse_steps(struct sfz_run *r, struct sfz_job *jobs,
+                                    struct sfz_env *env, const char *root)
+{
+    bool ok = sfz_sensor_test_job(&jobs[0], env, root, "a.c", "cold.zsm", false) &&
+        sfz_run_jobs(r, jobs, 1) == 0 && sfz_sensor_test_job(&jobs[0], env, root, "a.c", "out.zsm", true) &&
+        sfz_run_jobs(r, jobs, 1) == 0 && sfz_session_compare(root, "cold.zsm", "out.zsm", true);
+    pid_t guard = ok ? r->sessions[0].pid : 0;
+    return ok && sfz_session_changed(r, jobs, env, root, guard) && sfz_session_refused(r, jobs, env, root, guard);
+}
+static bool sfz_session_reuse_failure(struct sfz_group *g)
+{
+    char root[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof(root), "sfz_reuse_failure")) return false;
+    struct sfz_env env = g->env; env.jobs = 1;
+    struct sfz_run *r = zcl_calloc(1, sizeof(*r), "sfz.session.reuse");
+    struct sfz_job *jobs = zcl_calloc(2, sizeof(*jobs), "sfz.session.reuse.jobs");
+    bool ok = r && jobs && sfz_put(root, "a.c", "int f(void) { return 1; }\n", sizeof("int f(void) { return 1; }\n") - 1);
+    if (ok) { sfz_session_test_env(r, &env, root); ok = sfz_session_reuse_steps(r, jobs, &env, root); }
+    if (r) { (void)sfz_session_stop(&r->sessions[0]); (void)sfz_session_stop(&r->sessions[1]); }
+    if (!ok) printf("[session reuse/failure fixture failed: %s]\n", root);
+    free(jobs); free(r); if (ok) (void)test_rm_rf_recursive(root); return ok;
+}
+
+#if defined(__linux__)
+static void sfz_owner_child(int report, const char *root, const char *binary, pid_t parent)
+{
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) || getppid() != parent) _exit(2);
+    struct sfz_session sessions[2] = {0};
+    const char *env[] = {"PATH=/usr/bin:/bin", "LC_ALL=C", NULL};
+    int64_t deadline = clock_now_monotonic_ns() + 5000000000LL;
+    if (!sfz_session_start(&sessions[0], sessions, binary, root, env, "/dev/null", deadline, report)) _exit(2);
+    if (!write_all(report, &sessions[0].pid, sizeof(sessions[0].pid))) { (void)sfz_session_stop(&sessions[0]); _exit(2); }
+    pid_t ids[2];
+    if (write(sessions[0].input, "x\n", 2) != 2 || read_by(sessions[0].output, ids, sizeof(ids), deadline) != 1) {
+        (void)sfz_session_stop(&sessions[0]); _exit(2);
+    }
+    if (!write_all(report, ids, sizeof(ids))) { (void)sfz_session_stop(&sessions[0]); _exit(2); }
+    for (;;) pause();
+}
+static bool sfz_owned_reap(pid_t pid, int64_t deadline)
+{
+    while (clock_now_monotonic_ns() > 0 && clock_now_monotonic_ns() < deadline) {
+        int st; pid_t got = waitpid(pid, &st, WNOHANG);
+        if (got == pid) return true;
+        if (got < 0 && errno != EINTR) return false;
+        (void)poll(NULL, 0, 10);
+    }
+    return false;
+}
+static bool sfz_owner_cleanup(pid_t guard, pid_t descendant, bool guard_reaped, bool child_reaped)
+{
+    if (!guard_reaped) {
+        int st; pid_t got = waitpid(guard, &st, WNOHANG);
+        if (got == guard) guard_reaped = true;
+        else if (got == 0) {
+            (void)kill(-guard, SIGKILL);
+            guard_reaped = sfz_owned_reap(guard, clock_now_monotonic_ns() + 5000000000LL);
+        }
+    }
+    if (!child_reaped) child_reaped = sfz_owned_reap(descendant, clock_now_monotonic_ns() + 5000000000LL);
+    return guard_reaped && child_reaped;
+}
+static bool sfz_owner_result(pid_t owner, pid_t guard, const pid_t ids[2], bool known, bool ready, bool *drained)
+{
+    int64_t deadline = clock_now_monotonic_ns() + 5000000000LL;
+    bool owner_reaped = owner > 0 && sfz_owned_reap(owner, deadline);
+    deadline = clock_now_monotonic_ns() + 5000000000LL;
+    bool guard_reaped = known && sfz_owned_reap(guard, deadline);
+    bool child_reaped = ready && sfz_owned_reap(ids[1], deadline);
+    bool sensor_gone = ready && kill(ids[0], 0) != 0 && errno == ESRCH;
+    bool clean = known && sfz_owner_cleanup(guard, ids[1], guard_reaped, !ready || child_reaped);
+    *drained = ready && clean;
+    return ready && owner_reaped && guard_reaped && child_reaped && sensor_gone;
+}
+static bool sfz_session_owner_run(const char *root, const char *binary, int p[2], bool *drained)
+{
+    pid_t parent = getpid(), owner = fork();
+    if (!owner) { close(p[0]); sfz_owner_child(p[1], root, binary, parent); }
+    close(p[1]); pid_t guard = 0, ids[2] = {0};
+    int64_t deadline = clock_now_monotonic_ns() + 5000000000LL;
+    bool known = owner > 0 && read_by(p[0], &guard, sizeof(guard), deadline) == 1 && guard > 1;
+    bool ready = known && read_by(p[0], ids, sizeof(ids), deadline) == 1 && ids[0] > 1 && ids[1] > 1;
+    close(p[0]);
+    if (owner > 0) (void)kill(owner, SIGKILL);
+    return sfz_owner_result(owner, guard, ids, known, ready, drained);
+}
+static bool sfz_session_owner_death(void)
+{
+    char root[PATH_MAX], binary[PATH_MAX]; int p[2], old = 0;
+    if (!test_mkdtemp(root, sizeof(root), "sfz_owner") ||
+        !realpath("build/bin/z23-fuzz-session-responder", binary) ||
+        !sfz_put(root, "mode", "tree", 4) || prctl(PR_GET_CHILD_SUBREAPER, &old) || pipe(p)) return false;
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1)) { close(p[0]); close(p[1]); (void)test_rm_rf_recursive(root); return false; }
+    bool drained = false;
+    bool ok = sfz_session_owner_run(root, binary, p, &drained);
+    bool restored = drained && prctl(PR_SET_CHILD_SUBREAPER, old) == 0;
+    if (!drained) fputs("sfz owner fixture: descendant cleanup unproven; subreaper retained\n", stderr);
+    (void)test_rm_rf_recursive(root);
+    return ok && restored;
+}
+#else
+static bool sfz_session_owner_death(void) { return true; }
+#endif
+
 static int sfz_t_pool(struct sfz_group *g)
 {
     int failures = 0;
@@ -931,7 +1201,9 @@ static int sfz_t_pool(struct sfz_group *g)
         bool handshake = sfz_pool_handshake(g);
         bool failures_ok = sfz_pool_failures(g);
         bool cap = sfz_pool_cap();
-        ASSERT(handshake && failures_ok && cap);
+        bool sessions = sfz_session_failures() && sfz_session_owner_death() &&
+            sfz_session_valid_extra(g) && sfz_session_reuse_failure(g);
+        ASSERT(handshake && failures_ok && cap && sessions);
     } TEST_END
     return failures;
 }

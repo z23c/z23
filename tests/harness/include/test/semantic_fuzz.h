@@ -163,6 +163,8 @@ struct sfz_env {
     char clang[PATH_MAX];  /* the clang of the LLVM the sensor links */
     char gcc[PATH_MAX];    /* gcc for gcc_deps cases, "" when absent */
     int jobs;              /* compiles and sensor runs at once */
+    bool cold_sensor;      /* test-private standalone baseline */
+    int outcome_fd;        /* case child pipe; must not leak to descendants */
 };
 
 struct sfz_case {
