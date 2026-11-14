@@ -139,6 +139,7 @@ struct tag_stub {
     struct json_value board; /* the posts B's node holds */
     bool tamper;             /* the fetch delivers other bytes */
     bool malformed_board;
+    const char *catalog_error;
     int show_mode;
     int page_mode;
     bool fetch_partial;
@@ -681,7 +682,11 @@ static bool tag_call(const char *path, const struct json_value *in,
         ok = tag_post_capture(in, out);
     else if (strcmp(path, ZCL_APP_OFFER_BUNDLE_FETCH) == 0)
         ok = tag_fetch(in, out);
-    else if (strcmp(path, ZCL_APP_OFFER_BOARD_LIST) == 0)
+    else if (strcmp(path, ZCL_APP_OFFER_BOARD_LIST) == 0 && g_tag.catalog_error) {
+        zcl_command_reply_fail(out, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+            g_tag.catalog_error, "execute", true, false, "untrusted remote detail", path);
+        return false;
+    } else if (strcmp(path, ZCL_APP_OFFER_BOARD_LIST) == 0)
         ok = tag_list(in, out);
     else if (strcmp(path, ZCL_APP_OFFER_BOARD_SHOW) == 0)
         ok = tag_show(in, out);
@@ -4646,17 +4651,18 @@ static int tag_library_cleanup_failure(struct tag_world *w)
     int failures = tag_library_cleanup_failure_case(w, false);
     return failures ? failures : tag_library_cleanup_failure_case(w, true);
 }
-struct tag_discover_empty { unsigned calls; bool error, recover; };
+struct tag_discover_empty { unsigned calls; bool error, recover; const char *summary; };
 static bool tag_discover_empty_card(void *context, const struct zcl_present_model_v1 *model,
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     struct tag_discover_empty *d = context; (void)copy;
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (d->error ? strcmp(model->request_id, "discover-error") : strcmp(model->request_id, "discover-0")) return false;
+    if (d->error && (!d->summary || strcmp(model->summary, d->summary))) return false;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
     event->action_index = d->calls++ ? 1 : 0;
-    if (d->error && d->recover) { g_tag.malformed_board = false; d->error = false; }
+    if (d->error && d->recover) { g_tag.malformed_board = false; g_tag.catalog_error = NULL; d->error = false; }
     return true;
 }
 static int tag_discover_empty_cases(struct tag_world *w)
@@ -4666,7 +4672,7 @@ static int tag_discover_empty_cases(struct tag_world *w)
         tag_board_reset(); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
         ASSERT_EQ(d.calls, 2); ASSERT(!reply.error.mutated); zcl_command_reply_free(&reply);
-        d.calls = 0; d.error = true; g_tag.malformed_board = true;
+        d.calls = 0; d.error = true; d.summary = "The catalog response could not be verified. Retry or return to My Apps."; g_tag.malformed_board = true;
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
         ASSERT_EQ(d.calls, 2); ASSERT(!reply.error.mutated);
@@ -4674,14 +4680,32 @@ static int tag_discover_empty_cases(struct tag_world *w)
         const struct zcl_command_spec *spec = asf_spec("app.library"); char wire[32768];
         ASSERT(spec && zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &reply, wire, sizeof(wire)));
         ASSERT(strstr(wire, "CATALOG_INCOMPLETE")); zcl_command_reply_free(&reply);
-        d = (struct tag_discover_empty){.error = true, .recover = true}; g_tag.malformed_board = true;
+        d = (struct tag_discover_empty){.error = true, .recover = true,
+            .summary = "The catalog response could not be verified. Retry or return to My Apps."}; g_tag.malformed_board = true;
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
         ASSERT_EQ(d.calls, 2); ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         zcl_command_reply_free(&reply);
-        g_tag.malformed_board = false; PASS();
+        static const char *const codes[] = {"NODE_UNAVAILABLE", "OTHER_REMOTE_FAILURE"};
+        static const char *const summaries[] = {
+            "The selected node did not answer. Check your node profile and connection, then retry.",
+            "The catalog could not be read. Retry or return to My Apps."};
+        for (size_t i = 0; i < 2; ++i) {
+            d = (struct tag_discover_empty){.error = true, .summary = summaries[i]};
+            g_tag.catalog_error = codes[i]; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
+            ASSERT_EQ(d.calls, 2); ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+            ASSERT(!strcmp(reply.error.code, codes[i]));
+            zcl_command_reply_free(&reply);
+        }
+        d = (struct tag_discover_empty){.error = true, .recover = true, .summary = summaries[0]};
+        g_tag.catalog_error = codes[0]; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
+        ASSERT_EQ(d.calls, 2); ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        zcl_command_reply_free(&reply);
+        g_tag.catalog_error = NULL; g_tag.malformed_board = false; PASS();
     } _test_next:;
-    g_tag.malformed_board = false; return failures;
+    g_tag.catalog_error = NULL; g_tag.malformed_board = false; return failures;
 }
 
 /* Make <datadir>/.app-get-<token> shaped exactly like the leaf's staging,

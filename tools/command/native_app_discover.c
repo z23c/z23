@@ -240,6 +240,14 @@ static bool ad_catalog(struct discover *d, struct zcl_command_reply *reply)
     }
     zcl_command_reply_free(&why); return ok;
 }
+static const char *ad_catalog_message(const struct zcl_command_reply *reply)
+{
+    if (!strcmp(reply->error.code, "CATALOG_INCOMPLETE"))
+        return "The catalog response could not be verified. Retry or return to My Apps.";
+    if (!strcmp(reply->error.code, "NODE_UNAVAILABLE"))
+        return "The selected node did not answer. Check your node profile and connection, then retry.";
+    return "The catalog could not be read. Retry or return to My Apps.";
+}
 static bool ad_review(struct discover *d, struct zcl_command_reply *reply)
 {
     if (!app_get_stage_consume_progress(&d->rows[d->index], d->datadir, ad_consume, d, reply, d->receive_presenter, d->context)) {
@@ -296,7 +304,7 @@ static bool ad_loop(struct discover *d, struct zcl_command_reply *reply)
     for (;;) {
         if (!loaded) {
             if (!ad_catalog(d, reply)) {
-                if (ad_error(d, "The node catalog could not be read.", true)) continue;
+                if (ad_error(d, ad_catalog_message(reply), true)) continue;
                 return false;
             }
             loaded = true;
