@@ -13,6 +13,7 @@
  *                                          publish with A's key this week
  *   B (own HOME)          open skycombat-1.z23share   receive, build, open
  *                         <image> --qa-frames=120 exits 0
+ *                         open retained copy, confirm execution, same image
  *
  * B's image_sha3 equals A's for the shared version. The build needs no
  * system -dev package (the X11/GL headers are vendored); the runs need
@@ -90,6 +91,28 @@ static int ajs_a(struct ajs_world *w)
     return failures;
 }
 
+/* The front-door handler runs in process; this does not claim a fresh CLI
+ * process or My Apps recovery. Stop the launched game before assertions. */
+static bool ajs_b_reopen(struct asf_journey *j)
+{
+    struct asf_door run;
+    char image[80], question[512];
+    asf_door_run(j->b_home, j->b_home, j->b_datadir, "open", j->b_copy,
+                 ZCL_CLI_CONFIRM_ASK, &run);
+    ++j->commands_b;
+    bool stopped = asf_alive_then_stop(asf_door_pid(run.text));
+    (void)asf_door_line(&run, "image_sha3", image, sizeof(image));
+    int n = snprintf(question, sizeof(question), "Run %s's build %.16s?",
+                     j->b_copy, j->image_b);
+    bool consent = n > 0 && (size_t)n < sizeof(question) && run.asked &&
+                   strcmp(run.question, question) == 0;
+    bool same = !strcmp(image, j->image_b) && !strcmp(image, j->image_shared);
+    if (run.rc || !stopped || !consent || !same)
+        printf("  [receiver reopen: rc=%d stopped=%d consent=%d same=%d]\n%s",
+               run.rc, stopped, consent, same, run.text);
+    return run.rc == 0 && stopped && consent && same;
+}
+
 static int ajs_b(struct ajs_world *w)
 {
     int failures = 0;
@@ -97,6 +120,7 @@ static int ajs_b(struct ajs_world *w)
          "image, opens it; 120 QA frames") {
         ASSERT(asf_journey_receive(&w->j));
         ASSERT_EQ(asf_qa_frames(w->j.path_b), 0);
+        ASSERT(ajs_b_reopen(&w->j));
         PASS();
     } _test_next:;
     return failures;
