@@ -1014,6 +1014,13 @@ The last line of `build/scratch/agent-verify.rc` is `agent-verify: OK` or
 `agent-verify: FAILED (<steps>)`. A file without that last line is an
 interrupted run and is not a pass, whatever its `rc=` lines say.
 
+Before candidate lint, inspect `git status --short` and stage each intended
+new source path you own with `git add -- <owned-path> ...`. Some gates,
+including the fortify declaration check, enumerate Git-indexed paths and read
+their working-tree bytes; their PASS does not cover an untracked new file.
+Keep unrelated work out of the staged change.
+<!-- claim: symbol-present fmd_scan_index tools/lint/lintc/gate_fortify_masked_decls.c # fortify whole-tree scan enumerates index paths -->
+
 A change under `tools/command/*.c`, `engine/composition/**/*.def`,
 `contexts/**/*.def`, or a new `.c` file routinely passes `lint-fast` and then
 fails only in the full `make lint`, because the gates that catch that class of
@@ -1350,9 +1357,11 @@ legacy parity oracle; it is not called by the installed push hook.
 the two tracked-document targets (`fix-doc-counts`, `docs-executor-routing`;
 the capability inventory and API reference are build output under
 `build/gen`), and prints `git status --short`. It exits non-zero while
-untracked non-ignored files exist, because lint scans tracked files only:
-`git add -A`, run `make lint-ready`, commit what it changed, then run
-`make lint`. It never commits; neither does the lander.
+untracked non-ignored files exist, because some lint gates scan indexed paths
+only. Inspect the listed files, stage only intended owned paths, and reconcile
+unrelated untracked work without discarding it. Rerun `make lint-ready`, review
+and commit its intended generated changes, then run `make lint`. It never
+commits; neither does the lander.
 
 Every publishable proof runs the whole lint gate set, `make lint` plus
 `check-windows-acceptance`, including inventory-only changes. A scratch
