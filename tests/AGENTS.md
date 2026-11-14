@@ -7,6 +7,7 @@
 Rules:
 - Run groups only through `make t-fast ONLY=<group>` (substring) or `make t-fast-exact ONLY=<group>`; never run `test_zcl` directly.
 - A test file that exists proves nothing; zero groups run is a failure.
+- Assertion macros jump to `_test_next`, a function-scoped C label. Do not duplicate that label when adding a test block; use a separate helper function or combine related assertions under one test. `TEST_END` also defines the label.
 - Never weaken an assertion, threshold or fail-closed refusal to pass.
 - Use local fixtures and isolated datadirs; never a live node or wallet.
 - Some tests pin exact documentation sentences: `git grep -n "<sentence>" tests` before rewording a doc.
