@@ -21,3 +21,14 @@ not. A first repair put the edge on the wrong target; its focused run was
 cancelled and produced no verdict. The corrected umbrella edge and a test that
 removes it in memory passed the strict focused group with no skips in 51.004
 seconds of test-body time. Full candidate validation is recorded separately.
+
+The 83-group candidate suite at `06df1575425a93a1f3f4dc101d00490af9950e17`
+returned success with one self-skip and one native-classified load-flaky group. The first
+`test_device_host_runtime` attempt failed its expected receiver `refused`
+terminal assertion after a revoke; its isolated retry passed. The captured log
+contained authority-lock errors but did not retain the terminal diagnostic, so
+the cause remains unknown. A test-only failure report now emits only allowlisted
+terminal and cleanup values, read/buffer state and child exit status; the
+assertion and deadlines remain unchanged. The strict focused group passed 1/1
+with no skips or retries in 10.399 seconds of test-body time. This run did not
+reproduce the failure and therefore does not establish its cause.

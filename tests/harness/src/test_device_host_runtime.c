@@ -632,14 +632,45 @@ static bool runtime_target_absent(const struct runtime_fixture *fixture)
     struct pollfd interest = {.fd = fixture->target_listener, .events = POLLIN};
     return poll(&interest, 1, 0) == 0;
 }
+static const char *runtime_terminal_field(const char *line, const char *const *values, size_t count)
+{
+    if (!line) return "unknown";
+    for (size_t i = 0; i < count; ++i) {
+        size_t n = strlen(values[i]);
+        if (!strncmp(line, values[i], n) && (line[n] == ' ' || line[n] == '\n' || line[n] == '\0'))
+            return values[i];
+    }
+    return "unknown";
+}
+static void runtime_terminal_failure(const struct runtime_process *process, bool read_ok)
+{
+    static const char *const results[] = {"ready", "wait", "progress", "eof", "refused", "deadline", "io_error", "cancelled", "unsupported", "invalid"};
+    static const char *const clean[] = {"0", "1"};
+    const char *line = strstr(process->diagnostic_text, "event=HOST_RUNTIME_TERMINAL ");
+    const char *end = line ? strchr(line, '\n') : NULL;
+    const char *result = line ? strstr(line, " result=") : NULL;
+    const char *cleanup = line ? strstr(line, " cleanup_complete=") : NULL;
+    if (result && end && result >= end) result = NULL;
+    if (cleanup && end && cleanup >= end) cleanup = NULL;
+    const char *name = runtime_terminal_field(result ? result + 8 : NULL, results, sizeof(results) / sizeof(results[0]));
+    const char *done = runtime_terminal_field(cleanup ? cleanup + 18 : NULL, clean, sizeof(clean) / sizeof(clean[0]));
+    int exit_code = process->reaped && WIFEXITED(process->status) ? WEXITSTATUS(process->status) : -1;
+    int signal_no = process->reaped && WIFSIGNALED(process->status) ? WTERMSIG(process->status) : 0;
+    fprintf(stderr, "runtime terminal: result=%s cleanup=%s read_ok=%d buffer_full=%d reaped=%d exit=%d signal=%d custody_lost=%d\n",
+            name, done, read_ok, process->diagnostic_used >= sizeof(process->diagnostic_text) - 1,
+            process->reaped, exit_code, signal_no, process->custody_lost);
+}
+
 static bool runtime_terminal(struct runtime_process *process, const char *result)
 {
-    if (!runtime_diagnostics(process)) return false;
+    bool read_ok = runtime_diagnostics(process);
     char expected[64];
     int length = snprintf(expected, sizeof(expected), "result=%s cleanup_complete=1", result);
-    return length > 0 && (size_t)length < sizeof(expected) &&
+    bool ok = read_ok && length > 0 && (size_t)length < sizeof(expected) &&
         strstr(process->diagnostic_text, "event=HOST_RUNTIME_TERMINAL") &&
         strstr(process->diagnostic_text, expected);
+    if (!ok) runtime_terminal_failure(process, read_ok);
+    return ok;
 }
 static int runtime_client_authority_refusal(unsigned field)
 {
