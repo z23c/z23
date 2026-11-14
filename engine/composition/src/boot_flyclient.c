@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "config/boot_flyclient.h"
+#include "boot_timing_marks_internal.h"
 
 #include "config/boot_internal.h"
 #include "chain/chain.h"
@@ -456,16 +457,21 @@ bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
         return true;
     }
 
+    int64_t timing = boot_clock_ms();
     if (!mmb_leaf_store_open(&g_mmb_leaf_store, leaf_path))
         LOG_FAIL("boot", "MMB leaf store open failed at '%s'", leaf_path);
+    timing = boot_submark("svc.mmb.prepare.open", timing);
     uint64_t mmb_leaves = 0;
     rpc_blockchain_mmb_snapshot(NULL, &mmb_leaves, NULL);
     (void)boot_reconcile_mmb_leaf_store(&g_mmb_leaf_store,
                                         &svc->state->chain_active,
                                         mmb_leaves);
+    timing = boot_submark("svc.mmb.prepare.reconcile", timing);
 
     boot_mmb_legacy_finish(active_chain_height(&svc->state->chain_active), legacy_loader);
+    timing = boot_submark("svc.mmb.prepare.legacy", timing);
     bool complete = boot_mmb_validate_and_bind(&svc->state->chain_active);
+    (void)boot_submark("svc.mmb.prepare.validate", timing);
     printf("[FlyClient] MMB leaf store: %llu hashes, proof %s\n",
            (unsigned long long)g_mmb_leaf_store.num_leaves,
            complete ? "available" : "unavailable");

@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 
 #include "config/boot_flyclient.h"
+#include "config/boot_flight_recorder.h"
 #include "config/boot_snapshot_offer.h"
 #include "net/flyclient.h"
 #include "net/fast_sync.h"
@@ -292,6 +293,41 @@ static int mmb_reconcile_guard_checks(const char *dir)
     return failures;
 }
 
+static bool mmb_prepare_marks(struct node_db *db)
+{
+    static const char *const names[] = {"svc.mmb.prepare.open", "svc.mmb.prepare.reconcile",
+        "svc.mmb.prepare.legacy", "svc.mmb.prepare.validate"};
+    boot_flight_recorder_finish(db);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db->db, "SELECT stage FROM boot_stage_timings ORDER BY rowid", -1, &stmt, NULL) != SQLITE_OK) return false;
+    size_t i = 0;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char *name = sqlite3_column_text(stmt, 0);
+        if (i >= sizeof(names) / sizeof(names[0]) || !name || strcmp((const char *)name, names[i++])) break;
+    }
+    bool ok = i == sizeof(names) / sizeof(names[0]) && rc == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static int mmb_prepare_timing_checks(struct boot_svc_ctx *svc, const char *dir,
+                                     const struct mmb_leaf_store *ref, bool seeded,
+                                     uint64_t chain_n)
+{
+    int failures = 0;
+    struct node_db timing_db;
+    bool timing_ready = node_db_open(&timing_db, ":memory:");
+    boot_flight_recorder_reset_buffer_for_testing();
+    BFC_CHECK("boot prepare first call extends to the chain",
+              seeded && boot_prepare_mmb_leaf_store(svc, dir, NULL) &&
+              g_mmb_leaf_store.num_leaves == chain_n &&
+              mmb_stores_equal(&g_mmb_leaf_store, ref));
+    BFC_CHECK("boot prepare records ordered subphase timings", timing_ready && mmb_prepare_marks(&timing_db));
+    if (timing_ready) node_db_close(&timing_db);
+    return failures;
+}
+
 static int mmb_boot_prepare_warm_checks(const char *dir)
 {
     int failures = 0;
@@ -321,10 +357,7 @@ static int mmb_boot_prepare_warm_checks(const char *dir)
     bool seeded = mmb_seed_prefix(&seed, dir, "mmb_leaves.bin", &fx.chain,
                                   CHAIN_N - 5);
     mmb_leaf_store_close(&seed);
-    BFC_CHECK("boot prepare first call extends to the chain",
-              seeded && boot_prepare_mmb_leaf_store(&svc, dir, NULL) &&
-              g_mmb_leaf_store.num_leaves == CHAIN_N &&
-              mmb_stores_equal(&g_mmb_leaf_store, &ref));
+    failures += mmb_prepare_timing_checks(&svc, dir, &ref, seeded, CHAIN_N);
     mmb_leaf_store_close(&g_mmb_leaf_store);
 
     /* Age the file: any write by the second boot would refresh the mtime. */
