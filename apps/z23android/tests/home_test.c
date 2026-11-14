@@ -75,6 +75,11 @@ static bool node_line_is(const struct zapp_view *view, const char *text)
 static void plain_node_line_states(void)
 {
     static struct zapp_view view;
+    view.node_unexpected_exit = true;
+    assert(node_line_is(&view, "Node stopped unexpectedly."));
+    view.node_starting = true;
+    assert(node_line_is(&view, "Starting node…\\nYou can use Z23"));
+    view.node_starting = false; view.node_unexpected_exit = false;
     assert(node_line_is(&view, "Node stopped"));
     view.node_starting = true;
     assert(node_line_is(&view, "Starting node…\\nYou can use Z23"));

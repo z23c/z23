@@ -41,6 +41,7 @@ struct zapp_view {
     bool busy;
     bool node_running;
     bool node_process_running;
+    bool node_unexpected_exit; /* Restart policy observed an unrequested exit. */
     bool node_starting; /* Start has been reserved but has not completed. */
     bool node_installing; /* A one-time state install is running. */
     bool node_wallet_replaying;

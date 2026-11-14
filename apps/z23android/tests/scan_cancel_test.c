@@ -6,11 +6,17 @@ bool zapp_send_busy(void);
 #include "../controller.c"
 #include "../fleet_review_state.h"
 #include <assert.h>
+#define zapp_node_stop_refusal test_real_stop_refusal
+#define zapp_handoff_hold_begin test_real_hold_begin
+#define zapp_handoff_hold_end test_real_hold_end
+#include "../node_restart.c"
+#undef zapp_node_stop_refusal
+#undef zapp_handoff_hold_begin
+#undef zapp_handoff_hold_end
 
 static bool send_busy;
 bool zapp_send_busy(void) { return send_busy; }
 const char *zapp_node_stop_refusal(bool busy) { (void)busy; return NULL; }
-void zapp_restart_stopped(struct zapp_restart *r) { (void)r; }
 bool zapp_node_start_reserve(struct zapp_runtime *r, uint64_t *ticket, char *out, size_t cap)
 { (void)r; (void)out; (void)cap; *ticket = 42; return true; }
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
@@ -186,8 +192,25 @@ static void preview_observation_case(void)
     assert(node_observations_for_test == 1);
 }
 
+static void unexpected_exit_observation_view(void)
+{
+    struct controller c = {0};
+    struct zapp_restart_seen s = {.wanted = true, .ready = true, .now = 100};
+    bool changed = false;
+    zapp_restart_started(&c.restart);
+    assert(!restart_observe_view(&c, &s, &changed));
+    assert(changed && c.view.node_unexpected_exit);
+    s.now = 130; assert(restart_observe_view(&c, &s, &changed));
+    assert(changed && !c.view.node_unexpected_exit);
+    zapp_restart_started(&c.restart); s.now = 131;
+    assert(!restart_observe_view(&c, &s, &changed) && c.view.node_unexpected_exit);
+    zapp_restart_stopped(&c.restart); s.wanted = false;
+    assert(!restart_observe_view(&c, &s, &changed) && !c.view.node_unexpected_exit);
+}
+
 int main(void)
 {
+    unexpected_exit_observation_view();
     preview_observation_case();
     installer_view_case();
     struct zapp_runtime delayed = {0};

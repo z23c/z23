@@ -337,6 +337,7 @@ static void handoff_offer_locked(struct controller *c, const struct node_reading
         c->handoff_seen_epoch = observed->epoch;
         c->handoff_wait = c->handoff_active = true;
         zapp_restart_stopped(&c->restart);
+        c->view.node_unexpected_exit = false;
     } else if (held) zapp_handoff_hold_end();
     pthread_mutex_unlock(&c->pace_lock);
 }
@@ -970,6 +971,7 @@ static void restart_event(struct controller *c, bool started)
     pthread_mutex_lock(&c->lock);
     if (started) zapp_restart_started(&c->restart);
     else { zapp_restart_stopped(&c->restart); c->handoff_wait = c->handoff_active = false; zapp_handoff_hold_end(); }
+    c->view.node_unexpected_exit = false;
     pthread_mutex_unlock(&c->lock);
 }
 static bool starts_node(const char *action)
@@ -1007,6 +1009,7 @@ static bool execute_start(struct controller *c, const char *action, uint64_t tic
         else { c->handoff_active = false; zapp_handoff_hold_end(); }
     }
     if (started && !c->start_cancelled) zapp_restart_started(&c->restart);
+    if (started) c->view.node_unexpected_exit = false;
     pthread_mutex_unlock(&c->lock);
     return started;
 }
@@ -1188,6 +1191,16 @@ static void start_if_wanted(struct controller *c)
     pthread_mutex_unlock(&c->lock);
     if (wanted && idle) notify_view(c);
 }
+/* Caller holds c->lock; keep the Home signal bound to the same restart observation. */
+static bool restart_observe_view(struct controller *c, const struct zapp_restart_seen *seen, bool *changed)
+{
+    bool restart = zapp_restart_observe(&c->restart, seen) == ZAPP_RESTART_RUN;
+    bool unexpected = zapp_restart_notice(&c->restart) != NULL;
+    *changed = c->view.node_unexpected_exit != unexpected;
+    c->view.node_unexpected_exit = unexpected;
+    return restart;
+}
+
 /* Schedules or issues the restart of a node that exited on its own, from the latest observation. */
 static void restart_check(struct controller *c)
 {
@@ -1206,10 +1219,11 @@ static void restart_check(struct controller *c)
     }
     seen.wanted = c->view.node_wanted;
     seen.ready = !c->hidden && !c->pending && !c->view.busy;
-    bool restart = zapp_restart_observe(&c->restart, &seen) == ZAPP_RESTART_RUN;
+    bool notice_changed = false;
+    bool restart = restart_observe_view(c, &seen, &notice_changed);
     if (restart) queue_action(c, "node_start", "");
     pthread_mutex_unlock(&c->lock);
-    if (restart) notify_view(c);
+    if (restart || notice_changed) notify_view(c);
 }
 /* Caller holds c->lock. Asks the watcher to read the node status now. */
 static void watch_now(struct controller *c)
@@ -1503,6 +1517,7 @@ static enum zapp_refusal take_request(struct controller *c, const char *action, 
         c->start_cancelled = true;
         if (c->pending) { c->pending = false; c->view.busy = false; }
         zapp_restart_stopped(&c->restart);
+        c->view.node_unexpected_exit = false;
         c->handoff_wait = c->handoff_active = false; zapp_handoff_hold_end();
         char text[256];
         (void)zapp_node_stop(&c->runtime, text, sizeof(text));
