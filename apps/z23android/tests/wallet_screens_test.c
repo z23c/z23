@@ -1459,7 +1459,7 @@ static void test_every_page_pins_navigation(void)
     tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
     s = snap();
     CHECK(s->page == WALLET_PAGE_RECEIVE && pinned(s) == 2 && !strcmp(text_at(s, find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK)), "Back"));
-    long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST);
+    long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_TEXT);
     CHECK(share >= 0 && wallet_item_pinned(&s->items[share]));
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0 && !wallet_item_pinned(&s->items[find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS)]));
     CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_FUNDS);
@@ -2518,10 +2518,10 @@ static void test_receive_share(void)
     long text = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_TEXT);
     long share = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST);
     CHECK(copy >= 0 && text == copy + 1 && share == text + 2 &&
-        !strcmp(text_at(s, text), "Share request: text") && !strcmp(text_at(s, share), "Share request: media"));
+        !strcmp(text_at(s, text), "Share request") && !strcmp(text_at(s, share), "Share with photos or videos"));
     CHECK(text > copy && s->items[text + 1].kind == WALLET_ITEM_NOTE &&
         !strcmp(text_at(s, text + 1),
-            "Share the request as text, or add photos or videos. Choose the recipient in Android's share sheet."));
+            "You choose where to share it."));
     size_t next = (size_t)share + 1;
     CHECK(next < s->count && s->items[next].kind != WALLET_ITEM_NOTE);
     char expected[ZAPP_RECEIVE_CODE_MAX], code[ZAPP_RECEIVE_CODE_MAX];
@@ -2536,7 +2536,7 @@ static void test_receive_share(void)
     s = snap();
     long note = find_text(s, "Share cancelled. Nothing was sent.");
     CHECK(note >= 0 && note < find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST));
-    CHECK(pinned(s) == 2 && wallet_item_pinned(&s->items[find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_REQUEST)]));
+    CHECK(pinned(s) == 2 && wallet_item_pinned(&s->items[find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SHARE_TEXT)]));
     wallet_screens_pause();
     fake.during = delayed_share_notice;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));

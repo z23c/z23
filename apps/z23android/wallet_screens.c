@@ -562,9 +562,9 @@ static void funds_items(struct wallet_screen *s)
 
 static void share_request_items(struct wallet_screen *s)
 {
-    button(s, WALLET_ACT_SHARE_TEXT, "Share request: text");
-    note(s, "Share the request as text, or add photos or videos. Choose the recipient in Android's share sheet.");
-    button(s, WALLET_ACT_SHARE_REQUEST, "Share request: media");
+    button(s, WALLET_ACT_SHARE_TEXT, "Share request");
+    note(s, "You choose where to share it.");
+    button(s, WALLET_ACT_SHARE_REQUEST, "Share with photos or videos");
 }
 static void receive_items(struct wallet_screen *s)
 {
