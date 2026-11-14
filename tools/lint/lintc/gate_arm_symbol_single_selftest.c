@@ -71,11 +71,12 @@ static int asy_st_collect(const char *file, void *ctx, const char *name,
 /* run_dup_names: non-static names occurring >=2 times in one file, as a
  * newline-joined string (mirrors the shell's captured awk|awk pipeline,
  * embedded verbatim in the SELFTEST FAILED text on the divergent path). */
-static void asy_dup_names(const char *path, char *out, size_t cap)
+static int asy_dup_names(const char *path, char *out, size_t cap)
 {
     struct asy_names s = { .n_used = 0 };
-    (void)asy_analyze_file(path, asy_st_collect, &s);
     out[0] = '\0';
+    int rc = asy_analyze_file(path, asy_st_collect, &s);
+    if (rc) return rc;
     size_t used = 0;
     for (int i = 0; i < s.n_used; i++) {
         if (s.stat[i])
@@ -93,10 +94,61 @@ static void asy_dup_names(const char *path, char *out, size_t cap)
             continue;
         int k = snprintf(out + used, cap - used, "%s%s", used ? "\n" : "",
                          s.n[i]);
-        if (k < 0 || (size_t)k >= cap - used)
-            break;
+        if (k < 0 || (size_t)k >= cap - used) {
+            out[0] = '\0';
+            return 2;
+        }
         used += (size_t)k;
     }
+    return 0;
+}
+
+static int asy_expect_missing(const char *sandbox)
+{
+    char path[512], hits[4096];
+    if (ovf(snprintf(path, sizeof path, "%s/missing.c", sandbox), sizeof path)) return 2;
+    if (asy_dup_names(path, hits, sizeof hits) == 0) {
+        fprintf(stderr, "%s: SELFTEST FAILED — missing analyzer input was accepted\n", k_gate);
+        return 2;
+    }
+    return 0;
+}
+
+static int asy_expect_partial_error(const char *sandbox)
+{
+    static const char body[] = "int sample(void) { return 0; }\n\0bad\n";
+    char path[512], hits[4096] = "stale";
+    if (ovf(snprintf(path, sizeof path, "%s/partial.c", sandbox), sizeof path)) return 2;
+    FILE *f = fopen(path, "wb");
+    if (!f) return 2;
+    int bad = fwrite(body, 1, sizeof(body) - 1, f) != sizeof(body) - 1;
+    if (fclose(f) != 0) bad = 1;
+    if (bad || asy_dup_names(path, hits, sizeof hits) == 0 || hits[0]) {
+        fprintf(stderr, "%s: SELFTEST FAILED — partial analyzer error was accepted\n", k_gate);
+        return 2;
+    }
+    return 0;
+}
+
+static const char *asy_error_sandbox;
+
+static int asy_error_cases(void)
+{
+    return asy_expect_missing(asy_error_sandbox) |
+           asy_expect_partial_error(asy_error_sandbox);
+}
+
+static int asy_expect_errors(const char *sandbox)
+{
+    int rc = 0;
+    asy_error_sandbox = sandbox;
+    int quiet_rc = asy_quiet(asy_error_cases, &rc);
+    asy_error_sandbox = NULL;
+    if (quiet_rc || rc) {
+        fprintf(stderr, "%s: SELFTEST FAILED — analyzer error handling\n", k_gate);
+        return 2;
+    }
+    return 0;
 }
 
 static int asy_expect_dup(const char *sandbox, const char *msg,
@@ -107,7 +159,7 @@ static int asy_expect_dup(const char *sandbox, const char *msg,
     if (csr_write(path, body))
         return 2;
     char hits[4096];
-    asy_dup_names(path, hits, sizeof hits);
+    if (asy_dup_names(path, hits, sizeof hits)) return 2;
     if (hits[0] == '\0') {
         fprintf(stderr,
                 "%s: SELFTEST FAILED — %s (expected a duplicate, found none)\n",
@@ -125,7 +177,7 @@ static int asy_expect_clean(const char *sandbox, const char *msg,
     if (csr_write(path, body))
         return 2;
     char hits[4096];
-    asy_dup_names(path, hits, sizeof hits);
+    if (asy_dup_names(path, hits, sizeof hits)) return 2;
     if (hits[0] != '\0') {
         fprintf(stderr,
                 "%s: SELFTEST FAILED — %s (unexpected duplicate: %s)\n",
@@ -187,6 +239,7 @@ int check_arm_symbol_single_selftest(void)
         return die("z23-lint: mkdir failed: %s\n", base);
 
     int rc = 0;
+    rc |= asy_expect_errors(sandbox);
     rc |= asy_expect_dup(sandbox,
         "two non-static bodies of the same name in #ifdef/#else arms did not trip",
         "dup.c",
