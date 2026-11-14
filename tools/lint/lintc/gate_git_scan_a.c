@@ -628,6 +628,20 @@ static int nak_on_track(const char *path, void *ctx)
     return nak_scan_file(path, a);
 }
 
+static int nak_scan_set(const struct lint_changed *ch, struct nak_acc *a)
+{
+    for (int i = 0; i < ch->n; i++) {
+        int rc;
+        if (nak_skip_path(ch->path[i]))
+            continue;
+        a->nfiles++;
+        rc = nak_scan_file(ch->path[i], a);
+        if (rc)
+            return rc;
+    }
+    return 0;
+}
+
 static int nak_scan_env(const char *env, struct nak_acc *a)
 {
     const char *p = env;
@@ -680,9 +694,34 @@ static int nak_replay20(FILE *hits)
     return rc ? rc : (err ? die("z23-lint: read failed\n", "") : 0);
 }
 
+static int nak_note(const struct nak_acc *a, int floor)
+{
+    if (lint_examined_print(a->nfiles, floor) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int nak_scan_choose(const struct lint_changed *ch, struct nak_acc *a, int *floor)
+{
+    const char *env = getenv("ZCL_API_KEY_SCAN_FILES");
+    *floor = 1000;
+    if (ch->active) {
+        *floor = 0;
+        return nak_scan_set(ch, a);
+    }
+    if (env && env[0]) {
+        *floor = 1;
+        return nak_scan_env(env, a);
+    }
+    return each_zpath(k_ls_all, nak_on_track, a);
+}
+
 static int nak_finish(struct nak_acc *a, int floor)
 {
     int rc = nak_too_few(a->nfiles, floor);
+    int note = nak_note(a, floor);
+    if (note)
+        return note;
     if (rc) return rc;
     if (a->nhits) {
         if (fputs("[check_no_api_keys] a credential-shaped string is in a tracked file:\n",
@@ -705,28 +744,36 @@ static int nak_finish(struct nak_acc *a, int floor)
 
 int check_no_api_keys_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    struct lint_changed ch;
     regex_t re;
-    int cr = nak_comp(&re);
-    if (cr) return cr;
-    FILE *hits = tmpfile();
+    FILE *hits;
+    struct nak_acc a;
+    int floor = 1000, rc, cr, br;
+    br = lint_changed_bind(&argc, &argv, &ch);
+    if (br)
+        return br;
+    if (ch.active && ch.n == 0) {
+        lint_changed_free(&ch);
+        return lint_examined_print(0, 0) < 0 ? die("z23-lint: write failed\n", "") : 0;
+    }
+    cr = nak_comp(&re);
+    if (cr) {
+        lint_changed_free(&ch);
+        return cr;
+    }
+    hits = tmpfile();
     if (!hits) {
         regfree(&re);
+        lint_changed_free(&ch);
         return die("z23-lint: tmpfile failed\n", "");
     }
-    struct nak_acc a = { .re = &re, .hits = hits };
-    const char *env = getenv("ZCL_API_KEY_SCAN_FILES");
-    int floor = 1000, rc;
-    if (env && env[0]) {
-        floor = 1;
-        rc = nak_scan_env(env, &a);
-    } else {
-        rc = each_zpath(k_ls_all, nak_on_track, &a);
-    }
-    if (rc == 0) rc = nak_finish(&a, floor);
+    a = (struct nak_acc){ .re = &re, .hits = hits };
+    rc = nak_scan_choose(&ch, &a, &floor);
+    if (rc == 0)
+        rc = nak_finish(&a, floor);
     fclose(hits);
     regfree(&re);
+    lint_changed_free(&ch);
     return rc;
 }
 

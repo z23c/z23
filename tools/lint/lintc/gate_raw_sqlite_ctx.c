@@ -245,6 +245,23 @@ static int crs_ctx_rooms(char rooms[][RS_PATH])
     return w;
 }
 
+int crs_path_in_context_room(const char *path)
+{
+    static char rooms[CRS_ROOMS][RS_PATH];
+    static int n = -1;
+    if (n < 0) {
+        n = crs_ctx_rooms(rooms);
+        if (n < 0)
+            return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        size_t L = strlen(rooms[i]);
+        if (L > 0 && strncmp(path, rooms[i], L) == 0 && path[L] == '/')
+            return 1;
+    }
+    return 0;
+}
+
 int crs_scan_context(struct crs_viol *v)
 {
     static char rooms[CRS_ROOMS][RS_PATH];

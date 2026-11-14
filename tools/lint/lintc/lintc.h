@@ -172,6 +172,21 @@ int lint_path_is_excluded(const char *path);
 int excl_ensure(void);
 int lint_prod_scan(void);
 int rs_init(void);
+
+/* Changed-file set for a per-file gate. active is 1 when --changed-files was
+ * supplied, including an empty file (n == 0). Absent means the whole tree. */
+struct lint_changed {
+    char **path;
+    int n;
+    int active;
+};
+int lint_changed_bind(int *argc, char ***argv, struct lint_changed *out);
+void lint_changed_free(struct lint_changed *out);
+int lint_fast_should_narrow(int per_file, int set_supplied, int source_matches);
+int lint_fast_gate_narrow(const char *name, int set_supplied);
+/* floor < 0 prints scan-floor: whole. Returns 0, or -1 on a write error. */
+int lint_examined_print(int n, int floor);
+int lint_fast_append_changed(char *cmd, size_t cap, const char *path);
 int repo_shape_dirs(const char *family, const char *leaf,
                     char out[][RS_PATH], int max, int *n);
 int repo_shape_room_dirs(const char *shape, char out[][RS_PATH], int max,

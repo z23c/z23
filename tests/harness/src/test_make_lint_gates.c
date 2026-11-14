@@ -1204,6 +1204,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_deleted_engine_names_absent_from_production_sources),
     S_(t_build_commit_macro_stays_behind_getter),
     N_(t_fortify_combined_measurement),
+    N_(t_lint_fast_changed_files),
     S_(t_boot_repaired_index_persistence_contract),
     S_(t_chain_evidence_reconstruct_uses_retry_persistence),
     S_(t_boot_genesis_init_preserves_restored_authority_contract),
@@ -1746,10 +1747,11 @@ static int t_lint_fast_tor_graph(void)
         "if ! fixture_make fixture-print-gates > expected 2>parse.log; then cat parse.log >&2; exit 1; fi\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
         "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"
-        "tail -n +6 \"$HOME/args\" > actual; cmp expected actual\n"
+        "if git -C \"$2\" merge-base HEAD refs/remotes/origin/main >/dev/null 2>&1; then grep -q '^--changed-files=' \"$HOME/args\"; else ! grep -q '^--changed-files=' \"$HOME/args\"; fi\n"
+        "tail -n +6 \"$HOME/args\" | grep -v '^--changed-files=' > actual; cmp expected actual\n"
         "grep -qx check-vendor-provenance actual\n"
         "fixture_make -n -p ZCL_LINT_SERIAL=1 lint-fast > serial.db 2>&1 || :\n"
-        "grep -E '^lint-fast: .*check-vendor-provenance' serial.db >/dev/null\n"
+        "grep -E '^lint-fast: .*stub-lint' serial.db >/dev/null\n"
         "grep -E '^check-vendor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"
         "grep -E '^check-tor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"
         "grep -E '^lint: .*check-tor-provenance' serial.db >/dev/null\n"
@@ -1767,14 +1769,16 @@ static int t_lint_fast_tor_graph(void)
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
         "rm -f \"$HOME/calls\"; fixture_make lint-fast ZCL_LINT_FAST_PRECHECK=0 > optout.log 2>&1\n"
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ]\n"
-        "rm -f \"$HOME/calls\"; if fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast FAIL_GATE=1 > serial-fail.log 2>&1; then exit 1; fi\n"
-        "[ ! -e \"$HOME/calls\" ]\n"
+        "rm -f \"$HOME/calls\"; if FAIL_STAGE=run fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast > serial-fail.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ] || { echo 'precheck ran after serial fast failure' >&2; exit 1; }\n"
+        "grep -F 'lint-fast: precheck skipped after fast subset failure' serial-fail.log >/dev/null\n"
         "fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast > serial-pass.log 2>&1\n"
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
         "rm -f \"$HOME/calls\"; if FAIL_STAGE=precheck fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast > serial-precheck-fail.log 2>&1; then exit 1; fi\n"
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
         "rm -f \"$HOME/calls\"; fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast ZCL_LINT_FAST_PRECHECK=0 > serial-optout.log 2>&1\n"
-        "[ ! -e \"$HOME/calls\" ]\n";
+        "[ \"$(grep -c '^run$' \"$HOME/calls\")\" = 1 ]\n"
+        "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ]\n";
     static const char epoch_checks[] =
         "rm -f \"$HOME/epoch-calls\" \"$HOME/compiler-calls\"\n"
         "for fast in t-fast t-fast-exact; do for build in dev-bin z23-dev zclassic23-dev z23 zclassic23; do\n"

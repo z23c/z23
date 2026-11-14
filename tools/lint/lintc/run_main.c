@@ -37,6 +37,8 @@ static const char k_poles[] =
     " check-windows-cross-syntax check-standalone-tools-link check-clang-portability"
     " check-vcs-no-sha1 check-windows-acceptance check-outparam-init-before-return ";
 
+static const char *g_run_changed;
+
 static int resolve_default(void *ctx, const char *gate, char *cmd, size_t cap)
 {
     const struct lr_table_row *row = lr_table_find(ctx, gate);
@@ -44,6 +46,18 @@ static int resolve_default(void *ctx, const char *gate, char *cmd, size_t cap)
         return lint_gate_command(gate, cmd, cap);
     int n = snprintf(cmd, cap, "%s", row->cmd);
     return n < 0 || (size_t)n >= cap ? 2 : 0;
+}
+
+/* Append --changed-files only for a per-file gate whose source matches the
+ * base. Other gates, and a gate whose own source differs, stay whole-tree. */
+static int resolve_with_changed(void *ctx, const char *gate, char *cmd, size_t cap)
+{
+    int rc = resolve_default(ctx, gate, cmd, cap);
+    if (rc != 0 || !g_run_changed || !g_run_changed[0])
+        return rc;
+    if (!lint_fast_gate_narrow(gate, 1))
+        return 0;
+    return lint_fast_append_changed(cmd, cap, g_run_changed);
 }
 
 static bool all_digits(const char *s)
@@ -166,7 +180,8 @@ static int print_command(const char *gate)
 static int usage(int rc)
 {
     (void)fputs("usage: z23-lint run [--jobs N] [--bin-dir DIR] [--list] "
-                "[--print-command GATE] GATE...\n", rc ? stderr : stdout);
+                "[--print-command GATE] [--changed-files=PATH] GATE...\n",
+                rc ? stderr : stdout);
     return rc;
 }
 
@@ -177,6 +192,7 @@ struct run_args {
     int n;
     int mode;               /* 0 run, 1 list, 2 print-command, 3 help */
     const char *print_gate;
+    const char *changed;
 };
 
 static const char k_nomatch[] = "";
@@ -211,6 +227,14 @@ static int parse_one(struct run_args *a, int argc, char **argv, int *i)
     if ((v = opt_value(argc, argv, i, "--bin-dir")) != k_nomatch) {
         a->bin_dir = v;
         return v ? 0 : 2;
+    }
+    if ((v = opt_value(argc, argv, i, "--changed-files")) != k_nomatch) {
+        if (!v || !v[0]) {
+            (void)fprintf(stderr, "z23-lint run: --changed-files needs a path\n");
+            return 2;
+        }
+        a->changed = v;
+        return 0;
     }
     if (strcmp(argv[*i], "--list") == 0)
         a->mode = 1;
@@ -254,10 +278,11 @@ static int start_run(const struct run_args *a)
     if (!*state)
         (void)snprintf(state, sizeof state, "%s/.cache/lint-timing", cwd);
     (void)snprintf(lint_bin, sizeof lint_bin, "%s/z23-lint", a->bin_dir);
+    g_run_changed = a->changed;
     o = (struct lr_opts){ a->jobs, state, lint_bin, a->bin_dir,
                           env_int(getenv("ZCL_LINT_BUDGET_SEC"), DEFAULT_BUDGET),
                           getenv("ZCL_LINT_VERBOSE") && !strcmp(getenv("ZCL_LINT_VERBOSE"), "1"),
-                          stdout, stderr, resolve_default, &g_table,
+                          stdout, stderr, resolve_with_changed, &g_table,
                           k_serial_pro, k_serial_epi, k_poles };
     setup_env(a->gates, a->n, a->bin_dir);
     note_unrequested(a->gates, a->n);
@@ -271,7 +296,7 @@ static int start_run(const struct run_args *a)
 
 int lint_run_main(int argc, char **argv)
 {
-    struct run_args a = { env_int(getenv("ZCL_LINT_JOBS"), DEFAULT_JOBS), "build/bin", { 0 }, 0, 0, NULL };
+    struct run_args a = { env_int(getenv("ZCL_LINT_JOBS"), DEFAULT_JOBS), "build/bin", { 0 }, 0, 0, NULL, NULL };
     int rc = parse_args(&a, argc, argv);
     if (rc != 0)
         return rc;

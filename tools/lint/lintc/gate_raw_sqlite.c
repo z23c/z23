@@ -42,6 +42,10 @@
 #include "lintc.h"
 #include "gate_raw_sqlite_priv.h"
 
+int g_crs_examined_c;
+int g_crs_examined_h;
+static int g_crs_floor;
+
 static const char k_crs_gate[] = "check_raw_sqlite";
 static const char k_crs_allowlist[] = "tools/scripts/raw_sqlite_allowlist.txt";
 const char *const k_crs_prod_roots[CRS_PROD_ROOTS] = {
@@ -256,6 +260,7 @@ int crs_raw_file(const char *path, void *ctx)
         return 0;
     if (!crs_ends_c(path))
         return 0;
+    g_crs_examined_c++;
     FILE *f = fopen(path, "r");
     if (!f)
         return CRS_FATAL;
@@ -340,13 +345,29 @@ int crs_scan_kernel(int *total)
 
 /* ---- verdict --------------------------------------------------------- */
 
+static void crs_exam_reset(int floor)
+{
+    g_crs_examined_c = 0;
+    g_crs_examined_h = 0;
+    g_crs_floor = floor;
+}
+
+static int crs_done(int rc)
+{
+    int n = g_crs_examined_c + g_crs_examined_h;
+    if (lint_examined_print(n, g_crs_floor) < 0)
+        return 2;
+    return rc;
+}
+
 static int crs_verdict(struct crs_viol *v, const struct bln_set *allowed,
                        int allowed_total, int kernel_total)
 {
+    int rc;
     if (v->overflow) {
         fprintf(stderr, "%s: violation rows exceed %d\n", k_crs_gate,
                 CRS_ROWS);
-        return 2;
+        return crs_done(2);
     }
     if (v->n > 0) {
         for (int i = 0; i < v->n; i++)
@@ -361,7 +382,7 @@ static int crs_verdict(struct crs_viol *v, const struct bln_set *allowed,
         printf("  Allowlisted files (still pending sqlite3_step → AR migration) accounted for:\n");
         printf("    %d raw call sites across %d files\n", allowed_total,
                allowed->count);
-        return 1;
+        return crs_done(1);
     }
     if (allowed_total > 0) {
         printf("%s: clean outside allowlist\n", k_crs_gate);
@@ -375,29 +396,140 @@ static int crs_verdict(struct crs_viol *v, const struct bln_set *allowed,
     printf("  Principled kernel-store sites (consensus.db, correct-by-design,\n");
     printf("  below AR): %d // raw-sql-ok:progress-kv-kernel-store\n",
            kernel_total);
+    rc = 0;
+    return crs_done(rc);
+}
+
+static int crs_comp_is(const char *s, size_t n, const char *lit, size_t ln)
+{
+    return n == ln && memcmp(s, lit, ln) == 0;
+}
+
+static int crs_path_noise(const char *path)
+{
+    const char *p = path;
+    while (*p) {
+        const char *s = p;
+        size_t n;
+        while (*p && *p != '/')
+            p++;
+        n = (size_t)(p - s);
+        if (crs_comp_is(s, n, "vendor", 6) || crs_comp_is(s, n, "build", 5) ||
+            crs_comp_is(s, n, "test", 4))
+            return 1;
+        if (*p == '/')
+            p++;
+    }
     return 0;
 }
 
-int check_raw_sqlite_run(int argc, char **argv)
+static int crs_is_room(const char *path)
 {
-    (void)argc;
-    (void)argv;
+    if (strncmp(path, "controllers/", 12) == 0 || strncmp(path, "services/", 9) == 0)
+        return 1;
+    if (strstr(path, "/controllers/") != NULL || strstr(path, "/services/") != NULL)
+        return 1;
+    return 0;
+}
+
+/* The wide walks open only regular files under k_crs_prod_roots. A changed
+ * path outside that set, or one the walk cannot see, is not part of the
+ * intersection. ENOENT is invisible to readdir; any other stat failure is
+ * the same fail-closed result the walk returns. */
+static int crs_under_prod(const char *path)
+{
+    for (size_t i = 0; i < CRS_PROD_ROOTS; i++) {
+        size_t n = strlen(k_crs_prod_roots[i]);
+        if (strncmp(path, k_crs_prod_roots[i], n) == 0 && path[n] == '/')
+            return 1;
+    }
+    return 0;
+}
+
+static int crs_narrow_visible(const char *path)
+{
+    struct stat st;
+    if (!crs_under_prod(path))
+        return 0;
+    if (stat(path, &st) != 0)
+        return errno == ENOENT ? 0 : CRS_FATAL;
+    return S_ISREG(st.st_mode) ? 1 : 0;
+}
+
+static int crs_narrow_one(const char *path, struct crs_raw_ctx *raw, struct crs_viol *v)
+{
+    int vis = crs_narrow_visible(path);
+    int rc = 0;
+    int room;
+    if (vis != 1)
+        return vis;
+    if (crs_ends_c(path))
+        rc = crs_raw_file(path, raw);
+    /* Exec prunes vendor/build/test. The raw walk does not, and ignores
+     * hits there, so a noise path still goes through crs_raw_file only. */
+    if (rc == 0 && !crs_path_noise(path) && crs_ends_ch(path))
+        rc = crs_exec_file(path, v);
+    if (rc != 0 || crs_path_noise(path) || !crs_is_room(path) || !crs_ends_ch(path))
+        return rc;
+    room = crs_path_in_context_room(path);
+    if (room < 0)
+        return CRS_FATAL;
+    if (room)
+        rc = crs_ctx_file(path, v);
+    return rc;
+}
+
+static int crs_run_narrow(const struct lint_changed *ch)
+{
+    static struct crs_viol v;
+    static struct bln_set allowed;
+    struct crs_raw_ctx raw;
+    int allowed_total = 0;
+    int rc = 0;
+    if (ch->n == 0) {
+        crs_exam_reset(0);
+        return lint_examined_print(0, 0) < 0 ? 2 : 0;
+    }
+    crs_exam_reset(0);
+    if (excl_ensure() != 0)
+        return 2;
+    if (crs_raw_init() != 0 || crs_exec_init() != 0)
+        return 2;
+    memset(&v, 0, sizeof v);
+    memset(&allowed, 0, sizeof allowed);
+    if (bln_load(&allowed, k_crs_allowlist) != 0)
+        return 2;
+    raw.v = &v;
+    raw.allowed = &allowed;
+    raw.allowed_total = &allowed_total;
+    for (int i = 0; rc == 0 && i < ch->n; i++)
+        rc = crs_narrow_one(ch->path[i], &raw, &v);
+    if (rc)
+        return rc;
+    return crs_verdict(&v, &allowed, allowed_total, 0);
+}
+
+static int crs_run_wide(void)
+{
+    static struct crs_viol v;
+    static struct bln_set allowed;
+    int allowed_total = 0;
+    int kernel_total = 0;
+    int rc;
+    crs_exam_reset(2);
+    memset(&v, 0, sizeof v);
+    memset(&allowed, 0, sizeof allowed);
     if (excl_ensure() != 0)
         return 2;
     if (rs_init() != 0)
         return 2;
     if (crs_raw_init() != 0 || crs_exec_init() != 0)
         return 2;
-    static struct crs_viol v;
-    static struct bln_set allowed;
-    memset(&allowed, 0, sizeof allowed);
     if (bln_load(&allowed, k_crs_allowlist) != 0)
         return 2;
-    int allowed_total = 0;
-    int rc = crs_scan_raw(&v, &allowed, &allowed_total);
+    rc = crs_scan_raw(&v, &allowed, &allowed_total);
     if (rc)
         return rc;
-    int kernel_total = 0;
     crs_scan_kernel(&kernel_total);
     rc = crs_scan_exec(&v);
     if (rc)
@@ -406,4 +538,16 @@ int check_raw_sqlite_run(int argc, char **argv)
     if (rc)
         return rc;
     return crs_verdict(&v, &allowed, allowed_total, kernel_total);
+}
+
+int check_raw_sqlite_run(int argc, char **argv)
+{
+    struct lint_changed ch;
+    int rc;
+    int br = lint_changed_bind(&argc, &argv, &ch);
+    if (br)
+        return br;
+    rc = ch.active ? crs_run_narrow(&ch) : crs_run_wide();
+    lint_changed_free(&ch);
+    return rc;
 }

@@ -7,6 +7,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include "platform/logical_cpu.h"
@@ -41,6 +42,62 @@ static int build_jobs_main(int argc, char **argv)
     return 0;
 }
 
+/* Tool, not a gate. Withholds --changed-files when the gate source differs
+ * from the base. The harness links fast_narrow.c without this entry point,
+ * so the gate table stays out of that binary. */
+static int lint_fast_scan_args(int argc, char **argv, const char **gate,
+                               const char **changed)
+{
+    *gate = NULL;
+    *changed = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (strncmp(argv[i], "--gate=", 7) == 0 && argv[i][7] != '\0')
+            *gate = argv[i] + 7;
+        else if (strncmp(argv[i], "--changed-files=", 16) == 0 && argv[i][16] != '\0')
+            *changed = argv[i] + 16;
+        else
+            return 2;
+    }
+    if (!*gate || !*changed)
+        return 2;
+    return 0;
+}
+
+static const struct lint_gate *lint_fast_find(const char *name)
+{
+    size_t n = 0;
+    const struct lint_gate *tab = lint_gate_table(&n);
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(tab[i].name, name) == 0)
+            return &tab[i];
+    }
+    return NULL;
+}
+
+static int lint_fast_scan_main(int argc, char **argv)
+{
+    const char *gate = NULL;
+    const char *changed = NULL;
+    const struct lint_gate *g;
+    char flag[PATH_MAX];
+    char *args[4];
+    int ac = 0;
+    if (lint_fast_scan_args(argc, argv, &gate, &changed) != 0)
+        return die("z23-lint: usage: z23-lint fast-scan --gate=NAME --changed-files=PATH\n", "");
+    g = lint_fast_find(gate);
+    if (!g)
+        return die("z23-lint: unknown gate: %s\n", gate);
+    if (strcmp(gate, "check-fortify-masked-decls") == 0)
+        args[ac++] = (char *)"--verify";
+    if (lint_fast_gate_narrow(gate, 1)) {
+        if (snprintf(flag, sizeof flag, "--changed-files=%s", changed) >= (int)sizeof flag)
+            return 2;
+        args[ac++] = flag;
+    }
+    args[ac] = NULL;
+    return g->run(ac, args);
+}
+
 /* Subcommands (premise selection, module-linkgraph); they are tools, not
  * gates, so --list and the gate table never name them. */
 static const struct {
@@ -55,6 +112,7 @@ static const struct {
     { "module-linkgraph", lmg_main },
     { "run", lint_run_main },
     { "epoch-probes", lint_epoch_probes_main },
+    { "fast-scan", lint_fast_scan_main },
 };
 
 /* The premise-selection tool named by argv[1], or NULL. */

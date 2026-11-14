@@ -66,6 +66,7 @@ struct pc_opts {
     bool have_skip;
     char list[PC_LIST];
     char skip_list[PC_LIST];
+    const char *changed;          /* --changed-files, current tree only */
     size_t n_sel;
     size_t sel[PC_MAX_GATES];
     bool skipped[PC_MAX_GATES];   /* by selected index */
@@ -97,7 +98,8 @@ static const char *const k_pc_unbuilt[] = {
 
 static const char k_pc_usage[] =
     "z23-lint: usage: z23-lint precheck [--base=DIR] [--jobs=N] "
-    "[--gates=a,b] [--skip=a,b] [--skip-if-no-base] [--json]\n";
+    "[--gates=a,b] [--skip=a,b] [--skip-if-no-base] [--json] "
+    "[--changed-files=PATH]\n";
 
 static bool pc_parse_jobs(const char *s, int *out)
 {
@@ -141,6 +143,10 @@ static int pc_parse_arg(struct pc_opts *o, const char *arg)
     }
     if (strcmp(arg, "--json") == 0) {
         o->json = true;
+        return 0;
+    }
+    if (strncmp(arg, "--changed-files=", 16) == 0 && arg[16] != '\0') {
+        o->changed = arg + 16;
         return 0;
     }
     return 2;
@@ -214,37 +220,60 @@ static int pc_mark_skips(struct pc_opts *o, const struct lint_gate *tab,
     return 0;
 }
 
+/* changed is NULL for the base child and for a gate that must not narrow. */
 [[noreturn]] static void pc_child(const struct lint_gate *g, const char *dir,
-                                  FILE *cap)
+                                  FILE *cap, const char *changed)
 {
-    /* Same argv as `z23-lint GATE`: main.c runs g->run(argc-2, argv+2), so
-     * a plain invocation has argc 0 and argv[0] NULL. */
-    char *av[2] = { (char *)g->name, NULL };
-    int fd = cap ? fileno(cap) : open("/dev/null", O_RDWR);
+    /* Same argv as `z23-lint GATE` plus an optional --changed-files. main.c
+     * runs g->run on the args after the gate name. */
+    char flag[PATH_MAX];
+    char *args[2];
+    int n = 0;
+    int fd;
+    char root[PATH_MAX];
+    int rc;
+    if (changed && changed[0] != '\0') {
+        if (snprintf(flag, sizeof flag, "--changed-files=%s", changed) >= (int)sizeof flag)
+            _exit(PC_RC_SETUP);
+        args[n++] = flag;
+    }
+    args[n] = NULL;
+    fd = cap ? fileno(cap) : open("/dev/null", O_RDWR);
     if (fd < 0 || chdir(dir) != 0 || dup2(fd, STDOUT_FILENO) < 0
         || dup2(fd, STDERR_FILENO) < 0)
         _exit(PC_RC_SETUP);
     /* Gates that resolve the repo through cic_repo_root would otherwise lint
      * the binary's own tree in both runs; cic_invoke children inherit this. */
-    char root[PATH_MAX];
     if (!getcwd(root, sizeof root) || setenv("ZCL_LINT_REPO_ROOT", root, 1) != 0)
         _exit(PC_RC_SETUP);
     (void)alarm(PC_TIMEOUT_S);
-    int rc = g->run(0, av + 1) & 0xff;
+    rc = g->run(n, args) & 0xff;
     fflush(NULL);
     _exit(rc);
 }
 
 static int pc_spawn(const struct lint_gate *g, const char *dir, FILE *cap,
-                    pid_t *pid)
+                    const char *changed, pid_t *pid)
 {
     fflush(NULL);
     *pid = fork();
     if (*pid < 0)
         return -1;
     if (*pid == 0)
-        pc_child(g, dir, cap);
+        pc_child(g, dir, cap, changed);
     return 0;
+}
+
+/* The current-tree child (even items) of a per-file gate whose own source
+ * matches the base. The base child stays a whole-tree run. */
+static const char *pc_here_changed(const struct pc_opts *o, size_t item,
+                                   const char *name)
+{
+    if ((item % 2) != 0 || !o->changed || !o->changed[0])
+        return NULL;
+    if (!lint_fast_gate_narrow(name, 1))
+        return NULL;
+    return o->changed;
 }
 
 /* A work item that needs no child: a skipped gate, or a base rc already cached. */
@@ -265,8 +294,9 @@ static int pc_start_next(const struct lint_gate *tab, const struct pc_opts *o,
         return 0;
     const struct lint_gate *g = &tab[o->sel[*next / 2]];
     const char *dir = (*next % 2 == 0) ? "." : o->base;
+    const char *changed = pc_here_changed(o, *next, g->name);
     FILE *cap = (*next % 2 == 0) ? tmpfile() : NULL;
-    if (pc_spawn(g, dir, cap, &slots[*live].pid) != 0) {
+    if (pc_spawn(g, dir, cap, changed, &slots[*live].pid) != 0) {
         if (cap)
             fclose(cap);
         return -1;

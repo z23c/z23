@@ -208,6 +208,11 @@ int crs_exec_file(const char *path, void *ctx)
         return 0;
     if (strcmp(path, "engine/models/include/models/activerecord.h") == 0)
         return 0;
+    {
+        size_t el = strlen(path);
+        if (el >= 2 && path[el - 2] == '.' && path[el - 1] == 'h')
+            g_crs_examined_h++;
+    }
     FILE *f = fopen(path, "r");
     if (!f)
         return CRS_FATAL;

@@ -76,6 +76,8 @@ struct fmd_run_ctx {
     struct fmd_off offs[FMD_OFF_CAP];
     size_t n;
     int err;
+    int examined;
+    int narrow;
 };
 
 /* No heap anywhere in this gate: the measurement lives in one static
@@ -431,24 +433,27 @@ static int fmd_off_add(struct fmd_run_ctx *c, const char *path,
     return 0;
 }
 
-static int fmd_index_cb(const char *path, int stage, void *vp)
+static int fmd_scan_one(struct fmd_run_ctx *c, const char *path)
 {
-    (void)stage;
-    struct fmd_run_ctx *c = vp;
     size_t l = strlen(path);
+    char full[FMD_PATH];
+    struct stat sb;
+    char hits[FMD_HITS];
+    int rc;
     if (l < 3 || strcmp(path + l - 2, ".c") != 0)
         return 0;
-    char full[FMD_PATH];
-    if (ovf(snprintf(full, sizeof full, "%s/%s", c->root, path),
-            sizeof full)) {
+    if (strcmp(c->root, ".") == 0)
+        rc = snprintf(full, sizeof full, "%s", path);
+    else
+        rc = snprintf(full, sizeof full, "%s/%s", c->root, path);
+    if (ovf(rc, sizeof full)) {
         c->err = 1;
         return 1;
     }
-    struct stat sb;
     if (stat(full, &sb) != 0 || !S_ISREG(sb.st_mode))
         return 0; /* the script's `[ -f "$f" ] || continue` */
-    char hits[FMD_HITS];
-    int rc = fmd_scan_file(full, c->m, hits, sizeof hits);
+    c->examined++;
+    rc = fmd_scan_file(full, c->m, hits, sizeof hits);
     if (rc == 2) {
         c->err = 1;
         return 1;
@@ -458,6 +463,29 @@ static int fmd_index_cb(const char *path, int stage, void *vp)
         return 1;
     }
     return 0;
+}
+
+static int fmd_index_cb(const char *path, int stage, void *vp)
+{
+    (void)stage;
+    return fmd_scan_one(vp, path);
+}
+
+static int fmd_scan_set(struct fmd_run_ctx *c, const struct lint_changed *ch)
+{
+    for (int i = 0; i < ch->n; i++) {
+        if (fmd_scan_one(c, ch->path[i]) != 0) {
+            fprintf(stderr, "%s: index scan failed\n", k_fmd_gate);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+static int fmd_report_count(const struct fmd_run_ctx *c)
+{
+    int floor = c->narrow ? 0 : -1;
+    return lint_examined_print(c->examined, floor) < 0 ? 2 : 0;
 }
 
 static void fmd_report_fail(const struct fmd_run_ctx *c, const char *mset,
@@ -483,48 +511,89 @@ static void fmd_report_fail(const struct fmd_run_ctx *c, const char *mset,
             "not a row.\n", cc, mset);
 }
 
-static int fmd_scan_measured(const char *root, struct fmd_meas *m)
+static int fmd_scan_none(const struct fmd_meas *m, int floor)
 {
-    char mset[FMD_CC_BUF];
-    fmd_meas_masked_str(m, mset, sizeof mset);
-    if (m->nmasked == 0) {
-        printf("%s: PASSED — this toolchain masks no candidate\n"
-               "  declaration behind optimisation (control probe compiled, "
-               "so the\n  measurement ran). CC=\"%s\"\n",
-               k_fmd_gate, m->cc.shown);
-        return 0;
-    }
-    static struct fmd_run_ctx c;
-    memset(&c, 0, sizeof c);
-    c.m = m;
-    c.root = root;
+    printf("%s: PASSED — this toolchain masks no candidate\n"
+           "  declaration behind optimisation (control probe compiled, "
+           "so the\n  measurement ran). CC=\"%s\"\n",
+           k_fmd_gate, m->cc.shown);
+    return lint_examined_print(0, floor) < 0 ? 2 : 0;
+}
+
+static int fmd_scan_index(struct fmd_run_ctx *c)
+{
     char bad[8] = {0};
-    int grc = lint_git_index_foreach(fmd_index_cb, &c, bad);
-    if (c.err || grc) {
+    int grc = lint_git_index_foreach(fmd_index_cb, c, bad);
+    if (c->err || grc) {
         fprintf(stderr, "%s: index scan failed\n", k_fmd_gate);
         return 2;
     }
-    if (c.n > 0) {
-        fmd_report_fail(&c, mset, m->cc.shown);
-        return 1;
-    }
-    printf("%s: PASSED (masked set:%s; no unguarded caller)\n", k_fmd_gate,
-           mset);
     return 0;
+}
+
+static int fmd_scan_body(struct fmd_run_ctx *c, const char *mset, const char *cc)
+{
+    if (c->n > 0) {
+        fmd_report_fail(c, mset, cc);
+        return fmd_report_count(c) == 0 ? 1 : 2;
+    }
+    printf("%s: PASSED (masked set:%s; no unguarded caller)\n", k_fmd_gate, mset);
+    return fmd_report_count(c);
+}
+
+static int fmd_scan_measured(const char *root, struct fmd_meas *m,
+                             const struct lint_changed *ch)
+{
+    char mset[FMD_CC_BUF];
+    static struct fmd_run_ctx c;
+    int rc;
+    fmd_meas_masked_str(m, mset, sizeof mset);
+    if (m->nmasked == 0)
+        return fmd_scan_none(m, ch->active ? 0 : -1);
+    if (ch->active && ch->n == 0)
+        return lint_examined_print(0, 0) < 0 ? 2 : 0;
+    memset(&c, 0, sizeof c);
+    c.m = m;
+    c.root = root;
+    c.narrow = ch->active;
+    if (ch->active)
+        rc = fmd_scan_set(&c, ch);
+    else
+        rc = fmd_scan_index(&c);
+    if (rc)
+        return rc;
+    return fmd_scan_body(&c, mset, m->cc.shown);
 }
 
 int check_fortify_masked_decls_run(int argc, char **argv)
 {
-    bool verify = argc >= 1 && !strcmp(argv[0], "--verify");
-    if (verify) { --argc; ++argv; }
-    const char *root = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : ".";
+    struct lint_changed ch;
+    bool verify;
+    const char *root;
     static char work[FMD_PATH];
-    if (lint_mkdtemp(work, sizeof work, "fmd") != 0) return 2;
-    struct fmd_meas *m = fmd_meas_static();
-    int rc = fmd_meas_create(work, m);
-    if (!rc && verify) rc = fmd_selftest_measured(work, m);
+    struct fmd_meas *m;
+    int rc;
+    int br = lint_changed_bind(&argc, &argv, &ch);
+    if (br)
+        return br;
+    verify = argc >= 1 && argv[0] && !strcmp(argv[0], "--verify");
+    if (verify) {
+        --argc;
+        ++argv;
+    }
+    root = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : ".";
+    if (lint_mkdtemp(work, sizeof work, "fmd") != 0) {
+        lint_changed_free(&ch);
+        return 2;
+    }
+    m = fmd_meas_static();
+    rc = fmd_meas_create(work, m);
+    if (!rc && verify)
+        rc = fmd_selftest_measured(work, m);
     rap_rm_rf(work);
-    if (!rc) rc = fmd_scan_measured(root, m);
+    if (!rc)
+        rc = fmd_scan_measured(root, m, &ch);
     fmd_meas_release(m);
+    lint_changed_free(&ch);
     return rc;
 }

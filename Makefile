@@ -3792,7 +3792,7 @@ LINTC_RUN_CORE_SRCS = tools/lint/lintc/run_table.c tools/lint/lintc/run_cmd.c \
 	tools/lint/lintc/run_drive.c tools/lint/lintc/run_report.c
 # precheck.c is the fork/waitpid runner behind `z23-lint precheck`; its test
 # supplies its own gate table, so the test binary never links the real gates.
-TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS) $(LINTC_RUN_CORE_SRCS) tools/lint/lintc/precheck.c tools/lint/lintc/precheck_base.c tools/lint/lintc/lib.c)
+TEST_LINT_SELECTION_SRCS = $(if $(ZCL_HOST_WINDOWS),,$(LINTC_PREMISE_CORE_SRCS) $(LINTC_RUN_CORE_SRCS) tools/lint/lintc/precheck.c tools/lint/lintc/precheck_base.c tools/lint/lintc/fast_narrow.c tools/lint/lintc/lib.c)
 
 # test.c and test_parallel.c each own their own main() — never both in
 # one binary. test_parallel_zcl uses the latter + the same test/spec
@@ -7392,15 +7392,26 @@ LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip 
 ZCL_LINT_FAST_PRECHECK ?= 1
 define LINT_FAST_PRECHECK_RUN
 if [ "$(ZCL_LINT_FAST_PRECHECK)" = 1 ]; then \
-	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip-if-no-base --skip=$(LINT_FAST_PRECHECK_SKIP) || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
+	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip-if-no-base --skip=$(LINT_FAST_PRECHECK_SKIP) $$changed_arg || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
 	fi
 endef
 
 # These gates check the generated capability inventory and package registry
 # roots, including zcode-package.json dependency pins. Both also run in full lint.
+# A narrowed lint-fast pass judges only the changed files of a per-file gate
+# whose own source matches the merge-base. It is not a whole-tree proof;
+# make lint and the land proof stay whole-tree. No merge-base, or a diff
+# that does not succeed, means no flag.
 ifeq ($(ZCL_LINT_SERIAL),1)
-lint-fast: $(LINT_FAST_GATES) $(LINTC_TOOL) $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN)
-	@$(LINT_FAST_PRECHECK_RUN)
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
+		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \
+		$(REPRO_NETWORK_POLICY_SELFTEST_BIN) \
+		$(BUILD_EPOCH_INTEGRITY_LINT_BIN) \
+		$(CHECKOUT_LOCK_SELFTEST_LINT_BIN)
+	@rc=0; changed=$$(mktemp) || exit 1; changed_arg=; if base=$$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null); then if { git diff --name-only "$$base" && git ls-files --others --exclude-standard; } > "$$changed"; then changed_arg="--changed-files=$$changed"; fi; fi; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs 1 --bin-dir "$(BIN_DIR)" $$changed_arg $(LINT_FAST_GATES) || { echo "lint-fast: precheck skipped after fast subset failure"; rm -f "$$changed"; exit 1; }; \
+	$(LINT_FAST_PRECHECK_RUN) || rc=1; \
+	rm -f "$$changed"; \
+	[ "$$rc" = 0 ] || exit 1
 	@echo "lint-fast: OK (serial)"
 else
 lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
@@ -7408,8 +7419,9 @@ lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN
 		$(REPRO_NETWORK_POLICY_SELFTEST_BIN) \
 		$(BUILD_EPOCH_INTEGRITY_LINT_BIN) \
 		$(CHECKOUT_LOCK_SELFTEST_LINT_BIN)
-	@rc=0; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES) || { echo "lint-fast: precheck skipped after fast subset failure"; exit 1; }; \
+	@rc=0; changed=$$(mktemp) || exit 1; changed_arg=; if base=$$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null); then if { git diff --name-only "$$base" && git ls-files --others --exclude-standard; } > "$$changed"; then changed_arg="--changed-files=$$changed"; fi; fi; ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $$changed_arg $(LINT_FAST_GATES) || { echo "lint-fast: precheck skipped after fast subset failure"; rm -f "$$changed"; exit 1; }; \
 	$(LINT_FAST_PRECHECK_RUN) || rc=1; \
+	rm -f "$$changed"; \
 	[ "$$rc" = 0 ] || exit 1
 	@echo "lint-fast: OK"
 endif

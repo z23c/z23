@@ -42,6 +42,10 @@ struct crs_raw_ctx {
 typedef int (*crs_file_fn)(const char *path, void *ctx);
 
 extern const char *const k_crs_prod_roots[CRS_PROD_ROOTS];
+/* Files the raw (.c) and exec (.h) walks actually open. Context and kernel
+ * walks are subsets of those and are not counted again. */
+extern int g_crs_examined_c;
+extern int g_crs_examined_h;
 
 int crs_viol_add(struct crs_viol *v, const char *fmt, ...);
 int crs_walk(const char *dir, int prune_noise, crs_file_fn fn, void *ctx);
@@ -58,6 +62,9 @@ int crs_raw_file(const char *path, void *ctx);
 /* ctx is a struct crs_viol pointer. */
 int crs_exec_file(const char *path, void *ctx);
 int crs_ctx_file(const char *path, struct crs_viol *v);
+/* 1 when path sits inside a controllers/services room the wide context
+ * walk opens, 0 when it does not, -1 when that room list cannot be built. */
+int crs_path_in_context_room(const char *path);
 
 int crs_scan_kernel(int *total);
 int crs_scan_exec(struct crs_viol *v);

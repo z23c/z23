@@ -545,6 +545,7 @@ int t_wallet_view_never_invents_rpc_credentials(void);
 int t_deleted_engine_names_absent_from_production_sources(void);
 int t_build_commit_macro_stays_behind_getter(void);
 int t_fortify_combined_measurement(void);
+int t_lint_fast_changed_files(void);
 int t_projection_deferral_is_not_block_rejected_contract(void);
 int t_trusted_peer_stall_guard_contract(void);
 int t_gap_fill_wakes_connman_dispatch_contract(void);
