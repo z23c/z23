@@ -84,11 +84,29 @@ if the app is not installed, use an app-capable installation. The
 
 ### Make a change and share it
 
-Ask your assistant to make a personal copy, change it and show you a preview.
-Review the native window and choose **Make my copy**. After the assistant
-builds and previews the change, ask it to request **Keep**, then approve the
-exact version in the native window. The
-assistant supplies the change; Z23 provides the source and build tools.
+For a fresh Sky Combat installation, ask your assistant to use `apps_adopt`
+with `name: "skycombat"`. Review **Make my copy**, then choose **Build and
+preview** and explicitly **Keep this version**. The assistant can continue
+from that kept-copy receipt; reconnect using fresh copied setup if the receipt
+is missing or stale.
+
+Ask for a small change. After the assistant saves the draft, select the kept
+copy in My Apps and choose **Change → Review unkept changes**. Review the exact
+draft, choose **Build and preview**, and explicitly **Keep this version** when
+you want to keep it. The assistant supplies the change; Z23 provides the source
+and build tools.
+
+To send that kept version, choose **Share this version → Create share file**
+in My Apps. Review the version and publisher, confirm the share, and send the
+resulting `.z23share` file to your friend. This does not require an assistant
+for sharing, and the sender can close Z23 after creating the file.
+
+Your friend can use **Open With Z23** or run
+`z23 app receive --file=/absolute/path/app.z23share --datadir="$HOME/.local/share/z23-app-data" --preview` and review the
+publisher and destination. After receiving, they separately choose **Build and
+preview**, then **Keep this version**. Their kept copy can reopen offline from
+My Apps. The friend needs the app installation and a desktop, but no assistant,
+Z23 account or node service.
 
 To share a link from My Apps, select your kept app and choose **Share this
 version → Share a link**. Review the displayed saved version, package, publisher
@@ -110,16 +128,7 @@ Opening and sharing app links explicitly refuse on Windows.
 <!-- claim: symbol-present app_network_open_link tools/command/native_app_network_controller.c # explicit link receive flow -->
 <!-- claim: symbol-present al_setup_identity tools/command/native_app_library_command.c # copied AI setup binds saved and source identities -->
 
-To share your kept version, ask the assistant to share it to a new absolute
-file path. Review the version and publisher in the native window and confirm
-to create a `.z23share` file. Send that file directly to your friend.
-
-Your friend can run
-`z23 app receive --file=/absolute/path/app.z23share --datadir="$HOME/.local/share/z23-app-data" --preview` and review the
-publisher and destination. After receiving, they can choose **Build and
-preview**, then **Keep this version**. The local file-sharing workflow does
-not require signup. The detailed command contracts and current distribution
-limitations are below.
+The detailed command contracts and current distribution limitations are below.
 
 If you received a copy without keeping a version, reopen **My Apps** with
 the same data directory. Choose **Discover apps → Review received copies →

@@ -74,8 +74,8 @@ recorded here; check them against a trusted copy of this guide before use.
 ```sh
 (
     set -eu
-    installer_sha=d2f9977e024c5ece9a2dd1e55e641e5cf45fac19746d19994f1be2cf745c27f7
-    manifest_sha=97442fa341dc597cd33377f469319892950dc2807e0f0c883d5831dcc670d198
+    installer_sha=38bd7dec41b07807d6dc1c3534f278362294085d3605a5e8232f1f7a1a8f9969
+    manifest_sha=7267174fd1d7511aae06f7bb7187c517b215274b9effcd4c537aede96b90f671
     install_tmp=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$install_tmp"' 0
     curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 --max-filesize 1048576 \
@@ -95,12 +95,14 @@ open the game. Linux desktop registration needs `update-mime-database`; if it
 is unavailable, the installer reports a command-line fallback.
 
 Open Sky Combat using the command printed by the installer to try the game.
-To change it, open My Apps with the installed executable; if `z23` is not
-on your PATH, replace it below with its absolute installed path:
+To change it, open My Apps with the installed executable:
 
 ```sh
-z23 app library --datadir="$HOME/.local/share/z23-app-data"
+"$HOME/.local/bin/z23" app library --datadir="$HOME/.local/share/z23-app-data"
 ```
+
+If you chose another installation prefix, use the executable path printed by
+the installer. Keep the same app-data directory for My Apps and your assistant.
 
 Select Sky Combat and choose **Change with your AI**. Press **C** to copy the
 setup into your assistant's local MCP settings, keeping the window open while
@@ -116,27 +118,37 @@ is missing or the copy has changed, return to My Apps, select the kept copy,
 and choose **Change with your AI** (or **Change → Change with your AI**).
 Press **C** and give that fresh setup to your connected assistant, keeping the
 window open while pasting. Use this setup path for an existing or received copy
-as well. Ask it to change your copy; review and preview the exact saved draft,
-then explicitly choose **Keep this version**.
+as well. Ask it to change your copy. After it saves the draft, return to My Apps,
+select the kept copy and choose **Change → Review unkept changes**. Review the
+exact saved draft, choose **Build and preview**, then explicitly choose
+**Keep this version**.
 Your previous kept version remains available until you approve the new one.
 
-To send that kept version, choose **Share this version → Share a link**, review
-its identity and confirm **Share link**. Copy the link once available and keep
-the sharing window open while your friend receives it; sharing stops when the
-window closes or you stop it. You can instead choose **Create share file** and
-send the resulting file. Sharing requires a personal publishing identity; a
-received copy may open **Prepare a personal copy?**. Review and approve that
+To send that kept version, choose **Share this version → Create share file**,
+review its identity and confirm the share. Copy the file location and send the
+`.z23share` file through your usual file-transfer method. You do not need to keep
+Z23 running while your friend receives the file.
+
+You can also choose **Share a link** and confirm **Share link**. Copy the link
+once available and keep the sharing window open while your friend receives it;
+sharing stops when the window closes or you stop it. Links use Tor and can take
+time or fail to connect; the signed file is an alternative. Sharing requires a
+personal publishing identity; a received copy may open **Prepare a personal
+copy?**. Review and approve that
 preparation, review the draft, choose **Build and preview**, then explicitly
 **Keep this version**. Choose Share again to sign and share the kept version.
 This onward-sharing flow does not require an AI assistant or the original
 sender to remain online.
 
-Your friend needs their own app-capable installation and desktop, not a source
-checkout or a running node. For a link, they choose **Discover apps → Open a
-shared app**, paste it, review the publisher and offer, then confirm **Receive**.
-For a file, they can use the registered **Open With Z23** entry on Linux or run
-`z23 app receive --file=/absolute/path/app.z23share --datadir="$HOME/.local/share/z23-app-data" --preview`.
+Your friend needs their own app-capable installation and desktop, but no Z23
+account, AI assistant, source checkout, or running node. For a file, they can use
+the registered **Open With Z23** entry on Linux or run
+`"$HOME/.local/bin/z23" app receive --file=/absolute/path/app.z23share --datadir="$HOME/.local/share/z23-app-data" --preview`.
 Receiving, **Build and preview**, and **Keep this version** are separate choices.
+After Keep, your friend can reopen that copy from My Apps, including offline.
+For a link, they choose **Discover apps → Open a shared app**, paste it, review
+the publisher and offer, then confirm **Receive** and use the same preview and
+Keep choices.
 Compare the publisher identity through a separate trusted channel. Link opening
 and sharing currently refuse on Windows.
 
