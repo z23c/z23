@@ -129,7 +129,15 @@ open, so the focused field scrolls into view. A tap reaches a button only where
 that button is on screen (`view_hit.c`, tested by `tests/view_hit_test.c`): a
 button scrolled out of its page never takes a tap meant for the fixed bar over it.
 
-The Home screen shows the phone card (one plain status line: Node stopped, Stopping…, Starting your node… until a height has been seen, then Your node is running but has not replied yet, Catching up with the blocks to go, Can't confirm it's up to date with the reason (only 1 peer, no peers, peer count unknown, no new block for N min), No peer has reported a block height yet, Block N, waiting for other computers when the node has a height but no peer reference, or Checking the chain when its height is unknown, or Up to date; and a Start node or Stop node button, hidden while the node stops). The status line always takes two lines and the button keeps its place while hidden (the layout field `"lines"`), so the tiles below never move when the status wraps or the node stops. The Wallet, Receive, Scan and Assistant tiles come next, followed by installed Z23 apps. Receive opens the existing Receive page directly, including Copy address and Share request, without opening Funds first.
+The default Home shows a node status line, Node details, and Start node when the node is stopped. Wallet and Receive are the primary tiles. More opens Scan, Assistant, Apps, Play, Settings and the node controls, including Stop node. The node status keeps two lines and Start node keeps one line while hidden, so the tiles do not move as status changes. Receive opens its existing page directly, including Copy address and Share request, without opening Funds first.
+
+The **Node details** action opens a read-only page with the last reported
+node block and peer or fleet reference, or an explicit unknown or stopped
+state. The chain verdict permits a node to be up to two blocks behind that
+reference. Node sync and wallet scanning are separate; this page does not
+report wallet readiness or full-history validation. Back returns Home.
+The foreground notification uses the same node status line as Home.
+
 <!-- claim: symbol-present go_page apps/z23android/shell.c # Home Receive opens the existing Receive page directly -->
 Back from the Home shortcut returns Home, including after a share round trip; Back from Receive opened inside the wallet still returns to Funds.
 <!-- claim: symbol-present receive_from_home apps/z23android/shell.c # Home Receive Back returns Home without changing the wallet Receive Back destination -->

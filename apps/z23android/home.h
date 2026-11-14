@@ -31,6 +31,8 @@ struct zapp_app_entry {
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap);
 /* The plain node line the Home card shows for the view, copied into out. */
 const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t cap);
+/* Read-only node details derived only from the node view. */
+const char *zapp_home_node_details(const struct zapp_view *view, bool preview, char *out, size_t cap);
 /* One launchable app: zcl.z23_app_card.v1 for an org.z23.* app signed with this app's key, else
  * zcl.app_card.v1. Signed Z23 and base-app cards also carry version_code when known and version_name when nonempty.
  * Returns the JSON length or 0. */
@@ -52,7 +54,7 @@ size_t zapp_home_layout_count(void);
 const char *zapp_home_layout_name(size_t index);
 /* The document of the named built-in layout, or NULL. */
 const char *zapp_home_layout(const char *name);
-/* The label of a home action id (wallet, receive, scan, assistant, apps, settings), or NULL. */
+/* The label of a home action id (node_details, wallet, receive, scan, assistant, apps, settings), or NULL. */
 const char *zapp_home_action_label(const char *id);
 /* The action a Home node button sends, from the label drawn on it: "" for no action, such as while a stop is in progress. */
 const char *zapp_home_node_label(const struct zapp_view *view);

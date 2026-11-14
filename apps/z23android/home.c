@@ -11,6 +11,7 @@
 #define HOME_PHONE_TEXT \
     "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"title\",\"lines\":2}," \
     "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":3}," \
+    "{\"type\":\"action\",\"id\":\"node_details\",\"lines\":1}," \
     "{\"type\":\"action\",\"id\":\"node_start_home\",\"field\":\"home_start\",\"lines\":1}"
 
 /* Node status and wallet actions are the built-in home. */
@@ -31,7 +32,7 @@ static const struct { const char *name, *document; } layouts[] = {
     {"default", default_layout}, {"classic", classic_layout},
 };
 static const struct { const char *id, *label; } labels[] = {
-    {"scan", "Scan"}, {"assistant", "Assistant"}, {"wallet", "Wallet"}, {"receive", "Receive"}, {"apps", "Apps"}, {"settings", "Settings"},
+    {"node_details", "Node details"}, {"scan", "Scan"}, {"assistant", "Assistant"}, {"wallet", "Wallet"}, {"receive", "Receive"}, {"apps", "Apps"}, {"settings", "Settings"},
 };
 
 size_t zapp_home_layout_count(void) { return sizeof(layouts) / sizeof(layouts[0]); }
@@ -92,7 +93,7 @@ static void responding_node_line(const struct zapp_view *view, char *out, size_t
     else if (view->chain_state == ZAPP_CHAIN_BEHIND) behind_line(view, out, cap);
     else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);
-    else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Up to date");
+    else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Node up to date");
     else snprintf(out, cap, "Connected, checking the chain");
 }
 
@@ -125,6 +126,33 @@ const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t 
 {
     return plain_node_line(view, out, cap);
 }
+/* The details surface contains only explicit node fields, never wallet or assistant text. */
+const char *zapp_home_node_details(const struct zapp_view *view, bool preview, char *out, size_t cap)
+{
+    if (!out || !cap) return NULL;
+    if (preview) { snprintf(out, cap, "The preview app does not run a node."); return out; }
+    const char *state = view->node_stopping ? "Node stopping." :
+        view->node_starting || view->node_installing ? "Node starting." :
+        !view->node_process_running ? "Node stopped." :
+        view->pace == ZAPP_PACE_PAUSE ? "Node sync paused." :
+        !view->node_running ? "Node not responding." : NULL;
+    if (state) {
+        snprintf(out, cap, "%s\nNode sync is separate from wallet scanning.", state);
+        return out;
+    }
+    char height[32] = "Unknown", reference[32] = "Unknown";
+    if (view->node_height >= 0) zapp_grouped(view->node_height, height);
+    if (view->node_reference > 0) zapp_grouped(view->node_reference, reference);
+    const char *verdict = view->chain_state == ZAPP_CHAIN_CURRENT && view->node_height >= 0 && view->node_reference > 0 ?
+        "At the last check, the node was no more than two blocks behind the reported reference." :
+        view->chain_state == ZAPP_CHAIN_BEHIND && view->node_height >= 0 && view->node_reference > 0 ? "At the last check, the node was behind." :
+        view->chain_state == ZAPP_CHAIN_UNCONFIRMED ? "Cannot confirm the node is up to date." :
+        "Node sync status is unknown.";
+    snprintf(out, cap, "Last reported node block: %s\nReported peer or fleet reference: %s\n%s\nNode sync is separate from wallet scanning.",
+             height, reference, verdict);
+    return out;
+}
+
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap)
 {
     struct json_value card;

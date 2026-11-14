@@ -38,6 +38,38 @@ static void plant_wallet_marker(struct zapp_view *view)
     snprintf(view->ops_text, sizeof(view->ops_text), "%s", marker);
     snprintf(view->pair_offer, sizeof(view->pair_offer), "%s", marker);
 }
+static void node_details_states(void)
+{
+    struct zapp_view view = {0}; char text[512];
+    fill_secrets(&view); plant_wallet_marker(&view);
+    snprintf(view.node_line, sizeof(view.node_line), "WALLET-MARKER");
+    snprintf(view.sync_status, sizeof(view.sync_status), "TRANSCRIPT-SECRET");
+    snprintf(view.node_wallet_replay, sizeof(view.node_wallet_replay), "WALLET-MARKER");
+    assert(zapp_home_node_details(&view, true, text, sizeof(text)) && strstr(text, "preview app does not run"));
+    view.node_height = 123; view.node_reference = 125; view.chain_state = ZAPP_CHAIN_CURRENT;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node stopped") && !strstr(text, "123"));
+    view.node_starting = true;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node starting") && !strstr(text, "123"));
+    view.node_starting = false; view.node_process_running = true; view.node_stopping = true;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node stopping") && !strstr(text, "123"));
+    view.node_stopping = false; view.node_running = true; view.pace = ZAPP_PACE_PAUSE;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused") && !strstr(text, "123"));
+    view.pace = ZAPP_PACE_NORMAL; view.node_running = false;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "not responding") && !strstr(text, "123"));
+    view.node_running = true;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "123") && strstr(text, "125") &&
+        strstr(text, "no more than two blocks behind") && strstr(text, "separate from wallet scanning"));
+    assert(!strstr(text, "WALLET-MARKER") && !strstr(text, "SECRET") && !strstr(text, "CONNECTION-PATH"));
+    view.node_height = -1; view.node_reference = -1;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Unknown") &&
+        strstr(text, "sync status is unknown") && !strstr(text, "two blocks behind"));
+    view.node_height = 123; view.node_reference = 126; view.chain_state = ZAPP_CHAIN_BEHIND;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "node was behind") && !strstr(text, "two blocks behind"));
+    view.node_installing = true;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node starting") && !strstr(text, "123"));
+    assert(!strcmp(zapp_home_action_label("node_details"), "Node details"));
+}
+
 static void node_button_states(void)
 {
     static struct zapp_view view;
@@ -131,7 +163,7 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Catching up: 1,000 blocks to go"));
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
-    assert(node_line_is(&view, "Up to date"));
+    assert(node_line_is(&view, "Node up to date"));
     view.chain_state = ZAPP_CHAIN_UNCONFIRMED;
     snprintf(view.chain_doubt, sizeof(view.chain_doubt), "only 1 peer");
     assert(node_line_is(&view, "Can't confirm it's up to date: only 1 peer"));
@@ -153,7 +185,7 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Block 1,000, waiting for other computers"));
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
-    assert(node_line_is(&view, "Up to date"));
+    assert(node_line_is(&view, "Node up to date"));
     view.node_reference = -1;
     view.node_height = -1;
     assert(node_line_is(&view, "Checking the chain"));
@@ -195,11 +227,11 @@ static void phone_card_keeps_its_height(void)
         const struct zapp_node *home = zapp_layout_screen(layout, "home"), *phone = NULL;
         for (size_t c = 0; home && c < home->child_count; ++c)
             if (!strcmp(home->children[c].card, "phone")) phone = &home->children[c];
-        assert(phone && phone->child_count == 3);
-        int want[3], got[3];
+        assert(phone && phone->child_count == 4);
+        int want[4], got[4];
         assert(zapp_home_phone_card(&running, false, card, sizeof(card)));
         card_lines(phone, card, 1, want);
-        assert(want[0] == 2 && want[2] == 1);   /* the status line holds two lines and the button one */
+        assert(want[0] == 2 && want[2] == 1 && want[3] == 1); /* status, details and start keep their lines. */
         card_lines(phone, card, 2, got);
         assert(!memcmp(want, got, phone->child_count * sizeof(int)));
         assert(zapp_home_phone_card(&stopping, false, card, sizeof(card)) && strstr(card, "\"node_button\":\"\""));
@@ -494,7 +526,7 @@ static void scrollable_home_grid(const struct zapp_node *home)
 {
     assert(home->kind == ZAPP_NODE_LIST && home->child_count == 2);
     assert(home->children[0].kind == ZAPP_NODE_COLUMN && !strcmp(home->children[0].card, "phone"));
-    assert(home->children[0].child_count == 3 && !strcmp(home->children[0].children[2].id, "node_start_home"));
+    assert(home->children[0].child_count == 4 && !strcmp(home->children[0].children[2].id, "node_details") && !strcmp(home->children[0].children[3].id, "node_start_home"));
     assert(home->children[1].kind == ZAPP_NODE_GRID && home->children[1].child_count == 2);
     assert(!strcmp(home->children[1].children[0].id, "wallet") && !strcmp(home->children[1].children[1].id, "receive"));
 }
@@ -689,12 +721,12 @@ static void paced_home_lines(void)
     /* Paused while behind: the pause line, never the blocks left and never up to date. */
     view.pace = ZAPP_PACE_PAUSE;
     assert(node_line_is(&view, ZAPP_PAUSED_LINE));
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Up to date") && !strstr(card, "Catching up"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Node up to date") && !strstr(card, "Catching up"));
     /* Paused while current: still the pause line, never up to date. */
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
     assert(node_line_is(&view, ZAPP_PAUSED_LINE));
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Up to date"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Node up to date"));
     /* Gentle while behind: the slow catch-up line, with no estimate. */
     view.pace = ZAPP_PACE_GENTLE;
     view.node_reference = 2000;
@@ -781,7 +813,7 @@ static void check_agreement(const struct agreement_sample *s, struct zapp_view *
     snprintf(view->node_line, sizeof(view->node_line), "%s", node);
     zapp_home_node_line(view, home, sizeof(home));
     zapp_paced_sync_line(pace, s->process, stopping, sync, paced, sizeof(paced));
-    const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Up to date");
+    const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Node up to date");
     const bool home_behind = !strncmp(home, "Catching up", 11) ||
         (pace == ZAPP_PACE_GENTLE && strstr(home, " blocks left\nKeeping phone cool") != NULL);
     const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);
@@ -816,6 +848,7 @@ int main(void)
     fallback_labels();
     dark_by_default();
     phone_card_golden();
+    node_details_states();
     node_button_states();
     home_start_states();
     plain_node_line_states();

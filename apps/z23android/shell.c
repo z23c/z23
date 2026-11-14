@@ -36,7 +36,7 @@
 #define WHITE 0xffffffffu
 #define GRAVITY_CENTER_HORIZONTAL 1
 
-enum screen { SCREEN_HOME, SCREEN_MORE, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
+enum screen { SCREEN_HOME, SCREEN_NODE_DETAILS, SCREEN_MORE, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
 enum command { CMD_HOME, CMD_MORE, CMD_MORE_SCAN, CMD_MORE_ASSISTANT, CMD_MORE_START, CMD_MORE_STOP, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_PEER_MODE, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
@@ -53,7 +53,7 @@ static struct {
     jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
     jobject fleet_review_scroll, fleet_review_hint, fleet_review_status, fleet_start_button, fleet_result_scroll;
-    jobject camera_retry, camera_settings, more_start, more_stop;
+    jobject camera_retry, camera_settings, more_start, more_stop, node_details_text;
     jobject paste_panel, paste_field, paste_review, paste_error;
     char fleet_receipt[8192];
     char fleet_result_shown[ZAPP_NOTICE_CAP];
@@ -263,6 +263,19 @@ static bool build_home(JNIEnv *env, jobject root)
     return ok;
 }
 static jobject scroll_column(JNIEnv *env, jobject root, int padding_dp);
+static bool build_node_details(JNIEnv *env, jobject root)
+{
+    jobject content = scroll_column(env, root, 16);
+    jobject text = zj_widget(env, "android/widget/TextView", shell.activity);
+    bool ok = content && text && label(env, content, "Node details", 24.0f, WHITE) &&
+        zj_typography(env, text, 16.0f, (jint)WHITE) && zj_padding(env, text, 0, 8) &&
+        zj_append(env, content, text) && zj_keep(env, &shell.node_details_text, text) &&
+        button(env, root, "Back", CMD_HOME, 0, 0);
+    if (text) (*env)->DeleteLocalRef(env, text);
+    if (content) (*env)->DeleteLocalRef(env, content);
+    return ok;
+}
+
 static bool build_more(JNIEnv *env, jobject root)
 {
     jobject content = add_notice(env, root, SCREEN_MORE) ? scroll_column(env, root, 12) : NULL;
@@ -551,9 +564,10 @@ static bool attach_wallet_pages(JNIEnv *env, jobject stage, jobject wallet, jobj
 
 static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
 {
-    jobject more = column(env, DARK, 12, false);
+    jobject more = column(env, DARK, 12, false), details = column(env, DARK, 20, false);
     jobject wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false), setup = column(env, DARK, 0, false);
-    return more && build_home(env, home) && build_more(env, more) && add_screen(env, stage, SCREEN_MORE, more) && build_apps(env, apps) && build_settings(env, settings) &&
+    return details && build_node_details(env, details) && add_screen(env, stage, SCREEN_NODE_DETAILS, details) &&
+           more && build_home(env, home) && build_more(env, more) && add_screen(env, stage, SCREEN_MORE, more) && build_apps(env, apps) && build_settings(env, settings) &&
            add_screen(env, stage, SCREEN_HOME, home) &&
            add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
            attach_wallet_pages(env, stage, wallet, send, setup);
@@ -792,8 +806,16 @@ static void update_more_node(JNIEnv *env)
     if (shell.more_start) (void)zj_visible(env, shell.more_start, !strcmp(start, "Start node"));
     if (shell.more_stop) (void)zj_visible(env, shell.more_stop, !strcmp(text, "Stop node"));
 }
+static void render_node_details(JNIEnv *env, const struct zapp_view *view)
+{
+    char text[512];
+    if (shell.node_details_text && zapp_home_node_details(view, shell.preview, text, sizeof(text)))
+        (void)zj_text(env, shell.node_details_text, text);
+}
+
 static void enter_screen(JNIEnv *env, enum screen next, enum wallet_page page, enum screen origin)
 {
+    if (next == SCREEN_NODE_DETAILS) { struct zapp_view view; zapp_controller_snapshot(&view); render_node_details(env, &view); }
     if (next == SCREEN_WALLET) shell.receive_from_home = page == WALLET_PAGE_RECEIVE && origin == SCREEN_HOME;
     if (next == SCREEN_MORE) update_more_node(env);
     if (next == SCREEN_APPS) { refresh_apps(env); fill_apps(env); }
@@ -1065,7 +1087,8 @@ static void run_node_toggle(void)
 static void run_tile(JNIEnv *env, const struct target *target)
 {
     char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
-    if (!strcmp(target->id, "scan")) begin_scan(env);
+    if (!strcmp(target->id, "node_details")) go(env, SCREEN_NODE_DETAILS);
+    else if (!strcmp(target->id, "scan")) begin_scan(env);
     else if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
     else if (!strcmp(target->id, "wallet")) go(env, shell.preview || zapp_setup_state(shell.files) == ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP);
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
@@ -1441,6 +1464,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     render_fleet_review(env, view);
     if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
+    if (shell.current == SCREEN_NODE_DETAILS) render_node_details(env, view);
     if (shell.current == SCREEN_MORE) update_more_node(env);
     if (strcmp(shell.node_notice, view->node_action_notice)) {
         snprintf(shell.node_notice, sizeof(shell.node_notice), "%s", view->node_action_notice);
@@ -1551,7 +1575,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_MORE], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.node_details_text, &shell.notice_views[SCREEN_MORE], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     if (shell.phone_ok) json_free(&shell.phone);
