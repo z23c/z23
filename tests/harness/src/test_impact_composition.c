@@ -7216,6 +7216,97 @@ static bool ic_fresh_edit_fresh(void)
                         IC_FRESH_BODY("situation"));
 }
 
+static bool ic_fresh_edit_comment(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        IC_FRESH_BODY("intersection constructor destructor pragma asm"));
+}
+
+static bool ic_fresh_edit_line_comment(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "// section and constructor are only documentation\n"
+        "// __attribute__ is still a comment\n"
+        IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_hook_string(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "int fresh_probe_run(int x)\n{\n const char *s = \"/*\"; return x + s[0];\n}\n"
+        "__attribute__((constructor)) static void boot(void)\n{\n"
+        " const char *s = \"*/\"; (void)s;\n}\n");
+}
+
+static bool ic_fresh_edit_spliced_comment(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "/* harmless *\\\n/\n"
+        "__attribute__((constructor)) static void boot(void)\n{\n}\n"
+        "/* end */\n" IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_open_comment(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        IC_FRESH_BODY("situation") "/* unfinished comment");
+}
+
+static bool ic_fresh_edit_spliced_open(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "/\\\n* constructor comment */\n" IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_spliced_crlf(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "// comment \\\r\nconstructor still commented\n" IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_spliced_trigraph(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "/* harmless *?" "?/\n/\n"
+        "__attribute__((constructor)) static void boot(void)\n{\n}\n"
+        "/* end */\n" IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_spliced_space(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "/* harmless *\\ \t\n/\n"
+        "__attribute__((constructor)) static void boot(void)\n{\n}\n"
+        "/* end */\n" IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_header_hook(const char *mark)
+{
+    char body[512];
+    int n = snprintf(body, sizeof(body), "%sinclude <foo//section.h>\n%s",
+                     mark, IC_FRESH_BODY("situation"));
+    return n > 0 && (size_t)n < sizeof(body) &&
+        ic_fresh_add("tools/command/native_devagent_situation.c", body);
+}
+static bool ic_fresh_edit_header_hook(void) { return ic_fresh_header_hook("#"); }
+static bool ic_fresh_edit_header_digraph(void) { return ic_fresh_header_hook("%:"); }
+static bool ic_fresh_edit_header_trigraph(void) { return ic_fresh_header_hook("?" "?="); }
+
+static bool ic_fresh_edit_header_block(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "#include <foo/*bar.h>\n"
+        "__attribute__((constructor)) static void boot(void)\n{\n}\n"
+        "/* end */\n" IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_literal_hook(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+        "int fresh_probe_run(int x)\n{\n"
+        " const char *s = \"section\"; return x + s[0];\n}\n");
+}
+
 static bool ic_fresh_edit_callback(void)
 {
     return ic_fresh_add("tools/command/native_devagent_situation.c",
@@ -7627,6 +7718,20 @@ static bool ic_fresh_fixture_build(void)
         bool (*edit)(void);
     } branches[] = {
         {"fresh", ic_fresh_edit_fresh},
+        {"freshcomment", ic_fresh_edit_comment},
+        {"freshlinecomment", ic_fresh_edit_line_comment},
+        {"freshhookstring", ic_fresh_edit_hook_string},
+        {"freshsplicedcomment", ic_fresh_edit_spliced_comment},
+        {"freshopencomment", ic_fresh_edit_open_comment},
+        {"freshsplicedopen", ic_fresh_edit_spliced_open},
+        {"freshsplicedcrlf", ic_fresh_edit_spliced_crlf},
+        {"freshsplicedtrigraph", ic_fresh_edit_spliced_trigraph},
+        {"freshsplicedspace", ic_fresh_edit_spliced_space},
+        {"freshheaderhook", ic_fresh_edit_header_hook},
+        {"freshheaderdigraph", ic_fresh_edit_header_digraph},
+        {"freshheadertrigraph", ic_fresh_edit_header_trigraph},
+        {"freshheaderblock", ic_fresh_edit_header_block},
+        {"freshliteralhook", ic_fresh_edit_literal_hook},
         {"freshcallback", ic_fresh_edit_callback},
         {"freshtest", ic_fresh_edit_test},
         {"freshattrstatic", ic_fresh_edit_attributed_static},
@@ -7694,6 +7799,20 @@ struct ic_fresh_case {
 
 static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
+    {"freshcomment", 0, "devagent_situation", NULL},
+    {"freshlinecomment", 0, "devagent_situation", NULL},
+    {"freshhookstring", 'A', NULL, NULL},
+    {"freshsplicedcomment", 'A', NULL, NULL},
+    {"freshopencomment", 'A', NULL, NULL},
+    {"freshsplicedopen", 'A', NULL, NULL},
+    {"freshsplicedcrlf", 'A', NULL, NULL},
+    {"freshsplicedtrigraph", 'A', NULL, NULL},
+    {"freshsplicedspace", 'A', NULL, NULL},
+    {"freshheaderhook", 'A', NULL, NULL},
+    {"freshheaderdigraph", 'A', NULL, NULL},
+    {"freshheadertrigraph", 'A', NULL, NULL},
+    {"freshheaderblock", 'A', NULL, NULL},
+    {"freshliteralhook", 'A', NULL, NULL},
     {"freshcallback", 'A', NULL, NULL}, /* callback declarator remains fail-closed */
     {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
     {"freshattrstatic", 0, "devagent_start", NULL},
@@ -7750,6 +7869,12 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
 static bool ic_fresh_detail_valid(const struct ic_fresh_case *c,
                                   const struct zcl_dev_proof_changed_set *set)
 {
+    if (!strncmp(c->name, "freshspliced", 12))
+        return set->structural_detail && !strcmp(set->structural_detail, "source_splicing_unproven");
+    if (!strcmp(c->name, "freshhookstring") || !strcmp(c->name, "freshliteralhook") ||
+        !strcmp(c->name, "freshheaderhook") || !strcmp(c->name, "freshheaderdigraph") ||
+        !strcmp(c->name, "freshheadertrigraph") || !strcmp(c->name, "freshheaderblock"))
+        return set->structural_detail && !strcmp(set->structural_detail, "source_registration_hook");
     return strcmp(c->name, "freshcallback") ||
            (set->structural_detail && !strcmp(set->structural_detail, "declarator_function_pointer"));
 }

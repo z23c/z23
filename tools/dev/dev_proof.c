@@ -2570,15 +2570,63 @@ static bool dp_fresh_path_allowed(const char *path)
     return true;
 }
 
-/* Text no fresh file may carry: a hook that registers code without a caller. */
-static bool dp_fresh_hooked(const char *side)
+/* Keep the existing conservative hook spellings outside comments, including
+ * in literals. Only comments are excluded from this text check. */
+static bool dp_fresh_hook_chunk(const char *side, size_t len)
 {
     static const char *const hooks[] = {
         "__attribute__", "constructor", "destructor", "section", "pragma",
         "_Pragma", "__has_include", "__has_embed", "#embed", "asm"};
     for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++)
-        if (strstr(side, hooks[i])) return true;
+        if (dp_split_contains(side, len, hooks[i])) return true;
     return false;
+}
+
+/* Raw comment boundaries are uncertain when translation can splice lines.
+ * Refuse those sources rather than implementing another C preprocessor. */
+static bool dp_fresh_spliced(const char *side)
+{
+    if (strstr(side, "?" "?/")) return true;
+    for (const char *p = side; *p; p++) {
+        if (*p != '\\') continue;
+        const char *q = p + 1;
+        while (*q == ' ' || *q == '\t' || *q == '\v' || *q == '\f') q++;
+        if (*q == '\n' || *q == '\r') return true;
+    }
+    return false;
+}
+
+static bool dp_fresh_directive_mark(const char *p)
+{
+    return *p == '#' || strncmp(p, "%:", 2) == 0 || strncmp(p, "?" "?=", 3) == 0;
+}
+
+static bool dp_fresh_hooked(const char *side)
+{
+    const char *chunk = side, *p = side;
+    while (*p) {
+        if (*p == '"' || *p == '\'') {
+            p = dp_split_skip_quoted(p);
+            if (!p) return true;
+            continue;
+        }
+        /* Header-name tokens can contain comment-looking bytes. Keep the
+         * entire directive in the searched chunk, with its old strictness. */
+        if (dp_fresh_directive_mark(p)) {
+            p = dp_split_skip_directive(p);
+            if (!p) return true;
+            continue;
+        }
+        if (p[0] == '/' && (p[1] == '*' || p[1] == '/')) {
+            if (dp_fresh_hook_chunk(chunk, (size_t)(p - chunk))) return true;
+            p = p[1] == '*' ? dp_split_skip_block(p) : dp_split_eol(p);
+            if (!p) return true;
+            chunk = p;
+        } else {
+            p++;
+        }
+    }
+    return dp_fresh_hook_chunk(chunk, (size_t)(p - chunk));
 }
 
 /* Is `file` (a `git grep -l` hit, `local:path`) a changed row other than
@@ -2812,6 +2860,7 @@ static bool dp_fresh_text_ok(const struct dp_split_ctx *c, const char *side,
 {
     struct dp_split_funcs f = {0};
     if (!side) { *detail = "source_diff_unavailable"; return false; }
+    if (dp_fresh_spliced(side)) { *detail = "source_splicing_unproven"; return false; }
     if (dp_fresh_hooked(side)) { *detail = "source_registration_hook"; return false; }
     *detail = "source_parse_unavailable";
     if (!dp_split_parse_funcs(side, &f, detail)) return false;
