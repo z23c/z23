@@ -19,11 +19,11 @@
 #include <unistd.h>
 
 #define DA_PATH 1024
-#define DA_ARGS 31
+#define DA_ARGS 32
 struct da_plan {
     char cwd[DA_PATH], head[41], tree[41], node[DA_PATH], source[41], hash[65];
     char sdk[DA_PATH], ndk[DA_PATH], java[DA_PATH], params[DA_PATH];
-    char inputs[9][65], debug[DA_PATH], debug_hash[65];
+    char inputs[10][65], debug[DA_PATH], debug_hash[65];
 };
 static const char *da_str(const struct json_value *o, const char *k)
 { return zcl_dev_job_str(json_get(o, k)); }
@@ -95,7 +95,8 @@ static bool da_collect_inputs(struct da_plan *p)
         da_hash_child(p->ndk, "build/cmake/android.toolchain.cmake", p->inputs[5]) &&
         da_hash_child(p->java, "bin/jar", p->inputs[6]) &&
         da_hash_child(p->sdk, "build-tools/35.0.0/apksigner", p->inputs[7]) &&
-        da_hash_child(p->java, "bin/keytool", p->inputs[8]);
+        da_hash_child(p->java, "bin/keytool", p->inputs[8]) &&
+        da_hash_child(p->cwd, "vendor/cross/aarch64-linux-android35/lib/libcrypto.a", p->inputs[9]);
 }
 static bool da_inputs(const struct zcl_command_request *req, struct da_plan *p, const char **reason)
 {
@@ -154,6 +155,10 @@ static bool da_inputs(const struct zcl_command_request *req, struct da_plan *p, 
         !da_regular(p->params, "sapling-output.params", R_OK)) {
         *reason = "Install the Android SDK, NDK, JDK and verified Sapling parameters, then retry."; return false;
     }
+    if (!da_regular(p->cwd, "vendor/cross/aarch64-linux-android35/lib/libcrypto.a", R_OK) ||
+        !da_regular(p->cwd, "vendor/cross/aarch64-linux-android35/include/openssl/evp.h", R_OK)) {
+        *reason = "Build Android vendor prerequisites in this worktree with devbuild --wait make ZCL_TARGET=android-arm64 z23."; return false;
+    }
     if (!da_collect_inputs(p)) { *reason = "Cannot hash the Android build inputs."; return false; }
     return true;
 }
@@ -173,7 +178,7 @@ static bool da_args(struct json_value *a, const struct da_plan *p, const char *o
         da_arg(a, "DEVKEY_PROBE=OFF") && da_arg(a, "ZAPP_SHARE_FIXTURE=OFF") &&
         da_arg(a, "PACKAGE_PREVIEW=0") && da_arg(a, "APP_MANIFEST=AndroidManifest.xml") &&
         da_arg(a, "ANDROID_API=35") && da_arg(a, "BUILD_TOOLS_VERSION=35.0.0");
-    for (size_t i = 0; ok && i < 9; ++i) {
+    for (size_t i = 0; ok && i < 10; ++i) {
         char key[40]; snprintf(key, sizeof(key), "Z23_ANDROID_INPUT_%zu", i);
         ok = da_pair(a, key, p->inputs[i]);
     }
@@ -321,12 +326,12 @@ static bool da_handle(const struct json_value *h, struct da_plan *p, char out[DA
         !da_copy(p->java, sizeof(p->java), java) || !da_copy(p->params, sizeof(p->params), params) ||
         !da_copy(p->hash, sizeof(p->hash), hash) || !da_copy(p->source, sizeof(p->source), source) ||
         !da_copy(p->tree, sizeof(p->tree), tree)) return false;
-    for (size_t i = 0; i < 9; ++i) {
+    for (size_t i = 0; i < 10; ++i) {
         char key[40]; snprintf(key, sizeof(key), "Z23_ANDROID_INPUT_%zu", i);
         if (!da_copy(p->inputs[i], sizeof(p->inputs[i]), da_value(a, i + 20, key))) return false;
     }
-    if (!da_copy(p->debug, sizeof(p->debug), da_value(a, 29, "Z23_ANDROID_NODE_DEBUG")) ||
-        !da_copy(p->debug_hash, sizeof(p->debug_hash), da_value(a, 30, "Z23_ANDROID_NODE_DEBUG_SHA256"))) return false;
+    if (!da_copy(p->debug, sizeof(p->debug), da_value(a, 30, "Z23_ANDROID_NODE_DEBUG")) ||
+        !da_copy(p->debug_hash, sizeof(p->debug_hash), da_value(a, 31, "Z23_ANDROID_NODE_DEBUG_SHA256"))) return false;
     if (strcmp(p->debug, "none") && !da_path(p->debug)) return false;
     char prefix[DA_PATH]; int n = snprintf(prefix, sizeof(prefix), "%s/build/android-jobs/run-", p->cwd);
     const char *suffix = n > 0 && (size_t)n < sizeof(prefix) && !strncmp(out, prefix, (size_t)n) ? out + n : NULL;
@@ -369,7 +374,7 @@ void zcl_native_handle_dev_android_status(const struct zcl_command_request *req,
         !strcmp(observed.head, expected.head) && !strcmp(observed.tree, expected.tree) &&
         da_hash(expected.node, nodehash) && !strcmp(nodehash, expected.hash);
     bool input_ok = da_collect_inputs(&expected);
-    for (size_t i = 0; input_ok && i < 9; ++i) {
+    for (size_t i = 0; input_ok && i < 10; ++i) {
         char key[40]; snprintf(key, sizeof(key), "Z23_ANDROID_INPUT_%zu", i);
         const char *recorded = da_value(json_get(&handle, "argv"), i + 20, key);
         input_ok = recorded && !strcmp(expected.inputs[i], recorded);

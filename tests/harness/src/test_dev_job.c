@@ -574,7 +574,7 @@ static bool dj_android_fixture(char *lane, size_t cap)
     if (!dj_android_dir(g_repo, "apps") || !dj_android_dir(g_repo, "apps/z23android") ||
         !dj_android_child(g_repo, ".gitignore", 0600)) return false;
     char path[2048]; snprintf(path, sizeof(path), "%s/.gitignore", g_repo);
-    if (!dj_android_file(path, "/build/\n", 0600)) return false;
+    if (!dj_android_file(path, "/build/\n/vendor/cross/\n", 0600)) return false;
     snprintf(path, sizeof(path), "%s/apps/z23android/Makefile", g_repo);
     const char *makefile = "aligned-apk:\n"
         "\t@if test -f ../../build/fail; then exit 2; fi; "
@@ -592,9 +592,9 @@ static bool dj_android_fixture(char *lane, size_t cap)
     dj_git(g_repo, "worktree", "add", "--detach", lane, "HEAD");
     const char *dirs[] = {"build", "build/sdk space", "build/sdk space/build-tools", "build/sdk space/build-tools/35.0.0",
         "build/sdk space/platforms", "build/sdk space/platforms/android-35", "build/ndk", "build/ndk/build",
-        "build/ndk/build/cmake", "build/java", "build/java/bin", "build/params"};
+        "build/ndk/build/cmake", "vendor", "vendor/cross", "vendor/cross/aarch64-linux-android35", "vendor/cross/aarch64-linux-android35/lib", "vendor/cross/aarch64-linux-android35/include", "vendor/cross/aarch64-linux-android35/include/openssl", "build/java", "build/java/bin", "build/params"};
     for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i) if (!dj_android_dir(lane, dirs[i])) return false;
-    const char *files[] = {"build/node binary", "build/sdk space/build-tools/35.0.0/aapt", "build/sdk space/build-tools/35.0.0/zipalign", "build/sdk space/build-tools/35.0.0/apksigner",
+    const char *files[] = {"vendor/cross/aarch64-linux-android35/lib/libcrypto.a", "vendor/cross/aarch64-linux-android35/include/openssl/evp.h", "build/node binary", "build/sdk space/build-tools/35.0.0/aapt", "build/sdk space/build-tools/35.0.0/zipalign", "build/sdk space/build-tools/35.0.0/apksigner",
         "build/sdk space/platforms/android-35/android.jar", "build/ndk/build/cmake/android.toolchain.cmake",
         "build/java/bin/jar", "build/java/bin/keytool", "build/params/sapling-spend.params", "build/params/sapling-output.params"};
     for (size_t i = 0; i < sizeof(files)/sizeof(files[0]); ++i) if (!dj_android_child(lane, files[i], 0700)) return false;
@@ -650,6 +650,11 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
     TEST("dev.android: plan accepts spaces and rejects shell metacharacters") {
         ASSERT(dj_android_fixture(lane, sizeof(lane)));
         ASSERT(dj_android_default_cwd(lane));
+        snprintf(path, sizeof(path), "%s/vendor/cross/aarch64-linux-android35/lib/libcrypto.a", lane);
+        ASSERT(unlink(path) == 0);
+        dj_android_input(&c, lane, true); zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ASSERT(dj_error_is(&c, "ANDROID_INPUT_REQUIRED")); dj_end(&c);
+        ASSERT(dj_android_file(path, "fixture", 0700));
         dj_android_input(&c, lane, true); zcl_native_handle_dev_android_plan(&c.request, &c.reply);
         ASSERT(dj_ok(&c)); ASSERT_STR_EQ(dj_str(&c, "state"), "ready"); dj_end(&c);
         dj_android_input(&c, lane, true); json_set_str((struct json_value *)json_get(&c.input, "node_bin"), "/tmp/unsafe$(id)");
@@ -689,6 +694,10 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c); dj_join_all();
         dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "artifact_observed"); dj_end(&s);
         snprintf(good, sizeof(good), "%s", id);
+        snprintf(path, sizeof(path), "%s/vendor/cross/aarch64-linux-android35/lib/libcrypto.a", lane);
+        ASSERT(dj_android_file(path, "changed", 0700));
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "unproven"); dj_end(&s);
+        ASSERT(dj_android_file(path, "fixture", 0700));
         snprintf(path, sizeof(path), "%s/build/partial", lane); ASSERT(dj_android_file(path, "partial", 0600));
         dj_android_input(&c, lane, true); zcl_native_handle_dev_android_prepare(&c.request, &c.reply);
         ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c); dj_join_all();
