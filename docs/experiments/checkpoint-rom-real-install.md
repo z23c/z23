@@ -22,3 +22,20 @@ already contained the complete hash-bound checkpoint header and solution. The
 installer independently validated that header and installed the bundle. The
 corrected negative case used an empty header substrate. Neither experiment
 changed a phone or a canonical datadir.
+
+On 2026-11-14, the real-checkpoint fixture was run with the separately supplied
+block input absent and the explicit flat-index header fallback enabled. The
+fixture verified the bundle and index against the pinned SHA-256 values above,
+reconstructed the complete checkpoint header from the index and round-tripped
+it through a zero-transaction serialization carrier. The carrier is not a
+consensus-valid block. The wrong-nonce header was refused; the unmodified header
+passed the frozen Equihash verifier. The empty header substrate was refused,
+and the validated substrate installed under the compiled checkpoint authority.
+The focused group passed with no skips in 191.6 seconds.
+
+A separate negative run supplied an invalid block path while enabling the
+fallback. It failed before launching an installer, including on the automatic
+retry; an explicitly supplied invalid path did not select the fallback. These
+results qualify isolated checkpoint authority checks and installation only;
+they do not establish interrupted download, wallet-history recovery or device
+behavior.

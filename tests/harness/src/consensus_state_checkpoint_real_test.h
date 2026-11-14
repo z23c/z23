@@ -29,31 +29,90 @@ static bool csi_checkpoint_block(const char *path, struct block *block)
     return ok;
 }
 
-static bool csi_checkpoint_seed(const char *dir, const char *raw, bool positive)
+/* The flat-index trailer provides only a hash-bound header. A zero-tx block
+ * is a serialization carrier for this fixture, not a consensus-valid block. */
+static bool csi_checkpoint_header_carrier(const struct block_header *hdr,
+                                          struct block_header *out)
+{
+    struct block carrier, decoded;
+    block_init(&carrier); carrier.header = *hdr;
+    struct byte_stream bytes; stream_init(&bytes, 1024);
+    bool ok = block_serialize(&carrier, &bytes);
+    struct byte_stream input; stream_init_from_data(&input, bytes.data, bytes.size);
+    block_init(&decoded);
+    ok = ok && block_deserialize(&decoded, &input) && decoded.num_vtx == 0 &&
+         stream_remaining(&input) == 0;
+    if (ok) *out = decoded.header;
+    block_free(&decoded); stream_free(&input); stream_free(&bytes);
+    return ok;
+}
+
+static bool csi_checkpoint_header_from_index(struct main_state *ms,
+                                              struct block_header *out)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    struct uint256 expected, actual;
+    if (!cp || cp->height != 3056758) return false;
+    memcpy(expected.data, cp->block_hash, sizeof(expected.data));
+    struct block_index *bi = block_map_find(&ms->map_block_index, &expected);
+    size_t len = 0;
+    const unsigned char *solution = bi ? block_index_solution(bi, &len) : NULL;
+    if (!bi || bi->nHeight != cp->height || !bi->phashBlock || !bi->pprev ||
+        !bi->pprev->phashBlock || !solution || len == 0 || len > MAX_SOLUTION_SIZE)
+        return false;
+    struct block_header hdr; block_header_init(&hdr);
+    hdr.nVersion = bi->nVersion; hdr.hashPrevBlock = *bi->pprev->phashBlock;
+    hdr.hashMerkleRoot = block_index_merkle_root(bi);
+    hdr.hashFinalSaplingRoot = bi->hashFinalSaplingRoot;
+    hdr.nTime = bi->nTime; hdr.nBits = bi->nBits; hdr.nNonce = block_index_nonce(bi);
+    memcpy(hdr.nSolution, solution, len); hdr.nSolutionSize = len;
+    block_header_get_hash(&hdr, &actual);
+    return uint256_eq(&actual, &expected) && csi_checkpoint_header_carrier(&hdr, out);
+}
+
+static bool csi_checkpoint_header(const char *index_dir, const char *raw,
+                                  struct block_header *out)
+{
+    if (raw) {
+        struct block block;
+        if (!csi_checkpoint_block(raw, &block)) return false;
+        *out = block.header; block_free(&block);
+        return true;
+    }
+    const char *fallback = getenv("ZCL_TEST_CHECKPOINT_INDEX_HEADER");
+    if (!fallback || strcmp(fallback, "1") != 0) return false;
+    chain_params_select(CHAIN_MAIN);
+    struct main_state ms; main_state_init(&ms);
+    bool ok = load_block_index_flat(index_dir, &ms).ok &&
+              csi_checkpoint_header_from_index(&ms, out);
+    main_state_free(&ms); return ok;
+}
+
+
+static bool csi_checkpoint_seed(const char *dir, const struct block_header *header, bool positive)
 {
     chain_params_select(CHAIN_MAIN);
     checkpoint_header_solution_set_frozen_verifier_for_test(NULL);
     validate_headers_ensure_set_validator_for_test(NULL, NULL);
     const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    struct block b;
-    if (!cp || cp->height != 3056758 || !csi_checkpoint_block(raw, &b)) return false;
+    if (!cp || cp->height != 3056758 || !header) return false;
     struct uint256 expected, actual;
     memcpy(expected.data, cp->block_hash, sizeof(expected.data));
-    block_header_get_hash(&b.header, &actual);
+    block_header_get_hash(header, &actual);
     struct main_state ms; main_state_init(&ms);
     bool ok = uint256_eq(&actual, &expected) &&
         (!positive || load_block_index_flat(dir, &ms).ok) &&
         progress_store_open(dir);
     struct consensus_state_install_stamp stamp; bool found = true;
     if (ok) {
-        struct block_header wrong = b.header;
+        struct block_header wrong = *header;
         wrong.nNonce.data[0] ^= 1;
         ok = !checkpoint_header_solution_verify_and_persist(&ms, cp->height, &expected, &wrong) &&
             consensus_state_install_read_authority_stamp(progress_store_db(), &stamp, &found) && !found;
-        if (ok && positive) ok = checkpoint_header_solution_verify_and_persist(&ms, cp->height, &expected, &b.header) &&
+        if (ok && positive) ok = checkpoint_header_solution_verify_and_persist(&ms, cp->height, &expected, header) &&
             validate_headers_stage_has_pass_record(cp->height, &expected);
     }
-    progress_store_close(); main_state_free(&ms); block_free(&b);
+    progress_store_close(); main_state_free(&ms);
     return ok;
 }
 
@@ -175,7 +234,7 @@ static bool csi_checkpoint_inputs(struct csi_checkpoint_paths *p)
     p->raw = getenv("ZCL_TEST_CHECKPOINT_BLOCK");
     p->bundle = getenv("ZCL_TEST_CHECKPOINT_BUNDLE");
     p->params = getenv("ZCL_TEST_CHECKPOINT_PARAMS");
-    if (!p->scratch || !p->index || !p->raw || !p->bundle || !p->params) return false;
+    if (!p->scratch || !p->index || !p->bundle || !p->params) return false;
     struct stat st;
     return lstat(p->scratch, &st) == 0 && S_ISDIR(st.st_mode) &&
         st.st_uid == geteuid() && !(st.st_mode & 077);
@@ -209,9 +268,11 @@ static int csi_checkpoint_real(void)
     if (!csi_checkpoint_paths_init(&p)) {
         fputs("checkpoint real fixture: incomplete inputs or unsafe scratch\n", stderr); return 1;
     }
+    struct block_header header;
     bool ok = csi_checkpoint_copy_inputs(&p) &&
-        csi_checkpoint_seed(p.bad, p.raw, false) && csi_checkpoint_install(p.bad, p.copy, p.params, false) &&
-        csi_checkpoint_absent(p.bad) && csi_checkpoint_seed(p.good, p.raw, true) &&
+        csi_checkpoint_header(p.good, p.raw, &header) &&
+        csi_checkpoint_seed(p.bad, &header, false) && csi_checkpoint_install(p.bad, p.copy, p.params, false) &&
+        csi_checkpoint_absent(p.bad) && csi_checkpoint_seed(p.good, &header, true) &&
         csi_checkpoint_install(p.good, p.copy, p.params, true) && csi_checkpoint_stamp(p.good);
     fprintf(stderr, "checkpoint real fixture: %s; retained %s\n", ok ? "PASS" : "FAIL", p.root);
     return ok ? 0 : 1;
