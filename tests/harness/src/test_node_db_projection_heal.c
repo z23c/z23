@@ -473,7 +473,7 @@ static void ph_thermal_queue(struct ph_thermal *t)
     if (writer) writer->barrier = &t->barrier;
     t->queued = writer && db_service_enqueue_write(&t->ds, ph_block_writer, writer, free);
     for (int i = 0; t->queued && i < 100 && !atomic_load(&t->barrier.entered); i++)
-        platform_sleep_ms(10);
+        platform_sleep_ms(10); /* real-clock: wait for the actual database worker thread */
 }
 
 static int ph_thermal_start(struct ph_thermal *t)
@@ -490,7 +490,7 @@ static int ph_thermal_start(struct ph_thermal *t)
     for (int i = 0; t->up && i < 100; i++) {
         db_service_get_status(&t->ds, &status);
         if (status.queue_depth > 0) break;
-        platform_sleep_ms(10);
+        platform_sleep_ms(10); /* real-clock: projection worker queues restore behind held database writer */
     }
     PH_CHECK("gentle queues owed restore behind writer",
              t->queued && atomic_load(&t->barrier.entered) && status.queue_depth > 0);
@@ -506,7 +506,7 @@ static int ph_thermal_check_gentle(struct ph_thermal *t)
         if (t->v > t->v0 && t->first_marker == 0)
             t->first_marker = boot_projection_test_marker();
         if (t->v >= t->v0 + 2) break;
-        platform_sleep_ms(100);
+        platform_sleep_ms(100); /* real-clock: wait for the actual projection worker thread */
     }
     PH_CHECK("gentle worker preserves cursor and skips history",
              t->up && t->v >= t->v0 + 2 && t->s == t->s0 && t->j == t->j0 &&
@@ -527,7 +527,7 @@ static int ph_thermal_check_normal(struct ph_thermal *t)
     for (int i = 0; t->up && i < 100; i++) {
         boot_projection_test_counts(&t->v, &t->s, &t->j);
         if (t->j > t->j0 && node_db_sync_get_tip_height(&t->x.ndb) >= 2) break;
-        platform_sleep_ms(100);
+        platform_sleep_ms(100); /* real-clock: wait for the actual projection worker thread */
     }
     PH_CHECK("normal worker advances durable cursor",
              t->up && t->s > t->s0 && t->j > t->j0 &&
