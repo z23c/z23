@@ -16,3 +16,10 @@ passed while the source was being revised and is superseded by the final run.
 The final `DEVBUILD_CLASS=normal devbuild --wait make t-fast
 ONLY=block_index_loader` run passed one group with zero failures or skips;
 external archive and memory fixture environment variables were unset.
+
+The first candidate verification ran 73 groups with one failure: the file-size
+policy selftest rejected the source at 1527 lines, above its 1500-line limit.
+The same ceiling failed in lint. Removing 29 duplicate or unused includes
+reduced the file to 1498 lines. The focused block-index-loader group passed
+again with zero failures or skips, and the complexity and file-size checks
+passed on the repaired source.
