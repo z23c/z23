@@ -369,9 +369,9 @@ static int nrc_report(const struct nrc_acc *a, FILE *out, FILE *err,
     char rows[NRC_VMAX][NRC_VTEXT];
     memcpy(rows, a->viol, (size_t)a->nviol * NRC_VTEXT);
     qsort(rows, (size_t)a->nviol, NRC_VTEXT, nrc_cmp);
-    if (fprintf(err, "\n[check_no_real_clock_test_deadline] %d unmarked "
+    if (fprintf(err, "\n[check-no-real-clock-test-deadline] %s — %d unmarked "
                 "real-clock test deadline(s) in tests/harness/src/*.c:\n",
-                a->nviol) < 0)
+                strcmp(mode, "FAIL") == 0 ? "FAIL" : "WARN", a->nviol) < 0)
         return die("z23-lint: write failed\n", "");
     for (int i = 0; i < a->nviol; i++)
         if (fprintf(err, "  %s\n", rows[i]) < 0)

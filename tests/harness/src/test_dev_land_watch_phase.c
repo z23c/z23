@@ -1538,6 +1538,29 @@ static bool dlx_evidence_lint_complexity(void)
     dlx_end(&c); dlx_restore(); return ok;
 }
 
+static bool dlx_evidence_lint_deadline(void)
+{
+    const struct dlx_evidence_case k = {
+        .tag = "evidence_lint_deadline", .dimension = ZCL_DEV_PROOF_LINT,
+        .script = "printf '%s\\n' 'FAIL check-no-real-clock-test-deadline' "
+                  "'──── FAIL log: check-no-real-clock-test-deadline ────────────────────────────'\n"
+                  "i=0; while [ \"$i\" -lt 50 ]; do printf 'expected selftest preamble %s\\n' \"$i\"; i=$((i+1)); done\n"
+                  "printf '%s\\n' '[check-no-real-clock-test-deadline] FAIL — 1 unmarked real-clock test deadline' "
+                  "'  tests/harness/src/test_example.c:42 — ASSERT reads a real clock'\nexit 1\n",
+        .token = "child_proof_failed_exit_1",
+    };
+    char wt[PATH_MAX], local[64], base[64];
+    dlx_isolate(k.tag);
+    bool ok = dlx_evidence_settle(&k, wt, local, base);
+    setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+    struct dlx_call c; dlx_begin(&c, "step");
+    ok = ok && dlx_run(&c) && dlx_ok(&c) &&
+         strstr(dlx_str(&c, "detail"), "[check-no-real-clock-test-deadline] FAIL") &&
+         strstr(dlx_str(&c, "detail"), "test_example.c:42") &&
+         !strstr(dlx_str(&c, "detail"), "expected selftest preamble");
+    dlx_end(&c); dlx_restore(); return ok;
+}
+
 static int dlx_evidence_lint_body(void)
 {
     int failures = 0;
@@ -1563,6 +1586,7 @@ static int dlx_evidence_lint_body(void)
         dlx_restore();
         ASSERT(dlx_evidence_lint_late());
         ASSERT(dlx_evidence_lint_complexity());
+        ASSERT(dlx_evidence_lint_deadline());
         ASSERT(dlx_lint_bad_file(false));
         ASSERT(dlx_lint_bad_file(true));
         ASSERT(dlx_lint_utf8_boundary());

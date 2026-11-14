@@ -33,10 +33,10 @@ static int nrc_st_setenv(const struct nrc_st_env *e, const char *glob_pat,
         || setenv("ZCL_LINT_MODE", "FAIL", 1) != 0;
 }
 
-static int nrc_st_run(const struct nrc_st_env *e, int *rc_out, char *both,
+static int nrc_st_run(const struct nrc_st_env *e, const char *mode, int *rc_out, char *both,
                       size_t cap)
 {
-    if (nrc_st_setenv(e, e->glob, "1"))
+    if (nrc_st_setenv(e, e->glob, "1") || setenv("ZCL_LINT_MODE", mode, 1))
         return die("z23-lint: setenv failed\n", "");
     FILE *out = tmpfile(), *err = tmpfile();
     if (!out || !err) {
@@ -71,11 +71,17 @@ static int nrc_st_expect(const struct nrc_st_env *e, int want_fail,
         return 1;
     int rc = 0;
     char both[16384];
-    if (nrc_st_run(e, &rc, both, sizeof both))
+    if (nrc_st_run(e, "FAIL", &rc, both, sizeof both))
         return 1;
     if (want_fail && rc == 0) {
         fprintf(stderr, "check_no_real_clock_test_deadline selftest: "
                 "SELFTEST FAILED — %s\n", msg);
+        return 1;
+    }
+    if (want_fail && (rc != 1 ||
+        !strstr(both, "[check-no-real-clock-test-deadline] FAIL") ||
+        !strstr(both, "sandbox_probe.c:"))) {
+        fprintf(stderr, "check_no_real_clock_test_deadline selftest: missing failure marker or violation (rc=%d)\n%s\n", rc, both);
         return 1;
     }
     if (!want_fail && rc != 0) {
@@ -137,11 +143,25 @@ static int nrc_st_hollow(const struct nrc_st_env *e)
         return 1;
     int rc = 0;
     char both[16384];
-    if (nrc_st_run(&h, &rc, both, sizeof both))
+    if (nrc_st_run(&h, "FAIL", &rc, both, sizeof both))
         return 1;
     if (rc != 2) {
         fprintf(stderr, "check_no_real_clock_test_deadline selftest: an "
                 "EMPTY scan set exited %d, not 2\n", rc);
+        return 1;
+    }
+    return 0;
+}
+
+static int nrc_st_warn(const struct nrc_st_env *e)
+{
+    int rc = 0;
+    char both[16384];
+    if (nrc_st_plant(e, k_nrc_st_bare_assert) ||
+        nrc_st_run(e, "WARN", &rc, both, sizeof both)) return 1;
+    if (rc != 0 || !strstr(both, "[check-no-real-clock-test-deadline] WARN") ||
+        !strstr(both, "sandbox_probe.c:")) {
+        fprintf(stderr, "check_no_real_clock_test_deadline selftest: WARN mismatch (rc=%d)\n%s\n", rc, both);
         return 1;
     }
     return 0;
@@ -185,6 +205,7 @@ int check_no_real_clock_test_deadline_selftest(void)
                              "read) was reported as a violation",
                              k_nrc_st_virtual);
         bad |= nrc_st_hollow(&e);
+        bad |= nrc_st_warn(&e);
     }
     (void)rap_rm_rf(root);
     unsetenv("ZCL_REAL_CLOCK_GATE_SCAN_GLOB");
