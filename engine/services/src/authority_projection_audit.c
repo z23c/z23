@@ -452,6 +452,9 @@ bool ap_audit_run_once(void)
     if (v.violated)
         ap_collect_diff(pdb, ndb->db);
     else {
+        pthread_mutex_lock(&g_ap_detail_lock);
+        g_ap_diff_keys[0] = '\0';
+        pthread_mutex_unlock(&g_ap_detail_lock);
         atomic_store(&g_ap_diff_count, 0);
         atomic_store(&g_ap_diff_scan_error, false);
         atomic_store(&g_ap_diff_truncated, false);

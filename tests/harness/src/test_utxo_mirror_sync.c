@@ -37,6 +37,7 @@
 #include "controllers/rpc_client.h"
 #include "controllers/utxo_mirror_controller.h"
 #include "rpc/server.h"
+#include "util/blocker.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -375,17 +376,56 @@ static void ums_hex_key(char out[96], uint8_t tag)
     for (int i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", t[i]);
 }
 
-/* Audit half of the rebuild test: one projection-only and one authority-only
- * row at equal heights; the audit must record both keys, tagged p/a. */
+static int ums_test_confirmed_recovery(struct utxo_mirror_sync_service *svc,
+                                       struct node_db *ndbp, sqlite3 *pdb)
+{
+    int failures = 0;
+    UMS_CHECK("recovery: confirming audit ran", ap_audit_run_once());
+    struct json_value blocked = {0};
+    json_set_object(&blocked);
+    (void)ap_audit_dump_state_json(&blocked, NULL);
+    UMS_CHECK("recovery: second divergence latches the blocker",
+              json_get_bool(json_get(&blocked, "blocker_active")) &&
+              blocker_exists("authority_projection_divergence") &&
+              json_get_int(json_get(&blocked, "divergence_streak")) == 2 &&
+              json_get_int(json_get(&blocked, "diff_count")) == 6);
+    json_free(&blocked);
+
+    UMS_CHECK("recovery: rebuild replaces the diverged projection",
+              utxo_mirror_rebuild_now(svc) == 4);
+    UMS_CHECK("recovery: rebuilt projection matches the authority",
+              ums_roots_equal(ndbp, pdb));
+    UMS_CHECK("recovery: clean audit ran", ap_audit_run_once());
+    struct json_value clean = {0};
+    json_set_object(&clean);
+    (void)ap_audit_dump_state_json(&clean, NULL);
+    const char *clean_keys = json_get_str(json_get(&clean, "diff_keys"));
+    UMS_CHECK("recovery: clean audit clears the confirmed blocker",
+              !json_get_bool(json_get(&clean, "blocker_active")) &&
+              !blocker_exists("authority_projection_divergence") &&
+              json_get_int(json_get(&clean, "divergence_streak")) == 0 &&
+              json_get_int(json_get(&clean, "diff_count")) == 0 &&
+              clean_keys && clean_keys[0] == '\0' &&
+              json_get_int(json_get(&clean, "passes_total")) == 1);
+    json_free(&clean);
+    return failures;
+}
+
+/* Five projection-only rows and one authority-only row at equal heights pin
+ * the observed drift shape, then prove rebuild and clean-audit recovery. */
 static int ums_test_audit_diff(struct utxo_mirror_sync_service *svc,
                                struct node_db *ndbp, sqlite3 *pdb)
 {
     int failures = 0;
-    UMS_CHECK("audit: projection-only row", ums_seed_mirror_row(ndbp, 0x77, 50));
+    for (uint8_t tag = 0x77; tag <= 0x7b; tag++)
+        UMS_CHECK("audit: projection-only row",
+                  ums_seed_mirror_row(ndbp, tag, 50));
     UMS_CHECK("audit: authority-only row", ums_add_coin(pdb, 0x54, 4000, 104));
     g_ap_test_ndb = ndbp;
     g_utxo_mirror_sync = svc;
     ap_audit_reset_for_test();
+    UMS_CHECK("audit: fixture starts without a registry blocker",
+              !blocker_exists("authority_projection_divergence"));
     UMS_CHECK("audit: pass ran", ap_audit_run_once());
     struct json_value v = {0};
     json_set_object(&v);
@@ -400,8 +440,8 @@ static int ums_test_audit_diff(struct utxo_mirror_sync_service *svc,
               keys && strstr(keys, want_p));
     UMS_CHECK("audit: records the authority-only key",
               keys && strstr(keys, want_a));
-    UMS_CHECK("audit: diff_count == 2",
-              json_get_int(json_get(&v, "diff_count")) == 2);
+    UMS_CHECK("audit: diff_count == 6",
+              json_get_int(json_get(&v, "diff_count")) == 6);
     UMS_CHECK("audit: reports both heights",
               json_get_int(json_get(&v, "auth_h")) == 104 &&
               json_get_int(json_get(&v, "proj_h")) == 104);
@@ -409,7 +449,11 @@ static int ums_test_audit_diff(struct utxo_mirror_sync_service *svc,
     UMS_CHECK("audit: reports mirror health and quarantine",
               mh && strcmp(mh, "healthy") == 0 &&
               !json_get_bool(json_get(&v, "quarantine")));
+    UMS_CHECK("audit: first divergence does not latch the blocker",
+              !json_get_bool(json_get(&v, "blocker_active")) &&
+              json_get_int(json_get(&v, "divergence_streak")) == 1);
     json_free(&v);
+    failures += ums_test_confirmed_recovery(svc, ndbp, pdb);
     ap_audit_reset_for_test();
     g_ap_test_ndb = NULL;
     g_utxo_mirror_sync = NULL;
