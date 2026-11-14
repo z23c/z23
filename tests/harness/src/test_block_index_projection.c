@@ -1853,10 +1853,25 @@ done:
 #define BIP_TEST_REPLAY_WAL_SLACK  (4u * 1024u * 1024u)
 static char g_bip_replay_wal[336];
 static uint64_t g_bip_replay_wal_peak;
+static block_index_projection_t *g_bip_replay_projection;
+static int64_t g_bip_replay_limit;
+static sqlite3 *g_bip_replay_reader;
+static bool g_bip_replay_reader_released;
 
 static void bip_replay_wal_hook(uint64_t n)
 {
-    (void)n;
+    if (n == 1) {
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(g_bip_replay_projection->db, "PRAGMA journal_size_limit", -1, &stmt, NULL) == SQLITE_OK &&
+            sqlite3_step(stmt) == SQLITE_ROW)
+            g_bip_replay_limit = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    if (n == 3000 && g_bip_replay_reader) {
+        g_bip_replay_reader_released = sqlite3_exec(g_bip_replay_reader, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+        g_bip_replay_reader_released = sqlite3_close(g_bip_replay_reader) == SQLITE_OK && g_bip_replay_reader_released;
+        g_bip_replay_reader = NULL;
+    }
     uint64_t sz = (uint64_t)bip_file_size(g_bip_replay_wal);
     if (sz > g_bip_replay_wal_peak) g_bip_replay_wal_peak = sz;
 }
@@ -1875,13 +1890,30 @@ static int run_replay_wal_bound(int *failures)
     if (!log || !emit_n_headers(log, 0xC000u, n)) { *failures += 1; goto done; }
     p = block_index_projection_open(db, log);
     if (!p) { *failures += 1; goto done; }
+    p->wal_budget_bytes = BIP_TEST_WAL_BUDGET_BYTES;
     p->replay_wal_budget_bytes = BIP_TEST_REPLAY_WAL_BUDGET;
+    g_bip_replay_projection = p;
+    g_bip_replay_limit = -1;
+    BIP_CHECK("replay_wal: seed retained WAL",
+              sqlite3_exec(p->db, "CREATE TABLE retention_seed(x BLOB);"
+                  "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<500) "
+                  "INSERT INTO retention_seed SELECT zeroblob(1024) FROM n;"
+                  "PRAGMA wal_checkpoint(PASSIVE);", NULL, NULL, NULL) == SQLITE_OK &&
+              bip_file_size(g_bip_replay_wal) > BIP_TEST_WAL_BUDGET_BYTES);
+    g_bip_replay_reader = NULL;
+    g_bip_replay_reader_released = false;
+    BIP_CHECK("replay_wal: pin external reader",
+              sqlite3_open(db, &g_bip_replay_reader) == SQLITE_OK &&
+              sqlite3_exec(g_bip_replay_reader, "BEGIN; SELECT count(*) FROM retention_seed;", NULL, NULL, NULL) == SQLITE_OK);
     p->commit_events = 1u << 30; p->commit_bytes = UINT64_MAX;
     p->commit_ms = INT64_MAX / 2;
     p->event_hook = bip_replay_wal_hook;
     BIP_CHECK("replay_wal: catch_up succeeds",
               block_index_projection_catch_up(p) != (uint64_t)-1 &&
               block_index_projection_count(p) == (uint64_t)n);
+    BIP_CHECK("replay_wal: pinned reader released during replay", g_bip_replay_reader_released);
+    BIP_CHECK("replay_wal: retention matches effective checkpoint budget",
+              g_bip_replay_limit == BIP_TEST_WAL_BUDGET_BYTES);
     BIP_CHECK("replay_wal: WAL size alone forced mid-replay commits",
               p->batches_committed >= 3);
     BIP_CHECK("replay_wal: WAL (sampled per event) stayed within budget + slack",
@@ -1890,7 +1922,14 @@ static int run_replay_wal_bound(int *failures)
     BIP_CHECK("replay_wal: WAL (sampled per commit) stayed within budget + slack",
               p->max_wal_bytes_seen <=
                   BIP_TEST_REPLAY_WAL_BUDGET + BIP_TEST_REPLAY_WAL_SLACK);
+    BIP_CHECK("replay_wal: cursor reaches end", p->last_consumed_offset == event_log_size(log));
+    block_index_projection_close(p);
+    p = block_index_projection_open(db, log);
+    BIP_CHECK("replay_wal: reopen preserves rows and cursor", p &&
+              block_index_projection_count(p) == (uint64_t)n &&
+              p->last_consumed_offset == event_log_size(log));
 done:
+    if (g_bip_replay_reader) { sqlite3_close(g_bip_replay_reader); g_bip_replay_reader = NULL; }
     if (p) block_index_projection_close(p);
     if (log) event_log_close(log);
     bip_cleanup_dir(dir);

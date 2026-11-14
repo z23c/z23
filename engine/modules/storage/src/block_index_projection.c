@@ -488,7 +488,9 @@ static void replay_wal_limit(const block_index_projection_t *p, long long v)
 
 void bip_replay_begin(struct catch_up_ctx *c)
 {
-    replay_wal_limit(c->p, (long long)c->p->replay_wal_budget_bytes);
+    uint64_t limit = c->p->wal_budget_bytes < c->p->replay_wal_budget_bytes
+        ? c->p->wal_budget_bytes : c->p->replay_wal_budget_bytes;
+    replay_wal_limit(c->p, (long long)limit);
     c->wal_amp = BIP_REPLAY_WAL_AMP_PRIOR;
     int64_t now = mono_now_ms();
     c->total_bytes = event_log_size(c->p->log);
