@@ -136,6 +136,16 @@ order of size.
    name (zero hex), B's rebuilt image equals A's local build, B posts the
    signed rebuild report and hosts the carrier, and B still serves after
    A dies. The next journeys raise the count.
+
+   The same target passed the C23 plugin journey on 2026-11-14: two signed
+   generations with source and cases cross the real package swarm from
+   pre-boot inert-fetch records, the receiving owner explicitly pins and
+   switches, a distinct builder reproduces and attests the image, wrong-root
+   and corrupt-image inputs are refused, and rollback preserves state. A fresh
+   joiner then fetches from B after A's verified exit. Separate persona homes
+   on one regtest host are not independent physical hosts. No new distribution
+   or activation API was added.
+   <!-- claim: symbol-present aj_plugin_replica tools/app_journey_live.c # replica retrieval after publisher exit -->
 3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap

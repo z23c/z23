@@ -524,6 +524,13 @@ asks that node to fetch from its peers and install a new generation. Unlike
 `plugin fetch`, it does install. It never switches `current` and never runs
 the plugin. A dist image over 48 MiB is still `PLUGIN_DIST_TOO_LARGE`, and an
 unpinned publisher key on that install path is `PLUGIN_DIST_PUBLISHER_UNPINNED`.
+That remote installer accepts exactly the four packed members `LICENSE`, `NAME`,
+`NAME.plugin.json` and `NAME.plugin.sig`. A pack carrying `NAME.c` and
+`cases.json` for reproduction uses the inert `plugin fetch` path: a one-shot
+request persists a resumable record, a hosting node downloads it, and a
+stopped-node fetch verifies and checks it out. `PLUGIN_DIST_SHAPE` on the remote
+installer is this layout boundary, not publisher authority or a transport failure.
+<!-- claim: symbol-present PLUGIN_DIST_ERR_SHAPE contexts/commons/modules/plugin/src/plugin_dist.c # the remote installer keeps the exact four-member shape -->
 The release-envelope relay (a chunk-only copy with no admission member) stays
 refused and is covered by `make t-fast ONLY=plugin_dist`. See
 [PLUGIN_P2P_DIST_2026-10-20.md](../experiments/PLUGIN_P2P_DIST_2026-10-20.md).
@@ -639,6 +646,20 @@ network transport.
 
 <!-- claim: symbol-present zcl_native_handle_plugin_reproduce tools/command/native_plugin_attest_command.c # production rebuild, compare and attestation -->
 <!-- claim: symbol-present pj_t_reproduce tests/harness/src/test_plugin_journey.c # peer journey, refusal and corruption proof -->
+
+`make app-journey-live` also passed on 2026-11-14. It drives real regtest nodes
+with embedded Tor and isolated persona homes: two source-bearing generations
+cross the package swarm from persisted inert-fetch records, install is refused
+before the receiving owner's pin, reproduction signs a distinct builder's
+attestation, wrong roots and corrupt images are refused, and rollback preserves
+owner state. After the publisher's process group exits, a fresh joiner downloads
+the same root from the receiver, checks out, and meets the same owner-only
+activation boundary. This is one physical host and regtest, not two physical
+hosts or a physical-independence attestation. The source-bearing packs use
+`plugin fetch`, not the four-member `plugin fetch_remote` installer.
+
+<!-- claim: symbol-present aj_plugin_reproduce_attested tools/app_journey_live.c # live rebuild and attestation under a distinct builder -->
+<!-- claim: symbol-present aj_plugin_replica tools/app_journey_live.c # fresh joiner fetches from the replica after the publisher exits -->
 
 Never: pass a key's bytes on a command line; reuse a real wallet, node or
 release key; run `zcode publish` or anything that names a reward address; point

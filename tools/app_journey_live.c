@@ -25,6 +25,17 @@
  *   node A killed            B still hosts the carrier     the app outlives
  *                               its author's node
  *
+ * Before the nodes start, A promotes two one-shot C23 plugin generations with
+ * source and cases, and B records inert fetches for both roots. A restarts once
+ * with hosting; B resumes and completes the transfers. B then checks out after
+ * its node stops, proves install is refused before the owner pin, installs both
+ * generations without activating, reproduces generation 1 under a different
+ * builder key, rejects a wrong root and corrupt image, and rolls back with
+ * owner state intact. A fresh joiner records the same inert fetch before its
+ * first boot, downloads generation 1 from B after A exits, and proves the same
+ * owner-only activation boundary. Every daemon gets its persona's isolated
+ * HOME.
+ *
  * The node restart between the local verbs and publish is the documented
  * single-writer package-store order: the CLI owns <datadir>/zcode while
  * hosting is off, then the node takes it with -packagehost=1.
@@ -48,6 +59,7 @@
 #endif
 #include "json/json.h"
 #include "platform/clock.h"
+#include "util/write_all.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -130,6 +142,57 @@ static bool aj_write_file(const char *path, const char *bytes)
     if (!f) return false;
     bool ok = fputs(bytes, f) != EOF;
     return fclose(f) == 0 && ok;
+}
+
+static bool aj_copy_file(const char *from, const char *to)
+{
+    int in = open(from, O_RDONLY);
+    struct stat st;
+    int out = in >= 0 && fstat(in, &st) == 0 && S_ISREG(st.st_mode)
+        ? open(to, O_WRONLY | O_CREAT | O_EXCL, 0600) : -1;
+    if (out < 0) {
+        if (in >= 0) (void)close(in);
+        return false;
+    }
+    char buf[8192];
+    bool ok = true;
+    for (;;) {
+        ssize_t got = read(in, buf, sizeof(buf));
+        if (got == 0) break;
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0 || !zcl_write_all(out, buf, (size_t)got)) {
+            ok = false;
+            break;
+        }
+    }
+    bool closed = close(in) == 0;
+    return close(out) == 0 && closed && ok;
+}
+
+static bool aj_copy_flat_entry(const char *from, const char *to, const char *name)
+{
+    char src[1100], dst[1100];
+    struct stat st;
+    return snprintf(src, sizeof(src), "%s/%s", from, name) < (int)sizeof(src) &&
+           snprintf(dst, sizeof(dst), "%s/%s", to, name) < (int)sizeof(dst) &&
+           lstat(src, &st) == 0 && S_ISREG(st.st_mode) && aj_copy_file(src, dst);
+}
+
+static bool aj_copy_flat(const char *from, const char *to)
+{
+    DIR *dir = opendir(from);
+    if (!dir || mkdir(to, 0700) != 0) {
+        if (dir) (void)closedir(dir);
+        return false;
+    }
+    bool ok = true;
+    unsigned files = 0;
+    struct dirent *entry;
+    while (ok && (entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++files > 16 || !aj_copy_flat_entry(from, to, entry->d_name)) ok = false;
+    }
+    return closedir(dir) == 0 && ok && files > 0;
 }
 
 static int aj_slurp(const char *path, char *buf, size_t cap)
@@ -342,15 +405,24 @@ static int aj_run(const char *home, const char *cwd, int timeout_s,
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static void aj_kill_group(pid_t pgid)
+static bool aj_kill_group(pid_t pgid)
 {
-    if (pgid <= 1) return;
+    if (pgid <= 1) return true;
     (void)kill(-pgid, SIGTERM);
-    for (int i = 0; i < 50; i++) {
-        if (kill(-pgid, 0) != 0) return;
+    bool reaped = false;
+    for (unsigned i = 0; i < 100; i++) {
+        if (!reaped) {
+            int status;
+            pid_t got = waitpid(pgid, &status, WNOHANG);
+            if (got == pgid) reaped = true;
+            else if (got < 0 && errno == EINTR) continue;
+            else if (got < 0) return false;
+        }
+        if (kill(-pgid, 0) != 0 && errno == ESRCH) return reaped;
+        if (i == 49) (void)kill(-pgid, SIGKILL);
         aj_sleep_ms(200);
     }
-    (void)kill(-pgid, SIGKILL);
+    return false;
 }
 
 /* ── node lifecycle ─────────────────────────────────────────────────── */
@@ -360,11 +432,11 @@ static void aj_kill_group(pid_t pgid)
  * snapshots its own set before the next spawn rewrites them. */
 struct aj_node_flags {
     char bin[600], ddf[640], p2pf[32], rpcf[32], fsf[32], httpsf[32],
-        cons[64], pkg[24];
+        cons[64], pkg[24], home_pair[700], path_pair[64];
 };
-static bool aj_node_flags_build(struct aj_node_flags *f, const char *datadir,
-                                int p2p, int rpc, int fs, int https,
-                                const char *connect, bool hosting)
+static bool aj_node_flags_build(struct aj_node_flags *f, const char *home,
+                                const char *datadir, int p2p, int rpc, int fs,
+                                int https, const char *connect, bool hosting)
 {
     return snprintf(f->bin, sizeof(f->bin), "%s/build/bin/zclassic23", g_repo) < (int)sizeof(f->bin) &&
         snprintf(f->ddf, sizeof(f->ddf), "-datadir=%s", datadir) < (int)sizeof(f->ddf) &&
@@ -373,15 +445,17 @@ static bool aj_node_flags_build(struct aj_node_flags *f, const char *datadir,
         snprintf(f->fsf, sizeof(f->fsf), "-fsport=%d", fs) < (int)sizeof(f->fsf) &&
         snprintf(f->httpsf, sizeof(f->httpsf), "-httpsport=%d", https) < (int)sizeof(f->httpsf) &&
         snprintf(f->cons, sizeof(f->cons), "-connect=%s", connect) < (int)sizeof(f->cons) &&
-        snprintf(f->pkg, sizeof(f->pkg), "-packagehost=%d", hosting ? 1 : 0) < (int)sizeof(f->pkg);
+        snprintf(f->pkg, sizeof(f->pkg), "-packagehost=%d", hosting ? 1 : 0) < (int)sizeof(f->pkg) &&
+        snprintf(f->home_pair, sizeof(f->home_pair), "HOME=%s", home) < (int)sizeof(f->home_pair) &&
+        snprintf(f->path_pair, sizeof(f->path_pair), "PATH=/usr/bin:/bin") < (int)sizeof(f->path_pair);
 }
 
-static pid_t aj_node_spawn(const char *datadir, const char *log, int p2p,
-                           int rpc, int fs, int https, const char *connect,
-                           bool hosting)
+static pid_t aj_node_spawn(const char *home, const char *datadir, const char *log,
+                           int p2p, int rpc, int fs, int https,
+                           const char *connect, bool hosting)
 {
     static struct aj_node_flags f;
-    if (!aj_node_flags_build(&f, datadir, p2p, rpc, fs, https, connect, hosting))
+    if (!aj_node_flags_build(&f, home, datadir, p2p, rpc, fs, https, connect, hosting))
         return 0;
     char *argv[] = {f.bin, f.ddf, (char *)"-regtest", f.p2pf, f.rpcf, f.fsf,
         f.httpsf, f.cons, (char *)"-onion-persist", f.pkg,
@@ -399,6 +473,9 @@ static pid_t aj_node_spawn(const char *datadir, const char *log, int p2p,
             _exit(127);
         int in = open("/dev/null", O_RDONLY);
         if (in < 0 || dup2(in, STDIN_FILENO) < 0) _exit(127);
+        char *env[] = {f.home_pair, f.path_pair, NULL};
+        extern char **environ;
+        environ = env;
         execv(f.bin, argv);
         _exit(127);
     }
@@ -454,6 +531,9 @@ static bool aj_onion_status(const char *datadir, int rpc, const char *home,
 }
 
 struct aj_node_ctx { char datadir[640]; int rpc; char home[640]; };
+
+static bool aj_wait_ready_pair(struct aj_node_ctx *ac, struct aj_node_ctx *bc,
+                               const char *suffix);
 
 /* RPC liveness: the onion status leaf answers at all (any state). */
 static bool aj_probe_rpc(void *p)
@@ -530,7 +610,7 @@ static bool aj_fixture(void)
         "repo/engine/composition", "repo/engine/composition/commands",
         "repo/tools", "repo/tools/dev", "repo/apps", "repo/apps/tinyapp",
         "repo/apps/tinyapp/include", "repo/apps/tinyapp/src",
-        "a/home", "b/home"};
+        "a/home", "b/home", "capability"};
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         if (!aj_path_join(p, sizeof(p), g_work, dirs[i]) || aj_mkdir_p(p) != 0)
             return false;
@@ -556,6 +636,16 @@ static bool aj_fixture(void)
          "app:\n\tcc -std=c2x -O2 -Iinclude -MD -MF $(APP_OUT)/main.d"
          " -c src/main.c -o $(APP_OUT)/main.o\n"
          "\tcc -o $(APP_OUT)/app $(APP_OUT)/main.o\n"},
+        {"capability/upper.c",
+         "#include <ctype.h>\n#include <stdio.h>\n"
+         "int main(void) { int c;\n"
+         "    while ((c = getchar()) != EOF)\n"
+         "        if (putchar(toupper((unsigned char)c)) == EOF) return 1;\n"
+         "    return 0; }\n"},
+        {"capability/cases.json",
+         "[{\"name\":\"lower\",\"stdin\":\"abc\",\"expect_stdout\":\"ABC\"},"
+         "{\"name\":\"mixed\",\"stdin\":\"Hello, z23\\n\","
+         "\"expect_stdout\":\"HELLO, Z23\\n\"}]\n"},
     };
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
         if (!aj_path_join(p, sizeof(p), g_work, files[i][0]) ||
@@ -568,6 +658,8 @@ static bool aj_fixture(void)
         aj_slurp(p, lic, sizeof(lic)) <= 0)
         return false;
     return aj_path_join(p, sizeof(p), g_repo_app, "apps/tinyapp/LICENSE") &&
+        aj_write_file(p, lic) &&
+        aj_path_join(p, sizeof(p), g_work, "capability/LICENSE") &&
         aj_write_file(p, lic);
 }
 
@@ -738,7 +830,10 @@ static bool aj_phase_b_get(struct aj_node_ctx *bc)
 
 static bool aj_phase_outlives(struct aj_node_ctx *bc)
 {
-    aj_kill_group(g_a_pgid);
+    if (!aj_kill_group(g_a_pgid)) {
+        aj_fail("could not stop publisher A and reap its process group");
+        return false;
+    }
     g_a_pgid = 0;
     aj_sleep_ms(2000);
     static char hostf[128], carrierf[128];
@@ -757,6 +852,531 @@ static bool aj_phase_outlives(struct aj_node_ctx *bc)
         return false;
     }
     return true;
+}
+
+/* ── C23 plugin reproduction over the live package swarm ────────────── */
+
+static char g_plugin_root[2][65], g_plugin_gen[2][129];
+static char g_plugin_image[2][129], g_plugin_publisher[65];
+static char g_c_home[640], g_c_dd[640], g_c_log[640];
+static pid_t g_c_pgid;
+#define APPJ_C_RPC 39751
+#define APPJ_C_FS 39752
+#define APPJ_C_HTTPS 39753
+#define APPJ_CONNECT_B "127.0.0.1:20025"
+
+static int aj_plugin_run(struct aj_node_ctx *c, const char *label,
+                         char *const tail[], char *out, size_t cap, int timeout_s)
+{
+    if (cap) out[0] = '\0';
+    int rc = aj_cli(c->datadir, c->rpc, tail, out, cap, timeout_s, c->home);
+    static unsigned seq;
+    char log[1100];
+    if (snprintf(log, sizeof(log), "%s/plugin-%02u-%s.log", g_work, ++seq, label) <
+        (int)sizeof(log))
+        (void)aj_write_file(log, out);
+    return rc;
+}
+
+static bool aj_json_bool_is(const struct json_value *object, const char *key,
+                            bool expected)
+{
+    const struct json_value *value = json_get(object, key);
+    return value && value->type == JSON_BOOL && json_get_bool(value) == expected;
+}
+
+static bool aj_json_ok(const char *wire, struct json_value *doc)
+{
+    json_init(doc);
+    return json_read(doc, wire, strlen(wire)) && doc->type == JSON_OBJ &&
+           aj_json_bool_is(doc, "ok", true);
+}
+
+static const struct json_value *aj_json_data(const struct json_value *doc)
+{
+    const struct json_value *data = json_get(doc, "data");
+    return data ? data : doc;
+}
+
+static bool aj_json_refusal(const char *wire, const char *expected)
+{
+    struct json_value doc = {0};
+    json_init(&doc);
+    bool ok = json_read(&doc, wire, strlen(wire));
+    const struct json_value *error = ok ? json_get(&doc, "error") : NULL;
+    const char *code = error ? json_get_str(json_get(error, "code"))
+                             : json_get_str(json_get(&doc, "code"));
+    ok = ok && !aj_json_bool_is(&doc, "ok", true) && !strcmp(code, expected);
+    json_free(&doc);
+    return ok;
+}
+
+static bool aj_plugin_key(struct aj_node_ctx *c, const char *relative,
+                          char public_key[65])
+{
+    char path[1100], out[8192];
+    if (!aj_path_join(path, sizeof(path), g_work, relative)) return false;
+    char *tail[] = {(char *)"plugin", (char *)"keygen", path, NULL};
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "keygen", tail, out, sizeof(out), 60) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) {
+        const char *key = json_get_str(json_get(aj_json_data(&doc), "public_key"));
+        ok = strlen(key) == 64 && snprintf(public_key, 65, "%s", key) == 64;
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("%s plugin keygen: %s", relative, out);
+    return ok;
+}
+
+static bool aj_plugin_promote(struct aj_node_ctx *c, const char *version,
+                              const char *dist, char generation[129], char image[129])
+{
+    char source[1100], cases[1200], key[1200], dir[1200], version_arg[32];
+    if (!aj_path_join(source, sizeof(source), g_work, "capability/upper.c") ||
+        snprintf(cases, sizeof(cases), "--cases=%s/capability/cases.json", g_work) >= (int)sizeof(cases) ||
+        snprintf(key, sizeof(key), "--key=%s/a/publisher.key", g_work) >= (int)sizeof(key) ||
+        snprintf(dir, sizeof(dir), "--dir=%s", dist) >= (int)sizeof(dir) ||
+        snprintf(version_arg, sizeof(version_arg), "--version=%s", version) >= (int)sizeof(version_arg))
+        return false;
+    char *tail[] = {(char *)"lab", (char *)"promote", source, cases,
+        (char *)"--name=upper", version_arg, key, dir, (char *)"--include-source", NULL};
+    char out[16384];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, version, tail, out, sizeof(out), 180) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        const char *gen = json_get_str(json_get(data, "generation"));
+        const char *sha = json_get_str(json_get(data, "release_sha3_512"));
+        ok = strlen(gen) == 128 && strlen(sha) == 128 &&
+             json_get_int(json_get(data, "cases_passed")) == 2 &&
+             snprintf(generation, 129, "%s", gen) == 128 &&
+             snprintf(image, 129, "%s", sha) == 128;
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("lab promote %s: %s", version, out);
+    return ok;
+}
+
+static bool aj_plugin_publish_root(struct aj_node_ctx *c, const char *dist, size_t index)
+{
+    char dir_arg[1200];
+    if (snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", dist) >= (int)sizeof(dir_arg))
+        return false;
+    char *tail[] = {(char *)"plugin", (char *)"publish", dir_arg, NULL};
+    char out[16384];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, index == 0 ? "1.0.0" : "2.0.0", tail,
+                            out, sizeof(out), 120) == 0 && aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        const char *root = json_get_str(json_get(data, "package_root"));
+        const char *publisher = json_get_str(json_get(data, "publisher"));
+        const char *generation = json_get_str(json_get(data, "generation"));
+        ok = strlen(root) == 64 && !strcmp(publisher, g_plugin_publisher) &&
+             !strcmp(generation, g_plugin_gen[index]) &&
+             snprintf(g_plugin_root[index], 65, "%s", root) == 64;
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("plugin publish generation %zu: %s", index + 1, out);
+    return ok;
+}
+
+static bool aj_plugin_publish_one(struct aj_node_ctx *c, size_t index)
+{
+    char dist[1100], license[1100], license_dst[1100];
+    const char *version = index == 0 ? "1.0.0" : "2.0.0";
+    return snprintf(dist, sizeof(dist), "%s/a/dist-v%zu", g_work, index + 1) < (int)sizeof(dist) &&
+           aj_plugin_promote(c, version, dist, g_plugin_gen[index], g_plugin_image[index]) &&
+           aj_path_join(license, sizeof(license), g_work, "capability/LICENSE") &&
+           snprintf(license_dst, sizeof(license_dst), "%s/LICENSE", dist) < (int)sizeof(license_dst) &&
+           aj_copy_file(license, license_dst) && aj_plugin_publish_root(c, dist, index);
+}
+
+static bool aj_plugin_publish(struct aj_node_ctx *c)
+{
+    if (!aj_plugin_key(c, "a/publisher.key", g_plugin_publisher)) return false;
+    for (size_t i = 0; i < 2; i++)
+        if (!aj_plugin_publish_one(c, i)) return false;
+    return !strcmp(g_plugin_image[0], g_plugin_image[1]) &&
+           strcmp(g_plugin_root[0], g_plugin_root[1]) != 0 &&
+           strcmp(g_plugin_gen[0], g_plugin_gen[1]) != 0;
+}
+
+static bool aj_plugin_request(struct aj_node_ctx *c, size_t index)
+{
+    char root_arg[96], dir_arg[1200];
+    if (aj_mkdir_p(c->datadir) != 0 ||
+        snprintf(root_arg, sizeof(root_arg), "--root=%s", g_plugin_root[index]) >= (int)sizeof(root_arg) ||
+        snprintf(dir_arg, sizeof(dir_arg), "--dir=%s/received-v%zu", c->datadir, index + 1) >= (int)sizeof(dir_arg))
+        return false;
+    char *tail[] = {(char *)"plugin", (char *)"fetch", root_arg, dir_arg, NULL};
+    char out[32768];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "fetch-record", tail, out, sizeof(out), 120) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        ok = aj_json_bool_is(data, "complete", false) && aj_json_bool_is(data, "live", false);
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("persisting inert plugin fetch: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_pin(struct aj_node_ctx *c)
+{
+    char *tail[] = {(char *)"plugin", (char *)"publisher", g_plugin_publisher, NULL};
+    char out[8192];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "publisher-pin", tail, out, sizeof(out), 60) == 0 &&
+              aj_json_ok(out, &doc);
+    json_free(&doc);
+    if (!ok) aj_fail("owner publisher pin: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_call_refusal(struct aj_node_ctx *c, const char *expected)
+{
+    char *tail[] = {(char *)"plugin", (char *)"call", (char *)"upper",
+                    (char *)"--stdin=abc", NULL};
+    char out[8192];
+    bool ok = aj_plugin_run(c, "not-active", tail, out, sizeof(out), 60) != 0 &&
+              aj_json_refusal(out, expected);
+    if (!ok) aj_fail("%s check failed: %s", expected, out);
+    return ok;
+}
+
+struct aj_package_wait { struct aj_node_ctx *node; const char *root; };
+
+static bool aj_package_complete(void *p)
+{
+    struct aj_package_wait *w = p;
+    char *tail[] = {(char *)"dumpstate", (char *)"zcode_store", (char *)w->root, NULL};
+    char out[32768];
+    int rc = aj_plugin_run(w->node, "package-status", tail, out, sizeof(out), 60);
+    struct json_value doc = {0};
+    json_init(&doc);
+    bool parsed = json_read(&doc, out, strlen(out));
+    const struct json_value *state = json_get(&doc, "state");
+    bool ok = rc == 0 && parsed && aj_json_bool_is(state, "enabled", true) &&
+              aj_json_bool_is(state, "tracked", true) && aj_json_bool_is(state, "complete", true);
+    json_free(&doc);
+    return ok;
+}
+
+static bool aj_plugin_wait_complete(struct aj_node_ctx *c, size_t index)
+{
+    struct aj_package_wait w = {.node = c, .root = g_plugin_root[index]};
+    return aj_wait(aj_package_complete, &w, g_board_wait_s,
+                   "source-bearing plugin package transfer");
+}
+
+static bool aj_plugin_wait_onion(struct aj_node_ctx *c, const char *who)
+{
+    char what[128];
+    return snprintf(what, sizeof(what), "%s onion", who) < (int)sizeof(what) &&
+           aj_wait(aj_probe_onion, c, g_tor_wait_s, what);
+}
+
+static bool aj_plugin_checkout(struct aj_node_ctx *c, size_t index)
+{
+    char root_arg[96], dir_arg[1200];
+    if (snprintf(root_arg, sizeof(root_arg), "--root=%s", g_plugin_root[index]) >= (int)sizeof(root_arg) ||
+        snprintf(dir_arg, sizeof(dir_arg), "--dir=%s/received-v%zu", c->datadir, index + 1) >= (int)sizeof(dir_arg))
+        return false;
+    char *fetch[] = {(char *)"plugin", (char *)"fetch", root_arg, dir_arg, NULL};
+    char out[32768];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "fetch-checkout", fetch, out, sizeof(out), 120) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        ok = aj_json_bool_is(data, "complete", true) && aj_json_bool_is(data, "live", false) &&
+             !strcmp(json_get_str(json_get(data, "root")), g_plugin_root[index]) &&
+             !strcmp(json_get_str(json_get(data, "generation")), g_plugin_gen[index]);
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("local verified checkout: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_install(struct aj_node_ctx *c, size_t index, bool authorized)
+{
+    char manifest[1200];
+    if (snprintf(manifest, sizeof(manifest), "--manifest=%s/received-v%zu/upper.plugin.json",
+                 c->datadir, index + 1) >= (int)sizeof(manifest)) return false;
+    char *tail[] = {(char *)"plugin", (char *)"install", manifest, NULL};
+    char out[16384];
+    int rc = aj_plugin_run(c, authorized ? "install" : "install-refused",
+                           tail, out, sizeof(out), 60);
+    if (!authorized) {
+        bool refused = rc != 0 && aj_json_refusal(out, "PLUGIN_NO_KEYS");
+        if (!refused) aj_fail("unpinned install was not refused: %s", out);
+        return refused;
+    }
+    struct json_value doc = {0};
+    bool ok = rc == 0 && aj_json_ok(out, &doc) &&
+              !strcmp(json_get_str(json_get(aj_json_data(&doc), "generation")),
+                      g_plugin_gen[index]);
+    json_free(&doc);
+    if (!ok) aj_fail("owner install: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_rebuild_data(const struct json_value *data, const char *builder)
+{
+    return aj_json_bool_is(data, "reproduced", true) &&
+           aj_json_bool_is(data, "installed", false) &&
+           aj_json_bool_is(data, "activated", false) &&
+           aj_json_bool_is(data, "physical_independence_attested", false) &&
+           !strcmp(json_get_str(json_get(data, "generation")), g_plugin_gen[0]) &&
+           !strcmp(json_get_str(json_get(data, "image_sha3_512")), g_plugin_image[0]) &&
+           !strcmp(json_get_str(json_get(data, "source_root")), g_plugin_root[0]) &&
+           !strcmp(json_get_str(json_get(data, "builder_key")), builder) &&
+           json_get_int(json_get(data, "cases_passed")) == 2;
+}
+
+static bool aj_plugin_rebuild(struct aj_node_ctx *c, const char *received,
+                              const char *builder)
+{
+    char dir_arg[1200], key_arg[1200], out_arg[1200], source_arg[96];
+    if (snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", received) >= (int)sizeof(dir_arg) ||
+        snprintf(key_arg, sizeof(key_arg), "--key=%s/b/builder.key", g_work) >= (int)sizeof(key_arg) ||
+        snprintf(out_arg, sizeof(out_arg), "--out=%s/b/reproduced", g_work) >= (int)sizeof(out_arg) ||
+        snprintf(source_arg, sizeof(source_arg), "--source-root=%s", g_plugin_root[0]) >= (int)sizeof(source_arg))
+        return false;
+    char *reproduce[] = {(char *)"plugin", (char *)"reproduce", dir_arg,
+        source_arg, key_arg, out_arg, (char *)"--toolchain=live-gcc-linux-x86_64", NULL};
+    char out[32768];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "reproduce", reproduce, out, sizeof(out), 240) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) ok = aj_plugin_rebuild_data(aj_json_data(&doc), builder);
+    json_free(&doc);
+    if (!ok) aj_fail("receiver reproduction: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_attest(struct aj_node_ctx *c, const char *received,
+                             const char *builder)
+{
+    char pin_path[1100], pin[80], manifest[1200], attestations[1200], builders[1200];
+    if (!aj_path_join(pin_path, sizeof(pin_path), g_work, "b/builders.pin") ||
+        snprintf(pin, sizeof(pin), "%s\n", builder) >= (int)sizeof(pin) ||
+        !aj_write_file(pin_path, pin) || chmod(pin_path, 0600) != 0 ||
+        snprintf(manifest, sizeof(manifest), "--manifest=%s/upper.plugin.json", received) >= (int)sizeof(manifest) ||
+        snprintf(attestations, sizeof(attestations), "--attestations=%s/b/reproduced", g_work) >= (int)sizeof(attestations) ||
+        snprintf(builders, sizeof(builders), "--builders=%s", pin_path) >= (int)sizeof(builders))
+        return false;
+    char root_arg[96];
+    if (snprintf(root_arg, sizeof(root_arg), "--source-root=%s", g_plugin_root[0]) >= (int)sizeof(root_arg))
+        return false;
+    char *verify[] = {(char *)"plugin", (char *)"attest_verify", manifest,
+        attestations, builders, (char *)"--threshold=1", root_arg, NULL};
+    char out[32768];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "attest-verify", verify, out, sizeof(out), 60) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        ok = aj_json_bool_is(data, "accepted", true) &&
+             json_get_int(json_get(data, "attested")) == 1 &&
+             json_get_int(json_get(data, "threshold")) == 1;
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("receiver attestation: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_owner_install(struct aj_node_ctx *c, bool two_generations)
+{
+    if (!aj_plugin_checkout(c, 0) ||
+        (two_generations && !aj_plugin_checkout(c, 1)) ||
+        !aj_plugin_install(c, 0, false) || !aj_plugin_pin(c) ||
+        !aj_plugin_install(c, 0, true) ||
+        (two_generations && !aj_plugin_install(c, 1, true))) return false;
+    return aj_plugin_call_refusal(c, "PLUGIN_NO_GENERATION");
+}
+
+static bool aj_plugin_reproduce_attested(struct aj_node_ctx *c)
+{
+    char received[1100];
+    if (snprintf(received, sizeof(received), "%s/received-v1", c->datadir) >= (int)sizeof(received))
+        return false;
+    char builder[65];
+    return aj_plugin_key(c, "b/builder.key", builder) &&
+           strcmp(builder, g_plugin_publisher) != 0 &&
+           aj_plugin_rebuild(c, received, builder) &&
+           aj_plugin_attest(c, received, builder);
+}
+
+static bool aj_plugin_reproduce_refusal(struct aj_node_ctx *c, const char *dir,
+                                        const char *root, const char *out_dir,
+                                        const char *expected)
+{
+    char dir_arg[1200], source_arg[96], key_arg[1200], out_arg[1200];
+    if (snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", dir) >= (int)sizeof(dir_arg) ||
+        snprintf(source_arg, sizeof(source_arg), "--source-root=%s", root) >= (int)sizeof(source_arg) ||
+        snprintf(key_arg, sizeof(key_arg), "--key=%s/b/builder.key", g_work) >= (int)sizeof(key_arg) ||
+        snprintf(out_arg, sizeof(out_arg), "--out=%s", out_dir) >= (int)sizeof(out_arg))
+        return false;
+    char *tail[] = {(char *)"plugin", (char *)"reproduce", dir_arg, source_arg,
+        key_arg, out_arg, (char *)"--toolchain=live-gcc-linux-x86_64", NULL};
+    char out[16384];
+    bool ok = aj_plugin_run(c, "refusal", tail, out, sizeof(out), 60) != 0 &&
+              aj_json_refusal(out, expected) &&
+              access(out_dir, F_OK) != 0 && errno == ENOENT;
+    if (!ok) aj_fail("%s was not refused without output: %s", expected, out);
+    return ok;
+}
+
+static bool aj_plugin_wrong_root(struct aj_node_ctx *c)
+{
+    char bad_root[65], out_dir[1100], dir[1100];
+    if (snprintf(bad_root, sizeof(bad_root), "%s", g_plugin_root[0]) != 64)
+        return false;
+    bad_root[0] = bad_root[0] == '0' ? '1' : '0';
+    return aj_path_join(out_dir, sizeof(out_dir), g_work, "b/wrong-root-out") &&
+           snprintf(dir, sizeof(dir), "%s/received-v1", c->datadir) < (int)sizeof(dir) &&
+           aj_plugin_reproduce_refusal(c, dir, bad_root, out_dir,
+                                       "PLUGIN_REPRODUCE_ROOT_MISMATCH");
+}
+
+static bool aj_flip_image(const char *path)
+{
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    int byte = fseek(f, 32, SEEK_SET) == 0 ? fgetc(f) : EOF;
+    bool ok = byte != EOF && fseek(f, 32, SEEK_SET) == 0 &&
+              fputc(byte == 'X' ? 'Y' : 'X', f) != EOF;
+    return fclose(f) == 0 && ok;
+}
+
+static bool aj_plugin_corrupt_image(struct aj_node_ctx *c)
+{
+    char from[1100], corrupt[1100], image[1200], out_dir[1100];
+    if (snprintf(from, sizeof(from), "%s/received-v1", c->datadir) >= (int)sizeof(from) ||
+        !aj_path_join(corrupt, sizeof(corrupt), g_work, "b/corrupt") ||
+        !aj_path_join(out_dir, sizeof(out_dir), g_work, "b/corrupt-out") ||
+        !aj_copy_flat(from, corrupt) ||
+        snprintf(image, sizeof(image), "%s/upper", corrupt) >= (int)sizeof(image) ||
+        !aj_flip_image(image)) {
+        aj_fail("could not prepare a corrupt image copy");
+        return false;
+    }
+    return aj_plugin_reproduce_refusal(c, corrupt, g_plugin_root[0], out_dir,
+                                       "PLUGIN_EXE_HASH");
+}
+
+static bool aj_plugin_corruption(struct aj_node_ctx *c)
+{
+    return aj_plugin_wrong_root(c) && aj_plugin_corrupt_image(c);
+}
+
+static bool aj_plugin_call(struct aj_node_ctx *c, size_t generation)
+{
+    char out[16384];
+    char *tail[] = {(char *)"plugin", (char *)"call", (char *)"upper",
+                    (char *)"--stdin=abc", NULL};
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, "call", tail, out, sizeof(out), 60) == 0 &&
+              aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        const struct json_value *run = json_get(data, "run");
+        const char *version = generation == 0 ? "1.0.0" : "2.0.0";
+        ok = !strcmp(json_get_str(json_get(data, "version")), version) &&
+             !strcmp(json_get_str(json_get(data, "generation")), g_plugin_gen[generation]) &&
+             run && !strcmp(json_get_str(json_get(run, "stdout")), "ABC") &&
+             json_get_int(json_get(run, "exit_code")) == 0;
+    }
+    json_free(&doc);
+    if (!ok) aj_fail("plugin call generation %zu: %s", generation + 1, out);
+    return ok;
+}
+
+static bool aj_plugin_switch(struct aj_node_ctx *c, size_t generation, bool rollback)
+{
+    char *tail[] = {(char *)"plugin", rollback ? (char *)"rollback" : (char *)"switch",
+        (char *)"upper", rollback ? NULL : g_plugin_gen[generation], NULL};
+    char out[16384];
+    struct json_value doc = {0};
+    bool ok = aj_plugin_run(c, rollback ? "rollback" : "switch", tail,
+                            out, sizeof(out), 60) == 0 && aj_json_ok(out, &doc);
+    if (ok)
+        ok = !strcmp(json_get_str(json_get(aj_json_data(&doc), "current")),
+                     g_plugin_gen[generation]);
+    json_free(&doc);
+    if (!ok) aj_fail("plugin selection: %s", out);
+    return ok;
+}
+
+static bool aj_plugin_activate_rollback(struct aj_node_ctx *c)
+{
+    if (!aj_plugin_switch(c, 0, false) || !aj_plugin_call(c, 0)) return false;
+    char data_dir[1100], state[1200];
+    if (!aj_path_join(data_dir, sizeof(data_dir), c->home, ".z23/plugins/upper/data") ||
+        aj_mkdir_p(data_dir) != 0 ||
+        !aj_path_join(state, sizeof(state), data_dir, "state.txt") ||
+        !aj_write_file(state, "owner-state-survives\n") ||
+        !aj_plugin_switch(c, 1, false) || !aj_plugin_call(c, 1) ||
+        !aj_plugin_switch(c, 0, true) || !aj_plugin_call(c, 0)) return false;
+    char kept[64];
+    if (aj_slurp(state, kept, sizeof(kept)) <= 0 || strcmp(kept, "owner-state-survives\n")) {
+        aj_fail("plugin rollback changed owner state");
+        return false;
+    }
+    return true;
+}
+
+static bool aj_plugin_receive(struct aj_node_ctx *bc)
+{
+    return aj_plugin_wait_complete(bc, 0) && aj_plugin_wait_complete(bc, 1) &&
+           aj_plugin_call_refusal(bc, "PLUGIN_NOT_INSTALLED");
+}
+
+static bool aj_plugin_reproduce_rollback(struct aj_node_ctx *bc)
+{
+    if (!aj_kill_group(g_b_pgid)) {
+        aj_fail("could not stop receiver B before its CLI store handoff");
+        return false;
+    }
+    g_b_pgid = 0;
+    aj_sleep_ms(2000);
+    return aj_plugin_owner_install(bc, true) && aj_plugin_reproduce_attested(bc) &&
+           aj_plugin_corruption(bc) && aj_plugin_activate_rollback(bc);
+}
+
+static bool aj_plugin_replica(struct aj_node_ctx *bc)
+{
+    if (g_a_pgid) {
+        aj_fail("publisher A is still live before the replica proof");
+        return false;
+    }
+    struct aj_node_ctx cc = {.rpc = APPJ_C_RPC};
+    if (snprintf(g_c_home, sizeof(g_c_home), "%s/c/home", g_work) >= (int)sizeof(g_c_home) ||
+        snprintf(g_c_dd, sizeof(g_c_dd), "%s/c/datadir", g_work) >= (int)sizeof(g_c_dd) ||
+        snprintf(g_c_log, sizeof(g_c_log), "%s/c/node.log", g_work) >= (int)sizeof(g_c_log) ||
+        aj_mkdir_p(g_c_home) != 0) return false;
+    snprintf(cc.home, sizeof(cc.home), "%s", g_c_home);
+    snprintf(cc.datadir, sizeof(cc.datadir), "%s", g_c_dd);
+    if (!aj_plugin_request(&cc, 0)) return false;
+    g_b_pgid = aj_node_spawn(bc->home, bc->datadir, g_b_log, APPJ_B_P2P,
+        APPJ_B_RPC, APPJ_B_FS, APPJ_B_HTTPS, APPJ_CONNECT_A, true);
+    if (!g_b_pgid) return false;
+    g_c_pgid = aj_node_spawn(g_c_home, g_c_dd, g_c_log, APPJ_A_P2P,
+        APPJ_C_RPC, APPJ_C_FS, APPJ_C_HTTPS, APPJ_CONNECT_B, true);
+    if (!g_c_pgid || !aj_plugin_wait_onion(bc, "replica B") ||
+        !aj_plugin_wait_onion(&cc, "joiner C") || !aj_plugin_wait_complete(&cc, 0))
+        return false;
+    if (!aj_kill_group(g_c_pgid)) {
+        aj_fail("could not stop joiner C before its CLI store handoff");
+        return false;
+    }
+    g_c_pgid = 0;
+    return aj_plugin_owner_install(&cc, false);
 }
 
 /* ── reporting ──────────────────────────────────────────────────────── */
@@ -819,6 +1439,51 @@ static bool aj_wait_ready_pair(struct aj_node_ctx *ac, struct aj_node_ctx *bc,
     return aj_wait(aj_probe_onion, bc, g_tor_wait_s, what);
 }
 
+static bool aj_app_journey(struct aj_node_ctx *ac, struct aj_node_ctx *bc)
+{
+    /* A boots WITHOUT hosting (the CLI owns <datadir>/zcode for the local
+     * verbs); B boots hosting and dials A over the allowlisted port. */
+    g_a_pgid = aj_node_spawn(g_a_home, g_a_dd, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+                             APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, false);
+    g_b_pgid = aj_node_spawn(g_b_home, g_b_dd, g_b_log, APPJ_B_P2P, APPJ_B_RPC,
+                             APPJ_B_FS, APPJ_B_HTTPS, APPJ_CONNECT_A, true);
+    if (!aj_wait_ready_pair(ac, bc, "")) return false;
+    char a_addr[128], a_state[32];
+    bool a_r = false;
+    (void)aj_onion_status(g_a_dd, APPJ_A_RPC, g_a_home, a_addr, sizeof(a_addr),
+                          a_state, sizeof(a_state), &a_r);
+    aj_note("phase 1 nodes up, A onion %s", a_addr);
+
+    if (!aj_phase_a_local(ac)) return false;
+    aj_note("phase 2 A journey: create, modify, build %.16s, open, share file",
+            g_image_a);
+
+    /* A restarts WITH hosting: the single package-store writer handoff. */
+    if (!aj_kill_group(g_a_pgid)) {
+        aj_fail("node A did not exit before its hosting restart");
+        return false;
+    }
+    g_a_pgid = 0;
+    aj_sleep_ms(2000);
+    g_a_pgid = aj_node_spawn(g_a_home, g_a_dd, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+                             APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, true);
+    if (!g_a_pgid) {
+        aj_fail("node A hosting restart failed");
+        return false;
+    }
+    if (!aj_wait_ready_pair(ac, NULL, " (hosting)")) return false;
+    if (!aj_phase_publish(ac)) return false;
+    aj_note("phase 3 A published offer %.16s root %.16s", g_post, g_root);
+
+    if (!aj_phase_b_get(bc)) return false;
+    aj_note("phase 4 B received A's exact offer, rebuilt the same image and "
+            "now hosts the carrier");
+
+    if (!aj_plugin_receive(bc) || !aj_phase_outlives(bc)) return false;
+    aj_note("phase 5 outlives: A dead, B still serves the app");
+    return true;
+}
+
 /* The whole journey after argument parsing: fixture, nodes, A's local
  * verbs, A's hosting restart, publish, B's get, the outlives leg. Returns
  * 0 PASS / 2 FAIL, with nodes always stopped and evidence kept on FAIL. */
@@ -837,54 +1502,31 @@ static int aj_journey(void)
     snprintf(ac.home, sizeof(ac.home), "%s", g_a_home);
     snprintf(bc.home, sizeof(bc.home), "%s", g_b_home);
 
-    /* A boots WITHOUT hosting (the CLI owns <datadir>/zcode for the local
-     * verbs); B boots hosting and dials A over the allowlisted port. */
-    g_a_pgid = aj_node_spawn(g_a_dd, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
-                             APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, false);
-    g_b_pgid = aj_node_spawn(g_b_dd, g_b_log, APPJ_B_P2P, APPJ_B_RPC,
-                             APPJ_B_FS, APPJ_B_HTTPS, APPJ_CONNECT_A, true);
-    if (!aj_wait_ready_pair(&ac, &bc, "")) goto fail;
-    char a_addr[128], a_state[32];
-    bool a_r = false;
-    (void)aj_onion_status(g_a_dd, APPJ_A_RPC, g_a_home, a_addr, sizeof(a_addr),
-                          a_state, sizeof(a_state), &a_r);
-    aj_note("phase 1 nodes up, A onion %s", a_addr);
+    if (!aj_plugin_publish(&ac) || !aj_plugin_request(&bc, 0) ||
+        !aj_plugin_request(&bc, 1)) goto fail;
+    aj_note("phase 0 C23 plugin: signed two generations and persisted inert fetches");
 
-    if (!aj_phase_a_local(&ac)) goto fail;
-    aj_note("phase 2 A journey: create, modify, build %.16s, open, share file",
-            g_image_a);
+    if (!aj_app_journey(&ac, &bc)) goto fail;
+    if (!aj_plugin_reproduce_rollback(&bc) || !aj_plugin_replica(&bc)) goto fail;
+    aj_note("phase 6 plugin: peer transfer, reproduction, refused authority, "
+            "state-preserving rollback and replica fetch after A exits");
 
-    /* A restarts WITH hosting: the single package-store writer handoff. */
-    aj_kill_group(g_a_pgid);
-    g_a_pgid = 0;
-    aj_sleep_ms(2000);
-    g_a_pgid = aj_node_spawn(g_a_dd, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
-                             APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, true);
-    if (!g_a_pgid) {
-        aj_fail("node A hosting restart failed");
+    bool stopped = aj_kill_group(g_a_pgid);
+    stopped = aj_kill_group(g_b_pgid) && stopped;
+    stopped = aj_kill_group(g_c_pgid) && stopped;
+    if (!stopped) {
+        aj_fail("could not stop every test node");
         goto fail;
     }
-    if (!aj_wait_ready_pair(&ac, NULL, " (hosting)")) goto fail;
-    if (!aj_phase_publish(&ac)) goto fail;
-    aj_note("phase 3 A published offer %.16s root %.16s", g_post, g_root);
-
-    if (!aj_phase_b_get(&bc)) goto fail;
-    aj_note("phase 4 B received A's exact offer, rebuilt the same image and "
-            "now hosts the carrier");
-
-    if (!aj_phase_outlives(&bc)) goto fail;
-    aj_note("phase 5 outlives: A dead, B still serves the app");
-
-    aj_kill_group(g_a_pgid);
-    aj_kill_group(g_b_pgid);
     if (!g_keep) (void)aj_rm_rf(g_work, 0);
     aj_note("PASS: stranger-to-stranger app journeys proven live between "
             "two isolated nodes: 1");
     return 0;
 
 fail:
-    aj_kill_group(g_a_pgid);
-    aj_kill_group(g_b_pgid);
+    (void)aj_kill_group(g_a_pgid);
+    (void)aj_kill_group(g_b_pgid);
+    (void)aj_kill_group(g_c_pgid);
     aj_note("FAIL preserved evidence under %s", g_work);
     return 2;
 }
