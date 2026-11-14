@@ -538,6 +538,7 @@ ZCL_TEST_GROUP_NEED("test_app_seed_skycombat", ZCL_HOST_NEED_ENV,
  * opens and QA runs on a private Xvfb): the same host need. */
 ZCL_TEST_GROUP_NEED("test_app_journey_skycombat", ZCL_HOST_NEED_ENV,
     "ZCL_TEST_DISPLAY_APPS")
+ZCL_TEST_GROUP_BUILD_NEED("test_app_journey_skycombat", "build/bin/z23-dev", "dev-bin")
 
 /* mcp_serve drives `z23 mcp serve` over pipes against the dev binary. */
 ZCL_TEST_GROUP_BUILD_NEED("test_mcp_serve", "build/bin/z23-dev", "dev-bin")

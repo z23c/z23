@@ -14,6 +14,7 @@
  *   B (own HOME)          open skycombat-1.z23share   receive, build, open
  *                         <image> --qa-frames=120 exits 0
  *                         open retained copy, confirm execution, same image
+ *                         fresh CLI --yes reopens the same saved image
  *
  * B's image_sha3 equals A's for the shared version. The build needs no
  * system -dev package (the X11/GL headers are vendored); the runs need
@@ -28,13 +29,21 @@
 
 #include "test/test_core.h"
 #include "test/app_seed_fixture.h"
+#include "test/host_tool_capture.h"
 
 #include "chain/chainparams.h"
+#include "platform/time_compat.h"
+#include "command/native_app_launch.h"
 
 #if defined(__linux__)
+#include <errno.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 struct ajs_world {
@@ -113,6 +122,193 @@ static bool ajs_b_reopen(struct asf_journey *j)
     return run.rc == 0 && stopped && consent && same;
 }
 
+/* A fresh CLI process opens B's saved copy; always stop a reported game
+ * before evaluating the response. */
+static bool ajs_cli_prepare(const struct ajs_world *w, char *binary, size_t bcap,
+                            char *datadir, size_t dcap)
+{
+    const struct asf_journey *j = &w->j;
+    int n = snprintf(binary, bcap, "%s/build/bin/z23-dev", w->source);
+    int d = snprintf(datadir, dcap, "-datadir=%s", j->b_datadir);
+    if (n <= 0 || (size_t)n >= bcap || d <= 0 || (size_t)d >= dcap ||
+        !j->b_copy[0] || strchr(j->b_copy, '/') || !strcmp(j->b_copy, ".") ||
+        !strcmp(j->b_copy, "..") || setenv("HOME", j->b_home, 1) != 0 ||
+        chdir(j->b_home) != 0) return false;
+    return true;
+}
+
+/* The CLI's adopted descendants remain in this harness's custody even if
+ * its output is lost. Enumerate only direct children, bounded and complete. */
+static bool ajs_children(pid_t pids[32], size_t *count)
+{
+    char path[96], text[4096];
+    *count = 0;
+    (void)snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    bool read_ok = !ferror(f) && feof(f);
+    bool close_ok = fclose(f) == 0;
+    if (!read_ok || !close_ok) return false;
+    text[n] = '\0';
+    char *p = text;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        char *end = NULL; errno = 0;
+        long pid = strtol(p, &end, 10);
+        if (errno || end == p || pid <= 1 || pid > INT_MAX || *count == 32) return false;
+        pids[(*count)++] = (pid_t)pid;
+        p = end;
+    }
+    return true;
+}
+
+struct ajs_custody {
+    pid_t display;
+    const char *cli, *game;
+    long reported;
+    bool saw_game, saw_reported;
+};
+
+static bool ajs_child_identify(pid_t pid, struct ajs_custody *c)
+{
+    char image[APP_LAUNCH_PATH_MAX], again[APP_LAUNCH_PATH_MAX];
+    uint64_t born = 0, check = 0;
+    if (!app_proc_identity(pid, image, &born) || !born ||
+        (strcmp(image, c->cli) && strcmp(image, c->game)) ||
+        !app_proc_identity(pid, again, &check) || check != born || strcmp(image, again)) {
+        fprintf(stderr, "receiver CLI: unknown adopted child pid=%ld\n", (long)pid);
+        return false;
+    }
+    if (!strcmp(image, c->game)) {
+        c->saw_game = true;
+        if ((long)pid == c->reported) c->saw_reported = true;
+    }
+    return true;
+}
+
+static bool ajs_child_stop(pid_t pid, struct ajs_custody *c)
+{
+    int status = 0;
+    pid_t reaped = waitpid(pid, &status, WNOHANG);
+    if (reaped == pid) {
+        fprintf(stderr, "receiver CLI: adopted child exited before identification pid=%ld\n", (long)pid);
+        return false;
+    }
+    if (reaped != 0 || !ajs_child_identify(pid, c)) return false;
+    if (kill(pid, SIGKILL) != 0 && errno != ESRCH) return false;
+    for (int i = 0; i < 200; i++) {
+        reaped = waitpid(pid, &status, WNOHANG);
+        if (reaped == pid) return true;
+        if (reaped < 0 && errno != EINTR) return false;
+        platform_sleep_ms(10); /* real-clock: reap an owned CLI descendant */
+    }
+    return false;
+}
+
+static bool ajs_children_clean(struct ajs_custody *c)
+{
+    for (int pass = 0; pass < 8; pass++) {
+        pid_t pids[32]; size_t n = 0; bool found = false;
+        if (!ajs_children(pids, &n)) return false;
+        for (size_t i = 0; i < n; i++) {
+            if (pids[i] == c->display) continue;
+            found = true;
+            if (!ajs_child_stop(pids[i], c)) return false;
+        }
+        if (!found) return true;
+    }
+    return false;
+}
+
+static bool ajs_child_baseline(pid_t display)
+{
+    pid_t pids[32]; size_t n = 0;
+    if (!ajs_children(pids, &n)) return false;
+    for (size_t i = 0; i < n; i++) if (pids[i] != display) return false;
+    return true;
+}
+
+struct ajs_env { const char *name; char *old; };
+
+static bool ajs_env_restore(struct ajs_env env[3], size_t n)
+{
+    bool ok = true;
+    for (size_t i = 0; i < n; i++) {
+        int rc = env[i].old ? setenv(env[i].name, env[i].old, 1) : unsetenv(env[i].name);
+        if (rc != 0) ok = false;
+        free(env[i].old);
+    }
+    return ok;
+}
+
+static bool ajs_env_enter(struct ajs_env env[3], const char *home)
+{
+    for (size_t i = 0; i < 3; i++) {
+        const char *old = getenv(env[i].name);
+        env[i].old = old ? strdup(old) : NULL;
+        if (old && !env[i].old) {
+            for (size_t j = 0; j < i; j++) free(env[j].old);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < 3; i++) {
+        if (setenv(env[i].name, home, 1) != 0) {
+            (void)ajs_env_restore(env, 3);
+            return false;
+        }
+    }
+    return true;
+}
+
+struct ajs_cli_result { bool clean, saw_game, saw_reported, accepted; int rc; };
+
+static void ajs_cli_check(struct ajs_cli_result *result, struct asf_door *run,
+                          const struct asf_journey *j, size_t cap)
+{
+    char image[80];
+    (void)asf_door_line(run, "image_sha3", image, sizeof(image));
+    bool complete = cap > 1 && strlen(run->text) < cap - 1;
+    bool same = !strcmp(image, j->image_b) && !strcmp(image, j->image_shared);
+    result->accepted = result->rc == 0 && result->clean && result->saw_reported && same && complete;
+    if (!result->accepted)
+        printf("  [receiver CLI reopen: rc=%d clean=%d game=%d reported=%d same=%d complete=%d]\n%s",
+               result->rc, result->clean, result->saw_game, result->saw_reported, same, complete, run->text);
+}
+
+static struct ajs_cli_result ajs_b_cli_attempt(struct ajs_world *w, size_t cap)
+{
+    struct asf_journey *j = &w->j;
+    struct asf_door run = {0};
+    struct ajs_cli_result result = {.rc = -1};
+    struct ajs_env env[3] = {{"XDG_STATE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+                             {"XDG_CONFIG_HOME", NULL}};
+    char binary[1400], datadir[800], cli_real[PATH_MAX], game_real[PATH_MAX];
+    if (!ajs_cli_prepare(w, binary, sizeof(binary), datadir, sizeof(datadir)) ||
+        !realpath(binary, cli_real) || !realpath(j->path_b, game_real) ||
+        !ajs_child_baseline(w->xvfb) || !ajs_env_enter(env, j->b_home)) return result;
+    int old_subreaper = 0;
+    if (prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper) != 0 ||
+        prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
+        (void)ajs_env_restore(env, 3);
+        return result;
+    }
+    const char *argv[] = {binary, datadir, "app", "open", j->b_copy, "--yes", NULL};
+    result.rc = test_host_tool_capture(argv, run.text, cap, 60000);
+    struct ajs_custody c = {.display = w->xvfb, .cli = cli_real, .game = game_real,
+                            .reported = asf_door_pid(run.text)};
+    bool clean = ajs_children_clean(&c) && ajs_child_baseline(w->xvfb);
+    bool restored = clean && prctl(PR_SET_CHILD_SUBREAPER, old_subreaper) == 0;
+    bool env_restored = ajs_env_restore(env, 3);
+    result.clean = clean && restored && env_restored;
+    result.saw_game = c.saw_game;
+    result.saw_reported = c.saw_reported;
+    ajs_cli_check(&result, &run, j, cap);
+    if (result.rc == 0) ++j->commands_b;
+    return result;
+}
+
 static int ajs_b(struct ajs_world *w)
 {
     int failures = 0;
@@ -121,6 +317,10 @@ static int ajs_b(struct ajs_world *w)
         ASSERT(asf_journey_receive(&w->j));
         ASSERT_EQ(asf_qa_frames(w->j.path_b), 0);
         ASSERT(ajs_b_reopen(&w->j));
+        struct ajs_cli_result cli = ajs_b_cli_attempt(w, ASF_DOOR_OUT);
+        ASSERT(cli.accepted);
+        struct ajs_cli_result lost = ajs_b_cli_attempt(w, 1);
+        ASSERT(lost.rc == 0 && !lost.accepted && lost.clean && lost.saw_game && !lost.saw_reported);
         PASS();
     } _test_next:;
     return failures;
