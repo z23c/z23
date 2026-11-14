@@ -38,6 +38,22 @@ static int zs_child(void)
     return 0;
 }
 
+static int zs_wait_owner(void)
+{
+    const pid_t selectors[] = {-1, 0};
+    for (size_t i = 0; i < sizeof selectors / sizeof selectors[0]; i++) {
+        struct zc_cmd c = { .argv = ZC_ARGV("sh", "-c", "exit 0") };
+        pid_t child = zc_start(&c);
+        if (child <= 0)
+            return zs_fail("wait ownership fixture spawn");
+        int refused = zc_wait(selectors[i]);
+        int owned = zc_wait(child);
+        if (refused != -1 || owned != 0)
+            return zs_fail("invalid child PID consumed another child's result");
+    }
+    return 0;
+}
+
 static int zs_files(void)
 {
     char found[ZC_PATH];
@@ -76,10 +92,10 @@ int check_zcc_cache_selftest(void)
     memset(&zc, 0, sizeof zc);
     if (zc_mkwork("zcl-zcc-selftest.XXXXXX"))
         return zs_fail("scratch directory");
-    rc = zs_child() || zs_files() || zs_text() || zc_boot_status_selftest();
+    rc = zs_child() || zs_wait_owner() || zs_files() || zs_text() || zc_boot_status_selftest();
     rap_rm_rf(zc.work);
     if (rc == 0)
-        puts("check_zcc_cache: selftest OK (child capture, exit and signal codes, "
+        puts("check_zcc_cache: selftest OK (child ownership, capture, exit and signal codes, "
              "env set/unset, log counting, LOOKUP matching, sed, find, copy, bootstrap status)");
     return rc;
 }

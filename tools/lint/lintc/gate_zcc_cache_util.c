@@ -145,6 +145,10 @@ pid_t zc_start(const struct zc_cmd *c)
 
 int zc_wait(pid_t pid)
 {
+    if (pid <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
     int st = 0;
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR)
