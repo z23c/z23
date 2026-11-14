@@ -1048,7 +1048,7 @@ on that kind of change before submitting — it selects those gates and capabili
 freshness from the full lint umbrella.
 
 When a change needs both fast lint and preflight, run
-`DEVBUILD_CLASS=normal devbuild --wait make lint-fast-preflight`.
+`DEVBUILD_CLASS=normal devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" lint-fast-preflight`.
 This target combines their gate lists and retains the fast differential
 precheck.
 <!-- claim: symbol-present lint-fast-preflight Makefile # combined fast and preflight target -->
