@@ -140,3 +140,16 @@ The native train proof exposed three serving groups whose fixtures did not
 start the application. Those fixtures now set and restore the existing running
 state around serving checks. The three focused groups passed with no skips;
 the startup refusal fixture remains in place.
+
+## Projection replay WAL retention
+
+<!-- claim: symbol-present bip_replay_begin engine/modules/storage/src/block_index_projection.c # projection replay retention -->
+Replay now sets SQLite WAL retention to the smaller existing checkpoint budget,
+so a later WAL reset can release stale high-water space. This retention target
+is not a hard size bound while a reader pins WAL frames. The parent source
+`d828a1bfb1b32c574685abac2798618ed5ad813c` failed the new retention assertion;
+implementation `ca1599d89d7050a7ebd49e729bffe39b8ca58af4` passed nine focused
+projection groups with no skips, including pinned-reader and crash recovery
+fixtures. A single synthetic host experiment found fewer explicit checkpoints
+with a retained WAL; it does not establish device performance. Phone performance
+for this change is NOTRUN.
