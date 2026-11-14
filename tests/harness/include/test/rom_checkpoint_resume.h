@@ -7,6 +7,6 @@
 
 /* Retain the verified resumed file in the caller-owned fixture directory.
  * The caller authenticates source and result against checkpoint authority. */
-bool test_rom_checkpoint_resume(const char *source, const char *client_dir,
-                                char *output, size_t output_cap);
+bool rom_checkpoint_resume_fixture(const char *source, const char *client_dir,
+                                   char *output, size_t output_cap);
 #endif

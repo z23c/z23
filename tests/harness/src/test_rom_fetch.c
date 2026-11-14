@@ -2826,8 +2826,8 @@ out:
     return ok;
 }
 
-bool test_rom_checkpoint_resume(const char *source, const char *client_dir,
-                                char *output, size_t output_cap)
+bool rom_checkpoint_resume_fixture(const char *source, const char *client_dir,
+                                   char *output, size_t output_cap)
 {
     if (!source || !client_dir || !output || output_cap == 0) return false;
     return rf_crash_fixture(source, client_dir, true, output, output_cap);

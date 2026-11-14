@@ -261,7 +261,7 @@ static bool csi_checkpoint_copy_inputs(struct csi_checkpoint_paths *p)
     const char *resume = getenv("ZCL_TEST_CHECKPOINT_ROM_RESUME");
     if (resume) {
         if (strcmp(resume, "1") != 0 ||
-            !test_rom_checkpoint_resume(p->bundle, p->root, p->copy, sizeof(p->copy))) return false;
+            !rom_checkpoint_resume_fixture(p->bundle, p->root, p->copy, sizeof(p->copy))) return false;
     } else if (!csi_real_copy(p->bundle, p->copy)) return false;
     if (!csi_checkpoint_digest(p->bundle, bundle_sha) || !csi_checkpoint_digest(p->copy, bundle_sha)) return false;
     if (!csi_checkpoint_digest(p->index, index_sha) || !csi_checkpoint_digest(p->good_index, index_sha)) return false;
