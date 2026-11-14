@@ -760,6 +760,7 @@ bool cm_emit_bytes(const struct cm_opts *o, const struct cm_front *front,
     }
     ok = cm_core_init(&st->core, o->root) &&
          cm_norm_path(&st->core, o->source, &main_path);
+    st->core.cc_snapshot = o->cc_snapshot;
     if (ok && (main_path[0] == '@' || strcmp(main_path, ".") == 0))
         ok = cm_fail(&st->core, "source %s is not inside the root", o->source);
     ok = ok &&

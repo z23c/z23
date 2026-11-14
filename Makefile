@@ -9022,7 +9022,16 @@ CLANG_MANIFEST_SRCS := tools/sensors/clang_manifest.c \
 	tools/sensors/clang_manifest_session.c \
 	tools/sensors/clang_manifest_tokens.c \
 	$(CLANG_MANIFEST_CORE_SRCS)
-clang-manifest: $(BIN_DIR)/z23-clang-manifest $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest-warm-fixture
+clang-manifest: $(BIN_DIR)/z23-clang-manifest $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest-warm-fixture $(BIN_DIR)/z23-clang-manifest-cc-fixture
+$(BIN_DIR)/z23-clang-manifest-cc-fixture: $(CLANG_MANIFEST_CORE_SRCS) $(CLANG_MANIFEST_CORE_HDRS) tests/fixtures/semantic_sensor/cc_snapshot.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Itools/sensors \
+	    -Icontexts/commons/modules/vcs/include -Iplatform/modules/platform/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
+	    -o $@ tests/fixtures/semantic_sensor/cc_snapshot.c \
+	    $(filter-out tools/sensors/clang_manifest_cc.c,$(CLANG_MANIFEST_CORE_SRCS)) $(HARDEN_LDFLAGS)
 $(BIN_DIR)/z23-clang-manifest-warm-fixture: $(CLANG_MANIFEST_CORE_SRCS) $(CLANG_MANIFEST_CORE_HDRS) tests/fixtures/semantic_sensor/warm_paths.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \

@@ -126,7 +126,11 @@ struct cm_entry {
     uint32_t slot;
 };
 
+struct cm_cc_snapshot_entry { char path[PATH_MAX]; unsigned char *bytes; size_t len; uint8_t digest[32]; };
+struct cm_cc_snapshot { struct cm_cc_snapshot_entry entries[2]; };
+
 struct cm_core {
+    struct cm_cc_snapshot *cc_snapshot; /* owned by one session, NULL for cold calls */
     char root[PATH_MAX];
     size_t root_len;
     char home[PATH_MAX];

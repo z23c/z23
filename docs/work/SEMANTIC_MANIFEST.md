@@ -739,6 +739,14 @@ cold oracle again. So a disabled TU stays cold for the rest of the session
 only while the session serves no more distinct TUs than `--max-tus`.
 `--no-warm` makes every emit cold.
 
+Within one session, up to two compiler or loader-object byte snapshots share
+a 256 MiB bound. Each request still traces the loader and rereads each cached
+file through EOF; a digest is reused only when every byte matches and the read
+and close succeed. The warm verifier's cold oracle hashes independently.
+Like the ordinary streaming hash, this does not make concurrent in-place
+writes atomic. Standalone cold emits retain no session snapshot.
+<!-- claim: symbol-present cm_cc_snapshot_try tools/sensors/clang_manifest_cc.c # bounded session byte snapshots -->
+
 **Fault flag.** `ZCL_CLANG_MANIFEST_INJECT_WARM_MISMATCH=1` flips the last
 byte of every warm manifest before it is used. It is registered in
 `engine/composition/flags.def`, and the `semantic_sensor` group uses it to

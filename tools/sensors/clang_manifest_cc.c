@@ -116,6 +116,98 @@ static bool cm_cc_sha3(const char *path, struct sha3_256_ctx *ctx)
     return ok;
 }
 
+#ifndef CM_CC_SNAPSHOT_MAX
+#define CM_CC_SNAPSHOT_MAX (256u * 1024u * 1024u)
+#endif
+
+/* Snapshot reuse binds every byte read through EOF, never file metadata. Like
+ * the existing streaming hash this is not an atomic view of in-place writes. */
+static int cm_cc_compare(FILE *fp, const struct cm_cc_snapshot_entry *s)
+{
+    unsigned char buf[65536]; size_t pos = 0, n; bool equal = true;
+    while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+        if (pos > s->len || n > s->len - pos || memcmp(buf, s->bytes + pos, n)) equal = false;
+        if (pos > SIZE_MAX - n) return -1;
+        pos += n;
+    }
+    return ferror(fp) ? -1 : equal && pos == s->len ? 1 : 0;
+}
+
+static int cm_cc_capture(FILE *fp, size_t size, unsigned char *bytes, uint8_t digest[32])
+{
+    struct sha3_256_ctx ctx; sha3_256_init(&ctx);
+    size_t pos = 0;
+    while (pos < size) {
+        size_t n = fread(bytes + pos, 1, size - pos, fp);
+        if (!n) return ferror(fp) ? -1 : 0;
+        sha3_256_write(&ctx, bytes + pos, n); pos += n;
+    }
+    if (fgetc(fp) != EOF) return 0;
+    if (ferror(fp)) return -1;
+    sha3_256_finalize(&ctx, digest); return 1;
+}
+
+static int cm_cc_snapshot_read(FILE *fp, size_t size, struct cm_cc_snapshot_entry *s,
+                               unsigned char **candidate, uint8_t digest[32])
+{
+    if (size == s->len && s->bytes) return cm_cc_compare(fp, s);
+    /* Bound peak snapshot storage, including while replacing a smaller one. */
+    free(s->bytes); s->bytes = NULL; s->len = 0;
+    *candidate = zcl_malloc(size, "clang_manifest.cc_snapshot");
+    return *candidate ? cm_cc_capture(fp, size, *candidate, digest) : 0;
+}
+
+static struct cm_cc_snapshot_entry *cm_cc_choose(struct cm_cc_snapshot *s, const char *path, size_t size)
+{
+    size_t used = 0; struct cm_cc_snapshot_entry *slot = NULL;
+    for (size_t i = 0; i < 2; ++i) {
+        struct cm_cc_snapshot_entry *e = &s->entries[i];
+        if (e->bytes && !strcmp(e->path, path) && e->len == size) return e;
+        used += e->len;
+        if (!slot || e->len < slot->len) slot = e;
+    }
+    if (slot->len >= size) return NULL;
+    if (used - slot->len + size > CM_CC_SNAPSHOT_MAX) {
+        struct cm_cc_snapshot_entry *other = slot == &s->entries[0] ? &s->entries[1] : &s->entries[0];
+        if (other->len >= size) return NULL;
+        free(other->bytes); other->bytes = NULL; other->len = 0;
+    }
+    return slot;
+}
+
+static int cm_cc_snapshot_try(const char *path, struct cm_cc_snapshot *memo, uint8_t digest[32])
+{
+    FILE *fp = fopen(path, "rb"); struct stat st;
+    if (!fp) return -1;
+    bool eligible = fstat(fileno(fp), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+        (uint64_t)st.st_size <= CM_CC_SNAPSHOT_MAX;
+    struct cm_cc_snapshot_entry *s = eligible ? cm_cc_choose(memo, path, (size_t)st.st_size) : NULL;
+    unsigned char *candidate = NULL; int result = 0;
+    if (s) result = cm_cc_snapshot_read(fp, (size_t)st.st_size, s, &candidate, digest);
+    bool closed = fclose(fp) == 0;
+    if (!closed || result < 0) { free(candidate); return -1; }
+    if (result == 1 && candidate) {
+        free(s->bytes); s->bytes = candidate; s->len = (size_t)st.st_size;
+        (void)snprintf(s->path, sizeof(s->path), "%s", path);
+        memcpy(s->digest, digest, 32); return 1;
+    }
+    free(candidate);
+    if (result == 1) { memcpy(digest, s->digest, 32); return 1; }
+    if (s && (size_t)st.st_size == s->len) { free(s->bytes); s->bytes = NULL; s->len = 0; }
+    return 0;
+}
+
+static bool cm_cc_digest(const char *path, struct cm_cc_snapshot *s, uint8_t digest[32])
+{
+    if (s) {
+        int result = cm_cc_snapshot_try(path, s, digest);
+        if (result != 0) return result > 0;
+    }
+    struct sha3_256_ctx ctx; sha3_256_init(&ctx);
+    if (!cm_cc_sha3(path, &ctx)) return false;
+    sha3_256_finalize(&ctx, digest); return true;
+}
+
 enum cm_image { CM_IMAGE_SCRIPT, CM_IMAGE_STATIC, CM_IMAGE_DYNAMIC,
                 CM_IMAGE_MACHO, CM_IMAGE_UNKNOWN };
 
@@ -282,17 +374,14 @@ static bool cm_trace_run(const char *exe, char *buf, size_t cap)
 
 /* Fold one loaded object (by realpath and bytes) into the closure. */
 static bool cm_fold_object(struct sha3_256_ctx *ctx, const char *path,
-                           size_t *count)
+                           size_t *count, struct cm_cc_snapshot *memo)
 {
     char real[PATH_MAX];
-    struct sha3_256_ctx one;
     uint8_t d[32];
     if (realpath(path, real) == NULL)
         return false;
-    sha3_256_init(&one);
-    if (!cm_cc_sha3(real, &one))
+    if (!cm_cc_digest(real, memo, d))
         return false;
-    sha3_256_finalize(&one, d);
     sha3_256_write(ctx, (const unsigned char *)real, strlen(real) + 1);
     sha3_256_write(ctx, d, sizeof(d));
     (*count)++;
@@ -301,7 +390,7 @@ static bool cm_fold_object(struct sha3_256_ctx *ctx, const char *path,
 
 /* One trace line: "name => /path (0x..)", "/path (0x..)" (the loader), or
  * a virtual object with no file ("linux-vdso.so.1 (0x..)"). */
-static bool cm_fold_line(struct sha3_256_ctx *ctx, char *line, size_t *count)
+static bool cm_fold_line(struct sha3_256_ctx *ctx, char *line, size_t *count, struct cm_cc_snapshot *memo)
 {
     char *arrow = strstr(line, " => "), *path, *end;
     while (*line == ' ' || *line == '\t')
@@ -316,11 +405,11 @@ static bool cm_fold_line(struct sha3_256_ctx *ctx, char *line, size_t *count)
     if (end == NULL)
         return false;
     *end = '\0';
-    return cm_fold_object(ctx, path, count);
+    return cm_fold_object(ctx, path, count, memo);
 }
 
 /* The SHA3-256 over every shared object the loader maps for `exe`. */
-static bool cm_closure(const char *exe, uint8_t d[32])
+static bool cm_closure(const char *exe, uint8_t d[32], struct cm_cc_snapshot *memo)
 {
     char *buf = zcl_malloc(CM_TRACE_CAP, "clang_manifest.trace");
     struct sha3_256_ctx ctx;
@@ -330,7 +419,7 @@ static bool cm_closure(const char *exe, uint8_t d[32])
     sha3_256_init(&ctx);
     for (char *line = ok ? strtok_r(buf, "\n", &save) : NULL;
          ok && line != NULL; line = strtok_r(NULL, "\n", &save))
-        ok = cm_fold_line(&ctx, line, &count);
+        ok = cm_fold_line(&ctx, line, &count, memo);
     sha3_256_finalize(&ctx, d);
     free(buf);
     return ok && count > 0;
@@ -338,7 +427,7 @@ static bool cm_closure(const char *exe, uint8_t d[32])
 
 /* "libs none" for a script or static image, "libs sha3-256 <hex>" over a
  * dynamic image's loaded objects, false when they cannot be established. */
-static bool cm_libs_text(const char *exe, char out[96])
+static bool cm_libs_text(const char *exe, char out[96], struct cm_cc_snapshot *memo)
 {
     uint8_t d[32];
     char hex[65];
@@ -358,7 +447,7 @@ static bool cm_libs_text(const char *exe, char out[96])
         return false;
 #endif
     case CM_IMAGE_DYNAMIC:
-        if (!cm_closure(exe, d))
+        if (!cm_closure(exe, d, memo))
             return false;
         cm_hex(d, hex);
         (void)snprintf(out, 96, "libs sha3-256 %s", hex);
@@ -371,24 +460,21 @@ static bool cm_libs_text(const char *exe, char out[96])
 
 char *cm_object_cc_text(struct cm_core *c)
 {
-    struct sha3_256_ctx ctx;
     uint8_t d[32];
     char hex[65], libs[96];
     char *spelled = NULL, *out;
     size_t n;
     if (c->object_cc == NULL || c->toolchain_id == NULL ||
-        !cm_libs_text(c->object_cc, libs)) {
+        !cm_libs_text(c->object_cc, libs, c->cc_snapshot)) {
         out = cm_strdup("object-cc unknown");
         if (out == NULL)
             (void)cm_fail(c, "out of memory");
         return out;
     }
-    sha3_256_init(&ctx);
-    if (!cm_cc_sha3(c->object_cc, &ctx)) {
+    if (!cm_cc_digest(c->object_cc, c->cc_snapshot, d)) {
         (void)cm_fail(c, "cannot read the object compiler %s", c->object_cc);
         return NULL;
     }
-    sha3_256_finalize(&ctx, d);
     cm_hex(d, hex);
     if (!cm_spell_real(c, c->object_cc, &spelled))
         return NULL;

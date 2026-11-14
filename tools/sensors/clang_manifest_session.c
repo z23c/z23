@@ -100,6 +100,7 @@ struct cm_session_stats {
 };
 
 struct cm_session {
+    struct cm_cc_snapshot cc_snapshot;
     struct cm_warm_tu *tus;
     size_t ntus, cap, max_tus;
     bool verify_cold, no_warm, inject_mismatch;
@@ -734,7 +735,9 @@ static bool cm_warm_path(struct cm_session *ss, struct cm_warm_tu *w,
         r->written = "warm";
         return cm_accept(w, o, warm, warm_len, r, why, why_len);
     }
-    if (!cm_session_cold(o, &cold, &cold_len, r, why, why_len)) {
+    struct cm_opts oracle = *o;
+    oracle.cc_snapshot = NULL; /* the cold verifier must independently hash */
+    if (!cm_session_cold(&oracle, &cold, &cold_len, r, why, why_len)) {
         free(warm);
         return false;
     }
@@ -812,7 +815,7 @@ static void cm_session_line(struct cm_session *ss, char *line)
 {
     struct cm_outcome r = {.tu = "none", .written = "cold",
                            .verify = "skipped"};
-    struct cm_opts o = {0};
+    struct cm_opts o = {.cc_snapshot = &ss->cc_snapshot};
     char abs[PATH_MAX], why[512] = "";
     int n = 0;
     char **f = cm_split(line, &n);
@@ -961,6 +964,7 @@ int cm_session_main(int argc, char **argv)
     for (size_t k = 0; k < ss.ntus; k++)
         cm_tu_free(&ss.tus[k]);
     free(ss.tus);
+    for (size_t k = 0; k < 2; ++k) free(ss.cc_snapshot.entries[k].bytes);
     cm_reply_summary(&ss);
     return ss.s.refused == 0 ? 0 : 3;
 }

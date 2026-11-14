@@ -69,6 +69,7 @@ bool cm_walk(struct cm_state *st);
 
 /* The options of one emit, exactly as `emit` takes them on its command line. */
 struct cm_opts {
+    struct cm_cc_snapshot *cc_snapshot; /* private session lifetime; not a CLI option */
     const char *root;
     const char *source;
     const char *out;

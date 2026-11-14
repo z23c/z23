@@ -1820,6 +1820,43 @@ static int sss_t_object_cc(struct sss_ctx *c)
     return failures;
 }
 
+static int sss_t_cc_snapshot(struct sss_ctx *c)
+{
+    int failures = 0; struct sss_proc p = {0}; bool started = false;
+    char reply[SSS_REPLY_MAX], log[PATH_MAX], large[PATH_MAX], small[PATH_MAX];
+    char a[160], b[160], changed[160], resized[160]; struct stat before;
+    TEST_CASE("semantic_sensor: session compiler bytes detect same-size restored-mtime edits") {
+        ASSERT(sss_fresh(c, "cc-snapshot"));
+        ASSERT(sss_write_cc(c->root, "large/cc", "#!/bin/sh\nexit 0 # large-a\n", a, sizeof(a)));
+        ASSERT(sss_write_cc(c->root, "small/cc", "#!/bin/sh\nexit 0\n", b, sizeof(b)));
+        (void)snprintf(large, sizeof(large), "%s/large/cc", c->root);
+        (void)snprintf(small, sizeof(small), "%s/small/cc", c->root);
+        (void)snprintf(log, sizeof(log), "%s/cc-snapshot.err", c->dir);
+        ASSERT(stat(large, &before) == 0);
+        const char *opts[3] = {"--no-warm", NULL, NULL};
+        ASSERT(sss_start_opts(&p, c->sensor, opts, false, log)); started = true;
+        ASSERT(sss_cc_step(c, &p, "snap-large", large, SSS_TC_A, a, reply, sizeof(reply)));
+        ASSERT(sss_cc_step(c, &p, "snap-small", small, SSS_TC_A, b, reply, sizeof(reply)));
+        ASSERT(sss_cc_step(c, &p, "snap-large-again", large, SSS_TC_A, a, reply, sizeof(reply)));
+        ASSERT(sss_write_cc(c->root, "large/cc", "#!/bin/sh\nexit 0 # large-b\n", changed, sizeof(changed)));
+#if defined(__APPLE__)
+        struct timespec times[2] = {before.st_atimespec, before.st_mtimespec};
+#else
+        struct timespec times[2] = {before.st_atim, before.st_mtim};
+#endif
+        ASSERT(utimensat(AT_FDCWD, large, times, 0) == 0);
+        ASSERT(sss_cc_step(c, &p, "snap-mutated", large, SSS_TC_A, changed, reply, sizeof(reply)));
+        ASSERT(sss_cc_step(c, &p, "snap-mutated-again", large, SSS_TC_A, changed, reply, sizeof(reply)));
+        ASSERT(sss_write_cc(c->root, "large/cc", "#!/bin/sh\nexit 0\n", resized, sizeof(resized)));
+        ASSERT(sss_cc_step(c, &p, "snap-truncated", large, SSS_TC_A, resized, reply, sizeof(reply)));
+        ASSERT(sss_write_cc(c->root, "large/cc", "#!/bin/sh\nexit 0 # large-and-grown\n", resized, sizeof(resized)));
+        ASSERT(sss_cc_step(c, &p, "snap-grown", large, SSS_TC_A, resized, reply, sizeof(reply)));
+        started = false; ASSERT_EQ(sss_finish(&p, reply, sizeof(reply)), 0);
+    } TEST_END
+    if (started) (void)sss_finish(&p, reply, sizeof(reply));
+    return failures;
+}
+
 /* Case 5: a --cc that resolves only to a compile-cache wrapper (a masquerade
  * link with no real compiler behind it) gives "object-cc unknown", the same
  * as cold. */
@@ -1921,6 +1958,10 @@ int semantic_sensor_session_cases(void)
 {
     int failures = sss_t_reply_checks() + sss_t_reply_strings() +
                    sss_t_record_checks();
+    char fixture_out[4096]; bool timed_out = false;
+    const char *fixture_argv[] = {"build/bin/z23-clang-manifest-cc-fixture", NULL};
+    int fixture_rc = zcl_spawn_capture_merged_observed(fixture_argv, fixture_out, sizeof(fixture_out), 60000, &timed_out);
+    if (fixture_rc != 0 || timed_out) { printf("FAIL cc snapshot fixture: %s\n", fixture_out); ++failures; }
     struct sss_ctx c = {0};
     /* A sibling of the fixture project, outside its child-only HOME:
      * FILES must still classify these inputs as SYSTEM. */
@@ -1956,6 +1997,7 @@ int semantic_sensor_session_cases(void)
     failures += sss_t_post(&c);
     failures += sss_t_untrackable(&c);
     failures += sss_t_object_cc(&c);
+    failures += sss_t_cc_snapshot(&c);
     failures += sss_t_object_cc_wrapper(&c);
     failures += sss_t_object_cc_invalid(&c);
     failures += sss_t_bad_opts(&c);
