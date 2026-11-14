@@ -244,6 +244,88 @@ static bool dvt_snapshot_loss(const struct agent_impact_snapshot *snapshot)
         live.shared_rule_hits == captured.shared_rule_hits;
 }
 
+static bool dvt_snapshot_budget_test(void)
+{
+    struct stat table, source;
+    if (stat("platform/modules/platform/tests/windows_acceptance.mk", &table) ||
+        stat(DVT_TEST_FILE, &source) || table.st_size < 0 || source.st_size < 0)
+        return false;
+    size_t bytes = (size_t)table.st_size + (size_t)source.st_size;
+    struct agent_impact_snapshot *exact = agent_impact_snapshot_create_with_limit(bytes);
+    struct agent_impact_snapshot *over = agent_impact_snapshot_create_with_limit(bytes - 1);
+    struct agent_impact_snapshot *recovered = agent_impact_snapshot_create_with_limit(bytes);
+    bool ok = exact && !over && recovered &&
+        memcmp(agent_impact_snapshot_digest(exact), agent_impact_snapshot_digest(recovered), 32) == 0;
+    agent_impact_snapshot_free(exact);
+    agent_impact_snapshot_free(over);
+    agent_impact_snapshot_free(recovered);
+    return ok;
+}
+
+static bool dvt_snapshot_order_equal(const struct agent_impact_acc *live,
+                                     const struct agent_impact_acc *captured)
+{
+    bool ok = live->groups_lost && captured->groups_lost &&
+        live->shared_rule_hits == captured->shared_rule_hits &&
+        live->groups_len == ZCL_AGENT_IMPACT_MAX_GROUPS && captured->groups_len == live->groups_len &&
+        strcmp(live->groups[live->groups_len - 1], "devagent_situation") == 0 &&
+        strcmp(live->groups[live->groups_len - 1], captured->groups[captured->groups_len - 1]) == 0;
+    if (!ok) fprintf(stderr, "snapshot order: live=%s captured=%s live_hits=%zu captured_hits=%zu\n",
+                     live->groups_len ? live->groups[live->groups_len - 1] : "none",
+                     captured->groups_len ? captured->groups[captured->groups_len - 1] : "none",
+                     live->shared_rule_hits, captured->shared_rule_hits);
+    return ok;
+}
+
+static bool dvt_snapshot_order_test(void)
+{
+    const char *path = "tests/harness/src/test_fingerprint.c";
+    if (!dvt_fixture_write(path, "const char *probe = \"ticket_snapshot_probe\";\n")) return false;
+    struct agent_impact_snapshot *snapshot = agent_impact_snapshot_create();
+    struct agent_impact_acc live = {0}, captured = {0};
+    char group[32];
+    for (size_t i = 0; i < ZCL_AGENT_IMPACT_MAX_GROUPS - 1; ++i) {
+        (void)snprintf(group, sizeof(group), "fixture_%zu", i);
+        agent_impact_add_group(&live, group);
+        agent_impact_add_group(&captured, group);
+    }
+    bool a = agent_impact_apply_name_reference_routes("tools/ticket_snapshot_probe.c", &live);
+    bool b = agent_impact_name_routes_snapshot("tools/ticket_snapshot_probe.c", &captured, snapshot);
+    bool ok = snapshot && a && b && dvt_snapshot_order_equal(&live, &captured);
+    agent_impact_snapshot_free(snapshot);
+    return unlink(path) == 0 && ok;
+}
+
+static bool dvt_same_receipt(const struct dvt_call *a, const struct dvt_call *b)
+{
+    char x[16384], y[16384];
+    const struct json_value *af = json_get(&a->reply.data, "files");
+    const struct json_value *bf = json_get(&b->reply.data, "files");
+    if (!af || !bf || af->type != JSON_ARR || bf->type != JSON_ARR) return false;
+    size_t nx = json_write(af, x, sizeof(x));
+    size_t ny = json_write(bf, y, sizeof(y));
+    return dvt_ok(a) && dvt_ok(b) && nx < sizeof(x) && ny < sizeof(y) &&
+        nx == ny && memcmp(x, y, nx) == 0 &&
+        strcmp(dvt_str(a, "key"), dvt_str(b, "key")) == 0 &&
+        strcmp(dvt_str(a, "epoch"), dvt_str(b, "epoch")) == 0;
+}
+
+static bool dvt_snapshot_fallback_parity(void)
+{
+    struct dvt_call a, b, c;
+    dvt_begin(&a); dvt_begin(&b); dvt_begin(&c);
+    (void)json_push_kv_str(&a.input, "group", DVT_GROUP);
+    (void)json_push_kv_str(&b.input, "group", DVT_GROUP);
+    (void)json_push_kv_str(&c.input, "group", DVT_GROUP);
+    bool ok = dvt_run(&a);
+    zcl_alloc_fault_fail_next("agent_impact_snapshot");
+    ok = dvt_run(&b) && ok;
+    ok = dvt_run(&c) && ok;
+    ok = ok && dvt_same_receipt(&a, &b) && dvt_same_receipt(&a, &c);
+    dvt_end(&a); dvt_end(&b); dvt_end(&c);
+    return ok;
+}
+
 static bool dvt_snapshot_row_cap(void)
 {
     char path[128];
@@ -368,6 +450,13 @@ static bool dvt_fixture_closure_epoch(void)
     return ok;
 }
 
+static bool dvt_snapshot_initial_checks(const struct agent_impact_snapshot *captured)
+{
+    return captured && dvt_snapshot_parity(captured) && dvt_snapshot_loss(captured) &&
+        dvt_snapshot_budget_test() && dvt_snapshot_order_test() &&
+        dvt_snapshot_fallback_parity() && dvt_snapshot_row_cap();
+}
+
 static int dvt_referrer_mutation_test(void)
 {
     int failures = 0;
@@ -378,10 +467,7 @@ static int dvt_referrer_mutation_test(void)
         bool ok = chdir(root) == 0;
         ok = ok && dvt_snapshot_fixture();
         struct agent_impact_snapshot *captured = agent_impact_snapshot_create();
-        ok = ok && captured != NULL;
-        ok = ok && dvt_snapshot_parity(captured);
-        ok = ok && dvt_snapshot_loss(captured);
-        ok = ok && dvt_snapshot_row_cap();
+        ok = ok && dvt_snapshot_initial_checks(captured);
         ok = ok && dvt_probe_membership(true);
         ok = ok && dvt_fixture_write(DVT_TEST_FILE, "const char *probe = \"different_name\";\n");
         ok = ok && dvt_probe_membership(false);
@@ -403,6 +489,15 @@ int test_devagent_ticketkey(void);
 int test_devagent_ticketkey(void)
 {
     int failures = dvt_referrer_mutation_test();
+
+    TEST("ticketkey: current checkout fits the bounded snapshot") {
+        struct agent_impact_snapshot *snapshot = agent_impact_snapshot_create();
+        bool captured = snapshot != NULL;
+        agent_impact_snapshot_free(snapshot);
+        ASSERT(captured);
+        PASS();
+    }
+    if (failures) return failures;
 
     TEST("ticketkey: the leaf is registered with group,cwd,tip keys") {
         const struct zcl_command_spec *spec =

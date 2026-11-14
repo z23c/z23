@@ -43,11 +43,11 @@ static const char *const AIH_REFERRER_DIRS[] = {
     "tests/harness/src", "tools/lint/lintc",
 };
 
-enum { AIH_SNAPSHOT_ROWS = 4096, AIH_SNAPSHOT_BYTES = 64u << 20 };
+enum { AIH_SNAPSHOT_ROWS = 4096, AIH_SNAPSHOT_BYTES = 128u << 20 };
 struct aih_snapshot_row { char path[512]; char *text; size_t len; };
 struct agent_impact_snapshot {
     struct aih_snapshot_row *rows;
-    size_t count, bytes;
+    size_t count, bytes, byte_limit;
     char *table;
     unsigned char digest[32];
 };
@@ -69,8 +69,19 @@ static void aih_hash_frame(struct sha3_256_ctx *ctx, const char *bytes, size_t l
     sha3_256_write(ctx, (const unsigned char *)bytes, len);
 }
 
+static bool aih_snapshot_budget(struct agent_impact_snapshot *s, size_t len)
+{
+    if (len > s->byte_limit - s->bytes) {
+        fprintf(stderr, "agent impact snapshot: aggregate byte limit %zu exceeded; using live resolver\n",
+                s->byte_limit);
+        return false;
+    }
+    s->bytes += len;
+    return true;
+}
+
 static bool aih_snapshot_row(struct agent_impact_snapshot *s, const char *dir,
-                              const char *name, struct sha3_256_ctx *ctx)
+                              const char *name)
 {
     size_t n = strlen(name);
     if (n < 3 || strcmp(name + n - 2, ".c") != 0) return true;
@@ -81,11 +92,14 @@ static bool aih_snapshot_row(struct agent_impact_snapshot *s, const char *dir,
     if (!zcl_read_whole_file_text(row->path, AIH_REFERRER_MAX, &row->text,
                                   &row->len, "agent_impact_snapshot"))
         return false; // raw-return-ok:read-helper-logs-context-and-path-before-live-fallback
-    if (row->len > AIH_SNAPSHOT_BYTES - s->bytes) return false;
-    s->bytes += row->len;
-    aih_hash_frame(ctx, row->path, strlen(row->path));
-    aih_hash_frame(ctx, row->text, row->len);
+    if (!aih_snapshot_budget(s, row->len)) return false;
     return true;
+}
+
+static int aih_snapshot_row_cmp(const void *a, const void *b)
+{
+    const struct aih_snapshot_row *x = a, *y = b;
+    return strcmp(x->path, y->path);
 }
 
 static bool aih_snapshot_dir(struct agent_impact_snapshot *s, const char *dir,
@@ -94,21 +108,29 @@ static bool aih_snapshot_dir(struct agent_impact_snapshot *s, const char *dir,
     DIR *dh = opendir(dir);
     if (!dh) return false;
     bool ok = true;
+    size_t first = s->count;
     struct dirent *entry;
     errno = 0;
     while ((entry = readdir(dh)) != NULL) {
-        if (!aih_snapshot_row(s, dir, entry->d_name, ctx)) { ok = false; break; }
+        if (!aih_snapshot_row(s, dir, entry->d_name)) { ok = false; break; }
         errno = 0;
     }
     if (errno) ok = false;
     if (closedir(dh) != 0) ok = false;
+    if (ok && s->count - first > 1)
+        qsort(s->rows + first, s->count - first, sizeof(*s->rows), aih_snapshot_row_cmp);
+    if (ok) for (size_t i = first; i < s->count; ++i) {
+        aih_hash_frame(ctx, s->rows[i].path, strlen(s->rows[i].path));
+        aih_hash_frame(ctx, s->rows[i].text, s->rows[i].len);
+    }
     return ok;
 }
 
-struct agent_impact_snapshot *agent_impact_snapshot_create(void)
+static struct agent_impact_snapshot *aih_snapshot_create(size_t byte_limit)
 {
     struct agent_impact_snapshot *s = zcl_calloc(1, sizeof(*s), "agent_impact_snapshot");
     if (!s) return NULL;
+    s->byte_limit = byte_limit;
     s->rows = zcl_calloc(AIH_SNAPSHOT_ROWS, sizeof(*s->rows), "agent_impact_snapshot");
     char *cwd = getcwd(NULL, 0);
     size_t len = 0;
@@ -116,10 +138,10 @@ struct agent_impact_snapshot *agent_impact_snapshot_create(void)
         AIH_TABLE_MAX, &s->table, &len, "agent_impact_snapshot");
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
+    if (ok) ok = aih_snapshot_budget(s, len);
     if (ok) {
         aih_hash_frame(&ctx, cwd, strlen(cwd));
         aih_hash_frame(&ctx, s->table, len);
-        s->bytes = len;
         for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS)/sizeof(AIH_REFERRER_DIRS[0]); d++)
             if (!aih_snapshot_dir(s, AIH_REFERRER_DIRS[d], &ctx)) { ok = false; break; }
     }
@@ -128,6 +150,17 @@ struct agent_impact_snapshot *agent_impact_snapshot_create(void)
     sha3_256_finalize(&ctx, s->digest);
     return s;
 }
+
+struct agent_impact_snapshot *agent_impact_snapshot_create(void)
+{
+    return aih_snapshot_create(AIH_SNAPSHOT_BYTES);
+}
+#ifdef ZCL_TESTING
+struct agent_impact_snapshot *agent_impact_snapshot_create_with_limit(size_t byte_limit)
+{
+    return aih_snapshot_create(byte_limit);
+}
+#endif
 
 const unsigned char *agent_impact_snapshot_digest(const struct agent_impact_snapshot *s)
 {

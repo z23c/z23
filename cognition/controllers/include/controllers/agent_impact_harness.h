@@ -39,6 +39,9 @@
  * a partial snapshot. The digest binds cwd, ordered names and framed bytes. */
 struct agent_impact_snapshot;
 struct agent_impact_snapshot *agent_impact_snapshot_create(void);
+#ifdef ZCL_TESTING
+struct agent_impact_snapshot *agent_impact_snapshot_create_with_limit(size_t byte_limit);
+#endif
 void agent_impact_snapshot_free(struct agent_impact_snapshot *snapshot);
 const unsigned char *agent_impact_snapshot_digest(const struct agent_impact_snapshot *snapshot);
 bool agent_impact_harness_routes_snapshot(const char *path, struct agent_impact_acc *acc,
