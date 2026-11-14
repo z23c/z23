@@ -56,7 +56,16 @@ static void node_details_states(void)
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused") && !strstr(text, "123"));
     view.pace = ZAPP_PACE_NORMAL; view.node_running = false;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "not responding") && !strstr(text, "123"));
-    view.node_running = true;
+}
+static void node_details_reported(void)
+{
+    struct zapp_view view = {0}; char text[512];
+    fill_secrets(&view); plant_wallet_marker(&view);
+    snprintf(view.node_line, sizeof(view.node_line), "WALLET-MARKER");
+    snprintf(view.sync_status, sizeof(view.sync_status), "TRANSCRIPT-SECRET");
+    snprintf(view.node_wallet_replay, sizeof(view.node_wallet_replay), "WALLET-MARKER");
+    view.node_process_running = view.node_running = true;
+    view.node_height = 123; view.node_reference = 125; view.chain_state = ZAPP_CHAIN_CURRENT;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "123") && strstr(text, "125") &&
         strstr(text, "no more than two blocks behind") && strstr(text, "separate from wallet scanning"));
     assert(!strstr(text, "WALLET-MARKER") && !strstr(text, "SECRET") && !strstr(text, "CONNECTION-PATH"));
@@ -849,6 +858,7 @@ int main(void)
     dark_by_default();
     phone_card_golden();
     node_details_states();
+    node_details_reported();
     node_button_states();
     home_start_states();
     plain_node_line_states();

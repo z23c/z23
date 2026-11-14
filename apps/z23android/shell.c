@@ -1084,18 +1084,24 @@ static void run_node_toggle(void)
     const char *action = zapp_home_node_action_for_label(label);
     if (action[0]) shell.send(action, "");
 }
+static bool run_home_action(JNIEnv *env, const char *id)
+{
+    if (!strcmp(id, "node_details")) go(env, SCREEN_NODE_DETAILS);
+    else if (!strcmp(id, "scan")) begin_scan(env);
+    else if (!strcmp(id, "assistant")) go(env, SCREEN_ASSISTANT);
+    else if (!strcmp(id, "wallet")) go(env, shell.preview || zapp_setup_state(shell.files) == ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP);
+    else if (!strcmp(id, "apps")) go(env, SCREEN_APPS);
+    else if (!strcmp(id, "settings")) go(env, SCREEN_SETTINGS);
+    else if (!strcmp(id, "node_start_home")) shell.send("node_start", "");
+    else if (!strcmp(id, "node_toggle")) run_node_toggle();
+    else return false;
+    return true;
+}
 static void run_tile(JNIEnv *env, const struct target *target)
 {
     char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
-    if (!strcmp(target->id, "node_details")) go(env, SCREEN_NODE_DETAILS);
-    else if (!strcmp(target->id, "scan")) begin_scan(env);
-    else if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
-    else if (!strcmp(target->id, "wallet")) go(env, shell.preview || zapp_setup_state(shell.files) == ZAPP_SETUP_READY ? SCREEN_WALLET : SCREEN_SETUP);
-    else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
-    else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
-    else if (!strcmp(target->id, "node_start_home")) shell.send("node_start", "");
-    else if (!strcmp(target->id, "node_toggle")) run_node_toggle();
-    else if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&
+    if (run_home_action(env, target->id)) return;
+    if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&
              target->card <= shell.app_count && zapp_card_field(&shell.app_cards[target->card - 1], "package", package, sizeof(package))) {
         (void)zapp_card_field(&shell.app_cards[target->card - 1], "label", name, sizeof(name));
         (void)zapp_card_field(&shell.app_cards[target->card - 1], "activity", activity, sizeof(activity));

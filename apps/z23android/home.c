@@ -126,16 +126,30 @@ const char *zapp_home_node_line(const struct zapp_view *view, char *out, size_t 
 {
     return plain_node_line(view, out, cap);
 }
+static const char *node_details_pending(const struct zapp_view *view)
+{
+    if (view->node_stopping) return "Node stopping.";
+    if (view->node_starting || view->node_installing) return "Node starting.";
+    if (!view->node_process_running) return "Node stopped.";
+    if (view->pace == ZAPP_PACE_PAUSE) return "Node sync paused.";
+    return view->node_running ? NULL : "Node not responding.";
+}
+static const char *node_details_verdict(const struct zapp_view *view)
+{
+    bool known = view->node_height >= 0 && view->node_reference > 0;
+    if (known && view->chain_state == ZAPP_CHAIN_CURRENT)
+        return "At the last check, the node was no more than two blocks behind the reported reference.";
+    if (known && view->chain_state == ZAPP_CHAIN_BEHIND) return "At the last check, the node was behind.";
+    if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) return "Cannot confirm the node is up to date.";
+    return "Node sync status is unknown.";
+}
+
 /* The details surface contains only explicit node fields, never wallet or assistant text. */
 const char *zapp_home_node_details(const struct zapp_view *view, bool preview, char *out, size_t cap)
 {
     if (!out || !cap) return NULL;
     if (preview) { snprintf(out, cap, "The preview app does not run a node."); return out; }
-    const char *state = view->node_stopping ? "Node stopping." :
-        view->node_starting || view->node_installing ? "Node starting." :
-        !view->node_process_running ? "Node stopped." :
-        view->pace == ZAPP_PACE_PAUSE ? "Node sync paused." :
-        !view->node_running ? "Node not responding." : NULL;
+    const char *state = node_details_pending(view);
     if (state) {
         snprintf(out, cap, "%s\nNode sync is separate from wallet scanning.", state);
         return out;
@@ -143,11 +157,7 @@ const char *zapp_home_node_details(const struct zapp_view *view, bool preview, c
     char height[32] = "Unknown", reference[32] = "Unknown";
     if (view->node_height >= 0) zapp_grouped(view->node_height, height);
     if (view->node_reference > 0) zapp_grouped(view->node_reference, reference);
-    const char *verdict = view->chain_state == ZAPP_CHAIN_CURRENT && view->node_height >= 0 && view->node_reference > 0 ?
-        "At the last check, the node was no more than two blocks behind the reported reference." :
-        view->chain_state == ZAPP_CHAIN_BEHIND && view->node_height >= 0 && view->node_reference > 0 ? "At the last check, the node was behind." :
-        view->chain_state == ZAPP_CHAIN_UNCONFIRMED ? "Cannot confirm the node is up to date." :
-        "Node sync status is unknown.";
+    const char *verdict = node_details_verdict(view);
     snprintf(out, cap, "Last reported node block: %s\nReported peer or fleet reference: %s\n%s\nNode sync is separate from wallet scanning.",
              height, reference, verdict);
     return out;

@@ -43,3 +43,12 @@ cmake --build build/node-details-check/native --parallel 4
 
 The NDK, archive and header variables above represent the retained inputs
 identified by version and digest in this record.
+
+The first native candidate verification did not qualify: its complexity gate
+reported three functions above the existing cap, and a stale replay-tool
+depfile made the selector fall back to the universal set. That invalid run was
+stopped after the failure. The formatter, action dispatch and test cases were
+split without changing the cap or assertions; the complexity check then
+passed. Rebuilding the existing `skycombat-model-replay` target refreshed the
+depfile and the selector returned a closed 42-group selection. After the
+repair, `test-host` and the Android native compile and link passed again.
