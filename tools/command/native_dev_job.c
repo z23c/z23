@@ -18,6 +18,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
+#include "platform/path_compat.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
 #include "platform/state_root.h"
@@ -303,10 +304,9 @@ static bool job_argv_check(const struct json_value *argv,
     return true;
 }
 
-/* The primary checkout of THIS binary's repository: the parent of the common
- * git dir that git reports from the binary's own directory. The caller's cwd
- * never decides it. The test seam may pin it instead. */
-static bool job_primary_checkout(char *out, size_t cap)
+/* Resolve the primary checkout from trusted binding, or the executable directory
+ * when no binding is supplied. The caller cwd never supplies authority. */
+static bool job_primary_checkout(const char *binding, char *out, size_t cap)
 {
     const struct zcl_dev_job_hooks *h = zcl_dev_job_hooks();
     const char *argv[] = {"git", "rev-parse", "--path-format=absolute",
@@ -316,12 +316,14 @@ static bool job_primary_checkout(char *out, size_t cap)
     size_t n;
     if (h && h->primary_checkout)
         return platform_directory_canonical_real(h->primary_checkout, out, cap);
-    if (!os_proc_exe_path(exe, sizeof(exe)) || !(slash = strrchr(exe, '/')) ||
-        slash == exe)
-        return false;
-    n = (size_t)(slash - exe);
-    memcpy(dir, exe, n);
-    dir[n] = '\0';
+    if (binding && binding[0]) {
+        if (!platform_path_is_absolute(binding) || !platform_directory_canonical_real(binding, dir, sizeof(dir))) return false;
+    } else {
+        if (!os_proc_exe_path(exe, sizeof(exe)) || !(slash = strrchr(exe, '/')) || slash == exe) return false;
+        n = (size_t)(slash - exe);
+        memcpy(dir, exe, n);
+        dir[n] = '\0';
+    }
     if (zcl_spawn_capture_in_dir_observed(argv, dir, common, sizeof(common),
                                           15000, NULL) != 0)
         return false;
@@ -333,12 +335,18 @@ static bool job_primary_checkout(char *out, size_t cap)
     return platform_directory_canonical_real(common, out, cap);
 }
 
+bool zcl_dev_job_binding_available(const char *binding)
+{
+    char primary[ZCL_DEV_JOB_PATH_MAX];
+    return job_primary_checkout(binding, primary, sizeof(primary));
+}
+
 typedef bool (*job_wt_fn)(const char *worktree, const char *arg);
 
 /* Call fn with each worktree git lists for the primary checkout, its path
  * canonical, and stop at the first true. The list is read from the primary,
  * never from the caller's directory. */
-static bool job_any_worktree(job_wt_fn fn, const char *arg)
+static bool job_any_worktree(job_wt_fn fn, const char *arg, const char *binding)
 {
     const char *argv[] = {"git", "worktree", "list", "--porcelain", NULL};
     char primary[ZCL_DEV_JOB_PATH_MAX], path[ZCL_DEV_JOB_PATH_MAX];
@@ -346,7 +354,7 @@ static bool job_any_worktree(job_wt_fn fn, const char *arg)
     size_t cap = 1u << 20;
     char *out;
     bool found = false;
-    if (!job_primary_checkout(primary, sizeof(primary)))
+    if (!job_primary_checkout(binding, primary, sizeof(primary)))
         return false;
     out = zcl_malloc(cap, "dev_job_worktree_list");
     if (!out)
@@ -394,26 +402,50 @@ static bool job_in_state_root(const char *log)
     return strncmp(log, canon, n) == 0 && log[n] == '/';
 }
 
+bool zcl_dev_job_log_allowed_scoped(const char *log, const char *source_root)
+{
+    char primary[ZCL_DEV_JOB_PATH_MAX];
+    if (source_root && source_root[0] && !job_primary_checkout(source_root, primary, sizeof(primary))) return false;
+    return job_in_state_root(log) || job_any_worktree(job_wt_holds_log, log, source_root);
+}
 bool zcl_dev_job_log_allowed(const char *log)
 {
-    return job_in_state_root(log) || job_any_worktree(job_wt_holds_log, log);
+    return zcl_dev_job_log_allowed_scoped(log, NULL);
 }
-
-/* True when `cwd` (canonical) is a worktree git lists for the primary
- * checkout of this binary's repository. */
-static bool job_cwd_registered(const char *cwd)
+const char *zcl_dev_job_source_root(const struct zcl_command_request *request)
 {
-    return job_any_worktree(job_wt_is_cwd, cwd);
+    if (request && request->context && request->context->source_root && request->context->source_root[0])
+        return request->context->source_root;
+    const char *root = getenv("ZCL_DEV_SOURCE_ROOT");
+    return root && root[0] ? root : NULL;
 }
 
-bool zcl_dev_job_linked_worktree_registered(const char *canonical_path)
+/* True when canonical cwd belongs to the scoped repository. */
+static bool job_cwd_registered(const char *cwd, const char *source_root)
+{
+    return job_any_worktree(job_wt_is_cwd, cwd, source_root);
+}
+
+bool zcl_dev_job_worktree_registered_scoped(const char *cwd, const char *source_root)
+{
+    char canonical[ZCL_DEV_JOB_PATH_MAX];
+    return cwd && platform_directory_canonical_real(cwd, canonical, sizeof(canonical)) &&
+           strcmp(cwd, canonical) == 0 && job_cwd_registered(canonical, source_root);
+}
+
+bool zcl_dev_job_linked_worktree_registered_scoped(const char *canonical_path, const char *source_root)
 {
     char primary[ZCL_DEV_JOB_PATH_MAX], canonical[ZCL_DEV_JOB_PATH_MAX];
     return canonical_path &&
         platform_directory_canonical_real(canonical_path, canonical, sizeof(canonical)) &&
         strcmp(canonical_path, canonical) == 0 &&
-        job_primary_checkout(primary, sizeof(primary)) &&
-        strcmp(canonical, primary) != 0 && job_cwd_registered(canonical);
+        job_primary_checkout(source_root, primary, sizeof(primary)) &&
+        strcmp(canonical, primary) != 0 && job_cwd_registered(canonical, source_root);
+}
+
+bool zcl_dev_job_linked_worktree_registered(const char *path)
+{
+    return zcl_dev_job_linked_worktree_registered_scoped(path, NULL);
 }
 
 static bool job_head(const char *cwd, char *out, size_t cap)
@@ -434,7 +466,7 @@ static bool job_head(const char *cwd, char *out, size_t cap)
 
 /* Resolve the cwd input (default: the process cwd) to a registered
  * worktree. On failure the reply is already failed. */
-static bool job_resolve_cwd(const char *in, char *cwd,
+static bool job_resolve_cwd(const char *in, const char *source_root, char *cwd,
                             size_t cap, struct zcl_command_reply *reply)
 {
     char raw[ZCL_DEV_JOB_PATH_MAX];
@@ -451,10 +483,11 @@ static bool job_resolve_cwd(const char *in, char *cwd,
     if (in)
         (void)snprintf(raw, sizeof(raw), "%s", in);
     if (!platform_directory_canonical_real(raw, cwd, cap) ||
-        !job_cwd_registered(cwd)) {
+        !job_cwd_registered(cwd, source_root)) {
         job_invalid(reply, "CWD_NOT_WORKTREE",
-                    "cwd must be an existing git worktree of this repository "
-                    "(see git worktree list)",
+                    zcl_dev_job_binding_available(source_root) ?
+                    "cwd must be an existing git worktree of this repository (see git worktree list)" :
+                    "Select a valid checkout with ZCL_DEV_SOURCE_ROOT or MCP --checkout.",
                     "input.cwd");
         return false;
     }
@@ -665,7 +698,7 @@ void zcl_dev_job_start_typed(const struct zcl_dev_job_start_input *input,
     uint64_t key;
     if (!reply) return;
     if (!input || !job_argv_check(input->argv, reply) ||
-        !job_resolve_cwd(input->cwd, cwd, sizeof(cwd), reply)) return;
+        !job_resolve_cwd(input->cwd, input->source_root, cwd, sizeof(cwd), reply)) return;
     if (!job_head(cwd, head, sizeof(head))) {
         job_invalid(reply, "CWD_NOT_WORKTREE", "git rev-parse HEAD failed in cwd", "input.cwd");
         return;
@@ -687,7 +720,7 @@ void zcl_native_handle_dev_job_start(const struct zcl_command_request *request,
     if (!in) return;
     const struct zcl_dev_job_start_input parsed = {
         .argv = json_get(in, "argv"), .cwd = zcl_dev_job_str(json_get(in, "cwd")),
-        .label = zcl_dev_job_str(json_get(in, "label")),
+        .label = zcl_dev_job_str(json_get(in, "label")), .source_root = zcl_dev_job_source_root(request),
         .dedupe = !dedupe || json_get_bool(dedupe)
     };
     zcl_dev_job_start_typed(&parsed, reply);

@@ -479,6 +479,9 @@ ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform_shard_01", "build/bin/depfile-scope
 ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform", "build/bin/depfile-scope-launch",
                           "build/bin/depfile-scope-launch")
 
+/* The job test exercises a copied installed developer binary. */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_job", "build/bin/z23-dev", "dev-proof-producer")
+
 /* tests/harness/src/test_dev_platform.c runs the built dev binary on a
  * fixture checkout to observe `dev hotswap probe` with a source_tu end to end
  * (the dlopen half is a release stub in the test binary). The shard that

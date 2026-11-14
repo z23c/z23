@@ -172,6 +172,7 @@ static enum zcl_dev_job_state job_probe(const char *id, const char *log,
 }
 
 struct job_wait_req {
+    const char *source_root;
     const char *id;  /* NULL when waiting on an external log */
     const char *log; /* the log being read */
     struct json_value handle;
@@ -199,11 +200,12 @@ static bool job_external_log_scope(const char *ext,
                          "input.log");
         return false;
     }
-    if (!zcl_dev_job_log_allowed(r->log_canon)) {
+    if (!zcl_dev_job_log_allowed_scoped(r->log_canon, r->source_root)) {
         job_wait_invalid(reply, "LOG_NOT_ALLOWED",
-                         "log must be under <worktree>/build/scratch/ of a "
-                         "worktree of this repository, or under the dev job "
-                         "state root; write the output there and wait on it",
+                         zcl_dev_job_binding_available(r->source_root) ?
+                         "log must be under <worktree>/build/scratch/ of a worktree of this repository, "
+                         "or under the dev job state root; write the output there and wait on it" :
+                         "Select a valid checkout with ZCL_DEV_SOURCE_ROOT or MCP --checkout.",
                          "input.log");
         return false;
     }
@@ -222,6 +224,13 @@ static bool job_wait_target(const struct zcl_dev_job_wait_input *in,
                          zcl_dev_job_read_handle(r->id, &r->handle);
         r->log = r->have_handle ? zcl_dev_job_str(json_get(&r->handle, "log"))
                                 : NULL;
+        const char *cwd = r->have_handle ? zcl_dev_job_str(json_get(&r->handle, "cwd")) : NULL;
+        if (r->have_handle && !zcl_dev_job_worktree_registered_scoped(cwd, r->source_root)) {
+            job_wait_invalid(reply, "JOB_NOT_ALLOWED", zcl_dev_job_binding_available(r->source_root) ?
+                             "job belongs to a different checkout" :
+                             "Select a valid checkout with ZCL_DEV_SOURCE_ROOT or MCP --checkout.", "input.job_id");
+            return false;
+        }
     } else if (ext) {
         return job_external_log_scope(ext, reply, r);
     }
@@ -241,6 +250,7 @@ static bool job_wait_parse(const struct zcl_dev_job_wait_input *in,
 {
     memset(r, 0, sizeof(*r));
     json_init(&r->handle);
+    r->source_root = in ? in->source_root : NULL;
     r->id = in ? in->job_id : NULL;
     if (!in || (!r->id && !in->log)) {
         job_wait_invalid(reply, "INVALID_INPUT",
@@ -301,6 +311,7 @@ void zcl_native_handle_dev_job_wait(const struct zcl_command_request *request,
                          "integer timeout_s / tail_lines", "input");
         return;
     }
+    parsed.source_root = zcl_dev_job_source_root(request);
     parsed.job_id = zcl_dev_job_str(json_get(in, "job_id"));
     parsed.log = zcl_dev_job_str(json_get(in, "log"));
     zcl_dev_job_wait_typed(&parsed, reply);

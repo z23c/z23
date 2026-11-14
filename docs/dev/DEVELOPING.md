@@ -490,6 +490,19 @@ z23-dev agentbuild        # compare its source_id_sha256 to the captured one
 
 Never conclude "it is current" from `ls -l`.
 
+For an installed developer binary, select an approved checkout for the AI
+session with `ZCL_DEV_SOURCE_ROOT` set to its absolute path:
+
+```sh
+export ZCL_DEV_SOURCE_ROOT=/absolute/path/to/approved/checkout
+```
+The selected checkout identifies the repository authority for registered
+worktrees and job logs; a command `cwd` is only a candidate in that
+repository. An invalid explicit root is refused. MCP
+uses its verified `--checkout` context; without a configured checkout, source
+commands remain unavailable.
+<!-- claim: symbol-present zcl_dev_job_source_root tools/command/native_dev_job.c # explicit job checkout binding -->
+
 **Commits on `main` must be signed.** The push path refuses an unsigned
 commit, and the check is not a warning:
 

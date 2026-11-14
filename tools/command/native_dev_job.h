@@ -54,11 +54,11 @@ struct zcl_command_reply;
 /* semantic_argv changes dedupe only; argv is validated, stored and executed. */
 struct zcl_dev_job_start_input {
     const struct json_value *argv, *semantic_argv;
-    const char *cwd, *label;
+    const char *cwd, *label, *source_root;
     bool dedupe;
 };
 struct zcl_dev_job_wait_input {
-    const char *job_id, *log;
+    const char *job_id, *log, *source_root;
     int64_t timeout_s, tail_lines;
 };
 void zcl_dev_job_start_typed(const struct zcl_dev_job_start_input *input,
@@ -67,12 +67,17 @@ void zcl_dev_job_wait_typed(const struct zcl_dev_job_wait_input *input,
                             struct zcl_command_reply *reply);
 
 /* True when the canonical path `log` is under <worktree>/build/scratch/ of a
- * worktree listed for this binary's repository, or under the job state root. */
+ * worktree listed for the scoped repository, or under the job state root. */
 bool zcl_dev_job_log_allowed(const char *log);
+bool zcl_dev_job_log_allowed_scoped(const char *log, const char *source_root);
+bool zcl_dev_job_worktree_registered_scoped(const char *cwd, const char *source_root);
+const char *zcl_dev_job_source_root(const struct zcl_command_request *request);
+bool zcl_dev_job_binding_available(const char *source_root);
 
 /* True only for a canonical, registered linked worktree of this binary's
  * repository; the primary checkout is excluded. */
 bool zcl_dev_job_linked_worktree_registered(const char *canonical_path);
+bool zcl_dev_job_linked_worktree_registered_scoped(const char *canonical_path, const char *source_root);
 
 /* The string at v, or NULL when v is missing, not a string, or empty
  * (json_get_str() answers "" there). */

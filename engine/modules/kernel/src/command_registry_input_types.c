@@ -827,7 +827,9 @@ static const struct cr_int_bound *cr_job_wait_bound(const char *path,
     if (strcmp(path, "dev.fleet.job") == 0 && strcmp(key, "timeout_s") == 0)
         return &fleet_wait;
     bool ints = strcmp(key, "timeout_s") == 0 || strcmp(key, "tail_lines") == 0;
-    return ints && strcmp(path, "dev.loop.job.wait") == 0 ? &job_wait : NULL;
+    return ints && (strcmp(path, "dev.loop.job.wait") == 0 ||
+                    (strcmp(path, "dev.android.status") == 0 && strcmp(key, "timeout_s") == 0))
+        ? &job_wait : NULL;
 }
 
 static const struct cr_int_bound *cr_cx_next_bound(const char *path,

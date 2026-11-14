@@ -265,6 +265,21 @@ static bool supervisor_next_valid(const struct zcl_command_spec *spec,
         !strcmp(json_get_str(key), "supervisor.stalled.children.live.discovery.v1:0");
 }
 
+/* A running Android job can be polled only with the job ID it returned. */
+static bool android_job_next_valid(const struct zcl_command_spec *spec,
+                                   const struct json_value *input,
+                                   const struct json_value *data)
+{
+    if (!spec || strcmp(spec->path, "dev.android.status") != 0) return false;
+    const struct json_value *state = json_get(data, "state");
+    const struct json_value *observed = json_get(data, "job_id");
+    const struct json_value *requested = json_get(input, "job_id");
+    if (!state || state->type != JSON_STR || strcmp(json_get_str(state), "running") ||
+        !observed || observed->type != JSON_STR || !requested || requested->type != JSON_STR) return false;
+    const char *id = json_get_str(observed);
+    return id[0] && strcmp(id, json_get_str(requested)) == 0;
+}
+
 static bool push_next_item_valid(const struct zcl_command_next *next,
                                  const struct zcl_command_registry *registry,
                                  const struct zcl_command_spec *current_spec,
@@ -285,7 +300,8 @@ static bool push_next_item_valid(const struct zcl_command_next *next,
     if (current_spec && strcmp(next_spec->path, current_spec->path) == 0 &&
         !json_get(input, "cursor") && !json_get(input, "item_offset") &&
         !json_get(input, "after") && !source_next_valid(current_spec, input, data) &&
-        !supervisor_next_valid(current_spec, input, data))
+        !supervisor_next_valid(current_spec, input, data) &&
+        !android_job_next_valid(current_spec, input, data))
         return false;
     return zcl_command_registry_input_validate(next_spec, input, why,
                                                sizeof(why));

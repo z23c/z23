@@ -69,6 +69,18 @@ static bool dj_launch(const char *id)
     return true;
 }
 
+static pid_t g_detached_pid;
+static char g_installed_bin[1200];
+static bool dj_launch_process(const char *id)
+{
+    char arg[256];
+    if (!g_installed_bin[0] || snprintf(arg, sizeof(arg), "--job_id=%s", id) >= (int)sizeof(arg)) return false;
+    pid_t pid = fork();
+    if (pid == 0) { execl(g_installed_bin, g_installed_bin, "dev", "loop", "job", "exec", arg, (char *)NULL); _exit(127); }
+    if (pid < 0) return false;
+    g_detached_pid = pid; return true;
+}
+
 static void dj_join_all(void)
 {
     for (int i = 0; i < g_nthreads; i++)
@@ -580,6 +592,8 @@ static bool dj_android_fixture(char *lane, size_t cap)
         "\t@if test -f ../../build/fail; then exit 2; fi; "
         "if test -f ../../build/partial; then exit 0; fi; "
         "if test -f ../../build/slow; then sleep 2; fi; "
+        "i=0; while test -f ../../build/hold; do i=$$((i+1)); "
+        "if test $$i -ge 120; then exit 2; fi; sleep 1; done; "
         "mkdir -p '$(BUILD_DIR)/native' '$(BUILD_DIR)/package/lib/arm64-v8a'; "
         "cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; "
         "echo app > '$(BUILD_DIR)/native/libz23android.so'; "
@@ -610,6 +624,42 @@ static void dj_android_input(struct dj_call *c, const char *lane, bool with_cwd)
     for (size_t i = 0; i < 5; ++i) {
         snprintf(path, sizeof(path), "%s/%s", lane, names[i]); (void)json_push_kv_str(&c->input, keys[i], path);
     }
+}
+static bool dj_cli_call(const char *bin, const char *cwd, const char *verb,
+                        const struct json_value *input, struct json_value *result)
+{
+    char wire[8192], arg[8256], output[32768];
+    size_t n = json_write(input, wire, sizeof(wire));
+    if (!n || n >= sizeof(wire) || snprintf(arg, sizeof(arg), "--input=%s", wire) >= (int)sizeof(arg)) return false;
+    const char *argv[] = {bin, "dev", "android", verb, arg, NULL};
+    int rc = zcl_spawn_capture_in_dir_observed(argv, cwd, output, sizeof(output), 30000, NULL);
+    json_init(result);
+    bool ok = (rc == 0 || rc == 2) && json_read(result, output, strlen(output));
+    if (!ok) fprintf(stderr, "copied CLI %s returned %d: %s\n", verb, rc, output);
+    return ok;
+}
+static bool dj_cli_wait_log(const char *bin, const char *log, struct json_value *result)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    if (!json_push_kv_str(&input, "log", log)) { json_free(&input); return false; }
+    char wire[4096], arg[4160], output[32768];
+    size_t n = json_write(&input, wire, sizeof(wire)); json_free(&input);
+    if (!n || n >= sizeof(wire) || snprintf(arg, sizeof(arg), "--input=%s", wire) >= (int)sizeof(arg)) return false;
+    const char *argv[] = {bin, "dev", "loop", "job", "wait", arg, NULL};
+    int rc = zcl_spawn_capture_in_dir_observed(argv, "/", output, sizeof(output), 30000, NULL);
+    json_init(result); return (rc == 0 || rc == 2) && json_read(result, output, strlen(output));
+}
+static const char *dj_cli_data(const struct json_value *result, const char *key)
+{
+    return json_get_str(json_get(json_get(result, "data"), key));
+}
+static bool dj_copy_dev_binary(char *out, size_t cap)
+{
+    char dir[1024], result[64];
+    test_make_tmpdir(dir, sizeof(dir), "dev_job", "installed");
+    if (snprintf(out, cap, "%s/z23-dev", dir) >= (int)cap) return false;
+    const char *argv[] = {"cp", "build/bin/z23-dev", out, NULL};
+    return zcl_spawn_capture_observed(argv, result, sizeof(result), 30000, NULL) == 0;
 }
 static bool dj_android_prepare_hostile(struct dj_call *c, const char *lane)
 {
@@ -660,7 +710,15 @@ static bool dj_android_default_cwd(const char *lane)
 }
 static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
 {
-    int failures = 0; struct dj_call c, s, duplicate; char lane[1200], id[128], good[128], path[2048];
+    int failures = 0; struct dj_call c, s, duplicate; char lane[1200], id[128], good[128], path[2048], hold[2048] = {0};
+    const char *old_root = getenv("ZCL_DEV_SOURCE_ROOT");
+    char *saved_root = old_root ? strdup(old_root) : NULL;
+    if (old_root && !saved_root) return 1;
+    if (unsetenv("ZCL_DEV_SOURCE_ROOT") != 0) { free(saved_root); return 1; }
+    if (!dj_copy_dev_binary(g_installed_bin, sizeof(g_installed_bin))) {
+        if (saved_root) (void)setenv("ZCL_DEV_SOURCE_ROOT", saved_root, 1);
+        free(saved_root); return 1;
+    }
     TEST("dev.android: plan accepts spaces and rejects shell metacharacters") {
         ASSERT(dj_android_fixture(lane, sizeof(lane)));
         ASSERT(dj_android_default_cwd(lane));
@@ -675,6 +733,121 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         dj_android_input(&c, lane, true); json_set_str((struct json_value *)json_get(&c.input, "node_bin"), path);
         zcl_native_handle_dev_android_plan(&c.request, &c.reply);
         ASSERT(dj_error_is(&c, "ANDROID_INPUT_REQUIRED")); dj_end(&c); PASS();
+    }
+    TEST("dev.android: explicit checkout context binds linked worktrees") {
+        struct zcl_command_context context = { .source_root = g_repo };
+        zcl_dev_job_set_hooks(NULL);
+        dj_android_input(&c, lane, true); c.request.context = &context;
+        zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); dj_end(&c);
+        hooks->primary_checkout = NULL; hooks->launch = dj_launch_process; zcl_dev_job_set_hooks(hooks);
+        dj_android_input(&c, lane, true); c.request.context = &context;
+        zcl_native_handle_dev_android_prepare(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c);
+        int child_status = 0; ASSERT(waitpid(g_detached_pid, &child_status, 0) == g_detached_pid);
+        g_detached_pid = 0; ASSERT(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+        hooks->launch = dj_launch;
+        char foreign[1024]; test_make_tmpdir(foreign, sizeof(foreign), "dev_job", "foreign-status");
+        dj_git(foreign, "init", "-q", NULL, NULL, NULL);
+        dj_git(foreign, "commit", "-q", "--allow-empty", "-m", "fixture");
+        struct zcl_command_context foreign_context = {.source_root = foreign};
+        dj_begin(&s); s.request.context = &foreign_context;
+        (void)json_push_kv_str(&s.input, "job_id", id);
+        zcl_native_handle_dev_android_status(&s.request, &s.reply);
+        ASSERT(dj_error_is(&s, "JOB_NOT_ALLOWED")); ASSERT_EQ(s.reply.next_count, 0);
+        ASSERT(!json_get(&s.reply.data, "next_action")); dj_end(&s);
+        struct zcl_command_context bad_context = {.source_root = "/not-a-checkout"};
+        dj_begin(&s); s.request.context = &bad_context;
+        (void)json_push_kv_str(&s.input, "job_id", id);
+        zcl_native_handle_dev_job_wait(&s.request, &s.reply);
+        ASSERT(dj_error_is(&s, "JOB_NOT_ALLOWED"));
+        ASSERT(strstr(s.reply.error.message, "ZCL_DEV_SOURCE_ROOT")); dj_end(&s);
+        dj_begin(&s); s.request.context = &bad_context;
+        snprintf(path, sizeof(path), "%s/build/scratch/job-%s.log", lane, id);
+        (void)json_push_kv_str(&s.input, "log", path);
+        zcl_native_handle_dev_job_wait(&s.request, &s.reply);
+        ASSERT(dj_error_is(&s, "LOG_NOT_ALLOWED"));
+        ASSERT(strstr(s.reply.error.message, "ZCL_DEV_SOURCE_ROOT")); dj_end(&s);
+        dj_begin(&s); s.request.context = &bad_context;
+        (void)json_push_kv_str(&s.input, "cwd", lane); dj_push_argv(&s, "make", "ok");
+        zcl_native_handle_dev_job_start(&s.request, &s.reply);
+        ASSERT(dj_error_is(&s, "CWD_NOT_WORKTREE"));
+        ASSERT(strstr(s.reply.error.message, "ZCL_DEV_SOURCE_ROOT")); dj_end(&s);
+        dj_begin(&s); s.request.context = &context;
+        (void)json_push_kv_str(&s.input, "job_id", id);
+        zcl_native_handle_dev_android_status(&s.request, &s.reply);
+        ASSERT_STR_EQ(dj_str(&s, "state"), "artifact_observed"); dj_end(&s);
+        hooks->primary_checkout = g_repo; zcl_dev_job_set_hooks(NULL);
+        char saved_cwd[PATH_MAX]; ASSERT(getcwd(saved_cwd, sizeof(saved_cwd)));
+        ASSERT(chdir(lane) == 0);
+        dj_android_input(&c, lane, false); c.request.context = &context;
+        zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); dj_end(&c); ASSERT(chdir(saved_cwd) == 0);
+        context.source_root = "/not-a-checkout";
+        dj_android_input(&c, lane, true); c.request.context = &context;
+        zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ASSERT(dj_error_is(&c, "ANDROID_INPUT_REQUIRED")); dj_end(&c);
+        zcl_dev_job_set_hooks(hooks); PASS();
+    }
+    TEST("dev.android: copied installed CLI follows configured checkout") {
+        char wire_id[128], foreign[1024], foreign_lane[1200], log[1400]; struct json_value result;
+        ASSERT(setenv("ZCL_DEV_SOURCE_ROOT", g_repo, 1) == 0);
+        dj_android_input(&c, lane, true);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "plan", &c.input, &result));
+        ASSERT(json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        struct dj_call inferred; dj_android_input(&inferred, lane, false);
+        ASSERT(dj_cli_call(g_installed_bin, lane, "plan", &inferred.input, &result));
+        ASSERT(json_get_bool(json_get(&result, "ok"))); json_free(&result); dj_end(&inferred);
+        json_set_str((struct json_value *)json_get(&c.input, "cwd"), g_repo);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "plan", &c.input, &result));
+        ASSERT(!json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        test_make_tmpdir(foreign, sizeof(foreign), "dev_job", "installed-foreign");
+        dj_git(foreign, "init", "-q", NULL, NULL, NULL);
+        dj_git(foreign, "commit", "-q", "--allow-empty", "-m", "fixture");
+        snprintf(foreign_lane, sizeof(foreign_lane), "%s-linked", foreign);
+        dj_git(foreign, "worktree", "add", "--detach", foreign_lane, "HEAD");
+        json_set_str((struct json_value *)json_get(&c.input, "cwd"), foreign_lane);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "plan", &c.input, &result));
+        ASSERT(!json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        snprintf(log, sizeof(log), "%s/build/scratch", g_repo); (void)mkdir(log, 0700);
+        snprintf(log, sizeof(log), "%s/build/scratch/installed.log", g_repo);
+        ASSERT(dj_android_file(log, "rc=0\n", 0600));
+        ASSERT(dj_cli_wait_log(g_installed_bin, log, &result));
+        ASSERT(json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        snprintf(log, sizeof(log), "%s/outside.log", foreign);
+        ASSERT(dj_android_file(log, "rc=0\n", 0600));
+        ASSERT(dj_cli_wait_log(g_installed_bin, log, &result));
+        ASSERT(!json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        json_set_str((struct json_value *)json_get(&c.input, "cwd"), lane);
+        ASSERT(setenv("ZCL_DEV_SOURCE_ROOT", "/not-a-checkout", 1) == 0);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "plan", &c.input, &result));
+        ASSERT(!json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        ASSERT(unsetenv("ZCL_DEV_SOURCE_ROOT") == 0);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "plan", &c.input, &result));
+        ASSERT(!json_get_bool(json_get(&result, "ok"))); json_free(&result);
+        ASSERT(setenv("ZCL_DEV_SOURCE_ROOT", g_repo, 1) == 0);
+        snprintf(hold, sizeof(hold), "%s/build/hold", lane); ASSERT(dj_android_file(hold, "hold", 0600));
+        ASSERT(dj_cli_call(g_installed_bin, "/", "prepare", &c.input, &result));
+        ASSERT(json_get_bool(json_get(&result, "ok")));
+        snprintf(wire_id, sizeof(wire_id), "%s", dj_cli_data(&result, "job_id")); json_free(&result);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "prepare", &c.input, &result));
+        ASSERT_STR_EQ(dj_cli_data(&result, "state"), "attached");
+        ASSERT_STR_EQ(dj_cli_data(&result, "job_id"), wire_id); json_free(&result);
+        struct json_value wait; json_init(&wait); json_set_object(&wait);
+        ASSERT(json_push_kv_str(&wait, "job_id", wire_id));
+        ASSERT(dj_cli_call(g_installed_bin, "/", "status", &wait, &result));
+        ASSERT(json_get_bool(json_get(&result, "ok")));
+        ASSERT_STR_EQ(dj_cli_data(&result, "state"), "running"); json_free(&result);
+        ASSERT(unlink(hold) == 0); hold[0] = 0;
+        ASSERT(json_push_kv_int(&wait, "timeout_s", 1));
+        for (int tries = 0; tries < 60; ++tries) {
+            ASSERT(dj_cli_call(g_installed_bin, "/", "status", &wait, &result));
+            if (strcmp(dj_cli_data(&result, "state"), "running")) break;
+            json_free(&result);
+        }
+        ASSERT_STR_EQ(dj_cli_data(&result, "state"), "artifact_observed");
+        json_free(&result); json_free(&wait); dj_end(&c);
+        ASSERT(unsetenv("ZCL_DEV_SOURCE_ROOT") == 0); PASS();
     }
     TEST("dev.android: running and lost states are the native job states") {
         unsigned before = g_launch_count;
@@ -746,7 +919,12 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         dj_android_status(&s, id); ASSERT(dj_error_is(&s, "ANDROID_JOB_REQUIRED")); dj_end(&s); PASS();
     }
 _test_next:;
-    hooks->pid_liveness = NULL; g_no_child = false; dj_join_all(); return failures;
+    if (hold[0]) (void)unlink(hold);
+    if (g_detached_pid > 0) { (void)waitpid(g_detached_pid, NULL, 0); g_detached_pid = 0; }
+    hooks->launch = dj_launch;
+    hooks->pid_liveness = NULL; g_no_child = false; dj_join_all();
+    if (saved_root ? setenv("ZCL_DEV_SOURCE_ROOT", saved_root, 1) != 0 : unsetenv("ZCL_DEV_SOURCE_ROOT") != 0) failures++;
+    free(saved_root); return failures;
 }
 
 int test_dev_job(void);

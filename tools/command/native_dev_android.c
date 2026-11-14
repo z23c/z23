@@ -55,13 +55,13 @@ static bool da_git(const char *cwd, const char *const *argv, char *out, size_t c
     if (zcl_spawn_capture_in_dir_observed(argv, cwd, out, cap, 15000, NULL) != 0) return false;
     out[strcspn(out, "\r\n")] = 0; return true;
 }
-static bool da_source(struct da_plan *p)
+static bool da_source(struct da_plan *p, const char *source_root)
 {
     const char *head[] = {"git", "rev-parse", "HEAD", NULL};
     const char *tree[] = {"git", "rev-parse", "HEAD^{tree}", NULL};
     const char *status[] = {"git", "--no-optional-locks", "status", "--porcelain", "--untracked-files=all", NULL};
     char dirty[8192], head_text[128], tree_text[128];
-    bool ok = zcl_dev_job_linked_worktree_registered(p->cwd) &&
+    bool ok = zcl_dev_job_linked_worktree_registered_scoped(p->cwd, source_root) &&
         da_git(p->cwd, head, head_text, sizeof(head_text)) && strlen(head_text) == 40 &&
         da_git(p->cwd, tree, tree_text, sizeof(tree_text)) && strlen(tree_text) == 40 &&
         da_git(p->cwd, status, dirty, sizeof(dirty)) && !dirty[0];
@@ -176,8 +176,7 @@ static bool da_inputs(const struct zcl_command_request *req, struct da_plan *p, 
     const struct json_value *in = req ? req->input : NULL;
     const char *cwd = da_str(in, "cwd"); char inferred[PATH_MAX];
     if (!cwd) {
-        const char *root = zcl_native_source_root(req);
-        if (!root || !realpath(root, inferred)) { *reason = "Cannot resolve the current worktree."; return false; }
+        if (!realpath(".", inferred)) { *reason = "Cannot resolve the current worktree."; return false; }
         cwd = inferred;
     }
     const char *node = da_str(in, "node_bin"), *source = da_str(in, "node_source");
@@ -191,8 +190,10 @@ static bool da_inputs(const struct zcl_command_request *req, struct da_plan *p, 
     if (!java) java = "/usr/lib/jvm/default";
     const char *paths[] = {cwd, node, debug, sdk, ndk, java, params};
     if (!da_paths(paths, reason)) return false;
-    if (!da_copy(p->cwd, sizeof(p->cwd), cwd) || !da_path(p->cwd) || !da_source(p)) {
-        *reason = "Use a clean registered worktree, including untracked source files."; return false;
+    if (!da_copy(p->cwd, sizeof(p->cwd), cwd) || !da_path(p->cwd) || !da_source(p, zcl_dev_job_source_root(req))) {
+        *reason = zcl_dev_job_binding_available(zcl_dev_job_source_root(req)) ?
+            "Use a clean registered worktree, including untracked source files." :
+            "Select a valid checkout with ZCL_DEV_SOURCE_ROOT or MCP --checkout."; return false;
     }
     if (!da_node(p, node, debug, source, reason)) return false;
     if (!da_roots(p, sdk, ndk, java, params, reason)) return false;
@@ -387,7 +388,7 @@ void zcl_native_handle_dev_android_prepare(const struct zcl_command_request *req
     if (!ok) { json_free(&args); json_free(&semantic); if (rmdir(out)) mutated = true; da_emit_failed(r, mutated); return; }
     const struct zcl_dev_job_start_input input = {
         .argv = &args, .semantic_argv = &semantic, .cwd = p.cwd,
-        .label = "android-unsigned-v1", .dedupe = true
+        .label = "android-unsigned-v1", .source_root = zcl_dev_job_source_root(req), .dedupe = true
     };
     zcl_dev_job_start_typed(&input, r);
     json_free(&args);
@@ -438,12 +439,12 @@ static bool da_artifact_files(const char *out, const struct da_plan *expected, s
     ok = ok && n > 0 && (size_t)n < sizeof(file) && da_hash(file, stagedhash) && !strcmp(stagedhash, expected->hash);
     return ok;
 }
-static bool da_artifact_check(const struct json_value *handle, struct da_plan *expected, const char *out, struct da_artifact *artifact)
+static bool da_artifact_check(const struct json_value *handle, struct da_plan *expected, const char *out, struct da_artifact *artifact, const char *source_root)
 {
     struct stat out_st;
     struct da_plan observed = {0}; char nodehash[65];
     bool ok = lstat(out, &out_st) == 0 && S_ISDIR(out_st.st_mode) && out_st.st_uid == geteuid() &&
-        (out_st.st_mode & 077) == 0 && da_copy(observed.cwd, sizeof(observed.cwd), expected->cwd) && da_source(&observed) &&
+        (out_st.st_mode & 077) == 0 && da_copy(observed.cwd, sizeof(observed.cwd), expected->cwd) && da_source(&observed, source_root) &&
         !strcmp(observed.head, expected->head) && !strcmp(observed.tree, expected->tree) &&
         da_hash(expected->node, nodehash) && !strcmp(nodehash, expected->hash);
     ok = da_artifact_inputs(handle, expected, ok);
@@ -508,9 +509,10 @@ void zcl_native_handle_dev_android_status(const struct zcl_command_request *req,
         json_free(&handle); da_fail(r, "ANDROID_JOB_INPUT", "The native job contract rejected the generated input."); return;
     }
     const struct zcl_dev_job_wait_input input = {
-        .job_id = id, .timeout_s = timeout ? json_get_int(timeout) : 1
+        .job_id = id, .source_root = zcl_dev_job_source_root(req), .timeout_s = timeout ? json_get_int(timeout) : 1
     };
     zcl_dev_job_wait_typed(&input, r);
+    if (r->status == ZCL_COMMAND_STATUS_FAILED) { json_free(&handle); return; }
     bool reply_ok = true;
     const char *state = da_str(&r->data, "state");
     if (!state || strcmp(state, "passed")) {
@@ -518,7 +520,7 @@ void zcl_native_handle_dev_android_status(const struct zcl_command_request *req,
         json_free(&handle); if (!reply_ok) da_emit_failed(r, false); return;
     }
     struct da_artifact artifact = {0};
-    bool ok = da_artifact_check(&handle, &expected, out, &artifact);
+    bool ok = da_artifact_check(&handle, &expected, out, &artifact, zcl_dev_job_source_root(req));
     reply_ok = da_status_result(r, &expected, &artifact, ok);
     json_free(&handle); if (!reply_ok) da_emit_failed(r, false);
 }

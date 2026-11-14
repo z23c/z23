@@ -6605,6 +6605,38 @@ static int test_supervisor_next_binding(void)
     return failures;
 }
 
+static int g_android_next_case;
+static void android_next_fixture(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+    (void)json_push_kv_str(&reply->data, "state", g_android_next_case == 2 ? "artifact_observed" : "running");
+    (void)json_push_kv_str(&reply->data, "job_id", "job-1");
+    const char *input = g_android_next_case == 1 ? "{\"job_id\":\"job-2\"}" :
+        g_android_next_case == 3 ? "{\"job_id\":\"job-1\",\"timeout_s\":\"bad\"}" : "{\"job_id\":\"job-1\"}";
+    (void)zcl_command_reply_add_next(reply, "dev.android.status", input, "poll");
+}
+static int test_android_next_binding(void)
+{
+    int failures = 0; const struct zcl_command_registry *catalog = zcl_command_catalog();
+    TEST("android running next action binds job and validates input") {
+        const struct zcl_command_spec *base = find_spec(catalog, "dev.android.status"); ASSERT(base);
+        struct zcl_command_spec executable = *base; executable.handler = android_next_fixture;
+        struct zcl_command_registry local = {.commands = &executable, .count = 1};
+        struct zcl_command_context context = {.registry = catalog, .operator_lane = "dev",
+            .granted_capabilities = ~(uint64_t)0, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+        struct json_value input; json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "job_id", "job-1"));
+        for (g_android_next_case = 0; g_android_next_case < 4; g_android_next_case++) {
+            char out[ZCL_COMMAND_RESULT_BUDGET + 1]; enum zcl_command_exit code;
+            size_t n = zcl_command_registry_execute_json(&local, &executable, &context, &input, false,
+                executable.path, "normal", 0, 0, NULL, out, sizeof(out), &code);
+            ASSERT(n > 0); ASSERT_EQ(code == ZCL_COMMAND_EXIT_OK, g_android_next_case == 0);
+        }
+        json_free(&input); PASS();
+    } _test_next:;
+    return failures;
+}
+
 static void contract_bad_next_handler(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -7878,6 +7910,7 @@ int test_command_registry_catalog(void)
     failures += test_describe_emits_observed_p99();
     failures += test_next_actions_fail_closed();
     failures += test_supervisor_next_binding();
+    failures += test_android_next_binding();
     failures += test_domain_leaf_counts();
     failures += test_seventeen_roots();
     failures += test_yardsale_guide();
