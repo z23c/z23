@@ -1282,8 +1282,8 @@ if [[ "${1:-}" == "--check-provenance" ]]; then
     exit 0
 fi
 
-# Build order: openssl before libevent (libevent_openssl needs its headers).
-ALL=(build_tor_stub build_zlib build_sqlite build_openssl build_libevent build_leveldb)
+# build_libevent prepares OpenSSL first, including its headers and stamps.
+ALL=(build_tor_stub build_zlib build_sqlite build_libevent build_leveldb)
 # Darwin and Windows both need secp built here; Linux takes the pinned
 # archive. One condition, because both arms appended the same builder.
 case "$VENDOR_TARGET_OS" in
