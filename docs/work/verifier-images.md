@@ -101,17 +101,17 @@ pinned once the reviewer fixes that list.
 
 | Value | SHA3-256 |
 |---|---|
-| `source_content_sha3` | `49f49ce09877b32a354d7dbbca756c36963d1950212f8d8e3a287f6590364894` |
-| `source_image_sha3` (root-owned) | `2b5bc4f95a35e7e7fb3feb8cb049ffb7beff755b177413fe3e614faae2f47667` |
-| tool image `content_sha3` | `49636d2f06b70287d5c8c7dae96f980d2eb316c1386f064ed6a80de9efd2b35f` |
-| `tool_image_sha3` (root-owned) | `da9534ca126d2724092841468a4cd651a04bac0440d7104570aa6e27801823b4` |
+| `source_content_sha3` | `0011536cd9c35eb545c5fa6a5c9c16aa91aa7d55a1a6a9f398c4e8dfa50f5fcf` |
+| `source_image_sha3` (root-owned) | `4f50734a2a31b17d7d17457f6fc235efd4424c44f0d645fe3b9bb282e906d0ad` |
+| tool image `content_sha3` | `303d7c9f2b16fb84f361ade4259c3d58e9d7f169aee5c93bdf0073a95f09c433` |
+| `tool_image_sha3` (root-owned) | `dbd4310d7e5e2620476eba00312307c3f27a93abbf1af9bbbf1e190080604904` |
 | `seccomp_filter_sha3` | `6e764681d4ca638819faa76db1d9dcc1c520c34c70a6f73661d9a01a6c3482ec` |
-| result.o from the image | `268e7e07f6accd322fbe936ec00fcc65980a66c13c7f7962d5eb6d97b8425f11` (10,128 bytes) |
+| result.o from the image | `fc32be7b826288a379948dc040b15f60ebf50c68167689bad7e72fb23908322a` (4,496 bytes) |
 
-- The source image has 288 entries (3 files, 284 directories) and 8,350
+- The source image has 325 entries (3 files, 321 directories) and 8,350
   bytes.
 - The tool image has 97 entries (50 files, 16 links, 30 directories) and
-  45,527,684 bytes.
+  45,528,346 bytes.
 - `toolchain_id` is `z23.gcc14.fast_result.v2:` followed by the tool image
   root.
 - The source pins change only with the three pinned files or the profile.
@@ -121,7 +121,7 @@ pinned once the reviewer fixes that list.
 - A driver other than GCC 14.2 on Ubuntu 24.04 emits its own cold result.o.
   The no-root proof still requires the tool image to reproduce that object
   byte for byte. These pinned result.o bytes are required when the object
-  is 10,128 bytes.
+  is 4,496 bytes.
 
 ## No-root completeness proof
 

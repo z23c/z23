@@ -42,16 +42,16 @@
 #include <unistd.h>
 
 #define VI_PROFILE "tools/verify/fixed_result_fast.args"
-/* The test-fast result.o the other verifier lanes pin (10,128 bytes). */
+/* The test-fast result.o the other verifier lanes pin (4,496 bytes). */
 #define VI_OBJECT_SHA3 \
-    "268e7e07f6accd322fbe936ec00fcc65980a66c13c7f7962d5eb6d97b8425f11"
-#define VI_OBJECT_BYTES 10128u
+    "fc32be7b826288a379948dc040b15f60ebf50c68167689bad7e72fb23908322a"
+#define VI_OBJECT_BYTES 4496u
 /* The source image: three pinned files plus the profile's -I directories. */
 #define VI_SOURCE_CONTENT \
-    "49f49ce09877b32a354d7dbbca756c36963d1950212f8d8e3a287f6590364894"
+    "0011536cd9c35eb545c5fa6a5c9c16aa91aa7d55a1a6a9f398c4e8dfa50f5fcf"
 #define VI_SOURCE_ROOT_TREE \
-    "2b5bc4f95a35e7e7fb3feb8cb049ffb7beff755b177413fe3e614faae2f47667"
-#define VI_SOURCE_ENTRIES 288u
+    "4f50734a2a31b17d7d17457f6fc235efd4424c44f0d645fe3b9bb282e906d0ad"
+#define VI_SOURCE_ENTRIES 325u
 /* SHA3-256 of /etc/z23verify/fixed_result.seccomp.bpf. */
 #define VI_SECCOMP_SHA3 \
     "6e764681d4ca638819faa76db1d9dcc1c520c34c70a6f73661d9a01a6c3482ec"
