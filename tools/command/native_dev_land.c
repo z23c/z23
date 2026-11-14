@@ -4761,6 +4761,14 @@ static bool dl_push_fence_disposition(struct json_value *item, const struct dl_r
                          strcmp(r->state, "fenced") == 0 ? "fenced" : "complete");
 }
 
+static bool dl_push_outcome_times(struct json_value *item, const struct dl_row *r)
+{
+    /* ts is submission time; legacy outcomes may have no recorded completion. */
+    return json_push_kv_str(item, "ts", r->ts) &&
+        (strcmp(r->state, "landed") != 0 || r->landed_at <= 0 ||
+         json_push_kv_int(item, "landed_at", r->landed_at));
+}
+
 static bool dl_push_outcome_row(struct json_value *arr,
                                 const struct dl_row *r)
 {
@@ -4769,7 +4777,7 @@ static bool dl_push_outcome_row(struct json_value *arr,
     json_init(&item);
     json_set_object(&item);
     ok = json_push_kv_int(&item, "seq", r->seq) &&
-         json_push_kv_str(&item, "ts", r->ts) &&
+         dl_push_outcome_times(&item, r) &&
          json_push_kv_str(&item, "tip", r->tip) &&
          json_push_kv_str(&item, "state", r->state) &&
          dl_push_fence_disposition(&item, r) &&

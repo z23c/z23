@@ -832,6 +832,41 @@ static bool dlx_snapshot_setup(const char *name, char *path, size_t cap)
         "\"state\":\"failed\",\"attempt\":1}\n");
 }
 
+static int dlx_outcome_completion_time(void)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool opened = false;
+    TEST("land: status distinguishes recorded completion from submission time") {
+        char path[1200];
+        ASSERT(dlx_snapshot_setup("outcome_completion_time", path, sizeof(path)));
+        ASSERT(dlx_write(path,
+            "{\"seq\":1,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,"
+            "\"state\":\"landed\",\"ts\":\"2026-11-01T00:00:00Z\",\"landed_at\":1793491260}\n"
+            "{\"seq\":2,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,\"state\":\"landed\"}\n"
+            "{\"seq\":3,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,"
+            "\"state\":\"landed\",\"landed_at\":0}\n"
+            "{\"seq\":4,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,"
+            "\"state\":\"landed\",\"landed_at\":-1}\n"
+            "{\"seq\":5,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,"
+            "\"state\":\"failed\",\"landed_at\":1793491260}\n"));
+        dlx_begin(&c, "status"); opened = true;
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        const struct json_value *rows = dlx_arr(&c, "outcomes");
+        ASSERT(rows && rows->num_children == 5);
+        const struct json_value *completed = json_get(&rows->children[0], "landed_at");
+        ASSERT(completed && completed->type == JSON_INT);
+        ASSERT_EQ(json_get_int(completed), 1793491260);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "ts")), "2026-11-01T00:00:00Z");
+        for (size_t i = 1; i < rows->num_children; ++i)
+            ASSERT(!json_get(&rows->children[i], "landed_at"));
+        PASS();
+    } _test_next:;
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
 static int dlx_outcome_snapshot_changed(void)
 {
     int failures = 0;
@@ -1015,6 +1050,7 @@ int test_dev_land_malformed_outcome_refusal(void)
     failures += dlx_outcome_stream_boundaries();
 #if defined(ZCL_TESTING) && !defined(_WIN32)
     failures += dlx_outcome_snapshot_changed();
+    failures += dlx_outcome_completion_time();
     failures += dlx_outcome_snapshot_failure();
 #endif
     failures += dlx_outcome_record_budget();
