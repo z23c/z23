@@ -174,8 +174,12 @@ struct ajs_custody {
     pid_t display;
     const char *cli, *game, *make, *shell;
     long reported;
+    uint64_t reported_token;
     bool saw_game, saw_reported;
 };
+
+static bool ajs_reported_matches(const struct ajs_custody *c, pid_t pid, uint64_t born)
+{ return (long)pid == c->reported && (!c->reported_token || c->reported_token == born); }
 
 static bool ajs_child_identify(pid_t pid, struct ajs_custody *c)
 {
@@ -190,7 +194,7 @@ static bool ajs_child_identify(pid_t pid, struct ajs_custody *c)
     }
     if (!strcmp(image, c->game)) {
         c->saw_game = true;
-        if ((long)pid == c->reported) c->saw_reported = true;
+        if (ajs_reported_matches(c, pid, born)) c->saw_reported = true;
     }
     return true;
 }
@@ -467,7 +471,67 @@ static void ajs_cli_check(struct ajs_cli_result *result, struct asf_door *run,
                result->rc, result->clean, result->saw_game, result->saw_reported, same, complete, run->text);
 }
 
-static struct ajs_cli_result ajs_b_cli_attempt(struct ajs_world *w, size_t cap)
+static bool ajs_kept_fields(const struct json_value *data, const char *route, const char *version,
+                            const struct asf_journey *j, const struct app_selection *selected)
+{
+    char package[65], record[65];
+    zcl_hex_encode(selected->package, 32, package); zcl_hex_encode(selected->record, 32, record);
+    const struct json_value *revision = json_get(data, "selection_revision");
+    return !strcmp(json_get_str(json_get(data, "name")), route) &&
+        !strcmp(json_get_str(json_get(data, "version")), version) &&
+        !strcmp(json_get_str(json_get(data, "package_root")), package) &&
+        !strcmp(json_get_str(json_get(data, "record_id")), record) &&
+        !strcmp(json_get_str(json_get(data, "image_path")), j->path_b) &&
+        revision && revision->type == JSON_INT && json_get_int(revision) == 1 &&
+        !strcmp(json_get_str(json_get(data, "image_sha3")), j->image_b) &&
+        !strcmp(json_get_str(json_get(data, "image_sha3")), j->image_shared);
+}
+
+static bool ajs_kept_process(const struct json_value *data, long *pid, uint64_t *token)
+{
+    const struct json_value *p = json_get(data, "pid");
+    const char *text = json_get_str(json_get(data, "start_token"));
+    char *end = NULL; errno = 0;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (!text[0] || !end || *end || errno || !parsed || !p || p->type != JSON_INT ||
+        json_get_int(p) <= 1 || json_get_int(p) > INT_MAX) return false;
+    *pid = (long)json_get_int(p); *token = (uint64_t)parsed; return true;
+}
+
+static bool ajs_kept_receipt(const char *text, const char *route, const char *version,
+                             const struct asf_journey *j, const struct app_selection *selected,
+                             long *pid, uint64_t *token)
+{
+    struct json_value doc; json_init(&doc);
+    bool ok = json_read(&doc, text, strlen(text));
+    const struct json_value *data = json_get(&doc, "data"), *success = json_get(&doc, "ok");
+    ok = ok && success && success->type == JSON_BOOL && json_get_bool(success) &&
+        !strcmp(json_get_str(json_get(&doc, "command")), "app.open") &&
+        !strcmp(json_get_str(json_get(&doc, "status")), "passed") &&
+        ajs_kept_fields(data, route, version, j, selected) && ajs_kept_process(data, pid, token);
+    json_free(&doc); return ok;
+}
+
+static void ajs_cli_result_finish(struct ajs_cli_result *result, struct asf_door *run,
+                                  const struct asf_journey *j, size_t cap, const char *version, bool receipt)
+{
+    if (version) result->accepted = result->rc == 0 && result->clean && result->saw_reported && receipt;
+    else ajs_cli_check(result, run, j, cap);
+    if (version && !result->accepted)
+        printf("  [kept CLI reopen: rc=%d clean=%d reported=%d receipt=%d]\n%s", result->rc, result->clean, result->saw_reported, receipt, run->text);
+}
+
+static bool ajs_cli_receipt(const struct asf_door *run, size_t cap, const char *route,
+                            const char *version, const struct asf_journey *j,
+                            const struct app_selection *selected, long *pid, uint64_t *token)
+{
+    if (!version) { *pid = asf_door_pid(run->text); return false; }
+    return cap > 1 && strlen(run->text) < cap - 1 &&
+        ajs_kept_receipt(run->text, route, version, j, selected, pid, token);
+}
+
+static struct ajs_cli_result ajs_b_cli_attempt(struct ajs_world *w, size_t cap, const char *route, const char *version,
+                                               const struct app_selection *selected)
 {
     struct asf_journey *j = &w->j;
     struct asf_door run = {0};
@@ -484,19 +548,38 @@ static struct ajs_cli_result ajs_b_cli_attempt(struct ajs_world *w, size_t cap)
         (void)ajs_env_restore(env, 3);
         return result;
     }
-    const char *argv[] = {binary, datadir, "app", "open", j->b_copy, "--yes", NULL};
+    const char *argv[] = {binary, datadir, "app", "open", route, "--yes", NULL};
     result.rc = test_host_tool_capture(argv, run.text, cap, 60000);
+    long pid = 0; uint64_t token = 0;
+    bool receipt = ajs_cli_receipt(&run, cap, route, version, j, selected, &pid, &token);
     struct ajs_custody c = {.display = w->xvfb, .cli = cli_real, .game = game_real,
-                            .reported = asf_door_pid(run.text)};
+                            .reported = pid, .reported_token = token};
     bool clean = ajs_children_clean(&c) && ajs_child_baseline(w->xvfb);
     bool restored = clean && prctl(PR_SET_CHILD_SUBREAPER, old_subreaper) == 0;
     bool env_restored = ajs_env_restore(env, 3);
     result.clean = clean && restored && env_restored;
     result.saw_game = c.saw_game;
     result.saw_reported = c.saw_reported;
-    ajs_cli_check(&result, &run, j, cap);
+    ajs_cli_result_finish(&result, &run, j, cap, version, receipt);
     if (result.rc == 0) ++j->commands_b;
     return result;
+}
+
+static bool ajs_kept_reopen(struct ajs_world *w, const struct ajs_recovery *r)
+{
+    struct app_launch_env env; struct app_selection_routes routes; struct app_selection selected, after;
+    char why[256];
+    if (!ajs_recovery_selection(w, r) || !app_launch_env_from_process(&env, why, sizeof(why)) ||
+        app_selection_routes_load(env.state_dir, &routes) != APP_SELECTION_OK || routes.count != 1 ||
+        app_selection_load(env.state_dir, routes.names[0], &selected) != APP_SELECTION_OK)
+        return false;
+    struct ajs_cli_result opened = ajs_b_cli_attempt(w, ASF_DOOR_OUT, routes.names[0],
+        json_get_str(json_get(&r->original, "version")), &selected);
+    bool ok = opened.accepted && ajs_recovery_selection(w, r) &&
+        app_selection_load(env.state_dir, routes.names[0], &after) == APP_SELECTION_OK &&
+        !memcmp(selected.record, after.record, sizeof(selected.record));
+    if (ok) printf("  [kept CLI reopen: receipt=passed selection=unchanged game=identified cleanup=1 image=%s]\n", w->j.image_b);
+    return ok;
 }
 
 static int ajs_b(struct ajs_world *w)
@@ -514,12 +597,13 @@ static int ajs_b(struct ajs_world *w)
         ASSERT(asf_journey_receive(&w->j));
         ASSERT_EQ(asf_qa_frames(w->j.path_b), 0);
         ASSERT(ajs_b_reopen(&w->j));
-        struct ajs_cli_result cli = ajs_b_cli_attempt(w, ASF_DOOR_OUT);
+        struct ajs_cli_result cli = ajs_b_cli_attempt(w, ASF_DOOR_OUT, w->j.b_copy, NULL, NULL);
         ASSERT(cli.accepted);
-        struct ajs_cli_result lost = ajs_b_cli_attempt(w, 1);
+        struct ajs_cli_result lost = ajs_b_cli_attempt(w, 1, w->j.b_copy, NULL, NULL);
         ASSERT(lost.rc == 0 && !lost.accepted && lost.clean && lost.saw_game && !lost.saw_reported);
         ASSERT(ajs_recovery_snapshot(w, &recovery));
         ASSERT(ajs_recovery_gui(w, &recovery));
+        ASSERT(ajs_kept_reopen(w, &recovery));
         PASS();
     } _test_next:;
     json_free(&recovery.original);
