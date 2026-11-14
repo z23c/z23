@@ -2,8 +2,8 @@
  * The plugin software-anywhere journey through the real commands. The
  * publisher keygens, packs and `plugin publish`es a signed plugin; the
  * package is then serveable through the closed public-shape gate as
- * VCS_PACKAGE_PUBLIC_PLUGIN and crosses the authenticated swarm; the
- * receiver `plugin fetch`es it (inert: verifies, reports, never installs),
+ * VCS_PACKAGE_PUBLIC_PLUGIN and crosses the package swarm; the receiver
+ * `plugin fetch`es it (inert: verifies, reports, never installs),
  * is refused install until its owner pins the publisher key, then installs,
  * switches, calls, independently attests the verified generation with its own
  * builder key and checks the listing, upgrades, preserves state across a
@@ -13,10 +13,11 @@
  * closes the loop from source: the test writes a tiny C23 capability,
  * lab.promote proves its cases and signs it, and after swarm transfer the
  * receiver's plugin call returns the cases' output. A second Linux case
- * lets source and cases ride in the package and has the receiver re-run
- * the whole promote pipeline under its own key: the release image comes
- * out bit-identical to the signed manifest's sha3_512 before the owner's
- * pin lets it activate. A resident case crosses the same swarm with an
+ * uses the real include-source and plugin.reproduce commands under the
+ * receiver's builder key: image and generation equality, an ordinary builder
+ * attestation, owner-pin activation, and fail-closed missing, divergent and
+ * corrupt inputs are all checked before the selected generation must remain
+ * unchanged. A resident case crosses the same swarm with an
  * interface 1 pack: the public-shape gate admits it, the owner-pin gate
  * holds, and the receiver's resident supervisor runs the fetched
  * generation to a healthy ping. A platform-neutral case pins fetch resilience: a
@@ -48,12 +49,19 @@
 
 #include "command/native_command.h"
 #include "command/native_zcode_discovery.h"
+#include "config/command_catalog.h"
+#include "base/cleanse.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
+#include "crypto/ed25519.h"
 #include "json/json.h"
 #include "platform/os_proc.h"
 #include "platform/time_compat.h"
+#include "plugin/plugin_pack.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
+#include "sha3/sha3.h"
+#include "util/file_io.h"
 #include "vcs/package_public_shape.h"
 #include "vcs/package_service.h"
 #include "vcs/package_store.h"
@@ -286,12 +294,13 @@ static bool pj_pack(struct pj_fixture *f, unsigned version)
 }
 
 /* Publish one already-packed directory through the real command. */
-static bool pj_publish(struct pj_fixture *f, char root_hex[65])
+static bool pj_publish_dir(struct pj_fixture *f, const char *dir,
+                           char root_hex[65])
 {
     char in[4 * 1200];
     struct zcl_command_reply r;
     int n = snprintf(in, sizeof(in), "{\"dir\":\"%s\",\"datadir\":\"%s\"}",
-                     f->dist, f->pub.datadir);
+                     dir, f->pub.datadir);
     if (n <= 0 || (size_t)n >= sizeof(in) ||
         !pj_call(zcl_native_handle_plugin_publish, in, &r))
         return false;
@@ -305,6 +314,11 @@ static bool pj_publish(struct pj_fixture *f, char root_hex[65])
      * exactly as the node's own refresh gates do after a cross-handle
      * admission. */
     return ok && vcs_package_store_refresh(f->pub.store);
+}
+
+static bool pj_publish(struct pj_fixture *f, char root_hex[65])
+{
+    return pj_publish_dir(f, f->dist, root_hex);
 }
 
 /* Pack version `version`, then publish it. */
@@ -1120,7 +1134,8 @@ static bool pj_promote_source(struct pj_fixture *f)
         return false;
     int n = snprintf(in, sizeof(in),
                      "{\"file\":\"%s\",\"cases\":%s,\"name\":\"%s\","
-                     "\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\"}",
+                     "\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\","
+                     "\"include-source\":true}",
                      src, PJ_CAP_CASES, PJ_NAME, f->key, f->dist);
     if (n <= 0 || (size_t)n >= sizeof(in) ||
         !pj_call(zcl_native_handle_lab_promote, in, &r))
@@ -1189,26 +1204,26 @@ static int pj_t_source_to_peer(void)
     vcs_swarm_engine_set_global(prev);
     return failures;
 }
-/* Re-run the promote pipeline on a fetched source under the receiver's own
- * key; the out-params take the release hash and the signing key the receipt
- * names, so the caller can prove the pipeline really re-ran. */
-static bool pj_reproduce(const char *src, const char *cases, const char *key,
-                         const char *dir, char release_sha[129],
+/* Re-run the real reproduction command on a fetched package under the
+ * receiver's own key; the out-params take the compared release hash and the
+ * builder key the resulting attestation names. */
+static bool pj_reproduce(const char *dir, const char *root, const char *key,
+                         const char *out, char release_sha[129],
                          char pub_hex[65])
 {
     char in[4 * 1200];
     struct zcl_command_reply r;
     int n = snprintf(in, sizeof(in),
-                     "{\"file\":\"%s\",\"cases\":\"%s\",\"name\":\"%s\","
-                     "\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\"}",
-                     src, cases, PJ_NAME, key, dir);
+                     "{\"dir\":\"%s\",\"source-root\":\"%s\",\"key\":\"%s\","
+                     "\"out\":\"%s\",\"toolchain\":\"fixture-toolchain\"}",
+                     dir, root, key, out);
     if (n <= 0 || (size_t)n >= sizeof(in) ||
-        !pj_call(zcl_native_handle_lab_promote, in, &r))
+        !pj_call(zcl_native_handle_plugin_reproduce, in, &r))
         return false;
-    bool ok = r.exit_code == ZCL_COMMAND_EXIT_OK &&
+    bool ok = r.exit_code == ZCL_COMMAND_EXIT_OK && pj_bool(&r, "reproduced") &&
               json_get_int(json_get(&r.data, "cases_passed")) == 2;
-    const char *sha = ok ? pj_str(&r, "release_sha3_512") : NULL;
-    const char *pub = ok ? pj_str(&r, "public_key") : NULL;
+    const char *sha = ok ? pj_str(&r, "image_sha3_512") : NULL;
+    const char *pub = ok ? pj_str(&r, "builder_key") : NULL;
     ok = sha && strlen(sha) == 128 && pub && strlen(pub) == 64;
     if (ok) {
         snprintf(release_sha, 129, "%s", sha);
@@ -1216,6 +1231,252 @@ static bool pj_reproduce(const char *src, const char *cases, const char *key,
     }
     zcl_command_reply_free(&r);
     return ok;
+}
+
+#if defined(__linux__) && defined(ZCL_TESTING)
+extern void zcl_test_plugin_reproduce_capture_hook(void (*hook)(void *), void *arg);
+struct pj_capture_change {
+    const char *paths[2];
+    char saved[2][1600];
+    bool renamed[2], changed[2];
+};
+
+static void pj_capture_change_original(void *arg)
+{
+    struct pj_capture_change *change = arg;
+    static const uint8_t invalid[] = "invalid changed input\n";
+    for (size_t i = 0; i < 2; i++) {
+        change->renamed[i] = rename(change->paths[i], change->saved[i]) == 0;
+        change->changed[i] = change->renamed[i] &&
+            pj_write(change->paths[i], invalid, sizeof(invalid) - 1);
+    }
+}
+
+static bool pj_reproduce_captured(const char *dir, const char *root,
+                                  const char *key, const char *out,
+                                  const char *source, const char *cases,
+                                  const char *expected)
+{
+    struct pj_capture_change change = { .paths = { source, cases } };
+    for (size_t i = 0; i < 2; i++) {
+        int n = snprintf(change.saved[i], sizeof(change.saved[i]), "%s.saved", change.paths[i]);
+        if (n <= 0 || (size_t)n >= sizeof(change.saved[i]))
+            return false;
+    }
+    char sha[129], builder[65];
+    zcl_test_plugin_reproduce_capture_hook(pj_capture_change_original, &change);
+    bool ok = pj_reproduce(dir, root, key, out, sha, builder);
+    zcl_test_plugin_reproduce_capture_hook(NULL, NULL);
+    for (size_t i = 0; i < 2; i++) {
+        if (!change.renamed[i])
+            continue;
+        (void)unlink(change.paths[i]);
+        if (rename(change.saved[i], change.paths[i]) != 0)
+            ok = false;
+    }
+    return ok && change.changed[0] && change.changed[1] && strcmp(sha, expected) == 0;
+}
+#endif
+
+static bool pj_reproduce_refusal(const char *dir, const char *root,
+                                 const char *key, const char *out,
+                                 const char *builder, const char *code)
+{
+    char in[4 * 1200], attestation[1600];
+    struct zcl_command_reply r;
+    int n = snprintf(in, sizeof(in),
+                     "{\"dir\":\"%s\",\"source-root\":\"%s\",\"key\":\"%s\","
+                     "\"out\":\"%s\",\"toolchain\":\"fixture-toolchain\"}",
+                     dir, root, key, out);
+    if (n <= 0 || (size_t)n >= sizeof(in) ||
+        !pj_call(zcl_native_handle_plugin_reproduce, in, &r))
+        return false;
+    bool ok = r.status != ZCL_COMMAND_STATUS_PASSED &&
+              strcmp(r.error.code, code) == 0 && !pj_bool(&r, "reproduced");
+    zcl_command_reply_free(&r);
+    snprintf(attestation, sizeof(attestation), "%s/upper-%.16s.attest.json",
+             out, builder);
+    return ok && access(attestation, F_OK) != 0;
+}
+
+static bool pj_flip_first(const char *path)
+{
+    FILE *f = fopen(path, "r+b");
+    int c = f ? fgetc(f) : EOF;
+    bool ok = c != EOF && fseek(f, 0, SEEK_SET) == 0 && fputc(c ^ 1, f) != EOF;
+    return f && fclose(f) == 0 && ok;
+}
+
+static bool pj_read_seed(const char *path, uint8_t out[32])
+{
+    FILE *f = fopen(path, "rb");
+    size_t got = f ? fread(out, 1, 32, f) : 0;
+    bool ok = got == 32 && fgetc(f) == EOF;
+    return f && fclose(f) == 0 && ok;
+}
+
+static bool pj_remove_long_tree(char *path, const char *base)
+{
+    char original[4096];
+    if (!getcwd(original, sizeof(original)) || chdir(path) != 0)
+        return false;
+    (void)unlink("upper");
+    (void)unlink("upper.c");
+    (void)unlink("upper.plugin.json");
+    (void)unlink("upper.plugin.sig");
+    (void)unlink("cases.json");
+    bool ok = true;
+    for (;;) {
+        char *slash = strrchr(path, '/');
+        if (!slash || chdir("..") != 0) {
+            ok = false;
+            break;
+        }
+        if (rmdir(slash + 1) != 0 && errno != ENOENT) {
+            ok = false;
+            break;
+        }
+        *slash = '\0';
+        if (strcmp(path, base) == 0)
+            break;
+    }
+    if (chdir(original) != 0)
+        ok = false;
+    return ok;
+}
+
+/* Preserve the parsed manifest and image but change its signed bytes: one
+ * space before the final LF is valid JSON and selects a new generation. */
+static bool pj_resign_manifest(const char *manifest, const char *key_path)
+{
+    char *text = NULL, *variant = NULL;
+    size_t len = 0;
+    uint8_t seed[32] = {0}, secret[32] = {0};
+    bool ok = zcl_read_whole_file_text(manifest, 65536, &text, &len,
+                                       "plugin.journey.variant") &&
+              len > 1 && text[len - 1] == '\n';
+    if (ok) {
+        variant = zcl_calloc(len + 2, 1, "plugin.journey.variant");
+        ok = variant != NULL;
+    }
+    if (ok) {
+        memcpy(variant, text, len - 1);
+        variant[len - 1] = ' ';
+        variant[len] = '\n';
+        struct plugin_manifest parsed;
+        ok = plugin_manifest_parse(variant, len + 1, &parsed) == PLUGIN_OK;
+    }
+    char sig_path[1600], sig_json[256], pub_hex[65], sig_hex[129];
+    if (ok) {
+        size_t n = strlen(manifest);
+        ok = n > 4 && snprintf(sig_path, sizeof(sig_path), "%.*ssig",
+                               (int)(n - 4), manifest) > 0;
+    }
+    if (ok) {
+        uint8_t digest[64], pk[32], sig[64];
+        static const unsigned char domain[] = "z23.plugin.manifest.v1";
+        ok = pj_read_seed(key_path, seed);
+        if (ok) {
+            struct sha3_512_ctx hash;
+            sha3_512_init(&hash);
+            sha3_512_write(&hash, domain, sizeof(domain));
+            sha3_512_write(&hash, (const unsigned char *)variant, len + 1);
+            sha3_512_finalize(&hash, digest);
+            ed25519_keypair(pk, secret, seed);
+            ed25519_sign(sig, digest, sizeof(digest), secret, pk);
+            zcl_hex_encode(pk, sizeof(pk), pub_hex);
+            zcl_hex_encode(sig, sizeof(sig), sig_hex);
+            int n = snprintf(sig_json, sizeof(sig_json),
+                             "{\"sig_alg\":\"ed25519\",\"public_key\":\"%s\","
+                             "\"signature\":\"%s\"}\n", pub_hex, sig_hex);
+            ok = n > 0 && (size_t)n < sizeof(sig_json) &&
+                 pj_write(sig_path, (const uint8_t *)sig_json, (size_t)n) &&
+                 pj_write(manifest, (const uint8_t *)variant, len + 1);
+        }
+    }
+    memory_cleanse(secret, sizeof(secret));
+    memory_cleanse(seed, sizeof(seed));
+    free(variant);
+    free(text);
+    return ok;
+}
+
+static size_t pj_generation_execute(const char *dir, const char *root,
+                                    const char *key, const char *out,
+                                    struct json_value *input,
+                                    enum zcl_command_exit *exit_code,
+                                    char *wire, size_t wire_cap)
+{
+    char in[4 * 1200];
+    int n = snprintf(in, sizeof(in),
+                     "{\"dir\":\"%s\",\"source-root\":\"%s\",\"key\":\"%s\","
+                     "\"out\":\"%s\",\"toolchain\":\"fixture-toolchain\"}",
+                     dir, root, key, out);
+    json_init(input);
+    bool parsed = n > 0 && (size_t)n < sizeof(in) &&
+                  json_read(input, in, strlen(in));
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(registry, "plugin.reproduce", NULL);
+    struct zcl_command_context ctx = {
+        .registry = registry,
+        .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+    };
+    *exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+    size_t written = parsed && spec
+        ? zcl_command_registry_execute_json(registry, spec, &ctx, input, false,
+                                            spec->path, "normal", 0, 0, NULL,
+                                            wire, wire_cap, exit_code)
+        : 0;
+    json_free(input);
+    return written;
+}
+
+static bool pj_generation_sha(const struct json_value *facts)
+{
+    const char *expected = json_get_str(json_get(facts, "expected_sha3_512"));
+    const char *actual = json_get_str(json_get(facts, "actual_sha3_512"));
+    return strlen(expected) == 128 && strlen(actual) == 128 &&
+           strcmp(expected, actual) == 0;
+}
+
+static bool pj_generation_identity(const struct json_value *facts,
+                                   const char *canonical_gen)
+{
+    const char *expected = json_get_str(json_get(facts, "expected_generation"));
+    const char *actual = json_get_str(json_get(facts, "actual_generation"));
+    return strlen(expected) == 128 && strlen(actual) == 128 &&
+           strcmp(expected, actual) != 0 && strcmp(actual, canonical_gen) == 0;
+}
+
+static bool pj_generation_refusal(const char *dir, const char *root,
+                                  const char *key, const char *out,
+                                  const char *builder, const char *canonical_gen)
+{
+    char attestation[1600], wire[8192];
+    struct json_value input, envelope;
+    json_init(&input);
+    json_init(&envelope);
+    enum zcl_command_exit exit_code;
+    size_t written = pj_generation_execute(dir, root, key, out, &input,
+                                           &exit_code, wire, sizeof(wire));
+    bool parsed = written > 0 && written < sizeof(wire) &&
+                  json_read(&envelope, wire, written);
+    const struct json_value *error = parsed ? json_get(&envelope, "error") : NULL;
+    const struct json_value *facts = error ? json_get(error, "facts") : NULL;
+    const char *code = error ? json_get_str(json_get(error, "code")) : "";
+    bool ok = parsed && exit_code != ZCL_COMMAND_EXIT_OK && error && facts &&
+              strcmp(code, "PLUGIN_REPRODUCE_GENERATION_MISMATCH") == 0 &&
+              json_get_bool(json_get(error, "mutated")) &&
+              pj_generation_sha(facts) && pj_generation_identity(facts, canonical_gen);
+    if (!ok)
+        fprintf(stderr, "generation refusal diagnostics: code=%s root=%s\n",
+                code, root);
+    json_free(&envelope);
+    snprintf(attestation, sizeof(attestation), "%s/upper-%.16s.attest.json",
+             out, builder);
+    return ok && access(attestation, F_OK) != 0;
 }
 
 /* Independent reproduction: source and cases ride in the package as extra
@@ -1234,16 +1495,7 @@ static int pj_t_reproduce(void)
         char root1[65], dir1[1400], manifest[1600], gen1[129];
         ASSERT(ready);
         ASSERT(pj_promote_source(&f));
-        /* The owner lets the source and cases ride with the signed pack. */
-        {
-            char dst_src[1400], dst_cases[1400];
-            ASSERT(pj_join(dst_src, sizeof(dst_src), f.dist, "upper.c"));
-            ASSERT(pj_write(dst_src, (const uint8_t *)PJ_CAP_SOURCE,
-                            sizeof(PJ_CAP_SOURCE) - 1));
-            ASSERT(pj_join(dst_cases, sizeof(dst_cases), f.dist, "cases.json"));
-            ASSERT(pj_write(dst_cases, (const uint8_t *)PJ_CAP_CASES,
-                            strlen(PJ_CAP_CASES)));
-        }
+        /* The opt-in promote exported the exact source and cases. */
         ASSERT(pj_publish(&f, root1));
         uint8_t root_bin[32];
         ASSERT(zcl_hex_decode(root1, root_bin, 32));
@@ -1281,10 +1533,37 @@ static int pj_t_reproduce(void)
         ASSERT(pj_join(rkey, sizeof(rkey), f.base, "receiver.key"));
         ASSERT(pj_keygen_to(rkey, rpub_self));
         ASSERT(pj_join(rdist, sizeof(rdist), f.base, "repro-dist"));
-        ASSERT(pj_reproduce(got_src, got_cases, rkey, rdist, rsha, rpub));
+        ASSERT(pj_reproduce(dir1, root1, rkey, rdist, rsha, rpub));
         ASSERT_STR_EQ(rsha, got_sha);
         ASSERT_STR_EQ(rpub, rpub_self);
         ASSERT(strcmp(rpub, f.pub_hex) != 0);
+#if defined(ZCL_TESTING)
+        char captured_out[1200];
+        ASSERT(pj_join(captured_out, sizeof(captured_out), f.base, "repro-captured"));
+        ASSERT(pj_reproduce_captured(dir1, root1, rkey, captured_out,
+                                     got_src, got_cases, got_sha));
+#endif
+        /* The real command emitted the existing builder attestation; the
+         * receiver's independent builder pin makes it verify for this root. */
+        {
+            char pins[1200], pin_line[80], in[4096];
+            ASSERT(pj_join(pins, sizeof(pins), f.base, "receiver-builders.pin"));
+            ASSERT(snprintf(pin_line, sizeof(pin_line), "%s\n", rpub_self) == 65);
+            ASSERT(pj_write(pins, (const uint8_t *)pin_line, 65));
+            ASSERT(chmod(pins, 0600) == 0);
+            ASSERT(snprintf(in, sizeof(in),
+                            "{\"manifest\":\"%s\",\"attestations\":\"%s\","
+                            "\"builders\":\"%s\",\"threshold\":1,"
+                            "\"source-root\":\"%s\"}",
+                            manifest, rdist, pins, root1) > 0);
+            struct zcl_command_reply att;
+            ASSERT(pj_call(zcl_native_handle_plugin_attest_verify, in, &att));
+            ASSERT(att.status == ZCL_COMMAND_STATUS_PASSED);
+            ASSERT(pj_bool(&att, "accepted"));
+            ASSERT_EQ(json_get_int(json_get(&att.data, "attested")), 1);
+            ASSERT_STR_EQ(pj_str(&att, "image_sha3_512"), got_sha);
+            zcl_command_reply_free(&att);
+        }
         /* Authority is unchanged: no install until the receiver's owner
          * pins the publisher key. */
         {
@@ -1300,6 +1579,101 @@ static int pj_t_reproduce(void)
         ASSERT(pj_pin(&f));
         ASSERT(pj_install(manifest, gen1, true));
         ASSERT(pj_switch(gen1));
+        ASSERT(pj_call_upper("1.0.0"));
+        /* A claimed root must match every fetched byte, not just the manifest. */
+        char cur[129], wrong[1200], changed[1200], root2[65];
+        const char bad_root[65] =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+        ASSERT(pj_join(wrong, sizeof(wrong), f.base, "repro-wrong-root"));
+        ASSERT(pj_reproduce_refusal(dir1, bad_root, rkey, wrong, rpub_self,
+                                    "PLUGIN_REPRODUCE_ROOT_MISMATCH"));
+        ASSERT(pj_current(cur) && strcmp(cur, gen1) == 0);
+        /* Equal image bytes under different signed-manifest bytes select the
+         * generation-only refusal, with full expected/actual values retained. */
+        char generation[1200], root_variant[65];
+        ASSERT(pj_join(generation, sizeof(generation), f.base, "repro-generation"));
+        ASSERT(pj_resign_manifest(manifest, f.key));
+        ASSERT(pj_publish_dir(&f, dir1, root_variant));
+        ASSERT(pj_generation_refusal(dir1, root_variant, rkey, generation,
+                                     rpub_self, gen1));
+        ASSERT(pj_current(cur) && strcmp(cur, gen1) == 0);
+        /* A pack that creates its output directory and then fails must report
+         * that partial write honestly instead of denying filesystem mutation. */
+        char partial[4097], in[8192];
+        size_t used = (size_t)snprintf(partial, sizeof(partial), "%s", f.base);
+        ASSERT(used > 0 && used < sizeof(partial));
+        while (used < 4079) {
+            partial[used] = '/';
+            size_t n = 4079 - used;
+            if (n > 200)
+                n = 200;
+            memset(partial + used + 1, 'x', n);
+            partial[used + n + 1] = '\0';
+            ASSERT(mkdir(partial, 0700) == 0 || errno == EEXIST);
+            used += n + 1;
+        }
+        memcpy(partial + used, "/x", 3);
+        snprintf(in, sizeof(in),
+                 "{\"dir\":\"%s\",\"source-root\":\"%s\",\"key\":\"%s\","
+                 "\"out\":\"%s\",\"toolchain\":\"fixture-toolchain\"}",
+                 dir1, root_variant, rkey, partial);
+        struct zcl_command_reply partial_reply;
+        ASSERT(pj_call(zcl_native_handle_plugin_reproduce, in, &partial_reply));
+        ASSERT(partial_reply.status != ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(partial_reply.error.mutated);
+        ASSERT(strstr(partial_reply.error.next_action, "fresh absent out") != NULL);
+        ASSERT(access(partial, F_OK) == 0);
+        zcl_command_reply_free(&partial_reply);
+        ASSERT(pj_current(cur) && strcmp(cur, gen1) == 0);
+        ASSERT(pj_remove_long_tree(partial, f.base));
+        /* Missing reproduction inputs refuse before a build or attestation. */
+        char saved[1400], missing[1200], divergent[1200], corrupt[1200];
+        ASSERT(pj_join(saved, sizeof(saved), f.base, "saved-upper.c"));
+        ASSERT(pj_join(missing, sizeof(missing), f.base, "repro-missing"));
+        ASSERT(rename(got_src, saved) == 0);
+        bool refused = pj_reproduce_refusal(dir1, root1, rkey, missing,
+                                            rpub_self, "PLUGIN_REPRODUCE_INPUT");
+        ASSERT(rename(saved, got_src) == 0);
+        ASSERT(refused);
+        ASSERT(pj_current(cur) && strcmp(cur, gen1) == 0);
+        /* Changed source and cases first fail the old root. Republishing the
+         * altered directory gives a correct new root; its own build passes,
+         * but the signed image still diverges and earns no attestation. */
+        static const char lower_source[] =
+            "/* Copyright 2026 Rhett Creighton - Apache License 2.0 */\n"
+            "#include <stdio.h>\n"
+            "int main(void)\n"
+            "{\n"
+            "    int c;\n"
+            "    while ((c = getchar()) != EOF)\n"
+            "        putchar(c);\n"
+            "    return 0;\n"
+            "}\n";
+        static const char lower_cases[] =
+            "[{\"name\":\"lower\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"abc\\n\"},"
+            "{\"name\":\"mixed\",\"stdin\":\"Hello, z23\\n\","
+            "\"expect_stdout\":\"Hello, z23\\n\"}]";
+        ASSERT(pj_write(got_src, (const uint8_t *)lower_source,
+                        sizeof(lower_source) - 1));
+        ASSERT(pj_write(got_cases, (const uint8_t *)lower_cases,
+                        sizeof(lower_cases) - 1));
+        ASSERT(pj_join(changed, sizeof(changed), f.base, "repro-changed-root"));
+        ASSERT(pj_reproduce_refusal(dir1, root1, rkey, changed, rpub_self,
+                                    "PLUGIN_REPRODUCE_ROOT_MISMATCH"));
+        ASSERT(pj_publish_dir(&f, dir1, root2));
+        ASSERT(strcmp(root1, root2) != 0);
+        ASSERT(pj_join(divergent, sizeof(divergent), f.base, "repro-divergent"));
+        ASSERT(pj_reproduce_refusal(dir1, root2, rkey, divergent, rpub_self,
+                                    "PLUGIN_REPRODUCE_HASH_MISMATCH"));
+        ASSERT(pj_current(cur) && strcmp(cur, gen1) == 0);
+        /* A corrupt fetched image is refused before source compilation. */
+        char image[1600];
+        ASSERT(pj_join(image, sizeof(image), dir1, PJ_NAME));
+        ASSERT(pj_flip_first(image));
+        ASSERT(pj_join(corrupt, sizeof(corrupt), f.base, "repro-corrupt"));
+        ASSERT(pj_reproduce_refusal(dir1, root1, rkey, corrupt, rpub_self,
+                                    "PLUGIN_EXE_HASH"));
+        ASSERT(pj_current(cur) && strcmp(cur, gen1) == 0);
         ASSERT(pj_call_upper("1.0.0"));
         PASS();
     } _test_next:;

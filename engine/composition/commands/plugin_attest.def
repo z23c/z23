@@ -25,7 +25,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.attest", "plugin", "",
-    "Sign an attestation that a built image came from a source package root",
+    "Attest builds",
     "Hashes the image you built (SHA3-512), then signs one canonical record "
     "binding the plugin name, version, source package root (source-root, 64 "
     "lowercase hex), the build recipe or toolchain id (toolchain) and that "
@@ -49,7 +49,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.attest_verify", "plugin", "",
-    "Accept a manifest only when K pinned independent builders attest it",
+    "Verify builders",
     "Reads the manifest, the builder pin file (builders: one 64-hex public "
     "key per line, owner-only, # comments) and every *.attest.json in "
     "attestations. Accepts only when at least threshold DISTINCT pinned "

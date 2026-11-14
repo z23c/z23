@@ -231,6 +231,9 @@ static bool devagent_scoped_bool(const char *path, const char *key,
          * consent to a search expected to exceed one hour. */
         { "core.network.onion.vanity", "estimate_only" },
         { "core.network.onion.vanity", "accept_long_search" },
+        /* lab.promote's include-source: export the exact inputs a peer
+         * rebuilds through plugin.reproduce, never an activation flag. */
+        { "lab.promote", "include-source" },
     };
     if (!path)
         return false;

@@ -186,3 +186,7 @@ plugin.publish not_before # announce passes wall time as not_before into zcl_nat
 plugin.publish expiry # announce passes the fixed record window as expiry into zcl_native_zcode_publish_record's private RPC object; the network publish branch reads expiry there and plugin.publish request->input never reaches that object.
 plugin.publish operation # zcl_native_zcode_publish_record's private RPC path injects operation=publish; the network publish branch reads operation there and plugin.publish request->input never reaches that object.
 plugin.fetch board # psw_fetch_route builds a private provider selector and never sets board; the records board arm in zcl_native_zcode_records_local reads board only on that nested selector, and plugin.fetch request->input never reaches it.
+plugin.reproduce cases # pr_lab_input writes the fixed fetched cases.json path into a private lab.promote input; the reproduce request has no caller cases key.
+plugin.reproduce manifest # pr_next_install constructs a private install input from the verified fetched manifest path; a caller manifest key never reaches plugin.reproduce.
+plugin.reproduce interface # lab.promote forces interface=2 into its private plugin.pack input; no reproduce request key reaches that nested input.
+plugin.reproduce cap # pr_lab_input derives the private capability array only from the verified signed manifest; a caller cap key never reaches lab.promote.

@@ -737,6 +737,39 @@ static int t_package_prepare_sequence(void)
     return failures;
 }
 
+static int t_lab_include_source(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "lab.promote", NULL);
+    CIB_CHECK("lab include-source leaf resolves", spec != NULL);
+    if (!spec)
+        return failures;
+    const char *wires[] = { "{\"include-source\":true}",
+                            "{\"include-source\":false}",
+                            "{\"include-source\":\"true\"}",
+                            "{\"include-source\":1}" };
+    for (size_t i = 0; i < sizeof(wires) / sizeof(wires[0]); i++) {
+        struct json_value input;
+        char why[192] = {0};
+        json_init(&input);
+        bool parsed = json_read(&input, wires[i], strlen(wires[i]));
+        bool accepted = parsed && zcl_command_registry_input_validate(
+            spec, &input, why, sizeof(why));
+        CIB_CHECK("lab include-source admits only boolean shape",
+                  parsed && accepted == (i < 2));
+        if (i == 0) {
+            struct zcl_command_spec unrelated = *spec;
+            unrelated.path = "lab.run";
+            CIB_CHECK("lab include-source rule does not widen another leaf",
+                      !zcl_command_registry_input_validate(&unrelated, &input,
+                                                           why, sizeof(why)));
+        }
+        json_free(&input);
+    }
+    return failures;
+}
+
 /* ── 7. Shared key names keep command-specific numeric bounds ──────────── */
 
 static int t_package_fetch_maximum_bytes(void)
@@ -2086,6 +2119,7 @@ int test_command_input_bounds(void)
     failures += t_liquidity_numeric_input();
     failures += t_fleet_ledger_numeric_keys();
     failures += t_package_prepare_sequence();
+    failures += t_lab_include_source();
     failures += t_package_fetch_maximum_bytes();
     failures += t_fleet_usage_days();
     failures += t_moved_dual_shape_since();

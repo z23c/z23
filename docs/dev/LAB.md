@@ -240,10 +240,21 @@ plugin, in this order, and writes nothing to `dir` unless every gate passes:
 It signs, so it carries the authority of `plugin pack`, and it installs nothing:
 the reply's `next` is the install command. Linux only; other hosts refuse with
 `LAB_UNSUPPORTED`. Inputs: `file`, `cases`, `name`, `version`, `key`, `cap`,
-`dir`, `sanitize`, `timeout_ms`, `mem_mb`. The receipt `zcl.lab_promote.v1`
-carries `root` (of the test run), `cases_passed`, `release_command`,
-`release_sha3_512`, `name`, `version`, `manifest`, `signature`, `generation`,
-`public_key`; the reply's `next` array names `plugin.install`.
+`dir`, `sanitize`, `timeout_ms`, `mem_mb` and `include-source`. The receipt
+`zcl.lab_promote.v1` carries `root` (of the test run), `cases_passed`,
+`release_command`, `release_sha3_512`, `name`, `version`, `manifest`,
+`signature`, `generation`, `public_key`; the reply's `next` array names
+`plugin.install`.
+
+With `include-source=true`, the command also writes the exact loaded C source
+as NAME.c and the effective cases as cases.json in the chosen output directory,
+and returns those paths as `source` and `cases`. These optional flat members let the existing
+`plugin publish --dir` carry everything `plugin reproduce` needs. The default
+remains the three pack files. An export I/O failure reports
+`LAB_PROMOTE_EXPORT_FAILED` and admits that the signed pack was already
+written; it does not claim a reproducible export.
+
+<!-- claim: symbol-present promote_export tools/command/native_lab_promote_command.c # opt-in source and cases export -->
 
 Run on r1 (GCC 14.2.0) with a throwaway `HOME`; the publisher key is added with
 `plugin publisher`. `upper.c` upper-cases stdin and `cases.json` is

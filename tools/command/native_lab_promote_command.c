@@ -4,31 +4,59 @@
  * static release image with the lab's compiler, run every case again against
  * that image through the lab's confined runner, and only then pack it through
  * plugin.pack with the caller's key. Nothing is written to the output directory
- * unless every gate passed, and nothing is installed. */
+ * unless every gate passed, and nothing is installed. include-source additionally
+ * exports the loaded source and effective cases after the signed pack succeeds. */
 #include "command/lab_priv.h"
 #include "command/native_command.h"
 
 #include "base/safe_alloc.h"
+#include "platform/path_replace.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_store.h"
+#include "util/file_io.h"
+#include "util/path_util.h"
+#include "util/write_all.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 struct promote_req {
     const char *file;
+    bool include_source;
     uint32_t timeout_ms, mem_mb;
     char root[LAB_ROOT_HEX + 1];
     size_t passed, failed;
 };
+
+static bool promote_flag(const struct zcl_command_request *rq, const char *key,
+                         bool *value)
+{
+    const struct json_value *v = rq->input ? json_get(rq->input, key) : NULL;
+    *value = false;
+    if (!v)
+        return true;
+    if (v->type == JSON_BOOL) {
+        *value = json_get_bool(v);
+        return true;
+    }
+    const char *s = v->type == JSON_STR ? json_get_str(v) : NULL;
+    if (s && (s[0] == '\0' || strcmp(s, "true") == 0 || strcmp(s, "1") == 0)) {
+        *value = true;
+        return true;
+    }
+    return s && (strcmp(s, "false") == 0 || strcmp(s, "0") == 0);
+}
 
 static bool promote_parse(const struct zcl_command_request *rq,
                           struct promote_req *p)
 {
     memset(p, 0, sizeof(*p));
     p->file = lab_in_str(rq, "file");
-    return p->file && lab_in_str(rq, "name") && lab_in_str(rq, "version") &&
+    return promote_flag(rq, "include-source", &p->include_source) &&
+           p->file && lab_in_str(rq, "name") && lab_in_str(rq, "version") &&
            lab_in_str(rq, "key") &&
            lab_in_uint(rq, "timeout_ms", LAB_TIMEOUT_DEFAULT_MS,
                        LAB_TIMEOUT_MAX_MS, &p->timeout_ms) &&
@@ -173,6 +201,93 @@ static void promote_report(struct zcl_command_reply *reply,
         lab_fail(reply, "LAB_ALLOC", "serialize", "the receipt could not be built");
 }
 
+static bool promote_write(const char *path, const uint8_t *bytes, size_t len)
+{
+    char tmp[4096 + 32];
+    int n = snprintf(tmp, sizeof(tmp), "%s.%ld.tmp", path, (long)getpid());
+    int fd = n > 0 && (size_t)n < sizeof(tmp)
+                 ? open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                        0600)
+                 : -1;
+    bool ok = fd >= 0 && zcl_write_all(fd, bytes, len);
+    if (fd >= 0) {
+        if (ok && fsync(fd) != 0)
+            ok = false;
+        if (close(fd) != 0)
+            ok = false;
+    }
+    if (ok && platform_path_replace(tmp, path) != 0)
+        ok = false;
+    if (!ok && fd >= 0)
+        (void)unlink(tmp);
+    return ok;
+}
+
+static bool promote_cases_array(const struct json_value *v, uint8_t **bytes,
+                                size_t *len)
+{
+    size_t need = json_write(v, NULL, 0);
+    uint8_t *out = need ? zcl_malloc(need + 1, "lab.promote.cases") : NULL;
+    if (out && json_write(v, (char *)out, need + 1) == need) {
+        *bytes = out;
+        *len = need;
+        return true;
+    }
+    free(out);
+    return false;
+}
+
+static bool promote_cases_inline(const char *text, uint8_t **bytes, size_t *len)
+{
+    size_t n = strlen(text);
+    uint8_t *out = n ? zcl_malloc(n, "lab.promote.cases") : NULL;
+    if (!out)
+        return false;
+    memcpy(out, text, n);
+    *bytes = out;
+    *len = n;
+    return true;
+}
+
+static bool promote_cases_export(const struct zcl_command_request *rq,
+                                 uint8_t **bytes, size_t *len)
+{
+    const struct json_value *v = json_get(rq->input, "cases");
+    *bytes = NULL;
+    *len = 0;
+    if (v && v->type == JSON_ARR)
+        return promote_cases_array(v, bytes, len);
+    const char *text = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    const char *start = text ? text + strspn(text, " \t\n\r") : NULL;
+    if (start && *start == '[')
+        return promote_cases_inline(text, bytes, len);
+    return text && zcl_read_whole_file(text, 1024 * 1024, bytes, len,
+                                       "lab.promote.cases") &&
+           *len > 0;
+}
+
+static bool promote_export(const struct zcl_command_request *rq,
+                           const struct lab_ctx *ctx,
+                           struct zcl_command_reply *reply)
+{
+    const char *dir = lab_in_str(rq, "dir");
+    const char *name = lab_in_str(rq, "name");
+    char leaf[PLUGIN_NAME_MAX + 3], source[4096], cases[4096];
+    int n = snprintf(leaf, sizeof(leaf), "%s.c", name);
+    uint8_t *case_bytes = NULL;
+    size_t case_len = 0;
+    bool ok = n > 0 && (size_t)n < sizeof(leaf) &&
+              zcl_path_join(source, sizeof(source), dir ? dir : ".", leaf) &&
+              zcl_path_join(cases, sizeof(cases), dir ? dir : ".", "cases.json") &&
+              promote_cases_export(rq, &case_bytes, &case_len) &&
+              promote_write(source, ctx->src.bytes, ctx->src.len) &&
+              promote_write(cases, case_bytes, case_len) &&
+              json_push_kv_str(&reply->data, "source", source) &&
+              json_push_kv_str(&reply->data, "cases", cases);
+    free(case_bytes);
+    return ok;
+}
+
 /* Steps 3 and 4 for a built release image. */
 static void promote_verify(const struct zcl_command_request *rq,
                            struct lab_ctx *ctx, const struct promote_req *p,
@@ -197,6 +312,14 @@ static void promote_verify(const struct zcl_command_request *rq,
                        rel->command);
     } else if (promote_pack(rq, rel, reply)) {
         promote_report(reply, p, rel);
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED && p->include_source &&
+            !promote_export(rq, ctx, reply)) {
+            promote_refuse(reply, "LAB_PROMOTE_EXPORT_FAILED", "export",
+                           "the signed pack was written, but its source and cases "
+                           "could not be exported; no reproduction is claimed",
+                           rel->command);
+            reply->error.mutated = true;
+        }
     }
 }
 

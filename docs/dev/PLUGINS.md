@@ -486,13 +486,15 @@ z23 plugin call upper --stdin=abc          # run.stdout is "ABC"
 
 ## Distributing a plugin over the package swarm
 
-`plugin publish` verifies a packed directory (`NAME`, `NAME.plugin.json`,
-`NAME.plugin.sig`, `LICENSE`) and admits it as one content.v2 root in the
-datadir package store, then pins that root. It also writes a flat
-`z23-plugin-admission` member so a replica that holds the chunks can host the
-set. It does not install the plugin and does not switch `current`. With
-`announce` set, an unreachable overlay leaves the pin in place and the reply
-is `PLUGIN_ANNOUNCE_INCOMPLETE`.
+`plugin publish` verifies the required packed members (`NAME`,
+`NAME.plugin.json`, `NAME.plugin.sig`, `LICENSE`) and admits the flat directory
+as one content.v2 root in the datadir package store, then pins that root.
+Optional inert regular files, including `NAME.c` and `cases.json` from
+`lab promote --include-source`, travel in the same package; there is no second
+plugin package format. It also writes a flat `z23-plugin-admission` member so a
+replica that holds the chunks can host the set. It does not install the plugin
+and does not switch `current`. With `announce` set, an unreachable overlay
+leaves the pin in place and the reply is `PLUGIN_ANNOUNCE_INCOMPLETE`.
 
 `plugin fetch` downloads that root, checks the tree out, and verifies the
 signature. It never installs, switches, or runs. The receiver installs only
@@ -579,6 +581,64 @@ node; a chunk-only copy with no admission member is refused).
    z23 plugin list
    z23 plugin switch hello <128-hex generation>
    ```
+
+### Reproduce a fetched one-shot plugin
+
+For a reproducible capability, use `lab promote` instead of `plugin pack` in
+step 2 and opt in to carrying the source and cases. Add the real license text
+required by the existing publish gate, then use the same publish and fetch
+steps above:
+
+```sh
+z23 lab promote hello.c --cases=cases.json --name=hello --version=1.0.0 \
+    --key=./publisher.key --dir=./dist --include-source
+cp ./LICENSE ./dist/LICENSE
+```
+
+On the receiver, before pinning the publisher or installing, create a distinct
+builder key and run the real reproduction command. `out` must name an absent
+directory so an old pack or attestation cannot be reused:
+
+```sh
+z23 plugin keygen ./builder.key       # prints a different builder public_key
+z23 plugin reproduce --dir=./received --source-root=<root> \
+    --key=./builder.key --out=./reproduced --toolchain=gcc-14-linux-x86_64
+printf '%s\n' '<64-hex-builder-public-key>' > ./builders.pin
+chmod 0600 ./builders.pin
+z23 plugin attest_verify ./received/hello.plugin.json \
+    --attestations=./reproduced --builders=./builders.pin --threshold=1 \
+    --source-root=<root>
+```
+
+`plugin reproduce` verifies the fetched signature and image without granting
+publisher trust, rebuilds through `lab promote`, and requires both the
+executable SHA3-512 and signed-manifest generation to match. Only then does it
+write the receiver builder's ordinary attestation. The toolchain label is
+recorded in that attestation; the reply's `release_command` reports the actual
+compiler invocation. The result explicitly reports `installed:false`,
+`activated:false` and `physical_independence_attested:false`. Install and
+switch remain the separate receiving-owner steps above, and rollback still
+preserves plugin state.
+
+The command also re-derives the content.v2 root from every fetched member;
+`source-root` must equal it, otherwise `PLUGIN_REPRODUCE_ROOT_MISMATCH` stops
+the journey before compilation. Missing `NAME.c` or `cases.json` refuses
+`PLUGIN_REPRODUCE_INPUT`; an existing `out` refuses
+`PLUGIN_REPRODUCE_OUTPUT`; a resident interface refuses
+`PLUGIN_REPRODUCE_INTERFACE`. A rebuilt image that differs refuses
+`PLUGIN_REPRODUCE_HASH_MISMATCH`, while equal image bytes under different
+signed metadata refuse `PLUGIN_REPRODUCE_GENERATION_MISMATCH`. Divergent packs
+are retained for inspection but receive no attestation. Mismatch replies carry
+full expected and actual image and generation values in structured fields. A
+partial output is reported as mutated and names fresh-output recovery. A
+corrupt fetched image is refused earlier as `PLUGIN_EXE_HASH`. Other plugins without the
+opt-in source and cases cannot use this command; this is not a generic source
+reproduction API. The test proves the journey between isolated in-process
+stores and swarm engines, not two physical hosts or authenticated live
+network transport.
+
+<!-- claim: symbol-present zcl_native_handle_plugin_reproduce tools/command/native_plugin_attest_command.c # production rebuild, compare and attestation -->
+<!-- claim: symbol-present pj_t_reproduce tests/harness/src/test_plugin_journey.c # peer journey, refusal and corruption proof -->
 
 Never: pass a key's bytes on a command line; reuse a real wallet, node or
 release key; run `zcode publish` or anything that names a reward address; point

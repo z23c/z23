@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_lab_promote_command.c", CAP_FS_WRITE, "Builds the release image in the lab compile directory and hands it to plugin.pack, which writes the signed files")
+ZCL_MODULE_CAPABILITY("tools/command/native_lab_promote_command.c", CAP_FS_READ|CAP_FS_WRITE, "Reads the optional cases file, builds the release image in the lab compile directory, writes the signed pack and optionally exports the loaded source and cases")

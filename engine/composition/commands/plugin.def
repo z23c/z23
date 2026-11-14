@@ -7,7 +7,7 @@ ZCL_COMMAND_BRANCH("plugin", "", "Signed plugin store",
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.keygen", "plugin", "",
-    "Create a plugin signing key file and print its public key",
+    "Create signing key",
     "Creates the key file exclusively (O_EXCL, mode 0600) from the host "
     "CSPRNG: exactly the 32-byte Ed25519 seed. An existing path is refused "
     "with PLUGIN_KEY_EXISTS. The reply carries only the public key, the "
@@ -28,7 +28,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.publisher", "plugin", "",
-    "Add a publisher key z23 verifies plugin signatures against",
+    "Pin publisher key",
     "Appends the 64-character lowercase hex Ed25519 public key (key) as one "
     "line to ~/.z23/plugins/publisher_keys, the keys plugin.install, "
     "plugin.switch, plugin.run and plugin.call verify signatures against. "
@@ -54,7 +54,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.pack", "plugin", "",
-    "Write the signed manifest and signature for a plugin executable",
+    "Pack and sign",
     "Copies the executable to dir (default the current directory) as NAME "
     "and writes NAME.plugin.json (strict schema z23.plugin.v1, interface "
     "version 1 or 2 (interface, default 1), the executable SHA3-512 and the capabilities in "
@@ -278,7 +278,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.run", "plugin", "",
-    "Run an installed plugin confined, health-checked and restarted on failure",
+    "Run resident",
     "Starts the plugin's current verified executable as a confined child "
     "(Landlock, seccomp, no_new_privs, resource limits) that holds only the "
     "descriptors its manifest grants: a control socket, a log pipe and, for "
@@ -331,7 +331,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.index_add", "plugin", "",
-    "Sign a plugin index entry and add it to a local index directory",
+    "Add index entry",
     "Verifies NAME.plugin.json and its detached NAME.plugin.sig under the "
     "signing key (key), then writes one signed entry into the index directory "
     "(index): plugin name, version, interface version, capabilities, package "
@@ -358,7 +358,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.search", "plugin", "",
-    "List verified plugin index entries and mark each publisher pinned or not",
+    "Search index",
     "Reads every entry file in the index directory (index), verifies each "
     "signature against the entry's own publisher key, folds to the latest "
     "version per publisher and plugin, and lists the result, filtered by "
@@ -398,7 +398,9 @@ ZCL_COMMAND_READY_COMMAND(
     "swarm from that store. Publish vouches for nothing beyond byte "
     "coherence: every receiver re-verifies the signature, and install still "
     "requires the receiver to list the publisher key. Refusals: "
-    "PLUGIN_PUBLISH_LAYOUT (not the flat four-file set), "
+    "PLUGIN_PUBLISH_LAYOUT (missing required plugin members, or a non-flat, "
+    "non-regular or oversized member; optional inert files such as NAME.c and "
+    "cases.json are carried unchanged), "
     "PLUGIN_PUBLISH_LICENSE (LICENSE is not the exact text of an "
     "allowlisted permissive license, so no node may serve the root), "
     "PLUGIN_PUBLISH_NO_STORE, PLUGIN_PUBLISH_STORE (the store admission "
@@ -493,3 +495,39 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_plugin_fetch_remote)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.reproduce", "plugin", "",
+    "Reproduce build",
+    "Verifies one fetched plugin directory (dir) under the publisher key its "
+    "signature names, without trusting or changing publisher_keys, then "
+    "requires the interface 2 NAME.c and cases.json members exported by "
+    "lab.promote include-source. It re-derives the content.v2 manifest root "
+    "from every fetched member and refuses unless it equals source-root. "
+    "Rebuilds through the real confined "
+    "lab.promote pipeline with name, version and capabilities taken from the "
+    "verified manifest. The receiver's builder key (key) signs a new pack in "
+    "the absent output directory out. Only when the executable SHA3-512 and "
+    "signed-manifest generation both equal the fetched manifest does the "
+    "command reuse plugin.attest to file a builder attestation binding "
+    "source-root and toolchain to the matching image. The reply includes the "
+    "comparison and attestation path. It never installs, switches, runs the "
+    "selected plugin, changes current or last-good, or asserts physical "
+    "independence. Changed inputs and output collisions are refused; a "
+    "successfully rebuilt but divergent pack is retained for inspection and "
+    "gets no attestation. Mismatch replies carry full expected and actual "
+    "image and generation values in structured fields. A partial output is "
+    "reported mutated and names fresh-output recovery. Linux only.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,reproduce,rebuild,verify,attest,builder,source,cases,lab,one-shot",
+    "zcl.plugin_reproduce.input.v1", "zcl.plugin_reproduce.v1",
+    "dir,source-root,key,out,toolchain,sanitize,timeout_ms,mem_mb",
+    "dir,source-root,key,out,toolchain",
+    "z23 plugin reproduce --dir=./received --source-root=<64-hex-package-root> --key=./builder.key --out=./reproduced --toolchain=gcc-14-linux-x86_64",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_plugin_reproduce)

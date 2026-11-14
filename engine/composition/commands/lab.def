@@ -93,11 +93,16 @@ ZCL_COMMAND_READY_COMMAND(
     "installs nothing and never reads, creates or moves a key. The receipt "
     "zcl.lab_promote.v1 carries the test root, cases passed, the release "
     "command and SHA3-512, manifest and signature paths, the generation and the "
-    "public key. The reply next array names the plugin install command. Linux only.",
+    "public key. With include-source true, it also exports the exact loaded "
+    "source as NAME.c and the effective cases as cases.json for plugin.reproduce; "
+    "default output remains the three pack files. An export I/O failure reports "
+    "LAB_PROMOTE_EXPORT_FAILED and admits that the signed pack was already "
+    "written, so no reproduction is claimed. The reply next array names the "
+    "plugin install command. Linux only.",
     65536U,
-    "lab,promote,plugin,pack,sign,one-shot,static,release,cases",
+    "lab,promote,plugin,pack,sign,one-shot,static,release,cases,include-source,reproduce",
     "zcl.lab_promote_input.v1", "zcl.lab_promote.v1",
-    "file,cases,name,version,key,cap,dir,sanitize,timeout_ms,mem_mb", "file",
+    "file,cases,name,version,key,cap,dir,sanitize,timeout_ms,mem_mb,include-source", "file",
     "z23 lab promote upper.c --cases=cases.json --name=upper --version=1.0.0 --key=./publisher.key --dir=./dist",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
