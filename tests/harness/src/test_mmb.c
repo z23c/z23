@@ -11,6 +11,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#endif
 
 /* Helper: create a test leaf with predictable data */
 static void make_test_leaf(struct mmb_leaf *leaf, uint32_t height)
@@ -324,6 +329,86 @@ static int test_mmb_leaf_store_extend_equals_rebuild(void)
     } _test_next:;
     return failures;
 }
+
+static bool mmb_fixture_matches(const struct mmb_leaf_store *store,
+                                const struct mmb_chain_fixture *fx, int limit)
+{
+    int index = 0;
+    for (int h = 0; h < limit; h++) {
+        const struct block_index *bi = &fx->bi[h];
+        if (!bi->phashBlock) continue;
+        struct mmb_leaf leaf;
+        uint8_t hash[32];
+        mmb_leaf_from_block(&leaf, bi->phashBlock->data, bi->nHeight,
+                            bi->nTime, bi->nBits, bi->hashFinalSaplingRoot.data,
+                            (const uint8_t *)bi->nChainWork.pn,
+                            (const uint8_t[32]){0});
+        mmb_hash_leaf(&leaf, hash);
+        const uint8_t *actual = mmb_leaf_store_get(store, (uint64_t)index++);
+        if (!actual || memcmp(actual, hash, 32)) return false;
+    }
+    return store->num_leaves == (uint64_t)index;
+}
+
+static int test_mmb_leaf_batches(void)
+{
+    int failures = 0;
+    TEST("mmb leaf store: multiple batches preserve skipped heights and tail") {
+        char dir[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "mmb_batches", "dir");
+        struct mmb_chain_fixture fx;
+        struct mmb_leaf_store store;
+        ASSERT(mmb_chain_fixture_init(&fx, 390));
+        fx.bi[133].phashBlock = NULL;
+        ASSERT(mmb_open_fresh_store(&store, dir, "batch.bin"));
+        ASSERT(mmb_leaf_store_rebuild(&store, &fx.chain) == 389);
+        ASSERT(mmb_fixture_matches(&store, &fx, 390));
+        mmb_leaf_store_close(&store);
+        mmb_chain_fixture_free(&fx);
+        test_cleanup_tmpdir(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if !defined(_WIN32)
+static int mmb_short_write_child(const char *dir)
+{
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store store;
+    if (!mmb_chain_fixture_init(&fx, 300) ||
+        !mmb_open_fresh_store(&store, dir, "short.bin")) return 1;
+    struct rlimit limit = {128u * 32u + 45u, 128u * 32u + 45u};
+    if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR || setrlimit(RLIMIT_FSIZE, &limit)) return 1;
+    uint64_t count = mmb_leaf_store_rebuild(&store, &fx.chain);
+    bool ok = count == 129 && mmb_fixture_matches(&store, &fx, 129);
+    char path[sizeof(store.path)];
+    (void)snprintf(path, sizeof(path), "%s", store.path);
+    mmb_leaf_store_close(&store);
+    ok = ok && mmb_leaf_store_open(&store, path) &&
+         mmb_fixture_matches(&store, &fx, 129);
+    mmb_leaf_store_close(&store);
+    mmb_chain_fixture_free(&fx);
+    return ok ? 0 : 1;
+}
+
+static int test_mmb_leaf_short_write(void)
+{
+    int failures = 0;
+    TEST("mmb leaf store: short write retains durable complete prefix") {
+        char dir[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "mmb_short", "dir");
+        pid_t child = fork();
+        if (child == 0) _exit(mmb_short_write_child(dir));
+        int status = 0;
+        ASSERT(child > 0 && waitpid(child, &status, 0) == child &&
+               WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        test_cleanup_tmpdir(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 /* ── Rich leaf tests ──────────────────────────────────────── */
 
@@ -870,6 +955,10 @@ int test_mmb(void)
     failures += test_mmb_serialize_roundtrip();
     failures += test_mmb_leaf_store_append_extends_mapped_file();
     failures += test_mmb_leaf_store_extend_equals_rebuild();
+    failures += test_mmb_leaf_batches();
+#if !defined(_WIN32)
+    failures += test_mmb_leaf_short_write();
+#endif
 
     /* Rich leaf */
     failures += test_mmb_leaf_deterministic();

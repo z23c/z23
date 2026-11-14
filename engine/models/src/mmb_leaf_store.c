@@ -253,6 +253,36 @@ bool mmb_leaf_store_hash_at(const void *chain_active_ptr, int height,
     return true;
 }
 
+#define MMB_LEAF_BATCH 128u
+
+/* Commit complete leaves even on a short write; roll back any torn leaf.
+ * A failed rollback invalidates the handle exactly as single append does. */
+static bool mmb_leaf_flush(struct mmb_leaf_store *store, const uint8_t *bytes,
+                           size_t leaves, uint64_t *count)
+{
+    off_t original = lseek(store->fd, 0, SEEK_END);
+    if (original < 0) return false;
+    size_t written = 0, total = leaves * 32u;
+    while (written < total) {
+        ssize_t n = write(store->fd, bytes + written, total - written);
+        if (n <= 0) break;
+        written += (size_t)n;
+    }
+    size_t complete = written / 32u;
+    if (written != total &&
+        (zcl_ftruncate(store->fd, original + (off_t)(complete * 32u)) != 0 ||
+         lseek(store->fd, original + (off_t)(complete * 32u), SEEK_SET) < 0)) {
+        close(store->fd);
+        store->fd = -1;
+        store->open = false;
+        return false;
+    }
+    store->num_leaves += complete;
+    *count += complete;
+    if (complete) store->dirty = true;
+    return written == total;
+}
+
 /* Append the leaves for heights [from_height, tip] to the open store. The
  * caller guarantees the existing store is a valid prefix. Returns the number
  * of leaves appended (heights without a block index are skipped). */
@@ -269,16 +299,20 @@ uint64_t mmb_leaf_store_extend(struct mmb_leaf_store *store,
 
     mmb_leaf_store_unmap(store);
     uint64_t count = 0;
+    uint8_t batch[MMB_LEAF_BATCH * 32u];
+    size_t used = 0;
     for (int h = from_height; h <= height; h++) {
-        uint8_t hash[32];
-        if (!mmb_leaf_store_hash_at(chain_active_ptr, h, hash)) continue;
-        if (!mmb_leaf_store_append(store, hash)) {
+        if (!mmb_leaf_store_hash_at(chain_active_ptr, h, batch + used * 32u)) continue;
+        used++;
+        if (used == MMB_LEAF_BATCH && !mmb_leaf_flush(store, batch, used, &count)) {
             LOG_ERROR("mmb_leaf_store", "extend: append failed at h=%d (%s)",
                       h, store->path);
+            used = 0;
             break;
         }
-        count++;
+        if (used == MMB_LEAF_BATCH) used = 0;
     }
+    if (used) (void)mmb_leaf_flush(store, batch, used, &count);
     /* The remap boundary is also the durability boundary for the extension. */
     if (count > 0) (void)mmb_leaf_store_remap(store);
     return count;
@@ -304,20 +338,20 @@ uint64_t mmb_leaf_store_rebuild(struct mmb_leaf_store *store,
     store->dirty = true;
 
     uint64_t count = 0;
+    uint8_t batch[MMB_LEAF_BATCH * 32u];
+    size_t used = 0;
     int64_t t0 = platform_time_monotonic_us();
 
     for (int h = 0; h <= height; h++) {
-        uint8_t hash[32];
-        if (!mmb_leaf_store_hash_at(chain, h, hash)) continue;
-
-        if (!mmb_leaf_store_append(store, hash))
-            break;
-        count++;
-
-        if (count % 500000 == 0)
-            printf("[mmb_leaf_store] %llu/%d hashes written...\n",
-                   (unsigned long long)count, height + 1);
+        if (!mmb_leaf_store_hash_at(chain, h, batch + used * 32u)) continue;
+        used++;
+        if (used == MMB_LEAF_BATCH) {
+            bool ok = mmb_leaf_flush(store, batch, used, &count);
+            used = 0;
+            if (!ok) break;
+        }
     }
+    if (used) (void)mmb_leaf_flush(store, batch, used, &count);
 
     int64_t elapsed = (platform_time_monotonic_us() - t0) / 1000000LL;
 
