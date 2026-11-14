@@ -486,20 +486,26 @@ static bool an_notice(struct an_controller *c, const char *title, const char *su
 static bool an_form_input(struct an_controller *c, char url[257], struct app_network_link *link,
     struct zcl_command_reply *reply, bool *shown)
 {
-    char why[256]; bool submitted = false, ok;
+    for (;;) {
+        char why[256]; bool submitted = false, ok;
 #if defined(ZCL_TESTING)
-    if (c->hooks && c->hooks->form) ok = c->hooks->form(c->context, url, &submitted, why, sizeof(why));
-    else
+        if (c->hooks && c->hooks->form) ok = c->hooks->form(c->context, url, &submitted, why, sizeof(why));
+        else
 #endif
-        ok = an_link_form(url, &submitted, why, sizeof(why));
-    if (!ok) {
-        zcl_package_copy_fail(reply, "PRESENTATION_FAILED", false, "Cannot show app link entry.", "app.library"); return false;
+            ok = an_link_form(url, &submitted, why, sizeof(why));
+        if (!ok) {
+            zcl_package_copy_fail(reply, "PRESENTATION_FAILED", false, "Cannot show app link entry.", "app.library"); return false;
+        }
+        if (!submitted) return false;
+        if (app_network_link_parse(url, link)) return true;
+        bool again = false;
+        if (an_notice(c, "App link not recognized", "Paste the complete app link and try again.", true, &again) && again) {
+            c->error_presented = false;
+            continue;
+        }
+        *shown = c->error_presented;
+        zcl_package_copy_fail(reply, "BAD_INPUT", false, "The app link is invalid.", "app.library"); return false;
     }
-    if (!submitted) return false;
-    if (app_network_link_parse(url, link)) return true;
-    bool unused; (void)an_notice(c, "App link not recognized", "Paste the complete app link and try again.", false, &unused);
-    *shown = c->error_presented;
-    zcl_package_copy_fail(reply, "BAD_INPUT", false, "The app link is invalid.", "app.library"); return false;
 }
 /* reply is initialized on entry; cancel preserves the existing failure. */
 static bool an_retry(struct an_controller *c, struct zcl_command_reply *reply, bool *shown)

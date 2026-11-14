@@ -3358,6 +3358,68 @@ static int tag_library_discover(struct tag_world *w)
     tag_xdg_leave(&x);
     return failures;
 }
+struct tag_input_retry { unsigned mode, forms, notices, jobs, cards; };
+static bool tag_input_retry_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
+{
+    struct tag_input_retry *f = context; (void)why; (void)cap;
+    if (++f->forms > 2) return false;
+    *submitted = !(f->mode == 3 && f->forms == 2);
+    if (f->forms == 1) snprintf(out, 257, "incomplete-app-link");
+    else snprintf(out, 257, "http://%s/board/apps/v1", TAG_ONION);
+    return true;
+}
+static bool tag_input_retry_job(void *context, const char *mode, const char *url, const char *carrier,
+    const struct zcl_app_offer_row *selected, struct app_network_job_result *result,
+    struct zcl_command_reply *reply)
+{
+    struct tag_input_retry *f = context; struct app_network_link link; (void)reply;
+    ++f->jobs;
+    if (f->forms != 2 || strcmp(mode, "catalog") || carrier || selected ||
+        !app_network_link_parse(url, &link) || link.exact) return false;
+    result->error = APP_NETWORK_OK; return true;
+}
+static bool tag_input_retry_card(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_input_retry *f = context; (void)copy;
+    if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(model->request_id, "app-network-notice")) {
+        ++f->notices;
+        if (f->notices != 1 || f->jobs || strcmp(model->title, "App link not recognized") ||
+            model->action_count != 2 || strcmp(model->actions[0].id, "back") ||
+            strcmp(model->actions[1].id, "continue") || strcmp(model->actions[1].label, "Retry")) return false;
+        event->action_index = f->mode == 1 ? 0 : 1;
+        if (f->mode == 2) event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+        return true;
+    }
+    ++f->cards;
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "back")) { event->action_index = i; return true; }
+    return false;
+}
+static int tag_input_retry_case(struct tag_world *w, unsigned mode)
+{
+    int failures = 0; struct tag_input_retry f = {.mode = mode}; bool shown = false;
+    struct zcl_command_reply reply;
+    struct app_network_test_hooks hooks = {.form = tag_input_retry_form, .job = tag_input_retry_job};
+    TEST("invalid shared links can be corrected or canceled without fetching invalid input") {
+        int offers = g_tag.offers, posts = g_tag.posts, enables = g_tag.enables;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        ASSERT(!zcl_test_app_network_open_link(w->j.b_datadir, tag_input_retry_card, NULL,
+            &f, &reply, &shown, &hooks));
+        ASSERT_EQ(f.notices, 1u); ASSERT_EQ(f.forms, mode == 1 || mode == 2 ? 1u : 2u);
+        ASSERT_EQ(f.jobs, mode == 0 ? 1u : 0u); ASSERT_EQ(f.cards, mode == 0 ? 1u : 0u);
+        ASSERT_EQ(shown, mode == 1 || mode == 2);
+        ASSERT(!reply.error.mutated);
+        if (mode == 1 || mode == 2) ASSERT(!strcmp(reply.error.code, "BAD_INPUT"));
+        else ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts); ASSERT_EQ(g_tag.enables, enables);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    return failures;
+}
 struct tag_catalog_navigation { struct zcl_app_offer_row row; unsigned jobs, cards, notices; };
 static bool tag_catalog_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
 {
@@ -5821,6 +5883,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_fetch_native_profile(w);
     failures += tag_library_discover(w);
     failures += tag_catalog_navigation_case(w);
+    for (unsigned mode = 0; mode < 4; ++mode) failures += tag_input_retry_case(w, mode);
     failures += tag_library_link_cancel(w);
     failures += tag_library_link_fault(w, 1);
     failures += tag_library_link_fault(w, 2);
