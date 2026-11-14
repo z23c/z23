@@ -803,7 +803,7 @@ _test_next:
 }
 
 struct al_library_script {
-    unsigned actions[40], count, calls, errors, home_calls;
+    unsigned actions[64], count, calls, errors, home_calls;
     bool valid, saved_label, fresh_copy_prompt;
     char last_summary[241];
     char error_summary[241];
@@ -2820,6 +2820,70 @@ static bool al_library_fill(struct al_fx *f)
     }
     return true;
 }
+struct al_default_probe { unsigned step; bool saved, valid; };
+static int al_default_action(const struct zcl_present_model_v1 *model, const char *id)
+{
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, id)) return (int)i;
+    return -1;
+}
+static const char *al_default_saved(struct al_default_probe *p,
+    const struct zcl_present_model_v1 *model)
+{
+    if (p->step == 1 || p->step == 3) {
+        p->valid = p->valid && !strcmp(model->request_id, "library-1") &&
+            strstr(model->summary, "My very long friendly airplane") &&
+            strstr(model->items[0].value, "Saved version 010101010101") &&
+            al_default_action(model, "create") >= 0;
+        return p->step == 1 ? "previous" : "choose";
+    }
+    if (p->step == 2) {
+        p->valid = p->valid && !strcmp(model->request_id, "library-0") &&
+            strstr(model->summary, "Sky Combat") && al_default_action(model, "create") >= 0;
+        return "next";
+    }
+    p->valid = p->valid && al_default_action(model, "open") >= 0 &&
+        al_default_action(model, "back") >= 0;
+    return NULL;
+}
+static bool al_default_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy; (void)why; (void)cap;
+    struct al_default_probe *p = context; const char *action = NULL;
+    if (p->step == 0) action = "myapps";
+    else if (p->saved) action = al_default_saved(p, model);
+    else p->valid = p->valid && !strcmp(model->request_id, "library-0") &&
+        strstr(model->summary, "Sky Combat") && al_default_action(model, "create") >= 0;
+    ++p->step; event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (!action) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    int index = al_default_action(model, action);
+    if (index < 0) return false;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = (uint32_t)index; return true;
+}
+static int case_library_saved_default(void)
+{
+    int failures = 0; static struct al_fx f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("My Apps starts at a saved copy and preserves template navigation") {
+        ASSERT(al_setup(&f)); char builtin[PATH_MAX];
+        ASSERT(al_path(builtin, sizeof(builtin), f.env.bin_dir, "z23-skycombat"));
+        ASSERT(al_copy_exe(AL_FIXTURE, builtin, 0700) && al_write_file(f.env.config_path, "", 0600));
+        struct al_default_probe empty = {.valid = true};
+        zcl_test_app_library_run(&f.env, &reply, al_default_present, &empty);
+        ASSERT(empty.valid && empty.step == 2 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        struct app_selection saved, actual;
+        ASSERT(app_launch_state_dir_ready(f.env.state_dir) && al_selection(&f, "kept:copy-00", &saved));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        struct al_default_probe selected = {.saved = true, .valid = true};
+        zcl_test_app_library_run(&f.env, &reply, al_default_present, &selected);
+        ASSERT(selected.valid && selected.step == 5 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(app_selection_load(f.env.state_dir, "kept:copy-00", &actual) == APP_SELECTION_OK &&
+            actual.revision == saved.revision && !memcmp(actual.version, saved.version, 32));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); return failures;
+}
 static int case_library_builtin_help(void)
 {
     int failures = 0;
@@ -2880,6 +2944,12 @@ _test_next:;
     json_free(&setup); zcl_command_reply_free(&reply);
     return failures;
 }
+static void al_library_all_rows_actions(struct al_library_script *s)
+{
+    for (unsigned i = 0; i < 16; ++i) s->actions[i] = 1;
+    for (unsigned i = 16; i < 47; ++i) s->actions[i] = 2;
+    s->actions[47] = 3;
+}
 static int case_library_bounds(void)
 {
     int failures = 0;
@@ -2895,12 +2965,11 @@ static int case_library_bounds(void)
     PASS(); }
     TEST("My Apps reaches all32 rows including duplicate friendly saved labels") {
         ASSERT(al_library_fill(&f));
-        struct al_library_script s = {.count = 32, .valid = true};
-        for (unsigned i = 0; i < 31; ++i) s.actions[i] = 2;
-        s.actions[31] = 3;
+        struct al_library_script s = {.count = 48, .valid = true};
+        al_library_all_rows_actions(&s);
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
-        ASSERT(s.valid && s.calls == 32 && s.saved_label && !s.errors);
+        ASSERT(s.valid && s.calls == 48 && s.saved_label && !s.errors);
         ASSERT(strstr(s.last_summary, "App 32 of 32."));
         ASSERT(!json_get(&reply.data, "pid"));
     PASS(); }
@@ -3546,6 +3615,7 @@ _test_next:
     failures += case_library_tight_budget();
     failures += case_library_profile_input();
     failures += case_library_builtin_help();
+    failures += case_library_saved_default();
     failures += case_library_bounds();
     failures += case_library_keep_receipt();
     al_kill_all();

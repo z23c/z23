@@ -1809,11 +1809,18 @@ static void al_leave_preview(struct library *w, struct zcl_command_reply *reply,
     json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
     w->preview_current = false;
 }
+static size_t al_first_saved(const struct library *w)
+{
+    for (size_t i = 0; i < w->count; ++i)
+        if (w->rows[i].saved) return i;
+    return 0;
+}
 static void al_loop(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, const char *exe, const char *datadir)
 {
     char why[256] = {0};
     bool loaded = al_load(w, env, reply);
+    if (loaded) w->index = al_first_saved(w);
     while (loaded) {
         al_page_model(w);
         struct zcl_present_window_event_v1 event = {0};
