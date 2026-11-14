@@ -174,7 +174,7 @@ static bool edit_write(struct edit *e)
 {
     char path[4400];
     if (!platform_temp_directory_create("z23-edit-", e->scratch, sizeof(e->scratch)) ||
-        vcs_tree_materialize(e->selection.copy, e->copy.selected_tree, e->scratch,
+        vcs_tree_materialize_disposable(e->selection.copy, e->copy.selected_tree, e->scratch,
                              VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK ||
         !zcl_path_join(path, sizeof(path), e->scratch, e->path))
         return edit_fail(e, "SOURCE_MATERIALIZE_FAILED", false, "cannot create private source draft");
