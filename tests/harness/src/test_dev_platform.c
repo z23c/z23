@@ -11412,19 +11412,58 @@ struct dp_fake_watch {
     pid_t worker;
 };
 
-[[noreturn]] static void dp_fake_worker(int linger_ms)
+/* Bind both stand-ins to the original test owner, not to each other: tests
+ * intentionally kill the watcher while its worker remains alive. */
+struct dp_fake_owner { pid_t pid; uint64_t born; };
+static bool dp_pid_running(pid_t pid);
+
+#if defined(__linux__)
+static bool dp_fake_owner_alive(const struct dp_fake_owner *owner)
+{
+    uint64_t born = 0;
+    return dp_pid_running(owner->pid) &&
+           os_proc_pid_start_token((uint64_t)owner->pid, &born) && born == owner->born;
+}
+
+static int dp_fake_wait_signal(const sigset_t *set, const struct dp_fake_owner *owner)
+{
+    const struct timespec tick = {.tv_sec = 0, .tv_nsec = 100000000};
+    for (;;) {
+        if (!dp_fake_owner_alive(owner)) return -1;
+        int sig = sigtimedwait(set, NULL, &tick);
+        int wait_errno = errno;
+        if (!dp_fake_owner_alive(owner)) return -1;
+        if (sig >= 0) return sig;
+        if (wait_errno != EAGAIN && wait_errno != EINTR) return -1;
+    }
+}
+#endif
+
+[[noreturn]] static void dp_fake_worker(int linger_ms, const struct dp_fake_owner *owner)
 {
     sigset_t term;
     int sig = 0;
     sigemptyset(&term);
     sigaddset(&term, SIGTERM);
+    (void)owner;
+#if defined(__linux__)
+    sig = dp_fake_wait_signal(&term, owner);
+    if (sig < 0) _exit(0);
+    int64_t deadline = platform_time_monotonic_ms() + linger_ms;
+    while (platform_time_monotonic_ms() < deadline) {
+        if (!dp_fake_owner_alive(owner)) _exit(0);
+        int64_t remaining = deadline - platform_time_monotonic_ms();
+        if (remaining > 0) platform_sleep_ms(remaining < 100 ? (int)remaining : 100);
+    }
+#else
     (void)sigwait(&term, &sig);
     platform_sleep_ms(linger_ms);
+#endif
     _exit(0);
 }
 
 [[noreturn]] static void dp_fake_watcher(const char *root, int linger_ms,
-                                         int report_fd)
+                                         int report_fd, const struct dp_fake_owner *owner)
 {
     char lock[PATH_MAX];
     sigset_t stop;
@@ -11436,23 +11475,39 @@ struct dp_fake_watch {
     sigaddset(&stop, SIGTERM);
     sigaddset(&stop, SIGUSR1);
     (void)sigprocmask(SIG_BLOCK, &stop, NULL);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) _exit(2);
     int fd = zcl_devloop_watch_lock_path(root, lock, sizeof(lock))
         ? open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
     if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0 || ftruncate(fd, 0) != 0 ||
         dprintf(fd, "%ld verify ready proofq1\n", (long)getpid()) <= 0)
         _exit(2);
+#if defined(__linux__)
+    if (!dp_fake_owner_alive(owner)) _exit(2);
+#endif
     pid_t worker = fork();
     if (worker == 0) {
         (void)close(fd);
         (void)close(report_fd);
-        dp_fake_worker(linger_ms);
+        dp_fake_worker(linger_ms, owner);
     }
     pid_t pids[2] = {getpid(), worker};
-    if (worker < 0 || write(report_fd, pids, sizeof(pids)) != sizeof(pids))
+    if (worker < 0) _exit(3);
+    bool report_ok = write(report_fd, pids, sizeof(pids)) == sizeof(pids);
+#if defined(__linux__)
+    report_ok = report_ok && dp_fake_owner_alive(owner);
+#endif
+    if (!report_ok) {
+        (void)kill(worker, SIGKILL);
+        (void)waitpid(worker, NULL, 0);
         _exit(3);
+    }
     (void)close(report_fd);
+#if defined(__linux__)
+    sig = dp_fake_wait_signal(&stop, owner);
+#else
     (void)sigwait(&stop, &sig);
-    (void)kill(worker, SIGTERM);
+#endif
+    (void)kill(worker, sig < 0 ? SIGKILL : SIGTERM);
     (void)close(fd);
     (void)waitpid(worker, NULL, 0);
     _exit(0);
@@ -11465,13 +11520,17 @@ static bool dp_fake_watch_start(const char *root, int linger_ms,
 {
     int report[2];
     memset(out, 0, sizeof(*out));
+    struct dp_fake_owner owner = {.pid = getpid()};
+#if defined(__linux__)
+    if (!os_proc_pid_start_token((uint64_t)owner.pid, &owner.born)) return false;
+#endif
     if (pipe(report) != 0)
         return false;
     pid_t middle = fork();
     if (middle == 0) {
         (void)close(report[0]);
         if (fork() == 0)
-            dp_fake_watcher(root, linger_ms, report[1]);
+            dp_fake_watcher(root, linger_ms, report[1], &owner);
         _exit(0);
     }
     (void)close(report[1]);
@@ -11639,6 +11698,61 @@ static int64_t dp_lock_text_pid(const char *root)
     return got > 0 ? strtoll(body, NULL, 10) : 0;
 }
 
+#if defined(__linux__)
+static void dp_kill_if_same(pid_t pid, uint64_t born)
+{
+    uint64_t current = 0;
+    if (pid > 1 && born && os_proc_pid_start_token((uint64_t)pid, &current) &&
+        current == born && dp_pid_running(pid)) (void)kill(pid, SIGKILL);
+}
+
+static bool dp_fake_owner_read(int fd, struct dp_fake_watch *fake,
+                               uint64_t *watcher_born, uint64_t *worker_born)
+{
+    struct pollfd ready = {.fd = fd, .events = POLLIN};
+    if (poll(&ready, 1, 5000) != 1 || // real-clock: real detached child readiness pipe
+        read(fd, fake, sizeof(*fake)) != sizeof(*fake)) return false;
+    bool watcher_id = os_proc_pid_start_token((uint64_t)fake->watcher, watcher_born);
+    bool worker_id = os_proc_pid_start_token((uint64_t)fake->worker, worker_born);
+    return watcher_id && worker_id;
+}
+
+static bool dp_fake_owner_wait(const struct dp_fake_watch *fake)
+{
+    for (int i = 0; i < 300 &&
+         (dp_pid_running(fake->watcher) || dp_pid_running(fake->worker)); i++)
+        platform_sleep_ms(10); // real-clock: bounded wait for detached OS processes to exit
+    return !dp_pid_running(fake->watcher) && !dp_pid_running(fake->worker);
+}
+
+static bool dp_fake_owner_death(void)
+{
+    char root[PATH_MAX] = {0};
+    struct dp_fake_watch fake = {0};
+    uint64_t watcher_born = 0, worker_born = 0;
+    int p[2];
+    if (!dp_watch_session_root(root, "watch-owner-death")) return false;
+    if (pipe(p) != 0) { (void)test_rm_rf_recursive(root); return false; }
+    pid_t parent = getpid(), owner = fork();
+    if (owner == 0) {
+        (void)close(p[0]);
+        if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(2);
+        if (!dp_fake_watch_start(root, 30000, &fake) ||
+            write(p[1], &fake, sizeof(fake)) != sizeof(fake)) _exit(2);
+        for (;;) pause();
+    }
+    (void)close(p[1]);
+    bool ok = owner > 0 && dp_fake_owner_read(p[0], &fake, &watcher_born, &worker_born);
+    (void)close(p[0]);
+    if (owner > 0) { (void)kill(owner, SIGKILL); (void)waitpid(owner, NULL, 0); }
+    ok = ok && dp_fake_owner_wait(&fake);
+    dp_kill_if_same(fake.worker, worker_born);
+    dp_kill_if_same(fake.watcher, watcher_born);
+    (void)test_rm_rf_recursive(root);
+    return ok;
+}
+#endif
+
 static int test_watch_session_stop_leaves_nothing(void)
 {
     int failures = 0;
@@ -11648,6 +11762,9 @@ static int test_watch_session_stop_leaves_nothing(void)
 #if !defined(__linux__)
         PASS(); /* launch identity needs /proc (exe, cwd, boot_id) */
         goto _test_next;
+#endif
+#if defined(__linux__)
+        ASSERT(dp_fake_owner_death());
 #endif
         ASSERT(dp_watch_session_root(root, "watch-stop"));
         ASSERT(dp_fake_watch_start(root, 1500, &fake));
