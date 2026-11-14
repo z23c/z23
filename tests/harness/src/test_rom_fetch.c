@@ -18,8 +18,14 @@
  * assumptions (zero-root handshake, frame/chunk counter alignment, MAC) and
  * the no-partial-trust discard against the merged server code. */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "test/test_core.h"
+#include "test/rom_checkpoint_resume.h"
 #include "platform/file_sync.h"
+#include "platform/os_proc.h"
+#include "platform/pipe_compat.h"
 #include "net/rom_fetch.h"
 #include "net/rom_journal.h"
 #include "net/rom_peer_scoring.h"
@@ -2526,7 +2532,7 @@ static bool rf_crash_progress(uint32_t done, uint32_t total, uint64_t bytes,
     (void)done; (void)total; (void)bytes;
     int fd = *(int *)ctx;
     char marker = 0x44;
-    if (write(fd, &marker, 1) != 1)
+    if (platform_pipe_write_nosigpipe(fd, &marker, 1) != 1)
         return false;
     for (;;)
         pause(); /* parent kills this process after the durable callback */
@@ -2584,7 +2590,7 @@ static void rf_crash_run_child(struct rf_crash_child *children, int which,
                                                   &children[which].result[1]);
     free(hashes);
     char result = ok ? 0x53 : 0x46;
-    if (write(children[which].result[1], &result, 1) != 1) _exit(3);
+    if (platform_pipe_write_nosigpipe(children[which].result[1], &result, 1) != 1) _exit(3);
     _exit(ok ? 0 : 1);
 }
 
@@ -2594,7 +2600,7 @@ struct rf_crash_fixture_state {
     struct rom_artifact artifact;
     struct rom_fetch_manifest manifest;
     bool marked[62];
-    bool real_artifact;
+    bool real_artifact, checkpoint, source_owned, server_owned, client_owned, paths_valid;
     char server_dir[PATH_MAX], client_dir[PATH_MAX];
     char source[1200], part[1200], journal[1264], final[1200];
 };
@@ -2614,12 +2620,13 @@ static void rf_crash_cleanup_children(struct rf_crash_child children[2])
     }
 }
 
-static bool rf_copy_artifact(const char *src, const char *dst)
+static bool rf_copy_artifact(const char *src, const char *dst, bool *created)
 {
     int in = open(src, O_RDONLY);
     if (in < 0) return false;
     int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (out < 0) { close(in); return false; }
+    *created = true;
     char buf[65536];
     bool ok = true;
     for (;;) {
@@ -2648,34 +2655,70 @@ static bool rf_real_artifact_valid(const struct rom_artifact *a)
         !memcmp(a->chunk_root, root, 32) && !memcmp(a->whole_sha3, whole, 32);
 }
 
-static bool rf_crash_prepare(struct rf_crash_fixture_state *s, const char *real_source)
+static bool rf_crash_paths(struct rf_crash_fixture_state *s, const char *client_dir)
 {
     const char *name = "consensus-state-bundle-crash.sqlite";
-    if (!test_mkdtemp(s->server_dir, sizeof(s->server_dir), "zcl_rom_crash_srv") ||
-        !test_mkdtemp(s->client_dir, sizeof(s->client_dir), "zcl_rom_crash_cli")) return false;
-    snprintf(s->source, sizeof(s->source), "%s/%s", s->server_dir, name);
-    snprintf(s->part, sizeof(s->part), "%s/%s%s", s->client_dir, name, ROM_FETCH_PART_SUFFIX);
-    snprintf(s->journal, sizeof(s->journal), "%s.journal", s->part);
-    snprintf(s->final, sizeof(s->final), "%s/%s", s->client_dir, name);
+    if (!test_mkdtemp(s->server_dir, sizeof(s->server_dir), "zcl_rom_crash_srv")) return false;
+    s->server_owned = true;
+    if (client_dir) {
+        int n = snprintf(s->client_dir, sizeof(s->client_dir), "%s", client_dir);
+        if (n < 0 || (size_t)n >= sizeof(s->client_dir)) return false;
+    } else {
+        if (!test_mkdtemp(s->client_dir, sizeof(s->client_dir), "zcl_rom_crash_cli")) return false;
+        s->client_owned = true;
+    }
+    int a = snprintf(s->source, sizeof(s->source), "%s/%s", s->server_dir, name);
+    int b = snprintf(s->part, sizeof(s->part), "%s/%s%s", s->client_dir, name, ROM_FETCH_PART_SUFFIX);
+    int c = snprintf(s->journal, sizeof(s->journal), "%s.journal", s->part);
+    int d = snprintf(s->final, sizeof(s->final), "%s/%s", s->client_dir, name);
+    s->paths_valid = a >= 0 && (size_t)a < sizeof(s->source) && b >= 0 && (size_t)b < sizeof(s->part) &&
+                     c >= 0 && (size_t)c < sizeof(s->journal) && d >= 0 && (size_t)d < sizeof(s->final);
+    return s->paths_valid;
+}
+
+static bool rf_crash_artifact(struct rf_crash_fixture_state *s, const char *real_source, bool checkpoint)
+{
+    const char *name = "consensus-state-bundle-crash.sqlite";
     s->real_artifact = real_source != NULL;
-    if (!(real_source ? rf_copy_artifact(real_source, s->source) :
-          write_sparse_bundle(s->server_dir, name, 8ull * ROM_SEED_CHUNK_SIZE + 4096)) ||
-        rom_seed_register(s->server_dir, name, NULL, &s->artifact) != ROM_REG_OK) return false;
-    if (s->real_artifact && !rf_real_artifact_valid(&s->artifact)) return false;
+    s->checkpoint = checkpoint;
+    bool copied = real_source ? rf_copy_artifact(real_source, s->source, &s->source_owned) :
+        write_sparse_bundle(s->server_dir, name, 8ull * ROM_SEED_CHUNK_SIZE + 4096);
+    if (!real_source && copied) s->source_owned = true;
+    if (!copied || rom_seed_register(s->server_dir, name, NULL, &s->artifact) != ROM_REG_OK) return false;
+    if (s->real_artifact && !checkpoint && !rf_real_artifact_valid(&s->artifact)) return false;
+    if (checkpoint && (s->artifact.size_bytes != 513867776 ||
+        s->artifact.chunk_size != 8u * 1024u * 1024u || s->artifact.num_chunks != 62)) return false;
     manifest_from_artifact(&s->artifact, &s->manifest);
+    return true;
+}
+
+static bool rf_crash_spawn(struct rf_crash_fixture_state *s, int which)
+{
+    uint64_t parent = (uint64_t)getpid();
+    struct rf_crash_child *c = &s->child[which];
+    fflush(NULL);
+    c->pid = fork();
+    if (c->pid == 0) {
+        if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(4);
+        rf_crash_run_child(s->child, which, &s->manifest, s->client_dir);
+    }
+    if (c->pid < 0) return false;
+    if (s->checkpoint) {
+        printf("checkpoint ROM: %s child pid=%ld\n", which ? "resume" : "initial", (long)c->pid);
+        fflush(stdout);
+    }
+    close(c->start[0]); c->start[0] = -1;
+    close(c->result[1]); c->result[1] = -1;
+    return true;
+}
+
+static bool rf_crash_prepare(struct rf_crash_fixture_state *s, const char *real_source,
+                             const char *client_dir, bool checkpoint)
+{
+    if (!rf_crash_paths(s, client_dir) || !rf_crash_artifact(s, real_source, checkpoint)) return false;
     for (int i = 0; i < 2; i++)
         if (pipe(s->child[i].start) || pipe(s->child[i].result)) return false;
-    for (int i = 0; i < 2; i++) {
-        s->child[i].pid = fork();
-        if (s->child[i].pid == 0)
-            rf_crash_run_child(s->child, i, &s->manifest, s->client_dir);
-        if (s->child[i].pid < 0) return false;
-    }
-    for (int i = 0; i < 2; i++) {
-        close(s->child[i].start[0]); s->child[i].start[0] = -1;
-        close(s->child[i].result[1]); s->child[i].result[1] = -1;
-    }
-    return true;
+    return rf_crash_spawn(s, 0);
 }
 
 static bool rf_crash_interrupt(struct rf_crash_fixture_state *s)
@@ -2686,10 +2729,12 @@ static bool rf_crash_interrupt(struct rf_crash_fixture_state *s)
     struct rf_crash_child *c = &s->child[0];
     char signal_byte = 0;
     int status = 0;
-    if (!port || write(c->start[1], &port, sizeof(port)) != sizeof(port) ||
+    if (!port || platform_pipe_write_nosigpipe(c->start[1], &port, sizeof(port)) != sizeof(port) ||
         !rf_crash_read(c->result[0], &signal_byte, 1, s->real_artifact ? 600000 : 60000) || signal_byte != 0x44 ||
         access(s->final, F_OK) == 0 || kill(c->pid, SIGKILL) ||
         rf_crash_wait(c->pid, &status) != c->pid) return false;
+    if (s->checkpoint)
+        printf("checkpoint ROM: initial child pid=%ld reaped wait_status=%d\n", (long)c->pid, status);
     c->pid = -1;
     return WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
 }
@@ -2715,7 +2760,7 @@ static bool rf_crash_resume(struct rf_crash_fixture_state *s)
     uint16_t port = s->index_peer.port;
     char signal_byte = 0;
     int status = 0;
-    if (write(c->start[1], &port, sizeof(port)) != sizeof(port) ||
+    if (platform_pipe_write_nosigpipe(c->start[1], &port, sizeof(port)) != sizeof(port) ||
         !rf_crash_read(c->result[0], &signal_byte, 1, s->real_artifact ? 600000 : 60000) || signal_byte != 0x53 ||
         rf_crash_wait(c->pid, &status) != c->pid) return false;
     c->pid = -1;
@@ -2736,17 +2781,18 @@ static bool rf_crash_verify(const struct rf_crash_fixture_state *s)
 static void rf_crash_cleanup(struct rf_crash_fixture_state *s)
 {
     rf_crash_cleanup_children(s->child);
-    if (*s->source) unlink(s->source);
-    if (*s->part) unlink(s->part);
-    if (*s->journal) unlink(s->journal);
-    if (*s->final) unlink(s->final);
-    if (*s->server_dir) rmdir(s->server_dir);
-    if (*s->client_dir) rmdir(s->client_dir);
+    if (s->source_owned) unlink(s->source);
+    if (s->paths_valid && s->client_owned && *s->part) unlink(s->part);
+    if (s->paths_valid && s->client_owned && *s->journal) unlink(s->journal);
+    if (s->paths_valid && s->client_owned && *s->final) unlink(s->final);
+    if (s->server_owned) rmdir(s->server_dir);
+    if (s->client_owned) rmdir(s->client_dir);
     rom_seed_reset();
     rom_peer_scoring_test_reset();
 }
 
-static bool rf_crash_fixture(const char *real_source)
+static bool rf_crash_fixture(const char *real_source, const char *client_dir,
+                             bool checkpoint, char *output, size_t output_cap)
 {
     struct rf_crash_fixture_state s = {
         .child = {
@@ -2760,26 +2806,40 @@ static bool rf_crash_fixture(const char *real_source)
     rom_peer_scoring_test_reset();
     rom_seed_set_peer_bps_cap(1ull << 30);
     rom_seed_set_global_bps_cap(1ull << 30);
-    if (!rf_crash_prepare(&s, real_source)) goto out;
+    if (!rf_crash_prepare(&s, real_source, client_dir, checkpoint)) goto out;
     bool interrupted = rf_crash_interrupt(&s);
     fs_server_stop(); /* Drain old requests before accounting. */
     if (!interrupted || !rf_crash_read_durable(&s)) goto out;
+    if (!rf_crash_spawn(&s, 1)) goto out;
     if (!rf_index_start(&s.index_peer, s.server_dir, &s.artifact)) goto out;
     bool resumed = rf_crash_resume(&s);
     rf_index_stop(&s.index_peer);
     ok = resumed && rf_crash_verify(&s);
+    if (ok && checkpoint)
+        printf("checkpoint ROM resume: verified retained and missing chunk request counts\n");
+    if (ok && output) {
+        int n = snprintf(output, output_cap, "%s", s.final);
+        ok = n >= 0 && (size_t)n < output_cap;
+    }
 out:
     rf_crash_cleanup(&s);
     return ok;
+}
+
+bool test_rom_checkpoint_resume(const char *source, const char *client_dir,
+                                char *output, size_t output_cap)
+{
+    if (!source || !client_dir || !output || output_cap == 0) return false;
+    return rf_crash_fixture(source, client_dir, true, output, output_cap);
 }
 
 static int test_verified_process_crash_resume(void)
 {
     int failures = 0;
     TEST("rom_fetch: SIGKILL after a durable chunk resumes in a fresh process") {
-        ASSERT(rf_crash_fixture(NULL));
+        ASSERT(rf_crash_fixture(NULL, NULL, false, NULL, 0));
         const char *real_source = getenv("ZCL_TEST_ROM_REAL_ARTIFACT");
-        if (real_source && real_source[0]) ASSERT(rf_crash_fixture(real_source));
+        if (real_source && real_source[0]) ASSERT(rf_crash_fixture(real_source, NULL, false, NULL, 0));
         PASS();
     } _test_next:;
     return failures;

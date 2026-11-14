@@ -2513,10 +2513,14 @@ Z23_FLAG("ZCL_TEST_CHECKPOINT_BUNDLE", "env_test", "-", "-",
           "public bundle for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
 Z23_FLAG("ZCL_TEST_CHECKPOINT_INDEX", "env_test", "-", "-",
           "public flat index for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_INDEX_HEADER", "env_test", "-", "-",
+          "allow verified flat-index header carrier in the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
 Z23_FLAG("ZCL_TEST_CHECKPOINT_PARAMS", "env_test", "-", "-",
           "parameter directory for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
 Z23_FLAG("ZCL_TEST_CHECKPOINT_REAL", "env_test", "-", "-",
           "0 or unset runs the ordinary suite; 1 selects the real checkpoint install fixture; other values refuse; first use tests/harness/src/test_consensus_state_snapshot_install.c:auto")
+Z23_FLAG("ZCL_TEST_CHECKPOINT_ROM_RESUME", "env_test", "-", "-",
+          "require checkpoint ROM crash-resume before isolated real installation; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
 Z23_FLAG("ZCL_TEST_CHECKPOINT_SCRATCH", "env_test", "-", "-",
           "private scratch root for the opt-in real install fixture; first use tests/harness/src/consensus_state_checkpoint_real_test.h:auto")
 Z23_FLAG("ZCL_TEST_LEAK_CHECK", "env_test", "-", "-",

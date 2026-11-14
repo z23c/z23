@@ -3,6 +3,7 @@
 #define ZCL_CONSENSUS_STATE_CHECKPOINT_REAL_TEST_H
 
 #include "base/hex.h"
+#include "test/rom_checkpoint_resume.h"
 #include "conditions/checkpoint_header_solution_repair.h"
 #include "services/block_index_loader.h"
 #include "storage/coins_kv.h"
@@ -251,12 +252,17 @@ static bool csi_checkpoint_paths_init(struct csi_checkpoint_paths *p)
         csi_real_path(p->copy, sizeof(p->copy), p->root, "bundle.sqlite");
 }
 
-static bool csi_checkpoint_copy_inputs(const struct csi_checkpoint_paths *p)
+static bool csi_checkpoint_copy_inputs(struct csi_checkpoint_paths *p)
 {
     const char *bundle_sha = "6bc3bf5152e5cd38deadc344d563478696d3800f4417e564119319196447ae83";
     const char *index_sha = "68cda2bf810cc1583be5258816a3852948e625f99e2108e3b6bb104a41f733da";
     if (!csi_checkpoint_digest(p->bundle, bundle_sha) || !csi_checkpoint_digest(p->index, index_sha)) return false;
-    if (!csi_real_copy(p->bundle, p->copy) || !csi_real_copy(p->index, p->good_index)) return false;
+    if (!csi_real_copy(p->index, p->good_index)) return false;
+    const char *resume = getenv("ZCL_TEST_CHECKPOINT_ROM_RESUME");
+    if (resume) {
+        if (strcmp(resume, "1") != 0 ||
+            !test_rom_checkpoint_resume(p->bundle, p->root, p->copy, sizeof(p->copy))) return false;
+    } else if (!csi_real_copy(p->bundle, p->copy)) return false;
     if (!csi_checkpoint_digest(p->bundle, bundle_sha) || !csi_checkpoint_digest(p->copy, bundle_sha)) return false;
     if (!csi_checkpoint_digest(p->index, index_sha) || !csi_checkpoint_digest(p->good_index, index_sha)) return false;
     return chmod(p->copy, 0400) == 0;

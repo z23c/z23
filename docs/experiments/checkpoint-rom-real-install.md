@@ -39,3 +39,21 @@ retry; an explicitly supplied invalid path did not select the fallback. These
 results qualify isolated checkpoint authority checks and installation only;
 they do not establish interrupted download, wallet-history recovery or device
 behavior.
+
+## Interrupted transfer followed by checkpoint installation
+
+On 2026-11-14, an isolated fixture transferred the same SHA-256-pinned
+checkpoint bundle using the verified ROM chunk protocol. The first download
+process was killed after two of 62 chunks were durably journaled. A fresh
+process resumed; server accounting confirmed that neither retained chunk was
+requested again and each of the 60 missing chunks was requested once. The
+resumed file matched the original bundle SHA-256 and was passed directly to
+the real installer in the same private fixture directory. The transfer
+manifest was derived from the fixture bytes and supplied no installation
+authority.
+
+The installer refused the empty-header substrate and accepted the separately
+validated checkpoint header under compiled checkpoint authority. The isolated
+focused group passed with no skips in 198.8 seconds; the ordinary ROM and
+snapshot recovery groups also passed with no skips. This test does not exercise
+an interrupted installation, existing-wallet history recovery or a device.
