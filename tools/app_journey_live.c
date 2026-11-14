@@ -53,18 +53,30 @@
  *
  * Scratch trees live only under the sanctioned development-scratch root
  * (or an explicit --work). On PASS the tree is removed; on FAIL it stays
- * for evidence. */
+ * for evidence.
+ *
+ * Linux split roles use --sender or --receiver, a fresh absolute --work and
+ * finite --seconds execution budget. Sender writes expected.json and the typed
+ * onion-status.json, then waits for an owner-created regular `finish` marker.
+ * Receiver also takes --peer and --expected. Role evidence is retained;
+ * supervised cleanup may continue beyond the execution deadline. */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/supervised_process.h"
+#include "platform/os_proc.h"
+#include "base/safe_alloc.h"
+#include "base/hex.h"
+#include "sha3/sha3.h"
 #include "util/write_all.h"
 
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -89,6 +101,65 @@ static char g_a_log[640], g_b_log[640];
 static pid_t g_a_pgid, g_b_pgid; /* node session leaders, 0 when down */
 static pid_t g_run_child = -1;   /* aj_run's direct child, for the watchdog */
 static bool g_keep;
+static bool g_role_worker;
+static struct platform_supervised_process g_role_node;
+
+struct aj_role_args {
+    const char *work, *peer, *expected;
+    long seconds;
+    bool sender, receiver, worker;
+};
+
+static bool aj_role_peer(const char *s)
+{
+    if (!s || strlen(s) < 64 || strncmp(s + 56, ".onion:", 7)) return false;
+    for (size_t i = 0; i < 56; i++)
+        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '2' && s[i] <= '7'))) return false;
+    const char *p = s + 63; unsigned port = 0;
+    if (!*p) return false;
+    for (; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        port = port * 10u + (unsigned)(*p - '0');
+        if (port > 65535) return false;
+    }
+    return port > 0;
+}
+
+static bool aj_role_number(const char *s, long *out)
+{
+    if (!s || !*s) return false;
+    char *end; errno = 0; long n = strtol(s, &end, 10);
+    if (errno || *end || n < 1 || n > 86400) return false;
+    *out = n; return true;
+}
+
+static bool aj_role_flag(struct aj_role_args *r, const char *a)
+{
+    if (!strcmp(a, "--sender") && !r->sender) { r->sender = true; return true; }
+    if (!strcmp(a, "--receiver") && !r->receiver) { r->receiver = true; return true; }
+    if (!strcmp(a, "--role-worker") && !r->worker) { r->worker = true; return true; }
+    return false;
+}
+
+static bool aj_role_value(struct aj_role_args *r, const char *a)
+{
+    if (!strncmp(a, "--work=", 7) && !r->work) { r->work = a + 7; return true; }
+    if (!strncmp(a, "--peer=", 7) && !r->peer) { r->peer = a + 7; return true; }
+    if (!strncmp(a, "--expected=", 11) && !r->expected) { r->expected = a + 11; return true; }
+    return !strncmp(a, "--seconds=", 10) && !r->seconds && aj_role_number(a + 10, &r->seconds);
+}
+
+static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
+{
+    *r = (struct aj_role_args){0};
+    for (int i = 1; i < argc; i++) {
+        if (!aj_role_flag(r, argv[i]) && !aj_role_value(r, argv[i])) return false;
+    }
+    return r->sender != r->receiver && r->work && r->work[0] == '/' &&
+        r->work[1] && r->seconds &&
+        (r->sender ? !r->peer && !r->expected :
+         aj_role_peer(r->peer) && r->expected && r->expected[0] == '/');
+}
 static const char *g_fail_first;
 
 /* P2P ports are production reachable-port allowlist members (core net
@@ -493,7 +564,7 @@ static bool aj_kill_group(pid_t pgid)
  * snapshots its own set before the next spawn rewrites them. */
 struct aj_node_flags {
     char bin[600], ddf[640], p2pf[32], rpcf[32], fsf[32], httpsf[32],
-        cons[64], pkg[24], home_pair[700], path_pair[64];
+        cons[128], pkg[24], home_pair[700], path_pair[64];
 };
 static bool aj_node_flags_build(struct aj_node_flags *f, const char *home,
                                 const char *datadir, int p2p, int rpc, int fs,
@@ -511,6 +582,16 @@ static bool aj_node_flags_build(struct aj_node_flags *f, const char *home,
         snprintf(f->path_pair, sizeof(f->path_pair), "PATH=/usr/bin:/bin") < (int)sizeof(f->path_pair);
 }
 
+static void aj_node_argv(struct aj_node_flags *f, char **argv)
+{
+    char *items[] = {f->bin, f->ddf, (char *)"-regtest", f->p2pf, f->rpcf, f->fsf,
+        f->httpsf, f->cons, (char *)"-onion-persist", f->pkg,
+        (char *)"-regtestshielded", (char *)"-operator-lane=dev",
+        (char *)"-wallet-no-phrase-backup", (char *)"-nobgvalidation",
+        (char *)"-nolegacyimport", (char *)"-showmetrics=0", NULL};
+    memcpy(argv, items, sizeof(items));
+}
+
 static pid_t aj_node_spawn(const char *home, const char *datadir, const char *log,
                            int p2p, int rpc, int fs, int https,
                            const char *connect, bool hosting)
@@ -518,11 +599,7 @@ static pid_t aj_node_spawn(const char *home, const char *datadir, const char *lo
     static struct aj_node_flags f;
     if (!aj_node_flags_build(&f, home, datadir, p2p, rpc, fs, https, connect, hosting))
         return 0;
-    char *argv[] = {f.bin, f.ddf, (char *)"-regtest", f.p2pf, f.rpcf, f.fsf,
-        f.httpsf, f.cons, (char *)"-onion-persist", f.pkg,
-        (char *)"-regtestshielded", (char *)"-operator-lane=dev",
-        (char *)"-wallet-no-phrase-backup", (char *)"-nobgvalidation",
-        (char *)"-nolegacyimport", (char *)"-showmetrics=0", NULL};
+    char *argv[17]; aj_node_argv(&f, argv);
     fflush(NULL);
     pid_t pid = fork();
     if (pid < 0) return 0;
@@ -742,7 +819,7 @@ static bool aj_wait_ready_kill(const char *home, const char *pid_str,
         if (aj_slurp(app_log, body, sizeof(body)) > 0)
             ran = strstr(body, "tinyapp ready boost=2") != NULL;
     }
-    (void)kill((pid_t)strtol(pid_str, NULL, 10), SIGKILL);
+    if (!g_role_worker) (void)kill((pid_t)strtol(pid_str, NULL, 10), SIGKILL);
     if (!ran) {
         aj_fail("%s's modified app never printed its ready line", who);
         return false;
@@ -895,21 +972,21 @@ static bool aj_b_get_once(struct aj_node_ctx *bc, char *out, size_t cap)
     return false;
 }
 
+static bool aj_received_matches(const char *out)
+{
+    char got[160];
+    return aj_line_value(out, "package_root", got, sizeof(got)) && !strcmp(got, g_root) &&
+        aj_line_value(out, "publisher_fingerprint", got, sizeof(got)) && !strcmp(got, g_publisher) &&
+        aj_line_value(out, "image_sha3", got, sizeof(got)) && !strcmp(got, g_image_a);
+}
+
 static bool aj_phase_b_get(struct aj_node_ctx *bc)
 {
     char out[65536];
     if (!aj_b_get_once(bc, out, sizeof(out))) return false;
     char got[160];
-    if (!aj_line_value(out, "package_root", got, sizeof(got)) ||
-        strcmp(got, g_root) ||
-        !aj_line_value(out, "publisher_fingerprint", got, sizeof(got)) ||
-        strcmp(got, g_publisher)) {
-        aj_fail("B received an identity that is not A's exact offer");
-        return false;
-    }
-    if (!aj_line_value(out, "image_sha3", got, sizeof(got)) ||
-        strcmp(got, g_image_a)) {
-        aj_fail("B's rebuilt image differs from A's local build");
+    if (!aj_received_matches(out)) {
+        aj_fail("B's root, publisher or rebuilt image differs from A's");
         return false;
     }
     if (!aj_line_value(out, "rebuild_report", got, sizeof(got)) ||
@@ -1898,8 +1975,409 @@ static bool aj_prepare(const char *work_override)
         aj_mkdir_p(g_a_home) == 0 && aj_mkdir_p(g_b_home) == 0;
 }
 
+/* Split roles exchange only these public identities; the receiver checks them
+ * after name-only discovery and never turns them into retrieval selectors. */
+static bool aj_role_hex(const char *s, size_t len)
+{
+    uint8_t bytes[33];
+    return len <= 2 * sizeof(bytes) && !(len % 2) && zcl_hex_decode_lower(s, bytes, len / 2);
+}
+
+static bool aj_role_name_part(const char *s, size_t len)
+{
+    if (!len || len > 63 || s[0] == '-' || s[len - 1] == '-') return false;
+    for (size_t i = 0; i < len; i++)
+        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '-')) return false;
+    return true;
+}
+
+static bool aj_role_name(const char *s)
+{
+    if (!s || strlen(s) >= sizeof(g_name)) return false;
+    const char *slash = strchr(s, '/');
+    return slash && aj_role_name_part(s, (size_t)(slash - s)) &&
+        aj_role_name_part(slash + 1, strlen(slash + 1));
+}
+
+static bool aj_role_read_public(const char *path, char *body, size_t cap)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size < (off_t)cap;
+    size_t used = 0;
+    while (ok && used < (size_t)st.st_size) {
+        ssize_t n = read(fd, body + used, (size_t)st.st_size - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = false; break; }
+        used += (size_t)n;
+    }
+    char extra;
+    if (ok && read(fd, &extra, 1) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    body[used] = 0;
+    return ok && strlen(body) == used && !strstr(body, "\\u0000");
+}
+
+static bool aj_role_expected_values(const struct json_value *v)
+{
+    const struct json_value *name = json_get(v, "name"), *root = json_get(v, "root");
+    const struct json_value *pub = json_get(v, "publisher"), *image = json_get(v, "image");
+    bool ok = name && name->type == JSON_STR && root && root->type == JSON_STR &&
+        pub && pub->type == JSON_STR && image && image->type == JSON_STR &&
+        aj_role_name(json_get_str(name)) && aj_role_hex(json_get_str(root), 64) &&
+        aj_role_hex(json_get_str(pub), 66) && aj_role_hex(json_get_str(image), 64);
+    if (ok) {
+        snprintf(g_name, sizeof(g_name), "%s", json_get_str(name));
+        snprintf(g_root, sizeof(g_root), "%s", json_get_str(root));
+        snprintf(g_publisher, sizeof(g_publisher), "%s", json_get_str(pub));
+        snprintf(g_image_a, sizeof(g_image_a), "%s", json_get_str(image));
+    }
+    return ok;
+}
+
+static bool aj_role_expected(const char *path)
+{
+    char body[4097];
+    if (!aj_role_read_public(path, body, sizeof(body))) return false;
+    struct json_value v; json_init(&v);
+    bool ok = json_read(&v, body, strlen(body)) && aj_role_expected_values(&v);
+    json_free(&v); return ok;
+}
+
+static bool aj_role_status_file(struct aj_node_ctx *a)
+{
+    char path[1024], out[16384];
+    char *tail[] = {(char *)"core", (char *)"network", (char *)"onion", (char *)"status", NULL};
+    if (aj_cli(a->datadir, a->rpc, tail, out, sizeof(out), 90, a->home) != 0) return false;
+    struct json_value v; json_init(&v);
+    bool ok = json_read(&v, out, strlen(out));
+    const struct json_value *data = json_get(&v, "data");
+    const struct json_value *ready = json_get(data ? data : &v, "p2p_publish_ready");
+    ok = ok && ready && ready->type == JSON_BOOL && json_get_bool(ready);
+    json_free(&v);
+    return ok && aj_path_join(path, sizeof(path), g_work, "onion-status.json") && aj_write_file(path, out);
+}
+
+static bool aj_role_public_files(struct aj_node_ctx *a)
+{
+    if (!aj_role_name(g_name) || !aj_role_hex(g_root, 64) ||
+        !aj_role_hex(g_publisher, 66) || !aj_role_hex(g_image_a, 64)) return false;
+    char path[1024], body[1024];
+    int n = snprintf(body, sizeof(body),
+        "{\"name\":\"%s\",\"root\":\"%s\",\"publisher\":\"%s\",\"image\":\"%s\"}\n",
+        g_name, g_root, g_publisher, g_image_a);
+    if (n < 0 || (size_t)n >= sizeof(body) || !aj_path_join(path, sizeof(path), g_work, "expected.json") ||
+        !aj_write_file(path, body)) return false;
+    return aj_role_status_file(a);
+}
+
+static bool aj_role_node_start(const char *home, const char *datadir, const char *log,
+                               int p2p, int rpc, int fs, int https, const char *peer, bool hosting);
+static bool aj_role_node_stop(void);
+
+static bool aj_role_hold(long seconds)
+{
+    char path[1024];
+    if (!aj_path_join(path, sizeof(path), g_work, "finish")) return false;
+    long start = aj_now_s();
+    if (start <= 0) return false;
+    for (;;) {
+        if (platform_supervised_poll(&g_role_node) != PLATFORM_SUPERVISED_RUNNING ||
+            g_role_node.supervisor_pid < 0) return false;
+        struct stat st;
+        if (lstat(path, &st) == 0) return S_ISREG(st.st_mode) && st.st_uid == getuid();
+        if (errno != ENOENT) return false;
+        long now = aj_now_s();
+        if (now < start || now - start >= seconds) return false;
+        aj_sleep_ms(200);
+    }
+}
+
+static bool aj_role_sender(long seconds)
+{
+    struct aj_node_ctx a = {.rpc = APPJ_A_RPC};
+    snprintf(a.home, sizeof(a.home), "%s", g_a_home);
+    snprintf(a.datadir, sizeof(a.datadir), "%s", g_a_dd);
+    if (!aj_fixture()) return false;
+    if (!aj_role_node_start(a.home, a.datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+                            APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, false) ||
+        !aj_wait_ready_pair(&a, NULL, "") || !aj_phase_a_local(&a)) return false;
+    if (!aj_role_node_stop()) return false;
+    return aj_role_node_start(a.home, a.datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+                              APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, true) &&
+        aj_wait_ready_pair(&a, NULL, " (hosting)") && aj_phase_publish(&a) &&
+        aj_role_public_files(&a) && aj_role_hold(seconds);
+}
+
+static bool aj_role_receiver(const char *peer)
+{
+    struct aj_node_ctx b = {.rpc = APPJ_B_RPC};
+    snprintf(b.home, sizeof(b.home), "%s", g_b_home);
+    snprintf(b.datadir, sizeof(b.datadir), "%s", g_b_dd);
+    return aj_role_node_start(b.home, b.datadir, g_b_log, APPJ_B_P2P, APPJ_B_RPC,
+                              APPJ_B_FS, APPJ_B_HTTPS, peer, true) &&
+        aj_wait(aj_probe_rpc, &b, g_wait_s, "receiver RPC") &&
+        aj_wait(aj_probe_onion, &b, g_tor_wait_s, "receiver onion") && aj_phase_b_get(&b);
+}
+
+static bool aj_role_prepare(const struct aj_role_args *r)
+{
+    if (!r->sender && !aj_role_expected(r->expected)) { aj_fail("invalid public expectation"); return false; }
+    if (mkdir(r->work, 0700) != 0) { aj_fail("split work directory must be fresh and creatable"); return false; }
+    if (!aj_prepare(r->work)) { aj_fail("cannot prepare split work directory or runtime"); return false; }
+    return r->sender || (aj_path_join(g_repo_app, sizeof(g_repo_app), g_work, "empty") && mkdir(g_repo_app, 0700) == 0);
+}
+
+static int aj_role_work(const struct aj_role_args *r)
+{
+    struct stat st; char token;
+    struct pollfd control = {.fd = 3, .events = POLLIN};
+    if (fstat(3, &st) != 0 || !S_ISFIFO(st.st_mode) || poll(&control, 1, 1000) <= 0 ||
+        !(control.revents & POLLIN) || read(3, &token, 1) != 1 || token != 'R') {
+        aj_fail("split worker requires its owner control descriptor"); return 2;
+    }
+    close(3); g_role_worker = true; g_keep = true; platform_supervised_init(&g_role_node);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) return 2;
+    if (!aj_role_prepare(r)) return 2;
+    bool ok = r->sender ? aj_role_sender(r->seconds) : aj_role_receiver(r->peer);
+    bool stopped = aj_role_node_stop();
+    if (!ok || !stopped) { aj_fail("split worker failed or node cleanup was incomplete"); return 2; }
+    return 0;
+}
+
+#if defined(__linux__)
+static volatile sig_atomic_t g_role_stop;
+static void aj_role_signal(int sig) { (void)sig; g_role_stop = 1; }
+
+static int aj_role_image_fd(int fd)
+{
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (uint64_t)st.st_size > PLATFORM_SUPERVISED_IMAGE_MAX) { close(fd); return -1; }
+    size_t len = (size_t)st.st_size, used = 0;
+    unsigned char *bytes = zcl_malloc(len, "app_journey_role_image");
+    if (!bytes) { close(fd); return -1; }
+    while (used < len) {
+        ssize_t n = read(fd, bytes + used, len - used);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += (size_t)n;
+    }
+    bool ok = close(fd) == 0 && used == len;
+    uint8_t digest[32]; int image = -1;
+    if (ok) {
+        zcl_sha3_256(bytes, len, digest);
+        if (platform_supervised_image_capture(bytes, len, digest, &image) != PLATFORM_SUPERVISED_IMAGE_OK) image = -1;
+    }
+    free(bytes); return image;
+}
+
+static int aj_role_self_image(void)
+{
+    FILE *self = os_proc_open_self_exe();
+    if (!self) return -1;
+    int fd = dup(fileno(self));
+    if (fclose(self) != 0) { if (fd >= 0) close(fd); return -1; }
+    return aj_role_image_fd(fd);
+}
+
+static enum platform_supervised_state aj_role_drain(struct platform_supervised_process *p)
+{
+    enum platform_supervised_state state = p->observation.state;
+    while (p->supervisor_pid >= 0) {
+        int64_t now = clock_now_monotonic_ns();
+        if (now > 0 && now <= INT64_MAX - 10000000000LL)
+            state = platform_supervised_stop(p, now + 10000000000LL);
+        else state = platform_supervised_poll(p);
+        if (p->supervisor_pid >= 0) (void)poll(NULL, 0, 100);
+    }
+    return state;
+}
+
+static bool aj_role_node_stop(void)
+{
+    if (g_role_node.supervisor_pid < 0 && g_role_node.observation.state == PLATFORM_SUPERVISED_INVALID) return true;
+    enum platform_supervised_state state = platform_supervised_poll(&g_role_node);
+    bool prior_exit = g_role_node.observation.engine_exit_observed;
+    if (g_role_node.supervisor_pid >= 0) state = aj_role_drain(&g_role_node);
+    int status = g_role_node.observation.engine_wait_status;
+    bool exit_ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    bool stopped = !prior_exit && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+    return state == PLATFORM_SUPERVISED_CLEAN && g_role_node.supervisor_pid < 0 &&
+        g_role_node.observation.engine_exit_observed && g_role_node.observation.no_children && (exit_ok || stopped);
+}
+
+static void aj_role_close_start(int image, int input, int output, const int fds[2], bool writer)
+{
+    if (image >= 0) close(image);
+    if (input >= 0) close(input);
+    if (output >= 0) close(output);
+    if (fds[0] >= 0) close(fds[0]);
+    if (writer && fds[1] >= 0) close(fds[1]);
+}
+
+static bool aj_role_node_start(const char *home, const char *datadir, const char *log,
+                               int p2p, int rpc, int fs, int https, const char *peer, bool hosting)
+{
+    struct aj_node_flags f;
+    if (!aj_node_flags_build(&f, home, datadir, p2p, rpc, fs, https, peer, hosting)) return false;
+    int image = aj_role_self_image();
+    int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int output = open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int fds[2] = {-1, -1};
+    if (image < 0 || input < 0 || output < 0 || pipe(fds) != 0) goto fail;
+    char *argv[19] = {(char *)"app_journey_live", (char *)"--node-worker"};
+    aj_node_argv(&f, argv + 2);
+    const char *env[] = {f.home_pair, f.path_pair, NULL};
+    struct platform_supervised_fd_map maps[] = {{input, 0}, {output, 1}, {output, 2}, {fds[0], 3}};
+    int64_t now = clock_now_monotonic_ns();
+    if (now <= 0 || now > INT64_MAX - 10000000000LL) goto fail;
+    struct platform_supervised_spec spec = {.executable_fd = image, .argv = (const char *const *)argv,
+        .env = env, .env_count = 2, .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE,
+        .maps = maps, .map_count = 4, .launch_deadline_ns = now + 10000000000LL, .cleanup_timeout_ms = 10000};
+    enum platform_supervised_state state = platform_supervised_start(&g_role_node, &spec);
+    aj_role_close_start(image, input, output, fds, false);
+    bool ok = state == PLATFORM_SUPERVISED_RUNNING && write(fds[1], "R", 1) == 1;
+    close(fds[1]);
+    if (!ok && g_role_node.supervisor_pid >= 0) (void)aj_role_drain(&g_role_node);
+    return ok;
+fail:
+    aj_role_close_start(image, input, output, fds, true);
+    return false;
+}
+
+static int aj_role_node_worker(int argc, char **argv)
+{
+    char root[PATH_MAX], target[1024], token; struct stat st;
+    struct pollfd control = {.fd = 3, .events = POLLIN};
+    if (argc != 18 || !getcwd(root, sizeof(root)) ||
+        snprintf(target, sizeof(target), "%s/build/bin/zclassic23", root) >= (int)sizeof(target) ||
+        strcmp(argv[2], target) || fstat(3, &st) != 0 || !S_ISFIFO(st.st_mode) ||
+        poll(&control, 1, 1000) <= 0 || !(control.revents & POLLIN) ||
+        read(3, &token, 1) != 1 || token != 'R') return 2;
+    close(3); execv(argv[2], &argv[2]); return 2;
+}
+
+static bool aj_role_clean(const struct platform_supervised_process *p,
+                          enum platform_supervised_state state)
+{
+    return state == PLATFORM_SUPERVISED_CLEAN && p->supervisor_pid < 0 &&
+        p->observation.no_children && p->observation.engine_exit_observed &&
+        WIFEXITED(p->observation.engine_wait_status) && WEXITSTATUS(p->observation.engine_wait_status) == 0;
+}
+
+static int aj_role_monitor(struct platform_supervised_process *p, int control, int64_t start, int64_t deadline)
+{
+    enum platform_supervised_state state = PLATFORM_SUPERVISED_RUNNING;
+    bool failure = write(control, "R", 1) != 1;
+    while (!failure && !g_role_stop && p->supervisor_pid >= 0) {
+        int64_t now = clock_now_monotonic_ns();
+        if (now < start || now >= deadline) { aj_fail("split role deadline expired or clock failed"); failure = true; break; }
+        state = platform_supervised_poll(p);
+        if (p->supervisor_pid < 0) {
+            now = clock_now_monotonic_ns();
+            if (now < start || now >= deadline) failure = true;
+            break;
+        }
+        if (state != PLATFORM_SUPERVISED_RUNNING) { failure = true; break; }
+        (void)poll(NULL, 0, 100);
+    }
+    if (g_role_stop) { aj_fail("split role canceled"); failure = true; }
+    close(control);
+    if (p->supervisor_pid >= 0) state = aj_role_drain(p);
+    if (failure || !aj_role_clean(p, state)) { aj_fail("split worker failed or supervised cleanup was incomplete"); return 2; }
+    return 0;
+}
+
+static bool aj_role_handlers(struct sigaction old[3])
+{
+    const int sigs[] = {SIGPIPE, SIGINT, SIGTERM};
+    struct sigaction action = {0}; sigemptyset(&action.sa_mask);
+    for (int i = 0; i < 3; i++) {
+        action.sa_handler = i == 0 ? SIG_IGN : aj_role_signal;
+        if (sigaction(sigs[i], &action, &old[i]) != 0) {
+            while (i-- > 0) (void)sigaction(sigs[i], &old[i], NULL);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool aj_role_handlers_restore(const struct sigaction old[3])
+{
+    const int sigs[] = {SIGPIPE, SIGINT, SIGTERM}; bool ok = true;
+    for (int i = 0; i < 3; i++) if (sigaction(sigs[i], &old[i], NULL) != 0) ok = false;
+    return ok;
+}
+
+static int aj_role_owner(int argc, char **argv, const struct aj_role_args *r)
+{
+    if (argc + 1 >= (int)PLATFORM_SUPERVISED_ARGV_DEFAULT_MAX) return 2;
+    int64_t start = clock_now_monotonic_ns(), budget = (int64_t)r->seconds * 1000000000LL;
+    if (start <= 0 || start > INT64_MAX - budget) return 2;
+    int image = aj_role_self_image(), pipefd[2] = {-1, -1};
+    int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (image < 0 || input < 0 || pipe(pipefd) != 0) goto fail;
+    char *args[PLATFORM_SUPERVISED_ARGV_DEFAULT_MAX + 1];
+    for (int i = 0; i < argc; i++) args[i] = argv[i];
+    args[argc] = (char *)"--role-worker"; args[argc + 1] = NULL;
+    const char *env[] = {"PATH=/usr/bin:/bin", NULL};
+    struct platform_supervised_fd_map maps[] = {{input, 0}, {1, 1}, {2, 2}, {pipefd[0], 3}};
+    struct platform_supervised_spec spec = {.executable_fd = image, .argv = (const char *const *)args,
+        .env = env, .env_count = 1, .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE,
+        .maps = maps, .map_count = 4, .launch_deadline_ns = start + budget, .cleanup_timeout_ms = 10000};
+    struct sigaction old[3]; g_role_stop = 0;
+    if (!aj_role_handlers(old)) goto fail;
+    struct platform_supervised_process p; platform_supervised_init(&p);
+    enum platform_supervised_state state = platform_supervised_start(&p, &spec);
+    aj_role_close_start(image, input, -1, pipefd, false);
+    if (state != PLATFORM_SUPERVISED_RUNNING) {
+        aj_fail("cannot launch supervised split worker");
+        close(pipefd[1]); if (p.supervisor_pid >= 0) (void)aj_role_drain(&p);
+        (void)aj_role_handlers_restore(old); return 2;
+    }
+    int rc = aj_role_monitor(&p, pipefd[1], start, start + budget);
+    if (!aj_role_handlers_restore(old)) rc = 2;
+    return rc;
+fail:
+    aj_role_close_start(image, input, -1, pipefd, true);
+    return 2;
+}
+#else
+static bool aj_role_node_stop(void) { return false; }
+static bool aj_role_node_start(const char *home, const char *datadir, const char *log,
+                               int p2p, int rpc, int fs, int https, const char *peer, bool hosting)
+{ (void)home; (void)datadir; (void)log; (void)p2p; (void)rpc; (void)fs; (void)https; (void)peer; (void)hosting; return false; }
+static int aj_role_node_worker(int argc, char **argv) { (void)argc; (void)argv; return 2; }
+static int aj_role_owner(int argc, char **argv, const struct aj_role_args *r)
+{ (void)argc; (void)argv; (void)r; aj_fail("split role supervision is unavailable on this platform"); return 2; }
+#endif
+
+static bool aj_is_role(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--sender") || !strcmp(argv[i], "--receiver") || !strcmp(argv[i], "--role-worker")) return true;
+    return false;
+}
+
+static int aj_role_entry(int argc, char **argv)
+{
+    struct aj_role_args args;
+    if (!aj_role_parse(argc, argv, &args) || !getcwd(g_repo, sizeof(g_repo))) {
+        fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file]\n"); return 3;
+    }
+    if (args.worker) return aj_role_work(&args);
+    int rc = aj_role_owner(argc, argv, &args);
+    if (rc == 0) printf("%s: PASS; evidence %s\n", args.sender ? "sender" : "receiver", args.work);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--node-worker")) return aj_role_node_worker(argc, argv);
+    if (aj_is_role(argc, argv)) return aj_role_entry(argc, argv);
     const char *work_override = NULL;
     int usage = aj_parse_args(argc, argv, &work_override);
     if (usage) {

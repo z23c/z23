@@ -10,9 +10,96 @@
 
 static volatile sig_atomic_t aj_interrupted;
 static void aj_test_interrupt(int sig) { (void)sig; aj_interrupted = 1; }
+static int aj_group_owned_test(void);
+
+static int aj_fake_node(void)
+{
+    int ready[2]; if (pipe(ready) != 0) return 2;
+    pid_t p = fork();
+    if (p < 0) return 2;
+    if (!p) {
+        close(ready[0]); if (setsid() < 0) _exit(2);
+        char b = 'r'; if (write(ready[1], &b, 1) != 1) _exit(2);
+        for (;;) pause();
+    }
+    close(ready[1]); char b;
+    if (read(ready[0], &b, 1) != 1) return 2;
+    close(ready[0]);
+    const char *home = getenv("HOME"); char path[PATH_MAX];
+    if (!home || snprintf(path, sizeof(path), "%s/node-ready", home) >= (int)sizeof(path) ||
+        !aj_write_file(path, "ready")) return 2;
+    if (snprintf(path, sizeof(path), "%s/node-crash", home) >= (int)sizeof(path)) return 2;
+    if (access(path, F_OK) == 0) return 7;
+    for (;;) pause();
+}
+
+struct aj_nested_paths { char log[PATH_MAX], ready[PATH_MAX], marker[PATH_MAX]; };
+
+static bool aj_nested_prepare(bool crash, struct aj_nested_paths *paths)
+{
+    const char *root = getenv("AJ_TEST_ROOT");
+    if (!root || chdir(root) != 0 || strlen(root) >= sizeof(g_repo)) return false;
+    memcpy(g_repo, root, strlen(root) + 1); platform_supervised_init(&g_role_node);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) return false;
+    if (snprintf(paths->log, sizeof(paths->log), "%s/node.log", root) >= (int)sizeof(paths->log) ||
+        snprintf(paths->ready, sizeof(paths->ready), "%s/node-ready", root) >= (int)sizeof(paths->ready) ||
+        snprintf(paths->marker, sizeof(paths->marker), "%s/node-crash", root) >= (int)sizeof(paths->marker)) return false;
+    if (crash && !aj_write_file(paths->marker, "crash")) return false;
+    return aj_role_node_start(root, root, paths->log, 20024, 39731, 39732, 39733, APPJ_DEAD_SINK, false);
+}
+
+static bool aj_nested_observe(bool crash, const char *ready)
+{
+    bool seen = false;
+    for (int i = 0; i < 100 && !seen; i++) { seen = access(ready, F_OK) == 0; if (!seen) aj_sleep_ms(50); }
+    if (crash) for (int i = 0; i < 100 && !g_role_node.observation.engine_exit_observed; i++) {
+        (void)platform_supervised_poll(&g_role_node); aj_sleep_ms(50);
+    }
+    bool observed = !crash || g_role_node.observation.engine_exit_observed;
+    return seen && observed;
+}
+
+static int aj_nested_node_test(bool crash)
+{
+    struct aj_nested_paths paths;
+    if (!aj_nested_prepare(crash, &paths)) return 1;
+    bool observed = aj_nested_observe(crash, paths.ready);
+    bool stopped = aj_role_node_stop();
+    (void)unlink(paths.ready); (void)unlink(paths.marker); (void)unlink(paths.log);
+    return observed && (crash ? !stopped : stopped) ? 0 : 1;
+}
+
+static bool aj_test_detached_ready(void)
+{
+        int ready[2]; if (pipe(ready) != 0) return false;
+        pid_t p = fork();
+        if (p < 0) return false;
+        if (!p) {
+            close(ready[0]); if (setsid() < 0) _exit(2);
+            char r = 'r'; if (write(ready[1], &r, 1) != 1) _exit(2);
+            for (;;) pause();
+        }
+        close(ready[1]); char r;
+        if (read(ready[0], &r, 1) != 1) return false;
+        close(ready[0]);
+        return true;
+}
+
+static int aj_test_supervised_child(const char *mode)
+{
+        char b; if (read(3, &b, 1) != 1 || b != 'R') return 99;
+        if (!strcmp(mode, "supervised-fail")) return 7;
+        if (!strcmp(mode, "supervised-signal")) { raise(SIGKILL); return 99; }
+        if (!strcmp(mode, "supervised-nested")) return aj_nested_node_test(false);
+        if (!strcmp(mode, "supervised-nested-crash")) return aj_nested_node_test(true);
+        if (!aj_test_detached_ready()) return 99;
+        if (!strcmp(mode, "supervised-timeout")) for (;;) pause();
+        return 0;
+}
 
 static int aj_test_child(const char *mode)
 {
+    if (!strncmp(mode, "supervised-", 11)) return aj_test_supervised_child(mode);
     if (!strcmp(mode, "held")) {
         pid_t p = fork();
         if (p < 0) return 99;
@@ -25,6 +112,151 @@ static int aj_test_child(const char *mode)
     if (!strcmp(mode, "timeout")) { sleep(5); return 0; }
     return 0;
 }
+
+static int aj_role_parse_test(void)
+{
+    char peer[100]; memset(peer, 'a', 56); memcpy(peer + 56, ".onion:20024", sizeof(".onion:20024"));
+    char peerarg[120]; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
+    char *good[] = {(char *)"fixture", (char *)"--receiver", (char *)"--work=/tmp/new",
+        (char *)"--seconds=10", peerarg, (char *)"--expected=/tmp/public.json", NULL};
+    struct aj_role_args r;
+    bool ok = aj_role_parse(6, good, &r) && r.receiver && !r.sender && r.seconds == 10;
+    peer[0] = '8'; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
+    ok = !aj_role_parse(6, good, &r) && ok;
+    peer[0] = 'a'; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
+    good[2] = (char *)"--work=relative";
+    ok = !aj_role_parse(6, good, &r) && ok;
+    if (ok) puts("split role parser: PASS");
+    return ok ? 0 : 1;
+}
+
+static bool aj_role_test_identity(char *root, const char *pub, const char *image)
+{
+    char body[512];
+    snprintf(body, sizeof(body), "result\n  package_root: %s\n  publisher_fingerprint: %s\n  image_sha3: %s\n", root, pub, image);
+    bool matching = aj_received_matches(body);
+    root[0] = 'd';
+    snprintf(body, sizeof(body), "result\n  package_root: %s\n  publisher_fingerprint: %s\n  image_sha3: %s\n", root, pub, image);
+    return matching && !aj_received_matches(body);
+}
+
+static bool aj_test_dir_empty(const char *path)
+{
+    DIR *d = opendir(path); struct dirent *entry; bool empty = d != NULL;
+    while (d && (entry = readdir(d)) != NULL)
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) empty = false;
+    if (d && closedir(d) != 0) empty = false;
+    return empty;
+}
+
+static bool aj_role_test_workspace(const char *tmp, const char *path)
+{
+    char work[PATH_MAX];
+    if (snprintf(work, sizeof(work), "%s/receiver", tmp) >= (int)sizeof(work)) return false;
+    struct aj_role_args r = {.receiver = true, .work = work, .expected = path, .seconds = 5};
+    bool prepared = aj_role_prepare(&r);
+    bool empty = prepared && aj_test_dir_empty(g_repo_app);
+    bool refused = !aj_role_prepare(&r);
+    bool removed = aj_rm_rf(work, 0);
+    bool bad = aj_write_file(path, "{\"name\":\"bad\"}") && !aj_role_expected(path) &&
+        !aj_role_prepare(&r) && access(work, F_OK) != 0;
+    return prepared && empty && refused && removed && bad;
+}
+
+static int aj_role_expected_test(const char *tmp)
+{
+    char path[PATH_MAX], root[65], pub[67], image[65], body[512];
+    memset(root, 'a', 64); root[64] = 0; memset(pub, 'b', 66); pub[66] = 0;
+    memset(image, 'c', 64); image[64] = 0;
+    if (snprintf(path, sizeof(path), "%s/expected.json", tmp) >= (int)sizeof(path)) return 1;
+    snprintf(body, sizeof(body), "{\"name\":\"example/app\",\"root\":\"%s\",\"publisher\":\"%s\",\"image\":\"%s\"}", root, pub, image);
+    bool ok = aj_write_file(path, body) && aj_role_expected(path) && !strcmp(g_root, root) && !strcmp(g_image_a, image);
+    ok = aj_role_test_identity(root, pub, image) && ok;
+    ok = aj_role_test_workspace(tmp, path) && ok;
+    ok = !aj_role_name("a/b/c") && !aj_role_name("a_b/c") && aj_role_name("a-b/c-1") && ok;
+    ok = unlink(path) == 0 && ok;
+    if (ok) puts("split public handoff validation: PASS");
+    return ok ? 0 : 1;
+}
+
+#if defined(__linux__)
+static int aj_supervised_case(const char *self, const char *tmp, const char *mode, bool success, bool cancel)
+{
+    int image = aj_role_self_image(), input = open("/dev/null", O_RDONLY | O_CLOEXEC), fds[2];
+    if (image < 0 || input < 0 || pipe(fds) != 0) return 1;
+    const char *argv[] = {self, "--child", mode, NULL};
+    char root_env[PATH_MAX + 32];
+    if (snprintf(root_env, sizeof(root_env), "AJ_TEST_ROOT=%s", tmp) >= (int)sizeof(root_env)) return 1;
+    const char *env[] = {"PATH=/usr/bin:/bin", root_env, NULL};
+    struct platform_supervised_fd_map maps[] = {{input, 0}, {1, 1}, {2, 2}, {fds[0], 3}};
+    int64_t start = clock_now_monotonic_ns();
+    struct platform_supervised_spec spec = {.executable_fd = image, .argv = argv,
+        .env = env, .env_count = 2, .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE,
+        .maps = maps, .map_count = 4, .launch_deadline_ns = start + 5000000000LL,
+        .cleanup_timeout_ms = 10000};
+    struct platform_supervised_process p; platform_supervised_init(&p);
+    enum platform_supervised_state state = platform_supervised_start(&p, &spec);
+    close(image); close(input); close(fds[0]);
+    if (state != PLATFORM_SUPERVISED_RUNNING) {
+        close(fds[1]); if (p.supervisor_pid >= 0) (void)aj_role_drain(&p); return 1;
+    }
+    g_role_stop = cancel;
+    int64_t budget = !strncmp(mode, "supervised-nested", 17) ?
+        20000000000LL : 2000000000LL;
+    int rc = aj_role_monitor(&p, fds[1], start, start + budget);
+    g_role_stop = 0;
+    return (rc == 0) == success && p.supervisor_pid < 0 && p.observation.no_children &&
+        p.observation.engine_exit_observed ? 0 : 1;
+}
+
+static int aj_supervised_test(const char *self, const char *tmp)
+{
+    struct sigaction old[3];
+    if (!aj_role_handlers(old)) return 1;
+    pid_t other = fork();
+    if (!other) _exit(42);
+    int failed = other < 0;
+    failed |= aj_supervised_case(self, tmp, "supervised-ok", true, false);
+    failed |= aj_supervised_case(self, tmp, "supervised-fail", false, false);
+    failed |= aj_supervised_case(self, tmp, "supervised-signal", false, false);
+    failed |= aj_supervised_case(self, tmp, "supervised-timeout", false, false);
+    failed |= aj_supervised_case(self, tmp, "supervised-timeout", false, true);
+    failed |= aj_supervised_case(self, tmp, "supervised-nested", true, false);
+    failed |= aj_supervised_case(self, tmp, "supervised-nested-crash", true, false);
+    char *owner_argv[] = {(char *)self, (char *)"--child", (char *)"supervised-ok", NULL};
+    struct aj_role_args owner_args = {.seconds = 5};
+    failed |= aj_role_owner(3, owner_argv, &owner_args) != 0;
+    int status; pid_t got;
+    do { got = waitpid(other, &status, 0); } while (got < 0 && errno == EINTR);
+    if (got != other || !WIFEXITED(status) || WEXITSTATUS(status) != 42) failed = 1;
+    if (!aj_role_handlers_restore(old)) failed = 1;
+    if (!failed) puts("split supervised owner lifecycle: PASS");
+    return failed;
+}
+
+static int aj_role_owner_test(const char *self, const char *tmp)
+{
+    char work[PATH_MAX + 16];
+    if (snprintf(work, sizeof(work), "--work=%s", tmp) >= (int)sizeof(work)) return 1;
+    char *argv[] = {(char *)self, (char *)"--sender", work, (char *)"--seconds=5", NULL};
+    struct aj_role_args r;
+    if (!aj_role_parse(4, argv, &r)) return 1;
+    bool refused = aj_role_owner(4, argv, &r) != 0;
+    char missing[PATH_MAX];
+    if (snprintf(missing, sizeof(missing), "%s/control-missing", tmp) >= (int)sizeof(missing)) return 1;
+    r.work = missing;
+    pid_t p = fork();
+    if (!p) { close(3); _exit(aj_role_work(&r) == 2 ? 0 : 1); }
+    if (p < 0) return 1;
+    int st; pid_t got; do { got = waitpid(p, &st, 0); } while (got < 0 && errno == EINTR);
+    bool ok = refused && got == p && WIFEXITED(st) && WEXITSTATUS(st) == 0 && access(missing, F_OK) != 0;
+    if (ok) puts("split owner existing work and control refusal: PASS");
+    return ok ? 0 : 1;
+}
+#else
+static int aj_supervised_test(const char *self, const char *tmp) { (void)self; (void)tmp; return 0; }
+static int aj_role_owner_test(const char *self, const char *tmp) { (void)self; (void)tmp; return 0; }
+#endif
 
 static int aj_test_cli(int argc, char **argv)
 {
@@ -123,6 +355,7 @@ static int aj_test_setup(const char *self, const char *tmp)
         snprintf(path, sizeof path, "%s/build", tmp) >= (int)sizeof path || mkdir(path, 0700)) return 2;
     if (snprintf(path, sizeof path, "%s/build/bin", tmp) >= (int)sizeof path || mkdir(path, 0700)) return 2;
     if (snprintf(path, sizeof path, "%s/build/bin/z23", tmp) >= (int)sizeof path || symlink(self, path)) return 2;
+    if (snprintf(path, sizeof path, "%s/build/bin/zclassic23", tmp) >= (int)sizeof path || symlink(self, path)) return 2;
     return 0;
 }
 
@@ -225,11 +458,31 @@ static int aj_test_cases(void)
     return failed;
 }
 
-int main(int argc, char **argv)
+static int aj_test_dispatch(int argc, char **argv)
 {
-    if (argc == 3 && !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
+    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--role-worker"))) &&
+        !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
+    if (argc > 2 && !strncmp(argv[1], "-datadir=", 9) && !strcmp(argv[2], "-regtest")) return aj_fake_node();
+    if (argc > 1 && !strcmp(argv[1], "--node-worker")) return app_journey_live_main(argc, argv);
+    if (argc > 1 && (!strcmp(argv[1], "--sender") || !strcmp(argv[1], "--receiver")))
+        return app_journey_live_main(argc, argv);
     int cli = aj_test_cli(argc, argv);
     if (cli >= 0) return cli;
+    return -1;
+}
+
+static int aj_test_suite(const char *self, const char *tmp)
+{
+    int failed = aj_test_cases() | aj_group_startup_test() | aj_group_owned_test();
+    failed |= aj_single_get_test(tmp) | aj_catalog_test(tmp) | aj_role_parse_test();
+    failed |= aj_role_expected_test(tmp) | aj_supervised_test(self, tmp) | aj_role_owner_test(self, tmp);
+    return failed;
+}
+
+int main(int argc, char **argv)
+{
+    int dispatch = aj_test_dispatch(argc, argv);
+    if (dispatch >= 0) return dispatch;
     char self[PATH_MAX], tmp[PATH_MAX], root[PATH_MAX];
     const char *base = getenv("TMPDIR"), *home = getenv("HOME");
     if (!base || !*base) {
@@ -238,7 +491,7 @@ int main(int argc, char **argv)
     }
     if (!realpath(argv[0], self) || snprintf(tmp, sizeof tmp, "%s/app-journey-test.XXXXXX", base) >= (int)sizeof tmp || !mkdtemp(tmp)) return 2;
     int failed = aj_test_setup(self, tmp);
-    if (!failed) failed = aj_test_cases() | aj_group_startup_test() | aj_group_owned_test() | aj_single_get_test(tmp) | aj_catalog_test(tmp);
+    if (!failed) failed = aj_test_suite(self, tmp);
     if (!aj_rm_rf(tmp, 0)) failed = 1;
     if (!failed) puts("app journey child status selftest: PASS");
     return failed;
