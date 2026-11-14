@@ -111,9 +111,13 @@ order of size.
    coins read view, the prologue. Fix the largest step, read the next boot
    beacon, repeat. Resident memory (`node_rss_mb`) comes next. A boot that
    refuses to start names its stage and cause; an untyped refusal is a bug.
-2. **A stranger runs a stranger's app.** Today an app travels only as a
-   `.z23share` file handed between friends. Close the chain with pieces
-   that exist:
+2. **A stranger runs a stranger's app.** Signed `.z23share` handoff
+   and public catalog discovery are implemented; the live acceptance below
+   covers isolated personas on one regtest host. Next prove the same signed
+   package root and rebuilt image between independent physical hosts, with
+   a fresh receiver and no external signup. Reuse the existing commands:
+   <!-- claim: symbol-present zcl_native_handle_app_publish tools/command/native_app_publish_command.c # signed catalog publication -->
+   <!-- claim: symbol-present zcl_native_handle_app_get tools/command/native_app_get_command.c # catalog discovery and receive -->
    - `app publish COPY` posts one signed `zcl.app_offer.v1` entry to the
      public board room `apps` and serves the version on the swarm. Its plan
      half writes nothing.
