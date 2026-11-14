@@ -1937,6 +1937,43 @@ static int test_code_impact_rootless_index_rebuilds(void)
     return failures;
 }
 
+static bool ci_merge_group_loss(void)
+{
+    struct agent_impact_acc empty_loss = {0}, source = {0}, dst = {0}, full = {0};
+    char too_long[ZCL_AGENT_IMPACT_GROUP_MAX + 1];
+    memset(too_long, 'x', sizeof(too_long) - 1);
+    too_long[sizeof(too_long) - 1] = '\0';
+    agent_impact_add_group(&empty_loss, too_long);
+    agent_impact_merge_groups(&dst, &empty_loss);
+    if (!dst.groups_lost || dst.groups_len != 0) return false;
+    memset(&dst, 0, sizeof(dst));
+    agent_impact_add_group(&source, "alpha");
+    agent_impact_add_group(&source, "beta");
+    agent_impact_add_group(&source, too_long);
+    source.shared_rule_hits = 9;
+    agent_impact_add_group(&dst, "alpha");
+    agent_impact_merge_groups(&dst, &source);
+    if (!dst.groups_lost || dst.groups_len != 2 || dst.shared_rule_hits != 0 ||
+        strcmp(dst.groups[0], "alpha") || strcmp(dst.groups[1], "beta")) return false;
+    char name[32];
+    for (size_t i = 0; i < ZCL_AGENT_IMPACT_MAX_GROUPS; ++i) {
+        (void)snprintf(name, sizeof(name), "fixture_%zu", i);
+        agent_impact_add_group(&full, name);
+    }
+    agent_impact_merge_groups(&full, &source);
+    return full.groups_lost && full.groups_len == ZCL_AGENT_IMPACT_MAX_GROUPS;
+}
+
+static int test_code_group_merge_loss(void)
+{
+    int failures = 0;
+    TEST("code impact: group merge preserves source and destination loss") {
+        ASSERT(ci_merge_group_loss());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_boot_services_rule_capacity(void)
 {
     int failures = 0;
@@ -2057,6 +2094,7 @@ static int test_code_name_route_order(void)
 int test_code_impact(void)
 {
     int failures = 0;
+    failures += test_code_group_merge_loss();
     failures += test_code_name_route_order();
     failures += test_code_literal_candidate_scan();
     failures += test_code_literal_raw_rejection_contract();

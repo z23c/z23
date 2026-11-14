@@ -25,6 +25,9 @@ struct agent_impact_acc {
  * accumulator or token >= GROUP_MAX sets groups_lost, retaining stored groups
  * and their order. Later additions never clear loss; this is not admission. */
 void agent_impact_add_group(struct agent_impact_acc *acc, const char *group);
+/* Merge only the group names and their loss indication. */
+void agent_impact_merge_groups(struct agent_impact_acc *dst,
+                               const struct agent_impact_acc *src);
 /* Same loss contract; space, tab and comma delimit tokens. Continues after
  * rejected tokens. NULL inputs are no-ops. */
 void agent_impact_add_group_list(struct agent_impact_acc *acc, const char *groups);

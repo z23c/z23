@@ -35,6 +35,15 @@ void agent_impact_add_group(struct agent_impact_acc *acc, const char *group)
     }
 }
 
+void agent_impact_merge_groups(struct agent_impact_acc *dst,
+                               const struct agent_impact_acc *src)
+{
+    if (!dst || !src) return;
+    for (size_t i = 0; i < src->groups_len; ++i)
+        agent_impact_add_group(dst, src->groups[i]);
+    if (src->groups_lost) dst->groups_lost = true;
+}
+
 static bool agent_impact_match_one_pattern(const char *path,
                                            const char *pattern,
                                            size_t len, bool literal_only)

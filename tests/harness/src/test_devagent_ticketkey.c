@@ -195,10 +195,10 @@ static bool dvt_snapshot_fixture(void)
            zcl_spawn_capture(commit, output, sizeof(output), 30000) == 0;
 }
 
-static bool dvt_many_referrers(void)
+static bool dvt_many_referrers(size_t wanted)
 {
     size_t count = 0;
-    for (size_t i = 0; i < zcl_test_group_catalog_count() && count < 120; ++i) {
+    for (size_t i = 0; i < zcl_test_group_catalog_count() && count < wanted; ++i) {
         const char *id = zcl_test_group_catalog_at(i);
         if (strncmp(id, "test_", 5) || strlen(id) < 27 || strlen(id) >= 63) continue;
         char path[256];
@@ -206,7 +206,7 @@ static bool dvt_many_referrers(void)
             !dvt_fixture_write(path, "const char *probe = \"ticket_snapshot_probe\";\n")) return false;
         count++;
     }
-    return count == 120;
+    return count == wanted;
 }
 
 static bool dvt_large_groups_target(char group[64], char early[64])
@@ -268,7 +268,7 @@ static bool dvt_large_groups_fixture(void)
     char saved[PATH_MAX], root[PATH_MAX], group[64] = {0}, early[64] = {0};
     if (!getcwd(saved, sizeof(saved))) return false;
     test_make_tmpdir(root, sizeof(root), "ticket_snapshot", "many_groups");
-    bool ok = chdir(root) == 0 && dvt_snapshot_fixture() && dvt_many_referrers() &&
+    bool ok = chdir(root) == 0 && dvt_snapshot_fixture() && dvt_many_referrers(120) &&
               dvt_large_commit() && dvt_large_groups_target(group, early);
     if (ok) ok = dvt_large_groups_calls(group, early);
     bool restored = chdir(saved) == 0;
@@ -280,6 +280,97 @@ static int dvt_large_groups_test(void)
     int failures = 0;
     TEST("ticketkey: late routed group retains probe and observes tip edits") {
         ASSERT(dvt_large_groups_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool dvt_acc_has(const struct agent_impact_acc *acc, const char *group)
+{
+    for (size_t i = 0; i < acc->groups_len; ++i)
+        if (!strcmp(acc->groups[i], group)) return true;
+    return false;
+}
+
+static bool dvt_loss_groups(char retained[64], char omitted[64])
+{
+    struct agent_impact_snapshot *snapshot = agent_impact_snapshot_create();
+    struct agent_impact_acc acc = {0};
+    bool ok = snapshot && agent_impact_name_routes_snapshot("tools/ticket_snapshot_probe.c", &acc, snapshot);
+    for (size_t i = 0; ok && i < zcl_test_group_catalog_count(); ++i) {
+        const char *id = zcl_test_group_catalog_at(i);
+        char path[256];
+        if (strncmp(id, "test_", 5) || strlen(id) >= 63 ||
+            snprintf(path, sizeof(path), "tests/harness/src/%s.c", id) >= (int)sizeof(path)) continue;
+        if (access(path, F_OK) == 0 && !dvt_acc_has(&acc, id + 5)) {
+            (void)snprintf(omitted, 64, "%s", id + 5);
+            break;
+        }
+    }
+    if (ok && acc.groups_len && acc.groups_lost && omitted[0])
+        (void)snprintf(retained, 64, "%s", acc.groups[0]);
+    else ok = false;
+    printf("[loss fixture groups=%zu lost=%d retained=%s omitted=%s] ", acc.groups_len,
+           acc.groups_lost, ok ? retained : "none", ok ? omitted : "none");
+    agent_impact_snapshot_free(snapshot);
+    return ok;
+}
+
+static bool dvt_loss_call(const char *group, bool *ok, bool *member,
+                          bool *empty, char code[64])
+{
+    struct dvt_call c;
+    dvt_begin(&c);
+    (void)json_push_kv_str(&c.input, "group", group);
+    bool ran = dvt_run(&c);
+    *ok = dvt_ok(&c);
+    *member = dvt_files_contains(&c, "tools/ticket_snapshot_probe.c");
+    *empty = !json_get(&c.reply.data, "key") && !json_get(&c.reply.data, "files") &&
+             !c.reply.error.mutated && !c.reply.error.retryable;
+    (void)snprintf(code, 64, "%s", c.reply.error.code);
+    dvt_end(&c);
+    return ran;
+}
+
+static bool dvt_loss_refusal(const char *omitted)
+{
+    bool ok = false, member = false, empty = false;
+    char code[64] = {0};
+    bool ran = dvt_loss_call(omitted, &ok, &member, &empty, code);
+    printf("[loss omitted ran=%d ok=%d member=%d empty=%d code=%s] ", ran, ok, member, empty, code);
+    return ran && !ok && !member && empty && !strcmp(code, "ROUTING_INCOMPLETE");
+}
+
+static bool dvt_loss_calls(const char *retained, const char *omitted)
+{
+    bool ok = false, member = false, empty = false;
+    char code[64] = {0};
+    bool ran = dvt_loss_call(retained, &ok, &member, &empty, code);
+    bool first = dvt_loss_refusal(omitted);
+    bool repeat = dvt_loss_refusal(omitted);
+    zcl_alloc_fault_fail_next("agent_impact_snapshot");
+    bool fallback = dvt_loss_refusal(omitted);
+    printf("[loss retained ran=%d ok=%d member=%d] ", ran, ok, member);
+    return ran && ok && member && first && repeat && fallback;
+}
+
+static bool dvt_loss_fixture(void)
+{
+    char saved[PATH_MAX], root[PATH_MAX], retained[64] = {0}, omitted[64] = {0};
+    if (!getcwd(saved, sizeof(saved))) return false;
+    test_make_tmpdir(root, sizeof(root), "ticket_snapshot", "lost_groups");
+    bool ok = chdir(root) == 0 && dvt_snapshot_fixture() && dvt_many_referrers(260) &&
+              dvt_large_commit() && dvt_loss_groups(retained, omitted);
+    if (ok) ok = dvt_loss_calls(retained, omitted);
+    bool restored = chdir(saved) == 0;
+    return restored && test_rm_rf_recursive(root) == 0 && ok;
+}
+
+static int dvt_loss_test(void)
+{
+    int failures = 0;
+    TEST("ticketkey: lost routing groups cannot authorize an omitted group") {
+        ASSERT(dvt_loss_fixture());
         PASS();
     } _test_next:;
     return failures;
@@ -579,7 +670,9 @@ static int dvt_referrer_mutation_test(void)
 int test_devagent_ticketkey(void);
 int test_devagent_ticketkey(void)
 {
-    int failures = dvt_large_groups_test();
+    int failures = dvt_loss_test();
+    if (failures) return failures;
+    failures = dvt_large_groups_test();
     if (failures) return failures;
     failures = dvt_referrer_mutation_test();
 

@@ -63,6 +63,8 @@
  * ok=false, status "UNKNOWN_GROUP". Any Git invocation that does not exit
  * 0, or whose output does not parse, is ok=false, status "GIT_FAILED",
  * with a message naming the failing argv.
+ * An unmatched route with lost group names refuses ROUTING_INCOMPLETE;
+ * that refusal publishes no key or closure.
  *
  * PROCESS RULE. Run Git and cc only through zcl_spawn_capture() from
  * util/spawn.h. popen(), system() and a shell command string are forbidden
@@ -524,11 +526,12 @@ static bool dvt_join_group(char *joined, size_t cap, size_t *pos,
     return true;
 }
 
-/* True when the router says group G owns `path`: the routed verdict or any
- * matched shared-rule group names G. The memo above makes repeat lookups
- * free; every distinct path is still decided by the shared-rule resolver,
- * never by a copy of its logic. */
-static bool dvt_owned_by_group(const char *path, const char *group,
+/* MATCH for the routed verdict or a retained group, NO_MATCH only for a
+ * complete negative, UNKNOWN for an unmatched result with lost groups.
+ * Complete memo entries retain the shared resolver's original decision. */
+enum dvt_route_result { DVT_ROUTE_NO_MATCH, DVT_ROUTE_MATCH, DVT_ROUTE_UNKNOWN };
+
+static enum dvt_route_result dvt_owned_by_group(const char *path, const char *group,
     const struct agent_impact_snapshot *snapshot)
 {
     const char *cached = snapshot ? dvt_memo_get(path) : NULL;
@@ -540,7 +543,7 @@ static bool dvt_owned_by_group(const char *path, const char *group,
     size_t i;
     bool complete = true, matched = false;
     if (cached)
-        return dvt_list_names_group(cached, group);
+        return dvt_list_names_group(cached, group) ? DVT_ROUTE_MATCH : DVT_ROUTE_NO_MATCH;
     memset(&acc, 0, sizeof(acc));
     routed = zcl_native_code_route_snapshot(path, &acc, &crisk, snapshot);
     joined[0] = '\0';
@@ -552,8 +555,9 @@ static bool dvt_owned_by_group(const char *path, const char *group,
         if (dvt_list_names_group(acc.groups[i], group)) matched = true;
         if (complete) complete = dvt_join_group(joined, sizeof(joined), &pos, acc.groups[i]);
     }
-    if (snapshot && complete) dvt_memo_put(path, joined);
-    return matched;
+    if (snapshot && complete && !acc.groups_lost) dvt_memo_put(path, joined);
+    if (matched) return DVT_ROUTE_MATCH;
+    return acc.groups_lost ? DVT_ROUTE_UNKNOWN : DVT_ROUTE_NO_MATCH;
 }
 
 /* Sorted unique closure paths; vendor[i] marks a path-only entry and
@@ -1012,7 +1016,14 @@ static bool dvt_seed_set(struct zcl_command_reply *reply,
                          const struct agent_impact_snapshot *snapshot)
 {
     for (size_t i = 0; i < nblobs; i++) {
-        if (dvt_owned_by_group(blobs[i].path, req->group, snapshot) &&
+        enum dvt_route_result route = dvt_owned_by_group(blobs[i].path, req->group, snapshot);
+        if (route == DVT_ROUTE_UNKNOWN) {
+            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "ROUTING_INCOMPLETE", "execute",
+                     "Routing lost group names; a complete ticket key cannot be determined.",
+                     blobs[i].path);
+            return false;
+        }
+        if (route == DVT_ROUTE_MATCH &&
             !dvt_set_add(set, blobs[i].path, false)) {
             dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
                      "out of memory building the closure",

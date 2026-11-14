@@ -500,8 +500,7 @@ static void aih_merge_referrer_hit(const char *referrer_path,
 {
     struct agent_impact_acc found = {0};
     aih_own_groups(referrer_path, &found);
-    for (size_t i = 0; i < found.groups_len; i++)
-        agent_impact_add_group(acc, found.groups[i]);
+    agent_impact_merge_groups(acc, &found);
     if (found.groups_len > 0) {
         acc->shared_rule_hits++;
         *matched = true;
@@ -711,7 +710,7 @@ bool agent_impact_name_routes_snapshot(const char *path,
             struct agent_impact_acc found = {0};
             if (!agent_impact_harness_routes_snapshot(row->path, &found, snapshot))
                 (void)agent_impact_apply_shared_rules(row->path, &found);
-            for (size_t g = 0; g < found.groups_len; g++) agent_impact_add_group(acc, found.groups[g]);
+            agent_impact_merge_groups(acc, &found);
             if (found.groups_len) { acc->shared_rule_hits++; matched = true; }
         }
         return matched;
