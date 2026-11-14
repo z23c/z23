@@ -12,12 +12,14 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <limits.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 #include "lintc.h"
 #include "gate_windows_cross_syntax_priv.h"
 
@@ -194,6 +196,48 @@ static int sh_producer_cases(struct sh_env *e, const char *stub, const char *fla
     return csr_write(p, "/* producer fixture */\n") == 0 ? 0 : 2;
 }
 
+static int sh_generation_count(const char *root)
+{
+    DIR *dir = opendir(root);
+    if (!dir) return -1;
+    struct dirent *entry;
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL)
+        if (entry->d_name[0] != '.') ++count;
+    closedir(dir);
+    return count;
+}
+
+static int sh_retention_case(struct sh_env *e, const char *stub, const char *flags)
+{
+    int h, m, s, rc;
+    char root[SH_P], peer[SH_P];
+    struct stat st;
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
+    shp(root, sizeof root, "%s/.cache/z23/lint-tu/tu-cache-shared-selftest", e->home);
+    shp(peer, sizeof peer, "%s/future-generation", root);
+    if (stat(root, &st) != 0 || csr_mkdirs(peer) != 0) return 2;
+    struct utimbuf future = {.actime = st.st_mtime + 3600, .modtime = st.st_mtime + 3600};
+    if (utime(peer, &future) != 0) return 2;
+    if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
+    if ((rc = sh_expect("the selected generation beside a newer peer", h, m, s,
+                        SH_UNITS, 0, 0)) != 0) return rc;
+    return sh_generation_count(root) == 1 ? 0 : sh_fail("the one-generation limit was exceeded");
+}
+
+static int sh_retention(struct sh_env *e, const char *stub, const char *flags)
+{
+    const char *value = getenv("ZCL_LINT_TU_CACHE_GENERATIONS");
+    char *saved = value ? strdup(value) : NULL;
+    if (value && !saved) return 2;
+    int rc = setenv("ZCL_LINT_TU_CACHE_GENERATIONS", "1", 1) == 0 ?
+        sh_retention_case(e, stub, flags) : 2;
+    int restored = saved ? setenv("ZCL_LINT_TU_CACHE_GENERATIONS", saved, 1) :
+        unsetenv("ZCL_LINT_TU_CACHE_GENERATIONS");
+    free(saved);
+    return restored == 0 ? rc : 2;
+}
+
 static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
 {
     int h, m, s, rc;
@@ -217,7 +261,8 @@ static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
     if ((rc = sh_run(e, 1, stub, stub, flags, &h, &m, &s)) != 0) return rc;
     if ((rc = sh_expect("a changed header in the second tree", h, m, s, 0,
                         SH_UNITS, SH_UNITS)) != 0) return rc;
-    return sh_cc_identity(e, stub, flags);
+    if ((rc = sh_cc_identity(e, stub, flags)) != 0) return rc;
+    return sh_retention(e, stub, flags);
 }
 
 int wcs_selftest_shared_store(const char *base, const char *stub,

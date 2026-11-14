@@ -132,18 +132,19 @@ static int cc_binary_sha(const char *cc, char out[WCS_SHA])
     return -1;
 }
 
-struct gen_ent { char name[256]; long mtime; };
+struct gen_ent { char name[256]; long mtime; bool selected; };
 
 static int gen_cmp(const void *a, const void *b)
 {
     const struct gen_ent *x = a, *y = b;
+    if (x->selected != y->selected) return x->selected ? -1 : 1;
     if (x->mtime != y->mtime) return x->mtime > y->mtime ? -1 : 1;
     return strcmp(x->name, y->name);
 }
 
 /* 0 on success; -1 when the table of generations is full (readdir would
  * otherwise stop early and leave stale generations unpruned). */
-static int prune_generations(const char *gate_root, int keep)
+static int prune_generations(const char *gate_root, const char *selected, int keep)
 {
     static struct gen_ent ents[128];
     DIR *d = opendir(gate_root);
@@ -173,6 +174,9 @@ static int prune_generations(const char *gate_root, int keep)
             break;
         }
         ents[n].mtime = (long)st.st_mtime;
+        /* Reserve one existing slot for this sweep, regardless of clock skew
+         * or equal-second timestamp ties. Other generations remain LRU. */
+        ents[n].selected = strcmp(de->d_name, selected) == 0;
         n++;
     }
     closedir(d);
@@ -304,7 +308,7 @@ int wcs_cache_setup(const char *gate, const char *script_path,
         return 0;
     }
     utime(dir, NULL);
-    if (prune_generations(gate_root, generations_to_keep()) != 0) {
+    if (prune_generations(gate_root, salt, generations_to_keep()) != 0) {
         c_off("cache generations could not be pruned");
         return 2;
     }
