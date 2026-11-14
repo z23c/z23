@@ -121,6 +121,14 @@ preview**, then **Keep this version**. The local file-sharing workflow does
 not require signup. The detailed command contracts and current distribution
 limitations are below.
 
+If you received a copy without keeping a version, reopen **My Apps** with
+the same data directory. Choose **Discover apps → Review received copies →
+Review original**, then **Build and preview** and **Keep this version**.
+Recovery previews the original received snapshot; it does not substitute
+newer local edits. Already-kept versions remain in **My apps**.
+
+<!-- claim: symbol-present al_recovered_start tools/command/native_app_library_command.c # resume an unkept received copy through My Apps -->
+
 ### Discover and help share an original
 
 To browse public offers, run a node with package hosting enabled and use its

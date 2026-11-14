@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE,
-    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS };
+    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS, NUR_REPLACED, NUR_NOT_REPLACED };
 static struct {
     enum nur_mode mode;
     Display *owner;
@@ -64,6 +64,20 @@ static Status nur_send(Display *display, Window window, Bool propagate,
     Status result = XSendEvent(display, window, propagate, mask, event);
     (void)XSync(display, False);
     nur_events();
+    if (nur.mode == NUR_REPLACED && event->type == KeyRelease) {
+        char *name = NULL;
+        if (XFetchName(nur.owner, nur.window, &name) && name) {
+            int screen = DefaultScreen(nur.owner);
+            XDestroyWindow(nur.owner, nur.window);
+            nur.window = XCreateSimpleWindow(nur.owner, RootWindow(nur.owner, screen),
+                8, 8, 80, 60, 0, 0, 0);
+            XStoreName(nur.owner, nur.window, name);
+            XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask);
+            XMapWindow(nur.owner, nur.window);
+            XFree(name);
+            (void)XSync(nur.owner, False);
+        }
+    }
     return result;
 }
 static XImage *nur_image(Display *display, Drawable drawable, int x, int y,
@@ -178,11 +192,8 @@ static bool nur_discovery_result(int result)
 {
     return result == 0 && nur.injected && nur.count_ok && nur.presses == 1 && nur.releases == 1 && nur.images >= 2;
 }
-static bool nur_result(int result)
+static bool nur_basic_result(int result)
 {
-    if (nur.mode == NUR_KEYS) return result == 0;
-    if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE)
-        return nur_discovery_result(result);
     if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE)
         return nur_recovered(result);
     if (nur.mode == NUR_UNMAPPED)
@@ -192,10 +203,18 @@ static bool nur_result(int result)
         return result == 1 && nur.images >= 2 && nur.presses == 1 && nur.releases == 1;
     return false; /* Unexpected error must terminate through nur_error. */
 }
+static bool nur_result(int result)
+{
+    if (nur.mode == NUR_REPLACED || nur.mode == NUR_NOT_REPLACED)
+        return result == (nur.mode == NUR_REPLACED ? 0 : 1) && nur.presses == 1 && nur.releases == 1;
+    if (nur.mode == NUR_KEYS) return result == 0;
+    if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE) return nur_discovery_result(result);
+    return nur_basic_result(result);
+}
 static bool nur_mode_parse(const char *name)
 {
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
-        "name-race", "tree-race", "name-unexpected", "keys"};
+        "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced"};
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i)
         if (!strcmp(name, modes[i])) { nur.mode = (enum nur_mode)i; return true; }
     return false;
@@ -212,6 +231,13 @@ static bool nur_keys(const char *option)
     char *invalid[] = {"native_ui_driver", (char *)option, "--key=5", "--timeout-ms=200", NULL};
     return native_ui_driver_main(4, invalid) == 2 && nur.presses == 4 && nur.releases == 4;
 }
+static int nur_run_driver(char *option)
+{
+    char *args[] = {"native_ui_driver", option, "--key=tab", "--expect-pixels-change", "--timeout-ms=200", NULL};
+    char *replace_args[] = {"native_ui_driver", option, "--key=1", "--expect-window-replaced", "--timeout-ms=200", NULL};
+    if (nur.mode == NUR_KEYS) return nur_keys(option) ? 0 : 1;
+    return nur.mode >= NUR_REPLACED ? native_ui_driver_main(5, replace_args) : native_ui_driver_main(5, args);
+}
 int main(int argc, char **argv)
 {
     if (argc != 2 || !nur_mode_parse(argv[1])) return 2;
@@ -220,14 +246,12 @@ int main(int argc, char **argv)
     int result = -1;
     if (ready) {
         (void)snprintf(option, sizeof(option), "--title=%s", title);
-        char *args[] = {"native_ui_driver", option, "--key=tab",
-            "--expect-pixels-change", "--timeout-ms=200", NULL};
         XErrorHandler previous = XSetErrorHandler(nur_error);
         if (nur.mode == NUR_NAME_RACE || nur.mode == NUR_TREE_RACE) {
             char *count_args[] = {"native_ui_driver", option, "--expect-count=1", "--timeout-ms=200", NULL};
             nur.count_ok = native_ui_driver_main(4, count_args) == 0;
         }
-        result = nur.mode == NUR_KEYS ? (nur_keys(option) ? 0 : 1) : native_ui_driver_main(5, args);
+        result = nur_run_driver(option);
         (void)XSetErrorHandler(previous);
     }
     bool ok = ready && nur_result(result);

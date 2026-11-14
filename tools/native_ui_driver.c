@@ -228,6 +228,7 @@ struct ui_driver_options {
     unsigned int expected_count;
     unsigned int timeout_ms;
     bool expect_pixels_change;
+    bool expect_window_replaced;
 };
 
 static int parse_unsigned_in_range(const char *text, unsigned long lowest,
@@ -261,6 +262,8 @@ static int parse_ui_driver_options(int argc, char **argv,
                 return -1;
         } else if (strcmp(argv[i], "--expect-pixels-change") == 0) {
             options->expect_pixels_change = true;
+        } else if (strcmp(argv[i], "--expect-window-replaced") == 0) {
+            options->expect_window_replaced = true;
         } else {
             return -1;
         }
@@ -312,9 +315,28 @@ static bool ui_driver_options_usable(const struct ui_driver_options *options)
 {
     if (!options->title || !options->title[0] ||
         (!!options->key == options->expect_count_set) ||
-        (options->expect_pixels_change && !options->key))
+        ((options->expect_pixels_change || options->expect_window_replaced) && !options->key) ||
+        (options->expect_pixels_change && options->expect_window_replaced))
         return false;
     return !options->key || find_ui_driver_key(options->key) != NULL;
+}
+
+static bool wait_for_replacement(Display *display, Window root, const char *title,
+                                 Window original, unsigned int attempts, Window *replacement)
+{
+    bool destroyed = false;
+    for (unsigned int i = 0; i <= attempts; ++i) {
+        XEvent event;
+        while (XCheckTypedWindowEvent(display, original, DestroyNotify, &event)) destroyed = true;
+        Window found = None;
+        unsigned int count = matching_windows(display, root, title, 4u, &found);
+        if (destroyed && count == 1) {
+            XImage *image = capture_window(display, found);
+            if (image) { XDestroyImage(image); *replacement = found; return true; }
+        }
+        if (i < attempts) sleep_20ms();
+    }
+    return false;
 }
 
 static void wait_for_matching_windows(Display *display, Window root,
@@ -376,9 +398,39 @@ static int usage(const char *program)
             "usage: %s --title=<substring> "
             "(--key=1|2|3|4|c|tab|enter|left|right|up|down|pagedown|pageup|escape "
             "| --expect-count=N) "
-            "[--expect-pixels-change] [--timeout-ms=N]\n",
+            "[--expect-pixels-change | --expect-window-replaced] [--timeout-ms=N]\n",
             program);
     return 2;
+}
+
+static void report_event(const struct ui_driver_options *options, Window window, Window replacement)
+{
+    printf("{\"schema\":\"zcl.native_ui_physical_event.v1\","
+           "\"title\":\"%s\",\"key\":\"%s\",\"window\":%lu,"
+           "\"delivered\":true,\"pixels_changed\":%s",
+           options->title, options->key, (unsigned long)window,
+           options->expect_pixels_change ? "true" : "false");
+    if (options->expect_window_replaced)
+        printf(",\"replacement_window\":%lu", (unsigned long)replacement);
+    puts("}");
+}
+
+static bool deliver_event(Display *display, Window root, Window window, unsigned int count,
+                          const struct ui_driver_options *options, XImage *before, Window *replacement)
+{
+    if (options->expect_window_replaced && count == 1) {
+        XSelectInput(display, window, StructureNotifyMask);
+        (void)XSync(display, False);
+    }
+    bool sent = (!options->expect_window_replaced || count == 1) &&
+        send_window_event(display, root, window, options->expect_pixels_change,
+                          before, ui_driver_key_symbol(options->key));
+    unsigned int attempts = options->timeout_ms / 20u;
+    bool changed = pixels_changed_after_send(display, window, before, attempts, sent,
+                                             options->expect_pixels_change);
+    bool replaced = !options->expect_window_replaced || (sent &&
+        wait_for_replacement(display, root, options->title, window, attempts, replacement));
+    return sent && changed && replaced;
 }
 
 int main(int argc, char **argv)
@@ -396,9 +448,7 @@ int main(int argc, char **argv)
     if (!ui_driver_options_usable(&options))
         return usage(argv[0]);
     const char *title = options.title;
-    const char *key = options.key;
     bool expect_count_set = options.expect_count_set;
-    bool expect_pixels_change = options.expect_pixels_change;
     unsigned int expected_count = options.expected_count;
 
     Display *display = XOpenDisplay(NULL);
@@ -426,25 +476,17 @@ int main(int argc, char **argv)
                title, count);
         return 0;
     }
-    KeySym key_sym = ui_driver_key_symbol(key);
-    bool sent = send_window_event(display, root, window, expect_pixels_change,
-                                  before, key_sym);
-    bool pixels_changed = pixels_changed_after_send(display, window, before,
-                                                    attempts, sent,
-                                                    expect_pixels_change);
+    Window replacement = None;
+    bool delivered = deliver_event(display, root, window, count, &options, before, &replacement);
     if (before)
         XDestroyImage(before);
     (void)XCloseDisplay(display);
-    if (!sent || !pixels_changed) {
+    if (!delivered) {
         fprintf(stderr,
                 "native_ui_driver: window/key delivery failed or pixels did not change: %s\n",
                 title);
         return 1;
     }
-    printf("{\"schema\":\"zcl.native_ui_physical_event.v1\","
-           "\"title\":\"%s\",\"key\":\"%s\",\"window\":%lu,"
-           "\"delivered\":true,\"pixels_changed\":%s}\n",
-           title, key, (unsigned long)window,
-           expect_pixels_change ? "true" : "false");
+    report_event(&options, window, replacement);
     return 0;
 }

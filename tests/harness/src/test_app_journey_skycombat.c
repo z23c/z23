@@ -30,13 +30,19 @@
 #include "test/test_core.h"
 #include "test/app_seed_fixture.h"
 #include "test/host_tool_capture.h"
+#include "test/app_ui_fixture.h"
 
 #include "chain/chainparams.h"
 #include "platform/time_compat.h"
 #include "command/native_app_launch.h"
+#include "command/native_app_receive_preview.h"
+#include "command/native_app_confirm.h"
+#include "command/app_selection.h"
+#include "base/hex.h"
 
 #if defined(__linux__)
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdio.h>
@@ -166,7 +172,7 @@ static bool ajs_children(pid_t pids[32], size_t *count)
 
 struct ajs_custody {
     pid_t display;
-    const char *cli, *game;
+    const char *cli, *game, *make, *shell;
     long reported;
     bool saw_game, saw_reported;
 };
@@ -176,7 +182,8 @@ static bool ajs_child_identify(pid_t pid, struct ajs_custody *c)
     char image[APP_LAUNCH_PATH_MAX], again[APP_LAUNCH_PATH_MAX];
     uint64_t born = 0, check = 0;
     if (!app_proc_identity(pid, image, &born) || !born ||
-        (strcmp(image, c->cli) && strcmp(image, c->game)) ||
+        (strcmp(image, c->cli) && strcmp(image, c->game) &&
+         (!c->make || strcmp(image, c->make)) && (!c->shell || strcmp(image, c->shell))) ||
         !app_proc_identity(pid, again, &check) || check != born || strcmp(image, again)) {
         fprintf(stderr, "receiver CLI: unknown adopted child pid=%ld\n", (long)pid);
         return false;
@@ -264,6 +271,189 @@ static bool ajs_env_enter(struct ajs_env env[3], const char *home)
 
 struct ajs_cli_result { bool clean, saw_game, saw_reported, accepted; int rc; };
 
+struct ajs_recovery { struct json_value original; uint32_t ready_pages, keep_pages; };
+
+static bool ajs_recovery_pages(const struct json_value *data, bool keep, uint32_t *count)
+{
+    struct app_confirm *view = calloc(1, sizeof(*view));
+    if (!view) return false;
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "received-app");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "%s", keep ? "Preview opened" : "Your copy is ready");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary), "%s", keep ?
+        "Check the app before choosing Keep. Closing ends this review." :
+        "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice.");
+    view->model.action_count = 4;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", keep ? "Keep this version" : "Build and preview");
+    char why[128];
+    bool ok = app_confirm_field(&view->model, "App: ", json_get_str(json_get(data, "name"))) &&
+        app_confirm_field(&view->model, "Saved version: ", json_get_str(json_get(data, "version"))) &&
+        app_confirm_field(&view->model, "Publisher: ", json_get_str(json_get(data, "publisher_fingerprint"))) &&
+        app_confirm_field(&view->model, "Package: ", json_get_str(json_get(data, "package_root"))) &&
+        app_confirm_path(&view->model, "Copy location: ", json_get_str(json_get(data, "destination"))) &&
+        zcl_present_model_page_count_v1(&view->model, count, why, sizeof(why));
+    free(view);
+    return ok && *count > 0 && *count <= ZCL_PRESENT_MODEL_PAGES_MAX;
+}
+
+static bool ajs_recovery_snapshot(struct ajs_world *w, struct ajs_recovery *r)
+{
+    char copy[1400];
+    int n = snprintf(copy, sizeof(copy), "%s/copies/%s", w->j.b_datadir, w->j.b_copy);
+    if (n <= 0 || (size_t)n >= sizeof(copy)) return false;
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.recovery.v1");
+    struct app_receive_preview *preview = NULL;
+    json_set_object(&r->original);
+    bool ok = app_receive_preview_create_recovered(copy, w->j.b_datadir, NULL, &preview, &reply) &&
+        app_receive_preview_describe_recovered(preview, &r->original) &&
+        !strcmp(json_get_str(json_get(&r->original, "package_root")), w->j.share_root) &&
+        !strcmp(json_get_str(json_get(&r->original, "publisher_fingerprint")), w->j.share_fp) &&
+        ajs_recovery_pages(&r->original, false, &r->ready_pages) &&
+        ajs_recovery_pages(&r->original, true, &r->keep_pages);
+    if (!ok) printf("  [B recovery refused: %s]\n", reply.error.code);
+    app_receive_preview_close(preview);
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static bool ajs_recovery_selection(const struct ajs_world *w, const struct ajs_recovery *r)
+{
+    struct app_launch_env env; struct app_selection_routes routes; struct app_selection selected;
+    char why[256], datadir[PATH_MAX], image[65], version[65], fork[65], parent[65], package[65];
+    if (!app_launch_env_from_process(&env, why, sizeof(why)) ||
+        app_selection_routes_load(env.state_dir, &routes) != APP_SELECTION_OK || routes.count != 1 ||
+        app_selection_load(env.state_dir, routes.names[0], &selected) != APP_SELECTION_OK ||
+        !realpath(w->j.b_datadir, datadir)) return false;
+    zcl_hex_encode(selected.image, 32, image); zcl_hex_encode(selected.version, 32, version);
+    zcl_hex_encode(selected.fork, 32, fork);
+    zcl_hex_encode(selected.parent, 32, parent); zcl_hex_encode(selected.package, 32, package);
+    return selected.revision == 1 && !strcmp(selected.copy, json_get_str(json_get(&r->original, "destination"))) &&
+        !strcmp(selected.datadir, datadir) && !strcmp(image, w->j.image_b) &&
+        !strcmp(version, json_get_str(json_get(&r->original, "version"))) &&
+        !strcmp(fork, json_get_str(json_get(&r->original, "version"))) &&
+        !strcmp(parent, json_get_str(json_get(&r->original, "release_id"))) &&
+        !strcmp(package, json_get_str(json_get(&r->original, "package_root")));
+}
+
+struct ajs_ui { char driver[PATH_MAX], log[PATH_MAX]; };
+
+static bool ajs_ui_key(const struct ajs_ui *ui, const char *title,
+                       const char *key, bool pixels, bool replaced, unsigned timeout)
+{
+    bool ok = app_ui_drive(ui->driver, title, key, ui->log, pixels, replaced, timeout);
+    if (!ok) fprintf(stderr, "receiver recovery: window=%s action=%s failed (log %s)\n", title, key, ui->log);
+    return ok;
+}
+
+static bool ajs_ui_confirm_pages(const struct ajs_ui *ui, const char *title,
+                                 uint32_t pages, unsigned first_timeout)
+{
+    if (!ajs_ui_key(ui, title, "--expect-count=1", false, false, first_timeout)) return false;
+    for (uint32_t i = 1; i < pages; i++)
+        if (!ajs_ui_key(ui, title, "--key=3", true, false, 5000)) return false;
+    return ajs_ui_key(ui, title, "--key=4", false, false, 5000);
+}
+
+static bool ajs_ui_recovery_flow(const struct ajs_ui *ui, const struct ajs_recovery *r)
+{
+    return ajs_ui_key(ui, "My Apps", "--key=2", false, true, 10000) &&
+        ajs_ui_key(ui, "My Apps", "--key=4", false, true, 10000) &&
+        ajs_ui_key(ui, "My Apps", "--key=1", false, false, 10000) &&
+        ajs_ui_confirm_pages(ui, "Your copy is ready", r->ready_pages, 10000) &&
+        ajs_ui_confirm_pages(ui, "Preview opened", r->keep_pages, 30000);
+}
+
+struct ajs_gui_paths {
+    struct ajs_ui ui;
+    char binary[1400], datadir[800], cli[PATH_MAX], game[PATH_MAX];
+    char make[PATH_MAX], shell[PATH_MAX], output[PATH_MAX];
+};
+
+static bool ajs_gui_prepare(struct ajs_world *w, struct ajs_gui_paths *p)
+{
+    int n = snprintf(p->ui.driver, sizeof(p->ui.driver), "%s/build/bin/native_ui_driver", w->source);
+    int l = snprintf(p->ui.log, sizeof(p->ui.log), "%s/recovery-driver.log", w->root);
+    int o = snprintf(p->output, sizeof(p->output), "%s/recovery-cli.log", w->root);
+    return n > 0 && (size_t)n < sizeof(p->ui.driver) && l > 0 && (size_t)l < sizeof(p->ui.log) &&
+        o > 0 && (size_t)o < sizeof(p->output) &&
+        ajs_cli_prepare(w, p->binary, sizeof(p->binary), p->datadir, sizeof(p->datadir)) &&
+        realpath(p->binary, p->cli) && realpath(w->j.path_b, p->game) &&
+        realpath("/usr/bin/make", p->make) && realpath("/bin/sh", p->shell);
+}
+
+struct ajs_gui_run {
+    struct ajs_gui_paths paths;
+    struct app_ui_child cli;
+    struct sigaction old_signal;
+    int prior;
+    bool signal_saved, custody, started, flow, exited;
+};
+
+static bool ajs_gui_start(struct ajs_world *w, struct ajs_gui_run *g)
+{
+    struct ajs_gui_paths *p = &g->paths;
+    if (!ajs_gui_prepare(w, p) || !ajs_child_baseline(w->xvfb)) return false;
+    struct sigaction ignore = {.sa_handler = SIG_IGN};
+    if (sigemptyset(&ignore.sa_mask) != 0 || sigaction(SIGPIPE, &ignore, &g->old_signal) != 0) return false;
+    g->signal_saved = true;
+    g->custody = prctl(PR_GET_CHILD_SUBREAPER, &g->prior) == 0 && prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+    int log = g->custody ? open(p->output, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+    int in = g->custody ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+    const char *argv[] = {p->binary, p->datadir, "app", "library", "--json", NULL};
+    g->started = log >= 0 && in >= 0 && app_ui_spawn(&g->cli, argv, in, log, log);
+    if (log >= 0) (void)close(log);
+    if (in >= 0) (void)close(in);
+    return g->started;
+}
+
+static void ajs_gui_log(const char *path)
+{
+    char text[4097];
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    text[n] = '\0';
+    (void)fclose(f);
+    fprintf(stderr, "receiver recovery log %s (first %zu bytes):\n%s\n", path, n, text);
+}
+
+static void ajs_gui_run_flow(struct ajs_gui_run *g, const struct ajs_recovery *r)
+{
+    g->flow = ajs_ui_recovery_flow(&g->paths.ui, r);
+    uint32_t code = UINT32_MAX;
+    g->exited = g->flow && app_ui_wait(&g->cli, 15000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+}
+
+static bool ajs_gui_finish(struct ajs_world *w, const struct ajs_recovery *r, struct ajs_gui_run *g)
+{
+    struct ajs_gui_paths *p = &g->paths;
+    bool stopped = app_ui_stop(&g->cli);
+    struct ajs_custody c = {.display = w->xvfb, .cli = p->cli, .game = p->game, .make = p->make, .shell = p->shell};
+    bool clean = g->custody && stopped && ajs_children_clean(&c) && ajs_child_baseline(w->xvfb);
+    bool restored = clean && prctl(PR_SET_CHILD_SUBREAPER, g->prior) == 0;
+    bool signals = !g->signal_saved || sigaction(SIGPIPE, &g->old_signal, NULL) == 0;
+    bool selected = g->exited && ajs_recovery_selection(w, r);
+    bool ok = g->flow && g->exited && clean && restored && signals && c.saw_game && selected;
+    if (ok) printf("  [receiver GUI recovery: flow=1 exit=0 cleanup=1 selection=1 image=%s]\n", w->j.image_b);
+    if (!ok) {
+        fprintf(stderr, "receiver recovery: started=%d flow=%d exited=%d stopped=%d clean=%d game=%d selected=%d (logs %s, %s)\n",
+                g->started, g->flow, g->exited, stopped, clean, c.saw_game, selected, p->output, p->ui.log);
+        ajs_gui_log(p->output); ajs_gui_log(p->ui.log);
+    }
+    return ok;
+}
+
+static bool ajs_recovery_gui(struct ajs_world *w, const struct ajs_recovery *r)
+{
+    struct ajs_gui_run g = {.cli.pid = -1};
+    if (ajs_gui_start(w, &g)) ajs_gui_run_flow(&g, r);
+    return ajs_gui_finish(w, r, &g);
+}
+
 static void ajs_cli_check(struct ajs_cli_result *result, struct asf_door *run,
                           const struct asf_journey *j, size_t cap)
 {
@@ -312,8 +502,15 @@ static struct ajs_cli_result ajs_b_cli_attempt(struct ajs_world *w, size_t cap)
 static int ajs_b(struct ajs_world *w)
 {
     int failures = 0;
+    struct ajs_env env[3] = {{"XDG_STATE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+                             {"XDG_CONFIG_HOME", NULL}};
+    bool env_set = false;
+    struct ajs_recovery recovery = {0};
+    json_init(&recovery.original);
     TEST("app journey skycombat B: open the share file receives, builds A's "
          "image, opens it; 120 QA frames") {
+        ASSERT(ajs_env_enter(env, w->j.b_home));
+        env_set = true;
         ASSERT(asf_journey_receive(&w->j));
         ASSERT_EQ(asf_qa_frames(w->j.path_b), 0);
         ASSERT(ajs_b_reopen(&w->j));
@@ -321,8 +518,12 @@ static int ajs_b(struct ajs_world *w)
         ASSERT(cli.accepted);
         struct ajs_cli_result lost = ajs_b_cli_attempt(w, 1);
         ASSERT(lost.rc == 0 && !lost.accepted && lost.clean && lost.saw_game && !lost.saw_reported);
+        ASSERT(ajs_recovery_snapshot(w, &recovery));
+        ASSERT(ajs_recovery_gui(w, &recovery));
         PASS();
     } _test_next:;
+    json_free(&recovery.original);
+    if (env_set && !ajs_env_restore(env, 3)) failures++;
     return failures;
 }
 

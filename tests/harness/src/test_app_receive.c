@@ -2024,26 +2024,16 @@ int test_app_receive(void)
 #include <signal.h>
 #include <sys/wait.h>
 
-struct ru_child {
-    pid_t pid;
-    uint64_t token;
-    char before[APP_LAUNCH_PATH_MAX], image[PATH_MAX];
-};
+#include "test/app_ui_fixture.h"
 struct ru_env { const char *key; char *saved; };
 struct ru_run {
-    struct ru_child display, server, driver;
+    struct app_ui_child display, server, driver;
     int input, output;
     char display_name[32], driver_image[PATH_MAX], line[65536];
     const struct receive_fixture *fixture;
     bool file_only;
     bool cli_default;
 };
-static bool ru_pipe(int fd[2])
-{
-    if (pipe(fd) != 0) return false;
-    if (fcntl(fd[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(fd[1], F_SETFD, FD_CLOEXEC) == 0) return true;
-    close(fd[0]); close(fd[1]); return false;
-}
 static bool ru_read_line(int fd, char *out, size_t cap, int timeout)
 {
     size_t used = 0;
@@ -2079,79 +2069,6 @@ static bool ru_write(int fd, const char *text)
     }
     return true;
 }
-/* The fork child blocks before exec until its start token and inherited
- * harness executable are observed. Fast driver exits retain direct-child
- * custody, without pretending a post-exec /proc observation occurred. */
-static void ru_exec(const char *const *argv, int in, int out, int err, int gate)
-{
-    char go = 0;
-    if (read(gate, &go, 1) != 1 || go != 'G') _exit(126);
-    close(gate);
-    if (dup2(in, 0) < 0 || dup2(out, 1) < 0 || dup2(err, 2) < 0) _exit(126);
-    execv(argv[0], (char *const *)argv);
-    _exit(127);
-}
-static bool ru_spawn(struct ru_child *c, const char *const *argv, int in, int out, int err)
-{
-    int gate[2];
-    if (!realpath(argv[0], c->image) || !ru_pipe(gate)) return false;
-    c->pid = fork();
-    if (c->pid == 0) { close(gate[1]); ru_exec(argv, in, out, err, gate[0]); }
-    close(gate[0]);
-    bool pinned = c->pid > 1 && app_proc_identity(c->pid, c->before, &c->token) && c->token;
-    bool sent = pinned && write(gate[1], "G", 1) == 1;
-    close(gate[1]);
-    return sent;
-}
-/* Identity failure may reap a zombie internally; ECHILD is accepted only for
- * this retained direct child, never for unrelated or adopted grandchildren. */
-static bool ru_matches(struct ru_child *c)
-{
-    char exe[APP_LAUNCH_PATH_MAX]; uint64_t token = 0;
-    return app_proc_identity(c->pid, exe, &token) && token == c->token &&
-        (!strcmp(exe, c->image) || !strcmp(exe, c->before));
-}
-static enum platform_process_wait_result ru_wait(struct ru_child *c, unsigned ms, uint32_t *code)
-{
-    if (c->pid <= 1) return PLATFORM_PROCESS_WAIT_EXITED;
-    struct platform_process p; platform_process_init(&p);
-    p.native = (uintptr_t)c->pid; p.pid = (uint64_t)c->pid;
-    enum platform_process_wait_result rc = platform_process_wait(&p, ms, code);
-    if (rc == PLATFORM_PROCESS_WAIT_EXITED) c->pid = -1;
-    return rc;
-}
-static bool ru_reaped_identity_failure(struct ru_child *c)
-{
-    /* Only retained/enumerated direct children reach this fallback. Identity
-     * may disappear during exit before waitpid can reap. Observe that exact
-     * child with the existing bounded wait; never signal without identity. */
-    if (ru_wait(c, 2000, NULL) == PLATFORM_PROCESS_WAIT_EXITED) return true;
-    pid_t done;
-    do { done = waitpid(c->pid, NULL, WNOHANG); } while (done < 0 && errno == EINTR);
-    if (done == c->pid || (done < 0 && errno == ECHILD)) { c->pid = -1; return true; }
-    return false;
-}
-static bool ru_stop(struct ru_child *c)
-{
-    if (c->pid <= 1) return true;
-    enum platform_process_wait_result rc = ru_wait(c, c->token ? 0 : 2000, NULL);
-    if (rc == PLATFORM_PROCESS_WAIT_EXITED) return true;
-    if (rc != PLATFORM_PROCESS_WAIT_RUNNING) return ru_reaped_identity_failure(c);
-    const int signals[] = {SIGTERM, SIGKILL};
-    for (size_t i = 0; i < 2; ++i) {
-        if (!ru_matches(c)) return ru_reaped_identity_failure(c);
-        if (kill(c->pid, signals[i]) != 0 && errno != ESRCH) return false;
-        rc = ru_wait(c, 2000, NULL);
-        if (rc == PLATFORM_PROCESS_WAIT_EXITED) return true;
-        if (rc != PLATFORM_PROCESS_WAIT_RUNNING) return ru_reaped_identity_failure(c);
-    }
-    return false;
-}
-static bool ru_image_live(struct ru_child *c)
-{
-    char exe[APP_LAUNCH_PATH_MAX]; uint64_t token = 0;
-    return app_proc_identity(c->pid, exe, &token) && token == c->token && !strcmp(exe, c->image);
-}
 static int ru_log(const struct ru_run *r, const char *name)
 {
     char path[1100];
@@ -2161,14 +2078,14 @@ static int ru_log(const struct ru_run *r, const char *name)
 static bool ru_xvfb(struct ru_run *r)
 {
     int fd[2];
-    if (!ru_pipe(fd)) return false;
+    if (!app_ui_pipe(fd)) return false;
     int log = ru_log(r, "native-window-xvfb.log");
     /* Keep one server across gaps between short-lived dialog/driver clients.
      * Cleanup owns its lifetime; Xvfb must not reset when the last client closes.
      * displayfd on stdout is the private readiness pipe. */
     const char *argv[] = {"/usr/bin/Xvfb", "-displayfd", "1", "-nolisten", "tcp", "-noreset",
         "-screen", "0", "1280x800x24", NULL};
-    bool ok = log >= 0 && ru_spawn(&r->display, argv, log, fd[1], log);
+    bool ok = log >= 0 && app_ui_spawn(&r->display, argv, log, fd[1], log);
     close(fd[1]); if (log >= 0) close(log);
     char number[12];
     ok = ok && ru_read_line(fd[0], number, sizeof(number), 15000);
@@ -2176,20 +2093,20 @@ static bool ru_xvfb(struct ru_run *r)
     if (!ok || !number[0]) return false;
     for (const char *p = number; *p; ++p) if (*p < '0' || *p > '9') return false;
     int n = snprintf(r->display_name, sizeof(r->display_name), ":%s", number);
-    return n > 0 && (size_t)n < sizeof(r->display_name) && ru_image_live(&r->display) &&
+    return n > 0 && (size_t)n < sizeof(r->display_name) && app_ui_image_live(&r->display) &&
         setenv("DISPLAY", r->display_name, 1) == 0 && unsetenv("WAYLAND_DISPLAY") == 0;
 }
 static bool ru_server(struct ru_run *r)
 {
     int in[2], out[2]; char image[PATH_MAX];
-    if (!realpath("build/bin/z23-dev", image) || !ru_pipe(in)) return false;
-    if (!ru_pipe(out)) { close(in[0]); close(in[1]); return false; }
+    if (!realpath("build/bin/z23-dev", image) || !app_ui_pipe(in)) return false;
+    if (!app_ui_pipe(out)) { close(in[0]); close(in[1]); return false; }
     int log = ru_log(r, "native-window-mcp.log");
     char binding[sizeof(r->fixture->datadir) + 16];
     int n = snprintf(binding, sizeof(binding), "--datadir=%s", r->fixture->datadir);
     const char *argv[] = {image, "mcp", "serve", r->file_only ? binding : NULL, NULL};
     bool ok = n > 0 && (size_t)n < sizeof(binding) && log >= 0 &&
-        ru_spawn(&r->server, argv, in[0], out[1], log);
+        app_ui_spawn(&r->server, argv, in[0], out[1], log);
     close(in[0]); close(out[1]); if (log >= 0) close(log);
     r->input = in[1]; r->output = out[0];
     return ok && fcntl(r->input, F_SETFL, O_NONBLOCK) == 0;
@@ -2201,7 +2118,7 @@ static bool ru_initialize(struct ru_run *r)
     struct json_value doc; json_init(&doc);
     bool ok = json_read(&doc, r->line, strlen(r->line)) && json_get(json_get(&doc, "result"), "serverInfo");
     json_free(&doc);
-    return ok && ru_image_live(&r->server) && ru_write(r->input,
+    return ok && app_ui_image_live(&r->server) && ru_write(r->input,
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
 }
 static bool ru_request_fields(const struct ru_run *r, int id,
@@ -2231,11 +2148,11 @@ static bool ru_driver(struct ru_run *r, const char *action, bool pixels)
     int log = ru_log(r, "native-window-driver.log");
     const char *argv[] = {r->driver_image, "--title=Receive this app copy?", action,
         "--timeout-ms=5000", pixels ? "--expect-pixels-change" : NULL, NULL};
-    bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    bool ok = log >= 0 && app_ui_spawn(&r->driver, argv, log, log, log);
     if (log >= 0) close(log);
     uint32_t code = UINT32_MAX;
-    ok = ok && ru_wait(&r->driver, 7000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
-    bool stopped = ru_stop(&r->driver);
+    ok = ok && app_ui_wait(&r->driver, 7000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool stopped = app_ui_stop(&r->driver);
     return ok && stopped;
 }
 /* The title is unique on this fixture's display; no shared desktop is ever
@@ -2265,7 +2182,7 @@ static bool ru_pending(struct ru_run *r)
 {
     struct pollfd p = {.fd = r->output, .events = POLLIN};
     int rc; do { rc = poll(&p, 1, 0); } while (rc < 0 && errno == EINTR);
-    return rc == 0 && ru_image_live(&r->server) && rt_absent(r->fixture) && ru_home_unchanged(r);
+    return rc == 0 && app_ui_image_live(&r->server) && rt_absent(r->fixture) && ru_home_unchanged(r);
 }
 static bool ru_pages(struct ru_run *r, uint32_t count)
 {
@@ -2402,7 +2319,7 @@ static bool ru_cleanup(struct ru_run *r)
     if (r->input >= 0) close(r->input);
     if (r->output >= 0) close(r->output);
     r->input = r->output = -1;
-    bool driver = ru_stop(&r->driver), server = ru_stop(&r->server), display = ru_stop(&r->display);
+    bool driver = app_ui_stop(&r->driver), server = app_ui_stop(&r->server), display = app_ui_stop(&r->display);
     return driver && server && display;
 }
 /* Direct exec, not a shell or the positional receive/build/run shortcut.
@@ -2418,12 +2335,12 @@ static bool ru_cli_start(struct ru_run *r)
     char file[sizeof(r->fixture->file) + 8], datadir[sizeof(r->fixture->datadir) + 16];
     if (!ru_cli_option(file, sizeof(file), "file", r->fixture->file) ||
         !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) ||
-        !realpath("build/bin/z23-dev", image) || !ru_pipe(out)) return false;
+        !realpath("build/bin/z23-dev", image) || !app_ui_pipe(out)) return false;
     int log = ru_log(r, "native-window-cli.log");
     int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
     const char *argv[] = {image, "app", "receive", file, "--json",
         r->cli_default ? NULL : datadir, NULL};
-    bool ok = log >= 0 && input >= 0 && ru_spawn(&r->server, argv, input, out[1], log);
+    bool ok = log >= 0 && input >= 0 && app_ui_spawn(&r->server, argv, input, out[1], log);
     close(out[1]); if (log >= 0) close(log); if (input >= 0) close(input);
     r->output = out[0];
     return ok;
@@ -2434,10 +2351,10 @@ static bool ru_budget_cli_start(struct ru_run *r)
     char file[sizeof(r->fixture->file) + 8], datadir[sizeof(r->fixture->datadir) + 16];
     if (!ru_cli_option(file, sizeof(file), "file", r->fixture->file) ||
         !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) ||
-        !realpath("build/bin/z23-dev", image) || !ru_pipe(out)) return false;
+        !realpath("build/bin/z23-dev", image) || !app_ui_pipe(out)) return false;
     int log = ru_log(r, "receive-budget-cli.log"), input = open("/dev/null", O_RDONLY | O_CLOEXEC);
     const char *argv[] = {image, "app", "receive", file, datadir, "--preview", "--budget-bytes=2048", "--json", NULL};
-    bool ok = log >= 0 && input >= 0 && ru_spawn(&r->server, argv, input, out[1], log);
+    bool ok = log >= 0 && input >= 0 && app_ui_spawn(&r->server, argv, input, out[1], log);
     close(out[1]); if (log >= 0) close(log); if (input >= 0) close(input);
     r->output = out[0]; return ok;
 }
@@ -2450,7 +2367,7 @@ static bool ru_budget_cli_result(struct ru_run *r)
     ok = ok && !strcmp(ru_string(error, "code"), "BUDGET_TOO_SMALL") && mutated &&
         mutated->type == JSON_BOOL && !json_get_bool(mutated) && rt_absent(r->fixture);
     uint32_t code = 0;
-    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code != 0;
+    bool exited = app_ui_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code != 0;
     json_free(&doc); return ok && exited && ru_window(r, false);
 }
 static int ru_budget_cli_case(void)
@@ -2492,7 +2409,7 @@ static bool ru_cli_result(struct ru_run *r, bool committed)
     printf("APP_RECEIVE_UI transport=cli committed=%d result=%s\n", committed, r->line);
     json_free(&reply);
     uint32_t code = UINT32_MAX;
-    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool exited = app_ui_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
     close(r->output); r->output = -1;
     return ok && exited && ru_window(r, false) && ru_cli_no_build(r);
 }
@@ -2612,14 +2529,14 @@ static bool ruf_child_baseline(const struct ru_run *r)
 }
 static bool ruf_adopted_stop(pid_t pid, const struct ru_run *r)
 {
-    struct ru_child child = {.pid = pid};
+    struct app_ui_child child = {.pid = pid};
     if (!app_proc_identity(pid, child.image, &child.token))
-        return ru_reaped_identity_failure(&child); /* enumerated direct child */
+        return app_ui_reaped_identity_failure(&child); /* enumerated direct child */
     char make[PATH_MAX], shell[PATH_MAX];
     if (!realpath("/usr/bin/make", make) || !realpath("/bin/sh", shell)) return false;
     if (!child.token || (strcmp(child.image, r->server.image) &&
         strcmp(child.image, make) && strcmp(child.image, shell))) return false;
-    return ru_stop(&child); /* Rechecks executable+token before each signal. */
+    return app_ui_stop(&child); /* Rechecks executable+token before each signal. */
 }
 static bool ruf_workers_stop(struct ru_run *r)
 {
@@ -2645,7 +2562,7 @@ static bool ruf_workers_stop(struct ru_run *r)
 }
 static bool ruf_cleanup(struct ru_run *r, bool custody, int old_subreaper)
 {
-    bool server = ru_stop(&r->server);
+    bool server = app_ui_stop(&r->server);
     bool workers = custody && server && ruf_workers_stop(r);
     bool direct = ru_cleanup(r);
     bool empty = custody && ruf_child_baseline(r);
@@ -2707,7 +2624,7 @@ static void ruf_proc_children(long pid, long tid)
 static void ruf_cli_failure(struct ru_run *r)
 {
     int saved_errno = errno;
-    bool verified = ru_image_live(&r->server);
+    bool verified = app_ui_image_live(&r->server);
     fprintf(stderr, "RECEIVE_PROC cli_pid=%ld identity_verified=%d\n", (long)r->server.pid, verified);
     if (verified) {
         char path[64];
@@ -2779,12 +2696,12 @@ static bool ruf_driver(struct ru_run *r, const char *title, const char *action, 
     off_t start = log >= 0 ? lseek(log, 0, SEEK_END) : -1;
     const char *argv[] = {r->driver_image, option, action, "--timeout-ms=5000",
         pixels ? "--expect-pixels-change" : NULL, NULL};
-    bool ok = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    bool ok = log >= 0 && app_ui_spawn(&r->driver, argv, log, log, log);
     if (log >= 0) close(log);
     uint32_t code = UINT32_MAX;
     int waited = -1; /* no wait when spawn failed */
-    if (ok) { waited = (int)ru_wait(&r->driver, 7000, &code); ok = waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0; }
-    bool stopped = ru_stop(&r->driver);
+    if (ok) { waited = (int)app_ui_wait(&r->driver, 7000, &code); ok = waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0; }
+    bool stopped = app_ui_stop(&r->driver);
     if (!ok || !stopped) {
         fprintf(stderr, "--- evidence receive-ui-driver ---\nRECEIVE_FLOW_DRIVER title=%s action=%s wait=%d exit=%u stopped=%d\n",
             title, action, waited, code, stopped);
@@ -2801,12 +2718,12 @@ static bool ruf_cli(struct ru_run *r, enum ruf_case which)
     char file[sizeof(r->fixture->file) + 8], datadir[sizeof(r->fixture->datadir) + 16];
     if (!ru_cli_option(file, sizeof(file), "file", r->fixture->file) ||
         !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) ||
-        !realpath("build/bin/z23-dev", image) || !ru_pipe(out)) return false;
+        !realpath("build/bin/z23-dev", image) || !app_ui_pipe(out)) return false;
     int log = ru_log(r, "receive-flow-cli.log");
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
     const char *argv[] = {image, "app", "receive", file, datadir,
         which == RUF_INVALID ? "--preview=not-a-boolean" : "--preview", "--json", NULL};
-    bool ok = log >= 0 && in >= 0 && ru_spawn(&r->server, argv, in, out[1], log);
+    bool ok = log >= 0 && in >= 0 && app_ui_spawn(&r->server, argv, in, out[1], log);
     close(out[1]); if (log >= 0) close(log); if (in >= 0) close(in);
     r->output = out[0]; return ok;
 }
@@ -2960,7 +2877,7 @@ static bool ruf_result(struct ru_run *r, enum ruf_case which)
     printf("APP_RECEIVE_FLOW case=%d reply=%s\n", which, r->line);
     json_free(&reply);
     uint32_t code = UINT32_MAX;
-    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED &&
+    bool exited = app_ui_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED &&
         ((which != RUF_INVALID && code == 0) || (which == RUF_INVALID && code != 0));
     close(r->output); r->output = -1;
     return ok && exited && ru_window(r, false) &&
@@ -3013,7 +2930,7 @@ static bool ruf_gate_failure(struct ru_run *r, int gate[2])
     /* The fixture's make child is now blocked waiting for our FIFO, not a
      * wall-clock guess. Force the driver's error branch and hand live CLI /
      * build-worker/make/shell custody to the normal failure cleanup below. */
-    return ru_image_live(&r->server) &&
+    return app_ui_image_live(&r->server) &&
         !ruf_driver(r, "Deliberately absent cleanup-control window", "--expect-count=1", false);
 }
 /* Close is deferred while a real make child is held by the existing FIFO.
@@ -3054,7 +2971,7 @@ static bool rfp_blocked_close(struct ru_run *r, int gate[2])
     /* Build holds commits.log: inspect immutable trust and unchanged bytes,
      * not a competing history handle. rfp_result/ru_commit_data reopens and
      * validates the full receipt once the worker has completed. */
-    bool live = ru_image_live(&r->server);
+    bool live = app_ui_image_live(&r->server);
     bool trust = rt_received_trust(r->fixture, &pins);
     bool source = rt_received_source(r->fixture, true);
     fprintf(stderr, "RECEIVE_PROGRESS blocked pending=%d revents=%d live=%d trust=%d source=%d\n",
@@ -3105,7 +3022,7 @@ static bool rfp_result(struct ru_run *r)
     printf("APP_RECEIVE_PROGRESS_CLOSE reply=%s\n", r->line);
     json_free(&reply);
     uint32_t code = UINT32_MAX;
-    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool exited = app_ui_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
     close(r->output); r->output = -1;
     return ok && exited && ru_committed_modes(r) && rfp_no_publication(r);
 }
@@ -3155,7 +3072,7 @@ static bool rfp_success_reply(struct ru_run *r, size_t count)
     bool ok = json_read(&reply, r->line, strlen(r->line)) && rfp_success_data(r, &reply, count);
     json_free(&reply);
     uint32_t code = UINT32_MAX;
-    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool exited = app_ui_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
     close(r->output); r->output = -1;
     return ok && exited && ru_committed_modes(r);
 }
@@ -3173,7 +3090,7 @@ static bool rfp_plan_close(struct ru_run *r)
         !ruf_driver(r, "Checking the received version", "--key=escape", true)) return false;
     struct pollfd output = {.fd = r->output, .events = POLLIN};
     int pending; do { pending = poll(&output, 1, 0); } while (pending < 0 && errno == EINTR);
-    return pending == 0 && ru_image_live(&r->server) && rfp_success_reply(r, 1) &&
+    return pending == 0 && app_ui_image_live(&r->server) && rfp_success_reply(r, 1) &&
         rfp_no_publication(r) && ruf_driver(r, "Building your app", "--expect-count=0", false);
 }
 static bool ruf_progress_actions(struct ru_run *r, enum ruf_case which, int gate[2])
@@ -3269,7 +3186,7 @@ struct rus_identity {
     char version[65], route[33], image[65], record[65], image_path[PATH_MAX];
     uint8_t fork[32];
     struct app_launch_env env;
-    struct ru_child running;
+    struct app_ui_child running;
 };
 static bool rus_bundle(struct receive_fixture *f)
 {
@@ -3310,13 +3227,13 @@ static bool rus_wait_keep_window(struct ru_run *r)
     off_t start = log >= 0 ? lseek(log, 0, SEEK_END) : -1;
     const char *argv[] = {r->driver_image, "--title=Preview opened", "--expect-count=1",
         "--timeout-ms=30000", NULL};
-    bool spawned = log >= 0 && ru_spawn(&r->driver, argv, log, log, log);
+    bool spawned = log >= 0 && app_ui_spawn(&r->driver, argv, log, log, log);
     int spawn_errno = log >= 0 && !spawned ? errno : 0;
     if (log >= 0) close(log);
     uint32_t code = UINT32_MAX;
-    int waited = spawned ? (int)ru_wait(&r->driver, 32000, &code) : -1;
+    int waited = spawned ? (int)app_ui_wait(&r->driver, 32000, &code) : -1;
     bool ok = spawned && waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
-    bool stopped = ru_stop(&r->driver);
+    bool stopped = app_ui_stop(&r->driver);
     if (!ok || !stopped) {
         int64_t end = platform_time_monotonic_ms();
         fputs("--- evidence receive-ui-preview ---\n", stderr);
@@ -3373,7 +3290,7 @@ static bool rus_read(struct ru_run *r, const char *command, struct json_value *r
     json_init(reply);
     bool got = ru_read_line(r->output, r->line, sizeof(r->line), 15000);
     uint32_t code = UINT32_MAX;
-    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
+    bool exited = app_ui_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == 0;
     close(r->output); r->output = -1;
     if (!got || !exited) return false;
     printf("APP_RECEIVE_SUCCESS command=%s wire=%s\n", command, r->line);
@@ -3405,7 +3322,7 @@ static bool rus_process(const struct json_value *d, struct rus_identity *id)
         errno || !*start || !end || *end || !token) return false;
     id->running.pid = (pid_t)json_get_int(pid); id->running.token = token;
     (void)snprintf(id->running.image, sizeof(id->running.image), "%s", id->image_path);
-    return ru_image_live(&id->running) && ruf_bool(d, "ready", true) &&
+    return app_ui_image_live(&id->running) && ruf_bool(d, "ready", true) &&
         !strcmp(ru_string(d, "ready_basis"), "alive") && ru_string(d, "mapped_proof")[0];
 }
 static bool rus_image(const struct receive_fixture *f, struct rus_identity *id, const struct json_value *built)
@@ -3484,10 +3401,10 @@ static bool rus_cli(struct ru_run *r, const char *verb, const char *route)
 {
     int out[2]; char image[PATH_MAX], datadir[1024];
     if (!realpath("build/bin/z23-dev", image) ||
-        !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) || !ru_pipe(out)) return false;
+        !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) || !app_ui_pipe(out)) return false;
     int log = ru_log(r, "receive-success-cli.log"), in = open("/dev/null", O_RDONLY | O_CLOEXEC);
     const char *argv[] = {image, "app", verb, datadir, "--json", route, NULL};
-    bool ok = log >= 0 && in >= 0 && ru_spawn(&r->server, argv, in, out[1], log);
+    bool ok = log >= 0 && in >= 0 && app_ui_spawn(&r->server, argv, in, out[1], log);
     close(out[1]); if (log >= 0) close(log); if (in >= 0) close(in);
     r->output = out[0]; return ok;
 }
@@ -3520,12 +3437,12 @@ static bool rus_reopened(struct ru_run *r, struct rus_identity *id, const struct
 static bool rus_reopen(struct ru_run *r, struct rus_identity *id)
 {
     /* End the preview first; the new CLI must resolve only the kept route. */
-    if (!ru_stop(&id->running)) return false;
+    if (!app_ui_stop(&id->running)) return false;
     struct json_value reply; json_init(&reply);
     bool ok = rus_cli(r, "open", id->route) && rus_read(r, "app.open", &reply) &&
         rus_reopened(r, id, &reply);
     json_free(&reply);
-    bool stopped = ru_stop(&id->running); return ok && stopped;
+    bool stopped = app_ui_stop(&id->running); return ok && stopped;
 }
 /* Only adopted direct descendants in this isolated fixture qualify. A live
  * image must be the fixture's content-addressed build image, checked by bytes,
@@ -3544,9 +3461,9 @@ static bool rus_owned_image(const struct ru_run *r, const char *image)
 }
 static bool rus_adopted_stop(pid_t pid, const struct ru_run *r)
 {
-    struct ru_child child = {.pid = pid};
-    if (!app_proc_identity(pid, child.image, &child.token)) return ru_reaped_identity_failure(&child);
-    if (child.token && rus_owned_image(r, child.image)) return ru_stop(&child);
+    struct app_ui_child child = {.pid = pid};
+    if (!app_proc_identity(pid, child.image, &child.token)) return app_ui_reaped_identity_failure(&child);
+    if (child.token && rus_owned_image(r, child.image)) return app_ui_stop(&child);
     return ruf_adopted_stop(pid, r); /* Existing fixed CLI/make/shell custody. */
 }
 static bool rus_workers_stop(struct ru_run *r)
@@ -3565,7 +3482,7 @@ static bool rus_workers_stop(struct ru_run *r)
 }
 static bool rus_cleanup(struct ru_run *r, bool custody, int old_subreaper)
 {
-    bool server = ru_stop(&r->server);
+    bool server = app_ui_stop(&r->server);
     bool workers = custody && server && rus_workers_stop(r);
     bool direct = ru_cleanup(r);
     bool empty = custody && ruf_child_baseline(r);
@@ -3587,7 +3504,7 @@ static bool rus_after_reply(struct ru_run *r, struct receive_fixture *f, struct 
 {
     if (!ru_committed_modes(r) || !rus_received(f, id, false) || !rus_routes(id, keep)) return false;
     if (!ruf_driver(r, "Preview opened", "--expect-count=0", false)) return false;
-    if (!keep) return ru_stop(&id->running);
+    if (!keep) return app_ui_stop(&id->running);
     return rus_selection(f, id) && rus_list(r, id) && rus_reopen(r, id) &&
         rus_selection(f, id) && rus_received(f, id, false);
 }
@@ -3916,18 +3833,18 @@ static bool rud_one(struct ru_run *r, const char *mode, uint32_t expected)
 {
     int log = ru_log(r, "driver-readiness.log");
     const char *args[] = {r->driver_image, mode, NULL};
-    bool ok = log >= 0 && ru_spawn(&r->driver, args, log, log, log);
+    bool ok = log >= 0 && app_ui_spawn(&r->driver, args, log, log, log);
     if (log >= 0) close(log);
     uint32_t code = UINT32_MAX;
-    ok = ok && ru_wait(&r->driver, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == expected;
-    bool stopped = ru_stop(&r->driver);
+    ok = ok && app_ui_wait(&r->driver, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code == expected;
+    bool stopped = app_ui_stop(&r->driver);
     printf("UI_DRIVER_READINESS mode=%s exit=%u expected=%u cleanup=%d\n", mode, code, expected, stopped);
     return ok && stopped;
 }
 static bool rud_cases(struct ru_run *r)
 {
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
-        "name-race", "tree-race", "name-unexpected", "keys"};
+        "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced"};
     bool ok = true;
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
         bool passed = rud_one(r, modes[i], (i == 3 || i == 7) ? 77u : 0u);
