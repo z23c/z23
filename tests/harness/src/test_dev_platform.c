@@ -12028,7 +12028,6 @@ struct dp_inside_stop {
 {
     char lock[PATH_MAX];
     sigset_t stop;
-    int sig = 0;
     (void)setsid();
     if (chdir(root) != 0)
         _exit(2);
@@ -12075,8 +12074,9 @@ struct dp_inside_stop {
     }
     (void)close(ready_fd);
 #if defined(__linux__)
-    sig = dp_fake_wait_signal(&stop, owner);
+    (void)dp_fake_wait_signal(&stop, owner);
 #else
+    int sig = 0;
     (void)owner;
     (void)sigwait(&stop, &sig);
 #endif
