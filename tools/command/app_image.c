@@ -72,9 +72,16 @@ struct zcl_result app_image_env_root(uint8_t out[32])
     if (!out)
         return ZCL_ERR(-1, "app build record: env root needs an output");
     if (!vcs_toolchain_capsule_v1_capture(&capsule))
+#if defined(__APPLE__)
+        return ZCL_ERR(-1, "Cannot capture build tools at %s. If Apple Command "
+                           "Line Tools are missing, run xcode-select --install; "
+                           "otherwise check the developer directory. Retry.",
+                       VCS_BUILD_COMPILER_V1);
+#else
         return ZCL_ERR(-1, "host toolchain rooted at %s could not be captured; "
                            "verify the compiler, linker and runtime files",
                        VCS_BUILD_COMPILER_V1);
+#endif
     if (!vcs_toolchain_capsule_v1_root(&capsule, out))
         return ZCL_ERR(-1, "app build record: the captured toolchain "
                            "capsule has no root");
