@@ -17,9 +17,10 @@ those bytes: verify the HTTPS installer and manifest separately before claiming
 public availability. Pins identify an individual release; they are not policy
 constants and should be reverified for each qualification.
 
-The 2026-11-14 Linux x86_64 qualification used two fresh HOME/XDG profiles, a
-local graphical desktop, and host C compiler and build tools. Editing used an existing
-local-MCP assistant. The friend needed the app installation, but no assistant,
+The Linux qualification uses two fresh HOME/XDG profiles and a local graphical
+desktop. Record whether the tested release supplies its compiler kit or uses
+host build tools; earlier and later releases can have different prerequisites.
+Editing uses an existing local-MCP assistant. The friend needs the app installation, but no assistant,
 account, or node service. This is not an all-platform or human usability study.
 Use isolated fixtures, admitted jobs, and a bounded lifetime; do not start or
 alter canonical nodes, services, wallets, or profiles.
@@ -39,8 +40,12 @@ See `tools/command/app_installed_source_resolve.c` and
 
 Sky Combat carries its Linux X11/GL compile-time headers in the source copy and
 loads the window-system libraries at runtime. Do not tell recipients to install
-X11/GL development packages for this app. A compiler and make are still needed;
-a working graphical session and runtime libraries are separate launch inputs.
+X11/GL development packages for this app. A compiler and make are still needed,
+either from a verified bundled kit or the host. Inspect the exact release
+manifest and installed build plan before stating which is required. The pinned
+release in [the README](../../README.md) includes a Linux x86_64-v3 compiler kit;
+that does not qualify other architectures or every app. A working graphical
+session and runtime libraries are separate launch inputs.
 <!-- claim: symbol-present SKYCOMBAT_X11_INPUTS apps/skycombat/skycombat.mk # vendored window-system header closure -->
 <!-- claim: symbol-present RGFW_USE_XDL apps/skycombat/skycombat.mk # runtime window-system loading -->
 
@@ -54,15 +59,19 @@ qualify a bundled compiler kit, every app, or GUI launch without runtime librari
 
 ## Run the journey
 
-1. Install the verified release into a fresh sender profile. Open the installed
-   app and record the original visible state. In My Apps, use **Change with your
-   AI** and copy its setup. If a draft is waiting, choose **Change**, then
-   **Change with your AI**. Confirm the copied command and arguments refer to the
-   installed runtime and this profile.
-2. Use the assistant's actual MCP requests to adopt the app. Review native
-   consent, build and preview, then explicitly Keep. Read the source through
-   MCP; plan and confirm a small visible edit using the returned revision,
-   source version, head and blob identities. Save the requests and responses.
+1. Install the verified release into a fresh sender profile. In My Apps choose
+   **Create from Sky Combat**, review **Make my copy**, and confirm. Build and
+   wait for **Preview opened**, then explicitly Keep. Record the original visible
+   state and the resulting kept selection. A build still in progress is not a
+   missing preview; observe its result before sending another action.
+2. On that kept copy choose **Change with your AI** and copy its setup. If a
+   draft is waiting, choose **Change**, then **Change with your AI**. Verify the
+   copied command, arguments, name, revision and source version identify this
+   installed runtime, profile and kept copy. Call `apps_list`, then read source
+   through `app.customize`. Plan and confirm a small visible edit with the
+   returned revision, source version, head and blob identities. Save the actual
+   MCP requests and responses. After uncertain confirmation, inspect the saved
+   result before retrying; do not replay a mutation merely because output was lost.
 3. In My Apps select the kept copy, choose **Change**, then
    **Review unkept changes**. Verify the displayed edited version, build and
    preview it, and explicitly Keep. Save the Keep and selection receipts.
@@ -87,6 +96,7 @@ is not a substitute for them. Do not claim the original working directory was
 modified unless separately demonstrated.
 
 <!-- claim: symbol-present al_change_choice tools/command/native_app_library_command.c # saved draft uses Change; no draft uses Change with your AI -->
+<!-- claim: symbol-present al_model tools/command/native_app_library_command.c # native library offers copy creation before AI setup -->
 
 ## Qualify catalog transport separately
 
