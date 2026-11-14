@@ -1613,7 +1613,8 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         ASSERT(strstr(c.reply.error.evidence, "exit=2") != NULL);
         ASSERT(strstr(c.reply.error.evidence,
                       "FAIL check-no-real-clock-test-deadline") != NULL);
-        ASSERT(strstr(g_rvf.log, "agent-verify") == NULL);
+        (void)snprintf(want, sizeof(want), "%s%s", prefix, lint);
+        ASSERT_STR_EQ(g_rvf.log, want);
         dlt_end(&c);
         PASS();
     }
@@ -1626,7 +1627,8 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
         ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_LINT_FAILED", rc2, 5));
         ASSERT(strstr(c.reply.error.evidence, "no closing line") != NULL);
-        ASSERT(strstr(g_rvf.log, "agent-verify") == NULL);
+        (void)snprintf(want, sizeof(want), "%s%s", prefix, lint);
+        ASSERT_STR_EQ(g_rvf.log, want);
         dlt_end(&c);
         PASS();
     }
@@ -1639,7 +1641,10 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         dlt_rv_mode(&c, r, b2, o2, rc2, "gate", 0);
         ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_PREPARE_FAILED", rc2, 2));
         ASSERT(strstr(c.reply.error.evidence, "step=dev-bin exit=4") != NULL);
-        ASSERT(strstr(g_rvf.log, " lint ") == NULL); /* the argv word, not a path */
+        (void)snprintf(want, sizeof(want),
+                       "%s docs-capability-inventory \n%s dev-bin \n",
+                       pre, pre);
+        ASSERT_STR_EQ(g_rvf.log, want);
         dlt_end(&c);
         PASS();
     }
