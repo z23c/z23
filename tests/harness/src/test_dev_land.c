@@ -916,6 +916,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      test_dev_land_refusal_names_next_step, 0u},
     {"test_dev_land_proof_evidence_compile()",
      test_dev_land_proof_evidence_compile, 0u},
+    {"test_dev_land_gate_diagnostic_window()",
+     test_dev_land_gate_diagnostic_window, 0u},
 #endif
     {"dlx_case_registration()",
      dlx_case_registration, 1u},
@@ -1236,6 +1238,7 @@ static const char *const g_dlx_original_calls[] = {
     "test_dev_land_resubmit_failed_pair()",
     "test_dev_land_refusal_names_next_step()",
     "test_dev_land_proof_evidence_compile()",
+    "test_dev_land_gate_diagnostic_window()",
 #endif
     "dlx_case_registration()",
     "dlx_case_unknown_action()",

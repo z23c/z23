@@ -1487,7 +1487,9 @@ static bool dlx_evidence_lint_late(void)
 {
     const struct dlx_evidence_case k = {
         .tag = "evidence_lint_late", .dimension = ZCL_DEV_PROOF_LINT,
-        .script = "printf '%s\\n' 'FAIL check-red' '──── FAIL log: check-red ────────────────────────────'\n"
+        .script = "printf '%s\\n' 'widget.c:1: error: expected fixture failure' "
+                  "'observed: wrong gate evidence' "
+                  "'FAIL check-red' '──── FAIL log: check-red ────────────────────────────'\n"
                   "i=0; while [ \"$i\" -lt 50 ]; do printf 'PASS selftest preamble %s\\n' \"$i\"; i=$((i+1)); done\n"
                   "printf '%s\\n' '[check-other] FAIL wrong gate' '[check-red] FAIL — shell debt changed:' "
                   "'ss tools/scripts/fixture.sh actual=0 baseline=3 (stale row)' "
@@ -1575,6 +1577,25 @@ int test_dev_land_proof_evidence_compile(void)
         zcl_dev_land_test_first_actionable("zcc -c gate_no_wallclock_assertion.o\n",
                                           detail, sizeof(detail));
         ASSERT_STR_EQ(detail, "");
+        PASS();
+    }
+    TEST("land: diagnostic lines preserve spaces and embedded carriage returns") {
+        static const struct { const char *input; const char *expected; } cases[] = {
+            {"FAIL gate\r\n", "FAIL gate"},
+            {"FAIL gate \t\r\n", "FAIL gate  "},
+            {"FAIL gate\rcontext\r\n", "FAIL gate context"},
+            {"\rFAIL first\nFAIL second\n", " FAIL first"},
+            {"\rPASS check-fail\n", ""},
+            {"\r\n\r\n", ""},
+            {" \t\r\nPASS gate\r\nFAIL gate\r\n", "FAIL gate"},
+            {"FAIL gate\r\n  observed: actual=1 \t\r\n",
+             "FAIL gate\n  observed: actual=1  "},
+        };
+        char detail[256];
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            zcl_dev_land_test_first_actionable(cases[i].input, detail, sizeof(detail));
+            ASSERT_STR_EQ(detail, cases[i].expected);
+        }
         PASS();
     }
     TEST("land: a failed build names its first compiler error, relative") {
@@ -1720,6 +1741,97 @@ int test_dev_land_refusal_names_next_step(void)
         ASSERT(c.reply.error.next_action[0] != '\0');
         ASSERT(strstr(c.reply.error.next_action, "z23 dev land ") != NULL);
         dlx_end(&c);
+        PASS();
+    } _test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* Both fixture lines, a typed next action, and a row that still encodes.
+ * A log that is only the token FAIL does not satisfy the same predicate. */
+static bool dlx_gate_diag_holds(const struct dlx_call *c)
+{
+    const char *detail = dlx_str(c, "detail");
+    const char *next = dlx_str(c, "next_action");
+    return strstr(detail, "FAIL check-kpi-floor") != NULL &&
+           strstr(detail, "observed: exit status 1 response body empty") != NULL &&
+           strstr(next, "z23 dev land ") != NULL;
+}
+
+static bool dlx_gate_diag_step(const char *tag, const char *script,
+                               struct dlx_call *c)
+{
+    const struct dlx_evidence_case k = {
+        .tag = tag,
+        .dimension = ZCL_DEV_PROOF_LINT,
+        .script = script,
+        .token = "child_proof_failed_exit_1",
+    };
+    char wt[PATH_MAX], local[64], base[64];
+    dlx_isolate(tag);
+    if (!dlx_evidence_settle(&k, wt, local, base))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+    dlx_begin(c, "step");
+    if (dlx_run(c) && dlx_ok(c) &&
+        strcmp(dlx_str(c, "state"), "failed") == 0)
+        return true;
+    dlx_end(c);
+    return false;
+}
+
+int test_dev_land_gate_diagnostic_window(void)
+{
+    int failures = 0;
+    extern bool zcl_native_dev_land_test_encode_detail(const char *, bool,
+                                                       char *, size_t);
+    TEST("test_dev_land_gate_diagnostic_window: failure line and observed evidence") {
+        struct dlx_call c;
+        char landdir[1200], path[1400], stored[8192], encoded[8192];
+        size_t len = 0;
+        const struct json_value *outcomes, *row;
+        ASSERT(dlx_gate_diag_step(
+            "gate_diag_window",
+            "printf '%s\\n' 'FAIL check-kpi-floor' "
+            "'observed: exit status 1 response body empty'; exit 1\n",
+            &c));
+        ASSERT(dlx_gate_diag_holds(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "next_action"), "z23 dev land status");
+        ASSERT(strstr(dlx_str(&c, "detail"), "; log: ") != NULL);
+        ASSERT(zcl_native_dev_land_test_encode_detail(
+            dlx_str(&c, "detail"), true, encoded, sizeof(encoded)));
+        ASSERT(strstr(encoded, "FAIL check-kpi-floor") != NULL);
+        ASSERT(strstr(encoded, "observed: exit status 1 response body empty") != NULL);
+        dlx_end(&c);
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(snprintf(path, sizeof(path), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(path));
+        ASSERT(dlx_slurp(path, stored, sizeof(stored) - 1, &len));
+        stored[len] = '\0';
+        ASSERT(strstr(stored, "FAIL check-kpi-floor") != NULL);
+        ASSERT(strstr(stored, "observed: exit status 1 response body empty") != NULL);
+        dlx_begin(&c, "status");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        outcomes = dlx_arr(&c, "outcomes");
+        ASSERT(outcomes && outcomes->num_children >= 1);
+        row = &outcomes->children[0];
+        const char *status_detail = json_get_str(json_get(row, "detail"));
+        const char *status_next = json_get_str(json_get(row, "next_action"));
+        ASSERT(status_detail &&
+               strstr(status_detail, "FAIL check-kpi-floor") != NULL);
+        ASSERT(status_detail &&
+               strstr(status_detail,
+                      "observed: exit status 1 response body empty") != NULL);
+        ASSERT(status_next != NULL);
+        ASSERT_STR_EQ(status_next, "z23 dev land status");
+        dlx_end(&c);
+        dlx_restore();
+        ASSERT(dlx_gate_diag_step(
+            "gate_diag_fail_only",
+            "printf '%s\\n' 'FAIL'; exit 1\n", &c));
+        ASSERT(!dlx_gate_diag_holds(&c));
+        dlx_end(&c);
+        dlx_restore();
         PASS();
     } _test_next:;
     dlx_restore();

@@ -1751,15 +1751,19 @@ int dl_git(const char *dir, const char *const *args, char *out,
     }
 }
 
-static void dl_trim(char *s)
+static void dl_trim_suffix(char *s, const char *chars)
 {
     size_t n;
     if (!s)
         return;
     n = strlen(s);
-    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' ||
-                     s[n - 1] == ' ' || s[n - 1] == '\t'))
+    while (n > 0 && strchr(chars, s[n - 1]))
         s[--n] = '\0';
+}
+
+static void dl_trim(char *s)
+{
+    dl_trim_suffix(s, "\n\r \t");
 }
 
 /* Resolve a commit-ish to its full commit id in `dir`. */
@@ -2505,18 +2509,148 @@ static bool dl_actionable_pass(const char *s)
     return strncmp(s, "PASS", 4) == 0 && (s[4] == '\0' || strchr(" \t\r", s[4]));
 }
 
-/* The first line a person can act on: the earliest line naming an error, a
- * failure, or a refusal. A tail is not an answer; this is. */
-static void dl_first_actionable(const char *text, char *out, size_t cap)
+/* A line that records what the gate observed, not a second failure. */
+static bool dl_gate_observation(const char *s)
+{
+    return strstr(s, "observed") || strstr(s, "exit status") ||
+           strstr(s, "exit=") || strstr(s, "response body") ||
+           strstr(s, "actual=") || strstr(s, "expected");
+}
+
+/* The failure line, then up to four observed-evidence lines that follow it.
+ * A later strong failure does not replace the first one. A weak needle stays
+ * provisional until a strong line resets the window. */
+struct dl_gate_window {
+    char *out;
+    size_t cap;
+    size_t used;
+    unsigned follows;
+    bool locked;
+    bool open;
+    bool have;
+};
+
+static void dl_gate_window_init(struct dl_gate_window *w, char *out, size_t cap)
+{
+    w->out = out;
+    w->cap = cap;
+    w->used = 0;
+    w->follows = 0;
+    w->locked = false;
+    w->open = false;
+    w->have = false;
+    if (out && cap)
+        out[0] = '\0';
+}
+
+static void dl_gate_window_clear(struct dl_gate_window *w)
+{
+    w->used = 0;
+    w->follows = 0;
+    w->locked = false;
+    w->open = false;
+    w->have = false;
+    if (w->out && w->cap)
+        w->out[0] = '\0';
+}
+
+static bool dl_gate_window_add(struct dl_gate_window *w, const char *line)
+{
+    char clean[4096];
+    size_t n, room, take;
+    if (!w->out || w->cap < 2)
+        return false;
+    dl_sanitize_copy(line, clean, sizeof(clean));
+    n = strlen(clean);
+    room = w->cap - 1 - w->used;
+    if (w->used) {
+        if (room < 2)
+            return false;
+        w->out[w->used++] = '\n';
+        room--;
+    }
+    take = n < room ? n : room;
+    while (take > 0 && ((unsigned char)clean[take] & 0xC0) == 0x80)
+        take--;
+    memcpy(w->out + w->used, clean, take);
+    w->used += take;
+    w->out[w->used] = '\0';
+    return take == n;
+}
+
+static bool dl_gate_window_skip(const char *result)
+{
+    return result[0] == '\0' || dl_actionable_pass(result) ||
+           dl_actionable_compile(result);
+}
+
+static void dl_gate_window_lock(struct dl_gate_window *w, const char *line)
+{
+    if (w->locked) {
+        w->open = false;
+        return;
+    }
+    dl_gate_window_clear(w);
+    w->locked = true;
+    w->open = true;
+    w->have = true;
+    (void)dl_gate_window_add(w, line);
+}
+
+static void dl_gate_window_follow(struct dl_gate_window *w, const char *result,
+                                  const char *line)
+{
+    if (!w->open || w->follows >= 4 || !dl_gate_observation(result) ||
+        !dl_gate_window_add(w, line))
+        w->open = false;
+    else
+        w->follows++;
+}
+
+static bool dl_gate_window_needle(const char *line)
 {
     static const char *const needles[] = {
         "FAIL", "fail", "error:", "Error", "ERROR", "undefined reference",
         "refused", "assert",
     };
+    for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++)
+        if (strstr(line, needles[i]))
+            return true;
+    return false;
+}
+
+static void dl_gate_window_line(struct dl_gate_window *w, char *line)
+{
+    const char *result;
+    if (!w || !line)
+        return;
+    dl_trim_suffix(line, "\n\r");
+    result = line + strspn(line, " \t\r");
+    if (dl_gate_window_skip(result))
+        return;
+    if (dl_actionable_strong(result)) {
+        dl_gate_window_lock(w, line);
+        return;
+    }
+    if (w->have) {
+        dl_gate_window_follow(w, result, line);
+        return;
+    }
+    if (!dl_gate_window_needle(line))
+        return;
+    w->have = true;
+    w->open = true;
+    (void)dl_gate_window_add(w, line);
+}
+
+/* The first line a person can act on, plus the observed-evidence lines that
+ * follow it. A tail is not an answer; this is. */
+static void dl_first_actionable(const char *text, char *out, size_t cap)
+{
+    struct dl_gate_window w;
     char *copy, *save = NULL, *line;
     size_t len;
-    if (out && cap)
-        out[0] = '\0';
+    dl_gate_window_init(&w, out, cap);
     if (!text || !out || cap == 0)
         return;
     len = strlen(text) + 1;
@@ -2525,24 +2659,8 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
         return;
     memcpy(copy, text, len);
     for (line = strtok_r(copy, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        /* Gate names can contain "fail" (check-pipefail-status-pipe).
-         * A passing result is not the failure that stopped the candidate. */
-        const char *result = line + strspn(line, " \t\r");
-        if (dl_actionable_pass(result)) continue;
-        if (dl_actionable_strong(result)) {
-            dl_sanitize_copy(line, out, cap);
-            free(copy);
-            return;
-        }
-        if (dl_actionable_compile(result)) continue;
-        for (size_t i = 0; !out[0] && i < sizeof(needles) / sizeof(needles[0]); i++) {
-            if (strstr(line, needles[i])) {
-                dl_sanitize_copy(line, out, cap);
-                break;
-            }
-        }
-    }
+         line = strtok_r(NULL, "\n", &save))
+        dl_gate_window_line(&w, line);
     free(copy);
 }
 
@@ -4769,6 +4887,19 @@ static bool dl_push_outcome_times(struct json_value *item, const struct dl_row *
          json_push_kv_int(item, "landed_at", r->landed_at));
 }
 
+static bool dl_push_failed_next(struct json_value *item, const struct dl_row *r)
+{
+    if (strcmp(r->state, "failed") != 0)
+        return true;
+    return json_push_kv_str(item, "next_action", "z23 dev land status");
+}
+
+static bool dl_push_outcome_detail(struct json_value *item, const struct dl_row *r)
+{
+    return json_push_kv_str(item, "detail", r->detail) &&
+           dl_push_failed_next(item, r);
+}
+
 static bool dl_push_outcome_row(struct json_value *arr,
                                 const struct dl_row *r)
 {
@@ -4790,7 +4921,7 @@ static bool dl_push_outcome_row(struct json_value *arr,
                           r->remote_signature) &&
          json_push_kv_str(&item, "dimension", r->dimension) &&
          json_push_kv_str(&item, "log_path", r->log_path) &&
-         json_push_kv_str(&item, "detail", r->detail) &&
+         dl_push_outcome_detail(&item, r) &&
          json_push_back(arr, &item);
     json_free(&item);
     return ok;
@@ -5347,6 +5478,13 @@ void dl_step_reply(struct zcl_command_reply *reply,
         if (row->detail[0])
             (void)json_push_kv_str(&reply->data, "detail", row->detail);
     }
+    /* A failed step used to return only the row. The author needs one
+     * command to run next. A caller that already named a more specific
+     * action keeps it: json_get returns the first key. */
+    if (state && strcmp(state, "failed") == 0 &&
+        !json_get(&reply->data, "next_action"))
+        (void)json_push_kv_str(&reply->data, "next_action",
+                               "z23 dev land status");
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -6144,18 +6282,16 @@ static bool dl_lint_is_host_failure(FILE *f, int rc,
 
 static void dl_lint_fallback(FILE *f, char *out, size_t cap)
 {
-    char line[4096], fallback[1024] = "";
+    struct dl_gate_window w;
+    char line[4096];
     bool clipped;
+    dl_gate_window_init(&w, out, cap);
     rewind(f);
     while (dl_lint_line(f, line, sizeof(line), &clipped, NULL)) {
-        const char *p = line + strspn(line, " \t");
-        if (!clipped && strncmp(p, "FAIL ", 5) == 0) {
-            dl_sanitize_copy(p, out, cap);
-            return;
-        }
-        if (!fallback[0]) dl_first_actionable(line, fallback, sizeof(fallback));
+        if (clipped)
+            continue;
+        dl_gate_window_line(&w, line);
     }
-    (void)snprintf(out, cap, "%s", fallback);
 }
 
 enum dl_lint_observation { DL_LINT_CURRENT, DL_LINT_BUSY, DL_LINT_GONE, DL_LINT_STALE, DL_LINT_UNREADABLE };
@@ -8163,7 +8299,8 @@ static void dl_retained_lint(const char *wt, const char *local, const char *base
     }
     FILE *f = fdopen(fd, "r");
     if (!f) { close(fd); return; }
-    (void)dl_lint_body(f, out, cap);
+    if (!dl_lint_body(f, out, cap))
+        dl_lint_fallback(f, out, cap);
     bool stable = fstat(fileno(f), &after) == 0 && dl_same_file_snapshot(&before, &after);
     fclose(f);
     struct zcl_dev_proof_status now = {0};
@@ -8223,6 +8360,7 @@ static void dl_lint_proof_detail(const struct dl_dirs *d, const struct dl_row *r
                        complete ? "" : " [detail truncated]", lint);
     } else if (lint[0]) (void)snprintf(first, 256, "lint %s", lint);
 }
+
 
 /* Name what failed on the settled row. The digest's first line leads the
  * detail with the settled token kept after it, its first word becomes the
@@ -9600,9 +9738,11 @@ static bool dl_push_declined_settle(const struct dl_dirs *d, struct dl_row *row,
                    reason, next);
     row->push_diagnostic_pending = false;
     if (dl_commit_or_report(d, row, true, reply, "failed")) {
-        dl_step_reply(reply, row, "failed");
+        /* Before dl_step_reply: its default failed action must not hide
+         * this refusal's own next command. */
         (void)json_push_kv_str(&reply->data, "code", code);
         (void)json_push_kv_str(&reply->data, "next_action", next);
+        dl_step_reply(reply, row, "failed");
     }
     return true;
 }

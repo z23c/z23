@@ -293,6 +293,7 @@ bool dlx_queue_field_once(const char *anchor, const char *from,
 int test_dev_land_phase_mail_quiet(void);
 int test_dev_land_proof_evidence_test(void);
 int test_dev_land_proof_evidence_compile(void);
+int test_dev_land_gate_diagnostic_window(void);
 int test_dev_land_resubmit_failed_pair(void);
 int test_dev_land_refusal_names_next_step(void);
 int test_dev_land_status_observation(void);
