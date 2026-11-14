@@ -298,7 +298,7 @@ static bool ap_commit(struct ap *p)
 {
     if (!ap_key_unchanged(p) || !ap_create_key(p) || !ap_set_name(p)) return false;
     if (!platform_temp_directory_create("z23-personalize-", p->scratch, sizeof(p->scratch)) ||
-        vcs_tree_materialize(p->dir, p->copy.selected_tree, p->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK)
+        vcs_tree_materialize_disposable(p->dir, p->copy.selected_tree, p->scratch, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) != VCS_OK)
         return ap_fail(p, "MATERIALIZE_FAILED", "saved source could not be materialized privately");
     if (!ap_write_metadata(p)) return false;
     p->mutated = true; /* capture can retain CAS objects on any outcome. */
