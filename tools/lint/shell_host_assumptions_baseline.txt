@@ -13,7 +13,6 @@ nproc	tools/scripts/fresh-boot-weld-prove.sh	1
 nproc	tools/scripts/gate-and-report.sh	1
 nproc	tools/scripts/repro-verify.sh	2
 nproc	tools/scripts/repro_build.sh	2
-nproc	tools/scripts/timings.sh	1
 nproc	tools/scripts/zcode_registry_rederive.sh	1
 sed	tools/dev/commons_journey_acceptance.sh	1
 sed	tools/scripts/stopwatch_artifact_symmetry_check.sh	12
@@ -72,7 +71,6 @@ stat	tools/scripts/repro_build.sh	1
 stat	tools/scripts/sticky_fault_inject.sh	1
 stat	tools/scripts/store_sell_operator_proof.sh	1
 stat	tools/scripts/test_tmp_clean.sh	1
-stat	tools/scripts/timings.sh	1
 stat	tools/scripts/tip_agreement_probe.sh	1
 stat	tools/scripts/zcash_params.sh	1
 stat	tools/scripts/zcl-logrotate.sh	1

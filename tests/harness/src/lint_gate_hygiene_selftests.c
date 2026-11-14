@@ -1534,6 +1534,7 @@ int t_lint_explicit_gates_run_once(void)
     bool created = test_mkdtemp(fixture, sizeof(fixture), "lint_explicit") != NULL;
     TEST("[lint-gate] fast generated gates and explicit goals execute and propagate failures") {
         ASSERT(created);
+        ASSERT(run_gate_script_arg("tools/scripts/timings.sh", NULL, "--self-test") == 0);
         char capture[PATH_MAX];
         ASSERT(lint_gate_out_path(capture, sizeof(capture)) == 0);
         ASSERT(unlink(capture) == 0 || errno == ENOENT);

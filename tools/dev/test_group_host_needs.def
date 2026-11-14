@@ -221,6 +221,8 @@ ZCL_TEST_GROUP_BUILD_NEED("test_skycombat_qa_frames",
  * read-only lane; the script creates and removes only its own fixtures. */
 ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates_realroot",
                           "build/bin/z23-dev", "dev-bin")
+ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates",
+                          "build/bin/z23-timings", "z23-timings")
 
 /* These groups execute the fixed confined package verifier directly, through
  * package lifecycle commit/reproduction, or through build_fabric_worker.

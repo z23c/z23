@@ -18018,10 +18018,28 @@ doctor-env:
 	cc -std=c2x -Wall -Wextra -o build/bin/z23_doctor tools/dev/z23_doctor.c
 	@build/bin/z23_doctor $(ARGS)
 
-# Where the wall time went, read from artifacts measured on this host.
-# Never prints a duration it did not measure here.
-timings:
-	@tools/scripts/timings.sh
+# Read existing timing artifacts; their host and source identity may be unknown.
+TIMINGS_SRCS = tools/dev/timings.c tools/dev/timings_selftest.c \
+    platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c \
+    platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c \
+    platform/modules/base/src/result.c platform/modules/util/src/spawn.c \
+    platform/modules/util/src/spawn_binary.c platform/modules/platform/src/clock.c \
+    platform/modules/platform/src/os_proc.c
+$(BIN_DIR)/z23-timings: $(TIMINGS_SRCS) tools/dev/timings.h Makefile
+	@mkdir -p $(dir $@)
+	@tmp=$$(mktemp "$@.tmp.XXXXXXXX") || exit 1; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  $(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -DZCL_TIMINGS_STANDALONE \
+	    $(ZCL_PLATFORM_CPPFLAGS) -Itools/dev -Iplatform/modules/json/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/platform/include -o "$$tmp" $(TIMINGS_SRCS) -lm && \
+	  mv -f "$$tmp" "$@"
+.PHONY: z23-timings
+z23-timings: $(BIN_DIR)/z23-timings
+
+timings: $(BIN_DIR)/z23-timings
+	@$(BIN_DIR)/z23-timings --lint-total=$(words $(sort $(LINT_GATES)))
 
 # What a newcomer's first build costs: clone this repository into a scratch
 # directory, run the whole fresh-clone sequence, and time each stage. Writes
@@ -18033,7 +18051,7 @@ first-build-timing:
 
 # What an outside contributor can run before opening a PR, with nothing built.
 # Same two checks the public gate runs, in the same order.
-pr-check: $(BIN_DIR)/make-help
+pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 	@echo "══ pr-check: lint + whole-tree syntax ══"
 	@$(MAKE) --no-print-directory lint
 	@$(MAKE) --no-print-directory syntax-check
@@ -18148,10 +18166,10 @@ help-selftest: $(BIN_DIR)/make-help
 doctor-selftest:
 	@tools/scripts/doctor.sh --self-test
 
-timings-selftest:
+timings-selftest: $(BIN_DIR)/z23-timings
 	@tools/scripts/timings.sh --self-test
 
-first-build-timing-selftest:
+first-build-timing-selftest: $(BIN_DIR)/z23-timings
 	@tools/scripts/first_build_timing.sh --self-test
 
 # ── Lint gate: blanket warning suppressions stay named ───────────────────
