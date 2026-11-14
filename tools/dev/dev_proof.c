@@ -2684,8 +2684,9 @@ static bool dp_fresh_named_only_by_changed(const struct dp_split_ctx *c,
  * name), every proof runs lint in full, and its own group is planned
  * (dp_changed_set_widen). apps/z23android/ has its own build, which the root
  * build and the test groups never enter. A row of any file type there is
- * admitted when every file at `local` naming its file name is a changed row or
- * inside the same tree. Other apps are not sealed: the test harness and the
+ * admitted only when every changed row and every file at `local` naming its
+ * file name is inside the same tree. Mixed changes fall back to structural
+ * selection. Other apps are not sealed: the test harness and the
  * engine reach apps/skycombat. A deleted row never comes here. */
 #define DP_FRESH_LINT_ROOT "tools/lint/"
 #define DP_FRESH_LINT_PATH "tools/lint/lintc/gate_lint_gate_wiring.c"
@@ -2712,6 +2713,11 @@ static bool dp_fresh_sealed_admit(const struct dp_split_ctx *c,
                                   const char **refs, size_t count,
                                   const char *added)
 {
+    const char *root = dp_fresh_sealed(added);
+    if (!root) return false;
+    size_t root_len = strlen(root);
+    for (size_t i = 0; i < count; ++i)
+        if (strncmp(refs[i], root, root_len) != 0) return false;
     const char *leaf = dp_split_leaf(added);
     bool android = strncmp(added, DP_FRESH_ANDROID_ROOT,
                            strlen(DP_FRESH_ANDROID_ROOT)) == 0;
@@ -2719,7 +2725,7 @@ static bool dp_fresh_sealed_admit(const struct dp_split_ctx *c,
     const char *argv[] = {"git", "grep", "-l", "-a", android ? "-i" : "-w",
                           "-F", "-e", needle, c->local, "--", NULL};
     return dp_split_name_safe(added) && strlen(leaf) <= DP_SPLIT_LEAF_MAX &&
-           dp_fresh_listing_within(c, argv, dp_fresh_sealed(added), refs, count);
+           dp_fresh_listing_within(c, argv, root, NULL, 0);
 }
 
 /* A name the C implementation reserves (a leading underscore) can be a

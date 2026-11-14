@@ -7046,6 +7046,7 @@ static bool ic_split_base_build(void)
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") &&
            ic_split_w("docs/NOTES.txt", "pending: native_devagent_rules\n") &&
            ic_split_w("tools/zz/m1.txt", "one\n") &&
+           ic_split_w("tools/command/native_devagent_claim.c", "int consumer(void) { return 0; }\n") &&
            ic_split_w("tools/zz/m2.txt", "two\n") &&
            ic_split_w("tools/zz/m3.txt", "three\n") &&
            ic_split_w("tools/zz/m4.txt", "four\n") &&
@@ -7592,6 +7593,21 @@ static bool ic_fresh_edit_lint(void)
                       "int other(int x)\n{\n    return x;\n}\n");
 }
 
+static bool ic_fresh_edit_lint_outside(void)
+{
+    return ic_fresh_edit_lint() &&
+        ic_split_w("tools/command/native_devagent_claim.c", "#include \"../lint/lintc/gate_fresh_probe.c\"\n");
+}
+static bool ic_fresh_edit_lint_wildcard(void)
+{
+    return ic_fresh_edit_lint() &&
+        ic_split_w("Makefile", "outside.o:\n\t$(CC) -r $(wildcard tools/lint/lintc/*.c) -o $@\n");
+}
+static bool ic_fresh_edit_lint_mixed(void)
+{
+    return ic_fresh_edit_lint() && ic_split_w("tools/zz/m1.txt", "unrelated\n");
+}
+
 static bool ic_fresh_edit_lint_fixture(void)
 {
     return ic_split_w("tools/lint/fixtures/fresh_probe.c.fixture", "int x;\n");
@@ -7771,6 +7787,9 @@ static bool ic_fresh_fixture_build(void)
         {"freshtext", ic_fresh_edit_text},
         {"freshstaticbase", ic_fresh_edit_static_base},
         {"freshlint", ic_fresh_edit_lint},
+        {"freshlintoutside", ic_fresh_edit_lint_outside},
+        {"freshlintwildcard", ic_fresh_edit_lint_wildcard},
+        {"freshlintmixed", ic_fresh_edit_lint_mixed},
         {"freshlintfixture", ic_fresh_edit_lint_fixture},
         {"freshlintmention", ic_fresh_edit_lint_mention},
         {"freshandroid", ic_fresh_edit_android},
@@ -7830,6 +7849,9 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshdoc", 0, "code_inventory", "code_have"}, /* a document nothing else names */
     {"freshstaticbase", 0, "devagent_situation", NULL}, /* a shared static name */
     {"freshlint", 0, "make_lint_gates", "code_inventory"}, /* a new lint gate */
+    {"freshlintoutside", 'A', NULL, NULL}, /* changed external consumer */
+    {"freshlintwildcard", 'A', NULL, NULL}, /* changed external build route */
+    {"freshlintmixed", 'A', NULL, NULL}, /* conservatively refuse mixed rows */
     {"freshlintfixture", 0, "make_lint_gates", NULL}, /* a new lint fixture */
     {"freshandroid", 0, "code_inventory", NULL},     /* the app's own build */
     {"freshandroidres", 0, "code_inventory", NULL},  /* any file type there */
