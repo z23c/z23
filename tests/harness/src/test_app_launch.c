@@ -1148,18 +1148,19 @@ static int al_hex_digit(char c)
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     return -1;
 }
-static bool al_notice_path_matches(const struct zcl_present_model_v1 *model, const char *path)
+static unsigned al_notice_path_start(const struct zcl_present_model_v1 *model)
 {
-    char encoded[ZCL_PRESENT_COPY_TEXT_MAX * 4u + 1u]; size_t used = 0;
+    unsigned start = model->item_count;
     for (unsigned i = 0; i < model->item_count; ++i) {
-        const char *prefix = i ? "  " : "Path (escaped): ";
-        const char *line = model->items[i].value; size_t n = strlen(prefix);
-        if (strncmp(line, prefix, n)) return false;
-        line += n; n = strlen(line);
-        if (n >= sizeof(encoded) - used) return false;
-        memcpy(encoded + used, line, n); used += n;
+        if (strncmp(model->items[i].value, "Path (escaped): ", 16)) continue;
+        if (start != model->item_count) return model->item_count;
+        start = i;
     }
-    encoded[used] = 0; const unsigned char *raw = (const unsigned char *)path;
+    return start;
+}
+static bool al_notice_decoded_matches(const char *encoded, size_t used, const char *path)
+{
+    const unsigned char *raw = (const unsigned char *)path;
     for (size_t i = 0; i < used;) {
         unsigned char c = (unsigned char)encoded[i++];
         if (c == '\\') {
@@ -1175,6 +1176,21 @@ static bool al_notice_path_matches(const struct zcl_present_model_v1 *model, con
         if (!*raw || *raw++ != c) return false;
     }
     return *raw == 0;
+}
+static bool al_notice_path_matches(const struct zcl_present_model_v1 *model, const char *path)
+{
+    char encoded[ZCL_PRESENT_COPY_TEXT_MAX * 4u + 1u]; size_t used = 0;
+    unsigned start = al_notice_path_start(model);
+    if (start == model->item_count) return false;
+    for (unsigned i = start; i < model->item_count; ++i) {
+        const char *prefix = i == start ? "Path (escaped): " : "  ";
+        const char *line = model->items[i].value; size_t n = strlen(prefix);
+        if (strncmp(line, prefix, n)) return false;
+        line += n; n = strlen(line);
+        if (n >= sizeof(encoded) - used) return false;
+        memcpy(encoded + used, line, n); used += n;
+    }
+    return al_notice_decoded_matches(encoded, used, path);
 }
 
 static bool al_notice_refused(const struct al_library_script *s)
@@ -1198,6 +1214,14 @@ static bool al_recovery_notice(void *context, const struct zcl_present_model_v1 
     live->owner.update(live->owner.context, &event, false, &redraw, &close);
     return close;
 }
+static bool al_notice_guidance(const struct zcl_present_model_v1 *model)
+{
+    return model->item_count >= 4 && model->action_count == 4 &&
+        strstr(model->items[0].value, "Install Z23") &&
+        strstr(model->items[1].value, ".z23share") &&
+        !strcmp(model->actions[0].id, "close") && !strcmp(model->actions[1].id, "back") &&
+        !strcmp(model->actions[2].id, "next");
+}
 /* The notice runs the real paginated model with an injected native boundary. */
 static bool al_library_notice(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages,
@@ -1210,6 +1234,7 @@ static bool al_library_notice(void *context, const struct zcl_present_model_v1 *
     if (!pages || !pages->pages || !pages->pages[0].copy_text ||
         strcmp(pages->pages[0].copy_text, s->shared) ||
         strcmp(model->request_id, "library-share-result") || !al_notice_path_matches(model, s->shared)) return false;
+    if (!al_notice_guidance(model)) return false;
     (void)snprintf(s->setup, sizeof(s->setup), "%s", pages->pages[0].copy_text);
     bool redraw = false, close = false;
     struct zcl_present_window_event_v1 event = {0};

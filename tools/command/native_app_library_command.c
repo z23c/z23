@@ -681,7 +681,7 @@ static bool al_share_notice(struct app_confirm *view, const char *path, char *wh
     (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "library-share-result");
     (void)snprintf(view->model.title, sizeof(view->model.title), "Share file created");
     (void)snprintf(view->model.summary, sizeof(view->model.summary),
-        "Send this file to a friend. Press C to copy its location; keep this window open while pasting.");
+        "Send this file to a friend.");
     view->model.action_count = 4;
     app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
     app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
@@ -693,7 +693,9 @@ static bool al_share_notice(struct app_confirm *view, const char *path, char *wh
 #else
     app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "done", "Done");
 #endif
-    return app_confirm_path(&view->model, "Path (escaped): ", path) && app_confirm_prepare(view, why, cap);
+    return app_confirm_field(&view->model, "Friend: ", "Install Z23, then open the received .z23share file. No account is needed.") &&
+        app_confirm_field(&view->model, "Copy: ", "Press C to copy the location; keep this window open while pasting.") &&
+        app_confirm_path(&view->model, "Path (escaped): ", path) && app_confirm_prepare(view, why, cap);
 }
 
 static bool al_reveal_enabled(const struct app_confirm *notice)
