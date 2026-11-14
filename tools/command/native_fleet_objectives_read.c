@@ -14,6 +14,7 @@
  * than widening this leaf's link graph to pull in an orphaned package. */
 
 #include "native_fleet_objectives.h"
+#include "native_dev_land_precheck.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -149,12 +150,25 @@ static bool obj_default_attempts_dir(char *out, size_t cap)
 /* A decoded identity cannot exceed the complete ledger record holding it. */
 #define OBJ_NOTE_MAX OBJ_LINE_MAX
 
+/* Precheck appends its annotation even without a caller note. It cannot
+ * identify a train. Keep valid keys byte-for-byte; this is only a validity
+ * check, not permission to merge differently annotated named trains. */
+static bool obj_note_has_identity(const char *note)
+{
+    size_t n = strlen(note);
+    const size_t suffix = sizeof(ZCL_LAND_PRECHECK_SKIP_SUFFIX) - 1;
+    while (n >= suffix && !memcmp(note + n - suffix, ZCL_LAND_PRECHECK_SKIP_SUFFIX, suffix))
+        n -= suffix;
+    return strspn(note, " \t\r\n\v\f") < n;
+}
+
 static void obj_row_group_key(const struct json_value *row, char *out,
                               size_t cap)
 {
     const struct json_value *note = json_get(row, "note");
+    const char *text = note && note->type == JSON_STR ? json_get_str(note) : "";
     (void)snprintf(out, cap, "%s",
-                   note && note->type == JSON_STR ? json_get_str(note) : "");
+                   obj_note_has_identity(text) ? text : "");
 }
 
 struct obj_outcomes_stats {

@@ -162,7 +162,11 @@ static int rpr_case_missing_train_note(const char *root)
         "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n",
         "{\"state\":\"landed\",\"ts\":\"2026-10-22T08:00:00Z\",\"landed_at\":1792660000,\"note\":\"old\",\"attempt\":1,\"started\":1}\n"
         "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":\"\",\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n",
-        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":123,\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":123,\"worktree\":\"same\",\"attempt\":1,\"started\":2}\n",
+        "{\"state\":\"failed\",\"ts\":\"2026-10-12T08:00:00Z\",\"note\":\" [precheck skipped]\",\"attempt\":1,\"started\":1}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":\" [precheck skipped]\",\"attempt\":1,\"started\":2}\n",
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":\" \\t\\r\\n\"}\n",
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":\" \\t [precheck skipped] [precheck skipped]\"}\n"
     };
     (void)snprintf(path, sizeof(path), "%s/missing_note.jsonl", root);
     o.outcomes = path;
@@ -174,6 +178,24 @@ static int rpr_case_missing_train_note(const char *root)
             attempts = zcl_objectives_measure(&o, "landing_attempts_per_train");
             ASSERT(!latency.measured && !attempts.measured);
             ASSERT(strstr(latency.reason, "note") && strstr(attempts.reason, "note"));
+        }
+        PASS();
+    }
+    TEST("objectives: named trains retain their exact notes including precheck annotations") {
+        const char *notes[] = {"named", "named [precheck skipped]"};
+        for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); ++i) {
+            char text[1024];
+            (void)snprintf(text, sizeof(text),
+                "{\"state\":\"failed\",\"ts\":\"2026-10-12T08:00:00Z\",\"note\":\" [precheck skipped]\",\"attempt\":1,\"started\":1}\n"
+                "{\"state\":\"failed\",\"ts\":\"2026-10-22T08:00:00Z\",\"note\":\"%s\",\"attempt\":1,\"started\":2}\n"
+                "{\"state\":\"landed\",\"ts\":\"2026-10-22T09:00:00Z\",\"landed_at\":1792663200,\"note\":\"%s\",\"attempt\":2,\"started\":3}\n",
+                notes[i], notes[i]);
+            ASSERT(rpr_write(path, text));
+            struct zcl_objective_value latency = zcl_objectives_measure(&o, "landing_latency_s");
+            struct zcl_objective_value attempts = zcl_objectives_measure(&o, "landing_attempts_per_train");
+            ASSERT(latency.measured && attempts.measured);
+            ASSERT_EQ(latency.value, 7200);
+            ASSERT_EQ(attempts.value, 2);
         }
         PASS();
     }
