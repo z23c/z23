@@ -75,22 +75,26 @@ static struct node_db *csr_snapshot_copy_locked(
     struct active_chain **chain)
 {
     *chain = csr->chain_active;
-    if (*chain) {
-        struct block_index *tip = active_chain_cached_tip(*chain);
-        if (tip && tip->phashBlock)
-            out->tip_hash = *tip->phashBlock;
-    }
     if (csr->pindex_best_hdr && *csr->pindex_best_hdr)
         out->header_height = (*csr->pindex_best_hdr)->nHeight;
     if (csr->coins_tip)
         coins_view_cache_get_best_block(csr->coins_tip,
                                         &out->coins_best_block);
-    out->consistent = memcmp(out->tip_hash.data,
-                             out->coins_best_block.data, 32) == 0;
     out->commits_ok = csr->commits_ok;
     for (int i = 0; i < CSR_NUM_RESULTS; i++)
         out->commits_rejected_total += csr->commits_rejected[i];
     return csr->ndb;
+}
+
+static void csr_snapshot_tip(struct active_chain *chain, struct chain_state_view *out)
+{
+    if (!chain) return;
+    int height = active_chain_height(chain);
+    struct block_index *tip = active_chain_at(chain, height);
+    if (!tip || !tip->phashBlock || tip->nHeight != height) return;
+    out->tip_height = height;
+    out->tip_hash = *tip->phashBlock;
+    out->consistent = memcmp(out->tip_hash.data, out->coins_best_block.data, 32) == 0;
 }
 
 static void csr_snapshot_view_reset(struct chain_state_view *out)
@@ -128,8 +132,7 @@ void csr_snapshot(struct chain_state_repository *csr,
     /* These projection counts are independent point-in-time observations;
      * they are intentionally not atomic with the in-memory frontier copy.
      * The active chain object has process lifetime. */
-    if (chain)
-        out->tip_height = active_chain_height(chain);
+    csr_snapshot_tip(chain, out);
     /* Introspection must not compete for progress_store_tx_lock with a reducer
      * batch. The canonical coins_kv count is used by commit validation, while
      * this field's public contract is the rebuildable node.db projection. */
@@ -166,7 +169,7 @@ struct zcl_result csr_snapshot_bounded(struct chain_state_repository *csr,
     if (chain) {
         if (!progress_store_tx_trylock())
             return ZCL_ERR(EBUSY, "progress store busy (an ingest owns it)");
-        out->tip_height = active_chain_height(chain);
+        csr_snapshot_tip(chain, out);
         progress_store_tx_unlock();
     }
     /* utxo_count is not part of any bounded observation: its COUNT(*) scan

@@ -21,6 +21,7 @@
 #include "storage/progress_store.h"
 #include "event/event.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -1177,6 +1178,64 @@ static int t_snapshot_after_commit(void)
     return failures;
 }
 
+static struct uint256 g_snapshot_authority_hash;
+static bool snapshot_authoritative(void) { return true; }
+static int64_t g_snapshot_authority_height;
+static int64_t snapshot_authority_height(void) { return g_snapshot_authority_height; }
+static bool snapshot_authority_hash(uint8_t out[32])
+{
+    memcpy(out, g_snapshot_authority_hash.data, 32);
+    return true;
+}
+
+static int t_snapshot_authority_pair(void)
+{
+    int failures = 0;
+    struct chain_state_repository csr;
+    struct csr_fixture f; csr_fix_init(&f);
+    csr_init(&csr, &f.bm, &f.chain, &f.header_tip, &f.coins_tip, NULL, NULL);
+    struct block_index *g = csr_fix_add(&f, 0x92);
+    struct block_index *b = csr_fix_add(&f, 0x93);
+    struct chain_state_commit c = csr_make_commit(g, "init");
+    bool ok = csr_commit_tip(&csr, &c) == CSR_OK;
+    c = csr_make_commit(b, "extend");
+    ok = ok && csr_commit_tip(&csr, &c) == CSR_OK;
+    g_snapshot_authority_hash = *g->phashBlock;
+    g_snapshot_authority_height = 0;
+    active_chain_register_block_map(&f.bm);
+    active_chain_register_authority(&(struct active_chain_authority){
+        .get_height = snapshot_authority_height,
+        .get_hash = snapshot_authority_hash,
+        .is_authoritative = snapshot_authoritative,
+    });
+    struct chain_state_view v;
+    csr_snapshot(&csr, &v);
+    CSR_RUN("csr: snapshot binds authoritative height and hash",
+            ok && v.tip_height == 0 && !memcmp(v.tip_hash.data, g->phashBlock->data, 32));
+    struct zcl_result bounded = csr_snapshot_bounded(&csr, &v);
+    CSR_RUN("csr: bounded snapshot binds authoritative height and hash",
+            bounded.ok && v.tip_height == 0 && !memcmp(v.tip_hash.data, g->phashBlock->data, 32));
+    CSR_RUN("csr: genuine coins hash mismatch stays inconsistent", !v.consistent);
+    g_snapshot_authority_height = 3;
+    csr_snapshot(&csr, &v);
+    static const uint8_t zero[32] = {0};
+    CSR_RUN("csr: absent authority slot is unknown", v.tip_height == -1 &&
+            !memcmp(v.tip_hash.data, zero, 32) && !v.consistent);
+    g_snapshot_authority_height = 0;
+    g_snapshot_authority_hash = *b->phashBlock;
+    csr_snapshot(&csr, &v);
+    CSR_RUN("csr: competing authority hash stays distinguishable",
+            v.tip_height == 0 && memcmp(v.tip_hash.data, g_snapshot_authority_hash.data, 32));
+    active_chain_register_authority(&(struct active_chain_authority){0});
+    csr_snapshot(&csr, &v);
+    CSR_RUN("csr: unbound fallback uses cached tip", v.tip_height == 1 &&
+            !memcmp(v.tip_hash.data, b->phashBlock->data, 32));
+    active_chain_register_block_map(NULL);
+    csr_free(&csr);
+    csr_fix_free(&f);
+    return failures;
+}
+
 static int t_snapshot_uninitialised(void)
 {
     int failures = 0;
@@ -1533,12 +1592,15 @@ struct lo_snapshot_args {
     struct chain_state_repository *csr;
     struct chain_state_view view;
     _Atomic bool done;
+    bool bounded;
+    int bounded_code;
 };
 
 static void *lo_snapshot_thread(void *p)
 {
     struct lo_snapshot_args *a = p;
-    csr_snapshot(a->csr, &a->view);
+    if (a->bounded) a->bounded_code = csr_snapshot_bounded(a->csr, &a->view).code;
+    else csr_snapshot(a->csr, &a->view);
     atomic_store(&a->done, true);
     return NULL;
 }
@@ -1601,6 +1663,17 @@ static int t_snapshot_releases_csr_lock_before_progress_read(void)
     CSR_RUN("csr/lock-order: snapshot completes once the stage releases",
             atomic_load(&args.done) && args.view.tip_height == -1);
 
+    struct lo_snapshot_args bounded = { .csr = &csr, .bounded = true };
+    progress_store_tx_lock();
+    pthread_t bounded_thread;
+    bool bounded_started = pthread_create(&bounded_thread, NULL, lo_snapshot_thread, &bounded) == 0;
+    for (int i = 0; bounded_started && i < 2000 && !atomic_load(&bounded.done); i++)
+        platform_sleep_ms(1);
+    bool finished_while_held = atomic_load(&bounded.done);
+    progress_store_tx_unlock();
+    if (bounded_started) pthread_join(bounded_thread, NULL);
+    CSR_RUN("csr/lock-order: bounded snapshot refuses busy progress store",
+            bounded_started && finished_while_held && bounded.bounded_code == EBUSY);
     active_chain_register_authority(&(struct active_chain_authority){0});
     csr_free(&csr);
     csr_fix_free(&f);
@@ -1647,6 +1720,7 @@ int test_chain_state_repo(void)
     failures += t_persist_coins_best_rejects_before_publish();
     failures += t_persist_coins_best_uses_db_writer();
     failures += t_snapshot_after_commit();
+    failures += t_snapshot_authority_pair();
     failures += t_snapshot_uninitialised();
     failures += t_capture_frontiers_success();
     failures += t_capture_frontiers_null_csr();
