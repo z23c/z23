@@ -27,8 +27,9 @@
 
 #define ZCL_FR_CONTRACT "z23verify.fixed_result.v2"
 #define ZCL_FR_PROFILE "test_fast"
+#define ZCL_FR_PROFILE_ARGC 200u
 #define ZCL_FR_PROFILE_SHA3 \
-    "5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c"
+    "41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082"
 /* The retired strict profile's digest, named only so it refuses by name. */
 #define ZCL_FR_RETIRED_STRICT_SHA3 \
     "5fb3b13597488c20a9f5aeca2b654fad92b39714d93069c12c082206977aadaf"

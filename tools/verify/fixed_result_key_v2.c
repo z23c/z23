@@ -111,14 +111,14 @@ static bool actual_tail_ok(const char *const *argv, size_t argc,
         "-MMD", "-MP", "-MF", NULL, "-MT", NULL,
         "-c", "-o", NULL, SOURCE
     };
-    if (!argv || argc != 183 + sizeof(exact) / sizeof(exact[0])) return false;
+    if (!argv || argc != ZCL_FR_PROFILE_ARGC + sizeof(exact) / sizeof(exact[0])) return false;
     for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++) {
-        const char *actual = argv[183 + i];
+        const char *actual = argv[ZCL_FR_PROFILE_ARGC + i];
         if (!actual) return false;
         if (exact[i] && strcmp(actual, exact[i]) != 0) return false;
     }
-    if (strcmp(argv[183 + 5], target) != 0) return false;
-    const char *dep = argv[183 + 3], *obj = argv[183 + 8];
+    if (strcmp(argv[ZCL_FR_PROFILE_ARGC + 5], target) != 0) return false;
+    const char *dep = argv[ZCL_FR_PROFILE_ARGC + 3], *obj = argv[ZCL_FR_PROFILE_ARGC + 8];
     return output_dirfd == -1 ? work_paths_ok(dep, obj) :
            fd_paths_ok(dep, obj, output_dirfd);
 }
@@ -130,7 +130,7 @@ static bool profile_args_append(const uint8_t *profile, size_t len,
     size_t start = 0, count = 0;
     for (size_t i = 0; i < len; i++) {
         if (profile[i] != '\n') continue;
-        if (count >= 183 || i == start ||
+        if (count >= ZCL_FR_PROFILE_ARGC || i == start ||
             !actual_arg_matches(profile + start, i - start, cwd,
                                 actual[count]) ||
             !append_arg(out, used, profile + start, i - start))
@@ -138,7 +138,7 @@ static bool profile_args_append(const uint8_t *profile, size_t len,
         count++;
         start = i + 1;
     }
-    return count == 183 && start == len;
+    return count == ZCL_FR_PROFILE_ARGC && start == len;
 }
 
 static bool tail_args_append(char out[16384], size_t *used)

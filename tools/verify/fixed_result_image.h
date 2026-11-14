@@ -8,6 +8,8 @@
 #ifndef ZCL_VERIFY_FIXED_RESULT_IMAGE_H
 #define ZCL_VERIFY_FIXED_RESULT_IMAGE_H
 
+#include "verify/fixed_result_contract.h"
+
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -49,7 +51,7 @@
 #define ZCL_FRI_MAX_ENTRIES 4096u
 #define ZCL_FRI_MAX_FILE (512ULL * 1024ULL * 1024ULL)
 #define ZCL_FRI_MAX_BYTES (4ULL * 1024ULL * 1024ULL * 1024ULL)
-#define ZCL_FRI_PROFILE_ARGS 183u
+#define ZCL_FRI_PROFILE_ARGS ZCL_FR_PROFILE_ARGC
 #define ZCL_FRI_TARGET \
     "build/test-obj/epochs/" \
     "0000000000000000000000000000000000000000000000000000000000000000" \
@@ -156,7 +158,7 @@ struct zcl_fri_discovery {
     char trace_only_first[PATH_MAX];
 };
 
-/* The profile as the worker runs it: 183 pinned lines with @CWD@ expanded
+/* The profile as the worker runs it: the pinned lines with @CWD@ expanded
  * once, then the worker's exact -MMD/-MP/-MF/-MT/-c|-E/-o tail. */
 struct zcl_fri_argv {
     char *bytes;

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0.
  * purpose: Builds fixed_result_key_v2_probe.c in a private scratch directory
- *          under $HOME and runs it from the repository root; the exit status
+ *          under $TMPDIR and runs it from the repository root; the exit status
  *          is the compiler's or the probe's. Started through
  *          fixed_result_key_v2_probe.sh; --selftest checks that every compile
  *          input exists and the scratch and signal helpers. */
@@ -16,10 +16,12 @@ static const char *const frk_cc[] = {
     "/usr/bin/cc", "-std=c23", "-Wall", "-Wextra", "-Werror", "-pedantic",
     "-Itools", "-Iplatform/modules/base/include",
     "-Iplatform/modules/sha3/include", "-Iplatform/modules/platform/include",
+    "-Iplatform/modules/codec/include",
     nullptr};
 static const char *const frk_sources[] = {
     "tools/verify/fixed_result_key_v2.c", "tools/verify/fixed_result_contract.c",
     "tools/verify/fixed_result_key_v2_probe.c", "platform/modules/sha3/src/sha3.c",
+    "platform/modules/codec/src/cursor.c",
     nullptr};
 
 static int frk_status(int rc)
@@ -45,13 +47,13 @@ static int frk_run(void)
 {
     struct pu_argv cc = {.n = 0}, probe = {.n = 0};
     char templ[PU_PATH_MAX], work[PU_PATH_MAX];
-    const char *home = getenv("HOME");
+    const char *scratch = getenv("TMPDIR");
     int rc;
-    if (!home || !*home) {
-        fputs("usage: run from the repository root with HOME set\n", stderr);
+    if (!scratch || scratch[0] != '/') {
+        fputs("usage: run from the repository root through devbuild\n", stderr);
         return 2;
     }
-    if (snprintf(templ, sizeof templ, "%s/.z23-fixed-key-v2.XXXXXX", home) >=
+    if (snprintf(templ, sizeof templ, "%s/z23-fixed-key-v2.XXXXXX", scratch) >=
             (int)sizeof templ || !pu_scratch_make(templ, work, sizeof work))
         return 1;
     pu_argv_addv(&cc, frk_cc);

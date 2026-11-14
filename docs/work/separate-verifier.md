@@ -171,13 +171,23 @@ runner; it does not build the separate strict `test_parallel` object tree.
 That discovery cancelled native row 304 before publication. The signed
 strict worker remains historical, ineligible local qualification only.
 `tools/verify/fixed_result_fast.args` pins the real test-fast ordered GCC 14
-direct-source arguments (183 lines including `cc` and the literal random
+direct-source arguments (200 lines including `cc` and the literal random
 seed), SHA3-256
-`5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c`.
-The observed target was
+`41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082`.
+The original qualification target was
 `build/test-obj/epochs/0033ccae6a292700d2b299aec57e346aa7f719bac2798a620d2ba9e155ebca5e/platform/modules/base/src/result.o`.
 The test-fast profile is non-LTO at `-O1` and includes `-DZCL_TESTING`;
 release LTO result.c remains cold.
+
+The current profile repins the Make recipe with `-g1`, updated include roots
+and warning flags. Local requalification produced a 4,496-byte object with
+SHA256 `e6cc944b229437d98654b1222d208ca932fb8b17c565ac512c6f7becc6d4892e`,
+matching the Make-built object. Full and sparse source trees agreed on the
+object, depfile, stderr and preprocessing bytes; epoch, descriptor, header
+shadow, changed-source and same-UID checks passed. This remains local evidence
+with `attest_eligible=0` and zero proof launches avoided. Installed pins and
+images require separate qualification. The measurements below describe the
+retired 183-argument profile, not the current profile.
 
 The one-request `fixed_result_worker` runs the exact test-fast `-c` argv and a
 fresh checker `-E` with only `-fno-working-directory` added, under a fixed
@@ -252,11 +262,11 @@ test "$(stat -c %u "$stage")" = 0
 test "$(stat -c %u "$stage/fixed_result_fast.args")" = 0
 test "$(stat -c %a "$stage")" = 700
 test "$(openssl dgst -sha3-256 "$stage/fixed_result_fast.args" | awk '{print $NF}')" = \
-  5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c
+  41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082
 install -o root -g root -m 0444 "$stage/fixed_result_fast.args" \
   /etc/z23verify/fixed_result_fast.args
 test "$(openssl dgst -sha3-256 /etc/z23verify/fixed_result_fast.args | awk '{print $NF}')" = \
-  5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c
+  41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082
 ```
 
 The later service installer must pin the exact GCC 14 tool image, source

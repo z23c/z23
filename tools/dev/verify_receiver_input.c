@@ -173,7 +173,7 @@ static const char *vr_profile_expand(struct vr_profile *p, const char *cwd)
     return found == 1 ? NULL : "receiver_profile_shape";
 }
 
-/* The 183 LF-terminated tokens, split in place; the first must be "cc". */
+/* The fixed profile's LF-terminated tokens, split in place; the first must be "cc". */
 static bool vr_profile_split(struct vr_profile *out)
 {
     size_t count = 0, start = 0;

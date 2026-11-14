@@ -8,14 +8,14 @@ load pins, authenticate an image, verify a mount, establish account separation,
 or set `attest_eligible`. No
 caller may use successful formatting as permission to reuse an object.
 
-The fixed profile is the exact 183 LF-terminated ordered arguments in
+The fixed profile is the exact 200 LF-terminated ordered arguments in
 `fixed_result_fast.args`, SHA3-256
-`5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c`.
+`41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082`.
 The first argument is `cc`; the final profile argument is the literal
 `-frandom-seed=platform/modules/base/src/result.c`. Only a target shaped
 `build/test-obj/epochs/<64 lowercase hex>/platform/modules/base/src/result.o`
-is accepted. The constructor requires the *actual* ordered 193-token driver
-argv: 183 profile tokens (starting at `cc`), then
+is accepted. The constructor requires the *actual* ordered 210-token driver
+argv: 200 profile tokens (starting at `cc`), then
 `-MMD -MP -MF <dep> -MT <target> -c -o <object> source`.
 It checks every fixed token, expands
 `@CWD@` only against the caller's measured physical cwd, and requires the
@@ -103,7 +103,7 @@ FAIL observations. A nonzero checker/compiler under otherwise eligible inputs
 must block the request and cannot be silently treated as a cold miss.
 
 The local probe exercises formatting only. Its synthetic root vector yields
-`closure_sha3=0502f53a553bfad57377ab92bbe4b1e97fa2367a36ed2a2dacbaf7f041985cec`;
+`closure_sha3=d0fe6bd7bd3689b9cf78e87d4afd3d8acfcbc43c151b9e836ea676b97b5e6dd2`;
 the `verify_contract` test group pins the same vector.
 It launches zero compilers and avoids zero proof launches. It is not an
 eligibility or performance witness.

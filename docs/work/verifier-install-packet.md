@@ -117,7 +117,7 @@ for side in a b; do
     CF="-std=c23 -O2 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
         -ffile-prefix-map=$PWD=/zclassic23"
     FR="tools/verify/fixed_result_contract.c tools/verify/fixed_result_key_v2.c \
-        platform/modules/sha3/src/sha3.c"
+        platform/modules/sha3/src/sha3.c platform/modules/codec/src/cursor.c"
     K="tools/verify/fixed_result_trust.c tools/dev/verify_store.c \
        tools/dev/verify_attest.c $FR core/modules/crypto/src/ed25519.c \
        core/modules/crypto/src/sha512.c core/modules/crypto/src/random_secret.c \
@@ -173,7 +173,7 @@ install -o root -g root -m 0444 <reviewed filter> "$S/fixed_result.seccomp.bpf" 
 openssl dgst -sha3-256 "$S"/fixed_result_* "$S"/z23-tree-closure   # == hashes.a
 ```
 
-The profile must hash to `5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c`.
+The profile must hash to `41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082`.
 The launch policy must hash to `1315fa7fb2a718829a881955bf7415c3b4bdabc30d89ddeda0e0781983cc4abe`.
 
 The signer and publisher are installed directly:
@@ -275,7 +275,7 @@ contract token.
 | Root | Source |
 | --- | --- |
 | `source_content` | the source `content_sha3` from section 5 |
-| `profile_args` | `5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c` |
+| `profile_args` | `41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082` |
 | `source_image` | the source `tree_sha3` |
 | `tool_image` | the tool `tree_sha3` |
 | `worker` | the worker's hash in `hashes.a` |

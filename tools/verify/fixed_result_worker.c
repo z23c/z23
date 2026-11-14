@@ -34,7 +34,7 @@
 #define COMPILER_UID ZCL_FR_COMPILER_UID
 #define PROFILE "/etc/z23verify/fixed_result_fast.args"
 #define SOURCE ZCL_FR_SOURCE
-#define MAX_ARGS 183u
+#define MAX_ARGS ZCL_FR_PROFILE_ARGC
 #define MAX_PROFILE 65536u
 #define MAX_REQUEST 8192u
 #define MAX_PACKET 2048u

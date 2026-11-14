@@ -15,7 +15,7 @@ struct fixture {
     size_t profile_len;
     struct zcl_fixed_result_v2_roots roots;
     char target_a[160], target_b[160], profile_copy[65536], cwd_arg[4096];
-    const char *argv[193];
+    const char *argv[(ZCL_FR_PROFILE_ARGC + 10u)];
     const char *envp[4];
     struct zcl_fixed_result_v2_expected baseline, observed;
     const char *why;
@@ -45,7 +45,7 @@ static bool make_actual(struct fixture *f)
     char *line = f->profile_copy;
     for (size_t i = 0; i < f->profile_len; i++) {
         if (f->profile_copy[i] != '\n') continue;
-        if (count >= 183) return false;
+        if (count >= ZCL_FR_PROFILE_ARGC) return false;
         f->profile_copy[i] = '\0';
         char *tag = strstr(line, "@CWD@");
         if (tag) {
@@ -58,13 +58,13 @@ static bool make_actual(struct fixture *f)
         count++;
         line = f->profile_copy + i + 1;
     }
-    if (count != 183) return false;
+    if (count != ZCL_FR_PROFILE_ARGC) return false;
     static const char *const tail[10] = {
         "-MMD", "-MP", "-MF", "/work/result.ABC123/deps.d", "-MT", NULL,
         "-c", "-o", "/work/result.ABC123/result.o",
         "platform/modules/base/src/result.c"
     };
-    for (size_t i = 0; i < 10; i++) f->argv[183 + i] = tail[i];
+    for (size_t i = 0; i < 10; i++) f->argv[ZCL_FR_PROFILE_ARGC + i] = tail[i];
     return true;
 }
 
@@ -74,7 +74,7 @@ static bool setup(struct fixture *f)
     FILE *file = fopen(path, "rb");
     if (!file) return false;
     f->profile_len = fread(f->profile, 1, sizeof(f->profile), file);
-    if (ferror(file) || fclose(file) != 0 || f->profile_len != 5277)
+    if (ferror(file) || fclose(file) != 0 || f->profile_len != 5939)
         return false;
     uint8_t *fields = (uint8_t *)&f->roots;
     for (size_t i = 0; i < sizeof(f->roots); i++)
@@ -96,7 +96,7 @@ static bool setup(struct fixture *f)
         snprintf(f->target_b, sizeof(f->target_b), "%s%s%s", prefix, b,
                  suffix) >= (int)sizeof(f->target_b)) return false;
     if (!make_actual(f)) return false;
-    f->argv[183 + 5] = f->target_a;
+    f->argv[ZCL_FR_PROFILE_ARGC + 5] = f->target_a;
     return true;
 }
 
@@ -106,7 +106,7 @@ static bool construct(struct fixture *f, const uint8_t source[32],
 {
     return zcl_fixed_result_expected_v2(
         &f->roots, source, pp, target, f->profile, f->profile_len,
-        "/tmp/z23-proof-A", f->argv, 193, envp, 4, dirfd,
+        "/tmp/z23-proof-A", f->argv, (ZCL_FR_PROFILE_ARGC + 10u), envp, 4, dirfd,
         &f->observed, &f->why);
 }
 
@@ -116,11 +116,11 @@ static bool initial_and_epoch(struct fixture *f)
                    f->envp, -1)) return false;
     f->baseline = f->observed;
     /* The text pointers in the embedded expected value point into baseline. */
-    f->argv[183 + 5] = f->target_b;
+    f->argv[ZCL_FR_PROFILE_ARGC + 5] = f->target_b;
     bool valid = construct(f, f->roots.source_content, f->pp, f->target_b,
                            f->envp, -1) &&
                  same_expected(&f->baseline, &f->observed);
-    f->argv[183 + 5] = f->target_a;
+    f->argv[ZCL_FR_PROFILE_ARGC + 5] = f->target_a;
     return valid;
 }
 
@@ -130,18 +130,18 @@ static bool fd_path_checks(struct fixture *f)
     if (!platform_dirfd_child_path(dep, sizeof(dep), 17, "result.d") ||
         !platform_dirfd_child_path(obj, sizeof(obj), 17, "result.o"))
         return false;
-    f->argv[183 + 3] = dep;
-    f->argv[183 + 8] = obj;
+    f->argv[ZCL_FR_PROFILE_ARGC + 3] = dep;
+    f->argv[ZCL_FR_PROFILE_ARGC + 8] = obj;
     if (!construct(f, f->roots.source_content, f->pp, f->target_a,
                    f->envp, 17) ||
         !same_expected(&f->baseline, &f->observed)) return false;
     memcpy(short_obj, obj, strlen(obj) + 1);
     short_obj[strlen(short_obj) - strlen("result.o")] = '\0';
-    f->argv[183 + 8] = short_obj;
+    f->argv[ZCL_FR_PROFILE_ARGC + 8] = short_obj;
     bool refused = !construct(f, f->roots.source_content, f->pp,
                               f->target_a, f->envp, 17);
-    f->argv[183 + 3] = "/work/result.ABC123/deps.d";
-    f->argv[183 + 8] = "/work/result.ABC123/result.o";
+    f->argv[ZCL_FR_PROFILE_ARGC + 3] = "/work/result.ABC123/deps.d";
+    f->argv[ZCL_FR_PROFILE_ARGC + 8] = "/work/result.ABC123/result.o";
     return refused;
 }
 
@@ -149,20 +149,20 @@ static bool output_path_rejections(struct fixture *f)
 {
     if (construct(f, f->roots.source_content, f->pp, "result.o",
                   f->envp, -1)) return false;
-    f->argv[183 + 3] = "";
+    f->argv[ZCL_FR_PROFILE_ARGC + 3] = "";
     if (construct(f, f->roots.source_content, f->pp, f->target_a,
                   f->envp, -1)) return false;
-    f->argv[183 + 3] = "/dev/null";
+    f->argv[ZCL_FR_PROFILE_ARGC + 3] = "/dev/null";
     if (construct(f, f->roots.source_content, f->pp, f->target_a,
                   f->envp, -1)) return false;
-    f->argv[183 + 3] = "/work/result.ABC123/deps.d";
-    f->argv[183 + 8] = "";
+    f->argv[ZCL_FR_PROFILE_ARGC + 3] = "/work/result.ABC123/deps.d";
+    f->argv[ZCL_FR_PROFILE_ARGC + 8] = "";
     if (construct(f, f->roots.source_content, f->pp, f->target_a,
                   f->envp, -1)) return false;
-    f->argv[183 + 8] = "/work/result.XYZ999/result.o";
+    f->argv[ZCL_FR_PROFILE_ARGC + 8] = "/work/result.XYZ999/result.o";
     if (construct(f, f->roots.source_content, f->pp, f->target_a,
                   f->envp, -1)) return false;
-    f->argv[183 + 8] = "/work/result.ABC123/result.o";
+    f->argv[ZCL_FR_PROFILE_ARGC + 8] = "/work/result.ABC123/result.o";
     return true;
 }
 

@@ -22,7 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define FRS_PROFILE_LINES 183u
+#define FRS_PROFILE_LINES ZCL_FR_PROFILE_ARGC
 #define FRS_TAIL_MAX 12u
 #define FRS_ARGV_MAX (FRS_PROFILE_LINES + FRS_TAIL_MAX)
 #define FRS_RECEIPT_MAX (64u * 1024u)
@@ -78,7 +78,7 @@ static bool frs_expand_cwd(struct frs_argv *a, const char *line)
     return n > 0 && (size_t)n < sizeof(a->cwd_line);
 }
 
-/* The 183 profile lines with @CWD@ replaced by /zclassic23 exactly once,
+/* The pinned profile lines with @CWD@ replaced by /zclassic23 exactly once,
  * as the worker's read_profile builds them. */
 static bool frs_profile_argv(struct frs_argv *a, const uint8_t *profile,
                              size_t len)

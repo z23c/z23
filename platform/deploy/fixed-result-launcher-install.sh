@@ -44,7 +44,7 @@ for name in fixed_result_launcher fixed_result_worker z23-tree-closure \
     [[ $mode == 444 || $mode == 555 ]] || refuse stage_file_mode_unsafe
 done
 [[ $(hash "$stage/fixed_result_fast.args") == \
-   5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c ]] ||
+   41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082 ]] ||
     refuse fast_profile_mismatch
 [[ $(hash "$stage/fixed_result_launch_policy.v1") == \
    1315fa7fb2a718829a881955bf7415c3b4bdabc30d89ddeda0e0781983cc4abe ]] ||

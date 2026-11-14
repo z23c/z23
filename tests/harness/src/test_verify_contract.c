@@ -51,8 +51,10 @@
  * tools/verify/fixed_result_key_v2_probe.sh prints the same value. */
 /* The physical cwd the compile ran in; @CWD@ in the profile names it. */
 #define VC_KEY_CWD "/proof/z23-A"
+#define VC_RETIRED_FAST_SHA3 \
+    "5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c"
 #define VC_KEY_V2_CLOSURE \
-    "0502f53a553bfad57377ab92bbe4b1e97fa2367a36ed2a2dacbaf7f041985cec"
+    "d0fe6bd7bd3689b9cf78e87d4afd3d8acfcbc43c151b9e836ea676b97b5e6dd2"
 
 static const uint8_t k_vc_verifier_seed[32] = {0x51};
 static const uint8_t k_vc_box_seed[32] = {0x52};
@@ -332,6 +334,11 @@ static int test_vc_pins_values(void)
         vc_set(&f, vc_value_of(&f, "profile_args_sha3"), strict, 32u);
         ASSERT(vc_join(&f));
         ASSERT(vc_token(vc_pins_why(f.out, f.out_len), ZCL_FR_WHY_PROFILE));
+        ASSERT(zcl_hex_decode_lower(VC_RETIRED_FAST_SHA3, strict, 32u));
+        ASSERT(vc_split(bytes, len, &f));
+        vc_set(&f, vc_value_of(&f, "profile_args_sha3"), strict, 32u);
+        ASSERT(vc_join(&f));
+        ASSERT(vc_token(vc_pins_why(f.out, f.out_len), ZCL_FR_WHY_PROFILE));
         ASSERT(vc_split(bytes, len, &f));
         vc_set_text(&f, 2, "test_strict");
         ASSERT(vc_join(&f));
@@ -346,6 +353,7 @@ static int test_vc_pins_values(void)
         ASSERT(vc_token(vc_pins_why(f.out, f.out_len), ZCL_FR_WHY_HASH_ZERO));
 
         /* The encoder refuses what the parser refuses. */
+        ASSERT(zcl_hex_decode_lower(ZCL_FR_RETIRED_STRICT_SHA3, strict, 32u));
         memcpy(pins.profile_args, strict, 32u);
         ASSERT(!zcl_fr_pins_encode(&pins, bytes, VC_BUF, &len, &why));
         ASSERT(vc_token(why, ZCL_FR_WHY_PROFILE));
@@ -786,6 +794,12 @@ static int test_vc_record_binding(void)
                                    &root),
                           ZCL_VERIFY_ATTEST_WHY_PROFILE_MISMATCH));
         r = test_vc_record(&w, 0);
+        ASSERT(zcl_hex_decode_lower(VC_RETIRED_FAST_SHA3,
+                                    r.binding.profile_sha3, 32u));
+        ASSERT(vc_refused(vc_admit(&w, r, k_vc_verifier_seed, &b.binding,
+                                   &root),
+                          ZCL_VERIFY_ATTEST_WHY_PROFILE_MISMATCH));
+        r = test_vc_record(&w, 0);
         r.recorded_cwd = (struct zcl_verify_attest_text){"/src", 4u};
         ASSERT(vc_refused(vc_admit(&w, r, k_vc_verifier_seed, &b.binding,
                                    &root),
@@ -974,7 +988,7 @@ struct vc_key {
     uint8_t profile[8192];
     size_t profile_len;
     char lines[8192], cwd_arg[512];
-    const char *argv[193];
+    const char *argv[(ZCL_FR_PROFILE_ARGC + 10u)];
     char target_a[ZCL_FR_TARGET_LEN + 1u], target_b[ZCL_FR_TARGET_LEN + 1u];
     struct zcl_fixed_result_v2_roots roots;
     struct zcl_fixed_result_v2_expected a, b;
@@ -991,7 +1005,7 @@ static bool vc_key_argv(struct vc_key *k)
     memcpy(k->lines, k->profile, k->profile_len);
     for (size_t i = 0; i < k->profile_len; i++) {
         if (k->lines[i] != '\n') continue;
-        if (count >= 183u) return false;
+        if (count >= ZCL_FR_PROFILE_ARGC) return false;
         k->lines[i] = '\0';
         char *tag = strstr(line, "@CWD@");
         k->argv[count++] = line;
@@ -1006,8 +1020,8 @@ static bool vc_key_argv(struct vc_key *k)
     static const char *const tail[10] = {
         "-MMD", "-MP", "-MF", "/work/result.ABC123/deps.d", "-MT", NULL,
         "-c", "-o", "/work/result.ABC123/result.o", ZCL_FR_SOURCE};
-    for (size_t i = 0; i < 10u; i++) k->argv[183u + i] = tail[i];
-    return count == 183u;
+    for (size_t i = 0; i < 10u; i++) k->argv[ZCL_FR_PROFILE_ARGC + i] = tail[i];
+    return count == ZCL_FR_PROFILE_ARGC;
 }
 
 static bool vc_key_setup(struct vc_key *k)
@@ -1015,7 +1029,7 @@ static bool vc_key_setup(struct vc_key *k)
     FILE *file = fopen("tools/verify/fixed_result_fast.args", "rb");
     if (!file) return false;
     k->profile_len = fread(k->profile, 1, sizeof(k->profile), file);
-    if (fclose(file) != 0 || k->profile_len != 5277u) return false;
+    if (fclose(file) != 0 || k->profile_len != 5939u) return false;
     uint8_t *fields = (uint8_t *)&k->roots;
     for (size_t i = 0; i < sizeof(k->roots); i++)
         fields[i] = (uint8_t)(1u + i / 32u);
@@ -1032,10 +1046,10 @@ static bool vc_key_make(struct vc_key *k, const char *target,
                         struct zcl_fixed_result_v2_expected *out,
                         const char **why)
 {
-    k->argv[188] = target;
+    k->argv[ZCL_FR_PROFILE_ARGC + 5u] = target;
     return zcl_fixed_result_expected_v2(
         &k->roots, k->roots.source_content, k->pp, target, k->profile,
-        k->profile_len, VC_KEY_CWD, k->argv, 193u, envp, 4u, -1, out, why);
+        k->profile_len, VC_KEY_CWD, k->argv, (ZCL_FR_PROFILE_ARGC + 10u), envp, 4u, -1, out, why);
 }
 
 static int test_vc_key_v2(void)

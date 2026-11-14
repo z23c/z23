@@ -9,6 +9,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #include "verify/fixed_result_profile.h"
+#include "verify/fixed_result_contract.h"
 #include "platform/fd_path.h"
 
 #include <fcntl.h>
@@ -22,13 +23,12 @@
 #define FRF_SOURCE "platform/modules/base/src/result.c"
 #define FRF_HEADER "platform/modules/base/include/base/result.h"
 #define FRF_MANIFEST "tools/verify/fixed_result_fast.args"
-#define FRF_MANIFEST_SHA3 \
-    "5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c"
+#define FRF_MANIFEST_SHA3 ZCL_FR_PROFILE_SHA3
 #define FRF_OBJECT_SHA256 \
-    "32a13af795e799469c81dcf5e961a41fd3a6cb59745942efc17d2ae140454660"
+    "e6cc944b229437d98654b1222d208ca932fb8b17c565ac512c6f7becc6d4892e"
 #define FRF_GCC "/usr/bin/x86_64-linux-gnu-gcc-14"
-#define FRF_PINNED 183u
-#define FRF_EXPANDED 182u
+#define FRF_PINNED ZCL_FR_PROFILE_ARGC
+#define FRF_EXPANDED (ZCL_FR_PROFILE_ARGC - 1u)
 #define FRF_SEED "-frandom-seed=" FRF_SOURCE
 #define FRF_RECIPE \
     "__z23_fast_profile: ; @printf \"__PROFILE_BEGIN__\\n\"; " \
@@ -74,7 +74,7 @@ static void frf_preflight(struct frf_probe *p)
 {
     char templ[PU_PATH_MAX];
     const char *why = frp_checkout(p->repo, sizeof p->repo);
-    const char *home = getenv("HOME");
+    const char *scratch = getenv("TMPDIR");
     char gcc[PATH_MAX];
     if (why) frf_fail(why);
     if (!realpath("/usr/bin/cc", gcc) || strcmp(gcc, FRF_GCC) != 0)
@@ -82,11 +82,8 @@ static void frf_preflight(struct frf_probe *p)
     frp_sha3_file(FRF_MANIFEST, p->manifest_sha3);
     if (strcmp(p->manifest_sha3, FRF_MANIFEST_SHA3) != 0)
         frf_fail("manifest_bytes_mismatch");
-    if (!home || !*home) {
-        fputs("fixed_result_fast_refuse=home_unset\n", stderr);
-        exit(2);
-    }
-    if (snprintf(templ, sizeof templ, "%s/.z23-fast-result.XXXXXX", home) >=
+    if (!scratch || scratch[0] != '/') frf_fail("absolute_scratch_root_required");
+    if (snprintf(templ, sizeof templ, "%s/z23-fast-result.XXXXXX", scratch) >=
             (int)sizeof templ ||
         !pu_scratch_make(templ, p->work, sizeof p->work)) exit(1);
     snprintf(p->sparse, sizeof p->sparse, "%s", frf_w(p, "sparse"));
@@ -166,8 +163,10 @@ static void frf_build_tools(const struct frf_probe *p)
     frf_cc(true, (const char *const[]){
         "-Itools", "-Iplatform/modules/sha3/include",
         "-Iplatform/modules/base/include", "-Iplatform/modules/platform/include",
+        "-Iplatform/modules/codec/include",
         "tools/verify/fixed_result_worker.c",
         "tools/verify/fixed_result_contract.c", "platform/modules/sha3/src/sha3.c",
+        "platform/modules/codec/src/cursor.c",
         "platform/modules/platform/src/os_proc.c", "-o", frf_w(p, "worker"),
         nullptr});
     frf_cc(true, (const char *const[]){"tools/verify/fixed_result_peer_probe.c", "-o",
@@ -181,7 +180,7 @@ static void frf_mkdirs(const char *path)
 
 static void frf_copy(const char *src, const char *dst)
 {
-    if (!pu_copy(src, dst)) exit(1);
+    if (!pu_copy(src, dst) || chmod(dst, 0600) != 0) exit(1);
 }
 
 static void frf_stage_sparse(const struct frf_probe *p)
@@ -374,7 +373,7 @@ static void frf_edit_source(const char *path, const char *from, const char *to)
     ssize_t n;
     snprintf(tmp, sizeof tmp, "%s.new", path);
     out = in ? fopen(tmp, "wb") : nullptr;
-    if (!out) exit(1);
+    if (!out || chmod(tmp, 0600) != 0) exit(1);
     while ((n = getline(&line, &cap, in)) >= 0) {
         char *hit = strstr(line, from);
         if (hit) fprintf(out, "%.*s%s%s", (int)(hit - line), line, to, hit + flen);

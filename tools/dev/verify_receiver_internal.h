@@ -6,12 +6,13 @@
 #define ZCL_TOOLS_DEV_VERIFY_RECEIVER_INTERNAL_H
 
 #include "verify_receiver.h"
+#include "verify/fixed_result_contract.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define VR_PROFILE_TOKENS 183u
+#define VR_PROFILE_TOKENS ZCL_FR_PROFILE_ARGC
 #define VR_PROFILE_MAX 65536u
 #define VR_OBJECT_MAX (8u * 1024u * 1024u)
 #define VR_DEP_MAX (4u * 1024u * 1024u)
@@ -24,7 +25,7 @@ struct vr_bytes {
     size_t n;
 };
 
-/* The pinned profile, its 183 tokens with @CWD@ expanded once to the
+/* The pinned profile, its fixed tokens with @CWD@ expanded once to the
  * generation's physical cwd. Tokens point into `text` or `expanded`. */
 struct vr_profile {
     uint8_t text[VR_PROFILE_MAX + 1u];

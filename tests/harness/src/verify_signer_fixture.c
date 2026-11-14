@@ -35,7 +35,7 @@
 #define VSG_SCRATCH "/work/result.Qz7x2A"
 #define VSG_PASS_ID "0123456789abcdef0123456789abcdef"
 #define VSG_FAIL_ID "fedcba9876543210fedcba9876543210"
-#define VSG_ARGS 200u
+#define VSG_ARGS (ZCL_FR_PROFILE_ARGC + 16u)
 
 int zcl_test_fixed_result_worker_main(int argc, char **argv);
 
@@ -318,6 +318,7 @@ static bool vsg_profile_argv(const struct vsg_world *w, const char *cwd,
     a->lines[w->profile.n] = '\0';
     for (char *line = a->lines, *nl; (nl = strchr(line, '\n')) != NULL;
          line = nl + 1) {
+        if (a->argc >= ZCL_FR_PROFILE_ARGC) return false;
         *nl = '\0';
         const char *tag = strstr(line, "@CWD@");
         if (tag) {
@@ -327,9 +328,8 @@ static bool vsg_profile_argv(const struct vsg_world *w, const char *cwd,
         } else {
             a->argv[a->argc++] = line;
         }
-        if (a->argc >= VSG_ARGS - 16u) return false;
     }
-    return a->argc == 183u;
+    return a->argc == ZCL_FR_PROFILE_ARGC;
 }
 
 /* The worker's -c tail, or its checker -E tail, with `dir` holding its

@@ -78,7 +78,7 @@ emits bytes that its own parser refuses.
 |---|---|
 | contract | `z23verify.fixed_result.v2` |
 | profile | `test_fast`, file `tools/verify/fixed_result_fast.args`, installed as `/etc/z23verify/fixed_result_fast.args` |
-| profile digest | `5e8a1cafce7350ff3c335c6a714f59c75c1e646de82eb03d076f68bdad244e1c` |
+| profile digest | `41d985cfdd672074e903b3ff05efec58f4cb4c8d0057a685207d69f007bac082` |
 | recorded cwd | `/zclassic23` |
 | source | `platform/modules/base/src/result.c` |
 | target | `build/test-obj/epochs/<64 lowercase hex>/platform/modules/base/src/result.o` (121 bytes) |
@@ -418,7 +418,7 @@ The expected key (key v2, `tools/verify/fixed_result_key_v2.h`) is
 
 For the probe fixture (every byte of root i is `i+1`, with the real profile
 and environment roots), the closure is
-`0502f53a553bfad57377ab92bbe4b1e97fa2367a36ed2a2dacbaf7f041985cec`.
+`d0fe6bd7bd3689b9cf78e87d4afd3d8acfcbc43c151b9e836ea676b97b5e6dd2`.
 `verify_contract` pins this value.
 
 The store key v2 is SHA3-256 of:
