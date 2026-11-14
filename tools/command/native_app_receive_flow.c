@@ -390,6 +390,16 @@ static bool arf_keep(struct receive_flow *f)
     }
     json_free(&input); return ok && arf_status(f, "kept");
 }
+static void arf_notice_location(struct receive_flow *f, struct app_confirm *view)
+{
+    if (f->draft) return;
+    const char *path = zcl_package_copy_str(&f->reply->data,
+        f->adopted ? "copy" : "destination");
+    if (!path) return;
+    uint32_t start = view->model.item_count;
+    if (!app_confirm_path(&view->model, "Copy location: ", path))
+        view->model.item_count = start;
+}
 static void arf_notice(struct receive_flow *f)
 {
     struct app_confirm *view = zcl_calloc(1, sizeof(*view), "receive-flow/error");
@@ -404,11 +414,29 @@ static void arf_notice(struct receive_flow *f)
     excerpt[n] = 0;
     char why[256] = {0};
     if ((!f->draft || arf_fields(f, view)) &&
-        app_confirm_field(&view->model, "Message excerpt: ", n ? excerpt : "The result could not be retained.") &&
-        app_confirm_prepare(view, why, sizeof(why)))
-        (void)app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
+        app_confirm_field(&view->model, "Message excerpt: ", n ? excerpt : "The result could not be retained.")) {
+        uint32_t original = view->model.item_count;
+        arf_notice_location(f, view);
+        bool prepared = app_confirm_prepare(view, why, sizeof(why));
+        if (!prepared && view->model.item_count != original) {
+            app_confirm_free(view);
+            view->page_count = 0;
+            view->model.item_count = original;
+            prepared = app_confirm_prepare(view, why, sizeof(why));
+        }
+        if (prepared) (void)app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
+    }
     app_confirm_free(view); free(view);
 }
+#ifdef ZCL_TESTING
+void app_receive_flow_test_notice(struct zcl_command_reply *reply, bool adopted,
+                                  app_confirm_presenter presenter, void *context)
+{
+    struct receive_flow f = {.reply = reply, .adopted = adopted,
+        .presenter = presenter, .context = context};
+    arf_notice(&f);
+}
+#endif
 /* Receive already committed. A later failure belongs to continuation, so the
  * successful Receive envelope still carries its original receipt. Opt-in
  * callers must inspect continuation; this does not claim preview succeeded. */

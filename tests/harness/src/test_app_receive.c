@@ -1282,9 +1282,91 @@ static int rr_cases(void)
     } _test_next:;
     return failures;
 }
+#if defined(ZCL_TESTING)
+void app_receive_flow_test_notice(struct zcl_command_reply *reply, bool adopted,
+    app_confirm_presenter presenter, void *context);
+struct rloc_probe { const char *encoded, *expected_message; bool shown; };
+static bool rloc_matches(const struct rloc_probe *probe, const char *message,
+                         const char *location, bool message_found, bool collecting)
+{
+    return message_found && (!probe->expected_message ||
+        !strcmp(message, probe->expected_message)) && (!probe->encoded ? !collecting :
+        collecting && !strcmp(location, probe->encoded));
+}
+static bool rloc_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rloc_probe *probe = context;
+    (void)pages; (void)why; (void)cap;
+    char location[4096] = "", message[256] = "";
+    bool collecting = false, in_message = false, message_found = false;
+    for (uint32_t i = 0; i < model->item_count; ++i) {
+        const char *line = model->items[i].value;
+        if (!strncmp(line, "Message excerpt: ", 17)) {
+            in_message = true; message_found = true; line += 17;
+        } else if (!strncmp(line, "Copy location: ", 15)) {
+            in_message = false; collecting = true; line += 15;
+        }
+        else if (collecting && !strncmp(line, "  ", 2)) line += 2;
+        else if (in_message && !strncmp(line, "  ", 2)) line += 2;
+        else if (collecting) return false;
+        else continue;
+        char *out = collecting ? location : message;
+        size_t limit = collecting ? sizeof(location) : sizeof(message);
+        size_t used = strlen(out), n = strlen(line);
+        if (n >= limit - used) return false;
+        memcpy(out + used, line, n + 1);
+    }
+    probe->shown = rloc_matches(probe, message, location, message_found, collecting);
+    bool close = false, redraw = false;
+    return rt_action(live, 0, &close, &redraw) && close;
+}
+static bool rloc_case(const char *path, const char *encoded, bool adopted)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    json_set_object(&reply.data);
+    bool ok = !path || json_push_kv_str(&reply.data, adopted ? "copy" : "destination", path);
+    zcl_package_copy_fail(&reply, "PREVIEW_FAILED", true, "Original error", "fixture");
+    struct rloc_probe probe = {.encoded = encoded, .expected_message = "Original error"};
+    if (ok) app_receive_flow_test_notice(&reply, adopted, rloc_present, &probe);
+    ok = ok && probe.shown && reply.error.mutated &&
+        !strcmp(reply.error.code, "PREVIEW_FAILED") && !strcmp(reply.error.message, "Original error");
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+static int rloc_cases(void)
+{
+    int failures = 0;
+    TEST("receive failure shows retained location without hiding the error") {
+        ASSERT(rloc_case("/retained/a b\\c\303\251", "/retained/a\\x20b\\\\c\\xc3\\xa9", false));
+        ASSERT(rloc_case("/retained/adopted", "/retained/adopted", true));
+        ASSERT(rloc_case(NULL, NULL, false));
+        char long_path[4096]; memset(long_path, 'x', sizeof(long_path) - 1);
+        long_path[sizeof(long_path) - 1] = 0;
+        ASSERT(rloc_case(long_path, NULL, false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 #if defined(__linux__)
 enum rdiag_mode { RDIAG_CLOSE, RDIAG_UNAVAILABLE, RDIAG_PRIOR_CLOSE, RDIAG_MISMATCH, RDIAG_CONTINUE };
-struct rdiag_presenter { unsigned progress, choices, recoveries, keep_choices; enum rdiag_mode mode; };
+struct rdiag_presenter { unsigned progress, choices, recoveries, keep_choices; enum rdiag_mode mode; struct rloc_probe location; };
+static bool rloc_encode(const char *path, char *out, size_t cap)
+{
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)path; *p; ++p) {
+        char atom[5]; size_t n = 1;
+        if (*p == '\\') { atom[0] = '\\'; atom[1] = '\\'; n = 2; }
+        else if (*p <= 32 || *p > 126) {
+            atom[0] = '\\'; atom[1] = 'x'; zcl_hex_encode(p, 1, atom + 2); n = 4;
+        } else atom[0] = (char)*p;
+        if (n >= cap - used) return false;
+        memcpy(out + used, atom, n); used += n;
+    }
+    out[used] = 0; return true;
+}
 static bool rdiag_choose(const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_live_view_v1 *live)
 {
@@ -1332,8 +1414,7 @@ static bool rdiag_present(void *context, const struct zcl_present_model_v1 *mode
         return rt_action(live, 0, &close, &redraw) && close;
     }
     if (!strcmp(model->title, "The next step did not finish")) {
-        bool close = false, redraw = false;
-        return rt_action(live, 0, &close, &redraw) && close;
+        return rloc_present(&p->location, model, pages, live, why, cap);
     }
     if (!strcmp(model->title, "Preview opened")) {
         ++p->keep_choices; return rdiag_choose(model, live);
@@ -1358,17 +1439,23 @@ static bool rdiag_recovery(const struct json_value *second, const struct rdiag_p
     return p->mode == RDIAG_PRIOR_CLOSE ? !json_get(second, "progress_recovery") && p->recoveries == 0 :
         decision && !strcmp(decision, expected) && p->recoveries == 1;
 }
+static bool rdiag_progress_result(const struct json_value *first, const struct json_value *second,
+                                  const struct rdiag_presenter *p)
+{
+    return p->choices == 1 && p->progress == 2 && !json_get(first, "progress_error") &&
+        json_get_bool(json_get(first, "progress_displayed")) &&
+        !json_get_bool(json_get(second, "progress_displayed")) && rdiag_failure(second) && rdiag_recovery(second, p);
+}
 static bool rdiag_result(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
 {
     const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
     if (!ops || ops->type != JSON_ARR || json_size(ops) != 2) return false;
     const struct json_value *first = json_at(ops, 0), *second = json_at(ops, 1);
     const char *code = json_get_str(json_get(json_get(data, "continuation_error"), "code"));
-    return p->choices == 1 && p->progress == 2 && !json_get(first, "progress_error") &&
-        json_get_bool(json_get(first, "progress_displayed")) &&
-        !json_get_bool(json_get(second, "progress_displayed")) && rdiag_failure(second) && rdiag_recovery(second, p) &&
+    return rdiag_progress_result(first, second, p) &&
         code && !strcmp(code, p->mode == RDIAG_MISMATCH ? "PREVIEW_BUILD_MISMATCH" : "PROGRESS_UNAVAILABLE") && !json_get(data, "kept") &&
-        !json_get_bool(json_get(data, "continuation_executed"));
+        !json_get_bool(json_get(data, "continuation_executed")) &&
+        (p->mode == RDIAG_PRIOR_CLOSE || p->location.shown) && p->keep_choices == 0;
 }
 static void rdiag_debug(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
 {
@@ -1403,7 +1490,17 @@ static int rdiag_case(enum rdiag_mode mode)
         struct rt_presenter receive = {.fixture = &f, .decision = RT_CONFIRM};
         zcl_test_app_receive_run(&request, &reply, rt_present, &receive);
         ASSERT(rt_expected_reply(&receive, &reply));
-        struct rdiag_presenter presenter = {.mode = mode};
+        char encoded[PATH_MAX * 4];
+        const char *destination = json_get_str(json_get(&reply.data, "destination"));
+        ASSERT(destination && rloc_encode(destination, encoded, sizeof(encoded)));
+        char before_destination[PATH_MAX], before_version[65], before_package[65];
+        const char *version = json_get_str(json_get(&reply.data, "version"));
+        const char *package = json_get_str(json_get(&reply.data, "package_root"));
+        ASSERT(version && package && strlen(destination) < sizeof(before_destination));
+        ASSERT(strlen(version) == 64 && strlen(package) == 64);
+        strcpy(before_destination, destination); strcpy(before_version, version);
+        strcpy(before_package, package);
+        struct rdiag_presenter presenter = {.mode = mode, .location = {.encoded = encoded}};
         char wrapper[PATH_MAX];
         ASSERT(mode != RDIAG_MISMATCH || rdiag_wrapper(&f, image, wrapper, sizeof(wrapper)));
         zcl_native_bridge_ensure_rpc();
@@ -1413,6 +1510,17 @@ static int rdiag_case(enum rdiag_mode mode)
         app_receive_flow_run_test(f.datadir, &reply, rdiag_present, &presenter,
                                   mode == RDIAG_MISMATCH ? wrapper : image);
         zcl_native_bridge_bind_rpc(old_dir, old_port);
+        const struct json_value *error = json_get(&reply.data, "continuation_error");
+        ASSERT(json_get_str(json_get(&reply.data, "destination")) &&
+            !strcmp(json_get_str(json_get(&reply.data, "destination")), before_destination));
+        ASSERT(json_get_str(json_get(&reply.data, "version")) &&
+            !strcmp(json_get_str(json_get(&reply.data, "version")), before_version));
+        ASSERT(json_get_str(json_get(&reply.data, "package_root")) &&
+            !strcmp(json_get_str(json_get(&reply.data, "package_root")), before_package));
+        if (mode != RDIAG_PRIOR_CLOSE) {
+            ASSERT(json_get_bool(json_get(error, "received_copy_retained")));
+            ASSERT(!json_get_bool(json_get(error, "automatic_retry")));
+        }
         bool result = rdiag_result(&reply, &presenter);
         if (!result) rdiag_debug(&reply, &presenter);
         ASSERT(result);
@@ -1445,6 +1553,10 @@ int test_app_receive(void)
     failures += rd_parents();
     failures += rd_home_permissions();
     failures += rd_home_aliases();
+    failures += rloc_cases();
+#if defined(__linux__)
+    failures += rdiag_case(RDIAG_CLOSE);
+#endif
     /* Native harness owns fixture retirement; preserve failed state for diagnosis. */
     return failures;
 }
