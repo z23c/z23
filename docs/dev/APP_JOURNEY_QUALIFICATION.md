@@ -25,6 +25,13 @@ account, or node service. This is not an all-platform or human usability study.
 Use isolated fixtures, admitted jobs, and a bounded lifetime; do not start or
 alter canonical nodes, services, wallets, or profiles.
 
+Keep every helper process in the same fixture HOME and XDG environment,
+including MCP plan and confirmation calls. The command and datadir alone
+do not select that environment. Retain any refusal receipt and reconcile
+the selected source before retrying; never repeat a mutation whose result
+is unknown.
+<!-- claim: symbol-present app_launch_env_from_process tools/command/native_app_launch_registry.c # app registry and state follow the process environment -->
+
 For installed-source fixtures, choose an owner-private temporary root whose
 ancestors meet the resolver's ownership and permissions checks. In the recorded
 run, a world-writable temporary directory and a checkout with group-writable
