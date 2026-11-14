@@ -65,13 +65,13 @@ static void arf_model(const struct receive_flow *f, struct app_confirm *view, co
 }
 static bool arf_brief_fields(struct receive_flow *f, struct app_confirm *view)
 {
-    const char *name = zcl_package_copy_str(&f->reply->data, "copy");
+    const char *name = zcl_package_copy_str(&f->reply->data, f->adopted ? "copy" : "destination");
     const char *version = zcl_package_copy_str(&f->reply->data, "version");
     uint8_t decoded[32]; char prefix[13];
     if (!name || !*zcl_path_leaf(name) || !version || strlen(version) != 64 ||
         !zcl_hex_decode_lower(version, decoded, sizeof(decoded))) return false;
     memcpy(prefix, version, 12); prefix[12] = 0;
-    return app_confirm_path(&view->model, "Personal copy: ", zcl_path_leaf(name)) &&
+    return app_confirm_path(&view->model, f->adopted ? "Personal copy: " : "Received copy: ", zcl_path_leaf(name)) &&
         app_confirm_field(&view->model, "Saved version prefix: ", prefix);
 }
 static bool arf_fields(struct receive_flow *f, struct app_confirm *view)
@@ -113,14 +113,21 @@ static bool arf_choose(struct receive_flow *f, const char *title, const char *su
     app_confirm_free(view); free(view);
     return ok || arf_fail(f, "CONTINUATION_UNAVAILABLE", arf_choice_failure_message(f));
 }
-#if defined(ZCL_TESTING)
-bool app_receive_flow_test_adopted_choices(struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context)
+static bool arf_ready_choice(struct receive_flow *f, bool *chosen)
 {
-    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .adopted = true};
+    return arf_choose(f, "Your copy is ready", f->recovered ?
+        "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice." : f->adopted ?
+        "Build and run this personal saved version to preview it. Keep remains a separate choice." :
+        "Build and run this received version to preview it. Keep remains a separate choice.",
+        "Build and preview", !f->recovered, chosen);
+}
+#if defined(ZCL_TESTING)
+bool app_receive_flow_test_ready_choices(struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, bool adopted)
+{
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .adopted = adopted};
     bool chosen = false;
-    return arf_choose(&f, "Your copy is ready", "Build and preview. Keep is separate.",
-        "Build and preview", true, &chosen) && !chosen &&
+    return arf_ready_choice(&f, &chosen) && !chosen &&
         arf_choose(&f, "Preview opened", "Review before Keep.", "Keep this version", false, &chosen) && !chosen;
 }
 #endif
@@ -813,11 +820,7 @@ static bool arf_prepare(struct receive_flow *f, const char *datadir, bool *chose
     } else ok = f->adopted ?
         app_receive_preview_create_adopted(&f->reply->data, datadir, &f->preview, f->reply) :
         app_receive_preview_create(&f->reply->data, datadir, &f->preview, f->reply);
-    return ok && arf_choose(f, "Your copy is ready", f->recovered ?
-        "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice." : f->adopted ?
-        "Build and run this personal saved version to preview it. Keep remains a separate choice." :
-        "Build and run this received version to preview it. Keep remains a separate choice.",
-        "Build and preview", f->adopted, chosen);
+    return ok && arf_ready_choice(f, chosen);
 }
 static bool arf_continue(struct receive_flow *f, bool chosen)
 {

@@ -1440,9 +1440,9 @@ static bool rloc_case(const char *path, const char *encoded, bool adopted)
     zcl_command_reply_free(&reply);
     return ok;
 }
-bool app_receive_flow_test_adopted_choices(struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context);
-struct rbrief_probe { unsigned shown; };
+bool app_receive_flow_test_ready_choices(struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, bool adopted);
+struct rbrief_probe { unsigned shown; bool adopted; };
 static bool rbrief_actions(const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, bool ready, uint32_t *count,
     char *why, size_t cap)
@@ -1461,31 +1461,50 @@ static bool rbrief_present(void *context, const struct zcl_present_model_v1 *mod
     bool ready = probe->shown++ == 0;
     bool ok = rbrief_actions(model, pages, ready, &count, why, cap);
     if (ready) ok = ok && count == 1 && model->item_count == 2 &&
-        rt_field(model, "Personal copy: ", "copy\\x20name") &&
+        rt_field(model, probe->adopted ? "Personal copy: " : "Received copy: ", "copy\\x20name") &&
         rt_field(model, "Saved version prefix: ", "0123456789ab");
-    else ok = ok && rt_field(model, "Personal copy: ", "/private/long/path/copy name") &&
+    else ok = ok && rt_field(model, probe->adopted ? "Personal copy: " : "App: ",
+        probe->adopted ? "/private/long/path/copy name" : "fixture-app") &&
         rt_field(model, "Saved version: ", version);
     bool close = false, redraw = false;
     return ok && rt_action(live, 0, &close, &redraw) && close;
 }
-static bool rbrief_case(void)
+static bool rbrief_case(bool adopted)
 {
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
     json_set_object(&reply.data);
-    bool ok = json_push_kv_str(&reply.data, "copy", "/private/long/path/copy name") &&
+    bool ok = json_push_kv_str(&reply.data, adopted ? "copy" : "destination", "/private/long/path/copy name") &&
+        json_push_kv_str(&reply.data, "name", "fixture-app") &&
         json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-    struct rbrief_probe probe = {0};
-    if (ok) ok = app_receive_flow_test_adopted_choices(&reply, rbrief_present, &probe);
+    struct rbrief_probe probe = {.adopted = adopted};
+    if (ok) ok = app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, adopted);
     ok = ok && probe.shown == 2 &&
-        !strcmp(json_get_str(json_get(&reply.data, "copy")), "/private/long/path/copy name") &&
+        !strcmp(json_get_str(json_get(&reply.data, adopted ? "copy" : "destination")), "/private/long/path/copy name") &&
         !strcmp(json_get_str(json_get(&reply.data, "version")), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool rbrief_invalid(const char *path, const char *version)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    json_set_object(&reply.data);
+    bool ok = (!path || json_push_kv_str(&reply.data, "destination", path)) &&
+        (!version || json_push_kv_str(&reply.data, "version", version));
+    struct rbrief_probe probe = {0};
+    if (ok) ok = !app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, false) &&
+        probe.shown == 0 && !strcmp(reply.error.code, "CONTINUATION_UNAVAILABLE");
     zcl_command_reply_free(&reply); return ok;
 }
 static int rbrief_cases(void)
 {
     int failures = 0;
-    TEST("adopted ready choice is concise while Keep retains exact identity") {
-        ASSERT(rbrief_case()); PASS();
+    TEST("ready choices preserve exact identity and reject invalid received inputs") {
+        ASSERT(rbrief_case(true)); ASSERT(rbrief_case(false));
+        const char *valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        ASSERT(rbrief_invalid(NULL, valid)); ASSERT(rbrief_invalid("", valid));
+        ASSERT(rbrief_invalid("/private/", valid)); ASSERT(rbrief_invalid("/private/copy", NULL));
+        ASSERT(rbrief_invalid("/private/copy", "not-a-version"));
+        ASSERT(rbrief_invalid("/private/copy", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF"));
+        PASS();
     } _test_next:;
     return failures;
 }
