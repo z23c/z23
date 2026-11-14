@@ -211,15 +211,18 @@ pair_diag_client() {
 }
 
 pair_diag_client_node() {
-    local retry='?' line
+    local retry='?' open_refused='?' torn_down='?' timeout='?' line
     pair_diag_read "${ISO_PEER_DD:+$ISO_PEER_DD/node.log}"
     if [ "$DIAG_SCAN" = ok ]; then
-        retry=0
+        retry=0 open_refused=0 torn_down=0 timeout=0
         while IFS= read -r line; do
             case "$line" in *'first onion circuit attempt failed;'*) retry=1 ;; esac
+            case "$line" in *'onion stage=open_refused target='*) open_refused=1 ;; esac
+            case "$line" in *'(stage=circuit_torn_down waited_ms='*')'*) torn_down=1 ;; esac
+            case "$line" in *'(stage=circuit_timeout waited_ms='*')'*) timeout=1 ;; esac
         done <<<"$DIAG_TEXT"
     fi
-    printf 'PAIR_DIAG role=client_node scan=%s window=%s level=node onion_stream_retry=%s\n' "$DIAG_SCAN" "$DIAG_WINDOW" "$retry"
+    printf 'PAIR_DIAG role=client_node scan=%s window=%s level=node onion_stream_retry=%s open_refused=%s circuit_torn_down=%s circuit_timeout=%s\n' "$DIAG_SCAN" "$DIAG_WINDOW" "$retry" "$open_refused" "$torn_down" "$timeout"
 }
 
 append_probe() {
@@ -646,6 +649,44 @@ if [ "$SELFTEST" = 1 ]; then
         *) echo "  FAIL: same-line failure projection incomplete"; st_fail=1 ;;
     esac
     ISO_NODE_PID=""
+    printf "%s\n" "onion stage=open_refused target=TEST_SECRET" >"$ISO_PEER_DD/node.log"
+    diag_capture="$(pair_diag_client_node)"
+    case "$diag_capture" in
+        *"open_refused=1 circuit_torn_down=0 circuit_timeout=0"*) ;;
+        *) echo "  FAIL: open refusal projection"; st_fail=1 ;;
+    esac
+    printf "%s\n" "onion dial to TEST_SECRET was refused/torn down by Tor (stage=circuit_torn_down waited_ms=120)" >"$ISO_PEER_DD/node.log"
+    diag_capture="$(pair_diag_client_node)"
+    case "$diag_capture" in
+        *"open_refused=0 circuit_torn_down=1 circuit_timeout=0"*) ;;
+        *) echo "  FAIL: torn-down projection"; st_fail=1 ;;
+    esac
+    printf "%s\n" "onion dial to TEST_SECRET timed out waiting for a circuit (stage=circuit_timeout waited_ms=120)" >"$ISO_PEER_DD/node.log"
+    diag_capture="$(pair_diag_client_node)"
+    case "$diag_capture" in
+        *"open_refused=0 circuit_torn_down=0 circuit_timeout=1"*) ;;
+        *) echo "  FAIL: timeout projection"; st_fail=1 ;;
+    esac
+    printf "%s\n" "onion stage=open_refused_extra target=TEST_SECRET" "(stage=circuit_timeout_extra waited_ms=120)" "(stage=circuit_torn_down" " waited_ms=120)" >"$ISO_PEER_DD/node.log"
+    diag_capture="$(pair_diag_client_node)"
+    case "$diag_capture" in
+        *"open_refused=0 circuit_torn_down=0 circuit_timeout=0"*) ;;
+        *) echo "  FAIL: near-token or cross-line matched"; st_fail=1 ;;
+    esac
+    case "$diag_capture" in *TEST_SECRET*) echo "  FAIL: node diagnostic exposed log contents"; st_fail=1 ;; esac
+    rm -f "$ISO_PEER_DD/node.log"
+    diag_capture="$(pair_diag_client_node)"
+    case "$diag_capture" in
+        *"scan=unavailable"*"open_refused=? circuit_torn_down=? circuit_timeout=?"*) ;;
+        *) echo "  FAIL: unavailable node flags were not unknown"; st_fail=1 ;;
+    esac
+    mkdir "$ISO_PEER_DD/node.log"
+    diag_capture="$(pair_diag_client_node)"
+    case "$diag_capture" in
+        *"scan=error"*"open_refused=? circuit_torn_down=? circuit_timeout=?"*) ;;
+        *) echo "  FAIL: node scan error flags were not unknown"; st_fail=1 ;;
+    esac
+    rmdir "$ISO_PEER_DD/node.log"
     head -c 65537 /dev/zero | tr '\0' x >>"$ISO_DD/tor-rend.log"
     diag_capture="$(PROBE_WRITTEN=0 append_probe)"
     case "$diag_capture" in
