@@ -75,7 +75,7 @@ recorded here; check them against a trusted copy of this guide before use.
 (
     set -eu
     installer_sha=38bd7dec41b07807d6dc1c3534f278362294085d3605a5e8232f1f7a1a8f9969
-    manifest_sha=7267174fd1d7511aae06f7bb7187c517b215274b9effcd4c537aede96b90f671
+    manifest_sha=9f59465f57c3839be2a1d7c513e0eac807b00a598598933aa7c2d56268321799
     install_tmp=$(mktemp -d) || exit 1
     trap 'rm -rf -- "$install_tmp"' 0
     curl --fail --silent --show-error --location --connect-timeout 10 --max-time 90 --max-filesize 1048576 \
@@ -153,8 +153,9 @@ Compare the publisher identity through a separate trusted channel. Link opening
 and sharing currently refuse on Windows.
 
 A graphical desktop and an available build toolchain are needed for previews.
-An app-capable Linux release may include a verified compiler kit; otherwise use
-GNU make and a C23-capable host compiler. See
+The pinned release above requires GNU make and a C23-capable host compiler; it
+does not bundle a compiler kit. Sky Combat includes its X11/GL build headers;
+its graphical preview still needs the corresponding runtime libraries. See
 [Try, change and share an app](docs/commons/PLUGIN_APPS.md#try-change-and-share-an-app)
 for setup and platform details, and [Sky Combat](docs/commons/GAME.md) for controls.
 
