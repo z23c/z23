@@ -29,20 +29,22 @@ enum { ISR_CARD, ISR_RECORD, ISR_PROJECTION, ISR_PACKAGE, ISR_RECIPE,
     ISR_NODE_ALIAS, ISR_ACME_ALIAS, ISR_VERIFY_ALIAS, ISR_BASE_ROWS,
     ISR_DESKTOP_RECEIVE = ISR_BASE_ROWS, ISR_DESKTOP_ICON, ISR_DESKTOP_MIME,
     ISR_DESKTOP_GAME, ISR_DESKTOP_END, ISR_KIT_DESCRIPTOR = ISR_DESKTOP_END,
-    ISR_KIT_BUNDLE, ISR_ROWS };
+    ISR_KIT_BUNDLE, ISR_MAC_LAUNCHER, ISR_MAC_PLIST, ISR_ROWS };
 static const char *const isr_names[ISR_ROWS] = {
     "AGENT_CARD.md", "app-build.wire", "installed-source.json", // error-doc-ref-ok: generated installed release assets, not checkout documents
     "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme",
     "z23-package-verify", "z23-skycombat", "zclassic23", "zclassic23-acme",
     "zclassic23-package-verify", "org.zclassic.ZClassic23.desktop",
     "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml",
-    "org.zclassic.SkyCombat.desktop", "app-toolchain.json", "app-toolchain.bundle"
+    "org.zclassic.SkyCombat.desktop", "app-toolchain.json", "app-toolchain.bundle",
+    "z23-app-macos", "Z23Apps-Info.plist"
 };
 static const size_t isr_limits[ISR_ROWS] = {
     65536, 240, 4096, ISR_MIB, 256u * 1024u, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB,
-    65536, 65536, 65536, 65536, 4096, 64u * ISR_MIB
+    65536, 65536, 65536, 65536, 4096, 64u * ISR_MIB,
+    4u * ISR_MIB, 65536
 };
 struct isr_manifest { char digest[ISR_ROWS][65]; };
 struct isr_layout {
@@ -200,6 +202,14 @@ static int isr_row(const char *name)
         if (!strcmp(name, isr_names[i])) return i;
     return -1;
 }
+static bool isr_mac_shape(const struct isr_manifest *m, bool mac,
+                          unsigned desktop, unsigned kit)
+{
+    bool launcher = m->digest[ISR_MAC_LAUNCHER][0] != 0;
+    bool plist = m->digest[ISR_MAC_PLIST][0] != 0;
+    if (launcher != plist) return false;
+    return !launcher || (mac && !desktop && !kit);
+}
 static bool isr_shape(const struct isr_manifest *m, bool mac)
 {
     /* Count alone is insufficient: four optional rows cannot replace base rows. */
@@ -210,6 +220,7 @@ static bool isr_shape(const struct isr_manifest *m, bool mac)
         if (m->digest[row][0]) ++desktop;
     unsigned kit = (m->digest[ISR_KIT_DESCRIPTOR][0] != 0) +
         (m->digest[ISR_KIT_BUNDLE][0] != 0);
+    if (!isr_mac_shape(m, mac, desktop, kit)) return false;
     if (kit && (kit != 2 || mac || desktop != ISR_DESKTOP_END - ISR_BASE_ROWS)) return false;
     return desktop == 0 || (!mac && desktop == ISR_DESKTOP_END - ISR_BASE_ROWS);
 }
@@ -269,10 +280,10 @@ static bool isr_self(const struct isr_layout *l, const struct isr_manifest *m)
     if (close(named) != 0) ok = false;
     return ok;
 }
-static bool isr_desktop_assets(int dir, const struct isr_manifest *m)
+static bool isr_assets_range(int dir, const struct isr_manifest *m, int first, int end)
 {
-    if (!m->digest[ISR_DESKTOP_RECEIVE][0]) return true;
-    for (int row = ISR_BASE_ROWS; row < ISR_DESKTOP_END; ++row) {
+    if (!m->digest[first][0]) return true;
+    for (int row = first; row < end; ++row) {
         char hex[65]; size_t length;
         if (!isr_member(dir, isr_names[row], isr_limits[row], hex, NULL, 0, &length) ||
             strcmp(hex, m->digest[row])) return false;
@@ -288,7 +299,9 @@ bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t lengt
     if (!wire || length > ISR_MANIFEST) return false;
     char bytes[ISR_MANIFEST + 1]; struct isr_manifest manifest;
     memcpy(bytes, wire, length); bytes[length] = 0;
-    return isr_parse(bytes, length, &manifest, mac) && isr_desktop_assets(dir, &manifest);
+    return isr_parse(bytes, length, &manifest, mac) &&
+        isr_assets_range(dir, &manifest, ISR_BASE_ROWS, ISR_DESKTOP_END) &&
+        isr_assets_range(dir, &manifest, ISR_MAC_LAUNCHER, ISR_ROWS);
 }
 #endif
 static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
@@ -307,7 +320,9 @@ static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
         }
     }
     return isr_member(dir, isr_names[ISR_GAME], isr_limits[ISR_GAME],
-        hex, NULL, 0, &length) && !strcmp(hex, m->digest[ISR_GAME]) && isr_desktop_assets(dir, m);
+        hex, NULL, 0, &length) && !strcmp(hex, m->digest[ISR_GAME]) &&
+        isr_assets_range(dir, m, ISR_BASE_ROWS, ISR_DESKTOP_END) &&
+        isr_assets_range(dir, m, ISR_MAC_LAUNCHER, ISR_ROWS);
 }
 static bool isr_retained(const struct app_installed_source *out,
     const struct isr_manifest *m)
@@ -430,6 +445,12 @@ bool zcl_test_installed_toolchain_manifest(int dir, const char *wire, size_t len
     return ok;
 }
 #endif
+static bool isr_toolchain_identity(int dir, const struct isr_layout *layout,
+                                   const struct isr_manifest *manifest)
+{
+    return isr_self(layout, manifest) &&
+        isr_assets_range(dir, manifest, ISR_MAC_LAUNCHER, ISR_ROWS);
+}
 static enum app_installed_toolchain_status isr_toolchain(
     struct app_installed_toolchain *out)
 {
@@ -440,11 +461,13 @@ static enum app_installed_toolchain_status isr_toolchain(
     int dir = isr_directory(layout.dir);
     if (dir < 0) return APP_INSTALLED_TOOLCHAIN_REFUSED;
     struct isr_manifest manifest; char hash[65];
-    bool ok = isr_manifest(dir, &layout, &manifest, hash) && isr_self(&layout, &manifest);
+    bool ok = isr_manifest(dir, &layout, &manifest, hash) &&
+        isr_toolchain_identity(dir, &layout, &manifest);
     bool selected = ok && manifest.digest[ISR_KIT_DESCRIPTOR][0];
     if (selected) ok = isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &out->descriptor) &&
         isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &out->bundle);
-    if (ok) ok = isr_binding_matches(dir, &layout, hash) && isr_self(&layout, &manifest);
+    if (ok) ok = isr_binding_matches(dir, &layout, hash) &&
+        isr_toolchain_identity(dir, &layout, &manifest);
     if (close(dir) != 0) ok = false;
     return !ok ? APP_INSTALLED_TOOLCHAIN_REFUSED : selected ?
         APP_INSTALLED_TOOLCHAIN_VERIFIED : APP_INSTALLED_TOOLCHAIN_UNSELECTED;

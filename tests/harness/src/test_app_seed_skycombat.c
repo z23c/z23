@@ -976,15 +976,69 @@ static bool isd_tamper(struct isd_fixture *f)
     }
     return isd_missing_link(f);
 }
-static bool isd_kit_wire(struct isd_fixture *f, unsigned desktop, unsigned kit)
+static bool isd_append_pair(struct isd_fixture *f, const char *const names[2], unsigned mask)
 {
-    if (!isd_wire(f, 8191u, desktop)) return false;
-    static const char *const names[] = {"app-toolchain.json", "app-toolchain.bundle"};
     for (unsigned i = 0; i < 2; ++i) {
-        if (!(kit & (1u << i))) continue;
+        if (!(mask & (1u << i))) continue;
         size_t used = strlen(f->wire);
         int n = snprintf(f->wire + used, sizeof(f->wire) - used, "%s  %s\n", f->digest, names[i]);
         if (n <= 0 || (size_t)n >= sizeof(f->wire) - used) return false;
+    }
+    return true;
+}
+static bool isd_kit_wire(struct isd_fixture *f, unsigned desktop, unsigned kit)
+{
+    static const char *const names[] = {"app-toolchain.json", "app-toolchain.bundle"};
+    return isd_wire(f, 8191u, desktop) && isd_append_pair(f, names, kit);
+}
+static const char *const isd_mac_names[] = {"z23-app-macos", "Z23Apps-Info.plist"};
+static bool isd_mac_append(struct isd_fixture *f, unsigned mask)
+{
+    return isd_append_pair(f, isd_mac_names, mask);
+}
+static bool isd_mac_shapes(struct isd_fixture *f)
+{
+    for (unsigned mask = 1; mask < 4; ++mask) {
+        if (!isd_wire(f, 8191u, 0) || !isd_mac_append(f, mask) ||
+            isd_check(f, false) || isd_check(f, true) != (mask == 3)) return false;
+    }
+    if (!isd_wire(f, 8191u, 15u) || !isd_mac_append(f, 3) ||
+        isd_check(f, false) || isd_check(f, true)) return false;
+    if (!isd_kit_wire(f, 0, 3) || !isd_mac_append(f, 3) ||
+        isd_check(f, false) || isd_check(f, true)) return false;
+    return isd_wire(f, 8191u, 0) && isd_mac_append(f, 3);
+}
+static bool isd_mac_member_refusals(struct isd_fixture *f, unsigned i)
+{
+    if (!isd_write_name(f, isd_mac_names[i], "y", 1) || isd_check(f, true) ||
+        unlinkat(f->fd, isd_mac_names[i], 0) != 0 || isd_check(f, true) ||
+        symlinkat(asi_desktop_names[0], f->fd, isd_mac_names[i]) != 0 ||
+        isd_check(f, true) || unlinkat(f->fd, isd_mac_names[i], 0) != 0 ||
+        !isd_write_name(f, isd_mac_names[i], "x", 1) || !isd_check(f, true)) return false;
+    return true;
+}
+static bool isd_mac_members(struct isd_fixture *f)
+{
+    if (!isd_payload(f, 1)) return false;
+    for (unsigned i = 0; i < 2; ++i)
+        if (!isd_write_name(f, isd_mac_names[i], "x", 1)) return false;
+    if (!isd_mac_shapes(f) || !isd_check(f, true)) return false;
+    for (unsigned i = 0; i < 2; ++i)
+        if (!isd_mac_member_refusals(f, i)) return false;
+    return true;
+}
+static bool isd_mac_bounds(struct isd_fixture *f)
+{
+    for (size_t size = 65536; size <= 65537; ++size) {
+        if (!isd_payload(f, size)) return false;
+        char *bytes = malloc(size);
+        if (!bytes) return false;
+        memset(bytes, 'x', size);
+        bool ok = isd_write_name(f, isd_mac_names[0], bytes, size) &&
+            isd_write_name(f, isd_mac_names[1], bytes, size);
+        free(bytes);
+        if (!ok || !isd_wire(f, 8191u, 0) || !isd_mac_append(f, 3) ||
+            isd_check(f, true) != (size == 65536)) return false;
     }
     return true;
 }
@@ -1036,6 +1090,8 @@ static int isd_contract(struct ass_world *w)
         ASSERT(isd_kit_shapes(&f));
         ASSERT(isd_kit_members(&f));
         ASSERT(isd_kit_bounds(&f));
+        ASSERT(isd_mac_members(&f));
+        ASSERT(isd_mac_bounds(&f));
         PASS();
     } _test_next:;
     if (f.fd >= 0 && close(f.fd) != 0) ++failures;
