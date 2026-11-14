@@ -2,9 +2,10 @@
 
 # Agent verification preflight
 
-On 2026-11-14, an Android-only candidate spent about ten minutes building the
-selector producer before reporting a complexity failure. Its producer and exact
-suite built distinct test epochs: the former used the default test flags and the
+On 2026-11-14, Android-only candidate `c2d5022a` spent about ten minutes
+building the selector producer before reporting a complexity failure. A later
+startup-wording candidate `91b4bf9c` built distinct producer and exact-suite
+test epochs: the former used the default test flags and the
 latter used `ZCL_TEST_WERROR=1`. The bootstrap and exact suite now request the
 same strict policy. This observation does not measure end-to-end savings.
 
