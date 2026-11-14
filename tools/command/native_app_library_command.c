@@ -798,12 +798,10 @@ static void al_detail_model(struct library *w)
         app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
     } else {
         (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
+        (void)snprintf(m->title, sizeof(m->title), "Change with your AI");
         (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
-            ? "Use your existing AI. Setup has not connected it yet."
+            ? "Copy setup and paste it into your AI. Review and preview its changes here before choosing Keep."
             : "Editable source is unavailable. Ask the app author for source.");
-        if (r->saved) (void)snprintf(m->summary, sizeof(m->summary),
-            "%s revision %llu. AI source below; your kept app is unchanged.",
-            r->entry.id, (unsigned long long)r->selection.revision);
         char version[65] = {0};
         if (r->saved) (void)snprintf(version, sizeof(version), "%s", w->source_version);
         char first[33]; (void)snprintf(first, sizeof(first), "%.32s", version);
