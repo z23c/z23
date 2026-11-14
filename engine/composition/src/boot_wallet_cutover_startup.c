@@ -683,6 +683,19 @@ bool boot_test_pending_history_open(const struct app_context *ctx,
 }
 #endif
 
+static enum boot_pending_replay_result boot_pending_bound_history_result(
+    enum boot_pending_replay_result status)
+{
+    if (status == BOOT_PENDING_FAILED) LOG_ERROR("wallet", "pending replay bound history unavailable");
+    return status;
+}
+
+static bool boot_pending_replay_initialized(bool ready, const char *stage)
+{
+    if (!ready) LOG_ERROR("wallet", "pending replay %s initialization failed", stage);
+    return ready;
+}
+
 /* Runs before network, reducer and wallet services can mutate the reference. */
 static enum boot_pending_replay_result boot_pending_replay_prepare(struct boot_cutover_env *e, struct app_context *ctx,
     struct boot_cutover_replay *replay, struct wallet_rpc_context *rpc,
@@ -692,12 +705,25 @@ static enum boot_pending_replay_result boot_pending_replay_prepare(struct boot_c
     struct wallet_cutover_binding binding;
     uint8_t identity[32];
     int floor = -1;
-    if (!tip || !tip->phashBlock ||
-        wallet_sqlite_cutover_read(e->wallet_db, &binding) != WALLET_CUTOVER_PENDING ||
-        wallet_sqlite_cutover_scan_floor(e->wallet_db, &floor) != WALLET_CUTOVER_FLOOR_FOUND ||
-        !wallet_scan_identity(e->wallet, identity)) return BOOT_PENDING_FAILED;
+    if (!tip || !tip->phashBlock) {
+        LOG_ERROR("wallet", "pending replay chain tip unavailable");
+        return BOOT_PENDING_FAILED;
+    }
+    if (wallet_sqlite_cutover_read(e->wallet_db, &binding) != WALLET_CUTOVER_PENDING) {
+        LOG_ERROR("wallet", "pending replay binding unavailable");
+        return BOOT_PENDING_FAILED;
+    }
+    if (wallet_sqlite_cutover_scan_floor(e->wallet_db, &floor) != WALLET_CUTOVER_FLOOR_FOUND) {
+        LOG_ERROR("wallet", "pending replay scan floor unavailable");
+        return BOOT_PENDING_FAILED;
+    }
+    if (!wallet_scan_identity(e->wallet, identity)) {
+        LOG_ERROR("wallet", "pending replay wallet identity unavailable");
+        return BOOT_PENDING_FAILED;
+    }
     if (binding.history_identity_present) {
-        enum boot_pending_replay_result status = boot_bound_history_open(history, ctx, &binding);
+        enum boot_pending_replay_result status = boot_pending_bound_history_result(
+            boot_bound_history_open(history, ctx, &binding));
         if (status != BOOT_PENDING_COMPLETE) return status;
     }
     *rpc = (struct wallet_rpc_context){.wallet = e->wallet, .wallet_db = e->wallet_db,
@@ -707,7 +733,8 @@ static enum boot_pending_replay_result boot_pending_replay_prepare(struct boot_c
         .height = tip->nHeight, .hash = *tip->phashBlock, .root = tip->hashFinalSaplingRoot};
     bool ready;
     if (active_chain_at(&e->state->chain_active, floor))
-        ready = boot_cutover_replay_init(replay, rpc, e->db_service, &binding, floor, &endpoint, identity);
+        ready = boot_pending_replay_initialized(boot_cutover_replay_init(
+            replay, rpc, e->db_service, &binding, floor, &endpoint, identity), "active chain");
     else {
         ready = boot_cutover_replay_init(replay, rpc, e->db_service, &binding, floor, &endpoint, identity);
         if (ready) {
@@ -716,10 +743,13 @@ static enum boot_pending_replay_result boot_pending_replay_prepare(struct boot_c
             if (!ready) boot_cutover_replay_clear(replay);
         }
         if (!ready) {
-            if (!boot_pending_history_open(history, ctx, &endpoint, &binding)) return BOOT_PENDING_FAILED;
+            if (!boot_pending_history_open(history, ctx, &endpoint, &binding)) {
+                LOG_ERROR("wallet", "pending replay history unavailable");
+                return BOOT_PENDING_FAILED;
+            }
             rpc->main_state = history->state;
-            ready = boot_cutover_replay_init_archive(replay, rpc, e->db_service, &binding,
-                floor, &endpoint, identity, e->state, history->path);
+            ready = boot_pending_replay_initialized(boot_cutover_replay_init_archive(
+                replay, rpc, e->db_service, &binding, floor, &endpoint, identity, e->state, history->path), "archive");
         }
     }
     if (ready) replay->sapling_load_ok = e->sapling_load_ok;
@@ -1045,10 +1075,7 @@ static enum boot_pending_replay_result boot_cutover_replay_observed(struct boot_
     int64_t deadline = 0;
     if (!boot_pending_authenticate(e, ctx, &unlocked, &deadline)) goto done;
     result = boot_pending_replay_prepare(e, ctx, &replay, &rpc, &history);
-    if (result != BOOT_PENDING_COMPLETE) {
-        if (result == BOOT_PENDING_FAILED) LOG_ERROR("wallet", "pending replay reference or scan floor unavailable");
-        goto done;
-    }
+    if (result != BOOT_PENDING_COMPLETE) goto done;
     replay.auth_deadline_ms = deadline;
     result = boot_pending_replay_loop(e, ctx, params, &replay, deadline);
     if (result == BOOT_PENDING_COMPLETE && observation && history.observation_valid)
