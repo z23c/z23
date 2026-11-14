@@ -2931,19 +2931,28 @@ static void tag_xdg_leave(struct tag_xdg *x)
     if (x->state) (void)setenv("XDG_STATE_HOME", x->state, 1); else (void)unsetenv("XDG_STATE_HOME");
     free(x->config); free(x->state);
 }
+static bool tag_discover_library_layout(const struct zcl_present_model_v1 *model, bool detail)
+{
+    if (model->action_count != (detail ? 4u : 3u) || !strstr(model->summary, "tinyapp")) return false;
+    return detail || (!strcmp(model->actions[0].id, "choose") &&
+        !strcmp(model->actions[1].id, "create") && !strcmp(model->actions[2].id, "home"));
+}
 static bool tag_discover_library_card(struct tag_discover *d, const struct zcl_present_model_v1 *model,
     struct zcl_present_window_event_v1 *event)
 {
-    if (model->action_count != 4 || !strstr(model->summary, "tinyapp")) return false;
-    if (!strcmp(model->actions[0].id, "open")) ++d->detail;
-    else if (!strcmp(model->actions[0].id, "choose")) ++d->browser;
-    else return false;
+    bool detail = !strcmp(model->actions[0].id, "open");
+    if (!tag_discover_library_layout(model, detail)) return false;
+    if (detail) ++d->detail;
+    else ++d->browser;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    const char *wanted;
     if (d->cancel_after_error && d->errors && !d->share_canceled)
-        event->action_index = !strcmp(model->actions[0].id, "open") ? 2 : 0;
-    else event->action_index = d->oversized_share && !strcmp(model->actions[0].id, "open") ? 2 : 3;
-    return true;
+        wanted = detail ? "share" : "choose";
+    else wanted = detail ? (d->oversized_share ? "share" : "back") : "home";
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, wanted)) { event->action_index = i; return true; }
+    return false;
 }
 static bool tag_discover_error_card(struct tag_discover *d, struct zcl_present_window_event_v1 *event)
 {

@@ -1689,6 +1689,13 @@ static const char *al_create_first_card(struct al_create_view *s,
             al_create_action(m, "home", "Back") >= 0;
         return "home";
     }
+    if (s->count == 1) {
+        s->valid = m->action_count == 3 && al_create_action(m, "choose", "Choose app") >= 0 &&
+            al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
+            al_create_action(m, "home", "Back") >= 0 &&
+            al_create_action(m, "previous", NULL) < 0 && al_create_action(m, "next", NULL) < 0;
+        return "home";
+    }
     s->valid = al_create_action(m, "next", "Next app") >= 0 &&
         al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
         al_create_action(m, "previous", NULL) < 0;
@@ -1708,7 +1715,7 @@ static const char *al_create_view_action(struct al_create_view *s,
         s->valid = s->valid && al_create_last_card(m);
         return "home";
     }
-    if (s->step == (s->count ? 3u : 2u) && !strcmp(m->request_id, "library-home")) return "cancel";
+    if (s->step == (s->count > 1 ? 3u : 2u) && !strcmp(m->request_id, "library-home")) return "cancel";
     return NULL;
 }
 static bool al_create_view_present(void *context, const struct zcl_present_model_v1 *m,
@@ -1729,6 +1736,11 @@ static int case_library_create_view(void)
     TEST("My Apps offers creation in empty and terminal views") {
         ASSERT(al_setup(&f)); ASSERT(al_write_file(f.env.config_path, "", 0600));
         struct al_create_view view = {.valid = true};
+        zcl_test_app_library_run(&f.env, &reply, al_create_view_present, &view);
+        ASSERT(view.valid && view.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(al_library_catalog(&f, 1));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        view = (struct al_create_view){.count = 1, .valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_create_view_present, &view);
         ASSERT(view.valid && view.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT(al_library_catalog(&f, 2));
