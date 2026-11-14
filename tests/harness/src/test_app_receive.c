@@ -1440,6 +1440,55 @@ static bool rloc_case(const char *path, const char *encoded, bool adopted)
     zcl_command_reply_free(&reply);
     return ok;
 }
+bool app_receive_flow_test_adopted_choices(struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context);
+struct rbrief_probe { unsigned shown; };
+static bool rbrief_actions(const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, bool ready, uint32_t *count,
+    char *why, size_t cap)
+{
+    return pages && model->action_count == 4 && !strcmp(model->actions[0].label, "Close") &&
+        !strcmp(model->actions[3].label, ready ? "Build and preview" : "Keep this version") &&
+        zcl_present_model_page_count_v1(model, count, why, cap) && *count > 0;
+}
+static bool rbrief_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rbrief_probe *probe = context;
+    static const char version[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    uint32_t count = 0;
+    bool ready = probe->shown++ == 0;
+    bool ok = rbrief_actions(model, pages, ready, &count, why, cap);
+    if (ready) ok = ok && count == 1 && model->item_count == 2 &&
+        rt_field(model, "Personal copy: ", "copy\\x20name") &&
+        rt_field(model, "Saved version prefix: ", "0123456789ab");
+    else ok = ok && rt_field(model, "Personal copy: ", "/private/long/path/copy name") &&
+        rt_field(model, "Saved version: ", version);
+    bool close = false, redraw = false;
+    return ok && rt_action(live, 0, &close, &redraw) && close;
+}
+static bool rbrief_case(void)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    json_set_object(&reply.data);
+    bool ok = json_push_kv_str(&reply.data, "copy", "/private/long/path/copy name") &&
+        json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    struct rbrief_probe probe = {0};
+    if (ok) ok = app_receive_flow_test_adopted_choices(&reply, rbrief_present, &probe);
+    ok = ok && probe.shown == 2 &&
+        !strcmp(json_get_str(json_get(&reply.data, "copy")), "/private/long/path/copy name") &&
+        !strcmp(json_get_str(json_get(&reply.data, "version")), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    zcl_command_reply_free(&reply); return ok;
+}
+static int rbrief_cases(void)
+{
+    int failures = 0;
+    TEST("adopted ready choice is concise while Keep retains exact identity") {
+        ASSERT(rbrief_case()); PASS();
+    } _test_next:;
+    return failures;
+}
 static int rloc_cases(void)
 {
     int failures = 0;
@@ -2001,6 +2050,7 @@ int test_app_receive(void)
     failures += rd_parents();
     failures += rd_home_permissions();
     failures += rd_home_aliases();
+    failures += rbrief_cases();
     failures += rloc_cases();
     failures += rreveal_cases();
     failures += rtry_matrix();
