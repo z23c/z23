@@ -2637,6 +2637,10 @@ static int case_library_builtin_help(void)
         ASSERT(strstr(request, "fresh Change with your AI setup"));
         ASSERT(strstr(request, "source_version for every later source read and app.edit"));
         ASSERT(strstr(request, "exact expected_head"));
+        ASSERT(strstr(request, "expected_head from head_version"));
+        ASSERT(strstr(request, "expected_blob from file.blob"));
+        ASSERT(strstr(request, "plan_id and confirm=true"));
+        ASSERT(strstr(request, "re-read before another edit"));
         ASSERT(strstr(request, "explicit Keep and Share"));
         struct app_selection no_selection;
         ASSERT(app_selection_load(f.env.state_dir, "skycombat", &no_selection) == APP_SELECTION_ABSENT);

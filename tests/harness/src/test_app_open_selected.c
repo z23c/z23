@@ -3476,12 +3476,19 @@ static bool rr_cancel_personalize(struct rr_cycle *r)
     zcl_command_reply_free(&reply);
     return canceled;
 }
+static bool rr_setup_guide(const struct json_value *setup)
+{
+    const char *request = aso_string(setup, "request");
+    return strstr(request, "expected_head from head_version") && strstr(request, "expected_blob from file.blob") &&
+        strstr(request, "plan_id and confirm=true") && strstr(request, "re-read before another edit") &&
+        strstr(request, "explicit Keep and Share choices");
+}
 static bool rr_setup_identity(struct rr_cycle *r, const struct rr_consent *view,
     struct zcl_command_reply *reply, struct json_value *setup)
 {
     char key[4400]; bool exists = false;
     bool ok = reply->status == ZCL_COMMAND_STATUS_PASSED && view->confirmed &&
-        json_read(setup, view->setup, strlen(view->setup)) &&
+        json_read(setup, view->setup, strlen(view->setup)) && rr_setup_guide(setup) &&
         !strcmp(aso_string(setup, "name"), AK_ROUTE) &&
         json_get(setup, "revision") && json_get(setup, "revision")->type == JSON_INT &&
         json_get_int(json_get(setup, "revision")) == 1 &&
@@ -3698,45 +3705,108 @@ static bool rr_stale_change(struct rr_cycle *r)
     abc_close(&leaf);
     return ok && rr_preserved(r, r->personal);
 }
-static bool rr_edit_input(struct json_value *input, const struct rr_cycle *r,
-                          const struct json_value *setup, const char *blob)
+static bool rr_edit_input(struct json_value *input, const struct json_value *setup,
+                          const char *head, const char *blob)
 {
     json_init(input); json_set_object(input);
+    const struct json_value *revision = json_get(setup, "revision");
     return json_push_kv_str(input, "name", aso_string(setup, "name")) &&
-        json_push_kv_int(input, "expected_revision", 2) &&
+        revision && revision->type == JSON_INT && json_push_kv(input, "expected_revision", revision) &&
         json_push_kv_str(input, "source_version", aso_string(setup, "source_version")) &&
-        json_push_kv_str(input, "expected_head", r->head) &&
+        json_push_kv_str(input, "expected_head", head) &&
         json_push_kv_str(input, "path", "include/boost.h") &&
         json_push_kv_str(input, "expected_blob", blob) &&
         json_push_kv_str(input, "content", "#define BOOST 8\n");
 }
+static bool rr_edit_bindings(const struct json_value *data, const struct rr_cycle *r,
+                             const struct json_value *setup)
+{
+    const struct json_value *revision = json_get(data, "source_selection_revision");
+    const struct json_value *expected = json_get(setup, "revision");
+    return revision && revision->type == JSON_INT && expected && expected->type == JSON_INT &&
+        json_get_int(revision) == json_get_int(expected) &&
+        !strcmp(aso_string(data, "kept_version"), r->bob.build.version) &&
+        !strcmp(aso_string(data, "source_version"), aso_string(setup, "source_version"));
+}
 static bool rr_edit_transaction(struct aso_mcp *m, struct rr_cycle *r,
-                                const struct json_value *setup, const char *blob)
+                                const struct json_value *setup, const char *head, const char *blob)
 {
     struct json_value input, doc; json_init(&doc);
-    bool ok = rr_edit_input(&input, r, setup, blob) && aj_mcp_run(m, "app.edit", &input, &doc);
+    bool ok = rr_edit_input(&input, setup, head, blob) && aj_mcp_run(m, "app.edit", &input, &doc);
     char plan[65]; const char *id = aso_string(json_get(&doc, "data"), "plan_id");
-    ok = ok && strlen(id) == 64;
+    ok = ok && strlen(id) == 64 && rr_edit_bindings(json_get(&doc, "data"), r, setup);
     if (ok) (void)snprintf(plan, sizeof(plan), "%s", id);
     json_free(&doc); json_init(&doc);
     if (ok) ok = json_push_kv_str(&input, "plan_id", plan) && json_push_kv_bool(&input, "confirm", true) &&
         aj_mcp_run(m, "app.edit", &input, &doc);
     const char *version = aso_string(json_get(&doc, "data"), "version");
-    ok = ok && strlen(version) == 64;
+    ok = ok && strlen(version) == 64 && rr_edit_bindings(json_get(&doc, "data"), r, setup);
     if (ok) (void)snprintf(r->edited, sizeof(r->edited), "%s", version);
     json_free(&doc); json_free(&input); return ok;
 }
+static bool rr_edit_read_input(const struct json_value *setup, struct json_value *input)
+{
+    const struct json_value *revision = json_get(setup, "revision");
+    json_set_object(input);
+    return json_push_kv_str(input, "name", aso_string(setup, "name")) &&
+        revision && revision->type == JSON_INT && json_get_int(revision) == 2 &&
+        json_push_kv(input, "expected_revision", revision) &&
+        json_push_kv_str(input, "source_version", aso_string(setup, "source_version")) &&
+        json_push_kv_str(input, "path", "include/boost.h");
+}
+static bool rr_edit_read_result(const struct json_value *data, const struct rr_cycle *r,
+                                const struct json_value *setup, char head[65], char blob[65])
+{
+    const struct json_value *revision = json_get(setup, "revision");
+    const char *observed_head = aso_string(data, "head_version");
+    const char *observed_blob = aso_string(json_get(data, "file"), "blob");
+    const struct json_value *observed_revision = json_get(data, "selection_revision");
+    bool ok = strlen(observed_head) == 64 && strlen(observed_blob) == 64 && revision &&
+        observed_revision && observed_revision->type == JSON_INT && json_get_int(observed_revision) == json_get_int(revision) &&
+        !strcmp(observed_head, r->head) && strcmp(observed_head, aso_string(setup, "source_version")) &&
+        !strcmp(aso_string(data, "source_version"), aso_string(setup, "source_version")) &&
+        !strcmp(aso_string(data, "version"), r->bob.build.version) &&
+        !strcmp(aso_string(data, "content"), "#define BOOST 1\n");
+    if (ok) { memcpy(head, observed_head, 65); memcpy(blob, observed_blob, 65); }
+    return ok;
+}
+static bool rr_edit_read(struct aso_mcp *m, const struct rr_cycle *r, const struct json_value *setup,
+                         char head[65], char blob[65])
+{
+    struct json_value input = {0}, doc = {0};
+    bool ok = rr_edit_read_input(setup, &input) && aj_mcp_run(m, "app.customize", &input, &doc) &&
+        rr_edit_read_result(json_get(&doc, "data"), r, setup, head, blob);
+    json_free(&doc); json_free(&input); return ok;
+}
+static bool rr_refresh_setup(struct rr_cycle *r)
+{
+    struct rr_consent view = {.cycle = r}; struct zcl_command_reply reply;
+    struct json_value setup = {0}; char exe[PATH_MAX];
+    zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    bool ok = realpath("build/bin/z23-dev", exe) != NULL;
+    if (ok) zcl_test_app_library_native_at(&r->bob.env, exe, r->owner.alice_datadir, &reply,
+        rr_library_present, &view, rr_present);
+    const struct json_value *revision = NULL;
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        json_read(&setup, view.setup, strlen(view.setup));
+    if (ok) revision = json_get(&setup, "revision");
+    ok = ok && revision && revision->type == JSON_INT && json_get_int(revision) == 2 &&
+        !strcmp(aso_string(&setup, "version"), r->bob.build.version) &&
+        !strcmp(aso_string(&setup, "source_version"), r->personal) && rr_setup_guide(&setup);
+    if (ok) { int n = snprintf(r->mcp_setup, sizeof(r->mcp_setup), "%s", view.setup); ok = n > 0 && (size_t)n < sizeof(r->mcp_setup); }
+    json_free(&setup); zcl_command_reply_free(&reply); return ok;
+}
 static bool rr_edit(struct rr_cycle *r)
 {
-    char blob[65];
-    if (!rr_newer_dirty(r, "#define BOOST 6\n") ||
-        !rr_read(r, 2, "#define BOOST 1\n", blob)) return false;
+    char head[65], blob[65];
+    if (!rr_refresh_setup(r) || !rr_newer_dirty(r, "#define BOOST 6\n")) return false;
     struct json_value setup; json_init(&setup);
     char exe[PATH_MAX]; const char *a, *b, *c;
     struct aso_mcp m = {.pid = -1, .input = -1, .output = -1};
     bool ok = json_read(&setup, r->mcp_setup, strlen(r->mcp_setup)) &&
         realpath("build/bin/z23-dev", exe) && rr_setup_args(&setup, exe, r->owner.alice_datadir, &a, &b, &c) &&
-        aso_mcp_spawn_args(&m, exe, a, b, c) && aso_mcp_init(&m) && rr_edit_transaction(&m, r, &setup, blob);
+        aso_mcp_spawn_args(&m, exe, a, b, c) && aso_mcp_init(&m) &&
+        rr_edit_read(&m, r, &setup, head, blob) && rr_edit_transaction(&m, r, &setup, head, blob);
     bool closed = aso_mcp_close(&m); json_free(&setup); ok = ok && closed;
     return ok && strlen(r->edited) == 64 && strcmp(r->edited, r->personal) &&
         aj_parent_is(&r->owner, r->edited, r->head) && rr_preserved(r, r->edited);
