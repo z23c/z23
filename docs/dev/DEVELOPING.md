@@ -1540,6 +1540,12 @@ nonzero executed-group count. Do not accept a cached summary as an uncached
 proof. `tools/scripts/gate-and-report.sh <lintlog> <testlog>` verifies the
 canonical verdict tokens when a mission requires the combined report.
 
+For the installed desktop app flow, use
+[Installed app journey qualification](APP_JOURNEY_QUALIFICATION.md) to bind
+actual MCP edits, explicit Preview/Keep, signed-file receipt, and an independent
+recipient reopen to the exact installed release. Keep that acceptance separate
+from the Commons demonstration below.
+
 The product front door is one command, and it is how you check that the whole
 Commons journey still holds end to end — a person asks for behavior, the node
 reuses C23 from a peer, creates only what is missing, a second node reproduces
