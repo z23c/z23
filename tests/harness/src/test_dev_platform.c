@@ -12023,7 +12023,8 @@ struct dp_inside_stop {
 
 [[noreturn]] static void dp_fake_watcher_with_helper(const char *root,
                                                      int cmd_fd, int ready_fd,
-                                                     int report_fd)
+                                                     int report_fd,
+                                                     const struct dp_fake_owner *owner)
 {
     char lock[PATH_MAX];
     sigset_t stop;
@@ -12034,6 +12035,7 @@ struct dp_inside_stop {
     sigemptyset(&stop);
     sigaddset(&stop, SIGTERM);
     (void)sigprocmask(SIG_BLOCK, &stop, NULL);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) _exit(2);
     int fd = zcl_devloop_watch_lock_path(root, lock, sizeof(lock))
         ? open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
     if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0 || ftruncate(fd, 0) != 0 ||
@@ -12045,6 +12047,9 @@ struct dp_inside_stop {
      * birth token before the helper can be scheduled after that kill. */
     if (!os_proc_pid_start_token((uint64_t)leader, &born))
         _exit(2);
+#if defined(__linux__)
+    if (!dp_fake_owner_alive(owner)) _exit(2);
+#endif
     pid_t helper = fork();
     if (helper == 0) {
         char go = 0;
@@ -12062,13 +12067,63 @@ struct dp_inside_stop {
     pid_t pids[2] = {leader, helper};
     (void)close(cmd_fd);
     (void)close(report_fd);
-    if (helper < 0 || write(ready_fd, pids, sizeof(pids)) != sizeof(pids))
+    if (helper < 0) _exit(3);
+    if (write(ready_fd, pids, sizeof(pids)) != sizeof(pids)) {
+        (void)kill(helper, SIGKILL);
+        (void)waitpid(helper, NULL, 0);
         _exit(3);
+    }
     (void)close(ready_fd);
+#if defined(__linux__)
+    sig = dp_fake_wait_signal(&stop, owner);
+#else
+    (void)owner;
     (void)sigwait(&stop, &sig);
+#endif
     (void)close(fd);
     _exit(0);
 }
+
+#if defined(__linux__)
+static bool dp_helper_owner_death(void)
+{
+    char root[PATH_MAX] = {0};
+    int cmd[2], ready[2];
+    struct dp_fake_watch fake = {0};
+    uint64_t watcher_born = 0, worker_born = 0;
+    if (!dp_watch_session_root(root, "watch-helper-owner")) return false;
+    if (pipe(cmd) != 0) { (void)test_rm_rf_recursive(root); return false; }
+    if (pipe(ready) != 0) {
+        (void)close(cmd[0]); (void)close(cmd[1]); (void)test_rm_rf_recursive(root);
+        return false;
+    }
+    pid_t parent = getpid(), owner = fork();
+    if (owner == 0) {
+        (void)close(ready[0]);
+        if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(2);
+        struct dp_fake_owner identity = {.pid = getpid()};
+        if (!os_proc_pid_start_token((uint64_t)identity.pid, &identity.born)) _exit(2);
+        pid_t leader = fork();
+        if (leader == 0) {
+            (void)close(cmd[1]);
+            int sink = open("/dev/null", O_WRONLY);
+            if (sink < 0) _exit(2);
+            dp_fake_watcher_with_helper(root, cmd[0], ready[1], sink, &identity);
+        }
+        (void)close(cmd[0]); (void)close(ready[1]);
+        if (leader < 0) _exit(2);
+        for (;;) pause();
+    }
+    (void)close(cmd[0]); (void)close(cmd[1]); (void)close(ready[1]);
+    bool ok = owner > 0 && dp_fake_owner_read(ready[0], &fake, &watcher_born, &worker_born);
+    (void)close(ready[0]);
+    if (owner > 0) { (void)kill(owner, SIGKILL); (void)waitpid(owner, NULL, 0); }
+    ok = ok && dp_fake_owner_wait(&fake);
+    dp_kill_if_same(fake.worker, worker_born); dp_kill_if_same(fake.watcher, watcher_born);
+    (void)test_rm_rf_recursive(root);
+    return ok;
+}
+#endif
 
 static int test_watch_session_stop_from_own_session(void)
 {
@@ -12081,15 +12136,22 @@ static int test_watch_session_stop_from_own_session(void)
         PASS(); /* launch identity needs /proc (exe, cwd, boot_id) */
         goto _test_next;
 #endif
+#if defined(__linux__)
+        ASSERT(dp_helper_owner_death());
+#endif
         ASSERT(dp_watch_session_root(root, "watch-inside"));
         ASSERT(pipe(cmd) == 0 && pipe(ready) == 0 && pipe(report) == 0);
+        struct dp_fake_owner owner = {.pid = getpid()};
+#if defined(__linux__)
+        ASSERT(os_proc_pid_start_token((uint64_t)owner.pid, &owner.born));
+#endif
         pid_t middle = fork();
         if (middle == 0) {
             (void)close(cmd[1]);
             (void)close(ready[0]);
             (void)close(report[0]);
             if (fork() == 0)
-                dp_fake_watcher_with_helper(root, cmd[0], ready[1], report[1]);
+                dp_fake_watcher_with_helper(root, cmd[0], ready[1], report[1], &owner);
             _exit(0);
         }
         ASSERT(middle > 0 && waitpid(middle, NULL, 0) == middle);
