@@ -18076,8 +18076,8 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 	@echo "══ pr-check: passed ══"
 
 # agent-verify: the one verification trip for an edit. It runs the four checks
-# every edit must pass, each as its own sub-make with its own log, and keeps
-# going after a failure so one trip shows every red step. Full lint and the
+# every edit must pass, each as its own sub-make with its own log. Complexity fails fast before
+# selector setup; later failures are collected so one trip shows each red step. Full lint and the
 # wide group list stay with the landing step. The test step builds with
 # ZCL_TEST_WERROR=1, as the land proof's bundle build does, so a compiler
 # warning fails here instead of after a queue wait (row 916, 10-23).
@@ -18126,13 +18126,29 @@ agent-verify:
 	 rm -f build/scratch/agent-verify.*.log || exit 1; \
 	 only='$(strip $(ONLY))'; \
 	 if [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; then \
-	    rflag=; [ "$$only" = '@route' ] && rflag=--route-only; \
 	    dirty=$$(git status --porcelain --untracked-files=no | wc -l); \
 	    if [ "$$dirty" -ne 0 ]; then \
 	       echo "agent-verify: ONLY=$$only selects committed paths, as the land proof does, and $$dirty tracked path(s) are uncommitted; commit first, or name the groups with ONLY=<group,group>" | tee -a build/scratch/agent-verify.rc >&2; \
 	       exit 2; \
 	    fi; \
-	    $(MAKE) --no-print-directory dev-bin >build/scratch/agent-verify.dev-bin.log 2>&1 || { echo "agent-verify: dev-bin failed; see build/scratch/agent-verify.dev-bin.log" >&2; exit 2; }; \
+	 fi; \
+	 failed=""; \
+	 av_step() { \
+	    step="$$1"; shift; \
+	    log="build/scratch/agent-verify.$$step.log"; \
+	    $(MAKE) --no-print-directory "$$step" "$$@" >"$$log" 2>&1; rc=$$?; \
+	    { echo "agent-verify: $$step rc=$$rc"; \
+	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
+	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
+	      if [ $$rc -ne 0 ]; then $(MAKE) --no-print-directory agent-verify-evidence LOG="$$log"; fi; \
+	    } | tee -a build/scratch/agent-verify.rc; \
+	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
+	 }; \
+	 av_step check-cyclomatic-complexity; \
+	 if [ -n "$$failed" ]; then echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; exit 1; fi; \
+	 if [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; then \
+	    rflag=; [ "$$only" = '@route' ] && rflag=--route-only; \
+	    $(MAKE) --no-print-directory dev-bin ZCL_TEST_WERROR=1 >build/scratch/agent-verify.dev-bin.log 2>&1 || { echo "agent-verify: dev-bin failed; see build/scratch/agent-verify.dev-bin.log" >&2; exit 2; }; \
 	    base=$$(git merge-base origin/main HEAD) || { echo "agent-verify: no merge-base with origin/main; use ONLY=<group,group>" >&2; exit 2; }; \
 	    sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>build/scratch/agent-verify.select.err); \
 	    case "$$sel" in *'"reason":"plan-not-closed"'*) sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>>build/scratch/agent-verify.select.err);; esac; \
@@ -18150,19 +18166,6 @@ agent-verify:
 	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \
-	 failed=""; \
-	 av_step() { \
-	    step="$$1"; shift; \
-	    log="build/scratch/agent-verify.$$step.log"; \
-	    $(MAKE) --no-print-directory "$$step" "$$@" >"$$log" 2>&1; rc=$$?; \
-	    { echo "agent-verify: $$step rc=$$rc"; \
-	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
-	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
-	      if [ $$rc -ne 0 ]; then $(MAKE) --no-print-directory agent-verify-evidence LOG="$$log"; fi; \
-	    } | tee -a build/scratch/agent-verify.rc; \
-	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
-	 }; \
-	 av_step check-cyclomatic-complexity; \
 	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; fi; \
 	 av_step docs-capability-inventory; \
 	 av_step check-kpi-floor; \

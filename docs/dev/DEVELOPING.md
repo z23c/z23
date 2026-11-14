@@ -1017,12 +1017,16 @@ slice.
 `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed` (the groups the land proof selects for your committed changes; or `ONLY=<group,group>`) is the one verification trip for an
 edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
 `docs-capability-inventory` and `lint-fast`, each in its own sub-make with a log
-under `build/scratch/`. It does not stop at the first failure: it prints one
+under `build/scratch/`. Complexity fails fast before selector setup; later failures are collected.
+It prints one
 `agent-verify: <step> rc=<n>` line per step, then `agent-verify: OK` or
 `agent-verify: FAILED (...)`, and writes the same lines to
 `build/scratch/agent-verify.rc`. Run it through devbuild as one job, with
 `devbuild --wait --class normal make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`. Full
 `make lint` and the wide group list remain the landing step's job.
+The selector bootstrap and exact test step both use `ZCL_TEST_WERROR=1`.
+This aligns their strict test-compile policy.
+
 The last line of `build/scratch/agent-verify.rc` is `agent-verify: OK` or
 `agent-verify: FAILED (<steps>)`. A file without that last line is an
 interrupted run and is not a pass, whatever its `rc=` lines say.

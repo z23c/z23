@@ -1964,13 +1964,47 @@ static int t_shell_host_assumptions_recipe(void)
     return bad;
 }
 
+static int t_agent_verify_preflight(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p build/bin bin\n"
+        "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
+        "printf '#!/bin/sh\\ncase $1 in status) [ \"${DIRTY:-0}\" = 0 ] || echo dirty;; merge-base) echo base;; *) exit 1;; esac\\n' > bin/git; chmod +x bin/git\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\ncase \"$*\" in *check-cyclomatic-complexity*) [ \"${FAIL_COMPLEXITY:-0}\" = 0 ];; *t-fast-exact*) [ \"${FAIL_TEST:-0}\" = 0 ];; *) exit 0;; esac\\n' > submake; chmod +x submake\n"
+        "printf '#!/bin/sh\necho \"$*\" >> selector-calls\ncat <<END\n{\"groups\":\"models\",\"selector\":\"exact\",\"groups_selected\":1}\nEND\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
+        "PATH=\"$2/bin:$PATH\"; export PATH\n"
+        "if make --no-print-directory MAKE=./submake agent-verify > empty.log 2>&1; then exit 1; fi\n"
+        "[ ! -e calls ]\n"
+        "for choice in @changed @route; do if DIRTY=1 make --no-print-directory MAKE=./submake agent-verify ONLY=$choice > dirty.log 2>&1; then exit 1; fi; [ ! -e calls ]; done\n"
+        "if FAIL_COMPLEXITY=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > fail.log 2>&1; then exit 1; fi\n"
+        "[ \"$(wc -l < calls)\" = 2 ]; grep -q check-cyclomatic-complexity calls; grep -q agent-verify-evidence calls\n"
+        "grep -q 'agent-verify: FAILED (check-cyclomatic-complexity)' build/scratch/agent-verify.rc\n"
+        ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > pass.log 2>&1\n"
+        "[ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]; sed -n 1p calls | grep -q check-cyclomatic-complexity\n"
+        "grep -q 'dev-bin ZCL_TEST_WERROR=1' calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n"
+        "grep -q 'agent-verify: OK' build/scratch/agent-verify.rc\n"
+        "for gate in docs-capability-inventory check-kpi-floor lint-fast; do grep -q \"$gate\" calls; done\n"
+        ": > calls; : > selector-calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@route > route.log 2>&1\n"
+        "grep -q -- --route-only selector-calls; [ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]\n"
+        ": > calls; if FAIL_TEST=1 make --no-print-directory MAKE=./submake agent-verify ONLY=models > later.log 2>&1; then exit 1; fi\n"
+        "for gate in docs-capability-inventory check-kpi-floor lint-fast; do grep -q \"$gate\" calls; done\n"
+        "grep -q 'agent-verify: FAILED (t-fast-exact)' build/scratch/agent-verify.rc\n"
+        ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=models > explicit.log 2>&1\n"
+        "! grep -q dev-bin calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "preflight");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates_realroot(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_agent_verify_preflight() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
