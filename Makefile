@@ -17636,7 +17636,7 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(TOR_PROVENANCE_BIN) $(GIT_HOOK_BIN) $(HOTSWAP_ACTION_PLAN) \
 	$(PROCESS_GROUP_EXEC_BIN) $(BIN_DIR)/arena_product_journey_c23 \
 	$(REPRO_NETWORK_POLICY_SELFTEST_BIN) \
-	$(BUILD_EPOCH_INTEGRITY_LINT_BIN) \
+	$(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(BIN_DIR)/depfile-scope-launch \
 	$(CHECKOUT_LOCK_SELFTEST_LINT_BIN) $(BIN_DIR)/checkout-lock
 # tor-provenance-ready runs BEFORE the lint driver ever forks a gate script:
 # z23-lint run (both the parallel dispatcher above and the serial LINT_GATES

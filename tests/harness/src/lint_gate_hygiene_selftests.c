@@ -1518,6 +1518,8 @@ static bool lint_built_prereqs_contract(const char *makefile)
         return false;
     if (!range_contains(assignment, assignment_end, "$(GIT_HOOK_BIN)"))
         return false;
+    if (!range_contains(assignment, assignment_end, "$(BIN_DIR)/depfile-scope-launch"))
+        return false;
 
     const char *targets =
         strstr(makefile, "\nlint:");
@@ -1590,6 +1592,10 @@ int t_lint_umbrellas_share_built_prereqs(void)
     int git_hook_mutation_trips = lint_umbrellas_helper_mutation_trips(
         missing_git_hook, "$(GIT_HOOK_BIN)");
 
+    char *missing_depfile = read_ok ? strdup(makefile) : NULL;
+    int depfile_mutation_trips = lint_umbrellas_helper_mutation_trips(
+        missing_depfile, "$(BIN_DIR)/depfile-scope-launch");
+
     char *missing_target = read_ok ? strdup(makefile) : NULL;
     int target_mutation_trips = lint_umbrellas_target_mutation_trips(
         missing_target);
@@ -1600,12 +1606,14 @@ int t_lint_umbrellas_share_built_prereqs(void)
         ASSERT(baseline_ok);
         ASSERT(helper_mutation_trips);
         ASSERT(git_hook_mutation_trips);
+        ASSERT(depfile_mutation_trips);
         ASSERT(target_mutation_trips);
         PASS();
     } _test_next:;
     free(makefile);
     free(missing_helper);
     free(missing_git_hook);
+    free(missing_depfile);
     free(missing_target);
     return failures;
 }
