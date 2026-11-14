@@ -1349,6 +1349,134 @@ static int rloc_cases(void)
     } _test_next:;
     return failures;
 }
+void app_receive_flow_test_notice_reveal(struct zcl_command_reply *reply, bool adopted, bool draft,
+    app_confirm_presenter presenter, void *context, bool (*revealer)(void *, const char *));
+enum rreveal_mode { RREVEAL_CLOSE, RREVEAL_EARLY, RREVEAL_SHOW, RREVEAL_FAIL, RREVEAL_UNAVAILABLE };
+struct rreveal_probe {
+    enum rreveal_mode mode;
+    const char *path;
+    unsigned calls, windows;
+    bool available, exact, failure_notice, actions_ok;
+};
+static bool rreveal_open(void *context, const char *path)
+{
+    struct rreveal_probe *p = context;
+    ++p->calls; p->exact = p->path && !strcmp(p->path, path);
+    return p->mode != RREVEAL_FAIL;
+}
+static bool rreveal_visit(const struct zcl_present_window_live_view_v1 *live, uint32_t count)
+{
+    for (uint32_t i = 1; i < count; ++i) {
+        bool close = false, redraw = false;
+        if (!rt_action(live, 2, &close, &redraw) || close || !redraw) return false;
+    }
+    return true;
+}
+static bool rreveal_failure_view(struct rreveal_probe *p, const struct zcl_present_model_v1 *model,
+                                 const struct zcl_present_window_live_view_v1 *live)
+{
+    bool error = false, location = false;
+    for (uint32_t i = 0; i < model->item_count; ++i) {
+        if (strstr(model->items[i].value, "Original error:")) error = true;
+        if (strstr(model->items[i].value, "Copy location:")) location = true;
+    }
+    p->failure_notice = strstr(model->summary, "Could not open") &&
+        !strcmp(model->actions[3].label, "Close") && error && location;
+    bool close = false, redraw = false;
+    return rt_action(live, 0, &close, &redraw) && close;
+}
+static bool rreveal_present_action(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rreveal_probe *p = context; (void)pages;
+    ++p->windows;
+    if (p->windows == 2) return rreveal_failure_view(p, model, live);
+    p->available = strcmp(model->actions[3].label, "Close") != 0;
+    if (p->mode == RREVEAL_UNAVAILABLE) return false;
+    uint32_t count = 0; bool close = false, redraw = false;
+    if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    if (p->mode == RREVEAL_EARLY) {
+        if (count < 2 || !rt_action(live, 3, &close, &redraw) || close || !redraw) return false;
+        return rt_action(live, 0, &close, &redraw) && close;
+    }
+    if (p->mode == RREVEAL_CLOSE) {
+        if (!rreveal_visit(live, count)) return false;
+        return rt_action(live, 0, &close, &redraw) && close;
+    }
+    return rreveal_visit(live, count) && rt_action(live, 3, &close, &redraw) && close;
+}
+static bool rreveal_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rreveal_probe *p = context;
+    bool ok = rreveal_present_action(context, model, pages, live, why, cap);
+    p->actions_ok = p->actions_ok && ok;
+    return ok;
+}
+static bool rreveal_observed(const struct rreveal_probe *p, bool available, unsigned calls)
+{
+    unsigned windows = p->mode == RREVEAL_FAIL ? 2u : 1u;
+    return p->windows == windows && p->available == available &&
+        (p->mode == RREVEAL_UNAVAILABLE ? !p->actions_ok : p->actions_ok) &&
+        p->calls == calls && (!calls || p->exact) &&
+        (p->mode != RREVEAL_FAIL || p->failure_notice);
+}
+static bool rreveal_result(const struct zcl_command_reply *reply, const struct rreveal_probe *p,
+                           bool adopted, bool available, unsigned calls)
+{
+    return rreveal_observed(p, available, calls) && reply->error.mutated &&
+        !strcmp(reply->error.code, "PREVIEW_FAILED") &&
+        !strcmp(reply->error.message, "Original error: the saved copy remains unchanged and the operation was not repeated automatically.") &&
+        !strcmp(json_get_str(json_get(&reply->data, "package_root")), "retained-package") &&
+        (!p->path || !strcmp(json_get_str(json_get(&reply->data, adopted ? "copy" : "destination")), p->path));
+}
+static bool rreveal_case(const char *path, bool adopted, bool draft, enum rreveal_mode mode,
+                         bool available, unsigned calls)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    json_set_object(&reply.data);
+    bool ok = !path || json_push_kv_str(&reply.data, adopted ? "copy" : "destination", path);
+    ok = ok && json_push_kv_str(&reply.data, "name", "draft") &&
+        json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") &&
+        json_push_kv_str(&reply.data, "package_root", "retained-package");
+    zcl_package_copy_fail(&reply, "PREVIEW_FAILED", true,
+        "Original error: the saved copy remains unchanged and the operation was not repeated automatically.", "fixture");
+    struct rreveal_probe p = {.mode = mode, .path = path, .actions_ok = true};
+    if (ok) app_receive_flow_test_notice_reveal(&reply, adopted, draft, rreveal_present, &p, rreveal_open);
+    ok = ok && rreveal_result(&reply, &p, adopted, available, calls);
+    zcl_command_reply_free(&reply); return ok;
+}
+static int rreveal_cases(void)
+{
+    int failures = 0;
+    TEST("failure notice reveals only on explicit confirmed action") {
+#if defined(__APPLE__) || defined(__linux__)
+        const char *path = "/retained/a b\\c\303\251";
+        ASSERT(rreveal_case(path, false, false, RREVEAL_CLOSE, true, 0));
+        char paged[421]; memset(paged, 'p', sizeof(paged) - 1);
+        paged[0] = '/'; paged[sizeof(paged) - 1] = 0;
+        ASSERT(rreveal_case(paged, false, false, RREVEAL_EARLY, true, 0));
+        ASSERT(rreveal_case(paged, false, false, RREVEAL_SHOW, true, 1));
+        ASSERT(rreveal_case(paged, false, false, RREVEAL_CLOSE, true, 0));
+        ASSERT(rreveal_case(path, false, false, RREVEAL_SHOW, true, 1));
+        ASSERT(rreveal_case(path, true, false, RREVEAL_SHOW, true, 1));
+        ASSERT(rreveal_case(path, false, false, RREVEAL_FAIL, true, 1));
+        ASSERT(rreveal_case(path, false, false, RREVEAL_UNAVAILABLE, true, 0));
+        ASSERT(rreveal_case(path, false, true, RREVEAL_SHOW, false, 0));
+#endif
+        ASSERT(rreveal_case("relative", false, false, RREVEAL_SHOW, false, 0));
+        ASSERT(rreveal_case("/", false, false, RREVEAL_SHOW, false, 0));
+        ASSERT(rreveal_case("/retained/", false, false, RREVEAL_SHOW, false, 0));
+        ASSERT(rreveal_case(NULL, false, false, RREVEAL_SHOW, false, 0));
+        char long_path[4098]; memset(long_path, 'x', sizeof(long_path) - 1);
+        long_path[0] = '/'; long_path[sizeof(long_path) - 1] = 0;
+        ASSERT(rreveal_case(long_path, false, false, RREVEAL_SHOW, false, 0));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 #if defined(__linux__)
 enum rdiag_mode { RDIAG_CLOSE, RDIAG_UNAVAILABLE, RDIAG_PRIOR_CLOSE, RDIAG_MISMATCH, RDIAG_CONTINUE };
@@ -1554,6 +1682,7 @@ int test_app_receive(void)
     failures += rd_home_permissions();
     failures += rd_home_aliases();
     failures += rloc_cases();
+    failures += rreveal_cases();
 #if defined(__linux__)
     failures += rdiag_case(RDIAG_CLOSE);
 #endif

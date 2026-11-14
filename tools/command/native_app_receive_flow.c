@@ -4,6 +4,7 @@
 #include "command/native_app_commit_progress.h"
 #include "command/native_app_receive_job.h"
 #include "command/native_app_receive_preview.h"
+#include "command/native_app_share_reveal.h"
 #include "command/app_selection.h"
 #include "command/native_app_compose.h"
 #include "command/native_zcode_package_copy.h"
@@ -20,6 +21,8 @@ struct receive_flow {
     struct app_receive_preview *preview;
     app_confirm_presenter presenter;
     void *context;
+    bool (*revealer)(void *, const char *);
+    void *reveal_context;
     struct json_value operations;
     struct json_value build_evidence;
     struct json_value open_evidence;
@@ -390,15 +393,67 @@ static bool arf_keep(struct receive_flow *f)
     }
     json_free(&input); return ok && arf_status(f, "kept");
 }
-static void arf_notice_location(struct receive_flow *f, struct app_confirm *view)
+static const char *arf_notice_location(struct receive_flow *f, struct app_confirm *view)
 {
-    if (f->draft) return;
+    if (f->draft) return NULL;
     const char *path = zcl_package_copy_str(&f->reply->data,
         f->adopted ? "copy" : "destination");
-    if (!path) return;
+    if (!path) return NULL;
     uint32_t start = view->model.item_count;
-    if (!app_confirm_path(&view->model, "Copy location: ", path))
+    if (!app_confirm_path(&view->model, "Copy location: ", path)) {
         view->model.item_count = start;
+        return NULL;
+    }
+#if defined(__APPLE__) || defined(__linux__)
+    size_t n = strnlen(path, 4097u);
+    if (n > 1 && n < 4097u && path[0] == '/' && path[n - 1] != '/') return path;
+#endif
+    return NULL;
+}
+static void arf_reveal_action(struct app_confirm *view, bool enabled)
+{
+    const char *label = "Close";
+#if defined(__APPLE__)
+    if (enabled) label = "Show copy";
+#elif defined(__linux__)
+    if (enabled) label = "Open folder";
+#else
+    (void)enabled;
+#endif
+    app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", label);
+}
+static bool arf_reveal(struct receive_flow *f, const char *path)
+{
+    return f->revealer ? f->revealer(f->reveal_context, path) : app_share_reveal(path);
+}
+static void arf_reveal_failed(struct receive_flow *f, struct app_confirm *view)
+{
+    app_confirm_free(view);
+    view->page_count = 0;
+    (void)snprintf(view->model.summary, sizeof(view->model.summary),
+        "Could not open the copy location. Your copy is retained; nothing is retried automatically.");
+    arf_reveal_action(view, false);
+    char why[256] = {0};
+    if (app_confirm_prepare(view, why, sizeof(why)))
+        (void)app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
+}
+static void arf_notice_show(struct receive_flow *f, struct app_confirm *view)
+{
+    uint32_t original = view->model.item_count;
+    const char *path = arf_notice_location(f, view);
+    arf_reveal_action(view, path != NULL);
+    char why[256] = {0};
+    bool prepared = app_confirm_prepare(view, why, sizeof(why));
+    if (!prepared && view->model.item_count != original) {
+        app_confirm_free(view);
+        view->page_count = 0;
+        view->model.item_count = original;
+        path = NULL;
+        arf_reveal_action(view, false);
+        prepared = app_confirm_prepare(view, why, sizeof(why));
+    }
+    if (prepared && app_confirm_show(view, f->presenter, f->context, why, sizeof(why)) &&
+        view->confirmed && path && !arf_reveal(f, path)) arf_reveal_failed(f, view);
 }
 static void arf_notice(struct receive_flow *f)
 {
@@ -412,23 +467,19 @@ static void arf_notice(struct receive_flow *f)
         excerpt[i] = c >= 0x20 && c <= 0x7e ? (char)c : '?';
     }
     excerpt[n] = 0;
-    char why[256] = {0};
     if ((!f->draft || arf_fields(f, view)) &&
-        app_confirm_field(&view->model, "Message excerpt: ", n ? excerpt : "The result could not be retained.")) {
-        uint32_t original = view->model.item_count;
-        arf_notice_location(f, view);
-        bool prepared = app_confirm_prepare(view, why, sizeof(why));
-        if (!prepared && view->model.item_count != original) {
-            app_confirm_free(view);
-            view->page_count = 0;
-            view->model.item_count = original;
-            prepared = app_confirm_prepare(view, why, sizeof(why));
-        }
-        if (prepared) (void)app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
-    }
+        app_confirm_field(&view->model, "Message excerpt: ", n ? excerpt : "The result could not be retained."))
+        arf_notice_show(f, view);
     app_confirm_free(view); free(view);
 }
 #ifdef ZCL_TESTING
+void app_receive_flow_test_notice_reveal(struct zcl_command_reply *reply, bool adopted, bool draft,
+    app_confirm_presenter presenter, void *context, bool (*revealer)(void *, const char *))
+{
+    struct receive_flow f = {.reply = reply, .adopted = adopted, .draft = draft,
+        .presenter = presenter, .context = context, .revealer = revealer, .reveal_context = context};
+    arf_notice(&f);
+}
 void app_receive_flow_test_notice(struct zcl_command_reply *reply, bool adopted,
                                   app_confirm_presenter presenter, void *context)
 {
