@@ -5,6 +5,7 @@
 #include "command/native_dev_job.h"
 #include "config/command_catalog.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
@@ -473,8 +474,16 @@ static bool da_status_unproven(struct zcl_command_reply *r, struct da_plan *expe
         da_next(r, "dev.android.prepare", &next, "check inputs and retry");
     json_free(&next); return ok;
 }
+static bool da_status_provenance(struct zcl_command_reply *r, const struct da_plan *expected)
+{
+    return json_push_kv_str(&r->data, "app_tree", expected->tree) &&
+        json_push_kv_str(&r->data, "node_sha256", expected->hash) &&
+        json_push_kv_str(&r->data, "node_source_provided", expected->source) &&
+        json_push_kv_str(&r->data, "node_provenance", "unverified") &&
+        json_push_kv_str(&r->data, "toolchain_provenance", "partially_observed");
+}
 static bool da_status_observed(struct zcl_command_reply *r, struct da_plan *expected,
-                               const struct da_artifact *artifact, struct json_value *state_value)
+                               const struct da_artifact *artifact, struct json_value *state_value, const char *id)
 {
     json_set_str(state_value, "artifact_observed");
     struct json_value next; json_init(&next); json_set_object(&next);
@@ -483,18 +492,16 @@ static bool da_status_observed(struct zcl_command_reply *r, struct da_plan *expe
         json_push_kv_str(&r->data, "aligned_apk", artifact->apk) && json_push_kv_str(&r->data, "aligned_sha256", artifact->apkhash) &&
         json_push_kv_str(&r->data, "app_library_sha256", artifact->apphash) && json_push_kv_str(&r->data, "node_debug_sha256", expected->debug_hash) &&
         json_push_kv_str(&r->data, "embedded_node_verification", "not_checked") && json_push_kv_str(&r->data, "app_source", expected->head) &&
-        json_push_kv_str(&r->data, "app_tree", expected->tree) && json_push_kv_str(&r->data, "node_sha256", expected->hash) &&
-        json_push_kv_str(&r->data, "node_source_provided", expected->source) && json_push_kv_str(&r->data, "node_provenance", "unverified") &&
-        json_push_kv_str(&r->data, "toolchain_provenance", "partially_observed") &&
-        json_push_kv_str(&next, "instructions", "Transfer the APK. Run aapt dump badging <local-apk>, zipalign -c -P 16 4 <local-apk>, and unzip -p <local-apk> lib/arm64-v8a/libz23node.so | sha256sum. Compare node_sha256, then sign locally.") &&
-        da_next(r, "manual", &next, "verify and sign on the local host");
+        da_status_provenance(r, expected) &&
+        json_push_kv_str(&next, "job_id", id) && json_push_kv_str(&next, "apk_sha256", artifact->apkhash) &&
+        da_next(r, "dev.android.verify", &next, "verify the unsigned APK");
     json_free(&next); return ok;
 }
 static bool da_status_result(struct zcl_command_reply *r, struct da_plan *expected,
-                             const struct da_artifact *artifact, bool ok)
+                             const struct da_artifact *artifact, bool ok, const char *id)
 {
     struct json_value *state_value = (struct json_value *)json_get(&r->data, "state");
-    return ok ? da_status_observed(r, expected, artifact, state_value) :
+    return ok ? da_status_observed(r, expected, artifact, state_value, id) :
                 da_status_unproven(r, expected, state_value);
 }
 void zcl_native_handle_dev_android_status(const struct zcl_command_request *req, struct zcl_command_reply *r)
@@ -521,6 +528,161 @@ void zcl_native_handle_dev_android_status(const struct zcl_command_request *req,
     }
     struct da_artifact artifact = {0};
     bool ok = da_artifact_check(&handle, &expected, out, &artifact, zcl_dev_job_source_root(req));
-    reply_ok = da_status_result(r, &expected, &artifact, ok);
+    reply_ok = da_status_result(r, &expected, &artifact, ok, id);
     json_free(&handle); if (!reply_ok) da_emit_failed(r, false);
+}
+
+#define DA_VERIFY_NODE_LIMIT (256u * 1024u * 1024u)
+#define DA_VERIFY_LIST_LIMIT (1024u * 1024u)
+#define DA_NODE_ENTRY "lib/arm64-v8a/libz23node.so"
+
+static bool da_verify_capture(const char *const argv[], void *buf, size_t cap, size_t *length, const char **reason)
+{
+    struct zcl_spawn_binary_observation o = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(argv, buf, cap, 30000, &o);
+    if (!zcl_result_is_ok(result) || !o.exit_observed || o.exit_code ||
+        !o.eof || o.overflow || o.timed_out) {
+        if (reason) *reason = o.timed_out ? "Verification tool timed out." :
+            o.overflow ? "Verification tool exceeded its output limit." :
+            !o.exit_observed ? "Verification tool exit was not observed." :
+            "Verification tool failed; check the selected SDK installation and APK.";
+        return false;
+    }
+    *length = o.output_len;
+    return true;
+}
+static bool da_verify_command(const struct da_plan *p, const char *apk, bool package, const char **reason)
+{
+    char tool[DA_PATH], output[16384]; size_t length;
+    int n = snprintf(tool, sizeof(tool), "%s/build-tools/35.0.0/%s", p->sdk, package ? "aapt" : "zipalign");
+    if (n < 0 || (size_t)n >= sizeof(tool) || access(tool, X_OK) != 0) {
+        *reason = package ? "Selected SDK aapt is unavailable." : "Selected SDK zipalign is unavailable."; return false;
+    }
+    const char *aapt[] = {tool, "dump", "badging", apk, NULL};
+    const char *align[] = {tool, "-c", "-P", "16", "4", apk, NULL};
+    if (!da_verify_capture(package ? aapt : align, output, sizeof(output) - 1, &length, reason)) return false;
+    output[length] = 0;
+    if (package && strncmp(output, "package: name='org.z23.nativeapp'", strlen("package: name='org.z23.nativeapp'"))) {
+        *reason = "APK package is not org.z23.nativeapp."; return false;
+    }
+    return true;
+}
+static bool da_verify_unique_entry(const char *apk, const char **reason)
+{
+    char *listing = zcl_malloc(DA_VERIFY_LIST_LIMIT + 1, "android_apk_listing");
+    if (!listing) { *reason = "Cannot allocate the bounded APK entry listing."; return false; }
+    const char *argv[] = {"/usr/bin/unzip", "-Z", "-1", apk, NULL};
+    size_t length = 0, count = 0;
+    bool ok = da_verify_capture(argv, listing, DA_VERIFY_LIST_LIMIT, &length, reason);
+    if (ok && memchr(listing, 0, length)) { *reason = "APK entry listing contains invalid bytes."; ok = false; }
+    if (ok) {
+        listing[length] = 0;
+        char *save = NULL;
+        for (char *line = strtok_r(listing, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+            if (!strcmp(line, DA_NODE_ENTRY)) ++count;
+    }
+    free(listing);
+    if (ok && count != 1) *reason = "APK must contain exactly one node entry.";
+    return ok && count == 1;
+}
+static bool da_verify_node(const struct da_plan *p, const char *apk, const char **reason)
+{
+#if defined(_WIN32)
+    (void)p; (void)apk; *reason = "Android APK verification requires a supported host."; return false;
+#else
+    struct stat st;
+    int fd = open(p->node, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) { *reason = "Cannot open the selected node."; return false; }
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+              (uint64_t)st.st_size <= DA_VERIFY_NODE_LIMIT;
+    if (close(fd) != 0 || !ok) { *reason = "Selected node must be a regular file of at most 256 MiB."; return false; }
+    size_t size = (size_t)st.st_size, length = 0;
+    unsigned char *bytes = zcl_malloc(size, "android_apk_node");
+    if (!bytes) { *reason = "Cannot allocate the bounded embedded-node buffer."; return false; }
+    const char *argv[] = {"/usr/bin/unzip", "-p", apk, DA_NODE_ENTRY, NULL};
+    ok = da_verify_capture(argv, bytes, size, &length, reason);
+    if (ok && length != size) { *reason = "Embedded node size does not match the selected node."; ok = false; }
+    if (ok) {
+        struct sha256_ctx ctx; unsigned char digest[32]; char hash[65];
+        sha256_init(&ctx); sha256_write(&ctx, bytes, length); sha256_finalize(&ctx, digest);
+        zcl_hex_encode(digest, sizeof(digest), hash); ok = !strcmp(hash, p->hash);
+        if (!ok) *reason = "Embedded node hash does not match the selected node.";
+    }
+    free(bytes); return ok;
+#endif
+}
+static bool da_verify_reply(struct zcl_command_reply *r, const char *id, const struct da_plan *p, const char *apk, const char *hash)
+{
+    json_free(&r->data); json_init(&r->data); json_set_object(&r->data); r->next_count = 0;
+    return json_push_kv_str(&r->data, "state", "artifact_verified") &&
+        json_push_kv_str(&r->data, "job_id", id) && json_push_kv_str(&r->data, "app_source", p->head) &&
+        json_push_kv_str(&r->data, "app_tree", p->tree) && json_push_kv_str(&r->data, "node_sha256", p->hash) &&
+        json_push_kv_str(&r->data, "summary", "APK package, alignment and embedded node verified.") &&
+        json_push_kv_str(&r->data, "aligned_apk", apk) && json_push_kv_str(&r->data, "aligned_sha256", hash) &&
+        json_push_kv_str(&r->data, "package_verification", "passed") &&
+        json_push_kv_str(&r->data, "alignment_verification", "passed") &&
+        json_push_kv_str(&r->data, "embedded_node_verification", "passed") &&
+        json_push_kv_str(&r->data, "signature_verification", "not_checked") &&
+        json_push_kv_bool(&r->data, "signing_performed", false) &&
+        json_push_kv_str(&r->data, "node_provenance", "unverified") &&
+        json_push_kv_str(&r->data, "toolchain_provenance", "partially_observed");
+}
+static bool da_verify_recheck(const char *id, const char *source_root, const char *hash)
+{
+    struct json_value handle; json_init(&handle); struct da_plan p = {0};
+    struct da_artifact artifact = {0}; char out[DA_PATH];
+    bool ok = zcl_dev_job_read_handle(id, &handle) && da_handle(&handle, &p, out) &&
+        da_artifact_check(&handle, &p, out, &artifact, source_root) && !strcmp(artifact.apkhash, hash);
+    json_free(&handle); return ok;
+}
+static void da_verify_fail(struct zcl_command_reply *r, const char *code, const char *message)
+{
+    json_free(&r->data); json_init(&r->data); json_set_object(&r->data); r->next_count = 0;
+    da_fail(r, code, message);
+}
+static void da_verify_checks(struct zcl_command_reply *r, const struct da_plan *p,
+                             const char *id, const char *apk, const char *hash, const char *source_root)
+{
+    char after[65];
+    if (access("/usr/bin/unzip", X_OK) != 0) { da_verify_fail(r, "ANDROID_VERIFY_TOOL", "Install /usr/bin/unzip to verify the APK."); return; }
+    const char *reason = NULL;
+    if (!da_verify_command(p, apk, true, &reason)) { da_verify_fail(r, "ANDROID_VERIFY_PACKAGE", reason); return; }
+    if (!da_verify_command(p, apk, false, &reason)) { da_verify_fail(r, "ANDROID_VERIFY_ALIGNMENT", reason); return; }
+    if (!da_verify_unique_entry(apk, &reason) || !da_verify_node(p, apk, &reason)) {
+        da_verify_fail(r, "ANDROID_VERIFY_NODE", reason); return;
+    }
+    if (!da_hash(apk, after) || strcmp(after, hash) ||
+        !da_verify_recheck(id, source_root, hash)) {
+        da_verify_fail(r, "ANDROID_VERIFY_CHANGED", "APK, source or selected inputs changed during verification."); return;
+    }
+    if (!da_verify_reply(r, id, p, apk, hash)) da_emit_failed(r, false);
+}
+
+static bool da_verify_observed(struct zcl_command_reply *r, const char *id, const char *requested,
+                               struct da_plan *p, char apk[DA_PATH], char hash[65])
+{
+    const char *state = da_str(&r->data, "state"), *file = da_str(&r->data, "aligned_apk");
+    const char *observed = da_str(&r->data, "aligned_sha256");
+    struct json_value handle; json_init(&handle); char out[DA_PATH];
+    bool ok = state && !strcmp(state, "artifact_observed") && file && observed &&
+        da_copy(apk, DA_PATH, file) && da_copy(hash, 65, observed) && !strcmp(hash, requested) &&
+        zcl_dev_job_read_handle(id, &handle) && da_handle(&handle, p, out);
+    json_free(&handle); return ok;
+}
+
+void zcl_native_handle_dev_android_verify(const struct zcl_command_request *req, struct zcl_command_reply *r)
+{
+    const char *id = req ? da_str(req->input, "job_id") : NULL;
+    const char *requested = req ? da_str(req->input, "apk_sha256") : NULL;
+    unsigned char decoded[32]; char apk[DA_PATH], hash[65];
+    struct da_plan p = {0};
+    if (!id || !requested || !zcl_hex_decode_lower(requested, decoded, sizeof(decoded))) {
+        da_verify_fail(r, "ANDROID_VERIFY_INPUT", "Supply job_id and the observed lowercase apk_sha256."); return;
+    }
+    zcl_native_handle_dev_android_status(req, r);
+    if (r->status == ZCL_COMMAND_STATUS_FAILED) return;
+    if (!da_verify_observed(r, id, requested, &p, apk, hash)) {
+        da_verify_fail(r, "ANDROID_VERIFY_UNAVAILABLE", "Job is incomplete or the APK differs from the observed hash."); return;
+    }
+    da_verify_checks(r, &p, id, apk, hash, zcl_dev_job_source_root(req));
 }

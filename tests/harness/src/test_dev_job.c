@@ -581,8 +581,17 @@ static bool dj_android_child(const char *root, const char *part, mode_t mode)
     char path[2048]; int n = snprintf(path, sizeof(path), "%s/%s", root, part);
     return n > 0 && (size_t)n < sizeof(path) && dj_android_file(path, "fixture", mode);
 }
+static bool dj_android_fixture_tools(void)
+{
+    const char *required[] = {"/usr/bin/zip", "/usr/bin/unzip", "/usr/bin/7z"};
+    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
+        if (access(required[i], X_OK) != 0) { fprintf(stderr, "Android verify fixture requires %s\n", required[i]); return false; }
+    return true;
+}
+
 static bool dj_android_fixture(char *lane, size_t cap)
 {
+    if (!dj_android_fixture_tools()) return false;
     if (!dj_android_dir(g_repo, "apps") || !dj_android_dir(g_repo, "apps/z23android") ||
         !dj_android_child(g_repo, ".gitignore", 0600)) return false;
     char path[2048]; snprintf(path, sizeof(path), "%s/.gitignore", g_repo);
@@ -597,7 +606,8 @@ static bool dj_android_fixture(char *lane, size_t cap)
         "mkdir -p '$(BUILD_DIR)/native' '$(BUILD_DIR)/package/lib/arm64-v8a'; "
         "cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; "
         "echo app > '$(BUILD_DIR)/native/libz23android.so'; "
-        "echo apk > '$(BUILD_DIR)/aligned.apk'\n";
+        "echo extra > '$(BUILD_DIR)/package/extra'; "
+        "cd '$(BUILD_DIR)/package' && /usr/bin/zip -q '$(BUILD_DIR)/aligned.apk' lib/arm64-v8a/libz23node.so extra\n";
     if (!dj_android_file(path, makefile, 0600)) return false;
     dj_git(g_repo, "add", ".gitignore", "apps/z23android/Makefile", NULL, NULL);
     dj_git(g_repo, "commit", "-q", "-m", "android fixture", NULL);
@@ -612,6 +622,10 @@ static bool dj_android_fixture(char *lane, size_t cap)
         "build/sdk space/platforms/android-35/android.jar", "build/ndk/build/cmake/android.toolchain.cmake",
         "build/java/bin/jar", "build/java/bin/keytool", "build/params/sapling-spend.params", "build/params/sapling-output.params"};
     for (size_t i = 0; i < sizeof(files)/sizeof(files[0]); ++i) if (!dj_android_child(lane, files[i], 0700)) return false;
+    snprintf(path, sizeof(path), "%s/build/sdk space/build-tools/35.0.0/aapt", lane);
+    if (!dj_android_file(path, "#!/bin/sh\nif test \"$DJ_BAD_PACKAGE\" = 1; then echo \"package: name='wrong'\"; else echo \"package: name='org.z23.nativeapp'\"; fi\n", 0700)) return false;
+    snprintf(path, sizeof(path), "%s/build/sdk space/build-tools/35.0.0/zipalign", lane);
+    if (!dj_android_file(path, "#!/bin/sh\nexit ${DJ_BAD_ALIGN:-0}\n", 0700)) return false;
     return true;
 }
 static void dj_android_input(struct dj_call *c, const char *lane, bool with_cwd)
@@ -648,6 +662,24 @@ static bool dj_cli_wait_log(const char *bin, const char *log, struct json_value 
     const char *argv[] = {bin, "dev", "loop", "job", "wait", arg, NULL};
     int rc = zcl_spawn_capture_in_dir_observed(argv, "/", output, sizeof(output), 30000, NULL);
     json_init(result); return (rc == 0 || rc == 2) && json_read(result, output, strlen(output));
+}
+static bool dj_fixture_run(const char *cwd, const char *const argv[])
+{
+    char out[4096];
+    return zcl_spawn_capture_in_dir_observed(argv, cwd, out, sizeof(out), 30000, NULL) == 0;
+}
+static bool dj_verify_current_error(const char *bin, const struct json_value *wait, const char *code)
+{
+    struct json_value status, result;
+    if (!dj_cli_call(bin, "/", "status", wait, &status)) return false;
+    const struct json_value *next = json_at(json_get(&status, "next"), 0);
+    const struct json_value *input = json_get(next, "input");
+    bool ok = input && dj_cli_call(bin, "/", "verify", input, &result);
+    if (ok) {
+        const char *actual = json_get_str(json_get(json_get(&result, "error"), "code"));
+        ok = actual && !strcmp(actual, code); json_free(&result);
+    }
+    json_free(&status); return ok;
 }
 static const char *dj_cli_data(const struct json_value *result, const char *key)
 {
@@ -708,17 +740,24 @@ static bool dj_android_default_cwd(const char *lane)
     if (saved ? setenv("ZCL_DEV_SOURCE_ROOT", saved, 1) != 0 : unsetenv("ZCL_DEV_SOURCE_ROOT") != 0) ok = false;
     close(old); free(saved); return ok;
 }
+static bool dj_android_prepare_environment(char **saved_root)
+{
+    const char *old_root = getenv("ZCL_DEV_SOURCE_ROOT");
+    *saved_root = old_root ? strdup(old_root) : NULL;
+    if (old_root && !*saved_root) return false;
+    if (unsetenv("ZCL_DEV_SOURCE_ROOT") != 0) { free(*saved_root); return false; }
+    if (!dj_copy_dev_binary(g_installed_bin, sizeof(g_installed_bin))) {
+        if (*saved_root) (void)setenv("ZCL_DEV_SOURCE_ROOT", *saved_root, 1);
+        free(*saved_root); return false;
+    }
+    return true;
+}
+
 static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
 {
     int failures = 0; struct dj_call c, s, duplicate; char lane[1200], id[128], good[128], path[2048], hold[2048] = {0};
-    const char *old_root = getenv("ZCL_DEV_SOURCE_ROOT");
-    char *saved_root = old_root ? strdup(old_root) : NULL;
-    if (old_root && !saved_root) return 1;
-    if (unsetenv("ZCL_DEV_SOURCE_ROOT") != 0) { free(saved_root); return 1; }
-    if (!dj_copy_dev_binary(g_installed_bin, sizeof(g_installed_bin))) {
-        if (saved_root) (void)setenv("ZCL_DEV_SOURCE_ROOT", saved_root, 1);
-        free(saved_root); return 1;
-    }
+    char *saved_root = NULL;
+    if (!dj_android_prepare_environment(&saved_root)) return 1;
     TEST("dev.android: plan accepts spaces and rejects shell metacharacters") {
         ASSERT(dj_android_fixture(lane, sizeof(lane)));
         ASSERT(dj_android_default_cwd(lane));
@@ -790,7 +829,7 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         zcl_dev_job_set_hooks(hooks); PASS();
     }
     TEST("dev.android: copied installed CLI follows configured checkout") {
-        char wire_id[128], foreign[1024], foreign_lane[1200], log[1400]; struct json_value result;
+        char wire_id[128], foreign[1024], foreign_lane[1200], log[1400], apk[2048], backup[2100], package[2100], staged[2200], node[2200]; struct json_value result;
         ASSERT(setenv("ZCL_DEV_SOURCE_ROOT", g_repo, 1) == 0);
         dj_android_input(&c, lane, true);
         ASSERT(dj_cli_call(g_installed_bin, "/", "plan", &c.input, &result));
@@ -846,7 +885,63 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
             json_free(&result);
         }
         ASSERT_STR_EQ(dj_cli_data(&result, "state"), "artifact_observed");
-        json_free(&result); json_free(&wait); dj_end(&c);
+        const struct json_value *next = json_at(json_get(&result, "next"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(next, "command")), "dev.android.verify");
+        const struct json_value *next_input = json_get(next, "input");
+        ASSERT_STR_EQ(json_get_str(json_get(next_input, "job_id")), wire_id);
+        const char *apk_hash = json_get_str(json_get(next_input, "apk_sha256"));
+        snprintf(apk, sizeof(apk), "%s", dj_cli_data(&result, "aligned_apk"));
+        ASSERT(apk_hash && strlen(apk_hash) == 64);
+        char wire[4096]; size_t n = json_write(next_input, wire, sizeof(wire));
+        ASSERT(n > 0 && n < sizeof(wire));
+        struct json_value verify, observed; json_init(&verify); ASSERT(json_read(&verify, wire, n));
+        json_free(&result);
+        ASSERT(setenv("DJ_BAD_PACKAGE", "1", 1) == 0);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "verify", &verify, &observed));
+        ASSERT(!json_get_bool(json_get(&observed, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&observed, "error"), "code")), "ANDROID_VERIFY_PACKAGE"); json_free(&observed);
+        ASSERT(unsetenv("DJ_BAD_PACKAGE") == 0);
+        ASSERT(setenv("DJ_BAD_ALIGN", "1", 1) == 0);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "verify", &verify, &observed));
+        ASSERT(!json_get_bool(json_get(&observed, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&observed, "error"), "code")), "ANDROID_VERIFY_ALIGNMENT"); json_free(&observed);
+        ASSERT(unsetenv("DJ_BAD_ALIGN") == 0);
+        ASSERT(dj_cli_call(g_installed_bin, "/", "verify", &verify, &observed));
+        ASSERT(json_get_bool(json_get(&observed, "ok")));
+        ASSERT_STR_EQ(dj_cli_data(&observed, "state"), "artifact_verified");
+        ASSERT_STR_EQ(dj_cli_data(&observed, "signature_verification"), "not_checked");
+        json_free(&observed);
+        snprintf(backup, sizeof(backup), "%s.backup", apk);
+        const char *cp_backup[] = {"/usr/bin/cp", apk, backup, NULL};
+        const char *cp_restore[] = {"/usr/bin/cp", backup, apk, NULL};
+        const char *drop[] = {"/usr/bin/zip", "-dq", apk, "lib/arm64-v8a/libz23node.so", NULL};
+        ASSERT(dj_fixture_run("/", cp_backup)); ASSERT(dj_fixture_run("/", drop));
+        ASSERT(dj_cli_call(g_installed_bin, "/", "verify", &verify, &observed));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&observed, "error"), "code")), "ANDROID_VERIFY_UNAVAILABLE");
+        json_free(&observed);
+        ASSERT(dj_verify_current_error(g_installed_bin, &wait, "ANDROID_VERIFY_NODE"));
+        ASSERT(dj_fixture_run("/", cp_restore));
+        snprintf(package, sizeof(package), "%s", apk);
+        char *slash = strrchr(package, '/'); ASSERT(slash); *slash = 0;
+        size_t used = strlen(package); ASSERT(used + sizeof("/package") < sizeof(package));
+        strcat(package, "/package");
+        snprintf(staged, sizeof(staged), "%s/lib/arm64-v8a/libz23node.so", package);
+        snprintf(node, sizeof(node), "%s/build/node binary", lane);
+        ASSERT(dj_android_file(staged, "invalid", 0700)); ASSERT(dj_fixture_run("/", drop));
+        const char *add[] = {"/usr/bin/zip", "-q", apk, "lib/arm64-v8a/libz23node.so", NULL};
+        const char *restore_node[] = {"/usr/bin/cp", node, staged, NULL};
+        ASSERT(dj_fixture_run(package, add)); ASSERT(dj_fixture_run("/", restore_node));
+        ASSERT(dj_verify_current_error(g_installed_bin, &wait, "ANDROID_VERIFY_NODE"));
+        ASSERT(dj_fixture_run("/", cp_restore));
+        const char *duplicate[] = {"/usr/bin/7z", "rn", "-tzip", apk, "extra", "lib/arm64-v8a/libz23node.so", NULL};
+        ASSERT(dj_fixture_run("/", duplicate));
+        ASSERT(dj_verify_current_error(g_installed_bin, &wait, "ANDROID_VERIFY_NODE"));
+        ASSERT(dj_fixture_run("/", cp_restore));
+        json_set_str((struct json_value *)json_get(&verify, "apk_sha256"), "bad");
+        ASSERT(dj_cli_call(g_installed_bin, "/", "verify", &verify, &observed));
+        ASSERT(!json_get_bool(json_get(&observed, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&observed, "error"), "code")), "ANDROID_VERIFY_INPUT"); json_free(&observed);
+        json_free(&verify); json_free(&wait); dj_end(&c);
         ASSERT(unsetenv("ZCL_DEV_SOURCE_ROOT") == 0); PASS();
     }
     TEST("dev.android: running and lost states are the native job states") {

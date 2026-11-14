@@ -27,6 +27,7 @@ dependencies. Target archives are separate from host archives. Host tools
 generate source; the NDK compiles the Android executable. The app guide
 describes `make aligned-apk` for an unsigned package to sign separately.
 <!-- claim: symbol-present aligned-apk apps/z23android/Makefile # unsigned aligned app package -->
+
 <!-- claim: symbol-present ZCL_CROSS_TRIPLE Makefile # target archive selection -->
 <!-- claim: symbol-present HOST_CC Makefile # native generators -->
 
@@ -34,6 +35,30 @@ The binary audit requires an ARM64 PIE with the Android linker, Bionic libc,
 and no dynamic dependencies beyond libc, libm, and libdl. C++ runtime symbols
 are rejected.
 <!-- claim: symbol-present /system/bin/linker64 tools/scripts/check_c23_node_binary.sh # Android ELF audit -->
+
+## Package through the developer CLI
+
+Set `NODE_SOURCE_COMMIT` from the recorded node build commit, not the app
+checkout. Select an approved checkout once for the session, then run from a clean
+registered linked worktree of that repository:
+
+```sh
+export ZCL_DEV_SOURCE_ROOT=/absolute/path/to/approved/checkout
+z23-dev dev android --help
+z23-dev dev android plan --cwd=/absolute/path/to/linked/worktree \
+  --node_bin=/absolute/path/to/android/node \
+  --node_source="$NODE_SOURCE_COMMIT" \
+  --sdk_root=/absolute/path/to/android-sdk \
+  --ndk_root=/absolute/path/to/android-ndk-r30 \
+  --java_home=/absolute/path/to/jdk \
+  --params_dir=/absolute/path/to/sapling-params
+```
+
+Follow each returned next action through prepare, status and verify. Status
+reports `artifact_observed` with the APK hash; verify binds that hash to its
+package, alignment and embedded node checks. Verification requires
+`/usr/bin/unzip`. It does not check signatures or establish node provenance.
+Signing remains a separate local operation.
 
 ## Run over USB
 

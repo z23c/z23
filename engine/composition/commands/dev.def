@@ -3112,6 +3112,16 @@ ZCL_COMMAND_DEV_READ(
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_DEV_ONLY,
     zcl_native_handle_dev_android_status, "Android packaging is a development-lane surface", "z23-dev dev android status")
 
+ZCL_COMMAND_DEV_READ(
+    "dev.android.verify", "dev.android", "",
+    "Verify an observed Android APK",
+    "Verify the package identity, alignment and embedded node against an observed APK hash. Signing state is not checked.", 8192,
+    "android,package,verify", "zcl.dev_android_verify.input.v1", "zcl.dev_android.v1",
+    "job_id,apk_sha256", "job_id,apk_sha256", "z23-dev dev android verify --job_id=<id> --apk_sha256=<sha256>",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ | ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_android_verify, "Android packaging is a development-lane surface", "z23-dev dev android verify")
+
 /* ── dev.loop.job.start / .wait / .exec ──────────────────
  * Start a long job detached and wait for it in slices of at most 230 s, so
  * an agent never blocks a tool call past the prompt-cache TTL
