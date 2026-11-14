@@ -6114,6 +6114,179 @@ static int ndc_check_pace_sparse(struct ndc_fix_ctx *fx)
     test_cleanup_tmpdir(dir); return failures;
 }
 
+#ifndef _WIN32
+/* Disk-backed Sapling outputs exercise the same pause boundary as the walk. */
+struct ndc_pause_sapling {
+    char dir[256];
+    struct active_chain chain;
+    struct block_index slots[NDC_FIX_N + 1];
+    struct uint256 hashes[NDC_FIX_N + 1], cm, roots[NDC_FIX_N + 1];
+};
+static bool ndc_pause_sapling_build(struct ndc_pause_sapling *f)
+{
+    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", "pace_sapling");
+    char blocks[512]; snprintf(blocks, sizeof(blocks), "%s/blocks", f->dir);
+    if (mkdir(blocks, 0755) != 0) return false;
+    active_chain_init(&f->chain);
+    struct incremental_merkle_tree tree; sapling_tree_init(&tree);
+    f->hashes[0].data[0] = 1;
+    f->cm.data[0] = 0x31; f->cm.data[1] = 0x77;
+    const unsigned char magic[4] = {0x24, 0xe9, 0x27, 0x64};
+    for (int h = 1; h <= NDC_FIX_N; h++) {
+        struct block b; block_init(&b);
+        b.header.nVersion = 4; b.header.nTime = 1700000123u + (unsigned)h;
+        b.header.nBits = 0x2000ffffu; b.header.hashPrevBlock = f->hashes[h - 1];
+        b.vtx = calloc(1, sizeof(*b.vtx)); // raw-alloc-ok:test-fixture
+        if (!b.vtx) return false;
+        b.num_vtx = 1; transaction_init(b.vtx);
+        bool ok = transaction_alloc(b.vtx, 1, 1);
+        b.vtx->version = SAPLING_TX_VERSION; b.vtx->overwintered = true;
+        b.vtx->version_group_id = SAPLING_VERSION_GROUP_ID;
+        b.vtx->v_shielded_output = calloc(1, sizeof(*b.vtx->v_shielded_output)); // raw-alloc-ok:test-fixture
+        ok = ok && b.vtx->v_shielded_output;
+        if (ok) {
+            b.vtx->num_shielded_output = 1;
+            b.vtx->v_shielded_output[0].cm = f->cm;
+            b.vtx->v_shielded_output[0].cm.data[0] += (uint8_t)(h - 1);
+            incremental_tree_append(&tree, &b.vtx->v_shielded_output[0].cm);
+            incremental_tree_root(&tree, &f->roots[h]);
+            b.header.hashFinalSaplingRoot = f->roots[h];
+            transaction_compute_hash(b.vtx); b.header.hashMerkleRoot = b.vtx->hash;
+        }
+        struct disk_block_pos pos; disk_block_pos_init(&pos);
+        ok = ok && write_block_to_disk(&b, &pos, f->dir, magic);
+        if (ok) {
+            block_get_hash(&b, &f->hashes[h]);
+            struct block_index *slot = &f->slots[h]; block_index_init(slot);
+            slot->nHeight = h; slot->nStatus = BLOCK_HAVE_DATA;
+            slot->nFile = pos.nFile; slot->nDataPos = pos.nPos;
+            slot->hashBlock = f->hashes[h]; slot->phashBlock = &slot->hashBlock;
+            slot->hashFinalSaplingRoot = f->roots[h];
+            slot->pprev = h > 1 ? &f->slots[h - 1] : NULL;
+            ok = active_chain_install_tip_slot(&f->chain, slot);
+        }
+        block_free(&b);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool ndc_pause_row_match(sqlite3_stmt *x, sqlite3_stmt *y, int next)
+{
+    return next <= NDC_FIX_N && sqlite3_column_int(x, 0) == next &&
+           ndc_restart_row_equal(x, y);
+}
+
+static bool ndc_pause_rows_equal(sqlite3 *a, sqlite3 *b, bool hole)
+{
+    const char *sql = "SELECT height,hash,prev_hash,status FROM blocks ORDER BY height,hash";
+    sqlite3_stmt *x = NULL, *y = NULL; bool ok = false; int next = 1;
+    if (sqlite3_prepare_v2(a, sql, -1, &x, NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(b, sql, -1, &y, NULL) != SQLITE_OK) goto done;
+    for (;;) {
+        int rx = sqlite3_step(x), ry = sqlite3_step(y);
+        if (rx == SQLITE_DONE && ry == SQLITE_DONE) { ok = next == NDC_FIX_N + 1; break; }
+        if (hole && next == 4) next++;
+        if (rx != SQLITE_ROW || ry != SQLITE_ROW || !ndc_pause_row_match(x, y, next)) break;
+        next++;
+    }
+done:
+    if (x && sqlite3_finalize(x) != SQLITE_OK) ok = false;
+    if (y && sqlite3_finalize(y) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+
+static bool ndc_pause_receipts_equal(struct node_db *a, struct node_db *b, bool hole)
+{
+    for (int h = 1; h <= NDC_FIX_N; h++) {
+        uint8_t x[32], y[32];
+        bool ax = db_view_integrity_get(a, h, x), by = db_view_integrity_get(b, h, y);
+        if (ax != !(hole && h == 4) || by != ax || (ax && memcmp(x, y, 32))) return false;
+    }
+    return true;
+}
+
+static bool ndc_pause_sapling_equal(struct node_db *a, struct node_db *b,
+                                    const struct ndc_pause_sapling *f, bool hole)
+{
+    uint8_t *aw = NULL, *bw = NULL; size_t an = 0, bn = 0;
+    int ah = -1, bh = -1; struct uint256 ar, br;
+    bool ok = ndc_tip_witness(a, 0x71, &ah, &ar, &aw, &an) &&
+        ndc_tip_witness(b, 0x71, &bh, &br, &bw, &bn);
+    int want = hole ? 3 : NDC_FIX_N;
+    ok = ok && ah == want && bh == want && an > 0 && an == bn &&
+        !memcmp(aw, bw, an) && uint256_eq(&ar, &br) &&
+        uint256_eq(&ar, &f->roots[want]) &&
+        node_db_sync_get_tip_height(a) == NDC_FIX_N &&
+        node_db_sync_get_tip_height(b) == NDC_FIX_N &&
+        ndc_pause_rows_equal(a->db, b->db, hole);
+    ok = ok && ndc_pause_receipts_equal(a, b, hole);
+    free(aw); free(bw); return ok;
+}
+
+static bool ndc_pause_sapling_walk(struct ndc_pace_fixture *p,
+                                    struct ndc_pause_sapling *f, bool seeded)
+{
+    node_pace_set(NODE_PACE_NORMAL); node_db_catchup_lock_guard_test_set_batch_size(2);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(150);
+    struct ndc_pace_run run = {.db = &p->db, .chain = &f->chain, .dir = f->dir, .result = -1};
+    pthread_t thread; bool started = seeded && pthread_create(&thread, NULL, ndc_pace_walk, &run) == 0;
+    for (int i = 0; started && i < 1000 && node_db_catchup_lock_guard_test_batch_commits() < 1; i++) platform_sleep_ms(2);
+    bool reached = node_db_catchup_lock_guard_test_batch_commits() >= 1;
+    node_pace_set(NODE_PACE_PAUSE);
+    if (started) pthread_join(thread, NULL);
+    int prefix = seeded ? node_db_sync_get_tip_height(&p->db) : -1;
+    return started && reached && run.result > 0 && prefix > 0 &&
+           prefix < NDC_FIX_N && !node_db_catchup_service_active();
+}
+
+static int ndc_check_pace_sapling(bool hole)
+{
+    int failures = 0; struct ndc_pause_sapling f = {0};
+    struct ndc_pace_fixture p = {0}; struct ndc_fix_ctx fake = {0};
+    bool built = ndc_pause_sapling_build(&f); fake.built = built;
+    bool opened = ndc_pace_open(&fake, &p);
+    bool seeded = opened && ndc_tip_note(&p.db, 0x71, &f.cm, 1) &&
+                  ndc_tip_note(&p.ref, 0x71, &f.cm, 1);
+    if (hole) f.slots[4].nStatus &= ~BLOCK_HAVE_DATA;
+    bool partial = ndc_pause_sapling_walk(&p, &f, seeded);
+    node_pace_set(NODE_PACE_NORMAL); node_db_catchup_lock_guard_test_set_height_delay_ms(0);
+    int resumed = partial ? node_db_catchup_service_run(&p.db, &f.chain, NULL, f.dir) : -1;
+    int reference = seeded ? node_db_catchup_service_run(&p.ref, &f.chain, NULL, f.dir) : -1;
+    NDC_CHECK("Sapling pause stops at a committed partial prefix", partial);
+    NDC_CHECK("Sapling resume matches uninterrupted rows, receipts and witness",
+              partial && resumed > 0 && reference > 0 && ndc_pause_sapling_equal(&p.db, &p.ref, &f, hole));
+    ndc_pace_close(&p); active_chain_free(&f.chain); (void)test_rm_rf_recursive(f.dir);
+    return failures;
+}
+
+static int ndc_check_pace_sapling_bounded(bool hole)
+{
+    int failures = 0, status = 0;
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) {
+        int result = ndc_check_pace_sapling(hole);
+        fflush(NULL);
+        _exit(result == 0 ? 0 : 1);
+    }
+    bool finished = false;
+    int64_t deadline = platform_time_monotonic_ms() + 30000;
+    while (child > 0 && platform_time_monotonic_ms() < deadline) {
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) { finished = true; break; }
+        if (got < 0 && errno != EINTR) break;
+        platform_sleep_ms(10);
+    }
+    if (child > 0 && !finished) { kill(child, SIGKILL); (void)waitpid(child, &status, 0); }
+    NDC_CHECK("Sapling pause/resume completes within 30 seconds",
+              child > 0 && finished && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    return failures;
+}
+#endif
+
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
@@ -6152,6 +6325,10 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_service_conflict_rollback(&fx);
     failures += ndc_check_pace_pause(&fx);
     failures += ndc_check_pace_sparse(&fx);
+    #ifndef _WIN32
+    failures += ndc_check_pace_sapling_bounded(false);
+    failures += ndc_check_pace_sapling_bounded(true);
+#endif
     failures += ndc_check_batch_cap_two(&fx);
     failures += ndc_check_default_cap_one_commit(&fx);
     failures += ndc_check_busy_snapshot_restart(&fx);
