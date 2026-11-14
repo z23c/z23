@@ -101,6 +101,13 @@ static int lint_changed_load(struct lint_changed *c, const char *path)
             line[--n] = '\0';
         if (line[0] == '\0')
             continue;
+        /* Git quotes paths this newline format cannot represent literally.
+         * Discard even earlier entries: a partial set is not a safe scan. */
+        if (line[0] == '"') {
+            fprintf(stderr, "z23-lint: quoted changed-file path; using whole-tree scan\n");
+            lint_changed_free(c);
+            break;
+        }
         if (strlen(line) >= 4096) {
             rc = 2;
             break;
@@ -160,15 +167,15 @@ int lint_changed_bind(int *argc, char ***argv, struct lint_changed *out)
 
 int lint_fast_append_changed(char *cmd, size_t cap, const char *path)
 {
+    char quoted[8192];
     size_t n;
     int k;
-    if (!cmd || !path || !path[0] || strchr(path, ' ') || strchr(path, '\n')
-        || strchr(path, '\t'))
+    if (!cmd || !path || !path[0] || sh_single_quote(path, quoted, sizeof quoted))
         return 2;
     n = strlen(cmd);
     if (n >= cap)
         return 2;
-    k = snprintf(cmd + n, cap - n, " --changed-files=%s", path);
+    k = snprintf(cmd + n, cap - n, " --changed-files=%s", quoted);
     if (k < 0 || (size_t)k >= cap - n)
         return 2;
     return 0;

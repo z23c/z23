@@ -11,6 +11,8 @@
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 
 #include "lint_gate_selftests.h"
+#include "lint/lintc/lintc.h"
+#include "lint/lintc/run_priv.h"
 #include "util/spawn.h"
 
 #include <errno.h>
@@ -623,6 +625,50 @@ static void lfc_cleanup(const struct lfc_fix *fx)
     (void)zcl_spawn_capture_merged_in_dir_observed(argv, "/", out, sizeof out, 60000, &timeout);
 }
 
+static int lfc_quoted_paths(const struct lfc_fix *fx)
+{
+    static const char *const sets[] = {
+        "tools/clean_ok.c\n\"tools/tab\\tbad.c\"\n",
+        "\"tools/line\\nbad.c\"\n",
+        "\"tools/\\303\\251.c\"\n",
+    };
+    char out[1 << 16];
+    for (size_t i = 0; i < sizeof(sets) / sizeof(sets[0]); i++) {
+        if (lfc_rel(fx, "set_quoted.txt", sets[i]))
+            return 1;
+        for (size_t j = 0; j < sizeof(k_lfc_gates) / sizeof(k_lfc_gates[0]); j++) {
+            const struct lfc_gate *g = &k_lfc_gates[j];
+            int rc = lfc_run(fx, g->name, g->verify, "set_quoted.txt", 0,
+                             out, sizeof(out));
+            lfc_banner(g->name, "quoted-path-fallback", rc, out);
+            if (rc != 1 || !lfc_has(out, "old_bad.c") ||
+                !lfc_has(out, "using whole-tree scan"))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int lfc_command_paths(void)
+{
+    static const char *const paths[] = {
+        "set&&other", "set$HOME", "set'quote", "set\"quote",
+        "set\\backslash", "set space", "set\twith\ncontrols",
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        struct lr_plan plan;
+        char cmd[LR_CMD] = "gate", expected[256], err[256];
+        (void)snprintf(expected, sizeof expected, "--changed-files=%s", paths[i]);
+        if (lint_fast_append_changed(cmd, sizeof cmd, paths[i]) ||
+            lr_parse_command(cmd, NULL, &plan, err, sizeof err))
+            return 1;
+        if (plan.nsteps != 1 || plan.steps[0].argc != 2 ||
+            strcmp(plan.steps[0].argv[1], expected) != 0)
+            return 1;
+    }
+    return 0;
+}
+
 int t_lint_fast_changed_files(void)
 {
     int failures = 0;
@@ -631,6 +677,8 @@ int t_lint_fast_changed_files(void)
     TEST("lint fast path narrows per-file gates to the changed set") {
         ASSERT(lfc_prepare(&fx) == 0);
         ASSERT(lfc_all(&fx) == 0);
+        ASSERT(lfc_quoted_paths(&fx) == 0);
+        ASSERT(lfc_command_paths() == 0);
         PASS();
     } _test_next:;
     lfc_cleanup(&fx);
