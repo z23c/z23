@@ -71,6 +71,33 @@ modified unless separately demonstrated.
 
 <!-- claim: symbol-present al_change_choice tools/command/native_app_library_command.c # saved draft uses Change; no draft uses Change with your AI -->
 
+## Qualify catalog transport separately
+
+Keep the same network identity throughout copy, save, sign, publish and fetch.
+Do not import a default-network signed release into a regtest store or alter
+its chain metadata to make it fit. For a regtest transport fixture, create a
+fresh copy from the verified installed source with the active regtest network,
+then apply the intended edit and compare the rebuilt source and image. Installed
+seeding obtains the active chain identity. Reapplying a previously confirmed
+edit qualifies transport; it does not prove another AI or GUI interaction.
+<!-- claim: symbol-present vcs_package_accept_chain_id tools/command/native_app_seed_command.c # installed seeding uses the active chain -->
+
+Prepare the personal signed copy before handing the store to a hosting node.
+Record the publication's actual package root, publisher fingerprint and offer
+ID; a new personal namespace can change the package root. Fetch with those
+identities pinned, then compare source bytes and the running executable. A Tor
+handshake alone does not prove package transfer, reproduction or execution.
+<!-- claim: symbol-present app.get engine/composition/commands/apps.def # exact offer inputs for catalog fetch -->
+
+Use bounded fixture nodes and display sessions under current host admission.
+If the scheduler serializes a project's jobs, run the node and fetch within
+one admitted test job; do not leave the fetch waiting for a slot held by its
+own node or bypass admission. Verify fixture process cleanup after exit.
+After stopping the publisher, check the recipient's running image and hosting
+status. A fresh third-party fetch from that recipient is a separate check.
+Distinguish two host environments from independent physical hardware, and
+record network evidence before claiming strict peer or offline isolation.
+
 ## Evidence and failure disposition
 
 Keep a compact result index alongside the immutable or retained artifacts:
