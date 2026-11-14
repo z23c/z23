@@ -19,6 +19,10 @@ void app_receive_flow_run_observed(const char *datadir, struct zcl_command_reply
 void app_receive_flow_run_budgeted(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path,
     app_receive_build_observer observer, void *observer_context, size_t data_budget);
+/* Reopen an existing trusted received copy's original fork; never receives it again. */
+void app_recovered_flow_run(const char *copy_dir, const char *datadir, const uint8_t expected_fork[32],
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path, size_t data_budget);
 /* Only after successful native adoption AND personalization. Caller reserves
  * the original receipt plus bounded continuation evidence before mutation
  * (same 16KiB policy as Receive, including retained scratch failure evidence).

@@ -24,6 +24,8 @@
 #include "presentation/model_render.h"
 #include "zutf8/zutf8.h"
 #include "platform/os_proc.h"
+#include "platform/directory_compat.h"
+#include "util/path_util.h"
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -34,6 +36,8 @@
 #endif
 
 #define AL_ROWS (APP_LAUNCH_ENTRIES_MAX + APP_SELECTION_ROUTES_MAX)
+#define AL_RECOVERY_MAX 64u
+struct al_recovered_row { char name[APP_SELECTION_PATH_MAX]; uint8_t fork[32]; bool available; };
 struct library_row {
     struct app_launch_entry entry;
     struct app_selection selection;
@@ -42,6 +46,9 @@ struct library_row {
 struct library {
     struct app_launch_registry registry;
     struct library_row rows[AL_ROWS];
+    struct al_recovered_row recovered[AL_RECOVERY_MAX];
+    size_t recovered_count, recovered_index;
+    char recovered_root[APP_SELECTION_PATH_MAX];
     size_t count, index;
     size_t data_cap;
     unsigned page;
@@ -66,12 +73,13 @@ struct library {
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure, recovery_adoption, create_result, draft_result, publish_result;
-    bool share_result;
+    bool share_result, recovery_result;
     bool operation_canceled, preview_current;
     bool preparation_canceled;
     bool share_review;
     struct json_value receive_receipt;
     struct json_value draft_receipt;
+    struct json_value recovery_expected;
     bool has_draft, draft_current;
     struct zcl_command_reply discover_error;
     unsigned preparation_count;
@@ -182,6 +190,31 @@ static void al_discover_options(struct library *w)
     app_library_choice(m, "catalog", "Browse offers", "Browse offers received by this node.");
     app_library_choice(m, "open-link", "Open a shared app", "Paste an app link.");
     app_library_choice(m, "discover-back", "Back", "Return to My Apps.");
+    app_library_choice(m, "recover-copies", "Review received copies", "Find an earlier received copy.");
+}
+static void al_recovered_model(struct library *w)
+{
+    struct zcl_present_model_v1 *m = &w->model;
+    zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_CHOICE);
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-recovered-copies");
+    (void)snprintf(m->title, sizeof(m->title), "Received copies");
+    if (!w->recovered_count) {
+        (void)snprintf(m->summary, sizeof(m->summary), "No profile copies were found.");
+        app_library_choice(m, "recover-back", "Back", "Return to Discover apps."); return;
+    }
+    const struct al_recovered_row *row = &w->recovered[w->recovered_index];
+    char label[73]; size_t i = 0;
+    while (i + 1 < sizeof(label) && row->name[i]) {
+        unsigned char c = (unsigned char)row->name[i];
+        label[i++] = c >= 0x20 && c <= 0x7e ? (char)c : '?';
+    }
+    label[i] = 0;
+    (void)snprintf(m->summary, sizeof(m->summary), "Copy %zu of %zu: %.72s", w->recovered_index + 1, w->recovered_count, label);
+    app_library_choice(m, "recover-select", row->available ? "Review original" : "Unavailable",
+        row->available ? "Review this trusted received copy." : "Other, saved, or unavailable copy.");
+    if (w->recovered_index) app_library_choice(m, "recover-previous", "Previous", "Browse back.");
+    if (w->recovered_index + 1 < w->recovered_count) app_library_choice(m, "recover-next", "Next", "Browse forward.");
+    app_library_choice(m, "recover-back", "Back", "Return to Discover apps.");
 }
 
 struct al_help_view {
@@ -1164,10 +1197,90 @@ static void al_bound_history(struct library *w, struct json_value *facts, size_t
     }
 }
 
+/* Expected identity is the reviewed snapshot, not a claim that trust or the
+ * copy still exists after a later failure. Null records unobserved outcomes. */
+static bool al_recovered_retry_fields(struct json_value *compact, const struct json_value *retry, bool reserve)
+{
+    if (reserve) return json_push_kv_str(compact, "error_code", "ENV_UNAVAILABLE") &&
+        json_push_kv_bool(compact, "error_mutated", false) && json_push_kv_str(compact, "retry_choice", "try_again");
+    const char *fields[] = {"error_code", "error_mutated", "retry_choice"};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        const struct json_value *v = json_get(retry, fields[i]);
+        if (!v || !json_push_kv(compact, fields[i], v)) return false;
+    }
+    return true;
+}
+static bool al_recovered_retry_fact(struct json_value *facts, const struct json_value *data, bool reserve)
+{
+    const struct json_value *retry = data ? json_get(data, "initial_retry_failure") : NULL;
+    if (!reserve && !retry) return true;
+    struct json_value compact; json_init(&compact); json_set_object(&compact);
+    bool ok = al_recovered_retry_fields(&compact, retry, reserve) &&
+        json_push_kv(facts, "initial_retry_failure", &compact);
+    json_free(&compact); return ok;
+}
+static bool al_recovered_facts(struct library *w, struct json_value *facts,
+                               const struct json_value *data, bool reserve)
+{
+    struct json_value unknown; json_init(&unknown);
+    if (reserve) json_set_bool(&unknown, false); /* false serializes longer than null or true */
+    const char *keys[] = {"continuation_executed", "selection_changed"};
+    bool ok = json_push_kv(facts, "recovery_expected", &w->recovery_expected);
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const struct json_value *v = data ? json_get(data, keys[i]) : NULL;
+        ok = json_push_kv(facts, keys[i], v ? v : &unknown);
+    }
+    const struct json_value *error = data ? json_get(data, "continuation_error") : NULL;
+    const struct json_value *retained = error ? json_get(error, "received_copy_retained") : NULL;
+    ok = ok && json_push_kv(facts, "received_copy_retained", retained ? retained : &unknown);
+    ok = ok && al_recovered_retry_fact(facts, data, reserve);
+    json_free(&unknown);
+    return ok && json_push_kv_bool(facts, "details_unavailable", true);
+}
+
+static bool al_recovered_projection(struct library *w)
+{
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    bool ok = al_recovered_facts(w, &facts, NULL, true);
+    const char *key = w->recovery_adoption ? "historical_adoption" :
+        w->recovery_kept ? "historical_keep" : "historical_receive";
+    if (ok && w->has_received) ok = json_push_kv(&facts, key, &w->receive_receipt);
+    if (ok && w->has_draft) ok = json_push_kv(&facts, "historical_draft_keep", &w->draft_receipt);
+    if (ok && w->prepared_mutated) ok = json_push_kv(&facts, "library_preparation", &w->preparation);
+    size_t n = ok ? json_write(&facts, NULL, 0) : 0;
+    json_free(&facts); return n && n <= 1450u;
+}
+
+static void al_recovered_error_normalize(struct zcl_command_reply *reply)
+{
+    char *code = reply->error.code;
+    for (size_t i = 0; code[i]; ++i) {
+        if ((code[i] < 'A' || code[i] > 'Z') && (code[i] < '0' || code[i] > '9') && code[i] != '_') {
+            (void)snprintf(code, sizeof(reply->error.code), "RECOVERY_FAILED"); break;
+        }
+    }
+    char *message = reply->error.message;
+    for (size_t i = 0; i < 160 && message[i]; ++i)
+        if ((unsigned char)message[i] < 0x20 || (unsigned char)message[i] > 0x7e) message[i] = '?';
+    message[160] = 0;
+    reply->error.phase[0] = reply->error.current_state[0] = reply->error.next_action[0] = 0;
+    reply->error.evidence[0] = reply->error.failure_id[0] = 0;
+}
+static void al_recovered_begin(struct library *w)
+{
+    w->draft_result = w->create_result = w->publish_result = w->share_result = false;
+    w->receive_failure = false;
+    w->recovery_result = true;
+}
+
 static void al_bound_failure(struct library *w, struct zcl_command_reply *reply)
 {
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     bool omitted = false;
+    if (w->recovery_result) {
+        al_recovered_error_normalize(reply);
+        if (!al_recovered_facts(w, &facts, &reply->data, false)) omitted = true;
+    }
     size_t cap = al_failure_facts_cap(reply, &omitted);
     if (w->publish_result) zcl_app_copy_facts(&facts, &reply->data, al_publish_fact_keys, 4, 4, cap, &omitted);
     if (w->draft_result) zcl_app_copy_facts(&facts, &reply->data, al_draft_fact_keys, 7, 1, cap, &omitted);
@@ -1181,10 +1294,24 @@ static void al_bound_failure(struct library *w, struct zcl_command_reply *reply)
     al_copy_failure_facts(&facts, old, cap, &omitted);
     if (w->create_result) al_copy_adoption_facts(&facts, &reply->data, cap, &omitted);
     if (w->receive_failure) al_copy_receive_locations(&facts, &reply->data, cap, &omitted);
-    if (omitted) (void)json_push_kv_bool(&facts, "details_unavailable", true);
+    if (omitted && !json_get(&facts, "details_unavailable")) (void)json_push_kv_bool(&facts, "details_unavailable", true);
     if (old) { json_free(old); *old = facts; }
     else { if (!json_push_kv(&reply->data, "failure_facts", &facts)) omitted = true; json_free(&facts); }
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_library_recovery_failure(const struct json_value *expected, const struct json_value *prior,
+                                       struct zcl_command_reply *reply)
+{
+    struct library *w = zcl_calloc(1, sizeof(*w), "recovery-failure-fixture");
+    if (!w) return false;
+    w->recovery_expected = *expected;
+    w->draft_result = w->create_result = w->publish_result = w->share_result = true;
+    if (prior) { w->receive_receipt = *prior; w->has_received = w->recovery_ready = true; }
+    bool fits = al_recovered_projection(w);
+    if (fits) { al_recovered_begin(w); al_bound_failure(w, reply); }
+    free(w); return fits;
+}
+#endif
 static void al_bound_result(struct library *w, struct zcl_command_reply *reply, size_t data_cap)
 {
     if (reply->status == ZCL_COMMAND_STATUS_PASSED) {
@@ -1524,10 +1651,101 @@ static bool al_create(struct library *w, const struct app_launch_env *env,
     return al_create_finish(w, env, reply, prior, presenter, context);
 }
 
+static void al_recovered_probe(struct library *w, struct al_recovered_row *row, const char *datadir)
+{
+    char copy[APP_SELECTION_PATH_MAX];
+    if (!zcl_path_join(copy, sizeof(copy), w->recovered_root, row->name)) return;
+    struct zcl_command_reply check; zcl_command_reply_init(&check, "zcl.app_recovery.v1");
+    struct app_receive_preview *preview = NULL;
+    bool ok = app_receive_preview_create_recovered(copy, datadir, NULL, &preview, &check) &&
+        app_receive_preview_describe_recovered(preview, &check.data);
+    const char *version = zcl_package_copy_str(&check.data, "version");
+    row->available = ok && version && strlen(version) == 64 && zcl_hex_decode_lower(version, row->fork, 32);
+    app_receive_preview_close(preview); zcl_command_reply_free(&check);
+}
+static bool al_recovered_scan(struct library *w, const char *datadir, struct zcl_command_reply *reply)
+{
+    if (!datadir) datadir = zcl_native_command_datadir();
+    if (!datadir || datadir[0] != '/' || !zcl_path_join(w->recovered_root, sizeof(w->recovered_root), datadir, "copies"))
+        return al_fail(reply, "MISSING_DATADIR", "A bounded absolute app profile is required.");
+    w->recovered_count = w->recovered_index = 0;
+    enum platform_directory_probe_result shape = platform_directory_probe_real(w->recovered_root);
+    if (shape == PLATFORM_DIRECTORY_PROBE_MISSING) return true;
+    if (shape != PLATFORM_DIRECTORY_PROBE_OK) return al_fail(reply, "RECOVERY_UNREADABLE", "The copies folder cannot be read safely.");
+    struct platform_directory_list list = {0}; bool overflow = false;
+    if (!platform_directory_list_real_bounded(w->recovered_root, AL_RECOVERY_MAX, &list, &overflow))
+        return al_fail(reply, overflow ? "RECOVERY_LIMIT" : "RECOVERY_UNREADABLE",
+            overflow ? "Too many profile entries to review safely." : "The copies folder cannot be listed safely.");
+    bool ok = true;
+    for (size_t i = 0; i < list.count; ++i) {
+        struct al_recovered_row *row = &w->recovered[i];
+        size_t n = strlen(list.entries[i].name);
+        if (n >= sizeof(row->name)) { ok = false; break; }
+        memset(row, 0, sizeof(*row)); memcpy(row->name, list.entries[i].name, n + 1);
+        al_recovered_probe(w, row, datadir);
+        ++w->recovered_count;
+    }
+    platform_directory_list_free(&list);
+    return ok || al_fail(reply, "RECOVERY_UNREADABLE", "A copy name is too long to review safely.");
+}
+static bool al_recovered_snapshot(struct library *w, const char *copy, const char *datadir,
+                                  const uint8_t fork[32], struct zcl_command_reply *reply)
+{
+    struct zcl_command_reply check; zcl_command_reply_init(&check, "zcl.app_recovery.v1");
+    struct app_receive_preview *preview = NULL;
+    json_init(&w->recovery_expected); json_set_object(&w->recovery_expected);
+    bool verified = app_receive_preview_create_recovered(copy, datadir, fork, &preview, &check) &&
+        app_receive_preview_describe_recovered(preview, &w->recovery_expected);
+    app_receive_preview_close(preview); zcl_command_reply_free(&check);
+    if (!verified) return al_fail(reply, "RECOVERY_UNAVAILABLE", "The selected copy or its original trust changed; no build was started.");
+    if (!al_recovered_projection(w))
+        return al_fail(reply, "RECOVERY_TOO_LARGE", "The review and earlier receipts cannot fit safely; no build was started.");
+    return true;
+}
+static bool al_recovered_start(struct library *w, const char *datadir, struct zcl_command_reply *reply)
+{
+    if (!w->recovered_count || w->recovered_index >= w->recovered_count || !w->recovered[w->recovered_index].available)
+        return al_fail(reply, "RECOVERY_UNAVAILABLE", "This is another kind of copy or its original trust is unavailable.");
+    size_t allowance;
+    if (!al_create_allowance(w, &allowance))
+        return al_fail(reply, "RECOVERY_TOO_LARGE", "Earlier recovery information cannot be safely retained while reviewing this copy.");
+    if (!datadir) datadir = zcl_native_command_datadir();
+    char copy[APP_SELECTION_PATH_MAX];
+    const struct al_recovered_row *row = &w->recovered[w->recovered_index];
+    if (!datadir || !zcl_path_join(copy, sizeof(copy), w->recovered_root, row->name))
+        return al_fail(reply, "RECOVERY_UNAVAILABLE", "The copy path is unavailable.");
+    if (!al_recovered_snapshot(w, copy, datadir, row->fork, reply)) return false;
+    struct zcl_command_reply result; zcl_command_reply_init(&result, "zcl.app_recovery.v1");
+    al_recovered_begin(w);
+    app_recovered_flow_run(copy, datadir, row->fork, &result, w->notice, w->prepare_context,
+                           w->test_worker_path, allowance);
+    bool prior_mutated = reply->error.mutated;
+    w->receive_current = false;
+    w->draft_current = false;
+    zcl_command_reply_free(reply); *reply = result; reply->error.mutated |= prior_mutated;
+    w->any_mutated |= reply->error.mutated;
+    return false; /* A recovery result is terminal, including an explicit Close. */
+}
+static bool al_recovered_action(struct library *w, const char *id, const char *datadir,
+                                struct zcl_command_reply *reply, bool *handled)
+{
+    if (!strcmp(id, "recover-copies")) {
+        if (!al_recovered_scan(w, datadir, reply)) return false;
+        w->page = 10; return true;
+    }
+    if (!strcmp(id, "recover-back")) { w->page = 8; return true; }
+    if (!strcmp(id, "recover-previous")) { if (w->recovered_index) --w->recovered_index; return true; }
+    if (!strcmp(id, "recover-next")) { if (w->recovered_index + 1 < w->recovered_count) ++w->recovered_index; return true; }
+    if (!strcmp(id, "recover-select")) return al_recovered_start(w, datadir, reply);
+    *handled = false; return true;
+}
 static bool al_external(struct library *w, const struct app_launch_env *env, const char *datadir,
     app_library_presenter presenter, void *context, struct zcl_command_reply *reply, const char *id, bool *handled)
 {
     *handled = true;
+    bool recovery_handled = true;
+    bool recovery_ok = al_recovered_action(w, id, datadir, reply, &recovery_handled);
+    if (recovery_handled) return recovery_ok;
     if (strcmp(id, "draft")) w->draft_result = false;
     if (!strcmp(id, "create")) return al_create(w, env, datadir, presenter, context, reply);
     w->create_result = false;
@@ -1547,6 +1765,7 @@ static void al_page_model(struct library *w)
     else if (w->page == 6) al_share_options(w);
     else if (w->page == 8) al_discover_options(w);
     else if (w->page == 9) al_more_share_options(w);
+    else if (w->page == 10) al_recovered_model(w);
     else if (w->page) al_detail_model(w);
     else al_model(w);
 }
@@ -1554,7 +1773,8 @@ static void al_page_model(struct library *w)
 static void al_leave_preview(struct library *w, struct zcl_command_reply *reply, const char *id)
 {
     if (!w->preview_current || !(al_receipt_operation(id) || !strcmp(id, "catalog") ||
-        !strcmp(id, "open-link") || !strcmp(id, "hosting") || !strcmp(id, "create"))) return;
+        !strcmp(id, "open-link") || !strcmp(id, "hosting") || !strcmp(id, "create") ||
+        !strcmp(id, "recover-select"))) return;
     w->any_mutated |= reply->error.mutated;
     json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
     w->preview_current = false;
@@ -1626,6 +1846,7 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
     json_free(&w->preparation);
     json_free(&w->receive_receipt);
     json_free(&w->draft_receipt);
+    json_free(&w->recovery_expected);
     if (w->has_discover_error) zcl_command_reply_free(&w->discover_error);
     free(w);
 }

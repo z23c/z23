@@ -3502,12 +3502,18 @@ static bool tag_link_form(void *context, char out[257], bool *submitted, char *w
     int n = snprintf(out, 257, "http://%s/board/apps/v1/%s", TAG_ONION, f->row.post_id);
     *submitted = n > 0 && n < 257; return *submitted;
 }
+static bool tag_link_discover_actions(const struct zcl_present_model_v1 *model, char *why, size_t cap)
+{
+    return zcl_present_model_validate_v1(model, why, cap) && model->action_count == 4 &&
+        !strcmp(model->actions[0].id, "catalog") && !strcmp(model->actions[1].id, "open-link") &&
+        !strcmp(model->actions[2].id, "discover-back") && !strcmp(model->actions[3].id, "recover-copies");
+}
 static bool tag_link_cards(void *context, const struct zcl_present_model_v1 *model,
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     struct tag_link_fixture *f = context;
     if (!strcmp(model->request_id, "library-discover-options")) {
-        if (!zcl_present_model_validate_v1(model, why, cap) || model->action_count != 3 || strcmp(model->actions[1].id, "open-link")) return false;
+        if (!tag_link_discover_actions(model, why, cap)) return false;
         event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
         event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 1; return true;
     }

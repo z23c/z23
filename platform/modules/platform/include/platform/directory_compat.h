@@ -58,6 +58,12 @@ bool platform_directory_ensure(const char *path, int mode);
  * entries, symbolic links, and Windows reparse points are omitted. */
 bool platform_directory_list_real_sorted(const char *path,
                                          struct platform_directory_list *out);
+/* Like the real-directory listing, but examine at most `limit` immediate
+ * entries (including non-directories). Overflow returns false, sets overflow,
+ * and clears out; ordinary errors return false with overflow clear. */
+bool platform_directory_list_real_bounded(const char *path, size_t limit,
+                                          struct platform_directory_list *out,
+                                          bool *overflow);
 
 /* Return real, immediate child regular files in bytewise name order with a
  * valid metadata snapshot for every entry. Symbolic links and Windows reparse

@@ -39,6 +39,7 @@ static struct dirent *directory_fault_readdir(DIR *dir)
 #define platform_directory_probe_real fault_directory_probe_real
 #define platform_directory_canonical_real fault_directory_canonical_real
 #define platform_directory_list_real_sorted fault_directory_list_real_sorted
+#define platform_directory_list_real_bounded fault_directory_list_real_bounded
 #define platform_directory_list_regular_sorted fault_directory_list_regular_sorted
 #define platform_directory_list_children_sorted fault_directory_list_children_sorted
 #define platform_directory_list_free fault_directory_list_free
@@ -49,6 +50,7 @@ static struct dirent *directory_fault_readdir(DIR *dir)
 #undef platform_directory_list_children_sorted
 #undef platform_directory_list_regular_sorted
 #undef platform_directory_list_real_sorted
+#undef platform_directory_list_real_bounded
 #undef platform_directory_canonical_real
 #undef platform_directory_probe_real
 #undef platform_directory_ensure
@@ -151,10 +153,33 @@ static int directory_success_case(enum directory_kind kind)
     if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
     return failures;
 }
+static int directory_bounded_case(void)
+{
+    int failures = 0; char root[256] = {0};
+    struct platform_directory_list dirs = {0}; bool overflow = false;
+    TEST("bounded enumeration refuses overflow and errors without partial output") {
+        test_make_tmpdir(root, sizeof(root), "directory_errors", "bounded");
+        ASSERT(root[0] && directory_fixture(root, DIRECTORY_BOTH));
+        ASSERT(fault_directory_list_real_bounded(root, 4, &dirs, &overflow));
+        ASSERT(!overflow && directory_sorted_pair(&dirs, "a-dir", "z-dir"));
+        fault_directory_list_free(&dirs);
+        ASSERT(!fault_directory_list_real_bounded(root, 3, &dirs, &overflow));
+        ASSERT(overflow && !dirs.entries && dirs.count == 0);
+        directory_reads_left = 1;
+        ASSERT(!fault_directory_list_real_bounded(root, 4, &dirs, &overflow));
+        directory_reads_left = -1;
+        ASSERT(!overflow && !dirs.entries && dirs.count == 0);
+        PASS();
+    } _test_next:;
+    directory_reads_left = -1; fault_directory_list_free(&dirs);
+    if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
 
 int test_platform_directory_errors(void)
 {
     int failures = 0;
+    failures += directory_bounded_case();
     for (enum directory_kind kind = DIRECTORY_DIRS; kind <= DIRECTORY_BOTH; kind++) {
         failures += directory_error_case(kind, 0);
         failures += directory_error_case(kind, 1);

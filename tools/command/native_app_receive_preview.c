@@ -27,10 +27,13 @@ struct app_receive_preview {
     struct app_selection choice;
     struct app_selection kept;
     char state_dir[APP_LAUNCH_PATH_MAX];
-    bool built, previewed, draft;
+    char recovered_name[257], recovered_publisher[67];
+    bool built, previewed, draft, recovered;
     enum zcl_package_copy_adoption trust;
 };
 static bool arp_same(const struct app_selection *a, const struct app_selection *b);
+static bool arp_recovered_paths(struct app_receive_preview *p, const char *copy_dir,
+                                const char *datadir, struct zcl_command_reply *r);
 static bool arp_fail(struct zcl_command_reply *r, const char *code, const char *why)
 {
     zcl_package_copy_fail(r, code, r->error.mutated, why, "app.receive preview");
@@ -230,12 +233,16 @@ static bool arp_state(struct app_receive_preview *p, struct zcl_command_reply *r
     memcpy(p->state_dir, env.state_dir, strlen(env.state_dir) + 1);
     return true;
 }
-static bool arp_state_valid(const struct app_receive_preview *p, struct zcl_command_reply *r, bool check_head)
+static bool arp_recovered_path_current(const struct app_receive_preview *p, struct zcl_command_reply *r)
 {
-    struct app_launch_env env; char why[256] = {0};
-    if (!app_launch_env_from_process(&env, why, sizeof(why)) || strcmp(env.state_dir, p->state_dir))
-        return arp_fail(r, "PREVIEW_STATE_CHANGED", "launcher selection environment changed during preview");
-    if (!p->draft) return true;
+    struct app_receive_preview check = {0};
+    if (!arp_recovered_paths(&check, p->choice.copy, p->choice.datadir, r) ||
+        strcmp(check.choice.copy, p->choice.copy) || strcmp(check.choice.datadir, p->choice.datadir))
+        return arp_fail(r, "RECOVERY_PATH_REFUSED", "The received copy path changed.");
+    return true;
+}
+static bool arp_draft_current(const struct app_receive_preview *p, struct zcl_command_reply *r, bool check_head)
+{
     struct app_selection current;
     if (app_selection_load(p->state_dir, p->kept.app, &current) != APP_SELECTION_OK ||
         current.revision != p->kept.revision || !arp_same(&current, &p->kept))
@@ -250,13 +257,21 @@ static bool arp_state_valid(const struct app_receive_preview *p, struct zcl_comm
     zcl_package_copy_close(&copy);
     return ok || arp_fail(r, "DRAFT_STALE", "the draft or its owner trust changed; review again");
 }
+static bool arp_state_valid(const struct app_receive_preview *p, struct zcl_command_reply *r, bool check_head)
+{
+    struct app_launch_env env; char why[256] = {0};
+    if (!app_launch_env_from_process(&env, why, sizeof(why)) || strcmp(env.state_dir, p->state_dir))
+        return arp_fail(r, "PREVIEW_STATE_CHANGED", "launcher selection environment changed during preview");
+    if (p->recovered && !arp_recovered_path_current(p, r)) return false;
+    return !p->draft || arp_draft_current(p, r, check_head);
+}
 static bool arp_state_current(const struct app_receive_preview *p, struct zcl_command_reply *r)
 {
     return arp_state_valid(p, r, true);
 }
 bool app_receive_preview_current(const struct app_receive_preview *p, struct zcl_command_reply *r)
 {
-    return p && arp_state_current(p, r);
+    return p && arp_state_current(p, r) && (!p->recovered || arp_history(&p->choice, p->trust, r));
 }
 bool app_receive_preview_create(const struct json_value *d, const char *datadir,
     struct app_receive_preview **out, struct zcl_command_reply *r)
@@ -270,6 +285,87 @@ bool app_receive_preview_create(const struct json_value *d, const char *datadir,
     }
     p->trust = ZCL_PACKAGE_COPY_RECEIVED_TRUSTED;
     arp_route(&p->choice, false); *out = p; return true;
+}
+static bool arp_recovered_root(struct app_receive_preview *p, const char *datadir, char *canonical, size_t cap)
+{
+    char root[APP_SELECTION_PATH_MAX];
+    return platform_directory_canonical_real(datadir, p->choice.datadir, sizeof(p->choice.datadir)) &&
+        zcl_path_join(root, sizeof(root), p->choice.datadir, "copies") &&
+        platform_directory_probe_real(root) == PLATFORM_DIRECTORY_PROBE_OK &&
+        platform_directory_canonical_real(root, canonical, cap);
+}
+static bool arp_recovered_child(struct app_receive_preview *p, const char *copy_dir,
+                                const char *canonical, const char *leaf)
+{
+    char expected[APP_SELECTION_PATH_MAX];
+    return platform_directory_probe_real(copy_dir) == PLATFORM_DIRECTORY_PROBE_OK &&
+        platform_directory_canonical_real(copy_dir, p->choice.copy, sizeof(p->choice.copy)) &&
+        zcl_path_join(expected, sizeof(expected), canonical, leaf) && !strcmp(expected, p->choice.copy);
+}
+static bool arp_recovered_paths(struct app_receive_preview *p, const char *copy_dir,
+                                const char *datadir, struct zcl_command_reply *r)
+{
+    char canonical[APP_SELECTION_PATH_MAX];
+    const char *leaf = copy_dir ? strrchr(copy_dir, '/') : NULL;
+    if (!datadir || !leaf || !leaf[1] || !strcmp(leaf + 1, ".") || !strcmp(leaf + 1, "..") ||
+        !arp_recovered_root(p, datadir, canonical, sizeof(canonical)) ||
+        !arp_recovered_child(p, copy_dir, canonical, leaf + 1))
+        return arp_fail(r, "RECOVERY_PATH_REFUSED", "The received copy must be a real immediate profile copy.");
+    return true;
+}
+static bool arp_recovered_identity(struct app_receive_preview *p, const uint8_t *expected,
+                                   struct zcl_command_reply *r)
+{
+    struct zcl_package_copy copy = {0};
+    if (!zcl_package_copy_open_as(p->choice.copy, ZCL_PACKAGE_COPY_READ, &copy, r, "app.library recovery")) return false;
+    bool ok = (!expected || !memcmp(expected, copy.fork_version, 32)) &&
+        zcl_package_copy_adopted(p->choice.datadir, &copy, NULL) == ZCL_PACKAGE_COPY_RECEIVED_TRUSTED;
+    if (ok) {
+        memcpy(p->choice.fork, copy.fork_version, 32);
+        memcpy(p->choice.version, copy.fork_version, 32);
+        memcpy(p->choice.parent, copy.parent_release, 32);
+    }
+    zcl_package_copy_close(&copy);
+    if (!ok) return arp_fail(r, "RECOVERY_TRUST_REFUSED", "The original received history or trust changed.");
+    struct vcs_package_release release; uint8_t id[32];
+    if (zcl_package_copy_find_release(p->choice.datadir, p->choice.parent, &release, id) != ZCL_PACKAGE_COPY_FOUND ||
+        memcmp(id, p->choice.parent, 32))
+        return arp_fail(r, "RECOVERY_RELEASE_REFUSED", "The original received release is unavailable.");
+    memcpy(p->choice.package, release.package_root, 32);
+    (void)snprintf(p->recovered_name, sizeof(p->recovered_name), "%s", release.name);
+    zcl_hex_encode(release.publisher_pubkey, sizeof(release.publisher_pubkey), p->recovered_publisher);
+    return true;
+}
+bool app_receive_preview_create_recovered(const char *copy_dir, const char *datadir,
+    const uint8_t *expected_fork, struct app_receive_preview **out, struct zcl_command_reply *r)
+{
+    if (!out) return arp_fail(r, "BAD_PREVIEW_INPUT", "Recovery output is required.");
+    *out = NULL;
+    struct app_receive_preview *p = zcl_calloc(1, sizeof(*p), "app-recovery-preview");
+    if (!p) return arp_fail(r, "OUT_OF_MEMORY", "Cannot prepare received-copy recovery.");
+    bool ok = arp_recovered_paths(p, copy_dir, datadir, r) &&
+        arp_recovered_identity(p, expected_fork, r) && arp_state(p, r);
+    if (ok) {
+        p->trust = ZCL_PACKAGE_COPY_RECEIVED_TRUSTED; p->recovered = true;
+        arp_route(&p->choice, false);
+        struct app_selection current;
+        enum app_selection_result state = app_selection_load(p->state_dir, p->choice.app, &current);
+        if (state != APP_SELECTION_ABSENT)
+            ok = arp_fail(r, "RECOVERY_SELECTION_EXISTS", "This copy already has a saved or unreadable selection; inspect My Apps.");
+    }
+    if (!ok) { free(p); return false; }
+    *out = p; return true;
+}
+bool app_receive_preview_describe_recovered(const struct app_receive_preview *p, struct json_value *data)
+{
+    if (!p || !p->recovered || !data) return false;
+    return json_push_kv_str(data, "stage", "recovery") &&
+        json_push_kv_str(data, "name", p->recovered_name) &&
+        json_push_kv_str(data, "destination", p->choice.copy) &&
+        json_push_kv_str(data, "publisher_fingerprint", p->recovered_publisher) &&
+        zcl_package_copy_push_root(data, "version", p->choice.version) &&
+        zcl_package_copy_push_root(data, "release_id", p->choice.parent) &&
+        zcl_package_copy_push_root(data, "package_root", p->choice.package);
 }
 /* Adoption's package is the original release, not the personalized successor. */
 static bool arp_adopted_locations(struct app_receive_preview *p,
@@ -417,6 +513,7 @@ bool app_receive_preview_confirm_input(const struct app_receive_preview *p,
     const struct json_value *d = arp_envelope(envelope, "app.build"); uint8_t plan[32];
     if (!p || !arp_tuple(p, d) || !arp_text(d, "stage", "plan") || !arp_root(d, "plan_id", plan))
         return arp_fail(r, "PREVIEW_PLAN_MISMATCH", "build plan does not match the received saved version");
+    if (p->recovered && !arp_state_current(p, r)) return false;
     if (!arp_history(&p->choice, p->trust, r)) return false;
     return (app_receive_preview_build_input(p, out) && zcl_package_copy_push_root(out, "plan_id", plan) &&
         json_push_kv_bool(out, "confirm", true)) || arp_fail(r, "OUT_OF_MEMORY", "cannot assemble build confirmation");

@@ -35,6 +35,7 @@
 #include "util/file_io.h"
 #include "sha3/sha3.h"
 #include "platform/time_compat.h"
+#include "platform/directory_compat.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
 
@@ -2994,6 +2995,315 @@ static int ak_draft_history_run(void)
     return failures;
 }
 
+struct ak_recovery_view { struct ak_fixture *fixture; bool fail_trust, build, keep, observed, changed, previewed, cautious_notice; char backup[APP_SELECTION_PATH_MAX]; };
+bool zcl_test_library_recovery_failure(const struct json_value *expected, const struct json_value *prior,
+                                       struct zcl_command_reply *reply);
+static bool ak_recovery_room(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)context; (void)copy_text; (void)why; (void)cap;
+    const char *wanted = !strcmp(model->request_id, "library-home") ? "discover" :
+        !strcmp(model->request_id, "library-discover-options") ? "recover-copies" :
+        !strcmp(model->request_id, "library-recovered-copies") ? "recover-select" : NULL;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (!wanted) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    for (uint32_t i = 0; i < model->action_count; ++i) if (!strcmp(model->actions[i].id, wanted)) {
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = i; return true;
+    }
+    return false;
+}
+static bool ak_recovery_preview_choice(struct ak_recovery_view *v, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    bool close = false, redraw = false; uint32_t count = 0;
+    v->previewed = true;
+    if (!v->keep) return aj_receive_action(live, 0, &close, &redraw) && close;
+    if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close) return false;
+    return aj_receive_action(live, 3, &close, &redraw) && close;
+}
+static bool ak_recovery_ready(struct ak_recovery_view *v, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    bool close = false, redraw = false; uint32_t count = 0;
+    v->observed = aj_receive_field(model, "Saved version: ", v->fixture->build.version) &&
+        aj_receive_field(model, "Copy location: ", v->fixture->world.bob_copy);
+    if (!v->observed) return false;
+    if (!v->fail_trust && !v->build) return aj_receive_action(live, 0, &close, &redraw) && close;
+    if (!zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close) return false;
+    if (v->fail_trust) v->changed = rename(v->fixture->trust, v->backup) == 0;
+    return (!v->fail_trust || v->changed) && aj_receive_action(live, 3, &close, &redraw) && close;
+}
+static bool ak_recovery_notice(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
+    char *why, size_t cap)
+{
+    struct ak_recovery_view *v = context; bool close = false, redraw = false;
+    if (!pages || !live) return false;
+    if (!model->action_count) return ak_draft_wait_worker(live);
+    if (!strcmp(model->title, "Preview opened")) return ak_recovery_preview_choice(v, model, live, why, cap);
+    if (!strcmp(model->title, "The next step did not finish"))
+        v->cautious_notice = !strcmp(model->summary, "Review the received copy before continuing. Nothing is retried automatically.") &&
+            !strstr(model->summary, "is retained");
+    if (strcmp(model->title, "Your copy is ready"))
+        return aj_receive_action(live, 0, &close, &redraw) && close;
+    return ak_recovery_ready(v, model, live, why, cap);
+}
+static bool ak_recovery_expected_matches(const struct json_value *expected, const struct ak_fixture *f)
+{
+    return !strcmp(aso_string(expected, "destination"), f->world.bob_copy) &&
+        !strcmp(aso_string(expected, "version"), f->build.version) &&
+        !strcmp(aso_string(expected, "release_id"), f->release) &&
+        !strcmp(aso_string(expected, "package_root"), f->build.package);
+}
+static bool ak_recovery_wire(struct zcl_command_reply *reply, const struct ak_fixture *f)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog(); bool alias = false;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", &alias);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(reg, spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n <= ZCL_COMMAND_ERROR_BUDGET && json_read(&doc, wire, n);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+    const struct json_value *expected = json_get(facts, "recovery_expected");
+    const struct json_value *executed = json_get(facts, "continuation_executed");
+    const struct json_value *selected = json_get(facts, "selection_changed");
+    ok = ok && ak_recovery_expected_matches(expected, f) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        selected && selected->type == JSON_BOOL && !json_get_bool(selected) &&
+        json_get_bool(json_get(facts, "details_unavailable"));
+    json_free(&doc); return ok;
+}
+static bool ak_recovery_move(struct ak_fixture *f)
+{
+    char directory[ABC_PATH], destination[ABC_PATH];
+    int n = snprintf(directory, sizeof(directory), "%s/copies", f->world.bob_datadir);
+    int m = snprintf(destination, sizeof(destination), "%s/original", directory);
+    if (n <= 0 || (size_t)n >= sizeof(directory) || m <= 0 || (size_t)m >= sizeof(destination) ||
+        mkdir(directory, 0700) || rename(f->world.bob_copy, destination)) return false;
+    return snprintf(f->world.bob_copy, sizeof(f->world.bob_copy), "%s", destination) > 0;
+}
+static bool ak_recovery_prior(const struct ak_fixture *f, struct json_value *prior, size_t length)
+{
+    char path[APP_SELECTION_PATH_MAX];
+    if (!length || length >= sizeof(path)) return false;
+    memset(path, 'a', length); path[0] = '/'; path[length] = 0;
+    json_init(prior); json_set_object(prior);
+    return json_push_kv_str(prior, "destination", path) &&
+        json_push_kv_str(prior, "version", f->build.version) &&
+        json_push_kv_str(prior, "release_id", f->release) &&
+        json_push_kv_str(prior, "package_root", f->build.package) &&
+        json_push_kv_str(prior, "publisher_fingerprint", "021111111111111111111111111111111111111111111111111111111111111111");
+}
+static bool ak_recovery_projection_fits(const struct json_value *expected, const struct json_value *prior)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_package_copy_fail(&reply, "PREVIEW_WORKER_FAILED", true, "The worker stopped.", "fixture");
+    bool fits = zcl_test_library_recovery_failure(expected, prior, &reply);
+    zcl_command_reply_free(&reply); return fits;
+}
+static bool ak_recovery_history_matches(const struct ak_fixture *f, const struct json_value *prior,
+                                        const struct json_value *facts)
+{
+    const struct json_value *history = json_get(facts, "historical_receive");
+    const struct json_value *selection = json_get(facts, "selection_changed");
+    return !strcmp(aso_string(history, "destination"), aso_string(prior, "destination")) &&
+        !strcmp(aso_string(history, "version"), f->build.version) &&
+        !strcmp(aso_string(history, "release_id"), f->release) &&
+        !strcmp(aso_string(history, "package_root"), f->build.package) &&
+        !strcmp(aso_string(history, "publisher_fingerprint"), aso_string(prior, "publisher_fingerprint")) &&
+        selection && selection->type == JSON_NULL &&
+        !strcmp(aso_string(json_get(facts, "recovery_expected"), "version"), f->build.version);
+}
+static bool ak_recovery_projection_wire(const struct ak_fixture *f, const struct json_value *expected,
+                                        const struct json_value *prior)
+{
+    struct json_value null_value, doc; json_init(&null_value); json_init(&doc);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    bool ok = json_push_kv_str(&reply.data, "name", "stale-current") &&
+        json_push_kv(&reply.data, "continuation_executed", &null_value) &&
+        json_push_kv(&reply.data, "selection_changed", &null_value);
+    zcl_package_copy_fail(&reply, "PREVIEW_WORKER_FAILED", true, "The worker stopped.", "fixture");
+    memset(reply.error.code, 'A', sizeof(reply.error.code) - 1); reply.error.code[sizeof(reply.error.code) - 1] = 0;
+    memset(reply.error.message, '"', 160); reply.error.message[160] = 0;
+    ok = ok && zcl_test_library_recovery_failure(expected, prior, &reply);
+    const struct zcl_command_registry *reg = zcl_command_catalog(); bool alias = false;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", &alias);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = ok && spec ? zcl_command_registry_test_reply_wire(reg, spec, &reply, wire, sizeof(wire)) : 0;
+    ok = ok && n && n <= ZCL_COMMAND_ERROR_BUDGET && json_read(&doc, wire, n);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+    ok = ok && !json_get(facts, "name") && ak_recovery_history_matches(f, prior, facts);
+    json_free(&doc); json_free(&null_value);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_recovery_projection_test(const struct ak_fixture *f)
+{
+    struct json_value expected; json_init(&expected); json_set_object(&expected);
+    bool ok = json_push_kv_str(&expected, "destination", f->world.bob_copy) &&
+        json_push_kv_str(&expected, "version", f->build.version) &&
+        json_push_kv_str(&expected, "release_id", f->release) &&
+        json_push_kv_str(&expected, "package_root", f->build.package);
+    size_t low = 1, high = APP_SELECTION_PATH_MAX - 1;
+    while (ok && low < high) {
+        size_t mid = low + (high - low + 1) / 2;
+        struct json_value prior;
+        ok = ak_recovery_prior(f, &prior, mid);
+        bool fits = ok && ak_recovery_projection_fits(&expected, &prior);
+        json_free(&prior);
+        if (fits) low = mid; else high = mid - 1;
+    }
+    struct json_value prior; json_init(&prior);
+    ok = ok && low < APP_SELECTION_PATH_MAX - 1 && ak_recovery_prior(f, &prior, low) &&
+        ak_recovery_projection_wire(f, &expected, &prior);
+    json_free(&prior); json_init(&prior);
+    ok = ok && ak_recovery_prior(f, &prior, low + 1) && !ak_recovery_projection_fits(&expected, &prior);
+    json_free(&prior); json_free(&expected); return ok;
+}
+static bool ak_recovery_success_wire(struct zcl_command_reply *reply, const struct ak_fixture *f, bool keep)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", NULL);
+    char wire[32769];
+    struct zcl_command_budget_fixture budget = {.budget_bytes = spec ? (size_t)spec->budget_bytes : 0};
+    size_t n = spec ? zcl_command_registry_test_reply_wire_fixture(reg, spec, reply, &budget, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n) && !strcmp(aso_string(&doc, "status"), "passed");
+    const struct json_value *data = json_get(&doc, "data"), *kept = json_get(data, "kept");
+    ok = ok && !strcmp(aso_string(data, "destination"), f->world.bob_copy) &&
+        !strcmp(aso_string(data, "version"), f->build.version) &&
+        !strcmp(aso_string(data, "release_id"), f->release) &&
+        !strcmp(aso_string(data, "package_root"), f->build.package) &&
+        (!keep ? !kept : kept && !strcmp(aso_string(kept, "version"), f->build.version));
+    json_free(&doc); return ok;
+}
+static bool ak_recovery_selection(struct ak_fixture *f, const struct zcl_command_reply *reply, bool keep)
+{
+    if (!keep) return !json_get(&reply->data, "kept");
+    struct app_selection selected; const char *name = aso_string(json_get(&reply->data, "kept"), "name");
+    uint8_t version[32];
+    return zcl_hex_decode_lower(f->build.version, version, sizeof(version)) &&
+        app_selection_load(f->env.state_dir, name, &selected) == APP_SELECTION_OK &&
+        !memcmp(selected.version, version, sizeof(version));
+}
+static bool ak_recovery_build(struct ak_fixture *f, bool keep)
+{
+    char worker[PATH_MAX], old_dir[PATH_MAX];
+    if (!realpath("build/bin/z23-dev", worker)) return false;
+    zcl_native_bridge_ensure_rpc();
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
+    struct ak_recovery_view view = {.fixture = f, .build = true, .keep = keep};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_recovery_room, ak_recovery_notice, &view, worker);
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
+    const struct json_value *changed = json_get(&reply.data, "selection_changed");
+    bool ok = view.observed && view.previewed && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        reply.error.mutated && !strcmp(aso_string(&reply.data, "version"), f->build.version) &&
+        !strcmp(aso_string(&reply.data, "continuation"), keep ? "kept" : "previewed") &&
+        changed && changed->type == JSON_BOOL && json_get_bool(changed) == keep &&
+        json_get_bool(json_get(&reply.data, "continuation_executed"));
+    ok = ok && ak_recovery_selection(f, &reply, keep);
+    ok = ok && ak_recovery_success_wire(&reply, f, keep);
+    bool stopped = ak_draft_stop_preview(f, &reply);
+    zcl_command_reply_free(&reply); return ok && stopped;
+}
+static bool ak_recovery_link_refused(const struct ak_fixture *f)
+{
+    char link[ABC_PATH];
+    int n = snprintf(link, sizeof(link), "%s/copies/link", f->world.bob_datadir);
+    if (n <= 0 || (size_t)n >= sizeof(link) || symlink(f->world.bob_copy, link)) return false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    struct app_receive_preview *preview = NULL;
+    bool refused = !app_receive_preview_create_recovered(link, f->world.bob_datadir, NULL, &preview, &reply) &&
+        !reply.error.mutated && !preview;
+    app_receive_preview_close(preview); zcl_command_reply_free(&reply);
+    return unlink(link) == 0 && refused;
+}
+static bool ak_recovery_state(const struct ak_fixture *f, const char *head, uint8_t digest[32])
+{
+    uint8_t *bytes = NULL, version[32]; size_t size = 0;
+    bool ok = zcl_read_whole_file(f->trust, 65536, &bytes, &size, "received trust snapshot") &&
+        zcl_hex_decode_lower(head, version, sizeof(version));
+    if (ok) sha3_256(bytes, size, digest);
+    free(bytes);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.recovery_state.v1");
+    struct zcl_package_copy copy = {0};
+    ok = ok && zcl_package_copy_open_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ, &copy, &reply, "recovery-state") &&
+        !memcmp(copy.head_version, version, sizeof(version));
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply);
+    char directory[ABC_PATH];
+    int n = snprintf(directory, sizeof(directory), "%s/copies", f->world.bob_datadir);
+    struct platform_directory_list list = {0};
+    ok = ok && n > 0 && (size_t)n < sizeof(directory) && platform_directory_list_real_sorted(directory, &list) &&
+        list.count == 1 && !strcmp(list.entries[0].name, "original");
+    platform_directory_list_free(&list); return ok;
+}
+static bool ak_recovery_unchanged(const struct ak_fixture *f, const char *head, const uint8_t before[32])
+{
+    uint8_t after[32];
+    return ak_recovery_state(f, head, after) && !memcmp(before, after, sizeof(after));
+}
+static bool ak_recovery_cancel(struct ak_fixture *f)
+{
+    struct ak_recovery_view view = {.fixture = f};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_recovery_room, ak_recovery_notice, &view, NULL);
+    bool ok = view.observed && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(aso_string(&reply.data, "stage"), "recovery") &&
+        !strcmp(aso_string(&reply.data, "version"), f->build.version);
+    zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_recovery_trust_failure(struct ak_fixture *f)
+{
+    struct ak_recovery_view view = {.fixture = f, .fail_trust = true};
+    int n = snprintf(view.backup, sizeof(view.backup), "%s.saved", f->trust);
+    if (n <= 0 || (size_t)n >= sizeof(view.backup)) return false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_recovery_room, ak_recovery_notice, &view, NULL);
+    bool failed = view.observed && view.changed && view.cautious_notice && reply.status != ZCL_COMMAND_STATUS_PASSED &&
+        !reply.error.mutated && ak_recovery_wire(&reply, f);
+    bool restored = !view.changed || rename(view.backup, f->trust) == 0;
+    zcl_command_reply_free(&reply); return failed && restored;
+}
+static int ak_recovery_acceptance(struct ak_fixture *f)
+{
+    int failures = 0; char head[65]; uint8_t trust[32];
+    TEST("My Apps recovers the received fork after restart and refuses changed trust") {
+        ASSERT(ak_received(f) && ak_recovery_move(f) && ak_environment(f));
+        ASSERT(ak_recovery_link_refused(f));
+        ASSERT(ak_recovery_projection_test(f));
+        ASSERT(abc_put(f->world.bob_copy, "include/boost.h", "#define BOOST 9\n") &&
+            abc_save(f->world.bob_copy, head) && strcmp(head, f->build.version));
+        ASSERT(ak_recovery_state(f, head, trust));
+        ASSERT(ak_recovery_cancel(f));
+        ASSERT(ak_recovery_unchanged(f, head, trust));
+        ASSERT(ak_recovery_trust_failure(f));
+        ASSERT(ak_recovery_unchanged(f, head, trust));
+        ASSERT(ak_recovery_build(f, false));
+        ASSERT(ak_recovery_unchanged(f, head, trust));
+        ASSERT(ak_recovery_build(f, true));
+        ASSERT(ak_recovery_unchanged(f, head, trust));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ak_recovery_run(bool run)
+{
+    struct ak_fixture recovery = {0};
+    int failures = run ? ak_recovery_acceptance(&recovery) : 0;
+    if (!aso_cleanup_children()) failures++;
+    if (recovery.world.root[0]) (void)test_rm_rf_recursive(recovery.world.root);
+    return failures;
+}
 static int ak_routes(void)
 {
     struct aso_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
@@ -3016,6 +3326,7 @@ static int ak_routes(void)
     if (!aso_cleanup_children()) failures++;
     if (draft.world.root[0]) (void)test_rm_rf_recursive(draft.world.root);
     if (!failures) failures += ak_draft_history_run();
+    failures += ak_recovery_run(!failures);
     aso_env_restore(env, saved);
     if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);
     return failures;

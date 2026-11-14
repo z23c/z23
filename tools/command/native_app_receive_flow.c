@@ -29,7 +29,8 @@ struct receive_flow {
     app_receive_build_observer observer;
     void *observer_context;
     const char *status;
-    bool adopted, closed, draft;
+    bool adopted, closed, draft, recovered, identity_verified;
+    int selection_changed; /* -1 after Keep dispatch until its result proves the outcome. */
     bool plan_retry_eligible, plan_retry_requested, plan_retry_used;
     size_t retry_data_budget;
     const char *worker_path;
@@ -45,7 +46,7 @@ struct receive_progress {
 };
 static bool arf_fail(struct receive_flow *f, const char *code, const char *message)
 {
-    zcl_package_copy_fail(f->reply, code, f->draft ? f->reply->error.mutated : true,
+    zcl_package_copy_fail(f->reply, code, (f->draft || f->recovered) ? f->reply->error.mutated : true,
         message, f->draft ? "app.library draft" : f->adopted ? "app.adopt preview" : "app.receive preview");
     return false;
 }
@@ -66,7 +67,11 @@ static bool arf_fields(struct receive_flow *f, struct app_confirm *view)
     const char *name = zcl_package_copy_str(&f->reply->data, f->adopted ? "copy" : "name");
     const char *version = zcl_package_copy_str(&f->reply->data, "version");
     return name && version && app_confirm_field(&view->model, f->adopted ? "Personal copy: " : "App: ", name) &&
-        app_confirm_field(&view->model, f->draft ? "Draft version: " : "Saved version: ", version);
+        app_confirm_field(&view->model, f->draft ? "Draft version: " : "Saved version: ", version) &&
+        (!f->recovered || (app_confirm_field(&view->model, "Publisher: ",
+            zcl_package_copy_str(&f->reply->data, "publisher_fingerprint")) &&
+            app_confirm_field(&view->model, "Package: ", zcl_package_copy_str(&f->reply->data, "package_root")) &&
+            app_confirm_path(&view->model, "Copy location: ", zcl_package_copy_str(&f->reply->data, "destination"))));
 }
 static void arf_actions(struct app_confirm *view, const char *action)
 {
@@ -75,6 +80,12 @@ static void arf_actions(struct app_confirm *view, const char *action)
     app_confirm_action(&view->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
     app_confirm_action(&view->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
     app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", action);
+}
+static const char *arf_choice_failure_message(const struct receive_flow *f)
+{
+    if (f->recovered) return "The next choice could not be displayed. Review the received copy before continuing.";
+    return f->adopted ? "The next choice could not be displayed; the adopted copy is retained." :
+        "The next choice could not be displayed; the received copy is retained.";
 }
 static bool arf_choose(struct receive_flow *f, const char *title, const char *summary,
     const char *action, bool *chosen)
@@ -88,7 +99,7 @@ static bool arf_choose(struct receive_flow *f, const char *title, const char *su
         app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
     if (ok) *chosen = view->confirmed;
     app_confirm_free(view); free(view);
-    return ok || arf_fail(f, "CONTINUATION_UNAVAILABLE", f->adopted ? "The next choice could not be displayed; the adopted copy is retained." : "The next choice could not be displayed; the received copy is retained.");
+    return ok || arf_fail(f, "CONTINUATION_UNAVAILABLE", arf_choice_failure_message(f));
 }
 /* This callback observes only a completed immutable capture. It never enters
  * command dispatch, joins a thread, or performs filesystem/database work. */
@@ -258,7 +269,8 @@ static bool arf_capture_result(struct receive_flow *f, struct app_receive_job *j
         const struct json_value *error = parsed ? json_get(wire, "error") : NULL;
         const char *message = zcl_package_copy_str(error, "message");
         return arf_fail(f, result.evidence.timed_out ? "PREVIEW_TIMEOUT" : "PREVIEW_WORKER_FAILED",
-            message ? message : "The operation did not finish successfully; inspect the retained copy before retrying.");
+            message ? message : f->recovered ? "The operation did not finish. Review the received copy before retrying." :
+                "The operation did not finish successfully; inspect the retained copy before retrying.");
     }
     return parsed || arf_fail(f, "PREVIEW_RESULT_INVALID", "The operation returned no complete structured result.");
 }
@@ -388,6 +400,11 @@ bool app_receive_flow_test_retry_gate(const struct app_receive_job_result *resul
     return ok && f.plan_retry_eligible;
 }
 #endif
+static bool arf_job_mutates(enum app_receive_job_command command, const struct json_value *input)
+{
+    return command == APP_RECEIVE_JOB_OPEN ||
+        (command == APP_RECEIVE_JOB_BUILD && json_get_bool(json_get(input, "confirm")));
+}
 static bool arf_job(struct receive_flow *f, enum app_receive_job_command command,
     const struct json_value *input, const char *stage, struct json_value *wire)
 {
@@ -398,8 +415,7 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
     if (started != APP_RECEIVE_JOB_STARTED) {
         free(p); return arf_fail(f, "PREVIEW_WORKER_UNAVAILABLE", "Cannot start this platform's preview worker.");
     }
-    if (f->draft && (command == APP_RECEIVE_JOB_OPEN ||
-        (command == APP_RECEIVE_JOB_BUILD && json_get_bool(json_get(input, "confirm")))))
+    if ((f->draft || f->recovered) && arf_job_mutates(command, input))
         f->reply->error.mutated = true;
     if (command == APP_RECEIVE_JOB_OPEN) f->executed = -1;
     bool shown = arf_progress(f, p, stage);
@@ -435,7 +451,7 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
 }
 static bool arf_build(struct receive_flow *f)
 {
-    if (f->draft && !app_receive_preview_current(f->preview, f->reply)) return false;
+    if ((f->draft || f->recovered) && !app_receive_preview_current(f->preview, f->reply)) return false;
     struct json_value input, plan, confirm, built;
     json_init(&input); json_init(&plan); json_init(&confirm); json_init(&built);
     bool ok = app_receive_preview_build_input(f->preview, &input) &&
@@ -449,7 +465,7 @@ static bool arf_build(struct receive_flow *f)
 }
 static bool arf_open(struct receive_flow *f)
 {
-    if (f->draft && !app_receive_preview_current(f->preview, f->reply)) return false;
+    if ((f->draft || f->recovered) && !app_receive_preview_current(f->preview, f->reply)) return false;
     struct json_value input, opened; json_init(&input); json_init(&opened);
     bool ok = app_receive_preview_open_input(f->preview, &input) &&
         arf_job(f, APP_RECEIVE_JOB_OPEN, &input, "Opening the built version", &opened) &&
@@ -462,33 +478,47 @@ static bool arf_open(struct receive_flow *f)
 static bool arf_keep_result(struct receive_flow *f, const struct zcl_command_reply *kept, bool *canceled)
 {
     const char *status = zcl_package_copy_str(&kept->data, "status");
-    if (status && !strcmp(status, "canceled")) { *canceled = true; return true; }
+    if (status && !strcmp(status, "canceled")) { if (f->recovered) f->selection_changed = 0; *canceled = true; return true; }
     if (!status || strcmp(status, "kept"))
         return arf_fail(f, "KEEP_RESULT_INVALID", "Keep returned no confirmed selection; inspect before retrying.");
-    if (f->draft) f->reply->error.mutated = true;
+    if (f->draft || f->recovered) f->reply->error.mutated = true;
+    if (f->recovered) f->selection_changed = true;
     struct json_value summary; json_init(&summary); json_set_object(&summary);
     bool ok = arf_result_summary(&summary, &kept->data) && json_push_kv(&f->reply->data, "kept", &summary);
     json_free(&summary); return ok;
 }
+static const char *arf_keep_summary(const struct receive_flow *f)
+{
+    if (f->draft) return "Check the app before choosing Keep. This keeps the exact version you previewed; newer changes remain available.";
+    if (f->adopted) return "Check the app before choosing Keep. Closing leaves your personal copy available.";
+    if (f->recovered) return "Check the app before choosing Keep. Closing ends this review.";
+    return "Check the app before choosing Keep. Closing leaves your received copy available.";
+}
+static bool arf_keep_commit(struct receive_flow *f, struct json_value *input, bool *canceled)
+{
+    struct zcl_command_reply kept;
+    if (f->recovered) f->selection_changed = -1;
+    bool ok = zcl_app_inner_call("app.keep", input, &kept, NULL);
+    if (!ok) zcl_app_inner_fail(f->reply, &kept, true);
+    else ok = arf_keep_result(f, &kept, canceled);
+    zcl_command_reply_free(&kept); return ok;
+}
 static bool arf_keep(struct receive_flow *f)
 {
-    if (f->draft && !app_receive_preview_current(f->preview, f->reply)) return false;
+    if ((f->draft || f->recovered) && !app_receive_preview_current(f->preview, f->reply)) return false;
     bool chosen = false;
-    if (!arf_choose(f, "Preview opened", f->draft ? "Check the app before choosing Keep. This keeps the exact version you previewed; newer changes remain available." : f->adopted ? "Check the app before choosing Keep. Closing leaves your personal copy available." : "Check the app before choosing Keep. Closing leaves your received copy available.", "Keep this version", &chosen)) return false;
+    if (!arf_choose(f, "Preview opened", arf_keep_summary(f), "Keep this version", &chosen)) return false;
     if (!chosen) return arf_status(f, "previewed");
     struct json_value input; json_init(&input);
     enum app_receive_preview_keep_state state = app_receive_preview_keep_input(f->preview, &input, f->reply);
     bool ok = state != APP_RECEIVE_PREVIEW_KEEP_REFUSED;
+    if (f->recovered && state == APP_RECEIVE_PREVIEW_KEEP_SAME) {
+        json_free(&input); return arf_status(f, "already_kept");
+    }
     if (state == APP_RECEIVE_PREVIEW_KEEP_NEW) {
-        struct zcl_command_reply kept;
-        ok = zcl_app_inner_call("app.keep", &input, &kept, NULL);
-        if (!ok) zcl_app_inner_fail(f->reply, &kept, true);
-        else {
-            bool canceled = false;
-            ok = arf_keep_result(f, &kept, &canceled);
-            if (canceled) { json_free(&input); zcl_command_reply_free(&kept); return arf_status(f, "previewed"); }
-        }
-        zcl_command_reply_free(&kept);
+        bool canceled = false;
+        ok = arf_keep_commit(f, &input, &canceled);
+        if (canceled) { json_free(&input); return arf_status(f, "previewed"); }
     }
     json_free(&input); return ok && arf_status(f, "kept");
 }
@@ -530,6 +560,7 @@ static void arf_reveal_failed(struct receive_flow *f, struct app_confirm *view)
     app_confirm_free(view);
     view->page_count = 0;
     (void)snprintf(view->model.summary, sizeof(view->model.summary),
+        "%s", f->recovered ? "Could not open the copy location. Nothing is retried automatically." :
         "Could not open the copy location. Your copy is retained; nothing is retried automatically.");
     arf_reveal_action(view, false);
     char why[256] = {0};
@@ -543,6 +574,7 @@ static void arf_notice_show(struct receive_flow *f, struct app_confirm *view)
     arf_reveal_action(view, path != NULL);
     if (f->plan_retry_eligible) {
         (void)snprintf(view->model.summary, sizeof(view->model.summary),
+            "%s", f->recovered ? "Review the received copy and fix the build tools before trying again." :
             "Your received copy is retained. Fix the build tools before trying again.");
         app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", "Try build again");
     }
@@ -563,11 +595,18 @@ static void arf_notice_show(struct receive_flow *f, struct app_confirm *view)
         else if (path && !arf_reveal(f, path)) arf_reveal_failed(f, view);
     }
 }
+static const char *arf_notice_summary(const struct receive_flow *f)
+{
+    if (f->recovered) return "Review the received copy before continuing. Nothing is retried automatically.";
+    if (f->draft) return "Your unkept draft is retained. Nothing is retried automatically.";
+    if (f->adopted) return "Your adopted copy is retained. Nothing is retried automatically.";
+    return "Your received copy is retained. Nothing is retried automatically.";
+}
 static void arf_notice(struct receive_flow *f)
 {
     struct app_confirm *view = zcl_calloc(1, sizeof(*view), "receive-flow/error");
     if (!view) return;
-    arf_model(f, view, "The next step did not finish", f->draft ? "Your unkept draft is retained. Nothing is retried automatically." : f->adopted ? "Your adopted copy is retained. Nothing is retried automatically." : "Your received copy is retained. Nothing is retried automatically.");
+    arf_model(f, view, "The next step did not finish", arf_notice_summary(f));
     arf_actions(view, "Close");
     char excerpt[192]; size_t n = strnlen(f->reply->error.message, sizeof(excerpt) - 1);
     for (size_t i = 0; i < n; ++i) {
@@ -609,19 +648,20 @@ void app_receive_flow_test_notice(struct zcl_command_reply *reply, bool adopted,
  * callers must inspect continuation; this does not claim preview succeeded. */
 static bool arf_retained_error(struct receive_flow *f, struct json_value *error)
 {
+    if (f->recovered && !f->identity_verified) return true;
+    if (f->recovered) {
+        struct zcl_command_reply check; zcl_command_reply_init(&check, "zcl.app_recovery.v1");
+        bool current = f->preview && app_receive_preview_current(f->preview, &check);
+        zcl_command_reply_free(&check);
+        if (!current) return true; /* the earlier review does not prove present trust or location */
+    }
     if (!json_push_kv_bool(error, f->adopted ? "copy_retained" : "received_copy_retained", true)) return false;
     if (!f->adopted || strcmp(f->reply->error.code, "PREVIEW_CLEANUP_FAILED")) return true;
     /* Constructor-owned scratch path survives compact failure reporting. */
     return json_push_kv_str(error, "retained_scratch", f->reply->error.evidence);
 }
-static bool arf_finish(struct receive_flow *f, bool ok)
+static bool arf_finish_failure(struct receive_flow *f, bool saved)
 {
-    struct json_value execution; json_init(&execution);
-    if (f->executed >= 0) json_set_bool(&execution, f->executed == 1);
-    bool saved = json_push_kv(&f->reply->data, "continuation_executed", &execution) &&
-        json_push_kv_str(&f->reply->data, "continuation", ok ? f->status : "failed");
-    json_free(&execution);
-    if (ok) return saved;
     struct json_value error; json_init(&error); json_set_object(&error);
     char excerpt[161]; size_t n = strnlen(f->reply->error.message, sizeof(excerpt) - 1);
     for (size_t i = 0; i < n; ++i) {
@@ -636,7 +676,7 @@ static bool arf_finish(struct receive_flow *f, bool ok)
         json_push_kv_bool(&error, "automatic_retry", false) &&
         json_push_kv(&f->reply->data, "continuation_error", &error);
     json_free(&error);
-    if (saved) {
+    if (saved && !f->recovered) {
         bool mutated = f->reply->error.mutated;
         memset(&f->reply->error, 0, sizeof(f->reply->error));
         f->reply->error.mutated = mutated;
@@ -644,6 +684,18 @@ static bool arf_finish(struct receive_flow *f, bool ok)
         f->reply->exit_code = 0;
     }
     return saved;
+}
+static bool arf_finish(struct receive_flow *f, bool ok)
+{
+    struct json_value execution; json_init(&execution);
+    if (f->executed >= 0) json_set_bool(&execution, f->executed == 1);
+    struct json_value selection; json_init(&selection);
+    if (f->selection_changed >= 0) json_set_bool(&selection, f->selection_changed == 1);
+    bool saved = (!f->recovered || json_push_kv(&f->reply->data, "selection_changed", &selection)) &&
+        json_push_kv(&f->reply->data, "continuation_executed", &execution) &&
+        json_push_kv_str(&f->reply->data, "continuation", ok ? f->status : "failed");
+    json_free(&selection); json_free(&execution);
+    return ok ? saved : arf_finish_failure(f, saved);
 }
 #ifdef ZCL_TESTING
 bool app_receive_flow_test_report(struct zcl_command_reply *reply,
@@ -704,17 +756,25 @@ bool app_receive_flow_test_retry_report(struct zcl_command_reply *reply,
 #endif
 static bool arf_prepare(struct receive_flow *f, const char *datadir, bool *chosen)
 {
-    bool ok = f->adopted ?
+    bool ok;
+    if (f->recovered) {
+        uint8_t fork[32];
+        const char *version = zcl_package_copy_str(&f->reply->data, "version");
+        const char *copy = zcl_package_copy_str(&f->reply->data, "destination");
+        ok = version && strlen(version) == 64 && zcl_hex_decode_lower(version, fork, 32) &&
+            app_receive_preview_create_recovered(copy, datadir, fork, &f->preview, f->reply);
+    } else ok = f->adopted ?
         app_receive_preview_create_adopted(&f->reply->data, datadir, &f->preview, f->reply) :
         app_receive_preview_create(&f->reply->data, datadir, &f->preview, f->reply);
-    return ok && arf_choose(f, "Your copy is ready", f->adopted ?
+    return ok && arf_choose(f, "Your copy is ready", f->recovered ?
+        "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice." : f->adopted ?
         "Build and run this personal saved version to preview it. Keep remains a separate choice." :
         "Build and run this received version to preview it. Keep remains a separate choice.",
         "Build and preview", chosen);
 }
 static bool arf_continue(struct receive_flow *f, bool chosen)
 {
-    const char *status = f->adopted ? "adopted" : "received";
+    const char *status = f->recovered ? "recovered" : f->adopted ? "adopted" : "received";
     bool ok = chosen ? (arf_build(f) && arf_open(f) && arf_keep(f)) : arf_status(f, status);
     /* This card offers Keep or Close; Close ends the owner flow. */
     if (ok && chosen && f->observer && !strcmp(f->status, "kept"))
@@ -744,38 +804,75 @@ static bool arf_retry_plan(struct receive_flow *f, const char *datadir)
     return arf_prepare(f, datadir, &chosen) && arf_continue(f, chosen);
 }
 
+static const char *arf_generic_failure(const struct receive_flow *f)
+{
+    if (f->recovered) return "The next step could not be completed; review the received copy.";
+    return f->adopted ? "The next step could not be completed; your adopted copy is retained." :
+        "The next step could not be completed; your received copy is retained.";
+}
+static const char *arf_operations_failure(const struct receive_flow *f)
+{
+    return f->recovered ? "Operation evidence could not be returned; review the received copy before retrying." :
+        "Operation evidence could not be returned; inspect the retained copy before retrying.";
+}
+static void arf_complete(struct receive_flow *f, const char *datadir, bool ok)
+{
+    struct zcl_command_reply *reply = f->reply;
+    if (!ok) {
+        if (!f->recovered) reply->error.mutated = true;
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+            (void)arf_fail(f, "PREVIEW_FAILED", arf_generic_failure(f));
+        arf_notice(f);
+        if (f->plan_retry_requested) {
+            ok = arf_retry_plan(f, datadir);
+            if (!ok) arf_notice(f);
+        }
+    }
+    if (!json_push_kv(&reply->data, "operations", &f->operations)) {
+        ok = arf_fail(f, "OBSERVATION_UNAVAILABLE", arf_operations_failure(f));
+        f->plan_retry_eligible = false;
+        arf_notice(f);
+    }
+    json_free(&f->operations);
+    if (!arf_finish(f, ok))
+        (void)arf_fail(f, "OBSERVATION_UNAVAILABLE", f->recovered ? "Recovery result could not be returned; review the received copy." : f->adopted ? "Adoption committed, but its continuation report could not be returned. Inspect the retained copy before retrying." : "Receive committed, but its continuation report could not be returned. Inspect the retained copy before retrying.");
+    app_receive_preview_close(f->preview);
+    json_free(&f->build_evidence);
+    json_free(&f->open_evidence);
+}
 static void arf_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, bool adopted, const char *worker_path,
     app_receive_build_observer observer, void *observer_context, size_t data_budget)
 {
     struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path, .observer = observer, .observer_context = observer_context, .retry_data_budget = data_budget};
-    json_init(&f.build_evidence);
-    json_init(&f.open_evidence);
+    json_init(&f.build_evidence); json_init(&f.open_evidence);
     json_init(&f.operations); json_set_array(&f.operations);
     bool chosen = false;
     bool ok = arf_prepare(&f, datadir, &chosen);
     if (ok) ok = arf_continue(&f, chosen);
-    if (!ok) {
-        reply->error.mutated = true;
-        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
-            (void)arf_fail(&f, "PREVIEW_FAILED", adopted ? "The next step could not be completed; your adopted copy is retained." : "The next step could not be completed; your received copy is retained.");
-        arf_notice(&f);
-        if (f.plan_retry_requested) {
-            ok = arf_retry_plan(&f, datadir);
-            if (!ok) arf_notice(&f);
-        }
+    arf_complete(&f, datadir, ok);
+}
+void app_recovered_flow_run(const char *copy_dir, const char *datadir, const uint8_t expected_fork[32],
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path, size_t data_budget)
+{
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context,
+        .status = "recovered", .recovered = true, .worker_path = worker_path, .retry_data_budget = data_budget};
+    json_init(&f.build_evidence); json_init(&f.open_evidence);
+    json_init(&f.operations); json_set_array(&f.operations);
+    bool chosen = false;
+    bool ok = expected_fork && app_receive_preview_create_recovered(copy_dir, datadir, expected_fork, &f.preview, reply);
+    f.identity_verified = ok;
+    if (ok && !app_receive_preview_describe_recovered(f.preview, &reply->data))
+        ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "The recovered identity could not be retained.");
+    if (ok) {
+        size_t data_size = json_write(&reply->data, NULL, 0);
+        if (!data_size || data_size > data_budget || data_budget - data_size < 10240u)
+            ok = arf_fail(&f, "BUDGET_TOO_SMALL", "The recovered result cannot fit safely; no build was started.");
     }
-    if (!json_push_kv(&reply->data, "operations", &f.operations)) {
-        ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Operation evidence could not be returned; inspect the retained copy before retrying.");
-        f.plan_retry_eligible = false;
-        arf_notice(&f);
-    }
-    json_free(&f.operations);
-    if (!arf_finish(&f, ok))
-        (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", adopted ? "Adoption committed, but its continuation report could not be returned. Inspect the retained copy before retrying." : "Receive committed, but its continuation report could not be returned. Inspect the retained copy before retrying.");
-    app_receive_preview_close(f.preview);
-    json_free(&f.build_evidence);
-    json_free(&f.open_evidence);
+    if (ok) ok = arf_choose(&f, "Your copy is ready", "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice.", "Build and preview", &chosen);
+    if (ok) ok = arf_continue(&f, chosen);
+    arf_complete(&f, datadir, ok);
 }
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)

@@ -64,6 +64,14 @@ static bool append_entry(struct platform_directory_list *list,
     list->count = next_count;
     return true;
 }
+static bool directory_consume(size_t *examined, size_t limit, bool *overflow)
+{
+    if (*examined == limit) {
+        if (overflow) *overflow = true;
+        return false;
+    }
+    ++*examined; return true;
+}
 
 void platform_directory_list_free(struct platform_directory_list *list)
 {
@@ -311,15 +319,17 @@ bool platform_directory_canonical_real(const char *path, char *out,
 }
 
 static bool windows_find_directories(
-    HANDLE find, WIN32_FIND_DATAW *data, struct platform_directory_list *out)
+    HANDLE find, WIN32_FIND_DATAW *data, struct platform_directory_list *out,
+    size_t limit, bool *overflow)
 {
-    bool ok = true;
+    bool ok = true; size_t examined = 0;
     do {
         DWORD attrs = data->dwFileAttributes;
+        if (wcscmp(data->cFileName, L".") == 0 || wcscmp(data->cFileName, L"..") == 0)
+            continue;
+        if (!directory_consume(&examined, limit, overflow)) return false;
         if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-            wcscmp(data->cFileName, L".") == 0 ||
-            wcscmp(data->cFileName, L"..") == 0)
+            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
             continue;
         char *name = wide_to_utf8(data->cFileName);
         if (!name || !append_entry(out, name, NULL)) ok = false;
@@ -330,7 +340,8 @@ static bool windows_find_directories(
 }
 
 static bool windows_finish_real_listing(
-    const char *path, HANDLE root_handle, struct platform_directory_list *out)
+    const char *path, HANDLE root_handle, struct platform_directory_list *out,
+    size_t limit, bool *overflow)
 {
     wchar_t *wide = utf8_to_wide(path);
     if (!wide) { CloseHandle(root_handle); return false; }
@@ -359,7 +370,7 @@ static bool windows_finish_real_listing(
         CloseHandle(root_handle);
         return false;
     }
-    bool ok = windows_find_directories(find, &data, out);
+    bool ok = windows_find_directories(find, &data, out, limit, overflow);
     DWORD error = GetLastError();
     FindClose(find);
     CloseHandle(root_handle);
@@ -369,9 +380,10 @@ static bool windows_finish_real_listing(
     return true;
 }
 
-bool platform_directory_list_real_sorted(const char *path,
-                                         struct platform_directory_list *out)
+static bool directory_list_real_bounded(const char *path, size_t limit,
+                                        struct platform_directory_list *out, bool *overflow)
 {
+    if (overflow) *overflow = false;
     if (!out) return false;
     *out = (struct platform_directory_list){0};
     wchar_t *root = utf8_to_wide(path);
@@ -392,8 +404,10 @@ bool platform_directory_list_real_sorted(const char *path,
         if (root_handle != INVALID_HANDLE_VALUE) CloseHandle(root_handle);
         return false;
     }
-    return windows_finish_real_listing(path, root_handle, out);
+    return windows_finish_real_listing(path, root_handle, out, limit, overflow);
 }
+bool platform_directory_list_real_sorted(const char *path, struct platform_directory_list *out)
+{ return directory_list_real_bounded(path, SIZE_MAX, out, NULL); }
 
 static bool windows_root_handle_valid(
     HANDLE root_handle, BY_HANDLE_FILE_INFORMATION *root_info)
@@ -727,9 +741,17 @@ bool platform_directory_canonical_real(const char *path, char *out,
     return ok;
 }
 
-bool platform_directory_list_real_sorted(const char *path,
-                                         struct platform_directory_list *out)
+static bool directory_real_entry(int fd, const char *name, struct platform_directory_list *out)
 {
+    struct stat st;
+    if (fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return false;
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) return true;
+    return append_entry(out, name, NULL);
+}
+static bool directory_list_real_bounded(const char *path, size_t limit,
+                                        struct platform_directory_list *out, bool *overflow)
+{
+    if (overflow) *overflow = false;
     if (!out) return false;
     *out = (struct platform_directory_list){0};
     struct stat root_st;
@@ -740,24 +762,21 @@ bool platform_directory_list_real_sorted(const char *path,
     if (!dir) return false;
     bool ok = true;
     int fd = dirfd(dir);
-    struct dirent *entry;
+    struct dirent *entry; size_t examined = 0;
     while ((entry = directory_read_next(dir, &ok)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;
-        struct stat st;
-        if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
-            ok = false;
-            break;
-        }
-        if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) continue;
-        if (!append_entry(out, entry->d_name, NULL)) { ok = false; break; }
+        if (!directory_consume(&examined, limit, overflow)) { ok = false; break; }
+        if (!directory_real_entry(fd, entry->d_name, out)) { ok = false; break; }
     }
     if (closedir(dir) != 0) ok = false;
     if (!ok) { platform_directory_list_free(out); return false; }
     sort_entries(out);
     return true;
 }
+bool platform_directory_list_real_sorted(const char *path, struct platform_directory_list *out)
+{ return directory_list_real_bounded(path, SIZE_MAX, out, NULL); }
 
 bool platform_directory_list_regular_sorted(
     const char *path, struct platform_directory_list *out)
@@ -840,6 +859,12 @@ static bool platform_directory_list_children_sorted_impl(
     return true;
 }
 #endif
+
+bool platform_directory_list_real_bounded(const char *path, size_t limit,
+                                          struct platform_directory_list *out, bool *overflow)
+{
+    return directory_list_real_bounded(path, limit, out, overflow);
+}
 
 bool platform_directory_list_children_sorted(
     const char *path, struct platform_directory_list *directories,

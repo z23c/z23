@@ -22,6 +22,13 @@ enum app_receive_preview_keep_state {
 bool app_receive_preview_create(const struct json_value *receive_data,
     const char *datadir, struct app_receive_preview **out,
     struct zcl_command_reply *failure);
+/* Reopen the original trusted received fork, never the later HEAD. A non-NULL
+ * expected fork requires the exact prior choice on revalidation. */
+bool app_receive_preview_create_recovered(const char *copy_dir, const char *datadir,
+    const uint8_t *expected_fork, struct app_receive_preview **out,
+    struct zcl_command_reply *failure);
+bool app_receive_preview_describe_recovered(const struct app_receive_preview *p,
+    struct json_value *data);
 /* After successful native adoption/personalization only. Requires exactly
  * ADOPTED trust (never received trust), pins fork/parent/saved version, checks
  * original release package separately and derives the personal saved package
