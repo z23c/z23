@@ -697,6 +697,46 @@ static int store_case_pinned_final_chunk_boundary(void)
     return failures;
 }
 
+static int store_case_pins_recovered_possession(struct vcs_package_store *s,
+                                                 struct zs_pkg *l)
+{
+    int failures = 0;
+    struct vcs_package_possession_receipt receipt = {0};
+    ZS_CHECK("pins: recovered pin passes the full possession receipt",
+             vcs_package_store_verify_possession_receipt(s, l->root, true,
+                                                         &receipt) &&
+             receipt.complete && receipt.pinned &&
+             receipt.bytes_verified == 1000 && receipt.chunks_verified == 2);
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    ZS_CHECK("pins: recovered bytes remain readable",
+             vcs_package_store_get_chunk(s, l->root, "a.bin", 0, &got,
+                                         &got_len) == VCS_PACKAGE_STORE_OK &&
+             got_len == 500 && got &&
+             memcmp(got, l->contents[0], got_len) == 0);
+    free(got);
+    return failures;
+}
+
+static int store_case_pins_reopen(const char *dd, struct zs_pkg *l,
+                                  struct vcs_package_store **sp)
+{
+    int failures = 0;
+    vcs_package_store_close(*sp);
+    *sp = vcs_package_store_open(dd, 10000u);
+    ZS_CHECK("pins: store reopens after rare-pool pressure", *sp != NULL);
+    if (!*sp) return failures;
+    struct vcs_package_store *s = *sp;
+    struct vcs_package_store_status st;
+    ZS_CHECK("pins: recovered catalog retains the complete pin",
+             vcs_package_store_package_status(s, l->root, &st) &&
+             st.tracked && st.complete && st.pinned &&
+             st.pool == VCS_PACKAGE_STORE_POOL_PINS &&
+             st.present_bytes == 1000 && st.total_bytes == 1000 &&
+             st.present_chunks == 2 && st.total_chunks == 2);
+    return failures + store_case_pins_recovered_possession(s, l);
+}
+
 int t_store_pins(void)
 {
     int failures = 0;
@@ -722,14 +762,17 @@ int t_store_pins(void)
     failures += store_case_pins_m_fills_pool_and_n_refused(s, &m, &n);
     failures += store_case_pins_unpin_m(s, &m);
     failures += store_case_pins_rare_pressure(s, &l, &m, &n, &o, &p2);
+    failures += store_case_pins_reopen(dd, &l, &s);
 
-    struct zs_pkg pre;
-    failures += store_case_pins_pre_existing_marker(s, dd, paths, lens,
-                                                     &pre);
-    failures += store_case_pins_exhausted_refuses_manifest(s, dd, paths,
-                                                            lens);
-    failures += store_case_pins_possession_fails_after_missing_byte(s, dd,
-                                                                     &l);
+    struct zs_pkg pre = {0};
+    if (s) {
+        failures += store_case_pins_pre_existing_marker(s, dd, paths, lens,
+                                                         &pre);
+        failures += store_case_pins_exhausted_refuses_manifest(s, dd, paths,
+                                                                lens);
+        failures += store_case_pins_possession_fails_after_missing_byte(s, dd,
+                                                                         &l);
+    }
 
     zs_free_package(&l);
     zs_free_package(&m);
@@ -737,7 +780,7 @@ int t_store_pins(void)
     zs_free_package(&o);
     zs_free_package(&p2);
     zs_free_package(&pre);
-    vcs_package_store_close(s);
+    if (s) vcs_package_store_close(s);
     test_rm_rf_recursive(dd);
     return failures;
 }

@@ -27,14 +27,15 @@
  *
  * Before the nodes start, A promotes two one-shot C23 plugin generations with
  * source and cases, and B records inert fetches for both roots. A restarts once
- * with hosting; B resumes and completes the transfers. B then checks out after
- * its node stops, proves install is refused before the owner pin, installs both
- * generations without activating, reproduces generation 1 under a different
- * builder key, rejects a wrong root and corrupt image, and rolls back with
- * owner state intact. A fresh joiner records the same inert fetch before its
- * first boot, downloads generation 1 from B after A exits, and proves the same
- * owner-only activation boundary. Every daemon gets its persona's isolated
- * HOME.
+ * with hosting; B resumes and completes the transfers, then owner-pins root 1.
+ * After A exits, B stops for checkout, refused install without the owner pin,
+ * two-generation installation, reproduction under a different builder key,
+ * wrong-root and corrupt-image refusals, and state-preserving rollback. B then
+ * restarts on its original datadir and must recover the complete pin in a new
+ * process before a fresh joiner starts. The joiner proves a failed fetch-record
+ * write retains no record or checkout, then persists the request, downloads
+ * root 1 from restarted B, and meets the same owner-only activation boundary.
+ * Every daemon gets its persona's isolated HOME.
  *
  * The node restart between the local verbs and publish is the documented
  * single-writer package-store order: the CLI owns <datadir>/zcode while
@@ -1106,6 +1107,44 @@ static bool aj_plugin_publish(struct aj_node_ctx *c)
            strcmp(g_plugin_gen[0], g_plugin_gen[1]) != 0;
 }
 
+struct aj_fetch_record_paths {
+    char zcode[1100], downloads[1100], record[1200], checkout[1200];
+    char root_arg[96], dir_arg[1200];
+};
+
+static bool aj_fetch_record_prepare(struct aj_node_ctx *c, size_t index,
+                                    struct aj_fetch_record_paths *p)
+{
+    return snprintf(p->zcode, sizeof(p->zcode), "%s/zcode", c->datadir) < (int)sizeof(p->zcode) &&
+           snprintf(p->downloads, sizeof(p->downloads), "%s/downloads", p->zcode) < (int)sizeof(p->downloads) &&
+           snprintf(p->record, sizeof(p->record), "%s/%s", p->downloads, g_plugin_root[index]) < (int)sizeof(p->record) &&
+           snprintf(p->checkout, sizeof(p->checkout), "%s/received-v%zu", c->datadir, index + 1) < (int)sizeof(p->checkout) &&
+           snprintf(p->root_arg, sizeof(p->root_arg), "--root=%s", g_plugin_root[index]) < (int)sizeof(p->root_arg) &&
+           snprintf(p->dir_arg, sizeof(p->dir_arg), "--dir=%s", p->checkout) < (int)sizeof(p->dir_arg) &&
+           aj_mkdir_p(p->zcode) == 0 &&
+           aj_write_file(p->downloads, "not-a-directory\n");
+}
+
+static bool aj_plugin_fetch_record_refusal(struct aj_node_ctx *c, size_t index)
+{
+    struct aj_fetch_record_paths p;
+    if (!aj_fetch_record_prepare(c, index, &p)) {
+        aj_fail("could not prepare the download-record refusal");
+        return false;
+    }
+    char *tail[] = {(char *)"plugin", (char *)"fetch", p.root_arg, p.dir_arg, NULL};
+    char out[32768];
+    int rc = aj_plugin_run(c, "fetch-record-refused", tail, out, sizeof(out), 120);
+    bool ok = rc != 0 && aj_json_refusal(out, "PLUGIN_FETCH_RECORD_IO");
+    if (access(p.record, F_OK) == 0 || (errno != ENOENT && errno != ENOTDIR))
+        ok = false;
+    if (access(p.checkout, F_OK) == 0 || errno != ENOENT)
+        ok = false;
+    if (remove(p.downloads) != 0) ok = false;
+    if (!ok) aj_fail("download-record persistence refusal failed: %s", out);
+    return ok;
+}
+
 static bool aj_plugin_request(struct aj_node_ctx *c, size_t index)
 {
     char root_arg[96], dir_arg[1200];
@@ -1173,6 +1212,130 @@ static bool aj_plugin_wait_complete(struct aj_node_ctx *c, size_t index)
     struct aj_package_wait w = {.node = c, .root = g_plugin_root[index]};
     return aj_wait(aj_package_complete, &w, g_board_wait_s,
                    "source-bearing plugin package transfer");
+}
+
+static bool aj_package_counts(const struct json_value *package, bool pinned)
+{
+    const char *pool = package ? json_get_str(json_get(package, "pool")) : NULL;
+    int64_t present = package ? json_get_int(json_get(package, "present_bytes")) : 0;
+    int64_t total = package ? json_get_int(json_get(package, "total_bytes")) : 0;
+    return package && aj_json_bool_is(package, "tracked", true) &&
+           aj_json_bool_is(package, "complete", true) &&
+           aj_json_bool_is(package, "pinned", pinned) && present > 0 &&
+           present == total && (!pinned || (pool && !strcmp(pool, "pins")));
+}
+
+static bool aj_package_pin_identity(const struct json_value *data, bool commit,
+                                    const char *planned)
+{
+    const char *root = json_get_str(json_get(data, "package_root"));
+    const char *mode = json_get_str(json_get(data, "mode"));
+    const char *result = json_get_str(json_get(data, "result"));
+    return root && mode && planned && result &&
+           !strcmp(root, g_plugin_root[0]) &&
+           !strcmp(mode, commit ? "commit" : "plan") &&
+           !strcmp(result, "ok") && strlen(planned) == 64;
+}
+
+static bool aj_package_pin_reply(const char *out, bool commit, char token[65])
+{
+    struct json_value doc = {0};
+    bool ok = aj_json_ok(out, &doc);
+    if (ok) {
+        const struct json_value *data = aj_json_data(&doc);
+        const char *planned = json_get_str(json_get(data, "plan_token"));
+        ok = aj_package_pin_identity(data, commit, planned) &&
+             aj_json_bool_is(data, "committed", commit) &&
+             aj_json_bool_is(data, "pinned", commit) &&
+             aj_package_counts(json_get(data, "package"), commit) &&
+             (commit ? !strcmp(planned, token)
+                     : snprintf(token, 65, "%s", planned) == 64);
+    }
+    json_free(&doc);
+    return ok;
+}
+
+static bool aj_package_operator_pin(struct aj_node_ctx *c)
+{
+    char root_arg[96], token[65] = {0};
+    if (snprintf(root_arg, sizeof(root_arg), "--root=%s", g_plugin_root[0]) >=
+        (int)sizeof(root_arg)) return false;
+    for (unsigned step = 0; step < 2; step++) {
+        bool commit = step != 0;
+        char token_arg[96];
+        if (commit && snprintf(token_arg, sizeof(token_arg),
+                               "--plan_token=%s", token) >=
+                          (int)sizeof(token_arg)) return false;
+        char *tail[] = {(char *)"zcode", (char *)"package", (char *)"pin",
+                        root_arg, commit ? (char *)"--mode=commit" :
+                        (char *)"--mode=plan", token_arg, NULL};
+        if (!commit) tail[5] = NULL;
+        char out[32768];
+        int rc = aj_plugin_run(c, commit ? "package-pin-commit" :
+                               "package-pin-plan", tail, out, sizeof(out), 60);
+        if (rc != 0 || !aj_package_pin_reply(out, commit, token)) {
+            aj_fail("operator package pin: %s", out);
+            return false;
+        }
+    }
+    return true;
+}
+
+struct aj_retention_observation {
+    int64_t captured, chunks, total_chunks, bytes, total_bytes;
+};
+
+static bool aj_retention_observe(const char *out,
+                                 struct aj_retention_observation *observation)
+{
+    struct json_value doc = {0};
+    json_init(&doc);
+    bool parsed = json_read(&doc, out, strlen(out));
+    const struct json_value *state = json_get(&doc, "state");
+    if (!parsed || !state) {
+        json_free(&doc);
+        return false;
+    }
+    observation->captured = json_get_int(json_get(&doc, "captured_at"));
+    observation->chunks = json_get_int(json_get(state, "present_chunks"));
+    observation->total_chunks = json_get_int(json_get(state, "total_chunks"));
+    observation->bytes = json_get_int(json_get(state, "present_bytes"));
+    observation->total_bytes = json_get_int(json_get(state, "total_bytes"));
+    bool ok = observation->captured > 0 &&
+              aj_json_bool_is(state, "enabled", true) &&
+              aj_package_counts(state, true) && observation->chunks > 0 &&
+              observation->chunks == observation->total_chunks;
+    json_free(&doc);
+    return ok;
+}
+
+static bool aj_replica_retention(struct aj_node_ctx *c, pid_t previous_pgid)
+{
+    char *tail[] = {(char *)"dumpstate", (char *)"zcode_store",
+                    g_plugin_root[0], NULL};
+    char out[32768];
+    int rc = aj_plugin_run(c, "replica-retention", tail, out, sizeof(out), 60);
+    struct aj_retention_observation observation = {0};
+    bool ok = rc == 0 && aj_retention_observe(out, &observation);
+    char evidence[1500], path[1100];
+    int n = snprintf(evidence, sizeof(evidence),
+        "publisher_running=false\nreplica_before_pgid=%d\n"
+        "replica_after_pgid=%d\nold_process_group_absent=true\n"
+        "store_reopened=true\npackage_root=%s\ncaptured_at=%lld\n"
+        "complete=true\npinned=true\npool=pins\npresent_bytes=%lld\n"
+        "total_bytes=%lld\npresent_chunks=%lld\ntotal_chunks=%lld\n"
+        "retention_policy=owner-pin-no-expiry\n"
+        "continuous_availability_attested=false\n"
+        "sudden_power_loss_attested=false\n",
+        previous_pgid, g_b_pgid, g_plugin_root[0],
+        (long long)observation.captured, (long long)observation.bytes,
+        (long long)observation.total_bytes, (long long)observation.chunks,
+        (long long)observation.total_chunks);
+    if (ok && (n < 0 || (size_t)n >= sizeof(evidence) ||
+        !aj_path_join(path, sizeof(path), g_work, "b/replica-restart.txt") ||
+        !aj_write_file(path, evidence))) ok = false;
+    if (!ok) aj_fail("restarted replica did not recover its complete pin: %s", out);
+    return ok;
 }
 
 static bool aj_plugin_wait_onion(struct aj_node_ctx *c, const char *who)
@@ -1451,28 +1614,68 @@ static bool aj_plugin_reproduce_rollback(struct aj_node_ctx *bc)
            aj_plugin_corruption(bc) && aj_plugin_activate_rollback(bc);
 }
 
-static bool aj_plugin_replica(struct aj_node_ctx *bc)
+static bool aj_replica_restart(struct aj_node_ctx *bc, pid_t previous_b_pgid)
 {
-    if (g_a_pgid) {
-        aj_fail("publisher A is still live before the replica proof");
-        return false;
-    }
-    struct aj_node_ctx cc = {.rpc = APPJ_C_RPC};
-    if (snprintf(g_c_home, sizeof(g_c_home), "%s/c/home", g_work) >= (int)sizeof(g_c_home) ||
-        snprintf(g_c_dd, sizeof(g_c_dd), "%s/c/datadir", g_work) >= (int)sizeof(g_c_dd) ||
-        snprintf(g_c_log, sizeof(g_c_log), "%s/c/node.log", g_work) >= (int)sizeof(g_c_log) ||
-        aj_mkdir_p(g_c_home) != 0) return false;
-    snprintf(cc.home, sizeof(cc.home), "%s", g_c_home);
-    snprintf(cc.datadir, sizeof(cc.datadir), "%s", g_c_dd);
-    if (!aj_plugin_request(&cc, 0)) return false;
     g_b_pgid = aj_node_spawn(bc->home, bc->datadir, g_b_log, APPJ_B_P2P,
         APPJ_B_RPC, APPJ_B_FS, APPJ_B_HTTPS, APPJ_CONNECT_A, true);
-    if (!g_b_pgid) return false;
+    errno = 0;
+    int old_probe = kill(-previous_b_pgid, 0);
+    int old_error = errno;
+    if (g_b_pgid <= 1 || g_b_pgid == previous_b_pgid ||
+        old_probe != -1 || old_error != ESRCH) {
+        aj_fail("restart identity failed: before=%d after=%d "
+                "old_probe=%d old_errno=%d", previous_b_pgid, g_b_pgid,
+                old_probe, old_error);
+        return false;
+    }
+    if (!aj_plugin_wait_onion(bc, "restarted replica B")) return false;
+    pid_t actual_pgid = getpgid(g_b_pgid);
+    if (actual_pgid != g_b_pgid) {
+        aj_fail("restarted receiver is not its session leader: pid=%d pgid=%d",
+                g_b_pgid, actual_pgid);
+        return false;
+    }
+    return aj_replica_retention(bc, previous_b_pgid);
+}
+
+static bool aj_joiner_prepare(struct aj_node_ctx *cc)
+{
+    return snprintf(g_c_home, sizeof(g_c_home), "%s/c/home", g_work) < (int)sizeof(g_c_home) &&
+           snprintf(g_c_dd, sizeof(g_c_dd), "%s/c/datadir", g_work) < (int)sizeof(g_c_dd) &&
+           snprintf(g_c_log, sizeof(g_c_log), "%s/c/node.log", g_work) < (int)sizeof(g_c_log) &&
+           snprintf(cc->home, sizeof(cc->home), "%s", g_c_home) < (int)sizeof(cc->home) &&
+           snprintf(cc->datadir, sizeof(cc->datadir), "%s", g_c_dd) < (int)sizeof(cc->datadir) &&
+           aj_mkdir_p(g_c_home) == 0;
+}
+
+static bool aj_joiner_request(struct aj_node_ctx *cc)
+{
+    if (!aj_plugin_fetch_record_refusal(cc, 0) || !aj_plugin_request(cc, 0))
+        return false;
+    char record[1200];
+    struct stat st;
+    if (snprintf(record, sizeof(record), "%s/zcode/downloads/%s", cc->datadir,
+                 g_plugin_root[0]) >= (int)sizeof(record) ||
+        stat(record, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0) {
+        aj_fail("fresh recipient did not retain a resumable fetch record");
+        return false;
+    }
+    return true;
+}
+
+static bool aj_plugin_replica(struct aj_node_ctx *bc, pid_t previous_b_pgid)
+{
+    if (g_a_pgid || g_b_pgid || previous_b_pgid <= 1) {
+        aj_fail("publisher or receiver is still live before the replica restart");
+        return false;
+    }
+    if (!aj_replica_restart(bc, previous_b_pgid)) return false;
+    struct aj_node_ctx cc = {.rpc = APPJ_C_RPC};
+    if (!aj_joiner_prepare(&cc) || !aj_joiner_request(&cc)) return false;
     g_c_pgid = aj_node_spawn(g_c_home, g_c_dd, g_c_log, APPJ_A_P2P,
         APPJ_C_RPC, APPJ_C_FS, APPJ_C_HTTPS, APPJ_CONNECT_B, true);
-    if (!g_c_pgid || !aj_plugin_wait_onion(bc, "replica B") ||
-        !aj_plugin_wait_onion(&cc, "joiner C") || !aj_plugin_wait_complete(&cc, 0))
-        return false;
+    if (!g_c_pgid || !aj_plugin_wait_onion(&cc, "joiner C") ||
+        !aj_plugin_wait_complete(&cc, 0)) return false;
     if (!aj_kill_group(g_c_pgid)) {
         aj_fail("could not stop joiner C before its CLI store handoff");
         return false;
@@ -1581,7 +1784,8 @@ static bool aj_app_journey(struct aj_node_ctx *ac, struct aj_node_ctx *bc)
     aj_note("phase 4 B received A's exact offer, rebuilt the same image and "
             "now hosts the carrier");
 
-    if (!aj_plugin_receive(bc) || !aj_phase_outlives(bc)) return false;
+    if (!aj_plugin_receive(bc) || !aj_package_operator_pin(bc) ||
+        !aj_phase_outlives(bc)) return false;
     aj_note("phase 5 outlives: A dead, B still serves the app");
     return true;
 }
@@ -1609,9 +1813,12 @@ static int aj_journey(void)
     aj_note("phase 0 C23 plugin: signed two generations and persisted inert fetches");
 
     if (!aj_app_journey(&ac, &bc)) goto fail;
-    if (!aj_plugin_reproduce_rollback(&bc) || !aj_plugin_replica(&bc)) goto fail;
-    aj_note("phase 6 plugin: peer transfer, reproduction, refused authority, "
-            "state-preserving rollback and replica fetch after A exits");
+    pid_t previous_b_pgid = g_b_pgid;
+    if (!aj_plugin_reproduce_rollback(&bc) ||
+        !aj_plugin_replica(&bc, previous_b_pgid)) goto fail;
+    aj_note("phase 6 plugin: owner-pinned replica restarted after A exits; "
+            "reproduction, refused authority, state-preserving rollback and "
+            "fresh-peer recovery passed");
 
     bool stopped = aj_kill_group(g_a_pgid);
     stopped = aj_kill_group(g_b_pgid) && stopped;

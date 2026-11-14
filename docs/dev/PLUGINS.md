@@ -647,19 +647,65 @@ network transport.
 <!-- claim: symbol-present zcl_native_handle_plugin_reproduce tools/command/native_plugin_attest_command.c # production rebuild, compare and attestation -->
 <!-- claim: symbol-present pj_t_reproduce tests/harness/src/test_plugin_journey.c # peer journey, refusal and corruption proof -->
 
-`make app-journey-live` also passed on 2026-11-14. It drives real regtest nodes
-with embedded Tor and isolated persona homes: two source-bearing generations
-cross the package swarm from persisted inert-fetch records, install is refused
-before the receiving owner's pin, reproduction signs a distinct builder's
-attestation, wrong roots and corrupt images are refused, and rollback preserves
-owner state. After the publisher's process group exits, a fresh joiner downloads
-the same root from the receiver, checks out, and meets the same owner-only
-activation boundary. This is one physical host and regtest, not two physical
-hosts or a physical-independence attestation. The source-bearing packs use
-`plugin fetch`, not the four-member `plugin fetch_remote` installer.
+`make app-journey-live` drives real regtest nodes with embedded Tor and isolated
+persona homes: two source-bearing generations cross the package swarm from
+persisted inert-fetch records, install is refused before the receiving owner's
+pin, reproduction signs a distinct builder's attestation, wrong roots and
+corrupt images are refused, and rollback preserves owner state. The source-bearing
+packs use `plugin fetch`, not the four-member `plugin fetch_remote` installer.
+
+The receiver explicitly pins generation 1 before the publisher exits and its
+own node stops for the offline checks. After those checks, the receiver restarts
+on the same datadir. The harness requires a new process group, an absent old
+process group, and a recovered `dumpstate zcode_store` observation with the
+complete package in `pins` and every byte and chunk present. Only then can a
+fresh joiner start, retrieve the exact root from that restarted replica, check
+out, and meet the same owner-only activation boundary. A blocked download-record
+path must also fail with `PLUGIN_FETCH_RECORD_IO`, retaining neither a record
+nor a checkout, before the ordinary resumable request succeeds.
+
+The retention leg uses the existing resident operator commands; it adds no
+plugin publish/fetch API. The equivalent manual commands for a running regtest
+node are:
+
+```sh
+z23 -datadir=DD --rpcport=PORT -regtest \
+  zcode package pin --root=ROOT --mode=plan
+z23 -datadir=DD --rpcport=PORT -regtest \
+  zcode package pin --root=ROOT --mode=commit --plan_token=TOKEN
+z23 -datadir=DD --rpcport=PORT -regtest \
+  dumpstate zcode_store ROOT
+```
+
+These CLI flags connect to the resident owner. Omitting `datadir` from the
+command input keeps this operation on that resident store rather than opening
+an independent store over the live datadir. An ordinary pin has no TTL: its
+policy remains until explicit unpin, its marker is recovered when the store
+opens, and the package is excluded from normal HOT/RARE eviction. Possession
+still depends on the retained manifest and CAS bytes. `PINS_POOL_FULL` refuses
+a pin that does not fit, and an unpinned package cannot produce the pinned
+possession receipt. The focused checks are
+`make t-fast-exact ONLY=zcode_store,zcode_fetch`.
+
+Set `APPJ_KEEP=1` to retain the printed private work tree. Its sequenced command
+logs include `package-pin-plan`, `package-pin-commit`, `replica-retention`, and
+`fetch-record-refused`; **b/replica-restart.txt** records the before/after
+process groups and recovered byte/chunk accounting only after all recovery
+assertions pass.
+
+These are an operator pin command result and a recovered-store observation, not
+a signed `storage_ack`. The run proves possession after restart and subsequent
+peer retrieval, not continuous presence, a retention deadline, or future
+availability. It does not test external deletion, sudden power loss, two
+physical hosts, or production deployment. This is one physical regtest host;
+physical independence remains unattested.
 
 <!-- claim: symbol-present aj_plugin_reproduce_attested tools/app_journey_live.c # live rebuild and attestation under a distinct builder -->
-<!-- claim: symbol-present aj_plugin_replica tools/app_journey_live.c # fresh joiner fetches from the replica after the publisher exits -->
+<!-- claim: symbol-present aj_plugin_replica tools/app_journey_live.c # fresh joiner fetches only after the pinned replica restart recovers -->
+<!-- claim: symbol-present aj_plugin_fetch_record_refusal tools/app_journey_live.c # failed record persistence retains no record or checkout -->
+<!-- claim: symbol-present zcode.package.pin engine/composition/commands/zcode.def # existing operator pin plan and commit lifecycle -->
+<!-- claim: symbol-present zw_pin_via_resident tools/command/native_zcode_swarm_command.c # implicit datadir routes pin work to the resident store owner -->
+<!-- claim: symbol-present store_case_pins_reopen tests/harness/src/test_zcode_store_quota.c # store reopen and full pinned possession proof -->
 
 Never: pass a key's bytes on a command line; reuse a real wallet, node or
 release key; run `zcode publish` or anything that names a reward address; point

@@ -1418,6 +1418,76 @@ static int zf_t_fastobj_refusals(void)
     return failures;
 }
 
+static int zf_t_pin_budget_refusal(void)
+{
+    int failures = 0;
+    const char *reset_argv[] = { "z23-test" };
+    TEST("zcode package pin: capacity refusal cannot claim retention") {
+        char dd[1024];
+        test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "pin-full");
+        struct zf_pkg kept, filler, refused;
+        ASSERT(zf_make_package(&kept, 1));
+        ASSERT(zf_make_package(&filler, 2));
+        ASSERT(zf_make_package(&refused, 3));
+        const char *argv[] = { "z23-test", "-packagequota=2000" };
+        ParseParameters(2, argv);
+        struct vcs_package_store *store = vcs_package_store_open(dd, 2000u);
+        ASSERT(store != NULL);
+        ASSERT(zf_store_package(store, &kept));
+        ASSERT(zf_store_package(store, &filler));
+        ASSERT(zf_store_package(store, &refused));
+        ASSERT(vcs_package_store_pin(store, kept.root, true) ==
+               VCS_PACKAGE_STORE_OK);
+        ASSERT(vcs_package_store_pin(store, filler.root, true) ==
+               VCS_PACKAGE_STORE_OK);
+        vcs_package_store_close(store);
+
+        struct zf_cmd c;
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "root", refused.root_hex);
+        (void)json_push_kv_str(&c.input, "mode", "plan");
+        zcl_native_handle_zcode_package_pin(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const char *planned = json_get_str(json_get(&c.reply.data,
+                                                     "plan_token"));
+        ASSERT(planned != NULL && strlen(planned) == 64);
+        char token[65];
+        memcpy(token, planned, sizeof(token));
+        zf_cmd_free(&c);
+
+        zf_cmd_init(&c, dd);
+        (void)json_push_kv_str(&c.input, "root", refused.root_hex);
+        (void)json_push_kv_str(&c.input, "mode", "commit");
+        (void)json_push_kv_str(&c.input, "plan_token", token);
+        zcl_native_handle_zcode_package_pin(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "PINS_POOL_FULL");
+        zf_cmd_free(&c);
+
+        store = vcs_package_store_open(dd, 2000u);
+        ASSERT(store != NULL);
+        struct vcs_package_store_status st;
+        ASSERT(vcs_package_store_package_status(store, kept.root, &st) &&
+               st.complete && st.pinned);
+        ASSERT(vcs_package_store_package_status(store, refused.root, &st) &&
+               st.complete && !st.pinned);
+        struct vcs_package_possession_receipt receipt = {0};
+        ASSERT(!vcs_package_store_verify_possession_receipt(
+                   store, refused.root, true, &receipt) &&
+               receipt.failure == VCS_PACKAGE_POSSESSION_UNPINNED);
+        ASSERT(vcs_package_store_verify_possession_receipt(
+                   store, kept.root, true, &receipt) &&
+               receipt.complete && receipt.pinned);
+        vcs_package_store_close(store);
+        zf_free_package(&kept);
+        zf_free_package(&filler);
+        zf_free_package(&refused);
+        PASS();
+    } _test_next:;
+    ParseParameters(1, reset_argv);
+    return failures;
+}
+
 int test_zcode_fetch(void)
 {
     int failures = 0;
@@ -1434,6 +1504,7 @@ int test_zcode_fetch(void)
     failures += zf_t_peers_one_shot();
     failures += zf_t_peers_possession();
     failures += zf_t_pin_roundtrip();
+    failures += zf_t_pin_budget_refusal();
     failures += zf_t_offered_one_shot();
     failures += zf_t_offered_one_shot_hosting();
     failures += zf_t_offered_live();
