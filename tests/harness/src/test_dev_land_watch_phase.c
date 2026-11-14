@@ -1515,6 +1515,29 @@ static bool dlx_evidence_lint_late(void)
     dlx_end(&c); dlx_restore(); return ok;
 }
 
+static bool dlx_evidence_lint_complexity(void)
+{
+    const struct dlx_evidence_case k = {
+        .tag = "evidence_lint_complexity", .dimension = ZCL_DEV_PROOF_LINT,
+        .script = "printf '%s\\n' 'FAIL check-cyclomatic-complexity' "
+                  "'──── FAIL log: check-cyclomatic-complexity ────────────────────────────'\n"
+                  "i=0; while [ \"$i\" -lt 50 ]; do printf 'PASS selftest preamble %s\\n' \"$i\"; i=$((i+1)); done\n"
+                  "printf '%s\\n' '[check-cyclomatic-complexity] FAIL — 1 complexity violation(s)' "
+                  "'tools/dev/example.c:42: bad_function M=16 exceeds cap 15'\nexit 1\n",
+        .token = "child_proof_failed_exit_1",
+    };
+    char wt[PATH_MAX], local[64], base[64];
+    dlx_isolate(k.tag);
+    bool ok = dlx_evidence_settle(&k, wt, local, base);
+    setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+    struct dlx_call c; dlx_begin(&c, "step");
+    ok = ok && dlx_run(&c) && dlx_ok(&c) &&
+         strstr(dlx_str(&c, "detail"), "[check-cyclomatic-complexity] FAIL") &&
+         strstr(dlx_str(&c, "detail"), "bad_function M=16") &&
+         !strstr(dlx_str(&c, "detail"), "PASS selftest preamble");
+    dlx_end(&c); dlx_restore(); return ok;
+}
+
 static int dlx_evidence_lint_body(void)
 {
     int failures = 0;
@@ -1539,6 +1562,7 @@ static int dlx_evidence_lint_body(void)
         dlx_end(&c);
         dlx_restore();
         ASSERT(dlx_evidence_lint_late());
+        ASSERT(dlx_evidence_lint_complexity());
         ASSERT(dlx_lint_bad_file(false));
         ASSERT(dlx_lint_bad_file(true));
         ASSERT(dlx_lint_utf8_boundary());

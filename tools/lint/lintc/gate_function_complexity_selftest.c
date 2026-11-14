@@ -512,6 +512,15 @@ static int cyc_st_case(const char *root, const char *base_body,
     return cyc_st_want(&r, mode, want_rc, needle);
 }
 
+static int cyc_st_failure_marker(const char *root)
+{
+    struct cyc_st_run r;
+    if (cyc_st_exec(root, "", "RATCHET", 0, &r)) return 1;
+    return cyc_st_want(&r, "failure marker", 1,
+                       "[check-cyclomatic-complexity] FAIL") ||
+           cyc_st_want(&r, "failure function", 1, "over_cap M=16");
+}
+
 /* Read the fixture baseline back into buf. */
 static int cyc_st_read_base(const char *root, char *buf, size_t cap)
 {
@@ -951,6 +960,9 @@ int check_cyclomatic_complexity_selftest(void)
         bad |= cyc_st_case(root, "case.c:over_cap\n", "RATCHET", 2,
                            "malformed baseline M in line");
         /* WARN reports but exits 0 */
+        bad |= cyc_st_failure_marker(root);
+        bad |= cyc_st_case(root, "", "WARN", 0,
+                           "[check-cyclomatic-complexity] WARN");
         bad |= cyc_st_case(root, "", "WARN", 0, "not pinned");
         /* FAIL mode trips even an exactly pinned function */
         bad |= cyc_st_case(root, "case.c:over_cap:16\n", "FAIL", 1,

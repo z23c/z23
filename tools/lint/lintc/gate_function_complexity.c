@@ -1035,7 +1035,7 @@ static int cyc_on_func(const char *path, const char *name, int line, int m,
 static int cyc_dump_viol(const struct cyc_acc *a, FILE *hits,
                          const char *mode, FILE *err)
 {
-    if (fprintf(err, "check_cyclomatic_complexity: %s — %d complexity "
+    if (fprintf(err, "[check-cyclomatic-complexity] %s — %d complexity "
                 "violation(s) at cap %d (mode: %s)\n",
                 strcmp(mode, "WARN") == 0 ? "WARN" : "FAIL",
                 a->viol, CYC_MAX, mode) < 0)
