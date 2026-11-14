@@ -893,6 +893,8 @@ fail:
 static int aj_parse_args(int argc, char **argv, const char **work_override)
 {
     *work_override = NULL;
+    const char *keep = getenv("APPJ_KEEP");
+    g_keep = keep && strcmp(keep, "1") == 0;
     for (int i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "--work=", 7)) *work_override = argv[i] + 7;
         else if (!strcmp(argv[i], "--keep")) g_keep = true;
