@@ -16,6 +16,9 @@ A previously qualified local payload does not prove the public endpoint serves
 those bytes: verify the HTTPS installer and manifest separately before claiming
 public availability. Pins identify an individual release; they are not policy
 constants and should be reverified for each qualification.
+When checking the homepage, use an explicit browser User-Agent and retain the
+redirect, Content-Type and body. Compare the default curl representation
+separately; a difference alone does not establish a publication failure.
 
 The Linux qualification uses two fresh HOME/XDG profiles and a local graphical
 desktop. Record whether the tested release supplies its compiler kit or uses
@@ -92,7 +95,11 @@ qualify a bundled compiler kit, every app, or GUI launch without runtime librari
    **Review unkept changes**. Verify the displayed edited version, build and
    preview it, and explicitly Keep. Save the Keep and selection receipts.
 4. Share that kept version as a signed `.z23share` file. Save the share receipt
-   and file digest. Stop the sender before the recipient receives it.
+   and file digest. Before closing the native owner window, ensure a bounded
+   clipboard reader is available and capture the copied raw path. After closing
+   the window, compare that path with the terminal Share receipt. Inspect the
+   outcome before any deliberately separate new action. Stop the sender before
+   the recipient receives it.
 5. Install the same verified release in a fresh recipient profile. Open the
    file through the generated desktop association. Review native Receive
    consent, build and preview, and explicitly Keep. Record the receipt and the
