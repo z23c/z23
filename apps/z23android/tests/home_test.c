@@ -74,6 +74,12 @@ static void node_details_reported(void)
     view.node_height = 130;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "No more than 2 blocks behind"));
     assert(!strstr(text, "WALLET-MARKER") && !strstr(text, "SECRET") && !strstr(text, "CONNECTION-PATH"));
+}
+static void node_details_unknown_and_behind(void)
+{
+    struct zapp_view view = {0}; char text[512];
+    view.node_process_running = view.node_running = true;
+    view.chain_state = ZAPP_CHAIN_CURRENT;
     view.node_height = -1; view.node_reference = -1;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Unknown") &&
         strstr(text, "Sync status unknown") && !strstr(text, "No more than 2 blocks behind"));
@@ -869,6 +875,7 @@ int main(void)
     phone_card_golden();
     node_details_states();
     node_details_reported();
+    node_details_unknown_and_behind();
     node_button_states();
     home_start_states();
     plain_node_line_states();
