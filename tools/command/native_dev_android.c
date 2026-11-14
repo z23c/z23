@@ -504,14 +504,14 @@ static bool da_status_result(struct zcl_command_reply *r, struct da_plan *expect
     return ok ? da_status_observed(r, expected, artifact, state_value, id) :
                 da_status_unproven(r, expected, state_value);
 }
-void zcl_native_handle_dev_android_status(const struct zcl_command_request *req, struct zcl_command_reply *r)
+static void da_status_observe(const struct zcl_command_request *req, struct zcl_command_reply *r,
+                              const struct json_value *timeout)
 {
     const char *id = req ? da_str(req->input, "job_id") : NULL; struct json_value handle;
     json_init(&handle); struct da_plan expected = {0}; char out[DA_PATH];
     if (!id || !zcl_dev_job_read_handle(id, &handle) || !da_handle(&handle, &expected, out)) {
         json_free(&handle); da_fail(r, "ANDROID_JOB_REQUIRED", "Supply an Android job_id from dev android prepare."); return;
     }
-    const struct json_value *timeout = json_get(req->input, "timeout_s");
     if (timeout && timeout->type != JSON_NULL && timeout->type != JSON_INT) {
         json_free(&handle); da_fail(r, "ANDROID_JOB_INPUT", "The native job contract rejected the generated input."); return;
     }
@@ -530,6 +530,12 @@ void zcl_native_handle_dev_android_status(const struct zcl_command_request *req,
     bool ok = da_artifact_check(&handle, &expected, out, &artifact, zcl_dev_job_source_root(req));
     reply_ok = da_status_result(r, &expected, &artifact, ok, id);
     json_free(&handle); if (!reply_ok) da_emit_failed(r, false);
+}
+
+void zcl_native_handle_dev_android_status(const struct zcl_command_request *req, struct zcl_command_reply *r)
+{
+    const struct json_value *timeout = req ? json_get(req->input, "timeout_s") : NULL;
+    da_status_observe(req, r, timeout);
 }
 
 #define DA_VERIFY_NODE_LIMIT (256u * 1024u * 1024u)
@@ -679,7 +685,7 @@ void zcl_native_handle_dev_android_verify(const struct zcl_command_request *req,
     if (!id || !requested || !zcl_hex_decode_lower(requested, decoded, sizeof(decoded))) {
         da_verify_fail(r, "ANDROID_VERIFY_INPUT", "Supply job_id and the observed lowercase apk_sha256."); return;
     }
-    zcl_native_handle_dev_android_status(req, r);
+    da_status_observe(req, r, NULL);
     if (r->status == ZCL_COMMAND_STATUS_FAILED) return;
     if (!da_verify_observed(r, id, requested, &p, apk, hash)) {
         da_verify_fail(r, "ANDROID_VERIFY_UNAVAILABLE", "Job is incomplete or the APK differs from the observed hash."); return;

@@ -35,3 +35,22 @@ Focused command tests passed three groups with no skips; the vendor-input
 repair passed its focused group with no skips. The plan took 595 ms against
 its 250 ms budget and status took 1494 ms against its 900 ms budget. These are
 observed budget misses, not total build duration. No deployment was performed.
+
+## Native APK verification
+
+On 2026-11-14, candidate `6037fd999b3985d32af6cb1e4dd0a9808fe76e5d`
+verified an existing unsigned APK with SHA-256
+`f09b01d79c69e8050b1cf518edd025303e245567811d849716b3718770bba997`.
+The package name, 16 KiB alignment and embedded node hash passed; the node
+hash matched
+`a1a9a98541117562688fd0fa91871f8d3fb70d50202156e433c2a7d80f939ad2`.
+The command did not check a signature or establish node source provenance.
+
+A real ZIP fixture exercised status-to-verify input serialization and
+successful verification. Wrong package, failed alignment, changed APK hash,
+missing node, wrong node bytes and duplicate node entries were refused.
+The focused command, registry and API groups passed with no skips. The wider
+35-group candidate proof passed with one load-flaky retry in a checkout
+fixture; its first failure was retained. Candidate full lint passed 223 of
+224 checks and identified an undeclared status input read; that finding was
+repaired in the shared status observation path.
