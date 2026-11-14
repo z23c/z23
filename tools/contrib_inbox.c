@@ -1190,6 +1190,34 @@ static bool ci_fetch_fixture(struct ci *t, size_t page, size_t *len)
     return n >= 0 && (size_t)n < sizeof path && ci_read_file(path, t->list, CI_LIST, len);
 }
 
+static bool ci_error_identifier(const char *s)
+{
+    size_t n = strlen(s), i = 0;
+    if (!n || n > 64) return false;
+    while (i < n && ((s[i] >= 'A' && s[i] <= 'Z') ||
+                     (s[i] >= '0' && s[i] <= '9') || s[i] == '_')) i++;
+    return i == n;
+}
+
+/* Child output is untrusted: print only a bounded error identifier, never
+ * the remote message or other response content. */
+static void ci_fetch_error(const char *raw, int rc)
+{
+    struct json_value root;
+    json_init(&root);
+    if (!strstr(raw, "\\u0000") && json_read(&root, raw, strlen(raw)) && root.type == JSON_OBJ) {
+        const struct json_value *ok = json_get(&root, "ok");
+        const struct json_value *code = json_get(json_get(&root, "error"), "code");
+        if (ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
+            code && code->type == JSON_STR) {
+            const char *s = json_get_str(code);
+            if (ci_error_identifier(s))
+                fprintf(stderr, "contrib-inbox: board list failed rc=%d code=%s\n", rc, s);
+        }
+    }
+    json_free(&root);
+}
+
 static bool ci_fetch_live(struct ci *t, const struct ci_cursor *cursor, size_t limit,
                           size_t *len)
 {
@@ -1202,7 +1230,11 @@ static bool ci_fetch_live(struct ci *t, const struct ci_cursor *cursor, size_t l
         O(t, CI_O_Z23), "fleet", "board", "list", "--room=contrib", count,
         cursor->time ? time : NULL, cursor->time ? id : NULL, NULL,
     };
-    if (ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST) != 0) return false;
+    int rc = ci_process_run(&t->budget, argv, NULL, CI_SHORT_MS, false, t->list, CI_LIST);
+    if (rc != 0) {
+        ci_fetch_error(t->list, rc);
+        return false;
+    }
     *len = strlen(t->list);
     return true;
 }

@@ -836,6 +836,7 @@ static bool ci_fake_board(struct ci_env *e, char *bin, size_t cap)
         "#!/bin/sh\n"
         "printf '%s\\n' \"$*\" >> \"$0.args\"\n"
         "[ \"$1\" = fleet ] && [ \"$2\" = board ] && [ \"$3\" = list ] || exit 9\n"
+        "if [ -e \"$0.failure\" ]; then cat \"$0.failure\"; exit 6; fi\n"
         "[ ! -e \"$0.fail-first\" ] || exit 8\n"
         "case \" $* \" in\n"
         " *' --before_created_at='*)\n"
@@ -848,6 +849,43 @@ static bool ci_fake_board(struct ci_env *e, char *bin, size_t cap)
     if (snprintf(bin, cap, "%s/fake-z23", e->d) >= (int)cap ||
         snprintf(e->list, sizeof(e->list), "%s.page0", bin) >= (int)sizeof(e->list)) return false;
     return ci_wf(bin, script) && chmod(bin, 0700) == 0;
+}
+
+static int ci_bad_error_cases(struct ci_env *e, const struct ci_run_opts *opts,
+                              const char *failure, const char *log)
+{
+    int failures = 0;
+    CI_CHECK("unsafe board code fixture", ci_wf(failure, "{\"ok\":false,\"error\":{\"code\":\"BAD\\nINJECTED\"}}\n"));
+    CI_CHECK("unsafe board code is not printed", ci_pass_with(e, opts) == 1 && !ci_file_has(log, "INJECTED"));
+    CI_CHECK("embedded NUL in board code is refused", ci_wf(failure, "{\"ok\":false,\"error\":{\"code\":\"BAD\\u0000INJECTED\"}}\n") &&
+             ci_pass_with(e, opts) == 1 && !ci_file_has(log, "code=BAD"));
+    CI_CHECK("malformed board error is generic", ci_wf(failure, "not JSON SECRET_BODY\n") &&
+             ci_pass_with(e, opts) == 1 && ci_file_has(log, "board fetch incomplete or malformed") &&
+             !ci_file_has(log, "SECRET_BODY") && !ci_file_has(log, "rc=6"));
+    return failures;
+}
+
+static int case_board_fetch_error(void)
+{
+    struct ci_env e;
+    char bin[700], failure[750], log[800], cursor[800], seen[800], args[750];
+    int failures = 0;
+    if (!ci_setup(&e, "board_error") || !ci_fake_board(&e, bin, sizeof(bin))) return 1;
+    (void)snprintf(failure, sizeof(failure), "%s.failure", bin);
+    (void)snprintf(log, sizeof(log), "%s/run.log", e.d);
+    (void)snprintf(args, sizeof(args), "%s.args", bin);
+    ci_path(&e, cursor, sizeof(cursor), "crawl-cursor");
+    ci_path(&e, seen, sizeof(seen), "seen.txt");
+    const struct ci_run_opts opts = {.live = true, .live_list = true, .z23 = bin, .fsize = -1};
+    CI_CHECK("typed board failure fixture", ci_wf(failure, "{\"ok\":false,\"error\":{\"code\":\"BOARD_PAGE_METADATA_MISSING\",\"message\":\"SECRET_BODY\"}}\n"));
+    CI_CHECK("typed board failure retains code and exit", ci_pass_with(&e, &opts) == 1 &&
+             ci_file_has(log, "BOARD_PAGE_METADATA_MISSING") && ci_file_has(log, "rc=6") &&
+             !ci_file_has(log, "SECRET_BODY"));
+    struct stat st;
+    CI_CHECK("failed fetch leaves no seen or cursor writes", stat(seen, &st) == 0 && st.st_size == 0 && !ci_exists(cursor));
+    CI_CHECK("failed fetch posts nothing", ci_events_count(&e, "ESCALATE ") == 0 && !ci_file_has(args, "fleet board post"));
+    failures += ci_bad_error_cases(&e, &opts, failure, log);
+    return failures;
 }
 
 static int case_live_cursor(void)
@@ -1733,6 +1771,7 @@ int test_contrib_inbox(void)
     failures += case_four_per_pass();
     failures += case_pages_followed();
     failures += case_live_cursor();
+    failures += case_board_fetch_error();
     failures += case_live_fetch_failures();
     failures += case_bad_order();
     failures += case_late_older_post();
