@@ -1856,8 +1856,30 @@ static void test_receive_never_makes_keys(void)
     wallet_screens_close();
 }
 
+static void check_receive_loading(const char *op, const char *arg)
+{
+    (void)arg;
+    if (strcmp(op, "latest")) return;
+    CHECK(has("Loading your receiving address…"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) < 0);
+}
+
+static void leave_during_address_retry(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "latest")) {
+        fake.during = NULL;
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    }
+}
+
 static void test_receive_replies(void)
 {
+    start(false);
+    fake.during = check_receive_loading;
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    fake.during = NULL;
     start(false);                                     /* a node without the read command: Receive says so, makes nothing */
     fake.latest = NULL;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
@@ -1868,7 +1890,28 @@ static void test_receive_replies(void)
     fake.latest = "{\"ok\":true,\"data\":{\"address\":null}}";
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && has("no receive address yet"));
     fake.latest = OTHER_ERROR;
-    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && has("could not be read") && !has("WALLET_LOCKED"));
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && has("Your receiving address is not available yet.") && !has("WALLET_LOCKED"));
+    CHECK(find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_RETRY_ADDRESS) >= 0 &&
+          find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) < 0);
+    fake.latest = NULL;
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(has("cannot report its latest address yet") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":null,\"state\":\"none\"}}";
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(has("no receive address yet") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE)), A1) && count_ops("receive") == 0);
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
+    fake.during = leave_during_address_retry;
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(snap()->page == WALLET_PAGE_FUNDS && !wallet_screens_residue(A2, strlen(A2)) && count_ops("receive") == 0);
     fake.latest = "{\"ok\":false,\"data\":{\"address\":\"" A1 "\"}}";    /* ok:false is no reply, even when the command exited cleanly */
     fake.always_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
@@ -1886,6 +1929,24 @@ static void test_receive_unavailable(void)
     char address[92], live[256], offline[512];
     CHECK(domain_encoding_bech32_encode(address, sizeof(address), "zs", symbols, sizeof(symbols)));
     snprintf(live, sizeof(live), "{\"ok\":true,\"data\":{\"address\":\"%s\",\"state\":\"ok\"}}", address);
+    start(false);
+    fake.identity = "confirmed-wallet-one"; fake.setup_address = address; fake.setup_generation = 1;
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(has("Could not refresh your receiving address.") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_RETRY_ADDRESS) >= 0);
+    CHECK(wallet_screens_set_amount("1.25"));
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(strstr(text_at(snap(), find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE)), "?amount=1.25") && count_ops("receive") == 0);
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":null,\"state\":\"none\"}}";
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) >= 0 && !has("no receive address yet"));
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    fake.latest = NULL;
+    tap(WALLET_ACT_RETRY_ADDRESS, 0, WALLET_STAY);
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) >= 0 && !has("cannot report its latest address"));
+    wallet_screens_close();
     start(false);
     fake.identity = "confirmed-wallet-one"; fake.latest = live;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
@@ -2573,7 +2634,7 @@ static void test_receive_share(void)
     check_share_reply(NODE_UNAVAILABLE_ERROR, NULL, true);
     check_share_reply("{\"ok\":true,\"data\":{\"address\":null}}", "This wallet has no receive address yet. Tap New address.", false);
     check_share_reply(NULL, "This node cannot report its latest address yet. Tap New address to make one.", false);
-    check_share_reply("not-json", "The latest address could not be read. Check that your node is running, or tap New address.", false);
+    check_share_reply("not-json", "Your receiving address is not available yet.", false);
     check_pending_share_notice();
 
     check_request_refresh(A1, "confirmed-wallet-one", true);

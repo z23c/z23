@@ -70,7 +70,7 @@ struct data {
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
     bool address_pending, has_amount, no_receive, address_fallback, setup_bound, offline_bound, address_unavailable;
-    bool preload_tried;
+    bool preload_tried, address_read_failed;
     char offline_identity[82];
     uint64_t address_generation;
     uint64_t amount_zat;
@@ -593,9 +593,9 @@ static void receive_items(struct wallet_screen *s)
             snprintf(text, sizeof(text), "Asking for %s ZCL", grouped);
             line(s, text);
         }
-    } else if (d->address_pending) line(s, "Loading the address…");
-    if (d->address_unavailable && !d->address_pending) button(s, WALLET_ACT_RETRY_ADDRESS, "Retry");
-    else if (!d->address_unavailable && !d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
+    } else if (d->address_pending) line(s, "Loading your receiving address…");
+    if ((d->address_unavailable || d->address_read_failed) && !d->address_pending) button(s, WALLET_ACT_RETRY_ADDRESS, "Retry");
+    else if (!d->address_pending && !d->address_unavailable && !d->address_read_failed && !d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
     (void)add(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE, "Amount in ZCL (optional)");
     button(s, WALLET_ACT_SET_AMOUNT, "Set amount");
     button(s, WALLET_ACT_BACK, "Back");
@@ -1055,6 +1055,7 @@ static void address_unavailable(void)
     st.d.setup_bound = false;
     st.d.address_pending = false;
     st.d.address_unavailable = true;
+    st.d.address_read_failed = false;
     copy(st.d.note, sizeof(st.d.note),
          "The receive address cannot be checked. Retry or check your wallet.");
 }
@@ -1064,10 +1065,14 @@ static void address_failure(const struct json_value *data, bool missing, bool la
     if (preserve_share) return;
     clear_committed_share_notice();
     if (latest && st.d.address_unavailable) address_unavailable();
-    else if (latest && st.d.address_fallback) st.d.note[0] = 0;
+    else if (latest && st.d.address_fallback && (missing || (data && typed(data, "address", JSON_NULL)))) st.d.note[0] = 0;
     else if (data && latest && typed(data, "address", JSON_NULL)) copy(st.d.note, sizeof(st.d.note), "This wallet has no receive address yet. Tap New address.");
     else if (latest && missing) copy(st.d.note, sizeof(st.d.note), "This node cannot report its latest address yet. Tap New address to make one.");
-    else if (latest) copy(st.d.note, sizeof(st.d.note), "The latest address could not be read. Check that your node is running, or tap New address.");
+    else if (latest) {
+        st.d.address_read_failed = true;
+        copy(st.d.note, sizeof(st.d.note), st.d.address[0] ?
+             "Could not refresh your receiving address." : "Your receiving address is not available yet.");
+    }
     else if (missing) {
         st.d.no_receive = true;
         copy(st.d.note, sizeof(st.d.note), "This build cannot make a new address.");
@@ -1096,6 +1101,7 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json, 
     const char *address = NULL;
     if (!fallback_current()) return;
     st.d.address_pending = false;
+    if (latest) st.d.address_read_failed = false;
     json_init(&root);
     data = ok && json && json_read(&root, json, strlen(json)) ? data_of(&root) : NULL;
     address = text_of(data, "address");
@@ -1108,7 +1114,7 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json, 
         is(text_of(data, "state"), "none")) st.d.address_unavailable = false;
     if (address_is_showable(address)) {
         show_address(address);
-        if (st.d.address[0]) st.d.address_unavailable = false;
+        if (st.d.address[0]) { st.d.address_unavailable = false; st.d.address_read_failed = false; }
         st.d.offline_bound = false;
         st.d.address_fallback = false;
     }
@@ -1271,7 +1277,7 @@ static bool apply_offline(const struct reply *r)
 
     if (valid) {
         show_address(address);
-        if (st.d.address[0]) st.d.address_unavailable = false;
+        if (st.d.address[0]) { st.d.address_unavailable = false; st.d.address_read_failed = false; }
         copy(st.d.offline_identity, sizeof(st.d.offline_identity), r->identity);
         st.d.offline_bound = st.d.address[0] != 0;
         st.d.address_fallback = st.d.offline_bound;
@@ -1635,7 +1641,7 @@ static size_t open_detail(unsigned row, struct job *jobs)
 static size_t new_address(struct job *jobs)
 {
     size_t count = 0;
-    if (st.d.no_receive || st.d.address_unavailable) return 0;
+    if (st.d.no_receive || st.d.address_unavailable || st.d.address_read_failed) return 0;
     ++st.epoch;
     if (!submit(jobs, &count, K_NEW, "receive", "")) { --st.epoch; return 0; }
     request_clear(); st.d.has_amount = false; st.d.amount_zat = 0; clear_share_notice();
@@ -1651,7 +1657,7 @@ static size_t new_address(struct job *jobs)
 static size_t retry_address(struct job *jobs)
 {
     size_t count = 0;
-    if (!st.d.address_unavailable || st.d.address_pending) return 0;
+    if ((!st.d.address_unavailable && !st.d.address_read_failed) || st.d.address_pending) return 0;
     st.d.address_pending = true;
     (void)submit(jobs, &count, K_LATEST, "latest", "");
     touch();
