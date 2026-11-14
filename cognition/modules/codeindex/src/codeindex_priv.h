@@ -279,7 +279,7 @@ bool ci_store_scan_shard_refresh(struct ci_store *s, const char *path);
 bool ci_store_scan_shards_are_valid(struct ci_store *s, bool *valid);
 bool ci_store_apply_pragmas(sqlite3 *db);
 bool ci_store_ensure_schema(sqlite3 *db);
-bool ci_store_ensure_ref_order_index(sqlite3 *db);
+bool ci_store_ensure_ordered_indexes(sqlite3 *db);
 
 /* ── source enumeration ───────────────────────────────────────────────
  * Deterministic, sorted, repo-relative .c/.h and .def paths across the

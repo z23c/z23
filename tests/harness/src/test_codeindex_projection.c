@@ -419,7 +419,9 @@ static bool cip_legacy_ref_index(const char *root)
         "DROP INDEX IF EXISTS idx_refs_file_ordered; DROP INDEX IF EXISTS idx_refs_file;"
         "CREATE INDEX idx_refs_file ON refs(ref_file);"
         "DROP INDEX IF EXISTS idx_refs_enclosing_ordered; DROP INDEX IF EXISTS idx_refs_enclosing;"
-        "CREATE INDEX idx_refs_enclosing ON refs(enclosing)", NULL, NULL, NULL) == SQLITE_OK;
+        "CREATE INDEX idx_refs_enclosing ON refs(enclosing);"
+        "DROP INDEX IF EXISTS idx_symbols_name_ordered; DROP INDEX IF EXISTS idx_symbols_name;"
+        "CREATE INDEX idx_symbols_name ON symbols(name)", NULL, NULL, NULL) == SQLITE_OK;
     return sqlite3_close(db) == SQLITE_OK && ok;
 }
 
@@ -429,11 +431,14 @@ static bool cip_index_names(struct codeindex *ci, bool upgraded)
     const char *sql = "SELECT (SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file'),"
                       "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file_ordered'),"
                       "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing'),"
-                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing_ordered')";
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing_ordered'),"
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_symbols_name'),"
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_symbols_name_ordered')";
     bool ok = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK &&
         sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == !upgraded &&
         sqlite3_column_int(stmt, 1) == upgraded && sqlite3_column_int(stmt, 2) == !upgraded &&
-        sqlite3_column_int(stmt, 3) == upgraded;
+        sqlite3_column_int(stmt, 3) == upgraded && sqlite3_column_int(stmt, 4) == !upgraded &&
+        sqlite3_column_int(stmt, 5) == upgraded;
     if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
     return ok;
 }
@@ -545,7 +550,10 @@ static bool cip_conflicting_ref_index(const char *root, int mode)
         "CREATE TABLE idx_refs_file_ordered(v INTEGER)",
         "CREATE INDEX idx_refs_enclosing_ordered ON refs(ref_line)",
         "CREATE TABLE idx_refs_enclosing_ordered(v INTEGER)",
-        "CREATE INDEX idx_refs_enclosing_ordered ON refs(enclosing,ref_file,ref_line) WHERE ref_line>0"
+        "CREATE INDEX idx_refs_enclosing_ordered ON refs(enclosing,ref_file,ref_line) WHERE ref_line>0",
+        "CREATE INDEX idx_symbols_name_ordered ON symbols(def_line)",
+        "CREATE TABLE idx_symbols_name_ordered(v INTEGER)",
+        "CREATE INDEX idx_symbols_name_ordered ON symbols(name,def_path,def_line) WHERE def_line>0"
     };
     if (mode < 0 || (size_t)mode >= sizeof(sqls)/sizeof(sqls[0])) { sqlite3_close(db); return false; }
     bool ok = sqlite3_exec(db, sqls[mode], NULL, NULL, NULL) == SQLITE_OK;
@@ -606,6 +614,102 @@ static int cip_deny_enclosing(void *context, int action, const char *one,
     return action == SQLITE_CREATE_INDEX && one && !strcmp(one, "idx_refs_enclosing_ordered")
         ? SQLITE_DENY : SQLITE_OK;
 }
+static int cip_deny_symbol(void *context, int action, const char *one,
+                           const char *two, const char *db, const char *trigger)
+{
+    (void)context; (void)two; (void)db; (void)trigger;
+    return action == SQLITE_CREATE_INDEX && one && !strcmp(one, "idx_symbols_name_ordered")
+        ? SQLITE_DENY : SQLITE_OK;
+}
+static bool cip_symbol_ddl_refusal(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) return false;
+    sqlite3 *db = ci_store_db(store); sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_exec(db, "DROP INDEX idx_symbols_name_ordered; CREATE INDEX idx_symbols_name ON symbols(name)", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_set_authorizer(db, cip_deny_symbol, NULL) == SQLITE_OK &&
+        !ci_store_ensure_ordered_indexes(db) && sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK;
+    ok = ok && sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_symbols_name'", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1;
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    ci_store_close(store); return ok;
+}
+static int cip_defs_trace(unsigned type, void *ctx, void *statement, void *unused)
+{
+    (void)unused; const char *sql = sqlite3_sql(statement);
+    if (type == SQLITE_TRACE_PROFILE && sql && !strcmp(sql,
+        "SELECT " CI_SYM_COLS " FROM symbols WHERE name=? ORDER BY def_path ASC, def_line ASC"))
+        *(int *)ctx += sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_SORT, 1);
+    return 0;
+}
+static bool cip_defs_put(struct ci_store *s, char kind, const char *def, const char *decl)
+{
+    struct ci_symbol sym = {0};
+    snprintf(sym.name, sizeof sym.name, "mixed"); sym.kind = kind;
+    snprintf(sym.def_path, sizeof sym.def_path, "%s", def);
+    snprintf(sym.decl_path, sizeof sym.decl_path, "%s", decl);
+    sym.def_line = *def ? 3 : 0; sym.decl_line = *decl ? 4 : 0;
+    return ci_store_put_symbol(s, &sym);
+}
+static bool cip_defs_identity(struct ci_store *a, struct ci_store *b)
+{
+    struct ci_symbol x[8], y[8]; bool fa = false, fb = false;
+    if (!ci_store_symbol_by_name(a, "mixed", x, &fa) || !ci_store_symbol_by_name(b, "mixed", y, &fb) ||
+        !fa || fa != fb || memcmp(x, y, sizeof(*x))) return false;
+    if (!ci_store_symbol_by_name_path(a, "mixed", "a.c", x, &fa) ||
+        !ci_store_symbol_by_name_path(b, "mixed", "a.c", y, &fb) || !fa || fa != fb || memcmp(x, y, sizeof(*x))) return false;
+    return true;
+}
+static bool cip_defs_compare(struct ci_store *a, struct ci_store *b)
+{
+    struct ci_symbol x[8], y[8];
+    if (!cip_defs_identity(a, b)) return false;
+    struct codeindex ca = {.store=a}, cb = {.store=b};
+    for (int cap = 1; cap <= 8; cap *= 8) {
+        int na = ci_store_defs_by_name(a, "mixed", x, cap), nb = ci_store_defs_by_name(b, "mixed", y, cap);
+        if (na <= 0 || na != nb || memcmp(x, y, (size_t)na * sizeof(*x))) return false;
+        int ea = 0, eb = 0;
+        enum codeindex_exact_status sa = codeindex_find_exact_checked(&ca, "mixed", x, cap, &ea);
+        enum codeindex_exact_status sb = codeindex_find_exact_checked(&cb, "mixed", y, cap, &eb);
+        if (sa != sb || ea != eb || memcmp(x, y, (size_t)ea * sizeof(*x))) return false;
+    }
+    return true;
+}
+static struct ci_store *cip_defs_copy(struct ci_store *a)
+{
+    struct ci_store *b = ci_store_open_path(":memory:"); if (!b) return NULL;
+    sqlite3 *db = ci_store_db(b); sqlite3_backup *backup = sqlite3_backup_init(db, "main", ci_store_db(a), "main");
+    if (!backup) { ci_store_close(b); return NULL; }
+    bool copied = sqlite3_backup_step(backup, -1) == SQLITE_DONE;
+    if (sqlite3_backup_finish(backup) != SQLITE_OK || !copied || !ci_store_ensure_ordered_indexes(db)) {
+        ci_store_close(b); return NULL;
+    }
+    return b;
+}
+static bool cip_defs_traced(struct ci_store *a, struct ci_store *b)
+{
+    sqlite3 *da = ci_store_db(a), *db = ci_store_db(b); int sorts[2] = {0};
+    if (sqlite3_trace_v2(da, SQLITE_TRACE_PROFILE, cip_defs_trace, &sorts[0]) != SQLITE_OK ||
+        sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, cip_defs_trace, &sorts[1]) != SQLITE_OK) return false;
+    bool ok = cip_defs_compare(a, b);
+    ok = sqlite3_trace_v2(da, 0, NULL, NULL) == SQLITE_OK && ok;
+    ok = sqlite3_trace_v2(db, 0, NULL, NULL) == SQLITE_OK && ok;
+    return ok && sorts[0] > 0 && sorts[1] == 0;
+}
+static bool cip_definition_index_fixture(void)
+{
+    struct ci_store *a = ci_store_open_path(":memory:"), *b = NULL; bool ok = false;
+    if (!a || !cip_defs_put(a, 'T', "a.c", "") || !cip_defs_put(a, 't', "a.c", "") ||
+        !cip_defs_put(a, 'T', "", "decl.h")) goto done;
+    sqlite3 *da = ci_store_db(a);
+    if (sqlite3_exec(da, "DROP INDEX idx_symbols_name_ordered; CREATE INDEX idx_symbols_name ON symbols(name)", NULL, NULL, NULL) != SQLITE_OK) goto done;
+    b = cip_defs_copy(a); if (!b) goto done;
+    ok = cip_defs_traced(a, b);
+done:
+    if (b) ci_store_close(b);
+    if (a) ci_store_close(a);
+    return ok;
+}
 static bool cip_enclosing_ddl_refusal(void)
 {
     struct ci_store *store = ci_store_open_path(":memory:");
@@ -613,7 +717,7 @@ static bool cip_enclosing_ddl_refusal(void)
     sqlite3 *db = ci_store_db(store);
     bool ok = sqlite3_exec(db, "DROP INDEX idx_refs_enclosing_ordered; CREATE INDEX idx_refs_enclosing ON refs(enclosing)", NULL, NULL, NULL) == SQLITE_OK &&
         sqlite3_set_authorizer(db, cip_deny_enclosing, NULL) == SQLITE_OK &&
-        !ci_store_ensure_ref_order_index(db) && sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK;
+        !ci_store_ensure_ordered_indexes(db) && sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK;
     sqlite3_stmt *stmt = NULL;
     ok = ok && sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing'", -1, &stmt, NULL) == SQLITE_OK &&
         sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1;
@@ -637,6 +741,11 @@ static int cip_check_index_migration(bool ready, const char *workspace)
     CIP_CHECK("partial enclosing index refuses staged publication",
               ready && cip_conflicting_upgrade(workspace, 4));
     CIP_CHECK("enclosing DDL refusal retains legacy index", cip_enclosing_ddl_refusal());
+    CIP_CHECK("wrong-shape symbol index refuses staged publication", ready && cip_conflicting_upgrade(workspace, 5));
+    CIP_CHECK("symbol index-name table collision refuses staged publication", ready && cip_conflicting_upgrade(workspace, 6));
+    CIP_CHECK("partial symbol index refuses staged publication", ready && cip_conflicting_upgrade(workspace, 7));
+    CIP_CHECK("symbol DDL refusal retains legacy index", cip_symbol_ddl_refusal());
+    CIP_CHECK("definition index preserves typed identities and tie order", cip_definition_index_fixture());
     return failures;
 }
 
