@@ -14891,9 +14891,17 @@ $(LAB_PEER_BIN): $(LAB_PEER_SRCS) $(SPAWN_BINARY_HEADERS)
 APP_JOURNEY_LIVE_BIN = $(BIN_DIR)/app_journey_live
 APP_JOURNEY_LIVE_SRCS = tools/app_journey_live.c platform/modules/json/src/json.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c platform/modules/util/src/write_all.c
 APP_JOURNEY_LIVE_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
-.PHONY: app-journey-live
-app-journey-live: zclassic23 $(APP_JOURNEY_LIVE_BIN)
+.PHONY: app-journey-live app-journey-selftest
+app-journey-live: zclassic23 $(APP_JOURNEY_LIVE_BIN) app-journey-selftest
 	$(APP_JOURNEY_LIVE_BIN)
+app-journey-selftest: $(BIN_DIR)/app_journey_live_selftest
+	$(BIN_DIR)/app_journey_live_selftest
+$(BIN_DIR)/app_journey_live_selftest: tools/app_journey_live_selftest.c $(APP_JOURNEY_LIVE_SRCS)
+	mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(BUILD_IDENTITY_CPPFLAGS) $(APP_JOURNEY_LIVE_INCLUDES) \
+	    -o $@ tools/app_journey_live_selftest.c $(filter-out tools/app_journey_live.c,$(APP_JOURNEY_LIVE_SRCS)) -lpthread
 CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/app_journey_live.o
 $(APP_JOURNEY_LIVE_BIN): $(APP_JOURNEY_LIVE_SRCS)
 	mkdir -p $(dir $@)

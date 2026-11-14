@@ -344,11 +344,31 @@ static int aj_run(const char *home, const char *cwd, int timeout_s,
  * so EOF alone must not gate the wait: poll, and once the direct child
  * has exited drain briefly (the same short drain window util/spawn.h
  * uses) and stop. The deadline alarm is the last resort. */
-static size_t aj_capture_pipe(int fd, pid_t pid, char *out, size_t cap)
+static int aj_observe_child(pid_t pid, int flags)
+{
+    siginfo_t info = {0};
+    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT | flags) < 0)
+        return errno == EINTR ? 0 : -1;
+    return info.si_pid == pid ? 1 : 0;
+}
+
+static int aj_capture_drain(pid_t pid, bool *done, int *drains)
+{
+    if (!*done) {
+        int observed = aj_observe_child(pid, WNOHANG);
+        if (observed < 0) return -1;
+        *done = observed == 1;
+    }
+    return *done && ++*drains >= 20 ? 1 : 0;
+}
+
+static bool aj_capture_pipe(int fd, pid_t pid, char *out, size_t cap)
 {
     size_t used = 0;
     bool child_done = false;
+    bool ok = true;
     int drains = 0;
+    out[0] = '\0';
     for (;;) {
         if (used + 1 >= cap) break;
         if (g_alarm_fired) break;
@@ -356,22 +376,42 @@ static size_t aj_capture_pipe(int fd, pid_t pid, char *out, size_t cap)
         int pr = poll(&pfd, 1, child_done ? 100 : 500);
         if (pr < 0) {
             if (errno == EINTR) continue;
-            break;
+            ok = false; break;
         }
         if (pr == 0) {
-            int status0;
-            if (!child_done && waitpid(pid, &status0, WNOHANG) == pid)
-                child_done = true;
-            if (child_done && ++drains >= 20) break; /* 2 s drain window */
+            int drained = aj_capture_drain(pid, &child_done, &drains);
+            if (drained < 0) { ok = false; break; }
+            if (drained > 0) break; /* 2 s drain window */
             continue;
         }
         ssize_t n = read(fd, out + used, cap - 1 - used);
         if (n > 0) { used += (size_t)n; continue; }
         if (n < 0 && errno == EINTR) continue;
-        break; /* EOF (n == 0) or a real read error. */
+        if (n < 0) ok = false;
+        break;
     }
     out[used] = '\0';
-    return used;
+    return ok;
+}
+
+static int aj_finish_child(pid_t pid, bool captured)
+{
+    sigset_t set, prior;
+    sigemptyset(&set); sigaddset(&set, SIGALRM);
+    for (;;) {
+        if (sigprocmask(SIG_BLOCK, &set, &prior) != 0) return -1;
+        int status; pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid || (waited < 0 && errno != EINTR)) {
+            alarm(0); g_run_child = -1;
+            bool ok = captured && waited == pid && WIFEXITED(status);
+            int result = ok ? WEXITSTATUS(status) : -1;
+            if (sigprocmask(SIG_SETMASK, &prior, NULL) != 0) return -1;
+            return g_alarm_fired ? -1 : result;
+        }
+        if (sigprocmask(SIG_SETMASK, &prior, NULL) != 0) return -1;
+        struct timespec pause = { .tv_sec = 0, .tv_nsec = 50000000 };
+        nanosleep(&pause, NULL);
+    }
 }
 
 static int aj_run(const char *home, const char *cwd, int timeout_s,
@@ -392,17 +432,14 @@ static int aj_run(const char *home, const char *cwd, int timeout_s,
     close(fds[1]);
     g_run_child = pid;
     void (*old_alrm)(int) = signal(SIGALRM, aj_watchdog);
+    g_alarm_fired = 0;
     unsigned old_alarm = alarm((unsigned)(timeout_s > 0 ? timeout_s : 900));
     (void)old_alarm;
-    g_alarm_fired = 0;
-    (void)aj_capture_pipe(fds[0], pid, out, cap);
+    bool captured = aj_capture_pipe(fds[0], pid, out, cap);
     close(fds[0]);
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { /* retry */ }
-    alarm(0);
+    int result = aj_finish_child(pid, captured);
     signal(SIGALRM, old_alrm);
-    g_run_child = -1;
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return result;
 }
 
 static bool aj_kill_group(pid_t pgid)
