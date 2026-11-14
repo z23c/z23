@@ -4278,6 +4278,11 @@ gen-stamps-selftest:
 	trap 'git -C "$$root" worktree remove --force "$$w" >/dev/null 2>&1 || :; rm -rf "$$d" "$$w"; git -C "$$root" worktree prune' EXIT HUP INT TERM; \
 	p "real build in scratch worktree"; git -C "$$root" worktree add --detach "$$w" HEAD >/dev/null 2>&1 || fail "cannot create the scratch worktree"; \
 	cp Makefile "$$w/Makefile"; (cd "$$w" && $(MAKE) --no-print-directory -s worktree-prime SRC="$$root" >"$$d/prime.log" 2>&1) || { tail -n 20 "$$d/prime.log" >&2; fail "worktree-prime failed"; }; \
+	if [ -f "$$root/build/bin/source-identity-batch" ]; then \
+	  if mkdir -p "$$w/build/bin" && cp "$$root/build/bin/source-identity-batch" "$$w/build/bin/source-identity-batch.seed"; then \
+	    mv -f "$$w/build/bin/source-identity-batch.seed" "$$w/build/bin/source-identity-batch" || :; \
+	  fi; \
+	fi; \
 	hdrs="$(TMPL_GEN) $(SITE_CSS_GEN) $(INSTALL_SH_GEN) $(TUNNEL_EXPORT_BINDING)"; \
 	stamps="$(TMPL_STAMP) $(SITE_CSS_STAMP) $(INSTALL_SH_STAMP) $(TUNNEL_EXPORT_BINDING_STAMP)"; \
 	chtml="$$(ls "$$w"/$(TMPL_DIR)/*.chtml | head -n 1)"; \
