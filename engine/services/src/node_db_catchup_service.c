@@ -695,14 +695,6 @@ static int catchup_start_height(int db_tip)
     return start;
 }
 
-static bool catchup_read_proven(int32_t *proven_applied)
-{
-    sqlite3 *progress_db = progress_store_db();
-    if (!progress_db)
-        return false;
-    return node_db_catchup_read_proven_authority(progress_db, proven_applied);
-}
-
 static void catchup_seed_receipt(struct node_db *ndb, int start,
                                  uint8_t prev_receipt[32])
 {
@@ -879,7 +871,7 @@ static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
     catchup_active_begin(ps->start, chain_tip);
 
     ps->proven_applied = -1;
-    ps->proven_authority = catchup_read_proven(&ps->proven_applied);
+    ps->proven_authority = node_db_catchup_read_current_proven(&ps->proven_applied);
 
     int wallet_keys = catchup_count_wallet_keys(w);
     printf("SQLite catchup: %d blocks (%d..%d), lean index + wallet scan"
@@ -995,20 +987,15 @@ enum catchup_step {
     CATCHUP_STEP_FAIL,
 };
 
-static bool catchup_thermal_stop(struct catchup_pass *ps)
-{
-    if (!ps->background || g_shutdown_requested ||
-        node_pace_get() != NODE_PACE_GENTLE) return false;
-    ps->thermal_deferred = true;
-    return true;
-}
-
 /* Shutdown check, batch cycling, then locate and map the block's file. */
 static enum catchup_step catchup_walk_locate(struct catchup_pass *ps, int h,
                                              const struct block_index **out)
 {
     node_pace_poll();
-    if (catchup_thermal_stop(ps)) return CATCHUP_STEP_STOP;
+    if (node_db_catchup_thermal_stop(ps->background, g_shutdown_requested)) {
+        ps->thermal_deferred = true;
+        return CATCHUP_STEP_STOP;
+    }
 
     if (g_shutdown_requested || node_pace_get() == NODE_PACE_PAUSE)
         return CATCHUP_STEP_STOP;
@@ -1383,19 +1370,6 @@ static void catchup_walk_heights(struct catchup_pass *ps)
     }
 }
 
-static int catchup_entry_gate(struct node_db *ndb, bool background, bool *deferred)
-{
-    enum catchup_restore_result restored = node_db_catchup_restore_owed_result(ndb);
-    if (restored == CATCHUP_RESTORE_FAILED) return -1;
-    if (restored == CATCHUP_RESTORE_BUSY) return 0;
-    node_pace_poll();
-    if (background && node_pace_get() == NODE_PACE_GENTLE) {
-        if (deferred) *deferred = true;
-        return 0;
-    }
-    return node_pace_get() == NODE_PACE_PAUSE ? 0 : 1;
-}
-
 int node_db_catchup_service_run_origin(struct node_db *ndb, bool background,
                                        bool *deferred, const struct active_chain *chain,
                                        struct wallet *w, const char *datadir)
@@ -1425,7 +1399,7 @@ int node_db_catchup_service_run_origin(struct node_db *ndb, bool background,
 
     if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
-    int gate = catchup_entry_gate(ndb, background, deferred);
+    int gate = node_db_catchup_entry_gate(ndb, background, deferred);
     if (gate <= 0) return gate;
 
     int db_tip = 0;

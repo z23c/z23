@@ -11,6 +11,7 @@
 // still owed; a failed restore is logged here and retried by the next pass.
 
 #include "services/node_db_catchup_owed.h"
+#include "jobs/node_pace.h"
 
 #include "services/node_db_catchup_lock_guard.h"
 #include "services/node_db_catchup_service.h"
@@ -55,6 +56,24 @@ enum catchup_restore_result node_db_catchup_restore_owed_result(struct node_db *
 bool node_db_catchup_service_restore_owed(struct node_db *ndb)
 {
     return node_db_catchup_restore_owed_result(ndb) == CATCHUP_RESTORE_OK;
+}
+
+bool node_db_catchup_thermal_stop(bool background, bool shutdown)
+{
+    return background && !shutdown && node_pace_get() == NODE_PACE_GENTLE;
+}
+
+int node_db_catchup_entry_gate(struct node_db *ndb, bool background, bool *deferred)
+{
+    enum catchup_restore_result restored = node_db_catchup_restore_owed_result(ndb);
+    if (restored == CATCHUP_RESTORE_FAILED) return -1;
+    if (restored == CATCHUP_RESTORE_BUSY) return 0;
+    node_pace_poll();
+    if (background && node_pace_get() == NODE_PACE_GENTLE) {
+        if (deferred) *deferred = true;
+        return 0;
+    }
+    return node_pace_get() == NODE_PACE_PAUSE ? 0 : 1;
 }
 
 #ifdef ZCL_TESTING

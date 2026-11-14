@@ -39,3 +39,11 @@ bool node_db_catchup_read_proven_authority(sqlite3 *progress_db,
     progress_store_tx_unlock();
     return authority;
 }
+
+bool node_db_catchup_read_current_proven(int32_t *proven_applied)
+{
+    sqlite3 *progress_db = progress_store_db();
+    if (!progress_db)
+        return false;
+    return node_db_catchup_read_proven_authority(progress_db, proven_applied);
+}

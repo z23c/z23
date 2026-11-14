@@ -33,5 +33,7 @@ void node_db_catchup_owed_defer(struct sync_db_turbo_scope *scope);
 
 enum catchup_restore_result { CATCHUP_RESTORE_OK, CATCHUP_RESTORE_BUSY, CATCHUP_RESTORE_FAILED };
 enum catchup_restore_result node_db_catchup_restore_owed_result(struct node_db *ndb);
+bool node_db_catchup_thermal_stop(bool background, bool shutdown);
+int node_db_catchup_entry_gate(struct node_db *ndb, bool background, bool *deferred);
 
 #endif /* ZCL_SERVICES_NODE_DB_CATCHUP_OWED_H */

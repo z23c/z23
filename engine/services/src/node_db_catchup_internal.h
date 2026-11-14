@@ -14,6 +14,7 @@
  * node_db_catchup_proven.c; see its doc comment for the TRYLOCK contract.
  * Returns false (and leaves *applied_out untouched) when the progress tx is
  * contended. */
+bool node_db_catchup_read_current_proven(int32_t *proven_applied);
 bool node_db_catchup_read_proven_authority(sqlite3 *progress_db,
                                            int32_t *applied_out);
 
