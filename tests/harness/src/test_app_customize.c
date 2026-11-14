@@ -42,6 +42,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(ZCL_TESTING)
+void zcl_test_app_share_result_mismatch(const char *planned, const char *reported,
+    struct zcl_command_reply *reply);
+#endif
+
 #define ABC_DAY 20400
 #define ABC_PATH 900
 
@@ -3263,7 +3268,7 @@ static bool ast_partial_wire(struct ac_fixture *f, struct zcl_command_reply *rep
     const char *got_output = zcl_package_copy_str(facts, "output");
     ok = ok && release && got_release && got_package && got_version && got_output &&
         !strcmp(release, got_release) && !strcmp(package, got_package) &&
-        !strcmp(version, got_version) && !strcmp(output, got_output);
+        !strcmp(version, got_version) && !strcmp(output, got_output) && !json_get(facts, "share_file");
     json_free(&doc); return ok;
 }
 static bool ast_partial_setup(struct ac_fixture *f, char dir[900], char output[900], char version[65], char publisher[67])
@@ -3328,6 +3333,48 @@ static int ast_snapshot_case(void)
     } _test_next:;
     act_cleanup(&f); return failures;
 }
+static bool ast_mismatch_evidence(const char *reported, bool created)
+{
+    const char *planned = "/fixture/expected.z23share";
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.share.v1");
+    zcl_test_app_share_result_mismatch(planned, reported, &reply);
+    const struct json_value *facts = json_get(&reply.data, "failure_facts");
+    const char *requested = zcl_package_copy_str(facts, "requested_output");
+    const char *file = zcl_package_copy_str(facts, "share_file");
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
+        !strcmp(reply.error.code, "SHARE_RESULT_MISMATCH") &&
+        (created ? file && !strcmp(file, planned) && !requested :
+                   !file && requested && !strcmp(requested, planned));
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+static bool ast_mismatch_long_path(void)
+{
+    char path[3001], wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    memset(path, 'x', sizeof(path) - 1); path[0] = '/'; path[sizeof(path) - 1] = 0;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.share.v1");
+    zcl_test_app_share_result_mismatch(path, path, &reply);
+    const struct json_value *facts = json_get(&reply.data, "failure_facts");
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.share", NULL);
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &reply, wire, sizeof(wire)) : 0;
+    bool ok = n && n <= ZCL_COMMAND_ERROR_BUDGET && json_get_bool(json_get(facts, "details_unavailable")) &&
+        !json_get(facts, "share_file") && !json_get(facts, "requested_output") &&
+        strstr(reply.error.next_action, "share request") != NULL;
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+static int ast_mismatch_test(void)
+{
+    int failures = 0;
+    TEST("share mismatch records a file only when the successful result names it") {
+        ASSERT(ast_mismatch_evidence("/fixture/expected.z23share", true));
+        ASSERT(ast_mismatch_evidence("/fixture/other.z23share", false));
+        ASSERT(ast_mismatch_evidence(NULL, false));
+        ASSERT(ast_mismatch_long_path());
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int ast_publish_case(void)
 {
     int failures = 0; struct ac_fixture f;
@@ -3342,7 +3389,7 @@ int test_app_share(void)
     TEST("native share confirms the exact Keep and cancel does not mutate it") {
         ASSERT(act_setup(&f, false)); ASSERT(ast_journey(&f)); PASS();
     } _test_next:;
-    act_cleanup(&f); failures += ast_snapshot_case(); failures += ast_publish_case(); failures += ast_partial_case(); failures += ast_kept_case(); return failures;
+    act_cleanup(&f); failures += ast_snapshot_case(); failures += ast_publish_case(); failures += ast_partial_case(); failures += ast_kept_case(); failures += ast_mismatch_test(); return failures;
 }
 #else
 int test_app_share(void) { return 0; }

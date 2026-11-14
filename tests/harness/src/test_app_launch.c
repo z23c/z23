@@ -814,7 +814,7 @@ struct al_library_script {
     unsigned change_at;
     unsigned preparations;
     unsigned share_calls; bool share_cancel, fail_share_result, mismatch_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
-    bool fail_after_file, collision_after_choice; unsigned host_calls; bool cancel_host;
+    bool fail_after_file, collision_after_choice, write_collision; unsigned host_calls; bool cancel_host;
     bool cancel_preparation, stale_preparation;
     bool bad_preparation, fail_preparation, saw_share_review;
     unsigned share_choice, canceled_prepare_menu;
@@ -1230,15 +1230,42 @@ static bool al_library_notice(void *context, const struct zcl_present_model_v1 *
     return close;
 }
 
-static void al_library_collision(struct al_library_script *s, const char *path,
-    struct zcl_command_reply *reply)
+static bool al_rival_file(const char *path)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     bool made = fd >= 0 && write(fd, "rival", 5) == 5;
     if (fd >= 0 && close(fd)) made = false;
-    s->valid = s->valid && made;
+    return made;
+}
+static void al_library_collision(struct al_library_script *s, const char *path,
+    struct zcl_command_reply *reply)
+{
+    s->valid = s->valid && al_rival_file(path);
     zcl_package_copy_fail(reply, "OUTPUT_EXISTS", false,
         "a share file is never overwritten; move it or name another output", path);
+}
+static const char k_al_fixture_release[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static void al_library_write_collision(struct al_library_script *s, const char *path,
+    struct zcl_command_reply *reply)
+{
+    s->valid = s->valid && al_rival_file(path);
+    zcl_package_copy_fail(reply, "SHARE_FILE_WRITE", true,
+        "the release is kept, but the share file could not be created; name a new path as output", path);
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    s->valid = s->valid && json_push_kv_str(&facts, "output", path) &&
+        json_push_kv_str(&facts, "release_id", k_al_fixture_release) &&
+        json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+}
+static void al_library_reported_failure(struct al_library_script *s, const char *path,
+    struct zcl_command_reply *reply)
+{
+    zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true,
+        "The local share was created but its result could not be verified.", path);
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    s->valid = s->valid && json_push_kv_str(&facts, "share_file", path) &&
+        json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
 }
 
 static void al_library_share(void *context, const struct app_selection *selection,
@@ -1249,14 +1276,13 @@ static void al_library_share(void *context, const struct app_selection *selectio
     s->valid = s->valid && selection->revision > 0 && path[0] == 47;
     (void)snprintf(s->shared, sizeof(s->shared), "%s", path);
     if (s->share_cancel) { (void)json_push_kv_str(&reply->data, "status", "canceled"); return; }
+    if (s->write_collision) { al_library_write_collision(s, path, reply); return; }
     if (s->collision_after_choice) { al_library_collision(s, path, reply); return; }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0 || close(fd)) { s->valid = false; return; }
     if (s->fail_after_file) {
-        /* The real leaf shape: the file exists at the planned path, then the
-         * reply fails (SHARE_RESULT_MISMATCH), with no share_file key. */
-        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true,
-            "The local share was created but its result could not be verified.", path);
+        /* A successful signer reported the exact file, but identity failed. */
+        al_library_reported_failure(s, path, reply);
         return;
     }
     if (s->mismatch_share_result) {
@@ -1472,6 +1498,10 @@ static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply 
     struct al_library_script *s);
 static int al_share_collision_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s);
+static int al_share_long_evidence_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s, const char *home);
+static int al_share_write_collision_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s);
 static bool al_preparation_wire(struct zcl_command_reply *reply,
     const struct app_selection *selection, const char *visible);
 static bool al_share_review_failure(void *context, const struct zcl_present_model_v1 *model,
@@ -1521,20 +1551,24 @@ static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *repl
         ASSERT(al_share_snapshot_stale(f, home));
         PASS();
     }
-    TEST("Share retains the file location when the result names another file") {
+    TEST("Share treats a different reported file as an unverified destination") {
         zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
         *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .mismatch_share_result = true};
         zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
         ASSERT(reply->error.mutated && !strcmp(reply->error.code, "SHARE_RESULT_MISMATCH"));
         ASSERT(s->valid && s->errors == 1 && s->share_calls == 1);
         ASSERT(access(s->shared, F_OK) == 0);
-        ASSERT(!strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared));
-        const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
+        ASSERT(!strcmp(s->error_title, "Inspect share destination") && !strcmp(s->error_copy, s->shared));
+        const struct json_value *facts = json_get(&reply->data, "failure_facts");
+        const char *output = zcl_package_copy_str(facts, "requested_output");
         ASSERT(output && !strcmp(output, s->shared));
+        ASSERT(!zcl_package_copy_str(facts, "share_file"));
         ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
         PASS();
     } _test_next:;
     failures += al_share_collision_test(f, reply, s);
+    failures += al_share_write_collision_test(f, reply, s);
+    failures += al_share_long_evidence_test(f, reply, s, home);
     failures += al_share_leaf_failure_test(f, reply, s);
     failures += al_share_prepared_failure_test(f, reply, s);
     return failures;
@@ -1547,6 +1581,79 @@ static bool al_collision_file_cleanup(struct al_library_script *s)
     if (unlink(s->shared)) ok = false;
     s->shared[0] = 0;
     return ok;
+}
+static bool al_deep_quoted_home(const char *home, char *top, size_t topcap,
+                                char *deep, size_t deepcap)
+{
+    if (!al_path(top, topcap, home, "evidence-bound") || mkdir(top, 0700)) return false;
+    if (snprintf(deep, deepcap, "%s", top) >= (int)deepcap) return false;
+    char part[161]; memset(part, '"', sizeof(part) - 1); part[sizeof(part) - 1] = 0;
+    for (unsigned i = 0; i < 7; ++i) {
+        size_t n = strlen(deep);
+        if (snprintf(deep + n, deepcap - n, "/%s", part) >= (int)(deepcap - n) || mkdir(deep, 0700)) return false;
+    }
+    return true;
+}
+static bool al_share_omitted_wire(struct zcl_command_reply *reply)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "app.library", NULL);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(reg, spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc = {0}; bool ok = n && n <= ZCL_COMMAND_ERROR_BUDGET && json_read(&doc, wire, n);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+    ok = ok && json_get_bool(json_get(facts, "details_unavailable")) &&
+        !json_get(facts, "share_file") && !json_get(facts, "output");
+    json_free(&doc); return ok;
+}
+static bool al_deep_home_cleanup(const char *top, char *deep)
+{
+    size_t top_len = strlen(top);
+    if (!top_len || strncmp(deep, top, top_len) || (deep[top_len] && deep[top_len] != '/')) return false;
+    bool ok = true;
+    while (strlen(deep) > top_len) {
+        if (rmdir(deep) && errno != ENOENT) ok = false;
+        char *slash = strrchr(deep, '/');
+        if (!slash) return false;
+        *slash = 0;
+    }
+    return (rmdir(top) == 0 || errno == ENOENT) && ok;
+}
+static bool al_long_evidence_shown(const struct al_library_script *s)
+{
+    return s->valid && s->share_calls == 1 && s->errors == 1 &&
+        !strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared) &&
+        strstr(s->error_summary, "home folder") != NULL;
+}
+static bool al_long_evidence_cleanup(struct al_library_script *s, const char *home,
+                                     const char *top, char *deep)
+{
+    bool file_ok = s->shared[0] && unlink(s->shared) == 0; s->shared[0] = 0;
+    bool restored = setenv("HOME", home, 1) == 0;
+    bool cleaned = top[0] && al_deep_home_cleanup(top, deep);
+    return file_ok && restored && cleaned;
+}
+static int al_share_long_evidence_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s, const char *home)
+{
+    int failures = 0;
+    TEST("Share reports omitted long location without claiming it is in evidence") {
+        char top[PATH_MAX] = {0}, deep[PATH_MAX] = {0};
+        bool ready = al_deep_quoted_home(home, top, sizeof(top), deep, sizeof(deep)) && setenv("HOME", deep, 1) == 0;
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .fail_share_result = true};
+        if (ready) zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
+        bool wire = al_share_omitted_wire(reply);
+        bool shown = al_long_evidence_shown(s);
+        bool cleaned = al_long_evidence_cleanup(s, home, top, deep);
+        if (!(ready && shown && cleaned && wire))
+            fprintf(stderr, "long share evidence: ready=%d shown=%d cleaned=%d wire=%d calls=%u errors=%u code=%s\n",
+                    ready, shown, cleaned, wire, s->share_calls, s->errors, reply->error.code);
+        ASSERT(ready && shown && cleaned && wire);
+        ASSERT(reply->error.mutated && !strcmp(reply->error.code, "PRESENTATION_FAILED"));
+        PASS();
+    } _test_next:;
+    return failures;
 }
 static int al_share_collision_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s)
@@ -1571,6 +1678,32 @@ static int al_share_collision_test(struct al_fx *f, struct zcl_command_reply *re
     } _test_next:;
     return failures;
 }
+static int al_share_write_collision_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s)
+{
+    int failures = 0;
+    TEST("Share write refusal preserves release without claiming the rival file") {
+        struct app_selection before, after;
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .write_collision = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
+        bool selection_ok = app_selection_load(f->env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK &&
+                            !memcmp(&before, &after, sizeof(after));
+        bool path_shown = !strcmp(s->error_copy, s->shared);
+        bool file_ok = al_collision_file_cleanup(s);
+        const struct json_value *facts = json_get(&reply->data, "failure_facts");
+        ASSERT(file_ok && selection_ok && path_shown);
+        ASSERT(s->valid && s->share_calls == 1 && s->errors == 1 && s->notice_calls == 0);
+        ASSERT(reply->status != ZCL_COMMAND_STATUS_PASSED && reply->error.mutated && !strcmp(reply->error.code, "SHARE_FILE_WRITE"));
+        ASSERT(!strcmp(s->error_title, "Inspect share destination"));
+        const char *release = zcl_package_copy_str(facts, "release_id");
+        ASSERT(release && !strcmp(release, k_al_fixture_release));
+        ASSERT(!zcl_package_copy_str(facts, "share_file"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s)
 {
@@ -1584,7 +1717,7 @@ static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply 
         ASSERT(s->valid && s->errors == 1 && s->share_calls == 1 && s->notice_calls == 0);
         ASSERT(access(s->shared, F_OK) == 0);
         ASSERT(!strcmp(s->error_title, "Share file created") && !strcmp(s->error_copy, s->shared));
-        const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output");
+        const char *output = zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "share_file");
         ASSERT(output && !strcmp(output, s->shared));
         ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
         PASS();

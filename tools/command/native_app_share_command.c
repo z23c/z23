@@ -2,6 +2,7 @@
  * Native owner confirmation for sharing the exact saved Keep selection. */
 #include "command/native_app_share_command.h"
 #include "command/native_app_confirm.h"
+#include "command/native_app_compose.h"
 #include "command/native_app_launch.h"
 #include "command/native_app_personalize_command.h"
 #include "command/native_zcode_package_copy.h"
@@ -217,6 +218,41 @@ static bool sh_result_matches(const struct sh_work *w, const struct json_value *
         !strcmp(version, w->version) && !strcmp(package, w->package) &&
         !strcmp(publisher, w->publisher) && !strcmp(release, w->release);
 }
+static void sh_result_mismatch(const struct sh_work *w,
+    const struct zcl_command_reply *result, struct zcl_command_reply *reply)
+{
+    const char *file = zcl_package_copy_str(&result->data, "share_file");
+    bool created = file && !strcmp(file, w->output);
+    zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true,
+        created ? "The local share was created but its result could not be verified. Inspect the destination from your share request." :
+                  "The share result could not be verified. Inspect the destination from your share request before retrying.", "share request");
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    struct json_value path; json_init(&path); json_set_str(&path, w->output);
+    bool ok = path.type == JSON_STR && zcl_app_fact_add(&facts,
+        created ? "share_file" : "requested_output", &path, 1450u);
+    if (!ok) (void)json_push_kv_bool(&facts, "details_unavailable", true);
+    bool stored = json_push_kv(&reply->data, "failure_facts", &facts);
+    if (!ok || !stored) {
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "Inspect the destination from your share request before retrying.");
+    }
+    json_free(&path);
+    json_free(&facts);
+}
+#if defined(ZCL_TESTING)
+void zcl_test_app_share_result_mismatch(const char *planned, const char *reported,
+    struct zcl_command_reply *reply)
+{
+    struct sh_work *w = zcl_calloc(1, sizeof(*w), "share-mismatch-test");
+    if (!w) { sh_fail(reply, "OUT_OF_MEMORY", "Cannot prepare sharing."); return; }
+    struct zcl_command_reply result; zcl_command_reply_init(&result, "zcl.test.sign.v1");
+    (void)snprintf(w->output, sizeof(w->output), "%s", planned);
+    if (reported) (void)json_push_kv_str(&result.data, "share_file", reported);
+    sh_result_mismatch(w, &result, reply);
+    zcl_command_reply_free(&result);
+    free(w);
+}
+#endif
 static void sh_commit(const struct zcl_command_request *request, struct sh_work *w, struct zcl_command_reply *reply)
 {
     if (!sh_still_selected(w, reply) || !sh_copy(w, reply)) return;
@@ -228,7 +264,7 @@ static void sh_commit(const struct zcl_command_request *request, struct sh_work 
         sh_partial_facts(w, reply);
     }
     else if (!sh_result_matches(w, &result.data))
-        zcl_package_copy_fail(reply, "SHARE_RESULT_MISMATCH", true, "The local share was created but its result could not be verified.", w->output);
+        sh_result_mismatch(w, &result, reply);
     else { json_free(&reply->data); reply->data = result.data; json_init(&result.data); reply->error.mutated = true; }
     zcl_command_reply_free(&result);
 }

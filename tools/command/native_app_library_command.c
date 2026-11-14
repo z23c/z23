@@ -73,7 +73,7 @@ struct library {
     bool has_received;
     bool receive_current, has_discover_error, recovery_ready, recovery_kept, any_mutated, library_unavailable;
     bool receive_failure, recovery_adoption, create_result, draft_result, publish_result;
-    bool share_result, recovery_result;
+    bool share_result, share_inspect, recovery_result;
     bool operation_canceled, preview_current;
     bool preparation_canceled;
     bool share_review;
@@ -396,12 +396,21 @@ static bool al_received_error_view(struct library *w, const struct zcl_command_r
     }
     return false;
 }
+static const char *al_error_share_copy(const struct library *w, const struct json_value *facts)
+{
+    const char *key = w->share_result ? "share_file" :
+        w->share_inspect ? "requested_output" : NULL;
+    const char *copy = key ? zcl_package_copy_str(facts, key) : NULL;
+    if (!json_get(facts, "share_file") && w->share_result && w->shared_path[0]) copy = w->shared_path;
+    if (!copy && w->share_inspect) copy = zcl_package_copy_str(facts, "output");
+    return copy && !strcmp(copy, w->shared_path) ? copy : NULL;
+}
 static const char *al_error_copy(const struct library *w, const struct zcl_command_reply *reply)
 {
-    const char *key = w->publish_result ? "public_link" : w->share_result ? "output" : NULL;
-    const char *copy = key && reply->error.mutated ?
-        zcl_package_copy_str(json_get(&reply->data, "failure_facts"), key) : NULL;
-    if (copy && w->share_result && strcmp(copy, w->shared_path)) copy = NULL;
+    const struct json_value *facts = json_get(&reply->data, "failure_facts");
+    const char *copy = w->publish_result ?
+        (reply->error.mutated ? zcl_package_copy_str(facts, "public_link") : NULL) :
+        al_error_share_copy(w, facts);
     if (copy && (!copy[0] || strnlen(copy, ZCL_PRESENT_COPY_TEXT_MAX + 1) > ZCL_PRESENT_COPY_TEXT_MAX)) copy = NULL;
     return copy;
 }
@@ -414,10 +423,12 @@ static void al_error_view(struct library *w, const struct zcl_command_reply *rep
     (void)snprintf(w->model.request_id, sizeof(w->model.request_id), "library-error");
     (void)snprintf(w->model.title, sizeof(w->model.title), "%s",
         w->publish_result ? "Offer published" : w->share_result ? "Share file created" :
+        w->share_inspect ? "Inspect share destination" :
         w->action_failed ? "Could not complete this action" : "Could not open My Apps");
     (void)snprintf(w->model.summary, sizeof(w->model.summary), "%s", reply->error.message);
     app_library_choice(&w->model, "close", "Close", copy ?
-        (w->publish_result ? "Press C to copy the published app link." : "Press C to copy the share file location.") :
+        (w->publish_result ? "Press C to copy the published app link." :
+         w->share_inspect ? "Press C to copy the destination to inspect before retrying." : "Press C to copy the share file location.") :
         "No other app will be opened.");
     struct zcl_present_window_event_v1 event = {0};
     char why[256];
@@ -651,12 +662,16 @@ static bool al_share_path(struct library *w, const struct library_row *row, stru
 #endif
 }
 static void al_share_notice_failure(struct library *w, struct zcl_command_reply *reply,
-    const char *code, const char *message)
+    const char *code, const char *message, bool created)
 {
-    w->share_result = true;
+    w->share_result = created; w->share_inspect = !created;
     zcl_package_copy_fail(reply, code, true, message, w->shared_path);
     struct json_value facts; json_init(&facts); json_set_object(&facts);
-    if (json_push_kv_str(&facts, "output", w->shared_path)) (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    bool ok = json_push_kv_str(&facts, created ? "share_file" : "requested_output", w->shared_path);
+    if (created) ok = ok && json_push_kv_str(&facts, "output", w->shared_path);
+    if (!ok || !json_push_kv(&reply->data, "failure_facts", &facts))
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "Look for z23-share files in your home folder before retrying.");
     json_free(&facts);
 }
 static bool al_share_notice(struct app_confirm *view, const char *path, char *why, size_t cap)
@@ -711,28 +726,21 @@ static bool al_reveal_failure_notice(struct library *w)
     app_confirm_free(notice); free(notice);
     return shown;
 }
-/* A leaf that failed after writing the planned file keeps its own error as
- * primary, but the room latches the share result so the teardown card offers
- * the exact location instead of "No other app will be opened." */
-static void al_share_failure_file(struct library *w, struct zcl_command_reply *reply)
+/* A reported file and a requested destination have different authority. */
+static void al_share_failure_evidence(struct library *w, const struct zcl_command_reply *reply)
 {
-    struct stat st;
-    /* The leaf's collision refusal says this invocation did not create the
-     * existing path, even when an earlier operation mutated the profile. */
-    if (reply->status == ZCL_COMMAND_STATUS_PASSED || !strcmp(reply->error.code, "OUTPUT_EXISTS") || !w->shared_path[0] ||
-        lstat(w->shared_path, &st) != 0)
-        return;
-    w->share_result = true;
-    if (json_get(&reply->data, "failure_facts")) return; /* the leaf carries its own output fact */
-    struct json_value facts; json_init(&facts); json_set_object(&facts);
-    if (json_push_kv_str(&facts, "output", w->shared_path)) (void)json_push_kv(&reply->data, "failure_facts", &facts);
-    json_free(&facts);
+    const struct json_value *facts = json_get(&reply->data, "failure_facts");
+    const char *file = zcl_package_copy_str(facts, "share_file");
+    const char *requested = zcl_package_copy_str(facts, "requested_output");
+    if (!requested) requested = zcl_package_copy_str(facts, "output");
+    if (file && !strcmp(file, w->shared_path)) w->share_result = true;
+    else if (requested && !strcmp(requested, w->shared_path)) w->share_inspect = true;
 }
 static bool al_share_result(struct library *w, struct app_confirm *notice,
     struct zcl_command_reply *reply, char *why, size_t cap)
 {
     if (reply->status != ZCL_COMMAND_STATUS_PASSED) {
-        al_share_failure_file(w, reply);
+        al_share_failure_evidence(w, reply);
         return false;
     }
     const char *status = zcl_package_copy_str(&reply->data, "status");
@@ -744,12 +752,13 @@ static bool al_share_result(struct library *w, struct app_confirm *notice,
     const char *file = zcl_package_copy_str(&reply->data, "share_file");
     if (!file || strcmp(file, w->shared_path))
         al_share_notice_failure(w, reply, "SHARE_RESULT_MISMATCH",
-            "Share completed but its file location could not be verified.");
+            "Share completed but its file location could not be verified.", false);
     else if (!app_confirm_show(notice, w->notice, w->prepare_context, why, cap))
-        al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "Share file created; its location is in evidence.");
+        al_share_notice_failure(w, reply, "PRESENTATION_FAILED",
+            "Share file created, but confirmation could not be shown. Look for z23-share files in your home folder.", true);
     else if (al_reveal_enabled(notice) && !(w->revealer ? w->revealer : al_reveal_native)(w->prepare_context, w->shared_path)) {
         al_share_notice_failure(w, reply, "REVEAL_FAILED",
-            "The share file was created, but opening its location could not be confirmed.");
+            "The share file was created, but opening its location could not be confirmed.", true);
         w->error_presented = al_reveal_failure_notice(w);
     }
     return false;
@@ -1285,7 +1294,7 @@ static void al_recovered_error_normalize(struct zcl_command_reply *reply)
 }
 static void al_recovered_begin(struct library *w)
 {
-    w->draft_result = w->create_result = w->publish_result = w->share_result = false;
+    w->draft_result = w->create_result = w->publish_result = w->share_result = w->share_inspect = false;
     w->receive_failure = false;
     w->recovery_result = true;
 }
