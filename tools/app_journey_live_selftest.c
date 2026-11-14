@@ -26,6 +26,83 @@ static int aj_test_child(const char *mode)
     return 0;
 }
 
+static int aj_test_cli(int argc, char **argv)
+{
+    for (int i = 0; i + 1 < argc; ++i) if (!strcmp(argv[i], "app") && !strcmp(argv[i + 1], "get")) {
+        if (i + 2 == argc) {
+            char path[PATH_MAX];
+            const char *home = getenv("HOME");
+            if (!home || snprintf(path, sizeof(path), "%s/catalog-error", home) >= (int)sizeof(path)) return 2;
+            if (access(path, F_OK) == 0) return 7;
+            if (snprintf(path, sizeof(path), "%s/catalog-absent", home) >= (int)sizeof(path)) return 2;
+            puts(access(path, F_OK) == 0 ? "example/app-extra abc root 1s ago" : "example/app abc 0123456789abcdef 1s ago");
+            return 0;
+        }
+        int fd = open("get-count", O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (fd < 0) return 2;
+        char b = 'x'; bool ok = write(fd, &b, 1) == 1 && close(fd) == 0;
+        if (!ok) return 2;
+        if (access("get-success", F_OK) == 0) { puts("retrieval succeeded"); return 0; }
+        puts("distinctive retrieval failure"); return 7;
+    }
+    return -1;
+}
+
+static bool aj_single_get_success(struct aj_node_ctx *c, const char *tmp, const char *path)
+{
+    char success[PATH_MAX], out[4096]; struct stat st;
+    if (snprintf(success, sizeof(success), "%s/get-success", tmp) >= (int)sizeof(success)) return false;
+    int fd = open(success, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || close(fd) != 0) return false;
+    bool passed = aj_b_get_once(c, out, sizeof(out)) && strstr(out, "retrieval succeeded");
+    bool once = stat(path, &st) == 0 && st.st_size == 1;
+    bool cleaned = unlink(success) == 0 && unlink(path) == 0;
+    return passed && once && cleaned;
+}
+
+static int aj_single_get_test(const char *tmp)
+{
+    struct aj_node_ctx c = {.rpc = 1};
+    size_t len = strlen(tmp);
+    if (len >= sizeof(c.datadir) || len >= sizeof(g_repo_app)) return 1;
+    memcpy(c.datadir, tmp, len + 1); memcpy(c.home, tmp, len + 1);
+    memcpy(g_repo_app, tmp, len + 1);
+    snprintf(g_name, sizeof(g_name), "example/app");
+    g_board_wait_s = 3;
+    char out[4096], path[PATH_MAX];
+    bool failed = !aj_b_get_once(&c, out, sizeof(out)) && strstr(out, "distinctive retrieval failure");
+    if (snprintf(path, sizeof(path), "%s/get-count", tmp) >= (int)sizeof(path)) return 1;
+    struct stat st;
+    bool once = stat(path, &st) == 0 && st.st_size == 1;
+    (void)unlink(path);
+    g_board_wait_s = 1;
+    bool passed = aj_single_get_success(&c, tmp, path);
+    if (failed && once && passed) puts("single get failure and success: PASS");
+    return failed && once && passed ? 0 : 1;
+}
+
+static int aj_catalog_test(const char *tmp)
+{
+    struct aj_node_ctx c = {.rpc = 1}; size_t len = strlen(tmp);
+    if (len >= sizeof(c.datadir)) return 1;
+    memcpy(c.datadir, tmp, len + 1); memcpy(c.home, tmp, len + 1);
+    snprintf(g_name, sizeof(g_name), "example/app"); g_board_wait_s = 2;
+    bool ok = !aj_catalog_has_name("example/app-extra abc\n", g_name) &&
+        aj_catalog_has_name("other abc\nexample/app abc root\n", g_name);
+    char path[PATH_MAX], out[1024];
+    const char *modes[] = {"catalog-absent", "catalog-error"};
+    for (size_t i = 0; i < 2; i++) {
+        if (snprintf(path, sizeof(path), "%s/%s", tmp, modes[i]) >= (int)sizeof(path)) return 1;
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0 || close(fd) != 0) return 1;
+        bool absent = !aj_wait_catalog(&c, out, sizeof(out));
+        bool removed = unlink(path) == 0;
+        ok = absent && removed && ok;
+    }
+    if (ok) puts("catalog matching and refusal: PASS");
+    return ok ? 0 : 1;
+}
+
 static int aj_test_call(const char *mode, int timeout, int expected)
 {
     char out[256];
@@ -151,6 +228,8 @@ static int aj_test_cases(void)
 int main(int argc, char **argv)
 {
     if (argc == 3 && !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
+    int cli = aj_test_cli(argc, argv);
+    if (cli >= 0) return cli;
     char self[PATH_MAX], tmp[PATH_MAX], root[PATH_MAX];
     const char *base = getenv("TMPDIR"), *home = getenv("HOME");
     if (!base || !*base) {
@@ -159,7 +238,7 @@ int main(int argc, char **argv)
     }
     if (!realpath(argv[0], self) || snprintf(tmp, sizeof tmp, "%s/app-journey-test.XXXXXX", base) >= (int)sizeof tmp || !mkdtemp(tmp)) return 2;
     int failed = aj_test_setup(self, tmp);
-    if (!failed) failed = aj_test_cases() | aj_group_startup_test() | aj_group_owned_test();
+    if (!failed) failed = aj_test_cases() | aj_group_startup_test() | aj_group_owned_test() | aj_single_get_test(tmp) | aj_catalog_test(tmp);
     if (!aj_rm_rf(tmp, 0)) failed = 1;
     if (!failed) puts("app journey child status selftest: PASS");
     return failed;

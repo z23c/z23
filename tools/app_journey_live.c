@@ -838,18 +838,60 @@ static bool aj_phase_publish(struct aj_node_ctx *ac)
 
 /* B types ONE name. Every hex identity arrives from the network and must
  * equal A's; the rebuilt image must equal A's local build byte for byte. */
+static bool aj_catalog_has_name(const char *text, const char *name)
+{
+    size_t len = strlen(name);
+    if (!len) return false;
+    for (const char *line = text; *line;) {
+        if (!strncmp(line, name, len) && line[len] == ' ') return true;
+        const char *end = strchr(line, '\n');
+        if (!end) break;
+        line = end + 1;
+    }
+    return false;
+}
+
+static bool aj_catalog_deadline(int64_t *start, int64_t *deadline)
+{
+    *start = clock_now_monotonic_ns();
+    if (*start <= 0 || g_board_wait_s <= 0 || g_board_wait_s > 86400) return false;
+    int64_t budget = (int64_t)g_board_wait_s * 1000000000LL;
+    if (*start > INT64_MAX - budget) return false;
+    *deadline = *start + budget;
+    return true;
+}
+
+static bool aj_wait_catalog(struct aj_node_ctx *bc, char *out, size_t cap)
+{
+    if (!out || !cap) return false;
+    out[0] = '\0';
+    int64_t start, deadline;
+    if (!aj_catalog_deadline(&start, &deadline)) return false;
+    char *tail[] = {(char *)"app", (char *)"get", NULL};
+    for (;;) {
+        int64_t now = clock_now_monotonic_ns();
+        if (now < start || now >= deadline) break;
+        /* aj_run's alarm has whole-second resolution, so this may run for
+         * less than one extra second; never accept a result past deadline. */
+        int remaining = (int)((deadline - now + 999999999LL) / 1000000000LL);
+        int rc = aj_cli(bc->datadir, bc->rpc, tail, out, cap, remaining, bc->home);
+        now = clock_now_monotonic_ns();
+        if (now < start || now >= deadline) break;
+        if (rc == 0 && aj_catalog_has_name(out, g_name)) return true;
+        int64_t ms = (deadline - now) / 1000000LL;
+        if (ms > 5000) ms = 5000;
+        if (ms > 0) aj_sleep_ms((long)ms);
+    }
+    aj_fail("B catalog did not expose the app within %lds: %s", g_board_wait_s, out);
+    return false;
+}
+
 static bool aj_b_get_once(struct aj_node_ctx *bc, char *out, size_t cap)
 {
-    long deadline = aj_now_s() + g_board_wait_s;
-    for (;;) {
-        if (aj_app(bc, "get", g_name, out, cap, 900) == 0) return true;
-        if (aj_now_s() >= deadline) {
-            aj_fail("B app get never succeeded within %lds: %s",
-                    g_board_wait_s, out);
-            return false;
-        }
-        aj_sleep_ms(5000);
-    }
+    if (!aj_wait_catalog(bc, out, cap)) return false;
+    if (aj_app(bc, "get", g_name, out, cap, 900) == 0) return true;
+    aj_fail("B app get failed: %s", out);
+    return false;
 }
 
 static bool aj_phase_b_get(struct aj_node_ctx *bc)
