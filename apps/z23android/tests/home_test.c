@@ -69,13 +69,21 @@ static void node_details_reported(void)
     view.node_process_running = view.node_running = true;
     view.node_height = 123; view.node_reference = 125; view.chain_state = ZAPP_CHAIN_CURRENT;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "123") && strstr(text, "125") &&
-        strstr(text, "no more than two blocks behind") && strstr(text, "separate from wallet scanning"));
+        strstr(text, "No more than 2 blocks behind") && strstr(text, "Wallet scanning is separate"));
+    assert(strstr(text, "Last check\nNode block: 123\nNetwork reference: 125"));
+    view.node_height = 130;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "No more than 2 blocks behind"));
     assert(!strstr(text, "WALLET-MARKER") && !strstr(text, "SECRET") && !strstr(text, "CONNECTION-PATH"));
     view.node_height = -1; view.node_reference = -1;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Unknown") &&
-        strstr(text, "sync status is unknown") && !strstr(text, "two blocks behind"));
+        strstr(text, "Sync status unknown") && !strstr(text, "No more than 2 blocks behind"));
+    view.node_height = 123; view.node_reference = -1; view.chain_state = ZAPP_CHAIN_CURRENT;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Network reference: Unknown") &&
+        strstr(text, "Sync status unknown") && !strstr(text, "No more than 2 blocks behind"));
+    view.chain_state = ZAPP_CHAIN_UNCONFIRMED;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Cannot confirm sync"));
     view.node_height = 123; view.node_reference = 126; view.chain_state = ZAPP_CHAIN_BEHIND;
-    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "node was behind") && !strstr(text, "two blocks behind"));
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node is behind the reference") && !strstr(text, "No more than 2 blocks behind"));
     view.node_installing = true;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node starting") && !strstr(text, "123"));
     assert(!strcmp(zapp_home_action_label("node_details"), "Node details"));

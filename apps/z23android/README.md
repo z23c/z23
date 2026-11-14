@@ -131,10 +131,9 @@ button scrolled out of its page never takes a tap meant for the fixed bar over i
 
 The default Home shows a node status line, Node details, and Start node when the node is stopped. Wallet and Receive are the primary tiles. More opens Scan, Assistant, Apps, Play, Settings and the node controls, including Stop node. The node status keeps two lines and Start node keeps one line while hidden, so the tiles do not move as status changes. Receive opens its existing page directly, including Copy address and Share request, without opening Funds first.
 
-The **Node details** action opens a read-only page with the last reported
-node block and peer or fleet reference, or an explicit unknown or stopped
-state. The chain verdict permits a node to be up to two blocks behind that
-reference. Node sync and wallet scanning are separate; this page does not
+The **Node details** action shows the last checked node block and network
+reference from peers or a fleet host, or an explicit unknown or stopped state.
+The chain verdict permits a node to be up to two blocks behind that reference. Node sync and wallet scanning are separate; this page does not
 report wallet readiness or full-history validation. Back returns Home.
 The foreground notification uses the same node status line as Home.
 

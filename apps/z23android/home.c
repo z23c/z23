@@ -139,10 +139,10 @@ static const char *node_details_verdict(const struct zapp_view *view)
 {
     bool known = view->node_height >= 0 && view->node_reference > 0;
     if (known && view->chain_state == ZAPP_CHAIN_CURRENT)
-        return "At the last check, the node was no more than two blocks behind the reported reference.";
-    if (known && view->chain_state == ZAPP_CHAIN_BEHIND) return "At the last check, the node was behind.";
-    if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) return "Cannot confirm the node is up to date.";
-    return "Node sync status is unknown.";
+        return "No more than 2 blocks behind.";
+    if (known && view->chain_state == ZAPP_CHAIN_BEHIND) return "Node is behind the reference.";
+    if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) return "Cannot confirm sync.";
+    return "Sync status unknown.";
 }
 
 /* The details surface contains only explicit node fields, never wallet or assistant text. */
@@ -152,14 +152,14 @@ const char *zapp_home_node_details(const struct zapp_view *view, bool preview, c
     if (preview) { snprintf(out, cap, "The preview app does not run a node."); return out; }
     const char *state = node_details_pending(view);
     if (state) {
-        snprintf(out, cap, "%s\nNode sync is separate from wallet scanning.", state);
+        snprintf(out, cap, "%s\nWallet scanning is separate.", state);
         return out;
     }
     char height[32] = "Unknown", reference[32] = "Unknown";
     if (view->node_height >= 0) zapp_grouped(view->node_height, height);
     if (view->node_reference > 0) zapp_grouped(view->node_reference, reference);
     const char *verdict = node_details_verdict(view);
-    snprintf(out, cap, "Last reported node block: %s\nReported peer or fleet reference: %s\n%s\nNode sync is separate from wallet scanning.",
+    snprintf(out, cap, "Last check\nNode block: %s\nNetwork reference: %s\n%s\nWallet scanning is separate.",
              height, reference, verdict);
     return out;
 }
