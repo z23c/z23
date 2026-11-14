@@ -334,10 +334,14 @@ static int check_unavailable_is_unknown(void)
 
 /* Stand in for the node: answer `dumpstate` from the in-process registry, so
  * the DIAG row wiring is exercised too and no socket is ever opened. */
+static const char *g_ts_rpc_fixture;
+
 static char *ts_rpc_hook(const char *method, const char *params_json)
 {
     if (!method || strcmp(method, "dumpstate") != 0 || !params_json)
         return NULL;
+    if (g_ts_rpc_fixture)
+        return zcl_strdup(g_ts_rpc_fixture, "storage telemetry fixture");
     struct json_value params, result;
     json_init(&params);
     json_init(&result);
@@ -542,6 +546,36 @@ static int check_cache_command_values(void)
     json_free(&input); json_free(&env); return failures;
 }
 
+static int check_group_refusal(const char *state, const char *expected)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = spec_for("ops.telemetry.storage.cache");
+    struct json_value input, env;
+    json_init(&input); json_set_object(&input); json_init(&env);
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+    g_ts_rpc_fixture = state;
+    size_t n = spec ? zcl_command_registry_execute_json(zcl_command_catalog(), spec,
+        NULL, &input, false, spec->path, "normal", 0, 0, NULL, out,
+        sizeof out, &code) : 0;
+    g_ts_rpc_fixture = NULL;
+    bool parsed = n && json_read(&env, out, n);
+    const struct json_value *error = json_get(&env, "error");
+    const struct json_value *errcode = json_get(error, "code");
+    TS_CHECK("[storage] filtered reply rejects unsupported or malformed metadata",
+        parsed && code != ZCL_COMMAND_EXIT_OK && !json_get_bool(json_get(&env, "ok")) && errcode &&
+        errcode->type == JSON_STR && strcmp(json_get_str(errcode), expected) == 0);
+    if (strcmp(expected, "GROUP_UNAVAILABLE") == 0) {
+        const struct json_value *next = json_at(json_get(&env, "next"), 0);
+        const struct json_value *command = json_get(next, "command");
+        TS_CHECK("[storage] unavailable group suggests summary", command &&
+            command->type == JSON_STR &&
+            strcmp(json_get_str(command), "ops.telemetry.storage.summary") == 0);
+    }
+    json_free(&input); json_free(&env);
+    return failures;
+}
+
 static int check_commands(void)
 {
     int failures = 0;
@@ -557,6 +591,13 @@ static int check_commands(void)
     failures += exec_leaf("ops.telemetry.storage.cache", "normal", true,
                           &bytes);
     failures += check_cache_command_values();
+    failures += check_group_refusal("{\"state\":{\"group_filter\":\"cache\",\"group_filter_matched\":false,\"values\":{}}}", "GROUP_UNAVAILABLE");
+    failures += check_group_refusal("{\"state\":{\"group_filter\":\"cache\",\"values\":{}}}", "BAD_STATE_BODY");
+    failures += check_group_refusal("{\"state\":{\"group_filter\":\"disk\",\"group_filter_matched\":true,\"values\":{}}}", "BAD_STATE_BODY");
+    failures += check_group_refusal("{\"state\":{\"group_filter\":\"cache\",\"group_filter_matched\":\"yes\",\"values\":{}}}", "BAD_STATE_BODY");
+    g_ts_rpc_fixture = "{\"state\":{\"schema\":\"zcl.telemetry.storage.v1\",\"group_filter\":\"cache\",\"group_filter_matched\":false,\"values\":{}}}";
+    failures += exec_leaf("ops.telemetry.storage.summary", "normal", true, NULL);
+    g_ts_rpc_fixture = NULL;
     {
         const struct zcl_command_spec *cache =
             spec_for("ops.telemetry.storage.cache");

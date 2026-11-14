@@ -99,6 +99,38 @@ static void ts_add_sibling_suggestion(
         (void)zcl_command_reply_add_next(reply, sibling, "{}", sibling_reason);
 }
 
+/* Validate the node's unprojected group response before reporting success. */
+static bool ts_group_state(const struct json_value *state, const char *key,
+                           const struct zcl_command_request *request,
+                           struct zcl_command_reply *reply)
+{
+    if (strcmp(key, "summary") == 0 || strcmp(key, "full") == 0)
+        return true;
+    const struct json_value *group = json_get(state, "group_filter");
+    const struct json_value *matched = json_get(state, "group_filter_matched");
+    if (!group || group->type != JSON_STR ||
+        strcmp(json_get_str(group), key) != 0 || !matched ||
+        matched->type != JSON_BOOL) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_STATE_BODY",
+                               "serialize", false, false,
+                               "storage telemetry returned invalid group metadata",
+                               "storage_telemetry");
+        return false;
+    }
+    if (!json_get_bool(matched)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "GROUP_UNAVAILABLE",
+                               "execute", false, false,
+                               "the node does not support this storage telemetry group",
+                               "storage_telemetry");
+        ts_add_sibling_suggestion(request, reply, "ops.telemetry.storage.summary",
+                                  "read the available storage summary");
+        return false;
+    }
+    return true;
+}
+
 /* dumpstate params for the storage telemetry subsystem at one view/group.
  * `key` is a fixed token from the table below — never caller text — so it is
  * spliced into the array literal rather than round-tripped through a JSON
@@ -170,6 +202,10 @@ static void ts_dispatch(const struct zcl_command_request *request,
                                "serialize", false, false,
                                "storage telemetry body carried no state object",
                                "storage_telemetry");
+        json_free(&body);
+        return;
+    }
+    if (!ts_group_state(state, key, request, reply)) {
         json_free(&body);
         return;
     }
