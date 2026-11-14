@@ -1625,6 +1625,20 @@ static bool lo_lock_csr_bounded(struct chain_state_repository *csr, int ms)
     return false;
 }
 
+static bool lo_bounded_refuses_busy(struct chain_state_repository *csr)
+{
+    struct lo_snapshot_args bounded = { .csr = csr, .bounded = true };
+    progress_store_tx_lock();
+    pthread_t th;
+    bool started = pthread_create(&th, NULL, lo_snapshot_thread, &bounded) == 0;
+    for (int i = 0; started && i < 2000 && !atomic_load(&bounded.done); i++)
+        platform_sleep_ms(1);
+    bool finished = atomic_load(&bounded.done);
+    progress_store_tx_unlock();
+    if (started) pthread_join(th, NULL);
+    return started && finished && bounded.bounded_code == EBUSY;
+}
+
 static int t_snapshot_releases_csr_lock_before_progress_read(void)
 {
     int failures = 0;
@@ -1663,17 +1677,8 @@ static int t_snapshot_releases_csr_lock_before_progress_read(void)
     CSR_RUN("csr/lock-order: snapshot completes once the stage releases",
             atomic_load(&args.done) && args.view.tip_height == -1);
 
-    struct lo_snapshot_args bounded = { .csr = &csr, .bounded = true };
-    progress_store_tx_lock();
-    pthread_t bounded_thread;
-    bool bounded_started = pthread_create(&bounded_thread, NULL, lo_snapshot_thread, &bounded) == 0;
-    for (int i = 0; bounded_started && i < 2000 && !atomic_load(&bounded.done); i++)
-        platform_sleep_ms(1);
-    bool finished_while_held = atomic_load(&bounded.done);
-    progress_store_tx_unlock();
-    if (bounded_started) pthread_join(bounded_thread, NULL);
     CSR_RUN("csr/lock-order: bounded snapshot refuses busy progress store",
-            bounded_started && finished_while_held && bounded.bounded_code == EBUSY);
+            lo_bounded_refuses_busy(&csr));
     active_chain_register_authority(&(struct active_chain_authority){0});
     csr_free(&csr);
     csr_fix_free(&f);
