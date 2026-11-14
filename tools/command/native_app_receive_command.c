@@ -304,14 +304,16 @@ static bool ar_receipt_common(struct json_value *out, const struct json_value *p
     return json_push_kv_str(out, "stage", "commit");
 }
 /* Match zpb_keep_reply/zpb_record_write's shape. The future version is exactly
- * 64 lowercase hex bytes, so any such placeholder has identical encoded size.
- * next is a 512-byte producer buffer: 511 maximally escaped bytes bound every
- * possible formatted/truncated instruction, without duplicating its prose. */
-static bool ar_receipt_commit_fields(struct json_value *out, const struct receive_work *w)
+ * 64 lowercase hex bytes. Preserve the existing conservative preview bound;
+ * the budget check separately mirrors the producer's bounded next instruction. */
+static bool ar_receipt_commit_fields(struct json_value *out, const struct receive_work *w, bool conservative_next)
 {
     char version[65], trust[AR_PATH], next[512];
     memset(version, 'f', 64); version[64] = 0;
-    memset(next, 1, sizeof(next) - 1); next[sizeof(next) - 1] = 0;
+    if (conservative_next) { memset(next, 1, sizeof(next) - 1); next[sizeof(next) - 1] = 0; }
+    else (void)snprintf(next, sizeof(next),
+        "the copy in %s is yours to build and open; this confirmation covers only publisher %s and root %s",
+        w->destination, w->publisher, w->package);
     int n = snprintf(trust, sizeof(trust), "%s/%s/%s.%s.trust", w->datadir,
         ZCL_PACKAGE_RECEIVE_TRUST_DIR, version, w->release);
     if (n <= 0 || (size_t)n >= sizeof(trust)) return false;
@@ -324,13 +326,35 @@ static bool ar_preview_receipt_bound(const struct receive_work *w,
 {
     if (!w->preview) return true;
     struct json_value projected; json_init(&projected);
-    bool ok = ar_receipt_common(&projected, plan) && ar_receipt_commit_fields(&projected, w);
+    bool ok = ar_receipt_common(&projected, plan) && ar_receipt_commit_fields(&projected, w, true);
     size_t bytes = ok ? json_write(&projected, NULL, 0) : 0;
     json_free(&projected);
     if (!ok || !bytes) return ar_fail(reply, "PREVIEW_RECEIPT_PROJECTION_FAILED",
         "Cannot reserve the complete receive receipt; nothing was received.");
     return bytes <= AR_PREVIEW_RECEIPT_MAX || ar_fail(reply, "PREVIEW_RECEIPT_TOO_LARGE",
         "The escaped receive receipt exceeds the preview reserve; shorten the copy or datadir path, or receive without preview.");
+}
+/* The normal receipt uses the exact producer's bounded next instruction.
+ * Compare its escaped shape with the registry's measured usable data space
+ * before either confirmation or the receive commit can write anything. */
+static bool ar_receipt_budget(const struct zcl_command_request *request, const struct receive_work *w,
+    const struct json_value *plan, struct zcl_command_reply *reply)
+{
+    if (!request->success_data_budget_provided) {
+        if (request->budget_bytes) return ar_fail(reply, "BUDGET_UNAVAILABLE", "Cannot measure the receive reply budget; nothing was received.");
+        return true;
+    }
+    struct json_value projected; json_init(&projected);
+    bool ok = ar_receipt_common(&projected, plan) && ar_receipt_commit_fields(&projected, w, false) &&
+        json_push_kv_str(&projected, "continuation", "received") &&
+        json_push_kv_bool(&projected, "continuation_executed", false) &&
+        json_push_kv_bool(&projected, "receive_progress_ui_failed", false);
+    size_t bytes = ok ? json_write(&projected, NULL, 0) : 0;
+    json_free(&projected);
+    if (!ok || !bytes) return ar_fail(reply, "RECEIPT_PROJECTION_FAILED", "Cannot measure the receive receipt; nothing was received.");
+    size_t reserve = w->preview ? APP_RECEIVE_CONTINUATION_RESERVE : 0;
+    return (bytes <= request->success_data_budget && reserve <= request->success_data_budget - bytes) || ar_fail(reply, "BUDGET_TOO_SMALL",
+        "The receive result will not fit the reply budget; nothing was received. Increase the budget and try again.");
 }
 static bool ar_plan(const struct zcl_command_request *request,
     struct receive_work *w, struct zcl_command_reply *reply,
@@ -355,6 +379,7 @@ static bool ar_plan(const struct zcl_command_request *request,
         if (!ok) ar_fail(reply, "RECEIVE_IDENTITY_MISMATCH", "The verified receive identity differs from the selected offer.");
     }
     if (ok) ok = ar_preview_receipt_bound(w, &plan.data, reply);
+    if (ok) ok = ar_receipt_budget(request, w, &plan.data, reply);
     zcl_command_reply_free(&plan);
     return ok;
 }

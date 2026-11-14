@@ -358,7 +358,7 @@ static bool arf_retry_fits(const struct receive_flow *f)
      * exercises that bound against the registry's complete envelope. */
     return data && prior && prior <= 2048u && data <= 4096u &&
         data <= f->retry_data_budget && prior <= (f->retry_data_budget - data) / 2u &&
-        f->retry_data_budget - data - 2u * prior >= 10240u;
+        f->retry_data_budget - data - 2u * prior >= APP_RECEIVE_CONTINUATION_RESERVE;
 }
 #ifdef ZCL_TESTING
 bool app_receive_flow_test_retry_fit(struct zcl_command_reply *reply,
@@ -722,6 +722,30 @@ bool app_receive_flow_test_report(struct zcl_command_reply *reply,
             zcl_package_copy_str(json_get(wires[2], "error"), "message"));
     return ok && arf_finish(&f, !failed);
 }
+bool app_receive_flow_test_ordinary_report(struct zcl_command_reply *reply,
+    const struct app_receive_job_result *results, const struct json_value *wire, bool failed)
+{
+    static const char *const stages[] = {"Checking the received version", "Building your app", "Opening the built version"};
+    struct receive_flow f = {.reply = reply, .status = "kept", .executed = failed ? -1 : 1};
+    json_init(&f.operations); json_set_array(&f.operations);
+    struct receive_progress *p = zcl_calloc(1, sizeof(*p), "ordinary-budget/progress");
+    if (!p) { json_free(&f.operations); return false; }
+    p->phase = "allocation"; memset(p->why, '"', sizeof(p->why) - 1);
+    bool ok = json_push_kv_bool(&reply->data, "preview_opened", true);
+    for (size_t i = 0; ok && i < 3; ++i) {
+        ok = arf_observation(&f, &results[i], wire, stages[i], true, false, p);
+        if (ok) ok = json_push_kv_str(&f.operations.children[f.operations.num_children - 1], "progress_recovery", failed ? "unavailable" : "continue");
+    }
+    if (ok) ok = json_push_kv(&reply->data, "operations", &f.operations);
+    struct json_value kept; json_init(&kept); json_set_object(&kept);
+    if (ok && !failed) ok = arf_result_summary(&kept, wire) && json_push_kv(&reply->data, "kept", &kept);
+    if (ok && failed) {
+        char message[161], code[65]; memset(message, '"', 160); message[160] = 0;
+        memset(code, 'a', 64); code[64] = 0; (void)arf_fail(&f, code, message);
+    }
+    json_free(&kept); free(p); json_free(&f.operations);
+    return ok && arf_finish(&f, !failed);
+}
 bool app_receive_flow_test_retry_report(struct zcl_command_reply *reply,
     const struct json_value *prior, const struct app_receive_job_result results[3],
     const struct json_value *wire, bool failed)
@@ -867,7 +891,7 @@ void app_recovered_flow_run(const char *copy_dir, const char *datadir, const uin
         ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "The recovered identity could not be retained.");
     if (ok) {
         size_t data_size = json_write(&reply->data, NULL, 0);
-        if (!data_size || data_size > data_budget || data_budget - data_size < 10240u)
+        if (!data_size || data_size > data_budget || data_budget - data_size < APP_RECEIVE_CONTINUATION_RESERVE)
             ok = arf_fail(&f, "BUDGET_TOO_SMALL", "The recovered result cannot fit safely; no build was started.");
     }
     if (ok) ok = arf_choose(&f, "Your copy is ready", "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice.", "Build and preview", &chosen);

@@ -1079,6 +1079,110 @@ static int rpb_receipt_reserve(void)
     return failures;
 }
 
+static bool rbb_allowance(const struct zcl_command_spec *spec, size_t budget, size_t *usable)
+{
+    struct zcl_command_reply probe; zcl_command_reply_init(&probe, "zcl.app_receive.v1");
+    struct zcl_command_budget_fixture fixture = {.budget_bytes = budget};
+    char wire[16385]; size_t bytes = 0;
+    bool ok = zcl_command_registry_test_success_budget(spec, &probe, &fixture, usable,
+                                                        wire, sizeof(wire), &bytes);
+    zcl_command_reply_free(&probe); return ok;
+}
+static bool rbb_attempt(struct receive_fixture *f, bool preview, size_t budget, bool measured, bool allowed)
+{
+    struct json_value input; json_init(&input);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    size_t usable = 0;
+    bool ok = spec && rt_input(&input, f) && json_push_kv_bool(&input, "preview", preview) &&
+        (!measured || rbb_allowance(spec, budget, &usable));
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    unsigned calls = 0;
+    if (ok) {
+        struct zcl_command_request request = {.input = &input, .spec = spec, .budget_bytes = budget,
+            .success_data_budget_provided = measured, .success_data_budget = usable};
+        zcl_test_app_receive_run(&request, &reply, rpb_no_window, &calls);
+        const char *code = allowed ? "CONFIRMATION_UNAVAILABLE" : measured ? "BUDGET_TOO_SMALL" : "BUDGET_UNAVAILABLE";
+        ok = rt_failed_with(&reply, code) && calls == (allowed ? 1u : 0u) &&
+            !reply.error.mutated && rt_absent(f);
+    }
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool rbb_receipt_boundary(const struct zcl_command_spec *spec,
+                                 const struct zcl_command_reply *reply, size_t threshold)
+{
+    struct json_value projected; json_init(&projected);
+    bool ok = json_copy_checked(&projected, &reply->data) &&
+        json_push_kv_str(&projected, "continuation", "received") &&
+        json_push_kv_bool(&projected, "continuation_executed", false) &&
+        json_push_kv_bool(&projected, "receive_progress_ui_failed", false);
+    size_t size = ok ? json_write(&projected, NULL, 0) : 0, at = 0, below = 0;
+    ok = ok && size && rbb_allowance(spec, threshold, &at) &&
+        rbb_allowance(spec, threshold - 1u, &below) && size <= at && size > below;
+    json_free(&projected); return ok;
+}
+static bool rbb_wire_identity(const struct json_value *data, const struct receive_fixture *f)
+{
+    const char *destination = zcl_package_copy_str(data, "destination");
+    const char *release = zcl_package_copy_str(data, "release_id");
+    const char *package = zcl_package_copy_str(data, "package_root");
+    return destination && release && package && !strcmp(destination, f->destination) &&
+        !strcmp(release, f->release) && !strcmp(package, f->package);
+}
+static bool rbb_committed_wire(struct receive_fixture *f, size_t threshold)
+{
+    struct json_value input; json_init(&input);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    size_t usable = 0;
+    bool ok = spec && rt_input(&input, f) && rbb_allowance(spec, 16384u, &usable);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct rt_presenter presenter = {.fixture = f, .decision = RT_CONFIRM};
+    if (ok) {
+        struct zcl_command_request request = {.input = &input, .spec = spec, .budget_bytes = 16384u,
+            .success_data_budget_provided = true, .success_data_budget = usable};
+        zcl_test_app_receive_run(&request, &reply, rt_present, &presenter);
+        ok = presenter.observed && rt_expected_reply(&presenter, &reply) && rt_received(f) &&
+            rbb_receipt_boundary(spec, &reply, threshold);
+    }
+    struct zcl_command_budget_fixture fixture = {.budget_bytes = 16384u};
+    char wire[16385];
+    size_t bytes = ok ? zcl_command_registry_test_reply_wire_fixture(zcl_command_catalog(), spec,
+        &reply, &fixture, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    ok = ok && bytes && bytes <= 16384u && json_read(&doc, wire, bytes);
+    ok = ok && rbb_wire_identity(json_get(&doc, "data"), f);
+    json_free(&doc); zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool rbb_boundary(struct receive_fixture *f, size_t *threshold)
+{
+    size_t low = 512u, high = 16384u;
+    while (high - low > 1u) {
+        size_t middle = low + (high - low) / 2u;
+        if (rbb_attempt(f, false, middle, true, false)) low = middle;
+        else if (rbb_attempt(f, false, middle, true, true)) high = middle;
+        else return false;
+    }
+    *threshold = high;
+    size_t preview = high + APP_RECEIVE_CONTINUATION_RESERVE;
+    return rbb_attempt(f, false, low, true, false) && rbb_attempt(f, false, high, true, true) &&
+        rbb_attempt(f, true, preview - 1u, true, false) && rbb_attempt(f, true, preview, true, true);
+}
+static int rbb_receive_budget(void)
+{
+    int failures = 0; struct receive_fixture f = {0}; size_t threshold = 0;
+    TEST("signed receive refuses insufficient measured reply budget before confirmation") {
+        ASSERT(rt_setup(&f));
+        ASSERT(rbb_attempt(&f, false, 512u, true, false));
+        ASSERT(rbb_attempt(&f, true, 512u, true, false));
+        ASSERT(rbb_attempt(&f, false, 512u, false, false));
+        ASSERT(rbb_attempt(&f, false, 16384u, true, true));
+        ASSERT(rbb_attempt(&f, true, 16384u, true, true));
+        ASSERT(rbb_boundary(&f, &threshold));
+        ASSERT(rbb_committed_wire(&f, threshold));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* real-clock: bounded conditions observe an actual commit thread; no sleep
  * constitutes acceptance. Every presenter path releases the blocked worker. */
 enum rp_case { RP_NORMAL, RP_CLOSE, RP_UI_FAIL, RP_PARTIAL, RP_ALLOC, RP_START, RP_PREPARE };
@@ -1541,6 +1645,30 @@ static bool rtry_max_wire(struct json_value *wire)
         json_push_kv(wire, "error", &error) && json_push_kv_str(wire, "status", text);
     json_free(&error); json_free(&data); return ok;
 }
+/* Conservative serialization bound; these simultaneous maximum worker
+ * fields do not assert that a real successful worker can produce them. */
+static bool rbb_ordinary_maximum(bool failed)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct json_value worker; json_init(&worker); json_set_object(&worker);
+    bool ok = rtry_pad(&reply.data, 2048u) && rtry_max_wire(&worker);
+    size_t receipt = json_write(&reply.data, NULL, 0);
+    struct app_receive_job_result results[3] = {0};
+    for (size_t i = 0; i < 3; ++i) {
+        results[i].capture_status = INT_MIN; results[i].evidence.exit_code = INT_MIN;
+        results[i].evidence.stderr_len = 128; results[i].evidence.stderr_observed = INT64_MAX;
+        memset(results[i].evidence.stderr_tail, 0xff, 128);
+    }
+    ok = ok && app_receive_flow_test_ordinary_report(&reply, results, &worker, failed);
+    size_t total = json_write(&reply.data, NULL, 0);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    struct zcl_command_budget_fixture fixture = {.budget_bytes = 14000u};
+    char output[16385]; size_t usable = 0, bytes = 0;
+    ok = ok && total >= receipt && total - receipt <= APP_RECEIVE_CONTINUATION_RESERVE && spec &&
+        zcl_command_registry_test_success_budget(spec, &reply, &fixture, &usable, output, sizeof(output), &bytes) &&
+        total <= usable && bytes && bytes <= fixture.budget_bytes;
+    json_free(&worker); zcl_command_reply_free(&reply); return ok;
+}
 static bool rtry_large_rejected(void)
 {
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
@@ -1666,7 +1794,7 @@ static int rtry_matrix(void)
     return failures;
 }
 #if defined(__linux__)
-enum rdiag_mode { RDIAG_CLOSE, RDIAG_UNAVAILABLE, RDIAG_PRIOR_CLOSE, RDIAG_MISMATCH, RDIAG_CONTINUE };
+enum rdiag_mode { RDIAG_CLOSE, RDIAG_UNAVAILABLE, RDIAG_PRIOR_CLOSE, RDIAG_MISMATCH, RDIAG_CONTINUE, RDIAG_ALL_CONTINUE };
 struct rdiag_presenter { unsigned progress, choices, recoveries, keep_choices; enum rdiag_mode mode; struct rloc_probe location; };
 static bool rloc_encode(const char *path, char *out, size_t cap)
 {
@@ -1695,6 +1823,10 @@ static bool rdiag_progress(struct rdiag_presenter *p,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
     ++p->progress;
+    if (p->mode == RDIAG_ALL_CONTINUE) {
+        if (cap) { memset(why, '"', cap - 1); why[cap - 1] = 0; }
+        return false;
+    }
     if (p->progress == 2) {
         if (p->mode == RDIAG_PRIOR_CLOSE) {
             bool redraw = false, close = false;
@@ -1724,7 +1856,7 @@ static bool rdiag_present(void *context, const struct zcl_present_model_v1 *mode
     if (!strcmp(model->title, "Operation result retained")) {
         ++p->recoveries;
         if (p->mode == RDIAG_UNAVAILABLE) return false;
-        if (p->mode == RDIAG_MISMATCH || p->mode == RDIAG_CONTINUE) return rdiag_choose(model, live);
+        if (p->mode == RDIAG_MISMATCH || p->mode == RDIAG_CONTINUE || p->mode == RDIAG_ALL_CONTINUE) return rdiag_choose(model, live);
         bool close = false, redraw = false;
         return rt_action(live, 0, &close, &redraw) && close;
     }
@@ -1862,6 +1994,7 @@ int test_app_receive(void)
     failures += rr_cases();
     failures += rp_cases();
     failures += rpb_receipt_reserve();
+    failures += rbb_receive_budget();
     failures += rd_defaults();
     failures += rd_overrides();
     failures += rd_inputs();
@@ -1871,6 +2004,7 @@ int test_app_receive(void)
     failures += rloc_cases();
     failures += rreveal_cases();
     failures += rtry_matrix();
+    if (!rbb_ordinary_maximum(false) || !rbb_ordinary_maximum(true)) ++failures;
 #if defined(__linux__)
     failures += rdiag_case(RDIAG_CLOSE);
 #endif
@@ -2293,6 +2427,49 @@ static bool ru_cli_start(struct ru_run *r)
     close(out[1]); if (log >= 0) close(log); if (input >= 0) close(input);
     r->output = out[0];
     return ok;
+}
+static bool ru_budget_cli_start(struct ru_run *r)
+{
+    int out[2]; char image[PATH_MAX];
+    char file[sizeof(r->fixture->file) + 8], datadir[sizeof(r->fixture->datadir) + 16];
+    if (!ru_cli_option(file, sizeof(file), "file", r->fixture->file) ||
+        !ru_cli_option(datadir, sizeof(datadir), "datadir", r->fixture->datadir) ||
+        !realpath("build/bin/z23-dev", image) || !ru_pipe(out)) return false;
+    int log = ru_log(r, "receive-budget-cli.log"), input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    const char *argv[] = {image, "app", "receive", file, datadir, "--preview", "--budget-bytes=2048", "--json", NULL};
+    bool ok = log >= 0 && input >= 0 && ru_spawn(&r->server, argv, input, out[1], log);
+    close(out[1]); if (log >= 0) close(log); if (input >= 0) close(input);
+    r->output = out[0]; return ok;
+}
+static bool ru_budget_cli_result(struct ru_run *r)
+{
+    if (!ru_read_line(r->output, r->line, sizeof(r->line), 15000)) return false;
+    struct json_value doc; json_init(&doc);
+    bool ok = json_read(&doc, r->line, strlen(r->line));
+    const struct json_value *error = json_get(&doc, "error"), *mutated = json_get(error, "mutated");
+    ok = ok && !strcmp(ru_string(error, "code"), "BUDGET_TOO_SMALL") && mutated &&
+        mutated->type == JSON_BOOL && !json_get_bool(mutated) && rt_absent(r->fixture);
+    uint32_t code = 0;
+    bool exited = ru_wait(&r->server, 5000, &code) == PLATFORM_PROCESS_WAIT_EXITED && code != 0;
+    json_free(&doc); return ok && exited && ru_window(r, false);
+}
+static int ru_budget_cli_case(void)
+{
+    int failures = 0; size_t saved = 0;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL}, {"XAUTHORITY", NULL}, {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}};
+    struct receive_fixture f = {0}; struct ru_run r = {.input = -1, .output = -1, .fixture = &f};
+    TEST("CLI preview refuses an insufficient measured budget before native confirmation") {
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(rt_setup(&f) && ru_environment(&f));
+        ASSERT(realpath("build/bin/native_ui_driver", r.driver_image) && ru_xvfb(&r));
+        ASSERT(ru_budget_cli_start(&r) && ru_budget_cli_result(&r));
+        PASS();
+    } _test_next:;
+    bool clean = ru_cleanup(&r);
+    if (!ru_env_restore(env, saved) || !clean) ++failures;
+    return failures;
 }
 static bool ru_cli_no_build(const struct ru_run *r)
 {
@@ -3458,16 +3635,71 @@ static int rus_case(bool keep)
     if (!clean) failures++;
     return failures;
 }
-static bool rdiag_success_result(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
+static bool rdiag_all_progress(const struct json_value *ops)
 {
-    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
-    if (!ops || ops->type != JSON_ARR || json_size(ops) != 3) return false;
+    for (size_t i = 0; i < 3; ++i) {
+        const struct json_value *op = json_at(ops, i);
+        const char *error = ru_string(op, "progress_error");
+        if (!ruf_bool(op, "progress_displayed", false) || strlen(error) != 255 || error[0] != '"' ||
+            error[254] != '"' || strcmp(ru_string(op, "progress_recovery"), "continue")) return false;
+    }
+    return true;
+}
+static bool rdiag_all_result(const struct json_value *data, const struct json_value *ops,
+                             const struct rdiag_presenter *p)
+{
+    return rdiag_all_progress(ops) && p->choices == 1 && p->recoveries == 3 && p->keep_choices == 1 && p->progress == 3 &&
+        !strcmp(ru_string(data, "continuation"), "kept") && json_get(data, "kept") &&
+        ruf_bool(data, "continuation_executed", true);
+}
+static bool rdiag_single_result(const struct json_value *data, const struct json_value *ops,
+                                const struct rdiag_presenter *p)
+{
     const struct json_value *second = json_at(ops, 1), *third = json_at(ops, 2);
     return p->choices == 1 && p->recoveries == 1 && p->keep_choices == 1 && p->progress == 3 &&
         rdiag_failure(second) && !strcmp(ru_string(second, "progress_recovery"), "continue") &&
         !strcmp(ru_string(second, "stage"), "commit") && !strcmp(ru_string(second, "status"), "passed") &&
         !strcmp(ru_string(data, "continuation"), "kept") && json_get(data, "kept") &&
         ruf_bool(data, "continuation_executed", true) && ruf_bool(third, "progress_displayed", true);
+}
+static bool rdiag_success_result(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    if (!ops || ops->type != JSON_ARR || json_size(ops) != 3) return false;
+    return p->mode == RDIAG_ALL_CONTINUE ? rdiag_all_result(data, ops, p) : rdiag_single_result(data, ops, p);
+}
+static bool rdiag_selection_roots(const struct receive_fixture *f, const struct json_value *kept,
+                                  const struct app_selection *selection)
+{
+    uint8_t root[32];
+    return zcl_hex_decode_lower(f->release, root, sizeof(root)) && !memcmp(selection->parent, root, sizeof(root)) &&
+        zcl_hex_decode_lower(ru_string(kept, "image_sha3"), root, sizeof(root)) && !memcmp(selection->image, root, sizeof(root)) &&
+        zcl_hex_decode_lower(ru_string(kept, "record_id"), root, sizeof(root)) && !memcmp(selection->record, root, sizeof(root));
+}
+static bool rdiag_success_identity(const struct receive_fixture *f, const struct zcl_command_reply *reply,
+                                   const char *version)
+{
+    const struct json_value *kept = json_get(&reply->data, "kept");
+    const char *name = ru_string(kept, "name");
+    struct app_launch_env env; struct app_selection selection; char why[256] = {0}; uint8_t root[32];
+    bool ok = !strcmp(ru_string(&reply->data, "version"), version) &&
+        !strcmp(ru_string(&reply->data, "package_root"), f->package) &&
+        !strcmp(ru_string(kept, "version"), version) && app_launch_env_from_process(&env, why, sizeof(why)) &&
+        app_selection_load(env.state_dir, name, &selection) == APP_SELECTION_OK &&
+        !strcmp(selection.copy, f->destination) && zcl_hex_decode_lower(version, root, sizeof(root)) &&
+        !memcmp(selection.version, root, sizeof(root)) && !memcmp(selection.fork, root, sizeof(root)) &&
+        zcl_hex_decode_lower(f->package, root, sizeof(root)) &&
+        !memcmp(selection.package, root, sizeof(root));
+    return ok && rdiag_selection_roots(f, kept, &selection);
+}
+static bool rdiag_success_budget(struct zcl_command_reply *reply, size_t receipt)
+{
+    size_t total = json_write(&reply->data, NULL, 0), usable = 0, bytes = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    struct zcl_command_budget_fixture fixture = {.budget_bytes = 16384u}; char wire[16385];
+    return total >= receipt && total - receipt <= APP_RECEIVE_CONTINUATION_RESERVE && spec &&
+        zcl_command_registry_test_success_budget(spec, reply, &fixture, &usable, wire, sizeof(wire), &bytes) &&
+        total <= usable && bytes && bytes <= fixture.budget_bytes;
 }
 static void rdiag_success_debug(const struct zcl_command_reply *reply, const struct rdiag_presenter *p)
 {
@@ -3480,7 +3712,7 @@ static void rdiag_success_debug(const struct zcl_command_reply *reply, const str
         ru_string(second, "stage"), ru_string(second, "status"), ru_string(third, "status"),
         ru_string(third, "error_excerpt"));
 }
-static int rdiag_success(void)
+static int rdiag_success(bool all)
 {
     int failures = 0, old_subreaper = 0; size_t saved = 0; bool custody = false;
     struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
@@ -3505,7 +3737,11 @@ static int rdiag_success(void)
         if (!received) fprintf(stderr, "RECEIVE_RECOVERY setup observed=%d visited=%d status=%d code=%s\n",
             receive.observed, receive.visited, reply.status, reply.error.code);
         ASSERT(received);
-        struct rdiag_presenter presenter = {.mode = RDIAG_CONTINUE};
+        struct rus_identity identity = {0};
+        ASSERT(rus_received(&f, &identity, true) && !strcmp(identity.version, ru_string(&reply.data, "version")));
+        size_t receipt = json_write(&reply.data, NULL, 0);
+        char version[65]; (void)snprintf(version, sizeof(version), "%s", ru_string(&reply.data, "version"));
+        struct rdiag_presenter presenter = {.mode = all ? RDIAG_ALL_CONTINUE : RDIAG_CONTINUE};
         zcl_native_bridge_ensure_rpc();
         char old_dir[PATH_MAX]; (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
         int old_port = zcl_native_command_rpc_port();
@@ -3515,6 +3751,8 @@ static int rdiag_success(void)
         bool result = rdiag_success_result(&reply, &presenter);
         if (!result) rdiag_success_debug(&reply, &presenter);
         ASSERT(result);
+        ASSERT(rdiag_success_identity(&f, &reply, version));
+        ASSERT(rdiag_success_budget(&reply, receipt));
         PASS();
     } _test_next:;
     zcl_command_reply_free(&reply); json_free(&input);
@@ -3734,8 +3972,10 @@ int test_app_receive_ui(void)
     failures += rdiag_case(RDIAG_UNAVAILABLE);
     failures += rdiag_case(RDIAG_PRIOR_CLOSE);
     failures += rdiag_case(RDIAG_MISMATCH);
-    failures += rdiag_success();
+    failures += rdiag_success(false);
+    failures += rdiag_success(true);
     failures += rud_readiness();
+    failures += ru_budget_cli_case();
     failures += ru_case(false, false, false);
     failures += ru_case(true, false, false);
     failures += ru_case(true, true, false);

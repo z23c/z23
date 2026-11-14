@@ -3,6 +3,8 @@
 #ifndef ZCL_NATIVE_APP_RECEIVE_FLOW_H
 #define ZCL_NATIVE_APP_RECEIVE_FLOW_H
 #include "command/native_app_confirm.h"
+/* Bounded complete ordinary preview/Keep continuation data, excluding receipt. */
+#define APP_RECEIVE_CONTINUATION_RESERVE 10240u
 struct zcl_command_reply;
 struct app_selection;
 struct json_value;
@@ -45,5 +47,7 @@ struct app_receive_job_result;
 bool app_receive_flow_test_report(struct zcl_command_reply *reply,
     const struct app_receive_job_result *results,
     const struct json_value *const wires[3], bool failed);
+bool app_receive_flow_test_ordinary_report(struct zcl_command_reply *reply,
+    const struct app_receive_job_result *results, const struct json_value *wire, bool failed);
 #endif
 #endif
