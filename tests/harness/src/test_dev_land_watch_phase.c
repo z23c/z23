@@ -1137,6 +1137,7 @@ struct dlx_evidence_case {
     const char *token;          /* the settled first line, unchanged */
     const char *land_dimension; /* the outcome's dimension */
     const char *detail;         /* what the outcome detail leads with */
+    const char *context;        /* adjacent compiler inline context */
     const char *absent;         /* noise the evidence must not carry */
     const char *file;           /* repo-relative file the cause must name */
     const char *gate;           /* proof gate the cause must name */
@@ -1169,6 +1170,9 @@ static const char k_dlx_evidence_test_script[] =
 static const char k_dlx_evidence_compile_script[] =
     "root=$(pwd -P)\n"
     "echo \"cc -c $root/tools/dev/widget.c\"\n"
+    "echo 'inlined from stale_context at tools/dev/stale.c:1:2:'\n"
+    "echo 'unrelated diagnostic'\n"
+    "echo \"inlined from widget_call at $root/tools/dev/widget.c:10:3:\"\n"
     "echo \"$root/tools/dev/widget.c:12:5: error: unknown type name 'widget_t'\"\n"
     "echo \"$root/tools/dev/widget.c:14:1: error: expected ';' before '}' token\"\n"
     "echo 'make: *** [Makefile:1: build-only] Error 1'\n"
@@ -1226,6 +1230,8 @@ static bool dlx_evidence_text_ok(const struct dlx_evidence_case *k,
 {
     if (!dlx_has(text, k->detail))
         return false;
+    if (k->context && !dlx_has(text, k->context)) return false;
+    if (k->context && strstr(text, "stale_context")) return false;
     if (strstr(text, k->absent) || strstr(text, real_wt)) {
         printf("FAIL evidence carries '%s' or an absolute path: %s\n",
                k->absent, text);
@@ -1561,6 +1567,28 @@ int test_dev_land_proof_evidence_compile(void)
         dlx_restore();
         PASS();
     }
+    TEST("land: system header error retains adjacent inline context") {
+        const struct dlx_evidence_case k = {
+            .tag = "evidence_inline_system", .dimension = ZCL_DEV_PROOF_COMPILE,
+            .script = "printf '%s\\n' 'inlined from stale at tools/dev/stale.c:1:2:' "
+                      "'unrelated line' 'inlined from pe_take_str at tools/command/native_pair_epoch.c:330:5:' "
+                      "'/usr/include/string_fortified.h:29:3: error: overflow'\nexit 2\n",
+            .token = "child_proof_failed_exit_2",
+        };
+        char wt[PATH_MAX], local[64], base[64], path[PATH_MAX + 200], record[4096];
+        size_t len = 0;
+        dlx_isolate(k.tag);
+        ASSERT(dlx_evidence_settle(&k, wt, local, base));
+        (void)snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/%s-%s.failed", wt, local, base);
+        ASSERT(dlx_slurp(path, record, sizeof(record) - 1, &len));
+        record[len] = '\0';
+        ASSERT(strstr(record, "compile: /usr/include/string_fortified.h:29:3: error: overflow") != NULL);
+        ASSERT(strstr(record, "inlined from pe_take_str at tools/command/native_pair_epoch.c:330:5:") != NULL);
+        ASSERT(strstr(record, "inlined from stale") == NULL);
+        ASSERT(strstr(record, "cause change=") == NULL);
+        dlx_restore();
+        PASS();
+    }
     TEST("land: compiler commands do not hide a later failing gate") {
         char detail[256];
         zcl_dev_land_test_first_actionable(
@@ -1607,6 +1635,7 @@ int test_dev_land_proof_evidence_compile(void)
             .land_dimension = "compile",
             .detail = "compile: tools/dev/widget.c:12:5: error: unknown "
                       "type name 'widget_t'",
+            .context = "inlined from widget_call at tools/dev/widget.c:10:3:",
             .absent = "expected ';'",
             .file = "tools/dev/widget.c",
             .gate = "compile",

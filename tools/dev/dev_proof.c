@@ -14280,6 +14280,7 @@ struct dp_evidence {
     size_t count;
     char fallback_unit[DP_EVIDENCE_UNIT_MAX];
     char fallback[DP_EVIDENCE_LINE_MAX];
+    char inline_context[DP_EVIDENCE_LINE_MAX];
     bool error_kept;
     bool in_fail_group;
     bool in_failed_list;
@@ -14523,10 +14524,28 @@ static bool dp_evidence_follow(struct dp_evidence *e, const char *line,
     return indented;
 }
 
+static bool dp_evidence_inline(struct dp_evidence *e, const char *text)
+{
+    if (e->test_step || e->lint_step || e->error_kept ||
+        strncmp(text, "inlined from ", 13) != 0) return false;
+    dp_evidence_clean(e, text, e->inline_context);
+    return true;
+}
+
+static void dp_evidence_first_error(struct dp_evidence *e, const char *text)
+{
+    if (!e->error_kept) {
+        dp_evidence_keep(e, text);
+        if (e->inline_context[0]) dp_evidence_keep(e, e->inline_context);
+    }
+    e->error_kept = true;
+}
+
 static void dp_evidence_line(struct dp_evidence *e, const char *line)
 {
     if (e->test_step && dp_evidence_test_frame(e, line)) return;
     const char *text = line + strspn(line, " \t");
+    if (dp_evidence_inline(e, text)) return;
     if (dp_evidence_follow(e, line, text)) return;
     if (e->test_step && !e->in_fail_group) return;
     const char *fail_at = strstr(text, "FAIL at ");
@@ -14537,12 +14556,12 @@ static void dp_evidence_line(struct dp_evidence *e, const char *line)
                dp_evidence_ends_fail(text)) {
         dp_evidence_keep(e, text);
     } else if (dp_evidence_compiler_error(text)) {
-        if (!e->error_kept) dp_evidence_keep(e, text);
-        e->error_kept = true;
+        dp_evidence_first_error(e, text);
     } else if (!e->fallback[0] && strncmp(text, "make: *** ", 10) == 0) {
         (void)snprintf(e->fallback, sizeof(e->fallback), "%.*s",
                        (int)strcspn(text, "\r\n"), text);
     }
+    e->inline_context[0] = '\0';
 }
 
 static void dp_evidence_scan(struct dp_evidence *e, const char *log)
