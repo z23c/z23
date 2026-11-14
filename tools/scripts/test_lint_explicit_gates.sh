@@ -39,6 +39,7 @@ while [ "$#" -gt 0 ]; do
         run) shift ;;
         --jobs|--bin-dir) shift 2 ;;
         --cache|--cold-audit) shift ;;
+        --changed-files=*) test -r "${1#*=}"; shift ;;
         *) make --no-print-directory "$1"; shift ;;
     esac
 done
