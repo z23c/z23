@@ -1,9 +1,8 @@
 # Cold start to tip against a REMOTE peer
 
 The C3 wipe-to-tip stopwatch (`tools/scripts/cold_start_to_tip_stopwatch.sh`)
-has only ever been run against a peer on the same machine. Loopback is
-structurally privileged on **both** sides of the wire, so a loopback pass
-cannot stand in for a remote one:
+needs remote-peer evidence. Loopback is structurally privileged on **both**
+sides of the wire, so a loopback pass cannot stand in for a remote one:
 
 - **client side** — `is_trusted_peer()` in `core/modules/net/src/net.c` exempts
   `127.0.0.0/8` and `-whitelist` peers from `peer_misbehaving()`, so a loopback
@@ -25,6 +24,8 @@ bash tools/scripts/cold_start_to_tip_stopwatch.sh \
 Fresh isolated datadir and `$HOME`, ports 39170-39173, `-listen=0`,
 `-nolegacyimport`, `-nobgvalidation`, no bundle / snapshot / import flags.
 Read-only P2P client: the remote's datadir and services are never touched.
+This isolates the receiver's datadir and home; it does not establish a fresh
+Linux installation or independent physical hardware.
 
 ## When the serving peer refuses this host
 
@@ -54,6 +55,36 @@ A remote run needs a peer whose per-IP inbound allowance for this host is not
 consumed (free a slot, use a different source IP, or `-whitelist` the client on
 the serving node), or a different serving peer. The real prerequisite is at
 least one completed node handshake with an advertised height.
+
+## When a version probe passes but the node is evicted
+
+The version probe sends `version` and reads the peer's `version`; it sends no
+`verack` and closes on exit. Its pass establishes that exchange, not admission
+of the later node connection. A successful file-service fetch likewise does
+not establish a usable P2P header source.
+<!-- claim: symbol-present cmd_version tools/p2p_version_probe.c # bounded version-only preflight -->
+
+The serving node also has a same-IP duplicate-connection policy. A completed
+outbound connection can evict inbound connections sharing its IP, including a
+different node behind the same NAT. The authenticated mutual-dial exception
+requires matching remote static keys and its direction tie-break; a different
+key does not qualify merely because the IP matches.
+<!-- claim: symbol-present connman_evict_same_ip_inbound_when_outbound core/modules/net/src/connman_zcl23_dial.c # same-IP inbound eviction -->
+<!-- claim: symbol-present connman_mutual_dial_keeps_inbound core/modules/net/src/connman_zcl23_dial.c # authenticated mutual-dial exception -->
+
+Correlate the two sides by time and endpoint. The receiver may report
+`remote_close` while still at `version_sent`, while the serving node reports
+`evicted inbound ...; outbound handshake owns this IP` followed by an
+`evicted` disconnect from `peer_policy`. This is distinct from the inbound
+connection cap: raising that cap does not change the duplicate policy.
+
+Before repeating a full run, establish a serving route that admits the
+receiver under the existing policy. Do not infer admission from another
+version probe, change validation rules, or substitute a loopback result.
+If the intended topology requires distinct nodes sharing an IP, it needs a
+reviewed identity-aware policy change that preserves duplicate and anti-Sybil
+protections. The current source is sealed; follow the
+[unseal process](../../core/UNSEAL.md) for such a change.
 
 ## Harness behavior
 
