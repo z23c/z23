@@ -1724,12 +1724,20 @@ if [ "$SELFTEST" = "1" ]; then
     st_ps_check "incompatible file peer -> FAST named skip (fixture_incompatible class), never a 600s run" skip_incompatible "$(file_peer_probe_action handshake_failed)"
     st_ps_check "probe malfunction -> loud legacy fallback" fallback_tcp "$(file_peer_probe_action probe_error)"
 
+    # Exercise the same top-level matcher against guarded, duplicate and
+    # missing launch lines without starting a node.
+    st_launch_pattern='^launch_node([[:space:]]|$)'
+    st_ps_check "guarded initial launch is counted" 1 "$(printf '%s\n' 'launch_node || die "failed"' | grep -cE "$st_launch_pattern")"
+    st_ps_check "duplicate initial launches are counted" 2 "$(printf '%s\n' 'launch_node || die "failed"' 'launch_node || die "failed"' | grep -cE "$st_launch_pattern")"
+    st_ps_check "missing initial launch is counted as zero" 0 "$(printf '%s\n' '  launch_node || die "relaunch"' | grep -cE "$st_launch_pattern")"
+
     # The probe is PRE-FLIGHT by construction: its invocation (and therefore
     # every one of its skip paths) must sit BEFORE the node launch in this
     # file, so an incompatible fixture can never cost the measurement budget.
-    st_probe_line="$(grep -nF 'timeout 15 "$FS_HANDSHAKE_PROBE" "$file_peer_host" "$file_peer_port"' "${BASH_SOURCE[0]}" | head -n1 | cut -d: -f1)"
-    st_launch_line="$(grep -cE '^launch_node$' "${BASH_SOURCE[0]}")"
-    st_first_launch="$(grep -nE '^launch_node$' "${BASH_SOURCE[0]}" | head -n1 | cut -d: -f1)"
+    st_probe_pattern='^[[:space:]]+timeout 15 "\$FS_HANDSHAKE_PROBE" "\$file_peer_host" "\$file_peer_port"'
+    st_probe_line="$(grep -nE "$st_probe_pattern" "${BASH_SOURCE[0]}" | head -n1 | cut -d: -f1)"
+    st_launch_line="$(grep -cE "$st_launch_pattern" "${BASH_SOURCE[0]}")"
+    st_first_launch="$(grep -nE "$st_launch_pattern" "${BASH_SOURCE[0]}" | head -n1 | cut -d: -f1)"
     st_ps_check "the wiped node is launched exactly once from the top level (respawns go through launch_node())" 1 "$st_launch_line"
     if [ -n "$st_probe_line" ] && [ -n "$st_first_launch" ] && \
        [ "$st_probe_line" -lt "$st_first_launch" ]; then
@@ -1738,6 +1746,19 @@ if [ "$SELFTEST" = "1" ]; then
         st_order=bad
     fi
     st_ps_check "the file-peer probe runs BEFORE the wiped node launches (pre-flight, not post-mortem)" ok "$st_order"
+
+    # Verify the ordering check against an actual reversed fixture, rather
+    # than accidentally matching the selftest's own search text.
+    st_order_fixture="$(mktemp "${TMPDIR:-/tmp}/zcl-c3-order.XXXXXX")" || exit 1
+    printf '%s\n' 'launch_node || die "failed"' '    timeout 15 "$FS_HANDSHAKE_PROBE" "$file_peer_host" "$file_peer_port" \' >"$st_order_fixture"
+    st_reversed_probe="$(grep -nE "$st_probe_pattern" "$st_order_fixture" | head -n1 | cut -d: -f1)"
+    st_reversed_launch="$(grep -nE "$st_launch_pattern" "$st_order_fixture" | head -n1 | cut -d: -f1)"
+    st_ps_check "reversed fixture finds its probe" 2 "$st_reversed_probe"
+    st_ps_check "reversed fixture finds its launch" 1 "$st_reversed_launch"
+    st_reversed=bad
+    if [ -n "$st_reversed_probe" ] && [ -n "$st_reversed_launch" ] && [ "$st_reversed_probe" -lt "$st_reversed_launch" ]; then st_reversed=ok; fi
+    st_ps_check "a probe moved after launch is rejected" bad "$st_reversed"
+    rm -f "$st_order_fixture"
 
     # The incompatible-fixture skip reason must carry the exact match
     # substring the shared skip-class table keys on, so the collector and
