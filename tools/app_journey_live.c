@@ -58,7 +58,8 @@
  * Linux split roles use --sender or --receiver, a fresh absolute --work and
  * finite --seconds execution budget. Sender writes expected.json and the typed
  * onion-status.json, then waits for an owner-created regular `finish` marker.
- * Receiver also takes --peer and --expected. Role evidence is retained;
+ * Receiver also takes --peer and --expected; --serve retains its hosting
+ * node until its owner creates `finish`. Role evidence is retained;
  * supervised cleanup may continue beyond the execution deadline. */
 
 #ifndef _POSIX_C_SOURCE
@@ -107,7 +108,7 @@ static struct platform_supervised_process g_role_node;
 struct aj_role_args {
     const char *work, *peer, *expected;
     long seconds;
-    bool sender, receiver, worker;
+    bool sender, receiver, worker, serve;
 };
 
 static bool aj_role_peer(const char *s)
@@ -138,6 +139,7 @@ static bool aj_role_flag(struct aj_role_args *r, const char *a)
     if (!strcmp(a, "--sender") && !r->sender) { r->sender = true; return true; }
     if (!strcmp(a, "--receiver") && !r->receiver) { r->receiver = true; return true; }
     if (!strcmp(a, "--role-worker") && !r->worker) { r->worker = true; return true; }
+    if (!strcmp(a, "--serve") && !r->serve) { r->serve = true; return true; }
     return false;
 }
 
@@ -157,7 +159,7 @@ static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
     }
     return r->sender != r->receiver && r->work && r->work[0] == '/' &&
         r->work[1] && r->seconds &&
-        (r->sender ? !r->peer && !r->expected :
+        (r->sender ? !r->peer && !r->expected && !r->serve :
          aj_role_peer(r->peer) && r->expected && r->expected[0] == '/');
 }
 static const char *g_fail_first;
@@ -2110,7 +2112,44 @@ static bool aj_role_sender(long seconds)
         aj_role_public_files(&a) && aj_role_hold(seconds);
 }
 
-static bool aj_role_receiver(const char *peer)
+static bool aj_role_host_data(const struct json_value *d, int64_t *generation)
+{
+    const struct json_value *h = json_get(d, "host"), *c = json_get(d, "carrier");
+    const struct json_value *e = json_get(d, "enabled"), *g = json_get(d, "generation");
+    bool ok = h && h->type == JSON_STR && c && c->type == JSON_STR &&
+        e && e->type == JSON_BOOL && json_get_bool(e) && g && g->type == JSON_INT &&
+        json_get_int(g) > 0 && !strcmp(json_get_str(h), g_host_hex) && !strcmp(json_get_str(c), g_carrier);
+    if (ok) *generation = json_get_int(g);
+    return ok;
+}
+
+static bool aj_role_host_status(struct aj_node_ctx *b, int64_t *generation)
+{
+    char host[96], carrier[96], out[8192];
+    if (snprintf(host, sizeof(host), "--host=%s", g_host_hex) >= (int)sizeof(host) ||
+        snprintf(carrier, sizeof(carrier), "--carrier=%s", g_carrier) >= (int)sizeof(carrier)) return false;
+    char *tail[] = {(char *)"app", (char *)"host", (char *)"status", host, carrier, NULL};
+    if (aj_cli(b->datadir, b->rpc, tail, out, sizeof(out), 180, b->home) != 0) return false;
+    struct json_value v;
+    bool ok = aj_json_ok(out, &v) && aj_role_host_data(aj_json_data(&v), generation);
+    json_free(&v); return ok;
+}
+
+static bool aj_role_serve(struct aj_node_ctx *b, long seconds)
+{
+    int64_t generation = 0;
+    if (!aj_role_hex(g_host_hex, 64) || !aj_role_hex(g_carrier, 64) ||
+        !aj_role_host_status(b, &generation) || !aj_role_status_file(b)) return false;
+    char path[1024], body[512];
+    int n = snprintf(body, sizeof(body),
+        "{\"hosting_intent_enabled\":true,\"host\":\"%s\",\"carrier\":\"%s\",\"generation\":%lld}\n",
+        g_host_hex, g_carrier, (long long)generation);
+    if (n < 0 || (size_t)n >= sizeof(body) || !aj_path_join(path, sizeof(path), g_work, "receiver-ready.json") ||
+        !aj_write_file(path, body)) return false;
+    return aj_role_hold(seconds);
+}
+
+static bool aj_role_receiver(const char *peer, bool serve, long seconds)
 {
     struct aj_node_ctx b = {.rpc = APPJ_B_RPC};
     snprintf(b.home, sizeof(b.home), "%s", g_b_home);
@@ -2118,7 +2157,8 @@ static bool aj_role_receiver(const char *peer)
     return aj_role_node_start(b.home, b.datadir, g_b_log, APPJ_B_P2P, APPJ_B_RPC,
                               APPJ_B_FS, APPJ_B_HTTPS, peer, true) &&
         aj_wait(aj_probe_rpc, &b, g_wait_s, "receiver RPC") &&
-        aj_wait(aj_probe_onion, &b, g_tor_wait_s, "receiver onion") && aj_phase_b_get(&b);
+        aj_wait(aj_probe_onion, &b, g_tor_wait_s, "receiver onion") && aj_phase_b_get(&b) &&
+        (!serve || aj_role_serve(&b, seconds));
 }
 
 static bool aj_role_prepare(const struct aj_role_args *r)
@@ -2140,7 +2180,7 @@ static int aj_role_work(const struct aj_role_args *r)
     close(3); g_role_worker = true; g_keep = true; platform_supervised_init(&g_role_node);
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) return 2;
     if (!aj_role_prepare(r)) return 2;
-    bool ok = r->sender ? aj_role_sender(r->seconds) : aj_role_receiver(r->peer);
+    bool ok = r->sender ? aj_role_sender(r->seconds) : aj_role_receiver(r->peer, r->serve, r->seconds);
     bool stopped = aj_role_node_stop();
     if (!ok || !stopped) { aj_fail("split worker failed or node cleanup was incomplete"); return 2; }
     return 0;
@@ -2366,7 +2406,7 @@ static int aj_role_entry(int argc, char **argv)
 {
     struct aj_role_args args;
     if (!aj_role_parse(argc, argv, &args) || !getcwd(g_repo, sizeof(g_repo))) {
-        fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file]\n"); return 3;
+            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve]\n"); return 3;
     }
     if (args.worker) return aj_role_work(&args);
     int rc = aj_role_owner(argc, argv, &args);

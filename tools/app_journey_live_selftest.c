@@ -59,14 +59,75 @@ static bool aj_nested_observe(bool crash, const char *ready)
     return seen && observed;
 }
 
+static bool aj_serve_receipt(const char *path)
+{
+    char body[1024]; int n = aj_slurp(path, body, sizeof(body));
+    struct json_value v; json_init(&v);
+    bool ok = n > 0 && json_read(&v, body, (size_t)n);
+    const struct json_value *enabled = json_get(&v, "hosting_intent_enabled");
+    ok = ok && enabled && enabled->type == JSON_BOOL && json_get_bool(enabled) &&
+        !strcmp(json_get_str(json_get(&v, "host")), g_host_hex) &&
+        !strcmp(json_get_str(json_get(&v, "carrier")), g_carrier) &&
+        json_get_int(json_get(&v, "generation")) == 1;
+    json_free(&v); return ok;
+}
+
+static bool aj_serve_refusals(struct aj_node_ctx *b, const char *root, const char *ready)
+{
+    static const char *const modes[] = {"status-error", "status-missing", "status-false", "status-mismatch", "status-not-ok"};
+    bool ok = true; char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        if (snprintf(path, sizeof(path), "%s/%s", root, modes[i]) >= (int)sizeof(path)) return false;
+        bool made = aj_write_file(path, "x");
+        bool refused = made && !aj_role_serve(b, 1) && access(ready, F_OK) != 0;
+        bool removed = unlink(path) == 0;
+        ok = made && refused && removed && ok;
+    }
+    return ok;
+}
+
+struct aj_serve_paths { char ready[PATH_MAX], status[PATH_MAX], finish[PATH_MAX]; };
+
+static bool aj_serve_case(struct aj_node_ctx *b, const struct aj_serve_paths *p, int mode)
+{
+    bool made = mode == 0 ? aj_write_file(p->finish, "done") :
+        mode == 2 ? mkdir(p->finish, 0700) == 0 : true;
+    bool served = made && aj_role_serve(b, 1);
+    bool receipt = aj_serve_receipt(p->ready);
+    bool finish_ok = mode == 1 || (mode == 2 ? rmdir(p->finish) == 0 : unlink(p->finish) == 0);
+    bool ready_ok = unlink(p->ready) == 0;
+    bool status_ok = unlink(p->status) == 0;
+    return made && (served == (mode == 0)) && receipt && finish_ok && ready_ok && status_ok;
+}
+
+static bool aj_serve_tests(const char *root)
+{
+    if (strlen(root) >= sizeof(g_work)) return false;
+    memcpy(g_work, root, strlen(root) + 1);
+    memset(g_host_hex, 'a', 64); g_host_hex[64] = 0;
+    memset(g_carrier, 'b', 64); g_carrier[64] = 0;
+    struct aj_node_ctx b = {.rpc = 1};
+    if (strlen(root) >= sizeof(b.home)) return false;
+    memcpy(b.home, root, strlen(root) + 1); memcpy(b.datadir, root, strlen(root) + 1);
+    struct aj_serve_paths p;
+    if (!aj_path_join(p.ready, sizeof(p.ready), root, "receiver-ready.json") ||
+        !aj_path_join(p.status, sizeof(p.status), root, "onion-status.json") ||
+        !aj_path_join(p.finish, sizeof(p.finish), root, "finish")) return false;
+    bool ok = aj_serve_refusals(&b, root, p.ready);
+    for (int i = 0; i < 3; i++) ok = aj_serve_case(&b, &p, i) && ok;
+    if (ok) puts("receiver serving readiness and hold: PASS");
+    return ok;
+}
+
 static int aj_nested_node_test(bool crash)
 {
     struct aj_nested_paths paths;
     if (!aj_nested_prepare(crash, &paths)) return 1;
     bool observed = aj_nested_observe(crash, paths.ready);
+    bool served = crash || aj_serve_tests(g_repo);
     bool stopped = aj_role_node_stop();
     (void)unlink(paths.ready); (void)unlink(paths.marker); (void)unlink(paths.log);
-    return observed && (crash ? !stopped : stopped) ? 0 : 1;
+    return observed && served && (crash ? !stopped : stopped) ? 0 : 1;
 }
 
 static bool aj_test_detached_ready(void)
@@ -120,7 +181,15 @@ static int aj_role_parse_test(void)
     char *good[] = {(char *)"fixture", (char *)"--receiver", (char *)"--work=/tmp/new",
         (char *)"--seconds=10", peerarg, (char *)"--expected=/tmp/public.json", NULL};
     struct aj_role_args r;
-    bool ok = aj_role_parse(6, good, &r) && r.receiver && !r.sender && r.seconds == 10;
+    bool ok = aj_role_parse(6, good, &r) && r.receiver && !r.sender && !r.serve && r.seconds == 10;
+    good[6] = (char *)"--serve";
+    bool serve = aj_role_parse(7, good, &r) && r.serve;
+    if (!serve) fprintf(stderr, "receiver --serve was refused\n");
+    ok = serve && ok;
+    good[6] = NULL;
+    char *bad_sender[] = {(char *)"fixture", (char *)"--sender", (char *)"--work=/tmp/new",
+        (char *)"--seconds=10", (char *)"--serve", NULL};
+    ok = !aj_role_parse(5, bad_sender, &r) && ok;
     peer[0] = '8'; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
     ok = !aj_role_parse(6, good, &r) && ok;
     peer[0] = 'a'; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
@@ -258,25 +327,51 @@ static int aj_supervised_test(const char *self, const char *tmp) { (void)self; (
 static int aj_role_owner_test(const char *self, const char *tmp) { (void)self; (void)tmp; return 0; }
 #endif
 
+static bool aj_test_home_file(const char *name)
+{
+    const char *home = getenv("HOME"); char path[PATH_MAX];
+    return home && snprintf(path, sizeof(path), "%s/%s", home, name) < (int)sizeof(path) && access(path, F_OK) == 0;
+}
+
+static int aj_test_host_status(int argc, char **argv, int i)
+{
+    if (i + 4 >= argc || strncmp(argv[i + 3], "--host=", 7) || strncmp(argv[i + 4], "--carrier=", 10)) return 2;
+    if (aj_test_home_file("status-error")) return 7;
+    if (aj_test_home_file("status-missing")) { puts("{\"ok\":true,\"data\":{}}"); return 0; }
+    const char *host = aj_test_home_file("status-mismatch") ? "wrong" : argv[i + 3] + 7;
+    printf("{\"ok\":%s,\"data\":{\"host\":\"%s\",\"carrier\":\"%s\",\"enabled\":%s,\"generation\":1}}\n",
+           aj_test_home_file("status-not-ok") ? "false" : "true", host, argv[i + 4] + 10,
+           aj_test_home_file("status-false") ? "false" : "true");
+    return 0;
+}
+
+static int aj_test_get(int argc, char **argv, int i)
+{
+    if (i + 2 == argc) {
+        if (aj_test_home_file("catalog-error")) return 7;
+        puts(aj_test_home_file("catalog-absent") ? "example/app-extra abc root 1s ago" : "example/app abc 0123456789abcdef 1s ago");
+        return 0;
+    }
+    if (i + 4 != argc || strcmp(argv[i + 3], "--yes")) return 2;
+    int fd = open("get-count", O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return 2;
+    char b = 'x'; bool ok = write(fd, &b, 1) == 1 && close(fd) == 0;
+    if (!ok) return 2;
+    if (access("get-success", F_OK) == 0) { puts("retrieval succeeded"); return 0; }
+    puts("distinctive retrieval failure"); return 7;
+}
+
 static int aj_test_cli(int argc, char **argv)
 {
-    for (int i = 0; i + 1 < argc; ++i) if (!strcmp(argv[i], "app") && !strcmp(argv[i + 1], "get")) {
-        if (i + 2 == argc) {
-            char path[PATH_MAX];
-            const char *home = getenv("HOME");
-            if (!home || snprintf(path, sizeof(path), "%s/catalog-error", home) >= (int)sizeof(path)) return 2;
-            if (access(path, F_OK) == 0) return 7;
-            if (snprintf(path, sizeof(path), "%s/catalog-absent", home) >= (int)sizeof(path)) return 2;
-            puts(access(path, F_OK) == 0 ? "example/app-extra abc root 1s ago" : "example/app abc 0123456789abcdef 1s ago");
-            return 0;
+    for (int i = 0; i + 2 < argc; ++i) {
+        if (!strcmp(argv[i], "app") && !strcmp(argv[i + 1], "host") && !strcmp(argv[i + 2], "status"))
+            return aj_test_host_status(argc, argv, i);
+        if (!strcmp(argv[i], "core") && !strcmp(argv[i + 1], "network") && !strcmp(argv[i + 2], "onion")) {
+            puts("{\"data\":{\"p2p_publish_ready\":true}} "); return 0;
         }
-        int fd = open("get-count", O_WRONLY | O_CREAT | O_APPEND, 0600);
-        if (fd < 0) return 2;
-        char b = 'x'; bool ok = write(fd, &b, 1) == 1 && close(fd) == 0;
-        if (!ok) return 2;
-        if (access("get-success", F_OK) == 0) { puts("retrieval succeeded"); return 0; }
-        puts("distinctive retrieval failure"); return 7;
     }
+    for (int i = 0; i + 1 < argc; ++i)
+        if (!strcmp(argv[i], "app") && !strcmp(argv[i + 1], "get")) return aj_test_get(argc, argv, i);
     return -1;
 }
 
