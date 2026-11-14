@@ -878,6 +878,7 @@ struct nodedb_fold {
     struct topup_undo_tally undo;
     size_t height_conflicts, missing_rows;
     size_t rows_seen;
+    bool full_rows;
     /* Inserted entries, height-ASC by construction (we visit ascending),
      * collected for the bounded chainwork + skip pass. */
     struct block_index **new_entries;
@@ -981,10 +982,9 @@ static bool node_db_fold_row(struct nodedb_fold *f, int h,
     return true;
 }
 
-/* The range scan is a probe read (no header blobs): enough for every row the
- * map already holds, which the fold only raises. A hash the map lacks is
- * inserted from the FULL row, read through the same find path as before, so
- * node_db_topup_fill_new() sees exactly what it always saw. */
+/* A probe row suffices when the map already holds the entry. Otherwise use
+ * its full row, supplied by the sparse-map scan or fetched by height. Both
+ * scanners and the height lookup materialize the same header fields. */
 static bool node_db_fold_range_cb(int height, const struct db_block *row,
                                   void *ctx)
 {
@@ -992,7 +992,7 @@ static bool node_db_fold_range_cb(int height, const struct db_block *row,
     f->rows_seen++;
     struct uint256 hh;
     memcpy(hh.data, row->hash, 32);
-    if (block_map_find(&f->ms->map_block_index, &hh))
+    if (f->full_rows || block_map_find(&f->ms->map_block_index, &hh))
         return node_db_fold_row(f, height, row);
     struct db_block full;
     if (!db_block_find_by_height(f->ndb, height, &full))
@@ -1020,8 +1020,14 @@ static bool node_db_fold_window(struct nodedb_fold *f, int lo, int hi)
         return true;
     }
 #endif
-    if (!db_block_scan_height_range_probe(f->ndb, lo, hi,
-                                          node_db_fold_range_cb, f)) {
+    /* Sparse maps would pay a second query for each missing entry. This
+     * heuristic trades wider rows for fewer queries; dense warm maps keep
+     * the probe scan. Neither choice changes the rows or the fold. */
+    f->full_rows = f->ms->map_block_index.size <= span / 2;
+    bool scanned = f->full_rows
+        ? db_block_scan_height_range(f->ndb, lo, hi, node_db_fold_range_cb, f)
+        : db_block_scan_height_range_probe(f->ndb, lo, hi, node_db_fold_range_cb, f);
+    if (!scanned) {
         /* A callback abort already logged its own failure; a read error
          * (prepare/step) is reported here. Either way the fold stops. */
         LOG_FAIL("block_index", "node.db topup: window scan %d..%d failed",

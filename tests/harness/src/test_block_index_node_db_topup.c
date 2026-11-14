@@ -450,6 +450,31 @@ static bool ndt_range_run(struct main_state *ms, struct node_db *ndb,
     return ok;
 }
 
+struct ndt_point_reads { sqlite3_stmt *stmt; size_t count; };
+
+static int ndt_trace_point_reads(unsigned event, void *context, void *stmt,
+                                void *unused)
+{
+    (void)unused;
+    struct ndt_point_reads *reads = context;
+    if (event == SQLITE_TRACE_STMT && stmt == reads->stmt) reads->count++;
+    return 0;
+}
+
+static bool ndt_sparse_range_run(struct main_state *ms, struct node_db *ndb,
+    sqlite3 *progress, const char *dir, char *line, size_t cap,
+    int64_t *elapsed, size_t *point_reads)
+{
+    struct ndt_point_reads reads = { .stmt = ndb->stmt_block_by_height };
+    if (sqlite3_trace_v2(ndb->db, SQLITE_TRACE_STMT, ndt_trace_point_reads,
+                         &reads) != SQLITE_OK) return false;
+    bool ok = ndt_range_run(ms, ndb, progress, dir, false, line, cap, elapsed);
+    if (sqlite3_trace_v2(ndb->db, 0, NULL, NULL) != SQLITE_OK) ok = false;
+    *point_reads = reads.count;
+    printf("block_index_node_db_topup: sparse point reads=%zu\n", reads.count);
+    return ok;
+}
+
 static bool ndt_entries_equal(const struct block_index *a,
                               const struct block_index *b)
 {
@@ -512,11 +537,14 @@ static int ndt_range_equivalence_cases(const char *dir)
     if (ready) {
         char old_line[1024], new_line[1024];
         int64_t old_ms_t = 0, new_ms_t = 0;
+        size_t sparse_size = new_ms.map_block_index.size, point_reads = 0;
         bool a = ndt_range_run(&old_ms, &ndb, progress, dir, true,
                                old_line, sizeof(old_line), &old_ms_t);
-        bool b = ndt_range_run(&new_ms, &ndb, progress, dir, false,
-                               new_line, sizeof(new_line), &new_ms_t);
+        bool b = ndt_sparse_range_run(&new_ms, &ndb, progress, dir,
+                               new_line, sizeof(new_line), &new_ms_t, &point_reads);
         NDT_CHECK("range: both paths return ok", a && b);
+        NDT_CHECK("range: sparse fold only point-reads inserted rows for linking",
+                  point_reads == new_ms.map_block_index.size - sparse_size);
         NDT_CHECK("range: counter line present", old_line[0] != '\0');
         NDT_CHECK("range: counter lines identical",
                   strcmp(old_line, new_line) == 0);
