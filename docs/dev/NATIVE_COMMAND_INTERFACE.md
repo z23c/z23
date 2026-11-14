@@ -496,7 +496,11 @@ Default compact JSON budgets are part of the interface contract:
 | List page | 8,192 bytes or 20 items |
 | Search | 5 matches |
 
-Large results require `--view=full`, `--fields=...`, `--max-items`, and a cursor.
+Large results remain bounded with `--view=full`; follow the returned cursor to
+continue. The singular `--field=...` selects fields from the current returned
+page and cannot recover fields omitted from that page.
+<!-- claim: symbol-present nc_project_fields_data_budget tools/command/native_command_bridge.c # bounded field projection -->
+<!-- claim: symbol-present nc_main_apply_field_selection tools/command/native_command.c # selection of returned fields -->
 Legacy RPCs that return a top-level array are normalized as
 `data.items` plus a typed `data._page`; empty arrays remain valid results.
 Default responses omit nulls, defaults, redundant aliases, repeated

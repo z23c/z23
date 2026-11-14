@@ -88,16 +88,70 @@ static bool aj_serve_refusals(struct aj_node_ctx *b, const char *root, const cha
 
 struct aj_serve_paths { char ready[PATH_MAX], status[PATH_MAX], finish[PATH_MAX]; };
 
-static bool aj_serve_case(struct aj_node_ctx *b, const struct aj_serve_paths *p, int mode)
+static bool aj_test_peer(const char *path)
+{
+    char body[512], expected[80]; memset(expected, 'a', 56); memcpy(expected + 56, ".onion:43123", sizeof(".onion:43123"));
+    int n = aj_slurp(path, body, sizeof(body)); struct json_value v; json_init(&v);
+    bool ok = n > 0 && json_read(&v, body, (size_t)n) &&
+        !strcmp(json_get_str(json_get(&v, "endpoint")), expected) &&
+        !strcmp(json_get_str(json_get(&v, "observation")), "separate_status_reads_not_atomic");
+    json_free(&v); return ok;
+}
+
+static bool aj_test_route_cleanup(const char *root)
+{
+    static const char *const names[] = {"peer.json", "onion-status-recheck.json", "onion-status-page-2.json", "status-count"};
+    bool ok = true; char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (!aj_path_join(path, sizeof(path), root, names[i])) return false;
+        if (unlink(path) != 0 && errno != ENOENT) ok = false;
+    }
+    return ok;
+}
+
+static bool aj_serve_artifacts(const struct aj_serve_paths *p, bool paged)
+{
+    bool receipt = aj_serve_receipt(p->ready);
+    char peer[PATH_MAX];
+    bool peer_ok = aj_path_join(peer, sizeof(peer), g_work, "peer.json") && aj_test_peer(peer);
+    char continuation[PATH_MAX];
+    bool page_ok = aj_path_join(continuation, sizeof(continuation), g_work, "onion-status-page-2.json") &&
+        (access(continuation, F_OK) == 0) == paged;
+    if (!peer_ok) fprintf(stderr, "receiver peer handoff missing\n");
+    bool route_cleaned = aj_test_route_cleanup(g_work);
+    bool ready_ok = unlink(p->ready) == 0;
+    bool status_ok = unlink(p->status) == 0;
+    return receipt && peer_ok && page_ok && route_cleaned && ready_ok && status_ok;
+}
+
+static bool aj_serve_case(struct aj_node_ctx *b, const struct aj_serve_paths *p, int mode, bool paged)
 {
     bool made = mode == 0 ? aj_write_file(p->finish, "done") :
         mode == 2 ? mkdir(p->finish, 0700) == 0 : true;
     bool served = made && aj_role_serve(b, 1);
-    bool receipt = aj_serve_receipt(p->ready);
+    bool artifacts = aj_serve_artifacts(p, paged);
     bool finish_ok = mode == 1 || (mode == 2 ? rmdir(p->finish) == 0 : unlink(p->finish) == 0);
-    bool ready_ok = unlink(p->ready) == 0;
-    bool status_ok = unlink(p->status) == 0;
-    return made && (served == (mode == 0)) && receipt && finish_ok && ready_ok && status_ok;
+    return made && (served == (mode == 0)) && artifacts && finish_ok;
+}
+
+static bool aj_route_refusals(struct aj_node_ctx *b, const struct aj_serve_paths *p)
+{
+    static const char *const modes[] = {"route-false", "route-stall", "route-malformed", "route-skipped",
+        "route-missing", "route-bad", "route-duplicate", "route-changed", "route-port-changed", "route-recheck-bad"};
+    bool ok = true; char path[PATH_MAX], peer[PATH_MAX];
+    if (!aj_path_join(peer, sizeof(peer), g_work, "peer.json")) return false;
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        if (!aj_path_join(path, sizeof(path), g_work, modes[i])) return false;
+        bool made = aj_write_file(path, "x");
+        bool refused = made && !aj_role_serve(b, 1) && access(p->ready, F_OK) != 0 &&
+            access(peer, F_OK) != 0 && access(p->status, F_OK) == 0;
+        if (!refused) fprintf(stderr, "route refusal failed: %s\n", modes[i]);
+        bool removed = unlink(path) == 0;
+        if (unlink(p->status) != 0 && errno != ENOENT) removed = false;
+        bool clean = aj_test_route_cleanup(g_work);
+        ok = made && refused && removed && clean && ok;
+    }
+    return ok;
 }
 
 static bool aj_serve_tests(const char *root)
@@ -114,7 +168,14 @@ static bool aj_serve_tests(const char *root)
         !aj_path_join(p.status, sizeof(p.status), root, "onion-status.json") ||
         !aj_path_join(p.finish, sizeof(p.finish), root, "finish")) return false;
     bool ok = aj_serve_refusals(&b, root, p.ready);
-    for (int i = 0; i < 3; i++) ok = aj_serve_case(&b, &p, i) && ok;
+    ok = aj_route_refusals(&b, &p) && ok;
+    for (int i = 0; i < 3; i++) ok = aj_serve_case(&b, &p, i, false) && ok;
+    char marker[PATH_MAX];
+    if (!aj_path_join(marker, sizeof(marker), root, "route-paged")) return false;
+    bool made = aj_write_file(marker, "x");
+    bool paged = made && aj_serve_case(&b, &p, 0, true);
+    bool removed = unlink(marker) == 0;
+    ok = made && paged && removed && ok;
     if (ok) puts("receiver serving readiness and hold: PASS");
     return ok;
 }
@@ -345,6 +406,46 @@ static int aj_test_host_status(int argc, char **argv, int i)
     return 0;
 }
 
+static bool aj_test_onion_special(bool paged, bool second)
+{
+    if (aj_test_home_file("route-stall")) { puts("\"_page\":{\"truncated\":true,\"total_fields\":15,\"next_cursor\":0}}}"); return true; }
+    if (aj_test_home_file("route-malformed")) { puts("\"_page\":{\"truncated\":true,\"total_fields\":15}}}"); return true; }
+    if (aj_test_home_file("route-skipped")) { puts("\"_page\":{\"truncated\":true,\"total_fields\":15,\"next_cursor\":14,\"skipped_oversize\":\"port_mapping\"}}}"); return true; }
+    if (paged && !second) { puts("\"_page\":{\"view\":\"normal\",\"total_fields\":15,\"included\":14,\"truncated\":true,\"next_cursor\":14}}}"); return true; }
+    return false;
+}
+
+static void aj_test_onion_mapping(off_t count)
+{
+    if (aj_test_home_file("route-missing")) return;
+    printf("\"port_mapping\":{\"complete\":true,\"persistent_identity\":true,\"routes\":[{\"name\":\"p2p_tcp\",\"installed\":true,\"virtual_port\":%d}",
+               aj_test_home_file("route-bad") || (aj_test_home_file("route-recheck-bad") && count > 0) ? 0 :
+               aj_test_home_file("route-port-changed") && count > 0 ? 43124 : 43123);
+    if (aj_test_home_file("route-duplicate")) printf(",{\"name\":\"p2p_tcp\",\"installed\":true,\"virtual_port\":43123}");
+    printf("]},");
+}
+
+static int aj_test_onion(int argc, char **argv, int i)
+{
+    const char *home = getenv("HOME"); char path[PATH_MAX], onion[63];
+    if (!home || snprintf(path, sizeof(path), "%s/status-count", home) >= (int)sizeof(path)) return 2;
+    struct stat st; off_t count = stat(path, &st) == 0 ? st.st_size : 0;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return 2;
+    char b = 'x'; if (write(fd, &b, 1) != 1 || close(fd) != 0) return 2;
+    bool second = i + 4 < argc && !strcmp(argv[i + 4], "--cursor=14");
+    bool paged = aj_test_home_file("route-paged");
+    memset(onion, 'a', 56); memcpy(onion + 56, ".onion", 7);
+    if (aj_test_home_file("route-changed") && count > 0) onion[0] = 'b';
+    printf("{\"ok\":true,\"command\":\"core.network.onion.status\",\"data_schema\":\"zcl.onion_status.v1\",\"data\":{");
+    if (!second) printf("\"onion_address\":\"%s\",\"p2p_publish_ready\":%s,", onion,
+                        aj_test_home_file("route-false") ? "false" : "true");
+    if (aj_test_onion_special(paged, second)) return 0;
+    aj_test_onion_mapping(count);
+    puts("\"_page\":{\"view\":\"normal\",\"total_fields\":15,\"included\":1,\"truncated\":false}}}");
+    return 0;
+}
+
 static int aj_test_get(int argc, char **argv, int i)
 {
     if (i + 2 == argc) {
@@ -367,7 +468,7 @@ static int aj_test_cli(int argc, char **argv)
         if (!strcmp(argv[i], "app") && !strcmp(argv[i + 1], "host") && !strcmp(argv[i + 2], "status"))
             return aj_test_host_status(argc, argv, i);
         if (!strcmp(argv[i], "core") && !strcmp(argv[i + 1], "network") && !strcmp(argv[i + 2], "onion")) {
-            puts("{\"data\":{\"p2p_publish_ready\":true}} "); return 0;
+            return aj_test_onion(argc, argv, i);
         }
     }
     for (int i = 0; i + 1 < argc; ++i)

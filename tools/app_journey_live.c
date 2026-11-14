@@ -2047,18 +2047,141 @@ static bool aj_role_expected(const char *path)
     json_free(&v); return ok;
 }
 
+struct aj_route_observation { char onion[63]; int port; };
+
+static bool aj_route_identity(const struct json_value *data, char onion[63])
+{
+    const struct json_value *address = json_get(data, "onion_address");
+    const struct json_value *ready = json_get(data, "p2p_publish_ready");
+    if (!address || address->type != JSON_STR || !ready || ready->type != JSON_BOOL || !json_get_bool(ready)) return false;
+    const char *value = json_get_str(address); char endpoint[80];
+    int n = snprintf(endpoint, sizeof(endpoint), "%s:1", value);
+    if (n < 0 || (size_t)n >= sizeof(endpoint) || !aj_role_peer(endpoint)) return false;
+    memcpy(onion, value, 63); return true;
+}
+
+static bool aj_route_mapping_ready(const struct json_value *mapping)
+{
+    const struct json_value *complete = json_get(mapping, "complete"), *persistent = json_get(mapping, "persistent_identity");
+    const struct json_value *routes = json_get(mapping, "routes");
+    return mapping && mapping->type == JSON_OBJ && complete && complete->type == JSON_BOOL && json_get_bool(complete) &&
+        persistent && persistent->type == JSON_BOOL && json_get_bool(persistent) && routes && routes->type == JSON_ARR;
+}
+
+static int aj_route_entry(const struct json_value *route, int *port)
+{
+    const struct json_value *name = json_get(route, "name");
+    if (!name || name->type != JSON_STR || strcmp(json_get_str(name), "p2p_tcp")) return 0;
+    const struct json_value *installed = json_get(route, "installed"), *value = json_get(route, "virtual_port");
+    if (!installed || installed->type != JSON_BOOL || !json_get_bool(installed) ||
+        !value || value->type != JSON_INT || json_get_int(value) < 1 || json_get_int(value) > 65535) return -1;
+    *port = (int)json_get_int(value); return 1;
+}
+
+static bool aj_route_mapping(const struct json_value *mapping, int *port)
+{
+    if (!aj_route_mapping_ready(mapping)) return false;
+    const struct json_value *routes = json_get(mapping, "routes");
+    int found = 0;
+    for (size_t i = 0; i < json_size(routes); i++) {
+        int result = aj_route_entry(json_at(routes, i), port);
+        if (result < 0 || (result && ++found > 1)) return false;
+    }
+    return found == 1;
+}
+
+static bool aj_route_skip_ok(const struct json_value *skip)
+{
+    if (!skip) return true;
+    return skip->type == JSON_STR && strcmp(json_get_str(skip), "onion_address") &&
+        strcmp(json_get_str(skip), "p2p_publish_ready") && strcmp(json_get_str(skip), "port_mapping");
+}
+
+static bool aj_route_page_control(const struct json_value *data, int64_t cursor,
+                                  int64_t *next, bool *more)
+{
+    const struct json_value *page = json_get(data, "_page"), *truncated = json_get(page, "truncated");
+    const struct json_value *skip = json_get(page, "skipped_oversize");
+    if (!page || page->type != JSON_OBJ || !truncated || truncated->type != JSON_BOOL) return false;
+    if (!aj_route_skip_ok(skip)) return false;
+    *more = json_get_bool(truncated);
+    if (!*more) return true;
+    const struct json_value *n = json_get(page, "next_cursor"), *total = json_get(page, "total_fields");
+    if (!n || n->type != JSON_INT || !total || total->type != JSON_INT ||
+        json_get_int(n) <= cursor || json_get_int(n) > json_get_int(total)) return false;
+    *next = json_get_int(n); return true;
+}
+
+static bool aj_route_fetch(struct aj_node_ctx *a, int64_t cursor, char *out, size_t cap)
+{
+    char arg[64];
+    if (snprintf(arg, sizeof(arg), "--cursor=%lld", (long long)cursor) >= (int)sizeof(arg)) return false;
+    char *tail[] = {(char *)"core", (char *)"network", (char *)"onion", (char *)"status", arg, NULL};
+    return aj_cli(a->datadir, a->rpc, tail, out, cap, 90, a->home) == 0;
+}
+
+static bool aj_route_save(const char *name, const char *out)
+{
+    char path[1024];
+    return aj_path_join(path, sizeof(path), g_work, name) && aj_write_file(path, out);
+}
+
+static bool aj_route_envelope(const char *out, struct json_value *v)
+{
+    if (!aj_json_ok(out, v)) return false;
+    const struct json_value *schema = json_get(v, "data_schema"), *command = json_get(v, "command");
+    return schema && schema->type == JSON_STR && !strcmp(json_get_str(schema), "zcl.onion_status.v1") &&
+        command && command->type == JSON_STR && !strcmp(json_get_str(command), "core.network.onion.status");
+}
+
+static bool aj_route_read_pages(struct aj_node_ctx *a, struct aj_route_observation *route)
+{
+    int64_t cursor = 0;
+    for (int page = 0; page < 16; page++) {
+        char out[16384] = {0}, name[64]; struct json_value v = {0};
+        if (page == 0) snprintf(name, sizeof(name), "onion-status.json");
+        else snprintf(name, sizeof(name), "onion-status-page-%d.json", page + 1);
+        bool fetched = aj_route_fetch(a, cursor, out, sizeof(out));
+        bool saved = aj_route_save(name, out);
+        if (!fetched || !saved || !aj_route_envelope(out, &v)) { json_free(&v); return false; }
+        const struct json_value *data = aj_json_data(&v), *mapping = json_get(data, "port_mapping");
+        int64_t next = 0; bool more = false;
+        bool ok = data && data->type == JSON_OBJ && aj_route_page_control(data, cursor, &next, &more);
+        if (ok && page == 0) ok = aj_route_identity(data, route->onion);
+        if (ok && mapping) ok = aj_route_mapping(mapping, &route->port);
+        json_free(&v);
+        if (!ok) return false;
+        if (route->port) return true;
+        if (!more) return false;
+        cursor = next;
+    }
+    return false;
+}
+
+static bool aj_route_recheck_mapping(const struct json_value *data, int expected)
+{
+    const struct json_value *mapping = json_get(data, "port_mapping");
+    if (!mapping) return true;
+    int port = 0;
+    return aj_route_mapping(mapping, &port) && port == expected;
+}
+
 static bool aj_role_status_file(struct aj_node_ctx *a)
 {
-    char path[1024], out[16384];
-    char *tail[] = {(char *)"core", (char *)"network", (char *)"onion", (char *)"status", NULL};
-    if (aj_cli(a->datadir, a->rpc, tail, out, sizeof(out), 90, a->home) != 0) return false;
-    struct json_value v; json_init(&v);
-    bool ok = json_read(&v, out, strlen(out));
-    const struct json_value *data = json_get(&v, "data");
-    const struct json_value *ready = json_get(data ? data : &v, "p2p_publish_ready");
-    ok = ok && ready && ready->type == JSON_BOOL && json_get_bool(ready);
+    struct aj_route_observation route = {0};
+    if (!aj_route_read_pages(a, &route)) return false;
+    char out[16384] = {0}, onion[63]; struct json_value v = {0};
+    bool fetched = aj_route_fetch(a, 0, out, sizeof(out));
+    bool saved = aj_route_save("onion-status-recheck.json", out);
+    if (!fetched || !saved || !aj_route_envelope(out, &v)) { json_free(&v); return false; }
+    int64_t next = 0; bool more = false;
+    bool ok = aj_route_page_control(aj_json_data(&v), 0, &next, &more) &&
+        aj_route_identity(aj_json_data(&v), onion) && !strcmp(onion, route.onion) &&
+        aj_route_recheck_mapping(aj_json_data(&v), route.port);
     json_free(&v);
-    return ok && aj_path_join(path, sizeof(path), g_work, "onion-status.json") && aj_write_file(path, out);
+    char body[256];
+    int n = snprintf(body, sizeof(body), "{\"endpoint\":\"%s:%d\",\"observation\":\"separate_status_reads_not_atomic\"}\n", route.onion, route.port);
+    return ok && n > 0 && (size_t)n < sizeof(body) && aj_route_save("peer.json", body);
 }
 
 static bool aj_role_public_files(struct aj_node_ctx *a)
