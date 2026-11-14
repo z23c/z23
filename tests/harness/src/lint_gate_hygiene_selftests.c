@@ -1007,12 +1007,11 @@ int t_no_uncited_victory(void)
  * DEFENSIVE_CODING.md's canonical block. Runs on the real worktree. */
 #define ROOT_STRAY_SCRIPT_REL  "build/bin/z23-lint check-no-stray-root-files"
 
-/* Evidence for a failed run_gate_script(ROOT_STRAY_SCRIPT_REL, ...) call:
- * reads back the gate's redirected output (bounded) and lists the root
- * directory now, so a transient stray is named. Read-only. */
-#define ROOT_STRAY_CAPTURE_MAX (8 * 1024)
+/* Print at most 8 KiB of the gate's redirected output before another gate
+ * overwrites the per-process capture. Read-only; the read itself is unbounded. */
+#define LINT_GATE_CAPTURE_MAX (8 * 1024)
 
-static void print_root_stray_gate_capture(void)
+static void print_lint_gate_capture(void)
 {
     char out_path[PATH_MAX];
     if (lint_gate_out_path(out_path, sizeof(out_path)) != 0) {
@@ -1029,9 +1028,9 @@ static void print_root_stray_gate_capture(void)
         return;
     }
     size_t len = strlen(buf);
-    if (len > ROOT_STRAY_CAPTURE_MAX) {
+    if (len > LINT_GATE_CAPTURE_MAX) {
         fprintf(stderr, "%.*s\n[lint-gate] (output truncated at %d bytes)\n",
-                ROOT_STRAY_CAPTURE_MAX, buf, ROOT_STRAY_CAPTURE_MAX);
+                LINT_GATE_CAPTURE_MAX, buf, LINT_GATE_CAPTURE_MAX);
     } else {
         fprintf(stderr, "%s", buf);
         if (len == 0 || buf[len - 1] != '\n')
@@ -1155,7 +1154,7 @@ int t_no_stray_root_files(void)
         fprintf(stderr,
                 "[lint-gate] check-no-stray-root-files baseline rc=%d; gate "
                 "output follows\n", baseline_rc);
-        print_root_stray_gate_capture();
+        print_lint_gate_capture();
         print_root_listing_now();
     }
     int trip_rc = run_gate_script_with_env(
@@ -1165,7 +1164,7 @@ int t_no_stray_root_files(void)
         fprintf(stderr,
                 "[lint-gate] check-no-stray-root-files recover rc=%d; gate "
                 "output follows\n", recover_rc);
-        print_root_stray_gate_capture();
+        print_lint_gate_capture();
         print_root_listing_now();
     }
 
@@ -1535,8 +1534,15 @@ int t_lint_explicit_gates_run_once(void)
     bool created = test_mkdtemp(fixture, sizeof(fixture), "lint_explicit") != NULL;
     TEST("[lint-gate] fast generated gates and explicit goals execute and propagate failures") {
         ASSERT(created);
-        ASSERT(run_gate_script_arg("tools/scripts/test_lint_explicit_gates.sh",
-                                  NULL, fixture) == 0);
+        char capture[PATH_MAX];
+        ASSERT(lint_gate_out_path(capture, sizeof(capture)) == 0);
+        ASSERT(unlink(capture) == 0 || errno == ENOENT);
+        int rc = run_gate_script_arg("tools/scripts/test_lint_explicit_gates.sh", NULL, fixture);
+        if (rc != 0) {
+            fprintf(stderr, "[lint-gate] test_lint_explicit_gates.sh failed rc=%d; captured output:\n", rc);
+            print_lint_gate_capture();
+        }
+        ASSERT(rc == 0);
         PASS();
     } _test_next:;
     if (created && test_rm_rf_recursive(fixture) != 0) {
