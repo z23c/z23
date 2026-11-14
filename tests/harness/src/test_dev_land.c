@@ -780,6 +780,41 @@ static int dlx_shard_row_159(void)
 {
     return test_dev_land_integrated_merge(true);
 }
+
+/* A retired marker file at the land path is not a missing state root.
+ * Cancel reaches dl_dirs_make after only a seq check, so this drives the
+ * shipped refusal from that start state. */
+static int test_dev_land_land_file(void)
+{
+    int failures = 0;
+    TEST("land: a land path that is not a directory names that path and dev land send") {
+        char root[4096], land[4200];
+        struct dlx_call c;
+        FILE *marker;
+        dlx_isolate("land_not_dir");
+        ASSERT(platform_state_root(root, sizeof(root)));
+        ASSERT(snprintf(land, sizeof(land), "%s/land", root) > 0);
+        marker = fopen(land, "w");
+        ASSERT(marker != NULL);
+        ASSERT(fputs("RETIRED\n", marker) >= 0);
+        ASSERT(fclose(marker) == 0);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c));
+        ASSERT(!dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "STATE_DIR_FAILED");
+        ASSERT_STR_EQ(c.reply.error.message,
+                      "this host has no land queue: the land path is not a directory");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), land);
+        ASSERT_STR_EQ(c.reply.error.next_action,
+                      "z23 dev land send --host=<queue-host> --lane=<name> --commit=<sha>");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
 #endif /* !defined(_WIN32) */
 
 struct dlx_shard_case {
@@ -1162,6 +1197,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      test_dev_land_window_defer, 3u},
     {"test_dev_land_window_replay()",
      test_dev_land_window_replay, 3u},
+    {"test_dev_land_land_file()",
+     test_dev_land_land_file, 0u},
 #endif /* !defined(_WIN32) */
 };
 #define DLX_CASE_COUNT \
@@ -1363,6 +1400,7 @@ static const char *const g_dlx_original_calls[] = {
     "dlx_string_compatibility_cases()",
     "test_dev_land_window_defer()",
     "test_dev_land_window_replay()",
+    "test_dev_land_land_file()",
 #endif /* !defined(_WIN32) */
 };
 #define DLX_ORIGINAL_COUNT \

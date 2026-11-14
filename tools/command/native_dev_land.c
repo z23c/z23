@@ -341,12 +341,16 @@ static bool dl_mkdir_one(const char *path)
 static bool dl_dirs_resolve(struct dl_dirs *d, bool create)
 {
     int n;
+    if (d)
+        d->land[0] = '\0';
     if (!d || !(create ? platform_state_root(d->root, sizeof(d->root))
                        : platform_state_root_existing(d->root, sizeof(d->root))))
         return false;
     n = snprintf(d->land, sizeof(d->land), "%s/land", d->root);
-    if (n <= 0 || (size_t)n >= sizeof(d->land))
+    if (n <= 0 || (size_t)n >= sizeof(d->land)) {
+        d->land[0] = '\0';
         return false;
+    }
     n = snprintf(d->logs, sizeof(d->logs), "%s/land/logs", d->root);
     if (n <= 0 || (size_t)n >= sizeof(d->logs))
         return false;
@@ -359,6 +363,28 @@ static bool dl_dirs_resolve(struct dl_dirs *d, bool create)
 static bool dl_dirs_make(struct dl_dirs *d)
 {
     return dl_dirs_resolve(d, true);
+}
+
+/* A regular file where the queue directory belongs is not a missing state
+ * root. Name that path, and the send command for the host that has a queue. */
+static void dl_state_dir_fail(struct zcl_command_reply *reply,
+                              const char *action, const struct dl_dirs *d)
+{
+    struct stat st;
+    if (d && d->land[0] && stat(d->land, &st) == 0 &&
+        (st.st_mode & S_IFMT) != S_IFDIR) {
+        dl_fail(reply, "STATE_DIR_FAILED", action,
+                "this host has no land queue: the land path is not a directory",
+                d->land);
+        (void)snprintf(reply->error.next_action,
+                       sizeof(reply->error.next_action), "%s",
+                       "z23 dev land send --host=<queue-host> "
+                       "--lane=<name> --commit=<sha>");
+        return;
+    }
+    dl_fail(reply, "STATE_DIR_FAILED", action,
+            "cannot resolve the owner-private state root",
+            "platform_state_root");
 }
 
 /* ── time ──────────────────────────────────────────────────────────────── */
@@ -3913,9 +3939,7 @@ static void dl_submit(const struct zcl_command_request *req,
     if (!tip)
         return;
     if (!dl_dirs_make(&d)) {
-        dl_fail(reply, "STATE_DIR_FAILED", "submit",
-                "cannot resolve the owner-private state root",
-                "platform_state_root");
+        dl_state_dir_fail(reply, "submit", &d);
         return;
     }
     dl_pool_sweep_and_log(&d);
@@ -4063,9 +4087,7 @@ static void dl_cancel(const struct zcl_command_request *req,
         return;
     }
     if (!dl_dirs_make(&d)) {
-        dl_fail(reply, "STATE_DIR_FAILED", "cancel",
-                "cannot resolve the owner-private state root",
-                "platform_state_root");
+        dl_state_dir_fail(reply, "cancel", &d);
         return;
     }
     if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >=
@@ -12080,9 +12102,7 @@ static void dl_step(const struct zcl_command_request *req,
     bool have_inflight = false, have_row = false;
     int slot;
     if (!dl_dirs_make(&d)) {
-        dl_fail(reply, "STATE_DIR_FAILED", "slot",
-                "cannot resolve the owner-private state root",
-                "platform_state_root");
+        dl_state_dir_fail(reply, "slot", &d);
         return;
     }
     if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >=
