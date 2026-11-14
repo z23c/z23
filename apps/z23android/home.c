@@ -132,7 +132,8 @@ static const char *node_details_pending(const struct zapp_view *view)
     if (view->node_starting || view->node_installing) return "Node starting.";
     if (!view->node_process_running) return "Node stopped.";
     if (view->pace == ZAPP_PACE_PAUSE) return "Node sync paused.";
-    return view->node_running ? NULL : "Node not responding.";
+    if (view->node_running) return NULL;
+    return view->node_seen_height ? "Waiting for node status." : "Node starting.";
 }
 static const char *node_details_verdict(const struct zapp_view *view)
 {

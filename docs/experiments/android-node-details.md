@@ -52,3 +52,14 @@ split without changing the cap or assertions; the complexity check then
 passed. Rebuilding the existing `skycombat-model-replay` target refreshed the
 depfile and the selector returned a closed 42-group selection. After the
 repair, `test-host` and the Android native compile and link passed again.
+
+## Startup wording
+
+A device run of the landed `133e10086a737d27b9b99b6e23fd19a28d4f2232`
+app showed Home starting the node while Node details said it was not
+responding. The process can start before its first status reply, so that
+wording treated normal startup as a failure. The follow-up uses `Node
+starting.` until a height has been seen, and `Waiting for node status.`
+if a previously observed node has not answered. The admitted Android host
+tests passed for both states and the existing stopped, stopping, paused and
+preview cases. Physical verification of the follow-up remains pending.

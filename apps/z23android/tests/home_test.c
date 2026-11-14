@@ -55,7 +55,9 @@ static void node_details_states(void)
     view.node_stopping = false; view.node_running = true; view.pace = ZAPP_PACE_PAUSE;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused") && !strstr(text, "123"));
     view.pace = ZAPP_PACE_NORMAL; view.node_running = false;
-    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "not responding") && !strstr(text, "123"));
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node starting.") && !strstr(text, "123"));
+    view.node_seen_height = true;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Waiting for node status.") && !strstr(text, "123"));
 }
 static void node_details_reported(void)
 {
