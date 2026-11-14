@@ -4,6 +4,10 @@
 
 #include "test/test_core.h"
 #include "net/p2p_game.h"
+#include "controllers/game_controller.h"
+#include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 static int test_ttt_init_and_valid_move(void)
 {
@@ -341,10 +345,44 @@ static int test_game_type_registry(void)
     return failures;
 }
 
+static int test_peer_latency_samples(void)
+{
+    int failures = 0;
+    struct connman *cm = calloc(1, sizeof(*cm));
+    struct p2p_node *unknown = calloc(1, sizeof(*unknown));
+    struct p2p_node *sampled = calloc(1, sizeof(*sampled));
+    struct json_value out = {0};
+    if (!cm || !unknown || !sampled) { failures = 1; goto done; }
+    struct p2p_node *nodes[] = {unknown, sampled};
+    zcl_mutex_init(&cm->manager.cs_nodes);
+    cm->manager.nodes = nodes; cm->manager.num_nodes = 2;
+    unknown->id = 1; unknown->version = 1; unknown->min_ping_usec_time = INT64_MAX; unknown->avg_latency_us = -1;
+    sampled->id = 2; sampled->version = 1; sampled->ping_usec_time = 171311;
+    sampled->min_ping_usec_time = 1; sampled->avg_latency_us = 125500;
+    rpc_game_set_connman(cm);
+    bool ok = api_getpeerlatency(&out) && json_size(&out) == 2;
+    const struct json_value *a = json_at(&out, 0), *b = json_at(&out, 1);
+    const char *keys[] = {"ping_ms", "min_ping_ms", "avg_latency_ms"};
+    const double expected[] = {171.311, 0.001, 125.5};
+    for (size_t i = 0; ok && i < 3; ++i) {
+        const struct json_value *u = json_get(a, keys[i]), *v = json_get(b, keys[i]);
+        ok = u && u->type == JSON_NULL && v && v->type == JSON_REAL &&
+             fabs(json_get_real(v) - expected[i]) < 0.000001;
+    }
+    printf("peer latency: missing samples are null; measured samples stay numeric... %s\n", ok ? "OK" : "FAIL");
+    if (!ok) ++failures;
+    rpc_game_set_connman(NULL);
+    zcl_mutex_destroy(&cm->manager.cs_nodes);
+done:
+    json_free(&out); free(sampled); free(unknown); free(cm);
+    return failures;
+}
+
 int test_game(void)
 {
     int failures = 0;
 
+    failures += test_peer_latency_samples();
     failures += test_ttt_init_and_valid_move();
     failures += test_ttt_rejections_and_outcomes();
     failures += test_game_serialize_invite_and_move();

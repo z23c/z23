@@ -131,6 +131,20 @@ static bool rpc_pingpeer(const struct json_value *params, bool help,
     return true;
 }
 
+/* A missing pong is unknown, not a zero-latency measurement. */
+static bool latency_push_ms(struct json_value *entry, const char *key, int64_t usec)
+{
+    if (usec > 0 && usec != INT64_MAX) {
+        return json_push_kv_real(entry, key, (double)usec / 1000.0);
+    } else {
+        struct json_value missing = {0};
+        json_set_null(&missing);
+        bool ok = json_push_kv(entry, key, &missing);
+        json_free(&missing);
+        return ok;
+    }
+}
+
 /* ── RPC: getpeerlatency ─────────────────────────────────────── */
 
 static bool rpc_getpeerlatency(const struct json_value *params, bool help,
@@ -139,7 +153,7 @@ static bool rpc_getpeerlatency(const struct json_value *params, bool help,
     (void)params;
     RPC_HELP(help, result,
         "getpeerlatency\n"
-        "\nReturn latency measurements for all connected peers.\n"
+        "\nReturn last completed ping latency in milliseconds; unknown values are null.\n"
         "\nResult: array of objects with peer_id, addr, ping_ms, min_ping_ms.");
 
     struct connman *cm = g_game_ctx.connman;
@@ -157,18 +171,20 @@ static bool rpc_getpeerlatency(const struct json_value *params, bool help,
 
         struct json_value entry = {0};
         json_set_object(&entry);
-        json_push_kv_int(&entry, "peer_id", (int64_t)node->id);
-        json_push_kv_str(&entry, "addr", node->addr_name);
-        json_push_kv_bool(&entry, "inbound", node->inbound);
-        json_push_kv_real(&entry, "ping_ms",
-            (double)node->ping_usec_time / 1000.0);
-        json_push_kv_real(&entry, "min_ping_ms",
-            (double)node->min_ping_usec_time / 1000.0);
-        json_push_kv_real(&entry, "avg_latency_ms",
-            (double)node->avg_latency_us / 1000.0);
-        json_push_kv_int(&entry, "version", (int64_t)node->version);
-        json_push_kv_str(&entry, "subver", node->clean_sub_ver);
-        json_push_back(result, &entry);
+        bool ok = json_push_kv_int(&entry, "peer_id", (int64_t)node->id) &&
+                  json_push_kv_str(&entry, "addr", node->addr_name) &&
+                  json_push_kv_bool(&entry, "inbound", node->inbound) &&
+                  latency_push_ms(&entry, "ping_ms", node->ping_usec_time) &&
+                  latency_push_ms(&entry, "min_ping_ms", node->min_ping_usec_time) &&
+                  latency_push_ms(&entry, "avg_latency_ms", node->avg_latency_us) &&
+                  json_push_kv_int(&entry, "version", (int64_t)node->version) &&
+                  json_push_kv_str(&entry, "subver", node->clean_sub_ver) &&
+                  json_push_back(result, &entry);
+        if (!ok) {
+            json_free(&entry);
+            zcl_mutex_unlock(&cm->manager.cs_nodes);
+            return false;
+        }
         json_free(&entry);
     }
     zcl_mutex_unlock(&cm->manager.cs_nodes);

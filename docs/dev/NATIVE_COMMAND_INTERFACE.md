@@ -1257,3 +1257,10 @@ existing job, including after a lost start response. As with generic native job
 deduplication, simultaneous starts are not atomic; this is not an exactly-once
 guarantee. `next_action` in the response carries the command and full resolved
 input; standard `next` is also emitted when its smaller input field can hold it.
+
+## Peer latency samples
+
+`core.network.peers.latency` and `GET /api/latency` report the most recently
+completed ping, its minimum and its moving average in milliseconds. A field is
+`null` until that measurement exists; it is not a zero-latency observation.
+The separate `pingpeer` RPC retains its existing response contract.

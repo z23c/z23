@@ -644,9 +644,8 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "core.network.peers.latency", "core.network.peers", "",
     "Round-trip latency for every peer",
-    "Round-trip latency in microseconds for every connected peer, "
-    "measured live at call time via the P2P ping game; bounded to the "
-    "list budget row cap.", ZCL_COMMAND_LIST_BUDGET,
+    "Last completed ping latency in milliseconds for each connected peer; "
+    "unknown measurements are null, bounded to the list budget row cap.", ZCL_COMMAND_LIST_BUDGET,
     "peers,latency,ping",
     "zcl.command.empty_input.v1", "zcl.peer_latency.v1", "", "",
     "z23 core network peers latency",
