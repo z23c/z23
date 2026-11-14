@@ -14,12 +14,14 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "util/safe_alloc.h"
 #include "lintc.h"
 #include "gate_clang_portability_priv.h"
 
@@ -559,36 +561,72 @@ static void cp_child_compile(struct cp_ctx *c, const char *src)
     _exit(cp_compile_core(c, src));
 }
 
-int cp_compile_misses(struct cp_ctx *c)
+static void cp_pool_abort(pid_t *pids, int count)
 {
-    int running = 0;
-    for (int i = 0; i < c->nmiss; i++) {
-        while (running >= c->jobs) {
-            int st;
-            pid_t p;
-            do
-                p = wait(&st);
-            while (p < 0 && errno == EINTR);
-            if (p > 0)
-                running--;
-        }
-        pid_t pid = fork();
-        if (pid == 0)
-            cp_child_compile(c, c->miss[i]);
-        if (pid > 0)
-            running++;
+    for (int i = 0; i < count; i++) if (pids[i] > 0) {
+        int st; pid_t got;
+        do { got = waitpid(pids[i], &st, 0); } while (got < 0 && errno == EINTR);
     }
-    while (running > 0) {
-        int st;
-        pid_t p;
-        do
-            p = wait(&st);
-        while (p < 0 && errno == EINTR);
-        if (p > 0)
-            running--;
-    }
-    return 0;
 }
+
+static int cp_pool_collect(pid_t *pids, int count, int *running,
+                           pid_t (*wait_child)(pid_t, int *, int))
+{
+    int finished = 0;
+    for (int i = 0; i < count; i++) if (pids[i] > 0) {
+        int st = 0; pid_t got;
+        do { got = wait_child(pids[i], &st, WNOHANG); } while (got < 0 && errno == EINTR);
+        if (got < 0) {
+            int error = errno;
+            fprintf(stderr, "%s: worker wait failed: %s\n", k_cpc_gate, strerror(error));
+            if (error == ECHILD) pids[i] = 0;
+            return -1;
+        }
+        if (got > 0 && got != pids[i]) { fprintf(stderr, "%s: unexpected worker identity\n", k_cpc_gate); return -1; }
+        if (got == pids[i]) {
+            pids[i] = 0; (*running)--; finished++;
+            if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+                fprintf(stderr, "%s: compiler worker failed\n", k_cpc_gate); return -1;
+            }
+        }
+    }
+    return finished;
+}
+
+static bool cp_pool_fill(struct cp_ctx *c, pid_t *pids, int slots,
+                         int *next, int *running, pid_t (*spawn)(void))
+{
+    while (*next < c->nmiss && *running < c->jobs) {
+        pid_t pid = spawn();
+        if (pid == 0) cp_child_compile(c, c->miss[*next]);
+        if (pid < 0) {
+            fprintf(stderr, "%s: compiler worker fork failed: %s\n", k_cpc_gate, strerror(errno));
+            return false;
+        }
+        int slot = 0;
+        while (slot < slots && pids[slot]) slot++;
+        pids[slot] = pid; (*next)++; (*running)++;
+    }
+    return true;
+}
+
+int cp_compile_misses_with(struct cp_ctx *c, pid_t (*spawn)(void), pid_t (*wait_child)(pid_t, int *, int))
+{
+    if (!c || c->jobs <= 0 || c->nmiss < 0 || c->nmiss > CP_MAXSRC) return 2;
+    int slots = c->jobs < c->nmiss ? c->jobs : c->nmiss;
+    pid_t *pids = zcl_calloc((size_t)slots + 1, sizeof(*pids), "clang_portability_pool");
+    if (!pids) { fprintf(stderr, "%s: cannot allocate compiler worker slots\n", k_cpc_gate); return 2; }
+    int next = 0, running = 0, rc = 0;
+    while (next < c->nmiss || running) {
+        if (!cp_pool_fill(c, pids, slots, &next, &running, spawn)) { rc = 2; break; }
+        int done = cp_pool_collect(pids, slots, &running, wait_child);
+        if (done < 0) { rc = 2; break; }
+        if (!done && running) (void)poll(NULL, 0, 5);
+    }
+    if (rc) cp_pool_abort(pids, slots);
+    free(pids); return rc;
+}
+int cp_compile_misses(struct cp_ctx *c) { return cp_compile_misses_with(c, fork, waitpid); }
 
 int cp_compile_one(struct cp_ctx *c, const char *src)
 {

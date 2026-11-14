@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "util/safe_alloc.h"
 #include "lintc.h"
 #include "gate_clang_portability_priv.h"
 
@@ -26,10 +27,69 @@ static int cpt_fail(const char *msg)
     return 1;
 }
 
+static pid_t cpt_no_fork(void) { errno = EAGAIN; return -1; }
+static pid_t cpt_workers[3];
+static size_t cpt_worker_count;
+static int cpt_worker_exit;
+static pid_t cpt_quick_fork(void)
+{
+    pid_t p = fork();
+    if (!p) _exit(cpt_worker_exit);
+    if (p > 0 && cpt_worker_count < 3) cpt_workers[cpt_worker_count++] = p;
+    return p;
+}
+static int cpt_wait_fault;
+static pid_t cpt_wait_injected(pid_t pid, int *status, int options)
+{
+    if (cpt_wait_fault) {
+        int fault = cpt_wait_fault; cpt_wait_fault = 0;
+        if (fault == ECHILD) { pid_t got; do { got = waitpid(pid, status, 0); } while (got < 0 && errno == EINTR); }
+        errno = fault; return -1;
+    }
+    return waitpid(pid, status, options);
+}
+static int cpt_pool_fork_failure(void)
+{
+    struct cp_ctx *c = zcl_calloc(1, sizeof(*c), "clang_pool_test");
+    if (!c) return 2;
+    c->nmiss = c->jobs = 1;
+    int rc = cp_compile_misses_with(c, cpt_no_fork, waitpid);
+    free(c);
+    return rc != 0 ? 0 : cpt_fail("compiler pool accepted failed fork");
+}
+static bool cpt_workers_reaped(void)
+{
+    for (size_t i = 0; i < cpt_worker_count; i++) {
+        int st; errno = 0;
+        if (waitpid(cpt_workers[i], &st, WNOHANG) != -1 || errno != ECHILD) return false;
+    }
+    return true;
+}
+static int cpt_pool_wait_case(int fault, int exit_code, bool expected_success)
+{
+    struct cp_ctx *c = zcl_calloc(1, sizeof(*c), "clang_pool_test");
+    if (!c) return 2;
+    pid_t foreign = fork();
+    if (!foreign) _exit(0);
+    if (foreign < 0) { free(c); return 2; }
+    c->nmiss = 3; c->jobs = 2; cpt_wait_fault = fault;
+    cpt_worker_count = 0; cpt_worker_exit = exit_code;
+    int rc = cp_compile_misses_with(c, cpt_quick_fork, cpt_wait_injected);
+    int st = 0; pid_t got;
+    do { got = waitpid(foreign, &st, 0); } while (got < 0 && errno == EINTR);
+    free(c);
+    return ((rc == 0) == expected_success && got == foreign && WIFEXITED(st) && WEXITSTATUS(st) == 0 && cpt_workers_reaped())
+        ? 0 : cpt_fail("compiler pool wait failure or foreign child ownership");
+}
+
 /* ── include-digest TOCTOU proof ─────────────────────────────────────── */
 
 int cp_digest_selftest(const char *scratch)
 {
+    if (cpt_pool_fork_failure()) return 1;
+    if (cpt_pool_wait_case(EIO, 0, false) || cpt_pool_wait_case(ECHILD, 0, false) ||
+        cpt_pool_wait_case(EINTR, 0, true) || cpt_pool_wait_case(0, 7, false) ||
+        cpt_pool_wait_case(0, 0, true)) return 1;
     char base[CP_PATH], root[CP_PATH], sc1[CP_PATH], sc2[CP_PATH];
     if (cps_snp(base, "%s/tu-digest-self", scratch))
         return 2;

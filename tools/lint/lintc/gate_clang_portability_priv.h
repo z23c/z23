@@ -96,6 +96,7 @@ int  cp_include_digest(const char *scratch, const char *root,
 int  cp_cache_setup(struct cp_ctx *c, const char *cachedir, const char *root);
 int  cp_cache_plan(struct cp_ctx *c);
 int  cp_compile_misses(struct cp_ctx *c);
+int  cp_compile_misses_with(struct cp_ctx *c, pid_t (*spawn)(void), pid_t (*wait_child)(pid_t, int *, int));
 int  cp_cache_summary(const struct cp_ctx *c);
 int  cp_compile_one(struct cp_ctx *c, const char *src);
 
