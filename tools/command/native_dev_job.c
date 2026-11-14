@@ -434,10 +434,9 @@ static bool job_head(const char *cwd, char *out, size_t cap)
 
 /* Resolve the cwd input (default: the process cwd) to a registered
  * worktree. On failure the reply is already failed. */
-static bool job_resolve_cwd(const struct json_value *input, char *cwd,
+static bool job_resolve_cwd(const char *in, char *cwd,
                             size_t cap, struct zcl_command_reply *reply)
 {
-    const char *in = zcl_dev_job_str(json_get(input, "cwd"));
     char raw[ZCL_DEV_JOB_PATH_MAX];
     if (!in && !getcwd(raw, sizeof(raw))) {
         job_invalid(reply, "INVALID_INPUT", "cwd could not be determined",
@@ -527,10 +526,10 @@ static bool job_attach_existing(uint64_t key, char *id, size_t id_cap,
 
 static bool job_make_handle(struct json_value *handle, const char *id,
                             const char *cwd, const char *head,
-                            const struct json_value *input, char *log,
+                            const struct zcl_dev_job_start_input *input, char *log,
                             size_t log_cap)
 {
-    const char *label = zcl_dev_job_str(json_get(input, "label"));
+    const char *label = input->label;
     int n = snprintf(log, log_cap, "%s/build/scratch/job-%s.log", cwd, id);
     if (n <= 0 || (size_t)n >= log_cap)
         return false;
@@ -540,7 +539,7 @@ static bool job_make_handle(struct json_value *handle, const char *id,
            json_push_kv_str(handle, "cwd", cwd) &&
            json_push_kv_str(handle, "head", head) &&
            json_push_kv_str(handle, "label", label ? label : "") &&
-           json_push_kv(handle, "argv", json_get(input, "argv")) &&
+           json_push_kv(handle, "argv", input->argv) &&
            json_push_kv_int(handle, "started_unix",
                             (int64_t)platform_time_wall_time_t()) &&
            json_push_kv_str(handle, "log", log);
@@ -623,7 +622,7 @@ static void job_new_id(char *id, size_t cap)
                    (unsigned)getpid(), ++counter);
 }
 
-static void job_start_new(const struct zcl_command_request *request,
+static void job_start_new(const struct zcl_dev_job_start_input *input,
                           const char *cwd, const char *head, uint64_t key,
                           struct zcl_command_reply *reply)
 {
@@ -631,7 +630,7 @@ static void job_start_new(const struct zcl_command_request *request,
     char keypath[ZCL_DEV_JOB_PATH_MAX];
     struct json_value handle;
     job_new_id(id, sizeof(id));
-    if (!job_make_handle(&handle, id, cwd, head, request->input, log,
+    if (!job_make_handle(&handle, id, cwd, head, input, log,
                          sizeof(log)) ||
         !job_store(&handle, id, cwd)) {
         json_free(&handle);
@@ -658,41 +657,40 @@ static void job_start_new(const struct zcl_command_request *request,
     json_free(&handle);
 }
 
-void zcl_dev_job_start_keyed(const struct zcl_command_request *request,
-                             struct zcl_command_reply *reply,
-                             const struct json_value *semantic_argv)
+void zcl_dev_job_start_typed(const struct zcl_dev_job_start_input *input,
+                             struct zcl_command_reply *reply)
 {
     char cwd[ZCL_DEV_JOB_PATH_MAX], head[128], id[ZCL_DEV_JOB_ID_MAX + 1];
     struct json_value handle;
-    const struct json_value *dedupe;
     uint64_t key;
-    if (!reply)
-        return;
-    if (!request || !request->input ||
-        !job_argv_check(json_get(request->input, "argv"), reply) ||
-        !job_resolve_cwd(request->input, cwd, sizeof(cwd), reply))
-        return;
+    if (!reply) return;
+    if (!input || !job_argv_check(input->argv, reply) ||
+        !job_resolve_cwd(input->cwd, cwd, sizeof(cwd), reply)) return;
     if (!job_head(cwd, head, sizeof(head))) {
-        job_invalid(reply, "CWD_NOT_WORKTREE",
-                    "git rev-parse HEAD failed in cwd", "input.cwd");
+        job_invalid(reply, "CWD_NOT_WORKTREE", "git rev-parse HEAD failed in cwd", "input.cwd");
         return;
     }
-    dedupe = json_get(request->input, "dedupe");
-    if (semantic_argv && !job_argv_check(semantic_argv, reply)) return;
-    key = job_key_hash(cwd, head, semantic_argv ? semantic_argv : json_get(request->input, "argv"));
-    if ((!dedupe || json_get_bool(dedupe)) &&
-        job_attach_existing(key, id, sizeof(id), &handle)) {
+    if (input->semantic_argv && !job_argv_check(input->semantic_argv, reply)) return;
+    key = job_key_hash(cwd, head, input->semantic_argv ? input->semantic_argv : input->argv);
+    if (input->dedupe && job_attach_existing(key, id, sizeof(id), &handle)) {
         job_reply_start(reply, id, &handle, "attached", job_read_pid(id));
-        json_free(&handle);
-        return;
+        json_free(&handle); return;
     }
-    job_start_new(request, cwd, head, key, reply);
+    job_start_new(input, cwd, head, key, reply);
 }
 
 void zcl_native_handle_dev_job_start(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
-    zcl_dev_job_start_keyed(request, reply, NULL);
+    const struct json_value *in = request ? request->input : NULL;
+    const struct json_value *dedupe = in ? json_get(in, "dedupe") : NULL;
+    if (!in) return;
+    const struct zcl_dev_job_start_input parsed = {
+        .argv = json_get(in, "argv"), .cwd = zcl_dev_job_str(json_get(in, "cwd")),
+        .label = zcl_dev_job_str(json_get(in, "label")),
+        .dedupe = !dedupe || json_get_bool(dedupe)
+    };
+    zcl_dev_job_start_typed(&parsed, reply);
 }
 
 /* json_get_str() answers "" for a missing or non-string value; the job leaves

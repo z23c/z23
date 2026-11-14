@@ -212,11 +212,11 @@ static bool job_external_log_scope(const char *ext,
 }
 
 /* Resolve the log to read: a started job's own log, or an external one. */
-static bool job_wait_target(const struct json_value *in,
+static bool job_wait_target(const struct zcl_dev_job_wait_input *in,
                             struct zcl_command_reply *reply,
                             struct job_wait_req *r)
 {
-    const char *ext = zcl_dev_job_str(json_get(in, "log"));
+    const char *ext = in->log;
     if (r->id) {
         r->have_handle = zcl_dev_job_id_valid(r->id) &&
                          zcl_dev_job_read_handle(r->id, &r->handle);
@@ -235,33 +235,30 @@ static bool job_wait_target(const struct json_value *in,
 }
 
 /* Validate the input and resolve the target; the reply is failed on false. */
-static bool job_wait_parse(const struct json_value *in,
+static bool job_wait_parse(const struct zcl_dev_job_wait_input *in,
                            struct zcl_command_reply *reply,
                            struct job_wait_req *r)
 {
-    int64_t timeout_req = 0;
     memset(r, 0, sizeof(*r));
     json_init(&r->handle);
-    r->id = in ? zcl_dev_job_str(json_get(in, "job_id")) : NULL;
-    if (!in || (!r->id && !zcl_dev_job_str(json_get(in, "log"))) ||
-        !job_wait_int(in, "timeout_s", &timeout_req) ||
-        !job_wait_int(in, "tail_lines", &r->tail)) {
+    r->id = in ? in->job_id : NULL;
+    if (!in || (!r->id && !in->log)) {
         job_wait_invalid(reply, "INVALID_INPUT",
                          "give job_id (from dev loop job start) or log, and "
-                         "integer timeout_s / tail_lines",
-                         "input");
+                         "integer timeout_s / tail_lines", "input");
         return false;
     }
+    r->tail = in->tail_lines;
     if (!job_wait_target(in, reply, r))
         return false;
-    r->timeout_s = zcl_bounded_wait_clamp(timeout_req, 1, ZCL_DEV_JOB_WAIT_MAX_S,
+    r->timeout_s = zcl_bounded_wait_clamp(in->timeout_s, 1, ZCL_DEV_JOB_WAIT_MAX_S,
                                           JOB_WAIT_DEFAULT_S, &r->clamped);
     if (r->tail < 1 || r->tail > ZCL_DEV_JOB_TAIL_MAX)
         r->tail = r->tail < 1 ? JOB_TAIL_DEFAULT : ZCL_DEV_JOB_TAIL_MAX;
     return true;
 }
 
-void zcl_native_handle_dev_job_wait(const struct zcl_command_request *request,
+void zcl_dev_job_wait_typed(const struct zcl_dev_job_wait_input *input,
                                     struct zcl_command_reply *reply)
 {
     struct job_wait_req r;
@@ -271,7 +268,7 @@ void zcl_native_handle_dev_job_wait(const struct zcl_command_request *request,
     int rc = 0;
     if (!reply)
         return;
-    if (!job_wait_parse(request ? request->input : NULL, reply, &r)) {
+    if (!job_wait_parse(input, reply, &r)) {
         json_free(&r.handle);
         return;
     }
@@ -289,4 +286,22 @@ void zcl_native_handle_dev_job_wait(const struct zcl_command_request *request,
                    (platform_time_monotonic_ms() - t0) / 1000, r.timeout_s,
                    r.clamped, (size_t)r.tail);
     json_free(&r.handle);
+}
+
+void zcl_native_handle_dev_job_wait(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{
+    const struct json_value *in = request ? request->input : NULL;
+    struct zcl_dev_job_wait_input parsed = {0};
+    if (!reply) return;
+    if (!in || !job_wait_int(in, "timeout_s", &parsed.timeout_s) ||
+        !job_wait_int(in, "tail_lines", &parsed.tail_lines)) {
+        job_wait_invalid(reply, "INVALID_INPUT",
+                         "give job_id (from dev loop job start) or log, and "
+                         "integer timeout_s / tail_lines", "input");
+        return;
+    }
+    parsed.job_id = zcl_dev_job_str(json_get(in, "job_id"));
+    parsed.log = zcl_dev_job_str(json_get(in, "log"));
+    zcl_dev_job_wait_typed(&parsed, reply);
 }

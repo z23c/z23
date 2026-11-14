@@ -35,6 +35,10 @@ static bool da_path(const char *s)
 }
 static bool da_hash(const char *path, char out[65])
 {
+#if defined(_WIN32)
+    (void)path; (void)out;
+    return false;
+#else
     struct stat st; unsigned char buf[16384], digest[32]; struct sha256_ctx ctx;
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK); if (fd < 0) return false;
     bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode); ssize_t n = 0;
@@ -44,6 +48,7 @@ static bool da_hash(const char *path, char out[65])
     if (n < 0 || closed) ok = false;
     if (!ok) return false;
     sha256_finalize(&ctx, digest); zcl_hex_encode(digest, sizeof(digest), out); return true;
+#endif
 }
 static bool da_git(const char *cwd, const char *const *argv, char *out, size_t cap)
 {
@@ -164,6 +169,10 @@ static void da_defaults(const char *cwd, const char **node, const char **params,
 }
 static bool da_inputs(const struct zcl_command_request *req, struct da_plan *p, const char **reason)
 {
+#if defined(_WIN32)
+    (void)req; (void)p;
+    *reason = "Android packaging is not supported on Windows by this command."; return false;
+#endif
     const struct json_value *in = req ? req->input : NULL;
     const char *cwd = da_str(in, "cwd"); char inferred[PATH_MAX];
     if (!cwd) {
@@ -255,20 +264,6 @@ static void da_emit_failed(struct zcl_command_reply *r, bool mutated)
     zcl_command_reply_fail(r, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
         "ANDROID_REPLY_FAILED", "reply", false, mutated, "Could not construct the Android job response.", "dev.android");
 }
-static bool da_invoke(const struct zcl_command_request *req, struct zcl_command_reply *r,
-                      const struct json_value *input, const char *path, zcl_command_handler_fn handler,
-                      const struct json_value *semantic_argv)
-{
-    struct zcl_command_request local = *req; char why[256];
-    local.input = input; local.spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);
-    if (!local.spec || !zcl_command_registry_input_validate(local.spec, input, why, sizeof(why))) {
-        da_fail(r, "ANDROID_JOB_INPUT", "The native job contract rejected the generated input."); return false;
-    }
-    if (semantic_argv) zcl_dev_job_start_keyed(&local, r, semantic_argv);
-    else handler(&local, r);
-    return true;
-}
-
 void zcl_native_handle_dev_android_plan(const struct zcl_command_request *req, struct zcl_command_reply *r)
 {
     struct da_plan p = {0}; const char *reason = NULL;
@@ -386,15 +381,16 @@ void zcl_native_handle_dev_android_prepare(const struct zcl_command_request *req
     bool mutated = false;
     if (!da_inputs(req, &p, &reason)) { da_fail(r, "ANDROID_INPUT_REQUIRED", reason); return; }
     if (!da_prepare_output(&p, r, out, &mutated)) return;
-    struct json_value in, args, semantic; json_init(&in); json_set_object(&in);
-    json_init(&args); json_set_array(&args); json_init(&semantic); json_set_array(&semantic);
-    bool ok = da_args(&args, &p, out) && da_args(&semantic, &p, "/z23-android-output") &&
-        json_push_kv(&in, "argv", &args) && json_push_kv_str(&in, "cwd", p.cwd) && json_push_kv_str(&in, "label", "android-unsigned-v1");
+    struct json_value args, semantic; json_init(&args); json_set_array(&args);
+    json_init(&semantic); json_set_array(&semantic);
+    bool ok = da_args(&args, &p, out) && da_args(&semantic, &p, "/z23-android-output");
+    if (!ok) { json_free(&args); json_free(&semantic); if (rmdir(out)) mutated = true; da_emit_failed(r, mutated); return; }
+    const struct zcl_dev_job_start_input input = {
+        .argv = &args, .semantic_argv = &semantic, .cwd = p.cwd,
+        .label = "android-unsigned-v1", .dedupe = true
+    };
+    zcl_dev_job_start_typed(&input, r);
     json_free(&args);
-    if (!ok) { json_free(&semantic); json_free(&in); if (rmdir(out)) mutated = true; da_emit_failed(r, mutated); return; }
-    bool invoked = da_invoke(req, r, &in, "dev.loop.job.start", zcl_native_handle_dev_job_start, &semantic);
-    json_free(&in);
-    if (!invoked) { json_free(&semantic); if (rmdir(out)) mutated = true; r->error.mutated = mutated; return; }
     if (r->status != ZCL_COMMAND_STATUS_PASSED) { json_free(&semantic); r->error.mutated = true; return; }
     da_prepare_reply(r, &p, &semantic, out);
 }
@@ -507,14 +503,15 @@ void zcl_native_handle_dev_android_status(const struct zcl_command_request *req,
     if (!id || !zcl_dev_job_read_handle(id, &handle) || !da_handle(&handle, &expected, out)) {
         json_free(&handle); da_fail(r, "ANDROID_JOB_REQUIRED", "Supply an Android job_id from dev android prepare."); return;
     }
-    struct json_value wait; json_init(&wait); json_set_object(&wait);
     const struct json_value *timeout = json_get(req->input, "timeout_s");
-    bool reply_ok = json_push_kv_str(&wait, "job_id", id) &&
-        (timeout ? json_push_kv(&wait, "timeout_s", timeout) : json_push_kv_int(&wait, "timeout_s", 1));
-    if (!reply_ok || !da_invoke(req, r, &wait, "dev.loop.job.wait", zcl_native_handle_dev_job_wait, NULL)) {
-        json_free(&wait); json_free(&handle); if (!reply_ok) da_emit_failed(r, false); return;
+    if (timeout && timeout->type != JSON_NULL && timeout->type != JSON_INT) {
+        json_free(&handle); da_fail(r, "ANDROID_JOB_INPUT", "The native job contract rejected the generated input."); return;
     }
-    json_free(&wait);
+    const struct zcl_dev_job_wait_input input = {
+        .job_id = id, .timeout_s = timeout ? json_get_int(timeout) : 1
+    };
+    zcl_dev_job_wait_typed(&input, r);
+    bool reply_ok = true;
     const char *state = da_str(&r->data, "state");
     if (!state || strcmp(state, "passed")) {
         reply_ok = da_status_pending(r, state, id, &expected);

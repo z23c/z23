@@ -473,6 +473,12 @@ ZCL_TEST_GROUP_BUILD_NEED("test_consensus_rule_sweep",
                           "build/bin/consensus_rule_sweep",
                           "tools/consensus_rule_sweep")
 
+/* The cold epoch integrity test runs the nested depfile-scope launcher. */
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform_shard_01", "build/bin/depfile-scope-launch",
+                          "build/bin/depfile-scope-launch")
+ZCL_TEST_GROUP_BUILD_NEED("test_dev_platform", "build/bin/depfile-scope-launch",
+                          "build/bin/depfile-scope-launch")
+
 /* tests/harness/src/test_dev_platform.c runs the built dev binary on a
  * fixture checkout to observe `dev hotswap probe` with a source_tu end to end
  * (the dlopen half is a release stub in the test binary). The shard that
