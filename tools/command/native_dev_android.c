@@ -117,7 +117,7 @@ static bool da_node(struct da_plan *p, const char *node, const char *debug, cons
         if (!da_copy(p->debug, sizeof(p->debug), debug) || !da_hash(debug, p->debug_hash)) {
             *reason = "Cannot read node_debug."; return false;
         }
-    } else { strcpy(p->debug, "none"); strcpy(p->debug_hash, "none"); }
+    } else { memcpy(p->debug, "none", sizeof("none")); memcpy(p->debug_hash, "none", sizeof("none")); }
     unsigned char bytes[20];
     if (!da_copy(p->source, sizeof(p->source), source) || !zcl_hex_decode_lower(p->source, bytes, sizeof(bytes))) {
         *reason = "Supply the node_source commit; its provenance will remain unverified."; return false;

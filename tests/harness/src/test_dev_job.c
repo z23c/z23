@@ -671,7 +671,8 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         ASSERT(dj_android_file(path, "fixture", 0700));
         dj_android_input(&c, lane, true); zcl_native_handle_dev_android_plan(&c.request, &c.reply);
         ASSERT(dj_ok(&c)); ASSERT_STR_EQ(dj_str(&c, "state"), "ready"); dj_end(&c);
-        dj_android_input(&c, lane, true); json_set_str((struct json_value *)json_get(&c.input, "node_bin"), "/tmp/unsafe$(id)");
+        snprintf(path, sizeof(path), "%s/unsafe$(id)", lane);
+        dj_android_input(&c, lane, true); json_set_str((struct json_value *)json_get(&c.input, "node_bin"), path);
         zcl_native_handle_dev_android_plan(&c.request, &c.reply);
         ASSERT(dj_error_is(&c, "ANDROID_INPUT_REQUIRED")); dj_end(&c); PASS();
     }
