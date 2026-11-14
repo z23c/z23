@@ -33,6 +33,7 @@ int test_dev_job(void)
 }
 #else
 #include <pthread.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -43,6 +44,7 @@ static char g_repo[1024];
 static pthread_t g_threads[DJ_MAX_THREADS];
 static int g_nthreads;
 static bool g_no_child; /* launch succeeds but nothing runs: a lost job */
+static unsigned g_launch_count;
 
 static void *dj_thread_main(void *arg)
 {
@@ -55,6 +57,7 @@ static void *dj_thread_main(void *arg)
 static bool dj_launch(const char *id)
 {
     char *copy;
+    ++g_launch_count;
     if (g_no_child)
         return true;
     copy = strdup(id);
@@ -548,6 +551,172 @@ static int dj_test_unknown_liveness(struct zcl_dev_job_hooks *hooks)
     return failures;
 }
 
+static bool dj_android_file(const char *path, const char *text, mode_t mode)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(text, f) >= 0;
+    if (fclose(f) != 0) ok = false;
+    return ok && chmod(path, mode) == 0;
+}
+static bool dj_android_dir(const char *root, const char *part)
+{
+    char path[2048]; int n = snprintf(path, sizeof(path), "%s/%s", root, part);
+    return n > 0 && (size_t)n < sizeof(path) && mkdir(path, 0700) == 0;
+}
+static bool dj_android_child(const char *root, const char *part, mode_t mode)
+{
+    char path[2048]; int n = snprintf(path, sizeof(path), "%s/%s", root, part);
+    return n > 0 && (size_t)n < sizeof(path) && dj_android_file(path, "fixture", mode);
+}
+static bool dj_android_fixture(char *lane, size_t cap)
+{
+    if (!dj_android_dir(g_repo, "apps") || !dj_android_dir(g_repo, "apps/z23android") ||
+        !dj_android_child(g_repo, ".gitignore", 0600)) return false;
+    char path[2048]; snprintf(path, sizeof(path), "%s/.gitignore", g_repo);
+    if (!dj_android_file(path, "/build/\n", 0600)) return false;
+    snprintf(path, sizeof(path), "%s/apps/z23android/Makefile", g_repo);
+    const char *makefile = "aligned-apk:\n"
+        "\t@if test -f ../../build/fail; then exit 2; fi; "
+        "if test -f ../../build/partial; then exit 0; fi; "
+        "if test -f ../../build/slow; then sleep 2; fi; "
+        "mkdir -p '$(BUILD_DIR)/native' '$(BUILD_DIR)/package/lib/arm64-v8a'; "
+        "cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; "
+        "echo app > '$(BUILD_DIR)/native/libz23android.so'; "
+        "echo apk > '$(BUILD_DIR)/aligned.apk'\n";
+    if (!dj_android_file(path, makefile, 0600)) return false;
+    dj_git(g_repo, "add", ".gitignore", "apps/z23android/Makefile", NULL, NULL);
+    dj_git(g_repo, "commit", "-q", "-m", "android fixture", NULL);
+    int n = snprintf(lane, cap, "%s android lane", g_repo);
+    if (n <= 0 || (size_t)n >= cap) return false;
+    dj_git(g_repo, "worktree", "add", "--detach", lane, "HEAD");
+    const char *dirs[] = {"build", "build/sdk space", "build/sdk space/build-tools", "build/sdk space/build-tools/35.0.0",
+        "build/sdk space/platforms", "build/sdk space/platforms/android-35", "build/ndk", "build/ndk/build",
+        "build/ndk/build/cmake", "build/java", "build/java/bin", "build/params"};
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i) if (!dj_android_dir(lane, dirs[i])) return false;
+    const char *files[] = {"build/node binary", "build/sdk space/build-tools/35.0.0/aapt", "build/sdk space/build-tools/35.0.0/zipalign", "build/sdk space/build-tools/35.0.0/apksigner",
+        "build/sdk space/platforms/android-35/android.jar", "build/ndk/build/cmake/android.toolchain.cmake",
+        "build/java/bin/jar", "build/java/bin/keytool", "build/params/sapling-spend.params", "build/params/sapling-output.params"};
+    for (size_t i = 0; i < sizeof(files)/sizeof(files[0]); ++i) if (!dj_android_child(lane, files[i], 0700)) return false;
+    return true;
+}
+static void dj_android_input(struct dj_call *c, const char *lane, bool with_cwd)
+{
+    char path[2048]; dj_begin(c);
+    if (with_cwd) (void)json_push_kv_str(&c->input, "cwd", lane);
+    (void)json_push_kv_str(&c->input, "node_source", "0123456789abcdef0123456789abcdef01234567");
+    const char *keys[] = {"node_bin", "sdk_root", "ndk_root", "java_home", "params_dir"};
+    const char *names[] = {"build/node binary", "build/sdk space", "build/ndk", "build/java", "build/params"};
+    for (size_t i = 0; i < 5; ++i) {
+        snprintf(path, sizeof(path), "%s/%s", lane, names[i]); (void)json_push_kv_str(&c->input, keys[i], path);
+    }
+}
+static bool dj_android_prepare_hostile(struct dj_call *c, const char *lane)
+{
+    const char *a = getenv("ANDROID_API"), *b = getenv("BUILD_TOOLS_VERSION");
+    char *old_a = a ? strdup(a) : NULL, *old_b = b ? strdup(b) : NULL;
+    if ((a && !old_a) || (b && !old_b)) { free(old_a); free(old_b); return false; }
+    bool ok = setenv("ANDROID_API", "34", 1) == 0 && setenv("BUILD_TOOLS_VERSION", "1.0", 1) == 0;
+    if (ok) { dj_android_input(c, lane, true); zcl_native_handle_dev_android_prepare(&c->request, &c->reply); }
+    if (old_a ? setenv("ANDROID_API", old_a, 1) != 0 : unsetenv("ANDROID_API") != 0) ok = false;
+    if (old_b ? setenv("BUILD_TOOLS_VERSION", old_b, 1) != 0 : unsetenv("BUILD_TOOLS_VERSION") != 0) ok = false;
+    free(old_a); free(old_b); return ok;
+}
+static void dj_android_status(struct dj_call *c, const char *id)
+{
+    dj_begin(c); (void)json_push_kv_str(&c->input, "job_id", id);
+    (void)json_push_kv_int(&c->input, "timeout_s", 1);
+    zcl_native_handle_dev_android_status(&c->request, &c->reply);
+}
+static bool dj_android_default_cwd(const char *lane)
+{
+    int old = open(".", O_RDONLY);
+    const char *value = getenv("ZCL_DEV_SOURCE_ROOT");
+    char *saved = value ? strdup(value) : NULL;
+    if (old < 0 || (value && !saved)) { if (old >= 0) close(old); free(saved); return false; }
+    bool ok = unsetenv("ZCL_DEV_SOURCE_ROOT") == 0 && chdir(lane) == 0;
+    if (ok) {
+        struct dj_call c; dj_android_input(&c, lane, false);
+        zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ok = dj_ok(&c) && !strcmp(dj_str(&c, "state"), "ready"); dj_end(&c);
+    }
+    if (fchdir(old) != 0) ok = false;
+    if (saved ? setenv("ZCL_DEV_SOURCE_ROOT", saved, 1) != 0 : unsetenv("ZCL_DEV_SOURCE_ROOT") != 0) ok = false;
+    close(old); free(saved); return ok;
+}
+static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
+{
+    int failures = 0; struct dj_call c, s, duplicate; char lane[1200], id[128], good[128], path[2048];
+    TEST("dev.android: plan accepts spaces and rejects shell metacharacters") {
+        ASSERT(dj_android_fixture(lane, sizeof(lane)));
+        ASSERT(dj_android_default_cwd(lane));
+        dj_android_input(&c, lane, true); zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); ASSERT_STR_EQ(dj_str(&c, "state"), "ready"); dj_end(&c);
+        dj_android_input(&c, lane, true); json_set_str((struct json_value *)json_get(&c.input, "node_bin"), "/tmp/unsafe$(id)");
+        zcl_native_handle_dev_android_plan(&c.request, &c.reply);
+        ASSERT(dj_error_is(&c, "ANDROID_INPUT_REQUIRED")); dj_end(&c); PASS();
+    }
+    TEST("dev.android: running and lost states are the native job states") {
+        unsigned before = g_launch_count;
+        g_no_child = true; ASSERT(dj_android_prepare_hostile(&c, lane));
+        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id"));
+        char original[2048]; snprintf(original, sizeof(original), "%s", dj_str(&c, "output_dir"));
+        struct json_value handle; ASSERT(zcl_dev_job_read_handle(id, &handle));
+        const struct json_value *argv = json_get(&handle, "argv");
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 18)), "ANDROID_API=35");
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 19)), "BUILD_TOOLS_VERSION=35.0.0"); json_free(&handle);
+        dj_android_input(&duplicate, lane, true); zcl_native_handle_dev_android_prepare(&duplicate.request, &duplicate.reply);
+        ASSERT(dj_ok(&duplicate)); ASSERT_STR_EQ(dj_str(&duplicate, "state"), "attached");
+        ASSERT_STR_EQ(dj_str(&duplicate, "job_id"), id); ASSERT_STR_EQ(dj_str(&duplicate, "output_dir"), original);
+        ASSERT_EQ(g_launch_count, before + 1);
+        dj_end(&duplicate);
+        dj_begin(&s); (void)json_push_kv_str(&s.input, "job_id", id);
+        zcl_native_handle_dev_android_status(&s.request, &s.reply);
+        ASSERT_STR_EQ(dj_str(&s, "state"), "running"); ASSERT_EQ(dj_int(&s, "timeout_s"), 1); dj_end(&s);
+        dj_write_pid(id, 999999); hooks->pid_liveness = dj_dead_observation;
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "lost"); dj_end(&s);
+        hooks->pid_liveness = NULL; g_no_child = false; dj_end(&c); PASS();
+    }
+    TEST("dev.android: failed build is reported") {
+        snprintf(path, sizeof(path), "%s/build/fail", lane); ASSERT(dj_android_file(path, "fail", 0600));
+        dj_android_input(&c, lane, true); zcl_native_handle_dev_android_prepare(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c); dj_join_all();
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "failed"); dj_end(&s);
+        ASSERT(unlink(path) == 0); PASS();
+    }
+    TEST("dev.android: only fresh successful artifacts survive source and node checks") {
+        dj_android_input(&c, lane, true); zcl_native_handle_dev_android_prepare(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c); dj_join_all();
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "artifact_observed"); dj_end(&s);
+        snprintf(good, sizeof(good), "%s", id);
+        snprintf(path, sizeof(path), "%s/build/partial", lane); ASSERT(dj_android_file(path, "partial", 0600));
+        dj_android_input(&c, lane, true); zcl_native_handle_dev_android_prepare(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c); dj_join_all();
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "unproven"); dj_end(&s);
+        ASSERT(unlink(path) == 0);
+        snprintf(path, sizeof(path), "%s/build/slow", lane); ASSERT(dj_android_file(path, "slow", 0600));
+        dj_android_input(&c, lane, true); zcl_native_handle_dev_android_prepare(&c.request, &c.reply);
+        ASSERT(dj_ok(&c)); snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c);
+        snprintf(path, sizeof(path), "%s/build/node binary", lane); ASSERT(dj_android_file(path, "changed", 0700));
+        dj_join_all(); dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "unproven"); dj_end(&s);
+        ASSERT(dj_android_file(path, "fixture", 0700));
+        snprintf(path, sizeof(path), "%s/build/slow", lane); ASSERT(unlink(path) == 0);
+        snprintf(id, sizeof(id), "%s", good);
+        snprintf(path, sizeof(path), "%s/build/node binary", lane); ASSERT(dj_android_file(path, "changed", 0700));
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "unproven"); dj_end(&s);
+        ASSERT(dj_android_file(path, "fixture", 0700));
+        snprintf(path, sizeof(path), "%s/apps/z23android/Makefile", lane); FILE *f = fopen(path, "a"); ASSERT(f); ASSERT(fputs("# changed\n", f) >= 0); ASSERT(fclose(f) == 0);
+        dj_android_status(&s, id); ASSERT_STR_EQ(dj_str(&s, "state"), "unproven"); dj_end(&s); PASS();
+    }
+    TEST("dev.android: a generic job is not an Android job") {
+        dj_start(&c, g_repo, "make", "ok", true); ASSERT(dj_ok(&c));
+        snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id")); dj_end(&c); dj_join_all();
+        dj_android_status(&s, id); ASSERT(dj_error_is(&s, "ANDROID_JOB_REQUIRED")); dj_end(&s); PASS();
+    }
+_test_next:;
+    hooks->pid_liveness = NULL; g_no_child = false; dj_join_all(); return failures;
+}
+
 int test_dev_job(void);
 int test_dev_job(void)
 {
@@ -566,6 +735,7 @@ int test_dev_job(void)
     failures += dj_fleet_refusal_cases();
     failures += dj_fleet_source_refusals();
     failures += dj_fleet_shape_cases();
+    failures += dj_android_cases(&hooks);
 
     TEST("dev.fleet.job: unsafe peer is rejected before SSH") {
         dj_begin(&c);

@@ -49,6 +49,14 @@ struct zcl_dev_job_hooks {
 void zcl_dev_job_set_hooks(const struct zcl_dev_job_hooks *hooks);
 const struct zcl_dev_job_hooks *zcl_dev_job_hooks(void);
 
+struct zcl_command_request;
+struct zcl_command_reply;
+/* Internal typed callers may supply validated semantic argv for dedupe only;
+ * the job still executes and records the actual request argv. */
+void zcl_dev_job_start_keyed(const struct zcl_command_request *request,
+                             struct zcl_command_reply *reply,
+                             const struct json_value *semantic_argv);
+
 /* True when the canonical path `log` is under <worktree>/build/scratch/ of a
  * worktree listed for this binary's repository, or under the job state root. */
 bool zcl_dev_job_log_allowed(const char *log);

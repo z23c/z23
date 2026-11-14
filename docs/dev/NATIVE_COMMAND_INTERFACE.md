@@ -1233,3 +1233,21 @@ accept its own signed bundle inputs, without artifact-file selectors. The
 forwarding create, use and presentation confirmation leaves accept the existing
 mutually exclusive manifest/recipe hex or file+SHA3 representations. Resident
 forwarding remains owned by the ordinary publication command adapter.
+
+`dev.android.plan` checks a clean registered worktree and inputs for an
+unsigned Android package. `dev.android.prepare` starts the same operation using
+the native job runner and a unique output directory; `dev.android.status` takes
+its job ID and reports progress or observed artifact hashes. Source, node and
+selected tool and parameter hashes are observations before and after the build,
+not a proof of every intermediate state or of the node source. Status calls the
+result `artifact_observed`: APK package identity, alignment and embedded node
+bytes still require independent verification. Transfer it and run `aapt dump
+badging`, `zipalign -c -P 16 4`, and `unzip -p ... lib/arm64-v8a/libz23node.so |
+sha256sum`; compare that digest with `node_sha256` before signing locally with
+the existing application key. No signing or installation occurs remotely.
+
+A sequential repeat of the same running Android preparation attaches to its
+existing job, including after a lost start response. As with generic native job
+deduplication, simultaneous starts are not atomic; this is not an exactly-once
+guarantee. `next_action` in the response carries the command and full resolved
+input; standard `next` is also emitted when its smaller input field can hold it.

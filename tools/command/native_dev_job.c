@@ -658,8 +658,9 @@ static void job_start_new(const struct zcl_command_request *request,
     json_free(&handle);
 }
 
-void zcl_native_handle_dev_job_start(const struct zcl_command_request *request,
-                                     struct zcl_command_reply *reply)
+void zcl_dev_job_start_keyed(const struct zcl_command_request *request,
+                             struct zcl_command_reply *reply,
+                             const struct json_value *semantic_argv)
 {
     char cwd[ZCL_DEV_JOB_PATH_MAX], head[128], id[ZCL_DEV_JOB_ID_MAX + 1];
     struct json_value handle;
@@ -677,7 +678,8 @@ void zcl_native_handle_dev_job_start(const struct zcl_command_request *request,
         return;
     }
     dedupe = json_get(request->input, "dedupe");
-    key = job_key_hash(cwd, head, json_get(request->input, "argv"));
+    if (semantic_argv && !job_argv_check(semantic_argv, reply)) return;
+    key = job_key_hash(cwd, head, semantic_argv ? semantic_argv : json_get(request->input, "argv"));
     if ((!dedupe || json_get_bool(dedupe)) &&
         job_attach_existing(key, id, sizeof(id), &handle)) {
         job_reply_start(reply, id, &handle, "attached", job_read_pid(id));
@@ -685,6 +687,12 @@ void zcl_native_handle_dev_job_start(const struct zcl_command_request *request,
         return;
     }
     job_start_new(request, cwd, head, key, reply);
+}
+
+void zcl_native_handle_dev_job_start(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    zcl_dev_job_start_keyed(request, reply, NULL);
 }
 
 /* json_get_str() answers "" for a missing or non-string value; the job leaves

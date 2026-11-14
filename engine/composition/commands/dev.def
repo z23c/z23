@@ -70,7 +70,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_ff)
 
 ZCL_COMMAND_BRANCH("dev.retrieval", "dev",
-                   "Retrieval quality for a source generation",
+                   "Source retrieval quality",
                    ZCL_COMMAND_LAYER_DEV)
 
 #include "retrieval_pair.def"
@@ -113,7 +113,7 @@ ZCL_COMMAND_DEV_READ(
     "z23-dev dev retrieval experiment")
 
 ZCL_COMMAND_BRANCH("dev.publication", "dev",
-                   "Inspect async source publication",
+                   "Async source publication",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.publication.mirror", "dev.publication",
                    "Record optional non-authoritative mirror evidence",
@@ -249,15 +249,17 @@ ZCL_COMMAND_DEV_READ(
     "changed-scope verification requires the dev-only process executor",
     "make dev-bin, then z23-dev dev verify-change")
 
-ZCL_COMMAND_BRANCH("dev.core", "dev", "Core boundary and proof lanes",
+ZCL_COMMAND_BRANCH("dev.core", "dev", "Core boundary and proofs",
                    ZCL_COMMAND_LAYER_DEV)
-ZCL_COMMAND_BRANCH("dev.app", "dev", "Build capability-scoped C Apps",
+ZCL_COMMAND_BRANCH("dev.android", "dev", "Unsigned Android packages",
                    ZCL_COMMAND_LAYER_DEV)
-ZCL_COMMAND_BRANCH("dev.change", "dev", "Classify and apply changes",
+ZCL_COMMAND_BRANCH("dev.app", "dev", "Capability-scoped C Apps",
                    ZCL_COMMAND_LAYER_DEV)
-ZCL_COMMAND_BRANCH("dev.loop", "dev", "Persistent save-to-verdict loop",
+ZCL_COMMAND_BRANCH("dev.change", "dev", "Classify and apply",
                    ZCL_COMMAND_LAYER_DEV)
-ZCL_COMMAND_BRANCH("dev.proof", "dev", "Exact local push-proof receipts",
+ZCL_COMMAND_BRANCH("dev.loop", "dev", "Save-to-verdict loop",
+                   ZCL_COMMAND_LAYER_DEV)
+ZCL_COMMAND_BRANCH("dev.proof", "dev", "Exact push-proof receipts",
                    ZCL_COMMAND_LAYER_DEV)
 ZCL_COMMAND_BRANCH("dev.test", "dev", "Focused proof selection",
                    ZCL_COMMAND_LAYER_DEV)
@@ -473,7 +475,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "change application requires the dev-only process/activation executor",
     "z23-dev dev change cycle")
 
-ZCL_COMMAND_BRANCH("dev.vcs", "dev", "One-command source+binary revert",
+ZCL_COMMAND_BRANCH("dev.vcs", "dev", "Revert source and binary",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_COMMAND(
@@ -1189,7 +1191,7 @@ ZCL_COMMAND_DEV_READ(
  * `truth` is the per-lane inventory; `start` is the whole fleet in one
  * bounded packet for the session that dispatches lanes. */
 ZCL_COMMAND_BRANCH("dev.fleet", "dev",
-                   "Fleet truth and the opening packet",
+                   "Fleet status and briefs",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_READ(
@@ -1688,7 +1690,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * every declared source is read from), independent overrides — neither an
  * environment variable. See docs/dev/DATA_INDEX.md. */
 ZCL_COMMAND_BRANCH("dev.index", "dev",
-                   "Ingest and search local data sources",
+                   "Ingest and search data",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_COMMAND(
@@ -1781,7 +1783,7 @@ ZCL_COMMAND_DEV_READ(
  * it just built, and a compat leaf redirecting to a second binary would be a
  * dead end. */
 ZCL_COMMAND_BRANCH("dev.agent", "dev",
-                   "Checkout questions without composing shell",
+                   "Checkout questions",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_READ(
@@ -3076,6 +3078,39 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_fleet_job,
     "fleet jobs are a development-lane surface",
     "z23-dev dev fleet job")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.android.plan", "dev.android", "",
+    "Check inputs for an unsigned Android package",
+    "Check the registered clean worktree, node bytes and Android build inputs. The supplied node source is not independently verified.", 8192,
+    "android,package,plan", "zcl.dev_android.input.v1", "zcl.dev_android.v1",
+    "cwd,node_bin,node_source,node_debug,sdk_root,ndk_root,java_home,params_dir", "",
+    "z23-dev dev android plan --node_bin=<path> --node_source=<commit>",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_android_plan, "Android packaging is a development-lane surface", "z23-dev dev android plan")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.android.prepare", "dev.android", "",
+    "Start an unsigned Android package job",
+    "Use the existing Android node and build an unsigned aligned APK in a unique directory through the native job engine.", 4096,
+    "android,package,build", "zcl.dev_android.input.v1", "zcl.dev_job.v1",
+    "cwd,node_bin,node_source,node_debug,sdk_root,ndk_root,java_home,params_dir", "",
+    "z23-dev dev android prepare --node_bin=<path> --node_source=<commit>",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_android_prepare, "Android packaging is a development-lane surface", "z23-dev dev android prepare")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.android.status", "dev.android", "",
+    "Observe an unsigned Android package job",
+    "Wait boundedly and verify observed source, node and output bytes; no signing, installation or deployment is performed.", 8192,
+    "android,package,status", "zcl.dev_android_status.input.v1", "zcl.dev_android.v1",
+    "job_id,timeout_s", "job_id", "z23-dev dev android status --job_id=<id>",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_android_status, "Android packaging is a development-lane surface", "z23-dev dev android status")
 
 /* ── dev.loop.job.start / .wait / .exec ──────────────────
  * Start a long job detached and wait for it in slices of at most 230 s, so
