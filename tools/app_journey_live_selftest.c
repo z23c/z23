@@ -49,6 +49,81 @@ static int aj_test_setup(const char *self, const char *tmp)
     return 0;
 }
 
+static int aj_group_startup_test(void)
+{
+    int ready[2], gate[2];
+    if (pipe(ready) || pipe(gate)) return 1;
+    pid_t p = fork();
+    if (p < 0) return 1;
+    if (!p) {
+        close(ready[0]); close(gate[1]);
+        char b = 'r';
+        if (write(ready[1], &b, 1) != 1) _exit(2);
+        if (read(gate[0], &b, 1) < 0) _exit(2);
+        _exit(0);
+    }
+    close(ready[1]); close(gate[0]);
+    struct pollfd fd = {.fd = ready[0], .events = POLLIN};
+    char b; bool ready_ok = poll(&fd, 1, 3000) > 0 && (fd.revents & POLLIN) && read(ready[0], &b, 1) == 1;
+    bool stopped = ready_ok && aj_kill_group(p);
+    close(ready[0]); close(gate[1]);
+    if (!stopped && aj_observe_child(p, WNOHANG) >= 0) {
+        (void)kill(p, SIGKILL); (void)waitpid(p, NULL, 0);
+    }
+    if (!stopped) fprintf(stderr, "group startup custody failed\n");
+    else puts("group pre-setsid cleanup: PASS");
+    return stopped ? 0 : 1;
+}
+
+static void aj_group_test_leader(int ready[2], int alive[2])
+{
+    close(ready[0]); close(alive[0]);
+    if (setsid() < 0 || signal(SIGTERM, SIG_IGN) == SIG_ERR) _exit(2);
+    pid_t child = fork();
+    if (child < 0) _exit(2);
+    if (!child) { close(ready[1]); for (;;) pause(); }
+    if (signal(SIGTERM, SIG_DFL) == SIG_ERR) _exit(2);
+    char b = 'r'; if (write(ready[1], &b, 1) != 1) _exit(2);
+    for (;;) pause();
+}
+
+static bool aj_group_test_wait_other(pid_t other)
+{
+    int st; pid_t got; do { got = waitpid(other, &st, 0); } while (got < 0 && errno == EINTR);
+    return got == other && WIFEXITED(st) && WEXITSTATUS(st) == 42 &&
+        !aj_kill_group(other) && !aj_kill_group(getpid());
+}
+
+static bool aj_group_test_finish(pid_t p, int ready, int alive)
+{
+    struct pollfd ready_fd = {.fd = ready, .events = POLLIN};
+    char b; bool ready_ok = p > 0 && poll(&ready_fd, 1, 3000) > 0 &&
+        (ready_fd.revents & POLLIN) && read(ready, &b, 1) == 1;
+    bool stopped = p > 0 && aj_kill_group(p);
+    bool absent = stopped && kill(-p, 0) < 0 && errno == ESRCH;
+    close(ready);
+    struct pollfd fd = {.fd = alive, .events = POLLIN | POLLHUP};
+    bool eof = poll(&fd, 1, 3000) > 0 && (fd.revents & POLLHUP) && read(alive, &b, 1) == 0;
+    close(alive);
+    return ready_ok && stopped && absent && eof;
+}
+
+static int aj_group_owned_test(void)
+{
+    int ready[2], alive[2];
+    if (pipe(ready) || pipe(alive)) return 1;
+    pid_t other = fork();
+    if (!other) _exit(42);
+    if (other < 0) return 1;
+    pid_t p = fork();
+    if (!p) aj_group_test_leader(ready, alive);
+    close(ready[1]); close(alive[1]);
+    bool ok = aj_group_test_finish(p, ready[0], alive[0]);
+    ok = aj_group_test_wait_other(other) && ok;
+    if (ok) puts("group descendant and unrelated custody: PASS");
+    return ok ? 0 : 1;
+}
+
 static int aj_test_cases(void)
 {
     struct sigaction action = {0}, old;
@@ -84,7 +159,7 @@ int main(int argc, char **argv)
     }
     if (!realpath(argv[0], self) || snprintf(tmp, sizeof tmp, "%s/app-journey-test.XXXXXX", base) >= (int)sizeof tmp || !mkdtemp(tmp)) return 2;
     int failed = aj_test_setup(self, tmp);
-    if (!failed) failed = aj_test_cases();
+    if (!failed) failed = aj_test_cases() | aj_group_startup_test() | aj_group_owned_test();
     if (!aj_rm_rf(tmp, 0)) failed = 1;
     if (!failed) puts("app journey child status selftest: PASS");
     return failed;

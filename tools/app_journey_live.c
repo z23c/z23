@@ -347,8 +347,10 @@ static int aj_run(const char *home, const char *cwd, int timeout_s,
 static int aj_observe_child(pid_t pid, int flags)
 {
     siginfo_t info = {0};
-    if (waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT | flags) < 0)
-        return errno == EINTR ? 0 : -1;
+    int rc;
+    do { rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOWAIT | flags); }
+    while (rc < 0 && errno == EINTR);
+    if (rc < 0) return -1;
     return info.si_pid == pid ? 1 : 0;
 }
 
@@ -442,21 +444,42 @@ static int aj_run(const char *home, const char *cwd, int timeout_s,
     return result;
 }
 
+static bool aj_group_signal(pid_t pid, int sig)
+{
+    bool group = kill(-pid, sig) == 0 || errno == ESRCH;
+    bool child = kill(pid, sig) == 0 || errno == ESRCH;
+    return group && child;
+}
+
+static int aj_group_wait_leader(pid_t pid)
+{
+    for (unsigned i = 0; i < 50; i++) {
+        int observed = aj_observe_child(pid, WNOHANG);
+        if (observed != 0) return observed;
+        aj_sleep_ms(200);
+    }
+    return 0;
+}
+
+/* This single-threaded harness has no competing reaper. Pin its owned leader
+ * with waitid until signals finish; after reap, only observe group absence.
+ * This does not cover descendants that leave the session. */
 static bool aj_kill_group(pid_t pgid)
 {
     if (pgid <= 1) return true;
-    (void)kill(-pgid, SIGTERM);
-    bool reaped = false;
-    for (unsigned i = 0; i < 100; i++) {
-        if (!reaped) {
-            int status;
-            pid_t got = waitpid(pgid, &status, WNOHANG);
-            if (got == pgid) reaped = true;
-            else if (got < 0 && errno == EINTR) continue;
-            else if (got < 0) return false;
-        }
-        if (kill(-pgid, 0) != 0 && errno == ESRCH) return reaped;
-        if (i == 49) (void)kill(-pgid, SIGKILL);
+    int observed = aj_observe_child(pgid, WNOHANG);
+    if (observed < 0) return false;
+    bool signaled = aj_group_signal(pgid, SIGTERM);
+    observed = aj_group_wait_leader(pgid);
+    if (observed < 0) return false;
+    signaled = aj_group_signal(pgid, SIGKILL) && signaled;
+    if (!observed) observed = aj_group_wait_leader(pgid);
+    if (observed <= 0) return false;
+    int status; pid_t got;
+    do { got = waitpid(pgid, &status, 0); } while (got < 0 && errno == EINTR);
+    if (got != pgid || !signaled) return false;
+    for (unsigned i = 0; i < 50; i++) {
+        if (kill(-pgid, 0) != 0) return errno == ESRCH;
         aj_sleep_ms(200);
     }
     return false;
