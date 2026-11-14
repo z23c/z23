@@ -15,6 +15,10 @@ void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
 void app_receive_flow_run_observed(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path,
     app_receive_build_observer observer, void *observer_context);
+/* `data_budget` is the caller's usable success-data allowance, not the wire budget. */
+void app_receive_flow_run_budgeted(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context, size_t data_budget);
 /* Only after successful native adoption AND personalization. Caller reserves
  * the original receipt plus bounded continuation evidence before mutation
  * (same 16KiB policy as Receive, including retained scratch failure evidence).

@@ -507,17 +507,16 @@ static void ar_commit_preview(const struct zcl_command_request *request,
     if (offer && w->preview && reply->status == ZCL_COMMAND_STATUS_PASSED &&
         reply->exit_code == 0 && stage && !strcmp(stage, "commit"))
     {
-        if (observer) {
-            app_receive_flow_run_observed(w->datadir, reply, presenter, context, worker_path, observer, observer_context);
-            return;
-        }
-#ifdef ZCL_TESTING
-        if (worker_path) app_receive_flow_run_test(w->datadir, reply, presenter, context, worker_path);
-        else
-#else
-        (void)worker_path;
+        /* Registry callers provide the usable data allowance; native GUI
+         * callers without a custom wire budget use a conservative 16 KiB
+         * envelope allowance. An unquantified custom budget disables retry. */
+        size_t data_budget = request->success_data_budget_provided ? request->success_data_budget :
+            request->budget_bytes ? 0 : 14000u;
+#ifndef ZCL_TESTING
+        if (!observer) worker_path = NULL;
 #endif
-            app_receive_flow_run(w->datadir, reply, presenter, context);
+        app_receive_flow_run_budgeted(w->datadir, reply, presenter, context, worker_path,
+                                      observer, observer_context, data_budget);
     }
 }
 static void ar_run(const struct zcl_command_request *request, struct zcl_command_reply *reply,

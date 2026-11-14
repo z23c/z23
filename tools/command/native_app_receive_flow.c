@@ -30,6 +30,8 @@ struct receive_flow {
     void *observer_context;
     const char *status;
     bool adopted, closed, draft;
+    bool plan_retry_eligible, plan_retry_requested, plan_retry_used;
+    size_t retry_data_budget;
     const char *worker_path;
     int executed; /* 0: no open worker; -1: outcome uncertain; 1: validated open. */
 };
@@ -296,6 +298,96 @@ static bool arf_progress_outcome(struct receive_flow *f, bool shown, bool closed
     if (closed) { f->closed = true; return false; }
     return true;
 }
+static bool arf_retry_wire(const struct json_value *wire)
+{
+    const struct json_value *error = json_get(wire, "error");
+    const struct json_value *ok = json_get(wire, "ok"), *mutated = json_get(error, "mutated");
+    const char *command = zcl_package_copy_str(wire, "command");
+    const char *status = zcl_package_copy_str(wire, "status");
+    const char *code = zcl_package_copy_str(error, "code");
+    return command && !strcmp(command, "app.build") && status && !strcmp(status, "failed") &&
+        ok && ok->type == JSON_BOOL && !json_get_bool(ok) &&
+        code && !strcmp(code, "ENV_UNAVAILABLE") &&
+        mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
+}
+static bool arf_retry_evidence(const struct app_receive_job_result *result,
+                               const struct json_value *wire)
+{
+    return result->capture_status == 2 && result->evidence.exit_observed &&
+        result->evidence.exit_code == 2 && !result->evidence.timed_out &&
+        result->evidence.stdout_complete && !result->evidence.stdout_truncated &&
+        result->evidence.stderr_complete && result->stdout_len && arf_retry_wire(wire);
+}
+#ifdef ZCL_TESTING
+bool app_receive_flow_test_retry_evidence(const struct app_receive_job_result *result,
+                                          const struct json_value *wire)
+{ return result && wire && arf_retry_evidence(result, wire); }
+#endif
+static bool arf_retry_stage(const struct receive_flow *f, enum app_receive_job_command command,
+                            const struct json_value *input)
+{
+    return !f->adopted && !f->draft && !f->plan_retry_used && !f->executed &&
+        command == APP_RECEIVE_JOB_BUILD && !json_get(input, "confirm");
+}
+static void arf_retry_record(struct receive_flow *f)
+{
+    if (!f->operations.num_children) return;
+    struct json_value *last = &f->operations.children[f->operations.num_children - 1];
+    f->plan_retry_eligible = json_push_kv_str(last, "error_code", "ENV_UNAVAILABLE") &&
+        json_push_kv_bool(last, "error_mutated", false);
+}
+static bool arf_retry_fits(const struct receive_flow *f)
+{
+    size_t data = json_write(&f->reply->data, NULL, 0);
+    size_t prior = json_write(&f->operations, NULL, 0);
+    /* Reserve the first observation twice (history plus operations), then
+     * 10240 bytes for three maximal later observations, retry metadata and
+     * the larger of Keep/failure continuation fields. The serializer fixture
+     * exercises that bound against the registry's complete envelope. */
+    return data && prior && prior <= 2048u && data <= 4096u &&
+        data <= f->retry_data_budget && prior <= (f->retry_data_budget - data) / 2u &&
+        f->retry_data_budget - data - 2u * prior >= 10240u;
+}
+#ifdef ZCL_TESTING
+bool app_receive_flow_test_retry_fit(struct zcl_command_reply *reply,
+                                    const struct json_value *operations, size_t budget)
+{
+    struct receive_flow f = {.reply = reply, .operations = *operations, .retry_data_budget = budget};
+    return arf_retry_fits(&f);
+}
+#endif
+struct arf_retry_observation { bool ok, shown, closed, notice_failed, cleanup_failed, observed; };
+static void arf_retry_consider(struct receive_flow *f, enum app_receive_job_command command,
+                               const struct json_value *input, const struct arf_retry_observation *o)
+{
+    if (!o->ok && arf_retry_stage(f, command, input) && o->shown && !o->closed &&
+        !o->notice_failed && !o->cleanup_failed && o->observed) {
+        arf_retry_record(f);
+        if (f->plan_retry_eligible && !arf_retry_fits(f)) f->plan_retry_eligible = false;
+    }
+}
+#ifdef ZCL_TESTING
+bool app_receive_flow_test_retry_gate(const struct app_receive_job_result *result,
+    const struct json_value *wire, unsigned flags)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "fixture");
+    json_set_object(&reply.data); (void)json_push_kv_str(&reply.data, "fixture", "receipt");
+    struct receive_flow f = {.reply = &reply, .retry_data_budget = (flags & 2048u) ? 0 : 14000u,
+        .adopted = !!(flags & 1u), .draft = !!(flags & 2u),
+        .plan_retry_used = !!(flags & 4u), .executed = (flags & 8u) ? -1 : 0};
+    json_init(&f.operations); json_set_array(&f.operations);
+    struct json_value item, input; json_init(&item); json_set_object(&item);
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_back(&f.operations, &item);
+    if (flags & 16u) ok = ok && json_push_kv_bool(&input, "confirm", true);
+    const struct arf_retry_observation o = {.ok = !!(flags & 32u), .shown = !(flags & 64u),
+        .closed = !!(flags & 128u), .notice_failed = !!(flags & 256u),
+        .cleanup_failed = !!(flags & 512u), .observed = result && wire && arf_retry_evidence(result, wire)};
+    if (ok) arf_retry_consider(&f, (flags & 1024u) ? APP_RECEIVE_JOB_OPEN : APP_RECEIVE_JOB_BUILD, &input, &o);
+    json_free(&input); json_free(&item); json_free(&f.operations); zcl_command_reply_free(&reply);
+    return ok && f.plan_retry_eligible;
+}
+#endif
 static bool arf_job(struct receive_flow *f, enum app_receive_job_command command,
     const struct json_value *input, const char *stage, struct json_value *wire)
 {
@@ -320,7 +412,11 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
         cleanup_failed = true;
         platform_sleep_ms(1000);
     }
+    size_t before_observation = f->operations.num_children;
     bool ok = arf_capture_result(f, p->job, wire, stage, shown, p);
+    struct app_receive_job_result retry_result;
+    bool retry_observed = app_receive_job_poll(p->job, &retry_result) &&
+        arf_retry_evidence(&retry_result, wire);
     while (!app_receive_job_join_free(&p->job)) {
         arf_cleanup_notice(f);
         cleanup_failed = true;
@@ -329,6 +425,9 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
     app_confirm_free(&p->view);
     bool notice_failed = p->notice_failed, closed = p->close_seen;
     free(p);
+    const struct arf_retry_observation retry = {ok, shown, closed, notice_failed, cleanup_failed,
+        retry_observed && f->operations.num_children == before_observation + 1u};
+    arf_retry_consider(f, command, input, &retry);
     if (!ok) return false; /* Never replace a missing-evidence diagnosis. */
     if (cleanup_failed) return arf_fail(f, "PREVIEW_CLEANUP_DELAYED", "Worker cleanup required recovery; the observed operation result is retained.");
     if (notice_failed) return arf_fail(f, "PROGRESS_NOTICE_UNAVAILABLE", "The closing notice could not be displayed; the observed operation result is retained.");
@@ -442,6 +541,11 @@ static void arf_notice_show(struct receive_flow *f, struct app_confirm *view)
     uint32_t original = view->model.item_count;
     const char *path = arf_notice_location(f, view);
     arf_reveal_action(view, path != NULL);
+    if (f->plan_retry_eligible) {
+        (void)snprintf(view->model.summary, sizeof(view->model.summary),
+            "Your received copy is retained. Fix the build tools before trying again.");
+        app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", "Try build again");
+    }
     char why[256] = {0};
     bool prepared = app_confirm_prepare(view, why, sizeof(why));
     if (!prepared && view->model.item_count != original) {
@@ -450,10 +554,14 @@ static void arf_notice_show(struct receive_flow *f, struct app_confirm *view)
         view->model.item_count = original;
         path = NULL;
         arf_reveal_action(view, false);
+        if (f->plan_retry_eligible)
+            app_confirm_action(&view->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "continue", "Try build again");
         prepared = app_confirm_prepare(view, why, sizeof(why));
     }
-    if (prepared && app_confirm_show(view, f->presenter, f->context, why, sizeof(why)) &&
-        view->confirmed && path && !arf_reveal(f, path)) arf_reveal_failed(f, view);
+    if (prepared && app_confirm_show(view, f->presenter, f->context, why, sizeof(why)) && view->confirmed) {
+        if (f->plan_retry_eligible) f->plan_retry_requested = true;
+        else if (path && !arf_reveal(f, path)) arf_reveal_failed(f, view);
+    }
 }
 static void arf_notice(struct receive_flow *f)
 {
@@ -473,6 +581,14 @@ static void arf_notice(struct receive_flow *f)
     app_confirm_free(view); free(view);
 }
 #ifdef ZCL_TESTING
+bool app_receive_flow_test_retry_notice(struct zcl_command_reply *reply,
+                                       app_confirm_presenter presenter, void *context)
+{
+    struct receive_flow f = {.reply = reply, .presenter = presenter,
+        .context = context, .plan_retry_eligible = true};
+    arf_notice(&f);
+    return f.plan_retry_requested;
+}
 void app_receive_flow_test_notice_reveal(struct zcl_command_reply *reply, bool adopted, bool draft,
     app_confirm_presenter presenter, void *context, bool (*revealer)(void *, const char *))
 {
@@ -554,6 +670,37 @@ bool app_receive_flow_test_report(struct zcl_command_reply *reply,
             zcl_package_copy_str(json_get(wires[2], "error"), "message"));
     return ok && arf_finish(&f, !failed);
 }
+bool app_receive_flow_test_retry_report(struct zcl_command_reply *reply,
+    const struct json_value *prior, const struct app_receive_job_result results[3],
+    const struct json_value *wire, bool failed)
+{
+    struct receive_flow f = {.reply = reply, .status = "kept", .executed = failed ? -1 : 1};
+    json_init(&f.operations); json_set_array(&f.operations);
+    struct receive_progress *p = zcl_calloc(1, sizeof(*p), "retry-budget/progress");
+    if (!p) { json_free(&f.operations); return false; }
+    p->phase = "presenter"; p->notice_failed = true;
+    memset(p->why, '"', sizeof(p->why) - 1);
+    bool ok = json_push_kv(&reply->data, "initial_retry_failure", prior) &&
+        json_push_back(&f.operations, prior) && json_push_kv_bool(&reply->data, "preview_opened", true);
+    for (size_t i = 0; ok && i < 3; ++i) {
+        ok = arf_observation(&f, &results[i], wire, "Checking the received version", true, false, p);
+        if (ok) ok = json_push_kv_str(&f.operations.children[f.operations.num_children - 1],
+                                       "progress_recovery", "unavailable");
+    }
+    if (ok) ok = json_push_kv(&reply->data, "operations", &f.operations);
+    if (ok && !failed) {
+        struct json_value kept; json_init(&kept); json_set_object(&kept);
+        ok = arf_result_summary(&kept, wire) && json_push_kv(&reply->data, "kept", &kept);
+        json_free(&kept);
+    }
+    if (ok && failed) {
+        char message[192]; memset(message, '"', sizeof(message) - 1); message[sizeof(message) - 1] = 0;
+        char code[65]; memset(code, 'a', 64); code[64] = 0;
+        (void)arf_fail(&f, code, message);
+    }
+    free(p); json_free(&f.operations);
+    return ok && arf_finish(&f, !failed);
+}
 #endif
 static bool arf_prepare(struct receive_flow *f, const char *datadir, bool *chosen)
 {
@@ -576,27 +723,54 @@ static bool arf_continue(struct receive_flow *f, bool chosen)
     if (!ok && f->closed) ok = arf_status(f, status);
     return ok;
 }
+static bool arf_retry_plan(struct receive_flow *f, const char *datadir)
+{
+    if (!f->plan_retry_requested || !f->plan_retry_eligible || !f->operations.num_children)
+        return false;
+    struct json_value *last = &f->operations.children[f->operations.num_children - 1];
+    if (!json_push_kv_str(last, "retry_choice", "try_again") ||
+        !json_push_kv(&f->reply->data, "initial_retry_failure", last)) {
+        f->plan_retry_eligible = f->plan_retry_requested = false;
+        return arf_fail(f, "OBSERVATION_UNAVAILABLE", "The retry was not started because its earlier failure could not be retained.");
+    }
+    f->plan_retry_used = true;
+    f->plan_retry_eligible = f->plan_retry_requested = false;
+    app_receive_preview_close(f->preview); f->preview = NULL;
+    bool mutated = f->reply->error.mutated;
+    memset(&f->reply->error, 0, sizeof(f->reply->error));
+    f->reply->error.mutated = mutated;
+    f->reply->status = ZCL_COMMAND_STATUS_PASSED; f->reply->exit_code = 0;
+    bool chosen = false;
+    return arf_prepare(f, datadir, &chosen) && arf_continue(f, chosen);
+}
 
 static void arf_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, bool adopted, const char *worker_path,
-    app_receive_build_observer observer, void *observer_context)
+    app_receive_build_observer observer, void *observer_context, size_t data_budget)
 {
-    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path, .observer = observer, .observer_context = observer_context};
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path, .observer = observer, .observer_context = observer_context, .retry_data_budget = data_budget};
     json_init(&f.build_evidence);
     json_init(&f.open_evidence);
     json_init(&f.operations); json_set_array(&f.operations);
     bool chosen = false;
     bool ok = arf_prepare(&f, datadir, &chosen);
     if (ok) ok = arf_continue(&f, chosen);
-    if (!json_push_kv(&reply->data, "operations", &f.operations))
-        ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Operation evidence could not be returned; inspect the retained copy before retrying.");
-    json_free(&f.operations);
     if (!ok) {
         reply->error.mutated = true;
         if (reply->status == ZCL_COMMAND_STATUS_PASSED)
             (void)arf_fail(&f, "PREVIEW_FAILED", adopted ? "The next step could not be completed; your adopted copy is retained." : "The next step could not be completed; your received copy is retained.");
         arf_notice(&f);
+        if (f.plan_retry_requested) {
+            ok = arf_retry_plan(&f, datadir);
+            if (!ok) arf_notice(&f);
+        }
     }
+    if (!json_push_kv(&reply->data, "operations", &f.operations)) {
+        ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Operation evidence could not be returned; inspect the retained copy before retrying.");
+        f.plan_retry_eligible = false;
+        arf_notice(&f);
+    }
+    json_free(&f.operations);
     if (!arf_finish(&f, ok))
         (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", adopted ? "Adoption committed, but its continuation report could not be returned. Inspect the retained copy before retrying." : "Receive committed, but its continuation report could not be returned. Inspect the retained copy before retrying.");
     app_receive_preview_close(f.preview);
@@ -606,16 +780,20 @@ static void arf_run(const char *datadir, struct zcl_command_reply *reply,
 void app_receive_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
-    arf_run(datadir, reply, presenter, context, false, NULL, NULL, NULL);
+    arf_run(datadir, reply, presenter, context, false, NULL, NULL, NULL, 14000u);
 }
 void app_receive_flow_run_observed(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path,
     app_receive_build_observer observer, void *observer_context)
-{ arf_run(datadir, reply, presenter, context, false, worker_path, observer, observer_context); }
+{ arf_run(datadir, reply, presenter, context, false, worker_path, observer, observer_context, 14000u); }
+void app_receive_flow_run_budgeted(const char *datadir, struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context, const char *worker_path,
+    app_receive_build_observer observer, void *observer_context, size_t data_budget)
+{ arf_run(datadir, reply, presenter, context, false, worker_path, observer, observer_context, data_budget); }
 void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context)
 {
-    arf_run(datadir, reply, presenter, context, true, NULL, NULL, NULL);
+    arf_run(datadir, reply, presenter, context, true, NULL, NULL, NULL, 0);
 }
 
 static bool arf_draft_confirm(struct receive_flow *f, const struct app_selection *selection, uint8_t head[32])
@@ -657,6 +835,6 @@ void app_saved_draft_flow_run(const struct app_selection *selection,
 void app_receive_flow_run_test(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path)
 {
-    arf_run(datadir, reply, presenter, context, false, worker_path, NULL, NULL);
+    arf_run(datadir, reply, presenter, context, false, worker_path, NULL, NULL, 14000u);
 }
 #endif

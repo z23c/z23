@@ -9,6 +9,7 @@
 #include "command/native_app_library_command.h"
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_receive_flow.h"
+#include "command/native_app_receive_job.h"
 #include "command/native_app_host_browser.h"
 #include "command/native_app_compose.h"
 #include "command/native_app_offer.h"
@@ -1372,6 +1373,32 @@ static bool rreveal_visit(const struct zcl_present_window_live_view_v1 *live, ui
     }
     return true;
 }
+bool app_receive_flow_test_retry_notice(struct zcl_command_reply *reply,
+                                       app_confirm_presenter presenter, void *context);
+struct rtry_notice { bool choose, shown; };
+static bool rtry_notice_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rtry_notice *p = context; (void)pages;
+    uint32_t count = 0; bool close = false, redraw = false;
+    p->shown = !strcmp(model->actions[3].label, "Try build again") &&
+        strstr(model->summary, "Fix the build tools") != NULL;
+    if (!p->shown || !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    if (p->choose && !rreveal_visit(live, count)) return false;
+    return rt_action(live, p->choose ? 3 : 0, &close, &redraw) && close;
+}
+static bool rtry_notice_case(bool choose)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    json_set_object(&reply.data);
+    zcl_package_copy_fail(&reply, "PREVIEW_FAILED", true, "Tools unavailable", "fixture");
+    struct rtry_notice p = {.choose = choose};
+    bool requested = app_receive_flow_test_retry_notice(&reply, rtry_notice_present, &p);
+    bool ok = p.shown && requested == choose && reply.error.mutated &&
+        !strcmp(reply.error.code, "PREVIEW_FAILED");
+    zcl_command_reply_free(&reply); return ok;
+}
 static bool rreveal_failure_view(struct rreveal_probe *p, const struct zcl_present_model_v1 *model,
                                  const struct zcl_present_window_live_view_v1 *live)
 {
@@ -1478,6 +1505,166 @@ static int rreveal_cases(void)
     return failures;
 }
 #endif
+bool app_receive_flow_test_retry_evidence(const struct app_receive_job_result *result,
+                                          const struct json_value *wire);
+bool app_receive_flow_test_retry_gate(const struct app_receive_job_result *result,
+                                      const struct json_value *wire, unsigned flags);
+bool app_receive_flow_test_retry_fit(struct zcl_command_reply *reply,
+                                    const struct json_value *operations, size_t budget);
+bool app_receive_flow_test_retry_report(struct zcl_command_reply *reply,
+    const struct json_value *prior, const struct app_receive_job_result results[3],
+    const struct json_value *wire, bool failed);
+static bool rtry_pad(struct json_value *object, size_t size)
+{
+    if (!json_push_kv_str(object, "padding", "")) return false;
+    size_t have = json_write(object, NULL, 0);
+    if (!have || have > size || size - have > 4096u) return false;
+    char fill[4097]; memset(fill, 'x', size - have); fill[size - have] = 0;
+    json_set_str(&object->children[object->num_children - 1], fill);
+    return json_write(object, NULL, 0) == size;
+}
+static bool rtry_max_wire(struct json_value *wire)
+{
+    static const char *const names[] = {"stage", "version", "package_root", "plan_id",
+        "record_id", "image_sha3", "name", "ready_basis", "start_token", "mapped_proof"};
+    static const char *const scalars[] = {"ready", "pid", "executed", "selection_revision"};
+    char text[65], message[192]; memset(text, 'a', 64); text[64] = 0;
+    memset(message, '"', sizeof(message) - 1); message[sizeof(message) - 1] = 0;
+    struct json_value data, error; json_init(&data); json_set_object(&data);
+    json_init(&error); json_set_object(&error);
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(names) / sizeof(names[0]); ++i)
+        ok = json_push_kv_str(&data, names[i], text);
+    for (size_t i = 0; ok && i < sizeof(scalars) / sizeof(scalars[0]); ++i)
+        ok = json_push_kv_int(&data, scalars[i], INT64_MIN);
+    ok = ok && json_push_kv_str(&error, "message", message) && json_push_kv(wire, "data", &data) &&
+        json_push_kv(wire, "error", &error) && json_push_kv_str(wire, "status", text);
+    json_free(&error); json_free(&data); return ok;
+}
+static bool rtry_large_rejected(void)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct json_value prior, operations; json_init(&prior); json_set_object(&prior);
+    json_init(&operations); json_set_array(&operations);
+    bool ok = rtry_pad(&reply.data, 4096u) && rtry_pad(&prior, 2046u) &&
+        json_push_back(&operations, &prior) && json_write(&operations, NULL, 0) == 2048u &&
+        !app_receive_flow_test_retry_fit(&reply, &operations, 16384u);
+    json_free(&operations); json_free(&prior); zcl_command_reply_free(&reply);
+    return ok;
+}
+static bool rtry_budget_setup(struct zcl_command_reply *reply, struct json_value *prior,
+                              struct json_value *operations, size_t data_size, size_t prior_size)
+{
+    return rtry_pad(&reply->data, data_size) &&
+        json_push_kv_str(prior, "error_code", "ENV_UNAVAILABLE") &&
+        json_push_kv_bool(prior, "error_mutated", false) && rtry_pad(prior, prior_size - 2u) &&
+        json_push_back(operations, prior) && json_write(operations, NULL, 0) == prior_size;
+}
+static bool rtry_budget_edge(struct zcl_command_reply *reply, const struct json_value *ops, size_t threshold)
+{
+    return app_receive_flow_test_retry_fit(reply, ops, threshold) &&
+        !app_receive_flow_test_retry_fit(reply, ops, threshold - 1u) &&
+        !app_receive_flow_test_retry_fit(reply, ops, 0);
+}
+static bool rtry_budget_wire(struct zcl_command_reply *reply, const struct zcl_command_spec *spec,
+                             const struct zcl_command_budget_fixture *fixture, size_t *usable)
+{
+    char output[16385]; size_t bytes = 0;
+    return spec && zcl_command_registry_test_success_budget(spec, reply, fixture,
+        usable, output, sizeof(output), &bytes) && bytes > 0 &&
+        bytes <= (fixture->budget_bytes ? fixture->budget_bytes : 16384u);
+}
+static bool rtry_budget_case(bool failed, bool smaller)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct json_value prior, operations, worker; json_init(&prior); json_set_object(&prior);
+    json_init(&operations); json_set_array(&operations); json_init(&worker); json_set_object(&worker);
+    size_t receipt_size = smaller ? 1024u : 2048u, prior_size = smaller ? 512u : 1024u;
+    size_t threshold = receipt_size + 2u * prior_size + 10240u;
+    bool ok = rtry_budget_setup(&reply, &prior, &operations, receipt_size, prior_size) &&
+        rtry_budget_edge(&reply, &operations, threshold);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.receive", NULL);
+    struct zcl_command_budget_fixture fixture = {.authority_evidence = "fixture:\"\\\n",
+        .debited_zat = INT64_MAX, .remaining_zat = INT64_MAX, .elapsed_us = INT64_MAX,
+        .budget_bytes = smaller ? 14000u : 0, .presented = true, .alias = true};
+    size_t usable = 0;
+    if (smaller) ok = ok && rtry_budget_wire(&reply, spec, &fixture, &usable) &&
+        app_receive_flow_test_retry_fit(&reply, &operations, usable);
+    ok = ok && json_push_kv_str(&prior, "retry_choice", "try_again");
+    struct app_receive_job_result results[3] = {0};
+    for (size_t i = 0; i < 3; ++i) {
+        results[i].capture_status = INT_MIN; results[i].evidence.exit_code = INT_MIN;
+        results[i].evidence.stderr_len = 128; results[i].evidence.stderr_observed = INT64_MAX;
+        memset(results[i].evidence.stderr_tail, 0xff, 128);
+    }
+    ok = ok && rtry_max_wire(&worker) &&
+        app_receive_flow_test_retry_report(&reply, &prior, results, &worker, failed) &&
+        json_write(&reply.data, NULL, 0) <= threshold;
+    usable = 0;
+    ok = ok && rtry_budget_wire(&reply, spec, &fixture, &usable);
+    json_free(&worker); json_free(&operations); json_free(&prior); zcl_command_reply_free(&reply);
+    return ok;
+}
+static bool rtry_wire(const char *text, struct json_value *wire)
+{
+    json_init(wire); return json_read(wire, text, strlen(text));
+}
+static bool rtry_wire_matrix(const struct app_receive_job_result *result)
+{
+    static const char *const cases[] = {
+        "{\"command\":\"app.build\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":false}}",
+        "{\"command\":\"app.open\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":false}}",
+        "{\"command\":\"app.build\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":true}}",
+        "{\"command\":\"app.build\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\"}}",
+        "{\"command\":\"app.build\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"OTHER\",\"mutated\":false}}",
+        "{\"command\":\"app.build\",\"ok\":true,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":false}}",
+        "{\"command\":\"app.build\",\"ok\":false,\"status\":\"passed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":false}}"
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        struct json_value wire;
+        bool ok = rtry_wire(cases[i], &wire) &&
+            app_receive_flow_test_retry_evidence(result, &wire) == (i == 0);
+        json_free(&wire);
+        if (!ok) return false;
+    }
+    return true;
+}
+static bool rtry_transport_matrix(struct app_receive_job_result result, const struct json_value *wire)
+{
+    if (!app_receive_flow_test_retry_evidence(&result, wire)) return false;
+    result.evidence.timed_out = true;
+    if (app_receive_flow_test_retry_evidence(&result, wire)) return false;
+    result.evidence.timed_out = false; result.evidence.stdout_truncated = true;
+    if (app_receive_flow_test_retry_evidence(&result, wire)) return false;
+    result.evidence.stdout_truncated = false; result.evidence.exit_observed = false;
+    if (app_receive_flow_test_retry_evidence(&result, wire)) return false;
+    result.evidence.exit_observed = true; result.evidence.stderr_complete = false;
+    if (app_receive_flow_test_retry_evidence(&result, wire)) return false;
+    result.evidence.stderr_complete = true; result.evidence.stdout_complete = false;
+    if (app_receive_flow_test_retry_evidence(&result, wire)) return false;
+    result.evidence.stdout_complete = true; result.evidence.exit_code = 1;
+    return !app_receive_flow_test_retry_evidence(&result, wire);
+}
+static int rtry_matrix(void)
+{
+    int failures = 0; struct json_value wire;
+    static const char text[] = "{\"command\":\"app.build\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":false}}";
+    TEST("retry classification requires complete nonmutating build failure") {
+        struct app_receive_job_result result = {.capture_status = 2, .stdout_len = sizeof(text) - 1,
+            .evidence = {.exit_observed = true, .exit_code = 2, .stdout_complete = true, .stderr_complete = true}};
+        ASSERT(rtry_wire(text, &wire));
+        ASSERT(rtry_wire_matrix(&result) && rtry_transport_matrix(result, &wire));
+        ASSERT(app_receive_flow_test_retry_gate(&result, &wire, 0));
+        for (unsigned flag = 1; flag <= 2048; flag <<= 1)
+            ASSERT(!app_receive_flow_test_retry_gate(&result, &wire, flag));
+        ASSERT(rtry_notice_case(false) && rtry_notice_case(true));
+        ASSERT(rtry_budget_case(false, false) && rtry_budget_case(true, false));
+        ASSERT(rtry_budget_case(false, true) && rtry_budget_case(true, true));
+        ASSERT(rtry_large_rejected());
+        json_free(&wire); PASS();
+    } _test_next:;
+    return failures;
+}
 #if defined(__linux__)
 enum rdiag_mode { RDIAG_CLOSE, RDIAG_UNAVAILABLE, RDIAG_PRIOR_CLOSE, RDIAG_MISMATCH, RDIAG_CONTINUE };
 struct rdiag_presenter { unsigned progress, choices, recoveries, keep_choices; enum rdiag_mode mode; struct rloc_probe location; };
@@ -1683,6 +1870,7 @@ int test_app_receive(void)
     failures += rd_home_aliases();
     failures += rloc_cases();
     failures += rreveal_cases();
+    failures += rtry_matrix();
 #if defined(__linux__)
     failures += rdiag_case(RDIAG_CLOSE);
 #endif
@@ -3336,6 +3524,156 @@ static int rdiag_success(void)
 }
 /* Deterministic real-X11 controls for the included maintained UI driver.
  * Reuse this group's private display and exact direct-child custody. */
+struct rtry_presenter { unsigned choices, retries, previews; bool actions_ok, cancel_retry, stale, repeat; const char *trust_path; };
+static bool rtry_progress(const struct zcl_present_window_live_view_v1 *live)
+{
+    int64_t end = platform_time_monotonic_ms() + 30000;
+    do {
+        bool redraw = false, close = false;
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return true;
+        platform_sleep_ms(1);
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
+static bool rtry_failure_choice(struct rtry_presenter *p, const struct zcl_present_model_v1 *model,
+                                const struct zcl_present_window_live_view_v1 *live)
+{
+    ++p->retries;
+    if (p->cancel_retry || ((p->stale || p->repeat) && p->retries > 1)) {
+        bool close = false, redraw = false;
+        bool expected = p->retries == 1 ? !strcmp(model->actions[3].label, "Try build again") :
+            strcmp(model->actions[3].label, "Try build again") != 0;
+        return expected && rt_action(live, 0, &close, &redraw) && close;
+    }
+    bool ok = !strcmp(model->actions[3].label, "Try build again") && rdiag_choose(model, live);
+    if (ok && p->stale) ok = p->trust_path && unlink(p->trust_path) == 0;
+    return ok;
+}
+static bool rtry_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rtry_presenter *p = context; (void)pages; (void)why; (void)cap;
+    bool ok;
+    if (!strcmp(model->title, "Your copy is ready")) {
+        ++p->choices; ok = rdiag_choose(model, live);
+    } else if (!strcmp(model->title, "The next step did not finish")) {
+        ok = rtry_failure_choice(p, model, live);
+    } else if (!strcmp(model->title, "Preview opened")) {
+        ++p->previews; bool close = false, redraw = false;
+        ok = rt_action(live, 0, &close, &redraw) && close;
+    } else ok = rtry_progress(live);
+    p->actions_ok = p->actions_ok && ok;
+    return ok;
+}
+static bool rtry_wrapper(const struct receive_fixture *f, const char *image, char *path, size_t cap, bool repeat)
+{
+    char marker[PATH_MAX];
+    int n = snprintf(path, cap, "%s/retry-worker", f->world.root);
+    int m = snprintf(marker, sizeof(marker), "%s/retry-plan-seen", f->world.root);
+    if (n <= 0 || (size_t)n >= cap || m <= 0 || (size_t)m >= sizeof(marker) ||
+        strchr(image, '\'') || strchr(marker, '\'')) return false;
+    FILE *out = fopen(path, "w"); if (!out) return false;
+    static const char failure[] = "{\"command\":\"app.build\",\"ok\":false,\"status\":\"failed\",\"error\":{\"code\":\"ENV_UNAVAILABLE\",\"mutated\":false,\"message\":\"Tools unavailable\"}}";
+    int written = fprintf(out, "#!/bin/sh\nbuild=0; confirm=0\nfor arg do case \"$arg\" in build) build=1;; *'\"confirm\":true'*) confirm=1;; esac; done\nif [ \"$build\" = 1 ] && [ \"$confirm\" = 0 ] && { [ ! -e '%s' ] || [ %u = 1 ]; }; then : > '%s'; printf '%%s\\n' '%s'; exit 2; fi\nexec '%s' \"$@\"\n", marker, repeat ? 1u : 0u, marker, failure, image);
+    int closed = fclose(out);
+    return written > 0 && closed == 0 && chmod(path, 0700) == 0;
+}
+static bool rtry_selection_absent(const struct json_value *open)
+{
+    struct app_launch_env env; struct app_selection selection; char why[256] = {0};
+    const char *name = ru_string(open, "name");
+    return name[0] && app_launch_env_from_process(&env, why, sizeof(why)) &&
+        app_selection_load(env.state_dir, name, &selection) == APP_SELECTION_ABSENT;
+}
+static bool rtry_operations(const struct json_value *ops, const struct json_value *initial)
+{
+    if (!ops || json_size(ops) != 4 || !initial) return false;
+    const struct json_value *first = json_at(ops, 0), *plan = json_at(ops, 1);
+    const struct json_value *built = json_at(ops, 2), *opened = json_at(ops, 3);
+    const struct json_value *mutated = json_get(initial, "error_mutated");
+    return first && mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated) &&
+        !strcmp(ru_string(first, "error_code"), "ENV_UNAVAILABLE") &&
+        !strcmp(ru_string(initial, "retry_choice"), "try_again") &&
+        !strcmp(ru_string(plan, "stage"), "plan") && !strcmp(ru_string(built, "stage"), "commit") &&
+        rtry_selection_absent(opened);
+}
+static bool rtry_result(const struct zcl_command_reply *reply, const struct rtry_presenter *p,
+                        const char *version, const char *package)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    const struct json_value *initial = json_get(data, "initial_retry_failure");
+    return p->actions_ok && p->choices == 2 && p->retries == 1 && p->previews == 1 &&
+        rtry_operations(ops, initial) &&
+        !strcmp(ru_string(data, "version"), version) && !strcmp(ru_string(data, "package_root"), package) &&
+        !strcmp(ru_string(data, "continuation"), "previewed") &&
+        ruf_bool(data, "continuation_executed", true) && !json_get(data, "kept");
+}
+static bool rtry_stale_result(const struct zcl_command_reply *reply, const struct rtry_presenter *p,
+                              const char *version, const char *package)
+{
+    const struct json_value *data = &reply->data, *error = json_get(data, "continuation_error");
+    const struct json_value *initial = json_get(data, "initial_retry_failure");
+    return p->actions_ok && p->choices == 1 && p->retries == 2 && p->previews == 0 &&
+        !strcmp(ru_string(initial, "error_code"), "ENV_UNAVAILABLE") &&
+        !strcmp(ru_string(error, "code"), "PREVIEW_COPY_REFUSED") &&
+        !strcmp(ru_string(data, "version"), version) && !strcmp(ru_string(data, "package_root"), package) &&
+        !strcmp(ru_string(data, "continuation"), "failed") &&
+        !json_get_bool(json_get(data, "continuation_executed")) && !json_get(data, "kept");
+}
+static bool rtry_second_result(const struct zcl_command_reply *reply, const struct rtry_presenter *p,
+                               const char *version, const char *package)
+{
+    const struct json_value *data = &reply->data, *ops = json_get(data, "operations");
+    const struct json_value *initial = json_get(data, "initial_retry_failure");
+    return p->actions_ok && p->choices == 2 && p->retries == 2 && p->previews == 0 &&
+        ops && json_size(ops) == 2 && !strcmp(ru_string(initial, "retry_choice"), "try_again") &&
+        !strcmp(ru_string(data, "version"), version) && !strcmp(ru_string(data, "package_root"), package) &&
+        !strcmp(ru_string(data, "continuation"), "failed") && !json_get(data, "kept");
+}
+static int rtry_success(bool stale, bool repeat)
+{
+    int failures = 0, old_subreaper = 0; size_t saved = 0; bool custody = false;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"DISPLAY", NULL}, {"WAYLAND_DISPLAY", NULL}, {"XAUTHORITY", NULL},
+        {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}};
+    struct receive_fixture f = {0}; struct ru_run r = {.input = -1, .output = -1, .fixture = &f};
+    struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST("one explicit retry preserves Receive and previews without Keep") {
+        char image[PATH_MAX], wrapper[PATH_MAX], version[65], package[65];
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(rt_setup(&f) && rus_bundle(&f) && ru_environment(&f));
+        ASSERT(realpath("build/bin/z23-dev", image) && ru_xvfb(&r) && ruf_child_baseline(&r));
+        ASSERT(prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper) == 0 && prctl(PR_SET_CHILD_SUBREAPER, 1) == 0);
+        custody = true; ASSERT(rt_input(&input, &f));
+        struct zcl_command_request request = {.input = &input};
+        struct rt_presenter receive = {.fixture = &f, .decision = RT_CONFIRM};
+        zcl_test_app_receive_run(&request, &reply, rt_present, &receive);
+        ASSERT(rt_expected_reply(&receive, &reply));
+        ASSERT(strlen(ru_string(&reply.data, "version")) == 64 && strlen(ru_string(&reply.data, "package_root")) == 64);
+        strcpy(version, ru_string(&reply.data, "version")); strcpy(package, ru_string(&reply.data, "package_root"));
+        ASSERT(rtry_wrapper(&f, image, wrapper, sizeof(wrapper), repeat));
+        char trust[PATH_MAX];
+        ASSERT(strlen(ru_string(&reply.data, "trust_record")) < sizeof(trust));
+        strcpy(trust, ru_string(&reply.data, "trust_record"));
+        struct rtry_presenter presenter = {.actions_ok = true, .stale = stale, .repeat = repeat, .trust_path = trust};
+        zcl_native_bridge_ensure_rpc();
+        char old_dir[PATH_MAX]; (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f.datadir, 39461);
+        app_receive_flow_run_test(f.datadir, &reply, rtry_present, &presenter, wrapper);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
+        ASSERT(stale ? rtry_stale_result(&reply, &presenter, version, package) : repeat ?
+            rtry_second_result(&reply, &presenter, version, package) : rtry_result(&reply, &presenter, version, package));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input);
+    bool clean = rus_cleanup(&r, custody, old_subreaper);
+    if (!ru_env_restore(env, saved) || !clean) ++failures;
+    return failures;
+}
 static bool rud_one(struct ru_run *r, const char *mode, uint32_t expected)
 {
     int log = ru_log(r, "driver-readiness.log");
@@ -3390,6 +3728,9 @@ int test_app_receive_ui(void)
 {
     if (access("/usr/bin/Xvfb", X_OK) != 0) { puts("SKIP (app_receive_ui requires Linux Xvfb)"); return 0; }
     int failures = rdiag_case(RDIAG_CLOSE);
+    failures += rtry_success(false, false);
+    failures += rtry_success(true, false);
+    failures += rtry_success(false, true);
     failures += rdiag_case(RDIAG_UNAVAILABLE);
     failures += rdiag_case(RDIAG_PRIOR_CLOSE);
     failures += rdiag_case(RDIAG_MISMATCH);
