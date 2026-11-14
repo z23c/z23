@@ -66,7 +66,8 @@ bool node_db_catchup_thermal_stop(bool background, bool shutdown)
 int node_db_catchup_entry_gate(struct node_db *ndb, bool background, bool *deferred)
 {
     enum catchup_restore_result restored = node_db_catchup_restore_owed_result(ndb);
-    if (restored == CATCHUP_RESTORE_FAILED) return -1;
+    if (restored == CATCHUP_RESTORE_FAILED)
+        return -1; // raw-return-ok:restore-failure-already-logged
     if (restored == CATCHUP_RESTORE_BUSY) return 0;
     node_pace_poll();
     if (background && node_pace_get() == NODE_PACE_GENTLE) {
