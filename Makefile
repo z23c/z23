@@ -4842,17 +4842,18 @@ $(TEST_TSAN_LINK_RSP): $(TEST_TSAN_OBJS)
 # The call lines are `+` so the per-target makes share the jobserver; under
 # make -n/-q/-t (ZCL_MAKE_NO_EXEC) they expand to a no-op instead of running a
 # runner the dry run never built.
-# dev-bin already builds the confined verifier in its dev epoch. When both
+# Dev producer aliases already build the confined verifier in their dev epoch. When both
 # are selected, join the producer before running the verifier freshness check:
 # two recursive writers cannot acquire the same unverified compile epoch.
 # z23 and zclassic23 are the same public producer. Dispatch that producer
 # once, concurrently with independent targets, then check every named output.
 ZCL_TEST_BUILD_NEEDS = $(if $(ZCL_MAKE_NO_EXEC),: test build needs not listed in a dry run,$(ZCL_TEST_BUILD_NEEDS_RUN))
 ZCL_TEST_BUILD_NEEDS_RUN = needs="$$($(1) --list-build-needs $(2))" || exit 2; \
-	dev_selected="$$(printf '%s\n' "$$needs" | awk '$$1 == "dev-bin" { print 1 }')" || exit 2; \
+	dev_needs="$$(printf '%s\n' "$$needs" | awk '$$1 == "dev-bin" || $$1 == "z23-dev" || $$1 == "zclassic23-dev" || $$1 == "dev-proof-producer"')" || exit 2; \
+	dev_restart="$$(printf '%s\n' "$$dev_needs" | awk '$$1 != "dev-proof-producer" { print 1 }')" || exit 2; \
 	node_needs="$$(printf '%s\n' "$$needs" | awk '$$1 == "z23" || $$1 == "zclassic23"')" || exit 2; \
 	[ -n "$$needs" ] || exit 0; \
-	printf '%s\n' "$$needs" | { ids=; count=0; deferred_path=; node_started=; \
+	printf '%s\n' "$$needs" | { ids=; count=0; deferred_path=; node_started=; dev_started=; \
 	mkdir -p build/scratch || exit 2; \
 	work="$$(mktemp -d "$(CURDIR)/build/scratch/test-needs.XXXXXX")" || exit 2; \
 	trap 'status=$$?; rm -rf "$$work"; exit "$$status"' 0; \
@@ -4863,11 +4864,14 @@ ZCL_TEST_BUILD_NEEDS_RUN = needs="$$($(1) --list-build-needs $(2))" || exit 2; \
 	    return 1; }; \
 	}; while read -r target path; do \
 	  [ -n "$$target" ] || continue; \
-	  if [ "$$target" = dev-package-verifier-ensure ] && [ -n "$$dev_selected" ]; then \
+	  if [ "$$target" = dev-package-verifier-ensure ] && [ -n "$$dev_needs" ]; then \
 	    deferred_path="$$path"; continue; \
 	  fi; \
 	  case "$$target" in z23|zclassic23) \
 	    [ -z "$$node_started" ] || continue; node_started=1; target=z23; outputs="$$node_needs";; \
+	    dev-bin|z23-dev|zclassic23-dev|dev-proof-producer) \
+	    [ -z "$$dev_started" ] || continue; dev_started=1; \
+	    if [ -n "$$dev_restart" ]; then target=dev-bin; else target=dev-proof-producer; fi; outputs="$$dev_needs";; \
 	    *) outputs="$$target $$path";; esac; \
 	  id="need_$$count"; count=$$((count + 1)); ids="$$ids $$id"; \
 	  printf '%s\n' "$$target" > "$$work/$$id.target" && \
