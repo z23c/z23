@@ -185,8 +185,8 @@ static void al_home(struct library *w)
     zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-home");
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
-    (void)snprintf(m->summary, sizeof(m->summary), "Open your apps or discover available advertisements.");
-    app_library_choice(m, "myapps", "My apps", "Browse installed and saved apps.");
+    (void)snprintf(m->summary, sizeof(m->summary), "Open your apps, make a copy, or discover shared apps.");
+    app_library_choice(m, "myapps", "My apps", "Browse your apps or create a copy.");
     app_library_choice(m, "discover", "Discover apps", "Browse offers or open a shared app.");
     app_library_choice(m, "hosting", "Hosting", "Review and stop local hosting intents.");
     app_library_choice(m, "cancel", "Close", "Close without opening an app.");
