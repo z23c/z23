@@ -356,6 +356,8 @@ static int test_code_impact_unknown_path(void)
                        &reply);
 
         ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "include_unsafe_cause")),
+                      "query_input_regular_file_unverified core/modules/net/src/ci_does_not_exist.c");
         ASSERT(json_get_int(json_get(&reply.data, "count")) == 1);
         const struct json_value *arr = json_get(&reply.data, "impacted_files");
         ASSERT(arr && arr->num_children == 1);
@@ -1303,14 +1305,23 @@ static int ci_unsafe_cause_run(const char *name, const char *dep,
         unsafe = codeindex_include_unsafe_cause(index, cause, sizeof cause);
         codeindex_close(index);
     }
+    struct zcl_command_reply reply;
+    ci_impact_call("core/modules/net/include/net/real.h", dir, &reply);
+    const char *reported = json_get_str(json_get(&reply.data, "include_unsafe_cause"));
     printf("invariant=include_unsafe_cause case=%s unsafe=%d cause=\"%s\" "
            "ok=%d\n", name, unsafe ? 1 : 0, cause, index ? 1 : 0);
     TEST("code_impact: a narrow-unsafe include graph names its first rule and file") {
         ASSERT(index != NULL);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
         ASSERT(unsafe == (want[0] != '\0'));
         ASSERT_STR_EQ(cause, want);
+        ASSERT(json_get(&reply.data, "include_unsafe_cause") != NULL);
+        ASSERT(json_get(&reply.data, "include_unsafe_cause")->type == JSON_STR);
+        ASSERT(reported != NULL);
+        ASSERT_STR_EQ(reported, want);
         PASS();
     } _test_next:;
+    zcl_command_reply_free(&reply);
     return failures;
 }
 

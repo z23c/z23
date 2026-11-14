@@ -1012,6 +1012,16 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
     int nd_listed = 0;
     enum codeindex_include_dim idim;
     int nd = code_impact_emit_dependents(ci, path, reply, &nd_listed, &idim);
+    char cause[CODEINDEX_INCLUDE_UNSAFE_CAUSE_MAX] = {0};
+    (void)codeindex_include_query_unsafe_cause(ci, path, cause, sizeof cause);
+    if (!json_push_kv_str(&reply->data, "include_unsafe_cause", cause)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "OUT_OF_MEMORY",
+                               "dispatch", true, false,
+                               "cannot report include graph cause", path);
+        codeindex_close(ci);
+        return;
+    }
 
     /* direct_includes: this file's own forward in-tree #include fan-out
      * (codeindex_includes_of_file) — a quick depth-1 number, not the closure. */
