@@ -27,27 +27,51 @@ static const char k_gate[] = "check_arm_symbol_single";
 /* ── quiet in-process re-invocation (this port's spawn-free replacement
  * for the shell original's `env VAR=val "$self"` self-re-exec) ─────────── */
 
-static int asy_quiet(int (*fn)(void), int *code)
+static int asy_replay(FILE *t)
+{
+    char buf[8192];
+    if (fseek(t, 0, SEEK_SET) != 0) return 2;
+    size_t n = fread(buf, 1, sizeof buf, t);
+    if (ferror(t) || (n && fwrite(buf, 1, n, stderr) != n)) return 2;
+    if (n == sizeof buf && fgetc(t) != EOF &&
+        fputs("\n[selftest diagnostic truncated]\n", stderr) == EOF) return 2;
+    return ferror(t) || fflush(stderr) != 0 ? 2 : 0;
+}
+
+static int asy_capture_open(FILE *t, int *ou, int *eu)
+{
+    if (fflush(stdout) || fflush(stderr)) return 2;
+    *ou = dup(STDOUT_FILENO); *eu = dup(STDERR_FILENO);
+    if (*ou < 0 || *eu < 0) {
+        if (*ou >= 0) close(*ou);
+        if (*eu >= 0) close(*eu);
+        return die("z23-lint: dup failed\n", "");
+    }
+    if (dup2(fileno(t), STDOUT_FILENO) < 0 || dup2(fileno(t), STDERR_FILENO) < 0) {
+        (void)dup2(*ou, STDOUT_FILENO); (void)dup2(*eu, STDERR_FILENO);
+        close(*ou); close(*eu);
+        return die("z23-lint: dup2 failed\n", "");
+    }
+    return 0;
+}
+
+static int asy_quiet(int (*fn)(void), int want, int *code)
 {
     FILE *t = tmpfile();
     if (!t)
         return die("z23-lint: tmpfile failed\n", "");
-    fflush(stdout);
-    fflush(stderr);
-    int fd = fileno(t);
-    int ou = dup(STDOUT_FILENO), eu = dup(STDERR_FILENO);
-    if (ou < 0 || eu < 0 || dup2(fd, STDOUT_FILENO) < 0
-        || dup2(fd, STDERR_FILENO) < 0)
-        return die("z23-lint: dup2 failed\n", "");
+    int ou, eu;
+    if (asy_capture_open(t, &ou, &eu)) { fclose(t); return 2; }
     *code = fn();
-    fflush(stdout);
-    fflush(stderr);
-    if (dup2(ou, STDOUT_FILENO) < 0 || dup2(eu, STDERR_FILENO) < 0)
-        return die("z23-lint: dup2 failed\n", "");
+    int bad = fflush(stdout) != 0 || ferror(stdout);
+    bad |= fflush(stderr) != 0 || ferror(stderr);
+    bad |= dup2(ou, STDOUT_FILENO) < 0;
+    bad |= dup2(eu, STDERR_FILENO) < 0;
     close(ou);
     close(eu);
-    fclose(t);
-    return 0;
+    if (!bad && *code != want) bad |= asy_replay(t);
+    if (fclose(t) != 0) bad = 1;
+    return bad ? 2 : 0;
 }
 
 /* ── (1)-(5): fixture-driven analyzer probes ───────────────────────────── */
@@ -142,7 +166,7 @@ static int asy_expect_errors(const char *sandbox)
 {
     int rc = 0;
     asy_error_sandbox = sandbox;
-    int quiet_rc = asy_quiet(asy_error_cases, &rc);
+    int quiet_rc = asy_quiet(asy_error_cases, 0, &rc);
     asy_error_sandbox = NULL;
     if (quiet_rc || rc) {
         fprintf(stderr, "%s: SELFTEST FAILED — analyzer error handling\n", k_gate);
@@ -203,8 +227,7 @@ static int asy_cov_case(int want_rc, const char *msg, const char *const *keys,
         setenv(keys[i], vals[i], 1);
     }
     int rc = 0;
-    if (asy_quiet(asy_run, &rc))
-        return 2;
+    int quiet_rc = asy_quiet(asy_run, want_rc, &rc);
     for (int i = 0; i < nvars; i++) {
         if (save[i].was_set)
             setenv(save[i].key, save[i].old, 1);
@@ -212,6 +235,7 @@ static int asy_cov_case(int want_rc, const char *msg, const char *const *keys,
             unsetenv(save[i].key);
         free(save[i].old);
     }
+    if (quiet_rc) return 2;
     if (rc != want_rc) {
         fprintf(stderr,
                 "%s: SELFTEST FAILED — %s (wanted exit %d, got %d)\n",
