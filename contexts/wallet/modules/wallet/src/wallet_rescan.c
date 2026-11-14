@@ -184,18 +184,52 @@ static void wallet_rescan_log_done(const struct wallet_rescan_report *r,
  * key, or holding a stored key that cannot scan while locked) proves nothing
  * about the rest and keeps it. A cutover marker waits for durable binding
  * completion even when this scan reads the entire range. */
+#ifdef ZCL_TESTING
+static void (*wallet_rescan_before_clear_hook)(void *);
+static void *wallet_rescan_before_clear_context;
+void wallet_rescan_test_before_clear(void (*hook)(void *), void *context)
+{
+    wallet_rescan_before_clear_hook = hook;
+    wallet_rescan_before_clear_context = context;
+}
+static void wallet_rescan_run_before_clear(void)
+{
+    void (*hook)(void *) = wallet_rescan_before_clear_hook;
+    void *context = wallet_rescan_before_clear_context;
+    wallet_rescan_before_clear_hook = NULL;
+    wallet_rescan_before_clear_context = NULL;
+    if (hook) hook(context);
+}
+#endif
+
+static bool wallet_rescan_lock_scan_set(struct wallet *w)
+{
+    if (!zcl_mutex_trylock(&w->keystore.cs)) return false;
+    if (!zcl_mutex_trylock(&w->sapling_keys.cs)) { zcl_mutex_unlock(&w->keystore.cs); return false; }
+    return true;
+}
+
 static void wallet_rescan_clear_marker(struct wallet *w, int start_height,
                                        int stop_height, int tip,
-                                       const struct wallet_rescan_report *r)
+                                       const struct wallet_rescan_report *r,
+                                       bool identified, const uint8_t identity[32])
 {
     zcl_mutex_lock(&w->cs);
-    if (wallet_readiness_get_locked(w).state != WALLET_READINESS_PENDING &&
+    bool locked = identified && wallet_rescan_lock_scan_set(w);
+    uint8_t current[32];
+    if (locked && wallet_scan_identity_locked(w, current) &&
+        memcmp(current, identity, sizeof(current)) == 0 &&
+        wallet_readiness_get_locked(w).state != WALLET_READINESS_PENDING &&
         w->scan_retry.pending && start_height <= w->scan_retry.from &&
         stop_height >= tip && r->blocks_scanned == r->blocks_in_range &&
         r->shielded_txs_unscanned == 0 && w->sapling_keys.num_unscannable == 0) {
         if (strcmp(w->scan_retry.blocker, WALLET_BIRTHDAY_PENDING) == 0)
             w->initial_scan_floor = 0;
         memset(&w->scan_retry, 0, sizeof(w->scan_retry));
+    }
+    if (locked) {
+        zcl_mutex_unlock(&w->sapling_keys.cs);
+        zcl_mutex_unlock(&w->keystore.cs);
     }
     zcl_mutex_unlock(&w->cs);
 }
@@ -220,6 +254,8 @@ int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
                 !w ? "wallet" : "chain");
     }
 
+    uint8_t identity[32];
+    bool identified = wallet_scan_identity(w, identity);
     int tip = active_chain_height(chain);
     if (stop_height < 0 || stop_height > tip)
         stop_height = tip;
@@ -270,7 +306,10 @@ int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
     }
 
     wallet_rescan_classify(r);
-    wallet_rescan_clear_marker(w, start_height, stop_height, tip, r);
+    #ifdef ZCL_TESTING
+    wallet_rescan_run_before_clear();
+    #endif
+    wallet_rescan_clear_marker(w, start_height, stop_height, tip, r, identified, identity);
 
     int64_t elapsed = GetTime() - t_start;
     LOG_INFO("wallet",  // wallet-log-ok:note-count

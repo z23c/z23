@@ -36,21 +36,25 @@ void node_db_catchup_owed_defer(struct sync_db_turbo_scope *scope)
     scope->ndb = NULL;
 }
 
-/* False: still owed (the connection is inside a transaction, or the
- * restore failed and is retried by the next pass). */
-bool node_db_catchup_service_restore_owed(struct node_db *ndb)
+/* Distinguish a busy connection from a failed restore; both remain owed. */
+enum catchup_restore_result node_db_catchup_restore_owed_result(struct node_db *ndb)
 {
     if (!g_owed_scope.entered)
-        return true;
+        return CATCHUP_RESTORE_OK;
     if (node_db_catchup_lock_guard_foreign_txn(ndb))
-        return false;
+        return CATCHUP_RESTORE_BUSY;
     if (!sync_db_turbo_scope_end(&g_owed_scope)) {
         LOG_WARN_IN("node_db_catchup_service_run", "catchup",
                     "catchup: owed restore of normal mode failed; "
                     "retrying next pass");
-        return false;
+        return CATCHUP_RESTORE_FAILED;
     }
-    return true;
+    return CATCHUP_RESTORE_OK;
+}
+
+bool node_db_catchup_service_restore_owed(struct node_db *ndb)
+{
+    return node_db_catchup_restore_owed_result(ndb) == CATCHUP_RESTORE_OK;
 }
 
 #ifdef ZCL_TESTING

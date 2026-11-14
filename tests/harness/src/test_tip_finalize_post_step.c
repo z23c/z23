@@ -46,6 +46,10 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "storage/anchor_kv.h"
 #include "sapling/sapling.h"
+#include "sapling/note_encryption.h"
+#include "support/cleanse.h"
+#include "jobs/node_pace.h"
+#include "services/node_db_catchup_service.h"
 #include "wallet/sapling_keys.h"
 #include "coins/coins_view.h"
 #include "storage/progress_store.h"
@@ -667,6 +671,114 @@ static int tp_witness_wiring(void)
     tp_wire_close(&x);
     return failures;
 }
+
+#ifndef _WIN32
+/* Replace the tip output with a decryptable note for the fixture wallet. */
+static bool tp_gentle_tip_body(struct tp_wire *x, uint8_t rcm[32], struct uint256 *txid)
+{
+    struct transaction *tx = &x->t.blk[1].vtx[1];
+    struct output_description *out = &tx->v_shielded_output[0];
+    const struct sapling_key_entry *key = x->key;
+    uint8_t pt[564] = {0}, esk[32] = {2}, shared[32], enc_key[32];
+    rcm[0] = 1; pt[0] = 1; memcpy(pt + 1, key->diversifier, 11);
+    pt[12] = 0xe8; pt[13] = 3; memcpy(pt + 20, rcm, 32);
+    bool ok = sapling_compute_cm(key->diversifier, key->pk_d, 1000, rcm, out->cm.data) &&
+        sapling_ka_derivepublic(key->diversifier, esk, out->ephemeral_key.data) &&
+        sapling_ka_agree(key->pk_d, esk, shared) &&
+        sapling_kdf(enc_key, shared, out->ephemeral_key.data) &&
+        sapling_note_encrypt(enc_key, pt, sizeof(pt), out->enc_ciphertext);
+    memcpy(tx->v_shielded_spend[0].nullifier.data, x->w->sapling_notes[0].nf, 32);
+    struct incremental_merkle_tree tree; sapling_tree_init(&tree);
+    incremental_tree_append(&tree, &x->t.cm[0]); incremental_tree_append(&tree, &x->t.cm[1]);
+    incremental_tree_append(&tree, &out->cm); incremental_tree_root(&tree, &x->t.root[2]);
+    x->t.blk[1].header.hashFinalSaplingRoot = x->t.root[2];
+    transaction_compute_hash(tx); *txid = tx->hash;
+    struct disk_block_pos pos; disk_block_pos_init(&pos);
+    const struct chain_params *cp = chain_params_get();
+    ok = ok && write_block_to_disk(&x->t.blk[1], &pos, x->netdir, cp->pchMessageStart);
+    if (ok) {
+        struct block_index *bi = &x->t.bi[2];
+        block_get_hash(&x->t.blk[1], &bi->hashBlock); bi->phashBlock = &bi->hashBlock;
+        bi->hashFinalSaplingRoot = x->t.root[2];
+        ok = block_index_set_have_data_verified(bi, &pos, x->netdir);
+    }
+    memory_cleanse(pt, sizeof(pt)); memory_cleanse(shared, sizeof(shared));
+    memory_cleanse(enc_key, sizeof(enc_key));
+    return ok;
+}
+
+static bool tp_gentle_note_absent(struct tp_wire *x, const struct uint256 *txid)
+{
+    struct db_sapling_note *notes = NULL;
+    int n = db_sapling_note_list_unspent_alloc(&x->ndb, &notes);
+    bool absent = n >= 0;
+    for (int i = 0; i < n; i++)
+        if (memcmp(notes[i].txid, txid->data, 32) == 0) absent = false;
+    free(notes);
+    for (size_t i = 0; i < x->w->num_sapling_notes; i++)
+        if (uint256_eq(&x->w->sapling_notes[i].txid, txid)) absent = false;
+    return absent;
+}
+
+static bool tp_gentle_pending(struct tp_wire *x)
+{
+    struct wallet_tx pending; memset(&pending, 0, sizeof(pending));
+    pending.used = true; pending.confirms = 0;
+    bool ok = transaction_copy(&pending.tx, &x->t.blk[1].vtx[1]) &&
+              wallet_add_to_wallet(x->w, &pending);
+    transaction_free(&pending.tx); return ok;
+}
+
+static int tp_gentle_tip_verify(struct tp_wire *x, const struct uint256 *txid,
+                                const uint8_t rcm[32], bool drained)
+{
+    int failures = 0; uint8_t nf[32];
+    struct wallet_tx confirmed; memset(&confirmed, 0, sizeof(confirmed));
+    bool confirms = drained && wallet_get_tx_copy(x->w, txid, &confirmed) &&
+                    confirmed.confirms == 1 && uint256_eq(&confirmed.hash_block, x->t.bi[2].phashBlock);
+    TP_CHECK("wallet reconcile confirms the transaction while history is deferred", confirms);
+    transaction_free(&confirmed.tx);
+    TP_CHECK("wallet reconcile discovers the note with current witness and nullifier",
+             drained && tp_witness_is(&x->ndb, txid->data, 3, &x->t.root[2]) &&
+             tp_wit_expected_nf(x->key, rcm, 2, nf) && tp_wit_note_nf_is(&x->ndb, txid->data, nf));
+    TP_CHECK("wallet reconcile marks the prior nullifier spent and writer queue progresses",
+             drained && x->w->sapling_notes[0].spent && x->w->best_block_height == 3);
+    return failures;
+}
+
+static bool tp_gentle_chain(struct main_state *ms, struct tp_wire *x, bool body)
+{
+    return body && active_chain_install_tip_slot(&ms->chain_active, &x->t.bi[0]) &&
+        active_chain_install_tip_slot(&ms->chain_active, &x->t.bi[1]) &&
+        active_chain_install_tip_slot(&ms->chain_active, &x->t.bi[2]);
+}
+
+static int tp_gentle_wallet_tip(void)
+{
+    static struct tp_wire x; static struct main_state ms;
+    memset(&x, 0, sizeof(x)); memset(&ms, 0, sizeof(ms));
+    int failures = 0; uint8_t rcm[32] = {0}; struct uint256 txid = {0};
+    bool up = tp_wire_chain(&x) && tp_wire_wallet(&x);
+    bool body = up && tp_gentle_tip_body(&x, rcm, &txid) && tp_gentle_pending(&x);
+    main_state_init(&ms); x.rt.main_state = &ms;
+    x.t.bi[0].phashBlock = &x.t.bi[0].hashBlock;
+    bool chain = tp_gentle_chain(&ms, &x, body);
+    TP_CHECK("encrypted tip note absent before wallet reconcile",
+             body && tp_gentle_note_absent(&x, &txid));
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_GENTLE);
+    bool deferred = false; int before = up ? node_db_sync_get_tip_height(&x.ndb) : -1;
+    int walk = chain ? node_db_catchup_service_run_origin(&x.ndb, true, &deferred,
+                                      &ms.chain_active, x.w, x.netdir) : -1;
+    TP_CHECK("background history deferred before tip reconcile",
+             chain && before < 3 && walk == 0 && deferred && node_db_sync_get_tip_height(&x.ndb) == before);
+    bool tip = chain && tip_finalize_run_wallet_reconcile(&x.t.bi[2]);
+    bool drained = tip && db_service_run_write(&x.svc, tp_noop_write, NULL);
+    failures += tp_gentle_tip_verify(&x, &txid, rcm, drained);
+    node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
+    x.rt.main_state = NULL; main_state_free(&ms); tp_wire_close(&x); return failures;
+}
+#endif
+
 
 /* ---- Mutation-sweep gap closers: tripwire verdicts, entry refusals, coins
  * invalidation and the golden-window walk ---- */
@@ -1322,6 +1434,9 @@ out_early:
     test_rm_rf(dir);
 
     failures += tp_witness_wiring();
+#ifndef _WIN32
+    failures += tp_gentle_wallet_tip();
+#endif
     failures += tp_birthday_live(true);
     failures += tp_birthday_live(false);
     printf("tip_finalize_post_step tests: %s\n",

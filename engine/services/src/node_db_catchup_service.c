@@ -831,6 +831,8 @@ static int catchup_walk_start(int db_tip, int chain_tip,
 
 /* Every local of one catchup pass, so the phase helpers below can share it. */
 struct catchup_pass {
+    bool background;
+    bool thermal_deferred;
     struct node_db *ndb;
     const struct active_chain *chain;
     struct wallet *w;
@@ -891,8 +893,10 @@ static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
 /* Leave turbo mode and close the pass after a failed transaction open. */
 static void catchup_unwind_open(struct catchup_pass *ps, const char *restore_msg)
 {
-    if (!sync_db_turbo_scope_end(&ps->turbo_mode))
+    if (!sync_db_turbo_scope_end(&ps->turbo_mode)) {
         fprintf(stderr, "%s\n", restore_msg);
+        node_db_catchup_owed_defer(&ps->turbo_mode);
+    }
     catchup_abort_pass(&ps->restore_ok);
 }
 
@@ -991,11 +995,21 @@ enum catchup_step {
     CATCHUP_STEP_FAIL,
 };
 
+static bool catchup_thermal_stop(struct catchup_pass *ps)
+{
+    if (!ps->background || g_shutdown_requested ||
+        node_pace_get() != NODE_PACE_GENTLE) return false;
+    ps->thermal_deferred = true;
+    return true;
+}
+
 /* Shutdown check, batch cycling, then locate and map the block's file. */
 static enum catchup_step catchup_walk_locate(struct catchup_pass *ps, int h,
                                              const struct block_index **out)
 {
     node_pace_poll();
+    if (catchup_thermal_stop(ps)) return CATCHUP_STEP_STOP;
+
     if (g_shutdown_requested || node_pace_get() == NODE_PACE_PAUSE)
         return CATCHUP_STEP_STOP;
 #ifdef ZCL_TESTING
@@ -1278,6 +1292,7 @@ static void catchup_close_restore(struct catchup_pass *ps)
     if (!sync_db_turbo_scope_end(&ps->turbo_mode)) {
         LOG_WARN_IN("node_db_catchup_service_run", "catchup", "catchup: failed to restore normal mode");
         ps->restore_ok = false;
+        node_db_catchup_owed_defer(&ps->turbo_mode);
     }
 }
 
@@ -1368,10 +1383,22 @@ static void catchup_walk_heights(struct catchup_pass *ps)
     }
 }
 
-int node_db_catchup_service_run(struct node_db *ndb,
-                                const struct active_chain *chain,
-                                struct wallet *w,
-                                const char *datadir)
+static int catchup_entry_gate(struct node_db *ndb, bool background, bool *deferred)
+{
+    enum catchup_restore_result restored = node_db_catchup_restore_owed_result(ndb);
+    if (restored == CATCHUP_RESTORE_FAILED) return -1;
+    if (restored == CATCHUP_RESTORE_BUSY) return 0;
+    node_pace_poll();
+    if (background && node_pace_get() == NODE_PACE_GENTLE) {
+        if (deferred) *deferred = true;
+        return 0;
+    }
+    return node_pace_get() == NODE_PACE_PAUSE ? 0 : 1;
+}
+
+int node_db_catchup_service_run_origin(struct node_db *ndb, bool background,
+                                       bool *deferred, const struct active_chain *chain,
+                                       struct wallet *w, const char *datadir)
 {
     /* Unreadable blocks are LOUD HOLES, not abort triggers: on a
      * cold-import datadir the imported index carries the source node's
@@ -1381,7 +1408,9 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * restart loop that never reached the readable rows the tip needs
      * (garbage reads at low height, catchup aborting forever, tip pinned).
      * Consumers already handle missing lean rows (height_not_found). */
+    if (deferred) *deferred = false;
     struct catchup_pass ps = {
+        .background = background,
         .cb = {.last_committed_height = -1},
         .restore_ok = true,
         .cached_file = -1,
@@ -1396,10 +1425,8 @@ int node_db_catchup_service_run(struct node_db *ndb,
 
     if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
-    (void)node_db_catchup_service_restore_owed(ndb);
-    node_pace_poll();
-    if (node_pace_get() == NODE_PACE_PAUSE)
-        return 0;
+    int gate = catchup_entry_gate(ndb, background, deferred);
+    if (gate <= 0) return gate;
 
     int db_tip = 0;
     int chain_tip = 0;
@@ -1434,7 +1461,8 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * residual/regressed deferred writer. */
     if (node_db_catchup_lock_guard_restart_needed(ps.failed, ps.cb.busy_snapshot)) {
         catchup_active_finish();
-        int r = node_db_catchup_service_run(ndb, chain, w, datadir);
+        int r = node_db_catchup_service_run_origin(
+            ndb, background, deferred, chain, w, datadir);
         node_db_catchup_lock_guard_restart_done();
         return r;
     }
@@ -1470,8 +1498,16 @@ int node_db_catchup_service_run(struct node_db *ndb,
     if (indexed > 10000)
         node_db_wal_checkpoint(ndb);
 
+    if (deferred) *deferred = ps.thermal_deferred;
     catchup_active_finish();
     return indexed;
+}
+
+int node_db_catchup_service_run(struct node_db *ndb,
+                                const struct active_chain *chain,
+                                struct wallet *w, const char *datadir)
+{
+    return node_db_catchup_service_run_origin(ndb, false, NULL, chain, w, datadir);
 }
 
 #ifdef ZCL_TESTING

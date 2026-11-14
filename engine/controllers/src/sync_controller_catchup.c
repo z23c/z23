@@ -128,11 +128,11 @@ bool sync_block_file_mapping_open(struct sync_block_file_mapping *mapping,
  * moved with the catchup orchestration into
  * engine/services/src/node_db_catchup_service.c. */
 
-int node_db_sync_catchup(struct node_db *ndb,
-                         const struct active_chain *chain,
-                         struct wallet *w,
-                         const char *datadir)
+int node_db_sync_catchup_origin(struct node_db *ndb, bool background,
+                                bool *deferred, const struct active_chain *chain,
+                                struct wallet *w, const char *datadir)
 {
+    if (deferred) *deferred = false;
     /* Parse/validate front matter: the controller boundary rejects a bad
      * handle here so the failure logs with controller context. The whole
      * orchestration (turbo scope, DB verify, Sapling-tree init, the
@@ -141,5 +141,12 @@ int node_db_sync_catchup(struct node_db *ndb,
     if (!ndb || !ndb->open || !chain)
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
 
-    return node_db_catchup_service_run(ndb, chain, w, datadir);
+    return node_db_catchup_service_run_origin(ndb, background, deferred,
+                                               chain, w, datadir);
+}
+
+int node_db_sync_catchup(struct node_db *ndb, const struct active_chain *chain,
+                         struct wallet *w, const char *datadir)
+{
+    return node_db_sync_catchup_origin(ndb, false, NULL, chain, w, datadir);
 }

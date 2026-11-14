@@ -110,7 +110,7 @@ static bool catchup_lifecycle_join_thread_bounded(pthread_t thread,
 #endif
 }
 
-bool catchup_lifecycle_start(struct node_db_sync_catchup_job *job,
+bool catchup_lifecycle_start_origin(struct node_db_sync_catchup_job *job, bool background,
                              struct node_db *ndb,
                              const struct active_chain *chain,
                              struct wallet *w,
@@ -131,8 +131,13 @@ bool catchup_lifecycle_start(struct node_db_sync_catchup_job *job,
      * args.datadir_storage. Do not "simplify" that copy away. */
     char net_dir[2048];
     GetDataDir(true, net_dir, sizeof(net_dir));
-    return node_db_sync_catchup_job_start(job, ndb, chain, w,
+    return node_db_sync_catchup_job_start_origin(job, background, ndb, chain, w,
                                           net_dir[0] ? net_dir : datadir);
+}
+
+bool catchup_lifecycle_start(struct node_db_sync_catchup_job *job, struct node_db *ndb, const struct active_chain *chain, struct wallet *w, const char *datadir)
+{
+    return catchup_lifecycle_start_origin(job, false, ndb, chain, w, datadir);
 }
 
 void catchup_lifecycle_join(struct node_db_sync_catchup_job *job,

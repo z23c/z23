@@ -86,6 +86,13 @@ bool wallet_shielded_import_refused(const struct wallet_rpc_context *ctx,
 {
     if (sapling_keystore_contains_xsk(&ctx->wallet->sapling_keys, xsk)) {
         if (ignore_existing) {
+            zcl_mutex_lock(&ctx->wallet->cs);
+            bool pending = ctx->wallet->scan_retry.pending;
+            zcl_mutex_unlock(&ctx->wallet->cs);
+            if (pending) {
+                json_set_str(result, "Key is present, but wallet scan is incomplete. Check persistence and rescan.");
+                return false;
+            }
             json_set_null(result);
             return true;
         }
@@ -101,6 +108,97 @@ bool wallet_shielded_import_refused(const struct wallet_rpc_context *ctx,
     json_set_str(result, "Error: the Sapling keystore is full. "
                          "Key NOT imported.");
     LOG_FAIL("wallet_shielded", "z_importkey: refused, keystore full");
+}
+
+static void wallet_import_mark_scan_locked(struct wallet *w, int from)
+{
+    if (from < 0) from = 0;
+    if (w->scan_retry.pending && w->scan_retry.from < from) from = w->scan_retry.from;
+    if (!w->scan_retry.pending) {
+        w->scan_retry.since = GetTime();
+        snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+                 WALLET_RESCAN_BLOCKER_INCOMPLETE);
+    }
+    w->scan_retry.pending = true;
+    w->scan_retry.from = from;
+}
+
+static void wallet_import_mark_scan(struct wallet *w, int from)
+{
+    zcl_mutex_lock(&w->cs);
+    wallet_import_mark_scan_locked(w, from);
+    zcl_mutex_unlock(&w->cs);
+}
+
+static bool wallet_import_save_scan(struct wallet_rpc_context *ctx)
+{
+    if (!ctx->wallet_db) return true;
+    zcl_mutex_lock(&ctx->wallet->cs);
+    bool ok = wallet_sqlite_write_scan_state(ctx->wallet_db, ctx->wallet);
+    zcl_mutex_unlock(&ctx->wallet->cs);
+    return ok;
+}
+
+static bool wallet_import_persist_key(struct wallet_rpc_context *ctx, bool flushed, struct json_value *result)
+{
+    if (!ctx->wallet_db) return true;
+    if (!flushed) {
+        struct sapling_keystore *sks = &ctx->wallet->sapling_keys;
+        if (sks->has_seed && !wallet_sqlite_write_sapling_seed(ctx->wallet_db, sks->seed)) {
+            json_set_str(result, "Error: failed to persist Sapling seed. Key NOT imported. Check getwalletinfo.persistence and node.log.");
+            LOG_FAIL("wallet_shielded", "z_importkey: sapling_seed flush failed");
+        }
+        if (!wallet_sqlite_write_sapling_key(ctx->wallet_db, sks->keys[sks->num_keys - 1].child_index,
+                                             &sks->keys[sks->num_keys - 1])) {
+            json_set_str(result, "Error: failed to persist Sapling key. Key NOT imported. Check getwalletinfo.persistence and node.log.");
+            LOG_FAIL("wallet_shielded", "z_importkey: sapling_key flush failed");
+        }
+    }
+    wallet_backup_service_on_key_change();
+    return true;
+}
+
+static bool wallet_import_finish_scan(struct wallet_rpc_context *ctx, int start_height,
+                                      struct json_value *result)
+{
+    if (ctx->main_state) {
+        zcl_mutex_lock(&ctx->wallet->cs);
+        struct wallet_scan_retry saved = ctx->wallet->scan_retry;
+        zcl_mutex_unlock(&ctx->wallet->cs);
+        struct wallet_rescan_report report;
+        (void)wallet_rescan_report(ctx->wallet, &ctx->main_state->chain_active, start_height, -1, ctx->datadir, &report);
+        if (!wallet_flush_from_context(ctx).ok) {
+            zcl_mutex_lock(&ctx->wallet->cs);
+            if (!ctx->wallet->scan_retry.pending && saved.pending) ctx->wallet->scan_retry = saved;
+            else if (saved.pending && saved.from < ctx->wallet->scan_retry.from) ctx->wallet->scan_retry.from = saved.from;
+            wallet_import_mark_scan_locked(ctx->wallet, start_height);
+            zcl_mutex_unlock(&ctx->wallet->cs);
+            (void)wallet_import_save_scan(ctx);
+            json_set_str(result, "Key imported, but scan state could not be saved. Rescan again.");
+            return false;
+        }
+    }
+    zcl_mutex_lock(&ctx->wallet->cs);
+    bool pending = ctx->wallet->scan_retry.pending;
+    zcl_mutex_unlock(&ctx->wallet->cs);
+    if (pending) {
+        json_set_str(result, "Key imported, but rescan is incomplete. Rescan again when all blocks are available.");
+        return false;
+    }
+    return true;
+}
+
+static bool wallet_import_save_published(struct wallet_rpc_context *ctx, bool do_rescan, struct json_value *result)
+{
+    if (!do_rescan || wallet_flush_from_context(ctx).ok) return true;
+    json_set_str(result, "Key is in memory, but could not be saved with its pending scan.");
+    return false;
+}
+
+static void wallet_import_options(const char *text, bool *do_rescan, bool *ignore_existing)
+{
+    *do_rescan = strcmp(text, "no") != 0;
+    *ignore_existing = strcmp(text, "no") != 0 && strcmp(text, "yes") != 0;
 }
 
 bool rpc_z_importkey(const struct json_value *params, bool help,
@@ -138,16 +236,8 @@ bool rpc_z_importkey(const struct json_value *params, bool help,
         }
     }
 
-    /* Parse rescan option */
-    bool do_rescan = true;
-    bool ignore_existing = true;
-    if (strcmp(rescan_str, "no") == 0) {
-        do_rescan = false;
-        ignore_existing = false;
-    } else if (strcmp(rescan_str, "yes") == 0) {
-        do_rescan = true;
-        ignore_existing = false;
-    }
+    bool do_rescan, ignore_existing;
+    wallet_import_options(rescan_str, &do_rescan, &ignore_existing);
 
     /* Decode spending key */
     struct zip32_xsk xsk;
@@ -166,44 +256,38 @@ bool rpc_z_importkey(const struct json_value *params, bool help,
                  "is locked");
     }
 
-    /* Import into keystore */
-    if (!sapling_keystore_import_xsk(&ctx->wallet->sapling_keys, &xsk)) {
+    if (sapling_keystore_contains_xsk(&ctx->wallet->sapling_keys, &xsk)) {
+        bool ok = wallet_shielded_import_refused(ctx, &xsk, ignore_existing, result);
+        memory_cleanse(&xsk, sizeof(xsk));
+        return ok;
+    }
+    if (do_rescan) {
+        wallet_import_mark_scan(ctx->wallet, start_height);
+        struct zcl_result marked = wallet_flush_from_context(ctx);
+        if (!marked.ok) {
+            memory_cleanse(&xsk, sizeof(xsk));
+            json_set_str(result, "Key not imported: wallet scan state could not be saved.");
+            return false;
+        }
+    }
+
+    /* Publish the key and its pending scan together under wallet.cs. */
+    zcl_mutex_lock(&ctx->wallet->cs);
+    bool imported = sapling_keystore_import_xsk(&ctx->wallet->sapling_keys, &xsk);
+    if (imported && do_rescan) wallet_import_mark_scan_locked(ctx->wallet, start_height);
+    zcl_mutex_unlock(&ctx->wallet->cs);
+    if (!imported) {
         bool ok = wallet_shielded_import_refused(ctx, &xsk, ignore_existing,
                                                  result);
         memory_cleanse(&xsk, sizeof(xsk));
         return ok;
     }
     memory_cleanse(&xsk, sizeof(xsk));
+    if (!wallet_import_save_published(ctx, do_rescan, result)) return false;
 
-    /* Persist to wallet DB. A failed write on imported material leaves
-     * the spending key in memory but not on disk — user cannot recover
-     * after restart. Return the error so they know. */
-    if (ctx->wallet_db) {
-        struct sapling_keystore *sks = &ctx->wallet->sapling_keys;
-        if (sks->has_seed) {
-            if (!wallet_sqlite_write_sapling_seed(ctx->wallet_db, sks->seed)) {
-                json_set_str(result,
-                    "Error: failed to persist Sapling seed. Key NOT imported. "
-                    "Check getwalletinfo.persistence and node.log.");
-                LOG_FAIL("wallet_shielded", "z_importkey: sapling_seed flush failed");
-            }
-        }
-        if (!wallet_sqlite_write_sapling_key(ctx->wallet_db,
-                sks->keys[sks->num_keys - 1].child_index,
-                &sks->keys[sks->num_keys - 1])) {
-            json_set_str(result,
-                "Error: failed to persist Sapling key. Key NOT imported. "
-                "Check getwalletinfo.persistence and node.log.");
-            LOG_FAIL("wallet_shielded", "z_importkey: sapling_key flush failed");
-        }
-        wallet_backup_service_on_key_change();
-    }
+    if (!wallet_import_persist_key(ctx, do_rescan, result)) return false;
 
-    if (do_rescan && ctx->main_state) {
-        wallet_rescan(ctx->wallet, &ctx->main_state->chain_active,
-                      start_height, -1, ctx->datadir);
-    }
-
+    if (do_rescan && !wallet_import_finish_scan(ctx, start_height, result)) return false;
     json_set_null(result);
     return true;
 }

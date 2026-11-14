@@ -31,6 +31,7 @@
 #include "services/chain_state_service.h"
 #include "controllers/store_controller.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/node_pace.h"
 #include "jobs/refold_progress.h"  /* refold_in_progress — suppress projection
                                     * backfill while a mint/refold discards the
                                     * upper tip (see the guard below). */
@@ -372,6 +373,12 @@ static void projection_backfill_clear_stuck_blocker(void)
         blocker_clear(PROJECTION_STUCK_BLOCKER_ID);
 }
 
+static bool projection_restore_owed_write(struct node_db *ndb, void *ctx)
+{
+    (void)ctx;
+    return node_db_catchup_service_restore_owed(ndb);
+}
+
 static bool projection_backfill_should_run(struct boot_svc_ctx *svc)
 {
     return !svc->projection_backfill_thread_stop && boot_running(svc);
@@ -397,11 +404,11 @@ static int projection_backfill_cursor_height(struct node_db *ndb)
     return (ndb && ndb->open) ? node_db_sync_get_tip_height(ndb) : -1;
 }
 
-static bool projection_backfill_is_behind(bool refolding, bool tail_folding,
+static bool projection_backfill_is_behind(bool refolding, bool tail_folding, bool thermal_deferred,
                                           int projection_cursor,
                                           int chain_tip)
 {
-    return !refolding && !tail_folding && projection_cursor >= 0 &&
+    return !refolding && !tail_folding && !thermal_deferred && projection_cursor >= 0 &&
            chain_tip >= 0 && projection_cursor < chain_tip;
 }
 
@@ -411,6 +418,14 @@ static bool projection_backfill_cursor_frozen(bool behind,
 {
     return behind && projection_cursor == last_projection_cursor;
 }
+
+#ifdef ZCL_TESTING
+static _Atomic int64_t g_projection_test_marker;
+int64_t boot_projection_test_marker(void)
+{
+    return atomic_load(&g_projection_test_marker);
+}
+#endif
 
 static void projection_backfill_beat(int64_t *loop_iterations, bool behind,
                                      int projection_cursor,
@@ -428,6 +443,9 @@ static void projection_backfill_beat(int64_t *loop_iterations, bool behind,
             ? (int64_t)projection_cursor
             : PROJECTION_BACKFILL_AT_TIP_BEAT_BASE + (++*loop_iterations);
         supervisor_progress(sup_id, marker);
+#ifdef ZCL_TESTING
+        atomic_store(&g_projection_test_marker, marker);
+#endif
         /* Retire the stale stall blocker ONLY when the worker is healthy
          * this loop — quiescent (at tip / mid-refold) or the cursor
          * advanced. A behind-and-frozen worker skips the clear so a
@@ -593,6 +611,41 @@ static void projection_backfill_shielded_verify_tick(struct boot_svc_ctx *svc,
         atomic_store(&verify_done, true);
 }
 
+#ifdef ZCL_TESTING
+static _Atomic unsigned g_projection_test_verify;
+static _Atomic unsigned g_projection_test_scan;
+static _Atomic unsigned g_projection_test_start;
+void boot_projection_test_counts(unsigned *verify, unsigned *scan, unsigned *start)
+{
+    *verify = atomic_load(&g_projection_test_verify);
+    *scan = atomic_load(&g_projection_test_scan);
+    *start = atomic_load(&g_projection_test_start);
+}
+#endif
+
+static bool projection_thermal_wait(struct boot_svc_ctx *svc,
+                                    struct node_db *ndb, int chain_tip,
+                                    bool deferred)
+{
+    if (!deferred) return false;
+    struct db_service *dbsvc = boot_db_service(svc);
+    if (dbsvc && !node_db_sync_catchup_job_is_started(&svc->catchup_job))
+        (void)db_service_run_write(dbsvc, projection_restore_owed_write, NULL);
+    projection_backfill_shielded_verify_tick(svc, ndb, chain_tip);
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_projection_test_verify, 1);
+#endif
+    projection_backfill_idle_sleep(svc);
+    return true;
+}
+
+static bool projection_defer(struct boot_svc_ctx *svc, struct node_db *ndb,
+                             int tip, bool thermal, bool refolding, bool tail)
+{
+    return projection_thermal_wait(svc, ndb, tip, thermal) ||
+           projection_backfill_defer_for_fold(svc, refolding, tail);
+}
+
 static void *projection_backfill_service_thread(void *arg)
 {
     struct boot_svc_ctx *svc = arg;
@@ -625,6 +678,8 @@ static void *projection_backfill_service_thread(void *arg)
         int64_t header_tip = csr_header_height(csr_instance());
         bool tail_folding =
             node_db_catchup_tail_fold_in_progress(header_tip, hstar);
+        node_pace_poll();
+        bool thermal_deferred = node_pace_get() != NODE_PACE_NORMAL;
 
         /* The actual projection cursor (the height the backfill has REACHED),
          * read before the rewind logic below mutates projection_tip. This — not
@@ -638,6 +693,7 @@ static void *projection_backfill_service_thread(void *arg)
          * (cursor >= tip) or intentionally deferred worker is
          * healthy/quiescent. */
         bool behind = projection_backfill_is_behind(refolding, tail_folding,
+                                                    thermal_deferred,
                                                     projection_cursor,
                                                     chain_tip);
         bool cursor_frozen = projection_backfill_cursor_frozen(
@@ -656,7 +712,8 @@ static void *projection_backfill_service_thread(void *arg)
          * eligible; the first loop after either fold closes resumes backfill.
          * Mirrors the ownership guards in node_db_catchup_service.c and
          * utxo_mirror_sync_service.c. */
-        if (projection_backfill_defer_for_fold(svc, refolding, tail_folding))
+        if (projection_defer(svc, ndb, chain_tip, thermal_deferred,
+                             refolding, tail_folding))
             continue;
 
         if (projection_backfill_tip_ready(ndb, svc, chain_tip,
@@ -696,6 +753,9 @@ static void *projection_backfill_service_thread(void *arg)
             int repair_cap =
                 projection_backfill_repair_cap(projection_tip, chain_tip);
             bool hole_scan_ran = false;
+#ifdef ZCL_TESTING
+            atomic_fetch_add(&g_projection_test_scan, 1);
+#endif
             bool hole_scan_ok = boot_projection_hole_scan_if_due(
                 &hole_scan, ndb, repair_cap, prefix_expected, behind,
                 cursor_frozen, projection_cursor,
@@ -768,7 +828,10 @@ static void *projection_backfill_service_thread(void *arg)
                                 projection_tip + 1, chain_tip);
                     last_start_height = chain_tip;
                 }
-                if (!boot_start_catchup_service(svc, svc->datadir)) {
+#ifdef ZCL_TESTING
+                atomic_fetch_add(&g_projection_test_start, 1);
+#endif
+                if (!boot_start_catchup_service_origin(svc, svc->datadir, true)) {
                     fprintf(stderr,
                             "WARNING: projection backfill start failed "
                             "(projection=%d chain=%d)\n",

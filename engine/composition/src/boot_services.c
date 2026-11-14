@@ -397,15 +397,20 @@ bool boot_running(const struct boot_svc_ctx *svc)
 /* Catchup-job lifecycle policy moved to catchup_lifecycle_start/_join/_reap
  * (engine/services/src/catchup_lifecycle_service.c); these three stay as thin
  * boot_svc_ctx-to-job plumbing (same job, same timeouts). */
-bool boot_start_catchup_service(struct boot_svc_ctx *svc,
-                                const char *datadir)
+bool boot_start_catchup_service_origin(struct boot_svc_ctx *svc,
+                                       const char *datadir, bool background)
 {
     if (!svc)
         return false;
 
-    return catchup_lifecycle_start(&svc->catchup_job, boot_node_db(svc),
+    return catchup_lifecycle_start_origin(&svc->catchup_job, background, boot_node_db(svc),
                                    &svc->state->chain_active,
                                    svc->wallet, datadir);
+}
+
+bool boot_start_catchup_service(struct boot_svc_ctx *svc, const char *datadir)
+{
+    return boot_start_catchup_service_origin(svc, datadir, false);
 }
 
 void boot_join_catchup_service(struct boot_svc_ctx *svc)

@@ -6,7 +6,8 @@
  *   normal  today's behaviour, unchanged
  *   gentle  one pv_lookahead worker; the live reducer drain sleeps in
  *           proportion to the work each round took; history backfill
- *           queues no new below-tip bodies (in-flight ones finish)
+ *           queues no new below-tip bodies (in-flight ones finish);
+ *           background historical projection defers until normal
  *   pause   no pv_lookahead workers; the live reducer drain does nothing, so
  *           block fetch and validation stop. P2P, pings and held headers are
  *           untouched. History backfill
@@ -17,7 +18,7 @@
  * that run continuously (pv_lookahead workers and the reducer drain). A
  * missing, empty or unrecognised file means normal, so a node whose pace file
  * was never written behaves exactly as before. The pace never alters a
- * validation verdict: it only delays prefetch and drain work.
+ * validation verdict: it only delays prefetch, drain and projection work.
  *
  * node_pace_get is a relaxed atomic load and is safe on any thread. */
 

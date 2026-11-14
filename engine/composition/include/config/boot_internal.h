@@ -524,6 +524,7 @@ bool boot_onion_tor_start_early(const struct app_context *ctx);
  * engine/services/src/catchup_lifecycle_service.c (catchup_lifecycle_start/
  * _join/_reap) — it takes the job + inputs directly, not boot_svc_ctx. */
 bool boot_start_catchup_service(struct boot_svc_ctx *svc, const char *datadir);
+bool boot_start_catchup_service_origin(struct boot_svc_ctx *svc, const char *datadir, bool background);
 bool boot_reap_catchup_service(struct boot_svc_ctx *svc);
 void boot_join_catchup_service(struct boot_svc_ctx *svc);
 

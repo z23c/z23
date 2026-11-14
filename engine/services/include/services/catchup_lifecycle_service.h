@@ -39,6 +39,7 @@ struct node_db_sync_catchup_job; /* defined in controllers/sync_controller.h */
  * routing the expected "already running" case through
  * node_db_sync_catchup_job_start's LOG_FAIL path — matches the former
  * boot_start_catchup_service double-start guard). */
+bool catchup_lifecycle_start_origin(struct node_db_sync_catchup_job *job, bool background, struct node_db *ndb, const struct active_chain *chain, struct wallet *w, const char *datadir);
 bool catchup_lifecycle_start(struct node_db_sync_catchup_job *job,
                              struct node_db *ndb,
                              const struct active_chain *chain,

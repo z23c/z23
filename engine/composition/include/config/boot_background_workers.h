@@ -116,6 +116,10 @@ bool boot_start_hodl_history_service(struct boot_svc_ctx *svc);
 void boot_join_hodl_history_service(struct boot_svc_ctx *svc);
 
 /* Reducer projection backfill watcher (drives the catchup job forward). */
+#ifdef ZCL_TESTING
+void boot_projection_test_counts(unsigned *verify, unsigned *scan, unsigned *start);
+int64_t boot_projection_test_marker(void);
+#endif
 bool boot_start_projection_backfill_service(struct boot_svc_ctx *svc);
 void boot_join_projection_backfill_service(struct boot_svc_ctx *svc);
 

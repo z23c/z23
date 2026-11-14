@@ -51,6 +51,8 @@ struct node_db_sync_job_status {
 };
 
 struct node_db_sync_catchup_job {
+    bool background; /* Immutable while this job is running. */
+    bool deferred;
     pthread_t thread;
     bool started;
     atomic_bool finished;
@@ -394,6 +396,8 @@ bool node_db_sync_reset_tip(struct node_db *ndb);
  * Reads blocks from (sqlite_tip+1) to chain_tip and indexes them.
  * Also scans for wallet transactions if wallet is provided.
  * Called once at startup after chain is loaded. */
+int node_db_sync_catchup_origin(struct node_db *ndb, bool background, bool *deferred, const struct active_chain *chain, struct wallet *w, const char *datadir);
+
 int node_db_sync_catchup(struct node_db *ndb,
                          const struct active_chain *chain,
                          struct wallet *w,
@@ -424,6 +428,7 @@ void node_db_sync_get_job_status(struct node_db_sync_job_status *out);
 void node_db_sync_catchup_job_init(struct node_db_sync_catchup_job *job);
 /* datadir may be NULL when run against the caller-provided `ndb` handle
  * (for example in-memory tests); if present it is used for private fallback.*/
+bool node_db_sync_catchup_job_start_origin(struct node_db_sync_catchup_job *job, bool background, struct node_db *ndb, const struct active_chain *chain, struct wallet *w, const char *datadir);
 bool node_db_sync_catchup_job_start(struct node_db_sync_catchup_job *job,
                                     struct node_db *ndb,
                                     const struct active_chain *chain,

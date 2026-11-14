@@ -31,4 +31,7 @@ bool sync_db_turbo_scope_end(struct sync_db_turbo_scope *scope);
  * scope is left not entered. */
 void node_db_catchup_owed_defer(struct sync_db_turbo_scope *scope);
 
+enum catchup_restore_result { CATCHUP_RESTORE_OK, CATCHUP_RESTORE_BUSY, CATCHUP_RESTORE_FAILED };
+enum catchup_restore_result node_db_catchup_restore_owed_result(struct node_db *ndb);
+
 #endif /* ZCL_SERVICES_NODE_DB_CATCHUP_OWED_H */

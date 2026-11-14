@@ -63,6 +63,11 @@ struct zcl_result node_db_sapling_replay_test_flush_batch(struct node_db *db);
 #include "models/block.h"
 #include "models/explorer_index.h"
 #include "controllers/sync_controller.h"
+#include "controllers/wallet_helpers.h"
+#include "json/json.h"
+extern bool rpc_z_importkey(const struct json_value *params, bool help, struct json_value *result);
+extern void wallet_readiness_append_scan(struct json_value *result);
+extern void wallet_rescan_test_before_clear(void (*hook)(void *), void *context);
 #include "util/blocker.h"
 #include "util/util.h"
 #include "util/safe_alloc.h"
@@ -5992,6 +5997,7 @@ static int ndc_check_utxo_reemit_restart(void)
 
 struct ndc_pace_run {
     struct node_db *db; const struct active_chain *chain; struct wallet *wallet; const char *dir; int result;
+    bool background, deferred;
 };
 struct ndc_pace_fixture {
     char dir[256], refdir[256];
@@ -6002,7 +6008,9 @@ struct ndc_pace_fixture {
 static void *ndc_pace_walk(void *arg)
 {
     struct ndc_pace_run *run = arg;
-    run->result = node_db_catchup_service_run(run->db, run->chain, run->wallet, run->dir);
+    run->result = run->background
+        ? node_db_catchup_service_run_origin(run->db, true, &run->deferred, run->chain, run->wallet, run->dir)
+        : node_db_catchup_service_run(run->db, run->chain, run->wallet, run->dir);
     return NULL;
 }
 static struct wallet *ndc_pace_wallet(void)
@@ -6225,23 +6233,30 @@ static bool ndc_pause_sapling_equal(struct node_db *a, struct node_db *b,
     free(aw); free(bw); return ok;
 }
 
-static bool ndc_pause_sapling_walk(struct ndc_pace_fixture *p,
-                                    struct ndc_pause_sapling *f, bool seeded)
+static bool ndc_sapling_partial_result(const struct ndc_pace_run *run, int prefix, bool background)
 {
-    node_pace_set(NODE_PACE_NORMAL); node_db_catchup_lock_guard_test_set_batch_size(2);
-    node_db_catchup_lock_guard_test_set_height_delay_ms(150);
-    struct ndc_pace_run run = {.db = &p->db, .chain = &f->chain, .dir = f->dir, .result = -1};
-    pthread_t thread; bool started = seeded && pthread_create(&thread, NULL, ndc_pace_walk, &run) == 0;
-    for (int i = 0; started && i < 1000 && node_db_catchup_lock_guard_test_batch_commits() < 1; i++) platform_sleep_ms(2);
-    bool reached = node_db_catchup_lock_guard_test_batch_commits() >= 1;
-    node_pace_set(NODE_PACE_PAUSE);
-    if (started) pthread_join(thread, NULL);
-    int prefix = seeded ? node_db_sync_get_tip_height(&p->db) : -1;
-    return started && reached && run.result > 0 && prefix > 0 &&
+    return (!background || run->deferred) && run->result > 0 && prefix > 0 &&
            prefix < NDC_FIX_N && !node_db_catchup_service_active();
 }
 
-static int ndc_check_pace_sapling(bool hole)
+static bool ndc_pause_sapling_walk(struct ndc_pace_fixture *p,
+                                    struct ndc_pause_sapling *f, bool seeded, bool background)
+{
+    node_pace_set(NODE_PACE_NORMAL); node_db_catchup_lock_guard_test_set_batch_size(2);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(150);
+    if (background) node_db_catchup_lock_guard_test_hold_walk(true);
+    struct ndc_pace_run run = {.db = &p->db, .chain = &f->chain, .dir = f->dir, .result = -1, .background = background};
+    pthread_t thread; bool started = seeded && pthread_create(&thread, NULL, ndc_pace_walk, &run) == 0;
+    for (int i = 0; started && i < 1000 && node_db_catchup_lock_guard_test_batch_commits() < 1; i++) platform_sleep_ms(2);
+    bool reached = node_db_catchup_lock_guard_test_batch_commits() >= 1;
+    node_pace_set(background ? NODE_PACE_GENTLE : NODE_PACE_PAUSE);
+    if (background) node_db_catchup_lock_guard_test_hold_walk(false);
+    if (started) pthread_join(thread, NULL);
+    int prefix = seeded ? node_db_sync_get_tip_height(&p->db) : -1;
+    return started && reached && ndc_sapling_partial_result(&run, prefix, background);
+}
+
+static int ndc_check_pace_sapling(bool hole, bool background)
 {
     int failures = 0; struct ndc_pause_sapling f = {0};
     struct ndc_pace_fixture p = {0}; struct ndc_fix_ctx fake = {0};
@@ -6250,24 +6265,25 @@ static int ndc_check_pace_sapling(bool hole)
     bool seeded = opened && ndc_tip_note(&p.db, 0x71, &f.cm, 1) &&
                   ndc_tip_note(&p.ref, 0x71, &f.cm, 1);
     if (hole) f.slots[4].nStatus &= ~BLOCK_HAVE_DATA;
-    bool partial = ndc_pause_sapling_walk(&p, &f, seeded);
+    bool partial = ndc_pause_sapling_walk(&p, &f, seeded, background);
     node_pace_set(NODE_PACE_NORMAL); node_db_catchup_lock_guard_test_set_height_delay_ms(0);
-    int resumed = partial ? node_db_catchup_service_run(&p.db, &f.chain, NULL, f.dir) : -1;
+    bool deferred = false;
+    int resumed = partial ? node_db_catchup_service_run_origin(&p.db, background, &deferred, &f.chain, NULL, f.dir) : -1;
     int reference = seeded ? node_db_catchup_service_run(&p.ref, &f.chain, NULL, f.dir) : -1;
     NDC_CHECK("Sapling pause stops at a committed partial prefix", partial);
     NDC_CHECK("Sapling resume matches uninterrupted rows, receipts and witness",
-              partial && resumed > 0 && reference > 0 && ndc_pause_sapling_equal(&p.db, &p.ref, &f, hole));
+              partial && !deferred && resumed > 0 && reference > 0 && ndc_pause_sapling_equal(&p.db, &p.ref, &f, hole));
     ndc_pace_close(&p); active_chain_free(&f.chain); (void)test_rm_rf_recursive(f.dir);
     return failures;
 }
 
-static int ndc_check_pace_sapling_bounded(bool hole)
+static int ndc_check_pace_sapling_bounded(bool hole, bool background)
 {
     int failures = 0, status = 0;
     fflush(NULL);
     pid_t child = fork();
     if (child == 0) {
-        int result = ndc_check_pace_sapling(hole);
+        int result = ndc_check_pace_sapling(hole, background);
         fflush(NULL);
         _exit(result == 0 ? 0 : 1);
     }
@@ -6286,6 +6302,491 @@ static int ndc_check_pace_sapling_bounded(bool hole)
 }
 #endif
 
+
+#ifndef _WIN32
+/* The rollback authorizer changes pace at the retry boundary without adding a
+ * production hook. The recursive pass must keep its background origin. */
+static int ndc_background_rollback(void *arg, int action, const char *one,
+                                   const char *two, const char *db, const char *source)
+{
+    (void)two; (void)db; (void)source;
+    bool *changed = arg;
+    if (action == SQLITE_TRANSACTION && one && strcmp(one, "ROLLBACK") == 0) {
+        *changed = true;
+        node_pace_set(NODE_PACE_GENTLE);
+    }
+    return SQLITE_OK;
+}
+
+static int ndc_check_background_retry(struct ndc_fix_ctx *fx)
+{
+    int failures = 0; struct node_db db = {0}; char dir[256], path[512];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "background_retry");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool opened = fx->built && node_db_open(&db, path), changed = false, deferred = false;
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_NORMAL);
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_force_snapshot_failures(1);
+    bool armed = opened && sqlite3_set_authorizer(db.db, ndc_background_rollback, &changed) == SQLITE_OK;
+    int result = armed ? node_db_catchup_service_run_origin(&db, true, &deferred,
+                                                            &fx->ac, NULL, fx->dirF) : -1;
+    if (opened) sqlite3_set_authorizer(db.db, NULL, NULL);
+    NDC_CHECK("background origin survives BUSY_SNAPSHOT restart and defers",
+              armed && changed && deferred && result == 0 &&
+              node_db_catchup_lock_guard_test_snapshot_restarts() == 1 &&
+              node_db_sync_get_tip_height(&db) < 1 && !node_db_catchup_service_active());
+    node_pace_set(NODE_PACE_NORMAL); deferred = true;
+    result = opened ? node_db_catchup_service_run_origin(&db, true, &deferred,
+                                                         &fx->ac, NULL, fx->dirF) : -1;
+    NDC_CHECK("background retry resumes complete after pace normalizes",
+              result == NDC_FIX_N && !deferred && node_db_sync_get_tip_height(&db) == NDC_FIX_N);
+    node_db_catchup_lock_guard_test_reset(); node_pace_set(NODE_PACE_NORMAL);
+    node_pace_test_end_resume_grace(); if (opened) node_db_close(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
+static int ndc_background_deny_index(void *arg, int action, const char *one,
+                                     const char *two, const char *db, const char *source)
+{
+    (void)one; (void)two; (void)db; (void)source;
+    if (action != SQLITE_CREATE_INDEX) return SQLITE_OK;
+    *(bool *)arg = true;
+    return SQLITE_DENY;
+}
+
+static bool ndc_background_restore_failure(struct node_db *db, struct ndc_fix_ctx *fx)
+{
+    bool denied = false, deferred = true;
+    bool armed = sqlite3_set_authorizer(db->db, ndc_background_deny_index, &denied) == SQLITE_OK;
+    int result = armed ? node_db_catchup_service_run_origin(db, true, &deferred,
+                                      &fx->ac, NULL, fx->dirF) : 0;
+    if (armed) sqlite3_set_authorizer(db->db, NULL, NULL);
+    return armed && denied && result == -1 && !deferred;
+}
+
+static bool ndc_background_foreign_yield(struct node_db *db, struct ndc_fix_ctx *fx)
+{
+    bool deferred = false;
+    int result = node_db_catchup_service_run_origin(db, true, &deferred, &fx->ac, NULL, fx->dirF);
+    return result == 0 && !deferred && !sqlite3_get_autocommit(db->db) &&
+           node_db_synchronous_level(db) == 0;
+}
+
+static int ndc_check_background_owed(struct ndc_fix_ctx *fx)
+{
+    int failures = 0; struct node_db db = {0}; char dir[256], path[512];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "background_owed");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool opened = fx->built && node_db_open(&db, path), deferred = false;
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_NORMAL);
+    node_db_catchup_lock_guard_test_reset(); node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+    node_db_catchup_test_set_after_turbo_hook(ndc_race_foreign_begin);
+    bool held = opened && ndc_background_foreign_yield(&db, fx);
+    int result = 0;
+    NDC_CHECK("foreign writer preserves owed restore and is not thermal deferral", held);
+    node_pace_set(NODE_PACE_GENTLE); deferred = true;
+    result = held ? node_db_catchup_service_run_origin(&db, true, &deferred,
+                                                       &fx->ac, NULL, fx->dirF) : -1;
+    NDC_CHECK("foreign transaction remains open while restore is owed",
+              held && result == 0 && !deferred && !sqlite3_get_autocommit(db.db));
+    bool released = held && sqlite3_exec(db.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    node_pace_set(NODE_PACE_NORMAL);
+    NDC_CHECK("normal owed restore error fails and does not report deferral",
+              released && ndc_background_restore_failure(&db, fx));
+    result = released ? node_db_catchup_service_run_origin(&db, true, &deferred,
+                                                           &fx->ac, NULL, fx->dirF) : -1;
+    NDC_CHECK("normal retry restores turbo state before walking",
+              released && result == NDC_FIX_N && !deferred &&
+              node_db_synchronous_level(&db) == 1 &&
+              ndc_secondary_index_count(&db) == NDC_SECONDARY_INDEXES);
+    node_db_catchup_test_set_after_turbo_hook(NULL); node_db_catchup_lock_guard_test_reset();
+    node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
+    if (opened) node_db_close(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
+
+static int ndc_check_background_close_failure(struct ndc_fix_ctx *fx)
+{
+    int failures = 0; struct node_db db = {0}; char dir[256], path[512];
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "background_close");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool opened = fx->built && node_db_open(&db, path), denied = false, deferred = false;
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_NORMAL);
+    node_db_catchup_lock_guard_test_reset(); node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+    bool armed = opened && sqlite3_set_authorizer(db.db, ndc_background_deny_index, &denied) == SQLITE_OK;
+    int result = armed ? node_db_catchup_service_run_origin(&db, true, &deferred,
+                                      &fx->ac, NULL, fx->dirF) : 0;
+    if (armed) sqlite3_set_authorizer(db.db, NULL, NULL);
+    NDC_CHECK("failed turbo scope close is an error and not deferred",
+              armed && denied && result == -1 && !deferred);
+    node_pace_set(NODE_PACE_GENTLE); deferred = false;
+    result = opened ? node_db_catchup_service_run_origin(&db, true, &deferred,
+                                      &fx->ac, NULL, fx->dirF) : -1;
+    NDC_CHECK("gentle retry restores failed scope before deferral",
+              result == 0 && deferred && node_db_synchronous_level(&db) == 1 &&
+              ndc_secondary_index_count(&db) == NDC_SECONDARY_INDEXES);
+    node_db_catchup_lock_guard_test_reset(); node_pace_set(NODE_PACE_NORMAL);
+    node_pace_test_end_resume_grace(); if (opened) node_db_close(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
+
+static bool ndc_oldkey_genesis(struct ndc_replay_fixture *f)
+{
+    struct block b; block_init(&b); b.header.nVersion = 4;
+    b.vtx = zcl_calloc(1, sizeof(*b.vtx), "old key genesis tx");
+    if (!b.vtx) return false;
+    b.num_vtx = 1; transaction_init(b.vtx);
+    bool ok = transaction_alloc(b.vtx, 1, 1);
+    if (ok) { transaction_compute_hash(b.vtx); b.header.hashMerkleRoot = b.vtx->hash; }
+    struct disk_block_pos pos; disk_block_pos_init(&pos);
+    const unsigned char magic[4] = {0x24, 0xe9, 0x27, 0x64};
+    ok = ok && write_block_to_disk(&b, &pos, f->dir, magic);
+    if (ok) {
+        block_get_hash(&b, &f->hashes[0]);
+        struct block_index *slot = &f->slots[0]; block_index_init(slot);
+        slot->nHeight = 0; slot->nStatus = BLOCK_HAVE_DATA;
+        slot->nFile = pos.nFile; slot->nDataPos = pos.nPos;
+        slot->hashBlock = f->hashes[0]; slot->phashBlock = &slot->hashBlock;
+        ok = active_chain_install_tip_slot(&f->state.chain_active, slot);
+    }
+    block_free(&b); return ok;
+}
+
+static bool ndc_oldkey_found(const struct wallet *w, const struct uint256 *txid)
+{
+    for (size_t i = 0; i < w->num_sapling_notes; i++)
+        if (w->sapling_notes[i].used && uint256_eq(&w->sapling_notes[i].txid, txid)) return true;
+    return false;
+}
+
+static bool ndc_oldkey_rpc_mode(struct ndc_replay_fixture *f, struct wallet *w,
+                                struct wallet_sqlite *ws, bool no_chain, bool *scan_save_error)
+{
+    char key[512] = {0}; const struct chain_params *cp = chain_params_get();
+    bool encoded = sapling_encode_extended_spending_key(&f->wallet->sapling_keys.keys[0].xsk,
+                    cp->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY], key, sizeof(key));
+    struct json_value params, value, result;
+    json_init(&params); json_set_array(&params); json_init(&value); json_init(&result);
+    json_set_str(&value, key); json_push_back(&params, &value);
+    wallet_rpc_context_set_base(w, no_chain ? NULL : &f->state, f->dir, ws, NULL, NULL);
+    bool imported = encoded && rpc_z_importkey(&params, false, &result);
+    const char *message = json_get_str(&result);
+    if (scan_save_error) *scan_save_error = message && strstr(message, "Key imported, but scan state could not be saved") != NULL;
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    json_free(&params); json_free(&value); json_free(&result);
+    memory_cleanse(key, sizeof(key)); return imported;
+}
+static bool ndc_oldkey_rpc(struct ndc_replay_fixture *f, struct wallet *w, struct wallet_sqlite *ws)
+{
+    return ndc_oldkey_rpc_mode(f, w, ws, false, NULL);
+}
+
+struct ndc_oldkey_case {
+    struct ndc_replay_fixture f; struct wallet *imported;
+    struct node_db db; struct wallet_sqlite ws;
+};
+static bool ndc_oldkey_setup(struct ndc_oldkey_case *c)
+{
+    struct ndc_replay_fixture *f = &c->f;
+    c->imported = zcl_calloc(1, sizeof(*c->imported), "old key imported wallet");
+    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", "oldkey");
+    char blocks[320], dbpath[320]; snprintf(blocks, sizeof(blocks), "%s/blocks", f->dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", f->dir);
+    bool up = c->imported && mkdir(blocks, 0700) == 0 && node_db_open(&c->db, dbpath) &&
+              wallet_sqlite_open(&c->ws, c->db.db);
+    f->wallet = zcl_calloc(1, sizeof(*f->wallet), "old key source wallet");
+    if (f->wallet) wallet_init(f->wallet);
+    if (c->imported) wallet_init(c->imported);
+    main_state_init(&f->state); sapling_tree_init(&f->tree);
+    uint8_t seed[32] = {1}, d[11], pk[32];
+    return up && f->wallet && sapling_keystore_set_seed(&f->wallet->sapling_keys, seed) &&
+         sapling_keystore_new_address(&f->wallet->sapling_keys, d, pk) && ndc_oldkey_genesis(f) &&
+         ndc_replay_write_fixture_block(f, 1, d, pk) && ndc_replay_write_fixture_block(f, 2, d, pk) &&
+         wallet_readiness_initialize(c->imported, WALLET_READINESS_READY, false, 0);
+}
+static bool ndc_oldkey_coverage(struct ndc_oldkey_case *c, const struct wallet_rescan_report *r)
+{
+    return r->coverage_ok && r->blocks_scanned == 3 && r->blocks_in_range == 3 &&
+           wallet_scanned_through_height(c->imported) == 2;
+}
+static int ndc_oldkey_verify(struct ndc_oldkey_case *c, bool up)
+{
+    int failures = 0; struct ndc_replay_fixture *f = &c->f;
+    NDC_CHECK("historical encrypted note absent before old key import",
+              up && c->imported->sapling_keys.num_keys == 0 && !ndc_oldkey_found(c->imported, &f->note_txid));
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_GENTLE);
+    bool deferred = false; int before = up ? node_db_sync_get_tip_height(&c->db) : -1;
+    int result = up ? node_db_catchup_service_run_origin(&c->db, true, &deferred,
+                              &f->state.chain_active, c->imported, f->dir) : -1;
+    NDC_CHECK("background history is deferred before import",
+              up && result == 0 && deferred && before < 2 && node_db_sync_get_tip_height(&c->db) == before);
+    bool imported_ok = up && ndc_oldkey_rpc(f, c->imported, &c->ws);
+    NDC_CHECK("default old-key import rescans and discovers the historical encrypted note",
+              imported_ok && c->imported->sapling_keys.num_keys == 1 && ndc_oldkey_found(c->imported, &f->note_txid));
+    struct wallet_rescan_report report = {0};
+    if (imported_ok) (void)wallet_rescan_report(c->imported, &f->state.chain_active, 0, -1, f->dir, &report);
+    NDC_CHECK("historical rescan reads the complete range and reaches the tip",
+              imported_ok && ndc_oldkey_coverage(c, &report));
+    return failures;
+}
+static int ndc_check_oldkey_import(struct ndc_fix_ctx *unused)
+{
+    (void)unused; struct ndc_oldkey_case c = {0};
+    bool up = ndc_oldkey_setup(&c); int failures = ndc_oldkey_verify(&c, up);
+    node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
+    if (c.ws.open) wallet_sqlite_close(&c.ws);
+    if (c.db.open) node_db_close(&c.db);
+    main_state_free(&c.f.state);
+    if (c.imported) { wallet_free(c.imported); free(c.imported); }
+    if (c.f.wallet) { wallet_free(c.f.wallet); free(c.f.wallet); }
+    (void)test_rm_rf_recursive(c.f.dir); return failures;
+}
+
+
+static bool ndc_oldkey_reload(struct ndc_oldkey_case *c);
+static bool ndc_oldkey_marker(struct ndc_oldkey_case *c, bool pending);
+static bool ndc_oldkey_public_scan(struct ndc_oldkey_case *c, const char *status);
+static bool ndc_oldkey_recovered(struct ndc_oldkey_case *c, bool imported)
+{
+    struct wallet_rescan_report report = {0};
+    if (imported) (void)wallet_rescan_report(c->imported, &c->f.state.chain_active, 0, -1, c->f.dir, &report);
+    wallet_rpc_context_set_base(c->imported, &c->f.state, c->f.dir, &c->ws, NULL, NULL);
+    struct zcl_result flushed = wallet_flush_from_context(wallet_ctx());
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    return imported && ndc_oldkey_coverage(c, &report) &&
+           ndc_oldkey_found(c->imported, &c->f.note_txid) && flushed.ok &&
+           ndc_oldkey_reload(c) && ndc_oldkey_marker(c, false) &&
+           ndc_oldkey_public_scan(c, "complete");
+}
+static bool ndc_oldkey_reload(struct ndc_oldkey_case *c)
+{
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "old key reload wallet");
+    if (!w) return false;
+    wallet_init(w);
+    char path[320]; snprintf(path, sizeof(path), "%s/node.db", c->f.dir);
+    wallet_sqlite_close(&c->ws); node_db_close(&c->db);
+    bool ok = node_db_open(&c->db, path) && wallet_sqlite_open(&c->ws, c->db.db) &&
+              wallet_sqlite_read_sapling_keys(&c->ws, w) &&
+              sapling_keystore_find_by_ivk(&w->sapling_keys, c->f.wallet->sapling_keys.keys[0].ivk) != NULL;
+    wallet_free(w); free(w); return ok;
+}
+static bool ndc_oldkey_honest(int scanned)
+{
+    return scanned < 2;
+}
+static bool ndc_oldkey_public_scan(struct ndc_oldkey_case *c, const char *status)
+{
+    struct json_value out; json_init(&out); json_set_object(&out);
+    wallet_rpc_context_set_base(c->imported, &c->f.state, c->f.dir, &c->ws, NULL, NULL);
+    wallet_readiness_append_scan(&out);
+    const struct json_value *scan = json_get(&out, "scan");
+    const struct json_value *v = scan ? json_get(scan, "status") : NULL;
+    const char *s = v ? json_get_str(v) : NULL;
+    bool ok = s && strcmp(s, status) == 0;
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    json_free(&out); return ok;
+}
+static bool ndc_oldkey_marker(struct ndc_oldkey_case *c, bool pending)
+{
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "old key scan reload");
+    if (!w) return false;
+    wallet_init(w);
+    enum wallet_scan_state_status state = wallet_sqlite_read_scan_state_checked(&c->ws, w);
+    bool ok = state == WALLET_SCAN_STATE_OK && w->scan_retry.pending == pending;
+    if (pending) ok = ok && w->scan_retry.from == 0;
+    wallet_free(w); free(w); return ok;
+}
+
+static bool ndc_oldkey_pending_ok(struct ndc_oldkey_case *c)
+{
+    return c->imported->scan_retry.pending && ndc_oldkey_marker(c, true) &&
+           ndc_oldkey_public_scan(c, "incomplete");
+}
+static bool ndc_oldkey_retained(bool up, bool rpc, bool held, bool durable)
+{
+    return up && !rpc && held && durable;
+}
+static int ndc_oldkey_missing_verify(struct ndc_oldkey_case *cp, bool up)
+{
+    int failures = 0;
+    uint32_t saved = cp->f.slots[1].nStatus; cp->f.slots[1].nStatus &= ~BLOCK_HAVE_DATA;
+    node_pace_set_datadir(NULL); node_pace_set(NODE_PACE_GENTLE);
+    bool deferred = false;
+    int walk = up ? node_db_catchup_service_run_origin(&cp->db, true, &deferred,
+                         &cp->f.state.chain_active, cp->imported, cp->f.dir) : -1;
+    bool imported = up && ndc_oldkey_rpc(&cp->f, cp->imported, &cp->ws);
+    bool held = up && cp->imported->sapling_keys.num_keys == 1;
+    bool durable = held && ndc_oldkey_reload(cp);
+    int scanned = up ? wallet_scanned_through_height(cp->imported) : -1;
+    enum wallet_readiness_state ready = up ? wallet_readiness_get(cp->imported).state : WALLET_READINESS_UNKNOWN;
+    printf("old-key missing body: rpc=%d held=%d durable=%d deferred=%d scanned=%d readiness=%d marker=%d\n",
+           imported, held, durable, deferred, scanned, (int)ready, up && cp->imported->scan_retry.pending);
+    NDC_CHECK("incomplete import retains a durable key", ndc_oldkey_retained(up, imported, held, durable));
+    NDC_CHECK("missing historical note remains absent after incomplete default import rescan",
+              walk == 0 && deferred && !ndc_oldkey_found(cp->imported, &cp->f.note_txid));
+    NDC_CHECK("incomplete historical scan does not claim the tip", up && ndc_oldkey_honest(scanned));
+    NDC_CHECK("incomplete scan is durable and public",
+              up && ndc_oldkey_pending_ok(cp));
+    cp->f.slots[1].nStatus = saved;
+    NDC_CHECK("full rescan after body returns discovers the historical note",
+              up && ndc_oldkey_recovered(cp, true));
+    return failures;
+}
+static int ndc_check_oldkey_missing(struct ndc_fix_ctx *unused)
+{
+    (void)unused; struct ndc_oldkey_case c = {0};
+    bool up = ndc_oldkey_setup(&c); int failures = ndc_oldkey_missing_verify(&c, up);
+    node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
+    if (c.ws.open) wallet_sqlite_close(&c.ws);
+    if (c.db.open) node_db_close(&c.db);
+    main_state_free(&c.f.state);
+    if (c.imported) { wallet_free(c.imported); free(c.imported); }
+    if (c.f.wallet) { wallet_free(c.f.wallet); free(c.f.wallet); }
+    (void)test_rm_rf_recursive(c.f.dir); return failures;
+}
+
+struct ndc_oldkey_overlap {
+    struct ndc_oldkey_case *c; _Atomic bool entered, release;
+    struct wallet_rescan_report report;
+};
+static void ndc_oldkey_before_clear(void *arg)
+{
+    struct ndc_oldkey_overlap *o = arg;
+    atomic_store(&o->entered, true);
+    while (!atomic_load(&o->release)) platform_sleep_ms(2);
+}
+static void *ndc_oldkey_old_scan(void *arg)
+{
+    struct ndc_oldkey_overlap *o = arg;
+    (void)wallet_rescan_report(o->c->imported, &o->c->f.state.chain_active,
+                               0, -1, o->c->f.dir, &o->report);
+    return NULL;
+}
+static bool ndc_oldkey_other_key(struct wallet *w)
+{
+    uint8_t seed[32] = {9}, d[11], pk[32];
+    return sapling_keystore_set_seed(&w->sapling_keys, seed) &&
+           sapling_keystore_new_address(&w->sapling_keys, d, pk);
+}
+static bool ndc_oldkey_overlap_preserved(struct ndc_oldkey_overlap *o)
+{
+    struct ndc_oldkey_case *c = o->c;
+    return o->report.coverage_ok && o->report.shielded_txs_unscanned == 0 &&
+        !ndc_oldkey_found(c->imported, &c->f.note_txid) && c->imported->scan_retry.pending &&
+        ndc_oldkey_marker(c, true) && wallet_scanned_through_height(c->imported) < 2 &&
+        ndc_oldkey_public_scan(c, "incomplete");
+}
+static bool ndc_oldkey_wait_entered(struct ndc_oldkey_overlap *o, bool started)
+{
+    int64_t deadline = platform_time_monotonic_ms() + 5000;
+    while (started && !atomic_load(&o->entered) && platform_time_monotonic_ms() < deadline) platform_sleep_ms(2);
+    return atomic_load(&o->entered);
+}
+static int ndc_oldkey_overlap_verify(struct ndc_oldkey_case *c, bool up)
+{
+    int failures = 0; struct ndc_oldkey_overlap o = {.c = c};
+    bool seeded = up && ndc_oldkey_other_key(c->imported) &&
+                  !ndc_oldkey_found(c->imported, &c->f.note_txid);
+    wallet_rescan_test_before_clear(ndc_oldkey_before_clear, &o);
+    pthread_t thread; bool started = seeded && pthread_create(&thread, NULL, ndc_oldkey_old_scan, &o) == 0;
+    bool entered = ndc_oldkey_wait_entered(&o, started);
+    bool rpc = entered && ndc_oldkey_rpc_mode(&c->f, c->imported, &c->ws, true, NULL);
+    bool held = entered && sapling_keystore_find_by_ivk(&c->imported->sapling_keys,
+                                c->f.wallet->sapling_keys.keys[0].ivk) != NULL;
+    bool pending = held && c->imported->scan_retry.pending && ndc_oldkey_marker(c, true);
+    atomic_store(&o.release, true);
+    if (started) pthread_join(thread, NULL);
+    wallet_rescan_test_before_clear(NULL, NULL);
+    NDC_CHECK("older scan pauses before clear and default import leaves a pending key",
+              entered && !rpc && held && pending);
+    NDC_CHECK("older scan cannot clear pending history after import",
+              entered && ndc_oldkey_overlap_preserved(&o));
+    NDC_CHECK("later full scan finds the historical note and clears the marker",
+              held && ndc_oldkey_recovered(c, true));
+    return failures;
+}
+static int ndc_check_oldkey_overlap(struct ndc_fix_ctx *unused)
+{
+    (void)unused; struct ndc_oldkey_case c = {0};
+    bool up = ndc_oldkey_setup(&c); int failures = ndc_oldkey_overlap_verify(&c, up);
+    if (c.ws.open) wallet_sqlite_close(&c.ws);
+    if (c.db.open) node_db_close(&c.db);
+    main_state_free(&c.f.state);
+    if (c.imported) { wallet_free(c.imported); free(c.imported); }
+    if (c.f.wallet) { wallet_free(c.f.wallet); free(c.f.wallet); }
+    (void)test_rm_rf_recursive(c.f.dir); return failures;
+}
+
+
+struct ndc_oldkey_flush_fault { struct node_db *db; bool installed, fired; };
+static void ndc_oldkey_fault_sql(sqlite3_context *ctx, int argc, sqlite3_value **argv)
+{
+    (void)argc; (void)argv;
+    struct ndc_oldkey_flush_fault *f = sqlite3_user_data(ctx);
+    f->fired = true; sqlite3_result_error(ctx, "injected", -1);
+}
+static void ndc_oldkey_fail_marker_delete(void *arg)
+{
+    struct ndc_oldkey_flush_fault *f = arg;
+    const char *sql = "CREATE TRIGGER ndc_scan_delete_fail BEFORE DELETE ON node_state "
+        "WHEN OLD.key=\x27wallet_scan_incomplete\x27 BEGIN SELECT ndc_scan_fault(); END";
+    f->installed = sqlite3_create_function(f->db->db, "ndc_scan_fault", 0, SQLITE_UTF8 | SQLITE_INNOCUOUS,
+                          f, ndc_oldkey_fault_sql, NULL, NULL) == SQLITE_OK &&
+                   sqlite3_exec(f->db->db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+static bool ndc_oldkey_fault_observed(struct ndc_oldkey_flush_fault *f, bool rpc, bool scan_error)
+{
+    return f->installed && f->fired && scan_error && !rpc;
+}
+static int ndc_oldkey_flush_verify(struct ndc_oldkey_case *c, bool up)
+{
+    int failures = 0; struct ndc_oldkey_flush_fault fault = {.db = &c->db};
+    wallet_rescan_test_before_clear(ndc_oldkey_fail_marker_delete, &fault);
+    bool scan_error = false;
+    bool rpc = up && ndc_oldkey_rpc_mode(&c->f, c->imported, &c->ws, false, &scan_error);
+    wallet_rescan_test_before_clear(NULL, NULL);
+    bool held = up && c->imported->sapling_keys.num_keys == 1;
+    bool pending = held && c->imported->scan_retry.pending;
+    bool cleared = fault.installed && sqlite3_exec(c->db.db, "DROP TRIGGER ndc_scan_delete_fail", NULL, NULL, NULL) == SQLITE_OK;
+    bool durable = held && cleared && ndc_oldkey_reload(c);
+    NDC_CHECK("postscan flush failure returns error with key and pending state intact",
+              up && ndc_oldkey_fault_observed(&fault, rpc, scan_error) && held && pending && durable && ndc_oldkey_marker(c, true));
+    NDC_CHECK("later full scan and flush clear the durable marker",
+              durable && ndc_oldkey_recovered(c, true));
+    return failures;
+}
+static int ndc_check_oldkey_flush_failure(struct ndc_fix_ctx *unused)
+{
+    (void)unused; struct ndc_oldkey_case c = {0};
+    bool up = ndc_oldkey_setup(&c); int failures = ndc_oldkey_flush_verify(&c, up);
+    if (c.ws.open) wallet_sqlite_close(&c.ws);
+    if (c.db.open) node_db_close(&c.db);
+    main_state_free(&c.f.state);
+    if (c.imported) { wallet_free(c.imported); free(c.imported); }
+    if (c.f.wallet) { wallet_free(c.f.wallet); free(c.f.wallet); }
+    (void)test_rm_rf_recursive(c.f.dir); return failures;
+}
+
+
+static int ndc_background_case_bounded(struct ndc_fix_ctx *fx, int (*fn)(struct ndc_fix_ctx *))
+{
+    int failures = 0, status = 0; fflush(NULL); pid_t child = fork();
+    if (child == 0) { int result = fn(fx); fflush(NULL); _exit(result == 0 ? 0 : 1); }
+    bool finished = false; int64_t deadline = platform_time_monotonic_ms() + 30000;
+    while (child > 0 && platform_time_monotonic_ms() < deadline) {
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) { finished = true; break; }
+        if (got < 0 && errno != EINTR) break;
+        platform_sleep_ms(10);
+    }
+    if (child > 0 && !finished) { kill(child, SIGKILL); (void)waitpid(child, &status, 0); }
+    NDC_CHECK("background error case completes within 30 seconds",
+              child > 0 && finished && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    return failures;
+}
+#endif
 
 int test_node_db_catchup_service(void)
 {
@@ -6325,9 +6826,20 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_service_conflict_rollback(&fx);
     failures += ndc_check_pace_pause(&fx);
     failures += ndc_check_pace_sparse(&fx);
+#ifndef _WIN32
+    failures += ndc_background_case_bounded(&fx, ndc_check_background_retry);
+    failures += ndc_background_case_bounded(&fx, ndc_check_oldkey_import);
+    failures += ndc_background_case_bounded(&fx, ndc_check_oldkey_missing);
+    failures += ndc_background_case_bounded(&fx, ndc_check_oldkey_overlap);
+    failures += ndc_background_case_bounded(&fx, ndc_check_oldkey_flush_failure);
+    failures += ndc_background_case_bounded(&fx, ndc_check_background_owed);
+    failures += ndc_background_case_bounded(&fx, ndc_check_background_close_failure);
+    failures += ndc_check_pace_sapling_bounded(false, true);
+    failures += ndc_check_pace_sapling_bounded(true, true);
+#endif
     #ifndef _WIN32
-    failures += ndc_check_pace_sapling_bounded(false);
-    failures += ndc_check_pace_sapling_bounded(true);
+    failures += ndc_check_pace_sapling_bounded(false, false);
+    failures += ndc_check_pace_sapling_bounded(true, false);
 #endif
     failures += ndc_check_batch_cap_two(&fx);
     failures += ndc_check_default_cap_one_commit(&fx);

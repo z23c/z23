@@ -62,19 +62,27 @@ static int catchup_lifecycle_test_start_guard(void)
     node_db_sync_catchup_job_init(&job);
 
     bool started = db_ok &&
-        catchup_lifecycle_start(&job, &ndb, &ac, NULL, NULL);
+        catchup_lifecycle_start_origin(&job, true, &ndb, &ac, NULL, NULL);
+    bool background_set = started && job.background;
     /* Second start while the first is still (at least momentarily)
      * marked started must fail closed without disturbing the job —
      * mirrors the former boot_start_catchup_service guard that
      * pre-empted node_db_sync_catchup_job_start's LOG_FAIL path. */
     bool double_start_rejected = started &&
         !catchup_lifecycle_start(&job, &ndb, &ac, NULL, NULL);
+    bool rejected_preserved_role = job.background;
 
     catchup_lifecycle_join(&job, 5);
     bool joined_clears_started = !job.started;
+    bool legacy_started = catchup_lifecycle_start(&job, &ndb, &ac, NULL, NULL);
+    bool legacy_boot = legacy_started && !job.background;
+    bool deferred = true;
+    int invalid = node_db_sync_catchup_origin(NULL, true, &deferred, NULL, NULL, NULL);
+    bool invalid_cleared = invalid < 0 && !deferred;
+    catchup_lifecycle_join(&job, 5);
 
-    bool ok = db_ok && started && double_start_rejected &&
-              joined_clears_started;
+    bool ok = db_ok && started && background_set && double_start_rejected &&
+              joined_clears_started && legacy_boot && rejected_preserved_role && invalid_cleared;
 
     if (ndb.open)
         node_db_close(&ndb);

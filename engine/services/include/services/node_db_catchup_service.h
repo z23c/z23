@@ -204,6 +204,8 @@ void node_db_catchup_test_after_turbo(struct node_db *ndb);
  * Returns 0 without walking when the shared connection is inside another
  * writer's transaction; the next trigger retries from the durable cursor.
  * Logs every failure path internally. */
+int node_db_catchup_service_run_origin(struct node_db *ndb, bool background, bool *deferred, const struct active_chain *chain, struct wallet *w, const char *datadir);
+
 int node_db_catchup_service_run(struct node_db *ndb,
                                 const struct active_chain *chain,
                                 struct wallet *w,

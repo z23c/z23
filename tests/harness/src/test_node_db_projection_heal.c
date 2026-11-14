@@ -6,6 +6,19 @@
 
 #include "test/test_core.h"
 #include "config/boot_projection_hole_scan.h"
+#include "config/boot_background_workers.h"
+#include "config/boot_internal.h"
+#include "config/db_service.h"
+#include "jobs/node_pace.h"
+#include "services/node_db_catchup_owed.h"
+#include "platform/time_compat.h"
+#include "util/util.h"
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <errno.h>
+#endif
 #include "controllers/sync_controller.h"
 #include "models/block.h"
 #include "models/database.h"
@@ -366,9 +379,220 @@ static int ph_check_lean_replay_keeps_roots(void)
     return failures;
 }
 
+#ifndef _WIN32
+struct ph_writer_barrier { _Atomic bool entered; _Atomic bool release; };
+struct ph_writer_job { struct ph_writer_barrier *barrier; };
+
+static bool ph_block_writer(struct node_db *ndb, void *ctx)
+{
+    (void)ndb;
+    struct ph_writer_job *job = ctx;
+    struct ph_writer_barrier *b = job->barrier;
+    atomic_store(&b->entered, true);
+    while (!atomic_load(&b->release)) platform_sleep_ms(5);
+    return true;
+}
+
+static bool ph_index_present(struct node_db *ndb)
+{
+    sqlite3_stmt *s = NULL;
+    bool present = sqlite3_prepare_v2(ndb->db, "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_utxo_address'", -1, &s, NULL) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s);
+    return present;
+}
+
+static int ph_synchronous(struct node_db *ndb)
+{
+    sqlite3_stmt *s = NULL;
+    int mode = -1;
+    if (sqlite3_prepare_v2(ndb->db, "PRAGMA synchronous", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW) mode = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return mode;
+}
+
+struct ph_thermal {
+    struct ph_chain_fx x;
+    struct db_service ds;
+    struct main_state *ms;
+    struct boot_svc_ctx *svc;
+    _Atomic bool running;
+    enum node_pace saved;
+    char saved_datadir[4096], blocks[512];
+    bool up, ms_initialized, db_started, owed, index_before, index_dropped;
+    int normal_sync;
+    struct ph_writer_barrier barrier;
+    bool queued;
+    unsigned v0, s0, j0, v, s, j;
+    int64_t first_marker;
+};
+
+static bool ph_thermal_bodies(struct ph_thermal *t)
+{
+    ph_chain_open(&t->x, 0, PH_CHAIN_N);
+    snprintf(t->blocks, sizeof(t->blocks), "%s/blocks", t->x.dir);
+    bool ok = mkdir(t->blocks, 0755) == 0;
+    for (int h = 1; h < PH_CHAIN_N && ok; h++) {
+        struct disk_block_pos pos = {0};
+        ok = ph_write_block(t->x.dir, (uint32_t)h, &pos, &t->x.hash[h]);
+        t->x.slot[h].nFile = pos.nFile;
+        t->x.slot[h].nDataPos = pos.nPos;
+    }
+    return ok && node_db_sync_set_tip(&t->x.ndb, t->x.hash[1].data, 1);
+}
+
+static void ph_thermal_setup(struct ph_thermal *t)
+{
+    t->ms = calloc(1, sizeof(*t->ms)); // raw-alloc-ok:test-fixture
+    t->svc = calloc(1, sizeof(*t->svc)); // raw-alloc-ok:test-fixture
+    atomic_store(&t->running, true);
+    t->saved = node_pace_get();
+    GetDataDir(false, t->saved_datadir, sizeof(t->saved_datadir));
+    bool bodies = ph_thermal_bodies(t);
+    db_service_init(&t->ds);
+    t->up = t->ms && t->svc && t->x.opened && bodies && SetDataDir(t->x.dir);
+    if (!t->up) return;
+    main_state_init(t->ms);
+    t->ms_initialized = true;
+    for (int h = 1; h < PH_CHAIN_N && t->up; h++)
+        t->up = active_chain_install_tip_slot(&t->ms->chain_active, &t->x.slot[h]);
+    t->up = t->up && db_service_attach(&t->ds, &t->x.ndb) &&
+            db_service_start_test_worker(&t->ds);
+    t->db_started = t->up;
+}
+
+static void ph_thermal_queue(struct ph_thermal *t)
+{
+    t->normal_sync = t->up ? ph_synchronous(&t->x.ndb) : -1;
+    t->index_before = t->up && ph_index_present(&t->x.ndb);
+    struct sync_db_turbo_scope scope = {0};
+    t->owed = t->up && sync_db_turbo_scope_begin(&scope, &t->x.ndb, true);
+    t->index_dropped = t->owed && !ph_index_present(&t->x.ndb);
+    if (t->owed) node_db_catchup_owed_defer(&scope);
+    struct ph_writer_job *writer = t->owed ? malloc(sizeof(*writer)) : NULL; // raw-alloc-ok:test-fixture
+    if (writer) writer->barrier = &t->barrier;
+    t->queued = writer && db_service_enqueue_write(&t->ds, ph_block_writer, writer, free);
+    for (int i = 0; t->queued && i < 100 && !atomic_load(&t->barrier.entered); i++)
+        platform_sleep_ms(10);
+}
+
+static int ph_thermal_start(struct ph_thermal *t)
+{
+    int failures = 0;
+    boot_projection_test_counts(&t->v0, &t->s0, &t->j0);
+    node_pace_set(NODE_PACE_GENTLE);
+    if (t->up) {
+        t->svc->state = t->ms; t->svc->running = &t->running;
+        t->svc->datadir = t->x.dir; t->svc->runtime.db_service = &t->ds;
+        t->up = boot_start_projection_backfill_service(t->svc);
+    }
+    struct db_service_status status = {0};
+    for (int i = 0; t->up && i < 100; i++) {
+        db_service_get_status(&t->ds, &status);
+        if (status.queue_depth > 0) break;
+        platform_sleep_ms(10);
+    }
+    PH_CHECK("gentle queues owed restore behind writer",
+             t->queued && atomic_load(&t->barrier.entered) && status.queue_depth > 0);
+    atomic_store(&t->barrier.release, true);
+    return failures;
+}
+
+static int ph_thermal_check_gentle(struct ph_thermal *t)
+{
+    int failures = 0;
+    for (int i = 0; t->up && i < 100; i++) {
+        boot_projection_test_counts(&t->v, &t->s, &t->j);
+        if (t->v > t->v0 && t->first_marker == 0)
+            t->first_marker = boot_projection_test_marker();
+        if (t->v >= t->v0 + 2) break;
+        platform_sleep_ms(100);
+    }
+    PH_CHECK("gentle worker preserves cursor and skips history",
+             t->up && t->v >= t->v0 + 2 && t->s == t->s0 && t->j == t->j0 &&
+             node_db_sync_get_tip_height(&t->x.ndb) == 1);
+    PH_CHECK("gentle quiescent progress advances",
+             t->first_marker != 0 && boot_projection_test_marker() > t->first_marker);
+    PH_CHECK("gentle restores database synchronization",
+             t->normal_sync >= 0 && ph_synchronous(&t->x.ndb) == t->normal_sync);
+    PH_CHECK("gentle restores dropped index",
+             t->index_before && t->index_dropped && ph_index_present(&t->x.ndb));
+    return failures;
+}
+
+static int ph_thermal_check_normal(struct ph_thermal *t)
+{
+    int failures = 0;
+    node_pace_set(NODE_PACE_NORMAL);
+    for (int i = 0; t->up && i < 100; i++) {
+        boot_projection_test_counts(&t->v, &t->s, &t->j);
+        if (t->j > t->j0 && node_db_sync_get_tip_height(&t->x.ndb) >= 2) break;
+        platform_sleep_ms(100);
+    }
+    PH_CHECK("normal worker advances durable cursor",
+             t->up && t->s > t->s0 && t->j > t->j0 &&
+             node_db_sync_get_tip_height(&t->x.ndb) >= 2);
+    return failures;
+}
+
+static void ph_thermal_cleanup(struct ph_thermal *t)
+{
+    if (t->svc && t->svc->projection_backfill_thread_started)
+        boot_join_projection_backfill_service(t->svc);
+    if (t->svc) boot_join_catchup_service(t->svc);
+    if (t->db_started) db_service_stop(&t->ds);
+    if (t->owed) (void)node_db_catchup_service_restore_owed(&t->x.ndb);
+    if (t->ms_initialized) main_state_free(t->ms);
+    free(t->ms); free(t->svc);
+    (void)SetDataDir(t->saved_datadir);
+    char blk[512];
+    snprintf(blk, sizeof(blk), "%s/blk00000.dat", t->blocks);
+    (void)unlink(blk); (void)rmdir(t->blocks);
+    ph_chain_close(&t->x); node_pace_set(t->saved);
+}
+
+static int ph_check_thermal_worker_inner(void)
+{
+    struct ph_thermal t = {0};
+    ph_thermal_setup(&t);
+    ph_thermal_queue(&t);
+    int failures = ph_thermal_start(&t);
+    failures += ph_thermal_check_gentle(&t);
+    failures += ph_thermal_check_normal(&t);
+    ph_thermal_cleanup(&t);
+    return failures;
+}
+
+static int ph_check_thermal_worker(void)
+{
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) {
+        int failures = ph_check_thermal_worker_inner();
+        fflush(NULL);
+        _exit(failures ? 1 : 0);
+    }
+    if (child < 0) return 1;
+    int status = 0;
+    int64_t deadline = platform_time_monotonic_ms() + 30000;
+    while (platform_time_monotonic_ms() < deadline) {
+        pid_t r = waitpid(child, &status, WNOHANG);
+        if (r == child) return !(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        if (r < 0 && errno != EINTR) break;
+        platform_sleep_ms(100);
+    }
+    (void)kill(child, SIGKILL);
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    return 1;
+}
+#endif
+
 int test_node_db_projection_heal(void)
 {
     int failures = 0;
+#ifndef _WIN32
+    failures += ph_check_thermal_worker();
+#endif
     failures += ph_check_reorg_replaces_projected_tip();
     failures += ph_check_reorg_no_spurious_rewind();
     failures += ph_check_finalize_cursor();

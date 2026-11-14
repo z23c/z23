@@ -36,6 +36,8 @@ struct catchup_args {
 };
 
 struct catchup_lane_ctx {
+    bool background;
+    bool deferred;
     const struct active_chain *chain;
     struct wallet *w;
     const char *datadir;
@@ -91,7 +93,7 @@ static bool node_db_sync_catchup_lane_write(struct node_db *ndb, void *ctx)
             atomic_fetch_add(&g_catchup_test_worker_lane_calls, 1);
     }
 #endif
-    catchup->result = node_db_sync_catchup(ndb, catchup->chain,
+    catchup->result = node_db_sync_catchup_origin(ndb, catchup->background, &catchup->deferred, catchup->chain,
                                            catchup->w, catchup->datadir);
     return catchup->result >= 0;
 }
@@ -115,6 +117,7 @@ static void *node_db_sync_catchup_job_thread(void *arg)
     dbsvc = catchup_job_db_service_for(job->args.ndb);
     if (dbsvc) {
         struct catchup_lane_ctx ctx = {
+            .background = job->background,
             .chain = job->args.chain,
             .w = job->args.w,
             .datadir = job->args.datadir,
@@ -125,10 +128,12 @@ static void *node_db_sync_catchup_job_thread(void *arg)
                                   &ctx) && ctx.result >= 0) {
             LOG_WARN("sync", "catchup write lane failed without detail");
             ctx.result = -1;
+            ctx.deferred = false;
         }
         job->result = ctx.result;
+        job->deferred = ctx.deferred;
     } else {
-        job->result = node_db_sync_catchup(job->args.ndb, job->args.chain,
+        job->result = node_db_sync_catchup_origin(job->args.ndb, job->background, &job->deferred, job->args.chain,
                                            job->args.w, job->args.datadir);
     }
 
@@ -145,7 +150,7 @@ void node_db_sync_catchup_job_init(struct node_db_sync_catchup_job *job)
     atomic_store(&job->finished, false);
 }
 
-bool node_db_sync_catchup_job_start(struct node_db_sync_catchup_job *job,
+bool node_db_sync_catchup_job_start_origin(struct node_db_sync_catchup_job *job, bool background,
                                     struct node_db *ndb,
                                     const struct active_chain *chain,
                                     struct wallet *w,
@@ -177,6 +182,8 @@ bool node_db_sync_catchup_job_start(struct node_db_sync_catchup_job *job,
         }
         job->args.datadir = job->args.datadir_storage;
     }
+    job->background = background;
+    job->deferred = false;
     job->result = -1;
     atomic_store(&job->finished, false);
     job->started = true;
@@ -188,6 +195,11 @@ bool node_db_sync_catchup_job_start(struct node_db_sync_catchup_job *job,
         LOG_FAIL("sync", "catchup_job_start: thread_registry_spawn failed");
     }
     return true;
+}
+
+bool node_db_sync_catchup_job_start(struct node_db_sync_catchup_job *job, struct node_db *ndb, const struct active_chain *chain, struct wallet *w, const char *datadir)
+{
+    return node_db_sync_catchup_job_start_origin(job, false, ndb, chain, w, datadir);
 }
 
 bool node_db_sync_catchup_job_join(struct node_db_sync_catchup_job *job,
