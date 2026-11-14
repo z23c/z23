@@ -39,13 +39,14 @@ See `tools/command/app_installed_source_resolve.c` and
 
 1. Install the verified release into a fresh sender profile. Open the installed
    app and record the original visible state. In My Apps, use **Change with your
-   AI** and copy its setup. Confirm the copied command and arguments refer to the
+   AI** and copy its setup. If a draft is waiting, choose **Change**, then
+   **Change with your AI**. Confirm the copied command and arguments refer to the
    installed runtime and this profile.
 2. Use the assistant's actual MCP requests to adopt the app. Review native
    consent, build and preview, then explicitly Keep. Read the source through
    MCP; plan and confirm a small visible edit using the returned revision,
    source version, head and blob identities. Save the requests and responses.
-3. In My Apps select the kept copy, choose **Change with your AI**, then
+3. In My Apps select the kept copy, choose **Change**, then
    **Review unkept changes**. Verify the displayed edited version, build and
    preview it, and explicitly Keep. Save the Keep and selection receipts.
 4. Share that kept version as a signed `.z23share` file. Save the share receipt
@@ -67,6 +68,8 @@ version ID: compare each Keep with its own selection and compare shared content
 and image across profiles. A screenshot supports the receipts and hashes; it
 is not a substitute for them. Do not claim the original working directory was
 modified unless separately demonstrated.
+
+<!-- claim: symbol-present al_change_choice tools/command/native_app_library_command.c # saved draft uses Change; no draft uses Change with your AI -->
 
 ## Evidence and failure disposition
 
