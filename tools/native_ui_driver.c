@@ -14,7 +14,7 @@
 
 /* The X server can destroy a window between enumeration and inspection.
  * Suppress only BadWindow for the exact in-flight discovery request. */
-enum { UI_X11_QUERY_TREE = 15, UI_X11_GET_PROPERTY = 20 };
+enum { UI_X11_GET_ATTRIBUTES = 3, UI_X11_QUERY_TREE = 15, UI_X11_GET_PROPERTY = 20 };
 static struct {
     Display *display;
     Window window;
@@ -153,11 +153,13 @@ static bool send_key(Display *display, Window root, Window window,
 /* This standalone driver is single-threaded. Scope the Xlib error hook to
  * one exact GetImage request, draining other requests before installing it.
  * Mapping/resize can change after GetWindowAttributes; only that request's
- * BadMatch is a retryable missing image. All unrelated errors retain policy. */
+ * BadMatch or a destroyed drawable is a retryable missing image. All unrelated
+ * errors retain policy. */
 /* X11 core protocol request opcode; keep the driver on vendored Xlib headers. */
 enum { UI_X11_GET_IMAGE = 73 };
 static struct {
     Display *display;
+    Window window;
     unsigned long serial;
     XErrorHandler previous;
     bool mismatch;
@@ -167,7 +169,9 @@ static int capture_error(Display *display, XErrorEvent *error)
 {
     if (display == capture_request.display &&
         error->serial == capture_request.serial &&
-        error->request_code == UI_X11_GET_IMAGE && error->error_code == BadMatch) {
+        error->request_code == UI_X11_GET_IMAGE &&
+        (error->error_code == BadMatch ||
+         (error->error_code == BadDrawable && error->resourceid == capture_request.window))) {
         capture_request.mismatch = true;
         return 0;
     }
@@ -183,6 +187,7 @@ static XImage *capture_drawable(Display *display, Window window,
 {
     (void)XSync(display, False);
     capture_request.display = display;
+    capture_request.window = window;
     capture_request.serial = NextRequest(display);
     capture_request.mismatch = false;
     capture_request.previous = XSetErrorHandler(capture_error);
@@ -202,8 +207,11 @@ static XImage *capture_drawable(Display *display, Window window,
 static XImage *capture_window(Display *display, Window window)
 {
     XWindowAttributes attributes;
-    if (window == None ||
-        !XGetWindowAttributes(display, window, &attributes) ||
+    if (window == None) return NULL;
+    discovery_begin(display, window, UI_X11_GET_ATTRIBUTES);
+    Status found = XGetWindowAttributes(display, window, &attributes);
+    bool current = discovery_end(display);
+    if (!found || !current ||
         attributes.class != InputOutput || attributes.map_state != IsViewable ||
         attributes.width <= 0 || attributes.height <= 0)
         return NULL;

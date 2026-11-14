@@ -5,6 +5,8 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <stdbool.h>
+#include <errno.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +14,8 @@
 #include <unistd.h>
 
 enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE,
-    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS, NUR_REPLACED, NUR_NOT_REPLACED };
+    NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS, NUR_REPLACED, NUR_NOT_REPLACED,
+    NUR_DESTROY_ATTR, NUR_DESTROY_IMAGE, NUR_BAD_ATTR };
 static struct {
     enum nur_mode mode;
     Display *owner;
@@ -64,6 +67,10 @@ static Status nur_send(Display *display, Window window, Bool propagate,
     Status result = XSendEvent(display, window, propagate, mask, event);
     (void)XSync(display, False);
     nur_events();
+    if (nur.mode == NUR_DESTROY_ATTR && event->type == KeyRelease) {
+        XDestroyWindow(nur.owner, nur.window); (void)XSync(nur.owner, False);
+        nur.window = None; nur.injected = true;
+    }
     if (nur.mode == NUR_REPLACED && event->type == KeyRelease) {
         char *name = NULL;
         if (XFetchName(nur.owner, nur.window, &name) && name) {
@@ -91,6 +98,10 @@ static XImage *nur_image(Display *display, Drawable drawable, int x, int y,
         XUnmapWindow(nur.owner, nur.window);
         (void)XSync(nur.owner, False);
     }
+    if (nur.mode == NUR_DESTROY_IMAGE && nur.images == 2) {
+        XDestroyWindow(nur.owner, nur.window); (void)XSync(nur.owner, False);
+        nur.window = None; nur.injected = true;
+    }
     if (nur.mode == NUR_UNEXPECTED) {
         nur.injected = true;
         drawable = None; /* Real server BadDrawable, not the retriable BadMatch. */
@@ -102,6 +113,14 @@ static XImage *nur_image(Display *display, Drawable drawable, int x, int y,
         (void)XSync(nur.owner, False);
     }
     return image;
+}
+static Status nur_attributes(Display *display, Window window, XWindowAttributes *attributes)
+{
+    if (nur.mode == NUR_BAD_ATTR && !nur.injected) {
+        nur.injected = true;
+        return XGetWindowAttributes(display, None, attributes);
+    }
+    return XGetWindowAttributes(display, window, attributes);
 }
 static int nur_fetch_name(Display *display, Window window, char **name)
 {
@@ -124,14 +143,21 @@ static Status nur_query_tree(Display *display, Window window, Window *root, Wind
 }
 /* This is the previous Xlib handler, so the capture hook must delegate here.
  * The isolated process exits distinctly only for the real injected request. */
+static bool nur_expected_error(const XErrorEvent *error)
+{
+    if (!nur.injected) return false;
+    if (nur.mode == NUR_UNEXPECTED)
+        return nur.images == 1 && nur.presses == 0 && nur.releases == 0 &&
+            error->error_code == BadDrawable && error->request_code == 73;
+    if (error->error_code != BadWindow || error->resourceid != None) return false;
+    if (nur.mode == NUR_NAME_UNEXPECTED) return error->request_code == 20;
+    if (nur.mode == NUR_BAD_ATTR) return error->request_code == 3;
+    return false;
+}
 static int nur_error(Display *display, XErrorEvent *error)
 {
     (void)display;
-    bool expected_image = nur.mode == NUR_UNEXPECTED && nur.injected && nur.images == 1 &&
-        nur.presses == 0 && nur.releases == 0 && error->error_code == BadDrawable &&
-        error->request_code == 73; /* X11 core GetImage opcode. */
-    bool expected = expected_image || (nur.mode == NUR_NAME_UNEXPECTED && nur.injected &&
-        error->error_code == BadWindow && error->request_code == 20 && error->resourceid == None);
+    bool expected = nur_expected_error(error);
     fprintf(stderr, "UI_DRIVER_FIXTURE xerror=%u opcode=%u delegated=%d\n",
             error->error_code, error->request_code, expected);
     fflush(stderr);
@@ -144,6 +170,7 @@ static int nur_error(Display *display, XErrorEvent *error)
 #define nanosleep nur_sleep
 #define XSendEvent nur_send
 #define XGetImage nur_image
+#define XGetWindowAttributes nur_attributes
 #define XFetchName nur_fetch_name
 #define XQueryTree nur_query_tree
 #define main native_ui_driver_main
@@ -151,6 +178,7 @@ static int nur_error(Display *display, XErrorEvent *error)
 #undef main
 #undef XQueryTree
 #undef XFetchName
+#undef XGetWindowAttributes
 #undef XGetImage
 #undef XSendEvent
 #undef nanosleep
@@ -236,7 +264,36 @@ static int nur_run_driver(char *option)
     char *args[] = {"native_ui_driver", option, "--key=tab", "--expect-pixels-change", "--timeout-ms=200", NULL};
     char *replace_args[] = {"native_ui_driver", option, "--key=1", "--expect-window-replaced", "--timeout-ms=200", NULL};
     if (nur.mode == NUR_KEYS) return nur_keys(option) ? 0 : 1;
-    return nur.mode >= NUR_REPLACED ? native_ui_driver_main(5, replace_args) : native_ui_driver_main(5, args);
+    return (nur.mode == NUR_REPLACED || nur.mode == NUR_NOT_REPLACED) ?
+        native_ui_driver_main(5, replace_args) : native_ui_driver_main(5, args);
+}
+/* Run the new destruction probes as part of the registered unchanged case,
+ * keeping the harness selection stable. The unexpected request runs in its
+ * own child because the prior handler deliberately exits on delegation. */
+static bool nur_extra_case(enum nur_mode mode)
+{
+    memset(&nur, 0, sizeof(nur)); nur.mode = mode;
+    char title[96], option[112];
+    if (!nur_open(title)) return false;
+    (void)snprintf(option, sizeof(option), "--title=%s", title);
+    XErrorHandler previous = XSetErrorHandler(nur_error);
+    int result = nur_run_driver(option);
+    (void)XSetErrorHandler(previous);
+    bool ok = result == 1 && nur.injected && nur.presses == 1 && nur.releases == 1;
+    if (nur.gc) XFreeGC(nur.owner, nur.gc);
+    if (nur.window != None) XDestroyWindow(nur.owner, nur.window);
+    XCloseDisplay(nur.owner);
+    return ok;
+}
+static bool nur_destroy_cases(void)
+{
+    if (!nur_extra_case(NUR_DESTROY_ATTR) || !nur_extra_case(NUR_DESTROY_IMAGE)) return false;
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (!child) { (void)nur_extra_case(NUR_BAD_ATTR); _Exit(1); }
+    int status = 0; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 77;
 }
 int main(int argc, char **argv)
 {
@@ -261,5 +318,6 @@ int main(int argc, char **argv)
     if (nur.victim != None && !nur.injected) XDestroyWindow(nur.owner, nur.victim);
     if (nur.window != None) XDestroyWindow(nur.owner, nur.window);
     if (nur.owner) XCloseDisplay(nur.owner);
+    if (ok && nur.mode == NUR_UNCHANGED) ok = nur_destroy_cases();
     return ok ? 0 : 1;
 }
