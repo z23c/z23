@@ -363,7 +363,7 @@ static void fd_print_done(struct fd_run *r)
 {
     static const char *const keys[] = {
         "copy", "share_line", "publisher_fingerprint", "package_root",
-        "post_id", "image_sha3", "image_path", "log", "next",
+        "post_id", "public_link", "image_sha3", "image_path", "log", "next",
         "rebuild_report", "rebuild_count_status", "rebuild_retry", "hosting_status", "hosting_host",
         "hosting_carrier", "hosting_status_command", "hosting_stop_command", "hosting_retry", "hosting_retry_note"};
     const struct json_value *pid = json_get(&r->reply.data, "pid");

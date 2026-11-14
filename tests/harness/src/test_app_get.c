@@ -1990,6 +1990,8 @@ static int tag_a_publish(struct tag_world *w)
         (void)snprintf(w->name, sizeof(w->name), "%s", w->offer.name);
         const char *id = json_get_str(json_get(json_at(&g_tag.board, 0), "id"));
         ASSERT(id != NULL);
+        (void)snprintf(want, sizeof(want), "  public_link: http://%s/board/apps/v1/%s\n", TAG_ONION, id);
+        ASSERT(strstr(run.text, want) != NULL);
         (void)snprintf(want, sizeof(want), "z23 app get %s --root=%s --publisher=%s --offer=%s",
                        w->name, w->offer.root, w->offer.publisher, id);
         const char *continuation = strstr(run.text, want);
