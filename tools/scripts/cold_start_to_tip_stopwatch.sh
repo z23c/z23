@@ -654,11 +654,10 @@ boot_timings_median_pairs() {
 # in the real PASS artifact and only 59 are markers) — a looser match pulls in
 # "[boot] block_index: 1 entries, 296 bytes/entry, ..." and invents phases.
 #
-# `boot` is the 1-based boot ordinal within the run: it increments on each
-# top-level "prologue" marker, which boot.c emits as the first topmark of every
-# boot (engine/composition/src/boot.c boot_topmark("prologue", t_boot_start)). A run that
-# followed a self-respawn therefore reports each boot's phases separately rather
-# than silently blending two boots' timings into one set of names.
+# `boot` is a 1-based observed ordinal: prologue subphases precede their
+# aggregate marker in boot.c. A new prologue sequence starts the next boot;
+# an aggregate without preceding subphases also starts one. A partial log
+# cannot establish boots whose prologue markers are entirely missing.
 phases_json_from_log() {
     local log="${1:-}" med="${2:-}"
     [ -s "$log" ] || return 0
@@ -667,7 +666,7 @@ phases_json_from_log() {
             if (medfile != "")
                 while ((getline ln < medfile) > 0)
                     if (split(ln, mf, "\t") >= 2) med[mf[1]] = mf[2]
-            boot = 0; seq = 0; lastts = ""; first = 1
+            boot = 0; seq = 0; lastts = ""; first = 1; in_prologue = 0
         }
         /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z/ {
             lastts = substr($0, 1, 20)
@@ -684,7 +683,13 @@ phases_json_from_log() {
             if (nm !~ /^[a-z_.0-9]+$/) next
             if (msf !~ /^[0-9]+ms$/) next
             ms = msf; sub(/ms$/, "", ms)
-            if (nm == "prologue" && lvl == "phase") { boot++; seq = 0 }
+            if (lvl == "subphase" && nm ~ /^prologue\./) {
+                if (!in_prologue) { boot++; seq = 0 }
+                in_prologue = 1
+            } else if (nm == "prologue" && lvl == "phase") {
+                if (!in_prologue) { boot++; seq = 0 }
+                in_prologue = 0
+            } else in_prologue = 0
             if (boot == 0) boot = 1
             seq++
             printf "%s{\"phase\":%c%s%c,\"boot\":%d,\"seq\":%d,\"level\":%c%s%c",
@@ -1903,6 +1908,22 @@ cancelled_write_bytes: 0'
         0 "$(printf '%s' "$st_phases" | grep -o '"median_ms":0' | wc -l | tr -d ' ')"
     st_ps_check "boot markers: an absent log yields no phases, not a malformed element" \
         "" "$(phases_json_from_log "$st_log.nonesuch" "$st_med")"
+    printf '%s\n' '[boot]   prologue.observability 7ms' '[boot]   prologue.select_chain 3ms' '[boot] prologue 10ms' '[boot] total 20ms' >"$st_log"
+    st_phases="$(phases_json_from_log "$st_log" "$st_med")"
+    st_ps_check "boot markers: real-order first aggregate remains in boot 1" \
+        1 "$(printf '%s' "$st_phases" | grep -c '"phase":"prologue","boot":1,"seq":3' | tr -d ' ')"
+    printf '%s\n' '[boot]   prologue.observability 2ms' '[boot] prologue 4ms' '[boot] total 8ms' >>"$st_log"
+    st_phases="$(phases_json_from_log "$st_log" "$st_med")"
+    st_ps_check "boot markers: next prologue subphase starts boot 2" \
+        1 "$(printf '%s' "$st_phases" | grep -c '"phase":"prologue.observability","boot":2,"seq":1' | tr -d ' ')"
+    st_ps_check "boot markers: next aggregate remains in boot 2" \
+        1 "$(printf '%s' "$st_phases" | grep -c '"phase":"prologue","boot":2,"seq":2' | tr -d ' ')"
+    printf '%s\n' '[boot]   prologue.select_chain 3ms' '[boot] prologue incomplete' >"$st_log"
+    st_phases="$(phases_json_from_log "$st_log" "$st_med")"
+    st_ps_check "boot markers: partial prologue stays in observed boot 1" \
+        1 "$(printf '%s' "$st_phases" | grep -c '"phase":"prologue.select_chain","boot":1,"seq":1' | tr -d ' ')"
+    st_ps_check "boot markers: incomplete aggregate is not invented" \
+        1 "$(printf '%s' "$st_phases" | grep -o '"phase":' | wc -l | tr -d ' ')"
     rm -f "$st_log" "$st_med"
 
     # boot_timings median extraction, via the SHARED readers (no local parser).
@@ -2633,7 +2654,7 @@ write_artifact() {
         printf '    "peer_precheck": %s,\n' "$(json_string "$PEER_PRECHECK")"
         printf '    "peer_prechecks": [%s],\n' "$(peer_prechecks_json)"
         printf '    "peer_advertised_tip": %s,\n' "$(json_number_or_null "$last_network_tip")"
-        printf '    "peer_advertised_tip_source": "dumpstate reducer_frontier network_tip (best height any handshake-complete peer advertised); -1 means no handshake ever completed"\n'
+        printf '    "peer_advertised_tip_source": "last nonnegative dumpstate reducer_frontier network_tip observed; -1 means no usable network tip was observed during this run"\n'
         printf '  },\n'
         # phases[] — see the phases_json_from_log / harness_phases_json headers
         # for the provenance rule. Every element names the source of its
