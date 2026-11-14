@@ -623,30 +623,84 @@ static int hl_st_env_restore(const struct hl_st_env *sv)
                ? die("z23-lint: setenv failed\n", "") : 0;
 }
 
-/* One seeded-violation case: point the knob at the fixture, run the gate
- * with its output sunk, require a nonzero exit. */
-static int hl_st_run(const char *header, const char *fail_msg,
-                     const char *env_name, const char *env_val)
+static int hl_st_matches(int rc, int expected, const char *text,
+                         const char *needle)
+{
+    return rc == expected && (!needle || strstr(text, needle) != NULL);
+}
+
+/* One seeded case must fail for the intended reason, never for a setup error. */
+static int hl_st_run(const char *header, const char *env_name,
+                     const char *env_val, int expected, const char *needle,
+                     int quiet)
 {
     fputs(header, stdout);
     struct hl_st_env sv;
     if (hl_st_env_set(&sv, env_name, env_val))
-        return 1;
+        return 2;
     FILE *out = tmpfile();
     FILE *errf = tmpfile();
     int rc = (out && errf) ? hl_run_impl(out, errf) : 2;
+    char text[8192] = {0};
+    int read_failed = !out || !errf || csr_slurp(out, text, sizeof text);
     if (out)
-        fclose(out);
+        read_failed |= fclose(out) != 0;
     if (errf)
-        fclose(errf);
+        read_failed |= fclose(errf) != 0;
     if (hl_st_env_restore(&sv))
-        return 1;
-    if (rc == 0) {
-        fputs(fail_msg, stderr);
+        return 2;
+    if (read_failed) return 2;
+    if (!hl_st_matches(rc, expected, text, needle)) {
+        if (!quiet)
+            fprintf(stderr, "SELFTEST FAIL: expected rc %d and %s, got rc %d: %s\n",
+                    expected, needle ? needle : "a clean pass", rc, text);
         return 1;
     }
     fprintf(stdout, "  ok (exit %d)\n", rc);
     return 0;
+}
+
+/* The passing stub reproduces the real shape gate's four independently
+ * measured counts, while refusing every denied leaf. */
+static int hl_st_passing_tool(const char *path)
+{
+    struct hl_re re;
+    struct hl_counts counts;
+    if (hl_compile(&re)) return 1;
+    int rc = hl_shape_counts(&re, &counts, stderr);
+    hl_free(&re, 4);
+    if (rc) return 1;
+    char script[4096];
+    int n = snprintf(script, sizeof script,
+        "#!/bin/sh\n"
+        "case \"${1:-}\" in\n"
+        "--summary) echo 'SUMMARY: leaves %s/%s READY_READ covered | TUs %s/1 + %s island member(s)'; exit 0;;\n"
+        "--leaf) echo 'VERDICT: BLOCKED'; exit 2;;\n"
+        "esac\nexit 1\n", counts.f[HL_LEAVES], counts.f[HL_READY],
+        counts.f[HL_FILES], counts.f[HL_ISLAND]);
+    return n < 0 || (size_t)n >= sizeof script || csr_write(path, script) ||
+           chmod(path, 0755) != 0;
+}
+
+static int hl_st_recipe_cases(const char *passing, const char *mk)
+{
+    struct hl_st_env tool_env;
+    if (hl_st_env_set(&tool_env, "ZCL_HOTSWAP_CANDIDATES_TOOL", passing)) return 1;
+    int bad = hl_st_run("── selftest: passing fixture must pass ──\n",
+                        "ZCL_HOTSWAP_CANDIDATES_MAKEFILE", "Makefile", 0, NULL, 0);
+    if (!bad)
+        bad = hl_st_run("── selftest 2/2: a hotswap: recipe with the refusal removed must FAIL ──\n",
+                        "ZCL_HOTSWAP_CANDIDATES_MAKEFILE", mk, 1,
+                        "recipe no longer refuses runtime publication", 0);
+    if (hl_st_env_restore(&tool_env)) bad = 1;
+    return bad;
+}
+
+static int hl_st_write_fixtures(const char *stub, const char *passing,
+                                const char *mk)
+{
+    return csr_write(stub, k_hl_stub_tool) || chmod(stub, 0755) != 0 ||
+           csr_write(mk, k_hl_seeded_makefile) || hl_st_passing_tool(passing);
 }
 
 int check_hotswap_candidates_ledger_selftest(void)
@@ -660,28 +714,25 @@ int check_hotswap_candidates_ledger_selftest(void)
     char *tmp = mkdtemp(tmpl);
     if (!tmp)
         return die("z23-lint: mkdir failed: %s\n", td);
-    char stub[4096], mk[4096];
+    char stub[4096], passing[4096], mk[4096], missing[4096];
     int bad = 0;
     if (ovf(snprintf(stub, sizeof stub, "%s/stub-tool.sh", tmp), sizeof stub)
+        || ovf(snprintf(passing, sizeof passing, "%s/passing-tool.sh", tmp), sizeof passing)
+        || ovf(snprintf(missing, sizeof missing, "%s/missing", tmp), sizeof missing)
         || ovf(snprintf(mk, sizeof mk, "%s/Makefile.seeded", tmp), sizeof mk)
-        || csr_write(stub, k_hl_stub_tool)
-        || chmod(stub, 0755) != 0
-        || csr_write(mk, k_hl_seeded_makefile))
+        || hl_st_write_fixtures(stub, passing, mk))
         bad = 1;
     if (!bad)
         bad |= hl_st_run(
             "── selftest 1/2: a tool that under-reports coverage must FAIL "
             "──\n",
-            "  SELFTEST FAIL: the gate passed a tool whose counts disagree "
-            "with the manifests.\n",
-            "ZCL_HOTSWAP_CANDIDATES_TOOL", stub);
-    if (!bad)
-        bad |= hl_st_run(
-            "── selftest 2/2: a hotswap: recipe with the refusal removed "
-            "must FAIL ──\n",
-            "  SELFTEST FAIL: the gate passed a recipe that no longer "
-            "refuses FILES=/PROBE=.\n",
-            "ZCL_HOTSWAP_CANDIDATES_MAKEFILE", mk);
+            "ZCL_HOTSWAP_CANDIDATES_TOOL", stub, 1, "disagrees with", 0);
+    if (!bad && hl_st_run("", "ZCL_HOTSWAP_CANDIDATES_TOOL", missing,
+                          1, "disagrees with", 1) != 1) {
+        fputs("SELFTEST FAIL: unrelated tool error was not rejected.\n", stderr);
+        bad = 1;
+    }
+    if (!bad) bad |= hl_st_recipe_cases(passing, mk);
     (void)rap_rm_rf(tmp);
     if (bad) {
         fputs("SELFTEST FAILED — this gate cannot be trusted.\n", stderr);
