@@ -18,6 +18,7 @@ struct app_toolchain {
     struct vcs_manifest manifest;
     struct os_sandbox_kit_file *files;
     size_t file_count;
+    int backing_fd; bool backing_owned; size_t backing_size;
     uint8_t *bundle;
     size_t bundle_size;
 };

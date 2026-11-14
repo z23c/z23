@@ -63,7 +63,13 @@
 
 /* Verified immutable regular files for a private compiler root. Capture never
  * executes bytes. Enter is forked-child-only, before fd scrub/seccomp. */
-struct os_sandbox_kit_file { const char *path; int fd; uint8_t blob[32]; };
+struct os_sandbox_kit_file {
+    const char *path; int fd; uint8_t blob[32];
+    bool slice; size_t offset, length; uint32_t mode;
+};
+struct zcl_result os_sandbox_kit_backing_create(int *fd);
+struct zcl_result os_sandbox_kit_backing_append(int fd, const void *bytes, size_t length);
+struct zcl_result os_sandbox_kit_backing_seal(int fd);
 struct os_sandbox_kit_root {
     const struct os_sandbox_kit_file *files;
     size_t count;
@@ -398,6 +404,9 @@ int os_sandbox_pidns_enter(int close_fd);
  * The returning execution child keeps its descriptors for caller setup/scrub. */
 int os_sandbox_pidns_enter_clean(int close_fd);
 #if defined(ZCL_TESTING)
+#if defined(__linux__)
+bool os_sandbox_test_kit_file(const struct os_sandbox_kit_file *file, const char *root);
+#endif
 void os_sandbox_test_kit_wrapper_failure(unsigned stage);
 #endif
 

@@ -888,6 +888,78 @@ static int test_lab_kit_handles(void)
     if (fd >= 0) close(fd);
     return failures;
 }
+static void lt_kit_blob(const char *bytes, size_t length, uint8_t blob[32])
+{
+    const uint8_t tag = 0x20; struct sha3_256_ctx hash;
+    sha3_256_init(&hash); sha3_256_write(&hash, &tag, 1);
+    sha3_256_write(&hash, (const uint8_t *)bytes, length); sha3_256_finalize(&hash, blob);
+}
+static void lt_kit_slice_setup(struct os_sandbox_kit_file files[3], int fd, unsigned change)
+{
+    files[0] = (struct os_sandbox_kit_file){.path="one", .fd=fd, .slice=true, .offset=0, .length=3, .mode=S_IFREG|0644};
+    files[1] = (struct os_sandbox_kit_file){.path="two", .fd=fd, .slice=true, .offset=3, .length=3, .mode=S_IFREG|0755};
+    files[2] = (struct os_sandbox_kit_file){.path="empty", .fd=fd, .slice=true, .offset=6, .length=0, .mode=S_IFREG|0644};
+    lt_kit_blob("abc", 3, files[0].blob); lt_kit_blob("XYZ", 3, files[1].blob);
+    lt_kit_blob("", 0, files[2].blob);
+    if (change == 2) files[1].offset = 5;
+    if (change == 3) files[1].offset = SIZE_MAX;
+    if (change == 4) files[1].mode = S_IFLNK|0755;
+    if (change == 5) files[1].mode = S_IFREG|04755;
+    if (change == 6) files[1].blob[0] ^= 1;
+}
+static bool lt_kit_slice_probe(int one, int two, int empty)
+{
+    char a[4] = {0}, b[4] = {0}; struct stat x, y, z;
+    return one >= 0 && two >= 0 && empty >= 0 && read(one, a, 3) == 3 &&
+        read(two, b, 3) == 3 && !strcmp(a, "abc") && !strcmp(b, "XYZ") &&
+        fstat(one, &x) == 0 && fstat(two, &y) == 0 && fstat(empty, &z) == 0 &&
+        (x.st_mode & 0777) == 0444 && (y.st_mode & 0777) == 0555 && z.st_size == 0;
+}
+static bool lt_kit_slice_positive(const char *root, const struct os_sandbox_kit_file files[3])
+{
+    bool ok = true; char paths[3][600]; int fds[3];
+    for (size_t i = 0; i < 3; ++i) {
+        ok = os_sandbox_test_kit_file(&files[i], root) && ok;
+        int n = snprintf(paths[i], sizeof(paths[i]), "%s/%s", root, files[i].path);
+        if (n <= 0 || (size_t)n >= sizeof(paths[i])) return false;
+        fds[i] = open(paths[i], O_RDONLY);
+    }
+    ok = lt_kit_slice_probe(fds[0], fds[1], fds[2]) && ok;
+    for (size_t i = 0; i < 3; ++i) {
+        if (fds[i] >= 0) close(fds[i]);
+        if (unlink(paths[i])) ok = false;
+    }
+    return ok;
+}
+static bool lt_kit_slice_negative(const char *root, const struct os_sandbox_kit_file *file)
+{
+    bool ok = !os_sandbox_test_kit_file(file, root);
+    char path[600]; int n = snprintf(path, sizeof(path), "%s/two", root);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    if (unlink(path) && errno != ENOENT) ok = false;
+    return ok;
+}
+static bool lt_kit_slice_case(const char *root, unsigned change)
+{
+    int fd = -1;
+    if (!os_sandbox_kit_backing_create(&fd).ok) return false;
+    bool ready = os_sandbox_kit_backing_append(fd, "abcXYZ", 6).ok;
+    if (ready && change != 1) ready = os_sandbox_kit_backing_seal(fd).ok;
+    struct os_sandbox_kit_file files[3]; lt_kit_slice_setup(files, fd, change);
+    bool ok = ready && (change ? lt_kit_slice_negative(root, &files[1]) : lt_kit_slice_positive(root, files));
+    close(fd); return ok;
+}
+static int test_lab_kit_slices(void)
+{
+    int failures = 0;
+    TEST("lab: sealed backing slices materialize exact bytes and reject invalid inputs") {
+        char root[600]; int n = snprintf(root, sizeof(root), "%s/kit-root", g_lt_dir);
+        ASSERT(n > 0 && (size_t)n < sizeof(root) && mkdir(root, 0700) == 0);
+        for (unsigned change = 0; change <= 6; ++change) ASSERT(lt_kit_slice_case(root, change));
+        ASSERT(rmdir(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
 [[noreturn]] static void lt_clean_reaper_child(const int sentinel[2],
     const int release[2], const int ready[2])
 {
@@ -1023,6 +1095,7 @@ int test_lab(void)
     failures += test_lab_hello();
 #if defined(__linux__)
     failures += test_lab_kit_handles();
+    failures += test_lab_kit_slices();
     failures += test_lab_clean_reapers();
     failures += test_lab_wrapper_failure();
 #endif

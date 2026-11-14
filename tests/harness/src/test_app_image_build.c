@@ -45,6 +45,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define AIB_MAX_DEPS 8u
@@ -735,6 +739,72 @@ static int akt_authentication(struct akt_fixture *f)
     app_toolchain_free(&kit);
     return failures;
 }
+#if defined(__linux__)
+static bool akt_many_setup(struct akt_fixture *f)
+{
+    for (unsigned i = 0; i < 1100; ++i) {
+        char rel[80]; (void)snprintf(rel, sizeof(rel), "rootfs/bin/member%04u", i);
+        if (!akt_file(f, rel, i == 0 ? 0644 : 0755)) return false;
+    }
+    return aib_write(f->root, "rootfs/bin/member0000", "") && akt_capture(f);
+}
+static bool akt_many_content(const struct os_sandbox_kit_file *file)
+{
+    char bytes[18];
+    return file->length == sizeof(bytes) && (file->mode & 0777) == 0755 &&
+        pread(file->fd, bytes, sizeof(bytes), (off_t)file->offset) == (ssize_t)sizeof(bytes) &&
+        !memcmp(bytes, "inert kit fixture\n", sizeof(bytes));
+}
+static bool akt_many_slices(const struct app_toolchain *kit)
+{
+    bool empty = false, content = false;
+    for (size_t i = 0; i < kit->file_count; ++i) {
+        const struct os_sandbox_kit_file *file = &kit->files[i];
+        if (!file->slice || file->fd != kit->backing_fd) return false;
+        if (!strcmp(file->path, "bin/member0000"))
+            empty = file->length == 0 && (file->mode & 0777) == 0644;
+        if (!strcmp(file->path, "bin/member0001")) content = akt_many_content(file);
+    }
+    return empty && content;
+}
+[[noreturn]] static void akt_many_child(struct app_toolchain *kit, struct rlimit limit)
+{
+    limit.rlim_cur = 1024;
+    if (limit.rlim_max < limit.rlim_cur || setrlimit(RLIMIT_NOFILE, &limit)) _exit(1);
+    char why[256];
+    if (!app_toolchain_seal(kit, why, sizeof(why)) || kit->file_count != 1103 || !kit->backing_owned) _exit(2);
+    if (!akt_many_slices(kit)) _exit(3);
+    int fd = kit->backing_fd;
+    if (pwrite(fd, "x", 1, 0) >= 0 || ftruncate(fd, 0) >= 0) _exit(4);
+    app_toolchain_free(kit); app_toolchain_free(kit);
+    if (fcntl(fd, F_GETFD) != -1 || errno != EBADF) _exit(5);
+    _exit(0);
+}
+static bool akt_many_run_child(struct app_toolchain *kit, struct rlimit before)
+{
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (!child) akt_many_child(kit, before);
+    int status = 0; pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+static int akt_many_members(struct akt_fixture *f)
+{
+    int failures = 0; struct app_toolchain kit = {0};
+    TEST("app_image_build: sealed kit shares one descriptor under 1024 limit") {
+        ASSERT(akt_many_setup(f) && akt_verify(f, 0, &kit));
+        struct rlimit before, after; ASSERT(getrlimit(RLIMIT_NOFILE, &before) == 0);
+        ASSERT(akt_many_run_child(&kit, before));
+        ASSERT(getrlimit(RLIMIT_NOFILE, &after) == 0 && before.rlim_cur == after.rlim_cur && before.rlim_max == after.rlim_max);
+        kit.bundle[kit.bundle_size - 1] ^= 1;
+        char why[256]; ASSERT(!app_toolchain_seal(&kit, why, sizeof(why)) &&
+            !kit.backing_owned && !kit.files && !kit.file_count);
+        PASS();
+    } _test_next:;
+    app_toolchain_free(&kit); return failures;
+}
+#endif
 static int test_aib_kit_semantics(void)
 {
     int failures = 0;
@@ -747,6 +817,9 @@ static int test_aib_kit_semantics(void)
         failures += akt_descriptors(&f);
         failures += akt_required_tools(&f);
         failures += akt_authentication(&f);
+#if defined(__linux__)
+        failures += akt_many_members(&f);
+#endif
     }
     free(f.wire);
     if (f.root[0]) test_rm_rf(f.root);

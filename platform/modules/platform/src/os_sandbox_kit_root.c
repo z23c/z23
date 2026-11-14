@@ -64,6 +64,23 @@ struct zcl_result os_sandbox_kit_capture(const void *bytes, size_t length,
     }
     *out = fd; return ZCL_OK;
 }
+struct zcl_result os_sandbox_kit_backing_create(int *out)
+{
+    if (!out || *out != -1) return ZCL_ERR(-1, "kit backing: invalid output");
+    int fd = memfd_create("z23-kit", MFD_CLOEXEC|MFD_ALLOW_SEALING);
+    if (fd < 0) return kit_error("backing memfd");
+    *out = fd; return ZCL_OK;
+}
+struct zcl_result os_sandbox_kit_backing_append(int fd, const void *bytes, size_t length)
+{
+    if ((!bytes && length) || !kit_write_all(fd, bytes, length)) return kit_error("backing write");
+    return ZCL_OK;
+}
+struct zcl_result os_sandbox_kit_backing_seal(int fd)
+{
+    if (fcntl(fd, F_ADD_SEALS, KIT_SEALS)) return kit_error("backing seal");
+    return ZCL_OK;
+}
 static bool kit_component(const char *part, size_t n)
 {
     if (!n || (n == 1 && part[0] == '.') || (n == 2 && part[0] == '.' && part[1] == '.')) return false;
@@ -103,13 +120,13 @@ static bool kit_bind(const char *source, const char *target, bool readonly)
         mount(NULL, target, NULL, MS_BIND|MS_REMOUNT|MS_NOSUID|MS_NODEV|
             (readonly ? MS_RDONLY : 0), NULL) == 0;
 }
-static bool kit_copy_fd(int source, int destination, size_t length)
+static bool kit_copy_fd(int source, int destination, size_t start, size_t length)
 {
     uint8_t buffer[16384]; size_t offset = 0;
     while (offset < length) {
         size_t want = length - offset < sizeof(buffer) ? length - offset : sizeof(buffer);
         ssize_t got;
-        do { got = pread(source, buffer, want, (off_t)offset); } while (got < 0 && errno == EINTR);
+        do { got = pread(source, buffer, want, (off_t)(start + offset)); } while (got < 0 && errno == EINTR);
         if (got <= 0 || !kit_write_all(destination, buffer, (size_t)got)) return false;
         offset += (size_t)got;
     }
@@ -122,22 +139,40 @@ static bool kit_sealed_stat(const struct os_sandbox_kit_file *file, struct stat 
         fstat(file->fd, st) == 0 && S_ISREG(st->st_mode) &&
         st->st_size >= 0 && (uint64_t)st->st_size <= (256u << 20);
 }
+struct kit_slice { size_t start, length; uint32_t mode; };
+static bool kit_slice_metadata(const struct os_sandbox_kit_file *file, struct kit_slice *slice)
+{
+    struct stat st;
+    if (!kit_relative(file->path) || !kit_sealed_stat(file, &st)) return false;
+    slice->start = file->slice ? file->offset : 0;
+    slice->length = file->slice ? file->length : (size_t)st.st_size;
+    slice->mode = file->slice ? file->mode : (uint32_t)st.st_mode;
+    size_t start = slice->start, length = slice->length;
+    return S_ISREG(slice->mode) && !(slice->mode & 07000) && start <= (size_t)st.st_size &&
+        length <= (size_t)st.st_size - start && (off_t)start >= 0 &&
+        (size_t)(off_t)start == start && (off_t)(start + length) >= 0 &&
+        (size_t)(off_t)(start + length) == start + length;
+}
 static bool kit_file(const struct os_sandbox_kit_file *file, const char *root)
 {
-    char target[KIT_PATH]; struct stat st;
-    if (!kit_relative(file->path) || !kit_sealed_stat(file, &st)) return false;
+    char target[KIT_PATH]; struct kit_slice slice;
+    if (!kit_slice_metadata(file, &slice)) return false;
     int n = snprintf(target, sizeof(target), "%s/%s", root, file->path);
     if (n < 0 || (size_t)n >= sizeof(target) || !kit_parents(target)) return false;
     int fd = open(target, O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW, 0600);
     if (fd < 0) return false;
-    /* Anonymous memfd bind mounts return EINVAL. Populate private tmpfs only
-     * from sealed handles, rehash the destination and close every writer.
-     * The complete root becomes read-only before execution. */
-    bool ok = kit_copy_fd(file->fd, fd, (size_t)st.st_size) &&
-        kit_hash_fd(fd, (size_t)st.st_size, file->blob) && fchmod(fd, st.st_mode & 0555) == 0;
+    /* Copy sealed bytes into private tmpfs and rehash before the read-only pivot. */
+    bool ok = kit_copy_fd(file->fd, fd, slice.start, slice.length) &&
+        kit_hash_fd(fd, slice.length, file->blob) && fchmod(fd, 0444 | (slice.mode & 0111)) == 0;
     if (close(fd)) ok = false;
     return ok;
 }
+#if defined(ZCL_TESTING)
+bool os_sandbox_test_kit_file(const struct os_sandbox_kit_file *file, const char *root)
+{
+    return kit_file(file, root);
+}
+#endif
 static bool kit_mount_at(const char *root, const char *name, const char *source,
     bool readonly, const char *type, const char *options)
 {
@@ -200,6 +235,12 @@ struct zcl_result os_sandbox_kit_enter(const struct os_sandbox_kit_root *root,
     return kit_pivot(root);
 }
 #else
+struct zcl_result os_sandbox_kit_backing_create(int *fd)
+{ (void)fd; return ZCL_ERR(-1, "sealed compiler kits require Linux"); }
+struct zcl_result os_sandbox_kit_backing_append(int fd, const void *bytes, size_t length)
+{ (void)fd; (void)bytes; (void)length; return ZCL_ERR(-1, "sealed compiler kits require Linux"); }
+struct zcl_result os_sandbox_kit_backing_seal(int fd)
+{ (void)fd; return ZCL_ERR(-1, "sealed compiler kits require Linux"); }
 struct zcl_result os_sandbox_kit_capture(const void *bytes, size_t length,
     uint32_t mode, const uint8_t blob[32], int *fd)
 {

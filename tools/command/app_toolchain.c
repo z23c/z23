@@ -24,8 +24,7 @@ static bool kit_why(char *why, size_t cap, const char *text)
 void app_toolchain_free(struct app_toolchain *kit)
 {
     if (!kit) return;
-    for (size_t i = 0; i < kit->file_count; ++i)
-        if (kit->files[i].fd >= 0) close(kit->files[i].fd);
+    if (kit->backing_owned) close(kit->backing_fd);
     free(kit->files); free(kit->bundle); vcs_manifest_free(&kit->manifest);
     memset(kit, 0, sizeof(*kit));
 }
@@ -171,27 +170,39 @@ bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap)
     if (!ok) { app_toolchain_free(kit); return kit_why(why, cap, "Selected compiler kit unavailable, invalid or for another target."); }
     return true;
 }
+static void kit_seal_clear(struct app_toolchain *kit)
+{
+    if (kit->backing_owned) close(kit->backing_fd);
+    kit->backing_owned = false; kit->backing_fd = -1; kit->backing_size = 0;
+    free(kit->files); kit->files = NULL; kit->file_count = 0;
+}
 static bool kit_seal_entry(void *context, const struct vcs_entry *entry,
     const uint8_t *bytes, size_t length)
 {
     struct app_toolchain *kit = context; size_t i = kit->file_count;
-    if (i >= kit->manifest.count || strcmp(entry->path, kit->manifest.entries[i].path)) return false;
-    kit->files[i].path = kit->manifest.entries[i].path + 7;
-    memcpy(kit->files[i].blob, entry->blob, 32);
-    struct zcl_result r = os_sandbox_kit_capture(bytes, length, entry->mode, entry->blob, &kit->files[i].fd);
-    if (!r.ok) return false;
-    ++kit->file_count; return true;
+    if (i >= kit->manifest.count || strcmp(entry->path, kit->manifest.entries[i].path) ||
+        length > (256u << 20) - kit->backing_size || !S_ISREG(entry->mode) || (entry->mode & 07000)) return false;
+    struct os_sandbox_kit_file *file = &kit->files[i];
+    file->path = kit->manifest.entries[i].path + 7; file->fd = kit->backing_fd;
+    file->slice = true; file->offset = kit->backing_size; file->length = length; file->mode = entry->mode;
+    memcpy(file->blob, entry->blob, 32);
+    if (!os_sandbox_kit_backing_append(kit->backing_fd, bytes, length).ok) return false;
+    kit->backing_size += length; ++kit->file_count; return true;
 }
 bool app_toolchain_seal(struct app_toolchain *kit, char *why, size_t cap)
 {
     if (!kit || !kit->selected) return true;
-    if (kit->file_count == kit->manifest.count) return true;
-    for (size_t i = 0; i < kit->file_count; ++i) close(kit->files[i].fd);
-    free(kit->files); kit->files = NULL; kit->file_count = 0;
+    if (kit->backing_owned && kit->file_count == kit->manifest.count) return true;
+    kit_seal_clear(kit);
     kit->files = zcl_calloc(kit->manifest.count, sizeof(*kit->files), "app.toolchain.files");
-    if (!kit->files) return kit_why(why, cap, "Cannot allocate sealed kit handles.");
-    for (size_t i = 0; i < kit->manifest.count; ++i) kit->files[i].fd = -1;
+    if (!kit->files) return kit_why(why, cap, "Cannot allocate sealed kit members.");
+    if (!os_sandbox_kit_backing_create(&kit->backing_fd).ok) {
+        kit_seal_clear(kit); return kit_why(why, cap, "Cannot create sealed kit backing.");
+    }
+    kit->backing_owned = true;
     bool ok = vcs_source_bundle_visit_verified(kit->bundle, kit->bundle_size, kit->tree,
-        kit_seal_entry, kit, NULL) == VCS_SOURCE_BUNDLE_OK;
-    return ok || kit_why(why, cap, "Cannot seal the verified compiler kit.");
+        kit_seal_entry, kit, NULL) == VCS_SOURCE_BUNDLE_OK &&
+        kit->file_count == kit->manifest.count && os_sandbox_kit_backing_seal(kit->backing_fd).ok;
+    if (!ok) { kit_seal_clear(kit); return kit_why(why, cap, "Cannot construct and seal verified compiler kit backing."); }
+    return true;
 }
