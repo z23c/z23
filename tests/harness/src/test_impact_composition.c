@@ -3149,6 +3149,17 @@ static int test_ic_proof_wait_reports_settled_failure(void)
         zcl_dev_proof_wait_conclude(&pending_reply, &running_status);
         ASSERT(pending_reply.status == ZCL_COMMAND_STATUS_BLOCKED);
         ASSERT(pending_reply.exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(strcmp(pending_reply.error.code, "PROOF_WAIT_TIMEOUT") == 0);
+        ASSERT(pending_reply.error.retryable && !pending_reply.error.mutated);
+        ASSERT(pending_reply.next_count == 0);
+        ASSERT(strcmp(pending_reply.error.message, "wait timed out before the exact proof completed") == 0);
+        zcl_command_reply_free(&pending_reply);
+        running_status.state = ZCL_DEV_PROOF_STATE_MISSING;
+        zcl_command_reply_init(&pending_reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_wait_conclude(&pending_reply, &running_status);
+        ASSERT(pending_reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(strcmp(pending_reply.error.code, "PROOF_WAIT_TIMEOUT") == 0);
+        ASSERT(!pending_reply.error.retryable && pending_reply.next_count == 0);
         zcl_command_reply_free(&pending_reply);
 
         /* `dev.proof.ensure` must not re-queue a settled failure: no new
@@ -3251,13 +3262,14 @@ static int test_ic_proof_next_preserves_root(void)
         ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
         ASSERT(strcmp(status.root, canonical) == 0);
-        for (size_t i = 0; i < 2; i++) {
+        for (size_t i = 0; i < 3; i++) {
             struct zcl_command_reply reply;
             zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
-            zcl_dev_proof_status_conclude(&reply, &status);
+            if (i == 2) zcl_dev_proof_wait_conclude(&reply, &status);
+            else zcl_dev_proof_status_conclude(&reply, &status);
             ASSERT(reply.next_count == 1);
             ASSERT(strcmp(reply.next[0].command,
-                           i == 0 ? "dev.proof.retry" : "dev.proof.wait") == 0);
+                           i == 0 ? "dev.proof.retry" : i == 1 ? "dev.proof.wait" : "dev.proof.status") == 0);
             struct json_value input = {0};
             ASSERT(json_read(&input, reply.next[0].input_json,
                              strlen(reply.next[0].input_json)));
@@ -3270,15 +3282,27 @@ static int test_ic_proof_next_preserves_root(void)
             zcl_command_reply_free(&reply);
             status.state = ZCL_DEV_PROOF_STATE_RUNNING;
         }
+        struct zcl_command_reply missing;
+        status.state = ZCL_DEV_PROOF_STATE_MISSING;
+        zcl_command_reply_init(&missing, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_wait_conclude(&missing, &status);
+        ASSERT(missing.next_count == 0 && !missing.error.retryable);
+        ASSERT(strcmp(missing.error.message,
+            "the exact local commit and remote base do not have an admitted receipt") == 0);
+        zcl_command_reply_free(&missing);
+        status.state = ZCL_DEV_PROOF_STATE_RUNNING;
         /* The bounded next-action field cannot hold every legal root.
          * Omit an oversized action instead of truncating or dropping root. */
         memset(status.root, 'x', sizeof(status.root) - 1);
         status.root[sizeof(status.root) - 1] = 0;
-        struct zcl_command_reply reply;
-        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
-        zcl_dev_proof_status_conclude(&reply, &status);
-        ASSERT(reply.next_count == 0);
-        zcl_command_reply_free(&reply);
+        for (size_t i = 0; i < 2; i++) {
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+            if (i == 0) zcl_dev_proof_status_conclude(&reply, &status);
+            else zcl_dev_proof_wait_conclude(&reply, &status);
+            ASSERT(reply.next_count == 0);
+            zcl_command_reply_free(&reply);
+        }
         ASSERT(test_rm_rf_recursive(fixture) == 0);
         PASS();
     } _test_next:;

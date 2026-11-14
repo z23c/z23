@@ -185,8 +185,12 @@ static void proof_wait_pending(struct zcl_command_reply *reply,
     zcl_command_reply_fail(
         reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
         code, phase, status->state == ZCL_DEV_PROOF_STATE_RUNNING, false,
-        "the exact local commit and remote base do not have an admitted receipt",
+        status->state == ZCL_DEV_PROOF_STATE_RUNNING
+            ? "wait timed out before the exact proof completed"
+            : "the exact local commit and remote base do not have an admitted receipt",
         status->detail[0] ? status->detail : "exact_receipt_missing");
+    if (status->state == ZCL_DEV_PROOF_STATE_RUNNING)
+        proof_emit_route(reply, status, "dev.proof.status", "check the exact proof status");
 }
 
 /* The pair's `.failed` marker already settled this exact commit/base
