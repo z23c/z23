@@ -22,3 +22,16 @@ The `apk` target produced a verified signed APK using an isolated disposable
 fixture key. A deliberately wrong `EXPECTED_SIGNER_SHA256` refused after
 creating the signed fixture APK, matching the existing signer-check order.
 No installation or deployment was tested.
+
+## Native command smoke
+
+The native plan, prepare and status commands were exercised on 2026-11-14
+with application source `e12eea17c8de9014502e2c6c8fa7052163720fcd` and the
+node from `4fcd8da60c28bcb6060e03b6baf1f829af09e6e8`. The unsigned APK
+SHA-256 was `9223422168b6c3a14641740331bf99e558d8a62ba01e9605db095f9b0fe35dab`.
+The package name, alignment and embedded node hash were independently checked;
+the node hash matched `a1a9a98541117562688fd0fa91871f8d3fb70d50202156e433c2a7d80f939ad2`.
+Focused command tests passed three groups with no skips; the vendor-input
+repair passed its focused group with no skips. The plan took 595 ms against
+its 250 ms budget and status took 1494 ms against its 900 ms budget. These are
+observed budget misses, not total build duration. No deployment was performed.
