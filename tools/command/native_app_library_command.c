@@ -717,7 +717,9 @@ static bool al_reveal_failure_notice(struct library *w)
 static void al_share_failure_file(struct library *w, struct zcl_command_reply *reply)
 {
     struct stat st;
-    if (reply->status == ZCL_COMMAND_STATUS_PASSED || !w->shared_path[0] ||
+    /* The leaf's collision refusal says this invocation did not create the
+     * existing path, even when an earlier operation mutated the profile. */
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED || !strcmp(reply->error.code, "OUTPUT_EXISTS") || !w->shared_path[0] ||
         lstat(w->shared_path, &st) != 0)
         return;
     w->share_result = true;

@@ -814,7 +814,7 @@ struct al_library_script {
     unsigned change_at;
     unsigned preparations;
     unsigned share_calls; bool share_cancel, fail_share_result, mismatch_share_result; char shared[ZCL_PRESENT_COPY_TEXT_MAX + 1];
-    bool fail_after_file; unsigned host_calls; bool cancel_host;
+    bool fail_after_file, collision_after_choice; unsigned host_calls; bool cancel_host;
     bool cancel_preparation, stale_preparation;
     bool bad_preparation, fail_preparation, saw_share_review;
     unsigned share_choice, canceled_prepare_menu;
@@ -1230,6 +1230,17 @@ static bool al_library_notice(void *context, const struct zcl_present_model_v1 *
     return close;
 }
 
+static void al_library_collision(struct al_library_script *s, const char *path,
+    struct zcl_command_reply *reply)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    bool made = fd >= 0 && write(fd, "rival", 5) == 5;
+    if (fd >= 0 && close(fd)) made = false;
+    s->valid = s->valid && made;
+    zcl_package_copy_fail(reply, "OUTPUT_EXISTS", false,
+        "a share file is never overwritten; move it or name another output", path);
+}
+
 static void al_library_share(void *context, const struct app_selection *selection,
     const char *path, struct zcl_command_reply *reply)
 {
@@ -1238,6 +1249,7 @@ static void al_library_share(void *context, const struct app_selection *selectio
     s->valid = s->valid && selection->revision > 0 && path[0] == 47;
     (void)snprintf(s->shared, sizeof(s->shared), "%s", path);
     if (s->share_cancel) { (void)json_push_kv_str(&reply->data, "status", "canceled"); return; }
+    if (s->collision_after_choice) { al_library_collision(s, path, reply); return; }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0 || close(fd)) { s->valid = false; return; }
     if (s->fail_after_file) {
@@ -1458,6 +1470,8 @@ static int al_share_success_test(struct al_fx *f, struct zcl_command_reply *repl
 }
 static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
     struct al_library_script *s);
+static int al_share_collision_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s);
 static bool al_preparation_wire(struct zcl_command_reply *reply,
     const struct app_selection *selection, const char *visible);
 static bool al_share_review_failure(void *context, const struct zcl_present_model_v1 *model,
@@ -1520,8 +1534,41 @@ static int al_share_failure_test(struct al_fx *f, struct zcl_command_reply *repl
         ASSERT(unlink(s->shared) == 0); s->shared[0] = 0;
         PASS();
     } _test_next:;
+    failures += al_share_collision_test(f, reply, s);
     failures += al_share_leaf_failure_test(f, reply, s);
     failures += al_share_prepared_failure_test(f, reply, s);
+    return failures;
+}
+static bool al_collision_file_cleanup(struct al_library_script *s)
+{
+    char contents[6] = {0}; int fd = open(s->shared, O_RDONLY);
+    bool ok = fd >= 0 && read(fd, contents, 5) == 5 && !memcmp(contents, "rival", 5);
+    if (fd >= 0 && close(fd)) ok = false;
+    if (unlink(s->shared)) ok = false;
+    s->shared[0] = 0;
+    return ok;
+}
+static int al_share_collision_test(struct al_fx *f, struct zcl_command_reply *reply,
+    struct al_library_script *s)
+{
+    int failures = 0;
+    TEST("Share collision does not claim another file was created") {
+        struct app_selection before, after;
+        ASSERT(app_selection_load(f->env.state_dir, "fixtureapp", &before) == APP_SELECTION_OK);
+        zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
+        *s = (struct al_library_script){.actions = {0, 2}, .count = 2, .valid = true, .collision_after_choice = true};
+        zcl_test_app_library_share(&f->env, reply, al_library_present, s, al_library_prepared_same, al_library_share, al_library_notice);
+        bool selection_ok = app_selection_load(f->env.state_dir, "fixtureapp", &after) == APP_SELECTION_OK &&
+                            !memcmp(&before, &after, sizeof(after));
+        bool file_ok = al_collision_file_cleanup(s);
+        ASSERT(file_ok && selection_ok);
+        ASSERT(s->valid && s->share_calls == 1 && s->errors == 1 && s->notice_calls == 0);
+        ASSERT(reply->status != ZCL_COMMAND_STATUS_PASSED && !reply->error.mutated && !strcmp(reply->error.code, "OUTPUT_EXISTS"));
+        ASSERT(!strcmp(s->error_title, "Could not complete this action") && !s->error_copy[0]);
+        const struct json_value *facts = json_get(&reply->data, "failure_facts");
+        ASSERT(!zcl_package_copy_str(facts, "output") && !zcl_package_copy_str(facts, "share_file"));
+        PASS();
+    } _test_next:;
     return failures;
 }
 static int al_share_leaf_failure_test(struct al_fx *f, struct zcl_command_reply *reply,
