@@ -417,7 +417,9 @@ static bool cip_legacy_ref_index(const char *root)
     }
     bool ok = sqlite3_exec(db,
         "DROP INDEX IF EXISTS idx_refs_file_ordered; DROP INDEX IF EXISTS idx_refs_file;"
-        "CREATE INDEX idx_refs_file ON refs(ref_file)", NULL, NULL, NULL) == SQLITE_OK;
+        "CREATE INDEX idx_refs_file ON refs(ref_file);"
+        "DROP INDEX IF EXISTS idx_refs_enclosing_ordered; DROP INDEX IF EXISTS idx_refs_enclosing;"
+        "CREATE INDEX idx_refs_enclosing ON refs(enclosing)", NULL, NULL, NULL) == SQLITE_OK;
     return sqlite3_close(db) == SQLITE_OK && ok;
 }
 
@@ -425,12 +427,38 @@ static bool cip_index_names(struct codeindex *ci, bool upgraded)
 {
     sqlite3 *db = ci_store_db(ci->store); sqlite3_stmt *stmt = NULL;
     const char *sql = "SELECT (SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file'),"
-                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file_ordered')";
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_file_ordered'),"
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing'),"
+                      "(SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing_ordered')";
     bool ok = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK &&
         sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == !upgraded &&
-        sqlite3_column_int(stmt, 1) == upgraded;
+        sqlite3_column_int(stmt, 1) == upgraded && sqlite3_column_int(stmt, 2) == !upgraded &&
+        sqlite3_column_int(stmt, 3) == upgraded;
     if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
     return ok;
+}
+static int cip_callee_trace(unsigned type, void *ctx, void *statement, void *unused)
+{
+    (void)unused; const char *sql = sqlite3_sql(statement);
+    if (type == SQLITE_TRACE_PROFILE && sql && strstr(sql, "FROM refs WHERE enclosing=? ORDER BY"))
+        *(int *)ctx += sqlite3_stmt_status(statement, SQLITE_STMTSTATUS_SORT, 1);
+    return 0;
+}
+static bool cip_callee_parity(struct codeindex *old, struct codeindex *next)
+{
+    struct ci_ref a[8], b[8]; int sorts[2] = {0};
+    sqlite3 *da = ci_store_db(old->store), *db = ci_store_db(next->store);
+    if (sqlite3_trace_v2(da, SQLITE_TRACE_PROFILE, cip_callee_trace, &sorts[0]) != SQLITE_OK ||
+        sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, cip_callee_trace, &sorts[1]) != SQLITE_OK) return false;
+    bool ok = true;
+    for (int cap = 1; cap <= 8; cap *= 8) {
+        int na = codeindex_callees(old, "projection_main", a, cap);
+        int nb = codeindex_callees(next, "projection_main", b, cap);
+        ok = ok && na > 0 && na == nb && !memcmp(a, b, (size_t)na * sizeof(*a));
+    }
+    ok = sqlite3_trace_v2(da, 0, NULL, NULL) == SQLITE_OK && ok;
+    ok = sqlite3_trace_v2(db, 0, NULL, NULL) == SQLITE_OK && ok;
+    return ok && sorts[0] > 0 && sorts[1] == 0;
 }
 
 static bool cip_append(const char *root, const char *suffix, const char *text)
@@ -473,7 +501,7 @@ static bool cip_upgrade_step(const char *root, const char *comment,
     struct codeindex *next = codeindex_open(root);
     bool current = false;
     bool ok = cip_upgrade_next_ok(next, source, projection, &current) &&
-              cip_old_generation_ok(old, source, projection);
+              cip_old_generation_ok(old, source, projection) && cip_callee_parity(old, next);
     if (!ok) fprintf(stderr, "legacy refs upgrade: next=%d scans=%llu current=%d\n",
                      next != NULL, (unsigned long long)codeindex_test_source_scans(), current);
     codeindex_close(next);
@@ -505,17 +533,22 @@ static bool cip_incremental_ref_upgrade(const char *workspace)
 }
 
 /* Both conflicting names are legal SQLite schema but unusable as our index. */
-static bool cip_conflicting_ref_index(const char *root, bool table_collision)
+static bool cip_conflicting_ref_index(const char *root, int mode)
 {
     char path[PATH_MAX]; sqlite3 *db = NULL;
     if (!cip_index_path(root, path) || sqlite3_open(path, &db) != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return false;
     }
-    const char *sql = table_collision
-        ? "CREATE TABLE idx_refs_file_ordered(v INTEGER)"
-        : "CREATE INDEX idx_refs_file_ordered ON refs(ref_line)";
-    bool ok = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    static const char *const sqls[] = {
+        "CREATE INDEX idx_refs_file_ordered ON refs(ref_line)",
+        "CREATE TABLE idx_refs_file_ordered(v INTEGER)",
+        "CREATE INDEX idx_refs_enclosing_ordered ON refs(ref_line)",
+        "CREATE TABLE idx_refs_enclosing_ordered(v INTEGER)",
+        "CREATE INDEX idx_refs_enclosing_ordered ON refs(enclosing,ref_file,ref_line) WHERE ref_line>0"
+    };
+    if (mode < 0 || (size_t)mode >= sizeof(sqls)/sizeof(sqls[0])) { sqlite3_close(db); return false; }
+    bool ok = sqlite3_exec(db, sqls[mode], NULL, NULL, NULL) == SQLITE_OK;
     return sqlite3_close(db) == SQLITE_OK && ok;
 }
 
@@ -533,7 +566,7 @@ static bool cip_published_unchanged(const char *root, const struct stat *before,
     return ok;
 }
 
-static bool cip_conflict_setup(const char *root, bool table_collision,
+static bool cip_conflict_setup(const char *root, int mode,
                                uint8_t source[32], uint8_t projection[32])
 {
     if (!cip_write(root) || !cip_append(root, "second.c", "int second(void) { return 1; }\n")) return false;
@@ -541,15 +574,15 @@ static bool cip_conflict_setup(const char *root, bool table_collision,
     bool ok = initial && codeindex_source_root_sha3(initial, source) &&
         codeindex_retrieval_projection_root_sha3(initial, projection);
     codeindex_close(initial);
-    return ok && cip_legacy_ref_index(root) && cip_conflicting_ref_index(root, table_collision);
+    return ok && cip_legacy_ref_index(root) && cip_conflicting_ref_index(root, mode);
 }
 
-static bool cip_conflicting_upgrade(const char *workspace, bool table_collision)
+static bool cip_conflicting_upgrade(const char *workspace, int mode)
 {
     char root[PATH_MAX], path[PATH_MAX];
     uint8_t source[32], projection[32];
-    int n = snprintf(root, sizeof root, "%s/conflict-%d", workspace, table_collision);
-    if (n <= 0 || (size_t)n >= sizeof root || !cip_conflict_setup(root, table_collision, source, projection)) return false;
+    int n = snprintf(root, sizeof root, "%s/conflict-%d", workspace, mode);
+    if (n <= 0 || (size_t)n >= sizeof root || !cip_conflict_setup(root, mode, source, projection)) return false;
     struct stat before;
     bool ok = cip_index_path(root, path) && stat(path, &before) == 0 &&
         cip_published_unchanged(root, &before, source, projection) &&
@@ -561,9 +594,31 @@ static bool cip_conflicting_upgrade(const char *workspace, bool table_collision)
     bool unchanged = ok && cip_published_unchanged(root, &before, source, projection);
     if (!refused || !unchanged)
         fprintf(stderr, "conflicting refs index table=%d setup=%d refused=%d unchanged=%d scans=%llu\n",
-                table_collision, ok, refused, unchanged,
+                mode, ok, refused, unchanged,
                 (unsigned long long)codeindex_test_source_scans());
     return refused && unchanged;
+}
+
+static int cip_deny_enclosing(void *context, int action, const char *one,
+                              const char *two, const char *db, const char *trigger)
+{
+    (void)context; (void)two; (void)db; (void)trigger;
+    return action == SQLITE_CREATE_INDEX && one && !strcmp(one, "idx_refs_enclosing_ordered")
+        ? SQLITE_DENY : SQLITE_OK;
+}
+static bool cip_enclosing_ddl_refusal(void)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) return false;
+    sqlite3 *db = ci_store_db(store);
+    bool ok = sqlite3_exec(db, "DROP INDEX idx_refs_enclosing_ordered; CREATE INDEX idx_refs_enclosing ON refs(enclosing)", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_set_authorizer(db, cip_deny_enclosing, NULL) == SQLITE_OK &&
+        !ci_store_ensure_ref_order_index(db) && sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK;
+    sqlite3_stmt *stmt = NULL;
+    ok = ok && sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_refs_enclosing'", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1;
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    ci_store_close(store); return ok;
 }
 
 static int cip_check_index_migration(bool ready, const char *workspace)
@@ -575,6 +630,13 @@ static int cip_check_index_migration(bool ready, const char *workspace)
               ready && cip_conflicting_upgrade(workspace, false));
     CIP_CHECK("index-name table collision refuses staged publication",
               ready && cip_conflicting_upgrade(workspace, true));
+    CIP_CHECK("wrong-shape enclosing index refuses staged publication",
+              ready && cip_conflicting_upgrade(workspace, 2));
+    CIP_CHECK("enclosing index-name table collision refuses staged publication",
+              ready && cip_conflicting_upgrade(workspace, 3));
+    CIP_CHECK("partial enclosing index refuses staged publication",
+              ready && cip_conflicting_upgrade(workspace, 4));
+    CIP_CHECK("enclosing DDL refusal retains legacy index", cip_enclosing_ddl_refusal());
     return failures;
 }
 
