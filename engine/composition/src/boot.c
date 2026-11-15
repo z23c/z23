@@ -2912,7 +2912,7 @@ static bool boot_step_refold_from_anchor(struct app_context *ctx,
 
 /* UTXO/chain reconcile, the offline verbs, and the state-source
  * selection that decides between a bundle install and a from-anchor refold. */
-static bool boot_seq_select_state_source(struct app_context *ctx)
+static bool boot_seq_select_state_source(struct app_context *ctx, bool *installed)
 {
     if (boot_install_bundle_request_refused(ctx->datadir)) return false;
     boot_step_reconcile_utxo_chain();
@@ -2961,6 +2961,7 @@ static bool boot_seq_select_state_source(struct app_context *ctx)
     sync_benchmark_init(ctx->datadir); /* zcl.sync_benchmark.v1: arms this boot's phase receipt right before state-source selection (mirrors the manual ops.debug.rom_fetch.bundle command's own init call; idempotent). */
     struct boot_state_source_selection ssel;
     boot_select_state_source(&g_node_db, &g_state, ctx, &ssel);
+    *installed = ssel.auto_installed_bundle;
     if (ssel.do_from_anchor)
         return boot_step_refold_from_anchor(ctx, ssel.consumed_auto_refold);
     return !ssel.refused;
@@ -3496,10 +3497,7 @@ static bool boot_retry_old_cutover(struct app_context *ctx, struct boot_seq *seq
                                    const struct wallet_cutover_binding *binding)
 {
     struct boot_cutover_env env = boot_cutover_environment();
-    if (boot_cutover_retry_old(&env, ctx, seq->params, binding)) {
-        g_old_cutover_restart_binding = *binding;
-        g_cutover_exit_action = BOOT_CUTOVER_EXIT_RESTART;
-    }
+    if (boot_cutover_retry_old(&env, ctx, seq->params, binding)) boot_cutover_restart_arm(binding);
     return false;
 }
 
@@ -3531,8 +3529,10 @@ static bool boot_seq_load_chain(struct app_context *ctx, struct boot_seq *seq)
     if (!flysync_island_boot_after_index(ctx, &g_state)) return false;
     if (!boot_seq_reconcile_chain_state(ctx, seq)) return false;
     if (!boot_seq_load_sapling_tree(ctx)) return false;
-    if (!boot_seq_select_state_source(ctx)) return false;
+    bool installed = false; struct wallet_cutover_binding installed_fence;
+    if (!boot_seq_select_state_source(ctx, &installed)) return false;
     struct boot_cutover_env readiness_env = boot_cutover_environment();
+    if (boot_cutover_installed_restart(&readiness_env, ctx->datadir, installed, &installed_fence)) return false;
     if (!boot_cutover_publish_readiness(&readiness_env, ctx)) return false;
     if (!boot_seq_finalize_chain(ctx, seq)) return false;
     return boot_seq_resolve_tip(ctx, seq);

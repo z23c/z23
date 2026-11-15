@@ -354,7 +354,9 @@ static bool boot_cutover_load_chain_binding(struct boot_cutover_env *e, struct a
         e->state, csr_instance(), coins.height, &hash,
         expected->target_height, &installed_hash);
     if (restored != BOOT_PENDING_RESTORE_OK) {
-        LOG_ERROR("wallet", "pending wallet chain restore refused: %d", (int)restored);
+        LOG_ERROR("wallet", "pending wallet chain restore refused: %d (coins tip h=%d is %s the %zu-entry "
+                  "block index rebuilt from the projection)", (int)restored, coins.height, block_map_find(
+                  &e->state->map_block_index, &hash) ? "in" : "absent from", e->state->map_block_index.size);
         return false;
     }
     *tip = active_chain_tip(&e->state->chain_active);

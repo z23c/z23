@@ -73,6 +73,10 @@ struct wallet_cutover_binding;
 struct boot_bound_bundle_observation;
 bool boot_cutover_install_bound(struct boot_cutover_env *env, struct app_context *ctx,
     const struct chain_params *params, const struct boot_bound_bundle_observation *observation);
+/* After this boot's state-source selection installed a bundle, arm the restart
+ * handoff for the committed PENDING fence it left; `binding` receives it. */
+bool boot_cutover_installed_restart(struct boot_cutover_env *env, const char *datadir,
+    bool installed, struct wallet_cutover_binding *binding);
 bool boot_cutover_preflight_classify(struct boot_cutover_env *env, const char *datadir,
     enum boot_cutover_preflight_kind *kind, struct wallet_cutover_binding *binding);
 bool boot_cutover_preflight(struct boot_cutover_env *env, const char *datadir, bool *pending);

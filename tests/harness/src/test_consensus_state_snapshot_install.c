@@ -6716,6 +6716,34 @@ static bool csi_old_resume_precheck(struct node_db *node, struct wallet_sqlite *
         wallet_readiness_initialize(wallet, WALLET_READINESS_PENDING, present, generation) &&
         csi_old_wallet_fingerprint(node->db, fingerprint) && !memcmp(fingerprint, w->fingerprint, 32);
 }
+/* Post-install restart handoff: a fence that is not yet committed (OLD) never
+ * hands off and stays for the fail-closed readiness check; a committed fence
+ * hands off only when this boot installed, arming exactly its binding. */
+static bool csi_old_install_handoff(struct node_db *node, struct wallet_sqlite *ws,
+    const char *dir, const struct csi_old_witness *w, bool committed)
+{
+    struct boot_cutover_env env = {.node = node, .wallet_db = ws};
+    struct wallet_cutover_binding armed;
+    if (boot_old_cutover_restart_pending()) return false;
+    if (!committed)
+        return !boot_cutover_installed_restart(&env, dir, true, &armed) &&
+            !boot_old_cutover_restart_pending() && csi_old_still_fenced(ws, w);
+    bool skipped = !boot_cutover_installed_restart(&env, dir, false, &armed) &&
+        !boot_old_cutover_restart_pending();
+    bool handed = skipped && boot_cutover_installed_restart(&env, dir, true, &armed) &&
+        boot_old_cutover_restart_pending();
+    return handed && wallet_cutover_binding_equal(&armed, &w->binding) &&
+        csi_old_still_fenced(ws, w);
+}
+static bool csi_old_resume_with_handoff(struct node_db *node, struct main_state *main,
+    struct wallet_sqlite *ws, struct wallet *wallet, const struct csi_old_witness *w,
+    const char *root, const char *dir, const char *path, int dirfd)
+{
+    bool ok = csi_old_resume_precheck(node, ws, wallet, w, dirfd) &&
+        csi_old_install_handoff(node, ws, dir, w, false);
+    ok = csi_old_resume_check(node, main, ws, wallet, w, root, dir, path, dirfd, ok);
+    return ok && csi_old_install_handoff(node, ws, dir, w, true);
+}
 static void csi_old_advance_stages(int first, int last)
 {
     for (int stage = first; stage <= last; ++stage)
@@ -6756,8 +6784,7 @@ static bool csi_old_reopen(const char *root, const struct csi_old_witness *w)
     validate_headers_ensure_set_validator_for_test(csi_guarded_header_pass, NULL);
     csi_old_advance_stages(BOOT_STAGE_WALLET_LOADED + 1, BOOT_STAGE_BLOCK_INDEX_LOADED);
     int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    bool ok = csi_old_resume_precheck(node, ws, wallet, w, dirfd);
-    ok = csi_old_resume_check(node, main, ws, wallet, w, root, dir, f.path, dirfd, ok);
+    bool ok = csi_old_resume_with_handoff(node, main, ws, wallet, w, root, dir, f.path, dirfd);
     if (dirfd >= 0) close(dirfd);
     db_service_stop(&svc);
     app_runtime_set_current(NULL);

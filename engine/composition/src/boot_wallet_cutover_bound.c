@@ -123,3 +123,25 @@ bool boot_cutover_install_bound(struct boot_cutover_env *e, struct app_context *
     boot_cutover_restart_arm(&binding);
     return false;
 }
+
+/* A bundle installed by this boot's state-source selection commits a PENDING
+ * wallet fence. Like a bound install, it hands off to the next boot, whose
+ * COMMITTED preflight runs the verified pending restore and replay. Only a
+ * fence this boot just committed qualifies; any other PENDING row still
+ * reaches the fail-closed readiness check. */
+bool boot_cutover_installed_restart(struct boot_cutover_env *e, const char *datadir,
+    bool installed, struct wallet_cutover_binding *binding)
+{
+    if (!e || !datadir || !binding || !installed ||
+        wallet_sqlite_cutover_read(e->wallet_db, binding) != WALLET_CUTOVER_PENDING)
+        return false;
+    if (!boot_cutover_verify_committed(e, datadir, binding)) {
+        LOG_ERROR("wallet", "bundle install left a wallet cutover pending that does not "
+                  "verify as committed; refusing the restart handoff");
+        return false;
+    }
+    LOG_INFO("wallet", "bundle install committed a pending wallet cutover to h=%d; "
+             "restarting so the verified pending path completes it", binding->target_height);
+    boot_cutover_restart_arm(binding);
+    return true;
+}

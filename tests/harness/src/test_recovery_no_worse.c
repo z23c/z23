@@ -706,6 +706,18 @@ static int nw_prebinding_unavailable(struct nw_pending_restore_fixture *f,
     if (fd >= 0) close(fd);
     return failures;
 }
+/* A pending boot whose rebuilt index lacks the coins tip (a fresh node's
+ * projection holds no header for the installed seed) stays refused. */
+static int nw_pending_restore_absent_tip(struct nw_pending_restore_fixture *f,
+                                         struct block_index *old_tip, const struct uint256 *old_root)
+{
+    int failures = 0;
+    struct uint256 absent = f->tip_hash; absent.data[31] ^= 0x5a;
+    NW_CHECK("coins tip absent from the index refuses without publishing",
+        boot_wallet_pending_restore(&f->replay.ms, &f->csr, 2, &absent, 1, &f->installed_hash) ==
+            BOOT_PENDING_RESTORE_ANCESTRY_INVALID && nw_restore_view_is(f, old_tip, false, old_root));
+    return failures;
+}
 static int nw_pending_restore_case(void)
 {
     int failures = 0;
@@ -719,6 +731,7 @@ static int nw_pending_restore_case(void)
     failures += nw_prebinding_generation();
     int changes = sqlite3_total_changes(progress_store_db());
     failures += nw_prebinding_unavailable(&f, old_tip, &old_root);
+    failures += nw_pending_restore_absent_tip(&f, old_tip, &old_root);
     NW_CHECK("wrong height refuses without publishing",
         boot_wallet_pending_restore(&f.replay.ms, &f.csr, 3, &f.tip_hash, 1, &f.installed_hash) == BOOT_PENDING_RESTORE_ANCESTRY_INVALID &&
         nw_restore_view_is(&f, old_tip, false, &old_root));
