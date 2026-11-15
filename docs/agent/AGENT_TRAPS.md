@@ -49,13 +49,30 @@ historical fixture passes, then deploy/restart intentionally.
   classifies the running node's directory ("release": under
   `$HOME/.local/lib/z23/releases/` and not writable, versus "writable")
   before anything is written, and `deploy_local()` refuses up front with one
-  actionable message for the release case. Swapping the service onto a fresh
-  immutable release locally needs `make deploy` to accept an already-staged
-  release directory; that is open. `ship_exe_of()` strips the kernel's literal
-  `" (deleted)"` suffix before resolving; `ship_exe_live_of()` hands callers
-  that read or exec the running bytes the `/proc/<pid>/exe` handle, which stays
-  bound to the running inode after deletion. Pinned by `tools/ship.sh
-  --selftest` (`make check-ship-remote-transaction`).
+  actionable message for the release case. For a canonical service on an
+  immutable release, use the existing remote transaction on that same host
+  (`ZCL_SHIP_HOSTS=localhost ./tools/ship.sh --targets=remote`), with full
+  gates and a reviewed candidate satisfying `HEAD == origin/main` (ahead/behind
+  0/0). It stages or revalidates the exact immutable release, backs up the
+  prior standard `zzzzz-z23-ship-release.conf` for rollback during activation,
+  and refuses an effective `ExecStart` mismatch, naming any later shadowing
+  drop-in. Localhost alone is insufficient when a writable override exists:
+  build in a clean worktree at that candidate commit whose build root is not
+  the running executable's build root, preserve the exact prior process bytes
+  outside every build root, then preserve and move the override aside and
+  point the standard drop-in at those bytes with the complete prior argv and
+  source/commit/build-origin identity as the rollback state, verifying no
+  `ExecStart` or identity shadow. Otherwise ship can replace the rollback
+  bytes or hash a deleted/new pathname. Activation is process qualification,
+  not stable-health promotion. Direct `make deploy` into an immutable release
+  remains refused.
+  <!-- claim: symbol-present stage_remote tools/ship.sh # immutable release staging -->
+  <!-- claim: symbol-present ship_exec_guard_check tools/scripts/ship_progress_lib.sh # effective ExecStart shadow refusal -->
+  `ship_exe_of()` strips the kernel's literal `" (deleted)"` suffix before
+  resolving; `ship_exe_live_of()` hands callers that read or exec the running
+  bytes the `/proc/<pid>/exe` handle, which stays bound to the running inode
+  after deletion. Pinned by `tools/ship.sh --selftest`
+  (`make check-ship-remote-transaction`).
 - **Public connected-node tables can lag or cache old peer identity.** Verify
   the live socket before trusting a crawler row — a node that switched
   services can still show the prior service string in a public peer table
