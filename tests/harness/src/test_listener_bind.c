@@ -45,6 +45,82 @@ static uint16_t free_port(void)
     return port;
 }
 
+static platform_socket_t bf_reserve(uint16_t port, uint16_t *actual)
+{
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    struct sockaddr_storage ss;
+    socklen_t len = 0;
+    char text[NAME_SIZE];
+    if (fd != PLATFORM_SOCKET_INVALID &&
+        platform_socket_listen_address("127.0.0.1", port, false, &ss, &len) &&
+        platform_socket_bind(fd, (struct sockaddr *)&ss, len) == 0 &&
+        platform_socket_local_name(fd, text, sizeof(text), actual))
+        return fd;
+    if (fd != PLATFORM_SOCKET_INVALID) platform_socket_close(fd);
+    return PLATFORM_SOCKET_INVALID;
+}
+
+static platform_socket_t bf_reserve_redirect(uint16_t https)
+{
+    uint16_t actual = 0;
+    if (https <= 363) return PLATFORM_SOCKET_INVALID;
+    return bf_reserve((uint16_t)(https - 363), &actual);
+}
+
+struct bf_ports {
+    platform_socket_t fd[5];
+    uint16_t tls, fs, rpc, https;
+};
+
+static void bf_ports_close(struct bf_ports *p)
+{
+    for (size_t i = 0; i < 5; i++)
+        if (p->fd[i] != PLATFORM_SOCKET_INVALID) {
+            platform_socket_close(p->fd[i]);
+            p->fd[i] = PLATFORM_SOCKET_INVALID;
+        }
+}
+
+/* Release immediately before startup; another process can still claim a port. */
+static bool bf_ports_select(struct bf_ports *p)
+{
+    for (size_t i = 0; i < 5; i++) p->fd[i] = PLATFORM_SOCKET_INVALID;
+    for (int attempt = 0; attempt < 64; attempt++) {
+        p->fd[0] = bf_reserve(0, &p->https);
+        if (p->fd[0] == PLATFORM_SOCKET_INVALID) break;
+        p->fd[1] = bf_reserve_redirect(p->https);
+        if (p->fd[1] != PLATFORM_SOCKET_INVALID) break;
+        platform_socket_close(p->fd[0]);
+        p->fd[0] = PLATFORM_SOCKET_INVALID;
+    }
+    if (p->fd[1] != PLATFORM_SOCKET_INVALID) {
+        p->fd[2] = bf_reserve(0, &p->tls);
+        p->fd[3] = bf_reserve(0, &p->fs);
+        p->fd[4] = bf_reserve(0, &p->rpc);
+    }
+    bool ok = p->fd[1] != PLATFORM_SOCKET_INVALID && p->fd[2] != PLATFORM_SOCKET_INVALID &&
+              p->fd[3] != PLATFORM_SOCKET_INVALID && p->fd[4] != PLATFORM_SOCKET_INVALID;
+    if (!ok) bf_ports_close(p);
+    return ok;
+}
+
+static int case_redirect_port_occupied(void)
+{
+    int failures = 0;
+    TEST_CASE("listener_bind: an occupied derived redirect port rejects the candidate")
+    {
+        struct bf_ports ports;
+        ASSERT(bf_ports_select(&ports));
+        platform_socket_t candidate = bf_reserve_redirect(ports.https);
+        bool rejected = candidate == PLATFORM_SOCKET_INVALID;
+        if (candidate != PLATFORM_SOCKET_INVALID) platform_socket_close(candidate);
+        bf_ports_close(&ports);
+        ASSERT(rejected);
+    }
+    TEST_END
+    return failures;
+}
+
 static bool name_is(bool ok, const char *got, const char *want)
 {
     if (ok && strcmp(got, want) == 0)
@@ -300,19 +376,17 @@ static int case_boot_frontend_bind(const char *dir)
 
     TEST_CASE("listener_bind: the boot frontend start path binds every listener to -bind")
     {
-        uint16_t tls_port = free_port();
-        uint16_t fs_port = free_port();
-        uint16_t rpc_port = free_port();
-        uint16_t https_port = free_port();
-        ASSERT(tls_port != 0 && fs_port != 0 && rpc_port != 0 && https_port > 363);
-        bf_set_tls_port(tls_port);
+        struct bf_ports ports;
+        ASSERT(bf_ports_select(&ports));
+        bf_set_tls_port(ports.tls);
         int saved = atomic_load(&g_deferred_proof_validation_below_height);
         atomic_store(&g_deferred_proof_validation_below_height, -1);
-        bool started = bf_start(dir, "127.0.0.1", fs_port, rpc_port, https_port);
+        bf_ports_close(&ports);
+        bool started = bf_start(dir, "127.0.0.1", ports.fs, ports.rpc, ports.https);
         bool fs_ok = started && bf_wait_fs() && bf_fs_is("::ffff:127.0.0.1");
         bool https_ok = started && https_names(false, "127.0.0.1");
         bool redirect_ok = started && https_names(true, "127.0.0.1");
-        bool rpc_ok = started && bf_rpc_tls_is(tls_port, "127.0.0.1");
+        bool rpc_ok = started && bf_rpc_tls_is(ports.tls, "127.0.0.1");
         bf_stop();
         atomic_store(&g_deferred_proof_validation_below_height, saved);
         ASSERT(started);
@@ -331,18 +405,16 @@ static int case_boot_frontend_deferred(const char *dir)
 
     TEST_CASE("listener_bind: a queued HTTPS start keeps the -bind address")
     {
-        uint16_t tls_port = free_port();
-        uint16_t fs_port = free_port();
-        uint16_t rpc_port = free_port();
-        uint16_t https_port = free_port();
-        ASSERT(tls_port != 0 && fs_port != 0 && rpc_port != 0 && https_port > 363);
-        bf_set_tls_port(tls_port);
+        struct bf_ports ports;
+        ASSERT(bf_ports_select(&ports));
+        bf_set_tls_port(ports.tls);
         int saved = atomic_load(&g_deferred_proof_validation_below_height);
         atomic_store(&g_deferred_proof_validation_below_height, 20000);
         https_deferred_start_set_starter_for_testing(bf_record_starter);
         bf_starter_calls = 0;
         bf_starter_bind[0] = '\0';
-        bool started = bf_start(dir, "127.0.0.1", fs_port, rpc_port, https_port);
+        bf_ports_close(&ports);
+        bool started = bf_start(dir, "127.0.0.1", ports.fs, ports.rpc, ports.https);
         https_deferred_start_check();
         bool queued = started && bf_starter_calls == 1 &&
                       name_is(true, bf_starter_bind, "127.0.0.1");
@@ -381,6 +453,7 @@ int test_listener_bind(void)
     failures += case_fs_bound(dir);
     failures += case_fs_unparsable(dir);
     failures += case_rpc_tls(dir);
+    failures += case_redirect_port_occupied();
     failures += case_boot_frontend_bind(dir);
     failures += case_boot_frontend_deferred(dir);
 
