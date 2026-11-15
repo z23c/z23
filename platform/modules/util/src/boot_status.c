@@ -44,7 +44,17 @@ static int64_t g_progress_published_mono_ms;
  * escapes anything. */
 static char    g_blocker[64];
 static char    g_blocker_reason[256];
+static char    g_source_id_sha256[65];
 static _Atomic uint64_t g_publish_sequence;
+
+static bool boot_status_source_id_valid(const char *id)
+{
+    if (!id || strnlen(id, 65) != 64) return false;
+    for (size_t i = 0; i < 64; i++)
+        if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f')))
+            return false;
+    return true;
+}
 /* Per-stage transition marks: the ordinal each note_stage moved TO and its
  * monotonic offset from boot start. Only observed transitions are ever
  * appended — a stage nobody reached has no entry to serialize. */
@@ -119,6 +129,11 @@ size_t boot_status_write_json(const struct boot_status_snapshot *snap,
     struct json_value root;
     json_init(&root);
     json_set_object(&root);
+    if (boot_status_source_id_valid(snap->source_id_sha256) &&
+        !json_push_kv_str(&root, "source_id_sha256", snap->source_id_sha256)) {
+        json_free(&root);
+        return 0;
+    }
     (void)json_push_kv_str(&root, "schema", ZCL_BOOT_STATUS_SCHEMA);
     (void)json_push_kv_str(&root, "phase", snap->phase);
     (void)json_push_kv_str(&root, "stage", snap->stage);
@@ -174,6 +189,7 @@ size_t boot_status_write_json(const struct boot_status_snapshot *snap,
 static void boot_status_snapshot_locked(struct boot_status_snapshot *out)
 {
     memset(out, 0, sizeof(*out));
+    memcpy(out->source_id_sha256, g_source_id_sha256, sizeof(out->source_id_sha256));
     bool rb = false, sv = false;
     const char *phase = boot_status_phase_for_stage(g_stage_ordinal, &rb, &sv);
     snprintf(out->phase, sizeof(out->phase), "%s", phase);
@@ -285,7 +301,7 @@ static void boot_status_publish_locked(void)
 }
 
 /* ── Public writer API ───────────────────────────────────────────────── */
-void boot_status_init(const char *datadir)
+void boot_status_init_source(const char *datadir, const char *source_id)
 {
     pthread_mutex_lock(&g_lock);
     if (!datadir || !datadir[0]) {
@@ -294,6 +310,9 @@ void boot_status_init(const char *datadir)
         return;
     }
     snprintf(g_datadir, sizeof(g_datadir), "%s", datadir);
+    g_source_id_sha256[0] = '\0';
+    if (boot_status_source_id_valid(source_id))
+        memcpy(g_source_id_sha256, source_id, sizeof(g_source_id_sha256));
     g_stage_ordinal = (int)boot_stage_current();
     g_height = -1;
     g_activity[0] = '\0';
@@ -308,6 +327,11 @@ void boot_status_init(const char *datadir)
     g_last_heartbeat_unix = 0;
     boot_status_publish_locked();
     pthread_mutex_unlock(&g_lock);
+}
+
+void boot_status_init(const char *datadir)
+{
+    boot_status_init_source(datadir, NULL);
 }
 
 void boot_status_note_stage(int stage)
@@ -548,6 +572,15 @@ static bool boot_status_read_progress(const struct json_value *doc,
 /* Optional: absent on every boot that has not stopped on purpose. Read
  * through a NULL-guard because json_get_str of a missing key is not a
  * string and printing it would be the reader's own silent lie. */
+static void boot_status_read_source(const struct json_value *doc,
+                                    struct boot_status_snapshot *out)
+{
+    const struct json_value *source = json_get(doc, "source_id_sha256");
+    if (source && source->type == JSON_STR &&
+        boot_status_source_id_valid(json_get_str(source)))
+        memcpy(out->source_id_sha256, json_get_str(source), sizeof(out->source_id_sha256));
+}
+
 static bool boot_status_read_blocker(const struct json_value *doc,
                                      struct boot_status_snapshot *out)
 {
@@ -659,6 +692,7 @@ bool boot_status_read(const char *datadir, struct boot_status_snapshot *out,
         return false;
     }
     boot_status_copy_required(&doc, out);
+    boot_status_read_source(&doc, out);
     if (!boot_status_read_progress(&doc, out, expected_serving)) {
         json_free(&doc);
         boot_status_set_err(err, errlen,

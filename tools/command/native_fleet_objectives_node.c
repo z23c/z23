@@ -274,8 +274,13 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
         (void)snprintf(updated, sizeof(updated), "%lld", (long long)snap.updated_unix);
     else
         (void)snprintf(updated, sizeof(updated), "unavailable");
-    (void)snprintf(v.note, sizeof(v.note),
-                   "latest boot: started_unix=%s updated_unix=%s; source identity unavailable",
-                   started, updated);
+    if (snap.source_id_sha256[0])
+        (void)snprintf(v.note, sizeof(v.note),
+                       "latest boot: started_unix=%s updated_unix=%s; source_id_sha256=%s",
+                       started, updated, snap.source_id_sha256);
+    else
+        (void)snprintf(v.note, sizeof(v.note),
+                       "latest boot: started_unix=%s updated_unix=%s; source identity unavailable",
+                       started, updated);
     return v;
 }

@@ -4,6 +4,8 @@
 
 #include "config/boot_datadir_lock.h"
 #include "config/boot_error.h"
+#include "util/boot_status.h"
+#include "util/clientversion.h"
 
 #include <stdio.h>
 #include <fcntl.h>
@@ -14,6 +16,15 @@
 #endif
 #include <unistd.h>
 #if !defined(_WIN32)
+
+static bool bdl_beacon_source(const char *dir)
+{
+    struct boot_status_snapshot s;
+    char why[128];
+    const char *id = zcl_build_source_id_sha256();
+    return boot_status_read(dir, &s, why, sizeof(why)) &&
+           (strlen(id) == 64 ? !strcmp(s.source_id_sha256, id) : !s.source_id_sha256[0]);
+}
 
 #define BDL_CHECK(name, expr) do {                                      \
     printf("boot_datadir_lock: %s... ", (name));                       \
@@ -170,7 +181,7 @@ static int test_boot_datadir_lock_owner_beacon_stable(void)
     }
 
     bool owner_ready = false;
-    bool child_clean = false;
+    bool child_clean = false, source_ok = false;
     struct bdl_beacon_probe probe = {false, false, false};
     if (child > 0) {
         close(ready_pipe[1]);
@@ -178,6 +189,7 @@ static int test_boot_datadir_lock_owner_beacon_stable(void)
         char ready = 0;
         owner_ready = read(ready_pipe[0], &ready, 1) == 1 && ready == '1';
         close(ready_pipe[0]);
+        if (owner_ready) source_ok = bdl_beacon_source(dir);
         if (owner_ready)
             bdl_probe_refusal(dir, beacon_path, &probe);
         char release = '1';
@@ -192,6 +204,7 @@ static int test_boot_datadir_lock_owner_beacon_stable(void)
     }
     BDL_CHECK("owner beacon is readable, non-empty and under 64 KiB",
               pipes_ok && owner_ready && probe.beacon_read);
+    BDL_CHECK("owner beacon identifies its compiled source when available", source_ok);
     BDL_CHECK("second acquire is refused while the owner holds the datadir",
               probe.parent_refused);
     BDL_CHECK("refused acquire leaves owner beacon byte, inode and mtime intact",

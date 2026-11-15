@@ -22,6 +22,7 @@
 #include "test/test_core.h"
 #include "util/boot_status.h"
 #include "util/boot_phase.h"
+#include "command/native_command.h"
 #include "platform/private_file.h"
 #include "base/log_level.h"
 
@@ -118,6 +119,47 @@ static void bs_write_file(const char *dir, const char *name, const char *body)
             (void)!write(fd, body, strlen(body));
         close(fd);
     }
+}
+
+static bool bs_source_projection(const char *dir, const char *id)
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", dir);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.v1");
+    if (ok) zcl_native_handle_core_node_bootstatus(&request, &reply);
+    const struct json_value *source = json_get(&reply.data, "source_id_sha256");
+    ok = ok && reply.exit_code == ZCL_COMMAND_EXIT_OK && source && source->type == JSON_STR &&
+         !strcmp(json_get_str(source), id);
+    zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+static int bs_source_checks(const char *dir)
+{
+    int failures = 0;
+    const char *id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    struct boot_status_snapshot s;
+    char why[128], raw[1024];
+    boot_status_init_source(dir, id);
+    BS_CHECK("initial beacon identifies its source", boot_status_read(dir, &s, why, sizeof(why)) && !strcmp(s.source_id_sha256, id));
+    BS_CHECK("bootstatus projects the source", bs_source_projection(dir, id));
+    boot_status_note_stage((int)BOOT_STAGE_DB_OPEN);
+    BS_CHECK("updated beacon retains its source", boot_status_read(dir, &s, why, sizeof(why)) && !strcmp(s.source_id_sha256, id));
+    boot_status_init_source(dir, "unknown");
+    BS_CHECK("unknown source is unavailable", boot_status_read(dir, &s, why, sizeof(why)) && !s.source_id_sha256[0]);
+    boot_status_init_source(dir, "bad");
+    BS_CHECK("invalid source is unavailable", boot_status_read(dir, &s, why, sizeof(why)) && !s.source_id_sha256[0]);
+    boot_status_init(NULL);
+    (void)snprintf(raw, sizeof(raw), "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":1000,\"updated_unix\":1137,\"elapsed_s\":137,\"source_id_sha256\":\"%s\\u0000tail\"}", id);
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME, raw);
+    BS_CHECK("embedded NUL remains invalid JSON", !boot_status_read(dir, &s, why, sizeof(why)));
+    (void)snprintf(raw, sizeof(raw), "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":1000,\"updated_unix\":1137,\"elapsed_s\":137,\"source_id_sha256\":\"%s\",\"extra\":\"\\u0000\"}", id);
+    bs_write_file(dir, ZCL_BOOT_STATUS_FILENAME, raw);
+    BS_CHECK("escaped NUL in unrelated field remains invalid JSON", !boot_status_read(dir, &s, why, sizeof(why)));
+    return failures;
 }
 
 static int bs_diagnostic_checks(const char *dir)
@@ -353,10 +395,13 @@ int test_boot_status(void)
         return failures;
 
     failures += bs_diagnostic_checks(dir);
+    failures += bs_source_checks(dir);
 
     {
         struct boot_status_snapshot in;
         memset(&in, 0, sizeof(in));
+        snprintf(in.source_id_sha256, sizeof(in.source_id_sha256), "%s",
+                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         snprintf(in.phase, sizeof(in.phase), "loading");
         snprintf(in.stage, sizeof(in.stage), "db_open");
         in.stage_ordinal = (int32_t)BOOT_STAGE_DB_OPEN;
@@ -383,6 +428,7 @@ int test_boot_status(void)
         char why[128];
         bool ok = boot_status_read(dir, &out, why, sizeof(why));
         BS_CHECK("read recovered the beacon", ok);
+        BS_CHECK("source identity round-trips", ok && strcmp(out.source_id_sha256, in.source_id_sha256) == 0);
         BS_CHECK("phase round-trips", strcmp(out.phase, "loading") == 0);
         BS_CHECK("stage round-trips", strcmp(out.stage, "db_open") == 0);
         BS_CHECK("stage_ordinal round-trips",

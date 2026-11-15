@@ -71,6 +71,9 @@ extern "C" {
 /* Parsed view of a boot_status.json document. All string fields are
  * NUL-terminated fixed buffers so the reader never allocates. */
 struct boot_status_snapshot {
+    /* Compiled source-tree identity, not a Git commit or executable digest;
+     * empty when absent, unknown or invalid. */
+    char    source_id_sha256[65];
     char    phase[32];       /* coarse category, derived from the stage */
     char    stage[64];       /* boot_stage_name() at last update */
     int32_t stage_ordinal;   /* enum boot_stage value, -1 if absent */
@@ -113,6 +116,9 @@ struct boot_status_snapshot {
  * clock. Passing NULL/empty disarms the writer (subsequent note/set calls
  * no-op) — used by tests and by boot modes that have no datadir. */
 void boot_status_init(const char *datadir);
+/* As init, with an optional exact lowercase source identity on the first
+ * beacon. Unknown or invalid identities are recorded as unavailable. */
+void boot_status_init_source(const char *datadir, const char *source_id);
 
 /* Record a boot-stage transition and rewrite the beacon. `stage` is an
  * `enum boot_stage` ordinal (passed as int to keep this header free of the

@@ -2728,6 +2728,8 @@ static const char *nc_bootstatus_datadir(const struct zcl_command_request *req)
 static void nc_bootstatus_fill(struct zcl_command_reply *reply,
                                const struct boot_status_snapshot *s)
 {
+    if (s->source_id_sha256[0])
+        (void)json_push_kv_str(&reply->data, "source_id_sha256", s->source_id_sha256);
     (void)json_push_kv_str(&reply->data, "phase", s->phase);
     (void)json_push_kv_str(&reply->data, "stage", s->stage);
     (void)json_push_kv_int(&reply->data, "stage_ordinal", s->stage_ordinal);

@@ -1041,6 +1041,15 @@ static struct zcl_objective_value fox_measure(const char *brief,
     return zcl_objectives_measure(&o, id);
 }
 
+static bool fox_boot_source_attribution(const char *path, const char *datadir)
+{
+    if (!fox_write(path, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":1000,\"updated_unix\":1137,\"elapsed_s\":137,\"source_id_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}")) return false;
+    struct zcl_objective_value v = fox_measure(FOX_NO_BRIEF, datadir, "node_warm_restart_s");
+    return v.measured && v.value == 137 && strstr(v.note, "started_unix=1000") &&
+           strstr(v.note, "updated_unix=1137") &&
+           strstr(v.note, "source_id_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+}
+
 static int fox_case_next(void)
 {
     int failures = 0;
@@ -2187,6 +2196,7 @@ int test_fleet_objectives(void)
         ASSERT(strstr(v.note, "source identity unavailable") != NULL);
         char path[1200];
         (void)snprintf(path, sizeof(path), "%s/boot_status.json", dd);
+        ASSERT(fox_boot_source_attribution(path, dd));
         ASSERT(fox_write(path, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":0,\"updated_unix\":0,\"elapsed_s\":0}"));
         v = fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
         ASSERT(v.measured);
