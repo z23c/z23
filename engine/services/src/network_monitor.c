@@ -317,8 +317,22 @@ static void nm_group_key_of(const struct p2p_node *node, nm_group_key_t out)
     zcl_hex_encode(g, len, out);
 }
 
-/* Snapshot current peers into obs[] (bounded), with each peer's address-group
- * key in the parallel groups[] (may be NULL). Returns the count. */
+static void nm_copy_user_agent(char *dst, size_t size, const char *src)
+{
+    size_t i = 0;
+    bool visible = false;
+    while (i + 1 < size && src[i]) {
+        unsigned char c = (unsigned char)src[i];
+        dst[i++] = (c >= 32 && c <= 126) ? (char)c : '?';
+        if (dst[i - 1] != ' ')
+            visible = true;
+    }
+    dst[i] = '\0';
+    if (!visible)
+        snprintf(dst, size, "unknown");
+}
+
+/* Snapshot peers and their optional address-group keys. */
 static int nm_snapshot_peers(struct db_peer_chain_observation *obs,
                              nm_group_key_t *groups, int max,
                              int64_t now_unix)
@@ -341,8 +355,8 @@ static int nm_snapshot_peers(struct db_peer_chain_observation *obs,
         memset(o, 0, sizeof(*o));
         o->peer_id = (int64_t)node->id;
         snprintf(o->addr, sizeof(o->addr), "%.127s", node->addr_name);
-        snprintf(o->user_agent, sizeof(o->user_agent), "%.95s",
-                 node->clean_sub_ver);
+        nm_copy_user_agent(o->user_agent, sizeof(o->user_agent),
+                           node->clean_sub_ver);
         o->version = node->version;
         o->best_height = node->starting_height;
         o->latency_us = node->avg_latency_us;

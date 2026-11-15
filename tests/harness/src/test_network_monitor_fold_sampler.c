@@ -150,6 +150,23 @@ nms_row(const struct db_peer_chain_observation *rows, int n, int64_t id)
     return NULL;
 }
 
+static int nms_check_agents(const struct db_peer_chain_observation *rows, int n)
+{
+    int failures = 0;
+    const struct db_peer_chain_observation *r1 = nms_row(rows, n, 1);
+    const struct db_peer_chain_observation *r3 = nms_row(rows, n, 3);
+    const struct db_peer_chain_observation *r4 = nms_row(rows, n, 4);
+    const struct db_peer_chain_observation *r5 = nms_row(rows, n, 5);
+    const struct db_peer_chain_observation *r9 = nms_row(rows, n, 9);
+    NMS_CHECK(r1 && strcmp(r1->user_agent, "unknown") == 0);
+    NMS_CHECK(r3 && strcmp(r3->user_agent, "a?b") == 0);
+    NMS_CHECK(r4 && strcmp(r4->user_agent, "a?b") == 0);
+    NMS_CHECK(r5 && strcmp(r5->user_agent, "unknown") == 0);
+    NMS_CHECK(r9 && strlen(r9->user_agent) == 95 &&
+              strspn(r9->user_agent, "X") == 95);
+    return failures;
+}
+
 static int nms_check_rows(struct node_db *db, const char *our_hex)
 {
     int failures = 0;
@@ -161,7 +178,7 @@ static int nms_check_rows(struct node_db *db, const char *our_hex)
     if (!r2)
         return failures;
     NMS_CHECK(strcmp(r2->addr, "20.1.0.2:8033") == 0);
-    NMS_CHECK(strcmp(r2->user_agent, "/ua2/") == 0);
+    NMS_CHECK(strcmp(r2->user_agent, "/ua+2!#[]/") == 0);
     NMS_CHECK(r2->version == 170102);
     NMS_CHECK(r2->best_height == 10); /* vote 10 beats handshake 4 */
     NMS_CHECK(r2->latency_us == 1002);
@@ -171,6 +188,7 @@ static int nms_check_rows(struct node_db *db, const char *our_hex)
     NMS_CHECK(strcmp(r2->tip_hash, our_hex) == 0);
     const struct db_peer_chain_observation *r1 = nms_row(rows, n, 1);
     NMS_CHECK(r1 && r1->inbound == 1 && strcmp(r1->tip_hash, our_hex) == 0);
+    failures += nms_check_agents(rows, n);
     const struct db_peer_chain_observation *r9 = nms_row(rows, n, 9);
     NMS_CHECK(r9 && r9->best_height == 12 && r9->tip_hash[0] == 'c');
     const struct db_peer_chain_observation *r10 = nms_row(rows, n, 10);
@@ -229,6 +247,13 @@ int network_monitor_fold_sampler_tests(void)
     sync_monitor_init();
     int used = nms_build_peers(our_hex);
     nms_fill_votes_and_evict();
+    g_nodes[0].clean_sub_ver[0] = 0;
+    snprintf(g_nodes[1].clean_sub_ver, sizeof(g_nodes[1].clean_sub_ver), "/ua+2!#[]/");
+    memset(g_nodes[7].clean_sub_ver, 'X', 120);
+    g_nodes[7].clean_sub_ver[120] = 0;
+    snprintf(g_nodes[2].clean_sub_ver, sizeof(g_nodes[2].clean_sub_ver), "a\001b");
+    snprintf(g_nodes[3].clean_sub_ver, sizeof(g_nodes[3].clean_sub_ver), "a\200b");
+    snprintf(g_nodes[4].clean_sub_ver, sizeof(g_nodes[4].clean_sub_ver), " ");
     for (int i = 0; i < used; i++)
         g_ptrs[i] = &g_nodes[i];
     g_ptrs[used] = NULL; /* a NULL slot inside the array is skipped */
