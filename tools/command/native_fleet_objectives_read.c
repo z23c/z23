@@ -1895,14 +1895,28 @@ static bool obj_sync_number(const struct json_value *v, int64_t *out)
     return false;
 }
 
-/* Keeps the newest measured record; a later line wins a tie in ts. */
+/* The wall clock of a record, or -1 for a run that ended without one: only a
+ * verdict "fail" (the harness RAN and the node never synced) counts as a run
+ * with no wall clock. A skip, or any other row without a wall clock, is not a
+ * measurement. False when the row is not a run at all. */
+static bool obj_sync_wall(const struct json_value *row, int64_t *wall)
+{
+    if (obj_sync_number(json_get(row, "wall_clock_seconds"), wall))
+        return true;
+    if (strcmp(json_get_str(json_get(row, "verdict")), "fail") != 0)
+        return false;
+    *wall = -1;
+    return true;
+}
+
+/* Keeps the newest run; a later line wins a tie in ts. */
 static void obj_sync_row(const struct json_value *row,
                          struct obj_sync_newest *n)
 {
     int64_t ts, wall;
     const char *s;
     if (!obj_sync_number(json_get(row, "ts"), &ts) ||
-        !obj_sync_number(json_get(row, "wall_clock_seconds"), &wall))
+        !obj_sync_wall(row, &wall))
         return;
     if (n->have && ts < n->ts)
         return;
@@ -2048,13 +2062,19 @@ static struct zcl_objective_value obj_fresh_node_sync_eta_s(
                        (long long)age_h, n.verdict);
         return v;
     }
-    /* Fail closed: a run that did not pass (fail, seam, skip) timed
+    /* Fail closed: a run that did not pass (fail, seam, stalled) timed
      * something other than a completed sync, whatever its wall clock. */
     if (strcmp(n.verdict, "pass") != 0) {
+        char wall[32] = "none";
+        if (n.wall_s >= 0)
+            (void)snprintf(wall, sizeof(wall), "%lld s", (long long)n.wall_s);
+        /* The run happened and failed: that is UNMET, with the reason kept,
+         * never "unmeasured" (a P0 product failure must not hide there). */
+        v.unmet = true;
         (void)snprintf(v.reason, sizeof(v.reason),
                        "newest stopwatch run did not pass (verdict %s, "
-                       "wall %lld s, age %lld h)",
-                       n.verdict, (long long)n.wall_s, (long long)age_h);
+                       "wall %s, age %lld h)",
+                       n.verdict, wall, (long long)age_h);
         return v;
     }
     /* Fail closed: a local-peer run is a proxy, never a stranger's sync. It

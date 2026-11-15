@@ -227,7 +227,7 @@ results print `n/a (n<3)`; executors with no predictions are capped at C.
 ### Objectives
 
 `z23-dev fleet objectives [--format=json]` prints each named objective with
-its current value, target and status (`met`, `unmet`, `unmeasured(<reason>)`).
+its current value, target and status (`met`, `unmet`, `unmet(<reason>)`, `unmeasured(<reason>)`).
 The closed catalog is [`engine/composition/objectives.def`](../../engine/composition/objectives.def):
 `landing_latency_s`, `landing_attempts_per_train`, `proof_lint_wall_s`,
 `proof_test_wall_s`, `proof_wall_s`, `commits_landed_today`,
@@ -241,6 +241,28 @@ soonest expiry among the newest-epoch pairings in `$HOME/.local/state/z23-tunnel
 0 when any peer's newest epoch is expired or revoked and `unmeasured(<reason naming the
 directory>)` when the store cannot be read or names more than 64 peers (cap 64); it is read-only,
 does not read the pre-shared key; opening the pairing profile reads the device identity key into memory only, and it is cleansed on close.
+`fresh_node_sync_eta_s` reads the C3 stopwatch ledger (`ZCL_C3_STOPWATCH_HISTORY`, else
+`$HOME/.local/state/zclassic23-c3-stopwatch/history.jsonl`, the file
+`tools/scripts/c3_stopwatch_run_and_record.sh` appends to). When the newest run in the
+last 7 days did not pass, the row is `unmet(<reason>)` (verdict, wall seconds or `none`,
+age in hours), never `unmeasured`: a node that cannot finish its first start is a product
+failure, not a missing measurement. A newest row with verdict `fail` counts as that run even
+though it carries no wall clock. Only "no ledger", an unreadable ledger, no run in 7 days or a
+local-peer proxy stay `unmeasured(<reason>)`.
+Order in `brief` (and in `next`): an unmet `fresh_node_sync_eta_s` first, then an unmet
+`node_tip_lag_blocks`, then product before lab and the largest gap. A row that is `unmet`
+without a number ranks by that order; it has no gap to compare.
+`brief` skips a card a lane already holds: a worktree (`git worktree list --porcelain`)
+whose branch name or directory name (last path component) equals the card name, or starts
+with the card name and `-`, takes it, and a name that only shares a prefix does not. The
+reply lists the skipped cards in `taken`; when every unmet card is taken it returns the top
+one with `all_taken: true`. `worktree_scan` is `ok` or `unavailable: <why>`: when git cannot
+list worktrees nothing counts as taken, as before. An explicit `id` is never skipped. The
+`worktrees` input names a file of that porcelain text, read instead of git (tests).
+`node_build_lag_commits` (the commits on origin/main the public node's build lacks) is not
+in the catalog: neither the status brief nor `boot_status.json` carries a build commit
+(`boot_status.json` has only `source_id_sha256`, a source-tree digest that is not a git
+commit), so the row waits for the node to publish its build commit through one of them.
 Each row has a class: `product` (about the node a user runs: `node_rss_mb`,
 `node_tip_lag_blocks`, `node_warm_restart_s`, `fresh_node_sync_eta_s`) or `lab` (about
 the machinery that builds it), declared in the catalog's class column. The three node

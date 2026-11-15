@@ -36,7 +36,7 @@ static void obj_row_json(const struct zcl_objective_row *row,
                          const struct zcl_objective_value *value,
                          struct json_value *out)
 {
-    char status[80];
+    char status[ZCL_OBJECTIVES_REASON_MAX + 32];
     json_set_object(out);
     (void)json_push_kv_str(out, "id", row->id);
     (void)json_push_kv_str(out, "class", row->class_);
@@ -182,36 +182,93 @@ static const char *obj_class(const struct json_value *row)
     return (c && c[0]) ? c : "lab";
 }
 
-/* The measured, unmet row to work on: a product row always outranks a lab
- * row, the largest gap wins inside a class, and the first one in catalog
- * order wins a tie. NULL when no measured row is unmet. The reply's `next`
+/* The gap of an unmet row that has no number (its run failed, so there is no
+ * value to subtract): larger than any measured gap. */
+#define OBJ_GAP_NO_NUMBER 1e12
+
+/* The two outcomes a stranger meets first, in the order they are taken: a
+ * node that cannot finish its first sync, then one that is behind the
+ * network. They rank inside the product class by this tier, before the gap,
+ * so a P0 failure is never outbid by a larger memory gap. Every other row
+ * shares the last tier and keeps the gap order, then the catalog order. */
+static int obj_tier(const struct json_value *row)
+{
+    const char *id = json_get_str(json_get(row, "id"));
+    if (strcmp(id, "fresh_node_sync_eta_s") == 0)
+        return 0;
+    if (strcmp(id, "node_tip_lag_blocks") == 0)
+        return 1;
+    return 2;
+}
+
+/* The row's gap, or false when the row is not unmet. A row that is unmet
+ * without a measured value (status "unmet(<reason>)") carries no number. */
+static bool obj_unmet_gap(const struct json_value *row, double *gap)
+{
+    const char *status = json_get_str(json_get(row, "status"));
+    bool is_max;
+    if (!json_get_bool(json_get(row, "measured"))) {
+        *gap = OBJ_GAP_NO_NUMBER;
+        return strncmp(status, "unmet(", 6) == 0;
+    }
+    if (strcmp(status, "unmet") != 0)
+        return false;
+    is_max = strcmp(json_get_str(json_get(row, "direction")), "max") == 0;
+    *gap = obj_gap(is_max, json_get_int(json_get(row, "value")),
+                   json_get_int(json_get(row, "target")));
+    return true;
+}
+
+struct obj_rank {
+    bool product;
+    int tier;
+    double gap;
+};
+
+/* True when `a` outranks `b`: product before lab, then the lower tier, then
+ * the larger gap. A tie keeps the earlier catalog row, so this is strict. */
+static bool obj_outranks(const struct obj_rank *a, const struct obj_rank *b)
+{
+    if (a->product != b->product)
+        return a->product;
+    if (a->tier != b->tier)
+        return a->tier < b->tier;
+    return a->gap > b->gap;
+}
+
+/* The unmet row to work on: a product row outranks a lab row, the P0 tiers
+ * (fresh_node_sync_eta_s, then node_tip_lag_blocks) outrank the rest of the
+ * product rows, the largest gap wins inside a tier, and the first one in
+ * catalog order wins a tie. NULL when no row is unmet. The reply's `next`
  * and the screen's closing line both come through here. */
 static const struct json_value *obj_pick_next(const struct json_value *rows,
                                               double *gap_out)
 {
     const struct json_value *best = NULL;
-    double best_gap = 0.0;
-    bool best_product = false;
+    struct obj_rank best_rank = {false, 0, 0.0};
     for (size_t i = 0; i < rows->num_children; i++) {
         const struct json_value *row = &rows->children[i];
-        bool is_max, product;
-        double gap;
-        if (!json_get_bool(json_get(row, "measured")) ||
-            strcmp(json_get_str(json_get(row, "status")), "unmet") != 0)
+        struct obj_rank rank;
+        if (!obj_unmet_gap(row, &rank.gap))
             continue;
-        is_max = strcmp(json_get_str(json_get(row, "direction")), "max") == 0;
-        product = strcmp(obj_class(row), "product") == 0;
-        gap = obj_gap(is_max, json_get_int(json_get(row, "value")),
-                      json_get_int(json_get(row, "target")));
-        if (!best || (product && !best_product) ||
-            (product == best_product && gap > best_gap)) {
+        rank.product = strcmp(obj_class(row), "product") == 0;
+        rank.tier = rank.product ? obj_tier(row) : 2;
+        if (!best || obj_outranks(&rank, &best_rank)) {
             best = row;
-            best_gap = gap;
-            best_product = product;
+            best_rank = rank;
         }
     }
-    *gap_out = best_gap;
+    *gap_out = best_rank.gap;
     return best;
+}
+
+/* What a row says about its own value: the note of a measured row, the reason
+ * of an unmet row that has no number. */
+static const char *obj_row_note(const struct json_value *row)
+{
+    return json_get_str(json_get(row, json_get_bool(json_get(row, "measured"))
+                                          ? "note"
+                                          : "reason"));
 }
 
 static bool obj_next_fill(struct json_value *out, const struct json_value *row,
@@ -227,7 +284,7 @@ static bool obj_next_fill(struct json_value *out, const struct json_value *row,
            json_push_kv_str(out, "unit", json_get_str(json_get(row, "unit"))) &&
            json_push_kv_real(out, "gap", obj_round_gap(gap)) &&
            json_push_kv_str(out, "why", json_get_str(json_get(row, "why"))) &&
-           json_push_kv_str(out, "note", json_get_str(json_get(row, "note")));
+           json_push_kv_str(out, "note", obj_row_note(row));
 }
 
 bool zcl_objectives_next(const struct json_value *rows, struct json_value *out)
@@ -358,9 +415,12 @@ static void obj_put_next_line(struct obj_render_buf *b,
     obj_ascii(json_get_str(json_get(row, "id")), id, sizeof(id));
     obj_ascii(json_get_str(json_get(row, "unit")), unit, sizeof(unit));
     obj_ascii(json_get_str(json_get(row, "why")), why, sizeof(why));
-    obj_ascii(json_get_str(json_get(row, "note")), note, sizeof(note));
-    obj_put(b, "next: %s  %lld vs %lld %s - %s%s%s%s\n", id,
-            (long long)json_get_int(json_get(row, "value")),
+    obj_ascii(obj_row_note(row), note, sizeof(note));
+    char value_str[32] = "unmet";
+    if (json_get_bool(json_get(row, "measured")))
+        (void)snprintf(value_str, sizeof(value_str), "%lld",
+                       (long long)json_get_int(json_get(row, "value")));
+    obj_put(b, "next: %s  %s vs %lld %s - %s%s%s%s\n", id, value_str,
             (long long)json_get_int(json_get(row, "target")), unit, why,
             note[0] ? " [" : "", note, note[0] ? "]" : "");
 }
@@ -395,7 +455,7 @@ size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,
                 (void)snprintf(verdict, sizeof(verdict), "UNMET");
             }
         } else {
-            unmeasured++;
+            unmeasured += strncmp(status, "unmet(", 6) != 0;
             (void)snprintf(value_str, sizeof(value_str), "-");
             obj_ascii(status, verdict, sizeof(verdict));
         }

@@ -1376,8 +1376,8 @@ static int fox_case_sync(void)
         PASS();
     }
 
-    TEST("objectives: a fresh run that did not pass is unmeasured, however "
-         "short its wall clock") {
+    TEST("objectives: a fresh run that did not pass is UNMET, keeping its "
+         "reason, however short its wall clock") {
         (void)unlink(path);
         ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "467",
                                FOX_SYNC_REMOTE, "pass"));
@@ -1385,6 +1385,7 @@ static int fox_case_sync(void)
                                FOX_SYNC_REMOTE, "seam"));
         v = fox_sync_measure(path, FOX_SYNC_NOW);
         ASSERT(!v.measured);
+        ASSERT(v.unmet);
         ASSERT_STR_EQ(v.reason, "newest stopwatch run did not pass (verdict "
                                 "seam, wall 12 s, age 0 h)");
         (void)unlink(path);
@@ -1392,9 +1393,40 @@ static int fox_case_sync(void)
                                FOX_SYNC_REMOTE, "fail"));
         v = fox_sync_measure(path, FOX_SYNC_NOW);
         ASSERT(!v.measured);
+        ASSERT(v.unmet);
         fox_sync_status(&v, status, sizeof(status));
-        ASSERT_STR_EQ(status, "unmeasured(newest stopwatch run did not pass "
+        ASSERT_STR_EQ(status, "unmet(newest stopwatch run did not pass "
                               "(verdict fail, wall 30 s, age 0 h))");
+        PASS();
+    }
+
+    TEST("objectives: a newest FAIL row with no wall clock is the newest run, "
+         "and is unmet with its reason") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 90000, "616",
+                               FOX_SYNC_REMOTE, "stalled-named"));
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 7200, "null",
+                               FOX_SYNC_REMOTE, "fail"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT(v.unmet);
+        fox_sync_status(&v, status, sizeof(status));
+        ASSERT_STR_EQ(status, "unmet(newest stopwatch run did not pass "
+                              "(verdict fail, wall none, age 2 h))");
+        PASS();
+    }
+
+    TEST("objectives: a ledger with no run at all stays unmeasured, not unmet") {
+        (void)unlink(path);
+        ASSERT(fox_sync_put(path, "this is not json\n"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT(!v.unmet);
+        fox_sync_status(&v, status, sizeof(status));
+        ASSERT(strncmp(status, "unmeasured(", 11) == 0);
+        v = fox_sync_measure(absent, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT(!v.unmet);
         PASS();
     }
 

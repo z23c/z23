@@ -47,6 +47,9 @@ size_t zcl_objectives_catalog(const struct zcl_objective_row **out);
  * meaning and `reason` names why the tree cannot answer today. */
 struct zcl_objective_value {
     bool measured;
+    bool unmet; /* measured false, and the tree KNOWS the outcome is failing
+                 * though it has no number: status reads "unmet(<reason>)",
+                 * never "unmeasured". Only a producer sets it. */
     int64_t value;
     char reason[ZCL_OBJECTIVES_REASON_MAX];
     char note[ZCL_OBJECTIVES_REASON_MAX]; /* measured: what the value names, or "" */
@@ -141,6 +144,16 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
 struct zcl_objective_value zcl_objectives_device_pair_ttl_h(
     const struct zcl_objectives_options *options);
 
+/* The lanes already taken (native_fleet_objectives_taken.c). `fixture`, when
+ * set, is a file holding `git worktree list --porcelain` text read in place of
+ * asking git in `repo`. Returns the malloc'd text, or NULL with `why` set
+ * (git missing or failing, file unreadable, output over the cap). */
+char *zcl_objectives_worktree_text(const char *repo, const char *fixture,
+                                   char *why, size_t why_cap);
+/* True when a worktree in `text` has a branch name or a directory name (last
+ * path component) equal to `card`, or starting with `card` and '-'. */
+bool zcl_objectives_card_taken(const char *text, const char *card);
+
 /* The experiment-ledger producer (native_fleet_objectives_tokens.c): the
  * median, over lanes landed in the last 7 days, of the lane's worker agents'
  * uncached input + output tokens. */
@@ -200,7 +213,10 @@ size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
 /* The next target: the measured, unmet row of the finished objectives array
  * with the largest normalized gap to its target,
  * gap = (value - target) / max(|target|, 1) for "min" and
- * (target - value) / max(|target|, 1) for "max". Unmeasured rows are never
+ * (target - value) / max(|target|, 1) for "max". A row that is unmet with no
+ * number (status "unmet(<reason>)") has the largest gap, and among product
+ * rows an unmet fresh_node_sync_eta_s ranks first, then node_tip_lag_blocks.
+ * Unmeasured rows are never
  * chosen and a tie goes to the earlier catalog row. A PRODUCT row (class
  * "product") always outranks a lab row: the largest product gap wins, and a
  * lab row is chosen only when no measured product row is unmet. `out` becomes an object

@@ -114,7 +114,8 @@ ZCL_COMMAND_READY_READ(
     "(engine/composition/objectives.def): the objective id, the one file or "
     "command its value is read from, whether lower or higher is better, "
     "the current value, the target, the unit, and a status of met, unmet, "
-    "or unmeasured(<reason>). landing_latency_s and "
+    "unmet(<reason>) for a failed run with no number, or "
+    "unmeasured(<reason>). landing_latency_s and "
     "landing_attempts_per_train read the landing outcomes ledger; "
     "proof_lint_wall_s and proof_test_wall_s read the newest landing "
     "attempt's lint and test logs and phases.txt; "
@@ -164,7 +165,15 @@ ZCL_COMMAND_READY_READ(
     "fleet.objectives.brief", "fleet.loop", "",
     "A work card for the objective z23 should work on next",
     "Picks the objective `fleet objectives` would pick as `next` (the "
-    "measured unmet row with the largest gap, product before lab) and prints "
+    "unmet row with the largest gap, product before lab, an unmet "
+    "fresh_node_sync_eta_s first and an unmet node_tip_lag_blocks next) and "
+    "skips a card a worktree already holds: a worktree whose branch or "
+    "directory name equals the card name or starts with it and '-' takes it. "
+    "The reply names the skipped cards in `taken`, sets `all_taken` when "
+    "every unmet card is taken (the top one is then returned), and reports "
+    "`worktree_scan` (ok, or unavailable: <why> when git cannot list "
+    "worktrees, which counts nothing as taken); worktrees is a file of "
+    "`git worktree list --porcelain` text read in its place. It prints "
     "it as a zcl.work_card.v1-shaped card: name, level, outcome, owned and "
     "forbidden paths, the acceptance command and the stop_if conditions from "
     "engine/composition/objective_work.def, plus an `objective` object with "
@@ -186,7 +195,7 @@ ZCL_COMMAND_READY_READ(
     "fleet,objectives,brief,work,card,next,runner",
     "zcl.fleet_objectives_brief_input.v1", "zcl.work_card.v1",
     "id,runner_ok_only,outcomes,attempts_dir,repo,lintc_dir,baseline,brief,"
-    "exclude", "",
+    "exclude,worktrees", "",
     "z23-dev fleet objectives brief",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,

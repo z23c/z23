@@ -646,6 +646,7 @@ int test_fleet_objectives_step(void)
 {
     int failures = 0;
     (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FST_NOWHERE "/datadir", 1);
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FST_NOWHERE "/h.jsonl", 1);
     failures += fst_case_run();
     failures += fst_case_wait();
     failures += fst_case_paused();

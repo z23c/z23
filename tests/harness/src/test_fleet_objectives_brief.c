@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define FOB_PATH "fleet.objectives.brief"
 #define FOB_NOWHERE "/nonexistent/z23-fob"
@@ -898,6 +899,163 @@ _test_next:;
     return failures;
 }
 
+/* ── steering: the P0 ordering and the taken-card skip ───────────────────── */
+
+#define FOB_FRESH_CARD "objective-fresh-node-sync-eta-s"
+
+static const char *fob_card_name(const struct fob_call *c)
+{
+    return json_get_str(json_get(&c->reply.data, "name"));
+}
+
+/* One ledger line: a stopwatch run that failed, `age` seconds ago, with no
+ * wall clock (the shape the collector writes for a node that never synced). */
+static bool fob_fail_ledger(const char *path, long long age)
+{
+    char line[400];
+    (void)snprintf(line, sizeof(line),
+                   "{\"ts\":%lld,\"verdict\":\"fail\",\"wall_clock_seconds\":null,"
+                   "\"peer\":\"192.0.2.7:8033\",\"build_commit\":\"abcdef1234\"}\n",
+                   (long long)time(NULL) - age);
+    return fob_write(path, line);
+}
+
+/* A brief call with the worktree list read from `list` (a fixture file). */
+static bool fob_brief_wt(struct fob_call *c, const struct fob_paths *p,
+                         const char *list)
+{
+    char why[192];
+    fob_begin(c, FOB_PATH, p, NULL, false);
+    (void)json_push_kv_str(&c->input, "worktrees", list);
+    if (c->request.spec &&
+        !zcl_command_registry_input_validate(c->request.spec, &c->input, why,
+                                             sizeof(why))) {
+        printf("[input rejected: %s] ", why);
+        return false;
+    }
+    zcl_native_handle_fleet_objectives_brief(&c->request, &c->reply);
+    return true;
+}
+
+static int fob_case_order_p0(const char *root, const struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_paths q = *p;
+    char ledger[700];
+    struct fob_call c;
+    (void)snprintf(q.brief, sizeof(q.brief), "%s/tier.json", root);
+    (void)snprintf(ledger, sizeof(ledger), "%s/c3-history.jsonl", root);
+    TEST("brief: an unmet fresh_node_sync_eta_s is the card, ahead of a larger "
+         "node_rss_mb gap") {
+        ASSERT(fob_write(q.brief, "{\"hstar\":1000,\"header_height\":1010,"
+                                  "\"rss_mb\":100000,\"serving\":true}"));
+        ASSERT(fob_fail_ledger(ledger, 600));
+        (void)setenv("ZCL_C3_STOPWATCH_HISTORY", ledger, 1);
+        ASSERT(fob_brief(&c, &q, NULL, false));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fob_objective_id(&c), "fresh_node_sync_eta_s");
+        ASSERT_STR_EQ(fob_card_name(&c), FOB_FRESH_CARD);
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: without a fresh-node run, an unmet node_tip_lag_blocks "
+         "outranks a larger node_rss_mb gap") {
+        (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOB_NOWHERE "/h.jsonl", 1);
+        ASSERT(fob_brief(&c, &q, NULL, false));
+        ASSERT_STR_EQ(fob_objective_id(&c), "node_tip_lag_blocks");
+        fob_end(&c);
+        PASS();
+    }
+_test_next:;
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOB_NOWHERE "/h.jsonl", 1);
+    return failures;
+}
+
+static bool fob_taken_text(const char *path, const char *text)
+{
+    return fob_write(path, text);
+}
+
+static int fob_case_taken(const char *root, const struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_paths q = *p;
+    char ledger[700], list[700], text[8192];
+    struct fob_call c;
+    (void)snprintf(q.brief, sizeof(q.brief), "%s/tier.json", root);
+    (void)snprintf(ledger, sizeof(ledger), "%s/c3-history.jsonl", root);
+    (void)snprintf(list, sizeof(list), "%s/worktrees.txt", root);
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", ledger, 1);
+    TEST("brief: a card a worktree directory already carries (name-suffix) is "
+         "skipped and named in taken") {
+        ASSERT(fob_fail_ledger(ledger, 600));
+        ASSERT(fob_taken_text(list, "worktree /l/objective-fresh-node-sync-eta-s-fix\n"
+                                    "HEAD 0123\nbranch refs/heads/other\n\n"));
+        ASSERT(fob_brief_wt(&c, &q, list));
+        ASSERT_STR_EQ(fob_objective_id(&c), "node_tip_lag_blocks");
+        ASSERT_EQ(json_get(&c.reply.data, "taken")->num_children, (size_t)1);
+        ASSERT(fob_has_str(json_get(&c.reply.data, "taken"), FOB_FRESH_CARD));
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "all_taken")));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "worktree_scan")), "ok");
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: a branch name equal to the card also takes it") {
+        ASSERT(fob_taken_text(list, "worktree /l/anything\nHEAD 0123\n"
+                                    "branch refs/heads/" FOB_FRESH_CARD "\n\n"));
+        ASSERT(fob_brief_wt(&c, &q, list));
+        ASSERT_STR_EQ(fob_objective_id(&c), "node_tip_lag_blocks");
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: prefix-only and longer-word names do not take a card") {
+        ASSERT(fob_taken_text(list, "worktree /l/objective-fresh-node\nHEAD 0123\n"
+                                    "branch refs/heads/objective-fresh-node-sync-eta-sx\n\n"
+                                    "worktree /l/objective-fresh-node-sync-eta-s2\n"
+                                    "HEAD 0123\ndetached\n\n"));
+        ASSERT(fob_brief_wt(&c, &q, list));
+        ASSERT_STR_EQ(fob_objective_id(&c), "fresh_node_sync_eta_s");
+        ASSERT_EQ(json_get(&c.reply.data, "taken")->num_children, (size_t)0);
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: every unmet card taken returns the top one with all_taken") {
+        const struct zcl_objective_row *catalog;
+        size_t n = zcl_objectives_catalog(&catalog), used = 0;
+        text[0] = '\0';
+        for (size_t i = 0; i < n && used + 200 < sizeof(text); i++) {
+            char name[96];
+            size_t k = (size_t)snprintf(name, sizeof(name), "objective-%s",
+                                        catalog[i].id);
+            for (size_t j = 0; j < k && j < sizeof(name); j++)
+                if (name[j] == '_')
+                    name[j] = '-';
+            used += (size_t)snprintf(text + used, sizeof(text) - used,
+                                     "worktree /l/%s\nHEAD 0123\ndetached\n\n", name);
+        }
+        ASSERT(fob_taken_text(list, text));
+        ASSERT(fob_brief_wt(&c, &q, list));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fob_objective_id(&c), "fresh_node_sync_eta_s");
+        ASSERT(json_get_bool(json_get(&c.reply.data, "all_taken")));
+        ASSERT(json_get(&c.reply.data, "taken")->num_children >= 3);
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: an unreadable worktree list leaves nothing taken and says so") {
+        ASSERT(fob_brief_wt(&c, &q, FOB_NOWHERE "/worktrees.txt"));
+        ASSERT_STR_EQ(fob_objective_id(&c), "fresh_node_sync_eta_s");
+        ASSERT_EQ(json_get(&c.reply.data, "taken")->num_children, (size_t)0);
+        ASSERT(strncmp(json_get_str(json_get(&c.reply.data, "worktree_scan")),
+                       "unavailable: ", 13) == 0);
+        fob_end(&c);
+        PASS();
+    }
+_test_next:;
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOB_NOWHERE "/h.jsonl", 1);
+    return failures;
+}
+
 int test_fleet_objectives_brief(void);
 int test_fleet_objectives_brief(void)
 {
@@ -911,6 +1069,7 @@ int test_fleet_objectives_brief(void)
      * origin/main, which never holds the fixture, and every baseline would read
      * unmeasured. */
     (void)setenv("GIT_CEILING_DIRECTORIES", root, 1);
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOB_NOWHERE "/h.jsonl", 1);
     failures += fob_case_rows();
     failures += fob_case_runner_paths();
     if (!fob_fixture(root, &paths)) {
@@ -927,6 +1086,8 @@ int test_fleet_objectives_brief(void)
         failures += fob_case_order(root, &paths);
         failures += fob_case_baseline_row(&paths);
         failures += fob_case_complexity_origin(root, &paths);
+        failures += fob_case_order_p0(root, &paths);
+        failures += fob_case_taken(root, &paths);
     }
     (void)unsetenv("ZCL_LAND_OBJECTIVES_DATADIR");
     (void)test_rm_rf_recursive(root);

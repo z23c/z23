@@ -181,6 +181,7 @@ struct brief_inputs {
     const char *repo;
     const char *baseline;
     const char *exclude;
+    const char *worktrees; /* fixture: `git worktree list --porcelain` text file */
     const char *revision;
     char *complexity_bytes;
     size_t complexity_len;
@@ -740,17 +741,120 @@ static void brief_note_skipped(struct zcl_command_reply *reply,
     json_free(&top);
 }
 
+/* True when `arr` (an array of strings) holds `name`. */
+static bool brief_has_name(const struct json_value *arr, const char *name)
+{
+    for (size_t i = 0; i < arr->num_children; i++)
+        if (strcmp(json_get_str(&arr->children[i]), name) == 0)
+            return true;
+    return false;
+}
+
+/* The rows whose card is not named in `taken`, as a new array. */
+static bool brief_without(const struct json_value *rows,
+                          const struct json_value *taken, struct json_value *out)
+{
+    json_set_array(out);
+    for (size_t i = 0; i < rows->num_children; i++) {
+        char name[WORK_CARD_NAME_MAX + 1];
+        brief_name(json_get_str(json_get(&rows->children[i], "id")), name,
+                   sizeof(name));
+        if (!brief_has_name(taken, name) &&
+            !json_push_back(out, &rows->children[i]))
+            return false;
+    }
+    return true;
+}
+
+/* The first unmet card no lane has taken. `taken` collects the names passed
+ * over, best first; when every unmet card is taken the top one comes back
+ * with *all_taken set. `text` (the worktree list) NULL takes nothing. */
+static bool brief_pick_free(const struct json_value *rows, const char *text,
+                            struct json_value *next, struct json_value *taken,
+                            bool *all_taken)
+{
+    struct json_value rest;
+    bool ok = true;
+    json_set_array(taken);
+    *all_taken = false;
+    for (;;) {
+        char name[WORK_CARD_NAME_MAX + 1];
+        json_init(&rest);
+        ok = brief_without(rows, taken, &rest) && zcl_objectives_next(&rest, next);
+        json_free(&rest);
+        if (!ok || json_is_null(next))
+            break;
+        brief_name(json_get_str(json_get(next, "id")), name, sizeof(name));
+        if (!text || !zcl_objectives_card_taken(text, name))
+            return true;
+        ok = brief_push_str_item(taken, name);
+        json_free(next);
+        json_init(next);
+        if (!ok)
+            return false;
+    }
+    if (ok && taken->num_children > 0) {
+        *all_taken = true;
+        ok = zcl_objectives_next(rows, next);
+    }
+    return ok;
+}
+
+/* What the pick reports about the lanes: the names passed over, whether all
+ * were, and whether the worktree list could be read at all. */
+static void brief_note_taken(struct zcl_command_reply *reply,
+                             const struct json_value *taken, bool all_taken,
+                             const char *scan)
+{
+    (void)json_push_kv(&reply->data, "taken", taken);
+    (void)json_push_kv_bool(&reply->data, "all_taken", all_taken);
+    (void)json_push_kv_str(&reply->data, "worktree_scan", scan);
+}
+
+struct brief_lanes {
+    struct json_value taken;
+    bool all_taken;
+    char scan[ZCL_OBJECTIVES_REASON_MAX]; /* "" when no scan was asked for */
+};
+
+/* The pick over the narrowed rows. An explicit id briefs that row whatever
+ * the lanes hold; otherwise the first card no worktree has taken. A worktree
+ * list that cannot be read takes nothing, and `scan` says why. */
+static bool brief_pick(const struct json_value *narrowed, const char *id,
+                       const struct brief_inputs *in, struct json_value *next,
+                       struct brief_lanes *lanes)
+{
+    char why[160];
+    char *text;
+    bool ok;
+    json_init(&lanes->taken);
+    lanes->all_taken = false;
+    lanes->scan[0] = '\0';
+    if (id)
+        return zcl_objectives_next(narrowed, next);
+    text = zcl_objectives_worktree_text(in->repo, in->worktrees, why,
+                                        sizeof(why));
+    (void)snprintf(lanes->scan, sizeof(lanes->scan), "%s%s", text ? "ok" : "unavailable: ",
+                   text ? "" : why);
+    ok = brief_pick_free(narrowed, text, next, &lanes->taken, &lanes->all_taken);
+    free(text);
+    return ok;
+}
+
 /* Fills the reply from the narrowed rows; the pick is zcl_objectives_next. */
 static void brief_reply(struct zcl_command_reply *reply,
                         const struct json_value *rows, const char *id,
                         bool runner_only, const struct brief_inputs *in)
 {
     struct json_value narrowed, next;
+    struct brief_lanes lanes;
     bool ok;
     json_init(&narrowed);
     json_init(&next);
+    json_init(&lanes.taken);
+    lanes.scan[0] = '\0';
     ok = brief_narrow(rows, id, runner_only, &narrowed) &&
-         zcl_objectives_next(&narrowed, &next);
+         brief_pick(&narrowed, id, in, &next, &lanes);
     if (!ok) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "BRIEF_ALLOC",
@@ -770,6 +874,9 @@ static void brief_reply(struct zcl_command_reply *reply,
     }
     if (ok && runner_only && !id && reply->status == ZCL_COMMAND_STATUS_PASSED)
         brief_note_skipped(reply, rows);
+    if (ok && lanes.scan[0] && reply->status == ZCL_COMMAND_STATUS_PASSED)
+        brief_note_taken(reply, &lanes.taken, lanes.all_taken, lanes.scan);
+    json_free(&lanes.taken);
     json_free(&next);
     json_free(&narrowed);
 }
@@ -830,7 +937,8 @@ void zcl_native_handle_fleet_objectives_brief(
     } else {
         struct brief_inputs in = { .repo = brief_str(request, "repo", "."),
             .baseline = brief_str(request, "baseline", NULL),
-            .exclude = brief_str(request, "exclude", ""), .revision = revision };
+            .exclude = brief_str(request, "exclude", ""), .revision = revision,
+            .worktrees = brief_str(request, "worktrees", NULL) };
         brief_reply(reply, rows, id, runner_only, &in);
     }
     zcl_command_reply_free(&measured);

@@ -39,7 +39,8 @@ void zcl_objectives_status(const struct zcl_objective_row *row,
     if (!row || !value || !out || cap == 0)
         return;
     if (!value->measured) {
-        (void)snprintf(out, cap, "unmeasured(%s)", value->reason);
+        (void)snprintf(out, cap, "%s(%s)", value->unmet ? "unmet" : "unmeasured",
+                       value->reason);
         return;
     }
     (void)snprintf(out, cap, "%s",
