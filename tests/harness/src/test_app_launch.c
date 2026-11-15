@@ -906,7 +906,7 @@ static bool al_library_home(struct al_library_script *s, const struct zcl_presen
         !strcmp(model->actions[1].id, "discover") &&
         !strcmp(model->actions[2].id, "hosting") &&
         !strcmp(model->actions[3].id, "cancel");
-    event->action_index = s->home_calls++ ? 3 : 0;
+    ++s->home_calls; event->action_index = 3;
     return true;
 }
 static void al_library_share_menu(struct al_library_script *s,
@@ -1024,7 +1024,7 @@ static bool al_utf8_present(void *context, const struct zcl_present_model_v1 *mo
 {
     (void)copy; (void)why; (void)cap; struct al_utf8_summary *v = context;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
-    if (!v->calls++) { event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true; }
+    ++v->calls;
     v->valid = zutf8_validate(model->summary);
     (void)snprintf(v->summary, sizeof(v->summary), "%s", model->summary);
     event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true;
@@ -1043,7 +1043,7 @@ static bool al_utf8_name_case(struct al_fx *f, struct app_selection *selection, 
     zcl_test_app_library_run(&f->env, &reply, al_utf8_present, &view);
     if (ascii == 71) name[ascii] = 0;
     const char *label = strstr(view.summary, ". ");
-    bool ok = view.calls == 2 && view.valid && label && !strcmp(label + 2, name) &&
+    bool ok = view.calls == 1 && view.valid && label && !strcmp(label + 2, name) &&
         reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated;
     if (!ok) fprintf(stderr, "UTF-8 summary ascii=%zu calls=%u valid=%d summary=%s\n", ascii, view.calls, view.valid, view.summary);
     zcl_command_reply_free(&reply); return ok;
@@ -1076,7 +1076,7 @@ static bool al_unsaved_share_has(const struct zcl_present_model_v1 *model, const
 static bool al_unsaved_share_enter(struct al_unsaved_share_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {
-    if (s->calls != 1) return false;
+    if (s->calls != 0) return false;
     for (unsigned i = 0; i < model->action_count; ++i) {
         if (strcmp(model->actions[i].id, "choose")) continue;
         event->action_index = i; ++s->calls; return true;
@@ -1087,7 +1087,7 @@ static bool al_unsaved_share_enter(struct al_unsaved_share_script *s,
 static bool al_unsaved_share_press(struct al_unsaved_share_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {
-    if (s->calls != 2) return false;
+    if (s->calls != 1) return false;
     for (unsigned i = 0; i < model->action_count; ++i) {
         if (strcmp(model->actions[i].id, "share")) continue;
         s->saw_keep_hint = s->saw_keep_hint ||
@@ -1100,21 +1100,13 @@ static bool al_unsaved_share_press(struct al_unsaved_share_script *s,
 static bool al_unsaved_share_step_back(struct al_unsaved_share_script *s,
     const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
 {
-    if (s->calls != 3) return false;
+    if (s->calls != 2) return false;
     for (unsigned i = 0; i < model->action_count; ++i) {
         if (strcmp(model->actions[i].id, "back")) continue;
         s->returned_to_card = s->returned_to_card || !al_unsaved_share_has(model, "share-file");
         event->action_index = i; ++s->calls; return true;
     }
     return false;
-}
-static bool al_unsaved_share_home(struct al_unsaved_share_script *s,
-    const struct zcl_present_model_v1 *model, struct zcl_present_window_event_v1 *event)
-{
-    if (strcmp(model->request_id, "library-home")) return false;
-    s->valid = s->valid && s->calls == 0 && model->action_count == 4 &&
-        !strcmp(model->actions[0].id, "myapps");
-    event->action_index = 0; ++s->calls; return true;
 }
 static bool al_unsaved_share_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
@@ -1133,12 +1125,11 @@ static bool al_unsaved_share_present(void *context, const struct zcl_present_mod
         s->valid = s->valid && al_unsaved_share_has(model, "share-file");
         event->action_index = 0; return true;
     }
-    if (al_unsaved_share_home(s, model, event)) return true;
     if (al_unsaved_share_enter(s, model, event)) return true;
     if (al_unsaved_share_press(s, model, event)) return true;
     if (al_unsaved_share_step_back(s, model, event)) return true;
     /* Journey finished: dismiss on the app list after stepping back. */
-    if (s->calls < 4) s->valid = false;
+    if (s->calls < 3) s->valid = false;
     event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
     return true;
 }
@@ -1411,8 +1402,9 @@ static bool al_host_present(void *context, const struct zcl_present_model_v1 *mo
     (void)copy; (void)why; (void)cap; struct al_host_nav *s = context;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
-    const char *wanted = s->step == 0 ? "hosting" : s->step == 1 ? "back" : "cancel";
-    s->valid &= !strcmp(model->request_id, s->step == 1 ? "hosting-browser" : "library-home");
+    const char *wanted = s->step == 0 ? "home" : s->step == 1 ? "hosting" : s->step == 2 ? "back" : "cancel";
+    s->valid &= s->step == 0 ? !strncmp(model->request_id, "library-", 8) :
+        !strcmp(model->request_id, s->step == 2 ? "hosting-browser" : "library-home");
     ++s->step;
     for (unsigned i = 0; i < model->action_count; ++i)
         if (!strcmp(model->actions[i].id, wanted)) { event->action_index = i; return true; }
@@ -1428,7 +1420,7 @@ static int case_library(struct al_fx *f)
         node_rpc_client_set_test_hook(al_host_empty_rpc);
         zcl_test_app_library_run(&f->env, &reply, al_host_present, &nav);
         node_rpc_client_set_test_hook(NULL);
-        ASSERT(nav.valid && nav.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(nav.valid && nav.step == 4 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         PASS();
     }
@@ -1933,13 +1925,13 @@ static const char *al_create_first_card(struct al_create_view *s,
 {
     if (!s->count) {
         s->valid = al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
-            al_create_action(m, "home", "Back") >= 0;
+            al_create_action(m, "home", "More options") >= 0;
         return "home";
     }
     if (s->count == 1) {
         s->valid = m->action_count == 3 && al_create_action(m, "choose", "Choose app") >= 0 &&
             al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
-            al_create_action(m, "home", "Back") >= 0 &&
+            al_create_action(m, "home", "More options") >= 0 &&
             al_create_action(m, "previous", NULL) < 0 && al_create_action(m, "next", NULL) < 0;
         return "home";
     }
@@ -1951,18 +1943,17 @@ static const char *al_create_first_card(struct al_create_view *s,
 static bool al_create_last_card(const struct zcl_present_model_v1 *m)
 {
     return al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
-        al_create_action(m, "next", NULL) < 0 && al_create_action(m, "home", "Back") >= 0;
+        al_create_action(m, "next", NULL) < 0 && al_create_action(m, "home", "More options") >= 0;
 }
 static const char *al_create_view_action(struct al_create_view *s,
     const struct zcl_present_model_v1 *m)
 {
-    if (s->step == 0 && !strcmp(m->request_id, "library-home")) return "myapps";
-    if (s->step == 1 && !strcmp(m->request_id, "library-0")) return al_create_first_card(s, m);
-    if (s->count && s->step == 2 && !strcmp(m->request_id, "library-1")) {
+    if (s->step == 0 && !strcmp(m->request_id, "library-0")) return al_create_first_card(s, m);
+    if (s->count && s->step == 1 && !strcmp(m->request_id, "library-1")) {
         s->valid = s->valid && al_create_last_card(m);
         return "home";
     }
-    if (s->step == (s->count > 1 ? 3u : 2u) && !strcmp(m->request_id, "library-home")) return "cancel";
+    if (s->step == (s->count > 1 ? 2u : 1u) && !strcmp(m->request_id, "library-home")) return "cancel";
     return NULL;
 }
 static bool al_create_view_present(void *context, const struct zcl_present_model_v1 *m,
@@ -1984,17 +1975,17 @@ static int case_library_create_view(void)
         ASSERT(al_setup(&f)); ASSERT(al_write_file(f.env.config_path, "", 0600));
         struct al_create_view view = {.valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_create_view_present, &view);
-        ASSERT(view.valid && view.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(view.valid && view.step == 2 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT(al_library_catalog(&f, 1));
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         view = (struct al_create_view){.count = 1, .valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_create_view_present, &view);
-        ASSERT(view.valid && view.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(view.valid && view.step == 2 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT(al_library_catalog(&f, 2));
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         view = (struct al_create_view){.count = 2, .valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_create_view_present, &view);
-        ASSERT(view.valid && view.step == 4 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(view.valid && view.step == 3 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         PASS();
     } _test_next:;
     zcl_command_reply_free(&reply); return failures;
@@ -2855,14 +2846,14 @@ static int al_default_action(const struct zcl_present_model_v1 *model, const cha
 static const char *al_default_saved(struct al_default_probe *p,
     const struct zcl_present_model_v1 *model)
 {
-    if (p->step == 1 || p->step == 3) {
+    if (p->step == 0 || p->step == 2) {
         p->valid = p->valid && !strcmp(model->request_id, "library-1") &&
             strstr(model->summary, "My very long friendly airplane") &&
             strstr(model->items[0].value, "Saved version 010101010101") &&
             al_default_action(model, "create") >= 0;
-        return p->step == 1 ? "previous" : "choose";
+        return p->step == 0 ? "previous" : "choose";
     }
-    if (p->step == 2) {
+    if (p->step == 1) {
         p->valid = p->valid && !strcmp(model->request_id, "library-0") &&
             strstr(model->summary, "Sky Combat") && al_default_action(model, "create") >= 0;
         return "next";
@@ -2876,8 +2867,7 @@ static bool al_default_present(void *context, const struct zcl_present_model_v1 
 {
     (void)copy; (void)why; (void)cap;
     struct al_default_probe *p = context; const char *action = NULL;
-    if (p->step == 0) action = "myapps";
-    else if (p->saved) action = al_default_saved(p, model);
+    if (p->saved) action = al_default_saved(p, model);
     else p->valid = p->valid && !strcmp(model->request_id, "library-0") &&
         strstr(model->summary, "Sky Combat") && al_default_action(model, "create") >= 0;
     ++p->step; event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
@@ -2896,13 +2886,13 @@ static int case_library_saved_default(void)
         ASSERT(al_copy_exe(AL_FIXTURE, builtin, 0700) && al_write_file(f.env.config_path, "", 0600));
         struct al_default_probe empty = {.valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_default_present, &empty);
-        ASSERT(empty.valid && empty.step == 2 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(empty.valid && empty.step == 1 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         struct app_selection saved, actual;
         ASSERT(app_launch_state_dir_ready(f.env.state_dir) && al_selection(&f, "kept:copy-00", &saved));
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
         struct al_default_probe selected = {.saved = true, .valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_default_present, &selected);
-        ASSERT(selected.valid && selected.step == 5 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(selected.valid && selected.step == 4 && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT(app_selection_load(f.env.state_dir, "kept:copy-00", &actual) == APP_SELECTION_OK &&
             actual.revision == saved.revision && !memcmp(actual.version, saved.version, 32));
         PASS();
@@ -2980,12 +2970,12 @@ static int case_library_bounds(void)
     int failures = 0;
     static struct al_fx f;
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
-    TEST("My Apps home leads to an empty library and Back returns home") {
+    TEST("My Apps opens an empty library and More options reaches home") {
         ASSERT(al_setup(&f));
         ASSERT(al_write_file(f.env.config_path, "", 0600));
         struct al_library_script s = {.actions = {1}, .count = 1, .valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
-        ASSERT(s.valid && s.calls == 1 && s.home_calls == 2 && !s.errors && strstr(s.last_summary, "No apps yet"));
+        ASSERT(s.valid && s.calls == 1 && s.home_calls == 1 && !s.errors && strstr(s.last_summary, "No apps yet"));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
     PASS(); }
     TEST("My Apps reaches all32 rows including duplicate friendly saved labels") {
@@ -3416,7 +3406,7 @@ static bool al_keep_room(void *context, const struct zcl_present_model_v1 *model
     }
     if (!strncmp(model->request_id, "library-", 8) && model->action_count) {
         if (!strcmp(model->actions[0].id, "choose"))
-            return al_keep_press(model, event, "choose");
+            return al_keep_press(model, event, s->home_calls ? "choose" : "home");
         if (!strcmp(model->actions[0].id, "open")) {
             /* The second app card is the kept one: this visit proves the room
              * stayed open after the Keep instead of ejecting the user. */

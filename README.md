@@ -104,7 +104,8 @@ To change it, open My Apps with the installed executable:
 If you chose another installation prefix, use the executable path printed by
 the installer. Keep the same app-data directory for My Apps and your assistant.
 
-From the home screen choose **My apps → Create from Sky Combat**. Review
+In My Apps choose **Create from Sky Combat**. If the home screen appears, choose
+**My apps** first. Review
 **Make my copy**, then choose **Build and preview** and explicitly **Keep this
 version**. Canceling or a failed step does not mean a version was kept.
 

@@ -3002,6 +3002,13 @@ static bool tag_discover_card(void *context, const struct zcl_present_model_v1 *
     tag_discover_capture(d);
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (!strcmp(model->request_id, "library-home")) return tag_discover_home(d, model, event);
+    if (!d->home && !strncmp(model->request_id, "library-", 8)) {
+        event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+        for (unsigned i = 0; i < model->action_count; ++i)
+            if (!strcmp(model->actions[i].id, "home")) { event->action_index = i; return true; }
+        return false;
+    }
     if (!strcmp(model->request_id, "library-discover-options")) {
         event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
         event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true;
@@ -3526,7 +3533,8 @@ static bool tag_link_cards(void *context, const struct zcl_present_model_v1 *mod
         if (!zcl_present_model_validate_v1(model, why, cap) || model->action_count != 4 ||
             strcmp(model->actions[1].id, "discover")) return false;
         event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
-        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = f->homes++ ? 3 : 1; return true;
+        event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = f->homes++ ? 3 : 1;
+        f->discover.home = f->homes; return true;
     }
     if (!strcmp(model->request_id, "library-error")) {
         ++f->errors; f->action_error_title = !strcmp(model->title, "Could not complete this action");

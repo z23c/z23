@@ -156,7 +156,7 @@ static void al_model(struct library *w)
     if (!w->count) {
         (void)snprintf(m->summary, sizeof(m->summary), "No apps yet. Create a copy or discover an app to get started.");
         app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
-        app_library_choice(m, "home", "Back", "Return to the home menu.");
+        app_library_choice(m, "home", "More options", "Discover apps, hosting, and Close.");
         return;
     }
     const struct library_row *r = &w->rows[w->index];
@@ -177,7 +177,7 @@ static void al_model(struct library *w)
     else if (w->index) app_library_choice(m, "previous", "Previous app", "Browse back.");
     if (w->index + 1 < w->count) app_library_choice(m, "next", "Next app", "Browse forward.");
     else app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
-    app_library_choice(m, "home", "Back", "Return to the home menu.");
+    app_library_choice(m, "home", "More options", "Discover apps, hosting, and Close.");
 }
 static void al_home(struct library *w)
 {
@@ -1868,7 +1868,7 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
 #else
     (void)network_test; (void)adopter; (void)host;
 #endif
-    w->page = 3;
+    w->page = 0;
     al_loop(w, env, reply, presenter, context, exe, datadir);
     al_discover_error_recovery(w, reply);
     al_recovery(w, reply);

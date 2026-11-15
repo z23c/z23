@@ -3128,6 +3128,7 @@ static bool ak_recovery_room(void *context, const struct zcl_present_model_v1 *m
 {
     (void)context; (void)copy_text; (void)why; (void)cap;
     const char *wanted = !strcmp(model->request_id, "library-home") ? "discover" :
+        !strncmp(model->request_id, "library-", 8) && model->request_id[8] >= '0' && model->request_id[8] <= '9' ? "home" :
         !strcmp(model->request_id, "library-discover-options") ? "recover-copies" :
         !strcmp(model->request_id, "library-recovered-copies") ? "recover-select" : NULL;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
