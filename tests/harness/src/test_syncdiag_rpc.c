@@ -22,6 +22,124 @@
 #include "services/chain_evidence_authority_service.h"
 #include "net/peer_lifecycle.h"
 #include "net/net.h"
+#include "util/spawn.h"
+#include <sys/stat.h>
+#include <unistd.h>
+
+#if !defined(_WIN32)
+static bool doctor_fixture_write(const char *path, const char *body)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(body, 1, strlen(body), f) == strlen(body);
+    if (fclose(f) != 0) ok = false;
+    return ok && chmod(path, 0700) == 0;
+}
+
+struct doctor_env { char src[512], rel[512], artifact[512], status[512], fast[512], scenario[128]; };
+
+static bool doctor_env_init(struct doctor_env *e, const char *fixture, const char *mode)
+{
+    return snprintf(e->src, sizeof(e->src), "ZCL_AGENT_SRC_BIN=%s/status", fixture) < (int)sizeof(e->src) &&
+        snprintf(e->rel, sizeof(e->rel), "ZCL_AGENT_RELEASE_BIN=%s/mock", fixture) < (int)sizeof(e->rel) &&
+        snprintf(e->artifact, sizeof(e->artifact), "ZCL_AGENT_LIVE_BIN=%s/mock", fixture) < (int)sizeof(e->artifact) &&
+        snprintf(e->status, sizeof(e->status), "ZCL_AGENT_DEV_STATUS_CMD=%s/status", fixture) < (int)sizeof(e->status) &&
+        snprintf(e->scenario, sizeof(e->scenario), "DOCTOR_TEST_CASE=%s", mode) < (int)sizeof(e->scenario) &&
+        snprintf(e->fast, sizeof(e->fast), "ZCL_AGENT_FAST_PLAN_CMD=%s/status", fixture) < (int)sizeof(e->fast);
+}
+
+static const char *doctor_expected_id(const char *mode)
+{
+    if (!strcmp(mode, "different") || !strcmp(mode, "missingrelease"))
+        return "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    if (!strcmp(mode, "match")) return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    return "";
+}
+
+static bool doctor_json_matches(const char *out, const char *mode,
+                                const char *state, bool matches)
+{
+    struct json_value json = {0};
+    bool ok = json_read(&json, out, strlen(out));
+    const struct json_value *live = json_get(&json, "live_node");
+    const char *actual = json_get_str(json_get(live, "state"));
+    const struct json_value *match_value = json_get(live, "matches_tree");
+    const char *id = json_get_str(json_get(live, "source_id_sha256"));
+    const char *expected_id = doctor_expected_id(mode);
+    const char *comparison = json_get_str(json_get(live, "comparison_state"));
+    const char *expected_comparison = matches ? "match" :
+        (!strcmp(mode, "different") ? "different" : "unknown");
+    ok = ok && actual && !strcmp(actual, state) &&
+         match_value && match_value->type == JSON_BOOL &&
+         json_get_bool(match_value) == matches && id && !strcmp(id, expected_id) &&
+         comparison && !strcmp(comparison, expected_comparison);
+    json_free(&json);
+    return ok;
+}
+
+static bool doctor_case(const char *fixture, const char *mode,
+                        const char *state, bool matches)
+{
+    struct doctor_env e;
+    char out[32768];
+    if (!doctor_env_init(&e, fixture, mode)) return false;
+    const char *argv[] = {"env", e.src, e.rel, e.artifact, e.status, e.fast, e.scenario,
+        "/bin/bash", "tools/dev/agent-doctor.sh",
+        !strcmp(mode, "failtext") ? "text" : "--json", NULL};
+    bool timeout = false;
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, NULL, out, sizeof(out), 15000, &timeout);
+    if (rc != 0 || timeout) return false;
+    if (!strcmp(mode, "failtext"))
+        return strstr(out, "matches_release_artifact=unknown") &&
+               !strstr(out, "LIVE NODE DIFFERS") && !strstr(out, "THE LIVE NODE IS NOT RUNNING");
+    return doctor_json_matches(out, mode, state, matches);
+}
+
+static int syncdiag_doctor_live_identity(void)
+{
+    int failures = 0;
+    char root[256] = {0}, mock[512], status[512];
+    static const char script[] =
+        "#!/bin/sh\n"
+        "a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "if [ \"$1\" = agentbuild ]; then [ \"$DOCTOR_TEST_CASE\" = missingrelease ] && exit 1; printf '{\"source_id_sha256\":\"%s\"}\\n' \"$a\"; exit 0; fi\n"
+        "[ \"$1 $2 $3\" = 'ops mesh identity' ] || exit 2\n"
+        "case $DOCTOR_TEST_CASE in fail|failtext) exit 1;; malformed) printf '{'; exit 0;; badtype) printf '{\"ok\":true,\"data\":{\"schema\":\"zcl.machine_mesh_identity.v1\",\"authority\":\"live_daemon_observation\",\"build\":{\"source_id_sha256\":42}}}'; exit 0;; esac\n"
+        "id=$b; [ \"$DOCTOR_TEST_CASE\" = match ] && id=$a\n"
+        "schema=zcl.machine_mesh_identity.v1; authority=live_daemon_observation\n"
+        "[ \"$DOCTOR_TEST_CASE\" = badschema ] && schema=wrong\n"
+        "[ \"$DOCTOR_TEST_CASE\" = badauthority ] && authority=artifact\n"
+        "[ \"$DOCTOR_TEST_CASE\" = badid ] && id=ABC\n"
+        "row=$(printf '{\"ok\":true,\"data\":{\"schema\":\"%s\",\"authority\":\"%s\",\"build\":{\"source_id_sha256\":\"%s\"}}}' \"$schema\" \"$authority\" \"$id\")\n"
+        "printf '%s\\n' \"$row\"\n"
+        "case $DOCTOR_TEST_CASE in validfail) exit 1;; trailing) printf '{';; multiple) printf '%s\\n' \"$row\";; esac\n";
+    TEST("doctor compares release identity to observed daemon, not artifact") {
+        test_make_tmpdir(root, sizeof(root), "doctor", "identity");
+        ASSERT(root[0]);
+        ASSERT(snprintf(mock, sizeof(mock), "%s/mock", root) > 0);
+        ASSERT(snprintf(status, sizeof(status), "%s/status", root) > 0);
+        ASSERT(doctor_fixture_write(mock, script));
+        ASSERT(doctor_fixture_write(status, "#!/bin/sh\nprintf '{}\\n'\n"));
+        ASSERT(doctor_case(root, "different", "reporting", false));
+        ASSERT(doctor_case(root, "match", "reporting", true));
+        ASSERT(doctor_case(root, "fail", "unknown", false));
+        ASSERT(doctor_case(root, "malformed", "unknown", false));
+        ASSERT(doctor_case(root, "badschema", "unknown", false));
+        ASSERT(doctor_case(root, "badauthority", "unknown", false));
+        ASSERT(doctor_case(root, "badtype", "unknown", false));
+        ASSERT(doctor_case(root, "badid", "unknown", false));
+        ASSERT(doctor_case(root, "validfail", "unknown", false));
+        ASSERT(doctor_case(root, "trailing", "unknown", false));
+        ASSERT(doctor_case(root, "multiple", "unknown", false));
+        ASSERT(doctor_case(root, "missingrelease", "reporting", false));
+        ASSERT(doctor_case(root, "failtext", "unknown", false));
+        PASS();
+    } _test_next:;
+    if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
+#endif
 
 static bool syncdiag_queue_rpc(struct json_value *result)
 {
@@ -170,6 +288,9 @@ static int syncdiag_peer_summary(void)
 int test_syncdiag_rpc(void)
 {
     int failures = 0;
+#if !defined(_WIN32)
+    failures += syncdiag_doctor_live_identity();
+#endif
     agent_security_posture_test_override_review_required(0);
 
     syncdiag_reset_rpc_globals_for_test();

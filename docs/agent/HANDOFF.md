@@ -33,15 +33,17 @@ and sample history. Recovery and cure design live in
 [`work/self-verified-tip-plan.md`](../work/self-verified-tip-plan.md), not in a
 copied snapshot.
 
-Check whether the running binary matches this checkout before diagnosing
-anything live:
+Check the observed running daemon against the selected release artifact before
+diagnosing anything live:
 
 ```bash
-make agent-doctor | sed -n 2p     # live_node=… running_this_tree=true|false
+make agent-doctor | sed -n 2p     # live_node=… matches_release_artifact=true|false|unknown
 ```
 
-`running_this_tree=false` means stop and ship, or read the deployed source.
-Do not reason about live behaviour from this checkout. The node can look
+`false` means the observed daemon differs from the selected artifact; read the
+deployed source or ship an appropriate reviewed release. `unknown` means the
+comparison was unavailable, not that the daemon differs. Neither result proves
+the selected artifact is fresh for this checkout. The node can look
 exactly like a node with a real bug when the fix is already in `main` and
 merely never shipped.
 

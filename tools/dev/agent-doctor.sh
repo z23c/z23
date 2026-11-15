@@ -132,53 +132,36 @@ next_action() {
     fi
 }
 
-# ── Is the CANONICAL live node running this tree? ───────────────────────
-#
-# Everything else this doctor reports is about the DEV lane. Nothing compared
-# the running canonical daemon against the checkout, and the cost of that gap
-# is measured, not theoretical: on 2026-07-28 two separate "live defects" were
-# diagnosed off this repo, written up, and were in fact already FIXED in the
-# tree and merely never shipped. The daemon was running source_id ff29f119…
-# from a binary built 04:19 UTC while the fix had landed at 08:42 UTC.
-#
-# Reading the repo and assuming the running node contains it is the single
-# most expensive mistake available here, and it is silent — the node behaves
-# exactly like a node with a real bug. One string compare removes it.
-#
-# Read-only and failure-tolerant by construction: the daemon binary may be
-# absent (a fresh clone), unreadable, or slow, and none of that may break a
-# doctor whose whole job is to be safe to run. Any failure degrades to
-# live="unknown", never to a false "matches".
+# Compare the live daemon observation with the selected release artifact.
+# Neither the configured artifact path nor an unavailable observation proves
+# which source the running process uses. Failures leave the comparison unknown.
 live_node_json() {
     local bin="${ZCL_AGENT_LIVE_BIN:-$HOME/.local/bin/zclassic23-live}"
-    # Compare against the RELEASE artifact, because that is what ship.sh
-    # deploys. The dev binary is built with different flags and bakes a
-    # different id from the same tree, so comparing the live node against it
-    # would report a permanent, meaningless mismatch.
     local rel="${ZCL_AGENT_RELEASE_BIN:-build/bin/zclassic23}"
-    local rel_id live_id state="unknown" matches="false"
-
+    local rel_id live_id state="unknown" matches="false" comparison="unknown"
     rel_id="$(baked_source_id "$rel")"
-
-    if [ ! -x "$bin" ]; then
-        printf '{"binary":"%s","present":false,"state":"absent","source_id_sha256":"","tree_source_id_sha256":"%s","matches_tree":false}\n' \
-            "$(json_escape "$bin")" "$(json_escape "$rel_id")"
-        return 0
+    if ! live_id="$(timeout 5 "$rel" ops mesh identity --format=json 2>/dev/null |
+        jq -ser 'select(length == 1) | .[0] |
+                 select(.ok == true and .data.schema == "zcl.machine_mesh_identity.v1" and
+                       .data.authority == "live_daemon_observation" and
+                       (.data.build.source_id_sha256 | type == "string" and test("^[0-9a-f]{64}$"))) |
+                .data.build.source_id_sha256' 2>/dev/null)"; then
+        live_id=""
     fi
-
-    live_id="$(baked_source_id "$bin")"
-
-    if [ -n "$live_id" ]; then
+    if [[ "$live_id" =~ ^[0-9a-f]{64}$ ]]; then
         state="reporting"
-        # Both ids must be present AND equal. An empty release id means the
-        # tree has not been built, so nothing is known — never "matches".
-        if [ -n "$rel_id" ] && [ "$live_id" = "$rel_id" ]; then
-            matches="true"
+        if [[ "$rel_id" =~ ^[0-9a-f]{64}$ ]]; then
+            comparison="different"
+            if [ "$live_id" = "$rel_id" ]; then
+                matches="true"
+                comparison="match"
+            fi
         fi
+    else
+        live_id=""
     fi
-
-    printf '{"binary":"%s","present":true,"state":"%s","source_id_sha256":"%s","tree_source_id_sha256":"%s","matches_tree":%s}\n' \
-        "$(json_escape "$bin")" "$state" "$(json_escape "$live_id")" \
+    printf '{"configured_artifact":"%s","comparison":"selected_release_artifact","comparison_state":"%s","state":"%s","source_id_sha256":"%s","tree_source_id_sha256":"%s","matches_tree":%s}\n' \
+        "$(json_escape "$bin")" "$comparison" "$state" "$(json_escape "$live_id")" \
         "$(json_escape "$rel_id")" "$matches"
 }
 
@@ -221,9 +204,10 @@ emit_text() {
             " source_id=" + .build.source_id_sha256 +
             " commit_display=" + .build.build_commit,
             "[agent-doctor] live_node=" + (.live_node.state // "unknown") +
-            " running_this_tree=" + ((.live_node.matches_tree // false)|tostring) +
-            (if (.live_node.matches_tree // false) then ""
-             else "  ⚠ THE LIVE NODE IS NOT RUNNING THIS TREE — do not diagnose"
+            " matches_release_artifact=" + (if .live_node.comparison_state == "unknown" then "unknown" else (.live_node.matches_tree|tostring) end) +
+            (if .live_node.comparison_state == "unknown" then "  live identity comparison unavailable"
+             elif .live_node.matches_tree then ""
+             else "  ⚠ LIVE NODE DIFFERS FROM THE SELECTED RELEASE ARTIFACT — do not diagnose"
                   + " live behaviour from this checkout (running="
                   + ((.live_node.source_id_sha256 // "")[0:12])
                   + "… tree=" + ((.live_node.tree_source_id_sha256 // "")[0:12])
