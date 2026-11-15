@@ -93,7 +93,7 @@ static void responding_node_line(const struct zapp_view *view, char *out, size_t
     else if (view->chain_state == ZAPP_CHAIN_BEHIND) behind_line(view, out, cap);
     else if (view->chain_state == ZAPP_CHAIN_UNCONFIRMED) snprintf(out, cap, "Can't confirm it's up to date: %s", view->chain_doubt);
     else if (view->chain_state == ZAPP_CHAIN_WAITING) snprintf(out, cap, "%s", view->chain_doubt);
-    else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Node up to date");
+    else if (view->chain_state == ZAPP_CHAIN_CURRENT) snprintf(out, cap, "Recent blocks synced");
     else snprintf(out, cap, "Connected, checking the chain");
 }
 
@@ -154,14 +154,14 @@ const char *zapp_home_node_details(const struct zapp_view *view, bool preview, c
         ? "\nKeeping your phone cool. Some background work waits until it cools." : "";
     const char *state = node_details_pending(view);
     if (state) {
-        snprintf(out, cap, "%s%s\nWallet scanning is separate.", state, cooling);
+        snprintf(out, cap, "%s%s\nRecent-block check does not verify full history.\nWallet scanning is separate.", state, cooling);
         return out;
     }
     char height[32] = "Unknown", reference[32] = "Unknown";
     if (view->node_height >= 0) zapp_grouped(view->node_height, height);
     if (view->node_reference > 0) zapp_grouped(view->node_reference, reference);
     const char *verdict = node_details_verdict(view);
-    snprintf(out, cap, "Last check\nNode block: %s\nNetwork reference: %s\n%s%s\nWallet scanning is separate.",
+    snprintf(out, cap, "Recent-block check\nNode block: %s\nNetwork reference: %s\n%s%s\nRecent-block check does not verify full history.\nWallet scanning is separate.",
              height, reference, verdict, cooling);
     return out;
 }

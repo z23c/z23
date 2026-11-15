@@ -53,7 +53,7 @@ static void node_details_states(void)
     view.node_starting = false; view.node_process_running = true; view.node_stopping = true;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node stopping") && !strstr(text, "123"));
     view.node_stopping = false; view.node_running = true; view.pace = ZAPP_PACE_PAUSE;
-    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused while the phone cools") && !strstr(text, "123"));
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused while the phone cools") && strstr(text, "does not verify full history") && !strstr(text, "123"));
     view.pace = ZAPP_PACE_NORMAL; view.node_running = false;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node starting.") && !strstr(text, "123"));
     view.node_seen_height = true;
@@ -69,13 +69,14 @@ static void node_details_reported(void)
     view.node_process_running = view.node_running = true;
     view.node_height = 123; view.node_reference = 125; view.chain_state = ZAPP_CHAIN_CURRENT;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "123") && strstr(text, "125") &&
-        strstr(text, "No more than 2 blocks behind") && strstr(text, "Wallet scanning is separate"));
-    assert(strstr(text, "Last check\nNode block: 123\nNetwork reference: 125"));
+        strstr(text, "No more than 2 blocks behind") && strstr(text, "does not verify full history") && strstr(text, "Wallet scanning is separate"));
+    assert(strstr(text, "Recent-block check\nNode block: 123\nNetwork reference: 125"));
     assert(!strstr(text, "background work waits"));
     view.pace = ZAPP_PACE_GENTLE;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) &&
         strstr(text, "No more than 2 blocks behind") &&
         strstr(text, "Keeping your phone cool. Some background work waits until it cools.") &&
+        strstr(text, "does not verify full history") &&
         strstr(text, "Wallet scanning is separate"));
     view.pace = ZAPP_PACE_NORMAL;
     view.node_height = 130;
@@ -195,7 +196,7 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Catching up: 1,000 blocks to go"));
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
-    assert(node_line_is(&view, "Node up to date"));
+    assert(node_line_is(&view, "Recent blocks synced"));
     view.chain_state = ZAPP_CHAIN_UNCONFIRMED;
     snprintf(view.chain_doubt, sizeof(view.chain_doubt), "only 1 peer");
     assert(node_line_is(&view, "Can't confirm it's up to date: only 1 peer"));
@@ -217,7 +218,7 @@ static void plain_node_line_verdicts(void)
     assert(node_line_is(&view, "Block 1,000, waiting for other computers"));
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
-    assert(node_line_is(&view, "Node up to date"));
+    assert(node_line_is(&view, "Recent blocks synced"));
     view.node_reference = -1;
     view.node_height = -1;
     assert(node_line_is(&view, "Checking the chain"));
@@ -753,12 +754,12 @@ static void paced_home_lines(void)
     /* Paused while behind: the pause line, never the blocks left and never up to date. */
     view.pace = ZAPP_PACE_PAUSE;
     assert(node_line_is(&view, ZAPP_PAUSED_LINE));
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Node up to date") && !strstr(card, "Catching up"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Recent blocks synced") && !strstr(card, "Catching up"));
     /* Paused while current: still the pause line, never up to date. */
     view.node_reference = 1000;
     view.chain_state = ZAPP_CHAIN_CURRENT;
     assert(node_line_is(&view, ZAPP_PAUSED_LINE));
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Node up to date"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Recent blocks synced"));
     /* Gentle while behind: the slow catch-up line, with no estimate. */
     view.pace = ZAPP_PACE_GENTLE;
     view.node_reference = 2000;
@@ -845,7 +846,7 @@ static void check_agreement(const struct agreement_sample *s, struct zapp_view *
     snprintf(view->node_line, sizeof(view->node_line), "%s", node);
     zapp_home_node_line(view, home, sizeof(home));
     zapp_paced_sync_line(pace, s->process, stopping, sync, paced, sizeof(paced));
-    const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Node up to date");
+    const bool home_paused = !strcmp(home, ZAPP_PAUSED_LINE), home_current = !strcmp(home, "Recent blocks synced");
     const bool home_behind = !strncmp(home, "Catching up", 11) ||
         (pace == ZAPP_PACE_GENTLE && strstr(home, " blocks left\nKeeping phone cool") != NULL);
     const bool sync_paused = !strcmp(paced, ZAPP_PAUSED_LINE), sync_current = !strcmp(paced, up_to_date);
