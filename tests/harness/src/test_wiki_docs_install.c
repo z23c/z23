@@ -34,6 +34,7 @@ struct wi_release {
     char manifest[PATH_MAX], root[65], pin[65];
 };
 static bool wi_copy(const char *src, const char *dst, mode_t mode);
+static bool wi_mkpath(const char *base, const char *rel);
 
 static bool wi_write(const char *path, const void *bytes, size_t size, mode_t mode)
 {
@@ -105,17 +106,22 @@ static bool wi_fixture_runtime(struct wi_release *f, bool replacement)
     return n > 0 && (size_t)n < sizeof(path) && wi_write(path, "# Agent\n", 8, 0600);
 }
 
-static bool wi_fixture_create(struct wi_release *f)
+static bool wi_fixture_paths(struct wi_release *f)
 {
-    char source[PATH_MAX];
     if (!test_mkdtemp(f->base, sizeof(f->base), "wiki_release")) return false;
     int a = snprintf(f->release, sizeof(f->release), "%s/release", f->base);
     int b = snprintf(f->prefix, sizeof(f->prefix), "%s/prefix", f->base);
-    int c = snprintf(f->script, sizeof(f->script), "%s/install_z23.sh", f->base);
+    int c = snprintf(f->script, sizeof(f->script), "%s/standalone/bin/install_z23.sh", f->base);
     int d = snprintf(f->manifest, sizeof(f->manifest), "%s/SHA256SUMS", f->release);
     return a > 0 && (size_t)a < sizeof(f->release) && b > 0 && (size_t)b < sizeof(f->prefix) &&
-        c > 0 && (size_t)c < sizeof(f->script) && d > 0 && (size_t)d < sizeof(f->manifest) &&
-        mkdir(f->release, 0700) == 0 && realpath("tools/scripts/install_z23.sh", source) &&
+        c > 0 && (size_t)c < sizeof(f->script) && d > 0 && (size_t)d < sizeof(f->manifest);
+}
+
+static bool wi_fixture_create(struct wi_release *f)
+{
+    char source[PATH_MAX];
+    return wi_fixture_paths(f) && mkdir(f->release, 0700) == 0 && wi_mkpath(f->base, "standalone/bin") &&
+        realpath("tools/scripts/install_z23.sh", source) &&
         wi_copy(source, f->script, 0700) && wi_fixture_runtime(f, false) && wi_fixture_bundle(f) && wi_fixture_manifest(f, 2);
 }
 

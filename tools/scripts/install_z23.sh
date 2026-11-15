@@ -2228,7 +2228,7 @@ selftest_local_success() {
     run_install "$tmp/no-verifier-dest" "$tmp/units" "$tmp/no-verifier" \
         >/dev/null 2>"$tmp/no-verifier.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1"
-    grep -Eq 'exactly five|exactly once' "$tmp/no-verifier.err" \
+    grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/no-verifier.err" \
         || die "selftest: missing verifier must name the strict manifest refusal"
     if [ -e "$tmp/no-verifier-dest/bin/z23" ]; then
         die "selftest: incomplete release installed z23 anyway"
@@ -2250,7 +2250,7 @@ selftest_local_success() {
     run_install "$tmp/no-acme-dest" "$tmp/units" "$tmp/no-acme" \
         >/dev/null 2>"$tmp/no-acme.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: missing zclassic23-acme must exit 1"
-    grep -Eq 'exactly five|exactly once' "$tmp/no-acme.err" \
+    grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/no-acme.err" \
         || die "selftest: missing zclassic23-acme must name the strict manifest refusal"
     if [ -e "$tmp/no-acme-dest/bin/z23" ]; then
         die "selftest: a release silently missing zclassic23-acme installed z23 anyway"
@@ -2434,7 +2434,7 @@ selftest_local_manifest_refusals() {
     run_install "$tmp/prefix2" "$tmp/units" "$tmp/extra" \
         >/dev/null 2>"$tmp/extra.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: extra SHA256SUMS member must refuse"
-    grep -Eq 'exactly five|exactly once' "$tmp/extra.err" \
+    grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/extra.err" \
         || die "selftest: extra member must name the strict manifest refusal"
 
     [ -z "$(find "$tmp/stages" -mindepth 1 -maxdepth 1 \
@@ -3005,7 +3005,7 @@ selftest_current_release() {
         run_install "$tmp/cur-missing-$name-dest" "$tmp/units" \
             "$tmp/cur-missing-$name" >/dev/null 2>"$tmp/cur-missing-$name.err" || rc=$?
         [ "$rc" -eq 1 ] || die "selftest: a current release missing $name must exit 1"
-        grep -Eq 'exactly five|exactly once' "$tmp/cur-missing-$name.err" \
+        grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/cur-missing-$name.err" \
             || die "selftest: a current release missing $name must name the strict manifest refusal"
         if [ -e "$tmp/cur-missing-$name-dest/bin/z23" ]; then
             die "selftest: a current release missing $name installed z23 anyway"
