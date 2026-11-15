@@ -14323,7 +14323,8 @@ static bool ic_union_fixture(const char *generation, bool selected, unsigned mod
     if (!ic_union_guard(guard, sizeof(guard))) return false;
     int n = snprintf(makefile, sizeof(makefile),
         "%s\ndev-proof-bundle-prefork: $(PROOF_LINT_TOOL_TARGETS)\n"
-        ".PHONY: dev-proof-bundle-prefork z23 z23-acme zcl-rpc\n"
+        ".PHONY: dev-proof-bundle-prefork z23 z23-acme zcl-rpc docs-proof-tools\n"
+        "docs-proof-tools: build/bin/z23-lint\n\t@echo docs >> invocations\n\t@if [ -e docs-fail ]; then exit 1; fi\n"
         "build/bin/z23-lint: lint-source\n\t@echo bootstrap >> invocations\n"
         "\t@if [ -e bootstrap-fail ]; then exit 1; fi; if [ ! -e bootstrap-no-output ]; then cp lint-source $@; chmod +x $@; fi\n"
         "build/bin/lint-union-fixture:\n\t@echo lint-tool >> invocations\n\t@printf tool > $@\n"
@@ -14361,7 +14362,11 @@ static bool ic_union_expected_status(unsigned mode, bool ok, bool covered, const
 static bool ic_union_bootstrap_log(unsigned mode, const char *log)
 {
     bool bootstrap = mode < 3 || mode == 6;
-    return ic_union_log_count(log, "bootstrap\n") == (bootstrap ? 1 : 0) &&
+    const char *docs = strstr(log, "docs\n");
+    const char *list = strstr(log, "list\n");
+    return ic_union_log_count(log, "docs\n") == (bootstrap ? 1 : 0) &&
+        (!bootstrap || (docs && list && docs < list)) &&
+        ic_union_log_count(log, "bootstrap\n") == (bootstrap ? 1 : 0) &&
         ic_union_log_count(log, "list\n") == (bootstrap ? 1 : 0) &&
         ic_union_log_count(log, "lint-tool\n") == (bootstrap ? 1 : 0);
 }
@@ -14444,6 +14449,7 @@ static bool ic_union_retry_logs(const char *generation, char *log, size_t cap)
 {
     return ic_union_read(generation, "invocations", log, cap) &&
         ic_union_log_count(log, "bundle\n") == 2 && ic_union_log_count(log, "node\n") == 1 &&
+        ic_union_log_count(log, "docs\n") == 1 &&
         ic_union_log_count(log, "bootstrap\n") == 1 && ic_union_log_count(log, "list\n") == 2 &&
         ic_union_log_count(log, "lint-tool\n") == 1 && ic_union_log_count(log, "rpc\n") == 1;
 }
@@ -14459,7 +14465,8 @@ static bool ic_union_retry(const uint8_t expected[32])
         "%s\ndev-proof-bundle-prefork: $(PROOF_LINT_TOOL_TARGETS)\n"
         "build/bin/z23-lint: lint-source\n\t@echo bootstrap >> invocations\n\t@cp lint-source $@; chmod +x $@\n"
         "build/bin/lint-union-fixture:\n\t@echo lint-tool >> invocations\n\t@printf tool > $@\n"
-        ".PHONY: dev-proof-bundle-prefork z23 zcl-rpc\n"
+        ".PHONY: dev-proof-bundle-prefork z23 zcl-rpc docs-proof-tools\n"
+        "docs-proof-tools: build/bin/z23-lint\n\t@echo docs >> invocations\n"
         "dev-proof-bundle-prefork:\n\t@test ! -e build/bin/z23\n\t@echo bundle >> invocations\n"
         "\t@if [ ! -e retry-marker ]; then touch retry-marker; echo 'unverified compile epoch appeared after recovery admission; rerun make'; exit 1; fi\n"
         "z23:\n\t@test ! -e build/bin/z23\n\t@echo node >> invocations\n\t@cp node-input build/bin/z23 && chmod +x build/bin/z23\n"
@@ -14488,9 +14495,10 @@ static bool ic_union_warm_linter(const char *generation)
 static bool ic_union_bootstrap_failure(unsigned mode, bool ok, bool covered,
                                        const char *why, const char *log)
 {
-    const char *want = mode == 0 ? "proof_bundle_lint_bootstrap_failed" : "proof_bundle_build_failed";
-    int lists = mode < 2 ? 0 : 1;
+    const char *want = (mode == 0 || mode == 6) ? "proof_bundle_lint_bootstrap_failed" : "proof_bundle_build_failed";
+    int lists = mode < 2 || mode == 6 ? 0 : 1;
     return !ok && !covered && !strcmp(why, want) &&
+        ic_union_log_count(log, "docs\n") == (mode == 0 ? 0 : 1) &&
         ic_union_log_count(log, "bootstrap\n") == 1 && ic_union_log_count(log, "list\n") == lists &&
         ic_union_log_count(log, "bundle\n") == 0 && ic_union_log_count(log, "node\n") == 0;
 }
@@ -14499,16 +14507,17 @@ static bool ic_union_warm_result(bool ok, bool covered, const char *why, bool no
 {
     return ok && covered && !why[0] && node_read && !strcmp(node, "node-one") &&
         !memcmp(root, expected, 32) && ic_union_log_count(log, "bootstrap\n") == 0 &&
+        ic_union_log_count(log, "docs\n") == 1 &&
         ic_union_log_count(log, "list\n") == 1 && ic_union_log_count(log, "lint-tool\n") == 1;
 }
 static bool ic_union_bootstrap_case(unsigned mode, const uint8_t expected[32])
 {
-    static const char *const marker[] = {"bootstrap-fail", "bootstrap-no-output", "list-fail", "list-empty", "list-fail-output"};
+    static const char *const marker[] = {"bootstrap-fail", "bootstrap-no-output", "list-fail", "list-empty", "list-fail-output", "", "docs-fail"};
     char generation[4096], why[512] = {0}, log[256] = {0}, node[32] = {0};
     uint8_t root[32] = {0}; bool covered = false;
     test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-bootstrap");
     if (!ic_union_fixture(generation, true, 0, 0)) return false;
-    if (mode < 5 && !ic_write(generation, marker[mode], "x")) return false;
+    if (mode != 5 && !ic_write(generation, marker[mode], "x")) return false;
     if (mode == 5 && !ic_union_warm_linter(generation)) return false;
     bool ok = zcl_dev_proof_test_bundle_union(generation, "test_onion_pair_watch_live", true, false, false,
                                                &covered, root, why, sizeof(why));
@@ -14537,7 +14546,7 @@ static int test_ic_worker_bundle_union(void)
         ok = ic_union_empty_needs() && ok;
         ok = ic_union_clear_failure() && ok;
         ok = ic_union_retry(roots[0]) && ok;
-        for (unsigned i = 0; i < 6; ++i) ok = ic_union_bootstrap_case(i, roots[0]) && ok;
+        for (unsigned i = 0; i < 7; ++i) ok = ic_union_bootstrap_case(i, roots[0]) && ok;
         ASSERT(ok);
 #endif
         PASS();

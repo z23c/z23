@@ -11416,8 +11416,10 @@ static bool dp_bundle_lint_bootstrap(struct dp_worker *w, char *why,
     }
     struct zcl_dev_proof_budget budget =
         proof_step_budget(w->paths, "bundle-lint-bootstrap", PROOF_BUNDLE_DEFAULT_MS);
+    /* The standalone docs-tools goal builds this same lint prerequisite
+     * without rerunning the node vendor bootstrap already completed above. */
     const char *argv[] = {"make", "--no-print-directory", w->make_jobs,
-        "build/bin/z23-lint", "ZCL_TEST_WERROR=1", NULL};
+        "docs-proof-tools", "ZCL_TEST_WERROR=1", NULL};
     if (run_step(w->paths, w->generation, log, argv,
                  "bundle-lint-bootstrap", &budget, NULL) != 0) {
         proof_why(why, why_len, "proof_bundle_lint_bootstrap_failed");
