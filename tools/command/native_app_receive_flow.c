@@ -234,6 +234,11 @@ static bool arf_summary_execution(struct json_value *out, const struct json_valu
         if (v && (v->type == JSON_BOOL || v->type == JSON_INT) &&
             !json_push_kv(out, scalar[i], v)) return false;
     }
+    static const char *const build[] = {"make_ran", "cache_hit"};
+    for (size_t i = 0; i < sizeof(build) / sizeof(build[0]); ++i) {
+        const struct json_value *v = json_get(data, build[i]);
+        if (v && v->type == JSON_BOOL && !json_push_kv(out, build[i], v)) return false;
+    }
     return true;
 }
 static bool arf_result_summary(struct json_value *out, const struct json_value *wire)

@@ -1722,7 +1722,9 @@ static bool rtry_max_wire(struct json_value *wire)
         ok = json_push_kv_str(&data, names[i], text);
     for (size_t i = 0; ok && i < sizeof(scalars) / sizeof(scalars[0]); ++i)
         ok = json_push_kv_int(&data, scalars[i], INT64_MIN);
-    ok = ok && json_push_kv_str(&error, "message", message) && json_push_kv(wire, "data", &data) &&
+    ok = ok && json_push_kv_bool(&data, "make_ran", false) &&
+        json_push_kv_bool(&data, "cache_hit", false) &&
+        json_push_kv_str(&error, "message", message) && json_push_kv(wire, "data", &data) &&
         json_push_kv(wire, "error", &error) && json_push_kv_str(wire, "status", text);
     json_free(&error); json_free(&data); return ok;
 }
@@ -1749,6 +1751,36 @@ static bool rbb_ordinary_maximum(bool failed)
         zcl_command_registry_test_success_budget(spec, &reply, &fixture, &usable, output, sizeof(output), &bytes) &&
         total <= usable && bytes && bytes <= fixture.budget_bytes;
     json_free(&worker); zcl_command_reply_free(&reply); return ok;
+}
+static bool rbuild_observed(const struct json_value *op, const char *key, int expected)
+{
+    const struct json_value *v = json_get(op, key);
+    if (expected < 0) return !v;
+    return v && v->type == JSON_BOOL && json_get_bool(v) == (expected != 0);
+}
+static bool rbuild_observation(const char *text, int made, int hit)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct json_value worker; json_init(&worker);
+    struct app_receive_job_result results[3] = {0};
+    bool ok = json_read(&worker, text, strlen(text)) &&
+        app_receive_flow_test_ordinary_report(&reply, results, &worker, false);
+    const struct json_value *op = json_at(json_get(&reply.data, "operations"), 1);
+    ok = ok && rbuild_observed(op, "make_ran", made) && rbuild_observed(op, "cache_hit", hit);
+    json_free(&worker); zcl_command_reply_free(&reply); return ok;
+}
+static int rbuild_observations(void)
+{
+    int failures = 0;
+    TEST("receive receipt distinguishes builds, cache hits and missing build evidence") {
+        ASSERT(rbuild_observation("{\"data\":{\"make_ran\":true,\"cache_hit\":false}}", 1, 0));
+        ASSERT(rbuild_observation("{\"data\":{\"make_ran\":false,\"cache_hit\":true}}", 0, 1));
+        ASSERT(rbuild_observation("{\"data\":{}}", -1, -1));
+        ASSERT(rbuild_observation("{\"data\":{\"make_ran\":1,\"cache_hit\":\"false\"}}", -1, -1));
+        ASSERT(rbuild_observation("{\"error\":{\"facts\":{\"make_ran\":true,\"cache_hit\":false}}}", 1, 0));
+        PASS();
+    } _test_next:;
+    return failures;
 }
 static bool rtry_large_rejected(void)
 {
@@ -1980,7 +2012,8 @@ static bool rdiag_result(const struct zcl_command_reply *reply, const struct rdi
     if (!ops || ops->type != JSON_ARR || json_size(ops) != 2) return false;
     const struct json_value *first = json_at(ops, 0), *second = json_at(ops, 1);
     const char *code = json_get_str(json_get(json_get(data, "continuation_error"), "code"));
-    return rdiag_progress_result(first, second, p) &&
+    return rbuild_observed(second, "make_ran", 1) && rbuild_observed(second, "cache_hit", 0) &&
+        rdiag_progress_result(first, second, p) &&
         code && !strcmp(code, p->mode == RDIAG_MISMATCH ? "PREVIEW_BUILD_MISMATCH" : "PROGRESS_UNAVAILABLE") && !json_get(data, "kept") &&
         !json_get_bool(json_get(data, "continuation_executed")) &&
         (p->mode == RDIAG_PRIOR_CLOSE || p->location.shown) && p->keep_choices == 0;
@@ -2086,6 +2119,7 @@ int test_app_receive(void)
     failures += rloc_cases();
     failures += rreveal_cases();
     failures += rtry_matrix();
+    failures += rbuild_observations();
     if (!rbb_ordinary_maximum(false) || !rbb_ordinary_maximum(true)) ++failures;
 #if defined(__linux__)
     failures += rdiag_case(RDIAG_CLOSE);
