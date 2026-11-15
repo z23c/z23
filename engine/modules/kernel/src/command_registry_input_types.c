@@ -1278,6 +1278,20 @@ static bool cr_app_host_descriptor(const struct zcl_command_spec *spec,
     return true;
 }
 
+static bool cr_telegram_descriptor(const struct zcl_command_spec *spec, const char *key,
+                                   struct zcl_command_input_descriptor *out)
+{
+    if (!strcmp(spec->path, "ops.telegram.send") && !strcmp(key, "reply_to_message_id")) {
+        out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX; return true;
+    }
+    if (strcmp(spec->path, "ops.telegram.inbox")) return false;
+    if (!strcmp(key, "reliable")) { out->type = JSON_BOOL; return true; }
+    if (!strcmp(key, "group_chat_id")) {
+        out->type = JSON_INT; out->minimum = INT64_MIN; out->maximum = -1; return true;
+    }
+    return false;
+}
+
 static bool cr_general_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -1288,8 +1302,8 @@ static bool cr_general_descriptor(
         "before_seq", "after_seq"
     };
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
-    if (!strcmp(spec->path, "ops.telegram.send") && !strcmp(key, "reply_to_message_id")) {
-        out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX;
+    if (cr_telegram_descriptor(spec, key, out)) {
+        /* Leaf-specific types share the same execution and discovery rule. */
     } else if (host_bound) {
         out->type = JSON_INT;
         out->minimum = host_bound->lo;

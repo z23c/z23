@@ -1101,11 +1101,11 @@ static int tgt_reply_target_case(void)
     return failures;
 }
 
-static bool tgt_registry_send(const char *request, char *out, size_t cap,
+static bool tgt_registry_call(const char *path, const char *request, char *out, size_t cap,
                               enum zcl_command_exit *code)
 {
     const struct zcl_command_registry *reg = zcl_command_catalog();
-    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "ops.telegram.send", NULL);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, path, NULL);
     struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
                                       .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
     struct json_value input = {0};
@@ -1114,6 +1114,112 @@ static bool tgt_registry_send(const char *request, char *out, size_t cap,
                                                  spec->path, "normal", 0, 0, NULL, out, cap, code);
     json_free(&input);
     return n > 0;
+}
+
+static bool tgt_inbox_registry_result(const char *out, const char *receipt, bool acknowledged)
+{
+    struct json_value doc = {0};
+    if (!json_read(&doc, out, strlen(out))) return false;
+    const struct json_value *data = json_get(&doc, "data");
+    const struct json_value *r = json_get(data, "receipt");
+    bool ok = json_get_int(json_get(data, "next_offset")) == 26 &&
+        (acknowledged ? !r && json_get_int(json_get(data, "count")) == 0 :
+         r && !strcmp(json_get_str(r), receipt));
+    json_free(&doc);
+    return ok;
+}
+
+static int tgt_inbox_registry_case(void)
+{
+    int failures = 0;
+    const char *old = getenv("XDG_STATE_HOME");
+    char *saved = old ? strdup(old) : NULL;
+    bool changed = false;
+    char state[PLATFORM_TEMP_PATH_MAX + 32], out[65536], ack[256], receipt[65] = {0};
+    enum zcl_command_exit code;
+    struct json_value doc = {0};
+    const char *request = "{\"reliable\":true,\"group_chat_id\":-100123,\"wait_s\":0}";
+    TEST_CASE("telegram registry reliable inbox polls, replays and acknowledges") {
+        ASSERT(!old || saved);
+        ASSERT(snprintf(state, sizeof state, "%s/registry-inbox", g_root) < (int)sizeof state);
+        ASSERT(setenv("XDG_STATE_HOME", state, 1) == 0); changed = true;
+        ASSERT(tgt_write_file(g_env, "TELEGRAM_BOT_TOKEN=" TGT_CANARY
+               "\nTELEGRAM_CHAT_ID=4242\nTELEGRAM_ALLOW_FROM=99,100,-100123\n", 0600));
+        memset(&g_fake, 0, sizeof g_fake); tgt_script(200, tgt_reliable_updates);
+        ASSERT(tgt_registry_call("ops.telegram.inbox", request, out, sizeof out, &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(json_read(&doc, out, strlen(out)));
+        const struct json_value *data = json_get(&doc, "data");
+        const char *value = json_get_str(json_get(data, "receipt"));
+        ASSERT(strlen(value) == 64);
+        memcpy(receipt, value, sizeof receipt);
+        json_free(&doc);
+        ASSERT(tgt_registry_call("ops.telegram.inbox", request, out, sizeof out, &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(tgt_inbox_registry_result(out, receipt, false));
+        ASSERT(snprintf(ack, sizeof ack, "{\"reliable\":true,\"group_chat_id\":-100123,\"ack\":\"%s\"}", receipt) < (int)sizeof ack);
+        ASSERT(tgt_registry_call("ops.telegram.inbox", ack, out, sizeof out, &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(g_fake.calls, 1);
+        ASSERT(tgt_inbox_registry_result(out, receipt, true));
+    } TEST_END
+    json_free(&doc);
+    if (changed) { if (saved) setenv("XDG_STATE_HOME", saved, 1); else unsetenv("XDG_STATE_HOME"); }
+    if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600)) failures++;
+    free(saved);
+    return failures;
+}
+
+static int tgt_inbox_registry_invalid_case(void)
+{
+    int failures = 0;
+    static const char *const bad[] = {
+        "{\"reliable\":\"true\"}", "{\"group_chat_id\":\"-100123\"}",
+        "{\"reliable\":true,\"group_chat_id\":0}",
+        "{\"reliable\":true,\"group_chat_id\":1}",
+        "{\"reliable\":true,\"ack\":17}"
+    };
+    static const char *const refused[] = {
+        "{\"reliable\":true,\"group_chat_id\":-100124}",
+        "{\"group_chat_id\":-100123}",
+        "{\"reliable\":true,\"ack\":\"invalid\"}"
+    };
+    TEST_CASE("telegram registry refuses malformed inbox types without transport") {
+        memset(&g_fake, 0, sizeof g_fake);
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            char out[65536]; enum zcl_command_exit code;
+            ASSERT(tgt_registry_call("ops.telegram.inbox", bad[i], out, sizeof out, &code));
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_INVALID);
+            ASSERT(strstr(out, "\"INVALID_INPUT\"") != NULL);
+        }
+        for (size_t i = 0; i < sizeof refused / sizeof refused[0]; i++) {
+            char out[65536]; enum zcl_command_exit code;
+            ASSERT(tgt_registry_call("ops.telegram.inbox", refused[i], out, sizeof out, &code));
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_INVALID);
+            ASSERT(strstr(out, "\"TELEGRAM_BAD_INBOX_OPTIONS\"") != NULL);
+        }
+        ASSERT_EQ(g_fake.calls, 0);
+    } TEST_END
+    return failures;
+}
+
+static int tgt_inbox_descriptor_case(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "ops.telegram.inbox", NULL);
+    struct zcl_command_input_descriptor d;
+    TEST_CASE("telegram inbox descriptors expose its input types") {
+        ASSERT(spec && zcl_command_registry_input_descriptor(spec, "reliable", &d));
+        ASSERT_EQ(d.type, JSON_BOOL);
+        ASSERT(zcl_command_registry_input_descriptor(spec, "group_chat_id", &d));
+        ASSERT_EQ(d.type, JSON_INT);
+        ASSERT_EQ(d.minimum, INT64_MIN);
+        ASSERT_EQ(d.maximum, -1);
+    } TEST_END
+    return failures;
 }
 
 static int tgt_reply_registry_case(void)
@@ -1135,10 +1241,10 @@ static int tgt_reply_registry_case(void)
         ASSERT_EQ(desc.maximum, INT64_MAX);
         ASSERT(zcl_command_registry_input_validate(spec, &input, why, sizeof why));
         json_free(&input);
-        ASSERT(tgt_registry_send(request, out, sizeof out, &code));
+        ASSERT(tgt_registry_call("ops.telegram.send", request, out, sizeof out, &code));
         ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
         ASSERT(tgt_reply_body(0, 20129));
-        ASSERT(tgt_registry_send(request, out, sizeof out, &code));
+        ASSERT(tgt_registry_call("ops.telegram.send", request, out, sizeof out, &code));
         ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
         ASSERT(strstr(out, "\"duplicate\":true") != NULL);
         ASSERT_EQ(g_fake.calls, 1);
@@ -1160,7 +1266,7 @@ static int tgt_reply_registry_invalid_case(void)
             char request[128], out[65536];
             enum zcl_command_exit code;
             snprintf(request, sizeof request, "{\"text\":\"reply\",\"reply_to_message_id\":%s}", bad[i]);
-            ASSERT(tgt_registry_send(request, out, sizeof out, &code));
+            ASSERT(tgt_registry_call("ops.telegram.send", request, out, sizeof out, &code));
             ASSERT_EQ(code, ZCL_COMMAND_EXIT_INVALID);
             ASSERT(strstr(out, "\"INVALID_INPUT\"") != NULL);
         }
@@ -1440,6 +1546,9 @@ int test_telegram(void)
     failures += tgt_reliable_invalid_batch_case();
     failures += tgt_reply_target_case();
     failures += tgt_reply_registry_case();
+    failures += tgt_inbox_registry_case();
+    failures += tgt_inbox_registry_invalid_case();
+    failures += tgt_inbox_descriptor_case();
     failures += tgt_reply_registry_invalid_case();
     failures += tgt_reply_invalid_case();
     failures += tgt_reply_chunks_case();
