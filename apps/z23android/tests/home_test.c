@@ -53,7 +53,7 @@ static void node_details_states(void)
     view.node_starting = false; view.node_process_running = true; view.node_stopping = true;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node stopping") && !strstr(text, "123"));
     view.node_stopping = false; view.node_running = true; view.pace = ZAPP_PACE_PAUSE;
-    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused") && !strstr(text, "123"));
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "sync paused while the phone cools") && !strstr(text, "123"));
     view.pace = ZAPP_PACE_NORMAL; view.node_running = false;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "Node starting.") && !strstr(text, "123"));
     view.node_seen_height = true;
@@ -71,6 +71,13 @@ static void node_details_reported(void)
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "123") && strstr(text, "125") &&
         strstr(text, "No more than 2 blocks behind") && strstr(text, "Wallet scanning is separate"));
     assert(strstr(text, "Last check\nNode block: 123\nNetwork reference: 125"));
+    assert(!strstr(text, "background work waits"));
+    view.pace = ZAPP_PACE_GENTLE;
+    assert(zapp_home_node_details(&view, false, text, sizeof(text)) &&
+        strstr(text, "No more than 2 blocks behind") &&
+        strstr(text, "Keeping your phone cool. Some background work waits until it cools.") &&
+        strstr(text, "Wallet scanning is separate"));
+    view.pace = ZAPP_PACE_NORMAL;
     view.node_height = 130;
     assert(zapp_home_node_details(&view, false, text, sizeof(text)) && strstr(text, "No more than 2 blocks behind"));
     assert(!strstr(text, "WALLET-MARKER") && !strstr(text, "SECRET") && !strstr(text, "CONNECTION-PATH"));

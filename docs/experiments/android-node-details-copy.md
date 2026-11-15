@@ -15,3 +15,9 @@ complexity gate then passed; log SHA-256:
 `82323a62b852d71f0a54f13012a93ef0d1d758505b1769b47db554d10624a2f5`.
 The final focused host suite passed after the fixture split; log SHA-256:
 `360478d9ef82ddf6829da5d5c771fcaf9a3e6d7662c6204497dc14198c181a52`.
+
+On 2026-11-15, Node details added cooling and background-work wording for
+gentle pace and an explicit cooling reason for paused sync. The app host
+suite passed with normal, gentle and paused rendering assertions. Log
+SHA-256: `6c598ddbb9d713e4f8ba95d13bee624810d24049d71899022e7737ea0f56dcc9`.
+Phone presentation of this change is not yet verified.

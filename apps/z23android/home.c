@@ -131,7 +131,7 @@ static const char *node_details_pending(const struct zapp_view *view)
     if (view->node_stopping) return "Node stopping.";
     if (view->node_starting || view->node_installing) return "Node starting.";
     if (!view->node_process_running) return "Node stopped.";
-    if (view->pace == ZAPP_PACE_PAUSE) return "Node sync paused.";
+    if (view->pace == ZAPP_PACE_PAUSE) return "Node sync paused while the phone cools.";
     if (view->node_running) return NULL;
     return view->node_seen_height ? "Waiting for node status." : "Node starting.";
 }
@@ -150,17 +150,19 @@ const char *zapp_home_node_details(const struct zapp_view *view, bool preview, c
 {
     if (!out || !cap) return NULL;
     if (preview) { snprintf(out, cap, "The preview app does not run a node."); return out; }
+    const char *cooling = view->pace == ZAPP_PACE_GENTLE && view->node_process_running
+        ? "\nKeeping your phone cool. Some background work waits until it cools." : "";
     const char *state = node_details_pending(view);
     if (state) {
-        snprintf(out, cap, "%s\nWallet scanning is separate.", state);
+        snprintf(out, cap, "%s%s\nWallet scanning is separate.", state, cooling);
         return out;
     }
     char height[32] = "Unknown", reference[32] = "Unknown";
     if (view->node_height >= 0) zapp_grouped(view->node_height, height);
     if (view->node_reference > 0) zapp_grouped(view->node_reference, reference);
     const char *verdict = node_details_verdict(view);
-    snprintf(out, cap, "Last check\nNode block: %s\nNetwork reference: %s\n%s\nWallet scanning is separate.",
-             height, reference, verdict);
+    snprintf(out, cap, "Last check\nNode block: %s\nNetwork reference: %s\n%s%s\nWallet scanning is separate.",
+             height, reference, verdict, cooling);
     return out;
 }
 
