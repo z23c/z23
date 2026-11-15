@@ -18135,12 +18135,13 @@ agent-verify:
 	       exit 2; \
 	    fi; \
 	 fi; \
-	 failed=""; \
+	 av_t0=$$(date +%s); failed=""; \
+	 av_total() { echo "agent-verify: total secs=$$(($$(date +%s) - av_t0))" | tee -a build/scratch/agent-verify.rc; }; \
 	 av_step() { \
 	    step="$$1"; shift; \
 	    log="build/scratch/agent-verify.$$step.log"; \
-	    $(MAKE) --no-print-directory "$$step" "$$@" >"$$log" 2>&1; rc=$$?; \
-	    { echo "agent-verify: $$step rc=$$rc"; \
+	    s0=$$(date +%s); $(MAKE) --no-print-directory "$$step" "$$@" >"$$log" 2>&1; rc=$$?; s1=$$(date +%s); \
+	    { echo "agent-verify: $$step rc=$$rc secs=$$((s1 - s0))"; \
 	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
 	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
 	      if [ $$rc -ne 0 ]; then $(MAKE) --no-print-directory agent-verify-evidence LOG="$$log"; fi; \
@@ -18148,11 +18149,14 @@ agent-verify:
 	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
 	 }; \
 	 av_step check-cyclomatic-complexity; \
-	 if [ -n "$$failed" ]; then echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; exit 1; fi; \
+	 if [ -n "$$failed" ]; then av_total; echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; exit 1; fi; \
 	 if [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; then \
 	    rflag=; [ "$$only" = '@route' ] && rflag=--route-only; \
+	    b0=$$(date +%s); \
 	    $(MAKE) --no-print-directory dev-bin ZCL_TEST_WERROR=1 >build/scratch/agent-verify.dev-bin.log 2>&1 || { echo "agent-verify: dev-bin failed; see build/scratch/agent-verify.dev-bin.log" >&2; exit 2; }; \
+	    echo "agent-verify: dev-bin rc=0 secs=$$(($$(date +%s) - b0))" | tee -a build/scratch/agent-verify.rc; \
 	    base=$$(git merge-base origin/main HEAD) || { echo "agent-verify: no merge-base with origin/main; use ONLY=<group,group>" >&2; exit 2; }; \
+	    q0=$$(date +%s); \
 	    sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>build/scratch/agent-verify.select.err); \
 	    case "$$sel" in *'"reason":"plan-not-closed"'*) sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>>build/scratch/agent-verify.select.err);; esac; \
 	    only=$$(printf '%s' "$$sel" | sed -n 's/.*"groups":"\([^"]*\)".*/\1/p'); \
@@ -18165,7 +18169,7 @@ agent-verify:
 	       echo "agent-verify: the proof selector refused this range or its reply exceeded the leaf budget (PROOF_SELECT_REPLY_TOO_LARGE); use ONLY=<group,group>" >&2; \
 	       printf '%s\n' "$$sel" | cut -c1-400 >&2; exit 2; \
 	    fi; \
-	    echo "agent-verify: selection $$kind groups=$$count reason=$$why detail=$$detail base=$$base$${rflag:+ names=$$only}" | tee -a build/scratch/agent-verify.rc; \
+	    echo "agent-verify: selection $$kind groups=$$count reason=$$why detail=$$detail base=$$base$${rflag:+ names=$$only} select_secs=$$(($$(date +%s) - q0))" | tee -a build/scratch/agent-verify.rc; \
 	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \
@@ -18176,9 +18180,9 @@ agent-verify:
 	 av_step check-kpi-floor; \
 	 av_step lint-fast; \
 	 if [ -z "$$failed" ]; then \
-	    echo "agent-verify: OK" | tee -a build/scratch/agent-verify.rc; \
+	    av_total; echo "agent-verify: OK" | tee -a build/scratch/agent-verify.rc; \
 	 else \
-	    echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; \
+	    av_total; echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; \
 	    exit 1; \
 	 fi
 

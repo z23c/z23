@@ -1019,8 +1019,11 @@ edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
 `check-capability-closure`, `proof-lint-prebuild` (the proof's production-flag prefork build), `docs-capability-inventory`, `check-kpi-floor` and `lint-fast`, each in its own sub-make with a log
 under `build/scratch/`. Complexity fails fast before selector setup; later failures are collected.
 It prints one
-`agent-verify: <step> rc=<n>` line per step, then `agent-verify: OK` or
-`agent-verify: FAILED (...)`, and writes the same lines to
+`agent-verify: <step> rc=<n> secs=<s>` line per step (the `@changed` and
+`@route` forms also print `agent-verify: dev-bin rc=0 secs=<s>` and end the
+selection line with `select_secs=<s>`), so the log says where the minutes went,
+then `agent-verify: total secs=<total>` and the verdict line, `agent-verify: OK` or
+`agent-verify: FAILED (...)` (the verdict lines carry no timing, so the land rail reads them unchanged), and writes the same lines to
 `build/scratch/agent-verify.rc`. Run it through devbuild as one job, with
 `devbuild --wait --class normal make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`. Full
 `make lint` and the wide group list remain the landing step's job.
@@ -1028,7 +1031,7 @@ The selector bootstrap and exact test step both use `ZCL_TEST_WERROR=1`.
 This aligns their strict test-compile policy.
 
 The last line of `build/scratch/agent-verify.rc` is `agent-verify: OK` or
-`agent-verify: FAILED (<steps>)`. A file without that last line is an
+`agent-verify: FAILED (<steps>)`, directly after the total line. A file without that last line is an
 interrupted run and is not a pass, whatever its `rc=` lines say.
 
 Before candidate lint, inspect `git status --short` and stage each intended
