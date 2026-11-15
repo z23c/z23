@@ -45,6 +45,37 @@ bool mcp_policy_allows(const struct zcl_command_spec *spec,
  * policy. */
 bool mcp_policy_fleet_write(const struct zcl_command_spec *spec);
 
+/* The input key whose path the --fleet-writes bound covers: "file" for
+ * fleet.bundle.offer, "out" for fleet.bundle.fetch, NULL for every other
+ * leaf. Keyed on the canonical spec path, never an alias the caller typed. */
+const char *mcp_policy_bundle_path_key(const struct zcl_command_spec *spec);
+
+/* That key's value exactly as the leaf reads it (json_get_str), or NULL
+ * when the leaf is not a bundle leaf or the value is missing, not a string,
+ * not absolute or PATH_MAX bytes or longer. */
+const char *mcp_policy_bundle_path(const struct zcl_command_spec *spec,
+                                   const struct json_value *input);
+
+/* The path bound on the two fleet bundle writes --fleet-writes admits.
+ * Every other leaf passes. For offer and fetch, path is the value from
+ * mcp_policy_bundle_path and resolved the caller's resolution of it: for
+ * offer its realpath (every link followed, so an inside link that points out
+ * resolves outside); for fetch, only when path is absent (lstat, so a
+ * dangling link counts as present), the realpath of its parent joined with
+ * its leaf; NULL when either does not resolve. Admitted only when both are
+ * absolute, root (the served checkout's realpath, NULL without one) is an
+ * absolute path other than "/", and resolved is root or lies below it on a
+ * path-component boundary with no `.git` component (any letter case) below
+ * root. Pure: no
+ * filesystem access. A refusal is FLEET_WRITE_PATH_REFUSED; its message,
+ * written into the caller's message buffer (a static fallback when it does
+ * not fit), names the allowed root or says a checkout is required and points
+ * at the command line; detail points at spec->path. */
+bool mcp_policy_fleet_write_path(const struct zcl_command_spec *spec,
+                                 const char *path, const char *resolved,
+                                 const char *root, char *message,
+                                 size_t message_cap, struct mcp_refusal *why);
+
 /* The one mutation the dedicated apps_open tool runs without a plan or
  * confirm flow: app.open, while it stays an app-layer app-write mutation
  * outside the owner authority. Named launches use this binary's or the

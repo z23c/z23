@@ -7,6 +7,10 @@
  * apps_list / apps_open, thin wrappers that dispatch app.list and app.open
  * through the same path as run. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* realpath */
+#endif
+
 #include "mcp_serve.h"
 
 #include "mcp_identity.h"
@@ -28,6 +32,7 @@ bool zcl_mcp_serve_selected(int argc, char **argv)
 #include "command/native_command.h"
 #include "config/cli_lane_defaults.h"
 #include "config/command_catalog.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 
 #include <errno.h>
@@ -78,7 +83,9 @@ static const struct mcp_tool mcp_tools[] = {
      "spec declares no confirmation flow; other mutations return their plan first "
      "and commit only with every declared plan_id / plan_token and confirm:true, in "
      "input. A server started with --fleet-writes also runs fleet.board.post, "
-     "fleet.wiki.write, fleet.bundle.offer and fleet.bundle.fetch directly. "
+     "fleet.wiki.write, fleet.bundle.offer and fleet.bundle.fetch directly; the "
+     "bundle file and out paths must resolve inside the checkout, outside .git "
+     "(FLEET_WRITE_PATH_REFUSED). "
      "select (up to 8 dot paths; keys, indexes, * for every element, e.g. "
      "data.posts.*.text) returns only those values; a path that does not "
      "resolve is null and also listed in select_missing with the deepest "
@@ -207,6 +214,7 @@ struct mcp_serve {
     char cli_path[ZCL_COMMAND_MAX_PATH];
     char suggest[DYM_MAX * (ZCL_COMMAND_MAX_PATH + 4) + 4];
     char bad_arg[320];
+    char path_refusal[PATH_MAX + 512]; /* mcp_policy_fleet_write_path text */
     char *out;
     size_t out_cap;
 };
@@ -1005,13 +1013,56 @@ static bool app_tool_authority(struct mcp_serve *s, const struct mcp_tool *tool,
     return ok;
 }
 
-/* z23_run's two owner opt-ins, each off unless the server was started
- * with its flag: --fleet-writes and --wallet-reads. */
-static bool run_opt_in_allows(const struct mcp_serve *s,
-                              const struct zcl_command_spec *spec)
+/* Resolve a fleet bundle path the way the leaf will use it (see
+ * mcp_policy_fleet_write_path): offer's file with realpath; fetch's out only
+ * while absent, as its real parent joined with its leaf. False when it does
+ * not resolve. */
+static bool bundle_path_resolve(bool offer, const char *path,
+                                char resolved[static PATH_MAX])
 {
-    return (s->fleet_writes && mcp_policy_fleet_write(spec)) ||
-           (s->wallet_reads && mcp_policy_wallet_read(spec));
+    char parent[PATH_MAX];
+    if (!path)
+        return false;
+    if (offer)
+        return realpath(path, resolved) != NULL;
+    return platform_private_path_absent(path) &&
+           platform_private_path_resolve(path, resolved, PATH_MAX, parent,
+                                         sizeof(parent));
+}
+
+/* --fleet-writes admits fleet.bundle.offer's file and fleet.bundle.fetch's
+ * out only inside the served checkout; other fleet writes pass unchanged. */
+static bool fleet_write_path_allows(struct mcp_serve *s,
+                                    const struct zcl_command_spec *spec,
+                                    const struct json_value *input,
+                                    struct mcp_refusal *why)
+{
+    const char *key = mcp_policy_bundle_path_key(spec);
+    const char *path = mcp_policy_bundle_path(spec, input);
+    char resolved[PATH_MAX];
+    bool ok = key && bundle_path_resolve(strcmp(key, "file") == 0, path, resolved);
+    return mcp_policy_fleet_write_path(spec, path, ok ? resolved : NULL,
+                                       s->has_checkout ? s->id.root : NULL,
+                                       s->path_refusal, sizeof(s->path_refusal),
+                                       why);
+}
+
+/* z23_run's two owner opt-ins, each off unless the server was started
+ * with its flag: --fleet-writes and --wallet-reads. True when one of them
+ * decides the call; *allowed then holds its verdict, and a fleet bundle
+ * write whose file or out falls outside the checkout is refused in why.
+ * False leaves the call to the plain policy. */
+static bool run_opt_in_decides(struct mcp_serve *s,
+                               const struct zcl_command_spec *spec,
+                               const struct json_value *input, bool *allowed,
+                               struct mcp_refusal *why)
+{
+    if (s->fleet_writes && mcp_policy_fleet_write(spec)) {
+        *allowed = fleet_write_path_allows(s, spec, input, why);
+        return true;
+    }
+    *allowed = s->wallet_reads && mcp_policy_wallet_read(spec);
+    return *allowed;
 }
 
 static bool tool_authority(void *ctx, const struct mcp_tool *tool,
@@ -1021,7 +1072,7 @@ static bool tool_authority(void *ctx, const struct mcp_tool *tool,
     struct mcp_serve *s = ctx;
     const struct zcl_command_spec *spec;
     const struct json_value *input;
-    bool alias;
+    bool alias, allowed;
     if (!s->initialized)
         return refuse(why, "NOT_INITIALIZED", "send initialize first");
     if (is_app_tool(tool))
@@ -1036,8 +1087,9 @@ static bool tool_authority(void *ctx, const struct mcp_tool *tool,
         return refuse(why, "NO_CHECKOUT",
                       "this command reads a source tree; start the server "
                       "with --checkout=<git toplevel>");
-    if (tool == &mcp_tools[T_RUN] && run_opt_in_allows(s, spec))
-        return true;
+    if (tool == &mcp_tools[T_RUN] &&
+        run_opt_in_decides(s, spec, input, &allowed, why))
+        return allowed;
     return mcp_policy_allows(spec, s->cmd.registry, input, why);
 }
 

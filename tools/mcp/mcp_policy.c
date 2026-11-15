@@ -4,6 +4,8 @@
 
 #include "mcp_policy.h"
 
+#include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 static bool refuse(struct mcp_refusal *why, const char *code,
@@ -168,6 +170,99 @@ bool mcp_policy_fleet_write(const struct zcl_command_spec *spec)
         if (strcmp(spec->path, leaves[i]) == 0)
             return true;
     return false;
+}
+
+const char *mcp_policy_bundle_path_key(const struct zcl_command_spec *spec)
+{
+    if (!spec || !spec->path)
+        return NULL;
+    if (strcmp(spec->path, "fleet.bundle.offer") == 0)
+        return "file";
+    if (strcmp(spec->path, "fleet.bundle.fetch") == 0)
+        return "out";
+    return NULL;
+}
+
+/* A realpath root that bounds something: absolute and not "/". */
+static bool root_usable(const char *root)
+{
+    return root && root[0] == '/' && root[1] != '\0' &&
+           strnlen(root, PATH_MAX) < PATH_MAX;
+}
+
+/* True when the component after the slash at p is ".git" in any letter
+ * case: a case-insensitive volume (Darwin's default) opens .GIT as .git. */
+static bool git_component(const char *p)
+{
+    return p[1] == '.' && (p[2] | 0x20) == 'g' && (p[3] | 0x20) == 'i' &&
+           (p[4] | 0x20) == 't' && (p[5] == '\0' || p[5] == '/');
+}
+
+/* True when path is root or below it on a component boundary (root /a/b
+ * never admits /a/bc) and no component below root is ".git". */
+static bool path_in_checkout(const char *path, const char *root)
+{
+    size_t n = strlen(root);
+    const char *rest = path + n;
+    if (strncmp(path, root, n) != 0 || (*rest != '\0' && *rest != '/'))
+        return false;
+    for (const char *p = strchr(rest, '/'); p; p = strchr(p + 1, '/'))
+        if (git_component(p))
+            return false;
+    return true;
+}
+
+static bool path_refuse(struct mcp_refusal *why,
+                        const struct zcl_command_spec *spec, const char *key,
+                        const char *root, char *message, size_t cap)
+{
+    bool offer = strcmp(key, "file") == 0;
+    const char *cli = offer ? "z23 fleet bundle offer" : "z23 fleet bundle fetch";
+    int n = -1;
+    if (message && cap && !root_usable(root))
+        n = snprintf(message, cap,
+                     "a checkout is required: this server was started without "
+                     "--checkout, so --fleet-writes admits no %s path for %s; "
+                     "restart it with --checkout=<git toplevel> or run `%s` "
+                     "from the command line",
+                     key, spec->path, cli);
+    else if (message && cap)
+        n = snprintf(message, cap,
+                     "%s must be an absolute path that resolves inside the "
+                     "allowed root %s (the served checkout), outside any .git "
+                     "directory%s; run `%s` from the command line for any "
+                     "other path",
+                     key, root, offer ? "" : ", and must not exist yet", cli);
+    const char *text = message;
+    if (n < 0 || (size_t)n >= cap)
+        text = "fleet bundle paths must resolve inside the served checkout, "
+               "outside .git, and a checkout is required; use the command "
+               "line for any other path";
+    return refuse(why, "FLEET_WRITE_PATH_REFUSED", text, spec);
+}
+
+const char *mcp_policy_bundle_path(const struct zcl_command_spec *spec,
+                                   const struct json_value *input)
+{
+    const char *key = mcp_policy_bundle_path_key(spec);
+    const struct json_value *v = key && input ? json_get(input, key) : NULL;
+    const char *path = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    return path && path[0] == '/' && strnlen(path, PATH_MAX) < PATH_MAX ? path
+                                                                         : NULL;
+}
+
+bool mcp_policy_fleet_write_path(const struct zcl_command_spec *spec,
+                                 const char *path, const char *resolved,
+                                 const char *root, char *message,
+                                 size_t message_cap, struct mcp_refusal *why)
+{
+    const char *key = mcp_policy_bundle_path_key(spec);
+    if (!key)
+        return true;
+    if (path && path[0] == '/' && resolved && resolved[0] == '/' &&
+        root_usable(root) && path_in_checkout(resolved, root))
+        return true;
+    return path_refuse(why, spec, key, root, message, message_cap);
 }
 
 bool mcp_policy_app_open(const struct zcl_command_spec *spec)

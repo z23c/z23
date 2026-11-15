@@ -1130,6 +1130,109 @@ static int case_policy_fleet_write(void)
     return failures;
 }
 
+/* mcp_policy_fleet_write_path on leaf with the given path, resolution and
+ * root: 1 admitted, 0 refused with the typed code, detail and command-line
+ * pointer (and, when want is set, that text in the message), -1 otherwise. */
+static int ms_bound(const char *leaf, const char *path, const char *resolved,
+                    const char *root, size_t cap, const char *want)
+{
+    struct zcl_command_spec spec;
+    struct mcp_refusal why = {0};
+    char message[PATH_MAX + 512];
+    ms_mut_spec(&spec, leaf, "file,out", ZCL_COMMAND_CONFIRM_NONE);
+    if (mcp_policy_fleet_write_path(&spec, path, resolved, root, message, cap,
+                                    &why))
+        return 1;
+    bool typed = why.code && strcmp(why.code, "FLEET_WRITE_PATH_REFUSED") == 0 &&
+                 why.detail && strcmp(why.detail, leaf) == 0;
+    bool text = why.message && strstr(why.message, "command line") &&
+                (!want || strstr(why.message, want));
+    return typed && text ? 0 : -1;
+}
+
+#define MS_OFFER "fleet.bundle.offer"
+#define MS_FETCH "fleet.bundle.fetch"
+#define MS_CAP (PATH_MAX + 512)
+
+static int case_policy_fleet_write_path(void)
+{
+    int failures = 0;
+    TEST_CASE("the fleet bundle path bound admits only inside the root, outside .git") {
+        /* No checkout, a root of "/", no resolution, a relative path. */
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/a", "/ck/a", NULL, MS_CAP, "checkout is required"), 0);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/a", "/ck/a", NULL, MS_CAP, "checkout is required"), 0);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/a", "/ck/a", "/", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/a", NULL, "/ck", MS_CAP, "/ck"), 0);
+        ASSERT_EQ(ms_bound(MS_FETCH, NULL, "/ck/a", "/ck", MS_CAP, "/ck"), 0);
+        ASSERT_EQ(ms_bound(MS_OFFER, "a", "/ck/a", "/ck", MS_CAP, NULL), 0);
+        /* Component boundary and .git anywhere below the root. */
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ckx/f", "/ckx/f", "/ck", MS_CAP, "allowed root /ck"), 0);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/c", "/c", "/ck", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/.git/config", "/ck/.git/config", "/ck", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/.git", "/ck/.git", "/ck", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/s/.git/hooks/x", "/ck/s/.git/hooks/x", "/ck", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/.GIT/hooks/x", "/ck/.GIT/hooks/x", "/ck", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/.Git/config", "/ck/.Git/config", "/ck", MS_CAP, NULL), 0);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/x", "/elsewhere/x", "/ck", MS_CAP, NULL), 0);
+        /* A message that does not fit falls back to the static text. */
+        ASSERT_EQ(ms_bound(MS_OFFER, "/e/h", "/e/h", "/ck", 8, "checkout"), 0);
+        /* Inside: the root itself, plain files, names that only contain .git. */
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/f", "/ck/f", "/ck", MS_CAP, NULL), 1);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/b/new", "/ck/b/new", "/ck", MS_CAP, NULL), 1);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck", "/ck", "/ck", MS_CAP, NULL), 1);
+        ASSERT_EQ(ms_bound(MS_OFFER, "/ck/.gitignore", "/ck/.gitignore", "/ck", MS_CAP, NULL), 1);
+        ASSERT_EQ(ms_bound(MS_FETCH, "/ck/a.git/x", "/ck/a.git/x", "/ck", MS_CAP, NULL), 1);
+        /* Board posts and wiki writes are not path-bound. */
+        ASSERT_EQ(ms_bound("fleet.board.post", NULL, NULL, NULL, MS_CAP, NULL), 1);
+        ASSERT_EQ(ms_bound("fleet.wiki.write", NULL, NULL, NULL, MS_CAP, NULL), 1);
+    } TEST_END
+    return failures;
+}
+
+/* mcp_policy_bundle_path reads the leaf's own key as an absolute string. */
+static const char *ms_bundle_path(const char *leaf, const char *json)
+{
+    static struct json_value input; /* zeroed; holds the last parse */
+    struct zcl_command_spec spec;
+    json_free(&input);
+    json_init(&input);
+    ms_mut_spec(&spec, leaf, "file,out", ZCL_COMMAND_CONFIRM_NONE);
+    if (!json_read(&input, json, strlen(json)))
+        return "unparsed";
+    return mcp_policy_bundle_path(&spec, &input);
+}
+
+static int case_policy_bundle_path(void)
+{
+    int failures = 0;
+    TEST_CASE("the bundle path is the leaf's absolute string, nothing else") {
+        static char longjson[PATH_MAX + 128];
+        char longpath[PATH_MAX + 64];
+        const char *p;
+        memset(longpath, 'a', sizeof(longpath) - 1);
+        longpath[0] = '/';
+        longpath[sizeof(longpath) - 1] = '\0';
+        snprintf(longjson, sizeof(longjson), "{\"file\":\"%s\"}", longpath);
+        p = ms_bundle_path(MS_OFFER, "{\"file\":\"/ck/a\"}");
+        ASSERT(p && strcmp(p, "/ck/a") == 0);
+        p = ms_bundle_path(MS_FETCH, "{\"out\":\"/ck/b\",\"file\":\"/x\"}");
+        ASSERT(p && strcmp(p, "/ck/b") == 0);
+        ASSERT(ms_bundle_path(MS_FETCH, "{\"file\":\"/ck/b\"}") == NULL);
+        ASSERT(ms_bundle_path(MS_OFFER, "{\"file\":7}") == NULL);
+        ASSERT(ms_bundle_path(MS_OFFER, "{\"file\":null}") == NULL);
+        ASSERT(ms_bundle_path(MS_OFFER, "{\"file\":\"ck/a\"}") == NULL);
+        ASSERT(ms_bundle_path(MS_OFFER, longjson) == NULL);
+        ASSERT(ms_bundle_path("fleet.board.post", "{\"file\":\"/ck/a\"}") == NULL);
+        ASSERT(ms_bundle_path(MS_OFFER, "{}") == NULL);
+        /* A NUL cannot split the checked string from the leaf's: JSON
+         * parsing refuses \u0000 before any policy runs. */
+        p = ms_bundle_path(MS_OFFER, "{\"file\":\"/x\\u0000/y\"}");
+        ASSERT(p && strcmp(p, "unparsed") == 0);
+        (void)ms_bundle_path(MS_OFFER, "{}"); /* release the last parse */
+    } TEST_END
+    return failures;
+}
+
 static int case_policy_idempotency(void)
 {
     int failures = 0;
@@ -1548,6 +1651,186 @@ static int case_fleet_writes(const char *home, const char *checkout)
                        "{\"path\":\"app.tokens.create\",\"input\":"
                        "{\"wallet_scope\":\"dev\",\"ticker\":\"DEMO\"}}"));
         ASSERT(has(&m, "MUTATION_REFUSED_WALLET_RISK"));
+        ASSERT_EQ(ms_finish(&m), 0);
+    } TEST_END
+    return failures;
+}
+
+#define MS_HEX64 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+/* z23_run fleet.bundle.offer with file=path, or fleet.bundle.fetch with
+ * out=path and a well-formed root, sha256 and size. */
+static bool ms_bundle(struct ms *m, int id, bool offer, const char *path)
+{
+    char args[PATH_MAX + 512];
+    int n = offer ? snprintf(args, sizeof(args),
+                             "{\"path\":\"fleet.bundle.offer\",\"input\":"
+                             "{\"file\":\"%s\"}}", path)
+                  : snprintf(args, sizeof(args),
+                             "{\"path\":\"fleet.bundle.fetch\",\"input\":"
+                             "{\"root\":\"" MS_HEX64 "\",\"sha256\":\"" MS_HEX64
+                             "\",\"size\":1,\"out\":\"%s\"}}", path);
+    return n > 0 && (size_t)n < sizeof(args) && ms_tool(m, id, "z23_run", args);
+}
+
+/* Refused by the path bound before the leaf ran: no node call was made. */
+static bool ms_path_refused(const struct ms *m)
+{
+    return has(m, "FLEET_WRITE_PATH_REFUSED") && has(m, "command line") &&
+           !has(m, "NODE_UNAVAILABLE");
+}
+
+/* Admitted: the leaf ran and reached its node call, exactly as before. */
+static bool ms_path_admitted(const struct ms *m)
+{
+    return !has(m, "FLEET_WRITE_PATH_REFUSED") && has(m, "NODE_UNAVAILABLE");
+}
+
+static bool ms_write_file(const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    bool ok = fputs("bundle\n", f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+/* Fixtures beside and inside the checkout: outside.bin, <checkout>x/f,
+ * <checkout>/inside.bin, a link inside pointing at outside.bin, and a
+ * dangling link inside pointing outside. */
+static bool ms_path_fixtures(const char *home, const char *ck)
+{
+    char a[PATH_MAX + 64], b[PATH_MAX + 64];
+    snprintf(a, sizeof(a), "%s/outside.bin", home);
+    if (!ms_write_file(a))
+        return false;
+    snprintf(b, sizeof(b), "%s/link.bin", ck);
+    if (symlink(a, b) != 0)
+        return false;
+    snprintf(a, sizeof(a), "%s/elsewhere.out", home);
+    snprintf(b, sizeof(b), "%s/dangle.out", ck);
+    if (symlink(a, b) != 0)
+        return false;
+    snprintf(a, sizeof(a), "%sx", ck);
+    if (mkdir(a, 0700) != 0)
+        return false;
+    snprintf(a, sizeof(a), "%sx/f", ck);
+    if (!ms_write_file(a))
+        return false;
+    snprintf(a, sizeof(a), "%s/inside.bin", ck);
+    return ms_write_file(a);
+}
+
+/* Paths outside the bound, each refused for offer (o) or fetch (f). */
+static int ms_refused_paths(struct ms *m, const char *home, const char *ck)
+{
+    static const struct { bool offer; int base; const char *rest; } cases[] = {
+        {true, 0, "/outside.bin"},       /* (a) outside the checkout */
+        {false, 0, "/outside.out"},      /* (b) */
+        {true, 1, "/link.bin"},          /* (c) inside link to outside */
+        {true, 1, "x/f"},                /* (d) string prefix only */
+        {false, 1, "x/new.out"},         /* (d) */
+        {true, 1, "/.git/config"},       /* (e) */
+        {false, 1, "/.git/hooks/new"},   /* (e) */
+        {false, 1, "/.git/new.out"},     /* (e) */
+        {true, 1, "/../outside.bin"},    /* .. escape */
+        {false, 1, "/../escape.out"},    /* .. escape */
+        {false, 1, "/dangle.out"},       /* final link, target outside */
+        {false, 1, "/inside.bin"},       /* fetch target already exists */
+        {true, 2, "inside.bin"},         /* relative */
+        {false, 2, "new.out"},           /* relative */
+    };
+    int failures = 0;
+    char path[PATH_MAX + 64];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const char *base = cases[i].base == 0 ? home : cases[i].base == 1 ? ck : "";
+        snprintf(path, sizeof(path), "%s%s", base, cases[i].rest);
+        if (!ms_bundle(m, 10 + (int)i, cases[i].offer, path) ||
+            !ms_path_refused(m)) {
+            const char *code = strstr(m->line, "\\\"code\\\"");
+            printf("FAIL: %s %s was not refused by the path bound: %.160s\n",
+                   cases[i].offer ? "offer" : "fetch", path,
+                   code ? code : m->line);
+            failures++;
+        }
+    }
+    return failures;
+}
+
+/* --fleet-writes bounds fleet.bundle.offer's file and fleet.bundle.fetch's
+ * out to the served checkout outside .git; board posts are untouched, and a
+ * server without a checkout admits no bundle path. A port nothing listens on
+ * makes an admitted call fail fast at its node step. */
+static int case_fleet_write_paths(const char *home, const char *checkout)
+{
+    int failures = 0;
+    char dd[PATH_MAX + 16], err[PATH_MAX + 32], ck[PATH_MAX], path[PATH_MAX + 64];
+    snprintf(dd, sizeof(dd), "%s/pathsdd", home);
+    snprintf(err, sizeof(err), "%s/err_paths.txt", home);
+    (void)mkdir(dd, 0700);
+    TEST_CASE("--fleet-writes admits bundle paths only inside the checkout") {
+        struct ms m;
+        int dead = 0;
+        pid_t gone = ms_stub_start(dd, &dead);
+        ASSERT(gone > 0);
+        kill(gone, SIGKILL);
+        waitpid(gone, NULL, 0);
+        ASSERT(realpath(checkout, ck) != NULL);
+        ASSERT(ms_path_fixtures(home, ck));
+        ASSERT(ms_start_node_opt(&m, home, checkout, dd, dead, err,
+                                 "--fleet-writes"));
+        ASSERT_EQ(ms_refused_paths(&m, home, ck), 0);
+        ASSERT(ms_bundle(&m, 40, true, "/nonexistent-root-dir/x.bin"));
+        ASSERT(ms_path_refused(&m));
+        ASSERT(has(&m, ck)); /* the message names the allowed root */
+        /* A NUL never reaches the bound: JSON parsing refuses \u0000. */
+        snprintf(path, sizeof(path), "%s/inside.bin\\u0000/../../x", ck);
+        ASSERT(ms_bundle(&m, 44, true, path));
+        ASSERT(!has(&m, "NODE_UNAVAILABLE"));
+        snprintf(path, sizeof(path), "%s/inside.bin", ck); /* (f) */
+        ASSERT(ms_bundle(&m, 41, true, path));
+        ASSERT(ms_path_admitted(&m));
+        snprintf(path, sizeof(path), "%s/fetched.out", ck); /* (g) */
+        ASSERT(ms_bundle(&m, 42, false, path));
+        ASSERT(ms_path_admitted(&m));
+        ASSERT(ms_tool(&m, 43, "z23_run", MS_POST_ARGS)); /* (i) */
+        ASSERT(!has(&m, "FLEET_WRITE_PATH_REFUSED"));
+        ASSERT(has(&m, "NODE_UNAVAILABLE"));
+        ASSERT_EQ(ms_finish(&m), 0);
+    } TEST_END
+    return failures;
+}
+
+/* (h) --fleet-writes without --checkout admits no bundle path at all. */
+static int case_fleet_write_paths_no_checkout(const char *home)
+{
+    int failures = 0;
+    char dd[PATH_MAX + 16], err[PATH_MAX + 32], path[PATH_MAX + 64];
+    char a1[PATH_MAX + 16], a2[32];
+    snprintf(dd, sizeof(dd), "%s/pathsdd2", home);
+    snprintf(err, sizeof(err), "%s/err_paths2.txt", home);
+    (void)mkdir(dd, 0700);
+    TEST_CASE("--fleet-writes without --checkout refuses every bundle path") {
+        struct ms m;
+        int dead = 0;
+        pid_t gone = ms_stub_start(dd, &dead);
+        ASSERT(gone > 0);
+        kill(gone, SIGKILL);
+        waitpid(gone, NULL, 0);
+        snprintf(a1, sizeof(a1), "--datadir=%s", dd);
+        snprintf(a2, sizeof(a2), "--rpcport=%d", dead);
+        const char *const args[] = {MS_BIN, "mcp", "serve", a1, a2,
+                                    "--fleet-writes", NULL};
+        ASSERT(ms_start(&m, args, home, err));
+        ASSERT(ms_init(&m));
+        snprintf(path, sizeof(path), "%s/outside.bin", home);
+        ASSERT(ms_bundle(&m, 2, true, path));
+        ASSERT(ms_path_refused(&m));
+        ASSERT(has(&m, "checkout"));
+        snprintf(path, sizeof(path), "%s/nocheckout.out", home);
+        ASSERT(ms_bundle(&m, 3, false, path));
+        ASSERT(ms_path_refused(&m));
+        ASSERT(has(&m, "checkout"));
         ASSERT_EQ(ms_finish(&m), 0);
     } TEST_END
     return failures;
@@ -2002,6 +2285,8 @@ int test_mcp_serve(void)
     failures += case_policy_mutations();
     failures += case_policy_idempotency();
     failures += case_policy_fleet_write();
+    failures += case_policy_fleet_write_path();
+    failures += case_policy_bundle_path();
     failures += case_policy_plan_stage();
     if (!ms_file_exists(MS_BIN)) {
         printf("mcp_serve: SKIP (server half: %s missing; make dev-bin)\n",
@@ -2031,6 +2316,8 @@ int test_mcp_serve(void)
     failures += case_session(home, checkout);
     failures += case_wiki_search(home, checkout, NULL);
     failures += case_fleet_writes(home, checkout);
+    failures += case_fleet_write_paths(home, checkout);
+    failures += case_fleet_write_paths_no_checkout(home);
     failures += case_wallet_reads(home, checkout);
     failures += case_guide_lessons(home, checkout, NULL);
     failures += case_fixture_cleanup(home, checkout);

@@ -1577,7 +1577,13 @@ scope is described in [WIKI.md](WIKI.md#from-an-agent-harness).
   `fleet.wiki.write`, `fleet.bundle.offer` and `fleet.bundle.fetch`, each only
   while it stays an app-write mutation outside the owner authority and the
   core layer. Every other mutation keeps the policy above. Leave it off for a
-  harness that feeds the agent untrusted text.
+  harness that feeds the agent untrusted text. The offer's `file` and the
+  fetch's `out` must be absolute paths that resolve inside the served checkout
+  and outside any `.git` directory (offer follows every link; fetch needs an
+  absent target whose real parent is inside), and a server without
+  `--checkout` admits neither. Anything else is refused with
+  `FLEET_WRITE_PATH_REFUSED`; offer or fetch other paths with the native
+  `z23 fleet bundle` command line.
 - `select` on `z23_run` and `z23_code` (1 to 8 dot paths: object keys,
   decimal indexes and `*` for every array element, for example
   `data.posts.*.text`) returns `{"ok","status","select":{path:value}}` with
