@@ -13032,7 +13032,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# outer parse's source record so it cannot silently authorize a newer epoch.
 	$(MAKE) BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" seed-anchor-snapshot
 	@# Force a fresh production binary. The $(Z23_BIN) rule is a single
-	@# whole-program cc over $(ALL_SRCS) with NO depfile tracking, so a
+	@# whole-program cc over the shipped-node source set with NO depfile tracking, so a
 	@# header-only edit leaves every .c mtime unchanged and `make` would skip
 	@# the relink and ship a STALE binary — the exact footgun behind a
 	@# multi-day stale-binary outage. Removing the binary forces the rebuild.
