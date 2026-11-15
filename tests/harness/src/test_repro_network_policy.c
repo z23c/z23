@@ -282,8 +282,18 @@ static int rnp_source_record(const char *dir, char *out, size_t cap)
     return rnp_run(dir, args, out, cap);
 }
 
+static size_t rnp_lines(const char *text)
+{
+    size_t count = text[0] != '\0';
+    for (; *text; text++)
+        if (*text == '\n')
+            count++;
+    return count;
+}
+
 static bool rnp_gitlink_matches(const char *base, const char *builder,
-                                const char *commit, const char *record)
+                                const char *commit, const char *record,
+                                size_t expected_objects)
 {
     char dir[PATH_MAX], actual[4096], expected[256], snapshot_record[4096];
     if (snprintf(dir, sizeof dir, "%s/%s", base, builder) >= (int)sizeof dir)
@@ -303,6 +313,18 @@ static bool rnp_gitlink_matches(const char *base, const char *builder,
     if (strncmp(snapshot_record, record, 64) != 0) {
         test_note("%s source ID: got %.64s, expected %.64s", builder,
                   snapshot_record, record);
+        return false;
+    }
+    char object_dir[PATH_MAX];
+    if (snprintf(object_dir, sizeof object_dir, "%s/vendor/tor", dir) >=
+        (int)sizeof object_dir)
+        return false;
+    const char *objects[] = {"cat-file", "--batch-check", "--batch-all-objects", NULL};
+    if (rnp_git(object_dir, objects, actual, sizeof actual) != 0)
+        return false;
+    if (rnp_lines(actual) != expected_objects) {
+        test_note("%s object count: got %zu, expected %zu\n%s", builder,
+                  rnp_lines(actual), expected_objects, actual);
         return false;
     }
     return true;
@@ -378,6 +400,10 @@ static int test_rnp_gitlink(void)
                        "-c", "user.email=repro@localhost", "commit", "-q", "-m",
                        "fixture", NULL}, out, sizeof out) == 0);
         ASSERT(rnp_source_record(src, record, sizeof record) == 0);
+        ASSERT(rnp_git(detached, (const char *const[]){"rev-list", "--objects",
+                       "--no-object-names", "--no-walk", commit, NULL},
+                       out, sizeof out) == 0);
+        size_t expected_objects = rnp_lines(out);
         ASSERT(snprintf(script, sizeof script, "%s/tools/scripts/repro-verify.sh", cwd) <
                (int)sizeof script);
         char tmp_env[PATH_MAX + 16];
@@ -396,9 +422,9 @@ static int test_rnp_gitlink(void)
         ASSERT(end != NULL);
         *end = '\0';
         test_note("first source record: %.64s", record);
-        ASSERT(rnp_gitlink_matches(base, "a", commit, record));
+        ASSERT(rnp_gitlink_matches(base, "a", commit, record, expected_objects));
         ASSERT(rnp_gitlink_matches(base, "builder-two-deliberately-longer-path",
-                                   commit, record));
+                                   commit, record, expected_objects));
         PASS();
     }
     _test_next:;

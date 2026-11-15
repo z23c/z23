@@ -117,9 +117,11 @@ snapshot() {
                       exit 1
                       ;;
               esac
+              # The indexed commit and its tree are sufficient for source identity;
+              # ancestry and refs are not needed, even when no ref names the commit.
               if ! rm -rf -- "$path/.git" ||
                  ! git -C "$path" init -q ||
-                 ! git -C "$SRC/$path" rev-list --objects --no-object-names "$commit" |
+                 ! git -C "$SRC/$path" rev-list --objects --no-object-names --no-walk "$commit" |
                      git -C "$SRC/$path" pack-objects --stdout --no-reuse-delta |
                      git -C "$path" unpack-objects ||
                  ! git -C "$path" checkout -q --force --detach "$commit" ||
