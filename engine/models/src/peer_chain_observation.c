@@ -131,7 +131,15 @@ bool db_peer_chain_observation_prune(struct node_db *ndb, int keep_rows)
     struct qb q;
     qb_delete(&q, QB_T_peer_chain_observations);
     qb_where_in_select(&q, QB_C_peer_chain_observations_id, true, &keep);
-    QB_EXEC_BOOL(ndb, &q, s);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        return false; // raw-return-ok:query-builder-logs-prepare-failure
+    int rc = sqlite3_step(s); // raw-sql-ok:retain-statement-error-code
+    if (rc != SQLITE_DONE)
+        LOG_WARN("model", "peer_chain_observation prune step failed rc=%d: %s",
+                 rc, sqlite3_errstr(rc));
+    sqlite3_finalize(s);
+    return rc == SQLITE_DONE;
 }
 
 int db_peer_chain_observation_count(struct node_db *ndb)

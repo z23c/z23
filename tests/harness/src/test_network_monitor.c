@@ -118,6 +118,60 @@ static int test_observation_model(void)
     return failures;
 }
 
+static bool fixture_is_wal(sqlite3 *db)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &s, NULL) != SQLITE_OK)
+        return false;
+    bool wal = sqlite3_step(s) == SQLITE_ROW &&
+               strcmp((const char *)sqlite3_column_text(s, 0), "wal") == 0;
+    sqlite3_finalize(s);
+    return wal;
+}
+
+static int test_prune_diagnostic(void)
+{
+    int failures = 0;
+    char dir[256], path[320], text[1024] = {0};
+    struct node_db db = {0};
+    test_make_tmpdir(dir, sizeof(dir), "netmon", "prune-diagnostic");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (!node_db_open(&db, path)) {
+        (void)fixture_rm_ok(dir);
+        return 1;
+    }
+    NM_CHECK(fixture_is_wal(db.db));
+    int rc = sqlite3_exec(db.db, "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL "
+        "SELECT x+1 FROM n WHERE x<10005) INSERT INTO peer_chain_observations"
+        "(peer_id,addr,user_agent,observed_at) SELECT x,'peer','/test/',1 FROM n", NULL, NULL, NULL);
+    NM_CHECK(rc == SQLITE_OK);
+    NM_CHECK(db_peer_chain_observation_count(&db) == 10005);
+    NM_CHECK(db_peer_chain_observation_prune(&db, 10000));
+    NM_CHECK(db_peer_chain_observation_count(&db) == 10000);
+    NM_CHECK(sqlite3_exec(db.db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK);
+    FILE *log = tmpfile();
+    int saved = dup(STDERR_FILENO);
+    if (!log || saved < 0 || dup2(fileno(log), STDERR_FILENO) < 0) {
+        failures++;
+    } else {
+        bool ok = db_peer_chain_observation_prune(&db, 10000);
+        fflush(stderr);
+        if (dup2(saved, STDERR_FILENO) < 0) failures++;
+        rewind(log);
+        size_t bytes = fread(text, 1, sizeof(text) - 1, log);
+        NM_CHECK(bytes > 0);
+        NM_CHECK(!ok);
+        NM_CHECK(strstr(text, "prune step failed rc=8:") != NULL);
+        NM_CHECK(strstr(text, sqlite3_errstr(SQLITE_READONLY)) != NULL);
+        NM_CHECK(db_peer_chain_observation_count(&db) == 10000);
+    }
+    if (saved >= 0) close(saved);
+    if (log) fclose(log);
+    node_db_close(&db);
+    failures += !fixture_rm_ok(dir);
+    return failures;
+}
+
 /* ── 2. consensus-view fold ──────────────────────────────────────────── */
 static int test_consensus_view(void)
 {
@@ -423,6 +477,7 @@ int test_network_monitor(void)
     printf("\n=== network_monitor tests ===\n");
     int failures = 0;
     failures += test_observation_model();
+    failures += test_prune_diagnostic();
     failures += test_consensus_view();
     failures += test_tip_regression_condition();
     failures += test_tip_regression_rejects_malformed_window();
