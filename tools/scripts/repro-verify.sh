@@ -86,7 +86,7 @@ snapshot() {
     # Copy source plus offline/generated vendor inputs. Sovereign mode leaves
     # the snapshots Git-free and re-verifies their exact ZVCS authority through
     # the trusted bootstrap binary. Legacy worktree mode retains the throwaway
-    # repository used by the existing identity adapter.
+    # repository and the exact tracked gitlinks used by the identity adapter.
     local dst="$1"
     mkdir -p "$dst"
     rsync -a --delete \
@@ -98,6 +98,36 @@ snapshot() {
         ( cd "$dst"
           git init -q >/dev/null 2>&1
           git add -A >/dev/null 2>&1 || true
+          git -C "$SRC" ls-files --stage -z > "$BASE/gitlink-index" || {
+              echo "repro-verify: cannot read source index for gitlink restoration" >&2
+              exit 1
+          }
+          while IFS= read -r -d '' entry; do
+              metadata="${entry%%$'\t'*}"
+              path="${entry#*$'\t'}"
+              read -r mode commit stage <<< "$metadata"
+              [ "$mode" = 160000 ] || continue
+              [ "$stage" = 0 ] || {
+                  echo "repro-verify: unmerged gitlink cannot be reproduced: $path" >&2
+                  exit 1
+              }
+              case "$path" in
+                  /*|../*|*/../*|*/..)
+                      echo "repro-verify: unsafe gitlink path: $path" >&2
+                      exit 1
+                      ;;
+              esac
+              if ! rm -rf -- "$path/.git" ||
+                 ! git -C "$path" init -q ||
+                 ! git -C "$SRC/$path" rev-list --objects --no-object-names "$commit" |
+                     git -C "$SRC/$path" pack-objects --stdout --no-reuse-delta |
+                     git -C "$path" unpack-objects ||
+                 ! git -C "$path" checkout -q --force --detach "$commit" ||
+                 ! git add -f -- "$path"; then
+                  echo "repro-verify: failed to restore gitlink $path at $commit" >&2
+                  exit 1
+              fi
+          done < "$BASE/gitlink-index"
           git -c user.email=repro@localhost -c user.name=repro \
               commit -q -m 'repro-verify snapshot' >/dev/null 2>&1 || true )
     fi

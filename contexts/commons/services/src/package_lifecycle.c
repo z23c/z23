@@ -814,7 +814,7 @@ static struct zcl_result pkgl_last_consider(
     const struct pkgl_ctx *ctx, const char *name, char *best_name, size_t cap,
     int64_t *best_unix, bool *found)
 {
-    struct vcs_package_generations gens;
+    struct vcs_package_generations gens = {0};
     struct zcl_result r = pkgl_generations_load(ctx, name, &gens);
     if (!r.ok)
         return ZCL_ERR(-1, "read generation log for %s: %s", name,
@@ -986,7 +986,7 @@ struct zcl_result package_lifecycle_rollback(
     }
     name = out->name;
 
-    struct vcs_package_generations gens;
+    struct vcs_package_generations gens = {0};
     struct zcl_result r = pkgl_generations_load(&ctx, name, &gens);
     if (!r.ok) {
         pkgl_note(out->rule, sizeof(out->rule), out->detail,
@@ -1062,7 +1062,7 @@ struct zcl_result package_lifecycle_active(
 
     struct pkgl_ctx ctx;
     ZCL_CHECK(pkgl_ctx_open(&ctx, datadir));
-    struct vcs_package_generations gens;
+    struct vcs_package_generations gens = {0};
     struct zcl_result r = pkgl_generations_load(&ctx, name, &gens);
     if (r.ok)
         r = pkgl_active_pointer_matches(

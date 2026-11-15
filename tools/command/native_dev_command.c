@@ -763,7 +763,7 @@ void zcl_native_handle_dev_publication_status(
         return;
     }
     bool queued = vcs_devloop_publication_job_is_queued(root, job_root);
-    struct vcs_devloop_publication_receipt progress;
+    struct vcs_devloop_publication_receipt progress = {0};
     uint8_t progress_root[32];
     bool advanced = queued && vcs_devloop_publication_progress_load(
         root, job_root, &progress, progress_root);

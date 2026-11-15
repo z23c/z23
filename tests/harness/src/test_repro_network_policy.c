@@ -5,6 +5,7 @@
 #include "test/test_core.h"
 
 #include "repro_network_policy.h"
+#include "util/spawn.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -248,6 +249,164 @@ static int test_rnp_fixture(const char *root)
     return failures;
 }
 
+static int rnp_run(const char *dir, const char *const *args, char *out, size_t cap)
+{
+    const char *argv[32] = {"bash", "-c", "cd \"$1\" && shift && \"$@\"", "rnp", dir};
+    size_t n = 5;
+    for (size_t i = 0; args[i] && n + 1 < sizeof argv / sizeof argv[0]; i++)
+        argv[n++] = args[i];
+    argv[n] = NULL;
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_observed(argv, out, cap, 60000, &timed_out);
+    return timed_out ? -1 : rc;
+}
+
+static int rnp_git(const char *dir, const char *const *args, char *out, size_t cap)
+{
+    const char *full[24] = {"git", "-C", dir};
+    size_t n = 3;
+    for (size_t i = 0; args[i] && n + 1 < sizeof full / sizeof full[0]; i++)
+        full[n++] = args[i];
+    full[n] = NULL;
+    int rc = rnp_run(dir, full, out, cap);
+    size_t len = strlen(out);
+    while (len && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+        out[--len] = '\0';
+    return rc;
+}
+
+static int rnp_source_record(const char *dir, char *out, size_t cap)
+{
+    const char *args[] = {"env", "ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1",
+                          "tools/dev/source-identity.sh", "capture-record", NULL};
+    return rnp_run(dir, args, out, cap);
+}
+
+static bool rnp_gitlink_matches(const char *base, const char *builder,
+                                const char *commit, const char *record)
+{
+    char dir[PATH_MAX], actual[4096], expected[256], snapshot_record[4096];
+    if (snprintf(dir, sizeof dir, "%s/%s", base, builder) >= (int)sizeof dir)
+        return false;
+    const char *list[] = {"ls-files", "--stage", "--", "vendor/tor", NULL};
+    if (rnp_git(dir, list, actual, sizeof actual) != 0)
+        return false;
+    if (snprintf(expected, sizeof expected, "160000 %s 0\tvendor/tor", commit) >=
+        (int)sizeof expected)
+        return false;
+    if (strcmp(actual, expected) != 0) {
+        test_note("%s gitlink: got '%s', expected '%s'", builder, actual, expected);
+        return false;
+    }
+    if (rnp_source_record(dir, snapshot_record, sizeof snapshot_record) != 0)
+        return false;
+    if (strncmp(snapshot_record, record, 64) != 0) {
+        test_note("%s source ID: got %.64s, expected %.64s", builder,
+                  snapshot_record, record);
+        return false;
+    }
+    return true;
+}
+
+static int test_rnp_gitlink(void)
+{
+    int failures = 0;
+    char root[PATH_MAX] = {0};
+    test_make_tmpdir(root, sizeof root, "repro_gitlink", "root");
+    TEST("repro snapshots retain the exact tracked gitlink and source identity") {
+        char src[PATH_MAX], sub[PATH_MAX], tmp[PATH_MAX], script[PATH_MAX];
+        char payload[PATH_MAX], copy[PATH_MAX], cwd[PATH_MAX];
+        char commit[65], record[4096], log[8192], out[4096];
+        ASSERT(snprintf(src, sizeof src, "%s/src", root) < (int)sizeof src);
+        ASSERT(snprintf(sub, sizeof sub, "%s/sub", root) < (int)sizeof sub);
+        ASSERT(snprintf(tmp, sizeof tmp, "%s/tmp", root) < (int)sizeof tmp);
+        ASSERT(rnp_mkdir_at(root, "sub") == 0);
+        ASSERT(rnp_mkdir_at(root, "src/tools/dev") == 0);
+        ASSERT(rnp_mkdir_at(root, "tmp") == 0);
+        ASSERT(snprintf(payload, sizeof payload, "%s/payload", sub) < (int)sizeof payload);
+        ASSERT(rnp_put(payload, "fixture\n") == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"init", "-q", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"add", "payload", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"-c", "user.name=repro",
+                       "-c", "user.email=repro@localhost", "commit", "-q",
+                       "-m", "submodule", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"rev-parse", "HEAD", NULL},
+                       commit, sizeof commit) == 0);
+        ASSERT(rnp_git(src, (const char *const[]){"init", "-q", NULL}, out, sizeof out) == 0);
+        ASSERT(snprintf(payload, sizeof payload, "%s/Makefile", src) < (int)sizeof payload);
+        ASSERT(rnp_put(payload, ".PHONY: zclassic23\nzclassic23:\n"
+                       "\tmkdir -p build/bin\n\tcp payload build/bin/z23\n") == 0);
+        ASSERT(snprintf(payload, sizeof payload, "%s/payload", src) < (int)sizeof payload);
+        ASSERT(rnp_put(payload, "fixture payload\n") == 0);
+        ASSERT(snprintf(payload, sizeof payload, "%s/.gitignore", src) < (int)sizeof payload);
+        ASSERT(rnp_put(payload, "/build/\nvendor/tor/\n") == 0);
+        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+        ASSERT(snprintf(script, sizeof script, "%s/tools/dev/source-identity.sh", cwd) <
+               (int)sizeof script);
+        ASSERT(snprintf(copy, sizeof copy, "%s/tools/dev/source-identity.sh", src) <
+               (int)sizeof copy);
+        ASSERT(rnp_run(src, (const char *const[]){"cp", "-p", script, copy, NULL},
+                       out, sizeof out) == 0);
+        ASSERT(snprintf(payload, sizeof payload, "%s/payload", sub) < (int)sizeof payload);
+        ASSERT(rnp_put(payload, "detached fixture\n") == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"add", "payload", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"-c", "user.name=repro",
+                       "-c", "user.email=repro@localhost", "commit", "-q",
+                       "-m", "detached submodule", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(sub, (const char *const[]){"rev-parse", "HEAD", NULL},
+                       commit, sizeof commit) == 0);
+        int submodule_rc = rnp_git(src, (const char *const[]){"-c", "protocol.file.allow=always",
+                       "submodule", "add", "--force", "--quiet", sub, "vendor/tor", NULL},
+                       out, sizeof out);
+        test_note("submodule add rc=%d output=%s", submodule_rc, out);
+        ASSERT_EQ(submodule_rc, 0);
+        char detached[PATH_MAX];
+        ASSERT(snprintf(detached, sizeof detached, "%s/vendor/tor", src) < (int)sizeof detached);
+        ASSERT(rnp_git(detached, (const char *const[]){"checkout", "-q", "--detach",
+                       commit, NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(detached, (const char *const[]){"update-ref", "-d",
+                       "refs/heads/master", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(detached, (const char *const[]){"update-ref", "-d",
+                       "refs/remotes/origin/master", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(detached, (const char *const[]){"remote", "set-head", "origin",
+                       "-d", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(detached, (const char *const[]){"for-each-ref",
+                       "--format=%(refname)", NULL}, out, sizeof out) == 0);
+        ASSERT_STR_EQ(out, "");
+        ASSERT(rnp_git(src, (const char *const[]){"add", "-A", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_git(src, (const char *const[]){"-c", "user.name=repro",
+                       "-c", "user.email=repro@localhost", "commit", "-q", "-m",
+                       "fixture", NULL}, out, sizeof out) == 0);
+        ASSERT(rnp_source_record(src, record, sizeof record) == 0);
+        ASSERT(snprintf(script, sizeof script, "%s/tools/scripts/repro-verify.sh", cwd) <
+               (int)sizeof script);
+        char tmp_env[PATH_MAX + 16];
+        ASSERT(snprintf(tmp_env, sizeof tmp_env, "TMPDIR=%s", tmp) < (int)sizeof tmp_env);
+        int repro_rc = rnp_run(src, (const char *const[]){"env", "ZCL_REPRO_JOBS=1",
+                       "ZCL_REPRO_KEEP=1", "ZCL_REPRO_REFERENCE_BIN=",
+                       "ZCL_SOURCE_IDENTITY_BATCH_DISABLE=1", tmp_env, "bash", script,
+                       NULL}, log, sizeof log);
+        test_note("repro-verify output:\n%s", log);
+        ASSERT_EQ(repro_rc, 0);
+        const char *marker = "repro-verify: build trees kept at ";
+        char *base = strstr(log, marker);
+        ASSERT(base != NULL);
+        base += strlen(marker);
+        char *end = strchr(base, '\n');
+        ASSERT(end != NULL);
+        *end = '\0';
+        test_note("first source record: %.64s", record);
+        ASSERT(rnp_gitlink_matches(base, "a", commit, record));
+        ASSERT(rnp_gitlink_matches(base, "builder-two-deliberately-longer-path",
+                                   commit, record));
+        PASS();
+    }
+    _test_next:;
+    if (root[0] && failures == 0)
+        (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int test_rnp_pass(const char *root)
 {
     int failures = 0;
@@ -274,6 +433,34 @@ static int test_rnp_pass(const char *root)
     return failures;
 }
 
+static int test_rnp_locale_source_order(void)
+{
+    int failures = 0;
+    static char c_sources[262144], utf8_sources[262144];
+    char cwd[PATH_MAX], locale[64];
+    TEST("node source order is independent of locale") {
+        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+        int locale_rc = rnp_run(cwd, (const char *const[]){
+            "env", "LC_ALL=en_US.UTF-8", "locale", "charmap", NULL}, locale,
+            sizeof locale);
+        test_note("en_US.UTF-8 locale probe rc=%d output=%s", locale_rc, locale);
+        ASSERT_EQ(locale_rc, 0);
+        ASSERT_STR_EQ(locale, "UTF-8\n");
+        ASSERT_EQ(rnp_run(cwd, (const char *const[]){
+            "env", "LC_ALL=C", "make", "-s", "print-node-c23-srcs", NULL},
+            c_sources, sizeof c_sources), 0);
+        ASSERT_EQ(rnp_run(cwd, (const char *const[]){
+            "env", "LC_ALL=en_US.UTF-8", "make", "-s", "print-node-c23-srcs", NULL},
+            utf8_sources, sizeof utf8_sources), 0);
+        ASSERT(strstr(c_sources, "engine/models/src/database.c\n") != NULL);
+        ASSERT(strstr(c_sources, "tools/mind/") != NULL);
+        ASSERT(strcmp(c_sources, utf8_sources) == 0);
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
 int test_repro_network_policy(void);
 int test_repro_network_policy(void)
 {
@@ -284,6 +471,8 @@ int test_repro_network_policy(void)
     failures += test_rnp_order(root);
     failures += test_rnp_caller(root);
     failures += test_rnp_fixture(root);
+    failures += test_rnp_locale_source_order();
+    failures += test_rnp_gitlink();
     failures += test_rnp_pass(root);
     if (failures == 0)
         printf("test_repro_network_policy: all passed\n");

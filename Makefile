@@ -985,12 +985,13 @@ APP_INCLUDES = $(foreach a,$(APP_AUTHORITIES),\
 		$(if $(wildcard $(a)/$(d)/src),-I$(a)/$(d)/src)))
 # Lint-gate tests intentionally plant short-lived fixture files inside the
 # production scan tree so the lint scopes stay honest. Those files must remain
-# visible to lint, but concurrent builds must never compile them.
+# visible to lint, but concurrent builds must never compile them. Sort each
+# source wildcard bytewise: libc glob collation otherwise changes LTO link order.
 zcl_ephemeral_sources = $(foreach s,$(1),$(if $(findstring /_,$(s)),$(s)))
 zcl_filter_ephemeral_sources = $(filter-out $(call zcl_ephemeral_sources,$(1)),$(1))
 APP_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(foreach a,$(APP_AUTHORITIES),\
-		$(foreach d,$(APP_DIRS),$(wildcard $(a)/$(d)/src/*.c))))
+		$(foreach d,$(APP_DIRS),$(sort $(wildcard $(a)/$(d)/src/*.c)))))
 # The task host and resident artifact use the same canonical state codec.
 APP_SRCS += contexts/commons/packages/ztasks/src/ztasks.c
 
@@ -1001,12 +1002,12 @@ REDUCER_DIRS = conditions jobs services
 REDUCER_INCLUDES = $(foreach d,$(REDUCER_DIRS),\
 	-Iengine/reducer/$(d)/include -Iengine/reducer/$(d)/src)
 REDUCER_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach d,$(REDUCER_DIRS),$(wildcard engine/reducer/$(d)/src/*.c)))
+	$(foreach d,$(REDUCER_DIRS),$(sort $(wildcard engine/reducer/$(d)/src/*.c))))
 
 # Engine composition owns boot wiring and the declarative command registry.
 CONFIG_INCLUDES = -Iengine/composition/include
 CONFIG_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard engine/composition/src/*.c))
+	$(sort $(wildcard engine/composition/src/*.c)))
 
 # Library layer
 # DERIVED, never restated. engine/composition/lib_module_order.def is the one declaration
@@ -1033,7 +1034,7 @@ declared='$(LIB_MODULES)' tree='$(LIB_TREE_MODULES)')
 endif
 LIB_INCLUDES = $(foreach d,$(LIB_MODULE_DIRS),-I$(d)/include)
 LIB_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach d,$(LIB_MODULE_DIRS),$(wildcard $(d)/src/*.c)))
+	$(foreach d,$(LIB_MODULE_DIRS),$(sort $(wildcard $(d)/src/*.c))))
 ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_stub.c \
 	platform/modules/util/src/self_backtrace_stub.c \
@@ -1066,7 +1067,7 @@ PORTS_INCLUDES = -Iplatform/ports/include
 DOMAIN_DIRS = contexts/wallet/domain platform/domain/encoding
 DOMAIN_INCLUDES = $(foreach d,$(DOMAIN_DIRS),-I$(d)/include)
 DOMAIN_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach d,$(DOMAIN_DIRS),$(wildcard $(d)/src/*.c)))
+	$(foreach d,$(DOMAIN_DIRS),$(sort $(wildcard $(d)/src/*.c))))
 
 # Sealed consensus core (Wave 1.1 split). Bounded contexts under core/<context>/
 # hold the consensus predicates + static parameter tables. Include TOKENS are
@@ -1087,14 +1088,14 @@ DOMAIN_SRCS = $(call zcl_filter_ephemeral_sources,\
 CORE_CONTEXTS = consensus params math chainparams
 CORE_INCLUDES = $(foreach c,$(CORE_CONTEXTS),-Icore/$(c)/include)
 CORE_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach c,$(CORE_CONTEXTS),$(wildcard core/$(c)/src/*.c)))
+	$(foreach c,$(CORE_CONTEXTS),$(sort $(wildcard core/$(c)/src/*.c))))
 
 # Application layer (use cases / service objects).
 # May depend on domain/, platform/ports/, primitives, util — never on adapters or I/O.
 APPLICATION_CONTEXTS = consensus
 APPLICATION_INCLUDES = $(foreach c,$(APPLICATION_CONTEXTS),-Iengine/application/$(c)/include)
 APPLICATION_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach c,$(APPLICATION_CONTEXTS),$(wildcard engine/application/$(c)/src/*.c)))
+	$(foreach c,$(APPLICATION_CONTEXTS),$(sort $(wildcard engine/application/$(c)/src/*.c))))
 
 # Adapters layer (port implementations).
 # Outbound adapters implement the port interfaces. Inbound surfaces currently
@@ -1102,7 +1103,7 @@ APPLICATION_SRCS = $(call zcl_filter_ephemeral_sources,\
 # is introduced.
 ADAPTERS_INCLUDES = -Iplatform/adapters/outbound/persistence/include
 ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard platform/adapters/outbound/persistence/src/*.c))
+	$(sort $(wildcard platform/adapters/outbound/persistence/src/*.c)))
 
 # tools/ header root (the "command/" prefix for the native command adapter,
 # plus any other tools headers).
@@ -1260,7 +1261,7 @@ VERIFY_SIGNER_SRCS = tools/verify/fixed_result_trust.c \
 # test harness, or the package verifier (each already defines wallet_gui_main).
 WALLET_GUI_SIDE_SRCS = tools/dev/wallet_gui_load.c tools/dev/wallet_gui_export.c
 DEVLOOP_ALL_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(filter-out $(DEV_STANDALONE_SRCS) $(WALLET_GUI_SIDE_SRCS),$(wildcard tools/dev/*.c))) \
+	$(filter-out $(DEV_STANDALONE_SRCS) $(WALLET_GUI_SIDE_SRCS),$(sort $(wildcard tools/dev/*.c)))) \
 	$(VERIFY_CONTRACT_SRCS)
 # Shadow proof-obligation selection is report-only (see
 # docs/experiments/2026-09-25-shadow-obligation-selector.md): it links into
@@ -1301,7 +1302,7 @@ DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 # discover leaves ship in the release binary, so this is part of ALL_SRCS
 # rather than the dev-only lane. Header path -Itools is provided by TOOLS_INCLUDES.
 COMMAND_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard tools/command/*.c tools/mcp/*.c))
+	$(sort $(wildcard tools/command/*.c tools/mcp/*.c)))
 COMMAND_SRCS += contexts/commons/packages/zutf8/src/zutf8.c
 # `z23 jsonq` runs the same walker as build/bin/jsonq (tools/multicall.h).
 COMMAND_SRCS += tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c
@@ -1340,7 +1341,7 @@ NODE_ENTRY_SRCS = engine/entry/main.c engine/entry/main_cli_modes.c \
 # the node renders its own mind row into the signed mesh-status capsule, and
 # a node that could not say what index it holds could not be asked.
 MIND_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard tools/mind/*.c))
+	$(sort $(wildcard tools/mind/*.c)))
 
 ALL_SRCS = $(APP_SRCS) $(REDUCER_SRCS) $(CONFIG_SRCS) $(LIB_SRCS) \
 	$(CORE_SRCS) $(DOMAIN_SRCS) $(APPLICATION_SRCS) $(ADAPTERS_SRCS) \
