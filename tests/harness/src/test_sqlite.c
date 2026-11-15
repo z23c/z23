@@ -744,6 +744,11 @@ static bool check_sqlite_14_schema_mismatch_refused(const char *db_path)
     int32_t future_schema = NODE_DB_MAX_SCHEMA + 1;
     ok = ok && node_db_state_set(&ndb, "schema_version", &future_schema,
                                  sizeof(future_schema));
+    /* A newer schema inside the compat floor is read-compatible and opens,
+     * as at boot. Raise the floor too, so this stays the refused case: a
+     * newer binary made a change this one cannot read. */
+    ok = ok && node_db_state_set(&ndb, "schema_compat_floor", &future_schema,
+                                 sizeof(future_schema));
     if (ndb.open) node_db_close(&ndb);
     memset(&ndb, 0, sizeof(ndb));
     ok = ok && !node_db_open_existing_runtime(
@@ -756,7 +761,8 @@ static void check_sqlite_14_node_db_open_existing_runtime_exact_sche(int *failur
     /* Periodic workers need an exact-schema connection without repeating
      * CREATE/migrate/full-statement preparation every poll. The light open
      * must preserve ordinary model access, never create a missing file,
-     * and fail closed on a schema written by another binary version. */
+     * and fail closed on a schema another binary version wrote above the
+     * compat floor (inside the floor it opens read-compatible, as at boot). */
     printf("node_db_open_existing_runtime: exact schema, no create... ");
     char dir_template[PATH_MAX];
     char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-existing-reopen");

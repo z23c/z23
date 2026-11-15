@@ -2160,6 +2160,202 @@ static int t_older_binary_within_floor_opens_read_compatible(void)
     return failures;
 }
 
+/* One node_state value as hex ("" when the key is absent). */
+static void db_mig_state_hex(sqlite3 *db, const char *key, char *out,
+                             size_t n)
+{
+    sqlite3_stmt *st = NULL;
+    out[0] = '\0';
+    if (sqlite3_prepare_v2(db,
+            "SELECT hex(value) FROM node_state WHERE key=?",
+            -1, &st, NULL) != SQLITE_OK || !st)
+        return;
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+        snprintf(out, n, "%s", (const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+}
+
+struct db_mig_state_snap {
+    char version[32];
+    char floor[32];
+    int ledger;
+};
+
+static bool db_mig_snap_take(const char *dbpath,
+                             struct db_mig_state_snap *snap)
+{
+    sqlite3 *raw = NULL;
+    if (sqlite3_open(dbpath, &raw) != SQLITE_OK) {
+        sqlite3_close(raw);
+        return false;
+    }
+    db_mig_state_hex(raw, "schema_version", snap->version,
+                     sizeof(snap->version));
+    db_mig_state_hex(raw, "schema_compat_floor", snap->floor,
+                     sizeof(snap->floor));
+    snap->ledger = db_mig_count(raw, "SELECT count(*) FROM schema_migrations");
+    sqlite3_close(raw);
+    return true;
+}
+
+/* Seed a database and raw-stamp version (floor < 0 deletes the floor key). */
+static bool db_mig_seed_stamped(const char *dbpath, int32_t version,
+                                int32_t floor)
+{
+    struct node_db seed;
+    if (!node_db_open(&seed, dbpath))
+        return false;
+    node_db_close(&seed);
+    sqlite3 *raw = NULL;
+    bool ok = sqlite3_open(dbpath, &raw) == SQLITE_OK &&
+              db_mig_stamp_schema(raw, version);
+    if (ok && floor >= 0)
+        ok = db_mig_stamp_floor(raw, floor);
+    else if (ok)
+        ok = sqlite3_exec(raw, "DELETE FROM node_state "
+                          "WHERE key='schema_compat_floor'",
+                          NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_close(raw);
+    return ok;
+}
+
+enum db_mig_mutation {
+    DB_MIG_MUT_NONE = 0,
+    DB_MIG_MUT_LEDGER_ABOVE,    /* ledger row above the schema marker */
+    DB_MIG_MUT_FLOOR_BADLEN,    /* floor stored as a 2-byte blob */
+    DB_MIG_MUT_SCHEMA_BADLEN,   /* schema marker stored as an 8-byte blob */
+};
+
+static bool db_mig_set_blob(sqlite3 *db, const char *key, const void *buf,
+                            int len)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE node_state SET value=? WHERE key=?", -1, &st, NULL) !=
+        SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_blob(st, 1, buf, len, SQLITE_TRANSIENT) ==
+                  SQLITE_OK &&
+              sqlite3_bind_text(st, 2, key, -1, SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db) == 1;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool db_mig_apply_mutation(const char *dbpath, enum db_mig_mutation mut,
+                                  int32_t version)
+{
+    if (mut == DB_MIG_MUT_NONE)
+        return true;
+    sqlite3 *raw = NULL;
+    bool ok = sqlite3_open(dbpath, &raw) == SQLITE_OK;
+    if (ok && mut == DB_MIG_MUT_LEDGER_ABOVE) {
+        char sql[128];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO schema_migrations(version) VALUES('%03d')",
+                 (int)version + 1);
+        ok = sqlite3_exec(raw, sql, NULL, NULL, NULL) == SQLITE_OK;
+    } else if (ok && mut == DB_MIG_MUT_FLOOR_BADLEN) {
+        const unsigned char two[2] = { 1, 0 };
+        ok = db_mig_set_blob(raw, "schema_compat_floor", two, sizeof(two));
+    } else if (ok && mut == DB_MIG_MUT_SCHEMA_BADLEN) {
+        unsigned char eight[8] = { 0 };
+        memcpy(eight, &version, sizeof(version));
+        ok = db_mig_set_blob(raw, "schema_version", eight, sizeof(eight));
+    }
+    sqlite3_close(raw);
+    return ok;
+}
+
+/* Seed, stamp, run the lightweight runtime reopen and check the verdict. An
+ * accepted or refused reopen must leave version, floor and the ledger
+ * unchanged. boot_state >= 0 additionally pins the boot open's read-only
+ * preflight verdict for the same stamped database, so the two paths agree. */
+static bool db_mig_runtime_floor_case(const char *tag, int32_t version,
+                                      int32_t floor, enum db_mig_mutation mut,
+                                      int boot_state, bool expect_open)
+{
+    char dir[256];
+    char dbpath[512];
+    db_mig_path(dir, sizeof(dir), tag);
+    mkdir_p(dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    struct db_mig_state_snap before, after;
+    bool ok = db_mig_seed_stamped(dbpath, version, floor) &&
+              db_mig_apply_mutation(dbpath, mut, version) &&
+              db_mig_snap_take(dbpath, &before);
+    if (ok && boot_state >= 0) {
+        struct node_db_schema_preflight pf =
+            node_db_schema_preflight_existing(dbpath);
+        ok = (int)pf.state == boot_state;
+        if (!ok)
+            fprintf(stderr, "boot preflight state %d expected %d (%s)\n",
+                    (int)pf.state, boot_state, pf.detail ? pf.detail : "");
+    }
+    if (ok) {
+        struct node_db ndb;
+        bool opened = node_db_open_existing_runtime(&ndb, dbpath,
+                                                    "db_mig.floor");
+        ok = opened == expect_open && ndb.open == expect_open;
+        if (opened)
+            node_db_close(&ndb);
+    }
+    ok = ok && db_mig_snap_take(dbpath, &after) &&
+         strcmp(before.version, after.version) == 0 &&
+         strcmp(before.floor, after.floor) == 0 &&
+         before.ledger == after.ledger;
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
+static int t_runtime_reopen_follows_compat_floor(void)
+{
+    int failures = 0;
+    static const struct {
+        const char *tag;
+        int32_t version_delta;
+        int32_t floor_delta;  /* INT32_MIN: no floor key */
+        int32_t floor_abs;    /* >0: absolute floor, overrides floor_delta */
+        enum db_mig_mutation mut;
+        int boot_state;       /* -1: not pinned */
+        bool expect_open;
+    } cases[] = {
+        {"rt_ahead1_floor_max", 1, 0, 0, DB_MIG_MUT_NONE,
+         NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE, true},
+        {"rt_ahead2_floor_below", 2, -1, 0, DB_MIG_MUT_NONE, -1, true},
+        {"rt_ahead1_floor_1", 1, 0, 1, DB_MIG_MUT_NONE,
+         NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE, true},
+        {"rt_ahead1_floor_above", 1, 1, 0, DB_MIG_MUT_NONE, -1, false},
+        {"rt_ahead1_no_floor", 1, INT32_MIN, 0, DB_MIG_MUT_NONE, -1, false},
+        {"rt_ahead1_ledger_above", 1, 0, 0, DB_MIG_MUT_LEDGER_ABOVE,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
+        {"rt_ahead1_floor_badlen", 1, 0, 0, DB_MIG_MUT_FLOOR_BADLEN,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
+        {"rt_ahead1_schema_badlen", 1, 0, 0, DB_MIG_MUT_SCHEMA_BADLEN,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
+        {"rt_exact_max", 0, 0, 0, DB_MIG_MUT_NONE, -1, true},
+        {"rt_behind1", -1, 0, 0, DB_MIG_MUT_NONE, -1, false},
+    };
+    TEST("db_mig: runtime reopen follows the compat floor contract") {
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            int32_t floor = cases[i].floor_abs > 0 ? cases[i].floor_abs
+                : cases[i].floor_delta == INT32_MIN
+                ? -1 : NODE_DB_MAX_SCHEMA + cases[i].floor_delta;
+            bool ok = db_mig_runtime_floor_case(cases[i].tag,
+                    NODE_DB_MAX_SCHEMA + cases[i].version_delta, floor,
+                    cases[i].mut, cases[i].boot_state,
+                    cases[i].expect_open);
+            if (!ok)
+                fprintf(stderr, "runtime floor case failed: %s\n",
+                        cases[i].tag);
+            ASSERT(ok);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int t_malformed_store_repair_is_boot_only(void)
 {
     int failures = 0;
@@ -2382,6 +2578,7 @@ int test_db_migration_idempotent(void)
     failures += t_additive_migration_keeps_floor();
     failures += t_breaking_migration_raises_floor();
     failures += t_older_binary_within_floor_opens_read_compatible();
+    failures += t_runtime_reopen_follows_compat_floor();
     failures += t_floor_above_latest_refuses_with_typed_error();
     failures += t_backup_flag_writes_file_before_breaking_step();
     failures += t_backup_flag_refuses_on_insufficient_space();

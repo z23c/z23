@@ -971,6 +971,50 @@ bool node_db_open_runtime(struct node_db *ndb, const char *path,
     return node_db_open_impl(ndb, path, /*boot_ceremony=*/false, reason);
 }
 
+/* Schema gate for the lightweight runtime reopen. The exact current schema
+ * (schema == NODE_DB_MAX_SCHEMA) opens with no further check (latency-
+ * sensitive path). A NEWER schema (schema > NODE_DB_MAX_SCHEMA) is decided by
+ * the very same read-only node_db_schema_preflight_existing() the boot open
+ * runs, on the same path: it opens only when that returns READ_COMPATIBLE
+ * (well-formed single 4-byte schema and floor markers, floor <=
+ * NODE_DB_MAX_SCHEMA, and no migration-ledger version above the marker). Every
+ * other state (NEWER, UNKNOWN, ...) is refused with the preflight's own
+ * detail, so the reopen never accepts a database the boot open refuses. The
+ * connection stays read-write like the boot connection and this path never
+ * writes schema. An older schema is refused (boot migrates it before any
+ * runtime reopen). The multi-line banners are logged once per process because
+ * request handlers call this reopen. */
+static _Atomic bool g_reopen_compat_banner_logged;
+static _Atomic bool g_reopen_refusal_banner_logged;
+
+static bool node_db_runtime_reopen_schema_ok(struct node_db *ndb,
+                                             const char *reason)
+{
+    int schema = node_db_schema_version(ndb);
+    if (schema == NODE_DB_MAX_SCHEMA)
+        return true;
+    if (schema > NODE_DB_MAX_SCHEMA) {
+        struct node_db_schema_preflight pf =
+            node_db_schema_preflight_existing(ndb->path);
+        if (pf.state == NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE) {
+            if (!atomic_exchange(&g_reopen_compat_banner_logged, true))
+                node_db_log_read_compatible_open((int)pf.version,
+                                                 (int)pf.floor);
+            return true;
+        }
+        if (!atomic_exchange(&g_reopen_refusal_banner_logged, true)) {
+            if (pf.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER)
+                node_db_log_newer_schema_refusal((int)pf.version,
+                                                 (int)pf.floor);
+            else
+                node_db_log_unknown_schema_refusal(pf.detail);
+        }
+    }
+    LOG_WARN("db", "lightweight runtime reopen refused schema=%d "
+             "expected=%d reason=%s", schema, NODE_DB_MAX_SCHEMA, reason);
+    return false;
+}
+
 bool node_db_open_existing_runtime(struct node_db *ndb, const char *path,
                                    const char *reason)
 {
@@ -1023,10 +1067,7 @@ bool node_db_open_existing_runtime(struct node_db *ndb, const char *path,
     (void)sqlite3_busy_timeout(ndb->db, ZCL_NODE_DB_BUSY_TIMEOUT_MS);
     ndb->open = true;
 
-    int schema = node_db_schema_version(ndb);
-    if (schema != NODE_DB_MAX_SCHEMA) {
-        LOG_WARN("db", "lightweight runtime reopen refused schema=%d "
-                 "expected=%d reason=%s", schema, NODE_DB_MAX_SCHEMA, reason);
+    if (!node_db_runtime_reopen_schema_ok(ndb, reason)) {
         ndb->open = false;
         db_lifetime_scope_leave(&open_scope);
         return node_db_open_abort(ndb);

@@ -148,8 +148,16 @@ bool node_db_open_runtime(struct node_db *ndb, const char *path,
  * task that uses only ad-hoc model statements. Unlike node_db_open_runtime(),
  * this deliberately does not run CREATE TABLE, migrations, or prepare the
  * full cached statement catalog. It refuses a missing database and refuses
- * any schema version other than NODE_DB_MAX_SCHEMA, so callers cannot trade
- * latency for an implicit migration or a downgrade hazard.
+ * any schema version older than NODE_DB_MAX_SCHEMA, so callers cannot trade
+ * latency for an implicit migration. A schema NEWER than NODE_DB_MAX_SCHEMA
+ * opens (read-write, no schema write ever attempted) exactly when the boot
+ * open's own read-only node_db_schema_preflight_existing() on the same path
+ * returns READ_COMPATIBLE: well-formed single 4-byte schema and floor markers,
+ * floor <= NODE_DB_MAX_SCHEMA, and no migration-ledger version above the
+ * marker. Any other state (floor above NODE_DB_MAX_SCHEMA, malformed marker,
+ * contradictory ledger) is refused, so this open never accepts a database the
+ * boot open refuses. A schema equal to NODE_DB_MAX_SCHEMA opens without that
+ * preflight.
  *
  * Use this for periodic workers which open their own connection and otherwise
  * make an idle node repeat boot/schema work. Callers needing the cached
