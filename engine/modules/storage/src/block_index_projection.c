@@ -396,6 +396,7 @@ static uint64_t wal_file_bytes(const char *db_path)
 static void maybe_checkpoint_wal_budget(struct catch_up_ctx *c)
 {
     if (c->ins_stmt) sqlite3_reset(c->ins_stmt);
+    if (c->status_stmt) sqlite3_reset(c->status_stmt);
     if (c->exists_stmt) sqlite3_reset(c->exists_stmt);
     if (c->blob_stmt) sqlite3_reset(c->blob_stmt);
     if (c->dirty_stmt) sqlite3_reset(c->dirty_stmt);
@@ -760,6 +761,21 @@ static void catch_up_checkpoint_wal(struct catch_up_ctx *c, int rc)
         checkpoint_wal(c->p->db, "after catch-up");
 }
 
+static bool bip_prepare_status(struct catch_up_ctx *c)
+{
+    static const char sql[] =
+        "INSERT INTO block_index(hash,height,n_status,n_file,n_data_pos,n_undo_pos,"
+        "n_time,n_bits,n_version,n_tx,blob) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(hash) DO UPDATE SET height=excluded.height,n_status=excluded.n_status,"
+        "n_file=excluded.n_file,n_data_pos=excluded.n_data_pos,n_undo_pos=excluded.n_undo_pos,"
+        "n_time=excluded.n_time,n_bits=excluded.n_bits,n_version=excluded.n_version,"
+        "n_tx=excluded.n_tx,blob=excluded.blob";
+    if (sqlite3_prepare_v2(c->p->db, sql, -1, &c->status_stmt, NULL) == SQLITE_OK) return true;
+    fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
+            "[block_index_projection] prepare status UPSERT failed: %s\n", sqlite3_errmsg(c->p->db));
+    return false;
+}
+
 static bool bip_prepare_statements(struct catch_up_ctx *c)
 {
     /* Prepare the INSERT statement once for the whole catch_up. */
@@ -775,6 +791,11 @@ static bool bip_prepare_statements(struct catch_up_ctx *c)
         return false;
     }
 
+    if (!bip_prepare_status(c)) {
+        sqlite3_finalize(c->ins_stmt);
+        return false;
+    }
+
     /* Prepare the exists-check SELECT once for the whole catch_up, same
      * lifecycle as ins_stmt above (reset+rebound per event in
      * catch_up_cb(), finalized once below). */
@@ -785,6 +806,7 @@ static bool bip_prepare_statements(struct catch_up_ctx *c)
                 "[block_index_projection] prepare SELECT failed: %s\n",
                 sqlite3_errmsg(c->p->db));
         sqlite3_finalize(c->ins_stmt);
+        sqlite3_finalize(c->status_stmt);
         return false;
     }
 
@@ -799,12 +821,14 @@ static bool bip_prepare_statements(struct catch_up_ctx *c)
                 "[block_index_projection] prepare blob SELECT failed: %s\n",
                 sqlite3_errmsg(c->p->db));
         sqlite3_finalize(c->ins_stmt);
+        sqlite3_finalize(c->status_stmt);
         sqlite3_finalize(c->exists_stmt);
         return false;
     }
 
     if (!block_index_projection_prepare_dirty(c)) {
         sqlite3_finalize(c->ins_stmt);
+        sqlite3_finalize(c->status_stmt);
         sqlite3_finalize(c->exists_stmt);
         sqlite3_finalize(c->blob_stmt);
         return false;
@@ -841,6 +865,7 @@ static uint64_t bip_catch_up(block_index_projection_t *p, bool (*stop)(void *),
     catch_up_flush_trailing(&c);
     bip_replay_finish(&c);
     sqlite3_finalize(c.ins_stmt);
+    sqlite3_finalize(c.status_stmt);
     sqlite3_finalize(c.exists_stmt);
     sqlite3_finalize(c.blob_stmt);
     sqlite3_finalize(c.dirty_stmt);

@@ -31,7 +31,7 @@ static bool bip_status_unchanged(const struct ev_block_header *h,
 /* Apply one EV_BLOCK_STATUS event: read the existing row's blob (written by
  * the prior EV_BLOCK_HEADER first-admit — see event_log.h's EV_BLOCK_STATUS
  * doc), patch the mutable fields (nStatus/nFile/nDataPos/nUndoPos/nTx), and
- * re-serialize + INSERT OR REPLACE the SAME columns the EV_BLOCK_HEADER path
+ * re-serialize + UPSERT the SAME columns the EV_BLOCK_HEADER path
  * in block_index_projection.c's catch_up_cb writes. This is the only place
  * the header/solution bytes get re-copied for a status bump, and it happens
  * HERE — off the reducer fold's hot path, on the projection's own catch_up
@@ -128,21 +128,21 @@ bool catch_up_apply_status(struct catch_up_ctx *c,
         return false;
     }
 
-    sqlite3_reset(c->ins_stmt);
-    sqlite3_clear_bindings(c->ins_stmt);
-    sqlite3_bind_blob (c->ins_stmt, 1, h.hash, 32, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(c->ins_stmt, 2, (sqlite3_int64)h.height);
-    sqlite3_bind_int64(c->ins_stmt, 3, (sqlite3_int64)h.nStatus);
-    sqlite3_bind_int64(c->ins_stmt, 4, (sqlite3_int64)h.nFile);
-    sqlite3_bind_int64(c->ins_stmt, 5, (sqlite3_int64)h.nDataPos);
-    sqlite3_bind_int64(c->ins_stmt, 6, (sqlite3_int64)h.nUndoPos);
-    sqlite3_bind_int64(c->ins_stmt, 7, (sqlite3_int64)h.nTime);
-    sqlite3_bind_int64(c->ins_stmt, 8, (sqlite3_int64)h.nBits);
-    sqlite3_bind_int64(c->ins_stmt, 9, (sqlite3_int64)h.nVersion);
-    sqlite3_bind_int64(c->ins_stmt,10, (sqlite3_int64)h.nTx);
-    sqlite3_bind_blob (c->ins_stmt,11, newbuf, (int)written, SQLITE_TRANSIENT);
+    sqlite3_reset(c->status_stmt);
+    sqlite3_clear_bindings(c->status_stmt);
+    sqlite3_bind_blob (c->status_stmt, 1, h.hash, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(c->status_stmt, 2, (sqlite3_int64)h.height);
+    sqlite3_bind_int64(c->status_stmt, 3, (sqlite3_int64)h.nStatus);
+    sqlite3_bind_int64(c->status_stmt, 4, (sqlite3_int64)h.nFile);
+    sqlite3_bind_int64(c->status_stmt, 5, (sqlite3_int64)h.nDataPos);
+    sqlite3_bind_int64(c->status_stmt, 6, (sqlite3_int64)h.nUndoPos);
+    sqlite3_bind_int64(c->status_stmt, 7, (sqlite3_int64)h.nTime);
+    sqlite3_bind_int64(c->status_stmt, 8, (sqlite3_int64)h.nBits);
+    sqlite3_bind_int64(c->status_stmt, 9, (sqlite3_int64)h.nVersion);
+    sqlite3_bind_int64(c->status_stmt,10, (sqlite3_int64)h.nTx);
+    sqlite3_bind_blob (c->status_stmt,11, newbuf, (int)written, SQLITE_TRANSIENT);
 
-    int rc = sqlite3_step(c->ins_stmt);  // raw-sql-ok:kernel-primitive
+    int rc = sqlite3_step(c->status_stmt);  // raw-sql-ok:kernel-primitive
     if (rc != SQLITE_DONE) {
         fprintf(stderr,  // obs-ok:block-index-projection-catch-up-failure
                 "[block_index_projection] status-update INSERT step rc=%d "
@@ -168,7 +168,7 @@ bool catch_up_apply_status(struct catch_up_ctx *c,
         return false;
     }
     c->batch_count++;
-    c->collisions++;   /* a status update is always a replace by definition */
+    c->collisions++;   /* Preserve the historical changed-status count. */
     boot_scan_bump(c->scan_ctr);
     return true;   /* the replay cadence (bip_replay_after_event) commits */
 }

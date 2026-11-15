@@ -2047,7 +2047,8 @@ static int bip_status_trace_cb(unsigned event, void *opaque, void *stmt, void *u
     if (event == SQLITE_TRACE_STMT) {
         const char *sql = sqlite3_sql(stmt);
         struct bip_status_trace *trace = opaque;
-        if (sql && strstr(sql, "INSERT OR REPLACE INTO block_index")) trace->rows++;
+        if (sql && (strstr(sql, "INSERT INTO block_index") ||
+                    strstr(sql, "INSERT OR REPLACE INTO block_index"))) trace->rows++;
         if (sql && strstr(sql, "INSERT OR IGNORE INTO block_index_dirty")) trace->dirty++;
     }
     return 0;
@@ -2145,6 +2146,139 @@ done:
     return *failures - before;
 }
 
+static bool bip_set_blob(sqlite3 *db, const uint8_t key[32], const struct ev_block_header *h, const uint8_t sol[8])
+{
+    uint8_t wire[1600]; size_t n = 0; sqlite3_stmt *s = NULL;
+    bool ok = ev_block_header_serialize(h, sol, wire, sizeof(wire), &n) &&
+        sqlite3_prepare_v2(db, "UPDATE block_index SET blob=? WHERE hash=?", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, wire, (int)n, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 2, key, 32, SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_step(s) == SQLITE_DONE &&
+        sqlite3_changes(db) == 1;
+    sqlite3_finalize(s); return ok;
+}
+
+static bool bip_upsert_columns(sqlite3 *db, const struct ev_block_header *h)
+{
+    const int64_t expected[] = {h->height, h->nStatus, h->nFile, h->nDataPos,
+        h->nUndoPos, h->nTime, h->nBits, h->nVersion, h->nTx};
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(db, "SELECT height,n_status,n_file,n_data_pos,n_undo_pos,n_time,n_bits,n_version,n_tx FROM block_index WHERE hash=?", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, h->hash, 32, SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW;
+    for (int i = 0; ok && i < 9; ++i) ok = sqlite3_column_int64(s, i) == expected[i];
+    sqlite3_finalize(s); return ok;
+}
+static bool bip_upsert_row(block_index_projection_t *p, const struct ev_block_header *h, const uint8_t sol[8])
+{
+    struct disk_block_index d; disk_block_index_init(&d);
+    return block_index_projection_get(p, h->hash, &d) && d.nHeight == h->height && d.nStatus == h->nStatus &&
+        d.nFile == h->nFile && d.nDataPos == h->nDataPos && d.nUndoPos == h->nUndoPos && d.nTx == h->nTx &&
+        bip_timing_header_matches(&d, h, sol) && bip_upsert_columns(p->db, h);
+}
+
+static bool bip_blob_matches(sqlite3 *db, const uint8_t key[32], const struct ev_block_header *h, const uint8_t sol[8])
+{
+    uint8_t wire[1600]; size_t n = 0; sqlite3_stmt *s = NULL;
+    bool ok = ev_block_header_serialize(h, sol, wire, sizeof(wire), &n) &&
+        sqlite3_prepare_v2(db, "SELECT blob FROM block_index WHERE hash=?", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, key, 32, SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW &&
+        sqlite3_column_bytes(s, 0) == (int)n && memcmp(sqlite3_column_blob(s, 0), wire, n) == 0;
+    sqlite3_finalize(s); return ok;
+}
+static bool bip_dirty_has(sqlite3 *db, const uint8_t key[32])
+{
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(db, "SELECT 1 FROM block_index_dirty WHERE hash=?", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, key, 32, SQLITE_TRANSIENT) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW;
+    sqlite3_finalize(s); return ok;
+}
+
+static bool bip_upsert_target(block_index_projection_t *p, event_log_t *log,
+                              const struct ev_block_header *h, const uint8_t sol[8],
+                              uint64_t off, uint64_t events, uint64_t collisions)
+{
+    return off == event_log_size(log) && bip_upsert_row(p, h, sol) &&
+        block_index_projection_count(p) == 2 && p->events_consumed_total == events + 1 &&
+        p->replace_collisions_total == collisions + 1;
+}
+static bool bip_upsert_dirty(block_index_projection_t *p, const uint8_t digest[32],
+                             const uint8_t key[32], bool target_exists)
+{
+    struct dirty_count_ctx dirty = {0};
+    return bip_dirty_has(p->db, key) && block_index_projection_iterate_dirty_if_bound(
+        p, digest, 4096, target_exists ? 2 : 1, count_dirty_cb, &dirty) == 1 && dirty.count == 1;
+}
+
+static bool bip_upsert_seed(block_index_projection_t *p, event_log_t *log,
+                            const struct ev_block_header *a, const uint8_t sa[8],
+                            const struct ev_block_header *b, const uint8_t sb[8], bool target_exists)
+{
+    return emit_header(log, a, sa) && (!target_exists || emit_header(log, b, sb)) &&
+           block_index_projection_catch_up(p) == event_log_size(log);
+}
+
+static int bip_upsert_hash_case(int *failures, bool target_exists)
+{
+    int before = *failures; char dir[256], el[320], db[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", target_exists ? "upsert_present" : "upsert_absent");
+    snprintf(el, sizeof(el), "%s/log.bin", dir); snprintf(db, sizeof(db), "%s/p.db", dir);
+    event_log_t *log = event_log_open(el); block_index_projection_t *p = log ? block_index_projection_open(db, log) : NULL;
+    if (!p) { (*failures)++; if (log) event_log_close(log); goto done; }
+    struct ev_block_header a, b; uint8_t sa[8], sb[8];
+    make_header(&a, sa, sizeof(sa), 501, 41, 0x20);
+    make_header(&b, sb, sizeof(sb), 502, 42, 0x21);
+    bool ready = bip_upsert_seed(p, log, &a, sa, &b, sb, target_exists);
+    uint8_t digest[32]; memset(digest, 0x65, sizeof(digest));
+    ready = ready && block_index_projection_bind_flat(p, digest, 4096, target_exists ? 2 : 1);
+    /* The selected key is A while its stored blob reconstructs B. */
+    b.height = 333; b.nTime++; b.nBits++; b.nVersion++;
+    ready = ready && bip_set_blob(p->db, a.hash, &b, sb);
+    struct ev_block_header stored = b;
+    struct ev_block_header update = a; update.nStatus = 0x47;
+    uint64_t events = p->events_consumed_total, collisions = p->replace_collisions_total;
+    ready = ready && emit_status(log, &update);
+    uint64_t off = block_index_projection_catch_up(p);
+    b.nStatus = update.nStatus; b.nFile = update.nFile; b.nDataPos = update.nDataPos;
+    b.nUndoPos = update.nUndoPos; b.nTx = update.nTx;
+    BIP_CHECK("upsert mismatch: target row rebuilt", ready &&
+              bip_upsert_target(p, log, &b, sb, off, events, collisions));
+    BIP_CHECK("upsert mismatch: source blob unchanged", bip_blob_matches(p->db, a.hash, &stored, sb));
+    BIP_CHECK("upsert mismatch: target marked dirty", bip_upsert_dirty(p, digest, b.hash, target_exists));
+    block_index_projection_close(p); p = block_index_projection_open(db, log);
+    BIP_CHECK("upsert mismatch: reopen retains row and cursor", p && p->last_consumed_offset == off && bip_upsert_row(p, &b, sb));
+    if (p) block_index_projection_close(p);
+    event_log_close(log); bip_cleanup_dir(dir);
+done:
+    return *failures - before;
+}
+
+static int run_upsert_mismatch_absent(int *failures) { return bip_upsert_hash_case(failures, false); }
+static int run_upsert_mismatch_present(int *failures) { return bip_upsert_hash_case(failures, true); }
+
+static int run_upsert_failure(int *failures)
+{
+    int before = *failures; char dir[256], el[320], db[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "upsert_failure");
+    snprintf(el, sizeof(el), "%s/log.bin", dir); snprintf(db, sizeof(db), "%s/p.db", dir);
+    event_log_t *log = event_log_open(el); block_index_projection_t *p = log ? block_index_projection_open(db, log) : NULL;
+    if (!p) { (*failures)++; if (log) event_log_close(log); goto done; }
+    struct ev_block_header h; uint8_t sol[8]; make_header(&h, sol, sizeof(sol), 601, 7, 0x20);
+    bool ready = emit_header(log, &h, sol) && block_index_projection_catch_up(p) == event_log_size(log);
+    uint64_t offset = p->last_consumed_offset, events = p->events_consumed_total;
+    uint64_t collisions = p->replace_collisions_total;
+    struct ev_block_header prior = h;
+    bool trigger = sqlite3_exec(p->db, "CREATE TRIGGER upsert_fail BEFORE UPDATE ON block_index BEGIN SELECT RAISE(ABORT, \x27injected\x27); END", NULL, NULL, NULL) == SQLITE_OK;
+    h.nStatus = 0x21; ready = ready && emit_status(log, &h);
+    BIP_CHECK("upsert failure: rollback retains cursor and row", ready && trigger &&
+              block_index_projection_catch_up(p) == UINT64_MAX && p->last_consumed_offset == offset &&
+              p->events_consumed_total == events && p->replace_collisions_total == collisions &&
+              block_index_projection_count(p) == 1 && bip_upsert_row(p, &prior, sol));
+    bool dropped = sqlite3_exec(p->db, "DROP TRIGGER upsert_fail", NULL, NULL, NULL) == SQLITE_OK;
+    BIP_CHECK("upsert failure: retry consumes event", dropped && block_index_projection_catch_up(p) == event_log_size(log) && bip_upsert_row(p, &h, sol));
+    block_index_projection_close(p); event_log_close(log); bip_cleanup_dir(dir);
+done:
+    return *failures - before;
+}
+
 /* One case table is the coverage authority for the eight forked groups.
  * Every case owns a PID-specific database directory; the process-local memory,
  * storage and environment overrides cannot cross shard children. */
@@ -2174,6 +2308,9 @@ static const struct bip_case g_bip_cases[] = {
     {"catch_up_wal_budget", run_catch_up_wal_budget, 7},
     {"catch_up_timing", run_catch_up_timing, 6},
     {"status_noop", run_status_noop, 6},
+    {"upsert_mismatch_absent", run_upsert_mismatch_absent, 6},
+    {"upsert_mismatch_present", run_upsert_mismatch_present, 6},
+    {"upsert_failure", run_upsert_failure, 6},
     {"passive_checkpoint_then_close", run_passive_checkpoint_then_close, 6},
     {"catch_up_wal_reader", run_catch_up_wal_reader, 0},
     {"stoppable_sql_failure", run_stoppable_sql_failure, 1},
@@ -2297,9 +2434,9 @@ int test_block_index_projection(void)
     size_t owned = 0;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) owned += counts[i];
 #ifdef _WIN32
-    const size_t expected_cases = 26;
+    const size_t expected_cases = 29;
 #else
-    const size_t expected_cases = 27;
+    const size_t expected_cases = 30;
 #endif
     BIP_CHECK("partition: all cases have one owner",
               BIP_CASE_COUNT == expected_cases && owned == BIP_CASE_COUNT && unique);

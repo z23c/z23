@@ -119,12 +119,13 @@ struct block_index_projection {
 struct catch_up_ctx {
     block_index_projection_t *p;
     sqlite3_stmt *ins_stmt;       /* prepared INSERT OR REPLACE */
+    sqlite3_stmt *status_stmt;    /* prepared status UPSERT */
     sqlite3_stmt *exists_stmt;    /* prepared SELECT 1 ... WHERE hash = ? */
     sqlite3_stmt *blob_stmt;      /* prepared SELECT blob ... WHERE hash = ? */
     sqlite3_stmt *dirty_stmt;     /* prepared INSERT block_index_dirty(hash) */
     uint64_t batch_count;          /* events in current txn */
     uint64_t total_consumed;       /* across all batches this call */
-    uint64_t collisions;           /* INSERT OR REPLACE that found a prior row */
+    uint64_t collisions;           /* header replacements and changed status events */
     uint64_t status_orphans;       /* EV_BLOCK_STATUS with no prior row — logged, skipped */
     uint64_t last_offset_after;    /* offset *after* the last consumed event */
     uint64_t batch_start_offset;   /* cursor at the last commit */
