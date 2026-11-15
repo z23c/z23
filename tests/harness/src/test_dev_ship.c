@@ -338,8 +338,8 @@ static void dsx_hosts(const char *hosts, const char *proof)
 /* ── dev.ship ───────────────────────────────────────────────────────────── */
 
 /* flags: 'd' dry_run, 's' skip_gate, 'a' accept_one_way. */
-static void dsx_ship(struct dsx_call *c, const struct dsx *fx,
-                     const char *targets, const char *flags)
+static void dsx_ship_with_rollback(struct dsx_call *c, const struct dsx *fx,
+                     const char *targets, const char *flags, const char *rollback)
 {
     json_init(&c->input);
     json_set_object(&c->input);
@@ -350,6 +350,7 @@ static void dsx_ship(struct dsx_call *c, const struct dsx *fx,
     (void)json_push_kv_bool(&c->input, "skip_gate", strchr(flags, 's') != NULL);
     (void)json_push_kv_bool(&c->input, "accept_one_way",
                             strchr(flags, 'a') != NULL);
+    if (rollback) (void)json_push_kv_str(&c->input, "rollback_commit", rollback);
     memset(&c->request, 0, sizeof(c->request));
     c->request.input = &c->input;
     c->request.spec =
@@ -357,6 +358,9 @@ static void dsx_ship(struct dsx_call *c, const struct dsx *fx,
     zcl_command_reply_init(&c->reply, "zcl.dev_ship.v1");
     zcl_native_handle_dev_ship(&c->request, &c->reply);
 }
+static void dsx_ship(struct dsx_call *c, const struct dsx *fx,
+                     const char *targets, const char *flags)
+{ dsx_ship_with_rollback(c, fx, targets, flags, NULL); }
 
 static void dsx_end(struct dsx_call *c)
 {
@@ -1137,6 +1141,67 @@ _test_next:
     return failures;
 }
 
+static int dsx_case_rollback_commit(const struct dsx *fx)
+{
+    int failures = 0; struct dsx_call c; char prior[128], path[DSX_PATH + 64];
+    TEST("ship: caller rollback commit detects schema changes on a ready checkout") {
+        dsx_git(fx, (const char *const[]){"reset", "-q", "--hard", "origin/main", NULL});
+        ASSERT(dsx_run(fx->repo, (const char *const[]){"git", "rev-parse", "HEAD", NULL}, prior, sizeof(prior)) == 0);
+        prior[strcspn(prior, "\r\n")] = '\0'; ASSERT(strlen(prior) == 40);
+        (void)snprintf(path, sizeof(path), "%s/" DSX_SCHEMA_HEADER, fx->repo);
+        dsx_write(path, "#define NODE_DB_SCHEMA_LATEST 999\n", 0644);
+        dsx_commit(fx, "landed schema change");
+        dsx_git(fx, (const char *const[]){"push", "-q", "origin", "HEAD:main", NULL});
+        dsx_ship_with_rollback(&c, fx, "local", "d", prior);
+        ASSERT_STR_EQ(dsx_class(&c), "schema_one_way");
+        ASSERT_STR_EQ(dsx_str(&c, "schema_one_way.verdict"), "would_refuse");
+        ASSERT_STR_EQ(dsx_str(&c, "schema_one_way.baseline"), prior);
+        ASSERT_STR_EQ(dsx_str(&c, "schema_one_way.provenance"), "caller_supplied");
+        dsx_end(&c);
+        dsx_ship_with_rollback(&c, fx, "local", "da", prior);
+        ASSERT_STR_EQ(dsx_str(&c, "verdict"), "ready");
+        ASSERT_STR_EQ(dsx_str(&c, "schema_one_way.verdict"), "forward_only_accepted");
+        dsx_end(&c); PASS();
+    } _test_next:;
+    return failures;
+}
+static int dsx_case_rollback_invalid(const struct dsx *fx)
+{
+    int failures = 0;
+    struct dsx_call c;
+    char head[128], blob[128];
+    TEST("ship: rollback input must identify an exact existing commit") {
+        ASSERT(dsx_run(fx->repo, (const char *const[]){"git", "rev-parse", "HEAD", NULL}, head, sizeof(head)) == 0);
+        head[strcspn(head, "\r\n")] = '\0';
+        ASSERT(dsx_run(fx->repo, (const char *const[]){"git", "rev-parse", "HEAD:README", NULL}, blob, sizeof(blob)) == 0);
+        blob[strcspn(blob, "\r\n")] = '\0';
+        const char *bad[] = {"HEAD", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                             "0000000000000000000000000000000000000000", blob};
+        for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+            dsx_ship_with_rollback(&c, fx, "local", "d", bad[i]);
+            ASSERT(c.reply.exit_code == ZCL_COMMAND_EXIT_INVALID);
+            ASSERT_STR_EQ(c.reply.error.code, "INVALID_INPUT");
+            dsx_end(&c);
+        }
+        dsx_ship_with_rollback(&c, fx, "local", "d", head);
+        ASSERT_STR_EQ(dsx_str(&c, "verdict"), "ready");
+        ASSERT_STR_EQ(dsx_str(&c, "schema_one_way.verdict"), "none");
+        ASSERT(dsx_bool(&c, "schema_one_way.activation_recheck_required"));
+        dsx_end(&c);
+        dsx_ship(&c, fx, "local", "d");
+        ASSERT_STR_EQ(dsx_str(&c, "schema_one_way.baseline"), "origin/main");
+        ASSERT(dsx_bool(&c, "schema_one_way.activation_recheck_required"));
+        struct json_value null_value; json_init(&null_value);
+        ASSERT(json_push_kv(&c.input, "rollback_commit", &null_value));
+        zcl_command_reply_free(&c.reply); zcl_command_reply_init(&c.reply, "zcl.dev_ship.v1");
+        zcl_native_handle_dev_ship(&c.request, &c.reply);
+        ASSERT(c.reply.exit_code == ZCL_COMMAND_EXIT_INVALID);
+        json_free(&null_value);
+        dsx_end(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 int test_dev_ship(void);
 int test_dev_ship(void)
 {
@@ -1155,6 +1220,8 @@ int test_dev_ship(void)
     failures += dsx_case_ahead(&fx, sh);
     failures += dsx_case_containment(&fx);
     failures += dsx_case_remote_schema_preflight(sh);
+    failures += dsx_case_rollback_commit(&fx);
+    failures += dsx_case_rollback_invalid(&fx);
     dsx_env_leave(&fx);
     free(sh);
     printf(failures == 0 ? "test_dev_ship: all passed\n"

@@ -99,6 +99,7 @@ struct ship_plan {
     bool checkout_ok, dirty, fetch_ok, origin_present;
     char head[SHIP_OID];
     char origin[SHIP_OID];
+    char rollback[41];
     long behind, ahead;
     char source_id[65];
     bool stamp_present, gate_banked;
@@ -512,7 +513,7 @@ static bool ship_schema_version_moved(const struct ship_plan *p, char *buf,
                                       size_t cap)
 {
     char before[24], after[24];
-    return !ship_schema_version(p, p->origin, buf, cap, before) ||
+    return !ship_schema_version(p, p->rollback[0] ? p->rollback : p->origin, buf, cap, before) ||
            !ship_schema_version(p, p->head, buf, cap, after) ||
            strcmp(before, after) != 0;
 }
@@ -584,7 +585,7 @@ static void ship_schema_changed_files(const struct ship_plan *p, char *files,
                                       size_t cap)
 {
     const char *diff_args[] = { "diff", "-U0", "--no-color", "--no-ext-diff",
-                                p->origin, p->head, "--",
+                                p->rollback[0] ? p->rollback : p->origin, p->head, "--",
                                 ship_schema_pathspecs[0],
                                 ship_schema_pathspecs[1],
                                 ship_schema_pathspecs[2],
@@ -614,6 +615,8 @@ static void ship_schema(struct ship_plan *p)
     for (const char *c = p->schema_files; *c; c++)
         p->schema_count += *c == '\n';
     p->one_way = ship_one_way_decision(p->schema_count, p->accept_one_way);
+    if (p->rollback[0] && p->one_way == SHIP_ONE_WAY_REFUSE)
+        ship_refuse(p, "schema_one_way", "the caller-supplied rollback commit differs in persistent schema; explicit forward-only acceptance is required");
 }
 
 /* ── plan JSON ──────────────────────────────────────────────────────────── */
@@ -720,7 +723,9 @@ static void ship_emit_schema(const struct ship_plan *p, struct json_value *d)
     char *save = NULL;
     json_init(&s);
     json_set_object(&s);
-    (void)json_push_kv_str(&s, "baseline", "origin/main");
+    (void)json_push_kv_str(&s, "baseline", p->rollback[0] ? p->rollback : "origin/main");
+    (void)json_push_kv_str(&s, "provenance", p->rollback[0] ? "caller_supplied" : "checkout_origin");
+    (void)json_push_kv_bool(&s, "activation_recheck_required", true);
     (void)json_push_kv_bool(&s, "advisory", true);
     (void)json_push_kv_str(&s, "verdict", ship_one_way_name(p));
     if (p->schema_known)
@@ -786,7 +791,7 @@ static void ship_screen(const struct ship_plan *p, struct json_value *d)
         ship_screen_hosts(p, hosts, sizeof(hosts));
         (void)snprintf(screen, sizeof(screen),
                        "dev ship (%s): READY %.12s -> %s%s%s [%s]; source "
-                       "%.16s; gate %s; schema %s. Phase 1 plans only: "
+                       "%.16s; gate %s; schema %s (live rollback compatibility unchecked; activation recheck required). Phase 1 plans only: "
                        "tools/ship.sh still builds and deploys.",
                        mode, p->head, p->want_local ? "local" : "",
                        p->want_local && p->want_remote ? " + " : "",
@@ -836,6 +841,18 @@ static bool ship_read_input(struct ship_plan *p,
     p->dry_run = ship_input_bool(input, "dry_run");
     p->skip_gate = ship_input_bool(input, "skip_gate");
     p->accept_one_way = ship_input_bool(input, "accept_one_way");
+    const struct json_value *rollback = input ? json_get(input, "rollback_commit") : NULL;
+    if (rollback) {
+        const char *value = json_get_str(rollback);
+        if (rollback->type != JSON_STR || !value || strlen(value) != 40 ||
+            strspn(value, "0123456789abcdef") != 40) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                                   "INVALID_INPUT", "normalize", false, false,
+                                   "rollback_commit must be a lowercase 40-hex commit id", "input.rollback_commit");
+            return false;
+        }
+        memcpy(p->rollback, value, 41);
+    }
     if (!ship_parse_targets(p, ship_input_str(input, "targets"))) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_INPUT",
@@ -855,6 +872,15 @@ static bool ship_read_input(struct ship_plan *p,
         return false;
     }
     return true;
+}
+
+static bool ship_rollback_exists(const struct ship_plan *p)
+{
+    if (!p->rollback[0]) return true;
+    char type[32];
+    const char *args[] = { "cat-file", "-t", p->rollback, NULL };
+    return ship_git(p->root, args, type, sizeof(type), SHIP_GIT_TIMEOUT_MS) == 0 &&
+           !strcmp(type, "commit");
 }
 
 static void ship_finish(const struct ship_plan *p,
@@ -902,6 +928,13 @@ void zcl_native_handle_dev_ship(const struct zcl_command_request *request,
         return;
     }
     if (ship_read_input(p, request ? request->input : NULL, reply)) {
+        if (!ship_rollback_exists(p)) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                                   "INVALID_INPUT", "normalize", false, false,
+                                   "rollback_commit must identify an existing commit", "input.rollback_commit");
+            free(p);
+            return;
+        }
         if (p->want_remote)
             ship_parse_hosts(p);
         ship_checkout_facts(p);
