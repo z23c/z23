@@ -394,20 +394,16 @@ static int cln_eval(const char *scan_dir, FILE *out)
         .lookup = &lookup, .guard = &guard, .miss = miss,
         .env_mode = scan_dir != NULL
     };
-    if (scan_dir)
+    if (scan_dir) {
         rc = walk_src(scan_dir, 0, cln_on_file, &a);
-    else {
-        rc = each_zpath(k_ls_all, cln_on_file, &a);
-        if (rc != 0) {
-            a.nscan = 0;
-            a.nhit = 0;
-            a.nmiss = 0;
-            a.env_mode = 1;
-            if (psp_st_reset(a.miss))
-                rc = die("z23-lint: fseek failed\n", "");
-            else
-                rc = walk_src("engine/controllers/src", 0, cln_on_file, &a);
-        }
+    } else {
+        struct stat st;
+        if (lstat(".git", &st) == 0 || getenv("GIT_INDEX_FILE"))
+            rc = each_zpath(k_ls_all, cln_on_file, &a);
+        else if (errno != ENOENT)
+            rc = die("z23-lint: cannot stat %s\n", ".git");
+        else
+            rc = walk_src("engine/controllers/src", 0, cln_on_file, &a);
     }
     if (rc == 0)
         rc = cln_report(&a, scan_dir, out);

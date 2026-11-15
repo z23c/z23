@@ -48,8 +48,9 @@
  *   here is qsort/strcmp, never strcoll, and the case-folding in
  *   fp_ci_prefix is ASCII-only, matching awk tolower() under LC_ALL=C.
  * - find's -path patterns are fnmatch(,0) — `*` crosses `/`; reproduced
- *   with fnmatch(3) flags 0 against the same "$SCAN_ROOT/<auth>/..." path
- *   strings find saw.
+ *   with fnmatch(3) flags 0 against a synthetic leading slash plus each
+ *   scan-root-relative path, preserving the original glob semantics without
+ *   inheriting the checkout's parent-directory names.
  * - A file that cannot be opened mid-scan read as not-derivable under the
  *   shell too (awk exited nonzero, which `if file_is_derivable` treated as
  *   a violation); the shell also leaked awk's own error line to stderr in
@@ -139,10 +140,10 @@ static int fp_suffix(const char *name)
         && (name[n - 1] == 'c' || name[n - 1] == 'h');
 }
 
-static int fp_excluded(const char *full)
+static int fp_excluded(const char *path)
 {
     for (size_t i = 0; i < sizeof k_fp_excl / sizeof k_fp_excl[0]; i++)
-        if (fnmatch(k_fp_excl[i], full, 0) == 0)
+        if (fnmatch(k_fp_excl[i], path, 0) == 0)
             return 1;
     return 0;
 }
@@ -150,7 +151,7 @@ static int fp_excluded(const char *full)
 static int fp_walk_one(const char *dir, const char *rel, const char *name,
                        struct fp_files *fs)
 {
-    char full[4096], sub[4096];
+    char full[4096], sub[4096], match[4097];
     struct stat st;
     if (ovf(snprintf(full, sizeof full, "%s/%s", dir, name), sizeof full)
         || ovf(snprintf(sub, sizeof sub, "%s/%s", rel, name), sizeof sub))
@@ -159,8 +160,12 @@ static int fp_walk_one(const char *dir, const char *rel, const char *name,
         return 0;
     if (S_ISDIR(st.st_mode))
         return 1; /* sentinel: caller recurses (keeps this function flat) */
-    if (S_ISREG(st.st_mode) && fp_suffix(name) && !fp_excluded(full))
-        return fp_push(fs, sub);
+    if (S_ISREG(st.st_mode) && fp_suffix(name)) {
+        if (ovf(snprintf(match, sizeof match, "/%s", sub), sizeof match))
+            return 2;
+        if (!fp_excluded(match))
+            return fp_push(fs, sub);
+    }
     return 0;
 }
 
@@ -608,8 +613,24 @@ int check_file_purpose_selftest(void)
               || csr_mkdirs(empty_dir);
     if (!bad)
         bad |= fp_st_case(root, "RATCHET", NULL, 2, NULL);
-    if (!bad)
+    if (!bad) {
         bad |= fp_st_tree(root);
+        char absolute_build[4096];
+        if (ovf(snprintf(absolute_build, sizeof absolute_build, "%s/build", root),
+                sizeof absolute_build))
+            bad |= 1;
+        else {
+            bad |= fp_st_tree(absolute_build);
+            char excluded[4096];
+            if (ovf(snprintf(excluded, sizeof excluded,
+                    "%s/contexts/commons/packages/zjsonp/src/ignored.c",
+                    absolute_build), sizeof excluded) ||
+                csr_write(excluded, "int fp_st_excluded;\n"))
+                bad |= 1;
+            bad |= fp_st_case(absolute_build, "FAIL", NULL, 0,
+                              "scanned 3 source file(s) under");
+        }
+    }
     if (!bad) {
         /* a clean fixture tree passes RATCHET and reports the scan count */
         bad |= fp_st_case(root, "RATCHET", NULL, 0,
