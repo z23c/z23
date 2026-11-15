@@ -14269,7 +14269,7 @@ static bool dl_su_decimal(const char *text, long long *value)
 
 static int dl_su_borrow_lock(struct zcl_command_reply *reply)
 {
-    const char *locator = getenv(DL_SU_LOCK_ENV);
+    const char *locator = getenv("ZCL_LAND_SU_LOCK_FD");
     long long number;
     struct dl_dirs d;
     struct stat st;
@@ -14296,7 +14296,7 @@ static bool dl_su_trial_request(const struct zcl_command_request *req,
     const char *selector, const char *row, const char *prove, long long *seq)
 {
     long long requested = 0;
-    return getenv(DL_SU_LOCK_ENV) && dl_su_decimal(selector, seq) &&
+    return getenv("ZCL_LAND_SU_LOCK_FD") && dl_su_decimal(selector, seq) &&
         dl_hex_ok(row, 64) && prove && (!strcmp(prove, "0") || !strcmp(prove, "1")) &&
         dl_seq_in(req, &requested) && requested == *seq &&
         !json_get(req->input, "prove") && !json_get(req->input, "max_rows");
@@ -14305,8 +14305,8 @@ static bool dl_su_trial_request(const struct zcl_command_request *req,
 static bool dl_su_enter_trial(const struct zcl_command_request *req,
                                struct zcl_command_reply *reply)
 {
-    const char *selector = getenv(DL_SU_SEQ_ENV), *row = getenv(DL_SU_ROW_ENV);
-    const char *prove = getenv(DL_SU_PROVE_ENV);
+    const char *selector = getenv("ZCL_LAND_SU_TRIAL_SEQ"), *row = getenv("ZCL_LAND_SU_TRIAL_ROW");
+    const char *prove = getenv("ZCL_LAND_SU_PROVE");
     if (!selector && !row && !prove) return true;
     long long seq = 0;
     struct dl_dirs d;
