@@ -386,12 +386,12 @@ static bool dlx_su_copy_body(int source, int target, struct sha3_256_ctx *sha)
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) return false;
         if (!n) return true;
-        sha3_256_write(sha, (const uint8_t *)buffer, (size_t)n);
-        if (!dlx_su_write_all(target, buffer, (size_t)n)) return false;
+        if (sha) sha3_256_write(sha, (const uint8_t *)buffer, (size_t)n);
+        if (target >= 0 && !dlx_su_write_all(target, buffer, (size_t)n)) return false;
     }
 }
 
-static bool dlx_su_copy_executable(const char *path, uint8_t digest[32])
+static bool dlx_su_copy_original(const char *path, struct stat *before)
 {
     int source = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
     int target = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
@@ -400,21 +400,39 @@ static bool dlx_su_copy_executable(const char *path, uint8_t digest[32])
         if (target >= 0) close(target);
         return false;
     }
-    static const char domain[] = "zcl.dev_proof_executable_reuse.v1";
-    static const char tag[] = "Z23-LAND-TEST-CANDIDATE";
-    struct sha3_256_ctx sha;
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    bool ok = dlx_su_copy_body(source, target, &sha);
-    if (ok) {
-        sha3_256_write(&sha, (const uint8_t *)tag, sizeof(tag) - 1);
-        ok = write(target, tag, sizeof(tag) - 1) == (ssize_t)(sizeof(tag) - 1);
-    }
-    if (ok) sha3_256_finalize(&sha, digest);
+    bool ok = fstat(source, before) == 0 && dlx_su_copy_body(source, target, NULL);
     if (close(source) != 0) ok = false;
     if (fchmod(target, 0700) != 0) ok = false;
     if (close(target) != 0) ok = false;
     return ok;
+}
+static bool dlx_su_tag_digest(const char *path, uint8_t digest[32], const struct stat *before)
+{
+    static const char domain[] = "zcl.dev_proof_executable_reuse.v1";
+    static const char tag[] = "Z23-LAND-TEST-CANDIDATE";
+    struct stat after; struct sha3_256_ctx sha;
+    int target = open(path, O_RDWR | O_APPEND | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = target >= 0 && fstat(target, &after) == 0 && S_ISREG(after.st_mode) &&
+        after.st_size > 0 && (uint64_t)after.st_size + sizeof(tag) - 1 <= (UINT64_C(256) << 20);
+    if (ok) ok = dlx_su_write_all(target, tag, sizeof(tag) - 1);
+    sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    if (ok) ok = lseek(target, 0, SEEK_SET) == 0 && dlx_su_copy_body(target, -1, &sha);
+    if (ok) sha3_256_finalize(&sha, digest);
+    if (target >= 0 && close(target) != 0) ok = false;
+    if (ok) printf("[test selfupgrade] executable bytes before=%lld after=%lld\n",
+                   (long long)before->st_size, (long long)(after.st_size + sizeof(tag) - 1));
+    return ok;
+}
+static bool dlx_su_copy_executable(const char *path, uint8_t digest[32])
+{
+    struct stat before;
+    if (!dlx_su_copy_original(path, &before)) return false;
+    const char *argv[] = {"strip", "--strip-debug", path, NULL}; char output[1024] = {0};
+    if (zcl_spawn_capture(argv, output, sizeof(output), 30000) != 0) {
+        fprintf(stderr, "[test selfupgrade] debug stripping failed: %s\n", output);
+        return false;
+    }
+    return dlx_su_tag_digest(path, digest, &before);
 }
 
 static bool dlx_su_write_signed_fixture(const char *root, const char *local,
