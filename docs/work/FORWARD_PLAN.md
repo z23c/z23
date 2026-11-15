@@ -230,8 +230,10 @@ order of size.
    - A recorded non-author LAND lets the author submit.
    - A failed row returns to its author with its evidence, and the author
      repairs and resubmits.
-   - Add `dev land intake`, which takes READY posts from other agents and
-     labs: signature, author allowlist, scope, merge-tree, then the queue.
+   - `dev land intake` checks READY posts for signature, author allowlist,
+     scope and merge conflicts. Queue submission and result posts require a
+     matching confirmed plan; operational acceptance remains separate.
+     <!-- claim: symbol-present zcl_native_handle_dev_intake tools/command/native_dev_intake.c # planned READY intake -->
 
    Number: lanes the lead handles by hand per landing. Before: all of them.
 5. **The land queue proves in parallel and runs its newest driver.** One
@@ -241,8 +243,10 @@ order of size.
      the current main.
    - The self-upgrade module (default off) keeps a content-addressed driver
      slot, compares the candidate's decisions with the current driver's,
-     switches after matching rows and switches back after a failed row. Next
-     come a read-only decision verb and the post-landing hook.
+     switches after matching rows and switches back after a failed row.
+     `dev land decision` provides a read-only advisory next-dispatch snapshot;
+     it does not authorize publication. The post-landing hook remains work.
+     <!-- claim: symbol-present zcl_native_handle_dev_land_decision tools/command/native_dev_land.c # advisory dispatch decision -->
 
    Number: submit to landed p90, before 85 min, target 30.
    Number: the landings between a driver fix landing and the driver running
