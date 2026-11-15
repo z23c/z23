@@ -27,6 +27,13 @@ static bool vanish_list_children_sorted(const char *path,
 /* Observe the actual scanner call sites without relying on nonnull sanitizers.
  * Keep this copy private so it cannot replace the linked production scanner. */
 static unsigned empty_dep_null_sorts;
+static unsigned candidate_stats;
+static bool candidate_counting;
+static int candidate_stat(const char *path, struct stat *out)
+{
+    if (candidate_counting) candidate_stats++;
+    return stat(path, out);
+}
 static void empty_dep_sort(void *base, size_t count, size_t width,
                            int (*compare)(const void *, const void *))
 {
@@ -48,9 +55,11 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 #define ci_deps_stat_keys_watched empty_dep_stat_keys_watched
 #define ci_deps_keys_free empty_dep_keys_free
 #define qsort empty_dep_sort
+#define stat(path, out) candidate_stat(path, out)
 #define platform_directory_list_children_sorted vanish_list_children_sorted
 #include "../../../cognition/modules/codeindex/src/codeindex_deps.c"
 #undef platform_directory_list_children_sorted
+#undef stat
 #undef qsort
 #undef ci_deps_stat_root_sha3
 #undef ci_deps_stat_keys
@@ -66,6 +75,7 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 static int test_dep_vanished_child(void);
 static int test_dep_missing_root(void);
 static int test_dep_children_alloc(const char *label, bool regular);
+static int test_dep_candidate_filter(void);
 
 int test_codeindex_empty_dep_paths(void)
 {
@@ -89,10 +99,72 @@ int test_codeindex_empty_dep_paths(void)
     if (dir[0] && test_rm_rf_recursive(dir) != 0) failures++;
     failures += test_dep_vanished_child();
     failures += test_dep_missing_root();
+    failures += test_dep_candidate_filter();
     failures += test_dep_children_alloc("platform_directory_entries", true);
     failures += test_dep_children_alloc("platform_directory_entry_name", true);
     failures += test_dep_children_alloc("platform_directory_entries", false);
     failures += test_dep_children_alloc("platform_directory_entry_name", false);
+    return failures;
+}
+
+struct candidate_edges { unsigned count; bool valid; };
+
+static void candidate_edge(const char *src, const char *dep, void *user)
+{
+    struct candidate_edges *edges = user;
+    edges->count++;
+    if (strcmp(src, "unit.c") || strcmp(dep, "new.h")) edges->valid = false;
+}
+
+static bool candidate_check(struct text_includes *t, const char *input,
+                            unsigned want_stats, unsigned want_edges,
+                            struct candidate_edges *edges)
+{
+    char path[CI_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s", input);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    candidate_stats = 0;
+    candidate_counting = true;
+    text_include_candidate(t, path);
+    candidate_counting = false;
+    return candidate_stats == want_stats && edges->count == want_edges && edges->valid &&
+           !empty_dep_include_narrow_unsafe();
+}
+
+static int test_dep_candidate_filter(void)
+{
+    int failures = 0;
+    char root[256] = {0}, full[512];
+    struct text_includes t = {0};
+    struct candidate_edges edges = {.valid = true};
+    TEST("text include rejects known candidates before filesystem metadata") {
+        test_make_tmpdir(root, sizeof(root), "dep_paths", "candidate");
+        ASSERT(root[0]);
+        const char *files[] = {"unit.c", "listed.h", "added.h", "new.h"};
+        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+            int n = snprintf(full, sizeof(full), "%s/%s", root, files[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(full));
+            FILE *f = fopen(full, "wb");
+            ASSERT(f != NULL);
+            ASSERT(fclose(f) == 0);
+        }
+        t = (struct text_includes){.root = root, .unit = "unit.c",
+            .dep_text = "x.o: listed.h\n", .cb = candidate_edge, .user = &edges};
+        ASSERT(dep_paths_push(&t.added, "added.h"));
+        g_include_narrow_unsafe = 0;
+        dep_edge_root_begin();
+        ASSERT(candidate_check(&t, "./listed.h", 0, 0, &edges));
+        ASSERT(candidate_check(&t, "./unit.c", 0, 0, &edges));
+        ASSERT(candidate_check(&t, "./added.h", 0, 0, &edges));
+        ASSERT(candidate_check(&t, "./new.h", 1, 1, &edges));
+        ASSERT(candidate_check(&t, "./new.h", 0, 1, &edges));
+        ASSERT(candidate_check(&t, "missing.h", 1, 1, &edges));
+        dep_edge_root_end();
+        PASS();
+    } _test_next:;
+    candidate_counting = false;
+    dep_paths_free(&t.added);
+    if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
     return failures;
 }
 

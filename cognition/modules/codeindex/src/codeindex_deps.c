@@ -685,9 +685,9 @@ static bool dep_paths_has(const struct dep_paths *paths, const char *path)
 static void text_include_candidate(struct text_includes *t,
                                    char rel[CI_PATH_MAX])
 {
-    if (!dep_fold_dots(rel) || !rel_is_regular_file(t->root, rel) ||
-        dep_text_lists(t->dep_text, rel) || strcmp(rel, t->unit) == 0 ||
-        dep_paths_has(&t->added, rel))
+    if (!dep_fold_dots(rel) || dep_text_lists(t->dep_text, rel) ||
+        strcmp(rel, t->unit) == 0 || dep_paths_has(&t->added, rel) ||
+        !rel_is_regular_file(t->root, rel))
         return;
     if (t->added.count >= CI_TEXT_INCLUDE_FILES ||
         !dep_paths_push(&t->added, rel)) {
