@@ -140,6 +140,21 @@ static bool zrv_copy_input(struct zrv *z, struct json_value *in)
     return zcl_app_input(in, kv, 4);
 }
 
+/* Offer a plan only; the caller must inspect the kept copy and resolve the error. */
+static void zrv_build_recovery(struct zrv *z)
+{
+    struct json_value in;
+    bool ok = zrv_copy_input(z, &in);
+    char wire[sizeof(z->reply->next[0].input_json)];
+    size_t n = ok ? json_write(&in, wire, sizeof(wire)) : 0;
+    if (n && n < sizeof(wire) &&
+        zcl_command_reply_add_next(z->reply, "app.build", wire,
+            "Inspect the received copy and resolve the reported prerequisite, then plan a build of its saved version."))
+        (void)snprintf(z->reply->error.next_action, sizeof(z->reply->error.next_action),
+            "Resolve the reported build error, then use app.build to plan a build of the retained copy. Do not receive it again.");
+    json_free(&in);
+}
+
 /* app.run.copy plan, then its confirm accepting exactly the planned image.
  * `out` is always initialized. */
 static bool zrv_open(struct zrv *z, struct zcl_command_reply *out)
@@ -244,7 +259,9 @@ static void zrv_build_open(struct zrv *z)
 {
     struct zcl_command_reply inner, build;
     if (!zrv_build(z, &build)) {
-        zcl_app_inner_fail(z->reply, &build, true); zcl_command_reply_free(&build); return;
+        zcl_app_inner_fail(z->reply, &build, true);
+        zrv_build_recovery(z);
+        zcl_command_reply_free(&build); return;
     }
     bool saved_build = json_push_kv(&z->reply->data, "build", &build.data);
     (void)json_push_kv_bool(&z->reply->data, "build_metadata_complete", saved_build);

@@ -5706,6 +5706,7 @@ static int tag_rebuild_open_failure(struct tag_world *w)
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT(run.rc != 0); ASSERT(strstr(run.text, "APP_EXITED:") != NULL);
+        ASSERT(strstr(run.text, "Do not receive it again.") == NULL);
         ASSERT(strstr(run.text, "rebuild_report: published") != NULL);
         ASSERT(strstr(run.text, "destination: ") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
@@ -5713,6 +5714,97 @@ static int tag_rebuild_open_failure(struct tag_world *w)
         PASS();
     } _test_next:;
     return failures;
+}
+
+static bool tag_recovery_plan(struct json_value *input, const char *datadir, const char *copy)
+{
+    struct asf_leaf build; asf_open(&build);
+    char expected[TAG_PATH];
+    int n = snprintf(expected, sizeof(expected), "%s/copies/%s", datadir, copy);
+    bool ok = json_copy_checked(&build.in, input) && asf_pass("app.build", &build) &&
+        n > 0 && (size_t)n < sizeof(expected) &&
+        !strcmp(asf_get(&build, "stage"), "plan") &&
+        !strcmp(asf_get(&build, "authorization"), "received_trusted") &&
+        !strcmp(asf_get(&build, "copy"), expected) &&
+        !asf_flag(&build, "executed") && !asf_flag(&build, "make_ran");
+    asf_close(&build); return ok;
+}
+
+static bool tag_recovery_input(const char *wire, const char *datadir, const char *copy)
+{
+    struct json_value input; json_init(&input);
+    bool ok = json_read(&input, wire, strlen(wire)) && input.type == JSON_OBJ &&
+        !strcmp(tag_in(&input, "copy"), copy) && !strcmp(tag_in(&input, "datadir"), datadir) &&
+        !json_get(&input, "confirm") && !json_get(&input, "accept_execution");
+    if (ok) ok = tag_recovery_plan(&input, datadir, copy);
+    json_free(&input); return ok;
+}
+
+static bool tag_build_recovery_next(const struct asf_leaf *leaf, const char *datadir)
+{
+    if (leaf->out.status == ZCL_COMMAND_STATUS_PASSED ||
+        strcmp(leaf->out.error.code, "BUILD_FAILED") || !leaf->out.error.mutated ||
+        !asf_flag(leaf, "received") || asf_flag(leaf, "open_attempted")) return false;
+    const char *copy = asf_get(leaf, "copy");
+    if (!copy || !copy[0]) return false;
+    for (size_t i = 0; i < leaf->out.next_count; ++i) {
+        if (strcmp(leaf->out.next[i].command, "app.build")) continue;
+        return tag_recovery_input(leaf->out.next[i].input_json, datadir, copy);
+    }
+    return false;
+}
+
+static bool tag_recovery_confirm_input(struct asf_leaf *leaf, const char *command)
+{
+    char plan[65] = "", token[33] = "", offer[65] = "";
+    (void)snprintf(plan, sizeof(plan), "%s", asf_get(leaf, "plan_id"));
+    if (!strcmp(command, "app.get")) {
+        (void)snprintf(token, sizeof(token), "%s", asf_get(leaf, "token"));
+        (void)snprintf(offer, sizeof(offer), "%s", asf_get(leaf, "offer_id"));
+    }
+    bool ok = strlen(plan) == 64 && json_push_kv_str(&leaf->in, "plan_id", plan) &&
+        json_push_kv_bool(&leaf->in, "confirm", true) &&
+        (!token[0] || json_push_kv_str(&leaf->in, "token", token)) &&
+        (strcmp(command, "app.get") ||
+         (strlen(offer) == 64 && json_push_kv_str(&leaf->in, "offer_id", offer)));
+    printf("  [%s recovery plan_id_len=%zu token_len=%zu input_ok=%d]\n",
+           command, strlen(plan), strlen(token), ok);
+    return ok;
+}
+
+static bool tag_recovery_committed(struct asf_leaf *leaf, const char *command)
+{
+    zcl_command_reply_free(&leaf->out); zcl_command_reply_init(&leaf->out, "zcl.app_get.v1");
+    bool ran = asf_exec(command, leaf);
+    bool committed = ran && leaf->out.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(leaf->out.error.code, "BUILD_FAILED") && leaf->out.error.mutated &&
+        asf_flag(leaf, "received") && !asf_flag(leaf, "open_attempted") &&
+        asf_get(leaf, "copy")[0] != 0;
+    printf("  [%s recovery confirm ran=%d status=%d error=%s mutated=%d received=%d open=%d next=%zu]\n",
+           command, ran, (int)leaf->out.status, leaf->out.error.code,
+           leaf->out.error.mutated, asf_flag(leaf, "received"),
+           asf_flag(leaf, "open_attempted"), leaf->out.next_count);
+    return committed;
+}
+
+static bool tag_build_failure_next(const char *datadir, const char *command,
+                                   const char *target, bool *committed)
+{
+    *committed = false;
+    struct asf_leaf leaf; asf_open(&leaf);
+    const char *key = !strcmp(command, "app.get") ? "name" : "file";
+    bool ok = json_push_kv_str(&leaf.in, "datadir", datadir) &&
+        json_push_kv_str(&leaf.in, key, target) && asf_pass(command, &leaf);
+    for (size_t i = 0; ok && i < leaf.out.next_count; ++i)
+        if (!strcmp(leaf.out.next[i].command, "app.build")) ok = false;
+    printf("  [%s recovery plan ok=%d status=%d error=%s]\n", command, ok,
+           (int)leaf.out.status, leaf.out.error.code);
+    if (ok) ok = tag_recovery_confirm_input(&leaf, command);
+    if (ok) {
+        *committed = tag_recovery_committed(&leaf, command);
+        ok = *committed && tag_build_recovery_next(&leaf, datadir);
+    }
+    asf_close(&leaf); return ok;
 }
 
 static int tag_rehost_build_failure(struct tag_world *w)
@@ -5733,9 +5825,24 @@ static int tag_rehost_build_failure(struct tag_world *w)
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT(run.rc != 0); ASSERT(strstr(run.text, "BUILD_FAILED:") != NULL);
+        ASSERT(strstr(run.text, "Do not receive it again.") != NULL);
         ASSERT(strstr(run.text, "destination: ") != NULL);
         ASSERT(strstr(run.text, "hosting_status: recurring hosting enabled") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
+        char get_data[TAG_PATH], receive_data[TAG_PATH], file[TAG_PATH];
+        ASSERT(snprintf(get_data, sizeof(get_data), "%s/get-next", w->root) > 0 && mkdir(get_data, 0700) == 0);
+        ASSERT(snprintf(receive_data, sizeof(receive_data), "%s/receive-next", w->root) > 0 && mkdir(receive_data, 0700) == 0);
+        ASSERT(snprintf(file, sizeof(file), "%s/next.z23share", w->root) > 0);
+        FILE *out = fopen(file, "wb"); ASSERT(out != NULL);
+        bool wrote = fwrite(g_tag.bytes, 1, g_tag.len, out) == g_tag.len;
+        ASSERT(fclose(out) == 0 && wrote);
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        bool get_committed = false, receive_committed = false;
+        bool get_next = tag_build_failure_next(get_data, "app.get", w->name, &get_committed);
+        bool receive_next = tag_build_failure_next(receive_data, "app.receive-copy", file, &receive_committed);
+        printf("  [build recovery next: get=%d receive=%d]\n", get_next, receive_next);
+        ASSERT(get_committed); ASSERT(receive_committed);
+        ASSERT(get_next); ASSERT(receive_next);
         PASS();
     } _test_next:;
     return failures;

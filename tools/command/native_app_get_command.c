@@ -49,6 +49,32 @@ static bool ag_copy_data(struct json_value *out, const struct json_value *in,
     return !v || json_push_kv(out, key, v);
 }
 
+/* Forward only the exact plan generated for this received copy. */
+static void ag_build_recovery(struct zcl_command_reply *out,
+                              const struct zcl_command_reply *inner,
+                              const char *datadir)
+{
+    const char *copy = zcl_package_copy_str(&inner->data, "copy");
+    if (!copy || !copy[0] || !datadir || !datadir[0]) return;
+    const char *kv[] = {"copy", copy, "datadir", datadir};
+    struct json_value input;
+    bool built = zcl_app_input(&input, kv, 4);
+    char wire[sizeof(out->next[0].input_json)];
+    size_t n = built ? json_write(&input, wire, sizeof(wire)) : 0;
+    if (n && n < sizeof(wire)) {
+        for (size_t i = 0; i < inner->next_count; ++i) {
+            const struct zcl_command_next *next = &inner->next[i];
+            if (!strcmp(next->command, "app.build") && !strcmp(next->input_json, wire)) {
+                if (zcl_command_reply_add_next(out, "app.build", wire, next->reason))
+                    (void)snprintf(out->error.next_action, sizeof(out->error.next_action),
+                        "%s", inner->error.next_action);
+                break;
+            }
+        }
+    }
+    json_free(&input);
+}
+
 struct ag_one;
 static bool ag_observation(const struct ag_one *s, const struct json_value *build,
                            const char *opened, struct zcl_app_rebuild *r);
@@ -759,6 +785,7 @@ static bool ag_commit(struct ag_one *s)
     bool ok = zcl_app_inner_call_built("app.receive-copy", &in, built, &inner);
     if (!ok) {
         zcl_app_inner_fail(s->reply, &inner, false);
+        ag_build_recovery(s->reply, &inner, s->datadir);
         (void)zcl_app_copy_recovery(&s->reply->data, &inner.data);
         (void)ag_copy_data(&s->reply->data, &inner.data, "copy");
         (void)ag_copy_data(&s->reply->data, &inner.data, "destination");
@@ -1231,8 +1258,10 @@ static bool ag_attempt(struct ag_request *r, const struct zcl_app_offer_row *row
             zcl_package_copy_fail(r->reply, "ALLOC", zcl_package_copy_confirmed(r->input), "copying result", AG_COMMAND);
     } else {
         *last = attempt.error;
-        if (zcl_package_copy_confirmed(r->input))
+        if (zcl_package_copy_confirmed(r->input)) {
             (void)json_copy_checked(&r->reply->data, &attempt.data);
+            ag_build_recovery(r->reply, &attempt, r->datadir);
+        }
     }
     zcl_command_reply_free(&attempt); return ok;
 }
