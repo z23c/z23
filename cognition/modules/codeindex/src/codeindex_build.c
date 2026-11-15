@@ -700,11 +700,22 @@ static bool rebuild_can_patch_in_place(struct codeindex *ci,
                                        const struct ci_merkle_cost *cost)
 {
     bool valid = false;
-    return ci->store && ci_store_retrieval_projection_is_valid(ci->store, &valid) && valid &&
-           cost->snapshot_used && !cost->full_rescan &&
+    return ci->store && cost->snapshot_used && !cost->full_rescan &&
            !cost->inventory_changed &&
+           ci_store_retrieval_projection_is_valid(ci->store, &valid) && valid &&
            rebuild_generation_current(ci->store);
 }
+
+#if defined(ZCL_TESTING)
+bool codeindex_test_patch_eligible(struct ci_store *store, bool snapshot,
+                                   bool rescan, bool inventory_changed)
+{
+    struct codeindex ci = {.store = store};
+    struct ci_merkle_cost cost = {.snapshot_used = snapshot, .full_rescan = rescan,
+                                  .inventory_changed = inventory_changed};
+    return rebuild_can_patch_in_place(&ci, &cost);
+}
+#endif
 
 /* The staging inode must still be the private single-linked regular file this
  * rebuild created, reachable under the name it will be published from. */

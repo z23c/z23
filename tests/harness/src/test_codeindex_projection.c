@@ -686,6 +686,56 @@ static struct ci_store *cip_defs_copy(struct ci_store *a)
     }
     return b;
 }
+
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+static int cip_patch_trace(unsigned event, void *ctx, void *stmt, void *unused)
+{
+    (void)stmt; (void)unused;
+    if (event == SQLITE_TRACE_STMT) (*(int *)ctx)++;
+    return 0;
+}
+
+static bool cip_patch_case(struct ci_store *store, bool snapshot, bool rescan,
+                           bool inventory, bool expected, bool scans)
+{
+    int count = 0;
+    sqlite3 *db = ci_store_db(store);
+    if (sqlite3_trace_v2(db, SQLITE_TRACE_STMT, cip_patch_trace, &count) != SQLITE_OK)
+        return false;
+    bool eligible = codeindex_test_patch_eligible(store, snapshot, rescan, inventory);
+    bool cleared = sqlite3_trace_v2(db, 0, NULL, NULL) == SQLITE_OK;
+    return cleared && eligible == expected && (count > 0) == scans;
+}
+
+static bool cip_patch_corrupt(struct ci_store *source)
+{
+    struct ci_store *copy = cip_defs_copy(source);
+    if (!copy) return false;
+    uint8_t invalid[32] = {0};
+    bool ok = ci_store_meta_set(copy, CI_RETRIEVAL_PROJECTION_META, invalid, sizeof invalid) &&
+              cip_patch_case(copy, true, false, false, false, true);
+    ci_store_close(copy);
+    return ok;
+}
+
+static int cip_patch_checks(bool rooted, struct codeindex *one)
+{
+    int failures = 0;
+    CIP_CHECK("no snapshot skips eligibility projection scan",
+              rooted && cip_patch_case(one->store, false, false, false, false, false));
+    CIP_CHECK("full rescan skips eligibility projection scan",
+              rooted && cip_patch_case(one->store, true, true, false, false, false));
+    CIP_CHECK("inventory change skips eligibility projection scan",
+              rooted && cip_patch_case(one->store, true, false, true, false, false));
+    CIP_CHECK("eligible patch verifies projection",
+              rooted && cip_patch_case(one->store, true, false, false, true, true));
+    CIP_CHECK("eligible patch refuses invalid projection",
+              rooted && cip_patch_corrupt(one->store));
+    CIP_CHECK("missing store cannot be patched",
+              !codeindex_test_patch_eligible(NULL, true, false, false));
+    return failures;
+}
+#endif
 static bool cip_defs_traced(struct ci_store *a, struct ci_store *b)
 {
     sqlite3 *da = ci_store_db(a), *db = ci_store_db(b); int sorts[2] = {0};
@@ -771,6 +821,9 @@ int test_codeindex_projection_integrity(void)
               memcmp(projection_root, second_projection, 32) == 0);
     CIP_CHECK("baseline retrieval queries are intact",
               rooted && cip_queries_intact(one));
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+    failures += cip_patch_checks(rooted, one);
+#endif
     CIP_CHECK("shard reference ordering needs no sort and preserves projection",
               rooted && cip_shard_ref_order(one) &&
               cip_generation_matches(one, source_root, projection_root));

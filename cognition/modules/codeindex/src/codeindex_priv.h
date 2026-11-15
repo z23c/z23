@@ -109,6 +109,10 @@ struct ci_store *ci_store_open(const char *root);
 struct ci_store *ci_store_open_path(const char *dbpath);/* an explicit path (tmp build) */
 void             ci_store_close(struct ci_store *s);
 sqlite3         *ci_store_db(struct ci_store *s);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+bool codeindex_test_patch_eligible(struct ci_store *store, bool snapshot,
+                                   bool rescan, bool inventory_changed);
+#endif
 void             ci_store_lock(struct ci_store *s);
 void             ci_store_unlock(struct ci_store *s);
 
