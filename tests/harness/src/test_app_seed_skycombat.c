@@ -940,17 +940,6 @@ static bool asi_desktop_count(const char *dir, unsigned *count)
     }
     return *count == 0 || *count == 4;
 }
-static bool asi_desktop_evidence(const struct asi_run *r, const char *dir)
-{
-    unsigned count;
-    if (!asi_desktop_count(r->release, &count)) return false;
-    for (unsigned i = 0; i < count; ++i) {
-        char from[ASS_PATH], to[PATH_MAX];
-        if (!asi_path(from, sizeof(from), r->release, asi_desktop_names[i]) ||
-            !asi_path(to, sizeof(to), dir, asi_desktop_names[i]) || !asi_copy_public(from, to)) return false;
-    }
-    return true;
-}
 static bool asi_desktop_same(const char *a, const char *b)
 {
     FILE *left = fopen(a, "rb"); if (!left) return false;
@@ -1237,13 +1226,31 @@ static int isd_contract(struct ass_world *w)
 }
 #endif
 
-static bool asi_evidence(struct ass_world *w, struct asi_run *r)
+/* Evidence belongs to this run; never mix it with prior release artifacts. */
+static bool asi_evidence_empty(const char *path)
+{
+    DIR *dir = opendir(path); if (!dir) return false;
+    bool empty = true; struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) { empty = false; break; }
+    }
+    if (errno != 0) empty = false;
+    if (closedir(dir) != 0) empty = false;
+    return empty;
+}
+
+static bool asi_evidence(struct ass_world *w)
 {
     const char *dir = getenv("ZCL_TEST_INSTALLED_APP_EVIDENCE_DIR");
     if (!dir) return true;
     struct stat st;
     if (dir[0] != '/' || lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
         st.st_uid != geteuid() || (st.st_mode & 022)) return false;
+    if (!asi_evidence_empty(dir)) {
+        test_note("installed evidence directory must be empty: %s", dir);
+        return false;
+    }
     static const char *const logs[] = {"installed-package.log", "installed-install.log",
         "installed-list.json", "installed-cancel.json", "installed-confirm.json", "installed-xvfb.log",
         "installed-driver.log", "installed-cli.stderr", "kit-refusal.json"};
@@ -1252,17 +1259,7 @@ static bool asi_evidence(struct ass_world *w, struct asi_run *r)
         if (!asi_path(from, sizeof(from), w->root, logs[i]) ||
             !asi_path(to, sizeof(to), dir, logs[i]) || !asi_copy_public(from, to)) return false;
     }
-    /* Retain the complete public release so a later fresh-recipient journey
-     * can use this exact normal-packager output without producer state. */
-    static const char *const assets[] = {"SHA256SUMS", "AGENT_CARD.md", "z23", "zclassic23",
-        "z23-package-verify", "zclassic23-package-verify", "z23-acme", "zclassic23-acme",
-        "z23-skycombat", "installed-source.json", "app-build.wire", "manifest.wire",
-        "recipe.wire", "source.bundle", "app-toolchain.json", "app-toolchain.bundle", "docs.bundle", "docs.root"};
-    for (size_t i = 0; i < sizeof(assets)/sizeof(assets[0]); ++i) {
-        if (!asi_path(from, sizeof(from), r->release, assets[i]) ||
-            !asi_path(to, sizeof(to), dir, assets[i]) || !asi_copy_public(from, to)) return false;
-    }
-    return asi_desktop_evidence(r, dir);
+    return true;
 }
 static bool asi_cleanup(struct ass_world *w, struct asi_run *r,
                          struct asi_env *saved, bool env_saved, bool cwd_changed)
@@ -1360,7 +1357,7 @@ static int ass_installed(struct ass_world *w)
         ASSERT(asi_terminal_copy(w, &r) && asi_no_consumer_state(&r));
         ASSERT(asi_cancel(w, &r) && asi_confirm(w, &r));
         ASSERT(asi_kit_refusal(w, &r));
-        ASSERT(asi_evidence(w, &r));
+        ASSERT(asi_evidence(w));
         PASS();
     } _test_next:;
     if (!asi_cleanup(w, &r, &saved, env_saved, cwd_changed)) ++failures;
