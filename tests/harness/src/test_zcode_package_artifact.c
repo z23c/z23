@@ -13,6 +13,8 @@
 #include "json/json.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_accept.h"
+#include "vcs/package_store.h"
+#include "util/util.h"
 #include "config/command_catalog.h"
 #include "config/boot_zcode_dht.h"
 #include "controllers/rpc_client.h"
@@ -289,6 +291,50 @@ static bool artifact_resident_relative_refusal(const struct json_value *input)
     if (ok) ok = !json_get_bool(json_get(&reply, "ok")) && code && strcmp(code, "INVALID_INPUT") == 0;
     /* rpc_table owns a fixed array of borrowed static commands, no heap. */
     json_free(&params); json_free(&reply); return ok;
+}
+static bool artifact_peers_rpc_call(const struct rpc_command *command, const char *root, bool want_ok)
+{
+    struct json_value input = {0}, params = {0}, result = {0};
+    json_set_object(&input); json_set_array(&params);
+    bool ok = (!root || json_push_kv_str(&input, "root", root)) && json_push_back(&params, &input) &&
+        command && command->actor(&params, false, &result);
+    const struct json_value *status = json_get(&result, "ok");
+    ok = ok && status && status->type == JSON_BOOL && json_get_bool(status) == want_ok;
+    if (ok && want_ok) {
+        const char *observed = json_get_str(json_get(json_get(&result, "data"), "package_root"));
+        ok = observed && root && !strcmp(observed, root);
+    }
+    json_free(&result); json_free(&params); json_free(&input); return ok;
+}
+static bool artifact_peers_other_store(const char *root)
+{
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "root", root) && json_push_kv_str(&input, "datadir", "/different-fixture");
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "fixture");
+    if (ok) zcl_native_handle_zcode_package_peers(&request, &reply);
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_FAILED && !strcmp(reply.error.code, "DATADIR_CONFLICT");
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static int artifact_peers_rpc(void)
+{
+    int failures = 0; char dd[1024];
+    struct rpc_table table; rpc_table_init(&table); boot_zcode_package_register_rpc(&table);
+    const struct rpc_command *command = rpc_table_find(&table, "zcode_package_peers");
+    const char *root = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    TEST("resident package peers RPC requires its store and binds the requested root") {
+        ASSERT(command != NULL && vcs_package_store_global() == NULL);
+        ASSERT(artifact_peers_rpc_call(command, root, false));
+        test_make_tmpdir(dd, sizeof(dd), "package-artifact", "peers-rpc");
+        const char *argv[] = {"z23-test", "-packagehost=1"}; ParseParameters(2, argv); SetDataDir(dd);
+        ASSERT(vcs_package_store_open_global());
+        ASSERT(artifact_peers_rpc_call(command, root, true));
+        ASSERT(artifact_peers_rpc_call(command, NULL, false));
+        ASSERT(artifact_peers_other_store(root));
+        PASS();
+    } _test_next:;
+    vcs_package_store_close_global(); const char *reset[] = {"z23-test"}; ParseParameters(1, reset); SetDataDir("");
+    return failures;
 }
 static bool artifact_resident_roundtrip(const struct artifact_fixture *fixture, const struct json_value *data,
     const struct json_value *sealed)
@@ -600,7 +646,7 @@ int test_zcode_package_artifact(void)
         artifact_seal_hint_spelling("/release-body.wire", "/manifest.wire", "/recipe.wire") +
         artifact_seal_hint_spelling(NULL, "<artifact_dir>/manifest.wire", "<artifact_dir>/recipe.wire") +
         artifact_seal_hint_length(119) + artifact_seal_hint_length(120) +
-        artifact_seal_hint_length(150) + artifact_seal_hint_length(480) + artifact_binary_roundtrip() + artifact_export_interruption(1, false) +
+        artifact_seal_hint_length(150) + artifact_seal_hint_length(480) + artifact_peers_rpc() + artifact_binary_roundtrip() + artifact_export_interruption(1, false) +
         artifact_export_interruption(2, false) + artifact_export_interruption(0, true);
     for (unsigned i = 0; i < 3; ++i) failures += artifact_export_preflight(i);
     for (unsigned i = 0; i < 9; ++i) failures += artifact_reader_refusal(i);

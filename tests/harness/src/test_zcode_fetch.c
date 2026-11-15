@@ -662,6 +662,67 @@ static const struct json_value *zf_possession(const struct zf_cmd *c)
     return json_get(&c->reply.data, "possession");
 }
 
+static int zf_peers_mode;
+static unsigned zf_peers_calls;
+static char *zf_peers_rpc_hook(const char *method, const char *params)
+{
+    static const char root[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    ++zf_peers_calls;
+    if (strcmp(method, "zcode_package_peers") || !params || !strstr(params, root) || zf_peers_mode == 1) return NULL;
+    if (zf_peers_mode == 2) return zcl_strdup("{\"ok\":false,\"code\":\"PEERS_UNAVAILABLE\"}", "test.peers.error");
+    if (zf_peers_mode == 3) return zcl_strdup("{", "test.peers.malformed");
+    char *body = zcl_strdup("{\"ok\":true,\"data\":{\"package_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"live\":true,\"peer_count\":1,\"peers_truncated\":false,\"peers\":[{\"peer\":42,\"session_key\":\"key\",\"tier\":\"guest\",\"inflight\":1,\"allowance_exhausted\":false,\"offence_total\":0,\"transfer\":{\"verified_bytes_served\":5,\"verified_bytes_fetched\":7},\"verified_bytes_served\":5,\"verified_bytes_received\":7}],\"possession\":{\"observed\":true,\"tracked\":true,\"complete\":true,\"pinned\":true,\"public_serveable\":true,\"would_serve\":true,\"public_shape\":\"blob\",\"serve_rule\":\"blob\",\"present_bytes\":10,\"total_bytes\":10}}}", "test.zcode_fetch.peers");
+    if (body && zf_peers_mode == 4) *strstr(body, root) = 'b';
+    if (body && zf_peers_mode == 5) *strstr(body, "inflight") = 'x';
+    return body;
+}
+
+static int zf_t_peers_remote_refusals(void)
+{
+    int failures = 0;
+    TEST("zcode package peers refuses unavailable or malformed resident observations") {
+        for (zf_peers_mode = 1; zf_peers_mode <= 5; ++zf_peers_mode) {
+            struct zf_cmd c;
+            json_init(&c.input); json_set_object(&c.input);
+            memset(&c.request, 0, sizeof(c.request)); c.request.input = &c.input;
+            zcl_command_reply_init(&c.reply, "zcl.zcode_test.v1");
+            ASSERT(json_push_kv_str(&c.input, "root", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+            node_rpc_client_set_test_hook(zf_peers_rpc_hook);
+            zcl_native_handle_zcode_package_peers(&c.request, &c.reply);
+            node_rpc_client_set_test_hook(NULL);
+            ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+            ASSERT_STR_EQ(c.reply.error.code, "PEERS_UNAVAILABLE");
+            zf_cmd_free(&c);
+        }
+        PASS();
+    } _test_next:;
+    zf_peers_mode = 0; node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+static int zf_t_peers_resident(void)
+{
+    int failures = 0;
+    TEST("zcode package peers uses resident exact-root observation") {
+        struct zf_cmd c;
+        json_init(&c.input); json_set_object(&c.input);
+        memset(&c.request, 0, sizeof(c.request)); c.request.input = &c.input;
+        zcl_command_reply_init(&c.reply, "zcl.zcode_test.v1");
+        ASSERT(json_push_kv_str(&c.input, "root", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        node_rpc_client_set_test_hook(zf_peers_rpc_hook);
+        zcl_native_handle_zcode_package_peers(&c.request, &c.reply);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(c.reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&c.reply.data, "live")));
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data, "peers"), 0), "peer")), 42);
+        ASSERT(json_get_bool(json_get(zf_possession(&c), "would_serve")));
+        zf_cmd_free(&c);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 static int zf_t_peers_one_shot(void)
 {
     int failures = 0;
@@ -673,7 +734,10 @@ static int zf_t_peers_one_shot(void)
         struct zf_cmd c;
         zf_cmd_init(&c, dd);
         (void)json_push_kv_str(&c.input, "root", pkg.root_hex);
+        zf_peers_calls = 0; node_rpc_client_set_test_hook(zf_peers_rpc_hook);
         zcl_native_handle_zcode_package_peers(&c.request, &c.reply);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(zf_peers_calls == 0);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get(&c.reply.data, "live") &&
                !json_get_bool(json_get(&c.reply.data, "live")));
@@ -714,6 +778,26 @@ static int zf_t_peers_one_shot(void)
         zf_free_package(&pkg);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int zf_t_peers_wrong_store(void)
+{
+    int failures = 0;
+    struct vcs_swarm_engine *previous = vcs_swarm_engine_global();
+    struct vcs_swarm_engine *engine = NULL;
+    TEST("zcode package peers refuses an unrelated explicit datadir with a resident engine") {
+        char dd[1024]; test_make_tmpdir(dd, sizeof(dd), "zcode_fetch", "peers-wrong-store");
+        engine = vcs_swarm_engine_create(NULL, NULL, NULL, NULL, NULL);
+        ASSERT(engine != NULL); vcs_swarm_engine_set_global(engine);
+        struct zf_cmd c; zf_cmd_init(&c, dd);
+        ASSERT(json_push_kv_str(&c.input, "root", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        zcl_native_handle_zcode_package_peers(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "DATADIR_CONFLICT");
+        zf_cmd_free(&c); PASS();
+    } _test_next:;
+    vcs_swarm_engine_set_global(previous); vcs_swarm_engine_free(engine);
     return failures;
 }
 
@@ -1502,6 +1586,9 @@ int test_zcode_fetch(void)
     failures += zf_t_source_reproduction_loop();
     failures += zf_t_source_reproduction_local_complete();
     failures += zf_t_peers_one_shot();
+    failures += zf_t_peers_wrong_store();
+    failures += zf_t_peers_resident();
+    failures += zf_t_peers_remote_refusals();
     failures += zf_t_peers_possession();
     failures += zf_t_pin_roundtrip();
     failures += zf_t_pin_budget_refusal();

@@ -18,7 +18,10 @@
  *                          served/fetched bytes, allowance + offence
  *                          state) plus THIS node's store-side possession:
  *                          complete, operator-pinned, public-serveable
- *                          (would_serve). Engine-down replies are
+ *                          (would_serve). Implicit input queries the selected
+ *                          resident; explicit input datadir reads offline in
+ *                          a separate process, or the matching resident.
+ *                          Engine-down replies are
  *                          live:false with an empty peer list and still
  *                          report store facts, fail closed.
  *   zcode package offered  the live union of roots peers have ANNOUNCEd
@@ -52,6 +55,7 @@
  * running node downloads immediately; a one-shot CLI never fakes liveness
  * — it persists the download record and reports live:false, and the
  * engine's resume replay picks the record up at the next hosting boot.
+ * The peers read separately forwards to the resident as described above.
  * Every rejection names the exact rule. */
 
 #include "base/hex.h"
@@ -722,7 +726,78 @@ void zcl_native_handle_zcode_package_fetch(
 
 /* ── zcode package peers ────────────────────────────────────────────── */
 
-void zcl_native_handle_zcode_package_peers(
+static bool zw_peers_field(const struct json_value *obj, const char *key, enum json_type type)
+{
+    const struct json_value *v = json_get(obj, key);
+    return v && v->type == type;
+}
+static bool zw_peers_possession_valid(const struct json_value *p)
+{
+    static const char *const flags[] = {"observed", "tracked", "complete", "pinned", "public_serveable", "would_serve"};
+    if (!p || p->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < sizeof(flags)/sizeof(flags[0]); ++i)
+        if (!zw_peers_field(p, flags[i], JSON_BOOL)) return false;
+    return zw_peers_field(p, "public_shape", JSON_STR) && zw_peers_field(p, "serve_rule", JSON_STR) &&
+        zw_peers_field(p, "present_bytes", JSON_INT) && zw_peers_field(p, "total_bytes", JSON_INT);
+}
+static bool zw_peers_row_valid(const struct json_value *p)
+{
+    const struct json_value *transfer = json_get(p, "transfer");
+    return p && p->type == JSON_OBJ && zw_peers_field(p, "peer", JSON_INT) &&
+        zw_peers_field(p, "session_key", JSON_STR) && zw_peers_field(p, "tier", JSON_STR) &&
+        zw_peers_field(p, "inflight", JSON_INT) && zw_peers_field(p, "allowance_exhausted", JSON_BOOL) &&
+        zw_peers_field(p, "offence_total", JSON_INT) && transfer && transfer->type == JSON_OBJ &&
+        zw_peers_field(transfer, "verified_bytes_served", JSON_INT) &&
+        zw_peers_field(transfer, "verified_bytes_fetched", JSON_INT) &&
+        zw_peers_field(p, "verified_bytes_served", JSON_INT) &&
+        zw_peers_field(p, "verified_bytes_received", JSON_INT);
+}
+static bool zw_peers_rows_valid(const struct json_value *rows)
+{
+    if (!rows || rows->type != JSON_ARR || json_size(rows) > ZW_MAX_PEERS) return false;
+    for (size_t i = 0; i < json_size(rows); ++i) {
+        if (!zw_peers_row_valid(json_at(rows, i))) return false;
+    }
+    return true;
+}
+static bool zw_peers_data_valid(const struct json_value *data, const char *root)
+{
+    const char *actual = data ? json_get_str(json_get(data, "package_root")) : NULL;
+    const struct json_value *rows = data ? json_get(data, "peers") : NULL;
+    return data && data->type == JSON_OBJ && actual && !strcmp(actual, root) &&
+        zw_peers_field(data, "live", JSON_BOOL) && zw_peers_field(data, "peer_count", JSON_INT) &&
+        zw_peers_field(data, "peers_truncated", JSON_BOOL) && zw_peers_rows_valid(rows) &&
+        json_get_int(json_get(data, "peer_count")) == (int64_t)json_size(rows) &&
+        zw_peers_possession_valid(json_get(data, "possession"));
+}
+static void zw_peers_refusal(struct zcl_command_reply *reply, const struct json_value *body, bool parsed)
+{
+    const char *code = parsed ? json_get_str(json_get(body, "code")) : NULL;
+    const char *phase = parsed ? json_get_str(json_get(body, "phase")) : NULL;
+    const char *message = parsed ? json_get_str(json_get(body, "message")) : NULL;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        code && code[0] ? code : "PEERS_UNAVAILABLE", phase && phase[0] ? phase : "execute",
+        true, false, message && message[0] ? message : "resident peer observation unavailable or malformed", "zcode.package.peers");
+}
+static bool zw_peers_remote(const struct zcl_command_request *request, struct zcl_command_reply *reply, const char *root)
+{
+    struct rpc_arg_builder args; rpc_arg_builder_init(&args);
+    rpc_arg_builder_push_value(&args, request->input);
+    char *params = rpc_arg_builder_to_json(&args);
+    zcl_native_bridge_ensure_rpc();
+    char *raw = params ? node_rpc_call("zcode_package_peers", params) : NULL;
+    free(params);
+    struct json_value body; json_init(&body);
+    bool parsed = raw && json_read(&body, raw, strlen(raw)) && body.type == JSON_OBJ;
+    free(raw);
+    const struct json_value *ok = json_get(&body, "ok"), *data = json_get(&body, "data");
+    bool valid = parsed && ok && ok->type == JSON_BOOL && json_get_bool(ok) && zw_peers_data_valid(data, root);
+    if (valid) { json_free(&reply->data); json_init(&reply->data); valid = json_copy_checked(&reply->data, data) && zw_peers_data_valid(&reply->data, root); }
+    if (!valid) zw_peers_refusal(reply, &body, parsed);
+    json_free(&body);
+    return valid;
+}
+static void zw_peers_local(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
@@ -850,6 +925,33 @@ void zcl_native_handle_zcode_package_peers(
         "session_key is the LOCAL transport pseudo-key (0x02 || "
         "SHA3-256(domain || host identity)) — it scopes the service book "
         "to a transport session and is NOT a contributor identity");
+}
+
+void zcl_native_handle_zcode_package_peers(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *datadir = zw_input_str(request->input, "datadir");
+    struct vcs_package_store *store = vcs_package_store_global();
+    if (datadir && (store || vcs_swarm_engine_global())) {
+        char path[4400];
+        int n = snprintf(path, sizeof(path), "%s/zcode", datadir);
+        const char *resident = store ? vcs_package_store_root_dir(store) : NULL;
+        if (!resident || n <= 0 || (size_t)n >= sizeof(path) || strcmp(path, resident)) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "DATADIR_CONFLICT", "validate", false, false,
+                "the requested datadir differs from the resident package store; query it in a separate process",
+                "zcode.package.peers");
+            return;
+        }
+    }
+    if (!datadir && !store && !vcs_swarm_engine_global()) {
+        uint8_t root[32]; char hex[65];
+        if (!zw_root(request, reply, "zcode.package.peers", root)) return;
+        zcl_hex_encode(root, 32, hex);
+        (void)zw_peers_remote(request, reply, hex);
+        return;
+    }
+    zw_peers_local(request, reply);
 }
 
 /* ── zcode package offered ──────────────────────────────────────────── */

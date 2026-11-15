@@ -265,6 +265,32 @@ static bool package_publish_commit(const struct json_value *params, bool help,
 /* Read-only exact-root observation for native instruments.  This reuses the
  * resident store and swarm engine; it neither starts a fetch nor opens the
  * live store from a second process. */
+static bool package_peers(const struct json_value *params, bool help,
+                          struct json_value *result)
+{
+    if (help) { json_set_str(result, "zcode_package_peers {root}"); return true; }
+    const struct json_value *input = package_rpc_input(params);
+    char datadir[PACKAGE_RPC_DATADIR_MAX];
+    if (!input || json_get(input, "datadir") || !package_resident_datadir(datadir, sizeof(datadir))) {
+        json_set_object(result); json_push_kv_bool(result, "ok", false);
+        json_push_kv_str(result, "code", "PEERS_UNAVAILABLE");
+        json_push_kv_str(result, "message", "valid input and a resident package store are required"); return true;
+    }
+    struct json_value forwarded; json_init(&forwarded);
+    bool copied = json_copy_checked(&forwarded, input) && json_push_kv_str(&forwarded, "datadir", datadir);
+    struct zcl_command_request request = { .input = &forwarded };
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.zcode_package_peers.v1");
+    if (copied) zcl_native_handle_zcode_package_peers(&request, &reply);
+    bool passed = copied && reply.status == ZCL_COMMAND_STATUS_PASSED && reply.exit_code == ZCL_COMMAND_EXIT_OK;
+    json_set_object(result); json_push_kv_bool(result, "ok", passed);
+    if (passed) json_push_kv(result, "data", &reply.data);
+    else {
+        json_push_kv_str(result, "code", reply.error.code[0] ? reply.error.code : "PEERS_UNAVAILABLE");
+        json_push_kv_str(result, "phase", reply.error.phase[0] ? reply.error.phase : "execute");
+        json_push_kv_str(result, "message", reply.error.message[0] ? reply.error.message : "resident peer observation failed");
+    }
+    zcl_command_reply_free(&reply); json_free(&forwarded); return true;
+}
 static bool package_status(const struct json_value *params, bool help,
                            struct json_value *result)
 {
@@ -415,6 +441,7 @@ void boot_zcode_package_register_rpc(struct rpc_table *table)
         { "zcode", "zcode_package_fastobj_export", package_fastobj_export, true },
         { "zcode", "zcode_package_publish_commit", package_publish_commit, true },
         { "zcode", "zcode_package_status", package_status, true },
+        { "zcode", "zcode_package_peers", package_peers, true },
         { "zcode", "zcode_swarm_status", swarm_status, true },
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
