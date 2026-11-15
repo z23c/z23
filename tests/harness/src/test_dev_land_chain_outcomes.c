@@ -537,6 +537,119 @@ int test_dev_land_chain_relation(void)
     dlx_restore(); return failures;
 }
 
+/* A queue file this binary cannot read must tell the agent what to do. */
+static bool dlx_unreadable_next_ok(const char *next)
+{
+    return strstr(next, "record 2") != NULL && strstr(next, "rebuild") != NULL &&
+           strstr(next, "queue host owner") != NULL;
+}
+
+/* After a step ended in `state`: step reply and outcomes row each carry a
+ * next_action, the conflict one names submit, and the status screen line
+ * shows the start of the detail. */
+static const struct json_value *dlx_outcome_row(const struct dlx_call *c,
+                                                const char *state)
+{
+    const struct json_value *outcomes = dlx_arr(c, "outcomes"), *row = NULL;
+    for (size_t i = 0; outcomes && i < outcomes->num_children; i++)
+        if (strcmp(json_get_str(json_get(&outcomes->children[i], "state")),
+                   state) == 0)
+            row = &outcomes->children[i];
+    return row;
+}
+
+static bool dlx_next_names(const char *next, bool need_submit)
+{
+    return next && next[0] && (!need_submit || strstr(next, "submit"));
+}
+
+static bool dlx_row_screen_ok(const struct dlx_call *c,
+                              const struct json_value *row, bool need_submit)
+{
+    const char *detail = json_get_str(json_get(row, "detail"));
+    char head[25] = {0};
+    size_t n = 0;
+    while (detail && detail[n] && detail[n] != '\n' && n < sizeof(head) - 1) {
+        head[n] = detail[n];
+        n++;
+    }
+    return dlx_next_names(json_get_str(json_get(row, "next_action")),
+                          need_submit) &&
+           n > 8 && strstr(dlx_str(c, "screen"), head) != NULL;
+}
+
+static bool dlx_outcome_next_ok(const struct dlx_call *step, const char *state)
+{
+    struct dlx_call c;
+    const struct json_value *row;
+    bool need_submit = strcmp(state, "conflict") == 0, ok = false;
+    if (!dlx_next_names(dlx_str(step, "next_action"), need_submit))
+        return false;
+    dlx_begin(&c, "status");
+    if (dlx_run(&c) && dlx_ok(&c)) {
+        row = dlx_outcome_row(&c, state);
+        ok = row && dlx_row_screen_ok(&c, row, need_submit);
+    }
+    dlx_end(&c);
+    return ok;
+}
+
+static int dlx_next_conflict(void)
+{
+    int failures = 0;
+    TEST("land: a conflict row names submit in the step reply and outcomes row and shows detail on the status screen") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64];
+        dlx_isolate("next_conflict");
+        ASSERT(dlx_rig_make(&rig, "next_conflict_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "next_conflict_key"));
+        ASSERT(dlx_generated_conflict(&rig, NULL, tip));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
+        ASSERT(dlx_outcome_next_ok(&c, "conflict"));
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int dlx_next_failed(void)
+{
+    int failures = 0;
+    TEST("land: a failed row carries a next_action in the step reply and outcomes row and detail on the status screen") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("next_failed");
+        ASSERT(dlx_rig_make(&rig, "next_failed_rig"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+        ASSERT(dlx_outcome_next_ok(&c, "failed"));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    dlx_restore();
+    return failures;
+}
+
 int test_dev_land_malformed_queue_refusal(void)
 {
     int failures = 0;
@@ -597,6 +710,14 @@ int test_dev_land_malformed_queue_refusal(void)
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_2");
+        ASSERT(dlx_unreadable_next_ok(c.reply.error.next_action));
+        dlx_end(&c);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 1);
+        ASSERT(dlx_run(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_2");
+        ASSERT(dlx_unreadable_next_ok(c.reply.error.next_action));
         dlx_end(&c);
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
@@ -609,6 +730,8 @@ int test_dev_land_malformed_queue_refusal(void)
         dlx_restore();
         PASS();
     } _test_next:;
+    failures += dlx_next_conflict();
+    failures += dlx_next_failed();
     return failures;
 }
 

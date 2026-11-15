@@ -4911,11 +4911,42 @@ static bool dl_push_outcome_times(struct json_value *item, const struct dl_row *
          json_push_kv_int(item, "landed_at", r->landed_at));
 }
 
+/* The concrete next command for a row that ended in conflict or failed.
+ * Text only: nothing here runs git or touches the queue. Returns false for
+ * any other state. `row` may be NULL (placeholders then stand in). */
+static bool dl_row_next_text(const struct dl_row *row, const char *state,
+                             char *out, size_t cap)
+{
+    char submit[512];
+    bool conflict = strcmp(state, "conflict") == 0;
+    const char *wt = row && row->worktree[0] &&
+                     strlen(row->worktree) < 300 ? row->worktree : "<lane>";
+    if (!conflict && strcmp(state, "failed") != 0)
+        return false;
+    (void)snprintf(submit, sizeof(submit),
+                   "z23-dev dev land submit --worktree=%s", wt);
+    if (conflict)
+        (void)snprintf(out, cap, "git fetch origin main, rebase this lane on "
+                       "origin/main, then submit again: %s", submit);
+    else if (row && strstr(row->detail, "; log: "))
+        /* The gate-diagnostic detail already names its log, and
+         * test_dev_land_watch_phase.c pins the bare status text for it. */
+        (void)snprintf(out, cap, "z23 dev land status");
+    else if (row && row->log_path[0] && strlen(row->log_path) < 300)
+        (void)snprintf(out, cap, "read the log at %s, fix the cause, then "
+                       "submit again: %s", row->log_path, submit);
+    else
+        (void)snprintf(out, cap, "z23 dev land status names the failure; fix "
+                       "the cause, then submit again: %s", submit);
+    return true;
+}
+
 static bool dl_push_failed_next(struct json_value *item, const struct dl_row *r)
 {
-    if (strcmp(r->state, "failed") != 0)
+    char text[1100];
+    if (!dl_row_next_text(r, r->state, text, sizeof(text)))
         return true;
-    return json_push_kv_str(item, "next_action", "z23 dev land status");
+    return json_push_kv_str(item, "next_action", text);
 }
 
 static bool dl_push_outcome_detail(struct json_value *item, const struct dl_row *r)
@@ -5090,6 +5121,24 @@ static bool dl_status_screen_queued(struct dl_row *rows, size_t nrows,
     return true;
 }
 
+/* One screen line for a non-landed outcome. A conflict or failed row also
+ * shows the first line of its detail, cut to 80 bytes, so the reason is
+ * visible without a second command. */
+static int dl_status_other_line(const struct dl_row *r, char *at, size_t cap)
+{
+    char head[84] = "";
+    size_t n = 0;
+    if (strcmp(r->state, "conflict") == 0 || strcmp(r->state, "failed") == 0) {
+        while (r->detail[n] && r->detail[n] != '\n' && n < 80)
+            n++;
+        (void)snprintf(head, sizeof(head), " - %.*s", (int)n, r->detail);
+    }
+    return snprintf(at, cap, "  #%lld %.12s %s %s%s%s%s\n", r->seq, r->tip,
+                    r->state, r->dimension[0] ? r->dimension : "",
+                    r->log_path[0] ? " " : "", r->log_path,
+                    n ? head : "");
+}
+
 static bool dl_status_screen_outcomes(struct dl_row *last, size_t nlast,
                                       char *screen, size_t cap, size_t *used)
 {
@@ -5100,12 +5149,7 @@ static bool dl_status_screen_outcomes(struct dl_row *last, size_t nlast,
                          "  #%lld %.12s landed as %.12s\n", last[k].seq,
                          last[k].tip, last[k].pushed);
         else
-            w = snprintf(screen + *used, cap - *used,
-                         "  #%lld %.12s %s %s%s%s\n", last[k].seq,
-                         last[k].tip, last[k].state,
-                         last[k].dimension[0] ? last[k].dimension : "",
-                         last[k].log_path[0] ? " " : "",
-                         last[k].log_path);
+            w = dl_status_other_line(&last[k], screen + *used, cap - *used);
         if (w <= 0 || (size_t)w >= cap - *used)
             return false;
         *used += (size_t)w;
@@ -5541,10 +5585,10 @@ void dl_step_reply(struct zcl_command_reply *reply,
     /* A failed step used to return only the row. The author needs one
      * command to run next. A caller that already named a more specific
      * action keeps it: json_get returns the first key. */
-    if (state && strcmp(state, "failed") == 0 &&
-        !json_get(&reply->data, "next_action"))
-        (void)json_push_kv_str(&reply->data, "next_action",
-                               "z23 dev land status");
+    char next_text[1100];
+    if (state && !json_get(&reply->data, "next_action") &&
+        dl_row_next_text(row, state, next_text, sizeof(next_text)))
+        (void)json_push_kv_str(&reply->data, "next_action", next_text);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -15852,6 +15896,24 @@ static void dl_next_step(const char *code, const char *action,
                    cap);
 }
 
+/* QUEUE_READ_FAILED from a record this binary cannot parse: say so, and say
+ * not to edit the file. Returns false for any other code or evidence. */
+static bool dl_unreadable_record_next(const struct zcl_command_reply *reply,
+                                      char *out, size_t cap)
+{
+    static const char prefix[] = "malformed_queue_record_";
+    const char *num = reply->error.evidence + sizeof(prefix) - 1;
+    if (strcmp(reply->error.code, "QUEUE_READ_FAILED") != 0 ||
+        strncmp(reply->error.evidence, prefix, sizeof(prefix) - 1) != 0 ||
+        *num < '0' || *num > '9')
+        return false;
+    (void)snprintf(out, cap, "record %.12s of the land queue file is not "
+                   "readable by this z23-dev; rebuild it (devbuild --wait "
+                   "make -j28 dev-bin) and retry; if it persists do not edit "
+                   "the file, ask the queue host owner", num);
+    return true;
+}
+
 /* Fill error.next_action on a refusal that set none. Runs once, after the
  * verb returned, so no refusal path can skip it. */
 static void dl_reply_name_next(const struct zcl_command_request *request,
@@ -15869,7 +15931,8 @@ static void dl_reply_name_next(const struct zcl_command_request *request,
     seq_v = seq > 0 ? NULL : json_get(&reply->data, "seq");
     if (seq_v && seq_v->type == JSON_INT)
         seq = (long long)json_get_int(seq_v);
-    dl_next_step(reply->error.code, action, seq, step, sizeof(step));
+    if (!dl_unreadable_record_next(reply, step, sizeof(step)))
+        dl_next_step(reply->error.code, action, seq, step, sizeof(step));
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
                    "%s", step);
 }
