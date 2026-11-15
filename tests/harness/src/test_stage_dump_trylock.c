@@ -66,6 +66,8 @@
 #include "config/runtime.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
+#include "storage/coins_kv.h"
+#include "jobs/reducer_frontier.h"
 #include "platform/thread_compat.h"
 #include "util/thread_registry.h"
 
@@ -1352,6 +1354,134 @@ static int case_agent_trust_projection(void)
     return failures;
 }
 
+extern void sovereignty_test_set_unlock_hook(void (*hook)(void));
+static pthread_mutex_t sov_race_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sov_race_cv = PTHREAD_COND_INITIALIZER;
+static bool sov_race_entered, sov_race_held, sov_race_release, sov_race_done;
+static bool sov_race_ok;
+static struct json_value sov_race_output;
+static bool sov_race_wait(bool *flag, int seconds)
+{
+    struct timespec end;
+    if (!sdt_clock(CLOCK_REALTIME, &end)) return false;
+    end.tv_sec += seconds;
+    int rc = 0;
+    while (!*flag && !sov_race_release && rc == 0)
+        rc = pthread_cond_timedwait(&sov_race_cv, &sov_race_mu, &end);
+    return *flag;
+}
+static void sov_race_hook(void)
+{
+    pthread_mutex_lock(&sov_race_mu);
+    sov_race_entered = true;
+    pthread_cond_broadcast(&sov_race_cv);
+    (void)sov_race_wait(&sov_race_held, 5);
+    pthread_mutex_unlock(&sov_race_mu);
+}
+static void *sov_race_holder(void *unused)
+{
+    (void)unused;
+    pthread_mutex_lock(&sov_race_mu);
+    bool entered = sov_race_wait(&sov_race_entered, 5);
+    pthread_mutex_unlock(&sov_race_mu);
+    if (!entered) return NULL;
+    progress_store_tx_lock();
+    pthread_mutex_lock(&sov_race_mu);
+    sov_race_held = true;
+    pthread_cond_broadcast(&sov_race_cv);
+    (void)sov_race_wait(&sov_race_release, 10);
+    pthread_mutex_unlock(&sov_race_mu);
+    progress_store_tx_unlock();
+    return NULL;
+}
+static void *sov_race_projection(void *unused)
+{
+    (void)unused;
+    sov_race_ok = sovereignty_trust_state_json(&sov_race_output);
+    pthread_mutex_lock(&sov_race_mu);
+    sov_race_done = true;
+    pthread_cond_broadcast(&sov_race_cv);
+    pthread_mutex_unlock(&sov_race_mu);
+    return NULL;
+}
+static int sov_race_seed(bool eligible)
+{
+    int failures = 0;
+    if (!eligible) {
+        unsigned char bad = 7;
+        SD_CHECK("sov race: malformed stamp fixture",
+                 progress_meta_set(progress_store_db(), SOVEREIGNTY_T_READY_KEY,
+                                   &bad, sizeof(bad)));
+    } else {
+        sqlite3 *db = progress_store_db();
+        bool seeded = coins_kv_ensure_schema(db) &&
+            sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
+            coins_kv_set_applied_height_in_tx(db, 51) &&
+            sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+        reducer_frontier_provable_tip_set(50);
+        SD_CHECK("sov race: eligible guard fixture", seeded);
+    }
+    return failures;
+}
+
+static int sov_race_check_output(bool eligible)
+{
+    int failures = 0;
+    const struct json_value *mode = json_get(&sov_race_output, "trust_mode");
+    const struct json_value *gated = json_get(&sov_race_output, "gated");
+    SD_CHECK("sov race: complete trust and gate output", sov_race_ok &&
+             mode && json_get_str(mode) && gated &&
+             json_get(gated, "mint_mining_allowed") &&
+             json_get(gated, "wallet_spend_allowed"));
+    const struct json_value *mint = json_get(gated, "mint_mining_allowed");
+    const struct json_value *spend = json_get(gated, "wallet_spend_allowed");
+    SD_CHECK("sov race: guard and trust results", mint && spend &&
+             json_get_bool(mint) == eligible && json_get_bool(spend) == eligible &&
+             agent_strings_match(json_get_str(mode), "bare"));
+    if (!eligible) {
+        const struct json_value *ready = json_get(&sov_race_output, "t_ready");
+        SD_CHECK("sov race: malformed stamp renders null", ready && ready->type == JSON_NULL);
+    }
+    return failures;
+}
+
+static int case_sov_unlock_race(bool eligible)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "stage_dump_trylock", "sov_unlock");
+    progress_store_close();
+    bool opened = progress_store_open(dir);
+    SD_CHECK("sov race: store opens", opened);
+    if (!opened) { test_cleanup_tmpdir(dir); return failures; }
+    failures += sov_race_seed(eligible);
+    sov_race_entered = sov_race_held = sov_race_release = sov_race_done = false;
+    sov_race_ok = false;
+    memset(&sov_race_output, 0, sizeof(sov_race_output));
+    pthread_t holder, projection;
+    sovereignty_test_set_unlock_hook(sov_race_hook);
+    int h = pthread_create(&holder, NULL, sov_race_holder, NULL);
+    int p = h == 0 ? pthread_create(&projection, NULL, sov_race_projection, NULL) : -1;
+    SD_CHECK("sov race: threads start", h == 0 && p == 0);
+    pthread_mutex_lock(&sov_race_mu);
+    bool held = p == 0 && sov_race_wait(&sov_race_held, 5);
+    bool done = held && sov_race_wait(&sov_race_done, 2);
+    SD_CHECK("sov race: contender holds lock", held);
+    SD_CHECK("sov race: projection completes while lock held", done);
+    sov_race_release = true;
+    pthread_cond_broadcast(&sov_race_cv);
+    pthread_mutex_unlock(&sov_race_mu);
+    if (h == 0) pthread_join(holder, NULL);
+    if (p == 0) pthread_join(projection, NULL);
+    sovereignty_test_set_unlock_hook(NULL);
+    failures += sov_race_check_output(eligible);
+    json_free(&sov_race_output);
+    if (eligible) reducer_frontier_provable_tip_set(-1);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_stage_dump_trylock(void)
 {
     int failures = 0;
@@ -1360,6 +1490,8 @@ int test_stage_dump_trylock(void)
     failures += case_diag_dumps_busy_path();
     failures += case_validate_headers_ok0_index_used();
     failures += case_sovereignty_dump_busy_path();
+    failures += case_sov_unlock_race(false);
+    failures += case_sov_unlock_race(true);
     failures += case_agent_trust_projection();
     failures += case_chain_evidence_busy_ingest();
     failures += case_chain_evidence_ingest_contention();

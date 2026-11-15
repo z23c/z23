@@ -158,19 +158,19 @@ static void sov_stamp_transitions(sqlite3 *pdb, enum sync_trust_state st)
         sov_stamp_if_absent(pdb, SOVEREIGNTY_T_SOVEREIGN_KEY, "t_sovereign");
 }
 
-/* Render a stamped transition key as {"epoch": N, "iso8601": "..."}, or
- * JSON null when the transition has not yet been observed on this datadir.
- * `field` is caller-owned (json_init'd here); SELECT-only. */
-static void sov_render_stamp(sqlite3 *pdb, const char *key,
-                             struct json_value *field)
+static bool sov_read_stamp(sqlite3 *pdb, const char *key, int64_t *stamp)
 {
-    json_init(field);
-    int64_t stamp = 0;
     size_t n = 0;
     bool found = false;
-    bool ok = pdb && progress_meta_get_blob_exact(pdb, key, &stamp,
-                                                   sizeof(stamp), &n, &found);
-    if (!ok || !found || n != sizeof(stamp)) {
+    return pdb && progress_meta_get_blob_exact(pdb, key, stamp,
+                                                sizeof(*stamp), &n, &found) &&
+           found && n == sizeof(*stamp);
+}
+
+static void sov_render_stamp(int64_t stamp, bool found, struct json_value *field)
+{
+    json_init(field);
+    if (!found) {
         json_set_null(field);
         return;
     }
@@ -610,11 +610,18 @@ struct sov_state_scan {
     bool provenance_present;
 };
 
+#ifdef ZCL_TESTING
+static void (*sov_unlock_test_hook)(void);
+void sovereignty_test_set_unlock_hook(void (*hook)(void))
+{
+    sov_unlock_test_hook = hook;
+}
+#endif
+
 /* One lock-scoped read pass: every predicate, per-pool row count and the
  * importer provenance stamp the v2 dump reports. The caller holds the
  * progress-store read lock (progress_store_tx_trylock in
- * sovereignty_dump_state_json); this releases it exactly where the inline
- * code released it, before any JSON is emitted. */
+ * sovereignty_dump_state_json). The caller releases it after capturing stamps and guard results. */
 static void sov_scan_locked_state(sqlite3 *pdb, struct sov_state_scan *scan,
                                   bool include_counts)
 {
@@ -662,7 +669,6 @@ static void sov_scan_locked_state(sqlite3 *pdb, struct sov_state_scan *scan,
     } else {
         scan->provenance[0] = '\0';
     }
-    progress_store_tx_unlock();
 }
 
 /* Pure label mapping for the "authority_posture" field — what the store
@@ -731,20 +737,11 @@ static void sov_emit_core_state(struct json_value *out,
     json_push_kv_str(out, "trust_mode", trust_mode);
 }
 
-/* What is gated at the CURRENT posture — probe the actual guard so this
- * report can never drift from the enforcement it describes (one source
- * of truth: sovereignty_guard_allow). */
-static void sov_emit_gated(struct json_value *out, bool progress_open,
-                           bool proven_authority, bool self_folded)
+/* Render the guard results captured with the progress snapshot. */
+static void sov_emit_gated(struct json_value *out, bool mint_allowed,
+                           bool spend_allowed, bool proven_authority,
+                           bool self_folded)
 {
-    char mint_reason[96] = {0};
-    char spend_reason[96] = {0};
-    bool mint_allowed = progress_open &&
-        sovereignty_guard_allow("mint", mint_reason, sizeof(mint_reason));
-    bool spend_allowed = progress_open &&
-        sovereignty_guard_allow("wallet_spend", spend_reason,
-                                sizeof(spend_reason));
-
     /* Snapshot/bundle export requires BOTH proven_authority AND the
      * self_folded marker (engine/composition/src/bundle_exporter.c bx_qualified: "coins
      * not proven authority" / "coins lacks self-folded refold marker") — a
@@ -820,6 +817,26 @@ static bool sovereignty_dump_state_impl(struct json_value *out, const char *key,
     if (progress_locked)
         sov_scan_locked_state(pdb, &scan, include_counts);
 
+    enum sync_trust_state trust_st =
+        sync_trust_derive(scan.proven_authority, scan.self_folded,
+                          scan.self_derived);
+    int64_t ready_stamp = 0, sovereign_stamp = 0;
+    bool ready_found = false, sovereign_found = false;
+    bool mint_allowed = false, spend_allowed = false;
+    if (progress_locked) {
+        sov_stamp_transitions(pdb, trust_st);
+        ready_found = sov_read_stamp(pdb, SOVEREIGNTY_T_READY_KEY, &ready_stamp);
+        sovereign_found = sov_read_stamp(pdb, SOVEREIGNTY_T_SOVEREIGN_KEY,
+                                         &sovereign_stamp);
+        char reason[96];
+        mint_allowed = sovereignty_guard_allow("mint", reason, sizeof(reason));
+        spend_allowed = sovereignty_guard_allow("wallet_spend", reason, sizeof(reason));
+        progress_store_tx_unlock();
+#ifdef ZCL_TESTING
+        if (sov_unlock_test_hook) sov_unlock_test_hook();
+#endif
+    }
+
     const char *authority_posture = sov_authority_posture_name(
         progress_open, scan.proven_authority, scan.self_folded);
     const char *trust_mode = sovereignty_trust_mode(scan.proven_authority,
@@ -833,11 +850,6 @@ static bool sovereignty_dump_state_impl(struct json_value *out, const char *key,
      * never disagree with the enforcement (services/sync_trust_policy.h).
      * self_derived is only computed when hstar is available; when it is not,
      * it is false (the conservative floor), matching the guard's own fail. */
-    enum sync_trust_state trust_st =
-        sync_trust_derive(scan.proven_authority, scan.self_folded,
-                          scan.self_derived);
-    if (progress_open)
-        sov_stamp_transitions(pdb, trust_st);
     uint32_t cap_mask = sync_trust_caps(trust_st);
     json_push_kv_str(out, "trust_state", sync_trust_state_name(trust_st));
     /* Publish the last-known-good trust-tier cache from the SAME successful
@@ -875,11 +887,11 @@ static bool sovereignty_dump_state_impl(struct json_value *out, const char *key,
      * A later posture regression never clears these; see the stamping
      * comment above sovereignty_trust_mode for the full semantics. */
     struct json_value t_ready = {0};
-    sov_render_stamp(pdb, SOVEREIGNTY_T_READY_KEY, &t_ready);
+    sov_render_stamp(ready_stamp, ready_found, &t_ready);
     json_push_kv(out, "t_ready", &t_ready);
     json_free(&t_ready);
     struct json_value t_sovereign = {0};
-    sov_render_stamp(pdb, SOVEREIGNTY_T_SOVEREIGN_KEY, &t_sovereign);
+    sov_render_stamp(sovereign_stamp, sovereign_found, &t_sovereign);
     json_push_kv(out, "t_sovereign", &t_sovereign);
     json_free(&t_sovereign);
 
@@ -909,8 +921,8 @@ static bool sovereignty_dump_state_impl(struct json_value *out, const char *key,
                       scan.provenance_present);
     json_push_kv_str(out, "shielded_import_provenance", scan.provenance);
 
-    sov_emit_gated(out, progress_open, scan.proven_authority,
-                   scan.self_folded);
+    sov_emit_gated(out, mint_allowed, spend_allowed,
+                   scan.proven_authority, scan.self_folded);
 
     return true;
 }
