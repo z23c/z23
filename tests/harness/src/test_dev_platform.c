@@ -42,6 +42,7 @@
 #include <errno.h>
 #if defined(__linux__)
 #include <elf.h>
+#include <pthread.h>
 #endif
 #include <limits.h>
 #include <signal.h>
@@ -8167,6 +8168,270 @@ static int test_process_output_eof(void)
     return failures;
 }
 
+#if defined(__linux__)
+static bool dp_process_restore_test_env(const char *saved, bool changed)
+{
+    if (!changed) return true;
+    return saved ? platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) == 0 :
+                   dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS") == 0;
+}
+
+struct dp_process_overlap {
+    bool exclusive;
+    int executable, inherited;
+    struct zcl_devloop_process_result result;
+};
+
+static void *dp_process_overlap_run(void *context)
+{
+    struct dp_process_overlap *f = context;
+    const char *argv[] = {"/bin/sh", "-c", "true", NULL};
+    const char *env[] = {"PATH=/usr/bin:/bin", NULL};
+    if (f->exclusive)
+        (void)zcl_devloop_process_run_fd_inherit(".", f->executable, argv, env,
+                                                  f->inherited, 30000, NULL, NULL, &f->result);
+    else
+        (void)zcl_devloop_process_run(".", argv, 30000, &f->result);
+    return NULL;
+}
+
+static int test_resident_process_overlap(void)
+{
+    int failures = 0, executable = -1, inherited = -1, notify[2] = {-1, -1};
+    pthread_t thread;
+    bool started = false, changed = false;
+    const char *old = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = old ? strdup(old) : NULL;
+    TEST("dev platform: inherited lock runner refuses overlapping cancellation owners") {
+        ASSERT(!old || saved);
+        executable = open("/bin/sh", O_RDONLY | O_CLOEXEC);
+        inherited = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        ASSERT(executable >= 0 && inherited >= 3 && pipe(notify) == 0);
+        ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        changed = true;
+        zcl_devloop_process_cancel_clear();
+        for (int exclusive = 0; exclusive <= 1; ++exclusive) {
+            struct dp_process_overlap f = {.exclusive = exclusive != 0,
+                .executable = executable, .inherited = inherited};
+            zcl_devloop_process_test_preexec_notify_fd_set(notify[1]);
+            ASSERT(pthread_create(&thread, NULL, dp_process_overlap_run, &f) == 0);
+            started = true;
+            struct pollfd p = {.fd = notify[0], .events = POLLIN};
+            pid_t pids[2];
+            ASSERT(poll(&p, 1, 5000) == 1);
+            ASSERT(read(notify[0], pids, sizeof(pids)) == (ssize_t)sizeof(pids));
+            const char *argv[] = {"/bin/sh", "-c", "true", NULL};
+            const char *env[] = {"PATH=/usr/bin:/bin", NULL};
+            struct zcl_devloop_process_result result = {0};
+            errno = 0;
+            ASSERT(!zcl_devloop_process_run_fd_inherit(".", executable, argv, env,
+                                                        inherited, 30000, NULL, NULL, &result));
+            ASSERT(errno == EBUSY);
+            if (exclusive) {
+                errno = 0;
+                ASSERT(!zcl_devloop_process_run(".", argv, 30000, &result));
+                ASSERT(errno == EBUSY);
+            }
+            zcl_devloop_process_cancel_request();
+            ASSERT(pthread_join(thread, NULL) == 0);
+            started = false;
+            ASSERT(f.result.cancelled && !f.result.timed_out);
+            ASSERT(!zcl_devloop_process_cleanup_uncertain());
+            errno = 0;
+            ASSERT(waitpid(pids[1], NULL, WNOHANG) == -1 && errno == ECHILD);
+            zcl_devloop_process_test_preexec_notify_fd_set(-1);
+            zcl_devloop_process_cancel_clear();
+        }
+        PASS();
+    } _test_next:;
+    if (started) {
+        zcl_devloop_process_cancel_request();
+        (void)pthread_join(thread, NULL);
+    }
+    zcl_devloop_process_test_preexec_notify_fd_set(-1);
+    zcl_devloop_process_cancel_clear();
+    if (notify[0] >= 0) close(notify[0]);
+    if (notify[1] >= 0) close(notify[1]);
+    if (executable >= 0) close(executable);
+    if (inherited >= 0) close(inherited);
+    if (!dp_process_restore_test_env(saved, changed)) failures++;
+    free(saved);
+    return failures;
+}
+#endif
+
+#if defined(__linux__)
+static bool dp_uncertain_boundary_child(const char *marker)
+{
+    int binary = open("/bin/sh", O_RDONLY | O_CLOEXEC);
+    int inherited = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    char command[PATH_MAX + 32];
+    if (binary < 0 || inherited < 3 ||
+        snprintf(command, sizeof(command), "touch %s", marker) >= (int)sizeof(command))
+        return false;
+    const char *argv[] = {"/bin/sh", "-c", command, NULL};
+    const char *env[] = {"PATH=/usr/bin:/bin", NULL};
+    struct zcl_devloop_process_result result = {0};
+    zcl_devloop_process_cleanup_reset();
+    zcl_devloop_process_cancel_clear();
+    zcl_devloop_process_test_uncertain_after_acquire();
+    errno = 0;
+    bool refused = !zcl_devloop_process_run_fd_inherit(".", binary, argv, env,
+                                                        inherited, 5000, NULL, NULL, &result);
+    bool ok = refused && errno == EBUSY && result.exit_code == -1 &&
+              zcl_devloop_process_cleanup_uncertain() && access(marker, F_OK) != 0;
+    zcl_devloop_process_cleanup_reset();
+    const char *next[] = {"/bin/sh", "-c", "true", NULL};
+    ok = ok && zcl_devloop_process_run(".", next, 5000, &result) &&
+         result.exit_code == 0 && !result.cancelled && !result.timed_out;
+    close(binary);
+    close(inherited);
+    return ok;
+}
+
+static int test_resident_process_uncertain_fence(void)
+{
+    int failures = 0;
+    char root[PATH_MAX] = {0}, marker[PATH_MAX];
+    pid_t child = -1;
+    TEST("dev platform: post-acquire uncertain cleanup refuses without launching") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "process_uncertain_fence") != NULL);
+        ASSERT(snprintf(marker, sizeof(marker), "%s/launched", root) < (int)sizeof(marker));
+        child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            if (platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0)
+                _exit(2);
+            _exit(dp_uncertain_boundary_child(marker) ? 0 : 1);
+        }
+        int status = 0;
+        pid_t waited;
+        do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+        child = -1;
+        ASSERT(waited > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT(access(marker, F_OK) != 0 && errno == ENOENT);
+        PASS();
+    } _test_next:;
+    if (child > 0) { (void)kill(child, SIGKILL); (void)waitpid(child, NULL, 0); }
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+#endif
+
+#if defined(__linux__)
+struct dp_percall_cancel_fixture {
+    int notify;
+    pid_t pids[2];
+    bool fired;
+    unsigned legacy_polls;
+};
+
+static bool dp_percall_cancel(void *context)
+{
+    struct dp_percall_cancel_fixture *f = context;
+    struct pollfd p = {.fd = f->notify, .events = POLLIN};
+    if (f->fired) return true;
+    if (poll(&p, 1, 0) != 1 || !(p.revents & POLLIN)) return false;
+    f->fired = read(f->notify, f->pids, sizeof(f->pids)) == (ssize_t)sizeof(f->pids);
+    return f->fired;
+}
+
+static bool dp_percall_legacy_poll(void *context)
+{
+    struct dp_percall_cancel_fixture *f = context;
+    f->legacy_polls++;
+    return false;
+}
+
+static int test_resident_process_percall_cancel(void)
+{
+    int failures = 0, executable = -1, inherited = -1, notify[2] = {-1, -1};
+    bool changed = false, poll_set = false;
+    const char *old = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = old ? strdup(old) : NULL;
+    TEST("dev platform: per-call cancellation reaps child and preserves legacy poll") {
+        ASSERT(!old || saved);
+        executable = open("/bin/sh", O_RDONLY | O_CLOEXEC);
+        inherited = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        ASSERT(executable >= 0 && inherited >= 3 && pipe(notify) == 0);
+        ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        changed = true;
+        zcl_devloop_process_cancel_clear();
+        struct dp_percall_cancel_fixture f = {.notify = notify[0]};
+        zcl_devloop_process_cancel_poll_set(dp_percall_legacy_poll, &f);
+        poll_set = true;
+        zcl_devloop_process_test_preexec_notify_fd_set(notify[1]);
+        const char *argv[] = {"/bin/sh", "-c", "true", NULL};
+        const char *env[] = {"PATH=/usr/bin:/bin", NULL};
+        struct zcl_devloop_process_result result = {0};
+        ASSERT(!zcl_devloop_process_run_fd_inherit(".", executable, argv, env,
+            inherited, 30000, dp_percall_cancel, &f, &result));
+        ASSERT(f.fired && result.cancelled && !result.timed_out);
+        ASSERT(!zcl_devloop_process_cancel_requested());
+        ASSERT(!zcl_devloop_process_cleanup_uncertain());
+        errno = 0;
+        ASSERT(waitpid(f.pids[1], NULL, WNOHANG) == -1 && errno == ECHILD);
+        zcl_devloop_process_test_preexec_notify_fd_set(-1);
+        unsigned before = f.legacy_polls;
+        const char *legacy[] = {"/bin/sh", "-c", "sleep 0.1", NULL};
+        ASSERT(zcl_devloop_process_run(".", legacy, 5000, &result));
+        ASSERT(result.exit_code == 0 && f.legacy_polls > before);
+        PASS();
+    } _test_next:;
+    zcl_devloop_process_test_preexec_notify_fd_set(-1);
+    if (poll_set) zcl_devloop_process_cancel_poll_clear();
+    zcl_devloop_process_cancel_clear();
+    if (notify[0] >= 0) close(notify[0]);
+    if (notify[1] >= 0) close(notify[1]);
+    if (executable >= 0) close(executable);
+    if (inherited >= 0) close(inherited);
+    if (!dp_process_restore_test_env(saved, changed)) failures++;
+    free(saved);
+    return failures;
+}
+#endif
+
+#if defined(__linux__)
+static int test_resident_process_inherited_fd(void)
+{
+    int failures = 0, binary = -1, keep = -1, drop = -1;
+    char root[PATH_MAX] = {0}, a[PATH_MAX], b[PATH_MAX], env_keep[40], env_drop[40];
+    const char *old = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = old ? strdup(old) : NULL;
+    bool changed = false;
+    TEST("dev platform: descriptor execution inherits only the requested descriptor") {
+        ASSERT(!old || saved);
+        ASSERT(test_mkdtemp(root, sizeof(root), "process_fd_allowlist") != NULL);
+        ASSERT(snprintf(a, sizeof(a), "%s/keep", root) < (int)sizeof(a));
+        ASSERT(snprintf(b, sizeof(b), "%s/drop", root) < (int)sizeof(b));
+        binary = open("/bin/sh", O_RDONLY | O_CLOEXEC);
+        keep = open(a, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        drop = open(b, O_RDWR | O_CREAT, 0600);
+        ASSERT(binary >= 0 && keep >= 3 && drop >= 3);
+        ASSERT(snprintf(env_keep, sizeof(env_keep), "KEEP_FD=%d", keep) < (int)sizeof(env_keep));
+        ASSERT(snprintf(env_drop, sizeof(env_drop), "DROP_FD=%d", drop) < (int)sizeof(env_drop));
+        ASSERT(platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        changed = true;
+        const char *env[] = {env_keep, env_drop, "PATH=/usr/bin:/bin", NULL};
+        const char *argv[] = {"/bin/sh", "-c",
+            "test -e /proc/self/fd/$KEEP_FD && test ! -e /proc/self/fd/$DROP_FD", NULL};
+        struct zcl_devloop_process_result result = {0};
+        ASSERT(zcl_devloop_process_run_fd_inherit(".", binary, argv, env, keep, 30000, NULL, NULL, &result));
+        ASSERT(result.exit_code == 0 && !result.term_signal && !result.timed_out && !result.cancelled);
+        ASSERT((fcntl(keep, F_GETFD) & FD_CLOEXEC) != 0);
+        PASS();
+    } _test_next:;
+    if (binary >= 0) close(binary);
+    if (keep >= 0) close(keep);
+    if (drop >= 0) close(drop);
+    if (changed && (saved ? platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) :
+                          dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS")) != 0) failures++;
+    free(saved);
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+#endif
+
 static int test_resident_process_cancellation(void)
 {
     int failures = 0;
@@ -12947,6 +13212,12 @@ static const struct dp_shard_case g_dp_cases[] = {
 #if defined(__APPLE__)
     DP_CASE(test_darwin_attested_descriptor_process, 4),
 #endif
+#if defined(__linux__)
+    DP_CASE(test_resident_process_inherited_fd, 3),
+    DP_CASE(test_resident_process_overlap, 3),
+    DP_CASE(test_resident_process_uncertain_fence, 3),
+    DP_CASE(test_resident_process_percall_cancel, 3),
+#endif
     DP_CASE(test_resident_process_cancellation, 3),
     DP_CASE(test_exact_commit_preempts_edit_proof, 4),
     DP_CASE(test_watch_path_encoding, 4),
@@ -13116,6 +13387,12 @@ static int test_dev_platform_platform_arm(void)
         nonempty &= counts[i] > 0;
     }
     if (DP_CASE_COUNT != 77u + (unsigned)(
+#if defined(__linux__)
+            4
+#else
+            0
+#endif
+            ) + (unsigned)(
 #if defined(__APPLE__)
             1
 #else

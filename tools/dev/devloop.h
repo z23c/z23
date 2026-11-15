@@ -1004,6 +1004,15 @@ bool zcl_devloop_process_run_env(const char *cwd,
 bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
                                 const char *const argv[], int timeout_ms,
                                 struct zcl_devloop_process_result *out);
+/* Linux-only FD execution with caller-prepared environment and one borrowed
+ * descriptor inherited by the child. CLOEXEC changes only after fork. The
+ * optional caller-owned cancellation callback is polled while the exclusive
+ * runner owns the child; it does not replace the global poll callback. */
+bool zcl_devloop_process_run_fd_inherit(
+    const char *cwd, int exec_fd, const char *const argv[],
+    const char *const envp[], int inherited_fd, int timeout_ms,
+    bool (*cancel)(void *), void *cancel_ctx,
+    struct zcl_devloop_process_result *out);
 #if defined(__APPLE__)
 /* Start a proof step suspended, compare the already-open Mach-O's
  * CodeDirectory with the child's mapped CodeDirectory, then resume it.
@@ -1030,6 +1039,9 @@ void zcl_devloop_process_cancel_bind_parent(uint64_t expected_parent);
 #ifdef ZCL_TESTING
 /* Test-only stopped child fixture, inherited by fork before exec. */
 void zcl_devloop_process_test_preexec_notify_fd_set(int fd);
+#if defined(__linux__)
+void zcl_devloop_process_test_uncertain_after_acquire(void);
+#endif
 #if !defined(_WIN32)
 bool zcl_devloop_process_test_reap_invalid(void);
 #endif

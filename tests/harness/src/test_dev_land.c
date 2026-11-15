@@ -20,10 +20,201 @@
 
 #include "test/test_dev_land_common.h"
 #include "command/native_dev_land_selfupgrade.h"
+#include "dev_proof_receipt.h"
 #if !defined(_WIN32)
 #include <poll.h>
 #endif
 
+
+#if defined(__linux__)
+#include "test/app_ui_fixture.h"
+#include <sys/prctl.h>
+
+static bool dlx_su_fixture_marker(const char *state)
+{
+    static const char token[] = "z23-land-selfupgrade-test-v1";
+    char path[1400], actual[sizeof(token)];
+    struct stat st;
+    if (!state || snprintf(path, sizeof(path), "%s/.land-selfupgrade-fixture", state) >= (int)sizeof(path))
+        return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+        st.st_uid == getuid() && (st.st_mode & 077) == 0 &&
+        read(fd, actual, sizeof(actual)) == (ssize_t)(sizeof(token) - 1) &&
+        memcmp(actual, token, sizeof(token) - 1) == 0;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+extern void zcl_native_dev_land_test_trial_entry_hook(void (*hook)(void));
+
+static void dlx_su_crash_after_entry(void)
+{
+    const char *trace = getenv("ZCL_LAND_TEST_FIXTURE_TRACE");
+    FILE *event = trace ? fopen(trace, "a") : NULL;
+    if (!event || fprintf(event, "entered\n") < 0 || fclose(event) != 0) _exit(125);
+    _exit(77);
+}
+
+static void dlx_su_pause_trial(void)
+{
+    const char *mode = getenv("ZCL_LAND_TEST_FIXTURE_MODE");
+    const char *ready = getenv("ZCL_LAND_TEST_FIXTURE_READY");
+    const char *release = getenv("ZCL_LAND_TEST_FIXTURE_RELEASE");
+    int r = ready ? open(ready, O_RDWR | O_CLOEXEC) : -1;
+    int g = release ? open(release, O_RDWR | O_CLOEXEC) : -1;
+    if (r < 0 || g < 0) _exit(125);
+    if (mode && !strcmp(mode, "pick_cancel")) {
+        zcl_native_dev_land_test_pick_barrier(r, g);
+        return;
+    }
+    char marker = 'R';
+    if (write(r, &marker, 1) != 1) _exit(125);
+    struct pollfd p = {.fd = g, .events = POLLIN};
+    if (poll(&p, 1, 30000) != 1 || read(g, &marker, 1) != 1 || marker != 'G') _exit(125);
+    close(r); close(g);
+}
+
+struct dlx_su_cli_options {
+    const char *view, *cursor;
+    size_t budget, items;
+};
+
+static bool dlx_su_cli_input(int argc, char **argv, bool decision,
+                              struct json_value *input)
+{
+    if (strcmp(argv[5], "--json")) return false;
+    if (!decision)
+        return !strncmp(argv[4], "--input=", 8) &&
+            json_read(input, argv[4] + 8, strlen(argv[4] + 8)) && input->type == JSON_OBJ;
+    char *end = NULL;
+    errno = 0;
+    long long seq = !strncmp(argv[4], "--seq=", 6) ? strtoll(argv[4] + 6, &end, 10) : 0;
+    return argc == 6 && seq > 0 && !errno && end && !*end &&
+           json_push_kv_int(input, "seq", seq);
+}
+
+static bool dlx_su_cli_number(const char *arg, const char *value,
+                              struct dlx_su_cli_options *opt)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long long n = strtoull(value, &end, 10);
+    if (errno || !end || *end || n > SIZE_MAX) return false;
+    if (!strncmp(arg, "--budget-bytes=", 15) && !opt->budget) opt->budget = (size_t)n;
+    else if (!strncmp(arg, "--max-items=", 12) && !opt->items) opt->items = (size_t)n;
+    else return false;
+    return true;
+}
+
+static bool dlx_su_cli_options(int argc, char **argv, struct dlx_su_cli_options *opt)
+{
+    for (int i = 6; i < argc; ++i) {
+        const char *value = strchr(argv[i], '=');
+        if (!value || !value[1]) return false;
+        ++value;
+        if (!strncmp(argv[i], "--view=", 7) && !opt->view) opt->view = value;
+        else if (!strncmp(argv[i], "--cursor=", 9) && !opt->cursor) opt->cursor = value;
+        else if (!dlx_su_cli_number(argv[i], value, opt)) return false;
+    }
+    return true;
+}
+
+static bool dlx_su_child_authorized(int argc, char **argv)
+{
+    const char *marker = getenv("ZCL_LAND_TEST_FIXTURE_STATE");
+    const char *state = getenv("XDG_STATE_HOME");
+    const char *enabled = getenv("ZCL_LAND_TEST_FIXTURE_CHILD");
+    return marker && state && !strcmp(marker, state) && dlx_su_fixture_marker(state) &&
+        enabled && !strcmp(enabled, "1") && argc >= 6 && !strcmp(argv[1], "dev") &&
+        !strcmp(argv[2], "land");
+}
+
+static bool dlx_su_child_trace(const char *action)
+{
+    const char *trace = getenv("ZCL_LAND_TEST_FIXTURE_TRACE");
+    if (!trace) return true;
+    FILE *event = fopen(trace, "a");
+    if (!event) return false;
+    bool ok = fprintf(event, "%s\n", action) >= 0;
+    if (fclose(event) != 0) ok = false;
+    return ok;
+}
+
+static bool dlx_su_child_mode(bool drive)
+{
+    const char *mode = getenv("ZCL_LAND_TEST_FIXTURE_MODE");
+    if (!drive || !mode) return true;
+    if (!strcmp(mode, "crash"))
+        zcl_native_dev_land_test_trial_entry_hook(dlx_su_crash_after_entry);
+    if (!strcmp(mode, "entry_cancel") || !strcmp(mode, "pick_cancel"))
+        zcl_native_dev_land_test_trial_entry_hook(dlx_su_pause_trial);
+    return strcmp(mode, "wrongrow") || setenv("ZCL_LAND_SU_TRIAL_SEQ", "999", 1) == 0;
+}
+
+static const struct zcl_command_spec *dlx_su_child_spec(
+    const struct zcl_command_registry *registry, const char *path, bool drive,
+    struct zcl_command_spec *fixture)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(registry, path, NULL);
+    if (!drive) return spec;
+    if (!spec || spec->availability != ZCL_COMMAND_COMPAT || spec->handler) return NULL;
+    *fixture = *spec;
+    fixture->availability = ZCL_COMMAND_READY;
+    fixture->handler = zcl_native_handle_dev_land;
+    fixture->availability_reason = "";
+    fixture->compat_target = "";
+    return fixture;
+}
+
+static void dlx_su_child_execute(const struct zcl_command_registry *registry,
+    const struct zcl_command_spec *spec, const char *path, bool ok,
+    struct json_value *input, const struct dlx_su_cli_options *options)
+{
+    struct zcl_command_context context = {.registry = registry, .dev_build = true,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OPERATOR, .granted_capabilities = UINT64_MAX,
+        .source_root = getenv("ZCL_DEV_SOURCE_ROOT"), .one_shot_process = true};
+    char wire[65536];
+    enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INVALID;
+    size_t n = ok && spec && context.source_root
+        ? zcl_command_registry_execute_json(registry, spec, &context, input,
+              false, path, options->view, options->budget, options->items, options->cursor,
+              wire, sizeof(wire), &exit_code)
+        : 0;
+    json_free(input);
+    if (!n || n >= sizeof(wire) || fwrite(wire, 1, n, stdout) != n ||
+        fputc(10, stdout) == EOF || fflush(stdout) != 0)
+        _exit(125);
+    _exit((int)exit_code);
+}
+
+/* Only explicit isolated fixtures may dispatch this executable as a driver.
+ * The registry validates input and serializes the real production reply. */
+void dlx_selfupgrade_child_exit_if_requested(int argc, char **argv)
+{
+    if (!dlx_su_child_authorized(argc, argv)) return;
+    bool decision = !strcmp(argv[3], "decision");
+    bool drive = !strcmp(argv[3], "drive");
+    if (!decision && !drive) return;
+    struct json_value input = {0};
+    json_set_object(&input);
+    struct dlx_su_cli_options options = {0};
+    bool ok = dlx_su_cli_input(argc, argv, decision, &input) &&
+              dlx_su_cli_options(argc, argv, &options);
+    ok = ok && dlx_su_child_trace(argv[3]);
+    if (ok && !dlx_su_child_mode(drive)) _exit(125);
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+
+    const char *path = decision ? "dev.land.decision" : "dev.land.drive";
+    struct zcl_command_spec fixture_spec;
+    const struct zcl_command_spec *spec = dlx_su_child_spec(registry, path, drive, &fixture_spec);
+    dlx_su_child_execute(registry, spec, path, ok, &input, &options);
+
+}
+#else
+void dlx_selfupgrade_child_exit_if_requested(int argc, char **argv)
+{ (void)argc; (void)argv; }
+#endif
 
 #if !defined(_WIN32)
 struct dlx_scope_case {
@@ -155,6 +346,859 @@ static bool dlx_scope_unchanged(const struct dlx_scope_case *t)
            dlx_origin_main(&t->rig, origin) && strcmp(origin, t->origin) == 0 &&
            lstat(t->wt, &info) != 0 && errno == ENOENT;
 }
+
+#if defined(__linux__)
+/* The signed receipt is a trusted test-producer fixture, not build provenance. */
+static bool dlx_su_binary_write(const char *path, const void *data, size_t size)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    const unsigned char *bytes = data;
+    bool ok = true;
+    while (size) {
+        ssize_t n = write(fd, bytes, size);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = false; break; }
+        bytes += n; size -= (size_t)n;
+    }
+    if (fchmod(fd, 0600) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
+static bool dlx_su_write_all(int target, const char *buffer, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = write(target, buffer + done, len - done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        done += (size_t)n;
+    }
+    return true;
+}
+
+static bool dlx_su_copy_body(int source, int target, struct sha3_256_ctx *sha)
+{
+    char buffer[65536];
+    for (;;) {
+        ssize_t n = read(source, buffer, sizeof(buffer));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return false;
+        if (!n) return true;
+        sha3_256_write(sha, (const uint8_t *)buffer, (size_t)n);
+        if (!dlx_su_write_all(target, buffer, (size_t)n)) return false;
+    }
+}
+
+static bool dlx_su_copy_executable(const char *path, uint8_t digest[32])
+{
+    int source = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    int target = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0700);
+    if (source < 0 || target < 0) {
+        if (source >= 0) close(source);
+        if (target >= 0) close(target);
+        return false;
+    }
+    static const char domain[] = "zcl.dev_proof_executable_reuse.v1";
+    static const char tag[] = "Z23-LAND-TEST-CANDIDATE";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    bool ok = dlx_su_copy_body(source, target, &sha);
+    if (ok) {
+        sha3_256_write(&sha, (const uint8_t *)tag, sizeof(tag) - 1);
+        ok = write(target, tag, sizeof(tag) - 1) == (ssize_t)(sizeof(tag) - 1);
+    }
+    if (ok) sha3_256_finalize(&sha, digest);
+    if (close(source) != 0) ok = false;
+    if (fchmod(target, 0700) != 0) ok = false;
+    if (close(target) != 0) ok = false;
+    return ok;
+}
+
+static bool dlx_su_write_signed_fixture(const char *root, const char *local,
+    const char *base, const uint8_t evidence[32],
+    const uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES],
+    const uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES])
+{
+    char dir[1400], path[1600], hex[65], child_path[1600];
+    zcl_hex_encode(evidence, 32, hex);
+    if (snprintf(dir, sizeof(dir), "%s/.cache/zcl-dev-proof/children", root) >= (int)sizeof(dir) ||
+        !dlx_mkdir_p(dir) ||
+        snprintf(child_path, sizeof(child_path), "%s/%s.child", dir, hex) >= (int)sizeof(child_path) ||
+        !dlx_su_binary_write(child_path, child, ZCL_DEV_PROOF_CHILD_WIRE_BYTES) ||
+        snprintf(dir, sizeof(dir), "%s/.cache/zcl-dev-proof/receipts", root) >= (int)sizeof(dir) ||
+        !dlx_mkdir_p(dir) ||
+        snprintf(path, sizeof(path), "%s/%s-%s.receipt", dir, local, base) >= (int)sizeof(path))
+        return false;
+    return dlx_su_binary_write(path, wire, ZCL_DEV_PROOF_WIRE_BYTES);
+}
+
+static bool dlx_su_signed_candidate(const char *root, const char *local,
+                                     const char *base, char artifact[1400])
+{
+    uint8_t evidence[32], child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
+    if (snprintf(artifact, 1400, "%s/artifact", root) >= 1400 ||
+        !dlx_su_copy_executable(artifact, evidence) ||
+        !zcl_dev_proof_oid_decode(local, receipt.local_commit, &receipt.local_commit_len) ||
+        !zcl_dev_proof_oid_decode(base, receipt.remote_base, &receipt.remote_base_len)) return false;
+    uint8_t *roots[] = {receipt.source_root, receipt.source_cas_root, receipt.mutation_root,
+        receipt.changed_set_root, receipt.impact_policy_root, receipt.compiler_root,
+        receipt.flags_root, receipt.environment_root, receipt.build_graph_root};
+    for (size_t n = 0; n < sizeof(roots) / sizeof(roots[0]); ++n) memset(roots[n], (int)n + 1, 32);
+    struct zcl_dev_proof_dimension *compile = &receipt.dimensions[ZCL_DEV_PROOF_COMPILE];
+    memcpy(compile->receipt_root, evidence, 32); compile->selected = 1; compile->reused = 1;
+    struct zcl_dev_proof_dimension *lint = &receipt.dimensions[ZCL_DEV_PROOF_LINT];
+    memset(lint->receipt_root, 42, 32); lint->selected = 1; lint->ran = 1;
+    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION; receipt.complete = 1;
+    if (!zcl_dev_proof_child_receipt_create(ZCL_DEV_PROOF_COMPILE, compile, child) ||
+        !zcl_dev_proof_receipt_child_set_root(&receipt, receipt.child_set_root) ||
+        !zcl_dev_proof_receipt_seal(&receipt) ||
+        !zcl_dev_proof_receipt_serialize(&receipt, wire)) return false;
+    return dlx_su_write_signed_fixture(root, local, base, compile->receipt_root, child, wire);
+
+}
+
+static bool dlx_su_drive(struct dlx_call *c, long long seq,
+                         const struct zcl_command_context *context)
+{
+    dlx_begin(c, "drive");
+    c->request.context = context;
+    c->request.view = "normal";
+    return json_push_kv_int(&c->input, "seq", seq) && dlx_run(c);
+}
+
+static unsigned dlx_su_lines(const char *text, const char *word)
+{
+    unsigned count = 0;
+    size_t n = strlen(word);
+    for (const char *p = text; (p = strstr(p, word)) != NULL; p += n) ++count;
+    return count;
+}
+
+static bool dlx_su_signed_landing(const struct json_value *row, const char *expected_tip)
+{
+    const char *state = json_get_str(json_get(row, "state"));
+    const char *tip = json_get_str(json_get(row, "remote_tip"));
+    const char *source = json_get_str(json_get(row, "remote_source"));
+    const char *signer = json_get_str(json_get(row, "remote_signer"));
+    const char *signature = json_get_str(json_get(row, "remote_signature"));
+    uint8_t signer_bytes[32], signature_bytes[64];
+    return state && !strcmp(state, "landed") && tip && !strcmp(tip, expected_tip) &&
+        source && source[0] && signer && strlen(signer) == 64 && signature &&
+        strlen(signature) == 128 &&
+        zcl_hex_decode_lower(signer, signer_bytes, sizeof(signer_bytes)) &&
+        zcl_hex_decode_lower(signature, signature_bytes, sizeof(signature_bytes));
+}
+
+static bool dlx_su_one_landed_outcome(int64_t seq, const char *expected_tip)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "status");
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *rows = dlx_arr(&c, "outcomes");
+    unsigned count = 0;
+    if (!rows) ok = false;
+    for (size_t i = 0; ok && i < rows->num_children; ++i) {
+        const struct json_value *row = &rows->children[i];
+        if (json_get_int(json_get(row, "seq")) != seq) continue;
+        ok = dlx_su_signed_landing(row, expected_tip);
+        ++count;
+    }
+    dlx_end(&c);
+    return ok && count == 1;
+}
+
+static bool dlx_su_no_outcome(int64_t seq)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "status");
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *rows = dlx_arr(&c, "outcomes");
+    if (!rows) ok = false;
+    for (size_t i = 0; ok && i < rows->num_children; ++i)
+        if (json_get_int(json_get(&rows->children[i], "seq")) == seq) ok = false;
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_su_no_landing(int64_t seq)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "status");
+    bool ok = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *rows = dlx_arr(&c, "outcomes");
+    if (!rows) ok = false;
+    for (size_t i = 0; ok && i < rows->num_children; ++i) {
+        const struct json_value *row = &rows->children[i];
+        const char *state = json_get_str(json_get(row, "state"));
+        if (json_get_int(json_get(row, "seq")) == seq && state && !strcmp(state, "landed")) ok = false;
+    }
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_su_competing_attach(void)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "attach");
+    bool ok = json_push_kv_int(&c.input, "seq", 5) && dlx_run(&c) && dlx_ok(&c) &&
+        !strcmp(dlx_str(&c, "state"), "attached");
+    if (!ok) fprintf(stderr, "[test competing attach] status=%d code=%.80s\n",
+                     (int)c.reply.status, dlx_err_code(&c));
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_su_competing_landing(const char *tip)
+{
+    bool attached = false;
+    for (unsigned i = 0; i < 8; ++i) {
+        struct dlx_call c;
+        dlx_begin(&c, "step");
+        bool ok = dlx_run(&c) && dlx_ok(&c);
+        bool needs_attach = !ok && !strcmp(dlx_err_code(&c), "PUBLICATION_INTENT_REQUIRED");
+        const char *state = dlx_str(&c, "state");
+        bool landed = state && !strcmp(state, "landed");
+        if (!ok && !needs_attach) fprintf(stderr, "[test competing step] index=%u status=%d code=%.80s\n",
+                                          i, (int)c.reply.status, dlx_err_code(&c));
+        dlx_end(&c);
+        if (needs_attach && !attached) {
+            attached = dlx_su_competing_attach();
+            if (attached) continue;
+        }
+        if (!ok) return false;
+        if (landed) {
+            bool signed_outcome = dlx_su_one_landed_outcome(5, tip);
+            if (!signed_outcome) fprintf(stderr, "[test competing step] index=%u signed_outcome=0\n", i);
+            return signed_outcome;
+        }
+    }
+    return false;
+}
+
+struct dlx_su_race {
+    char ready[1400], release[1400];
+    char self[PATH_MAX], git[PATH_MAX], shell[PATH_MAX];
+    int read_fd, release_fd, old_subreaper;
+    bool custody;
+    unsigned adopted;
+    struct app_ui_child driver;
+};
+
+/* Same bounded direct-child reconciliation used by app-receive fixtures.
+ * This shard is serial in its own harness worker, with no competing reaper. */
+static bool dlx_su_children(pid_t pids[32], size_t *count)
+{
+    char path[96], text[4096];
+    *count = 0;
+    (void)snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    bool closed = close(fd) == 0;
+    if (!closed || n < 0 || (size_t)n == sizeof(text) - 1) return false;
+    text[n] = 0;
+    char *cursor = text;
+    while (*cursor) {
+        while (*cursor == ' ') ++cursor;
+        if (!*cursor) break;
+        char *end = NULL;
+        errno = 0;
+        long value = strtol(cursor, &end, 10);
+        if (errno || end == cursor || value <= 1 || value > INT_MAX || *count == 32)
+            return false;
+        pids[(*count)++] = (pid_t)value;
+        cursor = end;
+    }
+    return true;
+}
+
+static bool dlx_su_custody_begin(struct dlx_su_race *r)
+{
+    pid_t pids[32]; size_t count;
+    if (!dlx_su_children(pids, &count) || count ||
+        !realpath("/proc/self/exe", r->self) ||
+        !realpath("/usr/bin/git", r->git) || !realpath("/bin/sh", r->shell) ||
+        prctl(PR_GET_CHILD_SUBREAPER, &r->old_subreaper) != 0 ||
+        prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) return false;
+    r->custody = true;
+    return true;
+}
+
+static bool dlx_su_adopted_stop(pid_t pid, const struct dlx_su_race *r)
+{
+    struct app_ui_child child = {.pid = pid};
+    if (!app_proc_identity(pid, child.image, &child.token))
+        return app_ui_reaped_identity_failure(&child);
+    /* Only images launched by this local fixture are eligible. app_proc_identity
+     * normalizes the kernel's deleted suffix; app_ui_stop rechecks start+image. */
+    if (!child.token || (strcmp(child.image, r->self) &&
+        strcmp(child.image, "/memfd:z23-proof-executable") &&
+        strcmp(child.image, r->git) && strcmp(child.image, r->shell))) return false;
+    return app_ui_stop(&child);
+}
+
+static bool dlx_su_adopted_drain(struct dlx_su_race *r)
+{
+    for (unsigned pass = 0; pass < 8; ++pass) {
+        pid_t pids[32]; size_t count;
+        if (!dlx_su_children(pids, &count)) return false;
+        if (!count) return true;
+        for (size_t i = 0; i < count; ++i) {
+            if (!dlx_su_adopted_stop(pids[i], r)) return false;
+            ++r->adopted;
+        }
+    }
+    return false;
+}
+
+static bool dlx_su_race_close(struct dlx_su_race *r)
+{
+    bool stopped = app_ui_stop(&r->driver);
+    bool drained = r->custody && stopped && dlx_su_adopted_drain(r);
+    bool restored = !r->custody ||
+        (drained && prctl(PR_SET_CHILD_SUBREAPER, r->old_subreaper) == 0);
+    if (r->read_fd >= 0) close(r->read_fd);
+    if (r->release_fd >= 0) close(r->release_fd);
+    unsetenv("ZCL_LAND_TEST_FIXTURE_READY");
+    unsetenv("ZCL_LAND_TEST_FIXTURE_RELEASE");
+    unsetenv("ZCL_LAND_TEST_FIXTURE_MODE");
+    if (restored) {
+        if (r->ready[0]) unlink(r->ready);
+        if (r->release[0]) unlink(r->release);
+    } else {
+        fprintf(stderr, "[test selfupgrade] unresolved descendant cleanup; fixture retained\n");
+    }
+    return stopped && restored;
+}
+
+static bool dlx_su_race_open(struct dlx_su_race *r, bool after_check)
+{
+    if (!dlx_su_custody_begin(r) ||
+        snprintf(r->ready, sizeof(r->ready), "%s/trial-ready", g_dlx_state) >= (int)sizeof(r->ready) ||
+        snprintf(r->release, sizeof(r->release), "%s/trial-release", g_dlx_state) >= (int)sizeof(r->release) ||
+        mkfifo(r->ready, 0600) != 0 || mkfifo(r->release, 0600) != 0) return false;
+    r->read_fd = open(r->ready, O_RDWR | O_CLOEXEC);
+    r->release_fd = open(r->release, O_RDWR | O_CLOEXEC);
+    return r->read_fd >= 0 && r->release_fd >= 0 &&
+        setenv("ZCL_LAND_TEST_FIXTURE_READY", r->ready, 1) == 0 &&
+        setenv("ZCL_LAND_TEST_FIXTURE_RELEASE", r->release, 1) == 0 &&
+        setenv("ZCL_LAND_TEST_FIXTURE_MODE", after_check ? "pick_cancel" : "entry_cancel", 1) == 0;
+}
+
+struct dlx_su_race_work {
+    const struct zcl_command_context *context;
+    bool after_check;
+};
+
+static int dlx_su_race_drive(void *opaque)
+{
+    const struct dlx_su_race_work *work = opaque;
+    alarm(90);
+    struct dlx_call c;
+    bool ran = dlx_su_drive(&c, 5, work->context);
+    bool accepted = ran && (!work->after_check || !dlx_ok(&c));
+    dlx_end(&c);
+    return accepted ? 0 : 1;
+}
+
+static bool dlx_su_race_start(struct dlx_su_race *r, int (*work)(void *), void *context)
+{
+    int gate[2];
+    if (!app_ui_pipe(gate)) return false;
+    r->driver.pid = fork();
+    if (r->driver.pid == 0) {
+        close(gate[1]);
+        char go = 0;
+        bool released = read(gate[0], &go, 1) == 1 && go == 'G';
+        close(gate[0]);
+        _exit(released ? work(context) : 126);
+    }
+    close(gate[0]);
+    bool pinned = r->driver.pid > 1 &&
+        app_proc_identity(r->driver.pid, r->driver.image, &r->driver.token) &&
+        r->driver.token && !strcmp(r->driver.image, r->self);
+    bool sent = pinned && write(gate[1], "G", 1) == 1;
+    close(gate[1]);
+    return sent;
+}
+
+static bool dlx_su_race_ready(const struct dlx_su_race *r)
+{
+    struct pollfd p = {.fd = r->read_fd, .events = POLLIN};
+    char marker = 0;
+    return poll(&p, 1, 30000) == 1 && read(r->read_fd, &marker, 1) == 1 && marker == 'R';
+}
+
+static bool dlx_su_competing_cancel(void)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "cancel");
+    bool ok = json_push_kv_int(&c.input, "seq", 5) && dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_su_race_result(const struct dlx_su_race *r, const char *land,
+    const char *tip, bool after_check, bool ok, bool released, bool exited,
+    uint32_t code, bool clean)
+{
+    char pointer[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    bool restored = clean && !zcl_land_selfupgrade_pointer_read(land, pointer, sizeof(pointer));
+    bool outcome = clean && (after_check ? dlx_su_no_landing(5) : dlx_su_one_landed_outcome(5, tip));
+    bool passed = ok && released && exited && code == 0 && clean && restored && outcome;
+    if (!passed)
+        fprintf(stderr, "[test competing race] after_check=%d setup_action=%d released=%d exited=%d code=%u clean=%d restored=%d outcome=%d adopted=%u\n",
+                after_check, ok, released, exited, code, clean, restored, outcome, r->adopted);
+    return passed;
+}
+
+static bool dlx_su_cancel_race(const struct zcl_command_context *context,
+                                const char *land, const char *tip, bool after_check)
+{
+    struct dlx_su_race r = {.read_fd = -1, .release_fd = -1, .driver = {.pid = -1}};
+    struct dlx_su_race_work work = {.context = context, .after_check = after_check};
+    bool ok = dlx_su_race_open(&r, after_check) &&
+        dlx_su_race_start(&r, dlx_su_race_drive, &work) && dlx_su_race_ready(&r);
+    if (ok) ok = after_check ? dlx_su_competing_cancel() : dlx_su_competing_landing(tip);
+    bool released = r.release_fd >= 0 && write(r.release_fd, "G", 1) == 1;
+    uint32_t code = UINT32_MAX;
+    bool exited = app_ui_wait(&r.driver, 95000, &code) == PLATFORM_PROCESS_WAIT_EXITED;
+    bool clean = dlx_su_race_close(&r);
+    return dlx_su_race_result(&r, land, tip, after_check, ok, released, exited, code, clean);
+
+}
+
+static int dlx_su_orphan_probe(void *opaque)
+{
+    const struct dlx_su_race *r = opaque;
+    pid_t child = fork();
+    if (child < 0) return 1;
+    if (child == 0) {
+        if (setsid() < 0 || write(r->read_fd, "R", 1) != 1) _exit(2);
+        for (;;) pause();
+    }
+    for (;;) pause();
+}
+
+static int dlx_selfupgrade_cleanup_case(void)
+{
+    int failures = 0;
+    bool closed = false;
+    struct dlx_su_race r = {.read_fd = -1, .release_fd = -1, .driver = {.pid = -1}};
+    TEST("land: race fixture reaps a separate-session child after its owner dies") {
+        dlx_isolate("selfupgrade_cleanup");
+        ASSERT(dlx_mkdir_p(g_dlx_state));
+        ASSERT(dlx_su_race_open(&r, false));
+        ASSERT(dlx_su_race_start(&r, dlx_su_orphan_probe, &r));
+        ASSERT(dlx_su_race_ready(&r));
+        ASSERT(app_ui_stop(&r.driver));
+        bool clean = dlx_su_race_close(&r);
+        closed = true;
+        ASSERT(clean && r.adopted == 1);
+        PASS();
+    } _test_next:;
+    if (!closed && !dlx_su_race_close(&r)) ++failures;
+    dlx_restore();
+    return failures;
+}
+
+static bool dlx_su_row_unchanged(const char *before, const char *after, const char *marker)
+{
+    const char *a = strstr(before, marker), *b = strstr(after, marker);
+    if (!a || !b) return false;
+    const char *ae = strchr(a, '\n'), *be = strchr(b, '\n');
+    return ae && be && ae - a == be - b && memcmp(a, b, (size_t)(ae - a)) == 0;
+}
+
+static bool dlx_su_recovery_facts(const struct json_value *facts)
+{
+    const struct json_value *seq = json_get(facts, "seq"), *count = json_get(facts, "rows_landed");
+    const struct json_value *last = json_get(facts, "last_row_landed");
+    const struct json_value *recovery = json_get(facts, "recovery_required");
+    return seq && seq->type == JSON_INT && seq->val.i == 5 &&
+        count && count->type == JSON_INT && count->val.i == 1 &&
+        last && last->type == JSON_BOOL && last->val.b &&
+        recovery && recovery->type == JSON_BOOL && recovery->val.b;
+}
+
+static bool dlx_su_recovery_wire(struct dlx_call *c)
+{
+    char wire[3072];
+    size_t n = zcl_command_registry_test_reply_wire(zcl_command_catalog(),
+        c->request.spec, &c->reply, wire, sizeof(wire));
+    struct json_value doc = {0};
+    bool ok = n > 0 && n <= sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *error = json_get(&doc, "error");
+    const struct json_value *mutated = json_get(error, "mutated");
+    const char *code = json_get_str(json_get(error, "code"));
+    ok = ok && code && !strcmp(code, "SELFUPGRADE_RECOVERY_REQUIRED") &&
+        mutated && mutated->type == JSON_BOOL && mutated->val.b &&
+        dlx_su_recovery_facts(json_get(error, "facts"));
+    json_free(&doc);
+    return ok;
+}
+
+static int dlx_selfupgrade_postland_case(void)
+{
+    int failures = 0, image = -1;
+    bool opened = false;
+    struct dlx_rig rig = {0};
+    struct dlx_call c;
+    char source[4096], tip[64], local[64], base[64], wt[1400], artifact[1400];
+    char bin_dir[1600], bin[1700], why[256], land[1200];
+    uint8_t digest[32];
+    struct zcl_land_selfupgrade_binding pending = {0};
+    const char *process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    const char *upgrade = getenv(ZCL_LAND_SELFUPGRADE_ENV);
+    char *saved_process = process ? strdup(process) : NULL;
+    char *saved_upgrade = upgrade ? strdup(upgrade) : NULL;
+    TEST("land: verified driver landing prepares a bound admitted candidate") {
+        ASSERT((!process || saved_process) && (!upgrade || saved_upgrade));
+        ASSERT(getcwd(source, sizeof(source)) != NULL);
+        dlx_isolate("selfupgrade_postland");
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "running", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1) == 0);
+        ASSERT(setenv(ZCL_LAND_SELFUPGRADE_ENV, "1", 1) == 0);
+        ASSERT(dlx_rig_make(&rig, "selfupgrade_postland_rig"));
+        ASSERT(dlx_write_dep(rig.clone, "tools/command/native_dev_land_fixture.c", "fixture\n"));
+        ASSERT(dlx_commit(rig.clone, "tools/command/native_dev_land_fixture.c", "fixture\n", tip));
+        ASSERT(dlx_scope_submit(&rig, tip));
+        ASSERT(unsetenv("ZCL_LAND_ALLOW_UNSIGNED") == 0);
+        dlx_begin(&c, "step"); opened = true;
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c); opened = false;
+        dlx_begin(&c, "decision"); opened = true;
+        ASSERT(dlx_decision_run(&c) && dlx_ok(&c));
+        ASSERT(snprintf(local, sizeof(local), "%s", dlx_str(&c, "local")) == 40);
+        ASSERT(snprintf(base, sizeof(base), "%s", dlx_str(&c, "base")) == 40);
+        dlx_end(&c); opened = false;
+        dlx_land_wt(wt, sizeof(wt));
+        ASSERT(dlx_su_signed_candidate(wt, local, base, artifact));
+        ASSERT(snprintf(bin_dir, sizeof(bin_dir), "%s/build/bin", wt) < (int)sizeof(bin_dir));
+        ASSERT(dlx_mkdir_p(bin_dir));
+        ASSERT(snprintf(bin, sizeof(bin), "%s/z23-dev", bin_dir) < (int)sizeof(bin));
+        ASSERT(rename(artifact, bin) == 0);
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "pass", 1) == 0);
+        struct zcl_command_context context = {.registry = zcl_command_catalog(),
+            .source_root = source, .dev_build = true, .one_shot_process = true,
+            .authority_ceiling = ZCL_COMMAND_AUTH_OPERATOR, .granted_capabilities = UINT64_MAX};
+        opened = true;
+        ASSERT(dlx_su_drive(&c, 1, &context) && dlx_ok(&c));
+        dlx_end(&c); opened = false;
+        ASSERT(dlx_su_one_landed_outcome(1, local));
+        dlx_landdir(land, sizeof(land));
+        ASSERT(zcl_land_selfupgrade_binding_read(land, true, &pending));
+        ASSERT_STR_EQ(pending.commit, local);
+        ASSERT_STR_EQ(pending.base, base);
+        ASSERT_STR_EQ(pending.proof_root, wt);
+        ASSERT(zcl_dev_proof_open_reused_executable(wt, local, base, bin, &image,
+                                                    digest, why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    if (opened) dlx_end(&c);
+    if (image >= 0) close(image);
+    if (saved_process) setenv("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
+    else unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    if (saved_upgrade) setenv(ZCL_LAND_SELFUPGRADE_ENV, saved_upgrade, 1);
+    else unsetenv(ZCL_LAND_SELFUPGRADE_ENV);
+    free(saved_process); free(saved_upgrade);
+    dlx_restore();
+    return failures;
+}
+
+static const char *dlx_su_case_name(int mode)
+{
+    switch (mode) {
+    case 1: return "land: finish sync failure stops batch and preserves landed facts";
+    case 2: return "land: a trial crash after validated entry rolls back without publication";
+    case 3: return "land: wrong trial row is refused without publication";
+    case 4: return "land: independently landed row before first step cannot confirm trial";
+    case 5: return "land: cancel after checked trial cannot confirm transition";
+    default: return "land: real admitted child shadows distinct rows and confirms a landed trial";
+    }
+}
+
+static bool dlx_su_interrupted_result(int mode, const char *land, const char *trace)
+{
+    char events[4096], current[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    size_t len = 0;
+    struct zcl_land_selfupgrade_binding pending;
+    if (zcl_land_selfupgrade_pointer_read(land, current, sizeof(current)) ||
+        zcl_land_selfupgrade_binding_read(land, true, &pending) || !dlx_su_no_outcome(5) ||
+        !dlx_slurp(trace, events, sizeof(events) - 1, &len)) return false;
+    events[len] = 0;
+    return dlx_su_lines(events, "decision") == 6 && dlx_su_lines(events, "drive") == 1 &&
+        dlx_su_lines(events, "entered") == (mode == 2 ? 1u : 0u);
+}
+
+static bool dlx_su_interrupted_check(int mode, const struct zcl_command_context *context,
+                                     const char *land, const char *trace)
+{
+    char before[16384], after[16384];
+    size_t before_len = 0, after_len = 0;
+    struct dlx_call c;
+    bool ok = dlx_queue_bytes(before, sizeof(before), &before_len) &&
+        setenv("ZCL_LAND_TEST_FIXTURE_MODE", mode == 2 ? "crash" : "wrongrow", 1) == 0;
+    if (!ok) return false;
+    bool ran = dlx_su_drive(&c, 5, context);
+    ok = ran && !dlx_ok(&c);
+    dlx_end(&c);
+    if (unsetenv("ZCL_LAND_TEST_FIXTURE_MODE") != 0) ok = false;
+    return ok && dlx_queue_bytes(after, sizeof(after), &after_len) &&
+        before_len == after_len && memcmp(before, after, before_len) == 0 &&
+        dlx_su_interrupted_result(mode, land, trace);
+}
+
+static bool dlx_su_finish_check(const struct zcl_command_context *context, const char *tip)
+{
+    char before[16384], after[16384];
+    size_t before_len = 0, after_len = 0;
+    if (!dlx_queue_bytes(before, sizeof(before), &before_len)) return false;
+    zcl_land_selfupgrade_test_finish_sync_failure(true);
+    struct dlx_call c;
+    dlx_begin(&c, "drive"); c.request.context = context; c.request.view = "normal";
+    c.request.budget_bytes = 3072;
+    bool ok = json_push_kv_int(&c.input, "max_rows", 2) && dlx_run(&c) && !dlx_ok(&c) &&
+        c.reply.status == ZCL_COMMAND_STATUS_BLOCKED && c.reply.exit_code == ZCL_COMMAND_EXIT_FAILED;
+    zcl_land_selfupgrade_test_finish_sync_failure(false);
+    ok = ok && dlx_su_recovery_wire(&c);
+    dlx_end(&c);
+    return ok && dlx_queue_bytes(after, sizeof(after), &after_len) &&
+        dlx_su_row_unchanged(before, after, "{\"seq\":6,") && dlx_su_one_landed_outcome(5, tip);
+}
+
+static bool dlx_su_happy_check(const struct dlx_rig *rig,
+    const struct zcl_land_selfupgrade_binding *binding, const char *land,
+    const char *trace, const char *tip)
+{
+    char events[4096], current[ZCL_LAND_SELFUPGRADE_PATH_MAX], observed_tip[64];
+    size_t len = 0;
+    struct zcl_land_selfupgrade_binding confirmed;
+    if (!dlx_slurp(trace, events, sizeof(events) - 1, &len)) return false;
+    events[len] = 0;
+    return dlx_su_lines(events, "decision") == 6 && dlx_su_lines(events, "drive") == 1 &&
+        zcl_land_selfupgrade_pointer_read(land, current, sizeof(current)) &&
+        zcl_land_selfupgrade_binding_read(land, false, &confirmed) &&
+        !strcmp(confirmed.commit, binding->commit) && dlx_origin_main(rig, observed_tip) &&
+        !strcmp(observed_tip, tip) && dlx_su_one_landed_outcome(5, tip);
+}
+
+static bool dlx_su_mode_check(int mode, const struct zcl_command_context *context,
+    const struct dlx_rig *rig, const struct zcl_land_selfupgrade_binding *binding,
+    const char *land, const char *trace, const char *trial_tip, const char *last_tip)
+{
+    switch (mode) {
+    case 1: return dlx_su_finish_check(context, trial_tip);
+    case 2: case 3: return dlx_su_interrupted_check(mode, context, land, trace);
+    case 4: case 5: return dlx_su_cancel_race(context, land, trial_tip, mode == 5);
+    default: return dlx_su_happy_check(rig, binding, land, trace, last_tip);
+    }
+}
+
+struct dlx_su_fixture {
+    struct dlx_rig rig;
+    struct dlx_call c;
+    struct zcl_land_selfupgrade_binding binding;
+    struct zcl_command_context context;
+    bool opened;
+    int image, tamper, mode;
+    char source[4096], proof[1024], artifact[1400], base[64], tip[64];
+    char land[1200], trace[1400], marker_path[1400], events[4096];
+    char current[ZCL_LAND_SELFUPGRADE_PATH_MAX], slot[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    char last_tip[64], trial_tip[64];
+    char *old_process, *old_upgrade;
+};
+
+static int dlx_su_seed_rows(struct dlx_su_fixture *f, int mode)
+{
+    int failures = 0;
+    TEST("land: prepare private signed-fixture rows") {
+        const struct zcl_command_spec *catalog_drive =
+            zcl_command_registry_find(zcl_command_catalog(), "dev.land.drive", NULL);
+        ASSERT(catalog_drive && catalog_drive->availability == ZCL_COMMAND_COMPAT &&
+               !catalog_drive->handler);
+        ASSERT(getcwd(f->source, sizeof(f->source)) != NULL);
+        char state_tag[80], rig_tag[80];
+        ASSERT(snprintf(state_tag, sizeof(state_tag), "real_selfupgrade_child_%d", mode) < (int)sizeof(state_tag));
+        ASSERT(snprintf(rig_tag, sizeof(rig_tag), "real_selfupgrade_child_rig_%d", mode) < (int)sizeof(rig_tag));
+        dlx_isolate(state_tag);
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_PROOF_STUB", "pass", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_TEST_FIXTURE_CHILD", "1", 1) == 0);
+        ASSERT(setenv("ZCL_LAND_TEST_FIXTURE_STATE", g_dlx_state, 1) == 0);
+        ASSERT(dlx_rig_make(&f->rig, rig_tag));
+        ASSERT(dlx_origin_main(&f->rig, f->base));
+        ASSERT(dlx_scope_submit(&f->rig, f->rig.tip));
+        ASSERT(snprintf(f->marker_path, sizeof(f->marker_path), "%s/.land-selfupgrade-fixture", g_dlx_state) < (int)sizeof(f->marker_path));
+        ASSERT(dlx_write(f->marker_path, "z23-land-selfupgrade-test-v1") && chmod(f->marker_path, 0600) == 0);
+        ASSERT(dlx_su_fixture_marker(g_dlx_state));
+        memcpy(f->binding.commit, f->rig.tip, 41); memcpy(f->binding.base, f->base, 41);
+        for (int n = 2; n <= (mode == 1 ? 6 : 5); ++n) {
+            char name[40], content[40];
+            ASSERT(snprintf(name, sizeof(name), "change-%d.txt", n) < (int)sizeof(name));
+            ASSERT(snprintf(content, sizeof(content), "row-%d", n) < (int)sizeof(content));
+            ASSERT(dlx_commit(f->rig.clone, name, content, f->tip));
+            ASSERT(dlx_scope_submit(&f->rig, f->tip));
+            if (n == 5) ASSERT(snprintf(f->trial_tip, sizeof(f->trial_tip), "%s", f->tip) < (int)sizeof(f->trial_tip));
+        }
+        ASSERT(snprintf(f->last_tip, sizeof(f->last_tip), "%s", f->tip) < (int)sizeof(f->last_tip));
+        ASSERT(unsetenv("ZCL_LAND_ALLOW_UNSIGNED") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_su_admit_fixture(struct dlx_su_fixture *f)
+{
+    int failures = 0;
+    uint8_t digest[32];
+    TEST("land: admit exact fixture candidate and bind its trace") {
+        char proof_tag[80];
+        ASSERT(snprintf(proof_tag, sizeof(proof_tag), "selfupgrade-proof-%d", f->mode) < (int)sizeof(proof_tag));
+        test_make_tmpdir(f->proof, sizeof(f->proof), "dev_land", proof_tag);
+        ASSERT(dlx_su_signed_candidate(f->proof, f->binding.commit, f->binding.base, f->artifact));
+        ASSERT(strlen(f->proof) < sizeof(f->binding.proof_root));
+        memcpy(f->binding.proof_root, f->proof, strlen(f->proof) + 1);
+        ASSERT(zcl_dev_proof_open_reused_executable(f->proof, f->binding.commit, f->binding.base,
+            f->artifact, &f->image, digest, f->trace, sizeof(f->trace)));
+        dlx_landdir(f->land, sizeof(f->land));
+        ASSERT(zcl_land_selfupgrade_prepare(f->land, &f->binding, f->image));
+        ASSERT(zcl_land_selfupgrade_slot_path(f->land, f->binding.commit, f->slot, sizeof(f->slot)));
+        ASSERT(snprintf(f->trace, sizeof(f->trace), "%s/child-events", g_dlx_state) < (int)sizeof(f->trace));
+        ASSERT(dlx_write(f->trace, ""));
+        ASSERT(setenv("ZCL_LAND_TEST_FIXTURE_TRACE", f->trace, 1) == 0);
+        f->context = (struct zcl_command_context){.registry = zcl_command_catalog(),
+            .source_root = f->source, .dev_build = true, .one_shot_process = true,
+            .authority_ceiling = ZCL_COMMAND_AUTH_OPERATOR, .granted_capabilities = UINT64_MAX};
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_su_initial_checks(struct dlx_su_fixture *f)
+{
+    int failures = 0;
+    char before[16384], after[16384];
+    size_t before_len = 0, after_len = 0, events_len = 0;
+    TEST("land: default-off, budget, lock and candidate refusal") {
+        unsetenv(ZCL_LAND_SELFUPGRADE_ENV);
+        f->opened = true;
+        ASSERT(dlx_su_drive(&f->c, 1, &f->context) && dlx_ok(&f->c));
+        dlx_end(&f->c); f->opened = false;
+        ASSERT(dlx_slurp(f->trace, f->events, sizeof(f->events), &events_len) && events_len == 0);
+        ASSERT(!zcl_land_selfupgrade_pointer_read(f->land, f->current, sizeof(f->current)));
+        ASSERT(setenv(ZCL_LAND_SELFUPGRADE_ENV, "1", 1) == 0);
+        ASSERT(dlx_queue_bytes(before, sizeof(before), &before_len));
+        dlx_begin(&f->c, "drive"); f->c.request.context = &f->context; f->c.request.view = "normal";
+        f->c.request.budget_bytes = 3071; f->opened = true;
+        ASSERT(json_push_kv_int(&f->c.input, "seq", 2) && dlx_run(&f->c) && !dlx_ok(&f->c));
+        ASSERT_STR_EQ(dlx_err_code(&f->c), "SELFUPGRADE_REPLY_BUDGET_REQUIRED");
+        ASSERT(!f->c.reply.error.mutated);
+        dlx_end(&f->c); f->opened = false;
+        ASSERT(dlx_queue_bytes(after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        ASSERT(dlx_slurp(f->trace, f->events, sizeof(f->events), &events_len) && events_len == 0);
+        ASSERT(setenv("ZCL_LAND_SU_LOCK_FD", "not-a-descriptor", 1) == 0);
+        f->opened = true;
+        ASSERT(dlx_su_drive(&f->c, 2, &f->context) && !dlx_ok(&f->c));
+        ASSERT_STR_EQ(dlx_err_code(&f->c), "SELFUPGRADE_LOCK_REFUSED");
+        dlx_end(&f->c); f->opened = false;
+        unsetenv("ZCL_LAND_SU_LOCK_FD");
+        ASSERT(chmod(f->slot, 0700) == 0);
+        f->tamper = open(f->slot, O_WRONLY | O_APPEND | O_CLOEXEC);
+        ASSERT(f->tamper >= 0 && write(f->tamper, "x", 1) == 1 && close(f->tamper) == 0); f->tamper = -1;
+        f->opened = true;
+        ASSERT(dlx_su_drive(&f->c, 2, &f->context) && dlx_ok(&f->c));
+        dlx_end(&f->c); f->opened = false;
+        ASSERT(dlx_slurp(f->trace, f->events, sizeof(f->events), &events_len) && events_len == 0);
+        ASSERT(unlink(f->slot) == 0 && zcl_land_selfupgrade_prepare(f->land, &f->binding, f->image));
+        ASSERT(close(f->image) == 0); f->image = -1;
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_su_run_fixture(struct dlx_su_fixture *f, int mode)
+{
+    int failures = 0;
+    TEST(dlx_su_case_name(mode)) {
+        for (int seq = 3; seq <= (mode ? 4 : 5); ++seq) {
+            f->opened = true;
+            bool driven = dlx_su_drive(&f->c, seq, &f->context);
+            if (!driven || !dlx_ok(&f->c))
+                fprintf(stderr, "[test selfupgrade drive] seq=%d invoked=%d status=%d code=%.80s evidence=%.200s reason=%.200s\n",
+                    seq, driven, (int)f->c.reply.status, dlx_err_code(&f->c),
+                    dlx_err_evidence(&f->c), dlx_str(&f->c, "reason"));
+            ASSERT(driven && dlx_ok(&f->c));
+            dlx_end(&f->c); f->opened = false;
+        }
+        ASSERT(dlx_su_mode_check(mode, &f->context, &f->rig, &f->binding,
+                                 f->land, f->trace, f->trial_tip, f->last_tip));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void dlx_su_fixture_cleanup(struct dlx_su_fixture *f, bool failed)
+{
+    zcl_land_selfupgrade_test_finish_sync_failure(false);
+    if (f->opened) dlx_end(&f->c);
+    if (f->image >= 0) close(f->image);
+    if (f->tamper >= 0) close(f->tamper);
+    unsetenv("ZCL_LAND_SU_LOCK_FD");
+    unsetenv("ZCL_LAND_TEST_FIXTURE_MODE");
+    unsetenv("ZCL_LAND_TEST_FIXTURE_CHILD");
+    unsetenv("ZCL_LAND_TEST_FIXTURE_STATE");
+    unsetenv("ZCL_LAND_TEST_FIXTURE_TRACE");
+    if (f->old_process) setenv("ZCL_DEVLOOP_TEST_PROCESS", f->old_process, 1);
+    else unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    if (f->old_upgrade) setenv(ZCL_LAND_SELFUPGRADE_ENV, f->old_upgrade, 1);
+    else unsetenv(ZCL_LAND_SELFUPGRADE_ENV);
+    free(f->old_process); free(f->old_upgrade);
+    dlx_restore();
+    if (f->proof[0] && !failed) test_rm_rf_recursive(f->proof);
+    else if (f->proof[0]) fprintf(stderr, "[test selfupgrade] retained proof fixture=%s\n", f->proof);
+}
+
+static int dlx_selfupgrade_real_child_run(int mode)
+{
+    struct dlx_su_fixture f = {.image = -1, .tamper = -1, .mode = mode};
+    const char *old = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    f.old_process = old ? strdup(old) : NULL;
+    old = getenv(ZCL_LAND_SELFUPGRADE_ENV);
+    f.old_upgrade = old ? strdup(old) : NULL;
+    int failures = dlx_su_seed_rows(&f, mode);
+    if (!failures) failures += dlx_su_admit_fixture(&f);
+    if (!failures) failures += dlx_su_initial_checks(&f);
+    if (!failures) failures += dlx_su_run_fixture(&f, mode);
+    dlx_su_fixture_cleanup(&f, failures != 0);
+    return failures;
+}
+
+static int dlx_selfupgrade_real_child_case(void) { return dlx_selfupgrade_real_child_run(0); }
+static int dlx_selfupgrade_finish_fault_case(void) { return dlx_selfupgrade_real_child_run(1); }
+static int dlx_selfupgrade_crash_case(void) { return dlx_selfupgrade_real_child_run(2); }
+static int dlx_selfupgrade_wrongrow_case(void) { return dlx_selfupgrade_real_child_run(3); }
+static int dlx_selfupgrade_terminal_race_case(void) { return dlx_selfupgrade_real_child_run(4); }
+static int dlx_selfupgrade_cancel_race_case(void) { return dlx_selfupgrade_real_child_run(5); }
+#else
+static int dlx_selfupgrade_cleanup_case(void) { return 0; }
+static int dlx_selfupgrade_real_child_case(void) { return 0; }
+static int dlx_selfupgrade_finish_fault_case(void) { return 0; }
+static int dlx_selfupgrade_crash_case(void) { return 0; }
+static int dlx_selfupgrade_postland_case(void) { return 0; }
+static int dlx_selfupgrade_wrongrow_case(void) { return 0; }
+static int dlx_selfupgrade_terminal_race_case(void) { return 0; }
+static int dlx_selfupgrade_cancel_race_case(void) { return 0; }
+#endif
 
 static int dlx_scope_refusal_case(int seq, const char *terminal,
                                   const char *reason)
@@ -824,6 +1868,14 @@ struct dlx_shard_case {
 };
 
 static const struct dlx_shard_case g_dlx_shard_cases[] = {
+    {"dlx_selfupgrade_cleanup_case()", dlx_selfupgrade_cleanup_case, 0u},
+    {"dlx_selfupgrade_real_child_case()", dlx_selfupgrade_real_child_case, 0u},
+    {"dlx_selfupgrade_postland_case()", dlx_selfupgrade_postland_case, 0u},
+    {"dlx_selfupgrade_finish_fault_case()", dlx_selfupgrade_finish_fault_case, 0u},
+    {"dlx_selfupgrade_crash_case()", dlx_selfupgrade_crash_case, 0u},
+    {"dlx_selfupgrade_wrongrow_case()", dlx_selfupgrade_wrongrow_case, 0u},
+    {"dlx_selfupgrade_terminal_race_case()", dlx_selfupgrade_terminal_race_case, 0u},
+    {"dlx_selfupgrade_cancel_race_case()", dlx_selfupgrade_cancel_race_case, 0u},
     {"dlx_publication_hold_cases()",
      dlx_publication_hold_cases, 0u},
     {"dlx_hold_legacy_case()",
@@ -1208,6 +2260,14 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
  * arguments and platform guards: dropping, duplicating or reordering a row
  * in the ownership table must fail before any scenario runs. */
 static const char *const g_dlx_original_calls[] = {
+    "dlx_selfupgrade_cleanup_case()",
+    "dlx_selfupgrade_real_child_case()",
+    "dlx_selfupgrade_postland_case()",
+    "dlx_selfupgrade_finish_fault_case()",
+    "dlx_selfupgrade_crash_case()",
+    "dlx_selfupgrade_wrongrow_case()",
+    "dlx_selfupgrade_terminal_race_case()",
+    "dlx_selfupgrade_cancel_race_case()",
     "dlx_publication_hold_cases()",
     "dlx_hold_legacy_case()",
     "dlx_guarded_priority_case()",

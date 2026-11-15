@@ -2845,6 +2845,132 @@ static struct zcl_dev_acceptance_receipt_v1 ic_valid_dev_proof_receipt(void)
     return receipt;
 }
 
+#if !defined(_WIN32)
+static bool ic_binary_write(const char *root, const char *relative,
+                            const void *data, size_t len)
+{
+    char path[4352];
+    if (!ic_write(root, relative, "") ||
+        snprintf(path, sizeof(path), "%s/%s", root, relative) >= (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(data, 1, len, f) == len;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool ic_reused_proof_write(const char *root, const char *body,
+    const char *child_path, const char *receipt_path,
+    const uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES],
+    const uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES])
+{
+    char artifact[4352], child_full[4352], receipt_full[4352];
+    if (snprintf(artifact, sizeof(artifact), "%s/artifact", root) >= (int)sizeof(artifact) ||
+        snprintf(child_full, sizeof(child_full), "%s/%s", root, child_path) >= (int)sizeof(child_full) ||
+        snprintf(receipt_full, sizeof(receipt_full), "%s/%s", root, receipt_path) >= (int)sizeof(receipt_full))
+        return false;
+    return ic_write(root, "artifact", body) && chmod(artifact, 0700) == 0 &&
+           ic_binary_write(root, child_path, child, ZCL_DEV_PROOF_CHILD_WIRE_BYTES) &&
+           chmod(child_full, 0600) == 0 &&
+           ic_binary_write(root, receipt_path, wire, ZCL_DEV_PROOF_WIRE_BYTES) &&
+           chmod(receipt_full, 0600) == 0;
+}
+
+static bool ic_reused_proof_fixture(const char *root, bool built, char child_out[256])
+{
+    static const char local[] = "1111111111111111111111111111111111111111";
+    static const char base[] = "2222222222222222222222222222222222222222";
+    static const char domain[] = "zcl.dev_proof_executable_reuse.v1";
+    const char body[] = "admitted executable";
+    struct zcl_dev_acceptance_receipt_v1 receipt = ic_valid_dev_proof_receipt();
+    struct zcl_dev_proof_dimension *d = &receipt.dimensions[ZCL_DEV_PROOF_COMPILE];
+    struct sha3_256_ctx sha;
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES], wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, (const uint8_t *)body, sizeof(body) - 1);
+    sha3_256_finalize(&sha, d->receipt_root);
+    d->ran = built ? 1 : 0;
+    d->reused = built ? 0 : 1;
+    if (!zcl_dev_proof_child_receipt_create(ZCL_DEV_PROOF_COMPILE, d, child) ||
+        !zcl_dev_proof_receipt_child_set_root(&receipt, receipt.child_set_root) ||
+        !zcl_dev_proof_receipt_seal(&receipt) ||
+        !zcl_dev_proof_receipt_serialize(&receipt, wire))
+        return false;
+    char child_hex[65], child_path[256], receipt_path[256];
+    zcl_hex_encode(d->receipt_root, sizeof(d->receipt_root), child_hex);
+    if (snprintf(child_path, sizeof(child_path), ".cache/zcl-dev-proof/children/%s.child", child_hex) >= (int)sizeof(child_path) ||
+        snprintf(receipt_path, sizeof(receipt_path), ".cache/zcl-dev-proof/receipts/%s-%s.receipt", local, base) >= (int)sizeof(receipt_path))
+        return false;
+    memcpy(child_out, child_path, strlen(child_path) + 1);
+    return ic_reused_proof_write(root, body, child_path, receipt_path, child, wire);
+
+}
+
+static int test_ic_reused_proof_artifact(void)
+{
+    static const char local[] = "1111111111111111111111111111111111111111";
+    static const char base[] = "2222222222222222222222222222222222222222";
+    int failures = 0, fd = -1;
+    char root[4096] = {0}, path[4352], moved[4352], child[256], why[160];
+    uint8_t digest[32];
+    TEST("proof artifact accessor binds a signed reused compile child to held bytes") {
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "reused-artifact");
+        ASSERT(snprintf(path, sizeof(path), "%s/artifact", root) < (int)sizeof(path));
+        ASSERT(ic_reused_proof_fixture(root, false, child));
+        bool admitted = zcl_dev_proof_open_reused_executable(root, local, base, path,
+                                                             &fd, digest, why, sizeof(why));
+        if (!admitted) {
+            char receipt_path[4352], child_path[4352];
+            struct stat receipt_stat = {0}, child_stat = {0};
+            (void)snprintf(receipt_path, sizeof(receipt_path),
+                "%s/.cache/zcl-dev-proof/receipts/%s-%s.receipt", root, local, base);
+            (void)snprintf(child_path, sizeof(child_path), "%s/%s", root, child);
+            int receipt_rc = stat(receipt_path, &receipt_stat);
+            int child_rc = stat(child_path, &child_stat);
+            fprintf(stderr, "proof fixture refusal: why=%s receipt_stat=%d mode=%o size=%lld child_stat=%d mode=%o size=%lld\n",
+                    why, receipt_rc, (unsigned)(receipt_stat.st_mode & 0777),
+                    (long long)receipt_stat.st_size, child_rc,
+                    (unsigned)(child_stat.st_mode & 0777), (long long)child_stat.st_size);
+        }
+        ASSERT(admitted);
+        ASSERT(fd >= 0);
+        ASSERT(ic_write(root, "artifact", "modified in place"));
+        char sealed[20] = {0};
+        ASSERT(pread(fd, sealed, sizeof(sealed), 0) == 19);
+        ASSERT(memcmp(sealed, "admitted executable", 19) == 0);
+        errno = 0;
+        ASSERT(pwrite(fd, "x", 1, 0) == -1 && errno == EPERM);
+        ASSERT(close(fd) == 0); fd = -1;
+        ASSERT(ic_reused_proof_fixture(root, false, child));
+        ASSERT(zcl_dev_proof_open_reused_executable(root, local, base, path, &fd, digest, why, sizeof(why)));
+        ASSERT(snprintf(moved, sizeof(moved), "%s/moved", root) < (int)sizeof(moved));
+        ASSERT(rename(path, moved) == 0);
+        ASSERT(ic_write(root, "artifact", "different executable") && chmod(path, 0700) == 0);
+        char pinned[20] = {0};
+        ASSERT(pread(fd, pinned, sizeof(pinned), 0) == 19);
+        ASSERT(memcmp(pinned, "admitted executable", 19) == 0);
+        ASSERT(close(fd) == 0); fd = -1;
+        ASSERT(!zcl_dev_proof_open_reused_executable(root, local, base, path, &fd, digest, why, sizeof(why)));
+        ASSERT(fd == -1);
+        ASSERT(ic_reused_proof_fixture(root, false, child));
+        ASSERT(!zcl_dev_proof_open_reused_executable(root, base, local, path, &fd, digest, why, sizeof(why)));
+        ASSERT(fd == -1);
+        ASSERT(ic_write(root, child, "damaged"));
+        ASSERT(!zcl_dev_proof_open_reused_executable(root, local, base, path, &fd, digest, why, sizeof(why)));
+        ASSERT(fd == -1 && strcmp(why, "proof_compile_child_invalid") == 0);
+        ASSERT(ic_reused_proof_fixture(root, true, child));
+        ASSERT(!zcl_dev_proof_open_reused_executable(root, local, base, path, &fd, digest, why, sizeof(why)));
+        ASSERT(fd == -1 && strcmp(why, "proof_compile_not_reused") == 0);
+        PASS();
+    } _test_next:;
+    if (fd >= 0) close(fd);
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+#endif
+
 static int test_ic_dev_proof_receipt_admission(void)
 {
     int failures = 0;
@@ -17703,6 +17829,9 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_fleet_task_projection_keeps_proof_owner();
     failures += test_ic_dev_proof_contract_is_direct();
     failures += test_ic_lint_helpers_exclude_onion_stress();
+#if !defined(_WIN32)
+    failures += test_ic_reused_proof_artifact();
+#endif
     failures += test_ic_dev_proof_receipt_admission();
     failures += test_ic_dev_proof_receipt_requires_full_lint();
     failures += test_ic_dev_proof_child_action_identity();

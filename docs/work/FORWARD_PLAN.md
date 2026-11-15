@@ -241,11 +241,19 @@ order of size.
    - Bisect a red train.
    - Prove the next rows speculatively on an idle host, then confirm them on
      the current main.
-   - The self-upgrade module (default off) keeps a content-addressed driver
-     slot, compares the candidate's decisions with the current driver's,
-     switches after matching rows and switches back after a failed row.
+   - The default-off Linux self-upgrade path supports a local one-shot
+     operator drive. Its post-landing hook admits sealed executable bytes
+     through an existing signed proof and reused-compile child receipt.
+     Three distinct matching decisions precede a trial bound to one queue
+     row. Confirmation requires the candidate's queue transition and a
+     verified native publication receipt; uncertain completion stops the
+     batch for recovery. Launcher activation and qualification of long-lived
+     or delegated sessions remain separate work.
      `dev land decision` provides a read-only advisory next-dispatch snapshot;
-     it does not authorize publication. The post-landing hook remains work.
+     it does not authorize publication. The integration tests use isolated,
+     locally signed producer fixtures, not independent build provenance.
+     <!-- claim: symbol-present dl_su_prepare tools/command/native_dev_land.c # post-landing driver admission -->
+     <!-- claim: symbol-present zcl_land_selfupgrade_bind_trial tools/command/native_dev_land_selfupgrade.c # bound trial row -->
      <!-- claim: symbol-present zcl_native_handle_dev_land_decision tools/command/native_dev_land.c # advisory dispatch decision -->
 
    Number: submit to landed p90, before 85 min, target 30.

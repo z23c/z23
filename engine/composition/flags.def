@@ -1408,6 +1408,18 @@ Z23_FLAG("ZCL_LAND_TEST_DIE_AFTER_TRAIN_SPLIT", "env_test", "-", "-",
           "test-only crash after the atomic train split rewrite; first use tools/command/native_dev_land_train.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_DIE_BEFORE_TRAIN_SPLIT", "env_test", "-", "-",
           "test-only crash before the atomic train split rewrite; first use tools/command/native_dev_land_train.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_FIXTURE_CHILD", "env_test", "-", "-",
+          "Enable the marker-bound isolated selfupgrade child dispatcher; first use tests/harness/src/test_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_FIXTURE_MODE", "env_test", "-", "-",
+          "Select the isolated trial crash, wrong-row or race fixture mode; first use tests/harness/src/test_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_FIXTURE_READY", "env_test", "-", "-",
+          "Name the private trial-race readiness FIFO; first use tests/harness/src/test_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_FIXTURE_RELEASE", "env_test", "-", "-",
+          "Name the private trial-race release FIFO; first use tests/harness/src/test_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_FIXTURE_STATE", "env_test", "-", "-",
+          "Bind the child dispatcher to its isolated state-root marker; first use tests/harness/src/test_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TEST_FIXTURE_TRACE", "env_test", "-", "-",
+          "Record isolated selfupgrade child actions and validated trial entry; first use tests/harness/src/test_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_PICK_DELAY_MS", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_PRECHECK_BUDGET_MS", "env_test", "-", "-",

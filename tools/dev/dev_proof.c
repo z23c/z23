@@ -1,6 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Admit exact commit/base pairs from the resident development proof. */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
@@ -60,6 +63,9 @@
 #include <time.h>
 #if !defined(_WIN32)
 #include <stdarg.h>
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/resource.h>
@@ -467,6 +473,19 @@ bool zcl_dev_proof_cycle_reuse_admissible(
     json_free(&cycle);
     return admitted;
 }
+
+#if defined(_WIN32)
+static bool dp_open_reused_executable_platform(
+    const char *repo_root, const char *local, const char *base,
+    const char *artifact, int *out_fd, uint8_t digest[32],
+    char *why, size_t why_len)
+{
+    (void)repo_root; (void)local; (void)base; (void)artifact; (void)digest;
+    if (out_fd) *out_fd = -1;
+    if (why && why_len) (void)snprintf(why, why_len, "%s", "windows_proof_unavailable");
+    return false;
+}
+#endif
 
 #if defined(_WIN32)
 
@@ -10142,6 +10161,137 @@ static bool dp_executable_source_stable(int fd, const char *artifact,
            dp_executable_stamp_equal(&after, &named);
 }
 
+/* The child wire carries its original evidence after magic, version and id.
+ * Validate the child against the signed parent before reading those bytes. */
+static bool dp_reused_compile_digest(const struct proof_paths *paths,
+                                     const struct zcl_dev_acceptance_receipt_v1 *receipt,
+                                     uint8_t digest[32], char *why, size_t why_len)
+{
+    const struct zcl_dev_proof_dimension *d = &receipt->dimensions[ZCL_DEV_PROOF_COMPILE];
+    if (d->selected != 1 || d->reused != 1 || d->ran || d->failed || d->skipped) {
+        proof_why(why, why_len, "proof_compile_not_reused");
+        return false;
+    }
+    char hex[65], path[PATH_MAX];
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    zcl_hex_encode(d->receipt_root, sizeof(d->receipt_root), hex);
+    if (snprintf(path, sizeof(path), "%s/%s.child", paths->children, hex) >= (int)sizeof(path) ||
+        !read_exact_file(path, child, sizeof(child)) ||
+        !zcl_dev_proof_child_receipt_validate(child, sizeof(child), ZCL_DEV_PROOF_COMPILE, d)) {
+        proof_why(why, why_len, "proof_compile_child_invalid");
+        return false;
+    }
+    memcpy(digest, child + 16, 32);
+    return true;
+}
+
+#if defined(__linux__)
+static bool dp_reused_copy(int source, int image, off_t size)
+{
+    uint8_t buffer[65536];
+    for (off_t offset = 0; offset < size;) {
+        size_t remaining = (size_t)(size - offset);
+        size_t want = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        ssize_t n = pread(source, buffer, want, offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0 || !write_all(image, buffer, (size_t)n)) return false;
+        offset += n;
+    }
+    return true;
+}
+
+static bool dp_reused_verify(int source, int image, const struct stat *before,
+                             const char *artifact, const uint8_t expected[32],
+                             uint8_t digest[32])
+{
+    const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (fcntl(image, F_ADD_SEALS, seals) != 0) return false;
+    int actual = fcntl(image, F_GET_SEALS);
+    struct stat after, named;
+    return actual >= 0 && (actual & seals) == seals &&
+        fstat(source, &after) == 0 && dp_executable_stamp_equal(before, &after) &&
+        lstat(artifact, &named) == 0 && dp_executable_stamp_equal(&after, &named) &&
+        dp_executable_hash_fd(image, digest) && memcmp(digest, expected, 32) == 0;
+}
+
+/* Seal the exact candidate bytes before comparing them with signed evidence. */
+static int dp_reused_sealed_image(int source, const struct stat *before,
+                                  const char *artifact, const uint8_t expected[32],
+                                  uint8_t digest[32])
+{
+    if (before->st_size <= 0 || (uint64_t)before->st_size > (UINT64_C(256) << 20))
+        return -1;
+    int image = memfd_create("z23-proof-executable", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (image < 0) return -1;
+    if (!dp_reused_copy(source, image, before->st_size) ||
+        !dp_reused_verify(source, image, before, artifact, expected, digest)) {
+        (void)close(image);
+        return -1;
+    }
+    return image;
+}
+
+static int dp_reused_open_image(const char *artifact, const uint8_t expected[32],
+                                uint8_t actual[32])
+{
+    int fd = open(artifact, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat before;
+    int image = -1;
+    if (fd >= 0 && fstat(fd, &before) == 0 && S_ISREG(before.st_mode) &&
+        (before.st_mode & 0111) != 0)
+        image = dp_reused_sealed_image(fd, &before, artifact, expected, actual);
+    if (fd >= 0 && close(fd) != 0 && image >= 0) {
+        (void)close(image);
+        image = -1;
+    }
+    return image;
+}
+#endif
+
+static bool dp_reused_receipt_digest(const char *repo_root, const char *local,
+                                     const char *base, uint8_t expected[32],
+                                     char *why, size_t why_len)
+{
+    struct proof_paths paths;
+    struct zcl_dev_acceptance_receipt_v1 receipt;
+    if (!proof_paths_fill(repo_root, local, base, &paths) ||
+        !receipt_load(&paths, local, base, &receipt, why, why_len)) return false;
+    if (!zcl_dev_proof_receipt_signer_is_local(&receipt)) {
+        proof_why(why, why_len, "proof_artifact_signer_not_local");
+        return false;
+    }
+    return dp_reused_compile_digest(&paths, &receipt, expected, why, why_len);
+}
+
+static bool dp_open_reused_executable_platform(
+    const char *repo_root, const char *local, const char *base,
+    const char *artifact, int *out_fd, uint8_t digest[32],
+    char *why, size_t why_len)
+{
+    if (out_fd) *out_fd = -1;
+    if (!repo_root || !local || !base || !artifact || !out_fd || !digest) {
+        proof_why(why, why_len, "proof_artifact_input_invalid");
+        return false;
+    }
+    uint8_t expected[32], actual[32];
+    if (!dp_reused_receipt_digest(repo_root, local, base, expected, why, why_len))
+        return false;
+#if defined(__linux__)
+    int image = dp_reused_open_image(artifact, expected, actual);
+    if (image < 0) {
+        proof_why(why, why_len, "proof_artifact_digest_or_stability_failed");
+        return false;
+    }
+    memcpy(digest, actual, sizeof(actual));
+    *out_fd = image;
+    return true;
+#else
+    (void)actual;
+    proof_why(why, why_len, "proof_artifact_sealed_image_unsupported");
+    return false;
+#endif
+}
+
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
@@ -15891,6 +16041,15 @@ static bool proof_wait_platform(const char *repo_root,
 }
 
 #endif /* _WIN32 */
+
+bool zcl_dev_proof_open_reused_executable(
+    const char *repo_root, const char *local, const char *base,
+    const char *artifact, int *out_fd, uint8_t digest[32],
+    char *why, size_t why_len)
+{
+    return dp_open_reused_executable_platform(repo_root, local, base, artifact,
+                                               out_fd, digest, why, why_len);
+}
 
 int zcl_dev_proof_execution_acquire(const char *root, int *guard,
                                     char *why, size_t why_len)

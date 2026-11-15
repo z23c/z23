@@ -52,6 +52,10 @@
  * <root>/current.
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "command/native_dev_land_selfupgrade.h"
 
 #include "json/json.h"
@@ -59,6 +63,7 @@
 #include "util/spawn.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +83,8 @@ struct su_state {
     long long last_seq;
     char previous[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     char trial[SU_SHA_LEN + 1];
+    long long trial_seq;
+    char trial_row[65];
 };
 #endif
 
@@ -116,6 +123,43 @@ bool zcl_land_selfupgrade_touches_driver(const char *paths)
 static bool su_sha_ok(const char *sha)
 {
     return zcl_is_lower_hex(sha, SU_SHA_LEN);
+}
+
+#if defined(ZCL_TESTING)
+static _Thread_local bool g_su_test_finish_sync_failure;
+static _Thread_local bool g_su_test_finishing;
+
+void zcl_land_selfupgrade_test_finish_sync_failure(bool fail)
+{
+    g_su_test_finish_sync_failure = fail;
+}
+#endif
+
+static bool su_sync_directory(const char *root)
+{
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    bool ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
+/* The file and its containing directory must both survive a restart. */
+static bool su_publish_file(FILE *file, const char *tmp, const char *path,
+                            const char *root)
+{
+    bool ok = fflush(file) == 0 && fsync(fileno(file)) == 0;
+    if (fclose(file) != 0) ok = false;
+    if (!ok || rename(tmp, path) != 0) {
+        (void)unlink(tmp);
+        return false;
+    }
+#if defined(ZCL_TESTING)
+    /* The rename happened: deliberately model uncertain durability, not a
+     * clean refusal before mutation. Only the finish call enables this seam. */
+    if (g_su_test_finishing && g_su_test_finish_sync_failure) return false;
+#endif
+    return su_sync_directory(root);
 }
 #endif
 
@@ -243,7 +287,7 @@ static bool su_pointer_set(const char *root, const char *target)
         (void)unlink(tmp);
         return false;
     }
-    return true;
+    return su_sync_directory(root);
 }
 
 /* Only the read-only, explicitly scoped decision verb may be executed. */
@@ -364,7 +408,10 @@ static bool su_same_decision(const struct json_value *a, const struct json_value
     return true;
 }
 
-struct su_read_counts { int matches, seq, candidate, previous, trial; bool valid; };
+struct su_read_counts {
+    int matches, seq, candidate, previous, trial, trial_seq, trial_row;
+    bool valid;
+};
 
 static bool su_state_number(const char *value, long long *out)
 {
@@ -372,18 +419,37 @@ static bool su_state_number(const char *value, long long *out)
     return !strcmp(value, "0") || su_decimal(value, out);
 }
 
+struct su_metadata_field {
+    const char *prefix;
+    char *value;
+    size_t capacity, hex_width;
+    int *seen;
+};
+
+static bool su_state_text(const struct su_metadata_field *field, const char *value)
+{
+    if (++*field->seen != 1 || strlen(value) >= field->capacity ||
+        (value[0] && field->hex_width && !zcl_is_lower_hex(value, field->hex_width)))
+        return false;
+    (void)snprintf(field->value, field->capacity, "%s", value);
+    return true;
+}
+
 static void su_state_metadata(struct su_state *s, struct su_read_counts *c, const char *line)
 {
-    if (!strncmp(line, "candidate=", 10)) {
-        if (++c->candidate != 1 || (line[10] && !su_sha_ok(line + 10))) c->valid = false;
-        else (void)snprintf(s->candidate, sizeof s->candidate, "%s", line + 10);
-    } else if (!strncmp(line, "previous=", 9)) {
-        if (++c->previous != 1 || strlen(line + 9) >= sizeof s->previous) c->valid = false;
-        else (void)snprintf(s->previous, sizeof s->previous, "%s", line + 9);
-    } else if (!strncmp(line, "trial=", 6)) {
-        if (++c->trial != 1 || (line[6] && !su_sha_ok(line + 6))) c->valid = false;
-        else (void)snprintf(s->trial, sizeof s->trial, "%s", line + 6);
-    } else c->valid = false;
+    const struct su_metadata_field fields[] = {
+        {"candidate=", s->candidate, sizeof(s->candidate), 40, &c->candidate},
+        {"previous=", s->previous, sizeof(s->previous), 0, &c->previous},
+        {"trial=", s->trial, sizeof(s->trial), 40, &c->trial},
+        {"trial_row=", s->trial_row, sizeof(s->trial_row), 64, &c->trial_row},
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        size_t prefix = strlen(fields[i].prefix);
+        if (strncmp(line, fields[i].prefix, prefix)) continue;
+        if (!su_state_text(&fields[i], line + prefix)) c->valid = false;
+        return;
+    }
+    c->valid = false;
 }
 
 static void su_state_line(struct su_state *s, struct su_read_counts *c, char *line)
@@ -396,7 +462,22 @@ static void su_state_line(struct su_state *s, struct su_read_counts *c, char *li
     } else if (strncmp(line, "last_seq=", 9) == 0) {
         if (++c->seq != 1 || !su_state_number(line + 9, &n)) c->valid = false;
         else s->last_seq = n;
+    } else if (strncmp(line, "trial_seq=", 10) == 0) {
+        if (++c->trial_seq != 1 || !su_state_number(line + 10, &n)) c->valid = false;
+        else s->trial_seq = n;
     } else su_state_metadata(s, c, line);
+}
+
+static bool su_state_fields_complete(struct su_state *s, const struct su_read_counts *c)
+{
+    if (!c->valid || c->candidate != 1 || c->previous != 1 || c->trial != 1 || c->matches != 1)
+        return false;
+    /* Older state has neither trial binding field and can only roll back. */
+    if (c->trial_seq != c->trial_row || c->trial_seq > 1 ||
+        (s->trial_seq > 0) != (s->trial_row[0] != '\0') ||
+        (!s->trial[0] && (s->trial_seq || s->trial_row[0]))) return false;
+    if (!c->seq) { s->matches = 0; s->last_seq = 0; return true; }
+    return c->seq == 1 && s->matches <= s->last_seq;
 }
 
 static bool su_state_read(const char *root, struct su_state *s)
@@ -416,31 +497,31 @@ static bool su_state_read(const char *root, struct su_state *s)
     }
     if (ferror(f)) c.valid = false;
     fclose(f);
-    if (!c.valid || c.candidate != 1 || c.previous != 1 || c.trial != 1 || c.matches != 1) return false;
-    if (!c.seq) { s->matches = 0; s->last_seq = 0; return true; }
-    return c.seq == 1 && s->matches <= s->last_seq;
+    return su_state_fields_complete(s, &c);
 }
 
 static bool su_state_write(const char *root, const struct su_state *s)
 {
     char path[ZCL_LAND_SELFUPGRADE_PATH_MAX];
-    char tmp[ZCL_LAND_SELFUPGRADE_PATH_MAX + 8];
+    char tmp[ZCL_LAND_SELFUPGRADE_PATH_MAX + 16];
     FILE *f;
     bool ok;
     if (!zcl_path_join(path, sizeof(path), root, "upgrade.state"))
         return false;
-    (void)snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    f = fopen(tmp, "w");
-    if (!f)
-        return false;
-    ok = fprintf(f, "candidate=%s\nmatches=%d\nlast_seq=%lld\nprevious=%s\ntrial=%s\n",
-                 s->candidate, s->matches, s->last_seq, s->previous, s->trial) > 0;
-    ok = (fclose(f) == 0) && ok;
-    if (!ok || rename(tmp, path) != 0) {
+    (void)snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path);
+    int fd = mkstemp(tmp);
+    if (fd < 0) return false;
+    f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp); return false; }
+    ok = fprintf(f, "candidate=%s\nmatches=%d\nlast_seq=%lld\nprevious=%s\ntrial=%s\ntrial_seq=%lld\ntrial_row=%s\n",
+                 s->candidate, s->matches, s->last_seq, s->previous, s->trial,
+                 s->trial_seq, s->trial_row) > 0;
+    if (!ok) {
+        (void)fclose(f);
         (void)unlink(tmp);
         return false;
     }
-    return true;
+    return su_publish_file(f, tmp, path, root);
 }
 
 /* One decision run. False on a launch failure, nonzero exit or no output. */
@@ -492,21 +573,29 @@ su_count(const char *root, struct su_state *s, bool agree, int need_rows,
         return agree ? ZCL_LAND_SU_AGREE : ZCL_LAND_SU_DISAGREE;
     }
     /* Durable first, then the pointer: trial+previous reach disk before the
-     * pointer moves, so a crash between the two is recoverable (observe sees
-     * a trial the pointer never took) and ERROR leaves nothing changed. */
+     * pointer moves, so a crash between the two is recoverable. A failed
+     * directory fsync after rename is uncertain: ERROR never promises the
+     * old state is still on disk; the caller must reconcile via recover(). */
     (void)zcl_land_selfupgrade_pointer_read(root, prev, sizeof(prev));
     saved = *s;
     snprintf(s->previous, sizeof(s->previous), "%s", prev);
     snprintf(s->trial, sizeof(s->trial), "%s", sha);
+    s->trial_seq = 0; s->trial_row[0] = '\0';
     s->candidate[0] = '\0';
     s->matches = 0;
     if (!su_state_write(root, s)) {
-        *s = saved;
         return ZCL_LAND_SU_ERROR;
     }
     if (!su_pointer_set(root, cand_bin)) {
+        /* A directory-sync failure can follow a successful rename. Keep
+         * the durable trial in that case so recovery can roll it back. */
+        char actual[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+        if (zcl_land_selfupgrade_pointer_read(root, actual, sizeof(actual)) &&
+            strcmp(actual, cand_bin) == 0)
+            return ZCL_LAND_SU_ERROR;
         saved.trial[0] = '\0';
         saved.previous[0] = '\0';
+        saved.trial_seq = 0; saved.trial_row[0] = '\0';
         (void)su_state_write(root, &saved);
         return ZCL_LAND_SU_ERROR;
     }
@@ -529,6 +618,7 @@ static bool su_trial_lapsed(const char *root, struct su_state *s)
         return false;
     s->trial[0] = '\0';
     s->previous[0] = '\0';
+    s->trial_seq = 0; s->trial_row[0] = '\0';
     s->matches = 0;
     return su_state_write(root, s);
 }
@@ -565,30 +655,360 @@ zcl_land_selfupgrade_observe(const char *root, const char *current_bin,
 #endif
 }
 
+#if !defined(_WIN32)
+static bool su_finish_state(const char *root, struct su_state *s, bool ok);
+#endif
+
 bool zcl_land_selfupgrade_row_result(const char *root, bool row_ok)
 {
 #if defined(_WIN32)
     (void)root; (void)row_ok;
     return false;
 #else
-    char link[ZCL_LAND_SELFUPGRADE_PATH_MAX];
     struct su_state s;
-    bool restored = false;
-    if (!su_state_read(root, &s)) return false;
-    if (!s.trial[0])
-        return false;
-    if (!row_ok) {
-        if (s.previous[0])
-            restored = su_pointer_set(root, s.previous);
-        else if (zcl_path_join(link, sizeof(link), root, "current"))
-            restored = unlink(link) == 0;
-        if (!restored)
-            return false; /* keep the trial recorded; the caller may retry */
+    /* Preserve this older API's restored-pointer result, including false
+     * after a successful confirmation, while sharing durable completion. */
+    return su_state_read(root, &s) && s.trial[0] &&
+        su_finish_state(root, &s, row_ok) && !row_ok;
+#endif
+}
+
+#if !defined(_WIN32)
+static bool su_binding_ok(const struct zcl_land_selfupgrade_binding *b)
+{
+    return b && su_sha_ok(b->commit) && su_sha_ok(b->base) &&
+        b->proof_root[0] == '/' && !strchr(b->proof_root, '\n') &&
+        !strchr(b->proof_root, '\r');
+}
+
+static bool su_slot_dir(const char *root, const char *sha, char *dir, size_t cap)
+{
+    char path[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    if (!zcl_land_selfupgrade_slot_path(root, sha, path, sizeof(path))) return false;
+    char *end = strrchr(path, '/');
+    if (!end) return false;
+    *end = '\0';
+    int n = snprintf(dir, cap, "%s", path);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool su_binding_store(const char *root,
+    const struct zcl_land_selfupgrade_binding *b)
+{
+    char dir[ZCL_LAND_SELFUPGRADE_PATH_MAX], path[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    char tmp[ZCL_LAND_SELFUPGRADE_PATH_MAX + 16];
+    if (!su_slot_dir(root, b->commit, dir, sizeof(dir)) ||
+        !zcl_path_join(path, sizeof(path), dir, "proof.locator")) return false;
+    (void)snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path);
+    int fd = mkstemp(tmp);
+    if (fd < 0) return false;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp); return false; }
+    if (fprintf(f, "%s\n%s\n%s\n", b->commit, b->base, b->proof_root) < 0) {
+        fclose(f); unlink(tmp); return false;
     }
-    s.trial[0] = '\0';
-    s.previous[0] = '\0';
-    s.matches = 0;
-    (void)su_state_write(root, &s);
-    return restored;
+    return su_publish_file(f, tmp, path, dir);
+}
+
+static bool su_binding_parse(char *wire, const char *sha,
+                            struct zcl_land_selfupgrade_binding *b)
+{
+    char *base = strchr(wire, '\n');
+    char *proof = base ? strchr(base + 1, '\n') : NULL;
+    char *end = proof ? strchr(proof + 1, '\n') : NULL;
+    if (!base || !proof || !end || end[1] ||
+        base - wire != 40 || proof - base != 41 ||
+        end - proof < 2 || (size_t)(end - proof) > sizeof(b->proof_root)) return false;
+    *base++ = '\0'; *proof++ = '\0'; *end = '\0';
+    (void)snprintf(b->commit, sizeof(b->commit), "%s", wire);
+    (void)snprintf(b->base, sizeof(b->base), "%s", base);
+    (void)snprintf(b->proof_root, sizeof(b->proof_root), "%s", proof);
+    return su_binding_ok(b) && strcmp(b->commit, sha) == 0;
+}
+
+static bool su_binding_load(const char *root, const char *sha,
+    struct zcl_land_selfupgrade_binding *b)
+{
+    char dir[ZCL_LAND_SELFUPGRADE_PATH_MAX], path[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    if (!su_slot_dir(root, sha, dir, sizeof(dir)) ||
+        !zcl_path_join(path, sizeof(path), dir, "proof.locator")) return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    FILE *f = fdopen(fd, "r");
+    if (!f) { close(fd); return false; }
+    char wire[2 * ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    size_t n = fread(wire, 1, sizeof(wire) - 1, f);
+    bool ok = feof(f) && !ferror(f) && !memchr(wire, '\0', n);
+    if (fclose(f) != 0) ok = false;
+    wire[n] = '\0';
+    return ok && su_binding_parse(wire, sha, b);
+}
+
+static bool su_current_sha(const char *root, char sha[41])
+{
+    char path[ZCL_LAND_SELFUPGRADE_PATH_MAX], prefix[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    if (!zcl_land_selfupgrade_pointer_read(root, path, sizeof(path))) return false;
+    int n = snprintf(prefix, sizeof(prefix), "%s/slots/", root);
+    if (n <= 0 || (size_t)n >= sizeof(prefix) || strncmp(path, prefix, (size_t)n) ||
+        strlen(path + n) != 48 || strcmp(path + n + 40, "/z23-dev")) return false;
+    memcpy(sha, path + n, 40); sha[40] = '\0';
+    return su_sha_ok(sha);
+}
+
+static bool su_finish_state(const char *root, struct su_state *s, bool ok)
+{
+    char link[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    if (!ok) {
+        if (s->previous[0]) {
+            if (!su_pointer_set(root, s->previous)) return false;
+        } else {
+            if (!zcl_path_join(link, sizeof(link), root, "current") ||
+                (unlink(link) != 0 && errno != ENOENT) || !su_sync_directory(root))
+                return false;
+        }
+    }
+    s->trial[0] = '\0'; s->previous[0] = '\0'; s->matches = 0;
+    s->trial_seq = 0; s->trial_row[0] = '\0';
+    return su_state_write(root, s);
+}
+
+static bool su_recovery_pointer(const char *root, const struct su_state *s)
+{
+    char current[ZCL_LAND_SELFUPGRADE_PATH_MAX] = "";
+    char trial[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    if (!zcl_land_selfupgrade_slot_path(root, s->trial, trial, sizeof(trial)))
+        return false;
+    if (!zcl_land_selfupgrade_pointer_read(root, current, sizeof(current))) {
+        char link[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+        struct stat st;
+        return !s->previous[0] && zcl_path_join(link, sizeof(link), root, "current") &&
+            lstat(link, &st) != 0 && errno == ENOENT;
+    }
+    return !strcmp(current, trial) || !strcmp(current, s->previous);
+}
+#endif
+
+bool zcl_land_selfupgrade_binding_read(const char *root, bool pending,
+    struct zcl_land_selfupgrade_binding *binding)
+{
+#if defined(_WIN32)
+    (void)root; (void)pending; (void)binding; return false;
+#else
+    struct su_state s;
+    char sha[41];
+    if (!binding || !su_state_read(root, &s)) return false;
+    if (pending) {
+        if (!s.candidate[0] || s.trial[0]) return false;
+        (void)snprintf(sha, sizeof(sha), "%s", s.candidate);
+    } else if (!su_current_sha(root, sha)) return false;
+    return su_binding_load(root, sha, binding);
+#endif
+}
+
+#if defined(__linux__)
+static bool su_private_dir(const char *path)
+{
+    struct stat st;
+    return (mkdir(path, 0700) == 0 || errno == EEXIST) &&
+        lstat(path, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid() &&
+        !(st.st_mode & (S_IWGRP | S_IWOTH));
+}
+
+static bool su_sealed_fd(int source, struct stat *st)
+{
+    const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    int actual = fcntl(source, F_GET_SEALS);
+    return actual >= 0 && (actual & seals) == seals && fstat(source, st) == 0 &&
+        S_ISREG(st->st_mode) && st->st_size > 0;
+}
+
+static bool su_copy_sealed(int source, int target)
+{
+    struct stat st;
+    if (!su_sealed_fd(source, &st)) return false;
+    char bytes[8192];
+    off_t offset = 0;
+    while (offset < st.st_size) {
+        ssize_t n = pread(source, bytes, sizeof(bytes), offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        ssize_t written = 0;
+        while (written < n) {
+            ssize_t w = write(target, bytes + written, (size_t)(n - written));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) return false;
+            written += w;
+        }
+        offset += n;
+    }
+    return fchmod(target, 0500) == 0 && fsync(target) == 0;
+}
+
+static bool su_same_fd(int a, int b)
+{
+    struct stat x, y;
+    if (fstat(a, &x) != 0 || fstat(b, &y) != 0 || !S_ISREG(y.st_mode) ||
+        x.st_size <= 0 || x.st_size != y.st_size) return false;
+    char left[8192], right[8192];
+    for (off_t at = 0; at < x.st_size;) {
+        ssize_t n = pread(a, left, sizeof(left), at);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        ssize_t m;
+        do { m = pread(b, right, (size_t)n, at); } while (m < 0 && errno == EINTR);
+        if (m != n || memcmp(left, right, (size_t)n)) return false;
+        at += n;
+    }
+    return true;
+}
+
+static bool su_slot_directories(const char *root, const char *sha,
+    char dir[ZCL_LAND_SELFUPGRADE_PATH_MAX], char path[ZCL_LAND_SELFUPGRADE_PATH_MAX])
+{
+    char slots[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    return zcl_path_join(slots, sizeof(slots), root, "slots") &&
+        su_slot_dir(root, sha, dir, ZCL_LAND_SELFUPGRADE_PATH_MAX) &&
+        zcl_land_selfupgrade_slot_path(root, sha, path, ZCL_LAND_SELFUPGRADE_PATH_MAX) &&
+        su_private_dir(root) && su_private_dir(slots) && su_sync_directory(root) &&
+        su_private_dir(dir) && su_sync_directory(slots);
+}
+
+static bool su_install_sealed(const char *root, const char *sha, int source)
+{
+    char dir[ZCL_LAND_SELFUPGRADE_PATH_MAX], path[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    char tmp[ZCL_LAND_SELFUPGRADE_PATH_MAX + 16];
+    struct stat st;
+    if (!su_sealed_fd(source, &st) || !su_slot_directories(root, sha, dir, path)) return false;
+    int existing = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (existing >= 0) {
+        bool same = su_same_fd(source, existing);
+        close(existing);
+        return same;
+    }
+    if (errno != ENOENT) return false;
+    (void)snprintf(tmp, sizeof(tmp), "%s.XXXXXX", path);
+    int target = mkstemp(tmp);
+    if (target < 0) return false;
+    bool ok = su_copy_sealed(source, target) && su_same_fd(source, target);
+    if (close(target) != 0) ok = false;
+    /* Do not replace an existing version, even if another writer raced us. */
+    if (ok) ok = link(tmp, path) == 0;
+    (void)unlink(tmp);
+    return ok && su_sync_directory(dir);
+}
+#endif
+
+bool zcl_land_selfupgrade_prepare(const char *root,
+    const struct zcl_land_selfupgrade_binding *binding, int sealed_fd)
+{
+#if !defined(__linux__)
+    (void)root; (void)binding; (void)sealed_fd; return false;
+#else
+    struct su_state s;
+    char current[41];
+    if (!su_binding_ok(binding) || !su_state_read(root, &s) || s.trial[0] ||
+        !su_install_sealed(root, binding->commit, sealed_fd) ||
+        !su_binding_store(root, binding)) return false;
+    if (su_current_sha(root, current) && !strcmp(current, binding->commit)) return true;
+    if (!strcmp(s.candidate, binding->commit)) return true;
+    (void)snprintf(s.candidate, sizeof(s.candidate), "%s", binding->commit);
+    s.matches = 0; s.last_seq = 0;
+    return su_state_write(root, &s);
+#endif
+}
+
+enum zcl_land_selfupgrade_verdict zcl_land_selfupgrade_observe_captured(
+    const char *root, const char *sha, long long seq, const char *current,
+    const char *candidate, int need_rows)
+{
+#if defined(_WIN32)
+    (void)root; (void)sha; (void)seq; (void)current; (void)candidate;
+    (void)need_rows; return ZCL_LAND_SU_ERROR;
+#else
+    struct su_state s;
+    char slot[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    struct json_value a = {0}, b = {0};
+    if (seq <= 0 || need_rows < 1 || !current || !candidate ||
+        !zcl_land_selfupgrade_slot_path(root, sha, slot, sizeof(slot)) ||
+        !su_state_read(root, &s) || s.trial[0] || strcmp(s.candidate, sha))
+        return ZCL_LAND_SU_ERROR;
+    bool agree = seq > s.last_seq && su_read_decision(current, seq, &a) &&
+        su_read_decision(candidate, seq, &b) && su_same_decision(&a, &b);
+    json_free(&a); json_free(&b);
+    if (seq > s.last_seq) s.last_seq = seq;
+    return su_count(root, &s, agree, need_rows, sha, slot);
+#endif
+}
+
+bool zcl_land_selfupgrade_recover(const char *root)
+{
+#if defined(_WIN32)
+    (void)root; return false;
+#else
+    struct su_state s;
+    return su_state_read(root, &s) && (!s.trial[0] ||
+        (su_recovery_pointer(root, &s) && su_finish_state(root, &s, false)));
+#endif
+}
+
+bool zcl_land_selfupgrade_bind_trial(const char *root, const char *sha,
+    long long seq, const char *row_sha3)
+{
+#if defined(_WIN32)
+    (void)root; (void)sha; (void)seq; (void)row_sha3; return false;
+#else
+    struct su_state s;
+    char current[41];
+    if (!su_state_read(root, &s) || seq <= 0 || !su_sha_ok(sha) ||
+        !zcl_is_lower_hex(row_sha3, 64) || strcmp(s.trial, sha) ||
+        !su_current_sha(root, current) || strcmp(current, sha)) return false;
+    if (s.trial_seq)
+        return seq == s.trial_seq && !strcmp(s.trial_row, row_sha3);
+    s.trial_seq = seq;
+    (void)snprintf(s.trial_row, sizeof(s.trial_row), "%s", row_sha3);
+    return su_state_write(root, &s);
+#endif
+}
+
+#if !defined(_WIN32)
+static bool su_trial_matches(const char *root, const struct su_state *s,
+    const char *sha, long long seq, const char *row_sha3)
+{
+    char current[41];
+    return seq > 0 && seq == s->trial_seq &&
+        zcl_is_lower_hex(row_sha3, 64) && !strcmp(s->trial_row, row_sha3) &&
+        su_sha_ok(sha) && !strcmp(s->trial, sha) &&
+        su_current_sha(root, current) && !strcmp(current, sha);
+}
+#endif
+
+bool zcl_land_selfupgrade_trial_matches(const char *root, const char *sha,
+    long long seq, const char *row_sha3)
+{
+#if defined(_WIN32)
+    (void)root; (void)sha; (void)seq; (void)row_sha3; return false;
+#else
+    struct su_state s;
+    return su_state_read(root, &s) && su_trial_matches(root, &s, sha, seq, row_sha3);
+#endif
+}
+
+bool zcl_land_selfupgrade_finish(const char *root, const char *sha,
+    long long seq, const char *row_sha3, bool row_ok)
+{
+#if defined(_WIN32)
+    (void)root; (void)sha; (void)seq; (void)row_sha3; (void)row_ok; return false;
+#else
+    struct su_state s;
+    if (!su_state_read(root, &s) || !su_trial_matches(root, &s, sha, seq, row_sha3))
+        return false;
+#if defined(ZCL_TESTING)
+    g_su_test_finishing = true;
+#endif
+    bool finished = su_finish_state(root, &s, row_ok);
+#if defined(ZCL_TESTING)
+    g_su_test_finishing = false;
+#endif
+    return finished;
 #endif
 }

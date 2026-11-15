@@ -2392,6 +2392,8 @@ int main(int argc, char **argv)
     /* Clean-zygote reflex runner re-exec of this binary (exact argv shape),
      * dispatched before any global test init. */
     zcl_reflex_runner_exit_if_requested(argc, argv);
+    extern void dlx_selfupgrade_child_exit_if_requested(int, char **);
+    dlx_selfupgrade_child_exit_if_requested(argc, argv);
     setbuf(stdout, NULL); /* Unbuffered for test progress visibility */
     int failures = 0;
 

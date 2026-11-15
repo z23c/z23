@@ -473,6 +473,121 @@ _test_next:;
     (void)test_rm_rf_recursive(r.root);
     return failures;
 }
+static bool sul_state_bytes(const char *path, char *out, size_t cap, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    *len = fread(out, 1, cap, f);
+    bool ok = feof(f) && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int sul_foreign_pointer_case(void)
+{
+    int failures = 0;
+    struct sul_rig r = {0};
+    char slot_b[700], link[700], state[700], ptr[700], before[2048], after[2048];
+    size_t before_len = 0, after_len = 0;
+    TEST("selfupgrade: recovery refuses a foreign pointer and preserves bound trial") {
+        ASSERT(sul_rig_open(&r));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_A, r.src_x));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_B, r.src_y));
+        ASSERT(zcl_land_selfupgrade_slot_path(r.root, SHA_B, slot_b, sizeof(slot_b)));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args, 1),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        ASSERT(zcl_land_selfupgrade_bind_trial(r.root, SHA_A, 7, PLAN_X));
+        ASSERT(snprintf(link, sizeof(link), "%s/current", r.root) < (int)sizeof(link));
+        ASSERT(snprintf(state, sizeof(state), "%s/upgrade.state", r.root) < (int)sizeof(state));
+        ASSERT(unlink(link) == 0 && symlink(slot_b, link) == 0);
+        ASSERT(sul_state_bytes(state, before, sizeof(before), &before_len));
+        ASSERT(!zcl_land_selfupgrade_recover(r.root));
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        ASSERT_STR_EQ(ptr, slot_b);
+        ASSERT(sul_state_bytes(state, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        PASS();
+    } _test_next:;
+    if (r.root[0]) (void)test_rm_rf_recursive(r.root);
+    return failures;
+}
+#endif
+
+#if !defined(_WIN32)
+static int sul_bound_row_case(void)
+{
+    int failures = 0;
+    struct sul_rig r = {0};
+    char slot[700], ptr[700], state[700], before[2048], after[2048];
+    size_t before_len = 0, after_len = 0;
+    TEST("selfupgrade: only the bound real row can complete a trial") {
+        ASSERT(sul_rig_open(&r));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_A, r.src_x));
+        ASSERT(zcl_land_selfupgrade_slot_path(r.root, SHA_A, slot, sizeof(slot)));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args, 1),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        /* Shadow sequence 7 does not authorize completion of the actual row 42. */
+        ASSERT(!zcl_land_selfupgrade_trial_matches(r.root, SHA_A, 7, PLAN_X));
+        ASSERT(zcl_land_selfupgrade_bind_trial(r.root, SHA_A, 42, PLAN_X));
+        ASSERT(zcl_land_selfupgrade_trial_matches(r.root, SHA_A, 42, PLAN_X));
+        ASSERT(snprintf(state, sizeof(state), "%s/upgrade.state", r.root) < (int)sizeof(state));
+        ASSERT(sul_state_bytes(state, before, sizeof(before), &before_len));
+        ASSERT(zcl_land_selfupgrade_bind_trial(r.root, SHA_A, 42, PLAN_X));
+        ASSERT(!zcl_land_selfupgrade_bind_trial(r.root, SHA_A, 7, PLAN_X));
+        ASSERT(!zcl_land_selfupgrade_bind_trial(r.root, SHA_A, 42, PLAN_Y));
+        ASSERT(!zcl_land_selfupgrade_finish(r.root, SHA_A, 7, PLAN_X, true));
+        ASSERT(!zcl_land_selfupgrade_finish(r.root, SHA_A, 42, PLAN_Y, false));
+        ASSERT(!zcl_land_selfupgrade_finish(r.root, SHA_B, 42, PLAN_X, true));
+        ASSERT(sul_state_bytes(state, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        ASSERT_STR_EQ(ptr, slot);
+        ASSERT(zcl_land_selfupgrade_finish(r.root, SHA_A, 42, PLAN_X, true));
+        ASSERT(!zcl_land_selfupgrade_trial_matches(r.root, SHA_A, 42, PLAN_X));
+        ASSERT(!zcl_land_selfupgrade_finish(r.root, SHA_A, 42, PLAN_X, true));
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        ASSERT_STR_EQ(ptr, slot);
+        PASS();
+    } _test_next:;
+    if (r.root[0]) (void)test_rm_rf_recursive(r.root);
+    return failures;
+}
+
+static int sul_bound_recovery_case(void)
+{
+    int failures = 0;
+    struct sul_rig r = {0};
+    char slot_b[700], ptr[700], state[700], before[2048], after[2048];
+    size_t before_len = 0, after_len = 0;
+    TEST("selfupgrade: bound recovery restores the previous driver exactly once") {
+        ASSERT(sul_rig_open(&r));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_B, r.src_x));
+        ASSERT(zcl_land_selfupgrade_slot_path(r.root, SHA_B, slot_b, sizeof(slot_b)));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_B, g_args, 1),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        ASSERT(zcl_land_selfupgrade_bind_trial(r.root, SHA_B, 41, PLAN_X));
+        ASSERT(zcl_land_selfupgrade_finish(r.root, SHA_B, 41, PLAN_X, true));
+        ASSERT(zcl_land_selfupgrade_slot_install(r.root, SHA_A, r.src_x));
+        ASSERT_EQ((int)zcl_land_selfupgrade_observe(r.root, r.cur, SHA_A, g_args8, 1),
+                  (int)ZCL_LAND_SU_SWITCHED);
+        ASSERT(zcl_land_selfupgrade_bind_trial(r.root, SHA_A, 42, PLAN_Y));
+        ASSERT(zcl_land_selfupgrade_recover(r.root));
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        ASSERT_STR_EQ(ptr, slot_b);
+        ASSERT(!zcl_land_selfupgrade_trial_matches(r.root, SHA_A, 42, PLAN_Y));
+        ASSERT(!zcl_land_selfupgrade_finish(r.root, SHA_A, 42, PLAN_Y, true));
+        ASSERT(snprintf(state, sizeof(state), "%s/upgrade.state", r.root) < (int)sizeof(state));
+        ASSERT(sul_state_bytes(state, before, sizeof(before), &before_len));
+        ASSERT(zcl_land_selfupgrade_recover(r.root));
+        ASSERT(sul_state_bytes(state, after, sizeof(after), &after_len));
+        ASSERT(before_len == after_len && memcmp(before, after, before_len) == 0);
+        ASSERT(zcl_land_selfupgrade_pointer_read(r.root, ptr, sizeof(ptr)));
+        ASSERT_STR_EQ(ptr, slot_b);
+        PASS();
+    } _test_next:;
+    if (r.root[0]) (void)test_rm_rf_recursive(r.root);
+    return failures;
+}
 #endif
 
 int test_dev_land_selfupgrade(void);
@@ -487,6 +602,9 @@ int test_dev_land_selfupgrade(void)
     failures += sul_incomplete_cases();
     failures += sul_legacy_cases();
     failures += sul_durable_cases();
+    failures += sul_foreign_pointer_case();
+    failures += sul_bound_row_case();
+    failures += sul_bound_recovery_case();
 #endif
     if (failures == 0)
         printf("test_dev_land_selfupgrade: all passed\n");

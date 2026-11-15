@@ -151,6 +151,7 @@
 #include "command/native_dev_land_internal.h"
 #include "command/native_dev_land_cancel.h"
 #include "command/native_dev_land_precheck.h"
+#include "command/native_dev_land_selfupgrade.h"
 #include "util/clientversion.h"
 #include "command/native_devagent.h"
 #include "command/native_dev_agents.h"
@@ -182,6 +183,7 @@
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 #include "dev_proof.h"
 #include "dev_proof_budget.h"
+#include "devloop.h"
 #include "dev_proof_signer.h"
 #endif
 
@@ -5305,6 +5307,43 @@ static bool dl_phase_stamp(struct dl_row *row, long long posted)
 
 /* Persist one row back into the queue file, or drop it and record it as an
  * outcome when its state is terminal. */
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+static bool dl_row_identity(const struct dl_row *pick, char hex[65]);
+static _Thread_local char g_dl_su_expected_row[65];
+static _Thread_local bool g_dl_su_row_checked;
+static _Thread_local bool g_dl_su_row_transitioned;
+
+/* The first trial write compares the exact durable row under queue.lock.
+ * A snapshot alone cannot credit the candidate with another driver's work. */
+static bool dl_su_commit_identity(const struct dl_row *stored)
+{
+    if (!g_dl_su_expected_row[0]) return true;
+    char hex[65];
+    return g_dl_su_row_checked && dl_row_identity(stored, hex) &&
+        !strcmp(hex, g_dl_su_expected_row);
+}
+
+static void dl_su_commit_observed(bool persisted)
+{
+    if (persisted && g_dl_su_expected_row[0]) {
+        g_dl_su_expected_row[0] = '\0';
+        g_dl_su_row_transitioned = true;
+    }
+}
+#endif
+
+/* The caller holds queue.lock. Reconcile the observed identity and current
+ * durable controls before replacing a row or recording its terminal state. */
+static bool dl_commit_admit_write(struct dl_row *row, const struct dl_row *stored,
+                                  bool terminal, bool progress)
+{
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+    if (!dl_su_commit_identity(stored)) return false;
+#endif
+    if (!dl_commit_merge_durable(row, stored, progress)) return false;
+    return terminal || dl_hold_row_ok(row);
+}
+
 static bool dl_commit_row_mode(const struct dl_dirs *d, struct dl_row *row,
                                bool terminal, bool progress)
 {
@@ -5326,16 +5365,12 @@ static bool dl_commit_row_mode(const struct dl_dirs *d, struct dl_row *row,
     for (size_t i = 0; i < nrows; i++) {
         if (rows[i].seq == row->seq) {
             found = true;
-            if (!dl_commit_merge_durable(row, &rows[i], progress)) {
+            if (!dl_commit_admit_write(row, &rows[i], terminal, progress)) {
                 held_seal = true;
                 break;
             }
             if (terminal)
                 continue;
-            if (!dl_hold_row_ok(row)) {
-                held_seal = true;
-                break;
-            }
             post = dl_phase_stamp(row, rows[i].phase_mail);
             rows[kept++] = *row;
             continue;
@@ -5360,6 +5395,9 @@ static bool dl_commit_row_mode(const struct dl_dirs *d, struct dl_row *row,
     ok = !terminal || dl_terminal_checkpoint(d, row);
     if (ok)
         ok = dl_rewrite_rows(d->land, qpath, rows, kept);
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+    dl_su_commit_observed(ok);
+#endif
     free(rows);
     dl_unlock(lock);
     /* The digest was stamped into the row before this post and is written
@@ -12061,10 +12099,42 @@ static bool dl_fence_step(const struct dl_dirs *d, struct zcl_command_reply *rep
 #endif
 
 #if !defined(_WIN32)
+static bool dl_row_identity(const struct dl_row *pick, char hex[65]);
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+
+/* Called under step.lock, before fence execution or any row transition.
+ * Subsequent steps may evolve the row through the existing state machine. */
+static bool dl_su_step_identity(const struct zcl_command_request *req,
+    struct zcl_command_reply *reply, const char *qpath)
+{
+    if (!g_dl_su_expected_row[0]) return true;
+    struct dl_row *rows = NULL, pick = {0};
+    size_t count = 0;
+    bool inflight = false;
+    char hex[65];
+    long long seq = 0;
+    bool matches = dl_seq_in(req, &seq) &&
+        dl_load_rows(qpath, &rows, &count, NULL, 0) &&
+        dl_step_pick_row(rows, count, &pick, &inflight) && pick.seq == seq &&
+        dl_row_identity(&pick, hex) && !strcmp(hex, g_dl_su_expected_row);
+    free(rows);
+    if (!matches) {
+        dl_fail(reply, "SELFUPGRADE_TRIAL_REFUSED", "drive",
+            "trial row changed before its first locked transition", qpath);
+        return false;
+    }
+    g_dl_su_row_checked = true;
+    return true;
+}
+#endif
+
 static bool dl_step_enter(const struct zcl_command_request *req,
                            struct zcl_command_reply *reply,
                            const struct dl_dirs *d, const char *qpath)
 {
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+    if (!dl_su_step_identity(req, reply, qpath)) return false;
+#endif
     if (!dl_step_scope(req, reply, qpath) ||
         dl_fence_step(d, reply, json_get_int(json_get(req->input, "seq"))))
         return false;
@@ -12297,11 +12367,10 @@ static enum dl_dispatch_kind dl_decision_snapshot(const struct dl_dirs *d,
 /* Bind only the selected row, not the queue or a future execution plan.
  * Version the existing durable serialization rather than hashing padding or
  * introducing another row format. The final newline is part of the digest. */
-static bool dl_decision_row_identity(struct zcl_command_reply *reply,
-                                     const struct dl_row *pick)
+static bool dl_row_identity(const struct dl_row *pick, char hex[65])
 {
     static const char domain[] = "zcl.land.decision.row.v1\n";
-    char wire[DL_LINE_CAP], hex[65];
+    char wire[DL_LINE_CAP];
     unsigned char digest[32];
     size_t len = 0;
     struct sha3_256_ctx hash;
@@ -12311,6 +12380,14 @@ static bool dl_decision_row_identity(struct zcl_command_reply *reply,
     sha3_256_write(&hash, (const unsigned char *)wire, len);
     sha3_256_finalize(&hash, digest);
     zcl_hex_encode(digest, sizeof(digest), hex);
+    return true;
+}
+
+static bool dl_decision_row_identity(struct zcl_command_reply *reply,
+                                     const struct dl_row *pick)
+{
+    char hex[65];
+    if (!dl_row_identity(pick, hex)) return false;
     return json_push_kv_str(&reply->data, "row_schema", "zcl.land.decision.row.v1") &&
            json_push_kv_str(&reply->data, "row_sha3", hex);
 }
@@ -12989,6 +13066,7 @@ int zcl_native_dev_land_test_producer_reproof(const char *root,
  * process: its producer would be this binary, not the candidate's. */
 struct dl_prove_run {
     bool ran;       /* a producer was built and run for this pair */
+    bool unknown;   /* a trial child did not return valid timing evidence */
     long long ms;   /* build plus proof, milliseconds */
     char local[80]; /* the pair this step saw, for the per-row report */
     char base[80];
@@ -13250,6 +13328,7 @@ enum dl_drive_kind {
 
 struct dl_drive_verdict {
     enum dl_drive_kind kind;
+    bool recovery_required; /* Landing and driver recovery are separate facts. */
     char detail[4352];
     struct dl_row row; /* the row the verdict was read from */
 };
@@ -13390,6 +13469,50 @@ static void dl_drive_fail(struct zcl_command_reply *reply, long long seq,
                    v->kind == DL_DRIVE_CONTINUE ? cmd : "z23 dev land status");
 }
 
+static bool dl_drive_recovery_facts_ok(const struct json_value *data,
+    long long seq, int landed, bool last_landed)
+{
+    const struct json_value *facts = json_get(data, "failure_facts");
+    const struct json_value *s = json_get(facts, "seq"), *n = json_get(facts, "rows_landed");
+    const struct json_value *last = json_get(facts, "last_row_landed");
+    const struct json_value *recovery = json_get(facts, "recovery_required");
+    return s && s->type == JSON_INT && s->val.i == seq &&
+        n && n->type == JSON_INT && n->val.i == landed &&
+        last && last->type == JSON_BOOL && last->val.b == last_landed &&
+        recovery && recovery->type == JSON_BOOL && recovery->val.b;
+}
+
+static void dl_drive_recovery_reply(struct zcl_command_reply *reply,
+    long long seq, int landed, bool last_landed)
+{
+    (void)json_push_kv_bool(&reply->data, "recovery_required", true);
+    /* Failure envelopes export only opted-in facts, not partial data. Keep
+     * a fixed-size summary, independent of batch size and row strings. */
+    struct json_value facts = {0};
+    json_set_object(&facts);
+    bool captured = json_push_kv_int(&facts, "seq", seq) &&
+        json_push_kv_int(&facts, "rows_landed", landed) &&
+        json_push_kv_bool(&facts, "last_row_landed", last_landed) &&
+        json_push_kv_bool(&facts, "recovery_required", true) &&
+        json_push_kv(&reply->data, "failure_facts", &facts) &&
+        dl_drive_recovery_facts_ok(&reply->data, seq, landed, last_landed);
+    json_free(&facts);
+    if (!captured) {
+        /* Do not export a partially copied facts object. The fixed error
+         * evidence below retains the observed counts without allocation. */
+        json_free(&reply->data);
+        json_set_object(&reply->data);
+    }
+    char evidence[240];
+    (void)snprintf(evidence, sizeof(evidence),
+        "seq=%lld rows_landed=%d last_row_landed=%d facts=%s; no further row dispatched; inspect dev land status",
+        seq, landed, last_landed, captured ? "captured" : "allocation_failed");
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+        ZCL_COMMAND_EXIT_FAILED, "SELFUPGRADE_RECOVERY_REQUIRED", "drive", false,
+        true, "driver state requires recovery; recorded landings remain valid",
+        evidence);
+}
+
 static void dl_drive_outcome(struct zcl_command_reply *reply, long long seq,
                              int rounds, const struct dl_drive_verdict *v)
 {
@@ -13402,6 +13525,7 @@ static void dl_drive_outcome(struct zcl_command_reply *reply, long long seq,
         /* The verdict carries the row it was judged from: a landed reply
          * never depends on a second read of the queue. */
         dl_step_reply(reply, &v->row, "landed");
+        if (v->recovery_required) dl_drive_recovery_reply(reply, seq, 1, true);
         return;
     }
     (void)json_push_kv_int(&reply->data, "seq", seq);
@@ -13414,6 +13538,12 @@ static void dl_drive_outcome(struct zcl_command_reply *reply, long long seq,
 
 #if defined(ZCL_TESTING)
 static void (*g_dl_judged_hook)(void);
+static void (*g_dl_trial_entry_hook)(void);
+
+void zcl_native_dev_land_test_trial_entry_hook(void (*hook)(void))
+{
+    g_dl_trial_entry_hook = hook;
+}
 
 void zcl_native_dev_land_test_judged_hook(void (*hook)(void))
 {
@@ -13431,16 +13561,604 @@ static void dl_drive_judged(void)
 #endif
 }
 
+#if defined(__linux__)
+/* Only the process that holds drive.lock may cross this boundary. The child
+ * receives that same open file description, never a claim based on an env var. */
+static _Thread_local int g_dl_su_fd = -1;
+static _Thread_local bool g_dl_su_trial_child;
+#define DL_SU_LOCK_ENV "ZCL_LAND_SU_LOCK_FD"
+#define DL_SU_SEQ_ENV "ZCL_LAND_SU_TRIAL_SEQ"
+#define DL_SU_ROW_ENV "ZCL_LAND_SU_TRIAL_ROW"
+#define DL_SU_PROVE_ENV "ZCL_LAND_SU_PROVE"
+
+struct dl_su_args {
+    char input[16384], view[40], budget[64], items[64], cursor[280];
+    char lock[80], seq[80], row[100], prove[48], source[4160];
+    const char *argv[16];
+    const char **env;
+};
+
+static bool dl_su_input(const struct zcl_command_request *req, long long seq,
+                         char *out, size_t cap)
+{
+    struct json_value input = {0};
+    json_set_object(&input);
+    bool ok = req->input && req->input->type == JSON_OBJ;
+    for (size_t i = 0; ok && i < req->input->num_children; ++i) {
+        const char *key = req->input->keys[i];
+        if (seq && (!strcmp(key, "seq") || !strcmp(key, "prove") ||
+                    !strcmp(key, "max_rows"))) continue;
+        ok = json_push_kv(&input, key, &req->input->children[i]);
+    }
+    if (ok && seq) ok = json_push_kv_int(&input, "seq", seq);
+    size_t n = ok && cap > 8 ? json_write(&input, out + 8, cap - 8) : 0;
+    if (n && n < cap - 8) memcpy(out, "--input=", 8);
+    json_free(&input);
+    return n > 0 && n < cap - 8;
+}
+
+static bool dl_su_environment(struct dl_su_args *a, const char *source,
+                              long long seq, const char *row)
+{
+    extern char **environ;
+    size_t count = 0, used = 0;
+    while (environ && environ[count]) {
+        if (++count > 4096) return false;
+    }
+    a->env = zcl_calloc(count + 7, sizeof(*a->env), "land selfupgrade child env");
+    if (!a->env) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (!strncmp(environ[i], "ZCL_LAND_SU_", 12) ||
+            !strncmp(environ[i], "ZCL_DEV_SOURCE_ROOT=", 20)) continue;
+        a->env[used++] = environ[i];
+    }
+    (void)snprintf(a->lock, sizeof(a->lock), DL_SU_LOCK_ENV "=%d", g_dl_su_fd);
+    if (snprintf(a->source, sizeof(a->source), "ZCL_DEV_SOURCE_ROOT=%s", source) >=
+        (int)sizeof(a->source)) return false;
+    a->env[used++] = a->lock;
+    a->env[used++] = a->source;
+    if (seq) {
+        (void)snprintf(a->seq, sizeof(a->seq), DL_SU_SEQ_ENV "=%lld", seq);
+        (void)snprintf(a->row, sizeof(a->row), DL_SU_ROW_ENV "=%s", row);
+        (void)snprintf(a->prove, sizeof(a->prove), DL_SU_PROVE_ENV "=%d", g_dl_prove_mode);
+        a->env[used++] = a->seq; a->env[used++] = a->row; a->env[used++] = a->prove;
+    }
+    a->env[used] = NULL;
+    return true;
+}
+
+static bool dl_su_arguments(struct dl_su_args *a,
+    const struct zcl_command_request *req, long long seq, const char *row)
+{
+    const char *source = zcl_native_source_root(req);
+    if (!source || !source[0] || !dl_su_input(req, seq, a->input, sizeof(a->input)) ||
+        !dl_su_environment(a, source, seq, row)) return false;
+    size_t n = 0;
+    a->argv[n++] = "z23-dev"; a->argv[n++] = "dev"; a->argv[n++] = "land";
+    a->argv[n++] = "drive"; a->argv[n++] = a->input; a->argv[n++] = "--json";
+    (void)snprintf(a->view, sizeof(a->view), "--view=%s", req->view ? req->view : "full");
+    a->argv[n++] = a->view;
+    if (req->budget_bytes) {
+        (void)snprintf(a->budget, sizeof(a->budget), "--budget-bytes=%zu", req->budget_bytes);
+        a->argv[n++] = a->budget;
+    }
+    if (req->max_items) {
+        (void)snprintf(a->items, sizeof(a->items), "--max-items=%zu", req->max_items);
+        a->argv[n++] = a->items;
+    }
+    if (req->cursor) {
+        if (snprintf(a->cursor, sizeof(a->cursor), "--cursor=%s", req->cursor) >=
+            (int)sizeof(a->cursor)) return false;
+        a->argv[n++] = a->cursor;
+    }
+    a->argv[n] = NULL;
+    return true;
+}
+
+static bool dl_su_cancel(void *opaque)
+{
+    const struct zcl_command_request *req = opaque;
+    const struct zcl_command_invocation_runtime *run = req->context->invocation;
+    return run && run->cancelled && run->cancelled(run->cancel_context);
+}
+
+static bool dl_su_run(const struct zcl_command_request *req, int image,
+    long long seq, const char *row, struct zcl_devloop_process_result *result)
+{
+    struct dl_su_args *a = zcl_calloc(1, sizeof(*a), "land selfupgrade child args");
+    if (!a) return false;
+    /* Preserve the existing maximum per-round producer budgets. A delegated
+     * whole drive may contain up to sixteen rows; it must not inherit the
+     * twenty-second read-only decision timeout. Cancellation remains active. */
+    int rows = 1;
+    const struct json_value *limit = json_get(req->input, "max_rows");
+    if (!seq && limit && limit->type == JSON_INT && limit->val.i > 0 && limit->val.i <= 16)
+        rows = (int)limit->val.i;
+    int budget = rows * DL_DRIVE_ROUNDS *
+        (DL_PRODUCER_BUILD_TIMEOUT_MS + DL_PRODUCER_PROOF_TIMEOUT_MS + DL_LINT_TIMEOUT_MS);
+    bool ok = dl_su_arguments(a, req, seq, row) &&
+        zcl_devloop_process_run_fd_inherit(zcl_native_source_root(req), image,
+            a->argv, a->env, g_dl_su_fd, budget, dl_su_cancel, (void *)req, result);
+    free(a->env); free(a);
+    return ok;
+}
+
+static int dl_su_image(const char *root, bool pending,
+    struct zcl_land_selfupgrade_binding *binding, char *why, size_t cap)
+{
+    int fd = -1;
+    uint8_t digest[32];
+    char path[ZCL_LAND_SELFUPGRADE_PATH_MAX];
+    if (!zcl_land_selfupgrade_binding_read(root, pending, binding) ||
+        !zcl_land_selfupgrade_slot_path(root, binding->commit, path, sizeof(path))) {
+        (void)snprintf(why, cap, "%s", "driver_binding_unavailable");
+        return -1;
+    }
+    if (!zcl_dev_proof_open_reused_executable(binding->proof_root, binding->commit,
+        binding->base, path, &fd, digest, why, cap)) return -1;
+    return fd;
+}
+
+static bool dl_su_running_image(int admitted)
+{
+    FILE *self = os_proc_open_self_exe();
+    if (!self) return false;
+    struct stat a, b;
+    bool same = fstat(admitted, &a) == 0 && fstat(fileno(self), &b) == 0 &&
+        a.st_size > 0 && a.st_size == b.st_size;
+    char x[8192], y[8192];
+    for (off_t at = 0; same && at < a.st_size;) {
+        ssize_t n, m;
+        do { n = pread(admitted, x, sizeof(x), at); } while (n < 0 && errno == EINTR);
+        if (n <= 0) { same = false; break; }
+        do { m = pread(fileno(self), y, (size_t)n, at); } while (m < 0 && errno == EINTR);
+        same = m == n && memcmp(x, y, (size_t)n) == 0;
+        at += n;
+    }
+    fclose(self);
+    return same;
+}
+
+/* The runner retains diagnostic stderr as well as stdout. Admit exactly one
+ * complete command envelope, never a substring or a truncated last reply. */
+static bool dl_su_envelope(const struct zcl_devloop_process_result *p,
+                            const char *command, struct json_value *out)
+{
+    if (p->output_truncated || memchr(p->output, '\0', p->output_len)) return false;
+    size_t at = 0;
+    unsigned found = 0;
+    while (at < p->output_len) {
+        size_t end = at;
+        while (end < p->output_len && p->output[end] != '\n') ++end;
+        struct json_value line = {0};
+        if (p->output[at] == '{' && json_read(&line, p->output + at, end - at)) {
+            const char *schema = json_get_str(json_get(&line, "schema"));
+            const char *leaf = json_get_str(json_get(&line, "command"));
+            if (schema && leaf && !strcmp(schema, "zcl.result.v1") && !strcmp(leaf, command)) {
+                if (++found != 1 || !json_copy_checked(out, &line)) {
+                    json_free(&line); return false;
+                }
+            }
+        }
+        json_free(&line);
+        at = end + 1;
+    }
+    return found == 1;
+}
+
+static bool dl_su_string(const struct json_value *j, const char *key,
+                          char *out, size_t cap)
+{
+    const struct json_value *v = json_get(j, key);
+    if (!v) { out[0] = '\0'; return true; }
+    const char *s = json_get_str(v);
+    if (!s || strlen(s) >= cap) return false;
+    memcpy(out, s, strlen(s) + 1);
+    return true;
+}
+
+static bool dl_su_error(const struct json_value *j, struct zcl_command_error *e)
+{
+    struct { const char *key; char *out; size_t cap; } fields[] = {
+        {"code", e->code, sizeof(e->code)}, {"message", e->message, sizeof(e->message)},
+        {"phase", e->phase, sizeof(e->phase)}, {"current_state", e->current_state, sizeof(e->current_state)},
+        {"next_action", e->next_action, sizeof(e->next_action)}, {"evidence", e->evidence, sizeof(e->evidence)},
+        {"failure_id", e->failure_id, sizeof(e->failure_id)},
+    };
+    if (!j || j->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+        if (!dl_su_string(j, fields[i].key, fields[i].out, fields[i].cap)) return false;
+    struct { const char *key; bool *out; } flags[] = {
+        {"retryable", &e->retryable}, {"human_action_required", &e->human_action_required},
+        {"mutated", &e->mutated},
+    };
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); ++i) {
+        const struct json_value *v = json_get(j, flags[i].key);
+        if (v && v->type != JSON_BOOL) return false;
+        *flags[i].out = v && v->val.b;
+    }
+    return e->code[0] && e->message[0];
+}
+
+static bool dl_su_next(const struct json_value *j, struct zcl_command_reply *reply)
+{
+    if (!j) return true;
+    if (j->type != JSON_ARR || j->num_children > ZCL_COMMAND_MAX_NEXT) return false;
+    for (size_t i = 0; i < j->num_children; ++i) {
+        const struct json_value *item = &j->children[i];
+        struct zcl_command_next *next = &reply->next[i];
+        const struct json_value *input = json_get(item, "input");
+        if (!dl_su_string(item, "command", next->command, sizeof(next->command)) ||
+            !next->command[0] || !dl_su_string(item, "reason", next->reason, sizeof(next->reason)))
+            return false;
+        size_t n = input ? json_write(input, next->input_json, sizeof(next->input_json)) : 0;
+        if (!n || n >= sizeof(next->input_json)) return false;
+        ++reply->next_count;
+    }
+    return true;
+}
+
+static bool dl_su_reply_body(const struct json_value *j, bool successful,
+                              struct zcl_command_reply *reply)
+{
+    const char *schema = json_get_str(json_get(j, "data_schema"));
+    const struct json_value *data = json_get(j, "data");
+    if (successful)
+        return schema && !strcmp(schema, "zcl.land.v1") &&
+            data && data->type == JSON_OBJ && json_copy_checked(&reply->data, data);
+    const struct json_value *error = json_get(j, "error");
+    const struct json_value *facts = json_get(error, "facts");
+    return dl_su_error(error, &reply->error) &&
+        (!facts || (facts->type == JSON_OBJ &&
+                    json_push_kv(&reply->data, "failure_facts", facts)));
+}
+
+static bool dl_su_reply_value(const struct json_value *j,
+    const struct zcl_devloop_process_result *p, struct zcl_command_reply *reply)
+{
+    const char *status = json_get_str(json_get(j, "status"));
+    const struct json_value *ok = json_get(j, "ok");
+    if (!status || !ok || ok->type != JSON_BOOL ||
+        p->exit_code < 0 || p->exit_code > ZCL_COMMAND_EXIT_INTERNAL)
+        return false;
+    int selected = -1;
+    for (int i = ZCL_COMMAND_STATUS_PASSED; i <= ZCL_COMMAND_STATUS_FAILED; ++i)
+        if (!strcmp(status, zcl_command_status_name((enum zcl_command_status)i))) selected = i;
+    if (selected < 0 || ok->val.b != (selected <= ZCL_COMMAND_STATUS_ACCEPTED) ||
+        ok->val.b != (p->exit_code == 0)) return false;
+    reply->status = (enum zcl_command_status)selected;
+    reply->exit_code = (enum zcl_command_exit)p->exit_code;
+    return dl_su_reply_body(j, ok->val.b, reply) &&
+        dl_su_next(json_get(j, "next"), reply);
+}
+
+static bool dl_su_reply(const struct zcl_command_request *req,
+    const struct zcl_devloop_process_result *p, struct zcl_command_reply *reply)
+{
+    struct json_value wire = {0};
+    dl_drive_reply_reset(reply);
+    bool ok = !p->timed_out && !p->cancelled && !p->term_signal &&
+        dl_su_envelope(p, req->spec->path, &wire) && dl_su_reply_value(&wire, p, reply);
+    json_free(&wire);
+    if (!ok) {
+        dl_drive_reply_reset(reply);
+        dl_fail(reply, "SELFUPGRADE_CHILD_UNCERTAIN", "drive",
+                "the adopted driver left no complete bound reply", "inspect dev land status before resuming");
+        reply->error.mutated = true;
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "z23 dev land status");
+    }
+    return ok;
+}
+
+static bool dl_su_row_snapshot(const struct zcl_command_request *req,
+                               long long seq, char row[65])
+{
+    struct json_value input = {0};
+    struct zcl_command_reply observed;
+    struct zcl_command_request scoped = *req;
+    json_set_object(&input);
+    if (!json_push_kv_int(&input, "seq", seq)) { json_free(&input); return false; }
+    scoped.input = &input;
+    zcl_command_reply_init(&observed, "zcl.land.v1");
+    dl_decision(&scoped, &observed);
+    const char *sha = json_get_str(json_get(&observed.data, "row_sha3"));
+    bool ok = observed.status == ZCL_COMMAND_STATUS_PASSED && dl_hex_ok(sha, 64);
+    if (ok) memcpy(row, sha, 65);
+    zcl_command_reply_free(&observed); json_free(&input);
+    return ok;
+}
+
+static bool dl_su_shadow(const struct zcl_command_request *req, int image,
+                          long long seq, char wire[8192])
+{
+    struct dl_su_args *a = zcl_calloc(1, sizeof(*a), "land decision child args");
+    struct zcl_devloop_process_result *p = zcl_calloc(1, sizeof(*p), "land decision result");
+    struct json_value reply = {0};
+    if (!a || !p) { free(a); free(p); return false; }
+    char selector[64];
+    (void)snprintf(selector, sizeof(selector), "--seq=%lld", seq);
+    const char *args[] = {"z23-dev", "dev", "land", "decision", selector, "--json", NULL};
+    const char *source = zcl_native_source_root(req);
+    bool environment = source && dl_su_environment(a, source, 0, NULL);
+    bool ran = environment && zcl_devloop_process_run_fd_inherit(
+        source, image, args, a->env, g_dl_su_fd, 20000, dl_su_cancel, (void *)req, p);
+#if defined(ZCL_TESTING)
+    int run_errno = environment && !ran ? errno : 0;
+#endif
+    bool exited = ran && p->exit_code == 0 && !p->timed_out && !p->cancelled && !p->term_signal;
+    bool envelope = exited && dl_su_envelope(p, "dev.land.decision", &reply);
+    bool ok = envelope;
+#if defined(ZCL_TESTING)
+    if (!ok)
+        fprintf(stderr, "[test selfupgrade shadow] source=%d environment=%d ran=%d errno=%d exit=%d signal=%d timeout=%d cancelled=%d bytes=%zu truncated=%d envelope=%d\n",
+                source != NULL, environment, ran, run_errno, p->exit_code, p->term_signal,
+                p->timed_out, p->cancelled, p->output_len, p->output_truncated, envelope);
+#endif
+    size_t n = ok ? json_write(&reply, wire, 8192) : 0;
+    json_free(&reply); free(a->env); free(a); free(p);
+    return n > 0 && n < 8192;
+}
+
+static bool dl_su_shadow_binding(const char *wire, const char *row)
+{
+    struct json_value j = {0};
+    bool ok = json_read(&j, wire, strlen(wire));
+    const struct json_value *data = ok ? json_get(&j, "data") : NULL;
+    const char *sha = json_get_str(json_get(data, "row_sha3"));
+    ok = sha && !strcmp(sha, row);
+    json_free(&j);
+    return ok;
+}
+
+static enum zcl_land_selfupgrade_verdict dl_su_observe(
+    const struct zcl_command_request *req, const struct dl_dirs *d,
+    const struct zcl_land_selfupgrade_binding *candidate, int image,
+    long long seq, char row[65])
+{
+    FILE *self = os_proc_open_self_exe();
+    char current[8192] = "", proposed[8192] = "", after[65];
+    bool before = self && dl_su_row_snapshot(req, seq, row);
+    bool current_ok = before && dl_su_shadow(req, fileno(self), seq, current);
+    bool proposed_ok = current_ok && dl_su_shadow(req, image, seq, proposed);
+    bool current_bound = proposed_ok && dl_su_shadow_binding(current, row);
+    bool proposed_bound = current_bound && dl_su_shadow_binding(proposed, row);
+    bool after_ok = proposed_bound && dl_su_row_snapshot(req, seq, after);
+    bool coherent = after_ok && !strcmp(row, after);
+#if defined(ZCL_TESTING)
+    if (!coherent)
+        fprintf(stderr, "[test selfupgrade observe] seq=%lld self=%d before=%d current=%d proposed=%d current_bound=%d proposed_bound=%d after=%d same=%d\n",
+                seq, self != NULL, before, current_ok, proposed_ok, current_bound,
+                proposed_bound, after_ok, coherent);
+#endif
+    if (self) fclose(self);
+    /* A changed observation resets the streak. Neither comparison executes a
+     * queue transition, and no exclusive step lock is held across either. */
+    return zcl_land_selfupgrade_observe_captured(d->land, candidate->commit, seq,
+        coherent ? current : "", coherent ? proposed : "", ZCL_LAND_SELFUPGRADE_AGREE_ROWS);
+}
+
+static bool dl_su_driver_checkout(const struct dl_dirs *d, const struct dl_row *row)
+{
+    char head[80], changed[8192], dirty[64];
+    const char *head_args[] = {"rev-parse", "--verify", "--quiet", "HEAD^{commit}", NULL};
+    const char *dirty_args[] = {"status", "--porcelain", "--untracked-files=no", NULL};
+    const char *diff_args[] = {"diff", "--name-only", row->base, row->local, "--",
+        "tools/command/native_dev_land*", "tools/dev/dev_land*", NULL};
+    if (dl_git(d->wt, head_args, head, sizeof(head), 10000) != 0) return false;
+    dl_trim(head);
+    return dl_sha_ok(head) && !strcmp(head, row->local) &&
+        dl_git(d->wt, dirty_args, dirty, sizeof(dirty), 10000) == 0 && !dirty[0] &&
+        dl_git(d->wt, diff_args, changed, sizeof(changed), 10000) == 0 &&
+        zcl_land_selfupgrade_touches_driver(changed);
+}
+
+static void dl_su_prepare(const struct dl_row *row)
+{
+    struct dl_dirs d;
+    if (g_dl_su_trial_child || !zcl_land_selfupgrade_enabled() ||
+        strcmp(row->state, "landed") || !dl_chain_pair_bound(row) ||
+        !dl_publication_receipt_verify(row) || !dl_dirs_make(&d) ||
+        !dl_su_driver_checkout(&d, row)) return;
+    char why[160];
+    struct zcl_land_selfupgrade_binding binding = {0};
+    char artifact[4352];
+    if (strlen(d.wt) >= sizeof(binding.proof_root) ||
+        snprintf(artifact, sizeof(artifact), "%s/build/bin/z23-dev", d.wt) >= (int)sizeof(artifact)) return;
+    memcpy(binding.commit, row->local, 41); memcpy(binding.base, row->base, 41);
+    (void)snprintf(binding.proof_root, sizeof(binding.proof_root), "%s", d.wt);
+    int fd = -1;
+    uint8_t digest[32];
+    if (!zcl_dev_proof_open_reused_executable(d.wt, row->local, row->base,
+            artifact, &fd, digest, why, sizeof(why))) {
+        dl_log(row, why);
+        return; /* The already-verified landing remains successful. */
+    }
+    if (!zcl_land_selfupgrade_prepare(d.land, &binding, fd))
+        dl_log(row, "selfupgrade_prepare_uncertain: recover state/pointer before adoption");
+    close(fd);
+}
+
+/* Child timing is diagnostic, never proof or publication authority. */
+static void dl_su_proof_read(const struct zcl_command_reply *reply)
+{
+    const struct json_value *p = json_get(&reply->data, "trial_proof");
+    const struct json_value *ran = json_get(p, "ran"), *ms = json_get(p, "ms");
+    const char *local = json_get_str(json_get(p, "local"));
+    const char *base = json_get_str(json_get(p, "base"));
+    g_dl_prove = (struct dl_prove_run){ .unknown = true };
+    if (!ran || ran->type != JSON_BOOL || !ms || ms->type != JSON_INT ||
+        json_get_int(ms) < 0 || !local || !base ||
+        (local[0] && !dl_sha_ok(local)) || (base[0] && !dl_sha_ok(base))) return;
+    g_dl_prove.unknown = false;
+    g_dl_prove.ran = json_get_bool(ran);
+    g_dl_prove.ms = json_get_int(ms);
+    (void)snprintf(g_dl_prove.local, sizeof(g_dl_prove.local), "%s", local);
+    (void)snprintf(g_dl_prove.base, sizeof(g_dl_prove.base), "%s", base);
+}
+
+static void dl_su_proof_write(struct zcl_command_reply *reply)
+{
+    struct json_value p = {0};
+    json_set_object(&p);
+    (void)(json_push_kv_bool(&p, "ran", g_dl_prove.ran) &&
+        json_push_kv_int(&p, "ms", g_dl_prove.ms) &&
+        json_push_kv_str(&p, "local", g_dl_prove.local) &&
+        json_push_kv_str(&p, "base", g_dl_prove.base) &&
+        json_push_kv(&reply->data, "trial_proof", &p));
+    json_free(&p);
+}
+
+struct dl_su_trial {
+    struct dl_dirs dirs;
+    struct zcl_land_selfupgrade_binding candidate;
+    struct dl_row before;
+    long long seq;
+    char identity[65];
+};
+
+struct dl_su_trial_evidence {
+    bool bound, ran, replied, same, landed, confirmed, finished;
+    struct dl_row settled;
+    char wt[4096];
+};
+
+static bool dl_su_shadow_stopped(const struct zcl_command_request *req,
+    const struct dl_dirs *d, enum zcl_land_selfupgrade_verdict observed,
+    struct dl_drive_verdict *v)
+{
+    if (dl_su_cancel((void *)req) || zcl_devloop_process_cancel_requested()) {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "selfupgrade_shadow_cancelled");
+        return true;
+    }
+    if (observed == ZCL_LAND_SU_ERROR && !zcl_land_selfupgrade_recover(d->land)) {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "selfupgrade_recovery_required");
+        return true;
+    }
+    return false;
+}
+
+static bool dl_su_bind_row(const struct zcl_command_request *req,
+                           const struct dl_su_trial *trial)
+{
+    char after[65];
+    return !dl_su_cancel((void *)req) &&
+        !zcl_devloop_process_cancel_requested() &&
+        dl_su_row_snapshot(req, trial->seq, after) && !strcmp(trial->identity, after) &&
+        zcl_land_selfupgrade_bind_trial(trial->dirs.land, trial->candidate.commit,
+                                       trial->seq, trial->identity);
+}
+
+/* Native state and its signed publication receipt remain the authority.
+ * The child's reply can confirm execution, never invent a landing. */
+static void dl_su_trial_reconcile(const struct zcl_command_request *req,
+    const struct dl_su_trial *trial, const struct zcl_devloop_process_result *p,
+    struct zcl_command_reply *reply, struct dl_su_trial_evidence *e)
+{
+    e->replied = e->ran && dl_su_reply(req, p, reply);
+    g_dl_prove = (struct dl_prove_run){ .unknown = true };
+    if (e->replied) dl_su_proof_read(reply);
+    e->same = dl_drive_row(trial->seq, &e->settled, e->wt) &&
+        !strcmp(trial->before.tip, e->settled.tip);
+    e->landed = e->same && !strcmp(e->settled.state, "landed") &&
+        dl_publication_receipt_verify(&e->settled);
+    e->confirmed = e->landed && e->replied && p->exit_code == 0 &&
+        reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        json_get_bool(json_get(&reply->data, "trial_row_transitioned"));
+    e->finished = e->bound ? zcl_land_selfupgrade_finish(trial->dirs.land,
+        trial->candidate.commit, trial->seq, trial->identity, e->confirmed)
+        : zcl_land_selfupgrade_recover(trial->dirs.land);
+}
+
+#if defined(ZCL_TESTING)
+static void dl_su_trial_diagnostic(long long seq,
+    const struct zcl_devloop_process_result *p, const struct zcl_command_reply *reply,
+    const struct dl_su_trial_evidence *e)
+{
+    if (!e->confirmed || !e->finished)
+        fprintf(stderr, "[test selfupgrade trial] seq=%lld bound=%d ran=%d result=%d exit=%d signal=%d timeout=%d cancelled=%d bytes=%zu truncated=%d reply_status=%d code=%.80s evidence=%.200s checked=%d transitioned=%d same=%d landed=%d confirmed=%d finished=%d\n",
+                seq, e->bound, e->ran, e->replied, p ? p->exit_code : -1, p ? p->term_signal : 0,
+                p ? p->timed_out : 0, p ? p->cancelled : 0, p ? p->output_len : 0,
+                p ? p->output_truncated : 0, (int)reply->status, reply->error.code,
+                reply->error.evidence, json_get_bool(json_get(&reply->data, "trial_row_checked")),
+                json_get_bool(json_get(&reply->data, "trial_row_transitioned")),
+                e->same, e->landed, e->confirmed, e->finished);
+}
+#endif
+
+static void dl_su_trial_outcome(const struct dl_su_trial_evidence *e,
+                                struct dl_drive_verdict *v)
+{
+    v->recovery_required = !e->finished;
+    if (e->landed) {
+        dl_drive_judge_row(&e->settled, e->wt, v);
+        if (!e->finished) dl_log(&e->settled, "selfupgrade_finish_uncertain: landing retained; recovery required");
+    } else {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "%s",
+            e->finished ? "selfupgrade_trial_refused: inspect native outcome before resuming" :
+                       "selfupgrade_recovery_required: no row replay authorized");
+    }
+}
+
+static void dl_su_trial_run(const struct zcl_command_request *req,
+    const struct dl_su_trial *trial, int fd, struct zcl_command_reply *reply,
+    struct dl_drive_verdict *v)
+{
+    struct zcl_devloop_process_result *p = zcl_calloc(1, sizeof(*p), "land trial result");
+    struct dl_su_trial_evidence e = {0};
+    e.bound = p && dl_su_bind_row(req, trial);
+    e.ran = e.bound && dl_su_run(req, fd, trial->seq, trial->identity, p);
+    close(fd);
+    dl_su_trial_reconcile(req, trial, p, reply, &e);
+#if defined(ZCL_TESTING)
+    dl_su_trial_diagnostic(trial->seq, p, reply, &e);
+#endif
+    free(p);
+    dl_su_trial_outcome(&e, v);
+}
+
+static bool dl_su_trial(const struct zcl_command_request *req,
+    struct zcl_command_reply *reply, long long seq, struct dl_drive_verdict *v)
+{
+    struct dl_su_trial trial = {.seq = seq};
+    char why[160], wt[4096];
+    if (g_dl_su_trial_child || !zcl_land_selfupgrade_enabled() ||
+        !dl_dirs_make(&trial.dirs) || !dl_drive_row(seq, &trial.before, wt) ||
+        (strcmp(trial.before.state, "queued") && strcmp(trial.before.state, "inflight"))) return false;
+    int fd = dl_su_image(trial.dirs.land, true, &trial.candidate, why, sizeof(why));
+    if (fd < 0) return false; /* No admitted pending candidate: keep current driver. */
+    enum zcl_land_selfupgrade_verdict observed = dl_su_observe(req, &trial.dirs,
+        &trial.candidate, fd, seq, trial.identity);
+    if (observed != ZCL_LAND_SU_SWITCHED) {
+        close(fd);
+        return dl_su_shadow_stopped(req, &trial.dirs, observed, v);
+    }
+    dl_su_trial_run(req, &trial, fd, reply, v);
+    return true;
+}
+#endif
+
 static int dl_drive_run_row(const struct zcl_command_request *req,
                             struct zcl_command_reply *reply, long long seq,
                             struct dl_drive_verdict *v)
 {
     int rounds = 0;
+#if defined(__linux__)
+    if (dl_su_trial(req, reply, seq, v)) {
+        if (v->kind == DL_DRIVE_LANDED && !v->recovery_required) dl_su_prepare(&v->row);
+        return rounds;
+    }
+#endif
     while (rounds < DL_DRIVE_ROUNDS && v->kind == DL_DRIVE_CONTINUE) {
         rounds++;
         dl_drive_reply_reset(reply);
         dl_drive_round(req, reply, seq, v);
     }
+#if defined(__linux__)
+    if (v->kind == DL_DRIVE_LANDED) dl_su_prepare(&v->row);
+#endif
     return rounds;
 }
 
@@ -13459,6 +14177,13 @@ static void dl_drive_seq(const struct zcl_command_request *req,
     rounds = dl_drive_run_row(req, reply, seq, &v);
     dl_drive_judged();
     dl_drive_outcome(reply, seq, rounds, &v);
+#if defined(__linux__)
+    if (g_dl_su_trial_child) {
+        dl_su_proof_write(reply);
+        (void)json_push_kv_bool(&reply->data, "trial_row_checked", g_dl_su_row_checked);
+        (void)json_push_kv_bool(&reply->data, "trial_row_transitioned", g_dl_su_row_transitioned);
+    }
+#endif
 }
 
 /* ── drive prove:true max_rows:N ───────────────────────────────────────────
@@ -13517,6 +14242,143 @@ static int dl_drive_lock(struct zcl_command_reply *reply)
     return -1;
 }
 
+#if defined(__linux__)
+static bool dl_su_context(const struct zcl_command_request *req,
+                           struct zcl_command_reply *reply)
+{
+    if (req && req->spec && req->context && req->context->one_shot_process &&
+        req->context->dev_build &&
+        (!req->context->agent_session || !req->context->agent_session[0])) return true;
+    dl_fail(reply, "SELFUPGRADE_CONTEXT_UNSUPPORTED", "drive",
+            "driver adoption requires a local one-shot developer invocation",
+            "a long-lived or delegated session keeps its existing authority boundary");
+    return false;
+}
+
+static bool dl_su_decimal(const char *text, long long *value)
+{
+    if (!text || !*text) return false;
+    for (const char *p = text; *p; ++p) if (*p < '0' || *p > '9') return false;
+    char *end;
+    errno = 0;
+    long long n = strtoll(text, &end, 10);
+    if (errno || *end || n <= 0) return false;
+    *value = n;
+    return true;
+}
+
+static int dl_su_borrow_lock(struct zcl_command_reply *reply)
+{
+    const char *locator = getenv(DL_SU_LOCK_ENV);
+    long long number;
+    struct dl_dirs d;
+    struct stat st;
+    if (!locator) return -2;
+    if (!dl_su_decimal(locator, &number) || number < 3 || number > INT_MAX ||
+        !dl_dirs_make(&d) || !dl_snapshot_lock_same((int)number, d.land, "drive.lock") ||
+        fstat((int)number, &st) != 0 || st.st_nlink != 1 || (st.st_mode & 077) ||
+        flock((int)number, LOCK_EX | LOCK_NB) != 0) goto refused;
+    int fd = fcntl((int)number, F_DUPFD_CLOEXEC, 3);
+    if (fd < 0) goto refused;
+    /* FD_CLOEXEC is per descriptor, not per open file description. Close the
+     * inherited original, retaining one private CLOEXEC reference. Never
+     * LOCK_UN here or on return: that would unlock the parent's descriptor. */
+    if (!dl_snapshot_lock_same(fd, d.land, "drive.lock")) { close(fd); goto refused; }
+    close((int)number);
+    return fd;
+refused:
+    dl_fail(reply, "SELFUPGRADE_LOCK_REFUSED", "drive",
+            "inherited descriptor does not establish exclusive drive ownership", "drive.lock");
+    return -1;
+}
+
+static bool dl_su_trial_request(const struct zcl_command_request *req,
+    const char *selector, const char *row, const char *prove, long long *seq)
+{
+    long long requested = 0;
+    return getenv(DL_SU_LOCK_ENV) && dl_su_decimal(selector, seq) &&
+        dl_hex_ok(row, 64) && prove && (!strcmp(prove, "0") || !strcmp(prove, "1")) &&
+        dl_seq_in(req, &requested) && requested == *seq &&
+        !json_get(req->input, "prove") && !json_get(req->input, "max_rows");
+}
+
+static bool dl_su_enter_trial(const struct zcl_command_request *req,
+                               struct zcl_command_reply *reply)
+{
+    const char *selector = getenv(DL_SU_SEQ_ENV), *row = getenv(DL_SU_ROW_ENV);
+    const char *prove = getenv(DL_SU_PROVE_ENV);
+    if (!selector && !row && !prove) return true;
+    long long seq = 0;
+    struct dl_dirs d;
+    struct zcl_land_selfupgrade_binding binding;
+    char why[160], observed[65];
+    if (!dl_su_trial_request(req, selector, row, prove, &seq) ||
+        !dl_dirs_make(&d)) goto refused;
+    int image = dl_su_image(d.land, false, &binding, why, sizeof(why));
+    if (image < 0) goto refused;
+    bool matches = dl_su_running_image(image) &&
+        zcl_land_selfupgrade_trial_matches(d.land, binding.commit, seq, row) &&
+        dl_su_row_snapshot(req, seq, observed) && !strcmp(row, observed);
+    close(image);
+    if (!matches) goto refused;
+    g_dl_su_trial_child = true;
+    (void)snprintf(g_dl_su_expected_row, sizeof(g_dl_su_expected_row), "%s", row);
+    g_dl_prove_mode = strcmp(prove, "1") == 0;
+    return true;
+refused:
+    dl_fail(reply, "SELFUPGRADE_TRIAL_REFUSED", "drive",
+            "trial image, row or inherited execution context changed", "no trial transition executed");
+    return false;
+}
+
+static bool dl_su_forward(const struct zcl_command_request *req,
+                           struct zcl_command_reply *reply)
+{
+    struct dl_dirs d;
+    struct zcl_land_selfupgrade_binding binding;
+    char path[4192], why[160];
+    struct stat st;
+    if (!dl_dirs_make(&d)) goto refused;
+    if (!zcl_land_selfupgrade_recover(d.land)) goto refused;
+    if (snprintf(path, sizeof(path), "%s/current", d.land) >= (int)sizeof(path)) goto refused;
+    if (lstat(path, &st) != 0 && errno == ENOENT) return false;
+    int image = dl_su_image(d.land, false, &binding, why, sizeof(why));
+    if (image < 0) goto refused;
+    if (dl_su_running_image(image)) { close(image); return false; }
+    struct zcl_devloop_process_result *p = zcl_calloc(1, sizeof(*p), "land adopted result");
+    if (!p) { close(image); goto refused; }
+    bool ran = dl_su_run(req, image, 0, NULL, p);
+    close(image);
+    if (ran) (void)dl_su_reply(req, p, reply);
+    else {
+        dl_fail(reply, "SELFUPGRADE_LAUNCH_REFUSED", "drive",
+                "admitted driver did not produce an observed invocation", "inspect native outcomes before resuming");
+        reply->error.mutated = true;
+    }
+    free(p);
+    return true;
+refused:
+    dl_fail(reply, "SELFUPGRADE_RECOVERY_REQUIRED", "drive",
+            "current driver state or proof cannot be reconciled", "no unverified driver was executed");
+    return true;
+}
+
+/* Bare drive runs one session rather than the row loop. Qualify only the
+ * landed row that this session returned, under the same drive ownership. */
+static void dl_su_prepare_session(const struct zcl_command_request *req,
+                                  const struct zcl_command_reply *reply)
+{
+    if (json_get(req->input, "seq") || json_get(req->input, "max_rows") ||
+        json_get(req->input, "prove")) return;
+    const char *state = json_get_str(json_get(&reply->data, "state"));
+    long long seq = json_get_int(json_get(&reply->data, "seq"));
+    struct dl_row row;
+    char wt[4096];
+    if (state && !strcmp(state, "landed") && seq > 0 && dl_drive_row(seq, &row, wt))
+        dl_su_prepare(&row);
+}
+#endif
+
 static void dl_drive_row_report(struct json_value *out, long long seq,
                                 int rounds, const struct dl_drive_verdict *v)
 {
@@ -13532,8 +14394,8 @@ static void dl_drive_row_report(struct json_value *out, long long seq,
     (void)(json_push_kv_int(&item, "seq", seq) &&
            json_push_kv_str(&item, "base", base) &&
            json_push_kv_str(&item, "head", head) &&
-           json_push_kv_int(&item, "proof_ms", g_dl_prove.ms) &&
-           json_push_kv_str(&item, "proof", g_dl_prove.ran ? "ran"
+           (g_dl_prove.unknown || json_push_kv_int(&item, "proof_ms", g_dl_prove.ms)) &&
+           json_push_kv_str(&item, "proof", g_dl_prove.unknown ? "unknown" : g_dl_prove.ran ? "ran"
                                             : v->kind == DL_DRIVE_LANDED
                                                 ? "receipt_present" : "none") &&
            json_push_kv_str(&item, "outcome", names[v->kind]) &&
@@ -13548,7 +14410,7 @@ static void dl_drive_rows(const struct zcl_command_request *req,
 {
     struct json_value report;
     struct dl_drive_verdict v = { .kind = DL_DRIVE_LANDED };
-    int done = 0;
+    int done = 0, landed = 0;
     long long last_seq = 0;
     json_init(&report);
     json_set_array(&report);
@@ -13584,7 +14446,8 @@ static void dl_drive_rows(const struct zcl_command_request *req,
         v = row_v;
         last_seq = seq;
         done++;
-        if (row_v.kind != DL_DRIVE_LANDED)
+        if (row_v.kind == DL_DRIVE_LANDED) landed++;
+        if (row_v.kind != DL_DRIVE_LANDED || row_v.recovery_required)
             break;
     }
     g_dl_prove_mode = false;
@@ -13601,6 +14464,8 @@ static void dl_drive_rows(const struct zcl_command_request *req,
         dl_drive_outcome(reply, last_seq, 0, &v);
     }
     (void)json_push_kv(&reply->data, "rows", &report);
+    if (v.recovery_required)
+        dl_drive_recovery_reply(reply, last_seq, landed, v.kind == DL_DRIVE_LANDED);
     json_free(&report);
 }
 #endif
@@ -13638,17 +14503,76 @@ static void dl_drive_dispatch(const struct zcl_command_request *req,
     dl_drive_session(req, reply);
 }
 
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+static bool dl_su_drive_admitted(const struct zcl_command_request *req,
+                                  struct zcl_command_reply *reply)
+{
+    if (!dl_su_context(req, reply)) return false;
+    if (!req->budget_bytes || req->budget_bytes >= ZCL_COMMAND_ERROR_BUDGET) return true;
+    dl_fail(reply, "SELFUPGRADE_REPLY_BUDGET_REQUIRED", "drive",
+        "selfupgrade requires at least the standard error reply budget",
+        "use budget_bytes >= 3072 to preserve partial landing facts");
+    return false;
+}
+
+static void dl_su_context_reset(int fd)
+{
+    g_dl_su_fd = fd;
+    g_dl_su_trial_child = false;
+    g_dl_su_expected_row[0] = '\0';
+    g_dl_su_row_checked = false;
+    g_dl_su_row_transitioned = false;
+}
+
+/* All trial state is scoped to one invocation that already owns drive.lock. */
+static void dl_su_drive_owned(const struct zcl_command_request *req,
+    struct zcl_command_reply *reply, int fd, bool upgrade)
+{
+    dl_su_context_reset(fd);
+    bool prior_prove = g_dl_prove_mode;
+    g_dl_prove = (struct dl_prove_run){0};
+    bool handled = upgrade && (!dl_su_enter_trial(req, reply) ||
+        (!g_dl_su_trial_child && dl_su_forward(req, reply)));
+#if defined(ZCL_TESTING)
+    if (!handled && g_dl_su_trial_child && g_dl_trial_entry_hook)
+        g_dl_trial_entry_hook();
+#endif
+    if (!handled) {
+        dl_drive_dispatch(req, reply);
+        if (upgrade) dl_su_prepare_session(req, reply);
+    }
+    g_dl_prove_mode = prior_prove;
+    dl_su_context_reset(-1);
+}
+#endif
+
 /* Every drive, proving or not, holds drive.lock for its whole run: two
  * drives would race each other's rows and proofs. */
 static void dl_drive(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply)
 {
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-    int fd = dl_drive_lock(reply);
+    bool borrowed = false;
+    int fd = -2;
+#if defined(__linux__)
+    bool upgrade = zcl_land_selfupgrade_enabled();
+    if (upgrade && !dl_su_drive_admitted(req, reply)) return;
+    if (upgrade) {
+        fd = dl_su_borrow_lock(reply);
+        borrowed = fd >= 0;
+        if (fd == -1) return;
+    }
+#endif
+    if (fd == -2) fd = dl_drive_lock(reply);
     if (fd < 0)
         return;
+#if defined(__linux__)
+    dl_su_drive_owned(req, reply, fd, upgrade);
+#else
     dl_drive_dispatch(req, reply);
-    dl_unlock(fd);
+#endif
+    if (borrowed) close(fd);
+    else dl_unlock(fd);
 #else
     dl_drive_dispatch(req, reply);
 #endif

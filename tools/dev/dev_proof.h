@@ -516,6 +516,15 @@ bool zcl_dev_proof_resolve_pair(const char *repo_root,
                                 char local_commit[65],
                                 char remote_base[65],
                                 char *why, size_t why_len);
+/* Admit an existing artifact against a locally signed exact-pair proof and
+ * its reused compile child. Success returns a caller-owned sealed executable snapshot FD
+ * and the evidence digest; it does not execute the artifact or establish
+ * source-build provenance beyond the receipt producer trust boundary. */
+bool zcl_dev_proof_open_reused_executable(
+    const char *repo_root, const char *local, const char *base,
+    const char *artifact, int *out_fd, uint8_t digest[32],
+    char *why, size_t why_len);
+
 bool zcl_dev_proof_status_read(const char *repo_root,
                                const char *local_commit,
                                const char *remote_base,

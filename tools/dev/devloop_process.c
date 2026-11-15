@@ -151,6 +151,17 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
                             false, out);
 }
 
+static bool process_run_fd_inherit_platform(
+    const char *cwd, int exec_fd, const char *const argv[],
+    const char *const envp[], int inherited_fd, int timeout_ms,
+    bool (*cancel)(void *), void *cancel_ctx,
+    struct zcl_devloop_process_result *out)
+{
+    (void)cwd; (void)exec_fd; (void)argv; (void)envp; (void)inherited_fd;
+    (void)timeout_ms; (void)cancel; (void)cancel_ctx; (void)out;
+    return false;
+}
+
 #else
 
 #include <ctype.h>
@@ -158,6 +169,9 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -776,10 +790,11 @@ static const char *const *process_inherited_env(void)
 /* The child may stop between setsid and exec. Poll the startup pipe so owner
  * death and the command deadline still apply before the normal wait loop. */
 static ssize_t process_startup_read(int fd, char *byte, int64_t deadline_us,
+                                    bool (*cancel)(void *), void *cancel_ctx,
                                     struct zcl_devloop_process_result *out)
 {
     for (;;) {
-        if (zcl_devloop_process_cancel_requested()) {
+        if (zcl_devloop_process_cancel_requested() || (cancel && cancel(cancel_ctx))) {
             out->cancelled = true;
             errno = ECANCELED;
             return -1;
@@ -851,11 +866,36 @@ static bool process_run_admit(const char *cwd, const char *const argv[],
     return true;
 }
 
+#if defined(__linux__) && (defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING))
+/* Only stdio, the executable, the lock and the exec-status pipe survive. */
+static bool process_child_allow_fds(int executable, int inherited, int status)
+{
+#if defined(SYS_close_range)
+    int keep[3] = {executable, inherited, status};
+    for (int i = 0; i < 3; ++i)
+        for (int j = i + 1; j < 3; ++j)
+            if (keep[j] < keep[i]) { int t = keep[i]; keep[i] = keep[j]; keep[j] = t; }
+    unsigned next = 3;
+    for (int i = 0; i < 3; ++i) {
+        if (keep[i] < 3) return false;
+        unsigned current = (unsigned)keep[i];
+        if (current > next && syscall(SYS_close_range, next, current - 1, 0) != 0)
+            return false;
+        next = current + 1;
+    }
+    return syscall(SYS_close_range, next, UINT_MAX, 0) == 0;
+#else
+    (void)executable; (void)inherited; (void)status;
+    return false;
+#endif
+}
+#endif
+
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static void process_child_exec(const char *cwd, int exec_fd,
                                const char *const argv[],
                                const char *const envp[], bool raise_stack,
-                               int fds[2], int ready_fds[2])
+                               int fds[2], int ready_fds[2], int inherited_fd)
 {
     close(ready_fds[0]);
     if (setsid() < 0)
@@ -886,7 +926,20 @@ static void process_child_exec(const char *cwd, int exec_fd,
         dup2(fds[1], STDERR_FILENO) < 0)
         _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
     close(fds[1]);
+    if (inherited_fd >= 0) {
+#if defined(__linux__)
+        if (!process_child_allow_fds(exec_fd, inherited_fd, ready_fds[1]))
+            _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
+#else
+        _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
+#endif
+        int flags = fcntl(inherited_fd, F_GETFD);
+
+        if (flags < 0 || fcntl(inherited_fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
+            _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
+    }
     extern char **environ;
+
     environ = (char **)envp; /* the parent's own, or the bound set */
     if (exec_fd >= 0) {
         platform_execve_fd(exec_fd, (char *const *)argv, environ);
@@ -918,6 +971,7 @@ static bool process_pipes_open(int fds[2], int ready_fds[2])
 static bool process_startup_finish(pid_t pid, bool darwin_attested_spawn,
                                    int fds[2], int ready_fds[2],
                                    int64_t started_us, int64_t deadline_us,
+                                   bool (*cancel)(void *), void *cancel_ctx,
                                    struct zcl_devloop_process_result *out)
 {
 #if defined(__APPLE__)
@@ -942,7 +996,7 @@ static bool process_startup_finish(pid_t pid, bool darwin_attested_spawn,
     ssize_t ready_got;
     if (!darwin_attested_spawn) {
         ready_got = process_startup_read(ready_fds[0], &ready, deadline_us,
-                                         out);
+                                         cancel, cancel_ctx, out);
         if (ready_got != 1 || ready != '1') {
             close(ready_fds[0]);
             (void)kill(pid, SIGKILL);
@@ -954,7 +1008,7 @@ static bool process_startup_finish(pid_t pid, bool darwin_attested_spawn,
             return false;
         }
         ready_got = process_startup_read(ready_fds[0], &ready, deadline_us,
-                                         out);
+                                         cancel, cancel_ctx, out);
         out->startup_us = platform_time_monotonic_us() - started_us;
         close(ready_fds[0]);
         if (ready_got != 0) {
@@ -1003,13 +1057,29 @@ static void process_stop_wait(pid_t pid, int fd, int *status)
     }
 }
 
+static void process_observe_wait_failed(pid_t pid, int *fd, const char *image,
+                                        int *status)
+{
+    zcl_devloop_process_cleanup_uncertain_mark();
+    fprintf(stderr, "[devloop] process: waitpid failed for %s: %s\n",
+            image, strerror(errno));
+    terminate_child_session(pid, SIGKILL);
+    (void)process_reap_owned(pid, status);
+    if (*fd >= 0) close(*fd);
+    if (g_process_active_leader == (sig_atomic_t)pid)
+        g_process_active_leader = 0;
+}
+
 static bool process_observe(pid_t pid, int *fd, const char *image,
                             int64_t started_us, int64_t deadline_us,
+                            bool (*cancel)(void *), void *cancel_ctx,
                             struct zcl_devloop_process_result *out, int *status)
 {
     bool finished = false;
     while (!finished) {
         process_cancel_poll();
+        bool cancelled = zcl_devloop_process_cancel_requested() ||
+                         (cancel && cancel(cancel_ctx));
         size_t output_before = out->output_len;
         drain_output(fd, out);
         if (out->first_output_us == 0 && out->output_len > output_before)
@@ -1024,22 +1094,15 @@ static bool process_observe(pid_t pid, int *fd, const char *image,
              * SAME iteration, before the cancel/deadline branch below runs.
              * Attribute the cancellation here or the receipt lies about why
              * the child died. */
-            if (zcl_devloop_process_cancel_requested())
+            if (cancelled || zcl_devloop_process_cancel_requested())
                 out->cancelled = true;
             break;
         }
         if (waited < 0 && errno != EINTR) {
-            zcl_devloop_process_cleanup_uncertain_mark();
-            fprintf(stderr, "[devloop] process: waitpid failed for %s: %s\n",
-                    image, strerror(errno));
-            terminate_child_session(pid, SIGKILL);
-            (void)process_reap_owned(pid, status);
-            if (*fd >= 0) close(*fd);
-            if (g_process_active_leader == (sig_atomic_t)pid)
-                g_process_active_leader = 0;
+            process_observe_wait_failed(pid, fd, image, status);
             return false;
         }
-        bool cancelled = zcl_devloop_process_cancel_requested();
+        cancelled = cancelled || zcl_devloop_process_cancel_requested();
         if (cancelled || platform_time_monotonic_us() >= deadline_us) {
             out->cancelled = cancelled;
             out->timed_out = !cancelled;
@@ -1077,10 +1140,11 @@ static void process_finish(pid_t pid, int fd, int status, int64_t started_us,
 }
 #endif
 
-static bool process_run_impl(const char *cwd, int exec_fd,
+static bool process_run_body(const char *cwd, int exec_fd,
                              const char *const argv[],
                              const char *const envp[], int timeout_ms,
-                             bool raise_stack,
+                             bool raise_stack, int inherited_fd,
+                             bool (*cancel)(void *), void *cancel_ctx,
                              struct zcl_devloop_process_result *out)
 {
     if (!process_run_admit(cwd, argv, timeout_ms, out))
@@ -1089,6 +1153,8 @@ static bool process_run_impl(const char *cwd, int exec_fd,
 #if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
     (void)exec_fd;
     (void)raise_stack;
+    (void)inherited_fd;
+    (void)cancel; (void)cancel_ctx;
     (void)envp;
     fprintf(stderr, "[devloop] process execution is disabled outside a dev build\n");
     return false;
@@ -1136,7 +1202,7 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     }
     if (!darwin_attested_spawn && pid == 0) {
         process_child_exec(cwd, exec_fd, argv, envp, raise_stack,
-                           fds, ready_fds);
+                           fds, ready_fds, inherited_fd);
     }
     g_process_active_leader = (sig_atomic_t)pid;
 
@@ -1144,7 +1210,7 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     close(ready_fds[1]);
     int64_t deadline_us = started_us + (int64_t)timeout_ms * 1000;
     if (!process_startup_finish(pid, darwin_attested_spawn, fds, ready_fds,
-                                started_us, deadline_us, out))
+                                started_us, deadline_us, cancel, cancel_ctx, out))
         return false;
     int flags = fcntl(fds[0], F_GETFL, 0);
     if (flags >= 0)
@@ -1152,11 +1218,74 @@ static bool process_run_impl(const char *cwd, int exec_fd,
 
     int status = 0;
     if (!process_observe(pid, &fds[0], argv[0], started_us, deadline_us,
-                         out, &status))
+                         cancel, cancel_ctx, out, &status))
         return false;
     process_finish(pid, fds[0], status, started_us, out);
     return true;
 #endif
+}
+
+/* Legacy runs retain their existing concurrency. The lock-inheriting run
+ * requires exclusive cancellation ownership and refuses overlap both ways. */
+static _Atomic int g_process_execution_owners;
+#if defined(ZCL_TESTING) && defined(__linux__)
+static _Atomic bool g_process_test_uncertain_after_acquire;
+void zcl_devloop_process_test_uncertain_after_acquire(void)
+{
+    atomic_store_explicit(&g_process_test_uncertain_after_acquire, true, memory_order_relaxed);
+}
+#endif
+
+
+static bool process_owner_acquire(bool exclusive)
+{
+    int current = atomic_load_explicit(&g_process_execution_owners, memory_order_relaxed);
+    for (;;) {
+        if (exclusive ? current != 0 : current < 0 || current == INT_MAX)
+            return false;
+        int desired = exclusive ? -1 : current + 1;
+        if (atomic_compare_exchange_weak_explicit(&g_process_execution_owners,
+                &current, desired, memory_order_acquire, memory_order_relaxed))
+            return true;
+    }
+}
+
+static bool process_run_impl(const char *cwd, int exec_fd,
+                             const char *const argv[], const char *const envp[],
+                             int timeout_ms, bool raise_stack, int inherited_fd,
+                             bool (*cancel)(void *), void *cancel_ctx,
+                             struct zcl_devloop_process_result *out)
+{
+    bool exclusive = inherited_fd >= 0;
+    if (!process_owner_acquire(exclusive)) {
+        if (out) { memset(out, 0, sizeof(*out)); out->exit_code = -1; }
+        errno = EBUSY;
+        return false;
+    }
+#if defined(ZCL_TESTING) && defined(__linux__)
+    if (exclusive && atomic_exchange_explicit(&g_process_test_uncertain_after_acquire,
+                                               false, memory_order_relaxed))
+        zcl_devloop_process_cleanup_uncertain_mark();
+#endif
+    /* A preceding legacy owner may have reported uncertain cleanup while it
+     * was releasing ownership. Check only after the exclusive fence is held. */
+    if (exclusive && zcl_devloop_process_cleanup_uncertain()) {
+        atomic_store_explicit(&g_process_execution_owners, 0, memory_order_release);
+        if (out) { memset(out, 0, sizeof(*out)); out->exit_code = -1; }
+        errno = EBUSY;
+        return false;
+    }
+    bool ok = process_run_body(cwd, exec_fd, argv, envp, timeout_ms,
+                               raise_stack, inherited_fd, cancel, cancel_ctx, out);
+    /* Unreaped descendants keep exclusive cancellation ownership until this
+     * process exits; releasing it would risk signaling an unrelated child. */
+    if (!exclusive || !zcl_devloop_process_cleanup_uncertain()) {
+        if (exclusive)
+            atomic_store_explicit(&g_process_execution_owners, 0, memory_order_release);
+        else
+            atomic_fetch_sub_explicit(&g_process_execution_owners, 1, memory_order_release);
+    }
+    return ok;
 }
 
 bool zcl_devloop_process_run(const char *cwd,
@@ -1165,7 +1294,7 @@ bool zcl_devloop_process_run(const char *cwd,
                              struct zcl_devloop_process_result *out)
 {
     return process_run_impl(cwd, -1, argv, process_inherited_env(),
-                            timeout_ms, false, out);
+                            timeout_ms, false, -1, NULL, NULL, out);
 }
 
 bool zcl_devloop_process_run_test(const char *cwd,
@@ -1190,12 +1319,12 @@ bool zcl_devloop_process_run_test(const char *cwd,
     for (size_t i = 0; i < count; i++)
         if (strncmp(inherited[i], marker, sizeof(marker) - 1) != 0)
             child[used++] = inherited[i];
-    bool ok = process_run_impl(cwd, -1, argv, child, timeout_ms, true, out);
+    bool ok = process_run_impl(cwd, -1, argv, child, timeout_ms, true, -1, NULL, NULL, out);
     free(child);
     return ok;
 #else
     return process_run_impl(cwd, -1, argv, process_inherited_env(),
-                            timeout_ms, true, out);
+                            timeout_ms, true, -1, NULL, NULL, out);
 #endif
 }
 
@@ -1208,10 +1337,38 @@ bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
         return false;
     }
     return process_run_impl(cwd, exec_fd, argv, process_inherited_env(),
-                            timeout_ms, false, out);
+                            timeout_ms, false, -1, NULL, NULL, out);
+}
+
+static bool process_run_fd_inherit_platform(
+    const char *cwd, int exec_fd, const char *const argv[],
+    const char *const envp[], int inherited_fd, int timeout_ms,
+    bool (*cancel)(void *), void *cancel_ctx,
+    struct zcl_devloop_process_result *out)
+{
+#if defined(__linux__)
+    if (exec_fd < 0 || inherited_fd < 3 || inherited_fd == exec_fd || !envp)
+        return false;
+    return process_run_impl(cwd, exec_fd, argv, envp, timeout_ms, false,
+                            inherited_fd, cancel, cancel_ctx, out);
+#else
+    (void)cwd; (void)exec_fd; (void)argv; (void)envp; (void)inherited_fd;
+    (void)timeout_ms; (void)cancel; (void)cancel_ctx; (void)out;
+    return false;
+#endif
 }
 
 #endif /* _WIN32 */
+
+bool zcl_devloop_process_run_fd_inherit(
+    const char *cwd, int exec_fd, const char *const argv[],
+    const char *const envp[], int inherited_fd, int timeout_ms,
+    bool (*cancel)(void *), void *cancel_ctx,
+    struct zcl_devloop_process_result *out)
+{
+    return process_run_fd_inherit_platform(cwd, exec_fd, argv, envp, inherited_fd,
+                                            timeout_ms, cancel, cancel_ctx, out);
+}
 
 void zcl_devloop_process_cancel_bind_parent(uint64_t expected_parent)
 {
@@ -1234,5 +1391,10 @@ bool zcl_devloop_process_run_env(const char *cwd,
         fprintf(stderr, "[devloop] process: no child environment given\n");
         return false;
     }
+#if defined(_WIN32)
     return process_run_impl(cwd, -1, argv, envp, timeout_ms, false, out);
+#else
+    return process_run_impl(cwd, -1, argv, envp, timeout_ms, false, -1, NULL, NULL, out);
+#endif
+
 }
