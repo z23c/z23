@@ -180,10 +180,24 @@ order of size.
    An immediate sender post-Keep read misreported lock contention as damaged
    history; a settled read succeeded without mutation replay. The typed-busy
    fix landed in 728fa8846c4d. Its separately packaged runtime passed busy-lock
-   and torn-history checks and is public under manifest d5ddd4986723; the
+   and torn-history checks and was published under manifest d5ddd4986723; the
    physical journey was not repeated on it.
    Evidence: the retained app-physical-journey-1115 and
    app-history-busy-public-1115 results and review.
+
+   A fresh installed recipient on public source 3b8f3228febf received the same
+   signed file after the sender's app session closed. Its pre-Receive and
+   pre-Build inventories had no build records or images; its Build receipt
+   reported cache_hit=false and make_ran=true. Its source, package and live
+   image matched the earlier sender. The initial Preview was closed without
+   Keep; a separate native confirmation kept the copy at revision 1. A later
+   reopen of that exact kept image ran in a separate network namespace with
+   only loopback and no IPv4 or IPv6 routes. The host itself remained online.
+   The build observations and recipe support a fresh compilation inference;
+   make_ran does not independently attest a compiler process. The observed
+   physical environments are not hardware attestation. Evidence: the retained
+   app-build-observation-recipient-1115, app-build-observation-offline-1115 and
+   app-build-observation-public-1115 results and reviews.
 3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap
