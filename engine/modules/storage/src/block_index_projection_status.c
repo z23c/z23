@@ -16,6 +16,18 @@
 #include <stdio.h>
 #include <string.h>
 
+static bool bip_status_blob_valid(const void *blob, int len, size_t cap)
+{
+    return blob && len > 0 && (size_t)len <= cap;
+}
+
+static bool bip_status_unchanged(const struct ev_block_header *h,
+                                 const struct ev_block_status *st)
+{
+    return h->nStatus == st->nStatus && h->nFile == st->nFile &&
+        h->nDataPos == st->nDataPos && h->nUndoPos == st->nUndoPos && h->nTx == st->nTx;
+}
+
 /* Apply one EV_BLOCK_STATUS event: read the existing row's blob (written by
  * the prior EV_BLOCK_HEADER first-admit — see event_log.h's EV_BLOCK_STATUS
  * doc), patch the mutable fields (nStatus/nFile/nDataPos/nUndoPos/nTx), and
@@ -70,7 +82,7 @@ bool catch_up_apply_status(struct catch_up_ctx *c,
      * step/reset on this same statement, and prior EV_BLOCK_HEADER blobs
      * never exceed EV_BLOCK_HEADER_FIXED_BYTES + EV_BLOCK_HEADER_MAX_SOLUTION. */
     uint8_t old[256 + 1344];
-    if (!blob || blob_len <= 0 || (size_t)blob_len > sizeof(old)) {
+    if (!bip_status_blob_valid(blob, blob_len, sizeof(old))) {
         c->status_orphans++;
         return true;
     }
@@ -91,6 +103,12 @@ bool catch_up_apply_status(struct catch_up_ctx *c,
             c->error = true;
             return false;
         }
+    }
+
+    if (bip_status_unchanged(&h, &st)) {
+        c->batch_count++;
+        boot_scan_bump(c->scan_ctr);
+        return true;
     }
 
     h.nStatus  = st.nStatus;

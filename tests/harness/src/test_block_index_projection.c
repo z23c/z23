@@ -1936,6 +1936,215 @@ done:
     return *failures - start_failures;
 }
 
+static bool bip_timing_emit(event_log_t *log, int count, int rounds, bool headers, bool identical)
+{
+    bool ok = true;
+    event_log_set_deferred_sync(log, true);
+    for (int i = 0; headers && i < count && ok; ++i) {
+        struct ev_block_header h; uint8_t sol[8];
+        make_header(&h, sol, sizeof(sol), 0x70000u + (uint32_t)i, i, 0x20);
+        ok = emit_header(log, &h, sol);
+    }
+    for (int r = 0; r < rounds && ok; ++r) {
+        for (int i = 0; i < count && ok; ++i) {
+            struct ev_block_header h; uint8_t sol[8];
+            uint32_t status = identical ? 0x49u : 0x40u + (uint32_t)r;
+            make_header(&h, sol, sizeof(sol), 0x70000u + (uint32_t)i, i, status);
+            ok = emit_status(log, &h);
+        }
+    }
+    bool flushed = event_log_flush(log);
+    event_log_set_deferred_sync(log, false);
+    return ok && flushed;
+}
+
+static bool bip_timing_header_matches(const struct disk_block_index *got,
+                                      const struct ev_block_header *h, const uint8_t sol[8])
+{
+    return got->nVersion == h->nVersion && got->nTime == h->nTime && got->nBits == h->nBits &&
+        memcmp(got->hashPrev.data, h->hashPrev, 32) == 0 &&
+        memcmp(got->hashMerkleRoot.data, h->hashMerkleRoot, 32) == 0 &&
+        memcmp(got->hashFinalSaplingRoot.data, h->hashFinalSaplingRoot, 32) == 0 &&
+        memcmp(got->nNonce.data, h->nNonce, 32) == 0 &&
+        got->nSolutionSize == 8 && memcmp(got->nSolution, sol, 8) == 0;
+}
+
+static bool bip_timing_row_matches(block_index_projection_t *p, int i, uint32_t status)
+{
+    struct ev_block_header h; uint8_t sol[8]; struct disk_block_index got;
+    make_header(&h, sol, sizeof(sol), 0x70000u + (uint32_t)i, i, status);
+    disk_block_index_init(&got);
+    return block_index_projection_get(p, h.hash, &got) &&
+        got.nHeight == h.height && got.nStatus == h.nStatus && got.nTx == h.nTx &&
+        got.nFile == h.nFile && got.nDataPos == h.nDataPos && got.nUndoPos == h.nUndoPos &&
+        bip_timing_header_matches(&got, &h, sol);
+}
+
+static bool bip_timing_rows(block_index_projection_t *p, int count, uint32_t status)
+{
+    if (block_index_projection_count(p) != (uint64_t)count) return false;
+    for (int i = 0; i < count; ++i)
+        if (!bip_timing_row_matches(p, i, status)) return false;
+    return true;
+}
+
+static uint64_t bip_timing_catch(block_index_projection_t *p, const char *label)
+{
+    int64_t start = platform_time_monotonic_us();
+    uint64_t off = block_index_projection_catch_up(p);
+    int64_t total = platform_time_monotonic_us() - start;
+    printf("projection timing: %s total_us=%lld internal_ms=%lld residual_us=%lld\n",
+           label, (long long)total, (long long)p->last_catch_up_ms,
+           (long long)(total - p->last_catch_up_ms * 1000));
+    return off;
+}
+
+static bool bip_timing_phase(block_index_projection_t *p, event_log_t *log,
+                             const char *label, bool headers, bool identical, uint32_t status)
+{
+    bool emitted = bip_timing_emit(log, 1000, headers ? 0 : 10, headers, identical);
+    uint64_t expected = event_log_size(log);
+    uint64_t off = bip_timing_catch(p, label);
+    return emitted && off == expected && bip_timing_rows(p, 1000, status);
+}
+
+static int run_catch_up_timing(int *failures)
+{
+    int before = *failures;
+    char dir[256], el_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "timing");
+    snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(el_path);
+    if (!log) { (*failures)++; goto done; }
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    if (!p) { (*failures)++; event_log_close(log); goto done; }
+    uint64_t empty = bip_timing_catch(p, "empty");
+    BIP_CHECK("timing: empty offset and rows", empty == event_log_size(log) && block_index_projection_count(p) == 0);
+    BIP_CHECK("timing: header phase", bip_timing_phase(p, log, "1000_headers", true, false, 0x20));
+    BIP_CHECK("timing: changed status phase", bip_timing_phase(p, log, "10000_changed_status", false, false, 0x49));
+    uint64_t before_equal = p->last_consumed_offset;
+    BIP_CHECK("timing: identical status phase", bip_timing_phase(p, log, "10000_identical_status", false, true, 0x49) &&
+              p->last_consumed_offset > before_equal);
+    uint64_t off = p->last_consumed_offset;
+    uint64_t noop = bip_timing_catch(p, "empty_after_backlog");
+    BIP_CHECK("timing: repeat is a no-op", noop == off && bip_timing_rows(p, 1000, 0x49));
+    block_index_projection_close(p);
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("timing: reopen preserves cursor and rows", p && p->last_consumed_offset == off &&
+              bip_timing_rows(p, 1000, 0x49));
+    if (p) block_index_projection_close(p);
+    event_log_close(log);
+    bip_cleanup_dir(dir);
+done:
+    return *failures - before;
+}
+
+struct bip_status_trace { int rows, dirty; };
+static int bip_status_trace_cb(unsigned event, void *opaque, void *stmt, void *unused)
+{
+    (void)unused;
+    if (event == SQLITE_TRACE_STMT) {
+        const char *sql = sqlite3_sql(stmt);
+        struct bip_status_trace *trace = opaque;
+        if (sql && strstr(sql, "INSERT OR REPLACE INTO block_index")) trace->rows++;
+        if (sql && strstr(sql, "INSERT OR IGNORE INTO block_index_dirty")) trace->dirty++;
+    }
+    return 0;
+}
+
+static void bip_change_one_field(struct ev_block_header *h, int field)
+{
+    if (field == 0) h->nStatus++;
+    if (field == 1) h->nFile++;
+    if (field == 2) h->nDataPos++;
+    if (field == 3) h->nUndoPos++;
+    if (field == 4) h->nTx++;
+}
+
+static bool bip_noop_dirty(block_index_projection_t *p, const uint8_t digest[32], size_t expected)
+{
+    struct dirty_count_ctx dirty = {0};
+    return block_index_projection_iterate_dirty_if_bound(p, digest, 4096, 1, count_dirty_cb, &dirty) == 1 &&
+           dirty.count == expected;
+}
+static bool bip_noop_counters(block_index_projection_t *p, event_log_t *log,
+                              uint64_t offset, uint64_t events, uint64_t collisions, uint64_t scans)
+{
+    return offset == event_log_size(log) && p->events_consumed_total == events &&
+           p->replace_collisions_total == collisions &&
+           boot_scan_value("block_index_projection.catch_up_events") == scans && bip_timing_rows(p, 1, 0x20);
+}
+static bool bip_noop_reopened(block_index_projection_t *p, const uint8_t digest[32],
+                              uint64_t offset, uint64_t events, uint64_t collisions)
+{
+    return p && p->last_consumed_offset == offset && p->events_consumed_total == events &&
+           p->replace_collisions_total == collisions && bip_timing_rows(p, 1, 0x20) && bip_noop_dirty(p, digest, 1);
+}
+
+static bool bip_noop_retained(block_index_projection_t *p, event_log_t *log,
+                              const struct bip_status_trace *trace, const uint8_t digest[32],
+                              uint64_t offset, uint64_t events, uint64_t collisions, uint64_t scans)
+{
+    return trace->rows == 10 && trace->dirty == 10 && bip_noop_dirty(p, digest, 1) &&
+           bip_noop_counters(p, log, offset, events, collisions, scans);
+}
+
+static int run_status_noop(int *failures)
+{
+    int before = *failures;
+    char dir[256], el_path[320], db_path[320];
+    test_make_tmpdir(dir, sizeof(dir), "bip", "status_noop");
+    snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    event_log_t *log = event_log_open(el_path);
+    if (!log) { (*failures)++; goto done; }
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    if (!p) { (*failures)++; event_log_close(log); goto done; }
+    struct ev_block_header original; uint8_t sol[8];
+    make_header(&original, sol, sizeof(sol), 0x70000u, 0, 0x20);
+    BIP_CHECK("status noop: initial header", emit_header(log, &original, sol) &&
+              block_index_projection_catch_up(p) == event_log_size(log));
+    uint8_t digest[32]; memset(digest, 0x5a, sizeof(digest));
+    BIP_CHECK("status noop: bind clean baseline", block_index_projection_bind_flat(p, digest, 4096, 1));
+    struct bip_status_trace trace = {0};
+    BIP_CHECK("status noop: trace enabled", sqlite3_trace_v2(p->db, SQLITE_TRACE_STMT, bip_status_trace_cb, &trace) == SQLITE_OK);
+    uint64_t events = p->events_consumed_total, collisions = p->replace_collisions_total;
+    uint64_t scans = boot_scan_value("block_index_projection.catch_up_events");
+    uint64_t old_offset = p->last_consumed_offset;
+    BIP_CHECK("status noop: identical event emitted", emit_status(log, &original));
+    uint64_t offset = block_index_projection_catch_up(p);
+    BIP_CHECK("status noop: no row or dirty write", trace.rows == 0 && trace.dirty == 0 &&
+              bip_noop_dirty(p, digest, 0));
+    BIP_CHECK("status noop: exact cursor and counters", offset > old_offset &&
+              bip_noop_counters(p, log, offset, events + 1, collisions, scans + 1));
+    bool emitted = true;
+    for (int i = 0; i < 5 && emitted; ++i) {
+        struct ev_block_header changed = original;
+        bip_change_one_field(&changed, i);
+        emitted = emit_status(log, &changed) && emit_status(log, &changed) && emit_status(log, &original);
+    }
+    BIP_CHECK("status noop: field changes, repeats and reversions emitted", emitted);
+    offset = block_index_projection_catch_up(p);
+    BIP_CHECK("status noop: only changed rows written", trace.rows == 10 && trace.dirty == 10 &&
+              bip_noop_dirty(p, digest, 1));
+    BIP_CHECK("status noop: mixed cursor and counters",
+              bip_noop_counters(p, log, offset, events + 16, collisions + 10, scans + 16));
+    BIP_CHECK("status noop: post-dirty identical emitted", emit_status(log, &original));
+    offset = block_index_projection_catch_up(p);
+    BIP_CHECK("status noop: prior dirty remains without writes",
+              bip_noop_retained(p, log, &trace, digest, offset, events + 17, collisions + 10, scans + 17));
+    BIP_CHECK("status noop: trace removed", sqlite3_trace_v2(p->db, 0, NULL, NULL) == SQLITE_OK);
+    block_index_projection_close(p);
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("status noop: reopen retains row, cursor, counts and dirty",
+              bip_noop_reopened(p, digest, offset, events + 17, collisions + 10));
+    if (p) block_index_projection_close(p);
+    event_log_close(log); bip_cleanup_dir(dir);
+done:
+    return *failures - before;
+}
+
 /* One case table is the coverage authority for the eight forked groups.
  * Every case owns a PID-specific database directory; the process-local memory,
  * storage and environment overrides cannot cross shard children. */
@@ -1963,6 +2172,8 @@ static const struct bip_case g_bip_cases[] = {
     {"collision_accounting_cached_stmt", run_collision_accounting_cached_stmt, 5},
     {"bound_dirty_delta", run_bound_dirty_delta, 6},
     {"catch_up_wal_budget", run_catch_up_wal_budget, 7},
+    {"catch_up_timing", run_catch_up_timing, 6},
+    {"status_noop", run_status_noop, 6},
     {"passive_checkpoint_then_close", run_passive_checkpoint_then_close, 6},
     {"catch_up_wal_reader", run_catch_up_wal_reader, 0},
     {"stoppable_sql_failure", run_stoppable_sql_failure, 1},
@@ -2086,9 +2297,9 @@ int test_block_index_projection(void)
     size_t owned = 0;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) owned += counts[i];
 #ifdef _WIN32
-    const size_t expected_cases = 24;
+    const size_t expected_cases = 26;
 #else
-    const size_t expected_cases = 25;
+    const size_t expected_cases = 27;
 #endif
     BIP_CHECK("partition: all cases have one owner",
               BIP_CASE_COUNT == expected_cases && owned == BIP_CASE_COUNT && unique);
