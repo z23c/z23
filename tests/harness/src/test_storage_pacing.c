@@ -1015,6 +1015,7 @@ static int test_bg_quick_check_names_corrupt_table(void)
  * step, until the pace leaves PAUSE; a shutdown request during the wait ends
  * the scan with the abort code (INCOMPLETE, never FAILED). */
 struct thermal_probe {
+    bool audit;
     struct boot_bg_quick_check_pace pace;
     _Atomic int rc;
     _Atomic bool done;
@@ -1023,12 +1024,13 @@ struct thermal_probe {
 static void *thermal_probe_main(void *arg)
 {
     struct thermal_probe *p = (struct thermal_probe *)arg;
-    atomic_store(&p->rc, boot_bg_quick_check_progress_for_test(&p->pace));
+    atomic_store(&p->rc, p->audit ? boot_event_log_audit_pace_for_test(&p->pace) :
+        boot_bg_quick_check_progress_for_test(&p->pace));
     atomic_store(&p->done, true);
     return NULL;
 }
 
-static int test_bg_quick_check_thermal_pause(void)
+static int test_bg_quick_check_thermal_pause(bool audit)
 {
     int failures = 0;
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
@@ -1038,6 +1040,7 @@ static int test_bg_quick_check_thermal_pause(void)
     struct thermal_probe p;
     memset(&p, 0, sizeof(p));
     boot_bg_quick_check_pace_init(&p.pace, storage_pacing_class());
+    p.audit = audit;
     SPC("at normal pace the handler continues at once and stays unmarked",
         boot_bg_quick_check_progress_for_test(&p.pace) == 0 &&
         !p.pace.thermal);
@@ -1057,6 +1060,7 @@ static int test_bg_quick_check_thermal_pause(void)
 
     memset(&p, 0, sizeof(p));
     boot_bg_quick_check_pace_init(&p.pace, storage_pacing_class());
+    p.audit = audit;
     node_pace_set(NODE_PACE_PAUSE);
     started = pthread_create(&th, NULL, thermal_probe_main, &p) == 0;
     platform_sleep_ms(300);
@@ -1075,7 +1079,7 @@ static int test_bg_quick_check_thermal_pause(void)
 
 /* GENTLE on flash paces like rotational storage: a slice of work, then an
  * idle gap. Slice expiry is driven by the injected clock. */
-static int test_bg_quick_check_thermal_gentle(void)
+static int test_bg_quick_check_thermal_gentle_case(bool audit)
 {
     int failures = 0;
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
@@ -1091,19 +1095,37 @@ static int test_bg_quick_check_thermal_gentle(void)
     struct boot_bg_quick_check_pace pace;
     boot_bg_quick_check_pace_init(&pace, storage_pacing_class());
     node_pace_set(NODE_PACE_GENTLE);
-    bool first = boot_bg_quick_check_progress_for_test(&pace) == 0;
+    bool first = audit ? !boot_event_log_audit_pace_for_test(&pace) : boot_bg_quick_check_progress_for_test(&pace) == 0;
     SPC("gentle: the first callback starts a slice without idling",
         first && pace.thermal && pace.thermal_naps == 0);
     g_pace_clock_us += 100 * 1000;
-    (void)boot_bg_quick_check_progress_for_test(&pace);
+    if (audit) (void)boot_event_log_audit_pace_for_test(&pace);
+    else (void)boot_bg_quick_check_progress_for_test(&pace);
     SPC("gentle: no idle inside the slice", pace.thermal_naps == 0);
     g_pace_clock_us += 600 * 1000;
-    bool second = boot_bg_quick_check_progress_for_test(&pace) == 0;
+    bool second = audit ? !boot_event_log_audit_pace_for_test(&pace) : boot_bg_quick_check_progress_for_test(&pace) == 0;
     SPC("gentle: one idle gap after the slice, then the scan continues",
         second && pace.thermal_naps == 1);
 
+    if (audit) {
+        node_pace_set(NODE_PACE_NORMAL);
+        SPC("audit: normal continues", !boot_event_log_audit_pace_for_test(&pace));
+        thread_registry_request_shutdown();
+        SPC("audit: shutdown cancels", boot_event_log_audit_pace_for_test(&pace));
+        thread_registry_reset_for_test();
+    }
     node_pace_set(NODE_PACE_NORMAL);
     platform_clock_clear_source();
+    if (audit) {
+        struct boot_bg_quick_check_pace p = {0};
+        p.thermal_slice_started_ms = platform_time_monotonic_ms() - 1000;
+        node_pace_set(NODE_PACE_GENTLE);
+        boot_event_log_audit_stop_on_nap_for_test(true);
+        SPC("audit: shutdown interrupts gentle nap", boot_event_log_audit_pace_for_test(&p) && p.thermal_naps == 1);
+        boot_event_log_audit_stop_on_nap_for_test(false);
+        thread_registry_reset_for_test();
+        node_pace_set(NODE_PACE_NORMAL);
+    }
     storage_pacing_reset_for_testing();
     return failures;
 }
@@ -1129,8 +1151,10 @@ int test_storage_pacing(void)
     failures += test_bg_quick_check_never_queues();
     failures += test_bg_quick_check_real_scan();
     failures += test_bg_quick_check_outcome_str();
-    failures += test_bg_quick_check_thermal_pause();
-    failures += test_bg_quick_check_thermal_gentle();
+    failures += test_bg_quick_check_thermal_pause(false);
+    failures += test_bg_quick_check_thermal_pause(true);
+    failures += test_bg_quick_check_thermal_gentle_case(false);
+    failures += test_bg_quick_check_thermal_gentle_case(true);
     failures += test_bg_quick_check_names_corrupt_table();
     if (failures == 0)
         printf("=== storage_pacing tests: ALL PASS ===\n");

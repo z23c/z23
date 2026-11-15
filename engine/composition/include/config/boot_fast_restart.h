@@ -226,6 +226,8 @@ bool boot_fast_restart_bg_quick_check_cancel_for_test(void);
  * SQLite calls. `arg` is a struct boot_bg_quick_check_pace * (NULL is the
  * unpaced cancellation-only behaviour). Returns 1 to abort the VM. */
 int boot_bg_quick_check_progress_for_test(void *arg);
+bool boot_event_log_audit_pace_for_test(struct boot_bg_quick_check_pace *pace);
+void boot_event_log_audit_stop_on_nap_for_test(bool enabled);
 
 /* Run the real "PRAGMA quick_check(1)" against `path` on a read-only handle
  * under the production progress handler, paced for the currently resolved

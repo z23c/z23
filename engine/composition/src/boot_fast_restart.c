@@ -385,6 +385,12 @@ static bool boot_bg_quick_check_thermal_hold(
 
 /* GENTLE on storage that is not rotational: after each slice of work, idle for
  * the rotational class's gap in bounded steps. Returns true on shutdown. */
+#ifdef ZCL_TESTING
+static bool g_audit_test_stop_on_nap;
+void boot_event_log_audit_stop_on_nap_for_test(bool enabled)
+{ g_audit_test_stop_on_nap = enabled; }
+#endif
+
 static bool boot_bg_quick_check_thermal_gentle(
     struct boot_bg_quick_check_pace *pace)
 {
@@ -398,6 +404,9 @@ static bool boot_bg_quick_check_thermal_gentle(
     if (now - pace->thermal_slice_started_ms < 2 * gap)
         return false;
     pace->thermal_naps++;
+#ifdef ZCL_TESTING
+    if (g_audit_test_stop_on_nap) thread_registry_request_shutdown();
+#endif
     for (int64_t idle = 0; idle < gap; idle += BG_QUICK_CHECK_THERMAL_NAP_STEP_MS) {
         if (thread_registry_shutdown_requested())
             return true;
@@ -754,7 +763,7 @@ bool boot_bg_quick_check_start(const struct boot_bg_quick_check_target *target)
  * instead of re-reading it (storage/event_log.h, "Verified-prefix receipt").
  * This background pass re-proves that prefix, off the boot path, so a flipped
  * byte is still found — after READY instead of at boot. */
-static int64_t g_audit_thermal_wait_ms;
+static _Thread_local struct boot_bg_quick_check_pace g_audit_pace;
 
 /* Polled by the audit between chunks: holds through a PAUSE like the SQLite
  * scans do, and ends the audit as incomplete on shutdown. */
@@ -762,7 +771,7 @@ static bool boot_event_log_audit_should_stop(void)
 {
     if (thread_registry_shutdown_requested())
         return true;
-    return boot_bg_quick_check_thermal_hold(NULL, &g_audit_thermal_wait_ms);
+    return boot_bg_quick_check_thermal(&g_audit_pace);
 }
 
 static void *boot_event_log_audit_entry(void *arg)
@@ -773,6 +782,7 @@ static void *boot_event_log_audit_entry(void *arg)
         return NULL;   /* not wired this boot: nothing to audit */
 
     uint64_t audited = 0;
+    memset(&g_audit_pace, 0, sizeof(g_audit_pace));
     int64_t t0 = platform_time_monotonic_ms();
     int rc = event_log_audit_prefix(log, boot_event_log_audit_should_stop,
                                     &audited);
@@ -792,10 +802,10 @@ static void *boot_event_log_audit_entry(void *arg)
     printf("[boot] bg_quick_check %s target=event_log (receipt prefix audit) "
            "paced=%s bytes=%llu ms=%lld thermal_wait_ms=%lld\n",
            rc == 0 ? "ok" : rc < 0 ? "FAILED" : "did not complete",
-           g_audit_thermal_wait_ms > 0 ? "thermal" : "no",
+           g_audit_pace.thermal ? "thermal" : "no",
            (unsigned long long)audited,
            (long long)(platform_time_monotonic_ms() - t0),
-           (long long)g_audit_thermal_wait_ms);
+           (long long)g_audit_pace.thermal_wait_ms);
     return NULL;
 }
 
@@ -845,6 +855,14 @@ bool boot_fast_restart_bg_quick_check_cancel_for_test(void)
     sqlite3_finalize(st);
     sqlite3_close(db);
     return rc == SQLITE_INTERRUPT;
+}
+
+bool boot_event_log_audit_pace_for_test(struct boot_bg_quick_check_pace *pace)
+{
+    g_audit_pace = *pace;
+    bool stopped = boot_event_log_audit_should_stop();
+    *pace = g_audit_pace;
+    return stopped;
 }
 
 int boot_bg_quick_check_progress_for_test(void *arg)
