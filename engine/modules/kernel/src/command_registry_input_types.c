@@ -1292,6 +1292,12 @@ static bool cr_telegram_descriptor(const struct zcl_command_spec *spec, const ch
     return false;
 }
 
+static bool cr_objectives_path_key(const char *path, const char *key)
+{
+    static const char *const keys[] = { "outcomes", "attempts_dir", "repo", "lintc_dir", "baseline", "brief" };
+    return !strcmp(path, "fleet.objectives") && cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0]));
+}
+
 static bool cr_general_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -1309,7 +1315,7 @@ static bool cr_general_descriptor(
         out->minimum = host_bound->lo;
         out->maximum = host_bound->hi;
     } else if (cr_key_in(key, strings, sizeof(strings) / sizeof(strings[0])) ||
-               cr_docs_path_key(spec->path, key)) {
+               cr_docs_path_key(spec->path, key) || cr_objectives_path_key(spec->path, key)) {
         out->type = JSON_STR;
         out->max_bytes = zcl_command_registry_input_str_max(key);
         out->enum_values = cr_string_enums(key);

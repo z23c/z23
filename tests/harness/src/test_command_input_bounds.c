@@ -2098,6 +2098,30 @@ static int t_receive_continuation_wire(void)
     return failures;
 }
 
+static int t_objectives_path_descriptors(void)
+{
+    int failures = 0;
+    static const char *const keys[] = { "outcomes", "attempts_dir", "repo", "lintc_dir", "baseline", "brief" };
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "fleet.objectives", NULL);
+    struct zcl_command_spec unrelated = {.path = "fixture.unrelated", .input_keys = "brief"};
+    bool all = spec != NULL;
+    for (size_t i = 0; all && i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        struct zcl_command_input_descriptor d;
+        size_t max = zcl_command_registry_input_str_max(keys[i]);
+        all = zcl_command_registry_input_descriptor(spec, keys[i], &d) && d.type == JSON_STR &&
+            d.max_bytes == max && !d.required && cib_accepts("fleet.objectives", keys[i], 1, NULL, 0) &&
+            cib_accepts("fleet.objectives", keys[i], max, NULL, 0) &&
+            !cib_accepts("fleet.objectives", keys[i], 0, NULL, 0) &&
+            !cib_accepts("fleet.objectives", keys[i], max + 1, NULL, 0) &&
+            !cib_accepts_int("fleet.objectives", keys[i], 1);
+    }
+    struct zcl_command_input_descriptor other;
+    CIB_CHECK("objectives path overrides expose strings and preserve validation", all);
+    CIB_CHECK("objectives brief remains a path, not a boolean", !cib_json_shape("fleet.objectives", "{\"brief\":true}"));
+    CIB_CHECK("brief descriptor remains leaf scoped", !zcl_command_registry_input_descriptor(&unrelated, "brief", &other));
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
@@ -2107,6 +2131,7 @@ int test_command_input_bounds(void)
     failures += t_discovery_transport_shapes();
     failures += t_discovery_transport_edges();
     failures += t_discovery_descriptor_contract();
+    failures += t_objectives_path_descriptors();
     failures += t_soak_input_contract();
     failures += t_soak_time_contract();
     failures += t_key_edges();
