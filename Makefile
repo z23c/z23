@@ -18096,6 +18096,8 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # universal. A path that routes to no group is named on the selection line
 # (detail=unrouted=N first=<path>); with no routed group the test step is
 # skipped. The stack gate still runs the proof's full set.
+# The check-capability-closure step is the land proof's closure gate; it
+# grades the dev-epoch objects the test step just built, so it runs after it.
 # The check-kpi-floor step reads the floor file tools/lint/kpi_floor.txt and
 # the inputs its metrics measure: build/gen/CAPABILITY_INVENTORY.jsonl (built
 # by the step before it), engine/composition/commands/catalog.def,
@@ -18168,6 +18170,8 @@ agent-verify:
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \
 	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; fi; \
+	 av_step check-capability-closure; \
+	 av_step proof-lint-prebuild; \
 	 av_step docs-capability-inventory; \
 	 av_step check-kpi-floor; \
 	 av_step lint-fast; \

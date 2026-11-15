@@ -1016,7 +1016,7 @@ slice.
 
 `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed` (the groups the land proof selects for your committed changes; or `ONLY=<group,group>`) is the one verification trip for an
 edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
-`docs-capability-inventory` and `lint-fast`, each in its own sub-make with a log
+`check-capability-closure`, `proof-lint-prebuild` (the proof's production-flag prefork build), `docs-capability-inventory`, `check-kpi-floor` and `lint-fast`, each in its own sub-make with a log
 under `build/scratch/`. Complexity fails fast before selector setup; later failures are collected.
 It prints one
 `agent-verify: <step> rc=<n>` line per step, then `agent-verify: OK` or
