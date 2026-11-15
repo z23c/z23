@@ -207,13 +207,31 @@ static int64_t umc_poll_max_ms(void)
     return UMC_POLL_MAX_MS;
 }
 
-/* One RPC round trip. True only when the node answered with a typed object
- * (it always does: the method never returns a JSON-RPC error). Anything else —
- * connection refused, no cookie, deadline, an error object, an old node
- * without the method — means no usable answer. */
-static bool umc_call(const char *params, struct json_value *body,
-                     char *why, size_t why_cap)
+static void umc_call_error(struct json_value *body, bool parsed,
+                           char *why, size_t why_cap, bool *not_sent)
 {
+    const struct json_value *err = parsed && body->type == JSON_OBJ
+        ? json_get(body, "error") : NULL;
+    if ((!err || err->type != JSON_OBJ) && json_get(body, "code"))
+        err = body;
+    const char *msg = err && err->type == JSON_OBJ
+        ? json_get_str(json_get(err, "message")) : NULL;
+    if (not_sent && err && err->type == JSON_OBJ) {
+        int64_t code = json_get_int(json_get(err, "code"));
+        *not_sent = code == NODE_RPC_UNREACHABLE ||
+                    code == NODE_RPC_DEADLINE_EXPIRED;
+    }
+    snprintf(why, why_cap, "%s", msg && msg[0] ? msg : "untyped reply");
+}
+
+/* One RPC round trip. True only when the node answered with a typed object
+ * (it always does: the method never returns a JSON-RPC error). When not_sent is
+ * non-NULL, set it only for a transport error that proves no request was sent. */
+static bool umc_call(const char *params, struct json_value *body,
+                     char *why, size_t why_cap, bool *not_sent)
+{
+    if (not_sent)
+        *not_sent = false;
     why[0] = '\0';
     char *raw = node_rpc_call(UMC_RPC_METHOD, params);
     if (!raw) {
@@ -222,17 +240,14 @@ static bool umc_call(const char *params, struct json_value *body,
     }
     bool parsed = json_read(body, raw, strlen(raw));
     free(raw);
-    if (!parsed || body->type != JSON_OBJ ||
-        !json_get_str(json_get(body, "state"))) {
-        const struct json_value *err = parsed && body->type == JSON_OBJ
-            ? json_get(body, "error") : NULL;
-        const char *msg = err && err->type == JSON_OBJ
-            ? json_get_str(json_get(err, "message")) : NULL;
-        snprintf(why, why_cap, "%s", msg && msg[0] ? msg : "untyped reply");
-        json_free(body);
-        return false;
-    }
-    return true;
+    const struct json_value *state = parsed && body->type == JSON_OBJ
+        ? json_get(body, "state") : NULL;
+    if (parsed && body->type == JSON_OBJ &&
+        (!not_sent || (state && state->type == JSON_STR)))
+        return true;
+    umc_call_error(body, parsed, why, why_cap, not_sent);
+    json_free(body);
+    return false;
 }
 
 static void umc_fail_unavailable(struct zcl_command_reply *reply,
@@ -246,6 +261,19 @@ static void umc_fail_unavailable(struct zcl_command_reply *reply,
                            "runs outside the node)", why);
     (void)zcl_command_reply_add_next(reply, "core.status", "{}",
                                      "confirm the node is running");
+}
+
+static void umc_fail_start_unknown(struct zcl_command_reply *reply,
+                                   const char *why)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, "REBUILD_OUTCOME_UNKNOWN",
+                           "dispatch", false, true,
+                           "the rebuild start request may have reached the "
+                           "node; its outcome could not be read; do not replay, "
+                           "inspect the mirror first", why);
+    (void)zcl_command_reply_add_next(reply, "ops.debug.dash.mirror", "{}",
+                                     "inspect mirror health and rebuild count");
 }
 
 /* The node accepted the job and then went quiet, or the wait ran out: the
@@ -292,7 +320,7 @@ static void umc_poll_job(uint64_t id, struct zcl_command_reply *reply)
         if (interval > 0)
             platform_sleep_ms((int)interval);
         struct json_value b = {0};
-        if (umc_call(params, &b, why, sizeof(why))) {
+        if (umc_call(params, &b, why, sizeof(why), NULL)) {
             fails = 0;
             const char *state = json_get_str(json_get(&b, "state"));
             if (strcmp(state, "done") == 0) {
@@ -331,8 +359,12 @@ static void umc_run_forwarded(struct zcl_command_reply *reply)
     zcl_native_bridge_ensure_rpc();
     struct json_value b = {0};
     char why[160];
-    if (!umc_call("[\"start\"]", &b, why, sizeof(why))) {
-        umc_fail_unavailable(reply, why);
+    bool not_sent = false;
+    if (!umc_call("[\"start\"]", &b, why, sizeof(why), &not_sent)) {
+        if (not_sent)
+            umc_fail_unavailable(reply, why);
+        else
+            umc_fail_start_unknown(reply, why);
         return;
     }
     const char *state = json_get_str(json_get(&b, "state"));
@@ -358,7 +390,7 @@ static void umc_run_forwarded(struct zcl_command_reply *reply)
     } else if (strcmp(state, "absent") == 0) {
         umc_fail_absent(reply);
     } else {
-        umc_fail_unavailable(reply, "unrecognised reply to the start request");
+        umc_fail_start_unknown(reply, "unrecognised reply to the start request");
     }
     json_free(&b);
 }

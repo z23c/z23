@@ -1237,6 +1237,7 @@ enum ums_node_mode {
     UMS_NODE_COOKIE_ERROR,  /* the client's own transport error body */
     UMS_NODE_NEVER_DONE,    /* start accepted, the job never completes */
     UMS_NODE_DIES_AFTER_START, /* start accepted, then every poll fails */
+    UMS_NODE_DROP_START_REPLY, /* start queued, then its reply is lost */
 };
 
 static bool g_ums_forwarded;
@@ -1246,13 +1247,22 @@ static int g_ums_node_polls;
 static int g_ums_node_calls;
 static struct rpc_table g_ums_node_table;
 
+static char *ums_node_reply(char *out)
+{
+    if (g_ums_node_mode == UMS_NODE_DROP_START_REPLY) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
 static char *ums_node_hook(const char *method, const char *params_json)
 {
     g_ums_node_calls++;
     if (g_ums_node_mode == UMS_NODE_NO_ANSWER)
         return NULL;
     if (g_ums_node_mode == UMS_NODE_COOKIE_ERROR)
-        return strdup("{\"error\":{\"code\":-32603,\"message\":"
+        return strdup("{\"error\":{\"code\":-32097,\"message\":"
                       "\"cannot read RPC auth cookie\"}}");
     struct json_value params = {0}, result = {0};
     if (!json_read(&params, params_json, strlen(params_json)))
@@ -1277,7 +1287,7 @@ static char *ums_node_hook(const char *method, const char *params_json)
         out[0] = '\0';
     json_free(&params);
     json_free(&result);
-    return out;
+    return ums_node_reply(out);
 }
 
 static void ums_fwd_begin(struct utxo_mirror_sync_service *svc)
@@ -1456,12 +1466,14 @@ static int ums_fwd_run(struct ums_fx *fx, const char *name,
                        const char *evidence_prefix)
 {
     int failures = 0;
-    char label[128];
+    char label[256];
     g_ums_node_mode = mode;
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.utxo_mirror_rebuild.v1");
     ums_call_handler(&fx->svc, &reply);
-    snprintf(label, sizeof(label), "fwd/%s: status and code %s", name, code);
+    snprintf(label, sizeof(label), "fwd/%s: want %s/%d got %s/%d evidence=%s",
+             name, code, status, reply.error.code, reply.status,
+             reply.error.evidence);
     UMS_CHECK(label, reply.status == status &&
               strcmp(reply.error.code, code) == 0);
     snprintf(label, sizeof(label), "fwd/%s: mutated=%d", name, (int)mutated);
@@ -1472,6 +1484,34 @@ static int ums_fwd_run(struct ums_fx *fx, const char *name,
                                  strlen(evidence_prefix)) == 0);
     }
     zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static int ums_test_drop_start_reply(struct ums_fx *fx)
+{
+    int failures = 0;
+    g_ums_node_mode = UMS_NODE_DROP_START_REPLY;
+    struct zcl_command_reply lost;
+    zcl_command_reply_init(&lost, "zcl.utxo_mirror_rebuild.v1");
+    ums_call_handler(&fx->svc, &lost);
+    UMS_CHECK("fwd/drop_start_reply: outcome is unknown, not unavailable",
+              lost.status == ZCL_COMMAND_STATUS_FAILED &&
+              strcmp(lost.error.code, "REBUILD_OUTCOME_UNKNOWN") == 0);
+    UMS_CHECK("fwd/drop_start_reply: mutated and not retryable",
+              lost.error.mutated && !lost.error.retryable);
+    UMS_CHECK("fwd/drop_start_reply: never claims nothing changed",
+              strstr(lost.error.message, "nothing was run or changed") == NULL);
+    struct utxo_mirror_rebuild_job job;
+    utxo_mirror_rebuild_job_snapshot(&fx->svc, &job);
+    UMS_CHECK("fwd/drop_start_reply: the job was already queued",
+              job.id == 2 && job.state == UTXO_MIRROR_JOB_PENDING);
+    zcl_command_reply_free(&lost);
+    UMS_CHECK("fwd/drop_start_reply: the queued job really rebuilds",
+              utxo_mirror_rebuild_job_service(&fx->svc));
+    utxo_mirror_rebuild_job_snapshot(&fx->svc, &job);
+    UMS_CHECK("fwd/drop_start_reply: rebuild completed despite the lost reply",
+              job.id == 2 && job.state == UTXO_MIRROR_JOB_DONE &&
+              job.result == 3 && !job.quarantined);
     return failures;
 }
 
@@ -1493,10 +1533,10 @@ static int ums_test_forward_edges(void)
     UMS_CHECK("fwd: the method needs operator authority, not safe-mode",
               cmd && !cmd->ok_safe_mode);
 
-    /* No node answers: typed NODE_UNAVAILABLE, never a local run. */
+    /* A missing reply cannot prove whether the start was dispatched. */
     failures += ums_fwd_run(&fx, "no_answer", UMS_NODE_NO_ANSWER,
-                            "NODE_UNAVAILABLE", ZCL_COMMAND_STATUS_BLOCKED,
-                            false, NULL);
+                            "REBUILD_OUTCOME_UNKNOWN", ZCL_COMMAND_STATUS_FAILED,
+                            true, NULL);
     failures += ums_fwd_run(&fx, "cookie_error", UMS_NODE_COOKIE_ERROR,
                             "NODE_UNAVAILABLE", ZCL_COMMAND_STATUS_BLOCKED,
                             false, NULL);
@@ -1549,10 +1589,16 @@ static int ums_test_forward_edges(void)
               job.state == UTXO_MIRROR_JOB_DONE && job.result == 3 &&
               !job.quarantined);
 
+    /* The start was really queued, but its reply disappeared afterwards. */
+    failures += ums_test_drop_start_reply(&fx);
+
     /* Accepted, then the node stops answering the polls. */
+    int before_dies = g_ums_node_calls;
     failures += ums_fwd_run(&fx, "node_dies", UMS_NODE_DIES_AFTER_START,
                             "REBUILD_OUTCOME_UNKNOWN",
-                            ZCL_COMMAND_STATUS_FAILED, true, "job_id=2;");
+                            ZCL_COMMAND_STATUS_FAILED, true, "job_id=3;");
+    UMS_CHECK("fwd/node_dies: a parsed status error is not retried",
+              g_ums_node_calls == before_dies + 2);
 
     /* The method itself always answers with a typed object. */
     struct json_value params = {0}, result = {0};
