@@ -351,7 +351,37 @@ advertised_subver_verdict() {
     echo foreign
 }
 
+peer_lifecycle_summary_envelope_is_valid() {
+    printf '%s\n' "$1" |
+        grep -q '"subsystem"[[:space:]]*:[[:space:]]*"peer_lifecycle"' &&
+        printf '%s\n' "$1" | grep -q '"state"[[:space:]]*:[[:space:]]*{'
+}
+
+json_health_gap_at_most_one() {
+    printf '%s\n' "$1" |
+        grep -q '"tip_lag"[[:space:]]*:[[:space:]]*[01]\([^0-9]\|$\)'
+}
+
 deploy_verify_selftest() {
+    peer_summary_envelope='{"subsystem":"peer_lifecycle","description":"P2P lifecycle","captured_at":1,"state":{"attempted":1,"sources":[]}}'
+    peer_lifecycle_summary_envelope_is_valid "$peer_summary_envelope" || return 1
+    if peer_lifecycle_summary_envelope_is_valid '{"subsystem":"other","state":{"attempted":1}}'; then
+        return 1
+    fi
+    if peer_lifecycle_summary_envelope_is_valid '{"subsystem":"peer_lifecycle","summary":{"attempted":1}}'; then
+        return 1
+    fi
+
+    json_health_gap_at_most_one '{"checks":{"tip_lag":0}}' || return 1
+    json_health_gap_at_most_one '{"checks":{"tip_lag":1}}' || return 1
+    if json_health_gap_at_most_one '{"checks":{"tip_lag":2}}' ||
+       json_health_gap_at_most_one '{"checks":{"tip_lag":-1}}' ||
+       json_health_gap_at_most_one '{"checks":{"tip_lag":null}}' ||
+       json_health_gap_at_most_one '{"checks":{"gap":0}}' ||
+       json_health_gap_at_most_one '{"checks":{}}'; then
+        return 1
+    fi
+
     # Hostile inherited lane selectors must have no role in the result.
     ZCL_DATADIR="/attacker/datadir"
     ZCL_RPCPORT="1"
@@ -807,11 +837,6 @@ json_top_key_is_string() {
     json_key_is_string "$1" "$2" "$3"
 }
 
-json_health_gap_at_most_one() {
-    printf '%s\n' "$1" |
-        grep -q '"gap"[[:space:]]*:[[:space:]]*[01]\([^0-9]\|$\)'
-}
-
 json_rpc_result() {
     printf '%s\n' "$1"
 }
@@ -1009,8 +1034,8 @@ verify_contract() {
 
     if [ "$peer_lifecycle_verified" -eq 0 ]; then
         peer=$(rpc_dumpstate peer_lifecycle summary)
-        json_has_key "$peer" summary ||
-            { last_err="peer_lifecycle summary missing: $peer"; return 1; }
+        peer_lifecycle_summary_envelope_is_valid "$peer" ||
+            { last_err="peer_lifecycle summary envelope invalid: $peer"; return 1; }
         json_has_key "$peer" sources ||
             { last_err="peer_lifecycle sources missing: $peer"; return 1; }
         json_has_key "$peer" legacy_magicbean_handshakes ||
