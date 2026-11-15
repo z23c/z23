@@ -170,9 +170,11 @@ order of size.
 
    On public source c1b8a6d6ca48, a fresh installed sender used copied AI setup
    to edit, preview and Keep, then shared the signed file and closed its app
-   session before a fresh receiver accepted it. The receiver needed no account, previewed and
-   kept the copy, and rebuilt the same package and running image; its edited
-   source matched the sender's pinned kept source. Board and storage observations
+   session before a fresh receiver accepted it. The receiver needed no account,
+   completed Build, Preview and Keep, and its package and running image matched
+   the sender's; its edited source matched the sender's pinned kept source. The
+   original receipt omitted cache and make observations, so fresh compilation
+   is unconfirmed. Board and storage observations
    support distinct physical environments but are not hardware attestation.
    This copied-file run is not Tor, offline or physical-host catalog evidence.
    An immediate sender post-Keep read misreported lock contention as damaged
