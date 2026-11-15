@@ -29,6 +29,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "mcp/mcp_policy.h"
+#include "presentation/canvas.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
 #include "util/spawn.h"
@@ -2354,9 +2355,12 @@ static bool ak_draft_cancel_consent(struct ak_draft_flow_view *v,
     v->review_seen = true;
     return aj_receive_action(live, 0, &close, &redraw) && close;
 }
-static bool ak_draft_expected_title(const struct zcl_present_model_v1 *model, bool keep_view)
+static bool ak_draft_expected_view(const struct zcl_present_model_v1 *model, bool keep_view)
 {
-    if (keep_view || !strcmp(model->title, "Review unkept changes")) return true;
+    if (keep_view)
+        return !strcmp(model->summary, "Keep this previewed version. Newer changes remain available.") &&
+            zcl_present_canvas_text_width(model->summary, strlen(model->summary), 15u) <= 636u;
+    if (!strcmp(model->title, "Review unkept changes")) return true;
     fprintf(stderr, "draft presenter: unexpected title=%s summary=%s\n", model->title, model->summary);
     return false;
 }
@@ -2375,7 +2379,7 @@ static bool ak_draft_flow_present(void *context, const struct zcl_present_model_
     if (!strcmp(model->title, "Prepare a personal copy?"))
         return ak_draft_cancel_consent(v, model, live, why, cap);
     bool keep_view = !strcmp(model->title, "Preview opened");
-    if (!ak_draft_expected_title(model, keep_view)) return false;
+    if (!ak_draft_expected_view(model, keep_view)) return false;
     if (!aj_receive_field(model, "Draft version: ", v->nav.head)) return false;
     if (keep_view) v->prompted_keep = true;
     if (keep_view && !v->keep) return aj_receive_action(live, 0, &close, &redraw) && close;

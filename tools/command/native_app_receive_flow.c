@@ -519,7 +519,7 @@ static bool arf_keep_result(struct receive_flow *f, const struct zcl_command_rep
 }
 static const char *arf_keep_summary(const struct receive_flow *f)
 {
-    if (f->draft) return "Check the app before choosing Keep. This keeps the exact version you previewed; newer changes remain available.";
+    if (f->draft) return "Keep this previewed version. Newer changes remain available.";
     if (f->adopted) return "Check the app before choosing Keep. Closing leaves your personal copy available.";
     if (f->recovered) return "Check the app before choosing Keep. Closing ends this review.";
     return "Check the app before choosing Keep. Closing leaves your received copy available.";
