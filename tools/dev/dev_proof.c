@@ -10057,6 +10057,91 @@ bool zcl_dev_proof_test_generation_precheck(const char *root, char *why, size_t 
 }
 #endif
 
+/* The source record and digest must describe the same stable open inode. */
+static bool dp_executable_stamp_equal(const struct stat *a, const struct stat *b)
+{
+    if (!S_ISREG(a->st_mode) || !S_ISREG(b->st_mode) ||
+        a->st_dev != b->st_dev || a->st_ino != b->st_ino ||
+        a->st_mode != b->st_mode || a->st_size != b->st_size)
+        return false;
+#if defined(__APPLE__)
+    return a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+           a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+           a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+           a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
+    return a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
+           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+}
+
+static bool dp_executable_hash_fd(int fd, uint8_t out[32])
+{
+    struct sha3_256_ctx sha;
+    uint8_t buffer[65536];
+    off_t offset = 0;
+    hash_begin(&sha, "zcl.dev_proof_executable_reuse.v1");
+    for (;;) {
+        ssize_t n = pread(fd, buffer, sizeof(buffer), offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) return false;
+        if (n == 0) break;
+        sha3_256_write(&sha, buffer, (size_t)n);
+        offset += n;
+    }
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
+#if defined(ZCL_TESTING)
+static void (*dp_executable_test_after_record)(const char *, void *);
+static void *dp_executable_test_context;
+static void (*dp_executable_test_after_admit)(const char *, void *);
+#endif
+
+/* Observe the identity through the very descriptor that will be hashed. */
+static bool dp_executable_observe(const struct proof_paths *paths, int fd,
+                                  const char *artifact,
+                                  const struct dev_source_record *expected,
+                                  struct stat *before, char *why, size_t why_len)
+{
+    if (fstat(fd, before) != 0 || !S_ISREG(before->st_mode)) {
+        proof_why(why, why_len, "proof_executable_stat_failed");
+        return false;
+    }
+    struct dev_source_record source = {0};
+    char source_why[160] = {0};
+    if (!zcl_dev_executable_source_record_read(paths->root, fd, artifact,
+                                               &source, source_why, sizeof(source_why))) {
+        proof_whyf(why, why_len, "proof_executable_%s",
+                   source_why[0] ? source_why : "source_record_failed");
+        return false;
+    }
+#if defined(ZCL_TESTING)
+    if (dp_executable_test_after_record)
+        dp_executable_test_after_record(artifact, dp_executable_test_context);
+#endif
+    if (strcmp(source.source_id, expected->source_id) != 0) {
+        proof_whyf(why, why_len,
+                   "proof_executable_source_identity_mismatch_actual_%.16s_expected_%.16s",
+                   source.source_id, expected->source_id);
+        return false;
+    }
+    return true;
+}
+
+static bool dp_executable_source_stable(int fd, const char *artifact,
+                                        const struct stat *before, uint8_t out[32])
+{
+    struct stat after, named;
+    return dp_executable_hash_fd(fd, out) && fstat(fd, &after) == 0 &&
+           dp_executable_stamp_equal(before, &after) &&
+           lstat(artifact, &named) == 0 &&
+           dp_executable_stamp_equal(&after, &named);
+}
+
 static bool executable_reuse(const struct proof_paths *paths,
                              const char *artifact,
                              const struct dev_source_record *expected_source,
@@ -10070,37 +10155,37 @@ static bool executable_reuse(const struct proof_paths *paths,
     }
     int fd = open(artifact, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
-        proof_whyf(why, why_len, "proof_executable_open_failed_errno_%d",
-                   errno);
+        proof_whyf(why, why_len, "proof_executable_open_failed_errno_%d", errno);
         return false;
     }
-    struct dev_source_record source = {0};
-    char source_why[160] = {0};
-    bool admitted = zcl_dev_executable_source_record_read(
-        paths->root, fd, artifact, &source, source_why, sizeof(source_why));
-    if (close(fd) != 0) {
-        proof_whyf(why, why_len, "proof_executable_close_failed_errno_%d",
-                   errno);
-        return false;
-    }
-    if (!admitted) {
-        proof_whyf(why, why_len, "proof_executable_%s",
-                   source_why[0] ? source_why : "source_record_failed");
-        return false;
-    }
-    if (strcmp(source.source_id, expected_source->source_id) != 0) {
-        proof_whyf(why, why_len,
-                   "proof_executable_source_identity_mismatch_actual_%.16s_expected_%.16s",
-                   source.source_id, expected_source->source_id);
-        return false;
-    }
-    if (!hash_file("zcl.dev_proof_executable_reuse.v1", artifact,
-                   dimension->receipt_root)) {
-        proof_why(why, why_len, "proof_executable_hash_failed");
+    struct stat before;
+    bool observed = dp_executable_observe(paths, fd, artifact, expected_source,
+                                          &before, why, why_len);
+    bool hashed = observed && dp_executable_source_stable(
+        fd, artifact, &before, dimension->receipt_root);
+    bool closed = close(fd) == 0;
+    if (!observed) return false;
+    if (!hashed || !closed) {
+        proof_why(why, why_len, "proof_executable_hash_or_stability_failed");
         return false;
     }
     dimension->reused = dimension->selected;
     return true;
+}
+
+/* Materialization may reopen the source path; bind its output to admission. */
+static bool dp_executable_target_matches(const char *target,
+                                         const uint8_t admitted[32])
+{
+    int fd = open(target, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat before, after;
+    uint8_t digest[32];
+    bool same = fd >= 0 && fstat(fd, &before) == 0 && S_ISREG(before.st_mode) &&
+        dp_executable_hash_fd(fd, digest) && fstat(fd, &after) == 0 &&
+        dp_executable_stamp_equal(&before, &after) &&
+        memcmp(digest, admitted, sizeof(digest)) == 0;
+    if (fd >= 0 && close(fd) != 0) same = false;
+    return same;
 }
 
 static bool admitted_executable_materialize(
@@ -10121,12 +10206,67 @@ static bool admitted_executable_materialize(
     if (!executable_reuse(paths, source, expected_source, &artifact,
                           why, why_len))
         return false;
+#if defined(ZCL_TESTING)
+    if (dp_executable_test_after_admit)
+        dp_executable_test_after_admit(source, dp_executable_test_context);
+#endif
     if (!dependency_materialize(source, target)) {
         proof_why(why, why_len, "proof_executable_materialize_failed");
         return false;
     }
+    if (!dp_executable_target_matches(target, artifact.receipt_root)) {
+        proof_why(why, why_len, "proof_executable_materialized_digest_mismatch");
+        return false;
+    }
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_executable_reuse(
+    const char *root, const char *source, const char *source_id,
+    void (*after_record)(const char *, void *), void *context,
+    char *why, size_t why_len)
+{
+    struct proof_paths paths = {0};
+    struct dev_source_record expected = {0};
+    struct zcl_dev_proof_dimension dimension = {.selected = 1};
+    if (!root || !source_id || strlen(source_id) != 64 ||
+        snprintf(paths.root, sizeof(paths.root), "%s", root) >= (int)sizeof(paths.root))
+        return false;
+    memcpy(expected.source_id, source_id, 65);
+    dp_executable_test_after_record = after_record;
+    dp_executable_test_context = context;
+    bool ok = executable_reuse(&paths, source, &expected, &dimension, why, why_len);
+    dp_executable_test_after_record = NULL;
+    dp_executable_test_context = NULL;
+    return ok;
+}
+#endif
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_executable_materialize(
+    const char *root, const char *generation, const char *source,
+    const char *source_id, void (*after_record)(const char *, void *),
+    void *context, bool after_admit, char *why, size_t why_len)
+{
+    struct proof_paths paths = {0};
+    struct dev_source_record expected = {0};
+    char target[PATH_MAX];
+    if (!root || !source_id || strlen(source_id) != 64 ||
+        snprintf(paths.root, sizeof(paths.root), "%s", root) >= (int)sizeof(paths.root))
+        return false;
+    memcpy(expected.source_id, source_id, 65);
+    dp_executable_test_after_record = after_admit ? NULL : after_record;
+    dp_executable_test_after_admit = after_admit ? after_record : NULL;
+    dp_executable_test_context = context;
+    bool ok = admitted_executable_materialize(&paths, generation, source,
+        "build/bin/z23-dev", &expected, target, why, why_len);
+    dp_executable_test_after_record = NULL;
+    dp_executable_test_after_admit = NULL;
+    dp_executable_test_context = NULL;
+    return ok;
+}
+#endif
 
 static bool admitted_executable_mark_fresh(const char *path)
 {

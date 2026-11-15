@@ -14236,6 +14236,83 @@ static bool ic_release_fault_case(const char *submit, const char *generation, un
                         mode, ok, fault.invoked, fault.prepared, why, sentinel);
     return valid;
 }
+extern bool zcl_dev_proof_test_executable_reuse(
+    const char *, const char *, const char *, void (*)(const char *, void *),
+    void *, char *, size_t);
+extern bool zcl_dev_proof_test_executable_materialize(
+    const char *, const char *, const char *, const char *,
+    void (*)(const char *, void *), void *, bool, char *, size_t);
+
+struct ic_executable_race { unsigned mode; bool prepared; };
+
+static void ic_executable_race_after_record(const char *path, void *context)
+{
+    struct ic_executable_race *race = context;
+    char replacement[4352];
+    const char *output = path;
+    if (race->mode != 2) {
+        if (snprintf(replacement, sizeof(replacement), "%s.replacement", path) >=
+            (int)sizeof(replacement)) return;
+        output = replacement;
+    }
+    int flags = O_WRONLY | O_CLOEXEC;
+    flags |= race->mode != 2 ? O_CREAT | O_EXCL : O_APPEND;
+    int fd = open(output, flags, 0700);
+    if (fd < 0) return;
+    bool ok = write(fd, "different", 9) == 9;
+    if (close(fd) != 0) ok = false;
+    if (ok && race->mode != 2) ok = rename(output, path) == 0;
+    race->prepared = ok;
+}
+
+static int test_ic_executable_materialize_stability(void)
+{
+    int failures = 0;
+    char submit[4096] = {0}, generation[4096] = {0}, path[4352];
+#if !defined(_WIN32)
+    const char *original = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = original ? strdup(original) : NULL;
+    bool modified = false;
+#endif
+    TEST("proof executable admission refuses path replacement and inode mutation") {
+#if !defined(_WIN32)
+        char why[512] = {0};
+        ASSERT(!original || saved);
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        modified = true;
+        test_make_tmpdir(submit, sizeof(submit), "impact_composition", "reuse-submit");
+        test_make_tmpdir(generation, sizeof(generation), "impact_composition", "reuse-generation");
+        ASSERT(snprintf(path, sizeof(path), "%s/build/bin/z23-dev", submit) < (int)sizeof(path));
+        ASSERT(ic_release_fixture(submit, generation));
+        ASSERT(zcl_dev_proof_test_executable_materialize(submit, generation, path,
+            ic_release_source_id, NULL, NULL, false, why, sizeof(why)));
+        struct ic_executable_race direct = {.mode = 1};
+        ASSERT(ic_release_fixture(submit, generation));
+        ASSERT(!zcl_dev_proof_test_executable_reuse(submit, path,
+            ic_release_source_id, ic_executable_race_after_record, &direct,
+            why, sizeof(why)));
+        ASSERT(direct.prepared);
+        for (unsigned mode = 1; mode <= 3; ++mode) {
+
+            struct ic_executable_race race = {.mode = mode};
+            ASSERT(ic_release_fixture(submit, generation));
+            ASSERT(!zcl_dev_proof_test_executable_materialize(submit, generation, path,
+                ic_release_source_id, ic_executable_race_after_record, &race, mode == 3, why, sizeof(why)));
+            ASSERT(race.prepared);
+        }
+#endif
+        PASS();
+    } _test_next:;
+#if !defined(_WIN32)
+    if (modified && (saved ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) :
+                             unsetenv("ZCL_DEVLOOP_TEST_PROCESS")) != 0) failures++;
+    free(saved);
+#endif
+    if (submit[0]) test_rm_rf_recursive(submit);
+    if (generation[0]) test_rm_rf_recursive(generation);
+    return failures;
+}
+
 static int test_ic_release_readmission_alias(void)
 {
     int failures = 0; char submit[4096] = {0}, generation[4096] = {0};
@@ -17731,6 +17808,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_worker_plan_docs_before_refresh();
     failures += test_ic_worker_plan_graph_refresh_refuses();
     if (include_bundle) failures += ic_run_bundle();
+    failures += test_ic_executable_materialize_stability();
     failures += test_ic_release_readmission_alias();
     printf("closure_generation_fixtures wall_us=%lld\n",
            (long long)(platform_time_monotonic_us() - closure_fixture_started_us));
