@@ -67,7 +67,8 @@ static const struct zcl_app_observation_field zrv_receive_fields[] = {
 static const struct zcl_app_observation_field zrv_build_fields[] = {
     {"stage", JSON_STR}, {"copy", JSON_STR}, {"version", JSON_STR},
     {"package_root", JSON_STR}, {"env_root", JSON_STR}, {"dependency_root", JSON_STR},
-    {"record_id", JSON_STR}, {"image_sha3", JSON_STR}, {"executed", JSON_BOOL}
+    {"record_id", JSON_STR}, {"image_sha3", JSON_STR}, {"executed", JSON_BOOL},
+    {"cache_hit", JSON_BOOL}, {"make_ran", JSON_BOOL}, {"confinement", JSON_STR}
 };
 static const struct zcl_app_observation_field zrv_open_fields[] = {
     {"stage", JSON_STR}, {"copy_dir", JSON_STR}, {"head_version", JSON_STR},

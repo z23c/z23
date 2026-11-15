@@ -5212,18 +5212,31 @@ static bool tag_observation_tuple(const struct json_value *receive, const struct
         tag_matching_fields(opened, "image_sha3", result, "image_sha3") &&
         tag_matching_fields(receive, "destination", opened, "copy_dir");
 }
-static bool tag_check_observations(const struct zcl_command_reply *reply, const char *datadir)
+static bool tag_build_observation_flags(const struct json_value *build, bool cached)
+{
+    const struct json_value *hit = json_get(build, "cache_hit");
+    const struct json_value *made = json_get(build, "make_ran");
+    const struct json_value *mode = json_get(build, "confinement");
+    return hit && hit->type == JSON_BOOL && json_get_bool(hit) == cached &&
+        made && made->type == JSON_BOOL && json_get_bool(made) != cached &&
+        mode && mode->type == JSON_STR && json_get_str(mode) && json_get_str(mode)[0];
+}
+static bool tag_open_observation(const struct json_value *opened)
+{
+    const char *proof = zcl_package_copy_str(opened, "mapped_proof");
+    const struct json_value *executed = json_get(opened, "executed"), *alive = json_get(opened, "settled_alive");
+    return proof && (!strcmp(proof, "fexecve_inode") || !strcmp(proof, "proc_exe_triple") || !strcmp(proof, "cdhash_suspended")) &&
+        executed && executed->type == JSON_BOOL && json_get_bool(executed) &&
+        alive && alive->type == JSON_BOOL && json_get_bool(alive);
+}
+static bool tag_check_observations(const struct zcl_command_reply *reply, const char *datadir, bool cached)
 {
     const struct json_value *receive = tag_passed_data(json_get(&reply->data, "receive_observation"), "zcode.package.bundle.receive");
     const struct json_value *build = tag_passed_data(json_get(&reply->data, "build_observation"), "app.build");
     const struct json_value *opened = tag_passed_data(json_get(&reply->data, "open_observation"), "app.run.copy");
-    const char *proof = zcl_package_copy_str(opened, "mapped_proof");
-    const struct json_value *executed = json_get(opened, "executed"), *alive = json_get(opened, "settled_alive");
     return receive && build && opened && datadir &&
         tag_observation_tuple(receive, build, opened, &reply->data) &&
-        proof && (!strcmp(proof, "fexecve_inode") || !strcmp(proof, "proc_exe_triple") || !strcmp(proof, "cdhash_suspended")) &&
-        executed && executed->type == JSON_BOOL && json_get_bool(executed) &&
-        alive && alive->type == JSON_BOOL && json_get_bool(alive);
+        tag_build_observation_flags(build, cached) && tag_open_observation(opened);
 }
 static bool tag_library_wire(struct zcl_command_reply *reply, bool failure)
 {
@@ -5342,7 +5355,7 @@ static void tag_comparison_seed(const struct zcl_app_offer_row *row,
     if (tag_comparison_seed_ok)
         tag_comparison_seed_ok = tag_board_add_as(&match, 10, 0x6b) && tag_board_add_as(&match, 9, 0x6c);
 }
-static int tag_get_observations(struct tag_world *w)
+static int tag_get_observations(struct tag_world *w, const char *datadir, bool cached)
 {
     int failures = 0; struct asf_leaf leaf; bool opened = false; struct tag_discover child = {0};
     char token[33], plan[65], offer[65];
@@ -5350,7 +5363,7 @@ static int tag_get_observations(struct tag_world *w)
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
         asf_open(&leaf); opened = true;
-        ASSERT(json_push_kv_str(&leaf.in, "datadir", w->j.b_datadir) &&
+        ASSERT(json_push_kv_str(&leaf.in, "datadir", datadir) &&
             json_push_kv_str(&leaf.in, "name", w->name));
         ASSERT(asf_pass("app.get", &leaf));
         ASSERT(tag_get_plan_ids(&leaf, token, plan, offer));
@@ -5367,13 +5380,92 @@ static int tag_get_observations(struct tag_world *w)
             memcpy(child.image, image, sizeof(child.image));
         }
         ASSERT(passed && child.pid > 1 && child.start);
-        ASSERT(tag_check_observations(&leaf.out, w->j.b_datadir));
+        ASSERT(tag_check_observations(&leaf.out, datadir, cached));
         ASSERT(tag_library_wire(&leaf.out, false));
         PASS();
     } _test_next:;
-    if (child.pid > 1 && !tag_stop_receipt(&child, w->j.b_datadir)) ++failures;
+    if (child.pid > 1 && !tag_stop_receipt(&child, datadir)) ++failures;
     if (opened) asf_close(&leaf);
     return failures;
+}
+
+static bool tag_owned_child_running(pid_t pid)
+{
+    siginfo_t info = {0};
+    int rc;
+    do rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    while (rc < 0 && errno == EINTR);
+    return rc == 0 && info.si_pid == 0;
+}
+
+static bool tag_receive_child_fallback(const struct asf_leaf *leaf, const char *datadir,
+                                       struct tag_discover *child)
+{
+    const struct json_value *p = json_get(&leaf->out.data, "pid");
+    const struct json_value *build = json_get(json_get(&leaf->out.data, "build_observation"), "data");
+    const char *image = zcl_package_copy_str(build, "image_sha3");
+    uint8_t digest[32]; char path[TAG_PATH], resolved[PATH_MAX], actual[APP_LAUNCH_PATH_MAX];
+    if (!p || p->type != JSON_INT || json_get_int(p) <= 1 || !image || strlen(image) != 64 ||
+        !zcl_hex_decode_lower(image, digest, sizeof(digest))) return false;
+    int n = snprintf(path, sizeof(path), "%s/app_build/images/%s", datadir, image);
+    uint64_t start = 0; long pid = (long)json_get_int(p);
+    if (n <= 0 || (size_t)n >= sizeof(path) || !tag_owned_child_running((pid_t)pid) || !realpath(path, resolved) ||
+        !app_proc_identity(pid, actual, &start) || !start || strcmp(actual, resolved)) return false;
+    child->pid = pid; child->start = start; memcpy(child->image, image, sizeof(child->image));
+    return true;
+}
+
+static void tag_receive_child(const struct asf_leaf *leaf, const char *datadir,
+                              struct tag_discover *child, bool use_open)
+{
+    const struct json_value *p = json_get(&leaf->out.data, "pid");
+    const struct json_value *observation = json_get(json_get(&leaf->out.data, "open_observation"), "data");
+    const char *start = zcl_package_copy_str(observation, "start_token");
+    const char *image = zcl_package_copy_str(observation, "image_sha3");
+    if (use_open && p && p->type == JSON_INT && start && image && strlen(image) == 64) {
+        child->pid = (long)json_get_int(p); child->start = strtoull(start, NULL, 10);
+        memcpy(child->image, image, sizeof(child->image));
+    }
+    /* A top-level PID can survive an unavailable open observation. */
+    if (!child->pid || !child->start) (void)tag_receive_child_fallback(leaf, datadir, child);
+}
+
+static bool tag_receive_observations(const char *datadir, const char *file, bool cached)
+{
+    struct asf_leaf leaf; asf_open(&leaf);
+    bool ok = json_push_kv_str(&leaf.in, "datadir", datadir) &&
+        json_push_kv_str(&leaf.in, "file", file) && asf_pass("app.receive-copy", &leaf);
+    char plan[65] = "";
+    if (ok) {
+        (void)snprintf(plan, sizeof(plan), "%s", asf_get(&leaf, "plan_id"));
+        ok = strlen(plan) == 64 && json_push_kv_str(&leaf.in, "plan_id", plan) &&
+            json_push_kv_bool(&leaf.in, "confirm", true);
+    }
+    if (ok) {
+        zcl_command_reply_free(&leaf.out); zcl_command_reply_init(&leaf.out, "zcl.app_receive.v1");
+        ok = asf_pass("app.receive-copy", &leaf);
+    }
+    struct tag_discover child = {0};
+    /* Exercise missing-open cleanup on the cached case after retaining the real reply. */
+    tag_receive_child(&leaf, datadir, &child, !cached);
+    if (ok) ok = child.pid > 1 && child.start && tag_check_observations(&leaf.out, datadir, cached);
+    if (child.pid > 1 && !tag_stop_receipt(&child, datadir)) ok = false;
+    asf_close(&leaf); return ok;
+}
+
+static bool tag_receive_observation_cases(struct tag_world *w)
+{
+    char datadir[TAG_PATH], file[TAG_PATH];
+    int n = snprintf(datadir, sizeof(datadir), "%s/receive-observation", w->root);
+    int m = snprintf(file, sizeof(file), "%s/observation.z23share", w->root);
+    if (n <= 0 || (size_t)n >= sizeof(datadir) || m <= 0 || (size_t)m >= sizeof(file) ||
+        mkdir(datadir, 0700) != 0) return false;
+    FILE *out = fopen(file, "wb");
+    if (!out) return false;
+    bool wrote = fwrite(g_tag.bytes, 1, g_tag.len, out) == g_tag.len;
+    if (fclose(out) != 0 || !wrote) return false;
+    return tag_receive_observations(datadir, file, false) &&
+        tag_receive_observations(datadir, file, true);
 }
 /* The confirmed get's fetch must not be silent: it shows the same bounded
  * download window Discover shows, and closing it cancels before Receive. */
@@ -5495,7 +5587,14 @@ static int tag_b_journeys(struct tag_world *w)
     int failures = tag_b_get(w);
     if (!failures) failures += tag_confirm_progress(w);
     if (!failures) failures += tag_door_confirm_cancel(w);
-    return failures ? failures : tag_get_observations(w);
+    if (!failures) failures += tag_get_observations(w, w->j.b_datadir, true);
+    char fresh[TAG_PATH];
+    int n = snprintf(fresh, sizeof(fresh), "%s/observation-fresh", w->root);
+    if (!failures && (n <= 0 || (size_t)n >= sizeof(fresh) || mkdir(fresh, 0700) != 0)) return 1;
+    if (!failures) failures += tag_get_observations(w, fresh, false);
+    if (!failures) failures += tag_get_observations(w, fresh, true);
+    if (!failures && !tag_receive_observation_cases(w)) ++failures;
+    return failures;
 }
 
 static bool tag_pages_board(struct tag_world *w, char target[65])
