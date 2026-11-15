@@ -104,4 +104,12 @@ enum rf_xchg rf_chunk_exchange(struct rf_peer_conn *c,
                                const uint8_t chunk_root[32], uint32_t idx,
                                uint8_t *buf, uint32_t *out_sz);
 
+/* The verified download's between-round backoff: production_ms, unless a test
+ * replaced it. Lives in rom_fetch_session.c (rom_fetch.c is at its ceiling). */
+uint32_t rf_retry_backoff_ms(uint32_t production_ms);
+#ifdef ZCL_TESTING
+/* 0 restores production_ms. Lets a test walk every round in seconds. */
+void rom_fetch_set_retry_backoff_ms_for_test(uint32_t ms);
+#endif
+
 #endif /* ZCL_NET_ROM_FETCH_INTERNAL_H */

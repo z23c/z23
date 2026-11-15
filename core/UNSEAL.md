@@ -1242,3 +1242,7 @@ later lane flips it HARD.
 - 2026-11-10T17:41:27Z — REASON: Owner authorized 2026-11-10 metadata-only dependency refresh after behavior-preserving text_fit complexity refactor; no consensus predicates changed
   old ROOT: 0b668cf4c2ce053d9dabaf3a9d0bf6a1ba4b76edb6cc8150bead6275c4eeca99
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-15T22:21:00Z — REASON: rom_fetch: bound each chunk exchange with a transfer deadline so a dripping seed fails over; network client hardening, no consensus predicate change
+  old ROOT: 8f98184ff122c56ac2649b862a41cce01c1918d913cf20ed31cfccfad2c8b868
+  by: owner unseal ritual (make core-unseal)

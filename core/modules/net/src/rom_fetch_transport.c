@@ -71,6 +71,83 @@
 #define RF_ONION_IO_TIMEOUT_MS (RF_IO_TIMEOUT_MS * RF_ONION_SLOWDOWN)
 #define RF_ONION_PROBE_IO_TIMEOUT_MS (RF_PROBE_IO_TIMEOUT_MS * RF_ONION_SLOWDOWN)
 
+/* ── Per-chunk TRANSFER deadline: the bound the silence window is not ──
+ *
+ * The io window above re-arms on every byte, so a seed that drips one byte
+ * per 119 s holds a worker forever. rf_chunk_deadline_ms bounds the whole
+ * reply instead: request sent at t0, the first B wire bytes must be in by
+ *
+ *     t0 + SLOWDOWN * (SLACK + B / FLOOR)      (SLOWDOWN = 4 onion, 1 else)
+ *
+ * FLOOR is 64 KiB/s and SLACK 60 s. Both are anchored to the serve side
+ * (file_service_transport.c FS_PUBLIC_IO_*), which abandons any reply it
+ * cannot push within 30 s + B / 256 KiB/s. A seeder on this tree therefore
+ * never delivers a full 8 MiB chunk (8388644 wire bytes) slower than
+ * 30 + 33 = 63 s from its first send, while the client waits
+ * 60 + 128 = 188 s clearnet and 4 * 188 = 752 s over Tor: an effective onion
+ * floor of 16 KiB/s with 240 s for the first byte. A slow but honest Tor
+ * circuit (tens to hundreds of KiB/s) finishes a chunk in a few minutes at
+ * worst; anything at or above the floor finishes inside the deadline. A
+ * miss ends ONE exchange: the session is dropped and the worker fails over,
+ * exactly as for a broken link. */
+#define RF_CHUNK_FLOOR_BYTES_PER_SEC UINT64_C(65536)
+#define RF_CHUNK_SLACK_MS INT64_C(60000)
+
+#ifdef ZCL_TESTING
+/* 0 = the production value above. */
+static _Atomic uint64_t g_rf_chunk_floor_test;
+static _Atomic int64_t g_rf_chunk_slack_test;
+
+void rom_fetch_set_chunk_deadline_for_test(uint64_t floor_bytes_per_sec,
+                                           int64_t slack_ms)
+{
+    atomic_store(&g_rf_chunk_floor_test, floor_bytes_per_sec);
+    atomic_store(&g_rf_chunk_slack_test, slack_ms > 0 ? slack_ms : 0);
+}
+#endif
+
+static void rf_chunk_deadline_terms(uint64_t *floor_bps, int64_t *slack)
+{
+    *floor_bps = RF_CHUNK_FLOOR_BYTES_PER_SEC;
+    *slack = RF_CHUNK_SLACK_MS;
+#ifdef ZCL_TESTING
+    uint64_t test_floor = atomic_load(&g_rf_chunk_floor_test);
+    int64_t test_slack = atomic_load(&g_rf_chunk_slack_test);
+    if (test_floor)
+        *floor_bps = test_floor;
+    if (test_slack)
+        *slack = test_slack;
+#endif
+}
+
+int64_t rf_chunk_deadline_ms(const char *peer_addr, int64_t start_ms,
+                             uint64_t wire_bytes)
+{
+    uint64_t floor_bps = 0;
+    int64_t slack = 0;
+    rf_chunk_deadline_terms(&floor_bps, &slack);
+    /* wire_bytes is bounded by ROM_SEED_CHUNK_SIZE + 36 at every caller;
+     * refuse anything that could overflow rather than wrap to a long wait. */
+    if (start_ms <= 0 || wire_bytes > UINT64_C(1) << 40)
+        LOG_RETURN(0, RF_SUBSYS, "chunk: transfer deadline unavailable "
+                   "(start %lld, %llu bytes) — exchange fails closed",
+                   (long long)start_ms, (unsigned long long)wire_bytes);
+    int64_t budget = slack +
+        (int64_t)((wire_bytes * 1000u + floor_bps - 1u) / floor_bps);
+    if (net_name_is_onion(peer_addr))
+        budget *= RF_ONION_SLOWDOWN;
+    if (start_ms > INT64_MAX - budget)
+        LOG_RETURN(0, RF_SUBSYS, "chunk: transfer deadline overflows the "
+                   "monotonic clock — exchange fails closed");
+    return start_ms + budget;
+}
+
+int rf_io_timeout_ms(const char *peer_addr)
+{
+    return net_name_is_onion(peer_addr) ? RF_ONION_IO_TIMEOUT_MS
+                                        : RF_IO_TIMEOUT_MS;
+}
+
 /* Test-only injection of the raw-stream backend, mirroring
  * onion_stream_connect_backend_for_test. NULL in production and on every
  * path a release build can reach -- the whole block compiles out. */
@@ -127,12 +204,20 @@ bool rf_recv_exact(platform_socket_t fd, uint8_t *buf, size_t size)
 bool rf_recv_exact_until(platform_socket_t fd, uint8_t *buf, size_t size,
                          int64_t deadline_ms)
 {
+    return rf_recv_exact_bounded(fd, buf, size, deadline_ms, INT32_MAX);
+}
+
+bool rf_recv_exact_bounded(platform_socket_t fd, uint8_t *buf, size_t size,
+                           int64_t deadline_ms, int silence_ms)
+{
+    if (silence_ms <= 0)
+        silence_ms = INT32_MAX;
     size_t received = 0;
     while (received < size) {
         int64_t left = deadline_ms - platform_time_monotonic_ms();
         if (left <= 0)
             return false;
-        int timeout = left > INT32_MAX ? INT32_MAX : (int)left;
+        int timeout = left > silence_ms ? silence_ms : (int)left;
         if (platform_socket_set_receive_timeout(fd, timeout) != 0)
             return false;
         int result = platform_socket_receive(fd, buf + received,

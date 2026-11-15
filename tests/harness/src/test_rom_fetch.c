@@ -2922,6 +2922,408 @@ static int test_root_seed_retrieval(void)
     return failures;
 }
 
+/* ── Transfer-deadline fixture: a seeder that PACES its chunk reply ─────
+ *
+ * It completes the real handshake, answers the RMF manifest at once, then
+ * sends a ROM chunk reply on a fixed schedule: DRIP sends the size header and
+ * then ONE body byte per tick (far inside the 120 s silence window, so only a
+ * transfer deadline can end it); HONEST sends `slice` wire bytes per tick,
+ * MAC included, i.e. a slow but well-formed seeder. It records how long the
+ * client sat through each reply before it hung up (a failed send) — the sharp
+ * witness for "one dripping seed costs one bounded exchange". */
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+/* Test seams (rom_fetch_transport.c, rom_fetch_session.c; ZCL_TESTING). */
+extern void rom_fetch_set_chunk_deadline_for_test(uint64_t floor_bytes_per_sec,
+                                                  int64_t slack_ms);
+extern void rom_fetch_set_retry_backoff_ms_for_test(uint32_t ms);
+
+/* ROM_FETCH_VER_ROUNDS in rom_fetch.c: ROM_FETCH_CHUNK_RETRIES (25) + 1. */
+#define RF_PACE_ROUNDS 26
+/* Loopback dial + handshake + scheduling allowance per exchange. */
+#define RF_PACE_MARGIN_MS 500
+
+enum rf_pace_mode { RF_PACE_DRIP, RF_PACE_HONEST };
+
+struct rf_pace_seeder {
+    int fd;
+    uint16_t port;
+    pthread_t thread;
+    _Atomic bool stop;
+    enum rf_pace_mode mode;
+    int tick_ms;
+    size_t slice;
+    const char *dir;
+    const struct rom_artifact *art;
+    _Atomic unsigned rom_requests;
+    _Atomic int64_t max_hold_ms;
+};
+
+/* The serve side's chunk MAC: SHA3(key || send_counter || digest || data). */
+static void rf_pace_mac(struct fs_session *s, const uint8_t digest[32],
+                        const uint8_t *data, uint32_t n, uint8_t out[32])
+{
+    struct sha3_256_ctx mac;
+    sha3_256_init(&mac);
+    sha3_256_write(&mac, s->key, sizeof(s->key));
+    sha3_256_write(&mac, (const uint8_t *)&s->send_counter,
+                   sizeof(s->send_counter));
+    sha3_256_write(&mac, digest, 32);
+    sha3_256_write(&mac, data, n);
+    sha3_256_finalize(&mac, out);
+    s->send_counter++;
+}
+
+/* Send wire[0..total) on the mode's schedule (absolute ticks, no drift).
+ * Stops early when the client hangs up or the fixture is stopped. */
+static void rf_pace_send(struct rf_pace_seeder *p, int fd,
+                         const uint8_t *wire, size_t total)
+{
+    bool drip = p->mode == RF_PACE_DRIP;
+    size_t sent = 0, step = drip ? 1u : p->slice;
+    size_t want = drip ? 4u : step;
+    int64_t t0 = platform_time_monotonic_ms();
+    for (int64_t k = 1; sent < total && !atomic_load(&p->stop); k++) {
+        if (want > total - sent)
+            want = total - sent;
+        if (send(fd, wire + sent, want, MSG_NOSIGNAL) != (ssize_t)want)
+            break;
+        sent += want;
+        want = step;
+        int64_t wait = t0 + k * p->tick_ms - platform_time_monotonic_ms();
+        if (wait > 0)
+            platform_sleep_ms((uint32_t)wait);
+    }
+    int64_t hold = platform_time_monotonic_ms() - t0;
+    if (hold > atomic_load(&p->max_hold_ms))
+        atomic_store(&p->max_hold_ms, hold);
+}
+
+static void rf_pace_chunk(struct rf_pace_seeder *p, struct fs_session *s,
+                          int fd, uint32_t index)
+{
+    atomic_fetch_add(&p->rom_requests, 1);
+    uint8_t *wire = malloc(4u + (size_t)p->art->chunk_size + 32u);
+    uint32_t n = 0;
+    if (!wire || !rom_seed_read_chunk(p->art, p->dir, index, wire + 4,
+                                      p->art->chunk_size, &n)) {
+        free(wire);
+        return;
+    }
+    for (int b = 0; b < 4; b++)
+        wire[b] = (uint8_t)(n >> (8 * b));
+    rf_pace_mac(s, p->art->chunk_sha3[index], wire + 4, n, wire + 4 + n);
+    /* DRIP never gets as far as the MAC: the body alone outlasts any test. */
+    rf_pace_send(p, fd, wire, p->mode == RF_PACE_DRIP ? 4u + n : 4u + n + 32u);
+    free(wire);
+}
+
+static void rf_pace_conn(struct rf_pace_seeder *p, int fd)
+{
+    struct fs_session session;
+    fs_session_init(&session, fd);
+    uint8_t zero[32] = {0}, root[32], type = 0;
+    const uint8_t *payload = NULL;
+    uint32_t len = 0, index = 0;
+    int64_t deadline = platform_time_monotonic_ms() + 5000;
+    if (fs_handshake_until(&session, zero, false, deadline) &&
+        fs_recv_frame_until(&session, &type, &payload, &len, deadline) &&
+        type == FS_REQUEST) {
+        if (fs_parse_rom_manifest_request(payload, len, root)) {
+            uint8_t blob[ROM_SEED_MANIFEST_BLOB_MAX];
+            const uint8_t tag[32] = {0x52, 0x4d, 0x46};
+            size_t n = rom_seed_manifest_blob(p->art, blob, sizeof(blob));
+            if (n) (void)fs_send_chunk_fast(&session, blob, (uint32_t)n, tag);
+        } else if (fs_parse_rom_request(payload, len, root, &index) &&
+                   index < p->art->num_chunks) {
+            rf_pace_chunk(p, &session, fd, index);
+        }
+    }
+    fs_session_cleanup(&session);
+}
+
+static void *rf_pace_serve(void *arg)
+{
+    struct rf_pace_seeder *p = arg;
+    while (!atomic_load(&p->stop)) {
+        struct pollfd pollfd = {.fd = p->fd, .events = POLLIN};
+        if (poll(&pollfd, 1, 50) <= 0) continue;
+        int fd = accept(p->fd, NULL, NULL);
+        if (fd < 0) continue;
+#if defined(SO_NOSIGPIPE)
+        int one = 1;
+        (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+        rf_pace_conn(p, fd);
+        close(fd);
+    }
+    return NULL;
+}
+
+static bool rf_pace_start(struct rf_pace_seeder *p, enum rf_pace_mode mode,
+                          int tick_ms, size_t slice, const char *dir,
+                          const struct rom_artifact *art)
+{
+    memset(p, 0, sizeof(*p));
+    p->mode = mode; p->tick_ms = tick_ms; p->slice = slice;
+    p->dir = dir; p->art = art;
+    p->fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (p->fd < 0) return false;
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(addr);
+    if (bind(p->fd, (struct sockaddr *)&addr, sizeof(addr)) || listen(p->fd, 16) ||
+        getsockname(p->fd, (struct sockaddr *)&addr, &len) ||
+        pthread_create(&p->thread, NULL, rf_pace_serve, p)) {
+        close(p->fd); p->fd = -1; return false;
+    }
+    p->port = ntohs(addr.sin_port);
+    return true;
+}
+
+/* Stop serving and close the listener: later dials are refused at once. */
+static void rf_pace_stop(struct rf_pace_seeder *p)
+{
+    if (p->fd < 0) return;
+    atomic_store(&p->stop, true);
+    (void)pthread_join(p->thread, NULL);
+    close(p->fd);
+    p->fd = -1;
+}
+
+/* One single-chunk (64 KiB) artifact, served from sdir, fetched into cdir. */
+struct rf_pace_case {
+    char sroot[PATH_MAX], croot[PATH_MAX];
+    char *sdir, *cdir;
+    struct rom_artifact art;
+    struct rom_fetch_manifest m;
+    uint8_t (*chunk_sha3)[32];
+    uint32_t chunks;
+};
+
+static bool rf_pace_case_open(struct rf_pace_case *c, const char *name)
+{
+    fs_server_stop(); rom_seed_reset(); rom_peer_scoring_test_reset();
+    rom_seed_set_peer_bps_cap(1ull << 30); rom_seed_set_global_bps_cap(1ull << 30);
+    c->sdir = test_mkdtemp(c->sroot, sizeof(c->sroot), "zcl_romfetch_pace_srv");
+    c->cdir = test_mkdtemp(c->croot, sizeof(c->croot), "zcl_romfetch_pace_cli");
+    uint8_t *content = malloc(65536);
+    c->chunk_sha3 = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32);
+    if (!c->sdir || !c->cdir || !content || !c->chunk_sha3) { free(content); return false; }
+    gen_content(content, 65536);
+    bool ok = write_file(c->sdir, name, content, 65536) &&
+              rom_seed_register(c->sdir, name, NULL, &c->art) == ROM_REG_OK &&
+              c->art.num_chunks == 1;
+    free(content);
+    if (ok) manifest_from_artifact(&c->art, &c->m);
+    return ok;
+}
+
+static bool rf_pace_case_manifest(struct rf_pace_case *c, uint16_t port)
+{
+    return rom_fetch_get_manifest("127.0.0.1", port, c->m.chunk_root, c->chunk_sha3,
+                                  ROM_SEED_MAX_CHUNKS, &c->chunks) && c->chunks == 1;
+}
+
+static void rf_pace_case_close(struct rf_pace_case *c)
+{
+    rom_fetch_set_chunk_deadline_for_test(0, 0);
+    rom_fetch_set_retry_backoff_ms_for_test(0);
+    fs_server_stop(); rom_seed_reset(); rom_peer_scoring_test_reset();
+    free(c->chunk_sha3);
+    if (c->sdir) test_rm_rf_recursive(c->sdir);
+    if (c->cdir) test_rm_rf_recursive(c->cdir);
+}
+
+/* The client deadline for this case's whole chunk reply (clearnet). */
+static int64_t rf_pace_deadline(const struct rf_pace_case *c, uint64_t floor,
+                                int64_t slack_ms)
+{
+    rom_fetch_set_chunk_deadline_for_test(floor, slack_ms);
+    rom_fetch_set_retry_backoff_ms_for_test(10);
+    uint64_t wire = 4u + c->art.size_bytes + 32u;
+    return slack_ms + (int64_t)((wire * 1000u + floor - 1u) / floor);
+}
+
+/* The download under test, on its own thread so the test can bound it. */
+struct rf_dl_run {
+    const struct rf_pace_case *c;
+    const struct rom_fetch_peer *peers;
+    size_t npeers;
+    pthread_t tid;
+    bool started;
+    bool ok;
+    _Atomic bool done;
+    _Atomic int64_t elapsed_ms;
+};
+
+static void *rf_dl_thread(void *arg)
+{
+    struct rf_dl_run *r = arg;
+    int64_t t0 = platform_time_monotonic_ms();
+    r->ok = rom_fetch_download_verified_parallel(r->peers, r->npeers, &r->c->m,
+        (const uint8_t (*)[32])r->c->chunk_sha3, r->c->chunks, r->c->cdir, NULL, NULL);
+    atomic_store(&r->elapsed_ms, platform_time_monotonic_ms() - t0);
+    atomic_store(&r->done, true);
+    return NULL;
+}
+
+/* Start the download and wait up to bound_ms; true iff it returned in time.
+ * The caller stops its seeders and then calls rf_dl_join either way. */
+static bool rf_dl_bounded(struct rf_dl_run *r, const struct rf_pace_case *c,
+                          const struct rom_fetch_peer *peers, size_t npeers,
+                          int64_t bound_ms)
+{
+    r->c = c;
+    r->peers = peers;
+    r->npeers = npeers;
+    r->started = pthread_create(&r->tid, NULL, rf_dl_thread, r) == 0;
+    int64_t until = platform_time_monotonic_ms() + bound_ms;
+    while (r->started && !atomic_load(&r->done) &&
+           platform_time_monotonic_ms() < until)
+        platform_sleep_ms(10);
+    return r->started && atomic_load(&r->done);
+}
+
+static void rf_dl_join(struct rf_dl_run *r)
+{
+    if (r->started) (void)pthread_join(r->tid, NULL);
+    r->started = false;
+}
+
+static void rf_peer_at(struct rom_fetch_peer *p, uint16_t port)
+{
+    memset(p, 0, sizeof(*p));
+    snprintf(p->addr, sizeof(p->addr), "%s", "127.0.0.1");
+    p->port = port;
+}
+
+/* (a) The dripping seed is the only peer: every round costs one bounded
+ * exchange, the round cap ends the job, and the download returns false. */
+static int test_dripping_seed_alone_returns(void)
+{
+    int failures = 0;
+    struct rf_pace_case c = {0};
+    struct rf_pace_seeder drip = {.fd = -1};
+    struct rf_dl_run run = {0};
+    struct rom_fetch_peer peer;
+    TEST("rom_fetch: a seed dripping a chunk under the silence window costs "
+         "one bounded exchange per round and the download returns false") {
+        ASSERT(rf_pace_case_open(&c, "consensus-state-bundle-drip.sqlite"));
+        ASSERT(rf_pace_start(&drip, RF_PACE_DRIP, 20, 1, c.sdir, &c.art));
+        ASSERT(rf_pace_case_manifest(&c, drip.port));
+        int64_t deadline = rf_pace_deadline(&c, 1048576u, 200);
+        int64_t bound = RF_PACE_ROUNDS * (deadline + RF_PACE_MARGIN_MS);
+        rf_peer_at(&peer, drip.port);
+        bool returned = rf_dl_bounded(&run, &c, &peer, 1, bound);
+        rf_pace_stop(&drip); /* unblocks a client with no deadline */
+        rf_dl_join(&run);
+        printf("[returned=%d in %lld ms, bound %lld; longest reply %lld ms, "
+               "deadline %lld; %u exchanges] ", returned,
+               (long long)atomic_load(&run.elapsed_ms), (long long)bound,
+               (long long)atomic_load(&drip.max_hold_ms), (long long)deadline,
+               atomic_load(&drip.rom_requests));
+        ASSERT(returned);
+        ASSERT(!run.ok);
+        ASSERT(atomic_load(&drip.max_hold_ms) <= deadline + RF_PACE_MARGIN_MS);
+        /* Re-dialled every round: dropped, never reused, never written off. */
+        ASSERT(atomic_load(&drip.rom_requests) >= 2);
+        PASS();
+    } _test_next:;
+    rf_pace_stop(&drip);
+    rf_dl_join(&run);
+    rf_pace_case_close(&c);
+    return failures;
+}
+
+/* (b) Dripping seed first in the ring, honest seed second: the download
+ * fails over after one bounded exchange and installs verified bytes. */
+static int test_dripping_seed_fails_over(void)
+{
+    int failures = 0;
+    struct rf_pace_case c = {0};
+    struct rf_pace_seeder drip = {.fd = -1};
+    struct rf_dl_run run = {0};
+    struct rom_fetch_peer peers[2];
+    TEST("rom_fetch: one dripping seed plus one honest seed — the download "
+         "fails over after one bounded exchange and succeeds") {
+        ASSERT(rf_pace_case_open(&c, "consensus-state-bundle-dripfo.sqlite"));
+        ASSERT(rf_pace_start(&drip, RF_PACE_DRIP, 20, 1, c.sdir, &c.art));
+        uint16_t port = 0;
+        fs_server_start(c.sdir, 0, NULL);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++) platform_sleep_ms(50);
+        if (fs_server_is_running()) port = fs_server_get_port();
+        ASSERT(port != 0);
+        ASSERT(rf_pace_case_manifest(&c, drip.port));
+        int64_t deadline = rf_pace_deadline(&c, 1048576u, 1000);
+        rf_peer_at(&peers[0], drip.port); /* chunk 0 asks peers[0] first */
+        rf_peer_at(&peers[1], port);
+        bool returned = rf_dl_bounded(&run, &c, peers, 2,
+                                      4 * (deadline + RF_PACE_MARGIN_MS));
+        rf_pace_stop(&drip);
+        rf_dl_join(&run);
+        printf("[returned=%d ok=%d in %lld ms; drip reply %lld ms, deadline "
+               "%lld] ", returned, run.ok, (long long)atomic_load(&run.elapsed_ms),
+               (long long)atomic_load(&drip.max_hold_ms), (long long)deadline);
+        ASSERT(returned);
+        ASSERT(run.ok);
+        ASSERT(atomic_load(&drip.rom_requests) >= 1);
+        ASSERT(atomic_load(&drip.max_hold_ms) <= deadline + RF_PACE_MARGIN_MS);
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", c.cdir, c.m.filename);
+        ASSERT(rom_fetch_verify_file(path, &c.m));
+        PASS();
+    } _test_next:;
+    rf_pace_stop(&drip);
+    rf_dl_join(&run);
+    rf_pace_case_close(&c);
+    return failures;
+}
+
+/* (c) An honest seed pacing its reply at 1.25x the floor rate finishes
+ * inside the deadline, and needed the size term (it took longer than the
+ * slack alone). */
+static int test_slow_honest_seed_above_floor(void)
+{
+    int failures = 0;
+    struct rf_pace_case c = {0};
+    struct rf_pace_seeder slow = {.fd = -1};
+    struct rf_dl_run run = {0};
+    struct rom_fetch_peer peer;
+    TEST("rom_fetch: an honest seed at 1.25x the floor rate still completes "
+         "inside the transfer deadline") {
+        ASSERT(rf_pace_case_open(&c, "consensus-state-bundle-slow.sqlite"));
+        /* 4096 bytes per 100 ms = 40 KiB/s against a 32 KiB/s floor. */
+        ASSERT(rf_pace_start(&slow, RF_PACE_HONEST, 100, 4096, c.sdir, &c.art));
+        ASSERT(rf_pace_case_manifest(&c, slow.port));
+        int64_t slack = 600;
+        int64_t deadline = rf_pace_deadline(&c, 32768u, slack);
+        rf_peer_at(&peer, slow.port);
+        bool returned = rf_dl_bounded(&run, &c, &peer, 1,
+                                      4 * (deadline + RF_PACE_MARGIN_MS));
+        rf_pace_stop(&slow);
+        rf_dl_join(&run);
+        printf("[returned=%d ok=%d; reply took %lld ms, deadline %lld, slack "
+               "%lld] ", returned, run.ok, (long long)atomic_load(&slow.max_hold_ms),
+               (long long)deadline, (long long)slack);
+        ASSERT(returned);
+        ASSERT(run.ok);
+        ASSERT(atomic_load(&slow.rom_requests) == 1);
+        ASSERT(atomic_load(&slow.max_hold_ms) > slack);
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", c.cdir, c.m.filename);
+        ASSERT(rom_fetch_verify_file(path, &c.m));
+        PASS();
+    } _test_next:;
+    rf_pace_stop(&slow);
+    rf_dl_join(&run);
+    rf_pace_case_close(&c);
+    return failures;
+}
+
 static int test_rom_fetch_platform_arm(void)
 {
     int failures = 0;
@@ -2954,6 +3356,9 @@ static int test_rom_fetch_platform_arm(void)
     failures += rf_reap_case(&cut_case);
     failures += rf_reap_case(&no_seeder_case);
     failures += test_root_seed_retrieval();
+    failures += test_dripping_seed_alone_returns();
+    failures += test_dripping_seed_fails_over();
+    failures += test_slow_honest_seed_above_floor();
     return failures;
 }
 #else /* _WIN32 */

@@ -25,9 +25,11 @@
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "platform/socket_compat.h"
+#include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,6 +121,25 @@ const char *rom_fetch_refusal_reason_name(uint8_t reason)
  * artifact costs a handful of dials per worker instead of one per chunk. */
 #define RF_SESSION_MAX_CHUNKS 32u
 
+#ifdef ZCL_TESTING
+static _Atomic uint32_t g_rf_retry_backoff_test_ms;
+
+void rom_fetch_set_retry_backoff_ms_for_test(uint32_t ms)
+{
+    atomic_store(&g_rf_retry_backoff_test_ms, ms);
+}
+#endif
+
+uint32_t rf_retry_backoff_ms(uint32_t production_ms)
+{
+#ifdef ZCL_TESTING
+    uint32_t test_ms = atomic_load(&g_rf_retry_backoff_test_ms);
+    if (test_ms)
+        return test_ms;
+#endif
+    return production_ms;
+}
+
 void rf_conn_drop(struct rf_peer_conn *c)
 {
     if (!c || !c->is_open)
@@ -149,6 +170,10 @@ bool rf_conn_ensure(struct rf_peer_conn *c, const char *addr,
      * fs_handle_client_fd, file_service.c) — match it exactly. */
     uint8_t zero_root[32];
     memset(zero_root, 0, sizeof(zero_root));
+    /* Already bounded as a whole, not per recv: fs_handshake runs
+     * fs_handshake_until, which polls against one absolute deadline of
+     * FS_HANDSHAKE_RECV_BUDGET_MS (30 s, file_service_handshake.c), so a peer
+     * dripping handshake bytes costs at most that. */
     if (!fs_handshake(&c->s, zero_root, true)) {
         rf_session_close(&c->s, fd);
         LOG_FAIL(RF_SUBSYS, "chunk: handshake failed with %s:%u",
@@ -162,18 +187,89 @@ bool rf_conn_ensure(struct rf_peer_conn *c, const char *addr,
     return true;
 }
 
+/* Read `size` bytes of one exchange's reply, bounded twice: by the link's
+ * silence window per recv, and by the exchange's transfer deadline overall
+ * (rf_chunk_deadline_ms). A miss of either is a broken exchange; the deadline
+ * one is named here so a dripping seed is visible in the log. */
+static bool rf_xchg_read(const struct rf_peer_conn *c, uint32_t idx,
+                         uint8_t *buf, size_t size, int64_t deadline_ms)
+{
+    if (rf_recv_exact_bounded(c->fd, buf, size, deadline_ms,
+                              rf_io_timeout_ms(c->addr)))
+        return true;
+    if (platform_time_monotonic_ms() >= deadline_ms)
+        LOG_WARN(RF_SUBSYS, "chunk %u: peer %s:%u missed the transfer "
+                 "deadline (dripping or stalled) — dropping the session and "
+                 "failing over", idx, c->addr, (unsigned)c->port);
+    return false;
+}
+
+/* The rest of a typed refusal frame after its sentinel header: fixed size,
+ * MAC-authenticated, never a peer-sized read. */
+static enum rf_xchg rf_xchg_refusal(struct rf_peer_conn *c, uint32_t idx,
+                                    int64_t deadline_ms)
+{
+    struct fs_session *s = &c->s;
+    const char *peer_addr = c->addr;
+    uint16_t port = c->port;
+    uint8_t reason = 0;
+    uint8_t rmac_wire[32];
+    if (!rf_xchg_read(c, idx, &reason, 1, deadline_ms) ||
+        !rf_xchg_read(c, idx, rmac_wire, 32, deadline_ms)) {
+        LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u refused (truncated "
+                 "refusal frame) — backing off", idx, peer_addr,
+                 (unsigned)port);
+        return RF_XCHG_BROKEN;
+    }
+    uint8_t rmac_expect[32];
+    struct sha3_256_ctx rmc;
+    sha3_256_init(&rmc);
+    sha3_256_write(&rmc, s->key, 32);
+    sha3_256_write(&rmc, (const unsigned char *)&s->recv_counter, 8);
+    sha3_256_write(&rmc, RF_ROM_REFUSAL_MAC_TAG, 32);
+    sha3_256_write(&rmc, &reason, 1);
+    sha3_256_finalize(&rmc, rmac_expect);
+    memory_cleanse(&rmc, sizeof(rmc));
+    uint8_t rdiff = 0;
+    for (int i = 0; i < 32; i++) rdiff |= rmac_wire[i] ^ rmac_expect[i];
+    if (rdiff != 0) {
+        LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u sent an unauthenticated "
+                 "refusal (MAC mismatch) — backing off", idx, peer_addr,
+                 (unsigned)port);
+        return RF_XCHG_BROKEN;
+    }
+    /* The seeder advanced its send_counter for this refusal; stay level
+     * with it so the NEXT reply on this session still verifies. */
+    s->recv_counter++;
+    LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u busy (%s) — backing off + "
+             "retry", idx, peer_addr, (unsigned)port,
+             rom_fetch_refusal_reason_name(reason));
+    return RF_XCHG_REFUSED;
+}
+
 /* Ask an ALREADY handshaked session for one chunk and verify the reply's
  * transport MAC. Never dials and never closes: the caller owns the session's
- * life and acts on the returned verdict. */
+ * life and acts on the returned verdict.
+ *
+ * Every read of the reply is bounded by ONE transfer deadline stamped before
+ * the request goes out (rf_chunk_deadline_ms): the size header and a refusal
+ * frame get the slack alone, and once a plausible size is in hand the
+ * deadline extends to cover exactly that many bytes at the floor rate. A
+ * peer that drips bytes can no longer re-arm the per-recv silence window
+ * forever; a miss is RF_XCHG_BROKEN like any other cut link, so the caller
+ * drops the session (the recv_counter can no longer be trusted) and fails
+ * over. It is never a dial failure and never a content verdict. */
 enum rf_xchg rf_chunk_exchange(struct rf_peer_conn *c,
                                       const uint8_t chunk_root[32],
                                       uint32_t idx, uint8_t *buf,
                                       uint32_t *out_sz)
 {
     struct fs_session *s = &c->s;
-    platform_socket_t fd = c->fd;
     const char *peer_addr = c->addr;
     uint16_t port = c->port;
+    const int64_t start_ms = platform_time_monotonic_ms();
+    const int64_t head_deadline_ms =
+        rf_chunk_deadline_ms(peer_addr, start_ms, 4u + 1u + 32u);
 
     /* Request: ["ROM"(3)][chunk_root(32)][chunk_index(4 LE)]. */
     uint8_t req[FS_ROM_REQUEST_SIZE];
@@ -187,59 +283,27 @@ enum rf_xchg rf_chunk_exchange(struct rf_peer_conn *c,
 
     /* Reply is raw size/data/MAC or a typed refusal sentinel. */
     uint8_t hdr[4];
-    if (!rf_recv_exact(fd, hdr, 4))
+    if (!rf_xchg_read(c, idx, hdr, 4, head_deadline_ms))
         LOG_RETURN(RF_XCHG_BROKEN, RF_SUBSYS,
                    "chunk: size header read failed (peer %s:%u refused or "
                    "went away)", peer_addr, (unsigned)port);
 
-    if (rom_fetch_wire_is_refusal(hdr)) {
-        /* Fixed-size authenticated refusal; never a peer-sized read. */
-        uint8_t reason = 0;
-        uint8_t rmac_wire[32];
-        if (!rf_recv_exact(fd, &reason, 1) ||
-            !rf_recv_exact(fd, rmac_wire, 32)) {
-            LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u refused (truncated "
-                     "refusal frame) — backing off", idx, peer_addr,
-                     (unsigned)port);
-            return RF_XCHG_BROKEN;
-        }
-        uint8_t rmac_expect[32];
-        struct sha3_256_ctx rmc;
-        sha3_256_init(&rmc);
-        sha3_256_write(&rmc, s->key, 32);
-        sha3_256_write(&rmc, (const unsigned char *)&s->recv_counter, 8);
-        sha3_256_write(&rmc, RF_ROM_REFUSAL_MAC_TAG, 32);
-        sha3_256_write(&rmc, &reason, 1);
-        sha3_256_finalize(&rmc, rmac_expect);
-        memory_cleanse(&rmc, sizeof(rmc));
-        uint8_t rdiff = 0;
-        for (int i = 0; i < 32; i++) rdiff |= rmac_wire[i] ^ rmac_expect[i];
-        if (rdiff != 0) {
-            LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u sent an unauthenticated "
-                     "refusal (MAC mismatch) — backing off", idx, peer_addr,
-                     (unsigned)port);
-            return RF_XCHG_BROKEN;
-        }
-        /* The seeder advanced its send_counter for this refusal; stay level
-         * with it so the NEXT reply on this session still verifies. */
-        s->recv_counter++;
-        LOG_INFO(RF_SUBSYS, "chunk %u: peer %s:%u busy (%s) — backing off + "
-                 "retry", idx, peer_addr, (unsigned)port,
-                 rom_fetch_refusal_reason_name(reason));
-        return RF_XCHG_REFUSED;
-    }
+    if (rom_fetch_wire_is_refusal(hdr))
+        return rf_xchg_refusal(c, idx, head_deadline_ms);
 
     uint32_t size = zcl_read_u32_le(hdr);
     if (size == 0 || size > ROM_SEED_CHUNK_SIZE)
         LOG_RETURN(RF_XCHG_BROKEN, RF_SUBSYS,
                    "chunk: implausible chunk size %u from %s:%u (refusal or "
                    "corrupt stream)", size, peer_addr, (unsigned)port);
-    if (!rf_recv_exact(fd, buf, size))
+    const int64_t body_deadline_ms =
+        rf_chunk_deadline_ms(peer_addr, start_ms, 4u + (uint64_t)size + 32u);
+    if (!rf_xchg_read(c, idx, buf, size, body_deadline_ms))
         LOG_RETURN(RF_XCHG_BROKEN, RF_SUBSYS,
                    "chunk: data read failed (%u bytes) from %s:%u",
                    size, peer_addr, (unsigned)port);
     uint8_t mac_wire[32];
-    if (!rf_recv_exact(fd, mac_wire, 32))
+    if (!rf_xchg_read(c, idx, mac_wire, 32, body_deadline_ms))
         LOG_RETURN(RF_XCHG_BROKEN, RF_SUBSYS,
                    "chunk: MAC read failed from %s:%u",
                    peer_addr, (unsigned)port);

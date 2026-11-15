@@ -1042,9 +1042,9 @@ static bool rf_ver_acquire_chunk(struct rf_ver_job *j, struct rf_peer_conn *c,
          * each worker holds a distinct chunk index i at any instant, so the
          * spread de-correlates them while staying bounded and deterministic. */
         if (round + 1u < ROM_FETCH_VER_ROUNDS && !atomic_load(&j->abort)) {
-            uint32_t jitter = (i * 137u + round * 991u) %
-                              (ROM_FETCH_CHUNK_RETRY_MS / 2u + 1u);
-            platform_sleep_ms(ROM_FETCH_CHUNK_RETRY_MS + jitter);
+            uint32_t backoff = rf_retry_backoff_ms(ROM_FETCH_CHUNK_RETRY_MS);
+            uint32_t jitter = (i * 137u + round * 991u) % (backoff / 2u + 1u);
+            platform_sleep_ms(backoff + jitter);
         }
     }
     return false;
