@@ -3693,7 +3693,7 @@ static int test_tmpfs_early_exit_removed(void)
 #define TGS_REAP_STALE_SECONDS (72 * 60 * 60)
 
 enum { TGS_FX_STALE, TGS_FX_LOCKED, TGS_FX_FRESH, TGS_FX_SHORT, TGS_FX_UPPER,
-       TGS_FX_LINK, TGS_FX_COUNT };
+       TGS_FX_LINK, TGS_FX_LIVE, TGS_FX_COUNT };
 
 struct tgs_reap_fx {
     char path[TGS_FX_COUNT][PATH_MAX];
@@ -3715,6 +3715,7 @@ static void tgs_reap_names(struct tgs_reap_fx *fx)
     snprintf(fx->path[TGS_FX_SHORT], PATH_MAX, TGS_REAP_PARENT "/%.7s.SHORT0", tag + 1);
     snprintf(fx->path[TGS_FX_UPPER], PATH_MAX, TGS_REAP_PARENT "/A%.7s.UPPER0", tag + 1);
     snprintf(fx->path[TGS_FX_LINK], PATH_MAX, TGS_REAP_PARENT "/%s.LINK00", tag);
+    snprintf(fx->path[TGS_FX_LIVE], PATH_MAX, TGS_REAP_PARENT "/%s.LIVE00", tag);
     fx->lock_fd = -1;
 }
 
@@ -3737,7 +3738,7 @@ static bool tgs_reap_make_root(const char *path, int seconds_back)
     snprintf(inner, sizeof(inner), "%s/sub/file", path);
     FILE *f = fopen(inner, "w");
     if (!f) return false;
-    if (fputs("x\n", f) == EOF) { fclose(f); return false; }
+    if (fputs("retained failure evidence\n", f) == EOF) { fclose(f); return false; }
     if (fclose(f) != 0) return false;
     snprintf(inner, sizeof(inner), "%s/sub", path);
     return (seconds_back == 0 || tgs_reap_age(inner, seconds_back)) &&
@@ -3761,6 +3762,7 @@ static bool tgs_reap_build(struct tgs_reap_fx *fx, const char *root)
 {
     if (mkdir(TGS_REAP_PARENT, 0700) != 0 && errno != EEXIST) return false;
     if (!tgs_reap_make_root(fx->path[TGS_FX_STALE], TGS_REAP_STALE_SECONDS) ||
+        !tgs_reap_make_root(fx->path[TGS_FX_LIVE], TGS_REAP_STALE_SECONDS) ||
         !tgs_reap_make_root(fx->path[TGS_FX_LOCKED], TGS_REAP_STALE_SECONDS) ||
         !tgs_reap_make_root(fx->path[TGS_FX_FRESH], 0) ||
         !tgs_reap_make_root(fx->path[TGS_FX_SHORT], TGS_REAP_STALE_SECONDS) ||
@@ -3789,7 +3791,8 @@ static bool tgs_exists(const char *path)
 
 static bool tgs_reap_survivors_ok(const struct tgs_reap_fx *fx)
 {
-    return tgs_exists(fx->path[TGS_FX_LOCKED]) && tgs_exists(fx->path[TGS_FX_FRESH]) &&
+    return tgs_exists(fx->path[TGS_FX_STALE]) && tgs_exists(fx->path[TGS_FX_LIVE]) &&
+           tgs_exists(fx->path[TGS_FX_LOCKED]) && tgs_exists(fx->path[TGS_FX_FRESH]) &&
            tgs_exists(fx->path[TGS_FX_SHORT]) && tgs_exists(fx->path[TGS_FX_UPPER]) &&
            tgs_exists(fx->path[TGS_FX_LINK]) && tgs_exists(fx->behind);
 }
@@ -3807,23 +3810,70 @@ static int tgs_reap_run(const char *root, const char *exe, char *out, size_t cap
     return strstr(out, "tmpfs unavailable or disabled") ? 1 : 0;
 }
 
-/* Builds the fixtures, starts one runner, and judges the five cases. */
-static bool tgs_reap_scenario(struct tgs_reap_fx *fx, const char *root,
-                              const char *exe, char *out, size_t cap, bool *stale_gone)
+/* Hold a legacy root as the current directory without taking a flock. */
+static pid_t tgs_legacy_start(const char *path, int *release_fd)
 {
-    *stale_gone = false;
-    if (!tgs_reap_build(fx, root)) return false;
-    int ran = tgs_reap_run(root, exe, out, cap);
-    if (ran < 0) return false;
-    if (ran == 1) { *stale_gone = true; return true; }   /* no tmpfs: nothing to judge */
-    *stale_gone = !tgs_exists(fx->path[TGS_FX_STALE]);
-    return tgs_reap_survivors_ok(fx);
+    int ready[2], release[2];
+    if (pipe(ready) != 0) return -1;
+    if (pipe(release) != 0) { close(ready[0]); close(ready[1]); return -1; }
+    pid_t child = fork();
+    if (child == 0) {
+        close(ready[0]); close(release[1]);
+        if (chdir(path) != 0 || write(ready[1], "r", 1) != 1) _exit(1);
+        close(ready[1]);
+        char byte;
+        _exit(read(release[0], &byte, 1) == 0 ? 0 : 1);
+    }
+    close(ready[1]); close(release[0]);
+    char byte;
+    bool started = child > 0 && read(ready[0], &byte, 1) == 1 && byte == 'r';
+    close(ready[0]);
+    if (!started) {
+        close(release[1]);
+        if (child > 0) (void)waitpid(child, NULL, 0);
+        return -1;
+    }
+    *release_fd = release[1];
+    return child;
 }
 
-static int test_tmpfs_reaps_only_stale_unlocked_roots(void)
+static bool tgs_marker_exists(const char *path)
+{
+    char marker[PATH_MAX + 16];
+    int n = snprintf(marker, sizeof(marker), "%s/sub/file", path);
+    if (n <= 0 || (size_t)n >= sizeof(marker)) return false;
+    FILE *f = fopen(marker, "r");
+    if (!f) return false;
+    char body[64];
+    bool ok = fgets(body, sizeof(body), f) && strcmp(body, "retained failure evidence\n") == 0;
+    return fclose(f) == 0 && ok;
+}
+
+/* A runner does not own foreign roots or retained failure evidence. */
+static int tgs_reap_scenario(struct tgs_reap_fx *fx, const char *root,
+                              const char *exe, char *out, size_t cap)
+{
+    if (!tgs_reap_build(fx, root)) return -1;
+    int release_fd = -1;
+    pid_t child = tgs_legacy_start(fx->path[TGS_FX_LIVE], &release_fd);
+    if (child < 0) return -1;
+    int ran = tgs_reap_run(root, exe, out, cap);
+    int status = 0;
+    pid_t observed = waitpid(child, &status, WNOHANG);
+    bool live = observed == 0;
+    bool ok = ran >= 0 && live && tgs_reap_survivors_ok(fx);
+    for (int i = 0; i < TGS_FX_COUNT; ++i)
+        if (i != TGS_FX_LINK && !tgs_marker_exists(fx->path[i])) ok = false;
+    close(release_fd);
+    if (observed != child && waitpid(child, &status, 0) != child) ok = false;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) ok = false;
+    return ok ? ran : -1;
+}
+
+static int test_tmpfs_preserves_foreign_roots(void)
 {
     int failures = 0;
-    TEST("runner: start reaps stale unlocked tmpfs roots and nothing else") {
+    TEST("runner: start preserves foreign tmpfs roots") {
         static char out[1024 * 1024];
         char root[PATH_MAX], exe[PATH_MAX];
         struct tgs_reap_fx fx;
@@ -3831,13 +3881,12 @@ static int test_tmpfs_reaps_only_stale_unlocked_roots(void)
         tgs_reap_names(&fx);
         test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "reap");
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
-        bool stale_gone = false;
-        bool ok = tgs_reap_scenario(&fx, root, exe, out, sizeof(out), &stale_gone);
+        int result = tgs_reap_scenario(&fx, root, exe, out, sizeof(out));
         bool cleaned = tgs_reap_remove(&fx);
         ASSERT(test_rm_rf_recursive(root) == 0);
         ASSERT(cleaned);
-        ASSERT(stale_gone);   /* (a) stale root removed */
-        ASSERT(ok);           /* (b) locked, (c) fresh, (d) bad names, (e) symlink kept */
+        ASSERT(result >= 0);
+        if (result == 1) { printf("SKIP (tmpfs unavailable)\n"); goto _test_next; }
         PASS();
     } _test_next:;
     return failures;
@@ -4383,7 +4432,7 @@ int test_test_group_selector(void)
     failures += test_tmpfs_inherited_root();
     failures += test_tmpfs_failure_retained();
     failures += test_tmpfs_early_exit_removed();
-    failures += test_tmpfs_reaps_only_stale_unlocked_roots();
+    failures += test_tmpfs_preserves_foreign_roots();
 #endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();

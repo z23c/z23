@@ -118,7 +118,6 @@ const char *__lsan_default_suppressions(void)
 }
 #endif
 #if defined(__linux__)
-#include <dirent.h>
 #include <sys/file.h>
 #include <sys/vfs.h>
 #include <linux/magic.h>
@@ -139,83 +138,8 @@ static void tmpfs_note_group_started(void)
     g_tmpfs_started = true;
 }
 
-/* Scratch roots older than this, unlocked and owned by us, are dead runs. */
-#define TMPFS_SCRATCH_PARENT "/dev/shm/z23-scratch"
-#define TMPFS_REAP_AGE_SECONDS (48 * 60 * 60)
-
-/* Held open for the life of the runner: the flock on it tells later runners
- * that this root belongs to a live process. Process exit releases it. */
+/* Retain the lock for compatibility with older runners that scan scratch. */
 static int g_tmpfs_lock_fd = -1;
-
-static bool tmpfs_is_lower_hex(char c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-}
-
-static bool tmpfs_is_alnum(char c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-/* The shape "%08x.XXXXXX" that tmpfs_create_root hands to mkdtemp. */
-static bool tmpfs_name_is_root_shape(const char *name)
-{
-    for (int i = 0; i < 8; i++)
-        if (!tmpfs_is_lower_hex(name[i])) return false;
-    if (name[8] != '.') return false;
-    for (int i = 9; i < 15; i++)
-        if (!tmpfs_is_alnum(name[i])) return false;
-    return name[15] == '\0';
-}
-
-/* Opens a candidate without following a symlink and, when it is a directory
- * of ours older than the bound whose lock is free, returns the fd with the
- * lock held; otherwise -1. */
-static int tmpfs_open_stale(int parent_fd, const char *name, time_t now)
-{
-    int fd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) return -1;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
-        now - st.st_mtime <= TMPFS_REAP_AGE_SECONDS ||
-        flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-/* Returns 1 when the named entry was a stale dead root and is now removed. */
-static int tmpfs_reap_one(int parent_fd, const char *name, const char *own, time_t now)
-{
-    if (!tmpfs_name_is_root_shape(name) || strcmp(name, own) == 0) return 0;
-    int fd = tmpfs_open_stale(parent_fd, name, now);
-    if (fd < 0) return 0;
-    char path[PATH_MAX];
-    int n = snprintf(path, sizeof(path), TMPFS_SCRATCH_PARENT "/%s", name);
-    int removed = n > 0 && (size_t)n < sizeof(path) && test_rm_rf_recursive(path) == 0;
-    close(fd);
-    return removed;
-}
-
-/* Every failure is skipped: reaping never changes the run or its exit code. */
-static void tmpfs_reap_stale(void)
-{
-    int parent_fd = open(TMPFS_SCRATCH_PARENT, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (parent_fd < 0) return;
-    DIR *d = fdopendir(parent_fd);
-    if (!d) { close(parent_fd); return; }
-    const char *own = strrchr(g_tmpfs_root, '/');
-    own = own ? own + 1 : g_tmpfs_root;
-    time_t now = time(NULL);
-    int reaped = 0;
-    for (struct dirent *e; (e = readdir(d)) != NULL; )
-        reaped += tmpfs_reap_one(parent_fd, e->d_name, own, now);
-    closedir(d);
-    if (reaped > 0)
-        fprintf(stderr, "test_parallel: reaped %d stale tmpfs root(s) older than 48 h under "
-                TMPFS_SCRATCH_PARENT "\n", reaped);
-}
 
 static void tmpfs_cleanup(void)
 {
@@ -254,7 +178,6 @@ static bool tmpfs_create_root(void)
         return false;
     }
     g_tmpfs_owner = getpid();
-    /* Liveness lock; without it the age rule still protects a fresh root. */
     int fd = open(g_tmpfs_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); fd = -1; }
     g_tmpfs_lock_fd = fd;
@@ -279,7 +202,6 @@ static void tmpfs_setup(void)
         g_tmpfs_root[0] = '\0';
         goto fallback;
     }
-    tmpfs_reap_stale();
     return;
 fallback:
     fprintf(stderr, "test_parallel: tmpfs unavailable or disabled; using test-tmp\n");
