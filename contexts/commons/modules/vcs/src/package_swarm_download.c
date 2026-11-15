@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * package_swarm_download — per-download map lifecycle for the slice-12 swarm
- * engine: release, reset, and build of the manifest-derived coordinate maps
+ * engine: request timeout lifecycle, lookup, and manifest-derived coordinate maps
  * (file_of, chunk_of, have, peer_failed, chunk_attempts). Moved verbatim
  * out of package_swarm_node.c. */
 
@@ -110,4 +110,88 @@ bool dl_build_maps(struct swarm_download *dl)
             g++;
         }
     return true;
+}
+
+/* Request lifetime and timeout grace; caller holds the engine lock. */
+void vcs_swarm_timeout_grace_clear(struct swarm_download *dl, uint64_t peer)
+{
+    for (size_t i = 0; i < dl->tomb_count; i++)
+        if (peer == 0 || dl->tombs[i].expired.peer == peer)
+            dl->tombs[i].expired.used = false;
+}
+
+struct swarm_tombstone *vcs_swarm_find_tombstone(struct swarm_download *dl,
+                                                 uint64_t id)
+{
+    for (size_t i = 0; i < dl->tomb_count; i++)
+        if (dl->tombs[i].id == id) return &dl->tombs[i];
+    return NULL;
+}
+
+void vcs_swarm_timeouts_locked(struct vcs_swarm_engine *engine, uint64_t now)
+{
+    for (size_t i = 0; i < VCS_SWARM_MAX_DOWNLOADS; i++) {
+        struct swarm_download *dl = &engine->dls[i];
+        if (!dl->used ||
+            (dl->state != VCS_SWARM_DL_WANT_MANIFEST &&
+             dl->state != VCS_SWARM_DL_CHUNKS))
+            continue;
+        for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++) {
+            struct swarm_req *req = &dl->reqs[r];
+            if (!req->used || now < req->deadline)
+                continue;
+            uint32_t g = req->global_chunk;
+            struct swarm_req expired = *req;
+            vcs_swarm_req_finish(engine, dl, req, true, false);
+            if (g == UINT32_MAX)
+                dl->manifest_attempts++;
+            else {
+                struct swarm_tombstone *t = vcs_swarm_find_tombstone(dl, expired.want.request_id);
+                if (t) t->expired = expired;
+                dl->chunk_attempts[g]++;
+                if (dl->chunk_timeouts != UINT64_MAX) ++dl->chunk_timeouts;
+            }
+        }
+    }
+}
+
+static struct swarm_req *find_outstanding(struct swarm_download *dl,
+                                          uint64_t peer, uint64_t id)
+{
+    for (size_t i = 0; i < SWARM_DL_INFLIGHT_MAX; i++)
+        if (dl->reqs[i].used && dl->reqs[i].peer == peer &&
+            dl->reqs[i].want.request_id == id)
+            return &dl->reqs[i];
+    return NULL;
+}
+
+/* Retain exact authorization for one retry interval, never revive a
+ * canceled session, terminal download, manifest, or already stored chunk. */
+static bool timeout_chunk_request(struct swarm_download *dl, uint64_t peer,
+    uint64_t id, uint64_t now, struct swarm_req *out)
+{
+    if (dl->state != VCS_SWARM_DL_CHUNKS || !dl->manifest_loaded ||
+        !vcs_swarm_provider_allowed(dl->provider_restricted, dl->provider_peers,
+                                    dl->provider_count, peer)) return false;
+    struct swarm_tombstone *t = vcs_swarm_find_tombstone(dl, id);
+    if (!t || t->fulfilled || !t->expired.used || t->expired.peer != peer)
+        return false;
+    const struct swarm_req *r = &t->expired;
+    if (now < r->deadline || now - r->deadline >= VCS_SWARM_REQUEST_TIMEOUT_TICKS ||
+        r->global_chunk >= dl->total_chunks || vcs_swarm_bitmap_get(dl->have, r->global_chunk))
+        return false;
+    *out = *r;
+    /* The timeout already released its slot and in-flight count. */
+    out->used = false;
+    t->expired.used = false;
+    return true;
+}
+
+struct swarm_req *vcs_swarm_data_request(struct swarm_download *dl,
+    uint64_t peer, uint64_t id, uint64_t now, struct swarm_req *late)
+{
+    if (!dl) return NULL;
+    struct swarm_req *req = find_outstanding(dl, peer, id);
+    if (req) return req;
+    return timeout_chunk_request(dl, peer, id, now, late) ? late : NULL;
 }

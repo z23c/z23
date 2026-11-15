@@ -249,6 +249,19 @@ void vcs_swarm_record_delete_dl(struct vcs_swarm_engine *engine,
 
 /* Implemented in package_swarm_download.c: release, reset, and
  * build of a download's manifest-derived coordinate maps. */
+/* Request lifetime helpers; caller holds the engine lock. */
+bool vcs_swarm_bitmap_get(const uint8_t *map, uint32_t bit);
+bool vcs_swarm_provider_allowed(bool restricted, const uint64_t *allowed,
+                                size_t count, uint64_t peer);
+void vcs_swarm_req_finish(struct vcs_swarm_engine *engine,
+                          struct swarm_download *dl, struct swarm_req *req,
+                          bool tombstone, bool fulfilled);
+void vcs_swarm_timeout_grace_clear(struct swarm_download *dl, uint64_t peer);
+struct swarm_tombstone *vcs_swarm_find_tombstone(struct swarm_download *dl, uint64_t id);
+void vcs_swarm_timeouts_locked(struct vcs_swarm_engine *engine, uint64_t now);
+struct swarm_req *vcs_swarm_data_request(struct swarm_download *dl, uint64_t peer,
+                                         uint64_t id, uint64_t now, struct swarm_req *late);
+
 void dl_free_maps(struct swarm_download *dl);
 void dl_reset(struct swarm_download *dl);
 bool dl_build_maps(struct swarm_download *dl);

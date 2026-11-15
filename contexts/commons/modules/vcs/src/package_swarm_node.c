@@ -34,12 +34,9 @@
 #define SWARM_MANIFEST_CHUNK UINT32_MAX
 
 static uint64_t nonce_bump(struct vcs_swarm_engine *engine);
-bool vcs_swarm_bitmap_get(const uint8_t *map, uint32_t bit);
 void vcs_swarm_bitmap_set(uint8_t *map, uint32_t bit);
 void vcs_swarm_derive_request_id32(const uint8_t key[33], uint64_t request_id,
                                    const uint8_t root[32], uint8_t out[32]);
-bool vcs_swarm_provider_allowed(bool restricted, const uint64_t *allowed,
-                                size_t count, uint64_t peer);
 size_t vcs_swarm_provider_set(uint64_t *out, size_t capacity,
                               const uint64_t *peers, size_t count);
 #define bitmap_get vcs_swarm_bitmap_get
@@ -289,17 +286,8 @@ void vcs_swarm_record_delete_dl(struct vcs_swarm_engine *engine,
     vcs_swarm_record_delete(engine->zcode_dir, dl->root_hex);
 }
 
-static void req_finish(struct vcs_swarm_engine *engine,
-                       struct swarm_download *dl, struct swarm_req *req,
-                       bool tombstone, bool fulfilled);
 static uint64_t chunk_len_of(const struct swarm_download *dl, uint32_t g);
 
-static void timeout_grace_clear(struct swarm_download *dl, uint64_t peer)
-{
-    for (size_t i = 0; i < dl->tomb_count; i++)
-        if (peer == 0 || dl->tombs[i].expired.peer == peer)
-            dl->tombs[i].expired.used = false;
-}
 
 static void dl_fail(struct vcs_swarm_engine *engine,
                     struct swarm_download *dl, const char *rule)
@@ -307,12 +295,12 @@ static void dl_fail(struct vcs_swarm_engine *engine,
     vcs_swarm_log_failure(dl, rule);
     dl->state = VCS_SWARM_DL_FAILED;
     dl->rule = rule;
-    timeout_grace_clear(dl, 0);
+    vcs_swarm_timeout_grace_clear(dl, 0);
     /* Tombstone every outstanding request as cancelled: data still in
      * flight for a failed download is an honest race, not an offence. */
     for (size_t i = 0; i < SWARM_DL_INFLIGHT_MAX; i++)
         if (dl->reqs[i].used)
-            req_finish(engine, dl, &dl->reqs[i], true, false);
+            vcs_swarm_req_finish(engine, dl, &dl->reqs[i], true, false);
     vcs_swarm_record_delete_dl(engine, dl);
 }
 
@@ -422,15 +410,8 @@ static bool issue_want(struct vcs_swarm_engine *engine,
     return true;
 }
 
-static struct swarm_tombstone *find_tombstone(struct swarm_download *dl,
-                                             uint64_t id)
-{
-    for (size_t i = 0; i < dl->tomb_count; i++)
-        if (dl->tombs[i].id == id) return &dl->tombs[i];
-    return NULL;
-}
 
-static void req_finish(struct vcs_swarm_engine *engine,
+void vcs_swarm_req_finish(struct vcs_swarm_engine *engine,
                        struct swarm_download *dl, struct swarm_req *req,
                        bool tombstone, bool fulfilled)
 {
@@ -438,7 +419,7 @@ static void req_finish(struct vcs_swarm_engine *engine,
     if (req->used && slot >= 0 && engine->peers[slot].inflight > 0)
         engine->peers[slot].inflight--;
     if (tombstone) {
-        struct swarm_tombstone *t = find_tombstone(dl, req->want.request_id);
+        struct swarm_tombstone *t = vcs_swarm_find_tombstone(dl, req->want.request_id);
         if (!t) {
             t = &dl->tombs[dl->tomb_pos];
             dl->tomb_pos = (dl->tomb_pos + 1) % VCS_SWARM_TOMBSTONES_PER_DL;
@@ -599,7 +580,7 @@ static void sched_manifest(struct vcs_swarm_engine *engine,
 }
 
 /* CHUNKS terminal checks. Attempts are consumed by invalid DATA
- * or a timeout (timeouts_locked); peer_failed masks
+ * or a timeout (vcs_swarm_timeouts_locked); peer_failed masks
  * exclude a chunk's bad advertisers permanently. A download is
  * terminally stuck — and must SAY so — when every unfinished
  * chunk exhausted its bounded attempts ("chunk-attempts-
@@ -695,32 +676,6 @@ static void schedule_locked(struct vcs_swarm_engine *engine, int64_t day,
     }
 }
 
-static void timeouts_locked(struct vcs_swarm_engine *engine, uint64_t now)
-{
-    for (size_t i = 0; i < VCS_SWARM_MAX_DOWNLOADS; i++) {
-        struct swarm_download *dl = &engine->dls[i];
-        if (!dl->used ||
-            (dl->state != VCS_SWARM_DL_WANT_MANIFEST &&
-             dl->state != VCS_SWARM_DL_CHUNKS))
-            continue;
-        for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++) {
-            struct swarm_req *req = &dl->reqs[r];
-            if (!req->used || now < req->deadline)
-                continue;
-            uint32_t g = req->global_chunk;
-            struct swarm_req expired = *req;
-            req_finish(engine, dl, req, true, false);
-            if (g == SWARM_MANIFEST_CHUNK)
-                dl->manifest_attempts++;
-            else {
-                struct swarm_tombstone *t = find_tombstone(dl, expired.want.request_id);
-                if (t) t->expired = expired;
-                dl->chunk_attempts[g]++;
-                if (dl->chunk_timeouts != UINT64_MAX) ++dl->chunk_timeouts;
-            }
-        }
-    }
-}
 
 /* ── inbound frame handlers (lock held) ─────────────────────────────── */
 
@@ -968,22 +923,13 @@ static void handle_want(struct vcs_swarm_engine *engine,
         serve_chunk_want(engine, peer, want, day, res);
 }
 
-static struct swarm_req *find_outstanding(struct swarm_download *dl,
-                                          uint64_t peer, uint64_t id)
-{
-    for (size_t i = 0; i < SWARM_DL_INFLIGHT_MAX; i++)
-        if (dl->reqs[i].used && dl->reqs[i].peer == peer &&
-            dl->reqs[i].want.request_id == id)
-            return &dl->reqs[i];
-    return NULL;
-}
 
 /* Cancel every outstanding request of a download (completion/cancel
  * path): queue CANCEL frames and tombstone the ids as cancelled. */
 void vcs_swarm_cancel_outstanding(struct vcs_swarm_engine *engine,
                                   struct swarm_download *dl)
 {
-    timeout_grace_clear(dl, 0);
+    vcs_swarm_timeout_grace_clear(dl, 0);
     for (size_t i = 0; i < SWARM_DL_INFLIGHT_MAX; i++) {
         struct swarm_req *req = &dl->reqs[i];
         if (!req->used)
@@ -994,7 +940,7 @@ void vcs_swarm_cancel_outstanding(struct vcs_swarm_engine *engine,
         msg.body.cancel.request_id = req->want.request_id;
         memcpy(msg.body.cancel.package_root, dl->root, 32);
         uint64_t peer = req->peer;
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         vcs_swarm_queue_frame(engine, peer, &msg);
     }
 }
@@ -1012,7 +958,7 @@ static void handle_data_manifest(struct vcs_swarm_engine *engine,
                        data->bytes_len, day);
         dl->manifest_failed_mask |=
             UINT64_C(1) << (size_t)peer_slot(engine, peer->id);
-        req_finish(engine, dl, req, false, false);
+        vcs_swarm_req_finish(engine, dl, req, false, false);
         res->penalty = VCS_SWARM_PENALTY_INVALID_DATA;
         res->rule = "invalid-chunk";
         return;
@@ -1021,7 +967,7 @@ static void handle_data_manifest(struct vcs_swarm_engine *engine,
      * caller byte ceiling BEFORE the store sees it or any chunk is wanted. */
     struct vcs_package_manifest parsed;
     if (!vcs_package_manifest_parse(data->bytes, data->bytes_len, &parsed)) {
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         dl_fail(engine, dl, "manifest-reparse-failed");
         res->rule = dl->rule;
         return;
@@ -1030,7 +976,7 @@ static void handle_data_manifest(struct vcs_swarm_engine *engine,
     dl->manifest_loaded = true;
     if (!vcs_swarm_manifest_within_bound(
             &dl->manifest, dl->maximum_package_bytes)) {
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         dl_fail(engine, dl, "maximum-package-bytes-exceeded");
         res->rule = dl->rule;
         return;
@@ -1038,19 +984,19 @@ static void handle_data_manifest(struct vcs_swarm_engine *engine,
     enum vcs_package_store_result sr = vcs_package_store_put_manifest_resync(
         engine->store, data->bytes, data->bytes_len, NULL);
     if (sr != VCS_PACKAGE_STORE_OK) {
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         dl_fail(engine, dl, vcs_package_store_result_string(sr));
         res->rule = dl->rule;
         return;
     }
     if (!dl_build_maps(dl)) {
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         dl_fail(engine, dl, "allocation-failed");
         res->rule = dl->rule;
         return;
     }
     if (!vcs_swarm_rebuild_have(engine, dl)) {
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         dl_fail(engine, dl, "local-chunk-verification-failed");
         res->rule = dl->rule;
         return;
@@ -1068,7 +1014,7 @@ static void handle_data_manifest(struct vcs_swarm_engine *engine,
     dl->transferred_bytes += data->bytes_len;
     dl->transferred_objects++;
     dl->fetched_bytes += data->bytes_len;
-    req_finish(engine, dl, req, true, true);
+    vcs_swarm_req_finish(engine, dl, req, true, true);
     if (dl->total_chunks == 0 || dl->have_count == dl->total_chunks) {
         vcs_swarm_complete_download(engine, dl);
         return;
@@ -1091,7 +1037,7 @@ static void cancel_chunk_retries(struct vcs_swarm_engine *engine,
         msg.body.cancel.request_id = r->want.request_id;
         memcpy(msg.body.cancel.package_root, dl->root, 32);
         uint64_t peer = r->peer;
-        req_finish(engine, dl, r, true, false);
+        vcs_swarm_req_finish(engine, dl, r, true, false);
         vcs_swarm_queue_frame(engine, peer, &msg);
     }
 }
@@ -1113,7 +1059,7 @@ static void handle_data_chunk(struct vcs_swarm_engine *engine,
             dl->peer_failed[g] |= UINT64_C(1) << (size_t)slot;
         dl->chunk_attempts[g]++;
         vcs_swarm_invalid_chunk(dl, g);
-        req_finish(engine, dl, req, false, false);
+        vcs_swarm_req_finish(engine, dl, req, false, false);
         if (dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS)
             dl_fail(engine, dl, "chunk-attempts-exhausted");
         res->penalty = VCS_SWARM_PENALTY_INVALID_DATA;
@@ -1125,7 +1071,7 @@ static void handle_data_chunk(struct vcs_swarm_engine *engine,
         engine->store, dl->root, path, dl->chunk_of[g], data->bytes,
         data->bytes_len);
     if (sr != VCS_PACKAGE_STORE_OK) {
-        req_finish(engine, dl, req, true, false);
+        vcs_swarm_req_finish(engine, dl, req, true, false);
         dl_fail(engine, dl, vcs_package_store_result_string(sr));
         res->rule = dl->rule;
         return;
@@ -1141,39 +1087,9 @@ static void handle_data_chunk(struct vcs_swarm_engine *engine,
     dl->transferred_bytes += data->bytes_len;
     dl->transferred_objects++;
     dl->fetched_bytes += data->bytes_len;
-    req_finish(engine, dl, req, true, true);
+    vcs_swarm_req_finish(engine, dl, req, true, true);
     if (dl->have_count == dl->total_chunks)
         vcs_swarm_complete_download(engine, dl);
-}
-
-/* Retain exact authorization for one retry interval, never revive a
- * canceled session, terminal download, manifest, or already stored chunk. */
-static bool timeout_chunk_request(struct swarm_download *dl, uint64_t peer,
-    uint64_t id, uint64_t now, struct swarm_req *out)
-{
-    if (dl->state != VCS_SWARM_DL_CHUNKS || !dl->manifest_loaded ||
-        !dl_peer_allowed(dl, peer)) return false;
-    struct swarm_tombstone *t = find_tombstone(dl, id);
-    if (!t || t->fulfilled || !t->expired.used || t->expired.peer != peer)
-        return false;
-    const struct swarm_req *r = &t->expired;
-    if (now < r->deadline || now - r->deadline >= VCS_SWARM_REQUEST_TIMEOUT_TICKS ||
-        r->global_chunk >= dl->total_chunks || bitmap_get(dl->have, r->global_chunk))
-        return false;
-    *out = *r;
-    /* The timeout already released its slot and in-flight count. */
-    out->used = false;
-    t->expired.used = false;
-    return true;
-}
-
-static struct swarm_req *data_request(struct swarm_download *dl,
-    uint64_t peer, uint64_t id, uint64_t now, struct swarm_req *late)
-{
-    if (!dl) return NULL;
-    struct swarm_req *req = find_outstanding(dl, peer, id);
-    if (req) return req;
-    return timeout_chunk_request(dl, peer, id, now, late) ? late : NULL;
 }
 
 static void handle_data(struct vcs_swarm_engine *engine,
@@ -1183,7 +1099,7 @@ static void handle_data(struct vcs_swarm_engine *engine,
 {
     struct swarm_download *dl = dl_find(engine, data->object.package_root);
     struct swarm_req late;
-    struct swarm_req *req = data_request(dl, peer->id,
+    struct swarm_req *req = vcs_swarm_data_request(dl, peer->id,
         data->object.request_id, now, &late);
     if (!req) {
         /* Nothing outstanding: fulfilled-id replay, cancelled-id late
@@ -1232,7 +1148,7 @@ static void handle_data(struct vcs_swarm_engine *engine,
     bool exhausted = g != SWARM_MANIFEST_CHUNK &&
         ++dl->chunk_attempts[g] >= VCS_SWARM_MAX_CHUNK_ATTEMPTS;
     if (g != SWARM_MANIFEST_CHUNK) vcs_swarm_invalid_chunk(dl, g);
-    req_finish(engine, dl, req, false, false);
+    vcs_swarm_req_finish(engine, dl, req, false, false);
     if (exhausted) dl_fail(engine, dl, "chunk-attempts-exhausted");
     res->penalty = VCS_SWARM_PENALTY_INVALID_DATA;
     res->rule = "invalid-chunk";
@@ -1449,11 +1365,11 @@ void vcs_swarm_engine_peer_drop(struct vcs_swarm_engine *engine,
         struct swarm_download *dl = &engine->dls[i];
         if (!dl->used)
             continue;
-        timeout_grace_clear(dl, peer);
+        vcs_swarm_timeout_grace_clear(dl, peer);
         for (size_t r = 0; r < SWARM_DL_INFLIGHT_MAX; r++) {
             struct swarm_req *req = &dl->reqs[r];
             if (req->used && req->peer == peer)
-                req_finish(engine, dl, req, true, false);
+                vcs_swarm_req_finish(engine, dl, req, true, false);
         }
     }
     engine->peers[slot].used = false;
@@ -1898,7 +1814,7 @@ void vcs_swarm_engine_tick(struct vcs_swarm_engine *engine, int64_t day,
             engine->peers[i].tier = peer_tier_locked(engine,
                                                      &engine->peers[i]);
         }
-    timeouts_locked(engine, now);
+    vcs_swarm_timeouts_locked(engine, now);
     if (engine->store)
         schedule_locked(engine, day, now);
     pthread_mutex_unlock(&engine->lock);
