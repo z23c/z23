@@ -4,9 +4,11 @@
 #include "boot_timing_marks_internal.h"
 
 #include "config/boot_internal.h"
+#include "base/serialize_le.h"
 #include "chain/chain.h"
 #include "chain/mmb.h"
 #include "chain/mmr.h"
+#include "crypto/sha3.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "coins/utxo_commitment.h"
@@ -367,6 +369,51 @@ static bool boot_mmb_boundary_root(int64_t height, struct mmb_leaf *leaf)
 }
 
 
+/* Same preimage as mmb_hash_leaf; the large fixture compares every output
+ * with the sealed scalar implementation. */
+static void boot_mmb_hash_leaf4(const struct mmb_leaf leaves[4],
+                                uint8_t out[4][32])
+{
+    uint8_t preimages[4][1 + MMB_LEAF_PREIMAGE_SIZE];
+    const uint8_t *msgs[4];
+    size_t lens[4];
+    for (size_t lane = 0; lane < 4; lane++) {
+        preimages[lane][0] = MMB_TAG_LEAF;
+        memcpy(preimages[lane] + 1, leaves[lane].block_hash, 32);
+        zcl_write_u32_le(preimages[lane] + 33, leaves[lane].height);
+        zcl_write_u32_le(preimages[lane] + 37, leaves[lane].timestamp);
+        zcl_write_u32_le(preimages[lane] + 41, leaves[lane].nBits);
+        memcpy(preimages[lane] + 45, leaves[lane].sapling_root, 32);
+        memcpy(preimages[lane] + 77, leaves[lane].chain_work, 32);
+        memcpy(preimages[lane] + 109, leaves[lane].utxo_root, 32);
+        msgs[lane] = preimages[lane];
+        lens[lane] = sizeof(preimages[lane]);
+    }
+    sha3_256_x4(msgs, lens, out);
+}
+
+static bool boot_mmb_batch_matches(const struct mmb_leaf leaves[4],
+                                   const uint8_t *const stored[4], size_t lanes,
+                                   int64_t first_height, int tip,
+                                   const uint8_t frontier[32])
+{
+    uint8_t expected[4][32];
+    if (lanes == 4) {
+        boot_mmb_hash_leaf4(leaves, expected);
+    } else {
+        for (size_t lane = 0; lane < lanes; lane++)
+            mmb_hash_leaf(&leaves[lane], expected[lane]);
+    }
+    for (size_t lane = 0; lane < lanes; lane++) {
+        if (memcmp(stored[lane], expected[lane], 32) != 0)
+            return false;
+        if (first_height + (int64_t)lane == (int64_t)tip &&
+            memcmp(leaves[lane].block_hash, frontier, 32) != 0)
+            return false;
+    }
+    return true;
+}
+
 static bool boot_mmb_store_matches_chain(const struct mmb_leaf_store *store,
                                          const struct active_chain *chain, int tip,
                                          const uint8_t frontier[32])
@@ -374,15 +421,23 @@ static bool boot_mmb_store_matches_chain(const struct mmb_leaf_store *store,
     if (!store || !store->open || tip < 0 || store->num_leaves != (uint64_t)tip + 1)
         return false;
     const struct block_index *prev = NULL;
-    for (int64_t height = 0; height <= tip; height++) {
-        struct mmb_leaf leaf;
-        uint8_t expected[32];
-        const uint8_t *stored = mmb_leaf_store_get(store, (uint64_t)height);
-        if (!stored || !boot_mmb_copy_leaf(chain, (int)height, &prev, &leaf)) return false;
-        if (!boot_mmb_boundary_root(height, &leaf)) return false;
-        mmb_hash_leaf(&leaf, expected);
-        if (memcmp(stored, expected, sizeof(expected))) return false;
-        if (height == tip && memcmp(leaf.block_hash, frontier, 32)) return false;
+    int64_t height = 0;
+    while (height <= tip) {
+        struct mmb_leaf leaves[4];
+        const uint8_t *stored[4];
+        size_t lanes = 0;
+        while (lanes < 4 && height <= tip) {
+            stored[lanes] = mmb_leaf_store_get(store, (uint64_t)height);
+            if (!stored[lanes] ||
+                !boot_mmb_copy_leaf(chain, (int)height, &prev, &leaves[lanes]) ||
+                !boot_mmb_boundary_root(height, &leaves[lanes]))
+                return false;
+            lanes++;
+            height++;
+        }
+        if (!boot_mmb_batch_matches(leaves, stored, lanes,
+                                    height - (int64_t)lanes, tip, frontier))
+            return false;
     }
     return true;
 }

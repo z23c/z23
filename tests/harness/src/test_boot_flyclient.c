@@ -13,6 +13,7 @@
 #include "controllers/blockchain_controller.h"
 #include "chain/mmb.h"
 #include "models/mmb_leaf_store.h"
+#include "platform/time_compat.h"
 #include "validation/chainstate.h"
 #include "test/mmb_chain_fixture.h"
 #include "crypto/sha3.h"
@@ -919,6 +920,8 @@ static int gap_failed_prefix_checks(const char *dir)
     return failures;
 }
 
+static int mmb_large_validation_checks(const char *dir);
+
 static int boot_flyclient_gap_checks(void)
 {
     int failures = 0;
@@ -933,7 +936,44 @@ static int boot_flyclient_gap_checks(void)
     failures += gap_failed_prefix_checks(dir);
     failures += gap_legacy_catchup(dir);
     failures += gap_legacy_stops(dir);
+    failures += mmb_large_validation_checks(dir);
     test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int mmb_large_validation_checks(const char *dir)
+{
+    int failures = 0;
+    enum { N = 140003 };
+    struct mmb_chain_fixture fx;
+    struct mmb_leaf_store ref;
+    bool ready = gap_prepare(dir, &fx, &ref, N, N, NULL);
+    BFC_CHECK("large validation fixture ready", ready);
+    if (!ready) return failures;
+
+    int64_t started = platform_time_monotonic_ms();
+    bool valid = boot_mmb_leaf_store_test_verify(&fx.chain);
+    int64_t elapsed = platform_time_monotonic_ms() - started;
+    printf("boot_flyclient: leaf validation rows=%d ms=%lld\n",
+           N, (long long)elapsed);
+    BFC_CHECK("large validation accepts every correct leaf",
+              valid && mmb_stores_equal(&g_mmb_leaf_store, &ref));
+    BFC_CHECK("large validation binds the verified chain",
+              valid && boot_mmb_leaf_store_available(&fx.chain));
+    (void)sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
+    int64_t scalar_started = platform_time_monotonic_ms();
+    bool scalar_valid = boot_mmb_leaf_store_test_verify(&fx.chain);
+    int64_t scalar_elapsed = platform_time_monotonic_ms() - scalar_started;
+    (void)sha3_256_x4_select_impl(SHA3_IMPL_AUTO);
+    printf("boot_flyclient: scalar leaf validation rows=%d ms=%lld\n",
+           N, (long long)scalar_elapsed);
+    BFC_CHECK("large validation preserves scalar fallback", scalar_valid);
+    BFC_CHECK("large validation rejects a corrupt interior leaf",
+              mmb_corrupt_leaf(&g_mmb_leaf_store, N / 2) &&
+              !boot_mmb_leaf_store_test_verify(&fx.chain) &&
+              !boot_mmb_leaf_store_available(&fx.chain));
+    mmb_leaf_store_close(&g_mmb_leaf_store);
+    gap_release(&fx, &ref);
     return failures;
 }
 
