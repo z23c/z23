@@ -1288,7 +1288,9 @@ static bool cr_general_descriptor(
         "before_seq", "after_seq"
     };
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
-    if (host_bound) {
+    if (!strcmp(spec->path, "ops.telegram.send") && !strcmp(key, "reply_to_message_id")) {
+        out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX;
+    } else if (host_bound) {
         out->type = JSON_INT;
         out->minimum = host_bound->lo;
         out->maximum = host_bound->hi;

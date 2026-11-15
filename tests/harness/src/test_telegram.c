@@ -1101,6 +1101,74 @@ static int tgt_reply_target_case(void)
     return failures;
 }
 
+static bool tgt_registry_send(const char *request, char *out, size_t cap,
+                              enum zcl_command_exit *code)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "ops.telegram.send", NULL);
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+                                      .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    struct json_value input = {0};
+    if (!spec || !json_read(&input, request, strlen(request))) return false;
+    size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input, false,
+                                                 spec->path, "normal", 0, 0, NULL, out, cap, code);
+    json_free(&input);
+    return n > 0;
+}
+
+static int tgt_reply_registry_case(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "ops.telegram.send", NULL);
+    TEST_CASE("telegram reply target passes the registry before fake transport") {
+        struct json_value input = {0};
+        char why[128], out[65536];
+        enum zcl_command_exit code;
+        struct zcl_command_input_descriptor desc;
+        const char *request = "{\"text\":\"registry reply\",\"reply_to_message_id\":20129,\"idempotency_key\":\"registry-reply-v1\"}";
+        memset(&g_fake, 0, sizeof g_fake);
+        ASSERT(spec && json_read(&input, request, strlen(request)));
+        ASSERT(zcl_command_registry_input_descriptor(spec, "reply_to_message_id", &desc));
+        ASSERT_EQ(desc.type, JSON_INT);
+        ASSERT_EQ(desc.minimum, 1);
+        ASSERT_EQ(desc.maximum, INT64_MAX);
+        ASSERT(zcl_command_registry_input_validate(spec, &input, why, sizeof why));
+        json_free(&input);
+        ASSERT(tgt_registry_send(request, out, sizeof out, &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(tgt_reply_body(0, 20129));
+        ASSERT(tgt_registry_send(request, out, sizeof out, &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "\"duplicate\":true") != NULL);
+        ASSERT_EQ(g_fake.calls, 1);
+    } TEST_END
+    json_free(&r.data);
+    return failures;
+}
+
+static int tgt_reply_registry_invalid_case(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "ops.telegram.send", NULL);
+    static const char *const bad[] = {"0", "-1", "true", "\"7\""};
+    TEST_CASE("telegram registry rejects invalid reply targets before transport") {
+        memset(&g_fake, 0, sizeof g_fake);
+        ASSERT(spec);
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            char request[128], out[65536];
+            enum zcl_command_exit code;
+            snprintf(request, sizeof request, "{\"text\":\"reply\",\"reply_to_message_id\":%s}", bad[i]);
+            ASSERT(tgt_registry_send(request, out, sizeof out, &code));
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_INVALID);
+            ASSERT(strstr(out, "\"INVALID_INPUT\"") != NULL);
+        }
+        ASSERT_EQ(g_fake.calls, 0);
+    } TEST_END
+    return failures;
+}
+
 static int tgt_reply_invalid_case(void)
 {
     int failures = 0;
@@ -1371,6 +1439,8 @@ int test_telegram(void)
     failures += tgt_reliable_single_escaped_case();
     failures += tgt_reliable_invalid_batch_case();
     failures += tgt_reply_target_case();
+    failures += tgt_reply_registry_case();
+    failures += tgt_reply_registry_invalid_case();
     failures += tgt_reply_invalid_case();
     failures += tgt_reply_chunks_case();
     failures += tgt_reply_missing_parent_case();
