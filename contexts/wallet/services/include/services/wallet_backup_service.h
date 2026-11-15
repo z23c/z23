@@ -166,9 +166,18 @@ struct wallet_backup_status {
     int     last_encrypted_tables_verified;
     char    last_encrypted_path[512];
     char    last_error[256];       /* most recent failure reason */
+    bool    key_change_pending;    /* a key change still awaits a good backup */
 };
 
 void wallet_backup_status_snapshot(struct wallet_backup_status *out);
+
+#ifdef ZCL_TESTING
+/* Test-only: pin the wall clock used for trigger pacing (0 = real clock). */
+void wallet_backup_test_set_clock(int64_t now_s);
+/* Test-only: called by the worker after each backup run, before the trigger
+ * generation is settled; simulates a trigger arriving during the run. */
+void wallet_backup_test_set_after_run_hook(void (*fn)(void));
+#endif
 
 #ifdef ZCL_TESTING
 /* Test-only: seed the latest verified ENCRYPTED backup authority with `path`

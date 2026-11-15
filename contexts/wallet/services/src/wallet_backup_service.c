@@ -74,10 +74,12 @@ struct wallet_backup_service_state {
     char    last_encrypted_path[512];
     char    last_error[256];
     /* Debounced event trigger (D4: plan §5.4).
-     * Set by wallet_backup_service_on_key_change; cleared by the
-     * thread after running a debounce-eligible backup. */
-    bool    key_change_pending;
-    int64_t total_triggers;     /* total on_key_change calls (all, incl. coalesced) */
+     * on_key_change bumps key_change_gen; a good run marks the gen it
+     * snapshotted before starting as handled. Pending = gen != handled. */
+    uint64_t key_change_gen;    /* bumped by every accepted trigger */
+    uint64_t key_change_handled; /* gen covered by the last good run */
+    int64_t last_attempt_s;     /* start of the last thread-driven attempt */
+    int64_t total_triggers;    /* total on_key_change calls (all, incl. coalesced) */
     int64_t total_trigger_runs; /* backups that actually ran due to a trigger */
     _Atomic supervisor_child_id supervisor_id;
 };
@@ -390,6 +392,7 @@ void wallet_backup_status_snapshot(struct wallet_backup_status *out)
     snprintf(out->last_encrypted_path, sizeof(out->last_encrypted_path), "%s",
              g_wbs.last_encrypted_path);
     snprintf(out->last_error, sizeof(out->last_error), "%s", g_wbs.last_error);
+    out->key_change_pending = g_wbs.key_change_gen != g_wbs.key_change_handled;
     pthread_mutex_unlock(&g_wbs.lock);
 }
 
@@ -452,6 +455,7 @@ bool wallet_backup_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "last_encrypted_tables_verified",
                      st.last_encrypted_tables_verified);
     json_push_kv_bool(out, "last_error_present", st.last_error[0] != '\0');
+    json_push_kv_bool(out, "key_change_pending", st.key_change_pending);
     json_push_kv_str(out, "next_action",
                      encrypted_backup_available
                          ? "none"
@@ -598,6 +602,60 @@ struct zcl_result wallet_backup_now_encrypted(const char *password)
     return res;
 }
 /* ── Thread loop ────────────────────────────────────────────── */
+#ifdef ZCL_TESTING
+static _Atomic int64_t g_wbs_test_now_s;
+static void (*_Atomic g_wbs_test_after_run)(void);
+void wallet_backup_test_set_clock(int64_t now_s)
+{
+    atomic_store(&g_wbs_test_now_s, now_s);
+}
+void wallet_backup_test_set_after_run_hook(void (*fn)(void))
+{
+    atomic_store(&g_wbs_test_after_run, fn);
+}
+#endif
+/* Wall clock for trigger pacing only (tests may pin it). */
+static int64_t wbs_now_s(void)
+{
+#ifdef ZCL_TESTING
+    int64_t pinned = atomic_load(&g_wbs_test_now_s);
+    if (pinned != 0)
+        return pinned;
+#endif
+    return platform_time_wall_unix();
+}
+/* A trigger is due when the last good backup AND the last attempt (good or
+ * failed) are both at least the debounce window old: a failing backup is
+ * retried at that pace, never on every 200 ms tick. */
+static bool wbs_trigger_due(int64_t now_s, int64_t last_ok, int64_t last_attempt)
+{
+    bool ok_old = last_ok == 0 ||
+                  now_s >= last_ok + WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC;
+    bool attempt_old = last_attempt == 0 ||
+                       now_s >= last_attempt + WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC;
+    return ok_old && attempt_old;
+}
+/* One thread-driven backup. A generation snapshot (not a flag clear) keeps a
+ * trigger that lands after the snapshot pending, and a failure keeps it too. */
+static bool wbs_thread_attempt(void)
+{
+    pthread_mutex_lock(&g_wbs.lock);
+    uint64_t gen = g_wbs.key_change_gen;
+    g_wbs.last_attempt_s = wbs_now_s();
+    pthread_mutex_unlock(&g_wbs.lock);
+    struct zcl_result res = wallet_backup_now();
+    wbs_supervisor_heartbeat();
+#ifdef ZCL_TESTING
+    void (*hook)(void) = atomic_load(&g_wbs_test_after_run);
+    if (hook)
+        hook();
+#endif
+    pthread_mutex_lock(&g_wbs.lock);
+    if (res.ok)
+        g_wbs.key_change_handled = gen;
+    pthread_mutex_unlock(&g_wbs.lock);
+    return res.ok;
+}
 static void *wbs_thread_fn(void *arg)
 {
     (void)arg;
@@ -610,21 +668,18 @@ static void *wbs_thread_fn(void *arg)
     /* Do one immediate backup on start so the user always has a
      * fresh copy within a few seconds of boot — the worst failure
      * is the boot that hasn't reached its first hourly tick yet. */
-    (void)wallet_backup_now();
-    wbs_supervisor_heartbeat();
+    (void)wbs_thread_attempt();
     int64_t next_at_ms = platform_time_monotonic_ms() + (int64_t)interval * 1000;
     while (true) {
         pthread_mutex_lock(&g_wbs.lock);
         bool stop = g_wbs.stop_requested;
-        bool pending = g_wbs.key_change_pending;
+        bool pending = g_wbs.key_change_gen != g_wbs.key_change_handled;
         int64_t last_ok = g_wbs.last_run_unix;
+        int64_t last_attempt = g_wbs.last_attempt_s;
         pthread_mutex_unlock(&g_wbs.lock);
         if (stop) break;
-        bool ran_this_tick = false;
         if (platform_time_monotonic_ms() >= next_at_ms) {
-            (void)wallet_backup_now();
-            wbs_supervisor_heartbeat();
-            ran_this_tick = true;
+            (void)wbs_thread_attempt();
             /* Re-read interval in case config was updated. */
             pthread_mutex_lock(&g_wbs.lock);
             interval = g_wbs.cfg.interval_seconds > 0
@@ -632,25 +687,13 @@ static void *wbs_thread_fn(void *arg)
                 : WALLET_BACKUP_DEFAULT_INTERVAL_SEC;
             pthread_mutex_unlock(&g_wbs.lock);
             next_at_ms = platform_time_monotonic_ms() + (int64_t)interval * 1000;
-        } else if (pending) {
-            /* Debounced trigger path: fire if the last backup (of any
-             * kind) is older than WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC.
-             * Multiple triggers that arrive inside the window collapse
-             * into this single run. */
-            int64_t now_s = platform_time_wall_unix();
-            if (last_ok == 0 ||
-                now_s >= last_ok + WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC) {
-                (void)wallet_backup_now();
-                wbs_supervisor_heartbeat();
-                ran_this_tick = true;
-                pthread_mutex_lock(&g_wbs.lock);
-                g_wbs.total_trigger_runs++;
-                pthread_mutex_unlock(&g_wbs.lock);
-            }
-        }
-        if (ran_this_tick) {
+        } else if (pending &&
+                   wbs_trigger_due(wbs_now_s(), last_ok, last_attempt)) {
+            /* Debounced trigger path; triggers inside the window collapse
+             * into this run, and a failed run stays pending for a retry. */
+            (void)wbs_thread_attempt();
             pthread_mutex_lock(&g_wbs.lock);
-            g_wbs.key_change_pending = false;
+            g_wbs.total_trigger_runs++;
             pthread_mutex_unlock(&g_wbs.lock);
         }
         /* Sleep in small increments so stop_requested is honoured
@@ -747,6 +790,8 @@ struct zcl_result wallet_backup_start(const struct wallet_backup_config *cfg,
     }
     g_wbs.db = db;
     g_wbs.stop_requested = false;
+    g_wbs.key_change_handled = g_wbs.key_change_gen;
+    g_wbs.last_attempt_s = 0;
     wbs_restore_encrypted_authority_locked();
     g_wbs.thread_running = true;
     int rc = thread_registry_spawn("zcl_wallet_bk", wbs_thread_fn, NULL,
@@ -829,7 +874,7 @@ void wallet_backup_stop(void)
         g_wbs.thread_running = false;
         g_wbs.stop_requested = false;
         g_wbs.db = NULL;
-        g_wbs.key_change_pending = false;
+        g_wbs.key_change_handled = g_wbs.key_change_gen;
         wbs_config_retire_password(&g_wbs.cfg,
                                    &g_wbs.owned_encrypt_password,
                                    &g_wbs.owned_encrypt_password_cap);
@@ -857,7 +902,7 @@ void wallet_backup_service_on_key_change(void)
      * first-run immediately and pick up the state anyway. */
     g_wbs.total_triggers++;
     if (g_wbs.thread_running) {
-        g_wbs.key_change_pending = true;
+        g_wbs.key_change_gen++;
     }
     pthread_mutex_unlock(&g_wbs.lock);
 }

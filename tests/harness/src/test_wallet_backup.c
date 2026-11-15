@@ -2168,6 +2168,184 @@ static int t_boot_backup_option(void)
     return failures;
 }
 
+/* ── Failed trigger backups stay pending and retry, bounded ── */
+
+#if !defined(_WIN32)
+struct wb_retry {
+    struct wb_fixture f;
+    char moved[300];
+    struct wallet_backup_status base;
+    int64_t t0;                 /* pinned trigger clock */
+};
+
+typedef bool (*wb_pred)(const struct wallet_backup_status *s,
+                        const struct wb_retry *r, int64_t n);
+
+static bool wb_p_runs(const struct wallet_backup_status *s,
+                      const struct wb_retry *r, int64_t n)
+{
+    return s->total_runs - r->base.total_runs >= n;
+}
+
+static bool wb_p_fails(const struct wallet_backup_status *s,
+                       const struct wb_retry *r, int64_t n)
+{
+    return s->total_failures - r->base.total_failures >= n;
+}
+
+static bool wb_p_clear(const struct wallet_backup_status *s,
+                       const struct wb_retry *r, int64_t n)
+{
+    (void)r; (void)n;
+    return !s->key_change_pending;
+}
+
+static bool wb_wait(const struct wb_retry *r, wb_pred pred, int64_t n)
+{
+    for (int waited = 0; waited <= 4000; waited += 50) {
+        struct wallet_backup_status s;
+        wallet_backup_status_snapshot(&s);
+        if (pred(&s, r, n))
+            return true;
+        usleep(50 * 1000); /* real-clock: waits for the worker thread; verdicts are counters under a pinned clock, not elapsed time */
+    }
+    return false;
+}
+
+static void wb_settle(int ms)
+{
+    usleep((useconds_t)ms * 1000);
+}
+
+/* Replace the backup directory with a plain file (fails for root too). */
+static bool wb_break_dir(struct wb_retry *r)
+{
+    snprintf(r->moved, sizeof(r->moved), "%s.mv", r->f.backup_dir);
+    if (rename(r->f.backup_dir, r->moved) != 0)
+        return false;
+    FILE *fp = fopen(r->f.backup_dir, "w");
+    if (!fp)
+        return false;
+    return fclose(fp) == 0;
+}
+
+static bool wb_heal_dir(struct wb_retry *r)
+{
+    return unlink(r->f.backup_dir) == 0 &&
+           rename(r->moved, r->f.backup_dir) == 0;
+}
+
+static bool wb_retry_begin(struct wb_retry *r, const char *tag)
+{
+    wb_install_observer();
+    if (!wb_fixture_init(&r->f, tag))
+        return false;
+    wb_seed_keys(&r->f.ndb, 2);
+    struct wallet_backup_config cfg;
+    wallet_backup_config_defaults(&cfg);
+    cfg.backup_dir       = r->f.backup_dir;
+    cfg.interval_seconds = 999999;
+    cfg.encrypt          = false;
+    cfg.encrypt_password = NULL;
+    wallet_backup_status_snapshot(&r->base);
+    if (!wallet_backup_start(&cfg, &r->f.ndb).ok)
+        return false;
+    if (!wb_wait(r, wb_p_runs, 1))
+        return false;
+    struct wallet_backup_status s;
+    wallet_backup_status_snapshot(&s);
+    r->t0 = s.last_run_unix + 100;
+    wallet_backup_test_set_clock(r->t0);
+    return true;
+}
+
+static void wb_retry_end(struct wb_retry *r)
+{
+    wallet_backup_stop();
+    wallet_backup_test_set_clock(0);
+    wallet_backup_test_set_after_run_hook(NULL);
+    wb_fixture_tear_down(&r->f);
+    test_cleanup_tmpdir(r->moved);
+}
+
+static int64_t wb_fail_delta(const struct wb_retry *r)
+{
+    struct wallet_backup_status s;
+    wallet_backup_status_snapshot(&s);
+    return s.total_failures - r->base.total_failures;
+}
+
+static int t_failed_trigger_retries(void)
+{
+    int failures = 0;
+    struct wb_retry r;
+    memset(&r, 0, sizeof(r));
+    bool began = wb_retry_begin(&r, "retry");
+    bool broke = began && wb_break_dir(&r);
+    wallet_backup_service_on_key_change();
+    bool failed1 = broke && wb_wait(&r, wb_p_fails, 1);
+    wb_settle(1200);   /* six 200 ms loop ticks with the clock pinned */
+    struct wallet_backup_status s;
+    wallet_backup_status_snapshot(&s);
+    WB_RUN("wb: failed key-change backup stays pending and reports an error",
+           failed1 && s.key_change_pending && s.last_error[0] != '\0');
+    /* Bound: with the clock pinned, exactly one attempt per
+     * WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC window, never one per tick. */
+    WB_RUN("wb: failed attempts inside one debounce window are bounded to 1",
+           wb_fail_delta(&r) == 1);
+    wallet_backup_test_set_clock(r.t0 + WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC - 1);
+    wb_settle(800);
+    WB_RUN("wb: no retry before the debounce window after a failure ends",
+           wb_fail_delta(&r) == 1);
+    wallet_backup_test_set_clock(r.t0 + WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC);
+    bool failed2 = wb_wait(&r, wb_p_fails, 2);
+    wb_settle(800);
+    WB_RUN("wb: next window retries exactly once more while still failing",
+           failed2 && wb_fail_delta(&r) == 2);
+    bool healed = wb_heal_dir(&r);
+    wallet_backup_test_set_clock(r.t0 + 2 * WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC);
+    bool cleared = healed && wb_wait(&r, wb_p_clear, 0);
+    wallet_backup_status_snapshot(&s);
+    WB_RUN("wb: retry after the directory heals clears pending, not hourly",
+           cleared && s.total_runs - r.base.total_runs == 2 &&
+           wb_fail_delta(&r) == 2);
+    wb_retry_end(&r);
+    return failures;
+}
+
+static _Atomic int g_wb_hook_fired;
+
+static void wb_hook_trigger_once(void)
+{
+    if (atomic_exchange(&g_wb_hook_fired, 1) == 0)
+        wallet_backup_service_on_key_change();
+}
+
+static int t_trigger_during_run_survives(void)
+{
+    int failures = 0;
+    struct wb_retry r;
+    memset(&r, 0, sizeof(r));
+    bool began = wb_retry_begin(&r, "midrun");
+    atomic_store(&g_wb_hook_fired, 0);
+    wallet_backup_test_set_after_run_hook(wb_hook_trigger_once);
+    wallet_backup_service_on_key_change();
+    bool ran = began && wb_wait(&r, wb_p_runs, 2);
+    wb_settle(400);
+    struct wallet_backup_status s;
+    wallet_backup_status_snapshot(&s);
+    WB_RUN("wb: a trigger arriving during a run stays pending after it succeeds",
+           ran && atomic_load(&g_wb_hook_fired) == 1 && s.key_change_pending);
+    wallet_backup_test_set_clock(r.t0 + WALLET_BACKUP_TRIGGER_MIN_INTERVAL_SEC);
+    bool cleared = wb_wait(&r, wb_p_clear, 0);
+    wallet_backup_status_snapshot(&s);
+    WB_RUN("wb: the surviving trigger gets its own backup next window",
+           cleared && s.total_runs - r.base.total_runs == 3);
+    wb_retry_end(&r);
+    return failures;
+}
+#endif
+
 int test_wallet_backup(void)
 {
     printf("\n=== wallet_backup tests ===\n");
@@ -2206,6 +2384,10 @@ int test_wallet_backup(void)
     failures += t_overlapping_stop_password_lifetime();
     failures += t_stop_waiter_completion_sequence();
     failures += t_rotation_counts_enc();
+#if !defined(_WIN32)
+    failures += t_failed_trigger_retries();
+    failures += t_trigger_during_run_survives();
+#endif
     event_clear_observers(EV_WALLET_BACKUP);
     event_clear_observers(EV_WALLET_BACKUP_FAILED);
     return failures + ZCL_TEST_SETUP_FAILURES();
