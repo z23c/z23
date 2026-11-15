@@ -1637,6 +1637,17 @@ int test_dev_land_proof_evidence_compile(void)
         dlx_restore();
         PASS();
     }
+    TEST("land: first actionable line is the cannot-execute cause after a passing preamble") {
+        char detail[256];
+        zcl_dev_land_test_first_actionable(
+            "test_vendor_provenance: OK\n"
+            "[vendor] vendor_lock_timeout: runtime.lock (Connection timed out)\n"
+            "build_vendor_offline_selftest: PASS downloader_contacted=false\n"
+            "z23-lint run: cannot execute 'build/bin/repro-network-policy-selftest': No such file or directory\n"
+            "make: *** [Makefile:7428: lint-land] Error 1\n", detail, sizeof(detail));
+        ASSERT(strstr(detail, "cannot execute 'build/bin/repro-network-policy-selftest'") != NULL);
+        PASS();
+    }
     TEST("land: compiler commands do not hide a later failing gate") {
         char detail[256];
         zcl_dev_land_test_first_actionable(

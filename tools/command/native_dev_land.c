@@ -2639,7 +2639,7 @@ static bool dl_gate_window_needle(const char *line)
 {
     static const char *const needles[] = {
         "FAIL", "fail", "error:", "Error", "ERROR", "undefined reference",
-        "refused", "assert",
+        "refused", "assert", "cannot execute", "No such file or directory",
     };
     for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++)
         if (strstr(line, needles[i]))
@@ -6235,6 +6235,42 @@ static void dl_lint_render(char *detail, size_t cap, const char *gate,
     } else (void)snprintf(detail, cap, "%s", rendered);
 }
 
+/* Unattributed failures: the real cause (a missing helper, say) sits after
+ * the passing preamble, so keep it, and the frame's last lines, beside the head. */
+struct dl_lint_cause {
+    char cause[141];
+    char tail[3][51];
+    unsigned seen;
+};
+static bool dl_lint_cause_line(const char *line)
+{
+    return strstr(line, "cannot execute") || strstr(line, "No such file or directory") ||
+        strstr(line, ": command not found");
+}
+static void dl_lint_cause_add(struct dl_lint_cause *c, const char *line)
+{
+    size_t used = 0;
+    char *slot = c->tail[c->seen % 3];
+    if (!c->cause[0] && dl_lint_cause_line(line)) {
+        (void)dl_lint_append_body(c->cause, sizeof(c->cause), &used, line);
+        used = 0;
+    }
+    slot[0] = '\0';
+    (void)dl_lint_append_body(slot, sizeof(c->tail[0]), &used, line);
+    c->seen++;
+}
+static void dl_lint_cause_body(const struct dl_lint_cause *c, const char *head,
+                               char *body, size_t cap)
+{
+    size_t n = c->cause[0] ? (size_t)snprintf(body, cap, "%s", c->cause) : 0;
+    unsigned first = c->seen > 3 ? c->seen - 3 : 0;
+    for (unsigned i = first; i < c->seen && n < cap; i++) {
+        const char *t = c->tail[i % 3];
+        if (c->cause[0] && strncmp(t, c->cause, strlen(t)) == 0) continue;
+        n += (size_t)snprintf(body + n, cap - n, "%s%s", n ? " / " : "", t);
+    }
+    if (n < cap) (void)snprintf(body + n, cap - n, "%s%.200s", n ? " | " : "", head);
+}
 struct dl_lint_excerpt {
     char text[701];
     size_t used;
@@ -6255,11 +6291,28 @@ static bool dl_lint_attributed_fail(const char *line, const char *gate)
     char c = line[n + 7];
     return c == '\0' || c == ':' || c == ' ' || c == '\r' || c == '\n';
 }
+struct dl_lint_scan {
+    struct dl_lint_excerpt prefix, diagnosis;
+    struct dl_lint_cause cs;
+    bool attributed;
+};
+/* One body line of the failed frame; false once the diagnosis is full. */
+static bool dl_lint_scan_line(struct dl_lint_scan *s, const char *line, bool clipped,
+                              const char *gate)
+{
+    if (!s->attributed && !clipped && dl_lint_attributed_fail(line, gate)) s->attributed = true;
+    if (s->attributed) dl_lint_excerpt_add(&s->diagnosis, line, clipped);
+    else {
+        dl_lint_excerpt_add(&s->prefix, line, clipped);
+        dl_lint_cause_add(&s->cs, line);
+    }
+    return !(s->attributed && s->diagnosis.clipped);
+}
 static bool dl_lint_body_snapshot(FILE *f, char *detail, size_t cap, size_t remaining)
 {
-    char line[4096], gate[256], next[256];
-    struct dl_lint_excerpt prefix = {0}, diagnosis = {0};
-    bool line_clipped = false, found = false, attributed = false;
+    char line[4096], gate[256], next[256], merged[1000];
+    struct dl_lint_scan s = {{{0}, 0, false}, {{0}, 0, false}, {{0}, {{0}}, 0}, false};
+    bool line_clipped = false, found = false;
     while (dl_lint_line(f, line, sizeof(line), &line_clipped, &remaining)) {
         if (!found) {
             found = !line_clipped && dl_lint_frame(line, gate, sizeof(gate));
@@ -6267,13 +6320,15 @@ static bool dl_lint_body_snapshot(FILE *f, char *detail, size_t cap, size_t rema
         }
         if (!line_clipped && dl_lint_frame(line, next, sizeof(next))) break;
         if (line[strspn(line, " \t\r\n")] == '\0') continue;
-        if (!attributed && !line_clipped && dl_lint_attributed_fail(line, gate)) attributed = true;
-        if (attributed) dl_lint_excerpt_add(&diagnosis, line, line_clipped);
-        else dl_lint_excerpt_add(&prefix, line, line_clipped);
-        if (attributed && diagnosis.clipped) break;
+        if (!dl_lint_scan_line(&s, line, line_clipped, gate)) break;
     }
-    struct dl_lint_excerpt *chosen = attributed ? &diagnosis : &prefix;
+    struct dl_lint_excerpt *chosen = s.attributed ? &s.diagnosis : &s.prefix;
     if (!chosen->used) return false;
+    if (!s.attributed && chosen->clipped) {
+        dl_lint_cause_body(&s.cs, chosen->text, merged, sizeof(merged));
+        dl_lint_render(detail, cap, gate, merged, true);
+        return true;
+    }
     dl_lint_render(detail, cap, gate, chosen->text, chosen->clipped);
     return true;
 }

@@ -392,6 +392,65 @@ static bool dlx_lint_growth_snapshot(void)
     return ok;
 }
 
+static void dlx_put_frame(FILE *f, const char *gate)
+{
+    (void)fprintf(f, "──── FAIL log: %s ", gate);
+    for (int i = 0; i < 28; i++) (void)fputs("─", f);
+    (void)fputc('\n', f);
+}
+
+static const char dlx_cause_line[] =
+    "z23-lint run: cannot execute 'build/bin/repro-network-policy-selftest': "
+    "No such file or directory\n";
+
+static void dlx_put_preamble(FILE *f)
+{
+    (void)fputs("test_vendor_provenance: OK\n[vendor] vendor_lock_timeout: "
+                "/cache/job/z23-vendor-lock/runtime.lock (Connection timed out)\n", f);
+    for (int i = 0; i < 12; i++)
+        (void)fprintf(f, "vendor_lock_selftest: legacy, symlink, permissions, environment PASS %d\n", i);
+}
+
+static bool dlx_lint_snapshot_of(FILE *f, char *detail, size_t cap)
+{
+    long size = ftell(f);
+    rewind(f);
+    return size > 0 && zcl_dev_land_lint_snapshot_test(f, (size_t)size, detail, cap);
+}
+
+/* The real cause follows a long passing preamble and must survive the cap. */
+static bool dlx_lint_cause_survives(void)
+{
+    FILE *f = tmpfile();
+    if (!f) return false;
+    dlx_put_frame(f, "check-vendor-provenance");
+    dlx_put_preamble(f);
+    (void)fputs(dlx_cause_line, f);
+    (void)fputs("make: *** [Makefile:7428: lint-land] Error 1\n", f);
+    char detail[1024] = {0};
+    bool ok = dlx_lint_snapshot_of(f, detail, sizeof(detail)) &&
+        strncmp(detail, "FAIL check-vendor-provenance", 28) == 0 &&
+        strstr(detail, "cannot execute") && strstr(detail, "No such file or directory") &&
+        strlen(detail) < sizeof(detail);
+    return fclose(f) == 0 && ok;
+}
+
+/* A cannot-execute line in a later gate's frame is not the first gate's cause. */
+static bool dlx_lint_cause_stays_in_frame(void)
+{
+    FILE *f = tmpfile();
+    if (!f) return false;
+    dlx_put_frame(f, "check-first");
+    dlx_put_preamble(f);
+    dlx_put_frame(f, "check-second");
+    (void)fputs(dlx_cause_line, f);
+    char detail[1024] = {0};
+    bool ok = dlx_lint_snapshot_of(f, detail, sizeof(detail)) &&
+        strncmp(detail, "FAIL check-first", 16) == 0 &&
+        !strstr(detail, "cannot execute") && !strstr(detail, "No such file or directory");
+    return fclose(f) == 0 && ok;
+}
+
 static bool dlx_lint_late_failure(const char *log)
 {
     char detail[1024], dimension[64];
@@ -411,6 +470,11 @@ static bool dlx_lint_late_failure(const char *log)
 static int dlx_lint_failure_detail(void)
 {
     int failures = 0;
+    TEST("land: lint detail keeps the cannot-execute cause after a long passing preamble") {
+        ASSERT(dlx_lint_cause_survives());
+        ASSERT(dlx_lint_cause_stays_in_frame());
+        PASS();
+    }
     TEST("land: lint failure detail retains the failed gate stderr body") {
         char root[1024], log[1200], detail[1024], line[512], dimension[64];
         test_make_tmpdir(root, sizeof(root), "dev_land", "lint_failure_body");
