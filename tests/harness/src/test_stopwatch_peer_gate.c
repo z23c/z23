@@ -495,6 +495,9 @@ static int spg_interrupt(const char *const argv[], const char *dir, char *out, s
     if (log < 0 || events < 0 || inotify_add_watch(events, dir, IN_CREATE) < 0) return -1;
     pid_t child = fork();
     if (child == 0) {
+        /* A runner started in the background inherits SIGINT ignored. That
+         * survives exec, and the script cannot trap a signal ignored on entry. */
+        (void)signal(sig, SIG_DFL);
         (void)dup2(log, 1); (void)dup2(log, 2);
         execv(argv[0], (char *const *)argv);
         _exit(127);
