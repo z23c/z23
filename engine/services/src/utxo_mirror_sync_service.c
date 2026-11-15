@@ -28,6 +28,7 @@
 #include "storage/coins_ram.h"
 #include "storage/progress_store.h"
 #include "supervisors/domains.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/supervisor.h"
 #include "util/thread_registry.h"
@@ -189,6 +190,8 @@ static bool mirror_run_db_lane(struct node_db *ndb,
 struct mirror_node_state_ctx {
     int64_t cursor;
     bool mirror_has_rows;
+    bool has_branch_hash;
+    uint8_t branch_hash[32];
     bool ok;
 };
 
@@ -198,6 +201,11 @@ static bool mirror_read_node_state_lane(struct node_db *ndb, void *ctx)
 
     if (!ndb || !ndb->open || !s)
         return false;
+    if (!utxo_mirror_node_branch_hash(ndb, s->branch_hash,
+                                      &s->has_branch_hash)) {
+        LOG_WARN("utxo_mirror", "branch identity is unreadable or malformed");
+        return false;
+    }
     s->cursor = 0;
     (void)node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &s->cursor);
     sqlite3_stmt *st = NULL;
@@ -540,7 +548,34 @@ struct mirror_source {
     sqlite3_stmt *sel;
     int32_t frontier;
     int64_t count;
+    bool has_branch_hash;
+    uint8_t branch_hash[32];
 };
+
+/* The optional journal tip belongs to the same pinned snapshot as the coins.
+ * A rebuild without it must record unknown identity, never a guessed hash. */
+static void mirror_source_read_branch_hash(struct mirror_source *s)
+{
+    s->has_branch_hash = false;
+    if (s->frontier <= 0)
+        return;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(s->db,
+            "SELECT branch_hash FROM utxo_apply_delta WHERE height = ?",
+            -1, &st, NULL) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(st, 1, s->frontier - 1);
+    if (ar_step_checked(st, "utxo mirror rebuild branch hash", NULL) == ZCL_STEP_ROW) {
+        const void *blob = sqlite3_column_blob(st, 0);
+        int len = sqlite3_column_bytes(st, 0);
+        if (blob && len == 32) {
+            memcpy(s->branch_hash, blob, 32);
+            s->has_branch_hash = true;
+        }
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK)
+        s->has_branch_hash = false;
+}
 
 /* True only when the statement finalized and the connection closed cleanly. */
 static bool mirror_source_close(struct mirror_source *s)
@@ -585,6 +620,8 @@ static int mirror_source_open(struct mirror_source *s, bool operator_repair,
      * WAL pins the snapshot there). */
     int rc = mirror_snapshot_begin(s->db, &s->frontier, operator_repair,
                                    &s->count, reason, cap);
+    if (rc == 0)
+        mirror_source_read_branch_hash(s);
     if (rc == 0 && sqlite3_prepare_v2(s->db,
             "SELECT txid, vout, value, height, is_coinbase, script "
             "FROM coins ORDER BY txid, vout", -1, &s->sel, NULL) != SQLITE_OK) {
@@ -706,10 +743,12 @@ static int64_t mirror_rebuild_stage(struct mirror_writer *w,
                                           : UTXO_MIRROR_REBUILD_ERROR, false);
 }
 
-/* Verify, then stamp checkpoint + caches + cursor in the SAME transaction.
+/* Verify, then stamp checkpoint + caches + branch + cursor in one transaction.
  * 0, or the typed failure to roll back with. */
 static int mirror_rebuild_persist(struct node_db *ndb, struct mirror_stage *st,
-                                  int32_t frontier, int64_t expected_count)
+                                  int32_t frontier, int64_t expected_count,
+                                  bool has_branch_hash,
+                                  const uint8_t branch_hash[32])
 {
     int verdict = mirror_rebuild_verified(ndb, &st->src_sha, expected_count);
     if (verdict != 0)
@@ -722,6 +761,13 @@ static int mirror_rebuild_persist(struct node_db *ndb, struct mirror_stage *st,
     }
     if (!db_utxo_rebuild_wallet_and_address_caches_in_txn(ndb)) {
         LOG_WARN("utxo_mirror", "rebuild: wallet/address cache refresh failed");
+        return UTXO_MIRROR_REBUILD_ERROR;
+    }
+    bool hash_ok = has_branch_hash
+        ? node_db_state_set(ndb, UTXO_MIRROR_BRANCH_HASH_KEY, branch_hash, 32)
+        : node_db_state_delete(ndb, UTXO_MIRROR_BRANCH_HASH_KEY);
+    if (!hash_ok) {
+        LOG_WARN("utxo_mirror", "rebuild: branch identity persist failed at frontier=%d", frontier);
         return UTXO_MIRROR_REBUILD_ERROR;
     }
     int64_t next_cursor = frontier;
@@ -766,7 +812,8 @@ static int64_t mirror_rebuild_from_coins_kv(struct node_db *shared,
     int64_t failure = mirror_rebuild_stage(&w, &src, stop, &st);
     if (failure != 0)
         return failure;
-    rc = mirror_rebuild_persist(&w.db, &st, frontier, expected);
+    rc = mirror_rebuild_persist(&w.db, &st, frontier, expected,
+                                src.has_branch_hash, src.branch_hash);
     if (rc != 0)
         return mirror_writer_abort(&w, rc, false);
     if (!node_db_commit(&w.db)) {
@@ -1057,6 +1104,25 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
                    "authority frontier=%d after an authority rewind; mirror "
                    "quarantined (cursor was not decremented)",
                    (long long)state.cursor, frontier);
+    }
+
+    enum utxo_mirror_branch_verdict branch = state.has_branch_hash
+        ? utxo_mirror_branch_check(progress_store_db(), state.cursor,
+                                   state.branch_hash)
+        : UTXO_MIRROR_BRANCH_OK;
+    if (branch != UTXO_MIRROR_BRANCH_OK) {
+        bool changed = branch == UTXO_MIRROR_BRANCH_MISMATCH;
+        mirror_record_cause(svc, changed ? UTXO_MIRROR_CAUSE_AUTHORITY_REWIND
+                                         : UTXO_MIRROR_CAUSE_MISSING_DELTA);
+        atomic_store(&svc->mirror_health, UTXO_MIRROR_QUARANTINED);
+        atomic_fetch_add(&svc->quarantines_total, 1);
+        atomic_store(&svc->last_quarantine_unix,
+                     platform_time_wall_unix());
+        LOG_RETURN(-1, "utxo_mirror",
+                   "mirror branch identity at cursor=%lld: %s; "
+                   "quarantined without changing rows or cursor",
+                   (long long)state.cursor,
+                   changed ? "authority hash changed" : "authority history missing");
     }
 
     /* Catch-up deferral must not hide a rewind: the frontier may rebound

@@ -33,6 +33,24 @@
 #include <stdint.h>
 
 struct node_db;
+struct sqlite3;
+
+/* An OK result can be an exact match or an unchecked legacy identity. Missing
+ * history is never converted into a match after an identity has been recorded. */
+enum utxo_mirror_branch_verdict {
+    UTXO_MIRROR_BRANCH_OK,
+    UTXO_MIRROR_BRANCH_MISMATCH,
+    UTXO_MIRROR_BRANCH_HISTORY_MISSING,
+};
+
+enum utxo_mirror_branch_verdict
+utxo_mirror_branch_check(struct sqlite3 *db, int64_t cursor,
+                         const uint8_t expected[32]);
+
+/* Read an exact 32-byte identity without truncating malformed state into it.
+ * False means a read error or invalid length; *present is false when absent. */
+bool utxo_mirror_node_branch_hash(struct node_db *ndb, uint8_t expected[32],
+                                  bool *present);
 
 /* Result of one delta pass. */
 enum utxo_mirror_delta_status {

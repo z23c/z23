@@ -13,4 +13,9 @@
  * or coherent capture, and this read model is never consensus authority. */
 #define UTXO_MIRROR_SYNC_CURSOR_KEY "utxos_mirror_height"
 
+/* Optional 32-byte hash of the block at cursor - 1, committed with the cursor
+ * and mirror rows. Missing state means branch identity is unknown, never that
+ * two branches match. The hash uses the authority delta's internal byte order. */
+#define UTXO_MIRROR_BRANCH_HASH_KEY "utxos_mirror_branch_hash"
+
 #endif

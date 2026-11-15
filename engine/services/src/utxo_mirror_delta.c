@@ -18,6 +18,8 @@
 #include "script/script.h"    /* MAX_SCRIPT_SIZE */
 #include "script/standard.h"  /* utxo_classify_script */
 #include "storage/progress_store.h"
+#include "storage/utxo_mirror_schema.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -224,6 +226,72 @@ static int64_t mirror_count_delta_rows(sqlite3 *rdb, int32_t cursor, int32_t upp
     }
     sqlite3_finalize(cnt);
     return delta_rows;
+}
+
+static bool mirror_delta_tip_hash(sqlite3 *rdb, int32_t upper,
+                                  uint8_t out[32])
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(rdb,
+            "SELECT branch_hash FROM utxo_apply_delta WHERE height = ?",
+            -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int64(st, 1, upper - 1);
+    bool ok = false;
+    if (ar_step_checked(st, "utxo mirror delta branch hash", NULL) == ZCL_STEP_ROW) {
+        const void *blob = sqlite3_column_blob(st, 0);
+        int len = sqlite3_column_bytes(st, 0);
+        if (blob && len == 32) {
+            memcpy(out, blob, 32);
+            ok = true;
+        }
+    }
+    return sqlite3_finalize(st) == SQLITE_OK && ok;
+}
+
+bool utxo_mirror_node_branch_hash(struct node_db *ndb, uint8_t expected[32],
+                                  bool *present)
+{
+    if (!ndb || !expected || !present)
+        return false;
+    uint8_t stored[33];
+    size_t len = 0;
+    if (!node_db_state_read(ndb, UTXO_MIRROR_BRANCH_HASH_KEY,
+                            stored, sizeof(stored), &len, present))
+        return false;
+    if (!*present)
+        return true;
+    if (len != 32)
+        return false;
+    memcpy(expected, stored, 32);
+    return true;
+}
+
+enum utxo_mirror_branch_verdict
+utxo_mirror_branch_check(struct sqlite3 *db, int64_t cursor,
+                         const uint8_t expected[32])
+{
+    if (!db || !expected || cursor <= 0)
+        return UTXO_MIRROR_BRANCH_HISTORY_MISSING;
+    sqlite3_stmt *st = NULL;
+    enum utxo_mirror_branch_verdict verdict = UTXO_MIRROR_BRANCH_HISTORY_MISSING;
+    progress_store_tx_lock();
+    if (sqlite3_prepare_v2(db,
+            "SELECT branch_hash FROM utxo_apply_delta WHERE height = ?",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, cursor - 1);
+        if (ar_step_checked(st, "utxo mirror branch check", NULL) == ZCL_STEP_ROW) {
+            const void *blob = sqlite3_column_blob(st, 0);
+            int len = sqlite3_column_bytes(st, 0);
+            if (blob && len == 32)
+                verdict = memcmp(expected, blob, 32) == 0
+                    ? UTXO_MIRROR_BRANCH_OK : UTXO_MIRROR_BRANCH_MISMATCH;
+        }
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK)
+        verdict = UTXO_MIRROR_BRANCH_HISTORY_MISSING;
+    progress_store_tx_unlock();
+    return verdict;
 }
 
 enum mirror_coin_row {
@@ -494,6 +562,58 @@ static bool mirror_apply_live_coins(struct node_db *ndb, sqlite3 *rdb,
     return ok;
 }
 
+static sqlite3 *mirror_delta_snapshot_open(const char *pkv_path,
+    struct node_db *ndb, int32_t cursor, int32_t upper,
+    uint8_t branch_hash[32], enum utxo_mirror_delta_status *status)
+{
+    sqlite3 *rdb = NULL;
+    *status = UTXO_MIRROR_DELTA_ERROR;
+    if (!mirror_open_progress_ro(pkv_path, &rdb))
+        LOG_RETURN(NULL, "utxo_mirror",
+                   "delta: open ro progress.kv failed: %s", pkv_path);
+    if (sqlite3_exec(rdb, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+        int rc = sqlite3_extended_errcode(rdb);
+        sqlite3_close(rdb);
+        LOG_RETURN(NULL, "utxo_mirror",
+                   "delta: BEGIN authority snapshot failed: %s", sqlite3_errstr(rc));
+    }
+
+    int64_t delta_rows = mirror_count_delta_rows(rdb, cursor, upper);
+    if (delta_rows != (int64_t)(upper - cursor)) {
+        sqlite3_close(rdb);
+        *status = UTXO_MIRROR_DELTA_FALLBACK;
+        LOG_RETURN(NULL, "utxo_mirror",
+                   "delta: utxo_apply_delta rows=%lld != span=%d [%d,%d) — quarantine",
+                   (long long)delta_rows, upper - cursor, cursor, upper);
+    }
+    if (!mirror_delta_tip_hash(rdb, upper, branch_hash)) {
+        sqlite3_close(rdb);
+        *status = UTXO_MIRROR_DELTA_FALLBACK;
+        LOG_RETURN(NULL, "utxo_mirror",
+                   "delta: branch hash missing at tip height=%d — quarantine",
+                   upper - 1);
+    }
+
+    bool has_start_hash = false;
+    uint8_t start_hash[32];
+    if (!utxo_mirror_node_branch_hash(ndb, start_hash, &has_start_hash)) {
+        sqlite3_close(rdb);
+        LOG_RETURN(NULL, "utxo_mirror",
+                   "delta: stored branch identity is unreadable or malformed");
+    }
+    bool replay = has_start_hash && memcmp(start_hash, branch_hash, 32) == 0;
+    if (has_start_hash && !replay &&
+        utxo_mirror_branch_check(rdb, cursor, start_hash) != UTXO_MIRROR_BRANCH_OK) {
+        sqlite3_close(rdb);
+        *status = UTXO_MIRROR_DELTA_FALLBACK;
+        LOG_RETURN(NULL, "utxo_mirror",
+                   "delta: starting branch identity changed at height=%d — quarantine",
+                   cursor - 1);
+    }
+    *status = UTXO_MIRROR_DELTA_OK;
+    return rdb;
+}
+
 /* ── The delta pass ──────────────────────────────────────────────────── */
 
 int utxo_mirror_delta_apply(struct node_db *ndb,
@@ -514,22 +634,12 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
                    "delta: progress store path unavailable");
 
-    sqlite3 *rdb = NULL;
-    if (!mirror_open_progress_ro(pkv_path, &rdb))
-        LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
-                   "delta: open ro progress.kv failed: %s", pkv_path);
-
-    /* Missing utxo_apply_delta rows in the range mean the spent side would be
-     * incomplete → refuse the delta and let the caller quarantine. Every
-     * applied height persists a row (utxo_apply_stage.c), so the count must
-     * equal the height span. */
-    int64_t delta_rows = mirror_count_delta_rows(rdb, cursor, upper);
-    if (delta_rows != (int64_t)(upper - cursor)) {
-        sqlite3_close(rdb);
-        LOG_RETURN(UTXO_MIRROR_DELTA_FALLBACK, "utxo_mirror",
-                   "delta: utxo_apply_delta rows=%lld != span=%d [%d,%d) — quarantine",
-                   (long long)delta_rows, upper - cursor, cursor, upper);
-    }
+    enum utxo_mirror_delta_status snapshot_status = UTXO_MIRROR_DELTA_OK;
+    uint8_t branch_hash[32];
+    sqlite3 *rdb = mirror_delta_snapshot_open(pkv_path, ndb, cursor, upper,
+                                              branch_hash, &snapshot_status);
+    if (!rdb)
+        return snapshot_status;
 
     if (!node_db_begin(ndb)) {
         sqlite3_close(rdb);
@@ -580,13 +690,19 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
                    cursor, upper, (long long)rows_changed);
     }
 
-    /* Commitment and next-height cursor are mandatory members of this mirror
-     * transaction. Any failure rolls every derived row and cache back. */
+    /* Commitment, branch identity and next-height cursor are mandatory members
+     * of this mirror transaction. Any failure rolls derived state back. */
     if (!utxo_commitment_save_checkpoint_at_height(ndb->db, &uc, upper)) {
         mirror_rollback_warn(ndb, MIRROR_ROLLBACK_COMMITMENT);
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
                    "delta: commitment checkpoint save failed at frontier=%d",
                    upper);
+    }
+    if (!node_db_state_set(ndb, UTXO_MIRROR_BRANCH_HASH_KEY,
+                           branch_hash, sizeof(branch_hash))) {
+        mirror_rollback_warn(ndb, MIRROR_ROLLBACK_CURSOR);
+        LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
+                   "delta: branch hash persist failed at frontier=%d", upper);
     }
 
     int64_t next_cursor = upper;

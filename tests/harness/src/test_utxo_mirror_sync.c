@@ -178,7 +178,7 @@ static bool ums_write_delta_row(sqlite3 *pdb, int32_t height, uint8_t spent_tag,
     return ok;
 }
 
-static bool ums_write_empty_delta_row(sqlite3 *pdb, int32_t height)
+static bool ums_write_branch_delta_row(sqlite3 *pdb, int32_t height, uint8_t branch)
 {
     if (sqlite3_exec(pdb,
             "CREATE TABLE IF NOT EXISTS utxo_apply_delta ("
@@ -192,14 +192,20 @@ static bool ums_write_empty_delta_row(sqlite3 *pdb, int32_t height)
             " (height,branch_hash,spent_blob,added_blob) VALUES (?,?,?,?)",
             -1, &s, NULL) != SQLITE_OK)
         return false;
-    uint8_t zero32[32] = {0};
+    uint8_t branch_hash[32];
+    memset(branch_hash, branch, sizeof(branch_hash));
     sqlite3_bind_int64(s, 1, height);
-    sqlite3_bind_blob(s, 2, zero32, 32, SQLITE_STATIC);
+    sqlite3_bind_blob(s, 2, branch_hash, 32, SQLITE_STATIC);
     sqlite3_bind_blob(s, 3, "", 0, SQLITE_STATIC);
     sqlite3_bind_blob(s, 4, "", 0, SQLITE_STATIC);
     bool ok = sqlite3_step(s) == SQLITE_DONE;
     sqlite3_finalize(s);
     return ok;
+}
+
+static bool ums_write_empty_delta_row(sqlite3 *pdb, int32_t height)
+{
+    return ums_write_branch_delta_row(pdb, height, 0);
 }
 
 static bool ums_add_height_coin(sqlite3 *pdb, int32_t height)
@@ -2148,6 +2154,155 @@ static int ums_test_header_deferred_rewind(void)
     return failures;
 }
 
+static bool ums_branch_hash_is(struct node_db *ndb, uint8_t branch)
+{
+    uint8_t got[32], expected[32];
+    size_t len = 0;
+    bool present = false;
+    memset(expected, branch, sizeof(expected));
+    return node_db_state_read(ndb, UTXO_MIRROR_BRANCH_HASH_KEY,
+                              got, sizeof(got), &len, &present) &&
+           present && len == sizeof(expected) &&
+           memcmp(got, expected, sizeof(expected)) == 0;
+}
+
+static int ums_test_branch_replacement(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "branch_replacement");
+    UMS_CHECK("branch: fixture opens", fx.ok);
+    if (!fx.ok) {
+        ums_fx_close(&fx);
+        return 1;
+    }
+    UMS_CHECK("branch: history seeded",
+              ums_write_branch_delta_row(fx.pdb, 101, 0x51));
+    UMS_CHECK("branch: rebuild applies both coins",
+              utxo_mirror_sync_run_once(&fx.svc) == 2);
+    UMS_CHECK("branch: rebuild stores snapshot identity",
+              ums_branch_hash_is(&fx.ndb, 0x51));
+
+    UMS_CHECK("branch: delta advances to branch B",
+              ums_add_coin(fx.pdb, 0x53, 3000, 102) &&
+              ums_write_branch_delta_row(fx.pdb, 102, 0x52) &&
+              ums_set_frontier(fx.pdb, 103) &&
+              utxo_mirror_sync_run_once(&fx.svc) == 1);
+    UMS_CHECK("branch: delta stores tip identity",
+              ums_branch_hash_is(&fx.ndb, 0x52));
+    UMS_CHECK("branch: replace authority at the same height",
+              ums_write_branch_delta_row(fx.pdb, 102, 0x53));
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
+    UMS_CHECK("branch: same-height replacement quarantines",
+              utxo_mirror_sync_run_once(&fx.svc) == -1);
+    UMS_CHECK("branch: replacement names authority rewind",
+              ums_quarantined_with_cause(&fx.svc, "authority_rewind"));
+    int64_t cursor = -1;
+    UMS_CHECK("branch: rows, cursor and identity stay frozen",
+              db_utxo_count(&fx.ndb) == 3 &&
+              node_db_state_get_int(&fx.ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    &cursor) && cursor == 103 &&
+              ums_branch_hash_is(&fx.ndb, 0x52) &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+    UMS_CHECK("branch: next pass is a bounded quarantined no-op",
+              utxo_mirror_sync_run_once(&fx.svc) == 0 &&
+              ums_quarantined_with_cause(&fx.svc, "authority_rewind"));
+    ums_fx_close(&fx);
+    return failures;
+}
+
+static int ums_test_oversize_branch_state(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "oversize_branch_state");
+    UMS_CHECK("oversize: fixture opens", fx.ok);
+    if (!fx.ok) {
+        ums_fx_close(&fx);
+        return 1;
+    }
+    UMS_CHECK("oversize: rebuild stores branch A",
+              ums_write_branch_delta_row(fx.pdb, 101, 0x51) &&
+              utxo_mirror_sync_run_once(&fx.svc) == 2 &&
+              ums_branch_hash_is(&fx.ndb, 0x51));
+    uint8_t oversized[33];
+    memset(oversized, 0x51, sizeof(oversized));
+    UMS_CHECK("oversize: plant overlong persisted identity",
+              node_db_state_set(&fx.ndb, UTXO_MIRROR_BRANCH_HASH_KEY,
+                                oversized, sizeof(oversized)));
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
+    int64_t cursor = -1;
+    UMS_CHECK("oversize: identity is not truncated into a healthy match",
+              utxo_mirror_sync_run_once(&fx.svc) == -1 &&
+              db_utxo_count(&fx.ndb) == 2 &&
+              node_db_state_get_int(&fx.ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    &cursor) && cursor == 102 &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+    ums_fx_close(&fx);
+    return failures;
+}
+
+static int ums_delta_replay_unchanged(struct ums_fx *fx)
+{
+    int failures = 0;
+    int32_t applied = -1;
+    int64_t changed = -1;
+    int rc = utxo_mirror_delta_apply(&fx->ndb, 102, 103, 0,
+                                     UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                     &applied, &changed);
+    UMS_CHECK("continuity: unchanged-authority replay remains idempotent",
+              rc == UTXO_MIRROR_DELTA_OK && applied == 103 &&
+              changed == 1 && ums_branch_hash_is(&fx->ndb, 0x52));
+    return failures;
+}
+
+static int ums_delta_refuse_changed(struct ums_fx *fx)
+{
+    int failures = 0;
+    UMS_CHECK("continuity: replace authority before delta snapshot",
+              ums_write_branch_delta_row(fx->pdb, 102, 0x53));
+    int32_t applied = -1;
+    int64_t changed = -1;
+    int rc = utxo_mirror_delta_apply(&fx->ndb, 102, 103, 0,
+                                     UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                     &applied, &changed);
+    UMS_CHECK("continuity: changed branch refuses the delta",
+              rc == UTXO_MIRROR_DELTA_FALLBACK && applied == -1 && changed == -1);
+    int64_t rebuilds_before = atomic_load(&fx->svc.rebuilds_run);
+    int64_t cursor = -1;
+    UMS_CHECK("continuity: refusal leaves all mirror state untouched",
+              db_utxo_count(&fx->ndb) == 3 &&
+              node_db_state_get_int(&fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    &cursor) && cursor == 103 &&
+              ums_branch_hash_is(&fx->ndb, 0x52) &&
+              atomic_load(&fx->svc.rebuilds_run) == rebuilds_before);
+    return failures;
+}
+
+static int ums_test_delta_branch_continuity(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "delta_branch_continuity");
+    UMS_CHECK("continuity: fixture opens", fx.ok);
+    if (!fx.ok) {
+        ums_fx_close(&fx);
+        return 1;
+    }
+    UMS_CHECK("continuity: reach branch B at cursor 103",
+              ums_write_branch_delta_row(fx.pdb, 101, 0x51) &&
+              utxo_mirror_sync_run_once(&fx.svc) == 2 &&
+              ums_add_coin(fx.pdb, 0x53, 3000, 102) &&
+              ums_write_branch_delta_row(fx.pdb, 102, 0x52) &&
+              ums_set_frontier(fx.pdb, 103) &&
+              utxo_mirror_sync_run_once(&fx.svc) == 1 &&
+              ums_branch_hash_is(&fx.ndb, 0x52));
+    failures += ums_delta_replay_unchanged(&fx);
+    failures += ums_delta_refuse_changed(&fx);
+    ums_fx_close(&fx);
+    return failures;
+}
+
 static int ums_test_authority_rewind(struct node_db *ndb, sqlite3 *pdb, struct utxo_mirror_sync_service *svc)
 {
     int failures = 0;
@@ -2290,6 +2445,9 @@ int test_utxo_mirror_sync(void)
     failures += ums_test_stop_abort_rebuild();
     failures += ums_test_snapshot_race();
     failures += ums_test_header_deferred_rewind();
+    failures += ums_test_branch_replacement();
+    failures += ums_test_oversize_branch_state();
+    failures += ums_test_delta_branch_continuity();
     failures += ums_test_rebuild_now();
     failures += ums_test_containment_suite();
     node_db_close(&ndb);
