@@ -39,6 +39,9 @@ uint32_t pair_dir_max(const char *dir, const char *prefix);
 /* Epochs holding a client.json, ascending. */
 size_t pair_epoch_list(const char *state, const char *peer, uint32_t *epochs, size_t cap);
 bool pair_epoch_load(const char *state, const char *peer, uint32_t epoch, struct pair_epoch *out);
+/* pair_epoch_load without the PSK fingerprint step: reads the route file and the grant row only,
+ * never acquires the pre-shared key (psk_fp stays empty). */
+bool pair_epoch_load_meta(const char *state, const char *peer, uint32_t epoch, struct pair_epoch *out);
 enum pair_state pair_epoch_state(const struct pair_epoch *epoch, uint64_t now);
 const char *pair_state_name(enum pair_state state);
 bool pair_renew_due(const struct pair_epoch *epoch, uint64_t now, uint64_t before_s);

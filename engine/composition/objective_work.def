@@ -146,3 +146,10 @@ Z23_OBJECTIVE_WORK("baseline_hardening_banned_str", 1,
                    "the call sits in core/, engine/reducer/, contexts/wallet/, "
                    "consensus storage or the land driver, or a bounded form "
                    "would truncate a value the caller relies on")
+
+Z23_OBJECTIVE_WORK("device_pair_ttl_h", 0,
+                   "tools/command/native_pair_*.c,engine/models/**",
+                   "z23-dev fleet objectives",
+                   "the pairing grant is renewed through the device pairing "
+                   "store and the tunnel scripts, which sit outside a lane's "
+                   "reach")

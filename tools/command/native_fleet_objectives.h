@@ -97,6 +97,9 @@ struct zcl_objectives_options {
                                * NULL takes the newest one under this
                                * checkout's Claude project directory */
     const char *checkout_revision; /* internal: NULL auto; empty worktree */
+    const char *pair_state_dir; /* the pairing store read for
+                                 * device_pair_ttl_h; NULL selects
+                                 * $HOME/.local/state/z23-tunnel */
 };
 
 /* Measures one catalog row by id. An id this file does not recognize
@@ -132,6 +135,10 @@ struct zcl_objective_value zcl_objectives_node_rss_mb(
 struct zcl_objective_value zcl_objectives_node_tip_lag_blocks(
     const struct zcl_objectives_options *options);
 struct zcl_objective_value zcl_objectives_node_warm_restart_s(
+    const struct zcl_objectives_options *options);
+/* Hours until the soonest expiry among the newest-epoch device pairings in
+ * the local pairing store (native_fleet_objectives_pair.c). */
+struct zcl_objective_value zcl_objectives_device_pair_ttl_h(
     const struct zcl_objectives_options *options);
 
 /* The experiment-ledger producer (native_fleet_objectives_tokens.c): the

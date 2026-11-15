@@ -27,7 +27,7 @@
  *              "outcomes.jsonl", "rows.tsv", "phases.txt", "lint.log",
  *              "test.log", "git_log", "lintc_line_counts",
  *              "cyclomatic_baseline", "hardening_baseline", "status_brief",
- *              "boot_status.json", or
+ *              "boot_status.json", "pair_state", or
  *              "unmeasured" when no producer exists in the tree yet.
  *   direction_ "min" (lower is better) or "max" (higher is better).
  *   target_    the numeric threshold `met` is judged against.
@@ -128,3 +128,10 @@ Z23_OBJECTIVE("baseline_hardening_banned_str", "lab", "hardening_baseline",
              "each banned-str row in the hardening ratchet is a strcpy, "
              "strcat, sprintf, vsprintf or gets call with no length bound; "
              "the baseline may only shrink, so the sum is the work still owed")
+
+Z23_OBJECTIVE("device_pair_ttl_h", "lab", "pair_state", "max", 72, "h",
+             "hours until the soonest expiry among the newest-epoch device "
+             "pairings in the local pairing store; below the 72 h renewal "
+             "window a tunnel grant is about to lapse and deliveries over it "
+             "will fail, and 0 means a current pairing is already expired or "
+             "revoked")

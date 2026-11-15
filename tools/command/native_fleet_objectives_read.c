@@ -2099,6 +2099,7 @@ static const struct obj_producer k_producers[] = {
     {"generated_churn_10d", obj_generated_churn_10d},
     {"baseline_hardening_banned_str",
      zcl_objectives_baseline_hardening_banned_str},
+    {"device_pair_ttl_h", zcl_objectives_device_pair_ttl_h},
 };
 
 struct zcl_objective_value zcl_objectives_measure(

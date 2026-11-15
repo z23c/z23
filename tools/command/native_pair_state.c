@@ -161,7 +161,7 @@ bool pair_psk_fingerprint(const char *profile, const uint8_t peer[32], const uin
     return ok;
 }
 
-static bool pair_grant_read(struct pair_epoch *out, uint64_t now)
+static bool pair_grant_read(struct pair_epoch *out, uint64_t now, bool fingerprint)
 {
     struct device_identity identity = {0};
     struct device_identity_publication_report report;
@@ -173,13 +173,14 @@ static bool pair_grant_read(struct pair_epoch *out, uint64_t now)
     if (!ok) return false;
     zcl_hex_encode(out->row.host_scope.binding.psk.credential_id, 32, out->credential);
     out->psk_fp[0] = 0;
-    if (!out->row.revoked_at && out->row.expires_at > now)
+    if (fingerprint && !out->row.revoked_at && out->row.expires_at > now)
         (void)pair_psk_fingerprint(out->profile, out->peer_key, out->root, out->target_port,
                                    DEVICE_PAIRING_HOST_OUTBOUND, now, out->psk_fp);
     return true;
 }
 
-bool pair_epoch_load(const char *state, const char *peer, uint32_t epoch, struct pair_epoch *out)
+static bool pair_epoch_load_with(const char *state, const char *peer, uint32_t epoch, struct pair_epoch *out,
+                                bool fingerprint)
 {
     char path[PAIR_PATH_MAX + 32], text[PAIR_ROUTE_TEXT_MAX];
     size_t length = 0;
@@ -198,7 +199,18 @@ bool pair_epoch_load(const char *state, const char *peer, uint32_t epoch, struct
         LOG_WARN(PAIR_TAG, "epoch %u: route file is not a valid client route for this peer", (unsigned)epoch);
         return false;
     }
-    return pair_grant_read(out, pair_now());
+    return pair_grant_read(out, pair_now(), fingerprint);
+}
+
+bool pair_epoch_load(const char *state, const char *peer, uint32_t epoch, struct pair_epoch *out)
+{
+    return pair_epoch_load_with(state, peer, epoch, out, true);
+}
+
+/* Same route and grant-row read without the PSK fingerprint: never acquires the key. */
+bool pair_epoch_load_meta(const char *state, const char *peer, uint32_t epoch, struct pair_epoch *out)
+{
+    return pair_epoch_load_with(state, peer, epoch, out, false);
 }
 
 enum pair_state pair_epoch_state(const struct pair_epoch *epoch, uint64_t now)

@@ -234,8 +234,13 @@ The closed catalog is [`engine/composition/objectives.def`](../../engine/composi
 `lint_families_over_ceiling`, `functions_over_complexity_cap`,
 `fresh_node_sync_eta_s`, `tokens_per_landed_commit`, `landed_rows_today`,
 `land_success_rate_7d`, `land_failure_repeats`, `product_commit_share_7d`,
-`generated_churn_10d`,
+`generated_churn_10d`, `device_pair_ttl_h`,
 `node_rss_mb`, `node_tip_lag_blocks` and `node_warm_restart_s`.
+`device_pair_ttl_h` (lab, `max`, target 72 h, the renewal window) is the hours until the
+soonest expiry among the newest-epoch pairings in `$HOME/.local/state/z23-tunnel`: it is
+0 when any peer's newest epoch is expired or revoked and `unmeasured(<reason naming the
+directory>)` when the store cannot be read or names more than 64 peers (cap 64); it is read-only,
+does not read the pre-shared key; opening the pairing profile reads the device identity key into memory only, and it is cleansed on close.
 Each row has a class: `product` (about the node a user runs: `node_rss_mb`,
 `node_tip_lag_blocks`, `node_warm_restart_s`, `fresh_node_sync_eta_s`) or `lab` (about
 the machinery that builds it), declared in the catalog's class column. The three node
