@@ -157,7 +157,7 @@ static void al_model(struct library *w)
     if (!w->count) {
         (void)snprintf(m->summary, sizeof(m->summary), "No apps yet. Create a copy or discover an app to get started.");
         app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
-        app_library_choice(m, "home", "More options", "Discover apps, hosting, and Close.");
+        app_library_choice(m, "home", "More options", "Received copies, discovery, hosting.");
         return;
     }
     const struct library_row *r = &w->rows[w->index];
@@ -178,7 +178,7 @@ static void al_model(struct library *w)
     else if (w->index) app_library_choice(m, "previous", "Previous app", "Browse back.");
     if (w->index + 1 < w->count) app_library_choice(m, "next", "Next app", "Browse forward.");
     else app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
-    app_library_choice(m, "home", "More options", "Discover apps, hosting, and Close.");
+    app_library_choice(m, "home", "More options", "Received copies, discovery, hosting.");
 }
 static void al_home(struct library *w)
 {
@@ -188,7 +188,7 @@ static void al_home(struct library *w)
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
     (void)snprintf(m->summary, sizeof(m->summary), "Open your apps, make a copy, or discover shared apps.");
     app_library_choice(m, "myapps", "My apps", "Browse your apps or create a copy.");
-    app_library_choice(m, "discover", "Discover apps", "Browse offers or open a shared app.");
+    app_library_choice(m, "discover", "Discover apps", "Received copies, offers, and links.");
     app_library_choice(m, "hosting", "Hosting", "Review and stop local hosting intents.");
     app_library_choice(m, "cancel", "Close", "Close without opening an app.");
 }
