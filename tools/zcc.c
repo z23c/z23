@@ -429,7 +429,7 @@ static bool child_env_excluded(const char *entry)
     if (orchestration_env(entry)) return true;
     static const char *const controls[] = {
         "ZCC_DIR=", "ZCC_LOG=", "ZCC_MAX_MB=", "ZCC_STRICT=",
-        "ZCC_AUDIT=", "ZCC_DISABLE="
+        "ZCC_AUDIT=", "ZCC_DISABLE=", "ZCC_DISPATCH_TIMING="
     };
     for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); i++)
         if (strncmp(entry, controls[i], strlen(controls[i])) == 0)
@@ -2974,6 +2974,39 @@ static int64_t flight_clock_ms(void)
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
+/* The sink is bounded and contention drops a record rather than blocking. */
+static void epoch_timing_append(const char *path, const char *line, int n)
+{
+    int fd = open(path, O_WRONLY | O_APPEND | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return;
+    struct stat st;
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+            st.st_size >= 0 && st.st_size <= 8 * 1024 * 1024 - n)
+            (void)!write(fd, line, (size_t)n);
+        (void)flock(fd, LOCK_UN);
+    }
+    close(fd);
+}
+
+/* Best-effort, non-authoritative measurements; contention drops a record. */
+static void epoch_dispatch_timing(const char *source, const char *output,
+                                  int rc, int64_t start, int64_t end)
+{
+    const char *path = getenv("ZCC_DISPATCH_TIMING");
+    if (!path || !path[0]) return;
+    char src[4u * PATH_MAX + 1u], obj[4u * PATH_MAX + 1u];
+    if (!log_escape_path(source, src, sizeof src) ||
+        !log_escape_path(output, obj, sizeof obj)) return;
+    char line[8u * PATH_MAX + 192u], duration[32];
+    if (start < 0 || end < start) snprintf(duration, sizeof duration, "unknown");
+    else snprintf(duration, sizeof duration, "%lld", (long long)(end - start));
+    int n = snprintf(line, sizeof line, "dispatch_wall_ms=%s rc=%d source=%s output=%s\n",
+                     duration, rc, src, obj);
+    if (n <= 0 || (size_t)n >= sizeof line) return;
+    epoch_timing_append(path, line, n);
+}
+
 static off_t flight_offset(const char *key)
 {
     uint64_t offset = 0;
@@ -5303,8 +5336,11 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
         epoch_abort_stage(&artifacts, lock_fd);
         return epoch_fail("could not allocate compiler argv");
     }
+    int64_t started = flight_clock_ms();
     int rc = epoch_compile_or_serve(argc, argv, mode, output, source,
                                     &artifacts, compiler_argc, cc);
+    int64_t finished = flight_clock_ms();
+    epoch_dispatch_timing(source, output, rc, started, finished);
     free(cc);
     bool complete = epoch_compile_complete(rc, coverage, &artifacts);
     const char *reason = complete ? epoch_stage_reason(authority, &artifacts) : NULL;

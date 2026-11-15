@@ -8317,7 +8317,7 @@ static bool proof_prepare_environment(void)
         "ZCL_LINT_TU_CACHE_GENERATIONS", "ZCL_TEST_CACHE",
         "ZCL_TEST_CACHE_DUMP", "ZCL_TESTCACHE_STORE_ROOT",
         ZCL_DEV_OBSERVATION_STORE_ENV,
-        ZCL_VERIFY_RECEIVER_ENV, "ZCC_LOG",
+        ZCL_VERIFY_RECEIVER_ENV, "ZCC_LOG", "ZCC_DISPATCH_TIMING",
     };
     for (size_t i = 0; i < sizeof(unset_names) / sizeof(unset_names[0]); i++)
         if (unsetenv(unset_names[i]) != 0) return false;
@@ -11339,6 +11339,7 @@ static bool dp_receiver_end(const struct dp_worker *w,
                             struct zcl_verify_receiver *rx,
                             char *why, size_t why_len)
 {
+    (void)unsetenv("ZCC_DISPATCH_TIMING");
     bool env_ok = zcl_verify_receiver_env_clear();
     zcl_verify_receiver_finish(rx);
     (void)zcl_verify_receiver_phases_write(rx, w->paths->phases);
@@ -11349,6 +11350,21 @@ static bool dp_receiver_end(const struct dp_worker *w,
         proof_why(why, why_len, "object_reuse_environment_unavailable");
     zcl_verify_receiver_release(rx);
     return env_ok && !blocked;
+}
+
+/* Attempt-local attribution only; failure never changes proof admission. */
+static void dp_dispatch_timing_begin(const struct dp_worker *w)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/dispatch-timing.log", w->paths->logs) >= (int)sizeof path)
+        return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    static const char header[] = "# bundle dispatch wall samples; best effort, may be incomplete; not proof authority\n";
+    bool ok = write(fd, header, sizeof(header) - 1) == (ssize_t)(sizeof(header) - 1);
+    if (close(fd) != 0) ok = false;
+    if (!ok || setenv("ZCC_DISPATCH_TIMING", path, 1) != 0)
+        (void)unlink(path);
 }
 
 static bool dp_receiver_begin(const struct dp_worker *w,
@@ -11542,6 +11558,7 @@ static bool dp_worker_bundle_build(struct dp_worker *w, uint64_t *bundle_ms,
         (void)dp_receiver_end(w, &rx, NULL, 0);
         return false;
     }
+    dp_dispatch_timing_begin(w);
     int bundle_rc = 0;
     bool made = dp_worker_bundle_make(w, &bundle_rc, bundle_ms, z23, why, why_len);
     if (z23)
@@ -11623,6 +11640,7 @@ bool zcl_dev_proof_test_worker_bundle(const char *submit,
     struct dp_docs_fresh_run docs = {0};
     (void)snprintf(paths.root, sizeof(paths.root), "%s", submit);
     (void)snprintf(paths.state, sizeof(paths.state), "%s", generation);
+    (void)snprintf(paths.logs, sizeof(paths.logs), "%s", generation);
     (void)snprintf(paths.key, sizeof(paths.key), "fixture");
     (void)snprintf(paths.bundle_log, sizeof(paths.bundle_log),
                    "%s/closure-refresh.log", generation);
@@ -11928,6 +11946,7 @@ bool zcl_dev_proof_test_bundle_union(const char *generation, const char *groups,
     struct proof_paths paths = {0};
     (void)snprintf(paths.root, sizeof(paths.root), "%s", generation);
     (void)snprintf(paths.state, sizeof(paths.state), "%s", generation);
+    (void)snprintf(paths.logs, sizeof(paths.logs), "%s", generation);
     (void)snprintf(paths.key, sizeof(paths.key), "fixture");
     (void)snprintf(paths.bundle_log, sizeof(paths.bundle_log),
                    "%s/bundle-union.log", generation);

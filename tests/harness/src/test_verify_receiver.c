@@ -571,6 +571,7 @@ struct vrt_zcc_env {
     const char *obj_root;
     const char *obj_leaf;
     const char *cwd; /* NULL: the generation; argv stays the generation's */
+    const char *timing;
 };
 
 static bool vrt_output(const struct vrt_zcc_env *z, const char *epoch,
@@ -637,6 +638,11 @@ static bool vrt_zcc_env(const struct vrt_fx *f, const struct vrt_zcc_env *z,
     envp[n++] = storage[3];
     if (z->verified) envp[n++] = "ZCC_VERIFIED=1";
     if (z->admitted) envp[n++] = storage[2];
+    if (z->timing) {
+        ok = ok && snprintf(storage[4], sizeof(storage[4]), "ZCC_DISPATCH_TIMING=%s",
+                            z->timing) < (int)sizeof(storage[4]);
+        envp[n++] = storage[4];
+    }
     envp[n] = NULL;
     return ok;
 }
@@ -1597,6 +1603,82 @@ static int vrt_test_planted(struct vrt_fx *f)
     return failures;
 }
 
+static int vrt_test_dispatch_timing(struct vrt_fx *f)
+{
+    int failures = 0;
+    char out[ZCL_FR_TARGET_LEN + 1u], path[PATH_MAX];
+    struct vr_bytes log = {0};
+    TEST("verify receiver: epoch dispatch emits optional timing without changing compile") {
+        ASSERT(snprintf(path, sizeof path, "%s/dispatch-timing.log", f->root) < (int)sizeof path);
+        ASSERT(vrt_write(path, "", 0, 0600));
+        const struct vrt_zcc_env z = {.verified = true, .timing = path};
+        ASSERT(vrt_zcc(f, 'd', &z, out) == 0);
+        ASSERT(vrt_obj_is(f, out, &f->obj));
+        ASSERT(vrt_read(path, &log));
+        log.p[log.n] = 0;
+        ASSERT(log.n && strstr((char *)log.p, "dispatch_wall_ms="));
+        ASSERT(strstr((char *)log.p, VRT_SOURCE));
+        ASSERT(strstr((char *)log.p, out));
+        PASS();
+    } _test_next:;
+    free(log.p);
+    return failures;
+}
+
+static int vrt_test_dispatch_sink(struct vrt_fx *f)
+{
+    int failures = 0;
+    char out[ZCL_FR_TARGET_LEN + 1u], path[PATH_MAX] = {0}, target[PATH_MAX];
+    TEST("verify receiver: hostile timing sinks do not change compile") {
+        ASSERT(snprintf(path, sizeof path, "%s/timing-link", f->root) < (int)sizeof path);
+        ASSERT(snprintf(target, sizeof target, "%s/timing-target", f->root) < (int)sizeof target);
+        ASSERT(vrt_write(target, "sentinel", 8, 0600));
+        ASSERT(symlink(target, path) == 0);
+        const struct vrt_zcc_env link = {.verified = true, .timing = path};
+        ASSERT(vrt_zcc(f, 'b', &link, out) == 0);
+        ASSERT(vrt_obj_is(f, out, &f->obj));
+        struct vr_bytes content = {0};
+        ASSERT(vrt_read(target, &content));
+        bool unchanged = content.n == 8 && !memcmp(content.p, "sentinel", 8);
+        free(content.p);
+        ASSERT(unchanged);
+        ASSERT(unlink(path) == 0);
+        ASSERT(mkfifo(path, 0600) == 0);
+        ASSERT(vrt_zcc(f, 'c', &link, out) == 0);
+        ASSERT(vrt_obj_is(f, out, &f->obj));
+        ASSERT(unlink(path) == 0);
+        PASS();
+    } _test_next:;
+    if (path[0]) (void)unlink(path);
+    return failures;
+}
+
+static int vrt_test_dispatch_failure(struct vrt_fx *f)
+{
+    int failures = 0;
+    char out[ZCL_FR_TARGET_LEN + 1u], source[PATH_MAX] = {0}, path[PATH_MAX];
+    struct vr_bytes original = {0}, log = {0};
+    bool changed = false;
+    TEST("verify receiver: failed compiler keeps its status and timing") {
+        ASSERT(vrt_path(source, f->gen, VRT_SOURCE));
+        ASSERT(vrt_read(source, &original));
+        changed = true;
+        ASSERT(vrt_write(source, "invalid c source\n", 17, 0600));
+        ASSERT(snprintf(path, sizeof path, "%s/timing-failure.log", f->root) < (int)sizeof path);
+        ASSERT(vrt_write(path, "", 0, 0600));
+        const struct vrt_zcc_env z = {.verified = true, .timing = path};
+        ASSERT(vrt_zcc(f, 'a', &z, out) != 0);
+        ASSERT(vrt_read(path, &log));
+        log.p[log.n] = 0;
+        ASSERT(strstr((char *)log.p, "dispatch_wall_ms="));
+        ASSERT(strstr((char *)log.p, "rc=0 ") == NULL);
+        PASS();
+    } _test_next:;
+    if (changed && !vrt_write(source, original.p, original.n, 0600)) failures++;
+    free(original.p); free(log.p);
+    return failures;
+}
+
 static void vrt_fixture_free(struct vrt_fx *f)
 {
     zcl_verify_receiver_paths_free(f->inputs, f->input_count);
@@ -1607,6 +1689,14 @@ static void vrt_fixture_free(struct vrt_fx *f)
     if (f->root[0]) (void)nftw(f->root, vrt_rm, 8, FTW_DEPTH | FTW_PHYS);
     if (f->key_root[0]) (void)nftw(f->key_root, vrt_rm, 8, FTW_DEPTH | FTW_PHYS);
     if (f->anchor[0]) (void)nftw(f->anchor, vrt_rm, 8, FTW_DEPTH | FTW_PHYS);
+}
+
+static int vrt_test_timing_suite(struct vrt_fx *f)
+{
+    int failures = vrt_test_dispatch_timing(f);
+    if (!failures) failures += vrt_test_dispatch_sink(f);
+    if (!failures) failures += vrt_test_dispatch_failure(f);
+    return failures;
 }
 
 int test_verify_receiver(void)
@@ -1631,6 +1721,7 @@ int test_verify_receiver(void)
     if (!failures) failures += vrt_test_admitted_log(f);
     if (!failures) failures += vrt_test_zcc_other_tree(f);
     if (!failures) failures += vrt_test_planted(f);
+    if (!failures) failures += vrt_test_timing_suite(f);
     if (f) vrt_fixture_free(f);
     free(f);
     return failures;
