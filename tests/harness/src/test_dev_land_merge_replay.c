@@ -1484,11 +1484,11 @@ static bool dlx_snapshot_outcomes_ok(const struct json_value *rows)
         dlx_snapshot_row(rows, "landed_rows_today");
     const struct json_value *rate =
         dlx_snapshot_row(rows, "land_success_rate_7d");
-    bool ok = today && rate && json_get_int(json_get(today, "value")) == 1 &&
-              !json_get_bool(json_get(today, "met")) &&
+    /* Daily commit throughput is not an objective; acceptance rate remains. */
+    bool ok = !today && rate &&
               json_get_int(json_get(rate, "value")) == 100 &&
               json_get_bool(json_get(rate, "met"));
-    return ok ? true : dlx_snapshot_bad("outcomes readers", "landed_rows_today");
+    return ok ? true : dlx_snapshot_bad("outcomes readers", "accepted landing rate");
 }
 
 /* The paths the lander hands the producer, named by its own reasons: the
