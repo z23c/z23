@@ -2908,6 +2908,137 @@ static int test_fleet_board_scope_codec(void)
     return failures;
 }
 
+/* ---- `--open` answers only count when same-scope, same-room and live ---- */
+
+/* Sign and ingest one post; scope and room as given, ref optional. */
+static bool fb_open_put(struct node_db *db, struct fleet_board_post *post,
+                        uint8_t kind, const char *text, int64_t at,
+                        uint32_t ttl, uint8_t scope, const char *room,
+                        const uint8_t *ref, uint8_t who)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    fb_test_compose(post, kind, "lane-open", text, (uint64_t)at, ttl);
+    fb_test_scope(post, scope, room);
+    if (ref)
+        memcpy(post->ref, ref, 32);
+    if (fleet_board_post_sign(post, seed, pk) != FLEET_BOARD_OK)
+        return false;
+    return db_fleet_board_post_ingest(db, post, at, NULL) == FLEET_BOARD_OK;
+}
+
+/* How many rows `list --open` shows at `now`. */
+static int fb_open_count(struct node_db *db, int64_t now)
+{
+    struct fleet_board_filter f;
+    memset(&f, 0, sizeof(f));
+    f.open_only = true;
+    struct db_fleet_board_post rows[8];
+    return db_fleet_board_list(db, &f, now, rows, 8);
+}
+
+static int test_fleet_board_open_cross_scope_claim(void)
+{
+    int failures = 0;
+    TEST("fleet board: a public-scope claim does not hide a fleet-scope need") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        const int64_t now = 100000;
+        struct fleet_board_post need, claim;
+        ASSERT(fb_open_put(&db, &need, FLEET_BOARD_KIND_NEED, "fleet need",
+                           now, 3600, FLEET_BOARD_SCOPE_FLEET, "", NULL, 1));
+        ASSERT_EQ(fb_open_count(&db, now), 1);
+        ASSERT(fb_open_put(&db, &claim, FLEET_BOARD_KIND_CLAIM, "stranger",
+                           now + 1, 3600, FLEET_BOARD_SCOPE_PUBLIC, "general",
+                           need.id, 2));
+        ASSERT_EQ(fb_open_count(&db, now + 1), 1);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_open_expired_claim(void)
+{
+    int failures = 0;
+    TEST("fleet board: an expired claim no longer hides a need") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        const int64_t now = 100000;
+        struct fleet_board_post need, claim;
+        ASSERT(fb_open_put(&db, &need, FLEET_BOARD_KIND_NEED, "public need",
+                           now, 7200, FLEET_BOARD_SCOPE_PUBLIC, "general",
+                           NULL, 1));
+        ASSERT(fb_open_put(&db, &claim, FLEET_BOARD_KIND_CLAIM, "taking it",
+                           now + 1, 60, FLEET_BOARD_SCOPE_PUBLIC, "general",
+                           need.id, 2));
+        ASSERT_EQ(fb_open_count(&db, now + 2), 0);
+        ASSERT_EQ(fb_open_count(&db, now + 600), 1);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_open_live_claim_hides(void)
+{
+    int failures = 0;
+    TEST("fleet board: a live same-scope claim still hides the need") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        const int64_t now = 100000;
+        struct fleet_board_post need, claim, fneed, fclaim;
+        ASSERT(fb_open_put(&db, &need, FLEET_BOARD_KIND_NEED, "public need",
+                           now, 3600, FLEET_BOARD_SCOPE_PUBLIC, "general",
+                           NULL, 1));
+        ASSERT(fb_open_put(&db, &fneed, FLEET_BOARD_KIND_NEED, "fleet need",
+                           now, 3600, FLEET_BOARD_SCOPE_FLEET, "", NULL, 1));
+        ASSERT_EQ(fb_open_count(&db, now), 2);
+        ASSERT(fb_open_put(&db, &claim, FLEET_BOARD_KIND_CLAIM, "mine",
+                           now + 1, 3600, FLEET_BOARD_SCOPE_PUBLIC, "general",
+                           need.id, 2));
+        ASSERT_EQ(fb_open_count(&db, now + 1), 1);
+        ASSERT(fb_open_put(&db, &fclaim, FLEET_BOARD_KIND_CLAIM, "mine",
+                           now + 2, 3600, FLEET_BOARD_SCOPE_FLEET, "",
+                           fneed.id, 1));
+        ASSERT_EQ(fb_open_count(&db, now + 2), 0);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_open_cross_room_claim(void)
+{
+    int failures = 0;
+    TEST("fleet board: a claim in another public room does not hide a need") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        const int64_t now = 100000;
+        struct fleet_board_post need, claim;
+        ASSERT(fb_open_put(&db, &need, FLEET_BOARD_KIND_NEED, "ops need",
+                           now, 3600, FLEET_BOARD_SCOPE_PUBLIC, "ops", NULL,
+                           1));
+        ASSERT(fb_open_put(&db, &claim, FLEET_BOARD_KIND_CLAIM, "elsewhere",
+                           now + 1, 3600, FLEET_BOARD_SCOPE_PUBLIC, "general",
+                           need.id, 2));
+        /* Asking for the need's room pins the answering row to that room. */
+        struct fleet_board_filter f;
+        memset(&f, 0, sizeof(f));
+        f.open_only = true;
+        (void)snprintf(f.room, sizeof(f.room), "%s", "ops");
+        struct db_fleet_board_post rows[4];
+        ASSERT_EQ(db_fleet_board_list(&db, &f, now + 1, rows, 4), 1);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_scope_store(void)
 {
     int failures = 0;
@@ -13139,6 +13270,10 @@ int test_fleet_board(void)
     failures += test_fleet_board_peer_inventory_cursor();
     failures += test_fleet_board_scope_codec();
     failures += test_fleet_board_scope_store();
+    failures += test_fleet_board_open_cross_scope_claim();
+    failures += test_fleet_board_open_expired_claim();
+    failures += test_fleet_board_open_live_claim_hides();
+    failures += test_fleet_board_open_cross_room_claim();
     failures += test_fleet_board_reclaim_expired();
     failures += test_fleet_board_fleet_carriage();
     for (unsigned change = 0; change < 4; change++)

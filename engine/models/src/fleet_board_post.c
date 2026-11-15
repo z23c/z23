@@ -1159,18 +1159,50 @@ bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
     return db_fleet_board_post_lookup_checked(ndb, id, out) == FLEET_BOARD_LOOKUP_FOUND;
 }
 
-/* The `--open` predicate as a subquery: the set of ids that some claim or
- * result already references. Built here so both the list and the status count
- * ask the same question. */
-static void board_answered_subquery(struct qb *sub)
+/* The `--open` predicate as subqueries: the ids that a LIVE claim or result
+ * already answers. An answer counts only while it is discoverable now (an
+ * expired claim must not hide the work) and only when it sits in the same
+ * scope as the post it answers: a public-room claim is not an answer to a
+ * fleet-private need, and must not hide it. The query builder cannot compare
+ * two columns, so the scope match is one subquery per scope, each pinning
+ * both the answering row and its target (the aliased self-join) to a
+ * constant scope. For the public scope the room is pinned too when the
+ * caller named one; with no room named, rooms cannot be matched row to row
+ * and a public answer in any room counts. Built here so both the list and
+ * the status count ask the same question. */
+static void board_answered_subquery(struct qb *sub, int64_t scope,
+                                    const char *room, int64_t now)
 {
     static const int64_t k_answer_kinds[] = {
         FLEET_BOARD_KIND_CLAIM, FLEET_BOARD_KIND_RESULT,
     };
+    const bool pin_room = room && room[0] &&
+                          scope == FLEET_BOARD_SCOPE_PUBLIC;
     qb_select(sub, QB_T_fleet_board_posts);
+    qb_join_self(sub, QB_T_fleet_board_posts, QB_C_fleet_board_posts_ref,
+                 QB_C_fleet_board_posts_id);
     qb_select_column(sub, QB_C_fleet_board_posts_ref);
     qb_where_in_int(sub, QB_C_fleet_board_posts_kind, k_answer_kinds,
                     sizeof(k_answer_kinds) / sizeof(k_answer_kinds[0]));
+    fleet_board_where_discoverable(sub, now);
+    qb_where_int(sub, QB_C_fleet_board_posts_scope, QB_EQ, scope);
+    if (pin_room)
+        qb_where_text(sub, QB_C_fleet_board_posts_room, QB_EQ, room);
+    qb_self_alias(sub, true);
+    qb_where_int(sub, QB_C_fleet_board_posts_scope, QB_EQ, scope);
+    if (pin_room)
+        qb_where_text(sub, QB_C_fleet_board_posts_room, QB_EQ, room);
+    qb_self_alias(sub, false);
+}
+
+/* Hide every need that a live same-scope answer already covers. */
+static void board_where_unanswered(struct qb *q, const char *room,
+                                   int64_t now, struct qb *sub_storage)
+{
+    for (int64_t scope = 0; scope < FLEET_BOARD_SCOPE__COUNT; scope++) {
+        board_answered_subquery(sub_storage, scope, room, now);
+        qb_where_in_select(q, QB_C_fleet_board_posts_id, true, sub_storage);
+    }
 }
 
 void board_apply_filter(struct qb *q,
@@ -1232,8 +1264,7 @@ void board_apply_filter(struct qb *q,
         };
         qb_where_in_int(q, QB_C_fleet_board_posts_kind, k_open_kinds,
                         sizeof(k_open_kinds) / sizeof(k_open_kinds[0]));
-        board_answered_subquery(sub_storage);
-        qb_where_in_select(q, QB_C_fleet_board_posts_id, true, sub_storage);
+        board_where_unanswered(q, filter->room, now, sub_storage);
     }
 }
 

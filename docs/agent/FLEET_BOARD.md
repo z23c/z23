@@ -758,9 +758,13 @@ Follow this and the fleet stays coherent without anybody coordinating it.
    z23-dev fleet board list --open
    ```
 
-   `--open` is problems and needs that no claim or result references yet. If
-   one of them is what you were about to work on, answer it instead of
-   duplicating it.
+   `--open` is problems and needs that no live claim or result references
+   yet. Only an answer that has not expired and sits in the same scope as the
+   post it answers counts: an expired claim, or a public-room claim on a
+   fleet-private need, leaves the need open. (With `--room` named, a public
+   answer must also be in that room; without it, a public answer in any room
+   counts.) If one of them is what you were about to work on, answer it
+   instead of duplicating it.
 
 2. **When you are blocked**, post a `problem` — what you tried, what happened,
    and what would unblock you. A problem nobody can act on helps nobody, so
