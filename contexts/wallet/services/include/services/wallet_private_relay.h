@@ -14,6 +14,10 @@
  * z_sendmany). Vault, ZSLP, ZDIR, ZNAM, ZID, blog, swap, multisig and raw
  * transaction paths keep public relay.
  *
+ * A send that wallet_send_relay hands to the public relay is recorded here
+ * as WPR_PUBLIC so that, never mined, it expires and its coins return
+ * through the same expiry path. Nothing about it is pushed or pooled here.
+ *
  * Not solved here: timing correlation by an observer of both the node's Tor
  * circuits and the network, and a malicious first onion peer, which learns
  * that this node originated the transaction. */
@@ -78,6 +82,11 @@ enum wpr_state {
     WPR_SEEN = 3,
     WPR_EXPIRED = 4,   /* rolled back unconfirmed; the coins are free again */
     WPR_PREPARED = 5,  /* recorded before the wallet admits it; not yet queued */
+    /* Relayed to every peer by the ordinary public relay. Recorded only so
+     * it expires like a private send: never in the private pool, never
+     * pushed, never revalidated. Only a block retires it. Named `sent` in
+     * the status and not counted as a pending private send. */
+    WPR_PUBLIC = 6,
 };
 
 /* Chain and peer authorities. Every pointer must outlive the relay. */
@@ -108,6 +117,7 @@ struct wpr_pending_record {
     struct uint256 txid;
     bool expired;
     bool handed;
+    bool public_relay;  /* a WPR_PUBLIC record ('p' line) */
 };
 
 struct wpr_entry {
@@ -164,6 +174,8 @@ struct wpr_status_entry {
     bool disk_retry;                /* rollback waiting on the database */
     bool handed;                    /* queued to a peer at least once */
     bool mined;                     /* the wallet shows it in a block */
+    bool has_expiry;                /* carries an expiry height */
+    bool past_expiry;               /* reported for rollback, not yet done */
 };
 
 struct wpr_status {
@@ -221,6 +233,13 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx);
  * Fails closed: the caller must not admit the send. */
 struct zcl_result wpr_prepare(struct wpr *r, const struct uint256 *txid);
 
+/* Record a send the public relay announced (WPR_PUBLIC) so the tick expires
+ * it like a private send. The record is the txid and a 'p' mark, nothing the
+ * wallet does not already store; the relay never pushes it. Idempotent. Code
+ * -2: the table is full and nothing was recorded. Code -4: the entry is kept
+ * in memory and the write is retried on the next tick. */
+struct zcl_result wpr_record_public(struct wpr *r, const struct transaction *tx);
+
 /* Mark a send past expiry that the chain may already hold, or clear it. */
 void wpr_mark_held(struct wpr *r, const struct uint256 *txid, bool held);
 
@@ -228,7 +247,9 @@ void wpr_mark_held(struct wpr *r, const struct uint256 *txid, bool held);
 void wpr_set_disk_retry(struct wpr *r, const struct uint256 *txid, bool on);
 bool wpr_disk_retry(struct wpr *r, const struct uint256 *txid);
 
-/* The network offered the transaction back and the node accepted it. */
+/* The network offered the transaction back and the node accepted it. A
+ * WPR_PUBLIC record is already on the network, so only a wallet confirmation
+ * retires it; an offer back alone leaves it. */
 void wpr_note_seen(struct wpr *r, const struct uint256 *txid);
 
 /* Record that the wallet rolled a pending transaction back after it expired
@@ -239,8 +260,9 @@ void wpr_mark_expired(struct wpr *r, const struct uint256 *txid);
 void wpr_forget(struct wpr *r, const struct uint256 *txid);
 
 /* Read the durable pending set after a restart: admit each wallet
- * transaction to the private pool and schedule it with a fresh delay.
- * Nothing is sent here. */
+ * transaction to the private pool and schedule it with a fresh delay. A
+ * WPR_PUBLIC record comes back record-only, in either mode, never admitted
+ * or scheduled. Nothing is sent here. */
 struct zcl_result wpr_resume(struct wpr *r);
 
 /* Advance the state machine once. In private mode pushes due transactions; in

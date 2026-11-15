@@ -1298,6 +1298,110 @@ static int wprt_case_expiry_margin(void)
     return failures;
 }
 
+/* ── public mode: a relayed send that is never mined ─────────────────── */
+
+static bool wprt_status_next_has(struct wprt_fx *f, const struct uint256 *id,
+                                 const char *part);
+
+/* The node's mempool has dropped the send (its age limit), so nothing on
+ * this node holds it any more. */
+static void wprt_main_pool_drops(struct wprt_fx *f, const struct uint256 *id)
+{
+    tx_mempool_remove(&f->main_pool, id);
+    atomic_fetch_add(&wprt_now, (WPR_RETRY_S + 1) * 1000);
+}
+
+static bool wprt_public_send(struct wprt_fx *f, bool overwinter,
+                             struct uint256 *id, struct outpoint *spent,
+                             int *expiry)
+{
+    bool ok = wprt_wallet_ready(f, WPR_MODE_PUBLIC, 2, false);
+    if (overwinter)
+        wprt_overwinter_on(f);
+    memset(spent, 0, sizeof(*spent));
+    ok = ok && wprt_add_peer(f, WPRT_CLEAR_OUT) &&
+         wprt_rpc_send(f, false, 10.0, id) &&
+         tx_mempool_exists(&f->main_pool, id);
+    *expiry = ok ? (int)wprt_expiry_of(f, id, spent) : 0;
+    return ok;
+}
+
+/* The mark of the pending-file line naming `id`: 'p' public, 'x' expired,
+ * 'a' handed, ' ' live private, '-' no line, '?' no file. */
+static char wprt_pending_mark(const struct wprt_fx *f, const struct uint256 *id)
+{
+    char path[400], buf[20000], hex[65];
+    snprintf(path, sizeof(path), "%s/wallet_private_relay.pending", f->dir);
+    FILE *fp = platform_file_stream_open_read(path);
+    if (!fp)
+        return '?';
+    size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[len] = '\0';
+    uint256_get_hex(id, hex);
+    const char *at = strstr(buf, hex);
+    if (!at)
+        return '-';
+    return at > buf && at[-1] != '\n' ? at[-1] : ' ';
+}
+
+static void wprt_public_recorded(struct wprt_fx *f, const struct uint256 *id,
+                                 bool ok, int *failures)
+{
+    bool found = false;
+    wprt_report("public mode: the send is recorded durably as record-only, "
+                "outside the private pool, and is not reported held",
+                ok && wprt_pending_mark(f, id) == 'p' &&
+                    wprt_state(id, &found) == WPR_PUBLIC && found &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), id) &&
+                    !wallet_private_broadcast_is_held(id),
+                failures);
+    wprt_report("public mode: the status lists it as sent to every peer, says "
+                "not to pay again, and counts no pending private send",
+                ok && wprt_status_says(f, id, "sent",
+                                       "Do not send the payment again") &&
+                    wprt_status_next_has(f, id, "Relayed to every peer") &&
+                    wprt_pending() == 0,
+                failures);
+}
+
+static int wprt_case_public_expiry(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    struct uint256 id;
+    struct outpoint spent;
+    int e = 0;
+    bool ok = wprt_public_send(&f, true, &id, &spent, &e) && e > 0;
+    size_t inv_before = ok ? wprt_all(&f, "inv") : 0;
+    wprt_public_recorded(&f, &id, ok, &failures);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    wprt_report("public mode: past expiry and margin, a send this node's "
+                "mempool still holds is not rolled back",
+                ok && tx_mempool_exists(&f.main_pool, &id) &&
+                    wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n) &&
+                    wprt_status_next_has(&f, &id, "mempool no longer holds"),
+                &failures);
+    wprt_main_pool_drops(&f, &id);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 2);
+    wprt_report("public mode: once nothing holds it, an expired unmined send "
+                "releases its input",
+                ok && !wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n),
+                &failures);
+    wprt_report("public mode: the record turns expired and the status says "
+                "the payment may be sent again with a new key",
+                ok && wprt_pending_mark(&f, &id) == 'x' &&
+                    wprt_status_says(&f, &id, "expired", "new key"),
+                &failures);
+    wprt_report("public mode: the release sends nothing to any peer",
+                ok && wprt_all(&f, "inv") == inv_before &&
+                    wprt_all(&f, "tx") == 0 &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), &id),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
 /* A send the wallet shows confirmed is never rolled back, even when the
  * relay had already flagged it. */
 static int wprt_case_expiry_confirmed(void)
@@ -3108,6 +3212,214 @@ static int wprt_case_seen_then_expired(void)
     return failures;
 }
 
+/* ── public mode: mined, held, no expiry, restart, unwritable record ── */
+
+static bool wprt_confirm_at(struct wprt_fx *f, const struct uint256 *id,
+                            int height)
+{
+    struct wallet_tx wtx;
+    static struct uint256 bh;
+    memset(bh.data, 0xB4, 32);
+    static struct block_index bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.nHeight = height;
+    bi.phashBlock = &bh;
+    wprt_set_wallet_height(f, height);
+    if (!wprt_copy_tx(f, id, &wtx))
+        return false;
+    wallet_sync_transaction(f->wallet, &wtx.tx, &bi);
+    transaction_free(&wtx.tx);
+    struct wallet_tx now;
+    bool confirmed = wprt_copy_tx(f, id, &now) && now.confirms > 0;
+    if (confirmed)
+        transaction_free(&now.tx);
+    return confirmed;
+}
+
+static int wprt_case_public_mined(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    struct uint256 id;
+    struct outpoint spent;
+    int e = 0;
+    bool ok = wprt_public_send(&f, true, &id, &spent, &e) &&
+              wprt_pending_mark(&f, &id) == 'p';
+    wpr_note_seen(wpr_global(), &id);
+    wprt_report("public mode: a peer offering the send back does not retire "
+                "its record",
+                ok && wprt_pending_mark(&f, &id) == 'p', &failures);
+    ok = ok && wprt_confirm_at(&f, &id, e);
+    wprt_tick_at_height(&f, e);
+    bool found = false;
+    wprt_report("public mode: a mined send retires its record from disk and "
+                "nothing is rolled back",
+                ok && wprt_pending_mark(&f, &id) == '-' &&
+                    wprt_state(&id, &found) == WPR_SEEN && found &&
+                    wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n),
+                &failures);
+    wprt_main_pool_drops(&f, &id);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 50);
+    wprt_report("public mode: far past the margin the mined send and its "
+                "spend are still in the wallet",
+                ok && wprt_record_kept(&f, &id, &spent) &&
+                    wprt_pending_mark(&f, &id) == '-',
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+static int wprt_case_public_spent_held(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    struct uint256 id;
+    struct outpoint spent;
+    int e = 0;
+    bool ok = wprt_public_send(&f, true, &id, &spent, &e);
+    wprt_chain_consumes(&f, &spent);
+    wprt_main_pool_drops(&f, &id);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    wprt_report("public mode: an expired send whose input the chain has spent "
+                "is held, not rolled back, and the status says not to pay "
+                "again",
+                ok && wprt_record_kept(&f, &id, &spent) &&
+                    wprt_status_next_has(&f, &id,
+                                         "Do not send the payment again"),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+static int wprt_case_public_nullifier_held(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PUBLIC, 1, false);
+    struct wallet_tx wtx;
+    ok = ok && wprt_zspend_tx(&f, 0x64, 0x79, &wtx) &&
+         wallet_add_to_wallet(f.wallet, &wtx) &&
+         wpr_record_public(wpr_global(), &wtx.tx).ok;
+    bool released = ok && wallet_private_broadcast_expire(&wtx.tx.hash);
+    bool found = false;
+    wprt_report("public mode: an expired shielded send whose nullifier is "
+                "not provably unrevealed is held, not rolled back",
+                ok && !released &&
+                    wprt_state(&wtx.tx.hash, &found) == WPR_PUBLIC && found &&
+                    wprt_status_next_has(&f, &wtx.tx.hash,
+                                         "Do not send the payment again"),
+                &failures);
+    if (ok)
+        transaction_free(&wtx.tx);
+    wprt_close(&f);
+    return failures;
+}
+
+static int wprt_case_public_no_expiry(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    struct uint256 id;
+    struct outpoint spent;
+    int e = -1;
+    bool ok = wprt_public_send(&f, false, &id, &spent, &e) && e == 0;
+    wprt_main_pool_drops(&f, &id);
+    wprt_tick_at_height(&f, 1000000);
+    wprt_tick_at_height(&f, 1000001);
+    bool found = false;
+    wprt_report("public mode: a send with no expiry height is never released "
+                "and the status says so",
+                ok && wprt_state(&id, &found) == WPR_PUBLIC && found &&
+                    wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n) &&
+                    wprt_pending_mark(&f, &id) == 'p' &&
+                    wprt_status_next_has(&f, &id,
+                                         "never released automatically"),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* Sent publicly, then the node restarts in private mode with an onion peer:
+ * the record comes back record-only and nothing reaches the onion peer. */
+static void wprt_public_resumed(struct wprt_fx *f, const struct uint256 *id,
+                                struct p2p_node *onion, size_t onion_before,
+                                bool ok, int *failures)
+{
+    bool resumed = ok && wpr_resume(wpr_global()).ok;
+    bool found = false;
+    wprt_report("public mode: after a restart the record comes back "
+                "record-only, outside the private pool",
+                resumed && wprt_state(id, &found) == WPR_PUBLIC && found &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), id) &&
+                    wprt_pending_mark(f, id) == 'p',
+                failures);
+    wprt_run(3 * WPR_DELAY_MAX_MS, -1);
+    wprt_report("public mode: a restart in private mode sends it to no onion "
+                "peer",
+                resumed && wprt_count(onion, "tx") == 0 &&
+                    wprt_total_bytes(onion) == onion_before &&
+                    wprt_all(f, "tx") == 0,
+                failures);
+}
+
+static int wprt_case_public_restart_private(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    struct uint256 id;
+    struct outpoint spent;
+    int e = 0;
+    bool ok = wprt_public_send(&f, true, &id, &spent, &e);
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    ok = ok && onion;
+    size_t onion_before = ok ? wprt_total_bytes(onion) : 0;
+    wprt_restart_relay(&f);
+    wprt_public_resumed(&f, &id, onion, onion_before, ok, &failures);
+    wprt_main_pool_drops(&f, &id);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    bool found = false;
+    wprt_report("public mode: the restarted record still expires and "
+                "releases the input",
+                ok && wprt_state(&id, &found) == WPR_EXPIRED && found &&
+                    !wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* The record cannot be written: the send is still relayed, the entry is kept
+ * in memory and the next tick writes it. */
+static int wprt_case_public_record_unwritable(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PUBLIC, 1, false);
+    wprt_overwinter_on(&f);
+    struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
+    snprintf(wpr_global()->datadir, sizeof(wpr_global()->datadir), "%s",
+             "/nonexistent/wallet-private-relay");
+    struct uint256 id;
+    ok = ok && clear && wprt_rpc_send(&f, false, 10.0, &id);
+    bool found = false;
+    wprt_report("public mode: an unwritable record neither refuses nor rolls "
+                "back the send: it is relayed once and kept in memory",
+                ok && tx_mempool_exists(&f.main_pool, &id) &&
+                    wprt_count(clear, "inv") == 1 &&
+                    wprt_state(&id, &found) == WPR_PUBLIC && found &&
+                    wprt_pending_mark(&f, &id) != 'p',
+                &failures);
+    snprintf(wpr_global()->datadir, sizeof(wpr_global()->datadir), "%s",
+             f.dir);
+    struct wpr_tick_result res;
+    wprt_tick(1000, -1, &res);
+    wprt_report("public mode: the next tick writes the record",
+                ok && wprt_pending_mark(&f, &id) == 'p' &&
+                    wprt_count(clear, "inv") == 1,
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
 /* ── configuration that cannot be honored is refused ────────────────── */
 
 static int wprt_case_config(void)
@@ -4194,6 +4506,7 @@ int test_wallet_private_relay(void)
     failures += wprt_case_service_violated();
     failures += wprt_case_seen_and_block();
     failures += wprt_case_expiry_margin();
+    failures += wprt_case_public_expiry();
     failures += wprt_case_expiry_confirmed();
     failures += wprt_case_expiry_database();
     failures += wprt_case_expiry_unverified();
@@ -4230,6 +4543,12 @@ int test_wallet_private_relay(void)
     failures += wprt_case_held_at_zero();
     failures += wprt_case_handed_saved_first();
     failures += wprt_case_seen_then_expired();
+    failures += wprt_case_public_mined();
+    failures += wprt_case_public_spent_held();
+    failures += wprt_case_public_nullifier_held();
+    failures += wprt_case_public_no_expiry();
+    failures += wprt_case_public_restart_private();
+    failures += wprt_case_public_record_unwritable();
     failures += wprt_case_config();
     return failures;
 }

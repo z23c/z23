@@ -55,6 +55,9 @@ const char *wpr_state_name(enum wpr_state state)
     case WPR_WAITING_FOR_ROUTE: return "waiting_for_route";
     case WPR_EXPIRED: return "expired";
     case WPR_PREPARED:          return "preparing";
+    /* The public relay sent it to every peer. Status readers treat `sent`
+     * as no longer waiting to go out; next_step says how it was sent. */
+    case WPR_PUBLIC:            return "sent";
     case WPR_SCHEDULED:         return "scheduled";
     case WPR_SENT:              return "sent";
     case WPR_SEEN:              return "seen";
@@ -174,6 +177,8 @@ static bool wpr_persist_locked(const struct wpr *r)
             continue;
         if (e->state == WPR_EXPIRED)
             buf[len++] = 'x';
+        else if (e->state == WPR_PUBLIC)
+            buf[len++] = 'p';
         else if (e->handed)
             buf[len++] = 'a';
         uint256_get_hex(&e->txid, buf + len);
@@ -197,41 +202,6 @@ static bool wpr_hex_line_valid(const char *s)
             return false;
     }
     return s[64] == '\n' || s[64] == '\0';
-}
-
-static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
-                               bool *expired, bool *handed, size_t cap)
-{
-    char path[1100];
-    if (!wpr_pending_path(r, path, sizeof(path)))
-        return 0;
-    FILE *fp = platform_file_stream_open_read(path);
-    if (!fp)
-        return 0;
-    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 66 + 1];
-    size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
-    fclose(fp);
-    buf[len] = '\0';
-    size_t n = 0;
-    for (char *line = buf; *line && n < cap;) {
-        char *end = strchr(line, '\n');
-        size_t line_len = end ? (size_t)(end - line) : strlen(line);
-        bool x = line_len == 65 && line[0] == 'x';
-        bool a = line_len == 65 && line[0] == 'a';
-        const char *id = (x || a) ? line + 1 : line;
-        if ((line_len == 64 || x || a) && wpr_hex_line_valid(id)) {
-            char hex[65];
-            memcpy(hex, id, 64);
-            hex[64] = '\0';
-            expired[n] = x;
-            handed[n] = a;
-            uint256_set_hex(&out[n++], hex);
-        }
-        if (!end)
-            break;
-        line = end + 1;
-    }
-    return n;
 }
 
 static struct platform_positioned_file_snapshot wpr_pending_file_identity_snapshot(
@@ -283,19 +253,49 @@ static enum wpr_pending_read_status wpr_pending_read_file(const char *datadir,
     return status;
 }
 
+/* One line: 64 hex digits, optionally after one mark: 'x' expired, 'a'
+ * handed to an onion peer, 'p' a public send recorded only for expiry. */
 static enum wpr_pending_read_status wpr_pending_parse_line(char *line, size_t len,
     struct wpr_pending_record *out)
 {
-    bool expired = len == 65 && line[0] == 'x';
-    bool handed = len == 65 && line[0] == 'a';
-    const char *id = expired || handed ? line + 1 : line;
-    if ((len != 64 && !expired && !handed) || !wpr_hex_line_valid(id))
+    char mark = len == 65 ? line[0] : '\0';
+    bool marked = mark == 'x' || mark == 'a' || mark == 'p';
+    const char *id = marked ? line + 1 : line;
+    if ((len != 64 && !marked) || !wpr_hex_line_valid(id))
         return WPR_PENDING_MALFORMED;
     char hex[65]; memcpy(hex, id, 64); hex[64] = '\0';
     uint256_set_hex(&out->txid, hex);
-    out->expired = expired;
-    out->handed = handed;
+    out->expired = mark == 'x';
+    out->handed = mark == 'a';
+    out->public_relay = mark == 'p';
     return WPR_PENDING_OK;
+}
+
+/* The lenient reader resume uses: a line that does not parse is skipped. */
+static size_t wpr_read_pending(const struct wpr *r,
+                               struct wpr_pending_record *out, size_t cap)
+{
+    char path[1100];
+    if (!wpr_pending_path(r, path, sizeof(path)))
+        return 0;
+    FILE *fp = platform_file_stream_open_read(path);
+    if (!fp)
+        return 0;
+    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 66 + 1];
+    size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[len] = '\0';
+    size_t n = 0;
+    for (char *line = buf; *line && n < cap;) {
+        char *end = strchr(line, '\n');
+        size_t line_len = end ? (size_t)(end - line) : strlen(line);
+        if (wpr_pending_parse_line(line, line_len, &out[n]) == WPR_PENDING_OK)
+            n++;
+        if (!end)
+            break;
+        line = end + 1;
+    }
+    return n;
 }
 
 static enum wpr_pending_read_status wpr_pending_parse(char *buf, size_t len,
@@ -353,7 +353,9 @@ static bool wpr_pending_memory_matches(const struct wpr *r,
         for (size_t j = 0; j < count; ++j) {
             if (!uint256_eq(&entry->txid, &rows[j].txid)) continue;
             bool expired = entry->state == WPR_EXPIRED;
-            found = rows[j].expired == expired && (expired || rows[j].handed == entry->handed);
+            bool public_relay = entry->state == WPR_PUBLIC;
+            found = rows[j].expired == expired && rows[j].public_relay == public_relay &&
+                    (expired || rows[j].handed == entry->handed);
             break;
         }
         if (!found) return false;
@@ -489,6 +491,43 @@ struct zcl_result wpr_prepare(struct wpr *r, const struct uint256 *txid)
     return ZCL_OK;
 }
 
+/* Caller holds r->lock. A public send: its expiry from the exact bytes, never
+ * in the private pool, nothing scheduled. */
+static void wpr_fill_public_locked(struct wpr *r, struct wpr_entry *e,
+                                   const struct transaction *tx)
+{
+    wpr_fill_entry(e, &tx->hash, tx, 0, false);
+    e->state = WPR_PUBLIC;
+    e->seen_ms = r->now_ms();
+}
+
+struct zcl_result wpr_record_public(struct wpr *r, const struct transaction *tx)
+{
+    if (!r || !tx)
+        return ZCL_ERR(-1, "public send record: NULL relay or transaction");
+    zcl_mutex_lock(&r->lock);
+    if (wpr_find_locked(r, &tx->hash)) {
+        zcl_mutex_unlock(&r->lock);
+        return ZCL_OK;
+    }
+    struct wpr_entry *e = wpr_alloc_locked(r);
+    if (!e) {
+        zcl_mutex_unlock(&r->lock);
+        return ZCL_ERR(-2, "public send record: the pending table is full "
+                           "of unfinished sends");
+    }
+    wpr_fill_public_locked(r, e, tx);
+    /* The send is already in the node's mempool: keep the entry so it still
+     * expires in this process, and write it again on the next tick. */
+    bool written = wpr_persist_locked(r);
+    if (!written)
+        r->persist_dirty = true;
+    zcl_mutex_unlock(&r->lock);
+    return written ? ZCL_OK
+                   : ZCL_ERR(-4, "public send record: the pending file could "
+                                 "not be written; kept in memory and retried");
+}
+
 void wpr_mark_held(struct wpr *r, const struct uint256 *txid, bool held)
 {
     if (!r || !txid)
@@ -588,9 +627,25 @@ static void wpr_clear_locked(struct wpr *r, struct wpr_entry *e)
     memset(e, 0, sizeof(*e));
 }
 
+static bool wpr_wallet_confirmed(struct wpr *r, const struct uint256 *txid);
+
+static bool wpr_is_public(struct wpr *r, const struct uint256 *txid)
+{
+    zcl_mutex_lock(&r->lock);
+    const struct wpr_entry *e = wpr_find_locked(r, txid);
+    bool is_public = e && e->state == WPR_PUBLIC;
+    zcl_mutex_unlock(&r->lock);
+    return is_public;
+}
+
 void wpr_note_seen(struct wpr *r, const struct uint256 *txid)
 {
     if (!r || !txid)
+        return;
+    /* A public send is on the network from the start: a peer offering it
+     * back says nothing new, and a seen record is not saved, so only a
+     * confirmation may retire it. */
+    if (wpr_is_public(r, txid) && !wpr_wallet_confirmed(r, txid))
         return;
     zcl_mutex_lock(&r->lock);
     struct wpr_entry *e = wpr_find_locked(r, txid);
@@ -702,24 +757,48 @@ static bool wpr_resume_one(struct wpr *r, const struct uint256 *txid,
     return true;
 }
 
+/* Bring one recorded public send back, record-only, in either mode: it is
+ * never admitted to the private pool or scheduled, so nothing about it can
+ * reach an onion peer. A send the wallet does not hold is dropped; a
+ * confirmed one is left out, which retires its record. */
+static void wpr_resume_public(struct wpr *r, const struct uint256 *txid)
+{
+    struct wallet_tx wtx;
+    memset(&wtx, 0, sizeof(wtx));
+    if (!r->env.wallet || !wallet_get_tx_copy(r->env.wallet, txid, &wtx)) {
+        wpr_forget(r, txid);
+        return;
+    }
+    if (r->env.reserve)
+        r->env.reserve(&r->env, &wtx.tx);
+    if (wtx.confirms <= 0) {
+        zcl_mutex_lock(&r->lock);
+        struct wpr_entry *e = wpr_find_locked(r, txid);
+        if (!e)
+            e = wpr_alloc_locked(r);
+        if (e)
+            wpr_fill_public_locked(r, e, &wtx.tx);
+        zcl_mutex_unlock(&r->lock);
+    }
+    transaction_free(&wtx.tx);
+}
+
 struct zcl_result wpr_resume(struct wpr *r)
 {
     if (!r)
         return ZCL_ERR(-1, "private relay resume: NULL relay");
-    struct uint256 ids[WPR_MAX_ENTRIES];
-    bool was_expired[WPR_MAX_ENTRIES];
-    bool was_handed[WPR_MAX_ENTRIES];
+    struct wpr_pending_record rows[WPR_MAX_ENTRIES];
     zcl_mutex_lock(&r->lock);
-    size_t n = wpr_read_pending(r, ids, was_expired, was_handed,
-                                WPR_MAX_ENTRIES);
+    size_t n = wpr_read_pending(r, rows, WPR_MAX_ENTRIES);
     zcl_mutex_unlock(&r->lock);
 
     for (size_t i = 0; i < n; i++) {
-        if (was_expired[i]) {
-            wpr_restore_expired(r, &ids[i]);
-            continue;
-        }
-        wpr_resume_one(r, &ids[i], was_handed[i]);
+        if (rows[i].expired)
+            wpr_restore_expired(r, &rows[i].txid);
+        else if (rows[i].public_relay)
+            wpr_resume_public(r, &rows[i].txid);
+        else
+            wpr_resume_one(r, &rows[i].txid, rows[i].handed);
     }
     zcl_mutex_lock(&r->lock);
     bool ok = wpr_persist_locked(r);
@@ -1070,8 +1149,10 @@ static void wpr_tick_entry(struct wpr *r, size_t slot, int wallet_height,
             out->expired[out->num_expired++] = snap.txid;
         return;
     }
-    if (snap.state == WPR_SEEN)
-        return;  /* seen back: nothing to push, only the expiry above */
+    /* Seen back, or relayed publicly: nothing to push or pool, only the
+     * expiry above. */
+    if (snap.state == WPR_SEEN || snap.state == WPR_PUBLIC)
+        return;
     wpr_tick_live(r, &snap, now, out);
 }
 
@@ -1126,10 +1207,12 @@ void wpr_status_snapshot(struct wpr *r, struct wpr_status *out)
         s->disk_retry = e->disk_retry;
         s->handed = e->handed;
         s->mined = e->mined;
+        s->has_expiry = e->has_expiry;
+        s->past_expiry = e->expired;
         if (e->state == WPR_EXPIRED)
             out->expired++;
-        else if (e->state != WPR_SEEN)
-            out->pending++;
+        else if (e->state != WPR_SEEN && e->state != WPR_PUBLIC)
+            out->pending++;  /* pending private sends only */
     }
     zcl_mutex_unlock(&r->lock);
 }

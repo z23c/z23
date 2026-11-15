@@ -28,9 +28,12 @@ struct wallet_rpc_context *wallet_send_view_unless_prepared(
     struct wallet_rpc_context *ctx, struct wallet_rpc_context *view,
     const void *prepared);
 
-/* Broadcast a committed, durable send. Public mode announces to every peer.
- * Private mode queues it for one delayed onion push; if it cannot be queued
- * the send is rolled back and false is returned. */
+/* Broadcast a committed, durable send. Public relay records it record-only
+ * (WPR_PUBLIC) so that, never mined, it expires and its coins return, then
+ * announces it to every peer; a record that cannot be written is logged and
+ * the send is still relayed. Private mode queues it for one delayed onion
+ * push; if it cannot be queued the send is rolled back and false is
+ * returned. */
 bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx);
 
 /* Why the last wallet_send_relay failure on this thread failed: either the

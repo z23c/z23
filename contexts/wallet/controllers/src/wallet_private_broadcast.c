@@ -64,13 +64,30 @@ const char *wallet_send_relay_failure_text(void)
     return g_relay_failure;
 }
 
+/* Public relay: record the send so a send never mined expires and returns its
+ * coins, then announce it exactly as before. The send is already in the
+ * node's mempool, where peers may fetch it, so a record that cannot be made
+ * never stops or rolls it back: it is relayed, and without a record its coins
+ * stay reserved as they did before records existed. */
+static void wpb_relay_public(struct wpr *relay, struct wallet_rpc_context *ctx,
+                             const struct wallet_tx *wtx)
+{
+    struct zcl_result recorded = wpr_record_public(relay, &wtx->tx);
+    if (!recorded.ok)
+        LOG_WARN("wallet", "public send expiry record incomplete (code=%d): "
+                 "%s. The send is relayed; if the record is lost and it is "
+                 "never mined, its coins stay reserved until a rescan.",
+                 recorded.code, recorded.message);
+    if (ctx->connman)
+        connman_relay_transaction(ctx->connman, &wtx->tx.hash);
+}
+
 bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx)
 {
     struct wpr *relay = wpr_global();
     g_relay_failure = WPB_ROLLED_BACK_TEXT;
     if (ctx->mempool != wpr_pool(relay)) {
-        if (ctx->connman)
-            connman_relay_transaction(ctx->connman, &wtx->tx.hash);
+        wpb_relay_public(relay, ctx, wtx);
         return true;
     }
     struct zcl_result queued = wpr_enqueue(relay, &wtx->tx);
@@ -150,6 +167,19 @@ static enum wpb_expiry wpb_roll_back(struct wpr *relay,
     return WPB_EXPIRY_DEFERRED;
 }
 
+/* The node's own mempool still holds the send. It keeps a transaction past
+ * its expiry height until a block holds it or its age limit evicts it, and
+ * rolling the wallet back under it would leave the pool spending coins the
+ * wallet calls free. The private pool is not this pool: the rollback below
+ * removes the send from it. */
+static bool wpb_node_pool_holds(struct wpr *relay,
+                                const struct wallet_rpc_context *base,
+                                const struct uint256 *txid)
+{
+    return base->mempool && base->mempool != wpr_pool(relay) &&
+           tx_mempool_exists(base->mempool, txid);
+}
+
 static enum wpb_expiry wpb_expire_held_tx(struct wpr *relay,
                                           struct wallet_rpc_context *base,
                                           const struct wallet_rpc_context *view,
@@ -159,6 +189,8 @@ static enum wpb_expiry wpb_expire_held_tx(struct wpr *relay,
         wpr_note_seen(relay, &wtx->tx.hash);
         return WPB_EXPIRY_DEFERRED;
     }
+    if (wpb_node_pool_holds(relay, base, &wtx->tx.hash))
+        return WPB_EXPIRY_DEFERRED;
     if (!wpb_chain_shows_unspent(base, &wtx->tx)) {
         wpr_mark_held(relay, &wtx->tx.hash, true);
         return WPB_EXPIRY_HELD;
@@ -276,13 +308,13 @@ void wallet_private_broadcast_tick_at(int wallet_height)
         held += e == WPB_EXPIRY_HELD;
     }
     if (held)
-        LOG_WARN("wallet", "%zu private send(s) are past their expiry but "
+        LOG_WARN("wallet", "%zu wallet send(s) are past their expiry but "
                  "the chain may already hold them: an input is spent or "
                  "unknown to this node. They were not rolled back. Do not "
                  "send the payment again; rescan and check the wallet "
                  "history.", held);
     if (returned)
-        LOG_WARN("wallet", "%zu private send(s) expired unconfirmed and were "
+        LOG_WARN("wallet", "%zu wallet send(s) expired unconfirmed and were "
                  "returned to the wallet: the coins are available again. To "
                  "pay again, send it again with a new key.", returned);
     wallet_private_broadcast_warn_held(res.held);
@@ -386,7 +418,9 @@ static enum wallet_hold_proof_result wpb_prove_transparent(struct wallet *wallet
 static enum wallet_hold_proof_result wpb_prove_one(struct node_db *ndb,
     struct wallet *wallet, const struct wpr_pending_record *record, bool reserve)
 {
-    if (record->expired) return WALLET_HOLD_PROOF_OK;
+    /* A public send was recorded after the ordinary wallet commit reserved
+     * its coins; the proof covers sends recorded before the wallet wrote. */
+    if (record->expired || record->public_relay) return WALLET_HOLD_PROOF_OK;
     const struct wallet_tx *wtx = wallet_get_tx(wallet, &record->txid);
     enum db_wallet_tx_presence disk = db_wallet_tx_presence_checked(ndb, record->txid.data);
     if (disk == DB_WALLET_TX_ERROR) return WALLET_HOLD_PROOF_ERROR;
@@ -505,6 +539,24 @@ bool wallet_private_broadcast_is_held(const struct uint256 *txid)
             st == WPR_SCHEDULED);
 }
 
+/* A send the public relay announced to every peer. */
+static const char *wpb_public_next_step(const struct wpr_status_entry *e)
+{
+    if (e->past_expiry)
+        return "Relayed to every peer and past its expiry, not in a block. "
+               "Its coins return once this node's mempool no longer holds it "
+               "and the chain shows its inputs unspent. Do not send the "
+               "payment again until the status says expired.";
+    if (!e->has_expiry)
+        return "Relayed to every peer; waiting for a block. It has no expiry "
+               "height, so it is never released automatically: the coins "
+               "stay reserved until it is mined. Do not send the payment "
+               "again.";
+    return "Relayed to every peer; waiting for a block. Do not send the "
+           "payment again. If it is not mined by its expiry height and "
+           "margin, its coins return unless the chain may hold it.";
+}
+
 /* What the owner can safely do for a send in this state. No amounts or
  * addresses. */
 static const char *wallet_private_broadcast_next_step(
@@ -522,6 +574,8 @@ static const char *wallet_private_broadcast_next_step(
     switch (e->state) {
     case WPR_PREPARED:
         return "Being created. No action needed.";
+    case WPR_PUBLIC:
+        return wpb_public_next_step(e);
     case WPR_WAITING_FOR_ROUTE:
         if (e->handed)
             return "Handed to an onion peer earlier; waiting for a connected "

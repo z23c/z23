@@ -744,6 +744,31 @@ Before that, waiting is safe. A
 node restarted in public mode still resumes, expires and releases held sends,
 but pushes nothing.
 
+The same expiry applies in the default public mode. A wallet send
+(`sendtoaddress`, `sendmany`, `z_sendmany`, multisig) announced to every peer
+is recorded in the same pending file (a `p` line: the txid only), then
+relayed exactly as before; the record is never pushed, never enters the
+private pool, and survives a restart in either mode. The status lists it as
+`sent`, with a next step saying it was relayed to every peer, and does not
+count it in `pending` (pending private sends). If the record cannot be written
+the send is still relayed, a WARN is logged, and the write is retried each
+tick. A public send is released by the same checks plus one more: the node's
+own mempool must no longer hold it. The mempool keeps a transaction past its
+expiry height until a block holds it, its age limit evicts it (72 hours after
+it entered the pool, by default), or a restart reloads the pool, which refuses
+expired transactions; a public send that is never mined returns its coins at
+the first tick after that. A block retires the record with nothing rolled
+back. A send with no expiry height is never released automatically: its coins
+stay reserved until it is mined, and the status says so.
+
+Rolling back to a build older than this change: that build does not know the
+`p` line. On a normal start it drops the line, and the send's coins stay
+reserved until it is mined, as they did before records existed. If a wallet
+cutover is pending at that start, its strict reader calls the pending file
+malformed and the node refuses to boot while the line exists. Before rolling
+back, wait until the status shows no public send waiting: each one is mined or
+expired.
+
 The wallet commit and re-admission functions themselves refuse any pool but
 the private pool in private mode (`PRIVATE_BROADCAST_UNSUPPORTED`), so a
 transaction authored by name renewals, identities, anchors, directories, ZSLP

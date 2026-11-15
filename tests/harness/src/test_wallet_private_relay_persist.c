@@ -68,8 +68,8 @@ static void wprp_close(struct wprp_fx *f)
         test_rm_rf(f->dir);
 }
 
-/* The pending record's line for the send: 'x' expired, 'a' handed, ' ' live,
- * '-' no line at all. */
+/* The pending record's line for the send: 'x' expired, 'a' handed, 'p'
+ * public record-only, ' ' live, '-' no line at all. */
 static char wprp_disk_line(const struct wprp_fx *f)
 {
     char path[400];
@@ -244,6 +244,61 @@ static int wprp_case_evict(void)
     return failures;
 }
 
+/* A public send's record-only line: 'p', parsed back by the checked reader,
+ * kept in memory and rewritten when the first write fails, and not retired
+ * by an offer back without a confirmation. */
+static bool wprp_public_tx(struct transaction *tx, const struct uint256 *id)
+{
+    transaction_init(tx);
+    tx->overwintered = true;
+    tx->expiry_height = 77;
+    tx->hash = *id;
+    return true;
+}
+
+static bool wprp_snapshot_public(struct wprp_fx *f, const struct uint256 *id)
+{
+    struct wpr_pending_record rows[4];
+    size_t count = 0;
+    bool ok = wpr_pending_snapshot(f->r, rows, 4, &count) == WPR_PENDING_OK;
+    bool found = false;
+    for (size_t i = 0; ok && i < count; i++)
+        if (uint256_eq(&rows[i].txid, id))
+            found = rows[i].public_relay && !rows[i].expired && !rows[i].handed;
+    return ok && found;
+}
+
+static int wprp_case_public(void)
+{
+    int failures = 0;
+    struct wprp_fx f;
+    struct uint256 id;
+    struct transaction tx;
+    memset(id.data, 0x6b, sizeof(id.data));
+    bool ok = wprp_open(&f) && wprp_public_tx(&tx, &id);
+    wprp_point_at(&f, WPRP_BAD_DIR);
+    struct zcl_result first = ok ? wpr_record_public(f.r, &tx)
+                                 : ZCL_ERR(-1, "setup");
+    wprp_point_at(&f, f.dir);
+    wprp_report("an unwritable public record is kept in memory, code -4",
+                first.code == -4 && wprp_has(&f, &id), &failures);
+    wprp_tick(&f);
+    struct wprp_fx view = f;  /* the same record, read for this send */
+    uint256_get_hex(&id, view.hex);
+    wprp_report("a later tick writes the record-only 'p' line",
+                ok && wprp_disk_line(&view) == 'p', &failures);
+    wprp_report("the checked reader parses it as a public record",
+                ok && wprp_snapshot_public(&f, &id), &failures);
+    wpr_note_seen(f.r, &id);
+    wprp_report("an offer back with no wallet confirmation leaves the line",
+                ok && wprp_disk_line(&view) == 'p' && wprp_has(&f, &id),
+                &failures);
+    if (ok)
+        transaction_free(&tx);
+    wprp_close(&f);
+    return failures;
+}
+
 int wprp_run_tests(void);
 int wprp_run_tests(void)
 {
@@ -251,5 +306,6 @@ int wprp_run_tests(void)
     failures += wprp_case_evict();
     failures += wprp_case_expired();
     failures += wprp_case_seen();
+    failures += wprp_case_public();
     return failures;
 }
