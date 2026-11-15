@@ -50,7 +50,7 @@
 static _Atomic uint64_t g_ap_runs_total          = 0; /* passes attempted */
 static _Atomic uint64_t g_ap_checks_total        = 0; /* full comparisons done */
 static _Atomic uint64_t g_ap_passes_total        = 0; /* clean comparisons */
-static _Atomic uint64_t g_ap_divergences_total   = 0; /* blocker raises */
+static _Atomic uint64_t g_ap_divergences_total   = 0; /* confirmed samples */
 static _Atomic uint64_t g_ap_skipped_unsynced    = 0; /* markers absent/unequal */
 static _Atomic uint64_t g_ap_skipped_tip_moved   = 0; /* markers moved mid-scan */
 static _Atomic uint64_t g_ap_skipped_read_error  = 0; /* commitment/count read err */
@@ -167,7 +167,6 @@ bool ap_audit_apply_verdict(const struct ap_audit_verdict *v,
     }
 
     atomic_fetch_add(&g_ap_divergences_total, 1);
-    atomic_store(&g_ap_blocker_active, true);
 
     /* Compact reason so BOTH full 64-char roots always fit under
      * BLOCKER_REASON_MAX (256). The verbose detail goes to the log line. */
@@ -178,17 +177,33 @@ bool ap_audit_apply_verdict(const struct ap_audit_verdict *v,
              height, (unsigned long long)auth_count,
              (unsigned long long)proj_count, auth_hex, proj_hex);
 
+    bool registered = false;
     struct blocker_record rec;
     if (blocker_init(&rec, "authority_projection_divergence", "validation_pack",
                      BLOCKER_PERMANENT, reason)) {
-        if (blocker_set(&rec) == 0)
+        int rc = blocker_set(&rec);
+        registered = rc >= 0;
+        atomic_store(&g_ap_blocker_active, registered);
+        if (rc == 0)
             event_emitf(EV_OPERATOR_NEEDED, 0,
                         "check=authority_projection_divergence %s", reason);
+    } else {
+        atomic_store(&g_ap_blocker_active, false);
     }
-    LOG_WARN("validation_pack",
-             "[ap-audit] PERMANENT authority_projection_divergence: %s "
-             "(%s)", reason, v->detail);
-    return true;
+    if (registered) {
+        LOG_WARN("validation_pack",
+                 "[ap-audit] PERMANENT authority_projection_divergence: %s "
+                 "(%s)", reason, v->detail);
+    } else {
+        event_emitf(EV_OPERATOR_NEEDED, 0,
+                    "check=authority_projection_divergence registration_failed %s",
+                    reason);
+        LOG_WARN("validation_pack",
+                 "[ap-audit] UNREGISTERED authority/projection divergence; "
+                 "checkpoint adoption remains refused: %s (%s)",
+                 reason, v->detail);
+    }
+    return registered;
 }
 
 /* ── Differing-key diagnostics ───────────────────────────────────────── */

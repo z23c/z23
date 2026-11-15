@@ -58,7 +58,8 @@ void ap_audit_evaluate(const struct ap_audit_inputs *in,
  * VIOLATED verdict is confirmed across two consecutive samples (to swallow any
  * residual torn-scan race) before it raises the PERMANENT
  * `authority_projection_divergence` blocker carrying both roots. Returns true
- * iff THIS call raised the blocker. Exposed for unit tests (no DB required). */
+ * iff the blocker is registered after this call, including an existing
+ * rate-limited entry. Exposed for unit tests (no DB required). */
 bool ap_audit_apply_verdict(const struct ap_audit_verdict *v,
                             int32_t height,
                             uint64_t auth_count, uint64_t proj_count,

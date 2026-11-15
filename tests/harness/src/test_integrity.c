@@ -7,6 +7,7 @@
  *   - Stall recovery window expansion */
 
 #include "test/test_core.h"
+#include "json/json.h"
 #include "net/net.h"
 #include "coins/utxo_commitment.h"
 #include "chain/checkpoints.h"
@@ -1378,6 +1379,55 @@ static int test_integrity_ap_audit_divergence_fires(void)
     return failures;
 }
 
+static int test_integrity_ap_audit_registration_failure(void)
+{
+    int failures = 0;
+    struct json_value out = {0};
+
+    TEST("integrity: ap-audit full blocker registry never fakes registration") {
+        blocker_reset_for_testing();
+        ap_audit_reset_for_test();
+        for (int i = 0; i < BLOCKER_CAP; i++) {
+            char id[32];
+            snprintf(id, sizeof(id), "integrity-cap-%d", i);
+            struct blocker_record r;
+            ASSERT(blocker_init(&r, id, "integrity", BLOCKER_TRANSIENT,
+                                "capacity fixture"));
+            ASSERT(blocker_set(&r) >= 0);
+        }
+
+        uint8_t auth_root[32] = {0}, proj_root[32] = {1};
+        struct ap_audit_inputs in;
+        memset(&in, 0, sizeof(in));
+        in.comparable = true;
+        in.height = 3316576;
+        in.auth_count = 1341420;
+        in.proj_count = 1341425;
+        memcpy(in.auth_root, auth_root, sizeof(auth_root));
+        memcpy(in.proj_root, proj_root, sizeof(proj_root));
+        struct ap_audit_verdict v;
+        ap_audit_evaluate(&in, &v);
+        ASSERT(v.violated);
+
+        ASSERT(!ap_audit_apply_verdict(&v, in.height, in.auth_count,
+                                       in.proj_count, in.auth_root,
+                                       in.proj_root));
+        ASSERT(!ap_audit_apply_verdict(&v, in.height, in.auth_count,
+                                       in.proj_count, in.auth_root,
+                                       in.proj_root));
+        ASSERT(!blocker_exists("authority_projection_divergence"));
+        ASSERT(ap_audit_refuse_checkpoint_adoption());
+        ASSERT(ap_audit_dump_state_json(&out, NULL));
+        ASSERT(!json_get_bool(json_get(&out, "blocker_active")));
+        ASSERT_EQ(json_get_int(json_get(&out, "divergence_streak")), 2);
+        PASS();
+    } _test_next:;
+    json_free(&out);
+    blocker_reset_for_testing();
+    ap_audit_reset_for_test();
+    return failures;
+}
+
 int test_integrity(void)
 {
     int failures = 0;
@@ -1420,6 +1470,7 @@ int test_integrity(void)
     /* Redundant authority(coins)-vs-projection(utxos) cross-check */
     failures += test_integrity_ap_audit_match_no_fire();
     failures += test_integrity_ap_audit_divergence_fires();
+    failures += test_integrity_ap_audit_registration_failure();
     failures += test_integrity_ap_pair_check_table();
     failures += test_integrity_ap_pair_verdict_names();
 
