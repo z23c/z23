@@ -1793,8 +1793,10 @@ static int tgs_runner_proof_run(const struct tgs_runner_probe *p, int proof_run,
     ASSERT(rc == 0);
     ASSERT(strstr(p->out,
                   "proof contract "
-                  "group=test_store_e2e_gate "
+                  "group=test_reducer_block_ingest_gate "
                   "env=ZCL_STRESS_TESTS") != NULL);
+    ASSERT(strstr(p->out, "reducer_block_ingest_gate: block 1 is finalized by tip_finalize (reducer, not legacy)... OK") != NULL);
+    ASSERT(strstr(p->out, "=== reducer block-ingest gate: 0 failure(s) ===") != NULL);
     ASSERT(selector_output_contains(p->out, "active-proof-contract"));
     ASSERT(strstr(p->out, "cache PLAN — 0 cacheable, 0 cache HIT") !=
            NULL);
@@ -1826,11 +1828,11 @@ static int tgs_runner_proof_contract(const struct tgs_runner_probe *p)
 {
     int failures = 0;
     char first_proof_key[65] = {0};
-    ASSERT(zcl_test_group_proof_contract("test_store_e2e_gate") ==
+    ASSERT(zcl_test_group_proof_contract("test_reducer_block_ingest_gate") ==
            ZCL_TEST_PROOF_STRESS);
     int n = snprintf(p->command, p->command_cap,
                      "\"%s\" --jobs=1 "
-                     "--exact=test_store_e2e_gate "
+                     "--exact=test_reducer_block_ingest_gate "
                      "--activate-proof-contracts --cache 2>&1", p->exe);
     ASSERT(n > 0 && (size_t)n < p->command_cap);
     for (int proof_run = 0; proof_run < 2; proof_run++)
@@ -1845,7 +1847,7 @@ static int tgs_runner_stress_env_unset(const struct tgs_runner_probe *p)
     int failures = 0;
     int n = snprintf(p->command, p->command_cap,
                      "env -u ZCL_STRESS_TESTS \"%s\" --jobs=1 "
-                     "--exact=test_store_e2e_gate --no-cache 2>&1", p->exe);
+                     "--exact=test_reducer_block_ingest_gate --no-cache 2>&1", p->exe);
     ASSERT(n > 0 && (size_t)n < p->command_cap);
     int rc = capture_command(p->command, p->out, p->out_cap);
     ASSERT(rc == 0);
@@ -2020,8 +2022,8 @@ static int test_runner_exact_selection(void)
         ASSERT(tgs_runner_source_list(&probe) == 0);
         ASSERT(tgs_runner_two_ids(&probe) == 0);
 
-        /* Exercise the runner's proof-contract/cache boundary with the
-         * smallest real STRESS-contract group.  The contract dispatch is the
+        /* Exercise the runner's proof-contract/cache boundary with an
+         * isolated regtest STRESS-contract group. The contract dispatch is the
          * behavior under test here; recursively running the roughly
          * 100-second reducer forward-progress acceptance twice only tested
          * that unrelated product behavior twice and dominated every exact
