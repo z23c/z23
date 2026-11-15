@@ -104,6 +104,10 @@ struct ci_capability {
     int  score;
     /* How many of the query's stems this candidate matched anywhere. */
     int  terms_matched;
+    /* Most stems jointly supported by one symbol plus file context. */
+    int  coherent_terms_matched;
+    /* Distinct callers of coherent symbol witnesses. */
+    int  coherent_used_by_files;
 };
 
 /* What the search actually did, so a NOT_FOUND can say what was looked at

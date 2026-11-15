@@ -94,9 +94,12 @@ enum {
     CI_CONF_MED_MIN_USERS  = 1,
 };
 
+static_assert(CI_CAPABILITY_TERM_CAP <= 6, "symbol mask set requires at most six terms");
+
 struct cap_anchor {
     char     path[256];
     char     group[64];
+    uint64_t symbol_masks;  /* sets of base terms on individual symbols */
     uint32_t name_mask;      /* stems found in some symbol NAME here */
     uint32_t doc_mask;       /* stems found in some symbol doc/signature */
     uint32_t purpose_mask;   /* stems found in the file purpose */
@@ -406,6 +409,10 @@ static void cap_symbol_row(struct cap_scan *s, struct ci_capability_query *q,
 
     uint32_t nm = 0, dm = 0;
     cap_term_masks(&s->ss, name, doc, sig, &nm, &dm);
+    uint32_t base_mask = 0;
+    for (int i = 0; i < s->ss.term_count; ++i)
+        if ((nm | dm) & (1u << i)) base_mask |= 1u << s->ss.grp[i];
+    a->symbol_masks |= UINT64_C(1) << base_mask;
     if (nm) {
         cap_record_name_hit(a, name, nm);
     } else if (dm) {
@@ -924,6 +931,68 @@ static int cap_score(const struct cap_scan *s, const struct cap_anchor *a)
     return sc;
 }
 
+static int cap_coherent_terms(const struct cap_scan *s, const struct cap_anchor *a)
+{
+    uint32_t context = cap_groups(&s->ss, a->path_mask | a->purpose_mask);
+    int best = cap_popcount(context);
+    for (unsigned i = 0; i < (1u << s->ss.base); ++i) {
+        if (a->symbol_masks & (UINT64_C(1) << i)) {
+            int n = cap_popcount(context | i);
+            if (n > best) best = n;
+        }
+    }
+    return best;
+}
+
+/* Check a referenced symbol using the same ownership and eligibility rules as the scan. */
+static bool cap_coherent_row(sqlite3_stmt *stmt, const struct cap_scan *s,
+                             const struct cap_anchor *a, uint32_t context)
+{
+    const char *name = (const char *)sqlite3_column_text(stmt, 1);
+    const char *defp = (const char *)sqlite3_column_text(stmt, 2);
+    const char *declp = (const char *)sqlite3_column_text(stmt, 3);
+    const char *kind = (const char *)sqlite3_column_text(stmt, 4);
+    const char *doc = (const char *)sqlite3_column_text(stmt, 5);
+    const char *sig = (const char *)sqlite3_column_text(stmt, 6);
+    const char *anchor = cap_anchor_path(defp, declp);
+    if (!name || !anchor || strcmp(anchor, a->path) != 0 ||
+        cap_is_include_guard(name, kind && kind[0] ? kind[0] : '\0')) return false;
+    uint32_t nm = 0, dm = 0;
+    cap_term_masks(&s->ss, name, doc, sig, &nm, &dm);
+    uint32_t full = (1u << s->ss.base) - 1u;
+    return (nm | dm) && (cap_groups(&s->ss, nm | dm) | context) == full;
+}
+
+/* Count distinct caller files of coherent symbols, using recorded names. */
+static bool cap_coherent_usage(struct ci_store *st, const struct cap_scan *s,
+                               const struct cap_anchor *a, int *out)
+{
+    static const char sql[] =
+        "SELECT refs.ref_file,symbols.name,symbols.def_path,symbols.decl_path,"
+        "symbols.kind,symbols.doc,symbols.signature FROM refs JOIN symbols "
+        "ON refs.callee_name=symbols.name WHERE refs.ref_file<>?1 AND "
+        "(symbols.def_path=?1 OR symbols.decl_path=?1) ORDER BY refs.ref_file";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ci_store_db(st), sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_bind_text(stmt, 1, a->path, -1, SQLITE_TRANSIENT) == SQLITE_OK;
+    uint32_t context = cap_groups(&s->ss, a->path_mask | a->purpose_mask);
+    char last[4096] = "";
+    int count = 0, rc = SQLITE_ERROR;
+    while (ok && (rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:codeindex-derived
+        const char *path = (const char *)sqlite3_column_text(stmt, 0);
+        if (!path || strlen(path) >= sizeof(last)) { ok = false; break; }
+        if (strcmp(last, path) && cap_coherent_row(stmt, s, a, context)) {
+            memcpy(last, path, strlen(path) + 1);
+            count++;
+        }
+    }
+    ok = ok && rc == SQLITE_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    if (ok) *out = count;
+    return ok;
+}
+
 static int cap_terms_matched(const struct cap_scan *s,
                              const struct cap_anchor *a)
 {
@@ -1108,6 +1177,7 @@ static bool cap_fill_candidate(struct codeindex *ci, const struct cap_scan *s,
     c->symbol_count = a->name_hits;
     c->score = cap_score(s, a);
     c->terms_matched = cap_terms_matched(s, a);
+    c->coherent_terms_matched = cap_coherent_terms(s, a);
 
     struct ci_file f;
     bool found = false;
@@ -1122,6 +1192,8 @@ static bool cap_fill_candidate(struct codeindex *ci, const struct cap_scan *s,
     bool uok = cap_usage(ci->store, &s->ss, c->header, by_name,
                          &c->used_by_files, c->example_caller,
                          sizeof(c->example_caller));
+    if (uok && c->coherent_terms_matched == s->ss.base)
+        uok = cap_coherent_usage(ci->store, s, a, &c->coherent_used_by_files);
     ci_store_unlock(ci->store);
     if (!uok) return false;
     cap_label(c);
@@ -1214,8 +1286,9 @@ const char *codeindex_capability_confidence(const struct ci_capability *c,
     if (!c || !q) return "low";
     /* A relaxed search answered a question the caller did not ask, so it can
      * never reach "high" however good the numbers look. */
-    if (!q->relaxed && c->terms_matched >= q->term_count &&
-        c->symbol_count > 0 && c->used_by_files >= CI_CONF_HIGH_MIN_USERS)
+    if (!q->relaxed && c->coherent_terms_matched >= q->term_count &&
+        c->symbol_count > 0 && c->used_by_files >= CI_CONF_HIGH_MIN_USERS &&
+        c->coherent_used_by_files >= CI_CONF_HIGH_MIN_USERS)
         return "high";
     if (c->terms_matched >= 1 && c->used_by_files >= CI_CONF_MED_MIN_USERS)
         return "medium";

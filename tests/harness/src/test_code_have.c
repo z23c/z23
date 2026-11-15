@@ -27,6 +27,8 @@
 #include "base/text_fit.h"
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
+#include <sqlite3.h>
 #include "codeindex/codeindex_capability.h"
 #include "json/json.h"
 #include "config/command_catalog.h"
@@ -145,6 +147,8 @@ static const char *PURPOSE_HUGE_C =
 #define CH_CALLERS 5
 #define CH_MENTIONS 2
 
+static bool ch_write_mixed_fixture(void);
+
 static bool ch_write_fixture(bool with_sixth_caller)
 {
     if (!ch_write(HAVE_FIX, "engine/models/include/models/arfix.h", ARFIX_H))
@@ -165,6 +169,15 @@ static bool ch_write_fixture(bool with_sixth_caller)
         snprintf(rel, sizeof(rel), "engine/models/src/%s.c", mentions[i]);
         if (!ch_write(HAVE_FIX, rel, body)) return false;
     }
+    if (!ch_write(HAVE_FIX, "engine/models/include/models/scatter.h",
+        "int quartz_event(void);\nint meridian_repair(void);\n/* quartz */\nint sunstone_repair(void);\n")) return false;
+    for (int i = 0; i < 3; ++i) {
+        char path[128], body[256];
+        snprintf(path, sizeof(path), "engine/models/src/scatter%d.c", i);
+        snprintf(body, sizeof(body), "#include \"models/scatter.h\"\nint use%d(void) { return quartz_event() + meridian_repair(); }\n", i);
+        if (!ch_write(HAVE_FIX, path, body)) return false;
+    }
+    if (!ch_write_mixed_fixture()) return false;
     return ch_write(HAVE_FIX, "core/modules/net/src/foo.c", NET_FOO_C) &&
            ch_write(HAVE_FIX, "core/modules/net/src/purpose_long.c", PURPOSE_LONG_C) &&
            ch_write(HAVE_FIX, "core/modules/net/src/purpose_huge.c", PURPOSE_HUGE_C);
@@ -219,6 +232,8 @@ static int ch_check_verdict_derivation(void)
     memset(&vq, 0, sizeof(vq));
     vq.term_count = 1;
     c.terms_matched = 1;
+    c.coherent_terms_matched = 1;
+    c.coherent_used_by_files = 25;
     c.symbol_count = 4;
 
     /* Nothing calls it. However well it matched, it is not established. */
@@ -477,6 +492,12 @@ static int ch_check_cached_answer_matches(const struct ci_capability *caps,
     return failures;
 }
 
+static int ch_check_coherence(struct codeindex *fx, struct ci_capability *caps,
+                              struct ci_capability_query *q);
+static int ch_check_coherence_positive(struct codeindex *fx, struct ci_capability *caps,
+                                       struct ci_capability_query *q);
+static bool ch_paired_header_ownership(struct codeindex *ci);
+
 /* Run the hermetic-fixture checks: purpose capacity, the capability's
  * counts, absence and warm-cache agreement. */
 static int ch_check_hermetic_fixture(struct codeindex *fx,
@@ -502,9 +523,97 @@ static int ch_check_hermetic_fixture(struct codeindex *fx,
 
     /* 6a: the warm (cached) answer equals the cold one. */
     failures += ch_check_cached_answer_matches(caps, n, at);
+
+    failures += ch_check_coherence(fx, caps, q);
     return failures;
 }
 
+static int ch_check_coherence(struct codeindex *fx, struct ci_capability *caps,
+                              struct ci_capability_query *q)
+{
+    int failures = 0;
+    int scattered = codeindex_capabilities(fx, "quartz meridian", caps, 8, q);
+    int sat = scattered > 0 ? ch_find(caps, scattered, "engine/models/include/models/scatter.h") : -1;
+    CH_CHECK("unrelated symbols retain counts without asserting completeness",
+             sat >= 0 && caps[sat].terms_matched == 2 &&
+             caps[sat].coherent_terms_matched == 1 && caps[sat].used_by_files == 3 &&
+             codeindex_capability_verdict(caps, scattered, q) != CI_CAPABILITY_ALREADY_EXISTS);
+    int unrelated = codeindex_capabilities(fx, "quartz sunstone", caps, 8, q);
+    int uat = unrelated > 0 ? ch_find(caps, unrelated, "engine/models/include/models/scatter.h") : -1;
+    CH_CHECK("uncalled coherent symbol cannot borrow callers",
+             uat >= 0 && caps[uat].coherent_terms_matched == 2 &&
+             caps[uat].used_by_files == 3 && caps[uat].coherent_used_by_files == 0 &&
+             codeindex_capability_verdict(caps, unrelated, q) != CI_CAPABILITY_ALREADY_EXISTS);
+    failures += ch_check_coherence_positive(fx, caps, q);
+    return failures;
+}
+
+static int ch_check_coherence_positive(struct codeindex *fx, struct ci_capability *caps,
+                                       struct ci_capability_query *q)
+{
+    int failures = 0;
+    int positive = codeindex_capabilities(fx, "quartz event", caps, 8, q);
+    int pat = positive > 0 ? ch_find(caps, positive, "engine/models/include/models/scatter.h") : -1;
+    CH_CHECK("called coherent symbol supports high confidence",
+             pat >= 0 && caps[pat].coherent_terms_matched == 2 &&
+             caps[pat].coherent_used_by_files == 3 &&
+             codeindex_capability_verdict(caps, positive, q) == CI_CAPABILITY_ALREADY_EXISTS);
+    CH_CHECK("paired metadata cannot borrow header-owned callers",
+             ch_paired_header_ownership(fx));
+    return failures;
+}
+
+
+static bool ch_write_mixed_fixture(void)
+{
+    if (!ch_write(HAVE_FIX, "engine/models/include/models/mixed.h", "int zircon_amber_public(void);\n") ||
+        !ch_write(HAVE_FIX, "engine/models/src/mixed.c", "#include \"models/mixed.h\"\nint zircon_amber_public(void) { return 1; }\nstatic int zircon_amber_private(void) { return 0; }\n")) return false;
+    for (int i = 0; i < 3; ++i) {
+        char path[128], body[256];
+        snprintf(path, sizeof(path), "engine/models/src/mixeduser%d.c", i);
+        snprintf(body, sizeof(body), "#include \"models/mixed.h\"\nint use_mixed%d(void) { return zircon_amber_public(); }\n", i);
+        if (!ch_write(HAVE_FIX, path, body)) return false;
+    }
+    return true;
+}
+
+
+static bool ch_paired_query(struct codeindex *ci, struct ci_store *store)
+{
+    struct codeindex copy = *ci; copy.store = store;
+    struct ci_capability caps[8];
+    struct ci_capability_query q;
+    int count = codeindex_capabilities(&copy, "zircon amber", caps, 8, &q);
+    int at = count > 0 ? ch_find(caps, count, "engine/models/src/mixed.c") : -1;
+    return at >= 0 && caps[at].coherent_terms_matched == 2 &&
+           caps[at].coherent_used_by_files == 0 &&
+           strcmp(codeindex_capability_confidence(&caps[at], &q), "high");
+}
+
+/* Exercise legal paired metadata in a private copy of the scanned index. */
+static bool ch_paired_header_ownership(struct codeindex *ci)
+{
+    struct ci_store *store = ci_store_open_path(":memory:");
+    if (!store) return false;
+    sqlite3 *db = ci_store_db(store);
+    sqlite3_backup *backup = sqlite3_backup_init(db, "main", ci_store_db(ci->store), "main");
+    bool ok = backup && sqlite3_backup_step(backup, -1) == SQLITE_DONE;
+    if (backup && sqlite3_backup_finish(backup) != SQLITE_OK) ok = false;
+    struct ci_symbol rows[32];
+    int n = ok ? ci_store_symbols_in_file(store, "engine/models/src/mixed.c", rows, 32) : 0;
+    bool found = false;
+    for (int i = 0; i < n && i < 32; ++i) {
+        if (strcmp(rows[i].name, "zircon_amber_public")) continue;
+        ok = sqlite3_exec(db, "DELETE FROM symbols WHERE name='zircon_amber_public' AND def_path='engine/models/src/mixed.c'", NULL, NULL, NULL) == SQLITE_OK;
+        snprintf(rows[i].decl_path, sizeof(rows[i].decl_path), "%s", "engine/models/include/models/mixed.h");
+        ok = ok && ci_store_put_symbol(store, &rows[i]);
+        found = true;
+        break;
+    }
+    ok = ok && found && ch_paired_query(ci, store);
+    ci_store_close(store);
+    return ok;
+}
 
 /* ── known-answer fixture: real questions, real files ──────────────────
  *

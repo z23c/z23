@@ -145,6 +145,8 @@ void zcl_native_handle_code_have(const struct zcl_command_request *request,
         (void)json_push_kv_str(&o, "count_basis", caps[i].count_basis);
         (void)json_push_kv_str(&o, "example_caller", caps[i].example_caller);
         (void)json_push_kv_int(&o, "terms_matched", caps[i].terms_matched);
+        (void)json_push_kv_int(&o, "coherent_terms_matched", caps[i].coherent_terms_matched);
+        (void)json_push_kv_int(&o, "coherent_used_by_files", caps[i].coherent_used_by_files);
         (void)json_push_kv_str(&o, "confidence",
                                codeindex_capability_confidence(&caps[i], &q));
         json_free(&syms);
