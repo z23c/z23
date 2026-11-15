@@ -449,17 +449,22 @@ static bool abm_root(const struct app_build_make *m,
 
 bool app_build_closure_query(const struct app_build_make *m,
                              struct app_build_closure *out, char *why,
-                             size_t why_cap)
+                             size_t why_cap, bool *started)
 {
     struct lab_proc p;
     bool unconfined = false;
+    bool unused_started;
+    if (!started) started = &unused_started;
+    *started = false;
     memset(out, 0, sizeof(*out));
     if (!m || !m->copy_dir || !lab_proc_init(&p)) {
         abm_why(why, why_cap, "closure query setup failed");
         return false;
     }
+    p.launch = LAB_LAUNCH_FAILED;
     bool ok = abm_spawn(m, "print-app-closure", NULL, &p, &unconfined, why,
                         why_cap);
+    *started = p.launch == LAB_LAUNCHED;
     if (ok && (!abm_exited_ok(&p) || p.out_cut)) {
         abm_why(why, why_cap, "make print-app-closure %s: %.160s",
                 p.out_cut ? "printed more than the query bound"

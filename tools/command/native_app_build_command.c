@@ -287,10 +287,12 @@ static bool zab_closure(struct zab *z)
     const struct app_build_make m = {.copy_dir = zab_source(z),
                                      .work_dir = z->store.work,
                                      .confine = z->confine, .kit = &z->kit};
-    if (app_build_closure_query(&m, &z->closure, why, sizeof(why)))
+    bool started = false;
+    if (app_build_closure_query(&m, &z->closure, why, sizeof(why), &started))
         return true;
-    zab_fail(z, "CLOSURE_INVALID", false, "the make fragment's declared "
-             "closure could not be read", why);
+    zab_fail(z, started ? "CLOSURE_INVALID" : "BUILD_CHECK_UNAVAILABLE", false,
+             started ? "the make fragment's declared closure could not be read" :
+                       "this computer could not start the app build check", why);
     return false;
 }
 
@@ -715,7 +717,7 @@ static bool zab_snapshot_matches(struct zab *z, const struct app_build_make *m)
     char why[320] = "";
     if (!zab_package_at(z, m->copy_dir, package, dependencies))
         return false;
-    bool ok = app_build_closure_query(m, &closure, why, sizeof(why));
+    bool ok = app_build_closure_query(m, &closure, why, sizeof(why), NULL);
     if (!ok) {
         zab_fail(z, "SNAPSHOT_CLOSURE_FAILED", true,
                  "saved-source closure could not be derived before compilation", why);

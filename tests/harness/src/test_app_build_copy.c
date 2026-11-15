@@ -807,6 +807,34 @@ static int abc_failure_escaped(const struct abc_world *w)
     return failures;
 }
 
+static int abc_closure_launch_status(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: closure query distinguishes launch failure from invalid declaration") {
+        struct app_build_closure closure;
+        char why[320];
+        bool started = true;
+        ASSERT(!app_build_closure_query(NULL, &closure, why, sizeof(why), &started));
+        ASSERT(!started);
+        char missing[ABC_PATH];
+        struct stat st;
+        ASSERT(snprintf(missing, sizeof(missing), "%s/no-such-closure-dir", w->copy) > 0);
+        ASSERT(lstat(missing, &st) != 0);
+        const struct app_build_make absent = {.copy_dir = missing, .work_dir = w->build_dir};
+        started = true;
+        ASSERT(!app_build_closure_query(&absent, &closure, why, sizeof(why), &started));
+        ASSERT(!started);
+        ASSERT(abc_put(w->copy, "Makefile", ".PHONY: print-app-closure\nprint-app-closure:\n\t@printf \047../bad\\n\047\n"));
+        const struct app_build_make m = {.copy_dir = w->copy, .work_dir = w->build_dir};
+        started = false;
+        ASSERT(!app_build_closure_query(&m, &closure, why, sizeof(why), &started));
+        ASSERT(started);
+        PASS();
+    } _test_next:;
+    if (!abc_put(w->copy, "Makefile", k_makefile)) ++failures;
+    return failures;
+}
+
 static int abc_refuses_bad_builds(const struct abc_world *w)
 {
     int failures = 0;
@@ -1686,6 +1714,7 @@ int test_app_build_copy(void)
         failures += abc_restore_is_cache_hit(&w);
         failures += abc_refuses_dirty(&w);
         failures += abc_refuses_bad_builds(&w);
+        failures += abc_closure_launch_status(&w);
         if (!failures) failures += abc_failure_serialization(&w);
         if (!failures) failures += abc_failure_escaped(&w);
         failures += abc_landlock_contains(&w);

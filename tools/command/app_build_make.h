@@ -70,10 +70,10 @@ bool app_build_make_confinable(void);
 
 /* Run `make print-app-closure` (nothing writable) and root what it prints.
  * False with `why` on a failed query or an invalid, missing or oversized
- * declaration. */
+ * declaration. If non-NULL, `started` reports whether make actually launched. */
 bool app_build_closure_query(const struct app_build_make *m,
                              struct app_build_closure *out, char *why,
-                             size_t why_cap);
+                             size_t why_cap, bool *started);
 
 /* Run `make app APP_OUT=<out_dir>`; out_dir lies inside m->work_dir. */
 void app_build_make_run(const struct app_build_make *m, const char *out_dir,

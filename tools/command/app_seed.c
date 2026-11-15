@@ -143,7 +143,7 @@ static bool as_closure(struct as_ctx *c)
     struct app_build_closure closure;
     const struct app_build_make m = {.copy_dir = c->dest,
                                      .confine = app_build_make_confinable()};
-    if (!app_build_closure_query(&m, &closure, why, sizeof(why)))
+    if (!app_build_closure_query(&m, &closure, why, sizeof(why), NULL))
         return as_fail(c->out, "NO_PACKAGE_TARGETS", "%s/Makefile does not "
                        "name a closure the staged package holds: %s",
                        c->app_dir, why);
