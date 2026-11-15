@@ -583,7 +583,7 @@ static bool dj_android_child(const char *root, const char *part, mode_t mode)
 }
 static bool dj_android_fixture_tools(void)
 {
-    const char *required[] = {"/usr/bin/zip", "/usr/bin/unzip", "/usr/bin/7z"};
+    const char *required[] = {"/usr/bin/unzip", "/usr/bin/7z"};
     for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
         if (access(required[i], X_OK) != 0) { fprintf(stderr, "Android verify fixture requires %s\n", required[i]); return false; }
     return true;
@@ -607,7 +607,7 @@ static bool dj_android_fixture(char *lane, size_t cap)
         "cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'; "
         "echo app > '$(BUILD_DIR)/native/libz23android.so'; "
         "echo extra > '$(BUILD_DIR)/package/extra'; "
-        "cd '$(BUILD_DIR)/package' && /usr/bin/zip -q '$(BUILD_DIR)/aligned.apk' lib/arm64-v8a/libz23node.so extra\n";
+        "cd '$(BUILD_DIR)/package' && /usr/bin/7z a -tzip -bso0 -bsp0 '$(BUILD_DIR)/aligned.apk' lib/arm64-v8a/libz23node.so extra\n";
     if (!dj_android_file(path, makefile, 0600)) return false;
     dj_git(g_repo, "add", ".gitignore", "apps/z23android/Makefile", NULL, NULL);
     dj_git(g_repo, "commit", "-q", "-m", "android fixture", NULL);
@@ -914,7 +914,7 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         snprintf(backup, sizeof(backup), "%s.backup", apk);
         const char *cp_backup[] = {"/usr/bin/cp", apk, backup, NULL};
         const char *cp_restore[] = {"/usr/bin/cp", backup, apk, NULL};
-        const char *drop[] = {"/usr/bin/zip", "-dq", apk, "lib/arm64-v8a/libz23node.so", NULL};
+        const char *drop[] = {"/usr/bin/7z", "d", "-tzip", "-bso0", "-bsp0", apk, "lib/arm64-v8a/libz23node.so", NULL};
         ASSERT(dj_fixture_run("/", cp_backup)); ASSERT(dj_fixture_run("/", drop));
         ASSERT(dj_cli_call(g_installed_bin, "/", "verify", &verify, &observed));
         ASSERT_STR_EQ(json_get_str(json_get(json_get(&observed, "error"), "code")), "ANDROID_VERIFY_UNAVAILABLE");
@@ -928,7 +928,7 @@ static int dj_android_cases(struct zcl_dev_job_hooks *hooks)
         snprintf(staged, sizeof(staged), "%s/lib/arm64-v8a/libz23node.so", package);
         snprintf(node, sizeof(node), "%s/build/node binary", lane);
         ASSERT(dj_android_file(staged, "invalid", 0700)); ASSERT(dj_fixture_run("/", drop));
-        const char *add[] = {"/usr/bin/zip", "-q", apk, "lib/arm64-v8a/libz23node.so", NULL};
+        const char *add[] = {"/usr/bin/7z", "a", "-tzip", "-bso0", "-bsp0", apk, "lib/arm64-v8a/libz23node.so", NULL};
         const char *restore_node[] = {"/usr/bin/cp", node, staged, NULL};
         ASSERT(dj_fixture_run(package, add)); ASSERT(dj_fixture_run("/", restore_node));
         ASSERT(dj_verify_current_error(g_installed_bin, &wait, "ANDROID_VERIFY_NODE"));

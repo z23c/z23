@@ -400,6 +400,25 @@ ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_eval_selftest",
 ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_eval_selftest",
                           "build/bin/jsonq", "jsonq")
 
+/* tests/harness/src/test_retrieval_profile_sweep.c and
+ * test_retrieval_prefix_sweep.c replay the frozen receipt with the live
+ * checker, which execs the evaluator, jsonq and agent_sha3. The land proof
+ * has them from its lint tools; a lane's universal agent-verify built none
+ * of them for these groups, so both failed at access(live.sha3, X_OK) in
+ * every universal run on both build hosts (2026-11-15). */
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_profile_sweep",
+                          "build/bin/retrieval-eval", "retrieval-eval")
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_profile_sweep",
+                          "build/bin/jsonq", "jsonq")
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_profile_sweep",
+                          "build/bin/agent_sha3", "agent-sha3")
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_prefix_sweep",
+                          "build/bin/retrieval-eval", "retrieval-eval")
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_prefix_sweep",
+                          "build/bin/jsonq", "jsonq")
+ZCL_TEST_GROUP_BUILD_NEED("test_retrieval_prefix_sweep",
+                          "build/bin/agent_sha3", "agent-sha3")
+
 /* tests/harness/src/test_wallet_e2e_regtest.c drives the built z23 as a real
  * regtest node and self-skips where it is absent. */
 ZCL_TEST_GROUP_BUILD_NEED("test_wallet_e2e_regtest", "build/bin/z23", "z23")
