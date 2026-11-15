@@ -2610,7 +2610,11 @@ Z23_FLAG("ZCL_TEST_IMPROVE_DISK", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_INSTALLED_APP_BIN_DIR", "env_test", "-", "-",
           "Absolute release-binary directory opting into the isolated installed SkyCombat packaging and native copy fixture; missing prerequisites fail when enabled; first use tests/harness/src/test_app_seed_skycombat.c:auto")
 Z23_FLAG("ZCL_TEST_INSTALLED_APP_EVIDENCE_DIR", "env_test", "-", "-",
-          "Optional existing owner-controlled directory retaining only named public release members and logs from the installed SkyCombat fixture, never HOME or keys; first use tests/harness/src/test_app_seed_skycombat.c:auto")
+          "Optional existing empty owner-controlled directory retaining only diagnostic logs and receipts from the installed SkyCombat fixture, never release payloads, HOME or keys; first use tests/harness/src/test_app_seed_skycombat.c:auto")
+Z23_FLAG("ZCL_TEST_INSTALLED_APP_KIT_DIR", "env_test", "-", "-",
+          "Canonical compiler-kit artifact directory for the opt-in installed app build test; requires the independent KIT_SHA3 pin and BIN_DIR; first use tests/harness/src/test_app_seed_skycombat.c:auto")
+Z23_FLAG("ZCL_TEST_INSTALLED_APP_KIT_SHA3", "env_test", "-", "-",
+          "Independent lowercase SHA3-256 descriptor pin for the opt-in installed app compiler kit; requires KIT_DIR and BIN_DIR; first use tests/harness/src/test_app_seed_skycombat.c:auto")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
           "first use tests/harness/src/test_parallel.c:auto; documented at docs/dev/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",

@@ -142,6 +142,8 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 /* Explicit installed acceptance. These environment inputs belong only to the
  * harness: production resolver still uses the running executable exclusively. */
 #include "command/app_installed_source.h"
+#include "command/app_image.h"
+#include "command/app_copy_build.h"
 #include "command/app_toolchain.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
@@ -153,6 +155,7 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 #include "vcs/vcs_manifest.h"
 #include "vcs/vcs.h"
 #include "vcs/source_bundle.h"
+#include "vcs/package_store.h"
 #include "sha3/sha3.h"
 #include <dirent.h>
 #include <fcntl.h>
@@ -171,7 +174,11 @@ struct asi_run {
     char kit[ASS_PATH], kit_digest[65], copy[ASS_PATH], version[65];
     struct app_installed_source source;
     struct platform_process cli, display;
+    bool real_kit;
+    uint8_t kit_env[32];
+    uint8_t selected_package[32], selected_deps[32];
 };
+static bool asi_copy_public(const char *from, const char *to);
 static const char *const asi_env_keys[] = {
     "HOME", "DISPLAY", "WAYLAND_DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
     "XDG_STATE_HOME", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_PREFIX", "TMPDIR",
@@ -216,9 +223,21 @@ static bool asi_no_installer_hooks(void)
         if (!strncmp(*at, "Z23_INSTALL_TEST_", 17)) return false;
     return true;
 }
+/* Optional installed-kit build qualification: set both
+ * ZCL_TEST_INSTALLED_APP_KIT_DIR and ZCL_TEST_INSTALLED_APP_KIT_SHA3, alongside
+ * the installed-app fixture inputs, and run the registered group with --no-cache. */
+static bool asi_kit_optin(struct asi_run *r)
+{
+    const char *kit = getenv("ZCL_TEST_INSTALLED_APP_KIT_DIR");
+    const char *pin = getenv("ZCL_TEST_INSTALLED_APP_KIT_SHA3");
+    if (!!kit != !!pin || (kit && (!kit[0] || !pin[0]))) return false;
+    r->real_kit = kit != NULL;
+    return true;
+}
 static bool asi_prerequisites(struct ass_world *w, struct asi_run *r)
 {
     const char *bins = getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR");
+    if (!asi_kit_optin(r)) return false;
     char path[PATH_MAX];
     if (!bins || bins[0] != '/' || !realpath(bins, r->bin)) return false;
     if (!asi_no_installer_hooks()) return false;
@@ -336,8 +355,36 @@ static bool asi_kit_write(const char *dir, const char *name, const void *bytes, 
     bool ok = fwrite(bytes, 1, size, f) == size;
     return fclose(f) == 0 && ok;
 }
+static bool asi_copy_kit_members(const char *source, const char *destination)
+{
+    static const char *const names[] = {APP_TOOLCHAIN_DESCRIPTOR, APP_TOOLCHAIN_BUNDLE};
+    char from[PATH_MAX], to[ASS_PATH];
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); ++i)
+        if (!asi_path(from, sizeof(from), source, names[i]) || !asi_path(to, sizeof(to), destination, names[i]) ||
+            !asi_copy_public(from, to)) return false;
+    return true;
+}
+static bool asi_supplied_kit(struct ass_world *w, struct asi_run *r)
+{
+    const char *dir = getenv("ZCL_TEST_INSTALLED_APP_KIT_DIR");
+    const char *pin = getenv("ZCL_TEST_INSTALLED_APP_KIT_SHA3");
+    char canonical[PATH_MAX], why[256]; uint8_t digest[32];
+    if (!dir || !pin || !realpath(dir, canonical) || strcmp(dir, canonical) || strlen(pin) != 64 ||
+        !zcl_hex_decode_lower(pin, digest, sizeof(digest))) return false;
+    struct app_toolchain kit = {0};
+    bool ok = app_toolchain_artifact(&kit, canonical, pin, why, sizeof(why));
+    app_toolchain_free(&kit);
+    if (!ok || !asi_path(r->kit, sizeof(r->kit), w->root, "kit") || mkdir(r->kit, 0700)) return false;
+    if (!asi_copy_kit_members(canonical, r->kit)) return false;
+    ok = app_toolchain_artifact(&kit, r->kit, pin, why, sizeof(why));
+    if (ok) memcpy(r->kit_env, kit.env, sizeof(r->kit_env));
+    app_toolchain_free(&kit);
+    if (ok) memcpy(r->kit_digest, pin, sizeof(r->kit_digest));
+    return ok;
+}
 static bool asi_kit(struct ass_world *w, struct asi_run *r)
 {
+    if (r->real_kit) return asi_supplied_kit(w, r);
     uint8_t tree[32], digest[32], *wire = NULL; size_t length = 0;
     char root[65], hash[65], descriptor[1024];
     if (!asi_path(r->kit, sizeof(r->kit), w->root, "kit") || !asi_kit_tree(r)) return false;
@@ -911,6 +958,123 @@ static bool asi_kit_refusal(struct ass_world *w, struct asi_run *r)
     bool restored = chmod(path, st.st_mode & 07777) == 0;
     return ok && restored;
 }
+
+static bool asi_build_finish(struct asi_run *r, const char *path, struct json_value *reply)
+{
+    uint32_t code = 0; enum platform_process_wait_result state = platform_process_wait(&r->cli, 300000, &code);
+    if (state != PLATFORM_PROCESS_WAIT_EXITED) { (void)asi_stop(&r->cli); return false; }
+    platform_process_close(&r->cli);
+    return code == 0 && asi_json_file(path, reply) && asi_passed(reply);
+}
+static bool asi_build_call(struct ass_world *w, struct asi_run *r, const char *log,
+                           const char *plan, struct json_value *reply)
+{
+    char data[ASS_PATH+16], copy[ASS_PATH+16], version[80], plan_arg[80], path[ASS_PATH];
+    int a = snprintf(data, sizeof(data), "--datadir=%s", r->datadir);
+    int b = snprintf(copy, sizeof(copy), "--copy=%s", r->copy);
+    int c = snprintf(version, sizeof(version), "--version=%s", r->version);
+    int d = snprintf(plan_arg, sizeof(plan_arg), "--plan_id=%s", plan ? plan : "");
+    if (a <= 0 || (size_t)a >= sizeof(data) || b <= 0 || (size_t)b >= sizeof(copy) ||
+        c <= 0 || (size_t)c >= sizeof(version) || d <= 0 || (size_t)d >= sizeof(plan_arg) ||
+        !asi_path(path, sizeof(path), w->root, log)) return false;
+    const char *argv[] = {r->installed, "app", "build", "--json", data, copy, version,
+                          plan ? plan_arg : NULL, plan ? "--confirm=true" : NULL, NULL};
+    if (!asi_terminal_spawn(w, r, log, argv)) return false;
+    return asi_build_finish(r, path, reply);
+}
+
+static bool asi_build_identity(const struct asi_run *r, const struct json_value *data,
+                               const char *stage)
+{
+    char package[65], environment[65], dependency[65];
+    zcl_hex_encode(r->selected_package, sizeof(r->selected_package), package);
+    zcl_hex_encode(r->selected_deps, sizeof(r->selected_deps), dependency);
+    zcl_hex_encode(r->kit_env, sizeof(r->kit_env), environment);
+    const struct json_value *hit = json_get(data, "cache_hit");
+    return !strcmp(asi_string(data, "stage"), stage) && !strcmp(asi_string(data, "copy"), r->copy) &&
+        !strcmp(asi_string(data, "version"), r->version) && !strcmp(asi_string(data, "package_root"), package) &&
+        !strcmp(asi_string(data, "dependency_root"), dependency) &&
+        !strcmp(asi_string(data, "env_root"), environment) &&
+        !strcmp(asi_string(data, "confinement"), "landlock") && hit && hit->type == JSON_BOOL && !json_get_bool(hit);
+}
+
+/* Re-derive the selected successor, whose personalized metadata changes its package root. */
+static bool asi_selected_roots(struct ass_world *w, struct asi_run *r)
+{
+    char scratch[ASS_PATH];
+    if (!asi_path(scratch, sizeof(scratch), w->root, "selected-source") || mkdir(scratch, 0700) != 0)
+        return false;
+    struct zcl_package_copy copy = {0};
+    struct zcl_command_reply why; zcl_command_reply_init(&why, "zcl.app_build.test.v1");
+    bool ok = zcl_package_copy_open_selected_as(r->copy, ZCL_PACKAGE_COPY_READ, &copy,
+        &why, "app.build", r->version);
+    if (ok) ok = vcs_tree_materialize_readonly_disposable(r->copy, copy.selected_tree, scratch,
+        VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, 0) == VCS_OK;
+    if (ok) ok = app_copy_build_roots(r->datadir, scratch, &copy, r->selected_package, r->selected_deps, &why);
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&why);
+    if (test_rm_rf_recursive(scratch) != 0) ok = false;
+    return ok;
+}
+
+static bool asi_record_image_matches(const struct app_image_build *record, const char *path)
+{
+    struct app_image_build captured = {0};
+    return app_image_capture(path, &captured).ok && record->image_volume == captured.image_volume &&
+        record->image_low == captured.image_low && record->image_high == captured.image_high &&
+        record->image_size == captured.image_size;
+}
+static bool asi_build_record(const struct asi_run *r, const struct json_value *data)
+{
+    static const char *const keys[] = {"package_root", "env_root", "dependency_root", "closure_root", "image_sha3", "record_id"};
+    uint8_t values[6][32], id[32];
+    for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i) {
+        const char *hex = asi_string(data, keys[i]);
+        if (strlen(hex) != 64 || !zcl_hex_decode_lower(hex, values[i], sizeof(values[i]))) return false;
+    }
+    char records[ASS_PATH];
+    int n = snprintf(records, sizeof(records), "%s/app_build/records", r->datadir);
+    struct app_image_build record = {0}; bool hit = false;
+    return n > 0 && (size_t)n < sizeof(records) && !strcmp(asi_string(data, "record_store"), records) &&
+        app_image_build_load(records, values[0], values[1], values[2], &record, &hit).ok && hit &&
+        !memcmp(record.closure_root, values[3], 32) && !memcmp(record.image_sha3, values[4], 32) &&
+        app_image_build_id(&record, id).ok && !memcmp(id, values[5], 32) &&
+        asi_record_image_matches(&record, asi_string(data, "image_path"));
+}
+
+static bool asi_build_image(const struct asi_run *r, const struct json_value *data)
+{
+    const char *image = asi_string(data, "image_sha3"), *path = asi_string(data, "image_path");
+    uint8_t expected[32], record[32]; char expected_path[ASS_PATH]; struct app_image_build captured = {0};
+    int n = snprintf(expected_path, sizeof(expected_path), "%s/app_build/images/%s", r->datadir, image);
+    return strlen(image) == 64 && zcl_hex_decode_lower(image, expected, sizeof(expected)) &&
+        strlen(asi_string(data, "record_id")) == 64 &&
+        zcl_hex_decode_lower(asi_string(data, "record_id"), record, sizeof(record)) &&
+        n > 0 && (size_t)n < sizeof(expected_path) && !strcmp(path, expected_path) &&
+        app_image_capture(path, &captured).ok && !memcmp(expected, captured.image_sha3, sizeof(expected));
+}
+
+static bool asi_build_consistent(const struct asi_run *r, const struct json_value *p, const struct json_value *b)
+{
+    const struct json_value *made = json_get(b, "make_ran"), *executed = json_get(b, "executed");
+    const char *keys[] = {"plan_id", "package_root", "version", "closure_root", "env_root", "dependency_root"};
+    for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); ++i)
+        if (!asi_string(p, keys[i])[0] || strcmp(asi_string(p, keys[i]), asi_string(b, keys[i]))) return false;
+    return asi_build_identity(r, b, "commit") && made && made->type == JSON_BOOL && json_get_bool(made) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        asi_build_record(r, b) && asi_build_image(r, b);
+}
+static bool asi_real_build(struct ass_world *w, struct asi_run *r)
+{
+    struct json_value plan, built; json_init(&plan); json_init(&built);
+    bool ok = asi_selected_roots(w, r) && asi_build_call(w, r, "kit-build-plan.json", NULL, &plan);
+    const struct json_value *p = json_get(&plan, "data");
+    const char *id = asi_string(p, "plan_id");
+    ok = ok && asi_build_identity(r, p, "plan") && strlen(id) == 64 &&
+        asi_build_call(w, r, "kit-build-commit.json", id, &built);
+    const struct json_value *b = json_get(&built, "data");
+    ok = ok && asi_build_consistent(r, p, b);
+    json_free(&plan); json_free(&built); return ok;
+}
 static bool asi_copy_public(const char *from, const char *to)
 {
     FILE *in = fopen(from, "rb"); if (!in) return false;
@@ -1240,7 +1404,15 @@ static bool asi_evidence_empty(const char *path)
     return empty;
 }
 
-static bool asi_evidence(struct ass_world *w)
+static bool asi_evidence_copy(struct ass_world *w, const char *dir, const char *const *names, size_t count)
+{
+    char from[ASS_PATH], to[PATH_MAX];
+    for (size_t i = 0; i < count; ++i)
+        if (!asi_path(from, sizeof(from), w->root, names[i]) ||
+            !asi_path(to, sizeof(to), dir, names[i]) || !asi_copy_public(from, to)) return false;
+    return true;
+}
+static bool asi_evidence(struct ass_world *w, const struct asi_run *r)
 {
     const char *dir = getenv("ZCL_TEST_INSTALLED_APP_EVIDENCE_DIR");
     if (!dir) return true;
@@ -1254,10 +1426,10 @@ static bool asi_evidence(struct ass_world *w)
     static const char *const logs[] = {"installed-package.log", "installed-install.log",
         "installed-list.json", "installed-cancel.json", "installed-confirm.json", "installed-xvfb.log",
         "installed-driver.log", "installed-cli.stderr", "kit-refusal.json"};
-    char from[ASS_PATH], to[PATH_MAX];
-    for (size_t i = 0; i < sizeof(logs)/sizeof(logs[0]); ++i) {
-        if (!asi_path(from, sizeof(from), w->root, logs[i]) ||
-            !asi_path(to, sizeof(to), dir, logs[i]) || !asi_copy_public(from, to)) return false;
+    if (!asi_evidence_copy(w, dir, logs, sizeof(logs)/sizeof(logs[0]))) return false;
+    if (r->real_kit) {
+        static const char *const build[] = {"kit-build-plan.json", "kit-build-commit.json"};
+        if (!asi_evidence_copy(w, dir, build, sizeof(build)/sizeof(build[0]))) return false;
     }
     return true;
 }
@@ -1356,8 +1528,9 @@ static int ass_installed(struct ass_world *w)
         ASSERT(asi_discovery(w, &r) && asi_no_consumer_state(&r));
         ASSERT(asi_terminal_copy(w, &r) && asi_no_consumer_state(&r));
         ASSERT(asi_cancel(w, &r) && asi_confirm(w, &r));
+        if (r.real_kit) ASSERT(asi_real_build(w, &r));
         ASSERT(asi_kit_refusal(w, &r));
-        ASSERT(asi_evidence(w));
+        ASSERT(asi_evidence(w, &r));
         PASS();
     } _test_next:;
     if (!asi_cleanup(w, &r, &saved, env_saved, cwd_changed)) ++failures;
@@ -1370,7 +1543,13 @@ static int ass_installed(struct ass_world *w)
 
 static int ass_installed_preflight(struct ass_world *w)
 {
-    if (!getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) return 0;
+    if (!getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) {
+        if (getenv("ZCL_TEST_INSTALLED_APP_KIT_DIR") || getenv("ZCL_TEST_INSTALLED_APP_KIT_SHA3")) {
+            test_note("installed kit qualification requires ZCL_TEST_INSTALLED_APP_BIN_DIR");
+            return 1;
+        }
+        return 0;
+    }
     int failures = 0;
     struct asi_run check = {0};
     TEST("installed opt-in requires qualified release tools, Xvfb and game headers") {
