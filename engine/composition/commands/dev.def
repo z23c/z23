@@ -2550,7 +2550,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "<sha256>.bundle is reused), refuses a path under core/, engine/reducer/, "
     "contexts/wallet/ or the deny file, and runs git merge-tree against "
     "origin/main and pairwise against the earlier accepted posts. One "
-    "verdict per post: ACCEPT_FOR_QUEUE, REFUSE(reason) or CONFLICT(with). "
+    "verdict per post: ACCEPT_FOR_QUEUE, REFUSE(reason), CONFLICT(with) or "
+    "ANSWERED (a result reply exists, or the tip is on origin/main). A run "
+    "that read more than it took says truncated=true with a next step. "
     "Without commit it posts and queues nothing. commit=true returns the "
     "plan_id; with that plan_id and confirm=true it submits each accepted "
     "bundle through dev.land.receive and posts one result reply per post.",

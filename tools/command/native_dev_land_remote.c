@@ -972,6 +972,31 @@ static bool dlr_send_offer(struct dlr_send *s, struct zcl_command_reply *reply)
     return ok;
 }
 
+/* The next step after --bundle_out. The READY line below names the commit and
+ * the bundle hash only; the intake leaf needs root= and size= too, and root
+ * exists only after the bundle is offered on the swarm. */
+static void dlr_send_next_action(const struct dlr_send *s,
+                                 struct zcl_command_reply *reply)
+{
+    char text[2 * DLR_PATH + 640], size[24] = "<bytes>";
+    struct stat st;
+    if (stat(s->out, &st) == 0 && st.st_size >= 0)
+        (void)snprintf(size, sizeof(size), "%lld", (long long)st.st_size);
+    if (snprintf(text, sizeof(text),
+                 "run `z23 fleet bundle offer --file=%s`, then post "
+                 "`READY sha256=%s root=<root from the offer> size=%s` in "
+                 "room fleet; or carry the file to the queue host and run "
+                 "`dev land receive --bundle=%s --lane=%s` there",
+                 s->out, s->bsha, size, s->out, s->lane) >= (int)sizeof(text))
+        (void)snprintf(text, sizeof(text),
+                       "run `z23 fleet bundle offer --file=<bundle_out>`, "
+                       "then post `READY sha256=<bundle_sha256> root=<root "
+                       "from the offer> size=<bytes>` in room fleet; or "
+                       "carry the file to the queue host and use `dev land "
+                       "receive --bundle`");
+    (void)json_push_kv_str(&reply->data, "next_action", text);
+}
+
 /* --bundle_out: the handoff for a machine with no ssh to the queue host. */
 static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
 {
@@ -1006,6 +1031,7 @@ static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
     (void)json_push_kv_str(&reply->data, "lane", s->lane);
     (void)json_push_kv_str(&reply->data, "offer", s->offer);
     (void)json_push_kv_str(&reply->data, "ready", ready);
+    dlr_send_next_action(s, reply);
 }
 
 static bool dlr_send_copy(struct dlr_send *s, struct zcl_command_reply *reply)

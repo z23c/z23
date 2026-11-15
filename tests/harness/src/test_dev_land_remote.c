@@ -636,6 +636,19 @@ static int dlt_single_cases(void)
         ASSERT(dlt_sha_file(b, hex));
         ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "bundle_sha256")),
                       hex) == 0);
+        {
+            /* the printed READY line stays as is; next_action names what
+             * must be added before the intake leaf accepts it */
+            const char *next = json_get_str(json_get(&c.reply.data, "next_action"));
+            const char *ready = json_get_str(json_get(&c.reply.data, "ready"));
+            ASSERT(next != NULL && ready != NULL);
+            ASSERT(strstr(next, "fleet bundle offer") != NULL);
+            ASSERT(strstr(next, "--file=") != NULL);
+            ASSERT(strstr(next, "root=") != NULL);
+            ASSERT(strstr(next, "size=") != NULL);
+            ASSERT(strstr(next, hex) != NULL);
+            ASSERT(strstr(ready, "bundle_sha256=") != NULL);
+        }
         dlt_end(&c);
         ASSERT(DLT_GIT(out, sizeof(out), r.queue, "bundle", "verify", b) == 0);
         ASSERT(DLT_GIT(out, sizeof(out), r.queue, "bundle", "list-heads", b) == 0);

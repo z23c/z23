@@ -2056,9 +2056,29 @@ the new commit). An already-landed commit refuses `SEND_NOTHING_AHEAD`.
 A machine with no ssh to the queue host passes `--bundle_out=<absolute path>`
 instead. `send` writes the bundle there (refusing `SEND_BUNDLE_EXISTS` when the
 path exists), runs no `ssh` or `scp`, needs no `--host`, and returns
-`data.bundle`, `data.bundle_sha256`, `data.commit` and `data.lane` with a board-ready
-`READY <lane> <commit> bundle_sha256=<hex>` line that names no local path. Carry the file to the queue host and run
+`data.bundle`, `data.bundle_sha256`, `data.commit` and `data.lane`, a
+`data.ready` line `READY <lane> <commit> bundle_sha256=<hex>` that names no local path,
+and `data.next_action`. The `ready` line alone is not enough for `dev land
+intake`: it must also carry `root=` and `size=`, which come from `z23 fleet
+bundle offer --file=<bundle_out>` (post `READY sha256=<hex> root=<root>
+size=<bytes>` in room fleet; intake reads `bundle_sha256=` as `sha256=`). A
+post without them is refused `no_bundle`, and its `operator_step` names the
+three tokens. Or carry the file to the queue host and run
 `dev land receive --bundle=PATH --lane=NAME` there.
+
+`dev land intake` reads the board page by page (up to 1000 posts) and takes at
+most 32 READY posts per run. When it read more than it took, or the board had
+older pages left, the reply carries `data.truncated=true`, `data.skipped` and a
+`data.next_step` (rerun with `id=` for one post, or `since=` for newer ones). A
+board read that fails refuses with the board's own code and next step (for
+example `BOARD_PAGE_METADATA_MISSING`: upgrade the node), never `NO_POSTS`, which
+is only an unreadable `posts_file`. A refusal from `dev land receive` (for
+example `RECEIVE_RECEIPTS_REQUIRED`) is kept as `queue_error` on the verdict row
+and in the result reply text. A READY post that already has an `intake` result
+reply (signed by an allowed key, `ref=` its id) or whose tip is already on
+origin/main is reported `ANSWERED` and gets no second reply; `id=<post id>`
+asks for the answer again. List the intake operator's own key in the allow file
+so its replies count.
 
 No ssh between the machines, or a contributor with no access? Hand the bundle
 over onion instead: `z23 fleet bundle offer` then `fleet bundle fetch` (see

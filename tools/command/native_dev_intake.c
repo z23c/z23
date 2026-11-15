@@ -6,7 +6,8 @@
  *
  * A READY post that offers a bundle reads
  *   READY root=<64hex> sha256=<64hex> size=<n> [peer=<v3 onion>] free text
- * (a READY post without sha256 is REFUSE(no_bundle)). Checks, in order:
+ * (a READY post without sha256 is REFUSE(no_bundle); bundle_sha256= is read as
+ * sha256=, as `dev land send --bundle_out` prints it). Checks, in order:
  *   1 the post signature (fleet_board_post_verify over the listed fields)
  *   2 the author key is in the allow file (one 64-hex key per line, as
  *     z23-lab-peer's --authors)
@@ -59,7 +60,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { IN_MAX = 32, IN_PATH = 1024, IN_LINE = 128, IN_LIST = 64, IN_OUT = 262144 };
+/* IN_MAX live posts per run; ANSWERED posts are only reported, so they get
+ * their own room (IN_CAP slots in all). IN_PAGES board pages of 200 rows. */
+enum {
+    IN_MAX = 32, IN_CAP = 96, IN_ANS = 256, IN_PAGES = 5, IN_PAGE_ROWS = 200,
+    IN_PATH = 1024, IN_LINE = 128, IN_LIST = 64, IN_OUT = 262144
+};
+
+/* An intake result reply already on the board: its ref and short id. */
+struct in_ans {
+    char ref[65], id[13];
+};
 
 struct in_list {
     char v[IN_LIST][IN_LINE];
@@ -74,8 +85,9 @@ struct in_post {
     char step[320]; /* operator_step: what a person must do when we cannot fetch */
     int idx;        /* refs/intake/<idx> in the scratch repository */
     int64_t created;
-    char verdict[24]; /* ACCEPT_FOR_QUEUE | REFUSE | CONFLICT */
+    char verdict[24]; /* ACCEPT_FOR_QUEUE | REFUSE | CONFLICT | ANSWERED */
     char reason[48], with[17];
+    char queue_error[64]; /* the dev.land.receive code when it refused */
     bool live;
     int submitted; /* -1 not tried, 0 failed, 1 queued */
 };
@@ -85,8 +97,15 @@ struct in_ctx {
     bool board; /* posts come from the live board (show can re-read a post) */
     char main_sha[41], *out;
     struct in_list allow, deny;
-    struct in_post posts[IN_MAX];
+    struct in_post posts[IN_CAP];
     int n;
+    int active;      /* posts that are not ANSWERED, at most IN_MAX */
+    int skipped;     /* READY posts read but not taken for want of room */
+    bool truncated;  /* skipped > 0, or the board had pages past the cap */
+    bool board_more; /* the board had older posts past IN_PAGES pages */
+    bool by_id;      /* one post asked for by id=: results do not answer it */
+    struct in_ans ans[IN_ANS];
+    int nans;
 };
 
 static void in_set(struct in_post *p, const char *verdict, const char *reason)
@@ -231,10 +250,33 @@ static bool in_is_ready(const char *text)
     return !strncmp(text, "READY", 5) && (!text[5] || text[5] == ' ');
 }
 
-static bool in_sub(void (*fn)(const struct zcl_command_request *,
-                              struct zcl_command_reply *),
-                   const char *path, const char *schema,
-                   const struct json_value *input, struct json_value *data);
+typedef void (*in_handler)(const struct zcl_command_request *,
+                           struct zcl_command_reply *);
+
+/* A failed sub-leaf call: its error code, message and next step. */
+struct in_err {
+    char code[64], message[192], step[256];
+};
+
+static bool in_sub_err(in_handler fn, const char *path, const char *schema,
+                       const struct json_value *input, struct json_value *data,
+                       struct in_err *err);
+
+static bool in_sub(in_handler fn, const char *path, const char *schema,
+                   const struct json_value *input, struct json_value *data)
+{
+    return in_sub_err(fn, path, schema, input, data, NULL);
+}
+
+/* Test seams (the board list and the board post); NULL is the real leaf. */
+static in_handler g_in_list_hook, g_in_post_hook;
+
+void zcl_dev_intake_hooks_for_test(in_handler list, in_handler post);
+void zcl_dev_intake_hooks_for_test(in_handler list, in_handler post)
+{
+    g_in_list_hook = list;
+    g_in_post_hook = post;
+}
 
 /* The row's signature, else (live board only) the whole post by id through
  * fleet.board.show, which carries every signed field. On a pass `src` is the
@@ -260,6 +302,26 @@ static bool in_verified(const struct in_ctx *x, const struct json_value *j,
     return ok;
 }
 
+/* A READY post with no usable bundle: say what the poster must add. */
+static void in_no_bundle(struct in_post *p)
+{
+    in_refuse(p, "no_bundle");
+    (void)snprintf(p->step, sizeof(p->step),
+                   "the post names no fetchable bundle: run `z23 fleet bundle "
+                   "offer --file=B.bundle`, then re-post READY with root=, "
+                   "sha256= and size= from the offer (bundle_sha256= is read "
+                   "as sha256=)");
+}
+
+/* The bundle hash: sha256=<64hex>, or bundle_sha256= as `dev land send
+ * --bundle_out` prints it. */
+static bool in_sha_token(const char *text, struct in_post *p)
+{
+    return (in_token(text, "sha256", p->sha256, sizeof(p->sha256)) ||
+            in_token(text, "bundle_sha256", p->sha256, sizeof(p->sha256))) &&
+           in_hex_n(p->sha256, 64);
+}
+
 /* "READY <lane path> <40 hex commit> text" (the live form) or
  * "READY ... sha256=<64hex> [root= size= peer=]" (a bundle on the swarm). */
 static void in_bundle_form(const char *text, struct in_post *p)
@@ -276,9 +338,8 @@ static void in_bundle_form(const char *text, struct in_post *p)
             return;
         p->lane[0] = p->commit[0] = '\0';
     }
-    if (!in_token(text, "sha256", p->sha256, sizeof(p->sha256)) ||
-        !in_hex_n(p->sha256, 64)) {
-        in_refuse(p, "no_bundle");
+    if (!in_sha_token(text, p)) {
+        in_no_bundle(p);
         return;
     }
     (void)in_token(text, "root", p->root, sizeof(p->root));
@@ -384,33 +445,43 @@ static bool in_refuse_revoked(struct in_post *p)
     return true;
 }
 
-/* One listed post. Unsigned/foreign/bundle-less posts get their verdict here. */
-static void in_ingest(struct in_ctx *x, const struct json_value *j)
+/* The short id of an intake result already answering this post, or NULL.
+ * An explicit id= asks for the answer again, so it is never answered. */
+static const char *in_answer_of(const struct in_ctx *x, const char *id)
 {
-    struct in_post *p;
-    struct json_value shown;
-    const struct json_value *src;
-    const char *text = json_get_str(json_get(j, "text"));
-    if (!text || !in_is_ready(text) || x->n >= IN_MAX)
-        return;
-    p = &x->posts[x->n++];
-    memset(p, 0, sizeof(*p));
-    p->submitted = -1;
-    p->live = true;
-    json_init(&shown);
-    if (!in_verified(x, j, &shown, &src)) {
-        in_str(p->id, sizeof(p->id), j, "id");
-        in_refuse(p, "bad_signature");
-        json_free(&shown);
-        return;
-    }
+    if (x->by_id)
+        return NULL;
+    for (int i = 0; i < x->nans; i++)
+        if (!strcmp(x->ans[i].ref, id))
+            return x->ans[i].id;
+    return NULL;
+}
+
+/* An already answered post gets the typed ANSWERED verdict and no work. */
+static bool in_set_answered(struct in_ctx *x, struct in_post *p)
+{
+    const char *by = in_answer_of(x, p->id);
+    char reason[sizeof(p->reason)];
+    if (!by)
+        return false;
+    (void)snprintf(reason, sizeof(reason), "result=%s", by);
+    in_set(p, "ANSWERED", reason);
+    x->active--;
+    return true;
+}
+
+/* A verified post's fields and its first verdict: time, author, answered,
+ * revocation, then the bundle form. */
+static void in_judge(struct in_ctx *x, struct in_post *p,
+                     const struct json_value *src)
+{
+    int64_t ttl = json_get_int(json_get(src, "ttl"));
+    struct fleet_board_post timed = {0};
     in_str(p->id, sizeof(p->id), src, "id");
     in_str(p->host, sizeof(p->host), src, "host");
     in_str(p->agent, sizeof(p->agent), src, "agent");
     in_str(p->room, sizeof(p->room), src, "room");
     p->created = json_get_int(json_get(src, "created_at"));
-    int64_t ttl = json_get_int(json_get(src, "ttl"));
-    struct fleet_board_post timed = {0};
     timed.kind = FLEET_BOARD_KIND_NOTE;
     timed.created_at = (uint64_t)p->created;
     timed.ttl = ttl > 0 && ttl <= UINT32_MAX ? (uint32_t)ttl : 0;
@@ -418,8 +489,35 @@ static void in_ingest(struct in_ctx *x, const struct json_value *j)
         in_refuse(p, "post_expired_or_invalid_time");
     else if (!in_allowed(&x->allow, p->host))
         in_refuse(p, "author_not_allowed");
-    else if (!in_refuse_revoked(p))
+    else if (!in_set_answered(x, p) && !in_refuse_revoked(p))
         in_bundle_form(json_get_str(json_get(src, "text")), p);
+}
+
+/* One listed post. Unsigned/foreign/bundle-less posts get their verdict here. */
+static void in_ingest(struct in_ctx *x, const struct json_value *j)
+{
+    struct in_post *p;
+    struct json_value shown;
+    const struct json_value *src;
+    const char *text = json_get_str(json_get(j, "text"));
+    if (!text || !in_is_ready(text))
+        return;
+    if (x->n >= IN_CAP || x->active >= IN_MAX) {
+        x->skipped++; /* read, not taken: the reply says so */
+        x->truncated = true;
+        return;
+    }
+    p = &x->posts[x->n++];
+    x->active++;
+    memset(p, 0, sizeof(*p));
+    p->submitted = -1;
+    p->live = true;
+    json_init(&shown);
+    if (!in_verified(x, j, &shown, &src)) {
+        in_str(p->id, sizeof(p->id), j, "id");
+        in_refuse(p, "bad_signature");
+    } else
+        in_judge(x, p, src);
     json_free(&shown);
 }
 
@@ -433,13 +531,12 @@ static int in_cmp(const void *a, const void *b)
 
 /* ── sub-leaf calls ────────────────────────────────────────────────────── */
 
-typedef void (*in_handler)(const struct zcl_command_request *,
-                           struct zcl_command_reply *);
-
 /* Run a sibling leaf in process; true on a passed reply. data (when not
- * NULL) receives a copy of reply.data. */
-static bool in_sub(in_handler fn, const char *path, const char *schema,
-                   const struct json_value *input, struct json_value *data)
+ * NULL) receives a copy of reply.data; err (when not NULL) receives the
+ * error of a reply that did not pass. */
+static bool in_sub_err(in_handler fn, const char *path, const char *schema,
+                       const struct json_value *input, struct json_value *data,
+                       struct in_err *err)
 {
     struct zcl_command_request rq;
     struct zcl_command_reply rp;
@@ -452,32 +549,201 @@ static bool in_sub(in_handler fn, const char *path, const char *schema,
     ok = rp.status == ZCL_COMMAND_STATUS_PASSED;
     if (data)
         json_copy(data, &rp.data);
+    if (!ok && err) {
+        (void)snprintf(err->code, sizeof(err->code), "%s", rp.error.code);
+        (void)snprintf(err->message, sizeof(err->message), "%s", rp.error.message);
+        (void)snprintf(err->step, sizeof(err->step), "%s", rp.error.next_action);
+    }
     zcl_command_reply_free(&rp);
     return ok;
 }
 
-/* The board list (room, since) or the saved posts_file, into doc. */
-static bool in_load(const struct json_value *in, struct json_value *doc)
+static void in_err_set(struct in_err *err, const char *code, const char *message)
 {
-    const char *file = db_opt_str(in, "posts_file"), *room = db_opt_str(in, "room");
-    struct json_value query;
+    if (!err)
+        return;
+    (void)snprintf(err->code, sizeof(err->code), "%s", code);
+    (void)snprintf(err->message, sizeof(err->message), "%s", message);
+    err->step[0] = '\0';
+}
+
+/* A page cursor: the last row's time and id, moving strictly backward. */
+static bool in_page_cursor(const struct json_value *page, int64_t prior_at,
+                           const char *prior_id, int64_t *at, char id[65])
+{
+    const struct json_value *t = json_get(page, "next_created_at");
+    const char *nid = json_get_str(json_get(page, "next_id"));
+    if (!t || t->type != JSON_INT || json_get_int(t) <= 0 || !nid ||
+        !in_hex_n(nid, 64))
+        return false;
+    if (prior_id[0] && json_get_int(t) > prior_at)
+        return false;
+    if (prior_id[0] && json_get_int(t) == prior_at && strcmp(nid, prior_id) >= 0)
+        return false;
+    *at = json_get_int(t);
+    memcpy(id, nid, 65);
+    return true;
+}
+
+/* One list reply: its rows join `posts`; the cursor moves to the next page. */
+static bool in_page_take(const struct json_value *page, int64_t *at, char id[65],
+                         struct json_value *posts, bool *more, struct in_err *err)
+{
+    const struct json_value *rows = json_get(page, "posts");
+    const struct json_value *m = json_get(page, "has_more");
+    int64_t next_at = 0;
+    char next_id[65];
+    if (!rows || rows->type != JSON_ARR || !m || m->type != JSON_BOOL) {
+        in_err_set(err, "BOARD_PAGE_INVALID",
+                   "the board list reply has no posts array or no has_more, "
+                   "so its completeness is unknown");
+        return false;
+    }
+    for (size_t i = 0; i < json_size(rows); i++)
+        (void)json_push_back(posts, json_at(rows, i));
+    *more = json_get_bool(m);
+    if (!*more)
+        return true;
+    if (!in_page_cursor(page, *at, id, &next_at, next_id)) {
+        in_err_set(err, "BOARD_CURSOR_INVALID",
+                   "the board list reply has_more but no usable next cursor");
+        return false;
+    }
+    *at = next_at;
+    memcpy(id, next_id, 65);
+    return true;
+}
+
+/* One board page (room, since, and the cursor of the page before it). */
+static bool in_page_read(in_handler list, const struct json_value *in, int64_t *at,
+                         char id[65], struct json_value *posts, bool *more,
+                         struct in_err *err)
+{
+    const char *room = db_opt_str(in, "room");
+    struct json_value q, page;
+    bool ok;
+    json_init(&q);
+    json_set_object(&q);
+    (void)json_push_kv_str(&q, "room", room[0] ? room : "fleet");
+    (void)json_push_kv_int(&q, "limit", IN_PAGE_ROWS);
+    if (json_get(in, "since"))
+        (void)json_push_kv_int(&q, "since", json_get_int(json_get(in, "since")));
+    if (id[0]) {
+        (void)json_push_kv_int(&q, "before_created_at", *at);
+        (void)json_push_kv_str(&q, "before_id", id);
+    }
+    json_init(&page);
+    ok = in_sub_err(list, "fleet.board.list", "zcl.fleet_board_list.v1", &q,
+                    &page, err) &&
+         in_page_take(&page, at, id, posts, more, err);
+    json_free(&page);
+    json_free(&q);
+    return ok;
+}
+
+/* The live board, every page up to IN_PAGES, into doc.posts. more is true
+ * when the board still had older posts at the cap. A failed page keeps its
+ * error in err and fails the whole read: a partial board is not a board. */
+static bool in_load_board(const struct json_value *in, struct json_value *doc,
+                          struct in_err *err, bool *more)
+{
+    in_handler list = g_in_list_hook ? g_in_list_hook : zcl_native_handle_fleet_board_list;
+    struct json_value posts;
+    char id[65] = "";
+    int64_t at = 0;
+    bool ok = true;
+    json_init(&posts);
+    json_set_array(&posts);
+    *more = false;
+    for (int page = 0; ok && page < IN_PAGES; page++) {
+        ok = in_page_read(list, in, &at, id, &posts, more, err);
+        if (ok && !*more)
+            break;
+    }
+    if (!ok && !err->code[0])
+        in_err_set(err, "BOARD_LIST_FAILED", "fleet.board.list did not pass");
+    if (ok) {
+        json_set_object(doc);
+        ok = json_push_kv(doc, "posts", &posts);
+    }
+    json_free(&posts);
+    return ok;
+}
+
+/* The board list (room, since) or the saved posts_file, into doc. */
+static bool in_load(const struct json_value *in, struct json_value *doc,
+                    struct in_err *err, bool *more)
+{
+    const char *file = db_opt_str(in, "posts_file");
     struct db_text t = {0};
     bool ok;
-    if (file[0]) {
-        ok = db_text_load(file, &t) && t.n && json_read(doc, t.p, t.n);
-        db_text_free(&t);
-        return ok;
-    }
-    json_init(&query);
-    json_set_object(&query);
-    (void)json_push_kv_str(&query, "room", room[0] ? room : "fleet");
-    (void)json_push_kv_int(&query, "limit", 200);
-    if (json_get(in, "since"))
-        (void)json_push_kv_int(&query, "since", json_get_int(json_get(in, "since")));
-    ok = in_sub(zcl_native_handle_fleet_board_list, "fleet.board.list",
-                "zcl.fleet_board_list.v1", &query, doc);
-    json_free(&query);
+    *more = false;
+    if (!file[0])
+        return in_load_board(in, doc, err, more);
+    ok = db_text_load(file, &t) && t.n && json_read(doc, t.p, t.n);
+    db_text_free(&t);
     return ok;
+}
+
+/* An intake result already on the board answers the READY post it refs. The
+ * reply must carry a good signature from an allowed key, so no stranger can
+ * silence a post by naming it. */
+static void in_note_result(struct in_ctx *x, const struct json_value *j)
+{
+    const char *text = json_get_str(json_get(j, "text"));
+    char kind[16], agent[FLEET_BOARD_AGENT_MAX + 1], host[65];
+    struct in_ans *a;
+    if (!text || x->nans >= IN_ANS)
+        return;
+    in_str(kind, sizeof(kind), j, "kind");
+    in_str(agent, sizeof(agent), j, "agent");
+    in_str(host, sizeof(host), j, "host");
+    if (strcmp(kind, "result") || strcmp(agent, "intake") ||
+        !in_allowed(&x->allow, host) || !in_sig_ok(j, text))
+        return;
+    a = &x->ans[x->nans];
+    in_str(a->ref, sizeof(a->ref), j, "ref");
+    if (!in_hex_n(a->ref, 64))
+        return;
+    in_str(a->id, sizeof(a->id), j, "id");
+    x->nans++;
+}
+
+/* The listed rows: results first (they answer), then the READY posts. */
+static void in_take_posts(struct in_ctx *x, const struct json_value *list,
+                          const char *want, bool more)
+{
+    for (size_t i = 0; i < json_size(list); i++)
+        in_note_result(x, json_at(list, i));
+    for (size_t i = 0; i < json_size(list); i++) {
+        const struct json_value *j = json_at(list, i);
+        if (!want[0] || !strncmp(json_get_str(json_get(j, "id")), want, strlen(want)))
+            in_ingest(x, j);
+    }
+    x->board_more = more;
+    x->truncated = x->truncated || more;
+}
+
+/* The refusal for a list that could not be read: the board's own code,
+ * message and next step; NO_POSTS only for an unreadable posts_file. */
+static void in_load_refuse(struct zcl_command_reply *reply, const struct in_err *err)
+{
+    if (!err->code[0]) {
+        db_refuse(reply, "NO_POSTS", "collect",
+                  "the board list (or posts_file) could not be read");
+        return;
+    }
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED, err->code, "collect", false,
+                           false, err->message[0] ? err->message : err->code,
+                           "fleet.board.list");
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s",
+                   err->step[0]
+                       ? err->step
+                       : "run `z23 fleet board list --room=fleet` to see the "
+                         "same error and fix it, or pass posts_file=<saved "
+                         "list>, then rerun");
 }
 
 static void in_collect(struct in_ctx *x, const struct json_value *in,
@@ -485,22 +751,21 @@ static void in_collect(struct in_ctx *x, const struct json_value *in,
 {
     struct json_value doc;
     const struct json_value *list;
+    struct in_err err = {{0}, {0}, {0}};
     const char *want = db_opt_str(in, "id");
+    bool more = false;
     json_init(&doc);
     x->board = !db_opt_str(in, "posts_file")[0];
-    *ok = in_load(in, &doc);
+    x->by_id = want[0] != '\0';
+    *ok = in_load(in, &doc, &err, &more);
     list = json_get(&doc, "posts");
     if (!list && doc.type == JSON_ARR)
         list = &doc;
     *ok = *ok && list;
     if (!*ok)
-        db_refuse(reply, "NO_POSTS", "collect",
-                  "the board list (or posts_file) could not be read");
-    for (size_t i = 0; *ok && i < json_size(list); i++) {
-        const struct json_value *j = json_at(list, i);
-        if (!want[0] || !strncmp(json_get_str(json_get(j, "id")), want, strlen(want)))
-            in_ingest(x, j);
-    }
+        in_load_refuse(reply, &err);
+    else
+        in_take_posts(x, list, want, more);
     json_free(&doc);
 }
 
@@ -522,7 +787,7 @@ static void in_fetch(struct in_ctx *x, struct in_post *p)
                    p->sha256);
     if (access(p->bundle, R_OK) != 0) {
         if (!in_hex_n(p->root, 64) || !p->size[0]) {
-            in_refuse(p, "no_bundle");
+            in_no_bundle(p);
             return;
         }
         json_init(&q);
@@ -757,6 +1022,19 @@ static void in_conflicts(struct in_ctx *x)
     }
 }
 
+/* A post whose tip is already part of origin/main has nothing to land. */
+static void in_landed(struct in_ctx *x)
+{
+    for (int i = 0; i < x->n; i++) {
+        struct in_post *p = &x->posts[i];
+        const char *anc[] = {"merge-base", "--is-ancestor", p->tip, x->main_sha, NULL};
+        if (!p->live || !p->tip[0] || in_git(x, anc) != 0)
+            continue;
+        in_set(p, "ANSWERED", "on_main");
+        x->active--;
+    }
+}
+
 static void in_checks(struct in_ctx *x)
 {
     for (int i = 0; i < x->n; i++)
@@ -765,6 +1043,7 @@ static void in_checks(struct in_ctx *x)
     for (int i = 0; i < x->n; i++)
         if (x->posts[i].live)
             in_import(x, &x->posts[i], i);
+    in_landed(x);
     for (int i = 0; i < x->n; i++)
         if (x->posts[i].live)
             in_scope(x, &x->posts[i]);
@@ -793,7 +1072,9 @@ static void in_plan_id(const struct in_ctx *x, char out[65])
 
 static void in_text(const struct in_post *p, char *out, size_t cap)
 {
-    if (!strcmp(p->verdict, "ACCEPT_FOR_QUEUE"))
+    if (!strcmp(p->verdict, "ACCEPT_FOR_QUEUE") && p->queue_error[0])
+        (void)snprintf(out, cap, "intake ACCEPT_FOR_QUEUE not queued (%s)", p->queue_error);
+    else if (!strcmp(p->verdict, "ACCEPT_FOR_QUEUE"))
         (void)snprintf(out, cap, "intake ACCEPT_FOR_QUEUE %s", p->submitted == 1 ? "queued" : "not queued");
     else if (p->with[0])
         (void)snprintf(out, cap, "intake CONFLICT(with=%s): rebase and re-post READY", p->with);
@@ -814,21 +1095,40 @@ static bool in_mkbundle(const struct in_ctx *x, const struct in_post *p)
     return in_git(x, mk) == 0;
 }
 
+/* Hand one accepted bundle to dev.land.receive; a refusal keeps its code. */
+static void in_queue(struct in_ctx *x, struct in_post *p)
+{
+    struct json_value q;
+    struct in_err err = {{0}, {0}, {0}};
+    char lane[32];
+    p->submitted = 0;
+    if (!in_mkbundle(x, p)) {
+        (void)snprintf(p->queue_error, sizeof(p->queue_error), "%s", "bundle_cut_failed");
+        return;
+    }
+    json_init(&q);
+    json_set_object(&q);
+    (void)json_push_kv_str(&q, "bundle", p->bundle);
+    (void)snprintf(lane, sizeof(lane), "intake-%.12s", p->id);
+    (void)json_push_kv_str(&q, "lane", lane);
+    (void)json_push_kv_str(&q, "checkout", x->repo);
+    if (in_sub_err(zcl_native_handle_dev_land_remote, "dev.land.receive",
+                   "zcl.land.v1", &q, NULL, &err))
+        p->submitted = 1;
+    else
+        (void)snprintf(p->queue_error, sizeof(p->queue_error), "%s",
+                       err.code[0] ? err.code : "receive_failed");
+    json_free(&q);
+}
+
 static void in_apply_one(struct in_ctx *x, struct in_post *p)
 {
     struct json_value q;
     char text[160];
-    if (!strcmp(p->verdict, "ACCEPT_FOR_QUEUE")) {
-        json_init(&q);
-        json_set_object(&q);
-        (void)json_push_kv_str(&q, "bundle", p->bundle);
-        (void)snprintf(text, sizeof(text), "intake-%.12s", p->id);
-        (void)json_push_kv_str(&q, "lane", text);
-        (void)json_push_kv_str(&q, "checkout", x->repo);
-        p->submitted = in_mkbundle(x, p) && in_sub(zcl_native_handle_dev_land_remote,
-                              "dev.land.receive", "zcl.land.v1", &q, NULL) ? 1 : 0;
-        json_free(&q);
-    }
+    if (!strcmp(p->verdict, "ANSWERED"))
+        return; /* already has its result: nothing is posted twice */
+    if (!strcmp(p->verdict, "ACCEPT_FOR_QUEUE"))
+        in_queue(x, p);
     in_text(p, text, sizeof(text));
     json_init(&q);
     json_set_object(&q);
@@ -837,7 +1137,7 @@ static void in_apply_one(struct in_ctx *x, struct in_post *p)
     (void)json_push_kv_str(&q, "ref", p->id);
     (void)json_push_kv_str(&q, "room", p->room[0] ? p->room : "fleet");
     (void)json_push_kv_str(&q, "agent", "intake");
-    (void)in_sub(zcl_native_handle_fleet_board_post, "fleet.board.post",
+    (void)in_sub(g_in_post_hook ? g_in_post_hook : zcl_native_handle_fleet_board_post, "fleet.board.post",
                  "zcl.fleet_board_post_id.v1", &q, NULL);
     json_free(&q);
 }
@@ -852,6 +1152,8 @@ static void in_row(struct json_value *arr, const struct in_post *p)
         (void)snprintf(typed, sizeof(typed), "REFUSE(%s)", p->reason);
     else if (!strcmp(p->verdict, "CONFLICT"))
         (void)snprintf(typed, sizeof(typed), "CONFLICT(with=%s)", p->with);
+    else if (!strcmp(p->verdict, "ANSWERED"))
+        (void)snprintf(typed, sizeof(typed), "ANSWERED(%s)", p->reason);
     else
         (void)snprintf(typed, sizeof(typed), "%s", p->verdict);
     json_init(&r);
@@ -867,8 +1169,29 @@ static void in_row(struct json_value *arr, const struct in_post *p)
         (void)json_push_kv_str(&r, "operator_step", p->step);
     if (p->submitted >= 0)
         (void)json_push_kv_bool(&r, "queued", p->submitted == 1);
+    if (p->queue_error[0])
+        (void)json_push_kv_str(&r, "queue_error", p->queue_error);
     (void)json_push_back(arr, &r);
     json_free(&r);
+}
+
+/* A run that did not see or take every READY post says so and says what to
+ * do: it is never a complete-looking answer. */
+static void in_publish_truncation(const struct in_ctx *x,
+                                  struct zcl_command_reply *reply)
+{
+    char step[320];
+    (void)json_push_kv_bool(&reply->data, "truncated", x->truncated);
+    (void)json_push_kv_int(&reply->data, "skipped", x->skipped);
+    if (!x->truncated)
+        return;
+    (void)snprintf(step, sizeof(step),
+                   "%d READY post(s) were read but not taken (a run takes %d)%s: "
+                   "rerun with id=<post id prefix> for one post, or since=<unix "
+                   "time> to read newer posts",
+                   x->skipped, IN_MAX,
+                   x->board_more ? ", and older board pages were not read" : "");
+    (void)json_push_kv_str(&reply->data, "next_step", step);
 }
 
 static void in_publish(const struct in_ctx *x, struct zcl_command_reply *reply,
@@ -886,6 +1209,7 @@ static void in_publish(const struct in_ctx *x, struct zcl_command_reply *reply,
     (void)json_push_kv_str(&reply->data, "plan_id", plan);
     (void)json_push_kv(&reply->data, "verdicts", &arr);
     json_free(&arr);
+    in_publish_truncation(x, reply);
 }
 
 static bool in_inputs(struct in_ctx *x, const struct json_value *in,

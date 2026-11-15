@@ -11,6 +11,7 @@
 #include "test/test_dev_batch_fixture.h"
 
 #include "base/hex.h"
+#include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "crypto/ed25519.h"
 #include "session/fleet_board_proto.h"
@@ -48,33 +49,45 @@ static bool di_bundle(struct di *d, const char *lane, const char *file,
 
 /* One signed READY post as a board-list row; flip=true breaks the text after
  * signing. Returns the id in ids[slot]. */
-static void di_post_r(struct di *d, struct json_value *arr, int slot,
-                      uint64_t at, const char *text_in, const char *receipt,
-                      bool omit_receipt, bool flip)
+struct di_spec {
+    int slot;
+    uint64_t at;
+    const char *text, *receipt;
+    bool omit_receipt, flip;
+    uint8_t kind;      /* 0 is a note */
+    const char *agent; /* NULL is "lab" */
+    const char *ref;   /* 64 hex of the post answered, or NULL */
+};
+
+static void di_post_s(struct di *d, struct json_value *arr, const struct di_spec *sp)
 {
     struct fleet_board_post p;
     struct json_value r;
     char text[256], hex[129];
+    const char *agent = sp->agent ? sp->agent : "lab";
+    int slot = sp->slot;
     memset(&p, 0, sizeof(p));
-    p.kind = FLEET_BOARD_KIND_NOTE;
+    p.kind = sp->kind ? sp->kind : FLEET_BOARD_KIND_NOTE;
     p.scope = FLEET_BOARD_SCOPE_PUBLIC;
-    p.created_at = at;
+    p.created_at = sp->at;
     p.ttl = 86400;
     (void)snprintf(p.room, sizeof(p.room), "fleet");
-    (void)snprintf(p.agent, sizeof(p.agent), "lab");
-    (void)snprintf(text, sizeof(text), "%s", text_in);
-    (void)snprintf(p.receipt, sizeof(p.receipt), "%s", receipt);
+    (void)snprintf(p.agent, sizeof(p.agent), "%s", agent);
+    (void)snprintf(text, sizeof(text), "%s", sp->text);
+    (void)snprintf(p.receipt, sizeof(p.receipt), "%s", sp->receipt);
     p.text_len = (uint32_t)strlen(text);
     memcpy(p.text, text, p.text_len + 1);
+    if (sp->ref)
+        (void)zcl_hex_decode_lower(sp->ref, p.ref, 32);
     (void)fleet_board_post_sign(&p, d->seed, d->pk);
     zcl_hex_encode(p.id, 32, d->ids[slot]);
-    if (flip)
+    if (sp->flip)
         text[strlen(text) - 1] = 'X';
     json_init(&r);
     json_set_object(&r);
     (void)json_push_kv_str(&r, "id", d->ids[slot]);
-    (void)json_push_kv_str(&r, "kind", "note");
-    (void)json_push_kv_int(&r, "created_at", (int64_t)at);
+    (void)json_push_kv_str(&r, "kind", fleet_board_kind_name(p.kind));
+    (void)json_push_kv_int(&r, "created_at", (int64_t)sp->at);
     (void)json_push_kv_int(&r, "ttl", 86400);
     zcl_hex_encode(p.ref, 32, hex);
     (void)json_push_kv_str(&r, "ref", hex);
@@ -82,14 +95,24 @@ static void di_post_r(struct di *d, struct json_value *arr, int slot,
     (void)json_push_kv_str(&r, "host", hex);
     zcl_hex_encode(p.signature, 64, hex);
     (void)json_push_kv_str(&r, "signature", hex);
-    (void)json_push_kv_str(&r, "agent", "lab");
+    (void)json_push_kv_str(&r, "agent", agent);
     (void)json_push_kv_str(&r, "scope", "public");
     (void)json_push_kv_str(&r, "room", "fleet");
-    if (!omit_receipt && receipt[0])
-        (void)json_push_kv_str(&r, "receipt", receipt);
+    if (!sp->omit_receipt && sp->receipt[0])
+        (void)json_push_kv_str(&r, "receipt", sp->receipt);
     (void)json_push_kv_str(&r, "text", text);
     (void)json_push_back(arr, &r);
     json_free(&r);
+}
+
+static void di_post_r(struct di *d, struct json_value *arr, int slot,
+                      uint64_t at, const char *text_in, const char *receipt,
+                      bool omit_receipt, bool flip)
+{
+    struct di_spec sp = {.slot = slot, .at = at, .text = text_in,
+                         .receipt = receipt, .omit_receipt = omit_receipt,
+                         .flip = flip};
+    di_post_s(d, arr, &sp);
 }
 
 static void di_post(struct di *d, struct json_value *arr, int slot,
@@ -102,7 +125,7 @@ static void di_post(struct di *d, struct json_value *arr, int slot,
 
 static bool di_write_posts(struct di *d, const struct json_value *arr)
 {
-    static char buf[32768];
+    static char buf[131072];
     struct json_value doc;
     bool ok;
     json_init(&doc);
@@ -215,6 +238,444 @@ static bool di_setup(struct di *d)
     zcl_hex_encode(d->pk, 32, d->pkhex);
     (void)snprintf(p, sizeof(p), "# allowed\n%s\n", d->pkhex);
     return dbf_put(d->allow, p);
+}
+
+/* ── the helper hand-off: READY form, board paging, receive refusals ────── */
+
+extern void zcl_dev_intake_hooks_for_test(dbf_handler list, dbf_handler post);
+
+static struct json_value g_di_pg[8];
+static int g_di_pn, g_di_calls, g_di_nposts;
+static bool g_di_list_fail;
+static char g_di_before[8][80], g_di_ptext[256];
+
+static void di_stub_list(const struct zcl_command_request *rq,
+                         struct zcl_command_reply *rp)
+{
+    int i = g_di_calls++;
+    const char *b = json_get_str(json_get(rq->input, "before_id"));
+    const struct json_value *last;
+    if (i < 8)
+        (void)snprintf(g_di_before[i], sizeof(g_di_before[i]), "%s", b ? b : "");
+    if (g_di_list_fail || i >= g_di_pn) {
+        zcl_command_reply_fail(rp, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "BOARD_PAGE_METADATA_MISSING", "serialize", false,
+                               false,
+                               "board reply lacks has_more; completeness is "
+                               "unknown. Upgrade the node.",
+                               "fleet.board.list");
+        return;
+    }
+    (void)json_push_kv(&rp->data, "posts", &g_di_pg[i]);
+    (void)json_push_kv_bool(&rp->data, "has_more", i + 1 < g_di_pn);
+    if (i + 1 >= g_di_pn)
+        return;
+    last = json_at(&g_di_pg[i], json_size(&g_di_pg[i]) - 1);
+    (void)json_push_kv(&rp->data, "next_created_at", json_get(last, "created_at"));
+    (void)json_push_kv_str(&rp->data, "next_id", json_get_str(json_get(last, "id")));
+}
+
+static void di_stub_post(const struct zcl_command_request *rq,
+                         struct zcl_command_reply *rp)
+{
+    const char *t = json_get_str(json_get(rq->input, "text"));
+    (void)rp;
+    g_di_nposts++;
+    (void)snprintf(g_di_ptext, sizeof(g_di_ptext), "%s", t ? t : "");
+}
+
+static void di_stub_reset(void)
+{
+    for (int i = 0; i < 8; i++)
+        json_free(&g_di_pg[i]);
+    memset(g_di_pg, 0, sizeof(g_di_pg));
+    memset(g_di_before, 0, sizeof(g_di_before));
+    g_di_pn = g_di_calls = g_di_nposts = 0;
+    g_di_list_fail = false;
+    g_di_ptext[0] = '\0';
+    zcl_dev_intake_hooks_for_test(NULL, NULL);
+}
+
+static void di_stub_on(void)
+{
+    zcl_dev_intake_hooks_for_test(di_stub_list, di_stub_post);
+}
+
+struct di_opts {
+    bool file;         /* read d->posts instead of the (stubbed) board */
+    int mode;          /* 0 read only, 1 commit, 2 commit and confirm */
+    const char *plan, *id;
+};
+
+static void di_pair(const char **p, int *n, const char *k, const char *v)
+{
+    p[(*n)++] = k;
+    p[(*n)++] = v;
+    p[*n] = NULL;
+}
+
+static void di_call(struct di *d, const struct di_opts *o,
+                    struct zcl_command_reply *reply, char *dump, size_t cap)
+{
+    const char *pairs[16] = {NULL}, *flags[3] = {NULL};
+    int n = 0;
+    di_pair(pairs, &n, "repo", d->f.mainco);
+    di_pair(pairs, &n, "bundle_dir", d->bdir);
+    di_pair(pairs, &n, "allow", d->allow);
+    if (o->file)
+        di_pair(pairs, &n, "posts_file", d->posts);
+    if (o->plan)
+        di_pair(pairs, &n, "plan_id", o->plan);
+    if (o->id)
+        di_pair(pairs, &n, "id", o->id);
+    if (o->mode >= 1)
+        flags[0] = "commit";
+    if (o->mode >= 2)
+        flags[1] = "confirm";
+    di_env_on(d);
+    dbf_call(zcl_native_handle_dev_intake, &d->f, pairs, flags, reply, dump, cap);
+    di_env_off();
+}
+
+/* The plan, then the confirmed commit against the same board. */
+static void di_apply(struct di *d, struct di_opts o,
+                     struct zcl_command_reply *reply, char *dump, size_t cap)
+{
+    char plan[65] = "";
+    const char *at;
+    o.mode = 1;
+    di_call(d, &o, reply, dump, cap);
+    at = strstr(dump, "\"plan_id\":\"");
+    if (at)
+        (void)snprintf(plan, sizeof(plan), "%.64s", at + 11);
+    zcl_command_reply_free(reply);
+    o.mode = 2;
+    o.plan = plan;
+    di_call(d, &o, reply, dump, cap);
+}
+
+static int di_count(const char *s, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(s, needle); p; p = strstr(p + 1, needle))
+        n++;
+    return n;
+}
+
+static void di_row_text(char *out, size_t cap, const char *sha, const char *extra)
+{
+    (void)snprintf(out, cap,
+                   "READY good 1111111111111111111111111111111111111111 "
+                   "bundle_sha256=%s%s", sha, extra);
+}
+
+#define DI_ROOT0 " root=0000000000000000000000000000000000000000000000000000000000000000 size=1"
+
+static int di_case_ready_line(struct di *d, const char *sha)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true};
+    struct json_value arr;
+    char dump[16384], text[320];
+    uint64_t now = (uint64_t)platform_time_wall_unix();
+
+    TEST("intake: the READY line dev land send prints, plus root= and size=, "
+         "is ACCEPT_FOR_QUEUE") {
+        di_row_text(text, sizeof(text), sha, DI_ROOT0);
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post_r(d, &arr, 0, now, text, "", false, false);
+        ASSERT(di_write_posts(d, &arr));
+        json_free(&arr);
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: the bare printed line is REFUSE(no_bundle) and the step "
+         "names root=, sha256= and size=") {
+        di_row_text(text, sizeof(text),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "");
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post_r(d, &arr, 0, now, text, "", false, false);
+        ASSERT(di_write_posts(d, &arr));
+        json_free(&arr);
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "REFUSE(no_bundle)") != NULL);
+        ASSERT(strstr(dump, "\"operator_step\":\"") != NULL);
+        ASSERT(strstr(dump, "root=") != NULL);
+        ASSERT(strstr(dump, "sha256=") != NULL);
+        ASSERT(strstr(dump, "size=") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static void di_page_row(struct di *d, struct json_value *page, int slot, int k)
+{
+    char text[64];
+    (void)snprintf(text, sizeof(text), "READY nobundle-%d", k);
+    di_post_r(d, page, slot, (uint64_t)platform_time_wall_unix() + 100 - (uint64_t)k,
+              text, "", false, false);
+}
+
+static int di_case_board_error(struct di *d)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {0};
+    char dump[4096];
+
+    TEST("intake: a failed board read keeps its code and next step, not NO_POSTS") {
+        g_di_list_fail = true;
+        di_stub_on();
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT_STR_EQ(reply.error.code, "BOARD_PAGE_METADATA_MISSING");
+        ASSERT(strstr(reply.error.message, "has_more") != NULL);
+        ASSERT(reply.error.next_action[0] != '\0');
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    di_stub_reset();
+    return failures;
+}
+
+static int di_case_board_pages(struct di *d)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {0};
+    static char dump[65536];
+
+    TEST("intake: a two-page board is read to the end") {
+        for (int i = 0; i < 2; i++) {
+            json_init(&g_di_pg[i]);
+            json_set_array(&g_di_pg[i]);
+        }
+        di_page_row(d, &g_di_pg[0], 0, 0);
+        di_page_row(d, &g_di_pg[0], 1, 1);
+        di_page_row(d, &g_di_pg[1], 2, 2);
+        g_di_pn = 2;
+        di_stub_on();
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT_EQ(g_di_calls, 2);
+        ASSERT_STR_EQ(g_di_before[1], d->ids[1]);
+        ASSERT_EQ(di_count(dump, "REFUSE(no_bundle)"), 3);
+        ASSERT(strstr(dump, "\"truncated\":false") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    di_stub_reset();
+    return failures;
+}
+
+static int di_case_page_cap(struct di *d)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {0};
+    static char dump[65536];
+
+    TEST("intake: a board still has_more at the page cap is truncated, not silent") {
+        for (int i = 0; i < 8; i++) {
+            json_init(&g_di_pg[i]);
+            json_set_array(&g_di_pg[i]);
+            di_page_row(d, &g_di_pg[i], 0, i);
+        }
+        g_di_pn = 8;
+        di_stub_on();
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT(g_di_calls < 8);
+        ASSERT(strstr(dump, "\"truncated\":true") != NULL);
+        ASSERT(strstr(dump, "since=") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    di_stub_reset();
+    return failures;
+}
+
+static int di_case_over_max(struct di *d)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true};
+    struct json_value arr;
+    static char dump[65536];
+
+    TEST("intake: more than 32 READY posts report truncated=true and a skipped count") {
+        json_init(&arr);
+        json_set_array(&arr);
+        for (int i = 0; i < 34; i++)
+            di_page_row(d, &arr, 0, i);
+        ASSERT(di_write_posts(d, &arr));
+        json_free(&arr);
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT_EQ(di_count(dump, "REFUSE(no_bundle)"), 32);
+        ASSERT(strstr(dump, "\"truncated\":true") != NULL);
+        ASSERT(strstr(dump, "\"skipped\":2") != NULL);
+        ASSERT(strstr(dump, "id=") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static bool di_policy(struct di *d, const char *text)
+{
+    char st[1000], dir[1100], path[1200];
+    di_env_on(d);
+    bool ok = platform_state_root(st, sizeof(st));
+    di_env_off();
+    if (!ok || snprintf(dir, sizeof(dir), "%s/land", st) >= (int)sizeof(dir) ||
+        snprintf(path, sizeof(path), "%s/receive-policy", dir) >= (int)sizeof(path))
+        return false;
+    if (!text)
+        return unlink(path) == 0 || access(path, F_OK) != 0;
+    return dbf_mkdirs(dir) && dbf_put(path, text);
+}
+
+/* dev.land.receive only takes a checkout that carries the three marker files
+ * of the tree that owns the land queue; the lab's main checkout gets them
+ * (untracked, so no ref moves). */
+static bool di_markers(const struct di *d)
+{
+    static const char *const f[] = {"Makefile", "engine/composition/commands/root.def",
+                                    "tools/dev/test_group_catalog.def"};
+    char path[1000], dir[1000];
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
+        (void)snprintf(path, sizeof(path), "%s/%s", d->f.mainco, f[i]);
+        (void)snprintf(dir, sizeof(dir), "%s", path);
+        *strrchr(dir, '/') = '\0';
+        if (!dbf_mkdirs(dir) || !dbf_put(path, "# lab marker\n"))
+            return false;
+    }
+    return true;
+}
+
+static int di_case_receive_refusal(struct di *d, const char *sha)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true};
+    struct json_value arr;
+    static char dump[65536];
+    char text[320];
+
+    TEST("intake: a receive refusal carries its code in the result text and the row") {
+        di_row_text(text, sizeof(text), sha, DI_ROOT0);
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post_r(d, &arr, 0, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        ASSERT(di_write_posts(d, &arr));
+        json_free(&arr);
+        ASSERT(di_markers(d));
+        ASSERT(di_policy(d, "require_receipts=1\n"));
+        di_stub_on();
+        di_apply(d, o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"applied\":true") != NULL);
+        ASSERT(strstr(dump, "\"queue_error\":\"RECEIVE_RECEIPTS_REQUIRED\"") != NULL);
+        ASSERT_EQ(g_di_nposts, 1);
+        ASSERT(strstr(g_di_ptext, "not queued (RECEIVE_RECEIPTS_REQUIRED)") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    (void)di_policy(d, NULL);
+    di_stub_reset();
+    return failures;
+}
+
+static int di_case_answered(struct di *d, const char *sha)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true};
+    struct json_value arr;
+    static char dump[65536];
+    char text[320];
+    struct di_spec res = {.slot = 1, .text = "intake ACCEPT_FOR_QUEUE queued",
+                          .receipt = "", .kind = FLEET_BOARD_KIND_RESULT,
+                          .agent = "intake"};
+
+    TEST("intake: a READY post that already has an intake result is ANSWERED, "
+         "and a second run posts nothing") {
+        di_row_text(text, sizeof(text), sha, DI_ROOT0);
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post_r(d, &arr, 0, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        res.at = (uint64_t)platform_time_wall_unix() + 1;
+        res.ref = d->ids[0];
+        di_post_s(d, &arr, &res);
+        ASSERT(di_write_posts(d, &arr));
+        json_free(&arr);
+        di_stub_on();
+        di_apply(d, o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "ANSWERED(result=") != NULL);
+        ASSERT(strstr(dump, "ACCEPT_FOR_QUEUE\"") == NULL);
+        ASSERT_EQ(g_di_nposts, 0);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: an explicit id= asks for the answer again") {
+        o.id = d->ids[0];
+        /* the policy refuses at once, so the lab queue is never touched */
+        ASSERT(di_policy(d, "require_receipts=1\n"));
+        di_apply(d, o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
+        ASSERT_EQ(g_di_nposts, 1);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    (void)di_policy(d, NULL);
+    di_stub_reset();
+    return failures;
+}
+
+static int di_case_on_main(struct di *d, const char *sha)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true};
+    struct json_value arr;
+    static char dump[65536];
+    char text[320], bundle[1000], tip[41];
+    const char *fetch[] = {"fetch", "-q", bundle, "HEAD", NULL};
+    const char *setref[] = {"update-ref", "refs/remotes/origin/main", tip, NULL};
+
+    TEST("intake: a READY post whose tip is already on origin/main is ANSWERED") {
+        (void)snprintf(bundle, sizeof(bundle), "%s/%s.bundle", d->bdir, sha);
+        ASSERT(dbf_git(d->f.mainco, fetch));
+        ASSERT(dbf_rev(d->f.mainco, "FETCH_HEAD", tip));
+        ASSERT(dbf_git(d->f.mainco, setref));
+        di_row_text(text, sizeof(text), sha, DI_ROOT0);
+        json_init(&arr);
+        json_set_array(&arr);
+        di_post_r(d, &arr, 0, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+        ASSERT(di_write_posts(d, &arr));
+        json_free(&arr);
+        di_stub_on();
+        di_apply(d, o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "ANSWERED(on_main)") != NULL);
+        ASSERT_EQ(g_di_nposts, 0);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    di_stub_reset();
+    return failures;
 }
 
 int test_dev_intake(void);
@@ -511,6 +972,16 @@ int test_dev_intake(void)
         ASSERT(strcmp(before, after) == 0);
         PASS();
     }
+
+    /* the helper hand-off (the lab's origin/main moves in the last case) */
+    failures += di_case_ready_line(&d, shaA);
+    failures += di_case_board_error(&d);
+    failures += di_case_board_pages(&d);
+    failures += di_case_page_cap(&d);
+    failures += di_case_over_max(&d);
+    failures += di_case_receive_refusal(&d, shaA);
+    failures += di_case_answered(&d, shaA);
+    failures += di_case_on_main(&d, shaA);
 
 _test_next:;
     (void)test_rm_rf_recursive(d.f.root);
