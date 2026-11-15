@@ -13,7 +13,10 @@
 #include "boot_timing_marks_internal.h"
 #include "config/boot.h"                       /* struct app_context */
 #include "config/boot_consensus_bundle_marker.h"
+#include "config/boot_header_seed_import.h"   /* boot_header_seed_index_verdict */
 #include "config/consensus_state_install_runtime.h" /* boot_autodetect_consensus_bundle */
+#include "validation/chainstate.h"             /* block_map_count */
+#include "validation/main_state.h"             /* struct main_state */
 #include "chain/checkpoints.h"                 /* get_sha3_utxo_checkpoint */
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"                       /* ROM_SEED_* bounds */
@@ -882,13 +885,48 @@ static bool bbf_discover_from_peers(const char *datadir,
                  "directory.json hint — resume will re-discover");
     return true;
 }
+/* True when <datadir>/<rel> exists (an over-long path reads as absent). */
+static bool bbf_datadir_file_present(const char *datadir, const char *rel)
+{
+    char path[PATH_MAX];
+    struct platform_file_metadata metadata;
+    int pn = snprintf(path, sizeof(path), "%s/%s", datadir, rel);
+    return pn > 0 && (size_t)pn < sizeof(path) &&
+           platform_file_metadata_read(path, &metadata) ==
+               PLATFORM_FILE_METADATA_OK;
+}
+/* Does the header index the ladder loaded (`ms`, NULL when none was given)
+ * still want the seed? The same verdict the import applies
+ * (boot_header_seed_index_verdict), so the fetch and the import cannot
+ * disagree: a fresh datadir, or a root block_index.bin that is only the
+ * header-only stub of an interrupted first boot. */
+static bool bbf_header_seed_wanted_by_index(const char *datadir,
+                                            const struct main_state *ms,
+                                            bool root_present)
+{
+    enum boot_header_seed_index_verdict v =
+        boot_header_seed_index_verdict(ms, root_present);
+    size_t entries = ms ? block_map_count(&ms->map_block_index) : 0;
+    if (v == BOOT_HEADER_SEED_INDEX_STUB)
+        LOG_INFO(BBF_SUBSYS, "header-chain seed still needed: %s/"
+                 "block_index.bin holds %zu entries — %s", datadir, entries,
+                 boot_header_seed_index_verdict_reason(v));
+    else if (!boot_header_seed_index_verdict_allows(v))
+        LOG_INFO(BBF_SUBSYS, "header-chain seed not fetched: %s/"
+                 "block_index.bin is %s (%zu header entries) — %s", datadir,
+                 root_present ? "present" : "absent", entries,
+                 boot_header_seed_index_verdict_reason(v));
+    return boot_header_seed_index_verdict_allows(v);
+}
 /* Is the header-chain seed artifact still WANTED on this datadir? True on a
- * fresh, non-sovereign node that has neither imported it (<datadir>/
- * block_index.bin at the root) nor already downloaded it (<datadir>/bundles/
- * block_index.bin). Independent of the bundle gate: a datadir with a staged
- * bundle but no header chain STILL needs the seed so the install can bind. */
+ * fresh, non-sovereign node that has not already downloaded it (<datadir>/
+ * bundles/block_index.bin) and whose loaded header index is FRESH or a
+ * replaceable STUB (see bbf_header_seed_wanted_by_index). Independent of the
+ * bundle gate: a datadir with a staged bundle but no header chain STILL needs
+ * the seed so the install can bind. */
 static bool bbf_header_seed_needed(const char *datadir,
-                                   const struct app_context *ctx)
+                                   const struct app_context *ctx,
+                                   const struct main_state *ms)
 {
     if (!datadir || !datadir[0])
         return false;
@@ -904,19 +942,10 @@ static bool bbf_header_seed_needed(const char *datadir,
         return false;
     if (boot_consensus_bundle_marker_exists(datadir))
         return false;
-    char path[PATH_MAX];
-    struct platform_file_metadata metadata;
-    int pn = snprintf(path, sizeof(path), "%s/block_index.bin", datadir);
-    if (pn > 0 && (size_t)pn < sizeof(path) &&
-        platform_file_metadata_read(path, &metadata) ==
-            PLATFORM_FILE_METADATA_OK)
-        return false; /* already imported (or a legacy flat cache present) */
-    pn = snprintf(path, sizeof(path), "%s/bundles/block_index.bin", datadir);
-    if (pn > 0 && (size_t)pn < sizeof(path) &&
-        platform_file_metadata_read(path, &metadata) ==
-            PLATFORM_FILE_METADATA_OK)
+    bool root_present = bbf_datadir_file_present(datadir, "block_index.bin");
+    if (bbf_datadir_file_present(datadir, "bundles/block_index.bin"))
         return false; /* already downloaded — import consumes it, no re-fetch */
-    return true;
+    return bbf_header_seed_wanted_by_index(datadir, ms, root_present);
 }
 /* Fill `disc` from a local directory.json hint body and release the body. */
 static void bbf_adopt_hint_body(char *body, struct bbf_discovery *disc)
@@ -961,10 +990,11 @@ static int bbf_load_hint(const char *bundles_root, struct bbf_discovery *disc)
     bbf_adopt_hint_body(body, disc);
     return (disc->n_bundles == 0 && !disc->have_header_seed) ? -1 : 1;
 }
-bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
+bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx,
+                             const struct main_state *ms)
 {
     bool bundle_needed = boot_bundle_fetch_should_run(datadir, ctx);
-    bool header_needed = bbf_header_seed_needed(datadir, ctx);
+    bool header_needed = bbf_header_seed_needed(datadir, ctx, ms);
     if (!bundle_needed && !header_needed)
         return false;
     /* Assemble the file-service seed set once — both discovery and the download
@@ -1069,6 +1099,12 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
 bool boot_bundle_manifest_facts_ok_for_test(const struct rom_fetch_manifest *m)
 {
     return bbf_manifest_facts_ok(m);
+}
+bool boot_bundle_header_seed_needed_for_test(const char *datadir,
+                                             const struct app_context *ctx,
+                                             const struct main_state *ms)
+{
+    return bbf_header_seed_needed(datadir, ctx, ms);
 }
 int boot_bundle_quorum_pick_for_test(const int64_t *heights, const int *counts,
                                      const bool *has_explicit, size_t ncand)

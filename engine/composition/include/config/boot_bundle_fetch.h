@@ -177,8 +177,16 @@ void boot_bundle_fetch_reseed_test_hold(bool hold);
  * miss. The big bytes are always swarmed + content-verified against the
  * committed manifest, and the install path binds the result to the compiled
  * checkpoint. Best-effort: any miss returns false and boot proceeds unchanged
- * (P2P IBD). Returns true iff a verified bundle landed this boot. */
-bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx);
+ * (P2P IBD). Returns true iff a verified bundle landed this boot.
+ *
+ * `ms` is the header index the boot ladder already loaded (NULL when the
+ * caller has none). The header-chain seed is wanted only when
+ * boot_header_seed_index_verdict (config/boot_header_seed_import.h) allows it:
+ * a fresh datadir, or a root block_index.bin that is a replaceable stub. With
+ * `ms` NULL a present root block_index.bin keeps the seed unwanted. */
+struct main_state;
+bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx,
+                             const struct main_state *ms);
 
 /* How many file-service seeds `ctx` assembles to (the exact set
  * boot_bundle_fetch_maybe would use). ZERO means the fetch is structurally OFF
@@ -205,6 +213,10 @@ bool boot_bundle_fetch_discovery_dump_state_json(struct json_value *out,
 void boot_bundle_fetch_arm_peer_seed_for_test(const char *host, uint16_t port);
 /* Test surface (implemented in engine/composition/src/boot_bundle_fetch.c). */
 bool boot_bundle_manifest_facts_ok_for_test(const struct rom_fetch_manifest *m);
+/* The header-chain seed gate boot_bundle_fetch_maybe consults. */
+bool boot_bundle_header_seed_needed_for_test(const char *datadir,
+                                             const struct app_context *ctx,
+                                             const struct main_state *ms);
 int  boot_bundle_quorum_pick_for_test(const int64_t *heights, const int *counts,
                                       const bool *has_explicit, size_t ncand);
 size_t boot_bundle_probe_directories_for_test(

@@ -1041,7 +1041,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
      * node actually downloaded the artifact above. */
     if (!flysync) {
         boot_bundle_fetch_arm_peer_seeds(ndb);
-        (void)boot_bundle_fetch_maybe(ctx->datadir, ctx);
+        (void)boot_bundle_fetch_maybe(ctx->datadir, ctx, ms);
         recovery = flysync_island_recover_staged(ctx->datadir, ms);
         if (recovery == FLYSYNC_RECOVERY_NOT_APPLICABLE)
             (void)boot_header_seed_import_maybe(ctx->datadir, ms);

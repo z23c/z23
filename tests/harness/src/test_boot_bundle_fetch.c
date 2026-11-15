@@ -43,6 +43,9 @@
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 #include "util/safe_alloc.h"
+#include "validation/chainstate.h"              /* block_map, active_chain */
+#include "validation/main_state.h"              /* struct main_state */
+#include "chain/chain.h"                        /* block_index status bits */
 
 #include <fcntl.h>
 #include <stdatomic.h>
@@ -168,6 +171,143 @@ static int case_gate(void)
     return failures;
 }
 
+/* ── (a2) Header-chain seed gate over the loaded header index ─────────── */
+
+/* The loaded-index shapes the header-seed gate is asked about. */
+enum bbf_index_shape {
+    BBF_IDX_NONE,      /* no index handed to the gate */
+    BBF_IDX_EMPTY,     /* an index with no rows */
+    BBF_IDX_STUB,      /* genesis + 5 header-only rows, no tip */
+    BBF_IDX_POPULATED, /* 1025 header-only rows */
+    BBF_IDX_BODY,      /* the stub with body data on its top row */
+    BBF_IDX_TIP,       /* the stub with the active tip on its top row */
+};
+
+/* `n` linked rows: genesis with its body bit (as the ladder seats it), every
+ * row above it header-only. Returns the top row. */
+static struct block_index *bbf_stub_rows(struct main_state *ms, int n)
+{
+    struct block_index *prev = NULL;
+    for (int h = 0; h < n; h++) {
+        struct uint256 hash;
+        memset(&hash, 0, sizeof(hash));
+        hash.data[0] = (uint8_t)(h & 0xFF);
+        hash.data[1] = (uint8_t)((h >> 8) & 0xFF);
+        hash.data[3] = 0xC1;
+        struct block_index *pi =
+            chainstate_insert_block_index((struct chainstate *)ms, &hash);
+        if (!pi)
+            return NULL;
+        pi->nHeight = h;
+        pi->pprev = prev;
+        pi->nStatus = h == 0 ? (unsigned int)(BLOCK_VALID_SCRIPTS |
+                                              BLOCK_HAVE_DATA)
+                             : (unsigned int)BLOCK_VALID_TREE;
+        prev = pi;
+    }
+    return prev;
+}
+
+/* Shape `ms` as `shape`; false when the fixture could not be built. */
+static bool bbf_shape_index(struct main_state *ms, enum bbf_index_shape shape)
+{
+    if (shape == BBF_IDX_EMPTY)
+        return true;
+    struct block_index *top =
+        bbf_stub_rows(ms, shape == BBF_IDX_POPULATED ? 1025 : 6);
+    if (!top)
+        return false;
+    if (shape == BBF_IDX_BODY)
+        (void)block_index_status_fetch_or(top, (unsigned int)BLOCK_HAVE_DATA);
+    if (shape == BBF_IDX_TIP)
+        return active_chain_move_window_tip(&ms->chain_active, top);
+    return true;
+}
+
+/* 1 / 0: the gate's answer for `dir` under `ctx` with a `shape` index;
+ * -1 when the fixture could not be built. */
+static int bbf_seed_gate(const char *dir, const struct app_context *ctx,
+                         enum bbf_index_shape shape)
+{
+    if (shape == BBF_IDX_NONE)
+        return boot_bundle_header_seed_needed_for_test(dir, ctx, NULL) ? 1 : 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    int r = -1;
+    if (bbf_shape_index(&ms, shape))
+        r = boot_bundle_header_seed_needed_for_test(dir, ctx, &ms) ? 1 : 0;
+    main_state_free(&ms);
+    return r;
+}
+
+/* Every refusal that ran before the index was consulted still wins over a
+ * stub root index. */
+static int case_header_seed_gate_refusals(const char *dir)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: opt-outs, non-mainnet, a landed seed and the marker still refuse over a stub") {
+        struct app_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        setenv("ZCL_NO_BUNDLE_FETCH", "1", 1);
+        int env = bbf_seed_gate(dir, &ctx, BBF_IDX_STUB);
+        unsetenv("ZCL_NO_BUNDLE_FETCH");
+        ASSERT(env == 0);
+        ctx.no_file_sync = true;
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 0);
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.regtest = true;
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 0);
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.testnet = true;
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 0);
+        memset(&ctx, 0, sizeof(ctx));
+        ASSERT(bbf_seed_gate("", &ctx, BBF_IDX_STUB) == 0);
+        /* Already downloaded: the import consumes it, no re-fetch. */
+        char bundles[320];
+        snprintf(bundles, sizeof(bundles), "%s/bundles", dir);
+        ASSERT(mkdir(bundles, 0700) == 0);
+        ASSERT(bbf_write_file(bundles, "block_index.bin",
+                              (const uint8_t *)"seed", 4));
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 0);
+        test_rm_rf_recursive(bundles);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 1);
+        /* Sovereign marker: never re-seed installed state. */
+        uint8_t digest[32];
+        memset(digest, 0xab, sizeof(digest));
+        ASSERT(boot_consensus_bundle_marker_write(dir, 3056758, digest));
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 0);
+    } _test_next:;
+    return failures;
+}
+
+static int case_header_seed_gate(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "bbf_hsgate", "ok");
+    TEST("boot_bundle_fetch: header seed wanted on a fresh datadir or over a stub root index only") {
+        struct app_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        /* Fresh (no root block_index.bin). */
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_NONE) == 1);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_EMPTY) == 1);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 1);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_POPULATED) == 0);
+        /* A root block_index.bin is present. */
+        ASSERT(bbf_write_file(dir, "block_index.bin",
+                              (const uint8_t *)"stub", 4));
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_NONE) == 0);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_EMPTY) == 0);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_STUB) == 1);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_POPULATED) == 0);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_BODY) == 0);
+        ASSERT(bbf_seed_gate(dir, &ctx, BBF_IDX_TIP) == 0);
+    } _test_next:;
+    failures += case_header_seed_gate_refusals(dir);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 /* A regtest or testnet node never fetches mainnet bundle state (the artifact
  * binds to the mainnet CHECKPOINT_ROM). */
 static int case_network_gate(void)
@@ -210,7 +350,7 @@ static int case_network_gate(void)
         ctx.connect_peers[0] = "127.0.0.1:39099";
         ctx.n_connect_peers = 1;
         ASSERT(boot_bundle_fetch_seed_count(&ctx) == 0);
-        ASSERT(!boot_bundle_fetch_maybe(dir, &ctx));
+        ASSERT(!boot_bundle_fetch_maybe(dir, &ctx, NULL));
 
         test_rm_rf_recursive(dir);
     } _test_next:;
@@ -534,7 +674,7 @@ static int case_e2e(void)
         ctx.file_service_peer = peer_hp;
         ctx.connect_only = true;
 
-        ASSERT(boot_bundle_fetch_maybe(cdir3, &ctx));
+        ASSERT(boot_bundle_fetch_maybe(cdir3, &ctx, NULL));
         char *auto3 = boot_autodetect_consensus_bundle(cdir3);
         ASSERT(auto3 != NULL);
         free(auto3);
@@ -1146,7 +1286,7 @@ static int case_discovery(void)
         snprintf(hint, sizeof(hint), "%s/bundles/directory.json", cdir);
         ASSERT(access(hint, F_OK) != 0);
 
-        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx));
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx, NULL));
 
         /* Discovery persisted the winning directory.json for resume/reseed. */
         ASSERT(access(hint, F_OK) == 0);
@@ -1222,7 +1362,7 @@ static int case_discovery_outcome_persists(void)
         ctx.file_service_peer = peer_hp;
         ctx.connect_only = true;
 
-        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx));
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx, NULL));
 
         struct json_value out;
         json_init(&out);
@@ -1271,7 +1411,7 @@ static int case_discovery_outcome_persists(void)
         ctx2.connect_only = true;
 
         /* An empty seed lands nothing, but the outcome is still persisted. */
-        ASSERT(!boot_bundle_fetch_maybe(cdir2, &ctx2));
+        ASSERT(!boot_bundle_fetch_maybe(cdir2, &ctx2, NULL));
 
         json_init(&out);
         ASSERT(boot_bundle_fetch_discovery_dump_state_json(&out, NULL));
@@ -1581,7 +1721,7 @@ static int case_peer_seed_e2e_and_verification(void)
         boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.1", srv.port);
         ASSERT(boot_bundle_fetch_seed_count(&ctx) == 1);
         ASSERT(bbf_write_hint(cdir, &srv.art, false));
-        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx));
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx, NULL));
         char *landed = boot_autodetect_consensus_bundle(cdir);
         ASSERT(landed != NULL);
         free(landed);
@@ -1594,7 +1734,7 @@ static int case_peer_seed_e2e_and_verification(void)
         memset(&bctx, 0, sizeof(bctx));
         bctx.datadir = bdir;
         ASSERT(bbf_write_hint(bdir, &srv.art, true));
-        ASSERT(!boot_bundle_fetch_maybe(bdir, &bctx));
+        ASSERT(!boot_bundle_fetch_maybe(bdir, &bctx, NULL));
         char *bad_auto = boot_autodetect_consensus_bundle(bdir);
         ASSERT(bad_auto == NULL);
         free(bad_auto);
@@ -1614,7 +1754,7 @@ static int case_peer_seed_e2e_and_verification(void)
         fctx.connect_only = true;
         ASSERT(boot_bundle_fetch_seed_count(&fctx) == 1);
         ASSERT(bbf_write_hint(fdir, &srv.art, true));
-        ASSERT(!boot_bundle_fetch_maybe(fdir, &fctx));
+        ASSERT(!boot_bundle_fetch_maybe(fdir, &fctx, NULL));
         char *flag_auto = boot_autodetect_consensus_bundle(fdir);
         ASSERT(flag_auto == NULL);
         free(flag_auto);
@@ -1630,7 +1770,7 @@ static int case_peer_seed_e2e_and_verification(void)
         gctx.file_service_peer = peer_hp;
         gctx.connect_only = true;
         ASSERT(bbf_write_hint(gdir, &srv.art, false));
-        ASSERT(boot_bundle_fetch_maybe(gdir, &gctx));
+        ASSERT(boot_bundle_fetch_maybe(gdir, &gctx, NULL));
         char *good_auto = boot_autodetect_consensus_bundle(gdir);
         ASSERT(good_auto != NULL);
         free(good_auto);
@@ -1705,7 +1845,7 @@ static int case_peer_seed_stall_is_bounded(void)
 
         /* No local hint: discovery runs, the stalling seed is abandoned and
          * dropped, and the surviving seed carries the download. */
-        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx));
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx, NULL));
         char *landed = boot_autodetect_consensus_bundle(cdir);
         ASSERT(landed != NULL);
         free(landed);
@@ -1734,6 +1874,7 @@ int test_boot_bundle_fetch(void)
     failures += case_peer_seed_stall_is_bounded();
     failures += case_first_run_banner();
     failures += case_gate();
+    failures += case_header_seed_gate();
     failures += case_network_gate();
     failures += case_pick();
     failures += case_pick_kinds();
