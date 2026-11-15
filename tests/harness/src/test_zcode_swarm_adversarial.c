@@ -302,6 +302,126 @@ int t_swarm_unsolicited_and_replay(void)
     return failures;
 }
 
+/* A timed-out chunk can arrive while its replacement request is active.
+ * Serialize the actual original WANT as DATA, just as a peer would. */
+enum swarm_late_case { LATE_ACCEPT, LATE_EXPIRED, LATE_CANCEL, LATE_DROP,
+                       LATE_WRONG_PEER, LATE_WRONG_OBJECT, LATE_WRONG_HASH,
+                       LATE_RESTRICTED };
+
+static bool swarm_late_send(struct sw_node *n, const struct sw_pkg *p,
+                            uint64_t peer, struct vcs_package_swarm_object obj,
+                            uint64_t now, bool *encoded)
+{
+    size_t len = 0, frame_len = 0;
+    struct vcs_package_swarm_message data = {0};
+    data.type = VCS_PACKAGE_SWARM_DATA;
+    data.body.data.object = obj;
+    data.body.data.bytes = sw_chunk_bytes(p, 0, &len);
+    data.body.data.bytes_len = (uint32_t)len;
+    uint8_t frame[8 + 96 + SW_MAX_FILE];
+    *encoded = vcs_package_swarm_serialize(&data, frame, sizeof(frame), &frame_len);
+    if (!*encoded) return false;
+    struct vcs_swarm_frame_result result = vcs_swarm_engine_handle_frame(n->engine, peer, frame, frame_len, SW_DAY, now);
+    bool ok = result.penalty == VCS_SWARM_PENALTY_NONE;
+    free(result.reply);
+    return ok;
+}
+
+static int swarm_late_accepted_checks(struct sw_node *n, struct sw_pkg *p,
+    const uint8_t *key, uint64_t peer, struct vcs_package_swarm_object original,
+    struct vcs_package_swarm_object replacement, uint64_t at,
+    const struct vcs_service_key_totals *before, const struct vcs_swarm_download_status *prior)
+{
+    int failures = 0; bool encoded = false;
+    struct vcs_service_key_totals after = {0};
+    struct vcs_swarm_download_status current = {0};
+    SW_CHECK("late timeout replacement released once", vcs_swarm_engine_download_status(n->engine, p->root, &current) && current.inflight + 1 == prior->inflight);
+    SW_CHECK("late accepted credited once", vcs_service_key_totals(n->book, key, SW_DAY, &after) && after.verified_bytes_downloaded == before->verified_bytes_downloaded + p->lens[0]);
+    (void)swarm_late_send(n, p, peer, original, at + 1, &encoded);
+    SW_CHECK("late duplicate serializes", encoded);
+    (void)swarm_late_send(n, p, peer, replacement, at + 2, &encoded);
+    SW_CHECK("late replacement serializes", encoded);
+    SW_CHECK("late duplicate and replacement no second credit", vcs_service_key_totals(n->book, key, SW_DAY, &after) && after.verified_bytes_downloaded == before->verified_bytes_downloaded + p->lens[0]);
+    SW_CHECK("late duplicate and replacement do not release twice", vcs_swarm_engine_download_status(n->engine, p->root, &current) && current.inflight + 1 == prior->inflight);
+    return failures;
+}
+
+static int swarm_late_response_checks(struct sw_node *n, struct sw_pkg *p,
+    const uint8_t *key, uint64_t peer, struct vcs_package_swarm_object original,
+    struct vcs_package_swarm_object replacement, uint64_t now, enum swarm_late_case mode)
+{
+    int failures = 0;
+    struct vcs_service_key_totals before = {0};
+    struct vcs_swarm_download_status prior = {0};
+    bool allowed = mode == LATE_ACCEPT || mode == LATE_RESTRICTED;
+    SW_CHECK("late timeout initial accounting", vcs_service_key_totals(n->book, key, SW_DAY, &before));
+    SW_CHECK("late timeout replacement counted", vcs_swarm_engine_download_status(n->engine, p->root, &prior) && prior.inflight > 0);
+    if (mode == LATE_CANCEL) SW_CHECK("cancel after timeout", vcs_swarm_engine_cancel(n->engine, p->root, now));
+    if (mode == LATE_DROP) {
+        vcs_swarm_engine_peer_drop(n->engine, peer);
+        SW_CHECK("readd dropped peer", vcs_swarm_engine_peer_add(n->engine, peer, key));
+    }
+    if (mode == LATE_WRONG_PEER) {
+        uint8_t other[33]; sw_key(13, other);
+        SW_CHECK("late wrong peer add", vcs_swarm_engine_peer_add(n->engine, peer + 1, other));
+        peer++;
+    }
+    if (mode == LATE_WRONG_OBJECT) original.file_index = 1;
+    if (mode == LATE_WRONG_HASH) original.expected_hash[0] ^= 1;
+    uint64_t at = mode == LATE_EXPIRED ? now + VCS_SWARM_REQUEST_TIMEOUT_TICKS : now + 1;
+    bool encoded = false;
+    bool accepted = swarm_late_send(n, p, peer, original, at, &encoded);
+    SW_CHECK("late DATA serializes", encoded);
+    bool present = vcs_package_store_chunk_present(n->store, p->root, 0, 0);
+    SW_CHECK("late timeout storage disposition", allowed ? accepted && present : !present);
+    if (!allowed)
+        SW_CHECK("late invalid response stores no other chunk", !vcs_package_store_chunk_present(n->store, p->root, 1, 0));
+    if (allowed)
+        failures += swarm_late_accepted_checks(n, p, key, peer, original, replacement, at, &before, &prior);
+    return failures;
+}
+
+static int swarm_timeout_late_case(enum swarm_late_case mode)
+{
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg p;
+    uint8_t key[33];
+    sw_key(12, key);
+    if (!sw_node_open(&n, "timeoutlate", sw_score_contributor)) return 1;
+    if (!sw_make_package(&p, 2, 32)) {
+        sw_node_close(&n); test_rm_rf_recursive(n.datadir); return 1;
+    }
+    const uint64_t peer = 3101;
+    SW_CHECK("late timeout peer add", vcs_swarm_engine_peer_add(n.engine, peer, key));
+    sw_announce(n.engine, peer, &p);
+    enum vcs_swarm_fetch_result fetch = mode == LATE_RESTRICTED
+        ? vcs_swarm_engine_fetch_from(n.engine, p.root, SW_DAY, 1, &peer, 1)
+        : vcs_swarm_engine_fetch(n.engine, p.root, SW_DAY, 1);
+    SW_CHECK("late timeout fetch", fetch == VCS_SWARM_FETCH_OK);
+    vcs_swarm_engine_tick(n.engine, SW_DAY, 2);
+    struct sw_pump_stats st = {0};
+    sw_pump(&n, peer, &p, SW_SERVE_HONEST, false, 2, &st);
+    vcs_swarm_engine_tick(n.engine, SW_DAY, 3);
+    struct vcs_package_swarm_object first[8], retry[8];
+    size_t first_n = sw_drain_wants(&n, peer, first, 8);
+    SW_CHECK("late timeout initial chunk wants", first_n > 0 && first[0].object_kind == VCS_PACKAGE_SWARM_OBJECT_CHUNK && first[0].file_index == 0 && first[0].chunk_index == 0);
+    uint64_t now = 3u + VCS_SWARM_REQUEST_TIMEOUT_TICKS;
+    vcs_swarm_engine_tick(n.engine, SW_DAY, now);
+    size_t retry_n = sw_drain_wants(&n, peer, retry, 8);
+    bool replacement = false; size_t replacement_index = 0;
+    if (first_n > 0) for (size_t i = 0; i < retry_n; ++i)
+        if (retry[i].request_id != first[0].request_id &&
+            retry[i].file_index == first[0].file_index &&
+            retry[i].chunk_index == first[0].chunk_index &&
+            !memcmp(retry[i].expected_hash, first[0].expected_hash, 32)) { replacement = true; replacement_index = i; }
+    SW_CHECK("late timeout replacement request active", replacement);
+    if (first_n > 0 && replacement)
+        failures += swarm_late_response_checks(&n, &p, key, peer, first[0], retry[replacement_index], now, mode);
+    sw_free_package(&p); sw_node_close(&n); test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+
 int t_swarm_cancel_race(void)
 {
     int failures = 0;
@@ -393,6 +513,8 @@ int t_swarm_cancel_race(void)
     sw_free_package(&p);
     sw_node_close(&n);
     test_rm_rf_recursive(n.datadir);
+    for (int mode = LATE_ACCEPT; mode <= LATE_RESTRICTED; ++mode)
+        failures += swarm_timeout_late_case((enum swarm_late_case)mode);
     return failures;
 }
 

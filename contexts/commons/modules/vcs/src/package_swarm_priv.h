@@ -39,6 +39,9 @@ struct swarm_req {
 struct swarm_tombstone {
     uint64_t id;
     bool fulfilled; /* fulfilled: replay offence; cancelled: quiet drop */
+    /* Only timeout tombstones retain a bounded, exact chunk request.
+     * used marks grace eligibility, not an in-flight request slot. */
+    struct swarm_req expired;
 };
 
 struct swarm_download {
