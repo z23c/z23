@@ -654,6 +654,29 @@ _test_next:;
     return failures;
 }
 
+/* A quiet day must not turn commit volume into recommended work. */
+static bool fox_quiet_day(const char *root, const char *repo)
+{
+    char outcomes[1024];
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/quiet-outcomes.jsonl", root);
+    if (!fox_write(outcomes, "{\"state\":\"landed\",\"ts\":\"2020-01-01T00:00:00Z\"}\n")) return false;
+    struct zcl_objectives_options options = {.repo = repo, .outcomes = outcomes, .now = FOX_NOW};
+    struct zcl_objective_value commits = zcl_objectives_measure(&options, "commits_landed_today");
+    struct zcl_objective_value landed = zcl_objectives_measure(&options, "landed_rows_today");
+    struct fox_call c; fox_begin(&c);
+    fox_set(&c, "repo", repo); fox_set(&c, "outcomes", outcomes);
+    fox_set(&c, "attempts_dir", "/nonexistent/z23-fox/attempts");
+    fox_set(&c, "lintc_dir", "/nonexistent/z23-fox/lintc");
+    fox_set(&c, "baseline", "/nonexistent/z23-fox/baseline");
+    bool ok = commits.measured && commits.value == 0 && landed.measured && landed.value == 0 &&
+        fox_run(&c) && !fox_row(&c, "commits_landed_today") && !fox_row(&c, "landed_rows_today") &&
+        fox_row(&c, "tokens_per_landed_commit") && fox_row(&c, "land_success_rate_7d") &&
+        fox_row(&c, "node_rss_mb") &&
+        strcmp(fox_row_str(json_get(&c.reply.data, "next"), "id"), "commits_landed_today") &&
+        strcmp(fox_row_str(json_get(&c.reply.data, "next"), "id"), "landed_rows_today");
+    fox_end(&c); return ok;
+}
+
 static int fox_case_git(void)
 {
     int failures = 0;
@@ -675,6 +698,7 @@ static int fox_case_git(void)
             ASSERT(fox_mkdir(d));
         }
         ASSERT(fox_commit(repo, "docs/x.md", FOX_NOW - 12 * FOX_DAY, 1));
+        ASSERT(fox_quiet_day(root, repo));
         ASSERT(fox_commit(repo, "docs/API_REFERENCE.md", FOX_NOW - 9 * FOX_DAY, 2));
         ASSERT(fox_commit(repo, "core/a.c", FOX_NOW - 6 * FOX_DAY, 3));
         ASSERT(fox_commit(repo, "tools/t.c", FOX_NOW - 5 * FOX_DAY, 4));
@@ -1991,7 +2015,7 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: a commits-landed row exists over a fixture repo, its "
+    TEST("objectives: a generated-churn row exists over a fixture repo, its "
         "VALUE never asserted") {
         char repo[1024];
         (void)snprintf(repo, sizeof(repo), "%s/repo", root);
@@ -2004,9 +2028,9 @@ int test_fleet_objectives(void)
         fox_set(&c, "baseline", baseline_ok);
         fox_set(&c, "repo", repo);
         ASSERT(fox_run(&c));
-        const struct json_value *row = fox_row(&c, "commits_landed_today");
+        const struct json_value *row = fox_row(&c, "generated_churn_10d");
         ASSERT(row != NULL);
-        ASSERT_STR_EQ(fox_row_str(row, "id"), "commits_landed_today");
+        ASSERT_STR_EQ(fox_row_str(row, "id"), "generated_churn_10d");
         ASSERT_STR_EQ(fox_row_str(row, "source"), "git_log");
         fox_end(&c);
         PASS();
@@ -2031,7 +2055,9 @@ int test_fleet_objectives(void)
         ASSERT(strstr(screen, "[####################] 178/300 met") != NULL);
         const char *last = strstr(screen, "lab: met ");
         ASSERT(last != NULL);
-        ASSERT(strstr(last, " of 19, unmeasured ") != NULL);
+        char total[64];
+        (void)snprintf(total, sizeof(total), " of %zu, unmeasured ", n);
+        ASSERT(strstr(last, total) != NULL);
         /* The whole reply must fit the leaf's declared response budget. */
         ASSERT(c.request.spec != NULL);
         ASSERT(c.request.spec->budget_bytes >= 0);

@@ -58,9 +58,6 @@ Z23_OBJECTIVE("proof_lint_wall_s", "lab", "lint.log", "min", 300, "s",
 Z23_OBJECTIVE("proof_test_wall_s", "lab", "test.log", "min", 600, "s",
              "the test wall is the dominant cost of landing anything")
 
-Z23_OBJECTIVE("commits_landed_today", "lab", "git_log", "max", 20, "count",
-             "the only measure of the loop that is an outcome, not activity")
-
 Z23_OBJECTIVE("lint_families_over_ceiling", "lab", "lintc_line_counts", "min", 0,
              "count",
              "a lint family past the line ceiling is a file nobody can "
@@ -88,10 +85,6 @@ Z23_OBJECTIVE("tokens_per_landed_commit", "lab", "rows.tsv",
 Z23_OBJECTIVE("proof_wall_s", "lab", "phases.txt", "min", 900, "s",
              "the whole proof, from first phase to the end of lint and "
              "test, is what a train waits on before it can land")
-
-Z23_OBJECTIVE("landed_rows_today", "lab", "outcomes.jsonl", "max", 12, "count",
-             "outcomes rows in state landed since UTC midnight: the lab's "
-             "own throughput, counted from the landing record")
 
 Z23_OBJECTIVE("land_success_rate_7d", "lab", "outcomes.jsonl", "max", 90,
              "percent",

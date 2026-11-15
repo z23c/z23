@@ -61,12 +61,6 @@ Z23_OBJECTIVE_WORK("proof_test_wall_s", 0,
                    "z23-dev fleet objectives",
                    "a speed-up would drop, skip or weaken a test")
 
-Z23_OBJECTIVE_WORK("commits_landed_today", 0,
-                   "docs/work/**",
-                   "z23-dev fleet objectives",
-                   "the count can only rise by landing more work, which is "
-                   "the loop's output and not a file to edit")
-
 Z23_OBJECTIVE_WORK("lint_families_over_ceiling", 0,
                    "tools/lint/lintc/**",
                    "z23-dev fleet objectives",
@@ -100,11 +94,6 @@ Z23_OBJECTIVE_WORK("proof_wall_s", 0,
                    "z23-dev fleet objectives",
                    "a speed-up touches the land driver or weakens a proof "
                    "phase")
-
-Z23_OBJECTIVE_WORK("landed_rows_today", 0,
-                   "docs/work/**",
-                   "z23-dev fleet objectives",
-                   "the count follows landed work and is not a file to edit")
 
 Z23_OBJECTIVE_WORK("land_success_rate_7d", 0,
                    "tools/command/native_dev_land*,tools/dev/**",
