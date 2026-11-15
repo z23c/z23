@@ -111,11 +111,12 @@ order of size.
    coins read view, the prologue. Fix the largest step, read the next boot
    beacon, repeat. Resident memory (`node_rss_mb`) comes next. A boot that
    refuses to start names its stage and cause; an untyped refusal is a bug.
-2. **A stranger runs a stranger's app.** Signed `.z23share` handoff
-   and public catalog discovery are implemented; the acceptances below cover
-   isolated regtest personas and separate installed-app environments. Next prove the same signed
-   package root and rebuilt image between independent physical hosts, with
-   a fresh receiver and no external signup. Reuse the existing commands:
+2. **A stranger runs a stranger's app.** Signed `.z23share` handoff and public
+   catalog discovery are implemented. An installed signed-file journey reached
+   a fresh receiver on an apparently distinct physical host without signup.
+   Hardware observations are conventional evidence, not attestation. Catalog
+   discovery between independent physical hosts remains separate. Reuse the
+   existing commands:
    <!-- claim: symbol-present zcl_native_handle_app_publish tools/command/native_app_publish_command.c # signed catalog publication -->
    <!-- claim: symbol-present zcl_native_handle_app_get tools/command/native_app_get_command.c # catalog discovery and receive -->
    - `app publish COPY` posts one signed `zcl.app_offer.v1` entry to the
@@ -165,8 +166,22 @@ order of size.
    On public source b699edb1673d, a fresh installed recipient separately
    received the existing edited file and kept it after Preview displayed a
    concise app name alongside the full saved version. This did not repeat the
-   AI journey. Evidence: the retained app-preview-label-release-1115 UI result and review. The independent physical-host target
-   remains open.
+   AI journey. Evidence: the retained app-preview-label-release-1115 UI result and review.
+
+   On public source c1b8a6d6ca48, a fresh installed sender used copied AI setup
+   to edit, preview and Keep, then shared the signed file and closed its app
+   session before a fresh receiver accepted it. The receiver needed no account, previewed and
+   kept the copy, and rebuilt the same package and running image; its edited
+   source matched the sender's pinned kept source. Board and storage observations
+   support distinct physical environments but are not hardware attestation.
+   This copied-file run is not Tor, offline or physical-host catalog evidence.
+   An immediate sender post-Keep read misreported lock contention as damaged
+   history; a settled read succeeded without mutation replay. The typed-busy
+   fix landed in 728fa8846c4d. Its separately packaged runtime passed busy-lock
+   and torn-history checks and is public under manifest d5ddd4986723; the
+   physical journey was not repeated on it.
+   Evidence: the retained app-physical-journey-1115 and
+   app-history-busy-public-1115 results and review.
 3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap
