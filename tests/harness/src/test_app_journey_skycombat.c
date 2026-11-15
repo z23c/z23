@@ -35,6 +35,7 @@
 #include "chain/chainparams.h"
 #include "platform/time_compat.h"
 #include "command/native_app_launch.h"
+#include "command/native_app_library_command.h"
 #include "command/native_app_receive_preview.h"
 #include "command/native_app_confirm.h"
 #include "command/app_selection.h"
@@ -343,7 +344,23 @@ static bool ajs_recovery_selection(const struct ajs_world *w, const struct ajs_r
         !strcmp(package, json_get_str(json_get(&r->original, "package_root")));
 }
 
-struct ajs_ui { char driver[PATH_MAX], log[PATH_MAX]; };
+struct ajs_ui { char driver[PATH_MAX], log[PATH_MAX], home_key[16]; };
+
+struct ajs_menu_probe { unsigned calls, matches, index, actions; };
+
+static bool ajs_probe_menu(void *context, const struct zcl_present_model_v1 *model,
+                           const char *copy, struct zcl_present_window_event_v1 *event,
+                           char *why, size_t cap)
+{
+    (void)copy; (void)why; (void)cap;
+    struct ajs_menu_probe *probe = context;
+    ++probe->calls; probe->actions = model->action_count;
+    for (unsigned i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "home")) { ++probe->matches; probe->index = i; }
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
+    return true;
+}
 
 static bool ajs_ui_key(const struct ajs_ui *ui, const char *title,
                        const char *key, bool pixels, bool replaced, unsigned timeout)
@@ -364,7 +381,8 @@ static bool ajs_ui_confirm_pages(const struct ajs_ui *ui, const char *title,
 
 static bool ajs_ui_recovery_flow(const struct ajs_ui *ui, const struct ajs_recovery *r)
 {
-    return ajs_ui_key(ui, "My Apps", "--key=2", false, true, 10000) &&
+    return ajs_ui_key(ui, "My Apps", ui->home_key, false, true, 10000) &&
+        ajs_ui_key(ui, "My Apps", "--key=2", false, true, 10000) &&
         ajs_ui_key(ui, "My Apps", "--key=4", false, true, 10000) &&
         ajs_ui_key(ui, "My Apps", "--key=1", false, false, 10000) &&
         ajs_ui_confirm_pages(ui, "Your copy is ready", r->ready_pages, 10000) &&
@@ -377,6 +395,30 @@ struct ajs_gui_paths {
     char make[PATH_MAX], shell[PATH_MAX], output[PATH_MAX];
 };
 
+static bool ajs_probe_home(struct ajs_gui_paths *p)
+{
+    struct app_launch_env env; char why[256], dir[PATH_MAX];
+    if (!app_launch_env_from_process(&env, why, sizeof(why))) return false;
+    int n = snprintf(dir, sizeof(dir), "%s", p->cli);
+    if (n <= 0 || (size_t)n >= sizeof(dir)) return false;
+    char *slash = strrchr(dir, '/');
+    if (!slash || slash == dir) return false;
+    *slash = '\0';
+    n = snprintf(env.bin_dir, sizeof(env.bin_dir), "%s", dir);
+    if (n <= 0 || (size_t)n >= sizeof(env.bin_dir)) return false;
+    struct ajs_menu_probe probe = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.recovery-menu.v1");
+    zcl_test_app_library_run(&env, &reply, ajs_probe_menu, &probe);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        probe.calls == 1 && probe.matches == 1 && probe.index < 4;
+    printf("  [receiver initial menu: actions=%u home_action=%u probe_ok=%d]\n",
+           probe.actions, probe.index + 1, ok);
+    zcl_command_reply_free(&reply);
+    if (!ok) return false;
+    n = snprintf(p->ui.home_key, sizeof(p->ui.home_key), "--key=%u", probe.index + 1);
+    return n > 0 && (size_t)n < sizeof(p->ui.home_key);
+}
+
 static bool ajs_gui_prepare(struct ajs_world *w, struct ajs_gui_paths *p)
 {
     int n = snprintf(p->ui.driver, sizeof(p->ui.driver), "%s/build/bin/native_ui_driver", w->source);
@@ -385,7 +427,7 @@ static bool ajs_gui_prepare(struct ajs_world *w, struct ajs_gui_paths *p)
     return n > 0 && (size_t)n < sizeof(p->ui.driver) && l > 0 && (size_t)l < sizeof(p->ui.log) &&
         o > 0 && (size_t)o < sizeof(p->output) &&
         ajs_cli_prepare(w, p->binary, sizeof(p->binary), p->datadir, sizeof(p->datadir)) &&
-        realpath(p->binary, p->cli) && realpath(w->j.path_b, p->game) &&
+        realpath(p->binary, p->cli) && ajs_probe_home(p) && realpath(w->j.path_b, p->game) &&
         realpath("/usr/bin/make", p->make) && realpath("/bin/sh", p->shell);
 }
 
