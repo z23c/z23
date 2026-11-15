@@ -242,8 +242,6 @@ bool boot_cutover_preflight(struct boot_cutover_env *e, const char *datadir, boo
     return true;
 }
 
-
-
 static bool boot_cutover_verify_committed_mode(struct boot_cutover_env *e, const char *datadir,
     const struct wallet_cutover_binding *expected, bool stop)
 {
@@ -350,6 +348,7 @@ static bool boot_cutover_load_chain_binding(struct boot_cutover_env *e, struct a
     memcpy(installed_hash.data, expected->target_hash, sizeof(installed_hash.data));
     struct uint256 hash;
     memcpy(hash.data, coins.hash, sizeof(hash.data));
+    (void)boot_pending_island_prepare(e->state, expected, coins.height, &hash);
     enum boot_pending_restore_result restored = boot_wallet_pending_restore(
         e->state, csr_instance(), coins.height, &hash,
         expected->target_height, &installed_hash);

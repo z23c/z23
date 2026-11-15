@@ -780,6 +780,8 @@ static int nw_pending_restore_case(void)
     return failures;
 }
 
+#include "boot_pending_island_test.h"
+
 void reducer_frontier_test_set_compiled_anchor(int32_t height);
 bool test_reducer_prebinding_seed(sqlite3 *db, struct block_index *genesis,
                                   const uint8_t served[32], const uint8_t coins[32]);
@@ -1149,6 +1151,7 @@ int test_recovery_no_worse(void)
     printf("\n=== recovery_no_worse: RECOVERY NEVER MAKES IT WORSE ===\n");
     int failures = 0;
     failures += nw_pending_restore_case();
+    failures += nw_pending_island_case();
     failures += nw_prebinding_case();
     failures += nw_cold_stage_case();
     failures += nw_old_partial_case();

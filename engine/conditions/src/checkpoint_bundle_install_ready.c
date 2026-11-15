@@ -17,25 +17,41 @@
 
 #include "conditions/checkpoint_bundle_install_ready.h"
 
+#include "core/arith_uint256.h"
 #include "core/uint256.h"
+#include "chain/chain.h"                              /* block_index_get_ancestor */
 #include "chain/checkpoints.h"                        /* get_sha3_utxo_checkpoint */
 #include "conditions/checkpoint_header_solution_repair.h" /* solution-available gate */
 #include "config/consensus_state_install_runtime.h"   /* autodetect + arm + ready predicate */
 #include "config/boot_consensus_bundle_marker.h"      /* sovereign-marker witness */
+#include "config/flysync_island.h"                    /* the island window verifier */
 #include "controllers/agent_controller.h"             /* agent_runtime_context_datadir */
 #include "event/event.h"
+#include "jobs/stage_repair.h"                         /* header_solution_repair save */
+#include "net/checkpoint_header_fetch.h"               /* window walk */
+#include "platform/time_compat.h"
+#include "primitives/block.h"
 #include "services/chain_tip_watchdog.h"               /* chain_tip_watchdog_request_respawn */
+#include "services/island_anchor.h"
 #include "services/sync_monitor.h"                     /* sync_monitor_main_state */
+#include "storage/node_db_runtime.h"                   /* the pending restore's header loader */
+#include "storage/progress_store.h"
+#include "util/blocker.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 #include "util/thread_registry.h"                      /* thread_registry_request_shutdown */
 #include "validation/main_state.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define CBIR_SUBSYS "condition"
 #define CBIR_NAME   "checkpoint_bundle_install_ready"
+#define CBIR_WINDOW_BLOCKER_ID "checkpoint_rung_window_pending"
+#define CBIR_WINDOW_STALL_MS INT64_C(120000)
+#define CBIR_WINDOW_REFUSALS_MAX 3
 
 #ifdef ZCL_TESTING
 static _Atomic(struct main_state *) g_test_ms;
@@ -117,6 +133,223 @@ static bool detect_checkpoint_bundle_install_ready(void)
     return true;
 }
 
+/* ── Rung header window (legacy rung install only) ──────────────────────────
+ * The pending boot after a legacy install at a baked rung rebuilds its index
+ * from the projection only and proves the coins tip through an in-memory
+ * island (engine/composition/src/boot_pending_island.c). That boot does no
+ * network fetch, so the 28 full headers rung-27..rung must be durable before
+ * the install is armed. They load through the same loader the pending restore
+ * uses; when they do not, the existing window walk fetches them, each must hash
+ * to this node's own header chain, the island window verifier proves them
+ * (hash links down from the compiled rung hash, frozen PoW + Equihash), and
+ * each is saved in the existing hash-bound header_solution_repair table. */
+enum cbir_window { CBIR_WINDOW_NOT_APPLICABLE, CBIR_WINDOW_READY, CBIR_WINDOW_WAIT,
+                   CBIR_WINDOW_REFUSED };
+
+static _Atomic int64_t g_window_armed_ms;   /* 0: this condition holds no walk */
+static _Atomic int64_t g_window_moved_ms;
+static _Atomic int g_window_seen;
+static _Atomic int g_window_baseline;       /* progressing() delta baseline */
+static _Atomic int g_window_refusals;
+
+/* The compiled ladder rung at the staged bundle's height, strictly above the
+ * keystone, at exactly the bundle's hash. */
+static const struct rom_state_rung *cbir_rung(int32_t height, const uint8_t hash[32])
+{
+    const struct rom_state_checkpoint *keystone = get_rom_state_checkpoint();
+    if (!keystone || height <= keystone->height)
+        return NULL;
+    for (size_t i = 0; i < get_rom_state_rung_count(); i++) {
+        const struct rom_state_rung *r = get_rom_state_rung_at(i);
+        if (r && r->cp.height == height)
+            return memcmp(r->cp.block_hash, hash, 32) == 0 ? r : NULL;
+    }
+    return NULL;
+}
+
+/* -flysync and every datadir holding an island fact keep their own route. */
+static bool cbir_window_route(void)
+{
+    return flysync_island_phase() == FLYSYNC_OFF && !flysync_island_requested() &&
+           !island_anchor_registered() &&
+           island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_NONE;
+}
+
+/* This node's own header chain at rung..rung-27, top first. The rung row's
+ * chainwork must equal the compiled rung chainwork the island root work is
+ * derived from (T2); a mismatch is a hard refusal. */
+static enum cbir_window cbir_own_window(struct main_state *ms,
+                                        const struct rom_state_rung *rung,
+                                        struct uint256 *own)
+{
+    int32_t rung_h = rung->cp.height;
+    struct block_index *best = ms->pindex_best_header;
+    struct block_index *p = best && best->nHeight >= rung_h ?
+        block_index_get_ancestor(best, (int)rung_h) : NULL;
+    if (!p || !p->phashBlock || memcmp(p->phashBlock->data, rung->cp.block_hash, 32) != 0)
+        return CBIR_WINDOW_WAIT;
+    struct arith_uint256 want;
+    island_anchor_work_from_be(&want, rung->chainwork);
+    if (arith_uint256_compare(&p->nChainWork, &want) != 0) {
+        char have_hex[65], want_hex[65];
+        arith_uint256_get_hex(&p->nChainWork, have_hex);
+        arith_uint256_get_hex(&want, want_hex);
+        LOG_ERROR(CBIR_SUBSYS, "[condition:%s] REFUSED: this node's header chainwork at rung h=%d "
+                  "is %s but the compiled rung chainwork is %s; the rung window is not staged and "
+                  "the install is not armed", CBIR_NAME, (int)rung_h, have_hex, want_hex);
+        return CBIR_WINDOW_REFUSED;
+    }
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; i++, p = p->pprev) {
+        if (!p || !p->phashBlock || p->nHeight != rung_h - i)
+            return CBIR_WINDOW_WAIT;
+        own[i] = *p->phashBlock;
+    }
+    return CBIR_WINDOW_READY;
+}
+
+/* All 28 durable through the pending restore's loader, then proven again. */
+static bool cbir_window_durable(int32_t rung_h, const struct uint256 *own, struct block_header *w)
+{
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; i++)
+        if (!node_db_runtime_load_header_by_hash_height(rung_h - i, own[i].data, &w[i]))
+            return false; // raw-return-ok:window-not-yet-staged-is-the-normal-wait
+    struct island_anchor a;
+    char why[192];
+    if (flysync_island_verify_window(w, ISLAND_ANCHOR_WINDOW, rung_h, &a, why, sizeof(why)))
+        return true;
+    LOG_ERROR(CBIR_SUBSYS, "[condition:%s] stored rung window h=%d does not verify: %s",
+              CBIR_NAME, (int)rung_h, why);
+    return false;
+}
+
+static bool cbir_window_matches_own(const struct block_header *w, const struct uint256 *own)
+{
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; i++) {
+        struct uint256 hash;
+        block_header_get_hash(&w[i], &hash);
+        if (!uint256_eq(&hash, &own[i]))
+            return false; // raw-return-ok:caller-logs-the-refused-window
+    }
+    return true;
+}
+
+/* Fetched bytes are untrusted until the verifier passes; nothing is saved
+ * before it does. */
+static bool cbir_window_stage(const struct block_header *w, int n, int32_t top,
+                              int32_t rung_h, const struct uint256 *own)
+{
+    struct island_anchor a;
+    char why[192] = "the window is not 28 headers at the rung or differs from this node's "
+                    "own header chain";
+    bool ok = n == ISLAND_ANCHOR_WINDOW && top == rung_h && cbir_window_matches_own(w, own) &&
+              flysync_island_verify_window(w, n, rung_h, &a, why, sizeof(why));
+    sqlite3 *db = ok ? progress_store_db() : NULL;
+    for (int i = 0; ok && i < n; i++)
+        ok = db && stage_repair_header_solution_save(db, rung_h - i, &own[i], &w[i]);
+    if (!ok) {
+        atomic_fetch_add(&g_window_refusals, 1);
+        LOG_WARN(CBIR_SUBSYS, "[condition:%s] fetched rung window h=%d not staged: %s; "
+                 "fetching again", CBIR_NAME, (int)rung_h, why);
+        return false;
+    }
+    LOG_INFO(CBIR_SUBSYS, "[condition:%s] rung window h=%d..%d verified (hash-linked from the "
+             "compiled rung, frozen PoW/Equihash) and staged in header_solution_repair",
+             CBIR_NAME, (int)(rung_h - (n - 1)), (int)rung_h);
+    return true;
+}
+
+static void cbir_window_take(int32_t rung_h, const struct uint256 *own)
+{
+    struct block_header *w = zcl_calloc(CHECKPOINT_HEADER_FETCH_WINDOW_MAX, sizeof(*w),
+                                        "rung window take");
+    if (!w) {
+        LOG_WARN(CBIR_SUBSYS, "[condition:%s] rung window buffer allocation failed", CBIR_NAME);
+        return;
+    }
+    int32_t top = -1;
+    int n = checkpoint_header_fetch_take_window(w, CHECKPOINT_HEADER_FETCH_WINDOW_MAX, &top);
+    if (n > 0) {
+        atomic_store(&g_window_armed_ms, 0);
+        (void)cbir_window_stage(w, n, top, rung_h, own);
+    }
+    free(w);
+}
+
+/* Arm the walk when this condition holds none or it stalled. The single-header
+ * repair has finished: detect requires the rung solution to be durable. */
+static void cbir_window_arm_if_stalled(const struct rom_state_rung *rung)
+{
+    int64_t now = platform_time_monotonic_ms();
+    int have = checkpoint_header_fetch_window_progress();
+    if (have != atomic_load(&g_window_seen)) {
+        atomic_store(&g_window_seen, have);
+        atomic_store(&g_window_moved_ms, now);
+    }
+    if (atomic_load(&g_window_armed_ms) != 0 && checkpoint_header_fetch_is_armed() &&
+        now - atomic_load(&g_window_moved_ms) < CBIR_WINDOW_STALL_MS)
+        return;
+    struct uint256 top;
+    memcpy(top.data, rung->cp.block_hash, 32);
+    checkpoint_header_fetch_arm_window(rung->cp.height, &top, ISLAND_ANCHOR_WINDOW);
+    atomic_store(&g_window_armed_ms, now);
+    atomic_store(&g_window_moved_ms, now);
+    atomic_store(&g_window_seen, 0);
+}
+
+static void cbir_window_blocker(int32_t rung_h)
+{
+    struct blocker_record r;
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason), "the checkpoint-bundle install at rung h=%d waits for the 28 "
+             "full headers h=%d..%d from peers; the node keeps syncing meanwhile",
+             (int)rung_h, (int)(rung_h - (ISLAND_ANCHOR_WINDOW - 1)), (int)rung_h);
+    if (blocker_init(&r, CBIR_WINDOW_BLOCKER_ID, "checkpoint_fetch", BLOCKER_TRANSIENT, reason))
+        (void)blocker_set(&r);
+}
+
+/* Durable already, or durable after staging a completed walk; else (re)arm. */
+static enum cbir_window cbir_window_load_or_fetch(const struct rom_state_rung *rung,
+                                                  const struct uint256 *own)
+{
+    int32_t rung_h = rung->cp.height;
+    struct block_header *w = zcl_calloc(ISLAND_ANCHOR_WINDOW, sizeof(*w), "rung window load");
+    if (!w) {
+        LOG_WARN(CBIR_SUBSYS, "[condition:%s] rung window buffer allocation failed", CBIR_NAME);
+        return CBIR_WINDOW_WAIT;
+    }
+    bool durable = cbir_window_durable(rung_h, own, w);
+    if (!durable) {
+        cbir_window_take(rung_h, own);
+        durable = cbir_window_durable(rung_h, own, w);
+    }
+    free(w);
+    if (durable)
+        return CBIR_WINDOW_READY;
+    cbir_window_arm_if_stalled(rung);
+    return CBIR_WINDOW_WAIT;
+}
+
+static enum cbir_window cbir_window_ready(struct main_state *ms, int32_t target_h,
+                                          const uint8_t target_hash[32])
+{
+    const struct rom_state_rung *rung = cbir_rung(target_h, target_hash);
+    if (!rung || !cbir_window_route())
+        return CBIR_WINDOW_NOT_APPLICABLE;
+    struct uint256 own[ISLAND_ANCHOR_WINDOW];
+    enum cbir_window state = cbir_own_window(ms, rung, own);
+    if (state == CBIR_WINDOW_READY)
+        state = cbir_window_load_or_fetch(rung, own);
+    if (state == CBIR_WINDOW_WAIT) {
+        cbir_window_blocker(target_h);
+    } else {
+        /* No longer waiting on a walk: progressing() stops vouching for it,
+         * so READY and REFUSED rounds count toward the budget as before. */
+        atomic_store(&g_window_armed_ms, 0);
+        blocker_clear(CBIR_WINDOW_BLOCKER_ID);
+    }
+    return state;
+}
+
 static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
 {
 #ifdef ZCL_TESTING
@@ -147,6 +380,13 @@ static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
             free(bundle);
             return COND_REMEDY_SKIP; // raw-return-ok:solution-not-yet-backfilled-do-not-burn-budget
         }
+    }
+    /* A legacy install at a baked rung arms only once its header window is
+     * durable: the pending boot after it does no network fetch. */
+    enum cbir_window window = cbir_window_ready(ms, target_h, target_hash);
+    if (window == CBIR_WINDOW_WAIT || window == CBIR_WINDOW_REFUSED) {
+        free(bundle);
+        return window == CBIR_WINDOW_WAIT ? COND_REMEDY_SKIP : COND_REMEDY_FAILED;
     }
     /* Arm the durable, bounded install-on-next-boot request. Idempotent while
      * pending (the attempt count only bumps at CONSUME/boot), so repeated ticks
@@ -214,6 +454,30 @@ static bool witness_checkpoint_bundle_install_ready(int64_t target_at_detect)
            boot_consensus_bundle_marker_exists(datadir);
 }
 
+/* A completed rung window walk waits to be verified and staged: consume it on
+ * the next tick (cheap atomic read; the remedy re-verifies). */
+static bool urgent_checkpoint_bundle_install_ready(void)
+{
+    return checkpoint_header_fetch_window_progress() >= ISLAND_ANCHOR_WINDOW;
+}
+
+/* The rung window walk advanced since the last round, or this condition holds
+ * a walk it armed and still waits on (re-armed when it stalls): keep the
+ * bounded attempt budget from latching a walk that is converging. A slow first
+ * reply must not latch it (measured: the third skipped round latched 66 s after
+ * the walk armed; the walk completed 30 s later). A walk whose fetched windows
+ * keep failing verification stops counting as progress, so the budget latches
+ * after CBIR_WINDOW_REFUSALS_MAX refused windows. The node keeps syncing while
+ * it waits; nothing restarts. */
+static bool progressing_checkpoint_bundle_install_ready(int64_t target_at_detect)
+{
+    (void)target_at_detect;
+    int have = checkpoint_header_fetch_window_progress();
+    int before = atomic_exchange(&g_window_baseline, have);
+    return atomic_load(&g_window_refusals) < CBIR_WINDOW_REFUSALS_MAX &&
+           (have > before || atomic_load(&g_window_armed_ms) != 0);
+}
+
 static struct condition c_checkpoint_bundle_install_ready = {
     .name = CBIR_NAME,
     .severity = COND_WARN,
@@ -223,6 +487,8 @@ static struct condition c_checkpoint_bundle_install_ready = {
     .detect = detect_checkpoint_bundle_install_ready,
     .remedy = remedy_checkpoint_bundle_install_ready,
     .witness = witness_checkpoint_bundle_install_ready,
+    .progressing = progressing_checkpoint_bundle_install_ready,
+    .urgent = urgent_checkpoint_bundle_install_ready,
     .witness_window_secs = 30,
 };
 
@@ -238,6 +504,12 @@ void checkpoint_bundle_install_ready_test_reset(void)
     g_test_datadir = NULL;
     atomic_store(&g_test_suppress_restart, false);
     atomic_store(&g_test_remedy_calls, 0);
+    atomic_store(&g_window_armed_ms, 0);
+    atomic_store(&g_window_moved_ms, 0);
+    atomic_store(&g_window_seen, 0);
+    atomic_store(&g_window_baseline, 0);
+    atomic_store(&g_window_refusals, 0);
+    blocker_clear(CBIR_WINDOW_BLOCKER_ID);
     condition_reset_state(&c_checkpoint_bundle_install_ready);
 }
 
@@ -269,5 +541,10 @@ bool checkpoint_bundle_install_ready_test_detect(void)
 int checkpoint_bundle_install_ready_test_remedy(void)
 {
     return (int)remedy_checkpoint_bundle_install_ready();
+}
+
+bool checkpoint_bundle_install_ready_test_progressing(void)
+{
+    return progressing_checkpoint_bundle_install_ready(0);
 }
 #endif

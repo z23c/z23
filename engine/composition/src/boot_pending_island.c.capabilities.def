@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the pending boot's in-memory rung island. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_pending_island.c", CAP_FS_WRITE, "The checked window allocation reports a failed allocation on stderr; nothing about the island is written to disk.")

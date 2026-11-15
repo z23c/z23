@@ -82,6 +82,7 @@ ZCL_BLOCKER_REMEDY(sync_rate_below_floor,                    sync_rate_below_flo
 ZCL_BLOCKER_REMEDY(consensus.parity_slo_breach,              parity_slo_breach)
 ZCL_BLOCKER_REMEDY(header_repair_no_source,                  stale_validate_headers_repair)
 ZCL_BLOCKER_REMEDY(checkpoint_header_solution_no_peer,       checkpoint_header_solution_repair)
+ZCL_BLOCKER_REMEDY(checkpoint_rung_window_pending,           checkpoint_bundle_install_ready)
 ZCL_BLOCKER_REMEDY(net_partition_suspected,                  net_partition_suspected)
 ZCL_BLOCKER_REMEDY(reducer_drive_stuck,                      reducer_drive_watchdog)
 ZCL_BLOCKER_REMEDY(net_eclipse_suspected,                    net_eclipse_suspected)

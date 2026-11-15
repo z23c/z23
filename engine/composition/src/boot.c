@@ -3518,6 +3518,7 @@ static bool boot_pending_finish(struct app_context *ctx, struct boot_seq *seq,
         g_cutover_exit_action = BOOT_CUTOVER_EXIT_STOP;
     }
     if (replay != BOOT_PENDING_COMPLETE) return false;
+    if (boot_pending_island_restart_due(binding)) { boot_cutover_restart_arm(binding); return false; }
     activation_boot_complete(&g_activation_ctl, "wallet_cutover_complete");
     return boot_seq_start_services(ctx, seq);
 }
@@ -3701,7 +3702,8 @@ static bool boot_cutover_exit_cleanup(enum boot_cutover_exit_action action)
     if (g_cutover_exit_action != action || !g_node_db.db || g_node_db.sync_in_batch ||
         !sqlite3_get_autocommit(g_node_db.db) ||
         !(action == BOOT_CUTOVER_EXIT_STOP ? boot_cutover_verify_committed_stop(&env, g_datadir, &g_old_cutover_restart_binding) :
-          boot_cutover_verify_committed(&env, g_datadir, &g_old_cutover_restart_binding)))
+          (boot_cutover_verify_committed(&env, g_datadir, &g_old_cutover_restart_binding) ||
+           boot_pending_island_handoff_ready(&env, &g_old_cutover_restart_binding))))
         return false;
     g_cutover_exit_action = BOOT_CUTOVER_EXIT_NONE;
     boot_shutdown_offline_internal(false, true, true);

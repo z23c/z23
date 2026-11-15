@@ -1863,6 +1863,8 @@ static int case_regtest_producer_input(void)
     return failures;
 }
 
+#include "consensus_state_rung_window_test.h"
+
 int test_consensus_state_install_runtime(void)
 {
     printf("\n=== consensus_state_install_runtime ===\n");
@@ -1882,6 +1884,7 @@ int test_consensus_state_install_runtime(void)
     failures += case_checkpoint_header_ready();
     failures += case_checkpoint_header_frontier_restore();
     failures += case_retry_condition();
+    failures += case_rung_window_condition();
     failures += case_solution_repair_detect_window();
     failures += case_fresh_canonical_cutover();
     failures += case_gate_mirror_handle();

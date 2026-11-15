@@ -5,6 +5,7 @@
 #include "base/result.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 struct app_context;
 struct boot_svc_ctx;
 struct main_state;
@@ -144,4 +145,22 @@ enum boot_bound_dispatch_result boot_bound_dispatch(struct boot_cutover_env *env
 bool boot_bound_memory_bind(struct boot_cutover_env *env);
 bool boot_cutover_mode_supported(const struct app_context *ctx);
 struct zcl_result boot_sandbox_enter(const struct app_context *ctx, const char *fallback_datadir);
+/* boot_pending_island.c: a legacy pending cutover to a baked rung whose coins
+ * tip is absent from the projection-only index, with no island of any kind,
+ * proves the staged rung window and registers it for this process only.
+ * SKIPPED and REFUSED register nothing; the unchanged restore then decides. */
+struct uint256;
+enum boot_pending_island_result { BOOT_PENDING_ISLAND_SKIPPED, BOOT_PENDING_ISLAND_REGISTERED,
+    BOOT_PENDING_ISLAND_REFUSED };
+enum boot_pending_island_result boot_pending_island_prepare(struct main_state *ms,
+    const struct wallet_cutover_binding *binding, int32_t coins_height, const struct uint256 *coins_hash);
+bool boot_pending_island_active(void);
+/* After BOOT_PENDING_COMPLETE: true when this process holds an in-memory
+ * island, which must never start services; the caller arms the restart. */
+bool boot_pending_island_restart_due(const struct wallet_cutover_binding *binding);
+bool boot_pending_island_handoff_ready(struct boot_cutover_env *env,
+                                       const struct wallet_cutover_binding *binding);
+#ifdef ZCL_TESTING
+void boot_pending_island_test_reset(void);
+#endif
 #endif

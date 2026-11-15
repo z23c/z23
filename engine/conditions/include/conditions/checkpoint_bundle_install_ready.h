@@ -37,6 +37,8 @@ int checkpoint_bundle_install_ready_test_remedy_calls(void);
 /* Directly drive detect()/remedy() for the focused test. */
 bool checkpoint_bundle_install_ready_test_detect(void);
 int checkpoint_bundle_install_ready_test_remedy(void);
+/* The condition's progressing() answer for this round. */
+bool checkpoint_bundle_install_ready_test_progressing(void);
 #endif
 
 #endif /* ZCL_CONDITIONS_CHECKPOINT_BUNDLE_INSTALL_READY_H */
