@@ -26,6 +26,7 @@
 #include "platform/os_proc.h"
 #include "platform/directory_compat.h"
 #include "util/path_util.h"
+#include "util/path_leaf.h"
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -37,7 +38,7 @@
 
 #define AL_ROWS (APP_LAUNCH_ENTRIES_MAX + APP_SELECTION_ROUTES_MAX)
 #define AL_RECOVERY_MAX 64u
-struct al_recovered_row { char name[APP_SELECTION_PATH_MAX]; uint8_t fork[32]; bool available; };
+struct al_recovered_row { char name[APP_SELECTION_PATH_MAX]; char display[73]; uint8_t fork[32]; bool available; };
 struct library_row {
     struct app_launch_entry entry;
     struct app_selection selection;
@@ -215,8 +216,9 @@ static void al_recovered_model(struct library *w)
     }
     const struct al_recovered_row *row = &w->recovered[w->recovered_index];
     char label[73]; size_t i = 0;
-    while (i + 1 < sizeof(label) && row->name[i]) {
-        unsigned char c = (unsigned char)row->name[i];
+    const char *text = row->available && row->display[0] ? row->display : row->name;
+    while (i + 1 < sizeof(label) && text[i]) {
+        unsigned char c = (unsigned char)text[i];
         label[i++] = c >= 0x20 && c <= 0x7e ? (char)c : '?';
     }
     label[i] = 0;
@@ -1693,6 +1695,10 @@ static void al_recovered_probe(struct library *w, struct al_recovered_row *row, 
         app_receive_preview_describe_recovered(preview, &check.data);
     const char *version = zcl_package_copy_str(&check.data, "version");
     row->available = ok && version && strlen(version) == 64 && zcl_hex_decode_lower(version, row->fork, 32);
+    const char *name = zcl_package_copy_str(&check.data, "name");
+    if (row->available && name) {
+        (void)snprintf(row->display, sizeof(row->display), "%s", zcl_path_leaf(name));
+    }
     app_receive_preview_close(preview); zcl_command_reply_free(&check);
 }
 static bool al_recovered_scan(struct library *w, const char *datadir, struct zcl_command_reply *reply)

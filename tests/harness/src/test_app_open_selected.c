@@ -3127,6 +3127,8 @@ static bool ak_recovery_room(void *context, const struct zcl_present_model_v1 *m
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
     (void)context; (void)copy_text; (void)why; (void)cap;
+    if (!strcmp(model->request_id, "library-recovered-copies") &&
+        (!strstr(model->summary, "tinyapp") || strstr(model->summary, "original"))) return false;
     const char *wanted = !strcmp(model->request_id, "library-home") ? "discover" :
         !strncmp(model->request_id, "library-", 8) && model->request_id[8] >= '0' && model->request_id[8] <= '9' ? "home" :
         !strcmp(model->request_id, "library-discover-options") ? "recover-copies" :
