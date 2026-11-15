@@ -172,6 +172,9 @@ event_log_t *event_log_open_keep_torn(const char *path);
  * past the last whole verified record exists — a torn or damaged log is
  * refused here, never repaired (only event_log_open() recovers). Appends on
  * the handle are refused and close writes nothing. */
+/* Optional result is ERROR on failure, BUSY only for a confirmed lock conflict. */
+enum event_log_read_result { EVENT_LOG_READ_OK, EVENT_LOG_READ_BUSY, EVENT_LOG_READ_ERROR };
+event_log_t *event_log_open_readonly_result(const char *path, enum event_log_read_result *result);
 event_log_t *event_log_open_readonly(const char *path);
 
 /* Close the log. Flushes any pending data. NULL-safe. */

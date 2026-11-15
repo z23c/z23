@@ -69,6 +69,9 @@ struct vcs_repo *vcs_open(const char *repo_root);
  * index is opened, so nothing under repo_root is created or changed. NULL when
  * the log is absent, held by a writer or damaged — a torn tail is refused, not
  * truncated. snapshot, status, tree_capture and revert refuse this handle. */
+/* Optional result is ERROR on failure, BUSY only for a confirmed lock conflict. */
+enum vcs_read_result { VCS_READ_OK, VCS_READ_BUSY, VCS_READ_ERROR };
+struct vcs_repo *vcs_open_readonly_result(const char *repo_root, enum vcs_read_result *result);
 struct vcs_repo *vcs_open_readonly(const char *repo_root);
 void vcs_close(struct vcs_repo *r);
 

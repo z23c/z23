@@ -206,8 +206,9 @@ struct vcs_repo *vcs_open(const char *repo_root)
     return r;
 }
 
-struct vcs_repo *vcs_open_readonly(const char *repo_root)
+struct vcs_repo *vcs_open_readonly_result(const char *repo_root, enum vcs_read_result *result)
 {
+    if (result) *result = VCS_READ_ERROR;
     if (!repo_root || !repo_root[0])
         LOG_NULL("vcs", "null repo_root");
     struct vcs_repo *r = zcl_calloc(1, sizeof(*r), "vcs_repo_readonly");
@@ -222,13 +223,21 @@ struct vcs_repo *vcs_open_readonly(const char *repo_root)
         free(r);
         LOG_NULL("vcs", "repo path too long");
     }
-    r->log = event_log_open_readonly(logpath);
+    enum event_log_read_result status;
+    r->log = event_log_open_readonly_result(logpath, &status);
+    if (result && status == EVENT_LOG_READ_BUSY) *result = VCS_READ_BUSY;
     if (!r->log) {
         free(r);
         LOG_NULL("vcs", "commits.log is absent, held or damaged (left "
                  "untouched; a damaged log needs repair): %s", logpath);
     }
+    if (result) *result = VCS_READ_OK;
     return r;
+}
+
+struct vcs_repo *vcs_open_readonly(const char *repo_root)
+{
+    return vcs_open_readonly_result(repo_root, NULL);
 }
 
 void vcs_close(struct vcs_repo *r)

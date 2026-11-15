@@ -54,27 +54,6 @@
 #define crc32c(data, len)    zcl_crc32c((data), (len))
 #define crc32c_sw(data, len) zcl_crc32c_sw((data), (len))
 
-#ifdef ZCL_TESTING
-const char *event_log_crc32c_impl(void)
-{
-    return zcl_crc32c_impl_name();
-}
-
-uint32_t event_log_crc32c_test_sw(const void *data, size_t len)
-{
-    return crc32c_sw(data, len);
-}
-
-uint32_t event_log_crc32c_test_active(const void *data, size_t len)
-{
-    return crc32c(data, len);
-}
-
-bool event_log_crc32c_hw_available(void)
-{
-    return zcl_crc32c_hw_available();
-}
-#endif
 
 /* ── little-endian byte helpers ─────────────────────────────────────── */
 
@@ -838,14 +817,17 @@ event_log_t *event_log_open_keep_torn(const char *path)
     return event_log_handle_new(&file, path, &rec, false);
 }
 
-event_log_t *event_log_open_readonly(const char *path)
+event_log_t *event_log_open_readonly_result(const char *path, enum event_log_read_result *result)
 {
+    if (result) *result = EVENT_LOG_READ_ERROR;
     if (!path || !path[0])
         LOG_NULL("event_log", "open_readonly: empty path");
 
     struct platform_private_file file;
     platform_private_file_init(&file);
-    if (!platform_private_file_open_observation(path, &file)) {
+    enum platform_observation_result observed = platform_private_file_observe(path, &file);
+    if (observed != PLATFORM_OBSERVATION_OK) {
+        if (result && observed == PLATFORM_OBSERVATION_BUSY) *result = EVENT_LOG_READ_BUSY;
         fprintf(stderr,  // obs-ok:event-log-open-failure
                 "[event_log] read-only open(%s) failed: %s\n",
                 path, strerror(errno));
@@ -867,7 +849,14 @@ event_log_t *event_log_open_readonly(const char *path)
         platform_private_file_close(&file);
         return NULL;
     }
-    return event_log_handle_new(&file, path, &rec, true);
+    event_log_t *log = event_log_handle_new(&file, path, &rec, true);
+    if (log && result) *result = EVENT_LOG_READ_OK;
+    return log;
+}
+
+event_log_t *event_log_open_readonly(const char *path)
+{
+    return event_log_open_readonly_result(path, NULL);
 }
 
 /* Flush, then publish (or drop) the verified-prefix receipt at close. */

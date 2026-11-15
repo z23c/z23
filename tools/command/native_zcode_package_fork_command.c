@@ -180,11 +180,13 @@ static bool zpc_fork_record(const struct vcs_commit *root,
 /* READ never writes; CHECKED refuses a damaged log through the read-only
  * open before the full open could repair it; RECOVER is the full open. */
 static struct vcs_repo *zpc_repo_open(const char *dir,
-                                      enum zcl_package_copy_access access)
+                                      enum zcl_package_copy_access access,
+                                      enum vcs_read_result *status)
 {
+    *status = VCS_READ_ERROR;
     if (access == ZCL_PACKAGE_COPY_RECOVER)
         return vcs_open(dir);
-    struct vcs_repo *probe = vcs_open_readonly(dir);
+    struct vcs_repo *probe = vcs_open_readonly_result(dir, status);
     if (!probe || access == ZCL_PACKAGE_COPY_READ)
         return probe;
     vcs_close(probe);
@@ -216,7 +218,15 @@ static bool zpc_copy_open(const char *dir, enum zcl_package_copy_access access,
 {
     memset(copy, 0, sizeof(*copy));
     if (!zpc_history_present(dir, reply, command)) return false;
-    copy->repo = zpc_repo_open(dir, access);
+    enum vcs_read_result status;
+    copy->repo = zpc_repo_open(dir, access, &status);
+    if (!copy->repo && status == VCS_READ_BUSY) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "COPY_HISTORY_BUSY",
+                               "execute", true, false,
+                               "copy history is busy; retry after the writer finishes", dir);
+        return false;
+    }
     struct zpc_walk walk = {.copy = copy};
     walk.target_valid = version && zcl_hex_decode_lower(version, walk.target, 32);
     bool ok = copy->repo &&

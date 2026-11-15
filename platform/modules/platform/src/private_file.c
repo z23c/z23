@@ -277,24 +277,24 @@ bool platform_private_file_open_locked_create_wait(
   return platform_private_file_open_locked_wait(path, file);
 }
 
-static bool pf_open_observation(const char *path,
+static enum platform_observation_result pf_open_observation(const char *path,
                                            struct platform_private_file *file) {
   wchar_t wide[32768];
   if (!file || !pf_wide(path, wide))
-    return false;
+    return PLATFORM_OBSERVATION_ERROR;
   HANDLE h = CreateFileW(wide, GENERIC_READ,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
                              FILE_FLAG_OVERLAPPED, NULL);
   if (h == INVALID_HANDLE_VALUE)
-    return false;
+    return PLATFORM_OBSERVATION_ERROR;
   BY_HANDLE_FILE_INFORMATION info = {0};
   if (!GetFileInformationByHandle(h, &info) ||
       (info.dwFileAttributes &
        (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
     CloseHandle(h);
-    return false;
+    return PLATFORM_OBSERVATION_ERROR;
   }
   file->native = (uintptr_t)h;
   OVERLAPPED ov = {0};
@@ -303,10 +303,10 @@ static bool pf_open_observation(const char *path,
     DWORD error = GetLastError();
     platform_private_file_close(file);
     SetLastError(error);
-    return false;
+    return error == ERROR_LOCK_VIOLATION ? PLATFORM_OBSERVATION_BUSY : PLATFORM_OBSERVATION_ERROR;
   }
   file->locked = true;
-  return true;
+  return PLATFORM_OBSERVATION_OK;
 }
 
 void platform_private_file_close(struct platform_private_file *file) {
@@ -834,24 +834,29 @@ bool platform_private_file_open_locked_create_wait(
   }
   return platform_private_file_open_locked_wait(p, f);
 }
-static bool pf_open_observation(const char *path,
+static enum platform_observation_result pf_open_observation(const char *path,
                                            struct platform_private_file *file) {
   if (!file)
-    return false;
+    return PLATFORM_OBSERVATION_ERROR;
   int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
   if (fd < 0)
-    return false;
+    return PLATFORM_OBSERVATION_ERROR;
   struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-      flock(fd, LOCK_SH | LOCK_NB) != 0) {
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
     int error = errno;
     close(fd);
     errno = error;
-    return false;
+    return PLATFORM_OBSERVATION_ERROR;
+  }
+  if (flock(fd, LOCK_SH | LOCK_NB) != 0) {
+    int error = errno;
+    close(fd);
+    errno = error;
+    return error == EWOULDBLOCK || error == EAGAIN ? PLATFORM_OBSERVATION_BUSY : PLATFORM_OBSERVATION_ERROR;
   }
   file->native = (uintptr_t)fd;
   file->locked = true;
-  return true;
+  return PLATFORM_OBSERVATION_OK;
 }
 
 void platform_private_file_close(struct platform_private_file *f) {
@@ -1097,9 +1102,14 @@ bool platform_private_file_authority_flush(struct platform_private_file *f) {
 }
 
 /* One public observation entry point; the retained handle stays locked until close. */
+enum platform_observation_result platform_private_file_observe(
+    const char *path, struct platform_private_file *file) {
+  return pf_open_observation(path, file);
+}
+
 bool platform_private_file_open_observation(const char *path,
                                            struct platform_private_file *file) {
-  return pf_open_observation(path, file);
+  return platform_private_file_observe(path, file) == PLATFORM_OBSERVATION_OK;
 }
 
 /* One public entry point for exclusive creation and same-handle locking. */

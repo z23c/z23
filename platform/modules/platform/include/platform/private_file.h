@@ -61,6 +61,10 @@ bool platform_private_file_open_locked_create_wait(
     const char *path, struct platform_private_file *file);
 /* Existing regular file, read access only, immediate shared scan lock.
  * Interoperates with waiting exclusive writers; never creates or retries. */
+/* BUSY denotes only a confirmed nonblocking lock conflict. */
+enum platform_observation_result { PLATFORM_OBSERVATION_OK, PLATFORM_OBSERVATION_BUSY, PLATFORM_OBSERVATION_ERROR };
+enum platform_observation_result platform_private_file_observe(
+    const char *path, struct platform_private_file *file);
 bool platform_private_file_open_observation(const char *path,
                                            struct platform_private_file *file);
 /* Validate this retained regular file, without reopening a pathname or changing

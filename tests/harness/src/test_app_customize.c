@@ -39,6 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -532,6 +533,59 @@ static bool act_reads(struct ac_fixture *f)
     abc_close(&l);
     return act_read_files(f, ok, source);
 }
+
+/* Hold the real history lock in another process, as a concurrent writer does. */
+static bool act_busy_request(struct ac_fixture *f, bool busy)
+{
+    struct abc_leaf l;
+    if (!act_call(&l, "include/boost.h", true)) return false;
+    char version[65]; zcl_hex_encode(f->kept.version, 32, version);
+    bool ok = json_push_kv_str(&l.in, "source_version", version) &&
+        act_result(&l, busy ? "COPY_HISTORY_BUSY" : NULL);
+    if (busy) ok = ok && l.out.status == ZCL_COMMAND_STATUS_BLOCKED &&
+        l.out.exit_code == ZCL_COMMAND_EXIT_BLOCKED && l.out.error.retryable && !l.out.error.mutated;
+    else ok = ok && !strcmp(abc_get(&l, "content"), "#define BOOST 2\n");
+    abc_close(&l);
+    return ok;
+}
+
+static void act_history_lock_child(const char *path, const int ready[2], const int release[2])
+{
+    close(ready[0]); close(release[1]);
+    int fd = open(path, O_RDONLY); char byte = 'x';
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0 || write(ready[1], &byte, 1) != 1 ||
+        read(release[0], &byte, 1) != 1) _exit(1);
+    close(fd); _exit(0);
+}
+
+static bool act_history_child_done(pid_t pid)
+{
+    int status = 0; pid_t waited;
+    if (pid <= 0) return false;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+
+static bool act_history_busy(struct ac_fixture *f)
+{
+    char path[1600];
+    int n = snprintf(path, sizeof(path), "%s/.zvcs/commits.log", f->world.copy);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    int ready[2], release[2];
+    if (pipe(ready) != 0) return false;
+    if (pipe(release) != 0) { close(ready[0]); close(ready[1]); return false; }
+    pid_t pid = fork();
+    if (pid == 0) act_history_lock_child(path, ready, release);
+    close(ready[1]); close(release[0]);
+    char byte; bool is_ready = pid > 0 && read(ready[0], &byte, 1) == 1;
+    bool ok = is_ready && act_busy_request(f, true);
+    if (is_ready) { ssize_t sent = write(release[1], "x", 1); ok = ok && sent == 1; }
+    close(ready[0]); close(release[1]);
+    bool child_ok = act_history_child_done(pid);
+    return ok && child_ok && act_busy_request(f, false) && act_preserved(f, false);
+}
+
 
 static bool act_refusals(void)
 {
@@ -1418,6 +1472,7 @@ int test_app_customize(void)
     TEST("customize reads selected N while HEAD and working files advance without mutation") {
         ASSERT(act_setup(&f, true));
         ASSERT(act_reads(&f));
+        ASSERT(act_history_busy(&f));
         ASSERT(act_escaped_reads());
         ASSERT(act_serialized_navigation(&f));
         ASSERT(act_searches(&f));
