@@ -130,6 +130,8 @@ bool reducer_frontier_apply_hash_agreement(sqlite3 *db, int32_t anchor,
     const bool script_bh = column_exists(db, "script_validate_log", "block_hash");
     const bool proof_bh  = column_exists(db, "proof_validate_log", "block_hash");
 
+    /* With v.hash checked as a 32-byte blob, BLOB-affinity witnesses that
+     * are NULL, malformed or different all compare IS NOT to it. */
     char sql[1200];
     int n = snprintf(sql, sizeof(sql),
             "SELECT v.height,v.hash,h.hash,%s,%s,d.branch_hash "
@@ -140,9 +142,7 @@ bool reducer_frontier_apply_hash_agreement(sqlite3 *db, int32_t anchor,
             "LEFT JOIN utxo_apply_delta d ON d.height=v.height "
             "WHERE v.height > ? AND v.height <= ? "
             "AND (typeof(v.hash) <> 'blob' OR length(v.hash) <> 32 "
-            "OR typeof(h.hash) <> 'blob' OR length(h.hash) <> 32 "
-            "OR typeof(d.branch_hash) <> 'blob' OR length(d.branch_hash) <> 32 "
-            "OR v.hash <> h.hash OR v.hash <> d.branch_hash "
+            "OR h.hash IS NOT v.hash OR d.branch_hash IS NOT v.hash "
             "%s%s) "
             "ORDER BY v.height ASC LIMIT 1",
             script_bh ? "s.block_hash" : "NULL",

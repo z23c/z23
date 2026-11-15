@@ -2886,11 +2886,85 @@ static int case_header_receipt_snapshot(void)
     return failures;
 }
 
+static bool evidence_fold_caps(sqlite3 *db, int32_t expected)
+{
+    int32_t hstar = -1, served = -1;
+    return reducer_frontier_compute_hstar(db, &hstar, &served) && hstar == expected;
+}
+
+static int evidence_type_cases(sqlite3 *db)
+{
+    int failures = 0;
+    const char *tables[] = {"validate_headers_log", "header_admit_log", "utxo_apply_delta"};
+    const char *columns[] = {"hash", "hash", "branch_hash"};
+    const char *values[] = {"zeroblob(1)", "zeroblob(32)", "17", "1.5", "CAST(17 AS TEXT)"};
+    for (size_t t = 0; t < 3; t++) {
+        for (size_t v = 0; v < 5; v++) {
+            char sql[200];
+            snprintf(sql, sizeof(sql), "UPDATE %s SET %s=%s WHERE height=%d", tables[t], columns[t], values[v], A + 2);
+            bool ok = sqlite3_exec(db, "SAVEPOINT witness", NULL, NULL, NULL) == SQLITE_OK &&
+                      sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+                      sqlite3_changes(db) == 1 && evidence_fold_caps(db, A + 1);
+            RF_CHECK("mandatory witness: malformed or different caps H*", ok);
+            RF_CHECK("mandatory witness: rollback", sqlite3_exec(db, "ROLLBACK TO witness; RELEASE witness", NULL, NULL, NULL) == SQLITE_OK);
+        }
+    }
+    return failures;
+}
+
+static int evidence_missing_cases(sqlite3 *db)
+{
+    int failures = 0;
+    const char *tables[] = {"header_admit_log", "utxo_apply_delta"};
+    for (size_t t = 0; t < 2; t++) {
+        char sql[128];
+        snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE height=%d", tables[t], A + 2);
+        bool ok = sqlite3_exec(db, "SAVEPOINT witness", NULL, NULL, NULL) == SQLITE_OK &&
+                  sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+                  sqlite3_changes(db) == 1 && evidence_fold_caps(db, A + 1);
+        RF_CHECK("mandatory witness: missing caps H*", ok);
+        RF_CHECK("mandatory witness: rollback", sqlite3_exec(db, "ROLLBACK TO witness; RELEASE witness", NULL, NULL, NULL) == SQLITE_OK);
+    }
+    return failures;
+}
+
+static int case_mandatory_witness_types(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return 1;
+    bool seeded = rf_fixture_build_schema(db) && stamp_proven_authority(db, A + 1) &&
+                  put_consistent_range(db, A + 1, A + 3) && set_all_cursors(db, A + 4);
+    RF_CHECK("mandatory witness: seed", seeded);
+    if (seeded) {
+        failures += evidence_type_cases(db);
+        failures += evidence_missing_cases(db);
+    }
+    const char *tables[] = {"validate_headers_log", "header_admit_log", "utxo_apply_delta"};
+    const char *columns[] = {"hash", "hash", "branch_hash"};
+    bool equal_bad = sqlite3_exec(db, "SAVEPOINT witness", NULL, NULL, NULL) == SQLITE_OK;
+    for (size_t t = 0; t < 3 && equal_bad; t++) {
+        char sql[160];
+        snprintf(sql, sizeof(sql), "UPDATE %s SET %s=zeroblob(1) WHERE height=%d", tables[t], columns[t], A + 2);
+        equal_bad = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    }
+    RF_CHECK("mandatory witness: equal malformed caps H*", equal_bad && evidence_fold_caps(db, A + 1));
+    RF_CHECK("mandatory witness: rollback", sqlite3_exec(db, "ROLLBACK TO witness; RELEASE witness", NULL, NULL, NULL) == SQLITE_OK);
+    bool two = sqlite3_exec(db, "SAVEPOINT witness", NULL, NULL, NULL) == SQLITE_OK &&
+        set_hash_value(db, "header_admit_log", "hash", A + 2, "x", 1, false) &&
+        set_hash_value(db, "utxo_apply_delta", "branch_hash", A + 3, "x", 1, false);
+    RF_CHECK("mandatory witness: earliest mismatch caps H*", two && evidence_fold_caps(db, A + 1));
+    RF_CHECK("mandatory witness: rollback", sqlite3_exec(db, "ROLLBACK TO witness; RELEASE witness", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_reducer_frontier(void)
 {
     int failures = 0;
     printf("\n--- reducer_frontier (L0 H* authority) ---\n");
     failures += case_header_receipt_snapshot();
+    failures += case_mandatory_witness_types();
     failures += case_body_read_repair_note();
     failures += case_derived_stage_cursor_equivalence();
     failures += case_partial_authority_does_not_enable_compiled_floor();
