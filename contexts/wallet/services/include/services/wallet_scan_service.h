@@ -28,7 +28,36 @@
 #include "services/scan_util.h"
 #include "platform/read_mapping.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
+
+/* Returned instead of -1 when the requested height range holds a height with
+ * no block body. Nothing was deleted or written: wallet_utxos and
+ * wallet_transactions are exactly as they were. Distinct from -1 (a scan or
+ * write failure) so a caller can say which one happened. */
+#define WALLET_SCAN_REFUSED_MISSING_DATA (-2)
+
+/* Block-body coverage of one height range on one active chain. */
+struct wallet_scan_coverage {
+    int start_height;
+    int end_height;
+    int64_t blocks_missing;   /* heights with no index entry or no body */
+    int first_missing;        /* lowest such height, -1 when none */
+};
+
+/* True when this active-chain entry has a block body to read. The rule is
+ * the one rescanblockchain counts as blocks_missing_data
+ * (wallet_scan_one_block in contexts/wallet/modules/wallet/src/
+ * wallet_rescan.c): no index entry, or no BLOCK_HAVE_DATA. */
+bool wallet_scan_height_has_data(const struct block_index *pi);
+
+/* Count the heights of [start_height, end_height] on `chain` that have no
+ * block body, by wallet_scan_height_has_data(). Fills `out` (required) and
+ * returns true when none is missing. An empty range (start > end) is
+ * complete. A NULL chain counts the whole range as missing. */
+bool wallet_scan_range_coverage(const struct active_chain *chain,
+                                int start_height, int end_height,
+                                struct wallet_scan_coverage *out);
 
 /* Open one canonical block file for mapping without granting write access.
  * The descriptor is close-on-exec (non-inheritable on Windows).
@@ -56,7 +85,12 @@ int wallet_scan_block_file_map(const char *path,
  * ts_start:       monotonic timestamp captured before Pass 1 (for totals)
  * ts_p1:          monotonic timestamp captured after Pass 1
  *
- * Returns the number of wallet transactions found, or -1 on error. */
+ * When matched_files > 0, Pass 2 rereads every height of the range before it
+ * writes anything; a height with no block body ends the scan with
+ * WALLET_SCAN_REFUSED_MISSING_DATA and no row is touched.
+ *
+ * Returns the number of wallet transactions found, -1 on error, or
+ * WALLET_SCAN_REFUSED_MISSING_DATA. */
 int wallet_scan_pass2_execute(struct node_db *ndb,
                               const struct active_chain *chain,
                               const char *datadir,

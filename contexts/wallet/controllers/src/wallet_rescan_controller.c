@@ -8,6 +8,26 @@
 #include "controllers/wallet_rescan_controller_internal.h"
 #include "wallet/wallet_lock.h"
 
+/* True when a row-replacing scan did not replace the rows, with the error
+ * body set: the coverage refusal (missing count, first missing height, rows
+ * kept, way out) or `failed` for any other scan failure. */
+static bool wallet_rescan_scan_refused(struct json_value *result,
+                                       const char *command, int found,
+                                       const struct wallet_scan_coverage *cov,
+                                       const char *failed)
+{
+    if (found >= 0)
+        return false;
+    if (found != WALLET_SCAN_REFUSED_MISSING_DATA) {
+        json_set_str(result, failed);
+        return true;
+    }
+    char msg[768];
+    wallet_scan_refusal_text(command, cov, msg, sizeof(msg));
+    json_set_str(result, msg);
+    return true;
+}
+
 static bool rpc_replaywalletfromchain(const struct json_value *params,
                                        bool help, struct json_value *result)
 {
@@ -47,24 +67,29 @@ static bool rpc_replaywalletfromchain(const struct json_value *params,
         return false;
     }
 
+    int chain_tip;
+    char tip_msg[320];
+    if (!wallet_scan_tip_for_replace(&ctx->main_state->chain_active,
+            "replaywalletfromchain", &chain_tip, tip_msg, sizeof(tip_msg))) {
+        json_set_str(result, tip_msg);
+        return false;
+    }
+
     int64_t old_balance = db_wallet_utxo_balance(ctx->node_db);
 
     wallet_rebuild_spent_set(ctx->wallet);
-
-    int chain_tip = active_chain_height(&ctx->main_state->chain_active);
 
     printf("replaywalletfromchain: rescanning %d blocks...\n",
            chain_tip + 1);
     fflush(stdout);
 
-    int found = wallet_scan_blocks(ctx->node_db,
+    struct wallet_scan_coverage cov;
+    int found = wallet_scan_blocks_checked(ctx->node_db,
         &ctx->main_state->chain_active, ctx->wallet, ctx->datadir,
-        0, chain_tip);
-    if (found < 0) {
-        json_set_str(result,
-                     "Wallet replay failed; previous projection retained");
+        0, chain_tip, &cov);
+    if (wallet_rescan_scan_refused(result, "replaywalletfromchain", found,
+            &cov, "Wallet replay failed; previous projection retained"))
         return false;
-    }
 
     int64_t new_balance = db_wallet_utxo_balance(ctx->node_db);
     int utxo_count = 0;
@@ -281,7 +306,8 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
         "Rescan the entire chain for wallet transactions using the current\n"
         "full key set. Finds UTXOs that were missed because keys were added\n"
         "after the initial scan. Imports them into SQLite and syncs the\n"
-        "in-memory wallet.");
+        "in-memory wallet. Refuses, keeping the wallet rows, when this node\n"
+        "holds no block data for some height up to the tip.");
 
     ENSURE_WALLET(result);
     if (!ctx->main_state) {
@@ -315,19 +341,24 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
 
     /* Full rescan from block 0. wallet_scan_blocks owns the sole atomic
      * replacement; retain the old projection if scanning or storage fails. */
-    int chain_tip = active_chain_height(&ctx->main_state->chain_active);
+    int chain_tip;
+    char tip_msg[320];
+    if (!wallet_scan_tip_for_replace(&ctx->main_state->chain_active,
+            "rescanwallet", &chain_tip, tip_msg, sizeof(tip_msg))) {
+        json_set_str(result, tip_msg);
+        return false;
+    }
     printf("rescanwallet: rescanning %d blocks with %zu keys...\n",
            chain_tip + 1, ctx->wallet->keystore.num_keys);
     fflush(stdout);
 
-    int found = wallet_scan_blocks(ctx->node_db,
+    struct wallet_scan_coverage cov;
+    int found = wallet_scan_blocks_checked(ctx->node_db,
         &ctx->main_state->chain_active, ctx->wallet, ctx->datadir,
-        0, chain_tip);
-    if (found < 0) {
-        json_set_str(result,
-                     "Wallet rescan failed; previous projection retained");
+        0, chain_tip, &cov);
+    if (wallet_rescan_scan_refused(result, "rescanwallet", found, &cov,
+            "Wallet rescan failed; previous projection retained"))
         return false;
-    }
 
     /* Now sync the in-memory wallet from the fresh SQLite data */
     struct db_wallet_utxo unspent[4096];

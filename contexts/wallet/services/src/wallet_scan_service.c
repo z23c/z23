@@ -78,6 +78,33 @@ int wallet_scan_block_file_map(const char *path,
     return fd;
 }
 
+bool wallet_scan_height_has_data(const struct block_index *pi)
+{
+    return pi && (pi->nStatus & BLOCK_HAVE_DATA);
+}
+
+bool wallet_scan_range_coverage(const struct active_chain *chain,
+                                int start_height, int end_height,
+                                struct wallet_scan_coverage *out)
+{
+    if (!out)
+        LOG_FAIL("wallet_scan", "range coverage: NULL output");
+    out->start_height = start_height;
+    out->end_height = end_height;
+    out->blocks_missing = 0;
+    out->first_missing = -1;
+    for (int64_t h = start_height; h <= (int64_t)end_height; h++) {
+        const struct block_index *pi =
+            chain ? active_chain_at(chain, (int)h) : NULL;
+        if (wallet_scan_height_has_data(pi))
+            continue;
+        if (out->first_missing < 0)
+            out->first_missing = (int)h;
+        out->blocks_missing++;
+    }
+    return out->blocks_missing == 0;
+}
+
 static void wallet_scan_rollback_best_effort(struct node_db *ndb,
                                              const char *label)
 {
@@ -288,29 +315,20 @@ write_fail:
             "result write failed; previous wallet projection retained");
 }
 
-static int wallet_scan_pass2_nonempty(struct node_db *ndb,
-                                      const struct active_chain *chain,
-                                      const char *datadir,
-                                      int start_height,
-                                      int end_height,
-                                      const struct scan_addr_ht *aht,
-                                      const bool *file_has_match,
-                                      const struct timespec *ts_start,
-                                      const struct timespec *ts_p1)
+/* Walk [start_height, end_height] in height order (spend tracking needs it)
+ * and fold every block of a Pass-1-matched file into uset/wl. Returns -1
+ * having stopped at the first height with no block body, which it stores in
+ * *hole; otherwise the number of blocks deserialized. Every height is
+ * checked before the file filter, so this is also the scan-time recheck of
+ * the caller's coverage guard. */
+static int wallet_scan_pass2_walk(const struct active_chain *chain,
+                                  const char *datadir,
+                                  int start_height, int end_height,
+                                  const struct scan_addr_ht *aht,
+                                  const bool *file_has_match,
+                                  struct scan_utxo_set *uset,
+                                  struct scan_wtx_list *wl, int *hole)
 {
-    struct timespec ts_p2;
-
-    /* ========== PASS 2: Selective block deserialization ========== */
-    struct scan_utxo_set uset;
-    scan_uset_init(&uset);
-    struct scan_wtx_list wl;
-    scan_wl_init(&wl);
-
-    /* We need to process blocks in height order for correct spend tracking.
-     * Build a set of heights whose blocks are in matched files, then
-     * iterate heights in order. */
-
-    /* First, find which heights map to matched files */
     int blocks_deserialized = 0;
     int cached_file = -1;
     int cached_fd = -1;
@@ -319,8 +337,11 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
 
     for (int h = start_height; h <= end_height; h++) {
         const struct block_index *pi = active_chain_at(chain, h);
-        if (!pi) continue;
-        if (!(pi->nStatus & BLOCK_HAVE_DATA)) continue;
+        if (!wallet_scan_height_has_data(pi)) {
+            *hole = h;
+            blocks_deserialized = -1;
+            break;
+        }
 
         /* Skip files that pass 1 ruled out */
         if (!file_has_match[pi->nFile]) continue;
@@ -356,13 +377,46 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
         }
         blocks_deserialized++;
 
-        (void)scan_block_txs(&blk, h, aht, &uset, &wl);
+        (void)scan_block_txs(&blk, h, aht, uset, wl);
 
         block_free(&blk);
     }
     platform_read_mapping_close(&cached_mapping);
     if (cached_fd >= 0)
         close(cached_fd);
+    return blocks_deserialized;
+}
+
+static int wallet_scan_pass2_nonempty(struct node_db *ndb,
+                                      const struct active_chain *chain,
+                                      const char *datadir,
+                                      int start_height,
+                                      int end_height,
+                                      const struct scan_addr_ht *aht,
+                                      const bool *file_has_match,
+                                      const struct timespec *ts_start,
+                                      const struct timespec *ts_p1)
+{
+    struct timespec ts_p2;
+
+    /* ========== PASS 2: Selective block deserialization ========== */
+    struct scan_utxo_set uset;
+    scan_uset_init(&uset);
+    struct scan_wtx_list wl;
+    scan_wl_init(&wl);
+
+    int hole = -1;
+    int blocks_deserialized = wallet_scan_pass2_walk(
+        chain, datadir, start_height, end_height, aht, file_has_match,
+        &uset, &wl, &hole);
+    if (blocks_deserialized < 0) {
+        scan_uset_free(&uset);
+        scan_wl_free(&wl);
+        LOG_WARN("wallet_scan",
+                 "wallet_scan: height %d has no block body; scan of %d..%d "
+                 "refused, wallet rows kept", hole, start_height, end_height);
+        return WALLET_SCAN_REFUSED_MISSING_DATA;
+    }
 
     platform_time_monotonic_timespec(&ts_p2);
     double p2_ms = (double)(ts_p2.tv_sec - ts_p1->tv_sec) * 1000.0 +

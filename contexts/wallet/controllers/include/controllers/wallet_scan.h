@@ -8,7 +8,9 @@
 
 #include "models/database.h"
 #include "models/wallet_key.h"
+#include "services/wallet_scan_service.h"
 #include "validation/chainstate.h"
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -19,15 +21,64 @@ struct wallet;
  * Scans blocks from start_height to end_height, using the active chain's
  * block_index entries for file locations. Finds wallet transactions using
  * a hash table of address hashes (O(1) lookup vs O(n) keystore scan).
- * Tracks UTXOs in memory and bulk-writes results to SQLite.
+ * Tracks UTXOs in memory and replaces wallet_utxos and wallet_transactions
+ * with what it found, in one SQLite transaction.
  *
- * Returns the number of wallet transactions found, or -1 on error. */
+ * Coverage guard: before Pass 1 reads a file or any row is deleted, every
+ * height of [start_height, end_height] must hold a block body
+ * (wallet_scan_range_coverage). If one does not, the scan returns
+ * WALLET_SCAN_REFUSED_MISSING_DATA and leaves both tables untouched, so a
+ * node started from a state bundle (no bodies below the bundle height) can
+ * never replace the rows with a result read from a range with holes. Pass 2
+ * rechecks every height before it writes. The empty-range path, and the
+ * no-keys path of a wallet with no watch-only address, read no block and
+ * skip the guard; a wallet whose only ids are watch-only (the scan loads
+ * none of them) passes the guard before its empty replace.
+ *
+ * Returns the number of wallet transactions found, -1 on error, or
+ * WALLET_SCAN_REFUSED_MISSING_DATA. */
 int wallet_scan_blocks(struct node_db *ndb,
                        const struct active_chain *chain,
                        const struct wallet *w,
                        const char *datadir,
                        int start_height,
                        int end_height);
+
+/* wallet_scan_blocks, and fills `coverage` (optional) with what the coverage
+ * guard counted: the missing-block count and first missing height that a
+ * refusal reports. On a path that skips the guard it reports the range with
+ * nothing missing. */
+int wallet_scan_blocks_checked(struct node_db *ndb,
+                               const struct active_chain *chain,
+                               const struct wallet *w,
+                               const char *datadir,
+                               int start_height,
+                               int end_height,
+                               struct wallet_scan_coverage *coverage);
+
+/* The way out of a refusal that exists on such a node: the below-tip body
+ * backfill (engine/services/src/body_backfill_service.c) fetches the missing
+ * bodies unless it was turned off. */
+#define WALLET_SCAN_MISSING_DATA_WAY_OUT \
+    "This node fetches missing blocks in the background unless it runs " \
+    "with -bodyhistorybackfill=off (-bodyhistorybackfill=normal fetches " \
+    "them faster)."
+
+/* The refusal body for a row-replacing command (rescanwallet, reindexdb,
+ * replaywalletfromchain) whose range lacks block bodies: the missing count,
+ * the first missing height, that the wallet rows were kept, and the way out.
+ * Writes at most cap bytes, always NUL-terminated when cap > 0. */
+void wallet_scan_refusal_text(const char *command,
+                              const struct wallet_scan_coverage *coverage,
+                              char *out, size_t cap);
+
+/* The tip a row-replacing command (rescanwallet, reindexdb,
+ * replaywalletfromchain) scans 0..tip to. False, with a refusal body in out,
+ * when the active chain has no tip: the range 0..-1 would take the empty-range
+ * path and replace the rows with nothing. */
+bool wallet_scan_tip_for_replace(const struct active_chain *chain,
+                                 const char *command, int *tip,
+                                 char *out, size_t cap);
 
 /* Blocks kept below a wallet birthday, so a short reorganisation of the chain
  * the wallet was created on cannot hide an early payment. */

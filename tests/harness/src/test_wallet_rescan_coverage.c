@@ -41,13 +41,22 @@
  *      under-reported spendable by the whole maturity boundary band
  *      (21 x 12.5) while listunspent was correct, and only a manual
  *      rescanblockchain from 0 restored the number.
+ *   R. The row-replacing scan (rescanwallet, reindexdb,
+ *      replaywalletfromchain, the boot catch-up scan) refuses a range with
+ *      bodiless heights and keeps wallet_utxos and wallet_transactions; a
+ *      fully bodied range, and a catch-up delta whose bodies are present,
+ *      still replace them.
  */
 
 #include "test/test_core.h"
 #include "platform/directory_compat.h"
 
 #include "controllers/wallet_controller.h"
+#include "controllers/wallet_scan.h"
+#include "config/boot_cursor_state.h"
 #include "config/boot_internal.h"
+#include "coins/coins_view.h"
+#include "models/wallet_tx.h"
 #include "chain/chainparams.h"
 #include "util/util.h"
 
@@ -1456,6 +1465,286 @@ static bool wrc_reject_invalid_body(struct wallet *wallet, const char *dir,
            wallet->num_wallet_tx == before;
 }
 
+/* ── R. The row-replacing scan against the coverage guard ───────────────
+ * rescanwallet, replaywalletfromchain and the boot catch-up scan rebuild
+ * wallet_utxos and wallet_transactions from the blocks. On a node started
+ * from a state bundle the heights below the bundle hold no body; a scan over
+ * them used to delete every row and write back only what the readable
+ * blocks held, report success, and drop the balance.
+ *
+ * The wallet here holds one key that owns no output of the fixture: what
+ * the readable blocks hold for it is nothing, so a scan that runs commits an
+ * empty result and the seeded stale row shows whether it ran. (A scan that
+ * finds a wallet transaction cannot commit at all today: the Pass-2 writer
+ * saves wallet_transactions rows with has_block and a blank block_hash,
+ * which db_wallet_tx_validate refuses, so that write rolls back.) */
+struct wrc_r {
+    struct node_db *ndb;
+    struct rpc_table *tbl;
+    const struct wallet *w;
+    struct main_state *ms;
+    const char *datadir;
+    struct block_index *idx;
+};
+
+#define WRC_R_STALE_VALUE 4242
+
+static int64_t wrc_r_count(struct node_db *ndb, const char *sql)
+{
+    sqlite3_stmt *st = NULL;
+    int64_t n = -1;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW)
+        n = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
+/* A wallet row pair no block of the fixture holds: a scan that replaced the
+ * rows drops it, a scan that kept them leaves it. */
+static bool wrc_r_seed_stale(struct node_db *ndb)
+{
+    static const uint8_t raw_tx[2] = {0x01, 0x02};
+    static const uint8_t script[3] = {0x76, 0xa9, 0x14};
+    struct db_wallet_tx tx;
+    struct db_wallet_utxo u;
+    memset(&tx, 0, sizeof(tx));
+    memset(&u, 0, sizeof(u));
+    memset(tx.txid, 0xee, sizeof(tx.txid));
+    tx.raw_tx = (uint8_t *)raw_tx;
+    tx.raw_tx_len = sizeof(raw_tx);
+    tx.time_received = 1;
+    memcpy(u.txid, tx.txid, sizeof(u.txid));
+    memset(u.address_hash, 0xee, sizeof(u.address_hash));
+    u.value = WRC_R_STALE_VALUE;
+    u.script = (uint8_t *)script;
+    u.script_len = sizeof(script);
+    u.height = 3;
+    return db_wallet_tx_save(ndb, &tx) && db_wallet_utxo_save(ndb, &u);
+}
+
+static bool wrc_r_has_stale(struct node_db *ndb)
+{
+    return wrc_r_count(ndb, "SELECT count(*) FROM wallet_utxos WHERE "
+                            "value = 4242") == 1 &&
+           wrc_r_count(ndb, "SELECT count(*) FROM wallet_transactions "
+                            "WHERE hex(txid) GLOB 'EEEEEEEEEEEE*'") == 1;
+}
+
+struct wrc_r_rows {
+    int64_t utxos, txs, balance;
+    uint64_t utxo_fold, tx_fold;
+    bool folded;
+};
+
+/* FNV-1a over the type and bytes of every column of every row, in key
+ * order: equal folds mean the table is byte-for-byte unchanged. */
+static bool wrc_r_fold(struct node_db *ndb, const char *sql, uint64_t *fold)
+{
+    sqlite3_stmt *st = NULL;
+    *fold = 1469598103934665603ULL;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        for (int c = 0; c < sqlite3_column_count(st); c++) {
+            const uint8_t *p = sqlite3_column_blob(st, c);
+            int n = sqlite3_column_bytes(st, c);
+            *fold = (*fold ^ (uint64_t)sqlite3_column_type(st, c)) *
+                    1099511628211ULL;
+            for (int i = 0; p && i < n; i++)
+                *fold = (*fold ^ p[i]) * 1099511628211ULL;
+        }
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+static struct wrc_r_rows wrc_r_rows_now(struct node_db *ndb)
+{
+    struct wrc_r_rows r = {
+        .utxos = wrc_r_count(ndb, "SELECT count(*) FROM wallet_utxos"),
+        .txs = wrc_r_count(ndb, "SELECT count(*) FROM wallet_transactions"),
+        .balance = db_wallet_utxo_balance(ndb),
+    };
+    r.folded = wrc_r_fold(ndb, "SELECT * FROM wallet_utxos ORDER BY txid, vout",
+                          &r.utxo_fold) &&
+               wrc_r_fold(ndb, "SELECT * FROM wallet_transactions ORDER BY txid",
+                          &r.tx_fold);
+    return r;
+}
+
+static bool wrc_r_rows_equal(struct wrc_r_rows a, struct wrc_r_rows b)
+{
+    return a.folded && b.folded && a.utxos >= 0 && a.txs >= 0 &&
+           a.utxos == b.utxos && a.txs == b.txs && a.balance == b.balance &&
+           a.utxo_fold == b.utxo_fold && a.tx_fold == b.tx_fold;
+}
+
+/* Run a wallet RPC; the reply text (or "") lands in out. */
+static bool wrc_r_rpc(const struct wrc_r *r, const char *method, bool confirm,
+                      char *out, size_t cap)
+{
+    struct json_value params, result, v;
+    json_init(&params);
+    json_set_array(&params);
+    if (confirm) {
+        json_init(&v);
+        json_set_bool(&v, true);
+        json_push_back(&params, &v);
+        json_free(&v);
+    }
+    json_init(&result);
+    bool ok = rpc_table_execute(r->tbl, method, &params, &result);
+    const char *s = json_get_str(&result);
+    snprintf(out, cap, "%s", s ? s : "");
+    if (!ok)
+        printf("[%s: %s] ", method, out);
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+/* R1, the positive control: every body present, the rescan replaces the
+ * rows with what the blocks hold. */
+static int wrc_r_full_range_replaces(const struct wrc_r *r)
+{
+    int failures = 0;
+    wrc_set_have_data(r->idx, WRC_NBLOCKS, true);
+    char reply[1024];
+    WRC_CHECK("R1: seed a wallet row no block holds",
+              wrc_r_seed_stale(r->ndb) && wrc_r_has_stale(r->ndb));
+    WRC_CHECK("R1: rescanwallet over a fully bodied range succeeds",
+              wrc_r_rpc(r, "rescanwallet", false, reply, sizeof(reply)));
+    WRC_CHECK("R1: it replaced the rows: the stale row is gone",
+              !wrc_r_has_stale(r->ndb));
+    WRC_CHECK("R1: the rows now hold what the blocks hold for this key: none",
+              wrc_r_count(r->ndb, "SELECT count(*) FROM wallet_utxos") == 0 &&
+              wrc_r_count(r->ndb,
+                          "SELECT count(*) FROM wallet_transactions") == 0);
+    return failures;
+}
+
+/* R2/R3: heights 0..149 hold no body; every row-replacing RPC refuses and
+ * the rows stay as they were. */
+static int wrc_r_holed_range_refused(const struct wrc_r *r,
+                                     const char *method, bool confirm)
+{
+    int failures = 0;
+    char name[160], reply[1024];
+    struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
+    bool ok = wrc_r_rpc(r, method, confirm, reply, sizeof(reply));
+    struct wrc_r_rows after = wrc_r_rows_now(r->ndb);
+    snprintf(name, sizeof(name), "R: %s over a range with 150 bodiless "
+             "heights is refused", method);
+    WRC_CHECK(name, !ok && strstr(reply, "refused") != NULL);
+    snprintf(name, sizeof(name), "R: %s names the missing count, the first "
+             "missing height and that the rows were kept", method);
+    WRC_CHECK(name,
+              strstr(reply, "no block data for 150 of the blocks at "
+                            "heights 0..199") != NULL &&
+              strstr(reply, "first missing height 0") != NULL &&
+              strstr(reply, "were kept unchanged") != NULL);
+    snprintf(name, sizeof(name), "R: %s left the wallet rows and the durable "
+             "balance as they were", method);
+    WRC_CHECK(name, wrc_r_rows_equal(before, after) &&
+                    wrc_r_has_stale(r->ndb));
+    return failures;
+}
+
+/* R6: the scan-time recheck. A body lost between the guard and Pass 2 (a
+ * reorg into the range) stops Pass 2 before it writes. Called directly, as
+ * the guard has already passed by the time Pass 2 runs. */
+static int wrc_r_pass2_recheck(const struct wrc_r *r)
+{
+    int failures = 0;
+    struct scan_addr_ht aht;
+    scan_aht_init(&aht);
+    const bool match[1] = {true};
+    const struct timespec t = {.tv_sec = 1};
+    struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
+    int rc = wallet_scan_pass2_execute(r->ndb, &r->ms->chain_active,
+                                       r->datadir, 0, WRC_NBLOCKS - 1,
+                                       &aht, match, 1, &t, &t);
+    scan_aht_free(&aht);
+    WRC_CHECK("R6: Pass 2 refuses at the first height with no body",
+              rc == WALLET_SCAN_REFUSED_MISSING_DATA);
+    WRC_CHECK("R6: and leaves the wallet rows as they were",
+              wrc_r_rows_equal(before, wrc_r_rows_now(r->ndb)) &&
+              wrc_r_has_stale(r->ndb));
+    return failures;
+}
+
+/* R4/R5: the boot catch-up scan. A delta range whose bodies are all present
+ * scans as before; a full range with holes keeps the rows and the cursor. */
+static int wrc_r_boot_scan(const struct wrc_r *r)
+{
+    int failures = 0;
+    const struct active_chain *chain = &r->ms->chain_active;
+    const int64_t fp = (int64_t)wallet_scan_keyset_fp(r->w);
+    int64_t cursor = 0;
+
+    struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
+    bool reset = node_db_state_set_int(r->ndb, BOOT_CUR_WALLET, -1) &&
+                 node_db_state_set_int(r->ndb, BOOT_CUR_WALLET_KS, fp);
+    int refused = boot_cursor_scan_wallet(r->ndb, chain, r->w, r->datadir,
+                                          WRC_NBLOCKS - 1);
+    WRC_CHECK("R5: a boot scan from genesis over bodiless heights refuses",
+              reset && refused < 0);
+    WRC_CHECK("R5: it keeps the wallet rows and leaves the cursor unstamped",
+              wrc_r_rows_equal(before, wrc_r_rows_now(r->ndb)) &&
+              wrc_r_has_stale(r->ndb) &&
+              node_db_state_get_int(r->ndb, BOOT_CUR_WALLET, &cursor) &&
+              cursor == -1);
+
+    bool delta = node_db_state_set_int(r->ndb, BOOT_CUR_WALLET, 149);
+    int found = boot_cursor_scan_wallet(r->ndb, chain, r->w, r->datadir,
+                                        WRC_NBLOCKS - 1);
+    WRC_CHECK("R4: the catch-up delta 150..199, every body present, scans",
+              delta && found == 0);
+    WRC_CHECK("R4: it replaces the rows and stamps the cursor, as before",
+              !wrc_r_has_stale(r->ndb) &&
+              node_db_state_get_int(r->ndb, BOOT_CUR_WALLET, &cursor) &&
+              cursor == WRC_NBLOCKS - 1);
+    return failures;
+}
+
+static int wrc_r_coverage_guard(const struct wrc_r *r)
+{
+    int failures = 0;
+    struct coins_view backing;
+    struct coins_view_cache cache;
+    memset(&backing, 0, sizeof(backing));
+    coins_view_cache_init(&cache, &backing);
+    rpc_wallet_set_coins_tip(&cache);
+    /* Pin the scan's block directory to the fixture (mainnet params: the
+     * network directory is the base), so no path reaches a real datadir. */
+    bool pinned = chmod(r->datadir, 0700) == 0 && SetDataDir(r->datadir);
+    WRC_CHECK("R: scan block directory pinned to the fixture", pinned);
+    if (pinned) {
+        failures += wrc_r_full_range_replaces(r);
+        for (int i = 0; i < 150; i++)
+            r->idx[i].nStatus &= ~BLOCK_HAVE_DATA;
+        WRC_CHECK("R2: seed the stale row again",
+                  wrc_r_seed_stale(r->ndb) && wrc_r_has_stale(r->ndb));
+        failures += wrc_r_holed_range_refused(r, "rescanwallet", false);
+        failures += wrc_r_holed_range_refused(r, "reindexdb", false);
+        failures += wrc_r_holed_range_refused(r, "replaywalletfromchain",
+                                              true);
+        failures += wrc_r_pass2_recheck(r);
+        failures += wrc_r_boot_scan(r);
+    }
+    wrc_set_have_data(r->idx, WRC_NBLOCKS, true);
+    WRC_CHECK("R: clear the rows this section wrote",
+              db_wallet_utxo_delete_all(r->ndb) &&
+              db_wallet_tx_delete_all(r->ndb));
+    SetDataDir("");
+    ClearDataDirCache();
+    rpc_wallet_set_coins_tip(NULL);
+    coins_view_cache_free(&cache);
+    return failures;
+}
+
 int test_wallet_rescan_coverage(void);
 int test_wallet_rescan_coverage(void)
 {
@@ -1648,6 +1937,20 @@ int test_wallet_rescan_coverage(void)
                          "RESCAN_INCONCLUSIVE_ZERO") == 0);
         json_free(&params);
         json_free(&result);
+    }
+
+    /* ── R. rescanwallet, reindexdb, replaywalletfromchain and the boot
+     * catch-up scan against the coverage guard ── */
+    {
+        struct pubkey pk2;
+        memset(&pk2, 0, sizeof(pk2));
+        WRC_CHECK("R: wallet2 generates a key that owns no fixture output",
+                  wallet_generate_new_key(w2, &pk2));
+        const struct wrc_r r = {
+            .ndb = &ndb, .tbl = &wtbl, .w = w2, .ms = &ms,
+            .datadir = datadir, .idx = idx,
+        };
+        failures += wrc_r_coverage_guard(&r);
     }
 
     failures += wrc_boot_catch_up_body_root(w1, &ms, datadir, idx);

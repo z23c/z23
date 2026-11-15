@@ -180,29 +180,111 @@ static void import_confirmed_rows(struct wallet_rpc_context *ctx,
     }
 }
 
+/* The tails of the import warning: on a node holding every block body the
+ * advice is rescanwallet; on one that does not, rescanwallet refuses (see
+ * wallet_scan_blocks), so the warning says what is true instead. */
+struct import_phrases {
+    const char *withheld;
+    const char *skipped;
+    const char *capped;
+};
+
+static const struct import_phrases import_phrases_full = {
+    " Once it is, run rescanwallet to rebuild wallet_utxos from the blocks.",
+    " Run rescanwallet to rebuild wallet_utxos from the blocks.",
+    "rescanwallet covers the rest.",
+};
+
+static const struct import_phrases import_phrases_holed = {
+    "", "", "the rest were not copied.",
+};
+
+/* importaddress: the scan loads no watch-only id, so rescanwallet never
+ * rebuilds a watch-only row on any node. */
+static const struct import_phrases import_phrases_watch_only = {
+    " rescanwallet does not rediscover watch-only coins; run importaddress "
+    "again once it is.",
+    " rescanwallet does not rediscover watch-only coins.",
+    "the rest were not copied, and rescanwallet does not rediscover "
+    "watch-only coins.",
+};
+
+/* Whether rescanwallet could rebuild wallet_utxos here: every height up to
+ * the tip holds a block body. With no chain view rescanwallet refuses before
+ * it touches a row, so today's advice stands there. */
+static bool import_rescan_possible(const struct wallet_rpc_context *ctx,
+                                   struct wallet_scan_coverage *cov)
+{
+    if (!ctx->main_state) {
+        *cov = (struct wallet_scan_coverage){.first_missing = -1};
+        return true;
+    }
+    const struct active_chain *chain = &ctx->main_state->chain_active;
+    return wallet_scan_range_coverage(chain, 0, active_chain_height(chain),
+                                      cov);
+}
+
+/* Append, after the warning, why rescanwallet cannot help yet. */
+static void import_holed_advice(char *msg, size_t cap, int n,
+                                const struct wallet_scan_coverage *cov)
+{
+    if (n < 0 || (size_t)n >= cap)
+        return;
+    snprintf(msg + n, cap - (size_t)n,
+             " rescanwallet cannot rebuild wallet_utxos on this node yet: it "
+             "holds no block data for %lld of heights %d..%d (first missing "
+             "height %d), and rescanwallet refuses rather than replace the "
+             "wallet rows from an incomplete range. "
+             WALLET_SCAN_MISSING_DATA_WAY_OUT
+             " Run rescanwallet once they are present.",
+             (long long)cov->blocks_missing, cov->start_height,
+             cov->end_height, cov->first_missing);
+}
+
+/* The tails for this import, and whether the holed-node advice follows. */
+static const struct import_phrases *import_phrases_pick(
+    const struct wallet_rpc_context *ctx, bool watch_only,
+    struct wallet_scan_coverage *cov, bool *holed)
+{
+    *cov = (struct wallet_scan_coverage){.first_missing = -1};
+    *holed = false;
+    if (watch_only)
+        return &import_phrases_watch_only;
+    *holed = !import_rescan_possible(ctx, cov);
+    return *holed ? &import_phrases_holed : &import_phrases_full;
+}
+
 /* The warning an import owes the caller, or false when every row agreed.
  * rescanwallet rewrites wallet_utxos from the blocks and needs the coins
- * database; rescanblockchain does not (it changes the in-memory wallet only). */
+ * database; rescanblockchain does not (it changes the in-memory wallet only).
+ * A watch-only import (importaddress) is never told to run rescanwallet. */
 static bool import_warning(char *msg, size_t cap, bool have_db,
-                           const struct import_tally *tally)
+                           const struct import_tally *tally,
+                           const struct wallet_rpc_context *ctx,
+                           bool watch_only)
 {
+    struct wallet_scan_coverage cov;
+    bool holed;
+    const struct import_phrases *ph =
+        import_phrases_pick(ctx, watch_only, &cov, &holed);
     int n = 0;
     msg[0] = '\0';
     if (tally->withheld && have_db)
         n = snprintf(msg, cap,
                      "Imported; coin discovery withheld: the coins database "
-                     "is unavailable. Once it is, run rescanwallet to rebuild "
-                     "wallet_utxos from the blocks.");
+                     "is unavailable.%s", ph->withheld);
     else if (tally->skipped > 0)
         n = snprintf(msg, cap,
                      "Imported; %d utxos rows skipped because the coins "
-                     "database does not confirm them. Run rescanwallet to "
-                     "rebuild wallet_utxos from the blocks.", tally->skipped);
+                     "database does not confirm them.%s", tally->skipped,
+                     ph->skipped);
     if (tally->capped && n >= 0 && (size_t)n < cap)
-        snprintf(msg + n, cap - (size_t)n,
-                 "%sOnly the first %d rows were looked at; rescanwallet "
-                 "covers the rest.", n > 0 ? " " : "Imported; ",
-                 WALLET_IMPORT_ROW_CAP);
+        n += snprintf(msg + n, cap - (size_t)n,
+                      "%sOnly the first %d rows were looked at; %s",
+                      n > 0 ? " " : "Imported; ", WALLET_IMPORT_ROW_CAP,
+                      ph->capped);
+    if (holed && msg[0] != '\0')
+        import_holed_advice(msg, cap, n, &cov);
     return msg[0] != '\0';
 }
 
@@ -213,8 +295,9 @@ static void import_set_reply(struct json_value *result,
                              const struct wallet_rpc_context *ctx,
                              const struct import_tally *tally)
 {
-    char msg[384];
-    if (!import_warning(msg, sizeof(msg), ctx->node_db != NULL, tally)) {
+    char msg[1024];
+    if (!import_warning(msg, sizeof(msg), ctx->node_db != NULL, tally, ctx,
+                        false)) {
         if (ctx->node_db)
             printf("importprivkey: %d UTXOs imported (instant)\n",
                    tally->imported);
@@ -405,8 +488,9 @@ bool rpc_importaddress(const struct json_value *params, bool help,
     json_push_kv_bool(result, "watch_only", true);
     json_push_kv_int(result, "utxos", tally.imported);
     json_push_kv_real(result, "balance", (double)tally.value / 1e8);
-    char msg[384];
-    if (import_warning(msg, sizeof(msg), ctx->node_db != NULL, &tally)) {
+    char msg[1024];
+    if (import_warning(msg, sizeof(msg), ctx->node_db != NULL, &tally, ctx,
+                       true)) {
         LOG_WARN("wallet", "importaddress: %s", msg);
         json_push_kv_int(result, "utxos_skipped", tally.skipped);
         json_push_kv_bool(result, "coin_discovery_withheld", tally.withheld);

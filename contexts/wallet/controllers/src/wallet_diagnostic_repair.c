@@ -110,7 +110,8 @@ bool rpc_reindexdb(const struct json_value *params, bool help,
         "reindexdb\n"
         "Wipes wallet_utxos, wallet_transactions, and wallet_sapling_notes,\n"
         "then re-scans all blocks from disk to rebuild them.\n"
-        "Returns the corrected balance.\n");
+        "Returns the corrected balance. Refuses, changing nothing, when this\n"
+        "node holds no block data for some height up to the tip.\n");
 
     if (!wallet_ctx_db_ready(ctx)) {
         json_set_str(result, "SQLite database not available");
@@ -125,13 +126,33 @@ bool rpc_reindexdb(const struct json_value *params, bool help,
         return false;
     }
 
-    int chain_tip = active_chain_height(&ctx->main_state->chain_active);
+    int chain_tip;
+    char tip_msg[320];
+    if (!wallet_scan_tip_for_replace(&ctx->main_state->chain_active,
+            "reindexdb", &chain_tip, tip_msg, sizeof(tip_msg))) {
+        json_set_str(result, tip_msg);
+        return false;
+    }
     printf("reindexdb: fast wallet scan of %d blocks...\n", chain_tip + 1);
     fflush(stdout);
 
-    int found = wallet_scan_blocks(ctx->node_db,
+    struct wallet_scan_coverage cov;
+    int found = wallet_scan_blocks_checked(ctx->node_db,
         &ctx->main_state->chain_active, ctx->wallet, ctx->datadir,
-        0, chain_tip);
+        0, chain_tip, &cov);
+    if (found < 0) {
+        /* Nothing was replaced: answer before the flush and the balance
+         * report, which would describe the kept rows as a repair. */
+        char msg[768];
+        if (found == WALLET_SCAN_REFUSED_MISSING_DATA)
+            wallet_scan_refusal_text("reindexdb", &cov, msg, sizeof(msg));
+        else
+            snprintf(msg, sizeof(msg),
+                     "reindexdb: wallet scan failed; previous wallet rows "
+                     "retained");
+        json_set_str(result, msg);
+        return false;
+    }
 
     /* Persist the repaired wallet through the encryption-aware writer —
      * the single writer of the wallet key tables (the old plaintext

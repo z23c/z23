@@ -423,6 +423,121 @@ void wallet_birthday_reconcile(struct wallet *w, struct node_db *ndb,
     zcl_mutex_unlock(&w->cs);
 }
 
+void wallet_scan_refusal_text(const char *command,
+                              const struct wallet_scan_coverage *coverage,
+                              char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    if (!command)
+        command = "the wallet scan";
+    if (!coverage) {
+        snprintf(out, cap, "%s refused: block coverage unknown; wallet rows "
+                 "were kept unchanged.", command);
+        return;
+    }
+    snprintf(out, cap,
+             "%s refused: this node holds no block data for %lld of the "
+             "blocks at heights %d..%d (first missing height %d), so a scan "
+             "would replace the wallet rows with an incomplete result. The "
+             "wallet rows (wallet_utxos, wallet_transactions) were kept "
+             "unchanged. " WALLET_SCAN_MISSING_DATA_WAY_OUT " Run %s again "
+             "once they are present; rescanblockchain reports which blocks "
+             "of a range this node can read.",
+             command, (long long)coverage->blocks_missing,
+             coverage->start_height, coverage->end_height,
+             coverage->first_missing, command);
+}
+
+bool wallet_scan_tip_for_replace(const struct active_chain *chain,
+                                 const char *command, int *tip,
+                                 char *out, size_t cap)
+{
+    *tip = chain ? active_chain_height(chain) : -1;
+    if (*tip >= 0)
+        return true;
+    if (out && cap > 0)
+        snprintf(out, cap, "%s refused: the active chain has no tip yet, so "
+                 "a scan would replace the wallet rows with an empty result. "
+                 "The wallet rows (wallet_utxos, wallet_transactions) were "
+                 "kept unchanged. Run %s again once the node has loaded its "
+                 "chain.", command ? command : "the wallet scan",
+                 command ? command : "it");
+    return false;
+}
+
+/* The coverage guard: true when every height of the range holds a block
+ * body. Runs before Pass 1 and before any row is deleted. */
+static bool wallet_scan_guard_range(const struct active_chain *chain,
+                                    int start_height, int end_height,
+                                    struct wallet_scan_coverage *cov)
+{
+    if (wallet_scan_range_coverage(chain, start_height, end_height, cov))
+        return true;
+    LOG_WARN("wallet_scan",
+             "wallet_scan: %lld of heights %d..%d have no block body (first "
+             "%d); scan refused, wallet rows kept",
+             (long long)cov->blocks_missing, start_height, end_height,
+             cov->first_missing);
+    return false;
+}
+
+/* The caller's coverage record, or `local` when it passed none, set to the
+ * range with nothing counted missing yet. */
+static struct wallet_scan_coverage *wallet_scan_coverage_reset(
+    struct wallet_scan_coverage *coverage, struct wallet_scan_coverage *local,
+    int start_height, int end_height)
+{
+    struct wallet_scan_coverage *cov = coverage ? coverage : local;
+    *cov = (struct wallet_scan_coverage){
+        .start_height = start_height, .end_height = end_height,
+        .blocks_missing = 0, .first_missing = -1,
+    };
+    return cov;
+}
+
+/* Pass 2 behind a second look at the range: Pass 1 can run for minutes, and
+ * a zero-match result writes without walking a height, so the guard runs
+ * again right before Pass 2 may replace the rows. */
+static int wallet_scan_pass2_guarded(struct node_db *ndb,
+                                     const struct active_chain *chain,
+                                     const char *datadir,
+                                     int start_height, int end_height,
+                                     const struct scan_addr_ht *aht,
+                                     const bool *file_has_match,
+                                     int matched_files,
+                                     const struct timespec *ts_start,
+                                     const struct timespec *ts_p1,
+                                     struct wallet_scan_coverage *cov)
+{
+    if (!wallet_scan_guard_range(chain, start_height, end_height, cov))
+        return WALLET_SCAN_REFUSED_MISSING_DATA;
+    return wallet_scan_pass2_execute(ndb, chain, datadir,
+                                     start_height, end_height,
+                                     aht, file_has_match, matched_files,
+                                     ts_start, ts_p1);
+}
+
+/* The no-keys path: nothing to match, so no block is read and the replace
+ * writes an empty result. A wallet holding watch-only addresses still has
+ * rows to lose (importaddress seeds them; the scan loads no watch-only id),
+ * so its empty replace passes the same coverage guard first. */
+static int wallet_scan_zero_keys(struct node_db *ndb,
+                                 const struct active_chain *chain,
+                                 const struct wallet *w, const char *datadir,
+                                 int start_height, int end_height,
+                                 const struct scan_addr_ht *aht,
+                                 struct wallet_scan_coverage *cov)
+{
+    printf("wallet_scan: no wallet keys, skipping block scan\n");
+    if (w->keystore.num_watching > 0 &&
+        !wallet_scan_guard_range(chain, start_height, end_height, cov))
+        return WALLET_SCAN_REFUSED_MISSING_DATA;
+    return wallet_scan_pass2_execute(ndb, chain, datadir,
+                                     start_height, end_height,
+                                     aht, NULL, 0, NULL, NULL);
+}
+
 /* --- Main entry point --- */
 int wallet_scan_blocks(struct node_db *ndb,
                        const struct active_chain *chain,
@@ -431,6 +546,22 @@ int wallet_scan_blocks(struct node_db *ndb,
                        int start_height,
                        int end_height)
 {
+    return wallet_scan_blocks_checked(ndb, chain, w, datadir,
+                                      start_height, end_height, NULL);
+}
+
+int wallet_scan_blocks_checked(struct node_db *ndb,
+                               const struct active_chain *chain,
+                               const struct wallet *w,
+                               const char *datadir,
+                               int start_height,
+                               int end_height,
+                               struct wallet_scan_coverage *coverage)
+{
+    struct wallet_scan_coverage local_cov;
+    struct wallet_scan_coverage *cov =
+        wallet_scan_coverage_reset(coverage, &local_cov,
+                                   start_height, end_height);
     if (!wallet_scan_args_valid(ndb, chain, w, datadir))
         LOG_ERR("wallet_scan", "scan_blocks: invalid args (ndb=%p chain=%p w=%p datadir=%p)",
                 (void *)ndb, (void *)chain, (void *)w, (void *)datadir);
@@ -471,12 +602,20 @@ int wallet_scan_blocks(struct node_db *ndb,
      * looking for hashes that aren't in the set — minutes of
      * pointless disk I/O. */
     if (aht.count == 0) {
-        printf("wallet_scan: no wallet keys, skipping block scan\n");
-        int empty_result = wallet_scan_pass2_execute(
-            ndb, chain, datadir, start_height, end_height,
-            &aht, NULL, 0, NULL, NULL);
+        int empty_result = wallet_scan_zero_keys(ndb, chain, w, datadir,
+                                                 start_height, end_height,
+                                                 &aht, cov);
         scan_aht_free(&aht);
         return empty_result;
+    }
+
+    /* Coverage guard, before any block file is read or any row deleted. The
+     * guard and Pass 2 read the same `chain` over the same fixed range; a
+     * tip that advances past end_height does not change it, and Pass 2
+     * refuses on any height that has lost its body since. */
+    if (!wallet_scan_guard_range(chain, start_height, end_height, cov)) {
+        scan_aht_free(&aht);
+        return WALLET_SCAN_REFUSED_MISSING_DATA;
     }
 
     /* Determine which block files exist + capture their current sizes. */
@@ -568,10 +707,10 @@ int wallet_scan_blocks(struct node_db *ndb,
      * SQLite result-write transaction — is a Service. The Controller owns the
      * address hash table and the Pass-1 match array; it hands them to the
      * Service by const reference and frees them afterward. */
-    int found = wallet_scan_pass2_execute(ndb, chain, datadir,
+    int found = wallet_scan_pass2_guarded(ndb, chain, datadir,
                                           start_height, end_height,
                                           &aht, file_has_match, matched_files,
-                                          &ts_start, &ts_p1);
+                                          &ts_start, &ts_p1, cov);
 
     /* Cleanup */
     scan_aht_free(&aht);

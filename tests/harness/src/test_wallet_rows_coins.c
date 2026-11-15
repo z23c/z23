@@ -29,6 +29,7 @@
 #include "script/standard.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
+#include "util/util.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "wallet/keystore.h"
@@ -62,6 +63,7 @@ struct wrc_fx {
     struct wallet *w;
     struct main_state ms;
     struct block_index tip;
+    struct block_index *below;   /* heights 0..WRC_TIP-1 */
     struct node_db ndb;
     struct coins_view nv;
     struct coins_view_cache cache;
@@ -75,6 +77,9 @@ struct wrc_fx {
     bool ok;
 };
 
+/* A node with full history: every height 0..WRC_TIP is indexed and claims
+ * its block body. wrc_drop_bodies() turns it into a node started from a
+ * state bundle. */
 static bool wrc_make_chain(struct wrc_fx *fx)
 {
     main_state_init(&fx->ms);
@@ -82,12 +87,26 @@ static bool wrc_make_chain(struct wrc_fx *fx)
     fx->ms.chain_active.capacity = WRC_TIP + 1;
     fx->ms.chain_active.chain =
         calloc((size_t)(WRC_TIP + 1), sizeof(*fx->ms.chain_active.chain));
-    if (!fx->ms.chain_active.chain)
+    fx->below = calloc((size_t)WRC_TIP, sizeof(*fx->below));
+    if (!fx->ms.chain_active.chain || !fx->below)
         return false;
+    for (int h = 0; h < WRC_TIP; h++) {
+        fx->below[h].nHeight = h;
+        fx->below[h].nStatus = BLOCK_HAVE_DATA;
+        fx->ms.chain_active.chain[h] = &fx->below[h];
+    }
     memset(&fx->tip, 0, sizeof(fx->tip));
     fx->tip.nHeight = WRC_TIP;
+    fx->tip.nStatus = BLOCK_HAVE_DATA;
     fx->ms.chain_active.chain[WRC_TIP] = &fx->tip;
     return true;
+}
+
+/* The fast-started node: indexed below the tip, with no block body there. */
+static void wrc_drop_bodies(struct wrc_fx *fx)
+{
+    for (int h = 0; h < WRC_TIP; h++)
+        fx->below[h].nStatus &= ~BLOCK_HAVE_DATA;
 }
 
 static bool wrc_make_keys(struct wrc_fx *fx)
@@ -158,6 +177,8 @@ static void wrc_close(struct wrc_fx *fx)
         fx->ms.chain_active.height = -1;
         fx->ms.chain_active.capacity = 0;
     }
+    free(fx->below);
+    fx->below = NULL;
     main_state_free(&fx->ms);
     if (fx->w) {
         wallet_free(fx->w);
@@ -520,6 +541,277 @@ static int wrc_importaddress_says_when_capped(void)
     return failures;
 }
 
+/* ---- the import warning on a node started from a state bundle ---- */
+
+/* The holed-node warning: what is true, and never the rescanwallet advice
+ * that would erase the rows this import just copied. */
+static bool wrc_holed_text(const char *s)
+{
+    return s && strstr(s, "no block data for 200 of heights 0..200") &&
+           strstr(s, "first missing height 0") &&
+           strstr(s, "-bodyhistorybackfill") &&
+           !strstr(s, "Run rescanwallet to rebuild") &&
+           !strstr(s, "run rescanwallet to rebuild") &&
+           !strstr(s, "rescanwallet covers the rest");
+}
+
+static int wrc_import_holed_node_skipped(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: importprivkey on a bundle-started node does not advise rescanwallet") {
+        struct wrc_row rows[] = {
+            {WRC_AGREE, 1, 7, 7, false},
+            {WRC_BAD_AMOUNT, 2, 7, 7, false},
+        };
+        ASSERT(wrc_open(&fx, true));
+        wrc_drop_bodies(&fx);
+        ASSERT(wrc_seed_utxos(&fx, rows, 2));
+        struct json_value result;
+        ASSERT(wrc_import(&fx, &result));
+        ASSERT(wrc_wallet_rows(&fx) == 1);
+        ASSERT(wrc_reply_has(&result, "1 utxos rows skipped"));
+        ASSERT(wrc_holed_text(json_get_str(&result)));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int wrc_import_holed_node_withheld(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: a withheld import on a bundle-started node does not advise rescanwallet") {
+        struct wrc_row rows[] = {{WRC_AGREE, 1, 7, 7, false}};
+        ASSERT(wrc_open(&fx, false));
+        wrc_drop_bodies(&fx);
+        ASSERT(wrc_seed_utxos(&fx, rows, 1));
+        struct json_value result;
+        ASSERT(wrc_import(&fx, &result));
+        ASSERT(wrc_reply_has(&result, "coin discovery withheld"));
+        ASSERT(wrc_holed_text(json_get_str(&result)));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int wrc_import_holed_node_capped(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: a capped import on a bundle-started node says the rest were not copied") {
+        ASSERT(wrc_open(&fx, true));
+        wrc_drop_bodies(&fx);
+        ASSERT(wrc_seed_over_cap(&fx));
+        struct json_value result;
+        ASSERT(wrc_import(&fx, &result));
+        ASSERT(wrc_wallet_rows(&fx) == WALLET_IMPORT_ROW_CAP);
+        ASSERT(wrc_reply_has(&result, "the rest were not copied"));
+        ASSERT(wrc_holed_text(json_get_str(&result)));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* importaddress: the scan loads no watch-only id, so rescanwallet never
+ * rebuilds a watch-only row (on a full-history node it drops it). The
+ * warning says so and names no rescanwallet step, on either kind of node. */
+static int wrc_importaddress_no_rescan_advice(bool holed)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST(holed ? "wallet_rows_coins: importaddress on a bundle-started node does not advise rescanwallet"
+               : "wallet_rows_coins: importaddress on a full-history node does not advise rescanwallet") {
+        struct wrc_row rows[] = {
+            {WRC_AGREE, 1, 7, 7, false},
+            {WRC_BAD_AMOUNT, 2, 7, 7, false},
+        };
+        ASSERT(wrc_open(&fx, true));
+        if (holed)
+            wrc_drop_bodies(&fx);
+        ASSERT(wrc_seed_utxos(&fx, rows, 2));
+        struct json_value result;
+        ASSERT(wrc_import_address(&fx, &result));
+        ASSERT(json_get_int(json_get(&result, "utxos_skipped")) == 1);
+        const char *s = json_get_str(json_get(&result, "warning"));
+        ASSERT(s && strstr(s, "1 utxos rows skipped"));
+        ASSERT(strstr(s, "rescanwallet does not rediscover watch-only coins"));
+        ASSERT(!strstr(s, "Run rescanwallet") && !strstr(s, "run rescanwallet"));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ---- rescanwallet and reindexdb on a node started from a state bundle ---- */
+
+/* Row count and an FNV-1a fold of every column of every row, in key order:
+ * equal before and after means the table is byte-for-byte unchanged. */
+static bool wrc_table_digest(struct wrc_fx *fx, const char *sql,
+                             int *rows, uint64_t *fold)
+{
+    sqlite3_stmt *st = NULL;
+    *rows = 0;
+    *fold = 1469598103934665603ULL;
+    if (sqlite3_prepare_v2(fx->ndb.db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        (*rows)++;
+        for (int c = 0; c < sqlite3_column_count(st); c++) {
+            const uint8_t *p = sqlite3_column_blob(st, c);
+            int n = sqlite3_column_bytes(st, c);
+            *fold = (*fold ^ (uint64_t)sqlite3_column_type(st, c)) *
+                    1099511628211ULL;
+            for (int i = 0; p && i < n; i++)
+                *fold = (*fold ^ p[i]) * 1099511628211ULL;
+        }
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+struct wrc_rows_state {
+    int utxo_rows, tx_rows;
+    uint64_t utxo_fold, tx_fold;
+    int64_t balance;
+};
+
+static bool wrc_rows_state(struct wrc_fx *fx, struct wrc_rows_state *s)
+{
+    s->balance = db_wallet_utxo_balance(&fx->ndb);
+    return wrc_table_digest(fx, "SELECT * FROM wallet_utxos ORDER BY txid, vout",
+                            &s->utxo_rows, &s->utxo_fold) &&
+           wrc_table_digest(fx, "SELECT * FROM wallet_transactions ORDER BY txid",
+                            &s->tx_rows, &s->tx_fold);
+}
+
+static bool wrc_rows_same(const struct wrc_rows_state *a,
+                          const struct wrc_rows_state *b)
+{
+    return a->utxo_rows == b->utxo_rows && a->tx_rows == b->tx_rows &&
+           a->utxo_fold == b->utxo_fold && a->tx_fold == b->tx_fold &&
+           a->balance == b->balance;
+}
+
+/* One wallet_transactions row beside the imported wallet_utxos row. */
+static bool wrc_seed_wallet_tx(struct wrc_fx *fx)
+{
+    static const uint8_t raw_tx[2] = {0x01, 0x02};
+    struct db_wallet_tx tx;
+    memset(&tx, 0, sizeof(tx));
+    wrc_txid(1, tx.txid);
+    tx.raw_tx = (uint8_t *)raw_tx;
+    tx.raw_tx_len = sizeof(raw_tx);
+    tx.has_block = true;
+    memset(tx.block_hash, 0x07, sizeof(tx.block_hash));
+    tx.block_height = 7;
+    tx.time_received = 1;
+    return db_wallet_tx_save(&fx->ndb, &tx);
+}
+
+/* Run a row-replacing wallet RPC with the scan's block directory pinned to
+ * the fixture, so no path can reach a real datadir. */
+static bool wrc_run_repair(struct wrc_fx *fx, const char *method,
+                           struct json_value *result)
+{
+    struct json_value params;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(result);
+    bool pinned = SetDataDir(fx->datadir);
+    bool ok = pinned &&
+              rpc_table_execute(&fx->tbl, method, &params, result);
+    json_free(&params);
+    SetDataDir("");
+    ClearDataDirCache();
+    return pinned && ok;
+}
+
+/* Import the key, or only its address (a wallet holding nothing but a
+ * watch-only address: the scan loads no id for it). */
+static bool wrc_import_as(struct wrc_fx *fx, bool watch_only,
+                          struct json_value *result)
+{
+    return watch_only ? wrc_import_address(fx, result)
+                      : wrc_import(fx, result);
+}
+
+/* The imported rows, then `method` on the bundle-started node. */
+static int wrc_repair_keeps_rows(const char *method, const char *name,
+                                 bool watch_only)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST(name) {
+        struct wrc_row rows[] = {{WRC_AGREE, 1, 7, 7, false}};
+        ASSERT(wrc_open(&fx, true));
+        wrc_drop_bodies(&fx);
+        ASSERT(wrc_seed_utxos(&fx, rows, 1));
+        struct json_value result;
+        ASSERT(wrc_import_as(&fx, watch_only, &result));
+        json_free(&result);
+        ASSERT(fx.w->keystore.num_keys == (watch_only ? 0u : 1u) &&
+               fx.w->keystore.num_watching == (watch_only ? 1u : 0u));
+        ASSERT(wrc_seed_wallet_tx(&fx));
+        struct wrc_rows_state before, after;
+        ASSERT(wrc_rows_state(&fx, &before));
+        ASSERT(before.utxo_rows == 1 && before.tx_rows == 1 &&
+               before.balance == WRC_COIN_AMOUNT);
+        ASSERT(!wrc_run_repair(&fx, method, &result));
+        ASSERT(wrc_rows_state(&fx, &after));
+        ASSERT(wrc_rows_same(&before, &after));
+        ASSERT(wrc_reply_has(&result, "refused"));
+        ASSERT(wrc_reply_has(&result, "no block data for 200 of the blocks "
+                                      "at heights 0..200"));
+        ASSERT(wrc_reply_has(&result, "first missing height 0"));
+        ASSERT(wrc_reply_has(&result, "were kept unchanged"));
+        ASSERT(wrc_reply_has(&result, "-bodyhistorybackfill"));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* An active chain with no tip: 0..-1 would take the empty-range path and
+ * replace the rows with nothing. reindexdb refuses first. */
+static int wrc_repair_no_tip_keeps_rows(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: reindexdb with no chain tip keeps the wallet rows") {
+        struct wrc_row rows[] = {{WRC_AGREE, 1, 7, 7, false}};
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_utxos(&fx, rows, 1));
+        struct json_value result;
+        ASSERT(wrc_import(&fx, &result));
+        json_free(&result);
+        ASSERT(wrc_seed_wallet_tx(&fx));
+        struct wrc_rows_state before, after;
+        ASSERT(wrc_rows_state(&fx, &before));
+        ASSERT(before.utxo_rows == 1 && before.tx_rows == 1);
+        fx.ms.chain_active.height = -1;
+        ASSERT(!wrc_run_repair(&fx, "reindexdb", &result));
+        fx.ms.chain_active.height = WRC_TIP;
+        ASSERT(wrc_rows_state(&fx, &after));
+        ASSERT(wrc_rows_same(&before, &after));
+        ASSERT(wrc_reply_has(&result, "no tip yet"));
+        ASSERT(wrc_reply_has(&result, "were kept unchanged"));
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ---- listunspent ---- */
 
 static bool wrc_seed_wallet_row(struct wrc_fx *fx, const struct wrc_row *r,
@@ -821,6 +1113,24 @@ int wrc_run_tests(void)
     failures += wrc_importaddress_without_coins_view_withholds();
     failures += wrc_importprivkey_says_when_capped();
     failures += wrc_importaddress_says_when_capped();
+    failures += wrc_import_holed_node_skipped();
+    failures += wrc_import_holed_node_withheld();
+    failures += wrc_import_holed_node_capped();
+    failures += wrc_repair_keeps_rows("rescanwallet",
+        "wallet_rows_coins: rescanwallet on a bundle-started node keeps the imported rows",
+        false);
+    failures += wrc_repair_keeps_rows("reindexdb",
+        "wallet_rows_coins: reindexdb on a bundle-started node keeps the wallet rows",
+        false);
+    failures += wrc_repair_keeps_rows("rescanwallet",
+        "wallet_rows_coins: rescanwallet keeps a watch-only-only wallet's rows on a bundle-started node",
+        true);
+    failures += wrc_repair_keeps_rows("reindexdb",
+        "wallet_rows_coins: reindexdb keeps a watch-only-only wallet's rows on a bundle-started node",
+        true);
+    failures += wrc_repair_no_tip_keeps_rows();
+    failures += wrc_importaddress_no_rescan_advice(false);
+    failures += wrc_importaddress_no_rescan_advice(true);
     failures += wrc_listunspent_agreeing_row_same();
     failures += wrc_listunspent_coinbase_height_from_coin();
     failures += wrc_listunspent_disagreeing_rows_skipped();
