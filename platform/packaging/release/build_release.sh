@@ -278,7 +278,7 @@ file_nlink() {
 }
 
 write_sha256sums() {
-    local dir="$1" platform="${2:-linux-x86_64}" with_app="${3:-0}" with_kit="${4:-0}"
+    local dir="$1" platform="${2:-linux-x86_64}" with_app="${3:-0}" with_kit="${4:-0}" with_docs="${5:-0}"
     # AGENT_CARD.md is a manifest member, not an optional extra: the card
     # tells a coding assistant which commands to run against the node, so
     # a tampered copy is an instruction-injection path into whatever agent
@@ -305,6 +305,7 @@ write_sha256sums() {
             || die "app toolchain requires the Linux app release"
         members="$members $APP_TOOLCHAIN_MEMBERS"
     fi
+    [ "$with_docs" != 1 ] || members="$members docs.bundle docs.root"
     (
         cd "$dir" || exit 1
         # GNU sha256sum two-space format; sorted so the file is deterministic.
@@ -312,6 +313,56 @@ write_sha256sums() {
         sha256_lines $members AGENT_CARD.md | sort -k2 >SHA256SUMS
     ) || die "could not write SHA256SUMS in $dir"
 }
+
+# A docs-bearing target must name the same full source identity as this checkout.
+docs_source_matches() {
+    local source="$1" reported="$2"
+    [ "${#source}" -eq 64 ] || return 1
+    case "$source" in *[!0-9a-f]*) return 1 ;; esac
+    [ "$reported" = "source_id=$source" ]
+}
+
+docs_run_runtime() {
+    if command -v timeout >/dev/null 2>&1; then timeout 120 "$@" </dev/null
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout 120 "$@" </dev/null
+    else "$@" </dev/null; fi
+}
+
+# Capture only tracked, clean Markdown; ignored or generated files are not release inputs.
+copy_release_docs() (
+    local out="$1" scratch source capture root path target identity reported final checked
+    [ -x "$APP_VERIFIER" ] || die "missing host app verifier for docs"
+    identity="$(cd "$REPO_ROOT" && tools/dev/source-identity.sh capture)" || die "cannot capture checkout source identity"
+    reported="$(docs_run_runtime "$out/z23" ops debug version --field=source_id)" || die "docs-bearing release needs an executable host-compatible runtime"
+    docs_source_matches "$identity" "$reported" || die "runtime source identity differs from checkout; rebuild the Linux app runtime"
+    git -C "$REPO_ROOT" diff --quiet -- docs && git -C "$REPO_ROOT" diff --cached --quiet -- docs \
+        || die "tracked docs have uncommitted changes"
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/z23-docs-scratch.XXXXXX")" || die "cannot stage docs"
+    trap 'rm -rf -- "$scratch"' EXIT
+    source="$scratch/source"; mkdir -p "$source"
+    git -C "$REPO_ROOT" ls-files -z -- docs | while IFS= read -r -d '' path; do
+        case "$path" in docs/*.md) ;; *) continue ;; esac
+        [ -f "$REPO_ROOT/$path" ] && [ ! -L "$REPO_ROOT/$path" ] || die "invalid docs member: $path"
+        target="$source/${path#docs/}"
+        mkdir -p "${target%/*}" && cp -- "$REPO_ROOT/$path" "$target" && chmod 644 "$target" || die "cannot stage docs member"
+    done
+    [ -f "$source/README.md" ] || die "tracked docs lack README.md"
+    capture="$("$APP_VERIFIER" zcode workspace source capture "--workspace=$source" --field=source_root </dev/null)" || die "docs capture failed"
+    case "$capture" in source_root=*) root="${capture#source_root=}" ;; *) die "docs capture returned no root" ;; esac
+    [ "${#root}" -eq 64 ] || die "invalid docs root"
+    case "$root" in *[!0-9a-f]*) die "invalid docs root" ;; esac
+    "$APP_VERIFIER" zcode workspace source bundle create "--workspace=$source" "--source_root=$root" \
+        "--output=$scratch/docs.bundle" </dev/null >/dev/null || die "docs bundle create failed"
+    mkdir "$scratch/check-cas" "$scratch/check-docs" || die "cannot prepare runtime docs check"
+    checked="$(docs_run_runtime "$out/z23" zcode workspace source bundle checkout "--bundle=$scratch/docs.bundle" \
+        "--source_root=$root" "--workspace=$scratch/check-cas" "--destination=$scratch/check-docs" \
+        --field=checked_out)" || die "runtime cannot check out the docs bundle"
+    [ "$checked" = 'checked_out=true' ] && [ -f "$scratch/check-docs/README.md" ] || die "runtime docs checkout incomplete"
+    final="$(cd "$REPO_ROOT" && tools/dev/source-identity.sh capture)" || die "cannot recheck checkout source identity"
+    docs_source_matches "$identity" "source_id=$final" || die "checkout source changed during docs packaging"
+    cp -- "$scratch/docs.bundle" "$out/docs.bundle" || die "cannot retain docs bundle"
+    printf '%s\n' "$root" >"$out/docs.root" || die "cannot retain docs root"
+)
 
 # AGENT_CARD.md tells a coding assistant which commands to run against
 # this node. That makes it closer to executable content than to prose: a
@@ -553,7 +604,7 @@ package_from_bin() {
         [ "$(cd "$out_dir" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
     fi
     [ -z "$APP_TOOLCHAIN" ] || [ "$out_dir" != "$APP_TOOLCHAIN" ] || die "release output must differ from toolchain input"
-    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $DARWIN_APP_MEMBERS $APP_TOOLCHAIN_MEMBERS; do rm -f -- "$out_dir/$member"; done
+    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $DARWIN_APP_MEMBERS $APP_TOOLCHAIN_MEMBERS docs.bundle docs.root; do rm -f -- "$out_dir/$member"; done
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
@@ -604,10 +655,11 @@ package_from_bin() {
         plutil -lint "$out_dir/Z23Apps-Info.plist" >/dev/null \
             || die "Z23Apps-Info.plist is invalid"
     fi
-    local with_app=0 with_kit=0
+    local with_app=0 with_kit=0 with_docs=0
     [ -z "$APP_SOURCE" ] || with_app=1
     [ -z "$APP_TOOLCHAIN" ] || with_kit=1
-    write_sha256sums "$out_dir" "$platform" "$with_app" "$with_kit"
+    if [ "$with_app" = 1 ] && [ "$platform" = linux-x86_64 ]; then copy_release_docs "$out_dir"; with_docs=1; fi
+    write_sha256sums "$out_dir" "$platform" "$with_app" "$with_kit" "$with_docs"
 
     # The glibc/GLIBCXX symbol floor is an ELF question and has no meaning for
     # a PE. Running it on one would not fail -- it would pass having graded
@@ -892,6 +944,11 @@ selftest_app_toolchain() {
 
 selftest() {
     local tmp rc name host_fixture host_platform
+    local identity mismatch
+    identity="$(printf '%064d' 1)"; mismatch="$(printf '%064d' 2)"
+    docs_source_matches "$identity" "source_id=$identity" || die "selftest: matching docs source refused"
+    if docs_source_matches "$identity" "source_id=$mismatch" || docs_source_matches "$identity" "" || \
+       docs_source_matches "UNKNOWN" "source_id=UNKNOWN"; then die "selftest: invalid docs source admitted"; fi
     tmp="$(mktemp -d /tmp/zcl-build-release-selftest.XXXXXX)" || die "mktemp failed"
     trap 'rm -rf "$tmp"' EXIT
     printf 'int main(void) { return 0; }\n' >"$tmp/native-fixture.c"

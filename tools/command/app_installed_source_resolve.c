@@ -29,7 +29,8 @@ enum { ISR_CARD, ISR_RECORD, ISR_PROJECTION, ISR_PACKAGE, ISR_RECIPE,
     ISR_NODE_ALIAS, ISR_ACME_ALIAS, ISR_VERIFY_ALIAS, ISR_BASE_ROWS,
     ISR_DESKTOP_RECEIVE = ISR_BASE_ROWS, ISR_DESKTOP_ICON, ISR_DESKTOP_MIME,
     ISR_DESKTOP_GAME, ISR_DESKTOP_END, ISR_KIT_DESCRIPTOR = ISR_DESKTOP_END,
-    ISR_KIT_BUNDLE, ISR_MAC_LAUNCHER, ISR_MAC_PLIST, ISR_ROWS };
+    ISR_KIT_BUNDLE, ISR_MAC_LAUNCHER, ISR_MAC_PLIST, ISR_DOCS_BUNDLE,
+    ISR_DOCS_ROOT, ISR_ROWS };
 static const char *const isr_names[ISR_ROWS] = {
     "AGENT_CARD.md", "app-build.wire", "installed-source.json", // error-doc-ref-ok: generated installed release assets, not checkout documents
     "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme",
@@ -37,14 +38,14 @@ static const char *const isr_names[ISR_ROWS] = {
     "zclassic23-package-verify", "org.zclassic.ZClassic23.desktop",
     "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml",
     "org.zclassic.SkyCombat.desktop", "app-toolchain.json", "app-toolchain.bundle",
-    "z23-app-macos", "Z23Apps-Info.plist"
+    "z23-app-macos", "Z23Apps-Info.plist", "docs.bundle", "docs.root"
 };
 static const size_t isr_limits[ISR_ROWS] = {
     65536, 240, 4096, ISR_MIB, 256u * 1024u, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB,
     65536, 65536, 65536, 65536, 4096, 64u * ISR_MIB,
-    4u * ISR_MIB, 65536
+    4u * ISR_MIB, 65536, 64u * ISR_MIB, 65
 };
 struct isr_manifest { char digest[ISR_ROWS][65]; };
 struct isr_layout {
@@ -220,6 +221,7 @@ static bool isr_shape(const struct isr_manifest *m, bool mac)
         if (m->digest[row][0]) ++desktop;
     unsigned kit = (m->digest[ISR_KIT_DESCRIPTOR][0] != 0) +
         (m->digest[ISR_KIT_BUNDLE][0] != 0);
+    if ((m->digest[ISR_DOCS_BUNDLE][0] != 0) != (m->digest[ISR_DOCS_ROOT][0] != 0)) return false;
     if (!isr_mac_shape(m, mac, desktop, kit)) return false;
     if (kit && (kit != 2 || mac || desktop != ISR_DESKTOP_END - ISR_BASE_ROWS)) return false;
     return desktop == 0 || (!mac && desktop == ISR_DESKTOP_END - ISR_BASE_ROWS);
@@ -290,6 +292,11 @@ static bool isr_assets_range(int dir, const struct isr_manifest *m, int first, i
     }
     return true;
 }
+static bool isr_optional_assets(int dir, const struct isr_manifest *m)
+{
+    return isr_assets_range(dir, m, ISR_MAC_LAUNCHER, ISR_DOCS_BUNDLE) &&
+        isr_assets_range(dir, m, ISR_DOCS_BUNDLE, ISR_ROWS);
+}
 #if defined(ZCL_TESTING)
 /* Component seam only: never supplies a substitute executing image/ancestor
  * to the production resolver, and never returns admitted source authority. */
@@ -301,7 +308,7 @@ bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t lengt
     memcpy(bytes, wire, length); bytes[length] = 0;
     return isr_parse(bytes, length, &manifest, mac) &&
         isr_assets_range(dir, &manifest, ISR_BASE_ROWS, ISR_DESKTOP_END) &&
-        isr_assets_range(dir, &manifest, ISR_MAC_LAUNCHER, ISR_ROWS);
+        isr_optional_assets(dir, &manifest);
 }
 #endif
 static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
@@ -322,7 +329,7 @@ static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
     return isr_member(dir, isr_names[ISR_GAME], isr_limits[ISR_GAME],
         hex, NULL, 0, &length) && !strcmp(hex, m->digest[ISR_GAME]) &&
         isr_assets_range(dir, m, ISR_BASE_ROWS, ISR_DESKTOP_END) &&
-        isr_assets_range(dir, m, ISR_MAC_LAUNCHER, ISR_ROWS);
+        isr_optional_assets(dir, m);
 }
 static bool isr_retained(const struct app_installed_source *out,
     const struct isr_manifest *m)
@@ -449,7 +456,7 @@ static bool isr_toolchain_identity(int dir, const struct isr_layout *layout,
                                    const struct isr_manifest *manifest)
 {
     return isr_self(layout, manifest) &&
-        isr_assets_range(dir, manifest, ISR_MAC_LAUNCHER, ISR_ROWS);
+        isr_optional_assets(dir, manifest);
 }
 static enum app_installed_toolchain_status isr_toolchain(
     struct app_installed_toolchain *out)

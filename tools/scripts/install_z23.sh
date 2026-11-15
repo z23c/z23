@@ -239,6 +239,7 @@ attest_resolve_manifest() {
 
 INSTALL_STAGE=""
 INSTALL_STAGE_PARENT=""
+INSTALL_DOCS_SOURCE=""
 
 cleanup_install_stage() {
     if [ -n "${MACOS_INCOMING:-}" ]; then
@@ -265,6 +266,33 @@ cleanup_install_stage() {
     [ ! -e "$INSTALL_STAGE" ] \
         || find "$INSTALL_STAGE" -xdev -depth -delete
     INSTALL_STAGE=""
+    INSTALL_DOCS_SOURCE=""
+}
+
+# Verify and reconstruct before changing installed payloads or the docs link.
+prepare_bundled_docs() {
+    local stage="$1" scratch root result timeout_cmd=""
+    [ -n "$(manifest_digest_of "$stage" docs.bundle)" ] || return 0
+    [ "$(wc -c <"$stage/docs.root" | tr -d ' ')" -eq 65 ] && \
+        LC_ALL=C grep -Ex '[0-9a-f]{64}' "$stage/docs.root" >/dev/null || die "invalid verified docs root"
+    IFS= read -r root <"$stage/docs.root" || die "cannot read verified docs root"
+    scratch="$(mktemp -d "$stage/docs-scratch.XXXXXX")" || die "cannot stage verified docs"
+    mkdir "$scratch/cas" "$scratch/docs" || die "cannot prepare docs checkout"
+    if command -v timeout >/dev/null 2>&1; then timeout_cmd=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then timeout_cmd=gtimeout
+    fi
+    if [ -n "$timeout_cmd" ]; then
+        result="$("$timeout_cmd" 120 "$stage/z23" zcode workspace source bundle checkout \
+            "--bundle=$stage/docs.bundle" "--source_root=$root" "--workspace=$scratch/cas" \
+            "--destination=$scratch/docs" --field=checked_out </dev/null)" || die "verified docs checkout failed"
+    else
+        result="$("$stage/z23" zcode workspace source bundle checkout \
+            "--bundle=$stage/docs.bundle" "--source_root=$root" "--workspace=$scratch/cas" \
+            "--destination=$scratch/docs" --field=checked_out </dev/null)" || die "verified docs checkout failed"
+    fi
+    [ "$result" = 'checked_out=true' ] && [ -f "$scratch/docs/README.md" ] || die "verified docs checkout incomplete"
+    [ -z "$(find "$scratch/docs" -type f ! -name '*.md' -print -quit)" ] || die "verified docs contain non-Markdown files"
+    INSTALL_DOCS_SOURCE="$scratch/docs"
 }
 
 # The release is an EXACT CLOSED SET. The current set is seven names: the
@@ -301,6 +329,8 @@ payload_max_bytes() {
             printf '%s\n' "$REMOTE_VERIFIER_MAX_BYTES" ;;
         z23-acme|zclassic23-acme) printf '%s\n' "$REMOTE_ACME_MAX_BYTES" ;;
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
+        docs.root) printf '%s\n' 65 ;;
+        docs.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
         z23-skycombat|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
         z23-app-macos) printf '%s\n' "$((4 * 1024 * 1024))" ;;
         Z23Apps-Info.plist) printf '%s\n' 65536 ;;
@@ -354,11 +384,19 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|docs\.(root|bundle)|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
         "$manifest" || true)"
-    { [ "$lines" -eq 7 ] || [ "$lines" -eq 5 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 15 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ]; } && [ "$matching" -eq "$lines" ] \
-        || die "SHA256SUMS must contain exactly five (legacy), seven (current), thirteen (app), fifteen (macOS apps), seventeen (Linux app desktop), or nineteen (Linux app toolchain) strict lowercase SHA-256 rows"
+    { [ "$lines" -eq 5 ] || [ "$lines" -eq 7 ] || [ "$lines" -eq 9 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 15 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ] || [ "$lines" -eq 21 ]; } && [ "$matching" -eq "$lines" ] \
+        || die "SHA256SUMS must contain a supported exact release set with an optional complete docs pair"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
+    local docs_count
+    docs_count="$(printf '%s\n' "$names" | grep -Ec '^docs\.(bundle|root)$' || true)"
+    [ "$docs_count" -eq 0 ] || [ "$docs_count" -eq 2 ] || die "docs bundle and root must appear together"
+    if [ "$docs_count" -eq 2 ]; then
+        [ "$(printf '%s\n' "$names" | grep -xc 'docs.bundle')" -eq 1 ] && \
+        [ "$(printf '%s\n' "$names" | grep -xc 'docs.root')" -eq 1 ] || die "duplicate docs member"
+        names="$(printf '%s\n' "$names" | grep -Ev '^docs\.(bundle|root)$')"
+    fi
     [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_MACOS" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
@@ -739,7 +777,7 @@ install_directories() (
 # docs.
 install_docs() {
     local prefix="$1" share="$1/share/z23" src old="" stage
-    src="${Z23_INSTALL_DOCS_DIR:-$SCRIPT_DIR/../../docs}"
+    src="${Z23_INSTALL_DOCS_DIR:-${INSTALL_DOCS_SOURCE:-$SCRIPT_DIR/../../docs}}"
     if [ ! -f "$src/README.md" ]; then
         say "no docs tree at $src; z23 wiki will report DOCS_UNAVAILABLE" >&2
         return 0
@@ -774,6 +812,9 @@ app_payload_members() {
     fi
     if [ -n "$(manifest_digest_of "$1" app-toolchain.json)" ]; then
         printf '%s\n' "$APP_TOOLCHAIN_MEMBERS"
+    fi
+    if [ -n "$(manifest_digest_of "$1" docs.bundle)" ]; then
+        printf '%s\n' docs.bundle docs.root
     fi
 }
 
@@ -1443,6 +1484,7 @@ install_from_source() {
     trap 'exit 143' TERM
     fetch_into "$src" "$INSTALL_STAGE" "$expected_manifest_sha256"
     verify_strict "$INSTALL_STAGE"
+    prepare_bundled_docs "$INSTALL_STAGE"
     if [ "$APPS_ONLY" = 1 ]; then
         has_app_source "$INSTALL_STAGE" || die "--apps requires an app-capable release"
         case "$prefix" in /*) ;; *) die "--apps requires an absolute installation prefix" ;; esac

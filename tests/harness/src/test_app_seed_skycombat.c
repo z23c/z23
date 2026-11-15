@@ -979,6 +979,20 @@ static bool asi_desktop_installed(const struct asi_run *r)
     }
     return true;
 }
+static bool asi_docs_installed(const struct asi_run *r)
+{
+    static const char *const names[] = {"docs.bundle", "docs.root"};
+    char pin[65], generation[ASS_PATH], rel[100];
+    if (!asi_manifest_pin(r, pin)) return false;
+    int n = snprintf(rel, sizeof(rel), "share/z23/apps/%s", pin);
+    if (n <= 0 || (size_t)n >= sizeof(rel) || !asi_path(generation, sizeof(generation), r->prefix, rel)) return false;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        char from[ASS_PATH], to[ASS_PATH];
+        if (!asi_path(from, sizeof(from), r->release, names[i]) ||
+            !asi_path(to, sizeof(to), generation, names[i]) || !asi_desktop_same(from, to)) return false;
+    }
+    return true;
+}
 #if defined(ZCL_TESTING)
 /* Tests production parsing and desktop reads only; does not impersonate an
  * installed executable or grant the source authority returned by resolve(). */
@@ -1084,6 +1098,30 @@ static bool isd_append_pair(struct isd_fixture *f, const char *const names[2], u
         if (n <= 0 || (size_t)n >= sizeof(f->wire) - used) return false;
     }
     return true;
+}
+
+static bool isd_docs_pair(struct isd_fixture *f, unsigned mask, bool mac)
+{
+    static const char *const names[] = {"docs.bundle", "docs.root"};
+    return isd_wire(f, 8191u, 0) && isd_append_pair(f, names, mask) &&
+        isd_check(f, mac) == (mask == 0 || mask == 3);
+}
+
+static bool isd_docs_shapes(struct isd_fixture *f)
+{
+    unsigned char bytes[65]; memset(bytes, '1', 64); bytes[64] = '\n';
+    struct sha256_ctx hash; uint8_t digest[32];
+    sha256_init(&hash); sha256_write(&hash, bytes, sizeof(bytes)); sha256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), f->digest);
+    if (!isd_write_name(f, "docs.bundle", bytes, sizeof(bytes)) ||
+        !isd_write_name(f, "docs.root", bytes, sizeof(bytes))) return false;
+    for (unsigned mask = 0; mask < 4; ++mask)
+        if (!isd_docs_pair(f, mask, false) || !isd_docs_pair(f, mask, true)) return false;
+    if (!isd_wire(f, 8191u, 0)) return false;
+    static const char *const names[] = {"docs.bundle", "docs.root"};
+    if (!isd_append_pair(f, names, 3) || !isd_check(f, false)) return false;
+    if (!isd_write_name(f, "docs.bundle", "corrupt", 7) || isd_check(f, false)) return false;
+    return isd_write_name(f, "docs.bundle", bytes, sizeof(bytes)) && isd_check(f, false);
 }
 static bool isd_kit_wire(struct isd_fixture *f, unsigned desktop, unsigned kit)
 {
@@ -1191,6 +1229,7 @@ static int isd_contract(struct ass_world *w)
         ASSERT(isd_kit_bounds(&f));
         ASSERT(isd_mac_members(&f));
         ASSERT(isd_mac_bounds(&f));
+        ASSERT(isd_docs_shapes(&f));
         PASS();
     } _test_next:;
     if (f.fd >= 0 && close(f.fd) != 0) ++failures;
@@ -1218,7 +1257,7 @@ static bool asi_evidence(struct ass_world *w, struct asi_run *r)
     static const char *const assets[] = {"SHA256SUMS", "AGENT_CARD.md", "z23", "zclassic23",
         "z23-package-verify", "zclassic23-package-verify", "z23-acme", "zclassic23-acme",
         "z23-skycombat", "installed-source.json", "app-build.wire", "manifest.wire",
-        "recipe.wire", "source.bundle", "app-toolchain.json", "app-toolchain.bundle"};
+        "recipe.wire", "source.bundle", "app-toolchain.json", "app-toolchain.bundle", "docs.bundle", "docs.root"};
     for (size_t i = 0; i < sizeof(assets)/sizeof(assets[0]); ++i) {
         if (!asi_path(from, sizeof(from), r->release, assets[i]) ||
             !asi_path(to, sizeof(to), dir, assets[i]) || !asi_copy_public(from, to)) return false;
@@ -1302,7 +1341,7 @@ static bool asi_unseal_fixture_generation(const struct ass_world *w, const struc
 static bool asi_prepare_installed(struct ass_world *w, struct asi_run *r)
 {
     return asi_export(w, r) && asi_original(w, r) && asi_kit(w, r) &&
-        asi_package(w, r) && asi_install(w, r) && asi_desktop_installed(r);
+        asi_package(w, r) && asi_install(w, r) && asi_desktop_installed(r) && asi_docs_installed(r);
 }
 static int ass_installed(struct ass_world *w)
 {
