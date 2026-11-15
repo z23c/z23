@@ -149,6 +149,11 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 #include "base/hex.h"
 #include "crypto/sha256.h"
 #include "platform/process_lifecycle.h"
+#include "platform/os_sandbox.h"
+#include "platform/supervised_process.h"
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
 #include "platform/time_compat.h"
 #include "presentation/model_render.h"
 #include "util/spawn.h"
@@ -174,7 +179,7 @@ struct asi_run {
     char kit[ASS_PATH], kit_digest[65], copy[ASS_PATH], version[65];
     struct app_installed_source source;
     struct platform_process cli, display;
-    bool real_kit;
+    bool real_kit, offline, custody_live;
     uint8_t kit_env[32];
     uint8_t selected_package[32], selected_deps[32];
 };
@@ -577,7 +582,17 @@ static bool asi_passed(const struct json_value *reply)
 {
     return json_get_bool(json_get(reply, "ok")) && !strcmp(asi_string(reply, "status"), "passed");
 }
+static bool asi_share_hash(const char *path)
+{
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    struct sha256_ctx h; sha256_init(&h); unsigned char buf[16384], digest[32];
+    size_t n; while ((n = fread(buf, 1, sizeof(buf), f)) != 0) sha256_write(&h, buf, n);
+    bool ok = feof(f) && !ferror(f); if (fclose(f) != 0) ok = false;
+    sha256_finalize(&h, digest); char hex[65]; zcl_hex_encode(digest, 32, hex);
+    return ok && !strcmp(hex, "6a714436ba1a66b98339cfeddbb68dbdf634fd4dea9d335db6fad663e1cb5cc9");
+}
 static bool asi_cli_start(struct ass_world *w, struct asi_run *r, const char *verb, const char *log)
+
 {
     char path[ASS_PATH], errpath[ASS_PATH], data[ASS_PATH+16];
     if (!asi_path(path, sizeof(path), w->root, log) ||
@@ -643,6 +658,131 @@ static bool asi_terminal_spawn(struct ass_world *w, struct asi_run *r,
     if (out >= 0) close(out);
     if (err >= 0) close(err);
     return ok;
+}
+
+/* The sealed system trampoline execs the installed path so the runtime sees
+ * its installed executable identity. Its subreaper owns all descendants. */
+static int asi_supervised_image(void)
+{
+    const char *env_path = "/usr/bin/env";
+    FILE *f = fopen(env_path, "rb"); if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long len = ftell(f);
+    if (len <= 0 || len > (long)PLATFORM_SUPERVISED_IMAGE_MAX || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f); return -1;
+    }
+    uint8_t *bytes = malloc((size_t)len), hash[32];
+    bool ok = bytes && fread(bytes, 1, (size_t)len, f) == (size_t)len && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    int image = -1;
+    if (ok) {
+        zcl_sha3_256(bytes, (size_t)len, hash);
+        ok = platform_supervised_image_capture(bytes, (size_t)len, hash, &image) == PLATFORM_SUPERVISED_IMAGE_OK;
+    }
+    free(bytes); if (!ok) { dprintf(2, "offline supervisor image capture failed\n"); return -1; }
+    return image;
+}
+static int asi_supervised_finish(struct platform_supervised_process *process, enum platform_supervised_state state);
+static int asi_supervised_build(const char *const *argv)
+{
+    int image = asi_supervised_image(); if (image < 0) return 125;
+    const char *args[32] = {"/usr/bin/env"}; size_t count = 0;
+
+    while (argv[count] && count + 2 < sizeof(args)/sizeof(args[0])) { args[count + 1] = argv[count]; ++count; }
+    if (argv[count]) { close(image); return 125; }
+    size_t env_count = 0; while (environ[env_count]) ++env_count;
+    const struct platform_supervised_fd_map maps[] = {{0, 0}, {1, 1}, {2, 2}};
+    int64_t now = platform_time_monotonic_ms() * INT64_C(1000000);
+    struct platform_supervised_spec spec = {.executable_fd = image, .argv = args,
+        .env = (const char *const *)environ, .maps = maps, .map_count = 3,
+        .launch_deadline_ns = now + INT64_C(10000000000), .cleanup_timeout_ms = 10000,
+        .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE, .env_count = env_count};
+    struct platform_supervised_process process; platform_supervised_init(&process);
+    enum platform_supervised_state state = platform_supervised_start(&process, &spec);
+    close(image);
+    return asi_supervised_finish(&process, state);
+}
+static int asi_supervised_finish(struct platform_supervised_process *process, enum platform_supervised_state state)
+{
+    int64_t deadline = platform_time_monotonic_ms() + 280000;
+    while (state == PLATFORM_SUPERVISED_RUNNING && platform_time_monotonic_ms() < deadline) {
+        usleep(10000); state = platform_supervised_poll(process);
+    }
+    bool timed_out = state == PLATFORM_SUPERVISED_RUNNING || state == PLATFORM_SUPERVISED_INCOMPLETE;
+    if (timed_out)
+        state = platform_supervised_stop(process, (platform_time_monotonic_ms() + 10000) * INT64_C(1000000));
+    /* An incomplete observation keeps this owner and its handle alive. The
+     * caller may report its own deadline, but must not kill this owner. */
+    while (process->supervisor_pid >= 0) {
+        dprintf(2, "offline supervisor custody retained: state=%d supervisor=%lld\n",
+            state, (long long)process->supervisor_pid);
+        state = platform_supervised_stop(process,
+            (platform_time_monotonic_ms() + 10000) * INT64_C(1000000));
+    }
+
+    dprintf(2, "offline supervisor: state=%d exit_observed=%d no_children=%d status=%d\n",
+        state, process->observation.engine_exit_observed, process->observation.no_children,
+        process->observation.engine_wait_status);
+    return !timed_out && state == PLATFORM_SUPERVISED_CLEAN && process->observation.engine_exit_observed &&
+        process->observation.no_children && WIFEXITED(process->observation.engine_wait_status) &&
+        WEXITSTATUS(process->observation.engine_wait_status) == 0 ? 0 : 125;
+}
+
+/* The installed build parent and every descendant inherit the same denial. */
+static _Noreturn void asi_offline_child(int out, int err, const char *const *argv);
+static bool asi_offline_spawn(struct ass_world *w, struct asi_run *r,
+                              const char *log, const char *const *argv)
+{
+    char path[ASS_PATH], errpath[ASS_PATH];
+    if (!asi_path(path, sizeof(path), w->root, log) ||
+        !asi_path(errpath, sizeof(errpath), w->root, "installed-cli.stderr")) return false;
+    int out = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    int err = open(errpath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (out < 0 || err < 0) { if (out >= 0) close(out); if (err >= 0) close(err); return false; }
+    pid_t pid = fork();
+    if (pid == 0) asi_offline_child(out, err, argv);
+    close(out); close(err);
+    if (pid < 0) return false;
+    r->cli.pid = (uint64_t)pid; r->cli.native = (uintptr_t)pid; return true;
+}
+
+static _Noreturn void asi_offline_child(int out, int err, const char *const *argv)
+{
+    int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (setpgid(0, 0) || in < 0 || dup2(in, 0) < 0 || dup2(out, 1) < 0 || dup2(err, 2) < 0) _exit(120);
+    long limit = sysconf(_SC_OPEN_MAX); if (limit < 0 || limit > 1048576) _exit(121);
+    for (int fd = 3; fd < limit; ++fd) close(fd);
+    const int denied[] = {
+
+#ifdef SYS_pidfd_getfd
+        SYS_pidfd_getfd,
+#endif
+#ifdef SYS_ptrace
+        SYS_ptrace,
+#endif
+#ifdef SYS_process_vm_writev
+        SYS_process_vm_writev,
+#endif
+        -1
+    };
+    const int absent[] = {SYS_socket,
+#ifdef SYS_socketcall
+        SYS_socketcall,
+#endif
+#ifdef SYS_io_uring_setup
+        SYS_io_uring_setup,
+#endif
+    };
+    if (!os_sandbox_no_new_privs() || !zcl_result_is_ok(os_sandbox_seccomp_deny_ext(
+            denied, sizeof(denied)/sizeof(denied[0]), OS_SANDBOX_WX_OFF,
+            absent, sizeof(absent)/sizeof(absent[0]), false))) {
+        dprintf(2, "offline seccomp installation failed\n"); _exit(122);
+    }
+    errno = 0; int v4 = socket(AF_INET, SOCK_STREAM, 0), e4 = errno;
+    errno = 0; int v6 = socket(AF_INET6, SOCK_STREAM, 0), e6 = errno;
+    dprintf(2, "offline socket probes: ipv4=%d errno=%d ipv6=%d errno=%d\n", v4, e4, v6, e6);
+    if (v4 != -1 || e4 != ENOSYS || v6 != -1 || e6 != ENOSYS) _exit(123);
+    _exit(asi_supervised_build(argv));
 }
 
 static bool asi_terminal_refusal(struct ass_world *w, struct asi_run *r,
@@ -861,7 +1001,7 @@ static bool asi_copy_ready(struct ass_world *w, struct asi_run *r, int64_t start
 {
     /* One five-second responsiveness bound, including disappearance of the
      * consent window. The remaining copy window is progress or continuation. */
-    bool visible = asi_driver(w, r, "--expect-count=0") &&
+    bool visible = asi_window_driver(w, r, r->offline ? "--title=Receive this app copy?" : "--title=Make my copy", "--expect-count=0") &&
         asi_window_driver(w, r, "--title=copy", "--expect-count=1");
     int64_t feedback = platform_time_monotonic_ms() - started;
     printf("installed copy feedback_ms=%lld\n", (long long)feedback);
@@ -877,19 +1017,37 @@ static bool asi_copy_ready(struct ass_world *w, struct asi_run *r, int64_t start
     }
     return false;
 }
+static bool asi_confirm_launch(struct ass_world *w, struct asi_run *r)
+{
+    bool launched;
+    if (r->offline) {
+        const char *share = getenv("ZCL_TEST_INSTALLED_APP_ORIGINAL_SHARE");
+        char file[ASS_PATH + 16], data[ASS_PATH + 16];
+        int a = snprintf(file, sizeof(file), "--file=%s", share ? share : "");
+        int b = snprintf(data, sizeof(data), "--datadir=%s", r->datadir);
+        const char *argv[] = {r->installed, "app", "receive", "--json", file, data, "--preview=false", NULL};
+        launched = share && share[0] == '/' && a > 0 && (size_t)a < sizeof(file) &&
+            b > 0 && (size_t)b < sizeof(data) && asi_share_hash(share) &&
+            asi_terminal_spawn(w, r, "installed-confirm.json", argv);
+    } else launched = asi_cli_start(w, r, "adopt", "installed-confirm.json");
+    return launched;
+}
 static bool asi_confirm_actions(struct ass_world *w, struct asi_run *r)
 {
-    if (!asi_cli_start(w, r, "adopt", "installed-confirm.json") ||
-        !asi_driver(w, r, "--expect-count=1") || !asi_no_consumer_state(r)) return false;
+    const char *title = r->offline ? "--title=Receive this app copy?" : "--title=Make my copy";
+    bool launched = asi_confirm_launch(w, r);
+    if (!launched || !asi_window_driver(w, r, title, "--expect-count=1") || !asi_no_consumer_state(r)) return false;
+
     /* Unfocused -> Cancel -> Back -> Next. Owner refuses confirmation until
      * all pages visited. Repeat Next up to the maintained maximum; no copied
      * model/text or injected presenter, no per-page pixel/readability claim. */
-    for (unsigned i = 0; i < 3; ++i) if (!asi_driver(w, r, "--key=tab")) return false;
+    for (unsigned i = 0; i < 3; ++i) if (!asi_window_driver(w, r, title, "--key=tab")) return false;
     for (unsigned i = 1; i < ZCL_PRESENT_MODEL_PAGES_MAX; ++i)
-        if (!asi_driver(w, r, "--key=enter") || !asi_no_consumer_state(r)) return false;
-    if (!asi_driver(w, r, "--key=tab")) return false;
+        if (!asi_window_driver(w, r, title, "--key=enter") || !asi_no_consumer_state(r)) return false;
+    if (!asi_window_driver(w, r, title, "--key=tab")) return false;
     int64_t started = platform_time_monotonic_ms();
-    if (!asi_driver(w, r, "--key=enter")) return false;
+    if (!asi_window_driver(w, r, title, "--key=enter")) return false;
+    if (r->offline) return true;
     /* Adopt now offers the same explicit continuation as Receive. Close is
      * initially focused; do not request any build, preview, or Keep. */
     if (!asi_copy_ready(w, r, started)) {
@@ -899,16 +1057,31 @@ static bool asi_confirm_actions(struct ass_world *w, struct asi_run *r)
     if (!asi_window_driver(w, r, "--title=Your copy is ready", "--key=enter")) return false;
     return true;
 }
+static bool asi_receive_identity(const struct json_value *d)
+{
+    return !strcmp(asi_string(d, "stage"), "commit") &&
+        !strcmp(asi_string(d, "package_root"), "01c23f95253ea5113c25d9b2f0026b53e1a0e5d4cfff15a186b58ef55cf98e0a") &&
+        !strcmp(asi_string(d, "publisher_fingerprint"), "02f7291a387f374d10372fdec98443bac17388f418b9eb396c0e42e43f2019f28e") &&
+        !strcmp(asi_string(d, "release_id"), "a37b750a00fbf982ac6083a3349486449c6dc69b502b7771616c7ada41582b8e") &&
+        !strcmp(asi_string(d, "parent_release_root"), "10c5792d4375c21135be0608c87e90caf4e6455cd872eef11b893acf4efae6e8") &&
+        strlen(asi_string(d, "version")) == 64 && asi_string(d, "trust_record")[0] &&
+        !json_get_bool(json_get(d, "executed"));
+
+}
 static bool asi_confirm(struct ass_world *w, struct asi_run *r)
 {
     if (!asi_confirm_actions(w, r)) return false;
     struct json_value reply; json_init(&reply);
-    bool ok = asi_cli_finish(w, r, "installed-confirm.json", &reply) &&
-        asi_adopted_only(r, json_get(&reply, "data")) && asi_successor(r, json_get(&reply, "data")) &&
-        asi_driver(w, r, "--expect-count=0") &&
+    bool ok = asi_cli_finish(w, r, "installed-confirm.json", &reply);
+    const struct json_value *d = json_get(&reply, "data");
+    if (r->offline) {
+        ok = ok && asi_receive_identity(d);
+    } else ok = ok && asi_adopted_only(r, d) && asi_successor(r, d);
+    ok = ok && asi_window_driver(w, r, r->offline ? "--title=Receive this app copy?" : "--title=Make my copy", "--expect-count=0") &&
+
         asi_window_driver(w, r, "--title=Your copy is ready", "--expect-count=0");
     if (ok) {
-        const char *copy = asi_string(json_get(&reply, "data"), "copy");
+        const char *copy = asi_string(json_get(&reply, "data"), r->offline ? "destination" : "copy");
         int n = snprintf(r->copy, sizeof(r->copy), "%s", copy);
         const char *version = asi_string(json_get(&reply, "data"), "version");
         ok = n > 0 && (size_t)n < sizeof(r->copy) && strlen(version) == 64;
@@ -961,10 +1134,20 @@ static bool asi_kit_refusal(struct ass_world *w, struct asi_run *r)
 
 static bool asi_build_finish(struct asi_run *r, const char *path, struct json_value *reply)
 {
-    uint32_t code = 0; enum platform_process_wait_result state = platform_process_wait(&r->cli, 300000, &code);
-    if (state != PLATFORM_PROCESS_WAIT_EXITED) { (void)asi_stop(&r->cli); return false; }
+    uint32_t code = 0;
+    enum platform_process_wait_result state = platform_process_wait(&r->cli, r->offline ? 315000 : 300000, &code);
+    bool timely = state == PLATFORM_PROCESS_WAIT_EXITED;
+    while (r->offline && state != PLATFORM_PROCESS_WAIT_EXITED) {
+        test_note("offline supervisor owner still holds custody: pid=%llu", (unsigned long long)r->cli.pid);
+        state = platform_process_wait(&r->cli, 10000, &code);
+    }
+    if (state != PLATFORM_PROCESS_WAIT_EXITED) {
+        if (r->offline) r->custody_live = true;
+        else (void)asi_stop(&r->cli);
+        return false;
+    }
     platform_process_close(&r->cli);
-    return code == 0 && asi_json_file(path, reply) && asi_passed(reply);
+    return timely && code == 0 && asi_json_file(path, reply) && asi_passed(reply);
 }
 static bool asi_build_call(struct ass_world *w, struct asi_run *r, const char *log,
                            const char *plan, struct json_value *reply)
@@ -979,7 +1162,7 @@ static bool asi_build_call(struct ass_world *w, struct asi_run *r, const char *l
         !asi_path(path, sizeof(path), w->root, log)) return false;
     const char *argv[] = {r->installed, "app", "build", "--json", data, copy, version,
                           plan ? plan_arg : NULL, plan ? "--confirm=true" : NULL, NULL};
-    if (!asi_terminal_spawn(w, r, log, argv)) return false;
+    if (!(r->offline ? asi_offline_spawn(w, r, log, argv) : asi_terminal_spawn(w, r, log, argv))) return false;
     return asi_build_finish(r, path, reply);
 }
 
@@ -1073,6 +1256,8 @@ static bool asi_real_build(struct ass_world *w, struct asi_run *r)
         asi_build_call(w, r, "kit-build-commit.json", id, &built);
     const struct json_value *b = json_get(&built, "data");
     ok = ok && asi_build_consistent(r, p, b);
+    if (r->offline) ok = ok && !strcmp(asi_string(b, "image_sha3"),
+        "baf203b90f1f4149d93812ebee99695fec709aaacb5913e775fc52032f4ea0de");
     json_free(&plan); json_free(&built); return ok;
 }
 static bool asi_copy_public(const char *from, const char *to)
@@ -1423,7 +1608,14 @@ static bool asi_evidence(struct ass_world *w, const struct asi_run *r)
         test_note("installed evidence directory must be empty: %s", dir);
         return false;
     }
+    if (r->offline) {
+        static const char *const logs[] = {"installed-install.log",
+            "installed-list.json", "installed-confirm.json", "installed-xvfb.log",
+            "installed-driver.log", "installed-cli.stderr", "kit-build-plan.json", "kit-build-commit.json"};
+        return asi_evidence_copy(w, dir, logs, sizeof(logs)/sizeof(logs[0]));
+    }
     static const char *const logs[] = {"installed-package.log", "installed-install.log",
+
         "installed-list.json", "installed-cancel.json", "installed-confirm.json", "installed-xvfb.log",
         "installed-driver.log", "installed-cli.stderr", "kit-refusal.json"};
     if (!asi_evidence_copy(w, dir, logs, sizeof(logs)/sizeof(logs[0]))) return false;
@@ -1436,7 +1628,7 @@ static bool asi_evidence(struct ass_world *w, const struct asi_run *r)
 static bool asi_cleanup(struct ass_world *w, struct asi_run *r,
                          struct asi_env *saved, bool env_saved, bool cwd_changed)
 {
-    bool cli_stopped = asi_stop(&r->cli), display_stopped = asi_stop(&r->display);
+    bool cli_stopped = !r->custody_live && asi_stop(&r->cli), display_stopped = asi_stop(&r->display);
     bool ok = cli_stopped && display_stopped;
     if (cwd_changed && chdir(w->source) != 0) ok = false;
     if (env_saved && !asi_environment_restore(saved)) ok = false;
@@ -1512,6 +1704,25 @@ static bool asi_prepare_installed(struct ass_world *w, struct asi_run *r)
     return asi_export(w, r) && asi_original(w, r) && asi_kit(w, r) &&
         asi_package(w, r) && asi_install(w, r) && asi_desktop_installed(r) && asi_docs_installed(r);
 }
+static bool asi_prepare_mode(struct ass_world *w, struct asi_run *r)
+{
+    r->offline = getenv("ZCL_TEST_INSTALLED_APP_ORIGINAL_SHARE") != NULL;
+    if (!r->offline) return asi_prepare_installed(w, r);
+    const char *release = getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR");
+    const char *evidence = getenv("ZCL_TEST_INSTALLED_APP_EVIDENCE_DIR");
+    if (!r->real_kit || !release || strlen(release) >= sizeof(r->release) ||
+        !evidence || !asi_evidence_empty(evidence)) return false;
+    memcpy(r->release, release, strlen(release) + 1);
+    return asi_supplied_kit(w, r) && asi_install(w, r) &&
+        asi_desktop_installed(r) && asi_docs_installed(r);
+}
+static bool asi_installed_flow(struct ass_world *w, struct asi_run *r)
+{
+    if (!asi_discovery(w, r) || !asi_no_consumer_state(r)) return false;
+    if (!r->offline && (!asi_terminal_copy(w, r) || !asi_no_consumer_state(r) || !asi_cancel(w, r))) return false;
+    if (!asi_confirm(w, r) || (r->real_kit && !asi_real_build(w, r))) return false;
+    return (r->offline || asi_kit_refusal(w, r)) && asi_evidence(w, r);
+}
 static int ass_installed(struct ass_world *w)
 {
     if (!getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) return 0;
@@ -1522,18 +1733,14 @@ static int ass_installed(struct ass_world *w)
         struct sigaction chld;
         ASSERT(env_saved && sigaction(SIGCHLD, NULL, &chld) == 0 && chld.sa_handler == SIG_DFL && !(chld.sa_flags & SA_NOCLDWAIT));
         ASSERT(asi_prerequisites(w, &r) && asi_paths(w, &r));
-        ASSERT(asi_prepare_installed(w, &r));
+        ASSERT(asi_prepare_mode(w, &r));
         ASSERT(asi_display(w, &r));
         ASSERT(chdir(r.empty) == 0); cwd_changed = true;
-        ASSERT(asi_discovery(w, &r) && asi_no_consumer_state(&r));
-        ASSERT(asi_terminal_copy(w, &r) && asi_no_consumer_state(&r));
-        ASSERT(asi_cancel(w, &r) && asi_confirm(w, &r));
-        if (r.real_kit) ASSERT(asi_real_build(w, &r));
-        ASSERT(asi_kit_refusal(w, &r));
-        ASSERT(asi_evidence(w, &r));
+        ASSERT(asi_installed_flow(w, &r));
         PASS();
     } _test_next:;
     if (!asi_cleanup(w, &r, &saved, env_saved, cwd_changed)) ++failures;
+    if (!failures && r.offline) { test_note("offline fixture retained for separate preview: %s", w->root); return 0; }
     if (!failures && !asi_unseal_fixture_generation(w, &r)) {
         printf("installed fixture unseal refused; retained=%s\n", w->root);
         ++failures;
@@ -1599,6 +1806,7 @@ int test_app_seed_skycombat(void)
         failures += ass_installed(&w);
     asf_xvfb_stop(&w.xvfb);
     ass_world_restore(&w);
+    if (!failures && getenv("ZCL_TEST_INSTALLED_APP_ORIGINAL_SHARE")) return 0;
     return ass_cleanup_success(&w, failures);
 }
 
