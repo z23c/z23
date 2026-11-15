@@ -763,8 +763,13 @@ static bool bil_arena_file_map(const char *datadir, size_t count,
          * ENOSPC here as a clean refusal (anonymous fallback) instead of
          * an uncatchable SIGBUS mid-load. Tmpfs and friends may refuse
          * fallocate itself; proceeding then matches the pre-lane risk and
-         * keeps the mapping testable on such datadirs. */
+         * keeps the mapping testable on such datadirs. macOS has no
+         * posix_fallocate (its counterpart, F_PREALLOCATE, is not wired
+         * here), so the mapping proceeds unreserved there, the same risk
+         * the tmpfs case accepts. */
+#if !defined(__APPLE__)
         (void)posix_fallocate(afd, 0, (off_t)bytes);
+#endif
     }
     void *view = sized ? mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED,
                               afd, 0) : MAP_FAILED;
