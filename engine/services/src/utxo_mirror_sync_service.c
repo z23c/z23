@@ -1032,11 +1032,6 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
     }
     atomic_store(&svc->last_frontier, (int64_t)frontier);
 
-    if (mirror_sync_far_from_tip(frontier)) {
-        atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
-        return 0;
-    }
-
     struct mirror_node_state_ctx state = {0};
     if (!mirror_run_db_lane(svc->ndb, mirror_read_node_state_lane, &state) ||
         !state.ok) {
@@ -1062,6 +1057,13 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
                    "authority frontier=%d after an authority rewind; mirror "
                    "quarantined (cursor was not decremented)",
                    (long long)state.cursor, frontier);
+    }
+
+    /* Catch-up deferral must not hide a rewind: the frontier may rebound
+     * before the next pass, making a stale mirror look like forward drift. */
+    if (mirror_sync_far_from_tip(frontier)) {
+        atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
+        return 0;
     }
 
     /* Cursor equality is the constant-time steady state. Integrity auditing is

@@ -2094,6 +2094,60 @@ static int ums_test_sequential_blocks(sqlite3 *pdb, struct utxo_mirror_sync_serv
     return failures;
 }
 
+static int ums_test_header_deferred_rewind(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "rewind_headers");
+    struct chain_state_repository *csr = csr_instance();
+    bool was_init = csr->initialized;
+    struct block_index **was_slot = csr->pindex_best_hdr;
+    struct block_index bi;
+    memset(&bi, 0, sizeof(bi));
+    struct block_index *slot = &bi;
+    csr->pindex_best_hdr = &slot;
+    csr->initialized = true;
+    bi.nHeight = 101;
+    if (!fx.ok) {
+        csr->initialized = was_init;
+        csr->pindex_best_hdr = was_slot;
+        ums_fx_close(&fx);
+        return 1;
+    }
+    UMS_CHECK("header rewind: initial mirror built",
+              utxo_mirror_sync_run_once(&fx.svc) == 2);
+
+    uint8_t losing_txid[32];
+    ums_txid(losing_txid, 0x52);
+    UMS_CHECK("header rewind: lower authority below mirror",
+              coins_kv_spend(fx.pdb, losing_txid, 0) &&
+              ums_set_frontier(fx.pdb, 101));
+    bi.nHeight = 101 + UTXO_MIRROR_SYNC_NEAR_TIP_BLOCKS + 1;
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
+    UMS_CHECK("header rewind: refusal precedes catch-up deferral",
+              utxo_mirror_sync_run_once(&fx.svc) == -1);
+    UMS_CHECK("header rewind: authority rewind is named",
+              ums_quarantined_with_cause(&fx.svc, "authority_rewind"));
+    int64_t cursor = -1;
+    UMS_CHECK("header rewind: losing rows and cursor stay frozen",
+              db_utxo_count(&fx.ndb) == 2 &&
+              db_utxo_exists(&fx.ndb, losing_txid, 0) &&
+              node_db_state_get_int(&fx.ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    &cursor) && cursor == 102 &&
+              atomic_load(&fx.svc.rebuilds_run) == rebuilds_before);
+
+    bi.nHeight = 102;
+    UMS_CHECK("header rewind: frontier can rebound",
+              ums_set_frontier(fx.pdb, 102));
+    UMS_CHECK("header rewind: equal-height rebound stays quarantined",
+              utxo_mirror_sync_run_once(&fx.svc) == 0 &&
+              ums_quarantined_with_cause(&fx.svc, "authority_rewind"));
+    csr->initialized = was_init;
+    csr->pindex_best_hdr = was_slot;
+    ums_fx_close(&fx);
+    return failures;
+}
+
 static int ums_test_authority_rewind(struct node_db *ndb, sqlite3 *pdb, struct utxo_mirror_sync_service *svc)
 {
     int failures = 0;
@@ -2235,6 +2289,7 @@ int test_utxo_mirror_sync(void)
     progress_store_close();
     failures += ums_test_stop_abort_rebuild();
     failures += ums_test_snapshot_race();
+    failures += ums_test_header_deferred_rewind();
     failures += ums_test_rebuild_now();
     failures += ums_test_containment_suite();
     node_db_close(&ndb);
