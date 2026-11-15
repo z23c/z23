@@ -49,6 +49,7 @@
 #endif
 
 #include "test/test_core.h"
+#include "../../../cognition/controllers/src/event_agent_summary.h"
 
 #include "controllers/diagnostics_internal.h"
 #include "controllers/sovereignty_controller.h"
@@ -448,6 +449,12 @@ static int case_sovereignty_dump_busy_path(void)
                             "unknown_progress_store_busy"));
     SD_CHECK("sov busy(1st): trust_mode unknown",
              json_status_is(&out, "trust_mode", "unknown"));
+    struct json_value first_projection = {0};
+    bool first_ok = sovereignty_trust_state_json(&first_projection);
+    SD_CHECK("sov busy(1st): projection retains unknown status", first_ok &&
+             json_status_is(&first_projection, "durable_store_status", "unknown_progress_store_busy") &&
+             json_status_is(&first_projection, "trust_mode", "unknown"));
+    json_free(&first_projection);
 
     atomic_store(&lk.release, 1);
     pthread_join(th, NULL);
@@ -486,6 +493,12 @@ static int case_sovereignty_dump_busy_path(void)
                                 "busy_stale_cache"));
         SD_CHECK("sov busy(2nd): trust_mode == bare (from cache)",
                  json_status_is(&out, "trust_mode", "bare"));
+        struct json_value projection = {0};
+        bool projected = sovereignty_trust_state_json(&projection);
+        SD_CHECK("sov busy: projection retains stale cache status", projected &&
+                 json_status_is(&projection, "durable_store_status", "busy_stale_cache") &&
+                 json_status_is(&projection, "trust_mode", "bare"));
+        json_free(&projection);
 
         atomic_store(&lk2.release, 1);
         pthread_join(th, NULL);
@@ -1264,6 +1277,81 @@ static int case_health_collect_ndb_busy(void)
     return failures;
 }
 
+static int agent_pool_count_trace(unsigned event, void *opaque, void *statement, void *unused)
+{
+    (void)unused;
+    if (event == SQLITE_TRACE_STMT) {
+        const char *sql = sqlite3_sql(statement);
+        if (sql && strstr(sql, "SELECT COUNT(*) FROM") &&
+            (strstr(sql, "nullifiers") || strstr(sql, "anchors")))
+            (*(int *)opaque)++;
+    }
+    return 0;
+}
+
+static bool agent_strings_match(const char *a, const char *b)
+{
+    return a && b && strcmp(a, b) == 0;
+}
+
+static int case_agent_trust_projection(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "stage_dump_trylock", "agent_projection");
+    progress_store_close();
+    struct json_value empty_full = {0}, empty_projection = {0};
+    bool empty_ok = sovereignty_dump_state_json(&empty_full, NULL) &&
+                    sovereignty_trust_state_json(&empty_projection);
+    const char *empty_mode = json_get_str(json_get(&empty_full, "trust_mode"));
+    const char *projection_mode = json_get_str(json_get(&empty_projection, "trust_mode"));
+    SD_CHECK("agent projection: unavailable store parity", empty_ok && agent_strings_match(empty_mode, projection_mode));
+    json_free(&empty_full); json_free(&empty_projection);
+    bool opened = progress_store_open(dir);
+    SD_CHECK("agent projection: store opens", opened);
+    if (!opened) { test_cleanup_tmpdir(dir); return failures; }
+    sqlite3 *db = progress_store_db();
+    int setup = sqlite3_exec(db,
+        "CREATE TABLE nullifiers(nf BLOB, pool INTEGER, height INTEGER);"
+        "INSERT INTO nullifiers VALUES(zeroblob(1),0,1),(zeroblob(1),1,2);"
+        "CREATE TABLE sprout_anchors(root BLOB); CREATE TABLE sapling_anchors(root BLOB);",
+        NULL, NULL, NULL);
+    SD_CHECK("agent projection: synthetic pool tables", setup == SQLITE_OK);
+    int count = 0;
+    int trace_rc = sqlite3_trace_v2(db, SQLITE_TRACE_STMT, agent_pool_count_trace, &count);
+    SD_CHECK("agent projection: SQL trace enabled", trace_rc == SQLITE_OK);
+    struct json_value full = {0};
+    bool full_ok = sovereignty_dump_state_json(&full, NULL);
+    int full_counts = count;
+    count = 0;
+    struct json_value result = {0};
+    bool agent_ok = rpc_agent_summary(NULL, false, &result);
+    trace_rc = sqlite3_trace_v2(db, 0, NULL, NULL);
+    SD_CHECK("agent projection: SQL trace removed", trace_rc == SQLITE_OK);
+    const struct json_value *tier = json_get(&result, "trust_tier");
+    const struct json_value *caps = json_get(&full, "capabilities");
+    SD_CHECK("agent projection: full dump counts pools", full_ok && full_counts == 4);
+    SD_CHECK("agent projection: summary does not count pools", agent_ok && tier && count == 0);
+    const char *tier_mode = json_get_str(json_get(tier, "trust_mode"));
+    const char *full_mode = json_get_str(json_get(&full, "trust_mode"));
+    const char *tier_state = json_get_str(json_get(tier, "trust_state"));
+    const char *full_state = json_get_str(json_get(&full, "trust_state"));
+    SD_CHECK("agent projection: trust mode parity", agent_strings_match(tier_mode, full_mode));
+    SD_CHECK("agent projection: trust state parity", agent_strings_match(tier_state, full_state));
+    const char *names[] = {"mine", "wallet_spend", "export_bundle"};
+    const char *denied[] = {"mint_denied", "wallet_spend_denied", "export_bundle_denied"};
+    for (size_t i = 0; i < 3; ++i) {
+        const struct json_value *cap = json_get(caps, names[i]);
+        const struct json_value *allowed = json_get(cap, "allowed");
+        const struct json_value *observed = json_get(tier, denied[i]);
+        SD_CHECK("agent projection: capability parity", allowed && observed &&
+            json_get_bool(observed) == !json_get_bool(allowed));
+    }
+    json_free(&result); json_free(&full);
+    progress_store_close(); test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_stage_dump_trylock(void)
 {
     int failures = 0;
@@ -1272,6 +1360,7 @@ int test_stage_dump_trylock(void)
     failures += case_diag_dumps_busy_path();
     failures += case_validate_headers_ok0_index_used();
     failures += case_sovereignty_dump_busy_path();
+    failures += case_agent_trust_projection();
     failures += case_chain_evidence_busy_ingest();
     failures += case_chain_evidence_ingest_contention();
     failures += case_bounded_snapshot_ndb_mutex();

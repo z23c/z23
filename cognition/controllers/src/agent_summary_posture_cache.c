@@ -198,7 +198,7 @@ static void agent_trust_tier_collect_fresh(
 {
     struct json_value dump;
     json_init(&dump);
-    sovereignty_dump_state_json(&dump, NULL);
+    sovereignty_trust_state_json(&dump);
 
     trust_tier_str(out->trust_mode, sizeof(out->trust_mode),
                    json_get_str(json_get(&dump, "trust_mode")));

@@ -615,7 +615,8 @@ struct sov_state_scan {
  * progress-store read lock (progress_store_tx_trylock in
  * sovereignty_dump_state_json); this releases it exactly where the inline
  * code released it, before any JSON is emitted. */
-static void sov_scan_locked_state(sqlite3 *pdb, struct sov_state_scan *scan)
+static void sov_scan_locked_state(sqlite3 *pdb, struct sov_state_scan *scan,
+                                  bool include_counts)
 {
     scan->applied_ok = coins_kv_get_applied_height(pdb, &scan->applied,
                                                    &scan->applied_found);
@@ -639,12 +640,14 @@ static void sov_scan_locked_state(sqlite3 *pdb, struct sov_state_scan *scan)
      * stamp (see the sov_* helpers above) — same lock scope as the reads
      * above; progress_meta_get recursively acquires progress_store_tx_lock
      * itself, matching the coins_kv_tip_is_self_derived precedent. */
-    scan->sprout_anchor_rows = sov_count_rows(pdb, "sprout_anchors", NULL);
-    scan->sapling_anchor_rows = sov_count_rows(pdb, "sapling_anchors", NULL);
-    scan->sprout_nullifier_rows = sov_count_rows(pdb, "nullifiers",
-                                                 " WHERE pool=0");
-    scan->sapling_nullifier_rows = sov_count_rows(pdb, "nullifiers",
-                                                  " WHERE pool=1");
+    if (include_counts) {
+        scan->sprout_anchor_rows = sov_count_rows(pdb, "sprout_anchors", NULL);
+        scan->sapling_anchor_rows = sov_count_rows(pdb, "sapling_anchors", NULL);
+        scan->sprout_nullifier_rows = sov_count_rows(pdb, "nullifiers",
+                                                     " WHERE pool=0");
+        scan->sapling_nullifier_rows = sov_count_rows(pdb, "nullifiers",
+                                                      " WHERE pool=1");
+    }
     size_t prov_len = 0;
     bool prov_found = false;
     bool prov_ok = progress_meta_get(pdb, SHIELDED_IMPORT_PROVENANCE_KEY,
@@ -783,7 +786,8 @@ static void sov_emit_gated(struct json_value *out, bool progress_open,
     json_free(&rule);
 }
 
-bool sovereignty_dump_state_json(struct json_value *out, const char *key)
+static bool sovereignty_dump_state_impl(struct json_value *out, const char *key,
+                                        bool include_counts)
 {
     (void)key;
     if (!out)
@@ -814,7 +818,7 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
         .self_reason = "progress_store_not_open",
     };
     if (progress_locked)
-        sov_scan_locked_state(pdb, &scan);
+        sov_scan_locked_state(pdb, &scan, include_counts);
 
     const char *authority_posture = sov_authority_posture_name(
         progress_open, scan.proven_authority, scan.self_folded);
@@ -883,15 +887,17 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
      * distinguishable from `self_folded_marker` above: a `release_assisted`
      * node can carry a full complete history (post-import) with these counts
      * populated, while `self_folded` stays false until sovereign promotion. */
-    struct json_value pools = {0};
-    json_set_object(&pools);
-    json_push_kv_int(&pools, "sprout_anchors", scan.sprout_anchor_rows);
-    json_push_kv_int(&pools, "sapling_anchors", scan.sapling_anchor_rows);
-    json_push_kv_int(&pools, "sprout_nullifiers", scan.sprout_nullifier_rows);
-    json_push_kv_int(&pools, "sapling_nullifiers",
-                     scan.sapling_nullifier_rows);
-    json_push_kv(out, "shielded_pool_counts", &pools);
-    json_free(&pools);
+    if (include_counts) {
+        struct json_value pools = {0};
+        json_set_object(&pools);
+        json_push_kv_int(&pools, "sprout_anchors", scan.sprout_anchor_rows);
+        json_push_kv_int(&pools, "sapling_anchors", scan.sapling_anchor_rows);
+        json_push_kv_int(&pools, "sprout_nullifiers", scan.sprout_nullifier_rows);
+        json_push_kv_int(&pools, "sapling_nullifiers",
+                         scan.sapling_nullifier_rows);
+        json_push_kv(out, "shielded_pool_counts", &pools);
+        json_free(&pools);
+    }
 
     /* The importer's provenance stamp (shielded_import.provenance in
      * progress_meta) — see shi_write_provenance in
@@ -907,6 +913,16 @@ bool sovereignty_dump_state_json(struct json_value *out, const char *key)
                    scan.self_folded);
 
     return true;
+}
+
+bool sovereignty_dump_state_json(struct json_value *out, const char *key)
+{
+    return sovereignty_dump_state_impl(out, key, true);
+}
+
+bool sovereignty_trust_state_json(struct json_value *out)
+{
+    return sovereignty_dump_state_impl(out, NULL, false);
 }
 
 bool sovereignty_seeded_floor_recorded(bool *recorded)

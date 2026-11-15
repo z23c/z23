@@ -49,6 +49,10 @@ struct json_value;
  * so it never inherits that function's blocking behavior. */
 bool sovereignty_dump_state_json(struct json_value *out, const char *key);
 
+/* Display-only projection uses the same trust predicates and busy cache as
+ * the full dump, without collecting shielded pool counts. It grants nothing. */
+bool sovereignty_trust_state_json(struct json_value *out);
+
 /* Machine-readable trust_mode used by both the dumper above and
  * core.status/core.status.brief so every surface agrees on the same word:
  *   "sovereign"          — self-folded coin set (checkpoint/from-genesis
