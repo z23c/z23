@@ -5679,6 +5679,63 @@ static bool ops_supervisor_execute_budget(const char *key, struct json_value *en
 { return ops_supervisor_execute_options(key, env, budget, false); }
 static bool ops_supervisor_execute(const char *key, struct json_value *env)
 { return ops_supervisor_execute_budget(key, env, 0); }
+
+static const char *ops_supervisor_wire;
+static char *ops_supervisor_wire_rpc(const char *method, const char *params)
+{
+    (void)params;
+    return !strcmp(method, "dumpstate") && ops_supervisor_wire ? strdup(ops_supervisor_wire) : NULL;
+}
+
+static int test_ops_supervisor_null_key(void)
+{
+    int failures = 0;
+    struct json_value env; json_init(&env);
+    node_rpc_client_set_test_hook(ops_supervisor_wire_rpc);
+    TEST("ops.state distinguishes a keyed supervisor refusal") {
+        ops_supervisor_wire = "\"dumpstate: dump function returned false\"";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT(!json_get_bool(json_get(&env, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "STATE_KEY_UNAVAILABLE");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "null";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "BAD_STATE_BODY");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "\"dumpstate: dump function returned false\\u0000suffix\"";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "BAD_STATE_BODY");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "\"other\"";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "BAD_STATE_BODY");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "\"dumpstate: dump function returned false\"";
+        ASSERT(ops_supervisor_execute(NULL, &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "BAD_STATE_BODY");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "{";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "BAD_STATE_BODY");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "17";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "BAD_STATE_BODY");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = NULL;
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "NODE_UNAVAILABLE");
+        json_free(&env); json_init(&env);
+        ops_supervisor_wire = "{\"code\":-1,\"message\":\"fixture error\"}";
+        ASSERT(ops_supervisor_execute("summary", &env));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&env, "error"), "code")), "STATE_ERROR");
+        PASS();
+    } _test_next:;
+    json_free(&env);
+    node_rpc_client_set_test_hook(NULL);
+    ops_supervisor_wire = NULL;
+    return failures;
+}
 static bool ops_supervisor_no_self_next(const struct json_value *env)
 {
     const struct json_value *next = json_get(env, "next");
@@ -5770,6 +5827,7 @@ static int test_ops_supervisor_drilldown(void)
         ASSERT(json_get_bool(json_get(page, "truncated"))); ASSERT(!json_get(page, "next_cursor"));
         const struct json_value *next = json_at(json_get(&env, "next"), 0);
         ASSERT(strstr(json_get_str(json_get(next, "reason")), "key=summary") != NULL);
+        ASSERT(strstr(json_get_str(json_get(next, "reason")), "if supported") != NULL);
         json_free(&env);
         PASS();
     }
@@ -8000,6 +8058,7 @@ int test_command_registry_catalog(void)
     failures += test_ops_state_requires_subsystem();
     failures += test_ops_state_covered_reply_serializes();
     failures += test_ops_supervisor_drilldown();
+    failures += test_ops_supervisor_null_key();
     failures += test_dev_vcs_revert_release_stub();
     failures += test_dev_vcs_seal_grant_release_stub();
     failures += test_is_root_ownership();

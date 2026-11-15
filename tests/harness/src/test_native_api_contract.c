@@ -4059,6 +4059,81 @@ static void *partial_reply_serve(void *arg)
     return NULL;
 }
 
+static void *supervisor_refusal_serve(void *arg)
+{
+    struct partial_reply_server *s = arg;
+#if defined(_WIN32)
+    platform_socket_pollfd pfd = {.fd = (platform_socket_t)(intptr_t)s->listen_fd, .events = PLATFORM_SOCKET_POLL_READ};
+    int ready = platform_socket_poll(&pfd, 1, 2000);
+#else
+    struct pollfd pfd = {.fd = s->listen_fd, .events = POLLIN};
+    int ready;
+    do { ready = poll(&pfd, 1, 2000); } while (ready < 0 && errno == EINTR);
+#endif
+    if (ready <= 0) return NULL;
+    int fd = accept(s->listen_fd, NULL, NULL);
+    if (fd < 0) return NULL;
+    s->accepted_fd = fd;
+    if (partial_reply_consume_request(fd)) {
+        static const char body[] = "{\"result\":null,\"error\":\"dumpstate: dump function returned false\",\"id\":1}";
+        char hdr[256];
+        int n = snprintf(hdr, sizeof hdr, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", sizeof(body) - 1);
+        if (n > 0 && (size_t)n < sizeof hdr) {
+            (void)!write(fd, hdr, (size_t)n);
+            (void)!write(fd, body, sizeof(body) - 1);
+        }
+    }
+    close(fd); s->accepted_fd = -1;
+    return NULL;
+}
+
+static int test_supervisor_key_wire_refusal(void)
+{
+    int failures = 0;
+    pthread_t th = 0;
+    struct partial_reply_server srv = {.listen_fd = -1, .accepted_fd = -1};
+    char dir[PATH_MAX] = {0};
+    struct json_value input = {0};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.ops_state.v1");
+    TEST("ops.state names the supervisor keyed refusal from real RPC wire") {
+        srv.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+        ASSERT(srv.listen_fd >= 0);
+        struct sockaddr_in addr = {0};
+        addr.sin_family = AF_INET; addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ASSERT(bind(srv.listen_fd, (struct sockaddr *)&addr, sizeof addr) == 0);
+        socklen_t len = sizeof addr;
+        ASSERT(getsockname(srv.listen_fd, (struct sockaddr *)&addr, &len) == 0);
+        ASSERT(listen(srv.listen_fd, 1) == 0);
+        test_make_tmpdir(dir, sizeof dir, "native_api", "supervisor-rpc");
+        struct stat st;
+        ASSERT(dir[0] && stat(dir, &st) == 0 && S_ISDIR(st.st_mode));
+        char cookie[PATH_MAX + 16]; snprintf(cookie, sizeof cookie, "%s/.cookie", dir);
+        FILE *f = fopen(cookie, "w"); ASSERT(f);
+        bool written = fputs("dummyuser:dummypass\n", f) >= 0;
+        if (fclose(f) != 0) written = false;
+        ASSERT(written);
+        ASSERT(pthread_create(&th, NULL, supervisor_refusal_serve, &srv) == 0);
+        node_rpc_client_set_test_hook(NULL);
+        zcl_native_bridge_bind_rpc(dir, (int)ntohs(addr.sin_port));
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "subsystem", "supervisor"));
+        ASSERT(json_push_kv_str(&input, "key", "summary"));
+        struct zcl_command_request request = {.input = &input};
+        zcl_native_handle_ops_state(&request, &reply);
+        ASSERT_STR_EQ(reply.error.code, "STATE_KEY_UNAVAILABLE");
+        ASSERT(!reply.error.mutated);
+        PASS();
+    } _test_next:;
+    if (srv.listen_fd >= 0) close(srv.listen_fd);
+    if (th) (void)pthread_join(th, NULL);
+    if (srv.accepted_fd >= 0) close(srv.accepted_fd);
+    if (dir[0]) { char cookie[PATH_MAX + 16]; snprintf(cookie, sizeof cookie, "%s/.cookie", dir); unlink(cookie); rmdir(dir); }
+    zcl_native_bridge_bind_rpc("", 0);
+    json_free(&input); zcl_command_reply_free(&reply);
+    return failures;
+}
+
 static int test_partial_rpc_reply_names_the_timeout(void)
 {
     int failures = 0;
@@ -4963,6 +5038,7 @@ int test_native_api_contract(void)
     failures += test_status_brief_body_front_door_deadline();
     failures += test_vault_proof_commit_uses_long_rpc_deadline();
     failures += test_partial_rpc_reply_names_the_timeout();
+    failures += test_supervisor_key_wire_refusal();
     printf("=== native_api_contract: %d failures ===\n", failures);
     return failures;
 }

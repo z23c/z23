@@ -748,6 +748,7 @@ static bool nc_rpc_fetch_object(const char *method, const char *params,
                                 const char *unavailable_msg,
                                 const char *bad_body_code,
                                 const char *bad_body_msg,
+                                bool supervisor_key,
                                 struct zcl_command_reply *reply,
                                 struct json_value *body_out)
 {
@@ -762,8 +763,21 @@ static bool nc_rpc_fetch_object(const char *method, const char *params,
                                          "confirm the node is running");
         return false;
     }
-    if (!json_read(body_out, result, strlen(result)) ||
-        body_out->type != JSON_OBJ) {
+    bool parsed = json_read(body_out, result, strlen(result));
+    /* The RPC client normalizes scalar strings; its API does not retain
+     * whether they came from the wire result or error field. */
+    if (parsed && body_out->type == JSON_STR && supervisor_key &&
+        !strcmp(result, "\"dumpstate: dump function returned false\"")) {
+        json_free(body_out);
+        free(result);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "STATE_KEY_UNAVAILABLE",
+                               "execute", false, false,
+                               "the node refused this keyed supervisor view; the key may be unsupported or absent",
+                               evidence);
+        return false;
+    }
+    if (!parsed || body_out->type != JSON_OBJ) {
         json_free(body_out);
         free(result);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -810,7 +824,7 @@ static bool nc_mine_regtest_node(struct zcl_command_reply *reply)
     json_init(&body);
     if (!nc_rpc_fetch_object("getblockchaininfo", NULL, "getblockchaininfo",
                              "node unavailable", "INVALID_CHAIN_RESPONSE",
-                             "invalid chain response", reply, &body))
+                             "invalid chain response", false, reply, &body))
         return false;
     const char *chain = json_get_str(json_get(&body, "chain"));
     bool valid = chain && strcmp(chain, "regtest") == 0;
@@ -1011,7 +1025,27 @@ static bool nc_supervisor_page_guidance(const char *sub, const char *key, const 
     reply->next_count = 0;
     return zcl_command_reply_add_next(reply, "ops.state",
         "{\"subsystem\":\"supervisor\",\"key\":\"supervisor.stalled.children.live.discovery.v1:0\"}",
-        "list stalled children; key=summary and exact child names also work");
+        "if supported by the node, list stalled children; key=summary and exact child names may also work");
+}
+
+static bool nc_ops_state_fetch(const char *sub, const char *key,
+                               struct zcl_command_reply *reply, struct json_value *body)
+{
+    char params_json[512];
+    if (!nc_ops_state_build_params(sub, key, params_json,
+                                   sizeof(params_json))) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
+                               "normalize", false, false,
+                               "could not encode dumpstate params", sub);
+        return false;
+    }
+    return nc_rpc_fetch_object("dumpstate", params_json, sub,
+                             "the node did not return a state body",
+                             "BAD_STATE_BODY",
+                             "dumpstate returned a non-object body",
+                             !strcmp(sub, "supervisor") && key && key[0], reply,
+                             body);
 }
 
 void zcl_native_handle_ops_state(const struct zcl_command_request *request,
@@ -1030,23 +1064,8 @@ void zcl_native_handle_ops_state(const struct zcl_command_request *request,
         return;
     }
     const char *key = json_get_str(json_get(request->input, "key"));
-
-    char params_json[512];
-    if (!nc_ops_state_build_params(sub, key, params_json,
-                                   sizeof(params_json))) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
-                               "normalize", false, false,
-                               "could not encode dumpstate params", sub);
-        return;
-    }
-
     struct json_value body;
-    if (!nc_rpc_fetch_object("dumpstate", params_json, sub,
-                             "the node did not return a state body",
-                             "BAD_STATE_BODY",
-                             "dumpstate returned a non-object body", reply,
-                             &body))
+    if (!nc_ops_state_fetch(sub, key, reply, &body))
         return;
     /* node_rpc_call surfaces a JSON-RPC failure as either {"error":{...}}
      * (transport) or a bare {"code":..,"message":..} (RPC-level). Treat both
@@ -1097,7 +1116,7 @@ void zcl_native_handle_network_chain_view(
                              "network_monitor",
                              "the node did not return the network view",
                              "BAD_STATE_BODY",
-                             "network view returned a non-object body",
+                             "network view returned a non-object body", false,
                              reply, &body))
         return;
     const struct json_value *err, *ecode, *emsg;
@@ -1740,7 +1759,7 @@ void zcl_native_handle_ops_debug_bundle(
     if (!nc_rpc_fetch_object("debugbundle", "[]", "ops.debug.bundle",
                              "the node did not return a debug-bundle body",
                              "BAD_BUNDLE_BODY",
-                             "debugbundle returned a non-object body", reply,
+                             "debugbundle returned a non-object body", false, reply,
                              &body))
         return;
 
