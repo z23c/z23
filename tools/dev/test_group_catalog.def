@@ -405,6 +405,8 @@ ZCL_TEST_GROUP(dev_app_scaffold)
  * the real pull wire, and every way that crossing is refused. */
 ZCL_TEST_GROUP(app_event_sync)
 ZCL_TEST_GROUP(impact_composition)
+ZCL_TEST_GROUP(impact_composition_shard_01)
+ZCL_TEST_GROUP(impact_composition_shard_02)
 /* Signer identity for push-proof receipts: per-box key custody, the
  * signers.allow trust list, and the pre-push admission decision over both. */
 ZCL_TEST_GROUP(dev_proof_signer)

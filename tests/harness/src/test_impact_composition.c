@@ -17556,8 +17556,21 @@ static int test_ic_proof_umbrella_union(void)
     return failures;
 }
 
-int test_impact_composition(void)
+static int ic_run_bundle(void)
 {
+#if !defined(_WIN32)
+    int failures = test_ic_worker_bundle_make_once();
+    failures += test_ic_worker_bundle_union();
+    return failures;
+#else
+    printf("SKIP (proof bundle fixtures require POSIX processes)\n");
+    return 0;
+#endif
+}
+
+static int ic_run_remainder(bool include_bundle)
+{
+    (void)include_bundle; /* bundle cases are unavailable on Windows */
     int failures = 0;
     failures += test_ic_rule_group_capacity();
     failures += test_ic_rule_group_length();
@@ -17717,8 +17730,7 @@ int test_impact_composition(void)
     failures += test_ic_source_plan_roots();
     failures += test_ic_worker_plan_docs_before_refresh();
     failures += test_ic_worker_plan_graph_refresh_refuses();
-    failures += test_ic_worker_bundle_make_once();
-    failures += test_ic_worker_bundle_union();
+    if (include_bundle) failures += ic_run_bundle();
     failures += test_ic_release_readmission_alias();
     printf("closure_generation_fixtures wall_us=%lld\n",
            (long long)(platform_time_monotonic_us() - closure_fixture_started_us));
@@ -17797,4 +17809,16 @@ int test_impact_composition(void)
     failures += test_pw_plan_rejects_hidden_fields();
 #endif
     return failures;
+}
+
+int test_impact_composition(void)
+{
+    return ic_run_remainder(true);
+}
+
+int test_impact_composition_shard_01(void) { return ic_run_remainder(false); }
+int test_impact_composition_shard_02(void)
+{
+    ic_isolate_state_root();
+    return ic_run_bundle();
 }

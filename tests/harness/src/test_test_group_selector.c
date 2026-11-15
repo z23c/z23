@@ -1134,6 +1134,7 @@ static int test_umbrella_groups(void)
         "test_dev_land_remote", NULL};
     failures += umbrella_contract("test_dev_land", "dev_land",
                                   dev_land_extras);
+    failures += umbrella_contract("test_impact_composition", "impact_composition", NULL);
     return failures;
 }
 
