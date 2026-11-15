@@ -386,8 +386,15 @@ static int ndc_torn_walk_first_pass(struct ndc_torn_walk *w)
     /* Pre-run sentinel: a SIGSEGV on the hash-less slot kills the
      * process here; reaching the assertions proves a named outcome. */
     int result = -99;
+    node_db_catchup_lock_guard_test_reset();
     if (w->wrote && w->installed && w->opened)
         result = node_db_catchup_service_run(&w->ndb, &w->ac, NULL, w->dir2);
+    /* A chain with a real block above genesis that loses its tip hash is
+     * still a failed pass and still counts toward the abort streak. */
+    NDC_CHECK("a real block losing its tip hash still fails and counts",
+              result == -1 &&
+              node_db_catchup_lock_guard_test_abort_streak() == 1);
+    node_db_catchup_lock_guard_test_reset();
 
     int tip = w->opened ? node_db_sync_get_tip_height(&w->ndb) : -1;
     NDC_CHECK("catchup survives a torn hash-less slot without crashing",
@@ -429,6 +436,97 @@ static int ndc_check_torn_hashless_walk(void)
     struct ndc_torn_walk w;
     failures += ndc_torn_walk_first_pass(&w);
     failures += ndc_torn_walk_repaired_pass(&w);
+    return failures;
+}
+
+/* A node whose active chain is only the genesis block is waiting for a
+ * fast-start offer: its database has nothing to catch up to. The pass must be
+ * a clean no-op, never counted as an abort, so repeated triggers never raise
+ * node_db_catchup.abort_storm. Genesis here carries a hash but no readable
+ * body (no BLOCK_HAVE_DATA), so the walk indexes nothing and has no tip hash
+ * to commit -- the same state as the cold-start run. */
+struct ndc_genesis_only {
+    char dir[256];
+    struct uint256 hash;
+    struct block_index slot;
+    struct active_chain ac;
+    struct node_db ndb;
+    bool installed;
+    bool opened;
+};
+
+static void ndc_genesis_only_setup(struct ndc_genesis_only *g, uint32_t status)
+{
+    test_make_tmpdir(g->dir, sizeof(g->dir), "node_db_catchup", "genesis_only");
+    memset(&g->slot, 0, sizeof(g->slot));
+    g->hash.data[0] = 0x67;
+    g->slot.nHeight = 0;
+    g->slot.nStatus = status;
+    g->slot.phashBlock = &g->hash;
+    active_chain_init(&g->ac);
+    g->installed = active_chain_install_tip_slot(&g->ac, &g->slot);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/node.db", g->dir);
+    g->opened = node_db_open(&g->ndb, path);
+}
+
+static int ndc_check_genesis_only_is_noop(void)
+{
+    int failures = 0;
+    struct ndc_genesis_only g;
+    blocker_module_init();
+    blocker_reset_for_testing();
+    node_db_catchup_lock_guard_test_reset();
+    ndc_genesis_only_setup(&g, 0);
+    NDC_CHECK("genesis-only fixture installs and opens",
+              g.installed && g.opened);
+
+    int bad_results = 0;
+    for (int i = 0; i < NODE_DB_CATCHUP_ABORT_STREAK_CAP + 1 && g.opened; i++)
+        if (node_db_catchup_service_run(&g.ndb, &g.ac, NULL, g.dir) != 0)
+            bad_results++;
+    NDC_CHECK("every genesis-only pass reports no work, not failure",
+              bad_results == 0);
+    NDC_CHECK("genesis-only passes never count as aborts",
+              node_db_catchup_lock_guard_test_abort_streak() == 0);
+    NDC_CHECK("genesis-only passes raise no abort_storm blocker",
+              !blocker_exists(NODE_DB_CATCHUP_ABORT_STREAK_BLOCKER_ID));
+    NDC_CHECK("genesis-only passes never park the worker",
+              !node_db_catchup_lock_guard_parked());
+
+    if (g.opened) node_db_close(&g.ndb);
+    active_chain_free(&g.ac);
+    test_cleanup_tmpdir(g.dir);
+    node_db_catchup_lock_guard_test_reset();
+    blocker_reset_for_testing();
+    return failures;
+}
+
+/* A genesis slot that claims BLOCK_HAVE_DATA but whose block file is missing
+ * is a real fault, not a cold start: the pass must fail and count. */
+static int ndc_check_genesis_unreadable_body_fails(void)
+{
+    int failures = 0;
+    struct ndc_genesis_only g;
+    blocker_module_init();
+    blocker_reset_for_testing();
+    node_db_catchup_lock_guard_test_reset();
+    ndc_genesis_only_setup(&g, BLOCK_HAVE_DATA);
+    NDC_CHECK("unreadable-genesis fixture installs and opens",
+              g.installed && g.opened);
+
+    int result = g.opened
+        ? node_db_catchup_service_run(&g.ndb, &g.ac, NULL, g.dir) : 0;
+    NDC_CHECK("a HAVE_DATA genesis that cannot be indexed fails the pass",
+              result == -1);
+    NDC_CHECK("an unreadable genesis body counts toward the abort streak",
+              node_db_catchup_lock_guard_test_abort_streak() == 1);
+
+    if (g.opened) node_db_close(&g.ndb);
+    active_chain_free(&g.ac);
+    test_cleanup_tmpdir(g.dir);
+    node_db_catchup_lock_guard_test_reset();
+    blocker_reset_for_testing();
     return failures;
 }
 
@@ -6861,6 +6959,8 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_yield_after_turbo_defers_restore(&fx);
     failures += ndc_check_durable_reopen(&fx);
     failures += ndc_check_maintenance_defers_while_active(&fx);
+    failures += ndc_check_genesis_only_is_noop();
+    failures += ndc_check_genesis_unreadable_body_fails();
     failures += ndc_check_abort_storm_parks_worker();
     failures += ndc_append_sixth_block(&fx);
     failures += ndc_check_parked_then_half_open(&fx);

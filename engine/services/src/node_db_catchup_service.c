@@ -1207,7 +1207,6 @@ static void catchup_close_abort(struct catchup_pass *ps)
 /* Final commit, part one: the tip row (or the sparse proven-prefix cursor). */
 static void catchup_final_tip(struct catchup_pass *ps)
 {
-    /* Final commit */
     if (!ps->cb.tx_open || ps->failed ||
         (ps->interrupted && ps->indexed == 0))
         return;
@@ -1220,6 +1219,11 @@ static void catchup_final_tip(struct catchup_pass *ps)
         }
         return;
     }
+    /* Body-less genesis only: a HAVE_DATA genesis that failed to index fails. */
+    const struct block_index *g0 = active_chain_at(ps->chain, 0);
+    if (ps->chain_tip == 0 && ps->indexed == 0 && g0 &&
+        !(g0->nStatus & BLOCK_HAVE_DATA))
+        return;
     int start = ps->start;
     int chain_tip = ps->chain_tip;
     int first_missing_index_h = ps->holes.first_missing_index_h;
