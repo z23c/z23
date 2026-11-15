@@ -1469,12 +1469,12 @@ static bool rbrief_present(void *context, const struct zcl_present_model_v1 *mod
     bool close = false, redraw = false;
     return ok && rt_action(live, 0, &close, &redraw) && close;
 }
-static bool rbrief_case(bool adopted)
+static bool rbrief_case(bool adopted, const char *name)
 {
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
     json_set_object(&reply.data);
     bool ok = json_push_kv_str(&reply.data, adopted ? "copy" : "destination", "/private/long/path/copy name") &&
-        json_push_kv_str(&reply.data, "name", "fixture-app") &&
+        json_push_kv_str(&reply.data, "name", name) &&
         json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     struct rbrief_probe probe = {.adopted = adopted};
     if (ok) ok = app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, adopted);
@@ -1494,13 +1494,26 @@ static bool rbrief_invalid(const char *path, const char *version)
         probe.shown == 0 && !strcmp(reply.error.code, "CONTINUATION_UNAVAILABLE");
     zcl_command_reply_free(&reply); return ok;
 }
+static bool rbrief_bad_app(void)
+{
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    json_set_object(&reply.data);
+    bool ok = json_push_kv_str(&reply.data, "destination", "/private/copy name") &&
+        json_push_kv_str(&reply.data, "name", "publisher/") &&
+        json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    struct rbrief_probe probe = {0};
+    if (ok) ok = !app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, false) &&
+        probe.shown == 1 && !strcmp(reply.error.code, "CONTINUATION_UNAVAILABLE");
+    zcl_command_reply_free(&reply); return ok;
+}
 static int rbrief_cases(void)
 {
     int failures = 0;
     TEST("ready choices preserve exact identity and reject invalid received inputs") {
-        ASSERT(rbrief_case(true)); ASSERT(rbrief_case(false));
+        ASSERT(rbrief_case(true, "fixture-app")); ASSERT(rbrief_case(false, "publisher/fixture-app"));
+        ASSERT(rbrief_case(false, "fixture-app"));
         const char *valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        ASSERT(rbrief_invalid(NULL, valid)); ASSERT(rbrief_invalid("", valid));
+        ASSERT(rbrief_bad_app()); ASSERT(rbrief_invalid(NULL, valid)); ASSERT(rbrief_invalid("", valid));
         ASSERT(rbrief_invalid("/private/", valid)); ASSERT(rbrief_invalid("/private/copy", NULL));
         ASSERT(rbrief_invalid("/private/copy", "not-a-version"));
         ASSERT(rbrief_invalid("/private/copy", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF"));
