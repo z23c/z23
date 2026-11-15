@@ -112,8 +112,8 @@ order of size.
    beacon, repeat. Resident memory (`node_rss_mb`) comes next. A boot that
    refuses to start names its stage and cause; an untyped refusal is a bug.
 2. **A stranger runs a stranger's app.** Signed `.z23share` handoff
-   and public catalog discovery are implemented; the live acceptance below
-   covers isolated personas on one regtest host. Next prove the same signed
+   and public catalog discovery are implemented; the acceptances below cover
+   isolated regtest personas and separate installed-app environments. Next prove the same signed
    package root and rebuilt image between independent physical hosts, with
    a fresh receiver and no external signup. Reuse the existing commands:
    <!-- claim: symbol-present zcl_native_handle_app_publish tools/command/native_app_publish_command.c # signed catalog publication -->
@@ -150,6 +150,23 @@ order of size.
    on one regtest host are not independent physical hosts. No new distribution
    or activation API was added.
    <!-- claim: symbol-present aj_plugin_replica tools/app_journey_live.c # replica retrieval after publisher exit -->
+
+   An installed signed-file journey on public source 6e5f522bb5 used separate
+   sender and fresh recipient environments: the sender read the full source via
+   its copied AI setup, made one RED-to-GREEN edit, previewed and kept it, then
+   copied and sent the signed file before stopping. The recipient needed no
+   account, rebuilt and kept the copy, and its live image matched its Keep
+   receipt. The edited source bytes matched at both ends. Sender and recipient
+   cleanup passed; sender live image was not independently captured and the
+   preview screenshot did not establish the visible colour. Evidence: the retained app-direct-list-full-journey-1115 result and review.
+   This signed-file run is not a new Tor, offline or catalog-fetch proof, and
+   separate host environments do not establish independent physical hardware.
+
+   On public source b699edb1673d, a fresh installed recipient separately
+   received the existing edited file and kept it after Preview displayed a
+   concise app name alongside the full saved version. This did not repeat the
+   AI journey. Evidence: the retained app-preview-label-release-1115 UI result and review. The independent physical-host target
+   remains open.
 3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap
