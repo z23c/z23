@@ -166,8 +166,11 @@ bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap)
             retained.bundle.bytes, retained.bundle.length, why, cap);
     app_installed_toolchain_free(&retained);
     char target[64];
-    if (ok) ok = platform_toolchain_canonical_target(target, sizeof(target)) && !strcmp(target, kit->target);
-    if (!ok) { app_toolchain_free(kit); return kit_why(why, cap, "Selected compiler kit unavailable, invalid or for another target."); }
+    if (ok && !platform_toolchain_canonical_target(target, sizeof(target)))
+        ok = kit_why(why, cap, "Could not determine this host's compiler-kit target.");
+    if (ok && strcmp(target, kit->target))
+        ok = kit_why(why, cap, "Selected compiler kit is for another target.");
+    if (!ok) { app_toolchain_free(kit); return false; }
     return true;
 }
 static void kit_seal_clear(struct app_toolchain *kit)

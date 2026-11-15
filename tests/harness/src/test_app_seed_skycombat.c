@@ -142,6 +142,7 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 /* Explicit installed acceptance. These environment inputs belong only to the
  * harness: production resolver still uses the running executable exclusively. */
 #include "command/app_installed_source.h"
+#include "command/app_toolchain.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
 #include "crypto/sha256.h"
@@ -150,6 +151,9 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 #include "presentation/model_render.h"
 #include "util/spawn.h"
 #include "vcs/vcs_manifest.h"
+#include "vcs/vcs.h"
+#include "vcs/source_bundle.h"
+#include "sha3/sha3.h"
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -164,6 +168,7 @@ struct asi_run {
     char export_dir[ASS_PATH], release[ASS_PATH], home[ASS_PATH];
     char prefix[ASS_PATH], datadir[ASS_PATH], empty[ASS_PATH], tmp[ASS_PATH];
     char installed[ASS_PATH], pin[65];
+    char kit[ASS_PATH], kit_digest[65], copy[ASS_PATH], version[65];
     struct app_installed_source source;
     struct platform_process cli, display;
 };
@@ -308,13 +313,58 @@ static bool asi_manifest_pin(const struct asi_run *r, char pin[65])
     struct sha256_ctx h; sha256_init(&h); sha256_write(&h, bytes, n); sha256_finalize(&h, hash);
     zcl_hex_encode(hash, 32, pin); return true;
 }
+/* The packager verifies these inert files; no fixture tool is executed. */
+static bool asi_kit_tree(struct asi_run *r)
+{
+    static const char *const dirs[] = {"rootfs", "rootfs/bin", "rootfs/usr", "rootfs/usr/bin"};
+    static const char *const files[] = {"rootfs/bin/sh", "rootfs/usr/bin/cc", "rootfs/usr/bin/make"};
+    char path[ASS_PATH];
+    if (mkdir(r->kit, 0700)) return false;
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); ++i)
+        if (!asi_path(path, sizeof(path), r->kit, dirs[i]) || mkdir(path, 0700)) return false;
+    for (size_t i = 0; i < sizeof(files)/sizeof(files[0]); ++i)
+        if (!asf_put(r->kit, files[i], "inert kit fixture\n") ||
+            !asi_path(path, sizeof(path), r->kit, files[i]) || chmod(path, 0755)) return false;
+    return true;
+}
+static bool asi_kit_write(const char *dir, const char *name, const void *bytes, size_t size)
+{
+    char path[ASS_PATH];
+    if (!asi_path(path, sizeof(path), dir, name)) return false;
+    FILE *f = fopen(path, "wbx");
+    if (!f) return false;
+    bool ok = fwrite(bytes, 1, size, f) == size;
+    return fclose(f) == 0 && ok;
+}
+static bool asi_kit(struct ass_world *w, struct asi_run *r)
+{
+    uint8_t tree[32], digest[32], *wire = NULL; size_t length = 0;
+    char root[65], hash[65], descriptor[1024];
+    if (!asi_path(r->kit, sizeof(r->kit), w->root, "kit") || !asi_kit_tree(r)) return false;
+    bool ok = vcs_tree_capture_path(r->kit, tree) == VCS_OK &&
+        vcs_source_bundle_create(r->kit, tree, &wire, &length, NULL) == VCS_SOURCE_BUNDLE_OK;
+    if (!ok) { free(wire); return false; }
+    zcl_sha3_256(wire, length, digest); zcl_hex_encode(digest, 32, hash); zcl_hex_encode(tree, 32, root);
+    int n = snprintf(descriptor, sizeof(descriptor),
+        "{\"schema\":\"%s\",\"bundle_file\":\"%s\",\"bundle_sha3\":\"%s\","
+        "\"tree_root\":\"%s\",\"target\":\"linux-x86_64-v3\",\"policy\":\"%s\"}",
+        APP_TOOLCHAIN_SCHEMA, APP_TOOLCHAIN_BUNDLE, hash, root, APP_TOOLCHAIN_POLICY);
+    ok = n > 0 && (size_t)n < sizeof(descriptor) &&
+        asi_kit_write(r->kit, APP_TOOLCHAIN_BUNDLE, wire, length) &&
+        asi_kit_write(r->kit, APP_TOOLCHAIN_DESCRIPTOR, descriptor, (size_t)n);
+    free(wire);
+    if (!ok) return false;
+    zcl_sha3_256((const uint8_t *)descriptor, (size_t)n, digest);
+    zcl_hex_encode(digest, 32, r->kit_digest); return true;
+}
 static bool asi_package(struct ass_world *w, struct asi_run *r)
 {
     char script[PATH_MAX];
     if (!asi_path(script, sizeof(script), w->source, "platform/packaging/release/build_release.sh")) return false;
     const char *argv[] = {"/usr/bin/bash", script, "--bin", r->bin, "--out", r->release,
         "--platform", "linux-x86_64", "--app-source", r->export_dir,
-        "--app-source-sha3", r->pin, "--app-verifier", r->verifier, NULL};
+        "--app-source-sha3", r->pin, "--app-verifier", r->verifier,
+        "--app-toolchain", r->kit, "--app-toolchain-sha3", r->kit_digest, NULL};
     return asi_tool(w, "installed-package.log", argv, 600000);
 }
 static bool asi_service_isolation(const struct asi_run *r)
@@ -810,7 +860,56 @@ static bool asi_confirm(struct ass_world *w, struct asi_run *r)
         asi_adopted_only(r, json_get(&reply, "data")) && asi_successor(r, json_get(&reply, "data")) &&
         asi_driver(w, r, "--expect-count=0") &&
         asi_window_driver(w, r, "--title=Your copy is ready", "--expect-count=0");
+    if (ok) {
+        const char *copy = asi_string(json_get(&reply, "data"), "copy");
+        int n = snprintf(r->copy, sizeof(r->copy), "%s", copy);
+        const char *version = asi_string(json_get(&reply, "data"), "version");
+        ok = n > 0 && (size_t)n < sizeof(r->copy) && strlen(version) == 64;
+        if (ok) memcpy(r->version, version, sizeof(r->version));
+    }
     json_free(&reply); return ok;
+}
+static bool asi_kit_refusal_valid(const char *path, uint32_t code)
+{
+    struct json_value reply; json_init(&reply);
+    bool ok = code != 0 && asi_json_file(path, &reply);
+    const struct json_value *top_ok = json_get(&reply, "ok");
+    const struct json_value *error = json_get(&reply, "error");
+    const struct json_value *mutated = json_get(error, "mutated");
+    ok = ok && top_ok && top_ok->type == JSON_BOOL && !json_get_bool(top_ok) &&
+        !strcmp(asi_string(error, "code"), "ENV_UNAVAILABLE") &&
+        !strcmp(asi_string(error, "evidence"),
+            "Installed compiler kit refused: layout, owner/mode, manifest, running image or member mismatch") &&
+        mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
+    json_free(&reply); return ok;
+}
+static bool asi_kit_refusal_reply(struct ass_world *w, struct asi_run *r)
+{
+    char data[ASS_PATH+16], copy[ASS_PATH+16], version[80], path[ASS_PATH];
+    int a = snprintf(data, sizeof(data), "--datadir=%s", r->datadir);
+    int b = snprintf(copy, sizeof(copy), "--copy=%s", r->copy);
+    if (a <= 0 || (size_t)a >= sizeof(data) || b <= 0 || (size_t)b >= sizeof(copy) ||
+        !asi_path(path, sizeof(path), w->root, "kit-refusal.json")) return false;
+    int v = snprintf(version, sizeof(version), "--version=%s", r->version);
+    if (v <= 0 || (size_t)v >= sizeof(version)) return false;
+    const char *argv[] = {r->installed, "app", "build", "--json", data, copy, version, NULL};
+    if (!asi_terminal_spawn(w, r, "kit-refusal.json", argv)) return false;
+    uint32_t code = 0;
+    enum platform_process_wait_result state = platform_process_wait(&r->cli, 120000, &code);
+    if (state != PLATFORM_PROCESS_WAIT_EXITED) { (void)asi_stop(&r->cli); return false; }
+    platform_process_close(&r->cli);
+    return asi_kit_refusal_valid(path, code);
+}
+static bool asi_kit_refusal(struct ass_world *w, struct asi_run *r)
+{
+    char pin[65], dir[ASS_PATH], path[ASS_PATH]; struct stat st;
+    if (!asi_manifest_pin(r, pin) ||
+        snprintf(dir, sizeof(dir), "%s/share/z23/apps/%s", r->prefix, pin) >= (int)sizeof(dir) ||
+        !asi_path(path, sizeof(path), dir, APP_TOOLCHAIN_DESCRIPTOR) || lstat(path, &st) ||
+        !S_ISREG(st.st_mode) || chmod(path, st.st_mode | 022)) return false;
+    bool ok = asi_kit_refusal_reply(w, r);
+    bool restored = chmod(path, st.st_mode & 07777) == 0;
+    return ok && restored;
 }
 static bool asi_copy_public(const char *from, const char *to)
 {
@@ -1108,7 +1207,7 @@ static bool asi_evidence(struct ass_world *w, struct asi_run *r)
         st.st_uid != geteuid() || (st.st_mode & 022)) return false;
     static const char *const logs[] = {"installed-package.log", "installed-install.log",
         "installed-list.json", "installed-cancel.json", "installed-confirm.json", "installed-xvfb.log",
-        "installed-driver.log", "installed-cli.stderr"};
+        "installed-driver.log", "installed-cli.stderr", "kit-refusal.json"};
     char from[ASS_PATH], to[PATH_MAX];
     for (size_t i = 0; i < sizeof(logs)/sizeof(logs[0]); ++i) {
         if (!asi_path(from, sizeof(from), w->root, logs[i]) ||
@@ -1119,7 +1218,7 @@ static bool asi_evidence(struct ass_world *w, struct asi_run *r)
     static const char *const assets[] = {"SHA256SUMS", "AGENT_CARD.md", "z23", "zclassic23",
         "z23-package-verify", "zclassic23-package-verify", "z23-acme", "zclassic23-acme",
         "z23-skycombat", "installed-source.json", "app-build.wire", "manifest.wire",
-        "recipe.wire", "source.bundle"};
+        "recipe.wire", "source.bundle", "app-toolchain.json", "app-toolchain.bundle"};
     for (size_t i = 0; i < sizeof(assets)/sizeof(assets[0]); ++i) {
         if (!asi_path(from, sizeof(from), r->release, assets[i]) ||
             !asi_path(to, sizeof(to), dir, assets[i]) || !asi_copy_public(from, to)) return false;
@@ -1138,7 +1237,7 @@ static bool asi_cleanup(struct ass_world *w, struct asi_run *r,
         ok, (unsigned long long)r->cli.pid, (unsigned long long)r->display.pid, w->root);
     return ok;
 }
-/* Fixture-only retirement of the single verified flat 13- or 17-member generation.
+/* Fixture-only retirement of the single verified kit-bearing generation.
  * Never called after failed proof/export/process cleanup; no recursive chmod
  * and no following the mutable skycombat selector. */
 static bool asi_cleanup_identity(int fd, const struct stat *before,
@@ -1200,23 +1299,28 @@ static bool asi_unseal_fixture_generation(const struct ass_world *w, const struc
     printf("installed fixture generation unsealed=%d manifest=%s root=%s\n", ok, pin, w->root);
     return ok;
 }
+static bool asi_prepare_installed(struct ass_world *w, struct asi_run *r)
+{
+    return asi_export(w, r) && asi_original(w, r) && asi_kit(w, r) &&
+        asi_package(w, r) && asi_install(w, r) && asi_desktop_installed(r);
+}
 static int ass_installed(struct ass_world *w)
 {
     if (!getenv("ZCL_TEST_INSTALLED_APP_BIN_DIR")) return 0;
     int failures = 0; struct asi_run r = {0}; struct asi_env saved;
     app_installed_source_init(&r.source); platform_process_init(&r.cli); platform_process_init(&r.display);
     bool env_saved = asi_environment_save(&saved), cwd_changed = false;
-    TEST("normal release/install discovers SkyCombat and native consent creates an exact-source personal copy") {
+    TEST("kit-bearing release/install discovers SkyCombat, adopts its copy and reports kit refusal") {
         struct sigaction chld;
         ASSERT(env_saved && sigaction(SIGCHLD, NULL, &chld) == 0 && chld.sa_handler == SIG_DFL && !(chld.sa_flags & SA_NOCLDWAIT));
         ASSERT(asi_prerequisites(w, &r) && asi_paths(w, &r));
-        ASSERT(asi_export(w, &r) && asi_original(w, &r));
-        ASSERT(asi_package(w, &r) && asi_install(w, &r) && asi_desktop_installed(&r));
+        ASSERT(asi_prepare_installed(w, &r));
         ASSERT(asi_display(w, &r));
         ASSERT(chdir(r.empty) == 0); cwd_changed = true;
         ASSERT(asi_discovery(w, &r) && asi_no_consumer_state(&r));
         ASSERT(asi_terminal_copy(w, &r) && asi_no_consumer_state(&r));
         ASSERT(asi_cancel(w, &r) && asi_confirm(w, &r));
+        ASSERT(asi_kit_refusal(w, &r));
         ASSERT(asi_evidence(w, &r));
         PASS();
     } _test_next:;
