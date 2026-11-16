@@ -787,15 +787,28 @@ boot_sd_watchdog_disk_hold_scan(bool connman_started, bool sweep_alive,
                                 size_t cap);
 /* Tell the evidence code where cs_main lives (a known lock). */
 void boot_sd_watchdog_register_cs_main(const void *cs_main);
-/* Evidence-only NAMED mutex addresses: they label withhold-edge lock lines
- * and let the snapshot read a pthread owner tid, and nothing else. The
- * disk-hold verdict never reads this list (known locks stay the three above).
+/* NAMED mutex addresses: they label withhold-edge lock lines and let the
+ * snapshot read a pthread owner tid. The disk-hold verdict reads exactly one
+ * of them, BOOT_SD_NODE_DB_LOCK_NAME, as its fourth known lock (after the
+ * activation mutex, progress_store_tx_lock and cs_main); a NULL address there
+ * is skipped. Every other name is evidence only.
  * `name` must have static storage. A NULL `addr` clears that name's slot
  * (the slot keeps its name for a later re-register: names are never
  * released, so at most BOOT_SD_NAMED_LOCK_MAX distinct names ever exist).
  * False when the name is empty or every slot is taken. */
 #define BOOT_SD_NAMED_LOCK_MAX 4
 bool boot_sd_watchdog_register_named_lock(const char *name, const void *addr);
+/* The name node.db's SQLite connection mutex is registered under (the hold
+ * verdict's fourth known lock). */
+#define BOOT_SD_NODE_DB_LOCK_NAME "node_db_conn"
+#ifdef ZCL_TESTING
+/* The known-lock table exactly as the disk-hold scan builds it (address,
+ * recorded holder tid, holder /proc stat and wchan), copied into `out`.
+ * Returns the number of entries written. The holder text points into static
+ * storage that the next call overwrites. */
+size_t boot_sd_watchdog_test_known_locks(struct boot_sd_known_lock *out,
+                                         size_t cap);
+#endif
 /* Withhold-edge lock evidence as text, one line per '\n', at most
  * BOOT_SD_LOCK_EVIDENCE_MAX_LINES lines: the hot futex table (addresses with
  * >= 3 waiters, most first), every named address, each row's owner and its

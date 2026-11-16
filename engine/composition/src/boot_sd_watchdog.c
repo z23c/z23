@@ -649,6 +649,8 @@ static size_t boot_sd_watchdog_stalled_pillars(long *tids, size_t cap,
     return n;
 }
 
+static void boot_sd_watchdog_drop_stale_node_db(void);
+
 /* Pet-thread only. The LOG_WARN below takes the logger lock on the pet
  * thread; it is rate-limited to one line per BOOT_SD_DISK_HOLD_LOG_US. */
 static bool boot_sd_watchdog_disk_hold(struct wd_stall_state *st)
@@ -658,6 +660,9 @@ static bool boot_sd_watchdog_disk_hold(struct wd_stall_state *st)
         st->start_us = now_us;
     if (g_sd_watchdog_ctx && g_sd_watchdog_ctx->state)
         boot_sd_watchdog_register_cs_main(&g_sd_watchdog_ctx->state->cs_main);
+    /* node.db's mutex is a known lock of the scan below: drop its name first
+     * if the handle it was read from is no longer the live one. */
+    boot_sd_watchdog_drop_stale_node_db();
     long tids[3];
     bool started = false;
     size_t n = boot_sd_watchdog_stalled_pillars(tids, 3, &started);
@@ -716,20 +721,22 @@ bool boot_sd_watchdog_test_gate_decide(bool runtime_gate_alive,
 }
 #endif
 
-/* ── Evidence-only lock names ────────────────────────────────────────────
+/* ── node.db's lock name ─────────────────────────────────────────────────
  * node.db's SQLite connection mutex (FULLMUTEX: a recursive pthread mutex
- * whose address is its futex word) is registered as a NAMED evidence address
- * so a withhold snapshot can say "these threads wait on node.db" and name the
- * holder. The one SQLite call, sqlite3_db_mutex, runs on the registering
+ * whose address is its futex word) is registered as a NAMED address so a
+ * withhold snapshot can say "these threads wait on node.db" and name the
+ * holder, and so the disk-hold verdict counts it as its fourth known lock: a
+ * pillar waiting on it is explained when its holder is in D on an IO wchan.
+ * The one SQLite call, sqlite3_db_mutex, runs on the registering
  * thread (service start or the collect tick), never on the pet thread.
  * svc->node_db is never reopened while the watchdog runs: the quarantine
  * reopen happens only inside the open itself (database.c db_quarantine_and_
  * reopen), and shutdown joins the pet thread and clears the name before
  * node.db closes. The remembered handle is a plain-pointer guard for a
  * future reopen, not proof against a recycled sqlite3* address: the pet
- * thread drops the name when svc->node_db->db no longer equals it. */
+ * thread drops the name when svc->node_db->db no longer equals it, before
+ * every disk-hold scan and at every withhold edge. */
 static _Atomic(sqlite3 *) g_named_db;
-#define BOOT_SD_NODE_DB_LOCK_NAME "node_db_conn"
 
 static void boot_sd_watchdog_register_node_db(struct boot_svc_ctx *svc)
 {

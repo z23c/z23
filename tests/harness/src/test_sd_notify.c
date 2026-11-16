@@ -1793,6 +1793,281 @@ static int test_sd_watchdog_named_lock(void)
 }
 #endif
 
+#if defined(__linux__)
+/* node.db's lock as the verdict sees it: the connection mutex of a real
+ * FULLMUTEX SQLite connection (SQLite's recursive db->mutex), registered
+ * under BOOT_SD_NODE_DB_LOCK_NAME, entered TWICE by a holder thread while one
+ * waiter blocks on it. */
+struct sdn_ndb_fx {
+    sqlite3 *db;
+    sqlite3_mutex *mu;
+    _Atomic long holder_tid, waiter_tid;
+    _Atomic bool release;
+    pthread_t holder, waiter;
+    bool holder_up, waiter_up;
+};
+
+static void *sdn_ndb_holder_main(void *opaque)
+{
+    struct sdn_ndb_fx *fx = opaque;
+    sqlite3_mutex_enter(fx->mu);
+    sqlite3_mutex_enter(fx->mu); /* recursive: the second enter nests */
+    atomic_store(&fx->holder_tid, os_proc_self_tid());
+    while (!atomic_load(&fx->release))
+        platform_sleep_ms(1); /* real-clock: holder parks until the test releases it */
+    sqlite3_mutex_leave(fx->mu);
+    sqlite3_mutex_leave(fx->mu);
+    return NULL;
+}
+
+static void *sdn_ndb_waiter_main(void *opaque)
+{
+    struct sdn_ndb_fx *fx = opaque;
+    atomic_store(&fx->waiter_tid, os_proc_self_tid());
+    sqlite3_mutex_enter(fx->mu);
+    sqlite3_mutex_leave(fx->mu);
+    return NULL;
+}
+
+static bool sdn_ndb_fx_start(struct sdn_ndb_fx *fx)
+{
+    if (sqlite3_open_v2(":memory:", &fx->db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                            SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK)
+        return false;
+    fx->mu = sqlite3_db_mutex(fx->db);
+    if (!fx->mu)
+        return false;
+    fx->holder_up = pthread_create(&fx->holder, NULL, sdn_ndb_holder_main,
+                                   fx) == 0;
+    for (int i = 0; fx->holder_up && i < 2000 &&
+                    atomic_load(&fx->holder_tid) <= 0; i++)
+        platform_sleep_ms(1); /* real-clock: bounded wait for the holder thread to enter the mutex */
+    if (atomic_load(&fx->holder_tid) <= 0)
+        return false;
+    fx->waiter_up = pthread_create(&fx->waiter, NULL, sdn_ndb_waiter_main,
+                                   fx) == 0;
+    for (int i = 0; fx->waiter_up && i < 5000; i++) {
+        if (sdn_tid_futex_waits_on(atomic_load(&fx->waiter_tid), fx->mu))
+            return true;
+        platform_sleep_ms(1); /* real-clock: bounded wait for the waiter to enter a kernel futex wait */
+    }
+    return false;
+}
+
+static void sdn_ndb_fx_release(struct sdn_ndb_fx *fx)
+{
+    atomic_store(&fx->release, true);
+    if (fx->holder_up)
+        (void)pthread_join(fx->holder, NULL);
+    if (fx->waiter_up)
+        (void)pthread_join(fx->waiter, NULL);
+    fx->holder_up = fx->waiter_up = false;
+}
+
+#define SDN_KL_CAP 8
+static int sdn_find_lock(const struct boot_sd_known_lock *t, size_t n,
+                         const void *addr)
+{
+    for (size_t i = 0; i < n; i++)
+        if (t[i].addr && t[i].addr == addr)
+            return (int)i;
+    return -1;
+}
+
+/* Verdict over the known-lock table `t` for stalled pillars `tids`, each
+ * futex-waiting on `addr`, with a live socket thread and a fresh network. */
+static enum boot_sd_disk_hold_verdict
+sdn_ndb_verdict(const struct boot_sd_known_lock *t, size_t n, const long *tids,
+                size_t np, const void *addr, int64_t held, long *d_tid)
+{
+    char sc[64];
+    snprintf(sc, sizeof(sc), "%ld 0x%llx 0x80 0x0", HOLD_FUTEX_NR,
+             (unsigned long long)(uintptr_t)addr);
+    struct boot_sd_hold_acc a = {0};
+    boot_sd_watchdog_hold_acc_add(&a, k_sock, "do_poll");
+    for (size_t i = 0; i < np; i++) {
+        struct boot_sd_pillar_obs p = { .tid = tids[i], .stat = k_s_stat,
+            .wchan = "futex_wait_queue\n", .syscall = sc };
+        boot_sd_watchdog_hold_acc_add_pillar(&a, &p, t, n);
+    }
+    if (d_tid)
+        *d_tid = a.d_tid;
+    return boot_sd_watchdog_hold_acc_verdict(&a, true, true, held, HOLD_G);
+}
+
+static void sdn_set_holder_text(struct boot_sd_known_lock *t, int k,
+                                const char *stat, const char *wchan)
+{
+    if (k < 0)
+        return;
+    t[k].holder_stat  = stat;
+    t[k].holder_wchan = wchan;
+}
+
+/* The production known-lock table while the fixture holds node.db's lock:
+ * the real holder (awake: R or S) and controls with its /proc text replaced. */
+static int sdn_check_ndb_held(const struct sdn_ndb_fx *fx)
+{
+    int failures = 0;
+    struct boot_sd_known_lock t[SDN_KL_CAP];
+    size_t n = boot_sd_watchdog_test_known_locks(t, SDN_KL_CAP);
+    int k = sdn_find_lock(t, n, fx->mu);
+    long holder = atomic_load(&fx->holder_tid), d = 0, pillar = 100;
+    SDN_CHECK("node.db lock: a known lock of the hold verdict", k >= 0);
+    SDN_CHECK("node.db lock: holder is the recursive owner's gettid",
+              k >= 0 && t[k].holder_tid == holder);
+    SDN_CHECK("node.db lock: real holder /proc read, not D+IO (R or S)",
+              k >= 0 && t[k].holder_stat && t[k].holder_wchan &&
+              !boot_sd_watchdog_task_in_disk_wait(t[k].holder_stat,
+                                                  t[k].holder_wchan));
+    SDN_CHECK("WITHHOLD: node.db holder awake, R or S (real /proc)",
+              sdn_ndb_verdict(t, n, &pillar, 1, fx->mu, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    sdn_set_holder_text(t, k, NULL, NULL);
+    SDN_CHECK("WITHHOLD: node.db holder /proc unreadable",
+              sdn_ndb_verdict(t, n, &pillar, 1, fx->mu, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    sdn_set_holder_text(t, k, k_d_stat, "futex_wait_queue\n");
+    SDN_CHECK("WITHHOLD: node.db holder in D but not on an IO wchan",
+              sdn_ndb_verdict(t, n, &pillar, 1, fx->mu, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    sdn_set_holder_text(t, k, k_d_stat, "folio_wait_bit_common\n");
+    SDN_CHECK("HOLD: pillar waits on node.db's lock, holder D+IO",
+              sdn_ndb_verdict(t, n, &pillar, 1, fx->mu, 0, &d) ==
+              BOOT_SD_HOLD && d == holder);
+    SDN_CHECK("WITHHOLD: pillar on an unknown address, node.db holder D+IO",
+              sdn_ndb_verdict(t, n, &pillar, 1, (const void *)0xdead00, 0,
+                              NULL) == BOOT_SD_HOLD_NO_IO_WAIT);
+    return failures;
+}
+
+/* 11-16: the tick runner held progress_store_tx_lock and itself waited on
+ * node.db's lock, as did the message and dial loops; node.db's holder sat in
+ * D on its WAL read. The pillar's own wait decides, not the lock it holds. */
+static int sdn_check_ndb_chain(const struct sdn_ndb_fx *fx)
+{
+    int failures = 0;
+    struct boot_sd_known_lock t[SDN_KL_CAP];
+    size_t n = boot_sd_watchdog_test_known_locks(t, SDN_KL_CAP);
+    int k = sdn_find_lock(t, n, fx->mu);
+    const long pillars[3] = { 3823626, 3871092, 3871091 };
+    long holder = atomic_load(&fx->holder_tid), d = 0, prev = 0;
+    sdn_set_holder_text(t, k, k_d_stat, "folio_wait_bit_common\n");
+    if (n > 1) { /* progress_store_tx_lock, recorded holder = tick runner */
+        if (!t[1].addr)
+            t[1].addr = (const void *)(uintptr_t)0x7e5700ULL;
+        t[1].holder_tid   = pillars[0];
+        t[1].holder_stat  = k_s_stat;
+        t[1].holder_wchan = "futex_wait_queue\n";
+    }
+    enum boot_sd_disk_hold_verdict v =
+        sdn_ndb_verdict(t, n, pillars, 3, fx->mu, 0, &d);
+    SDN_CHECK("11-16 chain: every pillar explained by node.db's D holder",
+              v == BOOT_SD_HOLD && d == holder);
+    SDN_CHECK("11-16 chain: first check is unconfirmed",
+              boot_sd_watchdog_hold_confirm(v, d, &prev) ==
+              BOOT_SD_HOLD_UNCONFIRMED);
+    v = sdn_ndb_verdict(t, n, pillars, 3, fx->mu, 0, &d);
+    SDN_CHECK("11-16 chain: HOLD on the second check naming the same D thread",
+              boot_sd_watchdog_hold_confirm(v, d, &prev) == BOOT_SD_HOLD);
+    SDN_CHECK("11-16 chain: one microsecond inside the grace still holds",
+              sdn_ndb_verdict(t, n, pillars, 3, fx->mu, HOLD_G - 1, NULL) ==
+              BOOT_SD_HOLD);
+    SDN_CHECK("11-16 chain: grace elapsed withholds",
+              sdn_ndb_verdict(t, n, pillars, 3, fx->mu, HOLD_G, NULL) ==
+              BOOT_SD_HOLD_GRACE_ELAPSED);
+    return failures;
+}
+
+/* The real scan and the real decision path on the fixture: the holder is
+ * read, but it is awake (not D), so the decision is unchanged: withhold. */
+static int sdn_check_ndb_live(const struct sdn_ndb_fx *fx)
+{
+    int failures = 0;
+    char ev[768], want[64];
+    long pillar = atomic_load(&fx->waiter_tid), dt = -1;
+    long holder = atomic_load(&fx->holder_tid);
+    enum boot_sd_disk_hold_verdict v = boot_sd_watchdog_disk_hold_scan(
+        true, true, 0, &pillar, 1, &dt, ev, sizeof(ev));
+    printf("sd_notify: node.db lock live scan evidence: %s\n", ev);
+    SDN_CHECK("node.db lock (live): awake holder is stall-not-on-disk-io",
+              v == BOOT_SD_HOLD_NO_IO_WAIT);
+    snprintf(want, sizeof(want), "holder[tid=%ld ", holder);
+    SDN_CHECK("node.db lock (live): the scan reads node.db's holder",
+              strstr(ev, want) != NULL);
+    SDN_CHECK("node.db lock (live): gate_with_hold withholds",
+              !boot_sd_watchdog_test_gate_decide(false, &pillar, 1, true));
+    SDN_CHECK("node.db lock (live): a live gate pings (control)",
+              boot_sd_watchdog_test_gate_decide(true, &pillar, 1, true));
+    return failures;
+}
+
+/* After the holder left: a free lock (owner 0); then a cleared registration
+ * whose entry is skipped even with D+IO holder text planted on it. */
+static int sdn_check_ndb_free_and_cleared(const struct sdn_ndb_fx *fx)
+{
+    int failures = 0;
+    struct boot_sd_known_lock t[SDN_KL_CAP];
+    size_t n = boot_sd_watchdog_test_known_locks(t, SDN_KL_CAP);
+    int k = sdn_find_lock(t, n, fx->mu);
+    long pillar = 100;
+    SDN_CHECK("node.db lock: a free lock records holder tid 0",
+              k >= 0 && t[k].holder_tid == 0);
+    sdn_set_holder_text(t, k, k_d_stat, "folio_wait_bit_common\n");
+    SDN_CHECK("WITHHOLD: node.db lock free (owner 0)",
+              sdn_ndb_verdict(t, n, &pillar, 1, fx->mu, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    SDN_CHECK("node.db lock: clear the registration",
+              boot_sd_watchdog_register_named_lock(BOOT_SD_NODE_DB_LOCK_NAME,
+                                                   NULL));
+    n = boot_sd_watchdog_test_known_locks(t, SDN_KL_CAP);
+    SDN_CHECK("node.db lock: a cleared registration leaves the table",
+              sdn_find_lock(t, n, fx->mu) < 0);
+    for (size_t i = 0; i < n; i++) {
+        if (t[i].addr)
+            continue;
+        t[i].holder_tid = 796187;
+        sdn_set_holder_text(t, (int)i, k_d_stat, "folio_wait_bit_common\n");
+    }
+    SDN_CHECK("WITHHOLD: pillar on the old node.db address after the clear",
+              sdn_ndb_verdict(t, n, &pillar, 1, fx->mu, 0, NULL) ==
+              BOOT_SD_HOLD_NO_IO_WAIT);
+    return failures;
+}
+
+static int test_sd_watchdog_node_db_lock(void)
+{
+    int failures = 0;
+    static struct sdn_ndb_fx fx;
+    memset(&fx, 0, sizeof(fx));
+    bool started = sdn_ndb_fx_start(&fx);
+    SDN_CHECK("node.db lock fixture: holder entered twice, waiter parked on "
+              "the mutex word", started);
+    if (started) {
+        SDN_CHECK("node.db lock: register",
+                  boot_sd_watchdog_register_named_lock(
+                      BOOT_SD_NODE_DB_LOCK_NAME, fx.mu));
+        failures += sdn_check_ndb_held(&fx);
+        failures += sdn_check_ndb_chain(&fx);
+        failures += sdn_check_ndb_live(&fx);
+    }
+    sdn_ndb_fx_release(&fx);
+    if (started)
+        failures += sdn_check_ndb_free_and_cleared(&fx);
+    (void)boot_sd_watchdog_register_named_lock(BOOT_SD_NODE_DB_LOCK_NAME,
+                                               NULL);
+    if (fx.db)
+        (void)sqlite3_close(fx.db);
+    return failures;
+}
+#else
+static int test_sd_watchdog_node_db_lock(void)
+{
+    return 0;
+}
+#endif
+
 /* The pure incident shape: an unknown futex address with no D holder gets
  * the not-on-disk-io verdict. The decision it leads to is asserted on the
  * live path (sdn_check_named_lock_verdict) through the real gate. */
@@ -1817,5 +2092,6 @@ int test_sd_notify(void)
            test_sd_watchdog_disk_hold() + test_sd_watchdog_early_warning() +
            test_sd_watchdog_pet_cadence() + test_sd_watchdog_io_bytes_field() +
            test_sd_watchdog_promote_lock_threads() +
-           test_sd_watchdog_named_lock() + test_sd_watchdog_incident_shape();
+           test_sd_watchdog_named_lock() + test_sd_watchdog_node_db_lock() +
+           test_sd_watchdog_incident_shape();
 }

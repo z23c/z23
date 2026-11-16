@@ -251,23 +251,40 @@ void boot_sd_watchdog_register_cs_main(const void *cs_main)
  * only its address changes; a NULL address is an empty row. Names are never
  * released (a clear keeps the name for the next register), so a reader never
  * sees a name change under it and at most BOOT_SD_NAMED_LOCK_MAX distinct
- * names are ever registered. Never read by known_locks() or the hold
- * verdict. */
+ * names are ever registered. known_locks() reads exactly one slot,
+ * BOOT_SD_NODE_DB_LOCK_NAME, as the hold verdict's fourth known lock; a NULL
+ * (cleared or never registered) address there is skipped like any absent
+ * known lock. Every other named address is evidence only. */
 static struct {
     _Atomic(const char *) name;
     _Atomic(const void *) addr;
 } s_named[BOOT_SD_NAMED_LOCK_MAX];
 
-static bool named_lock_set_existing(const char *name, const void *addr)
+/* The slot whose name is `name`, or -1. */
+static int named_slot(const char *name)
 {
     for (size_t i = 0; i < BOOT_SD_NAMED_LOCK_MAX; i++) {
         const char *n = atomic_load(&s_named[i].name);
-        if (n && strcmp(n, name) == 0) {
-            atomic_store(&s_named[i].addr, addr);
-            return true;
-        }
+        if (n && strcmp(n, name) == 0)
+            return (int)i;
     }
-    return false;
+    return -1;
+}
+
+static bool named_lock_set_existing(const char *name, const void *addr)
+{
+    int i = named_slot(name);
+    if (i < 0)
+        return false;
+    atomic_store(&s_named[i].addr, addr);
+    return true;
+}
+
+/* The address registered under `name`, or NULL. */
+static const void *named_lock_addr(const char *name)
+{
+    int i = named_slot(name);
+    return i < 0 ? NULL : atomic_load(&s_named[i].addr);
 }
 
 bool boot_sd_watchdog_register_named_lock(const char *name, const void *addr)
@@ -306,21 +323,27 @@ bool boot_sd_watchdog_early_warn_due(const int64_t ages_us[3],
     return true;
 }
 
-#define EVIDENCE_NLOCKS 3
+/* Known locks, in this order: activation mutex, progress_store_tx_lock,
+ * cs_main, node.db's SQLite connection mutex (a recursive pthread mutex whose
+ * address is its futex word; registered off the pet thread, cleared before
+ * node.db closes or when its handle changes). */
+#define EVIDENCE_NLOCKS 4
 static void known_locks(const void **locks)
 {
     struct chain_activation_controller *ctl = process_block_activation_controller();
     locks[0] = ctl ? (const void *)&ctl->mutex : NULL;
     locks[1] = progress_store_tx_lock_addr();
     locks[2] = atomic_load(&s_cs_main_addr);
+    locks[3] = named_lock_addr(BOOT_SD_NODE_DB_LOCK_NAME);
 }
 
 static void log_lock_addresses(const void *const *locks)
 {
     LOG_WARN("boot",
              "[sd_watchdog] lock addresses (match a futex a0): "
-             "activation_mutex=%p progress_store_tx_lock=%p cs_main=%p",
-             locks[0], locks[1], locks[2]);
+             "activation_mutex=%p progress_store_tx_lock=%p cs_main=%p "
+             "%s=%p", locks[0], locks[1], locks[2],
+             BOOT_SD_NODE_DB_LOCK_NAME, locks[3]);
 }
 
 static void log_tx_lock_holder(void)
@@ -382,14 +405,16 @@ static void classify_tasks(const long *tids, size_t n, const void *const *locks,
 
 /* ── Lock evidence (withhold edge, log only) ─────────────────────────────
  *
- * 11-16 incident: ~28 threads futex-waited on one address that was none of
- * the known locks, and the snapshot could not say whose lock it was, who held
+ * 11-16 incident: ~28 threads futex-waited on one address that was then none
+ * of the known locks (node.db's connection mutex, now the fourth), and the
+ * snapshot could not say whose lock it was, who held
  * it, or whether the holder's IO moved. This block answers those three from
  * the per-thread rows the snapshot already reads: waiter counts per futex
  * word, the evidence-only NAMED addresses, each row's owner (read as a
  * pthread mutex owner ONLY for named and known locks; an unknown word may be
  * a condvar or an atomic and is never dereferenced), and two IO samples for
- * every D-state thread and owner. Nothing here feeds the hold verdict. */
+ * every D-state thread and owner. Nothing in this block feeds the hold
+ * verdict (the verdict reads known_locks() itself). */
 
 #define EVIDENCE_HOT_MIN   3
 #define EVIDENCE_HOT_LINES 6
@@ -410,6 +435,7 @@ static struct {
 
 static const char *const k_known_names[EVIDENCE_NLOCKS] = {
     "activation_mutex", "progress_store_tx_lock", "cs_main",
+    BOOT_SD_NODE_DB_LOCK_NAME,
 };
 
 static size_t count_waiters(unsigned long long addr, size_t n)
@@ -1171,6 +1197,22 @@ static void fill_known_locks(struct boot_sd_known_lock *kl,
         }
     }
 }
+
+#ifdef ZCL_TESTING
+size_t boot_sd_watchdog_test_known_locks(struct boot_sd_known_lock *out,
+                                         size_t cap)
+{
+    static struct hold_lock_scratch s_test_scratch;
+    struct boot_sd_known_lock kl[EVIDENCE_NLOCKS];
+    if (!out)
+        return 0;
+    fill_known_locks(kl, &s_test_scratch);
+    size_t n = 0;
+    for (; n < EVIDENCE_NLOCKS && n < cap; n++)
+        out[n] = kl[n];
+    return n;
+}
+#endif
 
 /* Append " <label>[task line]" to `evidence` while it fits. */
 static void evidence_append(char *evidence, size_t cap, const char *label,
