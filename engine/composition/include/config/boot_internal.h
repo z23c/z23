@@ -684,7 +684,12 @@ void boot_sd_watchdog_live_drive_fields(char *out, size_t cap);
 bool boot_sd_watchdog_format_task_line(char *out, size_t cap, long tid,
                                        const char *stat, const char *wchan,
                                        const char *syscall_text);
-void boot_sd_watchdog_log_thread_snapshot(void);
+/* Withhold-edge thread snapshot plus the lock-evidence block (IO samples
+ * `io_gap_us` apart). Returns the microseconds the lock-evidence block alone
+ * took (0 when the snapshot was skipped or found no threads): the pet loop
+ * shortens its next sleep by exactly that much, so the rest of the snapshot
+ * costs what it cost before the block existed. */
+int64_t boot_sd_watchdog_log_thread_snapshot(int64_t io_gap_us);
 /* One line naming the progress_store_tx_lock holder ("free" when !held). */
 bool boot_sd_watchdog_format_holder_line(char *out, size_t cap, bool held,
                                          long tid, const char *comm,
@@ -700,6 +705,21 @@ unsigned boot_sd_watchdog_task_priority(const char *stat,
  * Returns the count written. */
 size_t boot_sd_watchdog_order_snapshot(const unsigned char *prio, size_t n,
                                        size_t cap, size_t *order);
+/* A lock-evidence row as the truncation rule sees it (owner > 0 = a tid). */
+struct boot_sd_lock_ref {
+    unsigned long long addr;
+    long               owner;
+};
+/* Truncation rule for lock evidence, pure over the scan arrays: every row's
+ * owner becomes priority 0, then waiters (fx[i] == a row's addr) become
+ * priority 0 while the priority-0 count stays below `cap`. Returns that
+ * count. */
+size_t boot_sd_watchdog_promote_lock_threads(unsigned char *prio,
+                                             const long *tids,
+                                             const unsigned long long *fx,
+                                             size_t n,
+                                             const struct boot_sd_lock_ref *rows,
+                                             size_t nrows, size_t cap);
 
 /* Disk-stall hold. When the ping would be withheld but every stalled thread
  * is readable and at least one is blocked in the kernel on disk IO (st=D with
@@ -767,6 +787,82 @@ boot_sd_watchdog_disk_hold_scan(bool connman_started, bool sweep_alive,
                                 size_t cap);
 /* Tell the evidence code where cs_main lives (a known lock). */
 void boot_sd_watchdog_register_cs_main(const void *cs_main);
+/* Evidence-only NAMED mutex addresses: they label withhold-edge lock lines
+ * and let the snapshot read a pthread owner tid, and nothing else. The
+ * disk-hold verdict never reads this list (known locks stay the three above).
+ * `name` must have static storage. A NULL `addr` clears that name's slot
+ * (the slot keeps its name for a later re-register: names are never
+ * released, so at most BOOT_SD_NAMED_LOCK_MAX distinct names ever exist).
+ * False when the name is empty or every slot is taken. */
+#define BOOT_SD_NAMED_LOCK_MAX 4
+bool boot_sd_watchdog_register_named_lock(const char *name, const void *addr);
+/* Withhold-edge lock evidence as text, one line per '\n', at most
+ * BOOT_SD_LOCK_EVIDENCE_MAX_LINES lines: the hot futex table (addresses with
+ * >= 3 waiters, most first), every named address, each row's owner and its
+ * task line, an IO sample pair `io_gap_us` apart for every D-state thread and
+ * owner, and /proc/pressure/io. The live snapshot logs the same text. Returns
+ * the number of lines written (0 when another scan is running). Test-only:
+ * it takes the scan flag, so a production caller off the pet thread would
+ * make the pet's scan report no /proc for that whole IO gap. */
+#define BOOT_SD_LOCK_EVIDENCE_MAX_LINES 40
+#define BOOT_SD_LOCK_EVIDENCE_IO_GAP_US (5LL * 1000000)
+#ifdef ZCL_TESTING
+size_t boot_sd_watchdog_format_lock_evidence(char *out, size_t cap,
+                                             int64_t io_gap_us);
+#endif
+/* boot_sd_watchdog.c (the unit that owns clock and procfs reach) serves the
+ * evidence code: sleep up to `gap_us` in <= 1 s slices, cut short by a pet
+ * stop or shutdown, returning the microseconds waited; and the first line of
+ * /proc/pressure/io (false when missing or unreadable). */
+int64_t boot_sd_watchdog_evidence_sleep(int64_t gap_us);
+bool boot_sd_watchdog_read_pressure_io(char *out, size_t cap);
+/* One lock-evidence IO sample, parsed (no allocation: it runs on the pet
+ * thread) from a /proc/self/task/<tid>/stat line: cpu_ticks = utime + stime,
+ * majflt = major faults. Fields are counted after the LAST ')' so a comm with
+ * spaces or parentheses cannot shift them. A short or malformed line returns
+ * false and leaves out->ok false: the sample is unavailable, never a zero
+ * that looks measured. */
+struct boot_sd_io_sample {
+    bool     ok;
+    uint64_t cpu_ticks;
+    uint64_t majflt;
+};
+bool boot_sd_watchdog_parse_io_sample(const char *stat,
+                                      struct boot_sd_io_sample *out);
+/* The io line for a sample pair `gap_us` apart. Both samples readable:
+ * "cpu_ticks=a->b(+d) majflt=a->b(+d)"; otherwise each sample prints its
+ * values or "unavailable". Block-IO bytes need the task io file, which the
+ * allocation-free reader does not open, so they print
+ * "blk_io_bytes=unavailable". */
+void boot_sd_watchdog_format_io_line(char *out, size_t cap, long tid,
+                                     const char *why,
+                                     const struct boot_sd_io_sample *a,
+                                     const struct boot_sd_io_sample *b,
+                                     int64_t gap_us);
+/* Pet-loop cadence around a ping edge. `withhold` is a withhold edge;
+ * `old_us` is the edge cost base already had (pillar line, thread
+ * snapshot), uncompensated as on base; `new_us` the lock-evidence block,
+ * which is subtracted from the next sleep so the next decision lands at
+ * edge_start + old_us + period_us exactly as on base. A resume edge or no
+ * edge sleeps the full period. Clamped at 0. */
+struct boot_sd_edge_cost {
+    bool    withhold;
+    int64_t old_us;
+    int64_t new_us;
+};
+int64_t boot_sd_watchdog_next_sleep_us(int64_t period_us,
+                                       const struct boot_sd_edge_cost *c);
+/* The withhold-edge IO sample gap for a pet period: the full
+ * BOOT_SD_LOCK_EVIDENCE_IO_GAP_US, capped at half the period so the block
+ * fits inside the sleep it is subtracted from. */
+int64_t boot_sd_watchdog_edge_io_gap_us(int64_t period_us);
+/* Early warning: true (and *last_log_us = now_us) when any non-negative
+ * pillar age exceeds half of `bound_us` and the previous warning is at least
+ * BOOT_SD_EARLY_WARN_LOG_US old. Log only; it never feeds the pet decision. */
+#define BOOT_SD_EARLY_WARN_LOG_US (60LL * 1000000)
+bool boot_sd_watchdog_early_warn_due(const int64_t ages_us[3],
+                                     int64_t bound_us, int64_t now_us,
+                                     int64_t *last_log_us);
 const char *boot_sd_watchdog_disk_hold_name(enum boot_sd_disk_hold_verdict v);
 void boot_sd_watchdog_disk_hold_note(enum boot_sd_disk_hold_verdict v);
 unsigned long boot_sd_watchdog_disk_hold_count(void);
@@ -781,6 +877,13 @@ bool boot_sd_watchdog_test_sweep_alive(uint64_t sweep_heartbeat,
                                        int64_t sweep_age_us);
 /* Test seam for the pure pet decision (tests/harness/src/test_sd_notify.c). */
 bool boot_sd_watchdog_test_pet_decide(bool runtime_gate_alive);
+/* The pet thread's real decision path, pet_decide(gate_with_hold(...)), with
+ * the stalled-pillar observation injected (tids, connman started) in place of
+ * the live supervisor/connman reads; everything else (sweep, /proc scan,
+ * confirm, grace) runs as on the pet thread, on a fresh stall episode. */
+bool boot_sd_watchdog_test_gate_decide(bool runtime_gate_alive,
+                                       const long *pillar_tids, size_t n,
+                                       bool connman_started);
 bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,
                                                 bool sweep_alive,
                                                 bool recent_progress);

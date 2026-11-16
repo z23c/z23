@@ -9,10 +9,15 @@
  * Why: a wedged node was aborted by systemd with no record of which frame
  * was stuck. The per-thread wchan + syscall first argument (the futex word
  * address) lets an operator match a blocked thread to a known lock address.
+ * The lock-evidence block adds what the 11-16 stall lacked: which address
+ * everybody waited on, its name when registered, its holder, and whether
+ * the holder's IO advanced. The withhold edge may sleep for the IO sample
+ * pair (BOOT_SD_LOCK_EVIDENCE_IO_GAP_US); it is already not pinging.
  */
 
 #include "config/boot_internal.h"
 #include "platform/os_proc.h"
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/reducer_drive_guard.h"
 #include "util/supervisor.h"
@@ -20,6 +25,7 @@
 #include "services/chain_activation_service.h"
 #include "validation/process_block.h"
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #if defined(__linux__)
@@ -241,6 +247,65 @@ void boot_sd_watchdog_register_cs_main(const void *cs_main)
     atomic_store(&s_cs_main_addr, cs_main);
 }
 
+/* Evidence-only named addresses. A slot's name is claimed once (CAS) and then
+ * only its address changes; a NULL address is an empty row. Names are never
+ * released (a clear keeps the name for the next register), so a reader never
+ * sees a name change under it and at most BOOT_SD_NAMED_LOCK_MAX distinct
+ * names are ever registered. Never read by known_locks() or the hold
+ * verdict. */
+static struct {
+    _Atomic(const char *) name;
+    _Atomic(const void *) addr;
+} s_named[BOOT_SD_NAMED_LOCK_MAX];
+
+static bool named_lock_set_existing(const char *name, const void *addr)
+{
+    for (size_t i = 0; i < BOOT_SD_NAMED_LOCK_MAX; i++) {
+        const char *n = atomic_load(&s_named[i].name);
+        if (n && strcmp(n, name) == 0) {
+            atomic_store(&s_named[i].addr, addr);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool boot_sd_watchdog_register_named_lock(const char *name, const void *addr)
+{
+    if (!name || !name[0])
+        return false;
+    if (named_lock_set_existing(name, addr))
+        return true;
+    if (!addr)
+        return true; /* clearing a name that was never registered */
+    for (size_t i = 0; i < BOOT_SD_NAMED_LOCK_MAX; i++) {
+        const char *expect = NULL;
+        if (atomic_compare_exchange_strong(&s_named[i].name, &expect, name)) {
+            atomic_store(&s_named[i].addr, addr);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool boot_sd_watchdog_early_warn_due(const int64_t ages_us[3],
+                                     int64_t bound_us, int64_t now_us,
+                                     int64_t *last_log_us)
+{
+    if (!ages_us || !last_log_us || bound_us <= 0)
+        return false;
+    bool late = false;
+    for (size_t i = 0; i < 3; i++)
+        if (ages_us[i] >= 0 && ages_us[i] > bound_us / 2)
+            late = true;
+    if (!late)
+        return false;
+    if (*last_log_us != 0 && now_us - *last_log_us < BOOT_SD_EARLY_WARN_LOG_US)
+        return false;
+    *last_log_us = now_us;
+    return true;
+}
+
 #define EVIDENCE_NLOCKS 3
 static void known_locks(const void **locks)
 {
@@ -272,6 +337,33 @@ static void log_tx_lock_holder(void)
         LOG_WARN("boot", "[sd_watchdog] %s", line);
 }
 
+/* The scan arrays (~54 KB) live in static storage, not on the pet thread's
+ * stack. One snapshot at a time: the pet thread is the only caller, and an
+ * overlapping call is refused rather than sharing the arrays. Static, not
+ * malloc: a stalled thread may hold the allocator's lock. `fx` is each
+ * thread's futex-wait word (0 = not in a futex wait), `d` its st=D flag. */
+static struct {
+    long tids[EVIDENCE_SCAN_THREADS];
+    unsigned char prio[EVIDENCE_SCAN_THREADS];
+    size_t order[EVIDENCE_SCAN_THREADS];
+    unsigned long long fx[EVIDENCE_SCAN_THREADS];
+    bool d[EVIDENCE_SCAN_THREADS];
+} s_scan;
+static atomic_flag s_scan_busy = ATOMIC_FLAG_INIT;
+
+static unsigned long long futex_wait_addr(const char *syscall_text);
+static long mutex_owner_tid(const void *m);
+
+static bool stat_is_d(const char *stat)
+{
+    char comm[32];
+    char state = '?';
+    return stat && task_parse_stat(stat, comm, sizeof(comm), &state) &&
+           state == 'D';
+}
+
+/* One /proc read per thread feeds the print priority, the futex-word table
+ * and the D-state set. */
 static void classify_tasks(const long *tids, size_t n, const void *const *locks,
                            unsigned char *prio)
 {
@@ -283,21 +375,495 @@ static void classify_tasks(const long *tids, size_t n, const void *const *locks,
         prio[i] = (unsigned char)boot_sd_watchdog_task_priority(
             ok ? stat : NULL, has_sc ? sc : NULL, locks,
             EVIDENCE_NLOCKS);
+        s_scan.fx[i] = has_sc ? futex_wait_addr(sc) : 0;
+        s_scan.d[i] = ok && stat_is_d(stat);
     }
 }
 
-/* The scan arrays (~35 KB) live in static storage, not on the pet thread's
- * stack. One snapshot at a time: the pet thread is the only caller, and an
- * overlapping call is refused rather than sharing the arrays. Static, not
- * malloc: a stalled thread may hold the allocator's lock. */
-static struct {
-    long tids[EVIDENCE_SCAN_THREADS];
-    unsigned char prio[EVIDENCE_SCAN_THREADS];
-    size_t order[EVIDENCE_SCAN_THREADS];
-} s_scan;
-static atomic_flag s_scan_busy = ATOMIC_FLAG_INIT;
+/* ── Lock evidence (withhold edge, log only) ─────────────────────────────
+ *
+ * 11-16 incident: ~28 threads futex-waited on one address that was none of
+ * the known locks, and the snapshot could not say whose lock it was, who held
+ * it, or whether the holder's IO moved. This block answers those three from
+ * the per-thread rows the snapshot already reads: waiter counts per futex
+ * word, the evidence-only NAMED addresses, each row's owner (read as a
+ * pthread mutex owner ONLY for named and known locks; an unknown word may be
+ * a condvar or an atomic and is never dereferenced), and two IO samples for
+ * every D-state thread and owner. Nothing here feeds the hold verdict. */
 
-static void log_thread_snapshot_scan(void)
+#define EVIDENCE_HOT_MIN   3
+#define EVIDENCE_HOT_LINES 6
+#define EVIDENCE_IO_MAX    8
+#define EVIDENCE_ROWS      (EVIDENCE_HOT_LINES + BOOT_SD_NAMED_LOCK_MAX)
+
+struct lock_row {
+    unsigned long long addr;
+    const char *name;   /* "unknown" when neither named nor known */
+    size_t waiters;
+    long owner;         /* > 0 tid, 0 = free/none, -1 = not readable */
+};
+
+static struct {
+    struct lock_row rows[EVIDENCE_ROWS];
+    size_t nrows, hot_total, nnamed;
+} s_lk;
+
+static const char *const k_known_names[EVIDENCE_NLOCKS] = {
+    "activation_mutex", "progress_store_tx_lock", "cs_main",
+};
+
+static size_t count_waiters(unsigned long long addr, size_t n)
+{
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++)
+        w += s_scan.fx[i] == addr;
+    return w;
+}
+
+/* Keep the EVIDENCE_HOT_LINES busiest runs, most waiters first. */
+static void hot_insert(unsigned long long addr, size_t waiters)
+{
+    size_t keep = s_lk.nrows < EVIDENCE_HOT_LINES ? s_lk.nrows + 1
+                                                  : EVIDENCE_HOT_LINES;
+    size_t at = s_lk.nrows < keep ? s_lk.nrows : keep;
+    while (at > 0 && s_lk.rows[at - 1].waiters < waiters)
+        at--;
+    if (at >= keep)
+        return;
+    for (size_t j = keep - 1; j > at; j--)
+        s_lk.rows[j] = s_lk.rows[j - 1];
+    s_lk.rows[at] = (struct lock_row){ .addr = addr, .waiters = waiters };
+    s_lk.nrows = keep;
+}
+
+static bool futex_word_seen_before(size_t i)
+{
+    for (size_t j = 0; j < i; j++)
+        if (s_scan.fx[j] == s_scan.fx[i])
+            return true;
+    return false;
+}
+
+/* Count each distinct futex word once (first occurrence) and keep those with
+ * >= EVIDENCE_HOT_MIN waiters. Quadratic over at most EVIDENCE_SCAN_THREADS
+ * words and allocation-free: no qsort, whose glibc mergesort mallocs. */
+static void collect_hot(size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!s_scan.fx[i] || futex_word_seen_before(i))
+            continue;
+        size_t w = count_waiters(s_scan.fx[i], n);
+        if (w >= EVIDENCE_HOT_MIN) {
+            s_lk.hot_total++;
+            hot_insert(s_scan.fx[i], w);
+        }
+    }
+}
+
+/* Name and owner for a row: named first, then a known lock, else unknown. */
+static void label_row(struct lock_row *r, const void *const *locks)
+{
+    r->name = "unknown";
+    r->owner = -1;
+    for (size_t i = 0; i < BOOT_SD_NAMED_LOCK_MAX; i++) {
+        const void *a = atomic_load(&s_named[i].addr);
+        const char *nm = atomic_load(&s_named[i].name);
+        if (a && nm && (unsigned long long)(uintptr_t)a == r->addr) {
+            r->name = nm;
+            r->owner = mutex_owner_tid(a);
+            return;
+        }
+    }
+    for (size_t i = 0; i < EVIDENCE_NLOCKS; i++) {
+        if (!locks[i] || (unsigned long long)(uintptr_t)locks[i] != r->addr)
+            continue;
+        long holder = 0;
+        if (i == 1 && !progress_store_tx_holder(&holder, NULL))
+            holder = 0;
+        r->name = k_known_names[i];
+        r->owner = i == 1 ? holder : mutex_owner_tid(locks[i]);
+        return;
+    }
+}
+
+static bool row_has_addr(unsigned long long addr)
+{
+    for (size_t i = 0; i < s_lk.nrows; i++)
+        if (s_lk.rows[i].addr == addr)
+            return true;
+    return false;
+}
+
+/* Hot rows, then every registered named address not already among them. */
+static void collect_lock_rows(size_t n, const void *const *locks)
+{
+    s_lk.nrows = s_lk.hot_total = s_lk.nnamed = 0;
+    collect_hot(n);
+    for (size_t i = 0; i < BOOT_SD_NAMED_LOCK_MAX; i++) {
+        const void *a = atomic_load(&s_named[i].addr);
+        if (!a)
+            continue;
+        s_lk.nnamed++;
+        unsigned long long addr = (unsigned long long)(uintptr_t)a;
+        if (row_has_addr(addr) || s_lk.nrows >= EVIDENCE_ROWS)
+            continue;
+        s_lk.rows[s_lk.nrows++] = (struct lock_row){
+            .addr = addr, .waiters = count_waiters(addr, n) };
+    }
+    for (size_t i = 0; i < s_lk.nrows; i++)
+        label_row(&s_lk.rows[i], locks);
+}
+
+static bool ref_has_addr(const struct boot_sd_lock_ref *rows, size_t nrows,
+                         unsigned long long addr)
+{
+    for (size_t r = 0; r < nrows; r++)
+        if (rows[r].addr == addr)
+            return true;
+    return false;
+}
+
+static size_t promote_owners(unsigned char *prio, const long *tids, size_t n,
+                             const struct boot_sd_lock_ref *rows, size_t nrows)
+{
+    size_t promoted = 0;
+    for (size_t r = 0; r < nrows; r++) {
+        for (size_t i = 0; rows[r].owner > 0 && i < n; i++) {
+            if (tids[i] != rows[r].owner || prio[i] == 0)
+                continue;
+            prio[i] = 0;
+            promoted++;
+            break;
+        }
+    }
+    return promoted;
+}
+
+/* Truncation rule, extended: owners always print; waiters on a row's address
+ * print while the never-cut set stays within `cap`. */
+size_t boot_sd_watchdog_promote_lock_threads(unsigned char *prio,
+                                             const long *tids,
+                                             const unsigned long long *fx,
+                                             size_t n,
+                                             const struct boot_sd_lock_ref *rows,
+                                             size_t nrows, size_t cap)
+{
+    if (!prio || !tids || !fx || (!rows && nrows))
+        return 0;
+    size_t p0 = 0;
+    for (size_t i = 0; i < n; i++)
+        p0 += prio[i] == 0;
+    p0 += promote_owners(prio, tids, n, rows, nrows);
+    for (size_t i = 0; i < n && p0 < cap; i++) {
+        if (prio[i] != 0 && fx[i] && ref_has_addr(rows, nrows, fx[i])) {
+            prio[i] = 0;
+            p0++;
+        }
+    }
+    return p0;
+}
+
+static void promote_lock_threads(size_t n)
+{
+    struct boot_sd_lock_ref refs[EVIDENCE_ROWS];
+    for (size_t r = 0; r < s_lk.nrows; r++)
+        refs[r] = (struct boot_sd_lock_ref){ .addr = s_lk.rows[r].addr,
+                                             .owner = s_lk.rows[r].owner };
+    (void)boot_sd_watchdog_promote_lock_threads(s_scan.prio, s_scan.tids,
+                                                s_scan.fx, n, refs,
+                                                s_lk.nrows,
+                                                EVIDENCE_MAX_THREADS);
+}
+
+struct ev_text {
+    char *buf;
+    size_t cap, used, lines;
+};
+
+__attribute__((format(printf, 2, 3)))
+static void ev_line(struct ev_text *t, const char *fmt, ...)
+{
+    if (t->lines >= BOOT_SD_LOCK_EVIDENCE_MAX_LINES || t->used + 2 >= t->cap)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(t->buf + t->used, t->cap - t->used - 1, fmt, ap);
+    va_end(ap);
+    if (w < 0)
+        return;
+    size_t room = t->cap - t->used - 2;
+    t->used += (size_t)w < room ? (size_t)w : room;
+    t->buf[t->used++] = '\n';
+    t->buf[t->used] = '\0';
+    t->lines++;
+}
+
+/* "owner_tid=<tid> owner[<task line>]" or the reason there is none. */
+static void format_owner(char *out, size_t cap, long owner)
+{
+    char stat[EVIDENCE_FILE_MAX], wchan[64], sc[EVIDENCE_FILE_MAX];
+    char line[192];
+    stat[0] = wchan[0] = sc[0] = '\0';
+    if (owner < 0) {
+        snprintf(out, cap, "owner_tid=unknown");
+        return;
+    }
+    if (owner == 0) {
+        snprintf(out, cap, "owner_tid=none");
+        return;
+    }
+    bool ok = os_proc_self_task_read(owner, "stat", stat, sizeof(stat));
+    (void)os_proc_self_task_read(owner, "wchan", wchan, sizeof(wchan));
+    (void)os_proc_self_task_read(owner, "syscall", sc, sizeof(sc));
+    if (ok && boot_sd_watchdog_format_task_line(line, sizeof(line), owner,
+                                                stat, wchan, sc))
+        snprintf(out, cap, "owner_tid=%ld owner[%s]", owner, line);
+    else
+        snprintf(out, cap, "owner_tid=%ld owner[unreadable]", owner);
+}
+
+static void format_lock_rows(struct ev_text *t, size_t n)
+{
+    ev_line(t, "hot futex addresses (>=%d waiters): hot=%zu shown=%zu "
+            "named=%zu threads=%zu", EVIDENCE_HOT_MIN, s_lk.hot_total,
+            s_lk.hot_total < EVIDENCE_HOT_LINES ? s_lk.hot_total
+                                                : (size_t)EVIDENCE_HOT_LINES,
+            s_lk.nnamed, n);
+    for (size_t i = 0; i < s_lk.nrows; i++) {
+        char owner[256];
+        format_owner(owner, sizeof(owner), s_lk.rows[i].owner);
+        ev_line(t, "lock addr=0x%llx name=%s waiters=%zu %s",
+                s_lk.rows[i].addr, s_lk.rows[i].name, s_lk.rows[i].waiters,
+                owner);
+    }
+}
+
+struct io_pick {
+    long tid;
+    const char *why;
+    struct boot_sd_io_sample a, b;
+};
+
+static size_t io_pick_add(struct io_pick *p, size_t k, long tid,
+                          const char *why)
+{
+    if (tid <= 0 || k >= EVIDENCE_IO_MAX)
+        return k;
+    for (size_t i = 0; i < k; i++)
+        if (p[i].tid == tid)
+            return k;
+    p[k] = (struct io_pick){ .tid = tid, .why = why };
+    return k + 1;
+}
+
+/* Owners first (the holder is the question), then D-state threads. */
+static size_t pick_io_tids(struct io_pick *p, size_t n)
+{
+    size_t k = 0;
+    for (size_t r = 0; r < s_lk.nrows; r++)
+        k = io_pick_add(p, k, s_lk.rows[r].owner, "owner");
+    for (size_t i = 0; i < n; i++)
+        if (s_scan.d[i])
+            k = io_pick_add(p, k, s_scan.tids[i], "d-state");
+    return k;
+}
+
+static long long io_delta(uint64_t a, uint64_t b)
+{
+    return (long long)(b - a);
+}
+
+/* stat fields by number (proc(5)): 3 is the state letter, then numbers;
+ * tpgid (8) may be -1, so only the wanted fields are parsed as digits. */
+#define IO_STAT_FIELD_STATE  3
+#define IO_STAT_FIELD_MAJFLT 12
+#define IO_STAT_FIELD_UTIME  14
+#define IO_STAT_FIELD_STIME  15
+
+/* Step over one space-separated token; when `v` is set it must be all
+ * decimal digits without overflow. No strtoull: nothing here allocates. */
+static bool stat_token(const char **p, uint64_t *v)
+{
+    const char *s = *p;
+    while (*s == ' ')
+        s++;
+    const char *e = s;
+    while (*e && *e != ' ' && *e != '\n')
+        e++;
+    if (e == s)
+        return false;
+    *p = e;
+    if (!v)
+        return true;
+    uint64_t x = 0;
+    for (const char *c = s; c < e; c++) {
+        if (*c < '0' || *c > '9' || x > (UINT64_MAX - 9) / 10)
+            return false;
+        x = x * 10 + (uint64_t)(*c - '0');
+    }
+    *v = x;
+    return true;
+}
+
+bool boot_sd_watchdog_parse_io_sample(const char *stat,
+                                      struct boot_sd_io_sample *out)
+{
+    if (!out)
+        return false;
+    out->ok = false;
+    const char *p = stat ? strrchr(stat, ')') : NULL;
+    if (!p)
+        return false;
+    p++;
+    uint64_t majflt = 0, utime = 0, stime = 0;
+    for (int f = IO_STAT_FIELD_STATE; f <= IO_STAT_FIELD_STIME; f++) {
+        uint64_t *v = f == IO_STAT_FIELD_MAJFLT ? &majflt
+                    : f == IO_STAT_FIELD_UTIME  ? &utime
+                    : f == IO_STAT_FIELD_STIME  ? &stime : NULL;
+        if (!stat_token(&p, v))
+            return false;
+    }
+    *out = (struct boot_sd_io_sample){ .ok = true, .cpu_ticks = utime + stime,
+                                       .majflt = majflt };
+    return true;
+}
+
+static void format_io_sample(char *out, size_t cap,
+                             const struct boot_sd_io_sample *s)
+{
+    if (s && s->ok)
+        snprintf(out, cap, "cpu_ticks:%llu,majflt:%llu",
+                 (unsigned long long)s->cpu_ticks,
+                 (unsigned long long)s->majflt);
+    else
+        snprintf(out, cap, "unavailable");
+}
+
+void boot_sd_watchdog_format_io_line(char *out, size_t cap, long tid,
+                                     const char *why,
+                                     const struct boot_sd_io_sample *a,
+                                     const struct boot_sd_io_sample *b,
+                                     int64_t gap_us)
+{
+    if (!out || cap == 0)
+        return;
+    const char *w = why ? why : "?";
+    long long gap_ms = (long long)(gap_us / 1000);
+    if (!a || !b || !a->ok || !b->ok) {
+        char sa[64], sb[64];
+        format_io_sample(sa, sizeof(sa), a);
+        format_io_sample(sb, sizeof(sb), b);
+        snprintf(out, cap, "io tid=%ld why=%s sample_a=%s sample_b=%s "
+                 "blk_io_bytes=unavailable gap_ms=%lld", tid, w, sa, sb,
+                 gap_ms);
+        return;
+    }
+    snprintf(out, cap, "io tid=%ld why=%s cpu_ticks=%llu->%llu(%+lld) "
+             "majflt=%llu->%llu(%+lld) blk_io_bytes=unavailable gap_ms=%lld",
+             tid, w, (unsigned long long)a->cpu_ticks,
+             (unsigned long long)b->cpu_ticks,
+             io_delta(a->cpu_ticks, b->cpu_ticks),
+             (unsigned long long)a->majflt, (unsigned long long)b->majflt,
+             io_delta(a->majflt, b->majflt), gap_ms);
+}
+
+/* open/read/close of the task stat file into a stack buffer: no stdio, no
+ * allocation (a stalled thread may hold the allocator's lock). */
+static void read_io_sample(long tid, struct boot_sd_io_sample *s)
+{
+    char stat[EVIDENCE_FILE_MAX];
+    s->ok = false;
+    if (os_proc_self_task_read(tid, "stat", stat, sizeof(stat)))
+        (void)boot_sd_watchdog_parse_io_sample(stat, s);
+}
+
+static void format_io_samples(struct ev_text *t, size_t n, int64_t gap_us)
+{
+    struct io_pick picks[EVIDENCE_IO_MAX];
+    size_t k = pick_io_tids(picks, n);
+    if (k == 0)
+        return;
+    for (size_t i = 0; i < k; i++)
+        read_io_sample(picks[i].tid, &picks[i].a);
+    int64_t waited = boot_sd_watchdog_evidence_sleep(gap_us);
+    for (size_t i = 0; i < k; i++)
+        read_io_sample(picks[i].tid, &picks[i].b);
+    for (size_t i = 0; i < k; i++) {
+        char line[256];
+        boot_sd_watchdog_format_io_line(line, sizeof(line), picks[i].tid,
+                                        picks[i].why, &picks[i].a,
+                                        &picks[i].b, waited);
+        ev_line(t, "%s", line);
+    }
+}
+
+/* First line of /proc/pressure/io, or "unavailable". */
+static void format_pressure(struct ev_text *t)
+{
+    char buf[256] = "";
+    bool ok = boot_sd_watchdog_read_pressure_io(buf, sizeof(buf));
+    ev_line(t, "pressure io: %s", ok ? buf : "unavailable");
+}
+
+static size_t format_lock_evidence_text(char *out, size_t cap, size_t n,
+                                        int64_t io_gap_us)
+{
+    struct ev_text t = { .buf = out, .cap = cap };
+    out[0] = '\0';
+    format_lock_rows(&t, n);
+    format_io_samples(&t, n, io_gap_us);
+    format_pressure(&t);
+    return t.lines;
+}
+
+#ifdef ZCL_TESTING
+size_t boot_sd_watchdog_format_lock_evidence(char *out, size_t cap,
+                                             int64_t io_gap_us)
+{
+    if (!out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (atomic_flag_test_and_set(&s_scan_busy))
+        return 0;
+    const void *locks[EVIDENCE_NLOCKS];
+    size_t total = 0;
+    known_locks(locks);
+    size_t n = os_proc_self_task_ids(s_scan.tids, EVIDENCE_SCAN_THREADS, &total);
+    classify_tasks(s_scan.tids, n, locks, s_scan.prio);
+    collect_lock_rows(n, locks);
+    size_t lines = format_lock_evidence_text(out, cap, n, io_gap_us);
+    atomic_flag_clear(&s_scan_busy);
+    return lines;
+}
+#endif
+
+/* One WARN line per evidence line. Walked by hand (no strtok state). */
+static void log_lock_evidence(size_t n, int64_t io_gap_us)
+{
+    static char text[8192];
+    (void)format_lock_evidence_text(text, sizeof(text), n, io_gap_us);
+    char *s = text;
+    while (*s) {
+        char *nl = strchr(s, '\n');
+        if (nl)
+            *nl = '\0';
+        LOG_WARN("boot", "[sd_watchdog] %s", s);
+        if (!nl)
+            break;
+        s = nl + 1;
+    }
+}
+
+static int64_t elapsed_since(int64_t start_us)
+{
+    int64_t d = platform_time_monotonic_us() - start_us;
+    return d > 0 ? d : 0;
+}
+
+/* Returns the microseconds of the lock-evidence block only (row collection
+ * and promotion, then the evidence text with its IO gap and log lines); the
+ * base snapshot prints between them stay untimed, as on base. */
+static int64_t log_thread_snapshot_scan(int64_t io_gap_us)
 {
     const void *locks[EVIDENCE_NLOCKS];
     size_t total = 0;
@@ -308,9 +874,13 @@ static void log_thread_snapshot_scan(void)
     if (n == 0) {
         LOG_WARN("boot", "[sd_watchdog] thread snapshot unavailable "
                  "(no per-thread procfs on this platform)");
-        return;
+        return 0;
     }
     classify_tasks(s_scan.tids, n, locks, s_scan.prio);
+    int64_t t0 = platform_time_monotonic_us();
+    collect_lock_rows(n, locks);
+    promote_lock_threads(n);
+    int64_t lock_us = elapsed_since(t0);
     size_t shown = boot_sd_watchdog_order_snapshot(s_scan.prio, n,
                                                    EVIDENCE_MAX_THREADS,
                                                    s_scan.order);
@@ -320,17 +890,21 @@ static void log_thread_snapshot_scan(void)
     LOG_WARN("boot", "[sd_watchdog] thread snapshot: threads=%zu "
              "truncated=%zu unscanned=%zu", shown, n - shown,
              total - n);
+    int64_t t1 = platform_time_monotonic_us();
+    log_lock_evidence(n, io_gap_us);
+    return lock_us + elapsed_since(t1);
 }
 
-void boot_sd_watchdog_log_thread_snapshot(void)
+int64_t boot_sd_watchdog_log_thread_snapshot(int64_t io_gap_us)
 {
     if (atomic_flag_test_and_set(&s_scan_busy)) {
         LOG_WARN("boot", "[sd_watchdog] thread snapshot already running; "
                  "skipped");
-        return;
+        return 0;
     }
-    log_thread_snapshot_scan();
+    int64_t lock_us = log_thread_snapshot_scan(io_gap_us);
     atomic_flag_clear(&s_scan_busy);
+    return lock_us;
 }
 
 /* ── Disk-stall hold: pure classifier + status counters ──────────────────

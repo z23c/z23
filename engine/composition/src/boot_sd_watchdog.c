@@ -51,6 +51,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 /* ── systemd watchdog heartbeat ─────────────────────────────────
  * Two halves, deliberately on different threads:
@@ -590,9 +594,37 @@ static bool boot_sd_watchdog_marker_fresh(int64_t last_us, int64_t now_us,
     return last_us > 0 && now_us - last_us >= 0 && now_us - last_us < bound_us;
 }
 
+#ifdef ZCL_TESTING
+/* boot_sd_watchdog_test_gate_decide's injected stalled-pillar observation. */
+static struct {
+    bool   on;
+    bool   started;
+    size_t n;
+    long   tids[3];
+} s_test_pillars;
+
+static bool boot_sd_watchdog_test_pillars(long *tids, size_t cap,
+                                          bool *started_out, size_t *n_out)
+{
+    if (!s_test_pillars.on)
+        return false;
+    size_t n = 0;
+    for (; n < s_test_pillars.n && n < cap; n++)
+        tids[n] = s_test_pillars.tids[n];
+    *started_out = s_test_pillars.started;
+    *n_out = n;
+    return true;
+}
+#endif
+
 static size_t boot_sd_watchdog_stalled_pillars(long *tids, size_t cap,
                                                bool *started_out)
 {
+#ifdef ZCL_TESTING
+    size_t injected = 0;
+    if (boot_sd_watchdog_test_pillars(tids, cap, started_out, &injected))
+        return injected;
+#endif
     int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
     int64_t now_us   = platform_time_monotonic_us();
     struct connman_loop_liveness ll;
@@ -666,6 +698,235 @@ static bool boot_sd_watchdog_gate_with_hold(bool runtime_gate_alive,
     return boot_sd_watchdog_disk_hold(st);
 }
 
+#ifdef ZCL_TESTING
+bool boot_sd_watchdog_test_gate_decide(bool runtime_gate_alive,
+                                       const long *pillar_tids, size_t n,
+                                       bool connman_started)
+{
+    s_test_pillars.n = 0;
+    for (size_t i = 0; pillar_tids && i < n && i < 3; i++)
+        s_test_pillars.tids[s_test_pillars.n++] = pillar_tids[i];
+    s_test_pillars.started = connman_started;
+    s_test_pillars.on = true;
+    struct wd_stall_state stall = {0};
+    bool pet = boot_sd_watchdog_pet_decide(
+        boot_sd_watchdog_gate_with_hold(runtime_gate_alive, &stall));
+    s_test_pillars.on = false;
+    return pet;
+}
+#endif
+
+/* ── Evidence-only lock names ────────────────────────────────────────────
+ * node.db's SQLite connection mutex (FULLMUTEX: a recursive pthread mutex
+ * whose address is its futex word) is registered as a NAMED evidence address
+ * so a withhold snapshot can say "these threads wait on node.db" and name the
+ * holder. The one SQLite call, sqlite3_db_mutex, runs on the registering
+ * thread (service start or the collect tick), never on the pet thread.
+ * svc->node_db is never reopened while the watchdog runs: the quarantine
+ * reopen happens only inside the open itself (database.c db_quarantine_and_
+ * reopen), and shutdown joins the pet thread and clears the name before
+ * node.db closes. The remembered handle is a plain-pointer guard for a
+ * future reopen, not proof against a recycled sqlite3* address: the pet
+ * thread drops the name when svc->node_db->db no longer equals it. */
+static _Atomic(sqlite3 *) g_named_db;
+#define BOOT_SD_NODE_DB_LOCK_NAME "node_db_conn"
+
+static void boot_sd_watchdog_register_node_db(struct boot_svc_ctx *svc)
+{
+    if (atomic_load(&g_named_db) || !svc || !svc->node_db || !svc->node_db->db)
+        return;
+    sqlite3 *db = svc->node_db->db;
+    sqlite3_mutex *mu = sqlite3_db_mutex(db);
+    if (!mu) {
+        LOG_WARN("boot", "[sd_watchdog] node.db connection has no mutex "
+                 "(not FULLMUTEX); its lock stays unnamed in withhold "
+                 "evidence");
+        return;
+    }
+    if (!boot_sd_watchdog_register_named_lock(BOOT_SD_NODE_DB_LOCK_NAME, mu)) {
+        LOG_WARN("boot", "[sd_watchdog] evidence name table full; node.db "
+                 "mutex stays unnamed");
+        return;
+    }
+    atomic_store(&g_named_db, db);
+    LOG_INFO("boot", "[sd_watchdog] withhold evidence names %s=%p",
+             BOOT_SD_NODE_DB_LOCK_NAME, (void *)mu);
+}
+
+/* The withhold-edge IO sample gap. The pet thread is already not pinging
+ * when it sleeps here, and the lock-evidence block (this gap included) is
+ * subtracted from its next period sleep (boot_sd_watchdog_next_sleep_us), so
+ * the following decision lands where it did on base. */
+static bool boot_sd_watchdog_pet_stopping(void)
+{
+    /* A stop is in progress only while its join still waits on the pet. */
+    return atomic_load(&g_pet_handle_set) && atomic_load(&g_pet_stop);
+}
+
+int64_t boot_sd_watchdog_evidence_sleep(int64_t gap_us)
+{
+    int64_t start_us = platform_time_monotonic_us();
+    int64_t left_us = gap_us;
+    while (left_us > 0 && !boot_sd_watchdog_pet_stopping() &&
+           !thread_registry_shutdown_requested()) {
+        int64_t slice_us = left_us < 1000000 ? left_us : 1000000;
+        struct timespec req = {
+            .tv_sec  = (time_t)(slice_us / 1000000),
+            .tv_nsec = (long)((slice_us % 1000000) * 1000),
+        };
+        nanosleep(&req, NULL);
+        left_us -= slice_us;
+    }
+    int64_t waited_us = platform_time_monotonic_us() - start_us;
+    return waited_us > 0 ? waited_us : 0;
+}
+
+/* First line of /proc/pressure/io: a kernel-generated file, no block IO. */
+bool boot_sd_watchdog_read_pressure_io(char *out, size_t cap)
+{
+    if (!out || cap < 2)
+        return false;
+    out[0] = '\0';
+#if defined(__linux__)
+    int fd = open("/proc/pressure/io", O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    ssize_t got = read(fd, out, cap - 1);
+    (void)close(fd);
+    if (got <= 0) {
+        out[0] = '\0';
+        return false;
+    }
+    out[got] = '\0';
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = '\0';
+    return out[0] != '\0';
+#else
+    return false;
+#endif
+}
+
+int64_t boot_sd_watchdog_next_sleep_us(int64_t period_us,
+                                       const struct boot_sd_edge_cost *c)
+{
+    /* Only the lane-added block on a withhold edge; old_us stays
+     * uncompensated, exactly as base slept a full period after it. */
+    if (!c || !c->withhold || c->new_us <= 0)
+        return period_us;
+    return c->new_us >= period_us ? 0 : period_us - c->new_us;
+}
+
+int64_t boot_sd_watchdog_edge_io_gap_us(int64_t period_us)
+{
+    int64_t gap = BOOT_SD_LOCK_EVIDENCE_IO_GAP_US;
+    if (gap > period_us / 2)
+        gap = period_us / 2;
+    return gap > 0 ? gap : 0;
+}
+
+/* Pet thread, withhold edge: pointer compare only, no SQLite call. */
+static void boot_sd_watchdog_drop_stale_node_db(void)
+{
+    sqlite3 *named = atomic_load(&g_named_db);
+    struct boot_svc_ctx *svc = g_sd_watchdog_ctx;
+    sqlite3 *live = (svc && svc->node_db) ? svc->node_db->db : NULL;
+    if (!named || named == live)
+        return;
+    (void)boot_sd_watchdog_register_named_lock(BOOT_SD_NODE_DB_LOCK_NAME, NULL);
+    atomic_store(&g_named_db, NULL);
+    LOG_WARN("boot", "[sd_watchdog] node.db handle changed since its mutex "
+             "was named; %s is unnamed in this snapshot",
+             BOOT_SD_NODE_DB_LOCK_NAME);
+}
+
+/* Withhold/resume edge log. Fills `cost`: old_us is what base already spent
+ * here (pillar line, thread snapshot), left uncompensated as on base; new_us
+ * is only what this lane added (the stale-name check and the lock-evidence
+ * block with its IO gap). boot_sd_watchdog_next_sleep_us subtracts new_us
+ * alone on a withhold edge, so the next decision lands at edge start +
+ * old_us + period, exactly where it did on base; a resume edge adds nothing
+ * and sleeps the full period, as on base. */
+static void boot_sd_watchdog_log_edge(bool pet, bool recent, int64_t period_us,
+                                      struct boot_sd_edge_cost *cost)
+{
+    int64_t start_us = platform_time_monotonic_us();
+    *cost = (struct boot_sd_edge_cost){ .withhold = !pet };
+    /* `runtime=0` names the conjunction, not the term. Print every
+     * pillar's raw observation so the journal shows which leg refused
+     * and by how much. */
+    char pillars[640];
+    boot_sd_watchdog_describe_pillars(pillars, sizeof(pillars));
+    if (pet) {
+        LOG_INFO("boot",
+                 "[sd_watchdog] pinging again: recent_progress=%d %s",
+                 (int)recent, pillars);
+    } else {
+        LOG_WARN("boot",
+                 "[sd_watchdog] WITHHOLDING the watchdog ping — "
+                 "systemd will kill this process unless it resumes: "
+                 "recent_progress=%d %s",
+                 (int)recent, pillars);
+        int64_t drop_start_us = platform_time_monotonic_us();
+        boot_sd_watchdog_drop_stale_node_db();
+        int64_t drop_us = platform_time_monotonic_us() - drop_start_us;
+        cost->new_us = (drop_us > 0 ? drop_us : 0) +
+            boot_sd_watchdog_log_thread_snapshot(
+                boot_sd_watchdog_edge_io_gap_us(period_us));
+    }
+    int64_t spent = platform_time_monotonic_us() - start_us;
+    cost->old_us = spent > cost->new_us ? spent - cost->new_us : 0;
+}
+
+/* Age of a connman loop marker, or -1 when unknown/not started. */
+static int64_t boot_sd_watchdog_marker_age(bool started, int64_t last_us,
+                                           int64_t now_us)
+{
+    return started && last_us > 0 ? now_us - last_us : -1;
+}
+
+/* Early warning, log only: while any pillar is past half the bound, one
+ * line per BOOT_SD_EARLY_WARN_LOG_US. The dial loop inside its declared
+ * bounded wait is not late (the same carve-out the stall test makes). Reads
+ * the same atomics boot_sd_watchdog_describe_pillars reads; it never samples
+ * the work probe, whose since-last-period state the gate owns. Runs on the
+ * COLLECT tick, never the pet thread: the log sink is a synchronous locked
+ * stderr write, which a disk stall can block, and the pet thread must not
+ * gain a blocking write while the gate is still alive. */
+static void boot_sd_watchdog_early_warning(void)
+{
+    static int64_t s_last_warn_us;
+    int64_t bound_us = boot_sd_watchdog_freshness_bound_us();
+    int64_t now_us   = platform_time_monotonic_us();
+    struct connman_loop_liveness ll;
+    connman_observe_loop_liveness(
+        g_sd_watchdog_ctx ? g_sd_watchdog_ctx->connman : NULL, &ll);
+    int64_t tick_age = supervisor_tick_runner_running()
+                           ? supervisor_tick_runner_last_hb_age_us() : -1;
+    int64_t msg_age  = boot_sd_watchdog_marker_age(
+        ll.started, ll.message_last_progress_us, now_us);
+    int64_t dial_age = boot_sd_watchdog_marker_age(
+        ll.started, ll.dial_last_progress_us, now_us);
+    bool dial_wait = ll.dial_bounded_wait_until_us > now_us;
+    int64_t ages[3] = { tick_age, msg_age, dial_wait ? -1 : dial_age };
+    if (!boot_sd_watchdog_early_warn_due(ages, bound_us, now_us,
+                                         &s_last_warn_us))
+        return;
+    const char *cb = supervisor_active_callback_name();
+    /* The hold verdict as the pet thread last computed it (it is computed
+     * only on a dead gate); this tick does not re-run the /proc scan. */
+    char hold[96];
+    boot_sd_watchdog_format_hold_fields(hold, sizeof(hold));
+    LOG_WARN("boot",
+             "[sd_watchdog] early warning: a pillar is past half the "
+             "watchdog bound: tick_hb_age_ms=%lld msg_age_ms=%lld "
+             "dial_age_ms=%lld dial_wait=%d half_bound_ms=%lld active_cb=%s "
+             "last_pet_check[%s]",
+             (long long)(tick_age / 1000), (long long)(msg_age / 1000),
+             (long long)(dial_age / 1000), (int)dial_wait,
+             (long long)(bound_us / 2000), (cb && cb[0]) ? cb : "none", hold);
+}
+
 /* PET half. Sleeps in 1 s slices so boot_sd_watchdog_stop's pthread_join
  * never waits a full period. */
 static void *boot_sd_watchdog_pet_main(void *arg)
@@ -692,24 +953,9 @@ static void *boot_sd_watchdog_pet_main(void *arg)
          * this process WatchdogSec later; the log names which leg refused.
          * Edge-triggered, so a long refusal logs once, not once per period. */
         static bool s_last_pet = true;
+        struct boot_sd_edge_cost edge = {0};
         if (pet != s_last_pet) {
-            /* `runtime=0` names the conjunction, not the term. Print every
-             * pillar's raw observation so the journal shows which leg refused
-             * and by how much. */
-            char pillars[640];
-            boot_sd_watchdog_describe_pillars(pillars, sizeof(pillars));
-            if (pet) {
-                LOG_INFO("boot",
-                         "[sd_watchdog] pinging again: recent_progress=%d %s",
-                         (int)recent, pillars);
-            } else {
-                LOG_WARN("boot",
-                         "[sd_watchdog] WITHHOLDING the watchdog ping — "
-                         "systemd will kill this process unless it resumes: "
-                         "recent_progress=%d %s",
-                         (int)recent, pillars);
-                boot_sd_watchdog_log_thread_snapshot();
-            }
+            boot_sd_watchdog_log_edge(pet, recent, period_us, &edge);
             s_last_pet = pet;
         }
         if (pet) {
@@ -728,7 +974,7 @@ static void *boot_sd_watchdog_pet_main(void *arg)
                          (long long)(send_us / 1000));
             }
         }
-        int64_t left_us = period_us;
+        int64_t left_us = boot_sd_watchdog_next_sleep_us(period_us, &edge);
         while (left_us > 0 && !atomic_load(&g_pet_stop) &&
                !thread_registry_shutdown_requested()) {
             int64_t slice_us = left_us < 1000000 ? left_us : 1000000;
@@ -752,6 +998,11 @@ static void boot_sd_watchdog_tick(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (!sd_notify_is_active() || !svc)
         return;
+    /* Not on the pet thread: the one place a late node.db open (or a
+     * reopen after a stale drop) gets its mutex named. */
+    boot_sd_watchdog_register_node_db(svc);
+    /* Before the collect, which may itself block behind the stall. */
+    boot_sd_watchdog_early_warning();
     struct node_health_snapshot snap = {0};
     node_health_collect(&snap, svc->node_db, svc->state);
     /* Refresh status line — useful for `systemctl status z23-node`.
@@ -795,6 +1046,7 @@ bool boot_sd_watchdog_start(void *ctx)
         return true;
     }
     g_sd_watchdog_ctx = svc;
+    boot_sd_watchdog_register_node_db(svc);
 
     /* Collect/status cadence: half the configured WatchdogSec, clamped to
      * at least 5s. When WATCHDOG_USEC is unset the unit didn't ask for a
@@ -872,5 +1124,7 @@ void boot_sd_watchdog_stop(void *ctx)
     if (sd_notify_is_active())
         sd_notify_stopping("shutdown");
     sd_notify_set_health_check(NULL);
+    (void)boot_sd_watchdog_register_named_lock(BOOT_SD_NODE_DB_LOCK_NAME, NULL);
+    atomic_store(&g_named_db, NULL);
     g_sd_watchdog_ctx = NULL;
 }

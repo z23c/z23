@@ -1123,7 +1123,7 @@ static int test_sd_watchdog_evidence(void)
                       (long)getpid(), stat, "", "") &&
                   strstr(out, "st=R"));
     }
-    boot_sd_watchdog_log_thread_snapshot();
+    (void)boot_sd_watchdog_log_thread_snapshot(0);
 #endif
     return failures;
 }
@@ -1412,9 +1412,410 @@ static int test_sd_watchdog_disk_hold(void)
     return failures;
 }
 
+/* Early warning: one line per BOOT_SD_EARLY_WARN_LOG_US while any pillar is
+ * past half the bound; unknown ages (-1) never trigger it. */
+static int test_sd_watchdog_early_warning(void)
+{
+    int failures = 0;
+    const int64_t bound = 120LL * 1000000;
+    int64_t last = 0;
+    int64_t quiet[3] = { 1000, -1, bound / 2 };
+    int64_t late[3]  = { 1000, bound / 2 + 1, -1 };
+    int64_t unknown[3] = { -1, -1, -1 };
+    SDN_CHECK("early warn: every pillar within half the bound is quiet",
+              !boot_sd_watchdog_early_warn_due(quiet, bound, 5000000, &last) &&
+              last == 0);
+    SDN_CHECK("early warn: unknown ages are quiet",
+              !boot_sd_watchdog_early_warn_due(unknown, bound, 5000000,
+                                               &last));
+    SDN_CHECK("early warn: a pillar past half the bound warns",
+              boot_sd_watchdog_early_warn_due(late, bound, 5000000, &last) &&
+              last == 5000000);
+    SDN_CHECK("early warn: rate limited inside the minute",
+              !boot_sd_watchdog_early_warn_due(late, bound,
+                                               5000000 +
+                                               BOOT_SD_EARLY_WARN_LOG_US - 1,
+                                               &last));
+    SDN_CHECK("early warn: warns again after the minute",
+              boot_sd_watchdog_early_warn_due(late, bound,
+                                              5000000 +
+                                              BOOT_SD_EARLY_WARN_LOG_US,
+                                              &last));
+    return failures;
+}
+
+/* Pet cadence (I1): only the lock-evidence block is taken back out of the
+ * next sleep. Decision-to-decision time after a withhold edge must equal
+ * base's (old edge cost + period); a resume edge and a quiet period sleep the
+ * full period, as on base. */
+static int test_sd_watchdog_pet_cadence(void)
+{
+    int failures = 0;
+    const int64_t P = 30LL * 1000000; /* WatchdogSec=120 */
+    struct boot_sd_edge_cost withhold = { .withhold = true, .old_us = 700000,
+                                          .new_us = 5200000 };
+    int64_t sleep_us = boot_sd_watchdog_next_sleep_us(P, &withhold);
+    SDN_CHECK("cadence: withhold edge decides at base time (old + P)",
+              withhold.old_us + withhold.new_us + sleep_us ==
+              withhold.old_us + P);
+    struct boot_sd_edge_cost resume = { .withhold = false, .old_us = 3000 };
+    SDN_CHECK("cadence: resume edge sleeps the full period",
+              boot_sd_watchdog_next_sleep_us(P, &resume) == P);
+    struct boot_sd_edge_cost quiet = {0};
+    SDN_CHECK("cadence: no edge sleeps the full period",
+              boot_sd_watchdog_next_sleep_us(P, &quiet) == P &&
+              boot_sd_watchdog_next_sleep_us(P, NULL) == P);
+    struct boot_sd_edge_cost over = { .withhold = true, .new_us = P + 1 };
+    SDN_CHECK("cadence: a block longer than the period clamps at 0",
+              boot_sd_watchdog_next_sleep_us(P, &over) == 0);
+    SDN_CHECK("cadence: IO gap is 5 s at a 30 s period, half a 5 s period",
+              boot_sd_watchdog_edge_io_gap_us(P) ==
+              BOOT_SD_LOCK_EVIDENCE_IO_GAP_US &&
+              boot_sd_watchdog_edge_io_gap_us(5000000) == 2500000);
+    return failures;
+}
+
+/* The IO sample pair is read from the task stat file without allocation; the
+ * task io file is not read on the pet thread, so block bytes are never shown
+ * as a measured value (never "+0"). A comm holding ") (" must not shift the
+ * fields, and a short or malformed stat line is an unavailable sample. */
+static const char *const k_io_stat_paren =
+    "4242 (a) (b c) R 1 2 3 0 -1 4194368 100 0 7 0 30 12 0 0 20 0 1 0 5\n";
+static int test_sd_watchdog_io_bytes_field(void)
+{
+    int failures = 0;
+    char out[256];
+    struct boot_sd_io_sample a = { 0 }, b = { 0 }, bad = { .ok = true };
+    SDN_CHECK("io sample: comm with ') (' parses utime+stime and majflt",
+              boot_sd_watchdog_parse_io_sample(k_io_stat_paren, &a) && a.ok &&
+              a.cpu_ticks == 42 && a.majflt == 7);
+    SDN_CHECK("io sample: short stat line is unavailable",
+              !boot_sd_watchdog_parse_io_sample("4242 (x) R 1 2 3\n", &bad) &&
+              !bad.ok);
+    bad.ok = true;
+    SDN_CHECK("io sample: non-numeric majflt is unavailable",
+              !boot_sd_watchdog_parse_io_sample(
+                  "4242 (x) R 1 2 3 0 -1 4 100 0 7z 0 30 12\n", &bad) &&
+              !bad.ok);
+    bad.ok = true;
+    SDN_CHECK("io sample: no ')' is unavailable",
+              !boot_sd_watchdog_parse_io_sample("4242 x R 1 2 3\n", &bad) &&
+              !bad.ok);
+    b = a;
+    b.cpu_ticks += 5;
+    boot_sd_watchdog_format_io_line(out, sizeof(out), 4242, "owner", &a, &b,
+                                    50000);
+    SDN_CHECK("io line: readable samples print cpu/majflt deltas",
+              strcmp(out, "io tid=4242 why=owner cpu_ticks=42->47(+5) "
+                          "majflt=7->7(+0) blk_io_bytes=unavailable "
+                          "gap_ms=50") == 0);
+    boot_sd_watchdog_format_io_line(out, sizeof(out), 4242, "owner", &a, &bad,
+                                    50000);
+    SDN_CHECK("io line: a malformed second sample prints unavailable for it",
+              strcmp(out, "io tid=4242 why=owner sample_a=cpu_ticks:42,"
+                          "majflt:7 sample_b=unavailable "
+                          "blk_io_bytes=unavailable gap_ms=50") == 0);
+    boot_sd_watchdog_format_io_line(out, sizeof(out), 4242, "d-state", &bad,
+                                    &a, 0);
+    SDN_CHECK("io line: a malformed first sample prints unavailable for it",
+              strcmp(out, "io tid=4242 why=d-state sample_a=unavailable "
+                          "sample_b=cpu_ticks:42,majflt:7 "
+                          "blk_io_bytes=unavailable gap_ms=0") == 0);
+    return failures;
+}
+
+static bool sdn_order_has(const size_t *order, size_t n, size_t idx)
+{
+    for (size_t i = 0; i < n; i++)
+        if (order[i] == idx)
+            return true;
+    return false;
+}
+
+/* Truncation rule (brief item 5): 200 threads, print cap 128. The owner
+ * (index 190) and the hot waiters (150..154) sit past the cap and must be
+ * printed; a waiter on an address that is no row (160) stays ordinary. */
+#define SDN_PROMO_N   200
+#define SDN_PROMO_CAP 128
+static int test_sd_watchdog_promote_lock_threads(void)
+{
+    int failures = 0;
+    static unsigned char prio[SDN_PROMO_N];
+    static long tids[SDN_PROMO_N];
+    static unsigned long long fx[SDN_PROMO_N];
+    static size_t order[SDN_PROMO_N];
+    const unsigned long long hot = 0x59e20d6bfdf8ULL;
+    memset(prio, 1, sizeof(prio));
+    memset(fx, 0, sizeof(fx));
+    for (size_t i = 0; i < SDN_PROMO_N; i++)
+        tids[i] = 1000 + (long)i;
+    prio[5] = 0; /* an existing D-state thread */
+    for (size_t i = 150; i < 155; i++)
+        fx[i] = hot;
+    fx[160] = 0xabc0ULL;
+    struct boot_sd_lock_ref rows[1] = { { .addr = hot, .owner = 1190 } };
+    size_t n = boot_sd_watchdog_order_snapshot(prio, SDN_PROMO_N,
+                                               SDN_PROMO_CAP, order);
+    SDN_CHECK("promote control: without the rule the owner is cut",
+              !sdn_order_has(order, n, 190) && !sdn_order_has(order, n, 150));
+    size_t p0 = boot_sd_watchdog_promote_lock_threads(
+        prio, tids, fx, SDN_PROMO_N, rows, 1, SDN_PROMO_CAP);
+    n = boot_sd_watchdog_order_snapshot(prio, SDN_PROMO_N, SDN_PROMO_CAP,
+                                        order);
+    SDN_CHECK("promote: D + owner + 5 waiters are priority 0", p0 == 7);
+    SDN_CHECK("promote: owner and waiters printed first",
+              n == SDN_PROMO_CAP && order[0] == 5 && order[1] == 150 &&
+              order[5] == 154 && order[6] == 190);
+    SDN_CHECK("promote: a waiter on a non-row address stays cut",
+              !sdn_order_has(order, n, 160));
+
+    /* Cap pressure: 127 never-cut threads already. The owner still prints;
+     * waiters stop once the never-cut set reaches the cap. */
+    memset(prio, 0, 127);
+    memset(prio + 127, 1, SDN_PROMO_N - 127);
+    p0 = boot_sd_watchdog_promote_lock_threads(prio, tids, fx, SDN_PROMO_N,
+                                               rows, 1, SDN_PROMO_CAP);
+    SDN_CHECK("promote under cap pressure: owner kept, waiters not",
+              p0 == SDN_PROMO_CAP && prio[190] == 0 && prio[150] == 1 &&
+              prio[154] == 1);
+    return failures;
+}
+
+#if defined(__linux__)
+/* Named-lock fixture: one holder thread owns a pthread mutex registered as a
+ * named evidence address while SDN_LOCK_WAITERS threads block on it. */
+#define SDN_LOCK_WAITERS 3
+struct sdn_lock_fx {
+    pthread_mutex_t mu;
+    _Atomic long holder_tid;
+    _Atomic long waiter_tid[SDN_LOCK_WAITERS];
+    _Atomic int next_waiter;
+    _Atomic bool release;
+    pthread_t holder, waiters[SDN_LOCK_WAITERS];
+};
+
+static void *sdn_lock_holder_main(void *opaque)
+{
+    struct sdn_lock_fx *fx = opaque;
+    if (pthread_mutex_lock(&fx->mu) != 0)
+        return NULL;
+    atomic_store(&fx->holder_tid, os_proc_self_tid());
+    while (!atomic_load(&fx->release))
+        platform_sleep_ms(1); /* real-clock: holder parks until the test releases it */
+    (void)pthread_mutex_unlock(&fx->mu);
+    return NULL;
+}
+
+static void *sdn_lock_waiter_main(void *opaque)
+{
+    struct sdn_lock_fx *fx = opaque;
+    int slot = atomic_fetch_add(&fx->next_waiter, 1);
+    if (slot >= 0 && slot < SDN_LOCK_WAITERS)
+        atomic_store(&fx->waiter_tid[slot], os_proc_self_tid());
+    if (pthread_mutex_lock(&fx->mu) == 0)
+        (void)pthread_mutex_unlock(&fx->mu);
+    return NULL;
+}
+
+/* True when `tid` sits in a futex syscall whose first argument is `addr`. */
+static bool sdn_tid_futex_waits_on(long tid, const void *addr)
+{
+    char sc[256];
+    long nr = -1;
+    unsigned long long a0 = 0;
+    if (tid <= 0 || !os_proc_self_task_read(tid, "syscall", sc, sizeof(sc)) ||
+        sscanf(sc, "%ld %llx", &nr, &a0) != 2)
+        return false;
+    return nr == HOLD_FUTEX_NR && a0 == (unsigned long long)(uintptr_t)addr;
+}
+
+static bool sdn_lock_fx_all_waiting(struct sdn_lock_fx *fx)
+{
+    if (atomic_load(&fx->holder_tid) <= 0)
+        return false;
+    for (int i = 0; i < SDN_LOCK_WAITERS; i++)
+        if (!sdn_tid_futex_waits_on(atomic_load(&fx->waiter_tid[i]), &fx->mu))
+            return false;
+    return true;
+}
+
+/* Start the holder, then the waiters, and wait (bounded) until every waiter
+ * is parked in the kernel on the mutex word. */
+static bool sdn_lock_fx_start(struct sdn_lock_fx *fx)
+{
+    if (pthread_create(&fx->holder, NULL, sdn_lock_holder_main, fx) != 0)
+        return false;
+    for (int i = 0; i < 2000 && atomic_load(&fx->holder_tid) <= 0; i++)
+        platform_sleep_ms(1); /* real-clock: bounded wait for the holder thread to take the fixture mutex */
+    for (int i = 0; i < SDN_LOCK_WAITERS; i++)
+        if (pthread_create(&fx->waiters[i], NULL, sdn_lock_waiter_main, fx) != 0)
+            return false;
+    for (int i = 0; i < 5000; i++) {
+        if (sdn_lock_fx_all_waiting(fx))
+            return true;
+        platform_sleep_ms(1); /* real-clock: bounded wait for fixture threads to enter a kernel futex wait */
+    }
+    return false;
+}
+
+static void sdn_lock_fx_stop(struct sdn_lock_fx *fx, bool started)
+{
+    atomic_store(&fx->release, true);
+    if (!started)
+        return;
+    (void)pthread_join(fx->holder, NULL);
+    for (int i = 0; i < SDN_LOCK_WAITERS; i++)
+        (void)pthread_join(fx->waiters[i], NULL);
+}
+
+/* The evidence row for `name`: the one line of `text` that carries it. */
+static bool sdn_line_with(const char *text, const char *needle, char *line,
+                          size_t cap)
+{
+    const char *hit = strstr(text, needle);
+    if (!hit)
+        return false;
+    const char *start = hit;
+    while (start > text && start[-1] != '\n')
+        start--;
+    const char *end = strchr(hit, '\n');
+    size_t n = end ? (size_t)(end - start) : strlen(start);
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(line, start, n);
+    line[n] = '\0';
+    return true;
+}
+
+static size_t sdn_count_lines(const char *text)
+{
+    size_t n = 0;
+    for (const char *p = text; *p; p++)
+        n += *p == '\n';
+    return n;
+}
+
+static int sdn_check_named_lock_row(const struct sdn_lock_fx *fx,
+                                    const char *text, size_t lines)
+{
+    int failures = 0;
+    char row[512] = "", want[96];
+    long holder = atomic_load(&fx->holder_tid);
+    printf("sd_notify: lock evidence text (%zu lines):\n%s", lines, text);
+    SDN_CHECK("lock evidence: named row present",
+              sdn_line_with(text, "name=sdn_fixture_mutex", row, sizeof(row)));
+    snprintf(want, sizeof(want), "addr=0x%llx",
+             (unsigned long long)(uintptr_t)&fx->mu);
+    SDN_CHECK("lock evidence: row names the mutex address", strstr(row, want));
+    unsigned waiters = 0;
+    const char *w = strstr(row, "waiters=");
+    SDN_CHECK("lock evidence: row counts >= 2 waiters",
+              w && sscanf(w, "waiters=%u", &waiters) == 1 && waiters >= 2);
+    snprintf(want, sizeof(want), "owner_tid=%ld ", holder);
+    SDN_CHECK("lock evidence: owner tid is the holder's gettid",
+              holder > 0 && strstr(row, want));
+    snprintf(want, sizeof(want), "owner[tid=%ld ", holder);
+    SDN_CHECK("lock evidence: owner task line printed", strstr(row, want));
+    snprintf(want, sizeof(want), "io tid=%ld ", holder);
+    SDN_CHECK("lock evidence: io sample line for the holder",
+              sdn_line_with(text, want, row, sizeof(row)) &&
+              strstr(row, "->") && strstr(row, "gap_ms="));
+    unsigned long long c0 = 0, c1 = 0, m0 = 0, m1 = 0;
+    const char *cpu = strstr(row, "cpu_ticks="), *mf = strstr(row, "majflt=");
+    SDN_CHECK("lock evidence: holder io line has numeric cpu_ticks and majflt",
+              cpu && mf && sscanf(cpu, "cpu_ticks=%llu->%llu", &c0, &c1) == 2 &&
+              sscanf(mf, "majflt=%llu->%llu", &m0, &m1) == 2 && c1 >= c0);
+    SDN_CHECK("lock evidence: holder io line prints blk_io_bytes=unavailable",
+              strstr(row, " blk_io_bytes=unavailable "));
+    SDN_CHECK("lock evidence: hot table header and pressure line",
+              strstr(text, "hot futex") && strstr(text, "pressure io"));
+    SDN_CHECK("lock evidence: bounded line count",
+              lines > 0 && lines <= BOOT_SD_LOCK_EVIDENCE_MAX_LINES &&
+              lines == sdn_count_lines(text));
+    return failures;
+}
+
+/* The 11-16 incident shape on the live path: a stalled pillar futex-waits on
+ * an address that is NOT a known lock and whose holder is not in D. Naming
+ * that address for evidence must leave the verdict and the decision alone. */
+static int sdn_check_named_lock_verdict(const struct sdn_lock_fx *fx)
+{
+    int failures = 0;
+    char ev[600];
+    long pillar = atomic_load(&fx->waiter_tid[0]), dt = -1;
+    enum boot_sd_disk_hold_verdict v = boot_sd_watchdog_disk_hold_scan(
+        true, true, 0, &pillar, 1, &dt, ev, sizeof(ev));
+    SDN_CHECK("incident shape (live): named non-known lock is stall-not-on-disk-io",
+              v == BOOT_SD_HOLD_NO_IO_WAIT &&
+              strcmp(boot_sd_watchdog_disk_hold_name(v),
+                     "stall-not-on-disk-io") == 0);
+    /* The real decision path, pet_decide(gate_with_hold(false, &stall)),
+     * fed this stalled pillar; the live gate is the positive control. */
+    SDN_CHECK("incident shape (live): gate_with_hold withholds",
+              !boot_sd_watchdog_test_gate_decide(false, &pillar, 1, true));
+    SDN_CHECK("incident shape (live): a live gate pings (control)",
+              boot_sd_watchdog_test_gate_decide(true, &pillar, 1, true));
+    return failures;
+}
+
+static int test_sd_watchdog_named_lock(void)
+{
+    int failures = 0;
+    static struct sdn_lock_fx fx;
+    memset(&fx, 0, sizeof(fx));
+    if (pthread_mutex_init(&fx.mu, NULL) != 0) {
+        SDN_CHECK("named lock fixture: mutex init", false);
+        return failures;
+    }
+    SDN_CHECK("named lock: register",
+              boot_sd_watchdog_register_named_lock("sdn_fixture_mutex",
+                                                   &fx.mu));
+    bool started = sdn_lock_fx_start(&fx);
+    SDN_CHECK("named lock fixture: holder owns, waiters parked in futex",
+              started);
+    if (started) {
+        static char text[8192];
+        size_t lines = boot_sd_watchdog_format_lock_evidence(
+            text, sizeof(text), 50000);
+        failures += sdn_check_named_lock_row(&fx, text, lines);
+        failures += sdn_check_named_lock_verdict(&fx);
+    }
+    SDN_CHECK("named lock: unregister",
+              boot_sd_watchdog_register_named_lock("sdn_fixture_mutex", NULL));
+    sdn_lock_fx_stop(&fx, started);
+    (void)pthread_mutex_destroy(&fx.mu);
+    return failures;
+}
+#else
+static int test_sd_watchdog_named_lock(void)
+{
+    return 0;
+}
+#endif
+
+/* The pure incident shape: an unknown futex address with no D holder gets
+ * the not-on-disk-io verdict. The decision it leads to is asserted on the
+ * live path (sdn_check_named_lock_verdict) through the real gate. */
+static int test_sd_watchdog_incident_shape(void)
+{
+    int failures = 0;
+    struct hold_fx f;
+    hold_fx_init(&f, 0x59e20d6bfdf8ULL);
+    enum boot_sd_disk_hold_verdict v =
+        hold_run(&f, 1, k_sock, "do_poll", true, true, 0, NULL);
+    SDN_CHECK("incident shape: unknown lock address verdict text",
+              v == BOOT_SD_HOLD_NO_IO_WAIT &&
+              strcmp(boot_sd_watchdog_disk_hold_name(v),
+                     "stall-not-on-disk-io") == 0);
+    return failures;
+}
+
 int test_sd_notify(void)
 {
     return test_sd_notify_platform_arm() + test_sd_watchdog_evidence() +
            test_sd_watchdog_holder_and_order() +
-           test_sd_watchdog_disk_hold();
+           test_sd_watchdog_disk_hold() + test_sd_watchdog_early_warning() +
+           test_sd_watchdog_pet_cadence() + test_sd_watchdog_io_bytes_field() +
+           test_sd_watchdog_promote_lock_threads() +
+           test_sd_watchdog_named_lock() + test_sd_watchdog_incident_shape();
 }
