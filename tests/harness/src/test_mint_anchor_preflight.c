@@ -395,6 +395,10 @@ static bool map_copy_marks(const char *text, bool verdict)
         strstr(text, "mint_preflight.copy ") &&
         strstr(text, "mint_preflight.copy_stability ") &&
         strstr(text, "mint_preflight.copy_inspect ") &&
+        strstr(text, "mint_preflight.copy_open ") &&
+        strstr(text, "mint_preflight.copy_query_only ") &&
+        strstr(text, "mint_preflight.copy_gate ") &&
+        strstr(text, "mint_preflight.copy_close ") &&
         strstr(text, "mint_preflight.cleanup_check ") &&
         /* the private throwaway copy must never be fsynced: that flush cost
          * 697 s of an 877 s warm restart on r1 */
@@ -410,7 +414,11 @@ static bool map_marked_preflight(const char *dir, bool copy_path, bool *verdict)
     if (copy_path) return map_copy_marks(text, *verdict);
     return strstr(text, "mint_preflight.live_inspect ") &&
         (strstr(text, "mint_preflight.live_stability ") != NULL) == *verdict &&
-        !strstr(text, "mint_preflight.temp_create ");
+        !strstr(text, "mint_preflight.temp_create ") &&
+        !strstr(text, "mint_preflight.copy_open ") &&
+        !strstr(text, "mint_preflight.copy_query_only ") &&
+        !strstr(text, "mint_preflight.copy_gate ") &&
+        !strstr(text, "mint_preflight.copy_close ");
 }
 
 static int test_normal_preflight_live_verdicts(void)
