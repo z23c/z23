@@ -42,6 +42,7 @@
 #ifndef ZCL_SERVICES_UTXO_MIRROR_SYNC_SERVICE_H
 #define ZCL_SERVICES_UTXO_MIRROR_SYNC_SERVICE_H
 
+#include "config/db_service.h"
 #include "storage/utxo_mirror_schema.h"
 #include "util/result.h"
 #include <pthread.h>
@@ -51,6 +52,7 @@
 #include <sqlite3.h>
 
 struct node_db;
+struct utxo_commitment;
 
 /* ── Defaults ──────────────────────────────────────────────── */
 
@@ -179,10 +181,30 @@ void utxo_mirror_sync_stop(struct utxo_mirror_sync_service *svc);
  * Exposed for tests and for an explicit one-shot from the diagnostics path. */
 int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc);
 
+/* Shared mirror/delta write lane. The callback runs synchronously and must
+ * own any transaction it needs; a missing runtime service uses direct calls. */
+bool utxo_mirror_sync_run_db_lane(struct node_db *ndb,
+                                  db_service_write_fn fn, void *ctx);
+
 /* Capture an idle mirror-update generation for cross-store auditors. Returns
  * false while a mirror update is active. A NULL global service is idle at
  * generation zero (tests/early boot: there is no concurrent mirror writer). */
 bool utxo_mirror_sync_audit_snapshot(uint64_t *generation_out);
+
+enum utxo_mirror_checkpoint_adoption_result {
+    UTXO_MIRROR_CHECKPOINT_ADOPTION_REFUSED = 0,
+    UTXO_MIRROR_CHECKPOINT_ADOPTION_ADOPTED,
+    UTXO_MIRROR_CHECKPOINT_ADOPTION_UNSETTLED,
+};
+
+/* Adopt computed only if the next-height cursor, prior checkpoint, tip, and
+ * update generation still match on the mirror write lane. UNSETTLED means a
+ * failed save/commit could not be rolled back; do not claim restoration. */
+enum utxo_mirror_checkpoint_adoption_result utxo_mirror_sync_adopt_checkpoint(
+    struct node_db *ndb, int32_t expected_cursor,
+    const struct utxo_commitment *expected,
+    const struct utxo_commitment *computed,
+    int64_t expected_tip, uint64_t expected_generation);
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. */
 /* Typed failures of a wholesale rebuild (negative return of
@@ -248,6 +270,11 @@ void utxo_mirror_sync_test_set_post_authority_hook(void (*fn)(void *), void *ctx
 
 void utxo_mirror_sync_test_set_writer_hook(void (*fn)(sqlite3 *writer, void *ctx),
                                            void *ctx);
+
+/* Called inside checkpoint adoption immediately before its final immediate
+ * transaction, so a fixture can advance the real mirror in that window. */
+void utxo_mirror_sync_test_set_checkpoint_adopt_hook(bool (*fn)(void *ctx),
+                                                     void *ctx);
 #endif
 
 /* Test seam: called inside a wholesale rebuild after the caller read the

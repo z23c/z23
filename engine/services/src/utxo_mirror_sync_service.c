@@ -165,28 +165,6 @@ static bool read_coins_kv_state(int32_t *frontier_out, int64_t *count_out)
     return true;
 }
 
-static struct db_service *mirror_db_service_for(struct node_db *ndb)
-{
-    struct db_service *dbsvc = app_runtime_db_service();
-
-    if (!ndb || !dbsvc || !db_service_is_started(dbsvc))
-        return NULL;
-    return db_service_node_db(dbsvc) == ndb ? dbsvc : NULL;
-}
-
-static bool mirror_run_db_lane(struct node_db *ndb,
-                               db_service_write_fn fn,
-                               void *ctx)
-{
-    struct db_service *dbsvc = mirror_db_service_for(ndb);
-
-    if (!ndb || !fn)
-        return false;
-    if (dbsvc)
-        return db_service_run_write(dbsvc, fn, ctx);
-    return fn(ndb, ctx);
-}
-
 struct mirror_node_state_ctx {
     int64_t cursor;
     bool mirror_has_rows;
@@ -1040,7 +1018,7 @@ static bool mirror_sync_run_rebuild_lane(struct utxo_mirror_sync_service *svc,
      * updates_active covers a sample taken while the transaction is open. */
     atomic_fetch_add(&svc->updates_active, 1u);
     atomic_fetch_add(&svc->update_generation, 1u);
-    bool lane_ok = mirror_run_db_lane(svc->ndb,
+    bool lane_ok = utxo_mirror_sync_run_db_lane(svc->ndb,
                                       mirror_rebuild_and_advance_lane,
                                       rebuild);
     atomic_fetch_add(&svc->update_generation, 1u);
@@ -1080,7 +1058,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
     atomic_store(&svc->last_frontier, (int64_t)frontier);
 
     struct mirror_node_state_ctx state = {0};
-    if (!mirror_run_db_lane(svc->ndb, mirror_read_node_state_lane, &state) ||
+    if (!utxo_mirror_sync_run_db_lane(svc->ndb, mirror_read_node_state_lane, &state) ||
         !state.ok) {
         atomic_store(&svc->last_error_unix, platform_time_wall_unix());
         LOG_RETURN(-1, "utxo_mirror", "run_once: node.db state read failed");
@@ -1235,7 +1213,7 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     };
     atomic_fetch_add(&svc->updates_active, 1u);
     atomic_fetch_add(&svc->update_generation, 1u);
-    bool lane_ok = mirror_run_db_lane(svc->ndb, mirror_rebuild_and_advance_lane,
+    bool lane_ok = utxo_mirror_sync_run_db_lane(svc->ndb, mirror_rebuild_and_advance_lane,
                                       &rebuild);
     atomic_fetch_add(&svc->update_generation, 1u);
     atomic_fetch_sub(&svc->updates_active, 1u);

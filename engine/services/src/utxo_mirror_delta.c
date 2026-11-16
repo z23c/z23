@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * utxo_mirror_delta — implementation. See services/utxo_mirror_delta.h.
+ * utxo_mirror_delta — incremental projection and guarded checkpoint adoption.
  */
 
 // one-result-type-ok:delta-apply-3-valued-status — E2 (one way out): the one
@@ -11,8 +11,12 @@
 // stateless helper invoked by the utxo_mirror_sync service, not a lifecycle
 // service surface of its own.
 #include "services/utxo_mirror_delta.h"
+#include "services/utxo_mirror_sync_service.h"
 
 #include "coins/utxo_commitment.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
+#include "jobs/tip_finalize_stage.h"
 #include "models/database.h"
 #include "models/utxo.h"
 #include "script/script.h"    /* MAX_SCRIPT_SIZE */
@@ -24,7 +28,9 @@
 #include "util/safe_alloc.h"
 
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -721,4 +727,167 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
     *out_applied_through = upper;
     *out_rows_changed = rows_changed;
     return UTXO_MIRROR_DELTA_OK;
+}
+
+static struct db_service *mirror_db_service_for(struct node_db *ndb)
+{
+    struct db_service *dbsvc = app_runtime_db_service();
+
+    if (!ndb || !dbsvc || !db_service_is_started(dbsvc))
+        return NULL;
+    return db_service_node_db(dbsvc) == ndb ? dbsvc : NULL;
+}
+
+bool utxo_mirror_sync_run_db_lane(struct node_db *ndb,
+                                  db_service_write_fn fn, void *ctx)
+{
+    struct db_service *dbsvc = mirror_db_service_for(ndb);
+
+    if (!ndb || !fn)
+        return false;
+    if (dbsvc)
+        return db_service_run_write(dbsvc, fn, ctx);
+    return fn(ndb, ctx);
+}
+
+struct mirror_checkpoint_adopt_ctx {
+    struct utxo_mirror_sync_service *svc;
+    int32_t cursor;
+    const struct utxo_commitment *expected;
+    const struct utxo_commitment *computed;
+    int64_t tip;
+    uint64_t generation;
+    bool adopted;
+    bool unsettled;
+    char reason[96];
+};
+
+#ifdef ZCL_TESTING
+static bool (*mirror_checkpoint_adopt_hook)(void *ctx);
+static void *mirror_checkpoint_adopt_hook_ctx;
+
+void utxo_mirror_sync_test_set_checkpoint_adopt_hook(bool (*fn)(void *ctx),
+                                                     void *ctx)
+{
+    mirror_checkpoint_adopt_hook = fn;
+    mirror_checkpoint_adopt_hook_ctx = ctx;
+}
+#endif
+
+static const char *mirror_checkpoint_adoption_mismatch(
+    struct node_db *ndb, const struct mirror_checkpoint_adopt_ctx *a)
+{
+    int64_t cursor = -1;
+    struct utxo_commitment current;
+    if (!node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cursor) ||
+        cursor != a->cursor)
+        return "cursor missing or moved";
+    if (!utxo_commitment_load_checkpoint(ndb->db, &current) ||
+        !utxo_commitment_equal(&current, a->expected))
+        return "checkpoint changed before adoption";
+    if (tip_finalize_stage_last_height() != a->tip)
+        return "tip moved before adoption";
+    if (a->svc &&
+        (atomic_load(&a->svc->updates_active) != 1 ||
+         atomic_load(&a->svc->update_generation) != a->generation + 1))
+        return "mirror update generation moved";
+    return NULL;
+}
+
+static bool mirror_checkpoint_adopt_lane(struct node_db *ndb, void *ctx)
+{
+    struct mirror_checkpoint_adopt_ctx *a = ctx;
+#ifdef ZCL_TESTING
+    if (mirror_checkpoint_adopt_hook &&
+        !mirror_checkpoint_adopt_hook(mirror_checkpoint_adopt_hook_ctx)) {
+        (void)snprintf(a->reason, sizeof(a->reason), "test hook refused");
+        return false;
+    }
+#endif
+    if (!node_db_begin_immediate(ndb)) {
+        if (!node_db_rollback(ndb))
+            a->unsettled = true;
+        (void)snprintf(a->reason, sizeof(a->reason), "begin immediate failed%s",
+                       a->unsettled ? "; rollback failed" : "");
+        return false;
+    }
+
+    const char *why = mirror_checkpoint_adoption_mismatch(ndb, a);
+    if (!why && !utxo_commitment_save_checkpoint_at_height(
+                    ndb->db, a->computed, a->cursor))
+        why = "height-stamped checkpoint save failed";
+    if (!why && !node_db_commit(ndb))
+        why = "checkpoint commit failed";
+    if (why) {
+        if (!node_db_rollback(ndb))
+            a->unsettled = true;
+        (void)snprintf(a->reason, sizeof(a->reason), "%s%s", why,
+                       a->unsettled ? "; rollback failed" : "");
+        return false;
+    }
+    a->adopted = true;
+    return true;
+}
+
+static enum utxo_mirror_checkpoint_adoption_result
+mirror_checkpoint_adoption_finish(const struct mirror_checkpoint_adopt_ctx *a,
+                                  bool lane_ok)
+{
+    if (a->unsettled || (lane_ok && !a->adopted)) {
+        LOG_WARN("utxo_mirror", "checkpoint adoption UNSETTLED: %s",
+                 a->reason[0] ? a->reason : "no adoption witness");
+        return UTXO_MIRROR_CHECKPOINT_ADOPTION_UNSETTLED;
+    }
+    if (!lane_ok || !a->adopted) {
+        LOG_INFO("utxo_mirror", "checkpoint adoption refused: %s",
+                 a->reason[0] ? a->reason : "write lane failed");
+        return UTXO_MIRROR_CHECKPOINT_ADOPTION_REFUSED;
+    }
+    LOG_INFO("utxo_mirror",
+             "[utxo_cmt] checkpoint adopted count=%llu height=%d",
+             (unsigned long long)a->computed->count, a->cursor);
+    return UTXO_MIRROR_CHECKPOINT_ADOPTION_ADOPTED;
+}
+
+enum utxo_mirror_checkpoint_adoption_result utxo_mirror_sync_adopt_checkpoint(
+    struct node_db *ndb, int32_t expected_cursor,
+    const struct utxo_commitment *expected,
+    const struct utxo_commitment *computed,
+    int64_t expected_tip, uint64_t expected_generation)
+{
+    if (!ndb || !expected || !computed || expected_cursor < 0) {
+        LOG_FAIL("utxo_mirror", "checkpoint adoption invalid arguments");
+        return UTXO_MIRROR_CHECKPOINT_ADOPTION_REFUSED;
+    }
+
+    struct utxo_mirror_sync_service *svc = g_utxo_mirror_sync;
+    if (svc && (svc->ndb != ndb ||
+                atomic_load(&svc->updates_active) != 0 ||
+                atomic_load(&svc->update_generation) != expected_generation)) {
+        LOG_INFO("utxo_mirror",
+                 "checkpoint adoption skipped: mirror changed before write");
+        return UTXO_MIRROR_CHECKPOINT_ADOPTION_REFUSED;
+    }
+
+    struct mirror_checkpoint_adopt_ctx a = {
+        .svc = svc,
+        .cursor = expected_cursor,
+        .expected = expected,
+        .computed = computed,
+        .tip = expected_tip,
+        .generation = expected_generation,
+        .adopted = false,
+        .unsettled = false,
+        .reason = {0},
+    };
+    if (svc) {
+        atomic_fetch_add(&svc->updates_active, 1u);
+        atomic_fetch_add(&svc->update_generation, 1u);
+    }
+    bool lane_ok = utxo_mirror_sync_run_db_lane(ndb, mirror_checkpoint_adopt_lane, &a);
+    if (svc) {
+        atomic_fetch_add(&svc->update_generation, 1u);
+        atomic_fetch_sub(&svc->updates_active, 1u);
+    }
+    return mirror_checkpoint_adoption_finish(&a, lane_ok);
 }

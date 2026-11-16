@@ -28,6 +28,7 @@
 #include "platform/os_proc.h"
 #include "platform/time_compat.h"
 #include "services/utxo_recovery_service.h"
+#include "services/utxo_mirror_sync_service.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "supervisors/domains.h"
@@ -535,6 +536,35 @@ static void audit_clear_latched_blocker(const char *why)
              why ? why : "a clean audit");
 }
 
+static bool invariant_adopt_growth_checkpoint(
+    struct node_db *ndb, const struct utxo_commitment *before,
+    const struct utxo_commitment *computed, int64_t tip, int64_t cursor,
+    bool idle, uint64_t generation)
+{
+    atomic_store(&g_isn_commitment_candidate_streak, 0);
+    if (ap_audit_refuse_checkpoint_adoption()) return true;
+    if (!idle) {
+        LOG_INFO("validation_pack",
+                 "checkpoint growth adoption skipped: cursor unavailable "
+                 "or mirror busy");
+        return true;
+    }
+    enum utxo_mirror_checkpoint_adoption_result adoption =
+        utxo_mirror_sync_adopt_checkpoint(
+            ndb, (int32_t)cursor, before, computed, tip, generation);
+    if (adoption != UTXO_MIRROR_CHECKPOINT_ADOPTION_ADOPTED) {
+        if (adoption == UTXO_MIRROR_CHECKPOINT_ADOPTION_UNSETTLED)
+            LOG_WARN("validation_pack",
+                     "checkpoint growth adoption UNSETTLED; latch preserved");
+        else
+            LOG_INFO("validation_pack",
+                     "checkpoint growth adoption refused; latch preserved");
+        return true;
+    }
+    audit_clear_latched_blocker("a growth/stale resync");
+    return true;
+}
+
 bool invariant_sentinel_commitment_audit_once(void)
 {
     struct node_db *ndb = sentinel_ndb();
@@ -553,6 +583,13 @@ bool invariant_sentinel_commitment_audit_once(void)
     memset(&computed, 0, sizeof(computed));
     if (!utxo_commitment_load_checkpoint(ndb->db, &saved))
         return false; /* raw-return-ok:no checkpoint to audit against — skip */
+
+    int64_t mirror_cursor = -1;
+    bool cursor_ok = node_db_state_get_int(
+        ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &mirror_cursor) &&
+        mirror_cursor >= 0 && mirror_cursor <= INT32_MAX;
+    uint64_t mirror_generation = 0;
+    bool mirror_idle = utxo_mirror_sync_audit_snapshot(&mirror_generation);
 
     /* Torn-scan discard, keyed to the table's ACTUAL writer: every utxos
      * flush co-commits a fresh checkpoint in the same txn, so a stored
@@ -582,25 +619,13 @@ bool invariant_sentinel_commitment_audit_once(void)
         return true;
     }
 
-    /* Shared stale-vs-corruption classifier: growth past the checkpoint =
-     * stale (legitimate); shrink or equal-count-different-hash = corruption
-     * candidate. GROWTH is the EXPECTED steady state — the checkpoint is a
-     * derived cache written only out-of-band (boot/recovery), never
-     * co-committed by the live coins_kv mirror writer, so the `utxos`
-     * projection legitimately runs AHEAD of it during forward sync. Resync the
-     * checkpoint to the recomputed digest (the same refresh the boot path
-     * performs) and release any blocker latched during an earlier transient:
-     * the only OTHER clear needs EXACT equality, which an advancing set may
-     * never hit (the live 3164076 wedge). But never adopt a set the authority
-     * audit flagged as diverging from coins_kv. */
+    /* Growth is stale; shrink or equal-count-different-hash is a corruption
+     * candidate. Adoption preserves the checkpoint's exact covering height. */
     if (!utxo_recovery_xor_mismatch_is_corruption_candidate(
-            saved.count, computed.count)) {
-        atomic_store(&g_isn_commitment_candidate_streak, 0);
-        if (ap_audit_refuse_checkpoint_adoption()) return true;
-        (void)utxo_commitment_resync_from_db(ndb->db, NULL);
-        audit_clear_latched_blocker("a growth/stale resync");
-        return true;
-    }
+            saved.count, computed.count))
+        return invariant_adopt_growth_checkpoint(
+            ndb, &saved_after, &computed, tip_after,
+            mirror_cursor, cursor_ok && mirror_idle, mirror_generation);
 
     /* Corruption candidate (computed <= saved). Require
      * COMMITMENT_CANDIDATE_STREAK_RAISE consecutive candidate verdicts before

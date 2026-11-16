@@ -22,11 +22,13 @@
 #include "coins/utxo_commitment.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
+#include "jobs/tip_finalize_stage.h"
 #include "models/database.h"
 #include "models/utxo.h"
 #include "script/standard.h"
 #include "services/chain_state_service.h"
 #include "services/authority_projection_audit.h"
+#include "services/invariant_sentinel.h"
 #include "services/utxo_mirror_delta.h"
 #include "services/utxo_mirror_sync_service.h"
 #include "kernel/command_registry.h"
@@ -471,7 +473,9 @@ static int ums_test_audit_diff(struct utxo_mirror_sync_service *svc,
 struct ums_scan_fault {
     sqlite3 *db;
     bool prepare_denied;
+    bool deny_commit;
     bool deny_rollback;
+    bool commit_denied;
     bool rollback_denied;
     bool trace_started;
     bool interrupted;
@@ -482,6 +486,10 @@ static int ums_deny_staged_read(void *opaque, int action, const char *table,
 {
     struct ums_scan_fault *f = opaque;
     (void)db_name; (void)trigger;
+    if (f->deny_commit && action == SQLITE_TRANSACTION && table && !strcmp(table, "COMMIT")) {
+        f->commit_denied = true;
+        return SQLITE_DENY;
+    }
     if (f->deny_rollback && action == SQLITE_TRANSACTION && table && !strcmp(table, "ROLLBACK")) {
         f->rollback_denied = true;
         return SQLITE_DENY;
@@ -2016,6 +2024,212 @@ static int ums_test_xor_checkpoint(struct node_db *ndb, sqlite3 *pdb, struct utx
     return failures;
 }
 
+extern struct node_db *g_isn_test_ndb;
+
+struct ums_adopt_race {
+    struct ums_fx *fx;
+    bool advanced;
+};
+
+static bool ums_adopt_race_hook(void *ctx)
+{
+    struct ums_adopt_race *r = ctx;
+    int64_t cursor = -1;
+    struct utxo_commitment current;
+    utxo_commitment_compute_db(r->fx->ndb.db, &current);
+    if (!node_db_state_get_int(&r->fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                               &cursor) || cursor < 0 || cursor > INT32_MAX ||
+        !utxo_commitment_save_checkpoint_at_height(
+            r->fx->ndb.db, &current, (int32_t)cursor))
+        return false;
+    int64_t before = atomic_load(&r->fx->svc.last_mirror_height);
+    int64_t changed = utxo_mirror_sync_run_once(&r->fx->svc);
+    r->advanced = changed == 1 &&
+        atomic_load(&r->fx->svc.last_mirror_height) == before + 1;
+    return r->advanced;
+}
+
+struct ums_adopt_fault {
+    struct ums_fx *fx;
+    struct ums_scan_fault fault;
+};
+
+static bool ums_adopt_fault_hook(void *ctx)
+{
+    struct ums_adopt_fault *a = ctx;
+    sqlite3_set_authorizer(a->fx->ndb.db, ums_deny_staged_read, &a->fault);
+    return true;
+}
+
+static int ums_growth_initial(struct ums_fx *fx,
+    const struct utxo_commitment *truth, int64_t rebuilds_before)
+{
+    int failures = 0;
+    int64_t cursor = -1;
+    UMS_CHECK("growth: valid next-height cursor",
+              node_db_state_get_int(&fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    &cursor) && cursor > 0 && cursor <= INT32_MAX);
+    if (cursor <= 0 || cursor > INT32_MAX) return failures + 1;
+    struct utxo_commitment stale = *truth;
+    stale.count--;
+    stale.accumulator[0] ^= 1;
+    UMS_CHECK("growth: install older checkpoint",
+              utxo_commitment_save_checkpoint_at_height(
+                  fx->ndb.db, &stale, (int32_t)cursor - 1));
+    bool ran = invariant_sentinel_commitment_audit_once();
+    struct utxo_commitment adopted;
+    int32_t stamped = -1;
+    bool loaded = utxo_commitment_load_checkpoint_at_height(
+        fx->ndb.db, &adopted, &stamped);
+    UMS_CHECK("growth: resync preserves checkpoint covering height",
+              ran && loaded && stamped == cursor &&
+              utxo_commitment_equal(&adopted, truth));
+
+    UMS_CHECK("growth: supply following causal delta",
+              ums_write_empty_delta_row(fx->pdb, (int32_t)cursor) &&
+              ums_set_frontier(fx->pdb, (int32_t)cursor + 1));
+    int64_t passed = utxo_mirror_sync_run_once(&fx->svc);
+    int64_t next = -1;
+    UMS_CHECK("growth: following delta advances without quarantine or rebuild",
+              passed == 0 &&
+              node_db_state_get_int(&fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    &next) && next == cursor + 1 &&
+              atomic_load(&fx->svc.mirror_health) == UTXO_MIRROR_HEALTHY &&
+              atomic_load(&fx->svc.rebuilds_run) == rebuilds_before);
+    return failures;
+}
+
+static int ums_growth_race(struct ums_fx *fx,
+                           const struct utxo_commitment *truth)
+{
+    int failures = 0;
+    int64_t cursor = -1;
+    if (!node_db_state_get_int(&fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, &cursor) ||
+        cursor <= 0 || cursor > INT32_MAX)
+        return 1;
+    struct utxo_commitment stale = *truth;
+    stale.count--;
+    stale.accumulator[0] ^= 1;
+    UMS_CHECK("growth race: install older checkpoint again",
+              utxo_commitment_save_checkpoint_at_height(
+                  fx->ndb.db, &stale, (int32_t)cursor - 1));
+    UMS_CHECK("growth race: supply a real mirror update",
+              ums_add_coin(fx->pdb, 0x88, 5000, (int32_t)cursor) &&
+              ums_write_empty_delta_row(fx->pdb, (int32_t)cursor) &&
+              ums_set_frontier(fx->pdb, (int32_t)cursor + 1));
+    struct ums_adopt_race race = {.fx = fx, .advanced = false};
+    utxo_mirror_sync_test_set_checkpoint_adopt_hook(ums_adopt_race_hook, &race);
+    bool raced = invariant_sentinel_commitment_audit_once();
+    utxo_mirror_sync_test_set_checkpoint_adopt_hook(NULL, NULL);
+    struct utxo_commitment moved_truth, moved_checkpoint;
+    utxo_commitment_compute_db(fx->ndb.db, &moved_truth);
+    int32_t stamped = -1;
+    bool loaded = utxo_commitment_load_checkpoint_at_height(
+        fx->ndb.db, &moved_checkpoint, &stamped);
+    UMS_CHECK("growth race: moving the real cursor discards stale adoption",
+              raced && race.advanced && loaded && stamped == cursor + 1 &&
+              utxo_commitment_equal(&moved_checkpoint, &moved_truth) &&
+              atomic_load(&fx->svc.mirror_health) == UTXO_MIRROR_HEALTHY);
+    return failures;
+}
+
+static int ums_growth_missing_cursor(struct ums_fx *fx, int64_t rebuilds_before)
+{
+    int failures = 0;
+    int64_t cursor = atomic_load(&fx->svc.last_mirror_height);
+    if (cursor <= 0 || cursor > INT32_MAX) return 1;
+    struct utxo_commitment before_missing, unchanged;
+    utxo_commitment_compute_db(fx->ndb.db, &before_missing);
+    UMS_CHECK("growth missing cursor: install unstamped checkpoint and remove cursor",
+              utxo_commitment_save_checkpoint(fx->ndb.db, &before_missing) &&
+              node_db_state_delete(&fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY));
+    bool missing = invariant_sentinel_commitment_audit_once();
+    bool plain = utxo_commitment_load_checkpoint(fx->ndb.db, &unchanged);
+    struct utxo_commitment moved_checkpoint;
+    int32_t stamped = -1;
+    bool stamped_ok = utxo_commitment_load_checkpoint_at_height(
+        fx->ndb.db, &moved_checkpoint, &stamped);
+    UMS_CHECK("growth missing cursor: supply causal delta",
+              ums_write_empty_delta_row(fx->pdb, (int32_t)cursor) &&
+              ums_set_frontier(fx->pdb, (int32_t)cursor + 1));
+    int32_t applied = -1;
+    int64_t changed = 0;
+    int rc = utxo_mirror_delta_apply(
+        &fx->ndb, (int32_t)cursor, (int32_t)cursor + 1, 0,
+        UTXO_MIRROR_SYNC_CURSOR_KEY, &applied, &changed);
+    UMS_CHECK("growth missing cursor: checkpoint untouched and delta refuses",
+              missing && plain &&
+              utxo_commitment_equal(&unchanged, &before_missing) &&
+              !stamped_ok && rc == UTXO_MIRROR_DELTA_FALLBACK &&
+              atomic_load(&fx->svc.rebuilds_run) == rebuilds_before);
+    return failures;
+}
+
+static int ums_growth_unsettled(struct ums_fx *fx)
+{
+    int failures = 0;
+    int64_t cursor = atomic_load(&fx->svc.last_mirror_height);
+    if (cursor <= 0 || cursor > INT32_MAX) return 1;
+    struct utxo_commitment truth;
+    utxo_commitment_compute_db(fx->ndb.db, &truth);
+    struct utxo_commitment stale = truth;
+    stale.count--;
+    stale.accumulator[0] ^= 1;
+    UMS_CHECK("growth fault: restore cursor and stale checkpoint",
+              node_db_state_set_int(&fx->ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                    cursor) &&
+              utxo_commitment_save_checkpoint_at_height(
+                  fx->ndb.db, &stale, (int32_t)cursor - 1));
+    uint64_t generation = 0;
+    bool idle = utxo_mirror_sync_audit_snapshot(&generation);
+    struct ums_adopt_fault fault = {
+        .fx = fx,
+        .fault = {.deny_commit = true, .deny_rollback = true},
+    };
+    utxo_mirror_sync_test_set_checkpoint_adopt_hook(ums_adopt_fault_hook, &fault);
+    enum utxo_mirror_checkpoint_adoption_result fault_result =
+        utxo_mirror_sync_adopt_checkpoint(
+            &fx->ndb, (int32_t)cursor, &stale, &truth,
+            tip_finalize_stage_last_height(), generation);
+    utxo_mirror_sync_test_set_checkpoint_adopt_hook(NULL, NULL);
+    sqlite3_set_authorizer(fx->ndb.db, NULL, NULL);
+    UMS_CHECK("growth fault: commit plus rollback failure is UNSETTLED",
+              idle && fault.fault.commit_denied && fault.fault.rollback_denied &&
+              fault_result == UTXO_MIRROR_CHECKPOINT_ADOPTION_UNSETTLED &&
+              sqlite3_get_autocommit(fx->ndb.db) == 0);
+    UMS_CHECK("growth fault: fixture rollback cleanup",
+              node_db_rollback(&fx->ndb));
+    return failures;
+}
+
+static int ums_test_growth_resync(void)
+{
+    int failures = 0;
+    struct ums_fx fx;
+    ums_fx_open(&fx, "growth_resync");
+    UMS_CHECK("growth: initial mirror rebuild",
+              fx.ok && utxo_mirror_sync_run_once(&fx.svc) == 2);
+    if (!fx.ok) {
+        ums_fx_close(&fx);
+        return 1;
+    }
+    g_utxo_mirror_sync = &fx.svc;
+    invariant_sentinel_reset_for_testing();
+    g_isn_test_ndb = &fx.ndb;
+    ap_audit_reset_for_test();
+    struct utxo_commitment truth;
+    utxo_commitment_compute_db(fx.ndb.db, &truth);
+    int64_t rebuilds_before = atomic_load(&fx.svc.rebuilds_run);
+    failures += ums_growth_initial(&fx, &truth, rebuilds_before);
+    failures += ums_growth_race(&fx, &truth);
+    failures += ums_growth_missing_cursor(&fx, rebuilds_before);
+    failures += ums_growth_unsettled(&fx);
+    g_isn_test_ndb = NULL;
+    ap_audit_reset_for_test();
+    ums_fx_close(&fx);
+    return failures;
+}
+
 static int ums_test_header_tip_arms(struct node_db *ndb, sqlite3 *pdb, struct utxo_mirror_sync_service *svc,
                                    struct block_index *bi)
 {
@@ -2450,6 +2664,7 @@ int test_utxo_mirror_sync(void)
     failures += ums_test_delta_branch_continuity();
     failures += ums_test_rebuild_now();
     failures += ums_test_containment_suite();
+    failures += ums_test_growth_resync();
     node_db_close(&ndb);
     test_cleanup_tmpdir(dir);
     return failures;

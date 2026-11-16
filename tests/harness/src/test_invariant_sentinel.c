@@ -26,6 +26,7 @@
 #include "models/database.h"
 #include "services/authority_projection_audit.h"
 #include "services/invariant_sentinel.h"
+#include "services/utxo_mirror_sync_service.h"
 #include "coins/utxo_commitment.h"
 #include "util/blocker.h"
 #include "validation/chain_linkage_check.h"
@@ -309,14 +310,16 @@ static int isn_audit_seed_checkpoint_and_growth(struct node_db *ndb)
      * checkpoint to the grown set (count 8 -> 10). */
     bool grew = isn_insert_utxo(ndb, 100) &&
                 isn_insert_utxo(ndb, 101);
+    bool cursor = node_db_state_set_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY, 100);
     ran = invariant_sentinel_commitment_audit_once();
     struct utxo_commitment ck;
-    bool loaded = utxo_commitment_load_checkpoint(ndb->db, &ck);
+    int32_t height = -1;
+    bool loaded = utxo_commitment_load_checkpoint_at_height(ndb->db, &ck, &height);
     ISN_CHECK("audit: growth -> no fire + checkpoint resynced to 10",
-              grew && ran &&
+              grew && cursor && ran &&
               !blocker_exists("coins.commitment_spot_check") &&
               !chain_linkage_hold_active() &&
-              loaded && ck.count == 10);
+              loaded && ck.count == 10 && height == 100);
     return failures;
 }
 
