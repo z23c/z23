@@ -22,5 +22,8 @@ accepted make invocation alone does not prove a live exchange.
 
 Make dry runs passed for the empty default and sender and receiver argument
 lists. They show the command line only; they do not execute the parser.
-Focused selftest, full candidate proof and two-host app-sharing acceptance:
-NOT RUN.
+The existing parser and supervised-role selftest passed on source
+`9111274f25b69b6b01a7477f72270917e85ba515` under the remote gate. Its
+negative-fixture diagnostics are expected. The gate returned zero and its
+transferred evidence manifest verified. Full candidate proof and two-host
+app-sharing acceptance: NOT RUN.
