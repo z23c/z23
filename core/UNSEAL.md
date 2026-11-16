@@ -1258,3 +1258,7 @@ later lane flips it HARD.
 - 2026-11-16T09:52:45Z — REASON: checkpoint_header_fetch: read the window span range under the capture lock and clear span state in the test reset; correction to the two entries above: the change also buffers candidate headers in a fixed 32-slot ring on the receive side; hash-pinned capture unchanged, no consensus predicate change
   old ROOT: 32ce0e7ca628ef4f1af449f85a11eee02aa1d09e42cdc2c34963741ee8131ea3
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-16T18:46:30Z — REASON: Groth16 proof decode parity with zclassicd librustzcash 06da3b9: refuse compressed infinity with stray bits, coordinates equal to q, and proof A/B/C at infinity (owner instruction 2026-11-16: bug-for-bug compatible with zclassicd)
+  old ROOT: 2274d1ef67628abd126611debbd793d2671d8233fb5e7eb91fd598539555c2c1
+  by: owner unseal ritual (make core-unseal)

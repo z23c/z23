@@ -27,11 +27,12 @@
  *     this pins it so a future refactor cannot silently drop it (dropping it
  *     is a Groth16 soundness hole — small-subgroup proof forgery).
  *
- * BOUNDARY: this test never changes what the verifier accepts/rejects; it only
- * pins current behavior. Where that is more permissive than librustzcash
- * (non-canonical infinity encodings), the test documents it; tightening it is
- * a consensus change that must go through a full-chain replay first
- * (CONSENSUS_PARITY_DOCTRINE).
+ * BOUNDARY: this test never changes what the verifier accepts/rejects; it
+ * pins the accept set of zclassicd's librustzcash (06da3b9): pairing
+ * ec.rs into_affine_unchecked refuses an infinity encoding with any bit set
+ * after masking 0x3f and any coordinate >= q (Fq::from_repr), and bellman
+ * groth16 Proof::read refuses an A, B or C at infinity. Section 3b pins
+ * those refusals.
  */
 
 #include "test/test_core.h"
@@ -286,14 +287,13 @@ static int adv_g1_compressed_vectors(void)
                   g1_from_compressed(&p, inf_ok) && g1_is_identity(&p));
 
         /* NON-CANONICAL infinity: infinity flag set BUT x-bytes nonzero and
-         * the sort flag set. librustzcash rejects this; the C23 decoder
-         * currently accepts it (returns identity). This pins current behavior;
-         * do not flip to reject without a full-chain replay (consensus change). */
+         * the sort flag set. librustzcash (pairing ec.rs into_affine_unchecked)
+         * masks 0x3f and refuses any remaining bit (UnexpectedInformation). */
         uint8_t inf_dirty[48];
         memset(inf_dirty, 0xff, 48);
         inf_dirty[0] = 0xe0; /* compressed + infinity + sort, x = all-1s */
-        ADV_CHECK("g1 compressed NON-CANONICAL infinity -> ACCEPT (documents finding)",
-                  g1_from_compressed(&p, inf_dirty) && g1_is_identity(&p));
+        ADV_CHECK("g1 compressed NON-CANONICAL infinity -> REJECT (Rust parity)",
+                  !g1_from_compressed(&p, inf_dirty));
 
         /* x >= field modulus: compression set, infinity clear, x = all-0xff
          * (>= q) -> on-curve decode must fail at fp_from_bytes. */
@@ -303,13 +303,132 @@ static int adv_g1_compressed_vectors(void)
         ADV_CHECK("g1 compressed x >= q -> REJECT (non-canonical field elem)",
                   !g1_from_compressed(&p, x_oob));
 
-        /* All-0xFF: byte0 == 0xff has the infinity bit set, so the decoder
-         * returns identity before inspecting x (same class as above). */
+        /* All-0xFF: byte0 == 0xff has the infinity bit set with stray bits
+         * (same class as above): Rust refuses it. */
         uint8_t all_ff[48];
         memset(all_ff, 0xff, 48);
-        ADV_CHECK("g1 compressed all-0xFF -> ACCEPT as infinity (flag dominates)",
-                  g1_from_compressed(&p, all_ff) && g1_is_identity(&p));
+        ADV_CHECK("g1 compressed all-0xFF -> REJECT (dirty infinity, Rust parity)",
+                  !g1_from_compressed(&p, all_ff));
     }
+    return failures;
+}
+
+/* ============================================================
+ * 3b. librustzcash accept-set parity for proof-point decoding
+ *     (pairing ec.rs into_affine + bellman groth16 Proof::read)
+ * ============================================================ */
+
+/* q, the BLS12-381 base field modulus, big-endian (as encoded on the wire). */
+static const uint8_t FP_MODULUS_BE[48] = {
+    0x1a,0x01,0x11,0xea,0x39,0x7f,0xe6,0x9a,0x4b,0x1b,0xa7,0xb6,
+    0x43,0x4b,0xac,0xd7,0x64,0x77,0x4b,0x84,0xf3,0x85,0x12,0xbf,
+    0x67,0x30,0xd2,0xa0,0xf6,0xb0,0xf6,0x24,0x1e,0xab,0xff,0xfe,
+    0xb1,0x53,0xff,0xff,0xb9,0xfe,0xff,0xff,0xff,0xff,0xaa,0xab
+};
+
+/* Infinity encodings with exactly one stray bit, each refused by Rust. */
+static int adv_dirty_infinity_one_bit(void)
+{
+    int failures = 0;
+    struct g1_point p;
+    struct g2_point q;
+    uint8_t g1_sort[48] = {0}, g1_tail[48] = {0};
+    g1_sort[0] = 0xe0;                    /* infinity + sort flag only  */
+    g1_tail[0] = 0xc0; g1_tail[47] = 0x01; /* infinity + one low bit     */
+    ADV_CHECK("g1 infinity with only the sort flag -> REJECT",
+              !g1_from_compressed(&p, g1_sort));
+    ADV_CHECK("g1 infinity with one stray low bit -> REJECT",
+              !g1_from_compressed(&p, g1_tail));
+    uint8_t g2_sort[96] = {0}, g2_tail[96] = {0};
+    g2_sort[0] = 0xe0;
+    g2_tail[0] = 0xc0; g2_tail[95] = 0x01;
+    ADV_CHECK("g2 infinity with only the sort flag -> REJECT",
+              !g2_from_compressed(&q, g2_sort));
+    ADV_CHECK("g2 infinity with one stray low bit -> REJECT",
+              !g2_from_compressed(&q, g2_tail));
+    return failures;
+}
+
+/* Coordinates equal to q: Fq::from_repr refuses them (strict < q). x = q
+ * reduces to x = 0, which IS on the G1 curve ((0, 2) has order 3), so the
+ * encoding must fail at the field check, not later. */
+static int adv_coordinate_equal_to_modulus(void)
+{
+    int failures = 0;
+    struct fp f;
+    uint8_t below[48];
+    memcpy(below, FP_MODULUS_BE, 48);
+    below[47] = 0xaa;                                  /* q - 1 */
+    ADV_CHECK("fp_from_bytes refuses q", !fp_from_bytes(&f, FP_MODULUS_BE));
+    ADV_CHECK("fp_from_bytes accepts q - 1", fp_from_bytes(&f, below));
+
+    struct g1_point p;
+    uint8_t x_zero[48] = {0}, x_q[48];
+    x_zero[0] = 0x80;                                  /* x = 0, compressed */
+    memcpy(x_q, FP_MODULUS_BE, 48);
+    x_q[0] |= 0x80;                                    /* x = q, compressed */
+    ADV_CHECK("g1 compressed x = 0 decodes (control: (0, 2) is on curve)",
+              g1_from_compressed(&p, x_zero));
+    ADV_CHECK("g1 compressed x = q -> REJECT (non-canonical x)",
+              !g1_from_compressed(&p, x_q));
+
+    /* G2: find the smallest k with x = k (c1 = 0) on the twist, then encode
+     * the same x with c1 = q. Rust refuses that encoding. */
+    struct g2_point q2;
+    uint8_t enc[96] = {0};
+    bool found = false;
+    for (unsigned k = 0; k < 256 && !found; k++) {
+        memset(enc, 0, sizeof(enc));
+        enc[0] = 0x80;
+        enc[95] = (uint8_t)k;
+        found = g2_from_compressed(&q2, enc);
+    }
+    ADV_CHECK("g2 compressed x = (k, 0) decodes for some small k (control)",
+              found);
+    if (found) {
+        memcpy(enc, FP_MODULUS_BE, 48);                /* c1 = q */
+        enc[0] |= 0x80;
+        ADV_CHECK("g2 compressed x.c1 = q -> REJECT (non-canonical x)",
+                  !g2_from_compressed(&q2, enc));
+    }
+    return failures;
+}
+
+/* bellman groth16 Proof::read refuses A, B or C at infinity even when the
+ * encoding itself is the canonical infinity. */
+static int adv_proof_identity_points(void)
+{
+    int failures = 0;
+    uint8_t good[192];
+    memcpy(good, G1_GEN_COMPRESSED, 48);
+    memcpy(good + 48, G2_GEN_COMPRESSED, 96);
+    memcpy(good + 144, G1_GEN_COMPRESSED, 48);
+    struct groth16_proof gp;
+    ADV_CHECK("groth16_proof_read accepts generator A, B, C (control)",
+              groth16_proof_read(&gp, good));
+
+    static const struct { size_t off, len; const char *name; } slots[3] = {
+        { 0, 48, "groth16_proof_read refuses A at infinity" },
+        { 48, 96, "groth16_proof_read refuses B at infinity" },
+        { 144, 48, "groth16_proof_read refuses C at infinity" },
+    };
+    for (size_t i = 0; i < 3; i++) {
+        uint8_t bad[192];
+        memcpy(bad, good, sizeof(bad));
+        memset(bad + slots[i].off, 0, slots[i].len);
+        bad[slots[i].off] = 0xc0;                      /* canonical infinity */
+        ADV_CHECK(slots[i].name, !groth16_proof_read(&gp, bad));
+    }
+    return failures;
+}
+
+static int adv_rust_decode_parity(void)
+{
+    int failures = 0;
+    printf("librustzcash proof-point decode parity\n");
+    failures += adv_dirty_infinity_one_bit();
+    failures += adv_coordinate_equal_to_modulus();
+    failures += adv_proof_identity_points();
     return failures;
 }
 
@@ -367,8 +486,8 @@ static int adv_g2_vectors(void)
         uint8_t inf_dirty[96];
         memset(inf_dirty, 0xff, 96);
         inf_dirty[0] = 0xe0;
-        ADV_CHECK("g2 compressed NON-CANONICAL infinity -> ACCEPT (documents finding)",
-                  g2_from_compressed(&q, inf_dirty) && g2_is_identity(&q));
+        ADV_CHECK("g2 compressed NON-CANONICAL infinity -> REJECT (Rust parity)",
+                  !g2_from_compressed(&q, inf_dirty));
 
         uint8_t x_oob[96];
         memset(x_oob, 0xff, 96);
@@ -674,6 +793,7 @@ int test_bls12_381_adversarial(void)
     failures += adv_g1_compressed_vectors();
     failures += adv_g1_uncompressed_vectors();
     failures += adv_g2_vectors();
+    failures += adv_rust_decode_parity();
 
     failures += adv_subgroup_anchor(&G1);
 

@@ -16,8 +16,10 @@
  * This tool ONLY reads the verifier and records/checks verdicts. It never
  * modifies consensus code. The corpus is the golden; the golden is defined by
  * OUR current consensus behavior (parity is defined against ourselves), which
- * includes the DELIBERATE quirks that differ from librustzcash — e.g. the
- * BLS12-381 non-canonical-infinity ACCEPTANCE (owner-gated; PRESERVE exactly).
+ * must equal zclassicd's librustzcash 06da3b9: a compressed infinity encoding
+ * with stray bits and a proof with A, B or C at infinity are REJECTED, as
+ * pairing ec.rs and bellman groth16 Proof::read reject them (re-recorded
+ * 2026-11-16 with that owner-directed parity fix).
  *
  * TWO MODES
  * ---------
@@ -49,8 +51,10 @@
  * EDGE / ADVERSARIAL COVERAGE (see build_corpus())
  * ------------------------------------------------
  *   - canonical point-at-infinity (G1/G2, compressed + uncompressed)  -> ACCEPT
- *   - NON-CANONICAL infinity (infinity flag + dirty trailing bytes)    -> ACCEPT
- *     (the owner-gated quirk; librustzcash REJECTS — pinned here as ACCEPT)
+ *   - NON-CANONICAL compressed infinity (flag + dirty trailing bytes)  -> REJECT
+ *     (librustzcash rejects; the uncompressed decoder, used only to load
+ *     verifying keys, still accepts it)
+ *   - proof with A, B or C at infinity                                 -> REJECT
  *   - x >= field modulus (non-canonical field element)                 -> REJECT
  *   - all-zero / all-0xFF / bad compression-flag combinations
  *   - on-curve-but-NOT-prime-order-subgroup point in a proof           -> REJECT
@@ -221,17 +225,28 @@ static void build_g1_compressed_corpus(void)
     memset(buf, 0, 48); buf[0] = 0xc0;
     push_bytes(FAM_G1_COMPRESSED, "g1c: canonical infinity", buf, 48);
     memset(buf, 0xff, 48); buf[0] = 0xe0;
-    push_bytes(FAM_G1_COMPRESSED, "g1c: NON-CANONICAL infinity (quirk: ACCEPT)", buf, 48);
+    push_bytes(FAM_G1_COMPRESSED, "g1c: NON-CANONICAL infinity (Rust: REJECT)", buf, 48);
     memset(buf, 0xff, 48); buf[0] = 0xbf;
     push_bytes(FAM_G1_COMPRESSED, "g1c: x >= q (non-canonical field elem)", buf, 48);
     memset(buf, 0xff, 48);
-    push_bytes(FAM_G1_COMPRESSED, "g1c: all-0xFF (infinity flag dominates)", buf, 48);
+    push_bytes(FAM_G1_COMPRESSED, "g1c: all-0xFF (dirty infinity, Rust: REJECT)", buf, 48);
     /* boundary: valid generator with sort bit forced opposite */
     memcpy(buf, G1_GEN_COMPRESSED, 48); buf[0] ^= 0x20;
     push_bytes(FAM_G1_COMPRESSED, "g1c: generator with sign bit flipped", buf, 48);
     /* one-bit flip deep in x */
     memcpy(buf, G1_GEN_COMPRESSED, 48); buf[40] ^= 0x01;
     push_bytes(FAM_G1_COMPRESSED, "g1c: generator x one-bit flipped", buf, 48);
+    /* x = q: Fq::from_repr refuses it; x = 0 itself is on the curve. */
+    static const uint8_t q_be[48] = {
+        0x1a,0x01,0x11,0xea,0x39,0x7f,0xe6,0x9a,0x4b,0x1b,0xa7,0xb6,
+        0x43,0x4b,0xac,0xd7,0x64,0x77,0x4b,0x84,0xf3,0x85,0x12,0xbf,
+        0x67,0x30,0xd2,0xa0,0xf6,0xb0,0xf6,0x24,0x1e,0xab,0xff,0xfe,
+        0xb1,0x53,0xff,0xff,0xb9,0xfe,0xff,0xff,0xff,0xff,0xaa,0xab
+    };
+    memset(buf, 0, 48); buf[0] = 0x80;
+    push_bytes(FAM_G1_COMPRESSED, "g1c: x = 0 (on curve, order 3)", buf, 48);
+    memcpy(buf, q_be, 48); buf[0] |= 0x80;
+    push_bytes(FAM_G1_COMPRESSED, "g1c: x = q (Rust: REJECT)", buf, 48);
 }
 
 static void build_g1_uncompressed_corpus(void)
@@ -262,7 +277,7 @@ static void build_g2_compressed_corpus(void)
     memset(buf, 0, 96); buf[0] = 0xc0;
     push_bytes(FAM_G2_COMPRESSED, "g2c: canonical infinity", buf, 96);
     memset(buf, 0xff, 96); buf[0] = 0xe0;
-    push_bytes(FAM_G2_COMPRESSED, "g2c: NON-CANONICAL infinity (quirk: ACCEPT)", buf, 96);
+    push_bytes(FAM_G2_COMPRESSED, "g2c: NON-CANONICAL infinity (Rust: REJECT)", buf, 96);
     memset(buf, 0xff, 96); buf[0] = 0xbf;
     push_bytes(FAM_G2_COMPRESSED, "g2c: x >= q", buf, 96);
     memcpy(buf, G2_GEN_COMPRESSED, 96); buf[80] ^= 0x01;
@@ -316,6 +331,19 @@ static void build_proof_read_corpus(void)
         memcpy(badB, good, 192);
         memset(badB + 48, 0xff, 96); badB[48] = 0xbf;
         push_bytes(FAM_PROOF_READ, "proof: B out-of-field (REJECT)", badB, 192);
+        /* bellman groth16 Proof::read refuses A, B or C at infinity. */
+        static const struct { size_t off, len; const char *label; } inf[3] = {
+            { 0, 48, "proof: A at infinity (Rust: REJECT)" },
+            { 48, 96, "proof: B at infinity (Rust: REJECT)" },
+            { 144, 48, "proof: C at infinity (Rust: REJECT)" },
+        };
+        for (size_t i = 0; i < 3; i++) {
+            uint8_t p[192];
+            memcpy(p, good, 192);
+            memset(p + inf[i].off, 0, inf[i].len);
+            p[inf[i].off] = 0xc0;
+            push_bytes(FAM_PROOF_READ, inf[i].label, p, 192);
+        }
     }
 }
 

@@ -245,11 +245,12 @@ on-curve non-subgroup), malformed proofs, and crafted single/batch
 verifications against `groth16_parity_golden.bin` +
 `groth16_decode_corpus.bin`. A single verdict flip fails the gate.
 
-Parity is defined **against our own frozen behavior**, not against
-librustzcash: the corpus deliberately pins the quirks this chain accepts —
-notably the BLS12-381 non-canonical infinity encoding (infinity flag set with
-dirty trailing bytes), which librustzcash rejects and we ACCEPT. Never
-"fix" a pinned quirk; that is a consensus break.
+The frozen behavior must equal zclassicd's librustzcash (06da3b9) verdict for
+every proof encoding. Since 2026-11-16 the corpus pins librustzcash's
+refusals: a compressed infinity encoding with dirty trailing bytes, a field
+coordinate equal to q, and a proof with A, B or C at infinity are all
+REJECTED. An optimization must never flip a pinned verdict; that is a
+consensus break.
 
 Flow: optimise → `make check-groth16-parity` → prove bit-identity via the
 `crypto_perf_selftest` teeth → re-run `make check-crypto-perf` → **shrink** the

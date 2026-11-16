@@ -16,6 +16,7 @@
 #include "sapling/groth16_prover.h"
 #include "sapling/pedersen_hash.h"
 #include "sapling/fr.h"
+#include "sapling/bls12_381.h"
 #include "sapling/circuit_bits.h"
 #include "crypto/blake2s.h"
 #include "test/groth16_spend_oracle_kat.h"
@@ -1038,6 +1039,130 @@ static int fr_canonical_encoding_checks(void)
     return failures;
 }
 
+/* zclassicd's librustzcash accept set on a real output proof, through both the
+ * single-proof path and the prepare step the batch paths use:
+ * - Groth16 alone cannot tell cm from cm + r (the IC term reduces mod r), so
+ *   the canonical-cm gate in prepare is what refuses cm + r.
+ * - bellman Proof::read refuses A, B or C at infinity, and pairing ec.rs
+ *   refuses an infinity encoding with stray bits. */
+static int output_rust_accept_set_checks(const uint8_t cv[32],
+                                         const uint8_t cm[32],
+                                         const uint8_t cm_plus_r[32],
+                                         const uint8_t epk[32],
+                                         const uint8_t proof[192])
+{
+    int failures = 0;
+    struct sapling_verification_ctx vctx;
+    struct groth16_proof gp;
+    uint64_t pub[5][4];
+    sapling_verification_ctx_init(&vctx);
+    bool prepared = sapling_output_prepare(&vctx, cv, cm, epk, proof, &gp, pub);
+    PROVER_CHECK("output prepare accepts the real proof (control)", prepared);
+    if (prepared) {
+        for (int i = 0; i < 4; i++) {
+            pub[4][i] = 0;
+            for (int j = 0; j < 8; j++)
+                pub[4][i] |= (uint64_t)cm_plus_r[i * 8 + j] << (8 * j);
+        }
+        PROVER_CHECK("Groth16 alone accepts cm + r (the gate is the cm check)",
+                     sapling_output_groth16_one(&gp, (const uint64_t (*)[4])pub));
+    }
+    sapling_verification_ctx_init(&vctx);
+    PROVER_CHECK("output prepare (batch path) refuses cm + r",
+                 !sapling_output_prepare(&vctx, cv, cm_plus_r, epk, proof,
+                                         &gp, pub));
+
+    static const struct { size_t off, len; } slots[3] = {
+        { 0, 48 }, { 48, 96 }, { 144, 48 } };
+    static const char *const names[3][2] = {
+        { "output check refuses proof A at infinity",
+          "output prepare (batch path) refuses proof A at infinity" },
+        { "output check refuses proof B at infinity",
+          "output prepare (batch path) refuses proof B at infinity" },
+        { "output check refuses proof C at infinity",
+          "output prepare (batch path) refuses proof C at infinity" },
+    };
+    for (size_t s = 0; s < 3; s++) {
+        uint8_t bad[192];
+        memcpy(bad, proof, sizeof(bad));
+        memset(bad + slots[s].off, 0, slots[s].len);
+        bad[slots[s].off] = 0xc0;
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK(names[s][0],
+                     !sapling_check_output(&vctx, cv, cm, epk, bad));
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK(names[s][1],
+                     !sapling_output_prepare(&vctx, cv, cm, epk, bad, &gp, pub));
+    }
+    uint8_t dirty[192];
+    memcpy(dirty, proof, sizeof(dirty));
+    dirty[0] = 0xc0 | (dirty[0] & 0x3f);   /* infinity flag over A's x bytes */
+    sapling_verification_ctx_init(&vctx);
+    PROVER_CHECK("output prepare refuses an infinity flag with stray bits",
+                 !sapling_output_prepare(&vctx, cv, cm, epk, dirty, &gp, pub));
+    return failures;
+}
+
+/* Pre-ZIP-216 Jubjub and RedJubjub rules zclassicd's librustzcash applies in
+ * final_check (redjubjub.rs verify, edwards.rs Point::read). With no spends or
+ * outputs bvk is the identity, so R with [8]R = O and S = 0 satisfies the
+ * cofactored equation. Rust ACCEPTS R encoded with x = 0 and the sign bit
+ * set, and refuses S >= s. Z23 must match both ways. */
+static int redjubjub_rust_accept_set_checks(void)
+{
+    int failures = 0;
+    /* s, the Jubjub prime subgroup order, little-endian. */
+    static const uint8_t JUBJUB_S_LE[32] = {
+        0xb7, 0x2c, 0xf7, 0xd6, 0x5e, 0x0e, 0x97, 0xd0,
+        0x82, 0x10, 0xc8, 0xcc, 0x93, 0x20, 0x68, 0xa6,
+        0x00, 0x3b, 0x34, 0x01, 0x01, 0x3b, 0x67, 0x06,
+        0xa9, 0xaf, 0x33, 0x65, 0xea, 0xb4, 0x7d, 0x0e,
+    };
+    uint8_t sighash[32];
+    memset(sighash, 0x5a, sizeof(sighash));
+    struct sapling_verification_ctx vctx;
+
+    /* R candidates: identity (0, 1) and the order-2 point (0, -1), each in
+     * its canonical encoding and with the x sign bit set. */
+    uint8_t r_enc[4][32];
+    memset(r_enc, 0, sizeof(r_enc));
+    r_enc[0][0] = 0x01;                          /* (0, 1) canonical      */
+    r_enc[1][0] = 0x01; r_enc[1][31] = 0x80;     /* (0, 1) sign bit set   */
+    memcpy(r_enc[2], FR_MODULUS_LE, 32);
+    r_enc[2][0] = 0x00;                          /* (0, q - 1) canonical  */
+    memcpy(r_enc[3], r_enc[2], 32);
+    r_enc[3][31] |= 0x80;                        /* (0, q - 1) sign set   */
+    static const char *const names[4] = {
+        "final_check accepts R = identity, canonical encoding",
+        "final_check accepts R = identity with x sign bit set (pre-ZIP-216)",
+        "final_check accepts R = (0, -1), canonical encoding",
+        "final_check accepts R = (0, -1) with x sign bit set (pre-ZIP-216)",
+    };
+    for (size_t i = 0; i < 4; i++) {
+        uint8_t sig[64] = {0};
+        memcpy(sig, r_enc[i], 32);
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK(names[i], sapling_final_check(&vctx, 0, sig, sighash));
+    }
+    struct jub_point pt;
+    PROVER_CHECK("jub_from_bytes accepts x = 0 with the sign bit set",
+                 jub_from_bytes(&pt, r_enc[1]) && jub_from_bytes(&pt, r_enc[3]));
+
+    uint8_t sig_s[64] = {0};
+    sig_s[0] = 0x01;
+    memcpy(sig_s + 32, JUBJUB_S_LE, 32);   /* S = s: equation holds, S not < s */
+    sapling_verification_ctx_init(&vctx);
+    PROVER_CHECK("final_check refuses non-canonical S = s",
+                 !sapling_final_check(&vctx, 0, sig_s, sighash));
+
+    uint8_t sig_ok[64] = {0};
+    sig_ok[0] = 0x01;
+    sapling_verification_ctx_init(&vctx);
+    PROVER_CHECK("final_check refuses value_balance = INT64_MIN (checked_abs)",
+                 !sapling_final_check(&vctx, INT64_MIN, sig_ok, sighash));
+    return failures;
+}
+
 /* Output proof built through the public proving API, checked by the independent
  * consensus verifier and against a tampered copy. Runs only when the prover is
  * ready. Returns the failure count. */
@@ -1089,6 +1214,8 @@ static int prover_output_roundtrip_checks(void)
         PROVER_CHECK("non-canonical cm (cm + r) is rejected",
                      !sapling_check_output(
                          &vctx, cv, cm_plus_r, epk, proof));
+        failures += output_rust_accept_set_checks(cv, cm, cm_plus_r, epk,
+                                                  proof);
     }
     if (pctx)
         zclassic_sapling_proving_ctx_free(pctx);
@@ -1296,6 +1423,7 @@ int test_groth16_selfverify(void)
     int failures = 0;
 
     failures += fr_canonical_encoding_checks();
+    failures += redjubjub_rust_accept_set_checks();
     failures += output_circuit_shape_gate();
     failures += groth16_spend_reference_oracle();
     failures += spend_circuit_shape_gate();

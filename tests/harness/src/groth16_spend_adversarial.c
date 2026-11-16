@@ -74,6 +74,7 @@
 #include "sapling/sapling_prover.h"
 #include "sapling/sapling_circuit.h"
 #include "sapling/groth16_prover.h"
+#include "sapling/bls12_381.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "sapling/params_init.h"
 #include "sapling/fr.h"
@@ -209,6 +210,73 @@ static bool bundle_accepts(const struct adv_spend_bundle *b)
     sapling_verification_ctx_init(&vctx);
     return sapling_check_spend(&vctx, b->cv, b->anchor, b->nullifier, b->rk,
                                b->zkproof, b->spend_auth_sig, b->sighash);
+}
+
+static bool bundle_prepares(const struct adv_spend_bundle *b,
+                            struct groth16_proof *gp, uint64_t (*pub)[4])
+{
+    struct sapling_verification_ctx vctx;
+    sapling_verification_ctx_init(&vctx);
+    return sapling_spend_prepare(&vctx, b->cv, b->anchor, b->nullifier, b->rk,
+                                 b->zkproof, b->spend_auth_sig, b->sighash,
+                                 gp, pub);
+}
+
+/* zclassicd's librustzcash check_spend accept set on a real spend, through the
+ * single-proof path and the prepare step the batch paths use: anchor must be
+ * a canonical Fr (Fr::from_repr), and bellman Proof::read refuses A, B or C
+ * at infinity. Groth16 alone cannot tell anchor from anchor + r. */
+static int spend_rust_accept_set_checks(const struct adv_spend_bundle *good)
+{
+    static const uint8_t R_LE[32] = {
+        0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+        0xfe, 0x5b, 0xfe, 0xff, 0x02, 0xa4, 0xbd, 0x53,
+        0x05, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+        0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
+    };
+    int failures = 0;
+    struct groth16_proof gp;
+    uint64_t pub[7][4];
+    struct adv_spend_bundle b = *good;
+    unsigned carry = 0;
+    for (size_t i = 0; i < 32; i++) {
+        unsigned s = (unsigned)good->anchor[i] + R_LE[i] + carry;
+        b.anchor[i] = (uint8_t)s;
+        carry = s >> 8;
+    }
+    bool prepared = bundle_prepares(good, &gp, pub);
+    ADV_CHECK("(5) spend prepare accepts the real spend (control)", prepared);
+    if (prepared) {
+        for (int i = 0; i < 4; i++) {
+            pub[4][i] = 0;
+            for (int j = 0; j < 8; j++)
+                pub[4][i] |= (uint64_t)b.anchor[i * 8 + j] << (8 * j);
+        }
+        ADV_CHECK("(5) Groth16 alone accepts anchor + r (the gate is the "
+                  "anchor check)",
+                  sapling_spend_groth16_one(&gp, (const uint64_t (*)[4])pub));
+    }
+    ADV_CHECK("(5) non-canonical anchor (anchor + r) REJECTED",
+              !bundle_accepts(&b));
+    ADV_CHECK("(5) spend prepare (batch path) refuses anchor + r",
+              !bundle_prepares(&b, &gp, pub));
+
+    static const struct { size_t off, len; const char *chk, *prep; } slots[3] = {
+        { 0, 48, "(3) proof A at infinity REJECTED",
+          "(3) spend prepare (batch path) refuses proof A at infinity" },
+        { 48, 96, "(3) proof B at infinity REJECTED",
+          "(3) spend prepare (batch path) refuses proof B at infinity" },
+        { 144, 48, "(3) proof C at infinity REJECTED",
+          "(3) spend prepare (batch path) refuses proof C at infinity" },
+    };
+    for (size_t s = 0; s < 3; s++) {
+        struct adv_spend_bundle inf = *good;
+        memset(inf.zkproof + slots[s].off, 0, slots[s].len);
+        inf.zkproof[slots[s].off] = 0xc0;
+        ADV_CHECK(slots[s].chk, !bundle_accepts(&inf));
+        ADV_CHECK(slots[s].prep, !bundle_prepares(&inf, &gp, pub));
+    }
+    return failures;
 }
 
 /* ── (7) Truncated / bit-flipped proving key: typed refusal, no crash ──── */
@@ -492,6 +560,7 @@ int groth16_spend_adversarial_gate(void)
         ADV_CHECK("(5) negative control: wrong anchor REJECTED",
                  !bundle_accepts(&b));
     }
+    failures += spend_rust_accept_set_checks(&good);
     {
         struct adv_spend_bundle b = good;
         b.nullifier[0] ^= 0x01;

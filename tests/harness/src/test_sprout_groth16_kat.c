@@ -317,6 +317,32 @@ static int kat_check_tampered_inputs(struct js_description *js, uint8_t *h_sig)
                   js->macs[1].data, bad_nullifier,
                   js->nullifiers[1].data, js->commitments[0].data,
                   js->commitments[1].data, js->vpub_old, js->vpub_new));
+
+    /* librustzcash sprout_verify -> bellman Proof::read: A, B or C at
+     * infinity is refused before the pairing, as is an infinity flag with
+     * stray bits (pairing ec.rs into_affine_unchecked). */
+    static const struct { size_t off, len; const char *name; } slots[3] = {
+        { 0, 48, "real proof with A at infinity rejects" },
+        { 48, 96, "real proof with B at infinity rejects" },
+        { 144, 48, "real proof with C at infinity rejects" },
+    };
+    struct groth16_proof gp;
+    for (size_t s = 0; s < 3; s++) {
+        memcpy(bad_proof, js->proof, sizeof(bad_proof));
+        memset(bad_proof + slots[s].off, 0, slots[s].len);
+        bad_proof[slots[s].off] = 0xc0;
+        KAT_CHECK(slots[s].name,
+                  !groth16_proof_read(&gp, bad_proof) &&
+                  !sprout_verify_groth16(
+                      bad_proof, js->anchor.data, h_sig, js->macs[0].data,
+                      js->macs[1].data, js->nullifiers[0].data,
+                      js->nullifiers[1].data, js->commitments[0].data,
+                      js->commitments[1].data, js->vpub_old, js->vpub_new));
+    }
+    memcpy(bad_proof, js->proof, sizeof(bad_proof));
+    bad_proof[144] = (uint8_t)(0xc0 | (bad_proof[144] & 0x3f));
+    KAT_CHECK("real proof with a dirty infinity flag on C rejects at decode",
+              !groth16_proof_read(&gp, bad_proof));
     return failures;
 }
 
