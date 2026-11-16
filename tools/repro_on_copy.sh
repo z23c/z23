@@ -763,7 +763,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
             fi
             if [ -n "$EXPECT_CLIMB_PAST" ] &&
                [ "$t" -gt "$EXPECT_CLIMB_PAST" ] 2>/dev/null; then
-                if [ "$REFOLD_REQUESTED" != "1" ] ||
+                if { [ "$REFOLD_REQUESTED" != "1" ] &&
+                     [ -z "$INSTALL_BUNDLE_RESOLVED" ]; } ||
                    [ "$seen_at_or_below_climb" = "1" ]; then
                     climbed_past=1
                     echo "[repro] H* CLIMBED to $t (> $EXPECT_CLIMB_PAST)"
@@ -854,10 +855,11 @@ elif [ "$REFOLD_REQUESTED" = "1" ] && [ "$refold_snapshot_loaded" != "1" ]; then
 elif [ -n "$EXPECT_CLIMB_PAST" ] && [ "$climbed_past" != "1" ]; then
     echo "  VERDICT:   FAIL — H* did not climb strictly past $EXPECT_CLIMB_PAST"
     echo "             within ${DEADLINE}s (first=$first_tip max=$max_tip)."
-    if [ "$REFOLD_REQUESTED" = "1" ] &&
+    if { [ "$REFOLD_REQUESTED" = "1" ] ||
+         [ -n "$INSTALL_BUNDLE_RESOLVED" ]; } &&
        [ "$seen_at_or_below_climb" != "1" ]; then
-        echo "             Refold proofs require observing H* at/below the gate first;"
-        echo "             starting above it is not accepted as a climb proof."
+        echo "             Refold and bundle-install proofs require observing H*"
+        echo "             at/below the gate first; starting above is not a climb."
     fi
     RC=1
     VERDICT_WORD=FAIL

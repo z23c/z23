@@ -1142,6 +1142,123 @@ static int test_acp_refold_proof_realpath_failure(void)
     return failures;
 }
 
+/* Exercise the real climb gate with a fake node/RPC pair. The placeholder
+ * bundle is never opened: this tests copy-proof accounting, not chain validity. */
+static bool acp_bundle_climb_result(const char *path, bool expect_pass)
+{
+    char output[4096];
+    bool parsed = acp_read_file(path, output, sizeof(output));
+    struct json_value result;
+    json_init(&result);
+    parsed = parsed && json_read(&result, output, strlen(output));
+    int64_t first = expect_pass ? 3056758 : 3056759;
+    bool observed = parsed && result.type == JSON_OBJ &&
+        strcmp(json_get_str(json_get(&result, "schema")),
+               "zcl.copy_prove_result.v1") == 0 &&
+        strcmp(json_get_str(json_get(&result, "state")), "done") == 0 &&
+        strcmp(json_get_str(json_get(&result, "verdict")),
+               expect_pass ? "PASS" : "FAIL") == 0 &&
+        json_get_int(json_get(&result, "exit_code")) == (expect_pass ? 0 : 1) &&
+        json_get_bool(json_get(&result, "climbed_past")) == expect_pass &&
+        json_get_int(json_get(&result, "h_star_before")) == first &&
+        json_get_int(json_get(&result, "h_star_after")) == 3056759 &&
+        json_get_int(json_get(&result, "max_tip")) == 3056759;
+    json_free(&result);
+    return observed;
+}
+
+static int acp_bundle_climb_case(const char *label, const char *heights,
+                                 bool expect_pass)
+{
+    int failures = 0;
+    char work[512], home[600], src[600], bin[600];
+    char bundle[700], node[700], rpc[700], state[700], stopped[700];
+    char result_path[700], log_path[700], command[8192];
+    test_make_tmpdir(work, sizeof(work), "acp_bundle_climb", label);
+    snprintf(home, sizeof(home), "%s/home", work);
+    snprintf(src, sizeof(src), "%s/src", work);
+    snprintf(bin, sizeof(bin), "%s/bin", work);
+    snprintf(bundle, sizeof(bundle), "%s/fixture.sqlite", src);
+    snprintf(node, sizeof(node), "%s/node", bin);
+    snprintf(rpc, sizeof(rpc), "%s/rpc", bin);
+    snprintf(state, sizeof(state), "%s/calls", work);
+    snprintf(stopped, sizeof(stopped), "%s/stopped", work);
+    snprintf(result_path, sizeof(result_path), "%s/result.json", work);
+    snprintf(log_path, sizeof(log_path), "%s/repro.log", work);
+    bool setup = platform_directory_create(home, 0700) == 0 &&
+        platform_directory_create(src, 0700) == 0 &&
+        platform_directory_create(bin, 0700) == 0 &&
+        acp_write_file(bundle, "synthetic fixture; never opened\n");
+    const char *node_body =
+        "#!/bin/sh\n"
+        "datadir=\ninstall=0\n"
+        "for arg in \"$@\"; do\n"
+        "  case \"$arg\" in\n"
+        "    -datadir=*) datadir=${arg#-datadir=} ;;\n"
+        "    -install-consensus-bundle=*) install=1 ;;\n"
+        "  esac\n"
+        "done\n"
+        "if [ \"$install\" = 1 ]; then\n"
+        "  printf 'INSTALLED: -install-consensus-bundle: synthetic fixture\\n'\n"
+        "  exit 0\n"
+        "fi\n"
+        "[ -n \"$datadir\" ] || exit 2\n"
+        ": > \"$datadir/.cookie\"\n"
+        "child=\n"
+        "trap '[ -z \"$child\" ] || kill \"$child\" 2>/dev/null; "
+        "[ -z \"$child\" ] || wait \"$child\" 2>/dev/null; "
+        ": > \"$ZCL_ACP_STOPPED\"; exit 0' TERM INT\n"
+        "while :; do sleep 30 & child=$!; wait \"$child\"; done\n";
+    const char *rpc_body =
+        "#!/bin/sh\n"
+        "[ \"$1\" = getblockcount ] || exit 2\n"
+        "[ -n \"$ZCL_ACP_STATE\" ] || exit 2\n"
+        "[ -n \"$ZCL_ACP_HEIGHTS\" ] || exit 2\n"
+        "calls=0\n"
+        "if [ -f \"$ZCL_ACP_STATE\" ]; then\n"
+        "  IFS= read -r calls < \"$ZCL_ACP_STATE\" || exit 2\n"
+        "fi\n"
+        "index=0\nheight=-1\n"
+        "for candidate in $ZCL_ACP_HEIGHTS; do\n"
+        "  height=$candidate\n"
+        "  if [ \"$index\" -eq \"$calls\" ]; then break; fi\n"
+        "  index=$((index + 1))\n"
+        "done\n"
+        "[ \"$height\" -ge 0 ] || exit 2\n"
+        "printf '%s\\n' \"$((calls + 1))\" > \"$ZCL_ACP_STATE\"\n"
+        "printf '{\"result\":%s}\\n' \"$height\"\n";
+    setup = setup && acp_write_file(node, node_body) &&
+        acp_write_file(rpc, rpc_body) && chmod(node, 0755) == 0 &&
+        chmod(rpc, 0755) == 0;
+    int written = snprintf(command, sizeof(command),
+        "env HOME='%s' ZCL_NODE_BIN='%s' ZCL_RPC_BIN='%s' "
+        "ZCL_ACP_STATE='%s' ZCL_ACP_HEIGHTS='%s' ZCL_ACP_STOPPED='%s' "
+        "tools/repro_on_copy.sh acp-climb --src='%s' --full --deadline=%d "
+        "--expect-climb-past=3056758 --install-consensus-bundle='%s' "
+        "--json >'%s' 2>'%s'",
+        home, node, rpc, state, heights, stopped, src, expect_pass ? 15 : 4,
+        bundle, result_path, log_path);
+    setup = setup && written > 0 && (size_t)written < sizeof(command);
+    int rc = setup ? system(command) : -1;
+    char check[160];
+    snprintf(check, sizeof(check), "%s bundle-copy verdict and exit", label);
+    ACP_CHECK(check, setup && ((rc == 0) == expect_pass));
+    snprintf(check, sizeof(check), "%s bundle-copy exact climb evidence", label);
+    ACP_CHECK(check, acp_bundle_climb_result(result_path, expect_pass));
+    snprintf(check, sizeof(check), "%s fake node was stopped and reaped", label);
+    ACP_CHECK(check, access(stopped, F_OK) == 0);
+    test_rm_rf_recursive(work);
+    return failures;
+}
+
+static int test_acp_bundle_install_requires_climb(void)
+{
+    printf("[test_agent_copy_prove] bundle-install climb requires a low observation\n");
+    int failures = acp_bundle_climb_case("high-only", "3056759", false);
+    failures += acp_bundle_climb_case("low-then-high", "3056758 3056759", true);
+    return failures;
+}
+
 int test_agent_copy_prove(void)
 {
     int failures = 0;
@@ -1150,6 +1267,7 @@ int test_agent_copy_prove(void)
     failures += test_acp_script_no_run_json();
     failures += test_acp_destination_space_admission();
     failures += test_acp_launchd_like_live();
+    failures += test_acp_bundle_install_requires_climb();
     failures += test_acp_rpc_refusals();
     failures += test_acp_rpc_launch_and_poll();
     failures += test_acp_argv_capacity();
