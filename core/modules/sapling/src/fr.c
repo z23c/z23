@@ -49,11 +49,15 @@ static const uint64_t FR_R2[4] = {
     0x05d314967254398fULL, 0x0748d9d99f59ff11ULL
 };
 
-/* Jubjub curve parameter d = -(10240/10241) mod p, in Montgomery form */
-static const uint64_t JUB_D[4] = {
+/* Jubjub curve parameter d = -(10240/10241) mod p, in Montgomery form.
+ * A compile-time constant: this used to be copied into a mutable global behind
+ * a plain `static bool` flag on first use, which was a data race for
+ * concurrent first callers. Nothing is computed at runtime, so nothing needs
+ * publishing. */
+static const struct fr FR_JUB_D = {{
     0x2a522455b974f6b0ULL, 0xfc6cc9ef0d9acab3ULL,
     0x7a08fb94c27628d1ULL, 0x57f8f6a8fe0e262eULL
-};
+}};
 
 
 /* --- Fr field arithmetic --- */
@@ -214,17 +218,6 @@ void fr_to_bytes(uint8_t s[32], const struct fr *a)
  * a = -1
  * Extended coordinates: (X : Y : Z : T) where x = X/Z, y = Y/Z, T = XY/Z */
 
-static struct fr FR_JUB_D; /* d in Montgomery form */
-static bool jub_params_init = false;
-
-static void ensure_jub_params(void)
-{
-    if (jub_params_init) return;
-    memcpy(FR_JUB_D.d, JUB_D, 32);
-    /* JUB_D is already in Montgomery form (precomputed) */
-    jub_params_init = true;
-}
-
 void jub_identity(struct jub_point *p)
 {
     fr_zero(&p->x);
@@ -249,8 +242,6 @@ void jub_neg(struct jub_point *r, const struct jub_point *p)
 /* Complete addition for twisted Edwards with a=-1 */
 void jub_add(struct jub_point *r, const struct jub_point *a, const struct jub_point *b)
 {
-    ensure_jub_params();
-
     struct fr A, B, C, D, E, F, G, H;
 
     /* A = a.X * b.X */
@@ -544,8 +535,6 @@ void jub_to_bytes(uint8_t out[32], const struct jub_point *p)
 
 bool jub_from_bytes(struct jub_point *p, const uint8_t in[32])
 {
-    ensure_jub_params();
-
     uint8_t y_bytes[32];
     memcpy(y_bytes, in, 32);
     bool x_sign = (y_bytes[31] >> 7) & 1;

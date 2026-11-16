@@ -1262,3 +1262,7 @@ later lane flips it HARD.
 - 2026-11-16T18:46:30Z — REASON: Groth16 proof decode parity with zclassicd librustzcash 06da3b9: refuse compressed infinity with stray bits, coordinates equal to q, and proof A/B/C at infinity (owner instruction 2026-11-16: bug-for-bug compatible with zclassicd)
   old ROOT: 2274d1ef67628abd126611debbd793d2671d8233fb5e7eb91fd598539555c2c1
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-16T20:17:01Z — REASON: sapling lazy-init data races: Jubjub d constant made a compile-time const (fr.c); CPUID flags via pthread_once and Fr/Fp/Fq dispatch pointers as relaxed atomics with an idempotent initialiser (fr_avx512.c, bn254_accel.c). No value or selected implementation changes. Owner-authorized in-session: YOU HAVE TO DO THE Z23 CORE UNSEAL YOU HAVE AUTHORITY
+  old ROOT: abbe83b84b32ac1b490f2f508b286e059a2c7592c84be69a6b4a4f2a7b035f4a
+  by: owner unseal ritual (make core-unseal)
