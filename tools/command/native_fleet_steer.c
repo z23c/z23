@@ -4585,6 +4585,25 @@ static bool fmc_brief_tasks_emit(struct fmc_brief_lists *lists,
     return false;
 }
 
+static void fmc_brief_finalize(const struct zcl_command_request *req,
+                               struct zcl_command_reply *reply,
+                               const struct fmc_mail_view *mv)
+{
+    long long base_tasks_dropped = json_get_int(json_get(&reply->data, "tasks_dropped"));
+    size_t budget = mv && mv->forward ? fmc_brief_data_budget(req) : FMC_REPLY_SOFT_BUDGET - 512u;
+    if (!fmc_fit_budget(&reply->data, budget, mv && mv->forward)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "brief budget metadata could not be copied", "json");
+        return;
+    }
+    if (mv && mv->forward && !fmc_brief_cursor_finish(reply, mv, budget, base_tasks_dropped)) return;
+    if (!fmc_brief_tasks_update(&reply->data, base_tasks_dropped)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count projection is incomplete", "json");
+        return;
+    }
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
 static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_command_reply *reply,
                             struct fmc_brief_lists *l,
                             struct fmc_roster *ro,
@@ -4622,19 +4641,7 @@ static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_co
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count could not be copied", "json");
         return;
     }
-    long long base_tasks_dropped = json_get_int(json_get(&reply->data, "tasks_dropped"));
-    size_t budget = mv && mv->forward ? fmc_brief_data_budget(req) : FMC_REPLY_SOFT_BUDGET - 512u;
-    if (!fmc_fit_budget(&reply->data, budget, mv && mv->forward)) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "brief budget metadata could not be copied", "json");
-        return;
-    }
-    if (mv && mv->forward && !fmc_brief_cursor_finish(reply, mv, budget, base_tasks_dropped)) return;
-    if (!fmc_brief_tasks_update(&reply->data, base_tasks_dropped)) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count projection is incomplete", "json");
-        return;
-    }
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = 0;
+    fmc_brief_finalize(req, reply, mv);
 }
 
 /* A receiver that has run on this box (the lock file exists) and is not
