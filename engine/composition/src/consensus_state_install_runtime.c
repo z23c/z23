@@ -1244,16 +1244,24 @@ static void icb_install_release(struct consensus_state_artifact_evidence *artifa
         (void)close(dir_fd);
 }
 
-/* A fresh legacy binding (no observation, no committed cutover to retry) on a
- * node the pending boot could not finish: retriable, before anything durable. */
-static bool icb_strand_refused(const struct icb_wallet_guard *guard, const char *bundle_path,
-                               struct consensus_state_install_runtime_result *out)
+/* A fresh legacy binding refused BEFORE anything durable: the applied-node
+ * strand, or (card W) the 28-header rung window its own pending boot rehydrates
+ * not durably stored and verified yet — each with its distinct retriable code
+ * (checkpoint_rung_install_strand.h has both contracts). Returns the refusal
+ * code, 0 for main's path. */
+static int icb_retriable_refusal_code(const struct icb_wallet_guard *guard,
+                                      const char *bundle_path,
+                                      struct consensus_state_install_runtime_result *out)
 {
-    if (!guard || guard->expected || guard->observation ||
-        !checkpoint_rung_install_strand_refuses(bundle_path, out->reason, sizeof(out->reason)))
-        return false;
+    bool fresh = guard && !guard->expected && !guard->observation;
+    bool strand = fresh && checkpoint_rung_install_strand_refuses(bundle_path, out->reason,
+                                                                  sizeof(out->reason));
+    bool window = fresh && !strand &&
+        checkpoint_rung_window_ready_refuses(bundle_path, out->reason, sizeof(out->reason));
+    if (!strand && !window)
+        return 0;
     out->retriable_headers_not_ready = true;
-    return true;
+    return strand ? CHECKPOINT_RUNG_INSTALL_STRAND_CODE : CHECKPOINT_RUNG_WINDOW_NOT_READY_CODE;
 }
 /* Shared install core; terminal preparation requires a caller that exits. */
 static struct zcl_result icb_install_from_bundle(
@@ -1269,8 +1277,9 @@ static struct zcl_result icb_install_from_bundle(
         snprintf(out->reason, sizeof(out->reason), "empty bundle path or datadir");
         return ZCL_ERR(-1, "empty bundle path or datadir");
     }
-    if (icb_strand_refused(guard, bundle_path, out))
-        return ZCL_ERR(CHECKPOINT_RUNG_INSTALL_STRAND_CODE, "%s", out->reason);
+    int refusal_code = icb_retriable_refusal_code(guard, bundle_path, out);
+    if (refusal_code)
+        return ZCL_ERR(refusal_code, "%s", out->reason);
     struct zcl_result rc = ZCL_OK;
     int dir_fd = -1;
     struct consensus_state_artifact_evidence *artifact = NULL;

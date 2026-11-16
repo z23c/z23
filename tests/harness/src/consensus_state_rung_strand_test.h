@@ -11,11 +11,14 @@
 #define CONSENSUS_STATE_RUNG_STRAND_TEST_H
 
 #include "conditions/checkpoint_rung_install_strand.h"
+#include "config/consensus_state_snapshot_install.h" /* install authority stamp */
 #include "event/event.h"
 #include "framework/condition.h"
 #include "jobs/block_header_emit.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/stage_helpers.h"                      /* stage_log_row_count */
 #include "platform/time_compat.h"
+#include "storage/coins_kv.h"                        /* coins_kv_get_applied_height */
 #include "storage/event_log_payloads.h"
 #include "jobs/tip_finalize_stage.h"
 #include "storage/block_index_projection.h"
@@ -877,6 +880,160 @@ static int crs_case_install_fresh(void)
     return failures;
 }
 
+/* ── Card W: the boot-time rung-window precondition ────────────────────────── */
+
+/* Observation bits for the window-precondition install boot. */
+enum {
+    CRWS_INSTALLED = 1 << 0, CRWS_FAILED = 1 << 1, CRWS_PENDING = 1 << 2,
+    CRWS_CUTOVER = 1 << 3, CRWS_ARMED_AFTER = 1 << 4,
+    /* The seeded-restart withhold gate's "nothing applied" shape held through
+     * the boot: empty tip_finalize_log, no coins frontier key, no install
+     * authority stamp (genesis_seed_nothing_applied). */
+    CRWS_NOTHING_APPLIED = 1 << 5,
+};
+
+/* The withhold gate's nothing-applied shape, read as boot_genesis_seed.c reads
+ * it. The fresh fixture's reducer stage never ran, so tip_finalize_log does not
+ * exist yet and stage_log_row_count returns -1 there: the claim this case pins
+ * is that the boot wrote no rows into it (count <= 0; a present non-empty table
+ * fails). A coins-frontier or stamp read error drops the bit, like the gate. */
+static bool crsw_nothing_applied(void)
+{
+    sqlite3 *pdb = progress_store_db();
+    int32_t applied = -1;
+    bool coins = true, stamped = true;
+    struct consensus_state_install_stamp stamp;
+    bool coins_ok = pdb && coins_kv_get_applied_height(pdb, &applied, &coins) && !coins;
+    bool stamp_ok = pdb &&
+        consensus_state_install_read_authority_stamp(pdb, &stamp, &stamped) && !stamped;
+    if (pdb && (!coins_ok || !stamp_ok))
+        printf("consensus_state_install_runtime: window install withhold shape "
+               "coins_ok=%d stamped=%d\n", coins_ok, stamped);
+    return pdb && stage_log_row_count(pdb, "boot", "tip_finalize_log") <= 0 &&
+           coins_ok && stamp_ok;
+}
+
+/* The install boot as app_init runs it (the (1c) request armed by
+ * crs_install_startup, then the passive autodetect), observed for the window
+ * precondition, then the arm check of the next session. */
+static int crsw_install_observe(const struct crw_fixture *f, const char *bundle)
+{
+    struct node_db *node; struct wallet_sqlite *ws; struct main_state *main;
+    char failed[600];
+    snprintf(failed, sizeof(failed), "%s.failed", bundle);
+    if (!crs_install_startup(f, bundle, &node, &ws, &main))
+        return 1;
+    struct wallet_cutover_binding binding;
+    int seen = boot_maybe_auto_install_consensus_bundle(node, main, f->dir, false)
+        ? CRWS_INSTALLED : 0;
+    seen |= access(failed, F_OK) == 0 ? CRWS_FAILED : 0;
+    seen |= boot_install_bundle_pending(f->dir) ? CRWS_PENDING : 0;
+    seen |= wallet_sqlite_cutover_read(ws, &binding) != WALLET_CUTOVER_ABSENT
+        ? CRWS_CUTOVER : 0;
+    seen |= crsw_nothing_applied() ? CRWS_NOTHING_APPLIED : 0;
+    bool strand = false;
+    (void)crs_remedy(&strand);
+    seen |= boot_install_bundle_pending(f->dir) ? CRWS_ARMED_AFTER : 0;
+    return seen;
+}
+
+static int crsw_install_child(const struct crw_fixture *f)
+{
+    char bundle[400];
+    snprintf(bundle, sizeof(bundle), "%s/bundles/consensus-state-bundle-%d.sqlite",
+             f->dir, FSI_RUNG_H);
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0)
+        _exit(crsw_install_observe(f, bundle));
+    int status = 0;
+    bool done = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status);
+    int seen = done ? WEXITSTATUS(status) : 255;
+    printf("consensus_state_install_runtime: window install observations=0x%02x\n", seen);
+    return seen;
+}
+
+/* The fourth way into the dead datadir, at the install boot. One boot per
+ * fresh fixture (the state a boot leaves — .failed, request attempts — must
+ * not leak into the next observation). A fresh node (H* = 0, where the
+ * strand's guard cannot fire) whose staged bundle sits at a compiled rung with
+ * the 27 rows below the rung NOT stored must not install: retriable refusal,
+ * no .failed, the consumed request cleared, no cutover row, nothing applied.
+ * The rows stored and verified take main's path exactly as
+ * crs_case_install_fresh observes it; one stored row that fails the window
+ * verifier refuses again. */
+static int crs_case_install_window(void)
+{
+    int failures = 0;
+    struct crw_fixture f;
+    CSIR_CHECK("window install: rows-absent fixture opens (H*=0, solution stored)",
+               crw_open(&f, "strand-window-install", -1));
+    int seen = f.ready ? crsw_install_child(&f) : 255;
+    CSIR_CHECK("window install: rows absent at H*=0 -> no install, no .failed, request "
+               "cleared, no cutover, nothing applied",
+               seen == CRWS_NOTHING_APPLIED);
+    crs_close(&f);
+    CSIR_CHECK("window install: rows-stored fixture opens", crw_open(&f, "strand-window-ok", -1));
+    CSIR_CHECK("window install: rows stored and verified -> main's path (.failed on the "
+               "fixture bundle, request kept, install armed, nothing applied)",
+               f.ready && crs_stage_window(&f) &&
+               (seen = crsw_install_child(&f)) ==
+                   (CRWS_FAILED | CRWS_PENDING | CRWS_ARMED_AFTER | CRWS_NOTHING_APPLIED));
+    crs_close(&f);
+    CSIR_CHECK("window install: verify-fail fixture opens",
+               crw_open(&f, "strand-window-bad", -1));
+    g_crw_bad = f.is.hash[5];
+    flysync_island_test_set_frozen_verifier(crw_reject_one);
+    CSIR_CHECK("window install: one stored row failing the window verifier -> refused "
+               "(no .failed, request cleared, nothing applied)",
+               f.ready && crs_stage_window(&f) &&
+               (seen = crsw_install_child(&f)) == CRWS_NOTHING_APPLIED);
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    crs_close(&f);
+    return failures;
+}
+
+/* The window precondition's predicate at the unit level: the rows absent
+ * refuse with the first height named and NO H* read (W6); the route scope
+ * keeps -flysync, island and stored-island datadirs on main's path (W5); the
+ * rows stored and verified do not refuse; one stored row failing the window
+ * verifier refuses again. */
+static int crs_case_window_predicate(void)
+{
+    int failures = 0;
+    struct crw_fixture f;
+    char reason[512], bundle[400], want[32];
+    int reads = -1, reads_after = -1;
+    CSIR_CHECK("window predicate: fixture opens (H*=0, rows below the rung absent)",
+               crw_open(&f, "strand-window-pred", -1));
+    snprintf(bundle, sizeof(bundle), "%s/bundles/consensus-state-bundle-%d.sqlite",
+             f.dir, FSI_RUNG_H);
+    snprintf(want, sizeof(want), "h=%d", (int)(FSI_RUNG_H - 1));
+    reads = checkpoint_rung_install_strand_test_hstar_reads();
+    bool refused = f.ready &&
+        checkpoint_rung_window_ready_refuses(bundle, reason, sizeof(reason));
+    reads_after = checkpoint_rung_install_strand_test_hstar_reads();
+    CSIR_CHECK("window predicate: rows absent -> refuse naming the first missing "
+               "height, no H* read",
+               refused && strstr(reason, want) != NULL && reads_after == reads);
+    flysync_island_set_requested(true);
+    CSIR_CHECK("window predicate: -flysync requested keeps main's path",
+               checkpoint_rung_window_ready_refuses(bundle, reason, sizeof(reason)) ==
+                   false);
+    flysync_island_set_requested(false);
+    CSIR_CHECK("window predicate: the 28 rows stored and verified -> no refusal",
+               crs_stage_window(&f) &&
+               checkpoint_rung_window_ready_refuses(bundle, reason, sizeof(reason)) ==
+                   false);
+    g_crw_bad = f.is.hash[5];
+    flysync_island_test_set_frozen_verifier(crw_reject_one);
+    CSIR_CHECK("window predicate: one stored row failing the window verifier -> refuse",
+               checkpoint_rung_window_ready_refuses(bundle, reason, sizeof(reason)));
+    flysync_island_test_set_frozen_verifier(fsi_accept_all);
+    crs_close(&f);
+    return failures;
+}
+
 static int case_rung_install_strand(void)
 {
     return crs_case_core() + crs_case_arm_skips() + crs_case_arm_fresh() +
@@ -884,7 +1041,8 @@ static int case_rung_install_strand(void)
            crs_case_engine_quiet() + crs_case_episode_ends() + crs_case_witness_pending() +
            crs_case_witness_armed() + crs_case_progress_backstop() + crs_case_tail_cache() +
            crs_case_tail_frontier() + crs_case_tail_block_status() + crs_case_scan_measure() +
-           crs_case_install_refuses() + crs_case_install_fresh();
+           crs_case_install_refuses() + crs_case_install_fresh() + crs_case_install_window() +
+           crs_case_window_predicate();
 }
 
 #endif /* CONSENSUS_STATE_RUNG_STRAND_TEST_H */

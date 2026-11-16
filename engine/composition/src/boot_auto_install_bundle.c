@@ -888,11 +888,15 @@ bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
                       "install-on-next-boot request for %s landed durably but a "
                       "post-install step failed (%s) — retrying under the bounded "
                       "budget on the next boot", req_path, rr.reason);
-        } else if (rr.retriable_headers_not_ready && r.code == CHECKPOINT_RUNG_INSTALL_STRAND_CODE) {
+        } else if (rr.retriable_headers_not_ready &&
+                   (r.code == CHECKPOINT_RUNG_INSTALL_STRAND_CODE ||
+                    r.code == CHECKPOINT_RUNG_WINDOW_NOT_READY_CODE)) {
             /* Nothing was written. Clear the request (its consumed attempt goes
-             * with it) so the node neither respawns nor retries; the arm-time
-             * check holds while the strand does, and a later H* >= rung arms
-             * a fresh request on main's path. */
+             * with it) so the node neither respawns nor retries. The arm-time
+             * check holds while the strand does, and the window precondition
+             * holds until the 28-header rung window is durably stored and
+             * verified (the install-ready condition fetches and stores it,
+             * then arms a fresh request on main's path). */
             boot_install_bundle_clear(datadir);
         } else if (rr.retriable_headers_not_ready) {
             /* Defensive: the retry condition only arms this request once the

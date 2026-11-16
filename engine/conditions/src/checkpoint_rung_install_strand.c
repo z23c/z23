@@ -14,11 +14,13 @@
 #include "jobs/reducer_frontier.h"                    /* reducer_frontier_compute_hstar */
 #include "jobs/tip_finalize_stage.h"                  /* tip_finalize_stage_block_hash_at */
 #include "platform/time_compat.h"                     /* test-only hold measurement */
+#include "primitives/block.h"                         /* struct block_header (window rows) */
 #include "services/island_anchor.h"
 #include "storage/block_index_projection.h"
 #include "storage/event_log.h"
 #include "storage/event_log_payloads.h"               /* ev_block_header_parse */
 #include "storage/event_log_singleton.h"
+#include "storage/node_db_runtime.h"                  /* the pending restore's header loader */
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 
@@ -365,6 +367,99 @@ bool checkpoint_rung_install_strand_refuses(const char *bundle_path, char *reaso
     if (!atomic_exchange(&g_install_logged, true))
         LOG_WARN(CRS_SUBSYS, "install of %s refused (retriable, not marked .failed): %s",
                  bundle_path, reason && cap ? reason : "strand");
+    return true;
+}
+
+/* The 28 window headers top first, each row by the exact (height, hash) its
+ * child names — the SAME loader and walk order the pending restore's
+ * bpi_load_window uses (boot_pending_island.c). *first_h names the first row
+ * that is not loadable right now; the loader's trylock fall-through under
+ * reducer contention reads as not-loadable, so no caller may call it missing. */
+static bool crsw_load_window(int32_t rung_h, const uint8_t rung_hash[32],
+                             struct block_header *w, int32_t *first_h)
+{
+    struct uint256 expect;
+    memcpy(expect.data, rung_hash, 32);
+    for (int i = 0; i < ISLAND_ANCHOR_WINDOW; i++) {
+        *first_h = rung_h - i;
+        if (!node_db_runtime_load_header_by_hash_height(rung_h - i, expect.data, &w[i]))
+            return false; // raw-return-ok:not-loadable-now-is-the-refusal-input-itself
+        expect = w[i].hashPrevBlock;
+    }
+    return true;
+}
+
+/* Bottom rung of the staged window, for the reason lines. */
+static int32_t crsw_window_floor(int32_t rung_h)
+{
+    return rung_h - (ISLAND_ANCHOR_WINDOW - 1);
+}
+
+/* The reason lines for the two refusal shapes: a row not loadable right now
+ * (never "missing": the loader's trylock fall-through under reducer contention
+ * reads the same), and a stored window that does not verify yet. */
+static void crsw_reason_not_loadable(char *reason, size_t cap, const char *bundle_path,
+                                     int32_t first_h, int32_t rung_h)
+{
+    snprintf(reason, cap, "boot install of %s deferred (retriable, nothing "
+             "written): staged rung window header h=%d is not loadable right "
+             "now; the 28-header window h=%d..%d this install's next boot "
+             "depends on must be stored and verified first, so the bundle is "
+             "kept uninstalled and the node boots on normally while the "
+             "install-ready condition fetches it", bundle_path, (int)first_h,
+             (int)crsw_window_floor(rung_h), (int)rung_h);
+}
+
+static void crsw_reason_not_verified(char *reason, size_t cap, const char *bundle_path,
+                                     int32_t rung_h, const char *why)
+{
+    snprintf(reason, cap, "boot install of %s deferred (retriable, nothing "
+             "written): the stored rung window h=%d..%d does not verify yet "
+             "(%s); nothing was written, the bundle is kept uninstalled, and "
+             "the node boots on normally", bundle_path,
+             (int)crsw_window_floor(rung_h), (int)rung_h, why);
+}
+
+/* The reason for one read outcome (a row not loadable right now, or a stored
+ * window that does not verify yet). */
+static void crsw_refuse_reason(char *reason, size_t cap, const char *bundle_path,
+                               bool loaded, int32_t first_h, int32_t rung_h, const char *why)
+{
+    if (!reason || !cap)
+        return;
+    if (loaded)
+        crsw_reason_not_verified(reason, cap, bundle_path, rung_h, why);
+    else
+        crsw_reason_not_loadable(reason, cap, bundle_path, first_h, rung_h);
+}
+
+/* The window precondition (card W, checkpoint_rung_window_ready_refuses in the
+ * header): read-only, retriable, refuses only the legacy window route when the
+ * 28 rows the install's own pending boot rehydrates are not durably stored and
+ * verified. The window walks in a caller-frame buffer (about 42 KiB on the
+ * shallow boot stack): this module stays allocation-free and reaches no
+ * capability, and there is no OOM branch to take. No H* read anywhere on this
+ * path (W6). */
+bool checkpoint_rung_window_ready_refuses(const char *bundle_path, char *reason, size_t cap)
+{
+    int32_t rung_h = 0, first_h = 0;
+    uint8_t rung_hash[32];
+    if (!bundle_path || !boot_staged_bundle_wait_target(bundle_path, &rung_h, rung_hash) ||
+        !checkpoint_rung_at(rung_h, rung_hash) || !checkpoint_rung_window_route() ||
+        crs_row(rung_hash) == CHECKPOINT_RUNG_ROW_PROJECTED)
+        return false;
+    struct block_header w[ISLAND_ANCHOR_WINDOW];
+    memset(w, 0, sizeof(w));
+    char why[192] = "the window is not 28 headers at the rung";
+    bool loaded = crsw_load_window(rung_h, rung_hash, w, &first_h);
+    struct island_anchor anchor;
+    bool verified = loaded && flysync_island_verify_window(w, ISLAND_ANCHOR_WINDOW,
+                                                           rung_h, &anchor, why, sizeof(why));
+    if (verified)
+        return false;
+    crsw_refuse_reason(reason, cap, bundle_path, loaded, first_h, rung_h, why);
+    LOG_WARN(CRS_SUBSYS, "install of %s refused (retriable, not marked .failed): %s",
+             bundle_path, reason && cap ? reason : "window not ready");
     return true;
 }
 

@@ -27,6 +27,14 @@ struct rom_state_rung;
  * no install step returns this code. */
 #define CHECKPOINT_RUNG_INSTALL_STRAND_CODE (-230)
 
+/* Distinct install refusal code: the boot-time rung-window precondition (the
+ * strand's sibling). Same retriable shape — no .failed, the consumed
+ * install-on-next-boot request is cleared, no attempt budget burnt — but its
+ * own code so an operator (and the request-consumed clear) can tell "would
+ * strand an applied node" from "the rung window the next boot needs is not
+ * durably stored and verified yet". No install step returns it either. */
+#define CHECKPOINT_RUNG_WINDOW_NOT_READY_CODE (-231)
+
 /* The pending boot's own view of the rung row. */
 enum checkpoint_rung_row {
     CHECKPOINT_RUNG_ROW_PROJECTED,   /* the projection holds a row for the rung hash (at the
@@ -103,6 +111,25 @@ void checkpoint_rung_install_strand_note_episode_end(const struct checkpoint_run
  * staged wait target the arm site used. True means refuse (retriable); `reason`
  * then names it. Logs once per process. */
 bool checkpoint_rung_install_strand_refuses(const char *bundle_path, char *reason, size_t cap);
+
+/* Install site, the window precondition (card W): a fresh legacy binding at a
+ * compiled rung above the keystone on the legacy window route installs only
+ * when the 28-header rung window its own pending boot rehydrates from is
+ * ALREADY durable and verifies — the exact rows the pending restore loads with
+ * node_db_runtime_load_header_by_hash_height and proves with
+ * flysync_island_verify_window (the runtime arm gate makes them durable before
+ * it arms; the boot path alone had no window precondition, which let a boot
+ * that stopped seconds after the checkpoint solution persisted commit a wallet
+ * cutover its next boot could never complete). Reads the staged wait target,
+ * the route, the projection row and the durable rows; reads NO H* (the
+ * predicate is route + row availability, not frontier height). True means
+ * refuse (retriable, CHECKPOINT_RUNG_WINDOW_NOT_READY_CODE); `reason` then
+ * names the first height that is not loadable right now — never "missing":
+ * the loader's trylock fall-through under contention reads as absent, and the
+ * runtime condition stores the window and arms the install as today. Writes
+ * nothing. */
+bool checkpoint_rung_window_ready_refuses(const char *bundle_path, char *reason,
+                                          size_t cap);
 
 #ifdef ZCL_TESTING
 void checkpoint_rung_install_strand_test_reset(void);
