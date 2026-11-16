@@ -216,7 +216,7 @@ static inline void get_block_at(sqlite3 *db, int64_t height,
 
     char sql[256];
     snprintf(sql, sizeof(sql),
-        "SELECT hex(hash), time FROM blocks WHERE height = %" PRId64, height);
+        "SELECT hex(hash), time FROM blocks WHERE height = %" PRId64 " AND status >= 3", height);
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
         if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
@@ -237,7 +237,7 @@ static inline int64_t get_block_time(sqlite3 *db, int64_t height)
 {
     char sql[128];
     snprintf(sql, sizeof(sql),
-        "SELECT time FROM blocks WHERE height = %" PRId64, height);
+        "SELECT time FROM blocks WHERE height = %" PRId64 " AND status >= 3", height);
     int64_t t = fq_i64(db, sql);
     if (t <= 0 && height > 0)
         t = estimate_block_time(height);

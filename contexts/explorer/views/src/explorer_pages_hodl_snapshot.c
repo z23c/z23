@@ -83,7 +83,8 @@ void hodl_view_tip_hash(sqlite3 *db, int64_t tip, char out[HODL_VIEW_CACHE_HASH_
     out[0] = '\0';
     if (db && tip >= 0) {
         snprintf(sql, sizeof(sql),
-                 "SELECT hex(hash) FROM blocks WHERE height=%" PRId64, tip);
+                 "SELECT hex(hash) FROM blocks WHERE height=%" PRId64
+                 " AND status >= 3", tip);
         (void)sql_query_text(db, sql, out, HODL_VIEW_CACHE_HASH_MAX);
     }
     if (out[0] == '\0')

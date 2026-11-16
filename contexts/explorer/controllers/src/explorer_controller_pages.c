@@ -259,13 +259,20 @@ static bool factoids_block_hash_at(const char *datadir, int64_t height,
         return false;
 
     snprintf(sql, sizeof(sql),
-             "SELECT hex(hash) FROM blocks WHERE height=%" PRId64, height);
+             "SELECT hex(hash) FROM blocks WHERE height=%" PRId64
+             " AND status >= 3", height);
     bool ok = sql_query_text(db, sql, out, FACTOIDS_CACHE_HASH_MAX);
     sqlite3_close(db);
     return ok && out[0] != '\0';
 }
 
 #ifdef ZCL_TESTING
+bool factoids_block_hash_at_for_test(const char *datadir, int64_t height,
+                                     char out[FACTOIDS_CACHE_HASH_MAX])
+{
+    return factoids_block_hash_at(datadir, height, out);
+}
+
 static void factoids_cache_clear(void)
 {
     pthread_mutex_lock(&g_factoids_cache_lock);

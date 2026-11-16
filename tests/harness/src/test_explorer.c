@@ -26,6 +26,7 @@
 #include "views/explorer_dashboard_view.h"
 #include "views/explorer_block_view.h"
 #include "views/site_css.h"
+#include "views/explorer_pages_hodl_internal.h"
 #include "views/explorer_pages_loading_view.h"
 #include "views/explorer_pages_view.h"
 #include "views/explorer_stats_internal.h"
@@ -743,7 +744,7 @@ static int ex_case_09(void)
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
         ok = ok && sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER);"
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3);"
             "CREATE TABLE utxos(height INTEGER, value INTEGER);"
             "CREATE TABLE hodl_history(height INTEGER, time INTEGER,"
             "total_zat INTEGER,"
@@ -807,7 +808,7 @@ static int ex_case_10(void)
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
         ok = ok && sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER);"
+            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER, status INTEGER DEFAULT 3);"
             "CREATE TABLE utxos(height INTEGER, value INTEGER);"
             "CREATE TABLE hodl_history(height INTEGER, time INTEGER,"
             "total_zat INTEGER,"
@@ -901,7 +902,7 @@ static int ex_case_11(void)
 
         bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
         ok = ok && sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER);"
+            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER, status INTEGER DEFAULT 3);"
             "CREATE TABLE utxos(height INTEGER, value INTEGER);"
             "CREATE TABLE hodl_history(height INTEGER, time INTEGER,"
             "total_zat INTEGER,"
@@ -954,7 +955,7 @@ static void ex_case_12_seed(struct ex_hodl_cache_fx *fx)
 {
         fx->ok = sqlite3_open(fx->dbpath, &fx->db) == SQLITE_OK;
         fx->ok = fx->ok && sqlite3_exec(fx->db,
-            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER);"
+            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER, status INTEGER DEFAULT 3);"
             "CREATE TABLE utxos(height INTEGER, value INTEGER);"
             "CREATE TABLE hodl_history(height INTEGER, time INTEGER,"
             "total_zat INTEGER,"
@@ -1431,7 +1432,7 @@ static int ex_case_22(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER)",
+            "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER, status INTEGER DEFAULT 3)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
             "INSERT INTO blocks(height,hash,time) VALUES"
@@ -1467,7 +1468,7 @@ static int ex_case_23(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, hash TEXT, time INTEGER, "
+            "CREATE TABLE blocks(height INTEGER, hash TEXT, time INTEGER, status INTEGER DEFAULT 3, "
             "num_tx INTEGER, sapling_value INTEGER, sprout_value INTEGER)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
@@ -1519,7 +1520,7 @@ static int ex_case_24(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER, bits INTEGER, "
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3, bits INTEGER, "
             "chain_work BLOB)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
@@ -1563,7 +1564,7 @@ static int ex_case_25(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER, num_tx INTEGER)",
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3, num_tx INTEGER)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
             "INSERT INTO blocks(height,time,num_tx) VALUES"
@@ -1639,7 +1640,7 @@ static int ex_case_26(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER)",
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
             "INSERT INTO blocks(height,time) VALUES"
@@ -1713,7 +1714,7 @@ static int ex_case_27(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, hash TEXT, time INTEGER, num_tx INTEGER)",
+            "CREATE TABLE blocks(height INTEGER, hash TEXT, time INTEGER, status INTEGER DEFAULT 3, num_tx INTEGER)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
             "CREATE TABLE transactions(block_hash TEXT, block_height INTEGER, "
@@ -1782,7 +1783,7 @@ static int ex_case_28(void)
         sqlite3 *db = NULL;
         bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
         ok = ok && sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER);"
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3);"
             "CREATE TABLE transactions(block_height INTEGER, is_coinbase INTEGER);"
             "CREATE TABLE tx_inputs(block_height INTEGER);"
             "CREATE TABLE tx_outputs(value INTEGER, script_type INTEGER, "
@@ -1878,7 +1879,7 @@ static int ex_case_29(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER, num_tx INTEGER, "
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3, num_tx INTEGER, "
             "bits INTEGER, sapling_value INTEGER)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
@@ -1987,7 +1988,7 @@ static int ex_case_30(void)
         sqlite3 *db = NULL;
         sqlite3_open(":memory:", &db);
         sqlite3_exec(db,
-            "CREATE TABLE blocks(height INTEGER, time INTEGER)",
+            "CREATE TABLE blocks(height INTEGER, time INTEGER, status INTEGER DEFAULT 3)",
             NULL, NULL, NULL);
         sqlite3_exec(db,
             "CREATE TABLE addresses(address_hash BLOB, balance INTEGER, "
@@ -2300,6 +2301,51 @@ static int ex_case_40(void)
     return failures;
 }
 
+static int ex_case_41(void)
+{
+    extern bool factoids_block_hash_at_for_test(const char *, int64_t, char[80]);
+    int failures = 0;
+    printf("explorer: block lookups select canonical rows among forks... ");
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "explorer", "fork_reads");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK;
+    ok = ok && sqlite3_exec(db,
+        "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER, status INTEGER);"
+        "CREATE UNIQUE INDEX idx_blocks_height ON blocks(height) WHERE status>=3;"
+        "INSERT INTO blocks(height,hash,time,status) VALUES"
+        "(1,x'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',1,2),"
+        "(1,x'1111111111111111111111111111111111111111111111111111111111111111',1478403979,13),"
+        "(2,x'2222222222222222222222222222222222222222222222222222222222222222',1,2);",
+        NULL, NULL, NULL) == SQLITE_OK;
+    const char canonical[] =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    char hash[80] = {0}, tip_hash[80] = {0}, cache_hash[80] = {0};
+    int64_t block_time = 0;
+    if (ok) {
+        get_block_at(db, 1, hash, sizeof(hash), &block_time);
+        hodl_view_tip_hash(db, 1, tip_hash);
+        ok = factoids_block_hash_at_for_test(dir, 1, cache_hash);
+    }
+    ok = ok && strcmp(hash, canonical) == 0 && block_time == 1478403979 &&
+         get_block_time(db, 1) == 1478403979 &&
+         strcmp(tip_hash, canonical) == 0 && strcmp(cache_hash, canonical) == 0;
+    if (ok) {
+        get_block_at(db, 2, hash, sizeof(hash), &block_time);
+        hodl_view_tip_hash(db, 2, tip_hash);
+        ok = !factoids_block_hash_at_for_test(dir, 2, cache_hash);
+    }
+    ok = ok && !hash[0] && block_time == estimate_block_time(2) &&
+         get_block_time(db, 2) == estimate_block_time(2) &&
+         strcmp(tip_hash, "height:2:nohash") == 0;
+    if (db) sqlite3_close(db);
+    ok &= fixture_rm_ok(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 static int ex_quarantine_during_read(void *context)
 {
     struct utxo_mirror_sync_service *svc = context;
@@ -2479,6 +2525,7 @@ int test_explorer(void)
     failures += ex_case_38();
     failures += ex_case_39();
     failures += ex_case_40();
+    failures += ex_case_41();
     /* Reap the one-shot evidence-maintenance run and the registry-owned hodl
      * refresh worker so no finished thread outlives the group unjoined. */
     chain_evidence_maintain_quiesce();
