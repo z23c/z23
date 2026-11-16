@@ -79,7 +79,7 @@ static void gather_chain_records(sqlite3 *db, struct stats_ctx *c)
         if (sqlite3_prepare_v2(db,
                 "SELECT b2.height, b2.time - b1.time as gap "
                 "FROM blocks b1 JOIN blocks b2 ON b2.height = b1.height + 1 "
-                "WHERE b1.time > 0 AND b2.time > b1.time "
+                "WHERE b1.status >= 3 AND b2.status >= 3 AND b1.time > 0 AND b2.time > b1.time "
                 "ORDER BY gap ASC LIMIT 1",
                 -1, &s, NULL) == SQLITE_OK && s) {
             if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
@@ -92,7 +92,7 @@ static void gather_chain_records(sqlite3 *db, struct stats_ctx *c)
         if (sqlite3_prepare_v2(db,
                 "SELECT b2.height, b2.time - b1.time as gap "
                 "FROM blocks b1 JOIN blocks b2 ON b2.height = b1.height + 1 "
-                "WHERE b1.time > 0 AND b2.time > b1.time "
+                "WHERE b1.status >= 3 AND b2.status >= 3 AND b1.time > 0 AND b2.time > b1.time "
                 "ORDER BY gap DESC LIMIT 1",
                 -1, &s, NULL) == SQLITE_OK && s) {
             if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {

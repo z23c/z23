@@ -19,7 +19,7 @@ static size_t blocktimes_emit_pre_buttercup_card(char *r, size_t max, size_t off
         "MAX(b.time - a.time), "
         "count(*) "
         "FROM blocks a JOIN blocks b ON b.height = a.height + 1 "
-        "WHERE a.time > 0 AND b.time > 0 AND b.height < %d",
+        "WHERE a.status >= 3 AND b.status >= 3 AND a.time > 0 AND b.time > 0 AND b.height < %d",
         BUTTERCUP_ACTIVATION_HEIGHT);
     sqlite3_stmt *s = NULL;
     const char *sql = pre_bc_sql;
@@ -61,7 +61,7 @@ static size_t blocktimes_emit_post_buttercup_card(char *r, size_t max, size_t of
         "MAX(b.time - a.time), "
         "count(*) "
         "FROM blocks a JOIN blocks b ON b.height = a.height + 1 "
-        "WHERE a.time > 0 AND b.time > 0 AND a.height >= %d",
+        "WHERE a.status >= 3 AND b.status >= 3 AND a.time > 0 AND b.time > 0 AND a.height >= %d",
         BUTTERCUP_ACTIVATION_HEIGHT);
     if (chain_height > BUTTERCUP_ACTIVATION_HEIGHT) {
         sqlite3_stmt *s = NULL;
@@ -98,16 +98,16 @@ static size_t blocktimes_emit_post_buttercup_card(char *r, size_t max, size_t of
 static size_t blocktimes_emit_interval_records_card(char *r, size_t max, size_t off,
                                                     sqlite3 *db)
 {
-    int64_t tip = fq_i64(db, "SELECT COALESCE(MAX(height),0) FROM blocks");
+    int64_t tip = fq_i64(db, "SELECT COALESCE(MAX(height),0) FROM blocks WHERE status >= 3");
     int64_t tip_time = fq_i64(db,
-        "SELECT time FROM blocks WHERE height = (SELECT MAX(height) FROM blocks)");
+        "SELECT time FROM blocks WHERE height = (SELECT MAX(height) FROM blocks WHERE status >= 3) AND status >= 3");
     double avg_all = tip > 0
         ? (double)(tip_time - ZCL_EXPLORER_GENESIS_TIME) / (double)tip : 0.0;
     double avg_recent = 0.0;
     {
         char sql[160];
         snprintf(sql, sizeof(sql),
-            "SELECT time FROM blocks WHERE height = %" PRId64,
+            "SELECT time FROM blocks WHERE height = %" PRId64 " AND status >= 3",
             tip > 10000 ? tip - 10000 : (int64_t)0);
         int64_t t10k = fq_i64(db, sql);
         int64_t span = tip > 10000 ? 10000 : tip;
@@ -125,7 +125,7 @@ static size_t blocktimes_emit_interval_records_card(char *r, size_t max, size_t 
             "count(*) FROM ("
             "SELECT b.time - a.time AS d FROM blocks a "
             "JOIN blocks b ON b.height = a.height + 1 "
-            "WHERE a.time > 0 AND b.time > 0)";
+            "WHERE a.status >= 3 AND b.status >= 3 AND a.time > 0 AND b.time > 0)";
         if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
             if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
                 fast10 = sqlite3_column_int64(s, 0);

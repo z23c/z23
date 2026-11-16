@@ -1669,6 +1669,21 @@ static int ex_case_26(void)
 
         bool ok = n > 0 &&
                   ex_case_26_text(out, pre_expected, post_expected, records_expected);
+        if (ok) {
+            ok = sqlite3_exec(db,
+                "DELETE FROM blocks WHERE height=707002;"
+                "INSERT INTO blocks(height,time,status) VALUES"
+                "(2,999999999,2),(696002,1,2),(707001,999999999,2),"
+                "(707002,1,2),(707002,1600003706,3),(800000,1,2);",
+                NULL, NULL, NULL) == SQLITE_OK;
+        }
+        if (ok) {
+            uint8_t forked[8192];
+            size_t nf = factoids_emit_section_13_blocktimes(
+                forked, sizeof(forked) - 1, 0, db, 707002);
+            forked[nf < sizeof(forked) ? nf : sizeof(forked) - 1] = '\0';
+            ok = nf == n && memcmp(out, forked, n + 1) == 0;
+        }
         sqlite3_close(db);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
@@ -1775,6 +1790,20 @@ static int ex_case_27(void)
     return failures;
 }
 
+static bool ex_case_28_fork_invariant(sqlite3 *db, const struct stats_ctx *baseline)
+{
+    if (!db || !baseline) return false;
+    if (sqlite3_exec(db,
+            "INSERT INTO blocks(height,time,status) VALUES(2,1300,2);",
+            NULL, NULL, NULL) != SQLITE_OK) return false;
+    struct stats_ctx forked = {0};
+    gather_deep_chain_data(db, &forked);
+    return forked.fastest_block_h == baseline->fastest_block_h &&
+           forked.fastest_block_gap == baseline->fastest_block_gap &&
+           forked.slowest_block_h == baseline->slowest_block_h &&
+           forked.slowest_block_gap == baseline->slowest_block_gap;
+}
+
 static int ex_case_28(void)
 {
     int failures = 0;
@@ -1796,7 +1825,7 @@ static int ex_case_28(void)
             "CREATE TABLE op_returns(block_height INTEGER);"
             "CREATE TABLE zslp_tokens(genesis_height INTEGER);"
             "CREATE TABLE view_integrity(height INTEGER, sha3_hash BLOB);"
-            "INSERT INTO blocks(height,time) VALUES(1,1000),(2,1150);"
+            "INSERT INTO blocks(height,time) VALUES(1,1000),(2,1150),(3,1400);"
             "INSERT INTO transactions(block_height,is_coinbase) VALUES"
             "(1,1),(2,0);"
             "INSERT INTO tx_inputs(block_height) VALUES(2),(2);"
@@ -1824,7 +1853,10 @@ static int ex_case_28(void)
              c.p2pkh_outputs == 2 &&
              c.p2sh_outputs == 1 &&
              c.max_output_value == 300000000 &&
-             c.total_value_moved == 700000000;
+             c.total_value_moved == 700000000 &&
+             c.fastest_block_h == 2 && c.fastest_block_gap == 150 &&
+             c.slowest_block_h == 3 && c.slowest_block_gap == 250;
+        ok &= ex_case_28_fork_invariant(db, &c);
 
         if (db)
             sqlite3_close(db);
