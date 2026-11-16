@@ -24,6 +24,10 @@
 
 #include "services/wallet_backup_service.h"
 
+#include "platform/file_metadata.h"
+#include "platform/time_compat.h"
+#include "util/log_macros.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
@@ -134,8 +138,94 @@ int wallet_backup_list(const char *backup_dir,
     return written_paths;
 }
 
+/* ── Stale temporary sweep ──────────────────────────────────────
+ *
+ * wallet_backup_run.c writes and verifies each snapshot as
+ * "<final name>.tmp" and renames it only once verified, so a crash leaves at
+ * most such a file. Listing never shows it (its suffix is neither of the two
+ * accepted above); this sweep reclaims it.
+ *
+ * Bound: only a name that is EXACTLY wallet_backup_<digits>_<6 digits>
+ * .sqlite.tmp, only a regular file (a symlink is refused by the metadata
+ * read), and only when its modification time is at least one hour in the
+ * past (a future time counts as fresh). Two nodes may share one backup
+ * directory, so the file may belong to ANOTHER process's live run: a live
+ * run rewrites its file throughout the copy and needs seconds, not an hour,
+ * from close to rename. Even a run stalled past the bound fails closed — its
+ * reopen, verify or rename finds the name gone — so the sweep can cost a
+ * retry, never a listed partial file or a verified backup. One hour is the
+ * shortest bound with that margin; a temporary file holds plaintext wallet
+ * rows, so it should not outlive that margin by much.
+ *
+ * The temporary file's own SQLite rollback journal (".sqlite.tmp-journal",
+ * exactly that name) joins the sweep under the same bound: a crash mid-copy
+ * leaves it beside the temporary file, and it too may hold plaintext rows.
+ * It belongs to a file that is never published unverified, so removing it
+ * can at most cost that run a retry. Nothing else joins the sweep. */
+
+#define WBS_TEMP_SUFFIX ".tmp"
+#define WBS_TEMP_JOURNAL_SUFFIX ".tmp-journal"
+#define WBS_TEMP_STALE_SECONDS 3600
+
+static bool wbs_is_temp_name(const char *name)
+{
+    size_t pl = strlen(WALLET_BACKUP_FILENAME_PREFIX);
+    if (strncmp(name, WALLET_BACKUP_FILENAME_PREFIX, pl) != 0)
+        return false;
+    const char *p = name + pl;
+    const char *ts = p;
+    while (*p >= '0' && *p <= '9')
+        p++;
+    if (p == ts || p - ts > 19 || *p != '_')
+        return false;
+    p++;
+    for (int i = 0; i < 6; i++, p++)
+        if (*p < '0' || *p > '9')
+            return false;
+    return strcmp(p, WALLET_BACKUP_FILENAME_SUFFIX WBS_TEMP_SUFFIX) == 0 ||
+           strcmp(p, WALLET_BACKUP_FILENAME_SUFFIX WBS_TEMP_JOURNAL_SUFFIX) ==
+               0;
+}
+
+static void wbs_sweep_one(const char *dir, const char *name, int64_t now_s)
+{
+    char full[1024];
+    int n = snprintf(full, sizeof(full), "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof(full))
+        return;
+    struct platform_file_metadata md;
+    if (platform_file_metadata_read(full, &md) != PLATFORM_FILE_METADATA_OK)
+        return;
+    if (md.modified_seconds > now_s ||
+        now_s - md.modified_seconds < WBS_TEMP_STALE_SECONDS)
+        return;
+    if (unlink(full) == 0)
+        LOG_INFO("wallet_backup", "removed stale temporary backup %s "
+                 "(%lld s old)", full,
+                 (long long)(now_s - md.modified_seconds));
+    else if (errno != ENOENT)
+        LOG_WARN("wallet_backup", "cannot remove stale temporary backup %s: "
+                 "%s", full, strerror(errno));
+}
+
+static void wbs_sweep_stale_temps(const char *dir)
+{
+    if (!dir) return;
+    DIR *d = opendir(dir);
+    if (!d) return;
+    int64_t now_s = platform_time_wall_unix();
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL)
+        if (wbs_is_temp_name(e->d_name))
+            wbs_sweep_one(dir, e->d_name, now_s);
+    closedir(d);
+}
+
+/* Rotation's rule is unchanged: keep the newest `max_versions` backups. The
+ * sweep above runs first and is not counted in the return. */
 int wallet_backup_rotate(const char *backup_dir, int max_versions)
 {
+    wbs_sweep_stale_temps(backup_dir);
     if (max_versions <= 0) return 0;
     struct wbs_file files[256];
     int n = wbs_scan_backup_dir(backup_dir, files, 256);

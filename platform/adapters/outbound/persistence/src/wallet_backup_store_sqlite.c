@@ -20,6 +20,7 @@
 #include "util/ar_step_readonly.h"
 
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -228,16 +229,46 @@ static bool wbs_source_has_table(sqlite3 *dst, const char *table)
     return src_has;
 }
 
+#ifdef ZCL_TESTING
+/* Fixture-only seam, declared by the wallet-backup fixture: runs after each
+ * copied table with the count so far and the file being written. Returning
+ * false injects a copy failure at that point; returning true lets the test
+ * observe the directory exactly as a crash at that moment would leave it. */
+static bool (*_Atomic g_wbs_store_test_copy_hook)(size_t copied,
+                                                 const char *dst_path);
+void wallet_backup_store_sqlite_test_set_copy_hook(
+    bool (*fn)(size_t copied, const char *dst_path))
+{
+    atomic_store(&g_wbs_store_test_copy_hook, fn);
+}
+#endif
+
+/* True when the fixture seam (ZCL_TESTING only) asks for a copy failure
+ * after `copied` tables; always false in a production build. */
+static bool wbs_test_copy_refused(size_t copied, const char *dst_path)
+{
+#ifdef ZCL_TESTING
+    bool (*fn)(size_t, const char *) =
+        atomic_load(&g_wbs_store_test_copy_hook);
+    return fn && !fn(copied, dst_path);
+#else
+    (void)copied;
+    (void)dst_path;
+    return false;
+#endif
+}
+
 /* For each wallet table, run CREATE TABLE t AS SELECT ... The AS SELECT
  * form copies both schema and rows in one statement. A table the source
  * does not have is not copied — but it IS recorded in `stat` (and hence
  * in the manifest), because "the source never had it" and "the copy
  * dropped it" are the two things a restoring user most needs told apart. */
-static bool wbs_copy_tables(sqlite3 *dst, const char *const *tables,
-                            size_t n_tables,
+static bool wbs_copy_tables(sqlite3 *dst, const char *dst_path,
+                            const char *const *tables, size_t n_tables,
                             struct wallet_backup_table_stat *stat,
                             char *out_copy_err, size_t copy_err_cap)
 {
+    size_t copied = 0;
     for (size_t i = 0; i < n_tables; i++) {
         const char *table = tables[i];
         snprintf(stat[i].table, sizeof(stat[i].table), "%s",
@@ -257,6 +288,12 @@ static bool wbs_copy_tables(sqlite3 *dst, const char *const *tables,
             return false;
         }
         stat[i].rows = wbs_store_src_count(dst, table);
+        if (wbs_test_copy_refused(++copied, dst_path)) {
+            wbs_err(out_copy_err, copy_err_cap,
+                    "copy %s: injected test failure after %zu tables",
+                    table, copied);
+            return false;
+        }
     }
     return true;
 }
@@ -324,8 +361,8 @@ static enum wallet_backup_store_status wbs_store_write_snapshot(
 
     struct wallet_backup_table_stat stat[WBS_MAX_TABLES];
     memset(stat, 0, sizeof(stat));
-    bool all_ok = wbs_copy_tables(dst, tables, n_tables, stat, out_copy_err,
-                                  copy_err_cap);
+    bool all_ok = wbs_copy_tables(dst, dst_path, tables, n_tables, stat,
+                                  out_copy_err, copy_err_cap);
 
     /* Manifest last, so it describes what actually landed. Only written on a
      * complete copy — a half-copied file must not carry a manifest that

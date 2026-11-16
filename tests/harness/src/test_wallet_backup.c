@@ -2346,6 +2346,8 @@ static int t_trigger_during_run_survives(void)
 }
 #endif
 
+#include "wallet_backup_atomic_test.h"
+
 int test_wallet_backup(void)
 {
     printf("\n=== wallet_backup tests ===\n");
@@ -2384,6 +2386,7 @@ int test_wallet_backup(void)
     failures += t_overlapping_stop_password_lifetime();
     failures += t_stop_waiter_completion_sequence();
     failures += t_rotation_counts_enc();
+    failures += t_wallet_backup_atomic();
 #if !defined(_WIN32)
     failures += t_failed_trigger_retries();
     failures += t_trigger_during_run_survives();

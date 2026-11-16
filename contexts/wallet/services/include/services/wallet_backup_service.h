@@ -38,9 +38,17 @@
  *     skipped in silence. Every backup file also carries a
  *     `wallet_backup_manifest` table (one row per wallet table: was it
  *     in the source, how many rows landed) so a short copy stays
- *     detectable long after the run. Mismatch →
- *     EV_WALLET_BACKUP_FAILED and the file is left on disk for
- *     forensic inspection.
+ *     detectable long after the run. The copy is written and verified
+ *     under a temporary name (the final name plus `.tmp`) that list,
+ *     rotate and restore never treat as a backup. A failure at open,
+ *     attach, copy, manifest, close, flush, verify (mismatch) or rename
+ *     → EV_WALLET_BACKUP_FAILED naming the step (a mismatch names the
+ *     table and both row counts) and the temporary file is REMOVED; a
+ *     partial plaintext copy is never left behind. Only a verified file
+ *     is renamed to its final name. If the directory flush after that
+ *     rename fails, the run fails but the complete, verified file is
+ *     kept. A crash leaves at most a temporary file (and its rollback
+ *     journal), which rotation sweeps once it is an hour old.
  *   - Rotation: if the count of `wallet_backup_*.sqlite` files in
  *     `backup_dir` exceeds `max_versions`, the oldest is deleted.
  *     The newest is always kept.
