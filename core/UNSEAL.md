@@ -1246,3 +1246,15 @@ later lane flips it HARD.
 - 2026-11-15T22:21:00Z — REASON: rom_fetch: bound each chunk exchange with a transfer deadline so a dripping seed fails over; network client hardening, no consensus predicate change
   old ROOT: 8f98184ff122c56ac2649b862a41cce01c1918d913cf20ed31cfccfad2c8b868
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-16T08:51:42Z — REASON: checkpoint_header_fetch: fetch the rung header window with one bounded getheaders span and complete it from one ascending headers message; hash-pinned capture unchanged, request side only, no consensus predicate change
+  old ROOT: 1f2fd6bb733428a8e159b322faff4314c2a54dbf075e60c7ffc8bd3f823e9571
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-16T09:24:46Z — REASON: checkpoint_header_fetch: split the window send tick out of checkpoint_header_fetch_maybe_send to keep it under the complexity cap, same change as the entry above; request side only, no consensus predicate change
+  old ROOT: 25db2626200836fa38f55bb065687e65f888db574d180e27adf4de1f3064de58
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-16T09:52:45Z — REASON: checkpoint_header_fetch: read the window span range under the capture lock and clear span state in the test reset; correction to the two entries above: the change also buffers candidate headers in a fixed 32-slot ring on the receive side; hash-pinned capture unchanged, no consensus predicate change
+  old ROOT: 32ce0e7ca628ef4f1af449f85a11eee02aa1d09e42cdc2c34963741ee8131ea3
+  by: owner unseal ritual (make core-unseal)

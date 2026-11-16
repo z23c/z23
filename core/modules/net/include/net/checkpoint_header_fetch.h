@@ -90,9 +90,16 @@ void checkpoint_header_fetch_maybe_send(struct msg_processor *mp,
  * until `depth` headers are held. Each step is the same hash-pin capture as
  * single mode; the request is a getheaders with an EMPTY locator and
  * hash_stop = target, which zclassicd answers with exactly that header
- * (main.cpp "If locator is null, return the hashStop block"). No header is
- * validated here; the app layer re-verifies every link, PoW and Equihash. While
- * a window is armed, the single-mode has_capture()/take() report nothing. */
+ * (main.cpp "If locator is null, return the hashStop block"). When the local
+ * index holds the row `depth` below the top on the top's own chain, the first
+ * request is instead ONE bounded getheaders span (locator = that row, hash_stop
+ * = the top), at most once per arm and never while outgoing header sync is
+ * held; its ascending reply waits in a fixed ring of WINDOW_MAX headers until
+ * the top-down capture reaches each one by hash, so one headers message can
+ * complete the window. The row is only a hint to the peer; a short or wrong
+ * reply leaves the walk to continue from where the capture stands. No header
+ * is validated here; the app layer re-verifies every link, PoW and Equihash.
+ * While a window is armed, the single-mode has_capture()/take() report nothing. */
 #define CHECKPOINT_HEADER_FETCH_WINDOW_MAX 32
 
 /* Arm a backward walk. depth in [1, CHECKPOINT_HEADER_FETCH_WINDOW_MAX]; other
@@ -111,6 +118,9 @@ int checkpoint_header_fetch_take_window(struct block_header *out, int cap,
 
 #ifdef ZCL_TESTING
 void checkpoint_header_fetch_test_reset(void);
+/* Window span state: whether the span went out for this arm, and how many
+ * candidate headers wait in the ring. */
+void checkpoint_header_fetch_test_span_state(bool *tried, int *ring_held);
 #endif
 
 #endif /* ZCL_NET_CHECKPOINT_HEADER_FETCH_H */

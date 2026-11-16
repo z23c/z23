@@ -303,6 +303,8 @@ static int fsi_case_hold_and_services(void)
     return failures;
 }
 
+#include "checkpoint_header_window_span_test.h"
+
 /* ── Island window: verify, seed, exemptions ─────────────────────────────── */
 
 
@@ -2012,6 +2014,7 @@ int test_flysync_island(void)
     failures += fsi_case_window_walk();
     failures += fsi_case_window_args_and_single_mode();
     failures += fsi_case_hold_and_services();
+    failures += chws_cases();
     failures += fsi_case_verify_window();
     failures += fsi_case_terminal_prepare();
 #if !defined(_WIN32) && defined(ZCL_TESTING)

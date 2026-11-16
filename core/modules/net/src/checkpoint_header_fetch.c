@@ -53,6 +53,17 @@ static int32_t         g_window_top_height = -1;  /* guarded by g_lock */
 #define CHF_ASKED_MAX 8
 static int64_t         g_asked[CHF_ASKED_MAX];    /* guarded by g_lock */
 static int             g_asked_n = 0;             /* guarded by g_lock */
+/* Window span: at most one bounded getheaders span per armed window asks for
+ * the whole window at once. Its reply arrives in ascending height order while
+ * the capture is pinned top-down, so after the span went out the headers that
+ * do not match yet wait in this ring; each capture drains from it the header
+ * that hashes to the new target. The ring only holds candidates: a header
+ * leaves it only by hashing to the pinned target, exactly as on the wire. */
+static bool            g_window_span_tried = false;               /* g_lock */
+static struct block_header g_ring[CHECKPOINT_HEADER_FETCH_WINDOW_MAX]; /* g_lock */
+static struct uint256  g_ring_hash[CHECKPOINT_HEADER_FETCH_WINDOW_MAX]; /* g_lock */
+static bool            g_ring_used[CHECKPOINT_HEADER_FETCH_WINDOW_MAX]; /* g_lock */
+static int             g_ring_next = 0;                            /* g_lock */
 
 void checkpoint_header_fetch_arm(int32_t height, const struct uint256 *hash)
 {
@@ -121,36 +132,88 @@ bool checkpoint_header_fetch_take(struct block_header *out, int32_t *out_height)
     return have;
 }
 
+/* Under g_lock: drop every waiting span candidate. */
+static void chf_ring_clear_locked(void)
+{
+    memset(g_ring_used, 0, sizeof(g_ring_used));
+    g_ring_next = 0;
+}
+
+/* Under g_lock: keep a not-yet-matching header, overwriting the oldest, so a
+ * hostile batch of any length costs the fixed ring and nothing more. */
+static void chf_ring_put_locked(const struct block_header *hdr,
+                                const struct uint256 *hash)
+{
+    g_ring[g_ring_next] = *hdr;
+    g_ring_hash[g_ring_next] = *hash;
+    g_ring_used[g_ring_next] = true;
+    g_ring_next = (g_ring_next + 1) % CHECKPOINT_HEADER_FETCH_WINDOW_MAX;
+}
+
+/* Under g_lock: the ring slot whose hash is the pinned target, or -1. */
+static int chf_ring_find_target_locked(void)
+{
+    for (int i = 0; i < CHECKPOINT_HEADER_FETCH_WINDOW_MAX; i++)
+        if (g_ring_used[i] && memcmp(g_ring_hash[i].data, g_target_hash, 32) == 0)
+            return i;
+    return -1;
+}
+
+/* Under g_lock: store a header whose hash IS the pinned target and re-target
+ * its hashPrevBlock one height lower. True once `depth` headers are held. */
+static bool chf_window_capture_locked(const struct block_header *hdr)
+{
+    int have = atomic_load(&g_window_have);
+    int depth = atomic_load(&g_window_depth);
+    g_window[have] = *hdr;
+    have++;
+    atomic_store(&g_window_have, have);
+    atomic_fetch_add(&g_captures, 1);
+    g_asked_n = 0;
+    if (have >= depth) {
+        atomic_store(&g_captured, true);
+        return true;
+    }
+    memcpy(g_target_hash, hdr->hashPrevBlock.data, 32);
+    atomic_store(&g_target_height, atomic_load(&g_target_height) - 1);
+    atomic_store(&g_last_send_us, 0); /* next step goes out at once */
+    return false;
+}
+
+/* Under g_lock: after a capture, take from the ring each header that hashes to
+ * the new target. True once the window is complete. */
+static bool chf_ring_drain_locked(void)
+{
+    bool complete = false;
+    int i = chf_ring_find_target_locked();
+    while (!complete && i >= 0) {
+        g_ring_used[i] = false;
+        complete = chf_window_capture_locked(&g_ring[i]);
+        i = complete ? -1 : chf_ring_find_target_locked();
+    }
+    return complete;
+}
+
 /* Window-mode capture: HASH-PIN ONLY, like single mode. A match stores the
  * header and re-targets its hashPrevBlock one height lower; the walk is
- * complete (g_captured) once `depth` headers are held. */
+ * complete (g_captured) once `depth` headers are held. After a window span
+ * went out, a header that does not match yet waits in the ring for the
+ * capture to reach it (one ascending headers message completes the window). */
 static void chf_window_offer(const struct block_header *hdr,
                              const struct uint256 *hash)
 {
-    int have = 0;
-    int depth = 0;
-    int32_t at = -1;
+    bool complete = false;
     pthread_mutex_lock(&g_lock);
-    depth = atomic_load(&g_window_depth);
-    have = atomic_load(&g_window_have);
-    if (atomic_load(&g_armed) && !atomic_load(&g_captured) && depth > 0 &&
-        have < depth && memcmp(hash->data, g_target_hash, 32) == 0) {
-        g_window[have] = *hdr;
-        at = atomic_load(&g_target_height);
-        have++;
-        atomic_store(&g_window_have, have);
-        atomic_fetch_add(&g_captures, 1);
-        g_asked_n = 0;
-        if (have >= depth) {
-            atomic_store(&g_captured, true);
-        } else {
-            memcpy(g_target_hash, hdr->hashPrevBlock.data, 32);
-            atomic_store(&g_target_height, at - 1);
-            atomic_store(&g_last_send_us, 0); /* next step goes out at once */
-        }
-    }
+    int depth = atomic_load(&g_window_depth);
+    bool open = atomic_load(&g_armed) && !atomic_load(&g_captured) &&
+                depth > 0 && atomic_load(&g_window_have) < depth;
+    if (open && memcmp(hash->data, g_target_hash, 32) == 0)
+        complete = chf_window_capture_locked(hdr) || chf_ring_drain_locked();
+    else if (open && g_window_span_tried)
+        chf_ring_put_locked(hdr, hash);
+    int32_t at = atomic_load(&g_target_height);
     pthread_mutex_unlock(&g_lock);
-    if (at >= 0 && have >= depth)
+    if (complete)
         LOG_INFO(CHF_SUBSYS,
                  "header window complete: %d headers down to h=%d, "
                  "hash-pinned from the armed top; app will verify",
@@ -167,6 +230,8 @@ void checkpoint_header_fetch_arm_window(int32_t height,
     memcpy(g_target_hash, hash->data, 32);
     g_window_top_height = height;
     g_asked_n = 0;
+    g_window_span_tried = false;
+    chf_ring_clear_locked();
     atomic_store(&g_window_have, 0);
     atomic_store(&g_window_depth, depth);
     atomic_store(&g_captured, false);
@@ -175,8 +240,9 @@ void checkpoint_header_fetch_arm_window(int32_t height,
     atomic_store(&g_armed, true);
     pthread_mutex_unlock(&g_lock);
     LOG_INFO(CHF_SUBSYS,
-             "armed header window walk: %d headers down from h=%d by "
-             "empty-locator getheaders", depth, height);
+             "armed header window walk: %d headers down from h=%d by one "
+             "bounded getheaders span when the index holds the row below, "
+             "else empty-locator getheaders", depth, height);
 }
 
 int checkpoint_header_fetch_window_progress(void)
@@ -286,6 +352,67 @@ static void chf_window_send(struct msg_processor *mp, struct p2p_node *node,
              "hash_stop=target)", height, node->addr_name);
 }
 
+/* The hash of the index row `n` below `top` on top's own chain. A hint for the
+ * peer only: a wrong row costs one useless reply, never an acceptance (the
+ * capture stays a hash-pin from the armed top). */
+static bool chf_index_row_below(const struct main_state *ms,
+                                const struct uint256 *top, int32_t top_h,
+                                int n, struct uint256 *out)
+{
+    const struct block_index *bi = block_map_find(&ms->map_block_index, top);
+    for (int i = 0; bi && i < n; i++)
+        bi = bi->pprev;
+    if (!bi || !bi->phashBlock || bi->nHeight != top_h - n)
+        return false;
+    *out = *bi->phashBlock;
+    return true;
+}
+
+/* Window span: ask for the whole remaining window with ONE bounded getheaders
+ * (locator = the index row below it, hash_stop = the current target), at most
+ * once per armed window. Not while outgoing header sync is held or a snapshot
+ * is active (push_getheaders_span would drop it): the walk goes instead. True
+ * when this tick belongs to the span (sent, or another peer took the slot). */
+static bool chf_window_try_span(struct msg_processor *mp, struct p2p_node *node,
+                                const struct uint256 *target_hash,
+                                int32_t height, int remaining, int64_t now_us,
+                                int64_t last)
+{
+    pthread_mutex_lock(&g_lock);
+    bool tried = g_window_span_tried;
+    pthread_mutex_unlock(&g_lock);
+    if (tried || remaining < 1 || msg_processor_header_sync_held() ||
+        msg_processor_snapshot_active(mp))
+        return false;
+    struct uint256 row;
+    if (!chf_index_row_below(mp->main_state, target_hash, height, remaining,
+                             &row))
+        return false; // raw-return-ok:no-index-row-walk-instead
+    if (!atomic_compare_exchange_strong(&g_last_send_us, &last, now_us))
+        return true; // raw-return-ok:another-peer-claimed-this-interval
+    pthread_mutex_lock(&g_lock);
+    g_window_span_tried = true;
+    pthread_mutex_unlock(&g_lock);
+    push_getheaders_span(mp, node, &row, target_hash);
+    atomic_fetch_add(&g_sends, 1);
+    LOG_INFO(CHF_SUBSYS,
+             "requested header window h=%d..%d from %s via one bounded "
+             "getheaders span (locator=index row h=%d, hash_stop=target)",
+             height - remaining + 1, height, node->addr_name,
+             height - remaining);
+    return true;
+}
+
+/* Window-mode send tick: the span when it applies, else one walk step. */
+static void chf_window_tick(struct msg_processor *mp, struct p2p_node *node,
+                            const struct uint256 *target_hash, int32_t height,
+                            int remaining, int64_t now_us, int64_t last)
+{
+    if (!chf_window_try_span(mp, node, target_hash, height, remaining, now_us,
+                             last))
+        chf_window_send(mp, node, target_hash, height, now_us, last);
+}
+
 /* A peer usable as a checkpoint-header source: outbound, handshaked, not
  * tearing down, and tall enough to hold the checkpoint block. */
 static bool chf_peer_usable(const struct p2p_node *node, int32_t height)
@@ -324,12 +451,16 @@ void checkpoint_header_fetch_maybe_send(struct msg_processor *mp,
      * the span locator must FORK at the parent so the peer returns exactly the
      * checkpoint header (hash_stop bounds it to that one). */
     struct uint256 target_hash;
+    int remaining;
     pthread_mutex_lock(&g_lock);
     memcpy(target_hash.data, g_target_hash, 32);
+    height = atomic_load(&g_target_height); /* one snapshot with hash/remaining */
+    remaining = atomic_load(&g_window_depth) - atomic_load(&g_window_have);
     pthread_mutex_unlock(&g_lock);
 
     if (atomic_load(&g_window_depth) > 0) {
-        chf_window_send(mp, node, &target_hash, height, now_us, last);
+        chf_window_tick(mp, node, &target_hash, height, remaining, now_us,
+                        last);
         return;
     }
 
@@ -357,9 +488,24 @@ void checkpoint_header_fetch_test_reset(void)
     checkpoint_header_fetch_disarm();
     pthread_mutex_lock(&g_lock);
     g_asked_n = 0;
+    g_window_span_tried = false;
+    chf_ring_clear_locked();
     pthread_mutex_unlock(&g_lock);
     atomic_store(&g_last_send_us, 0);
     atomic_store(&g_sends, 0);
     atomic_store(&g_captures, 0);
+}
+
+void checkpoint_header_fetch_test_span_state(bool *tried, int *ring_held)
+{
+    int n = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < CHECKPOINT_HEADER_FETCH_WINDOW_MAX; i++)
+        n += g_ring_used[i] ? 1 : 0;
+    if (tried)
+        *tried = g_window_span_tried;
+    pthread_mutex_unlock(&g_lock);
+    if (ring_held)
+        *ring_held = n;
 }
 #endif
