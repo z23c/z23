@@ -1249,17 +1249,30 @@ static long long fmc_sub_int(const struct fmc_sub *s, const char *key,
 
 /* Push one {source, reason} row onto missing[] and note the observation age
  * of the attempt in ms. Small and single-purpose for the complexity gate. */
-static void fmc_note_missing(struct json_value *missing, const char *source,
-                             const char *reason, long long age_ms)
+static void fmc_note_missing_next(struct json_value *missing,
+                                  const char *source, const char *reason,
+                                  long long age_ms, const char *next,
+                                  long long dropped)
 {
     struct json_value item;
     json_init(&item);
     json_set_object(&item);
-    if (json_push_kv_str(&item, "source", source) &&
-        json_push_kv_str(&item, "reason", reason) &&
-        json_push_kv_int(&item, "age_ms", age_ms))
+    bool ok = json_push_kv_str(&item, "source", source) &&
+              json_push_kv_str(&item, "reason", reason) &&
+              json_push_kv_int(&item, "age_ms", age_ms);
+    if (ok && next && next[0])
+        ok = json_push_kv_str(&item, "next", next);
+    if (ok && dropped > 0)
+        ok = json_push_kv_int(&item, "dropped", dropped);
+    if (ok)
         (void)json_push_back(missing, &item);
     json_free(&item);
+}
+
+static void fmc_note_missing(struct json_value *missing, const char *source,
+                             const char *reason, long long age_ms)
+{
+    fmc_note_missing_next(missing, source, reason, age_ms, NULL, 0);
 }
 
 /* Push one distinct string onto a capped array. Returns true when the value
@@ -3811,7 +3824,8 @@ static bool fmc_outcome_completes(const struct json_value *outcomes,
 }
 
 /* One open problem/need as a bounded blocker string. */
-static void fmc_board_blocker(struct json_value *blockers, const char *kind,
+static void fmc_board_blocker(struct json_value *blockers, size_t *dropped,
+                              const char *kind,
                               const char *text, const char *ref)
 {
     char b[192];
@@ -3825,8 +3839,11 @@ static void fmc_board_blocker(struct json_value *blockers, const char *kind,
                     ref ? ref : "");
     if (wlen <= 0 || (size_t)wlen >= sizeof(b))
         return;
-    if (json_size(blockers) >= FMC_BLOCKER_CAP)
+    if (json_size(blockers) >= FMC_BLOCKER_CAP) {
+        if (dropped)
+            (*dropped)++;
         return;
+    }
     json_init(&item);
     json_set_str(&item, b);
     (void)json_push_back(blockers, &item);
@@ -3840,7 +3857,8 @@ static void fmc_board_blocker(struct json_value *blockers, const char *kind,
 static void fmc_board_post_lists(const struct json_value *post,
                                  struct json_value *agents,
                                  struct json_value *blockers,
-                                 struct zcl_fmc_cand_reg *cand)
+                                 struct zcl_fmc_cand_reg *cand,
+                                 size_t *dropped)
 {
     const char *agent, *kind, *ref;
     if (!post || post->type != JSON_OBJ)
@@ -3853,8 +3871,8 @@ static void fmc_board_post_lists(const struct json_value *post,
     if (!kind[0])
         return;
     if (strcmp(kind, "problem") == 0 || strcmp(kind, "need") == 0)
-        fmc_board_blocker(blockers, kind, fmc_row_field(post, "text"),
-                          ref);
+        fmc_board_blocker(blockers, dropped, kind,
+                          fmc_row_field(post, "text"), ref);
     else if (strcmp(kind, "claim") == 0 || strcmp(kind, "result") == 0) {
         if (ref[0])
             zcl_fmc_cand_note(cand, ref, ZCL_FMC_CAND_SRC_BOARD, agent,
@@ -3873,6 +3891,8 @@ static const char *fmc_board_refusal(const struct fmc_sub *sub)
         return "observation_budget_exhausted";
     if (strcmp(sub->reply.error.code, "BOARD_PAGE_METADATA_MISSING") == 0)
         return "board_page_metadata_missing";
+    if (strcmp(sub->reply.error.code, "BOARD_PAGE_BUDGET") == 0)
+        return "board_post_too_large";
     if (sub->reply.error.code[0] &&
         strstr(sub->reply.error.code, "NODE_UNAVAILABLE"))
         return "node_unavailable";
@@ -3882,13 +3902,22 @@ static const char *fmc_board_refusal(const struct fmc_sub *sub)
     return "sibling_refused";
 }
 
+/* Next step for a board refusal; only an oversized first post has one. */
+static const char *fmc_board_refusal_next(const struct fmc_sub *sub)
+{
+    if (sub && strcmp(sub->reply.error.code, "BOARD_PAGE_BUDGET") == 0)
+        return "z23 fleet board list --open --limit=1 --view=summary";
+    return NULL;
+}
+
 /* Walk open posts into the brief lists, collecting post ids as evidence
  * references. */
 static void fmc_board_posts_walk(const struct json_value *posts,
                                  struct json_value *agents,
                                  struct json_value *blockers,
                                  struct zcl_fmc_cand_reg *cand,
-                                 struct json_value *post_ids)
+                                 struct json_value *post_ids,
+                                 size_t *dropped)
 {
     size_t n, i;
     if (!posts || posts->type != JSON_ARR)
@@ -3898,7 +3927,7 @@ static void fmc_board_posts_walk(const struct json_value *posts,
         const struct json_value *post = json_at(posts, i);
         const struct json_value *v;
         const char *id;
-        fmc_board_post_lists(post, agents, blockers, cand);
+        fmc_board_post_lists(post, agents, blockers, cand, dropped);
         if (!post || post->type != JSON_OBJ)
             continue;
         v = json_get(post, "id");
@@ -3935,6 +3964,68 @@ static void fmc_board_observe(const struct zcl_command_request *req,
     obs->sub.ran = true;
 }
 
+/* Name the unread rest of the open queue: reason more_open_posts, the exact
+ * next command with the reply's own cursor, never a page loop in the brief. */
+static void fmc_board_note_more(const struct json_value *data,
+                                struct json_value *missing, int64_t age_ms)
+{
+    const struct json_value *more = json_get(data, "has_more");
+    const struct json_value *at = json_get(data, "next_created_at");
+    const struct json_value *id = json_get(data, "next_id");
+    char next[256];
+    uint8_t decoded[32];
+    if (!more || more->type != JSON_BOOL || !json_get_bool(more))
+        return;
+    int n = -1;
+    if (at && at->type == JSON_INT && json_get_int(at) > 0 &&
+        id && id->type == JSON_STR && json_get_str(id) &&
+        zcl_hex_decode_lower(json_get_str(id), decoded, sizeof(decoded)))
+        n = snprintf(next, sizeof(next),
+                     "z23 fleet board list --open --before_created_at=%lld --before_id=%s",
+                     (long long)json_get_int(at), json_get_str(id));
+    if (n < 0 || (size_t)n >= sizeof(next))
+        snprintf(next, sizeof(next), "z23 fleet board list --open");
+    fmc_note_missing_next(missing, "fleet.board", "more_open_posts", age_ms,
+                          next, 0);
+}
+
+/* Blockers the shared cap refused: say how many, and where the rest are. */
+static void fmc_board_note_dropped(struct json_value *missing, size_t dropped,
+                                   int64_t age_ms)
+{
+    if (dropped)
+        fmc_note_missing_next(missing, "fleet.board", "blockers_capped", age_ms,
+                              "z23 fleet board list --open",
+                              (long long)dropped);
+}
+
+#if defined(ZCL_TESTING)
+/* Drive the cursor text from a raw list reply: the leaf only emits valid
+ * cursors, so a malformed one can be exercised only here. */
+bool zcl_fleet_steer_test_board_more(const char *reply, char *next, size_t cap);
+bool zcl_fleet_steer_test_board_more(const char *reply, char *next, size_t cap)
+{
+    struct json_value data, missing;
+    const struct json_value *e;
+    const char *text;
+    bool ok = false;
+    json_init(&data);
+    json_init(&missing);
+    json_set_array(&missing);
+    if (json_read(&data, reply, strlen(reply))) {
+        fmc_board_note_more(&data, &missing, 0);
+        e = json_size(&missing) ? json_at(&missing, 0) : NULL;
+        text = e ? json_get_str(json_get(e, "next")) : NULL;
+        ok = text && strlen(text) < cap;
+        if (ok)
+            memcpy(next, text, strlen(text) + 1);
+    }
+    json_free(&data);
+    json_free(&missing);
+    return ok;
+}
+#endif
+
 static void fmc_brief_board(struct fmc_board_observation *obs,
                             struct json_value *agents,
                             struct json_value *blockers,
@@ -3945,11 +4036,16 @@ static void fmc_brief_board(struct fmc_board_observation *obs,
     if (obs->failure)
         fmc_note_missing(missing, "fleet.board", obs->failure, 0);
     else if (!fmc_sub_ok(&obs->sub))
-        fmc_note_missing(missing, "fleet.board", fmc_board_refusal(&obs->sub), obs->elapsed_ms);
+        fmc_note_missing_next(missing, "fleet.board", fmc_board_refusal(&obs->sub),
+                              obs->elapsed_ms, fmc_board_refusal_next(&obs->sub), 0);
     else {
-        const struct json_value *posts = json_get(&obs->sub.reply.data, "posts");
+        const struct json_value *data = &obs->sub.reply.data;
+        size_t dropped = 0;
         zcl_fmc_cand_source_ok(cand, ZCL_FMC_CAND_SRC_BOARD);
-        fmc_board_posts_walk(posts, agents, blockers, cand, post_ids);
+        fmc_board_posts_walk(json_get(data, "posts"), agents, blockers, cand,
+                             post_ids, &dropped);
+        fmc_board_note_more(data, missing, obs->elapsed_ms);
+        fmc_board_note_dropped(missing, dropped, obs->elapsed_ms);
     }
     fmc_sub_end(&obs->sub);
 }

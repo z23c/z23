@@ -6387,6 +6387,128 @@ static int fmx_t_board_refusal_reason(void)
     return failures;
 }
 
+/* The missing[] row for source/reason, or NULL. */
+static const struct json_value *fmx_missing_find(const struct fmx_call *c,
+                                                 const char *source,
+                                                 const char *reason)
+{
+    const struct json_value *missing = fmx_arr(c, "missing");
+    for (size_t i = 0; missing && i < json_size(missing); i++) {
+        const struct json_value *e = json_at(missing, i);
+        const char *s = json_get_str(json_get(e, "source"));
+        const char *r = json_get_str(json_get(e, "reason"));
+        if (s && r && !strcmp(s, source) && !strcmp(r, reason))
+            return e;
+    }
+    return NULL;
+}
+
+#define FMX_ID_A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+#define FMX_ID_B "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+/* Run one brief over a stubbed board body. */
+static bool fmx_board_brief(const char *body, struct fmx_call *call)
+{
+    bool passed;
+    g_fmx_board_body = body;
+    node_rpc_client_set_test_hook(fmx_board_body_rpc);
+    passed = fmx_forward_page(call, "0|", 1, 65536);
+    node_rpc_client_set_test_hook(fmx_no_node);
+    return passed;
+}
+
+/* A page of n open problem posts, newest first, then the has_more flag. */
+static void fmx_problem_page(char *out, size_t cap, int n, const char *more)
+{
+    size_t len = (size_t)snprintf(out, cap, "{\"ok\":true,\"has_more\":%s,\"posts\":[", more);
+    for (int i = 0; i < n && len < cap; i++) {
+        len += (size_t)snprintf(out + len, cap - len,
+            "%s{\"id\":\"%02x%.62s\",\"created_at\":%d,\"kind\":\"problem\","
+            "\"agent\":\"pg-agent\",\"text\":\"problem %d\"}",
+            i ? "," : "", i + 16, FMX_ID_A, 5000 - i, i);
+    }
+    if (len < cap)
+        snprintf(out + len, cap - len, "]}");
+}
+
+extern bool zcl_fleet_steer_test_board_more(const char *, char *, size_t);
+
+/* A malformed or non-positive cursor must fall back to the plain list
+ * command and never echo the bad text. */
+static bool fmx_cursor_falls_back(const char *reply)
+{
+    char next[256];
+    return zcl_fleet_steer_test_board_more(reply, next, sizeof(next)) &&
+           strcmp(next, "z23 fleet board list --open") == 0;
+}
+
+static int fmx_t_board_cursor_fallback(void)
+{
+    int failures = 0;
+    char next[256];
+    TEST("steer: brief falls back to the plain list command for a bad cursor") {
+        ASSERT(zcl_fleet_steer_test_board_more("{\"has_more\":true,\"next_created_at\":1000,"
+            "\"next_id\":\"" FMX_ID_B "\"}", next, sizeof(next)));
+        ASSERT(strstr(next, "--before_created_at=1000 --before_id=" FMX_ID_B) != NULL);
+        ASSERT(fmx_cursor_falls_back("{\"has_more\":true,\"next_created_at\":1000,"
+            "\"next_id\":\"x; rm -rf ~ --before_id=y\"}"));
+        ASSERT(fmx_cursor_falls_back("{\"has_more\":true,\"next_created_at\":1000,"
+            "\"next_id\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}"));
+        ASSERT(fmx_cursor_falls_back("{\"has_more\":true,\"next_created_at\":1000,"
+            "\"next_id\":\"bb\"}"));
+        ASSERT(fmx_cursor_falls_back("{\"has_more\":true,\"next_created_at\":0,"
+            "\"next_id\":\"" FMX_ID_B "\"}"));
+        ASSERT(fmx_cursor_falls_back("{\"has_more\":true,\"next_created_at\":-5,"
+            "\"next_id\":\"" FMX_ID_B "\"}"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fmx_t_board_incomplete(void)
+{
+    int failures = 0;
+    char page[8192];
+    TEST("steer: brief names an incomplete board view and the exact next command") {
+        ASSERT(fmx_forward_setup("board_incomplete"));
+        struct fmx_call call;
+        ASSERT(fmx_board_brief("{\"ok\":true,\"has_more\":true,\"posts\":["
+            "{\"id\":\"" FMX_ID_A "\",\"created_at\":2000,\"kind\":\"note\",\"agent\":\"a\"},"
+            "{\"id\":\"" FMX_ID_B "\",\"created_at\":1000,\"kind\":\"note\",\"agent\":\"b\"}]}", &call));
+        const struct json_value *e = fmx_missing_find(&call, "fleet.board", "more_open_posts");
+        ASSERT(e != NULL);
+        const char *next = json_get_str(json_get(e, "next"));
+        ASSERT(next != NULL);
+        ASSERT(strstr(next, "z23 fleet board list --open") != NULL);
+        ASSERT(strstr(next, "--before_created_at=1000") != NULL);
+        ASSERT(strstr(next, "--before_id=" FMX_ID_B) != NULL);
+        fmx_end(&call);
+        ASSERT(fmx_board_brief("{\"ok\":true,\"has_more\":false,\"posts\":["
+            "{\"id\":\"" FMX_ID_A "\",\"created_at\":2000,\"kind\":\"note\",\"agent\":\"a\"}]}", &call));
+        ASSERT(!fmx_missing_has(&call, "fleet.board"));
+        fmx_end(&call);
+        fmx_problem_page(page, sizeof(page), 20, "false");
+        ASSERT(fmx_board_brief(page, &call));
+        e = fmx_missing_find(&call, "fleet.board", "blockers_capped");
+        ASSERT(e != NULL);
+        ASSERT_EQ((long long)json_get_int(json_get(e, "dropped")), 4);
+        ASSERT(fmx_missing_find(&call, "fleet.board", "more_open_posts") == NULL);
+        fmx_end(&call);
+        ASSERT(fmx_board_brief("{\"ok\":true,\"has_more\":true,\"posts\":[]}", &call));
+        e = fmx_missing_find(&call, "fleet.board", "board_post_too_large");
+        ASSERT(e != NULL);
+        const char *step = json_get_str(json_get(e, "next"));
+        ASSERT(step && step[0] && strstr(step, "--limit=") != NULL);
+        fmx_end(&call);
+        ASSERT(fmx_board_brief("{\"ok\":true,\"posts\":[]}", &call));
+        ASSERT(fmx_missing_find(&call, "fleet.board", "board_page_metadata_missing") != NULL);
+        fmx_end(&call);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(fmx_no_node); fmx_restore();
+    return failures;
+}
+
 static int fmx_t_forward_fault(void)
 {
     int failures = 0;
@@ -6437,6 +6559,8 @@ int test_fleet_steer(void)
     failures += fmx_t_forward_fault();
     failures += fmx_t_board_deadline();
     failures += fmx_t_board_refusal_reason();
+    failures += fmx_t_board_incomplete();
+    failures += fmx_t_board_cursor_fallback();
     failures += fmx_task_projection_checks();
 #if !defined(_WIN32)
     failures += fmx_t_ledger_age();
