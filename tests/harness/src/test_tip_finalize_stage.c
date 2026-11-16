@@ -17,6 +17,7 @@
 #include "../../../engine/jobs/src/tip_finalize_stage_observe.h"
 /* src-private: the incremental utxo_apply SUM cache under differential KAT. */
 #include "../../../engine/jobs/src/tip_finalize_log_store.h"
+#include "../../../engine/jobs/src/tip_finalize_evidence.h"
 /* src-private: the durable-cursor hydrate seam under the cross-txn crash-window
  * clamp test (tip_finalize.uv_cursor_gap cure). */
 #include "../../../engine/jobs/src/tip_finalize_stage_durable.h"
@@ -1134,6 +1135,8 @@ static int case_anchor_storage(void)
         tf_teardown(dir, &ms, &sc);
     return failures;
 }
+
+#include "tip_finalize_trusted_anchor_log_test.h"
 
 static int noskip_successor_publishes(struct main_state *ms,
                                       struct synth_chain_tf *sc)
@@ -3283,6 +3286,8 @@ int test_tip_finalize_stage(void)
     failures += case_forked_utxo_evidence();
 
     failures += case_anchor_storage();
+
+    failures += case_trusted_anchor_log();
 
     /* Live-frontier no-skip (task #30 root cause): every chain_set_active_tip re-anchors the JUST-PUBLISHED
      * tip via set_authoritative_tip. The old height+1 anchor target bumped

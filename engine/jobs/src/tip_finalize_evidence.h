@@ -22,4 +22,11 @@ job_result_t tip_finalize_evidence_refuse(
     enum mint_validation_evidence utxo_evidence);
 void tip_finalize_evidence_clear(void);
 
+#ifdef ZCL_TESTING
+/* WARNs emitted for trusted-anchor metadata mismatches, and a reset of that
+ * count plus its throttle. */
+uint64_t tip_finalize_trusted_mismatch_warn_count_for_testing(void);
+void tip_finalize_trusted_mismatch_reset_for_testing(void);
+#endif
+
 #endif /* ZCL_JOBS_TIP_FINALIZE_EVIDENCE_H */

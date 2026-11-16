@@ -14,6 +14,10 @@
 #include "support/log_throttle.h"
 
 #include <sqlite3.h>
+#ifdef ZCL_TESTING
+#include <stdatomic.h>
+#endif
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -150,6 +154,55 @@ static bool tip_finalize_trusted_hash_match(bool trusted_found,
            memcmp(hash_blob, block_hash->data, 32) == 0;
 }
 
+static struct log_throttle tf_meta_throttle = LOG_THROTTLE_INIT;
+#ifdef ZCL_TESTING
+static _Atomic uint64_t tf_meta_warn_count;
+#endif
+
+/* An anchor row above an older trusted base is the normal raise-only state of
+ * every node started from an installed state bundle: each new tip gets an
+ * anchor row while the trusted base stays at the install height.  That case
+ * is not reported.  Surprising cases (no trusted base, a base above the row,
+ * or a base at the same height with a different hash) are reported, throttled
+ * on the state rather than the height so a repeating state logs once per 300 s
+ * with a true repeat count.  Logging only: the caller's decision is unchanged. */
+static void tip_finalize_trusted_mismatch_report(int height,
+                                                 bool trusted_found,
+                                                 int32_t trusted_height,
+                                                 bool hash_match)
+{
+    if (trusted_found && trusted_height < height)
+        return;
+    uint64_t key = trusted_found
+        ? (uint64_t)(uint32_t)trusted_height | (1ull << 32) : 0;
+    uint64_t repeats = 0;
+    if (!log_throttle_should_emit(&tf_meta_throttle, key,
+                                  platform_time_wall_unix(), 300, &repeats))
+        return;
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&tf_meta_warn_count, 1);
+#endif
+    LOG_WARN("tip_finalize",
+             "trusted anchor metadata mismatch h=%d "
+             "trusted_found=%d trusted_height=%d hash_match=%d "
+             "repeats=%llu",
+             height, trusted_found ? 1 : 0, trusted_height,
+             hash_match ? 1 : 0, (unsigned long long)repeats);
+}
+
+#ifdef ZCL_TESTING
+uint64_t tip_finalize_trusted_mismatch_warn_count_for_testing(void)
+{
+    return atomic_load(&tf_meta_warn_count);
+}
+
+void tip_finalize_trusted_mismatch_reset_for_testing(void)
+{
+    log_throttle_reset(&tf_meta_throttle);
+    atomic_store(&tf_meta_warn_count, 0);
+}
+#endif
+
 int tip_finalize_trusted_anchor_at(sqlite3 *db, int height,
                                    const struct uint256 *block_hash)
 {
@@ -161,9 +214,10 @@ int tip_finalize_trusted_anchor_at(sqlite3 *db, int height,
     /* This predicate is intentionally attempted for every successor before
      * the full-validation path.  A missing/non-anchor row is therefore the
      * normal case, not an anomaly: logging it once per distinct height turns
-     * a fast fold into an O(delta) warning storm.  Keep diagnostics for the
-     * only surprising case below — a row that claims to be the anchor but
-     * disagrees with the trusted-base metadata. */
+     * a fast fold into an O(delta) warning storm.  An anchor row above an
+     * older trusted base is equally normal (see the report helper).  Only a
+     * row that claims to be the anchor but contradicts the trusted-base
+     * metadata is reported. */
     if (!tip_finalize_anchor_row_exact(&row, block_hash))
         return 0;
     uint8_t hash_blob[32] = {0};
@@ -176,21 +230,9 @@ int tip_finalize_trusted_anchor_at(sqlite3 *db, int height,
     bool height_match = trusted_found && trusted_height == height;
     bool hash_match = tip_finalize_trusted_hash_match(
         trusted_found, hash_blob, block_hash);
-    if (!height_match || !hash_match) {
-        static struct log_throttle meta_throttle = LOG_THROTTLE_INIT;
-        uint64_t repeats = 0;
-        if (log_throttle_should_emit(&meta_throttle,
-                                     (uint64_t)(uint32_t)height,
-                                     platform_time_wall_unix(), 300,
-                                     &repeats))
-            LOG_WARN("tip_finalize",
-                     "trusted anchor metadata mismatch h=%d "
-                     "trusted_found=%d trusted_height=%d hash_match=%d "
-                     "repeats=%llu",
-                     height, trusted_found ? 1 : 0, trusted_height,
-                     hash_match ? 1 : 0,
-                     (unsigned long long)repeats);
-    }
+    if (!height_match || !hash_match)
+        tip_finalize_trusted_mismatch_report(
+            height, trusted_found, trusted_height, hash_match);
     return height_match && hash_match;
 }
 
