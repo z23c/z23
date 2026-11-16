@@ -41,5 +41,8 @@ the full Tor archive was absent. The result establishes
 this run, not the identity of any other archive creator. The first native
 proof failed in the preflight graph and no-Tor fixture cases after the initial
 unconditional dependency. The selected-gate correction and aligned fixtures
-are pending focused verification.
+passed focused verification on source
+`93fcacdfd91d2a8a79965666ad535e68df76f09d`: the two affected test groups
+ran cold with no failures, skips, unobserved groups or load-flaky retries
+(54.3 seconds test wall). Full native proof remains pending.
 <!-- claim: symbol-present tor-provenance-ready Makefile # Tor preparation precedes lint provenance dispatch -->
