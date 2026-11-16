@@ -60,6 +60,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* The flat writer's in-place save fault hook (block_index_flat_inplace.c):
+ * the payload is written and synced, then the save stops before the header,
+ * exactly what a kill in the middle of an in-place save leaves on disk. */
+extern int g_block_index_flat_inplace_fault;
+
 static struct uint256 hsi_make_hash(int h)
 {
     struct uint256 hash;
@@ -175,13 +180,46 @@ static void hsi_override_checkpoint(int32_t height, const struct uint256 *hash,
     checkpoints_set_sha3_override_for_test(&g_hsi_cp);
 }
 
-/* Import with the baked checkpoint set to the fixture chain's own genesis, so
- * the seed owns it. Without an override the baked checkpoint is mainnet's,
+/* The strongest row (most work) of the seed staged at <cdir>/bundles, as the
+ * import's own flat load reads it; false when the seed does not load. */
+static bool hsi_seed_best_row(const char *cdir, int32_t *height,
+                              struct uint256 *hash)
+{
+    char bdir[PATH_MAX + 16];
+    char arena[PATH_MAX + 48];
+    snprintf(bdir, sizeof(bdir), "%s/bundles", cdir);
+    snprintf(arena, sizeof(arena), "%s/.block_index.arena", bdir);
+    struct main_state ms;
+    main_state_init(&ms);
+    bool loaded = load_block_index_flat(bdir, &ms).ok;
+    struct block_index *best = NULL;
+    struct block_index *p = NULL;
+    size_t it = 0;
+    while (loaded && block_map_next(&ms.map_block_index, &it, NULL, &p))
+        if (p && p->phashBlock &&
+            (!best || arith_uint256_compare(&p->nChainWork,
+                                            &best->nChainWork) > 0))
+            best = p;
+    if (best) {
+        *height = best->nHeight;
+        *hash = *best->phashBlock;
+    }
+    main_state_free(&ms);
+    (void)unlink(arena);
+    return best != NULL;
+}
+
+/* Import with the baked checkpoint set to the seed's own strongest row, so
+ * the seed owns it and the checkpoint binds every row the seed carries (a
+ * seed that does not load keeps a genesis checkpoint; its import fails on the
+ * load either way). Without an override the baked checkpoint is mainnet's,
  * which no regtest fixture chain can own, and an unbound seed is discarded. */
 static bool hsi_import_owned(const char *cdir, struct main_state *ms)
 {
-    struct uint256 genesis = hsi_make_hash(0);
-    hsi_override_checkpoint(0, &genesis, -1);
+    int32_t height = 0;
+    struct uint256 best = hsi_make_hash(0);
+    (void)hsi_seed_best_row(cdir, &height, &best);
+    hsi_override_checkpoint(height, &best, -1);
     bool r = boot_header_seed_import_maybe(cdir, ms);
     checkpoints_reset_sha3_override_for_test();
     return r;
@@ -758,8 +796,8 @@ static int case_population_cap_boundary(void)
         ASSERT(over_left);   /* skipped before any move */
         ASSERT(!over_root);
         ASSERT(!r_at);       /* the half artifact cannot load ... */
-        ASSERT(at_root);     /* ... but the cap let it get as far as staging */
-        ASSERT(!at_left);
+        ASSERT(!at_root);    /* ... and a rejected seed never reaches the root */
+        ASSERT(!at_left);    /* ... but the cap let the import consume it */
     } _test_next:;
     return failures;
 }
@@ -855,7 +893,8 @@ static int case_rename_failure_named(void)
             ASSERT(chmod(fx.cdir, 0500) == 0);
             struct main_state ms;
             main_state_init(&ms);
-            bool r = boot_header_seed_import_maybe(fx.cdir, &ms);
+            /* Owned, so only the root write can stop it. */
+            bool r = hsi_import_owned(fx.cdir, &ms);
             size_t n = block_map_count(&ms.map_block_index);
             main_state_free(&ms);
             (void)chmod(fx.cdir, 0700);
@@ -943,9 +982,10 @@ static int case_clamp_every_row_and_persist(void)
 }
 
 /* Imports an 8-row artifact while the baked checkpoint is overridden to
- * (cp_height, hash); returns 1 when the import kept the seed and owns the
- * checkpoint, 0 when it discarded the seed (not imported, nothing kept,
- * checkpoint_unbound named), -1 for any other outcome. */
+ * (cp_height, hash); returns 1 when the import kept the seed up to the
+ * checkpoint (rows 0..cp_height, nothing above) and owns it, 0 when it
+ * discarded the seed (not imported, nothing kept, checkpoint_unbound named),
+ * -1 for any other outcome. */
 static int hsi_checkpoint_run(int32_t cp_height, int hash_row, int flip_byte)
 {
     struct hsi_fx fx;
@@ -965,7 +1005,7 @@ static int hsi_checkpoint_run(int32_t cp_height, int hash_row, int flip_byte)
     main_state_free(&ms);
     bool unbound = hsi_blocker_named("header_seed.checkpoint_unbound");
     int owned = -1;
-    if (r && !unbound && rows == 8 && best)
+    if (r && !unbound && rows == (size_t)cp_height + 1 && best)
         owned = 1;
     else if (!r && unbound && rows == 0 && !best && !hsi_exists(fx.root))
         owned = 0;
@@ -1586,6 +1626,696 @@ static int case_non_stub_root_kept(void)
     return failures;
 }
 
+/* ── A seed keeps only what the baked checkpoint hash binds ─────────────
+ * Fixture: honest rows 0..cp_h, `forged` rows above the checkpoint that claim
+ * far more work than the honest chain (a tiny stored hash under a hard nBits:
+ * the flat loader checks a row's stored hash only against its own target, so
+ * no Equihash solution is needed), and `side` rows on a branch off row 3 that
+ * is not an ancestor of the checkpoint block. */
+#define HSI_FORGED_TAG 0xDD
+#define HSI_SIDE_TAG 0xEE
+#define HSI_FORGED_BITS 0x1d00ffffu /* far harder than the honest 0x1f07ffff */
+
+static bool hsi_add_branch(struct main_state *ms, int parent_h, int n,
+                           uint8_t tag, uint32_t bits)
+{
+    struct uint256 ph = hsi_make_hash(parent_h);
+    struct block_index *prev = block_map_find(&ms->map_block_index, &ph);
+    for (int i = 0; i < n && prev; i++) {
+        struct uint256 hash = hsi_make_hash(parent_h + 1 + i);
+        hash.data[3] = tag;
+        struct block_index *pi =
+            chainstate_insert_block_index((struct chainstate *)ms, &hash);
+        if (!pi)
+            return false;
+        pi->nHeight = parent_h + 1 + i;
+        pi->nBits = bits;
+        pi->nTime = 3000000 + (uint32_t)i * 150;
+        pi->nVersion = 4;
+        pi->nTx = 1;
+        pi->pprev = prev;
+        struct arith_uint256 proof = GetBlockProof(pi);
+        arith_uint256_add(&pi->nChainWork, &prev->nChainWork, &proof);
+        hsi_make_header_only(pi);
+        prev = pi;
+    }
+    return prev != NULL;
+}
+
+/* Stage the seed saved in fx->sdir at <cdir>/bundles/block_index.bin. */
+static bool hsi_fx_stage(struct hsi_fx *fx)
+{
+    char bdir[PATH_MAX + 32];
+    char from[PATH_MAX + 32];
+    snprintf(bdir, sizeof(bdir), "%s/bundles", fx->cdir);
+    snprintf(from, sizeof(from), "%s/block_index.bin", fx->sdir);
+    snprintf(fx->bundle, sizeof(fx->bundle), "%s/block_index.bin", bdir);
+    snprintf(fx->root, sizeof(fx->root), "%s/block_index.bin", fx->cdir);
+    return mkdir(bdir, 0700) == 0 &&
+           hsi_copy_variant(from, fx->bundle, HSI_COPY_FULL);
+}
+
+/* fx->tip is the checkpoint block (row cp_h of the honest chain). */
+static bool hsi_forge_fx_make(struct hsi_fx *fx, int cp_h, int forged,
+                              int side)
+{
+    memset(fx, 0, sizeof(*fx));
+    chain_params_select(CHAIN_REGTEST);
+    if (!test_mkdtemp(fx->sdir, sizeof(fx->sdir), "hsi_f_src") ||
+        !test_mkdtemp(fx->cdir, sizeof(fx->cdir), "hsi_f_dst"))
+        return false;
+    struct main_state ms;
+    main_state_init(&ms);
+    hsi_build_chain(&ms, cp_h + 1, -1, false);
+    bool ok = hsi_add_branch(&ms, cp_h, forged, HSI_FORGED_TAG,
+                             HSI_FORGED_BITS) &&
+              hsi_add_branch(&ms, 3, side, HSI_SIDE_TAG, 0x1f07ffff);
+    if (ok)
+        save_block_index_flat(fx->sdir, &ms);
+    main_state_free(&ms);
+    fx->tip = hsi_make_hash(cp_h);
+    return ok && hsi_fx_stage(fx);
+}
+
+/* What a header map holds: rows, the highest row, forged or side rows. */
+struct hsi_view {
+    bool loaded;
+    size_t rows;
+    int max_height;
+    int foreign;
+};
+
+static void hsi_map_view(struct main_state *ms, struct hsi_view *v)
+{
+    v->rows = block_map_count(&ms->map_block_index);
+    v->max_height = -1;
+    v->foreign = 0;
+    size_t it = 0;
+    struct block_index *p = NULL;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &p)) {
+        if (!p || !p->phashBlock)
+            continue;
+        if (p->nHeight > v->max_height)
+            v->max_height = p->nHeight;
+        uint8_t tag = p->phashBlock->data[3];
+        if (tag == HSI_FORGED_TAG || tag == HSI_SIDE_TAG)
+            v->foreign++;
+    }
+}
+
+/* The root index as the next boot's flat rung would load it. */
+static void hsi_root_view(const char *cdir, struct hsi_view *v)
+{
+    struct main_state again;
+    main_state_init(&again);
+    v->loaded = load_block_index_flat(cdir, &again).ok;
+    hsi_map_view(&again, v);
+    main_state_free(&again);
+}
+
+struct hsi_bound_out {
+    bool result;
+    bool best_is_cp;
+    bool fork_intact; /* stub runs: the resident side row, same node */
+    struct hsi_view now, disk;
+};
+
+static bool hsi_bound_run(int cp_h, int forged, int side, bool stub,
+                          struct hsi_bound_out *o)
+{
+    memset(o, 0, sizeof(*o));
+    struct hsi_fx fx;
+    struct main_state ms;
+    main_state_init(&ms);
+    bool ok = hsi_forge_fx_make(&fx, cp_h, forged, side) &&
+              (!stub || (hsi_write_stub_root(fx.cdir, 6, 3, -1) &&
+                         load_block_index_flat(fx.cdir, &ms).ok));
+    struct uint256 fh = hsi_fork_hash(2);
+    struct block_index *fork = block_map_find(&ms.map_block_index, &fh);
+    if (ok) {
+        hsi_clear_blockers();
+        hsi_override_checkpoint(cp_h, &fx.tip, -1);
+        o->result = boot_header_seed_import_maybe(fx.cdir, &ms);
+        checkpoints_reset_sha3_override_for_test();
+        hsi_map_view(&ms, &o->now);
+        o->best_is_cp = ms.pindex_best_header &&
+                        ms.pindex_best_header->phashBlock &&
+                        uint256_eq(ms.pindex_best_header->phashBlock, &fx.tip);
+        o->fork_intact = !stub || hsi_fork_row_intact(&ms, fork);
+        hsi_root_view(fx.cdir, &o->disk);
+    }
+    main_state_free(&ms);
+    hsi_fx_free(&fx);
+    return ok;
+}
+
+static int case_rows_above_checkpoint_removed(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: rows above the checkpoint and off its chain are removed, in memory and on disk") {
+        struct hsi_bound_out o;
+        ASSERT(hsi_bound_run(10, 5, 3, false, &o));
+        ASSERT(o.result);
+        ASSERT(o.now.rows == 11);       /* rows 0..10 only */
+        ASSERT(o.now.max_height == 10); /* nothing above the checkpoint */
+        ASSERT(o.now.foreign == 0);     /* no forged or side row */
+        ASSERT(o.best_is_cp);
+        /* A restart loads the root this import wrote: the same 11 rows. */
+        ASSERT(o.disk.loaded);
+        ASSERT(o.disk.rows == 11);
+        ASSERT(o.disk.max_height == 10);
+        ASSERT(o.disk.foreign == 0);
+    } _test_next:;
+    return failures;
+}
+
+static int case_seed_at_checkpoint_kept_whole(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a seed that ends at the checkpoint imports whole") {
+        struct hsi_bound_out o;
+        ASSERT(hsi_bound_run(10, 0, 0, false, &o));
+        ASSERT(o.result);
+        ASSERT(o.now.rows == 11);
+        ASSERT(o.best_is_cp);
+        ASSERT(o.disk.loaded);
+        ASSERT(o.disk.rows == 11);
+    } _test_next:;
+    return failures;
+}
+
+static int case_resident_rows_survive_the_bind(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: binding a seed over a stub keeps every resident row") {
+        struct hsi_bound_out o;
+        ASSERT(hsi_bound_run(10, 5, 3, true, &o));
+        ASSERT(o.result);
+        ASSERT(o.now.rows == 14);  /* rows 0..10 + the stub's 3 side rows */
+        ASSERT(o.now.max_height == 10);
+        ASSERT(o.now.foreign == 0);
+        ASSERT(o.fork_intact);
+        ASSERT(o.best_is_cp);
+        ASSERT(o.disk.loaded);
+        ASSERT(o.disk.rows == 14);
+        ASSERT(o.disk.foreign == 0);
+    } _test_next:;
+    return failures;
+}
+
+/* The honest chain's cumulative work at height h (hsi_build_chain derives it
+ * as the flat loader's forward pass does: parent work plus GetBlockProof),
+ * big-endian as a compiled rung carries it. */
+static void hsi_honest_work_be(int h, uint8_t be[32])
+{
+    memset(be, 0, 32);
+    struct main_state ms;
+    main_state_init(&ms);
+    hsi_build_chain(&ms, h + 1, -1, false);
+    struct uint256 hash = hsi_make_hash(h);
+    struct block_index *p = block_map_find(&ms.map_block_index, &hash);
+    if (p) {
+        struct uint256 le;
+        arith_to_uint256(&le, &p->nChainWork);
+        for (int i = 0; i < 32; i++)
+            be[i] = le.data[31 - i];
+    }
+    main_state_free(&ms);
+}
+
+/* A compiled state rung at the honest row h (its hash with one byte flipped
+ * when flip >= 0) carrying the honest chain's work at h. */
+static void hsi_rung_at(struct rom_state_rung *r, int h, int flip)
+{
+    memset(r, 0, sizeof(*r));
+    r->cp.height = h;
+    struct uint256 hash = hsi_make_hash(h);
+    memcpy(r->cp.block_hash, hash.data, sizeof(r->cp.block_hash));
+    if (flip >= 0)
+        r->cp.block_hash[flip] ^= 0x01;
+    hsi_honest_work_be(h, r->chainwork);
+}
+
+/* Import the seed staged in `fx` under the checkpoint at h=10 and the rung
+ * table `rungs`; `want_h` is the honest row the frontier must be. */
+static void hsi_rung_import(struct hsi_fx *fx, const struct rom_state_rung *rungs,
+                            size_t n, int want_h, struct hsi_bound_out *o)
+{
+    struct uint256 cp10 = hsi_make_hash(10);
+    struct uint256 want = hsi_make_hash(want_h);
+    hsi_clear_blockers();
+    checkpoints_set_rom_state_rungs_override_for_test(rungs, n);
+    hsi_override_checkpoint(10, &cp10, -1);
+    struct main_state ms;
+    main_state_init(&ms);
+    o->result = boot_header_seed_import_maybe(fx->cdir, &ms);
+    checkpoints_reset_sha3_override_for_test();
+    checkpoints_reset_rom_state_rungs_override_for_test();
+    hsi_map_view(&ms, &o->now);
+    o->best_is_cp = ms.pindex_best_header &&
+                    ms.pindex_best_header->phashBlock &&
+                    uint256_eq(ms.pindex_best_header->phashBlock, &want);
+    main_state_free(&ms);
+    hsi_root_view(fx->cdir, &o->disk);
+}
+
+/* A baked state rung above the checkpoint: checkpoint at h=10, the rung at
+ * h=13 (the seed's own row 13, one byte flipped when flip >= 0), forged rows
+ * above 13 and side rows off row 3. */
+static bool hsi_rung_run(int flip, struct hsi_bound_out *o)
+{
+    memset(o, 0, sizeof(*o));
+    struct hsi_fx fx;
+    bool ok = hsi_forge_fx_make(&fx, 13, 5, 3);
+    if (ok) {
+        struct rom_state_rung rung;
+        hsi_rung_at(&rung, 13, flip);
+        hsi_rung_import(&fx, &rung, 1, flip >= 0 ? 10 : 13, o);
+    }
+    hsi_fx_free(&fx);
+    return ok;
+}
+
+static int case_bind_reaches_owned_state_rung(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a baked state rung the seed owns extends the bind; an unowned one does not") {
+        struct hsi_bound_out owned, unowned;
+        ASSERT(hsi_rung_run(-1, &owned));
+        ASSERT(hsi_rung_run(0, &unowned));
+        ASSERT(owned.result);
+        ASSERT(owned.now.rows == 14); /* rows 0..13: the rung and ancestors */
+        ASSERT(owned.now.max_height == 13);
+        ASSERT(owned.now.foreign == 0);
+        ASSERT(owned.best_is_cp);     /* the frontier is the rung block */
+        ASSERT(owned.disk.rows == 14);
+        ASSERT(owned.disk.foreign == 0);
+        ASSERT(unowned.result);
+        ASSERT(unowned.now.rows == 11); /* back to the checkpoint: 0..10 */
+        ASSERT(unowned.now.max_height == 10);
+        ASSERT(unowned.now.foreign == 0);
+        ASSERT(unowned.best_is_cp);
+        ASSERT(unowned.disk.rows == 11);
+    } _test_next:;
+    return failures;
+}
+
+/* Rungs at h=12 and h=13 over the forged fixture (honest rows 0..13, forged
+ * rows above 13, side rows off row 3); `flip12` flips rung 12's hash. */
+static bool hsi_two_rung_run(bool flip12, struct hsi_bound_out *o)
+{
+    memset(o, 0, sizeof(*o));
+    struct hsi_fx fx;
+    bool ok = hsi_forge_fx_make(&fx, 13, 5, 3);
+    if (ok) {
+        struct rom_state_rung rungs[2];
+        /* Byte 4: the flipped hash names no row (byte 0 would name row 13). */
+        hsi_rung_at(&rungs[0], 12, flip12 ? 4 : -1);
+        hsi_rung_at(&rungs[1], 13, -1);
+        hsi_rung_import(&fx, rungs, 2, flip12 ? 10 : 13, o);
+    }
+    hsi_fx_free(&fx);
+    return ok;
+}
+
+static int case_rung_needs_every_lower_rung(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a rung anchors only when the seed also owns every lower compiled rung") {
+        struct hsi_bound_out both, lower_flipped;
+        ASSERT(hsi_two_rung_run(false, &both));
+        ASSERT(hsi_two_rung_run(true, &lower_flipped));
+        ASSERT(both.result);
+        ASSERT(both.now.rows == 14); /* rows 0..13 */
+        ASSERT(both.now.max_height == 13);
+        ASSERT(both.best_is_cp);
+        ASSERT(lower_flipped.result);
+        ASSERT(lower_flipped.now.rows == 11); /* the checkpoint: rows 0..10 */
+        ASSERT(lower_flipped.now.max_height == 10);
+        ASSERT(lower_flipped.now.foreign == 0);
+        ASSERT(lower_flipped.best_is_cp);
+        ASSERT(lower_flipped.disk.rows == 11);
+        ASSERT(lower_flipped.disk.max_height == 10);
+    } _test_next:;
+    return failures;
+}
+
+/* Make the scratch directories of a fixture whose seed the caller builds. */
+static bool hsi_fx_open(struct hsi_fx *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    chain_params_select(CHAIN_REGTEST);
+    return test_mkdtemp(fx->sdir, sizeof(fx->sdir), "hsi_r_src") &&
+           test_mkdtemp(fx->cdir, sizeof(fx->cdir), "hsi_r_dst");
+}
+
+/* Save the seed built in `ms` (when `ok`) and stage it in bundles/. */
+static bool hsi_fx_close(struct hsi_fx *fx, struct main_state *ms, bool ok)
+{
+    if (ok)
+        save_block_index_flat(fx->sdir, ms);
+    main_state_free(ms);
+    return ok && hsi_fx_stage(fx);
+}
+
+static uint32_t hsi_pow_limit_bits(void)
+{
+    struct arith_uint256 limit;
+    uint256_to_arith(&limit, &chain_params_get()->consensus.powLimit);
+    return arith_uint256_get_compact(&limit, false);
+}
+
+/* One header-only row `hash` at height h, linked under `prev`. */
+static bool hsi_link_row(struct main_state *ms, struct block_index *prev,
+                         const struct uint256 *hash, int h, uint32_t bits)
+{
+    struct block_index *pi =
+        prev ? chainstate_insert_block_index((struct chainstate *)ms, hash)
+             : NULL;
+    if (!pi)
+        return false;
+    pi->nHeight = h;
+    pi->nBits = bits;
+    pi->nTime = 4000000;
+    pi->nVersion = 4;
+    pi->nTx = 1;
+    pi->pprev = prev;
+    struct arith_uint256 proof = GetBlockProof(pi);
+    arith_uint256_add(&pi->nChainWork, &prev->nChainWork, &proof);
+    hsi_make_header_only(pi);
+    return true;
+}
+
+/* Honest rows 0..10, a forged stretch at h=11..12 linked by stored prev hash
+ * (nBits at powLimit, so it carries less work than the honest rows), then a
+ * row holding the TRUE h=13 rung hash linked to the forged h=12. */
+static bool hsi_stretch_fx_make(struct hsi_fx *fx)
+{
+    if (!hsi_fx_open(fx))
+        return false;
+    struct main_state ms;
+    main_state_init(&ms);
+    hsi_build_chain(&ms, 11, -1, false);
+    struct uint256 f12 = hsi_make_hash(12);
+    f12.data[3] = HSI_FORGED_TAG;
+    fx->tip = hsi_make_hash(13);
+    bool ok = hsi_add_branch(&ms, 10, 2, HSI_FORGED_TAG, hsi_pow_limit_bits()) &&
+              hsi_link_row(&ms, block_map_find(&ms.map_block_index, &f12),
+                           &fx->tip, 13, 0x1f07ffff);
+    return hsi_fx_close(fx, &ms, ok);
+}
+
+static int case_rung_chainwork_must_match(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a rung row over a forged stretch (chainwork not the compiled one) does not anchor") {
+        struct hsi_fx fx;
+        struct hsi_bound_out o;
+        memset(&o, 0, sizeof(o));
+        bool made = hsi_stretch_fx_make(&fx);
+        if (made) {
+            struct rom_state_rung rung;
+            hsi_rung_at(&rung, 13, -1);
+            hsi_rung_import(&fx, &rung, 1, 10, &o);
+        }
+        hsi_fx_free(&fx);
+        ASSERT(made);
+        ASSERT(o.result);
+        ASSERT(o.now.rows == 11); /* the checkpoint: rows 0..10 */
+        ASSERT(o.now.max_height == 10);
+        ASSERT(o.now.foreign == 0); /* the forged stretch is gone */
+        ASSERT(o.best_is_cp);
+        ASSERT(o.disk.rows == 11);
+        ASSERT(o.disk.max_height == 10);
+        ASSERT(o.disk.foreign == 0);
+    } _test_next:;
+    return failures;
+}
+
+/* Honest rows 0..13 and a heavier forged fork off row 11 running to h=16. */
+static bool hsi_heavy_fork_fx_make(struct hsi_fx *fx)
+{
+    if (!hsi_fx_open(fx))
+        return false;
+    struct main_state ms;
+    main_state_init(&ms);
+    hsi_build_chain(&ms, 14, -1, false);
+    fx->tip = hsi_make_hash(13);
+    bool ok = hsi_add_branch(&ms, 11, 5, HSI_FORGED_TAG, HSI_FORGED_BITS);
+    return hsi_fx_close(fx, &ms, ok);
+}
+
+static int case_heavier_fork_does_not_deny_rung(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a heavier forged fork below the rung does not deny the rung anchor") {
+        struct hsi_fx fx;
+        struct hsi_bound_out o;
+        memset(&o, 0, sizeof(o));
+        bool made = hsi_heavy_fork_fx_make(&fx);
+        if (made) {
+            struct rom_state_rung rung;
+            hsi_rung_at(&rung, 13, -1);
+            hsi_rung_import(&fx, &rung, 1, 13, &o);
+        }
+        hsi_fx_free(&fx);
+        ASSERT(made);
+        ASSERT(o.result);
+        ASSERT(o.now.rows == 14); /* rows 0..13: the rung and its ancestors */
+        ASSERT(o.now.max_height == 13);
+        ASSERT(o.now.foreign == 0); /* every forged fork row is removed */
+        ASSERT(o.best_is_cp);       /* the frontier is the rung block */
+        ASSERT(o.disk.rows == 14);
+        ASSERT(o.disk.foreign == 0);
+    } _test_next:;
+    return failures;
+}
+
+/* ── A kill never leaves an unchecked seed as this node's own index ──────
+ * The next boot is simulated as boot runs it: the ladder's flat rung loads a
+ * present root index, then the import runs under the same checkpoint. */
+static bool hsi_next_boot(const struct hsi_fx *fx, struct hsi_view *v,
+                          bool *marker)
+{
+    struct main_state ms;
+    main_state_init(&ms);
+    if (hsi_exists(fx->root))
+        (void)load_block_index_flat(fx->cdir, &ms);
+    bool r = boot_header_seed_import_maybe(fx->cdir, &ms);
+    hsi_map_view(&ms, v);
+    main_state_free(&ms);
+    char failp[PATH_MAX + 80];
+    snprintf(failp, sizeof(failp), "%s.failed", fx->bundle);
+    *marker = hsi_exists(failp);
+    return r;
+}
+
+/* Kill an import at `kp` (the in-memory state dies with it), then boot again;
+ * `next` is what the next boot holds and `disk` the root it leaves. */
+static bool hsi_kill_run(struct hsi_fx *fx, int cp_h, int flip,
+                         enum boot_header_seed_kill_point kp,
+                         struct hsi_view *next, struct hsi_view *disk,
+                         bool *marker)
+{
+    hsi_clear_blockers();
+    hsi_override_checkpoint(cp_h, &fx->tip, flip);
+    struct main_state ms;
+    main_state_init(&ms);
+    boot_header_seed_import_test_kill_at(kp);
+    bool first = boot_header_seed_import_maybe(fx->cdir, &ms);
+    boot_header_seed_import_test_kill_at(BOOT_HEADER_SEED_KILL_NONE);
+    main_state_free(&ms);
+    (void)hsi_next_boot(fx, next, marker);
+    checkpoints_reset_sha3_override_for_test();
+    hsi_root_view(fx->cdir, disk);
+    return !first;
+}
+
+static int case_kill_before_unbound_discard(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a kill before the ownership decision leaves no unbound seed as the next boot's index") {
+        struct hsi_fx fx;
+        /* More than 1024 rows: a root holding it would read as POPULATED. */
+        ASSERT(hsi_fx_make(&fx, 1100, HSI_COPY_FULL));
+        struct hsi_view next, disk;
+        bool marker = false;
+        bool killed = hsi_kill_run(&fx, 1099, 0,
+                                   BOOT_HEADER_SEED_KILL_AFTER_LOAD, &next,
+                                   &disk, &marker);
+        hsi_fx_free(&fx);
+        ASSERT(killed);
+        ASSERT(next.rows == 0); /* nothing of the unbound seed is trusted */
+        ASSERT(marker);         /* the next boot re-ran the decision */
+        ASSERT(!disk.loaded);   /* and no root index was written */
+    } _test_next:;
+    return failures;
+}
+
+static int case_kill_points_never_resurrect_forged_rows(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a kill at any import step never brings back rows above the checkpoint") {
+        static const enum boot_header_seed_kill_point kps[] = {
+            BOOT_HEADER_SEED_KILL_AFTER_LOAD,
+            BOOT_HEADER_SEED_KILL_AFTER_DECISION,
+            BOOT_HEADER_SEED_KILL_AFTER_SAVE};
+        for (size_t i = 0; i < sizeof(kps) / sizeof(kps[0]); i++) {
+            struct hsi_fx fx;
+            ASSERT(hsi_forge_fx_make(&fx, 10, 5, 3));
+            struct hsi_view next, disk;
+            bool marker = false;
+            bool killed = hsi_kill_run(&fx, 10, -1, kps[i], &next, &disk,
+                                       &marker);
+            hsi_fx_free(&fx);
+            ASSERT(killed);
+            ASSERT(next.foreign == 0);
+            ASSERT(next.max_height == 10);
+            ASSERT(next.rows == 11); /* the next boot finished the import */
+            ASSERT(!marker);
+            ASSERT(disk.loaded);
+            ASSERT(disk.rows == 11);
+            ASSERT(disk.foreign == 0);
+        }
+    } _test_next:;
+    return failures;
+}
+
+static int case_rejected_seed_keeps_stub_bytes(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a seed the flat loader rejects leaves the stub root byte-identical") {
+        struct hsi_fx fx;
+        ASSERT(hsi_fx_make(&fx, 40, HSI_COPY_HALF));
+        ASSERT(hsi_write_stub_root(fx.cdir, 6, 3, -1));
+        size_t before_len = 0;
+        uint8_t *before = hsi_read_all(fx.root, &before_len);
+        struct main_state ms;
+        main_state_init(&ms);
+        bool loaded = before && load_block_index_flat(fx.cdir, &ms).ok;
+        hsi_clear_blockers();
+        bool r = loaded && hsi_import_owned(fx.cdir, &ms);
+        size_t rows = block_map_count(&ms.map_block_index);
+        main_state_free(&ms);
+        bool same = hsi_same_bytes(before, before_len, fx.root);
+        free(before);
+        char backup[PATH_MAX + 64];
+        snprintf(backup, sizeof(backup), "%s/block_index.bin.pre-seed",
+                 fx.cdir);
+        bool backup_left = hsi_exists(backup);
+        hsi_fx_free(&fx);
+        ASSERT(loaded);
+        ASSERT(!r);
+        ASSERT(rows == 9); /* the stub's own 6 + 3 side rows */
+        ASSERT(same);
+        ASSERT(!backup_left);
+        ASSERT(hsi_blocker_named("header_seed.load_failed"));
+    } _test_next:;
+    return failures;
+}
+
+/* An owned seed (checkpoint h=10, forged rows above it, side rows off row 3)
+ * imported over a stub root of honest rows 0..stub_n-1 plus `stub_forks`
+ * side rows that the ladder loaded, killed at `kp` or by the flat writer's
+ * in-place fault (`inplace_fault`: payload written and synced, header not);
+ * then the next boot runs over exactly the files the kill left. */
+struct hsi_save_kill_out {
+    bool first;
+    struct hsi_view next, disk;
+};
+
+static bool hsi_stub_save_kill_run(int stub_n, int stub_forks,
+                                   bool inplace_fault,
+                                   enum boot_header_seed_kill_point kp,
+                                   struct hsi_save_kill_out *o)
+{
+    memset(o, 0, sizeof(*o));
+    struct hsi_fx fx;
+    struct main_state ms;
+    main_state_init(&ms);
+    bool ok = hsi_forge_fx_make(&fx, 10, 5, 3) &&
+              hsi_write_stub_root(fx.cdir, stub_n, stub_forks, -1) &&
+              load_block_index_flat(fx.cdir, &ms).ok;
+    if (ok) {
+        hsi_clear_blockers();
+        hsi_override_checkpoint(10, &fx.tip, -1);
+        g_block_index_flat_inplace_fault = inplace_fault ? 1 : 0;
+        boot_header_seed_import_test_kill_at(kp);
+        o->first = boot_header_seed_import_maybe(fx.cdir, &ms);
+        boot_header_seed_import_test_kill_at(BOOT_HEADER_SEED_KILL_NONE);
+        g_block_index_flat_inplace_fault = 0;
+    }
+    main_state_free(&ms); /* the killed process's memory dies with it */
+    if (ok) {
+        bool marker = false;
+        (void)hsi_next_boot(&fx, &o->next, &marker);
+        checkpoints_reset_sha3_override_for_test();
+        hsi_root_view(fx.cdir, &o->disk);
+    }
+    hsi_fx_free(&fx);
+    return ok;
+}
+
+static int case_kill_mid_root_save_recovers(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a kill in the middle of the root save over a stub never strands the seed") {
+        struct hsi_save_kill_out o;
+        /* A stub of honest rows 0..9: the bound map (rows 0..10) differs from
+         * it in one row, so the flat writer would rewrite it in place. */
+        ASSERT(hsi_stub_save_kill_run(10, 0, true, BOOT_HEADER_SEED_KILL_NONE,
+                                      &o));
+        /* The save is never an in-place rewrite of the stub, so the armed
+         * mid-save fault is never reached and the root is replaced whole. */
+        ASSERT(o.first);
+        ASSERT(o.next.rows == 11); /* rows 0..10 */
+        ASSERT(o.next.max_height == 10);
+        ASSERT(o.next.foreign == 0);
+        ASSERT(o.disk.loaded);
+        ASSERT(o.disk.rows == 11);
+        ASSERT(o.disk.foreign == 0);
+    } _test_next:;
+    return failures;
+}
+
+static int case_kill_after_stub_root_removed(void)
+{
+    int failures = 0;
+    TEST("boot_header_seed: a kill after the stub root is removed and before the save re-decides the seed") {
+        struct hsi_save_kill_out o;
+        ASSERT(hsi_stub_save_kill_run(
+            6, 3, false, BOOT_HEADER_SEED_KILL_AFTER_ROOT_UNLINK, &o));
+        ASSERT(!o.first);
+        /* No root: the next boot is FRESH and runs the same decision. The
+         * stub's 3 header-only side rows died with the killed process. */
+        ASSERT(o.next.rows == 11);
+        ASSERT(o.next.max_height == 10);
+        ASSERT(o.next.foreign == 0);
+        ASSERT(o.disk.loaded);
+        ASSERT(o.disk.rows == 11);
+        ASSERT(o.disk.foreign == 0);
+    } _test_next:;
+    return failures;
+}
+
+static int hsi_bind_tests(void)
+{
+    int failures = 0;
+    failures += case_rows_above_checkpoint_removed();
+    failures += case_seed_at_checkpoint_kept_whole();
+    failures += case_resident_rows_survive_the_bind();
+    failures += case_bind_reaches_owned_state_rung();
+    failures += case_rung_needs_every_lower_rung();
+    failures += case_rung_chainwork_must_match();
+    failures += case_heavier_fork_does_not_deny_rung();
+    failures += case_kill_before_unbound_discard();
+    failures += case_kill_points_never_resurrect_forged_rows();
+    failures += case_rejected_seed_keeps_stub_bytes();
+    failures += case_kill_mid_root_save_recovers();
+    failures += case_kill_after_stub_root_removed();
+    return failures;
+}
+
 static int hsi_mutant_tests(void)
 {
     int failures = 0;
@@ -1615,6 +2345,7 @@ int test_boot_header_seed_import(void)
     failures += case_bad_row();
     failures += case_sync_benchmark_headers_phase();
     failures += hsi_mutant_tests();
+    failures += hsi_bind_tests();
     printf("=== boot_header_seed_import: %d failure(s) ===\n", failures);
     return failures;
 }

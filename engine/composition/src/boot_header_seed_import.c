@@ -11,6 +11,7 @@
 #include "core/arith_uint256.h"                 /* chainwork ranking */
 #include "config/boot_consensus_bundle_marker.h" /* sovereign install marker */
 #include "services/block_index_loader.h"        /* load_block_index_flat + promote */
+#include "services/island_anchor.h"             /* compiled rung chainwork */
 #include "services/sync_benchmark_service.h"    /* SYNC_BENCH_HEADERS phase */
 #include "validation/chainstate.h"              /* block_map_next / _count */
 #include "validation/main_state.h"              /* struct main_state */
@@ -38,10 +39,15 @@
 #define HSI_MAX_EXISTING_ENTRIES 1024u
 
 /* The flat loader's process-lifetime arena scratch file (bil_arena_file_map,
- * engine/services/src/block_index_loader.c). It opens this path O_TRUNC and
- * maps it MAP_SHARED; the ladder's own flat load of a stub root file left the
- * stub's rows living in that mapping. */
+ * engine/services/src/block_index_loader.c), created beside the file it
+ * loads: the seed loads in place from <datadir>/bundles, so its arena is
+ * <datadir>/bundles/.block_index.arena and never the one still backing the
+ * rows the ladder loaded from a stub root. */
 #define HSI_LOADER_ARENA_NAME ".block_index.arena"
+
+/* The flat loader builds "<dir>/block_index.bin" in a 1024-byte buffer
+ * (bil_flat_mapping_open); a longer seed path would open a truncated name. */
+#define HSI_LOADER_PATH_MAX 1024u
 
 /* True when a row above genesis holds this node's own body or undo data. */
 static bool hsi_index_has_local_body(const struct main_state *ms)
@@ -150,8 +156,8 @@ hsi_locate_downloaded_artifact(const char *datadir, char *src, size_t src_size)
 /* Never-stuck failure memory for the seed, the same sibling "<name>.failed"
  * convention the bundle autodetect honours (boot_auto_install_bundle.c
  * icb_scan_best_bundle skips a bundle with that marker; its writer is
- * csir_write_failed_marker). An import that discards an unbound seed returns
- * the seed to bundles/ — which keeps boot_bundle_fetch from fetching it again
+ * csir_write_failed_marker). An import that discards an unbound seed leaves
+ * the seed in bundles/ — which keeps boot_bundle_fetch from fetching it again
  * (bbf_header_seed_needed) — and marks it here, so no later boot re-imports
  * it. Delete the marker to retry. A marker path that does not fit refuses the
  * import: a seed that could not be marked would be re-imported every boot. */
@@ -195,133 +201,38 @@ static void hsi_mark_seed_failed(const char *src)
                  "marker %s failed: %s", failp, strerror(errno));
 }
 
-/* Outcome of moving the downloaded artifact to the datadir root. */
-enum hsi_stage_result {
-    HSI_STAGE_MOVED = 0,     /* rename succeeded — the import may proceed */
-    HSI_STAGE_REPLACED_STUB, /* rename atomically replaced a stub root file */
-    HSI_STAGE_BACKUP_FAILED, /* the stub root could not be kept aside */
-    HSI_STAGE_ARENA_BUSY,    /* the loader arena name could not be released */
-    HSI_STAGE_RENAME_FAILED  /* rename failed; errno holds the reason */
-};
-
-/* Release the loader arena's NAME before a second in-process flat load. The
- * loader opens the arena path O_TRUNC and maps it MAP_SHARED, so loading the
- * artifact into a map that the ladder filled from a stub root file would
- * truncate the file still backing the stub's rows (zeroing them under the
- * live hash map) and alias the new arena over them. Unlinking the name leaves
- * the stub's mapping on its own inode (a mapping pins its inode) and gives the
- * new load a fresh file. Absent (ENOENT) is fine: no arena backs the stub. */
-static bool hsi_release_loader_arena_name(const char *datadir)
+/* Release the NAME of the arena the seed's flat load mapped beside the seed.
+ * The loader keeps a successful arena mapped for the process lifetime (the
+ * rows live there; a mapping pins its inode), so the name is only scratch on
+ * disk: unlinking it leaves no stray file in bundles/. Absent is fine. */
+static void hsi_release_seed_arena_name(const char *dir)
 {
     char arena[PATH_MAX];
-    int n = snprintf(arena, sizeof(arena), "%s/" HSI_LOADER_ARENA_NAME, datadir);
+    int n = snprintf(arena, sizeof(arena), "%s/" HSI_LOADER_ARENA_NAME, dir);
     if (n < 0 || (size_t)n >= sizeof(arena))
-        return false;
-    return unlink(arena) == 0 || errno == ENOENT;
+        return; /* unreachable: dir is shorter than the seed path */
+    if (unlink(arena) != 0 && errno != ENOENT)
+        LOG_WARN(HSI_SUBSYS, "header-seed import: could not unlink the loader "
+                 "arena %s: %s", arena, strerror(errno));
 }
 
-/* Drop this import's own stub backup, keeping errno for the caller. */
-static void hsi_drop_stub_backup(const char *backup)
+/* An import by an earlier version kept a replaceable stub aside at
+ * <datadir>/block_index.bin.pre-seed while the seed sat at the root. This
+ * import never moves the root, so such a copy is a leftover of an interrupted
+ * earlier import: remove it (the stub itself, if any, is still at the root). */
+static void hsi_drop_stale_stub_backup(const char *datadir)
 {
-    int err = errno;
-    if (backup && unlink(backup) != 0 && errno != ENOENT)
-        LOG_WARN(HSI_SUBSYS, "header-seed import: could not remove the stub "
-                 "backup link %s: %s", backup, strerror(errno));
-    errno = err;
-}
-
-/* Copy every byte of `in` to `out`; false (errno set) on a read or write
- * error. */
-static bool hsi_copy_stream(FILE *in, FILE *out)
-{
-    unsigned char buf[16384];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            if (errno == 0)
-                errno = EIO;
-            return false;
-        }
-    }
-    if (!ferror(in))
-        return true;
-    if (errno == 0)
-        errno = EIO;
-    return false;
-}
-
-/* Copy `from` to the absent path `to` in binary mode; on failure the partial
- * copy is removed and errno names the first failure. */
-static bool hsi_copy_file(const char *from, const char *to)
-{
-    FILE *in = fopen(from, "rb");
-    if (!in)
-        return false;
-    FILE *out = fopen(to, "wb");
-    if (!out) {
-        int err = errno;
-        (void)fclose(in);
-        errno = err;
-        return false;
-    }
-    errno = 0;
-    bool ok = hsi_copy_stream(in, out);
-    int err = errno;
-    if (fclose(out) != 0 && ok) {
-        ok = false;
-        err = errno;
-    }
-    (void)fclose(in);
-    if (!ok) {
-        (void)unlink(to);
-        errno = err;
-    }
-    return ok;
-}
-
-/* Keep the stub root aside at `backup` so a discarded import can put the same
- * bytes back. A `backup` already present is what an interrupted earlier import
- * left (often a hard link to this very stub): its name is unlinked first and
- * never opened for writing, so the stub itself is never truncated through it.
- * A hard link where the platform has one; a byte copy on Windows or when the
- * filesystem refuses the link (EXDEV, EPERM, ENOTSUP, EMLINK). */
-static bool hsi_keep_stub_aside(const char *dst, const char *backup)
-{
+    char backup[PATH_MAX];
+    int n = snprintf(backup, sizeof(backup), "%s/block_index.bin.pre-seed",
+                     datadir);
+    if (n < 0 || (size_t)n >= sizeof(backup))
+        return;
     if (unlink(backup) == 0)
         LOG_INFO(HSI_SUBSYS, "header-seed import: removed the stale stub "
                  "backup %s an interrupted earlier import left", backup);
     else if (errno != ENOENT)
-        return false;
-#if !defined(_WIN32)
-    if (link(dst, backup) == 0)
-        return true;
-    LOG_INFO(HSI_SUBSYS, "header-seed import: cannot hard-link the stub %s "
-             "aside (%s) — copying it", dst, strerror(errno));
-#endif
-    return hsi_copy_file(dst, backup);
-}
-
-/* Move the artifact to the datadir root so (a) the flat loader finds it and
- * (b) the rom_seed scan re-serves it to the next fresh node. A present root
- * file reaches here only when it is a replaceable stub: rename(2) replaces it
- * atomically, so the root path always names either the stub or the whole
- * artifact. The stub is first kept aside at `backup` (non-NULL exactly when a
- * stub is present) so a discarded import can put the same bytes back. */
-static enum hsi_stage_result
-hsi_stage_artifact_at_root(const char *datadir, const char *src,
-                           const char *dst, const char *backup)
-{
-    if (backup && !hsi_keep_stub_aside(dst, backup))
-        return HSI_STAGE_BACKUP_FAILED;
-    if (backup && !hsi_release_loader_arena_name(datadir)) {
-        hsi_drop_stub_backup(backup);
-        return HSI_STAGE_ARENA_BUSY;
-    }
-    if (rename(src, dst) != 0) {
-        hsi_drop_stub_backup(backup);
-        return HSI_STAGE_RENAME_FAILED;
-    }
-    return backup ? HSI_STAGE_REPLACED_STUB : HSI_STAGE_MOVED;
+        LOG_WARN(HSI_SUBSYS, "header-seed import: could not remove the stale "
+                 "stub backup %s: %s", backup, strerror(errno));
 }
 
 /* Where the root block_index.bin lives and whether it is present; false when
@@ -366,36 +277,6 @@ static bool hsi_seed_may_land(const char *datadir, const struct main_state *ms,
              dst, root_present ? "is present" : "is absent", existing,
              boot_header_seed_index_verdict_reason(v));
     return false;
-}
-
-/* Name the staging failure; the downloaded artifact stays in bundles/. */
-static void hsi_report_stage_failure(enum hsi_stage_result staged,
-                                     const char *src, const char *dst)
-{
-    int err = errno; /* before the blocker write can disturb it */
-    if (staged == HSI_STAGE_BACKUP_FAILED) {
-        hsi_name_blocker("header_seed.stage_failed",
-                         "could not keep the stub header index aside before "
-                         "replacing it with the downloaded seed");
-        LOG_WARN(HSI_SUBSYS, "header-seed import: cannot keep the stub %s "
-                 "aside (%s) — the stub header index is kept", dst,
-                 strerror(err));
-        return;
-    }
-    if (staged == HSI_STAGE_ARENA_BUSY) {
-        hsi_name_blocker("header_seed.stage_failed",
-                         "could not release the block-index loader arena name "
-                         "before replacing the stub header index");
-        LOG_WARN(HSI_SUBSYS, "header-seed import: cannot unlink the loader "
-                 "arena beside %s (%s) — the stub header index is kept",
-                 dst, strerror(err));
-        return;
-    }
-    hsi_name_blocker("header_seed.stage_failed",
-                     "could not move downloaded block_index.bin to datadir "
-                     "root before import");
-    LOG_WARN(HSI_SUBSYS, "header-seed import: rename %s -> %s failed: %s",
-             src, dst, strerror(err));
 }
 
 /* Header-only clamp for the UNTRUSTED artifact: strip HAVE_DATA/HAVE_UNDO,
@@ -583,58 +464,25 @@ static size_t hsi_forget_seed_rows(struct main_state *ms,
 /* One import attempt's paths and the pre-import resident rows. */
 struct hsi_import {
     char src[PATH_MAX];    /* <datadir>/bundles/block_index.bin */
+    char dir[PATH_MAX];    /* <datadir>/bundles: the seed loads in place */
     char dst[PATH_MAX];    /* <datadir>/block_index.bin */
-    char backup[PATH_MAX]; /* stub hard link; "" when no stub root */
     bool root_present;
     struct hsi_resident resident;
 };
 
-/* Put the files back the way this import found them: the seed returns to
- * bundles/ (so the fetch does not download it again) and a stub root is
- * restored from the copy kept aside (a hard link where the platform allows
- * one, so usually the very same file). The root never keeps the
- * seed: when it cannot move back, the seed copy this import made at the root
- * is removed. Never removes a file the node had before the import. */
-static void hsi_unstage_seed(const struct hsi_import *imp)
-{
-    bool moved_back = rename(imp->dst, imp->src) == 0;
-    if (!moved_back)
-        LOG_WARN(HSI_SUBSYS, "header-seed import: could not return the "
-                 "discarded seed %s to %s: %s", imp->dst, imp->src,
-                 strerror(errno));
-    if (imp->backup[0]) {
-        if (rename(imp->backup, imp->dst) == 0)
-            return;
-        LOG_WARN(HSI_SUBSYS, "header-seed import: could not restore the stub "
-                 "header index %s from %s: %s — the stub stays at %s",
-                 imp->dst, imp->backup, strerror(errno), imp->backup);
-    }
-    if (!moved_back && unlink(imp->dst) != 0 && errno != ENOENT)
-        LOG_WARN(HSI_SUBSYS, "header-seed import: could not remove the "
-                 "discarded seed %s: %s", imp->dst, strerror(errno));
-}
-
 /* All-or-nothing: the imported chain does not own the baked checkpoint, so
- * none of it stays. Called before clamp, publish and save, so the resident
- * rows, pindex_best_header, the active-chain window and the served tip were
- * never touched; this removes the seed rows from the map and the seed from
- * the root. The loader keeps its arena mapped for the process lifetime (a
- * successful load never munmaps it, bil_arena_release), but after
- * hsi_forget_seed_rows no map bucket, frontier or tip points into it; the
- * marker keeps later boots from loading another, so it is one per boot. Its
- * file name is this load's own scratch (the stub's was released before
- * staging), so it is unlinked: the mapping pins the inode until exit. */
-static void hsi_discard_unbound_seed(const char *datadir, struct main_state *ms,
+ * none of it stays. Called before bind, clamp, save and publish, so the
+ * resident rows, pindex_best_header, the active-chain window, the served tip
+ * and the root index were never touched; this removes the seed rows from the
+ * map, keeps the seed in bundles/ (so the fetch does not download it again)
+ * and marks it failed so no later boot re-imports it. */
+static void hsi_discard_unbound_seed(struct main_state *ms,
                                      const struct hsi_import *imp,
                                      int ckpt_height)
 {
     size_t loaded = block_map_count(&ms->map_block_index);
     size_t removed = hsi_forget_seed_rows(ms, &imp->resident);
-    hsi_unstage_seed(imp);
     hsi_mark_seed_failed(imp->src);
-    if (!hsi_release_loader_arena_name(datadir))
-        LOG_WARN(HSI_SUBSYS, "header-seed import: could not unlink the loader "
-                 "arena of the discarded seed beside %s", imp->dst);
     hsi_name_blocker("header_seed.checkpoint_unbound",
                      "header seed does not own the baked checkpoint block "
                      "hash — discarded; headers and the checkpoint arrive "
@@ -668,67 +516,246 @@ static bool hsi_seed_may_stay(struct main_state *ms, int *ckpt_height)
                                            ckpt_height);
 }
 
-/* Build the stub backup path (only when a stub root is present) and snapshot
- * the resident rows; false (logged, blocker named) when either fails, before
- * anything is moved. */
-static bool hsi_import_prepare(const char *datadir, const struct main_state *ms,
-                               struct hsi_import *imp)
+/* True when `p` is the anchor block's row or one of its ancestors. */
+static bool hsi_bound_by(struct block_index *anchor,
+                         const struct block_index *p)
 {
-    imp->backup[0] = '\0';
-    if (imp->root_present) {
-        int n = snprintf(imp->backup, sizeof(imp->backup),
-                         "%s/block_index.bin.pre-seed", datadir);
-        if (n < 0 || (size_t)n >= sizeof(imp->backup)) {
-            LOG_WARN(HSI_SUBSYS, "header-seed import skipped: the stub backup "
-                     "path under %s does not fit", datadir);
-            return false;
-        }
+    return p->nHeight <= anchor->nHeight &&
+           block_index_get_ancestor(anchor, p->nHeight) == p;
+}
+
+/* True when the chain ending at `row` holds block hash `hash` at height h. */
+static bool hsi_chain_holds(struct block_index *row, int32_t h,
+                            const uint8_t hash[32])
+{
+    struct block_index *at =
+        h >= 0 && row->nHeight >= h ? block_index_get_ancestor(row, (int)h)
+                                    : NULL;
+    return at && at->phashBlock && memcmp(at->phashBlock->data, hash, 32) == 0;
+}
+
+/* Why the seed row `row`, found by compiled rung r's block hash, may not
+ * anchor the seed; NULL when it may. Its chain must hold the checkpoint row
+ * itself and every lower compiled rung's block hash at that rung's height,
+ * and its chainwork as the flat loader's forward pass derived it (parent work
+ * plus the row's own proof, never the file's stored value) must equal the
+ * compiled rung chainwork, the same test the rung install applies
+ * (cbir_own_window, checkpoint_bundle_install_ready.c). Rows at or below a
+ * compiled hash are linked by stored prev_hash only; the chainwork test is
+ * what refuses a forged stretch between true checkpoint and rung rows. */
+static const char *hsi_rung_refusal(struct block_index *row,
+                                    const struct rom_state_rung *r,
+                                    struct block_index *cp_row)
+{
+    if (row->nHeight != r->cp.height)
+        return "the row is not at the rung height";
+    if (block_index_status_load(row) & (unsigned int)BLOCK_FAILED_MASK)
+        return "the row is marked failed";
+    if (block_index_get_ancestor(row, cp_row->nHeight) != cp_row)
+        return "its chain does not hold the baked checkpoint row";
+    size_t n = get_rom_state_rung_count();
+    for (size_t i = 0; i < n; i++) {
+        const struct rom_state_rung *lo = get_rom_state_rung_at(i);
+        if (lo && lo->cp.height < r->cp.height &&
+            !hsi_chain_holds(row, lo->cp.height, lo->cp.block_hash))
+            return "its chain does not hold a lower compiled rung's block hash";
     }
-    if (hsi_resident_capture(ms, &imp->resident))
+    struct arith_uint256 want;
+    island_anchor_work_from_be(&want, r->chainwork);
+    if (arith_uint256_compare(&row->nChainWork, &want) != 0)
+        return "its derived chainwork is not the compiled rung chainwork";
+    return NULL;
+}
+
+/* The highest compiled block hash the seed provably owns: a baked state rung
+ * above the checkpoint (get_rom_state_rung_at) whose row, found by the rung's
+ * own block hash and independent of which row carries the most work, passes
+ * hsi_rung_refusal; else the baked checkpoint row `cp_row`. A rung row that
+ * is present but refused is logged and the next lower anchor is tried. A
+ * fresh node's install at a rung waits for its header chain to own the rung
+ * (consensus_state_install_header_ready_for), so binding the seed only to the
+ * checkpoint would leave every header between the two to P2P (measured live:
+ * 264,402 headers, about 8.5 minutes, STALLED at 600 s). */
+static struct block_index *hsi_bind_anchor(struct main_state *ms,
+                                           struct block_index *cp_row)
+{
+    struct block_index *anchor = cp_row;
+    size_t n = get_rom_state_rung_count();
+    for (size_t i = 0; i < n; i++) {
+        const struct rom_state_rung *r = get_rom_state_rung_at(i);
+        if (!r || r->cp.height <= anchor->nHeight)
+            continue;
+        struct uint256 rung_hash;
+        memcpy(rung_hash.data, r->cp.block_hash, sizeof(rung_hash.data));
+        struct block_index *row = block_map_find(&ms->map_block_index,
+                                                 &rung_hash);
+        const char *why = row ? hsi_rung_refusal(row, r, cp_row) : NULL;
+        if (row && !why)
+            anchor = row;
+        else if (why)
+            LOG_WARN(HSI_SUBSYS, "header-seed import: the seed carries the "
+                     "compiled state rung block hash h=%d but it may not "
+                     "anchor the seed: %s — binding to a lower compiled hash",
+                     (int)r->cp.height, why);
+    }
+    return anchor;
+}
+
+/* Rows of one bind: seed rows kept and removed. */
+struct hsi_bind {
+    size_t kept;
+    size_t removed;
+};
+
+/* Collect into `rows` (in place over the snapshot) the seed rows the anchor
+ * block binds; returns how many. */
+static size_t hsi_collect_bound_rows(struct block_index **rows, size_t n,
+                                     const struct hsi_resident *res,
+                                     struct block_index *anchor)
+{
+    size_t keep = 0;
+    for (size_t i = 0; i < n; i++) {
+        struct block_index *p = rows[i];
+        if (p && !hsi_is_resident(res, p) && hsi_bound_by(anchor, p))
+            rows[keep++] = p;
+    }
+    return keep;
+}
+
+/* Keep from the seed only what a compiled block hash binds: the anchor block
+ * (hsi_bind_anchor) and its ancestors. A seed row above the anchor, or one
+ * not on the anchor block's chain, is bound by no compiled hash (the flat
+ * seed carries no Equihash solutions and its stored hashes are checked only
+ * against their own targets), so it leaves the map before anything is
+ * clamped, saved or published; headers above the anchor arrive by P2P header
+ * sync with full validation. Resident rows are never touched. Every seed row
+ * is taken out (hsi_forget_seed_rows keeps resident lookups intact) and the
+ * bound ones are inserted again, since emptying only some seed buckets could
+ * cut the probe path of a kept one. False when the snapshot or a re-insert
+ * fails; the caller then drops the seed whole. */
+static bool hsi_bind_seed_to_anchor(struct main_state *ms,
+                                    const struct hsi_resident *res,
+                                    struct block_index *anchor,
+                                    struct hsi_bind *out)
+{
+    out->kept = out->removed = 0;
+    struct block_index **rows = NULL;
+    size_t n = 0;
+    if (!block_map_snapshot_indices(&ms->map_block_index, &rows, &n))
+        return false;
+    size_t keep = hsi_collect_bound_rows(rows, n, res, anchor);
+    size_t seed_rows = hsi_forget_seed_rows(ms, res);
+    bool ok = true;
+    for (size_t i = 0; i < keep; i++)
+        ok = block_map_insert(&ms->map_block_index, &rows[i]->hashBlock,
+                              rows[i]) && ok;
+    free(rows);
+    out->kept = keep;
+    out->removed = seed_rows - keep;
+    return ok;
+}
+
+/* Bind the seed to the highest compiled block hash it owns and log what was
+ * kept and removed; with no baked checkpoint there is nothing to bind to and
+ * the seed stays whole. False (logged, blocker named, every seed row removed)
+ * when the bind could not complete. */
+static bool hsi_bind_or_drop(struct main_state *ms,
+                             const struct hsi_import *imp)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (!cp)
         return true;
+    struct uint256 cp_hash;
+    memcpy(cp_hash.data, cp->block_hash, sizeof(cp_hash.data));
+    struct block_index *cp_row = block_map_find(&ms->map_block_index, &cp_hash);
+    struct block_index *anchor = cp_row ? hsi_bind_anchor(ms, cp_row) : NULL;
+    struct hsi_bind b;
+    if (anchor && hsi_bind_seed_to_anchor(ms, &imp->resident, anchor, &b)) {
+        LOG_INFO(HSI_SUBSYS,
+                 "header-seed import: kept %zu seed rows bound by the baked "
+                 "%s block hash (h=%d: that block and its ancestors; "
+                 "checkpoint h=%d), removed %zu (above it or off its chain), "
+                 "%zu resident rows kept — header frontier h=%d; headers "
+                 "above it arrive via P2P", b.kept,
+                 anchor == cp_row ? "checkpoint" : "state-rung",
+                 anchor->nHeight, cp->height, b.removed, imp->resident.count,
+                 anchor->nHeight);
+        return true;
+    }
+    size_t removed = hsi_forget_seed_rows(ms, &imp->resident);
     hsi_name_blocker("header_seed.stage_failed",
-                     "could not record the resident header index before "
-                     "importing the seed");
-    LOG_WARN(HSI_SUBSYS, "header-seed import skipped: could not snapshot the "
-             "%zu resident header entries", block_map_count(&ms->map_block_index));
+                     "could not bind the header seed to the baked checkpoint "
+                     "block — dropped; headers arrive via P2P");
+    LOG_WARN(HSI_SUBSYS, "header-seed import: binding the seed to the baked "
+             "checkpoint (h=%d) failed — removed all %zu seed rows, kept the "
+             "%zu resident rows, the seed stays at %s for the next boot",
+             cp->height, removed, imp->resident.count, imp->src);
+    sync_benchmark_phase_end(SYNC_BENCH_HEADERS);
     return false;
 }
 
-/* Stage the seed at the root and run the shared verified flat loader; false
- * (blocker named, logged) when either step refuses. */
-static bool hsi_stage_and_load(const char *datadir, struct main_state *ms,
-                               const struct hsi_import *imp)
+/* Build the seed directory path (it must fit the loader's path buffer) and
+ * snapshot the resident rows; false (logged, blocker named) when either
+ * fails, before anything is loaded. */
+static bool hsi_import_prepare(const char *datadir, const struct main_state *ms,
+                               struct hsi_import *imp)
 {
-    enum hsi_stage_result staged = hsi_stage_artifact_at_root(
-        datadir, imp->src, imp->dst, imp->root_present ? imp->backup : NULL);
-    if (staged != HSI_STAGE_MOVED && staged != HSI_STAGE_REPLACED_STUB) {
-        hsi_report_stage_failure(staged, imp->src, imp->dst);
+    int n = snprintf(imp->dir, sizeof(imp->dir), "%s/bundles", datadir);
+    if (n < 0 || (size_t)n >= sizeof(imp->dir) ||
+        strlen(imp->src) >= HSI_LOADER_PATH_MAX) {
+        LOG_WARN(HSI_SUBSYS, "header-seed import skipped: the seed path %s "
+                 "does not fit the flat loader's %u-byte path", imp->src,
+                 HSI_LOADER_PATH_MAX);
         return false;
     }
-    if (staged == HSI_STAGE_REPLACED_STUB)
+    if (!hsi_resident_capture(ms, &imp->resident)) {
+        hsi_name_blocker("header_seed.stage_failed",
+                         "could not record the resident header index before "
+                         "importing the seed");
+        LOG_WARN(HSI_SUBSYS, "header-seed import skipped: could not snapshot "
+                 "the %zu resident header entries",
+                 block_map_count(&ms->map_block_index));
+        return false;
+    }
+    hsi_drop_stale_stub_backup(datadir);
+    return true;
+}
+
+/* Run the shared verified flat loader over the seed IN PLACE in bundles/: the
+ * root index is never replaced by peer bytes, so no kill at any later step
+ * can leave an unchecked seed where the next boot's ladder loads this node's
+ * own index. False (blocker named, logged) when the loader refuses; the
+ * refused seed is removed from bundles/ (a later boot may fetch another) and
+ * the root index, stub or absent, is left exactly as it was. */
+static bool hsi_load_seed(struct main_state *ms, const struct hsi_import *imp)
+{
+    if (imp->root_present)
         LOG_INFO(HSI_SUBSYS,
-                 "header-seed import: replaced the stub header index at %s "
-                 "(%zu header-only entries, tip at genesis or absent) with the "
-                 "downloaded seed — importing it as on a fresh node",
+                 "header-seed import: the root index %s is a replaceable stub "
+                 "(%zu header-only entries, tip at genesis or absent) — "
+                 "importing the downloaded seed over it as on a fresh node",
                  imp->dst, block_map_count(&ms->map_block_index));
 
-    /* Load via the shared verified flat loader: embedded SHA3 re-verify,
-     * per-row PoW-target admission (block_row_verify → CheckProofOfWork) with
-     * per-row quarantine, persisted-FAILED-bit reconcile against the baked ROM
-     * checkpoint, pprev link, and the canonical forward pass (nChainWork/skip).
-     * Genesis (already in the ladder-seeded map) is deduped; header entries
-     * link pprev to it by hash. */
-    struct zcl_result r = load_block_index_flat(datadir, ms);
-    if (r.ok)
+    /* Embedded SHA3 re-verify, per-row PoW-target admission (block_row_verify
+     * → CheckProofOfWork) with per-row quarantine, persisted-FAILED-bit
+     * reconcile against the baked ROM checkpoint, pprev link, and the
+     * canonical forward pass (nChainWork/skip). Rows already resident are
+     * deduped; seed rows link pprev to them by hash. */
+    struct zcl_result r = load_block_index_flat(imp->dir, ms);
+    if (r.ok) {
+        hsi_release_seed_arena_name(imp->dir);
         return true;
+    }
     sync_benchmark_phase_end(SYNC_BENCH_HEADERS);
     hsi_name_blocker("header_seed.load_failed",
                      hsi_flat_load_failure_reason(&r));
+    bool removed = unlink(imp->src) == 0;
     LOG_WARN(HSI_SUBSYS,
-             "header-seed import: flat load rejected the artifact (%s) — "
-             "falling back to P2P header sync", r.message);
-    /* The loader removed its own rows; the stub (if any) was replaced. */
-    hsi_drop_stub_backup(imp->root_present ? imp->backup : NULL);
+             "header-seed import: flat load rejected the artifact (%s) — %s %s; "
+             "kept the %zu resident header entries and the root index %s "
+             "untouched; falling back to P2P header sync", r.message,
+             removed ? "removed" : "could not remove", imp->src,
+             block_map_count(&ms->map_block_index), imp->dst);
     return false;
 }
 
@@ -796,49 +823,138 @@ static void hsi_report_published_frontier(struct main_state *ms, size_t count,
              count, frontier, ckpt_height);
 }
 
+#ifdef ZCL_TESTING
+static enum boot_header_seed_kill_point g_hsi_kill_at;
+void boot_header_seed_import_test_kill_at(enum boot_header_seed_kill_point p)
+{
+    g_hsi_kill_at = p;
+}
+static bool hsi_killed_at(enum boot_header_seed_kill_point p)
+{
+    if (g_hsi_kill_at != p)
+        return false;
+    g_hsi_kill_at = BOOT_HEADER_SEED_KILL_NONE;
+    return true;
+}
+#define HSI_KILLED_AT(p) hsi_killed_at(p)
+#else
+#define HSI_KILLED_AT(p) false
+#endif
+
+/* Remove a stub root before the bound save. Over a present root the flat
+ * writer first tries an IN-PLACE rewrite (flat_save_publish,
+ * engine/services/src/block_index_flat_save.c; it takes it when at most a
+ * quarter of the rows differ, so only over a stub almost as large as the
+ * bound map): a kill in the middle of that leaves the stub's old header over
+ * a half-new payload, a root that no longer loads, which the next boot's
+ * verdict (NOT_LOADED) would refuse to re-seed on every later boot. With no
+ * root the writer's only path is its full tmp+fsync+rename, so a kill leaves
+ * either no root (the next boot is FRESH and decides the seed again) or the
+ * complete bound root. The stub is header-only by the verdict (STUB): a kill
+ * between this unlink and the rename loses only its rows, which P2P header
+ * sync sends again. On Windows the in-place save is always declined, so the
+ * stub is left for the full rewrite to replace. */
+static struct zcl_result hsi_remove_stub_root(const struct hsi_import *imp)
+{
+#ifndef _WIN32
+    if (imp->root_present && unlink(imp->dst) != 0 && errno != ENOENT)
+        return ZCL_ERR(-1, "could not remove the stub root before the full "
+                       "atomic save: %s", strerror(errno));
+#else
+    (void)imp;
+#endif
+    return ZCL_OK;
+}
+
+/* Write the bound, clamped map as the root index BEFORE anything of the seed
+ * is published: the next boot's ladder (rung "flat") loads the root verbatim
+ * as this node's own index, so it must already hold exactly what memory keeps
+ * — no row above the anchor, no seeder HAVE_DATA or (nFile, nDataPos)
+ * (a respawn before any shutdown save would otherwise re-admit them as its
+ * own warm cache; measured: ~1.3M pread/s on an absent blk00049.dat). With
+ * the stub root removed first (hsi_remove_stub_root) the write is the flat
+ * writer's full tmp+fsync+rename, never an in-place rewrite, and it
+ * re-encodes the hash-bound anchor header from the map. False (logged,
+ * blocker named, every seed row removed, the seed left in bundles/ for the
+ * next boot) when the stub cannot be removed or the write fails. */
+static bool hsi_persist_bound_index(const char *datadir, struct main_state *ms,
+                                    const struct hsi_import *imp)
+{
+    struct zcl_result w = hsi_remove_stub_root(imp);
+    if (w.ok && HSI_KILLED_AT(BOOT_HEADER_SEED_KILL_AFTER_ROOT_UNLINK))
+        return false;
+    if (w.ok)
+        w = save_block_index_flat_identity(datadir, ms, NULL);
+    if (w.ok)
+        return true;
+    size_t removed = hsi_forget_seed_rows(ms, &imp->resident);
+    hsi_name_blocker("header_seed.stage_failed",
+                     "could not write the checkpoint-bound header index to "
+                     "the datadir root — the seed stays in bundles/ for the "
+                     "next boot; headers arrive via P2P");
+    LOG_WARN(HSI_SUBSYS, "header-seed import: writing %s failed (%s) — "
+             "removed all %zu seed rows from memory, kept the %zu resident "
+             "rows; the root holds no seed row; the seed stays at %s for the "
+             "next boot", imp->dst, w.message, removed, imp->resident.count,
+             imp->src);
+    sync_benchmark_phase_end(SYNC_BENCH_HEADERS);
+    return false;
+}
+
+/* The root now holds the bound index: the downloaded seed is consumed. A
+ * seed that cannot be removed is harmless — a later boot finds this node's
+ * own root index and either refuses the seed by the verdict or re-runs the
+ * same decision on it. */
+static void hsi_consume_seed(const struct hsi_import *imp)
+{
+    if (unlink(imp->src) != 0 && errno != ENOENT)
+        LOG_WARN(HSI_SUBSYS, "header-seed import: could not remove the "
+                 "imported seed %s (%s); the root index %s already holds the "
+                 "bound rows", imp->src, strerror(errno), imp->dst);
+}
+
+/* Load the seed and decide it: false when it was refused, discarded or the
+ * bind failed (each path logged its outcome). */
+static bool hsi_load_and_bind(const char *datadir, struct main_state *ms,
+                              struct hsi_import *imp)
+{
+    if (!hsi_import_wanted(datadir, ms, imp) ||
+        !hsi_import_prepare(datadir, ms, imp) || !hsi_load_seed(ms, imp))
+        return false;
+    if (HSI_KILLED_AT(BOOT_HEADER_SEED_KILL_AFTER_LOAD))
+        return false;
+
+    /* Checkpoint ownership BEFORE anything of the seed is bound, clamped,
+     * saved or published: does the chain the publish would choose own the
+     * baked checkpoint block hash — the exact precondition the bundle install
+     * defers on (consensus_state_checkpoint_header_ready)? The flat seed
+     * carries no Equihash solutions, so its rows passed only their own PoW
+     * target; a seed that does not bind the checkpoint (stale or forged) is
+     * discarded whole and the node falls back to P2P headers. */
+    int ckpt_height = -1;
+    if (!hsi_seed_may_stay(ms, &ckpt_height)) {
+        hsi_discard_unbound_seed(ms, imp, ckpt_height);
+        return false;
+    }
+    return hsi_bind_or_drop(ms, imp);
+}
+
 static bool hsi_import_run(const char *datadir, struct main_state *ms,
                            struct hsi_import *imp)
 {
-    if (!hsi_import_wanted(datadir, ms, imp) ||
-        !hsi_import_prepare(datadir, ms, imp) ||
-        !hsi_stage_and_load(datadir, ms, imp))
+    if (!hsi_load_and_bind(datadir, ms, imp))
         return false;
-
-    /* Checkpoint ownership BEFORE anything of the seed is clamped, published
-     * or saved: does the chain the publish would choose own the baked
-     * checkpoint block hash — the exact precondition the bundle install defers
-     * on (consensus_state_checkpoint_header_ready)? The flat seed carries no
-     * Equihash solutions, so its rows passed only their own PoW target; a
-     * seed that does not bind the checkpoint (stale or forged) is discarded
-     * whole and the node falls back to P2P headers. */
-    int ckpt_height = -1;
-    if (!hsi_seed_may_stay(ms, &ckpt_height)) {
-        hsi_discard_unbound_seed(datadir, ms, imp, ckpt_height);
-        return false;
-    }
-
     size_t clamped = hsi_clamp_rows_header_only(ms);
+    if (HSI_KILLED_AT(BOOT_HEADER_SEED_KILL_AFTER_DECISION) ||
+        !hsi_persist_bound_index(datadir, ms, imp) ||
+        HSI_KILLED_AT(BOOT_HEADER_SEED_KILL_AFTER_SAVE))
+        return false;
+    hsi_consume_seed(imp);
 
     size_t count = block_map_count(&ms->map_block_index);
     if (hsi_publish_loaded_frontier(ms, count) == HSI_PROMOTE_ALLOC_FAILED)
         LOG_WARN(HSI_SUBSYS, "header-seed import: promote alloc failed (%zu "
                  "entries) — pindex_best_header publish may lag", count);
-
-    /* Persist the clamped map NOW. The on-disk artifact is otherwise still
-     * the seeder's original bytes, and the NEXT boot's block-index ladder
-     * (rung "flat") loads <datadir>/block_index.bin VERBATIM — the header-only
-     * clamp above lives only in RAM on this import path. A self-respawn before
-     * any shutdown save (the checkpoint_bundle_install_ready arm-and-respawn)
-     * would then re-admit the seeder's HAVE_DATA + (nFile, nDataPos) as this
-     * node's own warm cache, and every have-data-gated walker read-storms blk
-     * files this node never wrote (measured: ~1.3M pread/s on an absent
-     * blk00049.dat, wedging a supervised tick child). Saving here makes the
-     * clamp durable before the artifact can serve as the next boot's flat
-     * cache; the save re-encodes the hash-bound anchor header (the checkpoint
-     * solution the install binds) from the in-memory map. */
-    save_block_index_flat(datadir, ms);
-    /* The stub was replaced for good; its hard link is no longer needed. */
-    hsi_drop_stub_backup(imp->root_present ? imp->backup : NULL);
     hsi_report_published_frontier(ms, count, clamped);
     sync_benchmark_phase_end(SYNC_BENCH_HEADERS);
     return true;

@@ -21,7 +21,32 @@
  * checkpoint. The final consensus bind stays exactly where it already is: the
  * install gate (consensus_state_checkpoint_header_ready) independently requires
  * the imported chain to own the baked checkpoint block hash before any bundle
- * installs. */
+ * installs.
+ *
+ * What a seed may contribute is only what a compiled block hash binds: a seed
+ * whose chain does not own the baked checkpoint is discarded whole, and from
+ * one that does only the anchor block's row and its ancestors are kept. The
+ * anchor is the highest compiled block hash the seed provably owns: a baked
+ * state rung above the checkpoint (the hash a fresh node's install at that
+ * rung already binds its header chain to) whose row, found by that hash, has
+ * the checkpoint row and every lower rung's hash on its chain and the
+ * compiled rung chainwork as its derived chainwork; else the baked
+ * checkpoint. A row above the anchor, or off the anchor block's chain, is
+ * bound by no compiled hash (its stored hash is checked only against its own
+ * target, so forging one needs no Equihash solution); such rows are removed
+ * before anything is saved or published, and the headers above the anchor
+ * arrive by P2P header sync with full validation.
+ *
+ * Crash safety: the seed is loaded IN PLACE from <datadir>/bundles. The root
+ * <datadir>/block_index.bin — the file the next boot's ladder loads as this
+ * node's own index — is only ever written by this node's own flat save of the
+ * bound, clamped map, and only after the decision. A STUB root is removed
+ * just before that save, so the save is the flat writer's full
+ * tmp+fsync+rename and never an in-place rewrite that a kill could leave
+ * half-written. A kill before the rename leaves no root (or the stub, when
+ * the removal was not yet durable) and the seed in bundles/, so the next boot
+ * runs the same decision on it again; a root that does not load
+ * (NOT_LOADED) is never produced by this import and is still never seeded. */
 
 #ifndef ZCL_CONFIG_BOOT_HEADER_SEED_IMPORT_H
 #define ZCL_CONFIG_BOOT_HEADER_SEED_IMPORT_H
@@ -70,13 +95,30 @@ boot_header_seed_index_verdict_reason(enum boot_header_seed_index_verdict v);
  * block-index map. STRICT NO-OP (returns false) when: the artifact is absent,
  * seeding is opted out (ZCL_NO_BUNDLE_FETCH), the datadir is already sovereign
  * (bundle-installed marker), or the loaded index is anything but FRESH or STUB
- * (see boot_header_seed_index_verdict). On a real import it moves the artifact
- * to the datadir root (so the rom_seed scan re-serves it and the flat loader
- * finds it) — atomically replacing a STUB root file — loads it via the shared
- * verified flat loader, applies the header-only clamp, publishes
- * pindex_best_header, and names a typed blocker (never a fatal abort — always
- * fail-open to P2P IBD) when the load fails or the imported chain does not own
- * the baked checkpoint. Returns true iff headers landed. */
+ * (see boot_header_seed_index_verdict). On a real import it loads the artifact
+ * in place via the shared verified flat loader, decides checkpoint ownership,
+ * keeps only the rows the anchor (checkpoint or owned state rung) binds,
+ * applies the header-only clamp, removes a STUB root and writes the bound map
+ * as the root index with the flat writer's full tmp+fsync+rename (the
+ * rom_seed scan re-serves that file), removes the artifact, then publishes
+ * pindex_best_header. It names a typed blocker (never a fatal
+ * abort — always fail-open to P2P IBD) when the load fails, the imported chain
+ * does not own the baked checkpoint, or the bound index cannot be written.
+ * Returns true iff headers landed. */
 bool boot_header_seed_import_maybe(const char *datadir, struct main_state *ms);
+
+#ifdef ZCL_TESTING
+/* Test seam: simulate process death at one named point of the NEXT import.
+ * The import returns false there and does no further file or memory work, so
+ * a test can run the next boot over exactly the files a kill would leave. */
+enum boot_header_seed_kill_point {
+    BOOT_HEADER_SEED_KILL_NONE = 0,
+    BOOT_HEADER_SEED_KILL_AFTER_LOAD,     /* seed rows loaded, nothing decided */
+    BOOT_HEADER_SEED_KILL_AFTER_DECISION, /* owned seed bound and clamped */
+    BOOT_HEADER_SEED_KILL_AFTER_ROOT_UNLINK, /* stub root removed, not saved */
+    BOOT_HEADER_SEED_KILL_AFTER_SAVE,     /* root index written */
+};
+void boot_header_seed_import_test_kill_at(enum boot_header_seed_kill_point p);
+#endif
 
 #endif /* ZCL_CONFIG_BOOT_HEADER_SEED_IMPORT_H */
