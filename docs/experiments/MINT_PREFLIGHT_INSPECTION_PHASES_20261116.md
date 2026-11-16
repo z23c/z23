@@ -13,4 +13,4 @@ Focused check:
 DEVBUILD_CLASS=light devbuild --wait make -j2 t-fast-exact ONLY=mint_anchor_preflight T_FAST_EXACT_ARGS=--no-cache
 ```
 
-Initial three-phase check: 1 group passed, zero skipped. Final four-phase check: 1 group passed, zero failures, skips, environment-unobserved or load-flaky cases; test body 206 ms.
+Initial three-phase check: 1 group passed, zero skipped. Final four-phase check: 1 group passed, zero failures, skips, environment-unobserved or load-flaky cases; test body 206 ms. After extracting the phase helper, the same focused group passed with zero failures, skips, environment-unobserved or load-flaky cases; test body 131 ms.

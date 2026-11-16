@@ -675,6 +675,10 @@ static bool remove_temp_family(const char *dir, const char *main_path, char *rea
     return ok;
 }
 
+static void snapshot_submark(bool snapshot, const char *name, int64_t start) {
+    if (snapshot) (void)boot_submark(name, start);
+}
+
 /* Open an inspected database and run the gate; every failure that is not the
  * gate's own refusal is named in reason. */
 static bool inspect_open_and_gate(const char *target, int flags, const char *what, char *reason, size_t reason_size) {
@@ -682,7 +686,7 @@ static bool inspect_open_and_gate(const char *target, int flags, const char *wha
     bool snapshot = strcmp(what, "snapshot") == 0;
     int64_t phase = boot_clock_ms();
     int rc = sqlite3_open_v2(target, &db, flags, NULL);
-    if (snapshot) (void)boot_submark("mint_preflight.copy_open", phase);
+    snapshot_submark(snapshot, "mint_preflight.copy_open", phase);
     bool ok = rc == SQLITE_OK;
     if (!ok)
         preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_open rc=%d sqlite=%s", what, rc,
@@ -690,7 +694,7 @@ static bool inspect_open_and_gate(const char *target, int flags, const char *wha
     if (ok) {
         phase = boot_clock_ms();
         rc = sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL);
-        if (snapshot) (void)boot_submark("mint_preflight.copy_query_only", phase);
+        snapshot_submark(snapshot, "mint_preflight.copy_query_only", phase);
         ok = rc == SQLITE_OK;
         if (!ok)
             preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_query_only rc=%d sqlite=%s", what, rc,
@@ -699,14 +703,14 @@ static bool inspect_open_and_gate(const char *target, int flags, const char *wha
     if (ok) {
         phase = boot_clock_ms();
         ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
-        if (snapshot) (void)boot_submark("mint_preflight.copy_gate", phase);
+        snapshot_submark(snapshot, "mint_preflight.copy_gate", phase);
         if (!ok && reason && reason_size && reason[0] == '\0')
             preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_gate", what);
     }
     if (db) {
         phase = boot_clock_ms();
         rc = sqlite3_close(db);
-        if (snapshot) (void)boot_submark("mint_preflight.copy_close", phase);
+        snapshot_submark(snapshot, "mint_preflight.copy_close", phase);
         if (rc != SQLITE_OK) {
             preflight_reason_set(reason, reason_size, "inspect_read_failed what=%s_close rc=%d", what, rc);
             ok = false;
