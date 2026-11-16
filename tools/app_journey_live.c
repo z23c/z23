@@ -106,9 +106,10 @@ static pid_t g_run_child = -1;   /* aj_run's direct child, for the watchdog */
 static bool g_keep;
 static bool g_role_worker;
 static struct platform_supervised_process g_role_node;
+static bool g_main_network;
 
 struct aj_role_args {
-    const char *work, *peer, *expected, *share, *share_sha256, *share_publisher, *share_root;
+    const char *work, *peer, *expected, *share, *share_sha256, *share_publisher, *share_root, *network;
     long seconds;
     bool sender, receiver, worker, serve;
 };
@@ -147,6 +148,7 @@ static bool aj_role_flag(struct aj_role_args *r, const char *a)
 
 static bool aj_role_value(struct aj_role_args *r, const char *a)
 {
+    if (!strncmp(a, "--network=", 10) && !r->network) { r->network = a + 10; return true; }
     if (!strncmp(a, "--work=", 7) && !r->work) { r->work = a + 7; return true; }
     if (!strncmp(a, "--peer=", 7) && !r->peer) { r->peer = a + 7; return true; }
     if (!strncmp(a, "--expected=", 11) && !r->expected) { r->expected = a + 11; return true; }
@@ -174,7 +176,7 @@ static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
         if (!aj_role_flag(r, argv[i]) && !aj_role_value(r, argv[i])) return false;
     }
     return r->sender != r->receiver && r->work && r->work[0] == '/' &&
-        r->work[1] && r->seconds && aj_role_share_args(r) &&
+        r->work[1] && r->seconds && (!r->network || !strcmp(r->network, "main") || !strcmp(r->network, "regtest")) && aj_role_share_args(r) &&
         (r->sender ? !r->peer && !r->expected && !r->serve :
          aj_role_peer(r->peer) && r->expected && r->expected[0] == '/');
 }
@@ -602,12 +604,15 @@ static bool aj_node_flags_build(struct aj_node_flags *f, const char *home,
 
 static void aj_node_argv(struct aj_node_flags *f, char **argv)
 {
-    char *items[] = {f->bin, f->ddf, (char *)"-regtest", f->p2pf, f->rpcf, f->fsf,
-        f->httpsf, f->cons, (char *)"-onion-persist", f->pkg,
-        (char *)"-regtestshielded", (char *)"-operator-lane=dev",
-        (char *)"-wallet-no-phrase-backup", (char *)"-nobgvalidation",
-        (char *)"-nolegacyimport", (char *)"-showmetrics=0", NULL};
-    memcpy(argv, items, sizeof(items));
+    size_t n = 0;
+    argv[n++] = f->bin; argv[n++] = f->ddf;
+    if (!g_main_network) argv[n++] = (char *)"-regtest";
+    argv[n++] = f->p2pf; argv[n++] = f->rpcf; argv[n++] = f->fsf; argv[n++] = f->httpsf; argv[n++] = f->cons;
+    argv[n++] = (char *)"-onion-persist"; argv[n++] = f->pkg;
+    if (g_main_network) argv[n++] = (char *)"-bind=127.0.0.1";
+    else { argv[n++] = (char *)"-regtestshielded"; argv[n++] = (char *)"-nobgvalidation"; }
+    argv[n++] = (char *)"-operator-lane=dev"; argv[n++] = (char *)"-wallet-no-phrase-backup";
+    argv[n++] = (char *)"-nolegacyimport"; argv[n++] = (char *)"-showmetrics=0"; argv[n] = NULL;
 }
 
 static pid_t aj_node_spawn(const char *home, const char *datadir, const char *log,
@@ -638,6 +643,12 @@ static pid_t aj_node_spawn(const char *home, const char *datadir, const char *lo
     return pid > 0 ? pid : 0;
 }
 
+static size_t aj_cli_network_arg(char **argv, size_t n)
+{
+    if (!g_main_network) argv[n++] = (char *)"-regtest";
+    return n;
+}
+
 /* One z23 CLI call against a node's RPC (flags in argv, no env needed). */
 static int aj_cli(const char *datadir, int rpc, char *const tail[],
                   char *out, size_t cap, int timeout_s, const char *home)
@@ -648,8 +659,9 @@ static int aj_cli(const char *datadir, int rpc, char *const tail[],
         snprintf(ddf, sizeof(ddf), "-datadir=%s", datadir) >= (int)sizeof(ddf) ||
         snprintf(rpcf, sizeof(rpcf), "--rpcport=%d", rpc) >= (int)sizeof(rpcf))
         return -1;
-    char *argv[24] = {bin, ddf, rpcf, (char *)"-regtest"};
-    size_t n = 4;
+    char *argv[24] = {bin, ddf, rpcf};
+    size_t n = 3;
+    n = aj_cli_network_arg(argv, n);
     for (size_t i = 0; tail[i] && n < 23; i++) argv[n++] = tail[i];
     argv[n] = NULL;
     return aj_run(home ? home : "/nonexistent", "/", timeout_s, out, cap, argv);
@@ -739,9 +751,10 @@ static int aj_app(struct aj_node_ctx *c, const char *verb, const char *target,
         snprintf(ddf, sizeof(ddf), "-datadir=%s", c->datadir) >= (int)sizeof(ddf) ||
         snprintf(rpcf, sizeof(rpcf), "--rpcport=%d", c->rpc) >= (int)sizeof(rpcf))
         return -1;
-    char *argv[12] = {bin, ddf, rpcf, (char *)"-regtest", (char *)"app",
-                      (char *)verb};
-    size_t n = 6;
+    char *argv[12] = {bin, ddf, rpcf};
+    size_t n = 3;
+    n = aj_cli_network_arg(argv, n);
+    argv[n++] = (char *)"app"; argv[n++] = (char *)verb;
     if (target) argv[n++] = (char *)target;
     argv[n++] = (char *)"--yes";
     argv[n] = NULL;
@@ -2478,9 +2491,10 @@ static bool aj_share_ready(const struct aj_share_state *s)
     int n = snprintf(body, sizeof(body),
         "{\"name\":\"%s\",\"sha256\":\"%s\",\"size\":%lld,\"release_id\":\"%s\","
         "\"root\":\"%s\",\"publisher\":\"%s\",\"image\":\"%s\",\"carrier\":\"%s\","
-        "\"host\":\"%s\",\"generation\":%lld,\"host_status_enabled\":true}\n",
+        "\"host\":\"%s\",\"generation\":%lld,\"network\":\"%s\",\"host_status_enabled\":true}\n",
         s->offer.name, s->offer.sha256, (long long)s->size, s->release, s->offer.root,
-        s->offer.publisher, g_image_a, s->offer.carrier, g_host_hex, (long long)s->generation);
+        s->offer.publisher, g_image_a, s->offer.carrier, g_host_hex, (long long)s->generation,
+        g_main_network ? "main" : "regtest");
     return n > 0 && (size_t)n < sizeof(body) && aj_path_join(path, sizeof(path), g_work, "share-ready.json") &&
         aj_write_file(path, body);
 }
@@ -2701,7 +2715,7 @@ static int aj_role_node_worker(int argc, char **argv)
 {
     char root[PATH_MAX], target[1024], token; struct stat st;
     struct pollfd control = {.fd = 3, .events = POLLIN};
-    if (argc != 18 || !getcwd(root, sizeof(root)) ||
+    if ((argc != 16 && argc != 18) || !getcwd(root, sizeof(root)) ||
         snprintf(target, sizeof(target), "%s/build/bin/zclassic23", root) >= (int)sizeof(target) ||
         strcmp(argv[2], target) || fstat(3, &st) != 0 || !S_ISFIFO(st.st_mode) ||
         poll(&control, 1, 1000) <= 0 || !(control.revents & POLLIN) ||
@@ -2815,8 +2829,9 @@ static int aj_role_entry(int argc, char **argv)
 {
     struct aj_role_args args;
     if (!aj_role_parse(argc, argv, &args) || !getcwd(g_repo, sizeof(g_repo))) {
-            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve] [--share=/file --share-sha256=HEX --share-publisher=HEX --share-root=HEX]\n"); return 3;
+            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve] [--network=main|regtest] [--share=/file --share-sha256=HEX --share-publisher=HEX --share-root=HEX]\n"); return 3;
     }
+    g_main_network = args.network && !strcmp(args.network, "main");
     if (args.worker) return aj_role_work(&args);
     int rc = aj_role_owner(argc, argv, &args);
     if (rc == 0) printf("%s: PASS; evidence %s\n", args.sender ? "sender" : "receiver", args.work);

@@ -180,12 +180,13 @@ static bool aj_serve_tests(const char *root)
     return ok;
 }
 
-static int aj_nested_node_test(bool crash)
+static int aj_nested_node_test(bool crash, bool main_network)
 {
     struct aj_nested_paths paths;
+    g_main_network = main_network;
     if (!aj_nested_prepare(crash, &paths)) return 1;
     bool observed = aj_nested_observe(crash, paths.ready);
-    bool served = crash || aj_serve_tests(g_repo);
+    bool served = crash || main_network || aj_serve_tests(g_repo);
     bool stopped = aj_role_node_stop();
     (void)unlink(paths.ready); (void)unlink(paths.marker); (void)unlink(paths.log);
     return observed && served && (crash ? !stopped : stopped) ? 0 : 1;
@@ -212,8 +213,9 @@ static int aj_test_supervised_child(const char *mode)
         char b; if (read(3, &b, 1) != 1 || b != 'R') return 99;
         if (!strcmp(mode, "supervised-fail")) return 7;
         if (!strcmp(mode, "supervised-signal")) { raise(SIGKILL); return 99; }
-        if (!strcmp(mode, "supervised-nested")) return aj_nested_node_test(false);
-        if (!strcmp(mode, "supervised-nested-crash")) return aj_nested_node_test(true);
+        if (!strcmp(mode, "supervised-nested-main")) return aj_nested_node_test(false, true);
+        if (!strcmp(mode, "supervised-nested")) return aj_nested_node_test(false, false);
+        if (!strcmp(mode, "supervised-nested-crash")) return aj_nested_node_test(true, false);
         if (!aj_test_detached_ready()) return 99;
         if (!strcmp(mode, "supervised-timeout")) for (;;) pause();
         return 0;
@@ -352,6 +354,7 @@ static int aj_supervised_test(const char *self, const char *tmp)
     failed |= aj_supervised_case(self, tmp, "supervised-timeout", false, false);
     failed |= aj_supervised_case(self, tmp, "supervised-timeout", false, true);
     failed |= aj_supervised_case(self, tmp, "supervised-nested", true, false);
+    failed |= aj_supervised_case(self, tmp, "supervised-nested-main", true, false);
     failed |= aj_supervised_case(self, tmp, "supervised-nested-crash", true, false);
     char *owner_argv[] = {(char *)self, (char *)"--child", (char *)"supervised-ok", NULL};
     struct aj_role_args owner_args = {.seconds = 5};
@@ -554,6 +557,37 @@ static int aj_test_cli(int argc, char **argv)
     return -1;
 }
 
+static bool aj_test_argv_has(char *const *argv, const char *arg)
+{
+    for (size_t i = 0; argv[i]; ++i) if (!strcmp(argv[i], arg)) return true;
+    return false;
+}
+
+static bool aj_test_network_mode(void)
+{
+    char *args[] = {(char *)"fixture", (char *)"--sender", (char *)"--work=/tmp/work",
+        (char *)"--seconds=10", (char *)"--network=main", NULL, NULL};
+    struct aj_role_args r;
+    bool ok = aj_role_parse(5, args, &r) && !strcmp(r.network, "main");
+    args[5] = (char *)"--network=regtest"; ok = !aj_role_parse(6, args, &r) && ok;
+    args[4] = (char *)"--network=testnet"; ok = !aj_role_parse(5, args, &r) && ok;
+    args[4] = (char *)"--network=regtest"; ok = aj_role_parse(5, args, &r) && ok;
+    ok = aj_role_parse(4, args, &r) && !r.network && ok;
+    struct aj_node_flags f = {0}; char *argv[17] = {0}, *cli[3] = {0};
+    if (!aj_node_flags_build(&f, "/tmp/home", "/tmp/data", 1, 2, 3, 4, APPJ_DEAD_SINK, true)) return false;
+    g_main_network = false; aj_node_argv(&f, argv); size_t n = aj_cli_network_arg(cli, 0); cli[n] = NULL;
+    ok = aj_test_argv_has(argv, "-regtest") && aj_test_argv_has(argv, "-regtestshielded") &&
+        aj_test_argv_has(argv, "-nobgvalidation") && !aj_test_argv_has(argv, "-bind=127.0.0.1") &&
+        aj_test_argv_has(cli, "-regtest") && ok;
+    g_main_network = true; aj_node_argv(&f, argv); n = aj_cli_network_arg(cli, 0); cli[n] = NULL;
+    ok = !aj_test_argv_has(argv, "-regtest") && !aj_test_argv_has(argv, "-regtestshielded") &&
+        !aj_test_argv_has(argv, "-nobgvalidation") && aj_test_argv_has(argv, "-bind=127.0.0.1") &&
+        aj_test_argv_has(argv, "-connect=127.0.0.1:39996") && aj_test_argv_has(argv, "-nolegacyimport") &&
+        !aj_test_argv_has(cli, "-regtest") && ok;
+    g_main_network = false;
+    return ok;
+}
+
 static bool aj_test_share_args(void)
 {
     char sha[96], pub[100], root[96]; char h[65], p[67];
@@ -589,6 +623,15 @@ static bool aj_test_share_fault(struct aj_node_ctx *c, const struct aj_role_args
 
 static bool aj_test_share_snapshot_refusals(const char *tmp);
 
+static bool aj_test_ready_network(void)
+{
+    char path[1024], body[2048]; struct json_value v = {0};
+    bool ok = aj_path_join(path, sizeof(path), g_work, "share-ready.json") &&
+        aj_role_read_public(path, body, sizeof(body)) && json_read(&v, body, strlen(body)) &&
+        aj_share_field_is(&v, "network", "regtest");
+    json_free(&v); return ok;
+}
+
 static int aj_test_share(const char *tmp)
 {
     static const char sha[] = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
@@ -606,7 +649,7 @@ static int aj_test_share(const char *tmp)
     bool ok = aj_test_share_args() && aj_share_snapshot(&r, &s) && aj_share_verified(&c, &r, &s) &&
         aj_share_receive(&c, &r, &s) && aj_share_build(&c, &s) &&
         snprintf(marker, sizeof(marker), "%s/build-reached", tmp) < (int)sizeof(marker) && access(marker, F_OK) == 0 && aj_share_offer(&c, &r, &s) &&
-        aj_share_host(&c, &r, &s) && aj_role_public_files(&c) && aj_share_peer_matches(&s) && aj_share_ready(&s);
+        aj_share_host(&c, &r, &s) && aj_role_public_files(&c) && aj_share_peer_matches(&s) && aj_share_ready(&s) && aj_test_ready_network();
     for (size_t i = 0; i < sizeof(faults) / sizeof(faults[0]); ++i)
         ok = aj_test_share_fault(&c, &r, &s, faults[i]) && ok;
     ok = aj_write_file(s.path, "changed") && !aj_share_offer(&c, &r, &s) && ok;
@@ -812,7 +855,7 @@ static int aj_test_dispatch(int argc, char **argv)
 {
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--role-worker"))) &&
         !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
-    if (argc > 2 && !strncmp(argv[1], "-datadir=", 9) && !strcmp(argv[2], "-regtest")) return aj_fake_node();
+    if (argc > 2 && !strncmp(argv[1], "-datadir=", 9) && (!strcmp(argv[2], "-regtest") || !strncmp(argv[2], "-port=", 6))) return aj_fake_node();
     if (argc > 1 && !strcmp(argv[1], "--node-worker")) return app_journey_live_main(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "--sender") || !strcmp(argv[1], "--receiver")))
         return app_journey_live_main(argc, argv);
@@ -825,6 +868,7 @@ static int aj_test_suite(const char *self, const char *tmp)
 {
     int failed = aj_test_cases() | aj_group_startup_test() | aj_group_owned_test();
     failed |= aj_single_get_test(tmp) | aj_catalog_test(tmp) | aj_role_parse_test();
+    failed |= aj_test_network_mode() ? 0 : 1;
     failed |= aj_test_share(tmp);
     failed |= aj_role_expected_test(tmp) | aj_supervised_test(self, tmp) | aj_role_owner_test(self, tmp);
     return failed;
