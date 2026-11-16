@@ -29,11 +29,15 @@ struct wallet;
  * (wallet_scan_range_coverage). If one does not, the scan returns
  * WALLET_SCAN_REFUSED_MISSING_DATA and leaves both tables untouched, so a
  * node started from a state bundle (no bodies below the bundle height) can
- * never replace the rows with a result read from a range with holes. Pass 2
- * rechecks every height before it writes. The empty-range path, and the
- * no-keys path of a wallet with no watch-only address, read no block and
- * skip the guard; a wallet whose only ids are watch-only (the scan loads
- * none of them) passes the guard before its empty replace.
+ * never replace the rows with a result read from a range with holes. After
+ * Pass 1, every height must lie inside a block file Pass 1 read completely,
+ * below that file's end; a missing, uncounted or unreadable file (including
+ * no block file at all) refuses the same way. Pass 2 rechecks every height
+ * and refuses at a block of a matched file that cannot be mapped, lies past
+ * its file's end or does not parse. The empty-range path reads no block and
+ * skips the guard. The no-keys path reads no block either: it skips the
+ * guard only when there is nothing to lose (no watch-only address and both
+ * tables empty), otherwise the guard runs before its empty replace.
  *
  * Returns the number of wallet transactions found, -1 on error, or
  * WALLET_SCAN_REFUSED_MISSING_DATA. */
@@ -45,9 +49,10 @@ int wallet_scan_blocks(struct node_db *ndb,
                        int end_height);
 
 /* wallet_scan_blocks, and fills `coverage` (optional) with what the coverage
- * guard counted: the missing-block count and first missing height that a
- * refusal reports. On a path that skips the guard it reports the range with
- * nothing missing. */
+ * checks counted: the missing or unreadable block count and the first such
+ * height that a refusal reports (a Pass-2 refusal stops at the first, so it
+ * reports at least 1). On a path that skips the guard it reports the range
+ * with nothing missing. */
 int wallet_scan_blocks_checked(struct node_db *ndb,
                                const struct active_chain *chain,
                                const struct wallet *w,
@@ -65,7 +70,7 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
     "them faster)."
 
 /* The refusal body for a row-replacing command (rescanwallet, reindexdb,
- * replaywalletfromchain) whose range lacks block bodies: the missing count,
+ * replaywalletfromchain) whose range lacks readable block bodies: the count,
  * the first missing height, that the wallet rows were kept, and the way out.
  * Writes at most cap bytes, always NUL-terminated when cap > 0. */
 void wallet_scan_refusal_text(const char *command,

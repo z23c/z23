@@ -78,6 +78,23 @@ int wallet_scan_block_file_map(const char *path,
     return fd;
 }
 
+const char *wallet_scan_hole_text(enum wallet_scan_hole_kind kind)
+{
+    switch (kind) {
+    case WALLET_SCAN_HOLE_NO_BODY:
+        return "has no block body";
+    case WALLET_SCAN_HOLE_NO_FILE:
+        return "block file is absent or cannot be mapped";
+    case WALLET_SCAN_HOLE_BEYOND_FILE:
+        return "block data position lies beyond its block file";
+    case WALLET_SCAN_HOLE_UNPARSED:
+        return "block data does not parse";
+    case WALLET_SCAN_HOLE_NONE:
+        break;
+    }
+    return "is readable";
+}
+
 bool wallet_scan_height_has_data(const struct block_index *pi)
 {
     return pi && (pi->nStatus & BLOCK_HAVE_DATA);
@@ -315,76 +332,150 @@ write_fail:
             "result write failed; previous wallet projection retained");
 }
 
+/* The one block file Pass 2 holds mapped while it walks the range. */
+struct wallet_scan_pass2_file {
+    int file; /* mapped block file number, -1 when none */
+    int fd;
+    struct platform_read_mapping mapping;
+};
+
+static void wallet_scan_pass2_file_close(struct wallet_scan_pass2_file *f)
+{
+    platform_read_mapping_close(&f->mapping);
+    if (f->fd >= 0)
+        close(f->fd);
+    f->fd = -1;
+    f->file = -1;
+}
+
+/* Map block file `nfile` unless it is the one already mapped. False when it
+ * cannot be mapped; nothing is then mapped. */
+static bool wallet_scan_pass2_file_select(struct wallet_scan_pass2_file *f,
+                                          const char *datadir, int nfile)
+{
+    if (f->file == nfile)
+        return true;
+    wallet_scan_pass2_file_close(f);
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+                     datadir, nfile);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false; // raw-return-ok:caller logs the hole with its height
+    int fd = wallet_scan_block_file_map(path, &f->mapping);
+    if (fd < 0)
+        return false; // raw-return-ok:caller logs the hole with its height
+    f->fd = fd;
+    f->file = nfile;
+    platform_read_mapping_advise_sequential(&f->mapping);
+    return true;
+}
+
+/* The per-height checks that need no file read: a hole when the height has
+ * no body or its file lies outside the counted files. NONE otherwise, with
+ * *matched telling whether Pass 1 matched its file (unmatched: skip unread). */
+static enum wallet_scan_hole_kind wallet_scan_pass2_locate(
+    const struct block_index *pi, const bool *file_has_match, int num_files,
+    bool *matched)
+{
+    *matched = false;
+    if (!wallet_scan_height_has_data(pi))
+        return WALLET_SCAN_HOLE_NO_BODY;
+    if (pi->nFile < 0 || pi->nFile >= num_files)
+        return WALLET_SCAN_HOLE_NO_FILE;
+    *matched = file_has_match[pi->nFile];
+    return WALLET_SCAN_HOLE_NONE;
+}
+
+/* Read and parse the block of one height whose file Pass 1 matched. `blk` is
+ * initialized first on every path. WALLET_SCAN_HOLE_NONE: `blk` holds the
+ * block (caller frees it). Any other kind is a hole and `blk` holds nothing
+ * to free. */
+static enum wallet_scan_hole_kind wallet_scan_pass2_read(
+    const struct block_index *pi, const char *datadir,
+    struct wallet_scan_pass2_file *f, struct block *blk)
+{
+    block_init(blk);
+    if (!wallet_scan_pass2_file_select(f, datadir, pi->nFile))
+        return WALLET_SCAN_HOLE_NO_FILE;
+    if (!f->mapping.data || pi->nDataPos >= f->mapping.size)
+        return WALLET_SCAN_HOLE_BEYOND_FILE;
+    struct byte_stream bs;
+    stream_init_from_data(&bs, f->mapping.data + pi->nDataPos,
+                          f->mapping.size - pi->nDataPos);
+    if (!block_deserialize(blk, &bs)) {
+        block_free(blk);
+        return WALLET_SCAN_HOLE_UNPARSED;
+    }
+    return WALLET_SCAN_HOLE_NONE;
+}
+
+/* Where Pass 2 stopped, when it stopped at a hole. */
+struct wallet_scan_pass2_hole {
+    int height;
+    int file;
+    enum wallet_scan_hole_kind kind;
+};
+
 /* Walk [start_height, end_height] in height order (spend tracking needs it)
  * and fold every block of a Pass-1-matched file into uset/wl. Returns -1
- * having stopped at the first height with no block body, which it stores in
- * *hole; otherwise the number of blocks deserialized. Every height is
- * checked before the file filter, so this is also the scan-time recheck of
- * the caller's coverage guard. */
+ * having stopped at the first hole, which it stores in *hole; otherwise the
+ * number of blocks deserialized. Every height is checked before the file
+ * filter, so this is also the scan-time recheck of the caller's coverage
+ * guard. */
 static int wallet_scan_pass2_walk(const struct active_chain *chain,
                                   const char *datadir,
                                   int start_height, int end_height,
                                   const struct scan_addr_ht *aht,
-                                  const bool *file_has_match,
+                                  const bool *file_has_match, int num_files,
                                   struct scan_utxo_set *uset,
-                                  struct scan_wtx_list *wl, int *hole)
+                                  struct scan_wtx_list *wl,
+                                  struct wallet_scan_pass2_hole *hole)
 {
     int blocks_deserialized = 0;
-    int cached_file = -1;
-    int cached_fd = -1;
-    struct platform_read_mapping cached_mapping;
-    platform_read_mapping_init(&cached_mapping);
+    struct wallet_scan_pass2_file f = {.file = -1, .fd = -1};
+    platform_read_mapping_init(&f.mapping);
 
     for (int h = start_height; h <= end_height; h++) {
         const struct block_index *pi = active_chain_at(chain, h);
-        if (!wallet_scan_height_has_data(pi)) {
-            *hole = h;
+        struct block blk;
+        bool matched = false;
+        enum wallet_scan_hole_kind kind = wallet_scan_pass2_locate(
+            pi, file_has_match, num_files, &matched);
+        /* Skip files that pass 1 read and ruled out, unparsed. */
+        if (kind == WALLET_SCAN_HOLE_NONE && !matched)
+            continue;
+        if (kind == WALLET_SCAN_HOLE_NONE)
+            kind = wallet_scan_pass2_read(pi, datadir, &f, &blk);
+        if (kind != WALLET_SCAN_HOLE_NONE) {
+            *hole = (struct wallet_scan_pass2_hole){
+                .height = h, .file = pi ? pi->nFile : -1, .kind = kind,
+            };
             blocks_deserialized = -1;
             break;
         }
-
-        /* Skip files that pass 1 ruled out */
-        if (!file_has_match[pi->nFile]) continue;
-
-        if (pi->nFile != cached_file) {
-            platform_read_mapping_close(&cached_mapping);
-            if (cached_fd >= 0) {
-                close(cached_fd);
-                cached_fd = -1;
-            }
-            cached_file = -1;
-            char path[512];
-            snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                     datadir, pi->nFile);
-            int fd = wallet_scan_block_file_map(path, &cached_mapping);
-            if (fd < 0) continue;
-            cached_fd = fd;
-            cached_file = pi->nFile;
-            platform_read_mapping_advise_sequential(&cached_mapping);
-        }
-        if (!cached_mapping.data ||
-            pi->nDataPos >= cached_mapping.size) continue;
-
-        struct block blk;
-        block_init(&blk);
-        size_t rem = cached_mapping.size - pi->nDataPos;
-        struct byte_stream bs;
-        stream_init_from_data(&bs,
-                              cached_mapping.data + pi->nDataPos, rem);
-        if (!block_deserialize(&blk, &bs)) {
-            block_free(&blk);
-            continue;
-        }
         blocks_deserialized++;
-
         (void)scan_block_txs(&blk, h, aht, uset, wl);
-
         block_free(&blk);
     }
-    platform_read_mapping_close(&cached_mapping);
-    if (cached_fd >= 0)
-        close(cached_fd);
+    wallet_scan_pass2_file_close(&f);
     return blocks_deserialized;
+}
+
+/* Log the hole Pass 2 stopped at and record it in the caller's coverage. */
+static int wallet_scan_pass2_refuse(const struct wallet_scan_pass2_hole *hole,
+                                    int start_height, int end_height,
+                                    struct wallet_scan_coverage *cov)
+{
+    LOG_WARN("wallet_scan",
+             "wallet_scan: height %d (block file %d) %s; scan of %d..%d "
+             "refused, wallet rows kept", hole->height, hole->file,
+             wallet_scan_hole_text(hole->kind), start_height, end_height);
+    if (cov) {
+        cov->first_missing = hole->height;
+        if (cov->blocks_missing < 1)
+            cov->blocks_missing = 1;
+    }
+    return WALLET_SCAN_REFUSED_MISSING_DATA;
 }
 
 static int wallet_scan_pass2_nonempty(struct node_db *ndb,
@@ -394,8 +485,10 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
                                       int end_height,
                                       const struct scan_addr_ht *aht,
                                       const bool *file_has_match,
+                                      int num_files,
                                       const struct timespec *ts_start,
-                                      const struct timespec *ts_p1)
+                                      const struct timespec *ts_p1,
+                                      struct wallet_scan_coverage *cov)
 {
     struct timespec ts_p2;
 
@@ -405,17 +498,14 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
     struct scan_wtx_list wl;
     scan_wl_init(&wl);
 
-    int hole = -1;
+    struct wallet_scan_pass2_hole hole = {.height = -1, .file = -1};
     int blocks_deserialized = wallet_scan_pass2_walk(
         chain, datadir, start_height, end_height, aht, file_has_match,
-        &uset, &wl, &hole);
+        num_files, &uset, &wl, &hole);
     if (blocks_deserialized < 0) {
         scan_uset_free(&uset);
         scan_wl_free(&wl);
-        LOG_WARN("wallet_scan",
-                 "wallet_scan: height %d has no block body; scan of %d..%d "
-                 "refused, wallet rows kept", hole, start_height, end_height);
-        return WALLET_SCAN_REFUSED_MISSING_DATA;
+        return wallet_scan_pass2_refuse(&hole, start_height, end_height, cov);
     }
 
     platform_time_monotonic_timespec(&ts_p2);
@@ -453,9 +543,11 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
                               int end_height,
                               const struct scan_addr_ht *aht,
                               const bool *file_has_match,
+                              int num_files,
                               int matched_files,
                               const struct timespec *ts_start,
-                              const struct timespec *ts_p1)
+                              const struct timespec *ts_p1,
+                              struct wallet_scan_coverage *cov)
 {
     if (matched_files < 0)
         LOG_ERR("wallet_scan", "negative matched-file count: %d",
@@ -471,6 +563,6 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
 
     return wallet_scan_pass2_nonempty(ndb, chain, datadir,
                                       start_height, end_height,
-                                      aht, file_has_match,
-                                      ts_start, ts_p1);
+                                      aht, file_has_match, num_files,
+                                      ts_start, ts_p1, cov);
 }

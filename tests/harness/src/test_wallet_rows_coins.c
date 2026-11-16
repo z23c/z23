@@ -654,13 +654,13 @@ static int wrc_importaddress_no_rescan_advice(bool holed)
 
 /* Row count and an FNV-1a fold of every column of every row, in key order:
  * equal before and after means the table is byte-for-byte unchanged. */
-static bool wrc_table_digest(struct wrc_fx *fx, const char *sql,
+static bool wrc_table_digest(struct node_db *ndb, const char *sql,
                              int *rows, uint64_t *fold)
 {
     sqlite3_stmt *st = NULL;
     *rows = 0;
     *fold = 1469598103934665603ULL;
-    if (sqlite3_prepare_v2(fx->ndb.db, sql, -1, &st, NULL) != SQLITE_OK)
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &st, NULL) != SQLITE_OK)
         return false;
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
@@ -684,13 +684,39 @@ struct wrc_rows_state {
     int64_t balance;
 };
 
+static bool wrc_rows_state_db(struct node_db *ndb, struct wrc_rows_state *s)
+{
+    s->balance = db_wallet_utxo_balance(ndb);
+    return wrc_table_digest(ndb, "SELECT * FROM wallet_utxos ORDER BY txid, vout",
+                            &s->utxo_rows, &s->utxo_fold) &&
+           wrc_table_digest(ndb, "SELECT * FROM wallet_transactions ORDER BY txid",
+                            &s->tx_rows, &s->tx_fold);
+}
+
 static bool wrc_rows_state(struct wrc_fx *fx, struct wrc_rows_state *s)
 {
-    s->balance = db_wallet_utxo_balance(&fx->ndb);
-    return wrc_table_digest(fx, "SELECT * FROM wallet_utxos ORDER BY txid, vout",
-                            &s->utxo_rows, &s->utxo_fold) &&
-           wrc_table_digest(fx, "SELECT * FROM wallet_transactions ORDER BY txid",
-                            &s->tx_rows, &s->tx_fold);
+    return wrc_rows_state_db(&fx->ndb, s);
+}
+
+/* The row state above as one scalar, for other test files
+ * (test_block_scan.c): equal digests mean wallet_utxos and
+ * wallet_transactions are byte-for-byte unchanged. False when a table could
+ * not be read. */
+bool wrc_wallet_rows_digest(struct node_db *ndb, uint64_t *digest);
+bool wrc_wallet_rows_digest(struct node_db *ndb, uint64_t *digest)
+{
+    struct wrc_rows_state s;
+    if (!ndb || !digest || !wrc_rows_state_db(ndb, &s))
+        return false;
+    const uint64_t parts[5] = {
+        (uint64_t)s.utxo_rows, (uint64_t)s.tx_rows, (uint64_t)s.balance,
+        s.utxo_fold, s.tx_fold,
+    };
+    uint64_t d = 1469598103934665603ULL;
+    for (int i = 0; i < 5; i++)
+        d = (d ^ parts[i]) * 1099511628211ULL;
+    *digest = d;
+    return true;
 }
 
 static bool wrc_rows_same(const struct wrc_rows_state *a,
@@ -769,7 +795,7 @@ static int wrc_repair_keeps_rows(const char *method, const char *name,
         ASSERT(wrc_rows_state(&fx, &after));
         ASSERT(wrc_rows_same(&before, &after));
         ASSERT(wrc_reply_has(&result, "refused"));
-        ASSERT(wrc_reply_has(&result, "no block data for 200 of the blocks "
+        ASSERT(wrc_reply_has(&result, "no readable block data for 200 of the blocks "
                                       "at heights 0..200"));
         ASSERT(wrc_reply_has(&result, "first missing height 0"));
         ASSERT(wrc_reply_has(&result, "were kept unchanged"));

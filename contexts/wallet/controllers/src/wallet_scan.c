@@ -81,6 +81,7 @@ struct scan_thread_arg {
     int file_num;
     const struct scan_addr_ht *ht;
     bool result;
+    bool read_ok; /* the whole file was mapped and scanned */
 };
 
 static void *scan_file_thread(void *arg)
@@ -104,6 +105,7 @@ static void *scan_file_thread(void *arg)
     platform_read_mapping_advise_sequential(&mapping);
 
     a->result = scan_file_raw(mapping.data, mapping.size, a->ht);
+    a->read_ok = true;
 
     platform_read_mapping_close(&mapping);
     close(fd);
@@ -117,10 +119,15 @@ static void *scan_file_thread(void *arg)
  * we cache each file's match bit keyed on (keyset fingerprint, tip height,
  * per-file size): a warm boot re-reads only files that grew/changed since the
  * last scan and reuses cached bits for the rest, turning Pass-1's disk reads
- * O(delta) while Pass-2 stays a full, correctness-preserving rebuild. */
+ * O(delta) while Pass-2 stays a full, correctness-preserving rebuild.
+ * Only a file Pass 1 read completely caches its size: a file it could not
+ * read is stored with WSCAN_FILECACHE_UNREAD, which no file size equals, so
+ * the next scan reads it again. Version 1 caches stored a failed read as
+ * "no match" under the file's real size and are not trusted. */
 #define WSCAN_FILECACHE_KEY   "wallet_scan_pass1_filecache"
 #define WSCAN_FILECACHE_MAGIC 0x57534331u   /* 'WSC1' */
-#define WSCAN_FILECACHE_VER   1u
+#define WSCAN_FILECACHE_VER   2u
+#define WSCAN_FILECACHE_UNREAD UINT64_MAX
 #define WSCAN_MAX_FILES       200
 
 struct wscan_filecache {
@@ -270,6 +277,7 @@ static int wallet_scan_pass1_launch(const char *datadir, int base, int n,
         args[i].file_num = base + i;
         args[i].ht = aht;
         args[i].result = false;
+        args[i].read_ok = false;
         /* raw-pthread-ok: short-burst-joined-immediately */
         int rc = pthread_create(&threads[i], NULL,
                                 scan_file_thread, &args[i]);
@@ -288,19 +296,107 @@ static void wallet_scan_pass1_join_launched(int n, pthread_t *threads,
         if (launched[j]) pthread_join(threads[j], NULL);
 }
 
-/* Join each launched thread of the batch and record its match result. */
+/* Join each launched thread of the batch and record its match result.
+ * `unread` enters as the need-scan flags; a file whose scan read it
+ * completely is cleared, so on return it marks the files Pass 1 could not
+ * read. */
 static void wallet_scan_pass1_collect(int base, int n,
                                       const struct scan_thread_arg *args,
                                       pthread_t *threads,
                                       const bool *launched,
-                                      bool *file_has_match)
+                                      bool *file_has_match, bool *unread)
 {
     for (int i = 0; i < n; i++) {
         if (!launched[i])
             continue;
         pthread_join(threads[i], NULL);
         file_has_match[base + i] = args[i].result;
+        unread[base + i] = !args[i].read_ok;
     }
+}
+
+/* Run Pass 1 over every file flagged in `unread` (the need-scan flags), in
+ * batches of up to 8 threads. On return `unread` marks the files that could
+ * not be read. Returns 0, or -1 (logged) when a scan thread could not start. */
+static int wallet_scan_pass1_run(const char *datadir, int num_files,
+                                 const struct scan_addr_ht *aht,
+                                 bool *file_has_match, bool *unread)
+{
+    const int batch = 8;
+    for (int base = 0; base < num_files; base += batch) {
+        int n = num_files - base;
+        if (n > batch) n = batch;
+
+        struct scan_thread_arg args[8];
+        pthread_t threads[8];
+        bool launched[8] = { false };
+
+        if (wallet_scan_pass1_launch(datadir, base, n, aht, unread,
+                                     args, threads, launched) != 0) {
+            LOG_WARN("wallet_scan",
+                     "wallet_scan: failed to start pass-1 scan thread");
+            wallet_scan_pass1_join_launched(n, threads, launched);
+            return -1; // raw-return-ok:logged-above
+        }
+        wallet_scan_pass1_collect(base, n, args, threads, launched,
+                                  file_has_match, unread);
+    }
+    return 0;
+}
+
+/* Why one height of the range cannot be covered by the Pass-1 file results:
+ * no body, a block file Pass 1 did not count or could not read, or a data
+ * position at or past the end of that file. NONE when Pass 1 read the
+ * block's whole file. `unread` may be NULL only when num_files is 0. */
+static enum wallet_scan_hole_kind wallet_scan_pass1_hole(
+    const struct block_index *pi, int num_files, const uint64_t *cur_sizes,
+    const bool *unread)
+{
+    if (!wallet_scan_height_has_data(pi))
+        return WALLET_SCAN_HOLE_NO_BODY;
+    if (pi->nFile < 0 || pi->nFile >= num_files || unread[pi->nFile])
+        return WALLET_SCAN_HOLE_NO_FILE;
+    if ((uint64_t)pi->nDataPos >= cur_sizes[pi->nFile])
+        return WALLET_SCAN_HOLE_BEYOND_FILE;
+    return WALLET_SCAN_HOLE_NONE;
+}
+
+/* After Pass 1 and before any row is deleted: every height of the range must
+ * lie inside a block file Pass 1 read completely (or reused from a cache of
+ * such a read). Otherwise a "no match" for that file says nothing about the
+ * block, and an empty or partial replace would drop rows. Fills `cov` with
+ * the count and the first such height and logs one WARN for the first. */
+static bool wallet_scan_pass1_covered(const struct active_chain *chain,
+                                      int start_height, int end_height,
+                                      int num_files, const uint64_t *cur_sizes,
+                                      const bool *unread,
+                                      struct wallet_scan_coverage *cov)
+{
+    int64_t holes = 0;
+    int first_file = -1;
+    enum wallet_scan_hole_kind first_kind = WALLET_SCAN_HOLE_NONE;
+    for (int h = start_height; h <= end_height; h++) {
+        const struct block_index *pi = active_chain_at(chain, h);
+        enum wallet_scan_hole_kind kind =
+            wallet_scan_pass1_hole(pi, num_files, cur_sizes, unread);
+        if (kind == WALLET_SCAN_HOLE_NONE)
+            continue;
+        if (holes++ == 0) {
+            cov->first_missing = h;
+            first_file = pi ? pi->nFile : -1;
+            first_kind = kind;
+        }
+    }
+    if (holes == 0)
+        return true;
+    cov->blocks_missing = holes;
+    LOG_WARN("wallet_scan",
+             "wallet_scan: height %d (block file %d) %s, %lld unreadable of "
+             "heights %d..%d (%d block files counted); scan refused, wallet "
+             "rows kept", cov->first_missing, first_file,
+             wallet_scan_hole_text(first_kind), (long long)holes,
+             start_height, end_height, num_files);
+    return false;
 }
 
 /* Persist the refreshed cache for the next boot. Returns the
@@ -310,7 +406,8 @@ static bool wallet_scan_persist_filecache(struct node_db *ndb,
                                           uint64_t keyset_fp, int tip_height,
                                           int num_files,
                                           const uint64_t *cur_sizes,
-                                          const bool *file_has_match)
+                                          const bool *file_has_match,
+                                          const bool *unread)
 {
     if (!ndb->open)
         return true;
@@ -322,7 +419,7 @@ static bool wallet_scan_persist_filecache(struct node_db *ndb,
     nc.tip_height = tip_height;
     nc.num_files = num_files;
     for (int f = 0; f < num_files && f < WSCAN_MAX_FILES; f++) {
-        nc.sizes[f] = cur_sizes[f];
+        nc.sizes[f] = unread[f] ? WSCAN_FILECACHE_UNREAD : cur_sizes[f];
         nc.match[f] = file_has_match[f] ? 1u : 0u;
     }
     return node_db_state_set(ndb, WSCAN_FILECACHE_KEY, &nc, sizeof(nc));
@@ -437,7 +534,7 @@ void wallet_scan_refusal_text(const char *command,
         return;
     }
     snprintf(out, cap,
-             "%s refused: this node holds no block data for %lld of the "
+             "%s refused: this node holds no readable block data for %lld of the "
              "blocks at heights %d..%d (first missing height %d), so a scan "
              "would replace the wallet rows with an incomplete result. The "
              "wallet rows (wallet_utxos, wallet_transactions) were kept "
@@ -505,7 +602,7 @@ static int wallet_scan_pass2_guarded(struct node_db *ndb,
                                      int start_height, int end_height,
                                      const struct scan_addr_ht *aht,
                                      const bool *file_has_match,
-                                     int matched_files,
+                                     int num_files, int matched_files,
                                      const struct timespec *ts_start,
                                      const struct timespec *ts_p1,
                                      struct wallet_scan_coverage *cov)
@@ -514,14 +611,30 @@ static int wallet_scan_pass2_guarded(struct node_db *ndb,
         return WALLET_SCAN_REFUSED_MISSING_DATA;
     return wallet_scan_pass2_execute(ndb, chain, datadir,
                                      start_height, end_height,
-                                     aht, file_has_match, matched_files,
-                                     ts_start, ts_p1);
+                                     aht, file_has_match, num_files,
+                                     matched_files, ts_start, ts_p1, cov);
+}
+
+/* True when wallet_utxos or wallet_transactions holds at least one row, read
+ * through the model helpers. Rows can exist with no key the scan loads: a
+ * shielded spend saves a wallet_transactions row, importaddress seeds
+ * watch-only rows. */
+static bool wallet_scan_rows_present(struct node_db *ndb)
+{
+    if (db_wallet_tx_count(ndb) != 0)
+        return true;
+    struct db_wallet_utxo one;
+    memset(&one, 0, sizeof(one));
+    int n = db_wallet_utxo_list_all(ndb, &one, 1);
+    if (n > 0)
+        db_wallet_utxo_free(&one);
+    return n != 0;
 }
 
 /* The no-keys path: nothing to match, so no block is read and the replace
- * writes an empty result. A wallet holding watch-only addresses still has
- * rows to lose (importaddress seeds them; the scan loads no watch-only id),
- * so its empty replace passes the same coverage guard first. */
+ * writes an empty result. When there is anything to lose (a watch-only
+ * address, whose ids the scan does not load, or any existing wallet row) the
+ * empty replace passes the same coverage guard first. */
 static int wallet_scan_zero_keys(struct node_db *ndb,
                                  const struct active_chain *chain,
                                  const struct wallet *w, const char *datadir,
@@ -530,12 +643,14 @@ static int wallet_scan_zero_keys(struct node_db *ndb,
                                  struct wallet_scan_coverage *cov)
 {
     printf("wallet_scan: no wallet keys, skipping block scan\n");
-    if (w->keystore.num_watching > 0 &&
+    bool guarded = w->keystore.num_watching > 0 ||
+                   wallet_scan_rows_present(ndb);
+    if (guarded &&
         !wallet_scan_guard_range(chain, start_height, end_height, cov))
         return WALLET_SCAN_REFUSED_MISSING_DATA;
     return wallet_scan_pass2_execute(ndb, chain, datadir,
                                      start_height, end_height,
-                                     aht, NULL, 0, NULL, NULL);
+                                     aht, NULL, 0, 0, NULL, NULL, cov);
 }
 
 /* --- Main entry point --- */
@@ -583,7 +698,7 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
                "replacing with empty result\n", start_height, end_height);
         return wallet_scan_pass2_execute(ndb, chain, datadir,
                                          start_height, end_height,
-                                         NULL, NULL, 0, NULL, NULL);
+                                         NULL, NULL, 0, 0, NULL, NULL, cov);
     }
 
     struct timespec ts_start, ts_p1;
@@ -624,6 +739,15 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
     printf("wallet_scan: %d block files to scan\n", num_files);
     fflush(stdout);
 
+    /* No block file at all over a non-empty range: every height is a hole.
+     * Refuse here, before an empty Pass-1 result can reach the replace. */
+    if (num_files == 0 &&
+        !wallet_scan_pass1_covered(chain, start_height, end_height,
+                                   0, cur_sizes, NULL, cov)) {
+        scan_aht_free(&aht);
+        return WALLET_SCAN_REFUSED_MISSING_DATA;
+    }
+
     /* OS-S2 #4: load the Pass-1 file-match cache; decide per file whether the
      * cached bit can be reused (same keyset, tip not lower, size unchanged) or
      * the file must be re-scanned. */
@@ -637,7 +761,8 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
     printf("wallet_scan: pass 1 — parallel raw byte scan...\n");
     fflush(stdout);
 
-    /* Launch threads — up to 8 at a time */
+    /* need_scan marks the files Pass 1 must read; after the run it marks
+     * the files it could not read. */
     bool *file_has_match = zcl_calloc((size_t)num_files, sizeof(bool), "wallet scan file match");
     bool *need_scan = zcl_calloc((size_t)num_files, sizeof(bool), "wallet scan need");
     if (!file_has_match || !need_scan) {
@@ -655,34 +780,30 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
            "scanning %d\n", reused, num_files, num_files - reused);
     fflush(stdout);
 
-    int batch = 8;
-
-    for (int base = 0; base < num_files; base += batch) {
-        int n = num_files - base;
-        if (n > batch) n = batch;
-
-        struct scan_thread_arg args[8];
-        pthread_t threads[8];
-        bool launched[8] = { false };
-
-        if (wallet_scan_pass1_launch(datadir, base, n, &aht, need_scan,
-                                     args, threads, launched) != 0) {
-            LOG_WARN("wallet_scan", "wallet_scan: failed to start pass-1 scan thread");
-            wallet_scan_pass1_join_launched(n, threads, launched);
-            scan_aht_free(&aht);
-            free(file_has_match);
-            free(need_scan);
-            return -1; // raw-return-ok:logged-above
-        }
-        wallet_scan_pass1_collect(base, n, args, threads, launched,
-                                  file_has_match);
+    if (wallet_scan_pass1_run(datadir, num_files, &aht, file_has_match,
+                              need_scan) != 0) {
+        scan_aht_free(&aht);
+        free(file_has_match);
+        free(need_scan);
+        return -1; // raw-return-ok:logged-in-wallet_scan_pass1_run
     }
 
     /* Persist the refreshed cache for the next boot. */
     if (!wallet_scan_persist_filecache(ndb, keyset_fp, tip_height, num_files,
-                                       cur_sizes, file_has_match))
+                                       cur_sizes, file_has_match, need_scan))
         LOG_WARN("wallet_scan", "wallet_scan: pass-1 filecache persist failed");
+
+    /* A height whose file Pass 1 did not read completely is a hole: its "no
+     * match" says nothing. Refuse before any row is deleted. */
+    bool covered = wallet_scan_pass1_covered(chain, start_height, end_height,
+                                             num_files, cur_sizes, need_scan,
+                                             cov);
     free(need_scan);
+    if (!covered) {
+        scan_aht_free(&aht);
+        free(file_has_match);
+        return WALLET_SCAN_REFUSED_MISSING_DATA;
+    }
 
     platform_time_monotonic_timespec(&ts_p1);
     double p1_ms = (double)(ts_p1.tv_sec - ts_start.tv_sec) * 1000.0 +
@@ -709,8 +830,9 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
      * Service by const reference and frees them afterward. */
     int found = wallet_scan_pass2_guarded(ndb, chain, datadir,
                                           start_height, end_height,
-                                          &aht, file_has_match, matched_files,
-                                          &ts_start, &ts_p1, cov);
+                                          &aht, file_has_match, num_files,
+                                          matched_files, &ts_start, &ts_p1,
+                                          cov);
 
     /* Cleanup */
     scan_aht_free(&aht);

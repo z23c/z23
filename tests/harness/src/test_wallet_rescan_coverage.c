@@ -46,6 +46,11 @@
  *      bodiless heights and keeps wallet_utxos and wallet_transactions; a
  *      fully bodied range, and a catch-up delta whose bodies are present,
  *      still replace them.
+ *   U. A height whose BLOCK_HAVE_DATA body cannot be read (block file
+ *      absent, cut short, or the block does not parse), or no block file at
+ *      all, refuses the row replace and keeps the rows byte-equal; an intact
+ *      chain still replaces them, and a block in a file Pass 1 read and ruled
+ *      out is still skipped unparsed.
  */
 
 #include "test/test_core.h"
@@ -1641,7 +1646,7 @@ static int wrc_r_holed_range_refused(const struct wrc_r *r,
     snprintf(name, sizeof(name), "R: %s names the missing count, the first "
              "missing height and that the rows were kept", method);
     WRC_CHECK(name,
-              strstr(reply, "no block data for 150 of the blocks at "
+              strstr(reply, "no readable block data for 150 of the blocks at "
                             "heights 0..199") != NULL &&
               strstr(reply, "first missing height 0") != NULL &&
               strstr(reply, "were kept unchanged") != NULL);
@@ -1662,13 +1667,15 @@ static int wrc_r_pass2_recheck(const struct wrc_r *r)
     scan_aht_init(&aht);
     const bool match[1] = {true};
     const struct timespec t = {.tv_sec = 1};
+    struct wallet_scan_coverage cov = {.first_missing = -1};
     struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
     int rc = wallet_scan_pass2_execute(r->ndb, &r->ms->chain_active,
                                        r->datadir, 0, WRC_NBLOCKS - 1,
-                                       &aht, match, 1, &t, &t);
+                                       &aht, match, 1, 1, &t, &t, &cov);
     scan_aht_free(&aht);
     WRC_CHECK("R6: Pass 2 refuses at the first height with no body",
-              rc == WALLET_SCAN_REFUSED_MISSING_DATA);
+              rc == WALLET_SCAN_REFUSED_MISSING_DATA &&
+              cov.first_missing == 0 && cov.blocks_missing >= 1);
     WRC_CHECK("R6: and leaves the wallet rows as they were",
               wrc_r_rows_equal(before, wrc_r_rows_now(r->ndb)) &&
               wrc_r_has_stale(r->ndb));
@@ -1742,6 +1749,255 @@ static int wrc_r_coverage_guard(const struct wrc_r *r)
     ClearDataDirCache();
     rpc_wallet_set_coins_tip(NULL);
     coins_view_cache_free(&cache);
+    return failures;
+}
+
+/* ── U. Unreadable block data is a hole ──────────────────────────────────
+ * Every height carries BLOCK_HAVE_DATA, yet the bytes behind it cannot be
+ * read: its block file is absent, cut short before the block, or corrupted
+ * so the block does not parse. The scan used to skip such a block silently
+ * and replace the rows with what was left. Each case now refuses with the
+ * rows byte-equal, through wallet_scan_blocks and straight into Pass 2.
+ *
+ * blk00000.dat holds block A (pays the wallet's key, so Pass 1 matches the
+ * file) then block B (pays nobody); the one-height range points at B.
+ * blk00001.dat is blk00000 cut at B's data position, blk00002.dat is
+ * blk00000 with B's bytes after its version overwritten, blk00003.dat is
+ * junk holding no wallet bytes, and blk00004.dat does not exist. */
+#define WRC_U_FILES 5      /* direct Pass-2 calls map 0..4 */
+#define WRC_U_NOT_RUN (-100)
+
+struct wrc_u {
+    const struct wallet *w;
+    struct active_chain *chain;
+    struct block_index *tip; /* the one height (0) of the scanned range */
+    const char *dir;
+};
+
+struct wrc_u_out {
+    int rc;
+    bool kept;        /* rows byte-equal before and after, stale pair kept */
+    bool replaced;    /* stale pair gone, both tables empty */
+    struct wallet_scan_coverage cov;
+};
+
+static bool wrc_u_write_file(const char *dir, int n, const uint8_t *data,
+                             size_t len)
+{
+    char path[400];
+    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", dir, n);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = fwrite(data, 1, len, f) == len;
+    return fclose(f) == 0 && ok;
+}
+
+static uint8_t *wrc_u_read_file(const char *dir, int n, size_t *len)
+{
+    char path[400];
+    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", dir, n);
+    struct stat st;
+    FILE *f = NULL;
+    uint8_t *buf = NULL;
+    if (stat(path, &st) == 0 && st.st_size > 0 && (f = fopen(path, "rb")))
+        buf = malloc((size_t)st.st_size); /* raw-alloc-ok:test-fixture */
+    if (buf && fread(buf, 1, (size_t)st.st_size, f) == (size_t)st.st_size) {
+        *len = (size_t)st.st_size;
+    } else {
+        free(buf);
+        buf = NULL;
+    }
+    if (f)
+        fclose(f);
+    return buf;
+}
+
+/* Write A and B, then the cut, corrupted and junk copies. */
+static bool wrc_u_write_files(const char *dir, const struct key_id *kid,
+                              unsigned *pos_b)
+{
+    struct script pay_to_us, pay_to_nobody;
+    script_init(&pay_to_us);
+    script_for_p2pkh(&pay_to_us, kid);
+    script_init(&pay_to_nobody);
+    struct disk_block_pos a, b;
+    disk_block_pos_init(&a);
+    disk_block_pos_init(&b);
+    if (!wrc_g_write_body(&pay_to_us, &a, dir) ||
+        !wrc_g_write_body(&pay_to_nobody, &b, dir) ||
+        a.nFile != 0 || b.nFile != 0 || b.nPos <= a.nPos)
+        return false;
+    *pos_b = b.nPos;
+    size_t len = 0;
+    uint8_t *buf = wrc_u_read_file(dir, 0, &len);
+    bool ok = buf && len > (size_t)b.nPos + 4 &&
+              wrc_u_write_file(dir, 1, buf, b.nPos);
+    if (ok) {
+        memset(buf + b.nPos + 4, 0xff, len - b.nPos - 4);
+        ok = wrc_u_write_file(dir, 2, buf, len);
+    }
+    uint8_t junk[64];
+    memset(junk, 0xff, sizeof(junk));
+    ok = ok && wrc_u_write_file(dir, 3, junk, sizeof(junk));
+    free(buf);
+    return ok;
+}
+
+/* Pass 2 alone, every file marked matched. */
+static int wrc_u_pass2(const struct wrc_u *h, struct node_db *ndb,
+                       struct wallet_scan_coverage *cov)
+{
+    struct scan_addr_ht aht;
+    scan_aht_init(&aht);
+    const bool match[WRC_U_FILES] = {true, true, true, true, true};
+    const struct timespec t = {.tv_sec = 1};
+    int rc = wallet_scan_pass2_execute(ndb, h->chain, h->dir, 0, 0, &aht,
+                                       match, WRC_U_FILES, WRC_U_FILES,
+                                       &t, &t, cov);
+    scan_aht_free(&aht);
+    return rc;
+}
+
+/* Point height 0 at (nfile, data_pos), seed the stale row pair in a fresh
+ * node_db (no Pass-1 cache carries over) and run one scan. */
+static struct wrc_u_out wrc_u_scan(const struct wrc_u *h, int nfile,
+                                   unsigned data_pos, bool direct)
+{
+    struct wrc_u_out out = {.rc = WRC_U_NOT_RUN,
+                            .cov = {.first_missing = -1}};
+    h->tip->nFile = nfile;
+    h->tip->nDataPos = data_pos;
+    struct node_db ndb;
+    if (!node_db_open(&ndb, ":memory:"))
+        return out;
+    if (wrc_r_seed_stale(&ndb) && wrc_r_has_stale(&ndb)) {
+        struct wrc_r_rows before = wrc_r_rows_now(&ndb);
+        out.rc = direct ? wrc_u_pass2(h, &ndb, &out.cov)
+                        : wallet_scan_blocks_checked(&ndb, h->chain, h->w,
+                                                     h->dir, 0, 0, &out.cov);
+        out.kept = wrc_r_rows_equal(before, wrc_r_rows_now(&ndb)) &&
+                   wrc_r_has_stale(&ndb);
+        out.replaced = !wrc_r_has_stale(&ndb) &&
+                       wrc_r_count(&ndb, "SELECT count(*) FROM wallet_utxos") == 0 &&
+                       wrc_r_count(&ndb, "SELECT count(*) FROM "
+                                         "wallet_transactions") == 0;
+    }
+    node_db_close(&ndb);
+    printf("[%s rc=%d missing=%lld first=%d kept=%d] ",
+           direct ? "pass2" : "scan", out.rc,
+           (long long)out.cov.blocks_missing, out.cov.first_missing, out.kept);
+    return out;
+}
+
+static int wrc_u_hole(const struct wrc_u *h, const char *what, int nfile,
+                      unsigned data_pos)
+{
+    int failures = 0;
+    char name[200];
+    for (int direct = 0; direct < 2; direct++) {
+        struct wrc_u_out o = wrc_u_scan(h, nfile, data_pos, direct != 0);
+        snprintf(name, sizeof(name), "U: %s, %s: refused at height 0, rows "
+                 "byte-equal", what, direct ? "Pass 2" : "wallet_scan_blocks");
+        WRC_CHECK(name, o.rc == WALLET_SCAN_REFUSED_MISSING_DATA &&
+                        o.cov.first_missing == 0 &&
+                        o.cov.blocks_missing >= 1 && o.kept);
+    }
+    return failures;
+}
+
+static int wrc_u_cases(const struct wrc_u *h, unsigned pos_b)
+{
+    int failures = 0;
+    for (int direct = 0; direct < 2; direct++) {
+        struct wrc_u_out o = wrc_u_scan(h, 0, pos_b, direct != 0);
+        WRC_CHECK(direct ? "U: positive control, Pass 2: the intact block "
+                           "parses and the rows are replaced"
+                         : "U: positive control, wallet_scan_blocks: the "
+                           "intact chain replaces the rows",
+                  o.rc == 0 && o.replaced && o.cov.blocks_missing == 0 &&
+                  o.cov.first_missing == -1);
+    }
+    struct wrc_u_out skip = wrc_u_scan(h, 3, 8, false);
+    WRC_CHECK("U: a block in a file Pass 1 read and ruled out is skipped "
+              "unparsed, the rows are replaced",
+              skip.rc == 0 && skip.replaced);
+    failures += wrc_u_hole(h, "block file absent", 4, pos_b);
+    failures += wrc_u_hole(h, "block file cut before the block", 1, pos_b);
+    failures += wrc_u_hole(h, "block does not parse", 2, pos_b);
+    return failures;
+}
+
+/* No block file at all over a non-empty range: refused, rows kept. */
+static int wrc_u_no_files(struct wrc_u *h, const char *basedir,
+                          unsigned pos_b)
+{
+    int failures = 0;
+    char edir[300], blocksdir[360];
+    snprintf(edir, sizeof(edir), "%s_h0", basedir);
+    bool made = wrc_g_make_fixture_dirs(edir, blocksdir, sizeof(blocksdir)) &&
+                chmod(edir, 0700) == 0 && SetDataDir(edir);
+    WRC_CHECK("U: empty block directory pinned", made);
+    if (made) {
+        h->dir = edir;
+        struct wrc_u_out o = wrc_u_scan(h, 0, pos_b, false);
+        WRC_CHECK("U: no block file at all: refused at height 0, rows "
+                  "byte-equal",
+                  o.rc == WALLET_SCAN_REFUSED_MISSING_DATA &&
+                  o.cov.first_missing == 0 && o.cov.blocks_missing == 1 &&
+                  o.kept);
+    }
+#if defined(_WIN32)
+    test_cleanup_tmpdir(blocksdir);
+    test_cleanup_tmpdir(edir);
+#else
+    {
+        char cmd[400];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", edir);
+        TEST_DISCARD(system(cmd));
+    }
+#endif
+    return failures;
+}
+
+static int wrc_u_unreadable_holes(const struct wallet *w,
+                                  const struct key_id *kid,
+                                  const char *basedir)
+{
+    int failures = 0;
+    char hdir[300], blocksdir[360];
+    snprintf(hdir, sizeof(hdir), "%s_h", basedir);
+    unsigned pos_b = 0;
+    bool made = wrc_g_make_fixture_dirs(hdir, blocksdir, sizeof(blocksdir)) &&
+                wrc_u_write_files(hdir, kid, &pos_b) &&
+                chmod(hdir, 0700) == 0 && SetDataDir(hdir);
+    WRC_CHECK("U: fixture block files written and pinned", made);
+    struct active_chain chain;
+    active_chain_init(&chain);
+    struct block_index tip;
+    block_index_init(&tip);
+    tip.nHeight = 0;
+    tip.nStatus = BLOCK_HAVE_DATA;
+    if (made && active_chain_install_tip_slot(&chain, &tip)) {
+        struct wrc_u h = {.w = w, .chain = &chain, .tip = &tip, .dir = hdir};
+        failures += wrc_u_cases(&h, pos_b);
+        failures += wrc_u_no_files(&h, basedir, pos_b);
+    } else {
+        failures++;
+    }
+    active_chain_free(&chain);
+    SetDataDir("");
+    ClearDataDirCache();
+#if defined(_WIN32)
+    test_cleanup_tmpdir(blocksdir);
+    test_cleanup_tmpdir(hdir);
+#else
+    {
+        char cmd[400];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", hdir);
+        TEST_DISCARD(system(cmd));
+    }
+#endif
     return failures;
 }
 
@@ -1952,6 +2208,8 @@ int test_wallet_rescan_coverage(void)
         };
         failures += wrc_r_coverage_guard(&r);
     }
+
+    failures += wrc_u_unreadable_holes(w1, &kid, datadir);
 
     failures += wrc_boot_catch_up_body_root(w1, &ms, datadir, idx);
     {

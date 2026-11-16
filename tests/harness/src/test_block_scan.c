@@ -38,6 +38,9 @@ int boot_block_scan_test_worker_count(int nfiles, uint32_t cpus);
 int boot_block_scan_test_gap_height(struct main_state *ms,
                                     struct block_index *genesis_bi,
                                     bool force_slow);
+/* Byte-level digest of wallet_utxos and wallet_transactions
+ * (test_wallet_rows_coins.c). */
+bool wrc_wallet_rows_digest(struct node_db *ndb, uint64_t *digest);
 
 #ifndef _WIN32
 static bool scan_descriptor_matches_policy(
@@ -125,18 +128,21 @@ static bool scan_descriptor_pass2(struct scan_descriptor_fixture *fixture)
     const struct timespec started = {.tv_sec = 1};
     /* Observe the real mapping boundary, not the new wallet helper. The
      * one-byte fixture is intentionally unparsable; observation precedes
-     * deserialization and the empty result must still commit successfully. */
+     * deserialization. A matched block that does not parse is a hole, so
+     * Pass 2 refuses rather than commit an empty result, and the descriptor
+     * is still closed on that early exit. */
     platform_read_mapping_observe_for_testing(scan_descriptor_observe, fixture);
     int result = wallet_scan_pass2_execute(
         &fixture->ndb, &fixture->chain, fixture->dir, 0, 0,
-        &fixture->ht, file_has_match, 1, &started, &started);
+        &fixture->ht, file_has_match, 1, 1, &started, &started, NULL);
     platform_read_mapping_observe_for_testing(NULL, NULL);
     bool closed = fixture->descriptor >= 0 &&
                   fcntl(fixture->descriptor, F_GETFD) == -1 && errno == EBADF;
     printf("[Pass2 result=%d observed=%u bytes=%d policy=%d closed=%d] ",
            result, fixture->observed, fixture->bytes_ok,
            fixture->policy_ok, closed);
-    return result == 0 && fixture->observed == 1 && fixture->bytes_ok &&
+    return result == WALLET_SCAN_REFUSED_MISSING_DATA &&
+           fixture->observed == 1 && fixture->bytes_ok &&
            fixture->policy_ok && closed;
 }
 
@@ -553,6 +559,23 @@ static bool test_wallet_scan_empty_replacement_check_cleared(
            node_db_begin(ndb) && node_db_commit(ndb);
 }
 
+/* The zero-key scan over a range with a hole (height 1 has no index entry)
+ * while rows exist: refused, and both tables byte-equal before and after. */
+static bool test_wallet_scan_zero_key_hole_kept(struct node_db *ndb,
+                                                struct active_chain *chain,
+                                                struct wallet *empty_wallet)
+{
+    uint64_t before = 0, after = 0;
+    bool seeded = wrc_wallet_rows_digest(ndb, &before);
+    int holed = wallet_scan_blocks(ndb, chain, empty_wallet, "/nonexistent",
+                                   0, 1);
+    bool kept = wrc_wallet_rows_digest(ndb, &after) && before == after;
+    printf("[zero-key holed scan result=%d kept=%d] ", holed, kept);
+    return seeded && holed == WALLET_SCAN_REFUSED_MISSING_DATA && kept &&
+           wallet_projection_seed_is_present(ndb) &&
+           node_db_has_no_open_transaction(ndb);
+}
+
 static bool test_wallet_scan_empty_replacement_zero_key_scan(
     struct node_db *ndb, struct active_chain *chain,
     struct wallet *empty_wallet, bool ok)
@@ -561,11 +584,19 @@ static bool test_wallet_scan_empty_replacement_zero_key_scan(
         ok = db_sapling_note_delete_all(ndb) &&
              seed_wallet_projection(ndb);
     }
+    ok = ok && test_wallet_scan_zero_key_hole_kept(ndb, chain, empty_wallet);
+    /* Height 0 holds a body: the complete-range replace still empties the
+     * stale rows. */
     int zero_key_result = ok ? wallet_scan_blocks(
         ndb, chain, empty_wallet, "/nonexistent", 0, 0) : -1;
-    return ok && zero_key_result == 0 &&
-           db_wallet_tx_count(ndb) == 0 &&
-           db_wallet_utxo_balance(ndb) == 0;
+    ok = ok && zero_key_result == 0 &&
+         db_wallet_tx_count(ndb) == 0 &&
+         db_wallet_utxo_balance(ndb) == 0;
+    /* Both tables empty: nothing to lose, the holed range replaces as
+     * before. */
+    int nothing_to_lose = ok ? wallet_scan_blocks(
+        ndb, chain, empty_wallet, "/nonexistent", 0, 1) : -1;
+    return ok && nothing_to_lose == 0 && db_wallet_tx_count(ndb) == 0;
 }
 
 static bool test_wallet_scan_empty_replacement_empty_range_scan(
@@ -592,8 +623,14 @@ static int test_wallet_scan_empty_replacement(void)
     memset(&ndb, 0, sizeof(ndb));
     bool ok = test_wallet_scan_empty_replacement_open_db(&ndb);
 
+    /* Height 0 holds a body; height 1 has no index entry. */
     struct active_chain chain;
     active_chain_init(&chain);
+    struct block_index genesis;
+    block_index_init(&genesis);
+    genesis.nHeight = 0;
+    genesis.nStatus = BLOCK_HAVE_DATA;
+    ok = ok && active_chain_install_tip_slot(&chain, &genesis);
     struct scan_addr_ht ht;
     scan_aht_init(&ht);
     bool file_has_match[1] = {false};
@@ -601,7 +638,7 @@ static int test_wallet_scan_empty_replacement(void)
     struct timespec pass1 = {.tv_sec = 1, .tv_nsec = 0};
     int failed = ok ? wallet_scan_pass2_execute(
         &ndb, &chain, "/nonexistent", 0, 1000000000,
-        &ht, file_has_match, 0, &started, &pass1) : 0;
+        &ht, file_has_match, 1, 0, &started, &pass1, NULL) : 0;
     ok = ok && failed == -1 && wallet_projection_seed_is_present(&ndb) &&
          node_db_has_no_open_transaction(&ndb);
 
@@ -611,7 +648,7 @@ static int test_wallet_scan_empty_replacement(void)
     }
     int cleared = ok ? wallet_scan_pass2_execute(
         &ndb, &chain, "/nonexistent", 0, 1000000000,
-        &ht, file_has_match, 0, &started, &pass1) : -1;
+        &ht, file_has_match, 1, 0, &started, &pass1, NULL) : -1;
     ok = test_wallet_scan_empty_replacement_check_cleared(&ndb, ok, cleared);
 
     /* The public scanner must not bypass replacement for a zero-key wallet
