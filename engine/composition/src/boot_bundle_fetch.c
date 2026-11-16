@@ -22,6 +22,7 @@
 #include "net/rom_seed.h"                       /* ROM_SEED_* bounds */
 #include "net/file_service.h"                   /* FS_PORT default */
 #include "encoding/utilstrencodings.h"          /* HexStr */
+#include "platform/disk_space.h"
 #include "platform/file_metadata.h"
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
@@ -41,6 +42,12 @@
  * the read well above a realistic ROM directory (a few artifacts). */
 #define BBF_DIRECTORY_JSON_MAX (64u * 1024u)
 #define BBF_PROGRESS_INTERVAL_MS 1000
+
+/* Free-space reader and RLS directory fetch: production defaults, replaced
+ * only by the ZCL_TESTING setters at the end of this file. */
+static bool (*g_bbf_disk_space)(const char *path, uint64_t *available) =
+    platform_disk_space_available;
+static bbf_directory_fetch_fn g_bbf_directory_fetch = rom_fetch_get_directory;
 
 /* One instance lives on boot_bundle_fetch_download's stack. Both parallel ROM
  * fetchers serialize callback entry with their existing callback mutex, so no
@@ -225,6 +232,63 @@ static bool bbf_bundles_dir(const char *datadir, char *dst, size_t cap)
     int n = snprintf(dst, cap, "%s/bundles", datadir);
     return n >= 0 && (size_t)n < cap;
 }
+/* Bytes of `m` already on disk in <bundles>/<filename>.part (0 when absent).
+ * A parallel fetch writes chunks at scattered offsets, so a sparse .part is
+ * credited only with its allocated blocks, never more than the artifact. */
+static uint64_t bbf_partial_bytes(const char *bundles,
+                                  const struct rom_fetch_manifest *m)
+{
+    char part[PATH_MAX];
+    int n = snprintf(part, sizeof(part), "%s/%s%s", bundles, m->filename,
+                     ROM_FETCH_PART_SUFFIX);
+    struct stat st;
+    if (n < 0 || (size_t)n >= sizeof(part) || stat(part, &st) != 0 ||
+        !S_ISREG(st.st_mode) || st.st_size <= 0)
+        return 0;
+    uint64_t have = (uint64_t)st.st_size;
+#if !defined(_WIN32)
+    uint64_t allocated = (uint64_t)st.st_blocks * 512u;
+    if (allocated < have)
+        have = allocated;
+#endif
+    return have > m->size_bytes ? m->size_bytes : have;
+}
+/* Free-space gate before any .part is opened: the bundles directory must hold
+ * the artifact plus BOOT_BUNDLE_FETCH_DISK_MARGIN_BYTES, minus what a partial
+ * already holds. Short → no fetch starts and the WARN names free and needed
+ * bytes. A failed reading lets the fetch proceed with a WARN: the free-space
+ * check is wiring, not a byte check, and a full disk still stops the fetch at
+ * its first failed write exactly as before this gate existed. */
+static bool bbf_disk_space_ok(const char *bundles,
+                              const struct rom_fetch_manifest *m)
+{
+    uint64_t avail = 0;
+    if (!g_bbf_disk_space(bundles, &avail)) {
+        LOG_WARN(BBF_SUBSYS,
+                 "instant-on: could not read the free disk space of %s — "
+                 "starting the fetch of %s anyway (a full disk stops it at "
+                 "the first failed write)", bundles, m->filename);
+        return true;
+    }
+    uint64_t have = bbf_partial_bytes(bundles, m);
+    uint64_t want = m->size_bytes + BOOT_BUNDLE_FETCH_DISK_MARGIN_BYTES;
+    uint64_t need = have >= want ? 0 : want - have;
+    if (avail >= need)
+        return true;
+    bbf_progress_log("fallback", 0, m->num_chunks, have, m->size_bytes,
+                     "not enough free disk space; continuing with ordinary "
+                     "P2P sync");
+    LOG_WARN(BBF_SUBSYS,
+             "instant-on bundle fetch NOT started for %s: not enough free disk "
+             "space in %s (free=%llu bytes, needed=%llu bytes = size %llu + "
+             "margin %llu - partial %llu). Free disk space and restart; boot "
+             "falls back to P2P sync", m->filename, bundles,
+             (unsigned long long)avail, (unsigned long long)need,
+             (unsigned long long)m->size_bytes,
+             (unsigned long long)BOOT_BUNDLE_FETCH_DISK_MARGIN_BYTES,
+             (unsigned long long)have);
+    return false;
+}
 /* Probe the seeds for a chunk manifest and run the matching download path. */
 static bool bbf_probe_and_download(const struct rom_fetch_peer *peers,
                                    size_t npeers,
@@ -299,6 +363,8 @@ bool boot_bundle_fetch_download(const char *datadir,
                  bundles, strerror(errno));
     if (bbf_already_landed(datadir, bundles, m))
         return true;
+    if (!bbf_disk_space_ok(bundles, m))
+        return false;
     /* Prefer the per-chunk-verified swarm path (rom_fetch_download_verified_
      * parallel): probe reachable seeders for the artifact's "RMF" manifest and,
      * on the first that serves one matching the committed num_chunks, run the
@@ -549,8 +615,9 @@ static bool bbf_write_directory_hint(const char *datadir,
     return true;
 }
 /* One discovered-manifest candidate and how many independent seeds served it.
- * The advertised height is carried on `m.height` (rom_fetch_manifest.height) and
- * drives newest-first ranking (bbf_quorum_pick / bbf_quorum_rank). */
+ * The advertised height is carried on `m.height` (rom_fetch_manifest.height);
+ * bbf_quorum_pick / bbf_quorum_rank rank by it only where it names a baked
+ * commitment (bbf_height_is_baked). */
 struct bbf_disc_cand {
     struct rom_fetch_manifest m;
     int  count;
@@ -576,37 +643,54 @@ struct bbf_disc_cand {
  * gone — it silently fell OPEN to a from-genesis IBD whenever a mixed-height
  * fleet served distinct triples, even with a perfectly valid newest bundle on
  * offer):
- *   - Prefer the HIGHEST advertised height (the freshest bundle).
- *   - Within the same height, a >=2-seed triple still beats a lone one, then an
- *     explicit -fileservice seed beats a non-explicit one.
- *   - A lone non-explicit highest-height candidate is STILL returned: quorum is
- *     only a bandwidth-DoS guard here, NOT a trust source. Trust binds solely at
+ *   - The advertised height is an untrusted peer claim. It ranks first only
+ *     where it names a complete-state commitment this binary bakes in (the ROM
+ *     keystone or a ladder rung, get_baked_rom_state_checkpoint_at_height):
+ *     such a candidate beats every unbaked one, and among baked candidates the
+ *     HIGHEST height (the freshest commitment) wins. A lying seed can claim a
+ *     baked height but can never climb above the newest one this build knows.
+ *   - Any other height (one seed claiming 2^40, a legacy 0) proves nothing, so
+ *     among unbaked candidates agreement among MORE seeds wins before height.
+ *   - At equal height and count, an explicit -fileservice seed beats a
+ *     non-explicit one.
+ *   - A lone non-explicit candidate is STILL returned: quorum is only a
+ *     bandwidth-DoS guard here, NOT a trust source. Trust binds solely at
  *     install under the CHECKPOINT_ROM authority (boot_bundle_fetch.c's install
  *     path / engine/composition/src/boot_install_consensus_bundle.c), so a lying seed at
- *     worst wastes ONE bounded, content-verified fetch that fails to install;
- *     the caller then falls back to the next-highest candidate (bbf_quorum_rank)
- *     before it ever falls open to IBD.
+ *     worst wastes ONE bounded, content-verified fetch that fails to install
+ *     and is marked .failed, which discovery never selects again
+ *     (bbf_drop_failed_cands); the caller falls back to the next candidate
+ *     (bbf_quorum_rank) before it ever falls open to IBD.
  * `heights`/`counts`/`has_explicit` are parallel arrays of length `ncand`. No IO. */
+static bool bbf_height_is_baked(int64_t h)
+{
+    return h > 0 && h <= INT32_MAX &&
+           get_baked_rom_state_checkpoint_at_height((int32_t)h) != NULL;
+}
+/* True when candidate (hc, cc, ec) outranks the current best (hb, cb, eb). */
+static bool bbf_cand_beats(int64_t hc, int cc, bool ec,
+                           int64_t hb, int cb, bool eb)
+{
+    bool baked_c = bbf_height_is_baked(hc);
+    bool baked_b = bbf_height_is_baked(hb);
+    if (baked_c != baked_b)
+        return baked_c;
+    if (baked_c && hc != hb)
+        return hc > hb;           /* newest baked commitment first */
+    if (cc != cb)
+        return cc > cb;           /* agreement before an untrusted height */
+    if (hc != hb)
+        return hc > hb;
+    return ec && !eb;
+}
 static int bbf_quorum_pick(const int64_t *heights, const int *counts,
                            const bool *has_explicit, size_t ncand)
 {
     int best = -1;
     for (size_t c = 0; c < ncand; c++) {
-        if (best < 0) {
-            best = (int)c;
-            continue;
-        }
-        if (heights[c] > heights[(size_t)best]) {
-            best = (int)c;
-            continue;
-        }
-        if (heights[c] < heights[(size_t)best])
-            continue;
-        /* Same height: higher count wins; a tie prefers an explicit-seed
-         * candidate so a lone operator-named seed is not shadowed by an
-         * equal-count non-explicit. */
-        if (counts[c] > counts[best] ||
-            (counts[c] == counts[best] && has_explicit[c] && !has_explicit[best]))
+        if (best < 0 ||
+            bbf_cand_beats(heights[c], counts[c], has_explicit[c],
+                           heights[best], counts[best], has_explicit[best]))
             best = (int)c;
     }
     return best;
@@ -770,6 +854,49 @@ static void bbf_bind_responder(struct bbf_discovery *out, const char *body,
         }
     }
 }
+/* True when <datadir>/<rel> exists (an over-long path reads as absent). */
+static bool bbf_datadir_file_present(const char *datadir, const char *rel)
+{
+    char path[PATH_MAX];
+    struct platform_file_metadata metadata;
+    int pn = snprintf(path, sizeof(path), "%s/%s", datadir, rel);
+    return pn > 0 && (size_t)pn < sizeof(path) &&
+           platform_file_metadata_read(path, &metadata) ==
+               PLATFORM_FILE_METADATA_OK;
+}
+/* True when <datadir>/bundles/<m->filename>.failed exists: a bundle of that
+ * name already failed install here. The name is the picker's canonical
+ * "consensus-state-bundle-<height>.sqlite", never a peer-supplied path. */
+static bool bbf_bundle_marked_failed(const char *datadir,
+                                     const struct rom_fetch_manifest *m)
+{
+    char rel[PATH_MAX];
+    int n = snprintf(rel, sizeof(rel), "bundles/%s.failed", m->filename);
+    return n > 0 && (size_t)n < sizeof(rel) &&
+           bbf_datadir_file_present(datadir, rel);
+}
+/* Discovery never selects a triple whose bundle name carries a .failed marker
+ * (never-stuck: a refused bundle is not downloaded again). Compacts `cands`
+ * in place and returns the surviving count. Reads only; deletes nothing. */
+static size_t bbf_drop_failed_cands(const char *datadir,
+                                    struct bbf_disc_cand *cands, size_t ncand)
+{
+    size_t kept = 0;
+    for (size_t c = 0; c < ncand; c++) {
+        if (bbf_bundle_marked_failed(datadir, &cands[c].m)) {
+            LOG_INFO(BBF_SUBSYS,
+                     "discovery: %s (advertised height=%lld, %d seed(s)) "
+                     "already failed install here (.failed marker) — not "
+                     "selecting it again", cands[c].m.filename,
+                     (long long)cands[c].m.height, cands[c].count);
+            continue;
+        }
+        if (kept != c)
+            cands[kept] = cands[c];
+        kept++;
+    }
+    return kept;
+}
 /* Seed count of the tallied candidate whose whole-file digest is `whole`. */
 static int bbf_winner_count(const struct bbf_disc_cand *cands, size_t ncand,
                             const uint8_t *whole)
@@ -815,7 +942,7 @@ static bool bbf_discover_from_peers(const char *datadir,
     memset(hs_cands, 0, sizeof(hs_cands));
     size_t nbundle = 0, nhs = 0;
     size_t responded = bbf_probe_directories(
-        peers, np, bodies, stride, responded_flags, rom_fetch_get_directory);
+        peers, np, bodies, stride, responded_flags, g_bbf_directory_fetch);
     const size_t ccap = sizeof(bundle_cands) / sizeof(bundle_cands[0]);
     for (size_t i = 0; i < np; i++) {
         if (!responded_flags[i]) {
@@ -842,6 +969,7 @@ static bool bbf_discover_from_peers(const char *datadir,
                      "seed manifest that fails the baked-facts cross-check "
                      "— ignoring", peers[i].addr, (unsigned)peers[i].port);
     }
+    nbundle = bbf_drop_failed_cands(datadir, bundle_cands, nbundle);
     out->n_bundles = bbf_quorum_rank(bundle_cands, nbundle, out->bundles,
                                      ROM_FETCH_MAX_WORKERS);
     if (out->n_bundles == 0) {
@@ -876,24 +1004,16 @@ static bool bbf_discover_from_peers(const char *datadir,
         bbf_winner_count(bundle_cands, nbundle, out->bundles[0].whole_sha3) >= 2
             ? "reached" : "degraded_single_seed",
         np, responded);
-    /* Persist the winning (newest) bundle + header seed as the local hint for a
-     * resume; a fetch/verify miss on it re-discovers the full ranked set. */
+    /* Persist the top-ranked bundle + header seed as the local hint for a
+     * resume. bbf_fetch_ranked_bundles re-points it at whichever candidate
+     * actually lands, and a genuine install refusal of that bundle drops it
+     * (boot_bundle_fetch_forget_hint), so the next boot re-discovers. */
     if (!bbf_write_directory_hint(datadir, &out->bundles[0],
                                   out->have_header_seed ? &out->header_seed
                                                         : NULL))
         LOG_WARN(BBF_SUBSYS, "discovery: could not persist the discovered "
                  "directory.json hint — resume will re-discover");
     return true;
-}
-/* True when <datadir>/<rel> exists (an over-long path reads as absent). */
-static bool bbf_datadir_file_present(const char *datadir, const char *rel)
-{
-    char path[PATH_MAX];
-    struct platform_file_metadata metadata;
-    int pn = snprintf(path, sizeof(path), "%s/%s", datadir, rel);
-    return pn > 0 && (size_t)pn < sizeof(path) &&
-           platform_file_metadata_read(path, &metadata) ==
-               PLATFORM_FILE_METADATA_OK;
 }
 /* Does the header index the ladder loaded (`ms`, NULL when none was given)
  * still want the seed? The same verdict the import applies
@@ -980,15 +1100,106 @@ static bool bbf_hint_locations(const char *datadir, char *hint_path,
     return bbf_bundles_dir(datadir, bundles_root, root_cap);
 }
 /* Load the local directory.json hint into `disc`. Returns 0 when no hint
- * file exists, 1 when it yielded an artifact, -1 when it yielded none. */
-static int bbf_load_hint(const char *bundles_root, struct bbf_discovery *disc)
+ * file exists, 1 when it yielded an artifact, -1 when it yielded none. A
+ * hinted bundle whose name already carries a .failed marker is ignored in
+ * memory only: the hint file and every bundle file stay as they are (an older
+ * build's refusal is not cleaned up retroactively). */
+static int bbf_load_hint(const char *datadir, const char *bundles_root,
+                         struct bbf_discovery *disc)
 {
     char *body = bbf_read_text_file(bundles_root, "directory.json",
                                     BBF_DIRECTORY_JSON_MAX);
     if (!body)
         return 0;
     bbf_adopt_hint_body(body, disc);
+    if (disc->n_bundles == 1 &&
+        bbf_bundle_marked_failed(datadir, &disc->bundles[0])) {
+        LOG_WARN(BBF_SUBSYS,
+                 "manifest hint names %s, which already failed install here "
+                 "(.failed marker) — not fetching it again",
+                 disc->bundles[0].filename);
+        disc->n_bundles = 0;
+    }
     return (disc->n_bundles == 0 && !disc->have_header_seed) ? -1 : 1;
+}
+/* Bounded fallback over the ranked bundle candidates: newest-first, stopping
+ * at the first that lands (content-verified). A miss on one is not fatal; the
+ * next is tried before boot falls open to IBD (STEP 0: the export is not
+ * cross-node deterministic, so a lone candidate is legitimate but cannot be
+ * blindly trusted; a bad one wastes one bounded fetch, and the install gate is
+ * the trust boundary either way). When a live discovery lands a candidate
+ * other than the one persisted as the hint, the hint is re-pointed at it, so a
+ * later install refusal of that bundle forgets exactly the hint naming it. */
+static bool bbf_fetch_ranked_bundles(const char *datadir,
+                                     const struct bbf_discovery *disc,
+                                     bool discovered_live,
+                                     const struct rom_fetch_peer *peers,
+                                     size_t np)
+{
+    for (size_t bi = 0; bi < disc->n_bundles; bi++) {
+        const struct rom_fetch_peer *bundle_peers = peers;
+        size_t bundle_np = np;
+        bbf_narrow_seeds(discovered_live, disc->bundle_peers[bi],
+                         disc->bundle_peer_count[bi], &bundle_peers,
+                         &bundle_np);
+        if (boot_bundle_fetch_download(datadir, bundle_peers, bundle_np,
+                                       &disc->bundles[bi])) {
+            if (discovered_live && bi > 0 &&
+                !bbf_write_directory_hint(datadir, &disc->bundles[bi],
+                                          disc->have_header_seed
+                                              ? &disc->header_seed : NULL))
+                LOG_WARN(BBF_SUBSYS, "could not re-point the directory.json "
+                         "hint at the landed bundle %s",
+                         disc->bundles[bi].filename);
+            return true;
+        }
+        if (bi + 1 < disc->n_bundles)
+            LOG_WARN(BBF_SUBSYS,
+                     "instant-on: bundle candidate height=%lld did not land "
+                     "— trying the next of %zu candidate(s)",
+                     (long long)disc->bundles[bi].height, disc->n_bundles);
+    }
+    return false;
+}
+/* True when `name` is a bare file name: non-empty, no separator, not "." or
+ * "..". The name is only compared, never joined into a path. */
+static bool bbf_bare_name(const char *name)
+{
+    return name && name[0] && !strchr(name, '/') && !strchr(name, '\\') &&
+           strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
+}
+bool boot_bundle_fetch_forget_hint(const char *datadir, const char *filename)
+{
+    char bundles[PATH_MAX];
+    char hint[PATH_MAX];
+    if (!datadir || !datadir[0] || !bbf_bare_name(filename) ||
+        !bbf_hint_locations(datadir, hint, sizeof(hint), bundles,
+                            sizeof(bundles)))
+        return false;
+    char *body = bbf_read_text_file(bundles, "directory.json",
+                                    BBF_DIRECTORY_JSON_MAX);
+    if (!body)
+        return false; /* no hint: nothing names the refused bundle */
+    struct rom_fetch_manifest m;
+    memset(&m, 0, sizeof(m));
+    bool names_it = boot_bundle_pick_manifest(body, &m) &&
+                    strcmp(m.filename, filename) == 0;
+    free(body);
+    if (!names_it) {
+        LOG_INFO(BBF_SUBSYS, "directory.json hint does not name the refused "
+                 "bundle %s — keeping it", filename);
+        return false;
+    }
+    if (!platform_private_file_unlink_missing_ok(hint) ||
+        !platform_private_parent_flush(bundles)) {
+        LOG_WARN(BBF_SUBSYS, "could not drop the directory.json hint naming "
+                 "the refused bundle %s: %s", filename, strerror(errno));
+        return false;
+    }
+    LOG_WARN(BBF_SUBSYS, "dropped the directory.json hint naming the refused "
+             "bundle %s — the next boot re-discovers from its seeds and skips "
+             "every .failed bundle", filename);
+    return true;
 }
 bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx,
                              const struct main_state *ms)
@@ -1026,7 +1237,7 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx,
         return false;
     struct bbf_discovery disc;
     memset(&disc, 0, sizeof(disc));
-    int hint = bbf_load_hint(bundles_root, &disc);
+    int hint = bbf_load_hint(datadir, bundles_root, &disc);
     bool discovered_live = false;
     if (hint < 0) {
         LOG_WARN(BBF_SUBSYS,
@@ -1065,32 +1276,9 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx,
                      "complete — header chain falls back to P2P sync");
         }
     }
-    /* Bounded fallback: try the ranked bundle candidates newest-first, stopping
-     * at the first that lands (content-verified). A miss on the newest is not
-     * fatal — the next-highest is tried before boot falls open to IBD (STEP 0:
-     * the export is not cross-node deterministic, so a lone newest candidate is
-     * legitimate and must not be refused, but it also cannot be blindly trusted;
-     * a bad one just wastes one bounded fetch, and the install gate is the trust
-     * boundary either way). */
-    if (bundle_needed) {
-        for (size_t bi = 0; bi < disc.n_bundles; bi++) {
-            const struct rom_fetch_peer *bundle_peers = peers;
-            size_t bundle_np = np;
-            bbf_narrow_seeds(discovered_live, disc.bundle_peers[bi],
-                             disc.bundle_peer_count[bi], &bundle_peers,
-                             &bundle_np);
-            if (boot_bundle_fetch_download(datadir, bundle_peers, bundle_np,
-                                           &disc.bundles[bi])) {
-                any = true;
-                break;
-            }
-            if (bi + 1 < disc.n_bundles)
-                LOG_WARN(BBF_SUBSYS,
-                         "instant-on: bundle candidate height=%lld did not land "
-                         "— trying the next-highest of %zu candidate(s)",
-                         (long long)disc.bundles[bi].height, disc.n_bundles);
-        }
-    }
+    if (bundle_needed &&
+        bbf_fetch_ranked_bundles(datadir, &disc, discovered_live, peers, np))
+        any = true;
     return any;
 }
 #ifdef ZCL_TESTING
@@ -1110,5 +1298,13 @@ int boot_bundle_quorum_pick_for_test(const int64_t *heights, const int *counts,
                                      const bool *has_explicit, size_t ncand)
 {
     return bbf_quorum_pick(heights, counts, has_explicit, ncand);
+}
+void boot_bundle_fetch_set_disk_space_reader_for_test(bbf_disk_space_fn fn)
+{
+    g_bbf_disk_space = fn ? fn : platform_disk_space_available;
+}
+void boot_bundle_fetch_set_directory_fetch_for_test(bbf_directory_fetch_fn fn)
+{
+    g_bbf_directory_fetch = fn ? fn : rom_fetch_get_directory;
 }
 #endif

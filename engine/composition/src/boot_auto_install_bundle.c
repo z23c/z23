@@ -425,20 +425,25 @@ char *boot_autodetect_consensus_bundle(const char *datadir)
     return outp;
 }
 
-/* Write a sibling "<bundle_path>.failed" never-stuck marker (best-effort). */
-static void csir_write_failed_marker(const char *bundle_path)
+/* Write a sibling "<bundle_path>.failed" never-stuck marker (best-effort).
+ * True iff the marker now exists. */
+static bool csir_write_failed_marker(const char *bundle_path)
 {
     char failp[PATH_MAX];
     int n = snprintf(failp, sizeof(failp), "%s.failed", bundle_path);
-    if (n < 0 || (size_t)n >= sizeof(failp))
-        return;
+    if (n < 0 || (size_t)n >= sizeof(failp)) {
+        LOG_WARN(ICB_SUBSYS, "never-stuck marker path too long for %s",
+                 bundle_path);
+        return false;
+    }
     int fd = open(failp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) {
         LOG_WARN(ICB_SUBSYS, "could not write never-stuck marker %s: %s", failp,
                  strerror(errno));
-        return;
+        return false;
     }
     (void)close(fd);
+    return true;
 }
 
 /* Clear a stale "<bundle_path>.failed" marker after the bundle installed
@@ -741,6 +746,68 @@ size_t boot_post_install_drop_borrowed_have_data(
 
 /* ── The 1b + 1c orchestrator ──────────────────────────────────────────────── */
 
+/* Genuine refusal of an autodetected bundle: after its .failed marker is on
+ * disk, forget the discovery hint that names it so the next boot re-discovers
+ * (and skips it) instead of re-reading a poisoned hint forever.
+ *
+ * The refused bundle file itself stays on disk. Reclaiming it is safe only
+ * when it is provably junk for this build (content matching no compiled
+ * checkpoint or ROM authority), and nothing here can prove that: the
+ * installer reports one REFUSED status plus free text for a forged bundle and
+ * for a compiled-authority bundle refused for a local-state reason alike, and
+ * the export is not byte-deterministic, so no compiled digest names the file.
+ * A public node serves such files to others; keep them. */
+static void icb_forget_refused_bundle_hint(const char *datadir,
+                                           const char *bundle_path)
+{
+    const char *slash = strrchr(bundle_path, '/');
+    const char *name = slash ? slash + 1 : bundle_path;
+    (void)boot_bundle_fetch_forget_hint(datadir, name);
+}
+
+/* Act on an autodetected bundle that did NOT install. Only the genuine
+ * refusal branch marks .failed and forgets the hint; the post-install,
+ * owner-gate and deferred branches leave every file in place. */
+static void icb_after_refusal(const char *datadir, const char *auto_bundle,
+                              const struct consensus_state_install_runtime_result *rr)
+{
+    if (rr->state_installed) {
+        LOG_ERROR(ICB_SUBSYS,
+                  "autodetected bundle %s landed durably but a "
+                  "post-install step failed (%s) — retrying on the next "
+                  "boot (not marked .failed: the state is on disk)",
+                  auto_bundle, rr->reason);
+    } else if (rr->owner_gate_refused) {
+        /* The canonical-lane owner gate protects existing chain state;
+         * it judges the datadir, not the bundle. Leave no .failed
+         * marker so a boot with ZCL_DEPLOY_ALLOW_CANONICAL=1 finds the
+         * bundle again. */
+        LOG_WARN(ICB_SUBSYS,
+                 "autodetected bundle %s not installed (NOT marked "
+                 ".failed): %s", auto_bundle, rr->reason);
+    } else if (rr->retriable_headers_not_ready) {
+        /* RETRIABLE WAIT (fresh boot / mid-header-sync): the validated
+         * header chain has not yet reached the checkpoint height. The
+         * bundle is GOOD — the node has not caught up — so do NOT mark
+         * .failed. It is re-detected on the next boot, and the
+         * checkpoint_bundle_install_ready condition arms the install the
+         * moment the header chain reaches the checkpoint this session. */
+        LOG_INFO(ICB_SUBSYS,
+                 "autodetected bundle %s deferred (NOT marked .failed): "
+                 "%s", auto_bundle, rr->reason);
+    } else {
+        /* Genuine pre-activate refusal (bad / incompatible / contained
+         * bundle): mark .failed so the next boot degrades to normal
+         * behavior (never-stuck). */
+        bool marked = csir_write_failed_marker(auto_bundle);
+        LOG_ERROR(ICB_SUBSYS,
+                  "autodetected bundle %s did not install (marked .failed "
+                  "→ normal boot next time): %s", auto_bundle, rr->reason);
+        if (marked)
+            icb_forget_refused_bundle_hint(datadir, auto_bundle);
+    }
+}
+
 /* (1b) Passive autodetect of a <datadir>/bundles/<name>.sqlite starter bundle.
  * Returns true iff the bundle installed; *installed_height is set then. */
 static bool auto_install_detected(struct node_db *ndb, struct main_state *ms,
@@ -759,43 +826,23 @@ static bool auto_install_detected(struct node_db *ndb, struct main_state *ms,
             boot_auto_install_clear_failed_marker(auto_bundle);
             LOG_INFO(ICB_SUBSYS, "autodetected consensus bundle installed %s "
                                  "(H*=%d)", auto_bundle, rr.hstar);
-        } else if (rr.state_installed) {
-            LOG_ERROR(ICB_SUBSYS,
-                      "autodetected bundle %s landed durably but a "
-                      "post-install step failed (%s) — retrying on the next "
-                      "boot (not marked .failed: the state is on disk)",
-                      auto_bundle, rr.reason);
-        } else if (rr.owner_gate_refused) {
-            /* The canonical-lane owner gate protects existing chain state;
-             * it judges the datadir, not the bundle. Leave no .failed
-             * marker so a boot with ZCL_DEPLOY_ALLOW_CANONICAL=1 finds the
-             * bundle again. */
-            LOG_WARN(ICB_SUBSYS,
-                     "autodetected bundle %s not installed (NOT marked "
-                     ".failed): %s", auto_bundle, rr.reason);
-        } else if (rr.retriable_headers_not_ready) {
-            /* RETRIABLE WAIT (fresh boot / mid-header-sync): the validated
-             * header chain has not yet reached the checkpoint height. The
-             * bundle is GOOD — the node has not caught up — so do NOT mark
-             * .failed. It is re-detected on the next boot, and the
-             * checkpoint_bundle_install_ready condition arms the install the
-             * moment the header chain reaches the checkpoint this session. */
-            LOG_INFO(ICB_SUBSYS,
-                     "autodetected bundle %s deferred (NOT marked .failed): "
-                     "%s", auto_bundle, rr.reason);
         } else {
-            /* Genuine pre-activate refusal (bad / incompatible / contained
-             * bundle): mark .failed so the next boot degrades to normal
-             * behavior (never-stuck). */
-            csir_write_failed_marker(auto_bundle);
-            LOG_ERROR(ICB_SUBSYS,
-                      "autodetected bundle %s did not install (marked .failed "
-                      "→ normal boot next time): %s", auto_bundle, rr.reason);
+            icb_after_refusal(datadir, auto_bundle, &rr);
         }
         free(auto_bundle);
     }
     return installed;
 }
+
+#ifdef ZCL_TESTING
+void boot_auto_install_refusal_for_test(
+    const char *datadir, const char *bundle_path,
+    const struct consensus_state_install_runtime_result *rr)
+{
+    if (datadir && bundle_path && rr)
+        icb_after_refusal(datadir, bundle_path, rr);
+}
+#endif
 
 bool boot_maybe_auto_install_consensus_bundle(struct node_db *ndb,
                                               struct main_state *ms,

@@ -161,6 +161,10 @@ void boot_bundle_fetch_reseed_wait(void);
  * observe that the boot call returned first and nothing is served yet. */
 void boot_bundle_fetch_reseed_test_hold(bool hold);
 
+/* Free space the bundles directory must hold beyond the artifact itself before
+ * a download starts (filesystem slack, the verified-resume journal). */
+#define BOOT_BUNDLE_FETCH_DISK_MARGIN_BYTES (256ull * 1024u * 1024u)
+
 /* The production entry point wired into boot_select_state_source (before the
  * autodetect+install). Runs boot_bundle_fetch_should_run; assembles the
  * file-service seed set from ctx (ctx->file_service_peer, which may carry a
@@ -168,16 +172,22 @@ void boot_bundle_fetch_reseed_test_hold(bool hold);
  * ctx->connect_only); then obtains the manifest commitment. It prefers a LOCAL
  * <datadir>/bundles/directory.json (an operator hint, or one a prior discovery
  * persisted); when that is absent — the truly fresh node — it DISCOVERS the
- * manifest(s) from the seed set over the file-service "RLS" wire and RANKS them
- * newest-first (highest advertised height), preferring a >=2-seed / explicit
- * -fileservice candidate at a given height but never refusing a lone newest one
- * (the export is not cross-node byte-deterministic; quorum is a
- * bandwidth-DoS guard, not a trust source — trust binds at install). It persists the winner as the local hint,
- * then downloads newest-first with bounded fallback to the next-highest on a
- * miss. The big bytes are always swarmed + content-verified against the
- * committed manifest, and the install path binds the result to the compiled
- * checkpoint. Best-effort: any miss returns false and boot proceeds unchanged
- * (P2P IBD). Returns true iff a verified bundle landed this boot.
+ * manifest(s) from the seed set over the file-service "RLS" wire, drops every
+ * candidate whose bundle name already carries a .failed marker, and RANKS the
+ * rest: a height naming a commitment this binary bakes in (keystone or rung)
+ * first, newest of those first; any other advertised height is an untrusted
+ * claim, so there agreement among more seeds wins before height; an explicit
+ * -fileservice seed breaks a tie. A lone candidate is never refused (the export
+ * is not cross-node byte-deterministic; quorum is a bandwidth-DoS guard, not a
+ * trust source — trust binds at install). It persists the winner as the local
+ * hint, then downloads in rank order with bounded fallback on a miss. Before
+ * any .part is opened the bundles directory must have the artifact size plus
+ * BOOT_BUNDLE_FETCH_DISK_MARGIN_BYTES free (less any partial already there);
+ * short, nothing starts and the WARN names the free and needed bytes. The big
+ * bytes are always swarmed + content-verified against the committed manifest,
+ * and the install path binds the result to the compiled checkpoint.
+ * Best-effort: any miss returns false and boot proceeds unchanged (P2P IBD).
+ * Returns true iff a verified bundle landed this boot.
  *
  * `ms` is the header index the boot ladder already loaded (NULL when the
  * caller has none). The header-chain seed is wanted only when
@@ -187,6 +197,15 @@ void boot_bundle_fetch_reseed_test_hold(bool hold);
 struct main_state;
 bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx,
                              const struct main_state *ms);
+
+/* Forget a poisoned discovery hint. Called ONLY when the installer refused the
+ * staged bundle `filename` (a bare name under <datadir>/bundles/) for a genuine
+ * content or authority reason and its .failed marker was written. Removes
+ * <datadir>/bundles/directory.json iff the consensus bundle it names is
+ * exactly `filename`, so the next boot re-discovers (and skips the .failed
+ * bundle) instead of trusting the hint forever. Touches no other file; an
+ * operator hint naming another bundle stays. Returns true iff it removed. */
+bool boot_bundle_fetch_forget_hint(const char *datadir, const char *filename);
 
 /* How many file-service seeds `ctx` assembles to (the exact set
  * boot_bundle_fetch_maybe would use). ZERO means the fetch is structurally OFF
@@ -227,6 +246,23 @@ bool boot_bundle_probe_manifest_for_test(
     const uint8_t chunk_root[32], uint32_t want_chunks,
     uint8_t (*out_chunk_sha3)[32], uint32_t out_cap,
     uint32_t *out_num_chunks, bbf_manifest_fetch_fn fetch);
+/* Free-space reader consulted before a download starts (NULL restores
+ * platform_disk_space_available). */
+typedef bool (*bbf_disk_space_fn)(const char *path, uint64_t *available);
+void boot_bundle_fetch_set_disk_space_reader_for_test(bbf_disk_space_fn fn);
+/* RLS directory fetch used by discovery (NULL restores
+ * rom_fetch_get_directory), so a test can make each seed list its own
+ * artifact while one loopback server serves the chunks. */
+void boot_bundle_fetch_set_directory_fetch_for_test(bbf_directory_fetch_fn fn);
+#if !defined(_WIN32)
+/* Drive boot_auto_install_bundle.c's post-attempt handling of an autodetected
+ * bundle `bundle_path` that did NOT install, with a synthetic installer
+ * result, without running the installer. */
+struct consensus_state_install_runtime_result;
+void boot_auto_install_refusal_for_test(
+    const char *datadir, const char *bundle_path,
+    const struct consensus_state_install_runtime_result *rr);
+#endif
 #endif
 
 #endif /* ZCL_CONFIG_BOOT_BUNDLE_FETCH_H */

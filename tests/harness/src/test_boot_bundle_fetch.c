@@ -47,6 +47,7 @@
 #include "validation/main_state.h"              /* struct main_state */
 #include "chain/chain.h"                        /* block_index status bits */
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -468,47 +469,79 @@ static int case_pick_kinds(void)
 
 /* ── (c)+(d) E2E against the real serve path ────────────────────────────── */
 
+/* Redirect stderr (at full log level) into a temporary file while a boot call
+ * runs. Always restore stderr and its level before assertions run. */
+struct bbf_capture {
+    FILE *file;
+    int saved;
+    enum zcl_log_level level;
+};
+
+static bool bbf_capture_begin(struct bbf_capture *c)
+{
+    c->file = tmpfile();
+    if (!c->file)
+        LOG_FAIL("test_boot_bundle_fetch", "cannot create log capture");
+    c->saved = dup(STDERR_FILENO);
+    if (c->saved < 0) {
+        fclose(c->file);
+        LOG_FAIL("test_boot_bundle_fetch", "cannot save stderr");
+    }
+    fflush(stderr);
+    if (dup2(fileno(c->file), STDERR_FILENO) < 0) {
+        close(c->saved);
+        fclose(c->file);
+        LOG_FAIL("test_boot_bundle_fetch", "cannot redirect stderr");
+    }
+    c->level = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_ALL);
+    return true;
+}
+
+static bool bbf_capture_end(struct bbf_capture *c, char *out, size_t cap)
+{
+    fflush(stderr);
+    zcl_log_level_set(c->level);
+    int restored = dup2(c->saved, STDERR_FILENO);
+    close(c->saved);
+    if (restored < 0) {
+        fclose(c->file);
+        LOG_FAIL("test_boot_bundle_fetch", "cannot restore stderr");
+    }
+    rewind(c->file);
+    size_t n = fread(out, 1, cap - 1, c->file);
+    out[n] = '\0';
+    bool ok = !ferror(c->file) && fgetc(c->file) == EOF;
+    if (fclose(c->file) != 0)
+        ok = false;
+    if (!ok)
+        LOG_FAIL("test_boot_bundle_fetch", "log capture failed or exceeded bound");
+    return true;
+}
+
 /* Capture the real threaded download's foreground messages in this isolated
- * test process. Always restore stderr and its level before assertions run. */
+ * test process. */
 static bool bbf_capture_download(const char *dir,
                                  const struct rom_fetch_peer *peers,
                                  const struct rom_fetch_manifest *manifest,
                                  bool *download_ok, char *out, size_t cap)
 {
-    FILE *capture = tmpfile();
-    if (!capture)
-        LOG_FAIL("test_boot_bundle_fetch", "cannot create log capture");
-    int saved = dup(STDERR_FILENO);
-    if (saved < 0) {
-        fclose(capture);
-        LOG_FAIL("test_boot_bundle_fetch", "cannot save stderr");
-    }
-    fflush(stderr);
-    if (dup2(fileno(capture), STDERR_FILENO) < 0) {
-        close(saved);
-        fclose(capture);
-        LOG_FAIL("test_boot_bundle_fetch", "cannot redirect stderr");
-    }
-    enum zcl_log_level level = zcl_log_level_get();
-    zcl_log_level_set(ZCL_LOG_ALL);
+    struct bbf_capture c;
+    if (!bbf_capture_begin(&c))
+        return false;
     *download_ok = boot_bundle_fetch_download(dir, peers, 1, manifest);
-    fflush(stderr);
-    zcl_log_level_set(level);
-    int restored = dup2(saved, STDERR_FILENO);
-    close(saved);
-    if (restored < 0) {
-        fclose(capture);
-        LOG_FAIL("test_boot_bundle_fetch", "cannot restore stderr");
-    }
-    rewind(capture);
-    size_t n = fread(out, 1, cap - 1, capture);
-    out[n] = '\0';
-    bool ok = !ferror(capture) && fgetc(capture) == EOF;
-    if (fclose(capture) != 0)
-        ok = false;
-    if (!ok)
-        LOG_FAIL("test_boot_bundle_fetch", "log capture failed or exceeded bound");
-    return true;
+    return bbf_capture_end(&c, out, cap);
+}
+
+/* The same capture around the production entry, boot_bundle_fetch_maybe. */
+static bool bbf_capture_maybe(const char *dir, const struct app_context *ctx,
+                              bool *landed, char *out, size_t cap)
+{
+    struct bbf_capture c;
+    if (!bbf_capture_begin(&c))
+        return false;
+    *landed = boot_bundle_fetch_maybe(dir, ctx, NULL);
+    return bbf_capture_end(&c, out, cap);
 }
 
 /* Observe actual callback counters rather than a simulated progress object. */
@@ -1669,6 +1702,25 @@ static void bbf_seeder_stop(struct bbf_seeder *s)
  * `corrupt_whole` flips one bit of the committed whole-file digest — the
  * bytes on the wire are then perfectly good but do not match what the client
  * committed to, which is precisely what the content proof must catch. */
+/* One-artifact /directory.json body advertising `a` (whole-file digest
+ * `whole`) as a consensus bundle at `height`. */
+static bool bbf_artifact_json(char *out, size_t cap,
+                              const struct rom_artifact *a,
+                              const uint8_t whole[32], int64_t height)
+{
+    char digest_hex[65], whole_hex[65];
+    HexStr(a->chunk_root, 32, false, digest_hex, sizeof(digest_hex));
+    HexStr(whole, 32, false, whole_hex, sizeof(whole_hex));
+    int n = snprintf(out, cap,
+                     "{\"count\":1,\"artifacts\":[{\"kind\":\"consensus_bundle\","
+                     "\"digest\":\"%s\",\"whole_sha3\":\"%s\",\"size\":%llu,"
+                     "\"chunk_size\":%u,\"chunks\":%u,\"height\":%lld}]}",
+                     digest_hex, whole_hex,
+                     (unsigned long long)a->size_bytes, a->chunk_size,
+                     a->num_chunks, (long long)height);
+    return n > 0 && (size_t)n < cap;
+}
+
 static bool bbf_write_hint(const char *datadir, const struct rom_artifact *a,
                            bool corrupt_whole)
 {
@@ -1680,18 +1732,8 @@ static bool bbf_write_hint(const char *datadir, const struct rom_artifact *a,
     memcpy(whole, a->whole_sha3, 32);
     if (corrupt_whole)
         whole[0] ^= 0x01;
-    char digest_hex[65], whole_hex[65];
-    HexStr(a->chunk_root, 32, false, digest_hex, sizeof(digest_hex));
-    HexStr(whole, 32, false, whole_hex, sizeof(whole_hex));
     char json[1024];
-    int n = snprintf(json, sizeof(json),
-                     "{\"count\":1,\"artifacts\":[{\"kind\":\"consensus_bundle\","
-                     "\"digest\":\"%s\",\"whole_sha3\":\"%s\",\"size\":%llu,"
-                     "\"chunk_size\":%u,\"chunks\":%u,\"height\":3056758}]}",
-                     digest_hex, whole_hex,
-                     (unsigned long long)a->size_bytes, a->chunk_size,
-                     a->num_chunks);
-    if (n <= 0 || (size_t)n >= sizeof(json))
+    if (!bbf_artifact_json(json, sizeof(json), a, whole, 3056758))
         return false;
     return bbf_write_file(b, "directory.json", (const uint8_t *)json,
                           strlen(json));
@@ -1864,6 +1906,466 @@ static int case_peer_seed_stall_is_bounded(void)
     return failures;
 }
 
+/* ── Poisoned hint, untrusted height, free space (hunt B[9], B[13]) ─────── */
+
+static bool bbf_exists(const char *dir, const char *rel)
+{
+    char p[1024];
+    int n = snprintf(p, sizeof(p), "%s/%s", dir, rel);
+    return n > 0 && (size_t)n < sizeof(p) && access(p, F_OK) == 0;
+}
+
+/* FNV-1a over a file's bytes; false when unreadable. */
+static bool bbf_file_fnv(const char *path, uint64_t *out)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    uint64_t h = 1469598103934665603ull;
+    int ch;
+    while ((ch = fgetc(f)) != EOF) {
+        h ^= (uint64_t)(unsigned char)ch;
+        h *= 1099511628211ull;
+    }
+    bool ok = !ferror(f);
+    fclose(f);
+    *out = h;
+    return ok;
+}
+
+#define BBF_SNAP_MAX 32
+#define BBF_SNAP_NAME 256
+
+static int bbf_name_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+/* One "name size fnv" line per sorted entry of `dir`. */
+static bool bbf_snapshot_lines(const char *dir, char (*names)[BBF_SNAP_NAME],
+                               size_t n, char *out, size_t cap)
+{
+    size_t off = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < n; i++) {
+        char p[1024];
+        struct stat st;
+        uint64_t h = 0;
+        snprintf(p, sizeof(p), "%s/%s", dir, names[i]);
+        if (stat(p, &st) != 0)
+            return false;
+        if (S_ISREG(st.st_mode) && !bbf_file_fnv(p, &h))
+            return false;
+        /* A directory's own st_size is filesystem bookkeeping; its entries
+         * are snapshotted separately. */
+        long long size = S_ISDIR(st.st_mode) ? 0 : (long long)st.st_size;
+        int w = snprintf(out + off, cap - off, "%s %lld %016llx\n", names[i],
+                         size, (unsigned long long)h);
+        if (w < 0 || (size_t)w >= cap - off)
+            return false;
+        off += (size_t)w;
+    }
+    return true;
+}
+
+/* Byte-level snapshot of a directory: equal snapshots mean the same names,
+ * sizes and contents. */
+static bool bbf_snapshot_dir(const char *dir, char *out, size_t cap)
+{
+    static char names[BBF_SNAP_MAX][BBF_SNAP_NAME];
+    size_t n = 0;
+    DIR *d = opendir(dir);
+    if (!d)
+        return false;
+    struct dirent *e;
+    bool ok = true;
+    while (ok && (e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        ok = n < BBF_SNAP_MAX && strlen(e->d_name) < BBF_SNAP_NAME;
+        if (ok)
+            snprintf(names[n++], BBF_SNAP_NAME, "%s", e->d_name);
+    }
+    closedir(d);
+    if (!ok)
+        return false;
+    qsort(names, n, sizeof(names[0]), bbf_name_cmp);
+    return bbf_snapshot_lines(dir, names, n, out, cap);
+}
+
+/* True when <datadir>/bundles/directory.json names the bundle `name`. */
+static bool bbf_hint_names(const char *datadir, const char *name)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/bundles/directory.json", datadir);
+    FILE *f = fopen(p, "rb");
+    if (!f)
+        return false;
+    char body[4096];
+    size_t n = fread(body, 1, sizeof(body) - 1, f);
+    fclose(f);
+    body[n] = '\0';
+    struct rom_fetch_manifest m;
+    memset(&m, 0, sizeof(m));
+    return boot_bundle_pick_manifest(body, &m) && strcmp(m.filename, name) == 0;
+}
+
+static void bbf_refused_result(struct consensus_state_install_runtime_result *rr)
+{
+    memset(rr, 0, sizeof(*rr));
+    rr->status = CONSENSUS_INSTALL_REFUSED;
+    rr->height = -1;
+    rr->hstar = -1;
+    snprintf(rr->reason, sizeof(rr->reason), "%s",
+             "test: bundle content matches no compiled authority");
+}
+
+#define BBF_POISON_HONEST_H    3100000          /* names no baked commitment */
+#define BBF_POISON_JUNK_H      ((int64_t)1 << 40)
+#define BBF_POISON_HONEST_NAME "consensus-state-bundle-3100000.sqlite"
+#define BBF_POISON_JUNK_NAME   "consensus-state-bundle-1099511627776.sqlite"
+
+static struct rom_artifact g_poison_honest, g_poison_junk;
+static uint16_t g_poison_port;
+
+/* Seed 127.0.0.1 lists only the honest artifact at H; seed 127.0.0.2 lists
+ * only the junk artifact at 2^40. One wildcard-bound loopback server serves
+ * both artifacts' chunks. */
+static bool bbf_poison_directory(const char *addr, uint16_t port, char *buf,
+                                 size_t cap)
+{
+    if (port != g_poison_port)
+        return false;
+    if (strcmp(addr, "127.0.0.1") == 0)
+        return bbf_artifact_json(buf, cap, &g_poison_honest,
+                                 g_poison_honest.whole_sha3,
+                                 BBF_POISON_HONEST_H);
+    if (strcmp(addr, "127.0.0.2") == 0)
+        return bbf_artifact_json(buf, cap, &g_poison_junk,
+                                 g_poison_junk.whole_sha3, BBF_POISON_JUNK_H);
+    return false;
+}
+
+static bool bbf_poison_start(char *dir, size_t cap)
+{
+    /* A failed earlier case skips its cleanup; never serve from its root. */
+    fs_server_stop();
+    rom_seed_reset();
+    rom_seed_set_peer_bps_cap(1ull << 30);
+    rom_seed_set_global_bps_cap(1ull << 30);
+    test_make_tmpdir(dir, cap, "bbf_poison_srv", "ok");
+    size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
+    uint8_t *buf = malloc(size);
+    if (!buf)
+        return false;
+    bbf_gen_content(buf, size);
+    bool ok = bbf_write_file(dir, "consensus-state-bundle-3100000.sqlite", buf,
+                             size);
+    for (size_t i = 16; i < size; i++)
+        buf[i] ^= 0x5a;
+    ok = ok && bbf_write_file(dir, "consensus-state-bundle-3100001.sqlite", buf,
+                              size);
+    free(buf);
+    ok = ok &&
+         rom_seed_register(dir, "consensus-state-bundle-3100000.sqlite", NULL,
+                           &g_poison_honest) == ROM_REG_OK &&
+         rom_seed_register(dir, "consensus-state-bundle-3100001.sqlite", NULL,
+                           &g_poison_junk) == ROM_REG_OK;
+    if (!ok)
+        return false;
+    fs_server_start(dir, 0, NULL);
+    for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+        platform_sleep_ms(50);
+    g_poison_port = fs_server_is_running() ? fs_server_get_port() : 0;
+    return g_poison_port != 0;
+}
+
+/* (a) A hostile seed's junk bundle lands, is refused at install and marked
+ * .failed: the hint naming it is dropped, the next boot re-discovers, never
+ * fetches the .failed triple again and fetches the honest one; refusing that
+ * one too ends the cycle (never-stuck, no download loop). */
+static int case_poisoned_hint_rediscovers(void)
+{
+    int failures = 0;
+    static char log[262144];
+    TEST("boot_bundle_fetch: a refused junk bundle drops the hint naming it; "
+         "the next boot re-discovers, skips the .failed triple and fetches "
+         "the honest one") {
+        char sdir[256];
+        boot_bundle_fetch_disarm_peer_seeds();
+        ASSERT(bbf_poison_start(sdir, sizeof(sdir)));
+        boot_bundle_fetch_set_directory_fetch_for_test(bbf_poison_directory);
+        boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.1", g_poison_port);
+        boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.2", g_poison_port);
+        char cdir[256];
+        test_make_tmpdir(cdir, sizeof(cdir), "bbf_poison_cli", "ok");
+        struct app_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.datadir = cdir;
+        ASSERT(boot_bundle_fetch_seed_count(&ctx) == 2);
+
+        /* Boot 1: one seed each, no baked height, so the higher junk claim
+         * ranks first; its bytes match its own manifest, so it lands. */
+        ASSERT(boot_bundle_fetch_maybe(cdir, &ctx, NULL));
+        ASSERT(bbf_exists(cdir, "bundles/" BBF_POISON_JUNK_NAME));
+        ASSERT(!bbf_exists(cdir, "bundles/" BBF_POISON_HONEST_NAME));
+        ASSERT(bbf_hint_names(cdir, BBF_POISON_JUNK_NAME));
+
+        /* The installer refuses it for a genuine content reason. */
+        char junk[1024];
+        snprintf(junk, sizeof(junk), "%s/bundles/%s", cdir,
+                 BBF_POISON_JUNK_NAME);
+        struct consensus_state_install_runtime_result rr;
+        bbf_refused_result(&rr);
+        boot_auto_install_refusal_for_test(cdir, junk, &rr);
+        ASSERT(bbf_exists(cdir, "bundles/" BBF_POISON_JUNK_NAME ".failed"));
+        ASSERT(!bbf_exists(cdir, "bundles/directory.json"));
+        /* Not provably junk to this build: the file itself stays. */
+        ASSERT(bbf_exists(cdir, "bundles/" BBF_POISON_JUNK_NAME));
+
+        /* Boot 2: discovery runs again; the .failed triple is not fetched. */
+        bool landed = false;
+        ASSERT(bbf_capture_maybe(cdir, &ctx, &landed, log, sizeof(log)));
+        ASSERT(landed);
+        ASSERT(strstr(log, "attempting peer directory discovery") != NULL);
+        ASSERT(strstr(log, "checking download sources for "
+                           BBF_POISON_HONEST_NAME) != NULL);
+        ASSERT(strstr(log, "checking download sources for "
+                           BBF_POISON_JUNK_NAME) == NULL);
+        ASSERT(strstr(log, BBF_POISON_JUNK_NAME " already present") == NULL);
+        ASSERT(bbf_exists(cdir, "bundles/" BBF_POISON_HONEST_NAME));
+        ASSERT(bbf_hint_names(cdir, BBF_POISON_HONEST_NAME));
+
+        /* Refusing the honest one too: hint dropped, boot 3 fetches nothing. */
+        char honest[1024];
+        snprintf(honest, sizeof(honest), "%s/bundles/%s", cdir,
+                 BBF_POISON_HONEST_NAME);
+        boot_auto_install_refusal_for_test(cdir, honest, &rr);
+        ASSERT(!bbf_exists(cdir, "bundles/directory.json"));
+        ASSERT(bbf_capture_maybe(cdir, &ctx, &landed, log, sizeof(log)));
+        ASSERT(!landed);
+        ASSERT(strstr(log, "checking download sources") == NULL);
+        ASSERT(!bbf_exists(cdir, "bundles/directory.json"));
+
+        test_rm_rf_recursive(cdir);
+        fs_server_stop();
+        test_rm_rf_recursive(sdir);
+        rom_seed_reset();
+    } _test_next:;
+    boot_bundle_fetch_set_directory_fetch_for_test(NULL);
+    boot_bundle_fetch_disarm_peer_seeds();
+    return failures;
+}
+
+/* (b) An advertised height is an untrusted claim: agreement among more seeds
+ * outranks one seed advertising a higher height. */
+static int case_quorum_untrusted_height(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: two seeds agreeing on H outrank one seed "
+         "advertising a higher height") {
+        const int64_t huge = (int64_t)1 << 40;
+        bool f[] = { false, false };
+        int64_t h[] = { 3056758, huge };
+        int c[] = { 2, 1 };
+        ASSERT(boot_bundle_quorum_pick_for_test(h, c, f, 2) == 0);
+        int64_t hr[] = { huge, 3056758 };
+        int cr[] = { 1, 2 };
+        ASSERT(boot_bundle_quorum_pick_for_test(hr, cr, f, 2) == 1);
+
+        /* Neither height names a baked commitment: agreement first. */
+        int64_t u[] = { 3100000, 3150000 };
+        int uc[] = { 2, 1 };
+        ASSERT(boot_bundle_quorum_pick_for_test(u, uc, f, 2) == 0);
+        int ueq[] = { 1, 1 };
+        ASSERT(boot_bundle_quorum_pick_for_test(u, ueq, f, 2) == 1);
+
+        /* Any number of seeds claiming an unbaked height never outranks a
+         * baked commitment. */
+        int64_t b[] = { huge, 3056758 };
+        int bc[] = { 3, 1 };
+        ASSERT(boot_bundle_quorum_pick_for_test(b, bc, f, 2) == 1);
+    } _test_next:;
+    return failures;
+}
+
+static uint64_t g_fake_free;
+static bool g_fake_free_ok;
+static bool bbf_fake_disk_space(const char *path, uint64_t *available)
+{
+    (void)path;
+    if (!g_fake_free_ok)
+        return false;
+    *available = g_fake_free;
+    return true;
+}
+
+/* Write `n` bytes of non-repeating data as <dir>/<name> (a real partial). */
+static bool bbf_write_partial(const char *dir, const char *name, size_t n)
+{
+    uint8_t *buf = malloc(n);
+    if (!buf)
+        return false;
+    uint32_t x = 0x9e3779b9u;
+    for (size_t i = 0; i < n; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        buf[i] = (uint8_t)x;
+    }
+    bool ok = bbf_write_file(dir, name, buf, n);
+    free(buf);
+    return ok;
+}
+
+/* Run one gated download against a dead peer with `free_bytes` reported. */
+static bool bbf_disk_attempt(const char *cdir, const struct rom_fetch_manifest *m,
+                             bool reader_ok, uint64_t free_bytes, char *log,
+                             size_t cap)
+{
+    struct rom_fetch_peer dead[1];
+    memset(dead, 0, sizeof(dead));
+    snprintf(dead[0].addr, sizeof(dead[0].addr), "%s", "127.0.0.1");
+    dead[0].port = 1;
+    g_fake_free_ok = reader_ok;
+    g_fake_free = free_bytes;
+    bool ok = true;
+    return bbf_capture_download(cdir, dead, m, &ok, log, cap) && !ok;
+}
+
+/* (c) Free space below what the manifest needs: no fetch starts and the
+ * reported reason names disk space, not a transfer failure. */
+static int case_disk_space_gate(void)
+{
+    int failures = 0;
+    static char log[65536];
+    TEST("boot_bundle_fetch: too little free disk space starts no fetch and "
+         "the reason names disk space") {
+        uint64_t size = (uint64_t)ROM_SEED_CHUNK_SIZE + 4096;
+        char body[1024];
+        snprintf(body, sizeof(body),
+                 "{\"artifacts\":[{\"kind\":\"consensus_bundle\","
+                 "\"digest\":\"%064d\",\"whole_sha3\":\"%064d\",\"size\":%llu,"
+                 "\"chunk_size\":%u,\"chunks\":2,\"height\":3056758}]}",
+                 1, 2, (unsigned long long)size, (unsigned)ROM_SEED_CHUNK_SIZE);
+        struct rom_fetch_manifest m;
+        memset(&m, 0, sizeof(m));
+        ASSERT(boot_bundle_pick_manifest(body, &m));
+        char cdir[256];
+        test_make_tmpdir(cdir, sizeof(cdir), "bbf_disk_cli", "ok");
+        char part[512];
+        snprintf(part, sizeof(part), "bundles/%s%s", m.filename,
+                 ROM_FETCH_PART_SUFFIX);
+        boot_bundle_fetch_set_disk_space_reader_for_test(bbf_fake_disk_space);
+        const uint64_t margin = BOOT_BUNDLE_FETCH_DISK_MARGIN_BYTES;
+        char want[128];
+
+        ASSERT(bbf_disk_attempt(cdir, &m, true, size - 1, log, sizeof(log)));
+        ASSERT(strstr(log, "not enough free disk space") != NULL);
+        snprintf(want, sizeof(want), "free=%llu bytes, needed=%llu bytes",
+                 (unsigned long long)(size - 1),
+                 (unsigned long long)(size + margin));
+        ASSERT(strstr(log, want) != NULL);
+        ASSERT(strstr(log, "checking download sources") == NULL);
+        ASSERT(strstr(log, "transport failure") == NULL);
+        ASSERT(!bbf_exists(cdir, part));
+
+        /* A partial already present is credited: one byte short refuses,
+         * exactly enough starts the fetch. */
+        char bdir[512];
+        snprintf(bdir, sizeof(bdir), "%s/bundles", cdir);
+        char part_name[256];
+        snprintf(part_name, sizeof(part_name), "%s%s", m.filename,
+                 ROM_FETCH_PART_SUFFIX);
+        ASSERT(bbf_write_partial(bdir, part_name, 8192));
+        ASSERT(bbf_disk_attempt(cdir, &m, true, size + margin - 8192 - 1, log,
+                                sizeof(log)));
+        snprintf(want, sizeof(want), "needed=%llu bytes",
+                 (unsigned long long)(size + margin - 8192));
+        ASSERT(strstr(log, want) != NULL);
+        ASSERT(strstr(log, "checking download sources") == NULL);
+        ASSERT(bbf_disk_attempt(cdir, &m, true, size + margin - 8192, log,
+                                sizeof(log)));
+        ASSERT(strstr(log, "not enough free disk space") == NULL);
+        ASSERT(strstr(log, "checking download sources") != NULL);
+
+        /* A failed free-space reading lets the fetch proceed, with a WARN. */
+        ASSERT(bbf_disk_attempt(cdir, &m, false, 0, log, sizeof(log)));
+        ASSERT(strstr(log, "could not read the free disk space") != NULL);
+        ASSERT(strstr(log, "checking download sources") != NULL);
+        test_rm_rf_recursive(cdir);
+    } _test_next:;
+    boot_bundle_fetch_set_disk_space_reader_for_test(NULL);
+    return failures;
+}
+
+/* (d) The post-install, owner-gate and deferred outcomes, and a bundle an
+ * older build already marked .failed, leave every file in place. */
+static bool bbf_nongenuine_outcomes_keep(const char *cdir, const char *bundle,
+                                         const char *before)
+{
+    static char after[8192];
+    char bdir[512];
+    snprintf(bdir, sizeof(bdir), "%s/bundles", cdir);
+    for (int k = 0; k < 3; k++) {
+        struct consensus_state_install_runtime_result rr;
+        bbf_refused_result(&rr);
+        rr.state_installed = k == 0;
+        rr.owner_gate_refused = k == 1;
+        rr.retriable_headers_not_ready = k == 2;
+        boot_auto_install_refusal_for_test(cdir, bundle, &rr);
+        if (!bbf_snapshot_dir(bdir, after, sizeof(after)) ||
+            strcmp(before, after) != 0)
+            return false;
+    }
+    return true;
+}
+
+static int case_nongenuine_refusals_touch_nothing(void)
+{
+    int failures = 0;
+    static char before[8192], after[8192], root_before[2048], root_after[2048];
+    TEST("boot_bundle_fetch: deferred, owner-gate and post-install outcomes "
+         "and an older build's .failed bundle leave every file in place") {
+        struct bbf_seeder srv;
+        boot_bundle_fetch_disarm_peer_seeds();
+        ASSERT(bbf_seeder_start(&srv));
+        char cdir[256];
+        test_make_tmpdir(cdir, sizeof(cdir), "bbf_keep_cli", "ok");
+        ASSERT(bbf_write_hint(cdir, &srv.art, false));
+        char bdir[512];
+        snprintf(bdir, sizeof(bdir), "%s/bundles", cdir);
+        static const char name[] = "consensus-state-bundle-3056758.sqlite";
+        ASSERT(bbf_write_file(bdir, name, srv.content, srv.size));
+        char bundle[1024];
+        snprintf(bundle, sizeof(bundle), "%s/%s", bdir, name);
+        ASSERT(bbf_snapshot_dir(bdir, before, sizeof(before)));
+        ASSERT(bbf_nongenuine_outcomes_keep(cdir, bundle, before));
+        ASSERT(!bbf_exists(cdir, "bundles/consensus-state-bundle-3056758"
+                                 ".sqlite.failed"));
+
+        /* An older build refused it: .failed present, hint still names it. */
+        ASSERT(bbf_write_file(bdir, "consensus-state-bundle-3056758.sqlite"
+                              ".failed", (const uint8_t *)"", 0));
+        ASSERT(bbf_snapshot_dir(bdir, before, sizeof(before)));
+        ASSERT(bbf_snapshot_dir(cdir, root_before, sizeof(root_before)));
+        struct app_context ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.datadir = cdir;
+        boot_bundle_fetch_arm_peer_seed_for_test("127.0.0.1", srv.port);
+        ASSERT(!boot_bundle_fetch_maybe(cdir, &ctx, NULL));
+        ASSERT(bbf_snapshot_dir(bdir, after, sizeof(after)));
+        ASSERT(strcmp(before, after) == 0);
+        ASSERT(bbf_snapshot_dir(cdir, root_after, sizeof(root_after)));
+        ASSERT(strcmp(root_before, root_after) == 0);
+
+        test_rm_rf_recursive(cdir);
+        bbf_seeder_stop(&srv);
+    } _test_next:;
+    boot_bundle_fetch_disarm_peer_seeds();
+    return failures;
+}
+
 int test_boot_bundle_fetch(void)
 {
     printf("\n=== boot_bundle_fetch ===\n");
@@ -1889,6 +2391,10 @@ int test_boot_bundle_fetch(void)
     failures += case_manifest_probe_oom_spawns_nothing();
     failures += case_discovery();
     failures += case_discovery_outcome_persists();
+    failures += case_quorum_untrusted_height();
+    failures += case_disk_space_gate();
+    failures += case_nongenuine_refusals_touch_nothing();
+    failures += case_poisoned_hint_rediscovers();
     /* Reap the registry-owned reseed workers the cases spawned. */
     boot_bundle_fetch_reseed_wait();
     (void)thread_registry_join_all(5);
