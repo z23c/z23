@@ -110,6 +110,13 @@ int wallet_scan_block_file_map(const char *path,
  * the end of its file, or does not parse. A block in a file Pass 1 did not
  * match is skipped unread.
  *
+ * start_height == 0 replaces wallet_utxos and wallet_transactions with the
+ * result (an empty result empties them). start_height > 0 is a delta (the
+ * boot catch-up above its cursor): no row is deleted, an empty result writes
+ * nothing, and a found row never replaces one that already exists. A
+ * start_height below 0 is treated as a full scan: it takes the same
+ * replace path as start_height == 0.
+ *
  * Returns the number of wallet transactions found, -1 on error, or
  * WALLET_SCAN_REFUSED_MISSING_DATA. */
 int wallet_scan_pass2_execute(struct node_db *ndb,

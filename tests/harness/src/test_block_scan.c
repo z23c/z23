@@ -607,8 +607,18 @@ static bool test_wallet_scan_empty_replacement_empty_range_scan(
         ok = db_sapling_note_delete_all(ndb) &&
              seed_wallet_projection(ndb);
     }
-    int empty_range_result = ok ? wallet_scan_blocks(
+    /* An empty range above height 0 is a restart delta with nothing to
+     * scan: it keeps the rows byte-equal. */
+    uint64_t before = 0, after = 0;
+    ok = ok && wrc_wallet_rows_digest(ndb, &before);
+    int delta_result = ok ? wallet_scan_blocks(
         ndb, chain, empty_wallet, "/nonexistent", 1, 0) : -1;
+    ok = ok && delta_result == 0 && wrc_wallet_rows_digest(ndb, &after) &&
+         before == after && wallet_projection_seed_is_present(ndb) &&
+         node_db_has_no_open_transaction(ndb);
+    /* An empty range from height 0 still replaces with the empty result. */
+    int empty_range_result = ok ? wallet_scan_blocks(
+        ndb, chain, empty_wallet, "/nonexistent", 0, -1) : -1;
     return ok && empty_range_result == 0 &&
            db_wallet_tx_count(ndb) == 0 &&
            db_wallet_utxo_balance(ndb) == 0 &&

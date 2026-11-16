@@ -22,7 +22,10 @@ struct wallet;
  * block_index entries for file locations. Finds wallet transactions using
  * a hash table of address hashes (O(1) lookup vs O(n) keystore scan).
  * Tracks UTXOs in memory and replaces wallet_utxos and wallet_transactions
- * with what it found, in one SQLite transaction.
+ * with what it found, in one SQLite transaction. That replace is for a scan
+ * from height 0 only: a scan with start_height > 0 covers a delta, deletes no
+ * row, writes nothing when it finds nothing, and adds a found row without
+ * replacing one that already exists.
  *
  * Coverage guard: before Pass 1 reads a file or any row is deleted, every
  * height of [start_height, end_height] must hold a block body

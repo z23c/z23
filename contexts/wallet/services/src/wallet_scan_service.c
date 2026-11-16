@@ -228,25 +228,47 @@ static bool wallet_scan_delete_result_rows(struct node_db *ndb)
            db_wallet_tx_delete_all(ndb);
 }
 
-/* Write the in-memory UTXO set as wallet_utxo rows, marking spends.
- * Returns 0 on success, 1 when a wallet_utxo save failed, 2 when a
- * mark_spent failed; the caller logs and owns the rollback path. */
+/* Save one scanned output as a wallet_utxo row (INSERT OR REPLACE). */
+static bool wallet_scan_save_utxo_row(struct node_db *ndb,
+                                      struct scan_mem_utxo *u)
+{
+    struct db_wallet_utxo du;
+    memset(&du, 0, sizeof(du));
+    memcpy(du.txid, u->txid, 32);
+    du.vout = u->vout;
+    du.value = u->value;
+    memcpy(du.address_hash, u->addr_hash, 20);
+    du.script = u->script;
+    du.script_len = u->script_len;
+    du.height = u->height;
+    du.is_coinbase = u->is_coinbase;
+    return db_wallet_utxo_save(ndb, &du);
+}
+
+/* Write the in-memory UTXO set as wallet_utxo rows, marking spends. A delta
+ * scan (keep_existing) leaves a row that already exists as it is: the save
+ * replaces the whole row and would clear its spent mark. A spend the scan
+ * read from a block is marked either way. find answers false both for no row
+ * and for a failed read; a failed read leaves the connection's error code
+ * set and refuses, so a read error never turns into a replace. Returns 0 on
+ * success, 1 when a wallet_utxo save failed, 2 when a mark_spent failed, 3
+ * when the existing-row read failed; the caller logs and owns the rollback
+ * path. */
 static int wallet_scan_store_utxo_rows(struct node_db *ndb,
-                                       struct scan_utxo_set *uset)
+                                       struct scan_utxo_set *uset,
+                                       bool keep_existing)
 {
     for (int i = 0; i < uset->count; i++) {
         struct scan_mem_utxo *u = &uset->items[i];
-        struct db_wallet_utxo du;
-        memset(&du, 0, sizeof(du));
-        memcpy(du.txid, u->txid, 32);
-        du.vout = u->vout;
-        du.value = u->value;
-        memcpy(du.address_hash, u->addr_hash, 20);
-        du.script = u->script;
-        du.script_len = u->script_len;
-        du.height = u->height;
-        du.is_coinbase = u->is_coinbase;
-        if (!db_wallet_utxo_save(ndb, &du))
+        struct db_wallet_utxo have;
+        memset(&have, 0, sizeof(have));
+        bool exists = keep_existing &&
+                      db_wallet_utxo_find(ndb, u->txid, u->vout, &have);
+        if (exists)
+            db_wallet_utxo_free(&have);
+        else if (keep_existing && sqlite3_errcode(ndb->db) != SQLITE_OK)
+            return 3;
+        if (!exists && !wallet_scan_save_utxo_row(ndb, u))
             return 1;
         if (u->spent &&
             !db_wallet_utxo_mark_spent(ndb, u->txid, u->vout,
@@ -256,64 +278,95 @@ static int wallet_scan_store_utxo_rows(struct node_db *ndb,
     return 0;
 }
 
-/* Write the in-memory wallet transaction list as wallet_tx rows.
- * Returns false when a wallet_tx save failed; the caller logs and owns
+/* Save one scanned wallet transaction as a wallet_tx row. */
+static bool wallet_scan_save_wtx_row(struct node_db *ndb,
+                                     const struct scan_mem_wtx *t)
+{
+    struct db_wallet_tx dt;
+    memset(&dt, 0, sizeof(dt));
+    memcpy(dt.txid, t->txid, 32);
+    dt.raw_tx = t->raw;
+    dt.raw_tx_len = t->raw_len;
+    dt.has_block = true;
+    dt.block_height = t->height;
+    dt.time_received = (int64_t)t->time;
+    dt.from_me = t->from_me;
+    dt.fee = t->fee;
+    return db_wallet_tx_save(ndb, &dt);
+}
+
+/* Write the in-memory wallet transaction list as wallet_tx rows. A delta
+ * scan (keep_existing) skips a txid that already has a row: its from_me and
+ * fee see only the outputs inside the delta, so its row would carry less.
+ * Returns NULL on success, else the failure text; the caller logs and owns
  * the rollback path. */
-static bool wallet_scan_store_wtx_rows(struct node_db *ndb,
-                                       struct scan_wtx_list *wl)
+static const char *wallet_scan_store_wtx_rows(struct node_db *ndb,
+                                              struct scan_wtx_list *wl,
+                                              bool keep_existing)
 {
     for (int i = 0; i < wl->count; i++) {
         struct scan_mem_wtx *t = &wl->items[i];
-        struct db_wallet_tx dt;
-        memset(&dt, 0, sizeof(dt));
-        memcpy(dt.txid, t->txid, 32);
-        dt.raw_tx = t->raw;
-        dt.raw_tx_len = t->raw_len;
-        dt.has_block = true;
-        dt.block_height = t->height;
-        dt.time_received = (int64_t)t->time;
-        dt.from_me = t->from_me;
-        dt.fee = t->fee;
-        if (!db_wallet_tx_save(ndb, &dt))
-            return false; // raw-return-ok:caller wallet_scan_store_results logs the wallet_tx save failure
+        enum db_wallet_tx_presence have = keep_existing
+            ? db_wallet_tx_presence_checked(ndb, t->txid)
+            : DB_WALLET_TX_ABSENT;
+        if (have == DB_WALLET_TX_ERROR)
+            return "wallet_tx presence read failed";
+        if (have == DB_WALLET_TX_ABSENT && !wallet_scan_save_wtx_row(ndb, t))
+            return "wallet_tx save failed";
     }
-    return true;
+    return NULL;
+}
+
+/* Every write of one result, inside the open write transaction. A full scan
+ * (from height 0) replaces both tables; a delta scan only adds what it found.
+ * Returns NULL on success, else the failure text for the caller to log
+ * before its rollback. */
+static const char *wallet_scan_write_result_rows(struct node_db *ndb,
+                                                 bool delta,
+                                                 struct scan_utxo_set *uset,
+                                                 struct scan_wtx_list *wl)
+{
+    if (!delta && !wallet_scan_delete_result_rows(ndb))
+        return "model-owned result reset failed";
+    int utxo_store = wallet_scan_store_utxo_rows(ndb, uset, delta);
+    if (utxo_store == 1)
+        return "wallet_utxo save failed";
+    if (utxo_store == 2)
+        return "wallet_utxo mark_spent failed";
+    if (utxo_store == 3)
+        return "wallet_utxo existing-row read failed";
+    return wallet_scan_store_wtx_rows(ndb, wl, delta);
 }
 
 /* The sole durable write path for a completed transparent wallet scan.
- * An empty result uses the same transaction and model-owned table APIs as a
- * populated result, so Controllers never need table knowledge or a second
- * commit/rollback policy. */
-static int wallet_scan_store_results(struct node_db *ndb,
+ * A scan from height 0 replaces both tables with what it found, an empty
+ * result included, in one transaction through the model-owned table APIs,
+ * so Controllers never need table knowledge or a second commit/rollback
+ * policy. A scan that starts above 0 covers only a delta (the boot catch-up
+ * above its cursor): it deletes no row, an empty result writes nothing, and
+ * a found row is added without replacing one that already exists. */
+static int wallet_scan_store_results(struct node_db *ndb, int start_height,
                                      struct scan_utxo_set *uset,
                                      struct scan_wtx_list *wl)
 {
     bool write_tx_open = false;
+    bool delta = start_height > 0;
 
+    if (delta && uset->count == 0 && wl->count == 0) {
+        printf("wallet_scan: delta from height %d found no wallet rows; "
+               "existing rows kept\n", start_height);
+        fflush(stdout);
+        return 0;
+    }
     if (!wallet_scan_begin_write_tx(ndb))
         LOG_ERR("wallet_scan", "result write begin failed: %s",
                 (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
                                  : "db unavailable");
     write_tx_open = true;
-    if (!wallet_scan_delete_result_rows(ndb)) {
-        LOG_WARN("wallet_scan",
-                 "wallet_scan: model-owned result reset failed");
-        goto write_fail;
-    }
-
-    int utxo_store = wallet_scan_store_utxo_rows(ndb, uset);
-    if (utxo_store == 1) {
-        LOG_WARN("wallet_scan", "wallet_scan: wallet_utxo save failed");
-        goto write_fail;
-    }
-    if (utxo_store == 2) {
-        LOG_WARN("wallet_scan",
-                 "wallet_scan: wallet_utxo mark_spent failed");
-        goto write_fail;
-    }
-
-    if (!wallet_scan_store_wtx_rows(ndb, wl)) {
-        LOG_WARN("wallet_scan", "wallet_scan: wallet_tx save failed");
+    const char *write_failed =
+        wallet_scan_write_result_rows(ndb, delta, uset, wl);
+    if (write_failed) {
+        LOG_WARN("wallet_scan", "wallet_scan: %s", write_failed);
         goto write_fail;
     }
 
@@ -527,7 +580,7 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
            total_ms, unspent);
     fflush(stdout);
 
-    int result = wallet_scan_store_results(ndb, &uset, &wl);
+    int result = wallet_scan_store_results(ndb, start_height, &uset, &wl);
 
     /* Cleanup */
     scan_uset_free(&uset);
@@ -558,7 +611,8 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
     if (matched_files == 0) {
         struct scan_utxo_set empty_uset = {0};
         struct scan_wtx_list empty_wl = {0};
-        return wallet_scan_store_results(ndb, &empty_uset, &empty_wl);
+        return wallet_scan_store_results(ndb, start_height,
+                                         &empty_uset, &empty_wl);
     }
 
     return wallet_scan_pass2_nonempty(ndb, chain, datadir,

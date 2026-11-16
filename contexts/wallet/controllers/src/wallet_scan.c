@@ -694,8 +694,10 @@ int wallet_scan_blocks_checked(struct node_db *ndb,
 
     /* range fast-path. Empty range = nothing to do. */
     if (start_height > end_height) {
-        printf("wallet_scan: range empty (start=%d > end=%d), "
-               "replacing with empty result\n", start_height, end_height);
+        printf("wallet_scan: range empty (start=%d > end=%d), %s\n",
+               start_height, end_height,
+               start_height <= 0 ? "replacing with empty result"
+                                 : "nothing to scan, existing rows kept");
         return wallet_scan_pass2_execute(ndb, chain, datadir,
                                          start_height, end_height,
                                          NULL, NULL, 0, 0, NULL, NULL, cov);
