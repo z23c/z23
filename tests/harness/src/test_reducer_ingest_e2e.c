@@ -954,6 +954,8 @@ static int rie_check_no_stage_spin(void)
     return failures;
 }
 
+#include "reducer_reseed_unbacked_test.h"
+
 int test_reducer_ingest_e2e(void);
 int test_reducer_ingest_e2e(void)
 {
@@ -984,6 +986,8 @@ int test_reducer_ingest_e2e(void)
     failures += rie_run_invalid_scenario(ext);
 
     failures += rie_run_reorg_scenario(ext);
+
+    failures += rru_run_all();
 
     /* Belt + suspenders: production authority remains reducer-owned. */
     RIE_CHECK("teardown: reducer remains authoritative",

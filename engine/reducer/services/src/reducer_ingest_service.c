@@ -60,6 +60,7 @@
 #include "jobs/tip_finalize_stage.h"
 #include "jobs/stage_helpers.h"
 #include "jobs/stage_repair.h"  /* header-solution repair-table backfill */
+#include "support/log_throttle.h"
 
 static _Atomic int g_last_body_persist_log_height = -1;
 static _Atomic uint64_t g_catchup_validated_solution_skip_total;
@@ -599,6 +600,36 @@ uint64_t reducer_ingest_seed_anchor_reseed_failure_count(void)
     return atomic_load(&g_seed_anchor_reseed_failures);
 }
 
+/* True when this node has finalized nothing: the tip_finalize cursor is 0 and
+ * tip_finalize_log has no row (an unreadable log counts as empty). This is the
+ * test boot uses to publish the cached header tip as a "fresh" served tip
+ * (has_no_durable_tip_history, tip_finalize_stage_durable.c), and the test the
+ * init authority anchor uses to refuse (require_prior_progress,
+ * tip_finalize_anchor.c). A seed-imported node is in this state with a header
+ * tip and no coins; every applied or installed state leaves a row. */
+static bool reducer_reseed_tip_unbacked(void)
+{
+    return tip_finalize_stage_cursor() == 0 &&
+           stage_log_row_count(progress_store_db(), "reducer",
+                               "tip_finalize_log") <= 0;
+}
+
+static void reducer_refuse_unbacked_reseed(int height)
+{
+    atomic_fetch_add(&g_seed_anchor_reseed_failures, 1);
+    /* Reached on every ingest until something real anchors the node. */
+    static struct log_throttle throttle = LOG_THROTTLE_INIT;
+    uint64_t reps = 0;
+    if (log_throttle_should_emit(&throttle, 1, platform_time_wall_unix(),
+                                 3600, &reps))
+        LOG_WARN("reducer",
+                 "[reducer] runtime tip_finalize anchor re-seed refused h=%d "
+                 "reason=no-applied-state (tip_finalize cursor 0, empty "
+                 "tip_finalize_log): the served tip is a header tip with no "
+                 "coin state behind it repeated=%llu",
+                 height, (unsigned long long)reps);
+}
+
 static void reducer_seed_anchors_for_ingest_tip(
         struct chain_activation_controller *ctl)
 {
@@ -608,13 +639,24 @@ static void reducer_seed_anchors_for_ingest_tip(
      * stage's own pending work — a `< T+1` gate would re-seed it on
      * EVERY at-tip ingest, stamping the cursor to T+1 and skipping the
      * pending transition: each new block could then only publish when ITS
-     * successor arrived (the served-tip-trails-by-one defect). */
+     * successor arrived (the served-tip-trails-by-one defect).
+     *
+     * Never on a node that has finalized nothing: there the served tip is the
+     * header tip boot published as "fresh", and the untrusted seed (its gate
+     * is a linkage walk only) would stamp every cursor to it over an empty
+     * coin set. Any block that passes check_block reaches this line, from any
+     * peer (cmpctblock -> boot_submit_compact_block has no at-tip gate).
+     * Proof: tests/harness/src/reducer_reseed_unbacked_test.h. */
     struct block_index *anchor_tip = active_chain_tip(&ctl->ms->chain_active);
     if (anchor_tip && anchor_tip->phashBlock &&
-        tip_finalize_stage_cursor() < (uint64_t)anchor_tip->nHeight)
-        reducer_ingest_try_seed_anchor(anchor_tip->nHeight,
-                                       anchor_tip->phashBlock->data,
-                                       "runtime-reseed-cursor-behind-tip");
+        tip_finalize_stage_cursor() < (uint64_t)anchor_tip->nHeight) {
+        if (reducer_reseed_tip_unbacked())
+            reducer_refuse_unbacked_reseed(anchor_tip->nHeight);
+        else
+            reducer_ingest_try_seed_anchor(anchor_tip->nHeight,
+                                           anchor_tip->phashBlock->data,
+                                           "runtime-reseed-cursor-behind-tip");
+    }
 
     /* Regtest on-demand bootstrap: a FRESH genesis-only node (no import /
      * snapshot / reindex ever ran tip_finalize_stage_seed_anchor) has no
@@ -638,6 +680,15 @@ static void reducer_seed_anchors_for_ingest_tip(
         reducer_ingest_try_seed_anchor(0, anchor_tip->phashBlock->data,
                                        "regtest-genesis-seed");
 }
+
+#ifdef ZCL_TESTING
+void reducer_ingest_seed_anchors_for_tip_for_testing(
+        struct chain_activation_controller *ctl)
+{
+    if (ctl && ctl->ms)
+        reducer_seed_anchors_for_ingest_tip(ctl);
+}
+#endif
 
 static void reducer_drain_header_prefix(void)
 {

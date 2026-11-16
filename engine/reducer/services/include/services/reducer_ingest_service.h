@@ -112,6 +112,13 @@ void reducer_body_fsync_scope_snapshot(unsigned *depth,
                                        bool *event_log_deferred);
 
 #ifdef ZCL_TESTING
+struct chain_activation_controller;
+/* Run the pre-drain anchor step of reducer_ingest_block on its own (the
+ * runtime re-seed and the regtest genesis seed). A synthetic block cannot pass
+ * reducer_ingest_block's Equihash check, so tests reach this step here. */
+void reducer_ingest_seed_anchors_for_tip_for_testing(
+    struct chain_activation_controller *ctl);
+
 /* Force an artificial delay (microseconds) at the top of the next and every
  * subsequent precommit flush, so a test can prove the timing/EWMA/condition
  * wiring fires on a genuine slow flush without a real contended disk. 0
