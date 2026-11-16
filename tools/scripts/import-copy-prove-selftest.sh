@@ -1,24 +1,10 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# import-copy-prove-selftest.sh — hermetic proof that the ONE canonical
-# copy-prove driver tools/scripts/import-copy-prove.sh gates correctly in BOTH
-# modes (--mode=import default, and --mode=bundle), with NO real node binary,
-# NO real zclassicd, NO real chainstate/bundle, and NO network ports opened. It
-# fakes $NODE_BIN and $RPC_BIN (both env-overridable on the real script) with
-# tiny fixture scripts that emit exactly the banners/RPC substrings the real
-# driver greps/seds for, and drives the real script end-to-end against them.
-#
-# This exists because the real importer / bundle installer cannot be exercised
-# in CI/dev (there is no live wedge to reproduce, no zclassicd chainstate to
-# import, no exported bundle). What CAN be proven hermetically, and what this
-# proves, is that the DRIVER computes the mode-appropriate gate set and overall
-# verdict correctly from a given set of node responses — i.e. that the harness
-# will gate correctly the moment a real cure runs. It does not (and cannot)
-# prove anything about the importer / installer itself.
-#
-# All fixture paths live under a throwaway sandbox; nothing under $HOME or any
-# real datadir is read or written.
+# Hermetic import/bundle driver-gate checks using fake node/RPC responses.
+# No real node, datadir, network, importer or installer is exercised; the
+# fixtures cover driver verdicts, not importer/installer correctness. Every
+# fixture path is sandboxed and removed on exit.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -28,6 +14,8 @@ chmod 700 "$SANDBOX"
 
 cleanup() { rm -rf "$SANDBOX"; }
 trap cleanup EXIT
+
+Z23_PORT_PROBE_SS=/bin/true; export Z23_PORT_PROBE_SS
 
 FAKE_NODE="$SANDBOX/fake-zclassic23"
 FAKE_RPC="$SANDBOX/fake-zcl-rpc"
@@ -670,7 +658,18 @@ test_bundle_missing_provenance_fails_gsov3() {
     printf '[import-copy-prove-selftest] PASS: bundle mode fails G-SOV.3 when a provenance marker is missing (self_folded not proven)\n'
 }
 
+test_dead_sink_listener_fails_closed() {
+    OUTPUT="$SANDBOX/out-sink-listening"; COPY_DIR="$(fresh_copy_dir)"
+    EXTRA_ARGS=(--expect-climb-past="$WEDGE"); Z23_PORT_PROBE_SS=/bin/echo
+    local rc; rc="$(run_script)"; Z23_PORT_PROBE_SS=/bin/true
+    assert_rc "$rc" 2 "a listening dead sink was not refused"
+    assert_contains "$OUTPUT" "dead -connect sink 39999 is LISTENING" \
+        "the listening-sink refusal did not name its cause"
+    printf '[import-copy-prove-selftest] PASS: a listening dead sink is refused, never dialled\n'
+}
+
 # ── import mode ──
+test_dead_sink_listener_fails_closed
 test_dry_run_prints_plan_only
 test_refuses_non_copy_path
 test_refuses_preexisting_copy_dir

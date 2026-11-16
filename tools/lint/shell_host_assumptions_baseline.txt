@@ -31,7 +31,7 @@ ss	tools/scripts/isolated_node_env.sh	3
 ss	tools/scripts/lane_health.sh	2
 ss	tools/scripts/netdisrupt_two_node_drill.sh	5
 ss	tools/scripts/onion_pair_watch.sh	1
-ss	tools/scripts/port_probe.sh	11
+ss	tools/scripts/port_probe.sh	9
 ss	tools/scripts/store_sell_operator_proof.sh	4
 stat	platform/deploy/migrate-role-names.sh	2
 stat	platform/deploy/provision-z23-build-host.sh	4

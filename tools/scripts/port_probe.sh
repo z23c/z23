@@ -23,8 +23,8 @@ z23_tcp_port_listening()
         return 2
     fi
 
-    if command -v ss >/dev/null 2>&1; then
-        if output="$(ss -H -ltn "sport = :$port" 2>&1)"; then
+    if command -v "${Z23_PORT_PROBE_SS:-ss}" >/dev/null 2>&1; then
+        if output="$("${Z23_PORT_PROBE_SS:-ss}" -H -ltn "sport = :$port" 2>&1)"; then
             [ -n "$output" ] && return 0
             return 1
         else
