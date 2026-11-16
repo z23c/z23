@@ -1276,6 +1276,49 @@ static bool bmx_directory_tight_page(void)
     return bmx_directory_budget_probe(high, &cut) == 1 && cut;
 }
 
+static bool bmx_seed_crowded_history(void)
+{
+    char path[1600], quotes[301];
+    for (size_t i = 0; i < 150; ++i) memcpy(quotes + 2 * i, "\\\"", 2);
+    quotes[300] = 0;
+    for (unsigned stream = 0; stream < 8; ++stream) {
+        char rel[80];
+        (void)snprintf(rel, sizeof(rel), "mail/inbox.bulk-%u.jsonl", stream);
+        if (!bmx_write(BMX_A, rel, "", "wb")) return false;
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/%s", g_bmx_state[BMX_A], rel);
+        FILE *f = fopen(path, "ab");
+        if (!f) return false;
+        bool ok = true;
+        for (unsigned i = stream; i < 3000; i += 8) {
+            if (fprintf(f, "{\"seq\":%u,\"ts\":\"2026-09-16T%02u:%02u:%02uZ\",\"from\":\"box-%03u\",\"to\":\"node-a\",\"kind\":\"claim\",\"body\":\"note=%s\\nstate=accepted\",\"ref\":\"job-%04u\"}\n",
+                        i + 1, (i / 3600) % 24, (i / 60) % 60, i % 60, i % 200, quotes, i) < 0) { ok = false; break; }
+        }
+        if (fclose(f) != 0 || !ok) return false;
+    }
+    return true;
+}
+
+static int bmx_t_directory_crowded(void)
+{
+    int failures = 0;
+    TEST("boardmail: crowded default brief retains configured labels") {
+        ASSERT(bmx_setup("directory_crowded")); bmx_use(BMX_A); ASSERT(bmx_own_key());
+        ASSERT(bmx_seed_crowded_history());
+        struct bmx_call c; bmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+        (void)json_push_kv_int(&c.input, "limit", 100);
+        zcl_native_handle_fleet_steer_brief(&c.request, &c.reply);
+        const struct json_value *dir = json_get(&c.reply.data, "mailbox_directory");
+        const struct json_value *labels = json_get(dir, "labels");
+        const struct json_value *cut = json_get(&c.reply.data, "budget_truncated");
+        ASSERT(bmx_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(dir, "state")), "complete");
+        ASSERT_EQ(json_size(labels), 2u);
+        ASSERT(json_get_int(json_get(cut, "changes")) > 0);
+        bmx_end(&c); bmx_teardown(); PASS();
+    } _test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_directory(void)
 {
     int failures = 0;
@@ -1429,6 +1472,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_oversize();
     failures += bmx_t_delivery();
     failures += bmx_t_directory();
+    failures += bmx_t_directory_crowded();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

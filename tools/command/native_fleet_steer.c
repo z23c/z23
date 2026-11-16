@@ -4327,12 +4327,16 @@ static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
     json_free(&empty);
     struct json_value *trunc = (struct json_value *)json_get(data, "budget_truncated");
     if (!ok || !trunc || trunc->type != JSON_OBJ) return false;
-    if (!fmc_directory_fit(data, trunc, budget)) return false;
     for (i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
-        long long d = fmc_trim_member(data, keys[i], budget);
-        if (d > 0) ok &= fmc_trunc_add(trunc, keys[i], d);
+        if (forward && !strcmp(keys[i], "changes") &&
+            !fmc_directory_fit(data, trunc, budget)) return false;
+        long long d;
+        do {
+            d = fmc_trim_member(data, keys[i], budget);
+            if (d > 0 && !fmc_trunc_add(trunc, keys[i], d)) return false;
+        } while (d > 0 && json_write(data, NULL, 0) > budget);
     }
-    return ok;
+    return ok && (forward || fmc_directory_fit(data, trunc, budget));
 }
 
 struct fmc_brief_lists {
