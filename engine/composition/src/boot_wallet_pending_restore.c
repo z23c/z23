@@ -2,7 +2,10 @@
  * Restore an authenticated pending-cutover view without persistent writes. */
 #include "config/boot_wallet_pending_restore.h"
 #include "boot_wallet_cold_prefix_internal.h"
+#include "config/consensus_state_snapshot_install.h"
 #include "consensus_state_install_terminal_internal.h"
+#include "consensus_state_snapshot_install_internal.h"
+#include "consensus_state_proof_prefix.h"
 
 #include "base/serialize_le.h"
 #include "chain/chainparams.h"
@@ -80,6 +83,43 @@ static bool bpr_genesis_valid(const struct block_index *p, const struct chain_pa
     return target_seen && !p->pprev && uint256_eq(p->phashBlock, &params->consensus.hashGenesisBlock);
 }
 
+static bool bpr_sovereign_provenance(sqlite3 *db)
+{
+    bool self_found = false, assisted = false;
+    uint8_t self_folded = 0, utxo[32], anchors[32], nullifiers[32];
+    size_t self_len = 0;
+    int32_t assisted_height = -1;
+    return progress_meta_get_blob_exact(db, COINS_KV_SELF_FOLDED_KEY,
+                                       &self_folded, sizeof(self_folded),
+                                       &self_len, &self_found) &&
+        self_found && self_len == 1 && self_folded == 1 &&
+        consensus_state_install_read_assisted_seam(
+            db, &assisted_height, utxo, anchors, nullifiers, &assisted) &&
+        !assisted;
+}
+
+static bool bpr_installed_rom_root(int32_t height, const struct uint256 *hash,
+                                   bool target_seen)
+{
+    const struct rom_state_checkpoint *rom =
+        consensus_state_baked_trust_root_for_height(height);
+    if (!target_seen || !rom || memcmp(rom->block_hash, hash->data, 32) != 0)
+        return false;
+    sqlite3 *db = progress_store_db();
+    if (!db) return false;
+    struct consensus_state_proof_prefix prefix;
+    bool present = false, ok;
+    uint64_t generation = 0;
+    progress_store_tx_lock();
+    ok = consensus_state_proof_prefix_load(db, &prefix) &&
+        boot_wallet_authority_generation(db, &present, &generation) &&
+        bpr_sovereign_provenance(db);
+    progress_store_tx_unlock();
+    return ok && present && prefix.present && prefix.authority_generation_present &&
+        prefix.authority_generation == generation && prefix.height == height &&
+        memcmp(prefix.block_hash, hash->data, 32) == 0;
+}
+
 static enum boot_pending_restore_result bpr_ancestry(struct main_state *ms,
     struct block_index *tip, struct block_header *tip_header,
     int32_t installed_height, const struct uint256 *installed_hash)
@@ -96,6 +136,8 @@ static enum boot_pending_restore_result bpr_ancestry(struct main_state *ms,
         struct block_header header;
         if (!bpr_header(p, &header)) return BOOT_PENDING_RESTORE_HEADER_UNAVAILABLE;
         if (p == tip) *tip_header = header;
+        if (bpr_installed_rom_root(installed_height, installed_hash, target_seen))
+            return BOOT_PENDING_RESTORE_OK;
         if (!p->pprev)
             return target_seen && island_anchor_is_root(p) ? BOOT_PENDING_RESTORE_OK : BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
         if (!p->pprev->phashBlock || p->pprev->nHeight != p->nHeight - 1 ||

@@ -39,6 +39,7 @@
 #include "config/boot_internal.h"
 #include "config/boot_wallet_pending_restore.h"
 #include "config/boot_wallet_cold_prefix.h"
+#include "config/consensus_state_snapshot_install.h"
 #include "jobs/block_header_emit.h"
 #include "services/chain_state_service.h"
 #include "services/island_anchor.h"
@@ -47,6 +48,8 @@
 #include "storage/block_index_projection.h"
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
+#include "chain/checkpoints.h"
+#include "../../../engine/composition/src/consensus_state_proof_prefix.h"
 #include "chain/pow.h"
 #include "chain/subsidy.h"
 #include "coins/utxo_commitment.h"
@@ -780,6 +783,181 @@ static int nw_pending_restore_case(void)
     return failures;
 }
 
+static bool nw_prefix_bind_row(sqlite3_stmt *st, size_t ordinal,
+                               const struct consensus_state_bundle_proof_summary *row)
+{
+    return sqlite3_bind_int(st, 1, (int)ordinal) == SQLITE_OK &&
+        sqlite3_bind_text(st, 2, row->component, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 3, (sqlite3_int64)row->cursor) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 4, row->first_height) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 5, row->last_height) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 6, (sqlite3_int64)row->row_count) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 7, (sqlite3_int64)row->hash_bound_count) == SQLITE_OK &&
+        sqlite3_bind_blob(st, 8, row->component_digest, 32, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:test-fixture-seeding
+}
+
+static sqlite3 *nw_prefix_bundle(struct nw_pending_restore_fixture *f,
+                                 struct consensus_state_bundle_manifest *manifest)
+{
+    static const char *const names[CONSENSUS_STATE_BUNDLE_PROOF_COUNT] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply", "tip_finalize"
+    };
+    struct consensus_state_bundle_proof_summary proofs[CONSENSUS_STATE_BUNDLE_PROOF_COUNT] = {0};
+    memset(manifest, 0, sizeof(*manifest));
+    manifest->height = 1; manifest->history_complete = true; manifest->source_clean = true;
+    manifest->validation_profile = CONSENSUS_STATE_VALIDATION_FULL;
+    manifest->source_fold_cursor = 2; manifest->source_digest[0] = 1; manifest->artifact_digest[0] = 2;
+    memcpy(manifest->block_hash, f->installed_hash.data, 32);
+    sqlite3 *bundle = NULL;
+    bool ok = sqlite3_open(":memory:", &bundle) == SQLITE_OK && bundle &&
+        sqlite3_exec(bundle, "CREATE TABLE bundle_proof(ordinal INTEGER PRIMARY KEY,"
+            "component TEXT NOT NULL,cursor INTEGER NOT NULL,first_height INTEGER NOT NULL,"
+            "last_height INTEGER NOT NULL,row_count INTEGER NOT NULL,"
+            "hash_bound_count INTEGER NOT NULL,component_digest BLOB NOT NULL)",
+            NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_stmt *st = NULL;
+    ok = ok && sqlite3_prepare_v2(bundle, "INSERT INTO bundle_proof VALUES(?,?,?,?,?,?,?,?)",
+                                 -1, &st, NULL) == SQLITE_OK;
+    for (size_t i = 0; ok && i < CONSENSUS_STATE_BUNDLE_PROOF_COUNT; i++) {
+        snprintf(proofs[i].component, sizeof(proofs[i].component), "%s", names[i]);
+        proofs[i].cursor = i == CONSENSUS_STATE_BUNDLE_PROOF_COUNT - 1 ? 1 : 2;
+        proofs[i].last_height = 1; proofs[i].row_count = 2;
+        proofs[i].hash_bound_count = (i == 3 || i == 7) ? 0 : 2;
+        proofs[i].component_digest[0] = (uint8_t)(i + 1);
+        ok = nw_prefix_bind_row(st, i, &proofs[i]) &&
+            (i + 1 == CONSENSUS_STATE_BUNDLE_PROOF_COUNT ||
+             (sqlite3_reset(st) == SQLITE_OK && sqlite3_clear_bindings(st) == SQLITE_OK));
+    }
+    if (st) sqlite3_finalize(st);
+    consensus_state_bundle_proof_manifest_digest(proofs, CONSENSUS_STATE_BUNDLE_PROOF_COUNT,
+                                                 manifest->proof_manifest_digest);
+    if (!ok) { sqlite3_close(bundle); return NULL; }
+    return bundle;
+}
+
+static bool nw_seed_rom_prefix(struct nw_pending_restore_fixture *f, bool assisted)
+{
+    struct consensus_state_bundle_manifest manifest;
+    sqlite3 *bundle = nw_prefix_bundle(f, &manifest), *db = progress_store_db();
+    uint8_t one = 1;
+    manifest.utxo_root[0] = 1; manifest.anchor_digest[0] = 1;
+    manifest.nullifier_digest[0] = 1;
+    progress_store_tx_lock();
+    bool ok = bundle && sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_kv_bump_authority_generation_in_tx(db) &&
+        (assisted ? consensus_state_install_record_assisted_seam(
+                        db, 1, manifest.utxo_root, manifest.anchor_digest,
+                        manifest.nullifier_digest)
+                  : progress_meta_set_in_tx(db, COINS_KV_SELF_FOLDED_KEY, &one, 1)) &&
+        consensus_state_proof_prefix_install_in_tx(db, bundle, &manifest) &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+    if (bundle && sqlite3_close(bundle) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static void nw_rom_override(struct rom_state_checkpoint *rom,
+                            const struct nw_pending_restore_fixture *f)
+{
+    memset(rom, 0, sizeof(*rom));
+    rom->format_version = ROM_STATE_CHECKPOINT_V1; rom->height = 1;
+    rom->utxo_count = 1; rom->total_supply = 1; rom->anchor_count = 1;
+    rom->sprout_frontier_height = 0; rom->sapling_frontier_height = 0;
+    rom->nullifier_count = 1;
+    memcpy(rom->block_hash, f->installed_hash.data, 32);
+    for (size_t i = 0; i < 32; i++) {
+        rom->utxo_root[i] = 1; rom->anchor_digest[i] = 2;
+        rom->sprout_frontier_root[i] = 3; rom->sapling_frontier_root[i] = 4;
+        rom->nullifier_digest[i] = 5; rom->rom_state_root[i] = 6;
+    }
+    struct uint256 sapling_root;
+    incremental_tree_root(&f->tree, &sapling_root);
+    memcpy(rom->sapling_frontier_root, sapling_root.data, 32);
+    checkpoints_set_rom_state_override_for_test(rom);
+}
+
+enum nw_rom_case {
+    NW_ROM_VALID, NW_ROM_ASSISTED, NW_ROM_NO_PREFIX, NW_ROM_NO_ROM, NW_ROM_BAD_PREFIX,
+    NW_ROM_BAD_GENERATION, NW_ROM_BROKEN_PARENT, NW_ROM_WRONG_TARGET
+};
+
+static bool nw_rom_prepare(struct nw_pending_restore_fixture *f, enum nw_rom_case kind,
+                           struct rom_state_checkpoint *rom, struct block_index **old_tip,
+                           struct uint256 *old_root, struct uint256 *wanted_root,
+                           struct uint256 *target, int *changes)
+{
+    int failures = 0;
+    bool ready = nw_pending_restore_open(f);
+    NW_CHECK("ROM restore fixture opens", ready);
+    if (!ready) return false;
+    *old_tip = active_chain_tip(&f->replay.ms.chain_active);
+    incremental_tree_root(&f->replay.ms.sapling_tree, old_root);
+    incremental_tree_root(&f->tree, wanted_root);
+    f->tip->pprev->pprev = NULL;
+    if (kind != NW_ROM_NO_ROM) nw_rom_override(rom, f);
+    ready = kind == NW_ROM_NO_PREFIX || nw_seed_rom_prefix(f, kind == NW_ROM_ASSISTED);
+    if (kind == NW_ROM_BAD_PREFIX)
+        ready = ready && sqlite3_exec(progress_store_db(),
+            "DELETE FROM consensus_state_proof_prefix_component WHERE ordinal=7",
+            NULL, NULL, NULL) == SQLITE_OK;
+    if (kind == NW_ROM_BAD_GENERATION) {
+        static const uint8_t wrong[8] = {99, 0, 0, 0, 0, 0, 0, 0};
+        ready = ready && sqlite3_exec(progress_store_db(), "BEGIN IMMEDIATE",
+            NULL, NULL, NULL) == SQLITE_OK &&
+            progress_meta_set_in_tx(progress_store_db(), COINS_KV_AUTHORITY_GENERATION_KEY,
+                                    wrong, sizeof(wrong)) &&
+            sqlite3_exec(progress_store_db(), "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    }
+    if (kind == NW_ROM_BROKEN_PARENT) f->tip->pprev = NULL;
+    *target = f->installed_hash;
+    if (kind == NW_ROM_WRONG_TARGET) target->data[0] ^= 1;
+    *changes = sqlite3_total_changes(progress_store_db());
+    return ready && failures == 0;
+}
+
+static int nw_pending_rom_prefix_case(enum nw_rom_case kind, const char *label)
+{
+    int failures = 0, changes = 0;
+    struct nw_pending_restore_fixture f = {0};
+    struct rom_state_checkpoint rom;
+    struct block_index *old_tip = NULL;
+    struct uint256 old_root, wanted_root, target;
+    bool ready = nw_rom_prepare(&f, kind, &rom, &old_tip, &old_root, &wanted_root,
+                                &target, &changes);
+    if (!ready) { checkpoints_reset_rom_state_override_for_test(); nw_pending_restore_close(&f); return 1; }
+    enum boot_pending_restore_result got =
+        boot_wallet_pending_restore(&f.replay.ms, &f.csr, 2, &f.tip_hash, 1, &target);
+    enum boot_pending_restore_result want = kind == NW_ROM_VALID
+        ? BOOT_PENDING_RESTORE_OK : BOOT_PENDING_RESTORE_ANCESTRY_INVALID;
+    bool view = kind == NW_ROM_VALID
+        ? nw_restore_view_is(&f, f.tip, true, &wanted_root)
+        : nw_restore_view_is(&f, old_tip, false, &old_root);
+    printf("%s: restore=%d expected=%d view=%d changes=%d expected_changes=%d\n",
+           label, (int)got, (int)want, view,
+           sqlite3_total_changes(progress_store_db()), changes);
+    NW_CHECK(label, got == want && view && sqlite3_total_changes(progress_store_db()) == changes);
+    checkpoints_reset_rom_state_override_for_test();
+    nw_pending_restore_close(&f);
+    return failures;
+}
+
+static int nw_pending_rom_prefix_cases(void)
+{
+    int failures = 0;
+    failures += nw_pending_rom_prefix_case(NW_ROM_VALID, "committed ROM prefix restores truncated ancestry");
+    failures += nw_pending_rom_prefix_case(NW_ROM_ASSISTED, "assisted prefix with matching ROM and generation refuses");
+    failures += nw_pending_rom_prefix_case(NW_ROM_NO_PREFIX, "missing prefix refuses without publication");
+    failures += nw_pending_rom_prefix_case(NW_ROM_NO_ROM, "prefix without baked ROM refuses");
+    failures += nw_pending_rom_prefix_case(NW_ROM_BAD_PREFIX, "malformed prefix refuses");
+    failures += nw_pending_rom_prefix_case(NW_ROM_BAD_GENERATION, "generation mismatch refuses");
+    failures += nw_pending_rom_prefix_case(NW_ROM_BROKEN_PARENT, "broken suffix parent refuses");
+    failures += nw_pending_rom_prefix_case(NW_ROM_WRONG_TARGET, "wrong ROM target refuses");
+    return failures;
+}
+
 #include "boot_pending_island_test.h"
 
 void reducer_frontier_test_set_compiled_anchor(int32_t height);
@@ -1151,6 +1329,7 @@ int test_recovery_no_worse(void)
     printf("\n=== recovery_no_worse: RECOVERY NEVER MAKES IT WORSE ===\n");
     int failures = 0;
     failures += nw_pending_restore_case();
+    failures += nw_pending_rom_prefix_cases();
     failures += nw_pending_island_case();
     failures += nw_prebinding_case();
     failures += nw_cold_stage_case();

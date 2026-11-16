@@ -62,9 +62,11 @@ enum boot_pending_restore_result boot_wallet_old_genesis_restore(
  * opened the authoritative progress store, provided the installed binding target,
  * bound csr to ms and its coins
  * cache, and verified/registered any sparse island. Complete hash-bound header
- * sources must be available for every non-genesis entry back to genesis or
- * that island root. No persistent state is modified. On failure the previous
- * in-memory view and Sapling tree remain usable and unchanged. */
+ * sources must be available for every non-genesis entry back to genesis, that
+ * island root, or an exact sovereign committed baked-ROM prefix whose
+ * generation matches the installed authority and which has no assisted seam.
+ * No persistent state is modified. On failure the previous in-memory view and
+ * Sapling tree remain usable and unchanged. */
 enum boot_pending_restore_result boot_wallet_pending_restore(
     struct main_state *ms, struct chain_state_repository *csr,
     int32_t coins_height, const struct uint256 *coins_hash,
