@@ -66,6 +66,8 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "json/json.h"
+#include "vcs/app_offer.h"
+#include "zsha256/zsha256.h"
 #include "platform/clock.h"
 #include "platform/supervised_process.h"
 #include "platform/os_proc.h"
@@ -106,7 +108,7 @@ static bool g_role_worker;
 static struct platform_supervised_process g_role_node;
 
 struct aj_role_args {
-    const char *work, *peer, *expected;
+    const char *work, *peer, *expected, *share, *share_sha256, *share_publisher, *share_root;
     long seconds;
     bool sender, receiver, worker, serve;
 };
@@ -148,7 +150,21 @@ static bool aj_role_value(struct aj_role_args *r, const char *a)
     if (!strncmp(a, "--work=", 7) && !r->work) { r->work = a + 7; return true; }
     if (!strncmp(a, "--peer=", 7) && !r->peer) { r->peer = a + 7; return true; }
     if (!strncmp(a, "--expected=", 11) && !r->expected) { r->expected = a + 11; return true; }
+    if (!strncmp(a, "--share=", 8) && !r->share) { r->share = a + 8; return true; }
+    if (!strncmp(a, "--share-sha256=", 15) && !r->share_sha256) { r->share_sha256 = a + 15; return true; }
+    if (!strncmp(a, "--share-publisher=", 18) && !r->share_publisher) { r->share_publisher = a + 18; return true; }
+    if (!strncmp(a, "--share-root=", 13) && !r->share_root) { r->share_root = a + 13; return true; }
+
     return !strncmp(a, "--seconds=", 10) && !r->seconds && aj_role_number(a + 10, &r->seconds);
+}
+
+static bool aj_role_share_args(const struct aj_role_args *r)
+{
+    if (!r->share && !r->share_sha256 && !r->share_publisher && !r->share_root) return true;
+    return r->sender && r->share && r->share[0] == '/' && r->share[1] &&
+        vcs_app_offer_hex_valid(r->share_sha256, 32) &&
+        vcs_app_offer_hex_valid(r->share_publisher, 33) &&
+        vcs_app_offer_hex_valid(r->share_root, 32);
 }
 
 static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
@@ -158,7 +174,7 @@ static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
         if (!aj_role_flag(r, argv[i]) && !aj_role_value(r, argv[i])) return false;
     }
     return r->sender != r->receiver && r->work && r->work[0] == '/' &&
-        r->work[1] && r->seconds &&
+        r->work[1] && r->seconds && aj_role_share_args(r) &&
         (r->sender ? !r->peer && !r->expected && !r->serve :
          aj_role_peer(r->peer) && r->expected && r->expected[0] == '/');
 }
@@ -2219,6 +2235,275 @@ static bool aj_role_hold(long seconds)
     }
 }
 
+static bool aj_role_host_status(struct aj_node_ctx *b, int64_t *generation);
+
+/* A share sender accepts only the caller-pinned public identity and bytes. */
+struct aj_share_state {
+    char path[1024], copy[1024], release[65], version[65], plan[65], host_identity[65];
+    int64_t size, generation;
+    struct zcl_app_offer offer;
+};
+
+static bool aj_share_hash_file(const char *path, const char *expected, int64_t size)
+{
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    struct stat st;
+    if (fd < 0) return false;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == size && size > 0 &&
+        size <= (int64_t)ZCL_APP_OFFER_SIZE_MAX;
+    zsha256_ctx hash; zsha256_init(&hash); int64_t total = 0; uint8_t buf[8192], digest[32];
+    while (ok && total < size) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0 || n > size - total) { ok = false; break; }
+        zsha256_update(&hash, buf, (size_t)n); total += n;
+    }
+    ok = close(fd) == 0 && ok && total == size;
+    zsha256_final(&hash, digest); char hex[65]; zcl_hex_encode(digest, 32, hex);
+    return ok && !strcmp(hex, expected);
+}
+
+static bool aj_share_snapshot(const struct aj_role_args *r, struct aj_share_state *s)
+{
+    int in = open(r->share, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    struct stat st = {0};
+    if (in < 0) return false;
+    bool ok = fstat(in, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+        st.st_size <= (off_t)ZCL_APP_OFFER_SIZE_MAX &&
+        aj_path_join(s->path, sizeof(s->path), g_work, "original.z23share") &&
+        aj_path_join(s->copy, sizeof(s->copy), g_work, "received-original");
+    int out = ok ? open(s->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+    ok = ok && out >= 0; int64_t total = 0; uint8_t buf[8192];
+    while (ok && total < st.st_size) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0 || n > st.st_size - total || !zcl_write_all(out, buf, (size_t)n)) { ok = false; break; }
+        total += n;
+    }
+    if (out >= 0 && close(out) != 0) ok = false;
+    if (close(in) != 0) ok = false;
+    s->size = st.st_size;
+    return ok && total == s->size && aj_share_hash_file(s->path, r->share_sha256, s->size);
+}
+
+static const char *aj_share_text(const struct json_value *o, const char *key)
+{
+    const struct json_value *v = json_get(o, key);
+    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
+}
+
+static bool aj_share_field_is(const struct json_value *o, const char *key, const char *expected)
+{
+    const char *value = aj_share_text(o, key);
+    return value && !strcmp(value, expected);
+}
+
+static bool aj_share_copy_text(char *out, size_t cap, const char *value)
+{
+    if (!value || !value[0]) return false;
+    int n = snprintf(out, cap, "%s", value);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool aj_share_call(struct aj_node_ctx *c, const char *const *words,
+                          const struct json_value *input, struct json_value *reply)
+{
+    char arg[16384] = "--input=", out[65536]; char *tail[12]; size_t n = 0;
+    size_t bytes = json_write(input, arg + 8, sizeof(arg) - 8);
+    if (bytes >= sizeof(arg) - 8) return false;
+    for (; words[n] && n < 10; ++n) tail[n] = (char *)words[n];
+    if (words[n]) return false;
+    tail[n++] = arg; tail[n] = NULL;
+    out[0] = '\0';
+    int rc = aj_cli(c->datadir, c->rpc, tail, out, sizeof(out), 900, c->home);
+    static unsigned seq; char path[1100];
+    int len = snprintf(path, sizeof(path), "%s/share-%02u-%s.json", g_work, ++seq, words[0]);
+    if (len <= 0 || (size_t)len >= sizeof(path) || !aj_write_file(path, out) || rc != 0) return false;
+    return aj_json_ok(out, reply);
+}
+
+static bool aj_share_identity(const struct json_value *data, const struct aj_role_args *r,
+                              struct aj_share_state *s)
+{
+    const char *name = aj_share_text(data, "name"), *root = aj_share_text(data, "package_root");
+    const char *pub = aj_share_text(data, "publisher_fingerprint"), *release = aj_share_text(data, "release_id");
+    return aj_json_bool_is(data, "verified", true) && name && root && pub && release &&
+        aj_role_name(name) && !strcmp(root, r->share_root) && !strcmp(pub, r->share_publisher) &&
+        vcs_app_offer_hex_valid(release, 32) && aj_share_copy_text(s->offer.name, sizeof(s->offer.name), name) &&
+        aj_share_copy_text(s->offer.root, sizeof(s->offer.root), root) &&
+        aj_share_copy_text(s->offer.publisher, sizeof(s->offer.publisher), pub) &&
+        aj_share_copy_text(s->release, sizeof(s->release), release);
+}
+
+static bool aj_share_same_identity(const struct json_value *d, const struct aj_share_state *s)
+{
+    const char *name = aj_share_text(d, "name"), *root = aj_share_text(d, "package_root");
+    const char *pub = aj_share_text(d, "publisher_fingerprint"), *release = aj_share_text(d, "release_id");
+    return aj_json_bool_is(d, "verified", true) && name && root && pub && release &&
+        !strcmp(name, s->offer.name) && !strcmp(root, s->offer.root) &&
+        !strcmp(pub, s->offer.publisher) && !strcmp(release, s->release);
+}
+
+static bool aj_share_verified(struct aj_node_ctx *c, const struct aj_role_args *r, struct aj_share_state *s)
+{
+    const char *const words[] = {"zcode", "package", "bundle", "verify", NULL};
+    struct json_value in = {0}, reply = {0}; json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "file", s->path) && aj_share_call(c, words, &in, &reply) &&
+        aj_share_field_is(aj_json_data(&reply), "stage", "verify") && aj_share_identity(aj_json_data(&reply), r, s);
+    json_free(&in); json_free(&reply); return ok;
+}
+
+static bool aj_share_receive(struct aj_node_ctx *c, const struct aj_role_args *r, struct aj_share_state *s)
+{
+    const char *const words[] = {"zcode", "package", "bundle", "receive", NULL};
+    struct json_value in = {0}, reply = {0}; json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "file", s->path) && json_push_kv_str(&in, "destination", s->copy) &&
+        json_push_kv_str(&in, "datadir", c->datadir) && aj_share_call(c, words, &in, &reply);
+    const struct json_value *d = aj_json_data(&reply); const char *plan = aj_share_text(d, "plan_id");
+    ok = ok && aj_share_field_is(d, "stage", "plan") && aj_share_same_identity(d, s) && vcs_app_offer_hex_valid(plan, 32) &&
+        aj_share_copy_text(s->plan, sizeof(s->plan), plan);
+    json_free(&reply); json_init(&reply);
+    ok = ok && aj_share_hash_file(s->path, r->share_sha256, s->size) &&
+        json_push_kv_str(&in, "trust_publisher", r->share_publisher) &&
+        json_push_kv_str(&in, "trust_root", r->share_root) && json_push_kv_str(&in, "plan_id", s->plan) &&
+        json_push_kv_bool(&in, "confirm", true) && aj_share_call(c, words, &in, &reply);
+    d = aj_json_data(&reply); const char *version = aj_share_text(d, "version"), *destination = aj_share_text(d, "destination");
+    ok = ok && aj_share_field_is(d, "stage", "commit") && aj_share_same_identity(d, s) && destination && !strcmp(destination, s->copy) &&
+        vcs_app_offer_hex_valid(version, 32) && aj_share_copy_text(s->version, sizeof(s->version), version);
+    json_free(&in); json_free(&reply); return ok;
+}
+
+static bool aj_share_build(struct aj_node_ctx *c, struct aj_share_state *s)
+{
+    const char *const words[] = {"app", "build", NULL};
+    struct json_value in = {0}, reply = {0}; json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "copy", s->copy) && json_push_kv_str(&in, "datadir", c->datadir) &&
+        aj_share_call(c, words, &in, &reply);
+    const struct json_value *d = aj_json_data(&reply);
+    const char *plan = aj_share_text(d, "plan_id"), *version = aj_share_text(d, "version");
+    ok = ok && aj_share_field_is(d, "stage", "plan") && version && !strcmp(version, s->version) && vcs_app_offer_hex_valid(plan, 32) &&
+        aj_share_copy_text(s->plan, sizeof(s->plan), plan);
+    json_free(&reply); json_init(&reply);
+    ok = ok && json_push_kv_str(&in, "plan_id", s->plan) && json_push_kv_bool(&in, "confirm", true) &&
+        aj_share_call(c, words, &in, &reply);
+    d = aj_json_data(&reply); version = aj_share_text(d, "version"); const char *image = aj_share_text(d, "image_sha3");
+    ok = ok && aj_share_field_is(d, "stage", "commit") && aj_share_field_is(d, "plan_id", s->plan) && version && !strcmp(version, s->version) && vcs_app_offer_hex_valid(image, 32) &&
+        aj_share_copy_text(g_image_a, sizeof(g_image_a), image);
+    json_free(&in); json_free(&reply); return ok;
+}
+
+static bool aj_share_offer(struct aj_node_ctx *c, const struct aj_role_args *r, struct aj_share_state *s)
+{
+    const char *const words[] = {"fleet", "bundle", "offer", NULL};
+    struct json_value in = {0}, reply = {0}; json_set_object(&in);
+    bool ok = aj_share_hash_file(s->path, r->share_sha256, s->size) &&
+        json_push_kv_str(&in, "file", s->path) && aj_share_call(c, words, &in, &reply);
+    const struct json_value *d = aj_json_data(&reply), *sz = json_get(d, "size");
+    const char *carrier = aj_share_text(d, "root"), *sha = aj_share_text(d, "sha256");
+    ok = ok && vcs_app_offer_hex_valid(carrier, 32) && sha && !strcmp(sha, r->share_sha256) &&
+        sz && sz->type == JSON_INT && json_get_int(sz) == s->size && aj_json_bool_is(d, "pinned", true) &&
+        aj_share_copy_text(s->offer.carrier, sizeof(s->offer.carrier), carrier) &&
+        aj_share_copy_text(s->offer.sha256, sizeof(s->offer.sha256), sha);
+    s->offer.size = s->size;
+    json_free(&in); json_free(&reply); return ok;
+}
+
+static bool aj_share_host_plan(struct aj_node_ctx *c, struct aj_share_state *s,
+                               struct json_value *in, char text[ZCL_APP_OFFER_TEXT_MAX + 1u],
+                               int64_t *generation, bool *enabled)
+{
+    const char *const words[] = {"app", "host", "local", NULL};
+    struct json_value reply = {0};
+    struct aj_route_observation route = {0};
+    if (!aj_route_read_pages(c, &route) ||
+        snprintf(s->offer.onion, sizeof(s->offer.onion), "%s:%d", route.onion, route.port) >= (int)sizeof(s->offer.onion) ||
+        !zcl_app_offer_format(&s->offer, text, ZCL_APP_OFFER_TEXT_MAX + 1u)) return false;
+    json_set_object(in);
+    bool ok = json_push_kv_str(in, "offer", text) && json_push_kv_str(in, "release_id", s->release) &&
+        json_push_kv_str(in, "datadir", c->datadir) && aj_share_call(c, words, in, &reply);
+    const struct json_value *d = aj_json_data(&reply), *gen = json_get(d, "generation"), *en = json_get(d, "already_enabled");
+    const char *id = aj_share_text(d, "identity"), *plan = aj_share_text(d, "plan_id");
+    ok = ok && id && (!strcmp(id, "absent") || vcs_app_offer_hex_valid(id, 32)) &&
+        vcs_app_offer_hex_valid(plan, 32) && gen && gen->type == JSON_INT && json_get_int(gen) >= 0 &&
+        json_get_int(gen) < INT64_MAX - 1 && en && en->type == JSON_BOOL && aj_json_bool_is(d, "executed", false);
+    if (ok) {
+        *generation = json_get_int(gen); *enabled = json_get_bool(en);
+        ok = (strcmp(id, "absent") != 0 || (*generation == 0 && !*enabled)) &&
+            aj_share_copy_text(s->host_identity, sizeof(s->host_identity), id) && json_push_kv_str(in, "identity", id) && json_push_kv(in, "generation", gen) &&
+            json_push_kv(in, "already_enabled", en) && json_push_kv_str(in, "plan_id", plan);
+    }
+    json_free(&reply); return ok;
+}
+
+static bool aj_share_host(struct aj_node_ctx *c, const struct aj_role_args *r, struct aj_share_state *s)
+{
+    const char *const words[] = {"app", "host", "local", NULL};
+    char text[ZCL_APP_OFFER_TEXT_MAX + 1u]; struct json_value in = {0}, reply = {0};
+    int64_t generation = 0; bool enabled = false;
+    bool ok = aj_share_host_plan(c, s, &in, text, &generation, &enabled) &&
+        aj_share_hash_file(s->path, r->share_sha256, s->size) && json_push_kv_bool(&in, "confirm", true) &&
+        aj_share_call(c, words, &in, &reply);
+    const struct json_value *d = aj_json_data(&reply), *gen = json_get(d, "generation");
+    const char *host = aj_share_text(d, "host"), *carrier = aj_share_text(d, "carrier");
+    ok = ok && vcs_app_offer_hex_valid(host, 32) &&
+        (!strcmp(s->host_identity, "absent") || !strcmp(s->host_identity, host)) && carrier && !strcmp(carrier, s->offer.carrier) &&
+        aj_json_bool_is(d, "enabled", true) && aj_json_bool_is(d, "executed", !enabled) &&
+        gen && gen->type == JSON_INT && json_get_int(gen) == generation + (enabled ? 0 : 1) &&
+        aj_share_hash_file(s->path, r->share_sha256, s->size);
+    if (ok) ok = aj_share_copy_text(g_name, sizeof(g_name), s->offer.name) &&
+        aj_share_copy_text(g_root, sizeof(g_root), s->offer.root) &&
+        aj_share_copy_text(g_publisher, sizeof(g_publisher), s->offer.publisher) &&
+        aj_share_copy_text(g_host_hex, sizeof(g_host_hex), host) &&
+        aj_share_copy_text(g_carrier, sizeof(g_carrier), carrier);
+    int64_t observed = 0;
+    if (ok) ok = aj_role_host_status(c, &observed) && observed == generation + (enabled ? 0 : 1);
+    if (ok) s->generation = observed;
+    json_free(&in); json_free(&reply); return ok;
+}
+
+static bool aj_share_peer_matches(const struct aj_share_state *s)
+{
+    char path[1024], body[4097]; struct json_value v = {0};
+    if (!aj_path_join(path, sizeof(path), g_work, "peer.json") ||
+        !aj_role_read_public(path, body, sizeof(body))) return false;
+    bool ok = json_read(&v, body, strlen(body));
+    const char *endpoint = ok ? aj_share_text(&v, "endpoint") : NULL;
+    ok = endpoint && !strcmp(endpoint, s->offer.onion);
+    json_free(&v); return ok;
+}
+
+static bool aj_share_ready(const struct aj_share_state *s)
+{
+    char path[1024], body[2048];
+    int n = snprintf(body, sizeof(body),
+        "{\"name\":\"%s\",\"sha256\":\"%s\",\"size\":%lld,\"release_id\":\"%s\","
+        "\"root\":\"%s\",\"publisher\":\"%s\",\"image\":\"%s\",\"carrier\":\"%s\","
+        "\"host\":\"%s\",\"generation\":%lld,\"host_status_enabled\":true}\n",
+        s->offer.name, s->offer.sha256, (long long)s->size, s->release, s->offer.root,
+        s->offer.publisher, g_image_a, s->offer.carrier, g_host_hex, (long long)s->generation);
+    return n > 0 && (size_t)n < sizeof(body) && aj_path_join(path, sizeof(path), g_work, "share-ready.json") &&
+        aj_write_file(path, body);
+}
+
+static bool aj_role_sender_share(const struct aj_role_args *r)
+{
+    struct aj_share_state s = {0}; struct aj_node_ctx a = {.rpc = APPJ_A_RPC};
+    snprintf(a.home, sizeof(a.home), "%s", g_a_home);
+    snprintf(a.datadir, sizeof(a.datadir), "%s", g_a_dd);
+    if (!aj_share_snapshot(r, &s)) { aj_fail("original share snapshot or caller digest mismatch"); return false; }
+    bool ok = aj_role_node_start(a.home, a.datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+                                 APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, false) &&
+        aj_wait_ready_pair(&a, NULL, "") && aj_share_verified(&a, r, &s) &&
+        aj_share_receive(&a, r, &s) && aj_share_build(&a, &s) && aj_role_node_stop() &&
+        aj_role_node_start(a.home, a.datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+                           APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, true) &&
+        aj_wait_ready_pair(&a, NULL, " (hosting)") && aj_share_offer(&a, r, &s) &&
+        aj_share_host(&a, r, &s) && aj_role_public_files(&a) &&
+        aj_share_peer_matches(&s) && aj_share_ready(&s) && aj_role_hold(r->seconds);
+    if (!ok) aj_fail("original share sender refused before completion");
+    return ok;
+}
+
 static bool aj_role_sender(long seconds)
 {
     struct aj_node_ctx a = {.rpc = APPJ_A_RPC};
@@ -2303,7 +2588,8 @@ static int aj_role_work(const struct aj_role_args *r)
     close(3); g_role_worker = true; g_keep = true; platform_supervised_init(&g_role_node);
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) return 2;
     if (!aj_role_prepare(r)) return 2;
-    bool ok = r->sender ? aj_role_sender(r->seconds) : aj_role_receiver(r->peer, r->serve, r->seconds);
+    bool ok = r->sender ? (r->share ? aj_role_sender_share(r) : aj_role_sender(r->seconds)) :
+                          aj_role_receiver(r->peer, r->serve, r->seconds);
     bool stopped = aj_role_node_stop();
     if (!ok || !stopped) { aj_fail("split worker failed or node cleanup was incomplete"); return 2; }
     return 0;
@@ -2529,7 +2815,7 @@ static int aj_role_entry(int argc, char **argv)
 {
     struct aj_role_args args;
     if (!aj_role_parse(argc, argv, &args) || !getcwd(g_repo, sizeof(g_repo))) {
-            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve]\n"); return 3;
+            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve] [--share=/file --share-sha256=HEX --share-publisher=HEX --share-root=HEX]\n"); return 3;
     }
     if (args.worker) return aj_role_work(&args);
     int rc = aj_role_owner(argc, argv, &args);
