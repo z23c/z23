@@ -471,6 +471,34 @@ bool boot_register_store_payment_runtime(struct boot_svc_ctx *svc);
  * `svc->app_ctx && svc->app_ctx->load_snapshot_at_own_height != NULL`. */
 bool boot_loader_owns_seed(const struct app_context *ctx);
 
+/* ── boot_genesis_seed.c ────────────────────────────────────── */
+
+/* True iff the boot-time genesis seed must be withheld: the in-memory header
+ * chain owns the compiled checkpoint block, nothing is applied (empty
+ * tip_finalize_log, no coins frontier key, no install authority stamp; a read
+ * error counts as applied) and an installable bundle is staged at this boot
+ * (boot_autodetect_consensus_bundle(datadir) returns a path). A restart of a
+ * header-seeded node before any body landed resolves its tip to genesis (the
+ * scan fallback is the most-work row with a body); seeding there stamped every
+ * cursor 0 -> 1 and stranded the install. With no installable bundle (none
+ * staged, all .failed, already installed) no fast start is possible, so the
+ * node is seeded as before and syncs from block 1. Copies the staged bundle
+ * path into `bundle` (bundle_cap bytes; may be NULL) when withheld. Writes no
+ * store and no file. */
+bool boot_genesis_seed_withheld_for_header_seed(struct main_state *ms,
+                                                struct sqlite3 *pdb,
+                                                const char *datadir, char *bundle,
+                                                size_t bundle_cap);
+
+/* Fresh-genesis bootstrap (why: the call site in boot_services.c). Seeds the
+ * genesis anchor (reducer_ingest_try_seed_anchor, every upstream cursor to 1,
+ * never the coins frontier) only when the active tip is the compiled genesis
+ * and the tip_finalize cursor is 0, and not while
+ * boot_genesis_seed_withheld_for_header_seed holds; then it logs the withheld
+ * line naming the staged bundle. NULL ms or params: no-op. */
+void boot_seed_fresh_genesis(struct main_state *ms, const struct chain_params *params,
+                             const char *datadir);
+
 /* Point explorer + API-cache RPC backends at the local JSON-RPC endpoint.
  * Called by the frontend api_cache / https_explorer starts and once directly
  * from app_init_services (boot_services.c). */

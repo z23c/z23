@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the boot-time genesis seed gate. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_genesis_seed.c", CAP_FS_READ|CAP_FS_WRITE, "")

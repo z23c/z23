@@ -82,7 +82,6 @@
 #include "storage/small_projections.h"
 #include "storage/progress_store.h"
 #include "services/block_index_loader.h"
-#include "services/reducer_ingest_service.h" /* reducer_ingest_try_seed_anchor (regtest genesis boot seed) */
 #include "services/reducer_drain.h"
 #include "jobs/tip_finalize_stage.h"         /* tip_finalize_stage_cursor + active_chain_tip */
 #include "models/block.h"
@@ -553,15 +552,11 @@ static void boot_register_core_liveness_and_reducer(
      * own constant, never a peer's word — and the anchor row carries no UTXOs,
      * anchors or nullifiers, so nothing borrowed is admitted. Stamps every
      * upstream cursor to 1, never the coins frontier; inert on a node with real
-     * state. Seam analysis: docs/node/fresh-start-seam.md. */
-    if (!armed_from_anchor && params) {
-        struct block_index *gtip = active_chain_tip(&svc->state->chain_active);
-        if (gtip && gtip->phashBlock && gtip->nHeight == 0 &&
-            uint256_eq(gtip->phashBlock, &params->consensus.hashGenesisBlock) &&
-            tip_finalize_stage_cursor() == 0)
-            reducer_ingest_try_seed_anchor(0, gtip->phashBlock->data,
-                                           "fresh-genesis-boot");
-    }
+     * state, and withheld while a header-seeded node's staged checkpoint
+     * install can still run (boot_genesis_seed.c, contract boot_internal.h).
+     * Seam analysis: docs/node/fresh-start-seam.md. */
+    if (!armed_from_anchor)
+        boot_seed_fresh_genesis(svc->state, params, svc->datadir);
     (void)boot_mark_step(t_clr, "svc.clr.genesis_seed", "svc.core_liveness_reducer");
 }
 
