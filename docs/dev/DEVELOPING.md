@@ -2075,10 +2075,14 @@ example `BOARD_PAGE_METADATA_MISSING`: upgrade the node), never `NO_POSTS`, whic
 is only an unreadable `posts_file`. A refusal from `dev land receive` (for
 example `RECEIVE_RECEIPTS_REQUIRED`) is kept as `queue_error` on the verdict row
 and in the result reply text. A READY post that already has an `intake` result
-reply (signed by an allowed key, `ref=` its id) or whose tip is already on
-origin/main is reported `ANSWERED` and gets no second reply; `id=<post id>`
-asks for the answer again. List the intake operator's own key in the allow file
-so its replies count.
+reply (signed by the intake operator's own key, `ref=` its id) or whose tip is
+already on origin/main is reported `ANSWERED` and gets no second reply;
+`id=<post id>` asks for the answer again. A result reply counts only when its
+host is the key named by a `result_author=<this node's 64 lowercase hex board
+host key>` line in the allow file, which must also list that key as an author.
+A commit run refuses (`RESULT_AUTHOR_REQUIRED`) without that line, and a plan
+run names it in `next_step`. More than 256 matching result
+replies on the board set `data.truncated` and say so in `data.next_step`.
 
 No ssh between the machines, or a contributor with no access? Hand the bundle
 over onion instead: `z23 fleet bundle offer` then `fleet bundle fetch` (see

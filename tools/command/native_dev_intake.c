@@ -75,7 +75,14 @@ struct in_ans {
 struct in_list {
     char v[IN_LIST][IN_LINE];
     int n;
+    char author[IN_LINE]; /* a "result_author=" line's value; not an entry */
 };
+
+static const char in_author_tag[] = "result_author=";
+static const char in_author_remedy[] =
+    "intake cannot tell which READY posts it already answered; add a line "
+    "result_author=<this node's 64 lowercase hex board host key> to the allow "
+    "file";
 
 struct in_post {
     char id[65], host[65], agent[FLEET_BOARD_AGENT_MAX + 1];
@@ -106,6 +113,8 @@ struct in_ctx {
     bool by_id;      /* one post asked for by id=: results do not answer it */
     struct in_ans ans[IN_ANS];
     int nans;
+    bool ans_cut;      /* more valid result replies than IN_ANS were on the board */
+    char author[65];   /* the one key whose result replies answer; "" = none */
 };
 
 static void in_set(struct in_post *p, const char *verdict, const char *reason)
@@ -122,18 +131,34 @@ static void in_refuse(struct in_post *p, const char *reason)
 
 /* ── lists ─────────────────────────────────────────────────────────────── */
 
+/* A "result_author=" line is never an allow entry; the first one is kept. */
+static bool in_list_author_line(struct in_list *l, const char *line, size_t len)
+{
+    size_t tag = sizeof(in_author_tag) - 1;
+    if (strncmp(line, in_author_tag, tag))
+        return false;
+    if (!l->author[0]) {
+        memcpy(l->author, line + tag, len - tag);
+        l->author[len - tag] = '\0';
+    }
+    return true;
+}
+
 static void in_list_load(const char *path, struct in_list *l)
 {
     struct db_text t = {0};
     size_t pos = 0, len;
     const char *line;
     l->n = 0;
+    l->author[0] = '\0';
     if (!path[0] || !db_text_load(path, &t))
         return;
     while (l->n < IN_LIST && db_next_line(&t, &pos, &line, &len)) {
         while (len && (line[len - 1] == '\r' || line[len - 1] == ' '))
             len--;
         if (!len || line[0] == '#' || len >= IN_LINE)
+            continue;
+        if (in_list_author_line(l, line, len))
             continue;
         memcpy(l->v[l->n], line, len);
         l->v[l->n++][len] = '\0';
@@ -685,26 +710,41 @@ static bool in_load(const struct json_value *in, struct json_value *doc,
     return ok;
 }
 
-/* An intake result already on the board answers the READY post it refs. The
- * reply must carry a good signature from an allowed key, so no stranger can
- * silence a post by naming it. */
-static void in_note_result(struct in_ctx *x, const struct json_value *j)
+/* Is this row a result reply by the intake operator's own key? Only that key
+ * answers: another allowed host must not be able to silence a helper's READY
+ * by signing a result that names it. With no result author configured no row
+ * qualifies. The reply must also carry a good signature from an allowed key. */
+static bool in_result_row_ok(const struct in_ctx *x, const struct json_value *j)
 {
     const char *text = json_get_str(json_get(j, "text"));
     char kind[16], agent[FLEET_BOARD_AGENT_MAX + 1], host[65];
-    struct in_ans *a;
-    if (!text || x->nans >= IN_ANS)
-        return;
+    if (!text || !x->author[0])
+        return false;
     in_str(kind, sizeof(kind), j, "kind");
     in_str(agent, sizeof(agent), j, "agent");
     in_str(host, sizeof(host), j, "host");
-    if (strcmp(kind, "result") || strcmp(agent, "intake") ||
-        !in_allowed(&x->allow, host) || !in_sig_ok(j, text))
+    return !strcmp(kind, "result") && !strcmp(agent, "intake") &&
+           !strcasecmp(host, x->author) && in_allowed(&x->allow, host) &&
+           in_sig_ok(j, text);
+}
+
+/* An intake result already on the board answers the READY post it refs. */
+static void in_note_result(struct in_ctx *x, const struct json_value *j)
+{
+    struct in_ans *a;
+    char ref[65];
+    if (!in_result_row_ok(x, j))
         return;
+    in_str(ref, sizeof(ref), j, "ref");
+    if (!in_hex_n(ref, 64))
+        return;
+    if (x->nans >= IN_ANS) {
+        x->ans_cut = true;
+        x->truncated = true;
+        return;
+    }
     a = &x->ans[x->nans];
-    in_str(a->ref, sizeof(a->ref), j, "ref");
-    if (!in_hex_n(a->ref, 64))
-        return;
+    memcpy(a->ref, ref, sizeof(a->ref));
     in_str(a->id, sizeof(a->id), j, "id");
     x->nans++;
 }
@@ -1186,11 +1226,14 @@ static void in_publish_truncation(const struct in_ctx *x,
     if (!x->truncated)
         return;
     (void)snprintf(step, sizeof(step),
-                   "%d READY post(s) were read but not taken (a run takes %d)%s: "
+                   "%d READY post(s) were read but not taken (a run takes %d)%s%s: "
                    "rerun with id=<post id prefix> for one post, or since=<unix "
                    "time> to read newer posts",
                    x->skipped, IN_MAX,
-                   x->board_more ? ", and older board pages were not read" : "");
+                   x->board_more ? ", and older board pages were not read" : "",
+                   x->ans_cut ? ", and result replies past the first 256 were "
+                                "not recorded, so a READY they answer may be "
+                                "answered again" : "");
     (void)json_push_kv_str(&reply->data, "next_step", step);
 }
 
@@ -1210,6 +1253,30 @@ static void in_publish(const struct in_ctx *x, struct zcl_command_reply *reply,
     (void)json_push_kv(&reply->data, "verdicts", &arr);
     json_free(&arr);
     in_publish_truncation(x, reply);
+    if (!x->author[0] && !commit && !x->truncated)
+        (void)json_push_kv_str(&reply->data, "next_step", in_author_remedy);
+}
+
+/* The key whose result replies count as answers: result_author=<64 hex> as an
+ * input, else a "result_author=<64 hex>" line in the allow file. Absent: none
+ * (every READY is processed again). A malformed value refuses the run. */
+static bool in_author_load(struct in_ctx *x, const struct json_value *in,
+                           struct zcl_command_reply *reply)
+{
+    const char *v = db_opt_str(in, "result_author");
+    x->author[0] = '\0';
+    if (!v[0])
+        v = x->allow.author;
+    if (!v[0])
+        return true;
+    if (!in_hex_n(v, 64)) {
+        db_refuse(reply, "BAD_RESULT_AUTHOR", "input",
+                  "result_author must be the intake operator's 64 lowercase "
+                  "hex host key, as the board prints it");
+        return false;
+    }
+    (void)snprintf(x->author, sizeof(x->author), "%s", v);
+    return true;
 }
 
 static bool in_inputs(struct in_ctx *x, const struct json_value *in,
@@ -1228,9 +1295,15 @@ static bool in_inputs(struct in_ctx *x, const struct json_value *in,
     }
     in_list_load(db_opt_str(in, "allow"), &x->allow);
     in_list_load(db_opt_str(in, "deny"), &x->deny);
+    if (!in_author_load(x, in, reply))
+        return false;
     if (x->allow.n == 0) {
         db_refuse(reply, "ALLOW_EMPTY", "input",
                   "allow must name a file with at least one author key");
+        return false;
+    }
+    if (!x->author[0] && db_opt_flag(in, "commit")) {
+        db_refuse(reply, "RESULT_AUTHOR_REQUIRED", "input", in_author_remedy);
         return false;
     }
     return true;

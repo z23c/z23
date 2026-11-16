@@ -57,6 +57,7 @@ struct di_spec {
     uint8_t kind;      /* 0 is a note */
     const char *agent; /* NULL is "lab" */
     const char *ref;   /* 64 hex of the post answered, or NULL */
+    const uint8_t *seed, *pk; /* another signer than the lab key, or NULL */
 };
 
 static void di_post_s(struct di *d, struct json_value *arr, const struct di_spec *sp)
@@ -66,6 +67,7 @@ static void di_post_s(struct di *d, struct json_value *arr, const struct di_spec
     char text[256], hex[129];
     const char *agent = sp->agent ? sp->agent : "lab";
     int slot = sp->slot;
+    const uint8_t *pk = sp->pk ? sp->pk : d->pk;
     memset(&p, 0, sizeof(p));
     p.kind = sp->kind ? sp->kind : FLEET_BOARD_KIND_NOTE;
     p.scope = FLEET_BOARD_SCOPE_PUBLIC;
@@ -79,7 +81,7 @@ static void di_post_s(struct di *d, struct json_value *arr, const struct di_spec
     memcpy(p.text, text, p.text_len + 1);
     if (sp->ref)
         (void)zcl_hex_decode_lower(sp->ref, p.ref, 32);
-    (void)fleet_board_post_sign(&p, d->seed, d->pk);
+    (void)fleet_board_post_sign(&p, sp->seed ? sp->seed : d->seed, pk);
     zcl_hex_encode(p.id, 32, d->ids[slot]);
     if (sp->flip)
         text[strlen(text) - 1] = 'X';
@@ -91,7 +93,7 @@ static void di_post_s(struct di *d, struct json_value *arr, const struct di_spec
     (void)json_push_kv_int(&r, "ttl", 86400);
     zcl_hex_encode(p.ref, 32, hex);
     (void)json_push_kv_str(&r, "ref", hex);
-    zcl_hex_encode(d->pk, 32, hex);
+    zcl_hex_encode(pk, 32, hex);
     (void)json_push_kv_str(&r, "host", hex);
     zcl_hex_encode(p.signature, 64, hex);
     (void)json_push_kv_str(&r, "signature", hex);
@@ -218,9 +220,18 @@ static bool di_refs(const struct di *d, char *out, size_t cap)
     return zcl_spawn_capture(argv, out, cap, 30000) == 0;
 }
 
-static bool di_setup(struct di *d)
+/* The lab key is allowed and is the named result author (the allow-file line
+ * is the only way an operator can name one from the command line). */
+static bool di_allow_default(const struct di *d)
 {
     char p[900];
+    (void)snprintf(p, sizeof(p), "# allowed\n%s\nresult_author=%s\n", d->pkhex,
+                   d->pkhex);
+    return dbf_put(d->allow, p);
+}
+
+static bool di_setup(struct di *d)
+{
     memset(d, 0, sizeof(*d));
     if (!dbf_setup(&d->f, "intake"))
         return false;
@@ -236,8 +247,7 @@ static bool di_setup(struct di *d)
         memcpy(d->seed, sk, 32);
     }
     zcl_hex_encode(d->pk, 32, d->pkhex);
-    (void)snprintf(p, sizeof(p), "# allowed\n%s\n", d->pkhex);
-    return dbf_put(d->allow, p);
+    return di_allow_default(d);
 }
 
 /* ── the helper hand-off: READY form, board paging, receive refusals ────── */
@@ -246,15 +256,29 @@ extern void zcl_dev_intake_hooks_for_test(dbf_handler list, dbf_handler post);
 
 static struct json_value g_di_pg[8];
 static int g_di_pn, g_di_calls, g_di_nposts;
+enum di_cur { DI_CUR_OK, DI_CUR_NO_HAS_MORE, DI_CUR_MISSING, DI_CUR_REPEAT, DI_CUR_RISING };
+static enum di_cur g_di_cur;
 static bool g_di_list_fail;
 static char g_di_before[8][80], g_di_ptext[256];
+
+/* The next cursor of page i, bent by g_di_cur on the second page. */
+static void di_stub_cursor(struct zcl_command_reply *rp, int i)
+{
+    int src = g_di_cur == DI_CUR_REPEAT && i == 1 ? 0 : i;
+    const struct json_value *last =
+        json_at(&g_di_pg[src], json_size(&g_di_pg[src]) - 1);
+    int64_t at = json_get_int(json_get(last, "created_at"));
+    if (g_di_cur == DI_CUR_RISING && i == 1)
+        at += 1000;
+    (void)json_push_kv_int(&rp->data, "next_created_at", at);
+    (void)json_push_kv_str(&rp->data, "next_id", json_get_str(json_get(last, "id")));
+}
 
 static void di_stub_list(const struct zcl_command_request *rq,
                          struct zcl_command_reply *rp)
 {
     int i = g_di_calls++;
     const char *b = json_get_str(json_get(rq->input, "before_id"));
-    const struct json_value *last;
     if (i < 8)
         (void)snprintf(g_di_before[i], sizeof(g_di_before[i]), "%s", b ? b : "");
     if (g_di_list_fail || i >= g_di_pn) {
@@ -268,12 +292,12 @@ static void di_stub_list(const struct zcl_command_request *rq,
         return;
     }
     (void)json_push_kv(&rp->data, "posts", &g_di_pg[i]);
-    (void)json_push_kv_bool(&rp->data, "has_more", i + 1 < g_di_pn);
-    if (i + 1 >= g_di_pn)
+    if (g_di_cur == DI_CUR_NO_HAS_MORE && i == 0)
         return;
-    last = json_at(&g_di_pg[i], json_size(&g_di_pg[i]) - 1);
-    (void)json_push_kv(&rp->data, "next_created_at", json_get(last, "created_at"));
-    (void)json_push_kv_str(&rp->data, "next_id", json_get_str(json_get(last, "id")));
+    (void)json_push_kv_bool(&rp->data, "has_more", i + 1 < g_di_pn);
+    if (i + 1 >= g_di_pn || (g_di_cur == DI_CUR_MISSING && i == 1))
+        return;
+    di_stub_cursor(rp, i);
 }
 
 static void di_stub_post(const struct zcl_command_request *rq,
@@ -293,6 +317,7 @@ static void di_stub_reset(void)
     memset(g_di_before, 0, sizeof(g_di_before));
     g_di_pn = g_di_calls = g_di_nposts = 0;
     g_di_list_fail = false;
+    g_di_cur = DI_CUR_OK;
     g_di_ptext[0] = '\0';
     zcl_dev_intake_hooks_for_test(NULL, NULL);
 }
@@ -305,7 +330,7 @@ static void di_stub_on(void)
 struct di_opts {
     bool file;         /* read d->posts instead of the (stubbed) board */
     int mode;          /* 0 read only, 1 commit, 2 commit and confirm */
-    const char *plan, *id;
+    const char *plan, *id, *author;
 };
 
 static void di_pair(const char **p, int *n, const char *k, const char *v)
@@ -327,6 +352,8 @@ static void di_call(struct di *d, const struct di_opts *o,
         di_pair(pairs, &n, "posts_file", d->posts);
     if (o->plan)
         di_pair(pairs, &n, "plan_id", o->plan);
+    if (o->author)
+        di_pair(pairs, &n, "result_author", o->author);
     if (o->id)
         di_pair(pairs, &n, "id", o->id);
     if (o->mode >= 1)
@@ -493,7 +520,7 @@ static int di_case_page_cap(struct di *d)
         g_di_pn = 8;
         di_stub_on();
         di_call(d, &o, &reply, dump, sizeof(dump));
-        ASSERT(g_di_calls < 8);
+        ASSERT_EQ(g_di_calls, 5);
         ASSERT(strstr(dump, "\"truncated\":true") != NULL);
         ASSERT(strstr(dump, "since=") != NULL);
         zcl_command_reply_free(&reply);
@@ -600,7 +627,7 @@ static int di_case_answered(struct di *d, const char *sha)
 {
     int failures = 0;
     struct zcl_command_reply reply;
-    struct di_opts o = {.file = true};
+    struct di_opts o = {.file = true, .author = d->pkhex};
     struct json_value arr;
     static char dump[65536];
     char text[320];
@@ -678,6 +705,290 @@ _test_next:;
     return failures;
 }
 
+/* One READY by the lab key plus one intake result row by `res`; a run with
+ * result_author=`author` (or none). True when the READY was still processed:
+ * a queue verdict, no ANSWERED, and exactly one result post. */
+static bool di_seed_board(struct di *d, const char *sha, struct di_spec res)
+{
+    struct json_value arr;
+    char text[320];
+    bool ok;
+    di_row_text(text, sizeof(text), sha, DI_ROOT0);
+    json_init(&arr);
+    json_set_array(&arr);
+    di_post_r(d, &arr, 0, (uint64_t)platform_time_wall_unix(), text, "", false, false);
+    res.slot = 1;
+    res.at = (uint64_t)platform_time_wall_unix() + 1;
+    res.ref = d->ids[0];
+    res.kind = FLEET_BOARD_KIND_RESULT;
+    di_post_s(d, &arr, &res);
+    ok = di_write_posts(d, &arr);
+    json_free(&arr);
+    if (!ok || !di_policy(d, "require_receipts=1\n"))
+        return false;
+    g_di_nposts = 0;
+    di_stub_on();
+    return true;
+}
+
+static bool di_still_processed(struct di *d, const char *sha, struct di_spec res,
+                               const char *author)
+{
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true, .author = author};
+    static char dump[65536];
+    bool ok = di_seed_board(d, sha, res);
+    if (ok) {
+        di_apply(d, o, &reply, dump, sizeof(dump));
+        ok = strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL &&
+             strstr(dump, "ANSWERED") == NULL && g_di_nposts == 1;
+        zcl_command_reply_free(&reply);
+    }
+    (void)di_policy(d, NULL);
+    di_stub_reset();
+    return ok;
+}
+
+/* The same board, run with commit: true when the READY is ANSWERED and not
+ * one result was posted. */
+static bool di_answered(struct di *d, const char *sha, struct di_spec res,
+                        const char *author)
+{
+    struct zcl_command_reply reply;
+    struct di_opts o = {.file = true, .author = author};
+    static char dump[65536];
+    bool ok = di_seed_board(d, sha, res);
+    if (ok) {
+        di_apply(d, o, &reply, dump, sizeof(dump));
+        ok = strstr(dump, "ANSWERED(result=") != NULL &&
+             strstr(dump, "ACCEPT_FOR_QUEUE") == NULL && g_di_nposts == 0;
+        zcl_command_reply_free(&reply);
+    }
+    (void)di_policy(d, NULL);
+    di_stub_reset();
+    return ok;
+}
+
+static int di_case_forged_result(struct di *d, const char *sha)
+{
+    int failures = 0;
+    uint8_t skb[32], pkb[32], skc[32], pkc[32], sd[32];
+    char hexb[65], hexc[65], allow[400];
+    struct di_spec res = {.text = "intake ACCEPT_FOR_QUEUE queued", .receipt = "",
+                          .agent = "intake"};
+    memset(sd, 0x42, 32);
+    ed25519_keypair(pkb, skb, sd);
+    memset(sd, 0x43, 32);
+    ed25519_keypair(pkc, skc, sd);
+    zcl_hex_encode(pkb, 32, hexb);
+    zcl_hex_encode(pkc, 32, hexc);
+    (void)snprintf(allow, sizeof(allow), "%s\n%s\n", d->pkhex, hexb);
+
+    TEST("intake: a result row from another allowed host does not answer a READY") {
+        ASSERT(dbf_put(d->allow, allow));
+        res.seed = skb;
+        res.pk = pkb;
+        ASSERT(di_still_processed(d, sha, res, d->pkhex));
+        PASS();
+    }
+
+    TEST("intake: a result row from a host outside the allow file does not answer") {
+        res.seed = skc;
+        res.pk = pkc;
+        ASSERT(di_still_processed(d, sha, res, hexc));
+        ASSERT(di_still_processed(d, sha, res, d->pkhex));
+        PASS();
+    }
+
+    TEST("intake: a badly signed result row from the intake key does not answer") {
+        res.seed = NULL;
+        res.pk = NULL;
+        res.flip = true;
+        ASSERT(di_still_processed(d, sha, res, d->pkhex));
+        PASS();
+    }
+
+    TEST("intake: a result row whose agent is not intake does not answer") {
+        res.flip = false;
+        res.agent = "lab";
+        ASSERT(di_still_processed(d, sha, res, d->pkhex));
+        PASS();
+    }
+
+    TEST("intake: a commit run with no result author is refused before any post") {
+        struct zcl_command_reply reply;
+        struct di_opts o = {.file = true, .mode = 1};
+        static char dump[65536];
+        res.agent = "intake";
+        ASSERT(di_seed_board(d, sha, res));
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT_STR_EQ(reply.error.code, "RESULT_AUTHOR_REQUIRED");
+        ASSERT(strstr(reply.error.message, "result_author=") != NULL);
+        ASSERT_EQ(g_di_nposts, 0);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: a plan run with no result author works and names the remedy") {
+        struct zcl_command_reply reply;
+        struct di_opts o = {.file = true};
+        static char dump[65536];
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT(reply.error.code[0] == '\0');
+        ASSERT(strstr(dump, "\"verdict\":\"ACCEPT_FOR_QUEUE\"") != NULL);
+        ASSERT(strstr(dump, "\"next_step\":\"intake cannot tell") != NULL);
+        ASSERT(strstr(dump, "result_author=") != NULL);
+        ASSERT_EQ(g_di_nposts, 0);
+        zcl_command_reply_free(&reply);
+        (void)di_policy(d, NULL);
+        di_stub_reset();
+        PASS();
+    }
+
+    TEST("intake: a malformed result_author refuses the run") {
+        struct zcl_command_reply reply;
+        struct di_opts o = {.file = true, .author = "nothex"};
+        char dump[4096];
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT_STR_EQ(reply.error.code, "BAD_RESULT_AUTHOR");
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    (void)di_allow_default(d);
+    return failures;
+}
+
+/* The operator's only route: a result_author= line in the allow file. */
+static int di_case_author_line(struct di *d, const char *sha)
+{
+    int failures = 0;
+    uint8_t skb[32], pkb[32], sd[32];
+    char hexb[65], allow[400];
+    struct di_spec res = {.text = "intake ACCEPT_FOR_QUEUE queued", .receipt = "",
+                          .agent = "intake"};
+    memset(sd, 0x42, 32);
+    ed25519_keypair(pkb, skb, sd);
+    zcl_hex_encode(pkb, 32, hexb);
+
+    TEST("intake: a result_author= allow-file line makes the lab's result answer") {
+        ASSERT(di_allow_default(d));
+        ASSERT(di_answered(d, sha, res, NULL));
+        PASS();
+    }
+
+    TEST("intake: an allow-file author naming another host leaves the READY open") {
+        (void)snprintf(allow, sizeof(allow), "%s\n%s\nresult_author=%s\n",
+                       d->pkhex, hexb, hexb);
+        ASSERT(dbf_put(d->allow, allow));
+        ASSERT(di_still_processed(d, sha, res, NULL));
+        PASS();
+    }
+
+    TEST("intake: an allow file holding only a result_author= line is ALLOW_EMPTY") {
+        struct zcl_command_reply reply;
+        struct di_opts o = {.file = true};
+        char dump[4096];
+        (void)snprintf(allow, sizeof(allow), "result_author=%s\n", d->pkhex);
+        ASSERT(dbf_put(d->allow, allow));
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT_STR_EQ(reply.error.code, "ALLOW_EMPTY");
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    (void)di_allow_default(d);
+    return failures;
+}
+
+static void di_cap_pages(struct di *d, int n_rows)
+{
+    struct di_spec res = {.slot = 1, .text = "intake REFUSE x", .receipt = "",
+                          .kind = FLEET_BOARD_KIND_RESULT, .agent = "intake",
+                          .ref = d->ids[0]};
+    uint64_t now = (uint64_t)platform_time_wall_unix();
+    for (int p = 0; p < 2; p++) {
+        json_init(&g_di_pg[p]);
+        json_set_array(&g_di_pg[p]);
+    }
+    for (int k = 0; k < n_rows; k++) {
+        res.at = now + 1000 - (uint64_t)k;
+        di_post_s(d, &g_di_pg[k < n_rows / 2 ? 0 : 1], &res);
+    }
+    g_di_pn = 2;
+}
+
+static int di_case_answer_cap(struct di *d)
+{
+    int failures = 0;
+    struct zcl_command_reply reply;
+    struct di_opts o = {.author = d->pkhex};
+    static char dump[65536];
+
+    TEST("intake: more result replies than the answer table holds set truncated") {
+        di_cap_pages(d, 260);
+        di_stub_on();
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"truncated\":true") != NULL);
+        ASSERT(strstr(dump, "result replies") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("intake: result replies within the table do not set truncated") {
+        di_stub_reset();
+        di_cap_pages(d, 200);
+        di_stub_on();
+        di_call(d, &o, &reply, dump, sizeof(dump));
+        ASSERT(strstr(dump, "\"truncated\":false") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    di_stub_reset();
+    return failures;
+}
+
+static int di_cursor_run(struct di *d, enum di_cur mode, const char *code)
+{
+    struct zcl_command_reply reply;
+    struct di_opts o = {0};
+    char dump[4096];
+    int ok;
+    for (int i = 0; i < 3; i++) {
+        json_init(&g_di_pg[i]);
+        json_set_array(&g_di_pg[i]);
+        di_page_row(d, &g_di_pg[i], 0, i);
+    }
+    g_di_pn = 3;
+    g_di_cur = mode;
+    di_stub_on();
+    di_call(d, &o, &reply, dump, sizeof(dump));
+    ok = !strcmp(reply.error.code, code);
+    zcl_command_reply_free(&reply);
+    di_stub_reset();
+    return ok;
+}
+
+static int di_case_cursor(struct di *d)
+{
+    int failures = 0;
+
+    TEST("intake: a repeating, rising or missing next cursor is BOARD_CURSOR_INVALID") {
+        ASSERT(di_cursor_run(d, DI_CUR_REPEAT, "BOARD_CURSOR_INVALID"));
+        ASSERT(di_cursor_run(d, DI_CUR_RISING, "BOARD_CURSOR_INVALID"));
+        ASSERT(di_cursor_run(d, DI_CUR_MISSING, "BOARD_CURSOR_INVALID"));
+        PASS();
+    }
+
+    TEST("intake: a page without has_more is BOARD_PAGE_INVALID") {
+        ASSERT(di_cursor_run(d, DI_CUR_NO_HAS_MORE, "BOARD_PAGE_INVALID"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_intake(void);
 int test_dev_intake(void)
 {
@@ -741,8 +1052,7 @@ int test_dev_intake(void)
         di_run(&d, false, &reply, dump, sizeof(dump));
         ASSERT(strstr(dump, "REFUSE(author_not_allowed)") != NULL);
         zcl_command_reply_free(&reply);
-        (void)snprintf(dump, sizeof(dump), "%s\n", d.pkhex);
-        ASSERT(dbf_put(d.allow, dump));
+        ASSERT(di_allow_default(&d));
         PASS();
     }
 
@@ -981,6 +1291,10 @@ int test_dev_intake(void)
     failures += di_case_over_max(&d);
     failures += di_case_receive_refusal(&d, shaA);
     failures += di_case_answered(&d, shaA);
+    failures += di_case_forged_result(&d, shaA);
+    failures += di_case_author_line(&d, shaA);
+    failures += di_case_answer_cap(&d);
+    failures += di_case_cursor(&d);
     failures += di_case_on_main(&d, shaA);
 
 _test_next:;
