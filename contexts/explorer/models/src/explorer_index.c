@@ -27,6 +27,7 @@
 #include "zslp/slp.h"
 #include "sapling/constants.h"
 #include "util/log_macros.h"
+#include "util/ar_step_readonly.h"
 #include <string.h>
 
 /* ── Validation records ────────────────────────────────────────────
@@ -332,6 +333,61 @@ int64_t db_view_integrity_max_height(struct node_db *ndb)
         h = AR_COL_INT(s, 0);
     AR_FINALIZE(s);
     return h;
+}
+
+#ifdef ZCL_TESTING
+static bool g_view_integrity_step_fail;
+static int db_view_integrity_step(sqlite3_stmt *s)
+{
+    return g_view_integrity_step_fail ? SQLITE_BUSY :
+           ar_step_checked(s, "view_integrity prefix probe", NULL);
+}
+void db_view_integrity_test_step_fail(bool enabled)
+{
+    g_view_integrity_step_fail = enabled;
+}
+#else
+#define db_view_integrity_step(s) ar_step_checked(s, "view_integrity prefix probe", NULL)
+#endif
+
+int64_t db_view_integrity_contiguous_height(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open) return -1;
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_RET(ndb, s,
+        "SELECT COUNT(*),COALESCE(MIN(height),-1),COALESCE(MAX(height),-1) "
+        "FROM view_integrity", -1);
+    int64_t count = -1, min = -1, max = -1;
+    if (ar_step_checked(s, "view_integrity summary", NULL) == ZCL_STEP_ROW) {
+        int col = 0;
+        count = AR_COL_INT(s, col++);
+        min = AR_COL_INT(s, col++);
+        max = AR_COL_INT(s, col++);
+    }
+    AR_FINALIZE(s);
+    if (count <= 0 || min != 0 || max < 0 || max == INT64_MAX) return -1;
+    if (count == max + 1) return max;
+
+    int64_t lo = 0, hi = max;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo + 1) / 2;
+        AR_PREPARE_RET(ndb, s,
+            "SELECT COUNT(*) FROM view_integrity WHERE height<=?", -1);
+        if (AR_BIND_INT(s, 1, mid) != SQLITE_OK) {
+            AR_FINALIZE(s);
+            return -1;
+        }
+        enum zcl_step rc = db_view_integrity_step(s);
+        if (rc != ZCL_STEP_ROW) {
+            AR_FINALIZE(s);
+            return -1;
+        }
+        bool complete = AR_COL_INT(s, 0) == mid + 1;
+        AR_FINALIZE(s);
+        if (complete) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
 }
 
 /* ── Owner-derivation helper ───────────────────────────────────────── */

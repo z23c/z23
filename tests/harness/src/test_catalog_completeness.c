@@ -33,6 +33,7 @@
 #include "storage/nullifier_kv.h"
 #include "jobs/reducer_frontier.h"
 #include "models/database.h"
+#include "models/explorer_index.h"
 #include "models/op_return_index.h"
 #include "models/zslp_ledger.h"
 #include "storage/node_db_runtime.h"
@@ -599,8 +600,11 @@ static bool cc_seed_ndb_rows(struct node_db *ndb)
     memset(dg, 0x5A, sizeof(dg));
     return op_return_index_set_cursor(ndb, &cur) &&
            zslp_ledger_set_cursor(ndb, 420, dg) &&
-           cc_exec(ndb->db, "INSERT INTO view_integrity(height,sha3_hash) "
-                            "VALUES(500, zeroblob(32))") &&
+           cc_exec(ndb->db,
+                   "WITH RECURSIVE seq(h) AS ("
+                   "SELECT 0 UNION ALL SELECT h+1 FROM seq WHERE h<500) "
+                   "INSERT INTO view_integrity(height,sha3_hash) "
+                   "SELECT h,zeroblob(32) FROM seq") &&
            node_db_state_set_int(ndb, "sync_projection_tip_height", 640);
 }
 
@@ -719,6 +723,45 @@ static int cc_ndb_floor_variants(void)
     return failures;
 }
 
+static int cc_sparse_integrity_cases(struct node_db *ndb)
+{
+    int failures = 0;
+    CC_CHECK("sparse integrity: trusted floor 600 restored",
+             cc_seed_trusted_floor(600));
+    CC_CHECK("sparse integrity: high watermark without genesis",
+             cc_exec(ndb->db,
+                     "DELETE FROM view_integrity;"
+                     "INSERT INTO view_integrity(height,sha3_hash) "
+                     "VALUES(500,zeroblob(32))"));
+    struct catalog_index_status r = cc_snap_one("view_integrity", 1000);
+    failures += cc_check_row("sparse integrity: no prefix is not a high cursor",
+                             &r, true, -1, 1001, 600,
+                             (int)CATALOG_COVERAGE_NONE);
+    CC_CHECK("sparse integrity: interior gap",
+             cc_exec(ndb->db,
+                     "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+                     "(0,zeroblob(32)),(1,zeroblob(32)),(3,zeroblob(32))"));
+    r = cc_snap_one("view_integrity", 1000);
+    failures += cc_check_row("sparse integrity: exact prefix before gap",
+                             &r, true, 1, 999, 600,
+                             (int)CATALOG_COVERAGE_NONE);
+    CC_CHECK("sparse integrity: fill the gap",
+             cc_exec(ndb->db,
+                     "INSERT INTO view_integrity(height,sha3_hash) "
+                     "VALUES(2,zeroblob(32))"));
+    r = cc_snap_one("view_integrity", 1000);
+    failures += cc_check_row("sparse integrity: complete prefix",
+                             &r, true, 3, 997, 600,
+                             (int)CATALOG_COVERAGE_NONE);
+    db_view_integrity_test_step_fail(true);
+    int64_t cursor = db_view_integrity_contiguous_height(ndb);
+    db_view_integrity_test_step_fail(false);
+    printf("sparse integrity: forced step failure cursor=%lld\n",
+           (long long)cursor);
+    CC_CHECK("sparse integrity: forced step error fails closed", cursor == -1);
+    return failures;
+}
+
 static int cc_ndb_rows_body(struct node_db *ndb)
 {
     int failures = 0;
@@ -731,6 +774,7 @@ static int cc_ndb_rows_body(struct node_db *ndb)
     failures += cc_check_ndb_rows_seeded();
     failures += cc_explorer_coverage_sweep(ndb);
     failures += cc_ndb_floor_variants();
+    failures += cc_sparse_integrity_cases(ndb);
 
     /* With the progress store closed the floor and every anchor row are
      * unavailable: a closed store never manufactures coverage. */

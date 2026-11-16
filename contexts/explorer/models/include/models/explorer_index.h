@@ -109,15 +109,18 @@ bool db_view_integrity_save(struct node_db *ndb, int64_t height,
 bool db_view_integrity_get(struct node_db *ndb, int64_t height,
                            uint8_t sha3_out[32]);
 
-/* Highest height with a recorded view_integrity receipt, or -1 when the db
- * is closed. Mirrors db_utxo_max_height(): an empty table yields 0 (the "no
- * receipts yet" floor, SQLite's MAX() over zero rows), the same quirk
- * db_utxo_max_height/db_block_max_height already carry — single source of
- * truth for "SELECT MAX(height) FROM view_integrity". Read-only — used by
- * catalog_completeness (engine/modules/storage/catalog_completeness.c, reached via a
- * forward declaration, never an #include, to stay clean under the lib/
- * layering gate) to report explorer-projection catch-up lag. */
+/* Highest recorded receipt height, not proof of contiguous coverage.
+ * SQLite MAX() over an empty table yields NULL, read as 0 by this accessor;
+ * a closed or unreadable database returns -1. */
 int64_t db_view_integrity_max_height(struct node_db *ndb);
+
+/* Highest height H for which every receipt from 0 through H is present, or
+ * -1 when no such prefix exists or the read fails. Uses a COUNT/MIN/MAX fast
+ * path for a complete table, then bounded indexed searches for the first gap. */
+int64_t db_view_integrity_contiguous_height(struct node_db *ndb);
+#ifdef ZCL_TESTING
+void db_view_integrity_test_step_fail(bool enabled);
+#endif
 
 /* Read the 20-byte address hash recorded for a spent prevout (used to
  * derive a ZNAM op's owner from its first input). Returns false when the

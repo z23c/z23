@@ -72,7 +72,7 @@ extern bool op_return_index_legacy_catalog_warn_due(struct node_db *ndb,
 
 /* contexts/explorer/models/src/explorer_index.c (models/explorer_index.h) — added
  * alongside this module for exactly this read (see that header). */
-extern int64_t db_view_integrity_max_height(struct node_db *ndb);
+extern int64_t db_view_integrity_contiguous_height(struct node_db *ndb);
 
 /* engine/controllers/src/sync_controller_writers.c
  * (controllers/sync_controller.h) */
@@ -188,7 +188,7 @@ static int64_t cc_get_view_integrity_cursor(void)
 {
     struct node_db *ndb = node_db_runtime();
     if (!ndb) return CATALOG_CURSOR_UNAVAILABLE;
-    return db_view_integrity_max_height(ndb);
+    return db_view_integrity_contiguous_height(ndb);
 }
 
 static int64_t cc_get_explorer_projection_cursor(void)
