@@ -264,19 +264,21 @@ static void bm_roster_visit(const struct fleet_machine *m, void *user)
 
 /* The operator key this box trusts: the one `fleet join` recorded, or, on
  * the manager, its own box key. Neither means no roster at all. */
-static bool bm_operator(uint8_t out[FLEET_ENROL_PUBKEY_BYTES])
+static bool bm_operator(uint8_t out[FLEET_ENROL_PUBKEY_BYTES], bool readonly)
 {
     uint8_t seed[FLEET_ENROL_SEED_BYTES];
     const char *why = NULL;
     bool joined = false, own = false;
-    if (!fleet_enrol_operator_read(out, &joined, &why)) {
+    if (!(readonly ? fleet_enrol_operator_read_existing(out, &joined, &why) :
+                     fleet_enrol_operator_read(out, &joined, &why))) {
         LOG_WARN(BM_LOG, "fleet operator key unreadable: %s",
                  why ? why : "unknown");
         return false;
     }
     if (joined)
         return true;
-    if (!fleet_enrol_key_load(seed, out, false, &own, &why))
+    if (!(readonly ? fleet_enrol_key_read_existing(seed, out, &own, &why) :
+                     fleet_enrol_key_load(seed, out, false, &own, &why)))
         return false;
     memset(seed, 0, sizeof(seed));
     return own;
@@ -284,14 +286,15 @@ static bool bm_operator(uint8_t out[FLEET_ENROL_PUBKEY_BYTES])
 
 /* Every verified roster box with a signing key. Empty (never an error) on
  * a box that trusts no operator: such a box has no peers. */
-static bool bm_roster_load_checked(struct bm_roster *r)
+static bool bm_roster_load_checked(struct bm_roster *r, bool readonly)
 {
     uint8_t op[FLEET_ENROL_PUBKEY_BYTES];
     struct fleet_roster_scan scan;
     const char *why = NULL;
     memset(r, 0, sizeof(*r));
-    if (!bm_operator(op)) return false;
-    if (!fleet_roster_each(op, bm_roster_visit, r, &scan, &why)) {
+    if (!bm_operator(op, readonly)) return false;
+    if (!(readonly ? fleet_roster_each_existing(op, bm_roster_visit, r, &scan, &why) :
+                     fleet_roster_each(op, bm_roster_visit, r, &scan, &why))) {
         LOG_WARN(BM_LOG, "fleet roster unreadable: %s", why ? why : "unknown");
         r->n = 0; return false;
     }
@@ -299,7 +302,7 @@ static bool bm_roster_load_checked(struct bm_roster *r)
 }
 static void bm_roster_load(struct bm_roster *r)
 {
-    (void)bm_roster_load_checked(r);
+    (void)bm_roster_load_checked(r, false);
 }
 
 static const struct bm_peer *bm_by_name(const struct bm_roster *r,
@@ -328,12 +331,13 @@ static const struct bm_peer *bm_by_signer_hex(const struct bm_roster *r,
 }
 
 /* This box's own box key. False on a box with no enrolled key. */
-static bool bm_own_box(uint8_t own[FLEET_ENROL_PUBKEY_BYTES])
+static bool bm_own_box(uint8_t own[FLEET_ENROL_PUBKEY_BYTES], bool readonly)
 {
     uint8_t seed[FLEET_ENROL_SEED_BYTES];
     const char *why = NULL;
     bool present = false;
-    if (!fleet_enrol_key_load(seed, own, false, &present, &why))
+    if (!(readonly ? fleet_enrol_key_read_existing(seed, own, &present, &why) :
+                     fleet_enrol_key_load(seed, own, false, &present, &why)))
         present = false;
     memset(seed, 0, sizeof(seed));
     return present;
@@ -357,7 +361,7 @@ bool zcl_devagent_boardmail_directory(struct json_value *names, bool *truncated)
     json_set_array(names); *truncated = false;
     struct bm_roster *r = zcl_calloc(1, sizeof(*r), "boardmail.directory");
     uint8_t own[FLEET_ENROL_PUBKEY_BYTES]; const char *self = NULL;
-    bool ok = r && bm_roster_load_checked(r) && bm_own_box(own);
+    bool ok = r && bm_roster_load_checked(r, true) && bm_own_box(own, true);
     if (ok) for (size_t i = 0; i < r->n; ++i)
         if (!memcmp(r->p[i].box, own, sizeof(own))) self = r->p[i].name;
     ok = ok && self && self[0];
@@ -385,7 +389,7 @@ bool zcl_devagent_boardmail_remote(const char *to)
     }
     bm_roster_load(r);
     p = bm_by_name(r, to);
-    present = bm_own_box(own);
+    present = bm_own_box(own, false);
     remote = p && !(present && memcmp(p->box, own, sizeof(own)) == 0);
     free(r);
     return remote;
@@ -689,7 +693,7 @@ static void bm_route_load(struct bm_route *v)
     char root[4096], dir[4200];
     size_t i;
     bm_roster_load(&v->ro);
-    if (bm_own_box(own)) {
+    if (bm_own_box(own, false)) {
         for (i = 0; i < v->ro.n; i++) {
             if (memcmp(v->ro.p[i].box, own, sizeof(own)) == 0) {
                 (void)snprintf(v->self, sizeof(v->self), "%s",
@@ -797,7 +801,7 @@ void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
 static bool bm_route_observe_load(struct bm_route *v)
 {
     uint8_t own[FLEET_ENROL_PUBKEY_BYTES]; char root[4096], dir[4200];
-    if (!bm_roster_load_checked(&v->ro) || !bm_own_box(own)) return false;
+    if (!bm_roster_load_checked(&v->ro, false) || !bm_own_box(own, false)) return false;
     for (size_t i = 0; i < v->ro.n; ++i)
         if (!memcmp(v->ro.p[i].box, own, sizeof(own)))
             (void)snprintf(v->self, sizeof(v->self), "%s", v->ro.p[i].name);

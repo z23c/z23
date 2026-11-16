@@ -250,6 +250,15 @@ bool fleet_roster_each(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                            out, why, false);
 }
 
+bool fleet_roster_each_existing(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                                void (*visit)(const struct fleet_machine *, void *),
+                                void *user, struct fleet_roster_scan *out,
+                                const char **why)
+{
+    return fe_roster_query(operator_pubkey, NULL, NULL, visit, user,
+                           out, why, true);
+}
+
 struct fe_raw_walk {
     void (*visit)(const char *line, void *user);
     void *user;

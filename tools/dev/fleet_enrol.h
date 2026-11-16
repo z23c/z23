@@ -581,6 +581,12 @@ bool fleet_roster_each(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                        void *user, struct fleet_roster_scan *out,
                        const char **why);
 
+/* Walk the same verified roster without creating state directories. */
+bool fleet_roster_each_existing(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
+                                void (*visit)(const struct fleet_machine *, void *),
+                                void *user, struct fleet_roster_scan *out,
+                                const char **why);
+
 /* Every signer key the operator's own roster rows bind to `box_pubkey` (at
  * most `cap`; more refuses as fleet_head_too_large): `found` is false when no
  * row for the box is held. A head that revokes a box must also revoke each of

@@ -1236,6 +1236,18 @@ static int bmx_directory_budget_probe(size_t budget, bool *cut)
     bmx_end(&c); return result;
 }
 
+static bool bmx_model_expendable_cuts(struct json_value *data, struct json_value *cuts)
+{
+    static const char *const expendable[] = {"workers", "candidates", "work", "agents", "sessions", "blockers", "tasks"};
+    for (size_t i = 0; i < sizeof(expendable) / sizeof(expendable[0]); ++i) {
+        struct json_value *arr = (struct json_value *)json_get(data, expendable[i]);
+        size_t n = arr && arr->type == JSON_ARR ? arr->num_children : 0;
+        while (arr && arr->type == JSON_ARR && arr->num_children) json_free(&arr->children[--arr->num_children]);
+        if (n && !json_push_kv_int(cuts, expendable[i], (long long)n)) return false;
+    }
+    return true;
+}
+
 static bool bmx_directory_metadata_boundary(void)
 {
     struct bmx_call c; bmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
@@ -1250,9 +1262,10 @@ static bool bmx_directory_metadata_boundary(void)
     bool ok = bmx_ok(&c) && labels && labels->type == JSON_ARR && labels->num_children > 2 && cuts;
     size_t before = 0, after = 0;
     if (ok) {
+        ok = bmx_model_expendable_cuts(&c.reply.data, cuts);
         json_free(&labels->children[--labels->num_children]);
         before = json_write(&c.reply.data, NULL, 0);
-        ok = json_push_kv_int(cuts, "mailbox_directory", 1);
+        ok = ok && json_push_kv_int(cuts, "mailbox_directory", 1);
         after = json_write(&c.reply.data, NULL, 0);
     }
     bmx_end(&c);
