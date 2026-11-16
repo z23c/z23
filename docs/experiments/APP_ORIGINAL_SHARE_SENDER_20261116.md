@@ -13,6 +13,6 @@ The normal tiny-app sender remains the default when `--share` is absent.
 
 The source fixture exercises the native command boundaries with a fake child,
 including mismatched identity, plan, carrier, digest and status refusals.
-Focused selftest: NOT RUN. A real original-share sender, receiver, graphical
+The focused selftest passed on source `b079eee79d0cb6df72ead2aca710ad5cd1c9a2e9` through the forced R2 gate; its archive and manifest verified and the successful scratch was released. A real original-share sender, receiver, graphical
 observation, and two-host exchange: NOT RUN. This fixture does not establish
 live network or GUI behavior.
