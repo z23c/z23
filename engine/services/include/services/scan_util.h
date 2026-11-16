@@ -87,6 +87,10 @@ struct scan_mem_utxo {
     bool spent;
     uint8_t spent_txid[32];
     int spent_vin;
+    /* A wallet_utxos row stored before the scan, loaded so a spend of it
+     * inside the range is seen. Never saved again; only a spend the scan
+     * read from a block may mark it. */
+    bool pre_existing;
 };
 
 #define SCAN_UTXO_HT_SIZE 16381
@@ -99,6 +103,7 @@ struct scan_utxo_ht_entry {
 struct scan_utxo_set {
     struct scan_mem_utxo *items;
     int count, cap;
+    int dropped; /* UTXOs scan_uset_add could not hold: the set is short */
     struct scan_utxo_ht_entry *buckets[SCAN_UTXO_HT_SIZE];
 };
 
@@ -117,7 +122,9 @@ static inline void scan_uset_init(struct scan_utxo_set *s)
     s->items = zcl_calloc((size_t)s->cap, sizeof(struct scan_mem_utxo), "scan utxo set");
 }
 
-static inline void scan_uset_add(struct scan_utxo_set *s, const struct scan_mem_utxo *u)
+/* Add one UTXO. false (logged) when it could not be held: the set is then
+ * as it was, neither counted nor findable. */
+static inline bool scan_uset_add(struct scan_utxo_set *s, const struct scan_mem_utxo *u)
 {
     if (s->count >= s->cap) {
         int new_cap = s->cap * 2;
@@ -128,19 +135,26 @@ static inline void scan_uset_add(struct scan_utxo_set *s, const struct scan_mem_
              * Drop this UTXO rather than crash; loud so the gap is visible. */
             LOG_WARN("scan_util", "scan_uset_add: realloc to cap=%d failed; "
                      "dropping utxo (count=%d)", new_cap, s->count);
-            return;
+            s->dropped++;
+            return false;
         }
         s->items = grown;
         s->cap = new_cap;
     }
-    int i = s->count++;
-    s->items[i] = *u;
     unsigned b = scan_outpoint_hash(u->txid, u->vout);
     struct scan_utxo_ht_entry *e = zcl_malloc(sizeof(*e), "scan_utxo_ht_entry");
-    if (!e) return;
+    if (!e) {
+        LOG_WARN("scan_util", "scan_uset_add: index entry allocation "
+                 "failed; dropping utxo (count=%d)", s->count);
+        s->dropped++;
+        return false;
+    }
+    int i = s->count++;
+    s->items[i] = *u;
     e->idx = i;
     e->next = s->buckets[b];
     s->buckets[b] = e;
+    return true;
 }
 
 static inline int scan_uset_find(const struct scan_utxo_set *s,
@@ -171,6 +185,7 @@ struct scan_mem_wtx {
     uint8_t *raw;
     size_t raw_len;
     int height;
+    uint8_t block_hash[32]; /* hash of the parsed block that holds the tx */
     uint32_t time;
     bool from_me;
     int64_t fee;

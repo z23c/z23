@@ -53,6 +53,8 @@ enum wallet_scan_hole_kind {
     WALLET_SCAN_HOLE_NO_FILE,     /* block file absent, uncounted or unmappable */
     WALLET_SCAN_HOLE_BEYOND_FILE, /* nDataPos lies at or past the file's end */
     WALLET_SCAN_HOLE_UNPARSED,    /* the bytes at nDataPos do not parse */
+    WALLET_SCAN_HOLE_HASH_MISMATCH, /* they parse, but not as the block the
+                                     * index entry names (or it names none) */
 };
 
 /* A short fixed phrase for a hole kind, for log lines ("has no block body",
@@ -107,15 +109,25 @@ int wallet_scan_block_file_map(const char *path,
  * writes anything. The first hole ends the scan with
  * WALLET_SCAN_REFUSED_MISSING_DATA and no row is touched: a height with no
  * block body, or a block in a matched file that cannot be mapped, lies past
- * the end of its file, or does not parse. A block in a file Pass 1 did not
- * match is skipped unread.
+ * the end of its file, does not parse, or does not hash to the block its
+ * index entry names. A block in a file Pass 1 did not match is skipped
+ * unread. Every wallet_transactions row written carries the hash of the
+ * parsed block that holds it.
  *
  * start_height == 0 replaces wallet_utxos and wallet_transactions with the
- * result (an empty result empties them). start_height > 0 is a delta (the
- * boot catch-up above its cursor): no row is deleted, an empty result writes
- * nothing, and a found row never replaces one that already exists. A
- * start_height below 0 is treated as a full scan: it takes the same
- * replace path as start_height == 0.
+ * result (an empty result empties them). A result that found a wallet
+ * transaction replaces them only when every stored row is one the scan
+ * rediscovered (a wallet_utxos row with the same spent mark): rows a block
+ * scan cannot derive exist (shielded-only and unconfirmed transactions,
+ * watch-only imports), so otherwise the scan refuses with -1 before it
+ * deletes anything. start_height > 0 is a delta (the boot catch-up above its
+ * cursor): no row is deleted, an empty result writes nothing, and a found row
+ * never replaces one that already exists. A delta given Pass-1 file results
+ * first reads the stored unspent wallet_utxos rows (a failed read refuses
+ * with -1); when there are any it parses every height of the range, matched
+ * file or not, and marks a stored coin spent, never overwriting a spent mark,
+ * when a block of the range spends it. A start_height below 0 is treated as
+ * a full scan: it takes the same replace path as start_height == 0.
  *
  * Returns the number of wallet transactions found, -1 on error, or
  * WALLET_SCAN_REFUSED_MISSING_DATA. */

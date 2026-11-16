@@ -126,13 +126,16 @@ static bool legacy_import_open_block(
            snapshot->size > 0 && snapshot->size <= SIZE_MAX;
 }
 
-/* Process a single deserialized block for wallet txns. */
+/* Process a single deserialized block for wallet txns. Every wallet
+ * transaction found carries the hash of the parsed block that holds it. */
 static bool scan_block_txs(const struct block *blk, int height,
                             const struct scan_addr_ht *ht,
                             struct scan_utxo_set *uset,
                             struct scan_wtx_list *wl)
 {
     bool any_found = false;
+    struct uint256 block_hash;
+    block_get_hash(blk, &block_hash);
 
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         struct transaction *tx = &blk->vtx[ti];
@@ -186,6 +189,7 @@ static bool scan_block_txs(const struct block *blk, int height,
             memcpy(wt.txid, tx->hash.data, 32);
             wt.raw = ser_tx(tx, &wt.raw_len);
             wt.height = height;
+            memcpy(wt.block_hash, block_hash.data, 32);
             wt.time = blk->header.nTime;
             wt.from_me = from_me;
             if (from_me) {
@@ -246,13 +250,53 @@ static bool legacy_import_reset_wallet_rows(struct node_db *ndb)
     return false;
 }
 
+/* An import that found a wallet transaction resets wallet_utxos,
+ * wallet_transactions and wallet_sapling_notes and writes back only what it
+ * derives from the legacy block files. Rows it cannot derive can exist
+ * (shielded-only and unconfirmed transactions, watch-only imports), so that
+ * reset goes on only over empty tables; otherwise it refuses with every row
+ * kept. A failed read refuses too. An import that found nothing keeps its
+ * empty reset. */
+static bool legacy_import_found_reset_allowed(struct node_db *ndb,
+                                              const struct scan_wtx_list *wl)
+{
+    if (wl->count == 0)
+        return true;
+    struct db_wallet_utxo one;
+    memset(&one, 0, sizeof(one));
+    int utxos = db_wallet_utxo_list_all(ndb, &one, 1);
+    if (utxos > 0)
+        db_wallet_utxo_free(&one);
+    bool read = sqlite3_errcode(ndb->db) == SQLITE_OK;
+    int txs = db_wallet_tx_count(ndb);
+    read = read && sqlite3_errcode(ndb->db) == SQLITE_OK;
+    int notes = db_sapling_note_count_all(ndb);
+    read = read && sqlite3_errcode(ndb->db) == SQLITE_OK;
+    if (read && utxos == 0 && txs == 0 && notes == 0)
+        return true;
+    LOG_WARN("legacy_import",
+             "legacy_import: pass 2 refused: it found %d wallet transactions "
+             "but %s; its reset would drop rows this import cannot derive, "
+             "wallet rows kept", wl->count,
+             read ? "the wallet tables already hold rows"
+                  : "the wallet tables could not be read");
+    return false;
+}
+
 static bool legacy_import_persist_transparent(struct node_db *ndb,
                                               struct scan_utxo_set *uset,
                                               struct scan_wtx_list *wl)
 {
+    if (uset->dropped > 0) {
+        LOG_WARN("legacy_import", "legacy_import: pass 2 refused: %d wallet "
+                 "outputs could not be held in memory, wallet rows kept",
+                 uset->dropped);
+        return false; // raw-return-ok:logged-above
+    }
     if (!legacy_import_begin_checked(ndb, "pass 2 begin"))
         return false; // raw-return-ok:callee-logged
-    bool ok = legacy_import_reset_wallet_rows(ndb);
+    bool ok = legacy_import_found_reset_allowed(ndb, wl) &&
+              legacy_import_reset_wallet_rows(ndb);
     for (int i = 0; ok && i < uset->count; i++) {
         struct scan_mem_utxo *u = &uset->items[i];
         struct db_wallet_utxo du;
@@ -286,6 +330,7 @@ static bool legacy_import_persist_transparent(struct node_db *ndb,
         dt.raw_tx = t->raw;
         dt.raw_tx_len = t->raw_len;
         dt.has_block = true;
+        memcpy(dt.block_hash, t->block_hash, 32);
         dt.block_height = t->height;
         dt.time_received = (int64_t)t->time;
         dt.from_me = t->from_me;
@@ -634,7 +679,10 @@ static int legacy_import_pass2_transparent(
     for (int f = 0; f < st->num_files; f++) {
         if (legacy_import_abort_requested())
             return LEGACY_IMPORT_ABORT_P2;
-        if (!st->file_has_match[f])
+        /* Pass 1 matches output scripts only: once a wallet coin is held, a
+         * file that only spends it is no match, so every later file is
+         * walked. */
+        if (!st->file_has_match[f] && st->uset.count == 0)
             continue;
         int walked = 0;
         int scan = legacy_import_scan_matched_block(legacy_datadir, f,

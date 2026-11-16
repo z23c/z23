@@ -43,9 +43,11 @@
  *      rescanblockchain from 0 restored the number.
  *   R. The row-replacing scan (rescanwallet, reindexdb,
  *      replaywalletfromchain, the boot catch-up scan) refuses a range with
- *      bodiless heights and keeps wallet_utxos and wallet_transactions; a
- *      fully bodied range, and a catch-up delta whose bodies are present,
- *      still replace them.
+ *      bodiless heights and keeps wallet_utxos and wallet_transactions. A
+ *      fully bodied range from height 0 still replaces the rows; a catch-up
+ *      delta above its cursor deletes no row and keeps the existing rows,
+ *      adding what it found and marking spent a stored coin its blocks
+ *      spend.
  *   U. A height whose BLOCK_HAVE_DATA body cannot be read (block file
  *      absent, cut short, or the block does not parse), or no block file at
  *      all, refuses the row replace and keeps the rows byte-equal; an intact
@@ -812,9 +814,11 @@ static bool wrc_g_write_body(struct script *pay, struct disk_block_pos *pos,
     return wrote;
 }
 
-/* Point n synthetic index entries at one shared on-disk body. */
+/* Point n synthetic index entries at one shared on-disk body whose hash is
+ * `hash`, as a real index entry names the block it indexes. */
 static void wrc_fill_chain(struct block_index *idx, struct block_index **chain,
-                           const struct disk_block_pos *pos, int n)
+                           const struct disk_block_pos *pos,
+                           const struct uint256 *hash, int n)
 {
     for (int i = 0; i < n; i++) {
         block_index_init(&idx[i]);
@@ -822,7 +826,7 @@ static void wrc_fill_chain(struct block_index *idx, struct block_index **chain,
         idx[i].nFile = pos->nFile;
         idx[i].nDataPos = pos->nPos;
         idx[i].nStatus = BLOCK_HAVE_DATA;
-        idx[i].phashBlock = NULL;
+        idx[i].phashBlock = hash;
         chain[i] = &idx[i];
     }
 }
@@ -958,7 +962,7 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
         calloc(WRC_G_BLOCKS, sizeof(*idx)); /* raw-alloc-ok:test-fixture */
     struct block_index **chain =
         calloc(WRC_G_BLOCKS, sizeof(*chain)); /* raw-alloc-ok:test-fixture */
-    wrc_fill_chain(idx, chain, &pos_empty, WRC_G_BLOCKS);
+    wrc_fill_chain(idx, chain, &pos_empty, NULL, WRC_G_BLOCKS);
     idx[WRC_G_COIN_AT].nFile = pos_us.nFile;
     idx[WRC_G_COIN_AT].nDataPos = pos_us.nPos;
 
@@ -1072,7 +1076,8 @@ static bool wrc_create_fixture_dirs(const char *datadir, char *blocksdir,
  * seed-only-restore state, which used to be skipped in total silence. */
 static bool wrc_write_shared_body(const char *datadir,
                                   const struct script *pay_to_us,
-                                  struct disk_block_pos *pos)
+                                  struct disk_block_pos *pos,
+                                  struct uint256 *hash)
 {
     bool wrote = false;
     struct block blk;
@@ -1112,6 +1117,8 @@ static bool wrc_write_shared_body(const char *datadir,
 
         unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
         wrote = wrc_set_merkle(&blk) && write_block_to_disk(&blk, pos, datadir, msg_start);
+        if (wrote)
+            block_get_hash(&blk, hash);
     }
     block_free(&blk);
     return wrote;
@@ -1479,13 +1486,10 @@ static bool wrc_reject_invalid_body(struct wallet *wallet, const char *dir,
  *
  * The wallet here holds one key that owns no output of the fixture: what
  * the readable blocks hold for it is nothing, so a scan that runs commits an
- * empty result and the seeded stale row shows whether it ran. (A scan that
- * finds a wallet transaction cannot commit at all today: the Pass-2 writer
- * saves wallet_transactions rows with has_block and a blank block_hash,
- * which db_wallet_tx_validate refuses, so that write rolls back; a delta
- * whose found transaction is already stored saves no wallet_tx row and
- * commits, R10.) `owner` holds the key the fixture blocks pay: R8 and R10-R12
- * use it for a delta that finds a wallet transaction. */
+ * empty result and the seeded stale row shows whether it ran. `owner` holds
+ * the key the fixture blocks pay: R8, R10-R12, R15-R17 use it for a scan that
+ * finds a wallet transaction, whose row carries the hash of the block it was
+ * read from (`body_hash`, the one body every height shares). */
 struct wrc_r {
     struct node_db *ndb;
     struct rpc_table *tbl;
@@ -1494,6 +1498,7 @@ struct wrc_r {
     struct main_state *ms;
     const char *datadir;
     struct block_index *idx;
+    const struct uint256 *body_hash;
 };
 
 #define WRC_R_STALE_VALUE 4242
@@ -1588,6 +1593,64 @@ static bool wrc_r_rows_equal(struct wrc_r_rows a, struct wrc_r_rows b)
     return a.folded && b.folded && a.utxos >= 0 && a.txs >= 0 &&
            a.utxos == b.utxos && a.txs == b.txs && a.balance == b.balance &&
            a.utxo_fold == b.utxo_fold && a.tx_fold == b.tx_fold;
+}
+
+/* Upper-case hex of 32 bytes in storage order, as SQLite's hex() prints a
+ * blob. */
+static void wrc_r_hex32(const uint8_t b[32], char out[65])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(out + 2 * i, 3, "%02X", b[i]);
+}
+
+/* Count, unspent value and fold of the rows matching one WHERE clause per
+ * table: the rows a scan must leave alone, compared byte for byte while it
+ * adds or marks others. */
+static struct wrc_r_rows wrc_r_rows_where(struct node_db *ndb,
+                                          const char *utxo_where,
+                                          const char *tx_where)
+{
+    char sql[512];
+    struct wrc_r_rows r = {.utxos = -1, .txs = -1};
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM wallet_utxos WHERE %s",
+             utxo_where);
+    r.utxos = wrc_r_count(ndb, sql);
+    snprintf(sql, sizeof(sql),
+             "SELECT count(*) FROM wallet_transactions WHERE %s", tx_where);
+    r.txs = wrc_r_count(ndb, sql);
+    snprintf(sql, sizeof(sql), "SELECT COALESCE(SUM(value),0) FROM "
+             "wallet_utxos WHERE spent_txid IS NULL AND (%s)", utxo_where);
+    r.balance = wrc_r_count(ndb, sql);
+    snprintf(sql, sizeof(sql),
+             "SELECT * FROM wallet_utxos WHERE %s ORDER BY txid, vout",
+             utxo_where);
+    bool utxos_folded = wrc_r_fold(ndb, sql, &r.utxo_fold);
+    snprintf(sql, sizeof(sql),
+             "SELECT * FROM wallet_transactions WHERE %s ORDER BY txid",
+             tx_where);
+    r.folded = utxos_folded && wrc_r_fold(ndb, sql, &r.tx_fold);
+    return r;
+}
+
+/* Exactly one wallet_transactions row at or above `from`, carrying the
+ * fixture body's hash, and exactly one unspent wallet_utxos row there: what
+ * a scan of the paid key finds in heights that all share one body. */
+static bool wrc_r_found_rows_hashed(const struct wrc_r *r, int from)
+{
+    char hex[65], sql[256];
+    wrc_r_hex32(r->body_hash->data, hex);
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM wallet_transactions "
+             "WHERE block_height >= %d AND hex(block_hash) = '%s'", from, hex);
+    int64_t hashed = wrc_r_count(r->ndb, sql);
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM wallet_transactions "
+             "WHERE block_height >= %d", from);
+    int64_t txs = wrc_r_count(r->ndb, sql);
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM wallet_utxos WHERE "
+             "height >= %d AND spent_txid IS NULL", from);
+    int64_t utxos = wrc_r_count(r->ndb, sql);
+    printf("[hashed=%lld txs=%lld utxos=%lld] ", (long long)hashed,
+           (long long)txs, (long long)utxos);
+    return hashed == 1 && txs == 1 && utxos == 1;
 }
 
 /* Run a wallet RPC; the reply text (or "") lands in out. */
@@ -1824,27 +1887,41 @@ static int wrc_r_delta_keeps_rows(const struct wrc_r *r)
     return failures;
 }
 
-/* R8: a delta that finds a wallet transaction. Its write still ends in the
- * wallet_tx validator's refusal (has_block with a blank block_hash), so the
- * scan fails with the cursor unstamped; no row is deleted before that. */
+/* The rows stored below the delta: the stale pair and the spent height-10
+ * row. */
+#define WRC_R_OLD_UTXOS "height < 150"
+#define WRC_R_OLD_TXS "block_height IS NULL OR block_height < 150"
+
+/* R8: a delta that finds a wallet transaction with no stored row commits
+ * it: the row carries the hash of the block it was read from, every row
+ * stored before is byte-equal, nothing is deleted and the cursor stamps.
+ * (The scan used to save has_block with a blank block_hash, which
+ * db_wallet_tx_validate refuses, so the write rolled back and every boot
+ * repeated the same failing delta.) */
 static int wrc_r_delta_found_keeps_rows(const struct wrc_r *r)
 {
     int failures = 0;
     bool armed = false;
     int deletes = -1;
     bool seeded = wrc_r_reseed(r->ndb);
-    struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
+    struct wrc_r_rows before =
+        wrc_r_rows_where(r->ndb, WRC_R_OLD_UTXOS, WRC_R_OLD_TXS);
     int found = wrc_r_delta_boot_scan(r, r->owner, &armed, &deletes);
+    struct wrc_r_rows after =
+        wrc_r_rows_where(r->ndb, WRC_R_OLD_UTXOS, WRC_R_OLD_TXS);
     printf("[R8 found=%d deletes=%d] ", found, deletes);
-    WRC_CHECK("R8: seed the stale pair and the spent row afresh", seeded);
-    WRC_CHECK("R8: the delta 150..199 for the paid key fails at the write "
-              "and deleted no row first", armed && found == -1 &&
+    WRC_CHECK("R8: seed the stale pair and the spent row afresh",
+              seeded && before.utxos == 2 && before.txs == 1);
+    WRC_CHECK("R8: the delta 150..199 for the paid key commits what it "
+              "found and deletes no row", armed && found > 0 &&
               deletes == 0);
-    WRC_CHECK("R8: every row is byte-equal, the spent mark kept",
-              wrc_r_rows_equal(before, wrc_r_rows_now(r->ndb)) &&
+    WRC_CHECK("R8: the found transaction's row carries the hash of the "
+              "block at its height", wrc_r_found_rows_hashed(r, 150));
+    WRC_CHECK("R8: every row stored before is byte-equal, the spent mark "
+              "kept", wrc_r_rows_equal(before, after) &&
               wrc_r_has_stale(r->ndb) && wrc_r_spent_mark_kept(r->ndb));
-    WRC_CHECK("R8: the cursor is not stamped",
-              wrc_r_cursor_is(r->ndb, 149));
+    WRC_CHECK("R8: the cursor is stamped at the tip",
+              wrc_r_cursor_is(r->ndb, WRC_NBLOCKS - 1));
     return failures;
 }
 
@@ -1977,9 +2054,15 @@ static int wrc_r_delta_commit_keeps_rows(const struct wrc_r *r)
     return failures;
 }
 
-/* R11/R12: the existing-row read fails inside the delta write. SQLite's
- * authorizer denies reads of one wallet table for the scan only, so that
- * read's prepare fails; the scan must refuse and roll back, not save over. */
+/* R11/R12/R14: a read of one wallet table fails during the delta. SQLite's
+ * authorizer denies reads of that table for the scan only, so every read of
+ * it fails to prepare; the scan must refuse, not save over or skip a spend.
+ * Each case pins the end state only (a refusal, every row byte-equal, the
+ * cursor unstamped), not which read refused first: a delta now reads the
+ * stored unspent rows before its walk, so R11 refuses at that read, ahead of
+ * the existing-row read inside the write (R17 covers that read and the
+ * stored coin's recheck). R14 runs a wallet the delta blocks never pay,
+ * whose delta read no wallet table before. */
 static const char *wrc_r_denied_table;
 
 static int wrc_r_deny_table_read(void *arg, int action, const char *a,
@@ -1990,25 +2073,26 @@ static int wrc_r_deny_table_read(void *arg, int action, const char *a,
            strcmp(a, wrc_r_denied_table) == 0 ? SQLITE_DENY : SQLITE_OK;
 }
 
-static int wrc_r_delta_read_fails(const struct wrc_r *r, const char *table,
+static int wrc_r_delta_read_fails(const struct wrc_r *r,
+                                  const struct wallet *w, const char *table,
                                   const char *label)
 {
     int failures = 0;
     char name[200];
     uint8_t txid[32] = {0};
     bool seeded = wrc_r_reseed_found(r, txid) &&
-                  wrc_r_stamp_cursor(r->ndb, r->owner, 149);
+                  wrc_r_stamp_cursor(r->ndb, w, 149);
     struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
     wrc_r_denied_table = table;
     bool denied = sqlite3_set_authorizer(r->ndb->db, wrc_r_deny_table_read,
                                          NULL) == SQLITE_OK;
     int found = boot_cursor_scan_wallet(r->ndb, &r->ms->chain_active,
-                                        r->owner, r->datadir, WRC_NBLOCKS - 1);
+                                        w, r->datadir, WRC_NBLOCKS - 1);
     bool cleared = sqlite3_set_authorizer(r->ndb->db, NULL, NULL) == SQLITE_OK;
     wrc_r_denied_table = NULL;
     printf("[%s found=%d] ", label, found);
-    snprintf(name, sizeof(name), "%s: a failed %s read refuses the delta "
-             "write", label, table);
+    snprintf(name, sizeof(name), "%s: a failed %s read refuses the delta",
+             label, table);
     WRC_CHECK(name, seeded && denied && cleared && found < 0);
     snprintf(name, sizeof(name), "%s: every row is byte-equal, both spent "
              "marks kept", label);
@@ -2017,6 +2101,490 @@ static int wrc_r_delta_read_fails(const struct wrc_r *r, const char *table,
                     wrc_r_found_mark_kept(r->ndb, txid));
     snprintf(name, sizeof(name), "%s: the cursor is not stamped", label);
     WRC_CHECK(name, wrc_r_cursor_is(r->ndb, 149));
+    return failures;
+}
+
+/* R13: a delta block spends a wallet coin stored below the cursor. The
+ * spender block sits alone in blk00001.dat and pays no wallet key, and the
+ * wallet scanned is one the delta blocks never pay, so Pass 1 matches no
+ * file: only the delta's reread of the stored unspent rows can see the spend.
+ * Its tx1 spends the stored coin (input 0) and the height-10 coin a
+ * transaction already spent (input 1), whose mark must not change. */
+#define WRC_R_SPEND_AT 160
+#define WRC_R_SPENDME_VALUE 4545
+#define WRC_R_SPEND_FEE 1000
+#define WRC_R_OTHER_UTXOS "hex(txid) NOT GLOB '5A5A*'"
+#define WRC_R_OTHER_TXS "block_height IS NULL OR block_height <> 160"
+
+static bool wrc_u_write_file(const char *dir, int n, const uint8_t *data,
+                             size_t len);
+static uint8_t *wrc_u_read_file(const char *dir, int n, size_t *len);
+
+static bool wrc_r_seed_spendme(struct node_db *ndb)
+{
+    static const uint8_t script[3] = {0x76, 0xa9, 0x14};
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    memset(u.txid, 0x5a, sizeof(u.txid));
+    memset(u.address_hash, 0x5a, sizeof(u.address_hash));
+    u.vout = 1;
+    u.value = WRC_R_SPENDME_VALUE;
+    u.script = (uint8_t *)script;
+    u.script_len = sizeof(script);
+    u.height = 12;
+    return db_wallet_utxo_save(ndb, &u);
+}
+
+/* What a spender block's tx1 spends (up to two outpoints) and the one
+ * output it pays to nobody. */
+struct wrc_r_spend {
+    uint8_t prev[2][32];
+    uint32_t n[2];
+    size_t nin;
+    int64_t value;
+    uint32_t time;
+};
+
+/* R13's spend: the stored coin (input 0) and the already spent height-10
+ * coin (input 1), to nobody, less WRC_R_SPEND_FEE. */
+static struct wrc_r_spend wrc_r_spendme_spend(void)
+{
+    struct wrc_r_spend sp = {.n = {1, 1}, .nin = 2,
+                             .value = WRC_R_SPENDME_VALUE - WRC_R_SPEND_FEE,
+                             .time = 1700000160u};
+    memset(sp.prev[0], 0x5a, 32);
+    memset(sp.prev[1], 0xdd, 32);
+    return sp;
+}
+
+/* One input spending input i of sp. */
+static void wrc_r_spend_input(struct tx_in *in, const struct wrc_r_spend *sp,
+                              size_t i)
+{
+    memcpy(in->prevout.hash.data, sp->prev[i], 32);
+    in->prevout.n = sp->n[i];
+    script_init(&in->script_sig);
+    in->sequence = 0xffffffffu;
+}
+
+/* A coinbase-shaped tx0 paying nobody, then tx1 spending what sp names to
+ * nobody. */
+static bool wrc_r_build_spender(struct block *blk, const struct wrc_r_spend *sp)
+{
+    blk->header.nVersion = 4;
+    blk->header.nTime = sp->time;
+    blk->header.nBits = 0x2000ffffu;
+    blk->vtx = calloc(2, sizeof(*blk->vtx)); /* raw-alloc-ok:test-fixture */
+    if (!blk->vtx)
+        return false;
+    blk->num_vtx = 2;
+    struct transaction *t0 = &blk->vtx[0], *t1 = &blk->vtx[1];
+    transaction_init(t0);
+    transaction_init(t1);
+    t0->version = t1->version = 1;
+    t0->vin = calloc(1, sizeof(*t0->vin)); /* raw-alloc-ok:test-fixture */
+    t0->vout = calloc(1, sizeof(*t0->vout)); /* raw-alloc-ok:test-fixture */
+    t1->vin = calloc(sp->nin, sizeof(*t1->vin)); /* raw-alloc-ok:test-fixture */
+    t1->vout = calloc(1, sizeof(*t1->vout)); /* raw-alloc-ok:test-fixture */
+    if (!t0->vin || !t0->vout || !t1->vin || !t1->vout)
+        return false;
+    t0->num_vin = t0->num_vout = t1->num_vout = 1;
+    t1->num_vin = sp->nin;
+    outpoint_set_null(&t0->vin[0].prevout);
+    script_init(&t0->vin[0].script_sig);
+    t0->vin[0].sequence = 0xffffffffu;
+    t0->vout[0].value = 1;
+    script_init(&t0->vout[0].script_pub_key);
+    for (size_t i = 0; i < sp->nin; i++)
+        wrc_r_spend_input(&t1->vin[i], sp, i);
+    t1->vout[0].value = sp->value;
+    script_init(&t1->vout[0].script_pub_key);
+    return wrc_set_merkle(blk);
+}
+
+/* Write the spender block in scratch `sdir` (write_block_to_disk numbers its
+ * own files) and copy that file in as the fixture's blk00001.dat. */
+static bool wrc_r_place_spender(const struct wrc_r *r, const char *sdir,
+                                const struct wrc_r_spend *sp,
+                                struct uint256 *hash, uint8_t spender[32],
+                                struct disk_block_pos *pos)
+{
+    char blocksdir[360];
+    unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
+    struct block blk;
+    block_init(&blk);
+    bool ok = wrc_g_make_fixture_dirs(sdir, blocksdir, sizeof(blocksdir)) &&
+              wrc_r_build_spender(&blk, sp) &&
+              write_block_to_disk(&blk, pos, sdir, msg_start) &&
+              pos->nFile == 0;
+    if (ok) {
+        block_get_hash(&blk, hash);
+        memcpy(spender, blk.vtx[1].hash.data, 32);
+    }
+    block_free(&blk);
+    size_t len = 0;
+    uint8_t *buf = ok ? wrc_u_read_file(sdir, 0, &len) : NULL;
+    ok = buf && wrc_u_write_file(r->datadir, 1, buf, len);
+    free(buf);
+    return ok;
+}
+
+/* The stored coin now carries exactly the spender's txid and input 0. */
+static bool wrc_r_spendme_marked(struct node_db *ndb, const uint8_t spender[32])
+{
+    uint8_t txid[32];
+    memset(txid, 0x5a, sizeof(txid));
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    if (!db_wallet_utxo_find(ndb, txid, 1, &u))
+        return false;
+    bool marked = u.is_spent && memcmp(u.spent_txid, spender, 32) == 0 &&
+                  u.spent_vin == 0 && u.value == WRC_R_SPENDME_VALUE &&
+                  u.height == 12;
+    db_wallet_utxo_free(&u);
+    return marked;
+}
+
+/* The spender's own row: the hash of its block at `height`, from_me, the
+ * fee the spent coin's value implies. */
+static bool wrc_r_spender_row(struct node_db *ndb, const uint8_t spender[32],
+                              const struct uint256 *hash, int height)
+{
+    char txid_hex[65], hash_hex[65], sql[400];
+    wrc_r_hex32(spender, txid_hex);
+    wrc_r_hex32(hash->data, hash_hex);
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM wallet_transactions "
+             "WHERE hex(txid) = '%s' AND block_height = %d AND "
+             "hex(block_hash) = '%s' AND from_me = 1 AND fee = %d",
+             txid_hex, height, hash_hex, WRC_R_SPEND_FEE);
+    return wrc_r_count(ndb, sql) == 1;
+}
+
+/* Drop the spender file and the scratch directory. */
+static void wrc_r_remove_spender(const struct wrc_r *r, const char *sdir)
+{
+    char path[400];
+    snprintf(path, sizeof(path), "%s/blocks/blk00001.dat", r->datadir);
+    (void)remove(path);
+#if defined(_WIN32)
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", sdir);
+    (void)remove(path);
+    snprintf(path, sizeof(path), "%s/blocks", sdir);
+    test_cleanup_tmpdir(path);
+    test_cleanup_tmpdir(sdir);
+#else
+    snprintf(path, sizeof(path), "rm -rf %s", sdir);
+    TEST_DISCARD(system(path));
+#endif
+}
+
+/* A spender block placed as blk00001.dat at `height`: the index entry there
+ * points at it until wrc_r_spender_uninstall restores the entry. */
+struct wrc_r_placed {
+    char sdir[300];
+    struct uint256 hash;
+    uint8_t spender[32];
+    int height;
+    struct block_index saved;
+};
+
+static bool wrc_r_spender_install(const struct wrc_r *r,
+                                  struct wrc_r_placed *p, int height,
+                                  const struct wrc_r_spend *sp)
+{
+    memset(p, 0, sizeof(*p));
+    snprintf(p->sdir, sizeof(p->sdir), "%s_s", r->datadir);
+    p->height = height;
+    struct block_index *at = &r->idx[height];
+    p->saved = *at;
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    if (!wrc_r_place_spender(r, p->sdir, sp, &p->hash, p->spender, &pos))
+        return false;
+    at->nFile = 1;
+    at->nDataPos = pos.nPos;
+    at->phashBlock = &p->hash;
+    return true;
+}
+
+static void wrc_r_spender_uninstall(const struct wrc_r *r,
+                                    struct wrc_r_placed *p)
+{
+    r->idx[p->height] = p->saved;
+    wrc_r_remove_spender(r, p->sdir);
+}
+
+static int wrc_r_delta_spends_stored_coin(const struct wrc_r *r)
+{
+    int failures = 0;
+    struct wrc_r_placed p;
+    const struct wrc_r_spend sp = wrc_r_spendme_spend();
+    bool placed = wrc_r_spender_install(r, &p, WRC_R_SPEND_AT, &sp);
+    const uint8_t *spender = p.spender;
+    bool seeded = placed && wrc_r_reseed(r->ndb) &&
+                  wrc_r_seed_spendme(r->ndb);
+    struct wrc_r_rows before =
+        wrc_r_rows_where(r->ndb, WRC_R_OTHER_UTXOS, WRC_R_OTHER_TXS);
+    bool armed = false;
+    int deletes = -1;
+    int found = seeded ? wrc_r_delta_boot_scan(r, r->w, &armed, &deletes)
+                       : -100;
+    struct wrc_r_rows after =
+        wrc_r_rows_where(r->ndb, WRC_R_OTHER_UTXOS, WRC_R_OTHER_TXS);
+    printf("[R13 found=%d deletes=%d] ", found, deletes);
+    WRC_CHECK("R13: the spender block lies alone in blk00001.dat; the coin "
+              "it spends is stored unspent below the cursor", seeded);
+    WRC_CHECK("R13: the delta finds the spend and deletes no row",
+              armed && found == 1 && deletes == 0);
+    WRC_CHECK("R13: the stored coin is marked spent by exactly that "
+              "transaction and input", wrc_r_spendme_marked(r->ndb, spender));
+    WRC_CHECK("R13: the height-10 coin, already spent, keeps its mark",
+              wrc_r_spent_mark_kept(r->ndb));
+    WRC_CHECK("R13: the spender's row carries block 160's hash, from_me and "
+              "the fee from the stored coin's value",
+              wrc_r_spender_row(r->ndb, spender, &p.hash, WRC_R_SPEND_AT));
+    WRC_CHECK("R13: every other row is byte-equal",
+              wrc_r_rows_equal(before, after) && wrc_r_has_stale(r->ndb));
+    WRC_CHECK("R13: the cursor is stamped at the tip",
+              wrc_r_cursor_is(r->ndb, WRC_NBLOCKS - 1));
+    wrc_r_spender_uninstall(r, &p);
+    return failures;
+}
+
+/* R16: a coin found inside the range and spent, with no change, by a block
+ * in a file Pass 1 rules out (blk00001.dat pays no wallet key). The owner's
+ * coin is the coinbase output every fixture body pays; the spender takes the
+ * last height, so no later body pays the same outpoint again. Over empty
+ * tables, both a full scan from 0 (a restored wallet's first boot) and a
+ * delta with no stored unspent row must carry the spend: the walk parses
+ * every height from the first coin on. Before, both skipped blk00001.dat and
+ * committed the coin unspent. */
+#define WRC_R16_AT (WRC_NBLOCKS - 1)
+
+/* The owner's coin: output 0 of the fixture body's coinbase. */
+static bool wrc_r16_spend(const struct wrc_r *r, struct wrc_r_spend *sp,
+                          uint8_t coin[32])
+{
+    const struct block_index *bi = &r->idx[WRC_R_FOUND_AT];
+    struct disk_block_pos pos = {.nFile = bi->nFile, .nPos = bi->nDataPos};
+    struct block blk;
+    block_init(&blk);
+    bool ok = read_block_from_disk(&blk, &pos, r->datadir) &&
+              blk.num_vtx >= 1 && blk.vtx[0].num_vout == 1 &&
+              blk.vtx[0].vout[0].value > WRC_R_SPEND_FEE;
+    if (ok) {
+        memset(sp, 0, sizeof(*sp));
+        memcpy(coin, blk.vtx[0].hash.data, 32);
+        memcpy(sp->prev[0], coin, 32);
+        sp->n[0] = 0;
+        sp->nin = 1;
+        sp->value = blk.vtx[0].vout[0].value - WRC_R_SPEND_FEE;
+        sp->time = 1700000199u;
+    }
+    block_free(&blk);
+    return ok;
+}
+
+/* The coin's one row carries exactly the spender's txid and input 0. */
+static bool wrc_r16_coin_marked(struct node_db *ndb, const uint8_t coin[32],
+                                const uint8_t spender[32])
+{
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    if (!db_wallet_utxo_find(ndb, coin, 0, &u))
+        return false;
+    bool marked = u.is_spent && memcmp(u.spent_txid, spender, 32) == 0 &&
+                  u.spent_vin == 0;
+    printf("[spent=%d] ", u.is_spent ? 1 : 0);
+    db_wallet_utxo_free(&u);
+    return marked && wrc_r_count(ndb, "SELECT count(*) FROM wallet_utxos "
+                                      "WHERE spent_txid IS NULL") == 0;
+}
+
+static bool wrc_r16_clear(struct node_db *ndb)
+{
+    return db_wallet_utxo_delete_all(ndb) && db_wallet_tx_delete_all(ndb);
+}
+
+static int wrc_r16_full(const struct wrc_r *r, const uint8_t coin[32],
+                        const struct wrc_r_placed *p)
+{
+    int failures = 0;
+    bool cleared = wrc_r16_clear(r->ndb);
+    int found = wallet_scan_blocks_checked(r->ndb, &r->ms->chain_active,
+                                           r->owner, r->datadir, 0,
+                                           WRC_NBLOCKS - 1, NULL);
+    printf("[R16 full found=%d] ", found);
+    WRC_CHECK("R16: a full scan from 0 over empty tables commits",
+              cleared && found > 0);
+    WRC_CHECK("R16: the full scan marks the coin spent by the change-less "
+              "spend in blk00001.dat", wrc_r16_coin_marked(r->ndb, coin,
+                                                           p->spender));
+    WRC_CHECK("R16: the full scan stores the spender's row with its block "
+              "hash", wrc_r_spender_row(r->ndb, p->spender, &p->hash,
+                                        WRC_R16_AT));
+    return failures;
+}
+
+static int wrc_r16_delta(const struct wrc_r *r, const uint8_t coin[32],
+                         const struct wrc_r_placed *p)
+{
+    int failures = 0;
+    bool armed = false;
+    int deletes = -1;
+    bool cleared = wrc_r16_clear(r->ndb);
+    int found = cleared ? wrc_r_delta_boot_scan(r, r->owner, &armed, &deletes)
+                        : -100;
+    printf("[R16 delta found=%d deletes=%d] ", found, deletes);
+    WRC_CHECK("R16: a delta 150..199 with no stored unspent row commits and "
+              "deletes no row", armed && found > 0 && deletes == 0);
+    WRC_CHECK("R16: the delta marks the coin spent by the change-less spend "
+              "in blk00001.dat", wrc_r16_coin_marked(r->ndb, coin,
+                                                     p->spender));
+    WRC_CHECK("R16: the delta stores the spender's row with its block hash",
+              wrc_r_spender_row(r->ndb, p->spender, &p->hash, WRC_R16_AT));
+    WRC_CHECK("R16: the cursor is stamped at the tip",
+              wrc_r_cursor_is(r->ndb, WRC_NBLOCKS - 1));
+    return failures;
+}
+
+static int wrc_r_found_spent_in_unmatched_file(const struct wrc_r *r)
+{
+    int failures = 0;
+    struct wrc_r_spend sp;
+    struct wrc_r_placed p;
+    uint8_t coin[32] = {0};
+    bool spend = wrc_r16_spend(r, &sp, coin);
+    bool placed = spend && wrc_r_spender_install(r, &p, WRC_R16_AT, &sp);
+    WRC_CHECK("R16: the change-less spender lies alone in blk00001.dat at "
+              "the last height", placed);
+    if (placed) {
+        failures += wrc_r16_full(r, coin, &p);
+        failures += wrc_r16_delta(r, coin, &p);
+    }
+    if (spend)
+        wrc_r_spender_uninstall(r, &p);
+    WRC_CHECK("R16: clear the rows it wrote", wrc_r16_clear(r->ndb));
+    return failures;
+}
+
+/* R17: the stored unspent rows read before the walk succeeds, and a
+ * wallet_utxos read inside the scan's write transaction fails. The
+ * authorizer (given the connection) denies wallet_utxos reads only while a
+ * transaction is open, so the pre-walk read, made outside one, passes and
+ * the existing-row read of the write (R17a) or the stored coin's recheck
+ * before its spend mark (R17b) fails. Either refuses: every row byte-equal,
+ * the cursor unstamped. */
+static int wrc_r17_reads_outside, wrc_r17_reads_denied;
+
+static int wrc_r17_deny_utxo_read_in_tx(void *arg, int action, const char *a,
+                                        const char *b, const char *c,
+                                        const char *d)
+{
+    (void)b; (void)c; (void)d;
+    if (action != SQLITE_READ || !a || strcmp(a, "wallet_utxos") != 0)
+        return SQLITE_OK;
+    if (sqlite3_get_autocommit((sqlite3 *)arg)) {
+        wrc_r17_reads_outside++;
+        return SQLITE_OK;
+    }
+    wrc_r17_reads_denied++;
+    return SQLITE_DENY;
+}
+
+static int wrc_r17_run(const struct wrc_r *r, const struct wallet *w,
+                       bool seeded, const char *label)
+{
+    int failures = 0;
+    char name[200];
+    seeded = seeded && wrc_r_stamp_cursor(r->ndb, w, 149);
+    struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
+    wrc_r17_reads_outside = wrc_r17_reads_denied = 0;
+    bool denied = sqlite3_set_authorizer(r->ndb->db,
+                                         wrc_r17_deny_utxo_read_in_tx,
+                                         r->ndb->db) == SQLITE_OK;
+    int found = seeded ? boot_cursor_scan_wallet(r->ndb, &r->ms->chain_active,
+                                                 w, r->datadir,
+                                                 WRC_NBLOCKS - 1)
+                       : -100;
+    bool cleared = sqlite3_set_authorizer(r->ndb->db, NULL, NULL) == SQLITE_OK;
+    printf("[%s found=%d read_before=%d denied_in_write=%d] ", label, found,
+           wrc_r17_reads_outside, wrc_r17_reads_denied);
+    snprintf(name, sizeof(name), "%s: the pre-walk read passes and a "
+             "wallet_utxos read inside the write fails", label);
+    WRC_CHECK(name, seeded && denied && cleared && wrc_r17_reads_outside > 0 &&
+                    wrc_r17_reads_denied > 0);
+    snprintf(name, sizeof(name), "%s: the delta refuses", label);
+    WRC_CHECK(name, found < 0 && found != -100);
+    snprintf(name, sizeof(name), "%s: every row is byte-equal", label);
+    WRC_CHECK(name, wrc_r_rows_equal(before, wrc_r_rows_now(r->ndb)));
+    snprintf(name, sizeof(name), "%s: the cursor is not stamped", label);
+    WRC_CHECK(name, wrc_r_cursor_is(r->ndb, 149));
+    return failures;
+}
+
+static int wrc_r_delta_write_read_fails(const struct wrc_r *r)
+{
+    int failures = 0;
+    uint8_t txid[32] = {0};
+    failures += wrc_r17_run(r, r->owner, wrc_r_reseed_found(r, txid),
+                            "R17a existing-row read");
+    struct wrc_r_placed p;
+    const struct wrc_r_spend sp = wrc_r_spendme_spend();
+    bool seeded = wrc_r_spender_install(r, &p, WRC_R_SPEND_AT, &sp) &&
+                  wrc_r_reseed(r->ndb) && wrc_r_seed_spendme(r->ndb);
+    failures += wrc_r17_run(r, r->w, seeded, "R17b stored-coin recheck");
+    WRC_CHECK("R17b: the stored coin is still unspent",
+              wrc_r_count(r->ndb, "SELECT count(*) FROM wallet_utxos WHERE "
+                                  "hex(txid) GLOB '5A5A*' AND spent_txid IS "
+                                  "NULL") == 1);
+    wrc_r_spender_uninstall(r, &p);
+    return failures;
+}
+
+/* R15: a full scan from height 0 that finds a wallet transaction. Over
+ * empty tables it commits rows carrying the block hash (the repair a
+ * rescanwallet used to be unable to make), and a second scan rediscovers
+ * exactly those rows. With a stored row the scan cannot rediscover (rows a
+ * block scan cannot derive exist: shielded-only, unconfirmed, watch-only),
+ * the full replace refuses before it deletes anything. */
+static int wrc_r_full_found(const struct wrc_r *r)
+{
+    int failures = 0;
+    const struct active_chain *chain = &r->ms->chain_active;
+    wrc_set_have_data(r->idx, WRC_NBLOCKS, true);
+    bool cleared = db_wallet_utxo_delete_all(r->ndb) &&
+                   db_wallet_tx_delete_all(r->ndb);
+    int found = wallet_scan_blocks_checked(r->ndb, chain, r->owner,
+                                           r->datadir, 0, WRC_NBLOCKS - 1,
+                                           NULL);
+    struct wrc_r_rows first = wrc_r_rows_now(r->ndb);
+    printf("[R15 found=%d] ", found);
+    WRC_CHECK("R15: a full scan from 0 over empty tables commits what it "
+              "found", cleared && found > 0);
+    WRC_CHECK("R15: its rows carry the hash of the block they were read "
+              "from", wrc_r_found_rows_hashed(r, 0));
+    int again = wallet_scan_blocks_checked(r->ndb, chain, r->owner,
+                                           r->datadir, 0, WRC_NBLOCKS - 1,
+                                           NULL);
+    WRC_CHECK("R15: a second full scan rediscovers and rewrites the same "
+              "rows", again == found &&
+              wrc_r_rows_equal(first, wrc_r_rows_now(r->ndb)));
+    bool armed = wrc_r_seed_stale(r->ndb) && wrc_r_has_stale(r->ndb);
+    struct wrc_r_rows before = wrc_r_rows_now(r->ndb);
+    armed = armed && wrc_r_watch_deletes(r->ndb, true);
+    int refused = wallet_scan_blocks_checked(r->ndb, chain, r->owner,
+                                             r->datadir, 0, WRC_NBLOCKS - 1,
+                                             NULL);
+    int deletes = wrc_r_deletes;
+    armed = wrc_r_watch_deletes(r->ndb, false) && armed;
+    printf("[R15 refused=%d deletes=%d] ", refused, deletes);
+    WRC_CHECK("R15: with a stored row no block holds, the full replace "
+              "refuses before any delete", armed && refused < 0 &&
+              deletes == 0);
+    WRC_CHECK("R15: and every row is byte-equal",
+              wrc_r_rows_equal(before, wrc_r_rows_now(r->ndb)) &&
+              wrc_r_has_stale(r->ndb));
     return failures;
 }
 
@@ -2085,8 +2653,15 @@ static int wrc_r_coverage_guard(const struct wrc_r *r)
         failures += wrc_r_delta_found_keeps_rows(r);
         failures += wrc_r_empty_delta_range(r);
         failures += wrc_r_delta_commit_keeps_rows(r);
-        failures += wrc_r_delta_read_fails(r, "wallet_utxos", "R11");
-        failures += wrc_r_delta_read_fails(r, "wallet_transactions", "R12");
+        failures += wrc_r_delta_read_fails(r, r->owner, "wallet_utxos",
+                                           "R11");
+        failures += wrc_r_delta_read_fails(r, r->owner,
+                                           "wallet_transactions", "R12");
+        failures += wrc_r_delta_spends_stored_coin(r);
+        failures += wrc_r_delta_read_fails(r, r->w, "wallet_utxos", "R14");
+        failures += wrc_r_full_found(r);
+        failures += wrc_r_found_spent_in_unmatched_file(r);
+        failures += wrc_r_delta_write_read_fails(r);
     }
     wrc_set_have_data(r->idx, WRC_NBLOCKS, true);
     WRC_CHECK("R: clear the rows this section wrote",
@@ -2160,9 +2735,23 @@ static uint8_t *wrc_u_read_file(const char *dir, int n, size_t *len)
     return buf;
 }
 
-/* Write A and B, then the cut, corrupted and junk copies. */
+/* The hash of the block stored at `pos` under `dir`, read back from disk. */
+static bool wrc_u_body_hash(const char *dir, const struct disk_block_pos *pos,
+                            struct uint256 *hash)
+{
+    struct block blk;
+    block_init(&blk);
+    bool ok = read_block_from_disk(&blk, pos, dir);
+    if (ok)
+        block_get_hash(&blk, hash);
+    block_free(&blk);
+    return ok;
+}
+
+/* Write A and B, then the cut, corrupted and junk copies. `hash_b` is B's
+ * hash, the hash an index entry for B names. */
 static bool wrc_u_write_files(const char *dir, const struct key_id *kid,
-                              unsigned *pos_b)
+                              unsigned *pos_b, struct uint256 *hash_b)
 {
     struct script pay_to_us, pay_to_nobody;
     script_init(&pay_to_us);
@@ -2173,7 +2762,8 @@ static bool wrc_u_write_files(const char *dir, const struct key_id *kid,
     disk_block_pos_init(&b);
     if (!wrc_g_write_body(&pay_to_us, &a, dir) ||
         !wrc_g_write_body(&pay_to_nobody, &b, dir) ||
-        a.nFile != 0 || b.nFile != 0 || b.nPos <= a.nPos)
+        a.nFile != 0 || b.nFile != 0 || b.nPos <= a.nPos ||
+        !wrc_u_body_hash(dir, &b, hash_b))
         return false;
     *pos_b = b.nPos;
     size_t len = 0;
@@ -2269,6 +2859,15 @@ static int wrc_u_cases(const struct wrc_u *h, unsigned pos_b)
     WRC_CHECK("U: a block in a file Pass 1 read and ruled out is skipped "
               "unparsed, the rows are replaced",
               skip.rc == 0 && skip.replaced);
+    /* The bytes at the entry's position parse, but as a block other than the
+     * one the entry names: no row may carry either hash. */
+    const struct uint256 *named = h->tip->phashBlock;
+    struct uint256 other;
+    memset(&other, 0x42, sizeof(other));
+    h->tip->phashBlock = &other;
+    failures += wrc_u_hole(h, "block does not hash to its index entry", 0,
+                           pos_b);
+    h->tip->phashBlock = named;
     failures += wrc_u_hole(h, "block file absent", 4, pos_b);
     failures += wrc_u_hole(h, "block file cut before the block", 1, pos_b);
     failures += wrc_u_hole(h, "block does not parse", 2, pos_b);
@@ -2315,8 +2914,10 @@ static int wrc_u_unreadable_holes(const struct wallet *w,
     char hdir[300], blocksdir[360];
     snprintf(hdir, sizeof(hdir), "%s_h", basedir);
     unsigned pos_b = 0;
+    struct uint256 hash_b;
+    memset(&hash_b, 0, sizeof(hash_b));
     bool made = wrc_g_make_fixture_dirs(hdir, blocksdir, sizeof(blocksdir)) &&
-                wrc_u_write_files(hdir, kid, &pos_b) &&
+                wrc_u_write_files(hdir, kid, &pos_b, &hash_b) &&
                 chmod(hdir, 0700) == 0 && SetDataDir(hdir);
     WRC_CHECK("U: fixture block files written and pinned", made);
     struct active_chain chain;
@@ -2325,6 +2926,7 @@ static int wrc_u_unreadable_holes(const struct wallet *w,
     block_index_init(&tip);
     tip.nHeight = 0;
     tip.nStatus = BLOCK_HAVE_DATA;
+    tip.phashBlock = &hash_b;
     if (made && active_chain_install_tip_slot(&chain, &tip)) {
         struct wrc_u h = {.w = w, .chain = &chain, .tip = &tip, .dir = hdir};
         failures += wrc_u_cases(&h, pos_b);
@@ -2386,7 +2988,9 @@ int test_wallet_rescan_coverage(void)
 
     struct disk_block_pos pos;
     disk_block_pos_init(&pos);
-    bool wrote = wrc_write_shared_body(datadir, &pay_to_us, &pos);
+    struct uint256 body_hash;
+    memset(&body_hash, 0, sizeof(body_hash));
+    bool wrote = wrc_write_shared_body(datadir, &pay_to_us, &pos, &body_hash);
     WRC_CHECK("write a block (1 transparent + 1 shielded tx) to disk", wrote);
 
     /* ── 200 index entries, every one pointing at that same on-disk block.
@@ -2402,7 +3006,7 @@ int test_wallet_rescan_coverage(void)
         node_db_close(&ndb);
         return failures + 1;
     }
-    wrc_fill_chain(idx, chain, &pos, WRC_NBLOCKS);
+    wrc_fill_chain(idx, chain, &pos, &body_hash, WRC_NBLOCKS);
 
     struct main_state ms;
     main_state_init(&ms);
@@ -2551,7 +3155,7 @@ int test_wallet_rescan_coverage(void)
                   wallet_generate_new_key(w2, &pk2));
         const struct wrc_r r = {
             .ndb = &ndb, .tbl = &wtbl, .w = w2, .owner = w1, .ms = &ms,
-            .datadir = datadir, .idx = idx,
+            .datadir = datadir, .idx = idx, .body_hash = &body_hash,
         };
         failures += wrc_r_coverage_guard(&r);
     }

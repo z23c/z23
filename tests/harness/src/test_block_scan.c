@@ -23,6 +23,9 @@
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
 #include "wallet/wallet.h"
+#include "keys/pubkey.h"
+#include "script/standard.h"
+#include "storage/disk_block_io.h"
 #ifdef ZCL_TESTING
 #include "platform/read_mapping_testing.h"
 #endif
@@ -795,6 +798,253 @@ static int test_legacy_import_shutdown_abort(void)
     return 1;
 }
 
+/* One legacy block file holding one block whose coinbase (BIP34 height 7)
+ * pays `pay`; *hash is that block's hash and `coin` (when not NULL) its
+ * coinbase txid. */
+static bool test_legacy_import_found_write(const char *dir,
+                                           const struct script *pay,
+                                           struct uint256 *hash,
+                                           uint8_t coin[32])
+{
+    char blocks[320];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    if (mkdir(blocks, 0755) != 0)
+        return false;
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000007u;
+    blk.header.nBits = 0x2000ffffu;
+    blk.vtx = calloc(1, sizeof(*blk.vtx)); /* raw-alloc-ok:test-fixture */
+    bool ok = blk.vtx != NULL;
+    if (ok) {
+        blk.num_vtx = 1;
+        struct transaction *t0 = &blk.vtx[0];
+        transaction_init(t0);
+        t0->version = 1;
+        t0->vin = calloc(1, sizeof(*t0->vin)); /* raw-alloc-ok:test-fixture */
+        t0->vout = calloc(1, sizeof(*t0->vout)); /* raw-alloc-ok:test-fixture */
+        ok = t0->vin && t0->vout;
+        if (ok) {
+            t0->num_vin = t0->num_vout = 1;
+            outpoint_set_null(&t0->vin[0].prevout);
+            script_init(&t0->vin[0].script_sig);
+            t0->vin[0].script_sig.data[0] = 0x01; /* push 1 byte: height */
+            t0->vin[0].script_sig.data[1] = 0x07;
+            t0->vin[0].script_sig.size = 2;
+            t0->vin[0].sequence = 0xffffffffu;
+            t0->vout[0].value = 5000;
+            t0->vout[0].script_pub_key = *pay;
+        }
+    }
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
+    ok = ok && write_block_to_disk(&blk, &pos, dir, msg_start);
+    if (ok)
+        block_get_hash(&blk, hash);
+    if (ok && coin) {
+        transaction_compute_hash(&blk.vtx[0]);
+        memcpy(coin, blk.vtx[0].hash.data, 32);
+    }
+    block_free(&blk);
+    return ok;
+}
+
+/* The one wallet_transactions row carries the block's hash and height. */
+static bool test_legacy_import_found_row(struct node_db *ndb,
+                                         const struct uint256 *hash)
+{
+    struct db_wallet_tx tx;
+    memset(&tx, 0, sizeof(tx));
+    int listed = db_wallet_tx_list(ndb, &tx, 1, 0);
+    bool ok = listed == 1 && db_wallet_tx_count(ndb) == 1 && tx.has_block &&
+              tx.block_height == 7 &&
+              memcmp(tx.block_hash, hash->data, 32) == 0;
+    if (listed == 1)
+        db_wallet_tx_free(&tx);
+    return ok;
+}
+
+/* A fresh wallet key and the legacy block file paying it. */
+static bool test_legacy_import_found_fixture(const char *dir,
+                                             struct wallet *wallet,
+                                             struct uint256 *hash,
+                                             uint8_t coin[32])
+{
+    struct pubkey pk;
+    memset(&pk, 0, sizeof(pk));
+    if (!wallet || !wallet_generate_new_key(wallet, &pk))
+        return false;
+    struct key_id kid = pubkey_get_id(&pk);
+    struct script pay;
+    script_init(&pay);
+    script_for_p2pkh(&pay, &kid);
+    return test_legacy_import_found_write(dir, &pay, hash, coin);
+}
+
+/* Rows the import did not derive are present: the found replace would
+ * delete them, so it refuses and keeps every row byte-equal. */
+static bool test_legacy_import_found_refused(const char *dir,
+                                             struct node_db *ndb,
+                                             struct wallet *wallet)
+{
+    uint64_t before = 0, after = 0;
+    bool seeded = seed_wallet_projection(ndb) &&
+                  wrc_wallet_rows_digest(ndb, &before);
+    int refused = seeded ? legacy_import_service_run(dir, ndb, wallet, false)
+                         : -2;
+    bool kept = seeded && wrc_wallet_rows_digest(ndb, &after) &&
+                before == after && db_wallet_tx_count(ndb) == 2 &&
+                db_sapling_note_balance_for_address(ndb,
+                                                    "zs1scanrollback") == 5678 &&
+                node_db_has_no_open_transaction(ndb);
+    printf("[refused=%d kept=%d] ", refused, kept);
+    return refused == -1 && kept;
+}
+
+static int test_legacy_import_found_block_hash(void)
+{
+    printf("GIVEN a legacy block paying the wallet WHEN legacy import saves "
+           "it THEN its row carries the block hash, and stored rows refuse "
+           "a found replace... ");
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "block_scan", "legacy_found");
+    struct wallet *wallet = test_legacy_import_clear_new_wallet();
+    struct uint256 hash;
+    memset(&hash, 0, sizeof(hash));
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ok = test_legacy_import_found_fixture(dir, wallet, &hash, NULL) &&
+              node_db_open(&ndb, ":memory:");
+    int imported = ok ? legacy_import_service_run(dir, &ndb, wallet, false)
+                      : -2;
+    bool hashed = ok && test_legacy_import_found_row(&ndb, &hash);
+    printf("[imported=%d hashed=%d] ", imported, hashed);
+    ok = ok && imported == 1 && hashed &&
+         test_legacy_import_found_refused(dir, &ndb, wallet);
+
+    test_legacy_import_clear_free_wallet(wallet);
+    if (ndb.open) node_db_close(&ndb);
+    (void)test_rm_rf_recursive(dir);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* A block (BIP34 height 8) whose tx1 spends output 0 of `coin` with no
+ * change; it pays no wallet key. */
+static bool test_legacy_import_spender_build(struct block *blk,
+                                             const uint8_t coin[32])
+{
+    blk->header.nVersion = 4;
+    blk->header.nTime = 1700000008u;
+    blk->header.nBits = 0x2000ffffu;
+    blk->vtx = calloc(2, sizeof(*blk->vtx)); /* raw-alloc-ok:test-fixture */
+    if (!blk->vtx)
+        return false;
+    blk->num_vtx = 2;
+    struct transaction *t0 = &blk->vtx[0], *t1 = &blk->vtx[1];
+    transaction_init(t0);
+    transaction_init(t1);
+    t0->version = t1->version = 1;
+    t0->vin = calloc(1, sizeof(*t0->vin)); /* raw-alloc-ok:test-fixture */
+    t0->vout = calloc(1, sizeof(*t0->vout)); /* raw-alloc-ok:test-fixture */
+    t1->vin = calloc(1, sizeof(*t1->vin)); /* raw-alloc-ok:test-fixture */
+    t1->vout = calloc(1, sizeof(*t1->vout)); /* raw-alloc-ok:test-fixture */
+    if (!t0->vin || !t0->vout || !t1->vin || !t1->vout)
+        return false;
+    t0->num_vin = t0->num_vout = t1->num_vin = t1->num_vout = 1;
+    outpoint_set_null(&t0->vin[0].prevout);
+    script_init(&t0->vin[0].script_sig);
+    t0->vin[0].script_sig.data[0] = 0x01; /* push 1 byte: height */
+    t0->vin[0].script_sig.data[1] = 0x08;
+    t0->vin[0].script_sig.size = 2;
+    t0->vin[0].sequence = 0xffffffffu;
+    t0->vout[0].value = 1;
+    script_init(&t0->vout[0].script_pub_key);
+    memcpy(t1->vin[0].prevout.hash.data, coin, 32);
+    t1->vin[0].prevout.n = 0;
+    script_init(&t1->vin[0].script_sig);
+    t1->vin[0].sequence = 0xffffffffu;
+    t1->vout[0].value = 4000;
+    script_init(&t1->vout[0].script_pub_key);
+    transaction_compute_hash(t0);
+    transaction_compute_hash(t1);
+    return true;
+}
+
+/* Write the spender in scratch `sdir` (write_block_to_disk numbers its own
+ * files) and move it in as dir's blk00001.dat. */
+static bool test_legacy_import_spender_place(const char *dir, const char *sdir,
+                                             const uint8_t coin[32],
+                                             uint8_t spender[32])
+{
+    char blocks[320], from[384], to[384];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", sdir);
+    snprintf(from, sizeof(from), "%s/blocks/blk00000.dat", sdir);
+    snprintf(to, sizeof(to), "%s/blocks/blk00001.dat", dir);
+    struct block blk;
+    block_init(&blk);
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    unsigned char msg_start[4] = { 0x24, 0xe9, 0x27, 0x64 };
+    bool ok = mkdir(blocks, 0755) == 0 &&
+              test_legacy_import_spender_build(&blk, coin) &&
+              write_block_to_disk(&blk, &pos, sdir, msg_start) &&
+              pos.nFile == 0;
+    if (ok)
+        memcpy(spender, blk.vtx[1].hash.data, 32);
+    block_free(&blk);
+    return ok && rename(from, to) == 0;
+}
+
+/* The coin's one row carries the spend mark of exactly that spender. */
+static bool test_legacy_import_coin_spent(struct node_db *ndb,
+                                          const uint8_t coin[32],
+                                          const uint8_t spender[32])
+{
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    if (!db_wallet_utxo_find(ndb, coin, 0, &u))
+        return false;
+    bool spent = u.is_spent && memcmp(u.spent_txid, spender, 32) == 0 &&
+                 u.spent_vin == 0 && u.height == 7;
+    printf("[spent=%d] ", u.is_spent ? 1 : 0);
+    db_wallet_utxo_free(&u);
+    return spent && db_wallet_utxo_balance(ndb) == 0;
+}
+
+static int test_legacy_import_spent_in_unmatched_file(void)
+{
+    printf("GIVEN a legacy coin in blk00000 spent with no change in blk00001 "
+           "WHEN legacy import runs THEN the coin's row carries the spend... ");
+    char dir[256], sdir[256];
+    test_make_tmpdir(dir, sizeof(dir), "block_scan", "legacy_spent");
+    test_make_tmpdir(sdir, sizeof(sdir), "block_scan", "legacy_spent_s");
+    struct wallet *wallet = test_legacy_import_clear_new_wallet();
+    struct uint256 hash;
+    uint8_t coin[32] = {0}, spender[32] = {0};
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ok = test_legacy_import_found_fixture(dir, wallet, &hash, coin) &&
+              test_legacy_import_spender_place(dir, sdir, coin, spender) &&
+              node_db_open(&ndb, ":memory:");
+    int imported = ok ? legacy_import_service_run(dir, &ndb, wallet, false)
+                      : -2;
+    printf("[imported=%d] ", imported);
+    ok = ok && imported == 2 &&
+         test_legacy_import_coin_spent(&ndb, coin, spender);
+
+    test_legacy_import_clear_free_wallet(wallet);
+    if (ndb.open) node_db_close(&ndb);
+    (void)test_rm_rf_recursive(dir);
+    (void)test_rm_rf_recursive(sdir);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+
 /* ── Main ────────────────────────────────────────────────────── */
 
 /* ── boot wallet-scan cursor decision (O(delta) boot) ────────── */
@@ -1000,6 +1250,8 @@ int test_block_scan(void)
     failures += test_wallet_scan_empty_replacement();
     failures += test_legacy_import_clear_rollback();
     failures += test_legacy_import_shutdown_abort();
+    failures += test_legacy_import_found_block_hash();
+    failures += test_legacy_import_spent_in_unmatched_file();
 
     printf("block_scan: %d failure(s)\n\n", failures);
     return failures;
