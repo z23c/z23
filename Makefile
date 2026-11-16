@@ -14892,12 +14892,13 @@ $(LAB_PEER_BIN): $(LAB_PEER_SRCS) $(SPAWN_BINARY_HEADERS)
 # number). Opt-in like commons-demo: two real regtest daemons with real Tor
 # circuits, the public apps board over P2P and the package swarm over Tor.
 APP_JOURNEY_LIVE_BIN = $(BIN_DIR)/app_journey_live
+APP_JOURNEY_LIVE_ARGS ?=
 APP_JOURNEY_LIVE_SRCS = tools/app_journey_live.c platform/modules/json/src/json.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c platform/modules/platform/src/supervised_process.c platform/modules/sha3/src/sha3.c platform/modules/util/src/write_all.c
 APP_JOURNEY_LIVE_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/sha3/include -Iplatform/modules/util/include
 APP_JOURNEY_LIVE_HEADERS = platform/modules/platform/include/platform/supervised_process.h platform/modules/base/include/base/hex.h
 .PHONY: app-journey-live app-journey-selftest
 app-journey-live: zclassic23 $(APP_JOURNEY_LIVE_BIN) app-journey-selftest
-	$(APP_JOURNEY_LIVE_BIN)
+	$(APP_JOURNEY_LIVE_BIN) $(APP_JOURNEY_LIVE_ARGS)
 app-journey-selftest: $(BIN_DIR)/app_journey_live_selftest
 	$(BIN_DIR)/app_journey_live_selftest
 $(BIN_DIR)/app_journey_live_selftest: tools/app_journey_live_selftest.c $(APP_JOURNEY_LIVE_SRCS) $(APP_JOURNEY_LIVE_HEADERS)
