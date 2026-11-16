@@ -32,11 +32,14 @@ A fresh remote clone exposed an ordering gap in parallel
 `lint-fast-preflight`: its direct gate dispatcher reached vendor provenance
 without depending on Tor provenance preparation; the full Tor archive was
 absent when the gate ran. The parallel target
-now depends on `tor-provenance-ready`, matching the existing full and landing
-lint paths. The vendor provenance gate remains required. Serial mode already
+now depends on `tor-provenance-ready` when the selected gates include vendor
+or Tor provenance, preserving unrelated-gate behavior. The vendor provenance gate remains required. Serial mode already
 reaches that prerequisite through the gate target. A pre-submission fresh-clone preflight on source
 `b443277a61ffb19d911abae3ca6408a1246de757` passed 60 selected gates, including vendor
 provenance, and the 153-gate differential precheck. During early preparation,
 the full Tor archive was absent. The result establishes
-this run, not the identity of any other archive creator.
+this run, not the identity of any other archive creator. The first native
+proof failed in the preflight graph and no-Tor fixture cases after the initial
+unconditional dependency. The selected-gate correction and aligned fixtures
+are pending focused verification.
 <!-- claim: symbol-present tor-provenance-ready Makefile # Tor preparation precedes lint provenance dispatch -->

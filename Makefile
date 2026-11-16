@@ -7541,7 +7541,7 @@ lint-fast-preflight: $(LINT_FAST_PREFLIGHT_GATES) $(LINTC_TOOL) $(REPRO_NETWORK_
 	@$(LINT_FAST_PRECHECK_RUN)
 	@echo "lint-fast-preflight: OK (serial)"
 else
-lint-fast-preflight: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
+lint-fast-preflight: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(if $(filter check-vendor-provenance check-tor-provenance,$(LINT_FAST_PREFLIGHT_GATES)),tor-provenance-ready,) $(TOR_PROVENANCE_BIN) \
         $(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \
         $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN) \
         $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)

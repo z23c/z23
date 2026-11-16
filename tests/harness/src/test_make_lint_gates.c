@@ -1818,7 +1818,8 @@ static int t_lint_fast_tor_graph(void)
         "chmod +x stub-lint\n"
         "printf '%s\\n' '.PHONY: fixture-a fixture-b fixture-c' 'fixture-a fixture-b fixture-c:' '\t@printf \"%s\\\\n\" \"$@\" >> \"$(HOME)/serial-calls\"; test \"$(FAIL_GATE)\" != 1' >> overlay.mk\n"
         "union_make() { fixture_make -o lint-preflight-epoch-verify -o check-native-tunnel-export-binding Z23_DEV_BIN=/dev/null DEV_PACKAGE_VERIFY_BIN=/dev/null CAPABILITY_STANDALONE_OBJS= 'LINT_FAST_GATES=fixture-a fixture-b' 'LINT_PREFLIGHT_GATES=fixture-b fixture-c' 'LINT_FAST_PRECHECK_NATIVE=fixture-a fixture-b fixture-c' \"$@\"; }\n"
-        "rm -f \"$HOME/calls\"; union_make lint-fast-preflight > union.log 2>&1 || { cat union.log >&2; exit 1; }\n"
+        "rm -f \"$HOME/calls\" \"$HOME/tor\"; union_make lint-fast-preflight > union.log 2>&1 || { cat union.log >&2; exit 1; }\n"
+        "[ ! -e \"$HOME/tor\" ]\n"
         "printf 'run\\nprecheck\\n' > expected-calls; cmp expected-calls \"$HOME/calls\"\n"
         "printf 'fixture-a\\nfixture-b\\nfixture-c\\n' > expected-union; tail -n +6 \"$HOME/run-args\" > actual-union; cmp expected-union actual-union\n"
         "grep -Fx -- '--skip=fixture-a,fixture-b,fixture-c' \"$HOME/precheck-args\" >/dev/null\n"
@@ -1829,7 +1830,12 @@ static int t_lint_fast_tor_graph(void)
         "rm -f \"$HOME/calls\" \"$HOME/serial-calls\"; union_make -j1 lint-fast-preflight ZCL_LINT_SERIAL=1 > union-serial.log 2>&1\n"
         "cmp expected-union \"$HOME/serial-calls\"; [ \"$(grep -c '^precheck$' \"$HOME/calls\")\" = 1 ]\n"
         "rm -f \"$HOME/calls\"; if union_make -j1 lint-fast-preflight ZCL_LINT_SERIAL=1 FAIL_GATE=1 > union-serial-fail.log 2>&1; then exit 1; fi\n"
-        "[ ! -e \"$HOME/calls\" ]\n";
+        "[ ! -e \"$HOME/calls\" ]\n"
+        "for gate in check-vendor-provenance check-tor-provenance; do\n"
+        "  rm -f \"$HOME/tor\" \"$HOME/calls\"\n"
+        "  if union_make lint-fast-preflight \"LINT_FAST_GATES=$gate\" > union-tor.log 2>&1; then echo 'missing Tor refusal' >&2; exit 1; fi\n"
+        "  [ \"$(cat \"$HOME/tor\")\" = called ] && [ ! -e \"$HOME/calls\" ]\n"
+        "done\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "tor_graph");
     char combined[sizeof(script) + sizeof(checks) + sizeof(epoch_checks) + sizeof(union_checks)];

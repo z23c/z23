@@ -13553,7 +13553,7 @@ static int test_epoch_owner_is_nearest_make(void)
 struct epn_preflight_scan { int pre, standalone, begin, end, combined, continuation; bool block; };
 
 static const char *const epn_combined_prereqs[] = {
-    "lint-fast-preflight: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \\\n",
+    "lint-fast-preflight: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(if $(filter check-vendor-provenance check-tor-provenance,$(LINT_FAST_PREFLIGHT_GATES)),tor-provenance-ready,) $(TOR_PROVENANCE_BIN) \\\n",
     "        $(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \\\n",
     "        $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN) \\\n",
     "        $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN)\n"
@@ -13636,11 +13636,13 @@ static bool epn_preflight_makefile(const char *root)
         "O := objects\nD := $(O)/epochs/$(E)\nSESSION := $(D)/.build-session\nLEASE := $(D)/.leases/fixture\n"
         "Z23_DEV_BIN := verified\nDEV_PACKAGE_VERIFY_BIN := verified\nLINTC_TOOL := verified\n"
         "TOOLGEN_BIN := verified\nCAPABILITY_INVENTORY_TOOL := verified\nCAPABILITY_STANDALONE_OBJS := writer\n"
-        "include actual-edges.mk\n.PHONY: lint-preflight lint-fast-preflight acquire verified writer\n"
+        "LINT_FAST_PREFLIGHT_GATES := check-vendor-provenance\n"
+        "include actual-edges.mk\n.PHONY: lint-preflight lint-fast-preflight acquire verified writer tor-provenance-ready\n"
+        "tor-provenance-ready:\n\t@printf ready > tor-ready\n"
         "acquire:\n\t@tools/dev/build-epoch-session.sh acquire $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n"
         "verified: acquire\n\t@tools/dev/build-epoch-session.sh verify $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n\t@printf 'x\\n' > barrier\n"
         "writer: acquire\n\t@read token < barrier\n\t@tools/dev/compile-epoch-object.sh dep $(D)/standalone.o fixture.c $(S) 1 $(M) $(E) $(C) $(SESSION) -- cc -std=c23 -O2\n"
-        "lint-preflight lint-fast-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified\n"
+        "lint-preflight lint-fast-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified && { [ \"$@\" != lint-fast-preflight ] || test -f tor-ready; }\n"
         "BUILD_EPOCH_SESSION_TOOL := tools/dev/build-epoch-session.sh\nDEV_SESSION := $(SESSION)\nDEV_LEASE := $(LEASE)\nDEV_OBJ_ROOT := $(O)\nBIN_DIR := unused\nBUILD_EPOCH_KEEP := 1\n"
         "BUILD_SOURCE_ID := $(S)\nBUILD_CLEAN := 1\nBUILD_MUTATION := $(M)\nBUILD_COMPILER_ID := $(C)\nDEV_COMPILE_EPOCH := $(E)\nDEV_PROFILE := fixture-v1\nDEV_EPOCH_COMPILE_FLAGS := -O2\nDEV_EPOCH_LINK_FLAGS := -\n";
     char fifo[PATH_MAX];
