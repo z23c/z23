@@ -86,6 +86,7 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_submit_claim_guard.h"
 #include "base/safe_alloc.h"
 #include "base/utc_tm.h"
 #include "crypto/sha256.h"
@@ -98,6 +99,7 @@
 #include "platform/process_lifecycle.h"
 #include "platform/private_file.h"
 #include "platform/rng.h"
+#include "platform/time_compat.h"
 #include "util/file_io.h"
 #include "util/spawn.h"
 
@@ -621,7 +623,7 @@ static bool dvc_ledger_split(struct dvc_ledger *lg, size_t len)
  * cannot be read whole, or holds more rows than the cap, is refused by name
  * so no claim or release can rewrite a truncated copy of it. */
 static bool dvc_ledger_load(const char *path, struct dvc_ledger *lg,
-                            struct zcl_command_reply *reply)
+                            bool strict, struct zcl_command_reply *reply)
 {
     memset(lg, 0, sizeof(*lg));
 #ifdef _WIN32
@@ -644,6 +646,7 @@ static bool dvc_ledger_load(const char *path, struct dvc_ledger *lg,
     size_t len = 0;
     if (!zcl_read_whole_file_text(path, DVC_LEDGER_MAX_BYTES, &lg->text, &len,
                                   DVC_LEAF) ||
+        (strict && len && (lg->text[len - 1] != 10 || memchr(lg->text, 0, len) != NULL)) ||
         !dvc_ledger_split(lg, len)) {
         dvc_ledger_free(lg);
         dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "ledger",
@@ -1443,7 +1446,7 @@ static void dvc_run(const char *cwd, const char *story, bool release,
     struct platform_private_file lock;
     platform_private_file_init(&lock);
     if (dvc_lock(facts.ledger, &lock, reply) &&
-        dvc_ledger_load(facts.ledger, &lg, reply)) {
+        dvc_ledger_load(facts.ledger, &lg, false, reply)) {
         if (retire)
             dvc_retire_orphan(&facts, &lg, retire, reply);
         else if (release)
@@ -1539,4 +1542,264 @@ void zcl_native_handle_dev_agent_claim(
     if (release || retire || dvc_normalize_files(filesv, &norm, reply))
         dvc_run(dvc_cwd(request), story, release, retire, &norm, reply);
     json_free(&norm);
+}
+
+/* Submit checks use the same ledger and sidecar lock as claim acquisition.
+ * Git and path capture happen before the lock; the caller keeps the lock
+ * through the queue append. */
+struct zcl_submit_claim_guard {
+    struct dvc_facts facts;
+    struct json_value paths;
+    struct platform_private_file lock;
+};
+
+#ifdef _WIN32
+static bool dvc_submit_observe(const char *const argv[], char *bytes, size_t cap,
+                               size_t *length, int *exit_code)
+{
+    const char *image = getenv("ZCL_DEV_GIT_EXE");
+    if (!image || !image[0]) image = "C:/msys64/usr/bin/git.exe";
+    const char *args[32];
+    size_t i = 0;
+    for (; argv[i] && i + 1 < sizeof(args) / sizeof(args[0]); i++) args[i] = argv[i];
+    if (argv[i] || !platform_path_is_absolute(image)) return false;
+    args[i] = NULL;
+    args[0] = image;
+    static const char *const env[] = {
+        "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=",
+        "GIT_TERMINAL_PROMPT=0", "LANG=C", "LC_ALL=C", NULL,
+    };
+    struct platform_process_options opts = { .image = image, .argv = args, .env = env };
+    struct platform_process_capture_result result = {0};
+    struct platform_process_evidence evidence = {0};
+    bool ok = platform_process_capture_evidence(&opts, bytes, cap, 30000, &result, &evidence) &&
+        !result.timed_out && !result.output_truncated && evidence.stdout_complete &&
+        evidence.stdout_observed < cap && result.exit_code <= INT_MAX;
+    if (ok) { *length = (size_t)evidence.stdout_observed; *exit_code = (int)result.exit_code; }
+    return ok;
+}
+#else
+static bool dvc_submit_observe(const char *const argv[], char *bytes, size_t cap,
+                               size_t *length, int *exit_code)
+{
+    struct zcl_spawn_binary_observation o = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(argv, bytes, cap, 30000, &o);
+    bool ok = result.ok && o.eof && o.exit_observed && !o.overflow && !o.timed_out;
+    if (ok) { *length = o.output_len; *exit_code = o.exit_code; }
+    return ok;
+}
+#endif
+
+bool zcl_submit_git_capture(const char *const argv[], char *bytes,
+                            size_t cap, size_t *length)
+{
+    int exit_code = -1;
+    return dvc_submit_observe(argv, bytes, cap, length, &exit_code) && exit_code == 0;
+}
+static bool dvc_submit_facts(const char *cwd, const char *top, const char *common,
+                             struct dvc_facts *facts, struct zcl_command_reply *reply)
+{
+    char resolved_common[PATH_MAX];
+#ifdef _WIN32
+    bool ok = dvc_windows_git_path(cwd, top, facts->toplevel, sizeof(facts->toplevel)) &&
+              dvc_windows_git_path(cwd, common, resolved_common, sizeof(resolved_common));
+#else
+    int top_size = snprintf(facts->toplevel, sizeof(facts->toplevel), "%s", top);
+    int common_size = platform_path_is_absolute(common)
+        ? snprintf(resolved_common, sizeof(resolved_common), "%s", common)
+        : snprintf(resolved_common, sizeof(resolved_common), "%s/%s", cwd, common);
+    bool ok = platform_path_is_absolute(top) && top_size > 0 &&
+              (size_t)top_size < sizeof(facts->toplevel) && common_size > 0 &&
+              (size_t)common_size < sizeof(resolved_common);
+#endif
+    int n = ok ? snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s", resolved_common,
+                          DVC_LEDGER_NAME) : -1;
+    if (n < 0 || (size_t)n >= sizeof(facts->ledger)) {
+        dvc_fail(reply, "GIT_FAILED", "submit", "cannot resolve claim ledger identity", "invalid Git directory facts");
+        return false;
+    }
+    return true;
+}
+
+static bool dvc_submit_unrelated(const char *const args[])
+{
+    char out[80];
+#ifdef _WIN32
+    size_t length = 0;
+    int exit_code = -1;
+    return dvc_submit_observe(args, out, sizeof(out), &length, &exit_code) &&
+           exit_code == 1;
+#else
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_observed(args, out, sizeof(out), 30000, &timed_out);
+    return rc == 1 && !timed_out;
+#endif
+}
+
+static bool dvc_submit_parse_paths(struct json_value *paths, char *bytes, size_t length)
+{
+    for (size_t pos = 0; pos < length;) {
+        char *end = memchr(bytes + pos, 0, length - pos);
+        if (!end || end == bytes + pos) return false;
+        char normalized[DVC_PATH_CAP];
+        if (!zutf8_validate_n(bytes + pos, (size_t)(end - bytes - pos)) ||
+            dvc_path_normalize(bytes + pos, normalized, sizeof(normalized))) return false;
+        struct json_value item;
+        json_init(&item);
+        json_set_str(&item, normalized);
+        bool ok = item.type == JSON_STR && json_push_back(paths, &item);
+        json_free(&item);
+        if (!ok) return false;
+        pos = (size_t)(end - bytes) + 1;
+    }
+    return true;
+}
+
+struct zcl_submit_claim_guard *zcl_submit_claim_prepare(
+    const char *worktree, const char *top, const char *common, const char *tip,
+    struct zcl_command_reply *reply)
+{
+    struct zcl_submit_claim_guard *g = zcl_calloc(1, sizeof(*g), "submit_claim_guard");
+    if (!g) {
+        dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "submit", "cannot allocate claim guard", "allocation failed");
+        return NULL;
+    }
+    json_init(&g->paths);
+    json_set_array(&g->paths);
+    platform_private_file_init(&g->lock);
+    if (!dvc_submit_facts(worktree, top, common, &g->facts, reply)) goto fail;
+    enum { CAP = 8 * 1024 * 1024 };
+    char *bytes = zcl_malloc(CAP, "submit_claim_paths");
+    if (!bytes) {
+        dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "submit", "cannot allocate changed paths", "allocation failed");
+        goto fail;
+    }
+    char range[96];
+    if (snprintf(range, sizeof(range), "origin/main...%s", tip) >= (int)sizeof(range)) {
+        free(bytes);
+        dvc_fail(reply, "GIT_FAILED", "submit", "candidate range is too long", "invalid tip");
+        goto fail;
+    }
+    const char *argv[] = {"git", "-C", g->facts.toplevel, "diff", "--name-only", "-z",
+        "--no-renames", "--no-relative", "--no-ext-diff", "--no-textconv", range, "--", NULL};
+    size_t length = 0;
+    bool ok = zcl_submit_git_capture(argv, bytes, CAP, &length);
+    if (!ok) {
+        const char *args[] = { "git", "-C", g->facts.toplevel, "merge-base", "origin/main", tip, NULL };
+        bool unrelated = dvc_submit_unrelated(args);
+        free(bytes);
+        if (unrelated)
+            dvc_fail(reply, "TIP_UNRELATED", "submit", "that commit shares no history with origin/main",
+                     "git merge-base found no common ancestor");
+        else
+            dvc_fail(reply, "GIT_FAILED", "submit", "cannot capture complete candidate paths",
+                     "git diff failed or exceeded its bound");
+        goto fail;
+    }
+    ok = dvc_submit_parse_paths(&g->paths, bytes, length);
+    free(bytes);
+    if (!ok) {
+        dvc_fail(reply, "GIT_FAILED", "submit", "cannot capture complete candidate paths", "git diff failed or path is invalid");
+        goto fail;
+    }
+    return g;
+fail:
+    json_free(&g->paths);
+    platform_private_file_close(&g->lock);
+    free(g);
+    return NULL;
+}
+
+/* A submit may race another short claim or enqueue transaction. Retry only
+ * observed lock contention, with an independent attempt and elapsed bound. */
+static bool dvc_submit_lock_wait(const char *path, struct platform_private_file *lock)
+{
+    enum { DVC_SUBMIT_LOCK_TRIES = 250, DVC_SUBMIT_LOCK_MS = 20 };
+    int64_t start = clock_now_monotonic_raw_us();
+    bool observed_free = false;
+    for (unsigned i = 0; i < DVC_SUBMIT_LOCK_TRIES; i++) {
+        if (platform_private_file_open_locked_create(path, lock)) return true;
+        struct platform_private_file probe;
+        platform_private_file_init(&probe);
+        enum platform_observation_result result = platform_private_file_observe(path, &probe);
+        platform_private_file_close(&probe);
+        if (result == PLATFORM_OBSERVATION_ERROR) return false;
+        if (result == PLATFORM_OBSERVATION_OK) {
+            if (observed_free) return false;
+            observed_free = true;
+            continue;
+        }
+        observed_free = false;
+        int64_t now = clock_now_monotonic_raw_us();
+        if (now < start || now - start >= 5000000) return false;
+        platform_sleep_ms(DVC_SUBMIT_LOCK_MS); /* real-clock: bounded claim lock contention */
+    }
+    return false;
+}
+
+bool zcl_submit_claim_lock(struct zcl_submit_claim_guard *g,
+                           struct zcl_command_reply *reply)
+{
+    char path[PATH_MAX + 16];
+    int n = snprintf(path, sizeof(path), "%s.lock", g->facts.ledger);
+    if (n > 0 && (size_t)n < sizeof(path) && dvc_submit_lock_wait(path, &g->lock))
+        return true;
+    dvc_fail(reply, "CLAIM_LOCK_UNAVAILABLE", "submit",
+             "cannot acquire the claim ledger lock", g->facts.ledger);
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "Retry submit after the claim writer finishes; inspect access if it persists.");
+    return false;
+}
+
+static bool dvc_submit_row_valid(const char *line)
+{
+    struct json_value row;
+    json_init(&row);
+    size_t len = strlen(line), count = 0;
+    char owner[PATH_MAX];
+    bool ok = dvc_line_owner(line, owner, sizeof(owner)) &&
+        zutf8_validate_n(line, len) && json_read(&row, line, len) && row.type == JSON_OBJ;
+    const struct json_value *files = NULL;
+    for (size_t i = 0; ok && i < row.num_children; i++) {
+        if (strcmp(row.keys[i], "files") == 0) { files = &row.children[i]; count++; }
+    }
+    ok = ok && count == 1 && files && files->type == JSON_ARR && files->num_children > 0;
+    for (size_t i = 0; ok && i < files->num_children; i++) {
+        const struct json_value *item = &files->children[i];
+        const char *path = item->type == JSON_STR ? json_get_str(item) : NULL;
+        char normalized[DVC_PATH_CAP];
+        ok = path && !dvc_path_normalize(path, normalized, sizeof(normalized));
+    }
+    json_free(&row);
+    return ok;
+}
+bool zcl_submit_claim_check(struct zcl_submit_claim_guard *g,
+                            struct zcl_command_reply *reply)
+{
+    struct dvc_ledger lg;
+    if (!dvc_ledger_load(g->facts.ledger, &lg, true, reply)) return false;
+    for (size_t i = 0; i < lg.n; i++) {
+        if (!dvc_submit_row_valid(lg.lines[i])) {
+            dvc_ledger_free(&lg);
+            dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "submit", "claim ledger row is malformed", g->facts.ledger);
+            return false;
+        }
+    }
+    bool ok = dvc_check_overlap(&g->facts, &lg, &g->paths,
+                                (long long)(clock_now_wall_ms() / 1000), reply);
+    dvc_ledger_free(&lg);
+    if (!ok && strcmp(reply->error.code, "CLAIM_OVERLAP") == 0) {
+        (void)snprintf(reply->error.phase, sizeof(reply->error.phase), "%s", "submit");
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Coordinate with the named claim owner, then retry submit after release or lease expiry.");
+    }
+    return ok;
+}
+
+void zcl_submit_claim_free(struct zcl_submit_claim_guard *g)
+{
+    if (!g) return;
+    platform_private_file_close(&g->lock);
+    json_free(&g->paths);
+    free(g);
 }

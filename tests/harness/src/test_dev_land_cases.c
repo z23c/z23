@@ -9,13 +9,651 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "platform/private_file.h"
+#include "command/native_submit_claim_guard.h"
 
 #if !defined(_WIN32)
+#include <poll.h>
 
+
+void zcl_native_dev_land_test_qualify_head(bool on);
+void zcl_native_dev_land_submit_received(const struct zcl_command_request *,
+                                         struct zcl_command_reply *);
+
+/* Use the real claim command against the isolated repository ledger. */
+static bool dlx_claim_fixture(const char *owner, const char *file)
+{
+    struct json_value input, files, item;
+    struct zcl_command_request request = {0};
+    struct zcl_command_reply reply;
+    json_init(&input); json_set_object(&input);
+    json_init(&files); json_set_array(&files);
+    json_init(&item); json_set_str(&item, file);
+    bool ok = json_push_back(&files, &item) &&
+              json_push_kv_str(&input, "cwd", owner) &&
+              json_push_kv_str(&input, "story", "foreign-fixture") &&
+              json_push_kv(&input, "files", &files);
+    request.input = &input;
+    request.spec = zcl_command_registry_find(zcl_command_catalog(), "dev.agent.claim", NULL);
+    zcl_command_reply_init(&reply, "zcl.agent_claim.v1");
+    if (ok && request.spec) zcl_native_handle_dev_agent_claim(&request, &reply);
+    else ok = false;
+    ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED;
+    zcl_command_reply_free(&reply); json_free(&item); json_free(&files); json_free(&input);
+    return ok;
+}
+
+static bool dlx_claim_metadata_file(const struct dlx_call *c, const char *owner,
+                                    const char *expected)
+{
+    const struct json_value *items = dlx_arr(c, "conflicts");
+    const struct json_value *row = items && items->num_children ? &items->children[0] : NULL;
+    const char *file = row ? json_get_str(json_get(row, "file")) : NULL;
+    const char *worktree = row ? json_get_str(json_get(row, "worktree")) : NULL;
+    const char *story = row ? json_get_str(json_get(row, "story")) : NULL;
+    return file && worktree && story && strcmp(file, expected) == 0 &&
+           strcmp(worktree, owner) == 0 && strcmp(story, "foreign-fixture") == 0;
+}
+
+static bool dlx_claim_metadata(const struct dlx_call *c, const char *owner)
+{
+    return dlx_claim_metadata_file(c, owner, "change.txt");
+}
+
+static bool dlx_claim_refused(const struct dlx_call *c, const struct dlx_rig *rig,
+                              const char *foreign)
+{
+    return !dlx_ok(c) && strcmp(dlx_err_code(c), "CLAIM_OVERLAP") == 0 &&
+           dlx_claim_metadata(c, foreign) && !dlx_pc_ran(rig, "check-core-seal");
+}
+
+static bool dlx_claim_case_setup(struct dlx_rig *rig, unsigned mode, char *foreign,
+                                 size_t cap)
+{
+    char tag[48], ledger[800], row[1600];
+    snprintf(tag, sizeof(tag), "land_claim_%u", mode);
+    if (!dlx_pc_rig(rig, tag, true, "check-core-seal\n")) return false;
+    snprintf(foreign, cap, "%s-foreign", rig->clone);
+    const char *add[] = {"worktree", "add", "--detach", foreign, "HEAD", NULL};
+    bool ok = dlx_git(rig->clone, add) == 0;
+    if (ok && mode != 4 && mode != 6)
+        ok = dlx_claim_fixture(mode == 1 ? rig->clone : foreign,
+                               mode == 3 ? "other.txt" : "change.txt");
+    if (!ok || (mode != 2 && mode != 5 && mode != 6)) return ok;
+    snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", rig->clone);
+    snprintf(row, sizeof(row), "{\"expires_unix\":1,\"worktree\":\"%s\",\"story\":\"foreign-fixture\",\"files\":[\"change.txt\"]}\n", foreign);
+    if (mode == 5) snprintf(row, sizeof(row), "{\"worktree\":\"%s\",\"story\":\"foreign-fixture\",\"files\":[\"change.txt\"]}\n", foreign);
+    if (mode == 6) snprintf(row, sizeof(row), "{broken\n");
+    return dlx_write(ledger, row);
+}
+
+static bool dlx_claim_case_verdict(const struct dlx_call *c, const struct dlx_rig *rig,
+                                   unsigned mode, const char *foreign)
+{
+    if (mode == 0 || mode == 5 || mode >= 7)
+        return dlx_claim_refused(c, rig, foreign);
+    if (mode == 6)
+        return !dlx_ok(c) && strcmp(dlx_err_code(c), "CLAIM_LEDGER_UNREADABLE") == 0;
+    return dlx_ok(c);
+}
+
+static bool dlx_claim_case_call(struct dlx_rig *rig, unsigned mode, const char *foreign)
+{
+    struct dlx_call c;
+    if (mode == 8) {
+        dlx_begin(&c, "submit");
+        (void)json_push_kv_str(&c.input, "worktree", rig->clone);
+        (void)json_push_kv_str(&c.input, "note", "claim fixture");
+        (void)json_push_kv_bool(&c.input, "qualify", true);
+        zcl_native_dev_land_test_qualify_head(true);
+    } else dlx_pc_submit(&c, rig, mode == 7 ? "skip" : NULL, "claim fixture");
+    bool ok;
+    if (mode == 9) { zcl_native_dev_land_submit_received(&c.request, &c.reply); ok = true; }
+    else ok = dlx_run(&c);
+    if (mode == 8) zcl_native_dev_land_test_qualify_head(false);
+    ok = ok && dlx_claim_case_verdict(&c, rig, mode, foreign);
+    dlx_end(&c);
+    return (mode == 0 || mode >= 5) ? ok && dlx_queue_empty() : ok;
+}
+
+/* Each mode uses a fresh claim ledger and queue. */
+static bool dlx_claim_submit_case(unsigned mode)
+{
+    struct dlx_rig rig = {0};
+    char foreign[700];
+    bool ok = dlx_claim_case_setup(&rig, mode, foreign, sizeof(foreign));
+    if (ok) ok = dlx_claim_case_call(&rig, mode, foreign);
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_claim_submit_controls(void)
+{
+    for (unsigned mode = 1; mode <= 4; ++mode)
+        if (!dlx_claim_submit_case(mode)) return false;
+    return true;
+}
+
+static int dlx_claim_controls_test(void)
+{
+    int failures = 0;
+    TEST("land: same-owner, expired, nonoverlap and absent claims permit submit") {
+        ASSERT(dlx_claim_submit_controls());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_claim_overlap_test(void)
+{
+    int failures = 0;
+    TEST("land: live foreign claim refuses before precheck and queue") {
+        ASSERT(dlx_claim_submit_case(0));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_claim_entry_test(void)
+{
+    int failures = 0;
+    TEST("land: legacy and entry paths honor claims and malformed ledgers fail closed") {
+        for (unsigned mode = 5; mode <= 9; ++mode)
+            ASSERT(dlx_claim_submit_case(mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool dlx_claim_retry_attaches(void)
+{
+    struct dlx_rig rig = {0};
+    struct dlx_call c;
+    bool ok = dlx_pc_rig(&rig, "land_claim_retry", true, "check-core-seal\n");
+    if (ok) {
+        dlx_pc_submit(&c, &rig, NULL, "first");
+        ok = dlx_run(&c) && dlx_ok(&c);
+        dlx_end(&c);
+    }
+    char foreign[700];
+    snprintf(foreign, sizeof(foreign), "%s-foreign", rig.clone);
+    const char *add[] = {"worktree", "add", "--detach", foreign, "HEAD", NULL};
+    if (ok) ok = dlx_git(rig.clone, add) == 0 && dlx_claim_fixture(foreign, "change.txt");
+    if (ok) {
+        dlx_pc_submit(&c, &rig, NULL, "retry");
+        ok = dlx_run(&c) && dlx_ok(&c) &&
+             json_get_bool(json_get(&c.reply.data, "deduplicated"));
+        dlx_end(&c);
+        ok = ok && dlx_queue_has_one();
+    }
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_claim_retry_test(void)
+{
+    int failures = 0;
+    TEST("land: queued exact tip still attaches after a foreign claim") {
+        ASSERT(dlx_claim_retry_attaches());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Write a synthetic legacy claim while holding the native ledger lock. */
+static bool dlx_claim_late_write(const char *ledger, const char *foreign)
+{
+    char lock_path[900], row[1600];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s.lock", ledger);
+    if (n <= 0 || (size_t)n >= sizeof(lock_path)) return false;
+    n = snprintf(row, sizeof(row), "{\"worktree\":\"%s\",\"story\":\"foreign-fixture\",\"files\":[\"change.txt\"]}\n", foreign);
+    if (n <= 0 || (size_t)n >= sizeof(row)) return false;
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    bool ok = platform_private_file_open_locked_create(lock_path, &lock);
+    if (ok) ok = dlx_write(ledger, row);
+    platform_private_file_close(&lock);
+    return ok;
+}
+
+/* A bounded competing writer releases the precheck even on failure. */
+static void dlx_claim_late_worker(const char *marker, const char *fifo,
+                                  const char *ledger, const char *foreign)
+{
+    int ready_fd = open(marker, O_RDONLY);
+    char byte;
+    ssize_t n = -1;
+    if (ready_fd >= 0) {
+        do { n = read(ready_fd, &byte, 1); } while (n < 0 && errno == EINTR);
+        close(ready_fd);
+    }
+    bool ready = n == 1 && byte == 'r';
+    bool claimed = ready && dlx_claim_late_write(ledger, foreign);
+    int fd = ready ? open(fifo, O_WRONLY) : -1;
+    bool released = fd >= 0 && write(fd, "go\n", 3) == 3;
+    if (fd >= 0) close(fd);
+    _exit(claimed && released ? 0 : 1);
+}
+
+/* The unreaped leader anchors the private group while timeout cleanup runs. */
+static bool dlx_claim_late_wait(pid_t worker)
+{
+    struct timespec pause = { .tv_sec = 0, .tv_nsec = 100000000 };
+    int status = 0;
+    bool killed = false;
+    for (int i = 0; i < 200; ++i) {
+        pid_t got = waitpid(worker, &status, WNOHANG);
+        if (got == worker) return !killed && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (got < 0 && errno != EINTR) return false;
+        if (i == 150) {
+            if (worker != getpgrp() && getpgid(worker) == worker)
+                (void)kill(-worker, SIGKILL);
+            else (void)kill(worker, SIGKILL);
+            killed = true;
+        }
+        (void)nanosleep(&pause, NULL); /* real-clock: bound kernel child wait and forced reap */
+    }
+    /* The fixture is retained if the owner cannot be reaped within the bound. */
+    return false;
+}
+
+static bool dlx_claim_late_setup(struct dlx_rig *rig, const char *foreign,
+                                 const char *marker, const char *fifo, const char *lint)
+{
+    const char *add[] = {"worktree", "add", "--detach", foreign, "HEAD", NULL};
+    return dlx_git(rig->clone, add) == 0 && mkfifo(marker, 0600) == 0 && mkfifo(fifo, 0600) == 0 &&
+        dlx_write(lint, "#!/bin/sh\nif [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\nprintf r > build/claim-ready\nIFS= read -r line < build/claim-release\nexit 0\n") && chmod(lint, 0755) == 0;
+}
+
+static bool dlx_claim_during_precheck(void)
+{
+    struct dlx_rig rig = {0};
+    struct dlx_call c;
+    char foreign[700], marker[800], fifo[800], lint[800], ledger[800];
+    bool ok = dlx_pc_rig(&rig, "land_claim_late", true, "check-core-seal\n");
+    snprintf(foreign, sizeof(foreign), "%s-foreign", rig.clone);
+    snprintf(marker, sizeof(marker), "%s/build/claim-ready", rig.clone);
+    snprintf(fifo, sizeof(fifo), "%s/build/claim-release", rig.clone);
+    snprintf(lint, sizeof(lint), "%s/build/bin/z23-lint", rig.clone);
+    snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", rig.clone);
+    if (ok) ok = dlx_claim_late_setup(&rig, foreign, marker, fifo, lint);
+    pid_t worker = ok ? fork() : -1;
+    if (worker == 0) {
+        if (setpgid(0, 0) != 0) _exit(127);
+        dlx_claim_late_worker(marker, fifo, ledger, foreign);
+    }
+    if (worker > 0) (void)setpgid(worker, worker);
+    if (worker < 0) ok = false;
+    if (ok) {
+        dlx_pc_submit(&c, &rig, NULL, "late claim");
+        ok = dlx_run(&c) && !dlx_ok(&c) &&
+             strcmp(dlx_err_code(&c), "CLAIM_OVERLAP") == 0 &&
+             dlx_claim_metadata(&c, foreign);
+        dlx_end(&c);
+        bool worker_ok = dlx_claim_late_wait(worker);
+        ok = worker_ok && ok && dlx_file_exists(marker) && dlx_queue_empty();
+    }
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_claim_late_test(void)
+{
+    int failures = 0;
+    TEST("land: claim created during precheck blocks the append") {
+        ASSERT(dlx_claim_during_precheck());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A rename contributes both names; a delete and a stale base retain old paths. */
+static bool dlx_claim_history_setup(struct dlx_rig *rig, unsigned mode)
+{
+    const char *push[] = {"push", "--quiet", "origin", "HEAD:main", NULL};
+    const char *fetch[] = {"fetch", "--quiet", "origin", NULL};
+    if (mode < 3) {
+        if (dlx_git(rig->clone, push) != 0 || dlx_git(rig->clone, fetch) != 0) return false;
+        const char *move[] = {"mv", "change.txt", "moved.txt", NULL};
+        const char *remove[] = {"rm", "change.txt", NULL};
+        return dlx_git(rig->clone, mode == 2 ? remove : move) == 0 &&
+               dlx_commit_tree(rig->clone, "path change", rig->tip);
+    }
+    char other[700], tip[64];
+    snprintf(other, sizeof(other), "%s-base", rig->clone);
+    const char *add[] = {"worktree", "add", "--detach", other, "origin/main", NULL};
+    return dlx_git(rig->clone, add) == 0 &&
+           dlx_commit(other, "base-only.txt", "base\n", tip) &&
+           dlx_git(other, push) == 0 && dlx_git(rig->clone, fetch) == 0;
+}
+
+static bool dlx_claim_history_case(unsigned mode)
+{
+    struct dlx_rig rig = {0};
+    struct dlx_call c;
+    char tag[48], foreign[700];
+    snprintf(tag, sizeof(tag), "land_claim_history_%u", mode);
+    bool ok = dlx_pc_rig(&rig, tag, true, "check-core-seal\n");
+    if (ok) ok = dlx_claim_history_setup(&rig, mode);
+    snprintf(foreign, sizeof(foreign), "%s-foreign", rig.clone);
+    const char *add[] = {"worktree", "add", "--detach", foreign, "HEAD", NULL};
+    const char *path = mode == 1 ? "moved.txt" : "change.txt";
+    if (ok) ok = dlx_git(rig.clone, add) == 0 && dlx_claim_fixture(foreign, path);
+    if (ok) {
+        dlx_pc_submit(&c, &rig, "skip", "history path");
+        ok = dlx_run(&c) && !dlx_ok(&c) &&
+             strcmp(dlx_err_code(&c), "CLAIM_OVERLAP") == 0 &&
+             dlx_claim_metadata_file(&c, foreign, path);
+        dlx_end(&c);
+        ok = ok && dlx_queue_empty();
+    }
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_claim_history_test(void)
+{
+    int failures = 0;
+    TEST("land: claimed rename sides, deletion and stale-base delta are refused") {
+        for (unsigned mode = 0; mode < 4; ++mode)
+            ASSERT(dlx_claim_history_case(mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Claim through one real worktree and submit from the other or its child. */
+static bool dlx_claim_linked_case(bool same_owner)
+{
+    struct dlx_rig rig = {0};
+    struct dlx_call c;
+    char main[600], linked[700], nested[800], tip[64];
+    bool ok = dlx_pc_rig(&rig, same_owner ? "claim_linked_own" : "claim_linked_foreign",
+                         true, "check-core-seal\n");
+    snprintf(main, sizeof(main), "%s", rig.clone);
+    snprintf(linked, sizeof(linked), "%s-linked", main);
+    const char *add[] = {"worktree", "add", "--detach", linked, "HEAD", NULL};
+    if (ok) ok = dlx_git(main, add) == 0 &&
+                 dlx_write_dep(linked, "nested/item.txt", "linked\n") &&
+                 dlx_commit_tree(linked, "linked change", tip);
+    snprintf(nested, sizeof(nested), "%s/nested", linked);
+    if (ok) ok = dlx_claim_fixture(same_owner ? nested : main, "nested/item.txt");
+    if (ok) {
+        dlx_begin(&c, "submit");
+        (void)json_push_kv_str(&c.input, "worktree", nested);
+        (void)json_push_kv_str(&c.input, "tip", tip);
+        (void)json_push_kv_str(&c.input, "precheck", "skip");
+        (void)json_push_kv_str(&c.input, "note", "linked fixture");
+        ok = dlx_run(&c);
+        if (same_owner) ok = ok && dlx_ok(&c);
+        else ok = ok && !dlx_ok(&c) &&
+                  strcmp(dlx_err_code(&c), "CLAIM_OVERLAP") == 0 &&
+                  dlx_claim_metadata_file(&c, main, "nested/item.txt");
+        dlx_end(&c);
+        ok = ok && (same_owner ? dlx_queue_has_one() : dlx_queue_empty());
+    }
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_claim_linked_test(void)
+{
+    int failures = 0;
+    TEST("land: linked nested worktrees use common claims and canonical owners") {
+        ASSERT(dlx_claim_linked_case(false));
+        ASSERT(dlx_claim_linked_case(true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* An older Git rejects these newer switches while delegating all other calls. */
+static bool dlx_old_git_wrapper(const struct dlx_rig *rig, char *bin, size_t cap)
+{
+    char git[PATH_MAX], script[PATH_MAX + 512], wrapper[1400];
+    if (!realpath("/usr/bin/git", git) ||
+        snprintf(bin, cap, "%s/build/old-git", rig->clone) >= (int)cap ||
+        !dlx_mkdir_p(bin) ||
+        snprintf(wrapper, sizeof(wrapper), "%s/git", bin) >= (int)sizeof(wrapper))
+        return false;
+    int n = snprintf(script, sizeof(script),
+        "#!/bin/sh\nprintf hit > \"${0%%/*}/called\"\n"
+        "for arg do case \"$arg\" in --path-format=*|--end-of-options) exit 129;; esac; done\n"
+        "exec %s \"$@\"\n", git);
+    return n > 0 && (size_t)n < sizeof(script) && dlx_write(wrapper, script) &&
+           chmod(wrapper, 0755) == 0;
+}
+
+static bool dlx_old_git_verdict(struct dlx_call *c, bool same_owner,
+                                const char *foreign)
+{
+    if (same_owner) return dlx_ok(c);
+    return !dlx_ok(c) && strcmp(dlx_err_code(c), "CLAIM_OVERLAP") == 0 &&
+           dlx_claim_metadata_file(c, foreign, "nested/item.txt");
+}
+
+static bool dlx_old_git_prepare(struct dlx_rig *rig, bool same_owner,
+                                char *foreign, size_t foreign_cap,
+                                char *nested, size_t nested_cap, char tip[64])
+{
+    if (!dlx_pc_rig(rig, same_owner ? "oldgit_own" : "oldgit_foreign",
+                    true, "check-core-seal\n")) return false;
+    snprintf(foreign, foreign_cap, "%s-foreign", rig->clone);
+    snprintf(nested, nested_cap, "%s/nested", rig->clone);
+    const char *add[] = {"worktree", "add", "--detach", foreign, "HEAD", NULL};
+    return dlx_write_dep(rig->clone, "nested/item.txt", "fixture\n") &&
+           dlx_commit_tree(rig->clone, "nested change", tip) &&
+           dlx_git(rig->clone, add) == 0 &&
+           dlx_claim_fixture(same_owner ? nested : foreign, "nested/item.txt");
+}
+
+static bool dlx_old_git_submit(bool same_owner, const char *foreign,
+                               const char *nested, const char *tip, const char *bin)
+{
+    struct dlx_call c;
+    char marker[900];
+    dlx_begin(&c, "submit");
+    (void)json_push_kv_str(&c.input, "worktree", nested);
+    (void)json_push_kv_str(&c.input, "tip", tip);
+    (void)json_push_kv_str(&c.input, "precheck", "skip");
+    (void)json_push_kv_str(&c.input, "note", "old git fixture");
+    bool ok = dlx_run(&c) && dlx_old_git_verdict(&c, same_owner, foreign);
+    dlx_end(&c);
+    snprintf(marker, sizeof(marker), "%s/called", bin);
+    return ok && dlx_file_exists(marker) &&
+           (same_owner ? dlx_queue_has_one() : dlx_queue_empty());
+}
+
+static bool dlx_old_git_case(bool same_owner)
+{
+    struct dlx_rig rig = {0};
+    char foreign[700], nested[700], tip[64], bin[800], path[8192];
+    const char *old = getenv("PATH");
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved) return false;
+    bool ok = dlx_old_git_prepare(&rig, same_owner, foreign, sizeof(foreign),
+                                  nested, sizeof(nested), tip);
+    if (ok) ok = dlx_old_git_wrapper(&rig, bin, sizeof(bin));
+    if (ok) {
+        int n = snprintf(path, sizeof(path), "%s:%s", bin, saved ? saved : "");
+        ok = n > 0 && (size_t)n < sizeof(path) && setenv("PATH", path, 1) == 0;
+    }
+    if (ok) ok = dlx_old_git_submit(same_owner, foreign, nested, tip, bin);
+    if (saved) { (void)setenv("PATH", saved, 1); free(saved); }
+    else (void)unsetenv("PATH");
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_old_git_test(void)
+{
+    int failures = 0;
+    TEST("land: older Git accepts nested owner checks without newer switches") {
+        ASSERT(dlx_old_git_case(false));
+        ASSERT(dlx_old_git_case(true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Only this holder child owns the fixture lock; it spawns no descendants. */
+static void dlx_claim_lock_holder(const char *path, int ready, int release, bool delayed)
+{
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    if (!platform_private_file_open_locked_create(path, &lock) || write(ready, "r", 1) != 1)
+        _exit(1);
+    close(ready);
+    if (delayed) {
+        struct timespec pause = { .tv_sec = 0, .tv_nsec = 200000000 };
+        (void)nanosleep(&pause, NULL);
+    } else {
+        char byte;
+        ssize_t n;
+        do { n = read(release, &byte, 1); } while (n < 0 && errno == EINTR);
+    }
+    close(release);
+    platform_private_file_close(&lock);
+    _exit(0);
+}
+
+static bool dlx_claim_lock_ready(int fd)
+{
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    struct timespec start, now;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return false;
+    for (;;) {
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return false;
+        int64_t elapsed = (int64_t)(now.tv_sec - start.tv_sec) * 1000 +
+                          (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed < 0 || elapsed >= 5000) return false;
+        int rc = poll(&p, 1, (int)(5000 - elapsed));
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0) return false;
+        char byte;
+        ssize_t n = read(fd, &byte, 1);
+        if (n < 0 && errno == EINTR) continue;
+        return n == 1 && byte == 'r';
+    }
+}
+
+static bool dlx_claim_lock_attempt(struct zcl_submit_claim_guard *guard,
+                                   struct zcl_command_reply *reply, bool delayed)
+{
+    struct timespec start, end;
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return false;
+    bool locked = zcl_submit_claim_lock(guard, reply);
+    if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) return false;
+    int64_t elapsed = (int64_t)(end.tv_sec - start.tv_sec) * 1000 +
+                      (end.tv_nsec - start.tv_nsec) / 1000000;
+    if (delayed) return locked && zcl_submit_claim_check(guard, reply);
+    return !locked && strcmp(reply->error.code, "CLAIM_LOCK_UNAVAILABLE") == 0 &&
+           elapsed >= 4000 && elapsed <= 10000;
+}
+
+static bool dlx_claim_lock_parent(pid_t child, int ready[2], int release[2],
+                                  struct zcl_submit_claim_guard *guard,
+                                  struct zcl_command_reply *reply, bool delayed)
+{
+    (void)setpgid(child, child);
+    close(ready[1]); ready[1] = -1;
+    close(release[0]); release[0] = -1;
+    bool ok = dlx_claim_lock_ready(ready[0]);
+    if (ok) ok = dlx_claim_lock_attempt(guard, reply, delayed);
+    close(release[1]); release[1] = -1;
+    bool reaped = dlx_claim_late_wait(child);
+    if (!reaped) fprintf(stderr, "claim lock holder unresolved or failed; fixture retained\n");
+    return reaped && ok;
+}
+
+static void dlx_claim_pipe_close(int fds[2])
+{
+    if (fds[0] >= 0) close(fds[0]);
+    if (fds[1] >= 0) close(fds[1]);
+}
+
+static bool dlx_claim_lock_case(bool delayed)
+{
+    struct dlx_rig rig = {0};
+    struct zcl_command_reply reply;
+    struct zcl_submit_claim_guard *guard = NULL;
+    char common[800], lock_path[900];
+    int ready[2] = {-1, -1}, release[2] = {-1, -1};
+    bool ok = dlx_pc_rig(&rig, delayed ? "claim_lock_release" : "claim_lock_timeout",
+                         true, "check-core-seal\n");
+    snprintf(common, sizeof(common), "%s/.git", rig.clone);
+    snprintf(lock_path, sizeof(lock_path), "%s/z23-agent-claims.jsonl.lock", common);
+    zcl_command_reply_init(&reply, "zcl.agent_claim.v1");
+    if (ok) guard = zcl_submit_claim_prepare(rig.clone, rig.clone, common, rig.tip, &reply);
+    if (ok) ok = guard && pipe(ready) == 0 && pipe(release) == 0;
+    pid_t child = ok ? fork() : -1;
+    if (child == 0) {
+        if (setpgid(0, 0) != 0) _exit(127);
+        close(ready[0]); close(release[1]);
+        dlx_claim_lock_holder(lock_path, ready[1], release[0], delayed);
+    }
+    if (child > 0) ok = dlx_claim_lock_parent(child, ready, release, guard, &reply, delayed);
+    else ok = false;
+    dlx_claim_pipe_close(ready);
+    dlx_claim_pipe_close(release);
+    zcl_submit_claim_free(guard);
+    zcl_command_reply_free(&reply);
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_claim_lock_invalid(void)
+{
+    struct dlx_rig rig = {0};
+    struct zcl_command_reply reply;
+    struct zcl_submit_claim_guard *guard = NULL;
+    char common[800], lock_path[900];
+    bool ok = dlx_pc_rig(&rig, "claim_lock_invalid", true, "check-core-seal\n");
+    snprintf(common, sizeof(common), "%s/.git", rig.clone);
+    snprintf(lock_path, sizeof(lock_path), "%s/z23-agent-claims.jsonl.lock", common);
+    zcl_command_reply_init(&reply, "zcl.agent_claim.v1");
+    if (ok) guard = zcl_submit_claim_prepare(rig.clone, rig.clone, common, rig.tip, &reply);
+    if (ok) ok = guard && mkdir(lock_path, 0700) == 0;
+    if (ok) {
+        int64_t start = platform_time_monotonic_ms();
+        bool locked = zcl_submit_claim_lock(guard, &reply);
+        int64_t end = platform_time_monotonic_ms();
+        ok = !locked && strcmp(reply.error.code, "CLAIM_LOCK_UNAVAILABLE") == 0 &&
+             start > 0 && end >= start && end - start < 2000;
+    }
+    zcl_submit_claim_free(guard);
+    zcl_command_reply_free(&reply);
+    zcl_dev_land_precheck_test_force(false);
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_claim_lock_test(void)
+{
+    int failures = 0;
+    TEST("land: claim lock retries contention and bounds persistent contention") {
+        ASSERT(dlx_claim_lock_case(true));
+        ASSERT(dlx_claim_lock_case(false));
+        ASSERT(dlx_claim_lock_invalid());
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 int dlx_case_missing_dependency(void)
 {
-    int failures = 0;
+    int failures = dlx_claim_controls_test() + dlx_claim_overlap_test() +
+                   dlx_claim_entry_test() + dlx_claim_retry_test() +
+                   dlx_claim_late_test() + dlx_claim_history_test() +
+                   dlx_claim_linked_test() + dlx_old_git_test() +
+                   dlx_claim_lock_test();
     TEST("land: a proof-generation dependency missing from the submitting "
         "checkout too refuses by name instead of proceeding") {
         struct dlx_rig rig;

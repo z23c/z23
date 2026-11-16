@@ -2258,31 +2258,22 @@ ZCL_COMMAND_BRANCH("dev.land", "dev",
 ZCL_COMMAND_READY_COMMAND(
     "dev.land.submit", "dev.land", "",
     "Queue a signed tip for landing and return at once",
-    "Queues one signed tip and returns before any mutation of origin; the tip "
-    "defaults to the HEAD of worktree. Refuses an unsigned or unrelated tip. "
-    "A repeated submission of the same tip answers with the existing row. "
-    "With qualify the lane's worktree first fetches, rebases onto origin/main "
-    "when behind, requires signed commits, regenerates derived files, runs "
-    "full lint and every affected test group (one harness run), refuses a "
-    "tree the gates rewrote (QUALIFY_TREE_CHANGED names the paths and, for a "
-    "generated doc, its make target) and submits that tip. A failed gate "
-    "refuses with QUALIFY_LINT_FAILED, QUALIFY_GROUP_FAILED (group, log), "
-    "QUALIFY_UNSIGNED_TIP, QUALIFY_TREE_CHANGED (paths), QUALIFY_DIRTY_TREE, "
-    "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT, QUALIFY_REBASE_FAILED, "
-    "QUALIFY_GROUP_SELECTION or QUALIFY_STEP_FAILED "
-    "and queues nothing. Before queueing it runs a local lint precheck "
-    "(core gates plus every lint gate that failed in the last 7 days) on the "
-    "worktree and refuses PRECHECK_FAILED; a gate whose lane file is absent "
-    "(check-cookbook without build/bin/z23-dev) is named in precheck_unproven, "
-    "not refused; precheck=run (default) runs it and "
-    "needs the tip to be the worktree HEAD, precheck=skip queues without it and "
-    "appends \" [precheck skipped]\" to the note; any other value is "
-    "refused BAD_INPUT. Optional precheck_budget_ms sets a 180000..720000 ms "
-    "floor on the load-scaled shared deadline; it requires precheck=run and "
-    "cannot be combined with qualify. Over MCP a call without confirm returns a plan "
-    "(plan_id, worktree, branch, head, commits_ahead) and queues nothing; "
-    "repeat it with plan_id and confirm:true to queue, and a moved HEAD or "
-    "changed input is refused PLAN_MISMATCH. The CLI queues at once.", 65536,
+    "Queues a signed tip (default: worktree HEAD) before publishing to origin. "
+    "Refuses unsigned or unrelated tips. "
+    "A repeated tip from the same worktree attaches before qualify and does "
+    "not repeat its gates. New rows refuse CLAIM_OVERLAP for live foreign "
+    "claims in the shared Git repository. This enqueue check does not reserve "
+    "against later claims. Qualify fetches, rebases when behind, checks signed "
+    "commits, regenerates derived files, runs full lint and affected tests, "
+    "and refuses gate-rewritten trees. Qualify failures report QUALIFY_* with "
+    "the relevant group, step, paths or log. The local precheck runs core "
+    "gates and gates that failed in the last seven days; missing gate binaries "
+    "are listed as precheck_unproven. precheck=run requires worktree HEAD; "
+    "precheck=skip adds a skip marker to the note. precheck_budget_ms sets a "
+    "180000..720000 ms floor and requires precheck=run without qualify. "
+    "MCP first returns a plan; repeat with its plan_id and confirm:true to enqueue. "
+    "A moved HEAD or changed input "
+    "refuses PLAN_MISMATCH. The CLI queues at once.", 65536,
     "land,submit,queue,lane,tip",
     "zcl.land_submit_input.v1", "zcl.land.v1",
     "tip,worktree,note,json,qualify,precheck,precheck_budget_ms,plan_id,confirm", "",

@@ -143,6 +143,7 @@
 #endif
 
 #include "command/native_command.h"
+#include "command/native_submit_claim_guard.h"
 #include "command/native_dev_land_prepare.h"
 #include "command/native_dev_land_qualify.h"
 #include "command/native_dev_land_read.h"
@@ -3490,6 +3491,7 @@ static void dl_submit_loaded(const struct dl_dirs *d, struct dl_row *r,
                              struct dl_row *rows, size_t nrows, int lock,
                              const char *qpath, const char *tip,
                              const char *worktree,
+                             struct zcl_submit_claim_guard *claim,
                              struct zcl_command_reply *reply)
 {
     char line[DL_LINE_CAP];
@@ -3499,11 +3501,19 @@ static void dl_submit_loaded(const struct dl_dirs *d, struct dl_row *r,
     if (dl_submit_live_duplicate(d, rows, nrows, tip, worktree, reply)) {
         free(rows);
         dl_unlock(lock);
+        zcl_submit_claim_free(claim);
+        return;
+    }
+    if (!zcl_submit_claim_check(claim, reply)) {
+        free(rows);
+        dl_unlock(lock);
+        zcl_submit_claim_free(claim);
         return;
     }
     if (!dl_submit_next_seq(d, rows, nrows, &seq, &seq_why)) {
         free(rows);
         dl_unlock(lock);
+        zcl_submit_claim_free(claim);
         dl_fail(reply, "QUEUE_READ_FAILED", "submit",
                 "cannot assign a unique sequence while outcomes are unreadable",
                 seq_why);
@@ -3515,11 +3525,13 @@ static void dl_submit_loaded(const struct dl_dirs *d, struct dl_row *r,
     if (!dl_encode_row(r, line, sizeof(line), &len) ||
         !dl_append_row(qpath, line, len)) {
         dl_unlock(lock);
+        zcl_submit_claim_free(claim);
         dl_fail(reply, "QUEUE_WRITE_FAILED", "submit",
                 "cannot append the request row", qpath);
         return;
     }
     dl_unlock(lock);
+    zcl_submit_claim_free(claim);
     dl_outbox(d, r, "queued");
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
     (void)json_push_kv_int(&reply->data, "seq", r->seq);
@@ -3599,12 +3611,12 @@ static int dl_marker_batch_capture(const char *root, char *buf, size_t cap)
 
 /* Ambiguous framing never supplies a prefix of the marker set. Preserve the
  * original per-path resolver for unsupported Git and unusual path bytes. */
-static bool dl_marker_batch_parse(char *buf, size_t cap, char **paths)
+static bool dl_marker_batch_parse(char *buf, size_t cap, char **paths, size_t count)
 {
     size_t len = strlen(buf);
     if (len + 1 >= cap) return false;
     char *row = buf;
-    for (size_t i = 0; i < DL_SUBMIT_MARK_COUNT; i++) {
+    for (size_t i = 0; i < count; i++) {
         char *end = strchr(row, '\n');
         if (!end || end == row || (size_t)(end - row) >= DL_MARKER_PATH_CAP)
             return false;
@@ -3625,7 +3637,7 @@ static char *dl_marker_batch(const char *root, char **paths)
     char *buf = zcl_malloc(DL_MARKER_BATCH_CAP, "land_marker_paths");
     if (!buf) return NULL;
     if (dl_marker_batch_capture(root, buf, DL_MARKER_BATCH_CAP) == 0 &&
-        dl_marker_batch_parse(buf, DL_MARKER_BATCH_CAP, paths)) return buf;
+        dl_marker_batch_parse(buf, DL_MARKER_BATCH_CAP, paths, DL_SUBMIT_MARK_COUNT)) return buf;
     free(buf);
     return NULL;
 }
@@ -3783,31 +3795,16 @@ static const char *dl_submit_qualify(const struct zcl_command_request *req,
     return buf;
 }
 
-/* The tip a submission names: --qualify's qualified HEAD, an explicit
+/* The initial tip a submission names: an explicit
  * --tip, or the HEAD of --worktree. */
 static const char *dl_submit_tip(const struct zcl_command_request *req,
-                                 struct zcl_command_reply *reply, char *buf,
-                                 size_t cap, struct zcl_land_qualify *qr)
+                                 struct zcl_command_reply *reply)
 {
-    const struct json_value *flag = json_get(req->input, "qualify");
-    const char *tip = dl_str(req, "tip"), *worktree = dl_str(req, "worktree");
-    if (flag && flag->type == JSON_BOOL && flag->val.b)
-        return dl_submit_qualify(req, reply, buf, cap, qr);
-    if (!tip && worktree) {
-        const char *args[] = { "rev-parse", "HEAD", NULL };
-        if (dl_git(worktree, args, buf, cap, DL_GIT_TIMEOUT_MS) == 0) {
-            dl_trim(buf);
-            tip = buf;
-        }
-    }
-    if (!tip || !dl_tipish_ok(tip)) {
-        dl_fail(reply, "BAD_INPUT", "submit",
-                "tip is a 7-64 character hex commit id, or --worktree names "
-                "the checkout whose HEAD is submitted",
-                "input.tip missing or not a commit id");
-        return NULL;
-    }
-    return tip;
+    const char *tip = dl_str(req, "tip");
+    if (!tip && dl_str(req, "worktree")) return "HEAD";
+    if (tip && dl_tipish_ok(tip)) return tip;
+    dl_fail(reply, "BAD_INPUT", "submit", "tip must be a commit id or --worktree must name a checkout", "input.tip missing or invalid");
+    return NULL;
 }
 
 /* A qualified submission says which test groups it ran, [] when none, how many
@@ -3903,116 +3900,243 @@ static bool dl_submit_require_signed_tip(const char *allow_unsigned,
     return true;
 }
 
-static bool dl_submit_check_merge_base(const char *root, const char *full,
-                                       struct zcl_command_reply *reply)
+
+/* Capture marker paths and Git identity together. Malformed framing never
+ * supplies partial identity; marker fallback retains its existing behavior. */
+static bool dl_submit_fact_rows(const char *root, bool markers, char *buf,
+                                size_t cap, char **rows)
 {
-    /* Shared history with the branch it is going onto. A tip with no merge
-     * base is not something a rebase can fix. */
-    const char *args[] = { "merge-base", full, "origin/main", NULL };
-    char buf[256];
-    if (dl_git(root, args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0) {
-        dl_fail(reply, "TIP_UNRELATED", "submit",
-                "that commit shares no history with origin/main",
-                "git merge-base found no common ancestor");
+    const char *args[24] = { "git", "-C", root, "rev-parse" };
+    size_t n = 4;
+#ifdef _WIN32
+    args[n++] = "--path-format=relative";
+#endif
+    if (markers) {
+        for (size_t i = 0; i < DL_SUBMIT_MARK_COUNT; i++) {
+            args[n++] = "--git-path";
+            args[n++] = DL_SUBMIT_MARKS[i];
+        }
+    }
+    args[n++] = "--show-toplevel";
+    args[n++] = "--git-common-dir";
+    args[n] = NULL;
+    size_t length = 0;
+    if (!zcl_submit_git_capture(args, buf, cap - 1, &length) ||
+        memchr(buf, 0, length)) return false;
+    buf[length] = 0;
+    return dl_marker_batch_parse(buf, cap, rows,
+                                 markers ? DL_SUBMIT_MARK_COUNT + 2 : 2);
+}
+
+static bool dl_submit_copy_facts(char **rows, char *top, char *common)
+{
+    int a = snprintf(top, DL_MARKER_PATH_CAP, "%s", rows[0]);
+    int b = snprintf(common, DL_MARKER_PATH_CAP, "%s", rows[1]);
+    return a > 0 && a < DL_MARKER_PATH_CAP && b > 0 && b < DL_MARKER_PATH_CAP;
+}
+
+static bool dl_submit_facts_fast(const char *root, char *top, char *common,
+                                 bool *parsed, struct zcl_command_reply *reply)
+{
+    char buf[(DL_SUBMIT_MARK_COUNT + 2) * DL_MARKER_PATH_CAP + 1];
+    char *rows[DL_SUBMIT_MARK_COUNT + 2];
+    *parsed = dl_submit_fact_rows(root, true, buf, sizeof(buf), rows);
+    if (!*parsed) return false;
+    for (size_t i = 0; i < DL_SUBMIT_MARK_COUNT; i++)
+        if (!dl_submit_marker_check(root, DL_SUBMIT_MARKS[i], rows[i], reply)) return false;
+    return dl_submit_copy_facts(rows + DL_SUBMIT_MARK_COUNT, top, common);
+}
+
+static bool dl_submit_facts(const char *root, char *top, char *common,
+                            struct zcl_command_reply *reply)
+{
+    bool parsed = false;
+#if defined(ZCL_TESTING)
+    if (!dl_test_marker_batch_text)
+#endif
+    {
+        bool ok = dl_submit_facts_fast(root, top, common, &parsed, reply);
+        if (parsed) return ok;
+    }
+    if (!dl_submit_markers_check(root, reply)) return false;
+    char buf[2 * DL_MARKER_PATH_CAP + 1];
+    char *rows[2];
+    if (dl_submit_fact_rows(root, false, buf, sizeof(buf), rows) &&
+        dl_submit_copy_facts(rows, top, common)) return true;
+    dl_fail(reply, "GIT_FAILED", "submit", "cannot resolve worktree identity",
+            "Git directory facts were unavailable or ambiguous");
+    return false;
+}
+
+static bool dl_submit_identity(const char *root, const char *tip, bool qualify,
+                               char full[80], struct zcl_command_reply *reply)
+{
+    char spec[96], out[80];
+    if ((strcmp(tip, "HEAD") != 0 && !dl_tipish_ok(tip)) ||
+        snprintf(spec, sizeof(spec), "%s^{commit}", tip) >= (int)sizeof(spec)) {
+        dl_fail(reply, "TIP_UNKNOWN", "submit", "that commit does not exist in the checkout", "invalid tip");
         return false;
     }
-    return true;
+    const char *args[] = { "git", "-C", root, "log", "-1",
+        "--no-show-signature", "--format=format:%H%x00%G?%x00", spec, "--", NULL };
+    size_t length = 0;
+    if (!zcl_submit_git_capture(args, out, sizeof(out), &length)) {
+        dl_fail(reply, "TIP_UNKNOWN", "submit", "that commit does not exist in the checkout", "git log refused the tip");
+        return false;
+    }
+    if (length != 43 || out[40] != 0 || out[42] != 0 ||
+        (!out[41] || !strchr("GBUXYREN", out[41])) || !dl_sha_ok(out)) {
+        dl_fail(reply, "GIT_FAILED", "submit", "cannot verify commit identity", "ambiguous Git log output");
+        return false;
+    }
+    (void)snprintf(full, 80, "%s", out);
+    char sig[2] = { out[41], 0 };
+    return qualify || dl_submit_require_signed_tip(dl_allow_unsigned(), sig, reply);
+}
+
+struct dl_submission {
+    struct dl_dirs dirs;
+    struct zcl_land_qualify qualify;
+    char qpath[4096 + 32];
+    char root[4096], top[4096], common[4096], full[80], tip[64];
+    char note[DL_NOTE_MAX + 1];
+};
+
+
+/* A duplicate discovered during claim checking retains its original row. */
+static bool dl_submit_claim_early(struct dl_submission *s,
+                                  struct zcl_command_reply *reply)
+{
+    struct zcl_submit_claim_guard *claim =
+        zcl_submit_claim_prepare(s->root, s->top, s->common, s->full, reply);
+    if (!claim) return false;
+    struct zcl_command_reply checked;
+    zcl_command_reply_init(&checked, "zcl.land.v1");
+    bool ok = zcl_submit_claim_lock(claim, &checked) &&
+              zcl_submit_claim_check(claim, &checked);
+    zcl_submit_claim_free(claim);
+    if (ok) {
+        zcl_command_reply_free(&checked);
+        return true;
+    }
+    if (dl_submit_prelookup(&s->dirs, s->root, s->full, s->qpath,
+                            sizeof(s->qpath), reply)) {
+        zcl_command_reply_free(&checked);
+        return false;
+    }
+    zcl_command_reply_free(reply);
+    *reply = checked;
+    return false;
+}
+
+static bool dl_submit_verify_tip(struct dl_submission *s, const char *tip, bool qualify,
+                                 struct zcl_command_reply *reply)
+{
+    return dl_submit_identity(s->root, tip, qualify, s->full, reply) &&
+           dl_submit_facts(s->root, s->top, s->common, reply);
+}
+
+static bool dl_submit_initial(const struct zcl_command_request *req,
+                              bool sender_checked, bool qualify,
+                              struct dl_submission *s,
+                              struct zcl_command_reply *reply)
+{
+    if (!zcl_dev_land_precheck_input_valid(req->input, sender_checked, reply)) return false;
+    if (qualify && (!dl_str(req, "worktree") || dl_str(req, "tip"))) {
+        dl_fail(reply, "BAD_INPUT", "submit",
+                "qualify needs --worktree and qualifies its HEAD, not a --tip",
+                "invalid qualify input");
+        return false;
+    }
+    const char *tip = dl_submit_tip(req, reply);
+    if (!tip) return false;
+    if (!dl_dirs_make(&s->dirs)) {
+        dl_state_dir_fail(reply, "submit", &s->dirs);
+        return false;
+    }
+    dl_pool_sweep_and_log(&s->dirs);
+    if (!dl_submit_resolve_root(req, s->root, sizeof(s->root), reply) ||
+        !dl_submit_verify_tip(s, tip, qualify, reply)) return false;
+    const char *note = dl_str(req, "note");
+    if (note && strlen(note) > DL_NOTE_MAX) {
+        dl_fail(reply, "BAD_INPUT", "submit", "note is at most 512 characters",
+                "input.note over the row budget");
+        return false;
+    }
+    /* An existing immutable request attaches before qualification and does
+     * not repeat gates that belong to its original queue row. */
+    if (dl_submit_prelookup(&s->dirs, s->root, s->full, s->qpath,
+                            sizeof(s->qpath), reply)) return false;
+    return dl_submit_claim_early(s, reply);
+}
+
+static bool dl_submit_qualified(const struct zcl_command_request *req,
+                                struct dl_submission *s,
+                                struct zcl_command_reply *reply)
+{
+    const char *tip = dl_submit_qualify(req, reply, s->tip, sizeof(s->tip),
+                                        &s->qualify);
+    if (!tip || !dl_submit_verify_tip(s, tip, false, reply)) return false;
+    return !dl_submit_prelookup(&s->dirs, s->root, s->full, s->qpath,
+                                sizeof(s->qpath), reply);
+}
+
+/* Git capture precedes claim then queue lock. The loaded-row helper owns
+ * both locks through duplicate detection and append, releasing before mail. */
+static void dl_submit_enqueue(struct dl_submission *s,
+                              struct zcl_command_reply *reply)
+{
+    struct dl_row row = {0};
+    row.attempt = 1;
+    (void)snprintf(row.tip, sizeof(row.tip), "%s", s->full);
+    (void)snprintf(row.worktree, sizeof(row.worktree), "%s", s->root);
+    (void)snprintf(row.note, sizeof(row.note), "%s", s->note);
+    (void)snprintf(row.state, sizeof(row.state), "queued");
+    char ts[64];
+    dl_now_iso(ts);
+    (void)snprintf(row.ts, sizeof(row.ts), "%s", ts);
+    struct zcl_submit_claim_guard *claim =
+        zcl_submit_claim_prepare(s->root, s->top, s->common, s->full, reply);
+    if (!claim) return;
+    if (!zcl_submit_claim_lock(claim, reply)) {
+        zcl_submit_claim_free(claim);
+        return;
+    }
+    int lock = dl_rows_lock(s->dirs.land);
+    if (lock < 0) {
+        zcl_submit_claim_free(claim);
+        dl_fail(reply, "QUEUE_WRITE_FAILED", "submit", "cannot take the queue lock", s->qpath);
+        return;
+    }
+    struct dl_row *rows = NULL;
+    size_t nrows = 0;
+    char why[128] = {0};
+    if (!dl_load_rows(s->qpath, &rows, &nrows, why, sizeof(why))) {
+        dl_unlock(lock);
+        zcl_submit_claim_free(claim);
+        dl_fail(reply, "QUEUE_READ_FAILED", "submit",
+                "cannot append while the queue cannot be read",
+                dl_reason_or_path(why, s->qpath));
+        return;
+    }
+    dl_submit_loaded(&s->dirs, &row, rows, nrows, lock, s->qpath,
+                     s->full, s->root, claim, reply);
+    dl_submit_report_groups(reply, &s->qualify);
 }
 
 static void dl_submit(const struct zcl_command_request *req,
                       bool sender_checked,
                       struct zcl_command_reply *reply)
 {
-    struct dl_dirs d;
-    struct dl_row r;
-    struct dl_row *rows = NULL;
-    size_t nrows = 0;
-    char qpath[4096 + 32];
-    char root[4096], sig[64], full[80], ts[64], tip_buf[64];
-    char note_buf[DL_NOTE_MAX + 1];
-    const char *tip, *note;
-    const char *allow_unsigned = dl_allow_unsigned();
-    int lock = -1;
-    struct zcl_land_qualify qr = {0};
-
-    if (!zcl_dev_land_precheck_input_valid(req->input, sender_checked, reply)) return;
-
-    tip = dl_submit_tip(req, reply, tip_buf, sizeof(tip_buf), &qr);
-    if (!tip)
-        return;
-    if (!dl_dirs_make(&d)) {
-        dl_state_dir_fail(reply, "submit", &d);
-        return;
-    }
-    dl_pool_sweep_and_log(&d);
-    if (!dl_submit_resolve_root(req, root, sizeof(root), reply))
-        return;
-    /* The tip has to be a commit THIS checkout can name. A tip nobody can
-     * resolve is not a landing request, it is a typo. */
-    if (!dl_submit_tip_resolve(root, tip, full, reply)) {
-        return;
-    }
-    /* Signature. main rejects an unsigned commit, so a queue that accepted
-     * one would be queueing a push that cannot succeed. */
-    {
-        const char *args[] = { "log", "-1", "--format=%G?", full, NULL };
-        sig[0] = '\0';
-        (void)dl_git(root, args, sig, sizeof(sig), DL_GIT_TIMEOUT_MS);
-        dl_trim(sig);
-    }
-    if (!dl_submit_require_signed_tip(allow_unsigned, sig, reply))
-        return;
-    if (!dl_submit_check_merge_base(root, full, reply))
-        return;
-    note = dl_str(req, "note");
-    if (note && strlen(note) > DL_NOTE_MAX) {
-        dl_fail(reply, "BAD_INPUT", "submit",
-                "note is at most 512 characters",
-                "input.note over the row budget");
-        return;
-    }
-    if (dl_submit_prelookup(&d, root, full, qpath, sizeof(qpath), reply))
-        return;
-    if (!dl_submit_precheck(req, &d, root, full,
-                            sender_checked, &qr, note_buf, sizeof(note_buf),
-                            reply))
-        return;
-    memset(&r, 0, sizeof(r));
-    r.attempt = 1;
-    (void)snprintf(r.tip, sizeof(r.tip), "%s", full);
-    (void)snprintf(r.worktree, sizeof(r.worktree), "%s", root);
-    (void)snprintf(r.note, sizeof(r.note), "%s", note_buf);
-    (void)snprintf(r.state, sizeof(r.state), "queued");
-    dl_now_iso(ts);
-    (void)snprintf(r.ts, sizeof(r.ts), "%s", ts);
-    /* The lock covers seq assignment plus the append, so a step rewriting
-     * the file cannot drop this row. The critical section is local file IO
-     * only — never a git call, never a proof. */
-    lock = dl_rows_lock(d.land);
-    if (lock < 0) {
-        dl_fail(reply, "QUEUE_WRITE_FAILED", "submit",
-                "cannot take the queue lock", qpath);
-        return;
-    }
-    char queue_why[128] = {0};
-    if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
-                      sizeof(queue_why))) {
-        dl_unlock(lock);
-        dl_fail(reply, "QUEUE_READ_FAILED", "submit",
-                "cannot append while the queue cannot be read",
-                dl_reason_or_path(queue_why, qpath));
-        return;
-    }
-    /* A retry of the same immutable tip from the same checkout attaches to
-     * its live queue row. Keep the original age and proof pair: appending a
-     * second row would schedule a second full proof of identical work. The
-     * checkout is part of this local lookup because a different locator may
-     * be needed to recover a vanished submitter. Terminal outcomes remain
-     * separate: a later submission may need a new current-base proof. */
-    dl_submit_loaded(&d, &r, rows, nrows, lock, qpath, full, root, reply);
-    dl_submit_report_groups(reply, &qr);
+    struct dl_submission s = {0};
+    const struct json_value *flag = json_get(req->input, "qualify");
+    bool qualify = flag && flag->type == JSON_BOOL && flag->val.b;
+    if (!dl_submit_initial(req, sender_checked, qualify, &s, reply)) return;
+    if (qualify && !dl_submit_qualified(req, &s, reply)) return;
+    if (!dl_submit_precheck(req, &s.dirs, s.root, s.full, sender_checked,
+                            &s.qualify, s.note, sizeof(s.note), reply)) return;
+    dl_submit_enqueue(&s, reply);
 }
-
 static bool dl_cancel_push_settled(const struct dl_dirs *d, const char *qpath,
                                    long long seq, struct dl_row *settled);
 static bool dl_push_pair_same(const struct dl_row *a, const struct dl_row *b);
