@@ -11,25 +11,34 @@ responses and publishes `share-ready.json` only after observing host status.
 The normal tiny-app sender remains the default when `--share` is absent.
 <!-- claim: symbol-present aj_role_sender_share tools/app_journey_live.c # caller-pinned original share sender -->
 
-The source fixture exercises the native command boundaries with a fake child,
-including mismatched identity, plan, carrier, digest and status refusals.
-The focused selftest passed on source `b079eee79d0cb6df72ead2aca710ad5cd1c9a2e9` through the forced R2 gate; its archive and manifest verified and the successful scratch was released. A real original-share sender, receiver, graphical
-observation, and two-host exchange: NOT RUN. This fixture does not establish
-live network or GUI behavior.
-
-A first live sender on source `4ba42f5a65465d1899025cbcf1418cf6bb17dd00`
-verified the reviewed share and its receive plan, but receive commit refused
-`wrong-chain-id` while the fixture selected regtest. No hosting or live
-exchange was established. The share contains a mainnet chain identifier;
-acceptance remains enforced by the native package store.
-
 Split roles accept `--network=main` or `--network=regtest`, defaulting to
 regtest. Main mode omits the regtest and validation-disabling flags, binds its
 node listener to loopback, and uses a fresh caller-owned home and datadir.
 The sender's explicit dead-sink connection suppresses normal outbound peer
 selection; the Tor endpoint remains reachable, so this is not an inbound
-allowlist. Main-mode focused checks and an original-share rerun: NOT RUN.
+allowlist. For a mainnet share, include `--network=main` alongside the pinned
+share arguments. The sender records the network in `share-ready.json`; a
+receiver must select the same network.
 
-For an original mainnet share, include `--network=main` alongside the
-caller-pinned share arguments. The sender records the selected network in
-`share-ready.json`; a receiver must select the same network.
+The focused fake-child selftest passed through the forced R2 gate on source
+`7c5e43bbc010ff6437f3c612f88b6fcc3580bf7d`, including the main-mode
+supervised node worker and binding and refusal checks. Its evidence manifest
+verified and successful scratch was released. This fixture is not a live
+network or GUI test.
+
+A first live sender on source `4ba42f5a65465d1899025cbcf1418cf6bb17dd00`
+verified the reviewed share and its receive plan, but receive commit refused
+`wrong-chain-id` while the fixture selected regtest. No hosting was established
+in that run. The share contains a mainnet chain identifier; native package
+acceptance remains enforced.
+
+A main-mode sender on `7c5e43bbc010ff6437f3c612f88b6fcc3580bf7d` then
+verified, received and built the original share, pinned the same bytes as a
+carrier and observed an enabled host at generation 1. The share SHA-256 was
+`6a714436ba1a66b98339cfeddbb68dbdf634fd4dea9d335db6fad663e1cb5cc9`;
+the locally rebuilt image SHA3 was
+`baf203b90f1f4149d93812ebee99695fec709aaacb5913e775fc52032f4ea0de`.
+The isolated fixture reported zero peers. Receive commit took 65.013 seconds
+and build commit 12.632 seconds; both reported exceeded budgets. The sender
+finished successfully and its gate scratch was released. Remote data transfer,
+cross-host retrieval, catalog discovery and graphical operation: NOT RUN.
