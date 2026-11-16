@@ -33,6 +33,17 @@
  * after masking 0x3f and any coordinate >= q (Fq::from_repr), and bellman
  * groth16 Proof::read refuses an A, B or C at infinity. Section 3b pins
  * those refusals.
+ *
+ * HISTORY: these refusals tighten what Z23 accepted before. Every zclassic
+ * release tag pins the same librustzcash 06da3b9 and the same bellman 0.1.0,
+ * pairing 0.14.2 and sapling-crypto 21084bd hashes, and zclassicd runs
+ * Proof::read on every Sapling spend and output (ContextualCheckBlock ->
+ * ContextualCheckTransaction, no checkpoint skip) and on every Groth16
+ * JoinSplit (the GrothProof branch of JSDescription::Verify ignores the
+ * ProofVerifier) for every block it accepts through AcceptBlock, as each
+ * block was when it was mined. So a chain zclassicd accepted holds none of
+ * these encodings. CONSENSUS_PARITY_DOCTRINE still asks for a full-history
+ * replay (make replay-canary-genesis) before the tightening lands.
  */
 
 #include "test/test_core.h"
@@ -422,12 +433,62 @@ static int adv_proof_identity_points(void)
     return failures;
 }
 
+/* The uncompressed decoders load verifying and proving keys. pairing ec.rs
+ * G1Uncompressed/G2Uncompressed into_affine_unchecked reads each coordinate
+ * with Fq::from_repr, which is strict < q, so a coordinate equal to q is
+ * refused there too. x = q stands for x = 0 here, and (0, 2) is on G1, so only
+ * the field check can refuse it. */
+static int adv_uncompressed_coordinate_equal_to_modulus(void)
+{
+    int failures = 0;
+    struct g1_point p;
+    uint8_t g1_ok[96] = {0}, g1_q[96] = {0};
+    g1_ok[95] = 0x02;                                  /* (0, 2) */
+    memcpy(g1_q, FP_MODULUS_BE, 48);                   /* (q, 2) */
+    g1_q[95] = 0x02;
+    ADV_CHECK("g1 uncompressed (0, 2) decodes (control: on curve)",
+              g1_from_uncompressed(&p, g1_ok));
+    ADV_CHECK("g1 uncompressed x = q -> REJECT (non-canonical x)",
+              !g1_from_uncompressed(&p, g1_q));
+
+    /* G2: take a point with x = (k, 0), write it uncompressed, then write
+     * x.c1 as q instead of 0. */
+    struct g2_point q2;
+    uint8_t enc[96] = {0};
+    bool found = false;
+    for (unsigned k = 0; k < 256 && !found; k++) {
+        memset(enc, 0, sizeof(enc));
+        enc[0] = 0x80;
+        enc[95] = (uint8_t)k;
+        found = g2_from_compressed(&q2, enc);
+    }
+    ADV_CHECK("g2 point with x.c1 = 0 found (control)", found);
+    if (!found)
+        return failures;
+    struct fp2 ax, ay;
+    g2_to_affine(&ax, &ay, &q2);
+    uint8_t g2_ok[192];
+    fp_to_bytes(g2_ok, &ax.c1);
+    fp_to_bytes(g2_ok + 48, &ax.c0);
+    fp_to_bytes(g2_ok + 96, &ay.c1);
+    fp_to_bytes(g2_ok + 144, &ay.c0);
+    ADV_CHECK("g2 uncompressed x = (k, 0) decodes (control)",
+              g2_from_uncompressed(&q2, g2_ok));
+    uint8_t g2_q[192];
+    memcpy(g2_q, g2_ok, sizeof(g2_q));
+    memcpy(g2_q, FP_MODULUS_BE, 48);                   /* x.c1 = q */
+    ADV_CHECK("g2 uncompressed x.c1 = q -> REJECT (non-canonical x)",
+              !g2_from_uncompressed(&q2, g2_q));
+    return failures;
+}
+
 static int adv_rust_decode_parity(void)
 {
     int failures = 0;
     printf("librustzcash proof-point decode parity\n");
     failures += adv_dirty_infinity_one_bit();
     failures += adv_coordinate_equal_to_modulus();
+    failures += adv_uncompressed_coordinate_equal_to_modulus();
     failures += adv_proof_identity_points();
     return failures;
 }
