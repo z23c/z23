@@ -260,7 +260,6 @@ static bool pr_capture(const char *source, const char *scratch)
         ok = false;
     return ok && count > 0;
 }
-#endif
 
 static bool pr_find_manifest(struct pr_ctx *c)
 {
@@ -673,6 +672,7 @@ static bool pr_compare(const struct pr_ctx *c, const struct pr_rebuilt *rebuilt,
     reply->error.mutated = true;
     return false;
 }
+#endif
 
 void zcl_native_handle_plugin_reproduce(const struct zcl_command_request *request,
                                         struct zcl_command_reply *reply)

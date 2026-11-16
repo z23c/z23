@@ -692,6 +692,7 @@ static bool su_slot_dir(const char *root, const char *sha, char *dir, size_t cap
     return n > 0 && (size_t)n < cap;
 }
 
+#if defined(__linux__)
 static bool su_binding_store(const char *root,
     const struct zcl_land_selfupgrade_binding *b)
 {
@@ -709,6 +710,7 @@ static bool su_binding_store(const char *root,
     }
     return su_publish_file(f, tmp, path, dir);
 }
+#endif
 
 static bool su_binding_parse(char *wire, const char *sha,
                             struct zcl_land_selfupgrade_binding *b)
