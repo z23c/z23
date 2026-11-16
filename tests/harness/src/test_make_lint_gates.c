@@ -2002,9 +2002,42 @@ static int t_agent_verify_preflight(void)
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (t-fast-exact)' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
         ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=models > explicit.log 2>&1\n"
-        "! grep -q dev-bin calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n";
+        "if grep -q dev-bin calls; then exit 1; fi; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "preflight");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
+static int t_agent_verify_empty_exact(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p build/bin bin\n"
+        "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
+        "printf '#!/bin/sh\\ncase $1 in status) exit 0;; merge-base) echo base;; *) exit 1;; esac\\n' > bin/git; chmod +x bin/git\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\nexit 0\\n' > submake; chmod +x submake\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> selector-calls\\nprintf \"%%s\\n\" \"${SELECTOR_REPLY:?}\\n\"\\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
+        "PATH=\"$2/bin:$PATH\"; export PATH\n"
+        "SELECTOR_REPLY='{\"groups\":\"\",\"selector\":\"exact\",\"groups_selected\":0}'; export SELECTOR_REPLY\n"
+        "make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > empty-exact.log 2>&1\n"
+        "if grep -q t-fast-exact calls; then exit 1; fi\n"
+        "grep -Fq 'agent-verify: selection exact groups=0 ' build/scratch/agent-verify.rc\n"
+        "grep -Fq 'agent-verify: exact groups=0 selects no runtime tests; static gates still run' build/scratch/agent-verify.rc\n"
+        "for gate in check-capability-closure proof-lint-prebuild docs-capability-inventory check-kpi-floor lint-fast; do grep -q \"$gate\" calls; done\n"
+        "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
+        ": > calls; SELECTOR_REPLY='{\"groups\":\"\",\"selector\":\"universal\",\"groups_selected\":0}'; export SELECTOR_REPLY\n"
+        "if make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > empty-universal.log 2>&1; then exit 1; fi\n"
+        "if grep -q t-fast-exact calls; then exit 1; fi\n"
+        "if grep -q check-capability-closure calls; then exit 1; fi\n"
+        "grep -Fq 'proof selector refused this range' empty-universal.log\n"
+        ": > calls; SELECTOR_REPLY='{\"selector\":\"exact\",\"groups_selected\":0}'; export SELECTOR_REPLY\n"
+        "if make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > missing-groups.log 2>&1; then exit 1; fi\n"
+        "if grep -q t-fast-exact calls; then exit 1; fi\n"
+        "if grep -q check-capability-closure calls; then exit 1; fi\n"
+        "grep -Fq 'proof selector refused this range' missing-groups.log\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "empty_exact");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
@@ -2016,7 +2049,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_agent_verify_preflight() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_agent_verify_preflight() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 

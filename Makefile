@@ -18166,12 +18166,14 @@ agent-verify:
 	    why=$$(printf '%s' "$$sel" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p'); \
 	    detail=$$(printf '%s' "$$sel" | sed -n 's/.*"detail":"\([^"]*\)".*/\1/p'); \
 	    count=$$(printf '%s' "$$sel" | sed -n 's/.*"groups_selected":\([0-9]*\).*/\1/p'); \
+	    groups_field=$$(printf '%s' "$$sel" | sed -n 's/.*"groups":".*/present/p'); \
 	    names=$$(printf '%s' "$$only" | tr ',' '\n' | grep -c .); \
-	    if [ -z "$$kind" ] || [ "$$names" != "$$count" ] || { [ -z "$$only" ] && [ -z "$$rflag" ]; }; then \
+	    if [ "$$groups_field" != present ] || [ -z "$$kind" ] || [ "$$names" != "$$count" ] || { [ -z "$$only" ] && [ -z "$$rflag" ] && { [ "$$kind" != exact ] || [ "$$count" != 0 ]; }; }; then \
 	       echo "agent-verify: the proof selector refused this range or its reply exceeded the leaf budget (PROOF_SELECT_REPLY_TOO_LARGE); use ONLY=<group,group>" >&2; \
 	       printf '%s\n' "$$sel" | cut -c1-400 >&2; exit 2; \
 	    fi; \
 	    echo "agent-verify: selection $$kind groups=$$count reason=$$why detail=$$detail base=$$base$${rflag:+ names=$$only} select_secs=$$(($$(date +%s) - q0))" | tee -a build/scratch/agent-verify.rc; \
+	    if [ "$$kind" = exact ] && [ "$$count" = 0 ]; then echo "agent-verify: exact groups=0 selects no runtime tests; static gates still run" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \

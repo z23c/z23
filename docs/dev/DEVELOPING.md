@@ -1029,6 +1029,12 @@ then `agent-verify: total secs=<total>` and the verdict line, `agent-verify: OK`
 `make lint` and the wide group list remain the landing step's job.
 The selector bootstrap and exact test step both use `ZCL_TEST_WERROR=1`.
 This aligns their strict test-compile policy.
+An exact `groups=0` response is valid when the proof selects no runtime test
+groups. The wrapper then prints `agent-verify: exact groups=0 selects no runtime tests; static gates still run`,
+omits only `t-fast-exact`, and runs every remaining static gate. Its final `OK`
+is not a runtime-test pass. Empty universal and malformed replies still fail.
+<!-- claim: symbol-present agent-verify Makefile # exact zero-group selection is distinct from runtime test execution -->
+<!-- claim: symbol-present dp_worker_dimensions tools/dev/dev_proof.c # proof test work is conditional on a nonzero selected count -->
 
 The last line of `build/scratch/agent-verify.rc` is `agent-verify: OK` or
 `agent-verify: FAILED (<steps>)`, directly after the total line. A file without that last line is an
