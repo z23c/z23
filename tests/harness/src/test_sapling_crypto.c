@@ -1,5 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Fr/Fs field arithmetic, Jubjub, BLS12-381, PRF, FF1 tests. */
+ * Fr/Fs field arithmetic, Jubjub, BLS12-381, PRF, FF1 tests.
+ *
+ * ACCEL-ORACLE: core/modules/sapling/src/fr.c
+ * fr_add / fr_sub / fr_neg and fs_add / fs_neg run as x86-64 asm carry chains
+ * (bls12_381_fp_inline.h) with portable C chains elsewhere. The
+ * "carry chains match compare-then-subtract" test below pins them, limb for
+ * limb and for non-canonical inputs too, to the compare-and-branch form they
+ * replaced. */
 
 #include "platform/time_compat.h"
 #include "test/test_core.h"
