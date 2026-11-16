@@ -3,9 +3,9 @@
  * test_boot_self_respawn — the off-systemd self-respawn ARMING decision
  * (engine/composition/src/boot_self_respawn.c). This is the contract every clean-shutdown
  * exit point relies on to decide "re-exec /proc/self/exe": engine/entry/main.c's
- * post-app_shutdown() path AND boot_services_shutdown.c's straggler-guard
- * _exit path both call boot_self_respawn_exec_or_return(), which re-execs iff
- * boot_self_respawn_armed(). The truth table proven here:
+ * post-app_shutdown() path calls boot_self_respawn_exec_or_return(), which
+ * re-execs iff boot_self_respawn_armed() (the straggler-guard _exit in
+ * boot_services_shutdown.c does not call it). The truth table proven here:
  *
  *   respawn flag latched   argv captured   systemd notify   => armed?
  *   -------------------------------------------------------------------
@@ -31,6 +31,7 @@
 #include "services/chain_tip_watchdog.h"
 #include "util/supervisor_backstop.h"
 #include "util/sd_notify.h"
+#include "util/shutdown_stagewatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,163 @@ static void bsr_baseline(void)
     sd_notify_reset_for_testing();             /* g_active = 0 -> off systemd */
     unsetenv("NOTIFY_SOCKET");
     boot_self_respawn_set_argv(NULL);          /* no argv captured */
+    boot_self_respawn_clear_operator_stop_for_testing(); /* no stop noted */
+}
+
+/* Test seams for exec_or_return(): count exec attempts; the window hook lands
+ * an operator stop after the armed() check, before the final one. */
+static int g_bsr_exec_calls;
+static char *const *g_bsr_exec_argv;
+
+static int bsr_fake_exec(const char *path, char *const argv[])
+{
+    (void)path;
+    g_bsr_exec_calls++;
+    g_bsr_exec_argv = argv;
+    return -1;
+}
+
+static void bsr_window_stop(void)
+{
+    boot_self_respawn_note_operator_stop();
+}
+
+static bool bsr_reason_is_operator(const char *dir)
+{
+    char reason[64] = "";
+    bool forced = false;
+    return shutdown_stagewatch_read_exit_reason(dir, reason, sizeof(reason),
+                                                &forced) &&
+           strcmp(reason, SHUTDOWN_EXIT_REASON_OPERATOR) == 0;
+}
+
+/* Armed state with the stagewatch pointed at a scratch datadir of our own, so
+ * no breadcrumb is ever written outside the test's scratch. */
+static bool bsr_armed_in_scratch(char **argv, char *dir, size_t n)
+{
+    bsr_baseline();
+    shutdown_stagewatch_reset_for_test();
+    if (!test_mkdtemp(dir, n, "bsr_stop"))
+        return false;
+    shutdown_stagewatch_begin(dir);
+    boot_self_respawn_set_argv(argv);
+    chain_tip_watchdog_request_respawn();
+    g_bsr_exec_calls = 0;
+    g_bsr_exec_argv = NULL;
+    return true;
+}
+
+static void bsr_scratch_done(const char *dir)
+{
+    boot_self_respawn_set_test_hooks(NULL, NULL);
+    shutdown_stagewatch_reset_for_test();
+    (void)test_rm_rf_recursive(dir);
+    bsr_baseline();
+}
+
+/* The window between armed() and execv: with no stop the exec is attempted
+ * with the captured argv (control); a stop landing in the window declines it
+ * and records the operator breadcrumb. */
+static int bsr_exec_window_rows(char **argv)
+{
+    int failures = 0;
+    char dir[512];
+
+    if (!bsr_armed_in_scratch(argv, dir, sizeof(dir))) {
+        printf("  boot_self_respawn: scratch datadir... FAIL\n");
+        return 1;
+    }
+    boot_self_respawn_set_test_hooks(NULL, bsr_fake_exec);
+    boot_self_respawn_exec_or_return();
+    BSR_CHECK("armed, no stop -> exec attempted once with the captured argv",
+              g_bsr_exec_calls == 1 && g_bsr_exec_argv == argv);
+    BSR_CHECK("armed, no stop -> no operator breadcrumb",
+              !bsr_reason_is_operator(dir));
+    bsr_scratch_done(dir);
+
+    if (!bsr_armed_in_scratch(argv, dir, sizeof(dir))) {
+        printf("  boot_self_respawn: scratch datadir... FAIL\n");
+        return failures + 1;
+    }
+    boot_self_respawn_set_test_hooks(bsr_window_stop, bsr_fake_exec);
+    boot_self_respawn_exec_or_return();
+    BSR_CHECK("stop landing after armed() -> no exec (declined)",
+              g_bsr_exec_calls == 0);
+    BSR_CHECK("stop landing after armed() -> operator breadcrumb recorded",
+              bsr_reason_is_operator(dir));
+    bsr_scratch_done(dir);
+    return failures;
+}
+
+/* A stop noted before the call: declined by armed(); the decline path ran,
+ * proven by the operator breadcrumb in our scratch datadir and zero execs. */
+static int bsr_declined_rows(char **argv)
+{
+    int failures = 0;
+    char dir[512];
+
+    if (!bsr_armed_in_scratch(argv, dir, sizeof(dir))) {
+        printf("  boot_self_respawn: scratch datadir... FAIL\n");
+        return 1;
+    }
+    boot_self_respawn_set_test_hooks(NULL, bsr_fake_exec);
+    boot_self_respawn_note_operator_stop();
+    boot_self_respawn_exec_or_return();
+    BSR_CHECK("noted stop: exec_or_return() returned without exec",
+              g_bsr_exec_calls == 0);
+    BSR_CHECK("noted stop: decline path recorded the operator breadcrumb",
+              bsr_reason_is_operator(dir));
+    bsr_scratch_done(dir);
+    return failures;
+}
+
+/* Row 3b: an operator stop (SIGINT/SIGTERM noted by the handler) beats a
+ * latched respawn. Both latches, off systemd, argv captured: still NOT armed.
+ * Without the stop the same state is armed (row 3), so the stop alone flips it. */
+static int bsr_operator_stop_rows(char **argv)
+{
+    int failures = 0;
+
+    bsr_baseline();
+    boot_self_respawn_set_argv(argv);
+    chain_tip_watchdog_request_respawn();
+    BSR_CHECK("latched + argv, no stop noted -> ARMED (control)",
+              boot_self_respawn_armed());
+    boot_self_respawn_note_operator_stop();
+    BSR_CHECK("latched + argv + operator stop noted -> NOT armed",
+              !boot_self_respawn_armed());
+
+    /* The stop note is only a gate: clearing it restores the armed state, so
+     * armed() reads it live, not a cache. */
+    boot_self_respawn_clear_operator_stop_for_testing();
+    BSR_CHECK("stop cleared -> latch ARMED again",
+              boot_self_respawn_armed());
+
+    /* The restart-pending app_init path exits as an operator stop only when a
+     * stop was noted (and never under systemd). */
+    bsr_baseline();
+    BSR_CHECK("no stop noted -> operator_stop_exit() false",
+              !boot_self_respawn_operator_stop_exit());
+    boot_self_respawn_note_operator_stop();
+    {
+        /* Writes its breadcrumb: keep it inside our own scratch datadir. */
+        char dir[512];
+        shutdown_stagewatch_reset_for_test();
+        bool have = test_mkdtemp(dir, sizeof(dir), "bsr_stopexit") != NULL;
+        if (have)
+            shutdown_stagewatch_begin(dir);
+        BSR_CHECK("stop noted off systemd -> operator_stop_exit() true",
+                  have && boot_self_respawn_operator_stop_exit());
+        BSR_CHECK("operator_stop_exit() wrote the operator breadcrumb",
+                  have && bsr_reason_is_operator(dir));
+        shutdown_stagewatch_reset_for_test();
+        if (have)
+            (void)test_rm_rf_recursive(dir);
+    }
+    bsr_baseline();
+    failures += bsr_declined_rows(argv);
+    failures += bsr_exec_window_rows(argv);
+    return failures;
 }
 
 int test_boot_self_respawn(void);
@@ -89,6 +247,8 @@ int test_boot_self_respawn(void)
      * back to NOT armed, proving armed() reads the live latches, not a cache. */
     chain_tip_watchdog_test_reset_runtime();
     BSR_CHECK("clearing the only latch -> NOT armed again", !boot_self_respawn_armed());
+
+    failures += bsr_operator_stop_rows(fake_argv);
 
     /* ── Row 4: flag latched + argv captured but systemd notify ACTIVE -> NOT
      *    armed. Under systemd, Restart=always is the sole respawn authority; a

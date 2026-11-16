@@ -38,6 +38,32 @@ extern "C" {
  * re-exec can pass the identical command line. Idempotent; a NULL disarms. */
 void boot_self_respawn_set_argv(char **argv);
 
+/* Record that the operator asked this process image to stop (SIGINT or
+ * SIGTERM delivered to the process). Async-signal-safe: one lock-free atomic
+ * store, called from engine/entry/main.c signal_handler(). Internal shutdowns
+ * (watchdog, install respawn, straggler guard) never call it. Once noted, the
+ * process never self-respawns: the stop wins over any latched respawn request,
+ * so the node exits as an operator stop instead of re-exec'ing and running on.
+ * The note lives only in this process image (a re-exec starts clean). */
+void boot_self_respawn_note_operator_stop(void);
+
+/* For an exit path that would otherwise report a failure while the operator
+ * had asked to stop (the app_init restart-pending path): true iff an operator
+ * stop is noted and we are off systemd (call boot_self_respawn_prepare_early()
+ * first so the supervisor is known). Records the operator exit-reason
+ * breadcrumb; the caller then exits as a clean operator stop. Under systemd it
+ * returns false and nothing changes. */
+bool boot_self_respawn_operator_stop_exit(void);
+
+/* Test seam: window_hook runs right before exec_or_return()'s last
+ * operator-stop check (a test lands a stop there); exec_fn replaces execv.
+ * NULL, NULL restores production behavior. */
+void boot_self_respawn_set_test_hooks(void (*window_hook)(void),
+                                      int (*exec_fn)(const char *, char *const[]));
+
+/* Test seam: forget a noted operator stop. */
+void boot_self_respawn_clear_operator_stop_for_testing(void);
+
 /* True iff a self-respawn is armed right now: a respawn flag is latched
  * (chain_tip_watchdog_respawn_requested() || supervisor_backstop_respawn_
  * requested()), there is NO systemd notify socket (sd_notify_is_active()==

@@ -127,6 +127,12 @@ static VOID CALLBACK shutdown_timer_callback(PVOID context, BOOLEAN fired)
 
 static void signal_handler(int sig)
 {
+    /* An operator stop (SIGINT/SIGTERM) must never be swallowed by a latched
+     * self-respawn. Noted before the idempotence guard below, because a
+     * respawn-driven shutdown may already have set g_shutdown_requested.
+     * One atomic store: async-signal-safe. */
+    if (sig == SIGINT || sig == SIGTERM)
+        boot_self_respawn_note_operator_stop();
     if (g_shutdown_requested) {
         /* Repeated SIGTERM is normal under service managers and must be
          * idempotent. Keep Ctrl-C as the operator's immediate escape hatch. */
@@ -732,6 +738,23 @@ static int main_check_boot_guards(const struct app_context *ctx)
     return -1;
 }
 
+/* A committed wallet cutover wants a restart. Re-execs when armed (never
+ * returns then). True iff the operator stopped this boot meanwhile: the caller
+ * exits as that stop (the committed state is durable and the next start
+ * continues from it) instead of reporting BOOT_INIT_FAILED. */
+static bool main_cutover_restart_or_stop(void)
+{
+    if (!boot_old_cutover_restart_cleanup())
+        return false;
+    if (boot_self_respawn_prepare_early())
+        boot_self_respawn_exec_or_return();
+    /* A boot that failed for a real reason keeps its failure exit even when a
+     * stop was noted (the stop already suppressed the self-respawn above). */
+    if (boot_error_reported())
+        return false;
+    return boot_self_respawn_operator_stop_exit();
+}
+
 /* app_init plus every post-init path that exits instead of serving. Each
  * fallible step keeps its own paired cleanup on its own return path — the
  * caller never returns past this helper with a shutdown owed. */
@@ -745,9 +768,9 @@ static bool main_app_init_and_one_shots(struct app_context *ctx, int *rc)
         }
         (void)boot_projection_failure_cleanup();
         if (boot_old_cutover_restart_pending()) {
-            if (boot_old_cutover_restart_cleanup()) {
-                if (boot_self_respawn_prepare_early())
-                    boot_self_respawn_exec_or_return();
+            if (main_cutover_restart_or_stop()) {
+                *rc = 0;
+                return true;
             }
             fprintf(stderr, "FATAL: committed wallet cutover restart unavailable\n");
         }
@@ -1049,8 +1072,7 @@ int main(int argc, char **argv)
     /* #8 — capture argv for a possible in-process self-respawn (the watchdog
      * sets the respawn flag for a genuine-liveness stall when off-systemd).
      * The decision + re-exec live in engine/composition/src/boot_self_respawn.c so every
-     * shutdown exit point (here AND the straggler-guard _exit in
-     * boot_services_shutdown.c) honors an armed request identically.
+     * shutdown exit point that calls it honors an armed request identically.
      * This must receive the REAL process argv — never a synthetic array. */
     boot_self_respawn_set_argv(argv);
 
@@ -1078,12 +1100,10 @@ int main(int argc, char **argv)
      * by the fresh boot, so self-respawn is bounded exactly like a systemd
      * restart and cannot loop unbounded.
      *
-     * The decision + execv are centralized in engine/composition/src/boot_self_respawn.c
-     * so the straggler-guard _exit path in boot_services_shutdown.c (a
-     * background worker missed its join window; the destructive frees are
-     * skipped and the process exits early) honors an armed respawn the SAME
-     * way — an early exit there used to silently drop the request off-systemd,
-     * leaving the node DOWN. */
+     * The decision + execv are centralized in engine/composition/src/boot_self_respawn.c.
+     * (The straggler-guard _exit in boot_services_shutdown.c, taken when a
+     * background worker misses its join window, does not call
+     * boot_self_respawn_exec_or_return(); it exits early without re-exec.) */
     app_shutdown();
     boot_self_respawn_exec_or_return();
     return 0;
