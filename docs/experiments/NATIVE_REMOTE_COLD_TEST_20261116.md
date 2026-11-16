@@ -9,11 +9,12 @@ An older receiver that rejects the unknown input refuses rather than silently
 running a cached request. Fleet job results are observations, not native proof
 receipts.
 
-The source-level local job and SSH transport fixtures check the constructed
-arguments and input refusals. They do not prove that a remote receiver ran a
-cold group. The command_registry_catalog and native_api_contract groups passed on
-`18ed76ed778fbf7043fd178ab3a436c5105fc783`; dev_job passed on test-only repair
-`1a13ff234f7b2d3a81aac95b06407cbebaa67f4b` in 19.784 seconds.
+After the complexity refactor, the complexity gate passed without baseline
+changes. On commit `c055837140e926186e00809d11a2bc34f2215460`, the focused
+`dev_job`, `command_registry_catalog` and `native_api_contract` groups passed
+cold with zero failures, skips, environment-unobserved or load-flaky cases.
+The focused log SHA-256 is
+`38f85a04f6a98afc4ff9b4ce38fde8b305c1d82544877fda531f2f93f5dd2aca`.
 
 A real local receiver check requires three jobs against the same isolated
 `ZCL_TESTCACHE_STORE_ROOT` with `ZCL_TEST_CACHE=1`: seed a passing `hex_codec`
@@ -31,20 +32,19 @@ Wait for each returned job ID before the next start. For the third start add
 `--no_cache=true`; inspect each job log and verdict for the expected cache
 state. Preserve the job logs, then retire only this caller-owned cache after
 all three jobs are terminal and no process holds it. A local receiver uses no
-`peer`; remote
-routing additionally requires an authorized SSH peer and candidate receiver
-binary. Neither observation is a proof receipt.
+`peer`; remote routing additionally requires an authorized SSH peer and
+candidate receiver binary. Neither observation is a proof receipt.
 
 On 2026-11-16 the real local receiver ran those three jobs from clean commit
-`1a13ff234f7b2d3a81aac95b06407cbebaa67f4b` with binary SHA-256
-`9d7d62529665e53670552ea8a3ffca9bb53cd90870320383b3a5e05263d7baf3`.
+`c055837140e926186e00809d11a2bc34f2215460` with binary SHA-256
+`62a86c1a2ccf80545caeeb236e29c9c17fbb22feaedc56f6d3bbf1aa21509d3f`.
 All returned zero with no failures, skips, environment-unobserved or load-flaky
 cases; each reported toolkey `43e314c64cc4`.
 
 | Job | Result | Groups run | Groups cached | Log SHA-256 |
 | --- | --- | ---: | ---: | --- |
-| `j6afb472d-178df1-1` | cold, stored 1 | 1 | 0 | `3009c9ee1ca1ebe969f9bdef2afb4385f4b0bbeacc364cd04eec58b20936a9d1` |
-| `j6afb4793-17cfee-1` | cached | 0 | 1 | `7c73d2ff5cc6cb7c439ca2245bac6e0171d09234efebdf4c33a4e219d48647c4` |
-| `j6afb47e9-1873a7-1` | no_cache, cold | 1 | 0 | `e6dd423fb794e6973831646f07fd0bd47d83c41353786c77d7500e2a8d1390ec` |
+| `j6afb4c22-214afb-1` | cold, stored 1 | 1 | 0 | `660a784c3bf2c99a3f6c4f03be9e6a3c29a4a2d1eb3c0d5dce74b8ffd2b84c46` |
+| `j6afb4c68-21efe8-1` | cached | 0 | 1 | `d94f9fb83318f82f9f67cdb876e76c8c4b2e125f39cdcadd3a3495d30ace88bc` |
+| `j6afb4cae-22066b-1` | no_cache, cold | 1 | 0 | `9aea55f21eed7d91aafcb9172bb416de9172057d7f320318bdb4e5c51c4a606d` |
 
 The SSH forwarding fixture is mocked; no live remote receiver was exercised.
