@@ -1266,3 +1266,7 @@ later lane flips it HARD.
 - 2026-11-16T20:17:01Z — REASON: sapling lazy-init data races: Jubjub d constant made a compile-time const (fr.c); CPUID flags via pthread_once and Fr/Fp/Fq dispatch pointers as relaxed atomics with an idempotent initialiser (fr_avx512.c, bn254_accel.c). No value or selected implementation changes. Owner-authorized in-session: YOU HAVE TO DO THE Z23 CORE UNSEAL YOU HAVE AUTHORITY
   old ROOT: abbe83b84b32ac1b490f2f508b286e059a2c7592c84be69a6b4a4f2a7b035f4a
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-16T22:42:02Z — REASON: Owner-authorised prover and field-arithmetic speed work for the zclassicd C23 port: Pippenger MSM with mixed addition and a 0/1 scalar split, FFT and MSM on a bounded configurable thread budget, x86-64 asm carry chains for Fp/Fr add/sub and the Montgomery final subtraction, paired-window Pedersen tables. Every output stays bit-identical; no consensus predicate changes.
+  old ROOT: 3ab177f44975e94620405084387ce732848ddfcaf1ca4069806cf650281269b0
+  by: owner unseal ritual (make core-unseal)

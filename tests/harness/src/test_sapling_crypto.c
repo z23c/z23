@@ -10,6 +10,9 @@
 #include "sapling/sprout.h"
 #include "sapling/groth16_prover.h"
 #include "sapling/sapling_circuit.h"
+#include "sapling/pedersen_hash.h"
+#include "util/safe_alloc.h"
+#include <stdatomic.h>
 #include <time.h>
 
 /* test hook: unconditionally fails the allocation. Mirrors the
@@ -2134,6 +2137,580 @@ static int sapling_crypto_g2_msm_pins_small_scalar_sums(void)
     return failures;
 }
 
+/* ── Prover and field speed work: every fast path against a slow reference ──
+ *
+ * The fast paths below replaced slower code that produced the same values:
+ * branch-free Fr/Fs add/sub/neg, the FFT and MSM on several threads, mixed
+ * addition and the 0/1 scalar split in the MSM, prepared-affine Jubjub
+ * addition, and the paired-window Pedersen tables. Each is compared here with
+ * a reference written the slow, obvious way. */
+
+static uint64_t spd_next(uint64_t *s)
+{
+    uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+/* A canonical pseudo-random Fr element (below 2^254, so below the modulus). */
+static void spd_rand_fr(struct fr *out, uint64_t *s)
+{
+    uint8_t bytes[32];
+    for (int i = 0; i < 32; i++)
+        bytes[i] = (uint8_t)spd_next(s);
+    bytes[31] &= 0x3f;
+    fr_from_bytes(out, bytes);
+}
+
+static const uint64_t SPD_FR_P[4] = {
+    0xffffffff00000001ULL, 0x53bda402fffe5bfeULL,
+    0x3339d80809a1d805ULL, 0x73eda753299d7d48ULL
+};
+static const uint64_t SPD_FS_S[4] = {
+    0xd0970e5ed6f72cb7ULL, 0xa6682093ccc81082ULL,
+    0x06673b0101343b00ULL, 0x0e7db4ea6533afa9ULL
+};
+
+static bool spd_gte4(const uint64_t a[4], const uint64_t b[4])
+{
+    for (int i = 3; i >= 0; i--) {
+        if (a[i] > b[i]) return true;
+        if (a[i] < b[i]) return false;
+    }
+    return true;
+}
+
+/* r = a - b mod 2^256. */
+static void spd_sub4(uint64_t r[4], const uint64_t a[4], const uint64_t b[4])
+{
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t d = a[i] - b[i];
+        uint64_t b1 = a[i] < b[i];
+        r[i] = d - borrow;
+        borrow = b1 | (d < borrow);
+    }
+}
+
+/* r = a + b mod 2^256, returning the carry out. */
+static uint64_t spd_add4(uint64_t r[4], const uint64_t a[4], const uint64_t b[4])
+{
+    uint64_t carry = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t s = a[i] + b[i];
+        uint64_t c1 = s < a[i];
+        r[i] = s + carry;
+        carry = c1 | (r[i] < s);
+    }
+    return carry;
+}
+
+/* The compare-then-subtract forms fr.c used before, for any 4-limb inputs. */
+static void spd_ref_add(uint64_t r[4], const uint64_t a[4], const uint64_t b[4],
+                        const uint64_t p[4])
+{
+    uint64_t t[4];
+    uint64_t carry = spd_add4(t, a, b);
+    if (carry || spd_gte4(t, p))
+        spd_sub4(r, t, p);
+    else
+        memcpy(r, t, 32);
+}
+
+static void spd_ref_sub(uint64_t r[4], const uint64_t a[4], const uint64_t b[4],
+                        const uint64_t p[4])
+{
+    uint64_t t[4];
+    if (spd_gte4(a, b)) {
+        spd_sub4(r, a, b);
+        return;
+    }
+    (void)spd_add4(t, a, p);
+    spd_sub4(r, t, b);
+}
+
+static void spd_ref_neg(uint64_t r[4], const uint64_t a[4], const uint64_t p[4])
+{
+    if ((a[0] | a[1] | a[2] | a[3]) == 0)
+        memset(r, 0, 32);
+    else
+        spd_sub4(r, p, a);
+}
+
+/* Fr add/sub/neg (and aliasing r == a) and Fs add/neg against the references. */
+static bool spd_addsub_pair_ok(const uint64_t a[4], const uint64_t b[4])
+{
+    struct fr x, y, r, t;
+    struct fs u, v, w;
+    uint64_t want[4];
+    memcpy(x.d, a, 32);
+    memcpy(y.d, b, 32);
+    memcpy(u.d, a, 32);
+    memcpy(v.d, b, 32);
+
+    fr_add(&r, &x, &y);
+    spd_ref_add(want, a, b, SPD_FR_P);
+    bool ok = memcmp(r.d, want, 32) == 0;
+    t = x;
+    fr_add(&t, &t, &y);
+    ok = ok && memcmp(t.d, want, 32) == 0;
+
+    fr_sub(&r, &x, &y);
+    spd_ref_sub(want, a, b, SPD_FR_P);
+    ok = ok && memcmp(r.d, want, 32) == 0;
+    t = y;
+    fr_sub(&t, &x, &t);
+    ok = ok && memcmp(t.d, want, 32) == 0;
+
+    fr_neg(&r, &x);
+    spd_ref_neg(want, a, SPD_FR_P);
+    ok = ok && memcmp(r.d, want, 32) == 0;
+
+    fs_add(&w, &u, &v);
+    spd_ref_add(want, a, b, SPD_FS_S);
+    ok = ok && memcmp(w.d, want, 32) == 0;
+    fs_neg(&w, &u);
+    spd_ref_neg(want, a, SPD_FS_S);
+    return ok && memcmp(w.d, want, 32) == 0;
+}
+
+/* 0, 1, each modulus and its neighbours, the limb extremes. */
+static int spd_addsub_boundaries(uint64_t v[12][4])
+{
+    static const uint64_t one[4] = {1, 0, 0, 0};
+    int n = 0;
+    memset(v[n++], 0, 32);
+    memcpy(v[n++], one, 32);
+    for (int m = 0; m < 2; m++) {
+        const uint64_t *p = m ? SPD_FS_S : SPD_FR_P;
+        memcpy(v[n++], p, 32);
+        spd_sub4(v[n++], p, one);
+        (void)spd_add4(v[n++], p, one);
+        (void)spd_add4(v[n++], p, p);
+    }
+    memset(v[n++], 0xff, 32);
+    memset(v[n], 0, 32);
+    v[n++][3] = 0x8000000000000000ULL;
+    return n;
+}
+
+static int sapling_crypto_fr_fs_add_sub_neg_match_the_branching_form(void)
+{
+    int failures = 0;
+    printf("fr/fs add, sub, neg: carry chains match compare-then-subtract... ");
+    {
+        uint64_t v[12][4];
+        int n = spd_addsub_boundaries(v);
+        bool ok = true;
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                ok = ok && spd_addsub_pair_ok(v[i], v[j]);
+
+        /* Random pairs: canonical, non-canonical, equal, and one bit apart. */
+        uint64_t s = 0x5eed5eed5eed5eedULL;
+        for (int k = 0; k < 400000 && ok; k++) {
+            uint64_t a[4], b[4];
+            for (int i = 0; i < 4; i++) { a[i] = spd_next(&s); b[i] = spd_next(&s); }
+            if (k & 1) { a[3] &= 0x3fffffffffffffffULL; b[3] &= 0x3fffffffffffffffULL; }
+            if ((k & 7) == 2) memcpy(b, a, 32);
+            if ((k & 7) == 4) { memcpy(b, a, 32); b[k & 3] ^= 1ULL << (k & 63); }
+            ok = spd_addsub_pair_ok(a, b);
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* out[i] = sum(in[j] * w^(i*j)), the transform by its definition. */
+static void spd_naive_dft(struct fr *out, const struct fr *in, size_t n,
+                          const struct fr *w)
+{
+    struct fr wi;
+    fr_one(&wi);
+    for (size_t i = 0; i < n; i++) {
+        struct fr acc, x, term;
+        fr_zero(&acc);
+        fr_one(&x);
+        for (size_t j = 0; j < n; j++) {
+            fr_mul(&term, &in[j], &x);
+            fr_add(&acc, &acc, &term);
+            fr_mul(&x, &x, &wi);
+        }
+        out[i] = acc;
+        fr_mul(&wi, &wi, w);
+    }
+}
+
+/* fr_fft of n elements equals the definition, with w read from the transform
+ * of the polynomial x (whose value the QAP-root test above pins). */
+static bool spd_fft_matches_definition(size_t n, uint64_t *s)
+{
+    struct fr in[64], got[64], want[64], x[64];
+    for (size_t i = 0; i < n; i++) {
+        spd_rand_fr(&in[i], s);
+        got[i] = in[i];
+        fr_zero(&x[i]);
+    }
+    fr_one(&x[1]);
+    if (!fr_fft(x, n, false) || !fr_fft(got, n, false))
+        return false;
+    spd_naive_dft(want, in, n, &x[1]);
+    return memcmp(got, want, n * sizeof(struct fr)) == 0;
+}
+
+static bool spd_all_equal(const struct fr *want, struct fr *const got[3],
+                          size_t bytes)
+{
+    return memcmp(want, got[0], bytes) == 0 &&
+           memcmp(want, got[1], bytes) == 0 &&
+           memcmp(want, got[2], bytes) == 0;
+}
+
+/* The same n-element transform on 1, 3 and 8 threads, alone and as three
+ * arrays at once, forward and back. */
+static bool spd_fft_threads_agree(size_t n, uint64_t *s)
+{
+    size_t bytes = n * sizeof(struct fr);
+    struct fr *v = zcl_calloc(5 * n, sizeof(struct fr), "spd_fft");
+    if (!v)
+        return false;
+    struct fr *orig = v, *a = v + n, *many[3] = { v + 2 * n, v + 3 * n, v + 4 * n };
+    for (size_t i = 0; i < n; i++)
+        spd_rand_fr(&orig[i], s);
+    memcpy(a, orig, bytes);
+    memcpy(many[0], orig, bytes);
+    memcpy(many[1], orig, bytes);
+    memcpy(many[2], orig, bytes);
+
+    /* many[2] is the one-thread answer the other two are held to. */
+    bool ok = fr_fft(many[2], n, false) &&
+              fr_fft_parallel(many[0], n, false, 3) &&
+              fr_fft_parallel(many[1], n, false, 8) &&
+              spd_all_equal(many[2], many, bytes);
+    memcpy(many[0], orig, bytes);
+    memcpy(many[1], orig, bytes);
+    memcpy(many[2], orig, bytes);
+    ok = ok && fr_fft(a, n, false) && fr_fft_many(many, 3, n, false, 5) &&
+         spd_all_equal(a, many, bytes);
+    ok = ok && fr_fft_many(many, 3, n, true, 5) && fr_fft(a, n, true) &&
+         spd_all_equal(orig, many, bytes) && memcmp(orig, a, bytes) == 0;
+    free(v);
+    return ok;
+}
+
+static int sapling_crypto_fr_fft_matches_definition_on_any_thread_count(void)
+{
+    int failures = 0;
+    printf("fr_fft: equals the DFT definition and is thread-count independent... ");
+    {
+        uint64_t s = 0xf17f17f17f17f17fULL;
+        bool ok = true;
+        for (size_t n = 2; n <= 64; n <<= 1)
+            ok = ok && spd_fft_matches_definition(n, &s);
+        /* 2^12 is one cache block; 2^13 and 2^15 add per-stage passes. */
+        static const size_t sizes[] = { 2, 8, 256, 4096, 8192, 32768 };
+        for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+            ok = ok && spd_fft_threads_agree(sizes[i], &s);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+struct spd_cover {
+    uint8_t *hits;
+    _Atomic unsigned max_tid;
+};
+
+static void spd_cover_range(void *ctx, size_t lo, size_t hi, unsigned tid)
+{
+    struct spd_cover *c = ctx;
+    for (size_t i = lo; i < hi; i++)
+        c->hits[i]++;
+    unsigned seen = atomic_load(&c->max_tid);
+    while (tid > seen && !atomic_compare_exchange_weak(&c->max_tid, &seen, tid))
+        ;
+}
+
+/* Every index is visited exactly once and no tid reaches `threads`. */
+static bool spd_parallel_for_covers(unsigned threads, size_t n, size_t grain)
+{
+    struct spd_cover c = { .hits = zcl_calloc(n ? n : 1, 1, "spd_cover") };
+    if (!c.hits)
+        return false;
+    groth16_parallel_for(threads, n, grain, spd_cover_range, &c);
+    bool ok = atomic_load(&c.max_tid) < (threads ? threads : 1);
+    for (size_t i = 0; i < n; i++)
+        ok = ok && c.hits[i] == 1;
+    free(c.hits);
+    return ok;
+}
+
+static int sapling_crypto_prover_thread_budget_is_bounded_and_settable(void)
+{
+    int failures = 0;
+    printf("groth16 prover: thread budget clamps, defaults and fans out once... ");
+    {
+        groth16_prover_set_threads(3);
+        bool ok = groth16_prover_threads() == 3;
+        groth16_prover_set_threads(100000);
+        ok = ok && groth16_prover_threads() == GROTH16_MAX_THREADS;
+        groth16_prover_set_threads(0);
+        unsigned dflt = groth16_prover_threads();
+        ok = ok && dflt >= 1 && dflt <= 8;
+
+        ok = ok && spd_parallel_for_covers(1, 1000, 7) &&
+             spd_parallel_for_covers(4, 1000, 7) &&
+             spd_parallel_for_covers(8, 5, 1) &&
+             spd_parallel_for_covers(8, 4096, 0) &&
+             spd_parallel_for_covers(200, 300, 1) &&
+             spd_parallel_for_covers(0, 9, 100) &&
+             spd_parallel_for_covers(4, 0, 1);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static void spd_fr_raw(uint64_t raw[4], const struct fr *a)
+{
+    uint8_t bytes[32];
+    fr_to_bytes(bytes, a);
+    memcpy(raw, bytes, 32);
+}
+
+/* Scalar i: mostly 0, 1 and full-width values, as a witness is. */
+static void spd_msm_scalar(struct fr *out, size_t i, uint64_t *s)
+{
+    switch (i % 5) {
+    case 0: fr_zero(out); break;
+    case 1: fr_one(out); break;
+    case 2: pkc_small_fr(out, (uint32_t)(i % 97) + 2); break;
+    default: spd_rand_fr(out, s); break;
+    }
+}
+
+#define SPD_MSM_N 150
+
+/* Bases: multiples of g, every third left un-normalised (z != 1), one the
+ * identity; the rest normalised as proving-key points are. */
+static void spd_g1_bases(struct g1_point *pts, const struct g1_point *g)
+{
+    struct g1_point cur = *g;
+    for (size_t i = 0; i < SPD_MSM_N; i++) {
+        g1_add(&cur, &cur, g);
+        pts[i] = cur;
+        if (i % 3) {
+            g1_to_affine(&pts[i].x, &pts[i].y, &cur);
+            fp_one(&pts[i].z);
+        }
+    }
+    g1_identity(&pts[7]);
+}
+
+static int sapling_crypto_g1_msm_matches_scalar_mul_on_any_thread_count(void)
+{
+    int failures = 0;
+    printf("groth16_g1_msm: equals sum of scalar multiples on 1..8 threads... ");
+    {
+        struct g1_point gen, pts[SPD_MSM_N], want, got;
+        struct fr scalars[SPD_MSM_N];
+        uint64_t s = 0x6d736d6731ULL;
+        bool ok = g1_from_compressed(&gen, pkc_g1_gen_c);
+        spd_g1_bases(pts, &gen);
+        g1_identity(&want);
+        for (size_t i = 0; i < SPD_MSM_N; i++) {
+            uint64_t raw[4];
+            struct g1_point term;
+            spd_msm_scalar(&scalars[i], i, &s);
+            spd_fr_raw(raw, &scalars[i]);
+            g1_scalar_mul(&term, &pts[i], raw);
+            g1_add(&want, &want, &term);
+        }
+        for (unsigned t = 1; t <= 8 && ok; t++)
+            ok = groth16_g1_msm(&got, pts, scalars, SPD_MSM_N, t) &&
+                 pkc_g1_eq(&got, &want);
+        g1_msm(&got, pts, scalars, SPD_MSM_N);
+        ok = ok && pkc_g1_eq(&got, &want);
+        /* P + P and P - P through the mixed formula's special cases. */
+        struct fr two[2];
+        fr_one(&two[0]);
+        fr_one(&two[1]);
+        struct g1_point same[2] = { pts[1], pts[1] }, dbl;
+        g1_double(&dbl, &pts[1]);
+        g1_msm(&got, same, two, 2);
+        ok = ok && pkc_g1_eq(&got, &dbl);
+        g1_neg(&same[1], &pts[1]);
+        g1_msm(&got, same, two, 2);
+        ok = ok && g1_is_identity(&got);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* r = scalar * p by double-and-add over g2_add / g2_double. */
+static void spd_g2_scalar_mul(struct g2_point *r, const struct g2_point *p,
+                              const uint64_t raw[4])
+{
+    struct g2_point acc;
+    g2_identity(&acc);
+    for (int bit = 255; bit >= 0; bit--) {
+        g2_double(&acc, &acc);
+        if ((raw[bit / 64] >> (bit % 64)) & 1)
+            g2_add(&acc, &acc, p);
+    }
+    *r = acc;
+}
+
+#define SPD_MSM_G2_N 40
+
+static int sapling_crypto_g2_msm_matches_scalar_mul_on_any_thread_count(void)
+{
+    int failures = 0;
+    printf("groth16_g2_msm: equals sum of scalar multiples on 1..8 threads... ");
+    {
+        struct g2_point gen, cur, pts[SPD_MSM_G2_N], want, got;
+        struct fr scalars[SPD_MSM_G2_N];
+        uint64_t s = 0x6d736d6732ULL;
+        bool ok = g2_from_compressed(&gen, pkc_g2_gen_c);
+        cur = gen;
+        g2_identity(&want);
+        for (size_t i = 0; i < SPD_MSM_G2_N; i++) {
+            uint64_t raw[4];
+            struct g2_point term;
+            g2_add(&cur, &cur, &gen);
+            pts[i] = cur;
+            if (i % 3) {
+                g2_to_affine(&pts[i].x, &pts[i].y, &cur);
+                fp2_one(&pts[i].z);
+            }
+            spd_msm_scalar(&scalars[i], i, &s);
+            spd_fr_raw(raw, &scalars[i]);
+            spd_g2_scalar_mul(&term, &pts[i], raw);
+            g2_add(&want, &want, &term);
+        }
+        for (unsigned t = 1; t <= 8 && ok; t += 3)
+            ok = groth16_g2_msm(&got, pts, scalars, SPD_MSM_G2_N, t) &&
+                 pkc_g2_eq(&got, &want);
+        g2_msm(&got, pts, scalars, SPD_MSM_G2_N);
+        ok = ok && pkc_g2_eq(&got, &want);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static bool spd_jub_eq(const struct jub_point *a, const struct jub_point *b)
+{
+    uint8_t x[32], y[32];
+    jub_to_bytes(x, a);
+    jub_to_bytes(y, b);
+    return memcmp(x, y, 32) == 0;
+}
+
+static int sapling_crypto_jub_add_niels_matches_jub_add(void)
+{
+    int failures = 0;
+    printf("jub_add_niels: equals jub_add, negated and aliased, per batch... ");
+    {
+        struct jub_point g0, g1, acc, q[JUB_NIELS_BATCH_MAX], want, got, neg;
+        struct jub_niels nq[JUB_NIELS_BATCH_MAX + 1];
+        bool ok = pedersen_segment_generator(0, &g0) &&
+                  pedersen_segment_generator(1, &g1);
+        /* q[i] = (i+1) * g1 in extended form with z != 1; acc walks g0. */
+        q[0] = g1;
+        for (int i = 1; i < JUB_NIELS_BATCH_MAX; i++)
+            jub_add(&q[i], &q[i - 1], &g1);
+        jub_to_niels_batch(nq, q, JUB_NIELS_BATCH_MAX);
+        jub_double(&acc, &g0);
+        for (int i = 0; i < JUB_NIELS_BATCH_MAX && ok; i++) {
+            jub_add(&want, &acc, &q[i]);
+            jub_add_niels(&got, &acc, &nq[i], false);
+            ok = spd_jub_eq(&got, &want);
+            jub_neg(&neg, &q[i]);
+            jub_add(&want, &acc, &neg);
+            jub_add_niels(&got, &acc, &nq[i], true);
+            ok = ok && spd_jub_eq(&got, &want);
+            /* unified: q + q, q - q, and identity + q */
+            jub_add(&want, &q[i], &q[i]);
+            jub_add_niels(&got, &q[i], &nq[i], false);
+            ok = ok && spd_jub_eq(&got, &want);
+            jub_add_niels(&got, &q[i], &nq[i], true);
+            ok = ok && jub_is_identity(&got);
+            jub_identity(&got);
+            jub_add_niels(&got, &got, &nq[i], false);
+            ok = ok && spd_jub_eq(&got, &q[i]);
+            jub_add_niels(&acc, &acc, &nq[i], (i & 1) != 0);
+        }
+        /* A one-point batch, and an oversized batch converting nothing. */
+        struct jub_niels one, sentinel;
+        jub_to_niels_batch(&one, &q[4], 1);
+        ok = ok && memcmp(&one, &nq[4], sizeof(one)) == 0;
+        memset(&nq[0], 0x5a, sizeof(nq[0]));
+        sentinel = nq[0];
+        jub_to_niels_batch(nq, q, JUB_NIELS_BATCH_MAX + 1);
+        ok = ok && memcmp(&nq[0], &sentinel, sizeof(sentinel)) == 0;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* Pedersen hash the way the specification states it: per segment, the scalar
+ * sum(v_k * 16^k) times the segment generator, with v = +-(1 + a + 2b) —
+ * evaluated here one chunk at a time on a doubling base, no tables. */
+static bool spd_pedersen_reference(struct jub_point *out, const uint8_t *bits,
+                                   int nbits)
+{
+    int pos = 0;
+    jub_identity(out);
+    for (size_t seg = 0; seg < PEDERSEN_SEGMENT_GENERATORS && pos < nbits; seg++) {
+        struct jub_point base;
+        if (!pedersen_segment_generator(seg, &base))
+            return false;
+        for (int chunk = 0; chunk < 63 && pos < nbits; chunk++) {
+            int a = bits[pos++];
+            int b = pos < nbits ? bits[pos++] : 0;
+            int c = pos < nbits ? bits[pos++] : 0;
+            struct jub_point term;
+            jub_identity(&term);
+            for (int m = 0; m < 1 + a + 2 * b; m++)
+                jub_add(&term, &term, &base);
+            if (c)
+                jub_neg(&term, &term);
+            jub_add(out, out, &term);
+            for (int d = 0; d < 4; d++)
+                jub_double(&base, &base);
+        }
+    }
+    return true;
+}
+
+static int sapling_crypto_pedersen_pair_tables_match_per_chunk_reference(void)
+{
+    int failures = 0;
+    printf("pedersen_hash_bits: paired windows equal the per-chunk definition... ");
+    {
+        /* Every length that ends inside the first pairs, the segment seams
+         * (189 bits each), the Merkle (516) and note (582) lengths, the
+         * maximum (1134), then random lengths. */
+        static const int fixed[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                     183, 186, 187, 188, 189, 190, 191, 192,
+                                     195, 378, 381, 516, 582, 945, 1131, 1134 };
+        uint8_t bits[1134];
+        uint64_t s = 0x7065646572736eULL;
+        bool ok = true;
+        for (int t = 0; t < 28 + 200 && ok; t++) {
+            int nbits = t < 28 ? fixed[t] : 1 + (int)(spd_next(&s) % 1134);
+            for (int i = 0; i < nbits; i++)
+                bits[i] = (uint8_t)(spd_next(&s) & 1);
+            struct jub_point got, want;
+            pedersen_hash_bits(bits, nbits, &got);
+            ok = spd_pedersen_reference(&want, bits, nbits) &&
+                 spd_jub_eq(&got, &want);
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 int test_sapling_crypto(void)
 {
     int failures = 0;
@@ -2362,6 +2939,22 @@ int test_sapling_crypto(void)
     failures += sapling_crypto_g1_msm_pins_small_scalar_sums();
 
     failures += sapling_crypto_g2_msm_pins_small_scalar_sums();
+
+    /* ── prover and field speed work: fast paths against slow references ── */
+
+    failures += sapling_crypto_fr_fs_add_sub_neg_match_the_branching_form();
+
+    failures += sapling_crypto_fr_fft_matches_definition_on_any_thread_count();
+
+    failures += sapling_crypto_prover_thread_budget_is_bounded_and_settable();
+
+    failures += sapling_crypto_g1_msm_matches_scalar_mul_on_any_thread_count();
+
+    failures += sapling_crypto_g2_msm_matches_scalar_mul_on_any_thread_count();
+
+    failures += sapling_crypto_jub_add_niels_matches_jub_add();
+
+    failures += sapling_crypto_pedersen_pair_tables_match_per_chunk_reference();
 
     return failures;
 }

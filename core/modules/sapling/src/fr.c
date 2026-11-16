@@ -21,6 +21,7 @@
 
 #include "sapling/fr.h"
 #include <string.h>
+#include "bls12_381_fp_inline.h"
 
 /* Runtime-dispatched Montgomery multiply (CPUID → BMI2+ADX or portable) */
 extern void fr_mont_mul_accel(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]);
@@ -100,43 +101,17 @@ bool fr_eq(const struct fr *a, const struct fr *b)
 
 void fr_add(struct fr *r, const struct fr *a, const struct fr *b)
 {
-    unsigned __int128 carry = 0;
-    uint64_t tmp[4];
-    for (int i = 0; i < 4; i++) {
-        unsigned __int128 sum = (unsigned __int128)a->d[i] + b->d[i] + carry;
-        tmp[i] = (uint64_t)sum;
-        carry = sum >> 64;
-    }
-    if (carry || fr_gte(tmp, FR_P))
-        fr_sub_noborrow(r->d, tmp, FR_P);
-    else
-        memcpy(r->d, tmp, 32);
+    fpi_add4(r->d, a->d, b->d, FR_P);
 }
 
 void fr_sub(struct fr *r, const struct fr *a, const struct fr *b)
 {
-    if (fr_gte(a->d, b->d)) {
-        fr_sub_noborrow(r->d, a->d, b->d);
-    } else {
-        /* a - b + p */
-        uint64_t tmp[4];
-        unsigned __int128 carry = 0;
-        for (int i = 0; i < 4; i++) {
-            unsigned __int128 sum = (unsigned __int128)a->d[i] + FR_P[i] + carry;
-            tmp[i] = (uint64_t)sum;
-            carry = sum >> 64;
-        }
-        fr_sub_noborrow(r->d, tmp, b->d);
-    }
+    fpi_sub4(r->d, a->d, b->d, FR_P);
 }
 
 void fr_neg(struct fr *r, const struct fr *a)
 {
-    if (fr_is_zero(a)) {
-        fr_zero(r);
-    } else {
-        fr_sub_noborrow(r->d, FR_P, a->d);
-    }
+    fpi_neg4(r->d, a->d, FR_P);
 }
 
 void fr_mul(struct fr *r, const struct fr *a, const struct fr *b)
@@ -327,6 +302,70 @@ static inline void jub_cmov(struct jub_point *dst, const struct jub_point *src,
     fr_cmov(&dst->y, &src->y, mask);
     fr_cmov(&dst->z, &src->z, mask);
     fr_cmov(&dst->t, &src->t, mask);
+}
+
+/* --- Prepared affine points (mixed addition) --- */
+
+/* Montgomery's trick: one inversion for the whole batch. Z of a valid point is
+ * never zero (the curve has no points at infinity in this model). */
+void jub_to_niels_batch(struct jub_niels *out, const struct jub_point *in,
+                        size_t n)
+{
+    if (n == 0 || n > JUB_NIELS_BATCH_MAX)
+        return;
+
+    struct fr prefix[JUB_NIELS_BATCH_MAX], inv, zi, t;
+    prefix[0] = in[0].z;
+    for (size_t i = 1; i < n; i++)
+        fr_mul(&prefix[i], &prefix[i - 1], &in[i].z);
+    fr_inv(&inv, &prefix[n - 1]);
+
+    for (size_t i = n; i-- > 0;) {
+        if (i > 0) {
+            fr_mul(&zi, &inv, &prefix[i - 1]);
+            fr_mul(&inv, &inv, &in[i].z);
+        } else {
+            zi = inv;
+        }
+        fr_add(&t, &in[i].y, &in[i].x);
+        fr_mul(&out[i].y_plus_x, &t, &zi);
+        fr_sub(&t, &in[i].y, &in[i].x);
+        fr_mul(&out[i].y_minus_x, &t, &zi);
+        fr_mul(&t, &in[i].t, &zi);
+        fr_mul(&t, &t, &FR_JUB_D);
+        fr_add(&out[i].t2d, &t, &t);
+    }
+}
+
+/* add-2008-hwcd-3 with Z2 = 1 (a = -1, k = 2d): 7 multiplications against
+ * jub_add's 10. Unified, so it is correct for every pair of curve points.
+ * -b is (y-x, y+x, -2dxy); the swap and the negation are masked selects, so
+ * `negate` costs no branch. */
+void jub_add_niels(struct jub_point *r, const struct jub_point *a,
+                   const struct jub_niels *b, bool negate)
+{
+    uint64_t mask = (uint64_t)0 - (uint64_t)negate;
+    struct fr yp = b->y_plus_x, ym = b->y_minus_x, t2d = b->t2d, neg;
+    fr_cmov(&yp, &b->y_minus_x, mask);
+    fr_cmov(&ym, &b->y_plus_x, mask);
+    fr_neg(&neg, &b->t2d);
+    fr_cmov(&t2d, &neg, mask);
+
+    struct fr A, B, C, D, E, F, G, H;
+    fr_sub(&A, &a->y, &a->x);
+    fr_mul(&A, &A, &ym);
+    fr_add(&B, &a->y, &a->x);
+    fr_mul(&B, &B, &yp);
+    fr_mul(&C, &a->t, &t2d);
+    fr_add(&D, &a->z, &a->z);
+    fr_sub(&E, &B, &A);
+    fr_sub(&F, &D, &C);
+    fr_add(&G, &D, &C);
+    fr_add(&H, &B, &A);
+    fr_mul(&r->x, &E, &F);
+    fr_mul(&r->y, &G, &H);
+    fr_mul(&r->t, &E, &H);
+    fr_mul(&r->z, &F, &G);
 }
 
 /* Branchless nibble equality: returns 0xFF..FF if a == b (low 4 bits), else 0. */
@@ -627,27 +666,12 @@ bool fs_is_zero(const struct fs *a)
 
 void fs_add(struct fs *r, const struct fs *a, const struct fs *b)
 {
-    unsigned __int128 carry = 0;
-    uint64_t tmp[4];
-    for (int i = 0; i < 4; i++) {
-        unsigned __int128 sum = (unsigned __int128)a->d[i] + b->d[i] + carry;
-        tmp[i] = (uint64_t)sum;
-        carry = sum >> 64;
-    }
-    if (carry || fr_gte(tmp, FS_S)) {
-        fr_sub_noborrow(r->d, tmp, FS_S);
-    } else {
-        memcpy(r->d, tmp, 32);
-    }
+    fpi_add4(r->d, a->d, b->d, FS_S);
 }
 
 void fs_neg(struct fs *r, const struct fs *a)
 {
-    if (fs_is_zero(a)) {
-        fs_zero(r);
-    } else {
-        fr_sub_noborrow(r->d, FS_S, a->d);
-    }
+    fpi_neg4(r->d, a->d, FS_S);
 }
 
 void fs_to_bytes(uint8_t s[32], const struct fs *a)
