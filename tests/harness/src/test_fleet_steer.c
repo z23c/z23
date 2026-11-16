@@ -878,6 +878,36 @@ _test_next:;
     return failures;
 }
 
+static bool fmx_directory_state(const struct fmx_call *c, const char *state)
+{
+    const struct json_value *dir = json_get(&c->reply.data, "mailbox_directory");
+    const char *actual = json_get_str(json_get(dir, "state"));
+    const struct json_value *labels = json_get(dir, "labels");
+    return actual && !strcmp(actual, state) && labels && labels->type == JSON_ARR &&
+           json_size(labels) == 0 && fmx_arr(c, "agents") != NULL;
+}
+
+static int fmx_t_mailbox_access(void)
+{
+    int failures = 0; char brief[64], sender[64]; struct fmx_call b;
+    TEST("steer: mailbox snapshot respects scope and unavailable roster") {
+        fmx_isolate("mailbox_access");
+        ASSERT(fmx_mint("brief", brief, sizeof(brief)));
+        ASSERT(fmx_mint("brief,send", sender, sizeof(sender)));
+        fmx_brief(&b, brief, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(fmx_directory_state(&b, "withheld")); fmx_end(&b);
+        fmx_brief(&b, sender, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(fmx_directory_state(&b, "unknown")); fmx_end(&b);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(fmx_directory_state(&b, "unknown")); fmx_end(&b);
+        fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
 static int fmx_t_brief_empty(void)
 {
     int failures = 0;
@@ -6570,6 +6600,7 @@ int test_fleet_steer(void)
 #endif
     failures += fmx_t_register();
     failures += fmx_t_brief_empty();
+    failures += fmx_t_mailbox_access();
     failures += fmx_t_send_flow();
     failures += fmx_t_send_refusal_guidance(false);
     failures += fmx_t_send_refusal_guidance(true);

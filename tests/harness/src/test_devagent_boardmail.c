@@ -1141,6 +1141,158 @@ static bool bmx_oversize_refs(void)
     return fclose(f) == 0 && ok;
 }
 
+static bool bmx_directory_result(bool known, size_t count, bool truncated)
+{
+    struct json_value names; json_init(&names); bool cut = false;
+    bool got = zcl_devagent_boardmail_directory(&names, &cut);
+    bool b = false, c = false, self = false;
+    for (size_t i = 0; i < json_size(&names); ++i) {
+        const char *name = json_get_str(json_at(&names, i));
+        if (!name) { json_free(&names); return false; }
+        b |= !strcmp(name, "node-b"); c |= !strcmp(name, "node-c");
+        self |= !strcmp(name, "node-a");
+    }
+    bool ok = got == known && json_size(&names) == count && cut == truncated &&
+              !self && (!known || (b && c));
+    json_free(&names); return ok;
+}
+
+static bool bmx_brief_directory(void)
+{
+    struct bmx_call c; bmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_bool(&c.input, "json", true);
+    zcl_native_handle_fleet_steer_brief(&c.request, &c.reply);
+    const struct json_value *dir = json_get(&c.reply.data, "mailbox_directory");
+    const char *state = json_get_str(json_get(dir, "state"));
+    const struct json_value *labels = json_get(dir, "labels");
+    bool b = false, d = false;
+    for (size_t i = 0; labels && i < json_size(labels); ++i) {
+        const char *name = json_get_str(json_at(labels, i));
+        if (name) { b |= !strcmp(name, "node-b"); d |= !strcmp(name, "node-c"); }
+    }
+    bool ok = bmx_ok(&c) && state && !strcmp(state, "complete") &&
+        labels && json_size(labels) == 2u && b && d && json_size(dir) == 5u &&
+        json_get(&c.reply.data, "agents") != NULL;
+    bmx_end(&c); return ok;
+}
+
+static bool bmx_grant_directory(const char *scopes, const char *expected, size_t count)
+{
+    struct bmx_call grant, brief; char id[64] = "";
+    bmx_begin(&grant, "fleet.steer.grant", "zcl.fleet_steer_grant.v1");
+    (void)json_push_kv_str(&grant.input, "action", "mint");
+    (void)json_push_kv_str(&grant.input, "scopes", scopes);
+    (void)json_push_kv_str(&grant.input, "label", "chatgpt");
+    zcl_native_handle_fleet_steer_grant(&grant.request, &grant.reply);
+    const char *value = json_get_str(json_get(&grant.reply.data, "id"));
+    bool ok = bmx_ok(&grant) && value && strlen(value) < sizeof(id);
+    if (ok) (void)snprintf(id, sizeof(id), "%s", value);
+    bmx_end(&grant);
+    if (!ok) return false;
+    bmx_begin(&brief, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_str(&brief.input, "grant", id);
+    (void)json_push_kv_bool(&brief.input, "json", true);
+    zcl_native_handle_fleet_steer_brief(&brief.request, &brief.reply);
+    const struct json_value *dir = json_get(&brief.reply.data, "mailbox_directory");
+    const char *state = json_get_str(json_get(dir, "state"));
+    const struct json_value *labels = json_get(dir, "labels");
+    ok = bmx_ok(&brief) && state && !strcmp(state, expected) && labels && json_size(labels) == count;
+    bmx_end(&brief); return ok;
+}
+
+static bool bmx_directory_expand(void)
+{
+    char line[FLEET_ENROL_MACHINE_TEXT_MAX], name[25]; const char *why = NULL;
+    for (unsigned i = 0; i < 32u; ++i) {
+        (void)snprintf(name, sizeof(name), "node-%02u", i);
+        if (!bmx_roster_line(name, (uint8_t)(0x80u + i), (uint8_t)(0xa0u + i),
+                             (uint16_t)(FLEET_ENROL_PORT_FIRST + 3u + i), line, sizeof(line)) ||
+            !fleet_roster_append(line, &why)) return false;
+    }
+    return true;
+}
+
+/* Probe a forward page with the real sealed roster and a fixed output budget. */
+static int bmx_directory_budget_probe(size_t budget, bool *cut)
+{
+    struct bmx_call c; bmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_str(&c.input, "since", "0|");
+    (void)json_push_kv_int(&c.input, "limit", 1);
+    (void)json_push_kv_bool(&c.input, "json", true);
+    c.request.budget_bytes = budget;
+    zcl_native_handle_fleet_steer_brief(&c.request, &c.reply);
+    int result = 0;
+    if (bmx_ok(&c)) {
+        const struct json_value *dir = json_get(&c.reply.data, "mailbox_directory");
+        const char *state = json_get_str(json_get(dir, "state"));
+        const char *token = json_get_str(json_get(&c.reply.data, "cursor_token"));
+        const struct json_value *changes = json_get(&c.reply.data, "changes");
+        const struct json_value *cuts = json_get(&c.reply.data, "budget_truncated");
+        *cut = state && !strcmp(state, "truncated") &&
+            json_get_int(json_get(cuts, "mailbox_directory")) > 0;
+        result = changes && json_size(changes) == 1 && token && token[0] && strcmp(token, "0|") != 0 &&
+                 json_write(&c.reply.data, NULL, 0) <= budget - 1024u ? 1 : -1;
+    } else if (strcmp(c.reply.error.code, "BRIEF_PAGE_STALLED")) result = -1;
+    bmx_end(&c); return result;
+}
+
+static bool bmx_directory_metadata_boundary(void)
+{
+    struct bmx_call c; bmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_str(&c.input, "since", "0|");
+    (void)json_push_kv_int(&c.input, "limit", 1);
+    (void)json_push_kv_bool(&c.input, "json", true);
+    c.request.budget_bytes = 8192;
+    zcl_native_handle_fleet_steer_brief(&c.request, &c.reply);
+    struct json_value *dir = (struct json_value *)json_get(&c.reply.data, "mailbox_directory");
+    struct json_value *labels = (struct json_value *)json_get(dir, "labels");
+    struct json_value *cuts = (struct json_value *)json_get(&c.reply.data, "budget_truncated");
+    bool ok = bmx_ok(&c) && labels && labels->type == JSON_ARR && labels->num_children > 2 && cuts;
+    size_t before = 0, after = 0;
+    if (ok) {
+        json_free(&labels->children[--labels->num_children]);
+        before = json_write(&c.reply.data, NULL, 0);
+        ok = json_push_kv_int(cuts, "mailbox_directory", 1);
+        after = json_write(&c.reply.data, NULL, 0);
+    }
+    bmx_end(&c);
+    bool cut = false;
+    return ok && after > before && bmx_directory_budget_probe(before + 1024u, &cut) == 1 && cut;
+}
+
+static bool bmx_directory_tight_page(void)
+{
+    static const char row[] = "{\"seq\":1,\"ts\":\"2026-09-20T00:00:00Z\",\"from\":\"node-b\",\"to\":\"node-a\",\"kind\":\"note\",\"body\":\"retained\",\"ref\":\"budget-row\"}\n";
+    if (!bmx_write(BMX_A, "mail/inbox.node-b.jsonl", row, "wb")) return false;
+    if (!bmx_directory_metadata_boundary()) return false;
+    size_t low = 1024, high = 8192; bool cut = false;
+    if (bmx_directory_budget_probe(high, &cut) != 1) return false;
+    while (high - low > 1) {
+        size_t mid = low + (high - low) / 2;
+        int result = bmx_directory_budget_probe(mid, &cut);
+        if (result < 0) return false;
+        if (result) high = mid; else low = mid;
+    }
+    return bmx_directory_budget_probe(high, &cut) == 1 && cut;
+}
+
+static int bmx_t_directory(void)
+{
+    int failures = 0;
+    TEST("boardmail: verified directory names and bounded truncation") {
+        ASSERT(bmx_setup("directory")); bmx_use(BMX_A); ASSERT(bmx_own_key());
+        ASSERT(bmx_directory_result(true, 2u, false));
+        ASSERT(bmx_brief_directory());
+        ASSERT(bmx_grant_directory("brief", "withheld", 0u));
+        ASSERT(bmx_grant_directory("brief,send", "complete", 2u));
+        ASSERT(bmx_directory_expand());
+        ASSERT(bmx_directory_result(true, 32u, true));
+        ASSERT(bmx_directory_tight_page());
+        bmx_teardown(); PASS();
+    } _test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_delivery(void)
 {
     int failures = 0;
@@ -1214,6 +1366,7 @@ static int bmx_t_delivery(void)
         ASSERT(roster != NULL);
         ASSERT(fputs("unverifiable roster row\n", roster) >= 0);
         ASSERT(fclose(roster) == 0);
+        ASSERT(bmx_directory_result(false, 0u, false));
         zcl_devagent_boardmail_observe("someagent", NULL, &route);
         ASSERT_STR_EQ(route.label, "unknown");
         bmx_teardown();
@@ -1275,6 +1428,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_deferred();
     failures += bmx_t_oversize();
     failures += bmx_t_delivery();
+    failures += bmx_t_directory();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

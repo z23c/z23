@@ -713,7 +713,10 @@ ZCL_COMMAND_READY_READ(
     "One-call fleet brief: tasks, workers, blockers, capacity, candidates",
     "Local tasks/workers/blockers/capacity/candidates/evidence/changes; "
     "no peer contact/waits. missing[]/ages identify unavailable sources. "
-    "agents: mail/board names, not live workers. workers: newest16 "
+    "agents: mail/board names, not live workers. mailbox_directory: verified "
+    "roster labels for outbound box addressing, with complete/truncated/unknown/withheld "
+    "state; local snapshot, not liveness or delivery. Local, broadcast and ref "
+    "routes are not enumerated. workers: newest16 "
     "plus workers_total/exact/truncated; receiver=/worker= evidence or "
     "local resident. Fields: name/host/source(local|mail)/self_reported/worksp"
     "ace_selector/workspace_head/current_ref/stage/last_seen_ts/age_s/tokens_la"

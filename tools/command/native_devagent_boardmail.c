@@ -339,6 +339,35 @@ static bool bm_own_box(uint8_t own[FLEET_ENROL_PUBKEY_BYTES])
     return present;
 }
 
+/* Only verified remote box labels; reference-directed and local mail are
+ * intentionally outside this roster-only snapshot. */
+static bool bm_directory_add(struct json_value *names, const char *name, bool *truncated)
+{
+    for (size_t i = 0; i < json_size(names); ++i)
+        if (!strcmp(json_get_str(json_at(names, i)), name)) return true;
+    if (json_size(names) >= 32u) { *truncated = true; return true; }
+    struct json_value v; json_init(&v); json_set_str(&v, name);
+    bool ok = v.type == JSON_STR && json_push_back(names, &v);
+    json_free(&v); return ok;
+}
+
+bool zcl_devagent_boardmail_directory(struct json_value *names, bool *truncated)
+{
+    if (!names || !truncated) return false;
+    json_set_array(names); *truncated = false;
+    struct bm_roster *r = zcl_calloc(1, sizeof(*r), "boardmail.directory");
+    uint8_t own[FLEET_ENROL_PUBKEY_BYTES]; const char *self = NULL;
+    bool ok = r && bm_roster_load_checked(r) && bm_own_box(own);
+    if (ok) for (size_t i = 0; i < r->n; ++i)
+        if (!memcmp(r->p[i].box, own, sizeof(own))) self = r->p[i].name;
+    ok = ok && self && self[0];
+    if (ok) for (size_t i = 0; i < r->n && ok; ++i)
+        if (strcmp(r->p[i].name, self)) ok = bm_directory_add(names, r->p[i].name, truncated);
+    free(r);
+    if (!ok) { json_free(names); json_set_array(names); *truncated = false; }
+    return ok;
+}
+
 /* Is `to` another enrolled box, not this one? This box is the roster entry
  * whose box key is this box's own fleet key. */
 bool zcl_devagent_boardmail_remote(const char *to)

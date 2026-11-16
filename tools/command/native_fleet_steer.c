@@ -4292,6 +4292,24 @@ static bool fmc_trunc_add(struct json_value *trunc, const char *key, long long c
     return true;
 }
 
+/* Directory entries are optional presentation, but their loss must be named. */
+static bool fmc_directory_fit(struct json_value *data, struct json_value *trunc, size_t budget)
+{
+    struct json_value *dir = (struct json_value *)json_get(data, "mailbox_directory");
+    if (!dir) return true;
+    struct json_value *labels = (struct json_value *)json_get(dir, "labels");
+    struct json_value *state = (struct json_value *)json_get(dir, "state");
+    if (!labels || labels->type != JSON_ARR || !state || state->type != JSON_STR) return false;
+    if (!labels->num_children || json_write(data, NULL, 0) <= budget) return true;
+    json_set_str(state, "truncated");
+    if (state->type != JSON_STR) return false;
+    while (labels->num_children && json_write(data, NULL, 0) > budget) {
+        json_free(&labels->children[--labels->num_children]);
+        if (!fmc_trunc_add(trunc, "mailbox_directory", 1)) return false;
+    }
+    return true;
+}
+
 static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
 {
     static const char *const order[] = {
@@ -4309,6 +4327,7 @@ static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
     json_free(&empty);
     struct json_value *trunc = (struct json_value *)json_get(data, "budget_truncated");
     if (!ok || !trunc || trunc->type != JSON_OBJ) return false;
+    if (!fmc_directory_fit(data, trunc, budget)) return false;
     for (i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
         long long d = fmc_trim_member(data, keys[i], budget);
         if (d > 0) ok &= fmc_trunc_add(trunc, keys[i], d);
@@ -4430,6 +4449,27 @@ static void fmc_caller_emit(struct json_value *data,
     }
     (void)json_push_kv(data, "caller", &o);
     json_free(&o);
+}
+
+/* A verified local roster snapshot is not a receiver-liveness observation.
+ * A brief-only grant does not gain the send scope's route-name disclosure. */
+static bool fmc_mailbox_directory(struct json_value *data, const struct fmc_caller *caller,
+                                  int64_t now)
+{
+    struct json_value names, directory; json_init(&names); json_init(&directory);
+    json_set_array(&names); json_set_object(&directory);
+    bool allowed = !caller->grant || fmc_scope_has(caller->scopes, "send");
+    bool truncated = false;
+    bool known = allowed && zcl_devagent_boardmail_directory(&names, &truncated);
+    const char *state = !allowed ? "withheld" : !known ? "unknown" : truncated ? "truncated" : "complete";
+    char iso[32] = "";
+    if (known && now > 0) fmc_now_iso(now, iso, sizeof(iso));
+    bool ok = json_push_kv_str(&directory, "state", state) &&
+        json_push_kv_str(&directory, "source", "verified_roster") &&
+        json_push_kv_str(&directory, "freshness", known ? "local_snapshot" : "unknown") &&
+        json_push_kv_str(&directory, "observed_at", iso) &&
+        json_push_kv(&directory, "labels", &names) && json_push_kv(data, "mailbox_directory", &directory);
+    json_free(&names); json_free(&directory); return ok;
 }
 
 static size_t fmc_brief_data_budget(const struct zcl_command_request *req)
@@ -4558,6 +4598,10 @@ static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_co
     }
     (void)json_push_kv_str(&reply->data, "leaf", FMC_LEAF);
     fmc_caller_emit(&reply->data, ec->caller);
+    if (!fmc_mailbox_directory(&reply->data, ec->caller, ec->now)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "mailbox directory could not be copied", "json");
+        return;
+    }
     (void)json_push_kv(&reply->data, "agents", &l->agents);
     fmc_workers_emit(&reply->data, ro, ec);
     fmc_sessions_emit(&reply->data, ro, ec->now);

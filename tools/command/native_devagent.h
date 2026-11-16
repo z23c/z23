@@ -542,6 +542,9 @@ struct zcl_boardmail_delivery {
 };
 void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
                                      struct zcl_boardmail_delivery *out);
+/* Read a bounded verified roster of outbound box labels; false means unknown.
+ * Local and ref-based routes are outside this roster-only snapshot. */
+bool zcl_devagent_boardmail_directory(struct json_value *names, bool *truncated);
 /* Read-only snapshot: export_eligible is not delivery; unknown means incomplete inputs. */
 void zcl_devagent_boardmail_observe(const char *to, const char *ref,
                                     struct zcl_boardmail_delivery *out);
