@@ -18,7 +18,12 @@
  *
  * Pre-fix the body_runs == 1 assertion fails deterministically on
  * multi-core systems — concurrent first-callers all enter the body.
- * Post-fix pthread_once pins body_runs to exactly one. */
+ * Post-fix pthread_once pins body_runs to exactly one.
+ *
+ * The fr / fr_avx512 / bn254_accel section further down races the first
+ * calls of the Montgomery dispatchers, the CPUID feature flags and the
+ * Jubjub add path (formerly a lazy Jubjub d constant); it is meant to be
+ * run under TSan (make t-tsan ONLY=test_sapling_lazy_init). */
 
 #include "test/test_core.h"
 #include "platform/barrier.h"
