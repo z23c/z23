@@ -1335,6 +1335,18 @@ static bool cr_general_descriptor(
     return true;
 }
 
+static bool cr_dev_control_descriptor(const struct zcl_command_spec *spec, const char *key,
+                                  struct zcl_command_input_descriptor *out)
+{
+    if (!strcmp(spec->path, "dev.fleet.job") && !strcmp(key, "no_cache")) {
+        out->type = JSON_BOOL; return true;
+    }
+    if (!strcmp(spec->path, "dev.land.submit") && !strcmp(key, "precheck_budget_ms")) {
+        out->type = JSON_INT; out->minimum = 180000; out->maximum = 720000; return true;
+    }
+    return false;
+}
+
 bool zcl_command_registry_input_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -1345,12 +1357,7 @@ bool zcl_command_registry_input_descriptor(
     if (!strcmp(spec->path, "app.library") && !strcmp(key, "datadir")) {
         out->type = JSON_STR; out->max_bytes = zcl_command_registry_input_str_max(key); return true;
     }
-    if (!strcmp(spec->path, "dev.fleet.job") && !strcmp(key, "no_cache")) {
-        out->type = JSON_BOOL; return true;
-    }
-    if (!strcmp(spec->path, "dev.land.submit") && !strcmp(key, "precheck_budget_ms")) {
-        out->type = JSON_INT; out->minimum = 180000; out->maximum = 720000; return true;
-    }
+    if (cr_dev_control_descriptor(spec, key, out)) return true;
     if (!strcmp(spec->path, "fleet.board.list")) {
         if (!strcmp(key, "before_created_at")) {
             out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX;

@@ -217,17 +217,22 @@ static int dj_fleet_calls;
 static bool dj_fleet_timeout;
 static bool dj_fleet_argv_ok;
 static bool dj_fleet_expect_cold;
+static bool dj_fleet_prefix_ok(const char *const argv[])
+{
+    return !strcmp(argv[0], "ssh") && !strcmp(argv[1], "-o") &&
+        !strcmp(argv[2], "BatchMode=yes") && !strcmp(argv[4], "StrictHostKeyChecking=yes") &&
+        !strcmp(argv[5], "--") && !strcmp(argv[6], "r2") &&
+        !strcmp(argv[7], "/opt/z23-dev") && !strcmp(argv[8], "dev") &&
+        !strcmp(argv[9], "fleet") && !strcmp(argv[10], "job");
+}
+
 static int dj_fleet_transport(const char *const argv[], char *out, size_t cap,
                               int timeout_ms, bool *timed_out)
 {
     (void)timeout_ms;
     dj_fleet_calls++;
     *timed_out = dj_fleet_timeout;
-    dj_fleet_argv_ok = !strcmp(argv[0], "ssh") && !strcmp(argv[1], "-o") &&
-        !strcmp(argv[2], "BatchMode=yes") && !strcmp(argv[4], "StrictHostKeyChecking=yes") &&
-        !strcmp(argv[5], "--") && !strcmp(argv[6], "r2") &&
-        !strcmp(argv[7], "/opt/z23-dev") && !strcmp(argv[8], "dev") &&
-        !strcmp(argv[9], "fleet") && !strcmp(argv[10], "job");
+    dj_fleet_argv_ok = dj_fleet_prefix_ok(argv);
     bool cold = false;
     for (size_t i = 0; argv[i]; i++)
         if (!strcmp(argv[i], "--no_cache=true")) cold = true;

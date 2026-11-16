@@ -101,20 +101,25 @@ static void fj_job_invoke(const struct zcl_command_request *parent,
     handler(&local, reply);
 }
 
+static bool fj_test_args(struct json_value *args, const char *group, bool no_cache)
+{
+    char only[256];
+    int n = snprintf(only, sizeof only, "ONLY=%s", group);
+    bool ok = n > 0 && (size_t)n < sizeof only &&
+        fj_add_arg(args, "t-fast-exact") && fj_add_arg(args, only);
+    return ok && (!no_cache || fj_add_arg(args, "T_FAST_EXACT_ARGS=--no-cache"));
+}
+
 static void fj_local_start(const struct zcl_command_request *request,
                            struct zcl_command_reply *reply, const char *cwd,
                            const char *head, const char *task, const char *group, bool no_cache)
 {
     if (!fj_check_source(cwd, head)) { fj_fail(reply, "SOURCE_MISMATCH", "HEAD differs or tracked files are dirty"); return; }
-    char only[256];
     struct json_value input, args; json_init(&input); json_set_object(&input);
     json_init(&args); json_set_array(&args);
     bool ok = fj_add_arg(&args, "devbuild") && fj_add_arg(&args, "--wait") && fj_add_arg(&args, "make");
-    if (!strcmp(task, "test")) {
-        int n = snprintf(only, sizeof only, "ONLY=%s", group);
-        ok = ok && n > 0 && (size_t)n < sizeof only && fj_add_arg(&args, "t-fast-exact") && fj_add_arg(&args, only);
-        if (no_cache) ok = ok && fj_add_arg(&args, "T_FAST_EXACT_ARGS=--no-cache");
-    } else ok = ok && fj_add_arg(&args, !strcmp(task, "build") ? "z23" : "lint");
+    if (!strcmp(task, "test")) ok = ok && fj_test_args(&args, group, no_cache);
+    else ok = ok && fj_add_arg(&args, !strcmp(task, "build") ? "z23" : "lint");
     ok = ok && json_push_kv(&input, "argv", &args) && json_push_kv_str(&input, "cwd", cwd);
     json_free(&args);
     if (!ok) { json_free(&input); fj_fail(reply, "JOB_INPUT_FAILED", "could not construct job"); return; }
@@ -276,6 +281,18 @@ static bool fj_input_shape(const struct json_value *input)
     return !json_get(input, "peer_binary") || json_get(input, "peer");
 }
 
+static bool fj_operation_valid(const struct json_value *input, const char *op,
+                               const char *task, struct zcl_command_reply *reply)
+{
+    if (json_get(input, "no_cache") && (strcmp(op, "start") || strcmp(task, "test"))) {
+        fj_fail(reply, "INVALID_INPUT", "no_cache is only valid when starting a test"); return false;
+    }
+    if (strcmp(op, "start") && strcmp(op, "wait")) {
+        fj_fail(reply, "INVALID_INPUT", "operation must be start or wait"); return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_dev_fleet_job(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
@@ -291,10 +308,7 @@ void zcl_native_handle_dev_fleet_job(const struct zcl_command_request *request,
     int64_t timeout = tv && tv->type == JSON_INT ? json_get_int(tv) : 60;
     const struct json_value *cache = json_get(in, "no_cache");
     bool no_cache = cache && json_get_bool(cache);
-    if (cache && (strcmp(op, "start") || strcmp(task, "test"))) {
-        fj_fail(reply, "INVALID_INPUT", "no_cache is only valid when starting a test"); return;
-    }
-    if (strcmp(op, "start") && strcmp(op, "wait")) { fj_fail(reply, "INVALID_INPUT", "operation must be start or wait"); return; }
+    if (!fj_operation_valid(in, op, task, reply)) return;
     if (!fj_peer_valid(peer, slot)) {
         fj_fail(reply, "INVALID_INPUT", "invalid peer or executable path"); return;
     }
