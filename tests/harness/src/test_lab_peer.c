@@ -237,21 +237,39 @@ static void lpt_post(char *body, size_t cap, const char *id, const char *kind,
                    used > 0 ? "," : "", id, kind, ref, host, esc, expires);
 }
 
-/* One board page: key suffix "" or ".cursorN"; next > 0 marks it truncated. */
-static bool lpt_list_page(const struct lpt *e, const char *suffix, const char *posts, int next)
+/* The paging fields of a current fleet.board.list reply (no _page): more is
+ * "true", "false" or NULL (field absent); t <= 0 and idc == 0 omit the cursor. */
+static void lpt_tail(char *out, size_t cap, const char *more, int64_t t, char idc)
 {
-    char body[32 * 1024], key[80], page[96] = "";
-    if (next > 0)
-        (void)snprintf(page, sizeof(page),
-                       ",\"_page\":{\"truncated\":true,\"next_cursor\":%d}", next);
-    (void)snprintf(body, sizeof(body), "{\"ok\":true,\"data\":{\"posts\":[%s]%s}}", posts, page);
+    char id[65] = "", part[200];
+    size_t n = 0;
+    out[0] = '\0';
+    if (more)
+        n += (size_t)snprintf(out + n, cap - n, ",\"has_more\":%s", more);
+    if (t > 0) {
+        (void)snprintf(part, sizeof(part), ",\"next_created_at\":%lld", (long long)t);
+        n += (size_t)snprintf(out + n, cap - n, "%s", part);
+    }
+    if (idc) {
+        lpt_hex(id, idc, 64);
+        (void)snprintf(out + n, cap - n, ",\"next_id\":\"%s\"", id);
+    }
+}
+
+/* One board page: key suffix "" or ".N" (the fake's N-th call); tail is the
+ * paging fields from lpt_tail. */
+static bool lpt_list_page(const struct lpt *e, const char *suffix, const char *posts,
+                          const char *tail)
+{
+    char body[32 * 1024], key[80];
+    (void)snprintf(body, sizeof(body), "{\"ok\":true,\"data\":{\"posts\":[%s]%s}}", posts, tail);
     (void)snprintf(key, sizeof(key), "fleet.board.list%s", suffix);
     return lpt_resp(e, key, body);
 }
 
 static bool lpt_list(const struct lpt *e, const char *posts)
 {
-    return lpt_list_page(e, "", posts, 0);
+    return lpt_list_page(e, "", posts, ",\"has_more\":false");
 }
 
 /* ── offer ─────────────────────────────────────────────────────────────── */
@@ -697,21 +715,100 @@ static int case_verify_base_unknown(void)
     return failures;
 }
 
+/* A verify env whose first two board pages are canned: page 1 holds offer '1'
+ * with paging fields t1, page 2 offer '2' with t2 (t2 NULL: no page 2). */
+static bool lpt_pages_env(struct lpt *e, const char *tag, const char *t1, const char *t2)
+{
+    char p1[8 * 1024] = "", p2[8 * 1024] = "", ha[65];
+    lpt_hex(ha, 'a', 64);
+    lpt_offer_post(p1, sizeof(p1), '1', ha, NULL, NULL, LPT_FUTURE);
+    lpt_offer_post(p2, sizeof(p2), '2', ha, NULL, NULL, LPT_FUTURE);
+    return lpt_verify_env(e, tag) && lpt_list_page(e, ".1", p1, t1) &&
+           (!t2 || lpt_list_page(e, ".2", p2, t2));
+}
+
 static int case_verify_follows_pages(void)
 {
     int failures = 0;
     struct lpt e;
-    char posts[8 * 1024] = "", ha[65];
-    TEST_CASE("lab_peer: verify follows the board list cursor to the next page") {
-        lpt_hex(ha, 'a', 64);
-        ASSERT(lpt_verify_env(&e, "verify_pages"));
-        lpt_offer_post(posts, sizeof(posts), '2', ha, NULL, NULL, LPT_FUTURE);
-        ASSERT(lpt_list_page(&e, "", "", 1));
-        ASSERT(lpt_list_page(&e, ".cursor1", posts, 0));
+    char t1[300], t2[300];
+    TEST_CASE("lab_peer: verify reads both board pages to the end and sees every post") {
+        lpt_tail(t1, sizeof(t1), "true", 50, 'b');
+        lpt_tail(t2, sizeof(t2), "false", 0, 0);
+        ASSERT(lpt_pages_env(&e, "verify_pages", t1, t2));
         ASSERT_EQ(lpt_verify_run(&e), 0);
-        ASSERT(lpt_file_has(e.calls, "\t--cursor=1\n"));
+        ASSERT_EQ(lpt_count(e.calls, "\tlist\n"), 2);
+        ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 2);
+        ASSERT(lpt_run_has("\"truncated\":false"));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_page_two_request(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char t1[300], t2[300], id[65], want[100];
+    TEST_CASE("lab_peer: the request for page two carries both before_ flags of the reply") {
+        lpt_hex(id, 'b', 64);
+        lpt_tail(t1, sizeof(t1), "true", 50, 'b');
+        lpt_tail(t2, sizeof(t2), "false", 0, 0);
+        ASSERT(lpt_pages_env(&e, "verify_page2", t1, t2));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        (void)snprintf(want, sizeof(want), "\t--before_id=%s\n", id);
+        ASSERT_EQ(lpt_count(e.calls, "\t--before_created_at=50\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, want), 1);
+        ASSERT(!lpt_file_has(e.calls, "\t--cursor="));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_single_page_whole(void)
+{
+    int failures = 0;
+    struct lpt e;
+    TEST_CASE("lab_peer: a single page with has_more false is not truncated") {
+        ASSERT(lpt_verify_env(&e, "verify_single"));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tlist\n"), 1);
         ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 1);
         ASSERT(lpt_run_has("\"truncated\":false"));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_missing_cursor(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char t1[300], t2[300];
+    TEST_CASE("lab_peer: has_more with a missing cursor field reports truncation") {
+        lpt_tail(t1, sizeof(t1), "true", 50, 0);
+        ASSERT(lpt_pages_env(&e, "verify_nocur", t1, NULL));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tlist\n"), 1);
+        ASSERT(lpt_run_has("\"truncated\":true"));
+        lpt_tail(t1, sizeof(t1), "true", 0, 'b');
+        lpt_tail(t2, sizeof(t2), "false", 0, 0);
+        ASSERT(lpt_pages_env(&e, "verify_notime", t1, t2));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tlist\n"), 1);
+        ASSERT(lpt_run_has("\"truncated\":true"));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_repeated_cursor(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char t1[300];
+    TEST_CASE("lab_peer: a cursor that does not advance ends the loop as truncated") {
+        lpt_tail(t1, sizeof(t1), "true", 50, 'b');
+        ASSERT(lpt_pages_env(&e, "verify_repeat", t1, t1));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tlist\n"), 2);
+        ASSERT(lpt_run_has("\"truncated\":true"));
     } TEST_END
     return failures;
 }
@@ -720,13 +817,14 @@ static int case_verify_reports_truncation(void)
 {
     int failures = 0;
     struct lpt e;
+    char tail[300], suffix[16];
     TEST_CASE("lab_peer: a board listing that hits the page cap reports truncation") {
         ASSERT(lpt_verify_env(&e, "verify_trunc"));
-        ASSERT(lpt_list_page(&e, "", "", 1));
-        ASSERT(lpt_list_page(&e, ".cursor1", "", 2));
-        ASSERT(lpt_list_page(&e, ".cursor2", "", 3));
-        ASSERT(lpt_list_page(&e, ".cursor3", "", 4));
-        ASSERT(lpt_list_page(&e, ".cursor4", "", 5));
+        for (int n = 1; n <= 6; n++) {
+            (void)snprintf(suffix, sizeof(suffix), ".%d", n);
+            lpt_tail(tail, sizeof(tail), "true", 100 - n, 'b');
+            ASSERT(lpt_list_page(&e, suffix, "", tail));
+        }
         ASSERT_EQ(lpt_verify_run(&e), 0);
         ASSERT_EQ(lpt_count(e.calls, "\tlist\n"), 5);
         ASSERT(lpt_run_has("\"truncated\":true"));
@@ -1124,6 +1222,10 @@ int test_lab_peer(void)
     failures += case_verify_base_known_no_fetch();
     failures += case_verify_base_unknown();
     failures += case_verify_follows_pages();
+    failures += case_verify_page_two_request();
+    failures += case_verify_single_page_whole();
+    failures += case_verify_missing_cursor();
+    failures += case_verify_repeated_cursor();
     failures += case_verify_reports_truncation();
     failures += case_verify_nonzero_exit();
     failures += case_verify_handled_unreadable();

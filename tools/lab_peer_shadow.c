@@ -582,6 +582,13 @@ static bool ls_item_code(const char *reply, const char *id, char code[48])
     return true;
 }
 
+/* True when the board's list reply says more posts exist than one page holds. */
+static bool ls_more(const char *reply)
+{
+    return strstr(reply, "\"has_more\":true") != NULL ||
+           strstr(reply, "\"has_more\": true") != NULL;
+}
+
 /* "refused:<CODE>" when the board's result list shows a refusal for id. */
 static bool ls_refusal(const char *id, char out[64])
 {
@@ -683,9 +690,12 @@ static void ls_phase_collect(struct ls_ctx *c)
     const char *const col[] = {c->bin, "collect", a_check, a_state, a_room, a_dev, NULL};
     (void)ls_run(col, NULL, LS_OFFER_S, reply, sizeof(reply));
     ls_say(c, "collect: %.200s", reply);
-    const char *const lst[] = {c->z23, "fleet", "board", "list", a_room, "--kind=result", NULL};
+    const char *const lst[] = {c->z23, "fleet", "board", "list", a_room, "--kind=result",
+                               "--limit=200", NULL};
     g_ref[0] = '\0';
     (void)ls_run(lst, NULL, LS_QUICK_S, g_ref, sizeof(g_ref));
+    if (ls_more(g_ref))
+        ls_say(c, "board result list: truncated, has_more is true past 200 posts; older refusals are not compared");
     ls_phase_compare(c, reply);
     ls_phase_lane_verdicts(c, reply);
 }

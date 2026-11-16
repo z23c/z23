@@ -515,18 +515,42 @@ static int lp_usage(void)
 
 /* ── board listing ─────────────────────────────────────────────────────── */
 
-/* 0: the page is the last; >0: the next cursor; -1: truncated, no usable cursor. */
-static int64_t lp_next_cursor(const struct json_value *root,
-                              const struct json_value *data)
+/* The board's continuation: the (created_at, id) of the last post of a page,
+ * sent back as --before_created_at / --before_id for the next older page. */
+struct lp_cursor { // hardening-ok: board pagination key, not a byte-stream reader
+    int64_t time;
+    char id[65];
+};
+
+enum lp_more { LP_PAGE_LAST, LP_PAGE_MORE, LP_PAGE_BAD };
+
+/* Reads has_more, next_created_at and next_id of a fleet.board.list reply.
+ * LAST: has_more is false; MORE: true and *next holds a usable cursor; BAD:
+ * has_more is absent or not a boolean, or true with a missing or malformed
+ * cursor field, so the listing cannot be known complete. */
+static enum lp_more lp_next_cursor(const struct json_value *data, struct lp_cursor *next)
 {
-    const struct json_value *page = json_get(data, "_page");
-    if (!page)
-        page = json_get(root, "_page");
-    const struct json_value *t = json_get(page, "truncated");
-    const struct json_value *n = json_get(page, "next_cursor");
-    if (!t || t->type != JSON_BOOL || !json_get_bool(t))
-        return 0;
-    return n && n->type == JSON_INT && json_get_int(n) > 0 ? json_get_int(n) : -1;
+    const struct json_value *more = json_get(data, "has_more");
+    const struct json_value *t = json_get(data, "next_created_at");
+    const char *id = json_get_str(json_get(data, "next_id"));
+    if (!more || more->type != JSON_BOOL)
+        return LP_PAGE_BAD;
+    if (!json_get_bool(more))
+        return LP_PAGE_LAST;
+    if (!t || t->type != JSON_INT || json_get_int(t) <= 0 || !lp_hex(id, 64))
+        return LP_PAGE_BAD;
+    next->time = json_get_int(t);
+    (void)lp_fmt(next->id, sizeof(next->id), "%s", id);
+    return LP_PAGE_MORE;
+}
+
+/* A continuation must move strictly backward past the cursor it answers. */
+static bool lp_cursor_advances(const struct lp_cursor *next, const struct lp_cursor *prior)
+{
+    if (prior->time == 0)
+        return true;
+    return next->time < prior->time ||
+           (next->time == prior->time && strcmp(next->id, prior->id) < 0);
 }
 
 /* Copies one page's posts into dst up to LP_MERGED_MAX; at the cap the run is
@@ -549,18 +573,25 @@ struct lp_listq {
     char room[96], limit[32], kind[32];
 };
 
-/* One page at cursor: its posts are merged into posts and *next is the cursor
- * after it. NULL, or the typed code of a failed listing. */
+/* One page after cursor: its posts are merged into posts and *more says what
+ * follows it (*next is the cursor when MORE). NULL, or the typed code of a
+ * failed listing. */
 static const char *lp_list_page(struct lp_ctx *c, const struct lp_listq *q,
-                                int64_t cursor, struct json_value *posts,
-                                int64_t *next)
+                                const struct lp_cursor *cursor, struct json_value *posts,
+                                enum lp_more *more, struct lp_cursor *next)
 {
-    char cur[32];
-    const char *argv[10] = {c->v[LP_O_Z23], "fleet", "board", "list", q->room,
-                            q->kind, q->limit, NULL, NULL, NULL};
+    char before[48], before_id[96];
+    const char *argv[11] = {c->v[LP_O_Z23], "fleet", "board", "list", q->room,
+                            q->kind, q->limit, NULL, NULL, NULL, NULL};
     struct json_value root;
-    if (cursor > 0 && lp_fmt(cur, sizeof(cur), "--cursor=%lld", (long long)cursor))
-        argv[7] = cur;
+    if (cursor->time > 0 &&
+        (!lp_fmt(before, sizeof(before), "--before_created_at=%lld", (long long)cursor->time) ||
+         !lp_fmt(before_id, sizeof(before_id), "--before_id=%s", cursor->id)))
+        return "BOARD_LIST_FAILED";
+    if (cursor->time > 0) {
+        argv[7] = before;
+        argv[8] = before_id;
+    }
     if (!lp_run(argv, NULL, LP_QUICK_S, &root)) {
         json_free(&root);
         return "BOARD_LIST_FAILED";
@@ -569,28 +600,31 @@ static const char *lp_list_page(struct lp_ctx *c, const struct lp_listq *q,
     const struct json_value *arr = json_get(data, "posts");
     const char *err = arr && arr->type == JSON_ARR ? lp_merge(c, posts, arr)
                                                    : "BOARD_LIST_FAILED";
-    *next = lp_next_cursor(&root, data);
+    *more = lp_next_cursor(data, next);
     json_free(&root);
     return err;
 }
 
-/* The room's posts of one kind, following the list cursor page by page up to
- * LP_PAGES_MAX pages; a cap or an unusable cursor sets c->truncated. posts is
- * an initialised array. NULL, or the typed code of a failed listing. */
+/* The room's posts of one kind, following has_more / next_created_at / next_id
+ * page by page up to LP_PAGES_MAX pages; a page cap reached with more to read,
+ * a cursor that does not advance, or an unusable cursor sets c->truncated.
+ * posts is an initialised array. NULL, or the typed code of a failed listing. */
 static const char *lp_list_posts(struct lp_ctx *c, const char *kind,
                                  struct json_value *posts)
 {
     struct lp_listq q;
-    int64_t cursor = 0, next = 0;
+    struct lp_cursor cursor = {0}, next = {0};
+    enum lp_more more = LP_PAGE_LAST;
     if (!lp_fmt(q.room, sizeof(q.room), "--room=%s", c->v[LP_O_ROOM]) ||
         !lp_fmt(q.limit, sizeof(q.limit), "--limit=%d", LP_POSTS_MAX) ||
         !lp_fmt(q.kind, sizeof(q.kind), "--kind=%s", kind))
         return "BOARD_LIST_FAILED";
     for (int page = 0; page < LP_PAGES_MAX; page++) {
-        const char *err = lp_list_page(c, &q, cursor, posts, &next);
-        if (err || next == 0 || c->truncated)
+        const char *err = lp_list_page(c, &q, &cursor, posts, &more, &next);
+        if (err || more == LP_PAGE_LAST || c->truncated)
             return err;
-        if (next < 0 || next <= cursor || page + 1 == LP_PAGES_MAX)
+        if (more == LP_PAGE_BAD || !lp_cursor_advances(&next, &cursor) ||
+            page + 1 == LP_PAGES_MAX)
             c->truncated = true;
         if (c->truncated)
             return NULL;
