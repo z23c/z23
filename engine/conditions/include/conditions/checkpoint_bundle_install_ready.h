@@ -39,6 +39,8 @@ bool checkpoint_bundle_install_ready_test_detect(void);
 int checkpoint_bundle_install_ready_test_remedy(void);
 /* The condition's progressing() answer for this round. */
 bool checkpoint_bundle_install_ready_test_progressing(void);
+/* The condition's witness answer now. */
+bool checkpoint_bundle_install_ready_test_witness(void);
 #endif
 
 #endif /* ZCL_CONDITIONS_CHECKPOINT_BUNDLE_INSTALL_READY_H */

@@ -775,4 +775,19 @@ void condition_engine_reset_for_testing(void)
     atomic_store(&g_skip_filter, NULL);
     pthread_mutex_unlock(&g_condition_mu);
 }
+
+bool condition_engine_tick_one_at_for_testing(const char *name, int64_t now)
+{
+    if (!name)
+        return false;
+    pthread_mutex_lock(&g_condition_mu);
+    int i = condition_find_locked(name);
+    const struct condition *c = i >= 0 ? g_conditions[i] : NULL;
+    pthread_mutex_unlock(&g_condition_mu);
+    if (!c)
+        return false;
+    condition_credit_held_time(c, now);
+    condition_tick_one(c, now);
+    return true;
+}
 #endif

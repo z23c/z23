@@ -293,11 +293,13 @@ static int crw_case_ready_stops_progress(void)
     return failures;
 }
 
+#include "consensus_state_rung_strand_test.h"
+
 static int case_rung_window_condition(void)
 {
     return crw_case_stage_then_arm() + crw_case_work_mismatch() + crw_case_fetched_differs() +
            crw_case_equihash() + crw_case_flysync_route() + crw_case_island_route() +
-           crw_case_stored_route() + crw_case_ready_stops_progress();
+           crw_case_stored_route() + crw_case_ready_stops_progress() + case_rung_install_strand();
 }
 
 #endif /* CONSENSUS_STATE_RUNG_WINDOW_TEST_H */

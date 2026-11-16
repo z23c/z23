@@ -112,6 +112,7 @@ struct zcl_result consensus_state_install_from_bundle_old_retry(
 #include "consensus_state_proof_prefix.h"
 #include "chain/chain.h"                              /* block_index, active_chain_at */
 #include "chain/checkpoints.h"                        /* get_sha3_utxo_checkpoint */
+#include "conditions/checkpoint_rung_install_strand.h" /* the retriable strand refusal */
 #include "controllers/sync_controller.h"              /* sapling_tree_persist_pair */
 #include "core/serialize.h"                           /* byte_stream */
 #include "framework/condition.h"                     /* condition_engine_*_main_state */
@@ -1243,6 +1244,17 @@ static void icb_install_release(struct consensus_state_artifact_evidence *artifa
         (void)close(dir_fd);
 }
 
+/* A fresh legacy binding (no observation, no committed cutover to retry) on a
+ * node the pending boot could not finish: retriable, before anything durable. */
+static bool icb_strand_refused(const struct icb_wallet_guard *guard, const char *bundle_path,
+                               struct consensus_state_install_runtime_result *out)
+{
+    if (!guard || guard->expected || guard->observation ||
+        !checkpoint_rung_install_strand_refuses(bundle_path, out->reason, sizeof(out->reason)))
+        return false;
+    out->retriable_headers_not_ready = true;
+    return true;
+}
 /* Shared install core; terminal preparation requires a caller that exits. */
 static struct zcl_result icb_install_from_bundle(
     struct node_db *ndb, struct main_state *ms, const char *bundle_path,
@@ -1257,6 +1269,8 @@ static struct zcl_result icb_install_from_bundle(
         snprintf(out->reason, sizeof(out->reason), "empty bundle path or datadir");
         return ZCL_ERR(-1, "empty bundle path or datadir");
     }
+    if (icb_strand_refused(guard, bundle_path, out))
+        return ZCL_ERR(CHECKPOINT_RUNG_INSTALL_STRAND_CODE, "%s", out->reason);
     struct zcl_result rc = ZCL_OK;
     int dir_fd = -1;
     struct consensus_state_artifact_evidence *artifact = NULL;

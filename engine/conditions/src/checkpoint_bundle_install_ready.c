@@ -22,6 +22,7 @@
 #include "chain/chain.h"                              /* block_index_get_ancestor */
 #include "chain/checkpoints.h"                        /* get_sha3_utxo_checkpoint */
 #include "conditions/checkpoint_header_solution_repair.h" /* solution-available gate */
+#include "conditions/checkpoint_rung_install_strand.h" /* rung, route, strand refusal */
 #include "config/consensus_state_install_runtime.h"   /* autodetect + arm + ready predicate */
 #include "config/boot_consensus_bundle_marker.h"      /* sovereign-marker witness */
 #include "config/flysync_island.h"                    /* the island window verifier */
@@ -82,6 +83,37 @@ static const char *cbir_datadir(void)
     return agent_runtime_context_datadir();
 }
 
+/* A remedy round ended on the strand (progressing() keeps an episode that was
+ * already open when the strand began from latching on it while the lookup is
+ * still PENDING; a decided strand ends the episode through the witness). */
+static _Atomic bool g_strand_round;
+
+/* A legacy install at a baked rung is never armed on a node that already
+ * applied blocks itself below a rung its next boot's block index would not
+ * hold: the pending boot after that install cannot complete
+ * (checkpoint_rung_install_strand.h). The request this condition arms is
+ * always legacy. True also while the row lookup is still scanning (PENDING);
+ * the skip itself is logged once per process. */
+static bool cbir_strand_holds(int32_t target_h, const uint8_t target_hash[32])
+{
+    struct checkpoint_rung_install_strand strand;
+    if (!checkpoint_rung_arm_would_strand(target_h, target_hash, &strand))
+        return false; // raw-return-ok:no-strand-is-the-normal-answer-main-arms
+    checkpoint_rung_install_strand_note_arm(&strand);
+    return true;
+}
+
+/* detect()'s last conjunct. While the strand holds no episode starts; when it
+ * does not, an episode can open (or the open one continues), and its end on the
+ * strand path gets its own reason line (once per episode). */
+static bool cbir_episode_may_open(int32_t target_h, const uint8_t target_hash[32])
+{
+    if (cbir_strand_holds(target_h, target_hash))
+        return false; // raw-return-ok:the-strand-holds-no-episode-starts
+    checkpoint_rung_install_strand_note_episode_open();
+    return true;
+}
+
 static bool detect_checkpoint_bundle_install_ready(void)
 {
     struct main_state *ms = cbir_main_state();
@@ -130,7 +162,10 @@ static bool detect_checkpoint_bundle_install_ready(void)
         if (!checkpoint_header_solution_available(target_h, &cp_hash))
             return false; // raw-return-ok:checkpoint-header-solution-not-yet-backfilled
     }
-    return true;
+    /* While the strand holds no episode starts: no attempt is consumed,
+     * nothing latches and no operator page is raised for a node that keeps
+     * syncing. It arms as on main once the strand stops holding. */
+    return cbir_episode_may_open(target_h, target_hash);
 }
 
 /* ── Rung header window (legacy rung install only) ──────────────────────────
@@ -152,28 +187,8 @@ static _Atomic int g_window_seen;
 static _Atomic int g_window_baseline;       /* progressing() delta baseline */
 static _Atomic int g_window_refusals;
 
-/* The compiled ladder rung at the staged bundle's height, strictly above the
- * keystone, at exactly the bundle's hash. */
-static const struct rom_state_rung *cbir_rung(int32_t height, const uint8_t hash[32])
-{
-    const struct rom_state_checkpoint *keystone = get_rom_state_checkpoint();
-    if (!keystone || height <= keystone->height)
-        return NULL;
-    for (size_t i = 0; i < get_rom_state_rung_count(); i++) {
-        const struct rom_state_rung *r = get_rom_state_rung_at(i);
-        if (r && r->cp.height == height)
-            return memcmp(r->cp.block_hash, hash, 32) == 0 ? r : NULL;
-    }
-    return NULL;
-}
-
-/* -flysync and every datadir holding an island fact keep their own route. */
-static bool cbir_window_route(void)
-{
-    return flysync_island_phase() == FLYSYNC_OFF && !flysync_island_requested() &&
-           !island_anchor_registered() &&
-           island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_NONE;
-}
+/* The compiled rung and the -flysync / island-fact route test live in
+ * checkpoint_rung_install_strand.c, shared with the install-boot refusal. */
 
 /* This node's own header chain at rung..rung-27, top first. The rung row's
  * chainwork must equal the compiled rung chainwork the island root work is
@@ -332,8 +347,8 @@ static enum cbir_window cbir_window_load_or_fetch(const struct rom_state_rung *r
 static enum cbir_window cbir_window_ready(struct main_state *ms, int32_t target_h,
                                           const uint8_t target_hash[32])
 {
-    const struct rom_state_rung *rung = cbir_rung(target_h, target_hash);
-    if (!rung || !cbir_window_route())
+    const struct rom_state_rung *rung = checkpoint_rung_at(target_h, target_hash);
+    if (!rung || !checkpoint_rung_window_route())
         return CBIR_WINDOW_NOT_APPLICABLE;
     struct uint256 own[ISLAND_ANCHOR_WINDOW];
     enum cbir_window state = cbir_own_window(ms, rung, own);
@@ -348,6 +363,23 @@ static enum cbir_window cbir_window_ready(struct main_state *ms, int32_t target_
         blocker_clear(CBIR_WINDOW_BLOCKER_ID);
     }
     return state;
+}
+
+/* A legacy install at a baked rung arms only once its header window is durable
+ * (the pending boot after it does no network fetch), and never while the strand
+ * holds (cbir_strand_holds; detect() already keeps a new episode from starting). */
+static enum condition_remedy_result cbir_arm_gate(struct main_state *ms, int32_t target_h,
+                                                  const uint8_t target_hash[32])
+{
+    enum cbir_window window = cbir_window_ready(ms, target_h, target_hash);
+    if (window == CBIR_WINDOW_WAIT)
+        return COND_REMEDY_SKIP;
+    if (window == CBIR_WINDOW_REFUSED)
+        return COND_REMEDY_FAILED;
+    if (!cbir_strand_holds(target_h, target_hash))
+        return COND_REMEDY_OK;
+    atomic_store(&g_strand_round, true);
+    return COND_REMEDY_SKIP;
 }
 
 static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
@@ -381,12 +413,10 @@ static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
             return COND_REMEDY_SKIP; // raw-return-ok:solution-not-yet-backfilled-do-not-burn-budget
         }
     }
-    /* A legacy install at a baked rung arms only once its header window is
-     * durable: the pending boot after it does no network fetch. */
-    enum cbir_window window = cbir_window_ready(ms, target_h, target_hash);
-    if (window == CBIR_WINDOW_WAIT || window == CBIR_WINDOW_REFUSED) {
+    enum condition_remedy_result gate = cbir_arm_gate(ms, target_h, target_hash);
+    if (gate != COND_REMEDY_OK) {
         free(bundle);
-        return window == CBIR_WINDOW_WAIT ? COND_REMEDY_SKIP : COND_REMEDY_FAILED;
+        return gate;
     }
     /* Arm the durable, bounded install-on-next-boot request. Idempotent while
      * pending (the attempt count only bumps at CONSUME/boot), so repeated ticks
@@ -429,6 +459,31 @@ static enum condition_remedy_result remedy_checkpoint_bundle_install_ready(void)
     return COND_REMEDY_OK;
 }
 
+/* The strand is DECIDED to hold for the staged target and nothing is armed:
+ * no install happened, none will in this process while the strand holds, and
+ * there is nothing left for this condition to do on this node. PENDING (the
+ * log-tail lookup still scanning) and UNKNOWN are not decided. An armed
+ * install request clears only through the marker. Logs the reason once per
+ * episode. */
+static bool cbir_strand_ends_episode(const char *datadir)
+{
+    if (boot_install_bundle_pending(datadir))
+        return false; // raw-return-ok:an-armed-install-clears-only-by-the-marker
+    char *bundle = boot_autodetect_consensus_bundle(datadir);
+    if (!bundle)
+        return false; // raw-return-ok:no-staged-bundle-nothing-to-decide
+    int32_t target_h = 0;
+    uint8_t target_hash[32];
+    bool have_target = boot_staged_bundle_wait_target(bundle, &target_h, target_hash);
+    free(bundle);
+    struct checkpoint_rung_install_strand strand;
+    if (!have_target || !checkpoint_rung_arm_would_strand(target_h, target_hash, &strand) ||
+        !checkpoint_rung_strand_decided(&strand))
+        return false; // raw-return-ok:no-decided-strand-the-episode-continues
+    checkpoint_rung_install_strand_note_episode_end(&strand);
+    return true;
+}
+
 static bool witness_checkpoint_bundle_install_ready(int64_t target_at_detect)
 {
     (void)target_at_detect;
@@ -450,8 +505,23 @@ static bool witness_checkpoint_bundle_install_ready(int64_t target_at_detect)
     // forward fact this remedy's arm-and-respawn produces, observable across the
     // reboot, and unlike a tip-height witness it is honest for the live-cure node
     // that already sits above the checkpoint before the install.
+    // The second way to true (cbir_strand_ends_episode) is not a pure inverse of
+    // detect(): it is true only on forward facts: the reducer's applied frontier
+    // H* > 0 read as the binding capture reads it (compute_hstar and a
+    // tip_finalize row resolving the hash at H*), and the exact rung-row answer
+    // from the projection plus the finished bounded log-tail scan (never while
+    // it is PENDING), with no install armed. Read on this call: the armed
+    // request, the staged target and the projection row. H* and the scan's
+    // ABSENT are read on this call or remembered from the finished scan, and
+    // the remembered pair stands only until the event log grows (every
+    // persisted block appends a block-status event, so on a syncing node
+    // about once per poll); until then that H* can lag, which only delays
+    // (it always answers "strand", never "arm"). On that
+    // branch the engine's `cleared` means "nothing left for this condition to do
+    // on this node", not an install: the reason line logged just before says no
+    // install happened and the node keeps syncing block by block.
     return datadir && datadir[0] &&
-           boot_consensus_bundle_marker_exists(datadir);
+           (boot_consensus_bundle_marker_exists(datadir) || cbir_strand_ends_episode(datadir));
 }
 
 /* A completed rung window walk waits to be verified and staged: consume it on
@@ -474,6 +544,8 @@ static bool progressing_checkpoint_bundle_install_ready(int64_t target_at_detect
     (void)target_at_detect;
     int have = checkpoint_header_fetch_window_progress();
     int before = atomic_exchange(&g_window_baseline, have);
+    if (atomic_exchange(&g_strand_round, false))
+        return true; /* waiting on the strand, not failing: never latch on it */
     return atomic_load(&g_window_refusals) < CBIR_WINDOW_REFUSALS_MAX &&
            (have > before || atomic_load(&g_window_armed_ms) != 0);
 }
@@ -509,7 +581,9 @@ void checkpoint_bundle_install_ready_test_reset(void)
     atomic_store(&g_window_seen, 0);
     atomic_store(&g_window_baseline, 0);
     atomic_store(&g_window_refusals, 0);
+    atomic_store(&g_strand_round, false);
     blocker_clear(CBIR_WINDOW_BLOCKER_ID);
+    checkpoint_rung_install_strand_test_reset();
     condition_reset_state(&c_checkpoint_bundle_install_ready);
 }
 
@@ -546,5 +620,10 @@ int checkpoint_bundle_install_ready_test_remedy(void)
 bool checkpoint_bundle_install_ready_test_progressing(void)
 {
     return progressing_checkpoint_bundle_install_ready(0);
+}
+
+bool checkpoint_bundle_install_ready_test_witness(void)
+{
+    return witness_checkpoint_bundle_install_ready(0);
 }
 #endif

@@ -904,6 +904,16 @@ uint64_t block_index_projection_catch_up(block_index_projection_t *p)
     return bip_catch_up(p, NULL, NULL, NULL);
 }
 
+uint64_t block_index_projection_consumed_offset(block_index_projection_t *p)
+{
+    if (!p)
+        return UINT64_MAX;
+    pthread_mutex_lock(&p->mu);
+    uint64_t offset = p->db ? p->last_consumed_offset : UINT64_MAX;
+    pthread_mutex_unlock(&p->mu);
+    return offset;
+}
+
 /* ── readers ───────────────────────────────────────────────────────── */
 
 /* Parse a `blob` column back into a disk_block_index. */

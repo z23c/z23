@@ -218,6 +218,13 @@ void condition_engine_reset_for_testing(void);
  * currently_active, operator_needed_emitted. Module-static detect/remedy
  * bookkeeping is each condition's own responsibility. */
 void condition_reset_state(struct condition *c);
+
+/* Test clock: one engine tick of the registered condition `name` at the given
+ * wall time `now` (the same per-condition step condition_engine_tick() runs,
+ * without the skip filter or the progress hook), so a test can re-run detect
+ * on every tick and age an episode past its budget without sleeping. False
+ * when `name` is not registered. */
+bool condition_engine_tick_one_at_for_testing(const char *name, int64_t now);
 #endif
 
 #endif /* ZCL_FRAMEWORK_CONDITION_H */

@@ -80,6 +80,11 @@ enum bip_catch_up_status block_index_projection_catch_up_until(
 /* Complete replay; returns the committed offset or UINT64_MAX on error. */
 uint64_t block_index_projection_catch_up(block_index_projection_t *p);
 
+/* Read-only: the event-log record boundary the projection has consumed up to
+ * (events at or past it are replayed by the next catch-up). UINT64_MAX when
+ * `p` is NULL or closed. */
+uint64_t block_index_projection_consumed_offset(block_index_projection_t *p);
+
 /* Lookup by block hash. Returns true if present; fills `out` (incl.
  * solution buffer). `out` must be initialized by the caller before
  * passing in (the projection memcpys into its fields). */
