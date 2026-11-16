@@ -42,8 +42,11 @@
  * JoinSplit (the GrothProof branch of JSDescription::Verify ignores the
  * ProofVerifier) for every block it accepts through AcceptBlock, as each
  * block was when it was mined. So a chain zclassicd accepted holds none of
- * these encodings. CONSENSUS_PARITY_DOCTRINE still asks for a full-history
- * replay (make replay-canary-genesis) before the tightening lands.
+ * these encodings. HISTORY EVIDENCE: a scan of every block of the canonical
+ * chain (heights 0..3,321,763, tip 00000e7a9106...88df, 3,321,764 blocks, no
+ * gaps) decoded 454,954 Sapling spend proofs, 1,066,109 Sapling output proofs
+ * and 95,592 Groth16 JoinSplit proofs through groth16_proof_read with 0
+ * refused (record in docs/CONSENSUS_PARITY_DOCTRINE.md).
  */
 
 #include "test/test_core.h"

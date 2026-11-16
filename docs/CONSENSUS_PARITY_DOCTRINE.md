@@ -254,6 +254,37 @@ This is **not** a consensus change ahead of zclassicd — it *restores* parity
 with what every running zclassicd node actually does, and is exactly the static,
 non-signaled, non-dynamic mechanism class gate E13 permits.
 
+## Groth16 proof decode tightening (history evidence)
+
+`core/modules/sapling/src/bls12_381.c` decodes Groth16 proof points as
+zclassicd's librustzcash 06da3b9 does: a compressed infinity with any stray bit
+is refused, an Fq coordinate equal to or above q is refused, and a proof point
+A, B or C at infinity is refused (bellman `Proof::read`). This refuses
+encodings Z23 used to accept, so it needed proof that no proof on the real
+chain is now refused.
+
+Method (2026-11-16, host z23-r1, read-only): the append-only zclassicd
+`blk*.dat` block files (52 files) were copied to a private directory and every
+block was parsed with Z23's own `block_deserialize`. Every Sapling spend proof,
+Sapling output proof and Groth16 JoinSplit proof went through the fixed
+`groth16_proof_read`. No datadir, node or service was touched.
+
+| Item | Value |
+|---|---|
+| Blocks parsed (incl. forks) | 3,343,579, 0 parse failures |
+| Canonical chain covered | heights 0..3,321,763, tip `00000e7a9106652d0f0d0e7e5844a8302591d113325e02f9ea1f9c852feb88df`, 3,321,764 blocks, 0 gaps, 5,328,626 txs |
+| Coverage check | prev-hash chain walked from the tip to genesis with every ancestor present; that tip hash equals the zclassicd oracle's `getblockhash 3321763` |
+| Sapling spend proofs decoded | 454,954, refused 0 |
+| Sapling output proofs decoded | 1,066,109, refused 0 |
+| Groth16 JoinSplit proofs decoded | 95,592, refused 0 |
+| First / last height with a Groth16 proof | 476,970 / 3,321,753 (none below Sapling activation 476,969) |
+| Fork blocks also scanned | 456,101 / 1,073,157 / 95,613 proofs, refused 0 |
+
+The scan ran twice with identical results. Blocks above height 3,321,763 were
+not in the copy (the oracle was 13 blocks ahead). This is a decoder-level scan
+of every real proof, not a full-history node replay
+(`make replay-canary-genesis`).
+
 ## Parity guards on the connect path
 
 `contextual_check_block()` must stay wired into the connect path: context-free
