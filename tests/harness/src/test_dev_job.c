@@ -216,6 +216,7 @@ static const char *dj_fleet_response;
 static int dj_fleet_calls;
 static bool dj_fleet_timeout;
 static bool dj_fleet_argv_ok;
+static bool dj_fleet_expect_cold;
 static int dj_fleet_transport(const char *const argv[], char *out, size_t cap,
                               int timeout_ms, bool *timed_out)
 {
@@ -227,6 +228,10 @@ static int dj_fleet_transport(const char *const argv[], char *out, size_t cap,
         !strcmp(argv[5], "--") && !strcmp(argv[6], "r2") &&
         !strcmp(argv[7], "/opt/z23-dev") && !strcmp(argv[8], "dev") &&
         !strcmp(argv[9], "fleet") && !strcmp(argv[10], "job");
+    bool cold = false;
+    for (size_t i = 0; argv[i]; i++)
+        if (!strcmp(argv[i], "--no_cache=true")) cold = true;
+    dj_fleet_argv_ok = dj_fleet_argv_ok && cold == dj_fleet_expect_cold;
     if (!strcmp(argv[11], "--operation=wait"))
         dj_fleet_argv_ok = dj_fleet_argv_ok && !strcmp(argv[13], "--timeout_s=1");
     snprintf(out, cap, "%s", dj_fleet_response);
@@ -471,6 +476,96 @@ static int dj_fleet_shape_cases(void)
     }
     zcl_fleet_job_set_test_transport(NULL);
     g_no_child = false;
+    return failures;
+}
+
+static bool dj_fleet_cache_input(struct dj_call *c, const char *head, int mode)
+{
+    return json_push_kv_str(&c->input, "operation", "start") &&
+        json_push_kv_str(&c->input, "cwd", g_repo) &&
+        json_push_kv_str(&c->input, "expected_head", head) &&
+        json_push_kv_str(&c->input, "task", "test") &&
+        json_push_kv_str(&c->input, "group", "dev_job") &&
+        (mode == 0 || json_push_kv_bool(&c->input, "no_cache", mode == 2));
+}
+
+static int dj_fleet_cache_local_cases(void)
+{
+    const char *rev[] = {"git", "rev-parse", "HEAD", NULL}; char head[128] = {0};
+    if (zcl_spawn_capture_in_dir_observed(rev, g_repo, head, sizeof head, 15000, NULL) != 0) return 1;
+    head[strcspn(head, "\r\n")] = 0;
+    int failures = 0; g_no_child = true;
+    for (int i = 0; i < 3; i++) {
+        struct dj_call c; struct json_value handle; json_init(&handle); dj_begin(&c);
+        bool ok = dj_fleet_cache_input(&c, head, i);
+        if (ok) zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        ok = ok && dj_ok(&c) && zcl_dev_job_read_handle(dj_str(&c, "job_id"), &handle);
+        const struct json_value *argv = json_get(&handle, "argv");
+        ok = ok && json_size(argv) == (i == 2 ? 6u : 5u) &&
+             !strcmp(json_get_str(json_at(argv, 4)), "ONLY=dev_job");
+        if (ok && i == 2) ok = !strcmp(json_get_str(json_at(argv, 5)), "T_FAST_EXACT_ARGS=--no-cache");
+        if (!ok) { printf("dev.fleet.job cache local %d... FAIL\n", i); failures++; }
+        json_free(&handle); dj_end(&c);
+    }
+    g_no_child = false; return failures;
+}
+
+static int dj_fleet_cache_refusals(void)
+{
+    int failures = 0;
+    for (int i = 0; i < 4; i++) {
+        struct dj_call c; dj_begin(&c);
+        (void)json_push_kv_str(&c.input, "operation", i == 3 ? "wait" : "start");
+        (void)json_push_kv_str(&c.input, "task", i == 2 ? "lint" : "test");
+        if (i == 0) (void)json_push_kv_str(&c.input, "no_cache", "true");
+        else if (i == 1) (void)json_push_kv_int(&c.input, "no_cache", 1);
+        else (void)json_push_kv_bool(&c.input, "no_cache", false);
+        zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        if (!dj_error_is(&c, "INVALID_INPUT")) failures++;
+        dj_end(&c);
+    }
+    return failures;
+}
+
+static int dj_fleet_cache_peer_case(void)
+{
+    static const char response[] = "{\"schema\":\"zcl.result.v1\",\"command\":\"dev.fleet.job\",\"ok\":true,\"data\":{\"state\":\"started\",\"job_id\":\"job1\",\"preflight_head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}";
+    struct dj_call c; dj_begin(&c);
+    bool ok = dj_fleet_cache_input(&c, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 2) &&
+        json_push_kv_str(&c.input, "peer", "r2") && json_push_kv_str(&c.input, "peer_binary", "/opt/z23-dev");
+    dj_fleet_response = response; dj_fleet_calls = 0; dj_fleet_argv_ok = false; dj_fleet_expect_cold = true;
+    zcl_fleet_job_set_test_transport(dj_fleet_transport);
+    if (ok) zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+    ok = ok && dj_ok(&c) && dj_fleet_calls == 1 && dj_fleet_argv_ok;
+    zcl_fleet_job_set_test_transport(NULL); dj_fleet_expect_cold = false; dj_end(&c);
+    return ok ? 0 : 1;
+}
+
+static int dj_fleet_cache_cli_case(void)
+{
+    static const char response[] = "{\"schema\":\"zcl.result.v1\",\"command\":\"dev.fleet.job\",\"ok\":true,\"data\":{\"state\":\"started\",\"job_id\":\"job1\",\"preflight_head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}";
+    const char *args[] = {"fleet", "job", "--operation=start", "--peer=r2", "--peer_binary=/opt/z23-dev",
+        "--cwd=/work/tree", "--expected_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--task=test", "--group=dev_job", "--no_cache=true", "--json"};
+    dj_fleet_response = response; dj_fleet_calls = 0; dj_fleet_argv_ok = false; dj_fleet_expect_cold = true;
+    zcl_fleet_job_set_test_transport(dj_fleet_transport);
+    int rc = zcl_native_command_main("dev", args, 11, "", 0, CHAIN_MAIN, false);
+    zcl_fleet_job_set_test_transport(NULL); dj_fleet_expect_cold = false;
+    return rc == 0 && dj_fleet_calls == 1 && dj_fleet_argv_ok ? 0 : 1;
+}
+
+static int dj_fleet_cache_registry_case(void)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "dev.fleet.job", NULL);
+    char why[256]; int failures = 0;
+    for (int i = 0; i < 3; i++) {
+        struct json_value input; json_init(&input); json_set_object(&input);
+        if (i < 2) (void)json_push_kv_bool(&input, "no_cache", i == 1);
+        else (void)json_push_kv_str(&input, "no_cache", "true");
+        bool valid = spec && zcl_command_registry_input_validate(spec, &input, why, sizeof why);
+        if (valid != (i < 2)) failures++;
+        json_free(&input);
+    }
     return failures;
 }
 
@@ -1040,6 +1135,11 @@ int test_dev_job(void)
     failures += dj_fleet_refusal_cases();
     failures += dj_fleet_source_refusals();
     failures += dj_fleet_shape_cases();
+    failures += dj_fleet_cache_local_cases();
+    failures += dj_fleet_cache_refusals();
+    failures += dj_fleet_cache_peer_case();
+    failures += dj_fleet_cache_registry_case();
+    failures += dj_fleet_cache_cli_case();
     failures += dj_android_cases(&hooks);
 
     TEST("dev.fleet.job: unsafe peer is rejected before SSH") {

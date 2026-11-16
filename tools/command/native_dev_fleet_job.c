@@ -103,7 +103,7 @@ static void fj_job_invoke(const struct zcl_command_request *parent,
 
 static void fj_local_start(const struct zcl_command_request *request,
                            struct zcl_command_reply *reply, const char *cwd,
-                           const char *head, const char *task, const char *group)
+                           const char *head, const char *task, const char *group, bool no_cache)
 {
     if (!fj_check_source(cwd, head)) { fj_fail(reply, "SOURCE_MISMATCH", "HEAD differs or tracked files are dirty"); return; }
     char only[256];
@@ -113,6 +113,7 @@ static void fj_local_start(const struct zcl_command_request *request,
     if (!strcmp(task, "test")) {
         int n = snprintf(only, sizeof only, "ONLY=%s", group);
         ok = ok && n > 0 && (size_t)n < sizeof only && fj_add_arg(&args, "t-fast-exact") && fj_add_arg(&args, only);
+        if (no_cache) ok = ok && fj_add_arg(&args, "T_FAST_EXACT_ARGS=--no-cache");
     } else ok = ok && fj_add_arg(&args, !strcmp(task, "build") ? "z23" : "lint");
     ok = ok && json_push_kv(&input, "argv", &args) && json_push_kv_str(&input, "cwd", cwd);
     json_free(&args);
@@ -189,7 +190,7 @@ static bool fj_remote_refused(struct zcl_command_reply *reply,
 static void fj_remote(struct zcl_command_reply *reply, const char *peer,
                       const char *slot, const char *op, const char *cwd,
                       const char *head, const char *task, const char *group,
-                      const char *id, int64_t timeout)
+                      const char *id, int64_t timeout, bool no_cache)
 {
     char a[1040], b[1040], c[1040], d[1040], e[1040], t[64], output[65536] = {0};
     snprintf(a, sizeof a, "--operation=%s", op);
@@ -201,12 +202,14 @@ static void fj_remote(struct zcl_command_reply *reply, const char *peer,
     char j[1100]; snprintf(j, sizeof j, "--job_id=%s", id);
     const char *start[] = {"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "--", peer, slot,
                            "dev", "fleet", "job", a, b, c, d, e, "--json", NULL};
+    const char *start_cold[] = {"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "--", peer, slot,
+                                "dev", "fleet", "job", a, b, c, d, e, "--no_cache=true", "--json", NULL};
     const char *start_no_group[] = {"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "--", peer, slot,
                                     "dev", "fleet", "job", a, b, c, d, "--json", NULL};
     const char *wait[] = {"ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "--", peer, slot,
                           "dev", "fleet", "job", a, j, t, "--json", NULL};
     bool timed_out = false;
-    const char *const *argv = !strcmp(op, "wait") ? wait : (*group ? start : start_no_group);
+    const char *const *argv = !strcmp(op, "wait") ? wait : (no_cache ? start_cold : (*group ? start : start_no_group));
     int rc;
 #if defined(ZCL_TESTING)
     if (fj_transport) rc = fj_transport(argv, output, sizeof output, 250000, &timed_out);
@@ -266,6 +269,8 @@ static bool fj_input_shape(const struct json_value *input)
         const struct json_value *v = json_get(input, strings[i]);
         if (v && (v->type != JSON_STR || !json_get_str(v)[0])) return false;
     }
+    const struct json_value *cache = json_get(input, "no_cache");
+    if (cache && cache->type != JSON_BOOL) return false;
     const struct json_value *timeout = json_get(input, "timeout_s");
     if (timeout && timeout->type != JSON_INT) return false;
     return !json_get(input, "peer_binary") || json_get(input, "peer");
@@ -284,19 +289,24 @@ void zcl_native_handle_dev_fleet_job(const struct zcl_command_request *request,
     const char *group = fj_str(in, "group"), *id = fj_str(in, "job_id");
     const struct json_value *tv = json_get(in, "timeout_s");
     int64_t timeout = tv && tv->type == JSON_INT ? json_get_int(tv) : 60;
+    const struct json_value *cache = json_get(in, "no_cache");
+    bool no_cache = cache && json_get_bool(cache);
+    if (cache && (strcmp(op, "start") || strcmp(task, "test"))) {
+        fj_fail(reply, "INVALID_INPUT", "no_cache is only valid when starting a test"); return;
+    }
     if (strcmp(op, "start") && strcmp(op, "wait")) { fj_fail(reply, "INVALID_INPUT", "operation must be start or wait"); return; }
     if (!fj_peer_valid(peer, slot)) {
         fj_fail(reply, "INVALID_INPUT", "invalid peer or executable path"); return;
     }
     if (!strcmp(op, "wait")) {
         if (!fj_wait_valid(id, timeout)) { fj_fail(reply, "INVALID_INPUT", "invalid job id or timeout"); return; }
-        if (*peer) fj_remote(reply, peer, slot, op, "", "", "", "", id, timeout);
+        if (*peer) fj_remote(reply, peer, slot, op, "", "", "", "", id, timeout, false);
         else fj_local_wait(request, reply, id, timeout);
         return;
     }
     if (!fj_start_valid(cwd, head, task, group)) {
         fj_fail(reply, "INVALID_INPUT", "invalid workspace, head, task or test group"); return;
     }
-    if (*peer) fj_remote(reply, peer, slot, op, cwd, head, task, group, "", timeout);
-    else fj_local_start(request, reply, cwd, head, task, group);
+    if (*peer) fj_remote(reply, peer, slot, op, cwd, head, task, group, "", timeout, no_cache);
+    else fj_local_start(request, reply, cwd, head, task, group, no_cache);
 }

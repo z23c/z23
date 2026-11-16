@@ -3060,9 +3060,10 @@ ZCL_COMMAND_DEV_COMMAND(
     "Accepts only build, lint or a registered test group. A remote peer is "
     "reached through authorized SSH; the receiver validates the workspace "
     "and observed HEAD and uses its local job and host admission rail. "
+    "For a test start, no_cache:true requests uncached execution. "
     "Results are observations, not source-identity proof receipts.", 8192,
     "fleet,job,build,test,lint", "zcl.dev_fleet_job.input.v1", "zcl.dev_job.v1",
-    "operation,peer,peer_binary,cwd,expected_head,task,group,job_id,timeout_s", "",
+    "operation,peer,peer_binary,cwd,expected_head,task,group,job_id,timeout_s,no_cache", "",
     "z23-dev dev fleet job --operation=start --task=lint --cwd=/worktree --expected_head=<sha>",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
