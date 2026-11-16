@@ -342,7 +342,9 @@ candidate children: it starts no Make process or shell.
 
 On Linux, the save link never enumerates the complete object graph. Make performs one
 epoch-owned `-r` prelink when it establishes the dev environment; the action
-plan binds that regular file, and the artifact key hashes it. Each save then
+plan binds that regular file, and the artifact key hashes it. That prelink uses
+the platform linker, not the development linker, because mold writes `.bss` into
+a `-r` output as real zero bytes (a 1551 MB base against 207 MB). Each save then
 links only the current overlay response plus that frozen base, with overlay
 definitions ordered first. An overlay containing `.preinit_array`,
 `.init_array`, or `.fini_array` ownership fails closed before the linker so a

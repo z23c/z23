@@ -1704,13 +1704,13 @@ BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ZCL_DEV_LINKER ?= $(eval ZCL_DEV_LINKER := $(shell tools/dev/dev-linker-select.sh))$(ZCL_DEV_LINKER)
-# PE/COFF relocatable links are supported by the MinGW platform linker, while
-# lld-link rejects the ELF-style `-r` option.  Keep the measured fast linker
-# for executable links and use the platform linker for frozen restart bases.
-ZCL_RELOC_LINKER = $(ZCL_DEV_LINKER)
-ifneq ($(ZCL_HOST_WINDOWS),)
+# Frozen restart bases are `-r` prelinks and always use the platform linker
+# (no -fuse-ld): mold writes the 1.3 GB .bss of the test graph as real zero
+# bytes (base 1551 MB vs 207 MB with gold and 215 MB with GNU ld, same inputs,
+# same 1.3 s), and lld-link rejects `-r` on PE/COFF.  Executable links keep
+# ZCL_DEV_LINKER.  check-dev-loop-profiles proves a base link stays compact.
 ZCL_RELOC_LINKER =
-endif
+ZCL_RELOC_LINK = $(CC) $(ZCL_RELOC_LINKER) -r -nostdlib
 # Compiler-speed development profile. Same warning set as release (including
 # -Werror). No LTO: the release LTO link was measured at ~45 s wall here for a
 # one-file edit. -g1 instead of -g3: macro debug info is the expensive part of
@@ -4777,7 +4777,7 @@ $(TEST_RESTART_BASE_RELOC): $(TEST_PARALLEL_FAST_LINK_RSP) \
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" \
+	$(ZCL_RELOC_LINK) -o "$$tmp" \
 	  "@$(TEST_PARALLEL_FAST_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
@@ -6179,6 +6179,8 @@ dev-loop-profile-flags:
 	@printf 'DEV_RESTART\t%s\t%s\n' '$(DEV_RESTART_CFLAGS)' '$(DEV_RESTART_LDFLAGS)'
 	@printf 'INTEGRATION\t%s\t%s\n' '$(INTEGRATION_CFLAGS)' '$(INTEGRATION_LDFLAGS)'
 	@printf 'RELEASE\t%s\t%s\n' '$(RELEASE_CFLAGS)' '$(RELEASE_LDFLAGS)'
+	@printf 'RELOC_LINK\t%s\t\n' '$(ZCL_RELOC_LINK)'
+	@printf 'RELOC_CC\t%s\t\n' '$(CC)'
 
 print-CFLAGS:
 	@printf '%s\n' '$(CFLAGS)'
@@ -6521,7 +6523,7 @@ $(DEV_RESTART_BASE_RELOC): $(DEV_LINK_RSP) $(DEV_OBJS)
 	@set -eu; \
 	tmp="$$(mktemp "$@.XXXXXX")"; \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	$(CC) $(ZCL_RELOC_LINKER) -r -nostdlib -o "$$tmp" "@$(DEV_LINK_RSP)"; \
+	$(ZCL_RELOC_LINK) -o "$$tmp" "@$(DEV_LINK_RSP)"; \
 	chmod 0444 "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM

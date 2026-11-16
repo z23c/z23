@@ -17,7 +17,9 @@ scratch="$(mktemp "${TMPDIR:-/tmp}/zcl-dev-profile.XXXXXX")" ||
     fail 'cannot allocate expanded-recipe scratch file'
 selector_fixture="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-selector.XXXXXX")" ||
     fail 'cannot allocate standalone selector fixture'
-trap 'rm -f "$scratch"; rm -rf "$selector_fixture"' EXIT HUP INT TERM
+reloc_fixture="$(mktemp -d "${TMPDIR:-/tmp}/zcl-reloc-base.XXXXXX")" ||
+    fail 'cannot allocate relocatable-base fixture'
+trap 'rm -f "$scratch"; rm -rf "$selector_fixture" "$reloc_fixture"' EXIT HUP INT TERM
 
 # Exercise the real parse with inert, recording replacements for every source,
 # compiler and epoch helper. A node-bearing invocation must still reach its
@@ -111,6 +113,74 @@ profile_line()
     printf '%s\n' "$profiles" | awk -F '\t' -v wanted="$name" \
         '$1 == wanted { print; found = 1 } END { if (!found) exit 1 }'
 }
+
+# A relocatable base must not carry .bss as file bytes: mold -r wrote the 1.3 GB
+# .bss of the proof graph as zeros (1551 MB base against 207 MB). Link a 32 MiB
+# zero-initialised array with the exact command both base rules use (the
+# Makefile prints it) and require a small object. RELOC_BASE_CHECK_LINKER forces
+# a linker for the red run only; it is passed as the Makefile variable.
+reloc_print_row()
+{
+    local row="$1"
+    # The quoted expansion is one assignment word, or nothing when unset
+    # (an empty array would abort under set -u on bash 3.2).
+    make -s --no-print-directory -C "$ROOT" dev-loop-profile-flags \
+        ${RELOC_BASE_CHECK_LINKER:+"ZCL_RELOC_LINKER=$RELOC_BASE_CHECK_LINKER"} |
+        awk -F '\t' -v row="$row" '$1 == row { print $2 }'
+}
+
+# Print why the compiler cannot make a relocatable link at all, or nothing.
+reloc_probe()
+{
+    local cc="$1" cmd="$2"
+    printf '%s\n' 'int zcl_probe(void) { return 0; }' > "$reloc_fixture/probe.c"
+    # shellcheck disable=SC2086 # the printed commands are word lists
+    $cc -c -o "$reloc_fixture/probe.o" "$reloc_fixture/probe.c" \
+        > "$reloc_fixture/probe.log" 2>&1 ||
+        { echo "cannot compile with $cc"; return 0; }
+    # shellcheck disable=SC2086
+    $cmd -o "$reloc_fixture/probe-out.o" "$reloc_fixture/probe.o" \
+        > "$reloc_fixture/probe.log" 2>&1 ||
+        { echo "cannot link with: $cmd"; return 0; }
+    return 0
+}
+
+check_reloc_base_compact()
+{
+    local cmd cc why limit=1048576 size
+    cmd="$(reloc_print_row RELOC_LINK)" ||
+        fail 'cannot read the relocatable base link command'
+    cc="$(reloc_print_row RELOC_CC)" ||
+        fail 'cannot read the relocatable base compiler'
+    [ -n "$cmd" ] && [ -n "$cc" ] ||
+        fail 'Makefile prints no relocatable base link command or compiler'
+    why="$(reloc_probe "$cc" "$cmd")"
+    if [ -n "$why" ] && [ -n "${RELOC_BASE_CHECK_LINKER:-}" ]; then
+        fail "RELOC_BASE_CHECK_LINKER is set but unusable: $why"
+    fi
+    if [ -n "$why" ]; then
+        printf 'check-dev-loop-profiles: SKIP relocatable base check: %s\n' \
+            "$why"
+        return 0
+    fi
+    printf '%s\n' \
+        'static char zcl_pad[32u << 20];' \
+        'char *zcl_pad_get(void) { return zcl_pad; }' \
+        > "$reloc_fixture/pad.c"
+    # shellcheck disable=SC2086 # the printed commands are word lists
+    $cc -c -o "$reloc_fixture/pad.o" "$reloc_fixture/pad.c" ||
+        fail 'cannot compile the relocatable base fixture'
+    # shellcheck disable=SC2086
+    $cmd -o "$reloc_fixture/base.o" "$reloc_fixture/pad.o" ||
+        fail "relocatable base link failed: $cmd"
+    size="$(wc -c < "$reloc_fixture/base.o" | tr -d ' ')" ||
+        fail 'cannot size the relocatable base fixture'
+    [ "$size" -lt "$limit" ] ||
+        fail "relocatable base link wrote .bss into the file: $size bytes from a 32 MiB zero array (limit $limit) using: $cmd"
+    printf 'check-dev-loop-profiles: relocatable base compact (%s bytes)\n' \
+        "$size"
+}
+check_reloc_base_compact
 
 for name in DEV_LIVE DEV_RESTART INTEGRATION; do
     line="$(profile_line "$name")" || fail "missing $name profile"
@@ -287,7 +357,7 @@ awk '$0 == "else ifeq ($(strip $(MAKECMDGOALS)),)" {
 git -C "$ROOT" grep -q '^-include \$(DEV_OBJS:\.o=\.d) \$(DEV_PACKAGE_VERIFY_OBJ:\.o=\.d)$' -- \
     Makefile ||
     fail 'dev depfile profile omits the package verifier main (a header change leaves tools/package_verify.o stale and the relinked verifier aborts)'
-git -C "$ROOT" grep -q '^else ifneq (\$(filter fast-compile dev-build-only dev-package-verifier,\$(ZCL_DEPFILE_SINGLE_GOAL)),)$' -- \
+git -C "$ROOT" grep -q '^else ifneq (\$(filter fast-compile dev-build-only dev-package-verifier rank-pair,\$(ZCL_DEPFILE_SINGLE_GOAL)),)$' -- \
     Makefile ||
     fail 'the dev-package-verifier sub-make does not select the dev depfile profile by name'
 
