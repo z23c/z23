@@ -860,7 +860,7 @@ static bool tag_net_fetch(void *context, const char *onion, const char *path,
     const uint8_t *data = NULL; size_t size = 0; char json[17000];
     if (!strncmp(path, "/board/apps/v1", 14)) {
         f->board_calls++;
-        if (strcmp(onion, TAG_NET_RELAY)) return false;
+        if (strcmp(onion, TAG_NET_RELAY) || f->fault == 10) return false;
         if (!tag_net_board_body(f, json, sizeof(json), &size)) return false;
         data = (const uint8_t *)json;
     } else {
@@ -1289,6 +1289,34 @@ static bool tag_network_unsafe_cancel_refused(struct tag_net *f, int64_t now)
     struct zcl_app_offer_row row = {0}; enum app_network_error error; int before = f->calls;
     return !app_network_exact(&t, TAG_NET_RELAY, f->id, now, &row, &error) && f->calls == before;
 }
+/* A selected signed post must be rechecked before any carrier admission. */
+static bool tag_network_catalog_disappears(void)
+{
+    struct tag_net f;
+    bool ok = tag_net_init(&f, VCS_PACKAGE_CHUNK_BYTES + 13u);
+    char dir[PATH_MAX] = "";
+    if (ok) ok = test_mkdtemp(dir, sizeof(dir), "app_recheck") != NULL;
+    struct vcs_package_store *store = ok ? vcs_package_store_open(dir, vcs_package_store_quota_bytes()) : NULL;
+    struct app_network_transport t = {.fetch = tag_net_fetch, .cancelled = tag_net_cancelled,
+                                     .context = &f, .timeout_ms = 120000};
+    struct zcl_app_offer_row row = {0};
+    enum app_network_error error = APP_NETWORK_OK;
+    uint8_t *out = NULL; size_t len = 0; bool mutated = false;
+    int64_t now = platform_time_wall_unix();
+    if (ok) ok = store && app_network_exact(&t, TAG_NET_RELAY, f.id, now, &row, &error);
+    int calls = f.calls, boards = f.board_calls;
+    f.fault = 10;
+    if (ok) ok = !app_network_carrier(&t, TAG_NET_RELAY, TAG_NET_HOST, &row, now,
+                                      store, &out, &len, &mutated, &error) &&
+                 error == APP_NETWORK_UNAVAILABLE && !mutated && !out && len == 0 &&
+                 f.board_calls == boards + 1 && f.calls == calls + 1;
+    free(out);
+    if (store) vcs_package_store_close(store);
+    if (dir[0] && test_rm_rf_recursive(dir) != 0) ok = false;
+    free(f.bytes); free(f.manifest);
+    return ok;
+}
+
 static bool tag_network_exercise(void)
 {
     struct tag_net f; bool ok = tag_net_init(&f, VCS_PACKAGE_CHUNK_BYTES + 13u);
@@ -1581,7 +1609,7 @@ static int tag_network_test(void)
 {
     int failures = 0;
     TEST("app network: independently verify frames and sliced carrier") {
-        ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); ASSERT(tag_network_parallel()); PASS();
+        ASSERT(tag_network_catalog_disappears()); ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); ASSERT(tag_network_parallel()); PASS();
     } _test_next:;
     return failures;
 }
