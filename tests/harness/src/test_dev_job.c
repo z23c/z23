@@ -549,9 +549,14 @@ static int dj_fleet_cache_cli_case(void)
         "--task=test", "--group=dev_job", "--no_cache=true", "--json"};
     dj_fleet_response = response; dj_fleet_calls = 0; dj_fleet_argv_ok = false; dj_fleet_expect_cold = true;
     zcl_fleet_job_set_test_transport(dj_fleet_transport);
+    /* The test binary has the release catalog: a valid flag reaches the
+     * compatibility boundary, while a malformed value fails normalization. */
     int rc = zcl_native_command_main("dev", args, 11, "", 0, CHAIN_MAIN, false);
+    args[9] = "--no_cache=not_bool";
+    int invalid = zcl_native_command_main("dev", args, 11, "", 0, CHAIN_MAIN, false);
     zcl_fleet_job_set_test_transport(NULL); dj_fleet_expect_cold = false;
-    return rc == 0 && dj_fleet_calls == 1 && dj_fleet_argv_ok ? 0 : 1;
+    return rc == ZCL_COMMAND_EXIT_BLOCKED && invalid == ZCL_COMMAND_EXIT_INVALID &&
+           dj_fleet_calls == 0 ? 0 : 1;
 }
 
 static int dj_fleet_cache_registry_case(void)
