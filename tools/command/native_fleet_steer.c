@@ -4310,6 +4310,17 @@ static bool fmc_directory_fit(struct json_value *data, struct json_value *trunc,
     return true;
 }
 
+static bool fmc_fit_member(struct json_value *data, struct json_value *trunc,
+                           const char *key, size_t budget)
+{
+    long long d;
+    do {
+        d = fmc_trim_member(data, key, budget);
+        if (d > 0 && !fmc_trunc_add(trunc, key, d)) return false;
+    } while (d > 0 && json_write(data, NULL, 0) > budget);
+    return true;
+}
+
 static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
 {
     static const char *const order[] = {
@@ -4330,11 +4341,7 @@ static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
     for (i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
         if (forward && !strcmp(keys[i], "changes") &&
             !fmc_directory_fit(data, trunc, budget)) return false;
-        long long d;
-        do {
-            d = fmc_trim_member(data, keys[i], budget);
-            if (d > 0 && !fmc_trunc_add(trunc, keys[i], d)) return false;
-        } while (d > 0 && json_write(data, NULL, 0) > budget);
+        if (!fmc_fit_member(data, trunc, keys[i], budget)) return false;
     }
     return ok && (forward || fmc_directory_fit(data, trunc, budget));
 }
