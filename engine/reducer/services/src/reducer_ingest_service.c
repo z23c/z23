@@ -630,11 +630,66 @@ static void reducer_refuse_unbacked_reseed(int height)
                  height, (unsigned long long)reps);
 }
 
+/* True when `tip` is provably OFF the best-header chain: it has failed, or the
+ * best header's ancestor at its height resolves, has not failed, and carries a
+ * different hash. An unknowable answer (no best header, a tip above it, an
+ * unresolved or failed ancestor) is not proof, so it stays false, the same
+ * reading durable_candidate_on_best_header (tip_finalize_stage.c) uses. */
+static bool reducer_reseed_tip_off_best_chain(const struct main_state *ms,
+                                              const struct block_index *tip)
+{
+    if (block_has_any_failure(tip))
+        return true;
+    const struct block_index *best = ms->pindex_best_header;
+    if (!best || tip->nHeight > best->nHeight)
+        return false;
+    const struct block_index *anc =
+        block_index_get_ancestor((struct block_index *)best, tip->nHeight);
+    if (!anc || !anc->phashBlock || block_has_any_failure(anc))
+        return false;
+    return !uint256_eq(anc->phashBlock, tip->phashBlock);
+}
+
+static void reducer_refuse_off_best_chain_reseed(int height)
+{
+    atomic_fetch_add(&g_seed_anchor_reseed_failures, 1);
+    /* Reached on every ingest until the new branch finalizes past `height`. */
+    static struct log_throttle throttle = LOG_THROTTLE_INIT;
+    uint64_t reps = 0;
+    if (log_throttle_should_emit(&throttle, 1, platform_time_wall_unix(),
+                                 3600, &reps))
+        LOG_WARN("reducer",
+                 "[reducer] runtime tip_finalize anchor re-seed refused h=%d "
+                 "reason=off-best-chain: the served tip is not the best "
+                 "header's block at its height (a reorg is still re-"
+                 "finalizing) repeated=%llu",
+                 height, (unsigned long long)reps);
+}
+
+static void reducer_reseed_cursor_behind_tip(
+        struct chain_activation_controller *ctl,
+        const struct block_index *tip)
+{
+    if (reducer_reseed_tip_unbacked())
+        reducer_refuse_unbacked_reseed(tip->nHeight);
+    else if (reducer_reseed_tip_off_best_chain(ctl->ms, tip))
+        reducer_refuse_off_best_chain_reseed(tip->nHeight);
+    else
+        reducer_ingest_try_seed_anchor(tip->nHeight, tip->phashBlock->data,
+                                       "runtime-reseed-cursor-behind-tip");
+}
+
 static void reducer_seed_anchors_for_ingest_tip(
         struct chain_activation_controller *ctl)
 {
     /* Runtime re-seed ONLY when the finalize cursor is genuinely BEHIND the
-     * served tip's own transition (cursor < T, e.g. after a repair clamp).
+     * served tip's own transition (cursor < T). The boot repair clamp
+     * (stage_reconcile_clamp_tip_finalize_to_floor, boot.c) does not leave
+     * that state: tip_finalize init re-anchors the cursor to the cached tip or
+     * publishes the resolved tip at the cursor. A reorg rewind does:
+     * rewind_cursor_if_active_chain_reorged (tip_finalize_stage.c) lowers the
+     * cursor while the served tip stays on the old block until the new branch
+     * finalizes past its height (step_fin_publish_wanted is height-monotonic).
      * cursor == T is the healthy steady state — the T→T+1 transition is the
      * stage's own pending work — a `< T+1` gate would re-seed it on
      * EVERY at-tip ingest, stamping the cursor to T+1 and skipping the
@@ -646,17 +701,16 @@ static void reducer_seed_anchors_for_ingest_tip(
      * is a linkage walk only) would stamp every cursor to it over an empty
      * coin set. Any block that passes check_block reaches this line, from any
      * peer (cmpctblock -> boot_submit_compact_block has no at-tip gate).
-     * Proof: tests/harness/src/reducer_reseed_unbacked_test.h. */
+     * Proof: tests/harness/src/reducer_reseed_unbacked_test.h.
+     *
+     * Never on a served tip off the best-header chain: in the reorg window
+     * that tip is the orphaned old block, and the seed would raise the
+     * raise-only trusted base to it and write anchor rows naming it. Proof:
+     * tests/harness/src/reducer_reseed_orphan_test.h. */
     struct block_index *anchor_tip = active_chain_tip(&ctl->ms->chain_active);
     if (anchor_tip && anchor_tip->phashBlock &&
-        tip_finalize_stage_cursor() < (uint64_t)anchor_tip->nHeight) {
-        if (reducer_reseed_tip_unbacked())
-            reducer_refuse_unbacked_reseed(anchor_tip->nHeight);
-        else
-            reducer_ingest_try_seed_anchor(anchor_tip->nHeight,
-                                           anchor_tip->phashBlock->data,
-                                           "runtime-reseed-cursor-behind-tip");
-    }
+        tip_finalize_stage_cursor() < (uint64_t)anchor_tip->nHeight)
+        reducer_reseed_cursor_behind_tip(ctl, anchor_tip);
 
     /* Regtest on-demand bootstrap: a FRESH genesis-only node (no import /
      * snapshot / reindex ever ran tip_finalize_stage_seed_anchor) has no
