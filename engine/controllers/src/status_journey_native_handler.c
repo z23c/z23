@@ -26,6 +26,11 @@
 
 #define JOURNEY_RPC_CONNECT_MS 75L
 #define JOURNEY_RPC_TOTAL_MS   300L
+/* The one reserved-lane call made when the general lane did not answer: the
+ * whole command stays within the brief deadline plus this total. */
+#define JOURNEY_FD_CONNECT_MS  250L
+#define JOURNEY_FD_TOTAL_MS    1000L
+#define JOURNEY_FD_SCHEMA      "zcl.status_frontdoor.v1"
 
 enum journey_reason {
     JOURNEY_READY = 0,
@@ -43,6 +48,7 @@ enum journey_reason {
     JOURNEY_SAPLING_CHECKPOINT_UNHEALTHY,
     JOURNEY_SAPLING_WITNESS_NOT_READY,
     JOURNEY_MEMPOOL_STATUS_UNAVAILABLE,
+    JOURNEY_NODE_BUSY_GENERAL_RPC,
     JOURNEY_REASON_COUNT
 };
 
@@ -107,6 +113,11 @@ static const struct journey_reason_row g_journey_reasons[] = { /* hotswap-static
     [JOURNEY_MEMPOOL_STATUS_UNAVAILABLE] = {
         "MEMPOOL_STATUS_UNAVAILABLE", "NETWORK_ACCEPTANCE_UNKNOWN",
         "z23 core chain mempool status", true,
+        ZCL_STATUS_REASON_HEALTHCHECK_UNHEALTHY },
+    /* `z23 core status` (core.status) is the flagless one-dumpstate
+     * status_frontdoor reply, which the node serves on its reserved worker. */
+    [JOURNEY_NODE_BUSY_GENERAL_RPC] = {
+        "NODE_BUSY_GENERAL_RPC", "NODE_BUSY", "z23 core status", true,
         ZCL_STATUS_REASON_HEALTHCHECK_UNHEALTHY },
 };
 
@@ -454,12 +465,177 @@ static void journey_read_pace(struct journey_facts *f, struct json_value *pace,
     f->pace = pace_ok ? json_get_str(json_get(pace, "pace")) : NULL;
 }
 
+/* ── Degraded journey from the reserved-lane front door ───────────────────
+ * Used only when the brief did not answer. The front door (status_frontdoor.c)
+ * carries: provable_tip + provable_tip_published (atomics, no age label),
+ * sync_gap + sync_gap_known (derived from an untrusted peer height hint),
+ * connections{available,stale,age_seconds} and a degraded[] array naming every
+ * dark member. It has no wallet, money or synced member, so those stay
+ * unknown (JSON null), never false and never 0. */
+
+/* The envelope's `state` object, or the body itself when handed bare. */
+static const struct json_value *journey_fd_state(const struct json_value *doc)
+{
+    const struct json_value *st = json_get(doc, "state");
+    return journey_is_obj(st) ? st : doc;
+}
+
+/* Parse a front-door reply; true with `doc` to free and `*state` set only
+ * for a non-error reply of the expected schema. */
+static bool journey_fd_open(const char *raw, struct json_value *doc,
+                            const struct json_value **state)
+{
+    if (!raw || !journey_obj(doc, raw))
+        return false;
+    const struct json_value *st = journey_fd_state(doc);
+    const char *schema = json_get_str(json_get(st, "schema"));
+    if (!schema || strcmp(schema, JOURNEY_FD_SCHEMA) != 0) {
+        json_free(doc);
+        return false;
+    }
+    *state = st;
+    return true;
+}
+
+/* True when degraded[] names `member`, or is missing (freshness unproven). */
+static bool journey_fd_names_member(const struct json_value *st,
+                                    const char *member)
+{
+    const struct json_value *deg = json_get(st, "degraded");
+    if (!deg || deg->type != JSON_ARR)
+        return true;
+    for (size_t i = 0; i < json_size(deg); i++) {
+        const char *m = json_get_str(json_get(json_at(deg, i), "member"));
+        if (m && strcmp(m, member) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool journey_fd_peers_fresh(const struct json_value *st)
+{
+    const struct json_value *c = json_get(st, "connections");
+    bool available = false, stale = true;
+    return journey_is_obj(c) && journey_bool(c, "available", &available) &&
+           available && journey_bool(c, "stale", &stale) && !stale &&
+           !journey_fd_names_member(st, "connections");
+}
+
+static bool journey_fd_tip(const struct json_value *st, int64_t *tip)
+{
+    bool published = false;
+    return journey_bool(st, "provable_tip_published", &published) &&
+           published && journey_nonnegative(st, "provable_tip", tip);
+}
+
+/* The front door has no synced/at-tip member, so synced and gap are always
+ * unknown here. sync_gap derives from an untrusted peer height advertisement
+ * (the node tags it max_peer_height_trust=untrusted_peer_advertisement); it
+ * is only surfaced under its own name with that trust label. */
+static bool journey_fd_peer_gap(const struct json_value *st, int64_t *gap)
+{
+    bool gap_known = false;
+    return journey_fd_peers_fresh(st) &&
+           journey_bool(st, "sync_gap_known", &gap_known) && gap_known &&
+           journey_nonnegative(st, "sync_gap", gap);
+}
+
+static void journey_push_unknown(struct json_value *out, const char *key)
+{
+    status_push_int_if_known(out, key, false, 0);
+}
+
+static void journey_render_degraded_chain(struct json_value *out,
+                                          const struct json_value *st)
+{
+    int64_t tip = 0, gap = 0;
+    bool tip_known = journey_fd_tip(st, &tip);
+    bool gap_known = journey_fd_peer_gap(st, &gap);
+    (void)json_push_kv_bool(out, "status_complete", false);
+    (void)json_push_kv_bool(out, "node_healthy", false);
+    static const char *const unknown_keys[] = {
+        "synced", "gap", "wallet_ready", "can_receive", "can_send", "can_send_transparent",
+        "can_send_sapling", "header_height", "peer_count",
+    };
+    for (size_t i = 0; i < sizeof(unknown_keys) / sizeof(unknown_keys[0]); i++)
+        journey_push_unknown(out, unknown_keys[i]);
+    status_push_int_if_known(out, "hstar", tip_known, tip);
+    status_push_int_if_known(out, "peer_advertised_gap", gap_known, gap);
+    (void)json_push_kv_str(out, "peer_height_trust",
+                           "untrusted_peer_advertisement");
+    (void)json_push_kv_str(out, "sync_state", "unknown");
+    (void)json_push_kv_str(out, "primary_blocker", "unknown");
+    (void)json_push_kv_str(out, "pace", "unknown");
+    (void)json_push_kv_str(out, "status_source", "status_frontdoor");
+    status_push_int_if_known(out, "tip_height", tip_known, tip);
+    /* The front door labels peers, not the tip: no tip age exists to report. */
+    journey_push_unknown(out, "tip_age_s");
+}
+
+static void journey_render_degraded_wallet(struct json_value *out)
+{
+    static const char *const unknown_keys[] = {
+        "wallet_encrypted", "wallet_unlocked", "encrypted_backup_ready",
+        "sapling_prover_ready", "sapling_checkpoint_healthy",
+        "sapling_witness_ready", "mempool_transactions",
+    };
+    for (size_t i = 0; i < sizeof(unknown_keys) / sizeof(unknown_keys[0]); i++)
+        journey_push_unknown(out, unknown_keys[i]);
+    (void)json_push_kv_str(out, "sapling_witness_state", "unavailable");
+}
+
+static char *journey_compose_degraded(const struct json_value *st,
+                                      struct zcl_native_body_err *err)
+{
+    struct journey_facts none = {0};
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    journey_render_degraded_chain(&out, st);
+    journey_render_money(&out, &none);
+    journey_render_degraded_wallet(&out);
+    journey_render_reason(&out, &none, JOURNEY_NODE_BUSY_GENERAL_RPC);
+    char *body = zcl_json_value_to_body(&out, "status_journey_body");
+    json_free(&out);
+    if (!body) {
+        err->status = ZCL_NATIVE_BODY_INTERNAL;
+        (void)snprintf(err->message, sizeof(err->message),
+                       "could not serialize status journey");
+        LOG_NULL("native.status", "could not serialize status journey");
+    }
+    return body;
+}
+
+/* The brief did not answer and the reserved lane did: compose the degraded
+ * journey. NULL when there is no usable front-door reply (the caller then
+ * composes exactly as before) or when serialization failed (err set). */
+static char *journey_compose_frontdoor(const char *raw,
+                                       struct zcl_native_body_err *err,
+                                       bool *usable)
+{
+    struct json_value doc;
+    const struct json_value *st = NULL;
+    *usable = journey_fd_open(raw, &doc, &st);
+    if (!*usable)
+        return NULL;
+    char *body = journey_compose_degraded(st, err);
+    json_free(&doc);
+    return body;
+}
+
 char *zcl_native_status_journey_compose(
     const struct zcl_status_journey_sources *src,
     struct zcl_native_body_err *err)
 {
     struct json_value brief, money, wallet, backup, mempool, pace;
     bool brief_ok = src->brief && journey_obj(&brief, src->brief);
+    if (!brief_ok && src->frontdoor) {
+        bool usable = false;
+        char *degraded = journey_compose_frontdoor(src->frontdoor, err,
+                                                   &usable);
+        if (usable)
+            return degraded;
+    }
     bool money_ok = journey_obj(&money, src->money);
     bool wallet_ok = journey_obj(&wallet, src->wallet);
     bool backup_ok = journey_obj(&backup, src->backup);
@@ -506,12 +682,46 @@ char *zcl_native_status_journey_compose(
     return body;
 }
 
+/* The brief failed because the node took the connection but did not answer
+ * in time (the general worker lane is parked). A refused or absent node is
+ * not this case and keeps the unchanged output. */
+static bool journey_brief_unanswered(const struct zcl_native_body_err *e)
+{
+    return e->status == ZCL_NATIVE_BODY_UNAVAILABLE &&
+           (strstr(e->message, "did not answer within the deadline") ||
+            strstr(e->message, "truncated reply"));
+}
+
+/* ONE call on the node's reserved lane. NULL when it yielded no usable
+ * front-door body (or serialization failed, with `err` set); *usable says
+ * which. */
+static char *journey_busy_body(struct zcl_native_body_err *err, bool *usable)
+{
+    char *fd_raw = node_rpc_call_deadline(
+        "dumpstate", "[\"status_frontdoor\"]", JOURNEY_FD_CONNECT_MS,
+        JOURNEY_FD_TOTAL_MS);
+    char *body = journey_compose_frontdoor(fd_raw, err, usable);
+    free(fd_raw);
+    return body;
+}
+
 char *zcl_native_status_journey_body(const struct json_value *args,
                                      struct zcl_native_body_err *err)
 {
     (void)args;
     struct zcl_native_body_err brief_err = {0};
     char *brief_raw = zcl_native_status_brief_body(NULL, &brief_err);
+    if (!brief_raw && journey_brief_unanswered(&brief_err)) {
+        bool usable = false;
+        char *busy = journey_busy_body(err, &usable);
+        if (usable)
+            return busy;
+        /* The general lane is parked and the reserved lane gave nothing:
+         * the five general calls could only wait out their deadlines.
+         * Compose with the brief alone (today's STATUS_SOURCE_UNAVAILABLE). */
+        const struct zcl_status_journey_sources none = {0};
+        return zcl_native_status_journey_compose(&none, err);
+    }
     char *money_raw = node_rpc_call_deadline(
         "agentsession", "[\"custody_current\",{}]",
         JOURNEY_RPC_CONNECT_MS, JOURNEY_RPC_TOTAL_MS);

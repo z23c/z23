@@ -28,7 +28,11 @@ char *zcl_native_status_journey_body(const struct json_value *args,
                                      struct zcl_native_body_err *err);
 /* The raw JSON texts the journey reads: the status brief body and the five
  * RPC replies (custody snapshot, wallet, backup, mempool, pace). Any may be
- * NULL; a missing source makes its facts unknown, never true. */
+ * NULL; a missing source makes its facts unknown, never true.
+ * `frontdoor` is the reserved-lane `dumpstate ["status_frontdoor"]` reply:
+ * it is read ONLY when `brief` is absent or unusable, and then composes the
+ * degraded NODE_BUSY_GENERAL_RPC journey (chain facts only; everything else
+ * unknown). It never changes a journey the brief answered. */
 struct zcl_status_journey_sources {
     const char *brief;
     const char *money;
@@ -36,6 +40,7 @@ struct zcl_status_journey_sources {
     const char *backup;
     const char *mempool;
     const char *pace;
+    const char *frontdoor;
 };
 /* Compose the journey body from already-fetched sources. No I/O. */
 char *zcl_native_status_journey_compose(

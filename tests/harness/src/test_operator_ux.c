@@ -12,6 +12,7 @@
 #include "test/test_core.h"
 
 #include "controllers/explain_native_handlers.h"
+#include "controllers/status_native_handlers.h"
 #include "config/consensus_state_producer_receipt.h"
 #include "config/command_catalog.h"
 #include "command/native_command.h"
@@ -1328,6 +1329,362 @@ static int test_money_journey_status_one_line_contract(void)
     return failures;
 }
 
+/* ── Busy general lane: the journey falls back to the reserved front door ──
+ * One scripted RPC stub answers every general-lane method with `general` and
+ * `dumpstate` with `frontdoor`, counting calls. */
+static const char ux_busy_reply[] =
+    "{\"error\":{\"code\":-32603,\"message\":\"node accepted the connection "
+    "but did not answer within the deadline - the node is busy or wedged\"}}";
+static const char ux_refused_reply[] =
+    "{\"error\":{\"code\":-32097,\"message\":\"cannot connect to node "
+    "(connection refused) - is the node running and is -rpcport correct?\"}}";
+static const char *g_ux_general_reply;
+static const char *g_ux_fd_reply;
+static int g_ux_calls;
+static int g_ux_fd_calls;
+
+static char *ux_busy_rpc(const char *method, const char *params_json)
+{
+    (void)params_json;
+    g_ux_calls++;
+    if (strcmp(method, "dumpstate") == 0) {
+        g_ux_fd_calls++;
+        return strdup(g_ux_fd_reply);
+    }
+    return strdup(g_ux_general_reply);
+}
+
+/* A reserved-lane reply: provable tip `tip`, peer gap `gap`, connections
+ * labelled stale or not, and `degraded` the raw degraded[] contents, or NULL
+ * to omit the array (freshness unproven). */
+static void ux_fd_fixture_ex(char *buf, size_t cap, long tip, long gap,
+                             bool stale, const char *degraded)
+{
+    char deg[160] = "";
+    if (degraded)
+        (void)snprintf(deg, sizeof(deg), ",\"degraded\":[%s]", degraded);
+    (void)snprintf(
+        buf, cap,
+        "{\"state\":{\"schema\":\"zcl.status_frontdoor.v1\","
+        "\"height\":%ld,\"provable_tip\":%ld,\"provable_tip_published\":true,"
+        "\"sync_gap_known\":true,\"sync_gap\":%ld,"
+        "\"connections\":{\"available\":true,\"stale\":%s,"
+        "\"age_seconds\":%d,\"total\":8}%s}}",
+        tip, tip, gap, stale ? "true" : "false", stale ? 612 : 1, deg);
+}
+
+#define UX_FD_BUSY_MEMBER \
+    "{\"member\":\"connections\",\"reason\":\"peer_snapshot_busy\"}"
+
+/* Gap 0, fresh or (stale) labelled stale and named in degraded[] with the
+ * reason the node really emits. */
+static void ux_fd_fixture(char *buf, size_t cap, long tip, bool stale)
+{
+    ux_fd_fixture_ex(buf, cap, tip, 0, stale, stale ? UX_FD_BUSY_MEMBER : "");
+}
+
+/* Run the real journey body against the stub and render its one line.
+ * `data` is the parsed body on success (caller frees). */
+static bool ux_run_journey(const char *general, const char *frontdoor,
+                           char *line, size_t cap, struct json_value *data)
+{
+    g_ux_general_reply = general;
+    g_ux_fd_reply = frontdoor;
+    g_ux_calls = 0;
+    g_ux_fd_calls = 0;
+    node_rpc_client_set_test_hook(ux_busy_rpc);
+    struct zcl_native_body_err err = {0};
+    char *body = zcl_native_status_journey_body(NULL, &err);
+    node_rpc_client_set_test_hook(NULL);
+    if (!body)
+        return false;
+    json_init(data);
+    bool ok = json_read(data, body, strlen(body)) && data->type == JSON_OBJ;
+    free(body);
+    if (ok)
+        zcl_native_status_journey_render(data, line, cap);
+    else
+        json_free(data);
+    return ok;
+}
+
+static bool ux_has_all(const char *line, const char *const *parts, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!strstr(line, parts[i]))
+            return false;
+    return true;
+}
+
+static bool ux_has_none(const char *line, const char *const *parts, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (strstr(line, parts[i]))
+            return false;
+    return true;
+}
+
+/* True only when `key` is present and an explicit JSON null. */
+static bool ux_null(const struct json_value *d, const char *key)
+{
+    const struct json_value *v = json_get(d, key);
+    return v != NULL && v->type == JSON_NULL;
+}
+
+static const char *const ux_never_when_unknown[] = {
+    "synced=yes", "wallet=ready", "receive=yes", "send=yes",
+};
+
+static int test_status_busy_general_lane_degraded_line(void)
+{
+    int failures = 0;
+    TEST("busy general lane: one front-door call prints a truthful degraded line") {
+        char fd[1024], line[1024];
+        struct json_value d;
+        ux_fd_fixture(fd, sizeof(fd), 3320884, false);
+        ASSERT(ux_run_journey(ux_busy_reply, fd, line, sizeof(line), &d));
+        ASSERT_STR_EQ(line,
+            "node=blocked synced=unknown wallet=unknown receive=unknown "
+            "send=unknown spendable_zat=unknown pending_zat=unknown "
+            "reserved_zat=unknown blocker=NODE_BUSY_GENERAL_RPC "
+            "next_action=z23 core status tip=3320884 tip_age_s=unknown");
+        /* Exactly two calls: the brief, then the reserved lane. */
+        ASSERT_EQ(g_ux_calls, 2);
+        ASSERT_EQ(g_ux_fd_calls, 1);
+        ASSERT(!json_get_bool(json_get(&d, "node_healthy")));
+        ASSERT_EQ((int)json_get_int(json_get(&d, "tip_height")), 3320884);
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_status_busy_stale_member_is_unknown(void)
+{
+    int failures = 0;
+    TEST("busy general lane: a stale peer snapshot leaves synced unknown") {
+        char fd[1024], line[1024];
+        struct json_value d;
+        /* Gap 5 would otherwise be a positive lag: only the stale label and
+         * the degraded[] entry keep it unknown. */
+        ux_fd_fixture_ex(fd, sizeof(fd), 3320884, 5, true, UX_FD_BUSY_MEMBER);
+        ASSERT(ux_run_journey(ux_busy_reply, fd, line, sizeof(line), &d));
+        ASSERT(ux_null(&d, "peer_advertised_gap"));
+        static const char *const want[] = {
+            "node=blocked", "synced=unknown", "wallet=unknown",
+            "blocker=NODE_BUSY_GENERAL_RPC", "tip=3320884",
+        };
+        ASSERT(ux_has_all(line, want, 5));
+        ASSERT(ux_has_none(line, ux_never_when_unknown, 4));
+        ASSERT_EQ(g_ux_calls, 2);
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A fresh peer gap is kept under its own name with the node's trust label,
+ * and never becomes synced or gap. */
+static int test_status_busy_peer_gap_keeps_trust_label(void)
+{
+    int failures = 0;
+    TEST("busy general lane: peer gap is labelled untrusted, synced/gap null") {
+        char fd[1024], line[1024];
+        struct json_value d;
+        ux_fd_fixture_ex(fd, sizeof(fd), 3320884, 5, false, "");
+        ASSERT(ux_run_journey(ux_busy_reply, fd, line, sizeof(line), &d));
+        ASSERT_EQ((int)json_get_int(json_get(&d, "peer_advertised_gap")), 5);
+        ASSERT_STR_EQ(json_get_str(json_get(&d, "peer_height_trust")),
+                      "untrusted_peer_advertisement");
+        ASSERT(ux_null(&d, "synced"));
+        ASSERT(ux_null(&d, "gap"));
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* IBD: the provable tip is not published yet, so the tip stays unknown. */
+static int test_status_busy_unpublished_tip_is_unknown(void)
+{
+    int failures = 0;
+    TEST("busy general lane: an unpublished provable tip prints tip=unknown") {
+        static const char fd[] =
+            "{\"state\":{\"schema\":\"zcl.status_frontdoor.v1\","
+            "\"provable_tip\":3320884,\"provable_tip_published\":false,"
+            "\"sync_gap_known\":false,\"sync_gap\":0,"
+            "\"connections\":{\"available\":true,\"stale\":false,"
+            "\"age_seconds\":1,\"total\":8},\"degraded\":[]}}";
+        char line[1024];
+        struct json_value d;
+        ASSERT(ux_run_journey(ux_busy_reply, fd, line, sizeof(line), &d));
+        ASSERT(strstr(line, "tip=unknown") != NULL);
+        ASSERT(strstr(line, "tip=3320884") == NULL);
+        ASSERT(ux_null(&d, "tip_height"));
+        ASSERT(ux_null(&d, "hstar"));
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static const char ux_today_unavailable_line[] =
+    "node=blocked synced=no wallet=not_ready receive=no send=no "
+    "spendable_zat=unknown pending_zat=unknown reserved_zat=unknown "
+    "blocker=STATUS_SOURCE_UNAVAILABLE next_action=z23 core status brief";
+
+/* Run the busy journey for one fixture and return the rendered line. */
+static bool ux_busy_line(long gap, bool stale, const char *degraded,
+                         char *line, size_t cap)
+{
+    char fd[1024];
+    struct json_value d;
+    ux_fd_fixture_ex(fd, sizeof(fd), 3320884, gap, stale, degraded);
+    if (!ux_run_journey(ux_busy_reply, fd, line, cap, &d))
+        return false;
+    json_free(&d);
+    return g_ux_calls == 2;
+}
+
+static int test_status_busy_each_freshness_guard_alone(void)
+{
+    int failures = 0;
+    TEST("busy general lane: each peer-freshness guard alone leaves synced unknown") {
+        char line[1024];
+        /* A positive peer-advertised gap is untrusted: synced stays unknown. */
+        ASSERT(ux_busy_line(5, false, "", line, sizeof(line)));
+        ASSERT(strstr(line, "synced=unknown") != NULL);
+        ASSERT(strstr(line, "synced=no") == NULL);
+        /* Stale label with an empty degraded[]. */
+        ASSERT(ux_busy_line(5, true, "", line, sizeof(line)));
+        ASSERT(strstr(line, "synced=unknown") != NULL);
+        /* Fresh label but degraded[] names connections. */
+        ASSERT(ux_busy_line(5, false, UX_FD_BUSY_MEMBER, line,
+                            sizeof(line)));
+        ASSERT(strstr(line, "synced=unknown") != NULL);
+        /* degraded[] missing: freshness unproven. */
+        ASSERT(ux_busy_line(5, false, NULL, line, sizeof(line)));
+        ASSERT(strstr(line, "synced=unknown") != NULL);
+        ASSERT(ux_has_none(line, ux_never_when_unknown, 4));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static const char ux_skew_brief[] =
+    "{\"schema\":\"zcl.public_status.v1\",\"served_height\":42,"
+    "\"served_height_known\":true,\"serving\":true,\"healthy\":true,"
+    "\"primary_blocker\":\"none\"}";
+static const char ux_truncated_reply[] =
+    "{\"error\":{\"code\":-32603,\"message\":\"a reply started but only part "
+    "of it arrived (truncated reply) - the node is busy or its connection "
+    "dropped\"}}";
+
+/* Pinned literal: the skew brief is not a usable brief, so today's code
+ * prints the unavailable line after all six calls. */
+static const char ux_skew_line[] =
+    "node=blocked synced=no wallet=not_ready receive=no send=no "
+    "spendable_zat=unknown pending_zat=unknown reserved_zat=unknown "
+    "blocker=STATUS_SOURCE_UNAVAILABLE next_action=z23 core status brief";
+
+static int test_status_answered_brief_body_makes_six_calls(void)
+{
+    int failures = 0;
+    TEST("answered brief: six general calls, no front-door call, today's line") {
+        char fd[1024], line[1024];
+        struct json_value d;
+        ux_fd_fixture(fd, sizeof(fd), 3320884, false);
+        ASSERT(ux_run_journey(ux_skew_brief, fd, line, sizeof(line), &d));
+        ASSERT_EQ(g_ux_fd_calls, 0);
+        ASSERT_EQ(g_ux_calls, 6);
+        ASSERT_STR_EQ(line, ux_skew_line);
+        ASSERT(json_get(&d, "tip_height") == NULL);
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_status_truncated_brief_uses_frontdoor(void)
+{
+    int failures = 0;
+    TEST("truncated brief reply: same two-call fallback as a timeout") {
+        char fd[1024], line[1024];
+        struct json_value d;
+        ux_fd_fixture(fd, sizeof(fd), 3320884, false);
+        ASSERT(ux_run_journey(ux_truncated_reply, fd, line, sizeof(line),
+                              &d));
+        ASSERT(strstr(line, "blocker=NODE_BUSY_GENERAL_RPC") != NULL);
+        ASSERT_EQ(g_ux_calls, 2);
+        ASSERT_EQ(g_ux_fd_calls, 1);
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_status_busy_frontdoor_fails_keeps_today(void)
+{
+    int failures = 0;
+    TEST("busy general lane and failed front door: today's output unchanged") {
+        char line[1024];
+        struct json_value d;
+        ASSERT(ux_run_journey(ux_busy_reply, ux_busy_reply, line,
+                              sizeof(line), &d));
+        ASSERT_STR_EQ(line, ux_today_unavailable_line);
+        ASSERT_EQ(g_ux_calls, 2);
+        ASSERT_EQ(g_ux_fd_calls, 1);
+        ASSERT(json_get(&d, "tip_height") == NULL);
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_status_refused_node_skips_frontdoor(void)
+{
+    int failures = 0;
+    TEST("connection refused: today's output and no front-door call") {
+        char fd[1024], line[1024];
+        struct json_value d;
+        ux_fd_fixture(fd, sizeof(fd), 3320884, false);
+        ASSERT(ux_run_journey(ux_refused_reply, fd, line, sizeof(line), &d));
+        ASSERT_STR_EQ(line, ux_today_unavailable_line);
+        ASSERT_EQ(g_ux_fd_calls, 0);
+        json_free(&d);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A brief the node did answer: the front door is never read, even if given. */
+static int test_status_answered_brief_ignores_frontdoor(void)
+{
+    int failures = 0;
+    TEST("answered brief: compose is byte-identical with or without a front door") {
+        static const char brief[] =
+            "{\"hstar\":100,\"header_height\":100,\"gap\":0,\"peer_count\":8,"
+            "\"healthy\":true,\"tip_follow\":true,\"wallet_view_ready\":true,"
+            "\"wallet_spend_allowed\":true,\"sync_state\":\"synced\","
+            "\"primary_blocker\":\"none\"}";
+        char fd[1024];
+        ux_fd_fixture(fd, sizeof(fd), 3320884, false);
+        struct zcl_native_body_err err = {0};
+        const struct zcl_status_journey_sources plain = {.brief = brief};
+        const struct zcl_status_journey_sources both = {
+            .brief = brief, .frontdoor = fd};
+        char *a = zcl_native_status_journey_compose(&plain, &err);
+        char *b = zcl_native_status_journey_compose(&both, &err);
+        ASSERT(a != NULL && b != NULL);
+        ASSERT_STR_EQ(a, b);
+        ASSERT(strstr(b, "status_frontdoor") == NULL);
+        free(a);
+        free(b);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── CLI UX contract: next-command hint ──────────────────────────────── */
 
 static int test_next_command_prioritizes_blocker_over_gap(void)
@@ -1499,6 +1856,16 @@ int test_operator_ux(void)
     failures += test_brief_status_registry_fields_agree();
     failures += test_brief_status_unknown_fields_render_unknown();
     failures += test_money_journey_status_one_line_contract();
+    failures += test_status_busy_general_lane_degraded_line();
+    failures += test_status_busy_stale_member_is_unknown();
+    failures += test_status_busy_frontdoor_fails_keeps_today();
+    failures += test_status_busy_each_freshness_guard_alone();
+    failures += test_status_busy_peer_gap_keeps_trust_label();
+    failures += test_status_busy_unpublished_tip_is_unknown();
+    failures += test_status_answered_brief_body_makes_six_calls();
+    failures += test_status_truncated_brief_uses_frontdoor();
+    failures += test_status_refused_node_skips_frontdoor();
+    failures += test_status_answered_brief_ignores_frontdoor();
     failures += test_status_no_node_headline();
     failures += test_status_cli_no_node_headline();
     failures += test_next_command_prioritizes_blocker_over_gap();

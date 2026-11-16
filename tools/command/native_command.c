@@ -3455,6 +3455,24 @@ static void nc_journey_amount_text(const struct json_value *v, char *out,
         (void)snprintf(out, cap, "%lld", (long long)json_get_int(v));
 }
 
+/* The degraded journey (composed from the reserved-lane front door because
+ * the general lane did not answer) is the only body that carries
+ * status_source=status_frontdoor. It alone appends the tip and its age; an
+ * absent or null value reads "unknown". Every other body gets "". */
+static void nc_journey_degraded_tail(const struct json_value *d, char *tail,
+                                     size_t cap)
+{
+    const char *source = d ? json_get_str(json_get(d, "status_source")) : NULL;
+    tail[0] = '\0';
+    if (!source || strcmp(source, "status_frontdoor") != 0)
+        return;
+    char tip[32] = "unknown";
+    char age[32] = "unknown";
+    nc_journey_amount_text(json_get(d, "tip_height"), tip, sizeof(tip));
+    nc_journey_amount_text(json_get(d, "tip_age_s"), age, sizeof(age));
+    (void)snprintf(tail, cap, " tip=%s tip_age_s=%s", tip, age);
+}
+
 void zcl_native_status_journey_render(const struct json_value *d, char *buf,
                                       size_t cap)
 {
@@ -3481,19 +3499,21 @@ void zcl_native_status_journey_render(const struct json_value *d, char *buf,
     nc_status_journey_text(next_action, next_action_text,
                            sizeof(next_action_text),
                            "z23 status --format=json");
+    char tail[64];
+    nc_journey_degraded_tail(d, tail, sizeof(tail));
     char line[321];
     int n = snprintf(
         line, sizeof(line),
         "node=%s synced=%s wallet=%s receive=%s send=%s "
         "spendable_zat=%s pending_zat=%s reserved_zat=%s blocker=%s "
-        "next_action=%s",
+        "next_action=%s%s",
         nc_bool_answer(d, "node_healthy", "healthy", "blocked"),
         nc_bool_answer(d, "synced", "yes", "no"),
         nc_bool_answer(d, "wallet_ready", "ready", "not_ready"),
         nc_bool_answer(d, "can_receive", "yes", "no"),
         nc_bool_answer(d, "can_send", "yes", "no"),
         spendable_text, pending_text, reserved_text,
-        blocker_text, next_action_text);
+        blocker_text, next_action_text, tail);
     if (n < 0 || (size_t)n >= sizeof(line))
         (void)snprintf(line, sizeof(line),
                        "node=blocked blocker=status_render_overflow "
