@@ -18,6 +18,9 @@ bool node_db_exec(struct node_db *ndb, const char *sql)
     if (!ndb->open) return false;
     char *err = NULL;
     int rc = sqlite3_exec(ndb->db, sql, NULL, NULL, &err);
+    /* Any statement that leaves the handle in autocommit (COMMIT, ROLLBACK,
+     * a raw "COMMIT" through here) ends the recorded transaction owner. */
+    node_db_tx_owner_settle(ndb, NULL);
     if (rc != SQLITE_OK) {
         LOG_WARN("db", "db: exec failed: %s", err);
         node_db_note_activity(ndb, sql ? sql : "exec", rc);
@@ -83,18 +86,40 @@ static bool node_db_tx_op(struct node_db *ndb, const char *sql,
  * and is discarded on rollback, so an external observer is never told about a
  * row a later ROLLBACK erases. A handle with no after_commit hooks anywhere
  * pays one increment. */
+/* The owner is recorded BEFORE the BEGIN runs and re-stamped after success (a
+ * settle on another thread that ran before the BEGIN may have dropped the
+ * early record); the previous record is restored when BEGIN fails.
+ * db_service recovery reads it to tell a live caller's transaction from a
+ * leaked one. The connection mutex (recursive under FULLMUTEX; taken before
+ * state_mutex, the documented order) is held from the claim through the
+ * re-stamp or restore, so no statement on another thread, recovery's
+ * ROLLBACK included, can run while this transaction is open without its
+ * owner, and no other BEGIN can interleave a claim with this restore. */
+static bool node_db_begin_owned(struct node_db *ndb, const char *sql)
+{
+    struct node_db_tx_owner prev;
+    sqlite3_mutex *conn = ndb->db ? sqlite3_db_mutex(ndb->db) : NULL;
+    sqlite3_mutex_enter(conn);
+    node_db_tx_owner_claim(ndb, &prev);
+    bool ok = node_db_tx_op(ndb, sql, true);
+    if (ok)
+        node_db_tx_owner_claim(ndb, NULL);
+    else
+        node_db_tx_owner_settle(ndb, &prev);
+    sqlite3_mutex_leave(conn);
+    if (ok)
+        ar_after_commit_note_begin();
+    return ok;
+}
+
 bool node_db_begin(struct node_db *ndb)
 {
-    bool ok = node_db_tx_op(ndb, "BEGIN TRANSACTION", true);
-    if (ok) ar_after_commit_note_begin();
-    return ok;
+    return node_db_begin_owned(ndb, "BEGIN TRANSACTION");
 }
 
 bool node_db_begin_immediate(struct node_db *ndb)
 {
-    bool ok = node_db_tx_op(ndb, "BEGIN IMMEDIATE", true);
-    if (ok) ar_after_commit_note_begin();
-    return ok;
+    return node_db_begin_owned(ndb, "BEGIN IMMEDIATE");
 }
 
 /* If a write VM is abandoned in RUN state, SQLite rejects every later COMMIT

@@ -5,6 +5,7 @@
 #include "platform/time_compat.h"
 #include "config/db_service.h"
 #include "models/database.h"
+#include "support/log_throttle.h"
 #include "util/log_macros.h"
 #include "util/thread_liveness.h"
 #include "util/thread_registry.h"
@@ -67,40 +68,129 @@ static bool db_service_perform_job(struct db_service *svc,
     }
 }
 
-/* Recover an explicit leaked read transaction only. Autocommit readers are
- * borrowed cursors: BUSY_SNAPSHOT/LOCKED does not establish abandonment.
- * sqlite3_reset restarts their next step rather than aborting it, so recovery
- * must leave them untouched and report the original job failure. Never touch
- * TXN_WRITE; its caller owns the multi-job write sequence. */
-static bool db_service_recover_poisoned_snapshot(struct db_service *svc,
-                                                 const struct db_service_job *job)
-{
-    struct node_db *ndb = svc->node_db;
-    int err, txn;
+static struct log_throttle g_foreign_txn_log = LOG_THROTTLE_INIT;
 
-    if (!ndb || !ndb->db)
+/* What recovery decided under the connection mutex, copied out so the log
+ * lines are written after the mutex is released: a slow log sink must not
+ * stall every node.db user (the 2026-11-16 host had a starved disk). */
+struct db_service_recover_log {
+    int job_type;
+    int err;
+    bool refused;          /* refusal line due (rate-limited) */
+    unsigned long owner_tid;
+    long long txn_age;
+    unsigned long long reps;
+    bool recovering;
+    bool rollback_failed;
+    char errmsg[256];      /* sqlite3_errmsg, copied while still locked */
+};
+
+/* A read transaction that node_db_begin* opened on ANOTHER thread belongs to
+ * a live caller (2026-11-16: rolling it back made that caller's later
+ * statements autocommit and its COMMIT fail "no transaction is active").
+ * Refuse recovery so the job reports its original failure. Logged once per
+ * owning transaction, then at most every 60 s with the refusal count, naming
+ * the owner thread and the transaction's age so a real leak is visible. */
+static bool db_service_txn_owned_elsewhere(struct node_db *ndb,
+                                           struct db_service_recover_log *lg)
+{
+    struct node_db_tx_owner owner;
+    uint64_t reps = 0;
+
+    if (!node_db_tx_owner_get(ndb, &owner) ||
+        pthread_equal(owner.thread, pthread_self()))
         return false;
-    err = sqlite3_extended_errcode(ndb->db);
-    if ((err & 0xff) != SQLITE_BUSY && (err & 0xff) != SQLITE_LOCKED)
-        return false;
-    txn = sqlite3_txn_state(ndb->db, NULL);
-    if (txn != SQLITE_TXN_READ)
-        return false;
-    if (!sqlite3_get_autocommit(ndb->db)) {
+    uint64_t key = ((uint64_t)(unsigned long)owner.thread * 31u) ^
+                   (uint64_t)owner.since;
+    if (key == LOG_THROTTLE_KEY_NONE)
+        key = 0;
+    if (log_throttle_should_emit(&g_foreign_txn_log, key, db_service_now(),
+                                 60, &reps)) {
+        lg->refused = true;
+        lg->owner_tid = (unsigned long)owner.thread;
+        lg->txn_age = (long long)owner.age_secs;
+        lg->reps = (unsigned long long)reps;
+    }
+    return true;
+}
+
+static void db_service_recover_emit(const struct db_service_recover_log *lg)
+{
+    if (lg->refused)
+        LOG_WARN("db_service",
+                 "poisoned snapshot belongs to an open transaction of another "
+                 "thread; not recovering: job_type=%d err=%d owner_tid=%lu "
+                 "txn_age=%llds suppressed_repeats=%llu — the job fails; a "
+                 "transaction that never ends is a leak in that thread",
+                 lg->job_type, lg->err, lg->owner_tid, lg->txn_age, lg->reps);
+    if (lg->recovering)
         LOG_WARN("db_service",
                  "recovering poisoned WAL snapshot: job_type=%d err=%d — "
                  "rolling back the leaked read transaction and retrying the "
                  "job once",
-                 (int)job->type, err);
+                 lg->job_type, lg->err);
+    if (lg->rollback_failed)
+        LOG_WARN("db_service", "poisoned-snapshot rollback failed: %s",
+                 lg->errmsg);
+}
+
+/* Recover an explicit leaked read transaction only. Autocommit readers are
+ * borrowed cursors: BUSY_SNAPSHOT/LOCKED does not establish abandonment.
+ * sqlite3_reset restarts their next step rather than aborting it, so recovery
+ * must leave them untouched and report the original job failure. Never touch
+ * TXN_WRITE; its caller owns the multi-job write sequence. A read transaction
+ * another thread opened with node_db_begin* is live, not leaked: left alone
+ * too. Still recovered: a raw "BEGIN" (node_db_exec, no recorded owner) and a
+ * transaction the worker thread itself opened. Runs with the connection mutex
+ * held (see below); it only records the log lines in *lg. */
+static bool db_service_recover_locked(struct node_db *ndb,
+                                      struct db_service_recover_log *lg)
+{
+    int txn = sqlite3_txn_state(ndb->db, NULL);
+    if (txn != SQLITE_TXN_READ)
+        return false;
+    if (!sqlite3_get_autocommit(ndb->db)) {
+        if (db_service_txn_owned_elsewhere(ndb, lg))
+            return false;
+        lg->recovering = true;
         if (!node_db_rollback(ndb)) {
-            LOG_WARN("db_service",
-                     "poisoned-snapshot rollback failed: %s",
+            lg->rollback_failed = true;
+            snprintf(lg->errmsg, sizeof(lg->errmsg), "%s",
                      sqlite3_errmsg(ndb->db));
             return false;
         }
         return true;
     }
     return false;
+}
+
+/* The connection mutex (recursive under FULLMUTEX, taken before state_mutex
+ * as node_db_lock_connection_and_state does) is held from the transaction
+ * check through the owner lookup and the ROLLBACK. Without it the owner
+ * could COMMIT after the check and BEGIN a new transaction that this
+ * ROLLBACK would then end. It is taken only after the BUSY/LOCKED check,
+ * where sqlite3_txn_state always took it: a job that failed for another
+ * reason while its submitter holds the connection mutex (the rescan commit
+ * try-lock refusal) must still return without waiting on that submitter.
+ * Released before the caller retries the job, and before any log line is
+ * written. */
+static bool db_service_recover_poisoned_snapshot(struct db_service *svc,
+                                                 const struct db_service_job *job)
+{
+    struct node_db *ndb = svc->node_db;
+
+    if (!ndb || !ndb->db)
+        return false;
+    int err = sqlite3_extended_errcode(ndb->db);
+    if ((err & 0xff) != SQLITE_BUSY && (err & 0xff) != SQLITE_LOCKED)
+        return false;
+    struct db_service_recover_log lg = {.job_type = (int)job->type, .err = err};
+    sqlite3_mutex *conn = sqlite3_db_mutex(ndb->db);
+    sqlite3_mutex_enter(conn);
+    bool retry = db_service_recover_locked(ndb, &lg);
+    sqlite3_mutex_leave(conn);
+    db_service_recover_emit(&lg);
+    return retry;
 }
 
 struct db_service_batch_size_ctx {

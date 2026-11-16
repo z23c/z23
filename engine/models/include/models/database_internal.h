@@ -262,6 +262,16 @@ int node_db_describe_open_statements(sqlite3 *db, char *out, size_t cap);
 void node_db_note_tx_state(struct node_db *ndb, bool tx_open,
                            const char *op, int rc);
 
+/* Record the calling thread as owner of the transaction it is opening. When
+ * prev is non-NULL it receives the record this replaced, so a failed BEGIN
+ * can put it back with node_db_tx_owner_settle. */
+void node_db_tx_owner_claim(struct node_db *ndb, struct node_db_tx_owner *prev);
+/* Drop the owner record once the handle is back in autocommit. Otherwise,
+ * when keep is non-NULL, restore that record (a failed BEGIN inside a
+ * transaction someone else opened). */
+void node_db_tx_owner_settle(struct node_db *ndb,
+                             const struct node_db_tx_owner *keep);
+
 /* ── Long-running maintenance-op machinery (database_long_op.c) ─────────
  *
  * The progress-handler wrappers and the lock-free busy-op registry that backs
@@ -317,6 +327,11 @@ void node_db_unlock_state_and_connection(struct node_db *ndb, bool locked);
  * opens, after both locks are held. NULL removes it. */
 typedef void (*node_db_locked_test_hook_fn)(void *ctx);
 void node_db_set_locked_test_hook(node_db_locked_test_hook_fn fn, void *ctx);
+/* Test-only: fn runs on entry to node_db_tx_owner_settle, before it takes
+ * state_mutex, so a test can open a transaction inside a settle that is
+ * already under way. NULL removes it. */
+void node_db_set_tx_owner_settle_test_hook(node_db_locked_test_hook_fn fn,
+                                           void *ctx);
 #endif
 
 #endif

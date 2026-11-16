@@ -80,6 +80,8 @@ static void node_db_state_init(struct node_db *ndb)
     zcl_mutex_init(&ndb->state_mutex);
     ndb->state_mutex_init = true;
     ndb->tx_open = false;
+    ndb->tx_owner_set = false;
+    ndb->tx_owner_since = 0;
     ndb->turbo_mode = false;
     ndb->last_activity_time = db_now_seconds();
     ndb->last_sqlite_rc = SQLITE_OK;
@@ -102,6 +104,19 @@ void node_db_set_locked_test_hook(node_db_locked_test_hook_fn fn, void *ctx)
 {
     g_locked_test_hook_ctx = ctx;
     g_locked_test_hook = fn;
+}
+
+/* Read by the db worker on every node_db_exec, written by the test thread:
+ * atomic so a thread-sanitizer build sees no race. ctx is stored before fn
+ * and read after it. */
+static _Atomic(node_db_locked_test_hook_fn) g_settle_test_hook;
+static _Atomic(void *) g_settle_test_hook_ctx;
+
+void node_db_set_tx_owner_settle_test_hook(node_db_locked_test_hook_fn fn,
+                                           void *ctx)
+{
+    atomic_store(&g_settle_test_hook_ctx, ctx);
+    atomic_store(&g_settle_test_hook, fn);
 }
 #endif
 
@@ -191,6 +206,83 @@ void node_db_note_tx_state(struct node_db *ndb, bool tx_open,
                            const char *op, int rc)
 {
     node_db_stamp_activity(ndb, ndb ? &ndb->tx_open : NULL, tx_open, op, rc);
+}
+
+static void node_db_state_lock(struct node_db *ndb)
+{
+    if (ndb->state_mutex_init)
+        zcl_mutex_lock(&ndb->state_mutex);
+}
+
+static void node_db_state_unlock(struct node_db *ndb)
+{
+    if (ndb->state_mutex_init)
+        zcl_mutex_unlock(&ndb->state_mutex);
+}
+
+void node_db_tx_owner_claim(struct node_db *ndb, struct node_db_tx_owner *prev)
+{
+    if (prev)
+        *prev = (struct node_db_tx_owner){0};
+    if (!ndb)
+        return;
+    node_db_state_lock(ndb);
+    if (prev) {
+        prev->set = ndb->tx_owner_set;
+        prev->thread = ndb->tx_owner;
+        prev->since = ndb->tx_owner_since;
+    }
+    ndb->tx_owner_set = true;
+    ndb->tx_owner = pthread_self();
+    ndb->tx_owner_since = db_now_seconds();
+    node_db_state_unlock(ndb);
+}
+
+void node_db_tx_owner_settle(struct node_db *ndb,
+                             const struct node_db_tx_owner *keep)
+{
+    if (!ndb)
+        return;
+#ifdef ZCL_TESTING
+    node_db_locked_test_hook_fn settle_hook = atomic_load(&g_settle_test_hook);
+    if (settle_hook)
+        settle_hook(atomic_load(&g_settle_test_hook_ctx));
+#endif
+    /* Read autocommit under state_mutex, never before it: a stale "idle" read
+     * taken before another thread's claim, BEGIN and re-claim would wipe that
+     * live transaction's owner after its re-claim. Under the lock the re-claim
+     * (which follows its BEGIN) is either later than this clear or visible to
+     * this read. sqlite3_get_autocommit reads a field and takes no connection
+     * mutex, so the lock order is unchanged. */
+    node_db_state_lock(ndb);
+    bool idle = !ndb->db || sqlite3_get_autocommit(ndb->db) != 0;
+    if (idle) {
+        ndb->tx_owner_set = false;
+    } else if (keep) {
+        ndb->tx_owner_set = keep->set;
+        ndb->tx_owner = keep->thread;
+        ndb->tx_owner_since = keep->since;
+    }
+    node_db_state_unlock(ndb);
+}
+
+bool node_db_tx_owner_get(struct node_db *ndb, struct node_db_tx_owner *out)
+{
+    if (!out)
+        return false;
+    *out = (struct node_db_tx_owner){0};
+    if (!ndb)
+        return false;
+    node_db_tx_owner_settle(ndb, NULL);
+    node_db_state_lock(ndb);
+    if (ndb->tx_owner_set) {
+        out->set = true;
+        out->thread = ndb->tx_owner;
+        out->since = ndb->tx_owner_since;
+        out->age_secs = db_now_seconds() - ndb->tx_owner_since;
+    }
+    node_db_state_unlock(ndb);
+    return out->set;
 }
 
 void node_db_note_turbo_mode(struct node_db *ndb, bool turbo_mode,

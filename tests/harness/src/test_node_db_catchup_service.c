@@ -84,6 +84,7 @@ extern void wallet_rescan_test_before_clear(void (*hook)(void *), void *context)
 #include "storage/wallet_projection.h"
 #include "storage/event_log.h"
 #include "models/wallet_tx.h"
+#include "script/standard.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "core/serialize.h"
 #include "core/utiltime.h"
@@ -6886,11 +6887,301 @@ static int ndc_background_case_bounded(struct ndc_fix_ctx *fx, int (*fn)(struct 
 }
 #endif
 
+/* ── A tip write dropped on BUSY is re-derived by the catch-up walk ──────
+ * tip_finalize_post_step.c queues the confirmed-wallet-tx row (and the
+ * Sapling note) for block H on the db service. Since recovery refuses to roll
+ * back another thread's open transaction, such a job can fail on BUSY and is
+ * dropped. The tip path never stamps the projection cursor
+ * (sync_projection_tip_height); only the catch-up walk does, in the same
+ * transaction as its wallet scan of every height it walks. So with the cursor
+ * below H the next pass walks H and writes the row itself. These cases model
+ * that order (catch-up at H-1, tip H published, its write never runs) and run
+ * the real pass; the control stamps the cursor at H without a walk and shows
+ * the row then stays absent, so the assertion depends on H being revisited. */
+enum { NDC_DROP_H = 2 };
+
+struct ndc_drop_fix {
+    char dir[256];
+    struct uint256 hashes[NDC_DROP_H + 1];
+    struct block_index slots[NDC_DROP_H + 1];
+    struct disk_block_pos pos[NDC_DROP_H + 1];
+    uint32_t times[NDC_DROP_H + 1];
+    struct active_chain ac;
+    struct wallet *w;
+    struct tx_destination dest;
+    struct uint256 txid;
+};
+
+/* Block h: one coinbase-shaped tx; block H adds a tx paying the wallet key. */
+static bool ndc_drop_fill_txs(struct ndc_drop_fix *f, struct block *b, int h)
+{
+    bool ok = b->vtx != NULL;
+    for (size_t i = 0; ok && i < b->num_vtx; i++) {
+        transaction_init(&b->vtx[i]);
+        ok = transaction_alloc(&b->vtx[i], 1, 1);
+    }
+    if (!ok)
+        return false;
+    b->vtx[0].vin[0].sequence = 0xffffffffu;
+    b->vtx[0].vout[0].value = 5000000000LL + h;
+    if (b->num_vtx > 1) {
+        struct transaction *tx = &b->vtx[1];
+        tx->vin[0].prevout.hash.data[0] = 0x9d;
+        tx->vin[0].sequence = 0xffffffffu;
+        tx->vout[0].value = 123456;
+        script_for_destination(&tx->vout[0].script_pub_key, &f->dest);
+        transaction_compute_hash(tx);
+        f->txid = tx->hash;
+    }
+    return true;
+}
+
+static bool ndc_drop_write_block(struct ndc_drop_fix *f, int h)
+{
+    struct block b;
+    block_init(&b);
+    b.header.nVersion = 4;
+    f->times[h] = 1700000500u + (uint32_t)h;
+    b.header.nTime = f->times[h];
+    b.header.nBits = 0x2000ffffu;
+    b.header.hashPrevBlock = f->hashes[h - 1];
+    b.header.hashMerkleRoot.data[0] = (uint8_t)(0x70 + h);
+    b.num_vtx = h == NDC_DROP_H ? 2 : 1;
+    b.vtx = zcl_calloc(b.num_vtx, sizeof(*b.vtx), "drop fixture txs");
+    unsigned char magic[4] = {0x24, 0xe9, 0x27, 0x64};
+    bool ok = ndc_drop_fill_txs(f, &b, h);
+    disk_block_pos_init(&f->pos[h]);
+    ok = ok && write_block_to_disk(&b, &f->pos[h], f->dir, magic);
+    if (ok)
+        block_get_hash(&b, &f->hashes[h]);
+    block_free(&b);
+    return ok;
+}
+
+/* Publish block h as the active tip, as the reducer does before finalize. */
+static bool ndc_drop_publish(struct ndc_drop_fix *f, int h)
+{
+    memset(&f->slots[h], 0, sizeof(f->slots[h]));
+    f->slots[h].nHeight = h;
+    f->slots[h].nStatus = BLOCK_HAVE_DATA;
+    f->slots[h].nFile = f->pos[h].nFile;
+    f->slots[h].nDataPos = f->pos[h].nPos;
+    f->slots[h].nTime = f->times[h];
+    f->slots[h].phashBlock = &f->hashes[h];
+    if (h > 1)
+        f->slots[h].pprev = &f->slots[h - 1];
+    return active_chain_install_tip_slot(&f->ac, &f->slots[h]);
+}
+
+static bool ndc_drop_wallet(struct ndc_drop_fix *f)
+{
+    struct privkey key;
+    struct pubkey pubkey;
+    f->w = zcl_calloc(1, sizeof(*f->w), "drop fixture wallet");
+    if (!f->w)
+        return false;
+    wallet_init(f->w);
+    privkey_make_new(&key, true);
+    bool ok = privkey_get_pubkey(&key, &pubkey) &&
+              keystore_add_key(&f->w->keystore, &key);
+    memory_cleanse(&key, sizeof(key));
+    f->dest.type = DEST_KEY_ID;
+    f->dest.id.key = pubkey_get_id(&pubkey);
+    return ok;
+}
+
+static bool ndc_drop_build(struct ndc_drop_fix *f)
+{
+    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", "drop_tip");
+    char blocks[320];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", f->dir);
+    active_chain_init(&f->ac);
+    f->hashes[0].data[0] = 0xa0; /* block 1's parent: the projection refuses a blank prev */
+    bool ok = mkdir(blocks, 0755) == 0 && ndc_drop_wallet(f);
+    for (int h = 1; ok && h <= NDC_DROP_H; h++)
+        ok = ndc_drop_write_block(f, h);
+    return ok;
+}
+
+static void ndc_drop_free(struct ndc_drop_fix *f)
+{
+    if (f->w) {
+        wallet_free(f->w);
+        free(f->w);
+    }
+    active_chain_free(&f->ac);
+    (void)test_rm_rf_recursive(f->dir);
+}
+
+/* The wallet_transactions row the checked writer stores for H: confirmed at
+ * H, with the block hash and time of the projected block row. */
+static bool ndc_drop_row_confirmed(struct node_db *ndb,
+                                   const struct ndc_drop_fix *f)
+{
+    struct db_wallet_tx row = {0};
+    bool found = db_wallet_tx_find(ndb, f->txid.data, &row);
+    bool ok = found && row.has_block && row.block_height == NDC_DROP_H &&
+              memcmp(row.block_hash, f->hashes[NDC_DROP_H].data, 32) == 0 &&
+              row.time_received == (int64_t)f->times[NDC_DROP_H];
+    printf("dropped tip write: found=%d has_block=%d height=%d\n", found,
+           row.has_block, row.block_height);
+    free(row.raw_tx);
+    return ok;
+}
+
+static bool ndc_drop_row_absent(struct node_db *ndb,
+                                const struct ndc_drop_fix *f)
+{
+    struct db_wallet_tx row = {0};
+    bool found = db_wallet_tx_find(ndb, f->txid.data, &row);
+    free(row.raw_tx);
+    return !found;
+}
+
+/* Catch-up reached H-1; tip H is published and its confirmed-wallet-tx job
+ * never runs (the job returned false); the next pass runs as production. */
+static int ndc_drop_walk_case(struct ndc_drop_fix *f)
+{
+    int failures = 0;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/walk.db", f->dir);
+    struct node_db ndb;
+    bool up = node_db_open(&ndb, path);
+    int first = up ? node_db_catchup_service_run(&ndb, &f->ac, f->w, f->dir)
+                   : -99;
+    NDC_CHECK("dropped tip write: catch-up has walked to H-1",
+              up && first == 1 &&
+              node_db_sync_get_tip_height(&ndb) == NDC_DROP_H - 1);
+    bool published = ndc_drop_publish(f, NDC_DROP_H);
+    NDC_CHECK("dropped tip write: tip H published, its wallet row never "
+              "written, cursor still below H",
+              up && published && ndc_drop_row_absent(&ndb, f) &&
+              node_db_sync_get_tip_height(&ndb) == NDC_DROP_H - 1);
+    int second = up ? node_db_catchup_service_run(&ndb, &f->ac, f->w, f->dir)
+                    : -99;
+    printf("dropped tip write: first=%d second=%d cursor=%d\n", first, second,
+           up ? node_db_sync_get_tip_height(&ndb) : -99);
+    NDC_CHECK("dropped tip write: the next catch-up pass walks H and the "
+              "wallet tx row is confirmed at H with its block hash",
+              up && second == 1 &&
+              node_db_sync_get_tip_height(&ndb) == NDC_DROP_H &&
+              ndc_drop_row_confirmed(&ndb, f));
+    if (up)
+        node_db_close(&ndb);
+    return failures;
+}
+
+/* Control: a cursor stamped at H without a walk leaves the row absent. */
+static int ndc_drop_control_case(struct ndc_drop_fix *f)
+{
+    int failures = 0;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/control.db", f->dir);
+    struct node_db ndb;
+    bool up = node_db_open(&ndb, path);
+    bool stamped = up && node_db_sync_set_tip(&ndb,
+                                              f->hashes[NDC_DROP_H].data,
+                                              NDC_DROP_H);
+    int rc = stamped
+        ? node_db_catchup_service_run(&ndb, &f->ac, f->w, f->dir) : -99;
+    NDC_CHECK("dropped tip write control: a cursor already at H is not "
+              "re-walked and the row stays absent",
+              stamped && rc == 0 && ndc_drop_row_absent(&ndb, f));
+    if (up)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static int ndc_check_dropped_tip_wallet_tx_rederived(void)
+{
+    int failures = 0;
+    struct ndc_drop_fix f = {0};
+    bool built = ndc_drop_build(&f) && ndc_drop_publish(&f, 1);
+    NDC_CHECK("dropped tip write: fixture builds", built);
+    if (built) {
+        failures += ndc_drop_walk_case(&f);
+        failures += ndc_drop_control_case(&f);
+    }
+    ndc_drop_free(&f);
+    return failures;
+}
+
+#ifndef _WIN32
+/* The same order for the Sapling note at the tip: the replay fixture's block 1
+ * carries a note the wallet decrypts; the tip path's note write never runs and
+ * the pass with the cursor below H records it at H. */
+static bool ndc_drop_note_at(struct node_db *ndb,
+                             const struct ndc_replay_fixture *f, int h)
+{
+    struct db_sapling_note *notes = NULL;
+    int n = db_sapling_note_list_unspent_alloc(ndb, &notes);
+    bool ok = n == 1 && notes && notes[0].block_height == h &&
+              notes[0].output_index == 1 &&
+              memcmp(notes[0].txid, f->note_txid.data, 32) == 0;
+    printf("dropped tip note: notes=%d height=%d\n", n,
+           (n > 0 && notes) ? notes[0].block_height : -1);
+    free(notes);
+    return ok;
+}
+
+static bool ndc_drop_note_fixture(struct ndc_replay_fixture *f)
+{
+    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", "drop_note");
+    char blocks[320];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", f->dir);
+    snprintf(f->dbpath, sizeof(f->dbpath), "%s/node.db", f->dir);
+    main_state_init(&f->state);
+    sapling_tree_init(&f->tree);
+    f->wallet = zcl_calloc(1, sizeof(*f->wallet), "drop note wallet");
+    if (!f->wallet)
+        return false;
+    wallet_init(f->wallet);
+    f->hashes[0].data[0] = 0xa1; /* block 1's parent: the projection refuses a blank prev */
+    uint8_t seed[32] = {1}, d[11], pk[32];
+    return mkdir(blocks, 0755) == 0 &&
+           sapling_keystore_set_seed(&f->wallet->sapling_keys, seed) &&
+           sapling_keystore_new_address(&f->wallet->sapling_keys, d, pk) &&
+           ndc_replay_write_fixture_block(f, 1, d, pk);
+}
+
+static int ndc_check_dropped_tip_note_rederived(void)
+{
+    int failures = 0;
+    struct ndc_replay_fixture f = {0};
+    bool built = ndc_drop_note_fixture(&f);
+    struct node_db ndb;
+    bool up = built && node_db_open(&ndb, f.dbpath);
+    NDC_CHECK("dropped tip note: tip H published, its note row never "
+              "written, cursor below H",
+              up && db_sapling_note_count_all(&ndb) == 0 &&
+              node_db_sync_get_tip_height(&ndb) < 1);
+    int rc = up ? node_db_catchup_service_run(&ndb, &f.state.chain_active,
+                                              f.wallet, f.dir) : -99;
+    printf("dropped tip note: rc=%d cursor=%d\n", rc,
+           up ? node_db_sync_get_tip_height(&ndb) : -99);
+    NDC_CHECK("dropped tip note: the next catch-up pass walks H and records "
+              "the note at H",
+              up && rc == 1 && node_db_sync_get_tip_height(&ndb) == 1 &&
+              ndc_drop_note_at(&ndb, &f, 1));
+    if (up)
+        node_db_close(&ndb);
+    if (f.wallet) {
+        wallet_free(f.wallet);
+        free(f.wallet);
+    }
+    main_state_free(&f.state);
+    (void)test_rm_rf_recursive(f.dir);
+    return failures;
+}
+#endif
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
     printf("\n=== node_db_catchup_service tests ===\n");
+    failures += ndc_check_dropped_tip_wallet_tx_rederived();
 #ifndef _WIN32
+    failures += ndc_check_dropped_tip_note_rederived();
     failures += ndc_check_sapling_replay();
     failures += ndc_check_empty_cutover();
     failures += ndc_check_fresh_spend_publication();

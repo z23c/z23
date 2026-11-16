@@ -8,6 +8,7 @@
 #include "support/log_throttle.h"
 #include "util/sync.h"
 #include "util/wal_checkpoint_stats.h"
+#include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -88,6 +89,12 @@ struct node_db {
     zcl_mutex_t state_mutex;
     bool state_mutex_init;
     bool tx_open;
+    /* Thread that opened the explicit transaction with node_db_begin*, and
+     * when (wall seconds). Valid while tx_owner_set; dropped on COMMIT or
+     * ROLLBACK and whenever the handle is seen back in autocommit. */
+    bool tx_owner_set;
+    pthread_t tx_owner;
+    int64_t tx_owner_since;
     bool turbo_mode;
     int64_t last_activity_time;
     int last_sqlite_rc;
@@ -266,6 +273,19 @@ bool node_db_begin_immediate(struct node_db *ndb);
  * transaction is NOT committed). Returns false on any failure. */
 bool node_db_commit(struct node_db *ndb);
 bool node_db_rollback(struct node_db *ndb);
+
+/* Owner of the handle's explicit transaction, as recorded by node_db_begin*.
+ * A raw "BEGIN" through node_db_exec records none. */
+struct node_db_tx_owner {
+    bool set;
+    pthread_t thread;
+    int64_t since;      /* wall seconds when the owner opened it */
+    int64_t age_secs;
+};
+/* Fill *out with the recorded owner. Returns true only while one is recorded
+ * and the handle is still out of autocommit; a stale record (handle back in
+ * autocommit) is dropped here. */
+bool node_db_tx_owner_get(struct node_db *ndb, struct node_db_tx_owner *out);
 
 #ifdef ZCL_TESTING
 /* See node_db_commit in database.c. */

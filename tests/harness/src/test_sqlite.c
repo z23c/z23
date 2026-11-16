@@ -3633,6 +3633,163 @@ static void check_db_worker_preserves_owned_read_cursor(int *failures)
         (*failures)++;
 }
 
+/* A live caller's deferred transaction is not a leak. The 2026-11-16 node log:
+ * thread A ran node_db_begin and read, a worker job then failed BUSY inside
+ * A's read transaction, and recovery rolled A back, so A's later statements
+ * autocommitted and its COMMIT failed "no transaction is active". Here the
+ * harness thread is A; a second connection holds the write lock so the
+ * worker's write fails BUSY at once (a read-to-write upgrade never waits). */
+static bool sqlite_owner_open_read_txn(struct sqlite_poison_fixture *f)
+{
+    uint8_t got = 0;
+    size_t got_len = 0;
+    if (!node_db_begin(&f->ndb))
+        return false;
+    (void)node_db_state_get(&f->ndb, "any-key", &got, sizeof(got), &got_len);
+    return sqlite3_txn_state(f->ndb.db, NULL) == SQLITE_TXN_READ &&
+           sqlite3_get_autocommit(f->ndb.db) == 0;
+}
+
+/* The locker is opened before A reads and closed after A commits: its open
+ * and close lifecycle may write, which would make A's snapshot stale. */
+static bool sqlite_owner_worker_refused(struct sqlite_poison_fixture *f,
+                                        struct node_db *locker)
+{
+    bool locked = node_db_exec(locker, "BEGIN IMMEDIATE");
+    if (locked)
+        f->wrote = db_service_run_write(&f->svc, sqlite_poison_write_job, f);
+    bool released = locked && node_db_exec(locker, "ROLLBACK");
+    return released && !f->wrote && f->write_calls == 1 &&
+           sqlite3_get_autocommit(f->ndb.db) == 0 &&
+           sqlite3_txn_state(f->ndb.db, NULL) == SQLITE_TXN_READ;
+}
+
+static bool sqlite_owner_commits_own_row(struct sqlite_poison_fixture *f)
+{
+    uint8_t value = 0xa7, got = 0;
+    size_t got_len = 0;
+    bool wrote = node_db_state_set(&f->ndb, "owner-row", &value,
+                                   sizeof(value));
+    bool committed = wrote && node_db_commit(&f->ndb);
+    if (!committed)
+        (void)node_db_rollback(&f->ndb);
+    return committed && sqlite3_get_autocommit(f->ndb.db) != 0 &&
+           node_db_state_get(&f->ndb, "owner-row", &got, sizeof(got),
+                             &got_len) &&
+           got_len == 1 && got == 0xa7;
+}
+
+static void check_db_worker_spares_foreign_owned_txn(int *failures)
+{
+    struct sqlite_poison_fixture f;
+    struct node_db locker = {0};
+    bool refused = false, committed = false, next = false;
+    bool ok = sqlite_poison_open(&f) && node_db_open(&locker, f.path) &&
+              sqlite_owner_open_read_txn(&f);
+    if (ok)
+        refused = sqlite_owner_worker_refused(&f, &locker);
+    if (ok)
+        committed = sqlite_owner_commits_own_row(&f);
+    node_db_close(&locker);
+    if (ok)
+        next = db_service_run_write(&f.svc, sqlite_poison_write_job, &f) &&
+               f.write_calls == 2;
+    ok = ok && refused && committed && next;
+    db_service_stop(&f.svc);
+    node_db_close(&f.ndb);
+    test_rm_rf_recursive(f.dir);
+    printf("SQLite worker spares another thread's open transaction: %s "
+           "(refused=%d committed=%d next=%d calls=%d)\n",
+           ok ? "OK" : "FAIL", refused, committed, next, f.write_calls);
+    if (!ok)
+        (*failures)++;
+}
+
+/* CONTROL: a read transaction the worker itself opened and leaked is still
+ * recovered: rolled back and the job retried once. */
+static bool sqlite_worker_leak_read_txn(struct node_db *ndb, void *ctx)
+{
+    uint8_t got = 0;
+    size_t got_len = 0;
+    (void)ctx;
+    if (!node_db_begin(ndb))
+        return false;
+    (void)node_db_state_get(ndb, "any-key", &got, sizeof(got), &got_len);
+    return sqlite3_txn_state(ndb->db, NULL) == SQLITE_TXN_READ;
+}
+
+static void check_db_worker_recovers_own_leaked_txn(int *failures)
+{
+    struct sqlite_poison_fixture f;
+    bool ok = sqlite_poison_open(&f);
+    if (ok)
+        ok = db_service_run_write(&f.svc, sqlite_worker_leak_read_txn, NULL) &&
+             sqlite3_get_autocommit(f.ndb.db) == 0 &&
+             sqlite_poison_advance_wal(&f);
+    if (ok)
+        ok = sqlite_poison_probe(&f);
+    db_service_stop(&f.svc);
+    node_db_close(&f.ndb);
+    test_rm_rf_recursive(f.dir);
+    printf("SQLite worker recovers its own leaked read transaction: %s "
+           "(wrote=%d calls=%d)\n", ok ? "OK" : "FAIL", f.wrote,
+           f.write_calls);
+    if (!ok)
+        (*failures)++;
+}
+
+/* A settle that started while the handle was idle must not wipe the owner of
+ * a transaction opened while it ran: an unowned live transaction is exactly
+ * what recovery rolls back. The hook opens the transaction inside the settle
+ * (it fires on entry, before state_mutex), standing in for another thread's
+ * claim, BEGIN and re-claim landing between a stale autocommit read and the
+ * clear. */
+struct sqlite_settle_race {
+    struct node_db *ndb;
+    pthread_t self;
+    bool began;
+};
+
+static void sqlite_settle_hook_begins(void *ctx)
+{
+    struct sqlite_settle_race *r = ctx;
+    uint8_t got = 0;
+    size_t got_len = 0;
+    if (!pthread_equal(r->self, pthread_self()))
+        return;
+    node_db_set_tx_owner_settle_test_hook(NULL, NULL);
+    r->began = node_db_begin(r->ndb);
+    (void)node_db_state_get(r->ndb, "any-key", &got, sizeof(got), &got_len);
+}
+
+static void check_tx_owner_survives_concurrent_settle(int *failures)
+{
+    struct sqlite_poison_fixture f;
+    struct sqlite_settle_race r = {.ndb = &f.ndb, .self = pthread_self()};
+    struct node_db_tx_owner owner = {0};
+    bool owned = false, open = false;
+    bool ok = sqlite_poison_open(&f) && sqlite3_get_autocommit(f.ndb.db) != 0;
+    if (ok) {
+        node_db_set_tx_owner_settle_test_hook(sqlite_settle_hook_begins, &r);
+        node_db_tx_owner_settle(&f.ndb, NULL);
+        node_db_set_tx_owner_settle_test_hook(NULL, NULL);
+        open = sqlite3_get_autocommit(f.ndb.db) == 0;
+        owned = node_db_tx_owner_get(&f.ndb, &owner) &&
+                pthread_equal(owner.thread, pthread_self());
+        if (r.began)
+            (void)node_db_rollback(&f.ndb);
+    }
+    ok = ok && r.began && open && owned;
+    db_service_stop(&f.svc);
+    node_db_close(&f.ndb);
+    test_rm_rf_recursive(f.dir);
+    printf("SQLite tx owner survives a concurrent idle settle: %s "
+           "(began=%d open=%d owned=%d)\n", ok ? "OK" : "FAIL", r.began, open,
+           owned);
+    if (!ok)
+        (*failures)++;
+}
+
 struct sqlite_projection_interleave {
     struct node_db *competitor;
     int calls;
@@ -4752,6 +4909,9 @@ int test_sqlite(void) {
     check_state_write_does_not_wait_behind_catchup(&failures);
     check_db_worker_recovers_poisoned_snapshot(&failures);
     check_db_worker_preserves_owned_read_cursor(&failures);
+    check_db_worker_spares_foreign_owned_txn(&failures);
+    check_db_worker_recovers_own_leaked_txn(&failures);
+    check_tx_owner_survives_concurrent_settle(&failures);
     check_checkpoint_locked_names_open_statement(&failures);
 
     /* 100k-row UTXO open + random-read smoke test. Guards the
