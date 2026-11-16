@@ -43,7 +43,10 @@ choosing when you type nothing:
   accepted with no flag from you (see [`GETTING_STARTED.md`](GETTING_STARTED.md#syncing-to-the-chain-tip));
   a node with no peers at all logs the named blocker
   `bootstrap.no_state_source` and syncs from genesis, which is correct and
-  slow.
+  slow. A node that imported the header-chain seed but cannot obtain a state
+  bundle stays at height 0 (headers current, nothing applied) until a bundle
+  arrives; restarting it with no installable bundle under `bundles/` starts
+  the same from-genesis sync.
 - **No inbound reachability** unless you pass `-listen` and your port is
   actually reachable from outside, or you run the Tor build and publish an
   onion service. An outbound-only node syncs and relays fine; it just is not

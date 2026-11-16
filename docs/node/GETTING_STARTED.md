@@ -469,9 +469,13 @@ on what you already have, so read the first line of each before picking:
   goes through (see [`SYNC.md`](SYNC.md), "State offers over the peer link").
   If nobody offers anything acceptable within two minutes of your first peer,
   the node stops waiting and says so — naming the newest height it did see, in
-  `bootstrap.stale_offers_only` — and proceeds with path 2. A node with **no**
-  peers at all still names `bootstrap.no_state_source` and folds from genesis;
-  there is nobody to ask.
+  `bootstrap.stale_offers_only` — and proceeds with path 2. A node that
+  imported the header-chain seed but cannot obtain a state bundle stays at
+  height 0 (headers current, nothing applied) until a bundle arrives;
+  restarting it with no installable bundle under `bundles/` starts a
+  from-genesis sync, which is correct and slow. A node with **no** peers at
+  all still names `bootstrap.no_state_source`; one that was never seeded folds
+  from genesis, since there is nobody to ask.
 
 1. **Instant-on from serving Z23 peers** (fastest, but you must already know
    a peer address). Name one

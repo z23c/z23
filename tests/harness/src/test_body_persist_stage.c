@@ -599,6 +599,22 @@ static int bp_mut_hold_genesis(void)
              bp_unfetchable_reason(why, sizeof(why)));
     BP_CHECK("hold0: genesis wording",
              strstr(why, "height=0 genesis body absent") != NULL);
+    /* The h=0 text names the real state (nothing applied, no anchor stamped,
+     * cursors at 0) and BOTH operator exits: an arriving bundle installs, and
+     * a restart with no installable bundle releases to from-genesis sync. */
+    BP_CHECK("hold0: text names the state and both operator exits",
+             strstr(why, "no anchor was stamped") != NULL &&
+             strstr(why, "cursors wait") != NULL &&
+             strstr(why, "still installs") != NULL &&
+             strstr(why, "Restarting") != NULL &&
+             strstr(why, "from-genesis sync") != NULL);
+    BP_CHECK("hold0: stale seed-integrity wording is gone",
+             strstr(why, "integrity gate") == NULL);
+    /* The reason is formatted into a BLOCKER_REASON_MAX local before
+     * blocker_init sees it, so a silently cut tail would still pass
+     * strlen checks: assert the closing sentence is intact instead. */
+    BP_CHECK("hold0: h=0 text ends with the release-to-sync sentence",
+             strstr(why, "from-genesis sync.") != NULL);
     sc.fail_read_height = -1;
     bp_restore_have_data(&sc, 0);
     BP_CHECK("hold0: heals", body_persist_stage_drain(100) == 2);

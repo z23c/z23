@@ -135,9 +135,11 @@ static void requeue_hold_note_idle(int height, int tip_height)
     char reason[BLOCKER_REASON_MAX];
     if (height == 0)
         snprintf(reason, sizeof(reason),
-                 "height=0 genesis body absent; body_persist held %llds. "
-                 "The boot genesis anchor seed did not run or its integrity "
-                 "gate refused the seed",
+                 "height=0 genesis body absent; held %llds. No consensus "
+                 "state is installed, no anchor was stamped, cursors wait "
+                 "at 0. An arriving bundle still installs. Restarting "
+                 "with no installable bundle under bundles/ releases to "
+                 "from-genesis sync.",
                  (long long)(now - since));
     else
         snprintf(reason, sizeof(reason),
