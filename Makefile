@@ -14897,6 +14897,9 @@ APP_JOURNEY_LIVE_SRCS = tools/app_journey_live.c contexts/commons/modules/vcs/sr
 APP_JOURNEY_LIVE_INCLUDES = -Icontexts/commons/modules/vcs/include -Icontexts/commons/packages/zsha256/include -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/sha3/include -Iplatform/modules/util/include
 APP_JOURNEY_LIVE_HEADERS = contexts/commons/modules/vcs/include/vcs/app_offer.h contexts/commons/packages/zsha256/include/zsha256/zsha256.h platform/modules/platform/include/platform/supervised_process.h platform/modules/base/include/base/hex.h
 .PHONY: app-journey-live app-journey-selftest
+ifneq ($(filter --gui,$(APP_JOURNEY_LIVE_ARGS)),)
+app-journey-live: $(NATIVE_UI_DRIVER_BIN)
+endif
 app-journey-live: zclassic23 $(APP_JOURNEY_LIVE_BIN) app-journey-selftest
 	$(APP_JOURNEY_LIVE_BIN) $(APP_JOURNEY_LIVE_ARGS)
 app-journey-selftest: $(BIN_DIR)/app_journey_live_selftest

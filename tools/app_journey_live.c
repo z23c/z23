@@ -107,11 +107,14 @@ static bool g_keep;
 static bool g_role_worker;
 static struct platform_supervised_process g_role_node;
 static bool g_main_network;
+static bool g_gui;
+static char g_private_display[32];
+static struct platform_supervised_process g_xvfb;
 
 struct aj_role_args {
     const char *work, *peer, *expected, *share, *share_sha256, *share_publisher, *share_root, *network;
     long seconds;
-    bool sender, receiver, worker, serve;
+    bool sender, receiver, worker, serve, gui;
 };
 
 static bool aj_role_peer(const char *s)
@@ -142,6 +145,7 @@ static bool aj_role_flag(struct aj_role_args *r, const char *a)
     if (!strcmp(a, "--sender") && !r->sender) { r->sender = true; return true; }
     if (!strcmp(a, "--receiver") && !r->receiver) { r->receiver = true; return true; }
     if (!strcmp(a, "--role-worker") && !r->worker) { r->worker = true; return true; }
+    if (!strcmp(a, "--gui") && !r->gui) { r->gui = true; return true; }
     if (!strcmp(a, "--serve") && !r->serve) { r->serve = true; return true; }
     return false;
 }
@@ -176,7 +180,7 @@ static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
         if (!aj_role_flag(r, argv[i]) && !aj_role_value(r, argv[i])) return false;
     }
     return r->sender != r->receiver && r->work && r->work[0] == '/' &&
-        r->work[1] && r->seconds && (!r->network || !strcmp(r->network, "main") || !strcmp(r->network, "regtest")) && aj_role_share_args(r) &&
+        r->work[1] && r->seconds && (!r->gui || r->receiver) && (!r->network || !strcmp(r->network, "main") || !strcmp(r->network, "regtest")) && aj_role_share_args(r) &&
         (r->sender ? !r->peer && !r->expected && !r->serve :
          aj_role_peer(r->peer) && r->expected && r->expected[0] == '/');
 }
@@ -416,7 +420,11 @@ static void aj_run_child(const char *bin, const char *home, const char *cwd,
     if (snprintf(home_pair, sizeof(home_pair), "HOME=%s", home) >= (int)sizeof(home_pair))
         _exit(127);
     snprintf(path_pair, sizeof(path_pair), "PATH=/usr/bin:/bin");
-    char *env[3] = {home_pair, path_pair, NULL};
+    char display_pair[48]; char *env[4] = {home_pair, path_pair, NULL, NULL};
+    if (g_private_display[0]) {
+        if (snprintf(display_pair, sizeof(display_pair), "DISPLAY=%s", g_private_display) >= (int)sizeof(display_pair)) _exit(127);
+        env[2] = display_pair;
+    }
     extern char **environ;
     environ = env;
     execv(bin, argv);
@@ -508,12 +516,9 @@ static int aj_finish_child(pid_t pid, bool captured)
     }
 }
 
-static int aj_run(const char *home, const char *cwd, int timeout_s,
-                  char *out, size_t cap, char *const argv[])
+static int aj_run_exec(const char *bin, const char *home, const char *cwd, int timeout_s,
+                       char *out, size_t cap, char *const argv[])
 {
-    char bin[600];
-    if (snprintf(bin, sizeof(bin), "%s/build/bin/z23", g_repo) >= (int)sizeof(bin))
-        return -1;
     int fds[2];
     if (pipe(fds) != 0) return -1;
     fflush(NULL);
@@ -534,6 +539,14 @@ static int aj_run(const char *home, const char *cwd, int timeout_s,
     int result = aj_finish_child(pid, captured);
     signal(SIGALRM, old_alrm);
     return result;
+}
+
+static int aj_run(const char *home, const char *cwd, int timeout_s,
+                  char *out, size_t cap, char *const argv[])
+{
+    char bin[600];
+    if (snprintf(bin, sizeof(bin), "%s/build/bin/z23", g_repo) >= (int)sizeof(bin)) return -1;
+    return aj_run_exec(bin, home, cwd, timeout_s, out, cap, argv);
 }
 
 static bool aj_group_signal(pid_t pid, int sig)
@@ -1011,6 +1024,70 @@ static bool aj_received_matches(const char *out)
         aj_line_value(out, "image_sha3", got, sizeof(got)) && !strcmp(got, g_image_a);
 }
 
+static bool aj_gui_observe(const char *pid_str);
+
+#if defined(__linux__)
+static bool aj_gui_process(const char *pid_text, uint64_t *token)
+{
+    char *end = NULL; errno = 0;
+    unsigned long long pid = strtoull(pid_text, &end, 10);
+    if (errno || !end || *end || pid < 2 || pid > INT_MAX || !os_proc_pid_start_token(pid, token)) return false;
+    char path[80]; if (snprintf(path, sizeof(path), "/proc/%llu/exe", pid) >= (int)sizeof(path)) return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return false;
+    struct stat st; bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+    struct sha3_256_ctx hash; sha3_256_init(&hash); unsigned char buf[8192], digest[32];
+    while (ok) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) ok = false;
+        if (n <= 0) break;
+        sha3_256_write(&hash, buf, (size_t)n);
+    }
+    if (close(fd) != 0) ok = false;
+    sha3_256_finalize(&hash, digest); char hex[65]; zcl_hex_encode(digest, 32, hex);
+    uint64_t after = 0;
+    return ok && !strcmp(hex, g_image_a) && os_proc_pid_start_token(pid, &after) && *token == after;
+}
+
+static bool aj_gui_frame(const char *pid_text, uint64_t token)
+{
+    char driver[1024], frame[1024], log[1024], out[8192], record[1024];
+    if (!aj_path_join(driver, sizeof(driver), g_repo, "build/bin/native_ui_driver") ||
+        !aj_path_join(frame, sizeof(frame), g_work, "receiver-frame.png") ||
+        !aj_path_join(log, sizeof(log), g_work, "receiver-ui.json") ||
+        !aj_path_join(record, sizeof(record), g_work, "receiver-process.json") ||
+        access(driver, X_OK) || access("/usr/bin/ffmpeg", X_OK)) return false;
+    char *ui[] = {driver, (char *)"--title=Sky Combat - Multiplayer Ultimate", (char *)"--key=left",
+        (char *)"--expect-pixels-change", (char *)"--timeout-ms=30000", NULL};
+    if (aj_run_exec(driver, g_b_home, g_work, 35, out, sizeof(out), ui) != 0 || !aj_write_file(log, out)) return false;
+    char *grab[] = {(char *)"/usr/bin/ffmpeg", (char *)"-v", (char *)"error", (char *)"-n",
+        (char *)"-f", (char *)"x11grab", (char *)"-video_size", (char *)"1920x1080", (char *)"-i", g_private_display,
+        (char *)"-frames:v", (char *)"1", frame, NULL};
+    if (aj_run_exec("/usr/bin/ffmpeg", g_b_home, g_work, 35, out, sizeof(out), grab) != 0) return false;
+    int fd = open(frame, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); unsigned char png[8];
+    if (fd < 0) return false;
+    static const unsigned char magic[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    bool valid = read(fd, png, sizeof(png)) == (ssize_t)sizeof(png) && !memcmp(png, magic, sizeof(png));
+    if (close(fd) != 0) valid = false;
+    uint64_t after = 0;
+    if (!valid || !aj_gui_process(pid_text, &after) || after != token) return false;
+    int n = snprintf(out, sizeof(out), "{\"pid\":%s,\"start_token\":%llu,\"image_sha3\":\"%s\",\"display_observation\":\"separate\"}\n",
+        pid_text, (unsigned long long)token, g_image_a);
+    return n > 0 && (size_t)n < sizeof(out) && aj_write_file(record, out);
+}
+
+static bool aj_gui_observe(const char *pid_text)
+{
+    uint64_t token = 0;
+    if (!g_private_display[0] || !aj_gui_process(pid_text, &token) || !aj_gui_frame(pid_text, token)) {
+        aj_fail("GUI image, process, window or frame observation failed"); return false;
+    }
+    return true;
+}
+#else
+static bool aj_gui_observe(const char *pid_text) { (void)pid_text; return false; }
+#endif
+
 static bool aj_phase_b_get(struct aj_node_ctx *bc)
 {
     char out[65536];
@@ -1036,7 +1113,7 @@ static bool aj_phase_b_get(struct aj_node_ctx *bc)
         aj_fail("B's get output reported no opened pid");
         return false;
     }
-    return aj_wait_ready_kill(g_b_home, got, "B");
+    return g_gui ? aj_gui_observe(got) : aj_wait_ready_kill(g_b_home, got, "B");
 }
 
 static bool aj_phase_outlives(struct aj_node_ctx *bc)
@@ -2571,6 +2648,9 @@ static bool aj_role_serve(struct aj_node_ctx *b, long seconds)
     return aj_role_hold(seconds);
 }
 
+static bool aj_gui_start(const char *binary);
+static bool aj_gui_stop(void);
+
 static bool aj_role_receiver(const char *peer, bool serve, long seconds)
 {
     struct aj_node_ctx b = {.rpc = APPJ_B_RPC};
@@ -2602,10 +2682,13 @@ static int aj_role_work(const struct aj_role_args *r)
     close(3); g_role_worker = true; g_keep = true; platform_supervised_init(&g_role_node);
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) return 2;
     if (!aj_role_prepare(r)) return 2;
-    bool ok = r->sender ? (r->share ? aj_role_sender_share(r) : aj_role_sender(r->seconds)) :
-                          aj_role_receiver(r->peer, r->serve, r->seconds);
+    g_gui = r->gui; platform_supervised_init(&g_xvfb);
+    bool display_ok = !g_gui || aj_gui_start("/usr/bin/Xvfb");
+    bool ok = display_ok && (r->sender ? (r->share ? aj_role_sender_share(r) : aj_role_sender(r->seconds)) :
+                          aj_role_receiver(r->peer, r->serve, r->seconds));
     bool stopped = aj_role_node_stop();
-    if (!ok || !stopped) { aj_fail("split worker failed or node cleanup was incomplete"); return 2; }
+    bool display_stopped = !g_gui || aj_gui_stop();
+    if (!ok || !stopped || !display_stopped) { aj_fail("split worker failed or node cleanup was incomplete"); return 2; }
     return 0;
 }
 
@@ -2657,6 +2740,91 @@ static enum platform_supervised_state aj_role_drain(struct platform_supervised_p
         if (p->supervisor_pid >= 0) (void)poll(NULL, 0, 100);
     }
     return state;
+}
+
+static bool aj_gui_display_read(int fd)
+{
+    char text[8] = {0}; size_t n = 0; int64_t start = clock_now_monotonic_ns();
+    if (start <= 0 || start > INT64_MAX - 5000000000LL) return false;
+    while (n + 1 < sizeof(text)) {
+        int64_t now = clock_now_monotonic_ns();
+        if (now < start || now >= start + 5000000000LL) return false;
+        struct pollfd p = {.fd = fd, .events = POLLIN};
+        int rc = poll(&p, 1, (int)((start + 5000000000LL - now) / 1000000LL));
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0 || read(fd, text + n, 1) != 1) return false;
+        if (text[n] == '\n') break;
+        if (text[n] < '0' || text[n] > '9') return false;
+        ++n;
+    }
+    if (!n || text[n] != '\n') return false;
+    text[n] = 0; char *end = NULL; long value = strtol(text, &end, 10);
+    return end && !*end && value >= 0 && value <= 65535 &&
+        snprintf(g_private_display, sizeof(g_private_display), ":%ld", value) < (int)sizeof(g_private_display);
+}
+
+static bool aj_gui_artifacts_gone(void);
+
+static bool aj_gui_start(const char *binary)
+{
+    int image = aj_role_image_fd(open(binary, O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    int input = open("/dev/null", O_RDONLY | O_CLOEXEC); char log[1024];
+    int output = aj_path_join(log, sizeof(log), g_work, "xvfb.log") ?
+        open(log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+    int fds[2] = {-1, -1};
+    if (image < 0 || input < 0 || output < 0 || pipe(fds) != 0) goto fail;
+    const char *argv[] = {binary, "-displayfd", "4", "-screen", "0", "1920x1080x24",
+        "-nolock", "-nolisten", "tcp", "-nolisten", "unix", "-listen", "local", NULL};
+    char home[640];
+    if (snprintf(home, sizeof(home), "HOME=%s", g_work) >= (int)sizeof(home)) goto fail;
+    const char *env[] = {"PATH=/usr/bin:/bin", home, NULL};
+    struct platform_supervised_fd_map maps[] = {{input, 0}, {output, 1}, {output, 2}, {fds[1], 4}};
+    int64_t now = clock_now_monotonic_ns();
+    if (now <= 0 || now > INT64_MAX - 10000000000LL) goto fail;
+    struct platform_supervised_spec spec = {.executable_fd = image, .argv = argv, .env = env,
+        .env_count = 2, .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE, .maps = maps, .map_count = 4,
+        .launch_deadline_ns = now + 10000000000LL, .cleanup_timeout_ms = 10000};
+    enum platform_supervised_state state = platform_supervised_start(&g_xvfb, &spec);
+    close(image); close(input); close(output); close(fds[1]);
+    bool ok = state == PLATFORM_SUPERVISED_RUNNING && aj_gui_display_read(fds[0]) && aj_gui_artifacts_gone();
+    close(fds[0]);
+    if (!ok) aj_fail("private display failed to start");
+    return ok;
+fail:
+    if (image >= 0) close(image);
+    if (input >= 0) close(input);
+    if (output >= 0) close(output);
+    if (fds[0] >= 0) close(fds[0]);
+    if (fds[1] >= 0) close(fds[1]);
+    aj_fail("private display prerequisites unavailable"); return false;
+}
+
+static bool aj_gui_artifacts_gone(void)
+{
+    if (!g_private_display[0]) return true;
+    char socket[128], lock[128]; const char *number = g_private_display + 1;
+    if (snprintf(socket, sizeof(socket), "/tmp/.X11-unix/X%s", number) >= (int)sizeof(socket) ||
+        snprintf(lock, sizeof(lock), "/tmp/.X%s-lock", number) >= (int)sizeof(lock)) return false;
+    struct stat st;
+    bool socket_gone = lstat(socket, &st) != 0 && errno == ENOENT;
+    bool lock_gone = lstat(lock, &st) != 0 && errno == ENOENT;
+    return socket_gone && lock_gone;
+}
+
+static bool aj_gui_stop(void)
+{
+    if (g_xvfb.supervisor_pid < 0 && g_xvfb.observation.state == PLATFORM_SUPERVISED_INVALID) return true;
+    bool signaled = platform_supervised_signal(&g_xvfb, PLATFORM_SUPERVISED_TERMINATE);
+    int64_t start = clock_now_monotonic_ns();
+    while (signaled && g_xvfb.supervisor_pid >= 0 && start > 0) {
+        int64_t now = clock_now_monotonic_ns();
+        if (now < start || now - start >= 2000000000LL) break;
+        (void)platform_supervised_poll(&g_xvfb); aj_sleep_ms(50);
+    }
+    if (g_xvfb.supervisor_pid >= 0) (void)aj_role_drain(&g_xvfb);
+    bool ok = g_xvfb.supervisor_pid < 0 && g_xvfb.observation.no_children && aj_gui_artifacts_gone();
+    g_private_display[0] = 0;
+    return ok;
 }
 
 static bool aj_role_node_stop(void)
@@ -2809,6 +2977,8 @@ fail:
     return 2;
 }
 #else
+static bool aj_gui_start(const char *binary) { (void)binary; return false; }
+static bool aj_gui_stop(void) { return false; }
 static bool aj_role_node_stop(void) { return false; }
 static bool aj_role_node_start(const char *home, const char *datadir, const char *log,
                                int p2p, int rpc, int fs, int https, const char *peer, bool hosting)
@@ -2829,7 +2999,7 @@ static int aj_role_entry(int argc, char **argv)
 {
     struct aj_role_args args;
     if (!aj_role_parse(argc, argv, &args) || !getcwd(g_repo, sizeof(g_repo))) {
-            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve] [--network=main|regtest] [--share=/file --share-sha256=HEX --share-publisher=HEX --share-root=HEX]\n"); return 3;
+            fprintf(stderr, "usage: app_journey_live --sender|--receiver --work=/fresh/path --seconds=N [--peer=onion:port --expected=/file --serve] [--network=main|regtest --gui] [--share=/file --share-sha256=HEX --share-publisher=HEX --share-root=HEX]\n"); return 3;
     }
     g_main_network = args.network && !strcmp(args.network, "main");
     if (args.worker) return aj_role_work(&args);

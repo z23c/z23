@@ -221,8 +221,15 @@ static int aj_test_supervised_child(const char *mode)
         return 0;
 }
 
+#if defined(__linux__)
+static int aj_test_gui_owner(void);
+#endif
 static int aj_test_child(const char *mode)
 {
+#if defined(__linux__)
+    if (!strcmp(mode, "gui-owned")) return aj_test_gui_owner();
+#endif
+    if (!strcmp(mode, "display-env")) { const char *display = getenv("DISPLAY"); return display && !strcmp(display, ":65430") && !getenv("XAUTHORITY") ? 0 : 1; }
     if (!strncmp(mode, "supervised-", 11)) return aj_test_supervised_child(mode);
     if (!strcmp(mode, "held")) {
         pid_t p = fork();
@@ -249,10 +256,12 @@ static int aj_role_parse_test(void)
     bool serve = aj_role_parse(7, good, &r) && r.serve;
     if (!serve) fprintf(stderr, "receiver --serve was refused\n");
     ok = serve && ok;
+    good[6] = (char *)"--gui"; ok = aj_role_parse(7, good, &r) && r.gui && ok;
     good[6] = NULL;
     char *bad_sender[] = {(char *)"fixture", (char *)"--sender", (char *)"--work=/tmp/new",
         (char *)"--seconds=10", (char *)"--serve", NULL};
     ok = !aj_role_parse(5, bad_sender, &r) && ok;
+    bad_sender[4] = (char *)"--gui"; ok = !aj_role_parse(5, bad_sender, &r) && ok;
     peer[0] = '8'; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
     ok = !aj_role_parse(6, good, &r) && ok;
     peer[0] = 'a'; snprintf(peerarg, sizeof(peerarg), "--peer=%s", peer);
@@ -851,8 +860,133 @@ static int aj_test_cases(void)
     return failed;
 }
 
+#if defined(__linux__)
+static int aj_fake_xvfb(void)
+{
+    const char *home = getenv("HOME"); char path[PATH_MAX];
+    if (!home || snprintf(path, sizeof(path), "%s/xvfb-timeout", home) >= (int)sizeof(path)) return 2;
+    if (access(path, F_OK) != 0) {
+        if (snprintf(path, sizeof(path), "%s/xvfb-bad", home) >= (int)sizeof(path)) return 2;
+        const char *line = access(path, F_OK) == 0 ? "bad\n" : "65430\n";
+        if (write(4, line, strlen(line)) != (ssize_t)strlen(line)) return 2;
+    }
+    for (;;) pause();
+}
+
+static bool aj_test_gui_case(const char *self, const char *tmp, const char *name, bool expected)
+{
+    char path[PATH_MAX], marker[PATH_MAX], output[512];
+    if (snprintf(path, sizeof(path), "%s/%s", tmp, name) >= (int)sizeof(path) || mkdir(path, 0700) ||
+        strlen(path) >= sizeof(g_work)) return false;
+    memcpy(g_work, path, strlen(path) + 1); platform_supervised_init(&g_xvfb);
+    if (strcmp(name, "gui-ok") &&
+        (snprintf(marker, sizeof(marker), "%s/xvfb-%s", path, name + 4) >= (int)sizeof(marker) || !aj_write_file(marker, "x"))) return false;
+    bool started = aj_gui_start(self), observed = started == expected;
+    if (started) {
+        char *args[] = {(char *)self, (char *)"--child", (char *)"display-env", NULL};
+        observed = !strcmp(g_private_display, ":65430") && aj_run_exec(self, path, path, 5, output, sizeof(output), args) == 0 && aj_run_exec("/nonexistent/gui-test", path, path, 5, output, sizeof(output), args) != 0 && observed;
+    }
+    bool stopped = aj_gui_stop();
+    return observed && stopped && !g_private_display[0];
+}
+
+static bool aj_test_gui_missing(const char *tmp)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/gui-missing", tmp) >= (int)sizeof(path) || mkdir(path, 0700) || strlen(path) >= sizeof(g_work)) return false;
+    memcpy(g_work, path, strlen(path) + 1); platform_supervised_init(&g_xvfb);
+    return !aj_gui_start("/nonexistent/Xvfb") && aj_gui_stop();
+}
+
+static bool aj_test_gui_identity(void)
+{
+    char pid[32]; uint64_t token = 0;
+    if (snprintf(pid, sizeof(pid), "%ld", (long)getpid()) >= (int)sizeof(pid)) return false;
+    memset(g_image_a, '0', 64); g_image_a[64] = 0;
+    return !aj_gui_process("bad", &token) && !aj_gui_process(pid, &token);
+}
+
+static bool aj_test_gui_real(const char *tmp, bool force)
+{
+    char path[PATH_MAX], frame[PATH_MAX], output[1024];
+    if (snprintf(path, sizeof(path), "%s/real-%s", tmp, force ? "kill" : "term") >= (int)sizeof(path) ||
+        mkdir(path, 0700) || strlen(path) >= sizeof(g_work)) return false;
+    memcpy(g_work, path, strlen(path) + 1); platform_supervised_init(&g_xvfb);
+    bool ok = aj_gui_start("/usr/bin/Xvfb") && aj_gui_artifacts_gone() &&
+        aj_path_join(frame, sizeof(frame), path, "frame.png");
+    if (ok) {
+        char *argv[] = {(char *)"/usr/bin/ffmpeg", (char *)"-v", (char *)"error", (char *)"-n",
+            (char *)"-f", (char *)"x11grab", (char *)"-video_size", (char *)"1920x1080", (char *)"-i", g_private_display,
+            (char *)"-frames:v", (char *)"1", frame, NULL};
+        ok = aj_run_exec("/usr/bin/ffmpeg", path, path, 15, output, sizeof(output), argv) == 0 && aj_gui_artifacts_gone();
+    }
+    if (force && g_xvfb.supervisor_pid >= 0) {
+        int64_t now = clock_now_monotonic_ns();
+        ok = now > 0 && platform_supervised_stop(&g_xvfb, now + 10000000000LL) == PLATFORM_SUPERVISED_CLEAN && ok;
+    }
+    bool clean = force ? aj_gui_artifacts_gone() : aj_gui_stop();
+    g_private_display[0] = 0;
+    return ok && clean;
+}
+
+static int aj_test_gui_owner(void)
+{
+    const char *root = getenv("AJ_GUI_ROOT");
+    if (!root || strlen(root) >= sizeof(g_work)) return 2;
+    memcpy(g_work, root, strlen(root) + 1); platform_supervised_init(&g_xvfb);
+    if (!aj_gui_start("/usr/bin/Xvfb") || !aj_gui_artifacts_gone()) return 2;
+    size_t n = strlen(g_private_display) + 1;
+    if (write(4, g_private_display, n) != (ssize_t)n) return 2;
+    for (;;) pause();
+}
+
+static bool aj_test_gui_abrupt(const char *self, const char *tmp)
+{
+    char path[PATH_MAX], envroot[PATH_MAX + 16]; int fds[2];
+    if (snprintf(path, sizeof(path), "%s/real-abrupt", tmp) >= (int)sizeof(path) ||
+        mkdir(path, 0700) || snprintf(envroot, sizeof(envroot), "AJ_GUI_ROOT=%s", path) >= (int)sizeof(envroot) || pipe(fds)) return false;
+    int image = aj_role_image_fd(open(self, O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    int nullfd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (image < 0 || nullfd < 0) { if (image >= 0) close(image); if (nullfd >= 0) close(nullfd); close(fds[0]); close(fds[1]); return false; }
+    const char *argv[] = {self, "--child", "gui-owned", NULL};
+    const char *env[] = {"PATH=/usr/bin:/bin", envroot, NULL};
+    struct platform_supervised_fd_map maps[] = {{nullfd, 0}, {nullfd, 1}, {nullfd, 2}, {fds[1], 4}};
+    int64_t now = clock_now_monotonic_ns(); struct platform_supervised_process outer; platform_supervised_init(&outer);
+    struct platform_supervised_spec spec = {.executable_fd = image, .argv = argv, .env = env, .env_count = 2,
+        .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE, .maps = maps, .map_count = 4,
+        .launch_deadline_ns = now + 10000000000LL, .cleanup_timeout_ms = 10000};
+    bool ok = now > 0 && platform_supervised_start(&outer, &spec) == PLATFORM_SUPERVISED_RUNNING;
+    close(image); close(nullfd); close(fds[1]);
+    struct pollfd p = {.fd = fds[0], .events = POLLIN}; char display[32] = {0};
+    if (ok) { ssize_t n = poll(&p, 1, 15000) > 0 ? read(fds[0], display, sizeof(display)) : -1;
+        ok = n > 1 && n <= (ssize_t)sizeof(display) && display[n - 1] == 0 && display[0] == ':'; }
+    close(fds[0]);
+    if (ok) { snprintf(g_private_display, sizeof(g_private_display), "%s", display); ok = aj_gui_artifacts_gone(); }
+    now = clock_now_monotonic_ns();
+    bool clean = now > 0 && outer.supervisor_pid >= 0 &&
+        platform_supervised_stop(&outer, now + 10000000000LL) == PLATFORM_SUPERVISED_CLEAN && outer.observation.no_children;
+    bool absent = aj_gui_artifacts_gone(); g_private_display[0] = 0;
+    return ok && clean && absent;
+}
+
+static int aj_gui_test(const char *self, const char *tmp)
+{
+    bool ok = aj_test_gui_case(self, tmp, "gui-ok", true) && aj_test_gui_case(self, tmp, "gui-bad", false) &&
+        aj_test_gui_case(self, tmp, "gui-timeout", false) && aj_test_gui_missing(tmp) && aj_test_gui_identity();
+    if (getenv("APPJ_TEST_REAL_XVFB")) ok = aj_test_gui_real(tmp, false) && aj_test_gui_real(tmp, true) && aj_test_gui_abrupt(self, tmp) && ok;
+    if (ok) puts("private display ownership and identity refusals: PASS");
+    else fprintf(stderr, "private display ownership and identity refusals: FAIL\n");
+    return ok ? 0 : 1;
+}
+#else
+static int aj_gui_test(const char *self, const char *tmp) { (void)self; (void)tmp; return 0; }
+#endif
+
 static int aj_test_dispatch(int argc, char **argv)
 {
+#if defined(__linux__)
+    if (argc > 1 && !strcmp(argv[1], "-displayfd")) return aj_fake_xvfb();
+#endif
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--role-worker"))) &&
         !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
     if (argc > 2 && !strncmp(argv[1], "-datadir=", 9) && (!strcmp(argv[2], "-regtest") || !strncmp(argv[2], "-port=", 6))) return aj_fake_node();
@@ -870,6 +1004,7 @@ static int aj_test_suite(const char *self, const char *tmp)
     failed |= aj_single_get_test(tmp) | aj_catalog_test(tmp) | aj_role_parse_test();
     failed |= aj_test_network_mode() ? 0 : 1;
     failed |= aj_test_share(tmp);
+    failed |= aj_gui_test(self, tmp);
     failed |= aj_role_expected_test(tmp) | aj_supervised_test(self, tmp) | aj_role_owner_test(self, tmp);
     return failed;
 }
