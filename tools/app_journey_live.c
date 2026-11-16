@@ -2765,28 +2765,46 @@ static bool aj_gui_display_read(int fd)
 
 static bool aj_gui_artifacts_gone(void);
 
+static int aj_gui_worker(int argc, char **argv)
+{
+    static const char *const options[] = {"-displayfd", "4", "-screen", "0", "1920x1080x24",
+        "-nolock", "-nolisten", "tcp", "-nolisten", "unix", "-listen", "local"};
+    if (argc != 15) return 2;
+#ifndef AJ_GUI_SELFTEST
+    if (strcmp(argv[2], "/usr/bin/Xvfb")) return 2;
+#endif
+    for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); ++i)
+        if (strcmp(argv[i + 3], options[i])) return 2;
+    struct stat st; char token; struct pollfd p = {.fd = 3, .events = POLLIN};
+    if (fstat(3, &st) || !S_ISFIFO(st.st_mode) || poll(&p, 1, 1000) <= 0 ||
+        !(p.revents & POLLIN) || read(3, &token, 1) != 1 || token != 'R') return 2;
+    close(3); execv(argv[2], &argv[2]); return 2;
+}
+
 static bool aj_gui_start(const char *binary)
 {
-    int image = aj_role_image_fd(open(binary, O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    int image = aj_role_self_image();
     int input = open("/dev/null", O_RDONLY | O_CLOEXEC); char log[1024];
     int output = aj_path_join(log, sizeof(log), g_work, "xvfb.log") ?
         open(log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
-    int fds[2] = {-1, -1};
-    if (image < 0 || input < 0 || output < 0 || pipe(fds) != 0) goto fail;
-    const char *argv[] = {binary, "-displayfd", "4", "-screen", "0", "1920x1080x24",
+    int fds[2] = {-1, -1}, control[2] = {-1, -1};
+    if (image < 0 || input < 0 || output < 0 || pipe(fds) != 0 || pipe(control) != 0) goto fail;
+    const char *argv[] = {"app_journey_live", "--xvfb-worker", binary, "-displayfd", "4", "-screen", "0", "1920x1080x24",
         "-nolock", "-nolisten", "tcp", "-nolisten", "unix", "-listen", "local", NULL};
     char home[640];
     if (snprintf(home, sizeof(home), "HOME=%s", g_work) >= (int)sizeof(home)) goto fail;
     const char *env[] = {"PATH=/usr/bin:/bin", home, NULL};
-    struct platform_supervised_fd_map maps[] = {{input, 0}, {output, 1}, {output, 2}, {fds[1], 4}};
+    struct platform_supervised_fd_map maps[] = {{input, 0}, {output, 1}, {output, 2}, {control[0], 3}, {fds[1], 4}};
     int64_t now = clock_now_monotonic_ns();
     if (now <= 0 || now > INT64_MAX - 10000000000LL) goto fail;
     struct platform_supervised_spec spec = {.executable_fd = image, .argv = argv, .env = env,
-        .env_count = 2, .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE, .maps = maps, .map_count = 4,
+        .env_count = 2, .env_policy = PLATFORM_SUPERVISED_ENV_COMPLETE, .maps = maps, .map_count = 5,
         .launch_deadline_ns = now + 10000000000LL, .cleanup_timeout_ms = 10000};
     enum platform_supervised_state state = platform_supervised_start(&g_xvfb, &spec);
-    close(image); close(input); close(output); close(fds[1]);
-    bool ok = state == PLATFORM_SUPERVISED_RUNNING && aj_gui_display_read(fds[0]) && aj_gui_artifacts_gone();
+    close(image); close(input); close(output); close(fds[1]); close(control[0]);
+    bool ok = state == PLATFORM_SUPERVISED_RUNNING && write(control[1], "R", 1) == 1;
+    close(control[1]);
+    ok = ok && aj_gui_display_read(fds[0]) && aj_gui_artifacts_gone();
     close(fds[0]);
     if (!ok) aj_fail("private display failed to start");
     return ok;
@@ -2796,6 +2814,8 @@ fail:
     if (output >= 0) close(output);
     if (fds[0] >= 0) close(fds[0]);
     if (fds[1] >= 0) close(fds[1]);
+    if (control[0] >= 0) close(control[0]);
+    if (control[1] >= 0) close(control[1]);
     aj_fail("private display prerequisites unavailable"); return false;
 }
 
@@ -2977,6 +2997,7 @@ fail:
     return 2;
 }
 #else
+static int aj_gui_worker(int argc, char **argv) { (void)argc; (void)argv; return 2; }
 static bool aj_gui_start(const char *binary) { (void)binary; return false; }
 static bool aj_gui_stop(void) { return false; }
 static bool aj_role_node_stop(void) { return false; }
@@ -3010,6 +3031,7 @@ static int aj_role_entry(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--xvfb-worker")) return aj_gui_worker(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "--node-worker")) return aj_role_node_worker(argc, argv);
     if (aj_is_role(argc, argv)) return aj_role_entry(argc, argv);
     const char *work_override = NULL;

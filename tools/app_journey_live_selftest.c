@@ -3,6 +3,7 @@
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
+#define AJ_GUI_SELFTEST 1
 #define main app_journey_live_main
 #include "app_journey_live.c"
 #undef main
@@ -924,7 +925,8 @@ static bool aj_test_gui_real(const char *tmp, bool force)
         int64_t now = clock_now_monotonic_ns();
         ok = now > 0 && platform_supervised_stop(&g_xvfb, now + 10000000000LL) == PLATFORM_SUPERVISED_CLEAN && ok;
     }
-    bool clean = force ? aj_gui_artifacts_gone() : aj_gui_stop();
+    if (force && g_xvfb.supervisor_pid >= 0) { (void)aj_role_drain(&g_xvfb); ok = false; }
+    bool clean = force ? (g_xvfb.supervisor_pid < 0 && g_xvfb.observation.no_children && aj_gui_artifacts_gone()) : aj_gui_stop();
     g_private_display[0] = 0;
     return ok && clean;
 }
@@ -965,15 +967,23 @@ static bool aj_test_gui_abrupt(const char *self, const char *tmp)
     now = clock_now_monotonic_ns();
     bool clean = now > 0 && outer.supervisor_pid >= 0 &&
         platform_supervised_stop(&outer, now + 10000000000LL) == PLATFORM_SUPERVISED_CLEAN && outer.observation.no_children;
+    if (outer.supervisor_pid >= 0) { (void)aj_role_drain(&outer); clean = false; }
     bool absent = aj_gui_artifacts_gone(); g_private_display[0] = 0;
     return ok && clean && absent;
 }
 
 static int aj_gui_test(const char *self, const char *tmp)
 {
+    void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
     bool ok = aj_test_gui_case(self, tmp, "gui-ok", true) && aj_test_gui_case(self, tmp, "gui-bad", false) &&
         aj_test_gui_case(self, tmp, "gui-timeout", false) && aj_test_gui_missing(tmp) && aj_test_gui_identity();
-    if (getenv("APPJ_TEST_REAL_XVFB")) ok = aj_test_gui_real(tmp, false) && aj_test_gui_real(tmp, true) && aj_test_gui_abrupt(self, tmp) && ok;
+    if (getenv("APPJ_TEST_REAL_XVFB")) {
+        bool real = aj_test_gui_real(tmp, false) && aj_test_gui_real(tmp, true) && aj_test_gui_abrupt(self, tmp);
+        if (real) puts("real Xvfb connection, TERM, KILL and owner-loss: PASS");
+        else fprintf(stderr, "real Xvfb connection or cleanup: FAIL\n");
+        ok = real && ok;
+    }
+    if (signal(SIGPIPE, old_pipe) == SIG_ERR) ok = false;
     if (ok) puts("private display ownership and identity refusals: PASS");
     else fprintf(stderr, "private display ownership and identity refusals: FAIL\n");
     return ok ? 0 : 1;
@@ -990,6 +1000,7 @@ static int aj_test_dispatch(int argc, char **argv)
     if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--role-worker"))) &&
         !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
     if (argc > 2 && !strncmp(argv[1], "-datadir=", 9) && (!strcmp(argv[2], "-regtest") || !strncmp(argv[2], "-port=", 6))) return aj_fake_node();
+    if (argc > 1 && !strcmp(argv[1], "--xvfb-worker")) return app_journey_live_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "--node-worker")) return app_journey_live_main(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "--sender") || !strcmp(argv[1], "--receiver")))
         return app_journey_live_main(argc, argv);
