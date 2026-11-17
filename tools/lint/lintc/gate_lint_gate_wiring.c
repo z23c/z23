@@ -31,6 +31,10 @@
  *   H. no gate_commands.def row name appears twice (the first row
  *      wins; a repeat is a dead shadowing row). The set read for A/B
  *      dedups by design, so H walks every row.
+ *   I. every LINT_ROW_FILES per-file marker row names a gate the lists run,
+ *      appears once, and names only source paths that exist under the
+ *      scanned root (the run driver narrows exactly these gates; a bad
+ *      marker is a broken fast path, not a broken proof).
  *
  * Adding a lint gate is a THREE-file operation: Makefile LINT_GATES,
  * gate_commands.def, and the DEFENSIVE_CODING.md doc block. F/G
@@ -150,10 +154,16 @@ static int lgw_extract_doc_block(const char *doc, struct sr_set *out)
 }
 
 /* ── the driver's command table: LINT_ROW lines of gate_commands.def ───── */
-/* Calls VISIT(ctx, name, cmd) for each row in file order; stops at its first
- * non-zero. 0 ok, 2 on a missing file or an over-long row. */
-typedef int (*lgw_row_fn)(void *ctx, const char *name, const char *cmd);
-static int lgw_each_row(const char *driver, lgw_row_fn visit, void *ctx)
+/* Row kinds, matching lint_cmdrow_parse's return codes. */
+enum { LGW_KIND_CMD = 0, LGW_KIND_FILES = 3 };
+
+/* Calls VISIT(ctx, name, text) for each row of kind WANT in file order;
+ * stops at the visitor's first non-zero. 0 ok, 2 on a missing file, a
+ * malformed row or an over-long line — any other row shape is refused,
+ * never skipped. */
+typedef int (*lgw_row_fn)(void *ctx, const char *name, const char *text);
+static int lgw_each_kind(const char *driver, int want, lgw_row_fn visit,
+                         void *ctx)
 {
     static char line[LGW_LINE], name[SR_NAME], cmd[LGW_LINE];
     FILE *f = fopen(driver, "r");
@@ -168,7 +178,7 @@ static int lgw_each_row(const char *driver, lgw_row_fn visit, void *ctx)
         int pr = lint_cmdrow_parse(line, name, sizeof name, cmd, sizeof cmd);
         if (pr == 2)
             rc = die("z23-lint: malformed or over-long gate table row in %s\n", driver);
-        else if (pr == 0)
+        else if (pr == want)
             rc = visit(ctx, name, cmd);
     }
     if (ferror(f) && rc == 0) rc = die("z23-lint: cannot read %s\n", driver);
@@ -184,7 +194,7 @@ static int lgw_row_add(void *ctx, const char *name, const char *cmd)
 
 static int lgw_driver_list(const char *driver, struct sr_set *out)
 {
-    return lgw_each_row(driver, lgw_row_add, out);
+    return lgw_each_kind(driver, LGW_KIND_CMD, lgw_row_add, out);
 }
 
 struct lgw_find {
@@ -208,7 +218,7 @@ static int lgw_print_command(const char *driver, const char *gate, char *out, si
 {
     struct lgw_find q = { gate, out, cap, 0 };
     out[0] = '\0';
-    return lgw_each_row(driver, lgw_row_find, &q);
+    return lgw_each_kind(driver, LGW_KIND_CMD, lgw_row_find, &q);
 }
 
 /* ── set arithmetic + report accumulation ───────────────────────────────── */
@@ -612,7 +622,7 @@ static int lgw_check_dup(const char *driver, char *out, size_t cap,
 {
     static char labels[SR_ALLOW][SR_NAME];
     struct lgw_labels l = { labels, 0 };
-    int rc = lgw_each_row(driver, lgw_row_label, &l);
+    int rc = lgw_each_kind(driver, LGW_KIND_CMD, lgw_row_label, &l);
     if (rc)
         return rc;
     int n = l.n;
@@ -637,6 +647,106 @@ static int lgw_check_dup(const char *driver, char *out, size_t cap,
             i++;
     }
     return 0;
+}
+
+/* ── check I: the LINT_ROW_FILES per-file marker rows ────────────────────
+ * A marker row licenses the run driver to narrow a gate to a changed-path
+ * set, so it must name a gate the lists actually run, appear exactly once,
+ * and name source paths that exist under the scanned root. Anything else is
+ * dead or broken wiring behind a faster-looking lane pass. */
+struct lgw_files_ctx {
+    const char *root;
+    const struct sr_set *listed;
+    char *out;
+    size_t cap;
+    size_t *used;
+    int *fail;
+};
+
+static int lgw_files_token(const struct lgw_files_ctx *c, const char *gate,
+                           const char *tok)
+{
+    char path[LGW_LINE];
+    struct stat st;
+    if (tok[0] == '$')
+        return 0;
+    if (tok[0] == '.' && tok[1] == '/')
+        tok += 2;
+    if (ovf(snprintf(path, sizeof path, "%s/%s", c->root, tok), sizeof path))
+        return die("z23-lint: marker source path too long\n", "");
+    if (stat(path, &st) == 0)
+        return 0;
+    *(c->fail) = 1;
+    return lgw_appendf_pub(c->out, c->cap, c->used,
+                    "FAIL: LINT_ROW_FILES marker for '%s' names source '%s' that does not\n"
+                    "      exist under the scanned root. The narrow pass diffs the gate's own\n"
+                    "      sources; a path that is not there can never match. Fix the marker.\n",
+                    gate, tok) ? 2 : 0;
+}
+
+static int lgw_files_row_visit(void *ctx, const char *name, const char *files)
+{
+    struct lgw_files_ctx *c = ctx;
+    if (!sr_has(c->listed, name)) {
+        *(c->fail) = 1;
+        return lgw_appendf_pub(c->out, c->cap, c->used,
+                        "FAIL: LINT_ROW_FILES marker names gate '%s', which no\n"
+                        "      LINT_GATES/LINT_FAST_GATES list runs. A per-file marker for a gate\n"
+                        "      that never runs is dead wiring; remove the marker row.\n",
+                        name) ? 2 : 0;
+    }
+    if (files[0] == '\0') {
+        *(c->fail) = 1;
+        return lgw_appendf_pub(c->out, c->cap, c->used,
+                        "FAIL: LINT_ROW_FILES marker for '%s' names no sources. The narrow\n"
+                        "      pass cannot prove the gate's own code matches the base; remove\n"
+                        "      the marker or name what it reads.\n",
+                        name) ? 2 : 0;
+    }
+    const char *p = files;
+    while (*p) {
+        const char *q = p;
+        char tok[LGW_LINE];
+        while (*q && *q != ' ')
+            q++;
+        if ((size_t)(q - p) >= sizeof tok)
+            return die("z23-lint: marker source token too long\n", "");
+        if (q > p) {
+            memcpy(tok, p, (size_t)(q - p));
+            tok[q - p] = '\0';
+            if (lgw_files_token(c, name, tok))
+                return 2;
+        }
+        p = *q ? q + 1 : q;
+    }
+    return 0;
+}
+
+static int lgw_check_files(const char *root, const char *driver,
+                           const struct sr_set *listed, char *out, size_t cap,
+                           size_t *used, int *fail)
+{
+    static char labels[SR_ALLOW][SR_NAME];
+    struct lgw_labels l = { labels, 0 };
+    struct lgw_files_ctx c = { root, listed, out, cap, used, fail };
+    int rc = lgw_each_kind(driver, LGW_KIND_FILES, lgw_row_label, &l);
+    if (rc == 0 && l.n > 1) {
+        qsort(labels, (size_t)l.n, SR_NAME, lgw_cmp_label);
+        for (int i = 1; rc == 0 && i < l.n; i++) {
+            if (strcmp(labels[i - 1], labels[i]) != 0)
+                continue;
+            *fail = 1;
+            rc = lgw_appendf_pub(out, cap, used,
+                            "FAIL: LINT_ROW_FILES marker '%s' appears twice — the first row\n"
+                            "      wins, so the other is dead shadowing. Delete the stale marker.\n",
+                            labels[i]) ? 2 : 0;
+            while (i + 1 < l.n && strcmp(labels[i], labels[i + 1]) == 0)
+                i++;
+        }
+    }
+    if (rc == 0)
+        rc = lgw_each_kind(driver, LGW_KIND_FILES, lgw_files_row_visit, &c);
+    return rc;
 }
 
 /* ── orchestration ───────────────────────────────────────────────────────── */
@@ -731,7 +841,8 @@ static int lgw_run_checks(const char *root, const char *makefile, const char *dr
     if (lgw_check_e(root, faults, cap, used, fail)) return 2;
     if (lgw_check_f(listed, docset, doc, faults, cap, used, fail)) return 2;
     if (lgw_check_g(listed, docset, doc, faults, cap, used, fail)) return 2;
-    return lgw_check_dup(driver, faults, cap, used, fail);
+    if (lgw_check_dup(driver, faults, cap, used, fail)) return 2;
+    return lgw_check_files(root, driver, listed, faults, cap, used, fail);
 }
 
 int lgw_check_root(const char *root, FILE *out)

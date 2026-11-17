@@ -101,3 +101,14 @@ LINT_ROW("check-vendor-provenance", "tools/scripts/test_vendor_provenance.sh && 
 LINT_ROW("check-no-snapshot-struct-memcmp", "./build/bin/z23-lint check-no-snapshot-struct-memcmp --self-test && ./build/bin/z23-lint check-no-snapshot-struct-memcmp")
 LINT_ROW("check-no-warning-suppression", "./build/bin/z23-lint check-no-warning-suppression .")
 LINT_ROW("check-result-discard", "ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-result-discard")
+
+// Per-file-deterministic gates (lane fast path only). The run driver may
+// append --changed-files=PATH to these gates' commands when a changed-path
+// scope is given: each file's verdict is decided by that file alone. sources
+// is the gate's own code, which must match the merge-base before the driver
+// narrows (a gate that changed since the base scans whole-tree). A gate with
+// no LINT_ROW_FILES row ignores the scope entirely (fail-closed: unknown
+// shape = full tree). The land proof and `make lint` never narrow.
+LINT_ROW_FILES("check-no-api-keys", "tools/lint/lintc/gate_git_scan_a.c")
+LINT_ROW_FILES("check-fortify-masked-decls", "tools/lint/lintc/gate_fortify_masked_decls.c")
+LINT_ROW_FILES("check-raw-sqlite", "tools/lint/lintc/gate_raw_sqlite.c tools/lint/lintc/gate_raw_sqlite_ctx.c tools/lint/lintc/gate_raw_sqlite_exec.c tools/lint/lintc/gate_raw_sqlite_priv.h")

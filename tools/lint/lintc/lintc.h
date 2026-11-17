@@ -184,6 +184,14 @@ int lint_changed_bind(int *argc, char ***argv, struct lint_changed *out);
 void lint_changed_free(struct lint_changed *out);
 int lint_fast_should_narrow(int per_file, int set_supplied, int source_matches);
 int lint_fast_gate_narrow(const char *name, int set_supplied);
+/* The LINT_ROW_FILES("gate", "sources") marker rows of gate_commands.def
+ * (fast_narrow.c): the declared per-file sources of a gate the run driver may
+ * narrow to a changed-path set, NULL for a gate that is not marked. */
+const char *lint_fast_files_decl(const char *gate);
+/* The changed-path scope of BASE (tracked diff plus untracked paths) written
+ * to build/scratch and named in OUT. 0 ok; non-zero means no scope (the
+ * caller stays whole-tree). */
+int lint_changed_scope_from_base(const char *base, char *out, size_t cap);
 /* floor < 0 prints scan-floor: whole. Returns 0, or -1 on a write error. */
 int lint_examined_print(int n, int floor);
 int lint_fast_append_changed(char *cmd, size_t cap, const char *path);
@@ -279,8 +287,10 @@ enum { LINT_CMD_NONE = 0, LINT_CMD_PLAIN = 1, LINT_CMD_PAIR = 2 };
  * 0 and the command in out, 1 for a gate it does not own, 2 if cap is too small. */
 int lint_gate_command(const char *gate, char *out, size_t cap);
 
-/* Parse one LINT_ROW("name", "command") line of gate_commands.def text (the
- * driver's command table, command_table.c): 0 a row, 1 not a row, 2 too long. */
+/* Parse one line of gate_commands.def text (the driver's command table,
+ * command_table.c): 0 a LINT_ROW("name", "command") row, 3 a
+ * LINT_ROW_FILES("name", "sources") per-file marker row (the string lands in
+ * CMD either way), 1 not a row (blank or // comment), 2 malformed or too long. */
 int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
                       size_t ccap);
 

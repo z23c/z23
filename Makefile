@@ -5018,7 +5018,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast lint-changed
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -7437,6 +7437,21 @@ lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN
 	[ "$$rc" = 0 ] || exit 1
 	@echo "lint-fast: OK"
 endif
+
+# lint-changed — lane-side convenience over the same LINT_FAST_GATES: the
+# driver derives the changed-path scope from BASE itself (--base, no shell
+# list-building) and narrows exactly the per-file gates gate_commands.def
+# marks LINT_ROW_FILES and whose own source matches the merge-base. A
+# narrowed pass is never a whole-tree proof: make lint and the land proof
+# stay whole-tree.
+lint-changed: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(if $(filter check-vendor-provenance check-tor-provenance,$(LINT_FAST_GATES)),tor-provenance-ready,) $(TOR_PROVENANCE_BIN) \
+		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \
+		$(REPRO_NETWORK_POLICY_SELFTEST_BIN) \
+		$(BUILD_EPOCH_INTEGRITY_LINT_BIN) \
+		$(CHECKOUT_LOCK_SELFTEST_LINT_BIN)
+	@test -n "$(BASE)" || { echo "lint-changed: BASE=<ref> is required (e.g. make lint-changed BASE=origin/main)" >&2; exit 2; }
+	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" $(LINTC_TOOL) run --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" --base="$(BASE)" $(LINT_FAST_GATES)
+	@echo "lint-changed: OK (scoped to $(BASE); not a whole-tree proof)"
 
 # lint-land — what `dev land` runs in its landing worktree before it starts an
 # exact proof: LINT_FAST_GATES except check-zcc-cache, plus LINT_LAND_EXTRA_GATES. The extra list is

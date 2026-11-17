@@ -649,6 +649,180 @@ static int lfc_quoted_paths(const struct lfc_fix *fx)
     return 0;
 }
 
+/* ── the run driver's changed-path scope ─────────────────────────────────
+ * The driver (z23-lint run) must append --changed-files only to a gate the
+ * gate_commands.def LINT_ROW_FILES marker declares per-file-deterministic,
+ * never to an unmarked gate, never without a scope, and --base=<commit>
+ * must produce that scope from the worktree itself. The stub below stands
+ * in for the gate: it records its argv and always passes. */
+static const char k_lfc_run_stub[] =
+    "#!/bin/sh\n"
+    "printf '%s\\n' \"$*\" >> \"${0%/*}/run_trace\"\n"
+    "exit 0\n";
+
+static int lfc_run_stub(const struct lfc_fix *fx)
+{
+    char dir[PATH_MAX], bin[PATH_MAX], trace[PATH_MAX];
+    if (snprintf(dir, sizeof dir, "%s/build/bin", fx->dir) >= (int)sizeof dir)
+        return 1;
+    if (lfc_mkdir(dir))
+        return 1;
+    if (snprintf(bin, sizeof bin, "%s/z23-lint", dir) >= (int)sizeof bin)
+        return 1;
+    if (write_file(bin, k_lfc_run_stub) != 0 || chmod(bin, 0700) != 0)
+        return 1;
+    if (snprintf(trace, sizeof trace, "%s/run_trace", dir) >= (int)sizeof trace)
+        return 1;
+    (void)unlink(trace);
+    return 0;
+}
+
+static int lfc_trace(const struct lfc_fix *fx, char *out, size_t cap)
+{
+    char path[PATH_MAX];
+    FILE *f;
+    size_t n;
+    if (snprintf(path, sizeof path, "%s/build/bin/run_trace", fx->dir) >= (int)sizeof path)
+        return -1;
+    f = fopen(path, "r");
+    if (!f)
+        return -1;
+    n = fread(out, 1, cap - 1, f);
+    out[n] = '\0';
+    if (fclose(f) != 0)
+        return -1;
+    return (int)n;
+}
+
+/* The file named after FLAG (a --changed-files=PATH token) holds NEEDLE. */
+static int lfc_scope_file_has(const char *flag, const char *needle)
+{
+    char path[PATH_MAX], buf[1 << 15];
+    FILE *f;
+    size_t n, i = 0;
+    flag += strlen("--changed-files=");
+    while (flag[i] && flag[i] != '\n' && flag[i] != ' ' && i + 1 < sizeof path)
+        i++;
+    if (i == 0 || i >= sizeof path)
+        return 0;
+    memcpy(path, flag, i);
+    path[i] = '\0';
+    f = fopen(path, "r");
+    if (!f)
+        return 0;
+    n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    (void)fclose(f);
+    return strstr(buf, needle) != NULL;
+}
+
+static int lfc_run_driver(const struct lfc_fix *fx, const char *gate,
+                          const char *set, const char *base,
+                          char *out, size_t cap)
+{
+    static char flag[PATH_MAX], basearg[80];
+    const char *av[8];
+    int n = 0;
+    av[n++] = fx->bin;
+    av[n++] = "run";
+    av[n++] = "--jobs";
+    av[n++] = "1";
+    if (set) {
+        (void)snprintf(flag, sizeof flag, "--changed-files=%s/%s", fx->dir, set);
+        av[n++] = flag;
+    }
+    if (base) {
+        (void)snprintf(basearg, sizeof basearg, "--base=%s", base);
+        av[n++] = basearg;
+    }
+    av[n++] = gate;
+    av[n] = NULL;
+    return lfc_spawn(fx, av, out, cap, 120000);
+}
+
+/* One driver run: WANT_FLAG says the gate's argv must (not) carry
+ * --changed-files; WANT_PATH, when set, must be inside the scope file. */
+static int lfc_scope_assert(const struct lfc_fix *fx, const char *gate,
+                            const char *set, const char *base,
+                            int want_flag, const char *want_path,
+                            char *out, size_t cap)
+{
+    static char trace[1 << 15], trace_path[PATH_MAX];
+    const char *flag;
+    int rc;
+    if (snprintf(trace_path, sizeof trace_path, "%s/build/bin/run_trace",
+                 fx->dir) >= (int)sizeof trace_path)
+        return 1;
+    (void)unlink(trace_path);
+    rc = lfc_run_driver(fx, gate, set, base, out, cap);
+    lfc_banner(gate, base ? "run-base" : (set ? "run-set" : "run-wide"), rc, out);
+    if (rc != 0)
+        return 1;
+    if (lfc_trace(fx, trace, sizeof trace) < 0)
+        return 1;
+    if (strstr(trace, gate) == NULL)
+        return 1;
+    flag = strstr(trace, "--changed-files=");
+    if (!flag && !want_flag)
+        return 0;
+    if (!flag || !want_flag)
+        return 1;
+    if (!want_path)
+        return 0;
+    return lfc_scope_file_has(flag, want_path) ? 0 : 1;
+}
+
+static int lfc_marker_decl(void)
+{
+    const char *s = lint_fast_files_decl("check-no-api-keys");
+    if (!s || strstr(s, "gate_git_scan_a.c") == NULL)
+        return 1;
+    s = lint_fast_files_decl("check-raw-sqlite");
+    if (!s || strstr(s, "gate_raw_sqlite_ctx.c") == NULL
+        || strstr(s, "gate_raw_sqlite_priv.h") == NULL)
+        return 1;
+    if (!lint_fast_files_decl("check-fortify-masked-decls"))
+        return 1;
+    /* fail-closed: an unmarked or unknown gate declares nothing */
+    if (lint_fast_files_decl("check-no-python"))
+        return 1;
+    if (lint_fast_files_decl("check-not-a-gate"))
+        return 1;
+    return 0;
+}
+
+static int lfc_run_scope(struct lfc_fix *fx)
+{
+    static const char *const k_keep[] = { "engine/services/keep_b.c", NULL };
+    char *out = malloc(1 << 16);
+    int bad;
+    if (!out)
+        return 1;
+    if (lfc_run_stub(fx)) {
+        free(out);
+        return 1;
+    }
+    bad = lfc_scope_assert(fx, "check-no-api-keys", "set_bad.txt", NULL, 1,
+                           "fresh_bad.c", out, 1 << 16);
+    if (!bad)
+        bad = lfc_scope_assert(fx, "check-no-python", "set_bad.txt", NULL, 0,
+                               NULL, out, 1 << 16);
+    if (!bad)
+        bad = lfc_scope_assert(fx, "check-no-api-keys", NULL, NULL, 0,
+                               NULL, out, 1 << 16);
+    if (!bad) {
+        if (lfc_dirty(fx, k_keep))
+            bad = 1;
+        else
+            bad = lfc_scope_assert(fx, "check-no-api-keys", NULL, "HEAD", 1,
+                                   "keep_b.c", out, 1 << 16);
+        if (lfc_rel(fx, "engine/services/keep_b.c", "int keep_b;\n"))
+            bad = 1;
+    }
+    free(out);
+    return bad;
+}
+
 static int lfc_command_paths(void)
 {
     static const char *const paths[] = {
@@ -678,6 +852,8 @@ int t_lint_fast_changed_files(void)
         ASSERT(lfc_prepare(&fx) == 0);
         ASSERT(lfc_all(&fx) == 0);
         ASSERT(lfc_quoted_paths(&fx) == 0);
+        ASSERT(lfc_run_scope(&fx) == 0);
+        ASSERT(lfc_marker_decl() == 0);
         ASSERT(lfc_command_paths() == 0);
         PASS();
     } _test_next:;

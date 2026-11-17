@@ -13,6 +13,10 @@
  * (gate check H) can see it, since every other check is set-based.
  * Cases L and M cover native commands: a gate z23-lint owns passes with no
  * table line (L); one it does not own still fails there (M).
+ * Cases P-S cover the LINT_ROW_FILES per-file marker rows: a valid marker
+ * passes (P); one no gate list names is dead wiring (Q); a duplicated
+ * marker shadows its twin (R); a marker naming a missing source path
+ * fails closed (S).
  * Sandbox lives under getenv("TMPDIR") else "test-tmp", never /tmp.
  */
 #ifndef _POSIX_C_SOURCE
@@ -116,9 +120,11 @@ static int lgws_write_makefile(const char *d, const char *const *gates, int n)
     return csr_write(path, body);
 }
 
-/* Appends one LINT_ROW(gate, cmd) line to the fixture's gate_commands.def.
- * cmd is plain text without quotes or backslashes. */
-static int lgws_wire(const char *d, const char *gate, const char *cmd)
+/* Appends one row of the fixture's gate_commands.def: ROW is the row word
+ * ("LINT_ROW" or "LINT_ROW_FILES"); ARG is plain text without quotes or
+ * backslashes. */
+static int lgws_wire_row(const char *d, const char *row, const char *gate,
+                         const char *arg)
 {
     char driver[4096];
     if (ovf(snprintf(driver, sizeof driver, "%s/tools/lint/lintc/gate_commands.def", d),
@@ -126,9 +132,16 @@ static int lgws_wire(const char *d, const char *gate, const char *cmd)
         return 2;
     FILE *f = fopen(driver, "a");
     if (!f) return die("z23-lint: cannot open %s\n", driver);
-    int k = fprintf(f, "LINT_ROW(\"%s\", \"%s\")\n", gate, cmd);
+    int k = fprintf(f, "%s(\"%s\", \"%s\")\n", row, gate, arg);
     if (fclose(f) != 0 || k < 0) return die("z23-lint: write failed: %s\n", driver);
     return 0;
+}
+
+/* Appends one LINT_ROW(gate, cmd) line to the fixture's gate_commands.def.
+ * cmd is plain text without quotes or backslashes. */
+static int lgws_wire(const char *d, const char *gate, const char *cmd)
+{
+    return lgws_wire_row(d, "LINT_ROW", gate, cmd);
 }
 
 static int lgws_expect_reject(const char *label, const char *needle, const char *d,
@@ -475,12 +488,72 @@ static const char *lgws_absolutize(char *d0, char *scratch, size_t cap, int *rc)
     return scratch;
 }
 
+/* Case P: a LINT_ROW_FILES marker for a listed, wired gate whose source
+ * exists is part of a passing tree (positive control for the marker rows). */
+static int lgws_case_p(const char *base, int *fails)
+{
+    char d[4096], root[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/p", base), sizeof d)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    if (lgws_write_makefile(d, gates, 1) || lgws_write_doc(d, gates, 1)) return 2;
+    if (lgws_wire(d, gates[0], "./tools/lint/sentinel_a.sh")) return 2;
+    if (lgws_wire_row(d, "LINT_ROW_FILES", gates[0], "tools/lint/sentinel_a.sh")) return 2;
+    return lgws_expect_accept("P: a valid LINT_ROW_FILES marker passes", d, fails);
+}
+/* Case Q: a marker row naming a gate no list runs is dead wiring. */
+static int lgws_case_q(const char *base, int *fails)
+{
+    char d[4096], root[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/q", base), sizeof d)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    if (lgws_write_makefile(d, gates, 1) || lgws_write_doc(d, gates, 1)) return 2;
+    if (lgws_wire(d, gates[0], "./tools/lint/sentinel_a.sh")) return 2;
+    if (lgws_wire_row(d, "LINT_ROW_FILES", "check-sentinel-unrun", "tools/lint/sentinel_a.sh")) return 2;
+    return lgws_expect_reject("Q: a LINT_ROW_FILES marker no gate list names is caught",
+                              "check-sentinel-unrun", d, fails);
+}
+/* Case R: the same marker gate twice — only a walk of every marker row can
+ * see the dead shadow, like check H for LINT_ROW. */
+static int lgws_case_r(const char *base, int *fails)
+{
+    char d[4096], root[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/r", base), sizeof d)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    if (lgws_write_makefile(d, gates, 1) || lgws_write_doc(d, gates, 1)) return 2;
+    if (lgws_wire(d, gates[0], "./tools/lint/sentinel_a.sh")) return 2;
+    if (lgws_wire_row(d, "LINT_ROW_FILES", gates[0], "tools/lint/sentinel_a.sh")) return 2;
+    if (lgws_wire_row(d, "LINT_ROW_FILES", gates[0], "tools/lint/sentinel_b.sh")) return 2;
+    return lgws_expect_reject("R: a duplicated LINT_ROW_FILES marker is caught",
+                              "appears twice", d, fails);
+}
+/* Case S: a marker row whose source path does not exist — the narrow pass
+ * would diff against a path that is not there. */
+static int lgws_case_s(const char *base, int *fails)
+{
+    char d[4096], root[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/s", base), sizeof d)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired" };
+    if (lgws_write_makefile(d, gates, 1) || lgws_write_doc(d, gates, 1)) return 2;
+    if (lgws_wire(d, gates[0], "./tools/lint/sentinel_a.sh")) return 2;
+    if (lgws_wire_row(d, "LINT_ROW_FILES", gates[0], "tools/lint/does_not_exist.c")) return 2;
+    return lgws_expect_reject("S: a LINT_ROW_FILES marker naming a missing source is caught",
+                              "does_not_exist.c", d, fails);
+}
+
 typedef int (*lgws_case_fn)(const char *, int *);
 static const lgws_case_fn k_lgws_cases[] = {
     lgws_case_a, lgws_case_b, lgws_case_c, lgws_case_d,
     lgws_case_e, lgws_case_f, lgws_case_g, lgws_case_h,
     lgws_case_i, lgws_case_j, lgws_case_k, lgws_case_l, lgws_case_m, lgws_case_n,
-    lgws_case_o,
+    lgws_case_o, lgws_case_p, lgws_case_q, lgws_case_r, lgws_case_s,
 };
 
 int check_lint_gate_wiring_selftest(void)
@@ -511,6 +584,7 @@ int check_lint_gate_wiring_selftest(void)
         printf("\xe2\x95\x90\xe2\x95\x90 selftest: FAIL \xe2\x95\x90\xe2\x95\x90\n");
         return 1;
     }
-    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (15/15) \xe2\x95\x90\xe2\x95\x90\n");
+    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (%zu/%zu) \xe2\x95\x90\xe2\x95\x90\n",
+           ncases, ncases);
     return 0;
 }

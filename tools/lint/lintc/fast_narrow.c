@@ -1,34 +1,49 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: decide when a per-file lint gate may scan only the changed-file
- * set. The land proof and `make lint` never call this; a narrowed pass is
+ * set. The per-file-deterministic marker rows live in gate_commands.def
+ * (LINT_ROW_FILES), compiled in below, next to the command they qualify.
+ * The land proof and `make lint` never call this; a narrowed pass is
  * not a whole-tree proof. `z23-lint fast-scan` is a tool, not a gate.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include "lintc.h"
 #include "precheck_base.h"
+#include "run_priv.h"
 
-static const char *const k_fast_nak[] = {
-    "tools/lint/lintc/gate_git_scan_a.c",
-    NULL
+/* The per-file-deterministic marker rows of gate_commands.def: the run
+ * driver narrows exactly these gates, never a gate without a row. */
+#define LINT_ROW(name, cmd)
+#define LINT_ROW_FILES(name, files) { name, files },
+static const struct {
+    const char *name;
+    const char *files;
+} k_fast_file_rows[] = {
+#include "gate_commands.def"
 };
-static const char *const k_fast_fmd[] = {
-    "tools/lint/lintc/gate_fortify_masked_decls.c",
-    NULL
-};
-static const char *const k_fast_crs[] = {
-    "tools/lint/lintc/gate_raw_sqlite.c",
-    "tools/lint/lintc/gate_raw_sqlite_ctx.c",
-    "tools/lint/lintc/gate_raw_sqlite_exec.c",
-    "tools/lint/lintc/gate_raw_sqlite_priv.h",
-    NULL
-};
+#undef LINT_ROW
+#undef LINT_ROW_FILES
+
+const char *lint_fast_files_decl(const char *gate)
+{
+    if (!gate)
+        return NULL;
+    for (size_t i = 0; i < sizeof k_fast_file_rows / sizeof k_fast_file_rows[0]; i++)
+        if (strcmp(k_fast_file_rows[i].name, gate) == 0)
+            return k_fast_file_rows[i].files;
+    return NULL;
+}
 
 int lint_fast_should_narrow(int per_file, int set_supplied, int source_matches)
 {
@@ -181,17 +196,6 @@ int lint_fast_append_changed(char *cmd, size_t cap, const char *path)
     return 0;
 }
 
-static const char *const *lint_fast_sources(const char *name)
-{
-    if (strcmp(name, "check-no-api-keys") == 0)
-        return k_fast_nak;
-    if (strcmp(name, "check-fortify-masked-decls") == 0)
-        return k_fast_fmd;
-    if (strcmp(name, "check-raw-sqlite") == 0)
-        return k_fast_crs;
-    return NULL;
-}
-
 static int lint_fast_tip(char *tip, size_t cap)
 {
     const char *rev[] = {
@@ -226,18 +230,105 @@ static int lint_fast_diff_quiet(const char *sha, const char *const *files)
     return precheck_base_git(NULL, args, NULL, 0) == 0;
 }
 
+/* Split the declared space-separated sources into OUT (NULL-terminated) inside
+ * BUF. Returns the count, 0 when the row is empty or overflows either. */
+static int lint_fast_split_sources(const char *files, char *buf, size_t cap,
+                                   const char *out[9])
+{
+    size_t w = 0;
+    int n = 0;
+    const char *p = files;
+    while (*p) {
+        const char *q = p;
+        size_t len;
+        while (*q && *q != ' ')
+            q++;
+        len = (size_t)(q - p);
+        if (len == 0) {
+            p++;
+            continue;
+        }
+        if (w + len + 1 >= cap || n >= 8)
+            return 0;
+        memcpy(buf + w, p, len);
+        buf[w + len] = '\0';
+        out[n++] = buf + w;
+        w += len + 1;
+        p = q;
+    }
+    out[n] = NULL;
+    return n;
+}
+
 int lint_fast_gate_narrow(const char *name, int set_supplied)
 {
-    const char *const *src;
-    char sha[80];
+    char sha[80], buf[512];
+    const char *src[9];
+    const char *decl;
     if (!name || !set_supplied)
         return 0;
-    src = lint_fast_sources(name);
-    if (!src)
+    decl = lint_fast_files_decl(name);
+    if (!decl)
         return 0;
     if (!lint_fast_base(sha, sizeof sha))
         return 0;
+    if (lint_fast_split_sources(decl, buf, sizeof buf, src) == 0)
+        return 0;
     return lint_fast_should_narrow(1, 1, lint_fast_diff_quiet(sha, src));
+}
+
+/* The run driver's --base scope: git's stdout for ARGS appended to FD. */
+static int lint_scope_git_to_fd(const char *const *args, int fd)
+{
+    int st = 0;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        if (dup2(fd, STDOUT_FILENO) < 0)
+            _exit(127);
+        execvp("git", (char *const *)args);
+        _exit(127);
+    }
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+}
+
+int lint_changed_scope_from_base(const char *base, char *out, size_t cap)
+{
+    const char *diff[] = { "git", "diff", "--name-only", base, NULL };
+    static const char *const k_untracked[] = {
+        "git", "ls-files", "--others", "--exclude-standard", NULL
+    };
+    char path[PATH_MAX], cwd[PATH_MAX];
+    int fd, rc, n;
+    if (!base || !base[0] || lr_mkdir_p("build/scratch") != 0)
+        return 2;
+    /* Absolute: the scope file is handed to gates and readers that may not
+     * share the driver's working directory. */
+    if (!getcwd(cwd, sizeof cwd))
+        return 2;
+    n = snprintf(path, sizeof path, "%s/build/scratch/lint-changed-%ld.txt",
+                 cwd, (long)getpid());
+    if (n < 0 || (size_t)n >= sizeof path)
+        return 2;
+    fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    if (fd < 0)
+        return 2;
+    rc = lint_scope_git_to_fd(diff, fd);
+    if (rc == 0)
+        rc = lint_scope_git_to_fd(k_untracked, fd);
+    if (close(fd) != 0)
+        rc = -1;
+    if (rc != 0) {
+        (void)unlink(path);
+        return 2;
+    }
+    if (snprintf(out, cap, "%s", path) >= (int)cap)
+        return 2;
+    return 0;
 }
 
 

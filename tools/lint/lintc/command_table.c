@@ -70,11 +70,12 @@ static int lint_row_command(const char *p, char *cmd, size_t cap)
     return *p ? 2 : 0;
 }
 
-/* The table permits only blank lines, // comments and canonical rows. */
-int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
-                      size_t ccap)
+/* The table permits only blank lines, // comments and canonical rows. One
+ * scanner behind both row kinds: OPEN names the row word ("LINT_ROW(\"" or
+ * "LINT_ROW_FILES(\""); the same 0/1/2 contract as lint_cmdrow_parse. */
+static int lint_row_scan(const char *line, const char *open, char *name,
+                         size_t ncap, char *str, size_t scap)
 {
-    static const char k_open[] = "LINT_ROW(\"";
     const char *p = line;
     while (isspace((unsigned char)*p)) p++;
     if (!*p) return 1;
@@ -84,7 +85,22 @@ int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
         if (n && p[n - 1] == '\r') n--;
         return n && p[n - 1] == '\\' ? 2 : 1;
     }
-    if (strncmp(p, k_open, sizeof k_open - 1) != 0) return 2;
-    p += sizeof k_open - 1;
-    return lint_row_name(&p, name, ncap) ? 2 : lint_row_command(p, cmd, ccap);
+    if (strncmp(p, open, strlen(open)) != 0) return 2;
+    p += strlen(open);
+    return lint_row_name(&p, name, ncap) ? 2 : lint_row_command(p, str, scap);
+}
+
+/* One line of gate_commands.def text (the driver's command table): 0 a
+ * LINT_ROW("name", "command") row with the command in CMD, 3 a
+ * LINT_ROW_FILES("name", "sources") marker row with the sources in CMD,
+ * 1 not a row (blank or // comment), 2 malformed or too long. */
+int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
+                      size_t ccap)
+{
+    int rc = lint_row_scan(line, "LINT_ROW(\"", name, ncap, cmd, ccap);
+    if (rc != 2)
+        return rc;
+    return lint_row_scan(line, "LINT_ROW_FILES(\"", name, ncap, cmd, ccap) == 0
+               ? 3
+               : 2;
 }

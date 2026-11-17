@@ -14,6 +14,9 @@
 #include "run_priv.h"
 
 #define LINT_ROW(name, cmd) { name, cmd },
+/* Marker rows (per-file-deterministic shape) are not commands; fast_narrow.c
+ * compiles the same rows in for the narrowing decision. */
+#define LINT_ROW_FILES(name, files)
 static const struct {
     const char *name;
     const char *cmd;
@@ -21,6 +24,7 @@ static const struct {
 #include "gate_commands.def"
 };
 #undef LINT_ROW
+#undef LINT_ROW_FILES
 
 const struct lr_table_row *lr_table_find(const struct lr_table *t, const char *gate)
 {

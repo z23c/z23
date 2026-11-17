@@ -2,12 +2,17 @@
  *
  * purpose: `z23-lint run` — the C23 lint driver behind `make lint`, `lint-fast` and `lint-land`.
  *
- *   z23-lint run [--jobs N] [--bin-dir DIR] [--list] [--print-command GATE] GATE...
+ *   z23-lint run [--jobs N] [--bin-dir DIR] [--list] [--print-command GATE]
+ *                [--changed-files=PATH | --base=COMMIT] GATE...
  *
  * Runs each gate's command from the compiled table gate_commands.def (a gate
  * absent there asks gates.def) with fork/execvp and no shell, up to --jobs at
  * a time, and prints the PASS/FAIL verdict lines, `lint timing` table and FAIL
- * logs the land queue and fleet readers parse. Env: ZCL_LINT_JOBS,
+ * logs the land queue and fleet readers parse. A changed-path scope
+ * (--changed-files, or --base derived from the worktree) reaches only gates
+ * the table marks per-file-deterministic (LINT_ROW_FILES) whose own source
+ * matches the merge-base; every other gate, and any scope-free run, stays
+ * whole-tree. Env: ZCL_LINT_JOBS,
  * ZCL_LINT_BUDGET_SEC, ZCL_LINT_TIMING_DIR, ZCL_LINT_VERBOSE,
  * ZCL_LINT_INVENTORY_TOOL, ZCL_HOST_JOBS (nested sweep worker counts).
  * Exit: 0 every gate passed, 1 a gate failed (all still run), 2 misuse.
@@ -180,7 +185,8 @@ static int print_command(const char *gate)
 static int usage(int rc)
 {
     (void)fputs("usage: z23-lint run [--jobs N] [--bin-dir DIR] [--list] "
-                "[--print-command GATE] [--changed-files=PATH] GATE...\n",
+                "[--print-command GATE] [--changed-files=PATH] "
+                "[--base=COMMIT] GATE...\n",
                 rc ? stderr : stdout);
     return rc;
 }
@@ -193,6 +199,7 @@ struct run_args {
     int mode;               /* 0 run, 1 list, 2 print-command, 3 help */
     const char *print_gate;
     const char *changed;
+    const char *base;       /* --base=<commit>: derive the changed set here */
 };
 
 static const char k_nomatch[] = "";
@@ -219,6 +226,27 @@ static int parse_jobs(struct run_args *a, const char *v)
     return 0;
 }
 
+/* The two scope options, --changed-files and --base: each needs a value and
+ * neither may be given beside the other. */
+static int parse_scope(struct run_args *a, const char *v, int base)
+{
+    if (!v || !v[0]) {
+        (void)fprintf(stderr, "z23-lint run: %s needs %s\n",
+                      base ? "--base" : "--changed-files",
+                      base ? "a commit" : "a path");
+        return 2;
+    }
+    if (base ? a->changed != NULL : a->base != NULL) {
+        (void)fprintf(stderr, "z23-lint run: --base and --changed-files are exclusive\n");
+        return 2;
+    }
+    if (base)
+        a->base = v;
+    else
+        a->changed = v;
+    return 0;
+}
+
 static int parse_one(struct run_args *a, int argc, char **argv, int *i)
 {
     const char *v;
@@ -228,14 +256,10 @@ static int parse_one(struct run_args *a, int argc, char **argv, int *i)
         a->bin_dir = v;
         return v ? 0 : 2;
     }
-    if ((v = opt_value(argc, argv, i, "--changed-files")) != k_nomatch) {
-        if (!v || !v[0]) {
-            (void)fprintf(stderr, "z23-lint run: --changed-files needs a path\n");
-            return 2;
-        }
-        a->changed = v;
-        return 0;
-    }
+    if ((v = opt_value(argc, argv, i, "--changed-files")) != k_nomatch)
+        return parse_scope(a, v, 0);
+    if ((v = opt_value(argc, argv, i, "--base")) != k_nomatch)
+        return parse_scope(a, v, 1);
     if (strcmp(argv[*i], "--list") == 0)
         a->mode = 1;
     else if (strcmp(argv[*i], "--help") == 0 || strcmp(argv[*i], "-h") == 0)
@@ -262,6 +286,21 @@ static int parse_args(struct run_args *a, int argc, char **argv)
     return 0;
 }
 
+/* The changed-path scope for this run: --changed-files names it directly,
+ * --base derives it (tracked diff plus untracked paths). No scope, or a
+ * derivation that fails, means whole-tree — never a partial scan. */
+static const char *run_scope(const struct run_args *a)
+{
+    static char scope[LR_PATH];
+    if (!a->base)
+        return a->changed;
+    if (lint_changed_scope_from_base(a->base, scope, sizeof scope) == 0)
+        return scope;
+    (void)fprintf(stderr, "z23-lint run: no changed set from --base=%s; "
+                          "running whole-tree\n", a->base);
+    return NULL;
+}
+
 static int start_run(const struct run_args *a)
 {
     char state[PATH_MAX + 32], lint_bin[LR_PATH], cwd[PATH_MAX];
@@ -278,7 +317,7 @@ static int start_run(const struct run_args *a)
     if (!*state)
         (void)snprintf(state, sizeof state, "%s/.cache/lint-timing", cwd);
     (void)snprintf(lint_bin, sizeof lint_bin, "%s/z23-lint", a->bin_dir);
-    g_run_changed = a->changed;
+    g_run_changed = run_scope(a);
     o = (struct lr_opts){ a->jobs, state, lint_bin, a->bin_dir,
                           env_int(getenv("ZCL_LINT_BUDGET_SEC"), DEFAULT_BUDGET),
                           getenv("ZCL_LINT_VERBOSE") && !strcmp(getenv("ZCL_LINT_VERBOSE"), "1"),
@@ -296,7 +335,7 @@ static int start_run(const struct run_args *a)
 
 int lint_run_main(int argc, char **argv)
 {
-    struct run_args a = { env_int(getenv("ZCL_LINT_JOBS"), DEFAULT_JOBS), "build/bin", { 0 }, 0, 0, NULL, NULL };
+    struct run_args a = { env_int(getenv("ZCL_LINT_JOBS"), DEFAULT_JOBS), "build/bin", { 0 }, 0, 0, NULL, NULL, NULL };
     int rc = parse_args(&a, argc, argv);
     if (rc != 0)
         return rc;
