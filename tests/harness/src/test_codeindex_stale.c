@@ -10,6 +10,7 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 
 #include <errno.h>
 #if defined(__APPLE__)
@@ -25,6 +26,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 
 static bool cis_write(const char *root, const char *rel, const char *content)
 {
@@ -1100,10 +1102,67 @@ static int test_cis_one_shot_refusals(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static void cis_capture_peer_edge(const char *src, const char *dep, void *user)
+{
+    (void)src;
+    if (strstr(dep, "peer_only.h")) *(bool *)user = true;
+}
+
+static bool cis_watch_directory(const char *path, void *user)
+{
+    (void)path; (void)user;
+    return true;
+}
+
+static int test_cis_nested_worktree_scope(void)
+{
+    int failures = 0;
+    char dir[256] = {0}, root[CI_PATH_MAX], text[CI_PATH_MAX * 2];
+    struct ci_deps_keys keys = {0};
+    uint8_t digest[32];
+    bool peer_edge = false;
+    TEST("codeindex stale: nested registered worktree cannot replace parent depfiles") {
+        test_make_tmpdir(dir, sizeof dir, "cistale", "worktree");
+        ASSERT(realpath(dir, root) != NULL);
+        ASSERT(cis_seed(root));
+        ASSERT(cis_write(root, ".git/worktrees/peer/commondir", "../..\n"));
+        ASSERT(cis_write(root, "build/parent.d", "foo.o: core/modules/net/src/foo.c core/modules/net/include/net/foo.h\n"));
+        ASSERT(cis_write(root, "peer_only.h", "/* peer */\n"));
+        ASSERT(cis_write(root, "build/peer/build/peer.d", "foo.o: core/modules/net/src/foo.c peer_only.h\n"));
+        (void)snprintf(text, sizeof text, "gitdir: %s/.git/worktrees/peer\n", root);
+        ASSERT(cis_write(root, "build/peer/.git", text));
+        (void)snprintf(text, sizeof text, "%s/build/peer/.git\n", root);
+        ASSERT(cis_write(root, ".git/worktrees/peer/gitdir", text));
+        (void)snprintf(text, sizeof text, "%s/build/parent.d", root);
+        struct utimbuf old = {.actime = 1000000000, .modtime = 1000000000};
+        ASSERT(utime(text, &old) == 0);
+        ASSERT(!ci_deps_stat_keys(root, &keys, 100));
+        ASSERT(!ci_deps_stat_keys_watched(root, &keys, 100, cis_watch_directory, NULL));
+        ASSERT(ci_deps_scan(root, cis_capture_peer_edge, &peer_edge, digest));
+        ASSERT(!peer_edge);
+        ASSERT(ci_deps_include_narrow_unsafe());
+        ASSERT(strstr(ci_deps_include_narrow_cause(), "prereq_newer_than_depfile") != NULL);
+        ASSERT(cis_write(root, ".git/worktrees/peer/gitdir", "/invalid/.git\n"));
+        ASSERT(!ci_deps_stat_keys(root, &keys, 100));
+        ASSERT(cis_write(root, "build/peer/.git", "invalid\n"));
+        ASSERT(!ci_deps_stat_keys(root, &keys, 100));
+        PASS();
+    } _test_next:;
+    ci_deps_keys_free(&keys);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
+
 int test_codeindex_stale(void)
 {
     int failures = 0;
     failures += test_cis_null_refuses();
+#if !defined(_WIN32)
+    failures += test_cis_nested_worktree_scope();
+#endif
     failures += test_cis_one_shot_full_freshness();
     failures += test_cis_one_shot_refusals();
     failures += test_cis_fresh_index_is_current();

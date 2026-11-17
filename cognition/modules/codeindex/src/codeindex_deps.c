@@ -298,6 +298,7 @@ struct dep_paths {
     size_t count;
     size_t capacity;
     size_t limit; /* 0: unbounded; else collection stops past it */
+    bool refuse_boundary;
     ci_dep_directory_cb visit;
     void *visit_user;
 };
@@ -547,13 +548,27 @@ static bool dep_select_watched_epoch(const char *root, const char *reldir,
 static bool collect_dep_paths(const char *root, const char *reldir,
                               struct dep_paths *paths)
 {
+    char scope[CI_PATH_MAX];
+    int sn = snprintf(scope, sizeof scope, "%s/%s", root, reldir);
+    if (sn <= 0 || (size_t)sn >= sizeof scope) { errno = ENAMETOOLONG; return false; }
+    int boundary = ci_seed_worktree_boundary(root, scope);
+    if (boundary < 0 || (boundary > 0 && paths->refuse_boundary)) { errno = EIO; return false; }
+    if (boundary > 0) return true;
     char current[CI_PATH_MAX];
     enum epoch_state epoch;
     if (!dep_select_watched_epoch(root, reldir, paths, current, &epoch))
         return false;
     switch (epoch) {
     case EPOCH_CURRENT:
-        /* The live generation is the whole of this root's contribution. */
+        /* The selector jumps over epochs, which can itself be a worktree. */
+        {
+            char epochs[CI_PATH_MAX];
+            int n = snprintf(epochs, sizeof epochs, "%s/epochs", scope);
+            if (n <= 0 || (size_t)n >= sizeof epochs) { errno = ENAMETOOLONG; return false; }
+            int b = ci_seed_worktree_boundary(root, epochs);
+            if (b < 0 || (b > 0 && paths->refuse_boundary)) { errno = EIO; return false; }
+            if (b > 0) return true;
+        }
         return collect_dep_paths(root, current, paths);
     case EPOCH_UNKNOWN:
         return true;
@@ -1465,7 +1480,7 @@ bool ci_deps_stat_keys_watched(const char *root, struct ci_deps_keys *out,
     if (probe != PLATFORM_DIRECTORY_PROBE_OK)
         LOG_FAIL("codeindex", "inspect build directory failed: %s",
                  strerror(errno));
-    struct dep_paths paths = {.limit = cap, .visit = visit, .visit_user = user};
+    struct dep_paths paths = {.limit = cap, .refuse_boundary = true, .visit = visit, .visit_user = user};
     bool ok = collect_dep_paths(root, "build", &paths) &&
               dep_keys_fill(root, &paths, out);
     dep_paths_free(&paths);

@@ -58,8 +58,10 @@
 
 #include "util/safe_alloc.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #if !defined(_WIN32)
 
@@ -109,14 +111,18 @@ struct ci_seed_candidates {
  * a symlink is simply not a record we will use. */
 static bool seed_read_record(const char *path, char *out, size_t cap)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return false; }
     char buf[CI_PATH_MAX];
     ssize_t got = read(fd, buf, sizeof(buf) - 1);
     close(fd);
-    if (got <= 0) return false;
+    if (got <= 0 || (size_t)got == sizeof(buf) - 1) return false;
+    if (memchr(buf, 0, (size_t)got)) return false;
     buf[got] = '\0';
     char *newline = strchr(buf, '\n');
+    if (newline && newline[1]) return false;
     if (newline) *newline = '\0';
     size_t len = strlen(buf);
     while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == ' '))
@@ -518,7 +524,56 @@ static bool seed_stage_posix(const char *root, int stagefd,
     return ok;
 }
 
+static bool seed_registered_child(const char *root, const char *marker,
+                                  const char *line)
+{
+    char common[CI_PATH_MAX], shared[CI_PATH_MAX], admin[CI_PATH_MAX];
+    char registry[CI_PATH_MAX], canonical[CI_PATH_MAX], record[CI_PATH_MAX];
+    char back[CI_PATH_MAX], expected[CI_PATH_MAX], target[CI_PATH_MAX];
+    struct stat st;
+    if (!seed_common_dir(root, common) || !realpath(common, shared) ||
+        strncmp(line, "gitdir: ", 8) != 0 || line[8] != '/') return false;
+    int n = snprintf(registry, sizeof registry, "%s/worktrees", shared);
+    if (n <= 0 || (size_t)n >= sizeof registry ||
+        lstat(registry, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        !realpath(registry, canonical)) return false;
+    const char *path = line + 8;
+    size_t len = strlen(canonical);
+    if (strncmp(path, canonical, len) != 0 || path[len] != '/' ||
+        !path[len + 1] || strchr(path + len + 1, '/') ||
+        lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        !realpath(path, admin) || strcmp(admin, path) != 0) return false;
+    n = snprintf(record, sizeof record, "%s/gitdir", admin);
+    return n > 0 && (size_t)n < sizeof record &&
+        seed_read_record(record, target, sizeof target) && target[0] == '/' &&
+        realpath(target, back) && realpath(marker, expected) &&
+        strcmp(back, expected) == 0;
+}
+
 #endif /* !_WIN32 */
+
+/* Verify both sides of Git's linked-worktree registration before excluding it. */
+int ci_seed_worktree_boundary(const char *root, const char *child)
+{
+#if defined(_WIN32)
+    (void)root;
+    char marker[CI_PATH_MAX];
+    struct stat st;
+    int n = snprintf(marker, sizeof marker, "%s/.git", child);
+    if (n <= 0 || (size_t)n >= sizeof marker) return -1;
+    if (stat(marker, &st) == 0) return -1;
+    return errno == ENOENT ? 0 : -1;
+#else
+    char marker[CI_PATH_MAX], line[CI_PATH_MAX];
+    struct stat st;
+    int n = snprintf(marker, sizeof marker, "%s/.git", child);
+    if (n <= 0 || (size_t)n >= sizeof marker) return -1;
+    if (lstat(marker, &st) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISREG(st.st_mode) || !seed_read_record(marker, line, sizeof line))
+        return -1;
+    return seed_registered_child(root, marker, line) ? 1 : -1;
+#endif
+}
 
 /* A generation patched in place descends from whatever produced it, but the
  * file count in a seeding receipt describes ONE publication. Clearing it keeps

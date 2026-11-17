@@ -504,6 +504,8 @@ bool ci_deps_stat_keys_watched(const char *root, struct ci_deps_keys *out,
 bool ci_deps_stat_keys(const char *root, struct ci_deps_keys *out, size_t cap);
 void ci_deps_keys_free(struct ci_deps_keys *keys);
 
+int ci_seed_worktree_boundary(const char *root, const char *child);
+
 /* ── change-watched freshness memo (codeindex_fresh_memo.c) ────────────
  * A fresh verdict proved by a full walk is held for the process together
  * with an inotify watch armed before that walk. A hit means: the watch saw
