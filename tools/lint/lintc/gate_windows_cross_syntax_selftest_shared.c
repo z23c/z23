@@ -83,6 +83,34 @@ int wcs_mkdir_selftest(const char *base)
     return 0;
 }
 
+/* Run the real worker dispatcher against empty, nonempty and broken lists. */
+int wcs_worker_empty_test(const char *base)
+{
+    char path[SH_P], absent[SH_P];
+    int started = -1;
+    shp(path, sizeof path, "%s/worker-empty-list", base);
+    shp(absent, sizeof absent, "%s/worker-absent-list", base);
+    if (csr_write(path, "") != 0) return 2;
+    if (wcs_worker_run(path, 2, &started) != 0 || started != 0)
+        return sh_fail("empty miss list started workers");
+    if (wcs_worker_run(path, 0, &started) == 0 ||
+        wcs_worker_run(path, 33, &started) == 0)
+        return sh_fail("invalid worker count accepted");
+    if (csr_write(path, "\n") != 0) return 2;
+    if (wcs_worker_run(path, 2, &started) != 0 || started != 2)
+        return sh_fail("nonempty miss list did not dispatch workers");
+    if (geteuid() != 0) {
+        if (chmod(path, 0) != 0) return 2;
+        int refused = wcs_worker_run(path, 2, &started) != 0;
+        if (chmod(path, 0600) != 0 || !refused)
+            return sh_fail("unreadable miss list accepted");
+    }
+    if (wcs_worker_run(absent, 2, &started) == 0 ||
+        wcs_worker_run(base, 2, &started) == 0)
+        return sh_fail("invalid miss list accepted");
+    return 0;
+}
+
 /* One tree: src/shared.h plus SH_UNITS units that include it. */
 static int sh_producers(const char *tree)
 {

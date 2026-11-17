@@ -364,13 +364,36 @@ int wcs_reap_workers(const pid_t *pids, int count)
     return rc;
 }
 
-static int worker_run(int jobs)
+/* A missing, non-regular or unreadable plan is an infrastructure failure. */
+static int worker_list_nonempty(const char *path)
 {
-    char misslist[WCS_PATH];
-    if (ovf(snprintf(misslist, sizeof misslist, "%s/misses.txt", g_wcs_work),
-            sizeof misslist))
-        return 2;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return -1; }
+    if (!S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
+    unsigned char byte;
+    ssize_t n;
+    do { n = read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
+    int read_error = n < 0 ? errno : 0;
+    int closed = close(fd);
+    if (read_error) { errno = read_error; return -1; }
+    if (closed != 0) return -1;
+    return n > 0;
+}
+
+int wcs_worker_run(const char *misslist, int jobs, int *started_out)
+{
     int started = 0;
+    if (started_out) *started_out = 0;
+    if (jobs < 1 || jobs > 32) { errno = EINVAL; return 2; }
+    int nonempty = worker_list_nonempty(misslist);
+    if (nonempty < 0) {
+        fprintf(stderr, "%s: cannot read miss list %s: %s\n",
+                k_wcs_gate, misslist, strerror(errno));
+        return 2;
+    }
+    if (!nonempty) return 0;
     pid_t pids[32];
     for (int k = 0; k < jobs; k++) {
         pid_t pid = fork();
@@ -381,6 +404,7 @@ static int worker_run(int jobs)
         }
         if (pid == 0) wcs_worker_child(misslist, jobs, k);
         pids[started++] = pid;
+        if (started_out) *started_out = started;
     }
     return wcs_reap_workers(pids, started);
 }
@@ -493,7 +517,7 @@ int wcs_sweep(void)
                         g_wcs_cc, flagsnul, g_wcs_work, ".", NULL) != 0)
         return 2;
     if (wcs_cache_plan(srclist, misslist, g_wcs_out, 0) != 0) return 2;
-    if (worker_run(jobs) != 0) return 2;
+    if (wcs_worker_run(misslist, jobs, NULL) != 0) return 2;
     wcs_cache_summary();
     int r = gate_require_scanned(count_logs(), g_wcs_nsrc, k_wcs_gate, "");
     if (r) return r;
