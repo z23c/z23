@@ -647,8 +647,14 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap);
 /* ── bounded process helpers ──────────────────────────────────────────────
  * Not pure: these spawn (never through a shell) and are shared by the
  * dev.agent.* handlers. Both run from `root` and restore the caller's
- * directory before returning. A negative return is a launch failure. */
-int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms);
+ * directory before returning. A negative return is a launch failure.
+ *
+ * run_make self-admits: a caller outside every host development slice wraps
+ * its make in the launcher's light class (the per-save reflex lane), while a
+ * caller already inside a slice, or on a host with no launcher on PATH, runs
+ * the make directly. */
+int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms,
+                          bool *admitted);
 
 /* Run build/bin/test_parallel with one already-formed selector
  * ("--exact=x" / "--only=x") and --no-cache. `out` is always initialized; a

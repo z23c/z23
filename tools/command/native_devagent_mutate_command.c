@@ -397,7 +397,7 @@ static bool dvm_baseline(const char *root, const char *rel, const char *selector
                          struct zcl_command_reply *reply)
 {
     before->build_rc = zcl_devagent_run_make(root, "test_parallel",
-                                            DVM_BUILD_TIMEOUT_MS);
+                                            DVM_BUILD_TIMEOUT_MS, NULL);
     if (before->build_rc != 0) {
         free(original);
         dvm_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
@@ -557,7 +557,7 @@ static bool dvm_run_mutated(const char *root, const char *selector,
                             struct dvm_stage *after, const char **noticed_by)
 {
     after->build_rc = zcl_devagent_run_make(root, "test_parallel",
-                                           DVM_BUILD_TIMEOUT_MS);
+                                           DVM_BUILD_TIMEOUT_MS, NULL);
     *noticed_by = "nothing";
     bool noticed = false;
     if (after->build_rc != 0) {
@@ -588,7 +588,8 @@ static bool dvm_restore_after(const char *root, const char *rel, const char *abs
     if (restored && zcl_path_join(blob, sizeof(blob), root, DVM_PENDING_BYTES))
         (void)unlink(blob);
     *rebuild_rc = restored
-        ? zcl_devagent_run_make(root, "test_parallel", DVM_BUILD_TIMEOUT_MS)
+        ? zcl_devagent_run_make(root, "test_parallel", DVM_BUILD_TIMEOUT_MS,
+                                NULL)
         : -1;
 
     if (!restored) {

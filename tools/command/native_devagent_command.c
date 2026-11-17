@@ -13,12 +13,14 @@
 #include "controllers/shop_native_handler.h"
 #include "json/json.h"
 #include "platform/logical_cpu.h"
+#include "platform/os_proc.h"
 #include "util/spawn.h"
 
 #include "dev/test_group_catalog.h"
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #if !defined(_WIN32)
@@ -419,7 +421,78 @@ static int dva_spawn_at(const char *root, const char *const argv[], char *buf,
     return rc;
 }
 
-int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms)
+/* ── self-admission for the shared make runner ────────────────────────────
+ * The host contract admits every heavy build through its launcher. A leaf
+ * invoked bare (an agent's per-save reflex) is NOT inside any development
+ * slice, so its make would run unadmitted; wrapped in the launcher it would
+ * queue as ordinary build-lane work behind multi-minute proofs, which erases
+ * the seconds-scale purpose of a reflex. The launcher's light class solves
+ * both: its own single lane that no normal or landing waiter can take, at a
+ * 2-CPU quota. Callers already inside a slice keep the direct make — the
+ * enclosing budget admits the work and the launcher refuses a nested class
+ * switch — and a host without a launcher on PATH keeps today's behavior. */
+static bool dva_inside_build_slice(void)
+{
+    char dir[PATH_MAX];
+    return os_proc_cgroup_dir(dir, sizeof(dir)) &&
+           strstr(dir, "/development.slice/") != NULL;
+}
+
+/* An executable `devbuild` somewhere on PATH. Empty PATH segments mean the
+ * working directory to a shell; they are skipped here so a planted
+ * ./devbuild can never become the admission rail. */
+static bool dva_host_launcher_present(void)
+{
+    const char *path = getenv("PATH");
+    char candidate[PATH_MAX];
+    while (path && *path) {
+        size_t len = strcspn(path, ":");
+        if (len == 0) {
+            path++;
+            continue;
+        }
+        if (len + sizeof("/devbuild") > sizeof(candidate))
+            goto next;
+        memcpy(candidate, path, len);
+        memcpy(candidate + len, "/devbuild", sizeof("/devbuild"));
+        if (access(candidate, X_OK) == 0)
+            return true;
+    next:
+        path += len;
+        if (*path == ':')
+            path++;
+    }
+    return false;
+}
+
+/* argv for the shared make runner. An unadmitted run wraps the make in the
+ * launcher's light class — the class travels as an `env` assignment rather
+ * than a setenv(), so an embedding process never sees its environment
+ * mutated. Static: test_devagent_surface.c proves it through its direct
+ * include of this file, and a public symbol would be defined twice in the
+ * linked runner (production object plus the test's included copy). */
+static size_t zcl_devagent_make_argv(bool admit, const char *jobs,
+                                     const char *target, const char *argv[11])
+{
+    size_t n = 0;
+    if (admit) {
+        argv[n++] = "env";
+        argv[n++] = "DEVBUILD_CLASS=light";
+        argv[n++] = "devbuild";
+        argv[n++] = "--wait";
+        argv[n++] = "--project";
+        argv[n++] = "z23";
+    }
+    argv[n++] = "make";
+    argv[n++] = "--no-print-directory";
+    argv[n++] = jobs;
+    argv[n++] = target;
+    argv[n] = NULL;
+    return n;
+}
+
+int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms,
+                          bool *admitted)
 {
     if (!root || !target)
         return -1;
@@ -429,7 +502,11 @@ int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms)
     uint32_t online = platform_logical_cpu_count();
     (void)snprintf(jobs, sizeof(jobs), "-j%lu",
                    (unsigned long)(online > 0 ? online : 1));
-    const char *argv[] = { "make", "--no-print-directory", jobs, target, NULL };
+    bool admit = !dva_inside_build_slice() && dva_host_launcher_present();
+    if (admitted)
+        *admitted = admit;
+    const char *argv[11];
+    (void)zcl_devagent_make_argv(admit, jobs, target, argv);
     char *buf = zcl_malloc(DVA_CAPTURE_BYTES, "devagent.capture");
     if (!buf)
         return -1;
@@ -438,6 +515,34 @@ int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms)
     free(buf);
     return rc;
 }
+
+/* ── the harness stack step ──────────────────────────────────────────────
+ * The tree's own gate convention runs the harness with an unlimited stack
+ * (the Makefile's t-fast recipes do); a leaf invoked from a shell with the
+ * 8 MiB default inherits it, and stack-hungry gate selftests then read as
+ * a group FAIL that is not a defect — a false repair round. The run
+ * therefore raises RLIMIT_STACK and puts it back after, so an embedding
+ * server keeps its own limit. A kernel refusal (hard cap) raises nothing
+ * and the run behaves exactly as before. */
+#if !defined(_WIN32)
+static bool dva_runner_stack_raise(struct rlimit *saved)
+{
+    if (getrlimit(RLIMIT_STACK, saved) != 0 ||
+        saved->rlim_cur == RLIM_INFINITY)
+        return false;
+    struct rlimit raised = *saved;
+    raised.rlim_cur = raised.rlim_max == RLIM_INFINITY ? RLIM_INFINITY
+                                                       : raised.rlim_max;
+    return raised.rlim_cur != saved->rlim_cur &&
+           setrlimit(RLIMIT_STACK, &raised) == 0;
+}
+
+static void dva_runner_stack_restore(const struct rlimit *saved, bool raised)
+{
+    if (raised)
+        (void)setrlimit(RLIMIT_STACK, saved);
+}
+#endif
 
 int zcl_devagent_run_group(const char *root, const char *selector,
                            int timeout_ms, struct zcl_devagent_verdict *out,
@@ -458,7 +563,14 @@ int zcl_devagent_run_group(const char *root, const char *selector,
     if (!buf)
         return -1;
     buf[0] = '\0';
+#if !defined(_WIN32)
+    struct rlimit saved_stack;
+    bool stack_raised = dva_runner_stack_raise(&saved_stack);
+#endif
     int rc = dva_spawn_at(root, argv, buf, DVA_CAPTURE_BYTES, timeout_ms);
+#if !defined(_WIN32)
+    dva_runner_stack_restore(&saved_stack, stack_raised);
+#endif
     bool full = strlen(buf) >= DVA_CAPTURE_BYTES - 1;
     if (truncated)
         *truncated = full;

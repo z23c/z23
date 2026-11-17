@@ -426,6 +426,82 @@ int test_devagent_surface(void)
         PASS();
     }
 
+    /* ───────────────── make self-admission (per-save reflex) ────────────── */
+
+    /* An unadmitted caller wraps its make in the launcher's light class —
+     * own lane, never taken by normal or landing work — with the class as
+     * an env assignment (no process-global setenv) and the project pinned
+     * so a checkout outside the /z23/ path heuristics still lands on the
+     * z23 budget rather than the exclusive one. */
+    TEST("make argv: an unadmitted make wraps devbuild light") {
+        const char *argv[11];
+        size_t n = zcl_devagent_make_argv(true, "-j4", "test_parallel", argv);
+        ASSERT_EQ(n, 10);
+        ASSERT_STR_EQ(argv[0], "env");
+        ASSERT_STR_EQ(argv[1], "DEVBUILD_CLASS=light");
+        ASSERT_STR_EQ(argv[2], "devbuild");
+        ASSERT_STR_EQ(argv[3], "--wait");
+        ASSERT_STR_EQ(argv[4], "--project");
+        ASSERT_STR_EQ(argv[5], "z23");
+        ASSERT_STR_EQ(argv[6], "make");
+        ASSERT_STR_EQ(argv[7], "--no-print-directory");
+        ASSERT_STR_EQ(argv[8], "-j4");
+        ASSERT_STR_EQ(argv[9], "test_parallel");
+        ASSERT(argv[10] == NULL);
+        PASS();
+    }
+
+    /* A caller already inside a development slice must not nest a second
+     * admission: the enclosing budget governs it and the launcher refuses
+     * a class switch. The argv is exactly today's direct make. */
+    TEST("make argv: an admitted make runs directly") {
+        const char *argv[11];
+        size_t n = zcl_devagent_make_argv(false, "-j4", "test_parallel", argv);
+        ASSERT_EQ(n, 4);
+        ASSERT_STR_EQ(argv[0], "make");
+        ASSERT_STR_EQ(argv[1], "--no-print-directory");
+        ASSERT_STR_EQ(argv[2], "-j4");
+        ASSERT_STR_EQ(argv[3], "test_parallel");
+        ASSERT(argv[4] == NULL);
+        PASS();
+    }
+
+    /* The launcher probe finds an executable on PATH and nothing else; an
+     * empty PATH segment (the working directory to a shell) is skipped
+     * without ending the walk, and a non-executable file never counts. */
+    TEST("launcher probe: executable found; empty and dead segments skipped") {
+        char dir[1024], bin[1100], nobin[1100];
+        test_make_tmpdir(dir, sizeof(dir), "devagent", "probe");
+        ASSERT(tds_touch(dir, "bin/devbuild"));
+        ASSERT(tds_touch(dir, "nobin/devbuild"));
+        (void)snprintf(bin, sizeof(bin), "%s/bin", dir);
+        (void)snprintf(nobin, sizeof(nobin), "%s/nobin", dir);
+        {
+            const char *saved = getenv("PATH");
+            char with_empty[1400], exe[1200];
+            (void)snprintf(exe, sizeof(exe), "%s/bin/devbuild", dir);
+            ASSERT(chmod(exe, 0755) == 0); /* executable in bin/ only */
+            ASSERT(setenv("PATH", bin, 1) == 0);
+            ASSERT(dva_host_launcher_present());
+            /* A leading empty segment is skipped, then bin/ still matches:
+             * skipping never ends the walk. */
+            (void)snprintf(with_empty, sizeof(with_empty), ":%s", bin);
+            ASSERT(setenv("PATH", with_empty, 1) == 0);
+            ASSERT(dva_host_launcher_present());
+            /* The file exists here but is not executable: no launcher. */
+            ASSERT(setenv("PATH", nobin, 1) == 0);
+            ASSERT(!dva_host_launcher_present());
+            ASSERT(setenv("PATH", "::", 1) == 0);
+            ASSERT(!dva_host_launcher_present());
+            if (saved)
+                ASSERT(setenv("PATH", saved, 1) == 0);
+            else
+                ASSERT(unsetenv("PATH") == 0);
+        }
+        test_cleanup_tmpdir(dir);
+        PASS();
+    }
+
 _test_next:;
     if (failures == 0)
         printf("test_devagent_surface: all passed\n");

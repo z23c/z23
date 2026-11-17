@@ -68,7 +68,13 @@ its floor in the same commit, so the gain stays.
 3. **Edit** the smallest owned surface. Reuse existing C23 first; no Python;
    never weaken an assertion or threshold. Write the test first and watch it
    fail for the intended reason, then fix it.
-4. **Verify** with `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`, which runs exactly the
+4. **Verify.** For one just-saved file, `z23-dev dev agent hot --path=<file>`
+   first runs only that file's owning test group and answers with a verdict
+   and one next command; its rebuild self-admits through the host launcher's
+   light lane, so a per-save reflex never queues behind build-lane work.
+   <!-- claim: symbol-present dev.agent.hot engine/composition/commands/dev.def # per-save owning-group reflex -->
+   The verification trip for a committed change is
+   `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`, which runs exactly the
    test groups the land proof selects for your committed changes (the capped
    `code guide` and `code tests` lists miss groups the proof runs). `ONLY=<exact
    groups>` still works for a hand-picked set; it is mandatory and exact. Add

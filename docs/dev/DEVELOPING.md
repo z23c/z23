@@ -827,6 +827,13 @@ arrive. A newer relevant edit cancels obsolete bounded process groups; stale
 epochs do not publish verdicts. Never edit cache, cycle, failure, or receipt
 files to influence a verdict.
 
+An agent's per-save reflex is the rung under all of this:
+`z23-dev dev agent hot --path=<file>` runs exactly the saved file's owning
+group — hot against a resident loop's module when one owns the checkout,
+rebuilt otherwise — and its rebuild self-admits through the host launcher's
+light class when the calling process is not already inside a development
+slice, so the answer costs seconds of work and no build-lane queue.
+
 `STORY_RED` contains a bounded diagnostic capsule. The current cycle's
 `failure_id` is authoritative; inspect it with:
 

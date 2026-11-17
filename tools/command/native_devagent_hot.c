@@ -67,6 +67,9 @@
  * the rebuild only through zcl_devagent_run_make() from
  * command/native_devagent.h — the same code path dev.agent.test and
  * dev.agent.mutate use. No second runner, no shell, no popen()/system().
+ * A leaf invoked outside every host development slice self-admits that
+ * make through the host launcher's light class, so the reflex neither
+ * queues behind build-lane work nor compiles unadmitted.
  * Dev builds read residency through the watcher's own probe. Other builds
  * do not link the watcher and always take the rebuild path.
  * The leaf starts no node, touches no datadir, and writes nothing itself;
@@ -359,10 +362,12 @@ static void dvh_format_next_command(char next[512], const char *verdict,
 
 /* The executed-run reply: the verdict and its one next command off the
  * runner's own counts. Mode says which path the leaf took; hotswapped
- * says what the runner's SUITE VERDICT line itself reported. */
+ * says what the runner's SUITE VERDICT line itself reported;
+ * rebuild_admitted says the rebuild self-admitted through the launcher's
+ * light class rather than running bare. */
 static void dvh_emit_run_outcome(struct zcl_command_reply *reply,
                                  const char *path, const char *group,
-                                 bool loop_resident,
+                                 bool loop_resident, bool rebuild_admitted,
                                  const struct zcl_devagent_verdict *vd,
                                  int64_t t0_ms)
 {
@@ -378,6 +383,8 @@ static void dvh_emit_run_outcome(struct zcl_command_reply *reply,
     (void)json_push_kv_str(&reply->data, "mode",
                            loop_resident ? "hotswap" : "rebuild");
     (void)json_push_kv_bool(&reply->data, "hotswapped", vd->hotswap);
+    (void)json_push_kv_bool(&reply->data, "rebuild_admitted",
+                            !loop_resident && rebuild_admitted);
     (void)json_push_kv_int(&reply->data, "groups_ran", ran);
     (void)json_push_kv_int(&reply->data, "groups_failed", failed);
     (void)json_push_kv_int(&reply->data, "self_skips", skips);
@@ -432,20 +439,31 @@ void zcl_native_handle_dev_agent_hot(
         return;
     }
     bool loop_resident = dvh_loop_resident(root);
+    bool rebuild_admitted = false;
     if (!loop_resident) {
         int build_rc = zcl_devagent_run_make(root, "test_parallel",
-                                             DVH_BUILD_TIMEOUT_MS);
+                                             DVH_BUILD_TIMEOUT_MS,
+                                             &rebuild_admitted);
         if (build_rc != 0) {
             char msg[640];
             (void)snprintf(msg, sizeof(msg),
                            "make --no-print-directory test_parallel exited "
-                           "%d in '%s'; rerun it by hand, then rerun this "
-                           "leaf",
-                           build_rc, root);
+                           "%d in '%s'%s; rerun the named command by hand "
+                           "(its own output names the real cause), then "
+                           "rerun this leaf",
+                           build_rc, root,
+                           rebuild_admitted
+                               ? " through the admission rail"
+                               : "");
             dvh_refuse(reply, ZCL_COMMAND_STATUS_FAILED,
                        ZCL_COMMAND_EXIT_FAILED, "RUNNER_FAILED", "build", msg,
-                       msg, "make -j\"$(getconf _NPROCESSORS_ONLN)\" "
-                       "test_parallel");
+                       msg,
+                       rebuild_admitted
+                           ? "env DEVBUILD_CLASS=light devbuild --wait "
+                             "--project z23 make -j\"$(getconf "
+                             "_NPROCESSORS_ONLN)\" test_parallel"
+                           : "make -j\"$(getconf _NPROCESSORS_ONLN)\" "
+                             "test_parallel");
             return;
         }
     }
@@ -465,5 +483,6 @@ void zcl_native_handle_dev_agent_hot(
         return;
     }
 
-    dvh_emit_run_outcome(reply, path, group, loop_resident, &vd, t0_ms);
+    dvh_emit_run_outcome(reply, path, group, loop_resident, rebuild_admitted,
+                         &vd, t0_ms);
 }

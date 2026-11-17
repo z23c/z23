@@ -2121,7 +2121,10 @@ ZCL_COMMAND_DEV_COMMAND(
  * agent composing shell. When a resident dev loop owns this checkout it
  * already built the changed module and hot-swapped it, so the group runs
  * against that swap (mode hotswap); otherwise the runner is rebuilt first
- * (mode rebuild). A file no rule owns is UNRESOLVED, never a silent pass. */
+ * (mode rebuild), and a leaf running outside every host development slice
+ * self-admits that rebuild through the launcher's light class so the
+ * reflex never queues behind build-lane work. A file no rule owns is
+ * UNRESOLVED, never a silent pass. */
 ZCL_COMMAND_READY_READ(
     "dev.agent.hot", "dev.agent", "",
     "Run one saved file's owning test group, hot or rebuilt",
@@ -2129,10 +2132,11 @@ ZCL_COMMAND_READY_READ(
     "the owning group resolved by the same file-to-proof route code.tests "
     "reports (or the explicit override), the SUITE VERDICT counts from "
     "build/bin/test_parallel --no-cache, whether the run executed a "
-    "hot-swapped module, and the whole-leaf wall clock. ok is true for a "
-    "verdict in every case — PASS, FAIL, NOSHA and UNRESOLVED alike — and "
-    "false only when no verdict exists: a missing path, a file outside the "
-    "inspected directory, or a runner that could not start.", 8192,
+    "hot-swapped module, whether the rebuild self-admitted through the "
+    "host launcher's light class, and the whole-leaf wall clock. ok is true "
+    "for a verdict in every case — PASS, FAIL, NOSHA and UNRESOLVED alike — "
+    "and false only when no verdict exists: a missing path, a file outside "
+    "the inspected directory, or a runner that could not start.", 8192,
     "agent,hot,evidence,ladder,proof,hotswap,rebuild,verdict",
     "zcl.agent_hot_input.v1", "zcl.agent_hot.v1",
     "path,group,cwd", "path",
