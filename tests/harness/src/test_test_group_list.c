@@ -134,14 +134,17 @@ static int test_exact_set_and_suggest(void)
     int failures = 0;
     TEST("exact set dedups in order; suggest falls back to the longest token") {
         struct tglt t;
-        const char *set[] = {"--resolve-exact-set", "gamma,alpha,gamma"};
+        const char *set[] = {"--resolve-exact-set", "gamma,test_alpha,spec_gamma,alpha"};
         const char *bad[] = {"--resolve-exact-set", "alph"};
+        const char *multiline[] = {"--resolve-exact-set", "alpha\nmissing"};
         const char *sug[] = {"--suggest", "alphaz"};
         const char *miss[] = {"--resolve-exact", "spec_gamma", "nope"};
         char out[TGL_T_OUT], err[TGL_T_OUT];
         ASSERT(tglt_setup(&t, "exact", TGLT_RUNNER));
         ASSERT_EQ(tglt_run(&t, set, 2, out, err), 0);
         ASSERT_STR_EQ(out, "spec_gamma,test_alpha\n");
+        ASSERT_EQ(tglt_run(&t, multiline, 2, out, err), 1);
+        ASSERT(out[0] == '\0');
         ASSERT_EQ(tglt_run(&t, bad, 2, out, err), 1);
         ASSERT(out[0] == '\0');
         ASSERT(strstr(err, "closest registered names:\n  test_alpha\n") != NULL);

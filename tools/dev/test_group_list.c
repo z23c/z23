@@ -267,12 +267,16 @@ void tgl_ctx_free(struct tgl_ctx *c)
     free(c->fam);
 }
 
-const char *tgl_find(const struct tgl_ctx *c, const char *name)
+static const char *const *tgl_find_slot(const struct tgl_ctx *c, const char *name)
 {
-    const char *const *hit;
     if (!name || !name[0] || c->reg.n == 0)
         return NULL;
-    hit = bsearch(&name, c->sorted, c->reg.n, sizeof(*c->sorted), name_cmp);
+    return bsearch(&name, c->sorted, c->reg.n, sizeof(*c->sorted), name_cmp);
+}
+
+const char *tgl_find(const struct tgl_ctx *c, const char *name)
+{
+    const char *const *hit = tgl_find_slot(c, name);
     return hit ? *hit : NULL;
 }
 
@@ -281,32 +285,37 @@ bool tgl_is_registered(const struct tgl_ctx *c, const char *name)
     return tgl_find(c, name) != NULL;
 }
 
-bool tgl_resolve_exact(const struct tgl_ctx *c, const char *needle,
-                       const char **hit)
+static const char *const *resolve_exact_slot(const struct tgl_ctx *c,
+                                             const char *needle)
 {
     static const char *const prefix[] = {"", "test_", "spec_"};
-    const char *found = NULL;
+    const char *const *found = NULL;
     int count = 0;
     char cand[TGL_NAME_LIMIT * 2];
     if (!needle[0] || strlen(needle) >= TGL_NAME_LIMIT)
-        return false;
+        return NULL;
     for (const char *p = needle; *p; p++)
         if (!tgl_ident_char((unsigned char)*p))
-            return false;
+            return NULL;
     for (size_t i = 0; i < 3; i++) {
-        const char *r;
+        const char *const *r;
         (void)snprintf(cand, sizeof(cand), "%s%s", prefix[i], needle);
-        r = tgl_find(c, cand);
+        r = tgl_find_slot(c, cand);
         if (r) {
             found = r;
             count++;
         }
     }
-    if (count != 1)
-        return false;
-    if (hit)
-        *hit = found;
-    return true;
+    return count == 1 ? found : NULL;
+}
+
+bool tgl_resolve_exact(const struct tgl_ctx *c, const char *needle,
+                       const char **hit)
+{
+    const char *const *slot = resolve_exact_slot(c, needle);
+    if (slot && hit)
+        *hit = *slot;
+    return slot != NULL;
 }
 
 /* ── declared proof families ───────────────────────────────────────────── */
@@ -595,41 +604,56 @@ static bool csv_has_empty_token(const char *csv)
            strstr(csv, ",,") != NULL;
 }
 
+/* Each registry index tracks membership; the leading entries also hold the
+ * output in first-seen order. All names are owned by the registry. */
+struct exact_entry {
+    const char *ordered;
+    bool seen;
+};
+
 /* One non-empty token: canonical and deduplicated into `out`, or reported. */
 static bool exact_set_token(struct tgl_ctx *c, const char *tok, size_t len,
-                            struct tgl_strs *out)
+                            struct exact_entry *entries, size_t *count)
 {
     char word[TGL_NAME_LIMIT * 4];
-    const char *hit;
+    const char *const *slot;
     if (len >= sizeof(word))
         len = sizeof(word) - 1;
     memcpy(word, tok, len);
     word[len] = '\0';
-    if (!tgl_resolve_exact(c, word, &hit)) {
+    slot = resolve_exact_slot(c, word);
+    if (!slot) {
         exact_set_unknown(c, word);
         return false;
     }
-    if (!tgl_strs_has(out, hit))
-        (void)tgl_strs_push(out, hit, strlen(hit));
+    size_t index = (size_t)(slot - c->sorted);
+    if (!entries[index].seen) {
+        entries[index].seen = true;
+        entries[(*count)++].ordered = *slot;
+    }
     return true;
 }
 
 static int resolve_exact_set(struct tgl_ctx *c, const char *arg)
 {
-    struct tgl_strs out = {0};
-    size_t nl = strcspn(arg, "\n");
-    char *csv = strndup(arg, nl);
+    size_t count = 0;
     const char *p;
     bool invalid = false;
-    if (!csv)
+    if (strchr(arg, '\n')) {
+        fprintf(tgl_errf(c), "test-group-list: newline in exact group selection\n");
         return 1;
-    if (csv_has_empty_token(csv)) {
+    }
+    struct exact_entry *entries = zcl_calloc(c->reg.n + 1, sizeof(*entries),
+                                              "tgl_exact_entries");
+    if (!entries)
+        return 1;
+    if (csv_has_empty_token(arg)) {
         fprintf(tgl_errf(c), "test-group-list: empty exact group token\n");
         invalid = true;
     }
-    for (p = csv; *p || p == csv;) {
+    for (p = arg; *p || p == arg;) {
         size_t len = strcspn(p, ",");
-        if (len > 0 && !exact_set_token(c, p, len, &out))
+        if (len > 0 && !exact_set_token(c, p, len, entries, &count))
             invalid = true;
         p += len;
         if (*p == ',')
@@ -637,17 +661,16 @@ static int resolve_exact_set(struct tgl_ctx *c, const char *arg)
         else
             break;
     }
-    free(csv);
     if (invalid)
         exact_set_help(c);
-    if (invalid || out.n == 0) {
-        tgl_strs_free(&out);
+    if (invalid || count == 0) {
+        free(entries);
         return 1;
     }
-    for (size_t i = 0; i < out.n; i++)
-        fprintf(c->out, "%s%s", i ? "," : "", out.v[i]);
+    for (size_t i = 0; i < count; i++)
+        fprintf(c->out, "%s%s", i ? "," : "", entries[i].ordered);
     fprintf(c->out, "\n");
-    tgl_strs_free(&out);
+    free(entries);
     return 0;
 }
 
