@@ -376,7 +376,7 @@ int wcs_name_in(const char *name, const char *const *list)
     return 0;
 }
 
-static const char *const inc_pruned[] = { ".git", "build", "test-tmp",
+static const char *const inc_pruned[] = { ".git", ".cache", "build", "test-tmp",
     ".claude", "vendor/tor", "vendor/raylib", NULL };
 
 
@@ -403,7 +403,7 @@ static int inc_add(const char *dir)
 }
 
 /* Include roots, as the reference find does: every directory named include
- * under the tree, pruning the top-level build, test-tmp, .git, .claude,
+ * under the tree, pruning the top-level build, test-tmp, .git, .cache, .claude,
  * vendor/tor and vendor/raylib subtrees. Manual recursion: nftw stops early
  * on FTW_SKIP_SUBTREE in this libc, so a pruned directory ends the walk. */
 static int inc_scan(const char *dir, int depth)
@@ -431,6 +431,44 @@ static int inc_scan(const char *dir, int depth)
     }
     closedir(d);
     return rc;
+}
+
+static int inc_scope_fixture(void)
+{
+    return mkdir(".cache", 0700) == 0 &&
+           mkdir(".cache/fixture", 0700) == 0 &&
+           mkdir(".cache/fixture/include", 0700) == 0 &&
+           mkdir("project", 0700) == 0 &&
+           mkdir("project/include", 0700) == 0 &&
+           mkdir("project/.cache", 0700) == 0 &&
+           mkdir("project/.cache/include", 0700) == 0;
+}
+
+/* Exercise root pruning without excluding a nested directory of the same name. */
+static int inc_scope_selftest(void)
+{
+    int old = open(".", O_RDONLY | O_CLOEXEC);
+    if (old < 0 || chdir(g_wcs_work) != 0) {
+        if (old >= 0) close(old);
+        return 1;
+    }
+    int ok = inc_scope_fixture();
+    int before = g_wcs_nflag;
+    if (ok) ok = inc_scan(".", 0) == 0;
+    int root = 0, nested = 0, cache = 0;
+    for (int i = before; i < g_wcs_nflag; i++) {
+        root += strcmp(g_wcs_flag[i], "-I./project/include") == 0;
+        nested += strcmp(g_wcs_flag[i], "-I./project/.cache/include") == 0;
+        cache += strcmp(g_wcs_flag[i], "-I./.cache/fixture/include") == 0;
+    }
+    g_wcs_nflag = before;
+    if (fchdir(old) != 0) ok = 0;
+    if (close(old) != 0) ok = 0;
+    if (!ok || root != 1 || nested != 1 || cache != 0) {
+        fprintf(stderr, "%s: include scope self-test failed\n", k_wcs_gate);
+        return 1;
+    }
+    return 0;
 }
 
 /* 1 when dir holds a non-hidden regular header whose name ends in .h (the
@@ -731,7 +769,8 @@ int wcs_begin(int selftest_only)
         fprintf(stderr, "%s: FATAL — mktemp failed.\n", k_wcs_gate);
         return 2;
     }
-    int rc = wcs_setup();
+    int rc = inc_scope_selftest();
+    if (rc == 0) rc = wcs_setup();
     if (rc == 0) rc = wcs_selftest_phase();
     if (selftest_only || rc != 0) {
         rap_rm_rf(g_wcs_work);
