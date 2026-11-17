@@ -51,6 +51,7 @@ static bool adc_hex_id(const char *text)
     return text && strlen(text) == 64u && zcl_hex_decode_lower(text, id, sizeof(id));
 }
 
+#if !defined(_WIN32)
 /* The same APP_NETWORK_* refusal shape the open-link flow reports. */
 static const char *adc_error_code(enum app_network_error error)
 {
@@ -73,6 +74,8 @@ static void adc_fail_network(struct zcl_command_reply *reply,
                           "the endpoint could not be reached, or its signed reply did not verify",
                           ADC_COMMAND);
 }
+
+#endif
 
 /* The `app get` catalog shape: one line per distinct identity. */
 static bool adc_lines(struct zcl_command_reply *reply,
