@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_app_discover_command.c", CAP_FS_WRITE, "creates and removes one private worker scratch directory and writes nothing else")

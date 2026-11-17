@@ -1357,6 +1357,12 @@ bool zcl_command_registry_input_descriptor(
     if (!strcmp(spec->path, "app.library") && !strcmp(key, "datadir")) {
         out->type = JSON_STR; out->max_bytes = zcl_command_registry_input_str_max(key); return true;
     }
+    /* app.discover's owner hand-off flag: bare `--yes` types as a bool so the
+     * documented `app discover <link> --offer=<id> --yes` shape reaches the
+     * leaf. Scoped to this path: no other leaf declares a `yes` input key. */
+    if (!strcmp(spec->path, "app.discover") && !strcmp(key, "yes")) {
+        out->type = JSON_BOOL; return true;
+    }
     if (cr_dev_control_descriptor(spec, key, out)) return true;
     if (!strcmp(spec->path, "fleet.board.list")) {
         if (!strcmp(key, "before_created_at")) {

@@ -1141,6 +1141,7 @@ static void boot_register_node_rpcs(struct boot_svc_ctx *svc, const struct app_c
     boot_mesh_pairing_register_rpc(svc->rpc_table);
     boot_mesh_machines_register_rpc(svc->rpc_table);
     boot_fleet_board_register_rpc(svc->rpc_table);
+    boot_fleet_board_ingest_register_rpc(svc->rpc_table);
     boot_zcode_async_proof_register_rpc(svc->rpc_table);
     /* File transfer service — SHA3-verified chunk serving */
     if (boot_profile_has_file_service(ctx)) {

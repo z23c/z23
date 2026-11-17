@@ -1,7 +1,7 @@
 /* Dynamic application mounts. App-specific children come from app.def. */
 
 ZCL_COMMAND_BRANCH("app.host", "app",
-    "Hosting", ZCL_COMMAND_LAYER_APP)
+    "Host", ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
     "app.host.list", "app.host", "", "List local hosting intents",
@@ -68,15 +68,14 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_host_local)
 
 ZCL_COMMAND_READY_READ(
-    "app.list", "app", "", "List apps",
+    "app.list", "app", "", "List",
     "Every installed App manifest from the local App registry (apps, count), "
-    "plus `launchable`: each desktop app or game `app open` can start (such "
-    "as skycombat, kind desktop), built-in "
-    "or from the operator's apps.tsv, with aliases, installed yes/no, raise "
-    "support, "
-    "resolved path and the verified running pid, plus saved kept: routes and "
-    "copies under <datadir>/copies. A bounded snapshot at call time; saved "
-    "choices are revalidated on open, and running status changes over time.",
+    "plus `launchable`: each desktop app or game `app open` can start, "
+    "built-in or from the operator's apps.tsv, with aliases, installed "
+    "yes/no, raise support, resolved path and the verified running pid, "
+    "plus saved kept: routes and copies under <datadir>/copies. A bounded "
+    "snapshot at call time; saved choices are revalidated on open, and "
+    "running status changes over time.",
     ZCL_COMMAND_LIST_BUDGET,
     "apps,manifest,installed,launch,desktop,game", "zcl.command.empty_input.v1",
     "zcl.app_index.v1", "", "", "z23 app list",
@@ -87,7 +86,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_list_launchable)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.library", "app", "", "My Apps",
+    "app.library", "app", "", "Apps",
     "Browse saved apps and node advertisements. Review a verified offer before native Receive asks for owner approval.",
     32768, "apps,library,desktop,kept,discover",
     "zcl.app_library.input.v1", "zcl.app_open.v1", "datadir", "", "z23 app library",
@@ -100,24 +99,21 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_library)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.open", "app", "", "Open app",
-    "Opens a desktop app or game by name or alias, e.g. skycombat, sky or "
-    "airplane for the Sky Combat airplane game (see app list). Requires a "
+    "app.open", "app", "", "Open",
+    "Opens a desktop app or game by name or alias (see app list). Requires a "
     "desktop session, then either reports the verified running copy "
-    "(already_open: a pid whose executable and start time match; raise is "
-    "delivered by SIGUSR1 only to an app that declares raise support, else "
-    "unsupported_by_app) or spawns the "
+    "(already_open; raise is delivered by SIGUSR1 only to an app that "
+    "declares raise support, else unsupported_by_app) or spawns the "
     "program with no shell, detached, logging to ~/.local/state/z23/apps, "
     "and waits up to 15 s for its ready marker (opened: pid, ready_ms, "
     "executable, sha256, log). A refusal names its stage: unknown_app, "
     "not_installed, no_desktop, config_refused, spawn_failed, exited_early "
-    "(exit code and log tail) or not_ready (still running, pid given). "
-    "Launch arguments come only from this binary and the operator's apps.tsv. "
-    "With copy, opens an explicitly saved version using its app.build "
-    "env_root, dependency_root, image_sha3 and record_id. Requires "
-    "accept_execution:true and an adopted or trusted received copy. "
-    "Verifies the saved tree and exact built image without changing newer edits. "
-    "Name-only open uses the kept selection when one exists and revalidates it.",
+    "or not_ready. Launch arguments come only from this binary and the "
+    "operator's apps.tsv. With copy, opens an explicitly saved version "
+    "using its app.build env_root, dependency_root, image_sha3 and "
+    "record_id; requires accept_execution:true and an adopted or trusted "
+    "received copy. Name-only open uses the kept selection when one exists "
+    "and revalidates it.",
     0, "apps,launch,open,play,desktop,window,game,games,skycombat,"
     "sky-combat,airplane",
     "zcl.app_open.input.v1", "zcl.app_open.v1",
@@ -132,7 +128,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_open)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.keep", "app", "", "Keep version",
+    "app.keep", "app", "", "Keep",
     "Keep the exact saved version and app.build identity after preview. "
     "Pass selection_revision returned by preview as expected_revision. "
     "Requires accept_execution:true and an existing adopted or trusted copy. "
@@ -151,7 +147,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_keep)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.adopt", "app", "", "Copy release",
+    "app.adopt", "app", "", "Adopt",
     "Resolve the exact persisted release, display its verified publisher, "
     "identity, parent, changes and destination in a native confirmation "
     "window, and make a copy only after its local owner chooses Make my copy. "
@@ -175,7 +171,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_adopt)
 
 ZCL_COMMAND_READY_READ(
-    "app.inspect", "app", "", "Manifest",
+    "app.inspect", "app", "", "Inspect",
     "One App's manifest, declared capabilities, and route bindings from the "
     "local registry; complete for that App as currently installed.", 0,
     "app,manifest,capabilities,bindings", "zcl.app_ref_input.v1",
@@ -206,7 +202,7 @@ ZCL_COMMAND_READY_READ(
 /* Semantic chain-transaction discovery.  This is deliberately separate from
  * core.wallet.transaction.list, which lists one wallet's transaction history. */
 ZCL_COMMAND_BRANCH("app.transaction-types", "app",
-                   "Transaction types",
+                   "Tx types",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -324,30 +320,27 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_micro_lab)
 
-ZCL_COMMAND_BRANCH("app.invoke", "app", "Invoke route",
+ZCL_COMMAND_BRANCH("app.invoke", "app", "Route",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_COMMAND(
     "app.tasks", "app", "", "Tasks",
-    "Lists, adds, edits, completes, reopens, deletes or undoes task contents in "
-    "an isolated private app database. Omit datadir to use private per-user app storage; "
-    "an explicit datadir opens your existing task data. Headless changes require expected_revision "
-    "from the last read; stale writes refuse. Actions open and new show a native "
-    "task editor with background saving; open shows the task list or selects task_id. "
-    "Closing saves the latest valid draft and a failed save keeps it open. "
-    "Saved is returned only after durable "
-    "commit. Undo survives closing and reopening. Program selection never "
-    "replaces user task data. Optional preview_root, preview_receipt and preview_program "
-    "select an installed program; the native Updates panel asks permission before confined "
-    "execution. Keep checks current data, and Go back tests the previous program against "
-    "current tasks and undo. Previously kept programs may render current task copies. "
-    "Action offer-status reads proposal and currently kept program metadata without "
-    "task contents. Action offer "
-    "takes expected_offer_revision and the exact preview tuple, verifies installed bytes "
-    "and saves an inert proposal for the open app's Updates page. Both responses "
-    "distinguish kept_root from preview_root. It neither runs nor "
-    "accepts the program. A changed offer revision refuses; a new proposal never "
-    "replaces a preview already awaiting consent or Keep.", 0,
+    "Lists, adds, edits, completes, reopens, deletes or undoes task contents "
+    "in an isolated private app database. Omit datadir for private per-user "
+    "storage; an explicit datadir opens your existing task data. Headless "
+    "changes require expected_revision from the last read; stale writes "
+    "refuse. Actions open and new show a native task editor with background "
+    "saving; open shows the task list or selects task_id; a failed save "
+    "keeps the draft; undo survives closing and reopening. Optional "
+    "preview_root, preview_receipt and preview_program select an installed "
+    "program; the native Updates panel asks permission before confined "
+    "execution. Action offer-status reads proposal and kept program metadata "
+    "without task contents. Action offer takes expected_offer_revision and "
+    "the exact preview tuple, verifies installed bytes and saves an inert "
+    "proposal for the open app's Updates page. Both responses distinguish "
+    "kept_root from preview_root. It neither runs nor accepts the program; "
+    "a changed offer revision refuses, and a new proposal never replaces a "
+    "preview already awaiting consent or Keep.", 0,
     "tasks,edit,save,undo", "zcl.task_document.input.v1", "zcl.task_document.v1",
     "datadir,app,action,expected_revision,task_id,title,preview_root,preview_receipt,preview_program,expected_offer_revision", "action,datadir",
     "z23 app tasks open",
@@ -390,7 +383,7 @@ ZCL_COMMAND_READY_COMMAND(
  * confirm it (AUTH_OPERATOR, plan first), on an adopted copy or a received
  * copy the owner confirmed once at bundle receive. */
 ZCL_COMMAND_READY_COMMAND(
-    "app.build", "app", "", "Build copy",
+    "app.build", "app", "", "Build",
     "copy names <datadir>/copies/<name> or an absolute copy directory. Requires "
     "adoption or owner-confirmed publisher/root at bundle receive; else NOT_ADOPTED. "
     "Optional version is an exact lowercase root in verified copy history. Its "
@@ -418,7 +411,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_build)
 
-ZCL_COMMAND_BRANCH("app.run", "app", "Run binaries",
+ZCL_COMMAND_BRANCH("app.run", "app", "Run",
                    ZCL_COMMAND_LAYER_APP)
 
 
@@ -536,14 +529,11 @@ ZCL_COMMAND_READY_READ(
     "source_version selects an authorized successor in that same copy. "
     "Pages and file reads pin selection revision; changed selection refuses. "
     "No source edits, build, execution or model invocation. File slices are "
-    "UTF-8 or lossless base64: default 512 bytes, explicit limit 1..2048 bytes. "
-    "The 1 MiB file bound and reply budget still apply; escaped content may "
-    "require a smaller slice and is never truncated. "
-    "query searches literal non-overlapping bytes in the pinned tree: UTF-8 "
-    "1..64 bytes, expected_revision required, no path/limit. page and offset "
-    "resume the manifest index and byte cursor. At most four files/4 MiB and "
-    "two matches per call; snippets at most 96 bytes. complete is cursor end, "
-    "not exhaustive coverage: files over 1 MiB are explicitly unsearched.",
+    "UTF-8 or lossless base64, 1..2048 bytes, never truncated. query searches "
+    "literal non-overlapping bytes in the pinned tree: UTF-8 1..64 bytes, "
+    "expected_revision required. At most four files/4 MiB and two matches "
+    "per call; complete is cursor end, not exhaustive coverage: files over "
+    "1 MiB are explicitly unsearched.",
     ZCL_COMMAND_LIST_BUDGET,
     "app,customize,source,change,kept,context,search", "zcl.app_customize.input.v1",
     "zcl.app_customize.v1", "name,change,expected_revision,source_version,path,offset,limit,page,query", "name",
@@ -556,7 +546,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_customize)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.edit", "app", "", "Edit draft",
+    "app.edit", "app", "", "Edit",
     "Plan and confirm one UTF-8 replacement against the kept source at request "
     "start. expected_revision anchors Keep; optional source_version selects "
     "an authorized successor source. Keep is untouched. "
@@ -575,7 +565,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_APP_MANIFEST_READ, 0, zcl_native_handle_app_edit)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.personalize", "app", "", "Personalize",
+    "app.personalize", "app", "", "Tailor",
     "Use name and expected_revision alone for native owner confirmation of a "
     "kept version. Alternatively use copy, datadir, version and expected_head "
     "for the owner plan/confirm protocol. Saves a personal metadata successor; "
@@ -592,7 +582,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_APP_MANIFEST_READ, 0, zcl_native_handle_app_personalize)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.receive", "app", "", "Receive copy",
+    "app.receive", "app", "", "Inbox",
     "Receive a verified share after owner confirmation; default to the bound "
     "datadir and a free name. preview defaults false; true offers Build and "
     "Preview, then separate Keep. A committed receipt stays successful; inspect "
@@ -611,7 +601,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_receive)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.share", "app", "", "Share kept app",
+    "app.share", "app", "", "Share",
     "Locally display the exact kept source version, package, publisher and "
     "output path. Only the native owner decision signs and publishes the "
     "saved source and creates one .z23share file. No build or execution. "
@@ -630,7 +620,7 @@ ZCL_COMMAND_READY_COMMAND(
 /* Terminal copy workflows keep their plan/confirm contracts separate from
  * native kept-app owner windows. The CLI front door retains its short verbs. */
 ZCL_COMMAND_READY_COMMAND(
-    "app.copy", "app", "", "Copy app",
+    "app.copy", "app", "", "Copy",
     "Owner only. app is a name such as skycombat. Uses the release of that "
     "app already in the datadir (the parentless one, newest sequence), or "
     "seeds one first through the app.seed leaf; without app.seed it refuses "
@@ -651,7 +641,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_copy)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.save", "app", "", "Save edits",
+    "app.save", "app", "", "Save",
     "copy is a name under <datadir>/copies (or its absolute directory). "
     "Runs zcode.package.version.save on it: without confirm, lists the "
     "changed paths and returns a plan_id; with that plan_id and "
@@ -715,7 +705,23 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_get)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.receive-copy", "app", "", "Receive",
+    "app.discover", "app", "", "Discover",
+    "Fetch one stranger's public app offers by onion or link; with "
+    "offer_id, ingest that signed offer. Nothing runs.",
+    16384,
+    "app,discover,onion,link,board,offer,stranger,first,contact",
+    "zcl.app_discover.input.v1",
+    "zcl.app_discover.v1", "link,offer,yes,datadir", "link",
+    "z23 app discover <onion|link> --offer=<64hex> --yes",
+    ZCL_COMMAND_LAYER_APP,
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, 0, zcl_native_handle_app_discover)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.receive-copy", "app", "", "Import",
     "Owner only; `z23 app open FILE.z23share` runs it. Verifies the file "
     "(zcode.package.bundle.verify) and, without confirm, returns its name, "
     "version, parent and short publisher fingerprint and a plan_id; it "
@@ -735,7 +741,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_receive_copy)
 
-ZCL_COMMAND_BRANCH("app.source", "app", "App source",
+ZCL_COMMAND_BRANCH("app.source", "app", "Source",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -783,20 +789,17 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_app_source_export)
 
 ZCL_COMMAND_READY_COMMAND(
-    "app.seed", "app", "", "Seed app",
+    "app.seed", "app", "", "Seed",
     "app names a directory under apps/ of the z23 checkout (source, default "
     "the checkout this runs in). The package tree is apps/<app> plus every "
     "checkout file apps/<app>/zcode-seed.def maps (one '<repo path> <tree "
     "path>' per line; '..', absolute and symlinked paths refused). The "
-    "app's own Makefile is its entrypoint: its print-app-closure, run "
-    "on the staged tree (confined where the host can; the reply's confinement "
-    "says which), must name only files the tree holds, so a "
-    "copy builds with app build alone. Without confirm, returns package_root, release_id, file_count "
-    "and a plan_id. With that plan_id and confirm:true, signs with "
-    "~/.z23/zcode_publisher.key (made 0600 on first use) and publishes "
-    "through zcode.package.publish.commit. When this owner already holds a "
-    "release of the same package root, it is returned with existing:true "
-    "and nothing is written. Nothing is built.",
+    "app's Makefile is its entrypoint; its print-app-closure must name only "
+    "files the tree holds, so a copy builds with app build alone. Without "
+    "confirm, returns package_root, release_id, file_count and a plan_id; "
+    "with it and confirm:true, signs with ~/.z23/zcode_publisher.key and "
+    "publishes through zcode.package.publish.commit. An already-held release "
+    "of the same package root returns existing:true; nothing is built.",
     ZCL_COMMAND_LIST_BUDGET,
     "app,seed,package,release,publish,copy,remix,game,source",
     "zcl.app_seed.input.v1", "zcl.app_seed.v1",
@@ -834,7 +837,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, 0, zcl_native_handle_app_run_copy)
 
-ZCL_COMMAND_BRANCH("app.toolchain", "app", "App compiler kit",
+ZCL_COMMAND_BRANCH("app.toolchain", "app", "Compiler kit",
     ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(

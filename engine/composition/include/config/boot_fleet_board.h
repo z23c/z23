@@ -167,6 +167,9 @@ struct rpc_table;
 /* Register the `fleet_board` RPC method — the node-side half of every board
  * and wiki command leaf. */
 void boot_fleet_board_register_rpc(struct rpc_table *table);
+/* Register the `fleet_board_ingest` RPC method — first-contact discovery's
+ * only write into the local board (raw signed frame -> ingest chain). */
+void boot_fleet_board_ingest_register_rpc(struct rpc_table *table);
 /* Owner app-host operations dispatched by the resident board RPC. */
 struct json_value;
 bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,

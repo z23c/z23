@@ -859,6 +859,7 @@ static int test_fleet_board_wiki(void)
 
 /* Two independent node databases, driven through the real frame codec in wire
  * order. Node A never hands node B a struct: every byte B sees, B decoded. */
+static int fb_discover_ingest_leg(void);
 static int test_fleet_board_two_nodes(void)
 {
     int failures = 0;
@@ -988,6 +989,7 @@ static int test_fleet_board_two_nodes(void)
         node_db_close(&b);
         PASS();
     } _test_next:;
+    failures += fb_discover_ingest_leg();
     return failures;
 }
 
@@ -1873,6 +1875,7 @@ static bool fb_rpc_fixture_open(struct fb_rpc_fixture *f, const char *tag)
     app_runtime_set_current(&f->runtime);
     rpc_table_init(&f->table);
     boot_fleet_board_register_rpc(&f->table);
+    boot_fleet_board_ingest_register_rpc(&f->table);
     f->was_warming_up =
         rpc_is_in_warmup(f->warmup_status, sizeof(f->warmup_status));
     set_rpc_warmup_finished();
@@ -1915,6 +1918,156 @@ static bool fb_rpc_post(struct fb_rpc_fixture *f, const char *kind,
     if (ok) ok = fb_rpc_call(f, &input, result);
     json_free(&input);
     return ok;
+}
+
+/* ── first-contact discovery: the fleet_board_ingest RPC ──────────────── */
+
+#define FB_INGEST_FRAME_BYTES (FLEET_BOARD_FRAME_MAGIC_BYTES + 1u + \
+                               FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES)
+
+/* Encode one signed post as the raw frame hex a discovery client fetched;
+ * tamper flips the last signature byte the way a lying relay would. */
+static bool fb_ingest_frame(const struct fleet_board_post *post, bool tamper,
+                            char *hex, size_t cap)
+{
+    static uint8_t frame[FB_INGEST_FRAME_BYTES];
+    size_t frame_len = 0;
+    if (fleet_board_frame_encode_post(post, frame, sizeof(frame),
+                                      &frame_len) != FLEET_BOARD_OK)
+        return false;
+    if (cap < frame_len * 2u + 1u) return false;
+    zcl_hex_encode(frame, frame_len, hex);
+    if (tamper) {
+        size_t last = frame_len * 2u - 1u;
+        hex[last] = hex[last] == 'a' ? 'b' : 'a';
+    }
+    return true;
+}
+
+/* One raw-frame ingest call; `code` receives the refusal code, if any. */
+static bool fb_ingest_call(struct fb_rpc_fixture *f,
+                           const struct fleet_board_post *post, bool tamper,
+                           char *code, size_t code_cap)
+{
+    static char hex[2u * FB_INGEST_FRAME_BYTES + 1u];
+    struct json_value input, params, result;
+    json_init(&input); json_init(&params); json_init(&result);
+    json_set_object(&input); json_set_array(&params);
+    code[0] = '\0';
+    bool ok = fb_ingest_frame(post, tamper, hex, sizeof(hex)) &&
+        json_push_kv_str(&input, "frame", hex) &&
+        json_push_back(&params, &input) &&
+        rpc_table_execute(&f->table, "fleet_board_ingest", &params, &result);
+    const struct json_value *flag = json_get(&result, "ok");
+    ok = ok && flag && flag->type == JSON_BOOL && json_get_bool(flag);
+    if (!ok) {
+        const struct json_value *c = json_get(&result, "code");
+        if (c && c->type == JSON_STR)
+            (void)snprintf(code, code_cap, "%s", json_get_str(c));
+    }
+    json_free(&input); json_free(&params); json_free(&result);
+    return ok;
+}
+
+/* One signed offer post from A, the stranger B discovered. */
+static bool fb_ingest_offer(struct fleet_board_post *post, uint8_t seed[32],
+                            uint8_t pk[32], const char *text, int64_t created,
+                            enum fleet_board_scope scope)
+{
+    fb_test_compose(post, FLEET_BOARD_KIND_OFFER, "app-discover", text,
+                    (uint64_t)created, 3600);
+    post->scope = scope;
+    if (scope == FLEET_BOARD_SCOPE_PUBLIC)
+        (void)snprintf(post->room, sizeof(post->room), "%s", "apps");
+    fb_test_identity(7, seed, pk);
+    return fleet_board_post_sign(post, seed, pk) == FLEET_BOARD_OK;
+}
+
+/* The outcome flags and refusal codes of one ingest-leg run. */
+struct fb_ingest_outcome {
+    bool opened, accepted, stored_row;
+    bool refused_tamper, refused_old, refused_future, refused_fleet;
+    bool absent_bad, absent_old, absent_future, absent_fleet;
+    char code_tamper[32], code_old[32], code_future[32], code_fleet[32];
+};
+
+/* One case: sign A's post, send the (possibly tampered) frame, record
+ * whether the RPC refused it and whether anything was stored. */
+static void fb_ingest_case(struct fb_rpc_fixture *f, struct fleet_board_post *post,
+                           uint8_t seed[32], uint8_t pk[32], const char *text,
+                           int64_t created, enum fleet_board_scope scope,
+                           bool tamper, bool *signed_all, char *code, size_t cap,
+                           bool *refused, bool *absent)
+{
+    *signed_all = fb_ingest_offer(post, seed, pk, text, created, scope) && *signed_all;
+    *refused = *signed_all && !fb_ingest_call(f, post, tamper, code, cap);
+    *absent = !db_fleet_board_have(&f->db, post->id);
+}
+
+/* Run the whole stranger journey against the fixture; the fixture is always
+ * closed, so every verdict is a plain boolean the TEST can assert on. */
+static void fb_discover_ingest_run(struct fb_ingest_outcome *o)
+{
+    struct fb_rpc_fixture f;
+    struct fleet_board_post post, bad, old, future, fleet_post;
+    uint8_t seed[32], pk[32];
+    memset(o, 0, sizeof(*o));
+    o->absent_bad = o->absent_old = o->absent_future = o->absent_fleet = true;
+    memset(&f, 0, sizeof(f));
+    o->opened = fb_rpc_fixture_open(&f, "ingest");
+    if (!o->opened) return;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    bool signed_all = fb_ingest_offer(&post, seed, pk,
+        "{\"schema\":\"zcl.app_offer.v1\",\"name\":\"sky/game\"}",
+        now, FLEET_BOARD_SCOPE_PUBLIC);
+    o->accepted = signed_all &&
+        fb_ingest_call(&f, &post, false, o->code_tamper, sizeof(o->code_tamper));
+    struct db_fleet_board_post row;
+    o->stored_row = db_fleet_board_post_find(&f.db, post.id, &row) &&
+        !strcmp(row.post.text, post.text) &&
+        !memcmp(row.post.host_pubkey, pk, 32);
+    fb_ingest_case(&f, &bad, seed, pk, "a truthful body, relayed badly",
+                   now + 1, FLEET_BOARD_SCOPE_PUBLIC, true, &signed_all,
+                   o->code_tamper, sizeof(o->code_tamper), &o->refused_tamper,
+                   &o->absent_bad);
+    fb_ingest_case(&f, &old, seed, pk, "{\"schema\":\"zcl.app_offer.v1\"}",
+                   now - 100000, FLEET_BOARD_SCOPE_PUBLIC, false, &signed_all,
+                   o->code_old, sizeof(o->code_old), &o->refused_old,
+                   &o->absent_old);
+    fb_ingest_case(&f, &future, seed, pk, "{\"schema\":\"zcl.app_offer.v1\"}",
+                   now + 100000, FLEET_BOARD_SCOPE_PUBLIC, false, &signed_all,
+                   o->code_future, sizeof(o->code_future), &o->refused_future,
+                   &o->absent_future);
+    fb_ingest_case(&f, &fleet_post, seed, pk, "{\"schema\":\"zcl.app_offer.v1\"}",
+                   now + 2, FLEET_BOARD_SCOPE_FLEET, false, &signed_all,
+                   o->code_fleet, sizeof(o->code_fleet), &o->refused_fleet,
+                   &o->absent_fleet);
+    fb_rpc_fixture_close(&f);
+}
+
+/* B holds no peer link; it fetched one signed offer post over its own
+ * transport and hands the RAW frame to the RPC. Only a valid PUBLIC frame
+ * is stored, and only through db_fleet_board_post_ingest. */
+static int fb_discover_ingest_leg(void)
+{
+    int failures = 0;
+    TEST("fleet board ingest RPC: discovery's raw frame is verified before anything is stored") {
+        struct fb_ingest_outcome o;
+        fb_discover_ingest_run(&o);
+        ASSERT(o.opened);
+        ASSERT(o.accepted);
+        ASSERT(o.stored_row);
+        ASSERT(o.refused_tamper && !strcmp(o.code_tamper, "FRAME_INVALID"));
+        ASSERT(o.absent_bad);
+        ASSERT(o.refused_old && !strcmp(o.code_old, "BOARD_REFUSED"));
+        ASSERT(o.absent_old);
+        ASSERT(o.refused_future && !strcmp(o.code_future, "BOARD_REFUSED"));
+        ASSERT(o.absent_future);
+        ASSERT(o.refused_fleet && !strcmp(o.code_fleet, "NOT_PUBLIC"));
+        ASSERT(o.absent_fleet);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static const struct rpc_table *fb_native_test_table;

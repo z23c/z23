@@ -53,6 +53,7 @@
 #include "config/runtime.h"
 #include "command/native_zcode_package_copy.h"
 #include "command/native_app_library_command.h"
+#include "test_app_network_link.h"
 
 #if defined(_WIN32)
 int test_app_get(void);
@@ -107,6 +108,14 @@ int test_app_get(void)
 #define TAG_ENDPOINT TAG_ONION ":28133"
 #define TAG_LOCAL_HOST "1111111111111111111111111111111111111111111111111111111111111111"
 #define TAG_TEXT (ZCL_APP_OFFER_TEXT_MAX + 1u)
+
+/* The `app discover` worker-child seam this file owns (see
+ * test_app_network_link.h); the command reads these under ZCL_TESTING. */
+bool (*zcl_test_app_discover_job)(void *context,
+    const struct app_network_job_args *args,
+    struct app_network_job_result *result);
+void *zcl_test_app_discover_job_context;
+static char g_discover_datadir[TAG_PATH];
 
 int zcl_test_app_run_copy_poll(long pid);
 static int tag_process_observation(void)
@@ -1356,7 +1365,32 @@ static bool tag_network_worker_capacity(void)
     free(f.bytes); free(f.manifest); return ok;
 }
 
-/* Exact links preserve the offered identity. */
+/* First-contact discovery: the bare endpoint forms the relaxed parser adds,
+ * and the junk shapes it must still refuse. */
+static int tag_network_link_bare(void)
+{
+    int failures = 0;
+    TEST("app network: a bare v3 onion or host:port names the room; junk is refused") {
+        char bad[80]; struct app_network_link link;
+        ASSERT(app_network_link_parse(TAG_ONION, &link) && !link.exact &&
+               !link.post_id[0] && !strcmp(link.onion, TAG_ONION) && !link.port);
+        ASSERT(snprintf(bad, sizeof(bad), "%s:28133", TAG_ONION) > 0);
+        ASSERT(app_network_link_parse(bad, &link) && !link.exact &&
+               !link.post_id[0] && !strcmp(link.onion, TAG_ONION) && link.port == 28133u);
+        ASSERT(snprintf(bad, sizeof(bad), "%s:0", TAG_ONION) > 0);
+        ASSERT(!app_network_link_parse(bad, &link) && !link.onion[0]);
+        ASSERT(snprintf(bad, sizeof(bad), "%s:99999", TAG_ONION) > 0);
+        ASSERT(!app_network_link_parse(bad, &link));
+        ASSERT(snprintf(bad, sizeof(bad), "%s:2813a", TAG_ONION) > 0);
+        ASSERT(!app_network_link_parse(bad, &link));
+        ASSERT(!app_network_link_parse("short.onion", &link));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Exact links preserve the offered identity; a bare v3 onion (optionally
+ * host:port) names the whole room, and junk of every shape is refused. */
 static int tag_network_link(void)
 {
     int failures = 0;
@@ -1365,7 +1399,7 @@ static int tag_network_link(void)
         char url[257], bad[300]; struct app_network_link link;
         ASSERT(snprintf(url, sizeof(url), "http://%s/board/apps/v1/%s", TAG_ONION, id) > 0);
         ASSERT(app_network_link_parse(url, &link) && link.exact &&
-               !strcmp(link.onion, TAG_ONION) && !strcmp(link.post_id, id));
+               !strcmp(link.onion, TAG_ONION) && !strcmp(link.post_id, id) && !link.port);
         ASSERT(snprintf(url, sizeof(url), "http://%s/board/apps/v1", TAG_ONION) > 0);
         ASSERT(app_network_link_parse(url, &link) && !link.exact && !link.post_id[0]);
         ASSERT(snprintf(bad, sizeof(bad), "%s?x=1", url) > 0);
@@ -4701,6 +4735,184 @@ static bool tag_discover_empty_card(void *context, const struct zcl_present_mode
     if (d->error && d->recover) { g_tag.malformed_board = false; g_tag.catalog_error = NULL; d->error = false; }
     return true;
 }
+/* ── `app discover`: first-contact discovery by link ──────────────────── */
+struct tag_discover_stub {
+    unsigned jobs;
+    bool catalog_url_ok, direct_url_ok;
+    enum app_network_error direct_error;
+};
+static bool tag_discover_job(void *context, const struct app_network_job_args *args,
+                             struct app_network_job_result *result)
+{
+    struct tag_discover_stub *d = context;
+    ++d->jobs;
+    if (!strcmp(args->mode, "catalog")) {
+        d->catalog_url_ok = !strcmp(args->url, "http://" TAG_ONION "/board/apps/v1") &&
+            !args->selected && !args->carrier_onion;
+        struct zcl_app_offer_row *row = &result->rows[0];
+        memset(row, 0, sizeof(*row));
+        (void)snprintf(row->offer.name, sizeof(row->offer.name), "rem/game");
+        (void)snprintf(row->offer.root, sizeof(row->offer.root), "%s", TAG_CARRIER);
+        (void)snprintf(row->offer.publisher, sizeof(row->offer.publisher),
+                       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        (void)snprintf(row->post_id, sizeof(row->post_id),
+                       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        row->created_at = platform_time_wall_unix() - 90;
+        result->count = 1;
+        result->error = APP_NETWORK_OK;
+        result->protocol_valid = true;
+        return true;
+    }
+    if (!strcmp(args->mode, "direct")) {
+        d->direct_url_ok = !strncmp(args->url,
+            "http://" TAG_ONION "/board/apps/v1/",
+            sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u) &&
+            strlen(args->url) ==
+                sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u + 64u;
+        result->error = d->direct_error;
+        result->protocol_valid = true;
+        return d->direct_error == APP_NETWORK_OK;
+    }
+    return false;
+}
+
+static struct json_value *tag_discover_input(const char *link, const char *offer,
+                                             bool yes)
+{
+    struct json_value *in = calloc(1, sizeof(*in));
+    if (!in) return NULL;
+    json_init(in);
+    json_set_object(in);
+    if (!json_push_kv_str(in, "link", link) || !json_push_kv_str(in, "datadir", g_discover_datadir) ||
+        (offer && !json_push_kv_str(in, "offer", offer)) ||
+        (yes && !json_push_kv_bool(in, "yes", true))) {
+        json_free(in); free(in); return NULL;
+    }
+    return in;
+}
+
+/* Registry-driven: the listing stores nothing and answers in the app get
+ * catalog shape; refusals never reach the network child. */
+#define TAG_DISCOVER_OFFER \
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+/* One registry-driven `app discover` call through the leaf's own handler. */
+static bool tag_discover_call(const struct zcl_command_spec *spec,
+                              const char *link, const char *offer, bool yes,
+                              struct zcl_command_reply *reply)
+{
+    zcl_command_reply_init(reply, spec->output_schema);
+    struct json_value *in = tag_discover_input(link, offer, yes);
+    if (!in) return false;
+    struct zcl_command_request request = {.input = in, .spec = spec,
+                                          .invoked_name = spec->path};
+    spec->handler(&request, reply);
+    json_free(in); free(in);
+    return true;
+}
+
+/* The one listing line, in the app get catalog shape. */
+static bool tag_discover_line_ok(const struct zcl_command_reply *reply)
+{
+    const struct json_value *lines = json_get(&reply->data, "lines");
+    const char *line = lines && lines->type == JSON_ARR && json_size(lines) == 1
+        ? json_get_str(json_at(lines, 0)) : NULL;
+    return line && !strncmp(line, "rem/game ", 9) &&
+        strstr(line, "c0ffee00c0ffee00") && strstr(line, "ago");
+}
+
+/* The listing shape: same lines as the app get catalog, nothing stored. */
+static bool tag_discover_listing_ok(const struct zcl_command_spec *spec,
+                                    struct tag_discover_stub *stub,
+                                    int posts, int offers)
+{
+    struct zcl_command_reply reply;
+    if (!tag_discover_call(spec, TAG_ONION, NULL, false, &reply)) return false;
+    const struct json_value *count = json_get(&reply.data, "count");
+    const struct json_value *stored = json_get(&reply.data, "stored");
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        stub->jobs == 1u && stub->catalog_url_ok &&
+        g_tag.posts == posts && g_tag.offers == offers &&
+        count && count->type == JSON_INT && json_get_int(count) == 1 &&
+        stored && stored->type == JSON_BOOL && !json_get_bool(stored) &&
+        tag_discover_line_ok(&reply);
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+/* One refusal shape: nothing fetched, the named code, not mutated. */
+static bool tag_discover_refused(const struct zcl_command_spec *spec,
+                                 struct tag_discover_stub *stub, const char *link,
+                                 const char *offer, bool yes, const char *code)
+{
+    struct zcl_command_reply reply;
+    if (!tag_discover_call(spec, link, offer, yes, &reply)) return false;
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(reply.error.code, code) && stub->jobs == 0u;
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+/* A dead or lying endpoint reports the existing APP_NETWORK_* shape. */
+static bool tag_discover_timeout_ok(const struct zcl_command_spec *spec,
+                                    struct tag_discover_stub *stub)
+{
+    stub->jobs = 0;
+    stub->direct_error = APP_NETWORK_TIMEOUT;
+    struct zcl_command_reply reply;
+    if (!tag_discover_call(spec, TAG_ONION, TAG_DISCOVER_OFFER, true, &reply))
+        return false;
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(reply.error.code, "NETWORK_TIMEOUT") && stub->jobs == 1u &&
+        stub->direct_url_ok;
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static int tag_discover_command(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app discover: lists a stranger's room, refuses every ambiguous shape") {
+        const struct zcl_command_spec *spec =
+            zcl_command_registry_find(zcl_command_catalog(), "app.discover", NULL);
+        ASSERT(spec && spec->handler);
+        static struct tag_discover_stub stub;
+        memset(&stub, 0, sizeof(stub));
+        (void)snprintf(g_discover_datadir, sizeof(g_discover_datadir), "%s", w->j.b_datadir);
+        zcl_test_app_discover_job = tag_discover_job;
+        zcl_test_app_discover_job_context = &stub;
+        int posts = g_tag.posts, offers = g_tag.offers;
+
+        ASSERT(tag_discover_listing_ok(spec, &stub, posts, offers));
+        stub.jobs = 0; /* the refusals below must never fetch */
+
+        /* A full link names one offer: without --offer it must not fetch. */
+        char link[200];
+        ASSERT(snprintf(link, sizeof(link), "http://%s/board/apps/v1/%s",
+                        TAG_ONION, TAG_DISCOVER_OFFER) > 0);
+        ASSERT(tag_discover_refused(spec, &stub, link, NULL, false, "BAD_INPUT"));
+
+        /* host:port parses, but the default-port fetch refuses it up front. */
+        ASSERT(snprintf(link, sizeof(link), "%s:28133", TAG_ONION) > 0);
+        ASSERT(tag_discover_refused(spec, &stub, link, NULL, false, "BAD_INPUT"));
+
+        /* Ingesting a fetched offer writes the board: --yes is required and
+         * the fetch itself must not run without it. */
+        ASSERT(tag_discover_refused(spec, &stub, TAG_ONION, TAG_DISCOVER_OFFER,
+                                    false, "CONFIRM_REQUIRED"));
+
+        /* A dead or lying endpoint reports the existing APP_NETWORK_* shape. */
+        ASSERT(tag_discover_timeout_ok(spec, &stub));
+
+        zcl_test_app_discover_job = NULL;
+        zcl_test_app_discover_job_context = NULL;
+        PASS();
+    } _test_next:;
+    zcl_test_app_discover_job = NULL;
+    zcl_test_app_discover_job_context = NULL;
+    return failures;
+}
+
 static int tag_discover_empty_cases(struct tag_world *w)
 {
     int failures = 0; struct zcl_command_reply reply; struct tag_discover_empty d = {0};
@@ -6193,6 +6405,7 @@ int test_app_get(void)
     int failures = 0;
     printf("app get (publish to room apps, get by identity)...\n");
     failures += tag_network_link();
+    failures += tag_network_link_bare();
     failures += tag_network_ipc();
     failures += tag_network_diagnostics();
     failures += tag_network_diagnostic_protocol();
@@ -6232,6 +6445,7 @@ int test_app_get(void)
     if (failures == 0) failures += tag_publish_long_name(&w);
     if (failures == 0) failures += tag_published_continuation(&w);
     if (failures == 0) failures += tag_world_cases(&w);
+    failures += tag_discover_command(&w);
     zcl_app_offer_set_call(NULL);
     json_free(&g_tag.board);
     free(g_tag.bytes);
