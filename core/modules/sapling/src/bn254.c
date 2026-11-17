@@ -23,6 +23,9 @@
 
 #include "sapling/bn254.h"
 #include "sapling/bn254_accel.h"
+#if defined(__x86_64__) || defined(_M_X64)
+#include "mont_adx.h"
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -386,7 +389,23 @@ static struct {
     /* Twist Frobenius for G2 (used in Miller loop correction) */
     struct bn_fq2 twist_frob_x;  /* ξ^{(p-1)/3} = w1_1 */
     struct bn_fq2 twist_frob_y;  /* ξ^{(p-1)/2} = w1_1 * w1_6 */
+    /* Pre-multiplied products for the engine's Frobenius maps (exact field
+     * products of the constants above; see bn254_engine.inc). */
+    struct bn_fq2 k1_1, k1_2;    /* w1_1*w1_6, w1_2*w1_6 */
+    struct bn_fq k2_1, k2_2;     /* w2_1*w2_6, w2_2*w2_6 */
+    struct bn_fq2 k3_1, k3_2;    /* w3_1*w3_6, w3_2*w3_6 */
 } g_frob;
+
+/* Constants of the pairing engine (bn254_engine.inc), filled together with
+ * g_frob under the same once-flag. */
+static struct {
+    struct bn_fq fq_zero, fq_one;
+    struct bn_fq2 fq2_one;
+    struct bn_fq12 fq12_one;
+    struct bn_fq two_inv;     /* 1/2 */
+    struct bn_fq three;
+    struct bn_fq2 twist_b;    /* b' = 3/(9+u) */
+} g_eng;
 
 /* The table is filled exactly once (pthread_once) and then never written.
  * g_frob_ready is stored with release order after the last table write and
@@ -459,6 +478,32 @@ static void bn254_init_frobenius_once(void)
     uint64_t pm1_div2[4];
     u256_div_small(pm1_div2, pm1, 2);
     bn_fq2_pow(&g_frob.twist_frob_y, &xi, pm1_div2);
+
+    /* products for the engine's Frobenius maps */
+    bn_fq2_mul(&g_frob.k1_1, &g_frob.w1_1, &g_frob.w1_6);
+    bn_fq2_mul(&g_frob.k1_2, &g_frob.w1_2, &g_frob.w1_6);
+    bn_fq_mul(&g_frob.k2_1, &g_frob.w2_1, &g_frob.w2_6);
+    bn_fq_mul(&g_frob.k2_2, &g_frob.w2_2, &g_frob.w2_6);
+    bn_fq2_mul(&g_frob.k3_1, &g_frob.w3_1, &g_frob.w3_6);
+    bn_fq2_mul(&g_frob.k3_2, &g_frob.w3_2, &g_frob.w3_6);
+
+    /* engine constants */
+    bn_fq_zero(&g_eng.fq_zero);
+    bn_fq_one(&g_eng.fq_one);
+    bn_fq2_one(&g_eng.fq2_one);
+    bn_fq12_one(&g_eng.fq12_one);
+    struct bn_fq two;
+    bn_fq_from_u64(&two, 2);
+    bn_fq_inv(&g_eng.two_inv, &two);
+    bn_fq_from_u64(&g_eng.three, 3);
+    {
+        /* b' = 3 / (9 + u) in Fq2, exactly as bn_g2_twist_b computes it */
+        struct bn_fq2 three2;
+        bn_fq_from_u64(&three2.c0, 3);
+        bn_fq_zero(&three2.c1);
+        bn_fq2_inv(&g_eng.twist_b, &xi);
+        bn_fq2_mul(&g_eng.twist_b, &g_eng.twist_b, &three2);
+    }
 
     atomic_store_explicit(&g_frob_ready, true, memory_order_release);
 }
@@ -864,40 +909,6 @@ void bn_g1_scalar_mul(struct bn_g1 *r, const struct bn_g1 *p, const uint64_t sca
     *r = acc;
 }
 
-bool bn_g1_decompress(struct bn_g1 *p, const uint8_t data[33])
-{
-    /* zclassicd (Proof.hpp:97-111) accepts only the lead bytes 0x02 and 0x03;
-     * bit 0 is the y parity. Its format has no encoding of the point at
-     * infinity, so neither does this decoder. */
-    if ((data[0] & 0xFE) != 0x02)
-        return false;
-    bool y_lsb = (data[0] & 0x01) != 0;
-
-    /* x < q, strict (Proof.cpp:68-77) */
-    if (!bn_fq_from_bytes_be(&p->x, data + 1))
-        return false;
-
-    /* y^2 = x^3 + 3 */
-    struct bn_fq x3, b;
-    bn_fq_sq(&x3, &p->x);
-    bn_fq_mul(&x3, &x3, &p->x);
-    bn_fq_from_u64(&b, 3);
-    bn_fq_add(&x3, &x3, &b);
-
-    if (!bn_fq_sqrt(&p->y, &x3))
-        return false;
-
-    /* Check parity */
-    uint8_t ybuf[32];
-    bn_fq_to_bytes_be(ybuf, &p->y);
-    bool computed_lsb = (ybuf[31] & 1) != 0;
-    if (computed_lsb != y_lsb)
-        bn_fq_neg(&p->y, &p->y);
-
-    bn_fq_one(&p->z);
-    return true;
-}
-
 /* ══════════════════════════════════════════════════════════════
  *  G2: y^2 = x^3 + b' over Fq2 (Jacobian)
  *  b' = 3/(9+u) in Fq2
@@ -1122,79 +1133,6 @@ bool fq2_decode_fe2ip(struct bn_fq *c0, struct bn_fq *c1,
     return true;
 }
 
-/* b' = 3 / (9 + u), the twist curve coefficient (alt_bn128_twist_coeff_b). */
-static void bn_g2_twist_b(struct bn_fq2 *b)
-{
-    struct bn_fq2 three, xi;
-    bn_fq_from_u64(&three.c0, 3);
-    bn_fq_zero(&three.c1);
-    bn_fq_from_u64(&xi.c0, 9);
-    bn_fq_one(&xi.c1);
-    bn_fq2_inv(b, &xi);
-    bn_fq2_mul(b, b, &three);
-}
-
-/* Square root of a0 in Fq viewed inside Fq2. Every element of Fq is a square
- * in Fq2: either a0 is a square in Fq, or -a0 is (q = 3 mod 4, so -1 is a
- * non-square) and the root is t*u with t^2 = -a0. */
-static bool bn_fq2_sqrt_of_fq(struct bn_fq2 *r, const struct bn_fq *a0)
-{
-    struct bn_fq t, neg;
-    if (bn_fq_sqrt(&t, a0)) {
-        r->c0 = t;
-        bn_fq_zero(&r->c1);
-        return true;
-    }
-    bn_fq_neg(&neg, a0);
-    if (!bn_fq_sqrt(&t, &neg))
-        return false; /* unreachable: one of a0, -a0 is a square */
-    bn_fq_zero(&r->c0);
-    r->c1 = t;
-    return true;
-}
-
-/* Square root in Fq2 = Fq[u]/(u^2+1). Returns false iff a is not a square,
- * which is exactly when libsnark's Fp2_model::sqrt fails its Euler check
- * (fp2.tcc:146-170, used by zclassicd Proof.cpp:152). Which of the two roots
- * comes back is unspecified: bn_g2_decompress fixes the sign afterwards.
- *
- * a = a0 + a1*u with a1 != 0 is a square iff its norm a0^2 + a1^2 is a square
- * d^2 in Fq; then exactly one of (a0 + d)/2, (a0 - d)/2 is a square y0^2 and
- * the root is y0 + (a1 / (2*y0))*u. The a1 == 0 case needs its own branch:
- * there d = +/-a0, so for a non-square a0 the first candidate is 0, y0 = 0 and
- * the general formula would return 0 instead of the root t*u. */
-bool bn_fq2_sqrt(struct bn_fq2 *r, const struct bn_fq2 *a)
-{
-    const struct bn_fq2 in = *a; /* r may alias a */
-    if (bn_fq_is_zero(&in.c1))
-        return bn_fq2_sqrt_of_fq(r, &in.c0);
-
-    struct bn_fq norm, d, half, s, y0, den;
-    bn_fq2_norm(&norm, &in);
-    if (!bn_fq_sqrt(&d, &norm))
-        return false;
-    bn_fq_from_u64(&half, 2);
-    bn_fq_inv(&half, &half);
-    bn_fq_add(&s, &in.c0, &d);
-    bn_fq_mul(&s, &s, &half);
-    if (!bn_fq_sqrt(&y0, &s)) {
-        bn_fq_sub(&s, &in.c0, &d);
-        bn_fq_mul(&s, &s, &half);
-        if (!bn_fq_sqrt(&y0, &s))
-            return false;
-    }
-    if (bn_fq_is_zero(&y0))
-        return false; /* unreachable when a1 != 0; kept fail-closed */
-    bn_fq_add(&den, &y0, &y0);
-    bn_fq_inv(&den, &den);
-    r->c0 = y0;
-    bn_fq_mul(&r->c1, &in.c1, &den);
-
-    struct bn_fq2 chk;
-    bn_fq2_sq(&chk, r);
-    return bn_fq2_eq(&chk, &in);
-}
-
 /* Compare two Fq2 elements as FE2IP integers c1*q + c0 (Proof.cpp:25-34):
  * c1 first, then c0, each as a canonical integer. */
 static int bn_fq2_fe2ip_cmp(const struct bn_fq2 *a, const struct bn_fq2 *b)
@@ -1210,29 +1148,261 @@ static int bn_fq2_fe2ip_cmp(const struct bn_fq2 *a, const struct bn_fq2 *b)
     return memcmp(x, y, 32);
 }
 
-/* r, the prime order of G1 and G2 (alt_bn128_modulus_r), little-endian limbs. */
-static const uint64_t BN_R[4] = {
-    0x43e1f593f0000001ULL, 0x2833e84879b97091ULL,
-    0xb85045b68181585dULL, 0x30644e72e131a029ULL
+
+/* ══════════════════════════════════════════════════════════════
+ *  Pairing engine (bn254_engine.inc), instantiated per multiplier
+ * ══════════════════════════════════════════════════════════════ */
+
+/* BN parameter u = 4965661367192848881 (from libsnark alt_bn128_init.cpp)
+ * 6u+2 = 29793968203157093288 = 0x19D797039BE763BA8 */
+static const uint64_t ATE_LOOP[2] = {
+    0x9D797039BE763BA8ULL,
+    0x0000000000000001ULL
 };
 
-/* True iff r*P is the identity: the same test as zclassicd Proof.cpp:166
- * ("point is not in G2"). The twist curve has order r * (2q - r), so a point
- * that merely satisfies the curve equation is almost never in the order-r
- * subgroup the pairing is defined on. One 254-bit double-and-add per proof
- * (only g_B is a G2 element); zclassicd pays the same multiplication. */
-static bool bn_g2_in_subgroup(const struct bn_g2 *p)
+#define BNE_U 4965661367192848881ULL
+#define BNE_INV 0x87d20782e4866389ULL
+/* q - 2 and (q + 1) / 4, little-endian limbs */
+static const uint64_t BNE_QM2[4] = {
+    0x3c208c16d87cfd45ULL, 0x97816a916871ca8dULL,
+    0xb85045b68181585dULL, 0x30644e72e131a029ULL
+};
+static const uint64_t BNE_SQRT_EXP[4] = {
+    0x4f082305b61f3f52ULL, 0x65e05aa45a1c72a3ULL,
+    0x6e14116da0605617ULL, 0x0c19139cb84c680aULL
+};
+
+/* One line function of a G2 point's Miller loop (unscaled by P). The loop has
+ * 64 doublings, 36 additions for the set bits of 6u+2, and 2 Frobenius
+ * additions. */
+#define BN_NLINES 102
+struct bn_line {
+    struct bn_fq2 e0, vw, vv;
+};
+
+/* One factor of a pairing product: the lines of Q and the affine P. */
+struct bn_pair {
+    const struct bn_line *lines; /* NULL: identity operand, factor 1 */
+    const struct bn_fq *xp, *yp;
+};
+
+/* Per verifying key: the line tables of its fixed G2 elements and of the G2
+ * generator, and Straus tables for the IC multi-scalar multiplication. Built
+ * once from the key and immutable afterwards. */
+#define BN_PREP_MAX_INPUTS 16
+struct bn_tab_pt {
+    struct bn_fq x, y;
+    bool inf;
+};
+struct bn_phgr_prep {
+    struct bn_line l_alpha_a[BN_NLINES], l_alpha_c[BN_NLINES], l_gamma[BN_NLINES];
+    struct bn_line l_gamma_beta[BN_NLINES], l_rc_z[BN_NLINES], l_g2_one[BN_NLINES];
+    bool have_alpha_a, have_alpha_c, have_gamma, have_gamma_beta, have_rc_z;
+    bool have_g2_one, g2_one_ok, have_tables;
+    struct bn_tab_pt tab[BN_PREP_MAX_INPUTS][15];
+    /* the key this was built from (ic copied in full when it fits) */
+    struct ppzksnark_vk vk;
+    struct bn_g1 ic[BN_PREP_MAX_INPUTS + 1];
+};
+
+/* Portable instance: the dispatched multiply, byte-identical to the MULX one. */
+#define BNE_ID portable
+#define BNE_ATTR
+#define BNE_MUL(r, a, b) bn254_accel_mont_mul_portable((r), (a), (b))
+#include "bn254_engine.inc"
+#undef BNE_ID
+#undef BNE_ATTR
+#undef BNE_MUL
+
+#if defined(__x86_64__) || defined(_M_X64)
+/* BMI2+ADX instance: the multiply of mont_adx.h inlined into every field op. */
+#define BNE_ID adx
+#define BNE_ASM_ADDSUB 1
+#define BNE_ATTR __attribute__((target("bmi2,adx")))
+#define BNE_MUL(r, a, b) mont_mul_adx4((r), (a), (b), FQ_Q, BNE_INV)
+#include "bn254_engine.inc"
+#undef BNE_ID
+#undef BNE_ATTR
+#undef BNE_MUL
+#undef BNE_ASM_ADDSUB
+#define BN_HAVE_ADX_ENGINE 1
+#endif
+
+struct bn_engine {
+    const char *name;
+    bool (*g1_decompress)(struct bn_g1 *, const uint8_t[33]);
+    bool (*fq2_sqrt)(struct bn_fq2 *, const struct bn_fq2 *);
+    bool (*g2_decompress)(struct bn_g2 *, const uint8_t[65]);
+    bool (*g2_in_subgroup)(const struct bn_g2 *);
+    void (*prep_build)(struct bn_phgr_prep *, const struct ppzksnark_vk *);
+    int (*verify)(const struct ppzksnark_vk *, const struct bn_phgr_prep *,
+                  const struct ppzksnark_proof *, const uint64_t (*)[4], size_t);
+    void (*pairing_product)(struct bn_fq12 *, const struct bn_g1 *, const struct bn_g2 *, size_t);
+    void (*pairing_full)(struct bn_fq12 *, const struct bn_g1 *, const struct bn_g2 *);
+    bool (*multi_pairing_check)(const struct bn_g1 *, const struct bn_g2 *, size_t);
+    void (*final_exp)(struct bn_fq12 *);
+#ifdef ZCL_TESTING
+    void (*t_fq12_mul)(struct bn_fq12 *, const struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_sqr)(struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_cyc_sqr)(struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_inv)(struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_frob1)(struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_frob2)(struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_frob3)(struct bn_fq12 *, const struct bn_fq12 *);
+    void (*t_fq12_mul_by_024)(struct bn_fq12 *, const struct bn_fq2 *, const struct bn_fq2 *, const struct bn_fq2 *);
+    void (*t_fq6_mul)(struct bn_fq6 *, const struct bn_fq6 *, const struct bn_fq6 *);
+    void (*t_fq6_sqr)(struct bn_fq6 *, const struct bn_fq6 *);
+    void (*t_fq_inv)(struct bn_fq *, const struct bn_fq *);
+    bool (*t_fq_sqrt)(struct bn_fq *, const struct bn_fq *);
+    void (*t_accumulate)(struct bn_g1 *, const struct bn_phgr_prep *, const struct ppzksnark_vk *,
+                         const uint64_t (*)[4], size_t);
+#endif
+};
+
+static const struct bn_engine g_engine_portable = {
+    "portable",
+    bne_portable_g1_decompress, bne_portable_fq2_sqrt, bne_portable_g2_decompress,
+    bne_portable_g2_in_subgroup, bne_portable_prep_build, bne_portable_verify,
+    bne_portable_pairing_product, bne_portable_pairing_full,
+    bne_portable_multi_pairing_check, bne_portable_final_exp
+#ifdef ZCL_TESTING
+    , bne_portable_fq12_mul, bne_portable_fq12_sqr, bne_portable_fq12_cyc_sqr, bne_portable_fq12_inv,
+    bne_portable_fq12_frob1, bne_portable_fq12_frob2, bne_portable_fq12_frob3, bne_portable_fq12_mul_by_024,
+    bne_portable_fq6_mul, bne_portable_fq6_sqr, bne_portable_fq_inv, bne_portable_fq_sqrt, bne_portable_accumulate
+#endif
+};
+#ifdef BN_HAVE_ADX_ENGINE
+static const struct bn_engine g_engine_adx = {
+    "adx",
+    bne_adx_g1_decompress, bne_adx_fq2_sqrt, bne_adx_g2_decompress,
+    bne_adx_g2_in_subgroup, bne_adx_prep_build, bne_adx_verify,
+    bne_adx_pairing_product, bne_adx_pairing_full,
+    bne_adx_multi_pairing_check, bne_adx_final_exp
+#ifdef ZCL_TESTING
+    , bne_adx_fq12_mul, bne_adx_fq12_sqr, bne_adx_fq12_cyc_sqr, bne_adx_fq12_inv,
+    bne_adx_fq12_frob1, bne_adx_fq12_frob2, bne_adx_fq12_frob3, bne_adx_fq12_mul_by_024,
+    bne_adx_fq6_mul, bne_adx_fq6_sqr, bne_adx_fq_inv, bne_adx_fq_sqrt, bne_adx_accumulate
+#endif
+};
+#endif
+
+/* The engine every public entry point uses. Selection is idempotent (every
+ * racer stores the same pointer), so a relaxed atomic suffices. */
+static _Atomic(const struct bn_engine *) g_engine_sel = NULL;
+
+static const struct bn_engine *bn_eng(void)
 {
-    struct bn_g2 acc;
-    bn_g2_identity(&acc);
-    for (int i = 3; i >= 0; i--) {
-        for (int bit = 63; bit >= 0; bit--) {
-            bn_g2_double(&acc, &acc);
-            if ((BN_R[i] >> bit) & 1)
-                bn_g2_add(&acc, &acc, p);
-        }
+    const struct bn_engine *e = atomic_load_explicit(&g_engine_sel, memory_order_relaxed);
+    if (__builtin_expect(e == NULL, 0)) {
+        e = &g_engine_portable;
+#ifdef BN_HAVE_ADX_ENGINE
+        if (bn254_accel_cpu_has_adx())
+            e = &g_engine_adx;
+#endif
+        atomic_store_explicit(&g_engine_sel, e, memory_order_relaxed);
     }
-    return bn_g2_is_identity(&acc);
+    return e;
+}
+
+#ifdef ZCL_TESTING
+/* Test hook: 0 = automatic, 1 = portable instance, 2 = BMI2+ADX instance.
+ * Returns false (and changes nothing) when the instance is unavailable. Not
+ * thread-safe against concurrent verifiers; for tests only. */
+bool bn254_test_select_engine(int which)
+{
+    if (which == 0) {
+        atomic_store_explicit(&g_engine_sel, NULL, memory_order_relaxed);
+        return true;
+    }
+    if (which == 1) {
+        atomic_store_explicit(&g_engine_sel, &g_engine_portable, memory_order_relaxed);
+        return true;
+    }
+#ifdef BN_HAVE_ADX_ENGINE
+    if (which == 2 && bn254_accel_cpu_has_adx()) {
+        atomic_store_explicit(&g_engine_sel, &g_engine_adx, memory_order_relaxed);
+        return true;
+    }
+#endif
+    return false;
+}
+
+const char *bn254_test_engine_name(void) { return bn_eng()->name; }
+
+void bn254_test_miller(struct bn_fq12 *r, const struct bn_g1 *p, const struct bn_g2 *q, size_t n)
+{
+    bn254_init_frobenius();
+    bn_eng()->pairing_product(r, p, q, n);
+}
+
+void bn254_test_final_exp(struct bn_fq12 *f)
+{
+    bn254_init_frobenius();
+    bn_eng()->final_exp(f);
+}
+
+bool bn254_test_g2_in_subgroup(const struct bn_g2 *p)
+{
+    bn254_init_frobenius();
+    return bn_eng()->g2_in_subgroup(p);
+}
+
+void bn254_test_fq12_mul(struct bn_fq12 *r, const struct bn_fq12 *a, const struct bn_fq12 *b)
+{ bn254_init_frobenius(); bn_eng()->t_fq12_mul(r, a, b); }
+void bn254_test_fq12_sqr(struct bn_fq12 *r, const struct bn_fq12 *a)
+{ bn254_init_frobenius(); bn_eng()->t_fq12_sqr(r, a); }
+void bn254_test_fq12_cyc_sqr(struct bn_fq12 *r, const struct bn_fq12 *a)
+{ bn254_init_frobenius(); bn_eng()->t_fq12_cyc_sqr(r, a); }
+void bn254_test_fq12_inv(struct bn_fq12 *r, const struct bn_fq12 *a)
+{ bn254_init_frobenius(); bn_eng()->t_fq12_inv(r, a); }
+void bn254_test_fq12_frob(struct bn_fq12 *r, const struct bn_fq12 *a, int power)
+{
+    bn254_init_frobenius();
+    if (power == 1) bn_eng()->t_fq12_frob1(r, a);
+    else if (power == 2) bn_eng()->t_fq12_frob2(r, a);
+    else bn_eng()->t_fq12_frob3(r, a);
+}
+void bn254_test_fq12_mul_by_024(struct bn_fq12 *f, const struct bn_fq2 *x0,
+                                const struct bn_fq2 *x4, const struct bn_fq2 *x2)
+{ bn254_init_frobenius(); bn_eng()->t_fq12_mul_by_024(f, x0, x4, x2); }
+void bn254_test_fq6_mul(struct bn_fq6 *r, const struct bn_fq6 *a, const struct bn_fq6 *b)
+{ bn254_init_frobenius(); bn_eng()->t_fq6_mul(r, a, b); }
+void bn254_test_fq6_sqr(struct bn_fq6 *r, const struct bn_fq6 *a)
+{ bn254_init_frobenius(); bn_eng()->t_fq6_sqr(r, a); }
+void bn254_test_fq_inv(struct bn_fq *r, const struct bn_fq *a)
+{ bn254_init_frobenius(); bn_eng()->t_fq_inv(r, a); }
+bool bn254_test_fq_sqrt(struct bn_fq *r, const struct bn_fq *a)
+{ bn254_init_frobenius(); return bn_eng()->t_fq_sqrt(r, a); }
+
+/* The IC accumulation the verifier uses (prepared tables or plain), for tests.
+ * The prepared state is the verifier's own: this goes through bn_prep_get, so a
+ * key that differs from the cached one is accumulated through a private copy. */
+static const struct bn_phgr_prep *bn_prep_get(const struct bn_engine *e,
+                                              const struct ppzksnark_vk *vk,
+                                              struct bn_phgr_prep **tmp);
+void bn254_test_msm(struct bn_g1 *acc, const struct ppzksnark_vk *vk,
+                    const uint64_t (*in)[4], size_t n)
+{
+    bn254_init_frobenius();
+    const struct bn_engine *e = bn_eng();
+    struct bn_phgr_prep *tmp;
+    const struct bn_phgr_prep *pp = bn_prep_get(e, vk, &tmp);
+    if (pp)
+        e->t_accumulate(acc, pp, vk, in, n);
+    free(tmp);
+}
+#endif
+
+bool bn_g1_decompress(struct bn_g1 *p, const uint8_t data[33])
+{
+    bn254_init_frobenius();
+    return bn_eng()->g1_decompress(p, data);
+}
+
+bool bn_fq2_sqrt(struct bn_fq2 *r, const struct bn_fq2 *a)
+{
+    bn254_init_frobenius();
+    return bn_eng()->fq2_sqrt(r, a);
 }
 
 /* Decode a CompressedG2 exactly as zclassicd does (Proof.hpp:147-161,
@@ -1245,426 +1415,29 @@ static bool bn_g2_in_subgroup(const struct bn_g2 *p)
  * y is the root whose FE2IP integer is the larger of (y, -y) iff y_gt. */
 bool bn_g2_decompress(struct bn_g2 *p, const uint8_t data[65])
 {
-    if ((data[0] & 0xFE) != 0x0a)
-        return false;
-    bool y_gt = (data[0] & 0x01) != 0;
-
-    if (!fq2_decode_fe2ip(&p->x.c0, &p->x.c1, data + 1))
-        return false;
-
-    /* y^2 = x^3 + b_twist */
-    struct bn_fq2 rhs, b_twist, y, neg_y;
-    bn_fq2_sq(&rhs, &p->x);
-    bn_fq2_mul(&rhs, &rhs, &p->x);
-    bn_g2_twist_b(&b_twist);
-    bn_fq2_add(&rhs, &rhs, &b_twist);
-
-    if (!bn_fq2_sqrt(&y, &rhs))
-        return false;
-    bn_fq2_neg(&neg_y, &y);
-    if ((bn_fq2_fe2ip_cmp(&y, &neg_y) > 0) != y_gt)
-        y = neg_y;
-
-    p->y = y;
-    bn_fq2_one(&p->z);
-    return bn_g2_in_subgroup(p);
-}
-
-/* ══════════════════════════════════════════════════════════════
- *  Optimal Ate Pairing on BN-254
- * ══════════════════════════════════════════════════════════════ */
-
-/* BN parameter u = 4965661367192848881 (from libsnark alt_bn128_init.cpp)
- * 6u+2 = 29793968203157093288 = 0x19D797039BE763BA8 */
-static const uint64_t ATE_LOOP[2] = {
-    0x9D797039BE763BA8ULL,
-    0x0000000000000001ULL
-};
-static const int ATE_LOOP_BITS = 65; /* Number of bits */
-static const bool ATE_LOOP_NEG = false;
-
-/* mul_by_024: multiply Fp12 by sparse element with non-zero at positions
- * z0 (c0.c0), z2 (c0.c2), z4 (c1.c1).
- * Uses naive approach (construct full Fp12 and multiply) for correctness. */
-static void bn_fq12_mul_by_024(struct bn_fq12 *r,
-                                const struct bn_fq2 *ell_0,
-                                const struct bn_fq2 *ell_VW,
-                                const struct bn_fq2 *ell_VV)
-{
-    /* Construct sparse Fp12: Fp12(Fp6(ell_0, 0, ell_VV), Fp6(0, ell_VW, 0)) */
-    struct bn_fq12 sparse;
-    bn_fq12_zero(&sparse);
-    sparse.c0.c0 = *ell_0;
-    sparse.c0.c2 = *ell_VV;
-    sparse.c1.c1 = *ell_VW;
-
-    struct bn_fq12 tmp = *r;
-    bn_fq12_mul(r, &tmp, &sparse);
-}
-
-/* Doubling step for flipped Miller loop — direct port from libsnark.
- * Updates current point R (Jacobian on twist curve) and produces
- * line function coefficients ell_0, ell_VW, ell_VV. */
-static void doubling_step(struct bn_g2 *current,
-                          struct bn_fq2 *ell_0,
-                          struct bn_fq2 *ell_VW,
-                          struct bn_fq2 *ell_VV)
-{
-    struct bn_fq2 X = current->x, Y = current->y, Z = current->z;
-
-    /* A = X*Y/2 (use inv(2) to avoid division) */
-    struct bn_fq two_fq;
-    bn_fq_from_u64(&two_fq, 2);
-    struct bn_fq two_inv_fq;
-    bn_fq_inv(&two_inv_fq, &two_fq);
-    struct bn_fq2 two_inv;
-    two_inv.c0 = two_inv_fq;
-    bn_fq_zero(&two_inv.c1);
-
-    struct bn_fq2 XY;
-    bn_fq2_mul(&XY, &X, &Y);
-    struct bn_fq2 A;
-    bn_fq2_mul(&A, &two_inv, &XY);
-
-    struct bn_fq2 B; bn_fq2_sq(&B, &Y);
-    struct bn_fq2 C; bn_fq2_sq(&C, &Z);
-    struct bn_fq2 D;
-    bn_fq2_add(&D, &C, &C);
-    bn_fq2_add(&D, &D, &C); /* D = 3C */
-
-    /* E = twist_coeff_b * D = (3/xi)*D, but twist_coeff_b = b * inv(xi) = 3 * inv(9+u)
-     * We can compute: E = (3/(9+u)) * D. Precompute twist_coeff_b. */
-    struct bn_fq2 xi, three_fq2, twist_b, E;
-    bn_fq_from_u64(&xi.c0, 9);
-    bn_fq_one(&xi.c1);
-    bn_fq2_inv(&twist_b, &xi);
-    bn_fq_from_u64(&three_fq2.c0, 3);
-    bn_fq_zero(&three_fq2.c1);
-    bn_fq2_mul(&twist_b, &twist_b, &three_fq2);
-    bn_fq2_mul(&E, &twist_b, &D);
-
-    struct bn_fq2 F;
-    bn_fq2_add(&F, &E, &E);
-    bn_fq2_add(&F, &F, &E); /* F = 3E */
-
-    struct bn_fq2 BpF;
-    bn_fq2_add(&BpF, &B, &F);
-    struct bn_fq2 G;
-    bn_fq2_mul(&G, &two_inv, &BpF); /* G = (B+F)/2 */
-
-    struct bn_fq2 YpZ, BpC, H;
-    bn_fq2_add(&YpZ, &Y, &Z);
-    bn_fq2_sq(&YpZ, &YpZ);
-    bn_fq2_add(&BpC, &B, &C);
-    bn_fq2_sub(&H, &YpZ, &BpC); /* H = (Y+Z)^2 - (B+C) */
-
-    struct bn_fq2 I;
-    bn_fq2_sub(&I, &E, &B); /* I = E - B */
-
-    struct bn_fq2 J;
-    bn_fq2_sq(&J, &X); /* J = X^2 */
-
-    struct bn_fq2 E_sq;
-    bn_fq2_sq(&E_sq, &E);
-
-    /* Update current point */
-    struct bn_fq2 BmF;
-    bn_fq2_sub(&BmF, &B, &F);
-    bn_fq2_mul(&current->x, &A, &BmF); /* X3 = A*(B-F) */
-
-    struct bn_fq2 Gsq, three_Esq;
-    bn_fq2_sq(&Gsq, &G);
-    bn_fq2_add(&three_Esq, &E_sq, &E_sq);
-    bn_fq2_add(&three_Esq, &three_Esq, &E_sq);
-    bn_fq2_sub(&current->y, &Gsq, &three_Esq); /* Y3 = G^2 - 3*E^2 */
-
-    bn_fq2_mul(&current->z, &B, &H); /* Z3 = B*H */
-
-    /* Line function coefficients:
-     * ell_0 = xi * I  (goes to z0 = c0.c0)
-     * ell_VW = -H     (later scaled by yP, goes to z2 = c0.c2)
-     * ell_VV = 3*J    (later scaled by xP, goes to z4 = c1.c1) */
-    bn_fq2_mul_by_nonresidue(ell_0, &I); /* xi * I (mul_by_nonresidue IS xi*) */
-    bn_fq2_neg(ell_VW, &H);
-    bn_fq2_add(ell_VV, &J, &J);
-    bn_fq2_add(ell_VV, ell_VV, &J); /* 3*J */
-}
-
-/* Mixed addition step — direct port from libsnark.
- * base is affine (on twist), current is Jacobian. */
-static void mixed_addition_step(const struct bn_fq2 *base_x,
-                                const struct bn_fq2 *base_y,
-                                struct bn_g2 *current,
-                                struct bn_fq2 *ell_0,
-                                struct bn_fq2 *ell_VW,
-                                struct bn_fq2 *ell_VV)
-{
-    struct bn_fq2 X1 = current->x, Y1 = current->y, Z1 = current->z;
-    const struct bn_fq2 *x2 = base_x, *y2 = base_y;
-
-    struct bn_fq2 D, E, F, G, H, I, J;
-    struct bn_fq2 x2Z1;
-    bn_fq2_mul(&x2Z1, x2, &Z1);
-    bn_fq2_sub(&D, &X1, &x2Z1); /* D = X1 - x2*Z1 */
-
-    struct bn_fq2 y2Z1;
-    bn_fq2_mul(&y2Z1, y2, &Z1);
-    bn_fq2_sub(&E, &Y1, &y2Z1); /* E = Y1 - y2*Z1 */
-
-    bn_fq2_sq(&F, &D);          /* F = D^2 */
-    bn_fq2_sq(&G, &E);          /* G = E^2 */
-    bn_fq2_mul(&H, &D, &F);     /* H = D*F */
-
-    bn_fq2_mul(&I, &X1, &F);    /* I = X1*F */
-
-    struct bn_fq2 Z1G, twoI;
-    bn_fq2_mul(&Z1G, &Z1, &G);
-    bn_fq2_add(&twoI, &I, &I);
-    bn_fq2_add(&J, &H, &Z1G);
-    bn_fq2_sub(&J, &J, &twoI);  /* J = H + Z1*G - 2*I */
-
-    bn_fq2_mul(&current->x, &D, &J); /* X3 = D*J */
-
-    struct bn_fq2 ImJ, HY1;
-    bn_fq2_sub(&ImJ, &I, &J);
-    bn_fq2_mul(&ImJ, &E, &ImJ);
-    bn_fq2_mul(&HY1, &H, &Y1);
-    bn_fq2_sub(&current->y, &ImJ, &HY1); /* Y3 = E*(I-J) - H*Y1 */
-
-    bn_fq2_mul(&current->z, &Z1, &H); /* Z3 = Z1*H */
-
-    /* Line function coefficients */
-    struct bn_fq2 Ex2, Dy2, t;
-    bn_fq2_mul(&Ex2, &E, x2);
-    bn_fq2_mul(&Dy2, &D, y2);
-    bn_fq2_sub(&t, &Ex2, &Dy2);
-    bn_fq2_mul_by_nonresidue(ell_0, &t); /* ell_0 = xi * (E*x2 - D*y2) */
-
-    bn_fq2_neg(ell_VV, &E);              /* ell_VV = -E (later * xP) */
-    *ell_VW = D;                          /* ell_VW = D  (later * yP) */
-}
-
-/* Line function double: f = f² · line, update T. */
-static void line_func_double(struct bn_fq12 *f,
-                              struct bn_g2 *t,
-                              const struct bn_fq *px_a, const struct bn_fq *py_a)
-{
-    struct bn_fq2 ell_0, ell_VW, ell_VV;
-    doubling_step(t, &ell_0, &ell_VW, &ell_VV);
-
-    /* Scale by P: ell_VW *= yP, ell_VV *= xP */
-    struct bn_fq2 scaled_VW, scaled_VV;
-    bn_fq_mul(&scaled_VW.c0, &ell_VW.c0, py_a);
-    bn_fq_mul(&scaled_VW.c1, &ell_VW.c1, py_a);
-    bn_fq_mul(&scaled_VV.c0, &ell_VV.c0, px_a);
-    bn_fq_mul(&scaled_VV.c1, &ell_VV.c1, px_a);
-
-    struct bn_fq12 fsq;
-    bn_fq12_sq(&fsq, f);
-    *f = fsq;
-    bn_fq12_mul_by_024(f, &ell_0, &scaled_VW, &scaled_VV);
-}
-
-/* Line function add: f *= line, update T. */
-static void line_func_add(struct bn_fq12 *f,
-                           struct bn_g2 *t,
-                           const struct bn_fq2 *qx, const struct bn_fq2 *qy,
-                           const struct bn_fq *px_a, const struct bn_fq *py_a)
-{
-    struct bn_fq2 ell_0, ell_VW, ell_VV;
-    mixed_addition_step(qx, qy, t, &ell_0, &ell_VW, &ell_VV);
-
-    struct bn_fq2 scaled_VW, scaled_VV;
-    bn_fq_mul(&scaled_VW.c0, &ell_VW.c0, py_a);
-    bn_fq_mul(&scaled_VW.c1, &ell_VW.c1, py_a);
-    bn_fq_mul(&scaled_VV.c0, &ell_VV.c0, px_a);
-    bn_fq_mul(&scaled_VV.c1, &ell_VV.c1, px_a);
-
-    bn_fq12_mul_by_024(f, &ell_0, &scaled_VW, &scaled_VV);
-}
-
-/* exp_by_neg_z: compute elt^{-z} where z = 4965661367192848881.
- * Since z is positive (alt_bn128_final_exponent_is_z_neg = false),
- * this computes elt^z then takes conjugate (unitary inverse). */
-static void bn_fq12_exp_by_neg_z(struct bn_fq12 *r, const struct bn_fq12 *f)
-{
-    const uint64_t z = 4965661367192848881ULL;
-    struct bn_fq12 acc;
-    bn_fq12_one(&acc);
-    struct bn_fq12 base = *f;
-    for (int i = 62; i >= 0; i--) {
-        bn_fq12_sq(&acc, &acc);
-        if ((z >> i) & 1)
-            bn_fq12_mul(&acc, &acc, &base);
-    }
-    /* z is positive, so negate: unitary_inverse = conjugation */
-    bn_fq12_conjugate(&acc);
-    *r = acc;
-}
-
-/* BN-254 final exponentiation: f^{(p^12-1)/r}
- * Split as: easy_part * hard_part
- *   easy = (p^6 - 1)(p^2 + 1)
- *   hard = (p^4 - p^2 + 1)/r
- *
- * Hard part uses the BN u-chain + Frobenius decomposition from
- * "High-Speed Software Implementation of the Optimal Ate Pairing
- *  over Barreto-Naehrig Curves" (Beuchat et al., 2010) and
- * go-ethereum's bn256 implementation. */
-static void bn254_final_exp(struct bn_fq12 *f)
-{
     bn254_init_frobenius();
-
-    /* ── Easy part step 1: f^{p^6 - 1} ──
-     * f^{p^6} = conjugate(f) since Fq12 = Fq6[w]/(w^2-v) */
-    struct bn_fq12 t0, t1;
-    t0 = *f;
-    bn_fq12_conjugate(&t0);         /* t0 = f^{p^6} = conj(f) */
-    bn_fq12_inv(&t1, f);            /* t1 = f^{-1} */
-    bn_fq12_mul(f, &t0, &t1);       /* f = f^{p^6 - 1} */
-
-    /* ── Easy part step 2: f^{p^2 + 1} ── */
-    bn_fq12_frobenius_map(&t0, f, 2);  /* t0 = f^{p^2} */
-    bn_fq12_mul(f, &t0, f);             /* f = f^{p^2 + 1} */
-
-    /* Now f = original_f^{(p^6-1)(p^2+1)}, in the cyclotomic subgroup. */
-
-    /* ── Hard part: Fuentes-Castaneda et al. formula (from libsnark) ──
-     * Computes elt^(2z(6z²+3z+1)(q⁴-q²+1)/r) using exp_by_neg_z. */
-    struct bn_fq12 A, B, C, D, E, F2, G;
-    struct bn_fq12 H, I, J, K, L, M, N, O, P, Q, R, S, T, U;
-
-    bn_fq12_exp_by_neg_z(&A, f);       /* A = f^{-z} */
-    bn_fq12_sq(&B, &A);                /* B = A² = f^{-2z} */
-    bn_fq12_sq(&C, &B);                /* C = B² = f^{-4z} */
-    bn_fq12_mul(&D, &C, &B);           /* D = C*B = f^{-6z} */
-    bn_fq12_exp_by_neg_z(&E, &D);      /* E = D^{-z} = f^{6z²} */
-    bn_fq12_sq(&F2, &E);               /* F = E² = f^{12z²} */
-    bn_fq12_exp_by_neg_z(&G, &F2);     /* G = F^{-z} = f^{-12z³} */
-    H = D; bn_fq12_conjugate(&H);      /* H = conj(D) = f^{6z} */
-    I = G; bn_fq12_conjugate(&I);      /* I = conj(G) = f^{12z³} */
-    bn_fq12_mul(&J, &I, &E);           /* J = I*E = f^{12z³+6z²} */
-    bn_fq12_mul(&K, &J, &H);           /* K = J*H = f^{12z³+6z²+6z} */
-    bn_fq12_mul(&L, &K, &B);           /* L = K*B = f^{12z³+6z²+4z} */
-    bn_fq12_mul(&M, &K, &E);           /* M = K*E = f^{12z³+12z²+6z} */
-    bn_fq12_mul(&N, &M, f);            /* N = M*f = f^{12z³+12z²+6z+1} */
-    bn_fq12_frobenius_map(&O, &L, 1);  /* O = L^{p} */
-    bn_fq12_mul(&P, &O, &N);           /* P = O*N */
-    bn_fq12_frobenius_map(&Q, &K, 2);  /* Q = K^{p²} */
-    bn_fq12_mul(&R, &Q, &P);           /* R = Q*P */
-    S = *f; bn_fq12_conjugate(&S);     /* S = conj(f) = f^{-1} */
-    bn_fq12_mul(&T, &S, &L);           /* T = S*L = f^{12z³+6z²+4z-1} */
-    bn_fq12_frobenius_map(&U, &T, 3);  /* U = T^{p³} */
-    bn_fq12_mul(f, &U, &R);            /* result = U*R */
+    return bn_eng()->g2_decompress(p, data);
 }
 
-/* Forward declaration — defined below after multi_pairing_check */
-static void bn254_miller_loop(struct bn_fq12 *result,
-                              const struct bn_g1 *p,
-                              const struct bn_g2 *q);
-
+/* Optimal ate pairing. Same function as before: the Miller loop with the same
+ * line formulas and the same final exponentiation, so the result is the same
+ * field element for any input. */
 void bn254_pairing(struct bn_fq12 *result,
                    const struct bn_g1 *p,
                    const struct bn_g2 *q)
 {
-    bn254_miller_loop(result, p, q);
-    bn254_final_exp(result);
-}
-
-/* Compute Q.mul_by_q() — Frobenius on twist curve G2.
- * Maps (X, Y, Z) → (twist_mul_by_q_X * conj(X), twist_mul_by_q_Y * conj(Y), conj(Z))
- * Returns result in affine (Z=1). Input must be affine. */
-static void g2_mul_by_q(struct bn_fq2 *rx, struct bn_fq2 *ry,
-                         const struct bn_fq2 *qx, const struct bn_fq2 *qy)
-{
     bn254_init_frobenius();
-    /* Frobenius on Fq2 is conjugation */
-    struct bn_fq2 cx, cy;
-    bn_fq2_conj(&cx, qx);
-    bn_fq2_conj(&cy, qy);
-    /* Multiply by twist constants from libsnark alt_bn128_init.cpp */
-    bn_fq2_mul(rx, &g_frob.twist_frob_x, &cx);
-    bn_fq2_mul(ry, &g_frob.twist_frob_y, &cy);
+    bn_eng()->pairing_full(result, p, q);
 }
 
-/* Miller loop only (no final exponentiation) — for multi-pairing optimization.
- * Direct port of libsnark alt_bn128_ate_miller_loop. */
-static void bn254_miller_loop(struct bn_fq12 *result,
-                              const struct bn_g1 *p,
-                              const struct bn_g2 *q)
-{
-    if (bn_g1_is_identity(p) || bn_g2_is_identity(q)) {
-        bn_fq12_one(result);
-        return;
-    }
-
-    struct bn_fq px_a, py_a;
-    bn_g1_to_affine(&px_a, &py_a, p);
-
-    struct bn_fq2 qx_a, qy_a;
-    bn_g2_to_affine(&qx_a, &qy_a, q);
-
-    /* R starts as Q in Jacobian */
-    struct bn_g2 R;
-    R.x = qx_a;
-    R.y = qy_a;
-    bn_fq2_one(&R.z);
-
-    bn_fq12_one(result);
-
-    /* Miller loop: MSB-to-LSB scan of ate_loop_count, skip leading 1 */
-    bool found_one = false;
-    for (int i = ATE_LOOP_BITS - 1; i >= 0; i--) {
-        int bit_idx = i / 64;
-        int bit_pos = i % 64;
-        bool bit = (bit_idx < 2) && ((ATE_LOOP[bit_idx] >> bit_pos) & 1);
-
-        if (!found_one) {
-            found_one = bit;
-            continue;
-        }
-
-        line_func_double(result, &R, &px_a, &py_a);
-        if (bit)
-            line_func_add(result, &R, &qx_a, &qy_a, &px_a, &py_a);
-    }
-
-    if (ATE_LOOP_NEG)
-        bn_fq12_conjugate(result);
-
-    /* Frobenius correction: Q1 = Q.mul_by_q(), Q2 = Q1.mul_by_q() with Q2.Y negated */
-    struct bn_fq2 q1x, q1y;
-    g2_mul_by_q(&q1x, &q1y, &qx_a, &qy_a);
-
-    struct bn_fq2 q2x, q2y;
-    g2_mul_by_q(&q2x, &q2y, &q1x, &q1y);
-    bn_fq2_neg(&q2y, &q2y); /* Q2.Y = -Q2.Y */
-
-    line_func_add(result, &R, &q1x, &q1y, &px_a, &py_a);
-    line_func_add(result, &R, &q2x, &q2y, &px_a, &py_a);
-}
-
-/* Multi-pairing check: product of pairings == 1 in GT.
- * Computes product of Miller loops, then single final exponentiation.
- * This is both faster and more correct than separate pairings. */
+/* Multi-pairing check: product of pairings == 1 in GT, one final
+ * exponentiation. */
 bool bn254_multi_pairing_check(
     const struct bn_g1 *a_pts, const struct bn_g2 *b_pts,
     size_t n_pairs)
 {
-    struct bn_fq12 acc;
-    bn_fq12_one(&acc);
-
-    for (size_t i = 0; i < n_pairs; i++) {
-        struct bn_fq12 ml;
-        bn254_miller_loop(&ml, &a_pts[i], &b_pts[i]);
-        bn_fq12_mul(&acc, &acc, &ml);
-    }
-
-    bn254_final_exp(&acc);
-
-    struct bn_fq12 one;
-    bn_fq12_one(&one);
-    return bn_fq12_eq(&acc, &one);
+    bn254_init_frobenius();
+    return bn_eng()->multi_pairing_check(a_pts, b_pts, n_pairs);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -1674,29 +1447,31 @@ bool bn254_multi_pairing_check(
 bool ppzksnark_proof_read(struct ppzksnark_proof *proof, const uint8_t data[296])
 {
     size_t off = 0;
+    bn254_init_frobenius();
+    const struct bn_engine *e = bn_eng();
     /* 8 elements: g_A(33), g_A'(33), g_B(65), g_B'(33), g_C(33), g_C'(33), g_K(33), g_H(33) */
-    if (!bn_g1_decompress(&proof->a, data + off))
+    if (!e->g1_decompress(&proof->a, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_A) failed");
     off += 33;
-    if (!bn_g1_decompress(&proof->a_prime, data + off))
+    if (!e->g1_decompress(&proof->a_prime, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_A') failed");
     off += 33;
-    if (!bn_g2_decompress(&proof->b, data + off))
+    if (!e->g2_decompress(&proof->b, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g2_decompress(g_B) failed");
     off += 65;
-    if (!bn_g1_decompress(&proof->b_prime, data + off))
+    if (!e->g1_decompress(&proof->b_prime, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_B') failed");
     off += 33;
-    if (!bn_g1_decompress(&proof->c, data + off))
+    if (!e->g1_decompress(&proof->c, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_C) failed");
     off += 33;
-    if (!bn_g1_decompress(&proof->c_prime, data + off))
+    if (!e->g1_decompress(&proof->c_prime, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_C') failed");
     off += 33;
-    if (!bn_g1_decompress(&proof->k, data + off))
+    if (!e->g1_decompress(&proof->k, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_K) failed");
     off += 33;
-    if (!bn_g1_decompress(&proof->h, data + off))
+    if (!e->g1_decompress(&proof->h, data + off))
         LOG_FAIL("phgr13", "proof_read: bn_g1_decompress(g_H) failed");
     off += 33;
     return (off == 296);
@@ -2024,6 +1799,75 @@ bool bn_g2_is_on_curve(const struct bn_g2 *p)
     return bn_fq2_eq(&y2, &rhs);
 }
 
+/* ── per-key preparation ──────────────────────────────────────
+ *
+ * The line tables and Straus tables depend only on the verifying key. They are
+ * built once, from the first key a verification sees, into static storage (no
+ * allocation on the consensus path), and published with a release store. A
+ * caller whose key differs from the cached one (a test that edits a key, a
+ * second key in the same process) gets a private heap copy instead, so the
+ * cache can never make a verification use stale key material. Every verify
+ * compares the key against the snapshot, so even an in-place edit of a key
+ * that was cached is noticed. */
+
+static pthread_mutex_t g_prep_mu = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int g_prep_state; /* 0 empty, 1 published */
+static struct bn_phgr_prep g_prep;
+
+static bool bn_prep_matches(const struct bn_phgr_prep *pp, const struct ppzksnark_vk *vk)
+{
+    if (vk->ic_len != pp->vk.ic_len)
+        return false;
+    if (memcmp(&vk->alpha_a_g2, &pp->vk.alpha_a_g2, sizeof vk->alpha_a_g2) ||
+        memcmp(&vk->alpha_b_g1, &pp->vk.alpha_b_g1, sizeof vk->alpha_b_g1) ||
+        memcmp(&vk->alpha_c_g2, &pp->vk.alpha_c_g2, sizeof vk->alpha_c_g2) ||
+        memcmp(&vk->gamma_g2, &pp->vk.gamma_g2, sizeof vk->gamma_g2) ||
+        memcmp(&vk->gamma_beta_g1, &pp->vk.gamma_beta_g1, sizeof vk->gamma_beta_g1) ||
+        memcmp(&vk->gamma_beta_g2, &pp->vk.gamma_beta_g2, sizeof vk->gamma_beta_g2) ||
+        memcmp(&vk->rc_z_g2, &pp->vk.rc_z_g2, sizeof vk->rc_z_g2))
+        return false;
+    return memcmp(vk->ic, pp->ic, vk->ic_len * sizeof(struct bn_g1)) == 0;
+}
+
+static void bn_prep_snapshot(struct bn_phgr_prep *pp, const struct ppzksnark_vk *vk)
+{
+    pp->vk = *vk;
+    pp->vk.ic = NULL;
+    if (vk->ic_len >= 1 && vk->ic_len <= BN_PREP_MAX_INPUTS + 1)
+        memcpy(pp->ic, vk->ic, vk->ic_len * sizeof(struct bn_g1));
+}
+
+/* Returns a prepared key for vk: the cached one, or a private copy in *tmp
+ * that the caller frees. NULL only when that copy cannot be allocated. */
+static const struct bn_phgr_prep *bn_prep_get(const struct bn_engine *e,
+                                              const struct ppzksnark_vk *vk,
+                                              struct bn_phgr_prep **tmp)
+{
+    *tmp = NULL;
+    bool cacheable = vk->ic != NULL && vk->ic_len >= 1 && vk->ic_len <= BN_PREP_MAX_INPUTS + 1;
+    if (cacheable) {
+        if (atomic_load_explicit(&g_prep_state, memory_order_acquire) == 1 &&
+            bn_prep_matches(&g_prep, vk))
+            return &g_prep;
+        pthread_mutex_lock(&g_prep_mu);
+        if (atomic_load_explicit(&g_prep_state, memory_order_relaxed) == 0) {
+            bn_prep_snapshot(&g_prep, vk);
+            e->prep_build(&g_prep, vk);
+            atomic_store_explicit(&g_prep_state, 1, memory_order_release);
+        }
+        pthread_mutex_unlock(&g_prep_mu);
+        if (bn_prep_matches(&g_prep, vk))
+            return &g_prep;
+    }
+    struct bn_phgr_prep *t = zcl_calloc(1, sizeof *t, "phgr_prep");
+    if (!t)
+        return NULL;
+    bn_prep_snapshot(t, vk);
+    e->prep_build(t, vk);
+    *tmp = t;
+    return t;
+}
+
 /* PPZKSNARK verification: 5 pairing checks.
  *
  * 1. Knowledge of A:  e(g_A, alpha_A) == e(g_A', G2_one)
@@ -2033,7 +1877,8 @@ bool bn_g2_is_on_curve(const struct bn_g2 *p)
  * 5. Consistency:      e(g_K, gamma) == e(g_A+acc+g_C, gamma_beta_g2) * e(gamma_beta_g1, g_B)
  *
  * Each check can be written as: product of pairings == 1
- * by moving all terms to one side. */
+ * by moving all terms to one side. The five checks stay five separate
+ * products (no random combination): a proof is accepted iff each one holds. */
 bool ppzksnark_verify(const struct ppzksnark_vk *vk,
                       const struct ppzksnark_proof *proof,
                       const uint64_t (*public_inputs)[4],
@@ -2048,90 +1893,33 @@ bool ppzksnark_verify(const struct ppzksnark_vk *vk,
                  "verify: public input count mismatch: n_inputs=%zu ic_len=%zu (want %zu)",
                  n_inputs, vk->ic_len, vk->ic_len - 1);
 
-    /* Compute accumulator: acc = ic[0] + sum(input[i] * ic[i+1]) */
-    struct bn_g1 acc = vk->ic[0];
-    for (size_t i = 0; i < n_inputs; i++) {
-        struct bn_g1 term;
-        bn_g1_scalar_mul(&term, &vk->ic[i+1], public_inputs[i]);
-        bn_g1_add(&acc, &acc, &term);
-    }
+    bn254_init_frobenius();
+    const struct bn_engine *e = bn_eng();
+    struct bn_phgr_prep *tmp;
+    const struct bn_phgr_prep *pp = bn_prep_get(e, vk, &tmp);
+    if (!pp)
+        LOG_FAIL("phgr13", "verify: cannot allocate the verifying-key tables");
+    int rc = e->verify(vk, pp, proof, public_inputs, n_inputs);
+    free(tmp);
 
-    /* G2 generator ("G2_one" in the pairing checks). Single source of truth
-     * (bn254_g2_one) shared with the tests so the constant can never silently
-     * drift — a corrupt generator false-rejects every Sprout PHGR13 proof at
-     * pairing check 1, and this verifier is also on the consensus path. The
-     * on-curve guard makes any future drift fail LOUD. */
-    struct bn_g2 g2_gen;
-    bn254_g2_one(&g2_gen);
-    if (!bn_g2_is_on_curve(&g2_gen)) {
+    switch (rc) {
+    case 0:
+        return true;
+    case 1:
+        LOG_FAIL("phgr13", "verify: check 1 (knowledge of A) pairing rejected");
+    case 2:
+        LOG_FAIL("phgr13", "verify: check 2 (knowledge of B) pairing rejected");
+    case 3:
+        LOG_FAIL("phgr13", "verify: check 3 (knowledge of C) pairing rejected");
+    case 4:
+        LOG_FAIL("phgr13", "verify: check 4 (QAP divisibility) pairing rejected");
+    case 5:
+        LOG_FAIL("phgr13", "verify: check 5 (consistency) pairing rejected");
+    default:
+        /* the G2 generator constant is off the twist curve: never expected */
         LOG_FAIL("phgr13", "verify: G2 generator off-curve — refusing "
                  "(corrupt g2_gen constant; would false-reject all proofs)");
-        return false;
     }
-
-    /* Check 1: Knowledge of A
-     * e(g_A, alpha_A) * e(-g_A', G2_one) == 1 */
-    {
-        struct bn_g1 neg_ap;
-        bn_g1_neg(&neg_ap, &proof->a_prime);
-        struct bn_g1 pts1[2] = { proof->a, neg_ap };
-        struct bn_g2 pts2[2] = { vk->alpha_a_g2, g2_gen };
-        if (!bn254_multi_pairing_check(pts1, pts2, 2))
-            LOG_FAIL("phgr13", "verify: check 1 (knowledge of A) pairing rejected");
-    }
-
-    /* Check 2: Knowledge of B
-     * e(alpha_B, g_B) * e(-g_B', G2_one) == 1 */
-    {
-        struct bn_g1 neg_bp;
-        bn_g1_neg(&neg_bp, &proof->b_prime);
-        struct bn_g1 pts1[2] = { vk->alpha_b_g1, neg_bp };
-        struct bn_g2 pts2[2] = { proof->b, g2_gen };
-        if (!bn254_multi_pairing_check(pts1, pts2, 2))
-            LOG_FAIL("phgr13", "verify: check 2 (knowledge of B) pairing rejected");
-    }
-
-    /* Check 3: Knowledge of C
-     * e(g_C, alpha_C) * e(-g_C', G2_one) == 1 */
-    {
-        struct bn_g1 neg_cp;
-        bn_g1_neg(&neg_cp, &proof->c_prime);
-        struct bn_g1 pts1[2] = { proof->c, neg_cp };
-        struct bn_g2 pts2[2] = { vk->alpha_c_g2, g2_gen };
-        if (!bn254_multi_pairing_check(pts1, pts2, 2))
-            LOG_FAIL("phgr13", "verify: check 3 (knowledge of C) pairing rejected");
-    }
-
-    /* Check 4: QAP divisibility
-     * e(g_A + acc, g_B) * e(-g_H, rC_Z) * e(-g_C, G2_one) == 1 */
-    {
-        struct bn_g1 a_acc;
-        bn_g1_add(&a_acc, &proof->a, &acc);
-        struct bn_g1 neg_h, neg_c;
-        bn_g1_neg(&neg_h, &proof->h);
-        bn_g1_neg(&neg_c, &proof->c);
-        struct bn_g1 pts1[3] = { a_acc, neg_h, neg_c };
-        struct bn_g2 pts2[3] = { proof->b, vk->rc_z_g2, g2_gen };
-        if (!bn254_multi_pairing_check(pts1, pts2, 3))
-            LOG_FAIL("phgr13", "verify: check 4 (QAP divisibility) pairing rejected");
-    }
-
-    /* Check 5: Consistency
-     * e(g_K, gamma) * e(-(g_A+acc+g_C), gamma_beta_g2) * e(-gamma_beta_g1, g_B) == 1 */
-    {
-        struct bn_g1 a_acc_c;
-        bn_g1_add(&a_acc_c, &proof->a, &acc);
-        bn_g1_add(&a_acc_c, &a_acc_c, &proof->c);
-        struct bn_g1 neg_aac, neg_gb1;
-        bn_g1_neg(&neg_aac, &a_acc_c);
-        bn_g1_neg(&neg_gb1, &vk->gamma_beta_g1);
-        struct bn_g1 pts1[3] = { proof->k, neg_aac, neg_gb1 };
-        struct bn_g2 pts2[3] = { vk->gamma_g2, vk->gamma_beta_g2, proof->b };
-        if (!bn254_multi_pairing_check(pts1, pts2, 3))
-            LOG_FAIL("phgr13", "verify: check 5 (consistency) pairing rejected");
-    }
-
-    return true;
 }
 
 /* ══════════════════════════════════════════════════════════════

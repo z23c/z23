@@ -37,6 +37,7 @@ core/modules/crypto/src/blake2b_avx2.c    tests/harness/src/test_blake2b_batch_p
 core/modules/crypto/src/sha3_256_x4.c     tests/harness/src/test_sha3_256_x4.c            sha3_256_x4
 core/modules/crypto/src/sha3_avx512.c     tests/harness/src/test_sha3_512_x4.c            sha3_512_x4
 core/modules/sapling/src/bn254_accel.c    tests/harness/src/test_bn254_accel.c            bn254_accel
+core/modules/sapling/src/bn254.c         tests/harness/src/test_bn254_engine_parity.c    bn254_engine_parity
 core/modules/sapling/src/fr_avx512.c      tests/harness/src/test_fr_mont_parity.c         fr_mont_parity
 core/modules/sapling/src/fr.c             tests/harness/src/test_sapling_crypto.c         sapling_crypto
 core/modules/crypto/src/simd_dispatch.c   tests/harness/src/test_simd_os_support.c        simd_os_support

@@ -232,6 +232,53 @@ of the installed multiply and fails if the reported implementation string claims
 ADCX/ADOX that the machine code does not contain; it is the check that would
 have caught the original overclaim on day one, and it fails on the parent commit.
 
+### Sprout PHGR13 verification: the pairing engine
+
+Every pre-Sapling JoinSplit is a PHGR13 (BCTV14) proof, so a from-genesis sync verifies 432,407
+of them. `core/modules/sapling/src/bn254.c` used to verify one in about 18-20 ms, slower than
+libsnark's assembly field multiply (about 14 ms on the same 7950X3D class host), almost entirely
+because the pairing code was written for obviousness: the line functions of the fixed verifying
+key were recomputed (with two Fermat inversions inside every doubling step) on every proof, a
+Fq12 squaring was a full multiplication, a sparse line was multiplied as a dense element, the
+final exponentiation squared with the generic formula, and every Fq operation went through an
+indirect call.
+
+`bn254_engine.inc` keeps the computed values bit-identical (see
+`docs/CONSENSUS_PARITY_DOCTRINE.md`, "PHGR13 verifier speed") and removes that work:
+
+| Change | What it removes |
+|---|---|
+| line functions of the five verifying-key G2 points and of the G2 generator computed once per key; the proof's own G2 point once per proof, shared by the three checks that pair with it | 12 line-function evaluations per proof, each with two Fq inversions per step |
+| sparse multiply by a line (14 Fq2 multiplications) | 54-multiplication dense products |
+| Karatsuba / Chung-Hasan Fq6 squaring, complex Fq12 squaring, Granger-Scott cyclotomic squaring in the final exponentiation | generic squarings |
+| the whole engine compiled twice, once over the inlined MULX multiply (BMI2+ADX CPUs) and once over the portable multiply; add, subtract and negate in assembly on the first | an indirect call per multiplication, a long mov/and/or sequence per addition |
+| Straus 4-bit windows over per-key affine tables for the 9 public-input multiplications | 9 x 253 doublings and 9 x 126 additions |
+| `psi(P) == [6u^2]P` for the G2 subgroup test (proof in the parity doctrine) | one 254-bit double-and-add per proof (a 126-bit chain instead, in Fq2) |
+| fixed 4-bit-window exponentiation for the square roots and inversions | square-and-multiply with half the digits set |
+
+Measured on the dev PC (i9-9900K, BMI2+ADX, GCC 16 -O3 / Clang 22 -O3, median per call, KAT
+height-241 proof):
+
+| stage | before | after, portable multiply | after, ADX multiply |
+|---|--:|--:|--:|
+| verify one proof | 20.6 / 17.8 ms | 7.9 / 4.5 ms | 3.0 / 2.8 ms |
+| decode the proof (8 points, incl. subgroup test) | 344 / 274 us | 310 / 203 us | 121 / 120 us |
+| G2 subgroup test | 283 / 208 us | 201 / 140 us | 79 / 74 us |
+| one pairing e(P,Q) | 2.18 / 1.71 ms | 1.11 / 0.72 ms | 0.42 / 0.46 ms |
+| Miller loop, one pair | 1.24 / 1.09 ms | 0.55 / 0.35 ms | 0.21 / 0.20 ms |
+| final exponentiation | 795 / 618 us | 598 / 333 us | 216 / 204 us |
+
+Head to head on the 7950X3D host (r1), one process after the other, with the host at load 35-45 (so
+every absolute time is about twice an idle one): libsnark with its assembly field multiply
+(variant 3f017eb) 32-38 ms per proof, the previous C23 verifier 22-28 ms, the engine 3.3-4.6 ms,
+that is 0.08-0.12 of the libsnark time. The same two baselines at idle load, earlier the same day:
+14.0 ms and 18.1 ms. Stage times on that host, ADX instance: whole proof 2.8 ms, one pairing 0.45 ms,
+Miller loop 0.22 ms, final exponentiation 0.20 ms.
+
+Bit-identity of every value is the contract, not an observation: see "PHGR13 verifier speed" in
+`docs/CONSENSUS_PARITY_DOCTRINE.md` for the argument and the evidence (a frozen copy of the old
+code compared on the tower, the Miller loop, the final exponentiation, the decoders, the multi-scalar
+multiplication and the verdicts, plus the 483,797-case history gate against zclassicd).
 ## Optimizing safely
 
 Any optimization to a consensus crypto primitive must stay **bit-identical** to

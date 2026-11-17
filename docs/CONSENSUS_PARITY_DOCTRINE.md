@@ -322,6 +322,66 @@ level and `tests/harness/src/test_sprout_phgr13_kat.c` on the real height-241 pr
 verifier-level comparison of every real proof, not a full-history node replay
 (`make replay-canary-genesis`).
 
+## PHGR13 verifier speed: the pairing engine
+
+`core/modules/sapling/src/bn254.c` verifies Sprout PHGR13 JoinSplit proofs with its own BN254
+pairing. The Miller loop, final exponentiation, G1/G2 decoders, the verifier's multi-scalar
+multiplication and its G2 subgroup test now run on an *engine*
+(`core/modules/sapling/src/bn254_engine.inc`, included twice: once over the portable
+multiply and once over the inlined BMI2+ADX multiply of `mont_adx.h`, selected at run time
+by `bn254_accel_cpu_has_adx()`). A mainnet proof verifies in about 2.7-3.0 ms on a desktop Skylake
+core (i9-9900K) instead of 18-20 ms; on the 7950X3D server libsnark with its assembly field
+multiply takes 14.0 ms and the previous C23 verifier took 18.1 ms (`docs/CRYPTO_PERF.md`).
+
+**Contract: the same function, not a similar one.** The engine changes how values are computed, not
+which values. Every Fq, Fq2, Fq6 and Fq12 element is canonical (fully reduced) after every
+operation, as before. So for every input, including inputs no honest proof contains:
+
+| Quantity | Relation to the previous implementation |
+|---|---|
+| Miller-loop value before the final exponentiation | the same Fq12 element: the same line formulas (`doubling_step`, `mixed_addition_step`), evaluated once per G2 point instead of once per pairing, and applied by a sparse multiply that equals the dense one |
+| final exponentiation | the same Fq12 element: same exponent, same addition chain; Granger-Scott squarings equal the generic ones on the cyclotomic subgroup, which is where the easy part always lands |
+| G1 / G2 decompression, Fq2 square root | the same accept set and the same points |
+| IC multi-scalar multiplication | the same group element (Straus windows over per-key tables instead of 9 double-and-add loops) |
+| five pairing checks | still five separate products, each `== 1` after its own final exponentiation; no random combination, no merged equations |
+| G2 subgroup test | the same predicate `r*P == O`, decided by `psi(P) == [6u^2]P` (below) |
+
+The verdict is a function of those values, so the accept and reject sets are identical to the
+previous implementation's and therefore to zclassicd's. The one place the *method* differs from
+what a reader would expect is the subgroup test, so its argument is written out:
+
+*Claim.* For a point P of the twist E'(Fq2): `r*P = O` iff `psi(P) = [6u^2]P`, where `psi` is the
+untwist-Frobenius-twist endomorphism (the same constants as the Miller loop's Frobenius step) and
+`u = 4965661367192848881`.
+*Proof.* The BN family has `q = 36u^4+36u^3+24u^2+6u+1`, `r = 36u^4+36u^3+18u^2+6u+1`, trace
+`t = 6u^2+1 = q+1-r` (the test pins all three identities numerically). `psi` has degree `q` and
+satisfies `psi^2 - t*psi + q = 0` (it is conjugate to Frobenius by the twist isomorphism), so for an
+integer `m` the endomorphism `psi - [m]` has degree `m^2 - t*m + q`; at `m = 6u^2` that is
+`q - 6u^2 = r`. An isogeny of degree `r` has at most `r` kernel points, so
+`K = {P : psi(P) = [6u^2]P}` has `|K| <= r`. `G2 = E'(Fq2)[r]` is cyclic of order `r` (`r^2` does not
+divide `#E'(Fq2) = r(2q-r)`) and `psi` acts on it as multiplication by `q mod r = q - r = 6u^2`, so
+`G2` is inside `K`; hence `K = G2`. A point passes iff it lies in `G2`. QED. The test also checks
+this on 100+ twist points per instance against the original `r*P` loop, including `[r]t`
+(pure cofactor torsion), `[2q-r]t` (in G2) and `[r]t + g` (mixed), and every decoded proof of the
+history gate below goes through it.
+
+The line tables and Straus tables depend only on the verifying key. They are built once from the
+first key a verification sees, in static storage, and published with a release store; every
+verification compares the key it is handed with the snapshot, so a key edited in place (as
+`test_bg_validation_reverify` does) or a second key is verified against private tables built from
+that key, never stale ones.
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| `test_bn254_engine_parity` (frozen pre-engine copy `bn254_legacy_reference.c` in the test tree) | tower, Miller loop, final exponentiation, pairing, decoders, subgroup test, MSM and verdicts equal on both engine instances; 16 threads verifying through one key |
+| History gate (`phgr13_diff`: zclassicd's Proof.cpp over libsnark beside this verifier) | 483,797 cases (all 432,407 distinct mainnet PHGR13 proofs and 51,390 mutation and point-level cases): 0 verdicts differing from zclassicd for the candidate wrapper and 0 for the raw verifier, on the files of this change (3,343,579 blocks, 20 shards) |
+
+Do not "simplify" the engine into a second, separately maintained pairing, and do not merge
+the five checks into one random-coefficient product: the former forks the consensus function, the
+latter changes it (a probabilistic acceptance rule instead of five exact ones).
+
 ## Parity guards on the connect path
 
 `contextual_check_block()` must stay wired into the connect path: context-free

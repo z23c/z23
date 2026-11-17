@@ -219,4 +219,41 @@ bool sprout_verify_phgr13(const uint8_t proof[296],
                           uint64_t vpub_old,
                           uint64_t vpub_new);
 
+#ifdef ZCL_TESTING
+/* ── Test hooks (bn254.c, ZCL_TESTING builds only) ─────────────
+ *
+ * The pairing, decoders and verifier run on one of two instances of the same
+ * engine (bn254_engine.inc): the portable multiply and the BMI2+ADX one. The
+ * hooks let test_bn254_engine_parity pick the instance and reach the internal
+ * operations it compares against the frozen pre-engine implementation. Not
+ * thread-safe against concurrent verifiers (the selection is global). */
+
+/* 0 = automatic, 1 = portable, 2 = BMI2+ADX. False (nothing changed) when the
+ * instance cannot run on this CPU. */
+bool bn254_test_select_engine(int which);
+const char *bn254_test_engine_name(void);
+
+/* Product of the Miller loops of n pairs, before the final exponentiation;
+ * pairs with an identity operand contribute 1. */
+void bn254_test_miller(struct bn_fq12 *r, const struct bn_g1 *p, const struct bn_g2 *q, size_t n);
+void bn254_test_final_exp(struct bn_fq12 *f);
+bool bn254_test_g2_in_subgroup(const struct bn_g2 *p);
+
+void bn254_test_fq12_mul(struct bn_fq12 *r, const struct bn_fq12 *a, const struct bn_fq12 *b);
+void bn254_test_fq12_sqr(struct bn_fq12 *r, const struct bn_fq12 *a);
+void bn254_test_fq12_cyc_sqr(struct bn_fq12 *r, const struct bn_fq12 *a);
+void bn254_test_fq12_inv(struct bn_fq12 *r, const struct bn_fq12 *a);
+void bn254_test_fq12_frob(struct bn_fq12 *r, const struct bn_fq12 *a, int power);
+void bn254_test_fq12_mul_by_024(struct bn_fq12 *f, const struct bn_fq2 *x0,
+                                const struct bn_fq2 *x4, const struct bn_fq2 *x2);
+void bn254_test_fq6_mul(struct bn_fq6 *r, const struct bn_fq6 *a, const struct bn_fq6 *b);
+void bn254_test_fq6_sqr(struct bn_fq6 *r, const struct bn_fq6 *a);
+void bn254_test_fq_inv(struct bn_fq *r, const struct bn_fq *a);
+bool bn254_test_fq_sqrt(struct bn_fq *r, const struct bn_fq *a);
+
+/* acc = ic[0] + sum in[i] * ic[i+1] as ppzksnark_verify computes it. */
+void bn254_test_msm(struct bn_g1 *acc, const struct ppzksnark_vk *vk,
+                    const uint64_t (*in)[4], size_t n);
+#endif
+
 #endif

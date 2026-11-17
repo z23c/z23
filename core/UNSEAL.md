@@ -1278,3 +1278,7 @@ later lane flips it HARD.
 - 2026-11-17T02:04:05Z — REASON: PHGR13 (Sprout BCTV14) proof decode parity with zclassicd Proof.hpp/Proof.cpp over libsnark: refuse G1/G2 lead bytes other than 0x02/0x03 and 0x0a/0x0b, the invented infinity encoding, coordinates equal to q, G2 FE2IP integers at or above q^2 (quotient no longer truncated to 256 bits) and G2 points outside the order-r subgroup; take the Fq2 square root of Fq non-residues; publish the Frobenius table without a data race. Differential: 483,797 cases, 9,849 accept-where-zclassicd-rejects before, 0 after, all 432,407 distinct mainnet PHGR13 proofs still accepted. Owner-authorised unseal for consensus-parity fixes (task instruction 2026-11-16: bug-for-bug compatible with zclassicd)
   old ROOT: 3494d4219e49f0832ba1b78a61c561f2800d8e40941c283d108d27609d8fbc17
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-17T22:19:42Z — REASON: BN254 PHGR13 verifier speed: precomputed G2 line functions, sparse line multiply, cyclotomic squarings, inline MULX engine, Straus IC multiplication, psi-endomorphism G2 subgroup test; pairing values and every accept/reject verdict identical to the previous implementation (differential against a frozen copy, 483797-case history gate). Owner-authorized core edit for this work.
+  old ROOT: 4e5e7f72e5f943cf4db1c1bd16adab1efe5c575c10632e6997a6d262a1f71f64
+  by: owner unseal ritual (make core-unseal)
