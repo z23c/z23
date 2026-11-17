@@ -1270,3 +1270,7 @@ later lane flips it HARD.
 - 2026-11-16T22:42:02Z — REASON: Owner-authorised prover and field-arithmetic speed work for the zclassicd C23 port: Pippenger MSM with mixed addition and a 0/1 scalar split, FFT and MSM on a bounded configurable thread budget, x86-64 asm carry chains for Fp/Fr add/sub and the Montgomery final subtraction, paired-window Pedersen tables. Every output stays bit-identical; no consensus predicate changes.
   old ROOT: 3ab177f44975e94620405084387ce732848ddfcaf1ca4069806cf650281269b0
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-17T02:48:02Z — REASON: Sapling prover: unbiased Groth16 r,s blinds by rejection sampling, canonical fr_from_bytes, portable thread-count on Windows, no stdout print on key load, SHA-NI requires SSSE3+SSE4.1; owner-authorised core edit
+  old ROOT: 3494d4219e49f0832ba1b78a61c561f2800d8e40941c283d108d27609d8fbc17
+  by: owner unseal ritual (make core-unseal)

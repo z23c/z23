@@ -481,10 +481,28 @@ static void sha256_parity_report_throughput(int *failure_count, bool have_shani)
 
 #undef failures
 
+/* 0. CPUID predicate: SHA alone is not enough; SSSE3 (CPUID.1:ECX[9]) and
+ * SSE4.1 (ECX[19]) must be present too, or a masked VM CPU would SIGILL. */
+static int sha256_cpuid_predicate_check(void)
+{
+    const unsigned sha = 1u << 29, ssse3 = 1u << 9, sse41 = 1u << 19;
+    bool p = sha256_cpuid_allows_shani(ssse3 | sse41, sha) &&
+             !sha256_cpuid_allows_shani(sse41, sha) &&
+             !sha256_cpuid_allows_shani(ssse3, sha) &&
+             !sha256_cpuid_allows_shani(0, sha) &&
+             !sha256_cpuid_allows_shani(ssse3 | sse41, 0) &&
+             !sha256_cpuid_allows_shani(~0u, ~sha);
+    printf("sha256_isa_parity: SHA-NI needs SHA+SSSE3+SSE4.1 predicate... %s\n",
+           p ? "OK" : "FAIL");
+    return p ? 0 : 1;
+}
+
 int test_sha256_isa_parity(void)
 {
     printf("\n=== sha256_isa_parity (portable vs native-hardware differential oracle) ===\n");
     int failures = 0;
+
+    failures += sha256_cpuid_predicate_check();
 
     const bool hw = host_advertises_sha_hardware();
     const int  got_shani = sha256_select_impl(SHA256_IMPL_SHANI);

@@ -16,6 +16,7 @@
 #include "sapling/groth16_prover.h"
 #include "sapling/pedersen_hash.h"
 #include "sapling/fr.h"
+#include "sapling/fr_accel.h"
 #include "sapling/bls12_381.h"
 #include "sapling/circuit_bits.h"
 #include "crypto/blake2s.h"
@@ -1222,6 +1223,140 @@ static int prover_output_roundtrip_checks(void)
     return failures;
 }
 
+/* ── Groth16 blinds: adversarial RNG, tier-independent proof bytes ───────
+ *
+ * Before the fix the prover turned 32 raw bytes into the blinds r and s with no
+ * reduction, so a value >= r reached the Montgomery multiply and the ADX and
+ * portable tiers produced DIFFERENT proofs from the same RNG stream. Now both
+ * blinds are drawn by rejection sampling. This leg feeds the prover an RNG whose
+ * first candidates are adversarial (all 0xff, exactly r, r+1 for r; r-1 for s),
+ * builds the same output proof once per tier, and requires byte-identical
+ * proofs that the consensus verifier accepts. */
+
+struct blind_rng {
+    uint64_t state;
+    int draws;
+    uint8_t r_final[32]; /* candidate 3: the first value r keeps */
+    bool tweak;          /* teeth: change r's accepted candidate */
+};
+
+static void blind_le_p(uint8_t out[32], int delta)
+{
+    static const uint64_t P[4] = {
+        0xffffffff00000001ULL, 0x53bda402fffe5bfeULL,
+        0x3339d80809a1d805ULL, 0x73eda753299d7d48ULL
+    };
+    uint64_t v[4];
+    memcpy(v, P, sizeof v);
+    v[0] += (uint64_t)(int64_t)delta; /* +-1 on the low limb never carries */
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 8; j++)
+            out[i * 8 + j] = (uint8_t)(v[i] >> (8 * j));
+}
+
+static bool blind_rng_fill(void *user, uint8_t *out, size_t n)
+{
+    struct blind_rng *g = user;
+    int idx = g->draws++;
+    if (n != 32) {
+        /* note randomness (64 bytes etc.): plain deterministic stream */
+        for (size_t i = 0; i < n; i++) {
+            g->state = g->state * 6364136223846793005ULL + 1442695040888963407ULL;
+            out[i] = (uint8_t)(g->state >> 56);
+        }
+        g->draws--;
+        return true;
+    }
+    switch (idx) {
+    case 0: memset(out, 0xff, 32); break;         /* 2^256-1: rejected */
+    case 1: blind_le_p(out, 0); break;            /* r: rejected */
+    case 2: blind_le_p(out, 1); break;            /* r+1: rejected */
+    case 3: memcpy(out, g->r_final, 32); break;   /* r accepts this */
+    case 4: blind_le_p(out, -1); break;           /* s = r-1: accepted */
+    default:
+        for (size_t i = 0; i < 32; i++) {
+            g->state = g->state * 6364136223846793005ULL + 1442695040888963407ULL;
+            out[i] = (uint8_t)(g->state >> 56);
+        }
+    }
+    return true;
+}
+
+/* Build one output proof under the scripted RNG; tier chosen by the caller. */
+static bool blind_build_output(bool portable, bool tweak, uint8_t proof[192],
+                               uint8_t cv[32], uint8_t cm[32], uint8_t epk[32])
+{
+    struct blind_rng g = { .state = 0xC0FFEE, .tweak = tweak };
+    for (int i = 0; i < 32; i++) g.r_final[i] = (uint8_t)(i * 7 + 1);
+    g.r_final[31] = 0x01;
+    if (tweak) g.r_final[0] ^= 0x55;
+
+    uint8_t diversifier[11], ask[32], nsk[32], ovk[32];
+    uint8_t ak[32], nk[32], ivk[32], pk_d[32];
+    fr_accel_force_portable(portable);
+    sapling_set_test_rng_hook(blind_rng_fill, &g);
+    bool ok = find_diversifier(diversifier) && sapling_generate_r(ask) &&
+              sapling_generate_r(nsk) && sapling_generate_r(ovk);
+    if (ok) {
+        sapling_ask_to_ak(ask, ak);
+        sapling_nsk_to_nk(nsk, nk);
+        sapling_crh_ivk(ak, nk, ivk);
+        ok = sapling_ivk_to_pkd(ivk, diversifier, pk_d);
+    }
+    /* The note hook above served key material; now point both hooks at one
+     * fresh stream so the proof's blinds are the first 32-byte draws. */
+    g.draws = 0;
+    g.state = 0xC0FFEE;
+    groth16_set_test_rng_hook(blind_rng_fill, &g);
+    void *pctx = ok ? zclassic_sapling_proving_ctx_init() : NULL;
+    uint8_t enc[580], out[80];
+    /* sapling_build_output_with_ctx draws its note randomness first (64-byte
+     * draws, which the script ignores for indexing), then proves. */
+    bool built = pctx && sapling_build_output_with_ctx(
+        pctx, ovk, diversifier, pk_d, UINT64_C(777), NULL,
+        cv, cm, epk, enc, out, proof);
+    groth16_set_test_rng_hook(NULL, NULL);
+    sapling_set_test_rng_hook(NULL, NULL);
+    fr_accel_force_portable(false);
+    if (pctx)
+        zclassic_sapling_proving_ctx_free(pctx);
+    return built;
+}
+
+static int prover_blind_tier_checks(void)
+{
+    int failures = 0;
+    uint8_t pa[192], pb[192], pc[192];
+    uint8_t cva[32], cma[32], epka[32], cvb[32], cmb[32], epkb[32];
+    uint8_t cvc[32], cmc[32], epkc[32];
+
+    bool a = blind_build_output(true,  false, pa, cva, cma, epka);
+    bool b = blind_build_output(false, false, pb, cvb, cmb, epkb);
+    bool c = blind_build_output(false, true,  pc, cvc, cmc, epkc);
+    PROVER_CHECK("blinds: output proof built on portable tier (adversarial RNG)", a);
+    PROVER_CHECK("blinds: output proof built on dispatched tier (adversarial RNG)", b);
+    PROVER_CHECK("blinds: output proof built with a different accepted r", c);
+    if (a && b) {
+        printf("  blinds: dispatched tier is %s\n", fr_accel_implementation());
+        PROVER_CHECK("blinds: portable and dispatched tiers give byte-identical proofs",
+                     memcmp(pa, pb, 192) == 0 && memcmp(cva, cvb, 32) == 0 &&
+                     memcmp(cma, cmb, 32) == 0 && memcmp(epka, epkb, 32) == 0);
+        struct sapling_verification_ctx vctx;
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK("blinds: adversarial-RNG proof verifies",
+                     sapling_check_output(&vctx, cva, cma, epka, pa));
+    }
+    if (a && c) {
+        struct sapling_verification_ctx vctx;
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK("blinds: teeth: accepted r changes the proof",
+                     memcmp(pa, pc, 192) != 0);
+        PROVER_CHECK("blinds: teeth: changed-r proof still verifies",
+                     sapling_check_output(&vctx, cvc, cmc, epkc, pc));
+    }
+    return failures;
+}
+
 /* ── BLAKE2s gadget (circuit_bits.c gadget_blake2s) ────────────────────── */
 
 /* 21006 constraints for a 512-bit all-allocated input (circuit_bits.h). */
@@ -1460,6 +1595,8 @@ int test_groth16_selfverify(void)
 
     if (zclassic_sapling_prover_is_ready())
         failures += prover_output_roundtrip_checks();
+    if (zclassic_sapling_prover_is_ready())
+        failures += prover_blind_tier_checks();
 
     /* Adversarial + negative-control gate over the production SPEND
      * prove->verify round-trip (needs proving readiness). */
