@@ -252,6 +252,11 @@ static bool aj_test_sender_gui_refused(void)
     struct aj_role_args r; return !aj_role_parse(5, args, &r);
 }
 
+static bool aj_test_receiver_base(char **good, struct aj_role_args *r)
+{
+    return aj_role_parse(6, good, r) && r->receiver && !r->sender && !r->serve && r->seconds == 10;
+}
+
 static int aj_role_parse_test(void)
 {
     char peer[100]; memset(peer, 'a', 56); memcpy(peer + 56, ".onion:20024", sizeof(".onion:20024"));
@@ -259,7 +264,7 @@ static int aj_role_parse_test(void)
     char *good[] = {(char *)"fixture", (char *)"--receiver", (char *)"--work=/tmp/new",
         (char *)"--seconds=10", peerarg, (char *)"--expected=/tmp/public.json", NULL};
     struct aj_role_args r;
-    bool ok = aj_role_parse(6, good, &r) && r.receiver && !r.sender && !r.serve && r.seconds == 10;
+    bool ok = aj_test_receiver_base(good, &r);
     good[6] = (char *)"--serve";
     bool serve = aj_role_parse(7, good, &r) && r.serve;
     if (!serve) fprintf(stderr, "receiver --serve was refused\n");
@@ -1099,13 +1104,17 @@ static bool aj_test_fake_node_args(int argc, char **argv)
         (!strcmp(argv[2], "-regtest") || !strncmp(argv[2], "-port=", 6));
 }
 
+static bool aj_test_is_child(int argc, char **argv)
+{
+    return (argc == 3 || (argc == 4 && !strcmp(argv[3], "--role-worker"))) && !strcmp(argv[1], "--child");
+}
+
 static int aj_test_dispatch(int argc, char **argv)
 {
 #if defined(__linux__)
     if (argc > 1 && !strcmp(argv[1], "-displayfd")) return aj_fake_xvfb();
 #endif
-    if ((argc == 3 || (argc == 4 && !strcmp(argv[3], "--role-worker"))) &&
-        !strcmp(argv[1], "--child")) return aj_test_child(argv[2]);
+    if (aj_test_is_child(argc, argv)) return aj_test_child(argv[2]);
     if (aj_test_fake_node_args(argc, argv)) return aj_fake_node();
     if (argc > 1 && !strcmp(argv[1], "--xvfb-worker")) return app_journey_live_main(argc, argv);
     if (argc > 1 && !strcmp(argv[1], "--node-worker")) return app_journey_live_main(argc, argv);
