@@ -113,11 +113,21 @@ static bool adc_lines(struct zcl_command_reply *reply,
     return ok;
 }
 
-/* One owned scratch round trip; the child is reaped before cleanup. */
+/* One owned scratch round trip; the child is reaped before cleanup. The
+ * sandboxed worker machinery is POSIX-only: on Windows the command fails
+ * closed as unavailable rather than compiling a path it cannot honor —
+ * the same shape the app get flow uses for its private stage. */
 static bool adc_job(const char *datadir, const char *mode, const char *url,
                     struct app_network_job_result *result,
                     struct zcl_command_reply *reply)
 {
+#if defined(_WIN32)
+    (void)datadir; (void)mode; (void)url; (void)result;
+    zcl_package_copy_fail(reply, "NETWORK_UNAVAILABLE", false,
+                          "the sandboxed connection worker is unavailable on this platform",
+                          ADC_COMMAND);
+    return false;
+#else
     char anchor[ADC_PATH];
     uint8_t random[18];
     char token[33];
@@ -167,6 +177,7 @@ static bool adc_job(const char *datadir, const char *mode, const char *url,
         return false;
     }
     return true;
+#endif
 }
 
 /* One fleet_board_ingest round trip. `body` stays owned by the caller. */
