@@ -727,6 +727,26 @@ static bool bil_flat_allocation_sizes_valid(size_t count)
  * only hide the arena footprint. One trade-off accepted: ENOSPC on
  * writeback of a MAP_SHARED page raises SIGBUS; a full datadir is
  * already fatal for a node that cannot write blocks. */
+#if !defined(_WIN32) && !defined(__APPLE__)
+#ifdef ZCL_TESTING
+static int g_bil_test_reservation_error;
+void block_index_arena_test_reservation_error(int error);
+void block_index_arena_test_reservation_error(int error)
+{
+    g_bil_test_reservation_error = error;
+}
+#endif
+
+static int bil_arena_reserve(int fd, off_t bytes)
+{
+#ifdef ZCL_TESTING
+    if (g_bil_test_reservation_error)
+        return g_bil_test_reservation_error;
+#endif
+    return posix_fallocate(fd, 0, bytes);
+}
+#endif
+
 static bool bil_arena_file_map(const char *datadir, size_t count,
                                struct block_index **arena_out,
                                char *path_out, size_t path_cap)
@@ -768,7 +788,10 @@ static bool bil_arena_file_map(const char *datadir, size_t count,
          * here), so the mapping proceeds unreserved there, the same risk
          * the tmpfs case accepts. */
 #if !defined(__APPLE__)
-        (void)posix_fallocate(afd, 0, (off_t)bytes);
+        int reserve_rc = bil_arena_reserve(afd, (off_t)bytes);
+        if (reserve_rc != 0 && reserve_rc != ENOSYS &&
+            reserve_rc != EOPNOTSUPP && reserve_rc != ENOTSUP)
+            sized = false;
 #endif
     }
     void *view = sized ? mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED,

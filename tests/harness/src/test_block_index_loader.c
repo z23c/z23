@@ -37,6 +37,7 @@
 #include "platform/private_directory.h"
 #include "support/log_throttle.h"
 #include <sqlite3.h>
+#include <errno.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -512,6 +513,65 @@ static int bil_flat_round_trip_case(void)
     }
     return failures;
 }
+
+#if defined(ZCL_TESTING) && !defined(_WIN32) && !defined(__APPLE__)
+void block_index_arena_test_reservation_error(int error);
+
+static int bil_flat_reservation_case(int error, bool expect_mapping)
+{
+    int failures = 0;
+    printf("bil: reservation errno=%d expected=%s\n", error,
+           expect_mapping ? "mapped" : "fallback");
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_reservation"))
+        return 1;
+    struct main_state source, loaded_state;
+    main_state_init(&source);
+    main_state_init(&loaded_state);
+    build_synthetic_chain(&source, 100);
+    save_block_index_flat(dir, &source);
+
+    block_index_arena_test_reservation_error(error);
+    bool loaded = load_block_index_flat(dir, &loaded_state).ok;
+    block_index_arena_test_reservation_error(0);
+
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.block_index.arena", dir);
+    struct stat st;
+    bool path_valid = n > 0 && (size_t)n < sizeof(path);
+    bool mapped = path_valid && stat(path, &st) == 0 &&
+                  st.st_size == (off_t)(100u * sizeof(struct block_index));
+    bool removed = path_valid && stat(path, &st) != 0 && errno == ENOENT;
+    struct uint256 first_hash = make_test_hash(0);
+    struct uint256 last_hash = make_test_hash(99);
+    struct block_index *first = block_map_find(&loaded_state.map_block_index,
+                                               &first_hash);
+    struct block_index *last = block_map_find(&loaded_state.map_block_index,
+                                              &last_hash);
+    bool identical = loaded && first && first->nHeight == 0 && last &&
+                     last->nHeight == 99 && last->pprev &&
+                     last->pprev->nHeight == 98 &&
+                     loaded_state.map_block_index.size == source.map_block_index.size;
+    BIL_CHECK("bil: reservation result selects expected arena", expect_mapping ? mapped : removed);
+    BIL_CHECK("bil: reservation path preserves loaded chain", identical);
+    main_state_free(&source);
+    main_state_free(&loaded_state);
+    if (test_rm_rf_recursive(dir) != 0) failures++;
+    return failures;
+}
+
+static int bil_flat_reservation_cases(void)
+{
+    int failures = 0;
+    failures += bil_flat_reservation_case(ENOSPC, false);
+    failures += bil_flat_reservation_case(EDQUOT, false);
+    failures += bil_flat_reservation_case(EINVAL, false);
+    failures += bil_flat_reservation_case(EINTR, false);
+    failures += bil_flat_reservation_case(ENOSYS, true);
+    failures += bil_flat_reservation_case(EOPNOTSUPP, true);
+    return failures;
+}
+#endif
 
 /* File-backed load arena (bil_arena_file_map in block_index_loader.c): a
  * successful flat load must map its arena over the datadir scratch file.
@@ -3093,6 +3153,9 @@ int test_block_index_loader(void)
 
     failures += bil_flat_round_trip_case();
     failures += bil_flat_arena_file_case();
+#if defined(ZCL_TESTING) && !defined(_WIN32) && !defined(__APPLE__)
+    failures += bil_flat_reservation_cases();
+#endif
     failures += bil_flat_boot_peak_case();
     failures += bil_release_direct_case();
 
