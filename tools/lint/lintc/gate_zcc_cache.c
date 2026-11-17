@@ -89,8 +89,13 @@ int check_zcc_cache_run(int argc, char **argv)
     int rc = zc_setup();
     if (rc == 0)
         rc = zc_sections_run();
-    if (zc.work[0])
-        rap_rm_rf(zc.work);
+    if (zc.work[0]) {
+        if (rc || zc.failures)
+            fprintf(stderr, "check_zcc_cache: failure fixtures retained: %s\n",
+                    zc.work);
+        else
+            rap_rm_rf(zc.work);
+    }
     if (rc)
         return rc;
     if (zc.failures) {
