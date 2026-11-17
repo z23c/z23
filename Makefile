@@ -5050,6 +5050,7 @@ T_LIST_TOOL := $(TEST_GROUP_LIST_BIN)
 ONLY_REQUIRED_GOALS := t t-fast t-tsan t-hotswap
 ONLY_SELECTOR_GOALS := $(ONLY_REQUIRED_GOALS) t-asan
 ONLY_ACTIVE_GOALS := $(filter $(ONLY_SELECTOR_GOALS),$(MAKECMDGOALS))
+ONLY_COMMA := ,
 # The list tool is a small host binary, so a parse-time use builds it first
 # (TEST_GROUP_LIST_BUILD) when it is missing or older than its sources. It
 # starts no recursive Make: the build-epoch fixtures count those.
@@ -5073,7 +5074,6 @@ ifneq ($(ONLY_ACTIVE_GOALS),)
     # The runner's --only= takes one substring, so a comma list has no
     # single-run meaning here. Name the exact-set goal instead of reporting
     # a list as an unmatched group.
-    ONLY_COMMA := ,
     ifneq ($(findstring $(ONLY_COMMA),$(ONLY)),)
       $(error make $(ONLY_GOAL): ONLY=$(ONLY) is a list; use make t-fast-exact ONLY=$(ONLY) or one substring)
     endif
@@ -5133,7 +5133,12 @@ ifneq ($(EXACT_ONLY_ACTIVE_GOALS),)
   ifeq ($(strip $(EXACT_ONLY_MATCHED)),)
     $(error make t-fast-exact: ONLY='$(ONLY)' is not a valid exact registered group set; use comma-separated names, e.g. ONLY=dev_land,impact_composition)
   endif
-  $(info t-fast-exact: ONLY='$(ONLY)' resolves to exact set $(EXACT_ONLY_MATCHED))
+  EXACT_ONLY_GROUPS := $(subst $(ONLY_COMMA), ,$(EXACT_ONLY_MATCHED))
+  ifneq ($(word 9,$(EXACT_ONLY_GROUPS)),)
+    $(info t-fast-exact: running $(words $(EXACT_ONLY_GROUPS)) exact registered groups)
+  else
+    $(info t-fast-exact: ONLY='$(ONLY)' resolves to exact set $(EXACT_ONLY_MATCHED))
+  endif
 endif
 
 # Print every REGISTERED test group, one per line. No build, no test binary —
@@ -5710,7 +5715,7 @@ t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint \
 	$(BIN_DIR)/build-epoch-integrity
 	+@$(call ZCL_TEST_BUILD_NEEDS,$(TEST_PARALLEL_FAST_ACTIVE),--exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS))
-	$(ZCL_TEST_STACK_SETUP) && ZCL_TEST_TMPFS="$(ZCL_TEST_TMPFS)" \
+	@$(ZCL_TEST_STACK_SETUP) && ZCL_TEST_TMPFS="$(ZCL_TEST_TMPFS)" \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
 ifeq ($(ZCL_HOST_OS),Darwin)
