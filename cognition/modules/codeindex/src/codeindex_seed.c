@@ -52,6 +52,10 @@
  * and is restamped by ci_build_store_incremental.
  */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "codeindex_priv.h"
 
 #include "codeindex/codeindex_merkle.h"

@@ -1,68 +1,32 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Derive include edges and freshness keys from compiler depfiles.
  *
- * codeindex_deps — turn the compiler's own dependency files (the depfiles
- * under build/, extension .d) into include edges. Each depfile records
- * "<obj>: <src.c> <prereq> ..."; we emit a (source, prerequisite) pair for
- * EVERY in-tree prerequisite the compiler listed, which is the include graph
- * the build already computed for its configuration. Only the quoted includes
- * a depfile omits are read from source text (below).
+ * A depfile names the translation unit and the compiler-recorded prerequisites.
+ * Keep all in-tree prerequisite paths, including registries and generated
+ * inputs, regardless of extension. A missing listed input still contributes
+ * an edge and makes the narrow answer incomplete. An incomplete depfile or
+ * a prerequisite newer than its depfile can also prevent a complete answer.
  *
- * The prerequisite list is taken verbatim, never filtered by file extension.
- * The compiler records every byte it read, and plenty of those are not .h:
- * the ~23 tracked X-macro registries (`*.def` — the command catalog, the
- * condition registry, the sync-kernel catalog, the diagnostics dumpers) are
- * `#include`d exactly like headers and change a translation unit's behavior
- * exactly like headers. An extension allowlist silently dropped them from the
- * graph, so a registry edit moved no downstream content key and busted no
- * cache. The depfile is the authority; if the compiler read it, it is an edge.
- * A listed path that is not a regular file in this checkout is still an edge:
- * the header was deleted or renamed after the compile, a generated input has
- * not been generated yet, or the live epoch describes an older layout. The
- * unit still read that path, so its change must still impact the unit;
- * dropping the edge would narrow every plan past it. Such a path, or a
- * depfile that is incomplete or older than its translation unit, makes the
- * include answer not complete.
+ * Supplement compiler edges with resolvable quoted includes in source text
+ * across configurations. Look beside the including file or translation unit,
+ * at the checkout root, and under the module include directory. Unresolved
+ * quoted includes and angle-bracket includes add no text-derived edge.
  *
- * A depfile describes one configuration of the compile. A quoted include
- * inside an inactive conditional (a Windows-only .inc on Linux) names an
- * in-tree file that configuration never read, so the depfile omits it. That
- * file still shapes the unit elsewhere, so it is added as an edge from the
- * translation unit and scanned the same way for what it includes. Such an
- * edge only adds work, and a text scan that cannot finish still refuses.
- * Only quoted includes the scan resolves are added: one found at the checkout
- * root, beside the including file or the unit, or under that file's module
- * include/ directory. A quoted include that resolves at none of those places,
- * or an angle-bracket include, adds no edge and does not refuse, so an
- * inactive include reached only through another -I directory is not in the
- * graph.
+ * The compile lease selects one live generation per epoch-managed object
+ * root through .current-epoch. Only that generation contributes depfiles.
+ * Ignore history and pre-epoch loose files in those roots. An unresolved
+ * epoch contributes nothing and reports the condition.
  *
- * Depfiles are written into a per-build compile epoch,
- * `<object-root>/epochs/<64-hex>/`. Every build mints a new epoch and the
- * previous few are retained, so the directory accumulates immutable receipts of
- * trees that are no longer checked out: reading them all inflates a warm lookup
- * to tens of thousands of files and duplicates every edge. Exactly one of them
- * is the live graph — the epoch the build actually compiled into — and
- * `tools/dev/build-epoch-session.sh` names it in `<object-root>/.current-epoch`
- * while holding the lock that mints the epoch directory and hands out the
- * compile lease. A compile cannot land in an epoch that file does not name, so
- * the name and the build cannot disagree.
+ * Shared epochs can contain a depfile for a translation unit absent from this
+ * checkout. Hash its bytes but omit its edges only when the primary unit is
+ * outside build/ and absent (ENOENT or ENOTDIR). A missing generated unit
+ * under build/ or unreadable prerequisite of a present unit still refuses.
  *
- * An object root that has an `epochs/` directory is therefore read through that
- * pointer and through nothing else. Loose `.d` files beside it are pre-epoch
- * leftovers that no current compile wrote; they describe a tree that is days
- * stale, and reading them is how this scan came to see 0 of 3,111 live
- * depfiles. `history/` generations are excluded for the same reason.
- *
- * The live epoch is shared by every tree built into it, so it can hold the
- * depfile of a translation unit this tree does not have (a failed candidate
- * added it). A depfile whose primary unit is a source outside build/ that is
- * absent is foreign: it is hashed but adds no edge and no refusal, and the
- * scan logs how many it skipped. A present unit's missing or unreadable
- * input, and an absent generated unit under build/, still refuse.
- *
- * If build/ is absent (a fresh tree), no edges are produced. An epoch-managed
- * root with no resolvable current epoch contributes nothing and says so.
- * Other I/O failures fail closed. */
+ * Registered linked checkouts inside build/ own their compiler inputs.
+ * Validate Git's reciprocal registration before omitting a subtree. The
+ * freshness memo declines that scan because registration can change outside
+ * the directories it watches. A missing build/ is an empty graph. Other
+ * inspection failures propagate to the caller. */
 
 #include "codeindex_priv.h"
 

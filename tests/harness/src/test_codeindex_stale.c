@@ -6,6 +6,10 @@
  * reports the verdict, the out-param is optional, and a null codeindex
  * fails closed with a stale verdict. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 
 #include "codeindex/codeindex.h"
