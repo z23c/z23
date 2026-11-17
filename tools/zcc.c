@@ -406,6 +406,7 @@ static bool orchestration_env(const char *entry)
          * hour, 21 hits, because every agent session carried its own ids), and
          * no compiler driver reads any of them. */
         "ONLY=", "MAKEOVERRIDES=", "DEVBUILD_ACTIVE=", "DEVBUILD_CLASS=",
+        "DEVBUILD_UNIT=",
         "INVOCATION_ID=", "CODEX_TOOL_CALL_ID=",
         "JOURNAL_STREAM=", "SHLVL=", "OLDPWD=", "_=",
         "SSH_CONNECTION=", "SSH_CLIENT=", "SSH_TTY=", "XDG_SESSION_ID=",
