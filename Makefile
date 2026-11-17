@@ -7415,7 +7415,7 @@ endef
 # make lint and the land proof stay whole-tree. No merge-base, or a diff
 # that does not succeed, means no flag.
 ifeq ($(ZCL_LINT_SERIAL),1)
-lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(if $(filter check-vendor-provenance check-tor-provenance,$(LINT_FAST_GATES)),tor-provenance-ready,) $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \
 		$(REPRO_NETWORK_POLICY_SELFTEST_BIN) \
 		$(BUILD_EPOCH_INTEGRITY_LINT_BIN) \
@@ -7426,7 +7426,7 @@ lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN
 	[ "$$rc" = 0 ] || exit 1
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(TOR_PROVENANCE_BIN) \
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) $(if $(filter check-vendor-provenance check-tor-provenance,$(LINT_FAST_GATES)),tor-provenance-ready,) $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL) $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) \
 		$(REPRO_NETWORK_POLICY_SELFTEST_BIN) \
 		$(BUILD_EPOCH_INTEGRITY_LINT_BIN) \

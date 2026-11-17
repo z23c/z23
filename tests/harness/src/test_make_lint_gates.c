@@ -1758,7 +1758,8 @@ static int t_lint_fast_tor_graph(void)
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
-        "fixture_make() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null REPRO_NETWORK_POLICY_SELFTEST_BIN=/dev/null BUILD_EPOCH_INTEGRITY_LINT_BIN=/dev/null CHECKOUT_LOCK_SELFTEST_LINT_BIN=/dev/null \"$@\"; }\n"
+        "fixture_make_raw() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null REPRO_NETWORK_POLICY_SELFTEST_BIN=/dev/null BUILD_EPOCH_INTEGRITY_LINT_BIN=/dev/null CHECKOUT_LOCK_SELFTEST_LINT_BIN=/dev/null \"$@\"; }\n"
+        "fixture_make() { fixture_make_raw -o tor-provenance-ready \"$@\"; }\n"
         "if ! fixture_make fixture-print-gates > expected 2>parse.log; then cat parse.log >&2; exit 1; fi\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
         "[ ! -e \"$HOME/tor\" ]; [ -e \"$HOME/binding\" ]; [ -s \"$HOME/args\" ]\n"
@@ -1794,6 +1795,17 @@ static int t_lint_fast_tor_graph(void)
         "rm -f \"$HOME/calls\"; fixture_make lint-fast ZCL_LINT_SERIAL=1 LINT_FAST_GATES=fixture-fast ZCL_LINT_FAST_PRECHECK=0 > serial-optout.log 2>&1\n"
         "[ \"$(grep -c '^run$' \"$HOME/calls\")\" = 1 ]\n"
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ]\n";
+    static const char tor_checks[] =
+        "for mode in 0 1; do\n"
+        "  rm -f \"$HOME/tor\" \"$HOME/calls\"\n"
+        "  fixture_make_raw lint-fast ZCL_LINT_SERIAL=$mode LINT_FAST_GATES=fixture-fast > unrelated.log 2>&1 || exit 1\n"
+        "  [ ! -e \"$HOME/tor\" ] || exit 1\n"
+        "  for gate in check-vendor-provenance check-tor-provenance; do\n"
+        "    rm -f \"$HOME/tor\" \"$HOME/calls\"\n"
+        "    if fixture_make_raw lint-fast ZCL_LINT_SERIAL=$mode LINT_FAST_GATES=$gate > tor-fast.log 2>&1; then echo 'missing Tor refusal' >&2; exit 1; fi\n"
+        "    [ \"$(cat \"$HOME/tor\")\" = called ] && [ ! -e \"$HOME/calls\" ] || exit 1\n"
+        "  done\n"
+        "done\n";
     static const char epoch_checks[] =
         "rm -f \"$HOME/epoch-calls\" \"$HOME/compiler-calls\"\n"
         "for fast in t-fast t-fast-exact; do for build in dev-bin z23-dev zclassic23-dev z23 zclassic23; do\n"
@@ -1817,7 +1829,7 @@ static int t_lint_fast_tor_graph(void)
         "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$1\" >> \"$HOME/calls\"\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/$1-args\"\\nprintf \"%%s\\\\n\" \"${ZCL_CAP_CLOSURE_SOURCE_RECORD:-}\" > \"$HOME/$1-record\"\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
         "chmod +x stub-lint\n"
         "printf '%s\\n' '.PHONY: fixture-a fixture-b fixture-c' 'fixture-a fixture-b fixture-c:' '\t@printf \"%s\\\\n\" \"$@\" >> \"$(HOME)/serial-calls\"; test \"$(FAIL_GATE)\" != 1' >> overlay.mk\n"
-        "union_make() { fixture_make -o lint-preflight-epoch-verify -o check-native-tunnel-export-binding Z23_DEV_BIN=/dev/null DEV_PACKAGE_VERIFY_BIN=/dev/null CAPABILITY_STANDALONE_OBJS= 'LINT_FAST_GATES=fixture-a fixture-b' 'LINT_PREFLIGHT_GATES=fixture-b fixture-c' 'LINT_FAST_PRECHECK_NATIVE=fixture-a fixture-b fixture-c' \"$@\"; }\n"
+        "union_make() { fixture_make_raw -o lint-preflight-epoch-verify -o check-native-tunnel-export-binding Z23_DEV_BIN=/dev/null DEV_PACKAGE_VERIFY_BIN=/dev/null CAPABILITY_STANDALONE_OBJS= 'LINT_FAST_GATES=fixture-a fixture-b' 'LINT_PREFLIGHT_GATES=fixture-b fixture-c' 'LINT_FAST_PRECHECK_NATIVE=fixture-a fixture-b fixture-c' \"$@\"; }\n"
         "rm -f \"$HOME/calls\" \"$HOME/tor\"; union_make lint-fast-preflight > union.log 2>&1 || { cat union.log >&2; exit 1; }\n"
         "[ ! -e \"$HOME/tor\" ]\n"
         "printf 'run\\nprecheck\\n' > expected-calls; cmp expected-calls \"$HOME/calls\"\n"
@@ -1838,8 +1850,8 @@ static int t_lint_fast_tor_graph(void)
         "done\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "lint_fast", "tor_graph");
-    char combined[sizeof(script) + sizeof(checks) + sizeof(epoch_checks) + sizeof(union_checks)];
-    int n = snprintf(combined, sizeof(combined), "%s%s%s%s", script, checks, union_checks, epoch_checks);
+    char combined[sizeof(script) + sizeof(checks) + sizeof(tor_checks) + sizeof(epoch_checks) + sizeof(union_checks)];
+    int n = snprintf(combined, sizeof(combined), "%s%s%s%s%s", script, checks, tor_checks, union_checks, epoch_checks);
     if (n < 0 || (size_t)n >= sizeof(combined)) return 1;
     int bad = build_needs_fixture_run(repo_root(), fixture, combined);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
