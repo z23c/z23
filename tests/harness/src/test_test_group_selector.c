@@ -2079,31 +2079,34 @@ static int test_exact_default_parallel_jobs(void)
 {
     int failures = 0;
     TEST("t-fast-exact recursion defaults to -j only when make got no -j") {
-        const char *true_bin = tgs_fixture_executable("/usr/bin/true", "/bin/true");
-        ASSERT(true_bin != NULL);
-        char command[1024], line[512];
-        int n = snprintf(command, sizeof(command),
-            "env -u MAKEFLAGS -u MFLAGS make -n t-fast-exact ONLY=api "
-            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=%s "
-            "TEST_PARALLEL_FAST_ACTIVE=%s "
-            "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1 | "
-            "grep 'make --no-print-directory.*t-fast-exact-locked'",
-            true_bin, true_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        ASSERT(capture_command(command, line, sizeof(line)) == 0);
-        ASSERT(strstr(line, "--no-print-directory -j") != NULL);
+        const char *jobs[] = {"", "-j3"};
+        for (size_t i = 0; i < 2; i++) {
+            char command[1024], head[1], tail[4096];
+            /* Make executes recursive lines even under -n. Observe the child's
+             * argv after the checkout lock, without parsing its build graph. */
+            int n = snprintf(command, sizeof(command),
+                "env -u MAKEFLAGS -u MFLAGS make -n %s t-fast-exact ONLY=api "
+                "MAKE='echo tgs-child' BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+                jobs[i], zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            ASSERT(n > 0 && (size_t)n < sizeof(command));
+            ASSERT(capture_command_ends(command, head, sizeof(head), tail, sizeof(tail)) == 0);
 
-        n = snprintf(command, sizeof(command),
-            "env -u MAKEFLAGS -u MFLAGS make -n -j3 t-fast-exact ONLY=api "
-            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=%s "
-            "TEST_PARALLEL_FAST_ACTIVE=%s "
-            "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1 | "
-            "grep 'make --no-print-directory.*t-fast-exact-locked'",
-            true_bin, true_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        ASSERT(capture_command(command, line, sizeof(line)) == 0);
-        ASSERT(strstr(line, "t-fast-exact-locked") != NULL);
-        ASSERT(strstr(line, "-j") == NULL);
+            const char prefix[] = "\ntgs-child --no-print-directory ";
+            char *args = strstr(tail, prefix);
+            ASSERT(args != NULL);
+            args += sizeof(prefix) - 1;
+            args[strcspn(args, "\n")] = '\0';
+            if (!jobs[i][0]) {
+                ASSERT(strncmp(args, "-j", 2) == 0);
+                args += 2;
+                size_t digits = strspn(args, "0123456789");
+                ASSERT(digits > 0 && args[digits] == ' ');
+                args += digits + 1;
+            }
+            const char target[] = "t-fast-exact-locked ";
+            ASSERT(strncmp(args, target, sizeof(target) - 1) == 0);
+            ASSERT(strstr(args, " -j") == NULL);
+        }
         PASS();
     } _test_next:;
     return failures;
