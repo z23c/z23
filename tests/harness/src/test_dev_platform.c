@@ -13628,7 +13628,7 @@ static bool epn_preflight_tools(const char *cwd, const char *root)
         dp_mk_write(root, "fixture.c", "int fixture(void) { return 7; }\n");
 }
 
-static bool epn_preflight_makefile(const char *root)
+static bool epn_preflight_makefile(const char *root, const char *goal)
 {
     static const char mk[] =
         "S := $(shell printf '%064d' 4)\nM := $(shell printf '%064d' 5)\n"
@@ -13640,14 +13640,20 @@ static bool epn_preflight_makefile(const char *root)
         "include actual-edges.mk\n.PHONY: lint-preflight lint-fast-preflight acquire verified writer tor-provenance-ready\n"
         "tor-provenance-ready:\n\t@printf ready > tor-ready\n"
         "acquire:\n\t@tools/dev/build-epoch-session.sh acquire $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n"
-        "verified: acquire\n\t@tools/dev/build-epoch-session.sh verify $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n\t@printf 'x\\n' > barrier\n"
+        "verified: acquire\n\t@tools/dev/build-epoch-session.sh verify $(SESSION) $(LEASE) $(O) - 1 $(S) 1 $(M) $(C) $(E) fixture-v1 -O2 - cc c++ $$PPID\n\t@printf 'x\\n' >> barrier\n"
         "writer: acquire\n\t@read token < barrier\n\t@tools/dev/compile-epoch-object.sh dep $(D)/standalone.o fixture.c $(S) 1 $(M) $(E) $(C) $(SESSION) -- cc -std=c23 -O2\n"
-        "lint-preflight lint-fast-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified && { [ \"$@\" != lint-fast-preflight ] || test -f tor-ready; }\n"
+        "check-capability-closure lint-preflight lint-fast-preflight:\n\t@test -f $(D)/standalone.o && test ! -e $(D)/.unverified && { [ \"$@\" != lint-fast-preflight ] || test -f tor-ready; }\n"
+        "\t@if [ \"$@\" = check-capability-closure ]; then grep -qx x barrier; fi\n"
         "BUILD_EPOCH_SESSION_TOOL := tools/dev/build-epoch-session.sh\nDEV_SESSION := $(SESSION)\nDEV_LEASE := $(LEASE)\nDEV_OBJ_ROOT := $(O)\nBIN_DIR := unused\nBUILD_EPOCH_KEEP := 1\n"
         "BUILD_SOURCE_ID := $(S)\nBUILD_CLEAN := 1\nBUILD_MUTATION := $(M)\nBUILD_COMPILER_ID := $(C)\nDEV_COMPILE_EPOCH := $(E)\nDEV_PROFILE := fixture-v1\nDEV_EPOCH_COMPILE_FLAGS := -O2\nDEV_EPOCH_LINK_FLAGS := -\n";
     char fifo[PATH_MAX];
-    return dp_mk_write(root, "fixture.mk", mk) &&
-        snprintf(fifo, sizeof(fifo), "%s/barrier", root) < (int)sizeof(fifo) && mkfifo(fifo, 0600) == 0;
+    if (!dp_mk_write(root, "fixture.mk", mk)) return false;
+    /* With the closure edge missing, a FIFO reader would wait forever for
+     * the absent binary writer. A ready token lets that regression fail. */
+    if (!strcmp(goal, "check-capability-closure"))
+        return dp_mk_write(root, "barrier", "ready\n");
+    return snprintf(fifo, sizeof(fifo), "%s/barrier", root) < (int)sizeof(fifo) &&
+           mkfifo(fifo, 0600) == 0;
 }
 
 static bool epn_preflight_case(const char *cwd, const char *goal)
@@ -13655,7 +13661,7 @@ static bool epn_preflight_case(const char *cwd, const char *goal)
     char root[PATH_MAX], command[PATH_MAX + 128];
     if (!test_mkdtemp(root, sizeof(root), "epoch_preflight") ||
         !epn_preflight_edges(root) || !epn_preflight_tools(cwd, root) ||
-        !epn_preflight_makefile(root) ||
+        !epn_preflight_makefile(root, goal) ||
         snprintf(command, sizeof(command),
                  "cd '%s' && MAKEFLAGS= MFLAGS= make -s -j2 -f fixture.mk %s >make.log 2>&1",
                  root, goal) >= (int)sizeof(command)) return false;
@@ -13676,6 +13682,7 @@ static int test_epoch_preflight_final_verify(void)
         ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
         ASSERT(epn_preflight_case(cwd, "lint-preflight"));
         ASSERT(epn_preflight_case(cwd, "lint-fast-preflight"));
+        ASSERT(epn_preflight_case(cwd, "check-capability-closure"));
         PASS();
     } _test_next:;
     return failures;

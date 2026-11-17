@@ -14883,7 +14883,6 @@ check-capability-closure lint lint-preflight lint-fast-preflight: $(CAPABILITY_S
 # A standalone capability object can finish after either dev binary's own
 # aggregate verification. Verify once more after every preflight epoch writer
 # has drained, so a successful preflight does not leave its epoch unverified.
-ifneq ($(ZCL_LINT_SERIAL),1)
 # lint-preflight-epoch-verify fixture begin
 .PHONY: lint-preflight-epoch-verify
 lint-preflight-epoch-verify: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(CAPABILITY_STANDALONE_OBJS)
@@ -14892,9 +14891,11 @@ lint-preflight-epoch-verify: $(Z23_DEV_BIN) $(DEV_PACKAGE_VERIFY_BIN) $(CAPABILI
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(DEV_PROFILE)" "$(DEV_EPOCH_COMPILE_FLAGS)" \
 	  "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null
+check-capability-closure: lint-preflight-epoch-verify
+ifneq ($(ZCL_LINT_SERIAL),1)
 lint-preflight lint-fast-preflight: lint-preflight-epoch-verify
-# lint-preflight-epoch-verify fixture end
 endif
+# lint-preflight-epoch-verify fixture end
 $(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -18123,7 +18124,7 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # (detail=unrouted=N first=<path>); with no routed group the test step is
 # skipped. The stack gate still runs the proof's full set.
 # The check-capability-closure step is the land proof's closure gate; it
-# grades the dev-epoch objects the test step just built, so it runs after it.
+# prepares and grades the dev epoch after the focused test has reported.
 # The check-kpi-floor step reads the floor file tools/lint/kpi_floor.txt and
 # the inputs its metrics measure: build/gen/CAPABILITY_INVENTORY.jsonl (built
 # by the step before it), engine/composition/commands/catalog.def,
