@@ -220,7 +220,9 @@ static bool fbc_parse_fetch(const struct json_value *input,
     const struct json_value *size = json_get(input, "size");
     if (!size || size->type != JSON_INT || json_get_int(size) < 1 ||
         json_get_int(size) > (int64_t)VCS_BUNDLE_MAX_BYTES) {
-        fbc_fail(reply, "BAD_SIZE", "size must be 1 to 5242880 bytes", false,
+        fbc_fail(reply, "BAD_SIZE",
+                 "size must be 1 to 5242880 bytes: the bundle file's exact "
+                 "byte count the offer reports (fleet bundle offer)", false,
                  false, FBC_FETCH_CMD);
         return false;
     }

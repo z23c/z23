@@ -576,15 +576,17 @@ static int bundle_case_refusals(void)
 
     bundle_args(&a, &offered, out_path);
     a.size = 0;
-    SW_CHECK("bundle: size 0 is refused",
+    SW_CHECK("bundle: size 0 is refused and the refusal names where the number comes from",
              zcl_fleet_bundle_fetch_step(p.seed.store, p.seed.engine, &a,
                                          &o) == ZCL_FLEET_BUNDLE_REFUSED &&
-             strcmp(o.code, "BAD_SIZE") == 0);
+             strcmp(o.code, "BAD_SIZE") == 0 &&
+             strstr(o.message, "byte count the offer reports") != NULL);
     a.size = (uint64_t)VCS_BUNDLE_MAX_BYTES + 1u;
-    SW_CHECK("bundle: a size over 5 MiB is refused",
+    SW_CHECK("bundle: a size over 5 MiB is refused with the same guidance",
              zcl_fleet_bundle_fetch_step(p.seed.store, p.seed.engine, &a,
                                          &o) == ZCL_FLEET_BUNDLE_REFUSED &&
-             strcmp(o.code, "BAD_SIZE") == 0);
+             strcmp(o.code, "BAD_SIZE") == 0 &&
+             strstr(o.message, "byte count the offer reports") != NULL);
 
     bundle_args(&a, &offered, out_path);
     char existing[1200];

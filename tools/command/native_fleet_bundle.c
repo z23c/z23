@@ -348,7 +348,9 @@ enum zcl_fleet_bundle_status zcl_fleet_bundle_fetch_step(
                           false, false);
     if (args->size < 1u || args->size > (uint64_t)VCS_BUNDLE_MAX_BYTES)
         return zfb_refuse(out, "BAD_SIZE",
-                          "size must be 1 to 5242880 bytes", false, false);
+                          "size must be 1 to 5242880 bytes: the bundle "
+                          "file's exact byte count the offer reports "
+                          "(fleet bundle offer)", false, false);
     if (!platform_private_path_absent(args->out_path))
         return zfb_refuse(out, "OUT_EXISTS",
                           "out already exists (or cannot be checked); pick "
