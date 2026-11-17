@@ -3,6 +3,7 @@
  * Drives zcl_worktree_init against a private git worktree. */
 
 #include "test/test_core.h"
+#include "test/fixture_environment.h"
 
 #include "worktree_init.h"
 
@@ -175,11 +176,7 @@ static int test_worktree_missing_lib(const char *dir)
 static int test_worktree_copy(const char *dir)
 {
     int failures = 0;
-    const char *old = getenv("PATH");
-    char saved[8192];
-    saved[0] = '\0';
-    if (old != NULL && strlen(old) < sizeof saved)
-        memcpy(saved, old, strlen(old) + 1);
+    struct fixture_env saved = {0};
     TEST("worktree init: archives copy once and a second run skips them") {
         char canon[1024];
         char lane[1024];
@@ -188,7 +185,7 @@ static int test_worktree_copy(const char *dir)
         char path[1200];
         char binpath[1200];
         int rc = 1;
-        ASSERT(saved[0] != '\0');
+        ASSERT(fixture_env_save(&saved, "PATH"));
         ASSERT(snprintf(canon, sizeof canon, "%s/copy-canon", dir) > 0);
         ASSERT(snprintf(lane, sizeof lane, "%s/copy-lane", dir) > 0);
         ASSERT(snprintf(log, sizeof log, "%s/copy.log", dir) > 0);
@@ -197,8 +194,7 @@ static int test_worktree_copy(const char *dir)
         ASSERT(wti_seed(canon, 1) == 0);
         ASSERT(wti_lane(canon, lane) == 0);
         ASSERT(wti_make(dir) == 0);
-        ASSERT(snprintf(path, sizeof path, "%s:%s", binpath, saved) < (int)sizeof path);
-        ASSERT(setenv("PATH", path, 1) == 0);
+        ASSERT(fixture_path_prepend(binpath));
         ASSERT(wti_capture(lane, log, got, sizeof got, &rc) == 0);
         ASSERT(rc == 0);
         ASSERT(strstr(got, "[1/3] vendor/lib: copied from ") != NULL);
@@ -221,19 +217,14 @@ static int test_worktree_copy(const char *dir)
         ASSERT(strstr(got, "vendor/include: this IS the canonical checkout") != NULL);
         PASS();
     } _test_next:;
-    if (saved[0] != '\0')
-        setenv("PATH", saved, 1);
+    failures += !fixture_env_restore(&saved);
     return failures;
 }
 
 static int test_worktree_gap(const char *dir)
 {
     int failures = 0;
-    const char *old = getenv("PATH");
-    char saved[8192];
-    saved[0] = '\0';
-    if (old != NULL && strlen(old) < sizeof saved)
-        memcpy(saved, old, strlen(old) + 1);
+    struct fixture_env saved = {0};
     TEST("worktree init: a missing archive fails the link check") {
         char canon[1024];
         char lane[1024];
@@ -241,7 +232,7 @@ static int test_worktree_gap(const char *dir)
         char got[8192];
         char path[1200];
         int rc = 0;
-        ASSERT(saved[0] != '\0');
+        ASSERT(fixture_env_save(&saved, "PATH"));
         ASSERT(snprintf(canon, sizeof canon, "%s/gap-canon", dir) > 0);
         ASSERT(snprintf(lane, sizeof lane, "%s/gap-lane", dir) > 0);
         ASSERT(snprintf(log, sizeof log, "%s/gap.log", dir) > 0);
@@ -249,16 +240,15 @@ static int test_worktree_gap(const char *dir)
         ASSERT(wti_seed(canon, 0) == 0);
         ASSERT(wti_lane(canon, lane) == 0);
         ASSERT(wti_make(dir) == 0);
-        ASSERT(snprintf(path, sizeof path, "%s/bin:%s", dir, saved) < (int)sizeof path);
-        ASSERT(setenv("PATH", path, 1) == 0);
+        ASSERT(snprintf(path, sizeof path, "%s/bin", dir) < (int)sizeof path);
+        ASSERT(fixture_path_prepend(path));
         ASSERT(wti_capture(lane, log, got, sizeof got, &rc) == 0);
         ASSERT(rc == 1);
         ASSERT(strstr(got, "missing: vendor/lib/libz.a") != NULL);
         ASSERT(strstr(got, "worktree-init: done") == NULL);
         PASS();
     } _test_next:;
-    if (saved[0] != '\0')
-        setenv("PATH", saved, 1);
+    failures += !fixture_env_restore(&saved);
     return failures;
 }
 

@@ -5,6 +5,7 @@
  * without compiling the repository. */
 
 #include "test/test_core.h"
+#include "test/fixture_environment.h"
 
 #include "depfile_scope_launch.h"
 
@@ -154,10 +155,7 @@ static int dsl_line_count(const char *path)
 
 static bool dsl_linker_env(const char *root, const char *bins, const char *mode)
 {
-    char path[1024];
-    const char *oldpath = getenv("PATH");
-    if (!oldpath || snprintf(path, sizeof path, "%s:%s", bins, oldpath) >= (int)sizeof path) return false;
-    if (setenv("PATH", path, 1) || setenv("TMPDIR", root, 1) || setenv("DSL_MODE", mode, 1)) return false;
+    if (!fixture_path_prepend(bins) || setenv("TMPDIR", root, 1) || setenv("DSL_MODE", mode, 1)) return false;
     const char *const controls[] = {"MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES"};
     for (size_t i = 0; i < sizeof controls / sizeof controls[0]; ++i) if (unsetenv(controls[i])) return false;
     return true;
@@ -224,25 +222,18 @@ static int test_depfile_scope_linker(const char *root, const char *bins)
 static int test_depfile_scope_success(const char *root, const char *bin_dir)
 {
     int failures = 0;
-    char path_env[1024];
     char make_log[512];
     char run_log[512];
-    char saved_path[1024];
-    const char *old_path = getenv("PATH");
-    const char *old_tmp = getenv("TMPDIR");
+    struct fixture_env path = {0}, tmp = {0};
     TEST("depfile scope launch: builds in a private directory and removes it") {
-        int n;
-        ASSERT(old_path != NULL);
-        n = snprintf(saved_path, sizeof saved_path, "%s", old_path);
-        ASSERT(n > 0 && n < (int)sizeof saved_path);
-        n = snprintf(path_env, sizeof path_env, "%s:%s", bin_dir, old_path);
-        ASSERT(n > 0 && n < (int)sizeof path_env);
-        n = snprintf(make_log, sizeof make_log, "%s/make.log", root);
+        ASSERT(fixture_env_save(&path, "PATH"));
+        ASSERT(fixture_env_save(&tmp, "TMPDIR"));
+        int n = snprintf(make_log, sizeof make_log, "%s/make.log", root);
         ASSERT(n > 0 && n < (int)sizeof make_log);
         n = snprintf(run_log, sizeof run_log, "%s/run.log", root);
         ASSERT(n > 0 && n < (int)sizeof run_log);
         ASSERT(dsl_make_ok(bin_dir, root, run_log) == 0);
-        ASSERT(setenv("PATH", path_env, 1) == 0);
+        ASSERT(fixture_path_prepend(bin_dir));
         ASSERT(setenv("TMPDIR", root, 1) == 0);
         ASSERT(zcl_depfile_scope_launch(NULL) == 2);
         ASSERT(zcl_depfile_scope_launch("") == 2);
@@ -256,39 +247,26 @@ static int test_depfile_scope_success(const char *root, const char *bin_dir)
         ASSERT(access(run_log, F_OK) == 0);
         PASS();
     } _test_next:;
-    if (old_path)
-        (void)setenv("PATH", saved_path, 1);
-    if (old_tmp)
-        (void)setenv("TMPDIR", old_tmp, 1);
-    else
-        unsetenv("TMPDIR");
+    failures += !fixture_env_restore(&tmp);
+    failures += !fixture_env_restore(&path);
     return failures;
 }
 
 static int test_depfile_scope_make_fails(const char *root, const char *bin_dir)
 {
     int failures = 0;
-    char path_env[1024];
-    char saved_path[1024];
-    const char *old_path = getenv("PATH");
-    const char *old_tmp = getenv("TMPDIR");
+    struct fixture_env path = {0}, tmp = {0};
     TEST("depfile scope launch: a failing make removes the private directory") {
-        int n = old_path ? snprintf(saved_path, sizeof saved_path, "%s", old_path) : -1;
-        ASSERT(n > 0 && n < (int)sizeof saved_path);
-        n = snprintf(path_env, sizeof path_env, "%s:%s", bin_dir, old_path);
-        ASSERT(n > 0 && n < (int)sizeof path_env);
+        ASSERT(fixture_env_save(&path, "PATH"));
+        ASSERT(fixture_env_save(&tmp, "TMPDIR"));
         ASSERT(dsl_make_fail(bin_dir, root) == 0);
-        ASSERT(setenv("PATH", path_env, 1) == 0);
+        ASSERT(fixture_path_prepend(bin_dir));
         ASSERT(setenv("TMPDIR", root, 1) == 0);
         ASSERT(zcl_depfile_scope_launch(root) == 3);
         PASS();
     } _test_next:;
-    if (old_path)
-        (void)setenv("PATH", saved_path, 1);
-    if (old_tmp)
-        (void)setenv("TMPDIR", old_tmp, 1);
-    else
-        unsetenv("TMPDIR");
+    failures += !fixture_env_restore(&tmp);
+    failures += !fixture_env_restore(&path);
     return failures;
 }
 
@@ -376,22 +354,17 @@ static int test_depfile_scope_selector_signal(const char *root, const char *bins
 static int test_depfile_scope_signal(const char *root, const char *bin_dir)
 {
     int failures = 0;
-    char path_env[1024];
     char ready[512];
-    char saved_path[1024];
-    const char *old_path = getenv("PATH");
-    const char *old_tmp = getenv("TMPDIR");
+    struct fixture_env path = {0}, tmp = {0};
     pid_t pid = -1;
     int status = 0;
     TEST("depfile scope launch: a caught signal stops make and removes the directory") {
-        int n = old_path ? snprintf(saved_path, sizeof saved_path, "%s", old_path) : -1;
-        ASSERT(n > 0 && n < (int)sizeof saved_path);
-        n = snprintf(path_env, sizeof path_env, "%s:%s", bin_dir, old_path);
-        ASSERT(n > 0 && n < (int)sizeof path_env);
-        n = snprintf(ready, sizeof ready, "%s/ready", root);
+        ASSERT(fixture_env_save(&path, "PATH"));
+        ASSERT(fixture_env_save(&tmp, "TMPDIR"));
+        int n = snprintf(ready, sizeof ready, "%s/ready", root);
         ASSERT(n > 0 && n < (int)sizeof ready);
         ASSERT(dsl_make_sleep(bin_dir, root, ready) == 0);
-        ASSERT(setenv("PATH", path_env, 1) == 0);
+        ASSERT(fixture_path_prepend(bin_dir));
         ASSERT(setenv("TMPDIR", root, 1) == 0);
         pid = fork();
         ASSERT(pid >= 0);
@@ -408,12 +381,8 @@ static int test_depfile_scope_signal(const char *root, const char *bin_dir)
         kill(pid, SIGTERM);
         (void)waitpid(pid, &status, 0);
     }
-    if (old_path)
-        (void)setenv("PATH", saved_path, 1);
-    if (old_tmp)
-        (void)setenv("TMPDIR", old_tmp, 1);
-    else
-        unsetenv("TMPDIR");
+    failures += !fixture_env_restore(&tmp);
+    failures += !fixture_env_restore(&path);
     return failures;
 }
 

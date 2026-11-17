@@ -11,6 +11,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/fixture_environment.h"
 
 #include "command/native_command.h"
 #include "codeindex/codeindex.h"
@@ -252,27 +253,23 @@ static bool cct_build_fixture(struct cc_fix *fx)
     return ok;
 }
 
-static bool cct_moving_setup(const struct cc_fix *fx, const char *next,
-                             const char *old_path)
+static bool cct_moving_setup(const struct cc_fix *fx, const char *next)
 {
     static const char script[] =
-        "#!/bin/sh\nd=${0%/*}\nIFS= read -r PATH < \"$d/path\" || exit 1\n"
+        "#!/bin/sh\nd=${0%/*}\nPATH=${PATH#*:}\n"
         "export PATH\nIFS= read -r target < \"$d/target\" || exit 1\n"
         "case \"$*\" in\n"
         "*'moving^{commit}'*) git \"$@\"; r=$?; "
         "if [ \"$r\" = 0 ]; then git -C \"$d/..\" update-ref "
         "refs/heads/moving \"$target\" || exit 1; fi; exit \"$r\";;\n"
         "*) exec git \"$@\";;\nesac\n";
-    char shim[640], path_line[1024], target_line[128];
+    char shim[640], target_line[128];
     if (cct_git(fx, NULL, 0, "branch", "moving", fx->commit1, NULL))
         return false;
-    int n = snprintf(path_line, sizeof path_line, "%s\n", old_path);
     int m = snprintf(target_line, sizeof target_line, "%s\n", next);
-    if (n < 0 || (size_t)n >= sizeof path_line || m < 0 ||
-        (size_t)m >= sizeof target_line)
+    if (m < 0 || (size_t)m >= sizeof target_line)
         return false;
-    if (!cct_write(fx, "shim/path", path_line) ||
-        !cct_write(fx, "shim/target", target_line) ||
+    if (!cct_write(fx, "shim/target", target_line) ||
         !cct_write(fx, "shim/git", script))
         return false;
     (void)snprintf(shim, sizeof shim, "%s/shim/git", fx->dir);
@@ -310,10 +307,10 @@ static bool cct_moving_ref(const struct cc_fix *fx, const char *next)
     char *saved = old ? strdup(old) : NULL;
     if (old && !saved)
         return false;
-    bool setup = saved && cct_moving_setup(fx, next, saved);
-    int n = snprintf(path, sizeof path, "%s/shim:%s", fx->dir, saved ? saved : "");
+    bool setup = saved && cct_moving_setup(fx, next);
+    int n = snprintf(path, sizeof path, "%s/shim", fx->dir);
     bool installed = setup && n >= 0 && (size_t)n < sizeof path &&
-                     setenv("PATH", path, 1) == 0;
+                     fixture_path_prepend(path);
     struct cct_call c;
     cct_begin(&c, fx);
     cct_arg(&c, "at", "moving");
@@ -368,18 +365,16 @@ static bool cct_tree_fixture(const struct cc_fix *fx, size_t entries, bool fail,
     return cct_write(fx, "shim/calls", "") && ok;
 }
 
-static bool cct_tree_shim(const struct cc_fix *fx, const char *old)
+static bool cct_tree_shim(const struct cc_fix *fx)
 {
     static const char script[] =
-        "#!/bin/sh\nd=${0%/*}\nIFS= read -r PATH < \"$d/path\" || exit 1\n"
+        "#!/bin/sh\nd=${0%/*}\nPATH=${PATH#*:}\n"
         "export PATH\ncase \"$*\" in\n"
         "*ls-tree*) printf x >> \"$d/calls\" || exit 1; "
         "cat \"$d/listing\" || exit 1; [ ! -f \"$d/fail\" ] || exit 1;;\n"
         "*) exec git \"$@\";;\nesac\n";
-    char path_line[1024], shim[640];
-    int n = snprintf(path_line, sizeof path_line, "%s\n", old);
-    if (n < 0 || (size_t)n >= sizeof path_line ||
-        !cct_write(fx, "shim/path", path_line) || !cct_write(fx, "shim/git", script))
+    char shim[640];
+    if (!cct_write(fx, "shim/git", script))
         return false;
     (void)snprintf(shim, sizeof shim, "%s/shim/git", fx->dir);
     return chmod(shim, 0700) == 0;
@@ -416,13 +411,13 @@ static bool cct_tree_capture(const struct cc_fix *fx, size_t entries, bool fail,
     if (!saved)
         return false;
     size_t bytes = 0;
-    bool setup = cct_tree_shim(fx, saved) && cct_tree_fixture(fx, entries, fail, &bytes);
+    bool setup = cct_tree_shim(fx) && cct_tree_fixture(fx, entries, fail, &bytes);
     size_t lower = entries == 20000 ? 1024 * 1024 : 2 * 1024 * 1024;
     bool size_ok = bytes > lower && bytes < lower * 2;
     char path[1024];
-    int n = snprintf(path, sizeof path, "%s/shim:%s", fx->dir, saved);
+    int n = snprintf(path, sizeof path, "%s/shim", fx->dir);
     bool installed = setup && size_ok && n >= 0 && (size_t)n < sizeof path &&
-                     setenv("PATH", path, 1) == 0;
+                     fixture_path_prepend(path);
     struct cct_call c;
     cct_begin(&c, fx);
     bool ran = installed && cct_run(&c);
