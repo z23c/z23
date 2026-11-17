@@ -439,6 +439,70 @@ static int test_lrun_verdicts(void)
     return failures;
 }
 
+static size_t lrun_count_lines(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++)
+        n += (*s == '\n');
+    return n;
+}
+
+/* The persistent catch ledger: `z23-lint run` appends one
+ * zcl.lint_gate_catches.v1 line per EXECUTED gate to
+ * <state>/gate-catches.jsonl beside last-run.json (run_report.c). A
+ * catch is rc != 0; a pass appends its rc:0 line but never counts as a
+ * catch. A gate killed by a signal carries its 128+signal rc the way the
+ * timing row does, so it is a recorded catch too. */
+static int test_lrun_catch_ledger(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: each run appends one gate-catches line per executed gate") {
+        struct lrun_fx fx;
+        char out[4096], err[4096], p[PATH_MAX + 64], body[4096];
+        char *gates[] = { (char *)"check-fx-pass", (char *)"check-fx-fail",
+                          (char *)"check-fx-crash" };
+        struct lrun_cfg c = { 2, "", "", "" };
+        ASSERT(lrun_plant(&fx));
+        (void)snprintf(p, sizeof p, "%s/state/gate-catches.jsonl", fx.root);
+        ASSERT_EQ(lrun_go(&fx, &c, gates, 3, out, err, sizeof out), 1);
+        ASSERT(lrun_read(p, body, sizeof body));
+        ASSERT(strstr(body, "{\"ts\":\"") != NULL);
+        ASSERT(strstr(body, "\"gate\":\"check-fx-fail\",\"rc\":3,\"ms\":") != NULL);
+        ASSERT(strstr(body, "\"gate\":\"check-fx-pass\",\"rc\":0,\"ms\":") != NULL);
+        ASSERT(strstr(body, "\"gate\":\"check-fx-crash\",\"rc\":137,\"ms\":") != NULL);
+        ASSERT_EQ((int64_t)lrun_count_lines(body), 3);
+        /* a second run APPENDS: the snapshot is overwritten, the ledger is not */
+        ASSERT_EQ(lrun_go(&fx, &c, gates, 3, out, err, sizeof out), 1);
+        ASSERT(lrun_read(p, body, sizeof body));
+        ASSERT_EQ((int64_t)lrun_count_lines(body), 6);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END;
+    return failures;
+}
+
+/* A gate blocked by a failed prerequisite never ran, so it has no ledger
+ * line: only executed gates are recorded, exactly as last-run.json's
+ * gates array records them. */
+static int test_lrun_catch_ledger_blocked(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: a blocked reader adds no gate-catches line") {
+        struct lrun_fx fx;
+        char out[4096], err[4096], p[PATH_MAX + 64], body[4096];
+        char *gates[] = { (char *)"check-fx-fail", (char *)"check-fx-ord-reader" };
+        struct lrun_cfg c = { 2, "", "", "" };
+        ASSERT(lrun_plant(&fx));
+        (void)snprintf(p, sizeof p, "%s/state/gate-catches.jsonl", fx.root);
+        ASSERT_EQ(lrun_go_prereq(&fx, &c, gates, 2, out, err, sizeof out, gates[0]), 1);
+        ASSERT(lrun_read(p, body, sizeof body));
+        ASSERT(strstr(body, "\"gate\":\"check-fx-fail\",\"rc\":3") != NULL);
+        ASSERT(strstr(body, "check-fx-ord-reader") == NULL);
+        ASSERT_EQ((int64_t)lrun_count_lines(body), 1);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END;
+    return failures;
+}
+
 static int test_lrun_green(void)
 {
     int failures = 0;
@@ -860,6 +924,8 @@ int test_lint_run(void)
     failures += test_lrun_build_jobs();
     failures += test_lrun_seal();
     failures += test_lrun_verdicts();
+    failures += test_lrun_catch_ledger();
+    failures += test_lrun_catch_ledger_blocked();
     failures += test_lrun_green();
     failures += test_lrun_chain();
     failures += test_lrun_parallel();

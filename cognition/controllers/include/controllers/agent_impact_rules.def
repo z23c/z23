@@ -72,6 +72,11 @@ AGENT_IMPACT_RULE("tools/command/native_devagent_pace.c|tests/harness/src/test_d
  * unit; the parallel-runner hook that appends the rows rides the shared
  * test_parallel row below. */
 AGENT_IMPACT_RULE("tests/harness/src/group_history.c|tests/harness/include/test/group_history.h|tools/command/native_dev_test_history.c|tools/command/native_dev_test_history.c.capabilities.def|tests/harness/src/test_devtesthistory.c", "devtesthistory command_registry_catalog native_api_contract command_input_bounds")
+/* The lint gate-catch telemetry feed: the reading leaf, its capability
+ * row and the acceptance test are one unit; the writer-side append in
+ * run_report.c stays on the shared lint_run rule with the driver's own
+ * files, so editing the writer selects the driver's regression too. */
+AGENT_IMPACT_RULE("tools/command/native_dev_lint_catches.c|tools/command/native_dev_lint_catches.c.capabilities.def|tests/harness/src/test_devlintcatches.c", "devlintcatches command_registry_catalog native_api_contract command_input_bounds")
 /* The commuting-ticket key leaf: one handler file with one registered group,
  * like the lane-discipline leaves above. */
 AGENT_IMPACT_RULE("tools/command/native_devagent_ticketkey.c|tests/harness/src/test_devagent_ticketkey.c", "devagent_ticketkey command_registry_catalog native_api_contract command_input_bounds")

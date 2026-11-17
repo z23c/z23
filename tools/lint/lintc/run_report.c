@@ -1,8 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: the artifacts and report of `z23-lint run`: the per-run gates dir,
- * old-run pruning, the lint timing table, the zcl.lint_timing.v1 last-run.json
- * and the failure summary with each failed gate's log, in the formats
+ * old-run pruning, the lint timing table, the zcl.lint_timing.v1 last-run.json,
+ * the appended zcl.lint_gate_catches.v1 gate-catches.jsonl ledger and the
+ * failure summary with each failed gate's log, in the formats
  * the shell driver printed (the land queue and fleet readers parse them).
  */
 #ifndef _XOPEN_SOURCE
@@ -139,14 +140,54 @@ static void write_json_gates(FILE *f, const struct lr_run *r,
                       i ? ",\n" : "", rank[i]->name, rank[i]->ms, rank[i]->rc);
 }
 
-static void write_last_run(const struct lr_run *r, const struct lr_gate **rank,
-                           int nrank, long long wall_ms, int failed)
+/* The shared run timestamp: UTC, "YYYY-MM-DDTHH:MM:SSZ", the shape both
+ * last-run.json's generated_at_utc and the catch ledger's ts print. */
+static void utc_stamp(char *stamp, size_t cap)
 {
-    char tmp[LR_PATH], fin[LR_PATH], stamp[40];
-    time_t now = time(NULL); // platform-ok: z23-lint links no platform library; generated_at_utc field only
+    time_t now = time(NULL); // platform-ok: z23-lint links no platform library; artifact timestamps only
     struct tm tm;
     (void)gmtime_r(&now, &tm);
-    (void)strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    (void)strftime(stamp, cap, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+/* The persistent half of the timing artifact (schema
+ * zcl.lint_gate_catches.v1): last-run.json is one rename-overwritten
+ * snapshot, so catch evidence evaporates the moment the next run starts.
+ * This APPENDS one JSON line per EXECUTED gate to gate-catches.jsonl in
+ * the same state dir: {"ts","gate","rc","ms"} — exactly the row the
+ * timing table already records, so the ledger records and never decides.
+ * A catch is rc != 0; a pass appends its rc:0 line. A gate with no rc
+ * artifact (worker crash) and a blocked gate never ran, so neither has a
+ * line. Telemetry fails OPEN: one stderr line on failure, and the run's
+ * verdict is unchanged either way. */
+static void append_gate_catches(const struct lr_run *r, const char *stamp)
+{
+    char path[LR_PATH];
+    if (snprintf(path, sizeof path, "%s/gate-catches.jsonl",
+                 r->o->state_dir) >= (int)sizeof path)
+        return;
+    FILE *f = fopen(path, "a");
+    if (!f) {
+        (void)fprintf(r->o->err, "z23-lint run: catch ledger append failed (%s): %s\n",
+                      path, strerror(errno));
+        return;
+    }
+    for (int i = 0; i < r->n; i++) {
+        if (!r->g[i].have_rc)
+            continue;
+        (void)fprintf(f, "{\"ts\":\"%s\",\"gate\":\"%s\",\"rc\":%d,\"ms\":%lld}\n",
+                      stamp, r->g[i].name, r->g[i].rc, r->g[i].ms);
+    }
+    if (fclose(f) != 0)
+        (void)fprintf(r->o->err, "z23-lint run: catch ledger append failed (%s): %s\n",
+                      path, strerror(errno));
+}
+
+static void write_last_run(const struct lr_run *r, const struct lr_gate **rank,
+                           int nrank, long long wall_ms, int failed,
+                           const char *stamp)
+{
+    char tmp[LR_PATH], fin[LR_PATH];
     (void)snprintf(tmp, sizeof tmp, "%s/last-run.json.%ld.tmp", r->o->state_dir, (long)getpid());
     (void)snprintf(fin, sizeof fin, "%s/last-run.json", r->o->state_dir);
     FILE *f = fopen(tmp, "w");
@@ -252,12 +293,15 @@ static void print_failures(const struct lr_run *r, int failed)
 int lr_report(struct lr_run *r, long long wall_ms)
 {
     const struct lr_gate *rank[LR_MAX_GATES];
+    char stamp[40];
     int failed = 0;
     for (int i = 0; i < r->n; i++)
         failed += gate_failed(&r->g[i]) ? 1 : 0;
     int nrank = rank_gates(r, rank);
+    utc_stamp(stamp, sizeof stamp);
     print_timing(r, rank, nrank, wall_ms);
-    write_last_run(r, rank, nrank, wall_ms, failed);
+    write_last_run(r, rank, nrank, wall_ms, failed, stamp);
+    append_gate_catches(r, stamp);
     if (wall_ms > (long long)r->o->budget_sec * 1000)
         (void)fprintf(r->o->err, "z23-lint run: NOTE \xe2\x80\x94 wall %lld ms exceeds the %ds soft "
                       "budget (ZCL_LINT_BUDGET_SEC; see the budget comment above the lint target)\n",

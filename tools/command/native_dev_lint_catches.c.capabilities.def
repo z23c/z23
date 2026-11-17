@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_lint_catches.c", CAP_FS_READ|CAP_FS_WRITE, "dev_lint_catches_ledger: reads the gate-catches JSONL ledger named by dev.proof.lint_catches; writes only refusal and allocation-failure lines to stderr")

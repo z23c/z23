@@ -1579,6 +1579,39 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_test_history)
 
+/* ── dev.proof.lint_catches ────────────────────────────────────────
+ * The lint driver's persistent gate-catch ledger, read back as catch
+ * frequency (tools/command/native_dev_lint_catches.c over the append
+ * in tools/lint/lintc/run_report.c). Measurement only: the ledger
+ * records, never decides — no sweep policy or gate selection reads it.
+ * Under dev.proof because it measures the gates the land proof runs;
+ * no new dev branch, so the dev menu stays inside its budget. */
+ZCL_COMMAND_READY_READ(
+    "dev.proof.lint_catches", "dev.proof", "",
+    "Which lint gates caught nothing recently, and how often each caught",
+    "Reads the lint driver's persistent gate ledger (.cache/lint-timing/"
+    "gate-catches.jsonl by default — one JSON object per EXECUTED gate "
+    "appended beside last-run.json) and answers from it: per gate the "
+    "attempts and catch (rc != 0) counts and the ts and rc of its most "
+    "recent catch, sorted catches first and bounded by limit (default "
+    "20, max 200); zero_catch names the gates that ran in the window "
+    "with no catch among their rows. since keeps only rows at or after "
+    "one ISO-8601 UTC instant — the last-N-days question is since = now "
+    "minus N days. A missing ledger is a TRUE ZERO — exists=false, no "
+    "rows, no gates — never a guess; a malformed line is counted and "
+    "skipped, never fatal. It reads only the named path and writes "
+    "nothing.", 32768,
+    "lint,gate,catch,ledger,telemetry,window",
+    "zcl.dev_lint_catches_input.v1", "zcl.dev_lint_catches.v1",
+    "ledger,since,limit", "ledger",
+    "z23-dev dev proof lint_catches --since=2026-10-20T00:00:00Z",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_lint_catches)
+
 /* ── dev.batch ─────────────────────────────────────────────────────────────
  * The lab conveyor's batch ledger, moving from the shell bridges outside the
  * repo (requeue.sh, restack-failed.sh, slim-stacks.sh) into C. SHADOW STEP:
