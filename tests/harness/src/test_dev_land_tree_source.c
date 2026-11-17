@@ -360,6 +360,66 @@ _test_next:;
 #endif /* !defined(_WIN32) */
 
 #if !defined(_WIN32)
+#if defined(__linux__)
+static int dlx_cold_fixture_integration(void)
+{
+    int failures = 0;
+    TEST("land: cold rollback fixtures build in prepared tree") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char wt[1200], path[1400];
+        const char *const deps[] = {
+            "vendor/sqlite3.c", "vendor/tor/.provenance",
+            "vendor/tor/Makefile", "vendor/lib/libfoo.a",
+            "vendor/include/foo.h", "vendor/tor/libtor.a",
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
+        };
+        dlx_isolate("coldrollback");
+        ASSERT(dlx_rig_make(&rig, "coldrollback_rig"));
+        ASSERT(dlx_commit(rig.clone, "Makefile",
+            "build/hotswap/zcl_rollback_fixture_%.so:\n"
+            "\tmkdir -p build/hotswap\n"
+            "\techo fixture > $@\n", rig.tip));
+        for (size_t i = 0; i < sizeof(deps) / sizeof(deps[0]); ++i)
+            ASSERT(dlx_write_dep(rig.clone, deps[i], "fixture\n"));
+        ASSERT(dlx_plant_hook_bin(rig.clone));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        dlx_landdir(wt, sizeof(wt));
+        (void)snprintf(path, sizeof(path),
+            "%s/wt/build/hotswap/zcl_rollback_fixture_a.so", wt);
+        ASSERT(dlx_file_exists(path));
+        (void)snprintf(path, sizeof(path),
+            "%s/wt/build/hotswap/zcl_rollback_fixture_b.so", wt);
+        ASSERT(dlx_file_exists(path));
+        (void)snprintf(path, sizeof(path),
+            "%s/build/hotswap/zcl_rollback_fixture_a.so", rig.clone);
+        ASSERT(!dlx_file_exists(path));
+        (void)snprintf(path, sizeof(path),
+            "%s/build/hotswap/zcl_rollback_fixture_b.so", rig.clone);
+        ASSERT(!dlx_file_exists(path));
+        char prepared[1400];
+        (void)snprintf(prepared, sizeof(prepared), "%s/wt", wt);
+        const char *const clean[] = { "diff", "--quiet", "HEAD", "--", NULL };
+        ASSERT(dlx_git(prepared, clean) == 0);
+        PASS();
+    } _test_next:;
+    unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+    dlx_restore();
+    return failures;
+}
+#endif
+
 int test_dev_land_vendor_dependencies(void)
 {
     int failures = 0;
@@ -620,6 +680,9 @@ int test_dev_land_vendor_dependencies(void)
         dlx_restore();
         PASS();
     } _test_next:;
+#if defined(__linux__)
+    failures += dlx_cold_fixture_integration();
+#endif
     return failures;
 }
 #endif

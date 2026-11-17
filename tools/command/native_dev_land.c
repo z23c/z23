@@ -7998,6 +7998,18 @@ const char *zcl_dev_land_deps_source(void);
 unsigned zcl_dev_land_deps_calls(void) { return g_dl_deps_calls; }
 const char *zcl_dev_land_deps_source(void) { return g_dl_deps_source; }
 #endif
+#if defined(__linux__)
+static bool dl_wt_fixture_prepare(const struct dl_dirs *d,
+    struct dl_row *head, const struct dl_row *r, char *why, size_t why_cap)
+{
+    const char *donor = r->worktree[0] && dl_worktree_ok(r->worktree)
+        ? r->worktree : NULL;
+    struct dl_prepare_context prepare = { d, head, r };
+    return zcl_dev_land_fixtures_prepare_observed(d->wt, donor, why, why_cap,
+        dl_prepare_log, &prepare, dl_prepare_begin) &&
+        dl_wt_hotswap_ensure(d, r, why, why_cap);
+}
+#endif
 bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     struct dl_row *head,
                                     const struct dl_row *r, bool stubbed,
@@ -8026,7 +8038,7 @@ bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
         if (!dl_wt_vendor_ensure(d, r, why, why_cap))
             return false;
 #if defined(__linux__)
-        if (!dl_wt_hotswap_ensure(d, r, why, why_cap))
+        if (!dl_wt_fixture_prepare(d, head, r, why, why_cap))
             return false;
 #elif !defined(_WIN32)
         /* Production Darwin proofs do not require the Linux-only rollback

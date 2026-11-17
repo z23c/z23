@@ -24,6 +24,11 @@ bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
 bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
     size_t cap, zcl_land_prepare_sink sink, void *context,
     zcl_land_prepare_begin begin);
+#if defined(__linux__)
+bool zcl_dev_land_fixtures_prepare_observed(const char *wt, const char *donor,
+    char *why, size_t cap, zcl_land_prepare_sink sink, void *context,
+    zcl_land_prepare_begin begin);
+#endif
 #ifdef ZCL_TESTING
 int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
     int idle_ms, int hard_ms, bool allocation_failure,

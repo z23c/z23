@@ -246,6 +246,87 @@ _test_next:;
     return failures;
 }
 
+#if defined(__linux__)
+struct dlx_fixture_calls { size_t count; char names[3][96]; };
+static bool dlx_fixture_begin(void *context, const char *target)
+{
+    struct dlx_fixture_calls *calls = context;
+    if (calls->count >= 3) return false;
+    (void)snprintf(calls->names[calls->count++], 96, "%s", target);
+    return true;
+}
+static bool dlx_fixture_refuse(void *context, const char *target)
+{
+    (void)context;
+    (void)target;
+    return false;
+}
+#endif
+
+#if defined(__linux__)
+static int dlx_fixture_preparation_test(void)
+{
+    int failures = 0;
+    TEST("land: prepare cold rollback fixtures") {
+        char fixtures[1024], donor[1024], log[1200], path[1200], body[128], why[512];
+        size_t len = 0;
+        struct dlx_fixture_calls calls = {0};
+        test_make_tmpdir(fixtures, sizeof(fixtures), "dev_land", "cold_fixtures");
+        test_make_tmpdir(donor, sizeof(donor), "dev_land", "fixture_donor");
+        ASSERT(dlx_write_dep(fixtures, "Makefile",
+            "build/hotswap/zcl_rollback_fixture_%.so:\n"
+            "\tmkdir -p build/hotswap\n"
+            "\techo $@ >> build/fixture.log\n"
+            "\techo fixture > $@\n"));
+        ASSERT(!zcl_dev_land_fixtures_prepare_observed(
+            fixtures, NULL, why, sizeof(why), NULL, NULL, NULL));
+        ASSERT(zcl_dev_land_fixtures_prepare_observed(
+            fixtures, donor, why, sizeof(why), NULL, &calls, dlx_fixture_begin));
+        ASSERT(calls.count == 2);
+        ASSERT_STR_EQ(calls.names[0], "build/hotswap/zcl_rollback_fixture_a.so");
+        ASSERT_STR_EQ(calls.names[1], "build/hotswap/zcl_rollback_fixture_b.so");
+        (void)snprintf(log, sizeof(log), "%s/build/fixture.log", fixtures);
+        ASSERT(dlx_slurp(log, body, sizeof(body), &len));
+        ASSERT(strstr(body, "zcl_rollback_fixture_a.so") != NULL);
+        ASSERT(strstr(body, "zcl_rollback_fixture_b.so") != NULL);
+        ASSERT(zcl_dev_land_fixtures_prepare_observed(
+            fixtures, NULL, why, sizeof(why), NULL, &calls, dlx_fixture_begin));
+        ASSERT(calls.count == 2);
+        size_t warm_len = 0;
+        ASSERT(dlx_slurp(log, body, sizeof(body), &warm_len));
+        ASSERT(warm_len == len);
+        (void)snprintf(path, sizeof(path),
+            "%s/build/hotswap/zcl_rollback_fixture_a.so", fixtures);
+        ASSERT(remove(path) == 0);
+        ASSERT(zcl_dev_land_fixtures_prepare_observed(
+            fixtures, donor, why, sizeof(why), NULL, &calls, dlx_fixture_begin));
+        ASSERT(calls.count == 3);
+        ASSERT_STR_EQ(calls.names[2], "build/hotswap/zcl_rollback_fixture_a.so");
+        ASSERT(dlx_slurp(log, body, sizeof(body), &warm_len));
+        ASSERT(warm_len > len);
+        ASSERT(remove(path) == 0);
+        ASSERT(dlx_write_dep(fixtures, "Makefile",
+            "build/hotswap/zcl_rollback_fixture_%.so:\n\texit 1\n"));
+        ASSERT(!zcl_dev_land_fixtures_prepare_observed(
+            fixtures, donor, why, sizeof(why), NULL, NULL, NULL));
+        ASSERT(dlx_write_dep(fixtures, "Makefile",
+            "build/hotswap/zcl_rollback_fixture_%.so:\n\ttrue\n"));
+        ASSERT(!zcl_dev_land_fixtures_prepare_observed(
+            fixtures, donor, why, sizeof(why), NULL, NULL, NULL));
+        ASSERT(strstr(why, "fixture not produced") != NULL);
+        ASSERT(!zcl_dev_land_fixtures_prepare_observed(
+            fixtures, donor, why, sizeof(why), NULL, NULL, dlx_fixture_refuse));
+        ASSERT(strstr(why, "progress persistence refused") != NULL);
+        ASSERT(symlink("missing", path) == 0);
+        ASSERT(!zcl_dev_land_fixtures_prepare_observed(
+            fixtures, donor, why, sizeof(why), NULL, NULL, NULL));
+        ASSERT(strstr(why, "not a regular file") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 /* Exercise the proof-tools preparation adapter: a cold worktree triggers
  * exactly one docs-proof-tools build, a warm one builds nothing, and both
  * a make failure and a silent no-produce refuse by name. */
@@ -299,6 +380,9 @@ int test_dev_land_proof_tools_preparation(void)
                       "build/bin/z23-fleet-observe") != NULL);
         PASS();
     } _test_next:;
+#if defined(__linux__)
+    failures += dlx_fixture_preparation_test();
+#endif
     return failures;
 }
 

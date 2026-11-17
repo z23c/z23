@@ -22,6 +22,7 @@
 #include "util/spawn.h"
 
 #include <dirent.h>
+#include <errno.h>
 #if defined(__APPLE__)
 #include <libproc.h> /* proc_listpgrppids, proc_pidinfo: group CPU progress */
 #endif
@@ -289,6 +290,68 @@ bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
     }
     return true;
 }
+
+#if defined(__linux__)
+static bool dlp_fixture_missing(const char *root, const char *target,
+                                bool *missing, char *why, size_t cap)
+{
+    char path[4096 + 96];
+    struct stat st;
+    if (snprintf(path, sizeof(path), "%s/%s", root, target) >= (int)sizeof(path)) {
+        (void)snprintf(why, cap, "fixture path too long: %s", target);
+        return false;
+    }
+    if (lstat(path, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            (void)snprintf(why, cap, "fixture is not a regular file: %s", target);
+            return false;
+        }
+        *missing = false;
+        return true;
+    }
+    if (errno != ENOENT) {
+        (void)snprintf(why, cap, "fixture inspection failed: %s", target);
+        return false;
+    }
+    *missing = true;
+    return true;
+}
+
+bool zcl_dev_land_fixtures_prepare_observed(const char *wt, const char *donor,
+    char *why, size_t cap, zcl_land_prepare_sink sink, void *context,
+    zcl_land_prepare_begin begin)
+{
+    static const char *const targets[] = {
+        "build/hotswap/zcl_rollback_fixture_a.so",
+        "build/hotswap/zcl_rollback_fixture_b.so",
+    };
+    if (!wt || !why || !cap) return false;
+    why[0] = 0;
+    for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) {
+        bool missing, donor_missing;
+        if (!dlp_fixture_missing(wt, targets[i], &missing, why, cap)) return false;
+        if (!missing) continue;
+        if (!donor) {
+            (void)snprintf(why, cap, "fixture donor worktree unavailable");
+            return false;
+        }
+        if (!dlp_fixture_missing(donor, targets[i], &donor_missing, why, cap)) return false;
+        if (!donor_missing) continue;
+        if (begin && !begin(context, targets[i])) {
+            (void)snprintf(why, cap, "preparation progress persistence refused");
+            return false;
+        }
+        if (dlp_make(wt, targets[i], DLP_MAKE_IDLE_MS, DLP_MAKE_HARD_MS,
+                     false, sink, context, why, cap) != 0) return false;
+        if (!dlp_fixture_missing(wt, targets[i], &missing, why, cap)) return false;
+        if (missing) {
+            (void)snprintf(why, cap, "fixture not produced: %s", targets[i]);
+            return false;
+        }
+    }
+    return true;
+}
+#endif
 
 /* The sealed proof copies its generated-docs checker binaries out of this
  * worktree before any dimension builds inside the generation and refuses
