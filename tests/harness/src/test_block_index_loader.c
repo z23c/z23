@@ -517,6 +517,20 @@ static int bil_flat_round_trip_case(void)
 #if defined(ZCL_TESTING) && !defined(_WIN32) && !defined(__APPLE__)
 void block_index_arena_test_reservation_error(int error);
 
+static bool bil_reservation_chain_matches(struct main_state *source,
+                                          struct main_state *loaded)
+{
+    struct uint256 first_hash = make_test_hash(0);
+    struct uint256 last_hash = make_test_hash(99);
+    struct block_index *first = block_map_find(&loaded->map_block_index,
+                                               &first_hash);
+    struct block_index *last = block_map_find(&loaded->map_block_index,
+                                              &last_hash);
+    return first && first->nHeight == 0 && last && last->nHeight == 99 &&
+           last->pprev && last->pprev->nHeight == 98 &&
+           loaded->map_block_index.size == source->map_block_index.size;
+}
+
 static int bil_flat_reservation_case(int error, bool expect_mapping)
 {
     int failures = 0;
@@ -542,16 +556,7 @@ static int bil_flat_reservation_case(int error, bool expect_mapping)
     bool mapped = path_valid && stat(path, &st) == 0 &&
                   st.st_size == (off_t)(100u * sizeof(struct block_index));
     bool removed = path_valid && stat(path, &st) != 0 && errno == ENOENT;
-    struct uint256 first_hash = make_test_hash(0);
-    struct uint256 last_hash = make_test_hash(99);
-    struct block_index *first = block_map_find(&loaded_state.map_block_index,
-                                               &first_hash);
-    struct block_index *last = block_map_find(&loaded_state.map_block_index,
-                                              &last_hash);
-    bool identical = loaded && first && first->nHeight == 0 && last &&
-                     last->nHeight == 99 && last->pprev &&
-                     last->pprev->nHeight == 98 &&
-                     loaded_state.map_block_index.size == source.map_block_index.size;
+    bool identical = loaded && bil_reservation_chain_matches(&source, &loaded_state);
     BIL_CHECK("bil: reservation result selects expected arena", expect_mapping ? mapped : removed);
     BIL_CHECK("bil: reservation path preserves loaded chain", identical);
     main_state_free(&source);
