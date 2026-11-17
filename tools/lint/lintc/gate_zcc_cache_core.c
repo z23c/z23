@@ -114,13 +114,13 @@ int zc_sec_envfilter(void)
         zc_fail("filtered environment warm compile failed");
     zc_disp("HIT", "orchestration environment changed the cache key");
     int hw = zc_sha(eo, warm);
-    zc_want(!(h1 && hw) || strcmp(e1, warm) == 0,
+    zc_want(h1 && hw && strcmp(e1, warm) == 0,
             "orchestration environment changed object bytes");
     if (zc_x(av, third, NULL) != 0)
         zc_fail("real environment changed compile failed");
     zc_disp("MISS", "compiler-visible environment change was served");
     int h2 = zc_sha(eo, e2);
-    zc_want(!(h1 && h2) || strcmp(e1, e2) != 0,
+    zc_want(h1 && h2 && strcmp(e1, e2) != 0,
             "compiler-visible environment changed no bytes");
     return 0;
 }
