@@ -261,20 +261,38 @@ The harness case `plugin dev hot-swaps` (`tests/harness/src/test_lab_promote.c`)
 proves this sequence in one process, with no restart between steps:
 
 ```text
-lab.promote file=SRC cases=[...] name=NAME dir=DIST   # build, gate on cases, sign
-cp DIST/NAME DIR/NAME                                 # the gated image
-plugin.dev dir=DIR interface=2                        # generation 1, current
+plugin.dev dir=DIR file=SRC cases=[...] name=NAME     # build, prove, sign, install, switch
 plugin.call name=NAME stdin=...                       # runs generation 1
-(edit SRC; lab.promote and cp again; plugin.dev)      # generation 2, current
+(edit SRC; repeat the same plugin.dev call)            # generation 2, current
 plugin.call name=NAME stdin=...                       # runs generation 2 at once
 plugin.rollback name=NAME                             # current is generation 1
 plugin.call name=NAME stdin=...                       # generation 1 output again
 plugin.switch name=NAME generation=<gen 2 id>         # forward again
 ```
 
+`DIR` must exist and receives the packed files under `DIR/dist`; no prebuilt
+executable or copy step is needed. `NAME` defaults to the last component of
+`DIR`, and `version` defaults to `0.0.0-dev`. Source mode always builds an
+interface 2 plugin and requires `cases`. It composes `lab.promote`: every case
+must pass against a fresh sanitized build and then against the confined static
+release image before signing and activation. The successful reply's `proof`
+object carries `lab_root`, `cases_passed` and `release_sha3_512`.
+
 The store then holds two signed generations. A source that fails its cases or
-does not compile makes `lab.promote` refuse and write nothing, so there is no
-image to develop and the previous generation keeps answering `plugin.call`.
+does not compile leaves the previous generation current and answering
+`plugin.call`. The developer key is prepared before the lab proof, so a
+first-use refusal can leave that key; it does not install or switch a
+generation. Source-mode lab refusals retain their original `LAB_*` code and
+evidence. Promotion requires `sanitize=true` (the default); disabling it or
+an unavailable sanitizer returns `LAB_PROMOTE_SANITIZER_REQUIRED` before
+packing. Both builds use the same loaded source bytes even if the source file
+changes during the call. `timeout_ms` and `mem_mb` have the same meaning as
+for `lab.promote`.
+With `include-source=true`, source mode also writes `NAME.c` and `cases.json`
+into `DIR/dist` for reproduction. Set it on every edit you intend to share.
+
+<!-- claim: symbol-present pdv_source_dev tools/command/native_plugin_dev_command.c # one-call source proof and activation -->
+<!-- claim: symbol-present lp_case_hotswap tests/harness/src/test_lab_promote.c # source edit, hot swap, refusal and rollback journey -->
 
 #### Gated hot swap in one step
 

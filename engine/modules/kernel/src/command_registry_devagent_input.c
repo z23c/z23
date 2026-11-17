@@ -234,6 +234,7 @@ static bool devagent_scoped_bool(const char *path, const char *key,
         /* lab.promote's include-source: export the exact inputs a peer
          * rebuilds through plugin.reproduce, never an activation flag. */
         { "lab.promote", "include-source" },
+        { "plugin.dev", "include-source" },
     };
     if (!path)
         return false;

@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 struct promote_req {
+    struct zcl_command_request test;
     const char *file;
     bool include_source;
     uint32_t timeout_ms, mem_mb;
@@ -89,24 +90,17 @@ static void promote_refuse(struct zcl_command_reply *reply, const char *code,
 
 /* Step 1: lab.test on the same inputs, always fresh. A refusal of lab.test
  * itself stays in `reply`; false means the reply already carries a refusal. */
-static bool promote_cases(const struct zcl_command_request *rq,
+static bool promote_cases(struct lab_ctx *ctx,
                           struct zcl_command_reply *reply,
                           struct promote_req *p)
 {
-    static const char *const keys[] = { "file", "cases", "sanitize",
-                                        "timeout_ms", "mem_mb" };
-    struct json_value in;
     char message[192];
-    bool ok = promote_forward(rq, &in, keys, sizeof(keys) / sizeof(keys[0])) &&
-              json_push_kv_bool(&in, "fresh", true);
-    struct zcl_command_request sub = { .input = &in };
-    if (ok)
-        zcl_native_handle_lab_test(&sub, reply);
-    else
-        lab_fail(reply, "LAB_ALLOC", "run", "the lab could not allocate");
-    json_free(&in);
+    lab_test_context(&p->test, ctx, reply);
     if (reply->status != ZCL_COMMAND_STATUS_PASSED)
         return false;
+    const struct json_value *sanitizer = json_get(&reply->data, "sanitizer");
+    const struct json_value *enabled = json_get(sanitizer, "enabled");
+    bool sanitized = enabled && enabled->type == JSON_BOOL && json_get_bool(enabled);
     const struct json_value *root = json_get(&reply->data, "root");
     const struct json_value *pass = json_get(&reply->data, "passed");
     const struct json_value *fail = json_get(&reply->data, "failed");
@@ -120,8 +114,14 @@ static bool promote_cases(const struct zcl_command_request *rq,
     p->failed = (size_t)json_get_int(fail);
     json_free(&reply->data);
     json_init(&reply->data);
-    if (p->failed == 0 && p->passed > 0)
+    if (p->failed == 0 && p->passed > 0) {
+        if (!sanitized) {
+            promote_refuse(reply, "LAB_PROMOTE_SANITIZER_REQUIRED", "run",
+                           "promotion requires a sanitized test build; nothing was packed", p->root);
+            return false;
+        }
         return true;
+    }
     snprintf(message, sizeof(message),
              "%zu of %zu cases failed; nothing was written", p->failed,
              p->passed + p->failed);
@@ -267,6 +267,7 @@ static bool promote_cases_export(const struct zcl_command_request *rq,
 }
 
 static bool promote_export(const struct zcl_command_request *rq,
+                           const struct zcl_command_request *test,
                            const struct lab_ctx *ctx,
                            struct zcl_command_reply *reply)
 {
@@ -279,7 +280,7 @@ static bool promote_export(const struct zcl_command_request *rq,
     bool ok = n > 0 && (size_t)n < sizeof(leaf) &&
               zcl_path_join(source, sizeof(source), dir ? dir : ".", leaf) &&
               zcl_path_join(cases, sizeof(cases), dir ? dir : ".", "cases.json") &&
-              promote_cases_export(rq, &case_bytes, &case_len) &&
+              promote_cases_export(test, &case_bytes, &case_len) &&
               promote_write(source, ctx->src.bytes, ctx->src.len) &&
               promote_write(cases, case_bytes, case_len) &&
               json_push_kv_str(&reply->data, "source", source) &&
@@ -296,7 +297,7 @@ static void promote_verify(const struct zcl_command_request *rq,
 {
     size_t passed = 0, failed = 0;
     char message[192];
-    enum lab_check c = lab_cases_check(rq, ctx, rel->binary, p->timeout_ms,
+    enum lab_check c = lab_cases_check(&p->test, ctx, rel->binary, p->timeout_ms,
                                        p->mem_mb, &passed, &failed, NULL);
     if (c == LAB_CHECK_UNCONFINED) {
         lab_unconfined(reply);
@@ -313,7 +314,7 @@ static void promote_verify(const struct zcl_command_request *rq,
     } else if (promote_pack(rq, rel, reply)) {
         promote_report(reply, p, rel);
         if (reply->status == ZCL_COMMAND_STATUS_PASSED && p->include_source &&
-            !promote_export(rq, ctx, reply)) {
+            !promote_export(rq, &p->test, ctx, reply)) {
             promote_refuse(reply, "LAB_PROMOTE_EXPORT_FAILED", "export",
                            "the signed pack was written, but its source and cases "
                            "could not be exported; no reproduction is claimed",
@@ -323,24 +324,26 @@ static void promote_verify(const struct zcl_command_request *rq,
     }
 }
 
-void zcl_native_handle_lab_promote(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
+static void promote_snapshot(const struct zcl_command_request *request,
+                             struct promote_req *p,
+                             struct zcl_command_reply *reply)
 {
-    struct promote_req p;
     struct lab_ctx ctx;
     struct lab_compile *rel;
     char name[LAB_ROOT_HEX + 16];
-    if (!promote_parse(request, &p)) {
-        lab_fail(reply, "LAB_BAD_INPUT", "normalize",
-                 "usage: lab promote <file.c> --cases=<json> --name=<n> "
-                 "--version=<v> --key=<key file>; timeout_ms is 1..60000, "
-                 "mem_mb 1..2048");
+    if (!lab_in_bool(request, "sanitize", true)) {
+        promote_refuse(reply, "LAB_PROMOTE_SANITIZER_REQUIRED", "normalize",
+                       "promotion requires sanitize=true", "");
         return;
     }
-    if (!promote_cases(request, reply, &p) || !lab_ctx_open(&ctx, p.file, reply))
+    if (!lab_ctx_open(&ctx, p->file, reply))
         return;
+    if (!promote_cases(&ctx, reply, p)) {
+        lab_ctx_close(&ctx);
+        return;
+    }
     rel = zcl_calloc(1, sizeof(*rel), "lab.compile");
-    snprintf(name, sizeof(name), "%s-release", p.root);
+    snprintf(name, sizeof(name), "%s-release", p->root);
     if (!rel) {
         lab_fail(reply, "LAB_ALLOC", "build", "the lab could not allocate");
     } else {
@@ -350,9 +353,40 @@ void zcl_native_handle_lab_promote(const struct zcl_command_request *request,
         else if (!rel->ok)
             promote_build_failed(reply, rel);
         else
-            promote_verify(request, &ctx, &p, rel, reply);
+            promote_verify(request, &ctx, p, rel, reply);
         lab_compile_cleanup(&ctx.dirs, name);
     }
     free(rel);
     lab_ctx_close(&ctx);
+}
+
+void zcl_native_handle_lab_promote(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    struct promote_req p;
+    if (!promote_parse(request, &p)) {
+        lab_fail(reply, "LAB_BAD_INPUT", "normalize",
+                 "promotion requires file, cases, name, version and key with valid limits");
+        return;
+    }
+    struct json_value cases, test_options;
+    json_init(&test_options);
+    if (!lab_cases_snapshot(request, &cases, reply)) {
+        json_free(&cases);
+        return;
+    }
+    static const char *const keys[] = {
+        "file", "sanitize", "timeout_ms", "mem_mb"
+    };
+    bool ok = promote_forward(request, &test_options, keys, sizeof(keys) / sizeof(keys[0])) &&
+              json_push_kv(&test_options, "cases", &cases) &&
+              json_push_kv_bool(&test_options, "fresh", true);
+    if (ok) {
+        p.test.input = &test_options;
+        promote_snapshot(request, &p, reply);
+    } else {
+        lab_fail(reply, "LAB_ALLOC", "normalize", "the promotion snapshot could not be allocated");
+    }
+    json_free(&test_options);
+    json_free(&cases);
 }

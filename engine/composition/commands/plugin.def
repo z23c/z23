@@ -245,36 +245,36 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.dev", "plugin", "",
-    "Pack, install and switch to a plugin in one step for development",
-    "Runs the developer loop for the executable DIR/NAME: dir is the DIRECTORY "
-    "that holds the executable and name its file name (name defaults to the "
-    "last component of dir, so z23 plugin dev ./pk --name=skycombat packs "
-    "./pk/skycombat). A file path as dir, or a version that is not semver "
-    "(MAJOR.MINOR.PATCH), is refused as PLUGIN_DEV_DIR or PLUGIN_VERSION before "
-    "any write. With cases (the lab.promote case array) it first "
-    "runs each case against that executable under the plugin.call confinement "
-    "and refuses with PLUGIN_DEV_CASES_FAILED, the failing case's name and "
-    "diff, before any other step; a malformed array is PLUGIN_DEV_BAD_CASES. "
-    "Then it creates the developer signing key "
-    "(~/.z23/plugin_dev.key, or key) only when it is missing, packs the "
-    "executable into dir/dist, lists the key as a publisher key when it is not "
-    "listed, installs the packed generation and makes it current. Each step is "
-    "reported with the new generation id and its sequence number. A running "
-    "plugin run takes the generation up on SIGHUP. A failed step is named in "
-    "the refusal and the current generation stays active. It calls the plugin "
-    "store functions directly and starts nothing.",
+    "Build, prove, install and switch to a plugin in one development call",
+    "With dir alone, runs the developer loop for the executable DIR/NAME: dir "
+    "is the DIRECTORY that holds it and name defaults to the last component "
+    "of dir. Optional cases run against that executable under plugin.call "
+    "confinement before any write; failures are PLUGIN_DEV_CASES_FAILED and "
+    "malformed cases are PLUGIN_DEV_BAD_CASES. With file=SOURCE.c, dir is the "
+    "work directory and the command composes lab.promote instead: cases are "
+    "required and run against a fresh sanitized build, then a static release "
+    "build, then the confined release image. The source path always builds "
+    "interface 2, forwards cap, sanitize, timeout_ms and mem_mb, and leaves "
+    "the current generation unchanged on a lab refusal. The reply's proof "
+    "object carries the lab root, cases passed and release SHA3-512. Both "
+    "forms create ~/.z23/plugin_dev.key (or key) only when missing, pack into "
+    "dir/dist, list the publisher when needed, install and switch. version "
+    "defaults to 0.0.0-dev. The reply names each step, the generation and its "
+    "sequence. A running plugin run takes the generation up on SIGHUP; "
+    "one-shot plugin.call uses it immediately. A failed activation names its "
+    "step and leaves current unchanged.",
     ZCL_COMMAND_RESULT_BUDGET,
-    "plugin,dev,hot,swap,reload,pack,install,switch,generation,develop",
+    "plugin,dev,hot,swap,reload,source,build,prove,pack,install,switch,generation,develop",
     "zcl.plugin_dev.input.v1", "zcl.plugin_dev.v1",
-    "dir,name,version,key,cap,interface,cases", "dir",
-    "z23 plugin dev ./hello",
+    "dir,file,name,version,key,cap,interface,cases,sanitize,timeout_ms,mem_mb,include-source", "dir",
+    "z23 plugin dev dir=./upper file=./upper.c cases='[{\"name\":\"up\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}]'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_MODERATE,
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
-    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_REVERSIBLE,
-    zcl_native_handle_plugin_dev)
+    ZCL_COMMAND_CAP_PROCESS_EXEC | ZCL_COMMAND_CAP_COMPILER,
+    ZCL_COMMAND_TRAIT_REVERSIBLE, zcl_native_handle_plugin_dev)
 
 ZCL_COMMAND_READY_COMMAND(
     "plugin.run", "plugin", "",

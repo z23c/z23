@@ -92,7 +92,14 @@ static bool pdv_push_steps(struct json_value *data, const struct plugin_dev_resu
     return pushed;
 }
 
-static bool pdv_reply(struct zcl_command_reply *reply, const struct plugin_dev_result *res)
+struct pdv_proof {
+    char root[LAB_ROOT_HEX + 1];
+    char release_sha[PLUGIN_HEX_SHA3_512 + 1];
+    int64_t cases_passed;
+};
+
+static bool pdv_reply(struct zcl_command_reply *reply, const struct plugin_dev_result *res,
+                      const struct pdv_proof *proof)
 {
     json_set_object(&reply->data);
     bool ok = json_push_kv_str(&reply->data, "schema", "zcl.plugin_dev.v1") &&
@@ -105,6 +112,16 @@ static bool pdv_reply(struct zcl_command_reply *reply, const struct plugin_dev_r
               json_push_kv_str(&reply->data, "manifest", res->manifest_path) &&
               json_push_kv_str(&reply->data, "reload", "send SIGHUP to a running plugin run to take it up") &&
               pdv_push_steps(&reply->data, res);
+    if (ok && proof) {
+        struct json_value p;
+        json_init(&p);
+        json_set_object(&p);
+        ok = json_push_kv_str(&p, "lab_root", proof->root) &&
+             json_push_kv_int(&p, "cases_passed", proof->cases_passed) &&
+             json_push_kv_str(&p, "release_sha3_512", proof->release_sha) &&
+             json_push_kv(&reply->data, "proof", &p);
+        json_free(&p);
+    }
     return ok;
 }
 
@@ -176,6 +193,121 @@ static bool pdv_cases_pass(const struct zcl_command_request *request,
     return c == LAB_CHECK_RAN && failed == 0;
 }
 
+static bool pdv_receipt_str(const struct json_value *data, const char *key,
+                            char *out, size_t cap)
+{
+    const struct json_value *v = json_get(data, key);
+    if (!v || v->type != JSON_STR)
+        return false;
+    int n = snprintf(out, cap, "%s", json_get_str(v));
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool pdv_source_input(const struct zcl_command_request *request,
+                             const struct plugin_dev_request *dev,
+                             const struct plugin_dev_result *res,
+                             struct json_value *input)
+{
+    static const char *const keys[] = {
+        "file", "cases", "cap", "sanitize", "timeout_ms", "mem_mb", "include-source"
+    };
+    char dist[PATH_MAX];
+    int n = snprintf(dist, sizeof(dist), "%s/dist", dev->dir);
+    json_init(input);
+    json_set_object(input);
+    bool ok = n > 0 && (size_t)n < sizeof(dist);
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const struct json_value *v = json_get(request->input, keys[i]);
+        if (v)
+            ok = json_push_kv(input, keys[i], v);
+    }
+    return ok && json_push_kv_str(input, "name", res->name) &&
+           json_push_kv_str(input, "version",
+                            dev->version ? dev->version : plugin_dev_default_version()) &&
+           json_push_kv_str(input, "key", res->key_path) &&
+           json_push_kv_str(input, "dir", dist);
+}
+
+static void pdv_source_dev(const struct zcl_command_request *request,
+                           const struct plugin_dev_request *dev,
+                           struct plugin_dev_result *res,
+                           struct zcl_command_reply *reply)
+{
+    enum plugin_status st = plugin_dev_begin(dev, res);
+    if (st != PLUGIN_OK) {
+        pdv_refuse(reply, st, res);
+        return;
+    }
+    struct json_value input;
+    if (!pdv_source_input(request, dev, res, &input)) {
+        json_free(&input);
+        lab_fail(reply, "LAB_ALLOC", "normalize", "the source build request could not be allocated");
+        reply->error.mutated = res->key_created;
+        return;
+    }
+    struct zcl_command_request sub = { .input = &input, .view = request->view };
+    zcl_native_handle_lab_promote(&sub, reply);
+    json_free(&input);
+    if (reply->exit_code != ZCL_COMMAND_EXIT_OK) {
+        reply->error.mutated = reply->error.mutated || res->key_created;
+        return;
+    }
+    struct pdv_proof proof = {0};
+    proof.cases_passed = json_get_int(json_get(&reply->data, "cases_passed"));
+    bool receipt = proof.cases_passed > 0 &&
+                   pdv_receipt_str(&reply->data, "root", proof.root, sizeof(proof.root)) &&
+                   pdv_receipt_str(&reply->data, "release_sha3_512",
+                                   proof.release_sha, sizeof(proof.release_sha)) &&
+                   pdv_receipt_str(&reply->data, "manifest",
+                                   res->manifest_path, sizeof(res->manifest_path)) &&
+                   pdv_receipt_str(&reply->data, "generation",
+                                   res->generation, sizeof(res->generation)) &&
+                   pdv_receipt_str(&reply->data, "public_key",
+                                   res->public_key, sizeof(res->public_key));
+    json_free(&reply->data);
+    json_init(&reply->data);
+    reply->next_count = 0;
+    memset(reply->next, 0, sizeof(reply->next));
+    if (!receipt) {
+        pdv_refuse(reply, PLUGIN_ERR_IO, res);
+        return;
+    }
+    res->steps_done = 2;
+    st = plugin_dev_activate(dev->root, res);
+    if (st != PLUGIN_OK) {
+        pdv_refuse(reply, st, res);
+        return;
+    }
+    reply->error.mutated = true;
+    if (!pdv_reply(reply, res, &proof))
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                               "PLUGIN_IO", "dev", false, true,
+                               "plugin dev built the generation but could not write the reply",
+                               res->generation);
+}
+
+static bool pdv_source_args(const struct zcl_command_request *request,
+                            struct plugin_dev_request *dev, struct zcl_command_reply *reply)
+{
+    const char *file = plg_str(request, "file");
+    if (!file || !file[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                               "PLUGIN_ARGUMENT", "dev", false, false,
+                               "file must be a nonempty source path string",
+                               "omit file for executable mode");
+        return false;
+    }
+    if (json_get(request->input, "interface") && dev->interface_version != 2) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                               "PLUGIN_ARGUMENT", "dev", false, false,
+                               "file source mode builds an interface 2 plugin",
+                               "omit interface or pass interface=2");
+        return false;
+    }
+    dev->interface_version = 2;
+    return true;
+}
+
 void zcl_native_handle_plugin_dev(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -197,6 +329,11 @@ void zcl_native_handle_plugin_dev(const struct zcl_command_request *request,
     dev.name = plg_str(request, "name");
     dev.version = plg_str(request, "version");
     dev.key_path = plg_str(request, "key");
+    if (json_get(request->input, "file")) {
+        if (pdv_source_args(request, &dev, reply))
+            pdv_source_dev(request, &dev, &res, reply);
+        return;
+    }
     if (!pdv_cases_pass(request, &dev, reply))
         return;
     enum plugin_status st = plugin_dev(&dev, &res);
@@ -205,7 +342,7 @@ void zcl_native_handle_plugin_dev(const struct zcl_command_request *request,
         return;
     }
     reply->error.mutated = true;
-    if (!pdv_reply(reply, &res))
+    if (!pdv_reply(reply, &res, NULL))
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                                "PLUGIN_IO", "dev", false, true,
                                "plugin dev built the generation but could not write the reply",

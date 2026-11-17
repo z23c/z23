@@ -191,6 +191,14 @@ struct cr_int_bound {
     int64_t hi;
 };
 
+static const struct cr_int_bound *cr_bound_in(const char *key,
+                                               const struct cr_int_bound *bounds, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
+    return NULL;
+}
+
 static const struct cr_int_bound *cr_find_int_bound(const char *key)
 {
     static const struct cr_int_bound k_bounds[] = {
@@ -293,12 +301,7 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "uploaded_bytes", 0, INT64_MAX },
         { "downloaded_bytes", 0, INT64_MAX },
     };
-    for (size_t i = 0; i < sizeof(k_bounds) / sizeof(k_bounds[0]); i++) {
-        if (strcmp(key, k_bounds[i].key) != 0)
-            continue;
-        return &k_bounds[i];
-    }
-    return NULL;
+    return cr_bound_in(key, k_bounds, sizeof k_bounds / sizeof k_bounds[0]);
 }
 
 static bool cr_match_int_table(const char *key, const struct json_value *value,
@@ -709,9 +712,7 @@ static const struct cr_int_bound *cr_device_package_bound(const char *path, cons
     static const struct cr_int_bound bounds[] = {
         { "launch_ms", 1, 10000 }, { "execution_ms", 1, 600000 }, { "cleanup_ms", 1, 10000 }
     };
-    for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); ++i)
-        if (!strcmp(key, bounds[i].key)) return &bounds[i];
-    return NULL;
+    return cr_bound_in(key, bounds, sizeof bounds / sizeof bounds[0]);
 }
 
 static const struct cr_int_bound *cr_device_host_bound(const char *path,
@@ -740,9 +741,7 @@ static const struct cr_int_bound *cr_device_host_bound(const char *path,
         { "max_sessions", 1, 64 },
         { "max_active", 1, 4 },
     };
-    for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); ++i)
-        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
-    return NULL;
+    return cr_bound_in(key, bounds, sizeof bounds / sizeof bounds[0]);
 }
 /* A descriptor owns both discovery and validation for these leaf-scoped
  * integers. Unrelated leaves retain the ordinary string default. */
@@ -760,9 +759,7 @@ static const struct cr_int_bound *cr_app_customize_bound(const char *path,
         { "limit", 1, 2048 },
         { "page", 0, 16384 }
     };
-    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
-        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
-    return NULL;
+    return cr_bound_in(key, bounds, sizeof bounds / sizeof bounds[0]);
 }
 
 static const struct cr_int_bound *cr_history_bound(const char *path,
@@ -772,9 +769,7 @@ static const struct cr_int_bound *cr_history_bound(const char *path,
     static const struct cr_int_bound bounds[] = {
         { "after_seq", 0, INT64_MAX }, { "limit", 1, 64 }
     };
-    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
-        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
-    return NULL;
+    return cr_bound_in(key, bounds, sizeof bounds / sizeof bounds[0]);
 }
 
 /* lab.run, lab.test, lab.promote and plugin.call: wall-clock and memory caps of
@@ -788,11 +783,10 @@ static const struct cr_int_bound *cr_lab_bound(const char *path, const char *key
     if (strcmp(path, "plugin.pack") == 0 && strcmp(key, interface.key) == 0)
         return &interface;
     if (strcmp(path, "lab.run") != 0 && strcmp(path, "lab.test") != 0 &&
-        strcmp(path, "lab.promote") != 0 && strcmp(path, "plugin.call") != 0)
+        strcmp(path, "lab.promote") != 0 && strcmp(path, "plugin.call") != 0 &&
+        strcmp(path, "plugin.dev") != 0)
         return NULL;
-    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
-        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
-    return NULL;
+    return cr_bound_in(key, bounds, sizeof bounds / sizeof bounds[0]);
 }
 
 /* discover.read integers, and the docs path keys of discover.wiki and
@@ -805,9 +799,7 @@ static const struct cr_int_bound *cr_docs_read_bound(const char *path,
         { "offset", 0, INT64_MAX }, { "bytes", 1, 16384 }
     };
     if (strcmp(path, "discover.read") != 0) return NULL;
-    for (size_t i = 0; i < sizeof bounds / sizeof bounds[0]; i++)
-        if (strcmp(key, bounds[i].key) == 0) return &bounds[i];
-    return NULL;
+    return cr_bound_in(key, bounds, sizeof bounds / sizeof bounds[0]);
 }
 
 static bool cr_docs_path_key(const char *path, const char *key)
@@ -889,7 +881,8 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
 static bool cr_match_lab(const char *path, const char *key,
                          const struct json_value *value, bool *type_ok)
 {
-    if (strncmp(path, "lab.", 4) != 0 && strcmp(path, "plugin.call") != 0)
+    if (strncmp(path, "lab.", 4) != 0 && strcmp(path, "plugin.call") != 0 &&
+        strcmp(path, "plugin.dev") != 0)
         return false;
     const char *text = json_get_str(value);
     if (strcmp(key, "stdin") == 0)
@@ -944,6 +937,11 @@ static bool cr_match_telegram(const char *path, const char *key,
 static bool cr_match_lab_or_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
+    if (strcmp(path, "plugin.dev") == 0 && strcmp(key, "interface") == 0) {
+        const char *text = json_get_str(value);
+        *type_ok = cr_int_range(value, 1, 2) || !strcmp(text, "1") || !strcmp(text, "2");
+        return true;
+    }
     return cr_match_qualify_require(path, key, value, type_ok) ||
            cr_match_lab(path, key, value, type_ok) ||
            cr_match_leaf_ints(path, key, value, type_ok) ||

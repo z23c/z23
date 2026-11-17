@@ -1,15 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: lab.promote. A lab file that passes its cases becomes a signed
- * interface 2 plugin that plugin.call runs with the same output; a failing
- * case, a release image that disagrees with the sanitized build, or a missing
- * key refuses with a stable code and leaves the output directory empty. Every
- * key and store lives under a temporary HOME; the real ~/.z23 is never read. */
+ * Purpose: lab.promote and the one-call plugin.dev source loop. A lab file that
+ * passes its cases becomes a signed interface 2 plugin that plugin.call runs
+ * with the same output; failed proofs leave the output or current generation
+ * unchanged. Every key and store lives under a temporary HOME; the real
+ * ~/.z23 is never read. */
 
 #include "test/test_core.h"
 
 #include "base/safe_alloc.h"
+#include "config/command_catalog.h"
 #include "command/native_command.h"
+#include "command/lab_priv.h"
 #include "json/json.h"
+#include "plugin/plugin_dev.h"
 #include "plugin/plugin_store.h"
 
 #include <dirent.h>
@@ -56,17 +59,25 @@ struct lp_env {
     char old_home[PATH_MAX];
 };
 
-static bool lp_call(lp_handler handler, const char *input_json, struct zcl_command_reply *reply)
+static bool lp_invoke(lp_handler handler, const struct zcl_command_spec *spec,
+                      const char *input_json, struct zcl_command_reply *reply)
 {
     struct json_value input;
     json_init(&input);
     bool ok = json_read(&input, input_json, strlen(input_json));
-    struct zcl_command_request request = { .input = &input, .view = "normal" };
+    if (ok && spec)
+        ok = zcl_command_registry_input_validate(spec, &input, NULL, 0);
+    struct zcl_command_request request = { .spec = spec, .input = &input, .view = "normal" };
     zcl_command_reply_init(reply, "zcl.lab_promote_test.v1");
     if (ok)
         handler(&request, reply);
     json_free(&input);
     return ok;
+}
+
+static bool lp_call(lp_handler handler, const char *input_json, struct zcl_command_reply *reply)
+{
+    return lp_invoke(handler, NULL, input_json, reply);
 }
 
 static bool lp_join(char *out, size_t cap, const char *a, const char *b)
@@ -171,6 +182,23 @@ static bool lp_install_and_switch(const char *manifest, struct zcl_command_reply
     return ok;
 }
 
+/* The staged manifest must match the generation that completed proof. */
+static bool lp_mismatched_generation_refused(const struct lp_env *e,
+                                            const struct json_value *receipt)
+{
+    struct plugin_dev_result res = { .steps_done = 2 };
+    struct plugin_manifest current;
+    char exe[PATH_MAX];
+    snprintf(res.name, sizeof(res.name), "upper");
+    snprintf(res.public_key, sizeof(res.public_key), "%s", lp_str(receipt, "public_key"));
+    snprintf(res.manifest_path, sizeof(res.manifest_path), "%s", lp_str(receipt, "manifest"));
+    snprintf(res.generation, sizeof(res.generation), "%s", lp_str(receipt, "generation"));
+    res.generation[0] = res.generation[0] == '0' ? '1' : '0';
+    return plugin_dev_activate(e->root, &res) == PLUGIN_ERR_MANIFEST_INVALID &&
+           res.failed == PLUGIN_DEV_STEP_INSTALL &&
+           plugin_store_current(e->root, res.name, &current, exe, sizeof(exe)) == PLUGIN_ERR_NO_GENERATION;
+}
+
 static int lp_case_roundtrip(void)
 {
     int failures = 0;
@@ -196,6 +224,7 @@ static int lp_case_roundtrip(void)
         ASSERT_EQ(access(manifest, R_OK), 0);
         ASSERT_EQ(access(sig, R_OK), 0);
         ASSERT_EQ(lp_entries(e.dist), 3);
+        ASSERT(lp_mismatched_generation_refused(&e, &p.data));
         ASSERT(lp_install_and_switch(manifest, &c));
         ASSERT(lp_call(zcl_native_handle_plugin_call, "{\"name\":\"upper\",\"stdin\":\"abc\\n\"}", &c));
         ASSERT_EQ(c.exit_code, ZCL_COMMAND_EXIT_OK);
@@ -292,39 +321,100 @@ static int lp_case_no_key(void)
     return failures;
 }
 
-/* Copies src to dst as an executable; the release image a promote wrote. */
-static bool lp_copy_exe(const char *src, const char *dst)
+static int lp_case_source_snapshot(void)
 {
-    char buf[1 << 16];
-    FILE *in = fopen(src, "rb"), *out = fopen(dst, "wb");
-    size_t n = 0;
-    bool ok = in && out;
-    while (ok && (n = fread(buf, 1, sizeof(buf), in)) > 0)
-        ok = fwrite(buf, 1, n, out) == n;
-    if (in)
-        fclose(in);
-    if (out)
-        ok = fclose(out) == 0 && ok;
-    return ok && chmod(dst, 0755) == 0;
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("promotion test and release use loaded bytes after the source path changes") {
+        struct lab_ctx ctx;
+        struct zcl_command_reply r;
+        struct json_value input;
+        char path[PATH_MAX], in[PATH_MAX + 512];
+        const char *source = "#include <stdio.h>\nint main(void) { puts(\"snapshot\"); return 0; }\n";
+        ASSERT(ready);
+        ASSERT(lp_join(path, sizeof(path), e.base, "snapshot.c"));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs(source, f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        zcl_command_reply_init(&r, "zcl.lab_test.v1");
+        ASSERT(lab_ctx_open(&ctx, path, &r));
+        /* A real edit after loading must not change either compilation. */
+        f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("this is not C\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        snprintf(in, sizeof(in), "{\"file\":\"%s\",\"fresh\":true,\"cases\":["
+                 "{\"name\":\"snapshot\",\"expect_stdout\":\"snapshot\\n\"}]}", path);
+        json_init(&input);
+        ASSERT(json_read(&input, in, strlen(in)));
+        struct zcl_command_request rq = { .input = &input };
+        lab_test_context(&rq, &ctx, &r);
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "passed")), 1);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "failed")), 0);
+        struct lab_compile *rel = calloc(1, sizeof(*rel));
+        ASSERT(rel != NULL);
+        lab_compile_release(&ctx.dirs, &ctx.tc, &ctx.src, "snapshot-release", rel);
+        ASSERT(rel->ok);
+        size_t passed = 0, failed = 0;
+        ASSERT_EQ(lab_cases_check(&rq, &ctx, rel->binary, LAB_TIMEOUT_DEFAULT_MS,
+                                 LAB_MEM_DEFAULT_MB, &passed, &failed, NULL), LAB_CHECK_RAN);
+        ASSERT_EQ(passed, 1);
+        ASSERT_EQ(failed, 0);
+        lab_compile_cleanup(&ctx.dirs, "snapshot-release");
+        free(rel);
+        json_free(&input);
+        lab_ctx_close(&ctx);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
 }
 
-/* Promote file into a fresh dist and copy the gated release image to exe. */
-static bool lp_build_into(struct lp_env *e, const char *file, const char *cases, const char *exe)
+static int lp_case_cases_snapshot(void)
 {
-    struct zcl_command_reply p;
-    char img[PATH_MAX];
-    (void)test_rm_rf_recursive(e->dist);
-    lp_promote(e, file, cases, &p);
-    bool ok = p.exit_code == ZCL_COMMAND_EXIT_OK && lp_join(img, sizeof(img), e->dist, "upper");
-    zcl_command_reply_free(&p);
-    return ok && lp_copy_exe(img, exe);
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("promotion retains exact case file bytes before either build") {
+        struct zcl_command_reply r;
+        struct json_value input, cases;
+        char path[PATH_MAX], in[PATH_MAX + 64];
+        ASSERT(ready);
+        ASSERT(lp_join(path, sizeof(path), e.base, "cases.json"));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("  " LP_CASES_OK "\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        snprintf(in, sizeof(in), "{\"cases\":\"%s\"}", path);
+        json_init(&input);
+        ASSERT(json_read(&input, in, strlen(in)));
+        struct zcl_command_request rq = { .input = &input };
+        zcl_command_reply_init(&r, "zcl.lab_test.v1");
+        ASSERT(lab_cases_snapshot(&rq, &cases, &r));
+        json_free(&input);
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT_EQ(cases.type, JSON_STR);
+        ASSERT_STR_EQ(json_get_str(&cases), "  " LP_CASES_OK "\n");
+        json_free(&cases);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
 }
 
-static bool lp_dev(const char *dir, struct zcl_command_reply *r)
+static bool lp_dev_source(const char *dir, const char *file, const char *cases,
+                          struct zcl_command_reply *r)
 {
-    char in[2 * PATH_MAX];
-    snprintf(in, sizeof(in), "{\"dir\":\"%s\",\"interface\":2}", dir);
-    return lp_call(zcl_native_handle_plugin_dev, in, r) && r->exit_code == ZCL_COMMAND_EXIT_OK;
+    char in[4 * PATH_MAX + 1024];
+    snprintf(in, sizeof(in), "{\"dir\":\"%s\",\"file\":\"%s\",\"cases\":%s,"
+             "\"interface\":2,\"sanitize\":true,\"mem_mb\":256,\"timeout_ms\":5000,\"include-source\":true}",
+             dir, file, cases);
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), "plugin.dev", NULL);
+    return spec && lp_invoke(spec->handler, spec, in, r);
 }
 
 /* plugin.call upper on "abc\n": its stdout, or "?" when the call did not succeed. */
@@ -349,17 +439,25 @@ static bool lp_name_op(lp_handler h, const char *in, struct zcl_command_reply *r
     return ok;
 }
 
-/* One develop step: replace the executable from a gated source, run plugin dev. */
-static bool lp_develop(struct lp_env *e, const char *dir, const char *exe, const char *file,
-                       const char *cases, char gen[PLUGIN_HEX_SHA3_512 + 1], int64_t *seq)
+/* One source file becomes a proved, signed and current generation in one call. */
+static bool lp_develop(const char *dir, const char *file, const char *cases,
+                       char gen[PLUGIN_HEX_SHA3_512 + 1], int64_t *seq)
 {
     struct zcl_command_reply r;
-    if (!lp_build_into(e, file, cases, exe) || !lp_dev(dir, &r))
+    if (!lp_dev_source(dir, file, cases, &r))
         return false;
-    snprintf(gen, PLUGIN_HEX_SHA3_512 + 1, "%s", lp_str(&r.data, "generation"));
-    *seq = json_get_int(json_get(&r.data, "sequence"));
+    const struct json_value *proof = json_get(&r.data, "proof");
+    bool ok = r.exit_code == ZCL_COMMAND_EXIT_OK && r.next_count == 0 &&
+              json_size(json_get(&r.data, "steps")) == 5u && proof &&
+              json_get_int(json_get(proof, "cases_passed")) > 0 &&
+              strlen(lp_str(proof, "lab_root")) == PLUGIN_HEX_SHA3_512 &&
+              strlen(lp_str(proof, "release_sha3_512")) == PLUGIN_HEX_SHA3_512;
+    if (ok) {
+        snprintf(gen, PLUGIN_HEX_SHA3_512 + 1, "%s", lp_str(&r.data, "generation"));
+        *seq = json_get_int(json_get(&r.data, "sequence"));
+    }
     zcl_command_reply_free(&r);
-    return true;
+    return ok;
 }
 
 /* The store holds count generations, each with a signature, current on cur. */
@@ -387,21 +485,36 @@ static int lp_case_hotswap(void)
     bool ready = lp_env_open(&e);
     TEST_CASE("plugin dev hot-swaps: the next plugin.call runs the edited program, rollback restores") {
         struct zcl_command_reply r;
-        char dir[PATH_MAX], exe[PATH_MAX], out[32], seen[PLUGIN_HEX_SHA3_512 + 1];
+        char dir[PATH_MAX], out[32], seen[PLUGIN_HEX_SHA3_512 + 1];
         char g1[PLUGIN_HEX_SHA3_512 + 1], g2[PLUGIN_HEX_SHA3_512 + 1], in[1024];
         int64_t seq = 0;
         ASSERT(ready);
         ASSERT(lp_join(dir, sizeof(dir), e.base, "upper"));
         ASSERT_EQ(mkdir(dir, 0700), 0);
-        ASSERT(lp_join(exe, sizeof(exe), dir, "upper"));
-        /* Generation 1: build and gate the upper source, develop it, call it. */
-        ASSERT(lp_develop(&e, dir, exe, LP_UPPER, LP_CASES_OK, g1, &seq));
+        /* Generation 1: build, prove and activate the source in one call. */
+        static const char case_bytes[] = "  " LP_CASES_OK "\n";
+        char case_path[PATH_MAX], case_arg[PATH_MAX + 3], packed_cases[PATH_MAX];
+        ASSERT(lp_join(case_path, sizeof(case_path), e.base, "development-cases.json"));
+        FILE *case_file = fopen(case_path, "wb");
+        ASSERT(case_file != NULL);
+        ASSERT(fputs(case_bytes, case_file) >= 0);
+        ASSERT_EQ(fclose(case_file), 0);
+        snprintf(case_arg, sizeof(case_arg), "\"%s\"", case_path);
+        ASSERT(lp_develop(dir, LP_UPPER, case_arg, g1, &seq));
+        ASSERT(lp_join(packed_cases, sizeof(packed_cases), dir, "dist/cases.json"));
+        case_file = fopen(packed_cases, "rb");
+        ASSERT(case_file != NULL);
+        char exported[sizeof(case_bytes)];
+        size_t exported_len = fread(exported, 1, sizeof(exported), case_file);
+        ASSERT_EQ(fclose(case_file), 0);
+        ASSERT_EQ(exported_len, sizeof(case_bytes) - 1);
+        ASSERT(memcmp(exported, case_bytes, exported_len) == 0);
         ASSERT_EQ(seq, 1);
         lp_call_upper(out, seen);
         ASSERT_STR_EQ(out, "ABC\n");
         ASSERT_STR_EQ(seen, g1);
         /* Edit: the source becomes the reverser. Same process, no restart. */
-        ASSERT(lp_develop(&e, dir, exe, "tests/fixtures/lab/rev.c",
+        ASSERT(lp_develop(dir, "tests/fixtures/lab/rev.c",
                           "[{\"name\":\"rev\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"cba\\n\"}]",
                           g2, &seq));
         ASSERT_EQ(seq, 2);
@@ -410,18 +523,39 @@ static int lp_case_hotswap(void)
         ASSERT_STR_EQ(out, "cba\n");
         ASSERT_STR_EQ(seen, g2);
         ASSERT(lp_store_is(&e, 2, g2, (const char *[2]){ g1, g2 }));
-        /* A source whose cases fail, or that does not compile, yields no image to develop. */
-        (void)test_rm_rf_recursive(e.dist);
-        lp_promote(&e, "tests/fixtures/lab/rev.c",
-                   "[{\"name\":\"wrong\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}]", &r);
+        /* The same one-call path refuses failed cases and compiler errors. */
+        char unsanitized[PATH_MAX + 1024];
+        snprintf(unsanitized, sizeof(unsanitized), "{\"dir\":\"%s\",\"file\":\"%s\","
+                 "\"cases\":%s,\"sanitize\":false}", dir, LP_UPPER, LP_CASES_OK);
+        ASSERT(lp_call(zcl_native_handle_plugin_dev, unsanitized, &r));
+        ASSERT_STR_EQ(r.error.code, "LAB_PROMOTE_SANITIZER_REQUIRED");
+        ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        ASSERT(lp_store_is(&e, 2, g2, (const char *[2]){ g1, g2 }));
+        const char *bad_files[] = { "null", "42", "{}", "[]", "true", "\"\"" };
+        for (size_t i = 0; i < sizeof(bad_files) / sizeof(bad_files[0]); i++) {
+            char malformed[PATH_MAX + 128];
+            snprintf(malformed, sizeof(malformed), "{\"dir\":\"%s\",\"file\":%s}",
+                     dir, bad_files[i]);
+            ASSERT(lp_call(zcl_native_handle_plugin_dev, malformed, &r));
+            ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_INVALID);
+            ASSERT_STR_EQ(r.error.code, "PLUGIN_ARGUMENT");
+            ASSERT(!r.error.mutated);
+            zcl_command_reply_free(&r);
+            ASSERT(lp_store_is(&e, 2, g2, (const char *[2]){ g1, g2 }));
+        }
+        ASSERT(lp_dev_source(dir, "tests/fixtures/lab/rev.c",
+                             "[{\"name\":\"wrong\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}]", &r));
         ASSERT_STR_EQ(r.error.code, "LAB_PROMOTE_CASES_FAILED");
         zcl_command_reply_free(&r);
-        lp_promote(&e, "tests/fixtures/lab/compile_error.c", LP_CASES_OK, &r);
+        ASSERT(lp_dev_source(dir, "tests/fixtures/lab/compile_error.c", LP_CASES_OK, &r));
         ASSERT(r.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(r.error.code, "LAB_PROMOTE_CASES_FAILED");
         zcl_command_reply_free(&r);
         lp_call_upper(out, seen);
         ASSERT_STR_EQ(out, "cba\n");
         ASSERT_STR_EQ(seen, g2);
+        ASSERT(lp_store_is(&e, 2, g2, (const char *[2]){ g1, g2 }));
         /* Rollback restores generation 1; switch returns to generation 2. */
         ASSERT(lp_name_op(zcl_native_handle_plugin_rollback, "{\"name\":\"upper\"}", &r));
         lp_call_upper(out, seen);
@@ -447,6 +581,8 @@ int test_lab_promote(void)
     failures += lp_case_disagree();
     failures += lp_case_capture_allocation();
     failures += lp_case_no_key();
+    failures += lp_case_source_snapshot();
+    failures += lp_case_cases_snapshot();
     return failures;
 }
 #endif

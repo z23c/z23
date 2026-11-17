@@ -147,14 +147,20 @@ static enum plugin_status pd_install(const char *root, struct plugin_dev_result 
     enum plugin_status st = plugin_store_install(root, res->manifest_path, &m, &present);
     if (st != PLUGIN_OK)
         return st;
-    snprintf(res->generation, sizeof(res->generation), "%s", m.generation);
+    if (strcmp(m.generation, res->generation) != 0)
+        return PLUGIN_ERR_MANIFEST_INVALID;
     res->already_present = present != 0;
     res->sequence = pd_sequence(root, res->name);
     return PLUGIN_OK;
 }
 
-enum plugin_status plugin_dev(const struct plugin_dev_request *rq,
-                              struct plugin_dev_result *res)
+const char *plugin_dev_default_version(void)
+{
+    return PD_DEFAULT_VERSION;
+}
+
+enum plugin_status plugin_dev_begin(const struct plugin_dev_request *rq,
+                                    struct plugin_dev_result *res)
 {
     const char *version = NULL;
     if (!res)
@@ -170,24 +176,42 @@ enum plugin_status plugin_dev(const struct plugin_dev_request *rq,
         return st;
     res->steps_done = 1;
     res->failed = PLUGIN_DEV_STEP_PACK;
-    st = pd_pack(rq, res, version);
-    if (st != PLUGIN_OK)
-        return st;
+    return PLUGIN_OK;
+}
+
+enum plugin_status plugin_dev_activate(const char *root, struct plugin_dev_result *res)
+{
+    if (!root || !res || res->steps_done != 2)
+        return PLUGIN_ERR_ARGUMENT;
     res->failed = PLUGIN_DEV_STEP_PUBLISHER;
     int listed = 0;
-    st = plugin_store_add_key(rq->root, res->public_key, &listed);
+    enum plugin_status st = plugin_store_add_key(root, res->public_key, &listed);
     if (st != PLUGIN_OK)
         return st;
     res->publisher_added = listed == 0;
     res->steps_done = 3;
     res->failed = PLUGIN_DEV_STEP_INSTALL;
-    st = pd_install(rq->root, res);
+    st = pd_install(root, res);
     if (st != PLUGIN_OK)
         return st;
     res->steps_done = 4;
     res->failed = PLUGIN_DEV_STEP_SWITCH;
-    st = plugin_store_switch(rq->root, res->name, res->generation);
+    st = plugin_store_switch(root, res->name, res->generation);
     if (st == PLUGIN_OK)
         res->steps_done = 5;
     return st;
+}
+
+enum plugin_status plugin_dev(const struct plugin_dev_request *rq,
+                              struct plugin_dev_result *res)
+{
+    enum plugin_status st = plugin_dev_begin(rq, res);
+    if (st != PLUGIN_OK)
+        return st;
+    const char *version = rq->version ? rq->version : PD_DEFAULT_VERSION;
+    st = pd_pack(rq, res, version);
+    if (st != PLUGIN_OK)
+        return st;
+    res->steps_done = 2;
+    return plugin_dev_activate(rq->root, res);
 }

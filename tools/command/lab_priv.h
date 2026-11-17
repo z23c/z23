@@ -28,6 +28,14 @@ bool lab_ctx_open(struct lab_ctx *ctx, const char *file,
 void lab_ctx_close(struct lab_ctx *ctx);
 void lab_unconfined(struct zcl_command_reply *reply);
 
+/* Test the already loaded source snapshot. Caller owns ctx and closes it;
+ * promotion uses the same bytes for its subsequent release compilation. */
+void lab_test_context(const struct zcl_command_request *request,
+                      struct lab_ctx *ctx, struct zcl_command_reply *reply);
+/* Snapshot validated cases, retaining the original text for package export. */
+bool lab_cases_snapshot(const struct zcl_command_request *request,
+                         struct json_value *cases, struct zcl_command_reply *reply);
+
 /* Serve the stored receipt for ctx->root when it matches this compiler. */
 bool lab_cache_serve(struct lab_ctx *ctx, struct zcl_command_reply *reply);
 /* Store the receipt built in reply->data and mark it as a fresh result. */
