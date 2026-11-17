@@ -60,6 +60,7 @@
 
 #include "command/native_command.h"
 #include "command/native_devagent_usage_internal.h"
+#include "native_ledger_reader_internal.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -169,22 +170,8 @@ static bool dvo_add_why(struct dvo_model *m, const char *why)
     return true;
 }
 
-/* ISO-8601 UTC of exactly the ledger shape: "YYYY-MM-DDTHH:MM:SSZ". */
-static bool dvo_since_valid(const char *s)
-{
-    if (!s || strlen(s) != DVO_SINCE_LEN)
-        return false;
-    if (s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' ||
-        s[16] != ':' || s[19] != 'Z')
-        return false;
-    static const int digits[] = {0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18};
-    for (size_t i = 0; i < sizeof(digits) / sizeof(digits[0]); i++) {
-        char c = s[digits[i]];
-        if (c < '0' || c > '9')
-            return false;
-    }
-    return true;
-}
+/* ISO-8601 UTC of exactly the ledger shape: "YYYY-MM-DDTHH:MM:SSZ"
+ * (zcl_ledger_since_valid in native_ledger_reader_internal.h). */
 
 static void dvo_refuse(struct zcl_command_reply *reply,
                        enum zcl_command_exit exit_code, const char *code,
@@ -201,14 +188,7 @@ static void dvo_refuse(struct zcl_command_reply *reply,
     reply->error.human_action_required = human;
 }
 
-static bool dvo_line_blank(const char *line)
-{
-    for (const char *p = line; *p; p++) {
-        if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
-            return false;
-    }
-    return true;
-}
+/* Blank-line test: zcl_ledger_line_blank (native_ledger_reader_internal.h). */
 
 /* Reads the optional string filter `key`; false with the reply refused when
  * it is present but not acceptable. */
@@ -308,7 +288,7 @@ static void dvo_scan_ledger(FILE *fp, const char *filter, const char *since,
             scan->malformed++;
             continue;
         }
-        if (dvo_line_blank(line))
+        if (zcl_ledger_line_blank(line))
             continue;
         struct json_value row;
         json_init(&row);
@@ -453,7 +433,7 @@ void zcl_native_handle_dev_agent_outcomes(
                          "dev.agent.outcomes model filter",
                          "drop 'model' or name one model", &filter) ||
         !dvo_read_filter(
-            reply, input, "since", dvo_since_valid,
+            reply, input, "since", zcl_ledger_since_valid,
             "input key 'since' must be ISO-8601 UTC YYYY-MM-DDTHH:MM:SSZ",
             "dev.agent.outcomes time filter",
             "rerun with --since=2026-09-04T02:25:37Z", &since))

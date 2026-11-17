@@ -1550,6 +1550,35 @@ ZCL_COMMAND_DEV_READ(
     "test group resolution is a development-lane surface",
     "z23-dev dev test groups")
 
+/* ── dev.test.history ──────────────────────────────────────────────
+ * The persistent per-group outcome ledger the runner appends beside
+ * last-run.json, read back as failure frequency (tools/command/
+ * native_dev_test_history.c over the ledger writer in
+ * tests/harness/src/group_history.c). */
+ZCL_COMMAND_READY_READ(
+    "dev.test.history", "dev.test", "",
+    "Which test groups failed recently, and how often",
+    "Reads the runner's persistent group ledger (.cache/test-timing/"
+    "group-history.jsonl by default — one JSON object per EXECUTED group "
+    "appended beside last-run.json) and answers from it: per failing "
+    "group the attempts, failure and load-flaky counts and the ts, rc "
+    "and tree of its most recent failure, sorted failures first and "
+    "bounded by limit (default 20, max 200). since keeps only rows at "
+    "or after one ISO-8601 UTC instant. A missing ledger is a TRUE ZERO "
+    "— exists=false, no rows, no groups — never a guess; a malformed "
+    "line is counted and skipped, never fatal. It reads only the named "
+    "path and writes nothing.", 32768,
+    "test,history,failure,group,ledger,flaky",
+    "zcl.dev_test_history_input.v1", "zcl.dev_test_history.v1",
+    "ledger,since,limit", "ledger",
+    "z23-dev dev test history --ledger=build/scratch/group-history.jsonl",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_test_history)
+
 /* ── dev.batch ─────────────────────────────────────────────────────────────
  * The lab conveyor's batch ledger, moving from the shell bridges outside the
  * repo (requeue.sh, restack-failed.sh, slim-stacks.sh) into C. SHADOW STEP:

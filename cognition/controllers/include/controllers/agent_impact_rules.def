@@ -67,6 +67,11 @@ AGENT_IMPACT_RULE("tools/command/native_devagent_done.c|tests/harness/src/test_d
 AGENT_IMPACT_RULE("tools/command/native_devagent_triage.c|tests/harness/src/test_devagent_triage.c", "devagent_triage command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_ceiling.c|tests/harness/src/test_devagent_ceiling.c", "devagent_ceiling command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_pace.c|tests/harness/src/test_devagent_pace.c", "devagent_pace command_registry_catalog native_api_contract command_input_bounds")
+/* The persistent per-group failure-history feed: the runner-side ledger
+ * writer, its header, the reading leaf and the acceptance test are one
+ * unit; the parallel-runner hook that appends the rows rides the shared
+ * test_parallel row below. */
+AGENT_IMPACT_RULE("tests/harness/src/group_history.c|tests/harness/include/test/group_history.h|tools/command/native_dev_test_history.c|tools/command/native_dev_test_history.c.capabilities.def|tests/harness/src/test_devtesthistory.c", "devtesthistory command_registry_catalog native_api_contract command_input_bounds")
 /* The commuting-ticket key leaf: one handler file with one registered group,
  * like the lane-discipline leaves above. */
 AGENT_IMPACT_RULE("tools/command/native_devagent_ticketkey.c|tests/harness/src/test_devagent_ticketkey.c", "devagent_ticketkey command_registry_catalog native_api_contract command_input_bounds")
@@ -2140,7 +2145,7 @@ AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_h
  * the cache disable, and the mode stamping on SUITE VERDICT). It is the
  * harness every group runs inside, so keep it on the loader groups plus the
  * runner's own selector/catalog gates. */
-AGENT_IMPACT_RULE("tests/harness/src/test_parallel.c|tests/harness/include/test/runner_timing.h", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet test_test_group_selector make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test_parallel.c|tests/harness/include/test/runner_timing.h", "hotswap_module hotswap_module_v2 hotswap_loader hotswap_simnet test_test_group_selector devtesthistory make_lint_gates")
 /* LANE params-sovereignty, publish/release symmetry: the four shielded
  * verifying keys must arm and disarm together, because every one of the four
  * verifiers is fail-closed on a NULL key and the published-pointer set is

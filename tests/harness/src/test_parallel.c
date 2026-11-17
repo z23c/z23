@@ -57,6 +57,7 @@
 #include "devloop_reflex_runner.h"
 #include "test/runner_admission.h"
 #include "test/runner_timing.h"
+#include "test/group_history.h"
 #include "test/selection_build_needs.h"
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
@@ -2639,6 +2640,51 @@ static void timing_publish(const char *tmp_path, const char *final_path)
     }
 }
 
+/* The persistent half of the timing artifact: last-run.json is one
+ * rename-overwritten snapshot, so failure evidence evaporates the moment
+ * the next run starts. This appends one zcl.test_group_history.v1 line
+ * per EXECUTED group to group-history.jsonl in the SAME directory (so
+ * ZCL_TEST_TIMING_DIR redirects both) with the run's shared timestamp and
+ * the worktree HEAD. Skipped groups never ran; cache hits already have
+ * their row from the run that stored the key — neither is re-appended.
+ * dev.test.history reads the ledger back. Best-effort like the snapshot:
+ * one stderr line on failure, never a failed run. */
+static void timing_append_group_history(const char *dir, const char *ts,
+                                        const struct group_result *results,
+                                        size_t group_count)
+{
+    struct zcl_group_history_row *rows =
+        malloc(group_count ? group_count * sizeof(*rows) : 1);
+    if (!rows) {
+        fprintf(stderr, "test_parallel: history rows malloc failed\n");
+        return;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < group_count; i++) {
+        if (results[i].skipped || results[i].cached)
+            continue;
+        rows[n].group = g_groups[i].name;
+        rows[n].rc = results[i].signaled ? -results[i].exit_code
+                                         : results[i].exit_code;
+        rows[n].pass = !results[i].signaled && results[i].exit_code == 0;
+        rows[n].timing_valid = results[i].timing.valid;
+        rows[n].wall_ms = (long long)results[i].timing.elapsed_ms;
+        rows[n].load_flaky = results[i].load_flaky;
+        n++;
+    }
+    char tree[ZCL_GROUP_HISTORY_TREE_LEN];
+    char path[4200];
+    zcl_group_history_tree(".", tree, sizeof(tree));
+    if (snprintf(path, sizeof(path), "%s/group-history.jsonl", dir) <
+        (int)sizeof(path)) {
+        if (zcl_group_history_append(path, ts, tree, rows, n) < 0)
+            fprintf(stderr,
+                    "test_parallel: group history append failed (%s): %s\n",
+                    path, strerror(errno));
+    }
+    free(rows);
+}
+
 /* Per-group JSON timing artifact — the same "make results visible so
  * regressions are visible" pattern as z23-lint run's
  * .cache/lint-timing/last-run.json (schema zcl.lint_timing.v1), applied
@@ -2716,6 +2762,7 @@ static void write_test_timing_json(const struct group_result *results,
     }
 
     timing_publish(tmp_path, final_path);
+    timing_append_group_history(dir, ts, results, group_count);
 }
 
 #if !defined(_WIN32)
