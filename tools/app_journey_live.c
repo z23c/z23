@@ -150,17 +150,22 @@ static bool aj_role_flag(struct aj_role_args *r, const char *a)
     return false;
 }
 
+static bool aj_role_share_value(struct aj_role_args *r, const char *a)
+{
+    if (!strncmp(a, "--share=", 8) && !r->share) { r->share = a + 8; return true; }
+    if (!strncmp(a, "--share-sha256=", 15) && !r->share_sha256) { r->share_sha256 = a + 15; return true; }
+    if (!strncmp(a, "--share-publisher=", 18) && !r->share_publisher) { r->share_publisher = a + 18; return true; }
+    if (!strncmp(a, "--share-root=", 13) && !r->share_root) { r->share_root = a + 13; return true; }
+    return false;
+}
+
 static bool aj_role_value(struct aj_role_args *r, const char *a)
 {
     if (!strncmp(a, "--network=", 10) && !r->network) { r->network = a + 10; return true; }
     if (!strncmp(a, "--work=", 7) && !r->work) { r->work = a + 7; return true; }
     if (!strncmp(a, "--peer=", 7) && !r->peer) { r->peer = a + 7; return true; }
     if (!strncmp(a, "--expected=", 11) && !r->expected) { r->expected = a + 11; return true; }
-    if (!strncmp(a, "--share=", 8) && !r->share) { r->share = a + 8; return true; }
-    if (!strncmp(a, "--share-sha256=", 15) && !r->share_sha256) { r->share_sha256 = a + 15; return true; }
-    if (!strncmp(a, "--share-publisher=", 18) && !r->share_publisher) { r->share_publisher = a + 18; return true; }
-    if (!strncmp(a, "--share-root=", 13) && !r->share_root) { r->share_root = a + 13; return true; }
-
+    if (aj_role_share_value(r, a)) return true;
     return !strncmp(a, "--seconds=", 10) && !r->seconds && aj_role_number(a + 10, &r->seconds);
 }
 
@@ -173,6 +178,17 @@ static bool aj_role_share_args(const struct aj_role_args *r)
         vcs_app_offer_hex_valid(r->share_root, 32);
 }
 
+static bool aj_role_shape_valid(const struct aj_role_args *r)
+{
+    return r->sender ? !r->peer && !r->expected && !r->serve :
+        aj_role_peer(r->peer) && r->expected && r->expected[0] == '/';
+}
+
+static bool aj_role_network_valid(const struct aj_role_args *r)
+{
+    return !r->network || !strcmp(r->network, "main") || !strcmp(r->network, "regtest");
+}
+
 static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
 {
     *r = (struct aj_role_args){0};
@@ -180,10 +196,10 @@ static bool aj_role_parse(int argc, char **argv, struct aj_role_args *r)
         if (!aj_role_flag(r, argv[i]) && !aj_role_value(r, argv[i])) return false;
     }
     return r->sender != r->receiver && r->work && r->work[0] == '/' &&
-        r->work[1] && r->seconds && (!r->gui || r->receiver) && (!r->network || !strcmp(r->network, "main") || !strcmp(r->network, "regtest")) && aj_role_share_args(r) &&
-        (r->sender ? !r->peer && !r->expected && !r->serve :
-         aj_role_peer(r->peer) && r->expected && r->expected[0] == '/');
+        r->work[1] && r->seconds && (!r->gui || r->receiver) &&
+        aj_role_network_valid(r) && aj_role_share_args(r) && aj_role_shape_valid(r);
 }
+
 static const char *g_fail_first;
 
 /* P2P ports are production reachable-port allowlist members (core net
@@ -1027,13 +1043,8 @@ static bool aj_received_matches(const char *out)
 static bool aj_gui_observe(const char *pid_str);
 
 #if defined(__linux__)
-static bool aj_gui_process(const char *pid_text, uint64_t *token)
+static bool aj_gui_image_hash(int fd)
 {
-    char *end = NULL; errno = 0;
-    unsigned long long pid = strtoull(pid_text, &end, 10);
-    if (errno || !end || *end || pid < 2 || pid > INT_MAX || !os_proc_pid_start_token(pid, token)) return false;
-    char path[80]; if (snprintf(path, sizeof(path), "/proc/%llu/exe", pid) >= (int)sizeof(path)) return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return false;
     struct stat st; bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
     struct sha3_256_ctx hash; sha3_256_init(&hash); unsigned char buf[8192], digest[32];
     while (ok) {
@@ -1045,18 +1056,43 @@ static bool aj_gui_process(const char *pid_text, uint64_t *token)
     }
     if (close(fd) != 0) ok = false;
     sha3_256_finalize(&hash, digest); char hex[65]; zcl_hex_encode(digest, 32, hex);
+    return ok && !strcmp(hex, g_image_a);
+}
+
+static bool aj_gui_process(const char *pid_text, uint64_t *token)
+{
+    char *end = NULL; errno = 0;
+    unsigned long long pid = strtoull(pid_text, &end, 10);
+    if (errno || !end || *end || pid < 2 || pid > INT_MAX || !os_proc_pid_start_token(pid, token)) return false;
+    char path[80]; if (snprintf(path, sizeof(path), "/proc/%llu/exe", pid) >= (int)sizeof(path)) return false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return false;
     uint64_t after = 0;
-    return ok && !strcmp(hex, g_image_a) && os_proc_pid_start_token(pid, &after) && *token == after;
+    return aj_gui_image_hash(fd) && os_proc_pid_start_token(pid, &after) && *token == after;
+}
+
+static bool aj_gui_png_valid(const char *frame)
+{
+    int fd = open(frame, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); unsigned char png[8];
+    if (fd < 0) return false;
+    static const unsigned char magic[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    bool valid = read(fd, png, sizeof(png)) == (ssize_t)sizeof(png) && !memcmp(png, magic, sizeof(png));
+    if (close(fd) != 0) valid = false;
+    return valid;
+}
+
+static bool aj_gui_paths(char *driver, char *frame, char *log, char *record)
+{
+    return aj_path_join(driver, 1024, g_repo, "build/bin/native_ui_driver") &&
+        aj_path_join(frame, 1024, g_work, "receiver-frame.png") &&
+        aj_path_join(log, 1024, g_work, "receiver-ui.json") &&
+        aj_path_join(record, 1024, g_work, "receiver-process.json") &&
+        access(driver, X_OK) == 0 && access("/usr/bin/ffmpeg", X_OK) == 0;
 }
 
 static bool aj_gui_frame(const char *pid_text, uint64_t token)
 {
     char driver[1024], frame[1024], log[1024], out[8192], record[1024];
-    if (!aj_path_join(driver, sizeof(driver), g_repo, "build/bin/native_ui_driver") ||
-        !aj_path_join(frame, sizeof(frame), g_work, "receiver-frame.png") ||
-        !aj_path_join(log, sizeof(log), g_work, "receiver-ui.json") ||
-        !aj_path_join(record, sizeof(record), g_work, "receiver-process.json") ||
-        access(driver, X_OK) || access("/usr/bin/ffmpeg", X_OK)) return false;
+    if (!aj_gui_paths(driver, frame, log, record)) return false;
     char *ui[] = {driver, (char *)"--title=Sky Combat - Multiplayer Ultimate", (char *)"--key=left",
         (char *)"--expect-pixels-change", (char *)"--timeout-ms=30000", NULL};
     if (aj_run_exec(driver, g_b_home, g_work, 35, out, sizeof(out), ui) != 0 || !aj_write_file(log, out)) return false;
@@ -1064,13 +1100,8 @@ static bool aj_gui_frame(const char *pid_text, uint64_t token)
         (char *)"-f", (char *)"x11grab", (char *)"-video_size", (char *)"1920x1080", (char *)"-i", g_private_display,
         (char *)"-frames:v", (char *)"1", frame, NULL};
     if (aj_run_exec("/usr/bin/ffmpeg", g_b_home, g_work, 35, out, sizeof(out), grab) != 0) return false;
-    int fd = open(frame, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); unsigned char png[8];
-    if (fd < 0) return false;
-    static const unsigned char magic[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
-    bool valid = read(fd, png, sizeof(png)) == (ssize_t)sizeof(png) && !memcmp(png, magic, sizeof(png));
-    if (close(fd) != 0) valid = false;
     uint64_t after = 0;
-    if (!valid || !aj_gui_process(pid_text, &after) || after != token) return false;
+    if (!aj_gui_png_valid(frame) || !aj_gui_process(pid_text, &after) || after != token) return false;
     int n = snprintf(out, sizeof(out), "{\"pid\":%s,\"start_token\":%llu,\"image_sha3\":\"%s\",\"display_observation\":\"separate\"}\n",
         pid_text, (unsigned long long)token, g_image_a);
     return n > 0 && (size_t)n < sizeof(out) && aj_write_file(record, out);
@@ -2353,6 +2384,18 @@ static bool aj_share_hash_file(const char *path, const char *expected, int64_t s
     return ok && !strcmp(hex, expected);
 }
 
+static bool aj_share_copy_fd(int in, int out, int64_t size)
+{
+    int64_t total = 0; uint8_t buf[8192];
+    while (total < size) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0 || n > size - total || !zcl_write_all(out, buf, (size_t)n)) return false;
+        total += n;
+    }
+    return total == size;
+}
+
 static bool aj_share_snapshot(const struct aj_role_args *r, struct aj_share_state *s)
 {
     int in = open(r->share, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
@@ -2363,29 +2406,17 @@ static bool aj_share_snapshot(const struct aj_role_args *r, struct aj_share_stat
         aj_path_join(s->path, sizeof(s->path), g_work, "original.z23share") &&
         aj_path_join(s->copy, sizeof(s->copy), g_work, "received-original");
     int out = ok ? open(s->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
-    ok = ok && out >= 0; int64_t total = 0; uint8_t buf[8192];
-    while (ok && total < st.st_size) {
-        ssize_t n = read(in, buf, sizeof(buf));
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0 || n > st.st_size - total || !zcl_write_all(out, buf, (size_t)n)) { ok = false; break; }
-        total += n;
-    }
+    ok = ok && out >= 0 && aj_share_copy_fd(in, out, st.st_size);
     if (out >= 0 && close(out) != 0) ok = false;
     if (close(in) != 0) ok = false;
     s->size = st.st_size;
-    return ok && total == s->size && aj_share_hash_file(s->path, r->share_sha256, s->size);
-}
-
-static const char *aj_share_text(const struct json_value *o, const char *key)
-{
-    const struct json_value *v = json_get(o, key);
-    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    return ok && aj_share_hash_file(s->path, r->share_sha256, s->size);
 }
 
 static bool aj_share_field_is(const struct json_value *o, const char *key, const char *expected)
 {
-    const char *value = aj_share_text(o, key);
-    return value && !strcmp(value, expected);
+    const char *value = json_get_str(json_get(o, key));
+    return value && value[0] && !strcmp(value, expected);
 }
 
 static bool aj_share_copy_text(char *out, size_t cap, const char *value)
@@ -2415,8 +2446,8 @@ static bool aj_share_call(struct aj_node_ctx *c, const char *const *words,
 static bool aj_share_identity(const struct json_value *data, const struct aj_role_args *r,
                               struct aj_share_state *s)
 {
-    const char *name = aj_share_text(data, "name"), *root = aj_share_text(data, "package_root");
-    const char *pub = aj_share_text(data, "publisher_fingerprint"), *release = aj_share_text(data, "release_id");
+    const char *name = json_get_str(json_get(data, "name")), *root = json_get_str(json_get(data, "package_root"));
+    const char *pub = json_get_str(json_get(data, "publisher_fingerprint")), *release = json_get_str(json_get(data, "release_id"));
     return aj_json_bool_is(data, "verified", true) && name && root && pub && release &&
         aj_role_name(name) && !strcmp(root, r->share_root) && !strcmp(pub, r->share_publisher) &&
         vcs_app_offer_hex_valid(release, 32) && aj_share_copy_text(s->offer.name, sizeof(s->offer.name), name) &&
@@ -2427,8 +2458,8 @@ static bool aj_share_identity(const struct json_value *data, const struct aj_rol
 
 static bool aj_share_same_identity(const struct json_value *d, const struct aj_share_state *s)
 {
-    const char *name = aj_share_text(d, "name"), *root = aj_share_text(d, "package_root");
-    const char *pub = aj_share_text(d, "publisher_fingerprint"), *release = aj_share_text(d, "release_id");
+    const char *name = json_get_str(json_get(d, "name")), *root = json_get_str(json_get(d, "package_root"));
+    const char *pub = json_get_str(json_get(d, "publisher_fingerprint")), *release = json_get_str(json_get(d, "release_id"));
     return aj_json_bool_is(d, "verified", true) && name && root && pub && release &&
         !strcmp(name, s->offer.name) && !strcmp(root, s->offer.root) &&
         !strcmp(pub, s->offer.publisher) && !strcmp(release, s->release);
@@ -2443,23 +2474,52 @@ static bool aj_share_verified(struct aj_node_ctx *c, const struct aj_role_args *
     json_free(&in); json_free(&reply); return ok;
 }
 
+static bool aj_share_receive_plan(const struct json_value *d, struct aj_share_state *s)
+{
+    const char *plan = json_get_str(json_get(d, "plan_id"));
+    return aj_share_field_is(d, "stage", "plan") && aj_share_same_identity(d, s) &&
+        vcs_app_offer_hex_valid(plan, 32) && aj_share_copy_text(s->plan, sizeof(s->plan), plan);
+}
+
+static bool aj_share_receive_commit(const struct json_value *d, struct aj_share_state *s)
+{
+    const char *version = json_get_str(json_get(d, "version"));
+    const char *destination = json_get_str(json_get(d, "destination"));
+    return aj_share_field_is(d, "stage", "commit") && aj_share_same_identity(d, s) &&
+        destination && !strcmp(destination, s->copy) && vcs_app_offer_hex_valid(version, 32) &&
+        aj_share_copy_text(s->version, sizeof(s->version), version);
+}
+
+static bool aj_share_build_plan(const struct json_value *d, struct aj_share_state *s)
+{
+    const char *plan = json_get_str(json_get(d, "plan_id"));
+    const char *version = json_get_str(json_get(d, "version"));
+    return aj_share_field_is(d, "stage", "plan") && version && !strcmp(version, s->version) &&
+        vcs_app_offer_hex_valid(plan, 32) && aj_share_copy_text(s->plan, sizeof(s->plan), plan);
+}
+
+static bool aj_share_build_commit(const struct json_value *d, struct aj_share_state *s)
+{
+    const char *version = json_get_str(json_get(d, "version"));
+    const char *image = json_get_str(json_get(d, "image_sha3"));
+    return aj_share_field_is(d, "stage", "commit") && aj_share_field_is(d, "plan_id", s->plan) &&
+        version && !strcmp(version, s->version) && vcs_app_offer_hex_valid(image, 32) &&
+        aj_share_copy_text(g_image_a, sizeof(g_image_a), image);
+}
+
 static bool aj_share_receive(struct aj_node_ctx *c, const struct aj_role_args *r, struct aj_share_state *s)
 {
     const char *const words[] = {"zcode", "package", "bundle", "receive", NULL};
     struct json_value in = {0}, reply = {0}; json_set_object(&in);
     bool ok = json_push_kv_str(&in, "file", s->path) && json_push_kv_str(&in, "destination", s->copy) &&
         json_push_kv_str(&in, "datadir", c->datadir) && aj_share_call(c, words, &in, &reply);
-    const struct json_value *d = aj_json_data(&reply); const char *plan = aj_share_text(d, "plan_id");
-    ok = ok && aj_share_field_is(d, "stage", "plan") && aj_share_same_identity(d, s) && vcs_app_offer_hex_valid(plan, 32) &&
-        aj_share_copy_text(s->plan, sizeof(s->plan), plan);
+    ok = ok && aj_share_receive_plan(aj_json_data(&reply), s);
     json_free(&reply); json_init(&reply);
     ok = ok && aj_share_hash_file(s->path, r->share_sha256, s->size) &&
         json_push_kv_str(&in, "trust_publisher", r->share_publisher) &&
         json_push_kv_str(&in, "trust_root", r->share_root) && json_push_kv_str(&in, "plan_id", s->plan) &&
         json_push_kv_bool(&in, "confirm", true) && aj_share_call(c, words, &in, &reply);
-    d = aj_json_data(&reply); const char *version = aj_share_text(d, "version"), *destination = aj_share_text(d, "destination");
-    ok = ok && aj_share_field_is(d, "stage", "commit") && aj_share_same_identity(d, s) && destination && !strcmp(destination, s->copy) &&
-        vcs_app_offer_hex_valid(version, 32) && aj_share_copy_text(s->version, sizeof(s->version), version);
+    ok = ok && aj_share_receive_commit(aj_json_data(&reply), s);
     json_free(&in); json_free(&reply); return ok;
 }
 
@@ -2469,16 +2529,11 @@ static bool aj_share_build(struct aj_node_ctx *c, struct aj_share_state *s)
     struct json_value in = {0}, reply = {0}; json_set_object(&in);
     bool ok = json_push_kv_str(&in, "copy", s->copy) && json_push_kv_str(&in, "datadir", c->datadir) &&
         aj_share_call(c, words, &in, &reply);
-    const struct json_value *d = aj_json_data(&reply);
-    const char *plan = aj_share_text(d, "plan_id"), *version = aj_share_text(d, "version");
-    ok = ok && aj_share_field_is(d, "stage", "plan") && version && !strcmp(version, s->version) && vcs_app_offer_hex_valid(plan, 32) &&
-        aj_share_copy_text(s->plan, sizeof(s->plan), plan);
+    ok = ok && aj_share_build_plan(aj_json_data(&reply), s);
     json_free(&reply); json_init(&reply);
     ok = ok && json_push_kv_str(&in, "plan_id", s->plan) && json_push_kv_bool(&in, "confirm", true) &&
         aj_share_call(c, words, &in, &reply);
-    d = aj_json_data(&reply); version = aj_share_text(d, "version"); const char *image = aj_share_text(d, "image_sha3");
-    ok = ok && aj_share_field_is(d, "stage", "commit") && aj_share_field_is(d, "plan_id", s->plan) && version && !strcmp(version, s->version) && vcs_app_offer_hex_valid(image, 32) &&
-        aj_share_copy_text(g_image_a, sizeof(g_image_a), image);
+    ok = ok && aj_share_build_commit(aj_json_data(&reply), s);
     json_free(&in); json_free(&reply); return ok;
 }
 
@@ -2489,13 +2544,54 @@ static bool aj_share_offer(struct aj_node_ctx *c, const struct aj_role_args *r, 
     bool ok = aj_share_hash_file(s->path, r->share_sha256, s->size) &&
         json_push_kv_str(&in, "file", s->path) && aj_share_call(c, words, &in, &reply);
     const struct json_value *d = aj_json_data(&reply), *sz = json_get(d, "size");
-    const char *carrier = aj_share_text(d, "root"), *sha = aj_share_text(d, "sha256");
+    const char *carrier = json_get_str(json_get(d, "root")), *sha = json_get_str(json_get(d, "sha256"));
     ok = ok && vcs_app_offer_hex_valid(carrier, 32) && sha && !strcmp(sha, r->share_sha256) &&
         sz && sz->type == JSON_INT && json_get_int(sz) == s->size && aj_json_bool_is(d, "pinned", true) &&
         aj_share_copy_text(s->offer.carrier, sizeof(s->offer.carrier), carrier) &&
         aj_share_copy_text(s->offer.sha256, sizeof(s->offer.sha256), sha);
     s->offer.size = s->size;
     json_free(&in); json_free(&reply); return ok;
+}
+
+static bool aj_share_host_plan_valid(const struct json_value *d, const struct json_value *gen,
+                                     const struct json_value *en, const char *id, const char *plan)
+{
+    return id && (!strcmp(id, "absent") || vcs_app_offer_hex_valid(id, 32)) &&
+        vcs_app_offer_hex_valid(plan, 32) && gen && gen->type == JSON_INT && json_get_int(gen) >= 0 &&
+        json_get_int(gen) < INT64_MAX - 1 && en && en->type == JSON_BOOL && aj_json_bool_is(d, "executed", false);
+}
+
+static bool aj_share_host_plan_values(const struct json_value *d, struct aj_share_state *s,
+                                      struct json_value *in, int64_t *generation, bool *enabled)
+{
+    const struct json_value *gen = json_get(d, "generation"), *en = json_get(d, "already_enabled");
+    const char *id = json_get_str(json_get(d, "identity")), *plan = json_get_str(json_get(d, "plan_id"));
+    if (!aj_share_host_plan_valid(d, gen, en, id, plan)) return false;
+    *generation = json_get_int(gen); *enabled = json_get_bool(en);
+    return (strcmp(id, "absent") != 0 || (*generation == 0 && !*enabled)) &&
+        aj_share_copy_text(s->host_identity, sizeof(s->host_identity), id) && json_push_kv_str(in, "identity", id) &&
+        json_push_kv(in, "generation", gen) && json_push_kv(in, "already_enabled", en) && json_push_kv_str(in, "plan_id", plan);
+}
+
+static bool aj_share_host_identity(const struct json_value *d, const struct aj_share_state *s,
+                                   int64_t generation, bool enabled)
+{
+    const struct json_value *gen = json_get(d, "generation");
+    const char *host = json_get_str(json_get(d, "host")), *carrier = json_get_str(json_get(d, "carrier"));
+    return vcs_app_offer_hex_valid(host, 32) &&
+        (!strcmp(s->host_identity, "absent") || !strcmp(s->host_identity, host)) && carrier && !strcmp(carrier, s->offer.carrier) &&
+        aj_json_bool_is(d, "enabled", true) && aj_json_bool_is(d, "executed", !enabled) &&
+        gen && gen->type == JSON_INT && json_get_int(gen) == generation + (enabled ? 0 : 1);
+}
+
+static bool aj_share_host_export(const struct json_value *d, const struct aj_share_state *s)
+{
+    const char *host = json_get_str(json_get(d, "host")), *carrier = json_get_str(json_get(d, "carrier"));
+    return aj_share_copy_text(g_name, sizeof(g_name), s->offer.name) &&
+        aj_share_copy_text(g_root, sizeof(g_root), s->offer.root) &&
+        aj_share_copy_text(g_publisher, sizeof(g_publisher), s->offer.publisher) &&
+        aj_share_copy_text(g_host_hex, sizeof(g_host_hex), host) &&
+        aj_share_copy_text(g_carrier, sizeof(g_carrier), carrier);
 }
 
 static bool aj_share_host_plan(struct aj_node_ctx *c, struct aj_share_state *s,
@@ -2511,17 +2607,7 @@ static bool aj_share_host_plan(struct aj_node_ctx *c, struct aj_share_state *s,
     json_set_object(in);
     bool ok = json_push_kv_str(in, "offer", text) && json_push_kv_str(in, "release_id", s->release) &&
         json_push_kv_str(in, "datadir", c->datadir) && aj_share_call(c, words, in, &reply);
-    const struct json_value *d = aj_json_data(&reply), *gen = json_get(d, "generation"), *en = json_get(d, "already_enabled");
-    const char *id = aj_share_text(d, "identity"), *plan = aj_share_text(d, "plan_id");
-    ok = ok && id && (!strcmp(id, "absent") || vcs_app_offer_hex_valid(id, 32)) &&
-        vcs_app_offer_hex_valid(plan, 32) && gen && gen->type == JSON_INT && json_get_int(gen) >= 0 &&
-        json_get_int(gen) < INT64_MAX - 1 && en && en->type == JSON_BOOL && aj_json_bool_is(d, "executed", false);
-    if (ok) {
-        *generation = json_get_int(gen); *enabled = json_get_bool(en);
-        ok = (strcmp(id, "absent") != 0 || (*generation == 0 && !*enabled)) &&
-            aj_share_copy_text(s->host_identity, sizeof(s->host_identity), id) && json_push_kv_str(in, "identity", id) && json_push_kv(in, "generation", gen) &&
-            json_push_kv(in, "already_enabled", en) && json_push_kv_str(in, "plan_id", plan);
-    }
+    ok = ok && aj_share_host_plan_values(aj_json_data(&reply), s, in, generation, enabled);
     json_free(&reply); return ok;
 }
 
@@ -2533,18 +2619,10 @@ static bool aj_share_host(struct aj_node_ctx *c, const struct aj_role_args *r, s
     bool ok = aj_share_host_plan(c, s, &in, text, &generation, &enabled) &&
         aj_share_hash_file(s->path, r->share_sha256, s->size) && json_push_kv_bool(&in, "confirm", true) &&
         aj_share_call(c, words, &in, &reply);
-    const struct json_value *d = aj_json_data(&reply), *gen = json_get(d, "generation");
-    const char *host = aj_share_text(d, "host"), *carrier = aj_share_text(d, "carrier");
-    ok = ok && vcs_app_offer_hex_valid(host, 32) &&
-        (!strcmp(s->host_identity, "absent") || !strcmp(s->host_identity, host)) && carrier && !strcmp(carrier, s->offer.carrier) &&
-        aj_json_bool_is(d, "enabled", true) && aj_json_bool_is(d, "executed", !enabled) &&
-        gen && gen->type == JSON_INT && json_get_int(gen) == generation + (enabled ? 0 : 1) &&
+    const struct json_value *d = aj_json_data(&reply);
+    ok = ok && aj_share_host_identity(d, s, generation, enabled) &&
         aj_share_hash_file(s->path, r->share_sha256, s->size);
-    if (ok) ok = aj_share_copy_text(g_name, sizeof(g_name), s->offer.name) &&
-        aj_share_copy_text(g_root, sizeof(g_root), s->offer.root) &&
-        aj_share_copy_text(g_publisher, sizeof(g_publisher), s->offer.publisher) &&
-        aj_share_copy_text(g_host_hex, sizeof(g_host_hex), host) &&
-        aj_share_copy_text(g_carrier, sizeof(g_carrier), carrier);
+    if (ok) ok = aj_share_host_export(d, s);
     int64_t observed = 0;
     if (ok) ok = aj_role_host_status(c, &observed) && observed == generation + (enabled ? 0 : 1);
     if (ok) s->generation = observed;
@@ -2557,7 +2635,7 @@ static bool aj_share_peer_matches(const struct aj_share_state *s)
     if (!aj_path_join(path, sizeof(path), g_work, "peer.json") ||
         !aj_role_read_public(path, body, sizeof(body))) return false;
     bool ok = json_read(&v, body, strlen(body));
-    const char *endpoint = ok ? aj_share_text(&v, "endpoint") : NULL;
+    const char *endpoint = ok ? json_get_str(json_get(&v, "endpoint")) : NULL;
     ok = endpoint && !strcmp(endpoint, s->offer.onion);
     json_free(&v); return ok;
 }
@@ -2576,16 +2654,20 @@ static bool aj_share_ready(const struct aj_share_state *s)
         aj_write_file(path, body);
 }
 
+static bool aj_share_prepare_local(struct aj_node_ctx *a, const struct aj_role_args *r, struct aj_share_state *s)
+{
+    return aj_role_node_start(a->home, a->datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
+        APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, false) && aj_wait_ready_pair(a, NULL, "") &&
+        aj_share_verified(a, r, s) && aj_share_receive(a, r, s) && aj_share_build(a, s) && aj_role_node_stop();
+}
+
 static bool aj_role_sender_share(const struct aj_role_args *r)
 {
     struct aj_share_state s = {0}; struct aj_node_ctx a = {.rpc = APPJ_A_RPC};
     snprintf(a.home, sizeof(a.home), "%s", g_a_home);
     snprintf(a.datadir, sizeof(a.datadir), "%s", g_a_dd);
     if (!aj_share_snapshot(r, &s)) { aj_fail("original share snapshot or caller digest mismatch"); return false; }
-    bool ok = aj_role_node_start(a.home, a.datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
-                                 APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, false) &&
-        aj_wait_ready_pair(&a, NULL, "") && aj_share_verified(&a, r, &s) &&
-        aj_share_receive(&a, r, &s) && aj_share_build(&a, &s) && aj_role_node_stop() &&
+    bool ok = aj_share_prepare_local(&a, r, &s) &&
         aj_role_node_start(a.home, a.datadir, g_a_log, APPJ_A_P2P, APPJ_A_RPC,
                            APPJ_A_FS, APPJ_A_HTTPS, APPJ_DEAD_SINK, true) &&
         aj_wait_ready_pair(&a, NULL, " (hosting)") && aj_share_offer(&a, r, &s) &&
@@ -2671,12 +2753,17 @@ static bool aj_role_prepare(const struct aj_role_args *r)
     return r->sender || (aj_path_join(g_repo_app, sizeof(g_repo_app), g_work, "empty") && mkdir(g_repo_app, 0700) == 0);
 }
 
-static int aj_role_work(const struct aj_role_args *r)
+static bool aj_role_control_ready(void)
 {
     struct stat st; char token;
     struct pollfd control = {.fd = 3, .events = POLLIN};
-    if (fstat(3, &st) != 0 || !S_ISFIFO(st.st_mode) || poll(&control, 1, 1000) <= 0 ||
-        !(control.revents & POLLIN) || read(3, &token, 1) != 1 || token != 'R') {
+    return fstat(3, &st) == 0 && S_ISFIFO(st.st_mode) && poll(&control, 1, 1000) > 0 &&
+        (control.revents & POLLIN) && read(3, &token, 1) == 1 && token == 'R';
+}
+
+static int aj_role_work(const struct aj_role_args *r)
+{
+    if (!aj_role_control_ready()) {
         aj_fail("split worker requires its owner control descriptor"); return 2;
     }
     close(3); g_role_worker = true; g_keep = true; platform_supervised_init(&g_role_node);
@@ -2742,6 +2829,14 @@ static enum platform_supervised_state aj_role_drain(struct platform_supervised_p
     return state;
 }
 
+static bool aj_gui_display_parse(char *text, size_t n)
+{
+    if (!n || text[n] != '\n') return false;
+    text[n] = 0; char *end = NULL; long value = strtol(text, &end, 10);
+    return end && !*end && value >= 0 && value <= 65535 &&
+        snprintf(g_private_display, sizeof(g_private_display), ":%ld", value) < (int)sizeof(g_private_display);
+}
+
 static bool aj_gui_display_read(int fd)
 {
     char text[8] = {0}; size_t n = 0; int64_t start = clock_now_monotonic_ns();
@@ -2757,10 +2852,7 @@ static bool aj_gui_display_read(int fd)
         if (text[n] < '0' || text[n] > '9') return false;
         ++n;
     }
-    if (!n || text[n] != '\n') return false;
-    text[n] = 0; char *end = NULL; long value = strtol(text, &end, 10);
-    return end && !*end && value >= 0 && value <= 65535 &&
-        snprintf(g_private_display, sizeof(g_private_display), ":%ld", value) < (int)sizeof(g_private_display);
+    return aj_gui_display_parse(text, n);
 }
 
 static bool aj_gui_artifacts_gone(void);
@@ -2779,6 +2871,17 @@ static int aj_gui_worker(int argc, char **argv)
     if (fstat(3, &st) || !S_ISFIFO(st.st_mode) || poll(&p, 1, 1000) <= 0 ||
         !(p.revents & POLLIN) || read(3, &token, 1) != 1 || token != 'R') return 2;
     close(3); execv(argv[2], &argv[2]); return 2;
+}
+
+static void aj_gui_close_failed(int image, int input, int output, const int fds[2], const int control[2])
+{
+    if (image >= 0) close(image);
+    if (input >= 0) close(input);
+    if (output >= 0) close(output);
+    if (fds[0] >= 0) close(fds[0]);
+    if (fds[1] >= 0) close(fds[1]);
+    if (control[0] >= 0) close(control[0]);
+    if (control[1] >= 0) close(control[1]);
 }
 
 static bool aj_gui_start(const char *binary)
@@ -2809,13 +2912,7 @@ static bool aj_gui_start(const char *binary)
     if (!ok) aj_fail("private display failed to start");
     return ok;
 fail:
-    if (image >= 0) close(image);
-    if (input >= 0) close(input);
-    if (output >= 0) close(output);
-    if (fds[0] >= 0) close(fds[0]);
-    if (fds[1] >= 0) close(fds[1]);
-    if (control[0] >= 0) close(control[0]);
-    if (control[1] >= 0) close(control[1]);
+    aj_gui_close_failed(image, input, output, fds, control);
     aj_fail("private display prerequisites unavailable"); return false;
 }
 
