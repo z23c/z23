@@ -93,11 +93,13 @@ int zc_sec_envfilter(void)
         "BUILD_SOURCE_RECORD=first", "DEVBUILD_UNIT=unit-a", "ZCC_REAL_FLAG=1", NULL };
     const char *const second[] = { base[0], "BUILD_SOURCE_RECORD=second",
         "DEVBUILD_UNIT=unit-b", "ZCC_REAL_FLAG=1", NULL };
+    const char *const audited[] = { base[0], "BUILD_SOURCE_RECORD=second",
+        "DEVBUILD_UNIT=unit-b", "ZCC_REAL_FLAG=1", "ZCC_AUDIT=1", NULL };
     const char *const third[] = { base[0], "BUILD_SOURCE_RECORD=third",
         "DEVBUILD_UNIT=unit-b", "ZCC_REAL_FLAG=2", NULL };
     const char *const av[] = { zc.zcc, cv, "-c", zcw("environment.c"), "-o",
                                eo, NULL };
-    char e1[ZC_SHA], warm[ZC_SHA], e2[ZC_SHA];
+    char e1[ZC_SHA], warm[ZC_SHA], audit[ZC_SHA], e2[ZC_SHA];
     if (zc_put("compiler-environment",
                "#!/bin/sh\n[ -z \"${BUILD_SOURCE_RECORD+x}\" ] || exit 71\n"
                "[ -z \"${DEVBUILD_UNIT+x}\" ] || exit 72\n"
@@ -116,6 +118,13 @@ int zc_sec_envfilter(void)
     int hw = zc_sha(eo, warm);
     zc_want(h1 && hw && strcmp(e1, warm) == 0,
             "orchestration environment changed object bytes");
+    if (zc_x(av, audited, zcw("environment-audit.err")) != 0)
+        zc_fail("filtered environment audit compile failed");
+    int ha = zc_sha(eo, audit);
+    zc_want(lct_file_has(zcw("environment-audit.err"), "zcc: AUDIT MATCH "),
+            "filtered environment audit did not verify a cached object");
+    zc_want(h1 && ha && strcmp(e1, audit) == 0,
+            "filtered environment audit changed object bytes");
     if (zc_x(av, third, NULL) != 0)
         zc_fail("real environment changed compile failed");
     zc_disp("MISS", "compiler-visible environment change was served");
