@@ -114,9 +114,9 @@ order of size.
 2. **A stranger runs a stranger's app.** Signed `.z23share` handoff and public
    catalog discovery are implemented. An installed signed-file journey reached
    a fresh receiver on an apparently distinct physical host without signup.
-   Hardware observations are conventional evidence, not attestation. Catalog
-   discovery between independent physical hosts remains separate. Reuse the
-   existing commands:
+   Hardware observations are conventional evidence, not attestation. A later
+   two-host catalog journey and an original-app receiver observation are
+   recorded below. Reuse the existing commands:
    <!-- claim: symbol-present zcl_native_handle_app_publish tools/command/native_app_publish_command.c # signed catalog publication -->
    <!-- claim: symbol-present zcl_native_handle_app_get tools/command/native_app_get_command.c # catalog discovery and receive -->
    - `app publish COPY` posts one signed `zcl.app_offer.v1` entry to the
@@ -198,6 +198,22 @@ order of size.
    physical environments are not hardware attestation. Evidence: the retained
    app-build-observation-recipient-1115, app-build-observation-offline-1115 and
    app-build-observation-public-1115 results and reviews.
+
+   A generated tiny app crossed two observed physical Linux hosts by catalog,
+   was rebuilt, opened and rehosted, and was fetched by a fresh receiver after
+   its sender stopped. Evidence: the retained app-catalog-two-host-1116 result
+   and review on source `5e21cefb3f98afae94f675c69aae4097bca4ddc3`. These
+   observations do not attribute individual DATA bytes to a particular peer.
+
+   The original Sky Combat share was retrieved by catalog, rebuilt and opened
+   across two observed physical Linux hosts, matching the sender’s root,
+   publisher and image. A retained frame showed the HUD. The runtime source
+   was `50cc1e5422f8fc5adb4329721285621266cae2a8`; its later integration landed
+   as `fab78f316d2d692d528e92d2c84c3f8cf9792ce8`. See the
+   [original catalog GUI experiment](../experiments/APP_ORIGINAL_CATALOG_GUI_20261116.md).
+   Hardware observations are not attestation; window and process observations
+   are separate. Full gameplay and input causality remain unproven. The earlier
+   original-fetch timeout remains a separate unresolved observation.
 3. **One full proof per change.** The land proof is the only full lint and
    test run.
    - A lane submits after its focused groups, `lint-fast` and the cheap
