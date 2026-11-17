@@ -545,14 +545,64 @@ static bool dep_select_watched_epoch(const char *root, const char *reldir,
     return true;
 }
 
+/* Return 1 for an excluded worktree, 0 for a local directory, -1 on doubt. */
+static int dep_scope_boundary(const char *root, const char *reldir,
+                              bool refuse_boundary)
+{
+    char scope[CI_PATH_MAX];
+    int n = snprintf(scope, sizeof scope, "%s/%s", root, reldir);
+    if (n <= 0 || (size_t)n >= sizeof scope) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    int boundary = ci_seed_worktree_boundary(root, scope);
+    if (boundary < 0 || (boundary > 0 && refuse_boundary)) {
+        errno = EIO;
+        return -1;
+    }
+    return boundary;
+}
+
+static bool collect_dep_listing(const char *root, const char *reldir,
+                                struct dep_paths *paths)
+{
+    char full[CI_PATH_MAX];
+    int n = snprintf(full, sizeof full, "%s/%s", root, reldir);
+    if (n <= 0 || (size_t)n >= sizeof full) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    struct platform_directory_list directories = {0}, files = {0};
+    bool ok = dep_list_children(full, &directories, &files) &&
+              collect_dep_subdirs(root, reldir, &directories, paths) &&
+              collect_dep_files(reldir, &files, paths);
+    platform_directory_list_free(&directories);
+    platform_directory_list_free(&files);
+    if (!ok && !errno) errno = EIO;
+    return ok;
+}
+
+static bool collect_dep_epoch(const char *root, const char *reldir,
+                              const char *current, struct dep_paths *paths)
+{
+    /* The selector jumps over epochs, which can itself be a worktree. */
+    char epochs[CI_PATH_MAX];
+    int n = snprintf(epochs, sizeof epochs, "%s/epochs", reldir);
+    if (n <= 0 || (size_t)n >= sizeof epochs) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    int boundary = dep_scope_boundary(root, epochs, paths->refuse_boundary);
+    if (boundary < 0) return false;
+    if (boundary > 0) return true;
+    return collect_dep_paths(root, current, paths);
+}
+
 static bool collect_dep_paths(const char *root, const char *reldir,
                               struct dep_paths *paths)
 {
-    char scope[CI_PATH_MAX];
-    int sn = snprintf(scope, sizeof scope, "%s/%s", root, reldir);
-    if (sn <= 0 || (size_t)sn >= sizeof scope) { errno = ENAMETOOLONG; return false; }
-    int boundary = ci_seed_worktree_boundary(root, scope);
-    if (boundary < 0 || (boundary > 0 && paths->refuse_boundary)) { errno = EIO; return false; }
+    int boundary = dep_scope_boundary(root, reldir, paths->refuse_boundary);
+    if (boundary < 0) return false;
     if (boundary > 0) return true;
     char current[CI_PATH_MAX];
     enum epoch_state epoch;
@@ -560,37 +610,14 @@ static bool collect_dep_paths(const char *root, const char *reldir,
         return false;
     switch (epoch) {
     case EPOCH_CURRENT:
-        /* The selector jumps over epochs, which can itself be a worktree. */
-        {
-            char epochs[CI_PATH_MAX];
-            int n = snprintf(epochs, sizeof epochs, "%s/epochs", scope);
-            if (n <= 0 || (size_t)n >= sizeof epochs) { errno = ENAMETOOLONG; return false; }
-            int b = ci_seed_worktree_boundary(root, epochs);
-            if (b < 0 || (b > 0 && paths->refuse_boundary)) { errno = EIO; return false; }
-            if (b > 0) return true;
-        }
-        return collect_dep_paths(root, current, paths);
+        return collect_dep_epoch(root, reldir, current, paths);
     case EPOCH_UNKNOWN:
         return true;
     case EPOCH_NONE:
-        break;
+        return collect_dep_listing(root, reldir, paths);
     }
-
-    char full[CI_PATH_MAX];
-    int fn = snprintf(full, sizeof(full), "%s/%s", root, reldir);
-    if (fn <= 0 || (size_t)fn >= sizeof(full)) {
-        errno = ENAMETOOLONG;
-        return false;
-    }
-    struct platform_directory_list directories = {0}, files = {0};
-    bool ok =
-        dep_list_children(full, &directories, &files) &&
-        collect_dep_subdirs(root, reldir, &directories, paths) &&
-        collect_dep_files(reldir, &files, paths);
-    platform_directory_list_free(&directories);
-    platform_directory_list_free(&files);
-    if (!ok && !errno) errno = EIO;
-    return ok;
+    errno = EIO;
+    return false;
 }
 
 static void dep_root_init(struct sha3_256_ctx *sha, bool build_present)

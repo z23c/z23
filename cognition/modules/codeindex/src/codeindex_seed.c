@@ -524,30 +524,43 @@ static bool seed_stage_posix(const char *root, int stagefd,
     return ok;
 }
 
-static bool seed_registered_child(const char *root, const char *marker,
-                                  const char *line)
+/* Accept only a direct, real admin directory in the shared registry. */
+static bool seed_child_admin(const char *shared, const char *path,
+                             char admin[CI_PATH_MAX])
 {
-    char common[CI_PATH_MAX], shared[CI_PATH_MAX], admin[CI_PATH_MAX];
-    char registry[CI_PATH_MAX], canonical[CI_PATH_MAX], record[CI_PATH_MAX];
-    char back[CI_PATH_MAX], expected[CI_PATH_MAX], target[CI_PATH_MAX];
+    char registry[CI_PATH_MAX], canonical[CI_PATH_MAX];
     struct stat st;
-    if (!seed_common_dir(root, common) || !realpath(common, shared) ||
-        strncmp(line, "gitdir: ", 8) != 0 || line[8] != '/') return false;
     int n = snprintf(registry, sizeof registry, "%s/worktrees", shared);
     if (n <= 0 || (size_t)n >= sizeof registry ||
         lstat(registry, &st) != 0 || !S_ISDIR(st.st_mode) ||
         !realpath(registry, canonical)) return false;
-    const char *path = line + 8;
     size_t len = strlen(canonical);
     if (strncmp(path, canonical, len) != 0 || path[len] != '/' ||
-        !path[len + 1] || strchr(path + len + 1, '/') ||
-        lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) ||
-        !realpath(path, admin) || strcmp(admin, path) != 0) return false;
-    n = snprintf(record, sizeof record, "%s/gitdir", admin);
+        !path[len + 1] || strchr(path + len + 1, '/')) return false;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) &&
+           realpath(path, admin) && strcmp(admin, path) == 0;
+}
+
+/* Require the registry backlink to identify this exact marker. */
+static bool seed_child_backlink(const char *admin, const char *marker)
+{
+    char record[CI_PATH_MAX], target[CI_PATH_MAX];
+    char back[CI_PATH_MAX], expected[CI_PATH_MAX];
+    int n = snprintf(record, sizeof record, "%s/gitdir", admin);
     return n > 0 && (size_t)n < sizeof record &&
         seed_read_record(record, target, sizeof target) && target[0] == '/' &&
         realpath(target, back) && realpath(marker, expected) &&
         strcmp(back, expected) == 0;
+}
+
+static bool seed_registered_child(const char *root, const char *marker,
+                                  const char *line)
+{
+    char common[CI_PATH_MAX], shared[CI_PATH_MAX], admin[CI_PATH_MAX];
+    if (!seed_common_dir(root, common) || !realpath(common, shared) ||
+        strncmp(line, "gitdir: ", 8) != 0 || line[8] != '/') return false;
+    return seed_child_admin(shared, line + 8, admin) &&
+           seed_child_backlink(admin, marker);
 }
 
 #endif /* !_WIN32 */
