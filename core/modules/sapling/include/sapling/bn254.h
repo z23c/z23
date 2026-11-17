@@ -57,6 +57,9 @@ void bn_fq2_mul(struct bn_fq2 *r, const struct bn_fq2 *a, const struct bn_fq2 *b
 void bn_fq2_sq(struct bn_fq2 *r, const struct bn_fq2 *a);
 void bn_fq2_inv(struct bn_fq2 *r, const struct bn_fq2 *a);
 void bn_fq2_mul_by_nonresidue(struct bn_fq2 *r, const struct bn_fq2 *a);
+/* Square root in Fq2. False iff a is not a square (the accept set of libsnark's
+ * Fp2_model::sqrt). Which root is returned is unspecified. r may alias a. */
+bool bn_fq2_sqrt(struct bn_fq2 *r, const struct bn_fq2 *a);
 
 /* Fq6 = Fq2[v] / (v^3 - xi)  where xi = 9+u */
 struct bn_fq6 {
@@ -100,7 +103,9 @@ void bn_g1_double(struct bn_g1 *r, const struct bn_g1 *a);
 void bn_g1_to_affine(struct bn_fq *ax, struct bn_fq *ay, const struct bn_g1 *p);
 void bn_g1_scalar_mul(struct bn_g1 *r, const struct bn_g1 *p, const uint64_t scalar[4]);
 
-/* Decompress G1 point (33 bytes: 1 leading byte + 32 BE x-coordinate) */
+/* Decode a zclassicd CompressedG1 (33 bytes: lead byte 0x02|y_lsb, then x as
+ * 32 big-endian bytes, x < q). Any other lead byte is refused; there is no
+ * encoding of the point at infinity (zclassicd Proof.hpp:97-111). */
 bool bn_g1_decompress(struct bn_g1 *p, const uint8_t data[33]);
 
 /* G2: y^2 = x^3 + b' over Fq2 (Jacobian coordinates) */
@@ -120,7 +125,10 @@ void bn254_g2_one(struct bn_g2 *out);
 /* True iff the affine G2 point (z assumed 1) is on the BN254 twist curve. */
 bool bn_g2_is_on_curve(const struct bn_g2 *p);
 
-/* Decompress G2 point (65 bytes: 1 leading byte + 64 BE x-coordinate) */
+/* Decode a zclassicd CompressedG2 (65 bytes: lead byte 0x0a|y_gt, then x as a
+ * 64-byte big-endian FE2IP integer c1*q + c0 < q^2). Refuses any other lead
+ * byte, a non-square x^3 + b', and a point outside the order-r subgroup
+ * (zclassicd Proof.hpp:147-161, Proof.cpp:147-171). */
 bool bn_g2_decompress(struct bn_g2 *p, const uint8_t data[65]);
 
 /* Optimal Ate pairing on BN-254 */

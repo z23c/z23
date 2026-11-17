@@ -25,6 +25,8 @@
 #include "sapling/bn254_accel.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <pthread.h>
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 
@@ -209,8 +211,10 @@ bool bn_fq_from_bytes_be(struct bn_fq *r, const uint8_t s[32])
         int shift = ((31 - i) % 8) * 8;
         raw[limb] |= (uint64_t)s[i] << shift;
     }
-    /* Check < q */
-    if (u256_ge(raw, FQ_Q) && memcmp(raw, FQ_Q, 32) != 0)
+    /* Strict < q, as zclassicd's bigint::limit (Proof.cpp:74, bigint.tcc:211):
+     * the value q itself is not a field element encoding. Letting it through
+     * reduced it to 0. */
+    if (u256_ge(raw, FQ_Q))
         return false;
     /* Convert to Montgomery form: r = raw * R^2 * R^{-1} = raw * R mod q */
     bn_fq_mont_mul(r->d, raw, FQ_R2);
@@ -364,7 +368,6 @@ static void u256_div_small(uint64_t r[4], const uint64_t a[4], uint64_t d)
  * ══════════════════════════════════════════════════════════════ */
 
 static struct {
-    bool initialized;
     /* p-Frobenius on Fq6: c_k *= w1_k */
     struct bn_fq2 w1_1;     /* ξ^{(p-1)/3} */
     struct bn_fq2 w1_2;     /* ξ^{2(p-1)/3} */
@@ -385,10 +388,18 @@ static struct {
     struct bn_fq2 twist_frob_y;  /* ξ^{(p-1)/2} = w1_1 * w1_6 */
 } g_frob;
 
-static void bn254_init_frobenius(void)
-{
-    if (g_frob.initialized) return;
+/* The table is filled exactly once (pthread_once) and then never written.
+ * g_frob_ready is stored with release order after the last table write and
+ * loaded with acquire order by every user, so a reader that sees true also
+ * sees the whole table. On x86-64 an acquire load is the same single mov as a
+ * relaxed one. It used to be a plain `bool initialized` inside the table:
+ * concurrent first callers (parallel proof validation) both filled the table
+ * while others already read it. */
+static pthread_once_t g_frob_once = PTHREAD_ONCE_INIT;
+static atomic_bool g_frob_ready = false;
 
+static void bn254_init_frobenius_once(void)
+{
     /* ξ = 9 + u in Fq2 */
     struct bn_fq2 xi;
     bn_fq_from_u64(&xi.c0, 9);
@@ -449,7 +460,21 @@ static void bn254_init_frobenius(void)
     u256_div_small(pm1_div2, pm1, 2);
     bn_fq2_pow(&g_frob.twist_frob_y, &xi, pm1_div2);
 
-    g_frob.initialized = true;
+    atomic_store_explicit(&g_frob_ready, true, memory_order_release);
+}
+
+/* First-use path, out of line so the callers pay one load and one
+ * predicted-not-taken branch. */
+__attribute__((noinline, cold))
+static void bn254_init_frobenius_first(void)
+{
+    pthread_once(&g_frob_once, bn254_init_frobenius_once);
+}
+
+static inline void bn254_init_frobenius(void)
+{
+    if (__builtin_expect(!atomic_load_explicit(&g_frob_ready, memory_order_acquire), 0))
+        bn254_init_frobenius_first();
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -841,14 +866,14 @@ void bn_g1_scalar_mul(struct bn_g1 *r, const struct bn_g1 *p, const uint64_t sca
 
 bool bn_g1_decompress(struct bn_g1 *p, const uint8_t data[33])
 {
-    uint8_t flags = data[0];
-    bool y_lsb = (flags & 0x01) != 0;
+    /* zclassicd (Proof.hpp:97-111) accepts only the lead bytes 0x02 and 0x03;
+     * bit 0 is the y parity. Its format has no encoding of the point at
+     * infinity, so neither does this decoder. */
+    if ((data[0] & 0xFE) != 0x02)
+        return false;
+    bool y_lsb = (data[0] & 0x01) != 0;
 
-    /* Check for point at infinity */
-    bool all_zero = true;
-    for (int i = 1; i < 33; i++) if (data[i] != 0) { all_zero = false; break; }
-    if (all_zero && (flags & 0x04)) { bn_g1_identity(p); return true; }
-
+    /* x < q, strict (Proof.cpp:68-77) */
     if (!bn_fq_from_bytes_be(&p->x, data + 1))
         return false;
 
@@ -1007,17 +1032,17 @@ void bn_g2_to_affine(struct bn_fq2 *ax, struct bn_fq2 *ay, const struct bn_g2 *p
  */
 
 /* Divide a 512-bit unsigned integer by a 256-bit divisor.
- * Returns quotient (256-bit) and remainder (256-bit).
+ * Returns the full quotient (512-bit) and the remainder (256-bit).
  * Uses binary long division — O(512) iterations. Correct for all inputs.
  * Not performance-critical: called once per G2 decompression. */
 static void u512_divmod_u256(const uint64_t dividend[8],
                               const uint64_t divisor[4],
-                              uint64_t quotient[4],
+                              uint64_t quotient[8],
                               uint64_t remainder[4])
 {
     /* Accumulator for remainder — needs 257 bits during processing. */
     uint64_t rem[5] = {0};
-    memset(quotient, 0, 32);
+    memset(quotient, 0, 64);
 
     for (int i = 511; i >= 0; i--) {
         /* Left-shift remainder by 1 */
@@ -1053,9 +1078,9 @@ static void u512_divmod_u256(const uint64_t dividend[8],
             }
             rem[4] += (uint64_t)borrow;
 
-            /* Set quotient bit (only bits 0..255 matter) */
-            if (i < 256)
-                quotient[i / 64] |= (1ULL << (i % 64));
+            /* Every quotient bit is kept: the caller must see a quotient
+             * that does not fit in 256 bits in order to refuse it. */
+            quotient[i / 64] |= (1ULL << (i % 64));
         }
     }
 
@@ -1064,7 +1089,12 @@ static void u512_divmod_u256(const uint64_t dividend[8],
 
 /* Decode a CompressedG2 Fq2 x-coordinate from 64-byte FE2IP encoding.
  * combined (512-bit BE) = c1*q + c0 where c0, c1 < q.
- * Returns false if c1 >= q (invalid encoding). */
+ *
+ * zclassicd (Proof.cpp:86-96, bigint.tcc:194-216): div_qr gives a 5-limb
+ * quotient, and shorten() throws unless its high limb is zero and the low four
+ * limbs are strictly below q. So the accepted integers are exactly
+ * 0 <= combined < q^2. The quotient is therefore kept in full here: dropping
+ * its bits >= 2^256 made combined + 2^256*q decode like combined. */
 bool fq2_decode_fe2ip(struct bn_fq *c0, struct bn_fq *c1,
                       const uint8_t data[64])
 {
@@ -1076,11 +1106,13 @@ bool fq2_decode_fe2ip(struct bn_fq *c0, struct bn_fq *c1,
         combined[limb] |= (uint64_t)data[i] << shift;
     }
 
-    uint64_t q_raw[4], r_raw[4];
+    uint64_t q_raw[8], r_raw[4];
     u512_divmod_u256(combined, FQ_Q, q_raw, r_raw);
 
-    /* c1 = quotient, must be < q */
-    if (u256_ge(q_raw, FQ_Q) && memcmp(q_raw, FQ_Q, 32) != 0)
+    /* c1 = quotient, must be < q (strict), with no bits above 2^256 */
+    if ((q_raw[4] | q_raw[5] | q_raw[6] | q_raw[7]) != 0)
+        return false;
+    if (u256_ge(q_raw, FQ_Q))
         return false;
 
     /* c0 = remainder (already < q by definition of mod) */
@@ -1090,196 +1122,152 @@ bool fq2_decode_fe2ip(struct bn_fq *c0, struct bn_fq *c1,
     return true;
 }
 
-bool bn_g2_decompress(struct bn_g2 *p, const uint8_t data[65])
+/* b' = 3 / (9 + u), the twist curve coefficient (alt_bn128_twist_coeff_b). */
+static void bn_g2_twist_b(struct bn_fq2 *b)
 {
-    uint8_t flags = data[0];
-    bool y_gt = (flags & 0x01) != 0;
-
-    /* Check for point at infinity */
-    bool all_zero = true;
-    for (int i = 1; i < 65; i++) if (data[i] != 0) { all_zero = false; break; }
-    if (all_zero && (flags & 0x04)) { bn_g2_identity(p); return true; }
-
-    /* G2 x-coordinate: 64-byte FE2IP encoding → (c0, c1) in Fq2.
-     * Previous code (WRONG): read as c1(32 BE) || c0(32 BE).
-     * Correct: 64 bytes form a single 512-bit BE integer = c1*q + c0. */
-    if (!fq2_decode_fe2ip(&p->x.c0, &p->x.c1, data + 1))
-        return false;
-
-    /* y^2 = x^3 + b_twist */
-    struct bn_fq2 x3, b_twist;
-    bn_fq2_sq(&x3, &p->x);
-    bn_fq2_mul(&x3, &x3, &p->x);
-
-    /* b_twist = 3 / (9+u). Pre-compute: */
     struct bn_fq2 three, xi;
     bn_fq_from_u64(&three.c0, 3);
     bn_fq_zero(&three.c1);
     bn_fq_from_u64(&xi.c0, 9);
     bn_fq_one(&xi.c1);
-    bn_fq2_inv(&b_twist, &xi);
-    bn_fq2_mul(&b_twist, &b_twist, &three);
+    bn_fq2_inv(b, &xi);
+    bn_fq2_mul(b, b, &three);
+}
 
-    bn_fq2_add(&x3, &x3, &b_twist);
-
-    /* sqrt in Fq2: try a^{(q^2+1)/4} since q^2 mod 4 == 1 for BN... */
-    /* For BN-254: use Tonelli-Shanks or compute a^{(q^2+7)/16} and adjust.
-     * Simplified: try Fq2 sqrt via the formula for p ≡ 3 mod 4 base field. */
-
-    /* Fq2 sqrt: let a = a0 + a1*u.
-     * alpha = a^{(q-1)/2} in Fq2
-     * If alpha == -1, sqrt = u * a * (2a)^{(q-3)/4}
-     * If alpha != -1, sqrt = a * (a*(1+alpha))^{-1} * ...
-     * Simpler: compute candidate = a^{(q^2+1)/4} and verify */
-
-    /* For the decompression of static VK points, we can use a brute-force
-     * approach: compute y^2, then try sqrt. Since Fq2 sqrt is non-trivial,
-     * use the Cipolla-like method via the base field. */
-
-    /* Norm-based Fq2 sqrt:
-     * norm(a) = a0^2 + a1^2 (since u^2 = -1)
-     * If norm(a) is a QR in Fq, compute sqrt(norm) in Fq.
-     * Then y = a * (norm(a))^{(q-3)/4} * (sqrt(norm)+a0)^{-1/2} ...
-     * This is getting complex. Let me use the direct approach. */
-
-    /* Direct Fq2 sqrt via Frobenius:
-     * In Fq2 with q ≡ 3 mod 4:
-     * sqrt(a) = a^{(q+1)/2} up to a factor from Fq.
-     * But we're in Fq2, so we need a^{(q^2+1)/4}. */
-
-    /* Compute a^{(q+1)/4} as a candidate (works when Fq2 element is in Fq image) */
-    /* For general Fq2 elements, use: */
-
-    /* Step 1: a1 = a^{(q-3)/4} */
-    /* Step 2: a0 = a1 * a = a^{(q+1)/4} */
-    /* Step 3: if a0^2 == a, done */
-    /* Step 4: else a0 = a0 * sqrt(-1) = a0 * u (since u^2 = -1) */
-
-    /* Actually, for BN-254, q ≡ 3 mod 4, so sqrt(-1) doesn't exist in Fq.
-     * This means u is the sqrt of -1 in Fq2.
-     * For Fq2 sqrt with q ≡ 3 mod 4:
-     * - Compute t = a^q (Frobenius: conjugate = a0 - a1*u)
-     * - Compute alpha = a * t = a * a^q = a^{q+1} = norm(a) in Fq
-     * - Compute beta = alpha^{(q-3)/4} in Fq
-     * - x = a * t * beta = a^{q+1} * a^{q*(q-3)/4} = ... complicated
-     * Let me just use exponentiation. */
-
-    /* Fq2 exponentiation by (q^2+1)/4 */
-    /* q^2 + 1 is divisible by 4 for BN-254 */
-    /* This would require huge-number exponentiation. Instead, use the
-     * chain: sqrt(a) where a in Fq2, q ≡ 3 mod 4:
-     *   t = a^{(q-1)/2}  (in Fq2)
-     *   if t == 1:  sqrt(a) = a^{(q+1)/4}
-     *   if t == -1: sqrt(a) = a^{(q+1)/4} * u^{(q-1)/2} = a^{(q+1)/4} * (-1)^{...}
-     * Actually this doesn't work either. */
-
-    /* PRACTICAL APPROACH: for VK loading, the points are stored in the verifying
-     * key file uncompressed (x AND y). We only need decompression for proof
-     * points. Let me implement bn_g2_from_uncompressed instead and handle
-     * proof deserialization accordingly. For compressed G2 in PHGR13 proofs,
-     * we need Fq2 sqrt. Let me implement it properly. */
-
-    /* Tonnelli-Shanks for Fq2 using the norm map */
-    struct bn_fq norm;
-    struct bn_fq a0sq, a1sq;
-    bn_fq_sq(&a0sq, &x3.c0);
-    bn_fq_sq(&a1sq, &x3.c1);
-    bn_fq_add(&norm, &a0sq, &a1sq);
-
-    /* Check if norm is QR in Fq */
-    /* norm^{(q-1)/2} should be 1 for QR */
-
-    /* For Fq2 sqrt when q ≡ 3 mod 4:
-     * Compute gamma = x3^{(q-1)/2} in Fq2
-     * If gamma.c1 == 0 and gamma.c0 == 1: sqrt = x3^{(q+1)/4}
-     * If gamma.c1 == 0 and gamma.c0 == -1: no sqrt exists
-     * Otherwise: need more complex algorithm */
-
-    /* Since this is getting very involved and the VK file stores points
-     * uncompressed for the IC query, let me implement a simpler approach
-     * for G2 decompression that works for the proof format: */
-
-    /* BN-254 PHGR13 G2 compressed: just like G1 but in Fq2.
-     * We need Fq2 sqrt. Use: for q ≡ 3 mod 4,
-     * sqrt in Fq2 of (a0 + a1*u):
-     *   If a1 == 0: sqrt(a0) in Fq (straightforward since q ≡ 3 mod 4)
-     *   If a1 != 0:
-     *     d = sqrt(a0^2 + a1^2) in Fq (norm must be QR)
-     *     x0 = sqrt((a0 + d) / 2) or sqrt((a0 - d) / 2)
-     *     x1 = a1 / (2 * x0)
-     *     return x0 + x1 * u
-     */
-
-    struct bn_fq d;
-    if (!bn_fq_sqrt(&d, &norm)) {
-        /* Try negating */
-        bn_fq_neg(&d, &norm);
-        if (!bn_fq_sqrt(&d, &d))
-            return false;
+/* Square root of a0 in Fq viewed inside Fq2. Every element of Fq is a square
+ * in Fq2: either a0 is a square in Fq, or -a0 is (q = 3 mod 4, so -1 is a
+ * non-square) and the root is t*u with t^2 = -a0. */
+static bool bn_fq2_sqrt_of_fq(struct bn_fq2 *r, const struct bn_fq *a0)
+{
+    struct bn_fq t, neg;
+    if (bn_fq_sqrt(&t, a0)) {
+        r->c0 = t;
+        bn_fq_zero(&r->c1);
+        return true;
     }
+    bn_fq_neg(&neg, a0);
+    if (!bn_fq_sqrt(&t, &neg))
+        return false; /* unreachable: one of a0, -a0 is a square */
+    bn_fq_zero(&r->c0);
+    r->c1 = t;
+    return true;
+}
 
-    /* Try (a0 + d) / 2 */
-    struct bn_fq half, sum, y0;
+/* Square root in Fq2 = Fq[u]/(u^2+1). Returns false iff a is not a square,
+ * which is exactly when libsnark's Fp2_model::sqrt fails its Euler check
+ * (fp2.tcc:146-170, used by zclassicd Proof.cpp:152). Which of the two roots
+ * comes back is unspecified: bn_g2_decompress fixes the sign afterwards.
+ *
+ * a = a0 + a1*u with a1 != 0 is a square iff its norm a0^2 + a1^2 is a square
+ * d^2 in Fq; then exactly one of (a0 + d)/2, (a0 - d)/2 is a square y0^2 and
+ * the root is y0 + (a1 / (2*y0))*u. The a1 == 0 case needs its own branch:
+ * there d = +/-a0, so for a non-square a0 the first candidate is 0, y0 = 0 and
+ * the general formula would return 0 instead of the root t*u. */
+bool bn_fq2_sqrt(struct bn_fq2 *r, const struct bn_fq2 *a)
+{
+    const struct bn_fq2 in = *a; /* r may alias a */
+    if (bn_fq_is_zero(&in.c1))
+        return bn_fq2_sqrt_of_fq(r, &in.c0);
+
+    struct bn_fq norm, d, half, s, y0, den;
+    bn_fq2_norm(&norm, &in);
+    if (!bn_fq_sqrt(&d, &norm))
+        return false;
     bn_fq_from_u64(&half, 2);
     bn_fq_inv(&half, &half);
-
-    bn_fq_add(&sum, &x3.c0, &d);
-    bn_fq_mul(&sum, &sum, &half);
-
-    if (bn_fq_sqrt(&y0, &sum)) {
-        struct bn_fq two_y0, y1;
-        bn_fq_add(&two_y0, &y0, &y0);
-        bn_fq_inv(&two_y0, &two_y0);
-        bn_fq_mul(&y1, &x3.c1, &two_y0);
-        p->y.c0 = y0;
-        p->y.c1 = y1;
-    } else {
-        /* Try (a0 - d) / 2 */
-        bn_fq_sub(&sum, &x3.c0, &d);
-        bn_fq_mul(&sum, &sum, &half);
-        if (!bn_fq_sqrt(&y0, &sum))
+    bn_fq_add(&s, &in.c0, &d);
+    bn_fq_mul(&s, &s, &half);
+    if (!bn_fq_sqrt(&y0, &s)) {
+        bn_fq_sub(&s, &in.c0, &d);
+        bn_fq_mul(&s, &s, &half);
+        if (!bn_fq_sqrt(&y0, &s))
             return false;
-        struct bn_fq two_y0, y1;
-        bn_fq_add(&two_y0, &y0, &y0);
-        bn_fq_inv(&two_y0, &two_y0);
-        bn_fq_mul(&y1, &x3.c1, &two_y0);
-        p->y.c0 = y0;
-        p->y.c1 = y1;
     }
+    if (bn_fq_is_zero(&y0))
+        return false; /* unreachable when a1 != 0; kept fail-closed */
+    bn_fq_add(&den, &y0, &y0);
+    bn_fq_inv(&den, &den);
+    r->c0 = y0;
+    bn_fq_mul(&r->c1, &in.c1, &den);
 
-    /* Verify y^2 == x^3 + b_twist */
-    struct bn_fq2 y2;
-    bn_fq2_sq(&y2, &p->y);
-    if (!bn_fq2_eq(&y2, &x3))
+    struct bn_fq2 chk;
+    bn_fq2_sq(&chk, r);
+    return bn_fq2_eq(&chk, &in);
+}
+
+/* Compare two Fq2 elements as FE2IP integers c1*q + c0 (Proof.cpp:25-34):
+ * c1 first, then c0, each as a canonical integer. */
+static int bn_fq2_fe2ip_cmp(const struct bn_fq2 *a, const struct bn_fq2 *b)
+{
+    uint8_t x[32], y[32];
+    bn_fq_to_bytes_be(x, &a->c1);
+    bn_fq_to_bytes_be(y, &b->c1);
+    int c = memcmp(x, y, 32);
+    if (c != 0)
+        return c;
+    bn_fq_to_bytes_be(x, &a->c0);
+    bn_fq_to_bytes_be(y, &b->c0);
+    return memcmp(x, y, 32);
+}
+
+/* r, the prime order of G1 and G2 (alt_bn128_modulus_r), little-endian limbs. */
+static const uint64_t BN_R[4] = {
+    0x43e1f593f0000001ULL, 0x2833e84879b97091ULL,
+    0xb85045b68181585dULL, 0x30644e72e131a029ULL
+};
+
+/* True iff r*P is the identity: the same test as zclassicd Proof.cpp:166
+ * ("point is not in G2"). The twist curve has order r * (2q - r), so a point
+ * that merely satisfies the curve equation is almost never in the order-r
+ * subgroup the pairing is defined on. One 254-bit double-and-add per proof
+ * (only g_B is a G2 element); zclassicd pays the same multiplication. */
+static bool bn_g2_in_subgroup(const struct bn_g2 *p)
+{
+    struct bn_g2 acc;
+    bn_g2_identity(&acc);
+    for (int i = 3; i >= 0; i--) {
+        for (int bit = 63; bit >= 0; bit--) {
+            bn_g2_double(&acc, &acc);
+            if ((BN_R[i] >> bit) & 1)
+                bn_g2_add(&acc, &acc, p);
+        }
+    }
+    return bn_g2_is_identity(&acc);
+}
+
+/* Decode a CompressedG2 exactly as zclassicd does (Proof.hpp:147-161,
+ * Proof.cpp:147-171). Reject unless ALL of:
+ *   - the lead byte is 0x0a or 0x0b (bit 0 is the y_gt flag). There is no
+ *     encoding of the point at infinity;
+ *   - the 64-byte FE2IP integer is below q^2;
+ *   - x^3 + b' is a square in Fq2;
+ *   - the point is in the order-r subgroup.
+ * y is the root whose FE2IP integer is the larger of (y, -y) iff y_gt. */
+bool bn_g2_decompress(struct bn_g2 *p, const uint8_t data[65])
+{
+    if ((data[0] & 0xFE) != 0x0a)
+        return false;
+    bool y_gt = (data[0] & 0x01) != 0;
+
+    if (!fq2_decode_fe2ip(&p->x.c0, &p->x.c1, data + 1))
         return false;
 
-    /* Check sign convention: libsnark uses y_gt flag based on comparison */
-    /* The y_gt bit means "y > -y" in lexicographic Fq2 ordering */
-    uint8_t y1_buf[32];
-    bn_fq_to_bytes_be(y1_buf, &p->y.c1);
-    bool computed_gt;
-    if (!bn_fq_is_zero(&p->y.c1)) {
-        /* Compare c1 with q-c1 */
-        struct bn_fq neg_c1;
-        bn_fq_neg(&neg_c1, &p->y.c1);
-        uint8_t neg_buf[32];
-        bn_fq_to_bytes_be(neg_buf, &neg_c1);
-        computed_gt = (memcmp(y1_buf, neg_buf, 32) > 0);
-    } else {
-        uint8_t y0_buf[32];
-        bn_fq_to_bytes_be(y0_buf, &p->y.c0);
-        struct bn_fq neg_c0;
-        bn_fq_neg(&neg_c0, &p->y.c0);
-        uint8_t neg_buf[32];
-        bn_fq_to_bytes_be(neg_buf, &neg_c0);
-        computed_gt = (memcmp(y0_buf, neg_buf, 32) > 0);
-    }
+    /* y^2 = x^3 + b_twist */
+    struct bn_fq2 rhs, b_twist, y, neg_y;
+    bn_fq2_sq(&rhs, &p->x);
+    bn_fq2_mul(&rhs, &rhs, &p->x);
+    bn_g2_twist_b(&b_twist);
+    bn_fq2_add(&rhs, &rhs, &b_twist);
 
-    if (computed_gt != y_gt)
-        bn_fq2_neg(&p->y, &p->y);
+    if (!bn_fq2_sqrt(&y, &rhs))
+        return false;
+    bn_fq2_neg(&neg_y, &y);
+    if ((bn_fq2_fe2ip_cmp(&y, &neg_y) > 0) != y_gt)
+        y = neg_y;
 
+    p->y = y;
     bn_fq2_one(&p->z);
-    return true;
+    return bn_g2_in_subgroup(p);
 }
 
 /* ══════════════════════════════════════════════════════════════

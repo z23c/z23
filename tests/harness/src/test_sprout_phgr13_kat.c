@@ -167,6 +167,58 @@ static int kat_check_verify_mutations(const struct kat_fixture *f)
     return failures;
 }
 
+/* zclassicd refuses each of these re-encodings of the SAME valid proof at
+ * deserialization (src/zcash/Proof.hpp:105,155 and Proof.cpp:92-93); bn254.c
+ * used to verify all of them, which made a mined proof malleable and the
+ * accept sets different. Point-level coverage: test_bn254_phgr13_parity.c. */
+static int kat_check_zclassicd_encoding_parity(const struct kat_fixture *f)
+{
+    int failures = 0;
+    /* A, A', B (G2), B', C, C', K, H: PHGRProof order, Proof.hpp:208-215. */
+    static const size_t lead_off[8] = { 0, 33, 66, 131, 164, 197, 230, 263 };
+    static const uint8_t q_be[32] = {
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29,
+        0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+        0x97, 0x81, 0x6a, 0x91, 0x68, 0x71, 0xca, 0x8d,
+        0x3c, 0x20, 0x8c, 0x16, 0xd8, 0x7c, 0xfd, 0x47
+    };
+    uint8_t bad[296];
+
+    int accepted = 0;
+    for (size_t e = 0; e < 8; e++) {
+        for (unsigned bit = 2; bit < 8; bit++) {
+            /* Flip one of bits 0x04..0x80 of a lead byte. Only bit 0 (the y
+             * flag) may vary, so no result is 0x02/0x03 or 0x0a/0x0b. */
+            memcpy(bad, f->proof, sizeof(bad));
+            bad[lead_off[e]] ^= (uint8_t)(1u << bit);
+            if (sprout_verify_phgr13(bad, f->anchor, f->hsig, f->mac1, f->mac2,
+                                     f->nf1, f->nf2, f->cm1, f->cm2,
+                                     k_vpub_old, k_vpub_new))
+                accepted++;
+        }
+    }
+    printf("stray lead-byte bits on any proof element reject "
+           "(%d of 48 accepted)... ", accepted);
+    if (accepted == 0) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+
+    /* g_B's x is a 512-bit FE2IP integer X = c1*q + c0 at bytes 67..130.
+     * X + 2^256*q is a different byte string that decoded to the same point
+     * once the quotient was truncated to 256 bits. */
+    memcpy(bad, f->proof, sizeof(bad));
+    unsigned carry = 0;
+    for (int i = 31; i >= 0; i--) {
+        unsigned s = (unsigned)bad[67 + i] + q_be[i] + carry;
+        bad[67 + i] = (uint8_t)s;
+        carry = s >> 8;
+    }
+    KAT_CHECK("g_B re-encoded as X + 2^256*q rejects",
+              carry == 0 &&
+              !sprout_verify_phgr13(bad, f->anchor, f->hsig, f->mac1, f->mac2,
+                                    f->nf1, f->nf2, f->cm1, f->cm2,
+                                    k_vpub_old, k_vpub_new));
+    return failures;
+}
+
 static int kat_check_canonical_identity(struct transaction *tx,
                                         struct byte_stream *stream)
 {
@@ -282,6 +334,7 @@ int test_sprout_phgr13_kat(void)
 
     sprout_phgr_set_vk(&fixture_vk);
     failures += kat_check_verify_mutations(&fx);
+    failures += kat_check_zclassicd_encoding_parity(&fx);
     failures += kat_check_canonical_tx(&fx, &fixture_vk);
 
     printf("Sprout PHGR13 real-proof KAT: %s (%d failures)\n",

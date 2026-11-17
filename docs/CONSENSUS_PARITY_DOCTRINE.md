@@ -285,6 +285,43 @@ not in the copy (the oracle was 13 blocks ahead). This is a decoder-level scan
 of every real proof, not a full-history node replay
 (`make replay-canary-genesis`).
 
+## PHGR13 proof decode tightening (history evidence)
+
+`core/modules/sapling/src/bn254.c` decodes the eight points of a Sprout PHGR13
+(BCTV14) JoinSplit proof as the Proof.hpp and Proof.cpp of zclassicd (src/zcash)
+do on top of libsnark. It refuses encodings Z23 used to accept: a G1 or G2
+lead byte other than `0x02`/`0x03` and `0x0a`/`0x0b` (including the lead bit
+`0x04` with x = 0 that Z23 read as the point at infinity; zclassicd has no such
+encoding), a coordinate equal to q, a G2 FE2IP integer at or above q^2 (the
+quotient was truncated to 256 bits, so X + 2^256*q decoded like X: a second
+byte string for the same valid proof), and a G2 point outside the order-r
+subgroup. In the other direction, the Fq2 square root now returns the root
+`t*u` when x^3 + b' is a non-residue of Fq. Reaching that case through the
+verifier needs a subgroup point of that shape; none is known and finding one
+is a search of about 2^254, so it is pinned at the field level only.
+
+Method (2026-11-17, read-only): a differential harness linked
+the Proof.cpp of zclassicd and libsnark (portable build, no `-DUSE_ASM` in the
+verifier translation units) beside this file's `sprout_verify_phgr13`,
+`bn_g1_decompress` and `bn_g2_decompress`, and compared verdicts case by case
+over the append-only zclassicd `blk*.dat` copy (52 files). No datadir, node or
+service was touched.
+
+| Item | Value |
+|---|---|
+| Blocks parsed (incl. forks) | 3,343,579, 0 parse failures |
+| PHGR13 JoinSplits found / distinct | 433,209 / 432,407 |
+| Distinct mainnet proofs accepted by zclassicd | 432,407 |
+| Of those refused by the fixed Z23 | 0 |
+| Mutation and point-level cases (125 classes) | 51,390 |
+| Total cases / Z23 verdicts differing from zclassicd | 483,797 / 0 |
+| Same harness on the code before the fix | 9,849 differing, all Z23 accepting what zclassicd rejects |
+
+`tests/harness/src/test_bn254_phgr13_parity.c` pins each rule at the point
+level and `tests/harness/src/test_sprout_phgr13_kat.c` on the real height-241 proof. This is a
+verifier-level comparison of every real proof, not a full-history node replay
+(`make replay-canary-genesis`).
+
 ## Parity guards on the connect path
 
 `contextual_check_block()` must stay wired into the connect path: context-free
