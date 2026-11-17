@@ -34,20 +34,38 @@
 
 /* ── mkdir -p ───────────────────────────────────────────────────────── */
 
+static int wcs_mkdir_one(const char *path)
+{
+    if (mkdir(path, 0755) == 0) return 0;
+    if (errno != EEXIST) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (S_ISDIR(st.st_mode)) return 0;
+    errno = ENOTDIR;
+    return -1;
+}
+
 int wcs_mkdirs_p(const char *path)
 {
     char tmp[WCS_PATH];
     size_t n = strlen(path);
     if (n >= sizeof tmp) return -1;
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return 0;
+        errno = ENOTDIR;
+        return -1;
+    }
+    if (errno != ENOENT) return -1;
     memcpy(tmp, path, n + 1);
     for (size_t i = 1; i < n; i++) {
         if (tmp[i] == '/') {
             tmp[i] = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+            if (wcs_mkdir_one(tmp) != 0) return -1;
             tmp[i] = '/';
         }
     }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+    if (wcs_mkdir_one(tmp) != 0) return -1;
     return 0;
 }
 

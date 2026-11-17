@@ -54,6 +54,35 @@ static int sh_fail(const char *msg)
     return 1;
 }
 
+/* Exercise the real cache directory helper on existing and colliding paths. */
+int wcs_mkdir_selftest(const char *base)
+{
+    char root[SH_P], dir[SH_P], file[SH_P], link[SH_P], child[SH_P];
+    shp(root, sizeof root, "%s/mkdir-scope", base);
+    shp(dir, sizeof dir, "%s/a/b", root);
+    shp(file, sizeof file, "%s/file", root);
+    shp(link, sizeof link, "%s/link", root);
+    shp(child, sizeof child, "%s/link/child", root);
+    if (wcs_mkdirs_p(dir) != 0 || wcs_mkdirs_p(dir) != 0 ||
+        csr_write(file, "fixture") != 0 || symlink("a", link) != 0 ||
+        wcs_mkdirs_p(link) != 0 || wcs_mkdirs_p(child) != 0)
+        return sh_fail("mkdir directory creation or symlink traversal");
+    if (wcs_mkdirs_p(file) == 0)
+        return sh_fail("mkdir accepted an existing regular file");
+    shp(link, sizeof link, "%s/file-link", root);
+    if (symlink("file", link) != 0 || wcs_mkdirs_p(link) == 0)
+        return sh_fail("mkdir accepted a symlink to a regular file");
+    char longpath[WCS_PATH + 1];
+    memset(longpath, 'x', sizeof longpath - 1);
+    longpath[sizeof longpath - 1] = 0;
+    if (wcs_mkdirs_p(longpath) == 0)
+        return sh_fail("mkdir accepted an overlong path");
+    shp(child, sizeof child, "%s/file/child", root);
+    if (wcs_mkdirs_p(child) == 0)
+        return sh_fail("mkdir accepted a regular-file ancestor");
+    return 0;
+}
+
 /* One tree: src/shared.h plus SH_UNITS units that include it. */
 static int sh_producers(const char *tree)
 {

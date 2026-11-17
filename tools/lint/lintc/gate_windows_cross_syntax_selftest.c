@@ -726,6 +726,7 @@ static int fake_classifier_probes(void)
 
 int wcs_selftest_phase(void)
 {
+    if (wcs_mkdir_selftest(g_wcs_work) != 0) return 1;
     static char violating[SFP], clean[SFP], compat[SFP];
     static char *argv[WCS_ARGS];
     struct stat st;
