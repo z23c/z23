@@ -21,6 +21,7 @@
 #include "util/path_util.h"
 #include "util/write_all.h"
 #include "vcs/package_manifest.h"
+#include "vcs/package_prepare.h"
 #include "vcs/package_store.h"
 
 #include <dirent.h>
@@ -356,38 +357,50 @@ static bool pr_inputs(struct pr_ctx *c, struct zcl_command_reply *reply)
     return true;
 }
 
+static bool pr_file_hash(int fd, uint64_t size, uint8_t **hashes, uint32_t *chunks)
+{
+    *hashes = NULL;
+    *chunks = size ? (uint32_t)(1u + (size - 1u) / VCS_PACKAGE_CHUNK_BYTES) : 0;
+    if (*chunks == 0)
+        return true;
+    size_t buf_size = size < VCS_PACKAGE_CHUNK_BYTES ? (size_t)size : VCS_PACKAGE_CHUNK_BYTES;
+    *hashes = zcl_malloc((size_t)*chunks * 32u, "plugin.reproduce.hashes");
+    uint8_t *buf = zcl_malloc(buf_size, "plugin.reproduce.chunk");
+    bool ok = *hashes && buf &&
+              vcs_package_prepare_hash_chunks(fd, size, *chunks, *hashes, buf, NULL);
+    free(buf);
+    return ok;
+}
+
+
 static bool pr_manifest_add_file(const struct pr_ctx *c,
                                  struct vcs_package_manifest *manifest,
                                  const char *leaf)
 {
     char path[PR_PATH_MAX];
-    struct stat st;
-    if (!zcl_path_join(path, sizeof(path), c->dir, leaf) ||
-        lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
+    struct stat before, after;
+    if (!zcl_path_join(path, sizeof(path), c->dir, leaf))
         return false;
-    uint8_t *bytes = NULL;
-    size_t len = 0;
-    bool ok = zcl_read_whole_file(path, 64u * 1024u * 1024u, &bytes, &len,
-                                  "plugin.reproduce.root");
-    uint32_t chunks = (uint32_t)((len + VCS_PACKAGE_CHUNK_BYTES - 1) /
-                                 VCS_PACKAGE_CHUNK_BYTES);
-    uint8_t *hashes = chunks ? zcl_calloc(chunks, 32, "plugin.reproduce.hashes")
-                             : NULL;
-    ok = ok && (chunks == 0 || hashes != NULL);
-    for (uint32_t i = 0; ok && i < chunks; i++) {
-        size_t off = (size_t)i * VCS_PACKAGE_CHUNK_BYTES;
-        size_t cl = len - off;
-        if (cl > VCS_PACKAGE_CHUNK_BYTES)
-            cl = VCS_PACKAGE_CHUNK_BYTES;
-        ok = vcs_package_chunk_hash(bytes + off, cl, hashes + (size_t)i * 32);
-    }
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        return false;
+    bool ok = fstat(fd, &before) == 0 && S_ISREG(before.st_mode) &&
+              before.st_size >= 0 && (uint64_t)before.st_size <= 64u * 1024u * 1024u;
+    uint64_t size = ok ? (uint64_t)before.st_size : 0;
+    uint32_t chunks = 0;
+    uint8_t *hashes = NULL;
+    ok = ok && pr_file_hash(fd, size, &hashes, &chunks) &&
+         fstat(fd, &after) == 0 && after.st_size == before.st_size &&
+         after.st_mtime == before.st_mtime;
+    if (close(fd) != 0)
+        ok = false;
     uint32_t mode = strcmp(leaf, c->manifest.name) == 0
                         ? VCS_PACKAGE_MODE_EXECUTABLE : VCS_PACKAGE_MODE_FILE;
-    ok = ok && vcs_package_manifest_add(manifest, leaf, mode, len, hashes, chunks);
+    ok = ok && vcs_package_manifest_add(manifest, leaf, mode, size, hashes, chunks);
     free(hashes);
-    free(bytes);
     return ok;
 }
+
 
 static bool pr_root_matches(struct pr_ctx *c, struct zcl_command_reply *reply)
 {

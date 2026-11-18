@@ -119,25 +119,42 @@ static bool prepare_regular_alloc(struct prepare_walk *walk, const char *path,
     return true;
 }
 
+bool vcs_package_prepare_hash_chunks(int fd, uint64_t size, uint32_t chunk_count,
+                                     uint8_t *hashes, uint8_t *scratch,
+                                     uint32_t *failed_chunk)
+{
+    if (failed_chunk) *failed_chunk = 0;
+    if (fd < 0 || size > VCS_PACKAGE_MAX_FILE_BYTES)
+        return false;
+    uint32_t expected = size ? (uint32_t)(1u + (size - 1u) / VCS_PACKAGE_CHUNK_BYTES) : 0;
+    if (chunk_count != expected || (chunk_count && (!hashes || !scratch)))
+        return false;
+    uint64_t left = size;
+    for (uint32_t i = 0; i < chunk_count; i++) {
+        size_t want = left > VCS_PACKAGE_CHUNK_BYTES ? VCS_PACKAGE_CHUNK_BYTES : (size_t)left;
+        if (!prepare_read_exact(fd, scratch, want) ||
+            !vcs_package_chunk_hash(scratch, want, hashes + (size_t)i * 32u)) {
+            if (failed_chunk) *failed_chunk = i;
+            return false;
+        }
+        left -= want;
+    }
+    return true;
+}
+
+
 /* Reads and digests the file in bounded chunks, in order. */
 static bool prepare_regular_hash(struct prepare_walk *walk, int fd,
                                  const char *path, uint64_t size,
                                  uint32_t chunks, uint8_t *hashes,
                                  uint8_t *buf)
 {
-    uint64_t left = size;
-    for (uint32_t i = 0; i < chunks; i++) {
-        size_t want = left > VCS_PACKAGE_CHUNK_BYTES
-            ? VCS_PACKAGE_CHUNK_BYTES : (size_t)left;
-        if (!prepare_read_exact(fd, buf, want) ||
-            !vcs_package_chunk_hash(buf, want, hashes + (size_t)i * 32u)) {
-            walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
-            prepare_detail(walk, "%s: read chunk %u", path, i);
-            return false;
-        }
-        left -= want;
-    }
-    return true;
+    uint32_t failed = 0;
+    if (vcs_package_prepare_hash_chunks(fd, size, chunks, hashes, buf, &failed))
+        return true;
+    walk->error = VCS_PACKAGE_PREPARE_ERR_IO;
+    prepare_detail(walk, "%s: read chunk %u", path, failed);
+    return false;
 }
 
 static bool prepare_recipe_file(struct prepare_walk *walk, const char *path)

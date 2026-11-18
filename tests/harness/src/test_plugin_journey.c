@@ -63,6 +63,7 @@
 #include "sha3/sha3.h"
 #include "util/file_io.h"
 #include "vcs/package_public_shape.h"
+#include "vcs/package_prepare.h"
 #include "vcs/package_service.h"
 #include "vcs/package_store.h"
 #include "vcs/package_swarm_node.h"
@@ -1519,6 +1520,70 @@ static bool pj_generation_refusal(const char *dir, const char *root,
  * bit-identical to the signed manifest's sha3_512 — before install is even
  * possible. Authority is unchanged: only the receiving owner's pin lets the
  * reproduced plugin activate. */
+/* Create an inert multichunk package member without a whole-file buffer. */
+static bool pj_chunk_file(const char *dir, const char *name, size_t length)
+{
+    char path[1600];
+    unsigned char bytes[8192];
+    memset(bytes, 0x5a, sizeof(bytes));
+    if (!pj_join(path, sizeof(path), dir, name))
+        return false;
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = true;
+    while (length && ok) {
+        size_t n = length < sizeof(bytes) ? length : sizeof(bytes);
+        ok = fwrite(bytes, 1, n, f) == n;
+        length -= n;
+    }
+    return fclose(f) == 0 && ok;
+}
+
+
+static int pj_t_chunk_reader(void)
+{
+    int failures = 0;
+    FILE *f = NULL;
+    uint8_t *buffer = NULL;
+    TEST("package chunk reader handles empty, boundary, partial and short files") {
+        uint8_t hashes[64], expected[64];
+        uint32_t failed = 99;
+        f = tmpfile();
+        ASSERT(f != NULL);
+        int fd = fileno(f);
+        ASSERT(vcs_package_prepare_hash_chunks(fd, 0, 0, NULL, NULL, &failed));
+        buffer = malloc(VCS_PACKAGE_CHUNK_BYTES);
+        ASSERT(buffer != NULL);
+        memset(buffer, 0x5a, VCS_PACKAGE_CHUNK_BYTES);
+        ASSERT(vcs_package_chunk_hash(buffer, VCS_PACKAGE_CHUNK_BYTES, expected));
+        ASSERT(vcs_package_chunk_hash(buffer, 17, expected + 32));
+        ASSERT_EQ(fwrite(buffer, 1, VCS_PACKAGE_CHUNK_BYTES, f), VCS_PACKAGE_CHUNK_BYTES);
+        ASSERT_EQ(fwrite(buffer, 1, 17, f), 17);
+        ASSERT_EQ(fflush(f), 0);
+        ASSERT_EQ(lseek(fd, 0, SEEK_SET), 0);
+        ASSERT(vcs_package_prepare_hash_chunks(fd, VCS_PACKAGE_CHUNK_BYTES, 1,
+                                               hashes, buffer, &failed));
+        ASSERT(memcmp(hashes, expected, 32) == 0);
+        ASSERT_EQ(lseek(fd, 0, SEEK_SET), 0);
+        ASSERT(vcs_package_prepare_hash_chunks(fd, VCS_PACKAGE_CHUNK_BYTES + 17u, 2,
+                                               hashes, buffer, &failed));
+        ASSERT(memcmp(hashes, expected, sizeof(expected)) == 0);
+        ASSERT_EQ(lseek(fd, 0, SEEK_SET), 0);
+        ASSERT(!vcs_package_prepare_hash_chunks(fd, VCS_PACKAGE_CHUNK_BYTES + 18u, 2,
+                                                hashes, buffer, &failed));
+        ASSERT_EQ(failed, 1u);
+        ASSERT(!vcs_package_prepare_hash_chunks(fd, 1, 0, NULL, NULL, &failed));
+        ASSERT(!vcs_package_prepare_hash_chunks(fd, VCS_PACKAGE_MAX_FILE_BYTES + 1u,
+                                                0, NULL, NULL, &failed));
+        PASS();
+    } _test_next:;
+    free(buffer);
+    if (f) fclose(f);
+    return failures;
+}
+
+
 static int pj_t_reproduce(void)
 {
     int failures = 0;
@@ -1529,6 +1594,7 @@ static int pj_t_reproduce(void)
         char root1[65], dir1[1400], manifest[1600], gen1[129];
         ASSERT(ready);
         ASSERT(pj_promote_source(&f, "alias-upper.c", false));
+        ASSERT(pj_chunk_file(f.dist, "partial.bin", VCS_PACKAGE_CHUNK_BYTES + 17u));
         /* The opt-in promote exported the exact source and cases. */
         ASSERT(pj_publish(&f, root1));
         uint8_t root_bin[32];
@@ -1567,7 +1633,11 @@ static int pj_t_reproduce(void)
         ASSERT(pj_join(rkey, sizeof(rkey), f.base, "receiver.key"));
         ASSERT(pj_keygen_to(rkey, rpub_self));
         ASSERT(pj_join(rdist, sizeof(rdist), f.base, "repro-dist"));
-        ASSERT(pj_reproduce(dir1, root1, rkey, rdist, rsha, rpub));
+        zcl_alloc_fault_fail_next("zcl_read_whole_file");
+        bool reproduced = pj_reproduce(dir1, root1, rkey, rdist, rsha, rpub);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(reproduced && armed);
         ASSERT_STR_EQ(rsha, got_sha);
         ASSERT_STR_EQ(rpub, rpub_self);
         ASSERT(strcmp(rpub, f.pub_hex) != 0);
@@ -2642,6 +2712,7 @@ int test_plugin_journey(void)
     failures += pj_t_uninstall();
 #if defined(__linux__)
     failures += pj_t_source_to_peer();
+    failures += pj_t_chunk_reader();
     failures += pj_t_reproduce();
     failures += pj_t_reproduce_file_name();
     failures += pj_t_resident();

@@ -65,6 +65,14 @@ const char *vcs_package_prepare_error_string(
 void vcs_package_prepared_init(struct vcs_package_prepared *prepared);
 void vcs_package_prepared_free(struct vcs_package_prepared *prepared);
 
+/* Hash exactly size bytes from the current fd position in canonical chunks.
+ * Caller supplies chunk_count * 32 bytes and a scratch buffer of at least
+ * min(size, VCS_PACKAGE_CHUNK_BYTES) bytes. Empty input needs neither buffer.
+ * Caller owns descriptor and validates file identity before and after. */
+bool vcs_package_prepare_hash_chunks(int fd, uint64_t size, uint32_t chunk_count,
+                                     uint8_t *hashes, uint8_t *scratch,
+                                     uint32_t *failed_chunk);
+
 /* Opens the supplied directory without following symlinks, rejects every
  * non-regular/non-directory entry and any file that changes while read, then
  * derives all canonical wires. Root-level `.zvcs`, `.codeindex`, and `build`
