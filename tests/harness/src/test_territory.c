@@ -35,6 +35,7 @@
  * All scratch work happens under ./test-tmp/ (project no-/tmp convention). */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 
 #include "codeindex/codeindex.h"
 #include "territory/territory.h"
@@ -310,6 +311,43 @@ static void corrupt_memo_byte(FILE *f, long at)
 static int clamp_negative_count(int n)
 {
     return n < 0 ? 0 : n;
+}
+
+static int test_rollup_without_group_catalog(struct codeindex *ci,
+    const struct territory_reach_set *rs, const struct territory_router *router,
+    const struct territory_rollup *normal)
+{
+    int failures = 0;
+    struct territory_rollup *fault = NULL;
+    struct territory_report *named = NULL;
+    TEST("rollup: no group metadata allocation; named scorecards retain it") {
+        ASSERT(normal && normal->failed == 0);
+        zcl_alloc_fault_fail_next("ts_groups");
+        fault = territory_rollup_build(ci, NULL, rs, router);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(armed);
+        ASSERT(fault && fault->failed == 0);
+        ASSERT_EQ(fault->count, normal->count);
+        ASSERT_EQ(fault->total_files, normal->total_files);
+        ASSERT_EQ(fault->total_public, normal->total_public);
+        for (int i = 0; i < normal->count; i++) {
+            ASSERT_STR_EQ(fault->ranks[i].name, normal->ranks[i].name);
+            ASSERT_EQ(fault->ranks[i].unproven, normal->ranks[i].unproven);
+            ASSERT_EQ(fault->ranks[i].files, normal->ranks[i].files);
+        }
+        zcl_alloc_fault_fail_next("ts_groups");
+        named = territory_scorecard(ci, NULL, "platform/modules/base", rs, router);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(named == NULL);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    territory_report_free(named);
+    territory_rollup_free(fault);
+    return failures;
 }
 
 int test_territory(void);
@@ -712,6 +750,7 @@ int test_territory(void)
         ASSERT_EQ(u->total_unknown, unknown);
         ASSERT_EQ(u->total_public, reached + unreached + unknown);
         ASSERT_EQ(u->from_cache, false);   /* root=NULL: no memo at all */
+        failures += test_rollup_without_group_catalog(ci, rs, &frouter, u);
         territory_rollup_free(u);
         PASS();
     }

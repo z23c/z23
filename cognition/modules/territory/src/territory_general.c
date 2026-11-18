@@ -33,6 +33,7 @@
  */
 
 #include "territory/territory.h"
+#include "territory_internal.h"
 
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
@@ -1013,7 +1014,7 @@ struct territory_rollup *territory_rollup_build(
 
     for (int i = 0; i < n; i++) {
         struct territory_report *r =
-            territory_scorecard(ci, root, names[i], rs, router);
+            territory_scorecard_rollup(ci, root, names[i], rs, router);
         if (!r) { out->failed++; continue; }
         struct territory_rank *k = &out->ranks[out->scored++];
         (void)snprintf(k->name, sizeof(k->name), "%s", r->name);
