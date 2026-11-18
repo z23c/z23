@@ -2036,6 +2036,10 @@ static bool tc_external_exec_denied(void)
         "onion_pair_watch_live",
         "test_p2_invariant_check",
         "p2_invariant_check",
+        "test_sem_replay",
+        "sem_replay",
+        "test_mutation_harness",
+        "mutation_harness",
         "test_jsonq",
         "jsonq",
         "test_resident_launch_contract",
@@ -2233,7 +2237,8 @@ static int tc_rail_pin_refused(struct testcache *tc)
         "test_codeindex_incremental", /* popen()s two tools/ scripts */
         "test_dev_proof_signer", /* rail: self re-exec of the test image */
         "test_p2_invariant_check", /* zcl_spawn_* exec of the checker: denylist */
-        "test_sem_replay",       /* rail: execs make (the delegated tool build) */
+        "test_sem_replay",       /* denylist: zcl_spawn of make; fixture execvp( is source text */
+        "test_mutation_harness", /* denylist: zcl_mut_spawn of the compiler; fixture execvp( */
         "test_test_group_selector", /* popen() re-execs the test image */
         "test_verify_receiver",  /* execve()s argv[0]: the test image */
         "test_zcode_swarm_net",  /* shard workers self re-exec the test image */

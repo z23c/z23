@@ -927,7 +927,7 @@ static const char *const k_ar_exact[] = {
     "-g0", "-g1", "-g2", "-g3", "-ggdb", "-gdwarf-4", "-gdwarf-5",
     "-gno-record-gcc-switches", "-grecord-gcc-switches", "-O", "-O0", "-O1",
     "-O2", "-O3", "-Os", "-Og", "-Oz", "-mno-red-zone",
-    "-ffp-contract=off", "-pthread",
+    "-ffp-contract=off", "-pthread", "-fblocks",
 };
 
 /* Joined-value families whose value names no file (bound by value: a
@@ -937,7 +937,7 @@ static const char *const k_ar_joined[] = {
     "-fmacro-prefix-map=", "-fvisibility=", "-fcf-protection=",
     "-ftrivial-auto-var-init=", "-fzero-call-used-regs=",
     "-fdiagnostics-color", "-fno-diagnostics-color", "-march=", "-mcpu=",
-    "-mtune=", "-frandom-seed=",
+    "-mtune=", "-frandom-seed=", "-mmacosx-version-min=",
 };
 
 /* -Wl, items: none names a file the root does not bind. */

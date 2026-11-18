@@ -360,6 +360,21 @@ static int hs_link(const char *existing, const char *linkpath)
 #endif
 }
 
+/* flags.env stores Make's flag text. A recipe passes that text through a
+ * shell, which turns \" into ". Undo one escape level once, into the plan
+ * the compiler argv, the action root and the cache key all bind. */
+static void hs_shell_unescape(char *text)
+{
+    char *write = text;
+    for (char *read = text; *read; read++) {
+        if (*read == '\\' && read[1])
+            *write++ = *++read;
+        else
+            *write++ = *read;
+    }
+    *write = 0;
+}
+
 static bool hs_plan_line(char *dst, size_t cap, const char *line,
                          const char *prefix)
 {
@@ -372,6 +387,7 @@ static bool hs_plan_line(char *dst, size_t cap, const char *line,
         return false;
     memcpy(dst, value, len);
     dst[len] = 0;
+    hs_shell_unescape(dst);
     return true;
 }
 

@@ -569,6 +569,14 @@ static bool group_reads_external_inputs(const char *name)
          * hash no checker bytes. The whole-test receipt still binds the
          * checker through its BUILD_NEED row; only this group key is denied. */
         "p2_invariant_check",
+        /* zcl_spawn of make and git. The execvp( in the entry file is fixture
+         * source text, so the rail's literal skip does not see a call. The
+         * delegated make still reads the Makefile. */
+        "sem_replay",
+        /* zcl_mut_spawn_owned runs the compiler. The execvp( in this file is
+         * fixture source, so the rail's literal skip does not see a call.
+         * The tools/dev script spelling is dry-run text, not a bound binary. */
+        "mutation_harness",
         /* The stdin adapter executes jsonq outside the entry-file scanner.
          * BUILD_NEED binds the whole proof, but no per-group artifact key. */
         "jsonq",
@@ -889,12 +897,32 @@ static bool trc_self_reexec(const char *b)
     return false;
 }
 
+/* A call-site token in code, not one spelled inside a string literal.
+ * The rail's own token table lives in string literals; those are not calls. */
+static bool trc_code_has_token(const char *b, const char *tok)
+{
+    size_t n = strlen(b);
+    size_t tl = strlen(tok);
+    size_t i = 0;
+    while (i < n) {
+        if (b[i] == '"' || b[i] == '\'') {
+            trc_skip_literal(b, n, &i);
+            continue;
+        }
+        if (i + tl <= n && memcmp(b + i, tok, tl) == 0 &&
+            trc_left_boundary(b, b + i))
+            return true;
+        i++;
+    }
+    return false;
+}
+
 /* True when any exec-family call site is present. */
 static bool trc_has_exec_call(const char *b)
 {
     for (size_t i = 0; i < sizeof(TRC_EXEC_TOKENS) / sizeof(TRC_EXEC_TOKENS[0]);
          i++)
-        if (trc_has_token(b, TRC_EXEC_TOKENS[i], NULL))
+        if (trc_code_has_token(b, TRC_EXEC_TOKENS[i]))
             return true;
     return false;
 }

@@ -3309,6 +3309,53 @@ ZCL_COMMAND_DEV_READ(
     "factory measurement reads dev-lane state and needs the dev binary",
     "z23-dev dev factory")
 
+/* ── dev.loop.measure ──────────────────────────────────────────────────────
+ * Read-only classification of records the caller already loaded
+ * (tools/command/native_dev_loop_measure.c). No ledger of its own. */
+ZCL_COMMAND_DEV_READ(
+    "dev.loop.measure", "dev.loop", "",
+    "Classify a loaded window into reuse and required proof",
+    "Reads the records array the caller already loaded: code guide or "
+    "code have, a hot-swap build receipt or its stage cache record, a "
+    "fast-plan test selection, a plugin call, a dev-cycle row, and a "
+    "commit row. Reports repeated discovery, redundant non-release "
+    "builds, unnecessary non-safety tests, and repair rounds, each with "
+    "token and second totals. A counter that was not recorded is null, "
+    "never zero. Safety-proof spend stays in its own class and is never "
+    "eliminable. An exact prior discovery, non-release build input, "
+    "non-safety test selection, or already-explained failure is reused "
+    "and not started. A safety proof is required unless an exact receipt "
+    "passes zcl_dev_proof_receipt_admit for that same input; missing, "
+    "stale, and different-input proofs stay required. Running software "
+    "counts a hot-swapped leaf that executed, a plugin call that ran, or "
+    "a focused proof that passed. A commit, diff, or queued task does "
+    "not. Writes nothing.", 32768,
+    "loop,measure,reuse,tokens,proof,hotswap,plugin",
+    "zcl.dev_loop_measure_input.v1", "zcl.dev_loop_measure.v1", "records", "",
+    "z23-dev dev loop measure --format=json", ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_loop_measure,
+    "loop measurement reads caller-loaded records and needs the dev binary",
+    "z23-dev dev loop measure")
+
+/* Read-only span token. One swappable leaf; the body lives in
+ * engine/controllers/src/loop_span_controller.c. */
+ZCL_COMMAND_READY_READ(
+    "dev.loop.span", "dev.loop", "", "Fold one text span",
+    "Returns the deterministic token of input text. Missing text folds "
+    "the empty span. Writes nothing.", 0,
+    "loop,span,token", "zcl.loop_span_input.v1",
+    "zcl.loop_span.v1", "text", "", "z23 dev loop span",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_loop_span)
+
 /* ── dev.beta6 ─────────────────────────────────────────────────────────────
  * Preflight for the optional beta6 bootstrap-snapshot server
  * (engine/services/src/beta6_bootstrap_serve.c, docs/node/BOOTSTRAPPING.md). */

@@ -153,3 +153,6 @@ HOTSWAP_SWAPPABLE("contexts/market/controllers/src/shop_native_reputation.c",
  * The restore path writes and is withheld. */
 HOTSWAP_SWAPPABLE("contexts/wallet/controllers/src/wallet_recovery_native_handlers.c",
                   "core.wallet.recovery.status")
+/* Read-only span token. One translation unit, one leaf. */
+HOTSWAP_SWAPPABLE("engine/controllers/src/loop_span_controller.c",
+                  "dev.loop.span")

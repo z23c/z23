@@ -1022,8 +1022,8 @@ static void ars_shadow_state(const struct ars_driver *d, uint8_t out[32])
 }
 
 
-/* GCC/Clang escape quotes and backslashes inside a quoted driver word. The
- * vector path decodes only these two spellings, never shell expansions. */
+/* GCC/Clang escape quotes and backslashes inside a quoted -### word.
+ * Decode only these two spellings, never shell expansions. */
 static bool ars_vector_quoted_word(const char **cursor, char word[PATH_MAX])
 {
     const char *p = *cursor + 1;
@@ -1046,9 +1046,10 @@ static bool ars_vector_quoted_word(const char **cursor, char word[PATH_MAX])
 }
 
 /* One command line of -### output: each word (quoted or bare) canonical and
- * hashed with its terminator. A word with an escape is refused. */
+ * hashed with its terminator. A quoted word uses the same \" and \\ decode
+ * as the cc1 sysroot parser. A bare word with a backslash is refused. */
 static bool ars_line_sha3(struct sha3_256_ctx *sha, const char *p,
-                          const char *root, const char *tmp, bool vector)
+                          const char *root, const char *tmp)
 {
     for (;;) {
         p += strspn(p, " \t");
@@ -1056,18 +1057,16 @@ static bool ars_line_sha3(struct sha3_256_ctx *sha, const char *p,
             break;
         bool quoted = *p == '"';
         char word[PATH_MAX], canon[PATH_MAX + 64];
-        if (vector && quoted) {
+        if (quoted) {
             if (!ars_vector_quoted_word(&p, word))
                 return false;
         } else {
-            p += quoted;
-            size_t n = strcspn(p, quoted ? "\"\r\n" : " \t\r\n");
-            if ((quoted && p[n] != '"') || n >= sizeof(word) ||
-                memchr(p, '\\', n))
+            size_t n = strcspn(p, " \t\r\n");
+            if (n >= sizeof(word) || memchr(p, '\\', n))
                 return false;
             memcpy(word, p, n);
             word[n] = '\0';
-            p += n + quoted;
+            p += n;
         }
         if (!zcl_action_root_canon_driver_word(word, root, tmp, canon,
                                                sizeof(canon)))
@@ -1111,7 +1110,7 @@ static bool ars_lines_capture(const struct ars_driver *d, const char *out,
         const char *p = line + strspn(line, " ");
         bool command = line[0] == ' ' && !strchr("\r\n", *p) &&
                        strncmp(p, "(in-process)", 12) != 0;
-        if (command && !ars_line_sha3(&sha, p, d->root, tmp, d->vector_mode))
+        if (command && !ars_line_sha3(&sha, p, d->root, tmp))
             return false;
         line = strchr(line, '\n');
         line += line != NULL;
