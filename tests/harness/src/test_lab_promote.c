@@ -263,6 +263,37 @@ static int lp_case_failed_case(void)
     return failures;
 }
 
+static int lp_case_compile_failed(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("lab.promote reports the first compiler error") {
+        struct zcl_command_reply p;
+        char path[PATH_MAX];
+        ASSERT(ready);
+        ASSERT_EQ(mkdir(e.dist, 0700), 0);
+        ASSERT(lp_join(path, sizeof(path), e.base, "invalid.c"));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("int main(void) { return missing_value; }\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        lp_promote(&e, path, "[{\"name\":\"mode\"}]", &p);
+        ASSERT_STR_EQ(p.error.code, "LAB_PROMOTE_CASES_FAILED");
+        ASSERT(strstr(p.error.message, "1 of 1 cases failed") != NULL);
+        ASSERT(strstr(p.error.message, "line 1") != NULL);
+        ASSERT(strstr(p.error.message, "col 25") != NULL);
+        ASSERT(strstr(p.error.message, "compiler error: line 1") != NULL);
+        ASSERT(strstr(p.error.message, "missing_value") != NULL);
+        ASSERT_EQ(strlen(p.error.evidence), 128);
+        ASSERT(strstr(p.error.next_action, "z23 lab show ") == p.error.next_action);
+        ASSERT_EQ(lp_entries(e.dist), 0);
+        zcl_command_reply_free(&p);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
 static int lp_case_disagree(void)
 {
     int failures = 0;
@@ -851,6 +882,7 @@ int test_lab_promote(void)
     failures += lp_case_ready_values();
     failures += lp_case_export_borrow();
     failures += lp_case_failed_case();
+    failures += lp_case_compile_failed();
     failures += lp_case_disagree();
     failures += lp_case_capture_allocation();
     failures += lp_case_no_key();

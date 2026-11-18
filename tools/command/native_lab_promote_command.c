@@ -88,27 +88,71 @@ static void promote_refuse(struct zcl_command_reply *reply, const char *code,
     snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", evidence);
 }
 
-/* Append a bounded, UTF-8-repaired case summary without replacing refusal evidence. */
-static void promote_case_message(char message[192], const char *name, const char *diff)
+static size_t promote_min(size_t a, size_t b)
+{
+    return a < b ? a : b;
+}
+
+static const char *promote_nonempty(const char *value, const char *fallback)
+{
+    return value && value[0] ? value : fallback;
+}
+
+/* Append bounded, UTF-8-repaired detail without replacing refusal evidence. */
+static void promote_case_message(char message[192], const char *name, const char *diff, bool compiler)
 {
     struct json_value text;
     bool name_cut = false, diff_cut = false;
     size_t used = strlen(message);
     size_t room = sizeof(((struct zcl_command_reply *)0)->error.message) - used;
-    if (room < 16) return;
-    size_t name_cap = room - 16 < 24 ? room - 16 : 24;
-    size_t diff_cap = room - 16 - name_cap < 56 ? room - 16 - name_cap : 56;
+    size_t framing = compiler ? 22 : 16;
+    if (room < framing) return;
+    size_t name_cap = compiler ? 0 : promote_min(room - framing, 24);
+    size_t diff_cap = room - framing - name_cap;
+    if (!compiler) diff_cap = promote_min(diff_cap, 56);
     json_init(&text);
     json_set_object(&text);
-    if (!name || !name[0]) name = "unavailable";
-    if (!diff || !diff[0]) diff = "diagnostic unavailable";
-    if (lab_json_text(&text, "name", name, strlen(name), name_cap, &name_cut) &&
+    name = promote_nonempty(name, "unavailable");
+    diff = promote_nonempty(diff, "diagnostic unavailable");
+    if ((compiler || lab_json_text(&text, "name", name, strlen(name), name_cap, &name_cut)) &&
         lab_json_text(&text, "diff", diff, strlen(diff), diff_cap, &diff_cut)) {
-        (void)snprintf(message + used, room, "; case \"%s%s\": %s%s",
-                       json_get_str(json_get(&text, "name")), name_cut ? "..." : "",
-                       json_get_str(json_get(&text, "diff")), diff_cut ? "..." : "");
+        const char *clean = json_get_str(json_get(&text, "diff"));
+        if (compiler)
+            (void)snprintf(message + used, room, "; compiler error: %s%s",
+                           clean, diff_cut ? "..." : "");
+        else
+            (void)snprintf(message + used, room, "; case \"%s%s\": %s%s",
+                           json_get_str(json_get(&text, "name")), name_cut ? "..." : "",
+                           clean, diff_cut ? "..." : "");
     }
     json_free(&text);
+}
+
+
+/* Prefer the compiler error when no case could run. */
+static bool promote_compile_error(char message[192], const struct json_value *data)
+{
+    const struct json_value *compile = json_get(data, "compile");
+    const struct json_value *ok = json_get(compile, "ok");
+    if (!ok || ok->type != JSON_BOOL || json_get_bool(ok))
+        return false;
+    const struct json_value *rows = json_get(compile, "diagnostics");
+    for (size_t i = 0; i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *severity = json_get(row, "severity");
+        const struct json_value *detail = json_get(row, "message");
+        if (!severity || severity->type != JSON_STR ||
+            strcmp(json_get_str(severity), "error") != 0 ||
+            !detail || detail->type != JSON_STR || !json_get_str(detail)[0])
+            continue;
+        char description[LAB_DIAG_MESSAGE + 64];
+        snprintf(description, sizeof(description), "line %lld col %lld: %s",
+                 (long long)json_get_int(json_get(row, "line")),
+                 (long long)json_get_int(json_get(row, "col")), json_get_str(detail));
+        promote_case_message(message, NULL, description, true);
+        return true;
+    }
+    return false;
 }
 
 static void promote_first_row(char message[192], const struct json_value *data)
@@ -119,11 +163,11 @@ static void promote_first_row(char message[192], const struct json_value *data)
         const struct json_value *pass = json_get(row, "pass");
         if (pass && pass->type == JSON_BOOL && !json_get_bool(pass)) {
             promote_case_message(message, json_get_str(json_get(row, "name")),
-                                 json_get_str(json_get(row, "diff")));
+                                 json_get_str(json_get(row, "diff")), false);
             return;
         }
     }
-    promote_case_message(message, NULL, NULL);
+    promote_case_message(message, NULL, NULL, false);
 }
 
 /* Step 1: lab.test on the same inputs, always fresh. A refusal of lab.test
@@ -153,7 +197,8 @@ static bool promote_cases(struct lab_ctx *ctx,
     if (p->failed > 0) {
         snprintf(message, sizeof(message), "%zu of %zu cases failed; nothing was written",
                  p->failed, p->passed + p->failed);
-        promote_first_row(message, &reply->data);
+        if (!promote_compile_error(message, &reply->data))
+            promote_first_row(message, &reply->data);
     }
     json_free(&reply->data);
     json_init(&reply->data);
@@ -349,7 +394,7 @@ static void promote_verify(const struct zcl_command_request *rq,
         snprintf(message, sizeof(message),
                  "the release image failed %zu of %zu cases that the sanitized "
                  "build passed; nothing was written", failed, passed + failed);
-        promote_case_message(message, fail.name, fail.diff);
+        promote_case_message(message, fail.name, fail.diff, false);
         promote_refuse(reply, "LAB_PROMOTE_RELEASE_DISAGREES", "verify", message,
                        rel->command);
     } else if (promote_pack(rq, rel, reply)) {
