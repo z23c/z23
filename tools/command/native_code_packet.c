@@ -1381,18 +1381,21 @@ static bool pk_open(const struct zcl_command_request *request,
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_ABSENT",
                                "open", false, false,
-                               "no readable code index at the source root; run "
-                               "any `code` leaf once to build it", "");
+                               "no readable code index; run code.map, then retry; "
+                               "if an index owner is active, wait for its refresh", "");
+        (void)zcl_command_reply_add_next(reply, "code.map", "{}",
+                                         "prepare the source index, then retry code.packet");
         return false;
     }
     if (stale) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_STALE",
                                "open", true, false,
-                               "the source tree changed since the code index "
-                               "generation was sealed; run a rebuilding `code` "
-                               "leaf (for example `code sym <name>`) and retry",
+                               "the source index is stale; run code.map, then retry; "
+                               "if an index owner is active, wait for its refresh",
                                "source_root_sha3");
+        (void)zcl_command_reply_add_next(reply, "code.map", "{}",
+                                         "refresh the source index, then retry code.packet");
         return false;
     }
     if (!code_generation_hex(run->ctx.ci, run->f.source_hex, run->f.dep_hex)) {

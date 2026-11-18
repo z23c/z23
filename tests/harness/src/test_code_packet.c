@@ -1482,6 +1482,42 @@ static int test_code_packet_reverse_impact_failure(void)
     return failures;
 }
 
+static int test_code_packet_index_recovery(void)
+{
+    int failures = 0;
+    TEST("code_packet: absent and stale indexes advise code.map") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        unsigned long long before = 0, after = 0;
+        int n_before = 0, n_after = 0;
+        pkt_tree(PKT_FIX, &before, &n_before);
+        const char *syms[] = { "pk_small_add" };
+        struct zcl_command_reply reply;
+        pkt_call("Recover index", syms, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(reply.error.code, "CODEINDEX_ABSENT");
+        ASSERT(reply.next_count > 0);
+        ASSERT_STR_EQ(reply.next[0].command, "code.map");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{}");
+        ASSERT(strstr(reply.error.message, "code.map") != NULL);
+        zcl_command_reply_free(&reply);
+        pkt_tree(PKT_FIX, &after, &n_after);
+        ASSERT_EQ(n_before, n_after);
+        ASSERT(before == after);
+        ASSERT(pkt_index_build());
+        ASSERT(pkt_write("core/modules/net/src/pk_small.c", PKT_SMALL "/* changed */\n"));
+        pkt_call("Recover stale index", syms, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(reply.error.code, "CODEINDEX_STALE");
+        ASSERT(reply.next_count > 0);
+        ASSERT_STR_EQ(reply.next[0].command, "code.map");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{}");
+        ASSERT(strstr(reply.error.message, "code.map") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1516,5 +1552,6 @@ int test_code_packet(void)
     failures += test_code_packet_definition_evidence();
     failures += test_code_packet_impact_failure();
     failures += test_code_packet_reverse_impact_failure();
+    failures += test_code_packet_index_recovery();
     return failures;
 }
