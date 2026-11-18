@@ -18206,7 +18206,8 @@ agent-verify:
 	 av_step check-capability-closure; \
 	 av_step proof-lint-prebuild; \
 	 av_step docs-capability-inventory; \
-	 av_step check-kpi-floor; \
+	 if [ "$$rc" -eq 0 ]; then av_step check-kpi-floor -o docs-capability-inventory; \
+	 else av_step check-kpi-floor; fi; \
 	 av_step lint-fast; \
 	 if [ -z "$$failed" ]; then \
 	    av_total; echo "agent-verify: OK" | tee -a build/scratch/agent-verify.rc; \

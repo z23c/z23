@@ -2028,6 +2028,47 @@ static int t_agent_verify_preflight(void)
     return bad;
 }
 
+/* Run the actual agent-verify and KPI recipes with a counted phony generator. */
+static int t_agent_verify_inventory_once(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p build/bin\n"
+        "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
+        "awk '/^check-kpi-floor:/ { active=1; print; next } active && /^[[:space:]]/ { print; next } active { exit }' \"$1/Makefile\" >> Makefile\n"
+        "cat >> Makefile <<'MAKE'\n"
+        ".PHONY: check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild docs-capability-inventory check-kpi-floor lint-fast agent-verify-evidence\n"
+        "check-cyclomatic-complexity check-capability-closure proof-lint-prebuild agent-verify-evidence:\n\t@:\n"
+        "t-fast-exact:\n\t@echo 'SUITE VERDICT: PASS'\n"
+        "lint-fast:\n\t@echo lint >> calls\n"
+        "docs-capability-inventory:\n\t@echo inventory >> calls\n"
+        "\t@if [ \"$$FAIL_INVENTORY\" = always ]; then exit 7; fi; if [ \"$$FAIL_INVENTORY\" = once ] && [ ! -e failed-once ]; then touch failed-once; exit 7; fi\n"
+        "MAKE\n"
+        "printf '#!/bin/sh\\nif [ \"$2\" = --selftest ]; then echo selftest >> calls; else echo kpi >> calls; [ \"${FAIL_KPI:-0}\" = 0 ]; fi\\n' > build/bin/z23-lint\n"
+        "chmod +x build/bin/z23-lint\n"
+        "make --no-print-directory agent-verify ONLY=fixture > normal.log 2>&1\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 1 ]; [ \"$(grep -c '^selftest$' calls)\" = 1 ]; [ \"$(grep -c '^kpi$' calls)\" = 1 ]\n"
+        "grep -q 'agent-verify: docs-capability-inventory rc=0' build/scratch/agent-verify.rc\n"
+        "grep -q 'agent-verify: check-kpi-floor rc=0' build/scratch/agent-verify.rc\n"
+        "rm -f calls failed-once; if FAIL_INVENTORY=once make --no-print-directory agent-verify ONLY=fixture > once.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; [ \"$(grep -c '^selftest$' calls)\" = 1 ]; [ \"$(grep -c '^kpi$' calls)\" = 1 ]\n"
+        "grep -q 'agent-verify: FAILED (docs-capability-inventory)' build/scratch/agent-verify.rc\n"
+        "grep -q 'agent-verify: check-kpi-floor rc=0' build/scratch/agent-verify.rc\n"
+        "rm -f calls; if FAIL_INVENTORY=always make --no-print-directory agent-verify ONLY=fixture > always.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; if grep -Eq '^(selftest|kpi)$' calls; then exit 1; fi; grep -q '^lint$' calls\n"
+        "grep -q 'agent-verify: FAILED (docs-capability-inventory check-kpi-floor)' build/scratch/agent-verify.rc\n"
+        "rm -f calls; if FAIL_KPI=1 make --no-print-directory agent-verify ONLY=fixture > kpi.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 1 ]; grep -q '^selftest$' calls; grep -q '^kpi$' calls; grep -q '^lint$' calls\n"
+        "grep -q 'agent-verify: FAILED (check-kpi-floor)' build/scratch/agent-verify.rc\n"
+        "rm -f calls; make --no-print-directory check-kpi-floor > standalone.log 2>&1; make --no-print-directory check-kpi-floor >> standalone.log 2>&1\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; [ \"$(grep -c '^selftest$' calls)\" = 2 ]; [ \"$(grep -c '^kpi$' calls)\" = 2 ]\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "inventory_once");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
+
 static int t_agent_verify_empty_exact(void)
 {
     static const char script[] =
@@ -2067,7 +2108,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_agent_verify_preflight() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_agent_verify_preflight() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
