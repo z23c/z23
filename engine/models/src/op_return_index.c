@@ -600,6 +600,9 @@ bool op_return_index_truncate(struct node_db *ndb)
     empty.height = -1;
     if (!op_return_index_set_cursor(ndb, &empty))
         LOG_FAIL("op_return_index", "truncate: failed to reset cursor state");
+    /* The remembered digests described the chain just dropped. */
+    if (!catalog_history_clear(ndb, CATALOG_HISTORY_OP_RETURN_INDEX))
+        LOG_FAIL("op_return_index", "truncate: failed to clear digest history");
     /* Retire any v1 record so the refusal above cannot survive a rebuild —
      * this is the operator's documented escape from a legacy record. */
     if (!node_db_state_delete(ndb, OP_RETURN_INDEX_CURSOR_KEY_V1) ||
@@ -612,6 +615,99 @@ bool op_return_index_truncate(struct node_db *ndb)
      * record set above) instead of skipping straight to the stale cache. */
     oprindex_legacy_backoff_clear(ndb);
     return true;
+}
+
+bool op_return_index_commit_fold(struct node_db *ndb,
+                                 const struct op_return_index_cursor *prev,
+                                 const struct op_return_index_cursor *next)
+{
+    if (!ndb || !ndb->open || !prev || !next)
+        LOG_FAIL("op_return_index", "commit_fold: invalid args");
+    if (!catalog_fold_unit_begin(ndb))
+        LOG_FAIL("op_return_index", "commit_fold: no unit at h=%d",
+                 next->height);
+    bool ok = op_return_index_set_cursor(ndb, next) &&
+              catalog_history_record_step(ndb,
+                  CATALOG_HISTORY_OP_RETURN_INDEX, prev->height, prev->digest,
+                  next->height, next->digest, false);
+    if (!catalog_fold_unit_end(ndb, ok) || !ok)
+        LOG_FAIL("op_return_index", "commit_fold: step h=%d not committed",
+                 next->height);
+    return true;
+}
+
+static bool oprindex_delete_above(struct node_db *ndb, int32_t fork_height)
+{
+    struct qb q;
+    qb_delete(&q, QB_T_op_return_index);
+    qb_where_int(&q, QB_C_op_return_index_height, QB_GT, fork_height);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s))
+        LOG_FAIL("op_return_index", "unwind: %s", qb_error(&q));
+    bool done = AR_STEP_DONE(s);
+    AR_FINALIZE(s);
+    node_db_note_activity(ndb, "op_return_index_unwind",
+                          done ? SQLITE_OK : SQLITE_ERROR);
+    if (!done)
+        LOG_FAIL("op_return_index", "unwind: DELETE above h=%d failed",
+                 fork_height);
+    return true;
+}
+
+/* Exact rewind to a fork inside the declared range: the digest at the fork
+ * is the base digest when the fork is the height before the base, otherwise
+ * the history's. Returns false (with *why filled) when it cannot be proven. */
+static bool oprindex_fork_digest(struct node_db *ndb,
+                                 const struct op_return_index_cursor *cur,
+                                 int32_t fork_height, uint8_t out[32],
+                                 char *why, size_t why_size)
+{
+    if (fork_height < cur->base_height - 1) {
+        snprintf(why, why_size, "fork %d is below the declared base %d",
+                 fork_height, cur->base_height);
+        return false;
+    }
+    if (fork_height == cur->base_height - 1) {
+        memcpy(out, cur->base_digest, 32);
+        return true;
+    }
+    return catalog_history_can_rewind(ndb, CATALOG_HISTORY_OP_RETURN_INDEX,
+                                      fork_height, cur->height, cur->digest,
+                                      out, why, why_size);
+}
+
+enum catalog_rewind op_return_index_unwind_above(struct node_db *ndb,
+                                                 int32_t fork_height)
+{
+    if (!ndb || !ndb->open || fork_height < -1)
+        LOG_RETURN(CATALOG_REWIND_ERROR, "op_return_index",
+                   "unwind: invalid args (fork=%d)", fork_height);
+    if (!oprindex_delete_above(ndb, fork_height))
+        return CATALOG_REWIND_ERROR;
+
+    struct op_return_index_cursor cur;
+    if (!op_return_index_get_cursor(ndb, &cur))
+        return CATALOG_REWIND_NOOP;       /* legacy/unreadable: left alone */
+    if (cur.height <= fork_height)
+        return CATALOG_REWIND_NOOP;
+
+    uint8_t digest[32];
+    char why[160] = "";
+    if (oprindex_fork_digest(ndb, &cur, fork_height, digest, why,
+                             sizeof(why))) {
+        struct op_return_index_cursor next = cur;
+        next.height = fork_height;
+        memcpy(next.digest, digest, 32);
+        if (!op_return_index_set_cursor(ndb, &next) ||
+            !catalog_history_drop_above(ndb, CATALOG_HISTORY_OP_RETURN_INDEX,
+                                        fork_height))
+            return CATALOG_REWIND_ERROR;
+        return CATALOG_REWIND_EXACT;
+    }
+    LOG_WARN("op_return_index", "unwind: full rebuild required at fork %d "
+             "(cursor %d): %s", fork_height, cur.height, why);
+    return op_return_index_truncate(ndb) ? CATALOG_REWIND_REBUILD
+                                         : CATALOG_REWIND_ERROR;
 }
 
 static bool op_return_index_file_backed(struct node_db *ndb)

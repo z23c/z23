@@ -40,6 +40,7 @@
 
 #include "models/database.h"
 #include "models/activerecord.h"
+#include "models/catalog_digest_history.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -175,6 +176,32 @@ bool op_return_index_get_cursor(struct node_db *ndb,
 bool op_return_index_set_cursor(struct node_db *ndb,
                                 const struct op_return_index_cursor *cur);
 
+/* Persist one fold step: the new cursor+digest AND the bounded digest
+ * history entry for it (models/catalog_digest_history.h) as one unit, so the
+ * history can never disagree with the cursor across a crash. `prev` is the
+ * cursor the step started from (its digest is remembered too, so the first
+ * step after an upgrade can already be rewound to). Owned by the backfill
+ * service, under op_return_index_fold_try_begin(). */
+bool op_return_index_commit_fold(struct node_db *ndb,
+                                 const struct op_return_index_cursor *prev,
+                                 const struct op_return_index_cursor *next);
+
+/* Reorg unwind of the catalog to `fork_height` (the last height both
+ * branches share): delete every row above it and, when the cursor is above
+ * it, put the cursor and digest back to what folding exactly the heights up
+ * to the fork produced.
+ *   NOOP     cursor at or below the fork (or an unreadable/legacy state:
+ *            rows above the fork still go, the state is left alone);
+ *   EXACT    cursor = fork, digest from the bounded history (or the base
+ *            digest when the fork is the height before the declared base);
+ *   REBUILD  the history cannot prove the fork (deeper than the window, a
+ *            catalog that predates it, an inconsistent entry, a fork below
+ *            the declared base): truncate, so the backfill re-derives it. A
+ *            WARN names the reason.
+ * Caller holds op_return_index_fold_try_begin() and a transaction. */
+enum catalog_rewind op_return_index_unwind_above(struct node_db *ndb,
+                                                 int32_t fork_height);
+
 /* Scalar-only read for callers that cannot see struct
  * op_return_index_cursor (lib/ modules that reach app/ accessors by
  * forward declaration — see engine/modules/storage/src/catalog_completeness.c).
@@ -220,7 +247,8 @@ bool op_return_index_prune_below(struct node_db *ndb, int32_t base_height);
  * to the empty (genesis-rooted, nothing-folded) state. Also deletes any
  * legacy v1 record, so this is the operator's escape from a v1 refusal.
  * The backfill service re-derives the catalog from block bodies on its
- * next ticks, re-seeding the base if the datadir is snapshot-seeded. */
+ * next ticks, re-seeding the base if the datadir is snapshot-seeded.
+ * Also clears the bounded digest history (it described the dropped chain). */
 bool op_return_index_truncate(struct node_db *ndb);
 
 /* Production rebuild: owns a separate existing-runtime connection and one

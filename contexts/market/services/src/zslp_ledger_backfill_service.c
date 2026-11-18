@@ -60,7 +60,7 @@ static struct node_db *backfill_ndb(void)
 
 /* ── One bounded batch ────────────────────────────────────────────── */
 
-int zslp_ledger_backfill_run_once(void)
+static int backfill_run_batch(void)
 {
     struct node_db *ndb = backfill_ndb();
     if (!ndb || !ndb->open)
@@ -91,16 +91,14 @@ int zslp_ledger_backfill_run_once(void)
 
     int folded = 0;
     for (int32_t h = cursor + 1; h <= target; h++) {
+        /* The height's rows, then its cursor + digest + digest-history entry
+         * as one unit (the history is what lets a reorg rewind this ledger
+         * exactly instead of rebuilding it). */
         uint8_t new_digest[32];
-        if (!zslp_ledger_apply_height(ndb, h, digest, new_digest)) {
+        if (!zslp_ledger_fold_and_commit(ndb, h - 1, digest, h, new_digest)) {
             LOG_WARN("zslp_ledger",
-                     "backfill: apply_height failed at h=%d — stopping this "
+                     "backfill: fold of h=%d failed — stopping this "
                      "batch, retrying next tick", h);
-            break;
-        }
-        if (!zslp_ledger_set_cursor(ndb, h, new_digest)) {
-            LOG_WARN("zslp_ledger",
-                     "backfill: cursor persist failed at h=%d", h);
             break;
         }
         memcpy(digest, new_digest, 32);
@@ -110,6 +108,35 @@ int zslp_ledger_backfill_run_once(void)
 
     if (folded > 0)
         atomic_fetch_add(&g_backfill_blocks_folded, (uint64_t)folded);
+    return folded;
+}
+
+/* A rebuild unwind leaves a re-derive floor (models/zslp_ledger.h): the fold
+ * derives every height above it itself. Once the cursor has reached the
+ * projection tip every live-judged height has been re-derived, and the floor
+ * goes. */
+static void backfill_settle_rederive_floor(void)
+{
+    struct node_db *ndb = backfill_ndb();
+    int32_t floor = -1, cursor = -1;
+    uint8_t digest[32];
+    if (!ndb || !ndb->open || !zslp_ledger_rederive_floor_get(ndb, &floor))
+        return;
+    if (zslp_ledger_get_cursor(ndb, &cursor, digest) &&
+        cursor >= node_db_sync_get_tip_height(ndb))
+        (void)zslp_ledger_rederive_floor_clear(ndb);
+}
+
+/* The fold guard (models/zslp_ledger.h) makes the batch and the reorg unwind
+ * mutually exclusive: both move the cursor and digest. A tick that finds it
+ * held skips (never waits) and the next tick folds. */
+int zslp_ledger_backfill_run_once(void)
+{
+    if (!zslp_ledger_fold_try_begin())
+        return 0;
+    int folded = backfill_run_batch();
+    backfill_settle_rederive_floor();
+    zslp_ledger_fold_end();
     return folded;
 }
 

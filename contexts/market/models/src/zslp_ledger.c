@@ -12,6 +12,7 @@
 
 #include "models/zslp_ledger.h"
 #include "models/zslp_validity.h"
+#include "models/catalog_digest_history.h"
 
 #include "models/database.h"
 #include "models/activerecord.h"
@@ -21,11 +22,16 @@
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
 #define ZSLP_LEDGER_CURSOR_KEY "zslp_ledger_cursor_height"
 #define ZSLP_LEDGER_DIGEST_KEY "zslp_ledger_digest"
+/* Set by a rebuild unwind: every height above it must be re-derived by the
+ * fold, because the live hook judged it against a truncated ledger. */
+#define ZSLP_LEDGER_REDERIVE_KEY "zslp_ledger_rederive_above"
 
 DEFINE_MODEL_CALLBACKS(zslp_ledger)
 
@@ -238,7 +244,166 @@ bool zslp_ledger_truncate(struct node_db *ndb)
         LOG_FAIL("zslp_ledger", "truncate: failed to reset cursor");
     if (!node_db_state_set(ndb, ZSLP_LEDGER_DIGEST_KEY, zero, 32))
         LOG_FAIL("zslp_ledger", "truncate: failed to reset digest");
+    /* The remembered per-height digests described the chain just dropped. */
+    if (!catalog_history_clear(ndb, CATALOG_HISTORY_ZSLP_LEDGER))
+        LOG_FAIL("zslp_ledger", "truncate: failed to clear digest history");
+    if (!node_db_state_delete(ndb, ZSLP_LEDGER_REDERIVE_KEY))
+        LOG_FAIL("zslp_ledger", "truncate: failed to clear the re-derive floor");
     return true;
+}
+
+/* ── Fold guard, committed fold step, reorg unwind ─────────────────── */
+
+static atomic_flag g_fold_guard = ATOMIC_FLAG_INIT;
+
+bool zslp_ledger_fold_try_begin(void)
+{
+    return !atomic_flag_test_and_set_explicit(&g_fold_guard,
+                                              memory_order_acquire);
+}
+
+void zslp_ledger_fold_end(void)
+{
+    atomic_flag_clear_explicit(&g_fold_guard, memory_order_release);
+}
+
+/* ── Re-derive floor ───────────────────────────────────────────────────
+ *
+ * A fold derives a height from the ledger as the heights below it left it, and
+ * a VALID or INVALID verdict is final. After a rebuild unwind the ledger is
+ * empty and the projection keeps indexing: the live hook judges every new
+ * block against that empty ledger, so a SEND of a token created below the
+ * fork would be recorded INVALID, and the fold would then keep it. The
+ * rebuild therefore records a floor, and the fold throws away whatever the
+ * live hook wrote at a height above it and derives the height itself, in
+ * order, from a complete ledger. The backfill clears the floor once the
+ * cursor has caught up with the projection (zslp_ledger_rederive_floor_clear). */
+bool zslp_ledger_rederive_floor_get(struct node_db *ndb, int32_t *floor_out)
+{
+    int64_t v = 0;
+    if (!ndb || !ndb->open || !node_db_state_get_int(ndb,
+                                                      ZSLP_LEDGER_REDERIVE_KEY,
+                                                      &v))
+        return false;
+    if (floor_out)
+        *floor_out = (int32_t)v;
+    return true;
+}
+
+bool zslp_ledger_rederive_floor_clear(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open)
+        LOG_FAIL("zslp_ledger", "rederive floor clear: db not open");
+    if (!node_db_state_delete(ndb, ZSLP_LEDGER_REDERIVE_KEY))
+        LOG_FAIL("zslp_ledger", "rederive floor clear: delete failed");
+    return true;
+}
+
+/* Delete everything the ledger holds stamped exactly at `height`, and undo the
+ * spends recorded at it. */
+static bool zslp_ledger_reset_height(struct node_db *ndb, int32_t height)
+{
+    static const char *const k_sql[] = {
+        "DELETE FROM zslp_ledger WHERE created_height=?",
+        "DELETE FROM zslp_validity WHERE block_height=?",
+        "UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
+        " WHERE spent_height=?",
+    };
+    for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]); i++) {
+        sqlite3_stmt *s = NULL;
+        AR_PREPARE_BOOL(ndb, s, k_sql[i]);
+        AR_BIND_INT(s, 1, height);
+        bool ok = false;
+        AR_FINALIZE_STEP_DONE(s, ok);
+        if (!ok)
+            LOG_FAIL("zslp_ledger", "reset h=%d: statement failed: %s", height,
+                     k_sql[i]);
+    }
+    return true;
+}
+
+bool zslp_ledger_fold_and_commit(struct node_db *ndb, int32_t prev_height,
+                                 const uint8_t prev_digest[32],
+                                 int32_t height, uint8_t out_digest[32])
+{
+    if (!ndb || !ndb->open || !prev_digest || !out_digest)
+        LOG_FAIL("zslp_ledger", "fold_and_commit: invalid args");
+    int32_t floor = -1;
+    if (zslp_ledger_rederive_floor_get(ndb, &floor) && height > floor &&
+        !zslp_ledger_reset_height(ndb, height))
+        LOG_FAIL("zslp_ledger", "fold_and_commit: re-derive reset h=%d failed",
+                 height);
+    bool tainted = false;
+    if (!zslp_validity_apply_height_ex(ndb, height, prev_digest, out_digest,
+                                       &tainted))
+        LOG_FAIL("zslp_ledger", "fold_and_commit: apply_height failed h=%d",
+                 height);
+    if (!catalog_fold_unit_begin(ndb))
+        LOG_FAIL("zslp_ledger", "fold_and_commit: no unit at h=%d", height);
+    bool ok = zslp_ledger_set_cursor(ndb, height, out_digest) &&
+              catalog_history_record_step(ndb, CATALOG_HISTORY_ZSLP_LEDGER,
+                                          prev_height, prev_digest, height,
+                                          out_digest, tainted);
+    if (!catalog_fold_unit_end(ndb, ok) || !ok)
+        LOG_FAIL("zslp_ledger", "fold_and_commit: step h=%d not committed",
+                 height);
+    return true;
+}
+
+/* Everything the ledger and its validity verdicts hold above the fork goes, and
+ * a spend recorded above it un-happens. */
+static bool zslp_ledger_delete_above(struct node_db *ndb, int32_t fork_height)
+{
+    static const char *const k_sql[] = {
+        "DELETE FROM zslp_ledger WHERE created_height>?",
+        "DELETE FROM zslp_validity WHERE block_height>?",
+        "UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
+        " WHERE spent_height>?",
+    };
+    for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]); i++) {
+        sqlite3_stmt *s = NULL;
+        AR_PREPARE_BOOL(ndb, s, k_sql[i]);
+        AR_BIND_INT(s, 1, fork_height);
+        bool ok = false;
+        AR_FINALIZE_STEP_DONE(s, ok);
+        if (!ok)
+            LOG_FAIL("zslp_ledger", "unwind: statement failed: %s", k_sql[i]);
+    }
+    return true;
+}
+
+enum catalog_rewind zslp_ledger_unwind_above(struct node_db *ndb,
+                                             int32_t fork_height)
+{
+    if (!ndb || !ndb->open || fork_height < -1)
+        LOG_RETURN(CATALOG_REWIND_ERROR, "zslp_ledger",
+                   "unwind: invalid args (fork=%d)", fork_height);
+    int32_t cursor = -1;
+    uint8_t digest[32];
+    if (!zslp_ledger_get_cursor(ndb, &cursor, digest) ||
+        !zslp_ledger_delete_above(ndb, fork_height))
+        return CATALOG_REWIND_ERROR;
+    if (cursor <= fork_height)
+        return CATALOG_REWIND_NOOP;
+
+    uint8_t fork_digest[32];
+    char why[160] = "";
+    if (catalog_history_can_rewind(ndb, CATALOG_HISTORY_ZSLP_LEDGER,
+                                   fork_height, cursor, digest, fork_digest,
+                                   why, sizeof(why))) {
+        if (!zslp_ledger_set_cursor(ndb, fork_height, fork_digest) ||
+            !catalog_history_drop_above(ndb, CATALOG_HISTORY_ZSLP_LEDGER,
+                                        fork_height))
+            return CATALOG_REWIND_ERROR;
+        return CATALOG_REWIND_EXACT;
+    }
+    LOG_WARN("zslp_ledger", "unwind: full rebuild required at fork %d "
+             "(cursor %d): %s", fork_height, cursor, why);
+    if (!zslp_ledger_truncate(ndb) ||
+        !node_db_state_set_int(ndb, ZSLP_LEDGER_REDERIVE_KEY,
+                               (int64_t)fork_height))
+        return CATALOG_REWIND_ERROR;
+    return CATALOG_REWIND_REBUILD;
 }
 
 /* ── Queries ───────────────────────────────────────────────────────── */

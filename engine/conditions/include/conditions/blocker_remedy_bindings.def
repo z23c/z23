@@ -515,3 +515,8 @@ ZCL_BLOCKER_REMEDY(sapling_tree.tip_root_missing,                OWNER)
  *     within seconds. The operator only sees it if the retries keep failing. */
 ZCL_BLOCKER_REMEDY(tor.start_failed,                            tor_start_failed)
 ZCL_BLOCKER_REMEDY(rpc.start_failed,                            rpc_start_failed)
+/* A reorg unwind of the explorer projection failed
+ * (engine/services/src/explorer_unwind_service.c). OWNER because the repair,
+ * a -reindex-explorer, truncates and re-walks projections, which is a person's
+ * call; a later successful unwind clears it by itself. */
+ZCL_BLOCKER_REMEDY(explorer.unwind_failed,                      OWNER)

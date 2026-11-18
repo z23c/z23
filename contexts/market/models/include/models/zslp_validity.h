@@ -25,6 +25,14 @@ enum zslp_ledger_role {
 bool zslp_validity_apply_height(struct node_db *ndb, int32_t height,
                                 const uint8_t prev_digest[32],
                                 uint8_t out_digest[32]);
+/* As above; *cross_height_write (when non-NULL) is set when the fold rewrote a
+ * validity row stamped at an EARLIER height (an ancestor a walk settled late).
+ * A reorg rewind cannot undo such a write, so the digest history marks the
+ * step and a rewind across it rebuilds. */
+bool zslp_validity_apply_height_ex(struct node_db *ndb, int32_t height,
+                                   const uint8_t prev_digest[32],
+                                   uint8_t out_digest[32],
+                                   bool *cross_height_write);
 bool zslp_validity_apply_live(struct node_db *ndb,
                               const struct transaction *tx,
                               const struct slp_message *msg, int32_t height);

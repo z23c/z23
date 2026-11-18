@@ -18,6 +18,7 @@
 #include "crypto/sha3.h"
 #include "models/activerecord.h"
 #include "models/database.h"
+#include "util/ar_step_readonly.h"
 #include "models/zslp_ledger.h"
 #include "primitives/transaction.h"
 #include "script/standard.h"
@@ -836,6 +837,58 @@ static enum zslp_walk_result walk_plan(struct zslp_walk *w,
     return result;
 }
 
+/* ── Cross-height writes of a fold ─────────────────────────────────────
+ *
+ * A fold of height H normally writes only rows stamped H. The one exception
+ * is a walk that judges an ancestor stamped LOWER than H (a transaction the
+ * bound refused at its own height, settled now that a descendant fits). A
+ * reorg rewind deletes rows above the fork; it cannot undo that write to a
+ * row at or below it. The fold therefore reports whether it changed any such
+ * row, and the digest history marks the step tainted, so a rewind across it
+ * rebuilds the catalog instead of claiming an exactness it cannot prove.
+ *
+ * Thread-local: a fold runs entirely on the calling thread. */
+static _Thread_local int32_t g_fold_height = -1;
+static _Thread_local bool g_fold_cross_height_write;
+
+struct zslp_validity_fingerprint {
+    bool present;
+    int64_t status;
+    char reason[64];
+    int64_t units[4];
+};
+
+static void validity_fingerprint(struct node_db *ndb, const uint8_t txid[32],
+                                 struct zslp_validity_fingerprint *fp)
+{
+    memset(fp, 0, sizeof(*fp));
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT status,reason,input_units,output_units,burned_units,"
+            "minted_units FROM zslp_validity WHERE txid=?", -1, &s, NULL) !=
+            SQLITE_OK || !s)
+        return;
+    AR_BIND_BLOB(s, 1, txid, 32);
+    if (ar_step_checked(s, "zslp validity fingerprint", NULL) == ZCL_STEP_ROW) {
+        fp->present = true;
+        fp->status = AR_COL_INT(s, 0);
+        const char *why = AR_COL_TEXT(s, 1);
+        snprintf(fp->reason, sizeof(fp->reason), "%s", why ? why : "");
+        for (int i = 0; i < 4; i++)
+            fp->units[i] = AR_COL_INT(s, 2 + i);
+    }
+    AR_FINALIZE(s);
+}
+
+static bool validity_fingerprint_differs(
+    const struct zslp_validity_fingerprint *a,
+    const struct zslp_validity_fingerprint *b)
+{
+    return a->present != b->present || a->status != b->status ||
+           strcmp(a->reason, b->reason) != 0 ||
+           memcmp(a->units, b->units, sizeof(a->units)) != 0;
+}
+
 /* Judges one stored transaction from the rows of its inputs as they stand. */
 static bool validity_judge_stored(struct node_db *ndb, const uint8_t txid[32],
                                   struct zslp_input_row *rows)
@@ -849,16 +902,29 @@ static bool validity_judge_stored(struct node_db *ndb, const uint8_t txid[32],
     int32_t height = 0;
     if (!read_slp_script(ndb, txid, script, &script_len, &height))
         return false; // raw-return-ok:caller records missing ancestry
+    const bool cross = g_fold_height >= 0 && height != g_fold_height;
+    struct zslp_validity_fingerprint before;
+    if (cross)
+        validity_fingerprint(ndb, txid, &before);
     struct slp_message msg;
+    bool saved;
     if (!slp_parse(script, script_len, &msg)) {
         struct zslp_validity_row row;
         memset(&row, 0, sizeof(row));
         memcpy(row.txid, txid, 32);
         row.block_height = height;
         row_set(&row, ZSLP_VALIDITY_INVALID, "malformed_slp");
-        return validity_save(ndb, &row);
+        saved = validity_save(ndb, &row);
+    } else {
+        saved = validate_message(ndb, txid, NULL, &msg, height, rows);
     }
-    return validate_message(ndb, txid, NULL, &msg, height, rows);
+    if (cross) {
+        struct zslp_validity_fingerprint after;
+        validity_fingerprint(ndb, txid, &after);
+        if (validity_fingerprint_differs(&before, &after))
+            g_fold_cross_height_write = true;
+    }
+    return saved;
 }
 
 /* Records a walk the bound refused. Only this transaction's row moves, to
@@ -1069,9 +1135,9 @@ static void validity_apply_height_digest(struct sha3_256_ctx *ctx,
     }
 }
 
-bool zslp_validity_apply_height(struct node_db *ndb, int32_t height,
-                                const uint8_t prev_digest[32],
-                                uint8_t out_digest[32])
+static bool validity_apply_height_impl(struct node_db *ndb, int32_t height,
+                                     const uint8_t prev_digest[32],
+                                     uint8_t out_digest[32])
 {
     if (!ndb || !ndb->open || height < 0 || !prev_digest || !out_digest)
         LOG_FAIL("zslp_validity", "apply_height: invalid argument");
@@ -1114,6 +1180,29 @@ bool zslp_validity_apply_height(struct node_db *ndb, int32_t height,
     AR_FINALIZE(s);
     sha3_256_finalize(&ctx, out_digest);
     return true;
+}
+
+bool zslp_validity_apply_height_ex(struct node_db *ndb, int32_t height,
+                                   const uint8_t prev_digest[32],
+                                   uint8_t out_digest[32],
+                                   bool *cross_height_write)
+{
+    g_fold_height = height;
+    g_fold_cross_height_write = false;
+    bool ok = validity_apply_height_impl(ndb, height, prev_digest, out_digest);
+    if (cross_height_write)
+        *cross_height_write = g_fold_cross_height_write;
+    g_fold_height = -1;
+    g_fold_cross_height_write = false;
+    return ok;
+}
+
+bool zslp_validity_apply_height(struct node_db *ndb, int32_t height,
+                                const uint8_t prev_digest[32],
+                                uint8_t out_digest[32])
+{
+    return zslp_validity_apply_height_ex(ndb, height, prev_digest, out_digest,
+                                         NULL);
 }
 
 bool zslp_validity_is_caught_up(struct node_db *ndb, int32_t provable_tip,

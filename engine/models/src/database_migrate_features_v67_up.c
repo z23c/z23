@@ -594,14 +594,15 @@ static int db_migrate_step_86(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
-/* Both board indexes are additive and preserve the compatibility floor. */
-static int db_migrate_board_index(struct node_db *ndb, int *current_ver,
-                                  int *floor_ver, int *applied, int version,
-                                  const char *index_sql, const char *stamp_sql)
+/* Additive single-statement steps (indexes, new rebuildable tables) preserve
+ * the compatibility floor: an older binary still opens the database. */
+static int db_migrate_additive_sql(struct node_db *ndb, int *current_ver,
+                                   int *floor_ver, int *applied, int version,
+                                   const char *add_sql, const char *stamp_sql)
 {
     if (*current_ver >= version) return 0;
-    if (!node_db_exec(ndb, index_sql))
-        LOG_RETURN(-1, "db", "migrate v%d: board index failed", version);
+    if (!node_db_exec(ndb, add_sql))
+        LOG_RETURN(-1, "db", "migrate v%d: additive statement failed", version);
     if (!node_db_exec(ndb, stamp_sql))
         LOG_RETURN(-1, "db", "migrate v%d: migration stamp failed", version);
     DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, version, *floor_ver);
@@ -634,7 +635,7 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_step_86(ndb, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_board_index(ndb, current_ver, floor_ver, applied, 87,
+    if (db_migrate_additive_sql(ndb, current_ver, floor_ver, applied, 87,
             "CREATE INDEX IF NOT EXISTS idx_fleet_board_wiki_latest "
             "ON fleet_board_posts(kind,slug,created_at DESC,id DESC)",
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('087')") < 0)
@@ -643,10 +644,23 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_wallet_additive(ndb, 89, current_ver, floor_ver, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_board_index(ndb, current_ver, floor_ver, applied, 90,
+    if (db_migrate_additive_sql(ndb, current_ver, floor_ver, applied, 90,
             "CREATE INDEX IF NOT EXISTS idx_fleet_board_app_page "
             "ON fleet_board_posts(room,scope,kind,created_at DESC,id DESC)",
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('090')") < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    /* v91: bounded per-height digest history of the zslp_ledger and
+     * op_return_index catalogs, so a reorg within the window rewinds them
+     * exactly instead of dropping them. A derived, rebuildable table that
+     * nothing outside those two catalogs reads. */
+    if (db_migrate_additive_sql(ndb, current_ver, floor_ver, applied, 91,
+            "CREATE TABLE IF NOT EXISTS catalog_digest_history("
+            "catalog INTEGER NOT NULL CHECK(catalog IN (1,2)),"
+            "height INTEGER NOT NULL CHECK(height>=0),"
+            "digest BLOB NOT NULL CHECK(length(digest)=32),"
+            "tainted INTEGER NOT NULL DEFAULT 0 CHECK(tainted IN (0,1)),"
+            "PRIMARY KEY(catalog,height)) WITHOUT ROWID",
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('091')") < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     *version_out = *current_ver;
     *floor_out = *floor_ver;

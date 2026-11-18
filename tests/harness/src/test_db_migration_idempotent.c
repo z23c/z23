@@ -964,7 +964,7 @@ static int t_v90_board_page_index(void)
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='090'"), 0);
         ASSERT(db_mig_board_row_matches(db.db, FLEET_BOARD_KIND_OFFER));
         ASSERT(node_db_migrate(&db, NULL) > 0);
-        ASSERT_EQ(node_db_schema_version(&db), 90);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
         ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='090'"), 1);
         ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_fleet_board_app_page' AND sql='CREATE INDEX idx_fleet_board_app_page ON fleet_board_posts(room,scope,kind,created_at DESC,id DESC)'"), 1);
@@ -973,9 +973,51 @@ static int t_v90_board_page_index(void)
         ASSERT_EQ(node_db_migrate(&db, NULL), 0);
         db_mig_close_raw_handle(&db); raw_open = false;
         ASSERT(node_db_open(&db, path)); opened = true;
-        ASSERT_EQ(node_db_schema_version(&db), 90);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
         ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
         ASSERT(db_mig_board_row_matches(db.db, FLEET_BOARD_KIND_OFFER));
+        PASS();
+    } _test_next:;
+    if (raw_open) db_mig_close_raw_handle(&db);
+    if (opened) node_db_close(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
+/* v91 adds the rebuildable catalog_digest_history table: additive, floor
+ * preserving, idempotent, and never touching the rows an earlier run left. */
+static int t_v91_catalog_digest_history(void)
+{
+    int failures = 0; char dir[256], path[512];
+    db_mig_path(dir, sizeof(dir), "v91_catalog_history"); mkdir_p(dir);
+    (void)snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0}; bool opened = false, raw_open = false;
+    TEST("db_mig: v91 adds the catalog digest history table, idempotently") {
+        ASSERT(node_db_open(&db, path)); node_db_close(&db);
+        sqlite3 *raw = NULL; ASSERT(sqlite3_open(path, &raw) == SQLITE_OK);
+        ASSERT(db_mig_exec_raw(raw, "DROP TABLE IF EXISTS catalog_digest_history"));
+        ASSERT(db_mig_exec_raw(raw, "DELETE FROM schema_migrations WHERE version='091'"));
+        ASSERT(db_mig_stamp_schema(raw, 90)); ASSERT(db_mig_stamp_floor(raw, 79));
+        ASSERT(sqlite3_close(raw) == SQLITE_OK);
+        ASSERT(db_mig_open_raw_handle(&db, path)); raw_open = true;
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE name='catalog_digest_history'"), 0);
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='091'"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM pragma_table_info('catalog_digest_history') WHERE name IN ('catalog','height','digest','tainted')"), 4);
+        ASSERT(db_mig_exec_raw(db.db, "INSERT INTO catalog_digest_history(catalog,height,digest,tainted) VALUES(1,7,zeroblob(32),0)"));
+        ASSERT_EQ(node_db_migrate(&db, NULL), 0);
+        /* Re-migrating from a stamp below 91 must not touch the existing row. */
+        ASSERT(db_mig_exec_raw(db.db, "DELETE FROM schema_migrations WHERE version='091'"));
+        ASSERT(db_mig_stamp_schema(db.db, 90));
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM catalog_digest_history WHERE catalog=1 AND height=7"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='091'"), 1);
+        db_mig_close_raw_handle(&db); raw_open = false;
+        ASSERT(node_db_open(&db, path)); opened = true;
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
         PASS();
     } _test_next:;
     if (raw_open) db_mig_close_raw_handle(&db);
@@ -2556,6 +2598,7 @@ int test_db_migration_idempotent(void)
     failures += t_v88_height_encoding_stamp_retry();
     failures += t_v89_bound_cutover_additive();
     failures += t_v90_board_page_index();
+    failures += t_v91_catalog_digest_history();
     failures += t_v20_wallet_notes_upgrade_adds_source();
     failures += t_reopen_is_idempotent();
     failures += t_market_content_registry_schema();

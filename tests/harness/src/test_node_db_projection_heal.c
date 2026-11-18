@@ -23,6 +23,8 @@
 #include "models/block.h"
 #include "models/database.h"
 #include "services/node_db_catchup_service.h"
+#include "services/explorer_unwind_service.h"
+#include "models/zslp_ledger.h"
 #include "chain/chain.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -215,6 +217,41 @@ static int ph_check_reorg_no_spurious_rewind(void)
              r1 == 1 && node_db_sync_get_tip_height(&x.ndb) == 1);
     if (x.opened)
         failures += ph_noop_checks(&x);
+    ph_fork_close(&x);
+    return failures;
+}
+
+/* The reorg unwind takes the catalog fold guards. While a fold still holds
+ * one the unwind changes nothing, so the cursor must NOT move (a rewind
+ * without the unwind would re-walk the winner over the loser's rows); the
+ * next tick retries and heals. */
+static int ph_check_unwind_deferred_while_fold_busy(void)
+{
+    int failures = 0;
+    struct ph_fork_fx x;
+    memset(&x, 0, sizeof(x));
+    ph_fork_open(&x, "defer", BLOCK_HAVE_DATA);
+    int r1 = x.opened
+        ? node_db_catchup_service_run(&x.ndb, &x.ac, NULL, x.dir) : -1;
+    active_chain_init(&x.ac);
+    bool swapped = x.opened && r1 == 1 &&
+                   active_chain_install_tip_slot(&x.ac, &x.slotB);
+    explorer_unwind_test_set_guard_wait_ms(30);
+    bool held = zslp_ledger_fold_try_begin();
+    bool deferred = swapped && held &&
+        !node_db_catchup_service_rewind_stale_fork(&x.ndb, &x.ac, x.dir);
+    PH_CHECK("reorg while a catalog fold holds its guard: the unwind is "
+             "deferred, cursor and loser row untouched",
+             deferred && node_db_sync_get_tip_height(&x.ndb) == 1 &&
+             ph_connected_rows(&x.ndb, 1, x.hashA.data) == 1);
+    if (held)
+        zslp_ledger_fold_end();
+    bool healed = swapped &&
+        node_db_catchup_service_rewind_stale_fork(&x.ndb, &x.ac, x.dir);
+    PH_CHECK("the next tick, with the fold done, unwinds and rewinds the "
+             "cursor",
+             healed && node_db_sync_get_tip_height(&x.ndb) < 1);
+    explorer_unwind_test_set_guard_wait_ms(-1);
     ph_fork_close(&x);
     return failures;
 }
@@ -595,6 +632,7 @@ int test_node_db_projection_heal(void)
 #endif
     failures += ph_check_reorg_replaces_projected_tip();
     failures += ph_check_reorg_no_spurious_rewind();
+    failures += ph_check_unwind_deferred_while_fold_busy();
     failures += ph_check_finalize_cursor();
     failures += ph_check_lean_replay_keeps_roots();
     printf("node_db_projection_heal: %d failures\n", failures);

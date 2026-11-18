@@ -104,6 +104,13 @@ QB_COLUMN(op_return_index, tag_text)
 QB_COLUMN(op_return_index, payload_len)
 QB_COLUMN(op_return_index, payload_sha3)
 
+/* catalog_digest_history — schema v91, database_migrate_features_v67_up.c */
+QB_TABLE(catalog_digest_history)
+QB_COLUMN(catalog_digest_history, catalog)
+QB_COLUMN(catalog_digest_history, height)
+QB_COLUMN(catalog_digest_history, digest)
+QB_COLUMN(catalog_digest_history, tainted)
+
 /* zswap_ads — schema v48, database_migrate_features_v30_up.c */
 QB_TABLE(zswap_ads)
 QB_COLUMN(zswap_ads, quote_root)

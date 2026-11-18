@@ -44,6 +44,8 @@
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/boot_status.h"
+#include "util/blocker.h"
+#include "services/explorer_unwind_service.h"
 #include "util/ar_step_readonly.h"
 #include "util/safe_alloc.h"
 #include <stdio.h>
@@ -441,6 +443,9 @@ bool boot_reindex_explorer(struct node_db *ndb)
                  "(reindex may not re-walk)");
         ok = false;
     }
+    /* A truncate + re-walk from genesis supersedes a failed reorg unwind. */
+    if (ok)
+        blocker_clear(EXPLORER_UNWIND_BLOCKER_ID);
     return ok;
 }
 

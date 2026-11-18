@@ -167,6 +167,13 @@ static bool backfill_adopt_base(struct node_db *ndb,
                  "backfill: failed to persist adopted base_height=%d",
                  next.base_height);
 
+    /* The remembered per-height digests belonged to the old base's chain. */
+    if (!catalog_history_clear(ndb, CATALOG_HISTORY_OP_RETURN_INDEX))
+        LOG_WARN("op_return_index",
+                 "backfill: digest history not cleared at adopted "
+                 "base_height=%d — a rewind verifies it before trusting it",
+                 next.base_height);
+
     /* Rows below the new base are outside the declared range: the digest
      * chain does not cover them and no verifier could reproduce them. */
     if (!op_return_index_prune_below(ndb, next.base_height))
@@ -354,12 +361,13 @@ static bool backfill_fold_genesis_digest(struct node_db *ndb,
                                          struct op_return_index_row *rows)
 {
     uint8_t genesis_digest[32];
+    const struct op_return_index_cursor prev = *cur;
     op_return_index_fold_block_digest(cur->base_height, cur->base_digest,
                                       digest, 0, bi->phashBlock->data,
                                       rows, 0, genesis_digest);
     cur->height = 0;
     memcpy(cur->digest, genesis_digest, 32);
-    if (!op_return_index_set_cursor(ndb, cur))
+    if (!op_return_index_commit_fold(ndb, &prev, cur))
         return false; /* raw-return-ok: caller logs the cursor persist failure */
     memcpy(digest, genesis_digest, 32);
     return true;
@@ -373,12 +381,13 @@ static bool backfill_fold_digest_persist(struct node_db *ndb,
                                          size_t n_rows)
 {
     uint8_t new_digest[32];
+    const struct op_return_index_cursor prev = *cur;
     op_return_index_fold_block_digest(cur->base_height, cur->base_digest,
                                       digest, h, bi->phashBlock->data,
                                       rows, n_rows, new_digest);
     cur->height = h;
     memcpy(cur->digest, new_digest, 32);
-    if (!op_return_index_set_cursor(ndb, cur))
+    if (!op_return_index_commit_fold(ndb, &prev, cur))
         return false; /* raw-return-ok: caller logs the cursor persist failure */
     memcpy(digest, new_digest, 32);
     return true;

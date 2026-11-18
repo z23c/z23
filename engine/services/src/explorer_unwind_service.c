@@ -18,7 +18,7 @@
  *      a winner RENEW or TRANSFER ran twice over state it had already
  *      changed.
  *
- * The fix is exact and needs no new table or schema version:
+ * The fix is exact:
  *
  *   - everything stamped with a height above `fork_height` is deleted;
  *   - when the stale range carried any ZNAM / ZID / ZDIR operation (or a
@@ -28,12 +28,24 @@
  *     runs. The common reorg (no overlay operation in the stale range) pays
  *     only the stamped deletes;
  *   - the two cursor-owning derived catalogs (zslp_ledger, op_return_index)
- *     carry a running digest that cannot be rewound, so when their cursor is
- *     above the fork they are truncated and their own services re-derive
- *     them, exactly as a reindex does.
+ *     carry a running digest that chains every folded height. Each keeps a
+ *     bounded per-height digest history (models/catalog_digest_history.h, as
+ *     deep as the catchup fork scan), so a reorg within that window rewinds
+ *     the catalog EXACTLY: rows above the fork go, spends above it are
+ *     undone, cursor = fork and digest = the stored digest at the fork. Only
+ *     a reorg deeper than the window, or a catalog that predates the history,
+ *     falls back to the old drop-and-rebuild (a WARN names the reason);
+ *   - the `transactions` table is pruned by block hash against the active
+ *     chain when the caller can supply it, never by height alone (see
+ *     unwind_transactions);
+ *   - the two catalog backfills are excluded while the unwind runs (fold
+ *     guards, bounded wait, lock order documented at unwind_take_guards).
  *
  * All of it runs in one transaction: a failure leaves the projection as it
- * was. node.db ONLY; never consulted by consensus. */
+ * was. node.db ONLY; never consulted by consensus.
+ *
+ * Knowingly NOT unwound: the append-only ZNAM event-log projection. That gap
+ * predates this change and is out of its scope. */
 
 #include "services/explorer_unwind_service.h"
 #include "models/explorer_index.h"
@@ -41,6 +53,8 @@
 #include "models/activerecord.h"
 #include "models/op_return_index.h"
 #include "models/zslp_ledger.h"
+#include "platform/time_compat.h"
+#include "util/blocker.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "overlay/overlay_projection.h"
@@ -53,12 +67,16 @@
 #include "znam/znam.h"
 #include "zid/zid_anchor.h"
 
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* Every table below carries a block height on each row; the derived row is a
  * pure function of the block at that height (and of rows below it), so a
- * delete above the fork is exact. */
+ * delete above the fork is exact. The rows of the two cursor-owning catalogs
+ * (zslp_ledger, zslp_validity, op_return_index) are NOT listed: their models
+ * delete them together with the cursor/digest rewind they belong to. */
 static const char *const k_stamped_deletes[] = {
     "DELETE FROM tx_outputs WHERE block_height>?",
     "DELETE FROM tx_inputs WHERE block_height>?",
@@ -68,18 +86,10 @@ static const char *const k_stamped_deletes[] = {
     "DELETE FROM joinsplits WHERE block_height>?",
     "DELETE FROM sprout_nullifiers WHERE block_height>?",
     "DELETE FROM view_integrity WHERE height>?",
-    "DELETE FROM op_return_index WHERE height>?",
     "DELETE FROM zslp_transfers WHERE block_height>?",
-    "DELETE FROM zslp_validity WHERE block_height>?",
-    "DELETE FROM zslp_ledger WHERE created_height>?",
     "DELETE FROM zslp_tokens WHERE genesis_height>?",
     "DELETE FROM zanc_anchors WHERE height>?",
 };
-
-/* A spend recorded above the fork un-happens with the block. */
-static const char k_ledger_unspend[] =
-    "UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
-    " WHERE spent_height>?";
 
 /* Tables whose rows are mutated in place by overlay operations. They are
  * rebuilt from the chain, never patched. */
@@ -302,25 +312,135 @@ static bool unwind_replay(struct node_db *ndb,
     return ok;
 }
 
-/* A derived catalog that owns a cursor and a running digest cannot be rewound
- * to an earlier height; above the fork it is dropped and re-derived. */
-static bool unwind_derived_catalogs(struct node_db *ndb, int fork_height)
+/* The two cursor-owning derived catalogs unwind themselves: each deletes its
+ * rows above the fork and, when its cursor was above the fork, restores the
+ * cursor and digest exactly from its bounded digest history, or truncates
+ * for its own backfill to re-derive when the history cannot prove the fork
+ * (models/catalog_digest_history.h). */
+static bool unwind_derived_catalogs(struct node_db *ndb, int fork_height,
+                                    struct explorer_unwind_report *report)
 {
-    int32_t ledger_h = -1;
-    uint8_t digest[32];
-    bool ok = zslp_ledger_get_cursor(ndb, &ledger_h, digest);
-    if (ok)
-        ok = ledger_h > fork_height
-                 ? zslp_ledger_truncate(ndb)
-                 : unwind_exec_height(ndb, k_ledger_unspend, fork_height);
-
-    int32_t cursor = -1, base = 0;
-    if (ok && op_return_index_get_cursor_heights(ndb, &cursor, &base) &&
-        cursor > fork_height)
-        ok = op_return_index_truncate(ndb);
-    if (!ok)
+    enum catalog_rewind zl = zslp_ledger_unwind_above(ndb, fork_height);
+    enum catalog_rewind oi = zl == CATALOG_REWIND_ERROR
+                                 ? CATALOG_REWIND_ERROR
+                                 : op_return_index_unwind_above(ndb,
+                                                                fork_height);
+    if (report) {
+        report->zslp_ledger = zl;
+        report->op_return_index = oi;
+    }
+    if (zl == CATALOG_REWIND_ERROR || oi == CATALOG_REWIND_ERROR) {
         LOG_ERROR("explorer", "unwind: derived catalogs could not be reset "
                   "at fork height %d", fork_height);
+        return false;
+    }
+    return true;
+}
+
+/* The transactions table (txid -> block hash/height) is written by the same
+ * catchup walk (sync_block_lean -> db_tx_save) and by the snapshot txindex
+ * import. It is NOT height-stamped state a blind delete may touch: an
+ * imported or lean row above the fork can be a valid row of the ACTIVE chain
+ * whose block was never walked, and deleting it loses a row nothing rewrites.
+ *
+ * The exact rule needs the active chain: a row above the fork is stale
+ * precisely when its block hash is not the active chain's hash at that
+ * height. Such a row describes a transaction in a block the reorg removed;
+ * a transaction of the winning branch is rewritten by the re-walk (db_tx_save
+ * replaces by txid), and one only the loser carried would stay forever.
+ * Rows whose hash IS the active hash are kept. Without a hash source
+ * (chain->active_hash == NULL) the table is left alone. */
+struct unwind_block_ref {
+    int height;
+    uint8_t hash[32];
+};
+
+static bool unwind_collect_blocks_above(struct node_db *ndb, int fork_height,
+                                        struct unwind_block_ref **out,
+                                        size_t *n_out)
+{
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_BOOL(ndb, s,
+        "SELECT block_height,block_hash FROM transactions"
+        " WHERE block_height>? GROUP BY block_height,block_hash");
+    AR_BIND_INT(s, 1, fork_height);
+    struct unwind_block_ref *refs = NULL;
+    size_t n = 0, cap = 0;
+    bool ok = true;
+    enum zcl_step rc = ZCL_STEP_ROW;
+    while (ok && (rc = ar_step_checked(s, "unwind transactions scan", NULL)) ==
+                       ZCL_STEP_ROW) {
+        if (AR_COL_BYTES(s, 1) != 32)
+            continue;
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 64;
+            struct unwind_block_ref *grown = zcl_realloc(
+                refs, ncap * sizeof(*refs), "unwind transactions blocks");
+            if (!grown) {
+                LOG_ERROR("explorer", "unwind: out of memory for %zu block "
+                          "refs", ncap);
+                ok = false;
+                break;
+            }
+            refs = grown;
+            cap = ncap;
+        }
+        refs[n].height = (int)AR_COL_INT(s, 0);
+        memcpy(refs[n].hash, sqlite3_column_blob(s, 1), 32);
+        n++;
+    }
+    AR_FINALIZE(s);
+    if (rc == ZCL_STEP_ERROR) {
+        LOG_ERROR("explorer", "unwind: transactions scan step failed");
+        ok = false;
+    }
+    if (!ok) {
+        free(refs);
+        return false;
+    }
+    *out = refs;
+    *n_out = n;
+    return true;
+}
+
+static bool unwind_delete_block_rows(struct node_db *ndb, int fork_height,
+                                     const uint8_t hash[32])
+{
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_BOOL(ndb, s,
+        "DELETE FROM transactions WHERE block_hash=? AND block_height>?");
+    AR_BIND_BLOB(s, 1, hash, 32);
+    AR_BIND_INT(s, 2, fork_height);
+    bool ok = false;
+    AR_FINALIZE_STEP_DONE(s, ok);
+    if (!ok)
+        LOG_ERROR("explorer", "unwind: transactions delete failed");
+    return ok;
+}
+
+static bool unwind_transactions(struct node_db *ndb, int fork_height,
+                                const struct explorer_unwind_chain *chain,
+                                struct explorer_unwind_report *report)
+{
+    if (!chain || !chain->active_hash)
+        return true;
+    struct unwind_block_ref *refs = NULL;
+    size_t n = 0;
+    if (!unwind_collect_blocks_above(ndb, fork_height, &refs, &n))
+        return false;  // raw-return-ok:the collector logged the failure
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++) {
+        uint8_t active[32];
+        bool on_chain = chain->active_hash(chain->ctx, refs[i].height,
+                                           active) &&
+                        memcmp(active, refs[i].hash, 32) == 0;
+        if (on_chain)
+            continue;
+        ok = unwind_delete_block_rows(ndb, fork_height, refs[i].hash);
+        if (ok && report)
+            report->stale_blocks_in_transactions++;
+    }
+    free(refs);
     return ok;
 }
 
@@ -334,7 +454,8 @@ static bool unwind_stamped_deletes(struct node_db *ndb, int fork_height)
 }
 
 static bool unwind_body(struct node_db *ndb, int fork_height,
-                        explorer_block_reader_fn read, void *rctx)
+                        const struct explorer_unwind_chain *chain,
+                        struct explorer_unwind_report *report)
 {
     struct overlay_registry reg;
     if (!unwind_replay_registry(&reg)) {
@@ -355,9 +476,11 @@ static bool unwind_body(struct node_db *ndb, int fork_height,
 
     /* The derived catalogs read the stamped tables, so they settle first. */
     if (ok)
-        ok = unwind_derived_catalogs(ndb, fork_height);
+        ok = unwind_derived_catalogs(ndb, fork_height, report);
     if (ok)
         ok = unwind_stamped_deletes(ndb, fork_height);
+    if (ok)
+        ok = unwind_transactions(ndb, fork_height, chain, report);
     if (ok && touched && !complete) {
         LOG_WARN("explorer", "unwind: overlay operations above height %d but "
                  "the projection is not contiguous up to it; ZNAM/ZID/ZDIR "
@@ -367,23 +490,91 @@ static bool unwind_body(struct node_db *ndb, int fork_height,
         LOG_WARN("explorer", "unwind: overlay operations above height %d; "
                  "rebuilding ZNAM/ZID/ZDIR state from the chain",
                  fork_height);
-        ok = unwind_replay(ndb, &reg, fork_height, read, rctx);
+        ok = unwind_replay(ndb, &reg, fork_height,
+                           chain ? chain->read : NULL,
+                           chain ? chain->ctx : NULL);
     }
     return ok;
 }
 
-struct zcl_result explorer_index_unwind_above(struct node_db *ndb,
-                                              int fork_height,
-                                              explorer_block_reader_fn read,
-                                              void *rctx)
+/* ── The fold guards ───────────────────────────────────────────────────
+ *
+ * zslp_ledger and op_return_index each have a backfill that, on the shared
+ * node.db connection, reads its cursor, folds, and writes cursor+digest back.
+ * An unwind that runs between the read and the write would have its restored
+ * cursor overwritten by a stale one. The unwind therefore holds BOTH fold
+ * guards around its transaction.
+ *
+ * Lock order: zslp_ledger guard, then op_return_index guard; release in
+ * reverse. All acquisition is try-lock. The unwind never holds one guard
+ * while waiting for the other (it gives the first back and retries), and the
+ * backfills never wait for a guard (a held guard skips their tick), so there
+ * is no hold-and-wait and no cycle.
+ *
+ * Bounded wait: a fold batch is at most a few seconds, so the unwind polls
+ * for up to UNWIND_GUARD_WAIT_MS. If a guard stays busy it returns
+ * EXPLORER_UNWIND_ERR_BUSY having changed nothing, and the caller must not
+ * rewind the cursor; the next tick retries. */
+#define UNWIND_GUARD_WAIT_MS 10000
+#define UNWIND_GUARD_POLL_MS 20
+
+#ifdef ZCL_TESTING
+static _Atomic int g_guard_wait_ms = UNWIND_GUARD_WAIT_MS;
+
+void explorer_unwind_test_set_guard_wait_ms(int ms)
 {
-    if (!ndb || !ndb->open || fork_height < -1)
-        return ZCL_ERR(-1, "explorer_index_unwind_above: invalid args "
-                       "(fork_height=%d)", fork_height);
+    atomic_store(&g_guard_wait_ms, ms < 0 ? UNWIND_GUARD_WAIT_MS : ms);
+}
+
+static int unwind_guard_wait_ms(void)
+{
+    return atomic_load(&g_guard_wait_ms);
+}
+#else
+static int unwind_guard_wait_ms(void)
+{
+    return UNWIND_GUARD_WAIT_MS;
+}
+#endif
+
+static bool unwind_try_both_guards(void)
+{
+    if (!zslp_ledger_fold_try_begin())
+        return false;  // raw-return-ok:a busy guard is the normal answer; the caller polls
+    if (!op_return_index_fold_try_begin()) {
+        zslp_ledger_fold_end();
+        return false;
+    }
+    return true;
+}
+
+static bool unwind_take_guards(void)
+{
+    const int64_t deadline_us = platform_time_monotonic_us() +
+                                (int64_t)unwind_guard_wait_ms() * 1000;
+    for (;;) {
+        if (unwind_try_both_guards())
+            return true;
+        if (platform_time_monotonic_us() >= deadline_us)
+            return false;
+        platform_sleep_ms(UNWIND_GUARD_POLL_MS);
+    }
+}
+
+static void unwind_release_guards(void)
+{
+    op_return_index_fold_end();
+    zslp_ledger_fold_end();
+}
+
+static struct zcl_result unwind_locked(struct node_db *ndb, int fork_height,
+                                       const struct explorer_unwind_chain *chain,
+                                       struct explorer_unwind_report *report)
+{
     if (!node_db_begin_immediate(ndb))
         return ZCL_ERR(-2, "unwind above height %d: could not open a "
                        "transaction", fork_height);
-    if (!unwind_body(ndb, fork_height, read, rctx)) {
+    if (!unwind_body(ndb, fork_height, chain, report)) {
         if (!node_db_rollback(ndb))
             LOG_ERROR("explorer", "unwind: rollback failed");
         return ZCL_ERR(-3, "unwind above height %d failed; projection left "
@@ -397,4 +588,64 @@ struct zcl_result explorer_index_unwind_above(struct node_db *ndb,
                        fork_height);
     }
     return ZCL_OK;
+}
+
+/* The failure signal. A failed unwind leaves the projection as it was while
+ * the caller has (or will have) moved its cursor, so the losing branch may
+ * still be indexed: raise the named blocker, and clear it when a later unwind
+ * succeeds. Invalid arguments and a busy guard changed nothing, so they
+ * neither raise nor clear it. */
+static void unwind_note_outcome(int fork_height, const struct zcl_result *res)
+{
+    if (res->ok) {
+        blocker_clear(EXPLORER_UNWIND_BLOCKER_ID);
+        return;
+    }
+    struct blocker_record r;
+    char reason[200];
+    snprintf(reason, sizeof(reason),
+             "reorg unwind to height %d failed (%s): ZNAM/ZID/ZDIR and token "
+             "tables may still hold the losing branch; run -reindex-explorer",
+             fork_height, res->message);
+    if (blocker_init(&r, EXPLORER_UNWIND_BLOCKER_ID, "explorer",
+                     BLOCKER_DEPENDENCY, reason)) {
+        r.escape_deadline_secs = 0; /* a person decides; a later unwind or a
+                                       reindex clears it */
+        (void)blocker_set(&r);
+    }
+}
+
+struct zcl_result explorer_index_unwind_above_chain(
+    struct node_db *ndb, int fork_height,
+    const struct explorer_unwind_chain *chain,
+    struct explorer_unwind_report *report)
+{
+    if (report)
+        memset(report, 0, sizeof(*report));
+    if (!ndb || !ndb->open || fork_height < -1)
+        return ZCL_ERR(-1, "explorer_index_unwind_above: invalid args "
+                       "(fork_height=%d)", fork_height);
+    if (!unwind_take_guards())
+        return ZCL_ERR(EXPLORER_UNWIND_ERR_BUSY, "unwind above height %d: a "
+                       "catalog fold still holds its guard after %d ms; "
+                       "nothing changed, retry on the next tick", fork_height,
+                       unwind_guard_wait_ms());
+    struct zcl_result res = unwind_locked(ndb, fork_height, chain, report);
+    unwind_note_outcome(fork_height, &res);
+    if (res.ok && chain && chain->after_commit &&
+        !chain->after_commit(chain->ctx, fork_height))
+        res = ZCL_ERR(EXPLORER_UNWIND_ERR_HOOK, "unwind above height %d "
+                      "committed but the cursor move that follows it failed",
+                      fork_height);
+    unwind_release_guards();
+    return res;
+}
+
+struct zcl_result explorer_index_unwind_above(struct node_db *ndb,
+                                              int fork_height,
+                                              explorer_block_reader_fn read,
+                                              void *rctx)
+{
+    struct explorer_unwind_chain chain = { .read = read, .ctx = rctx };
+    return explorer_index_unwind_above_chain(ndb, fork_height, &chain, NULL);
 }

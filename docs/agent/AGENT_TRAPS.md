@@ -331,6 +331,25 @@ CLEAN** unless its empty-scan floor is preserved, as the native domain gate now 
   `store_controller.c` and `store_view.c` (token-gated access). Deleting it
   silently zeroes every store customer's balance. If it must go, that is a
   store-migration project, not a hygiene sweep.
+- **Do not "simplify" the reorg unwind of `zslp_ledger` / `op_return_index` back to
+  drop-and-rebuild, and do not drop the digest history or the re-derive floor.**
+  Both catalogs carry a running digest that chains every folded height, so a
+  rebuild after a one-block reorg costs hours on mainnet (and token-gated services
+  refuse while the ledger is behind). `catalog_digest_history` keeps the digest after
+  each of the last `CATALOG_HISTORY_DEPTH` heights so `explorer_index_unwind_above`
+  rewinds exactly (rows above the fork go, cursor and digest come back from the
+  history); only a deeper reorg, or a catalog that predates the history, truncates.
+  Three things are easy to miss. (1) The unwind must hold both fold guards
+  (`zslp_ledger_fold_try_begin`, then `op_return_index_fold_try_begin`) around its
+  transaction AND the projection-cursor move that follows it: both backfills share
+  the node.db connection and write a cursor they read earlier. (2) A zslp VALID or
+  INVALID verdict is final, so after a truncate the live hook would judge new blocks
+  against an empty ledger and keep them INVALID forever; the rebuild records a
+  re-derive floor and the fold discards what the live hook wrote above it. (3) A
+  fold that settles an ancestor stamped at an EARLIER height rewrites a row the
+  rewind cannot restore; such a step is recorded `tainted` and a rewind across it
+  rebuilds. `transactions` is pruned by block hash against the active chain, never
+  by height alone: snapshot-import and lean-walk rows above the fork can be valid.
 - **Verify emptiness against the guard, not against `ls`.** Before deleting any
   top-level directory: `git grep -n '"<dirname>"' -- lib/test tools/lint tools/scripts engine/modules/framework`
   and `git grep -n '<dirname>/' -- tools/lint tools/scripts`. A directory with

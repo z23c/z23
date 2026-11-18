@@ -39,6 +39,7 @@
 #ifndef ZCL_DB_MODEL_ZSLP_LEDGER_H
 #define ZCL_DB_MODEL_ZSLP_LEDGER_H
 
+#include "models/catalog_digest_history.h"
 #include "models/database.h"
 
 #include <stdbool.h>
@@ -81,8 +82,49 @@ bool zslp_ledger_get_cursor(struct node_db *ndb, int32_t *out_height,
 bool zslp_ledger_set_cursor(struct node_db *ndb, int32_t height,
                             const uint8_t digest[32]);
 
-/* Drop-and-rederive: delete every ledger row and reset cursor/digest. */
+/* Drop-and-rederive: delete every ledger row and reset cursor/digest. Also
+ * clears the bounded digest history (it described the dropped chain). */
 bool zslp_ledger_truncate(struct node_db *ndb);
+
+/* Fold guard. Exactly one party may advance, rewind or drop the cursor and
+ * digest at a time: the backfill service holds it for a batch, the reorg
+ * unwind holds it around its transaction. Try-lock only: a holder never
+ * waits for it, so there is no lock cycle. Lock order when both catalogs are
+ * needed: zslp_ledger_fold_try_begin() BEFORE op_return_index_fold_try_begin(),
+ * released in the opposite order. */
+bool zslp_ledger_fold_try_begin(void);
+void zslp_ledger_fold_end(void);
+
+/* Fold one height AND commit it: zslp_ledger_apply_height, then the cursor,
+ * the digest and the bounded digest history entry as one unit (the history is
+ * what lets a reorg rewind the ledger exactly; see
+ * models/catalog_digest_history.h). `prev_height`/`prev_digest` are the cursor
+ * the step starts from. Writes the new digest to out_digest. Returns false on
+ * a DB error (the caller stops the batch and retries; a half-applied height is
+ * harmless because apply_height is idempotent). Needs the fold guard. */
+bool zslp_ledger_fold_and_commit(struct node_db *ndb, int32_t prev_height,
+                                 const uint8_t prev_digest[32],
+                                 int32_t height, uint8_t out_digest[32]);
+
+/* Reorg unwind of the ledger to `fork_height` (the last height both branches
+ * share). Every ledger and validity row stamped above it is deleted and every
+ * spend recorded above it is undone. When the cursor was above the fork it is
+ * also restored: EXACT (cursor = fork, digest from the bounded history) when
+ * the history proves the fork, REBUILD (truncated for the backfill to
+ * re-derive, with a WARN naming why) when it cannot. NOOP: cursor at or below
+ * the fork. Caller holds the fold guard and a transaction. */
+enum catalog_rewind zslp_ledger_unwind_above(struct node_db *ndb,
+                                             int32_t fork_height);
+
+/* The rebuild fallback of the unwind truncates the ledger while the projection
+ * keeps indexing, so the live hook judges new blocks against an empty ledger
+ * and records spends of older tokens INVALID, which the fold then keeps. The
+ * unwind therefore records a re-derive floor (the fork height): the fold
+ * (zslp_ledger_fold_and_commit) discards what the live hook wrote at any
+ * height above it and derives that height itself, in order. The backfill
+ * clears the floor once its cursor reaches the projection tip. */
+bool zslp_ledger_rederive_floor_get(struct node_db *ndb, int32_t *floor_out);
+bool zslp_ledger_rederive_floor_clear(struct node_db *ndb);
 
 /* Reconciliation surface: a holder's spendable token balance =
  * SUM(amount) over that (token_id,address)'s UNSPENT rows. token_id is

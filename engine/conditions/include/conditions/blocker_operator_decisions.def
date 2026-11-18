@@ -386,3 +386,21 @@ ZCL_BLOCKER_DECISION(sapling_tree.tip_root_missing,
     "Sapling root and refused when they disagree, but the wallet refuses "
     "shielded spends while no root is available to check them against. "
     "There is deliberately no automatic repair of the index.")
+
+/* ── Failed reorg unwind (engine/services/src/explorer_unwind_service.c). The
+ * catchup cursor was rewound below a block a reorg removed, but undoing what
+ * the losing branch wrote to the projection failed (the transaction rolled
+ * back, so the projection is exactly as it was). ──────────────────────── */
+ZCL_BLOCKER_DECISION(explorer.unwind_failed,
+    "A person chooses; nothing here is stuck for consensus. The explorer "
+    "projection was not unwound after a reorg, so ZNAM/ZID/ZDIR names, token "
+    "and OP_RETURN catalogs and per-height rows may still describe the losing "
+    "branch until it is repaired. "
+    "OPTION A - do nothing: the next reorg unwind that succeeds clears this "
+    "blocker, and the projection is wrong only where the losing branch "
+    "differed from the winner. "
+    "OPTION B - restart with -reindex-explorer, which truncates the explorer "
+    "projections and re-walks the chain from genesis. Cost: the re-walk time, "
+    "during which explorer, name and token answers are incomplete. "
+    "Consensus, relay and wallet custody are unaffected either way - the "
+    "projection is rebuildable and never consulted by consensus.")
