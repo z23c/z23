@@ -36,12 +36,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Heights of history kept below the newest folded height. Equal to the
- * catchup fork-scan depth (CATCHUP_FORK_SCAN_DEPTH): a reorg the projection
- * rewind can detect is always inside the window. A rewind whose fork is
- * CATALOG_HISTORY_DEPTH or fewer heights below the cursor is exact; one
- * more falls back to rebuild. */
-#define CATALOG_HISTORY_DEPTH 4096
+/* Heights of history kept below the newest folded height. One more than the
+ * catchup fork-scan depth (CATCHUP_FORK_SCAN_DEPTH = 4096): that scan finds a
+ * stale row as deep as cursor - 4096 and rewinds to the height below it, so
+ * the deepest fork it can produce is cursor - 4097, and a reorg the
+ * projection rewind can detect is always inside the window. A rewind whose
+ * fork is CATALOG_HISTORY_DEPTH or fewer heights below the cursor is exact;
+ * one more falls back to rebuild. */
+#define CATALOG_HISTORY_DEPTH 4097
 
 enum catalog_history_kind {
     CATALOG_HISTORY_ZSLP_LEDGER = 1,

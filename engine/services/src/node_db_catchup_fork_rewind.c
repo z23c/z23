@@ -130,9 +130,11 @@ static bool fork_move_cursor(void *ctx, int fork_h)
 
 /* The history window of the derived catalogs must cover every reorg this scan
  * can detect, or an exact rewind would be impossible for a depth the
- * projection itself rewinds. */
-static_assert(CATCHUP_FORK_SCAN_DEPTH <= CATALOG_HISTORY_DEPTH,
-              "catalog digest history must be as deep as the fork scan");
+ * projection itself rewinds. The scan finds a stale row as deep as
+ * cursor - CATCHUP_FORK_SCAN_DEPTH and the fork is the height below it. */
+static_assert(CATCHUP_FORK_SCAN_DEPTH + 1 <= CATALOG_HISTORY_DEPTH,
+              "catalog digest history must cover the deepest fork the scan "
+              "can rewind to");
 
 /* Rewind the cursor to the highest height below `stale_h` that has an
  * active-chain slot (a sparse chain may lack the slot right below); none ->
