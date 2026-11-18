@@ -867,6 +867,128 @@ static int test_code_packet_deterministic(void)
     return failures;
 }
 
+extern bool zcl_packet_test_merge(struct zcl_command_reply *reply,
+                                  struct json_value *out);
+
+static int test_code_packet_transfer(void)
+{
+    int failures = 0;
+    TEST("code_packet: final transfer keeps the completed packet on allocation fault") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_index_build());
+        size_t before = json_test_live_blocks();
+        const char *syms[] = { "pk_small_add" };
+        struct zcl_command_reply original, target;
+        pkt_call("Transfer packet", syms, 1, NULL, 0, 20, &original);
+        ASSERT(original.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get(&original.data, "name") != NULL);
+        size_t len = json_write(&original.data, NULL, 0);
+        char *expected = malloc(len + 1);
+        char *actual = malloc(len + 1);
+        ASSERT(expected != NULL && actual != NULL);
+        (void)json_write(&original.data, expected, len + 1);
+        zcl_command_reply_init(&target, "zcl.code_packet.v1");
+        zcl_alloc_fault_fail_next("json_children");
+        bool transferred = zcl_packet_test_merge(&target, &original.data);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(armed);
+        ASSERT(transferred);
+        ASSERT(json_get(&target.data, "name") != NULL);
+        ASSERT_EQ(json_write(&target.data, actual, len + 1), len);
+        ASSERT_STR_EQ(actual, expected);
+        free(actual);
+        free(expected);
+        zcl_command_reply_free(&target);
+        zcl_command_reply_free(&original);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
+static int test_code_packet_transfer_prefilled(void)
+{
+    int failures = 0;
+    TEST("code_packet: prefilled transfer appends and reports allocation failure") {
+        size_t before = json_test_live_blocks();
+        struct zcl_command_reply reply;
+        struct json_value out;
+        zcl_command_reply_init(&reply, "zcl.code_packet.v1");
+        json_init(&out); json_set_object(&out);
+        ASSERT(json_push_kv_str(&reply.data, "name", "prior"));
+        ASSERT(json_push_kv_str(&out, "name", "packet"));
+        ASSERT(zcl_packet_test_merge(&reply, &out));
+        ASSERT_EQ(reply.data.num_children, 2);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "name")), "prior");
+        ASSERT_STR_EQ(json_get_str(&reply.data.children[1]), "packet");
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.code_packet.v1");
+        for (int i = 0; i < 8; i++)
+            ASSERT(json_push_kv_int(&reply.data, "prior", i));
+        zcl_alloc_fault_fail_next("json_children");
+        bool transferred = zcl_packet_test_merge(&reply, &out);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(!transferred);
+        ASSERT_EQ(reply.data.num_children, 8);
+        ASSERT_EQ(out.num_children, 1);
+        json_free(&out);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
+extern bool zcl_packet_test_finish(struct zcl_command_reply *reply,
+                                   struct json_value *out, const char *summary);
+
+static int test_code_packet_transfer_late_failure(void)
+{
+    int failures = 0;
+    TEST("code_packet: late transfer and summary failures preserve prior data") {
+        size_t before = json_test_live_blocks();
+        struct zcl_command_reply reply;
+        struct json_value out;
+        zcl_command_reply_init(&reply, "zcl.code_packet.v1");
+        json_init(&out); json_set_object(&out);
+        ASSERT(json_push_kv_str(&reply.data, "prior", "first"));
+        ASSERT(json_push_kv_str(&reply.data, "prior", "second"));
+        ASSERT(json_push_kv_str(&out, "name", "packet"));
+        ASSERT(json_push_kv_str(&out, "goal", "work"));
+        char expected[128], actual[128];
+        size_t len = json_write(&reply.data, expected, sizeof(expected));
+        zcl_alloc_fault_fail_nth("json_push_kv_key", 2);
+        bool transferred = zcl_packet_test_merge(&reply, &out);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(!transferred);
+        ASSERT_EQ(json_write(&reply.data, actual, sizeof(actual)), len);
+        ASSERT_STR_EQ(actual, expected);
+        zcl_alloc_fault_fail_next("json_set_str");
+        transferred = zcl_packet_test_finish(&reply, &out, "packet summary");
+        consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(!transferred);
+        ASSERT_EQ(json_write(&reply.data, actual, sizeof(actual)), len);
+        ASSERT_STR_EQ(actual, expected);
+        json_free(&out);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -888,5 +1010,8 @@ int test_code_packet(void)
     failures += test_code_packet_generation_and_staleness();
     failures += test_code_packet_authority_and_pattern();
     failures += test_code_packet_deterministic();
+    failures += test_code_packet_transfer();
+    failures += test_code_packet_transfer_prefilled();
+    failures += test_code_packet_transfer_late_failure();
     return failures;
 }

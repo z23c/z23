@@ -1199,11 +1199,46 @@ static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
     }
 }
 
-static void pk_merge(struct zcl_command_reply *reply, struct json_value *out)
+static bool pk_merge(struct zcl_command_reply *reply, struct json_value *out)
 {
-    for (size_t i = 0; i < out->num_children; i++)
-        (void)json_push_kv(&reply->data, out->keys[i], &out->children[i]);
+    if (reply->data.type == JSON_OBJ && reply->data.num_children == 0) {
+        json_free(&reply->data);
+        reply->data = *out;
+        json_init(out);
+        return true;
+    }
+    struct json_value staged;
+    json_init(&staged);
+    if (!json_copy_checked(&staged, &reply->data)) return false;
+    for (size_t i = 0; i < out->num_children; i++) {
+        if (!json_push_kv(&staged, out->keys[i], &out->children[i])) {
+            json_free(&staged);
+            return false;
+        }
+    }
+    json_free(&reply->data);
+    reply->data = staged;
+    return true;
 }
+
+static bool pk_finish(struct zcl_command_reply *reply, struct json_value *out,
+                      const char *summary)
+{
+    return json_push_kv_str(out, "summary", summary) && pk_merge(reply, out);
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_packet_test_finish(struct zcl_command_reply *reply,
+                            struct json_value *out, const char *summary)
+{
+    return pk_finish(reply, out, summary);
+}
+
+bool zcl_packet_test_merge(struct zcl_command_reply *reply, struct json_value *out)
+{
+    return pk_merge(reply, out);
+}
+#endif
 
 /* Open the index read-only and bind the run to its generation. */
 static bool pk_open(const struct zcl_command_request *request,
@@ -1287,13 +1322,16 @@ void zcl_native_handle_code_packet(const struct zcl_command_request *request,
         pk_run_free(run);
         return;
     }
-    pk_merge(reply, &out);
     char summary[300];
     (void)snprintf(summary, sizeof(summary),
                    "packet %s: %d excerpt line(s), %d covering group(s), size "
                    "%s", run->f.name, run->f.excerpt_lines, run->f.ngroup,
                    pk_size_class(run->f.max_dependents));
-    (void)json_push_kv_str(&reply->data, "summary", summary);
+    if (!pk_finish(reply, &out, summary))
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "OUT_OF_MEMORY",
+                               "assemble", true, false,
+                               "could not transfer the packet to the reply", "");
     json_free(&out);
     pk_run_free(run);
 }
