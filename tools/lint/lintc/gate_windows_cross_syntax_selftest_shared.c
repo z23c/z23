@@ -164,6 +164,87 @@ int wcs_worker_cap_test(const char *base)
     return 0;
 }
 
+/* Observe the actual persisted plan and its cache-disabled miss-list copy. */
+static int sh_plan_read(const char *path, const char *const *expected, int n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    char line[WCS_PATH + 2];
+    int ok = 1;
+    for (int i = 0; i < n; i++) {
+        if (!fgets(line, sizeof line, f)) { ok = 0; break; }
+        size_t len = strlen(line);
+        if (!len || line[len - 1] != '\n') { ok = 0; break; }
+        line[len - 1] = 0;
+        if (strcmp(line, expected[i]) != 0) { ok = 0; break; }
+    }
+    if (fgetc(f) != EOF || ferror(f)) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    return ok ? 0 : 1;
+}
+
+static int sh_plan_setup(char paths[5][WCS_PATH], const char *base)
+{
+    static const char *const names[] = {"a.c", "b.c", "c.c", "d.c", "missing.c"};
+    static const char *const data[] = {"a", "bbb", "ccc", "ddddddd"};
+    for (int i = 0; i < 5; i++) {
+        shp(paths[i], WCS_PATH, "%s/%s", base, names[i]);
+        if (i < 4 && csr_write(paths[i], data[i]) != 0) return 2;
+    }
+    return 0;
+}
+
+static int sh_plan_cache(const char *base, const char *plan, const char *miss,
+                         const char *const *expected)
+{
+    return setenv("ZCL_LINT_TU_CACHE", "0", 1) != 0 ||
+           wcs_cache_setup("test", "", "", "", base, ".", NULL) ||
+           wcs_cache_plan(plan, miss, base, 0) || sh_plan_read(miss, expected, 4);
+}
+
+static int sh_plan_fallback(char paths[5][WCS_PATH], const char *plan)
+{
+    const char *const expected[] = {paths[3], paths[4]};
+    g_wcs_nsrc = 2;
+    if (wcs_copy(g_wcs_src[0], WCS_PATH, paths[4]) ||
+        wcs_copy(g_wcs_src[1], WCS_PATH, paths[3]) ||
+        wcs_finish_src_list(plan)) return 1;
+    if (sh_plan_read(plan, expected, 2)) return 1;
+    return strcmp(g_wcs_src[0], expected[0]) || strcmp(g_wcs_src[1], expected[1]);
+}
+
+static int sh_plan_order(const char *base)
+{
+    char p[5][WCS_PATH], plan[SH_P], miss[SH_P];
+    if (sh_plan_setup(p, base)) return 2;
+    shp(plan, sizeof plan, "%s/ordered-srcs", base);
+    shp(miss, sizeof miss, "%s/ordered-misses", base);
+    const char *const input[] = {p[0], p[3], p[2], p[1], p[0]};
+    const char *const expected[] = {p[3], p[1], p[2], p[0]};
+    g_wcs_nsrc = 5;
+    for (int i = 0; i < 5; i++)
+        if (wcs_copy(g_wcs_src[i], WCS_PATH, input[i])) return 2;
+    if (wcs_finish_src_list(plan) || g_wcs_nsrc != 4 ||
+        sh_plan_read(plan, expected, 4)) return 1;
+    for (int i = 0; i < 4; i++)
+        if (strcmp(g_wcs_src[i], expected[i]) != 0) return 1;
+    if (sh_plan_cache(base, plan, miss, expected)) return 1;
+    return sh_plan_fallback(p, plan);
+}
+
+int wcs_plan_order_test(const char *base)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 2;
+    if (pid == 0) _exit(sh_plan_order(base));
+    int status;
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    if (got != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return sh_fail("persisted source plan order");
+    return 0;
+}
+
 /* One tree: src/shared.h plus SH_UNITS units that include it. */
 static int sh_producers(const char *tree)
 {

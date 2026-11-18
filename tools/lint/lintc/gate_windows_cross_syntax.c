@@ -593,6 +593,21 @@ static int dedupe_srcs(void)
     return n;
 }
 
+static void sort_by_size(void);
+
+int wcs_finish_src_list(const char *srclist)
+{
+    int n = dedupe_srcs();
+    sort_by_size();
+    FILE *o = fopen(srclist, "w");
+    if (!o) return 2;
+    int failed = 0;
+    for (int i = 0; i < n; i++)
+        if (fprintf(o, "%s\n", g_wcs_src[i]) < 0) failed = 1;
+    if (fclose(o) != 0) failed = 1;
+    return failed ? 2 : 0;
+}
+
 static int get_src_list(void)
 {
     char raw[WCS_PATH], errp[WCS_PATH], srclist[WCS_PATH];
@@ -610,12 +625,7 @@ static int get_src_list(void)
         return 2;
     }
     if (read_src_raw(raw) != 0) return 2;
-    int n = dedupe_srcs();
-    FILE *o = fopen(srclist, "w");
-    if (!o) return 2;
-    for (int i = 0; i < n; i++) fprintf(o, "%s\n", g_wcs_src[i]);
-    fclose(o);
-    return 0;
+    return wcs_finish_src_list(srclist);
 }
 
 struct size_ent { long long size; char path[WCS_PATH]; };
@@ -632,7 +642,6 @@ static int size_cmp(const void *a, const void *b)
 static void sort_by_size(void)
 {
     static struct size_ent ents[WCS_TUS];
-    static char tmp[WCS_TUS][WCS_PATH];
     for (int i = 0; i < g_wcs_nsrc; i++) {
         struct stat st;
         if (stat(g_wcs_src[i], &st) != 0) return;
@@ -640,8 +649,8 @@ static void sort_by_size(void)
         memcpy(ents[i].path, g_wcs_src[i], WCS_PATH);
     }
     qsort(ents, (size_t)g_wcs_nsrc, sizeof ents[0], size_cmp);
-    for (int i = 0; i < g_wcs_nsrc; i++) memcpy(tmp[i], ents[i].path, WCS_PATH);
-    for (int i = 0; i < g_wcs_nsrc; i++) memcpy(g_wcs_src[i], tmp[i], WCS_PATH);
+    for (int i = 0; i < g_wcs_nsrc; i++)
+        memcpy(g_wcs_src[i], ents[i].path, WCS_PATH);
 }
 
 /* ── setup: everything before the self-test phase ───────────────────── */
@@ -694,7 +703,6 @@ static int wcs_setup_sources(void)
         "'make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs' printed no "
         "translation units — NODE_C23_SRCS moved or the target broke");
     if (r) return r;
-    sort_by_size();
     return 0;
 }
 
@@ -770,6 +778,7 @@ int wcs_begin(int selftest_only)
         return 2;
     }
     int rc = inc_scope_selftest();
+    if (rc == 0) rc = wcs_plan_order_test(g_wcs_work);
     if (rc == 0) rc = wcs_setup();
     if (rc == 0) rc = wcs_selftest_phase();
     if (selftest_only || rc != 0) {

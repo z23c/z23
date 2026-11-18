@@ -60,6 +60,8 @@ int wcs_worker_status_test(void);
 int wcs_worker_run(const char *misslist, int jobs, int *started_out);
 int wcs_worker_empty_test(const char *base);
 int wcs_worker_cap_test(const char *base);
+int wcs_finish_src_list(const char *srclist);
+int wcs_plan_order_test(const char *base);
 int wcs_lists_selftest(void);
 extern const char k_wcs_baseline[];
 
