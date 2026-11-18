@@ -669,6 +669,46 @@ static int test_lab_test_stderr(void)
     return failures;
 }
 
+static int test_lab_show_readonly(void)
+{
+    int failures = 0;
+    TEST("lab.show reads receipts without creating build state") {
+        char base[600], receipts[700], path[900], input[256], missing[600];
+        struct zcl_command_reply r;
+        ASSERT(snprintf(base, sizeof(base), "%s/archive", g_lt_dir) > 0);
+        ASSERT(snprintf(receipts, sizeof(receipts), "%s/receipts", base) > 0);
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT_EQ(mkdir(receipts, 0700), 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/%0128d.json", receipts, 0) > 0);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("{\"answer\":42}", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(snprintf(input, sizeof(input), "{\"root\":\"%0128d\"}", 0) > 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
+        ASSERT(lt_call(zcl_native_handle_lab_show, input, "zcl.lab_show.v1", &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(lt_int(&r.data, "receipt", "answer"), 42);
+        zcl_command_reply_free(&r);
+        ASSERT(snprintf(path, sizeof(path), "%s/cc", base) > 0);
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT(snprintf(path, sizeof(path), "%s/run", base) > 0);
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT(snprintf(path, sizeof(path), "%s/zcc", base) > 0);
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT(snprintf(missing, sizeof(missing), "%s/absent", g_lt_dir) > 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", missing, 1), 0);
+        ASSERT(lt_call(zcl_native_handle_lab_show, input, "zcl.lab_show.v1", &r));
+        ASSERT(lt_failed_with(&r, "LAB_NOT_FOUND"));
+        zcl_command_reply_free(&r);
+        ASSERT(access(missing, F_OK) != 0 && errno == ENOENT);
+        PASS();
+    } _test_next:;
+    (void)setenv("Z23_LAB_DIR", g_lt_dir, 1);
+    return failures;
+}
+
+
 static int test_lab_refusals(void)
 {
     int failures = 0;
@@ -1276,6 +1316,7 @@ int test_lab(void)
     failures += test_lab_test_inline_and_cache();
     failures += test_lab_test_stderr();
     failures += test_lab_refusals();
+    failures += test_lab_show_readonly();
     failures += test_lab_unconfined_seam();
     failures += test_lab_case_capture_allocation();
     failures += test_lab_workload();

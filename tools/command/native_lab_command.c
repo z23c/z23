@@ -141,7 +141,7 @@ bool lab_ctx_open(struct lab_ctx *ctx, const char *file,
     memset(ctx, 0, sizeof(*ctx));
     enum lab_err err = file ? lab_source_load(file, &ctx->src) : LAB_OK;
     if (err == LAB_OK)
-        err = lab_dirs_open(&ctx->dirs);
+        err = file ? lab_dirs_open(&ctx->dirs) : lab_dirs_resolve(&ctx->dirs);
     if (err == LAB_OK && file)
         err = lab_toolchain_find(&ctx->tc);
     if (err != LAB_OK) {

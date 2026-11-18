@@ -18,6 +18,12 @@ size_t lab_run_count(void)
     return 0;
 }
 
+enum lab_err lab_dirs_resolve(struct lab_dirs *d)
+{
+    memset(d, 0, sizeof(*d));
+    return LAB_E_UNSUPPORTED;
+}
+
 enum lab_err lab_dirs_open(struct lab_dirs *d)
 {
     memset(d, 0, sizeof(*d));

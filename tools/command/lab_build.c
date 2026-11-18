@@ -53,7 +53,7 @@ static bool lab_base_path(char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
-enum lab_err lab_dirs_open(struct lab_dirs *d)
+enum lab_err lab_dirs_resolve(struct lab_dirs *d)
 {
     memset(d, 0, sizeof(*d));
     if (!lab_base_path(d->base, sizeof(d->base)) ||
@@ -62,6 +62,14 @@ enum lab_err lab_dirs_open(struct lab_dirs *d)
         !zcl_path_join(d->receipts, sizeof(d->receipts), d->base, "receipts") ||
         !zcl_path_join(d->zcc, sizeof(d->zcc), d->base, "zcc"))
         return LAB_E_UNSUPPORTED;
+    return LAB_OK;
+}
+
+enum lab_err lab_dirs_open(struct lab_dirs *d)
+{
+    enum lab_err err = lab_dirs_resolve(d);
+    if (err != LAB_OK)
+        return err;
     const char *all[] = { d->base, d->cc, d->run, d->receipts, d->zcc };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         if (!zcl_result_is_ok(zcl_mkdir_p(all[i], 0700)))
