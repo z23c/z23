@@ -1093,47 +1093,95 @@ static void pk_assemble(struct pk_run *run, int max_lines)
         pk_sb_add(&run->notes, "  - %s\n", traps[i]);
 }
 
-static void pk_json_tail(struct pk_run *run, struct json_value *out,
+static bool pk_tail_line(struct json_value *arr, const char *text)
+{
+    struct json_value value;
+    json_init(&value);
+    json_set_str(&value, text);
+    bool ok = value.type == JSON_STR && json_push_back(arr, &value);
+    json_free(&value);
+    return ok;
+}
+
+static bool pk_tail_header(const struct pk_run *run, struct json_value *out)
+{
+    if (!json_push_kv_str(out, "name", run->f.name) ||
+        !json_push_kv_str(out, "goal", run->in.goal) ||
+        !json_push_kv_str(out, "change", run->in.change ? run->in.change : "") ||
+        !json_push_kv_str(out, "head", run->f.head[0] ? run->f.head : "unavailable") ||
+        !json_push_kv_str(out, "source_root_sha3", run->f.source_hex) ||
+        !json_push_kv_str(out, "dep_root_sha3", run->f.dep_hex) ||
+        !json_push_kv_int(out, "max_lines", run->in.max_lines) ||
+        !json_push_kv_int(out, "max_lines_effective", run->ctx.max_lines) ||
+        !json_push_kv_str(out, "size", pk_size_class(run->f.max_dependents)) ||
+        !json_push_kv_int(out, "excerpt_lines", run->f.excerpt_lines) ||
+        !json_push_kv_int(out, "bytes_read", (int64_t)run->ctx.bytes_read))
+        return false;
+    return true;
+}
+
+static bool pk_tail_sections(const struct pk_run *run, struct json_value *out)
+{
+    if (!json_push_kv(out, "excerpts", &run->excerpts) ||
+        !json_push_kv(out, "files", &run->files) ||
+        !json_push_kv(out, "tests", &run->tests) ||
+        !json_push_kv(out, "pattern", &run->pattern) ||
+        !json_push_kv(out, "impact", &run->impact) ||
+        !json_push_kv(out, "capabilities", &run->caps) ||
+        !json_push_kv(out, "authority", &run->auth) ||
+        !json_push_kv(out, "claims", &run->claims)) return false;
+    return true;
+}
+
+static bool pk_json_tail(struct pk_run *run, struct json_value *out,
                          const struct pk_sb *doc)
 {
-    (void)json_push_kv_str(out, "name", run->f.name);
-    (void)json_push_kv_str(out, "goal", run->in.goal);
-    (void)json_push_kv_str(out, "change", run->in.change ? run->in.change : "");
-    (void)json_push_kv_str(out, "head", run->f.head[0] ? run->f.head : "unavailable");
-    (void)json_push_kv_str(out, "source_root_sha3", run->f.source_hex);
-    (void)json_push_kv_str(out, "dep_root_sha3", run->f.dep_hex);
-    (void)json_push_kv_int(out, "max_lines", run->in.max_lines);
-    (void)json_push_kv_int(out, "max_lines_effective", run->ctx.max_lines);
-    (void)json_push_kv_str(out, "size", pk_size_class(run->f.max_dependents));
-    (void)json_push_kv_int(out, "excerpt_lines", run->f.excerpt_lines);
-    (void)json_push_kv_int(out, "bytes_read", (int64_t)run->ctx.bytes_read);
-    (void)json_push_kv(out, "excerpts", &run->excerpts);
-    (void)json_push_kv(out, "files", &run->files);
-    (void)json_push_kv(out, "tests", &run->tests);
-    (void)json_push_kv(out, "pattern", &run->pattern);
-    (void)json_push_kv(out, "impact", &run->impact);
-    (void)json_push_kv(out, "capabilities", &run->caps);
-    (void)json_push_kv(out, "authority", &run->auth);
-    (void)json_push_kv(out, "claims", &run->claims);
+    if (!pk_tail_header(run, out) || !pk_tail_sections(run, out)) return false;
     struct json_value gates, traps;
     json_init(&gates); json_set_array(&gates);
     json_init(&traps); json_set_array(&traps);
     char g[PK_GATES][PK_GATE_LEN];
     size_t ng = pk_gate_lines(&run->f, g);
-    for (size_t i = 0; i < ng; i++)
-        code_push_line(&gates, g[i]);
+    bool ok = true;
+    for (size_t i = 0; i < ng && ok; i++)
+        ok = pk_tail_line(&gates, g[i]);
     char t[PK_TRAPS][PK_TRAP_LEN];
     size_t nt = pk_trap_lines(run->traps, t);
-    for (size_t i = 0; i < nt; i++)
-        code_push_line(&traps, t[i]);
-    (void)json_push_kv(out, "gates", &gates);
-    (void)json_push_kv(out, "traps", &traps);
+    for (size_t i = 0; i < nt && ok; i++)
+        ok = pk_tail_line(&traps, t[i]);
+    ok = ok && json_push_kv(out, "gates", &gates) &&
+         json_push_kv(out, "traps", &traps);
     json_free(&gates); json_free(&traps);
-    (void)json_push_kv_str(out, "markdown", doc->p ? doc->p : "");
+    return ok && json_push_kv_str(out, "markdown", doc->p ? doc->p : "");
 }
 
-/* Render the document, then the JSON; false when anything overflowed. */
-static bool pk_render(struct pk_run *run, struct json_value *out)
+#if defined(ZCL_TESTING)
+bool zcl_packet_test_tail(struct json_value *out)
+{
+    struct pk_run *run = zcl_calloc(1, sizeof(*run), "packet_tail_test");
+    if (!run) return false;
+    run->in.goal = "fixture";
+    struct pk_sb doc = {0};
+    json_init(out);
+    json_set_object(out);
+    bool ok = pk_json_tail(run, out, &doc);
+    free(run);
+    return ok;
+}
+#endif
+
+enum pk_render_result { PK_RENDER_OK, PK_RENDER_FIT, PK_RENDER_ALLOC };
+
+static bool pk_render_fits(const struct pk_run *run, const struct pk_sb *files,
+                           const struct pk_sb *doc)
+{
+    return !run->declaration_output_failed && !files->over && !doc->over &&
+           !run->map.over && !run->exc.over && !run->pat.over &&
+           !run->keep.over && !run->authority.over && !run->notes.over;
+}
+
+/* Keep allocation refusal distinct from bounded overflow. */
+static enum pk_render_result pk_render(struct pk_run *run, struct json_value *out)
 {
     struct pk_sb files = {0}, doc = {0};
     pk_sb_raw(&files, run->map.p ? run->map.p : "", run->map.len);
@@ -1142,17 +1190,21 @@ static bool pk_render(struct pk_run *run, struct json_value *out)
     pk_sb_raw(&files, run->pat.p ? run->pat.p : "", run->pat.len);
     pk_md_document(&doc, &run->in, &run->f, &files, &run->keep,
                    &run->authority, &run->notes);
-    bool ok = !run->declaration_output_failed && !files.over && !doc.over && !run->map.over && !run->exc.over &&
-              !run->pat.over && !run->keep.over && !run->authority.over &&
-              !run->notes.over;
+    bool allocation_failed = false;
+    bool ok = pk_render_fits(run, &files, &doc);
     if (ok) {
         json_init(out);
         json_set_object(out);
-        pk_json_tail(run, out, &doc);
+        if (!pk_json_tail(run, out, &doc)) {
+            json_free(out);
+            json_init(out);
+            ok = false;
+            allocation_failed = true;
+        }
     }
     pk_sb_free(&files);
     pk_sb_free(&doc);
-    return ok;
+    return allocation_failed ? PK_RENDER_ALLOC : ok ? PK_RENDER_OK : PK_RENDER_FIT;
 }
 
 /* The reply cap: this leaf's declared budget (code.def: 65536, the registry
@@ -1169,7 +1221,8 @@ static size_t pk_reply_cap(const struct zcl_command_request *request)
 }
 
 /* Assemble, shrinking max_lines by a third (floor 20) until it fits `cap`. */
-static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
+static enum pk_render_result pk_fit(struct pk_run *run, size_t cap,
+                                    struct json_value *out)
 {
     int lines = run->in.max_lines;
     /* One immutable index generation and source cache serve every retry.
@@ -1180,9 +1233,11 @@ static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
     run->declarations = true;
     for (;;) {
         pk_assemble(run, lines);
-        bool ok = pk_render(run, out);
+        enum pk_render_result result = pk_render(run, out);
+        if (result == PK_RENDER_ALLOC) return result;
+        bool ok = result == PK_RENDER_OK;
         if (ok && json_write(out, NULL, 0) <= cap)
-            return true;
+            return PK_RENDER_OK;
         if (ok)
             json_free(out);
         if (run->neighborhoods) {
@@ -1194,7 +1249,7 @@ static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
             continue;
         }
         if (lines <= PK_LINES_MIN)
-            return false;
+            return PK_RENDER_FIT;
         lines = lines * 2 / 3 < PK_LINES_MIN ? PK_LINES_MIN : lines * 2 / 3;
     }
 }
@@ -1312,7 +1367,16 @@ void zcl_native_handle_code_packet(const struct zcl_command_request *request,
         return;
     }
     struct json_value out;
-    if (!pk_fit(run, pk_reply_cap(request), &out)) {
+    enum pk_render_result fit = pk_fit(run, pk_reply_cap(request), &out);
+    if (fit != PK_RENDER_OK) {
+        if (fit == PK_RENDER_ALLOC) {
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INTERNAL, "OUT_OF_MEMORY",
+                                   "assemble", true, false,
+                                   "could not construct the packet", "");
+            pk_run_free(run);
+            return;
+        }
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "PACKET_TOO_LARGE",
                                "assemble", false, false,

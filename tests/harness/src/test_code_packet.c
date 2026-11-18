@@ -989,6 +989,34 @@ static int test_code_packet_transfer_late_failure(void)
     return failures;
 }
 
+extern bool zcl_packet_test_tail(struct json_value *out);
+
+static int test_code_packet_tail_failure(void)
+{
+    int failures = 0;
+    TEST("code_packet: tail gate allocation failure refuses incomplete output") {
+        size_t before = json_test_live_blocks();
+        struct json_value out;
+        zcl_alloc_fault_fail_next("json_copy_children");
+        bool ok = zcl_packet_test_tail(&out);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(!ok);
+        json_free(&out);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        ASSERT(zcl_packet_test_tail(&out));
+        const struct json_value *gates = json_get(&out, "gates");
+        ASSERT(gates != NULL && gates->type == JSON_ARR);
+        ASSERT_EQ(gates->num_children, 3);
+        json_free(&out);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1013,5 +1041,6 @@ int test_code_packet(void)
     failures += test_code_packet_transfer();
     failures += test_code_packet_transfer_prefilled();
     failures += test_code_packet_transfer_late_failure();
+    failures += test_code_packet_tail_failure();
     return failures;
 }
