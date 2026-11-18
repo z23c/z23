@@ -326,16 +326,21 @@ bool zcl_native_code_routes_many(const char *const *paths, size_t count,
 }
 
 static const char *code_route_at(const char *root, const char *path,
-    struct agent_impact_acc *acc, bool *consensus_risk, bool focus_without_failures)
+    struct agent_impact_acc *acc, bool *consensus_risk, bool primary_sufficient)
 {
     struct agent_impact_acc local = {0};
     struct agent_impact_acc *a = acc ? acc : &local;
     code_route_primary(root, path, a, NULL);
     bool established = code_path_is_consensus_risk(path) ||
                        (a->shared_rule_hits > 0 && a->groups_len > 0);
-    if (!focus_without_failures || !established)
+    if (!primary_sufficient || !established)
         (void)agent_impact_name_routes_at(root, path, a);
     return code_route_finish(path, a, consensus_risk);
+}
+
+const char *zcl_native_code_label_at(const char *root, const char *path)
+{
+    return code_route_at(root, path, NULL, NULL, true);
 }
 
 const char *zcl_native_code_focus_route_at(const char *root, const char *path,

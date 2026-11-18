@@ -33,7 +33,7 @@
  */
 
 #define _GNU_SOURCE
-#include "command/native_command.h"
+#include "command/native_code_priv.h"
 
 #include "kernel/command_registry.h"
 #include "json/json.h"
@@ -609,8 +609,7 @@ void zcl_native_handle_code_emitter(const struct zcl_command_request *request,
         const char *route = NULL;
         if (s) {
             emit_push_emitter(reply, &ctx, s);
-            bool crisk = false;
-            route = zcl_native_code_route_for_path(s->path, NULL, &crisk);
+            route = zcl_native_code_label_at(ctx.root, s->path);
         }
         emit_push_owning_proofs(reply, &ctx, route);
         emit_push_registry_rows(reply, &ctx);

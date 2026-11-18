@@ -32,6 +32,7 @@
  *                             line without a newline remains admitted. */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_emitter.h"
 #include "command/native_command.h"
@@ -507,9 +508,72 @@ static int test_code_emitter_segment_bounds(void)
     return failures;
 }
 
+static int test_code_emitter_primary_label(void)
+{
+    int failures = 0;
+    char root[4096] = {0}, path[4096];
+    TEST("code_emitter: an established primary label avoids referrer scans") {
+        ASSERT(test_mkdtemp(root, sizeof root, "emitter_route"));
+        int n = snprintf(path, sizeof path, "%s/tools", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        n = snprintf(path, sizeof path, "%s/tools/command", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        n = snprintf(path, sizeof path, "%s/tools/command/native_code_" "emitter1109.c", root);
+        ASSERT(n > 0 && (size_t)n < sizeof path);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f);
+        bool wrote = fputs("void beacon(void) { puts(\"emitter-label-1109\"); }\n", f) >= 0;
+        ASSERT(fclose(f) == 0 && wrote);
+        n = snprintf(path, sizeof path, "%s/tests", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        n = snprintf(path, sizeof path, "%s/tests/harness", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        n = snprintf(path, sizeof path, "%s/tests/harness/src", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        n = snprintf(path, sizeof path, "%s/tests/harness/src/test_dev_job.c", root);
+        ASSERT(n > 0 && (size_t)n < sizeof path);
+        f = fopen(path, "wb");
+        ASSERT(f);
+        wrote = fputs("const char *s = \"native_code_" "emitter1109\";\n", f) >= 0;
+        ASSERT(fclose(f) == 0 && wrote);
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "text", "emitter-label-1109"));
+        struct zcl_command_context ctx = {.source_root = root};
+        struct zcl_command_request req = {.input = &input, .context = &ctx};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_emitter.v1");
+        zcl_alloc_fault_fail_next("agent_impact_names");
+        zcl_native_handle_code_emitter(&req, &reply);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(armed);
+        ASSERT(json_get_bool(json_get(&reply.data, "resolved")));
+        char output[8192];
+        ASSERT(json_write(&reply.data, output, sizeof output) > 0);
+        ASSERT(strstr(output, "make t-fast ONLY=make_lint_gates") != NULL);
+        zcl_command_reply_free(&reply); json_free(&input);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_code_emitter(void)
 {
     int failures = 0;
+    failures += test_code_emitter_primary_label();
     failures += test_code_emitter_glob();
     failures += test_code_emitter_dynamic_blocker_id();
     failures += test_code_emitter_format_discrimination();
