@@ -1282,3 +1282,7 @@ later lane flips it HARD.
 - 2026-11-17T22:19:42Z — REASON: BN254 PHGR13 verifier speed: precomputed G2 line functions, sparse line multiply, cyclotomic squarings, inline MULX engine, Straus IC multiplication, psi-endomorphism G2 subgroup test; pairing values and every accept/reject verdict identical to the previous implementation (differential against a frozen copy, 483797-case history gate). Owner-authorized core edit for this work.
   old ROOT: 4e5e7f72e5f943cf4db1c1bd16adab1efe5c575c10632e6997a6d262a1f71f64
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-18T04:11:26Z — REASON: prover memory: exact-size constraint storage, parse-once proving keys
+  old ROOT: 31a58ad5528b23dffc40b8e5a68291eb6a520e5f93a020b85d7540a3d4baec53
+  by: owner unseal ritual (make core-unseal)

@@ -1425,6 +1425,97 @@ static int sapling_crypto_lc_add_term_signals_oom_on_realloc_failu(void)
     return failures;
 }
 
+/* cs_enforce stores each linear combination at exactly its term count (the
+ * 8-term doubling capacity of lc_add_term is for the gadget's scratch
+ * combination only), keeps every term in order, stores an empty combination
+ * without an allocation, and still signals OOM when that allocation fails. */
+struct exact_fixture {
+    struct constraint_system cs;
+    struct linear_combination a, b, c, sum, one_lc, five_lc, empty;
+    size_t x, y, z;
+};
+
+/* x * y = z, then (x + y) * 1 = 5, then 0 * 0 = 0, with x = 2, y = 3, z = 6. */
+static bool exact_fixture_build(struct exact_fixture *f)
+{
+    struct fr one, two, three, five, six;
+    fr_one(&one);
+    fr_add(&two, &one, &one);
+    fr_add(&three, &two, &one);
+    fr_add(&five, &two, &three);
+    fr_mul(&six, &two, &three);
+    cs_init(&f->cs);
+    f->x = cs_alloc_aux(&f->cs, &two);
+    f->y = cs_alloc_aux(&f->cs, &three);
+    f->z = cs_alloc_aux(&f->cs, &six);
+    lc_init(&f->a); lc_init(&f->b); lc_init(&f->c); lc_init(&f->sum);
+    lc_init(&f->one_lc); lc_init(&f->five_lc); lc_init(&f->empty);
+    lc_add_term(&f->a, f->x, &one);
+    lc_add_term(&f->b, f->y, &one);
+    lc_add_term(&f->c, f->z, &one);
+    lc_add_term(&f->sum, f->x, &one);
+    lc_add_term(&f->sum, f->y, &one);
+    lc_add_term(&f->one_lc, 0, &one);    /* variable 0 is ONE */
+    lc_add_term(&f->five_lc, 0, &five);
+    return cs_enforce(&f->cs, &f->a, &f->b, &f->c) &&
+           cs_enforce(&f->cs, &f->sum, &f->one_lc, &f->five_lc) &&
+           cs_enforce(&f->cs, &f->empty, &f->empty, &f->empty) &&
+           !f->cs.oom_error && f->cs.num_constraints == 3;
+}
+
+static void exact_fixture_free(struct exact_fixture *f)
+{
+    lc_free(&f->a); lc_free(&f->b); lc_free(&f->c); lc_free(&f->sum);
+    lc_free(&f->one_lc); lc_free(&f->five_lc); lc_free(&f->empty);
+    cs_free(&f->cs);
+}
+
+/* One term each in constraint 0; two terms, in order, in constraint 1. */
+static bool exact_fixture_sizes_ok(const struct exact_fixture *f)
+{
+    const struct r1cs_constraint *c0 = &f->cs.constraints[0];
+    const struct r1cs_constraint *c1 = &f->cs.constraints[1];
+    bool one_term = c0->a.num_terms == 1 && c0->a.cap == 1 &&
+                    c0->b.num_terms == 1 && c0->b.cap == 1 &&
+                    c0->c.num_terms == 1 && c0->c.cap == 1;
+    bool two_terms = c1->a.num_terms == 2 && c1->a.cap == 2 &&
+                     c1->a.terms[0].var == f->x && c1->a.terms[1].var == f->y;
+    return one_term && two_terms;
+}
+
+/* An empty combination holds no allocation; the caller's scratch combination
+ * keeps its own capacity; the stored system is the one that was enforced. */
+static bool exact_fixture_rest_ok(const struct exact_fixture *f)
+{
+    const struct r1cs_constraint *c2 = &f->cs.constraints[2];
+    size_t bad = SIZE_MAX;
+    bool empty_ok = c2->a.terms == NULL && c2->a.num_terms == 0 &&
+                    c2->a.cap == 0 && !c2->a.oom_error;
+    return empty_ok && f->sum.cap == 8 && cs_is_satisfied(&f->cs, &bad);
+}
+
+/* OOM while storing a constraint: false, flagged, nothing appended. */
+static bool exact_fixture_oom_ok(struct exact_fixture *f)
+{
+    size_t before = f->cs.num_constraints;
+    groth16_prover_test_set_realloc_hook(p93_force_null_realloc);
+    bool oom_ret = cs_enforce(&f->cs, &f->a, &f->b, &f->c);
+    groth16_prover_test_set_realloc_hook(NULL);
+    return !oom_ret && f->cs.oom_error && f->cs.num_constraints == before;
+}
+
+static int sapling_crypto_cs_enforce_stores_exact_size_combinations(void)
+{
+    int failures = 0;
+    printf("cs_enforce stores combinations at exact size... ");
+    struct exact_fixture f;
+    bool ok = exact_fixture_build(&f) && exact_fixture_sizes_ok(&f) &&
+              exact_fixture_rest_ok(&f) && exact_fixture_oom_ok(&f);
+    exact_fixture_free(&f);
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 static int sapling_crypto_cs_alloc_aux_signals_oom_on_realloc_fail(void)
 {
     int failures = 0;
@@ -2910,6 +3001,8 @@ int test_sapling_crypto(void)
     failures += sapling_crypto_lc_add_term_signals_oom_on_realloc_failu();
 
     failures += sapling_crypto_cs_alloc_aux_signals_oom_on_realloc_fail();
+
+    failures += sapling_crypto_cs_enforce_stores_exact_size_combinations();
 
     failures += sapling_crypto_cs_enforce_propagates_input_lc_oom_error();
 
