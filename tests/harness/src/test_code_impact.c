@@ -2577,12 +2577,52 @@ static int test_code_navigation_selected_root(void)
     return failures;
 }
 
+static bool ci_groups_have(const struct json_value *groups, const char *name)
+{
+    for (size_t i = 0; i < json_size(groups); i++) {
+        const char *group = json_get_str(json_get(json_at(groups, i), "group"));
+        if (group && strcmp(group, name) == 0) return true;
+    }
+    return false;
+}
+
+static int test_code_territory_selected_root(void)
+{
+    int failures = 0;
+    char root[4096] = {0};
+    TEST("code territory and general route the selected root") {
+        ASSERT(test_mkdtemp(root, sizeof root, "territory_root"));
+        ASSERT(ci_impact_mk_write(root, "tools/command/native_code_" "terrbeacon1109.c",
+                                 "int terrbeacon1109(void) { return 0; }\n"));
+        ASSERT(ci_impact_mk_write(root, "tests/harness/src/test_fleet_parity.c",
+                                 "const char *s = \"native_code_" "terrbeacon1109\";\n"));
+        struct zcl_command_context ctx = {.source_root = root};
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "name", "tools"));
+        struct zcl_command_request req = {.input = &input, .context = &ctx};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_territory.v1");
+        zcl_native_handle_code_territory(&req, &reply);
+        ASSERT(ci_groups_have(json_get(&reply.data, "routed_groups"), "fleet_parity"));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.general_brief.v1");
+        zcl_native_handle_general(&req, &reply);
+        ASSERT(ci_groups_have(json_get(json_get(&reply.data, "proves"), "groups"), "fleet_parity"));
+        zcl_command_reply_free(&reply); json_free(&input);
+        PASS();
+    } _test_next:;
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
     failures += test_code_group_merge_loss();
     failures += test_code_name_route_order();
     failures += test_code_navigation_selected_root();
+    failures += test_code_territory_selected_root();
     failures += test_code_literal_candidate_scan();
     failures += test_code_literal_raw_rejection_contract();
     failures += test_code_impact_rule_predicate();

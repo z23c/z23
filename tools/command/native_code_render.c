@@ -1116,7 +1116,7 @@ void zcl_native_handle_general(const struct zcl_command_request *request,
     struct territory_reach_set *rs =
         territory_reach_open(ci, root, &src, &rstats);
     struct territory_router router = { .route = code_territory_route,
-                                       .user = NULL };
+                                       .user = &root };
 
     const char *name = code_str(request, "name");
     if (!name || !name[0] || strcmp(name, "roll-up") == 0 ||
