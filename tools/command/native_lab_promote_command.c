@@ -88,6 +88,44 @@ static void promote_refuse(struct zcl_command_reply *reply, const char *code,
     snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", evidence);
 }
 
+/* Append a bounded, UTF-8-repaired case summary without replacing refusal evidence. */
+static void promote_case_message(char message[192], const char *name, const char *diff)
+{
+    struct json_value text;
+    bool name_cut = false, diff_cut = false;
+    size_t used = strlen(message);
+    size_t room = sizeof(((struct zcl_command_reply *)0)->error.message) - used;
+    if (room < 16) return;
+    size_t name_cap = room - 16 < 24 ? room - 16 : 24;
+    size_t diff_cap = room - 16 - name_cap < 56 ? room - 16 - name_cap : 56;
+    json_init(&text);
+    json_set_object(&text);
+    if (!name || !name[0]) name = "unavailable";
+    if (!diff || !diff[0]) diff = "diagnostic unavailable";
+    if (lab_json_text(&text, "name", name, strlen(name), name_cap, &name_cut) &&
+        lab_json_text(&text, "diff", diff, strlen(diff), diff_cap, &diff_cut)) {
+        (void)snprintf(message + used, room, "; case \"%s%s\": %s%s",
+                       json_get_str(json_get(&text, "name")), name_cut ? "..." : "",
+                       json_get_str(json_get(&text, "diff")), diff_cut ? "..." : "");
+    }
+    json_free(&text);
+}
+
+static void promote_first_row(char message[192], const struct json_value *data)
+{
+    const struct json_value *rows = json_get(data, "cases");
+    for (size_t i = 0; i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *pass = json_get(row, "pass");
+        if (pass && pass->type == JSON_BOOL && !json_get_bool(pass)) {
+            promote_case_message(message, json_get_str(json_get(row, "name")),
+                                 json_get_str(json_get(row, "diff")));
+            return;
+        }
+    }
+    promote_case_message(message, NULL, NULL);
+}
+
 /* Step 1: lab.test on the same inputs, always fresh. A refusal of lab.test
  * itself stays in `reply`; false means the reply already carries a refusal. */
 static bool promote_cases(struct lab_ctx *ctx,
@@ -112,6 +150,11 @@ static bool promote_cases(struct lab_ctx *ctx,
     snprintf(p->root, sizeof(p->root), "%s", json_get_str(root));
     p->passed = (size_t)json_get_int(pass);
     p->failed = (size_t)json_get_int(fail);
+    if (p->failed > 0) {
+        snprintf(message, sizeof(message), "%zu of %zu cases failed; nothing was written",
+                 p->failed, p->passed + p->failed);
+        promote_first_row(message, &reply->data);
+    }
     json_free(&reply->data);
     json_init(&reply->data);
     if (p->failed == 0 && p->passed > 0) {
@@ -122,9 +165,8 @@ static bool promote_cases(struct lab_ctx *ctx,
         }
         return true;
     }
-    snprintf(message, sizeof(message),
-             "%zu of %zu cases failed; nothing was written", p->failed,
-             p->passed + p->failed);
+    if (p->failed == 0)
+        snprintf(message, sizeof(message), "0 of %zu cases failed; nothing was written", p->passed);
     promote_refuse(reply, "LAB_PROMOTE_CASES_FAILED", "cases", message, p->root);
     snprintf(reply->error.next_action, sizeof(reply->error.next_action),
              "z23 lab show %s", p->root);
@@ -294,8 +336,9 @@ static void promote_verify(const struct zcl_command_request *rq,
 {
     size_t passed = 0, failed = 0;
     char message[192];
+    struct lab_case_fail fail = { { 0 }, { 0 } };
     enum lab_check c = lab_cases_check(&p->test, ctx, rel->binary, p->timeout_ms,
-                                       p->mem_mb, &passed, &failed, NULL);
+                                       p->mem_mb, &passed, &failed, &fail);
     if (c == LAB_CHECK_UNCONFINED) {
         lab_unconfined(reply);
     } else if (c == LAB_CHECK_ALLOC) {
@@ -306,6 +349,7 @@ static void promote_verify(const struct zcl_command_request *rq,
         snprintf(message, sizeof(message),
                  "the release image failed %zu of %zu cases that the sanitized "
                  "build passed; nothing was written", failed, passed + failed);
+        promote_case_message(message, fail.name, fail.diff);
         promote_refuse(reply, "LAB_PROMOTE_RELEASE_DISAGREES", "verify", message,
                        rel->command);
     } else if (promote_pack(rq, rel, reply)) {

@@ -249,9 +249,13 @@ static int lp_case_failed_case(void)
         ASSERT_EQ(mkdir(e.dist, 0700), 0);
         lp_promote(&e, LP_UPPER,
                    "[{\"name\":\"ok\",\"stdin\":\"a\\n\",\"expect_stdout\":\"A\\n\"},"
-                   "{\"name\":\"wrong\",\"stdin\":\"b\\n\",\"expect_stdout\":\"b\\n\"}]", &p);
+                   "{\"name\":\"wrong-猫猫猫猫猫猫猫猫\",\"stdin\":\"b\\n\",\"expect_stdout\":\"b\\n\"}]", &p);
         ASSERT_STR_EQ(p.error.code, "LAB_PROMOTE_CASES_FAILED");
         ASSERT(strstr(p.error.message, "1 of 2 cases failed") != NULL);
+        ASSERT(strstr(p.error.message, "wrong-猫猫猫猫猫猫...") != NULL);
+        ASSERT(strstr(p.error.next_action, "z23 lab show ") == p.error.next_action);
+        ASSERT_EQ(strlen(p.error.evidence), 128);
+        ASSERT(strstr(p.error.message, "line 1") != NULL);
         ASSERT_EQ(lp_entries(e.dist), 0);
         zcl_command_reply_free(&p);
     } TEST_END
@@ -271,6 +275,9 @@ static int lp_case_disagree(void)
         lp_promote(&e, LP_MODE, "[{\"name\":\"mode\",\"expect_stdout\":\"asan\\n\"}]", &p);
         ASSERT_STR_EQ(p.error.code, "LAB_PROMOTE_RELEASE_DISAGREES");
         ASSERT(strstr(p.error.message, "1 of 1 cases") != NULL);
+        ASSERT(strstr(p.error.message, "mode") != NULL);
+        ASSERT(p.error.evidence[0] != 0);
+        ASSERT(strstr(p.error.message, "line 1") != NULL);
         ASSERT_EQ(lp_entries(e.dist), 0);
         zcl_command_reply_free(&p);
     } TEST_END
