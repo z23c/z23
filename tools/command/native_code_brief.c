@@ -74,7 +74,7 @@ struct cb_brief {
     size_t nnext;
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
     bool lessons_capped;
-    bool lesson_lost; /* a pooled lesson could not be copied: the query fails */
+    bool lesson_lost; /* a lesson could not be copied: the query fails */
     int64_t deadline_ms;
     const char *root;
 };
@@ -470,7 +470,7 @@ static size_t cb_queries(const struct cb_brief *b, char q[][CB_QUERY_CAP],
     return n;
 }
 
-static void cb_take_lesson(struct cb_brief *b, const struct json_value *e)
+static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e)
 {
     const char *slug = json_get_str(json_get(e, "slug"));
     const struct json_value *rules = json_get(e, "rules");
@@ -479,24 +479,30 @@ static void cb_take_lesson(struct cb_brief *b, const struct json_value *e)
                                                   : json_get_str(json_get(e, "summary"));
     struct cb_lesson *l;
     if (!slug[0] || !text[0] || strlen(slug) > CB_TOPIC_MAX)
-        return;
+        return true;
     for (size_t i = 0; i < b->nlessons; i++)
         if (strcmp(b->lessons[i].slug, slug) == 0)
-            return;
+            return true;
     if (b->nlessons >= CB_MAX_LESSONS) {
         b->lessons_capped = true;
-        return;
+        return true;
     }
     l = &b->lessons[b->nlessons];
     memcpy(l->slug, slug, strlen(slug) + 1);
-    if (cb_copy(l->rule, CB_RULE_CAP, text, strlen(text)))
-        b->lessons_capped = true;
+    bool clipped = cb_copy(l->rule, CB_RULE_CAP, text, strlen(text));
     json_init(&l->matched);
-    if (json_get(e, "matched"))
-        json_copy(&l->matched, json_get(e, "matched"));
-    else
+    const struct json_value *matched = json_get(e, "matched");
+    if (matched && !json_copy_checked(&l->matched, matched)) {
+        b->lesson_lost = true;
+        if (!b->unavailable[0])
+            (void)snprintf(b->unavailable, sizeof(b->unavailable), "%s", "WIKI_UNAVAILABLE");
+        return false;
+    }
+    if (!matched)
         json_set_array(&l->matched);
+    b->lessons_capped = b->lessons_capped || clipped;
     b->nlessons++;
+    return true;
 }
 
 /* One fleet.wiki.find under the brief's absolute deadline. The leaf is
@@ -578,6 +584,17 @@ bool zcl_code_brief_pool_offer(struct json_value *pool, size_t max,
     return true;
 }
 
+static bool cb_accept_wiki_entry(struct cb_brief *b, struct json_value *pool,
+                                 const struct json_value *entry)
+{
+    if (!pool)
+        return cb_take_lesson(b, entry);
+    if (zcl_code_brief_pool_offer(pool, CB_POOL_MAX, entry))
+        return true;
+    b->lesson_lost = true;
+    return false;
+}
+
 /* One page of one search. With a pool the entries are collected for
  * ranking, else taken in the order the wiki gave them; *next is the
  * after_slug to resume from, empty when the wiki has no more. False when it
@@ -596,11 +613,7 @@ static bool cb_wiki_find(const struct zcl_command_request *request,
     ok = reply.exit_code == ZCL_COMMAND_EXIT_OK;
     entries = ok ? json_get(&reply.data, "entries") : NULL;
     for (size_t i = 0; entries && i < json_size(entries); i++) {
-        if (!pool)
-            cb_take_lesson(b, json_at(entries, i));
-        else if (!zcl_code_brief_pool_offer(pool, CB_POOL_MAX,
-                                            json_at(entries, i))) {
-            b->lesson_lost = true; /* the query is not answered */
+        if (!cb_accept_wiki_entry(b, pool, json_at(entries, i))) {
             ok = false;
             break;
         }
@@ -658,7 +671,7 @@ static void cb_take_pool(struct cb_brief *b, const struct json_value *pool)
                 (best == n || cb_pool_before(json_at(pool, i), json_at(pool, best))))
                 best = i;
         done[best] = true;
-        cb_take_lesson(b, json_at(pool, best));
+        if (!cb_take_lesson(b, json_at(pool, best))) break;
     }
 }
 
@@ -841,6 +854,33 @@ static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b)
     json_free(&arr);
     return ok;
 }
+
+#if defined(ZCL_TESTING)
+/* Exercise the same direct/pooled collectors without a fleet wiki service. */
+bool zcl_code_brief_test_collect_lessons(const struct json_value *entries,
+                                          bool pooled, const char *prior_error,
+                                          struct json_value *data)
+{
+    struct cb_brief *b = zcl_calloc(1, sizeof(*b), "code_guide_test_brief");
+    if (!b) return false;
+    b->lesson_lost = prior_error != NULL;
+    if (prior_error)
+        (void)snprintf(b->unavailable, sizeof(b->unavailable), "%s", prior_error);
+    if (pooled) {
+        cb_take_pool(b, entries);
+    } else {
+        for (size_t i = 0; i < json_size(entries); i++)
+            if (!cb_take_lesson(b, json_at(entries, i))) break;
+    }
+    bool ok = cb_push_lessons(data, b) &&
+              (!b->unavailable[0] || json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
+              (!b->lessons_capped || json_push_kv_bool(data, "lessons_capped", true));
+    for (size_t i = 0; i < b->nlessons; i++)
+        json_free(&b->lessons[i].matched);
+    free(b);
+    return ok;
+}
+#endif
 
 static bool cb_push_cut(struct json_value *data, const struct cb_brief *b)
 {

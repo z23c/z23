@@ -1038,6 +1038,103 @@ static int test_code_guide_render_sweep(void)
     return failures;
 }
 
+bool zcl_code_brief_test_collect_lessons(const struct json_value *entries,
+                                          bool pooled, const char *prior_error, struct json_value *data);
+
+static int test_code_guide_lesson_provenance(void)
+{
+    int failures = 0;
+    TEST("guide retains valid lesson provenance when a later copy fails") {
+        const char *text = "["
+            "{\"slug\":\"first\",\"updated\":\"3\",\"summary\":\"First lesson\",\"matched\":[\"summary\"]},"
+            "{\"slug\":\"second\",\"updated\":\"2\",\"summary\":\"Second lesson\",\"matched\":[\"rule\"]},"
+            "{\"slug\":\"third\",\"updated\":\"1\",\"summary\":\"Third lesson\"}]";
+        struct json_value entries;
+        json_init(&entries);
+        ASSERT(json_read(&entries, text, strlen(text)));
+        for (size_t pooled = 0; pooled < 2; pooled++) {
+            struct json_value data;
+            size_t live = json_test_live_blocks();
+            json_init(&data);
+            json_set_object(&data);
+            ASSERT(zcl_code_brief_test_collect_lessons(&entries, pooled != 0, NULL, &data));
+            const struct json_value *normal = json_get(&data, "lessons");
+            ASSERT_EQ(json_size(normal), 3u);
+            ASSERT_STR_EQ(json_get_str(json_at(json_get(json_at(normal, 0), "matched"), 0)), "summary");
+            ASSERT_EQ(json_size(json_get(json_at(normal, 2), "matched")), 0u);
+            ASSERT(json_get(&data, "lessons_unavailable") == NULL);
+            json_free(&data);
+            ASSERT_EQ(json_test_live_blocks(), live);
+            json_init(&data);
+            json_set_object(&data);
+            zcl_alloc_fault_fail_nth("json_copy_children", 2);
+            bool ok = zcl_code_brief_test_collect_lessons(&entries, pooled != 0, NULL, &data);
+            bool fired = zcl_alloc_fault_armed_label() == NULL;
+            zcl_alloc_fault_clear();
+            ASSERT(ok && fired);
+            const struct json_value *lessons = json_get(&data, "lessons");
+            ASSERT_EQ(json_size(lessons), 1u);
+            ASSERT_STR_EQ(json_get_str(json_get(json_at(lessons, 0), "slug")), "first");
+            ASSERT_STR_EQ(json_get_str(json_at(json_get(json_at(lessons, 0), "matched"), 0)), "summary");
+            ASSERT_STR_EQ(json_get_str(json_get(&data, "lessons_unavailable")), "WIKI_UNAVAILABLE");
+            json_free(&data);
+            ASSERT_EQ(json_test_live_blocks(), live);
+        }
+        struct json_value partial;
+        json_init(&partial);
+        json_set_object(&partial);
+        ASSERT(zcl_code_brief_test_collect_lessons(&entries, true, "WIKI_DEADLINE", &partial));
+        ASSERT_EQ(json_size(json_get(&partial, "lessons")), 3u);
+        ASSERT_STR_EQ(json_get_str(json_get(&partial, "lessons_unavailable")), "WIKI_DEADLINE");
+        json_free(&partial);
+        json_init(&partial);
+        json_set_object(&partial);
+        zcl_alloc_fault_fail_nth("json_copy_children", 2);
+        bool partial_ok = zcl_code_brief_test_collect_lessons(&entries, true, "WIKI_DEADLINE", &partial);
+        bool partial_fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(partial_ok && partial_fired);
+        ASSERT_EQ(json_size(json_get(&partial, "lessons")), 1u);
+        ASSERT_STR_EQ(json_get_str(json_get(&partial, "lessons_unavailable")), "WIKI_DEADLINE");
+        json_free(&partial);
+        json_free(&entries);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_lesson_cap(void)
+{
+    int failures = 0;
+    TEST("lesson collection keeps dedupe and cap behavior") {
+        const char *text = "["
+            "{\"slug\":\"a\",\"summary\":\"A\"},"
+            "{\"slug\":\"a\",\"summary\":\"duplicate\"},"
+            "{\"slug\":\"\",\"summary\":\"invalid\"},"
+            "{\"slug\":\"b\",\"summary\":\"B\"},"
+            "{\"slug\":\"c\",\"summary\":\"C\"},"
+            "{\"slug\":\"d\",\"summary\":\"D\"},"
+            "{\"slug\":\"e\",\"summary\":\"E\"},"
+            "{\"slug\":\"f\",\"summary\":\"F\"}]";
+        struct json_value entries;
+        json_init(&entries);
+        ASSERT(json_read(&entries, text, strlen(text)));
+        for (size_t pooled = 0; pooled < 2; pooled++) {
+            struct json_value data;
+            json_init(&data);
+            json_set_object(&data);
+            ASSERT(zcl_code_brief_test_collect_lessons(&entries, pooled != 0, NULL, &data));
+            ASSERT_EQ(json_size(json_get(&data, "lessons")), 5u);
+            ASSERT(json_get_bool(json_get(&data, "lessons_capped")));
+            ASSERT(json_get(&data, "lessons_unavailable") == NULL);
+            json_free(&data);
+        }
+        json_free(&entries);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -2425,6 +2522,8 @@ int test_code_impact(void)
     failures += test_code_guide_long_cost();
     failures += test_code_guide_render_fault();
     failures += test_code_guide_render_sweep();
+    failures += test_code_guide_lesson_provenance();
+    failures += test_code_guide_lesson_cap();
     failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();
