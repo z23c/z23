@@ -720,20 +720,40 @@ static bool lp_change_cases_ready(void *context, struct zcl_command_reply *reply
     return false;
 }
 
+struct lp_copy_probe {
+    struct json_value *input;
+    bool armed;
+};
+
+static bool lp_copy_probe_ready(void *context, struct zcl_command_reply *reply)
+{
+    struct lp_copy_probe *probe = context;
+    probe->armed = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    return lp_change_cases_ready(probe->input, reply);
+}
+
 static int lp_case_ready_values(void)
 {
     int failures = 0;
     struct lp_env e;
     bool ready = lp_env_open(&e);
-    TEST_CASE("promotion copies array and inline cases before ready") {
+    TEST_CASE("promotion preserves array, inline and file cases before ready") {
         ASSERT(ready);
-        for (size_t form = 0; form < 2; form++) {
-            char in[4 * PATH_MAX + 1024];
+        for (size_t form = 0; form < 3; form++) {
+            char in[4 * PATH_MAX + 1024], path[PATH_MAX], encoded[PATH_MAX + 1024];
             struct json_value input, inline_cases;
             struct zcl_command_reply r;
             json_init(&inline_cases);
-            if (form) json_set_str(&inline_cases, LP_CASES_OK);
-            char encoded[1024];
+            if (form == 1) json_set_str(&inline_cases, LP_CASES_OK);
+            if (form == 2) {
+                ASSERT(lp_join(path, sizeof(path), e.base, "no-export-cases.json"));
+                FILE *f = fopen(path, "wb");
+                ASSERT(f != NULL);
+                ASSERT(fputs(LP_CASES_OK, f) >= 0);
+                ASSERT_EQ(fclose(f), 0);
+                json_set_str(&inline_cases, path);
+            }
             if (form) {
                 ASSERT_EQ(inline_cases.type, JSON_STR);
                 ASSERT(json_write(&inline_cases, encoded, sizeof encoded) < sizeof encoded);
@@ -745,7 +765,16 @@ static int lp_case_ready_values(void)
             struct zcl_command_request request = { .input = &input };
             zcl_command_reply_init(&r, "zcl.lab_promote.v1");
             size_t before = lab_cases_test_parse_count();
-            lab_promote_with_ready(&request, lp_change_cases_ready, &input, &r);
+            if (form) {
+                struct lp_copy_probe probe = { .input = &input };
+                /* The first json_copy_str forwards file; the second was cases. */
+                zcl_alloc_fault_fail_nth("json_copy_str", 2);
+                lab_promote_with_ready(&request, lp_copy_probe_ready, &probe, &r);
+                zcl_alloc_fault_clear();
+                ASSERT(probe.armed);
+            } else {
+                lab_promote_with_ready(&request, lp_change_cases_ready, &input, &r);
+            }
             ASSERT_EQ(lab_cases_test_parse_count() - before, form ? 1 : 0);
             ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
             ASSERT_EQ(json_get_int(json_get(&r.data, "cases_passed")), 2);

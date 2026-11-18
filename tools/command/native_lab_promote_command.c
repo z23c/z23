@@ -548,8 +548,9 @@ void lab_promote_with_ready(const struct zcl_command_request *request,
     static const char *const keys[] = {
         "file", "sanitize", "timeout_ms", "mem_mb"
     };
+    bool keep_case_value = p.include_source || cases.parsed.type != JSON_ARR;
     bool ok = promote_forward(request, &test_options, keys, sizeof(keys) / sizeof(keys[0])) &&
-              json_push_kv(&test_options, "cases", cases.value) &&
+              (!keep_case_value || json_push_kv(&test_options, "cases", cases.value)) &&
               json_push_kv_bool(&test_options, "fresh", true);
     free(cases.file_text);
     if (ok) {
