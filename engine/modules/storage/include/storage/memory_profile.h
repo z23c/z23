@@ -21,7 +21,7 @@
 #include <stdint.h>
 
 #define STORAGE_STEADY_MMAP_BYTES (64LL * 1024 * 1024)  /* 64 MiB */
-#define STORAGE_STEADY_CACHE_KIB  (128LL * 1024)        /* 128 MiB */
+#define STORAGE_STEADY_CACHE_KIB  (32LL * 1024)         /* 32 MiB */
 
 /* Cap a folding-profile value at the steady ceiling. */
 int64_t storage_memory_profile_steady_mmap(int64_t folding_mmap_bytes);

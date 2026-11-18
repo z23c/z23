@@ -3,8 +3,9 @@
  * test_storage_memory_profile — the steady (tip-following) SQLite memory
  * profile on the consensus.db and projection connections.  On temp-dir
  * fixture stores: PRAGMA mmap_size / cache_size read back the folding values
- * at open, the steady 64 MiB / 128 MiB caps after the switch, the folding
- * values again after switching back, and a write/read round trip returns the
+ * at open, the steady 64 MiB mmap / 32 MiB per-connection cache caps after
+ * the switch (64 MiB combined), the folding values again after switching back,
+ * and a write/read round trip returns the
  * same rows in every profile (PRAGMA-only: no byte read or written changes). */
 
 #include "test/test_core.h"
@@ -175,15 +176,19 @@ int test_storage_memory_profile(void)
     MP_CHECK("is steady", storage_memory_profile_is_steady());
     MP_CHECK("kernel steady mmap == 64 MiB",
              mp_pragma(pdb, "PRAGMA mmap_size") == STORAGE_STEADY_MMAP_BYTES);
-    MP_CHECK("kernel steady cache == min(open, 128 MiB)",
+    MP_CHECK("kernel steady cache == min(open, 32 MiB)",
              mp_pragma(pdb, "PRAGMA cache_size") ==
              -storage_memory_profile_steady_cache_kib(-p_cache0));
-    MP_CHECK("kernel steady cache <= 128 MiB",
-             -mp_pragma(pdb, "PRAGMA cache_size") <= STORAGE_STEADY_CACHE_KIB);
+    MP_CHECK("kernel steady cache <= 32 MiB",
+             -mp_pragma(pdb, "PRAGMA cache_size") <= 32LL * 1024);
     MP_CHECK("projection steady mmap == 64 MiB",
              mp_pragma(jdb, "PRAGMA mmap_size") == STORAGE_STEADY_MMAP_BYTES);
-    MP_CHECK("projection steady cache never above folding",
-             mp_pragma(jdb, "PRAGMA cache_size") == j_cache0);
+    MP_CHECK("projection steady cache == min(open, 32 MiB)",
+             mp_pragma(jdb, "PRAGMA cache_size") ==
+             -storage_memory_profile_steady_cache_kib(-j_cache0));
+    MP_CHECK("combined steady cache budget is 64 MiB",
+             -mp_pragma(pdb, "PRAGMA cache_size") -
+             mp_pragma(jdb, "PRAGMA cache_size") == 64LL * 1024);
     MP_CHECK("round trip steady", mp_roundtrip(pdb, jdb, 1));
 
     MP_CHECK("switch back to folding", storage_memory_profile_set(false));

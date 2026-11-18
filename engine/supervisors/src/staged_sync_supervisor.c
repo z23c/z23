@@ -265,8 +265,8 @@ static void staged_sync_apply_progress_durability(struct main_state *ms)
         atomic_store(&g_progress_sync_ibd, want);
 }
 
-/* SQLite memory profile gate. Follows the tip (steady: 64 MiB mmap / 128 MiB
- * cache) only when the node is neither in initial block download nor in a
+/* SQLite memory profile gate. Follows the tip (steady: 64 MiB mmap / 32 MiB
+ * cache per connection) only when the node is neither in initial block download nor in a
  * refold / mint fold (refold_cadence_active()); any of those, and the snapshot
  * install that runs under IBD, restores the folding sizing. Reuses the same
  * is_initial_block_download() signal as the durability gate above and applies
