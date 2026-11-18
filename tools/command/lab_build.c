@@ -225,6 +225,26 @@ static bool lab_severity(const char *p, char *sev, const char **rest)
     return false;
 }
 
+/* GNU ld source locations carry a section offset instead of a column. */
+static bool lab_linker_severity(const char *p, char *sev, const char **rest)
+{
+    static const char prefix[] = "(.text+0x";
+    static const char marker[] = "): undefined reference to ";
+    if (strncmp(p, prefix, sizeof(prefix) - 1) != 0)
+        return false;
+    p += sizeof(prefix) - 1;
+    if (!isxdigit((unsigned char)*p))
+        return false;
+    while (isxdigit((unsigned char)*p))
+        p++;
+    if (strncmp(p, marker, sizeof(marker) - 1) != 0 || !p[sizeof(marker) - 1])
+        return false;
+    snprintf(sev, 8, "error");
+    *rest = p + 3;
+    return true;
+}
+
+
 /* Parse "file:line:col: severity: message" (column optional). */
 static bool lab_parse_line(const char *line, size_t len, struct lab_diag *d)
 {
@@ -239,10 +259,14 @@ static bool lab_parse_line(const char *line, size_t len, struct lab_diag *d)
             continue;
         }
         long col = 0;
-        if (*end == ':' && end[1] >= '0' && end[1] <= '9')
+        bool has_col = *end == ':' && end[1] >= '0' && end[1] <= '9';
+        if (has_col)
             col = strtol(end + 1, &end, 10);
         const char *msg;
-        if (*end == ':' && lab_severity(end + 1, d->severity, &msg)) {
+        if (*end == ':' && (lab_severity(end + 1, d->severity, &msg) ||
+                            lab_linker_severity(end + 1, d->severity, &msg))) {
+            if (has_col && strncmp(end + 1, "(.text+0x", 9) == 0)
+                return false;
             d->line = (int)ln;
             d->col = (int)col;
             snprintf(d->message, sizeof(d->message), "%s", msg);

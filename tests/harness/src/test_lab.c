@@ -151,6 +151,40 @@ static int test_lab_hello(void)
     return failures;
 }
 
+static int test_lab_link_error(void)
+{
+    int failures = 0;
+    TEST("lab run: source-located linker errors have structured diagnostics") {
+        char path[600], input[1024];
+        struct zcl_command_reply r;
+        ASSERT(snprintf(path, sizeof(path), "%s/missing-link.c", g_lt_dir) > 0);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("extern int missing_helper(void);\n"
+                     "int main(void) { return missing_helper(); }\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(snprintf(input, sizeof(input), "{\"file\":\"%s\",\"compile_only\":true}",
+                        path) > 0);
+        ASSERT(lt_call(zcl_native_handle_lab_run, input, "zcl.lab_run.v1", &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(!lt_flag(&r.data, "compile", "ok"));
+        if (lt_has(&r.data, "compile", "raw_tail", ":(.text+") &&
+            lt_has(&r.data, "compile", "raw_tail", "undefined reference to")) {
+            const struct json_value *diag = lt_at(&r.data, "compile", "diagnostics");
+            ASSERT(diag && diag->num_children > 0);
+            ASSERT_EQ(lt_int(&diag->children[0], "line", NULL), 2);
+            ASSERT_EQ(lt_int(&diag->children[0], "col", NULL), 0);
+            ASSERT(lt_streq(json_get(&diag->children[0], "severity"), "error"));
+            ASSERT(lt_has(&diag->children[0], "message", NULL, "missing_helper"));
+            ASSERT(lt_has(&diag->children[0], "message", NULL, "undefined reference to"));
+        }
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_lab_compile_error(void)
 {
     int failures = 0;
@@ -1185,6 +1219,7 @@ int test_lab(void)
     failures += test_lab_wrapper_failure();
 #endif
     failures += test_lab_compile_error();
+    failures += test_lab_link_error();
     failures += test_lab_exit_and_stderr();
     failures += test_lab_crash();
     failures += test_lab_sanitizers();
