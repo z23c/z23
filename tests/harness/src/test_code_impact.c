@@ -964,6 +964,80 @@ static int test_code_guide_long_cost(void)
     return failures;
 }
 
+void zcl_code_brief_test_render_fault(const char *label, unsigned nth, unsigned after);
+
+static int test_code_guide_render_fault(void)
+{
+    int failures = 0;
+    TEST("guide refuses an allocation failure while building the brief") {
+        char cwd[512];
+        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+        struct zcl_command_reply reply;
+        zcl_code_brief_test_render_fault("json_children", 1, 0);
+        cg_guide_paths(cwd, "tests/harness/src/test_code_impact.c", &reply);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(fired);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(reply.error.code, "CODE_GUIDE_ALLOC");
+        ASSERT(json_is_null(&reply.data));
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ci_guide_render_fault(const char *root, const char *label,
+                                  unsigned after, int budget)
+{
+    size_t live = json_test_live_blocks();
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "paths", "unknown_fixture.c") &&
+              json_push_kv_int(&input, "budget", budget);
+    struct zcl_command_context ctx = {.source_root = root};
+    struct zcl_command_request request = {.input = &input, .context = &ctx};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.code_guide.v1");
+    if (ok) {
+        zcl_code_brief_test_render_fault(label, 1, after);
+        zcl_native_handle_code_guide(&request, &reply);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ok = fired && reply.exit_code != ZCL_COMMAND_EXIT_OK &&
+             strcmp(reply.error.code, "CODE_GUIDE_ALLOC") == 0 &&
+             json_is_null(&reply.data);
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok && json_test_live_blocks() == live;
+}
+
+static int test_code_guide_render_sweep(void)
+{
+    int failures = 0;
+    TEST("guide retires partial JSON for nested, next and reduction faults") {
+        const char *labels[] = {"json_children", "json_keys", "json_copy_children",
+                                "json_copy_keys", "json_copy_str", "json_set_str",
+                                "json_push_kv_key"};
+        char root[512];
+        ASSERT(test_mkdtemp(root, sizeof root, "guide_render_fault"));
+        ASSERT(ci_impact_mk_write(root, "AGENTS.md",
+            "# Fixture\n\nRules:\n"
+            "- A long first rule for the bounded guide fixture; it names an ordinary editing instruction and its intended owner.\n"
+            "- A long second rule for the bounded guide fixture; it describes another ordinary editing instruction for the owner.\n"
+            "- A long third rule for the bounded guide fixture; it describes the checks and evidence normally provided to the owner.\n"));
+        for (size_t k = 0; k < sizeof(labels) / sizeof(labels[0]); k++)
+            ASSERT(ci_guide_render_fault(root, labels[k], 0, 8192));
+        ASSERT(ci_guide_render_fault(root, "json_copy_children", 2, 8192));
+        ASSERT(ci_guide_render_fault(root, "json_children", 1, 256));
+        ASSERT_EQ(test_rm_rf_recursive(root), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -2349,6 +2423,8 @@ int test_code_impact(void)
     failures += test_code_guide_source_changes();
     failures += test_code_guide_next_commands();
     failures += test_code_guide_long_cost();
+    failures += test_code_guide_render_fault();
+    failures += test_code_guide_render_sweep();
     failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();

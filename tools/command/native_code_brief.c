@@ -768,131 +768,144 @@ static void cb_build_next(struct cb_brief *b)
 
 /* ── render ───────────────────────────────────────────────────────────── */
 
-static void cb_push_strs(struct json_value *obj, const char *key,
+#if defined(ZCL_TESTING)
+static _Thread_local const char *g_cb_render_fault;
+static _Thread_local unsigned g_cb_render_fault_nth, g_cb_render_fault_after;
+/* after: 0 first build, 1 reduced build, 2 next insertion. */
+void zcl_code_brief_test_render_fault(const char *label, unsigned nth, unsigned after)
+{
+    g_cb_render_fault = label;
+    g_cb_render_fault_nth = nth;
+    g_cb_render_fault_after = after;
+}
+#endif
+
+/* json_push_back deep-copies this non-owning view. */
+static bool cb_array_string(struct json_value *arr, const char *text)
+{
+    struct json_value view = { .type = JSON_STR, .val.s = (char *)text };
+    return json_push_back(arr, &view);
+}
+
+static bool cb_push_strs(struct json_value *obj, const char *key,
                          const char (*list)[CB_RULE_CAP], size_t n)
 {
-    struct json_value arr, s;
+    struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; i < n; i++) {
-        json_init(&s);
-        json_set_str(&s, list[i]);
-        (void)json_push_back(&arr, &s);
-        json_free(&s);
-    }
-    (void)json_push_kv(obj, key, &arr);
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++)
+        ok = cb_array_string(&arr, list[i]);
+    if (ok) ok = json_push_kv(obj, key, &arr);
     json_free(&arr);
+    return ok;
 }
 
-static void cb_push_owners(struct json_value *data, const struct cb_brief *b)
+static bool cb_push_owners(struct json_value *data, const struct cb_brief *b)
 {
     struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; i < b->nowners; i++) {
+    bool ok = true;
+    for (size_t i = 0; ok && i < b->nowners; i++) {
         struct json_value o;
         json_init(&o);
         json_set_object(&o);
-        (void)json_push_kv_str(&o, "file", b->owners[i].file);
-        cb_push_strs(&o, "rules", b->owners[i].rules, b->owners[i].nrules);
-        (void)json_push_back(&arr, &o);
+        ok = json_push_kv_str(&o, "file", b->owners[i].file) &&
+             cb_push_strs(&o, "rules", b->owners[i].rules, b->owners[i].nrules) &&
+             json_push_back(&arr, &o);
         json_free(&o);
     }
-    (void)json_push_kv(data, "owners", &arr);
+    if (ok) ok = json_push_kv(data, "owners", &arr);
     json_free(&arr);
+    return ok;
 }
 
-static void cb_push_lessons(struct json_value *data, const struct cb_brief *b)
+static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b)
 {
     struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; i < b->nlessons; i++) {
+    bool ok = true;
+    for (size_t i = 0; ok && i < b->nlessons; i++) {
         struct json_value o;
         json_init(&o);
         json_set_object(&o);
-        (void)json_push_kv_str(&o, "slug", b->lessons[i].slug);
-        (void)json_push_kv_str(&o, "rule", b->lessons[i].rule);
-        (void)json_push_kv(&o, "matched", &b->lessons[i].matched);
-        (void)json_push_back(&arr, &o);
+        ok = json_push_kv_str(&o, "slug", b->lessons[i].slug) &&
+             json_push_kv_str(&o, "rule", b->lessons[i].rule) &&
+             json_push_kv(&o, "matched", &b->lessons[i].matched) &&
+             json_push_back(&arr, &o);
         json_free(&o);
     }
-    (void)json_push_kv(data, "lessons", &arr);
+    if (ok) ok = json_push_kv(data, "lessons", &arr);
     json_free(&arr);
+    return ok;
 }
 
-static void cb_push_cut(struct json_value *data, const struct cb_brief *b)
+static bool cb_push_cut(struct json_value *data, const struct cb_brief *b)
 {
     static const char *const names[] = {"lessons", "tests", "owner_rules",
                                         "owners", "next"};
     const bool flags[] = {b->cut_lessons, b->cut_tests, b->cut_rules,
                           b->cut_owners, b->cut_next};
-    struct json_value arr, s;
-    bool any = false;
+    struct json_value arr;
+    bool any = false, ok = true;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; i < 5; i++) {
-        if (!flags[i])
-            continue;
+    for (size_t i = 0; ok && i < 5; i++) {
+        if (!flags[i]) continue;
         any = true;
-        json_init(&s);
-        json_set_str(&s, names[i]);
-        (void)json_push_back(&arr, &s);
-        json_free(&s);
+        ok = cb_array_string(&arr, names[i]);
     }
-    (void)json_push_kv_bool(data, "truncated", any);
-    if (any)
-        (void)json_push_kv(data, "cut", &arr);
+    if (ok) ok = json_push_kv_bool(data, "truncated", any);
+    if (ok && any) ok = json_push_kv(data, "cut", &arr);
     json_free(&arr);
+    return ok;
 }
 
-static void cb_push_tests(struct json_value *data, const struct cb_brief *b)
+static bool cb_push_tests(struct json_value *data, const struct cb_brief *b)
 {
-    struct json_value arr, s;
+    struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; i < b->ntests; i++) {
-        json_init(&s);
-        json_set_str(&s, b->tests[i]);
-        (void)json_push_back(&arr, &s);
-        json_free(&s);
-    }
-    (void)json_push_kv(data, "tests", &arr);
+    bool ok = true;
+    for (size_t i = 0; ok && i < b->ntests; i++)
+        ok = cb_array_string(&arr, b->tests[i]);
+    if (ok) ok = json_push_kv(data, "tests", &arr);
     json_free(&arr);
-    if (b->unmapped)
-        (void)json_push_kv_bool(data, "tests_unmapped", true);
+    return ok && (!b->unmapped || json_push_kv_bool(data, "tests_unmapped", true));
 }
 
-static void cb_push_next_cmds(struct json_value *data, const struct cb_brief *b)
+static bool cb_push_next_cmds(struct json_value *data, const struct cb_brief *b)
 {
-    struct json_value arr, s;
+    struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; i < b->nnext; i++) {
-        json_init(&s);
-        json_set_str(&s, b->next[i]);
-        (void)json_push_back(&arr, &s);
-        json_free(&s);
+    bool ok = true;
+    for (size_t i = 0; ok && i < b->nnext; i++)
+        ok = cb_array_string(&arr, b->next[i]);
+#if defined(ZCL_TESTING)
+    if (ok && g_cb_render_fault && g_cb_render_fault_after == 2) {
+        zcl_alloc_fault_fail_nth(g_cb_render_fault, g_cb_render_fault_nth);
+        g_cb_render_fault = NULL;
     }
-    (void)json_push_kv(data, "next", &arr);
+#endif
+    if (ok) ok = json_push_kv(data, "next", &arr);
     json_free(&arr);
+    return ok;
 }
 
-static void cb_build(const struct cb_brief *b, struct json_value *data)
+static bool cb_build(const struct cb_brief *b, struct json_value *data)
 {
     json_free(data);
     json_init(data);
     json_set_object(data);
-    (void)json_push_kv_str(data, "schema", "zcl.code_guide_brief.v1");
-    cb_push_owners(data, b);
-    cb_push_tests(data, b);
-    cb_push_lessons(data, b);
-    if (b->unavailable[0])
-        (void)json_push_kv_str(data, "lessons_unavailable", b->unavailable);
-    if (b->lessons_capped)
-        (void)json_push_kv_bool(data, "lessons_capped", true);
-    cb_push_next_cmds(data, b);
-    cb_push_cut(data, b);
+    return json_push_kv_str(data, "schema", "zcl.code_guide_brief.v1") &&
+           cb_push_owners(data, b) && cb_push_tests(data, b) &&
+           cb_push_lessons(data, b) &&
+           (!b->unavailable[0] || json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
+           (!b->lessons_capped || json_push_kv_bool(data, "lessons_capped", true)) &&
+           cb_push_next_cmds(data, b) && cb_push_cut(data, b);
 }
 
 /* Remove the lowest-priority content that is left; false when none is. */
@@ -919,14 +932,23 @@ static bool cb_reduce(struct cb_brief *b)
     return true;
 }
 
-static bool cb_fit(struct cb_brief *b, struct json_value *data)
+enum cb_fit_result { CB_FIT_OK, CB_FIT_ALLOC, CB_FIT_BUDGET };
+
+static enum cb_fit_result cb_fit(struct cb_brief *b, struct json_value *data)
 {
     for (;;) {
-        cb_build(b, data);
+#if defined(ZCL_TESTING)
+        if (g_cb_render_fault && g_cb_render_fault_after != 2 && g_cb_render_fault_after-- == 0) {
+            zcl_alloc_fault_fail_nth(g_cb_render_fault, g_cb_render_fault_nth);
+            g_cb_render_fault = NULL;
+        }
+#endif
+        if (!cb_build(b, data))
+            return CB_FIT_ALLOC;
         if (json_write(data, NULL, 0) <= b->budget)
-            return true;
+            return CB_FIT_OK;
         if (!cb_reduce(b))
-            return false;
+            return CB_FIT_BUDGET;
     }
 }
 
@@ -967,8 +989,14 @@ void zcl_code_brief_render(const struct zcl_command_request *request,
     cb_collect_tests(b);
     cb_collect_lessons(request, b);
     cb_build_next(b);
-    if (!cb_fit(b, &reply->data))
-        cb_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "CODE_GUIDE_OUTPUT",
-                "the brief does not fit the budget");
+    enum cb_fit_result result = cb_fit(b, &reply->data);
+    if (result != CB_FIT_OK) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        cb_fail(reply, ZCL_COMMAND_EXIT_INTERNAL,
+                result == CB_FIT_ALLOC ? "CODE_GUIDE_ALLOC" : "CODE_GUIDE_OUTPUT",
+                result == CB_FIT_ALLOC ? "the brief could not be allocated"
+                                       : "the brief does not fit the budget");
+    }
     cb_free(b);
 }
