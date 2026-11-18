@@ -2527,11 +2527,62 @@ static int test_code_name_route_order(void)
     return failures;
 }
 
+static int test_code_navigation_selected_root(void)
+{
+    int failures = 0;
+    char dir[4096] = {0};
+    TEST("code navigation: routes use the selected source root") {
+        ASSERT(test_mkdtemp(dir, sizeof dir, "navigation_root"));
+        ASSERT(ci_impact_mk_write(dir, "tests/harness/src/test_dev_job.c",
+                   "const char *s = \"zkprobe_" "beacon_1109\";\n"));
+        ASSERT(ci_impact_mk_write(dir, "tools/lint/lintc/empty.c", "int empty;\n"));
+        const char *path = "tools/command/zkprobe_" "beacon_1109.c";
+        struct zcl_command_context ctx = {.source_root = dir};
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path", path));
+        struct zcl_command_request req = {.input = &input, .context = &ctx};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&req, &reply);
+        ASSERT(json_array_has_string(json_get(&reply.data, "test_groups"), "dev_job"));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.code_cost.v1");
+        zcl_native_handle_code_cost(&req, &reply);
+        ASSERT(json_array_has_string(json_get(&reply.data, "test_groups"), "dev_job"));
+        zcl_command_reply_free(&reply);
+        json_free(&input); json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "paths", path));
+        zcl_command_reply_init(&reply, "zcl.code_guide.v1");
+        zcl_native_handle_code_guide(&req, &reply);
+        ASSERT(json_array_has_string(json_get(&reply.data, "tests"), "dev_job"));
+        zcl_command_reply_free(&reply);
+        json_free(&input); json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "paths", "tools/command/zkprobe_" "beacon_1109.c,docs/notes.md"));
+        zcl_command_reply_init(&reply, "zcl.code_guide.v1");
+        zcl_native_handle_code_guide(&req, &reply);
+        ASSERT(json_array_has_string(json_get(&reply.data, "tests"), "dev_job"));
+        zcl_command_reply_free(&reply);
+        zcl_alloc_fault_fail_next("agent_impact_batch");
+        zcl_command_reply_init(&reply, "zcl.code_guide.v1");
+        zcl_native_handle_code_guide(&req, &reply);
+        bool fault_consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(fault_consumed);
+        ASSERT(json_array_has_string(json_get(&reply.data, "tests"), "dev_job"));
+        zcl_command_reply_free(&reply); json_free(&input);
+        PASS();
+    } _test_next:;
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
     failures += test_code_group_merge_loss();
     failures += test_code_name_route_order();
+    failures += test_code_navigation_selected_root();
     failures += test_code_literal_candidate_scan();
     failures += test_code_literal_raw_rejection_contract();
     failures += test_code_impact_rule_predicate();

@@ -2,9 +2,8 @@
  * purpose: Price the proof of a change: the focused test route for one path
  * plus what the last suite run measured those groups to cost. */
 
-#include "command/native_command.h"
+#include "command/native_code_priv.h"
 
-#include "controllers/agent_impact_rules.h"
 #include "json/json.h"
 #include "util/safe_alloc.h"
 
@@ -19,16 +18,6 @@ enum {
     CODE_COST_GROUPS_CAP = 12,      /* mirrors code.tests test_groups cap */
     CODE_COST_TIMING_MAX = 4 * 1024 * 1024,
 };
-
-static const char *cost_source_root(
-    const struct zcl_command_request *request)
-{
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *root = getenv("ZCL_DEV_SOURCE_ROOT");
-    return root && root[0] ? root : ".";
-}
 
 /* Read a checkout file whole into a zcl_malloc'd, NUL-terminated buffer of at
  * most `max` bytes; *len receives its size. NULL when the file is absent,
@@ -242,14 +231,15 @@ void zcl_native_handle_code_cost(
         return;
     }
 
+    const char *root = zcl_native_source_root(request);
     struct agent_impact_acc acc = {0};
     bool crisk = false;
-    const char *route = zcl_native_code_route_for_path(path, &acc, &crisk);
+    const char *route = zcl_native_code_route_at(root, path, &acc, &crisk);
     if (!route)
         route = "make_lint_gates";
 
     struct json_value timing;
-    bool have_timing = cost_timing_load(cost_source_root(request), &timing);
+    bool have_timing = cost_timing_load(root, &timing);
 
     size_t shown = acc.groups_len < (size_t)CODE_COST_GROUPS_CAP
                        ? acc.groups_len : (size_t)CODE_COST_GROUPS_CAP;

@@ -666,7 +666,7 @@ void zcl_native_handle_code_room(const struct zcl_command_request *request,
      * and `dev test plan` use, so a room view and a test plan never disagree. */
     bool crisk = false;
     char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
-    const char *route = code_emit_route(reply, path, &crisk, route_storage);
+    const char *route = code_emit_route(request, reply, path, &crisk, route_storage);
 
     /* commands[]: WF4 4C dispatch-index join (code_commands_for_file above) —
      * command paths whose registered native handler is DEFINED in this file.

@@ -405,13 +405,13 @@ static void cb_collect_tests(struct cb_brief *b)
         ? zcl_calloc(b->npaths, sizeof(*accs), "code_guide_routes") : NULL;
     for (size_t i = 0; i < b->npaths; i++)
         paths[i] = b->paths[i];
-    bool batched = accs && zcl_native_code_routes_many(paths, b->npaths, accs, routes, risks);
+    bool batched = accs && zcl_native_code_routes_many_at(b->root, paths, b->npaths, accs, routes, risks);
     for (size_t i = 0; i < b->npaths; i++) {
         struct agent_impact_acc local;
         struct agent_impact_acc *acc = batched ? &accs[i] : &local;
         bool crisk = batched ? risks[i] : false;
         const char *route = batched ? routes[i]
-            : zcl_native_code_route_for_path(b->paths[i], acc, &crisk);
+            : zcl_native_code_route_at(b->root, b->paths[i], acc, &crisk);
         b->test_evidence_unavailable = b->test_evidence_unavailable || acc->referrer_read_failed;
         if (!crisk && acc->groups_len == 0) {
             b->unmapped = true;

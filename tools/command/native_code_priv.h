@@ -122,7 +122,8 @@ bool code_path_is_consensus_risk(const char *path);
  * the routed group and, via `consensus_risk`, whether it is a consensus
  * surface — so the caller can render a summary without recomputing. */
 const char *code_emit_route(
-    struct zcl_command_reply *reply, const char *path, bool *consensus_risk,
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *path, bool *consensus_risk,
     char route_storage[static ZCL_AGENT_IMPACT_GROUP_MAX]);
 
 /* WF4 4C dispatch-index join (config/command_handler_index.h) against the

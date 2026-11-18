@@ -71,6 +71,21 @@ static bool write_fh_fixture(void)
         "int firsthour_vendored(void)\n{\n    return 5;\n}\n");
 }
 
+static bool fh_cost_route_fixture(void)
+{
+    static const char *const groups[] = {"code_impact", "code_packet", "code_firsthour",
+        "dev_job", "devagent_ticketkey", "fleet_parity", "path_check", "codeindex",
+        "command_registry_catalog", "native_api_contract", "command_handler_snapshot",
+        "hotswap_module", "dev_platform", "code_capsule"};
+    for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++) {
+        char path[256];
+        int n = snprintf(path, sizeof path, "tests/harness/src/test_%s.c", groups[i]);
+        if (n <= 0 || (size_t)n >= sizeof path ||
+            !fh_mk_write(FH_FIX, path, "const char *s = \"tools/ship.sh\";\n")) return false;
+    }
+    return true;
+}
+
 static void fh_call(void (*handler)(const struct zcl_command_request *,
                                     struct zcl_command_reply *),
                     const char *schema, const char *invoked,
@@ -317,13 +332,21 @@ static int test_fh_cost_measured(void)
 
 /* Measure a retained group beyond the display limit, proving the aggregate
  * covers the complete retained route rather than merely visible rows. */
+static bool fh_fixture_route(struct agent_impact_acc *acc, bool *risk)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd) || chdir(FH_FIX) != 0) return false;
+    bool ok = zcl_native_code_route_for_path("tools/ship.sh", acc, risk) != NULL;
+    return chdir(cwd) == 0 && ok;
+}
+
 static int test_fh_cost_hidden_group(void)
 {
     int failures = 0;
     TEST("code_firsthour: cost counts and measures retained groups beyond the displayed twelve") {
         struct agent_impact_acc acc = {0};
         bool risk = false;
-        ASSERT(zcl_native_code_route_for_path("tools/ship.sh", &acc, &risk) != NULL);
+        ASSERT(fh_fixture_route(&acc, &risk));
         ASSERT(acc.groups_len > 12 && !acc.groups_lost);
         char json[512];
         int n = snprintf(json, sizeof(json),
@@ -404,7 +427,7 @@ static int test_fh_cost_duration_validity(void)
     TEST("code_firsthour: complete timing requires every retained duration to be valid") {
         struct agent_impact_acc acc = {0};
         bool risk = false;
-        ASSERT(zcl_native_code_route_for_path("tools/ship.sh", &acc, &risk) != NULL);
+        ASSERT(fh_fixture_route(&acc, &risk));
         ASSERT(acc.groups_len > 12 && !acc.groups_lost);
         for (unsigned variant = 0; variant <= 3; variant++) {
             ASSERT(fh_cost_full_artifact(&acc, acc.groups_len - 1, variant, FH_FIX));
@@ -598,7 +621,7 @@ int test_code_firsthour(void)
 {
     int failures = 0;
      TEST_DISCARD(system("rm -rf " FH_FIX));
-    if (!write_fh_fixture()) {
+    if (!write_fh_fixture() || !fh_cost_route_fixture()) {
         printf("  code_firsthour: fixture write... FAIL\n");
         return 1;
     }

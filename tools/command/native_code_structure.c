@@ -365,7 +365,7 @@ void zcl_native_handle_code_file(const struct zcl_command_request *request,
      * to (mirrors `dev test plan` / code.tests). Lets an editor jump from a
      * file to its proof group in one call. */
     char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
-    (void)code_emit_route(reply, path, NULL, route_storage);
+    (void)code_emit_route(request, reply, path, NULL, route_storage);
 
     json_free(&sarr); json_free(&iarr);
     codeindex_close(ci);
@@ -1039,7 +1039,7 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
      * to downstream. */
     bool crisk = false;
     char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
-    const char *route = code_emit_route(reply, path, &crisk, route_storage);
+    const char *route = code_emit_route(request, reply, path, &crisk, route_storage);
 
     char summary[256];
     (void)snprintf(summary, sizeof(summary),

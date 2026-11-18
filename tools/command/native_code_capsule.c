@@ -469,7 +469,7 @@ void zcl_native_handle_code_capsule(const struct zcl_command_request *request,
     bool crisk = false;
     char route_storage[ZCL_AGENT_IMPACT_GROUP_MAX];
     const char *route =
-        code_emit_route(reply, def_path, &crisk, route_storage);
+        code_emit_route(request, reply, def_path, &crisk, route_storage);
 
     char summary[300];
     (void)snprintf(summary, sizeof(summary),
