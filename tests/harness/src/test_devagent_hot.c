@@ -10,6 +10,7 @@
  */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 
 #include "command/native_command.h"
 #include "command/native_devagent.h"
@@ -239,6 +240,34 @@ int test_devagent_hot(void)
         PASS();
     }
 
+    TEST("hot: primary owner avoids an irrelevant referrer scan") {
+        char path[1024];
+        int n = snprintf(path, sizeof path, "%s/tools", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        n = snprintf(path, sizeof path, "%s/tools/command", root);
+        ASSERT(n > 0);
+        ASSERT((size_t)n < sizeof path);
+        ASSERT(mkdir(path, 0755) == 0);
+        ASSERT(dvx_write(root, "tools/command/native_code_" "hotprimary1109.c", "int primary1109;\n"));
+        struct dvx_call c;
+        dvx_begin(&c);
+        ASSERT(json_push_kv_str(&c.input, "cwd", root));
+        ASSERT(json_push_kv_str(&c.input, "path", "tools/command/native_code_" "hotprimary1109.c"));
+        zcl_alloc_fault_fail_next("agent_impact_names");
+        bool ran = dvx_run(&c);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(ran);
+        ASSERT(armed);
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "RUNNER_FAILED");
+        ASSERT(strstr(c.reply.error.evidence, "--exact=test_make_lint_gates --no-cache") != NULL);
+        dvx_end(&c);
+        PASS();
+    }
+
     ASSERT(dvx_fixture(root));
 
     TEST("hot: a saved file no rule owns is UNRESOLVED, never a pass") {
@@ -352,6 +381,7 @@ int test_devagent_hot(void)
     }
 
 _test_next:;
+    zcl_alloc_fault_clear();
     (void)test_rm_rf_recursive(root);
     if (failures == 0) printf("test_devagent_hot: all passed\n");
     else printf("test_devagent_hot: %d FAILED\n", failures);

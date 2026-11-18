@@ -81,7 +81,6 @@
 #include "command/native_dev_loop_command.h"
 #include "command/native_devagent.h"
 
-#include "controllers/agent_impact_rules.h"
 #include "dev/test_group_catalog.h"
 #include "json/json.h"
 #include "zutf8/zutf8.h"
@@ -190,22 +189,6 @@ static void dvh_emit_unresolved(struct zcl_command_reply *reply,
     dvh_push_next(&reply->data, next);
 }
 
-/* First matched shared-rule group that is a registered group, in route
- * order. A rule hit that names nothing registered is not ownership — the
- * floor the router falls back to is the absence of a signal, not a group. */
-static bool dvh_owned_route_group(const struct agent_impact_acc *acc,
-                                  char out[ZCL_TEST_GROUP_FULL_MAX])
-{
-    if (!acc || !out)
-        return false;
-    for (size_t i = 0; i < acc->groups_len; i++) {
-        if (acc->groups[i] &&
-            zcl_test_group_resolve_exact(acc->groups[i], out))
-            return true;
-    }
-    return false;
-}
-
 /* The two BAD_INPUT refusals in one place: a leaf without a path is
  * undirected, and an absolute or escaping path would leave the inspected
  * directory. False means the reply already carries the refusal. */
@@ -289,11 +272,8 @@ static bool dvh_resolve_owning_group(const struct json_value *input,
         (void)snprintf(group, ZCL_TEST_GROUP_FULL_MAX, "%s", override);
         return true;
     }
-    struct agent_impact_acc acc;
     bool consensus_risk = false;
-    const char *route = NULL;
-    memset(&acc, 0, sizeof(acc));
-    route = zcl_native_code_route_at(dir, path, &acc, &consensus_risk);
+    const char *route = zcl_native_code_hot_route_at(dir, path, &consensus_risk, wanted);
     if (!route)
         route = "";
     if (consensus_risk) {
@@ -301,8 +281,7 @@ static bool dvh_resolve_owning_group(const struct json_value *input,
         if (!resolved)
             return false;
     } else {
-        bool owned = dvh_owned_route_group(&acc, wanted);
-        if (!owned)
+        if (!wanted[0])
             return false;
     }
     (void)snprintf(group, ZCL_TEST_GROUP_FULL_MAX, "%s", route);

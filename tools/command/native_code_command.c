@@ -355,6 +355,29 @@ const char *zcl_native_code_route_at(const char *root, const char *path,
     return code_route_at(root, path, acc, consensus_risk, false);
 }
 
+/* Hot needs the first registered owner, not merely the reported label. */
+static bool code_route_owned(const struct agent_impact_acc *acc, char *wanted)
+{
+    for (size_t i = 0; i < acc->groups_len; i++)
+        if (acc->groups[i] && zcl_test_group_resolve_exact(acc->groups[i], wanted)) return true;
+    return false;
+}
+
+const char *zcl_native_code_hot_route_at(const char *root, const char *path,
+    bool *consensus_risk, char *wanted)
+{
+    struct agent_impact_acc local;
+    struct agent_impact_acc *acc = &local;
+    code_route_primary(root, path, acc, NULL);
+    bool risk = code_path_is_consensus_risk(path);
+    wanted[0] = 0;
+    if (!risk && !code_route_owned(acc, wanted)) {
+        (void)agent_impact_name_routes_at(root, path, acc);
+        (void)code_route_owned(acc, wanted);
+    }
+    return code_route_finish(path, acc, consensus_risk);
+}
+
 const char *zcl_native_code_route_for_path(const char *path,
     struct agent_impact_acc *acc, bool *consensus_risk)
 {

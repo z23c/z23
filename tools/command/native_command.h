@@ -454,6 +454,9 @@ bool zcl_native_code_routes_many(const char *const *paths, size_t count,
                                  const char **routes, bool *risks);
 const char *zcl_native_code_route_at(const char *root, const char *path,
                                      struct agent_impact_acc *acc, bool *consensus_risk);
+/* wanted must point to ZCL_TEST_GROUP_FULL_MAX writable bytes. */
+const char *zcl_native_code_hot_route_at(const char *root, const char *path,
+    bool *consensus_risk, char *wanted);
 const char *zcl_native_code_route_for_path(const char *path,
                                            struct agent_impact_acc *acc,
                                            bool *consensus_risk);
