@@ -357,9 +357,9 @@ static bool map_preflight_untouched(const char *dir, bool *verdict)
     struct map_file_state before[4], after[4];
     for (size_t i = 0; i < 4; i++)
         map_capture(dir, suffixes[i], &before[i]);
-    /* A non-empty -wal is read in place; the derived -shm read-marks and
-     * wal-index may be rewritten, the main file and the -wal never. */
-    bool shm_may_change = before[1].exists && before[1].st.st_size > 0;
+    /* In-place WAL reads may rewrite a pre-existing derived -shm. A missing
+     * -shm selects the copy fallback, which must leave the whole family intact. */
+    bool shm_may_change = before[1].exists && before[1].st.st_size > 0 && before[2].exists;
     *verdict = boot_mint_anchor_normal_boot_preflight(dir);
     bool same = true;
     for (size_t i = 0; i < 4; i++) {
