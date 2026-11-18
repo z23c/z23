@@ -294,6 +294,46 @@ static int lp_case_compile_failed(void)
     return failures;
 }
 
+static int lp_case_release_compile_failed(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("lab.promote reports the release compiler error after a warning") {
+        struct zcl_command_reply p;
+        char path[PATH_MAX];
+        ASSERT(ready);
+        ASSERT_EQ(mkdir(e.dist, 0700), 0);
+        ASSERT(lp_join(path, sizeof(path), e.base, "release-fail.c"));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("#if defined(__has_feature)\n"
+                     "#if __has_feature(address_sanitizer)\n"
+                     "#define GOOD 1\n"
+                     "#endif\n"
+                     "#endif\n"
+                     "#if !defined(__SANITIZE_ADDRESS__) && !defined(GOOD)\n"
+                     "#pragma GCC diagnostic warning \"-Wcpp\"\n"
+                     "#warning informational_release_warning\n"
+                     "#error actual_release_failure\n"
+                     "#endif\n"
+                     "int main(void) { return 0; }\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        lp_promote(&e, path, "[{\"name\":\"ok\"}]", &p);
+        ASSERT_STR_EQ(p.error.code, "LAB_PROMOTE_BUILD_FAILED");
+        ASSERT_STR_EQ(p.error.phase, "build");
+        ASSERT(strstr(p.error.message, "actual_release_failure") != NULL);
+        ASSERT(strstr(p.error.message, "line 9") != NULL);
+        ASSERT(strstr(p.error.message, "informational_release_warning") == NULL);
+        ASSERT(p.error.evidence[0] != 0);
+        ASSERT_EQ(lp_entries(e.dist), 0);
+        zcl_command_reply_free(&p);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
+
 static int lp_case_disagree(void)
 {
     int failures = 0;
@@ -883,6 +923,7 @@ int test_lab_promote(void)
     failures += lp_case_export_borrow();
     failures += lp_case_failed_case();
     failures += lp_case_compile_failed();
+    failures += lp_case_release_compile_failed();
     failures += lp_case_disagree();
     failures += lp_case_capture_allocation();
     failures += lp_case_no_key();

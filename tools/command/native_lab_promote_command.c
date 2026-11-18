@@ -129,6 +129,19 @@ static void promote_case_message(char message[192], const char *name, const char
 }
 
 
+static void promote_diagnostic(char message[192], long long line, long long col,
+                               const char *detail)
+{
+    char description[LAB_DIAG_MESSAGE + 64];
+    if (col > 0)
+        snprintf(description, sizeof(description), "line %lld col %lld: %s",
+                 line, col, detail);
+    else
+        snprintf(description, sizeof(description), "line %lld: %s", line, detail);
+    promote_case_message(message, NULL, description, true);
+}
+
+
 /* Prefer the compiler error when no case could run. */
 static bool promote_compile_error(char message[192], const struct json_value *data)
 {
@@ -145,11 +158,8 @@ static bool promote_compile_error(char message[192], const struct json_value *da
             strcmp(json_get_str(severity), "error") != 0 ||
             !detail || detail->type != JSON_STR || !json_get_str(detail)[0])
             continue;
-        char description[LAB_DIAG_MESSAGE + 64];
-        snprintf(description, sizeof(description), "line %lld col %lld: %s",
-                 (long long)json_get_int(json_get(row, "line")),
-                 (long long)json_get_int(json_get(row, "col")), json_get_str(detail));
-        promote_case_message(message, NULL, description, true);
+        promote_diagnostic(message, (long long)json_get_int(json_get(row, "line")),
+                           (long long)json_get_int(json_get(row, "col")), json_get_str(detail));
         return true;
     }
     return false;
@@ -222,6 +232,15 @@ static void promote_build_failed(struct zcl_command_reply *reply,
                                  const struct lab_compile *rel)
 {
     char message[192];
+    for (size_t i = 0; i < rel->n_diag; i++) {
+        const struct lab_diag *d = &rel->diag[i];
+        if (strcmp(d->severity, "error") == 0 && d->message[0]) {
+            snprintf(message, sizeof(message), "the static release build failed");
+            promote_diagnostic(message, d->line, d->col, d->message);
+            promote_refuse(reply, "LAB_PROMOTE_BUILD_FAILED", "build", message, rel->command);
+            return;
+        }
+    }
     const char *why = rel->n_diag ? rel->diag[0].message
                       : rel->detail[0] ? rel->detail
                                        : "the linker failed; is a static libc installed";
