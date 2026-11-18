@@ -228,23 +228,11 @@ const struct vcs_package_file *vcs_package_manifest_find(
         ? &manifest->files[lo] : NULL;
 }
 
-bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
-                              const char *path, uint32_t mode, uint64_t size,
-                              const uint8_t *chunk_hashes,
-                              uint32_t chunk_count)
+static bool package_manifest_insert(struct vcs_package_manifest *manifest,
+                                    size_t insert_at, const char *path,
+                                    uint32_t mode, uint64_t size,
+                                    const uint8_t *chunk_hashes, uint32_t chunk_count)
 {
-    if (!package_manifest_validate_add(manifest, path, mode, size,
-                                       chunk_hashes, chunk_count))
-        return false;
-
-    size_t insert_at = 0;
-    while (insert_at < manifest->count &&
-           strcmp(manifest->files[insert_at].path, path) < 0)
-        insert_at++;
-    if (insert_at < manifest->count &&
-        strcmp(manifest->files[insert_at].path, path) == 0)
-        LOG_FAIL("vcs.package", "duplicate package path %s", path);
-
     if (!package_manifest_reserve(manifest))
         return false;
 
@@ -267,6 +255,24 @@ bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
     file->chunk_hashes = hash_copy;
     manifest->count++;
     return true;
+}
+
+bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
+                              const char *path, uint32_t mode, uint64_t size,
+                              const uint8_t *chunk_hashes, uint32_t chunk_count)
+{
+    if (!package_manifest_validate_add(manifest, path, mode, size,
+                                       chunk_hashes, chunk_count))
+        return false;
+    size_t insert_at = 0;
+    while (insert_at < manifest->count &&
+           strcmp(manifest->files[insert_at].path, path) < 0)
+        insert_at++;
+    if (insert_at < manifest->count &&
+        strcmp(manifest->files[insert_at].path, path) == 0)
+        LOG_FAIL("vcs.package", "duplicate package path %s", path);
+    return package_manifest_insert(manifest, insert_at, path, mode, size,
+                                   chunk_hashes, chunk_count);
 }
 
 static int package_file_cmp(const void *a, const void *b)
@@ -385,6 +391,7 @@ static bool package_wire_has(size_t wire_len, size_t off, size_t need)
 static bool package_parse_record(const uint8_t *wire, size_t wire_len,
                                  size_t *off, uint32_t i,
                                  struct vcs_package_manifest *out,
+                                 uint64_t *total_bytes, uint64_t *total_chunks,
                                  const char **reject)
 {
     if (!package_wire_has(wire_len, (*off), 2)) {
@@ -429,11 +436,15 @@ static bool package_parse_record(const uint8_t *wire, size_t wire_len,
         *reject = "chunk-hashes-truncated";
         return false;
     }
-    if (!vcs_package_manifest_add(out, path, mode, size, wire + (*off),
-                                  chunk_count)) {
+    if (size > VCS_PACKAGE_MAX_TOTAL_BYTES - *total_bytes ||
+        chunk_count > VCS_PACKAGE_MAX_TOTAL_CHUNKS - *total_chunks ||
+        !package_manifest_insert(out, out->count, path, mode, size,
+                                 wire + (*off), chunk_count)) {
         *reject = "manifest-limits";
         return false;
     }
+    *total_bytes += size;
+    *total_chunks += chunk_count;
     (*off) += hash_bytes;
     return true;
 }
@@ -472,8 +483,10 @@ bool vcs_package_manifest_parse(const uint8_t *wire, size_t wire_len,
         goto rejected;
     }
 
+    uint64_t total_bytes = 0, total_chunks = 0;
     for (uint32_t i = 0; i < file_count; i++) {
-        if (!package_parse_record(wire, wire_len, &off, i, out, &reject))
+        if (!package_parse_record(wire, wire_len, &off, i, out,
+                                  &total_bytes, &total_chunks, &reject))
             goto rejected;
     }
     if (off != wire_len) {

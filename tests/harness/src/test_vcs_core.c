@@ -48,6 +48,7 @@
 #include "vcs/vcs_seal.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "platform/time_compat.h"
@@ -2053,6 +2054,98 @@ static bool package_prefixes_rejected(const uint8_t *wire, size_t wire_len)
     return all_clean;
 }
 
+static int package_parse_overflow_controls(const uint8_t *wire, size_t wire_len)
+{
+    int failures = 0;
+    const size_t extra = 2u + 1u + 4u + 8u + 4u + 32u;
+    uint8_t *extended = malloc(wire_len + extra);
+    VC_CHECK("package: aggregate overflow fixture", extended != NULL);
+    if (!extended)
+        return failures;
+    struct vcs_package_manifest parsed;
+    memcpy(extended, wire, wire_len);
+    size_t off = wire_len;
+    extended[off++] = 1; extended[off++] = 0; extended[off++] = 'e';
+    vc_wr_u32le(extended + off, VCS_PACKAGE_MODE_FILE); off += 4;
+    vc_wr_u64le(extended + off, 1); off += 8;
+    vc_wr_u32le(extended + off, 1); off += 4;
+    memset(extended + off, 5, 32);
+    vc_wr_u32le(extended + 14, 5);
+    VC_CHECK("package: total bytes and chunks overflow rejected",
+             !vcs_package_manifest_parse(extended, wire_len + extra, &parsed) &&
+             !parsed.files && !parsed.count && !parsed.cap);
+    vcs_package_manifest_free(&parsed);
+    /* One extra chunk with total bytes still below their limit. */
+    vc_wr_u64le(extended + VCS_PACKAGE_MANIFEST_WIRE_HEADER_BYTES + 3u + 4u,
+                VCS_PACKAGE_MAX_FILE_BYTES - 2u);
+    VC_CHECK("package: total chunks overflow below byte limit rejected",
+             !vcs_package_manifest_parse(extended, wire_len + extra, &parsed) &&
+             !parsed.files && !parsed.count && !parsed.cap);
+    vcs_package_manifest_free(&parsed);
+    free(extended);
+    return failures;
+}
+
+static int package_parse_allocation_controls(const uint8_t *wire, size_t wire_len)
+{
+    int failures = 0;
+    struct vcs_package_manifest parsed;
+    zcl_alloc_fault_fail_nth("vcs_package_chunk_hashes", 2);
+    bool accepted = vcs_package_manifest_parse(wire, wire_len, &parsed);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    VC_CHECK("package: second hash allocation failure clears output",
+             fired && !accepted && !parsed.files && !parsed.count && !parsed.cap);
+    vcs_package_manifest_free(&parsed);
+    accepted = vcs_package_manifest_parse(wire, wire_len, &parsed);
+    VC_CHECK("package: parse succeeds after allocation failure",
+             accepted && parsed.count == 4);
+    vcs_package_manifest_free(&parsed);
+    return failures;
+}
+
+/* Exercise both aggregate limits with distinct canonical records. */
+static int package_parse_aggregate_limits(void)
+{
+    int failures = 0;
+    const size_t hash_bytes = (size_t)VCS_PACKAGE_MAX_CHUNKS_PER_FILE * 32u;
+    uint8_t *hashes = calloc(1, hash_bytes);
+    struct vcs_package_manifest fixture, parsed;
+    vcs_package_manifest_init(&fixture);
+    vcs_package_manifest_init(&parsed);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = hashes != NULL;
+    for (unsigned i = 0; i < 4 && ok; i++) {
+        char path[] = "a";
+        path[0] += (char)i;
+        hashes[0] = (uint8_t)(i + 1);
+        ok = vcs_package_manifest_add(&fixture, path, VCS_PACKAGE_MODE_FILE,
+                                      VCS_PACKAGE_MAX_FILE_BYTES, hashes,
+                                      VCS_PACKAGE_MAX_CHUNKS_PER_FILE);
+    }
+    ok = ok && vcs_package_manifest_serialize(&fixture, &wire, &wire_len);
+    VC_CHECK("package: aggregate fixture", ok);
+    if (ok) {
+        ok = vcs_package_manifest_parse(wire, wire_len, &parsed);
+        VC_CHECK("package: exact aggregate limits accepted", ok && parsed.count == 4);
+        if (ok && parsed.count == 4 && parsed.files) {
+            for (unsigned i = 0; i < 4; i++)
+                VC_CHECK("package: distinct aggregate records preserved",
+                         parsed.files[i].path && parsed.files[i].chunk_hashes &&
+                         parsed.files[i].path[0] == (char)('a' + i) &&
+                         parsed.files[i].chunk_hashes[0] == i + 1);
+        }
+        vcs_package_manifest_free(&parsed);
+        failures += package_parse_overflow_controls(wire, wire_len);
+        failures += package_parse_allocation_controls(wire, wire_len);
+    }
+    free(wire);
+    free(hashes);
+    vcs_package_manifest_free(&fixture);
+    return failures;
+}
+
 static int t_package_manifest(void)
 {
     int failures = 0;
@@ -3902,6 +3995,7 @@ int test_vcs_core(void)
 
     failures += t_manifest_fixedpoint();
     failures += t_package_manifest();
+    failures += package_parse_aggregate_limits();
     failures += t_package_swarm();
     failures += package_capsule_wire_tests();
     failures += t_source_bundle();
