@@ -393,7 +393,11 @@ static int lp_case_cases_snapshot(void)
         ASSERT(json_read(&input, in, strlen(in)));
         struct zcl_command_request rq = { .input = &input };
         zcl_command_reply_init(&r, "zcl.lab_test.v1");
-        ASSERT(lab_cases_snapshot(&rq, &cases, &r));
+        /* A file snapshot needs its input buffer, but no execution-row array. */
+        zcl_alloc_fault_fail_nth("lab.cases", 2);
+        bool captured = lab_cases_snapshot(&rq, &cases, &r);
+        zcl_alloc_fault_clear();
+        ASSERT(captured);
         json_free(&input);
         ASSERT_EQ(unlink(path), 0);
         ASSERT_EQ(cases.type, JSON_STR);

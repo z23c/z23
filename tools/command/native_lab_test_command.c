@@ -221,7 +221,7 @@ static bool lab_case_parse(const struct json_value *o, struct lab_case *c)
     return lab_case_args(json_get(o, "args"), c);
 }
 
-static bool lab_cases_load(const struct zcl_command_request *rq,
+static bool lab_cases_open(const struct zcl_command_request *rq,
                            struct lab_cases *cs)
 {
     const struct json_value *v = rq->input ? json_get(rq->input, "cases") : NULL;
@@ -235,11 +235,24 @@ static bool lab_cases_load(const struct zcl_command_request *rq,
         cs->arr->num_children > LAB_CASES_MAX)
         return false;
     cs->n = cs->arr->num_children;
-    cs->items = zcl_calloc(cs->n, sizeof(*cs->items), "lab.cases");
-    for (size_t i = 0; cs->items && i < cs->n; i++)
-        if (!lab_case_parse(&cs->arr->children[i], &cs->items[i]))
+    return true;
+}
+
+static bool lab_cases_parse(const struct lab_cases *cs)
+{
+    struct lab_case scratch;
+    for (size_t i = 0; i < cs->n; i++)
+        if (!lab_case_parse(&cs->arr->children[i], cs->items ? &cs->items[i] : &scratch))
             return false;
-    return cs->items != NULL;
+    return true;
+}
+
+static bool lab_cases_load(const struct zcl_command_request *rq, struct lab_cases *cs)
+{
+    if (!lab_cases_open(rq, cs))
+        return false;
+    cs->items = zcl_calloc(cs->n, sizeof(*cs->items), "lab.cases");
+    return cs->items && lab_cases_parse(cs);
 }
 
 static void lab_cases_free(struct lab_cases *cs)
@@ -255,7 +268,7 @@ bool lab_cases_snapshot(const struct zcl_command_request *request,
     struct lab_cases cs;
     json_init(cases);
     bool ok;
-    if (!lab_cases_load(request, &cs)) {
+    if (!lab_cases_open(request, &cs) || !lab_cases_parse(&cs)) {
         lab_cases_free(&cs);
         lab_fail(reply, "LAB_BAD_CASES", "normalize", "cases must be a valid nonempty case array");
         return false;
