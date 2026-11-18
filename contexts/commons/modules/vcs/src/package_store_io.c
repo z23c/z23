@@ -652,19 +652,11 @@ static struct store_package *store_record_publish(
 
 static struct store_package *store_record_finish(
     struct vcs_package_store *store, struct store_package *pkg,
-    const uint8_t *wire, size_t wire_len, bool committed)
+    size_t wire_len, bool committed)
 {
     if (!store_package_build_chunks(pkg)) {
         store_record_dispose(pkg);
         LOG_NULL(STORE_LOG, "manifest %s chunk table", pkg->root_hex);
-    }
-    if (!pkg->manifest_wire) {
-        pkg->manifest_wire = zcl_malloc(wire_len, "store_manifest_wire");
-        if (!pkg->manifest_wire) {
-            store_record_dispose(pkg);
-            LOG_NULL(STORE_LOG, "wire copy %s", pkg->root_hex);
-        }
-        memcpy(pkg->manifest_wire, wire, wire_len);
     }
     pkg->manifest_wire_len = wire_len;
     pkg->file_count = (uint32_t)pkg->manifest.count;
@@ -713,34 +705,36 @@ enum vcs_package_store_result store_record_stage_fresh(
     memcpy(pkg.root, root, sizeof(pkg.root));
     zcl_hex_encode(pkg.root, 32, pkg.root_hex);
     pkg.manifest_wire = wire;
-    if (!store_record_finish(store, &pkg, NULL, wire_len, false)) {
+    if (!store_record_finish(store, &pkg, wire_len, false)) {
         store_rm_rf(staging_dir);
         return VCS_PACKAGE_STORE_ERR_ALLOC;
     }
     return VCS_PACKAGE_STORE_OK;
 }
 
-struct store_package *store_record_add(struct vcs_package_store *store,
-                                       const uint8_t *wire,
-                                       size_t wire_len,
-                                       const char *expect_hex,
-                                       bool committed)
+/* Takes ownership of wire on every return. */
+static struct store_package *store_record_add(
+    struct vcs_package_store *store, uint8_t *wire, size_t wire_len,
+    const char *expect_hex, bool committed)
 {
     struct store_package pkg;
     memset(&pkg, 0, sizeof(pkg));
-    if (!vcs_package_manifest_parse(wire, wire_len, &pkg.manifest))
+    pkg.manifest_wire = wire;
+    if (!vcs_package_manifest_parse(wire, wire_len, &pkg.manifest)) {
+        store_record_dispose(&pkg);
         LOG_NULL(STORE_LOG, "manifest %s does not parse", expect_hex);
+    }
     if (!vcs_package_manifest_root(&pkg.manifest, pkg.root)) {
-        vcs_package_manifest_free(&pkg.manifest);
+        store_record_dispose(&pkg);
         LOG_NULL(STORE_LOG, "manifest %s has no root", expect_hex);
     }
     zcl_hex_encode(pkg.root, 32, pkg.root_hex);
     if (strcmp(pkg.root_hex, expect_hex) != 0) {
-        vcs_package_manifest_free(&pkg.manifest);
+        store_record_dispose(&pkg);
         LOG_NULL(STORE_LOG, "manifest at %s commits a different root %s",
                  expect_hex, pkg.root_hex);
     }
-    return store_record_finish(store, &pkg, wire, wire_len, committed);
+    return store_record_finish(store, &pkg, wire_len, committed);
 }
 
 static bool store_committed_root_loaded(const struct vcs_package_store *store,
@@ -769,7 +763,6 @@ static bool store_load_staged_record(struct vcs_package_store *store,
     }
     bool loaded = wire &&
         store_record_add(store, wire, wire_len, name, false) != NULL;
-    free(wire);
     if (!loaded)
         LOG_FAIL(STORE_LOG, "staged manifest unreadable at %s", sdir);
     return true;
@@ -788,7 +781,6 @@ static void store_load_committed_record(struct vcs_package_store *store,
     }
     if (!store_record_add(store, wire, wire_len, name, true))
         store->catalog_incomplete = true;
-    free(wire);
 }
 
 /* Every committed manifest under dir. An unreadable entry or listing marks

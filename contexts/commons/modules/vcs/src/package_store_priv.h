@@ -246,17 +246,10 @@ enum vcs_package_store_result store_finish_duplicate_chunk(
  * Best-effort for diagnostics: 0 when the directory is unreadable. */
 uint32_t store_releases_count(const struct vcs_package_store *store);
 
-/* Parse a manifest wire, verify its root equals expect_hex, build the
- * record (unique chunks, total bytes, pin marker), and append it to the
- * table. NULL on parse/root/allocation failure (logged). */
+/* Stage and record a validated manifest; consumes it on every return. */
 enum vcs_package_store_result store_record_stage_fresh(
     struct vcs_package_store *store, struct vcs_package_manifest *manifest,
     const uint8_t root[32], const char *root_hex);
-
-struct store_package *store_record_add(struct vcs_package_store *store,
-                                       const uint8_t *wire, size_t wire_len,
-                                       const char *expect_hex,
-                                       bool committed);
 
 /* The root/chunk catalog is rebuilt from manifests at open. Parsed manifest
  * trees and wire copies are an LRU hot cache capped independently of corpus

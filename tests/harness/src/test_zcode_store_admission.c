@@ -249,6 +249,77 @@ static int store_identity_readback(struct vcs_package_store *s, struct zs_pkg *p
     return failures;
 }
 
+static int store_owned_reload_wrong_root(const char *dd, const struct zs_pkg *p,
+                                         bool committed)
+{
+    int failures = 0;
+    char original[512], wrong[512], wrong_hex[65];
+    memcpy(wrong_hex, p->root_hex, sizeof(wrong_hex));
+    wrong_hex[0] = wrong_hex[0] == '0' ? '1' : '0';
+    snprintf(original, sizeof(original), "%s/zcode/%s/%s", dd,
+             committed ? "manifests" : "staging", p->root_hex);
+    snprintf(wrong, sizeof(wrong), "%s/zcode/%s/%s", dd,
+             committed ? "manifests" : "staging", wrong_hex);
+    bool moved = rename(original, wrong) == 0;
+    struct vcs_package_store *s = moved ? vcs_package_store_open(dd, 1000000u) : NULL;
+    ZS_CHECK("owned reload: different root name refuses valid wire", moved && !s);
+    vcs_package_store_close(s);
+    bool restored = moved && rename(wrong, original) == 0;
+    ZS_CHECK("owned reload: original name restored", restored);
+    return failures;
+}
+
+static int store_owned_reload_wire(struct vcs_package_store *s, const struct zs_pkg *p)
+{
+    int failures = 0;
+    uint8_t *wire = NULL;
+    size_t len = 0;
+    enum vcs_package_store_result r = vcs_package_store_get_manifest_wire(
+        s, p->root, &wire, &len);
+    ZS_CHECK("owned reload: restored wire matches fixture", r == VCS_PACKAGE_STORE_OK &&
+             wire && len == p->wire_len && memcmp(wire, p->wire, len) == 0);
+    free(wire);
+    return failures;
+}
+
+static int store_case_owned_reload(bool committed)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *s = zs_open(dd, sizeof(dd),
+        committed ? "owned-committed" : "owned-staged", 1000000u);
+    ZS_CHECK("owned reload: store opens", s != NULL);
+    if (!s) return failures;
+    const char *paths[] = { "input.txt" };
+    const size_t lens[] = { 11 };
+    struct zs_pkg p;
+    bool built = zs_make_package(&p, 1, paths, lens, 0x65);
+    ZS_CHECK("owned reload: fixture builds", built);
+    if (!built) { vcs_package_store_close(s); test_rm_rf_recursive(dd); return failures; }
+    bool stored = vcs_package_store_put_manifest(s, p.wire, p.wire_len, NULL) ==
+        VCS_PACKAGE_STORE_OK;
+    if (stored && committed)
+        stored = zs_put_all(s, &p) == VCS_PACKAGE_STORE_OK;
+    ZS_CHECK("owned reload: fixture persisted", stored);
+    vcs_package_store_close(s);
+    if (stored)
+        failures += store_owned_reload_wrong_root(dd, &p, committed);
+    zcl_alloc_fault_fail_next("store_manifest_wire");
+    s = vcs_package_store_open(dd, 1000000u);
+    bool copy_unused = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    struct vcs_package_store_status status;
+    bool loaded = s && vcs_package_store_package_status(s, p.root, &status);
+    ZS_CHECK("owned reload: disk wire retained without another allocation",
+             stored && copy_unused && loaded && status.tracked && status.complete == committed);
+    if (loaded)
+        failures += store_owned_reload_wire(s, &p);
+    vcs_package_store_close(s);
+    zs_free_package(&p);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 static int store_case_single_identity(void)
 {
     int failures = 0;
@@ -297,6 +368,8 @@ int t_store_manifest_admission(void)
 {
     int failures = 0;
     failures += store_case_single_identity();
+    failures += store_case_owned_reload(false);
+    failures += store_case_owned_reload(true);
     char dd[256];
     struct vcs_package_store *s =
         zs_open(dd, sizeof(dd), "manifest", 1000000u);
