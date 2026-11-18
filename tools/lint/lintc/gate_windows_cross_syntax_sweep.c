@@ -364,22 +364,25 @@ int wcs_reap_workers(const pid_t *pids, int count)
     return rc;
 }
 
-/* A missing, non-regular or unreadable plan is an infrastructure failure. */
-static int worker_list_nonempty(const char *path)
+/* Count the worker's fgets frames up to the configured pool size. */
+static int worker_list_count(const char *path, int limit)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return -1;
     struct stat st;
     if (fstat(fd, &st) != 0) { close(fd); return -1; }
     if (!S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
-    unsigned char byte;
-    ssize_t n;
-    do { n = read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
-    int read_error = n < 0 ? errno : 0;
-    int closed = close(fd);
+    FILE *f = fdopen(fd, "r");
+    if (!f) { close(fd); return -1; }
+    char row[WCS_PATH];
+    int count = 0;
+    errno = 0;
+    while (count < limit && fgets(row, sizeof row, f)) count++;
+    int read_error = ferror(f) ? (errno ? errno : EIO) : 0;
+    int closed = fclose(f);
     if (read_error) { errno = read_error; return -1; }
     if (closed != 0) return -1;
-    return n > 0;
+    return count;
 }
 
 int wcs_worker_run(const char *misslist, int jobs, int *started_out)
@@ -387,13 +390,14 @@ int wcs_worker_run(const char *misslist, int jobs, int *started_out)
     int started = 0;
     if (started_out) *started_out = 0;
     if (jobs < 1 || jobs > 32) { errno = EINVAL; return 2; }
-    int nonempty = worker_list_nonempty(misslist);
-    if (nonempty < 0) {
+    int rows = worker_list_count(misslist, jobs);
+    if (rows < 0) {
         fprintf(stderr, "%s: cannot read miss list %s: %s\n",
                 k_wcs_gate, misslist, strerror(errno));
         return 2;
     }
-    if (!nonempty) return 0;
+    if (!rows) return 0;
+    if (rows < jobs) jobs = rows;
     pid_t pids[32];
     for (int k = 0; k < jobs; k++) {
         pid_t pid = fork();

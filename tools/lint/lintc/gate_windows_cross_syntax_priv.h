@@ -58,6 +58,7 @@ void wcs_worker_child(const char *misslist, int jobs, int index);
 int wcs_worker_status_test(void);
 int wcs_worker_run(const char *misslist, int jobs, int *started_out);
 int wcs_worker_empty_test(const char *base);
+int wcs_worker_cap_test(const char *base);
 extern const char k_wcs_baseline[];
 
 /* sha256 + include digest (gate_windows_cross_syntax_digest.c), per-TU result cache (gate_windows_cross_syntax_cache.c) */

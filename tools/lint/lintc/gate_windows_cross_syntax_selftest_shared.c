@@ -96,9 +96,6 @@ int wcs_worker_empty_test(const char *base)
     if (wcs_worker_run(path, 0, &started) == 0 ||
         wcs_worker_run(path, 33, &started) == 0)
         return sh_fail("invalid worker count accepted");
-    if (csr_write(path, "\n") != 0) return 2;
-    if (wcs_worker_run(path, 2, &started) != 0 || started != 2)
-        return sh_fail("nonempty miss list did not dispatch workers");
     if (geteuid() != 0) {
         if (chmod(path, 0) != 0) return 2;
         int refused = wcs_worker_run(path, 2, &started) != 0;
@@ -108,6 +105,55 @@ int wcs_worker_empty_test(const char *base)
     if (wcs_worker_run(absent, 2, &started) == 0 ||
         wcs_worker_run(base, 2, &started) == 0)
         return sh_fail("invalid miss list accepted");
+    return 0;
+}
+
+/* Each real worker writes its own fixture result; the final row lacks newline. */
+static int sh_worker_case(const char *base, int rows, int limit)
+{
+    char list[SH_P], out[SH_P], name[64], log[SH_P], rc[SH_P];
+    shp(list, sizeof list, "%s/cap-%d.list", base, rows);
+    shp(out, sizeof out, "%s/cap-%d.out", base, rows);
+    if (mkdir(out, 0700) != 0) return 2;
+    FILE *f = fopen(list, "w");
+    if (!f) return 2;
+    for (int i = 0; i < rows; i++)
+        if (fprintf(f, "unit%d.c%s", i, i + 1 == rows ? "" : "\n") < 0) {
+            fclose(f); return 2;
+        }
+    if (fclose(f) != 0 || wcs_copy(g_wcs_out, sizeof g_wcs_out, out)) return 2;
+    int started = 0;
+    if (wcs_worker_run(list, limit, &started) != 0) return 1;
+    for (int i = 0; i < rows; i++) {
+        shp(name, sizeof name, "unit%d.c", i);
+        if (wcs_paths_for(name, out, log, sizeof log, rc, sizeof rc)) return 2;
+        struct stat st;
+        if (stat(log, &st) != 0 || stat(rc, &st) != 0) return 1;
+        FILE *result = fopen(rc, "r");
+        int status = -1;
+        if (!result) return 1;
+        int ok = fscanf(result, "%d", &status) == 1 && status == 0;
+        if (fclose(result) != 0 || !ok) return 1;
+    }
+    return started == (rows < limit ? rows : limit) ? 0 : 1;
+}
+
+int wcs_worker_cap_test(const char *base)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 2;
+    if (pid == 0) {
+        if (wcs_copy(g_wcs_cc, sizeof g_wcs_cc, "/bin/true")) _exit(2);
+        g_wcs_nflag = 0;
+        int rc = sh_worker_case(base, 1, 3) || sh_worker_case(base, 2, 3) ||
+                 sh_worker_case(base, 5, 3);
+        _exit(rc ? 1 : 0);
+    }
+    int status;
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    if (got != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return sh_fail("worker cap or per-row result");
     return 0;
 }
 
