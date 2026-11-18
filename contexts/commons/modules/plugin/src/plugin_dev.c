@@ -129,15 +129,8 @@ static enum plugin_status pd_pack(const struct plugin_dev_request *rq,
 
 static size_t pd_sequence(const char *root, const char *name)
 {
-    struct plugin_info *infos = NULL;
-    size_t count = 0, seq = 0;
-    if (plugin_store_list(root, &infos, &count) != PLUGIN_OK)
-        return 0;
-    for (size_t i = 0; i < count; i++)
-        if (strcmp(infos[i].name, name) == 0)
-            seq = infos[i].generation_count;
-    plugin_store_list_free(infos, count);
-    return seq;
+    size_t seq = 0;
+    return plugin_store_generation_count(root, name, &seq) == PLUGIN_OK ? seq : 0;
 }
 
 static enum plugin_status pd_install(const char *root, struct plugin_dev_result *res)

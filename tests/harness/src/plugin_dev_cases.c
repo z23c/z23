@@ -119,6 +119,27 @@ static int pdc_case_second(struct pdc_env *e, char *first)
     return failures;
 }
 
+static int pdc_case_scoped_sequence(struct pdc_env *e, const char *generation)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    char current[PLUGIN_HEX_SHA3_512 + 1];
+    size_t count = 0;
+    TEST_CASE("plugin dev sequence reads only the named plugin") {
+        plugin_store_test_fail_readdir("/plugins", 0);
+        bool developed = pdc_dev(e, &r);
+        plugin_store_test_fail_readdir(NULL, 0);
+        ASSERT(developed);
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "sequence")), 2);
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, current));
+        ASSERT_EQ(count, 2u);
+        ASSERT_STR_EQ(current, generation);
+    } TEST_END
+    return failures;
+}
+
 static int pdc_case_broken_pack(struct pdc_env *e)
 {
     int failures = 0;
@@ -369,6 +390,7 @@ int plugin_dev_cases(void)
         char first[PLUGIN_HEX_SHA3_512 + 1] = "";
         failures += pdc_case_fresh(&e, first);
         failures += pdc_case_second(&e, first);
+        failures += pdc_case_scoped_sequence(&e, first);
         failures += pdc_case_broken_pack(&e);
 #if defined(__linux__)
         failures += pdc_case_cases(&e);

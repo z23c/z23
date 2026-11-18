@@ -122,6 +122,11 @@ bool plugin_link_generation(const char *dir, const char *link,
 enum plugin_slot_state plugin_link_slot(const char *dir, const char *link,
                                         char hex[PLUGIN_HEX_SHA3_512 + 1]);
 
+/* Read only NAME's generations, returning their count or PLUGIN_ERR_IO when
+ * the directory cannot be read completely. */
+enum plugin_status plugin_store_generation_count(const char *root, const char *name,
+                                                 size_t *count);
+
 /* Verify a stored generation directory against the publisher key file. */
 enum plugin_status plugin_verify_generation(const char *root, const char *name,
                                             const char *generation);

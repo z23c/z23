@@ -1006,6 +1006,22 @@ static enum plugin_status ps_load_info(const char *root, const char *name,
     return ps_load_generations(plugdir, info);
 }
 
+enum plugin_status plugin_store_generation_count(const char *root, const char *name,
+                                                 size_t *count)
+{
+    struct plugin_info info;
+    if (!root || !name || !count || !plugin_name_valid(name))
+        return PLUGIN_ERR_ARGUMENT;
+    *count = 0;
+    enum plugin_status st = ps_load_info(root, name, &info);
+    if (st == PLUGIN_OK && info.generations_state == PLUGIN_SLOT_UNREADABLE)
+        st = PLUGIN_ERR_IO;
+    if (st == PLUGIN_OK)
+        *count = info.generation_count;
+    free(info.generations);
+    return st;
+}
+
 static enum plugin_status ps_collect(DIR *d, const char *root,
                                      struct plugin_info **out, size_t *count)
 {
