@@ -194,7 +194,12 @@ bool lab_json_text(struct json_value *obj, const char *key, const char *text,
 {
     if (len == 0)
         return json_push_kv_str(obj, key, "");
-    char *out = zcl_malloc(escaped_cap * 3 + 8, "lab.text");
+    /* Each input byte produces at most three bytes, and escaped cost is
+     * never smaller than the stored output. Reserve one byte for NUL. */
+    size_t limit = len <= escaped_cap / 3 ? len * 3 : escaped_cap;
+    if (limit == SIZE_MAX)
+        return false;
+    char *out = zcl_malloc(limit + 1, "lab.text");
     size_t olen = 0, cost = 0, i = 0;
     if (!out)
         return false;

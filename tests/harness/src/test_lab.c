@@ -1080,6 +1080,50 @@ static int test_lab_wrapper_failure(void)
 }
 #endif
 
+static bool lt_text_allocation(const char *text, size_t cap, size_t maximum)
+{
+    FILE *capture = tmpfile();
+    if (!capture) return false;
+    int saved = dup(STDERR_FILENO);
+    if (saved < 0 || dup2(fileno(capture), STDERR_FILENO) < 0) {
+        if (saved >= 0) close(saved);
+        fclose(capture);
+        return false;
+    }
+    struct json_value obj;
+    json_init(&obj);
+    json_set_object(&obj);
+    bool cut = false;
+    zcl_alloc_fault_fail_next("lab.text");
+    bool inserted = lab_json_text(&obj, "text", text, strlen(text), cap, &cut);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool restored = dup2(saved, STDERR_FILENO) >= 0;
+    close(saved);
+    rewind(capture);
+    char log[512];
+    size_t n = fread(log, 1, sizeof(log) - 1, capture);
+    log[n] = '\0';
+    fclose(capture);
+    json_free(&obj);
+    size_t requested = 0;
+    bool parsed = sscanf(log, "zcl_malloc INJECTED FAILURE: %zu bytes", &requested) == 1 &&
+                  strstr(log, " bytes for 'lab.text'") != NULL;
+    return restored && !inserted && fired && !cut && parsed &&
+           requested > 0 && requested <= maximum;
+}
+
+static int test_lab_text_allocation(void)
+{
+    int failures = 0;
+    TEST_CASE("receipt scratch scales with short stdout and failure diff") {
+        ASSERT(lt_text_allocation("hello, lab\n", 20000, 34));
+        ASSERT(lt_text_allocation("line 1: expected \"6\\n\" got \"5\\n\"", 512,
+                                  97));
+    } TEST_END
+    return failures;
+}
+
 static int test_lab_empty_text(void)
 {
     int failures = 0;
@@ -1132,6 +1176,7 @@ int test_lab(void)
         return failures;
     }
     failures += test_lab_empty_text();
+    failures += test_lab_text_allocation();
     failures += test_lab_hello();
 #if defined(__linux__)
     failures += test_lab_kit_handles();
