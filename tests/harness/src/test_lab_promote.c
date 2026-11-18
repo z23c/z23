@@ -558,6 +558,53 @@ static bool lp_dev_source(const char *dir, const char *file, const char *cases,
     return spec && lp_invoke(spec->handler, spec, in, r);
 }
 
+static int lp_case_export_borrow(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("plugin.dev exports exact case file without another allocation") {
+        static const char original[] = "  " LP_CASES_OK "\n";
+        char dir[PATH_MAX], path[PATH_MAX], cases[PATH_MAX + 4], output[PATH_MAX];
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(lp_join(dir, sizeof dir, e.base, "upper"));
+        ASSERT_EQ(mkdir(dir, 0700), 0);
+        ASSERT(lp_join(path, sizeof path, e.base, "cases.json"));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs(original, f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(snprintf(cases, sizeof cases, "\"%s\"", path) > 0);
+        zcl_alloc_fault_fail_next("lab.promote.cases");
+        bool called = lp_dev_source(dir, LP_UPPER, cases, &r);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(called);
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(armed);
+        ASSERT(lp_join(output, sizeof output, dir, "dist/cases.json"));
+        f = fopen(output, "rb");
+        ASSERT(f != NULL);
+        char bytes[sizeof original];
+        size_t n = fread(bytes, 1, sizeof bytes, f);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(n, sizeof original - 1);
+        ASSERT(memcmp(bytes, original, n) == 0);
+        zcl_command_reply_free(&r);
+        zcl_alloc_fault_fail_next("lab.promote.cases");
+        called = lp_dev_source(dir, LP_UPPER, LP_CASES_OK, &r);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(called && fired);
+        ASSERT_STR_EQ(r.error.code, "LAB_PROMOTE_EXPORT_FAILED");
+        ASSERT(r.error.mutated);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
 /* plugin.call upper on "abc\n": its stdout, or "?" when the call did not succeed. */
 static void lp_call_upper(char out[32], char generation[PLUGIN_HEX_SHA3_512 + 1])
 {
@@ -720,6 +767,7 @@ int test_lab_promote(void)
     failures += lp_case_hotswap();
     failures += lp_case_invalid_before_key();
     failures += lp_case_ready_snapshot();
+    failures += lp_case_export_borrow();
     failures += lp_case_failed_case();
     failures += lp_case_disagree();
     failures += lp_case_capture_allocation();

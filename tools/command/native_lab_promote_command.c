@@ -237,33 +237,29 @@ static bool promote_cases_array(const struct json_value *v, uint8_t **bytes,
     return false;
 }
 
-static bool promote_cases_inline(const char *text, uint8_t **bytes, size_t *len)
-{
-    size_t n = strlen(text);
-    uint8_t *out = n ? zcl_malloc(n, "lab.promote.cases") : NULL;
-    if (!out)
-        return false;
-    memcpy(out, text, n);
-    *bytes = out;
-    *len = n;
-    return true;
-}
-
 static bool promote_cases_export(const struct zcl_command_request *rq,
-                                 uint8_t **bytes, size_t *len)
+                                 const uint8_t **bytes, size_t *len,
+                                 uint8_t **storage)
 {
     const struct json_value *v = json_get(rq->input, "cases");
     *bytes = NULL;
     *len = 0;
-    if (v && v->type == JSON_ARR)
-        return promote_cases_array(v, bytes, len);
+    if (v && v->type == JSON_ARR) {
+        bool ok = promote_cases_array(v, storage, len);
+        *bytes = *storage;
+        return ok;
+    }
     const char *text = v && v->type == JSON_STR ? json_get_str(v) : NULL;
     const char *start = text ? text + strspn(text, " \t\n\r") : NULL;
-    if (start && *start == '[')
-        return promote_cases_inline(text, bytes, len);
-    return text && zcl_read_whole_file(text, 1024 * 1024, bytes, len,
-                                       "lab.promote.cases") &&
-           *len > 0;
+    if (start && *start == '[') {
+        *bytes = (const uint8_t *)text;
+        *len = strlen(text);
+        return *len > 0;
+    }
+    bool ok = text && zcl_read_whole_file(text, 1024 * 1024, storage, len,
+                                          "lab.promote.cases") && *len > 0;
+    *bytes = *storage;
+    return ok;
 }
 
 static bool promote_export(const struct zcl_command_request *rq,
@@ -275,17 +271,18 @@ static bool promote_export(const struct zcl_command_request *rq,
     const char *name = lab_in_str(rq, "name");
     char leaf[PLUGIN_NAME_MAX + 3], source[4096], cases[4096];
     int n = snprintf(leaf, sizeof(leaf), "%s.c", name);
-    uint8_t *case_bytes = NULL;
+    const uint8_t *case_bytes = NULL;
+    uint8_t *case_storage = NULL;
     size_t case_len = 0;
     bool ok = n > 0 && (size_t)n < sizeof(leaf) &&
               zcl_path_join(source, sizeof(source), dir ? dir : ".", leaf) &&
               zcl_path_join(cases, sizeof(cases), dir ? dir : ".", "cases.json") &&
-              promote_cases_export(test, &case_bytes, &case_len) &&
+              promote_cases_export(test, &case_bytes, &case_len, &case_storage) &&
               promote_write(source, ctx->src.bytes, ctx->src.len) &&
               promote_write(cases, case_bytes, case_len) &&
               json_push_kv_str(&reply->data, "source", source) &&
               json_push_kv_str(&reply->data, "cases", cases);
-    free(case_bytes);
+    free(case_storage);
     return ok;
 }
 
