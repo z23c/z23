@@ -392,30 +392,18 @@ static bool fsi_note_installed(void)
     return r.ok;
 }
 
-static void fsi_fall_back_at(struct main_state *ms, const char *why,
+static bool fsi_fall_back_at(struct main_state *ms, const char *why,
                              bool respawn);
 
 /* ── Detaching a fallen-back island ──────────────────────────────────────────
- * After a fall-back the island rows are real headers whose root has no parent
- * here, and they carry the rung's chainwork: left alone they would stay the
- * best header and steer header sync above the rung, where normal sync can
- * fetch no block. So every window row still off the chain, and every entry
- * descending from one (headers admitted above the rung), is detached: no
- * parent, no skip, and work FSI_DETACHED_WORK, below
- * any real entry's (genesis included). Not zero: the boot block-index scan
- * ranks a zero-work entry by height, which would make the rung row the best
- * header again. Every work comparison passes over the rows, and when normal
- * sync re-delivers these headers from their real parent, accept_block_header's
- * known-header relink sets each parent and derives its work, so the rows
- * rejoin the chain as ordinary headers. Keyed on the durable fact: the listed
- * rows at their exact heights and hashes (with or without the root in the
- * index); if the list cannot be read, every off-chain entry at the fact's
- * heights. It runs at the fall-back and again at every boot whose durable
- * state is FELL_BACK, after the canonical forward pass over the map (the
- * loader brings the rows back with work, and work above rows that rejoined in
- * memory only is stale), so a crash anywhere between the durable FELL_BACK and
- * a saved rejoin is repaired by the next boot. The fact retires once the rung
- * row is on the chain. Idempotent. */
+ * Off-chain island rows and their descendants must not steer sync above the
+ * rung. Detach clears parent/skip and assigns FSI_DETACHED_WORK, below real
+ * entries but nonzero so height-only scans cannot make the rung best again.
+ * Re-delivery from a real parent restores links and work. The durable fact
+ * selects listed rows by exact height/hash, or every off-chain row at its
+ * heights when the list is unreadable. It runs at fall-back and each
+ * FELL_BACK boot after the canonical forward pass, repairing crashes before
+ * a saved rejoin. The fact retires when the rung rejoins; idempotent. */
 #define FSI_DETACHED_WORK 1u
 
 static bool fsi_work_is_detached(const struct block_index *bi)
@@ -512,31 +500,32 @@ static int fsi_cmp_height(const void *x, const void *y)
     return (a->nHeight > b->nHeight) - (a->nHeight < b->nHeight);
 }
 
-/* Every entry above the root that descends from a detached row (headers normal
- * sync admitted above the rung after the rows rejoined in memory only): in
- * height order, an entry whose parent carries the detached token is detached
- * in turn, so its re-delivered header relinks it with real work. */
-static bool fsi_detach_descendants(struct main_state *ms, int32_t root_h,
-                                   size_t *above)
+/* Collect descendants before mutating seeds so allocation failure is atomic. */
+static bool fsi_collect_descendants(struct main_state *ms, int32_t root_h,
+                                    struct fsi_rows *up)
 {
-    struct fsi_rows up = {0};
     size_t it = 0;
     struct block_index *bi = NULL;
     bool ok = true;
     while (ok && block_map_next(&ms->map_block_index, &it, NULL, &bi)) {
         if (bi && bi->nHeight > root_h && bi->pprev && !fsi_work_is_detached(bi))
-            ok = fsi_rows_push(&up, bi);
+            ok = fsi_rows_push(up, bi);
     }
-    if (ok && up.n)
-        qsort(up.v, up.n, sizeof(*up.v), fsi_cmp_height);
-    for (size_t i = 0; ok && i < up.n; i++) {
-        if (!up.v[i]->pprev || !fsi_work_is_detached(up.v[i]->pprev))
+    if (ok && up->n)
+        qsort(up->v, up->n, sizeof(*up->v), fsi_cmp_height);
+    return ok;
+}
+
+/* In height order, an entry whose parent carries the detached token is
+ * detached in turn, so its re-delivered header relinks it with real work. */
+static void fsi_detach_descendants(struct fsi_rows *up, size_t *above)
+{
+    for (size_t i = 0; i < up->n; i++) {
+        if (!up->v[i]->pprev || !fsi_work_is_detached(up->v[i]->pprev))
             continue;
-        fsi_detach_row(up.v[i]);
+        fsi_detach_row(up->v[i]);
         (*above)++;
     }
-    free(up.v);
-    return ok;
 }
 
 /* The most-work entry that still has real work, else the active tip. */
@@ -592,15 +581,19 @@ size_t flysync_island_detach(struct main_state *ms,
     if (!ms || !a)
         return 0;
     zcl_mutex_lock(&ms->cs_main);
-    struct fsi_rows rows = {0};
+    struct fsi_rows rows = {0}, up = {0};
     bool have = false;
     bool ok = fsi_collect_listed(ms, a, &rows, &have) ||
               (!have && fsi_collect_range(ms, a, &rows));
+    if (ok)
+        ok = fsi_collect_descendants(ms, a->root_height, &up);
     size_t seeds = ok ? rows.n : 0, above = 0;
     for (size_t i = 0; i < seeds; i++)
         fsi_detach_row(rows.v[i]);
-    ok = ok && fsi_detach_descendants(ms, a->root_height, &above);
+    if (ok)
+        fsi_detach_descendants(&up, &above);
     zcl_mutex_unlock(&ms->cs_main);
+    free(up.v);
     free(rows.v);
     size_t n = seeds + above;
     if (n)
@@ -614,6 +607,14 @@ size_t flysync_island_detach(struct main_state *ms,
                  "rejoin when normal sync reaches their parent", n,
                  (int)a->root_height, above);
     return n;
+}
+
+static bool fsi_detach_no_oom(struct main_state *ms,
+                              const struct island_anchor *a)
+{
+    uint64_t before = zcl_alloc_failure_count();
+    (void)flysync_island_detach(ms, a);
+    return zcl_alloc_failure_count() == before;
 }
 
 static bool fsi_recovery_lease_and_marker(const char *datadir);
@@ -820,21 +821,19 @@ bool flysync_island_boot_reconcile(struct main_state *ms)
     }
     if (island_anchor_state_load(progress_store_db()) ==
         ISLAND_ANCHOR_STATE_INSTALLED) {
-        /* Installed state stands on the bundle, not on these rows: keep the
-         * registration the reorg floor and the loader rely on, and say so. */
+        /* Installed state stands on the bundle; keep registration and report. */
         LOG_ERROR(FSI_SUBSYS, "installed island: %s; recovery required", why);
         return false;
     }
     LOG_WARN(FSI_SUBSYS, "island does not stand after load: %s", why);
-    fsi_fall_back_at(ms, why, false);
+    (void)fsi_fall_back_at(ms, why, false);
     return false;
 }
 
 /* ── Phase machine ───────────────────────────────────────────────────────── */
 
-/* Set at boot: a mainnet node whose boot skipped the compiled keystone header
- * capture because FlySync owned the state source. Fall-back re-arms it, so
- * normal sync gets exactly what a node without -flysync gets. */
+/* When FlySync skipped the boot keystone capture, fall-back re-arms it for
+ * the same normal sync a node without -flysync would run. */
 static _Atomic bool g_rearm_keystone_on_fall_back = false;
 
 static struct main_state *fsi_main_state(void)
@@ -874,12 +873,8 @@ static void fsi_log_deferred(const char *why)
               "(it may be installed): %s", why);
 }
 
-/* Order: the durable FELL_BACK first, then the in-memory detach, then the
- * phase (which lifts the hold), then the restart. A crash after the first
- * step is finished by the next boot's detach (flysync_island_boot_after_index).
- * The boot-time reconcile calls this before the network starts, so it does
- * not restart: that boot continues as the fallen-back node. */
-static void fsi_fall_back_at(struct main_state *ms, const char *why,
+/* Durable FELL_BACK precedes detach and phase change; OOM keeps the hold. */
+static bool fsi_fall_back_at(struct main_state *ms, const char *why,
                              bool respawn)
 {
     enum island_anchor_state st = island_anchor_state_load(progress_store_db());
@@ -887,21 +882,26 @@ static void fsi_fall_back_at(struct main_state *ms, const char *why,
         LOG_ERROR(FSI_SUBSYS, "fall-back refused, the rung bundle is "
                   "installed: %s", why);
         fsi_set_phase(FLYSYNC_DONE);
-        return;
+        return true;
     }
     if (st == ISLAND_ANCHOR_STATE_UNREADABLE) {
         /* Never decide on an unreadable state: stay held, the next tick (or
          * the next boot) reads it again. */
         fsi_log_deferred(why);
-        return;
+        return true;
     }
     struct island_anchor a;
     bool island = island_anchor_get(&a);
     checkpoint_header_fetch_disarm();
     fsi_note_fallback(why);
-    if (island && ms)
-        (void)flysync_island_detach(ms, &a);
-    else if (island)
+    if (island && ms && !fsi_detach_no_oom(ms, &a)) {
+        LOG_ERROR(FSI_SUBSYS, "fallen-back detach allocation failed; keeping "
+                  "the header-sync hold for retry");
+        if (respawn)
+            fsi_request_respawn();
+        return false;
+    }
+    if (island && !ms)
         LOG_ERROR(FSI_SUBSYS, "fallen-back island not detached in process (no "
                   "main state); the next boot detaches it");
     fsi_set_phase(FLYSYNC_FELL_BACK);
@@ -909,11 +909,12 @@ static void fsi_fall_back_at(struct main_state *ms, const char *why,
         checkpoint_header_fetch_arm_compiled();
     if (respawn)
         fsi_request_respawn();
+    return true;
 }
 
 static void fsi_fall_back(const char *why)
 {
-    fsi_fall_back_at(fsi_main_state(), why, true);
+    (void)fsi_fall_back_at(fsi_main_state(), why, true);
 }
 
 /* The chosen offer's download progress: the verified-chunk count last seen and
@@ -1119,19 +1120,9 @@ bool flysync_island_wants_offer_height(int32_t height)
     return fsi_rung_at(height) != NULL;
 }
 
-/* The canonical forward pass over every entry at or above the island root's
- * height, in height order: each one's work is derived again from its stored
- * links. The loader's work is stale above rows that rejoined in memory only
- * and were not saved relinked. Entries below the root are left as loaded.
- * It runs before the detach: after it, the pass would hand the detached rows
- * their own proof again.
- * The pass also rewrites nChainTx, the skip link, the cached branch id and
- * the failed-child bit of each entry from its parent, as the loader's own
- * pass does at every boot. nChainTx follows the loader's rule: the parent's
- * nChainTx plus nTx, 0 when the parent has none, so a still-detached or
- * parentless row starts its own count. Every entry gets the value the loader
- * would derive from these links; nothing below the root changes. */
-static void fsi_forward_pass_from(struct main_state *ms, int32_t root_h)
+/* Recompute pointer-derived fields at/above root_h before detach, leaving
+ * lower entries untouched; return false without mutation on allocation failure. */
+static bool fsi_forward_pass_from(struct main_state *ms, int32_t root_h)
 {
     struct fsi_rows up = {0};
     size_t it = 0;
@@ -1148,21 +1139,20 @@ static void fsi_forward_pass_from(struct main_state *ms, int32_t root_h)
     }
     zcl_mutex_unlock(&ms->cs_main);
     if (!ok)
-        LOG_ERROR(FSI_SUBSYS, "fallen-back island: forward pass from h=%d not "
-                  "run (out of memory); work above the island may stay stale "
-                  "until the next boot", (int)root_h);
+        LOG_ERROR(FSI_SUBSYS, "fallen-back island: forward-pass allocation "
+                  "failed from h=%d; refusing boot with stale work",
+                  (int)root_h);
     free(up.v);
+    return ok;
 }
 
-/* Every boot whose durable state is FELL_BACK: run the forward pass above,
- * retire the fact once the rung row is on the chain, otherwise detach what is
- * still off it. With no fact (a fall-back before seeding) there is nothing to
- * detach. */
-static void fsi_boot_detach_fallen_back(struct main_state *ms)
+/* Every FELL_BACK boot recomputes work before retiring or detaching;
+ * missing facts are a no-op and allocation failure refuses boot. */
+static bool fsi_boot_detach_fallen_back(struct main_state *ms)
 {
     sqlite3 *db = progress_store_db();
     if (!ms || island_anchor_state_load(db) != ISLAND_ANCHOR_STATE_FELL_BACK)
-        return;
+        return true;
     struct island_anchor a;
     bool found = false;
     struct zcl_result r = island_anchor_load(db, &a, &found);
@@ -1170,8 +1160,9 @@ static void fsi_boot_detach_fallen_back(struct main_state *ms)
         LOG_ERROR(FSI_SUBSYS, "fallen-back island not detached this boot: %s",
                   r.message);
     if (!r.ok || !found)
-        return;
-    fsi_forward_pass_from(ms, a.root_height);
+        return true;
+    if (!fsi_forward_pass_from(ms, a.root_height))
+        return false;
     struct block_index *rung = block_map_find(&ms->map_block_index,
                                               &a.rung_hash);
     if (rung && rung->nHeight == a.rung_height &&
@@ -1179,29 +1170,28 @@ static void fsi_boot_detach_fallen_back(struct main_state *ms)
         struct zcl_result r = island_anchor_retire(db);
         if (!r.ok)
             LOG_ERROR(FSI_SUBSYS, "%s", r.message);
-        return;
+        return true;
     }
-    (void)flysync_island_detach(ms, &a);
+    return fsi_detach_no_oom(ms, &a);
 }
 
-/* Count this holding boot durably; past FLYSYNC_HOLD_BOOTS, fall back here,
- * before the state source is chosen, so this boot already runs as a node
- * without -flysync (no restart needed). */
-static void fsi_boot_count_hold(struct main_state *ms)
+/* Count holding boots durably; past FLYSYNC_HOLD_BOOTS, fall back before
+ * choosing the state source, without requesting a restart. */
+static bool fsi_boot_count_hold(struct main_state *ms)
 {
     uint64_t boots = 0;
     struct zcl_result r = island_anchor_hold_boot(progress_store_db(), &boots);
     if (!r.ok) {
         LOG_ERROR(FSI_SUBSYS, "%s; the per-boot bounds still apply",
                   r.message);
-        return;
+        return true;
     }
     if (boots <= FLYSYNC_HOLD_BOOTS)
-        return;
+        return true;
     char why[160];
     snprintf(why, sizeof(why), "header sync was held across %llu boots "
              "(bound %d)", (unsigned long long)boots, FLYSYNC_HOLD_BOOTS);
-    fsi_fall_back_at(ms, why, false);
+    return fsi_fall_back_at(ms, why, false);
 }
 
 static struct block_header g_boot_window[ISLAND_ANCHOR_WINDOW];
@@ -1382,6 +1372,17 @@ bool flysync_island_boot_materialize(struct main_state *ms)
     return ok;
 }
 
+static bool fsi_boot_reconcile_checked(struct main_state *ms)
+{
+    uint64_t before = zcl_alloc_failure_count();
+    bool reconciled = !island_anchor_registered() ||
+        flysync_island_boot_reconcile(ms);
+    if (!reconciled && zcl_alloc_failure_count() != before)
+        return false;
+    return reconciled ||
+        island_anchor_state_load(progress_store_db()) != ISLAND_ANCHOR_STATE_INSTALLED;
+}
+
 bool flysync_island_boot_after_index(struct app_context *ctx,
                                      struct main_state *ms)
 {
@@ -1400,12 +1401,12 @@ bool flysync_island_boot_after_index(struct app_context *ctx,
         return boot_refuse_at_permanent_gate("flysync_datadir", why, next, 2,
                                              NULL);
     }
-    if (island_anchor_registered() && !flysync_island_boot_reconcile(ms) &&
-        island_anchor_state_load(progress_store_db()) == ISLAND_ANCHOR_STATE_INSTALLED)
+    if (!fsi_boot_reconcile_checked(ms))
         return false;
-    fsi_boot_detach_fallen_back(ms);
-    if (flysync_island_holds_header_sync())
-        fsi_boot_count_hold(ms);
+    if (!fsi_boot_detach_fallen_back(ms))
+        return false;
+    if (flysync_island_holds_header_sync() && !fsi_boot_count_hold(ms))
+        return false;
     enum flysync_phase p = flysync_island_phase();
     if (p != FLYSYNC_OFF && p != FLYSYNC_FELL_BACK) {
         msg_processor_set_header_sync_hold(flysync_island_holds_header_sync);

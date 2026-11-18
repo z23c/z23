@@ -9,6 +9,7 @@
 #include "test/test_flysync_island_common.h"
 
 
+#include "base/safe_alloc.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "chain/checkpoints.h"
@@ -200,6 +201,95 @@ static bool fsi_up_detached(struct block_index **ub)
     return true;
 }
 
+struct fsi_row_state {
+    struct block_index *pprev, *pskip;
+    struct arith_uint256 work;
+};
+
+static void fsi_capture_rows(struct fsi_node *n, struct block_index **ub,
+                             struct fsi_row_state *state)
+{
+    int count = ub ? FSI_W + FSI_UP : FSI_W;
+    for (int i = 0; i < count; i++) {
+        struct block_index *bi = i < FSI_W ? n->rows[i] : ub[i - FSI_W];
+        state[i].pprev = bi->pprev;
+        state[i].pskip = bi->pskip;
+        state[i].work = bi->nChainWork;
+    }
+}
+
+static bool fsi_anchor_unchanged(const struct fsi_node *n)
+{
+    sqlite3 *db = progress_store_db();
+    struct island_anchor back;
+    bool found = false;
+    return island_anchor_load(db, &back, &found).ok && found &&
+           back.root_height == n->a.root_height &&
+           back.rung_height == n->a.rung_height &&
+           uint256_eq(&back.root_hash, &n->a.root_hash) &&
+           uint256_eq(&back.rung_hash, &n->a.rung_hash) &&
+           arith_uint256_compare(&back.root_work, &n->a.root_work) == 0 &&
+           island_anchor_state_load(db) == ISLAND_ANCHOR_STATE_FELL_BACK;
+}
+
+static bool fsi_rows_unchanged(struct fsi_node *n, struct block_index **ub,
+                               const struct fsi_row_state *state)
+{
+    int count = ub ? FSI_W + FSI_UP : FSI_W;
+    for (int i = 0; i < count; i++) {
+        struct block_index *bi = i < FSI_W ? n->rows[i] : ub[i - FSI_W];
+        if (bi->pprev != state[i].pprev || bi->pskip != state[i].pskip ||
+            arith_uint256_compare(&bi->nChainWork, &state[i].work) != 0)
+            return false;
+    }
+    struct block_index *best = ub ? ub[FSI_UP - 1] : fsi_top(n);
+    return n->ms.pindex_best_header == best && fsi_anchor_unchanged(n);
+}
+
+static int fsi_detach_oom_is_atomic(struct fsi_node *n, struct block_index **ub)
+{
+    int failures = 0;
+    struct fsi_row_state before[FSI_W + FSI_UP];
+    fsi_capture_rows(n, ub, before);
+    zcl_alloc_fault_fail_nth("flysync_detach_rows", 2);
+    size_t detached = flysync_island_detach(&n->ms, &n->a);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    FSI_CHECK("crash after rejoin: descendant OOM leaves detach unapplied",
+              detached == 0 && fired && fsi_rows_unchanged(n, ub, before));
+    return failures;
+}
+
+static int fsi_boot_detach_oom_refuses(struct fsi_node *n,
+                                       struct block_index **ub)
+{
+    int failures = 0;
+    struct fsi_row_state before[FSI_W + FSI_UP];
+    fsi_capture_rows(n, ub, before);
+    zcl_alloc_fault_fail_nth("flysync_detach_rows", 2);
+    bool booted = flysync_island_boot_after_index(NULL, &n->ms);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    FSI_CHECK("crash after rejoin: detach OOM refuses boot without mutation",
+              !booted && fired && fsi_rows_unchanged(n, ub, before));
+    return failures;
+}
+
+static int fsi_forward_oom_refuses(struct fsi_node *n, struct block_index **ub)
+{
+    int failures = 0;
+    struct fsi_row_state before[FSI_W + FSI_UP];
+    fsi_capture_rows(n, ub, before);
+    zcl_alloc_fault_fail_next("flysync_detach_rows");
+    bool oom_booted = flysync_island_boot_after_index(NULL, &n->ms);
+    bool oom_fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    FSI_CHECK("crash after rejoin: forward-pass OOM refuses stale work",
+              !oom_booted && oom_fired &&
+              fsi_rows_unchanged(n, ub, before));
+    return failures;
+}
+
 /* MUST 1 (re-review): normal sync rejoined the island in memory and saved
  * headers above the rung linked to it, then the process died before the
  * relinked rows were saved. The rows load parentless, the headers above load
@@ -229,7 +319,10 @@ static int fsi_case_fallback_crash_rejoin(struct fsi_node *n)
     n->ms.pindex_best_header = ub[FSI_UP - 1];
     FSI_CHECK("crash after rejoin: the headers above load linked to the rung",
               ub[0]->pprev == fsi_top(n) && fsi_top(n)->pprev == NULL);
-    FSI_CHECK("crash after rejoin: the boot detaches the headers above too",
+    failures += fsi_detach_oom_is_atomic(n, ub);
+    failures += fsi_boot_detach_oom_refuses(n, ub);
+    failures += fsi_forward_oom_refuses(n, ub);
+    FSI_CHECK("crash after rejoin: the retry detaches the headers above too",
               flysync_island_boot_after_index(NULL, &n->ms) &&
               fsi_rows_detached(n) && fsi_up_detached(ub) &&
               n->ms.pindex_best_header == genesis);
@@ -516,6 +609,67 @@ static int fsi_case_hold_record(void)
     return failures;
 }
 
+static int fsi_case_reconcile_detach_oom(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_reconcile_detach_oom")) {
+        FSI_CHECK("reconcile-detach fixture opens", false);
+        fsi_node_close(&n);
+        return failures;
+    }
+    FSI_CHECK("reconcile-detach island seeds", fsi_node_seed(&n));
+    n.rows[5]->pprev = NULL;
+    flysync_island_set_requested(true);
+    struct fsi_row_state before[FSI_W];
+    fsi_capture_rows(&n, NULL, before);
+    zcl_alloc_fault_fail_next("flysync_detach_rows");
+    bool booted = flysync_island_boot_after_index(NULL, &n.ms);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    FSI_CHECK("reconcile detach OOM refuses boot without a hidden retry",
+              !booted && fired &&
+              flysync_island_phase() == FLYSYNC_SEEDED &&
+              flysync_island_holds_header_sync() &&
+              flysync_island_test_respawns() == 0 &&
+              fsi_rows_unchanged(&n, NULL, before));
+    fsi_release_globals();
+    fsi_node_close(&n);
+    return failures;
+}
+
+static int fsi_case_hold_detach_oom(void)
+{
+    int failures = 0;
+    struct fsi_node n;
+    if (!fsi_node_open(&n, "flysync_hold_detach_oom")) {
+        FSI_CHECK("hold-detach fixture opens", false);
+        fsi_node_close(&n);
+        return failures;
+    }
+    FSI_CHECK("hold-detach island seeds", fsi_node_seed(&n));
+    sqlite3 *db = progress_store_db();
+    uint8_t over[8] = {FLYSYNC_HOLD_BOOTS + 1};
+    FSI_CHECK("hold-detach over-bound count recorded",
+              progress_meta_set(db, "flysync.hold_boots", over, sizeof(over)));
+    flysync_island_set_requested(true);
+    struct fsi_row_state before[FSI_W];
+    fsi_capture_rows(&n, NULL, before);
+    zcl_alloc_fault_fail_next("flysync_detach_rows");
+    bool booted = flysync_island_boot_after_index(NULL, &n.ms);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    FSI_CHECK("hold-limit detach OOM refuses boot and keeps the hold",
+              !booted && fired &&
+              flysync_island_phase() == FLYSYNC_SEEDED &&
+              flysync_island_holds_header_sync() &&
+              flysync_island_test_respawns() == 0 &&
+              fsi_rows_unchanged(&n, NULL, before));
+    fsi_release_globals();
+    fsi_node_close(&n);
+    return failures;
+}
+
 /* A link peer that delivers part bytes and then trickles: link parts keep
  * arriving (the per-object 30 s idle bound never fires) but no chunk
  * completes. The hold must still end at FLYSYNC_FETCH_STALL_MS, because the
@@ -585,6 +739,8 @@ int fsi_state_cases(void)
     failures += fsi_case_listonly();
     failures += fsi_case_state_fresh();
     failures += fsi_case_state_unreadable();
+    failures += fsi_case_reconcile_detach_oom();
+    failures += fsi_case_hold_detach_oom();
     failures += fsi_case_link_trickle();
     return failures;
 }
