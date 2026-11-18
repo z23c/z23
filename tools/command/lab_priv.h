@@ -32,6 +32,10 @@ void lab_unconfined(struct zcl_command_reply *reply);
  * promotion uses the same bytes for its subsequent release compilation. */
 void lab_test_context(const struct zcl_command_request *request,
                       struct lab_ctx *ctx, struct zcl_command_reply *reply);
+typedef bool (*lab_promote_ready_fn)(void *context, struct zcl_command_reply *reply);
+void lab_promote_with_ready(const struct zcl_command_request *request,
+                            lab_promote_ready_fn ready, void *context,
+                            struct zcl_command_reply *reply);
 /* Snapshot validated cases, retaining the original text for package export. */
 bool lab_cases_snapshot(const struct zcl_command_request *request,
                          struct json_value *cases, struct zcl_command_reply *reply);

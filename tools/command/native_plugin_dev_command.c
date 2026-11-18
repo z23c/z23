@@ -228,12 +228,26 @@ static bool pdv_source_input(const struct zcl_command_request *request,
            json_push_kv_str(input, "dir", dist);
 }
 
+struct pdv_ready_context {
+    const struct plugin_dev_request *dev;
+    struct plugin_dev_result *res;
+};
+
+static bool pdv_source_ready(void *context, struct zcl_command_reply *reply)
+{
+    struct pdv_ready_context *c = context;
+    enum plugin_status st = plugin_dev_begin(c->dev, c->res);
+    if (st == PLUGIN_OK) return true;
+    pdv_refuse(reply, st, c->res);
+    return false;
+}
+
 static void pdv_source_dev(const struct zcl_command_request *request,
                            const struct plugin_dev_request *dev,
                            struct plugin_dev_result *res,
                            struct zcl_command_reply *reply)
 {
-    enum plugin_status st = plugin_dev_begin(dev, res);
+    enum plugin_status st = plugin_dev_validate(dev, res);
     if (st != PLUGIN_OK) {
         pdv_refuse(reply, st, res);
         return;
@@ -246,7 +260,8 @@ static void pdv_source_dev(const struct zcl_command_request *request,
         return;
     }
     struct zcl_command_request sub = { .input = &input, .view = request->view };
-    zcl_native_handle_lab_promote(&sub, reply);
+    struct pdv_ready_context context = { .dev = dev, .res = res };
+    lab_promote_with_ready(&sub, pdv_source_ready, &context, reply);
     json_free(&input);
     if (reply->exit_code != ZCL_COMMAND_EXIT_OK) {
         reply->error.mutated = reply->error.mutated || res->key_created;

@@ -59,6 +59,8 @@ enum plugin_status plugin_dev(const struct plugin_dev_request *request,
  * the caller finishes the pack step, then activates the signed manifest named
  * in result. */
 const char *plugin_dev_default_version(void);
+enum plugin_status plugin_dev_validate(const struct plugin_dev_request *request,
+                                       struct plugin_dev_result *result);
 enum plugin_status plugin_dev_begin(const struct plugin_dev_request *request,
                                     struct plugin_dev_result *result);
 enum plugin_status plugin_dev_activate(const char *root,

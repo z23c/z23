@@ -159,15 +159,20 @@ const char *plugin_dev_default_version(void)
     return PD_DEFAULT_VERSION;
 }
 
+enum plugin_status plugin_dev_validate(const struct plugin_dev_request *rq,
+                                       struct plugin_dev_result *res)
+{
+    const char *version = NULL;
+    if (!res) return PLUGIN_ERR_ARGUMENT;
+    memset(res, 0, sizeof(*res));
+    res->failed = PLUGIN_DEV_STEP_COUNT;
+    return pd_args(rq, res, &version);
+}
+
 enum plugin_status plugin_dev_begin(const struct plugin_dev_request *rq,
                                     struct plugin_dev_result *res)
 {
-    const char *version = NULL;
-    if (!res)
-        return PLUGIN_ERR_ARGUMENT;
-    memset(res, 0, sizeof(*res));
-    res->failed = PLUGIN_DEV_STEP_COUNT; /* refused before any step ran */
-    enum plugin_status st = pd_args(rq, res, &version);
+    enum plugin_status st = plugin_dev_validate(rq, res);
     if (st != PLUGIN_OK)
         return st;
     res->failed = PLUGIN_DEV_STEP_KEY;

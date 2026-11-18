@@ -405,6 +405,97 @@ static int lp_case_cases_snapshot(void)
     return failures;
 }
 
+static int lp_case_invalid_before_key(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("plugin.dev rejects invalid case inputs before creating a key") {
+        struct zcl_command_reply r;
+        char dir[PATH_MAX], key[PATH_MAX], cases[PATH_MAX], input[4 * PATH_MAX + 512];
+        ASSERT(ready);
+        ASSERT(lp_join(dir, sizeof dir, e.base, "upper"));
+        ASSERT_EQ(mkdir(dir, 0700), 0);
+        ASSERT(lp_join(key, sizeof key, e.base, "new.key"));
+        ASSERT(lp_join(cases, sizeof cases, e.base, "invalid.json"));
+        FILE *f = fopen(cases, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("[{\"name\":\"bad\",\"expect_exit\":999}]", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        const char *forms[] = { "[{\"name\":\"bad\",\"expect_exit\":999}]", NULL, "" };
+        for (size_t i = 0; i < 3; i++) {
+            char field[PATH_MAX + 64];
+            if (i == 1) snprintf(field, sizeof field, ",\"cases\":\"%s\"", cases);
+            else if (i == 0) snprintf(field, sizeof field, ",\"cases\":%s", forms[i]);
+            else field[0] = 0;
+            snprintf(input, sizeof input, "{\"dir\":\"%s\",\"file\":\"%s\",\"key\":\"%s\"%s}", dir, LP_UPPER, key, field);
+            ASSERT(lp_call(zcl_native_handle_plugin_dev, input, &r));
+            ASSERT_STR_EQ(r.error.code, "LAB_BAD_CASES");
+            ASSERT(!r.error.mutated);
+            ASSERT(access(key, F_OK) != 0);
+            zcl_command_reply_free(&r);
+        }
+        snprintf(input, sizeof input, "{\"dir\":\"%s\",\"file\":\"%s\",\"key\":\"%s\",\"version\":\"bad\"}", dir, LP_UPPER, key);
+        ASSERT(lp_call(zcl_native_handle_plugin_dev, input, &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_VERSION");
+        ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+        snprintf(input, sizeof input, "{\"dir\":\"%s\",\"file\":\"%s\",\"key\":\"%s\",\"mem_mb\":0,\"cases\":[]}", dir, LP_UPPER, key);
+        ASSERT(lp_call(zcl_native_handle_plugin_dev, input, &r));
+        ASSERT_STR_EQ(r.error.code, "LAB_BAD_INPUT");
+        ASSERT(!r.error.mutated);
+        ASSERT(access(key, F_OK) != 0);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
+static bool lp_remove_cases_ready(void *context, struct zcl_command_reply *reply)
+{
+    (void)reply;
+    return unlink((const char *)context) == 0;
+}
+
+static int lp_case_ready_snapshot(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("promotion keeps its case snapshot across the ready callback") {
+        static const char original[] = "  " LP_CASES_OK "\n";
+        char path[PATH_MAX], output[PATH_MAX], in[4 * PATH_MAX + 512];
+        struct json_value input;
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(lp_join(path, sizeof path, e.base, "ready-cases.json"));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs(original, f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        snprintf(in, sizeof in, "{\"file\":\"%s\",\"cases\":\"%s\",\"name\":\"upper\",\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\",\"include-source\":true}", LP_UPPER, path, e.key, e.dist);
+        json_init(&input);
+        ASSERT(json_read(&input, in, strlen(in)));
+        struct zcl_command_request request = { .input = &input };
+        zcl_command_reply_init(&r, "zcl.lab_promote.v1");
+        lab_promote_with_ready(&request, lp_remove_cases_ready, path, &r);
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "cases_passed")), 2);
+        ASSERT(lp_join(output, sizeof output, e.dist, "cases.json"));
+        f = fopen(output, "rb");
+        ASSERT(f != NULL);
+        char bytes[sizeof original];
+        size_t n = fread(bytes, 1, sizeof bytes, f);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(n, sizeof original - 1);
+        ASSERT(memcmp(bytes, original, n) == 0);
+        zcl_command_reply_free(&r);
+        json_free(&input);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
 static bool lp_dev_source(const char *dir, const char *file, const char *cases,
                           struct zcl_command_reply *r)
 {
@@ -577,6 +668,8 @@ int test_lab_promote(void)
     printf("\n=== Lab promote tests ===\n");
     failures += lp_case_roundtrip();
     failures += lp_case_hotswap();
+    failures += lp_case_invalid_before_key();
+    failures += lp_case_ready_snapshot();
     failures += lp_case_failed_case();
     failures += lp_case_disagree();
     failures += lp_case_capture_allocation();

@@ -360,8 +360,9 @@ static void promote_snapshot(const struct zcl_command_request *request,
     lab_ctx_close(&ctx);
 }
 
-void zcl_native_handle_lab_promote(const struct zcl_command_request *request,
-                                   struct zcl_command_reply *reply)
+void lab_promote_with_ready(const struct zcl_command_request *request,
+                            lab_promote_ready_fn ready, void *context,
+                            struct zcl_command_reply *reply)
 {
     struct promote_req p;
     if (!promote_parse(request, &p)) {
@@ -383,10 +384,17 @@ void zcl_native_handle_lab_promote(const struct zcl_command_request *request,
               json_push_kv_bool(&test_options, "fresh", true);
     if (ok) {
         p.test.input = &test_options;
-        promote_snapshot(request, &p, reply);
+        if (!ready || ready(context, reply))
+            promote_snapshot(request, &p, reply);
     } else {
         lab_fail(reply, "LAB_ALLOC", "normalize", "the promotion snapshot could not be allocated");
     }
     json_free(&test_options);
     json_free(&cases);
+}
+
+void zcl_native_handle_lab_promote(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    lab_promote_with_ready(request, NULL, NULL, reply);
 }
