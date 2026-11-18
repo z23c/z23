@@ -1596,7 +1596,8 @@ static int case_wiki_search(const char *home, const char *checkout,
         ASSERT(has(&m, "zcl.code_guide_brief.v1"));
         ASSERT(has(&m, "lessons_unavailable"));
         ASSERT(has(&m, "NODE_UNAVAILABLE"));
-        ASSERT(has(&m, "make lint-fast"));
+        ASSERT(has(&m, "agent-verify ONLY=@changed"));
+        ASSERT(!has(&m, "make lint-fast"));
         ASSERT_EQ(ms_finish(&m), 0);
     } TEST_END
     if (!ms_abort_case(&m, &stub)) {
@@ -1951,7 +1952,9 @@ static int case_guide_lessons(const char *home, const char *checkout,
         ASSERT(ms_tool(&m, 2, "z23_code", args));
         ASSERT(has(&m, "\"isError\":false"));
         ASSERT(has(&m, "WIKI_DEADLINE"));
-        ASSERT(has(&m, "make lint-fast"));
+        ASSERT(has(&m, "agent-verify ONLY=@changed"));
+        ASSERT(has(&m, "lint-preflight"));
+        ASSERT(!has(&m, "make lint-fast"));
         ASSERT_EQ(ms_finish(&m), 0);
         ASSERT(ms_stop_child(&stub));
     } TEST_END
