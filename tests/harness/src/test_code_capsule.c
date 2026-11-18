@@ -348,6 +348,58 @@ static int test_code_change_plan_patch(void)
     return failures;
 }
 
+static int test_code_change_plan_deleted_paths(void)
+{
+    int failures = 0;
+    const char *root = "test-tmp/change_plan_deletions";
+    TEST("code_change_plan: deleted headers retain source and route evidence") {
+        test_rm_rf_recursive(root);
+        ASSERT(cap_budget_mk_write(root, "src/fixture.c", "int fixture;\n"));
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "patch",
+            "diff --git a/tools/command/native_dev_proof_remote_command.h b/tools/command/native_dev_proof_remote_command.h\n"
+            "--- a/tools/command/native_dev_proof_remote_command.h\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+            "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n+++ b/docs/guide.md\n@@ -2,2 +2,2 @@\n--- a/core/fake_body.c\n-old\n+++ /dev/null\n+++ b/core/fake_add.c\n"
+            "--- a/core/modules/net/src/old.c\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+            "diff --git a/src/new.c b/src/new.c\n--- /dev/null\n+++ b/src/new.c\n@@ -0,0 +1 @@\n+new\n"
+            "+++ b/docs/only.md\n"
+            "diff --git a/docs/truncated.md b/docs/truncated.md\n"
+            "--- a/docs/truncated.md\n+++ b/docs/truncated.md\n@@ -3,3 +3,3 @@\n context\n"
+            "diff --git a/docs/deleted.md b/docs/deleted.md\n"
+            "--- a/docs/deleted.md\n+++ /dev/null\n"
+            "diff --git a/core/modules/net/src/old.c b/core/modules/net/src/old.c\n"
+            "--- a/core/modules/net/src/old.c\n+++ /dev/null\n"));
+        struct zcl_command_context ctx = { .source_root = root };
+        struct zcl_command_request request = { .input = &input, .context = &ctx,
+            .view = "normal", .invoked_name = "code.change-plan" };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_change_plan.v1");
+        zcl_native_handle_code_change_plan(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *edit = json_get(&reply.data, "edit");
+        const struct json_value *read = json_get(&reply.data, "read");
+        ASSERT(edit && edit->num_children == 7);
+        ASSERT(read && read->num_children == 7);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 0), "path")), "tools/command/native_dev_proof_remote_command.h");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 1), "path")), "docs/guide.md");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 2), "path")), "core/modules/net/src/old.c");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 3), "path")), "src/new.c");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 4), "path")), "docs/only.md");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 5), "path")), "docs/truncated.md");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 6), "path")), "docs/deleted.md");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(read, 0), "reason")), "inspect deleted file in patch or base revision");
+        ASSERT(json_get_bool(json_get(&reply.data, "consensus_risk")));
+        const struct json_value *groups = json_get(&reply.data, "test_groups");
+        ASSERT(groups && groups->num_children > 0);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int test_code_change_plan_patch_without_index(void)
 {
     int failures = 0;
@@ -962,6 +1014,7 @@ int test_code_capsule(void)
     failures += test_code_capsule_static_id_is_exact();
     failures += test_code_change_plan_symbol();
     failures += test_code_change_plan_patch();
+    failures += test_code_change_plan_deleted_paths();
     failures += test_code_change_plan_patch_without_index();
     failures += test_code_capsule_budget_shrink();
     failures += test_code_capsule_generation();

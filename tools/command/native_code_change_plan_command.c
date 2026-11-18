@@ -148,22 +148,120 @@ static bool plan_resolve_intent(struct codeindex *index, const char *intent,
     return false;
 }
 
+static void plan_patch_add(struct plan_paths *edit, const char *start,
+                           size_t len, const char *reason)
+{
+    if (len == 0 || len >= sizeof(edit->path[0])) return;
+    char path[256];
+    memcpy(path, start, len);
+    path[len] = '\0';
+    plan_add_path(edit, path, 0, reason, "exact_patch_header");
+}
+
+static bool plan_hunk_number(const char **p, const char *end, size_t *value)
+{
+    if (*p >= end || **p < '0' || **p > '9') return false;
+    size_t n = 0;
+    while (*p < end && **p >= '0' && **p <= '9') {
+        unsigned digit = (unsigned)(**p - '0');
+        if (n > (SIZE_MAX - digit) / 10) return false;
+        n = n * 10 + digit;
+        (*p)++;
+    }
+    *value = n;
+    return true;
+}
+
+static bool plan_hunk_range(const char **p, const char *end, char sign,
+                            size_t *count)
+{
+    if (*p >= end || *(*p)++ != sign) return false;
+    size_t start;
+    if (!plan_hunk_number(p, end, &start)) return false;
+    *count = 1;
+    if (*p < end && **p == ',') {
+        (*p)++;
+        if (!plan_hunk_number(p, end, count)) return false;
+    }
+    return true;
+}
+
+static bool plan_hunk_header(const char *line, size_t len, size_t *old,
+                             size_t *new_lines)
+{
+    if (len < 4 || strncmp(line, "@@ ", 3) != 0) return false;
+    const char *p = line + 3, *end = line + len;
+    if (!plan_hunk_range(&p, end, '-', old) || p >= end || *p++ != ' ')
+        return false;
+    if (!plan_hunk_range(&p, end, '+', new_lines)) return false;
+    return end - p >= 3 && strncmp(p, " @@", 3) == 0;
+}
+
+static void plan_hunk_line(char first, size_t *old, size_t *new_lines)
+{
+    if ((first == ' ' || first == '-') && *old) (*old)--;
+    if ((first == ' ' || first == '+') && *new_lines) (*new_lines)--;
+}
+
+struct plan_hunk_state {
+    size_t old_lines, new_lines;
+    bool active;
+};
+
+static bool plan_hunk_boundary(const char *line, size_t len)
+{
+    return len >= 11 && strncmp(line, "diff --git ", 11) == 0;
+}
+
+static bool plan_hunk_consume(struct plan_hunk_state *hunk, const char *line,
+                              size_t len)
+{
+    if (hunk->active && !plan_hunk_boundary(line, len)) {
+        plan_hunk_line(line[0], &hunk->old_lines, &hunk->new_lines);
+        hunk->active = hunk->old_lines != 0 || hunk->new_lines != 0;
+        return true;
+    }
+    hunk->active = false;
+    if (!plan_hunk_header(line, len, &hunk->old_lines, &hunk->new_lines))
+        return false;
+    hunk->active = hunk->old_lines != 0 || hunk->new_lines != 0;
+    return true;
+}
+
+static bool plan_patch_deleted_header(const char *line, size_t len,
+                                      const char *old)
+{
+    return old && len == sizeof("+++ /dev/null") - 1 &&
+           strncmp(line, "+++ /dev/null", len) == 0;
+}
+
+static bool plan_patch_old_header(const char *line, size_t len)
+{
+    return len > 6 && strncmp(line, "--- a/", 6) == 0;
+}
+
 static void plan_paths_from_patch(const char *patch, struct plan_paths *edit)
 {
-    const char *line = patch;
+    const char *line = patch, *old = NULL;
+    size_t old_len = 0;
+    struct plan_hunk_state hunk = {0};
     while (line && *line && edit->len < PLAN_PATH_CAP) {
         const char *end = strchr(line, '\n');
         size_t len = end ? (size_t)(end - line) : strlen(line);
-        if (len > 6 && strncmp(line, "+++ b/", 6) == 0) {
-            size_t path_len = len - 6;
-            if (path_len < sizeof(edit->path[0])) {
-                char path[256];
-                memcpy(path, line + 6, path_len);
-                path[path_len] = '\0';
-                plan_add_path(edit, path, 0, "changed by supplied patch",
-                              "exact_patch_header");
-            }
+        if (plan_hunk_consume(&hunk, line, len)) {
+            old = NULL;
+            line = end ? end + 1 : NULL;
+            continue;
         }
+        if (plan_patch_deleted_header(line, len, old))
+            plan_patch_add(edit, old, old_len, "deleted by supplied patch");
+        old = NULL;
+        if (plan_patch_old_header(line, len)) {
+            old = line + 6;
+            old_len = len - 6;
+        }
+        if (len > 6 && strncmp(line, "+++ b/", 6) == 0)
+            plan_patch_add(edit, line + 6, len - 6, "changed by supplied patch");
         line = end ? end + 1 : NULL;
     }
 }
@@ -202,9 +300,11 @@ static void plan_collect_patch_paths(const char *patch,
                                      struct plan_paths *edit)
 {
     plan_paths_from_patch(patch, edit);
-    for (size_t i = 0; i < edit->len; i++)
-        plan_add_path(read, edit->path[i], 0, "inspect changed file",
-                      "exact_patch_header");
+    for (size_t i = 0; i < edit->len; i++) {
+        const char *reason = strcmp(edit->reason[i], "deleted by supplied patch") == 0
+            ? "inspect deleted file in patch or base revision" : "inspect changed file";
+        plan_add_path(read, edit->path[i], 0, reason, "exact_patch_header");
+    }
 }
 
 static const char *plan_resolve_input(struct codeindex *index,
