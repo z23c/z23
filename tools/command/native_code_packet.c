@@ -60,6 +60,9 @@ struct pk_run {
     bool neighborhoods;
     bool declarations;
     bool declaration_output_failed;
+    struct agent_impact_acc *route_accs;
+    const char *routes[PK_TOUCH_MAX];
+    bool route_risks[PK_TOUCH_MAX];
     struct json_value excerpts, files, tests, pattern, impact, caps, auth,
         claims;
     struct pk_sb map, exc, pat, keep, authority, notes;
@@ -714,27 +717,29 @@ static void pk_group_add(struct pk_run *run, const char *raw,
 }
 
 /* tests[]: the same resolver code.tests uses, one entry per touched file. */
-static void pk_do_tests(struct pk_run *run, const char *path)
+static void pk_do_tests(struct pk_run *run, const char *path, int index)
 {
-    struct agent_impact_acc acc = {0};
-    bool crisk = false;
-    const char *route = zcl_native_code_route_for_path(path, &acc, &crisk);
+    struct agent_impact_acc local;
+    struct agent_impact_acc *acc = run->route_accs ? &run->route_accs[index] : &local;
+    bool crisk = run->route_accs ? run->route_risks[index] : false;
+    const char *route = run->route_accs ? run->routes[index]
+        : zcl_native_code_route_for_path(path, acc, &crisk);
     struct json_value o, raw, ids;
     pk_obj(&o);
     json_init(&raw); json_set_array(&raw);
     json_init(&ids); json_set_array(&ids);
-    size_t shown = acc.groups_len < (size_t)CODE_TESTS_CAP
-                       ? acc.groups_len : (size_t)CODE_TESTS_CAP;
+    size_t shown = acc->groups_len < (size_t)CODE_TESTS_CAP
+                       ? acc->groups_len : (size_t)CODE_TESTS_CAP;
     for (size_t i = 0; i < shown; i++) {
-        code_push_line(&raw, acc.groups[i]);
-        pk_group_add(run, acc.groups[i], &ids);
+        code_push_line(&raw, acc->groups[i]);
+        pk_group_add(run, acc->groups[i], &ids);
     }
     pk_group_add(run, route ? route : "make_lint_gates", &ids);
     (void)json_push_kv_str(&o, "file", path);
     (void)json_push_kv_str(&o, "route", route ? route : "make_lint_gates");
     (void)json_push_kv_bool(&o, "consensus_risk", crisk);
-    (void)json_push_kv_bool(&o, "matched", acc.shared_rule_hits > 0);
-    (void)json_push_kv_bool(&o, "groups_lost", acc.groups_lost);
+    (void)json_push_kv_bool(&o, "matched", acc->shared_rule_hits > 0);
+    (void)json_push_kv_bool(&o, "groups_lost", acc->groups_lost);
     (void)json_push_kv(&o, "test_groups", &raw);
     (void)json_push_kv(&o, "groups", &ids);
     json_free(&raw); json_free(&ids);
@@ -891,7 +896,7 @@ static void pk_do_touched(struct pk_run *run, int i)
     if (given)
         pk_claim(run, indexed, indexed ? "code index" : "not in the code index",
                  "file %s is in the code index", path);
-    pk_do_tests(run, path);
+    pk_do_tests(run, path, i);
     if (indexed)
         pk_do_impact(run, path);
     pk_do_capability(run, path, indexed);
@@ -1057,6 +1062,21 @@ static void pk_keep_signatures(struct pk_run *run)
     }
 }
 
+static void pk_routes_prepare(struct pk_run *run)
+{
+    if (run->ntouch < 2) return;
+    run->route_accs = zcl_calloc((size_t)run->ntouch, sizeof(*run->route_accs),
+                                 "code_packet_routes");
+    if (!run->route_accs) return;
+    const char *paths[PK_TOUCH_MAX];
+    for (int i = 0; i < run->ntouch; i++) paths[i] = run->touch[i];
+    if (!zcl_native_code_routes_many(paths, (size_t)run->ntouch, run->route_accs,
+                                     run->routes, run->route_risks)) {
+        free(run->route_accs);
+        run->route_accs = NULL;
+    }
+}
+
 static void pk_assemble(struct pk_run *run, int max_lines)
 {
     pk_run_reset(run, max_lines);
@@ -1067,8 +1087,11 @@ static void pk_assemble(struct pk_run *run, int max_lines)
         pk_do_symbol(run, i);
     for (int i = 0; i < run->in.nfile; i++)
         pk_touch_add(run, run->in.files[i], true);
+    pk_routes_prepare(run);
     for (int i = 0; i < run->ntouch; i++)
         pk_do_touched(run, i);
+    free(run->route_accs);
+    run->route_accs = NULL;
     run->f.ntouch = run->ntouch;
     int missing = 0;
     for (int i = 0; i < run->f.ngroup; i++)

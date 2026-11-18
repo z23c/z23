@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define PKT_FIX "test-tmp/code_packet_fix"
 
@@ -1017,6 +1018,117 @@ static int test_code_packet_tail_failure(void)
     return failures;
 }
 
+static int test_code_packet_batch_fallback(void)
+{
+    int failures = 0;
+    TEST("code_packet: multi-path routes batch and preserve fallback output") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_index_build());
+        size_t before = json_test_live_blocks();
+        const char *files[] = { "core/modules/net/src/pk_service.c",
+                                "tools/command/native_code_capsule.c",
+                                "docs/new-notes.md" };
+        struct zcl_command_reply normal, fallback, single;
+        zcl_alloc_fault_fail_next("agent_impact_batch");
+        pkt_call("Route one file", NULL, 0, files, 1, 20, &single);
+        bool single_skipped = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(single_skipped);
+        ASSERT(single.status == ZCL_COMMAND_STATUS_PASSED);
+        zcl_command_reply_free(&single);
+        pkt_call("Route a mixed packet", NULL, 0, files, 3, 20, &normal);
+        ASSERT(normal.status == ZCL_COMMAND_STATUS_PASSED);
+        zcl_alloc_fault_fail_next("agent_impact_batch");
+        pkt_call("Route a mixed packet", NULL, 0, files, 3, 20, &fallback);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(fallback.status == ZCL_COMMAND_STATUS_PASSED);
+        size_t len = json_write(&normal.data, NULL, 0);
+        char *a = malloc(len + 1), *b = malloc(len + 1);
+        ASSERT(a != NULL && b != NULL);
+        (void)json_write(&normal.data, a, len + 1);
+        ASSERT_EQ(json_write(&fallback.data, b, len + 1), len);
+        ASSERT_STR_EQ(a, b);
+        free(a); free(b);
+        const struct json_value *rows = json_get(&normal.data, "tests");
+        ASSERT(rows && rows->type == JSON_ARR);
+        ASSERT_EQ(rows->num_children, 3);
+        for (size_t i = 0; i < 3; i++)
+            ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, i), "file")), files[i]);
+        ASSERT(json_get_bool(json_get(json_at(rows, 0), "consensus_risk")));
+        zcl_command_reply_free(&normal);
+        zcl_command_reply_free(&fallback);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
+static bool pkt_partial_compare(void)
+{
+    const char *files[] = { "tools/command/native_code_capsule.c",
+                            "core/modules/net/src/pk_small.c" };
+    struct zcl_command_reply partial, scalar;
+    pkt_call("Partial routing", NULL, 0, files, 2, 20, &partial);
+    zcl_alloc_fault_fail_next("agent_impact_batch");
+    pkt_call("Partial routing", NULL, 0, files, 2, 20, &scalar);
+    bool consumed = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    size_t len = json_write(&partial.data, NULL, 0);
+    char *a = malloc(len + 1), *b = malloc(len + 1);
+    const struct json_value *row = pkt_first(&partial, "tests");
+    const struct json_value *groups = json_get(row, "test_groups");
+    bool ok = consumed && partial.status == ZCL_COMMAND_STATUS_PASSED &&
+              scalar.status == ZCL_COMMAND_STATUS_PASSED && a && b &&
+              json_get_bool(json_get(row, "matched")) && groups &&
+              groups->type == JSON_ARR && groups->num_children > 0;
+    if (ok) {
+        (void)json_write(&partial.data, a, len + 1);
+        ok = json_write(&scalar.data, b, len + 1) == len && strcmp(a, b) == 0;
+    }
+    free(a); free(b);
+    zcl_command_reply_free(&partial);
+    zcl_command_reply_free(&scalar);
+    return ok;
+}
+
+static bool pkt_partial_route_fallback(void)
+{
+    char cwd[4096], dir[4096];
+    if (!getcwd(cwd, sizeof(cwd)) || !test_mkdtemp(dir, sizeof(dir), "packet_routes"))
+        return false;
+    bool entered = chdir(dir) == 0;
+    bool ok = entered && mkdir("tests", 0755) == 0 &&
+              mkdir("tests/harness", 0755) == 0 &&
+              mkdir("tests/harness/src", 0755) == 0;
+    FILE *f = ok ? fopen("tests/harness/src/test_code_packet.c", "wb") : NULL;
+    if (f) {
+        ok = fputs("const char *x = \"native_code_capsule\";\n", f) >= 0;
+        if (fclose(f) != 0) ok = false;
+    } else ok = false;
+    if (ok) ok = pkt_fixture() && pkt_index_build();
+    if (ok) ok = pkt_partial_compare();
+    if (entered && chdir(cwd) != 0) ok = false;
+    if (test_rm_rf_recursive(dir) != 0) ok = false;
+    return ok;
+}
+
+static int test_code_packet_partial_routes(void)
+{
+    int failures = 0;
+    TEST("code_packet: incomplete referrer scan falls back per path") {
+        size_t before = json_test_live_blocks();
+        ASSERT(pkt_partial_route_fallback());
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1042,5 +1154,7 @@ int test_code_packet(void)
     failures += test_code_packet_transfer_prefilled();
     failures += test_code_packet_transfer_late_failure();
     failures += test_code_packet_tail_failure();
+    failures += test_code_packet_batch_fallback();
+    failures += test_code_packet_partial_routes();
     return failures;
 }
