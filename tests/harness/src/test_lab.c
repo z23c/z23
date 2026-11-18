@@ -536,6 +536,84 @@ static int test_lab_test_replay_archive(void)
 }
 
 
+static int test_lab_blocked_state(void)
+{
+    int failures = 0;
+    TEST("lab run refuses a file in the compiler directory before caching") {
+        char base[600], path[700];
+        struct zcl_command_reply r;
+        ASSERT(snprintf(base, sizeof(base), "%s/blocked-state", g_lt_dir) > 0);
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/cc", base) > 0);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
+        size_t compiles = lab_compile_count();
+        ASSERT(lt_run("hello.c", "\"compile_only\":true,\"timeout_ms\":4181", &r));
+        ASSERT(lt_failed_with(&r, "LAB_STATE"));
+        ASSERT_EQ(lab_compile_count(), compiles);
+        zcl_command_reply_free(&r);
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT(lt_run("hello.c", "\"compile_only\":true,\"timeout_ms\":4181", &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(lt_flag(&r.data, "compile", "ok"));
+        ASSERT(!lt_flag(&r.data, "cache", "hit"));
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    (void)setenv("Z23_LAB_DIR", g_lt_dir, 1);
+    return failures;
+}
+
+static int test_lab_old_state_receipt(void)
+{
+    int failures = 0;
+    TEST("lab retries an old compile-directory failure receipt") {
+        char base[600], root[LAB_ROOT_HEX + 1], compiler[LAB_ROOT_HEX + 1], input[256];
+        struct zcl_command_reply r, shown;
+        struct lab_dirs dirs;
+        struct json_value receipt, compile;
+        ASSERT(snprintf(base, sizeof(base), "%s/old-state", g_lt_dir) > 0);
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
+        ASSERT(lt_run("hello.c", "\"compile_only\":true,\"timeout_ms\":4182", &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(lt_flag(&r.data, "compile", "ok"));
+        snprintf(root, sizeof(root), "%s", json_get_str(json_get(&r.data, "root")));
+        snprintf(compiler, sizeof(compiler), "%s", json_get_str(json_get(&r.data, "compiler_id")));
+        zcl_command_reply_free(&r);
+        ASSERT_EQ(lab_dirs_resolve(&dirs), LAB_OK);
+        json_init(&receipt);
+        json_init(&compile);
+        json_set_object(&receipt);
+        json_set_object(&compile);
+        ASSERT(json_push_kv_str(&receipt, "compiler_id", compiler));
+        ASSERT(json_push_kv_bool(&compile, "ok", false));
+        ASSERT(json_push_kv_str(&compile, "detail", "compile directory failed"));
+        ASSERT(json_push_kv(&receipt, "compile", &compile));
+        ASSERT(lab_receipt_store(&dirs, root, &receipt));
+        json_free(&compile);
+        json_free(&receipt);
+        snprintf(input, sizeof(input), "{\"root\":\"%s\"}", root);
+        ASSERT(lt_call(zcl_native_handle_lab_show, input, "zcl.lab_show.v1", &shown));
+        ASSERT(lt_has(lt_at(&shown.data, "receipt", "compile"), "detail", NULL,
+                      "compile directory failed"));
+        zcl_command_reply_free(&shown);
+        size_t compiles = lab_compile_count();
+        ASSERT(lt_run("hello.c", "\"compile_only\":true,\"timeout_ms\":4182", &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(lt_flag(&r.data, "compile", "ok"));
+        ASSERT(!lt_flag(&r.data, "cache", "hit"));
+        ASSERT_EQ(lab_compile_count(), compiles + 1);
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    (void)setenv("Z23_LAB_DIR", g_lt_dir, 1);
+    return failures;
+}
+
+
 static int test_lab_cache(void)
 {
     int failures = 0;
@@ -1406,6 +1484,8 @@ int test_lab(void)
     failures += test_lab_resource_caps();
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
+    failures += test_lab_blocked_state();
+    failures += test_lab_old_state_receipt();
     failures += test_lab_replay_archive();
     failures += test_lab_test_replay_archive();
     failures += test_lab_test_cases();

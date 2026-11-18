@@ -198,7 +198,9 @@ bool lab_cache_serve(struct lab_ctx *ctx, struct zcl_command_reply *reply)
     json_init(&stored);
     json_init(&cache);
     bool hit = lab_receipt_load(&ctx->dirs, ctx->root, &stored) &&
-               lab_json_str_is(&stored, "compiler_id", ctx->tc.identity);
+               lab_json_str_is(&stored, "compiler_id", ctx->tc.identity) &&
+               !lab_json_str_is(json_get(&stored, "compile"), "detail",
+                                "compile directory failed");
     if (hit) {
         json_set_object(&cache);
         json_free(&reply->data);

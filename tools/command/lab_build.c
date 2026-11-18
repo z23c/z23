@@ -65,18 +65,23 @@ enum lab_err lab_dirs_resolve(struct lab_dirs *d)
     return LAB_OK;
 }
 
+static bool lab_ensure_dir(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) == 0)
+        return S_ISDIR(st.st_mode);
+    if (errno != ENOENT || !zcl_result_is_ok(zcl_mkdir_p(path, 0700)))
+        return false;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 /* Prepare only the directory that owns private invocation workdirs. */
 enum lab_err lab_dirs_open_run(struct lab_dirs *d)
 {
-    struct stat st;
     enum lab_err err = lab_dirs_resolve(d);
     if (err != LAB_OK)
         return err;
-    if (stat(d->run, &st) == 0)
-        return S_ISDIR(st.st_mode) ? LAB_OK : LAB_E_STATE;
-    if (errno != ENOENT || !zcl_result_is_ok(zcl_mkdir_p(d->run, 0700)))
-        return LAB_E_STATE;
-    return stat(d->run, &st) == 0 && S_ISDIR(st.st_mode) ? LAB_OK : LAB_E_STATE;
+    return lab_ensure_dir(d->run) ? LAB_OK : LAB_E_STATE;
 }
 
 
@@ -87,7 +92,7 @@ enum lab_err lab_dirs_open(struct lab_dirs *d)
         return err;
     const char *all[] = { d->base, d->cc, d->run, d->receipts, d->zcc };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
-        if (!zcl_result_is_ok(zcl_mkdir_p(all[i], 0700)))
+        if (!lab_ensure_dir(all[i]))
             return LAB_E_STATE;
     return LAB_OK;
 }
