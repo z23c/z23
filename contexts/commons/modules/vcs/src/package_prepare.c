@@ -222,23 +222,6 @@ static bool prepare_copy_field(char *out, size_t cap, const char *value)
     return true;
 }
 
-static const struct vcs_package_file *prepare_manifest_find(
-    const struct vcs_package_manifest *manifest, const char *path)
-{
-    size_t lo = 0, hi = manifest->count;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2u;
-        int cmp = strcmp(manifest->files[mid].path, path);
-        if (cmp < 0)
-            lo = mid + 1u;
-        else
-            hi = mid;
-    }
-    return lo < manifest->count &&
-                   strcmp(manifest->files[lo].path, path) == 0
-        ? &manifest->files[lo] : NULL;
-}
-
 /* An optional exact file list makes a real module subset declarative without
  * copying its implementation into a package-shaped directory. The package
  * manifest still commits the configuration itself, and only selected bytes
@@ -271,7 +254,7 @@ static bool prepare_apply_file_selection(struct prepare_walk *walk,
             return false;
         }
         const struct vcs_package_file *source =
-            prepare_manifest_find(&walk->out->manifest, path);
+            vcs_package_manifest_find(&walk->out->manifest, path);
         if (!source || !vcs_package_manifest_add(
                 &selected, source->path, source->mode, source->size,
                 source->chunk_hashes, source->chunk_count)) {
@@ -316,7 +299,7 @@ static bool prepare_programs_entries(struct prepare_walk *walk,
                            path ? path : "(not a string)");
             return false;
         }
-        if (!prepare_manifest_find(&walk->out->manifest, path)) {
+        if (!vcs_package_manifest_find(&walk->out->manifest, path)) {
             prepare_detail(walk, "programs[%zu] is not in files: %s", i, path);
             return false;
         }

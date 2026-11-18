@@ -63,10 +63,7 @@ bool store_manifest_identity(const uint8_t *wire, size_t wire_len,
 const struct vcs_package_file *store_resolve_file(
     const struct store_package *pkg, const char *path)
 {
-    for (size_t i = 0; i < pkg->manifest.count; i++)
-        if (strcmp(pkg->manifest.files[i].path, path) == 0)
-            return &pkg->manifest.files[i];
-    return NULL;
+    return vcs_package_manifest_find(&pkg->manifest, path);
 }
 
 enum vcs_package_store_result store_chunk_hash_checked(

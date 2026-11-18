@@ -209,6 +209,25 @@ static bool package_manifest_validate_add(const struct vcs_package_manifest *man
     return true;
 }
 
+const struct vcs_package_file *vcs_package_manifest_find(
+    const struct vcs_package_manifest *manifest, const char *path)
+{
+    if (!manifest || !path)
+        return NULL;
+    size_t lo = 0, hi = manifest->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        int cmp = strcmp(manifest->files[mid].path, path);
+        if (cmp < 0)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    return lo < manifest->count &&
+                   strcmp(manifest->files[lo].path, path) == 0
+        ? &manifest->files[lo] : NULL;
+}
+
 bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
                               const char *path, uint32_t mode, uint64_t size,
                               const uint8_t *chunk_hashes,

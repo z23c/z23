@@ -88,6 +88,10 @@ bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
 bool vcs_package_manifest_serialize(const struct vcs_package_manifest *manifest,
                                     uint8_t **out, size_t *out_len);
 
+/* Find a path in a canonical sorted manifest; returns NULL when absent. */
+const struct vcs_package_file *vcs_package_manifest_find(
+    const struct vcs_package_manifest *manifest, const char *path);
+
 /* Parse only the exact canonical wire form. Initializes *out. Unsorted or
  * duplicate paths, traversal, invalid modes/counts/sizes, overflow,
  * truncation, and any trailing byte are rejected. */

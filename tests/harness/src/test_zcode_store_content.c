@@ -620,9 +620,87 @@ static int store_into_oversized_final_control(struct vcs_package_store *store,
     return failures;
 }
 
+static int store_sorted_path_reads(struct vcs_package_store *s,
+                                   const uint8_t root[32], bool all)
+{
+    int failures = 0;
+    for (size_t i = 0; i < 63 && all; i++) {
+        char name[32];
+        uint8_t *out = NULL;
+        size_t len = 0;
+        snprintf(name, sizeof(name), "file-%03zu", i);
+        enum vcs_package_store_result result =
+            vcs_package_store_get_chunk(s, root, name, 0, &out, &len);
+        all = result == VCS_PACKAGE_STORE_OK && len == 1 && out && out[0] == (uint8_t)i;
+        free(out);
+    }
+    ZS_CHECK("sorted path: every exact name returns expected bytes", all);
+    const char *missing[] = { "000-before", "file-030x", "zzzz-after" };
+    for (size_t i = 0; i < sizeof(missing) / sizeof(missing[0]); i++) {
+        uint8_t *out = NULL;
+        size_t len = 0;
+        ZS_CHECK("sorted path: absent name refuses",
+            vcs_package_store_get_chunk(s, root, missing[i], 0, &out, &len) ==
+                VCS_PACKAGE_STORE_ERR_CHUNK_COORD && out == NULL && len == 0);
+        free(out);
+    }
+    return failures;
+}
+
+static int store_sorted_path_controls(void)
+{
+    int failures = 0;
+    char dd[1024];
+    struct vcs_package_store *s = zs_open(
+        dd, sizeof(dd), "sorted_paths", VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    ZS_CHECK("sorted path: store opens", s != NULL);
+    if (!s) return failures + 1;
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    uint8_t byte = 0, hash[32], root[32], *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = true;
+    for (size_t i = 63; i > 0 && ok; i--) {
+        char name[32];
+        byte = (uint8_t)(i - 1);
+        snprintf(name, sizeof(name), "file-%03zu", i - 1);
+        ok = vcs_package_chunk_hash(&byte, 1, hash) &&
+             vcs_package_manifest_add(&manifest, name, VCS_PACKAGE_MODE_FILE,
+                                      1, hash, 1);
+    }
+    ok = ok && vcs_package_manifest_serialize(&manifest, &wire, &wire_len) &&
+         vcs_package_store_put_manifest(s, wire, wire_len, root) == VCS_PACKAGE_STORE_OK;
+    ZS_CHECK("sorted path: reverse insertion publishes 63 files", ok);
+    if (ok) {
+        ZS_CHECK("sorted path: middle missing put refuses",
+            vcs_package_store_put_chunk(s, root, "file-030x", 0, &byte, 1) ==
+                VCS_PACKAGE_STORE_ERR_CHUNK_COORD);
+        byte = 62;
+        ok = vcs_package_store_put_chunk(s, root, "file-062", 0, &byte, 1) ==
+             VCS_PACKAGE_STORE_OK;
+        ZS_CHECK("sorted path: last file stores", ok);
+    }
+    bool all = ok;
+    for (size_t i = 0; i < 63 && all; i++) {
+        char name[32];
+        byte = (uint8_t)i;
+        snprintf(name, sizeof(name), "file-%03zu", i);
+        all = vcs_package_store_put_chunk(s, root, name, 0, &byte, 1) ==
+              VCS_PACKAGE_STORE_OK;
+    }
+    ZS_CHECK("sorted path: every distinct chunk stores", all);
+    if (ok) failures += store_sorted_path_reads(s, root, all);
+    free(wire);
+    vcs_package_manifest_free(&manifest);
+    vcs_package_store_close(s);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int t_store_work_output(void)
 {
     int failures = 0;
+    failures += store_sorted_path_controls();
     char dd[1024];
     struct vcs_package_store *s = zs_open(
         dd, sizeof(dd), "work_output", VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
