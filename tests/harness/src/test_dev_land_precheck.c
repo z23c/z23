@@ -625,6 +625,30 @@ static bool dlx_pc_success_not_recorded(bool fail)
     return ok;
 }
 
+static bool dlx_pc_compiler_evidence(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400], rows[512];
+    if (!dlx_pc_rig(&rig, "compiler_evidence", true, "check-windows-cross-syntax\n")) return false;
+    dlx_pc_row(rows, sizeof(rows), 1, "failed", "lint", 1,
+               "check-windows-cross-syntax failed");
+    if (!dlx_pc_outcomes(rows) || !dlx_write_dep(rig.clone, "build/gen/guest_kernel_data.c", "fixture\n")) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig.clone);
+    if (!dlx_write(path, "#!/bin/sh\nif [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "printf 'selftest: expected permission denied\\nselftest.c:1:2: error: expected\\n'\n"
+        "printf 'check-windows-cross-syntax: FAIL — 1 file(s) failed mingw -fsyntax-only (not baselined, not a skippable missing header):\\n'\n"
+        "printf '  tools/command/example.c\\n    tools/command/example.c:44:8: error: missing_symbol undeclared\\n'\nexit 1\n") || chmod(path, 0755) != 0) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ok = dlx_run(&c) && !dlx_ok(&c) && dlx_queue_empty() &&
+        strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0 &&
+        strstr(dlx_err_evidence(&c), "tools/command/example.c:44:8: error: missing_symbol undeclared") &&
+        !strstr(dlx_err_evidence(&c), "selftest.c");
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_retained_failure(bool large)
 {
     struct dlx_rig rig;
@@ -1303,6 +1327,10 @@ int dlx_case_precheck(void)
         ASSERT(dlx_pc_timeout_output(1));
         ASSERT(dlx_pc_timeout_output(2));
         ASSERT(dlx_pc_timeout_output(3));
+        PASS();
+    }
+    TEST("land: compiler failure evidence selects the actual diagnostic") {
+        ASSERT(dlx_pc_compiler_evidence());
         PASS();
     }
     TEST("land: failed gate retains its captured prefix and identifies truncation") {

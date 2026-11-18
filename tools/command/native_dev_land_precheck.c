@@ -22,6 +22,7 @@
 #include "platform/rng.h"
 
 #include "base/safe_alloc.h"
+#include "zutf8/zutf8.h"
 #include "base/hex.h"
 #include "json/json.h"
 #include "platform/state_root.h"
@@ -762,6 +763,70 @@ static void pc_failure_facts(struct pc_run *r, const char *gate,
     json_free(&facts);
 }
 
+static bool pc_plain_capture(const struct pc_run *r)
+{
+    if (!pc_stream_complete(r, false) || r->capture.stdout_truncated ||
+        r->capture.stderr_observed || strlen(r->out) != r->capture.stdout_observed)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)r->out; *p; p++)
+        if ((*p < 32 && *p != '\n' && *p != '\r' && *p != '\t') || *p == 127)
+            return false;
+    return true;
+}
+
+static bool pc_compiler_location(const char *line, size_t file_len, size_t cap)
+{
+    const char *p = line + file_len + 1;
+    size_t digits = strspn(p, "0123456789");
+    if (!digits || p[digits] != ':') return false;
+    p += digits + 1;
+    digits = strspn(p, "0123456789");
+    if (!digits || strncmp(p + digits, ": error: ", 9)) return false;
+    const char *end = strchr(line, '\n');
+    if (!end || (size_t)(end - line) + 2 > cap) return false;
+    for (const char *q = line; q < end; q++)
+        if ((unsigned char)*q < 32 || *q == 127) return false;
+    return zutf8_validate_n(line, (size_t)(end - line));
+}
+
+static const char *pc_windows_file(const char *out)
+{
+    static const char marker[] = "check-windows-cross-syntax: FAIL ";
+    const char *summary = strstr(out, marker);
+    if (!summary || (summary != out && summary[-1] != '\n')) return NULL;
+    const char *end = strchr(summary, '\n');
+    const char *shape = strstr(summary, "file(s) failed mingw -fsyntax-only");
+    return end && shape && shape < end ? end + 1 : NULL;
+}
+
+/* Select only a diagnostic tied to a source listed by the failing Windows
+ * compiler summary. Self-test output before that summary is not evidence. */
+static bool pc_windows_diagnostic(const struct pc_run *r, const char *gate,
+                                  char *ev, size_t cap)
+{
+    if (strcmp(gate, "check-windows-cross-syntax") || !pc_plain_capture(r))
+        return false;
+    const char *file = pc_windows_file(r->out);
+    if (!file) return false;
+    const char *end;
+    if (file[0] != ' ' || file[1] != ' ') return false;
+    file += 2;
+    end = strchr(file, '\n');
+    if (!end || end == file) return false;
+    size_t file_len = (size_t)(end - file);
+    const char *line = end + 1;
+    if (strncmp(line, "    ", 4) != 0) return false;
+    line += 4;
+    if (strncmp(line, file, file_len) || line[file_len] != ':') return false;
+    if (!pc_compiler_location(line, file_len, cap)) return false;
+    end = strchr(line, '\n');
+    size_t n = (size_t)(end - line);
+    memcpy(ev, line, n);
+    ev[n] = '\n';
+    ev[n + 1] = 0;
+    return true;
+}
+
 static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
                            struct zcl_command_reply *reply)
 {
@@ -779,7 +844,8 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
         (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "inspect facts");
         return;
     }
-    pc_head_lines(r->out, ev, sizeof(ev));
+    if (!pc_windows_diagnostic(r, gate, ev, sizeof(reply->error.evidence)))
+        pc_head_lines(r->out, ev, sizeof(ev));
     pc_failure_facts(r, gate, reply, false);
     (void)snprintf(msg, sizeof(msg),
                    "precheck gate %s failed (exit %d); fix and resubmit: %s",
