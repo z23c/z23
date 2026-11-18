@@ -503,13 +503,19 @@ static int cgs_case_p(const struct ccs_fx *fx)
 static int cgs_case_q(const struct ccs_fx *fx)
 {
     struct ccg_cfg cfg;
+    char excluded[CCD_PATH];
     const char *const need[] = { "raw syscall", NULL };
     cgs_cfg(&cfg);
     if (cgs_base(fx, "q", "") != 0
-        || ccs_put(fx, "q/fixture_src/raw_user.c", "extern long sys" "call(long, ...);\n"
+        || ccs_put(fx, "q/fixture_src/build/raw_user.c", "extern long sys" "call(long, ...);\n"
                                                   "long raw_use(void) { return sys" "call(0); }\n") != 0)
         return ccs_say(0, "Q: fixture");
-    return cgs_check(fx, "q", &cfg, -1, need, "Q: raw syscall in an uncompiled source still refuses");
+    ccs_path(fx, "q/build/opaque", excluded);
+    if (mkdir(excluded, 0) != 0)
+        return ccs_say(0, "Q: excluded cache fixture");
+    int failures = cgs_check(fx, "q", &cfg, -1, need,
+        "Q: source fallback skips the top-level build tree but grades nested build sources");
+    return failures + (rmdir(excluded) != 0);
 }
 
 /* V. a source with embedded NUL bytes is scanned in bounds: a ban hit after the NUL on

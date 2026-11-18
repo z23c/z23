@@ -164,6 +164,11 @@ static int ccg_walk_entry(const struct ccg_scan *s, const char *base, const char
     struct stat st;
     if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
         return 0;
+    /* The source fallback excludes these top-level trees. The separate
+     * epoch object walk must still inspect every subdirectory. */
+    if (!*rel && strcmp(suffix, ".c") == 0 &&
+        (strcmp(name, "build") == 0 || strcmp(name, "vendor") == 0 || strcmp(name, ".git") == 0))
+        return 0;
     if (snprintf(r, sizeof r, "%s%s%s", rel, rel[0] ? "/" : "", name) >= (int)sizeof r
         || snprintf(p, sizeof p, "%s/%s", base, r) >= (int)sizeof p)
         return ccg_walk_fail(s, "path too long under", base, 0);
@@ -743,11 +748,8 @@ static int ccg_sources(const struct ccg_scan *s, struct ccg_list *out)
         return 1;
     if (rc == 0 && out->n == 0)
         rc = ccg_walk(s, s->root, "", ".c", &walked);
-    for (size_t i = 0; rc == 0 && i < walked.n; i++) {
-        const char *k = walked.ent[i].key;
-        if (strncmp(k, "build/", 6) && strncmp(k, "vendor/", 7) && strncmp(k, ".git/", 5))
-            rc = ccg_list_add(out, k);
-    }
+    for (size_t i = 0; rc == 0 && i < walked.n; i++)
+        rc = ccg_list_add(out, walked.ent[i].key);
     ccd_map_free(&walked);
     return rc < 0 ? -1 : rc == CCG_REPORTED ? 2 : 0;
 }
