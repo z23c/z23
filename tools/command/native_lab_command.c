@@ -209,6 +209,42 @@ static bool lab_json_str_is(const struct json_value *v, const char *key,
     return f && f->type == JSON_STR && strcmp(json_get_str(f), want) == 0;
 }
 
+static bool lab_legacy_name_matches(const struct lab_ctx *ctx, const struct json_value *stored)
+{
+    const struct json_value *file = json_get(stored, "file");
+    if (!file || file->type != JSON_STR ||
+        !lab_json_str_is(stored, "root", ctx->legacy_root))
+        return false;
+    const char *path = json_get_str(file);
+    size_t n = strlen(path);
+    if (n < 3 || n >= LAB_PATH || strcmp(path + n - 2, ".c") != 0)
+        return false;
+    char name[72];
+    lab_base_name(path, name);
+    return strcmp(name, ctx->src.base) == 0;
+}
+
+static bool lab_cache_matches(const struct lab_ctx *ctx, const struct json_value *stored,
+                              bool legacy)
+{
+    return lab_json_str_is(stored, "compiler_id", ctx->tc.identity) &&
+           !lab_json_str_is(json_get(stored, "compile"), "detail", "compile directory failed") &&
+           (!legacy || lab_legacy_name_matches(ctx, stored));
+}
+
+bool lab_root_named(struct lab_ctx *ctx, struct lab_hasher *hasher)
+{
+    lab_hasher_finish(hasher, ctx->legacy_root);
+    struct lab_hasher *named = lab_hasher_new("source-name.v1");
+    if (!named)
+        return false;
+    lab_hasher_field(named, "legacy_root", ctx->legacy_root, strlen(ctx->legacy_root));
+    lab_hasher_field(named, "source_name", ctx->src.base, strlen(ctx->src.base));
+    lab_hasher_finish(named, ctx->root);
+    return true;
+}
+
+
 /* Answer from the stored receipt when it exists for this compiler. */
 bool lab_cache_serve(struct lab_ctx *ctx, struct zcl_command_reply *reply)
 {
@@ -216,9 +252,13 @@ bool lab_cache_serve(struct lab_ctx *ctx, struct zcl_command_reply *reply)
     json_init(&stored);
     json_init(&cache);
     bool hit = lab_receipt_load(&ctx->dirs, ctx->root, &stored) &&
-               lab_json_str_is(&stored, "compiler_id", ctx->tc.identity) &&
-               !lab_json_str_is(json_get(&stored, "compile"), "detail",
-                                "compile directory failed");
+               lab_cache_matches(ctx, &stored, false);
+    if (!hit) {
+        json_free(&stored);
+        json_init(&stored);
+        hit = lab_receipt_load(&ctx->dirs, ctx->legacy_root, &stored) &&
+              lab_cache_matches(ctx, &stored, true);
+    }
     if (hit) {
         json_set_object(&cache);
         json_free(&reply->data);
@@ -274,8 +314,7 @@ static bool lab_root_run(struct lab_ctx *ctx, const struct lab_req *r)
     lab_hasher_u64(h, "argc", r->n_args);
     for (size_t i = 0; i < r->n_args; i++)
         lab_hasher_field(h, "arg", r->args[i], strlen(r->args[i]));
-    lab_hasher_finish(h, ctx->root);
-    return true;
+    return lab_root_named(ctx, h);
 }
 
 /* ── receipt ────────────────────────────────────────────────────────── */

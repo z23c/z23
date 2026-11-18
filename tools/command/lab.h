@@ -145,6 +145,9 @@ size_t lab_scan_sanitizer(const char *text, size_t len, char *first, size_t cap)
 size_t lab_compile_count(void);
 size_t lab_run_count(void);
 
+/* Effective compiler-visible source basename, including its normalization. */
+void lab_base_name(const char *path, char out[72]);
+
 /* Hex SHA3-512 over length-prefixed fields (see lab_receipt.c). */
 struct lab_hasher;
 struct lab_hasher *lab_hasher_new(const char *kind);

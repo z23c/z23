@@ -342,8 +342,7 @@ static bool lab_root_test(struct lab_ctx *ctx, const struct lab_cases *cs,
     lab_hasher_u64(h, "cases", cs->n);
     for (size_t i = 0; i < cs->n; i++)
         lab_hash_case(h, &cs->items[i]);
-    lab_hasher_finish(h, ctx->root);
-    return true;
+    return lab_root_named(ctx, h);
 }
 
 /* ── verdict ────────────────────────────────────────────────────────── */

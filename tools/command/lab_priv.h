@@ -11,6 +11,7 @@ struct lab_ctx {
     struct lab_toolchain tc;
     struct lab_source src;
     char root[LAB_ROOT_HEX + 1];
+    char legacy_root[LAB_ROOT_HEX + 1];
 };
 
 void lab_fail(struct zcl_command_reply *reply, const char *code,
@@ -57,6 +58,8 @@ bool lab_cases_snapshot(const struct zcl_command_request *request,
 
 /* Serve the stored receipt for ctx->root when it matches this compiler. */
 bool lab_cache_serve(struct lab_ctx *ctx, struct zcl_command_reply *reply);
+/* Finish a canonical root and bind it to the effective compiler basename. */
+bool lab_root_named(struct lab_ctx *ctx, struct lab_hasher *hasher);
 /* Store the receipt built in reply->data and mark it as a fresh result. */
 bool lab_publish(struct lab_ctx *ctx, struct zcl_command_reply *reply);
 

@@ -16,6 +16,7 @@
 #include "util/write_all.h"
 #include "util/path_util.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -31,6 +32,20 @@ enum {
     LAB_RECEIPT_MAX = 64 * 1024,
 };
 
+void lab_base_name(const char *path, char out[72])
+{
+    const char *slash = strrchr(path, '/');
+    const char *name = slash ? slash + 1 : path;
+    size_t n = strlen(name), j = 0;
+    for (size_t i = 0; i < n && j < 64; i++) {
+        unsigned char c = (unsigned char)name[i];
+        out[j++] = (isalnum(c) || c == '_' || c == '-' || c == '.') ? (char)c
+                                                                    : '_';
+    }
+    out[j] = '\0';
+    if (j < 3 || out[0] == '.' || strcmp(out + j - 2, ".c") != 0)
+        snprintf(out, 72, "main.c");
+}
 struct lab_hasher {
     struct sha3_512_ctx ctx;
 };

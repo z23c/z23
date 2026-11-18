@@ -171,17 +171,20 @@ transient `cc/` and `run/` directories removed after each call. The compiler
 is `build/bin/zcc cc`; without `zcc` beside the node binary the lab calls `cc`
 directly.
 
-The root is the SHA3-512 of length-prefixed fields: the source bytes, `sanitize`,
-`timeout_ms`, `mem_mb`, and for `run` also `compile_only`, `stdin` and `args`,
-for `test` the canonical cases. The same root with the same compiler identity
+The root binds the effective compiler-visible source basename to a SHA3-512
+of length-prefixed inputs: source bytes, `sanitize`, `timeout_ms`, `mem_mb`,
+and for `run` also `compile_only`, `stdin` and `args`, or for `test` the
+canonical cases. Moving a source without changing that effective basename keeps
+the same root. The same root with the same compiler identity
 (path, size and mtime of `cc` and `zcc`) is answered from the stored receipt
 with `cache.hit:true`, without compiling or running. The cache keys the inputs,
 not the program's behavior: a program that reads the clock or a random source is
 replayed, not re-run. Pass `fresh:true` to compile and run again.
 
-Test roots use the `test.diff.v2` kind so requests obtain byte-aware diagnostics
-and case stderr even when an earlier test receipt is cached. Run roots are unchanged;
-`lab show` returns historical receipts with their original fields.
+New run and test roots use the basename-bound identity. Earlier receipts remain
+showable, and are reused only when their recorded source path has the same
+effective basename and compiler identity. Test roots retain the `test.diff.v2`
+canonical input kind for byte-aware diagnostics and case stderr.
 
 <!-- claim: symbol-present test.diff.v2 tools/command/native_lab_test_command.c # test-only receipt version -->
 

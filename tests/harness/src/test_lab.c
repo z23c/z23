@@ -671,6 +671,213 @@ static int test_lab_receipt_store_test(void)
 }
 
 
+static bool lt_named_file(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok = f && fputs("#include <stdio.h>\nint main(void) { puts(__FILE__); return 0; }\n", f) >= 0;
+    if (f) ok = fclose(f) == 0 && ok;
+    return ok;
+}
+
+static bool lt_named_setup(const char *label, char first[600], char second[600], char moved[600])
+{
+    char dir[600], sub[600];
+    return snprintf(dir, sizeof(dir), "%s/named-%s", g_lt_dir, label) > 0 &&
+           mkdir(dir, 0700) == 0 &&
+           snprintf(sub, sizeof(sub), "%s/moved", dir) > 0 && mkdir(sub, 0700) == 0 &&
+           snprintf(first, 600, "%s/first.c", dir) > 0 &&
+           snprintf(second, 600, "%s/second.c", dir) > 0 &&
+           snprintf(moved, 600, "%s/first.c", sub) > 0 &&
+           lt_named_file(first) && lt_named_file(second) && lt_named_file(moved);
+}
+
+static bool lt_named_call(const char *file, bool test, struct zcl_command_reply *r)
+{
+    char input[1024];
+    int n = snprintf(input, sizeof(input), "{\"file\":\"%s\"%s}", file,
+                     test ? ",\"cases\":[{\"name\":\"file\","
+                            "\"expect_stdout\":\"first.c\\n\"}]" : "");
+    return n > 0 && (size_t)n < sizeof(input) &&
+           lt_call(test ? zcl_native_handle_lab_test : zcl_native_handle_lab_run,
+                   input, test ? "zcl.lab_test.v1" : "zcl.lab_run.v1", r);
+}
+
+static int test_lab_named_run(void)
+{
+    int failures = 0;
+    TEST("lab run cache distinguishes effective source basenames") {
+        char first[600], second[600], moved[600], root[LAB_ROOT_HEX + 1];
+        struct zcl_command_reply r;
+        ASSERT(lt_named_setup("run", first, second, moved));
+        ASSERT(lt_named_call(first, false, &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(lt_streq(lt_at(&r.data, "run", "stdout"), "first.c\n"));
+        snprintf(root, sizeof(root), "%s", json_get_str(json_get(&r.data, "root")));
+        zcl_command_reply_free(&r);
+        ASSERT(lt_named_call(second, false, &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(lt_streq(lt_at(&r.data, "run", "stdout"), "second.c\n"));
+        ASSERT(!lt_streq(json_get(&r.data, "root"), root));
+        zcl_command_reply_free(&r);
+        ASSERT(lt_named_call(moved, false, &r));
+        ASSERT(lt_flag(&r.data, "cache", "hit"));
+        ASSERT(lt_streq(json_get(&r.data, "root"), root));
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_lab_named_test(void)
+{
+    int failures = 0;
+    TEST("lab test cache distinguishes effective source basenames") {
+        char first[600], second[600], moved[600], root[LAB_ROOT_HEX + 1];
+        struct zcl_command_reply r;
+        ASSERT(lt_named_setup("test", first, second, moved));
+        ASSERT(lt_named_call(first, true, &r));
+        if (!lab_confinement_available()) {
+            ASSERT(lt_failed_with(&r, "LAB_UNCONFINED"));
+            zcl_command_reply_free(&r);
+            PASS();
+        }
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(lt_int(&r.data, "failed", NULL), 0);
+        snprintf(root, sizeof(root), "%s", json_get_str(json_get(&r.data, "root")));
+        zcl_command_reply_free(&r);
+        ASSERT(lt_named_call(second, true, &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(lt_int(&r.data, "failed", NULL), 1);
+        ASSERT(!lt_streq(json_get(&r.data, "root"), root));
+        zcl_command_reply_free(&r);
+        ASSERT(lt_named_call(moved, true, &r));
+        ASSERT(lt_flag(&r.data, "cache", "hit"));
+        ASSERT(lt_streq(json_get(&r.data, "root"), root));
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+/* Roots captured with the signed pre-change CLI for lt_named_file's exact bytes
+ * and lt_named_call's default run/test inputs (golden-{run,test}.json). */
+static bool lt_legacy_hash(const char *file, bool test, char root[LAB_ROOT_HEX + 1])
+{
+    (void)file;
+    const char *value = test
+        ? "5f41ad26f80238e4cd92ea5266c41beeaff0c6b3e732dbe24f3dff431acb3ceec01874f6d3e9677e32c74a97234ed3cd3824c96cee1821765cb9a4e50fae2d3e"
+        : "0daf2538e1151fa16982bfd9eeb2f4d3cc4efab5404915119f85d21ac3475e51c495fb0b714361ea1601c61bf6400848c7ce432585fabebff4390d8a61bb828d";
+    snprintf(root, LAB_ROOT_HEX + 1, "%s", value);
+    return true;
+}
+
+
+static bool lt_legacy_copy(const struct lab_dirs *dirs, const char *from, const char *root,
+                           bool omit_file)
+{
+    struct json_value source, copy;
+    json_init(&source);
+    json_init(&copy);
+    json_set_object(&copy);
+    bool ok = lab_receipt_load(dirs, from, &source);
+    for (size_t i = 0; ok && i < source.num_children; i++) {
+        const char *key = source.keys[i];
+        if (omit_file && strcmp(key, "file") == 0)
+            continue;
+        ok = strcmp(key, "root") == 0 ? json_push_kv_str(&copy, key, root)
+                                      : json_push_kv(&copy, key, &source.children[i]);
+    }
+    ok = ok && lab_receipt_store(dirs, root, &copy);
+    json_free(&source);
+    json_free(&copy);
+    return ok;
+}
+
+static bool lt_legacy_seed(bool test, char first[600], char second[600], char moved[600],
+                           char legacy[LAB_ROOT_HEX + 1], struct lab_dirs *dirs)
+{
+    char named[LAB_ROOT_HEX + 1], path[LAB_PATH + 24];
+    struct zcl_command_reply r;
+    if (!lt_named_setup(test ? "legacy-test" : "legacy-run", first, second, moved) ||
+        !lt_named_call(first, test, &r))
+        return false;
+    bool ok = r.status == ZCL_COMMAND_STATUS_PASSED && json_get(&r.data, "root");
+    snprintf(named, sizeof(named), "%s", ok ? json_get_str(json_get(&r.data, "root")) : "");
+    zcl_command_reply_free(&r);
+    return ok && lab_dirs_resolve(dirs) == LAB_OK && lt_legacy_hash(first, test, legacy) &&
+           lt_legacy_copy(dirs, named, legacy, false) &&
+           snprintf(path, sizeof(path), "%s/%s.json", dirs->receipts, named) < (int)sizeof(path) &&
+           unlink(path) == 0;
+}
+
+static bool lt_legacy_show(const char *root)
+{
+    char input[256];
+    struct zcl_command_reply r;
+    snprintf(input, sizeof(input), "{\"root\":\"%s\"}", root);
+    if (!lt_call(zcl_native_handle_lab_show, input, "zcl.lab_show.v1", &r))
+        return false;
+    bool ok = r.status == ZCL_COMMAND_STATUS_PASSED && lt_streq(json_get(&r.data, "root"), root);
+    zcl_command_reply_free(&r);
+    return ok;
+}
+
+static bool lt_legacy_probe(const char *file, bool test, const char *root, bool different)
+{
+    struct zcl_command_reply r;
+    if (!lt_named_call(file, test, &r))
+        return false;
+    bool ok = r.status == ZCL_COMMAND_STATUS_PASSED &&
+              (root ? lt_flag(&r.data, "cache", "hit") && lt_streq(json_get(&r.data, "root"), root)
+                    : !lt_flag(&r.data, "cache", "hit"));
+    if (ok && different)
+        ok = test ? lt_int(&r.data, "failed", NULL) == 1
+                  : lt_streq(lt_at(&r.data, "run", "stdout"), "second.c\n");
+    zcl_command_reply_free(&r);
+    return ok;
+}
+
+static bool lt_legacy_replay(bool test)
+{
+    char first[600], second[600], moved[600], legacy[LAB_ROOT_HEX + 1], state[600];
+    struct lab_dirs dirs;
+    if (!lab_confinement_available())
+        return true;
+    if (snprintf(state, sizeof(state), "%s/legacy-state-%s", g_lt_dir, test ? "test" : "run") <= 0 ||
+        mkdir(state, 0700) != 0 || setenv("Z23_LAB_DIR", state, 1) != 0)
+        return false;
+    bool ok = lt_legacy_seed(test, first, second, moved, legacy, &dirs) &&
+           lt_legacy_show(legacy) && lt_legacy_probe(moved, test, legacy, false) &&
+           lt_legacy_probe(second, test, NULL, true) &&
+           lt_legacy_copy(&dirs, legacy, legacy, true) &&
+           lt_legacy_probe(first, test, NULL, false);
+    (void)setenv("Z23_LAB_DIR", g_lt_dir, 1);
+    return ok;
+}
+
+
+static int test_lab_legacy_named_run(void)
+{
+    int failures = 0;
+    TEST("lab run replays only unambiguous matching legacy source names") {
+        ASSERT(lt_legacy_replay(false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_lab_legacy_named_test(void)
+{
+    int failures = 0;
+    TEST("lab test replays only unambiguous matching legacy source names") {
+        ASSERT(lt_legacy_replay(true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_lab_cache(void)
 {
     int failures = 0;
@@ -1541,6 +1748,10 @@ int test_lab(void)
     failures += test_lab_resource_caps();
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
+    failures += test_lab_named_run();
+    failures += test_lab_named_test();
+    failures += test_lab_legacy_named_run();
+    failures += test_lab_legacy_named_test();
     failures += test_lab_receipt_store_run();
     failures += test_lab_receipt_store_test();
     failures += test_lab_blocked_state();
