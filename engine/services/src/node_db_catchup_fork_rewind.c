@@ -185,26 +185,26 @@ static bool fork_rewind_below(struct node_db *ndb,
     return source.cursor_moved;
 }
 
-bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
-                                  const struct active_chain *chain, int cursor,
-                                  const char *datadir)
+int node_db_catchup_fork_rewind_at(struct node_db *ndb,
+                                   const struct active_chain *chain, int cursor,
+                                   const char *datadir)
 {
     if (!ndb || !ndb->open || !chain || cursor < 0)
-        return false;
+        return 0;
     int stale_h = fork_lowest_stale_row(ndb, chain, cursor);
     if (stale_h < 0)
-        return false;
+        return 0;
     int fork_h = -1;
     bool deferred = false;
     bool ok = fork_rewind_below(ndb, chain, datadir, stale_h, &fork_h,
                                 &deferred);
     if (deferred)
-        return false;
+        return -1;  // raw-return-ok:fork_rewind_below logged the deferral
     LOG_WARN("catchup", "projection row at height %d is off the active "
              "chain (reorg); projection cursor %d -> %d %s", stale_h, cursor,
              fork_h, ok ? "rewound so the winner is re-indexed"
                         : "rewind FAILED");
-    return ok;
+    return ok ? 1 : 0;
 }
 
 bool node_db_catchup_service_rewind_stale_fork(struct node_db *ndb,
@@ -215,5 +215,5 @@ bool node_db_catchup_service_rewind_stale_fork(struct node_db *ndb,
     if (!ndb || !ndb->open || !chain ||
         !node_db_sync_get_tip_height_checked(ndb, &cursor))
         return false;
-    return node_db_catchup_fork_rewind_at(ndb, chain, cursor, datadir);
+    return node_db_catchup_fork_rewind_at(ndb, chain, cursor, datadir) > 0;
 }

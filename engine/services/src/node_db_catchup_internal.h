@@ -123,9 +123,16 @@ void catchup_sapling_tree_persist_dirty(struct node_db *ndb,
                                         struct catchup_sapling_tree *ct);
 
 /* Reorg rewind with the cursor already read (node_db_catchup_fork_rewind.c); the
- * public wrapper is node_db_catchup_service_rewind_stale_fork. */
-bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
-                                  const struct active_chain *chain,
-                                  int cursor, const char *datadir);
+ * public wrapper is node_db_catchup_service_rewind_stale_fork. Returns 1 when
+ * the cursor was rewound, 0 when there was nothing to rewind (or the rewind
+ * failed, logged), and -1 when a stale row was found but the unwind had to
+ * wait (a catalog fold or another writer held node.db): nothing moved, and
+ * the caller must not walk forward from the cursor this pass. Walking on would
+ * index the winner above the loser's rows, and the next scan, which stops at
+ * the first row that agrees with the active chain, would never see the loser
+ * again. */
+int node_db_catchup_fork_rewind_at(struct node_db *ndb,
+                                   const struct active_chain *chain,
+                                   int cursor, const char *datadir);
 
 #endif /* ZCL_NODE_DB_CATCHUP_INTERNAL_H */

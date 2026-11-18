@@ -256,6 +256,66 @@ static int ph_check_unwind_deferred_while_fold_busy(void)
     return failures;
 }
 
+/* A deferred unwind must also stop the catchup pass. The winner here is one
+ * block LONGER than the loser (B at 1, C at 2): walking on from the loser's
+ * cursor would index C on top of A, and the next scan, which walks down from
+ * the cursor only until the first row that agrees with the active chain,
+ * would stop at C and never see A again. */
+/* A indexed at height 1; the active chain then switches to B at 1 and C at
+ * 2 (body on disk). */
+static bool ph_longer_winner(struct ph_fork_fx *x, struct uint256 *hashC,
+                             struct block_index *slotC)
+{
+    int r1 = x->opened
+        ? node_db_catchup_service_run(&x->ndb, &x->ac, NULL, x->dir) : -1;
+    struct disk_block_pos posC;
+    bool wrote = r1 == 1 && ph_write_block(x->dir, 3, &posC, hashC);
+    ph_slot(slotC, &posC, hashC, BLOCK_HAVE_DATA);
+    slotC->nHeight = 2;
+    slotC->pprev = &x->slotB;
+    active_chain_free(&x->ac);
+    active_chain_init(&x->ac);
+    return wrote && active_chain_install_tip_slot(&x->ac, &x->slotB) &&
+           active_chain_install_tip_slot(&x->ac, slotC);
+}
+
+/* One catchup pass, then B and C are the connected rows and A is demoted. */
+static bool ph_winner_indexed(struct ph_fork_fx *x, const struct uint256 *hashC)
+{
+    int rc = node_db_catchup_service_run(&x->ndb, &x->ac, NULL, x->dir);
+    return rc >= 0 && node_db_sync_get_tip_height(&x->ndb) == 2 &&
+           ph_connected_rows(&x->ndb, 1, x->hashA.data) == 0 &&
+           ph_connected_rows(&x->ndb, 1, x->hashB.data) == 1 &&
+           ph_connected_rows(&x->ndb, 2, hashC->data) == 1;
+}
+
+static int ph_check_deferred_unwind_skips_the_walk(void)
+{
+    int failures = 0;
+    struct ph_fork_fx x;
+    memset(&x, 0, sizeof(x));
+    ph_fork_open(&x, "defer_walk", BLOCK_HAVE_DATA);
+    struct uint256 hashC;
+    struct block_index slotC;
+    bool longer = ph_longer_winner(&x, &hashC, &slotC);
+    explorer_unwind_test_set_guard_wait_ms(30);
+    bool held = zslp_ledger_fold_try_begin();
+    int r2 = longer && held
+        ? node_db_catchup_service_run(&x.ndb, &x.ac, NULL, x.dir) : -1;
+    PH_CHECK("deferred unwind with a longer winner: the catchup pass walks "
+             "nothing on top of the loser",
+             longer && held && r2 == 0 &&
+             node_db_sync_get_tip_height(&x.ndb) == 1 &&
+             ph_connected_rows(&x.ndb, 1, x.hashA.data) == 1);
+    if (held)
+        zslp_ledger_fold_end();
+    PH_CHECK("the next pass unwinds the loser and indexes the winner",
+             longer && ph_winner_indexed(&x, &hashC));
+    explorer_unwind_test_set_guard_wait_ms(-1);
+    ph_fork_close(&x);
+    return failures;
+}
+
 /* ── boot cursor ─────────────────────────────────────────────── */
 
 #define PH_CHAIN_N 5
@@ -633,6 +693,7 @@ int test_node_db_projection_heal(void)
     failures += ph_check_reorg_replaces_projected_tip();
     failures += ph_check_reorg_no_spurious_rewind();
     failures += ph_check_unwind_deferred_while_fold_busy();
+    failures += ph_check_deferred_unwind_skips_the_walk();
     failures += ph_check_finalize_cursor();
     failures += ph_check_lean_replay_keeps_roots();
     printf("node_db_projection_heal: %d failures\n", failures);

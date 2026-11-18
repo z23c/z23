@@ -1346,9 +1346,9 @@ static int catchup_tips_need_work(struct node_db *ndb,
         return 0;  // raw-return-ok:logged by the checked tip reader
     /* A reorg replaces blocks the projection already indexed; heal the cursor
      * before the "caught up" early-out below can hide the stale rows. */
-    if (node_db_catchup_fork_rewind_at(ndb, chain, *db_tip, datadir) &&
-        !node_db_sync_get_tip_height_checked(ndb, db_tip))
-        return 0;  // raw-return-ok:logged by the checked tip reader
+    int heal = node_db_catchup_fork_rewind_at(ndb, chain, *db_tip, datadir);
+    if (heal < 0 || (heal && !node_db_sync_get_tip_height_checked(ndb, db_tip)))
+        return 0;  // raw-return-ok:deferred (never walk on a loser) or logged
     *chain_tip = active_chain_height(chain);
     if (*db_tip >= *chain_tip)
         return 0;
