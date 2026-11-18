@@ -1323,11 +1323,10 @@ size_t code_territory_route(const char *path,
 {
     const char *root = *(const char *const *)user;
     struct agent_impact_acc acc = {0};
-    bool crisk = false;
-    const char *route = zcl_native_code_route_at(root, path, &acc, &crisk);
+    bool crisk = zcl_native_code_collect_at(root, path, &acc, false);
     size_t n = 0;
     if (crisk && n < cap)
-        (void)snprintf(out[n++], TERRITORY_GROUP_MAX, "%s", route);
+        (void)snprintf(out[n++], TERRITORY_GROUP_MAX, "%s", "consensus_parity");
     for (size_t i = 0; i < acc.groups_len && n < cap; i++) {
         bool dup = false;
         for (size_t j = 0; j < n; j++)
