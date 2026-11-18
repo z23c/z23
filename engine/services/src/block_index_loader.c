@@ -207,17 +207,6 @@ bool block_index_ptrs_height_sorted(struct block_index *const *arr, size_t n)
     return true;
 }
 
-/* Sort a forward-pass pointer array by height, skipping the qsort when the
- * array is already ordered (see block_index_ptrs_height_sorted). Kept as
- * its own function, called unconditionally, so a caller's own branch count
- * never grows just because this call learned to skip redundant work. */
-static void block_index_sort_forward_pass_input(
-    struct block_index **arr, size_t n)
-{
-    if (!block_index_ptrs_height_sorted(arr, n))
-        qsort(arr, n, sizeof(*arr), block_index_ptr_cmp_height);
-}
-
 /* ── save/load block_index_flat ──────────────────────────── */
 
 struct zcl_result save_block_index_flat_identity(

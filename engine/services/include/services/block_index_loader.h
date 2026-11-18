@@ -51,6 +51,13 @@ bool block_index_initialize_genesis(struct block_index *genesis, const struct ch
 int block_index_ptr_cmp_height(const void *a, const void *b);
 bool block_index_ptrs_height_sorted(struct block_index *const *arr,
                                     size_t n);
+/* Sort forward-pass input by height. Already-ordered arrays are unchanged;
+ * dense heights use a stable counting sort, with qsort for sparse input or
+ * allocation failure. */
+void block_index_sort_forward_pass_input(struct block_index **arr, size_t n);
+#ifdef ZCL_TESTING
+bool block_index_sort_counting_allowed_for_test(int32_t max_height, size_t count);
+#endif
 
 /* ── Flat file (block_index.bin) ─────────────────────────── */
 

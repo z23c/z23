@@ -4,6 +4,7 @@
  * LevelDB loader, and the event-log projection rebuild (E1 file-size split
  * out of block_index_loader.c); both entry points are declared in
  * services/block_index_loader.h. */
+// one-result-type-ok:sort-counting — pure ordering and predicate helpers, not a fallible service surface
 
 #include "services/block_index_loader.h"
 #include "services/chain_state_service.h"
@@ -16,8 +17,58 @@
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
 
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+static bool block_index_counting_allowed(int32_t max, size_t n)
+{
+    return max >= 0 && max < INT32_MAX &&
+           (uint64_t)max <= 4ull * n + 1024u && n <= UINT32_MAX;
+}
+
+#ifdef ZCL_TESTING
+bool block_index_sort_counting_allowed_for_test(int32_t max_height, size_t count)
+{
+    return block_index_counting_allowed(max_height, count);
+}
+#endif
+
+void block_index_sort_forward_pass_input(struct block_index **arr, size_t n)
+{
+    if (block_index_ptrs_height_sorted(arr, n))
+        return;
+    int32_t max = 0;
+    bool dense = true;
+    for (size_t i = 0; i < n; i++) {
+        if (arr[i]->nHeight < 0) {
+            dense = false;
+            break;
+        }
+        if (arr[i]->nHeight > max)
+            max = arr[i]->nHeight;
+    }
+    if (dense && block_index_counting_allowed(max, n)) {
+        uint32_t *start = zcl_calloc((size_t)max + 2u, sizeof(*start),
+                                     "flat save sort counts");
+        struct block_index **out = zcl_malloc(n * sizeof(*out),
+                                              "flat save sort");
+        if (start && out) {
+            for (size_t i = 0; i < n; i++) start[arr[i]->nHeight + 1]++;
+            for (int32_t h = 0; h <= max; h++) start[h + 1] += start[h];
+            for (size_t i = 0; i < n; i++) out[start[arr[i]->nHeight]++] = arr[i];
+            memcpy(arr, out, n * sizeof(*out));
+            free(start);
+            free(out);
+            return;
+        }
+        free(start);
+        free(out);
+    }
+    qsort(arr, n, sizeof(*arr), block_index_ptr_cmp_height);
+}
 
 /* nChainWork from the parent's work plus this entry's proof; a parentless
  * entry gets its own proof, except the registered FlySync island root, which

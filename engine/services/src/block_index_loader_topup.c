@@ -610,7 +610,7 @@ static size_t topup_forward_pass_over_map(struct main_state *ms,
         if (e && e->phashBlock && n < total)
             sorted[n++] = e;
     }
-    qsort(sorted, n, sizeof(*sorted), topup_cmp_height);
+    block_index_sort_forward_pass_input(sorted, n);
     block_index_forward_pass(sorted, n);
     return n;
 }

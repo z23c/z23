@@ -1348,6 +1348,108 @@ static int topup_check_idempotent_rerun(struct topup_fx *fx)
     return failures;
 }
 
+static int topup_check_sort_fallbacks(void)
+{
+    int failures = 0;
+    struct block_index rows[3];
+    for (int i = 0; i < 3; i++) {
+        block_index_init(&rows[i]);
+        rows[i].nHeight = i;
+    }
+    struct block_index *sorted[3] = {&rows[2], &rows[1], &rows[0]};
+    block_index_sort_forward_pass_input(sorted, 3);
+    TOPUP_CHECK("dense counting sort restores height order",
+                sorted[0] == &rows[0] && sorted[1] == &rows[1] &&
+                sorted[2] == &rows[2]);
+
+    sorted[0] = &rows[2]; sorted[1] = &rows[1]; sorted[2] = &rows[0];
+    zcl_alloc_fault_fail_next("flat save sort counts");
+    block_index_sort_forward_pass_input(sorted, 3);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    TOPUP_CHECK("counting-sort allocation failure falls back to qsort",
+                fired && sorted[0] == &rows[0] && sorted[1] == &rows[1] &&
+                sorted[2] == &rows[2]);
+
+    rows[1].nHeight = 10000;
+    sorted[0] = &rows[1]; sorted[1] = &rows[2]; sorted[2] = &rows[0];
+    zcl_alloc_fault_fail_next("flat save sort counts");
+    block_index_sort_forward_pass_input(sorted, 3);
+    bool sparse_skipped = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    TOPUP_CHECK("sparse heights skip counting sort and use qsort",
+                sparse_skipped && sorted[0] == &rows[0] &&
+                sorted[1] == &rows[2] && sorted[2] == &rows[1]);
+    return failures;
+}
+
+static int topup_check_sort_duplicates(void)
+{
+    int failures = 0;
+    struct block_index rows[3];
+    for (int i = 0; i < 3; i++) {
+        block_index_init(&rows[i]);
+        rows[i].nHeight = i < 2 ? 1 : 2;
+    }
+    rows[0].nHeight = 2;
+    struct block_index *sorted[3] = {&rows[0], &rows[1], &rows[2]};
+    block_index_sort_forward_pass_input(sorted, 3);
+    TOPUP_CHECK("equal heights retain input order",
+                sorted[0] == &rows[1] && sorted[1] == &rows[0] &&
+                sorted[2] == &rows[2]);
+    return failures;
+}
+
+static int topup_check_sort_output_oom(void)
+{
+    int failures = 0;
+    struct block_index rows[3];
+    for (int i = 0; i < 3; i++) {
+        block_index_init(&rows[i]);
+        rows[i].nHeight = i;
+    }
+    struct block_index *sorted[3] = {&rows[2], &rows[1], &rows[0]};
+    zcl_alloc_fault_fail_next("flat save sort");
+    block_index_sort_forward_pass_input(sorted, 3);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    TOPUP_CHECK("output allocation failure falls back to qsort",
+                fired && sorted[0] == &rows[0] && sorted[1] == &rows[1] &&
+                sorted[2] == &rows[2]);
+    return failures;
+}
+
+static int topup_check_sort_extremes(void)
+{
+    int failures = 0;
+    struct block_index rows[3];
+    for (int i = 0; i < 3; i++) {
+        block_index_init(&rows[i]);
+        rows[i].nHeight = i;
+    }
+    rows[1].nHeight = -1;
+    struct block_index *sorted[3] = {&rows[2], &rows[0], &rows[1]};
+    block_index_sort_forward_pass_input(sorted, 3);
+    TOPUP_CHECK("negative height uses qsort",
+                sorted[0] == &rows[1] && sorted[1] == &rows[0] &&
+                sorted[2] == &rows[2]);
+
+    TOPUP_CHECK("upper-bound eligibility is independent of sparsity",
+                !block_index_sort_counting_allowed_for_test(INT32_MAX, 3) &&
+                block_index_sort_counting_allowed_for_test(INT32_MAX - 1,
+                                                           UINT32_MAX));
+    rows[1].nHeight = INT32_MAX;
+    sorted[0] = &rows[1]; sorted[1] = &rows[2]; sorted[2] = &rows[0];
+    zcl_alloc_fault_fail_next("flat save sort counts");
+    block_index_sort_forward_pass_input(sorted, 3);
+    bool skipped = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    TOPUP_CHECK("INT32_MAX avoids signed overflow via qsort",
+                skipped && sorted[0] == &rows[0] && sorted[1] == &rows[2] &&
+                sorted[2] == &rows[1]);
+    return failures;
+}
+
 static int topup_check_null_projection(struct topup_fx *fx)
 {
     int failures = 0;
@@ -1393,6 +1495,10 @@ int test_block_index_topup(void)
     failures += topup_check_hydrated_stub(&fx);
     failures += topup_check_disk_recovery(&fx);
     failures += topup_check_idempotent_rerun(&fx);
+    failures += topup_check_sort_fallbacks();
+    failures += topup_check_sort_duplicates();
+    failures += topup_check_sort_output_oom();
+    failures += topup_check_sort_extremes();
     failures += topup_check_null_projection(&fx);
     topup_close_stores(&fx);
     failures += run_bound_topup_integration() + run_undo_topup_cases()
