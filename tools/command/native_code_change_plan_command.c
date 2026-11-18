@@ -299,8 +299,8 @@ void zcl_native_handle_code_change_plan(
         return;
     }
 
-    struct codeindex *index = codeindex_open(zcl_native_source_root(request));
-    if (!index) {
+    struct codeindex *index = patch ? NULL : codeindex_open(zcl_native_source_root(request));
+    if (!patch && !index) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
                                "dispatch", true, false,
@@ -371,5 +371,5 @@ void zcl_native_handle_code_change_plan(
     json_free(&read_json); json_free(&edit_json); json_free(&avoid);
     json_free(&compile); json_free(&test_groups); json_free(&test_commands);
     json_free(&unknowns);
-    codeindex_close(index);
+    if (index) codeindex_close(index);
 }

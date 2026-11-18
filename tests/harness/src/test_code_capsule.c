@@ -31,6 +31,7 @@
 #include "kernel/command_registry.h"
 #include "json/json.h"
 
+#include <errno.h>
 #include <stddef.h>
 #include <sqlite3.h>
 #include <string.h>
@@ -344,6 +345,61 @@ static int test_code_change_plan_patch(void)
         json_free(&input);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int test_code_change_plan_patch_without_index(void)
+{
+    int failures = 0;
+    const char *root = "test-tmp/change_plan_patch_noindex";
+    const char *index_path = "test-tmp/change_plan_patch_noindex/.codeindex";
+    TEST("code_change_plan: patch uses headers without opening an index") {
+        test_rm_rf_recursive(root);
+        ASSERT(cap_budget_mk_write(root, "src/fixture.c", "int plan_fixture_symbol(void) { return 1; }\n"));
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "patch", "--- a/src/fixture.c\n+++ b/src/fixture.c\n"));
+        ASSERT(json_push_kv_str(&input, "symbol", "plan_fixture_symbol"));
+        ASSERT(json_push_kv_str(&input, "intent", "plan_fixture_symbol"));
+        struct zcl_command_context ctx = { .source_root = root };
+        struct zcl_command_request request = {
+            .input = &input, .context = &ctx, .view = "normal",
+            .invoked_name = "code.change-plan",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_change_plan.v1");
+        zcl_native_handle_code_change_plan(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "resolution")), "exact_patch_paths");
+        ASSERT(!json_get_bool(json_get(&reply.data, "symbol_found")));
+        const struct json_value *edit = json_get(&reply.data, "edit");
+        ASSERT(edit && edit->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(edit, 0), "path")), "src/fixture.c");
+        struct stat st;
+        ASSERT(stat(index_path, &st) != 0 && errno == ENOENT);
+        zcl_command_reply_free(&reply);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "symbol", "plan_fixture_symbol"));
+        zcl_command_reply_init(&reply, "zcl.code_change_plan.v1");
+        zcl_native_handle_code_change_plan(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(&reply.data, "symbol_found")));
+        ASSERT(stat(index_path, &st) == 0);
+        zcl_command_reply_free(&reply);
+        ASSERT(cap_budget_mk_write(root, "src/fixture.c",
+                                   "int plan_refreshed_symbol(void) { return 2; }\n"));
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "intent", "plan_refreshed_symbol"));
+        zcl_command_reply_init(&reply, "zcl.code_change_plan.v1");
+        zcl_native_handle_code_change_plan(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "resolution")), "heuristic_intent_symbol");
+        ASSERT(json_get_bool(json_get(&reply.data, "symbol_found")));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(root);
     return failures;
 }
 
@@ -906,6 +962,7 @@ int test_code_capsule(void)
     failures += test_code_capsule_static_id_is_exact();
     failures += test_code_change_plan_symbol();
     failures += test_code_change_plan_patch();
+    failures += test_code_change_plan_patch_without_index();
     failures += test_code_capsule_budget_shrink();
     failures += test_code_capsule_generation();
     failures += test_code_capsule_exact_enumeration();
