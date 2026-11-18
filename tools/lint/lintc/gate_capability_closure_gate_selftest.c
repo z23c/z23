@@ -20,7 +20,7 @@
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
-enum { CGS_CASES = 30, CGS_FILLER = 500 };
+enum { CGS_CASES = 31, CGS_FILLER = 500 };
 
 static const char k_fx0[] = "build/dev-obj/epochs/fx0";
 
@@ -557,6 +557,23 @@ static int cgs_case_r(const struct ccs_fx *fx)
     return cgs_check(fx, "r", &cfg, 0, need, "R: an object whose source is absent is foreign, counted, and not graded");
 }
 
+/* A generated object may have no retained source, but an error resolving
+ * that source prevents a freshness decision. */
+static int cgs_case_source_stat(const struct ccs_fx *fx)
+{
+    struct ccg_cfg cfg;
+    char path[CCD_PATH];
+    const char *const need[] = { "FATAL", "cannot stat", "build/generated.c", NULL };
+    cgs_cfg(&cfg);
+    if (cgs_base(fx, "stat", "") != 0 ||
+        cgs_cc(fx, ".filler.c", "stat/build/dev-obj/epochs/fx0/build/generated.o", NULL) != 0)
+        return ccs_say(0, "source stat: fixture");
+    ccs_path(fx, "stat/build/generated.c", path);
+    if (symlink("generated.c", path) != 0)
+        return ccs_say(0, "source stat: fixture symlink");
+    return cgs_check(fx, "stat", &cfg, 2, need, "source stat: an unresolved source is never graded fresh");
+}
+
 /* W. an object older than its source is a stale build: UNPROVEN (2) and named
  * as stale, never graded. The source's mtime is set into the future. */
 static int cgs_case_w(const struct ccs_fx *fx)
@@ -757,7 +774,7 @@ static int cgs_cases(const struct ccs_fx *fx)
            cgs_case_g(fx) + cgs_case_h() + cgs_case_i(fx) + cgs_case_j(fx) + cgs_case_k(fx) + cgs_case_l() +
            cgs_case_m(fx) + cgs_case_n1(fx) + cgs_case_n2(fx) + cgs_case_o(fx) + cgs_case_p(fx) + cgs_case_q(fx) +
            cgs_case_r(fx) + cgs_case_s(fx) + cgs_case_t(fx) + cgs_case_u(fx) + cgs_case_v(fx) + cgs_case_w(fx) +
-           cgs_case_x(fx) + cgs_case_spaced(fx) + cgs_case_y(fx);
+           cgs_case_x(fx) + cgs_case_source_stat(fx) + cgs_case_spaced(fx) + cgs_case_y(fx);
 }
 
 int check_capability_closure_selftest(void)

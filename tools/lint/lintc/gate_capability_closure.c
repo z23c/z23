@@ -300,15 +300,19 @@ static int ccg_is_stale(const struct ccg_scan *s, const char *rel)
     struct stat ost, sst;
     struct timespec a, b;
     ccg_c_of(rel, src, sizeof src);
-    if (!ccg_is_file(s->root, src))
+    if (snprintf(srcp, sizeof srcp, "%s/%s", s->root, src) >= (int)sizeof srcp)
+        return ccg_walk_fail(s, "path too long under", s->root, 0);
+    if (stat(srcp, &sst) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR)
+            return 0;
+        return ccg_walk_fail(s, "cannot stat", srcp, errno);
+    }
+    if (!S_ISREG(sst.st_mode))
         return 0;
-    if (snprintf(obj, sizeof obj, "%s/%s", s->epoch, rel) >= (int)sizeof obj
-        || snprintf(srcp, sizeof srcp, "%s/%s", s->root, src) >= (int)sizeof srcp)
+    if (snprintf(obj, sizeof obj, "%s/%s", s->epoch, rel) >= (int)sizeof obj)
         return ccg_walk_fail(s, "path too long under", s->epoch, 0);
     if (stat(obj, &ost) != 0)
         return ccg_walk_fail(s, "cannot stat", obj, errno);
-    if (stat(srcp, &sst) != 0)
-        return ccg_walk_fail(s, "cannot stat", srcp, errno);
     a = CCG_MTIME(sst);
     b = CCG_MTIME(ost);
     return a.tv_sec > b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec > b.tv_nsec);
