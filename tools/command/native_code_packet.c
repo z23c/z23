@@ -649,15 +649,18 @@ static void pk_do_file_map(struct pk_run *run, const char *path, bool from_input
         return;
     }
     static struct ci_symbol syms[64];
-    int ns = codeindex_symbols_in_file(run->ctx.ci, path, syms, 64);
+    int total = -1;
+    int ns = codeindex_symbols_in_file_total(run->ctx.ci, path, syms, 64, &total);
     if (ns < 0) ns = 0;
     char purpose[200];
     code_trunc(purpose, sizeof(purpose), cf.purpose, 180);
     (void)json_push_kv_str(&o, "group", cf.group);
     (void)json_push_kv_str(&o, "purpose", purpose);
-    (void)json_push_kv_int(&o, "symbols_total", ns);
+    if (total >= 0) (void)json_push_kv_int(&o, "symbols_total", total);
+    else (void)json_push_kv_str(&o, "symbols_status", "unavailable");
     pk_sb_add(&run->map, "FILE %s  [%s]  %s\n  symbols:", path, cf.group,
               purpose);
+    if (total < 0) pk_sb_add(&run->map, " unavailable");
     int shown = 0;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < ns && shown < PK_FILE_SYMS; i++) {
@@ -669,8 +672,8 @@ static void pk_do_file_map(struct pk_run *run, const char *path, bool from_input
             shown++;
         }
     }
-    if (ns > shown)
-        pk_sb_add(&run->map, " (+%d more)", ns - shown);
+    if (total > shown)
+        pk_sb_add(&run->map, " (+%d more)", total - shown);
     pk_sb_add(&run->map, "\n");
     pk_push(&run->files, &o);
 }

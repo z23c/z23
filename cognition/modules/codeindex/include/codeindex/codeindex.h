@@ -364,6 +364,11 @@ bool codeindex_source_file_counts(struct codeindex *ci,
 int codeindex_symbols_in_file(struct codeindex *ci, const char *path,
                               struct ci_symbol *out, int cap);
 
+/* As above, also stream and validate all rows for an exact total. On error
+ * returns -1 and sets *total to -1. The output remains bounded by cap. */
+int codeindex_symbols_in_file_total(struct codeindex *ci, const char *path,
+                                    struct ci_symbol *out, int cap, int *total);
+
 /* In-tree include dependencies of `path`, ordered by dep path. Each out[i] is a
  * NUL-terminated repo-relative path (up to 255 bytes). Fills up to `cap` rows,
  * returns count (>=0), -1 on error.

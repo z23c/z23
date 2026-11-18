@@ -181,6 +181,15 @@ int codeindex_symbols_in_file(struct codeindex *ci, const char *path,
     return ci_store_symbols_in_file(ci->store, path, out, cap);
 }
 
+int codeindex_symbols_in_file_total(struct codeindex *ci, const char *path,
+                                    struct ci_symbol *out, int cap, int *total)
+{
+    if (total) *total = -1;
+    if (!ci || !ci->store || !path || !out || cap <= 0 || !total)
+        LOG_ERR("codeindex", "bad arg to codeindex_symbols_in_file_total");
+    return ci_store_symbols_in_file_total(ci->store, path, out, cap, total);
+}
+
 int codeindex_includes_of_file(struct codeindex *ci, const char *path,
                                char (*out)[256], int cap)
 {

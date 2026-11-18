@@ -198,7 +198,7 @@ int ci_store_caller_edges(struct ci_store *s, const char *callee,
         rc = sqlite3_bind_text(stmt, 1, callee, -1, SQLITE_TRANSIENT);
     int n = 0;
     while (rc == SQLITE_OK && n < cap) {
-        int step = sqlite3_step(stmt); // raw-sql-ok:codeindex-derived
+        int step = sqlite3_step(stmt); // raw-sql-ok:codeindex-derived // raw-sql-ok:codeindex-derived
         if (step == SQLITE_DONE) break;
         if (step != SQLITE_ROW) { rc = step; break; }
         if (!ci_edge_read_row(stmt, &out[n])) {
@@ -531,15 +531,32 @@ bool ci_store_source_file_counts(struct ci_store *s,
     return true;
 }
 
-int ci_store_symbols_in_file(struct ci_store *s, const char *path,
-                             struct ci_symbol *out, int cap)
+static bool ci_store_file_symbols_collect(sqlite3_stmt *stmt, struct ci_symbol *out,
+                                          int cap, bool full, int *n, int *matched)
 {
+    struct ci_symbol scratch;
+    while (full || *n < cap) {
+        int step = sqlite3_step(stmt); // raw-sql-ok:codeindex-derived
+        if (step == SQLITE_DONE) return true;
+        if (step != SQLITE_ROW) return false;
+        struct ci_symbol *row = *n < cap ? &out[*n] : &scratch;
+        if (!ci_store_fill_symbol(stmt, row)) continue;
+        if (*matched == INT_MAX) return false;
+        (*matched)++;
+        if (*n < cap) (*n)++;
+    }
+    return true;
+}
+
+int ci_store_symbols_in_file_total(struct ci_store *s, const char *path,
+                                   struct ci_symbol *out, int cap, int *total)
+{
+    if (total) *total = -1;
     if (!s || !path || !out || cap <= 0)
         LOG_ERR("codeindex", "bad arg to symbols_in_file");
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
-    /* A .c file owns its definitions (def_path); a header owns declarations
-     * (decl_path). Match either, definitions first, then source order. */
+    /* A .c file owns its definitions; a header owns declarations. */
     if (sqlite3_prepare_v2(s->db,
         "SELECT " CI_SYM_COLS " FROM symbols"
         " WHERE def_path=?1 OR decl_path=?1"
@@ -548,16 +565,21 @@ int ci_store_symbols_in_file(struct ci_store *s, const char *path,
         pthread_mutex_unlock(&s->lock);
         LOG_ERR("codeindex", "prepare symbols_in_file");
     }
-    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
-    int n = 0;
-    int rc;
-    while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
-        if (ci_store_fill_symbol(stmt, &out[n]))
-            n++;  /* skip corrupted rows */
-    }
-    sqlite3_finalize(stmt);
+    int n = 0, matched = 0;
+    bool ok = sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              ci_store_file_symbols_collect(stmt, out, cap, total != NULL, &n, &matched);
+    int finalized = sqlite3_finalize(stmt);
     pthread_mutex_unlock(&s->lock);
+    if (!ok || finalized != SQLITE_OK)
+        LOG_ERR("codeindex", "read symbols_in_file");
+    if (total) *total = matched;
     return n;
+}
+
+int ci_store_symbols_in_file(struct ci_store *s, const char *path,
+                             struct ci_symbol *out, int cap)
+{
+    return ci_store_symbols_in_file_total(s, path, out, cap, NULL);
 }
 
 /* The store lock owns the prepared statement, including binding and reset.

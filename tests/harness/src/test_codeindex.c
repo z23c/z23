@@ -4468,6 +4468,63 @@ static int ci_identity_tests(void)
     return failures;
 }
 
+struct ci_file_total_trace { sqlite3 *db; int rows; bool interrupt; };
+
+static int ci_file_total_trace_row(unsigned kind, void *context,
+                                   void *statement, void *detail)
+{
+    (void)detail;
+    struct ci_file_total_trace *trace = context;
+    const char *sql = sqlite3_sql(statement);
+    if (kind != SQLITE_TRACE_ROW || !sql ||
+        !strstr(sql, "WHERE def_path=?1 OR decl_path=?1")) return 0;
+    trace->rows++;
+    if (trace->interrupt && trace->rows == 4) sqlite3_interrupt(trace->db);
+    return 0;
+}
+
+static bool ci_file_total_seed(struct ci_store *store, const char *path, int n)
+{
+    for (int i = 0; i < n; i++) {
+        char name[40];
+        (void)snprintf(name, sizeof(name), "file_total_%03d", i);
+        if (!ci_defs_put(store, name, path, i + 1, 'T')) return false;
+    }
+    return true;
+}
+
+static int ci_file_total_tests(void)
+{
+    int failures = 0;
+    struct ci_store *store = ci_store_open_path(":memory:");
+    CI_CHECK("file totals fixture opens", store != NULL);
+    if (!store) return failures;
+    bool seeded = ci_file_total_seed(store, "many.c", 70) &&
+                  ci_file_total_seed(store, "exact.c", 64);
+    sqlite3 *db = ci_store_db(store);
+    bool damaged = sqlite3_exec(db, "UPDATE symbols SET row_sha3=zeroblob(32) "
+                                    "WHERE name='file_total_065' AND def_path='many.c'",
+                                NULL, NULL, NULL) == SQLITE_OK;
+    struct ci_symbol rows[3];
+    struct ci_file_total_trace trace = { .db = db };
+    bool traced = sqlite3_trace_v2(db, SQLITE_TRACE_ROW, ci_file_total_trace_row, &trace) == SQLITE_OK;
+    int n = ci_store_symbols_in_file(store, "many.c", rows, 3);
+    CI_CHECK("ordinary file symbols stop after cap", seeded && damaged && traced && n == 3 && trace.rows == 3);
+    trace.rows = 0;
+    int total = -1;
+    n = ci_store_symbols_in_file_total(store, "many.c", rows, 3, &total);
+    CI_CHECK("file total streams and excludes corrupt row", n == 3 && total == 69 && trace.rows == 70);
+    trace.rows = 0;
+    n = ci_store_symbols_in_file_total(store, "exact.c", rows, 3, &total);
+    CI_CHECK("file total handles 64-row boundary", n == 3 && total == 64 && trace.rows == 64);
+    trace.rows = 0; trace.interrupt = true; total = 0;
+    n = ci_store_symbols_in_file_total(store, "many.c", rows, 3, &total);
+    CI_CHECK("file total reports interrupted iteration", n == -1 && total == -1 && trace.rows == 4);
+    (void)sqlite3_trace_v2(db, 0, NULL, NULL);
+    ci_store_close(store);
+    return failures;
+}
+
 struct ci_reverse_fault { sqlite3 *db; bool after_row, traced; int rows, requests, runs, target_run; };
 static int ci_reverse_trace(unsigned kind, void *context, void *statement, void *detail)
 {
@@ -4731,6 +4788,7 @@ int test_codeindex(void)
     failures += ci_enclosing_tests();
     failures += ci_family_tests();
     failures += ci_identity_tests();
+    failures += ci_file_total_tests();
     failures += ci_reverse_tests();
     failures += ci_reverse_reuse_tests();
     failures += ci_reverse_empty_count();

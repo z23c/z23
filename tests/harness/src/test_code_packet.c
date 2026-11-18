@@ -1183,6 +1183,40 @@ static int test_code_packet_files_only_retry(void)
     return failures;
 }
 
+static int test_code_packet_exact_symbol_total(void)
+{
+    int failures = 0;
+    TEST("code_packet: per-file symbol totals include rows beyond 64") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        char text[8192];
+        size_t used = 0;
+        for (int i = 0; i < 64; i++) {
+            int n = snprintf(text + used, sizeof(text) - used,
+                             "static int pk_exact_%d(void) { return %d; }\n", i, i);
+            ASSERT(n > 0 && (size_t)n < sizeof(text) - used);
+            used += (size_t)n;
+        }
+        ASSERT(pkt_write("core/modules/net/src/pk_exact.c", text));
+        ASSERT(pkt_index_build());
+        const char *files[] = { "core/modules/net/src/pk_many.c",
+                                "core/modules/net/src/pk_exact.c" };
+        struct zcl_command_reply reply;
+        pkt_call("Count file symbols", NULL, 0, files, 2, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *rows = json_get(&reply.data, "files");
+        ASSERT(rows && rows->num_children == 2);
+        ASSERT_EQ(json_get_int(json_get(json_at(rows, 0), "symbols_total")), 70);
+        ASSERT_EQ(json_get_int(json_get(json_at(rows, 1), "symbols_total")), 64);
+        ASSERT(strstr(pkt_md(&reply), "(+46 more)") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "(+40 more)") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1208,6 +1242,7 @@ int test_code_packet(void)
     failures += test_code_packet_transfer_prefilled();
     failures += test_code_packet_transfer_late_failure();
     failures += test_code_packet_tail_failure();
+    failures += test_code_packet_exact_symbol_total();
     failures += test_code_packet_files_only_retry();
     failures += test_code_packet_batch_fallback();
     failures += test_code_packet_partial_routes();
