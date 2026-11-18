@@ -40,6 +40,10 @@ static const char *SCHEMA[] = {
     "CREATE INDEX IF NOT EXISTS idx_blocks_chainwork"
     " ON blocks(chain_work DESC)",
 
+    "CREATE INDEX IF NOT EXISTS idx_blocks_height_state"
+    " ON blocks(height,hash,status,file_num,data_pos,undo_pos,num_tx)"
+    " WHERE status>=3",
+
     /* Private local mesh authority. Public identities are stored only after
      * explicit operator confirmation; no key material or remote content root
      * belongs in this table. */

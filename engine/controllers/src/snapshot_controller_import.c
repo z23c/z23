@@ -309,7 +309,10 @@ static bool import_block_index_begin_bulk_scan(struct node_db *ndb,
                 "T1 drop idx_blocks_height") &&
              snapshot_sql_exec_checked(ndb,
                 "DROP INDEX IF EXISTS idx_blocks_chainwork",
-                "T1 drop idx_blocks_chainwork");
+                "T1 drop idx_blocks_chainwork") &&
+             snapshot_sql_exec_checked(ndb,
+                "DROP INDEX IF EXISTS idx_blocks_height_state",
+                "T1 drop idx_blocks_height_state");
     }
     if (ok)
         ok = import_block_index_reset(ndb);
@@ -466,6 +469,11 @@ static bool import_block_index_rebuild_block_indexes(struct node_db *ndb)
             "CREATE INDEX IF NOT EXISTS idx_blocks_chainwork"
             " ON blocks(chain_work DESC)",
             "T1 rebuild idx_blocks_chainwork") &&
+           snapshot_sql_exec_checked(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_blocks_height_state"
+            " ON blocks(height,hash,status,file_num,data_pos,undo_pos,num_tx)"
+            " WHERE status>=3",
+            "T1 rebuild idx_blocks_height_state") &&
            snapshot_sql_exec_checked(ndb, "PRAGMA synchronous=NORMAL",
             "T1 restore synchronous=NORMAL") &&
            snapshot_sql_exec_checked(ndb, "PRAGMA wal_autocheckpoint=1000",

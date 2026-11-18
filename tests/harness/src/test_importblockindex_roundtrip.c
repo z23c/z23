@@ -269,6 +269,14 @@ static int ibr_test_shutdown_abort(void)
         if (opened) {
             IBR_CHECK("abort scenario: blocks table left empty",
                       db_block_count(&ndb) == 0);
+            sqlite3_stmt *st = NULL;
+            bool index_present = sqlite3_prepare_v2(ndb.db,
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND "
+                "name='idx_blocks_height_state'", -1, &st, NULL) == SQLITE_OK &&
+                sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1;
+            sqlite3_finalize(st);
+            IBR_CHECK("abort scenario: reopen repairs the covering state index",
+                      index_present);
             node_db_close(&ndb);
         }
 
@@ -756,14 +764,14 @@ static int ibr_d_check_local_memory_failure(const char *base,
         if (sqlite3_prepare_v2(db,
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name"
                 " IN ('idx_blocks_height','idx_blocks_prev',"
-                "'idx_blocks_chainwork')", -1, &st, NULL) == SQLITE_OK &&
-            sqlite3_step(st) == SQLITE_ROW)
+                "'idx_blocks_chainwork','idx_blocks_height_state')", -1, &st,
+                NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
             indexes = sqlite3_column_int(st, 0);
         sqlite3_finalize(st);
     }
     sqlite3_close(db);
     IBR_CHECK("scenario D: the failed import put the block indexes back",
-              indexes == 3);
+              indexes == 4);
     return failures;
 }
 

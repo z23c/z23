@@ -518,7 +518,8 @@ bool db_block_scan_height_range_probe(struct node_db *ndb, int lo, int hi,
 {
     return scan_height_range(ndb,
         "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx"
-        " FROM blocks WHERE height BETWEEN ? AND ?"
+        " FROM blocks INDEXED BY idx_blocks_height_state"
+        " WHERE height BETWEEN ? AND ?"
         " AND status>=3 ORDER BY height, rowid",
         true, lo, hi, cb, ctx);
 }

@@ -1025,6 +1025,48 @@ static int t_v91_catalog_digest_history(void)
     test_cleanup_tmpdir(dir); return failures;
 }
 
+static int db_mig_deny_schema_marker(void *unused, int action,
+    const char *first, const char *second, const char *database,
+    const char *trigger)
+{
+    (void)unused; (void)second; (void)database; (void)trigger;
+    return (action == SQLITE_INSERT || action == SQLITE_UPDATE) && first &&
+        !strcmp(first, "node_state") ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int t_v92_covering_index_atomic_retry(void)
+{
+    int failures = 0; char dir[256], path[512];
+    db_mig_path(dir, sizeof(dir), "v92_covering_atomic"); mkdir_p(dir);
+    (void)snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0}; bool raw_open = false;
+    TEST("db_mig: v92 marker refusal rolls back index and ledger, then retries") {
+        ASSERT(node_db_open(&db, path)); node_db_close(&db);
+        sqlite3 *raw = NULL; ASSERT(sqlite3_open(path, &raw) == SQLITE_OK);
+        ASSERT(db_mig_exec_raw(raw, "DROP INDEX IF EXISTS idx_blocks_height_state"));
+        ASSERT(db_mig_exec_raw(raw, "DELETE FROM schema_migrations WHERE version='092'"));
+        ASSERT(db_mig_stamp_schema(raw, 91)); ASSERT(db_mig_stamp_floor(raw, 79));
+        ASSERT(sqlite3_close(raw) == SQLITE_OK);
+        ASSERT(db_mig_open_raw_handle(&db, path)); raw_open = true;
+        ASSERT(sqlite3_set_authorizer(db.db, db_mig_deny_schema_marker, NULL) == SQLITE_OK);
+        ASSERT_EQ(node_db_migrate(&db, NULL), -1);
+        ASSERT(sqlite3_set_authorizer(db.db, NULL, NULL) == SQLITE_OK);
+        ASSERT_EQ(node_db_schema_version(&db), 91);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='092'"), 0);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_height_state'"), 0);
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), 79);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='092'"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_height_state'"), 1);
+        ASSERT_EQ(node_db_migrate(&db, NULL), 0);
+        db_mig_close_raw_handle(&db); raw_open = false;
+        PASS();
+    } _test_next:;
+    if (raw_open) db_mig_close_raw_handle(&db);
+    test_cleanup_tmpdir(dir); return failures;
+}
+
 static int t_v20_wallet_notes_upgrade_adds_source(void)
 {
     int failures = 0;
@@ -2599,6 +2641,7 @@ int test_db_migration_idempotent(void)
     failures += t_v89_bound_cutover_additive();
     failures += t_v90_board_page_index();
     failures += t_v91_catalog_digest_history();
+    failures += t_v92_covering_index_atomic_retry();
     failures += t_v20_wallet_notes_upgrade_adds_source();
     failures += t_reopen_is_idempotent();
     failures += t_market_content_registry_schema();

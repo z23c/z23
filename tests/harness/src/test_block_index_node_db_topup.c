@@ -638,6 +638,42 @@ static bool ndt_probe_compare(const struct ndt_probe_seen *full,
     return same;
 }
 
+struct ndt_probe_sql { char value[512]; };
+
+static int ndt_trace_probe_sql(unsigned event, void *context, void *stmt,
+                               void *unused)
+{
+    (void)unused;
+    struct ndt_probe_sql *seen = context;
+    const char *sql = event == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
+    if (sql && strstr(sql,
+            "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx"))
+        snprintf(seen->value, sizeof(seen->value), "%s", sql);
+    return 0;
+}
+
+static bool ndt_probe_uses_covering_index(struct node_db *ndb, const char *sql)
+{
+    char explain[640];
+    if (!sql || !sql[0] ||
+        snprintf(explain, sizeof(explain), "EXPLAIN QUERY PLAN %s", sql) >=
+            (int)sizeof(explain))
+        return false;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ndb->db, explain, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool covering = false;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char *detail = sqlite3_column_text(stmt, 3);
+        if (detail && strstr((const char *)detail,
+                "USING COVERING INDEX idx_blocks_height_state"))
+            covering = true;
+    }
+    sqlite3_finalize(stmt);
+    return covering && rc == SQLITE_DONE;
+}
+
 static int ndt_probe_scan_cases(const char *dir)
 {
     int failures = 0;
@@ -654,10 +690,15 @@ static int ndt_probe_scan_cases(const char *dir)
     memset(&probe, 0, sizeof(probe));
     bool a = ready && db_block_scan_height_range(&ndb, 9, 15, ndt_probe_cb,
                                                  &full);
+    struct ndt_probe_sql seen = {{0}};
+    sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, ndt_trace_probe_sql, &seen);
     bool b = ready && db_block_scan_height_range_probe(&ndb, 9, 15,
                                                        ndt_probe_cb, &probe);
+    bool traced = sqlite3_trace_v2(ndb.db, 0, NULL, NULL) == SQLITE_OK;
     NDT_CHECK("probe: both scans ok, five rows each",
-              a && b && full.n == 5 && probe.n == 5);
+              a && b && traced && full.n == 5 && probe.n == 5);
+    NDT_CHECK("probe: narrow scan uses the covering state index",
+              ndt_probe_uses_covering_index(&ndb, seen.value));
     bool narrow = false;
     bool same = ndt_probe_compare(&full, &probe, &narrow);
     NDT_CHECK("probe: rows match the full scan on the fold's columns", same);
@@ -1095,7 +1136,8 @@ static int ndt_trace_scan(unsigned event, void *context, void *stmt, void *unuse
     struct ndt_scan_observation *o = context;
     const char *sql = event == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
     if (sql && strstr(sql, "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx") &&
-        strstr(sql, "FROM blocks WHERE height BETWEEN")) ++o->range_scans;
+        strstr(sql, "FROM blocks INDEXED BY idx_blocks_height_state "
+                    "WHERE height BETWEEN")) ++o->range_scans;
     return 0;
 }
 static bool ndt_observed_topup(struct main_state *ms, struct node_db *ndb,

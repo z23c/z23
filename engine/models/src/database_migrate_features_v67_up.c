@@ -595,17 +595,32 @@ static int db_migrate_step_86(struct node_db *ndb, int *current_ver,
 }
 
 /* Additive single-statement steps (indexes, new rebuildable tables) preserve
- * the compatibility floor: an older binary still opens the database. */
+ * the compatibility floor and commit DDL, ledger and markers atomically. */
 static int db_migrate_additive_sql(struct node_db *ndb, int *current_ver,
                                    int *floor_ver, int *applied, int version,
                                    const char *add_sql, const char *stamp_sql)
 {
     if (*current_ver >= version) return 0;
-    if (!node_db_exec(ndb, add_sql))
-        LOG_RETURN(-1, "db", "migrate v%d: additive statement failed", version);
-    if (!node_db_exec(ndb, stamp_sql))
-        LOG_RETURN(-1, "db", "migrate v%d: migration stamp failed", version);
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, version, *floor_ver);
+    bool txn_owned = node_db_begin(ndb);
+    if (!txn_owned && sqlite3_get_autocommit(ndb->db))
+        LOG_RETURN(-1, "db", "migrate v%d: additive transaction begin failed",
+                   version);
+    int32_t schema_version = (int32_t)version;
+    int32_t compat_floor = (int32_t)*floor_ver;
+    bool ok = node_db_exec(ndb, add_sql) &&
+              node_db_exec(ndb, stamp_sql) &&
+              node_db_state_set(ndb, "schema_version", &schema_version,
+                                sizeof(schema_version)) &&
+              node_db_state_set(ndb, "schema_compat_floor", &compat_floor,
+                                sizeof(compat_floor));
+    if (txn_owned) {
+        if (ok)
+            ok = node_db_commit(ndb);
+        if (!ok)
+            (void)node_db_rollback(ndb);
+    }
+    if (!ok)
+        LOG_RETURN(-1, "db", "migrate v%d: additive transaction failed", version);
     *current_ver = version;
     (*applied)++;
     return 0;
@@ -661,6 +676,12 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
             "tainted INTEGER NOT NULL DEFAULT 0 CHECK(tainted IN (0,1)),"
             "PRIMARY KEY(catalog,height)) WITHOUT ROWID",
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('091')") < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    if (db_migrate_additive_sql(ndb, current_ver, floor_ver, applied, 92,
+            "CREATE INDEX IF NOT EXISTS idx_blocks_height_state "
+            "ON blocks(height,hash,status,file_num,data_pos,undo_pos,num_tx) "
+            "WHERE status>=3",
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('092')") < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     *version_out = *current_ver;
     *floor_out = *floor_ver;
