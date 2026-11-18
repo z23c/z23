@@ -37,6 +37,13 @@ struct wcs_lists {
     struct wcs_infra infra[WCS_TUS]; int ninfra;
 };
 
+static struct wcs_lists g_wcs_lists;
+
+static void lists_reset(struct wcs_lists *L)
+{
+    L->nstill = L->nnew = L->nskipg = L->nskipo = L->nclean = L->ninfra = 0;
+}
+
 static int lists_push(char arr[][WCS_PATH], int *n, const char *v)
 {
     if (*n >= WCS_TUS) {
@@ -514,6 +521,29 @@ static int verdict(const struct wcs_lists *L, char brows[][WCS_PATH], int bn,
     return 0;
 }
 
+/* The second verdict must ignore old rows without clearing unused storage. */
+int wcs_lists_selftest(void)
+{
+    struct wcs_lists *L = &g_wcs_lists;
+    char brows[1][WCS_PATH] = {"old.c"};
+    int stale[1];
+    L->nstill = L->nnew = L->nskipg = L->nskipo = L->nclean = L->ninfra = 1;
+    memcpy(L->still[0], "old.c", sizeof "old.c");
+    memcpy(L->newf[0], "old.c", sizeof "old.c");
+    memcpy(L->infra[0].src, "old.c", sizeof "old.c");
+    L->newf[WCS_TUS - 1][0] = 'X';
+    lists_reset(L);
+    int ok = L->nstill == 0 && L->nnew == 0 && L->nskipg == 0 &&
+             L->nskipo == 0 && L->nclean == 0 && L->ninfra == 0 &&
+             L->newf[WCS_TUS - 1][0] == 'X';
+    if (ok) ok = find_stale(L, brows, 1, stale) == 1 && stale[0] == 0;
+    if (ok) ok = lists_push(L->newf, &L->nnew, "new.c") == 0 &&
+                 L->nnew == 1 && strcmp(L->newf[0], "new.c") == 0;
+    lists_reset(L);
+    if (!ok) fprintf(stderr, "%s: verdict reset self-test failed\n", k_wcs_gate);
+    return ok ? 0 : 1;
+}
+
 int wcs_sweep(void)
 {
     char srclist[WCS_PATH], flagsnul[WCS_PATH], misslist[WCS_PATH];
@@ -543,15 +573,15 @@ int wcs_sweep(void)
                 k_wcs_gate, k_wcs_baseline);
         return 2;
     }
-    static struct wcs_lists L;
-    memset(&L, 0, sizeof L);
-    r = classify_all(ossl_absent, shapes, &L);
+    struct wcs_lists *L = &g_wcs_lists;
+    lists_reset(L);
+    r = classify_all(ossl_absent, shapes, L);
     if (r) return r;
     static char brows[WCS_TUS][WCS_PATH];
     static int stale[WCS_TUS];
     int bn = 0;
     if (baseline_rows(brows, &bn) != 0) return 2;
-    int ns = find_stale(&L, brows, bn, stale);
-    return verdict(&L, brows, bn, stale, ns);
+    int ns = find_stale(L, brows, bn, stale);
+    return verdict(L, brows, bn, stale, ns);
 }
 

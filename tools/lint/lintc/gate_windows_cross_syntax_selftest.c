@@ -747,7 +747,8 @@ static int wcs_log_shape_test(const char *base)
 
 static int wcs_log_setup_test(const char *base)
 {
-    return wcs_log_shape_test(base) || wcs_mkdir_selftest(base);
+    return wcs_lists_selftest() || wcs_log_shape_test(base) ||
+           wcs_mkdir_selftest(base);
 }
 
 int wcs_selftest_phase(void)
