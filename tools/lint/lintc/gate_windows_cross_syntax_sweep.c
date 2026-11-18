@@ -31,27 +31,28 @@ struct wcs_infra { char src[WCS_PATH]; char rc[32]; char kind[40]; };
 struct wcs_lists {
     char still[WCS_TUS][WCS_PATH]; int nstill;
     char newf[WCS_TUS][WCS_PATH]; int nnew;
-    char skipg[WCS_TUS][WCS_PATH]; int nskipg;
-    char skipo[WCS_TUS][WCS_PATH]; int nskipo;
-    char cleanl[WCS_TUS][WCS_PATH]; int nclean;
+    int nskipg;
+    int nskipo;
+    int nclean;
     struct wcs_infra infra[WCS_TUS]; int ninfra;
 };
 
 static int lists_push(char arr[][WCS_PATH], int *n, const char *v)
 {
     if (*n >= WCS_TUS) {
-        fprintf(stderr, "%s: translation-unit table exceeds %d\n", k_wcs_gate,
-                WCS_TUS);
+        fprintf(stderr, "%s: translation-unit table exceeds %d\n", k_wcs_gate, WCS_TUS);
         return 2;
     }
-    if (wcs_copy(arr[*n], WCS_PATH, v)) {
-        fprintf(stderr, "%s: path exceeds %d bytes: %s\n", k_wcs_gate,
-                WCS_PATH, v);
+    size_t len = strlen(v);
+    if (len >= WCS_PATH) {
+        fprintf(stderr, "%s: path exceeds %d bytes: %s\n", k_wcs_gate, WCS_PATH, v);
         return 2;
     }
+    if (arr) memcpy(arr[*n], v, len + 1);
     (*n)++;
     return 0;
 }
+
 
 /* 0 with out set; 1 when the file is absent or empty; -1 when the first
  * token does not fit out. */
@@ -114,16 +115,16 @@ static int classify_by_kind(const char *src, const char *rcs, const char *kind,
                             struct wcs_lists *L)
 {
     if (strcmp(kind, "CLEAN") == 0)
-        return lists_push(L->cleanl, &L->nclean, src);
+        return lists_push(NULL, &L->nclean, src);
     if (strcmp(kind, "SKIP_GENERATED") == 0)
-        return lists_push(L->skipg, &L->nskipg, src);
+        return lists_push(NULL, &L->nskipg, src);
     if (strcmp(kind, "COMPILER_FAILURE") == 0 ||
         strcmp(kind, "MISSING_RESULT") == 0 ||
         strcmp(kind, "INCONSISTENT_SUCCESS") == 0)
         return push_infra(L, src, rcs, kind);
     if (ossl_absent && (strcmp(kind, "SKIP_OPENSSL") == 0 ||
                         strcmp(kind, "SKIP_HEADERS") == 0))
-        return lists_push(L->skipo, &L->nskipo, src);
+        return lists_push(NULL, &L->nskipo, src);
     int known = in_baseline(src);
     return lists_push(known ? L->still : L->newf,
                       known ? &L->nstill : &L->nnew, src);
@@ -141,7 +142,7 @@ static int classify_tu(const char *src, int ossl_absent, unsigned char log_shape
         return 2;
     }
     if (strcmp(rcs, "0") == 0 && log_shape == 1)
-        return lists_push(L->cleanl, &L->nclean, src);
+        return lists_push(NULL, &L->nclean, src);
     if (wcs_compile_kind(log, rcs, kind, sizeof kind) != 0) return 2;
     return classify_by_kind(src, rcs, kind, ossl_absent, L);
 }
