@@ -614,6 +614,63 @@ static int test_lab_old_state_receipt(void)
 }
 
 
+static bool lt_receipt_block(bool is_test, bool late)
+{
+    struct zcl_command_reply r;
+    char path[LAB_PATH + 64], root[LAB_ROOT_HEX + 1];
+    struct lab_dirs dirs;
+    if (is_test && !lab_confinement_available())
+        return true;
+    if (!lt_replay_request(is_test, &r))
+        return false;
+    if (r.status != ZCL_COMMAND_STATUS_PASSED || !json_get(&r.data, "root")) {
+        zcl_command_reply_free(&r);
+        return false;
+    }
+    snprintf(root, sizeof(root), "%s", json_get_str(json_get(&r.data, "root")));
+    zcl_command_reply_free(&r);
+    if (lab_dirs_resolve(&dirs) != LAB_OK ||
+        snprintf(path, sizeof(path), "%s/%s.json", dirs.receipts, root) >= (int)sizeof(path))
+        return false;
+    if (unlink(path) != 0)
+        return false;
+    if (late) {
+        size_t n = strlen(path);
+        if (snprintf(path + n, sizeof(path) - n, ".%ld.tmp", (long)getpid()) >=
+            (int)(sizeof(path) - n))
+            return false;
+    }
+    if (mkdir(path, 0700) != 0)
+        return false;
+    bool called = lt_replay_request(is_test, &r);
+    bool refused = called && lt_failed_with(&r, "LAB_RECEIPT_STORE");
+    if (called) zcl_command_reply_free(&r);
+    bool removed = rmdir(path) == 0;
+    return refused && removed;
+}
+
+static int test_lab_receipt_store_run(void)
+{
+    int failures = 0;
+    TEST("lab run refuses an unavailable receipt destination") {
+        ASSERT(lt_receipt_block(false, false));
+        ASSERT(lt_receipt_block(false, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_lab_receipt_store_test(void)
+{
+    int failures = 0;
+    TEST("lab test refuses a failed atomic receipt write") {
+        ASSERT(lt_receipt_block(true, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_lab_cache(void)
 {
     int failures = 0;
@@ -1484,6 +1541,8 @@ int test_lab(void)
     failures += test_lab_resource_caps();
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
+    failures += test_lab_receipt_store_run();
+    failures += test_lab_receipt_store_test();
     failures += test_lab_blocked_state();
     failures += test_lab_old_state_receipt();
     failures += test_lab_replay_archive();

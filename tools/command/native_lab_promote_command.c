@@ -452,7 +452,7 @@ static void promote_snapshot(const struct zcl_command_request *request,
                        "promotion requires sanitize=true", "");
         return;
     }
-    if (!lab_ctx_open(&ctx, p->file, reply))
+    if (!lab_ctx_read(&ctx, p->file, reply))
         return;
     if (!promote_cases(&ctx, reply, p)) {
         lab_ctx_close(&ctx);

@@ -254,6 +254,57 @@ static int pdc_case_cases(struct pdc_env *e)
     return failures;
 }
 
+static int pdc_case_source_receipt_failure(struct pdc_env *e)
+{
+    int failures = 0;
+    char old_lab[PATH_MAX] = "", base[PATH_MAX], path[PATH_MAX], root[PLUGIN_HEX_SHA3_512 + 1];
+    char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
+    const char *old = getenv("Z23_LAB_DIR");
+    bool had_old = old != NULL;
+    size_t count = 0;
+    if (old) snprintf(old_lab, sizeof(old_lab), "%s", old);
+    TEST_CASE("plugin dev source leaves current unchanged if receipt storage fails") {
+        const char *input = "{\"file\":\"tests/fixtures/lab/upper.c\","
+                            "\"cases\":[{\"name\":\"one\",\"stdin\":\"x\\n\","
+                            "\"expect_stdout\":\"X\\n\"}],\"fresh\":true}";
+        struct json_value in;
+        struct zcl_command_reply r;
+        ASSERT(snprintf(base, sizeof(base), "%s/source-lab", e->base) > 0);
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
+        json_init(&in);
+        ASSERT(json_read(&in, input, strlen(input)));
+        struct zcl_command_request request = { .input = &in };
+        zcl_command_reply_init(&r, "zcl.lab_test.v1");
+        zcl_native_handle_lab_test(&request, &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        snprintf(root, sizeof(root), "%s", json_get_str(json_get(&r.data, "root")));
+        zcl_command_reply_free(&r);
+        json_free(&in);
+        ASSERT(snprintf(path, sizeof(path), "%s/receipts/%s.json", base, root) > 0);
+        ASSERT_EQ(unlink(path), 0);
+        size_t n = strlen(path);
+        ASSERT(snprintf(path + n, sizeof(path) - n, ".%ld.tmp", (long)getpid()) > 0);
+        ASSERT_EQ(mkdir(path, 0700), 0);
+        ASSERT(pdc_state(e, &count, before));
+        ASSERT_EQ(count, 3u);
+        ASSERT(snprintf(e->input, sizeof(e->input),
+                        "{\"dir\":\"%s\",\"file\":\"tests/fixtures/lab/upper.c\","
+                        "\"interface\":2,\"cases\":[{\"name\":\"one\","
+                        "\"stdin\":\"x\\n\",\"expect_stdout\":\"X\\n\"}]}", e->dir) > 0);
+        ASSERT(pdc_dev(e, &r));
+        ASSERT_STR_EQ(r.error.code, "LAB_RECEIPT_STORE");
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, after));
+        ASSERT_EQ(count, 3u);
+        ASSERT_STR_EQ(after, before);
+    } TEST_END
+    if (had_old) (void)setenv("Z23_LAB_DIR", old_lab, 1);
+    else (void)unsetenv("Z23_LAB_DIR");
+    return failures;
+}
+
+
 static int pdc_case_cases_pass(struct pdc_env *e)
 {
     int failures = 0;
@@ -420,6 +471,7 @@ int plugin_dev_cases(void)
 #if defined(__linux__)
         failures += pdc_case_cases(&e);
         failures += pdc_case_cases_pass(&e);
+        failures += pdc_case_source_receipt_failure(&e);
 #else
         failures += pdc_case_cases_unavailable(&e);
 #endif

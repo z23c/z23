@@ -674,8 +674,8 @@ static void lab_test_execute(struct lab_ctx *ctx, const struct lab_cases *cs,
         lab_unconfined(reply);
     else if (result == LAB_CHECK_ALLOC)
         lab_fail(reply, "LAB_ALLOC", "run", "the lab could not allocate case results");
-    else if (!lab_build_test(&reply->data, ctx, comp, r->sanitize, &t, &rows) ||
-             !lab_publish(ctx, reply))
+    else if ((!lab_build_test(&reply->data, ctx, comp, r->sanitize, &t, &rows) ||
+              !lab_publish(ctx, reply)) && reply->status == ZCL_COMMAND_STATUS_PASSED)
         lab_fail(reply, "LAB_ALLOC", "serialize", "the receipt could not be built");
     lab_compile_cleanup(&ctx->dirs, ctx->root);
     json_free(&rows);
@@ -711,7 +711,7 @@ void lab_test_context(const struct zcl_command_request *request,
         if (!lab_root_test(ctx, &cs, r.sanitize, r.timeout_ms, r.mem_mb))
             lab_fail(reply, "LAB_ALLOC", "root", "the lab could not allocate");
         else if (r.fresh || !lab_cache_serve(ctx, reply)) {
-            if (!own_ctx || lab_ctx_prepare(ctx, reply)) {
+            if (lab_ctx_prepare(ctx, reply)) {
                 if (!lab_confinement_available())
                     lab_unconfined(reply);
                 else

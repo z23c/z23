@@ -151,12 +151,30 @@ bool lab_ctx_read(struct lab_ctx *ctx, const char *file,
     return err == LAB_OK;
 }
 
+static void lab_receipt_refuse(struct lab_ctx *ctx, struct zcl_command_reply *reply)
+{
+    lab_fail(reply, "LAB_RECEIPT_STORE", "store",
+             "the receipt could not be stored; check the receipts directory and retry");
+    snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", ctx->dirs.receipts);
+    snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+             "check the receipts directory and remove any blocking receipt path, then retry");
+}
+
+static bool lab_ctx_receipt_ready(struct lab_ctx *ctx, struct zcl_command_reply *reply)
+{
+    if (ctx->root[0] && !lab_receipt_target_ready(&ctx->dirs, ctx->root)) {
+        lab_receipt_refuse(ctx, reply);
+        return false;
+    }
+    return true;
+}
+
 bool lab_ctx_prepare(struct lab_ctx *ctx, struct zcl_command_reply *reply)
 {
     enum lab_err err = lab_dirs_open(&ctx->dirs);
     if (err != LAB_OK)
         lab_err_reply(reply, err);
-    return err == LAB_OK;
+    return err == LAB_OK && lab_ctx_receipt_ready(ctx, reply);
 }
 
 bool lab_ctx_open(struct lab_ctx *ctx, const char *file, struct zcl_command_reply *reply)
@@ -220,7 +238,13 @@ bool lab_publish(struct lab_ctx *ctx, struct zcl_command_reply *reply)
     struct json_value cache;
     json_init(&cache);
     json_set_object(&cache);
-    (void)lab_receipt_store(&ctx->dirs, ctx->root, &reply->data);
+    if (!lab_receipt_store(&ctx->dirs, ctx->root, &reply->data)) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        lab_receipt_refuse(ctx, reply);
+        json_free(&cache);
+        return false;
+    }
     bool ok = json_push_kv_bool(&cache, "hit", false) &&
               json_push_kv(&reply->data, "cache", &cache);
     json_free(&cache);

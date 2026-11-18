@@ -155,6 +155,8 @@ void lab_hasher_finish(struct lab_hasher *h, char hex[LAB_ROOT_HEX + 1]);
 
 /* Receipt store: <state>/receipts/<root>.json. */
 bool lab_root_valid(const char *root);
+/* Check known receipt target obstructions without writing. */
+bool lab_receipt_target_ready(const struct lab_dirs *dirs, const char *root);
 bool lab_receipt_store(const struct lab_dirs *dirs, const char *root,
                        const struct json_value *receipt);
 bool lab_receipt_load(const struct lab_dirs *dirs, const char *root,

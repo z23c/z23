@@ -5,6 +5,8 @@
  * A root is the SHA3-512 of length-prefixed fields: for each field the tag,
  * a zero byte, the 64-bit little-endian length, then the bytes. The same
  * source and the same canonical inputs always give the same root. */
+#define _GNU_SOURCE
+
 #include "command/lab.h"
 
 #include "base/hex.h"
@@ -82,6 +84,24 @@ static bool lab_receipt_path(const struct lab_dirs *d, const char *root,
     int n = snprintf(out, cap, "%s/%s%s", d->receipts, root, suffix);
     return lab_root_valid(root) && n > 0 && (size_t)n < cap;
 }
+
+/* Check deterministic target obstructions without creating or changing it.
+ * The later atomic store remains authoritative for permissions and races. */
+bool lab_receipt_target_ready(const struct lab_dirs *d, const char *root)
+{
+    char path[LAB_PATH];
+    if (!lab_receipt_path(d, root, ".json", path, sizeof(path)))
+        return false;
+#if defined(__linux__)
+    struct stat st;
+    if (faccessat(AT_FDCWD, d->receipts, W_OK | X_OK, AT_EACCESS) != 0)
+        return false;
+    if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode))
+        return false;
+#endif
+    return true;
+}
+
 
 bool lab_receipt_store(const struct lab_dirs *d, const char *root,
                        const struct json_value *receipt)

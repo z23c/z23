@@ -445,6 +445,7 @@ ZCL_CAPABILITY_SYMBOL("__vfprintf_chk", CAP_FS_WRITE,
 
 /* ---- CAP_FS_READ ---- */
 ZCL_CAPABILITY_SYMBOL("access", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("faccessat", CAP_FS_READ, "Checks filesystem access using a directory descriptor and flags.")
 ZCL_CAPABILITY_SYMBOL("fclose", CAP_FS_READ,
     "Commits buffered bytes only if a CAP_FS_WRITE call put them there, "
     "so the handle itself is all the reach this symbol adds.")
