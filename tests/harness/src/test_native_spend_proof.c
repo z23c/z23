@@ -19,6 +19,7 @@
 #include "sapling/groth16_prover.h"
 #include "sapling/sapling.h"
 #include "sapling/sapling_circuit.h"
+#include "sapling/sapling_prover.h"
 #include "sapling/pedersen_hash.h"
 #include "sapling/fr.h"
 
@@ -181,6 +182,72 @@ static bool nsp_output_fixture(struct sapling_output_witness *wit,
                            pub->cm);
 }
 
+/* One fixed-blinding proof from either entry point, against its pin, and
+ * accepted by the consensus verifier. */
+struct nsp_pin_case {
+    const uint8_t *spend_pk; size_t spend_len;
+    const uint8_t *out_pk; size_t out_len;
+    const struct groth16_pk *spend_parsed, *out_parsed;
+    const struct sapling_spend_witness *wit;
+    const struct sapling_spend_inputs *pub;
+    const struct sapling_output_witness *ow;
+    const struct sapling_output_inputs *op;
+    const uint8_t *sig, *sighash;
+};
+
+static bool nsp_pin_one(const struct nsp_pin_case *c, bool spend, bool parsed)
+{
+    uint8_t proof[192];
+    char hex[2 * 192 + 1];
+    uint32_t ctr = 0;
+    bool ok;
+    groth16_set_test_rng_hook(nsp_det_fill, &ctr);
+    if (spend)
+        ok = parsed ? sapling_create_spend_proof_parsed(c->spend_parsed, c->wit,
+                                                        c->pub, proof)
+                    : sapling_create_spend_proof(c->spend_pk, c->spend_len,
+                                                 c->wit, c->pub, proof);
+    else
+        ok = parsed ? sapling_create_output_proof_parsed(c->out_parsed, c->ow,
+                                                         c->op, proof)
+                    : sapling_create_output_proof(c->out_pk, c->out_len, c->ow,
+                                                  c->op, proof);
+    groth16_set_test_rng_hook(NULL, NULL);
+    nsp_hex(proof, sizeof proof, hex);
+    if (!ok || strcmp(hex, spend ? NSP_GOLDEN_SPEND_PROOF
+                                 : NSP_GOLDEN_OUTPUT_PROOF) != 0)
+        return false;
+    struct sapling_verification_ctx vctx;
+    sapling_verification_ctx_init(&vctx);
+    return spend ? sapling_check_spend(&vctx, c->pub->cv, c->pub->anchor,
+                                       c->pub->nullifier, c->pub->rk, proof,
+                                       c->sig, c->sighash)
+                 : sapling_check_output(&vctx, c->op->cv, c->op->cm,
+                                        c->op->epk, proof);
+}
+
+/* Both entry points, both circuits, on 1, 4 and 8 prover threads: every proof
+ * equals its pre-change pin and verifies. */
+static int nsp_pin_across_threads(const struct nsp_pin_case *c)
+{
+    int failures = 0;
+    static const unsigned threads[] = {1u, 4u, 8u};
+    for (size_t t = 0; t < sizeof threads / sizeof threads[0]; t++) {
+        groth16_prover_set_threads(threads[t]);
+        for (int k = 0; k < 4; k++) {
+            bool spend = k < 2, parsed = (k & 1) != 0;
+            char name[160];
+            snprintf(name, sizeof name,
+                     "threads=%u %s %s proof equals the pin and verifies",
+                     threads[t], parsed ? "parsed-key" : "per-proof-parse",
+                     spend ? "spend" : "output");
+            NSP_CHECK(name, nsp_pin_one(c, spend, parsed));
+        }
+    }
+    groth16_prover_set_threads(0);
+    return failures;
+}
+
 /* Old entry points only: spend and output proof bytes against the pins. */
 static int nsp_pin_old_entry_points(const uint8_t *spend_pk, size_t spend_len,
                                     const struct sapling_spend_witness *wit,
@@ -276,6 +343,56 @@ static int nsp_shared_key_checks(const uint8_t *pk_data, size_t pk_len,
     return failures;
 }
 
+#ifdef ZCL_TESTING
+/* Builds the pin case (both keys raw and parsed, spend and output fixtures)
+ * and runs the 1/4/8-thread pin matrix over it. */
+static int nsp_pin_thread_matrix(const uint8_t *pk_data, size_t pk_len,
+                                 const struct sapling_spend_witness *wit,
+                                 const struct sapling_spend_inputs *pub,
+                                 const uint8_t sig[64],
+                                 const uint8_t sighash[32])
+{
+    int failures = 0;
+    struct sapling_output_witness ow;
+    struct sapling_output_inputs op;
+    struct nsp_pin_case pc = {
+        .spend_pk = pk_data, .spend_len = pk_len,
+        .wit = wit, .pub = pub, .ow = &ow, .op = &op,
+        .sig = sig, .sighash = sighash,
+    };
+    pc.out_pk = sapling_get_output_pk(&pc.out_len);
+    pc.spend_parsed = sapling_get_spend_pk_parsed();
+    pc.out_parsed = sapling_get_output_pk_parsed();
+    bool ready = nsp_output_fixture(&ow, &op) && pc.out_pk &&
+                 pc.spend_parsed && pc.out_parsed;
+    NSP_CHECK("thread-count pin fixture ready", ready);
+    if (ready)
+        failures += nsp_pin_across_threads(&pc);
+    return failures;
+}
+#endif
+
+/* sapling_init_params SHA-512-pins every params file before installing the
+ * verifying keys, so "official" is checked, not assumed. Its boot self-test
+ * proves against the shared parsed keys; with no proving session open they
+ * must not stay resident after it. */
+static int nsp_load_params(const char *params_dir)
+{
+    int failures = 0;
+#ifdef ZCL_TESTING
+    int self_tests_before = zclassic_test_prover_self_test_runs();
+#endif
+    NSP_CHECK("sapling_init_params loaded the SHA-512-pinned params",
+              sapling_init_params(params_dir));
+#ifdef ZCL_TESTING
+    if (zclassic_test_prover_self_test_runs() > self_tests_before)
+        NSP_CHECK("after the boot self-test no parsed proving key stays "
+                  "resident",
+                  !sapling_test_pk_parsed_resident());
+#endif
+    return failures;
+}
+
 int test_native_spend_proof(void)
 {
     printf("\n=== native_spend_proof: C23 prover vs the OFFICIAL Sapling "
@@ -299,10 +416,7 @@ int test_native_spend_proof(void)
     }
     fclose(probe);
 
-    /* sapling_init_params SHA-512-pins every params file before installing the
-     * verifying keys, so "official" is checked, not assumed. */
-    NSP_CHECK("sapling_init_params loaded the SHA-512-pinned params",
-              sapling_init_params(params_dir));
+    failures += nsp_load_params(params_dir);
 
     size_t pk_len = 0;
     const uint8_t *pk_data = sapling_get_spend_pk(&pk_len);
@@ -401,6 +515,9 @@ int test_native_spend_proof(void)
 
 #ifdef ZCL_TESTING
     failures += nsp_pin_old_entry_points(pk_data, pk_len, &wit, &pub);
+    if (verified)
+        failures += nsp_pin_thread_matrix(pk_data, pk_len, &wit, &pub, sig,
+                                          sighash);
 #endif
     if (verified)
         failures += nsp_shared_key_checks(pk_data, pk_len, &wit, &pub, sig,

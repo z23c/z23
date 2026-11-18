@@ -1286,3 +1286,7 @@ later lane flips it HARD.
 - 2026-11-18T04:11:26Z — REASON: prover memory: exact-size constraint storage, parse-once proving keys
   old ROOT: 31a58ad5528b23dffc40b8e5a68291eb6a520e5f93a020b85d7540a3d4baec53
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-18T05:02:12Z — REASON: prover memory review fix: release the parse-once proving keys after the boot self-test so a full-set node does not keep ~77 MB of parsed keys resident until its first send; proof bytes unchanged
+  old ROOT: ad098987dae310e5942d51bce79abfef4a44627515a96143d6d4ec1a11b3a424
+  by: owner unseal ritual (make core-unseal)

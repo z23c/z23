@@ -118,6 +118,8 @@ bool sapling_test_pair_arm_buffers(const uint8_t *spend, size_t spend_len,
                                    const uint8_t *output, size_t output_len);
 bool sapling_test_pair_prefix_ok(const uint8_t *spend, size_t spend_len,
                                  const uint8_t *output, size_t output_len);
+/* Test-only: true while either parsed proving key is resident. */
+bool sapling_test_pk_parsed_resident(void);
 #endif
 
 #endif

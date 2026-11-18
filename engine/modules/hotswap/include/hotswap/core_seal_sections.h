@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "667477230b1559b4e87b31b75030b76227a60c75b83cf204722c7d683cdba49e"
+    "21a110bc5a08dc7ede388aa6f17262d7de09bad06906b60af36b27c6aee03dc5"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "a5e6d5b82da78830e3a3cadcfbc3076b4140522fbe601f2bb41be773463603e4") \
+        "5606d29844405d8d646210211cdcef2149659b6999d693cd2c259f9f7c7ed404") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "f2ed2cd6b1e118a99e10fdb475c82ca210600e833e18e74fe2fb4d40f400dfc8") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \
@@ -73,7 +73,7 @@
     ZCL_HOTSWAP_SECTION_ROW("core/math/src", \
         "489136c5ceec46980deb06e9a9437c79b691a13606b3fcab9d6130508dad43a8") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules", \
-        "af651dded663e147811d18c75078c87f3d0fcba875359f26a8dcdd6eba6ded0b") \
+        "51a45a9109c39e5933dbfb07bd78f899ba55e613ab5d3701c7b7bff173a93b48") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom", \
         "20fc50fc216a21b99b3704761fd36818bad04788f7fc18fc2f774277ab273515") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom/include", \
@@ -165,13 +165,13 @@
     ZCL_HOTSWAP_SECTION_ROW("core/modules/primitives/src", \
         "c5bfdfa57c2a60edc78123a4984f5bcaa3da566804cb843279b6174697ceb158") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/sapling", \
-        "3b57f38891c80a71daa9226c01278ea71a5710a0ea0235ebd0d04b600f6cd25f") \
+        "af6532a9ec38d9b6ca362f81c70e2920459ad343a2f7674538090c074408c7bf") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/sapling/include", \
-        "94bfcf0e6dc12b63edeb9405e2cec816394ebaa2c0d3b5913809c1b28c842bcd") \
+        "e54c20dcb95d7c9d316458883eb506553e92f53049600b443897c36240f445b3") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/sapling/include/sapling", \
-        "89c348c67df723980bc3caa19e6d9daa23b1131a37cc64dc06e817150c4063db") \
+        "a82fe1247a5433a11e34807239a3793728fb6a0976c10892fd1a290eee4402ba") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/sapling/src", \
-        "d9268ec81d0a87adc8d2de066189afa87e38016e020204fe8737052bebaf59cc") \
+        "14fca8a1904c859adc5b410221209c7762ea9e4b0b573569c87fdcfe9baff1d2") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/script", \
         "2d272a64614b7b3621e4bd82904aedc5a6dff187f80c0ca2ce3afb9d3d94e985") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/script/include", \

@@ -366,6 +366,13 @@ static void params_arm_proving_locked(const char *params_dir,
                  "consensus verification remains active",
                  zclassic_sapling_prover_backend(),
                  zclassic_sapling_prover_status());
+
+    /* The self-test's two proofs parsed the shared keys (about 77 MB). This
+     * is the boot loader of a full set: no proving session is open (none can
+     * be while no proving key was resident), so nothing else holds them.
+     * Without this they would stay resident from boot until the first send's
+     * last session ended. A send parses them again on its first proof. */
+    pk_parsed_release();
 }
 
 enum {
@@ -1365,6 +1372,14 @@ bool sapling_test_pair_prefix_ok(const uint8_t *spend, size_t spend_len,
                                  const uint8_t *output, size_t output_len)
 {
     return params_pair_prefix_matches(spend, spend_len, output, output_len);
+}
+
+bool sapling_test_pk_parsed_resident(void)
+{
+    pthread_mutex_lock(&pk_parsed_mu);
+    bool resident = spend_pk_parsed_ok || output_pk_parsed_ok;
+    pthread_mutex_unlock(&pk_parsed_mu);
+    return resident;
 }
 #endif
 
