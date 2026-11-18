@@ -1243,6 +1243,11 @@ static size_t pk_reply_cap(const struct zcl_command_request *request)
     return cap > 4096 ? cap - 2048 : cap / 2;
 }
 
+static int pk_next_lines(int lines)
+{
+    return lines * 2 / 3 < PK_LINES_MIN ? PK_LINES_MIN : lines * 2 / 3;
+}
+
 /* Assemble, shrinking max_lines by a third (floor 20) until it fits `cap`. */
 static enum pk_render_result pk_fit(struct pk_run *run, size_t cap,
                                     struct json_value *out)
@@ -1254,8 +1259,10 @@ static enum pk_render_result pk_fit(struct pk_run *run, size_t cap,
     pk_prepare_symbols(run);
     run->neighborhoods = true;
     run->declarations = true;
+    bool reuse_files = false;
     for (;;) {
-        pk_assemble(run, lines);
+        if (reuse_files) run->ctx.max_lines = lines;
+        else pk_assemble(run, lines);
         enum pk_render_result result = pk_render(run, out);
         if (result == PK_RENDER_ALLOC) return result;
         bool ok = result == PK_RENDER_OK;
@@ -1263,6 +1270,13 @@ static enum pk_render_result pk_fit(struct pk_run *run, size_t cap,
             return PK_RENDER_OK;
         if (ok)
             json_free(out);
+        if (ok && run->in.nsym == 0) {
+            if (lines <= PK_LINES_MIN) return PK_RENDER_FIT;
+            lines = pk_next_lines(lines);
+            reuse_files = true;
+            continue;
+        }
+        reuse_files = false;
         if (run->neighborhoods) {
             run->neighborhoods = false;
             continue;
@@ -1273,7 +1287,7 @@ static enum pk_render_result pk_fit(struct pk_run *run, size_t cap,
         }
         if (lines <= PK_LINES_MIN)
             return PK_RENDER_FIT;
-        lines = lines * 2 / 3 < PK_LINES_MIN ? PK_LINES_MIN : lines * 2 / 3;
+        lines = pk_next_lines(lines);
     }
 }
 

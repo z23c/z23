@@ -1129,6 +1129,60 @@ static int test_code_packet_partial_routes(void)
     return failures;
 }
 
+static int test_code_packet_files_only_retry(void)
+{
+    int failures = 0;
+    TEST("code_packet: files-only fit reuses assembled evidence") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_index_build());
+        struct json_value input;
+        json_init(&input);
+        const char *text = "{\"goal\":\"Files only\",\"files\":[\"core/modules/net/src/pk_small.c\",\"docs/" "notes.md\"],\"max_lines\":120}";
+        ASSERT(json_read(&input, text, strlen(text)));
+        size_t before = json_test_live_blocks();
+        struct zcl_command_reply full, tight, refused;
+        pkt_run(PKT_FIX, &input, &full);
+        ASSERT(full.status == ZCL_COMMAND_STATUS_PASSED);
+        const char *summary = json_get_str(json_get(&full.data, "summary"));
+        ASSERT(summary != NULL);
+        size_t out_len = json_write(&full.data, NULL, 0) - strlen(summary) - (sizeof(",\"summary\":\"\"") - 1);
+        ASSERT(out_len > 4096);
+        zcl_alloc_fault_fail_nth("agent_impact_batch", 2);
+        pkt_run_budget(PKT_FIX, &input, out_len + 2047, &tight);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(armed);
+        ASSERT(tight.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&tight.data, "max_lines_effective")), 80);
+        for (size_t i = 0; i < full.data.num_children; i++)
+            if (strcmp(full.data.keys[i], "max_lines_effective") == 0)
+                json_set_int(&full.data.children[i], 80);
+        size_t len = json_write(&full.data, NULL, 0);
+        char *a = malloc(len + 1), *b = malloc(len + 1);
+        ASSERT(a && b);
+        (void)json_write(&full.data, a, len + 1);
+        ASSERT_EQ(json_write(&tight.data, b, len + 1), len);
+        ASSERT_STR_EQ(a, b);
+        free(a); free(b);
+        zcl_alloc_fault_fail_nth("agent_impact_batch", 2);
+        pkt_run_budget(PKT_FIX, &input, out_len + 2046, &refused);
+        armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(armed);
+        ASSERT_STR_EQ(refused.error.code, "PACKET_TOO_LARGE");
+        zcl_command_reply_free(&full);
+        zcl_command_reply_free(&tight);
+        zcl_command_reply_free(&refused);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1154,6 +1208,7 @@ int test_code_packet(void)
     failures += test_code_packet_transfer_prefilled();
     failures += test_code_packet_transfer_late_failure();
     failures += test_code_packet_tail_failure();
+    failures += test_code_packet_files_only_retry();
     failures += test_code_packet_batch_fallback();
     failures += test_code_packet_partial_routes();
     return failures;
