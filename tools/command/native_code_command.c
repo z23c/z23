@@ -325,28 +325,29 @@ bool zcl_native_code_routes_many(const char *const *paths, size_t count,
     return zcl_native_code_routes_many_at(".", paths, count, accs, routes, risks);
 }
 
+bool zcl_native_code_collect_at(const char *root, const char *path,
+    struct agent_impact_acc *acc, bool primary_sufficient)
+{
+    code_route_primary(root, path, acc, NULL);
+    bool risk = code_path_is_consensus_risk(path);
+    bool established = risk || (acc->shared_rule_hits > 0 && acc->groups_len > 0);
+    if (!primary_sufficient || !established)
+        (void)agent_impact_name_routes_at(root, path, acc);
+    return risk;
+}
+
 static const char *code_route_at(const char *root, const char *path,
     struct agent_impact_acc *acc, bool *consensus_risk, bool primary_sufficient)
 {
     struct agent_impact_acc local = {0};
     struct agent_impact_acc *a = acc ? acc : &local;
-    code_route_primary(root, path, a, NULL);
-    bool established = code_path_is_consensus_risk(path) ||
-                       (a->shared_rule_hits > 0 && a->groups_len > 0);
-    if (!primary_sufficient || !established)
-        (void)agent_impact_name_routes_at(root, path, a);
+    (void)zcl_native_code_collect_at(root, path, a, primary_sufficient);
     return code_route_finish(path, a, consensus_risk);
 }
 
 const char *zcl_native_code_label_at(const char *root, const char *path)
 {
     return code_route_at(root, path, NULL, NULL, true);
-}
-
-const char *zcl_native_code_focus_route_at(const char *root, const char *path,
-    struct agent_impact_acc *acc, bool *consensus_risk, bool has_failed_groups)
-{
-    return code_route_at(root, path, acc, consensus_risk, !has_failed_groups);
 }
 
 const char *zcl_native_code_route_at(const char *root, const char *path,

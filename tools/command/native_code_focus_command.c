@@ -48,9 +48,8 @@ static size_t focus_route(const char *path,
 {
     const struct focus_route_context *ctx = user;
     struct agent_impact_acc acc;
-    bool crisk = false;
-    (void)zcl_native_code_focus_route_at(ctx->root, path, &acc, &crisk,
-                                         ctx->has_failed_groups);
+    bool crisk = zcl_native_code_collect_at(ctx->root, path, &acc,
+                                            !ctx->has_failed_groups);
     if (acc.shared_rule_hits == 0 && !crisk)
         return 0;
     size_t n = 0;
