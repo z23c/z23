@@ -904,6 +904,66 @@ static int test_code_guide_next_commands(void)
     return failures;
 }
 
+static int test_code_guide_long_cost(void)
+{
+    int failures = 0;
+    TEST("guide cost command preserves a long path with spaces and a quote") {
+        char cwd[512], stem[181], path[256], command[1100];
+        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+        memset(stem, 'a', sizeof(stem) - 1);
+        stem[sizeof(stem) - 1] = '\0';
+        ASSERT(snprintf(path, sizeof path, "notes/%s report's notes.txt", stem) > 0);
+        ASSERT(snprintf(command, sizeof command, "build/bin/z23 code cost 'notes/%s report'\\''s notes.txt'", stem) > 0);
+        struct zcl_command_reply guide;
+        cg_guide_paths(cwd, path, &guide);
+        ASSERT_EQ(guide.exit_code, ZCL_COMMAND_EXIT_OK);
+        const struct json_value *next = json_get(&guide.data, "next");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), command);
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path", path));
+        struct zcl_command_context ctx = {.source_root = cwd};
+        struct zcl_command_request request = {.input = &input, .context = &ctx};
+        struct zcl_command_reply cost;
+        zcl_command_reply_init(&cost, "zcl.test.code_cost.v1");
+        zcl_native_handle_code_cost(&request, &cost);
+        ASSERT_EQ(cost.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&cost.data, "path")), path);
+        zcl_command_reply_free(&cost);
+        json_free(&input);
+        zcl_command_reply_free(&guide);
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "paths", path));
+        ASSERT(json_push_kv_int(&input, "budget", 256));
+        zcl_command_reply_init(&guide, "zcl.test.code_guide.v1");
+        zcl_native_handle_code_guide(&request, &guide);
+        ASSERT_EQ(guide.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_write(&guide.data, NULL, 0) <= 256);
+        next = json_get(&guide.data, "next");
+        if (json_size(next))
+            ASSERT_STR_EQ(json_get_str(json_at(next, 0)), command);
+        else {
+            const struct json_value *cut = json_get(&guide.data, "cut");
+            bool cut_next = false;
+            for (size_t i = 0; i < json_size(cut); i++)
+                if (strcmp(json_get_str(json_at(cut, i)), "next") == 0)
+                    cut_next = true;
+            ASSERT(cut_next);
+        }
+        zcl_command_reply_free(&guide);
+        json_free(&input);
+        cg_guide_paths(cwd, "--notes.txt", &guide);
+        ASSERT_EQ(guide.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(&guide.data, "next"), 0)),
+                      "build/bin/z23 code cost --path=--notes.txt");
+        zcl_command_reply_free(&guide);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -2288,6 +2348,7 @@ int test_code_impact(void)
     failures += test_code_context_map_warm_follows_generation();
     failures += test_code_guide_source_changes();
     failures += test_code_guide_next_commands();
+    failures += test_code_guide_long_cost();
     failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();

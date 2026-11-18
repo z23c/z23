@@ -39,7 +39,7 @@
 #define CB_MAX_QUERIES 4
 #define CB_QUERY_CAP 129
 #define CB_MAX_NEXT 4
-#define CB_NEXT_CAP 160
+#define CB_NEXT_CAP (CB_PATH_CAP * 4 + sizeof("build/bin/z23 code cost --path=") + 2)
 #define CB_HEAD_CAP 4096
 #define CB_WIKI_DEADLINE_MS 1000
 #define CB_DIR_PAGES 4
@@ -705,10 +705,40 @@ static bool cb_needs_preflight(const struct cb_brief *b)
     return false;
 }
 
+/* Quote paths that need shell protection; preserve simple paths as-is. */
+static bool cb_cost_arg(const char *path, char out[static CB_NEXT_CAP])
+{
+    size_t len = strlen(path);
+    if (len >= CB_PATH_CAP)
+        return false;
+    bool quote = strspn(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-") != len;
+    size_t n = 0;
+    if (quote) out[n++] = '\'';
+    for (const char *p = path; *p; p++) {
+        if (quote && *p == '\'') {
+            memcpy(out + n, "'\\''", 4);
+            n += 4;
+        } else {
+            out[n++] = *p;
+        }
+    }
+    if (quote) out[n++] = '\'';
+    out[n] = '\0';
+    return n < CB_NEXT_CAP;
+}
+
 static void cb_push_next(struct cb_brief *b, const char *fmt, const char *arg)
 {
-    if (b->nnext < CB_MAX_NEXT)
-        (void)snprintf(b->next[b->nnext++], CB_NEXT_CAP, fmt, arg);
+    if (b->nnext >= CB_MAX_NEXT) {
+        b->cut_next = true;
+        return;
+    }
+    int n = snprintf(b->next[b->nnext], CB_NEXT_CAP, fmt, arg);
+    if (n < 0 || (size_t)n >= CB_NEXT_CAP) {
+        b->cut_next = true;
+        return;
+    }
+    b->nnext++;
 }
 
 static void cb_build_next(struct cb_brief *b)
@@ -718,8 +748,15 @@ static void cb_build_next(struct cb_brief *b)
         if (cb_needs_preflight(b))
             cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
     } else {
-        if (b->npaths)
-            cb_push_next(b, "build/bin/z23 code cost %s", b->paths[0]);
+        if (b->npaths) {
+            char arg[CB_NEXT_CAP];
+            if (cb_cost_arg(b->paths[0], arg))
+                cb_push_next(b, b->paths[0][0] == '-'
+                              ? "build/bin/z23 code cost --path=%s"
+                              : "build/bin/z23 code cost %s", arg);
+            else
+                b->cut_next = true;
+        }
         if (cb_needs_preflight(b))
             cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-fast-preflight");
         else
