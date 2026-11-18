@@ -2,7 +2,7 @@
  * Purpose: Project exact C23, command-registry, and proof-route facts as bounded typed relations. */
 
 #define _GNU_SOURCE
-#include "command/native_command.h"
+#include "command/native_code_priv.h"
 
 #include "base/hex.h"
 #include "codeindex/codeindex.h"
@@ -123,15 +123,6 @@ static void relation_command_transports(struct json_value *relations,
 static bool relation_query_missing(const char *query)
 {
     return !query || !query[0];
-}
-
-static const char *relation_context_source_root(
-    const struct zcl_command_request *request)
-{
-    if (request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    return NULL;
 }
 
 static bool relation_lookup_symbol(struct codeindex *index, const char *query,
@@ -329,12 +320,7 @@ void zcl_native_handle_code_relations(
         return;
     }
 
-    const char *root = relation_context_source_root(request);
-    if (!root) {
-        const char *environment_root = getenv("ZCL_DEV_SOURCE_ROOT");
-        if (environment_root && environment_root[0]) root = environment_root;
-        else root = ".";
-    }
+    const char *root = zcl_native_source_root(request);
     struct codeindex *index = codeindex_open_source_view(root);
     if (!index) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -397,8 +383,8 @@ void zcl_native_handle_code_relations(
     const char *path = relation_symbol_path(&symbol);
     struct agent_impact_acc proof = {0};
     bool consensus_risk = false;
-    const char *route = zcl_native_code_route_for_path(
-        path, &proof, &consensus_risk);
+    const char *route = zcl_native_code_route_at(
+        root, path, &proof, &consensus_risk);
     relation_push_route_groups(&relations, &relation_count, &truncated,
                                symbol_id, &proof, route);
 

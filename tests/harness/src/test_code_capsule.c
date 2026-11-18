@@ -1003,6 +1003,41 @@ static int test_code_capsule_callee_refusal(void)
     test_rm_rf_recursive(CAP_BUDGET_FIX); return failures;
 }
 
+static int test_code_plan_relations_root(void)
+{
+    int failures = 0;
+    TEST("code plan and relations route from the selected root") {
+        test_rm_rf_recursive(CAP_BUDGET_FIX);
+        ASSERT(cap_budget_mk_write(CAP_BUDGET_FIX, "tools/command/zkrouted_" "beacon_1109.c",
+                                   "int zkrouted_" "beacon_1109(void) { return 1; }\n"));
+        ASSERT(cap_budget_mk_write(CAP_BUDGET_FIX, "tests/harness/src/test_dev_job.c",
+                                   "const char *s = \"zkrouted_" "beacon_1109\";\n"));
+        struct codeindex *ci = codeindex_open(CAP_BUDGET_FIX);
+        ASSERT(ci);
+        codeindex_close(ci);
+        struct zcl_command_context ctx = {.source_root = CAP_BUDGET_FIX};
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "symbol", "zkrouted_" "beacon_1109"));
+        struct zcl_command_request req = {.input = &input, .context = &ctx};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_change_plan.v1");
+        zcl_native_handle_code_change_plan(&req, &reply);
+        ASSERT(string_present(json_get(&reply.data, "test_groups"), "dev_job"));
+        zcl_command_reply_free(&reply); json_free(&input);
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "name", "zkrouted_" "beacon_1109"));
+        zcl_command_reply_init(&reply, "zcl.code_relations.v1");
+        zcl_native_handle_code_relations(&req, &reply);
+        ASSERT(relation_present(json_get(&reply.data, "relations"),
+                                "routes_path_change_to_test_group", "dev_job"));
+        zcl_command_reply_free(&reply); json_free(&input);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(CAP_BUDGET_FIX);
+    return failures;
+}
+
 int test_code_capsule(void)
 {
     int failures = 0;
@@ -1012,6 +1047,7 @@ int test_code_capsule(void)
     failures += test_code_capsule_golden_symbol();
     failures += test_code_capsule_commands_join();
     failures += test_code_capsule_static_id_is_exact();
+    failures += test_code_plan_relations_root();
     failures += test_code_change_plan_symbol();
     failures += test_code_change_plan_patch();
     failures += test_code_change_plan_deleted_paths();

@@ -8,7 +8,7 @@
  * and renders JSON plus `lines` like the sibling `code` leaves. */
 
 #define _GNU_SOURCE
-#include "command/native_command.h"
+#include "command/native_code_priv.h"
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_focus.h"
@@ -41,10 +41,10 @@ static size_t focus_route(const char *path,
                           char (*out)[SPECIALIST_GROUP_MAX], size_t cap,
                           void *user)
 {
-    (void)user;
+    const char *root = *(const char *const *)user;
     struct agent_impact_acc acc = {0};
     bool crisk = false;
-    (void)zcl_native_code_route_for_path(path, &acc, &crisk);
+    (void)zcl_native_code_route_at(root, path, &acc, &crisk);
     if (acc.shared_rule_hits == 0 && !crisk)
         return 0;
     size_t n = 0;
@@ -278,7 +278,7 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
 
     struct specialist_focus_hit hits[SPECIALIST_FOCUS_HIT_CAP];
     bool truncated = false;
-    int n = specialist_focus_rank(ci, spec, &ev, focus_route, NULL, hits,
+    int n = specialist_focus_rank(ci, spec, &ev, focus_route, &root, hits,
                                   SPECIALIST_FOCUS_HIT_CAP, &truncated);
     codeindex_close(ci);
     if (n < 0) {

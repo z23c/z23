@@ -5,7 +5,7 @@
  * It composes existing codeindex and impact-rule facts; it does not invent a
  * semantic result when the index cannot prove one. */
 
-#include "command/native_command.h"
+#include "command/native_code_priv.h"
 
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"
@@ -105,12 +105,12 @@ static bool plan_is_package_source(const char *path)
     return false;
 }
 
-static void plan_add_tests_for_path(const char *path, char tests[][64],
+static void plan_add_tests_for_path(const char *root, const char *path, char tests[][64],
                                     size_t *count, bool *consensus_risk)
 {
     struct agent_impact_acc impact = {0};
     bool risk = false;
-    const char *route = zcl_native_code_route_for_path(path, &impact, &risk);
+    const char *route = zcl_native_code_route_at(root, path, &impact, &risk);
     if (risk && consensus_risk) *consensus_risk = true;
     for (size_t i = 0; i < impact.groups_len && *count < PLAN_TEST_CAP; i++) {
         if (plan_has_test(tests, *count, impact.groups[i])) continue;
@@ -353,14 +353,14 @@ static void plan_add_symbol_paths(struct codeindex *index,
                       "direct caller", "exact_call_site");
 }
 
-static void plan_collect_test_groups(const struct zcl_command_request *request,
+static void plan_collect_test_groups(const char *root,
                                      const struct plan_paths *edit,
                                      char tests[][64], size_t *count,
                                      bool *consensus_risk)
 {
     for (size_t i = 0; i < edit->len; i++)
-        plan_add_tests_for_path(edit->path[i], tests, count, consensus_risk);
-    if (plan_is_package_workspace(zcl_native_source_root(request))) {
+        plan_add_tests_for_path(root, edit->path[i], tests, count, consensus_risk);
+    if (plan_is_package_workspace(root)) {
         for (size_t i = 0; i < edit->len; i++) {
             if (!plan_is_package_source(edit->path[i])) continue;
             plan_add_test(tests, count, "zcode_package_registry");
@@ -399,13 +399,14 @@ void zcl_native_handle_code_change_plan(
         return;
     }
 
-    struct codeindex *index = patch ? NULL : codeindex_open(zcl_native_source_root(request));
+    const char *root = zcl_native_source_root(request);
+    struct codeindex *index = patch ? NULL : codeindex_open(root);
     if (!patch && !index) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
                                "dispatch", true, false,
                                "could not open or rebuild the code index",
-                               zcl_native_source_root(request));
+                               root);
         return;
     }
 
@@ -422,7 +423,7 @@ void zcl_native_handle_code_change_plan(
     char tests[PLAN_TEST_CAP][64] = {{0}};
     size_t test_count = 0;
     bool consensus_risk = false;
-    plan_collect_test_groups(request, &edit, tests, &test_count,
+    plan_collect_test_groups(root, &edit, tests, &test_count,
                              &consensus_risk);
 
     (void)json_push_kv_str(&reply->data, "input_kind", input_kind);

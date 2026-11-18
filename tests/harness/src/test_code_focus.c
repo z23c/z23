@@ -576,6 +576,31 @@ static int test_focus_notes_read_cap(void)
     return failures;
 }
 
+static int test_focus_selected_root(void)
+{
+    int failures = 0;
+    TEST("code_focus: failed referrer is routed from the selected root") {
+        test_rm_rf_recursive(FOCUS_FIX);
+        ASSERT(focus_mk_write(FOCUS_FIX, "tools/command/native_code_focus_" "beacon1109.c",
+                              "int focus_beacon1109(void) { return 0; }\n"));
+        ASSERT(focus_mk_write(FOCUS_FIX, "tests/harness/src/test_fleet_parity.c",
+                              "const char *s = \"native_code_focus_" "beacon1109\";\n"));
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json",
+            "{\"schema\":\"zcl.test_timing.v1\",\"failed_count\":1,\"groups\":[{\"name\":\"test_fleet_parity\",\"ms\":17,\"rc\":1}]}"));
+        struct zcl_command_reply reply;
+        focus_call_name("codeindex", FOCUS_FIX, &reply);
+        const struct json_value *files = json_get(&reply.data, "files");
+        ASSERT(files && json_size(files) == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(files, 0), "path")),
+                      "tools/command/native_code_focus_" "beacon1109.c");
+        ASSERT_EQ(json_get_int(json_get(json_at(files, 0), "score")), 100000);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(FOCUS_FIX);
+    return failures;
+}
+
 int test_code_focus(void)
 {
     int failures = 0;
@@ -588,6 +613,7 @@ int test_code_focus(void)
     failures += test_focus_lint_gates();
     failures += test_focus_work_cap();
     failures += test_focus_rank();
+    failures += test_focus_selected_root();
     failures += test_focus_notes_read_cap();
     return failures;
 }
