@@ -932,6 +932,15 @@ static enum plugin_slot_state ps_open_failure(int err)
     return err == ENOTDIR || err == ELOOP ? PLUGIN_SLOT_CORRUPT : PLUGIN_SLOT_UNREADABLE;
 }
 
+#ifdef ZCL_TESTING
+static atomic_uint g_ps_generation_slots;
+
+unsigned plugin_store_test_generation_slot_count(void)
+{
+    return atomic_load_explicit(&g_ps_generation_slots, memory_order_relaxed);
+}
+#endif
+
 /* Append every generation id in the open directory. A read that fails before
  * the end of the directory leaves what was found unusable: the caller drops it
  * and reports the directory unreadable. */
@@ -954,6 +963,9 @@ static enum plugin_status ps_scan_generations(DIR *d, const char *gens,
         }
         memcpy(info->generations[info->generation_count++], e->d_name,
                PLUGIN_HEX_SHA3_512 + 1);
+#ifdef ZCL_TESTING
+        atomic_fetch_add_explicit(&g_ps_generation_slots, 1, memory_order_relaxed);
+#endif
     }
     *complete = errno == 0;
     return PLUGIN_OK;
@@ -1009,17 +1021,27 @@ static enum plugin_status ps_load_info(const char *root, const char *name,
 enum plugin_status plugin_store_generation_count(const char *root, const char *name,
                                                  size_t *count)
 {
-    struct plugin_info info;
+    char gens[PLUGIN_PATH_MAX];
     if (!root || !name || !count || !plugin_name_valid(name))
         return PLUGIN_ERR_ARGUMENT;
     *count = 0;
-    enum plugin_status st = ps_load_info(root, name, &info);
-    if (st == PLUGIN_OK && info.generations_state == PLUGIN_SLOT_UNREADABLE)
-        st = PLUGIN_ERR_IO;
-    if (st == PLUGIN_OK)
-        *count = info.generation_count;
-    free(info.generations);
-    return st;
+    if (!plugin_join(gens, sizeof(gens), root, name, "generations", NULL))
+        return PLUGIN_ERR_IO;
+    DIR *d = opendir(gens);
+    if (!d)
+        return ps_open_failure(errno) == PLUGIN_SLOT_UNREADABLE ? PLUGIN_ERR_IO : PLUGIN_OK;
+    struct dirent *e;
+    while ((e = ps_readdir(d, gens)) != NULL) {
+        if (plugin_hex_valid(e->d_name, PLUGIN_HEX_SHA3_512))
+            (*count)++;
+    }
+    int read_error = errno;
+    closedir(d);
+    if (read_error != 0) {
+        *count = 0;
+        return PLUGIN_ERR_IO;
+    }
+    return PLUGIN_OK;
 }
 
 static enum plugin_status ps_collect(DIR *d, const char *root,

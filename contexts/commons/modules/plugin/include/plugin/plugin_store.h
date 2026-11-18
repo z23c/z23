@@ -269,6 +269,8 @@ void plugin_store_test_fail_readdir(const char *suffix, unsigned after);
 unsigned long plugin_store_test_unique(void);
 /* Test seam: how many file streams this process has hashed. */
 unsigned plugin_fs_test_hash_count(void);
+/* Test seam: how many generation IDs this process has copied into list slots. */
+unsigned plugin_store_test_generation_slot_count(void);
 #endif
 
 #endif

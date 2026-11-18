@@ -1397,6 +1397,45 @@ static int pst_case_readdir_failure(void)
     return failures;
 }
 
+static int pst_case_generation_count_without_materialization(void)
+{
+    int failures = 0;
+    struct pst_fx fx = {0};
+    TEST_CASE("generation count enumerates ids without copying or sorting them") {
+        size_t count = 0;
+        char gens[PATH_MAX], path[PATH_MAX], saved[PATH_MAX];
+        ASSERT(pst_two_generations(&fx, true));
+        ASSERT(pst_plug_path(&fx, "generations", gens, sizeof(gens)));
+        ASSERT(pst_path(path, sizeof(path), gens, "not-a-generation"));
+        ASSERT_EQ(mkdir(path, 0700), 0);
+        unsigned before = plugin_store_test_generation_slot_count();
+        ASSERT_EQ(plugin_store_generation_count(fx.root, "hello", &count), PLUGIN_OK);
+        ASSERT_EQ(count, 2u);
+        ASSERT_EQ(plugin_store_test_generation_slot_count() - before, 0u);
+
+        ASSERT(pst_plug_path(&fx, "generations-away", saved, sizeof(saved)));
+        ASSERT_EQ(rename(gens, saved), 0);
+        ASSERT_EQ(plugin_store_generation_count(fx.root, "hello", &count), PLUGIN_OK);
+        ASSERT_EQ(count, 0u);
+        ASSERT_EQ(rename(saved, gens), 0);
+
+        plugin_store_test_fail_readdir("/generations", 1);
+        enum plugin_status st = plugin_store_generation_count(fx.root, "hello", &count);
+        plugin_store_test_fail_readdir(NULL, 0);
+        ASSERT_EQ(st, PLUGIN_ERR_IO);
+        ASSERT_EQ(count, 0u);
+
+        ASSERT_EQ(rename(gens, saved), 0);
+        ASSERT(pst_write(gens, "x", 1));
+        ASSERT_EQ(plugin_store_generation_count(fx.root, "hello", &count), PLUGIN_OK);
+        ASSERT_EQ(count, 0u);
+        pst_fx_close(&fx);
+    } TEST_END
+    plugin_store_test_fail_readdir(NULL, 0);
+    pst_fx_close(&fx);
+    return failures;
+}
+
 static const char *pst_str(const struct zcl_command_reply *r, const char *key)
 {
     const char *s = json_get_str(json_get(&r->data, key));
@@ -2681,6 +2720,7 @@ int test_plugin_store(void)
     failures += pst_case_slot_states_corrupt();
     failures += pst_case_slot_states_unreadable();
     failures += pst_case_readdir_failure();
+    failures += pst_case_generation_count_without_materialization();
     failures += pst_case_status_states();
     failures += pst_case_pack_roundtrip();
     failures += pst_case_pack_deterministic();
