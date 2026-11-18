@@ -66,7 +66,10 @@ bool catalog_fold_unit_end(struct node_db *ndb, bool ok);
 /* Record the digest after folding `height`, and (INSERT OR IGNORE) the digest
  * of `prev_height` it was folded from when that is >= 0, so a rewind to the
  * previous cursor is possible even for the first step after an upgrade.
- * Prunes entries older than height - CATALOG_HISTORY_DEPTH. Call inside the
+ * An entry already held at prev_height that differs from prev_digest means the
+ * catalog was refolded without this history in between: the whole history of
+ * the catalog is cleared first. Prunes entries older than height -
+ * CATALOG_HISTORY_DEPTH. Call inside the
  * fold unit together with the catalog's cursor write. */
 bool catalog_history_record_step(struct node_db *ndb,
                                  enum catalog_history_kind kind,

@@ -132,11 +132,28 @@ bool catalog_history_record_step(struct node_db *ndb,
 {
     if (!ndb || !ndb->open || !digest || height < 0)
         LOG_FAIL("catalog_history", "record_step: invalid arguments");
-    if (prev_height >= 0 && prev_digest &&
-        !history_put(ndb, kind, prev_height, prev_digest, false,
-                     QB_INSERT_OR_IGNORE))
-        LOG_FAIL("catalog_history", "record_step: previous entry h=%d failed",
-                 prev_height);
+    if (prev_height >= 0 && prev_digest) {
+        /* The entry the step starts from must be the cursor's own digest. It
+         * differs only when something that does not write this history moved
+         * the catalog in between (a binary without it that truncated and
+         * refolded across a reorg): the entries then describe a chain the
+         * catalog no longer folds, and a later rewind would restore a loser
+         * digest over winner rows. Start the history again. */
+        uint8_t held[32];
+        if (catalog_history_lookup(ndb, kind, prev_height, held, NULL) &&
+            memcmp(held, prev_digest, 32) != 0) {
+            LOG_WARN("catalog_history", "record_step: catalog %d history at "
+                     "h=%d disagrees with the cursor it folds from; clearing "
+                     "it (the catalog was refolded without it)", (int)kind,
+                     prev_height);
+            if (!catalog_history_clear(ndb, kind))
+                LOG_FAIL("catalog_history", "record_step: clear failed");
+        }
+        if (!history_put(ndb, kind, prev_height, prev_digest, false,
+                         QB_INSERT_OR_IGNORE))
+            LOG_FAIL("catalog_history", "record_step: previous entry h=%d "
+                     "failed", prev_height);
+    }
     if (!history_put(ndb, kind, height, digest, tainted, QB_INSERT_OR_REPLACE))
         LOG_FAIL("catalog_history", "record_step: entry h=%d failed", height);
     if (height > CATALOG_HISTORY_DEPTH &&
