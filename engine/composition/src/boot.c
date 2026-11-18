@@ -960,9 +960,8 @@ static struct zcl_result sr_block_index_loaded(void *ctx)
 static struct zcl_result sr_chain_tip_resolved(void *ctx)
 {
     (void)ctx;
-    /* Restore normal SQLite mode, persist the resolved tip, and stamp
-     * boot_status — the coins/block-index reconciliation is complete by the
-     * time app_init calls this. */
+    /* Restore normal SQLite mode, persist the resolved tip and stamp
+     * boot_status: coins/block-index reconciliation is complete here. */
     if (!boot_step_finalize_chain_state())
         return ZCL_ERR(-1, "chain tip finalization failed");
     return ZCL_OK;
@@ -984,6 +983,7 @@ static struct zcl_result sr_services_running(void *ctx)
 {
     (void)ctx;
     boot_step_start_maintenance_services();
+    (void)block_index_flat_release_arena_pages(&g_state);
     return ZCL_OK;
 }
 static struct zcl_result sr_sandbox_enter(void *ctx)

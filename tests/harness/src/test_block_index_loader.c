@@ -67,6 +67,20 @@ static void bil_test_unlink_arena(const char *dir)
         unlink(p);
 }
 
+#if defined(__linux__)
+extern size_t block_index_flat_release_arena_pages(struct main_state *)
+    __attribute__((weak));
+#endif
+
+static size_t bil_test_release_arena_pages(struct main_state *ms)
+{
+#if defined(__linux__)
+    if (!block_index_flat_release_arena_pages)
+        return 0;
+#endif
+    return block_index_flat_release_arena_pages(ms);
+}
+
 /* Build a minimal block_index chain of `n` blocks in main_state. */
 static void build_synthetic_chain(struct main_state *ms, int n)
 {
@@ -613,6 +627,17 @@ static int bil_flat_arena_file_case(void)
             stat(arena_path, &st) == 0 &&
             st.st_size == (off_t)(100u * sizeof(struct block_index));
 
+        size_t expected_release = 0;
+#if defined(__linux__)
+        if (arena_ok)
+            expected_release = (size_t)st.st_size;
+#endif
+        size_t initial_released = bil_test_release_arena_pages(&ms2);
+        struct main_state nonowner;
+        main_state_init(&nonowner);
+        size_t nonowner_release = bil_test_release_arena_pages(&nonowner);
+        main_state_free(&nonowner);
+
         struct uint256 first_hash = make_test_hash(0);
         struct uint256 last_hash = make_test_hash(99);
         struct block_index *first = block_map_find(&ms2.map_block_index,
@@ -623,11 +648,23 @@ static int bil_flat_arena_file_case(void)
             last && last->nHeight == 99 && last->pprev &&
             last->pprev->nHeight == 98 &&
             ms2.map_block_index.size == ms.map_block_index.size;
+        bool dirty_ok = loaded && first;
+        if (dirty_ok) {
+            first->nHeight = 7;
+            size_t released = bil_test_release_arena_pages(&ms2);
+            dirty_ok = released == expected_release && first->nHeight == 7;
+            first->nHeight = 0;
+        }
 
         BIL_CHECK("bil: flat load arena is a file-backed mapping with exact byte size",
                   arena_ok);
-        BIL_CHECK("bil: file-backed arena loads entries identically to calloc",
+        BIL_CHECK("bil: canonical owner releases all arena pages",
+                  initial_released == expected_release);
+        BIL_CHECK("bil: non-owner cannot release the canonical arena",
+                  nonowner_release == 0);
+        BIL_CHECK("bil: file-backed arena entries and links survive page release",
                   entries_ok);
+        BIL_CHECK("bil: shared writes survive another page release", dirty_ok);
 
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);

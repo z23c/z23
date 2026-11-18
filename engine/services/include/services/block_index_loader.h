@@ -120,6 +120,12 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
 struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main_state *ms,
                                                 size_t max_entries);
 
+/* Drop resident pages from the successful canonical file-backed load arena.
+ * The mapping and entries remain valid; later reads refault and writes stay
+ * shared. Returns the advised byte count, or 0 for another owner, an anonymous
+ * arena, an unsupported platform, or an advisory failure. */
+size_t block_index_flat_release_arena_pages(struct main_state *ms);
+
 /* Load a bounded flat index into an empty private state without publishing a
  * global flat identity. This admits no header, chain or endpoint authority.
  * Discard the private state after any failure. */

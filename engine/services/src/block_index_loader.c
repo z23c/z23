@@ -7,8 +7,14 @@
 // one-result-type-ok:height-sorted-predicate — block_index_ptrs_height_sorted
 // is a pure total classification (already height-sorted, or not) over a
 // caller-owned array; it never fails, so zcl_result would only relabel
-// true/false as OK/ERR. Every other exported function in this file already
-// returns struct zcl_result.
+// true/false as OK/ERR.
+// one-result-type-ok:arena-page-release — the advisory page release reports
+// its advised byte count, with zero meaning no eligible mapping or no release.
+
+/* madvise(MADV_DONTNEED) is a BSD/Linux extension outside strict POSIX. */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
 
 #include "platform/time_compat.h"
 #include "platform/read_mapping.h"
@@ -696,6 +702,42 @@ static bool bil_flat_allocation_sizes_valid(size_t count)
            count <= SIZE_MAX / sizeof(struct block_index *);
 }
 
+static struct main_state *g_bil_flat_arena_owner;
+static struct block_index *g_bil_flat_arena_base;
+static size_t g_bil_flat_arena_bytes;
+
+static void bil_flat_arena_register(struct main_state *ms,
+                                    struct block_index *arena, size_t bytes,
+                                    bool canonical, bool mapped)
+{
+    if (!canonical || !mapped)
+        return;
+    g_bil_flat_arena_owner = ms;
+    g_bil_flat_arena_base = arena;
+    g_bil_flat_arena_bytes = bytes;
+}
+
+size_t block_index_flat_release_arena_pages(struct main_state *ms)
+{
+    if (!ms || ms != g_bil_flat_arena_owner || !g_bil_flat_arena_base ||
+        !g_bil_flat_arena_bytes)
+        return 0;
+#if defined(__linux__)
+    if (madvise(g_bil_flat_arena_base, g_bil_flat_arena_bytes,
+                MADV_DONTNEED) != 0) {
+        LOG_WARN("block_index_flat",
+                 "Block index arena page release failed: %s", strerror(errno));
+        return 0;
+    }
+    LOG_INFO("block_index_flat",
+             "Block index arena: released %zu resident bytes",
+             g_bil_flat_arena_bytes);
+    return g_bil_flat_arena_bytes;
+#else
+    return 0;
+#endif
+}
+
 /* ── File-backed load arena ────────────────────────────────
  *
  * Scout-verified design (lane block-index-arena-mmap-1111): the bulk-load
@@ -721,7 +763,9 @@ static bool bil_flat_allocation_sizes_valid(size_t count)
  * lifetime — it frees only the buckets — and post-boot inserts allocate
  * per-entry with zcl_calloc in chainstate_insert_block_index, so on
  * success this mapping is never munmap'd; process exit tears it down
- * with the map intact.
+ * with the map intact. Immediately before READY, Linux drops its resident
+ * pages with MADV_DONTNEED without unmapping it. Later entry accesses refault
+ * from the shared file and dirty pages retain their writes.
  *
  * O_CREAT|O_TRUNC gives every boot a freshly zeroed file whose
  * ftruncate extension reads as zeros, which is why bil_flat_load needs
@@ -856,7 +900,12 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
                                        size_t max_entries, bool publish_identity)
 {
     /* A failed or legacy load cannot inherit a verified snapshot identity. */
-    if (publish_identity) block_index_flat_identity_forget();
+    if (publish_identity) {
+        block_index_flat_identity_forget();
+        g_bil_flat_arena_owner = NULL;
+        g_bil_flat_arena_base = NULL;
+        g_bil_flat_arena_bytes = 0;
+    }
     int fd;
     size_t file_size;
     struct platform_read_mapping mapping;
@@ -933,6 +982,8 @@ finish:
     flat_read_mapping_close(&mapping, fd);
     if (!result.ok)
         return result;
+    bil_flat_arena_register(ms, arena, arena_bytes, publish_identity,
+                            arena_mapped);
     t_fwd_ms = platform_time_monotonic_ms() - t_fwd_ms;
     printf("[boot]   %-28s %lldms\n", "blkidx.flat_parse_insert",
            (long long)t_parse_ms);
