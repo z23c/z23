@@ -33,6 +33,7 @@
 #if !defined(_WIN32)
 #include <signal.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -447,6 +448,103 @@ _test_next:;
     return failures;
 }
 
+static int dvx_orphan_retirement_tests(void)
+{
+    int failures = 0;
+#ifndef _WIN32
+    static const char *const files_none[] = {NULL};
+    TEST("claim: a fully absent legacy owner retires without admitting a symlink alias") {
+        char repo[512], target[1024], row[2048], ledger[1024];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "orphan-retirement");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", repo);
+        (void)snprintf(target, sizeof(target), "%s/missing-parent/missing-worktree", repo);
+        (void)snprintf(row, sizeof(row),
+                       "{\"worktree\":\"%s\",\"story\":\"legacy\",\"files\":[\"engine/a.c\"]}\n",
+                       target);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        struct dvx_call c;
+        dvx_claim(&c, repo, "retire-orphan", files_none, false);
+        ASSERT(json_push_kv_str(&c.input, "retire_worktree", target));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "retired"), 1);
+        ASSERT_EQ(dvx_int(&c, "live"), 0);
+        char evidence[1024];
+        (void)snprintf(evidence, sizeof(evidence), "%s", dvx_str(&c, "evidence_path"));
+        dvx_end(&c);
+        char *text = NULL;
+        size_t len = 0;
+        ASSERT(zcl_read_whole_file_text(evidence, sizeof(row), &text, &len,
+                                        "claim_orphan_evidence"));
+        ASSERT(len == strlen(row) && memcmp(text, row, len) == 0);
+        free(text);
+        text = NULL;
+        ASSERT(zcl_read_whole_file_text(ledger, sizeof(row), &text, &len,
+                                        "claim_orphan_ledger"));
+        ASSERT(len == 0);
+        free(text);
+
+        char actual[1024], alias[1024];
+        (void)snprintf(actual, sizeof(actual), "%s/actual", repo);
+        (void)snprintf(alias, sizeof(alias), "%s/alias", repo);
+        ASSERT(mkdir(actual, 0700) == 0);
+        ASSERT(symlink("actual", alias) == 0);
+        (void)snprintf(target, sizeof(target), "%s/missing-parent/missing-worktree", alias);
+        (void)snprintf(row, sizeof(row),
+                       "{\"worktree\":\"%s\",\"story\":\"legacy\",\"files\":[\"engine/a.c\"]}\n",
+                       target);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        dvx_claim(&c, repo, "retire-orphan", files_none, false);
+        ASSERT(json_push_kv_str(&c.input, "retire_worktree", target));
+        ASSERT(dvx_run(&c) && !dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_ORPHAN_PATH_REFUSED");
+        dvx_end(&c);
+        text = NULL;
+        ASSERT(zcl_read_whole_file_text(ledger, sizeof(row), &text, &len,
+                                        "claim_orphan_alias_ledger"));
+        ASSERT(len == strlen(row) && memcmp(text, row, len) == 0);
+        free(text);
+
+        (void)snprintf(target, sizeof(target), "%s/dangling", repo);
+        ASSERT(symlink("not-present", target) == 0);
+        (void)snprintf(row, sizeof(row),
+                       "{\"worktree\":\"%s\",\"story\":\"legacy\",\"files\":[\"engine/a.c\"]}\n",
+                       target);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        dvx_claim(&c, repo, "retire-orphan", files_none, false);
+        ASSERT(json_push_kv_str(&c.input, "retire_worktree", target));
+        ASSERT(dvx_run(&c) && !dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OWNER_NOT_ABSENT");
+        dvx_end(&c);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+
+    TEST("claim: root is a canonical ancestor for an absent legacy owner") {
+        char repo[512], target[1024], row[2048];
+        struct stat st;
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "orphan-root");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(target, sizeof(target), "/z23-claim-retired-%ld", (long)getpid());
+        ASSERT(lstat(target, &st) != 0 && errno == ENOENT);
+        (void)snprintf(row, sizeof(row),
+                       "{\"worktree\":\"%s\",\"story\":\"legacy\",\"files\":[\"engine/a.c\"]}\n",
+                       target);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        struct dvx_call c;
+        dvx_claim(&c, repo, "retire-orphan", files_none, false);
+        ASSERT(json_push_kv_str(&c.input, "retire_worktree", target));
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "retired"), 1);
+        dvx_end(&c);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+#endif
+    return failures;
+}
+
 static int dvx_metadata_tests(void)
 {
     int failures = 0;
@@ -833,7 +931,7 @@ int test_devagent_claim(void)
 {
     int failures = dvx_lease_tests() + dvx_expiry_scope_tests() +
                    dvx_owner_authority_tests() + dvx_owner_roundtrip_tests() +
-                   dvx_metadata_tests() + dvx_unreadable_tests() +
+                   dvx_orphan_retirement_tests() + dvx_metadata_tests() + dvx_unreadable_tests() +
                    dvx_write_failure_tests() + dvx_interleaved_tests() +
                    dvx_release_input_tests();
     char one[512], two[600];

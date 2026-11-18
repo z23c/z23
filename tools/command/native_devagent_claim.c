@@ -1178,12 +1178,46 @@ static bool dvc_orphan_target_valid(const char *target,
                                      struct zcl_command_reply *reply)
 {
     char resolved[PATH_MAX], parent[PATH_MAX];
-    if (!dvc_orphan_path_valid(target) ||
-        !platform_private_path_resolve(target, resolved, sizeof(resolved),
-                                        parent, sizeof(parent)) ||
-        strcmp(resolved, target) != 0) {
+    bool valid = dvc_orphan_path_valid(target);
+#ifdef _WIN32
+    valid = valid && platform_private_path_resolve(target, resolved, sizeof(resolved),
+                                                   parent, sizeof(parent)) &&
+        strcmp(resolved, target) == 0;
+#else
+    if (valid) {
+        char probe[PATH_MAX];
+        int n = snprintf(probe, sizeof(probe), "%s", target);
+        valid = n > 0 && (size_t)n < sizeof(probe);
+        while (valid) {
+            struct stat st;
+            if (lstat(probe, &st) == 0) {
+                if (strcmp(probe, "/") == 0) {
+                    valid = true;
+                    break;
+                }
+                valid = (!S_ISLNK(st.st_mode) || strcmp(probe, target) == 0) &&
+                    platform_private_path_resolve(probe, resolved, sizeof(resolved),
+                                                  parent, sizeof(parent)) &&
+                    strcmp(resolved, probe) == 0;
+                break;
+            }
+            if (errno != ENOENT) {
+                valid = false;
+                break;
+            }
+            char *slash = strrchr(probe, '/');
+            if (!slash) {
+                valid = false;
+                break;
+            }
+            if (slash == probe) probe[1] = '\0';
+            else *slash = '\0';
+        }
+    }
+#endif
+    if (!valid) {
         dvc_fail(reply, "CLAIM_ORPHAN_PATH_REFUSED", "retire",
-                 "retire_worktree requires an exact ASCII path with a real canonical parent",
+                 "retire_worktree requires an exact ASCII path with a canonical existing ancestor",
                  target);
         return false;
     }
