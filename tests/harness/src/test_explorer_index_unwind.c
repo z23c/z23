@@ -21,6 +21,9 @@
 #include "models/database.h"
 #include "services/explorer_unwind_service.h"
 #include "models/explorer_index.h"
+#include "models/op_return_index.h"
+#include "models/zslp_ledger.h"
+#include "models/zslp_validity.h"
 #include "models/znam.h"
 #include "znam/znam.h"
 #include "zslp/slp.h"
@@ -488,6 +491,113 @@ static int uw_run_world(const char *name, const struct uw_world *w,
     return failures;
 }
 
+/* ── The two cursor-owning catalogs ───────────────────────────────────
+ *
+ * zslp_ledger and op_return_index carry a running digest that cannot be
+ * rewound: with their cursor above the fork they are dropped for their own
+ * services to re-derive; with it at or below the fork only the stale rows go,
+ * a token spend recorded above the fork is undone, and the cursor and digest
+ * stay as they were. */
+
+static int64_t uw_count(struct node_db *ndb, const char *sql)
+{
+    sqlite3_stmt *s = NULL;
+    int64_t n = -1;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) != SQLITE_OK || !s)
+        return -1;
+    if (sqlite3_step(s) == SQLITE_ROW)  // raw-sql-ok:test-readonly-count
+        n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+static struct node_db *uw_catalog_db(const struct uw_world *w, int32_t cursor)
+{
+    struct node_db *ndb = uw_open();
+    if (!ndb)
+        return NULL;
+    uw_apply(ndb, w->common, UW_COMMON_N, 0);
+    uw_apply(ndb, w->stale, w->nstale, 1);
+    uint8_t tok[32], prev[32], spender[32], addr[20], digest[32];
+    memset(tok, 0x7A, 32);
+    memset(prev, 0x7B, 32);
+    memset(spender, 0x7C, 32);
+    memset(addr, k_owner_a, 20);
+    memset(digest, 0x3D, 32);
+    /* A common-prefix token output, spent by a stale-range transaction. */
+    bool ok = zslp_ledger_record_valid_output(ndb, tok, prev, 1, 50, addr, 2,
+                                              ZSLP_LEDGER_TOKEN) &&
+              zslp_ledger_mark_valid_spent(ndb, prev, 1, spender, 5) &&
+              zslp_ledger_set_cursor(ndb, cursor, digest);
+    struct op_return_index_cursor cur;
+    memset(&cur, 0, sizeof(cur));
+    cur.height = cursor;
+    memset(cur.digest, 0x4E, 32);
+    ok = ok && op_return_index_set_cursor(ndb, &cur);
+    if (!ok) {
+        uw_close(ndb);
+        return NULL;
+    }
+    return ndb;
+}
+
+static int uw_catalog_above_fork(const struct uw_world *w)
+{
+    int failures = 0;
+    struct node_db *ndb = uw_catalog_db(w, 8);
+    bool ok = ndb && explorer_index_unwind_above(ndb, UW_FORK, NULL, NULL).ok;
+    int32_t lh = -2, oh = -2, ob = -2;
+    uint8_t ld[32];
+    ok = ok && zslp_ledger_get_cursor(ndb, &lh, ld) &&
+         op_return_index_get_cursor_heights(ndb, &oh, &ob);
+    UW_CHECK("catalog cursors above the fork: both catalogs are dropped "
+             "for re-derivation",
+             ok && lh == -1 && oh == -1 &&
+             uw_count(ndb, "SELECT COUNT(*) FROM zslp_ledger") == 0 &&
+             uw_count(ndb, "SELECT COUNT(*) FROM op_return_index") == 0);
+    uw_close(ndb);
+    return failures;
+}
+
+static int uw_catalog_at_fork(const struct uw_world *w)
+{
+    int failures = 0;
+    int32_t lh = -2, oh = -2, ob = -2;
+    uint8_t ld[32];
+    struct node_db *ndb = uw_catalog_db(w, UW_FORK);
+    bool ok = ndb && uw_count(ndb, "SELECT COUNT(*) FROM op_return_index"
+                              " WHERE height>3") > 0 &&
+         explorer_index_unwind_above(ndb, UW_FORK, NULL, NULL).ok;
+    uint8_t want[32];
+    memset(want, 0x3D, 32);
+    ok = ok && zslp_ledger_get_cursor(ndb, &lh, ld) &&
+         op_return_index_get_cursor_heights(ndb, &oh, &ob);
+    UW_CHECK("catalog cursors at the fork: cursor and digest are kept",
+             ok && lh == UW_FORK && memcmp(ld, want, 32) == 0 &&
+             oh == UW_FORK);
+    UW_CHECK("catalog cursors at the fork: stale rows go, prefix rows stay",
+             ok &&
+             uw_count(ndb, "SELECT COUNT(*) FROM op_return_index"
+                           " WHERE height>3") == 0 &&
+             uw_count(ndb, "SELECT COUNT(*) FROM op_return_index") > 0 &&
+             uw_count(ndb, "SELECT COUNT(*) FROM zslp_ledger"
+                           " WHERE created_height>3") == 0);
+    UW_CHECK("catalog cursors at the fork: a spend above the fork is undone",
+             ok &&
+             uw_count(ndb, "SELECT COUNT(*) FROM zslp_ledger WHERE"
+                           " created_height=2 AND spent_by_txid IS NULL"
+                           " AND spent_height IS NULL") == 1);
+    uw_close(ndb);
+    return failures;
+}
+
+static int uw_catalog_checks(void)
+{
+    struct uw_world w;
+    uw_world_stamped_only(&w);
+    return uw_catalog_above_fork(&w) + uw_catalog_at_fork(&w);
+}
+
 int test_explorer_index_unwind(void)
 {
     int failures = 0;
@@ -499,6 +609,7 @@ int test_explorer_index_unwind(void)
     failures += uw_run_world("stamped rows only", &w, false);
     uw_world_shorter_winner(&w);
     failures += uw_run_world("shorter winning chain", &w, true);
+    failures += uw_catalog_checks();
 
     /* A projection with a hole below the fork (a snapshot-seeded datadir):
      * the in-place overlays cannot be rebuilt there, so they are left as they

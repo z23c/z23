@@ -348,8 +348,9 @@ static bool unwind_body(struct node_db *ndb, int fork_height,
      * outputs and op_returns of every height up to the fork. A datadir
      * seeded from a snapshot, or with holes below the fork, lacks them, and
      * clearing the in-place tables there would destroy state that cannot be
-     * re-derived. Such a database gets the stamped deletes only. */
-    bool complete = fork_height < 0 ||
+     * re-derived. Such a database gets the stamped deletes only. The probe
+     * scans view_integrity, so it runs only when a replay is wanted. */
+    bool complete = !touched || fork_height < 0 ||
                     db_view_integrity_contiguous_height(ndb) >= fork_height;
 
     /* The derived catalogs read the stamped tables, so they settle first. */
