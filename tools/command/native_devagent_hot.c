@@ -22,7 +22,7 @@
  *          name is UNRESOLVED, never a run of something nearby.
  *   cwd    optional string. Directory to inspect instead of the process
  *          working directory. Exists so a fixture repository can be
- *          inspected; the owning-group route itself is pure and needs no
+ *          inspected; routing reads referrers in that directory and needs no
  *          checkout.
  *
  * OUTPUT (zcl.agent_hot.v1) on every verdict — PASS, FAIL, NOSHA and
@@ -277,7 +277,7 @@ static bool dvh_saved_file_readable(struct zcl_command_reply *reply,
  * route names it, otherwise the first registered shared-rule group does.
  * False means no owning group exists — the caller answers UNRESOLVED. */
 static bool dvh_resolve_owning_group(const struct json_value *input,
-                                     const char *path,
+                                     const char *dir, const char *path,
                                      char wanted[ZCL_TEST_GROUP_FULL_MAX],
                                      char group[ZCL_TEST_GROUP_FULL_MAX])
 {
@@ -293,7 +293,7 @@ static bool dvh_resolve_owning_group(const struct json_value *input,
     bool consensus_risk = false;
     const char *route = NULL;
     memset(&acc, 0, sizeof(acc));
-    route = zcl_native_code_route_for_path(path, &acc, &consensus_risk);
+    route = zcl_native_code_route_at(dir, path, &acc, &consensus_risk);
     if (!route)
         route = "";
     if (consensus_risk) {
@@ -415,7 +415,7 @@ void zcl_native_handle_dev_agent_hot(
     /* ── owning group: the override, or the code.tests route ─────────── */
     char wanted[ZCL_TEST_GROUP_FULL_MAX];
     char group[ZCL_TEST_GROUP_FULL_MAX];
-    if (!dvh_resolve_owning_group(input, path, wanted, group)) {
+    if (!dvh_resolve_owning_group(input, dir, path, wanted, group)) {
         dvh_emit_unresolved(reply, path, t0_ms);
         return;
     }

@@ -452,6 +452,8 @@ const char *zcl_native_code_route_snapshot(const char *path,
 bool zcl_native_code_routes_many(const char *const *paths, size_t count,
                                  struct agent_impact_acc *accs,
                                  const char **routes, bool *risks);
+const char *zcl_native_code_route_at(const char *root, const char *path,
+                                     struct agent_impact_acc *acc, bool *consensus_risk);
 const char *zcl_native_code_route_for_path(const char *path,
                                            struct agent_impact_acc *acc,
                                            bool *consensus_risk);

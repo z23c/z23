@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define DVX_PATH "dev.agent.hot"
 
@@ -158,6 +159,19 @@ static bool dvx_seed_refused(const char *root, const char *name,
     return false;
 }
 
+static bool dvx_seed_routed_data(const char *root)
+{
+    char path[1024];
+    const char *dirs[] = {"probes", "tests", "tests/harness", "tests/harness/src"};
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        int n = snprintf(path, sizeof path, "%s/%s", root, dirs[i]);
+        if (n <= 0 || (size_t)n >= sizeof path || mkdir(path, 0755) != 0) return false;
+    }
+    return dvx_write(root, "probes/zkhot_" "route1109.tsv", "data\n") &&
+           dvx_write(root, "tests/harness/src/test_fleet_parity.c",
+                     "const char *p = \"probes/zkhot_" "route1109.tsv\";\n");
+}
+
 int test_devagent_hot(void)
 {
     int failures = 0;
@@ -182,6 +196,20 @@ int test_devagent_hot(void)
         ASSERT(dvx_run(&c));
         ASSERT(!dvx_ok(&c));
         ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("hot: saved data route uses the inspected directory") {
+        ASSERT(dvx_seed_routed_data(root));
+        struct dvx_call c;
+        dvx_begin(&c);
+        ASSERT(json_push_kv_str(&c.input, "cwd", root));
+        ASSERT(json_push_kv_str(&c.input, "path", "probes/zkhot_" "route1109.tsv"));
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "RUNNER_FAILED");
+        ASSERT(strstr(c.reply.error.evidence, "test_fleet_parity") != NULL);
         dvx_end(&c);
         PASS();
     }
