@@ -619,6 +619,7 @@ int test_explorer_index(void);
 int test_zslp_ledger_saturation(void);
 int test_explorer_index_unwind(void);
 int explorer_unwind_catalog_suite(void);
+int explorer_unwind_random_suite(void);
 int test_mining(void);
 int test_utxo_commitment(void);
 int test_mmr(void);

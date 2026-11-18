@@ -611,6 +611,7 @@ int test_explorer_index_unwind(void)
     failures += uw_run_world("shorter winning chain", &w, true);
     failures += uw_catalog_checks();
     failures += explorer_unwind_catalog_suite();
+    failures += explorer_unwind_random_suite();
 
     /* A projection with a hole below the fork (a snapshot-seeded datadir):
      * the in-place overlays cannot be rebuilt there, so they are left as they
