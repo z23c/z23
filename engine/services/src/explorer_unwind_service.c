@@ -571,9 +571,20 @@ static struct zcl_result unwind_locked(struct node_db *ndb, int fork_height,
                                        const struct explorer_unwind_chain *chain,
                                        struct explorer_unwind_report *report)
 {
-    if (!node_db_begin_immediate(ndb))
+    if (!node_db_begin_immediate(ndb)) {
+        /* The node.db connection is shared by every thread. Inside another
+         * writer's transaction the BEGIN fails having changed nothing: that
+         * is the busy answer (defer, keep the cursor, retry on the next tick,
+         * as catchup's own pass does), not a failed unwind that would move
+         * the cursor over the losing branch behind a raised blocker. */
+        if (ndb->db && !sqlite3_get_autocommit(ndb->db))
+            return ZCL_ERR(EXPLORER_UNWIND_ERR_BUSY, "unwind above height "
+                           "%d: the shared node.db connection is inside "
+                           "another writer's transaction; nothing changed, "
+                           "retry on the next tick", fork_height);
         return ZCL_ERR(-2, "unwind above height %d: could not open a "
                        "transaction", fork_height);
+    }
     if (!unwind_body(ndb, fork_height, chain, report)) {
         if (!node_db_rollback(ndb))
             LOG_ERROR("explorer", "unwind: rollback failed");
@@ -593,14 +604,16 @@ static struct zcl_result unwind_locked(struct node_db *ndb, int fork_height,
 /* The failure signal. A failed unwind leaves the projection as it was while
  * the caller has (or will have) moved its cursor, so the losing branch may
  * still be indexed: raise the named blocker, and clear it when a later unwind
- * succeeds. Invalid arguments and a busy guard changed nothing, so they
- * neither raise nor clear it. */
+ * succeeds. Invalid arguments, a busy guard and a connection held by another
+ * writer's transaction changed nothing, so they neither raise nor clear it. */
 static void unwind_note_outcome(int fork_height, const struct zcl_result *res)
 {
     if (res->ok) {
         blocker_clear(EXPLORER_UNWIND_BLOCKER_ID);
         return;
     }
+    if (res->code == EXPLORER_UNWIND_ERR_BUSY)
+        return;  /* nothing changed; the caller defers and retries */
     struct blocker_record r;
     char reason[200];
     snprintf(reason, sizeof(reason),

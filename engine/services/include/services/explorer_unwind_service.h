@@ -36,7 +36,9 @@
  * guards (zslp_ledger first) around its transaction and waits for them for a
  * bounded time. If a fold still holds one it returns
  * EXPLORER_UNWIND_ERR_BUSY having changed NOTHING: the caller must then not
- * rewind its cursor and retries on its next tick. */
+ * rewind its cursor and retries on its next tick. The same answer comes back
+ * when the shared node.db connection is inside another writer's transaction
+ * (the unwind cannot open its own). */
 
 #include "models/catalog_digest_history.h"
 #include "util/result.h"
