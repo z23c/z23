@@ -129,11 +129,10 @@ static int classify_by_kind(const char *src, const char *rcs, const char *kind,
                       known ? &L->nstill : &L->nnew, src);
 }
 
-static int classify_tu(const char *src, int ossl_absent,
+static int classify_tu(const char *src, int ossl_absent, unsigned char log_shape,
                        struct wcs_lists *L)
 {
     char log[WCS_PATH * 2], rc[WCS_PATH * 2], rcs[64], kind[40];
-    struct stat st;
     if (wcs_paths_for(src, g_wcs_out, log, sizeof log, rc, sizeof rc) != 0)
         return 2;
     if (read_rc_file(rc, rcs, sizeof rcs) < 0) {
@@ -141,7 +140,7 @@ static int classify_tu(const char *src, int ossl_absent,
                 (int)sizeof rcs, rc);
         return 2;
     }
-    if (strcmp(rcs, "0") == 0 && (stat(log, &st) != 0 || st.st_size == 0))
+    if (strcmp(rcs, "0") == 0 && log_shape == 1)
         return lists_push(L->cleanl, &L->nclean, src);
     if (wcs_compile_kind(log, rcs, kind, sizeof kind) != 0) return 2;
     return classify_by_kind(src, rcs, kind, ossl_absent, L);
@@ -445,17 +444,26 @@ static int make_out_dirs(void)
     return 0;
 }
 
-static int count_logs(void)
+/* 0 is missing/nonregular; 1 is an empty regular log; 2 is nonempty. */
+int wcs_log_shape(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+    return st.st_size == 0 ? 1 : 2;
+}
+
+static int count_logs(unsigned char *shapes)
 {
     int logs = 0;
     for (int i = 0; i < g_wcs_nsrc; i++) {
         char log[WCS_PATH * 2], rc[WCS_PATH * 2];
-        wcs_paths_for(g_wcs_src[i], g_wcs_out, log, sizeof log, rc, sizeof rc);
-        struct stat st;
-        if (stat(log, &st) == 0) logs++;
+        if (wcs_paths_for(g_wcs_src[i], g_wcs_out, log, sizeof log, rc, sizeof rc)) return -1;
+        shapes[i] = (unsigned char)wcs_log_shape(log);
+        if (shapes[i]) logs++;
     }
     return logs;
 }
+
 
 static int infra_keeps_row(const struct wcs_lists *L, const char *row)
 {
@@ -476,10 +484,10 @@ static int find_stale(const struct wcs_lists *L, char brows[][WCS_PATH],
     return ns;
 }
 
-static int classify_all(int ossl_absent, struct wcs_lists *L)
+static int classify_all(int ossl_absent, const unsigned char *shapes, struct wcs_lists *L)
 {
     for (int i = 0; i < g_wcs_nsrc; i++) {
-        int rc = classify_tu(g_wcs_src[i], ossl_absent, L);
+        int rc = classify_tu(g_wcs_src[i], ossl_absent, shapes[i], L);
         if (rc) return rc;
     }
     return 0;
@@ -523,7 +531,8 @@ int wcs_sweep(void)
     if (wcs_cache_plan(srclist, misslist, g_wcs_out, 0) != 0) return 2;
     if (wcs_worker_run(misslist, jobs, NULL) != 0) return 2;
     wcs_cache_summary();
-    int r = gate_require_scanned(count_logs(), g_wcs_nsrc, k_wcs_gate, "");
+    unsigned char shapes[WCS_TUS];
+    int r = gate_require_scanned(count_logs(shapes), g_wcs_nsrc, k_wcs_gate, "");
     if (r) return r;
     struct stat st;
     int ossl_absent = stat("vendor/include/openssl/ssl.h", &st) != 0;
@@ -535,7 +544,7 @@ int wcs_sweep(void)
     }
     static struct wcs_lists L;
     memset(&L, 0, sizeof L);
-    r = classify_all(ossl_absent, &L);
+    r = classify_all(ossl_absent, shapes, &L);
     if (r) return r;
     static char brows[WCS_TUS][WCS_PATH];
     static int stale[WCS_TUS];

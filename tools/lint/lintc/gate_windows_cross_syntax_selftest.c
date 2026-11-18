@@ -724,11 +724,37 @@ static int fake_classifier_probes(void)
     return 0;
 }
 
+static int wcs_log_shape_test(const char *base)
+{
+    char dir[WCS_PATH], log[WCS_PATH];
+    if (ovf(snprintf(dir, sizeof dir, "%s/log-shape", base), sizeof dir) ||
+        ovf(snprintf(log, sizeof log, "%s/probe.log", dir), sizeof log) ||
+        mkdir(dir, 0700) || mkdir(log, 0700)) return 1;
+    int bad = wcs_log_shape(log) != 0 || rmdir(log) != 0 || wcs_log_shape(log) != 0;
+    FILE *f = fopen(log, "w");
+    if (!f || fclose(f) != 0) return 1;
+    bad |= wcs_log_shape(log) != 1;
+    f = fopen(log, "w");
+    if (!f) return 1;
+    int write_ok = fputs("diagnostic\n", f) >= 0;
+    if (fclose(f) != 0 || !write_ok) return 1;
+    bad |= wcs_log_shape(log) != 2;
+    (void)unlink(log);
+    (void)rmdir(dir);
+    if (bad) fprintf(stderr, "FAIL: invalid log shape classification\n");
+    return bad;
+}
+
+static int wcs_log_setup_test(const char *base)
+{
+    return wcs_log_shape_test(base) || wcs_mkdir_selftest(base);
+}
+
 int wcs_selftest_phase(void)
 {
     if (wcs_worker_empty_test(g_wcs_work) != 0 ||
         wcs_worker_cap_test(g_wcs_work) != 0) return 1;
-    if (wcs_mkdir_selftest(g_wcs_work) != 0) return 1;
+    if (wcs_log_setup_test(g_wcs_work) != 0) return 1;
     static char violating[SFP], clean[SFP], compat[SFP];
     static char *argv[WCS_ARGS];
     struct stat st;
