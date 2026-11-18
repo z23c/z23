@@ -73,13 +73,16 @@ its floor in the same commit, so the gain stays.
    and one next command; its rebuild self-admits through the host launcher's
    light lane, so a per-save reflex never queues behind build-lane work.
    <!-- claim: symbol-present dev.agent.hot engine/composition/commands/dev.def # per-save owning-group reflex -->
+   During editing, `make lint-fast` gives standalone lint feedback.
    The verification trip for a committed change is
    `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`, which runs exactly the
    test groups the land proof selects for your committed changes (the capped
    `code guide` and `code tests` lists miss groups the proof runs). `ONLY=<exact
-   groups>` still works for a hand-picked set; it is mandatory and exact. Add
-   `make lint-fast` for a quick check and `make check-architecture-tree` after
-   moving files. A cached or zero-test run is not a pass.
+   groups>` still works for a hand-picked set; it is mandatory and exact. Check the final
+   `agent-verify: OK` verdict. It includes a successful `lint-fast` on that
+   candidate. Run the [applicable preflight](dev/DEVELOPING.md#4-receive-fast-local-feedback)
+   before submission and `make check-architecture-tree` after moving files.
+   A cached or zero-test run is not a pass.
 5. **Review.** One reviewer who is not the author, of any model, reads the
    exact commit. Commits are signed; an AI-written commit ends with a
    `Co-Authored-By:` trailer naming the model.
