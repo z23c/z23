@@ -650,6 +650,76 @@ static struct store_package *store_record_publish(
     return added;
 }
 
+static struct store_package *store_record_finish(
+    struct vcs_package_store *store, struct store_package *pkg,
+    const uint8_t *wire, size_t wire_len, bool committed)
+{
+    if (!store_package_build_chunks(pkg)) {
+        store_record_dispose(pkg);
+        LOG_NULL(STORE_LOG, "manifest %s chunk table", pkg->root_hex);
+    }
+    if (!pkg->manifest_wire) {
+        pkg->manifest_wire = zcl_malloc(wire_len, "store_manifest_wire");
+        if (!pkg->manifest_wire) {
+            store_record_dispose(pkg);
+            LOG_NULL(STORE_LOG, "wire copy %s", pkg->root_hex);
+        }
+        memcpy(pkg->manifest_wire, wire, wire_len);
+    }
+    pkg->manifest_wire_len = wire_len;
+    pkg->file_count = (uint32_t)pkg->manifest.count;
+    for (size_t i = 0; i < pkg->manifest.count; i++)
+        pkg->total_chunks += pkg->manifest.files[i].chunk_count;
+    pkg->manifest_loaded = true;
+    pkg->hot_clock = ++store->hot_clock;
+    pkg->committed = committed;
+    /* New packages start RARE: no observed demand or replication yet
+     * (the enum's zero value is HOT, so this must be explicit). */
+    pkg->class_ = VCS_PACKAGE_STORE_CLASS_RARE;
+    store_package_touch(store, pkg);
+    pkg->admission_generation = pkg->mutation_generation;
+    char pin[STORE_PATH_MAX];
+    snprintf(pin, sizeof(pin), "%s/pins/%s", store->root, pkg->root_hex);
+    pkg->pinned = store_path_exists(pin);
+    return store_record_publish(store, pkg);
+}
+
+/* Both admission locks are held. Consumes manifest on every return. */
+enum vcs_package_store_result store_record_stage_fresh(
+    struct vcs_package_store *store, struct vcs_package_manifest *manifest,
+    const uint8_t root[32], const char *root_hex)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (!vcs_package_manifest_serialize(manifest, &wire, &wire_len)) {
+        vcs_package_manifest_free(manifest);
+        return VCS_PACKAGE_STORE_ERR_ALLOC;
+    }
+    char staging_dir[STORE_PATH_MAX];
+    char staged[STORE_PATH_MAX];
+    snprintf(staging_dir, sizeof(staging_dir), "%s/staging/%s", store->root,
+             root_hex);
+    snprintf(staged, sizeof(staged), "%s/manifest", staging_dir);
+    if (!store_generation_advance(store) || !store_mkdir_p(staging_dir) ||
+        !store_atomic_write(staged, wire, wire_len)) {
+        free(wire);
+        vcs_package_manifest_free(manifest);
+        return VCS_PACKAGE_STORE_ERR_IO;
+    }
+    struct store_package pkg;
+    memset(&pkg, 0, sizeof(pkg));
+    pkg.manifest = *manifest;
+    vcs_package_manifest_init(manifest);
+    memcpy(pkg.root, root, sizeof(pkg.root));
+    zcl_hex_encode(pkg.root, 32, pkg.root_hex);
+    pkg.manifest_wire = wire;
+    if (!store_record_finish(store, &pkg, NULL, wire_len, false)) {
+        store_rm_rf(staging_dir);
+        return VCS_PACKAGE_STORE_ERR_ALLOC;
+    }
+    return VCS_PACKAGE_STORE_OK;
+}
+
 struct store_package *store_record_add(struct vcs_package_store *store,
                                        const uint8_t *wire,
                                        size_t wire_len,
@@ -670,36 +740,7 @@ struct store_package *store_record_add(struct vcs_package_store *store,
         LOG_NULL(STORE_LOG, "manifest at %s commits a different root %s",
                  expect_hex, pkg.root_hex);
     }
-    if (!store_package_build_chunks(&pkg)) {
-        vcs_package_manifest_free(&pkg.manifest);
-        LOG_NULL(STORE_LOG, "manifest %s chunk table", expect_hex);
-    }
-    pkg.manifest_wire = zcl_malloc(wire_len, "store_manifest_wire");
-    if (!pkg.manifest_wire) {
-        free(pkg.chunks);
-        vcs_package_manifest_free(&pkg.manifest);
-        LOG_NULL(STORE_LOG, "wire copy %s", expect_hex);
-    }
-    memcpy(pkg.manifest_wire, wire, wire_len);
-    pkg.manifest_wire_len = wire_len;
-    pkg.file_count = (uint32_t)pkg.manifest.count;
-    for (size_t i = 0; i < pkg.manifest.count; i++)
-        pkg.total_chunks += pkg.manifest.files[i].chunk_count;
-    pkg.manifest_loaded = true;
-    pkg.hot_clock = ++store->hot_clock;
-    pkg.committed = committed;
-    /* New packages start RARE: no observed demand or replication yet
-     * (the enum's zero value is HOT, so this must be explicit). */
-    pkg.class_ = VCS_PACKAGE_STORE_CLASS_RARE;
-    store_package_touch(store, &pkg);
-    pkg.admission_generation = pkg.mutation_generation;
-    {
-        char pin[STORE_PATH_MAX];
-        snprintf(pin, sizeof(pin), "%s/pins/%s", store->root,
-                 pkg.root_hex);
-        pkg.pinned = store_path_exists(pin);
-    }
-    return store_record_publish(store, &pkg);
+    return store_record_finish(store, &pkg, wire, wire_len, committed);
 }
 
 static bool store_committed_root_loaded(const struct vcs_package_store *store,

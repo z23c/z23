@@ -152,7 +152,8 @@ bool store_chunk_write_verified(struct vcs_package_store *store,
                                 const uint8_t hash[32],
                                 const uint8_t *chunk, size_t chunk_len);
 bool store_manifest_identity(const uint8_t *wire, size_t wire_len,
-                             uint8_t root[32], uint64_t *total_bytes);
+                             uint8_t root[32], uint64_t *total_bytes,
+                             struct vcs_package_manifest *manifest);
 bool store_chunk_inputs_valid(struct vcs_package_store *store,
                               const uint8_t package_root[32],
                               const char *path, const uint8_t *chunk);
@@ -248,6 +249,10 @@ uint32_t store_releases_count(const struct vcs_package_store *store);
 /* Parse a manifest wire, verify its root equals expect_hex, build the
  * record (unique chunks, total bytes, pin marker), and append it to the
  * table. NULL on parse/root/allocation failure (logged). */
+enum vcs_package_store_result store_record_stage_fresh(
+    struct vcs_package_store *store, struct vcs_package_manifest *manifest,
+    const uint8_t root[32], const char *root_hex);
+
 struct store_package *store_record_add(struct vcs_package_store *store,
                                        const uint8_t *wire, size_t wire_len,
                                        const char *expect_hex,

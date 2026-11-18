@@ -764,7 +764,8 @@ static enum vcs_package_store_result store_put_manifest_mode(
 
     uint8_t root[32];
     uint64_t total_bytes = 0;
-    if (!store_manifest_identity(wire, wire_len, root, &total_bytes)) {
+    struct vcs_package_manifest manifest;
+    if (!store_manifest_identity(wire, wire_len, root, &total_bytes, &manifest)) {
         pthread_mutex_unlock(&store->lock);
         return VCS_PACKAGE_STORE_ERR_MANIFEST;
     }
@@ -774,12 +775,14 @@ static enum vcs_package_store_result store_put_manifest_mode(
     if (root_out)
         memcpy(root_out, root, 32);
     if (!store_process_lock(store)) {
+        vcs_package_manifest_free(&manifest);
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
                    "lock store for manifest admission");
     }
     if (!store_generation_check(store)) {
         store_process_unlock(store);
+        vcs_package_manifest_free(&manifest);
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
                    "manifest admission refused: stale store handle");
@@ -787,6 +790,7 @@ static enum vcs_package_store_result store_put_manifest_mode(
     struct store_package *existing = store_find(store, root, NULL);
     if (store->catalog_incomplete) {
         store_process_unlock(store);
+        vcs_package_manifest_free(&manifest);
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_IO, STORE_LOG,
                    "manifest admission refused: catalog changed");
@@ -795,6 +799,7 @@ static enum vcs_package_store_result store_put_manifest_mode(
         enum vcs_package_store_result result =
             store_existing_manifest_noop(store, existing);
         store_process_unlock(store);
+        vcs_package_manifest_free(&manifest);
         pthread_mutex_unlock(&store->lock);
         return result; /* same root = same content: no-op if still present */
     }
@@ -806,29 +811,16 @@ static enum vcs_package_store_result store_put_manifest_mode(
         store_manifest_preflight(store, root_hex, total_bytes, no_evict);
     if (preflight != VCS_PACKAGE_STORE_OK) {
         store_process_unlock(store);
+        vcs_package_manifest_free(&manifest);
         pthread_mutex_unlock(&store->lock);
         return preflight;
     }
 
-    char staging_dir[STORE_PATH_MAX];
-    char staged[STORE_PATH_MAX];
-    snprintf(staging_dir, sizeof(staging_dir), "%s/staging/%s", store->root,
-             root_hex);
-    snprintf(staged, sizeof(staged), "%s/manifest", staging_dir);
-    if (!store_generation_advance(store) || !store_mkdir_p(staging_dir) ||
-        !store_atomic_write(staged, wire, wire_len)) {
-        store_process_unlock(store);
-        pthread_mutex_unlock(&store->lock);
-        return VCS_PACKAGE_STORE_ERR_IO;
-    }
-    if (!store_record_add(store, wire, wire_len, root_hex, false)) {
-        store_rm_rf(staging_dir);
-        store_process_unlock(store);
-        pthread_mutex_unlock(&store->lock);
-        return VCS_PACKAGE_STORE_ERR_ALLOC;
-    }
-    enum vcs_package_store_result result = store_finish_dedup_manifest(
-        store, root, store->pkg_count - 1, no_evict);
+    enum vcs_package_store_result result =
+        store_record_stage_fresh(store, &manifest, root, root_hex);
+    if (result == VCS_PACKAGE_STORE_OK)
+        result = store_finish_dedup_manifest(
+            store, root, store->pkg_count - 1, no_evict);
     store_process_unlock(store);
     pthread_mutex_unlock(&store->lock);
     return result;

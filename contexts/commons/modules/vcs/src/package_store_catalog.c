@@ -44,19 +44,18 @@ bool store_chunk_inputs_valid(struct vcs_package_store *store,
 }
 
 bool store_manifest_identity(const uint8_t *wire, size_t wire_len,
-                             uint8_t root[32], uint64_t *total_bytes)
+                             uint8_t root[32], uint64_t *total_bytes,
+                             struct vcs_package_manifest *manifest)
 {
-    struct vcs_package_manifest manifest;
-    if (!vcs_package_manifest_parse(wire, wire_len, &manifest))
+    if (!vcs_package_manifest_parse(wire, wire_len, manifest))
         return false;
-    if (!vcs_package_manifest_root(&manifest, root)) {
-        vcs_package_manifest_free(&manifest);
+    if (!vcs_package_manifest_root(manifest, root)) {
+        vcs_package_manifest_free(manifest);
         return false;
     }
     *total_bytes = 0;
-    for (size_t i = 0; i < manifest.count; i++)
-        *total_bytes += manifest.files[i].size;
-    vcs_package_manifest_free(&manifest);
+    for (size_t i = 0; i < manifest->count; i++)
+        *total_bytes += manifest->files[i].size;
     return true;
 }
 

@@ -37,6 +37,7 @@
 #include "controllers/diagnostics_internal.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "crypto/ed25519.h"
@@ -228,9 +229,74 @@ static int store_case_manifest_quota_infeasible(struct vcs_package_store *s,
     return failures;
 }
 
+static int store_identity_readback(struct vcs_package_store *s, struct zs_pkg *p)
+{
+    int failures = 0;
+    uint8_t *expected = malloc(p->wire_len);
+    ZS_CHECK("identity: wire comparison fixture", expected != NULL);
+    if (!expected) return failures;
+    memcpy(expected, p->wire, p->wire_len);
+    p->wire[0] ^= 1u;
+    uint8_t *stored = NULL;
+    size_t stored_len = 0;
+    enum vcs_package_store_result read = vcs_package_store_get_manifest_wire(
+        s, p->root, &stored, &stored_len);
+    ZS_CHECK("identity: stored wire matches original after caller mutation",
+             read == VCS_PACKAGE_STORE_OK && stored_len == p->wire_len &&
+             stored && memcmp(stored, expected, stored_len) == 0);
+    free(stored);
+    free(expected);
+    return failures;
+}
+
+static int store_case_single_identity(void)
+{
+    int failures = 0;
+    char dd[256];
+    struct vcs_package_store *s = zs_open(dd, sizeof(dd), "single-identity", 1000000u);
+    ZS_CHECK("identity: store opens", s != NULL);
+    if (!s) return failures;
+    const char *paths[] = { "input.txt" };
+    const size_t lens[] = { 11 };
+    struct zs_pkg p;
+    bool built = zs_make_package(&p, 1, paths, lens, 0x44);
+    ZS_CHECK("identity: fixture builds", built);
+    if (!built) { vcs_package_store_close(s); test_rm_rf_recursive(dd); return failures; }
+    uint8_t root[32], sentinel[32];
+    memset(root, 0xa5, sizeof(root));
+    memcpy(sentinel, root, sizeof(root));
+    zcl_alloc_fault_fail_next("vcs_package_chunk_hashes");
+    enum vcs_package_store_result first = vcs_package_store_put_manifest(s, p.wire, p.wire_len, root);
+    bool first_fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    ZS_CHECK("identity: first parse hash allocation remains required", first_fired && first == VCS_PACKAGE_STORE_ERR_MANIFEST &&
+             memcmp(root, sentinel, sizeof(root)) == 0);
+    zcl_alloc_fault_fail_next("vcs_package_wire");
+    enum vcs_package_store_result late = vcs_package_store_put_manifest(s, p.wire, p.wire_len, root);
+    bool late_fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    ZS_CHECK("identity: late allocation refusal retains computed root",
+             late_fired && late == VCS_PACKAGE_STORE_ERR_ALLOC && memcmp(root, p.root, 32) == 0);
+    zcl_alloc_fault_fail_nth("vcs_package_chunk_hashes", 2);
+    enum vcs_package_store_result second = vcs_package_store_put_manifest(s, p.wire, p.wire_len, root);
+    bool second_unused = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    ZS_CHECK("identity: fresh admission parses hashes once", second == VCS_PACKAGE_STORE_OK && second_unused && memcmp(root, p.root, 32) == 0);
+    failures += store_identity_readback(s, &p);
+    vcs_package_store_close(s);
+    s = vcs_package_store_open(dd, 1000000u);
+    struct vcs_package_store_status status;
+    ZS_CHECK("identity: staged manifest reloads", s && vcs_package_store_package_status(s, p.root, &status) && status.tracked && !status.complete);
+    vcs_package_store_close(s);
+    zs_free_package(&p);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int t_store_manifest_admission(void)
 {
     int failures = 0;
+    failures += store_case_single_identity();
     char dd[256];
     struct vcs_package_store *s =
         zs_open(dd, sizeof(dd), "manifest", 1000000u);
