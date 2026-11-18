@@ -2054,6 +2054,86 @@ static bool package_prefixes_rejected(const uint8_t *wire, size_t wire_len)
     return all_clean;
 }
 
+static int package_order_fault_controls(struct vcs_package_manifest *m)
+{
+    int failures = 0;
+    uint8_t root[32], *wire = NULL;
+    size_t wire_len = 0;
+    zcl_alloc_fault_fail_next("vcs_package_sorted_copy");
+    bool ok = vcs_package_manifest_root(m, root);
+    bool unused = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    VC_CHECK("package: ordered root needs no sort allocation", ok && unused);
+    zcl_alloc_fault_fail_next("vcs_package_sorted_copy");
+    ok = vcs_package_manifest_serialize(m, &wire, &wire_len);
+    unused = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    VC_CHECK("package: ordered wire needs no sort allocation", ok && unused);
+    free(wire);
+    struct vcs_package_file tmp = m->files[0];
+    m->files[0] = m->files[1];
+    m->files[1] = tmp;
+    zcl_alloc_fault_fail_next("vcs_package_sorted_copy");
+    ok = vcs_package_manifest_root(m, root);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    VC_CHECK("package: unordered root still requires sort", !ok && fired);
+    zcl_alloc_fault_fail_next("vcs_package_sorted_copy");
+    ok = vcs_package_manifest_serialize(m, &wire, &wire_len);
+    fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    VC_CHECK("package: unordered wire still requires sort", !ok && fired && !wire && !wire_len);
+    free(wire);
+    tmp = m->files[0]; m->files[0] = m->files[1]; m->files[1] = tmp;
+    return failures;
+}
+
+static int package_unordered_duplicate_controls(struct vcs_package_manifest *m)
+{
+    int failures = 0;
+    char *saved = m->files[2].path;
+    m->files[2].path = m->files[0].path;
+    uint8_t root[32], *wire = NULL;
+    size_t wire_len = 0;
+    VC_CHECK("package: nonadjacent duplicate root rejected",
+             !vcs_package_manifest_root(m, root));
+    VC_CHECK("package: nonadjacent duplicate wire rejected",
+             !vcs_package_manifest_serialize(m, &wire, &wire_len) &&
+             !wire && !wire_len);
+    free(wire);
+    m->files[2].path = saved;
+    return failures;
+}
+
+static int package_order_roundtrip(void)
+{
+    int failures = 0;
+    struct vcs_package_manifest m;
+    vcs_package_manifest_init(&m);
+    bool built = vcs_package_manifest_add(&m, "a", VCS_PACKAGE_MODE_FILE, 0, NULL, 0) &&
+        vcs_package_manifest_add(&m, "b", VCS_PACKAGE_MODE_EXECUTABLE, 0, NULL, 0) &&
+        vcs_package_manifest_add(&m, "c", VCS_PACKAGE_MODE_FILE, 0, NULL, 0);
+    VC_CHECK("package: ordered fixture builds", built);
+    if (!built) { vcs_package_manifest_free(&m); return failures; }
+    uint8_t root[32], reversed_root[32], *wire = NULL, *reversed_wire = NULL;
+    size_t len = 0, reversed_len = 0;
+    bool ok = vcs_package_manifest_root(&m, root) &&
+        vcs_package_manifest_serialize(&m, &wire, &len);
+    VC_CHECK("package: ordered fixture serializes", ok);
+    failures += package_order_fault_controls(&m);
+    struct vcs_package_file tmp = m.files[0]; m.files[0] = m.files[1]; m.files[1] = tmp;
+    bool reversed = vcs_package_manifest_root(&m, reversed_root) &&
+        vcs_package_manifest_serialize(&m, &reversed_wire, &reversed_len);
+    VC_CHECK("package: unordered root and wire equal ordered", ok && reversed &&
+             memcmp(root, reversed_root, 32) == 0 && len == reversed_len &&
+             memcmp(wire, reversed_wire, len) == 0);
+    VC_CHECK("package: sorting leaves input order untouched", strcmp(m.files[0].path, "b") == 0);
+    failures += package_unordered_duplicate_controls(&m);
+    free(wire); free(reversed_wire);
+    vcs_package_manifest_free(&m);
+    return failures;
+}
+
 static int package_parse_overflow_controls(const uint8_t *wire, size_t wire_len)
 {
     int failures = 0;
@@ -3995,6 +4075,7 @@ int test_vcs_core(void)
 
     failures += t_manifest_fixedpoint();
     failures += t_package_manifest();
+    failures += package_order_roundtrip();
     failures += package_parse_aggregate_limits();
     failures += t_package_swarm();
     failures += package_capsule_wire_tests();

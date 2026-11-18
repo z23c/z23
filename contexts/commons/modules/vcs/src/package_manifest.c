@@ -282,10 +282,12 @@ static int package_file_cmp(const void *a, const void *b)
     return strcmp(fa->path, fb->path);
 }
 
-static bool package_sorted_copy(const struct vcs_package_manifest *manifest,
-                                struct vcs_package_file **out)
+static bool package_ordered_files(const struct vcs_package_manifest *manifest,
+                                const struct vcs_package_file **out,
+                                struct vcs_package_file **owned)
 {
     *out = NULL;
+    *owned = NULL;
     uint64_t total_bytes = 0;
     uint64_t total_chunks = 0;
     if (!package_manifest_totals(manifest, &total_bytes, &total_chunks))
@@ -295,7 +297,16 @@ static bool package_sorted_copy(const struct vcs_package_manifest *manifest,
     if (manifest->count == 0)
         return true;
 
-    if (manifest->count > SIZE_MAX / sizeof(**out))
+    size_t i = 1;
+    while (i < manifest->count &&
+           strcmp(manifest->files[i - 1].path, manifest->files[i].path) < 0)
+        i++;
+    if (i == manifest->count) {
+        *out = manifest->files;
+        return true;
+    }
+
+    if (manifest->count > SIZE_MAX / sizeof(**owned))
         LOG_FAIL("vcs.package", "package sort capacity overflow");
     struct vcs_package_file *copy = zcl_malloc(
         manifest->count * sizeof(*copy), "vcs_package_sorted_copy");
@@ -310,6 +321,7 @@ static bool package_sorted_copy(const struct vcs_package_manifest *manifest,
         }
     }
     *out = copy;
+    *owned = copy;
     return true;
 }
 
@@ -323,8 +335,9 @@ bool vcs_package_manifest_serialize(const struct vcs_package_manifest *manifest,
     if (!manifest)
         LOG_FAIL("vcs.package", "null package manifest");
 
-    struct vcs_package_file *files = NULL;
-    if (!package_sorted_copy(manifest, &files))
+    const struct vcs_package_file *files = NULL;
+    struct vcs_package_file *owned = NULL;
+    if (!package_ordered_files(manifest, &files, &owned))
         return false;
 
     size_t total = VCS_PACKAGE_MANIFEST_WIRE_HEADER_BYTES;
@@ -333,19 +346,19 @@ bool vcs_package_manifest_serialize(const struct vcs_package_manifest *manifest,
         size_t hash_bytes = (size_t)files[i].chunk_count * 32u;
         size_t fixed = 2u + path_len + 4u + 8u + 4u;
         if (fixed > SIZE_MAX - hash_bytes || total > SIZE_MAX - fixed - hash_bytes) {
-            free(files);
+            free(owned);
             LOG_FAIL("vcs.package", "package wire length overflow");
         }
         total += fixed + hash_bytes;
     }
     if (total > VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES) {
-        free(files);
+        free(owned);
         LOG_FAIL("vcs.package", "package wire limit exceeded: %zu", total);
     }
 
     uint8_t *wire = zcl_malloc(total, "vcs_package_wire");
     if (!wire) {
-        free(files);
+        free(owned);
         LOG_FAIL("vcs.package", "alloc package wire");
     }
     size_t off = 0;
@@ -377,7 +390,7 @@ bool vcs_package_manifest_serialize(const struct vcs_package_manifest *manifest,
             off += hash_bytes;
         }
     }
-    free(files);
+    free(owned);
     *out = wire;
     *out_len = off;
     return true;
@@ -537,8 +550,9 @@ bool vcs_package_manifest_root(const struct vcs_package_manifest *manifest,
 {
     if (!manifest || !out)
         LOG_FAIL("vcs.package", "null package root input");
-    struct vcs_package_file *files = NULL;
-    if (!package_sorted_copy(manifest, &files))
+    const struct vcs_package_file *files = NULL;
+    struct vcs_package_file *owned = NULL;
+    if (!package_ordered_files(manifest, &files, &owned))
         return false;
 
     uint8_t version_le[2];
@@ -565,7 +579,7 @@ bool vcs_package_manifest_root(const struct vcs_package_manifest *manifest,
     }
     if (ok)
         sha3_256_finalize(&ctx, out);
-    free(files);
+    free(owned);
     if (!ok)
         LOG_FAIL("vcs.package", "package file hash failed");
     return true;
