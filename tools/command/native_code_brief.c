@@ -711,29 +711,20 @@ static void cb_push_next(struct cb_brief *b, const char *fmt, const char *arg)
         (void)snprintf(b->next[b->nnext++], CB_NEXT_CAP, fmt, arg);
 }
 
-/* The group for the focused proof command: t-fast ONLY takes one name. The
- * lint umbrella is proved by the lint commands that follow, so it is named
- * only when it is the sole routed group. The verify command itself no longer
- * takes a group: ONLY=@changed runs the set the land proof selects, which a
- * capped presentation list of groups cannot. */
-static const char *cb_focus_group(const struct cb_brief *b)
-{
-    for (size_t i = 0; i < b->ntests; i++)
-        if (strcmp(b->tests[i], "make_lint_gates") != 0)
-            return b->tests[i];
-    return b->ntests ? b->tests[0] : NULL;
-}
-
 static void cb_build_next(struct cb_brief *b)
 {
-    const char *group = cb_focus_group(b);
-    if (group)
+    if (b->ntests) {
         cb_push_next(b, "%s", "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
-    else if (b->npaths)
-        cb_push_next(b, "build/bin/z23 code cost %s", b->paths[0]);
-    cb_push_next(b, "%s", "make lint-fast");
-    if (cb_needs_preflight(b))
-        cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
+        if (cb_needs_preflight(b))
+            cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
+    } else {
+        if (b->npaths)
+            cb_push_next(b, "build/bin/z23 code cost %s", b->paths[0]);
+        if (cb_needs_preflight(b))
+            cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-fast-preflight");
+        else
+            cb_push_next(b, "%s", "make lint-fast");
+    }
     if (b->ntests == 1 && strcmp(b->tests[0], "make_lint_gates") == 0)
         cb_push_next(b, "%s", "build/bin/z23-lint run --list");
 }

@@ -860,6 +860,50 @@ static int test_code_guide_source_changes(void)
     return failures;
 }
 
+static int test_code_guide_next_commands(void)
+{
+    int failures = 0;
+    TEST("guide next commands avoid duplicate lint and retain mapped tests") {
+        char cwd[512];
+        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+        char unmapped[96];
+        snprintf(unmapped, sizeof unmapped, "other/%s.%s", "zz_unmapped_fixture", "def");
+        const char *paths[] = {"tools/command/native_code_brief.c",
+                               "tests/harness/src/test_code_impact.c",
+                               "zz_no_impact_rule_fixture.c",
+                               unmapped};
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+            struct zcl_command_reply reply;
+            cg_guide_paths(cwd, paths[i], &reply);
+            ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+            const struct json_value *next = json_get(&reply.data, "next");
+            ASSERT(next && next->type == JSON_ARR);
+            bool verify = false, preflight = false, union_gate = false;
+            for (size_t j = 0; j < json_size(next); j++) {
+                const char *cmd = json_get_str(json_at(next, j));
+                ASSERT(cmd != NULL);
+                verify |= strstr(cmd, "agent-verify ONLY=@changed") != NULL;
+                preflight |= strstr(cmd, " lint-preflight") != NULL;
+                union_gate |= strstr(cmd, " lint-fast-preflight") != NULL;
+                if (i < 2) ASSERT(strcmp(cmd, "make lint-fast") != 0);
+            }
+            if (i < 2) {
+                ASSERT(verify);
+                ASSERT(json_size(json_get(&reply.data, "tests")) > 0);
+                ASSERT_EQ(preflight, i == 0);
+                ASSERT(!union_gate);
+            } else {
+                ASSERT(!verify && !preflight);
+                ASSERT_EQ(union_gate, i == 3);
+                if (i == 2) ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
+            }
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -2243,6 +2287,7 @@ int test_code_impact(void)
     failures += test_boot_services_rule_capacity();
     failures += test_code_context_map_warm_follows_generation();
     failures += test_code_guide_source_changes();
+    failures += test_code_guide_next_commands();
     failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();
