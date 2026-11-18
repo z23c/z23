@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "base/safe_alloc.h"
 #include "gate_capability_closure_priv.h"
 #include "lintc.h"
 #include "lintc_proc.h"
@@ -231,7 +232,11 @@ static int cgs_case_d(const struct ccs_fx *fx)
                                            "int aggregate_edge(void) { return aggregate_only_unknown(); }\n") != 0
         || cgs_cc(fx, "d/.restart-base.c", "d/build/dev-obj/epochs/fx0/restart-base.o", NULL) != 0)
         return ccs_say(0, "D: fixture");
-    return cgs_check(fx, "d", &cfg, 0, NULL, "D: a correctly declared, fully-used fixture passes (positive control)");
+    zcl_alloc_fault_fail_next("ccg_ban line");
+    int failures = cgs_check(fx, "d", &cfg, 0, NULL,
+        "D: a correctly declared fixture passes without allocating a line for ordinary source");
+    zcl_alloc_fault_clear();
+    return failures;
 }
 
 /* E. an epoch below the object floor is UNPROVEN, never a clean pass. */
@@ -519,14 +524,16 @@ static int cgs_case_q(const struct ccs_fx *fx)
 }
 
 /* V. a source with embedded NUL bytes is scanned in bounds: a ban hit after the NUL on
- * the same line is found (line 1), and the line after it is still numbered (line 2). */
+ * the same line is found, and skipped ordinary lines still count. */
 static int cgs_case_v(const struct ccs_fx *fx)
 {
-    static const char src[] = "a\0 sys" "call(0);\nlong raw_use(void) { return sys" "call(0); }\n";
+    static const char src[] = "ordinary line\na\0 sys" "call(0);\nlong raw_use(void) { return sys" "call(0); }\n"
+                              "x\0int\t" "$0x80\ny\0sv" "c  #0\nz\0\"  sys" "call\\n\"\n";
     struct ccg_cfg cfg;
     char path[CCD_PATH];
     FILE *f;
-    const char *const need[] = { "raw syscall", "    1: sys" "call(0);", "    2:long raw_use", NULL };
+    const char *const need[] = { "raw syscall", "    2: sys" "call(0);", "    3:long raw_use",
+        "    4:int\t" "$0x80", "    5:sv" "c  #0", "    6:\"  sys" "call\\n\"", NULL };
     cgs_cfg(&cfg);
     if (cgs_base(fx, "v", "") != 0 || ccs_put(fx, "v/fixture_src/seed.txt", "x\n") != 0)
         return ccs_say(0, "V: fixture");
@@ -534,7 +541,7 @@ static int cgs_case_v(const struct ccs_fx *fx)
     f = fopen(path, "wb");
     if (!f || fwrite(src, 1, sizeof src - 1, f) != sizeof src - 1 || fclose(f) != 0)
         return ccs_say(0, "V: write");
-    return cgs_check(fx, "v", &cfg, -1, need, "V: a ban hit after an embedded NUL is found, later lines are numbered");
+    return cgs_check(fx, "v", &cfg, -1, need, "V: all trap forms after embedded NULs are found at the original line numbers");
 }
 
 /* R. the leftover object of a failed candidate has no source in this tree: it is

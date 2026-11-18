@@ -691,17 +691,29 @@ static const char *ccg_ban_piece(const regex_t *re, const char *line, size_t len
     return NULL;
 }
 
+/* Each alternative in k_ccg_raw requires one of these literals. getline
+ * terminates the buffer; embedded NULs separate pieces on the same line. */
+static bool ccg_ban_candidate(const char *raw, size_t len)
+{
+    for (const char *p = raw; p < raw + len; p += strlen(p) + 1)
+        if (strstr(p, "syscall") || strstr(p, "$0x80") || strstr(p, "svc"))
+            return true;
+    return false;
+}
+
 /* lc_each_line callback: one source line, newline stripped, against the ban;
  * each piece between embedded NUL bytes is judged. */
 static int ccg_ban_line(void *vctx, const char *raw, size_t len)
 {
     struct ccg_ban *b = vctx;
+    b->no++;
+    if (!ccg_ban_candidate(raw, len))
+        return 0;
     char *line = len < SIZE_MAX ? zcl_malloc(len + 1, "ccg_ban line") : NULL;
     if (!line)
         return -1;
     memcpy(line, raw, len);
     line[len] = '\0';
-    b->no++;
     if (len > 0 && line[len - 1] == '\n')
         line[len - 1] = '\0';
     const char *hit = ccg_ban_piece(b->re, line, len);
