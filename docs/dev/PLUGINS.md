@@ -647,7 +647,11 @@ preserves plugin state.
 
 The command also re-derives the content.v2 root from every fetched member;
 `source-root` must equal it, otherwise `PLUGIN_REPRODUCE_ROOT_MISMATCH` stops
-the journey before compilation. Missing `NAME.c` or `cases.json` refuses
+the journey before compilation. A version-marked `compiler-name.txt` preserves
+the source basename used by the original compiler when it differs from NAME.c;
+its value must be a single normalized .c basename, not a path or option.
+Unmarked files of that name remain inert, and legacy aligned packages need no
+descriptor. Missing `NAME.c` or `cases.json` refuses
 `PLUGIN_REPRODUCE_INPUT`; an existing `out` refuses
 `PLUGIN_REPRODUCE_OUTPUT`; a resident interface refuses
 `PLUGIN_REPRODUCE_INTERFACE`. A rebuilt image that differs refuses

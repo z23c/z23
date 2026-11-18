@@ -251,7 +251,11 @@ the reply's `next` is the install command. Linux only; other hosts refuse with
 
 With `include-source=true`, the command also writes the exact loaded C source
 as NAME.c and the effective cases as cases.json in the chosen output directory,
-and returns those paths as `source` and `cases`. These optional flat members let the existing
+and returns those paths as `source` and `cases`. When the compiler-visible
+basename differs from NAME.c, a versioned `compiler-name.txt` also travels with
+the source so reproduction uses the same basename. Unmarked files at that
+reserved name are preserved; an export that needs the descriptor refuses to
+overwrite one. These optional flat members let the existing
 `plugin publish --dir` carry everything `plugin reproduce` needs. The default
 remains the three pack files. An export I/O failure reports
 `LAB_PROMOTE_EXPORT_FAILED` and admits that the signed pack was already

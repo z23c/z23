@@ -17,10 +17,12 @@
 #include "util/path_util.h"
 #include "util/write_all.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 struct promote_req {
@@ -340,6 +342,57 @@ static bool promote_write(const char *path, const uint8_t *bytes, size_t len)
     return ok;
 }
 
+/* Return 0 for absent, 1 for unmarked, 2 for our valid descriptor, -1 on error. */
+static int promote_sidecar_kind(const char *path)
+{
+    static const char prefix[] = LAB_COMPILER_NAME_PREFIX;
+    static const char marker[] = LAB_COMPILER_NAME_MARKER;
+    char data[sizeof(marker) + 72];
+    int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
+#if !defined(_WIN32)
+    flags |= O_NONBLOCK;
+#endif
+    int fd = open(path, flags);
+    if (fd < 0)
+        return errno == ENOENT ? 0 : -1;
+    struct stat st;
+    ssize_t n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
+                    ? read(fd, data, sizeof(data) - 1) : -1;
+    bool closed = close(fd) == 0;
+    if (n < 0 || !closed)
+        return -1;
+    if (n < (ssize_t)(sizeof(prefix) - 1) ||
+        memcmp(data, prefix, sizeof(prefix) - 1) != 0)
+        return 1;
+    if (n <= (ssize_t)(sizeof(marker) - 1) || n != st.st_size ||
+        memcmp(data, marker, sizeof(marker) - 1) != 0)
+        return -1;
+    data[n] = '\0';
+    return strlen(data) == (size_t)n &&
+           lab_compiler_name_valid(data + sizeof(marker) - 1) ? 2 : -1;
+}
+
+/* Preserve unmarked members; only this versioned sidecar is replaced or removed. */
+static bool promote_name_sidecar(const char *dir, const char *exported,
+                                 const char *compiler_name)
+{
+    static const char marker[] = LAB_COMPILER_NAME_MARKER;
+    char path[4096], data[sizeof(marker) + 72];
+    if (!zcl_path_join(path, sizeof(path), dir, LAB_COMPILER_NAME_FILE))
+        return false;
+    int kind = promote_sidecar_kind(path);
+    if (kind < 0)
+        return false;
+    if (strcmp(exported, compiler_name) == 0)
+        return kind != 2 || unlink(path) == 0;
+    if (kind == 1 || !lab_compiler_name_valid(compiler_name))
+        return false;
+    int n = snprintf(data, sizeof(data), "%s%s", marker, compiler_name);
+    return n > 0 && (size_t)n < sizeof(data) &&
+           promote_write(path, (const uint8_t *)data, (size_t)n);
+}
+
+
 static bool promote_cases_array(const struct json_value *v, uint8_t **bytes,
                                 size_t *len)
 {
@@ -394,6 +447,7 @@ static bool promote_export(const struct zcl_command_request *rq,
     bool ok = n > 0 && (size_t)n < sizeof(leaf) &&
               zcl_path_join(source, sizeof(source), dir ? dir : ".", leaf) &&
               zcl_path_join(cases, sizeof(cases), dir ? dir : ".", "cases.json") &&
+              promote_name_sidecar(dir ? dir : ".", leaf, ctx->src.base) &&
               promote_cases_export(test, &case_bytes, &case_len, &case_storage) &&
               promote_write(source, ctx->src.bytes, ctx->src.len) &&
               promote_write(cases, case_bytes, case_len) &&

@@ -15,6 +15,7 @@
 #include "plugin/plugin_dev.h"
 #include "plugin/plugin_store.h"
 
+#include <errno.h>
 #include <dirent.h>
 #include <limits.h>
 #include <stdio.h>
@@ -769,6 +770,69 @@ static bool lp_dev_source(const char *dir, const char *file, const char *cases,
     return spec && lp_invoke(spec->handler, spec, in, r);
 }
 
+static bool lp_promote_export(const struct lp_env *e, const char *name,
+                              struct zcl_command_reply *reply)
+{
+    char input[4 * PATH_MAX + 1024];
+    int n = snprintf(input, sizeof(input),
+                     "{\"file\":\"" LP_UPPER "\",\"cases\":%s,\"name\":\"%s\","
+                     "\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\","
+                     "\"include-source\":true}", LP_CASES_OK, name, e->key, e->dist);
+    return n > 0 && (size_t)n < sizeof(input) &&
+           lp_call(zcl_native_handle_lab_promote, input, reply);
+}
+
+static bool lp_text_is(const char *path, const char *expected)
+{
+    char bytes[256];
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    bool ok = !ferror(f) && n == strlen(expected) && memcmp(bytes, expected, n) == 0;
+    return fclose(f) == 0 && ok;
+}
+
+static int lp_case_compiler_sidecar(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("source export owns only its marked compiler-name sidecar") {
+        char path[PATH_MAX];
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(lab_compiler_name_valid("upper.c"));
+        ASSERT(!lab_compiler_name_valid("-option.c"));
+        ASSERT(!lab_compiler_name_valid("../other.c"));
+        ASSERT_EQ(mkdir(e.dist, 0700), 0);
+        ASSERT(lp_join(path, sizeof(path), e.dist, LAB_COMPILER_NAME_FILE));
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("caller data", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(lp_promote_export(&e, "upper", &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        ASSERT(lp_text_is(path, "caller data"));
+        ASSERT(lp_promote_export(&e, "alias", &r));
+        ASSERT_STR_EQ(r.error.code, "LAB_PROMOTE_EXPORT_FAILED");
+        zcl_command_reply_free(&r);
+        ASSERT(lp_text_is(path, "caller data"));
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT(lp_promote_export(&e, "alias", &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        ASSERT(lp_text_is(path, LAB_COMPILER_NAME_MARKER "upper.c"));
+        ASSERT(lp_promote_export(&e, "upper", &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&r);
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
+
 static int lp_case_export_borrow(void)
 {
     int failures = 0;
@@ -981,6 +1045,7 @@ int test_lab_promote(void)
     failures += lp_case_ready_snapshot();
     failures += lp_case_ready_values();
     failures += lp_case_export_borrow();
+    failures += lp_case_compiler_sidecar();
     failures += lp_case_failed_case();
     failures += lp_case_compile_failed();
     failures += lp_case_release_compile_failed();

@@ -1121,22 +1121,32 @@ static const char PJ_CAP_SOURCE[] =
     "[{\"name\":\"lower\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"ABC\\n\"}," \
     "{\"name\":\"mixed\",\"stdin\":\"Hello, z23\\n\",\"expect_stdout\":\"HELLO, Z23\\n\"}]"
 
+static const char PJ_FILE_SOURCE[] =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0 */\n"
+    "#include <stdio.h>\n"
+    "int main(void) { puts(__FILE__); return 0; }\n";
+#define PJ_FILE_CASES "[{\"name\":\"file\",\"expect_stdout\":\"semantic.c\\n\"}," \
+    "{\"name\":\"again\",\"expect_stdout\":\"semantic.c\\n\"}]"
+
+
 /* Create the capability from source: lab.promote runs the cases against a
  * sanitized build, builds the release image, re-proves the cases on it and
  * signs the pack into f->dist; the owner then adds the LICENSE. */
-static bool pj_promote_source(struct pj_fixture *f)
+static bool pj_promote_source(struct pj_fixture *f, const char *source_name, bool semantic)
 {
     char cap[1200], src[1400], in[4 * 1200];
     struct zcl_command_reply r;
+    const char *program = semantic ? PJ_FILE_SOURCE : PJ_CAP_SOURCE;
+    const char *cases = semantic ? PJ_FILE_CASES : PJ_CAP_CASES;
     if (!pj_join(cap, sizeof(cap), f->base, "cap") || mkdir(cap, 0700) != 0 ||
-        !pj_join(src, sizeof(src), cap, "upper.c") ||
-        !pj_write(src, (const uint8_t *)PJ_CAP_SOURCE, sizeof(PJ_CAP_SOURCE) - 1))
+        !pj_join(src, sizeof(src), cap, source_name) ||
+        !pj_write(src, (const uint8_t *)program, strlen(program)))
         return false;
     int n = snprintf(in, sizeof(in),
                      "{\"file\":\"%s\",\"cases\":%s,\"name\":\"%s\","
                      "\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\","
                      "\"include-source\":true}",
-                     src, PJ_CAP_CASES, PJ_NAME, f->key, f->dist);
+                     src, cases, PJ_NAME, f->key, f->dist);
     if (n <= 0 || (size_t)n >= sizeof(in) ||
         !pj_call(zcl_native_handle_lab_promote, in, &r))
         return false;
@@ -1160,7 +1170,7 @@ static int pj_t_source_to_peer(void)
     TEST("plugin journey: C23 source to a peer's plugin call") {
         char root1[65], dir1[1400], manifest[1600], gen1[129], cur[129];
         ASSERT(ready);
-        ASSERT(pj_promote_source(&f));
+        ASSERT(pj_promote_source(&f, "upper.c", false));
         ASSERT(pj_publish(&f, root1));
         uint8_t publisher_key[33], receiver_key[33];
         sw_key(81, publisher_key);
@@ -1298,6 +1308,30 @@ static bool pj_reproduce_refusal(const char *dir, const char *root,
              out, builder);
     return ok && access(attestation, F_OK) != 0;
 }
+
+static bool pj_bad_compiler_names(struct pj_fixture *f, const char *dir,
+                                  const char *key, const char *builder)
+{
+    static const char *const bad[] = {
+        "z23.compiler-name.v1\n../other.c",
+        "z23.compiler-name.v1\n-option.c",
+        "z23.compiler-name.v2\nother.c",
+    };
+    static const char valid[] = "z23.compiler-name.v1\nalias-upper.c";
+    char path[1600], out[1200], root[65];
+    if (!pj_join(path, sizeof(path), dir, "compiler-name.txt"))
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(bad) / sizeof(bad[0]); i++) {
+        int n = snprintf(out, sizeof(out), "%s/bad-compiler-%zu", f->base, i);
+        ok = n > 0 && (size_t)n < sizeof(out) &&
+             pj_write(path, (const uint8_t *)bad[i], strlen(bad[i])) &&
+             pj_publish_dir(f, dir, root) &&
+             pj_reproduce_refusal(dir, root, key, out, builder, "PLUGIN_REPRODUCE_INPUT");
+    }
+    return pj_write(path, (const uint8_t *)valid, sizeof(valid) - 1) && ok;
+}
+
 
 static bool pj_flip_first(const char *path)
 {
@@ -1494,7 +1528,7 @@ static int pj_t_reproduce(void)
     TEST("plugin journey: receiver independently reproduces the signed bytes") {
         char root1[65], dir1[1400], manifest[1600], gen1[129];
         ASSERT(ready);
-        ASSERT(pj_promote_source(&f));
+        ASSERT(pj_promote_source(&f, "alias-upper.c", false));
         /* The opt-in promote exported the exact source and cases. */
         ASSERT(pj_publish(&f, root1));
         uint8_t root_bin[32];
@@ -1537,6 +1571,7 @@ static int pj_t_reproduce(void)
         ASSERT_STR_EQ(rsha, got_sha);
         ASSERT_STR_EQ(rpub, rpub_self);
         ASSERT(strcmp(rpub, f.pub_hex) != 0);
+        ASSERT(pj_bad_compiler_names(&f, dir1, rkey, rpub_self));
 #if defined(ZCL_TESTING)
         char captured_out[1200];
         ASSERT(pj_join(captured_out, sizeof(captured_out), f.base, "repro-captured"));
@@ -1681,6 +1716,47 @@ static int pj_t_reproduce(void)
     vcs_swarm_engine_set_global(prev);
     return failures;
 }
+
+static int pj_t_reproduce_file_name(void)
+{
+    int failures = 0;
+    struct pj_fixture f;
+    struct vcs_swarm_engine *prev = vcs_swarm_engine_global();
+    bool ready = pj_open(&f);
+    TEST("plugin journey: reproduction preserves compiler-visible __FILE__") {
+        char root[65], dir[1400], manifest[1600], expected[129];
+        char key[1200], out[1200], sha[129], builder[65], own[65];
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        ASSERT(pj_promote_source(&f, "semantic.c", true));
+        ASSERT(pj_publish(&f, root));
+        uint8_t publisher[33], receiver[33];
+        sw_key(83, publisher);
+        sw_key(84, receiver);
+        ASSERT(vcs_swarm_engine_peer_add(f.recv.engine, 11, publisher));
+        ASSERT(vcs_swarm_engine_peer_add(f.pub.engine, 13, receiver));
+        vcs_swarm_engine_set_global(f.recv.engine);
+        ASSERT(pj_join(dir, sizeof(dir), f.base, "semantic-received"));
+        ASSERT(pj_fetch_drive(&f.recv, 11, &f.pub, 13, f.recv.datadir, root, dir, &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(pj_bool(&r, "complete"));
+        zcl_command_reply_free(&r);
+        ASSERT(pj_join(manifest, sizeof(manifest), dir, "upper.plugin.json"));
+        ASSERT(pj_manifest_sha(manifest, expected));
+        ASSERT(pj_join(key, sizeof(key), f.base, "semantic-receiver.key"));
+        ASSERT(pj_keygen_to(key, own));
+        ASSERT(pj_join(out, sizeof(out), f.base, "semantic-repro"));
+        ASSERT(pj_reproduce(dir, root, key, out, sha, builder));
+        ASSERT_STR_EQ(sha, expected);
+        ASSERT_STR_EQ(builder, own);
+        ASSERT(strcmp(builder, f.pub_hex) != 0);
+        PASS();
+    } _test_next:;
+    pj_close(&f);
+    vcs_swarm_engine_set_global(prev);
+    return failures;
+}
+
 
 static uint8_t *pj_find(uint8_t *img, size_t size, const char *marker)
 {
@@ -2567,6 +2643,7 @@ int test_plugin_journey(void)
 #if defined(__linux__)
     failures += pj_t_source_to_peer();
     failures += pj_t_reproduce();
+    failures += pj_t_reproduce_file_name();
     failures += pj_t_resident();
     failures += pj_t_stop();
 #endif

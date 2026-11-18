@@ -426,6 +426,64 @@ static bool pr_verify(struct pr_ctx *c, struct zcl_command_reply *reply)
            pr_inputs(c, reply) && pr_root_matches(c, reply);
 }
 
+/* Only the version-marked sidecar is interpreted; older inert members stay inert. */
+static bool pr_name_marked(const char *path, bool *marked)
+{
+    static const char prefix[] = LAB_COMPILER_NAME_PREFIX;
+    char buf[sizeof(prefix) - 1];
+    *marked = false;
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return errno == ENOENT;
+    struct stat st;
+    ssize_t n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
+                    ? read(fd, buf, sizeof(buf)) : -1;
+    bool closed = close(fd) == 0;
+    if (n < 0 || !closed)
+        return false;
+    *marked = n == (ssize_t)sizeof(buf) && memcmp(buf, prefix, sizeof(buf)) == 0;
+    return true;
+}
+
+/* The captured package root has already bound this optional member. */
+static bool pr_compiler_source(struct pr_ctx *c, struct zcl_command_reply *reply)
+{
+    static const char marker[] = LAB_COMPILER_NAME_MARKER;
+    char path[PR_PATH_MAX], work[PLATFORM_TEMP_PATH_MAX], dest[PR_PATH_MAX];
+    char *text = NULL;
+    bool marked = false;
+    size_t len = 0;
+    if (!zcl_path_join(path, sizeof(path), c->dir, LAB_COMPILER_NAME_FILE) ||
+        !pr_name_marked(path, &marked))
+        goto bad;
+    if (!marked)
+        return true;
+    if (!zcl_read_whole_file_text(path, sizeof(marker) + 72, &text, &len,
+                                  "plugin.reproduce.name"))
+        goto bad;
+    if (len <= sizeof(marker) - 1 || strlen(text) != len ||
+        memcmp(text, marker, sizeof(marker) - 1) != 0) {
+        free(text);
+        goto bad;
+    }
+    const char *name = text + sizeof(marker) - 1;
+    if (!lab_compiler_name_valid(name) ||
+        !platform_temp_directory_create_under(c->dir, "z23-source-", work, sizeof(work)) ||
+        !zcl_path_join(dest, sizeof(dest), work, name) || rename(c->source, dest) != 0) {
+        free(text);
+        goto bad;
+    }
+    free(text);
+    snprintf(c->source, sizeof(c->source), "%s", dest);
+    return true;
+bad:
+    pat_refuse(reply, "PLUGIN_REPRODUCE_INPUT",
+               "use a valid compiler-name.txt from a source export and retry",
+               "reproduce", c->dir);
+    return false;
+}
+
+
 static bool pr_capabilities(unsigned mask, struct json_value *caps)
 {
     json_init(caps);
@@ -614,9 +672,11 @@ static bool pr_output_absent(const struct pr_ctx *c, struct zcl_command_reply *r
     return false;
 }
 
-static bool pr_build(const struct zcl_command_request *request, const struct pr_ctx *c,
+static bool pr_build(const struct zcl_command_request *request, struct pr_ctx *c,
                      struct pr_rebuilt *rebuilt, struct zcl_command_reply *reply)
 {
+    if (!pr_compiler_source(c, reply))
+        return false;
     struct json_value input;
     if (!pr_lab_input(request, c, &input)) {
         pat_refuse(reply, "PLUGIN_REPRODUCE_ALLOC", "retry after freeing memory",

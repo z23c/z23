@@ -46,6 +46,19 @@ void lab_base_name(const char *path, char out[72])
     if (j < 3 || out[0] == '.' || strcmp(out + j - 2, ".c") != 0)
         snprintf(out, 72, "main.c");
 }
+bool lab_compiler_name_valid(const char *name)
+{
+    static const char allowed[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-";
+    if (!name || name[0] == '-' || strlen(name) > 64 ||
+        strspn(name, allowed) != strlen(name))
+        return false;
+    char normalized[72];
+    lab_base_name(name, normalized);
+    return strcmp(name, normalized) == 0;
+}
+
+
 struct lab_hasher {
     struct sha3_512_ctx ctx;
 };
