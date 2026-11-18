@@ -245,6 +245,59 @@ int wcs_plan_order_test(const char *base)
     return 0;
 }
 
+int wcs_inc_scope_fixture(void)
+{
+    return mkdir(".cache", 0700) == 0 &&
+           mkdir(".cache/fixture", 0700) == 0 &&
+           mkdir(".cache/fixture/include", 0700) == 0 &&
+           mkdir("project", 0700) == 0 &&
+           mkdir("project/include", 0700) == 0 &&
+           mkdir("project/.cache", 0700) == 0 &&
+           mkdir("project/.cache/include", 0700) == 0;
+}
+
+static int sh_dirent_probes;
+static int sh_dirent_lstat(const char *path, struct stat *st)
+{
+    sh_dirent_probes++;
+    return lstat(path, st);
+}
+
+#if defined(_DIRENT_HAVE_D_TYPE) && defined(DT_UNKNOWN) && defined(DT_DIR) && defined(DT_REG) && defined(DT_LNK)
+static int sh_dirent_known(const char *dir, const char *file, const char *link,
+                           struct dirent *de)
+{
+    de->d_type = DT_REG;
+    if (wcs_inc_entry_dir(file, de, sh_dirent_lstat) || sh_dirent_probes) return 1;
+    de->d_type = DT_DIR;
+    if (!wcs_inc_entry_dir(dir, de, sh_dirent_lstat) || sh_dirent_probes) return 1;
+    de->d_type = DT_LNK;
+    if (wcs_inc_entry_dir(link, de, sh_dirent_lstat) || sh_dirent_probes) return 1;
+    de->d_type = DT_UNKNOWN;
+    return 0;
+}
+#endif
+
+int wcs_inc_dirent_test(const char *base)
+{
+    char dir[SH_P], file[SH_P], link[SH_P];
+    shp(dir, sizeof dir, "%s/project", base);
+    shp(file, sizeof file, "%s/dirent-file", base);
+    shp(link, sizeof link, "%s/dirent-link", base);
+    if (csr_write(file, "x") != 0 || symlink("project", link) != 0) return 2;
+    struct dirent de = {0};
+    sh_dirent_probes = 0;
+#if defined(_DIRENT_HAVE_D_TYPE) && defined(DT_UNKNOWN) && defined(DT_DIR) && defined(DT_REG) && defined(DT_LNK)
+    if (sh_dirent_known(dir, file, link, &de))
+        return sh_fail("dirent hint classification or redundant stat");
+#endif
+    if (!wcs_inc_entry_dir(dir, &de, sh_dirent_lstat) || sh_dirent_probes != 1 ||
+        wcs_inc_entry_dir(file, &de, sh_dirent_lstat) || sh_dirent_probes != 2 ||
+        wcs_inc_entry_dir(link, &de, sh_dirent_lstat) || sh_dirent_probes != 3)
+        return sh_fail("dirent unknown fallback");
+    return 0;
+}
+
 /* One tree: src/shared.h plus SH_UNITS units that include it. */
 static int sh_producers(const char *tree)
 {

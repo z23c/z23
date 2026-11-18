@@ -402,6 +402,19 @@ static int inc_add(const char *dir)
     return wcs_flag_add(flag);
 }
 
+int wcs_inc_entry_dir(const char *path, const struct dirent *de,
+                      int (*probe)(const char *, struct stat *))
+{
+#if defined(_DIRENT_HAVE_D_TYPE) && defined(DT_UNKNOWN) && defined(DT_DIR) && \
+    defined(DT_REG) && defined(DT_LNK)
+    if (de->d_type != DT_UNKNOWN) return de->d_type == DT_DIR;
+#else
+    (void)de;
+#endif
+    struct stat st;
+    return probe(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 /* Include roots, as the reference find does: every directory named include
  * under the tree, pruning the top-level build, test-tmp, .git, .cache, .claude,
  * vendor/tor and vendor/raylib subtrees. Manual recursion: nftw stops early
@@ -420,8 +433,7 @@ static int inc_scan(const char *dir, int depth)
             rc = 2;
             break;
         }
-        struct stat st;
-        if (lstat(p, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (!wcs_inc_entry_dir(p, de, lstat)) continue;
         if (wcs_name_in(skip_dot(p), inc_pruned)) continue;
         if (!strcmp(de->d_name, "include") && inc_add(p) != 0) {
             rc = 2;
@@ -433,17 +445,6 @@ static int inc_scan(const char *dir, int depth)
     return rc;
 }
 
-static int inc_scope_fixture(void)
-{
-    return mkdir(".cache", 0700) == 0 &&
-           mkdir(".cache/fixture", 0700) == 0 &&
-           mkdir(".cache/fixture/include", 0700) == 0 &&
-           mkdir("project", 0700) == 0 &&
-           mkdir("project/include", 0700) == 0 &&
-           mkdir("project/.cache", 0700) == 0 &&
-           mkdir("project/.cache/include", 0700) == 0;
-}
-
 /* Exercise root pruning without excluding a nested directory of the same name. */
 static int inc_scope_selftest(void)
 {
@@ -452,7 +453,7 @@ static int inc_scope_selftest(void)
         if (old >= 0) close(old);
         return 1;
     }
-    int ok = inc_scope_fixture();
+    int ok = wcs_inc_scope_fixture();
     int before = g_wcs_nflag;
     if (ok) ok = inc_scan(".", 0) == 0;
     int root = 0, nested = 0, cache = 0;
@@ -778,6 +779,7 @@ int wcs_begin(int selftest_only)
         return 2;
     }
     int rc = inc_scope_selftest();
+    if (rc == 0) rc = wcs_inc_dirent_test(g_wcs_work);
     if (rc == 0) rc = wcs_plan_order_test(g_wcs_work);
     if (rc == 0) rc = wcs_setup();
     if (rc == 0) rc = wcs_selftest_phase();

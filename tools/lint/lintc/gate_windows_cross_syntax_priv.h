@@ -11,6 +11,8 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+struct dirent;
+struct stat;
 
 enum {
     WCS_PATH = 1024,
@@ -62,6 +64,10 @@ int wcs_worker_empty_test(const char *base);
 int wcs_worker_cap_test(const char *base);
 int wcs_finish_src_list(const char *srclist);
 int wcs_plan_order_test(const char *base);
+int wcs_inc_scope_fixture(void);
+int wcs_inc_dirent_test(const char *base);
+int wcs_inc_entry_dir(const char *path, const struct dirent *de,
+                      int (*probe)(const char *, struct stat *));
 int wcs_lists_selftest(void);
 extern const char k_wcs_baseline[];
 
