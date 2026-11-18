@@ -67,6 +67,7 @@ ZCL_MODULE_CAPABILITY("engine/conditions/src/segment_corruption.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("engine/conditions/src/checkpoint_bundle_install_ready.c", CAP_FS_WRITE, "Checked rung-window buffers report a failed allocation on stderr.")
 ZCL_MODULE_CAPABILITY("engine/services/src/build_fabric_proof_recovery.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/node_db_catchup_wallet_replay.c", CAP_FS_WRITE, "Checked allocation and rollback failures report to stderr.")
+ZCL_MODULE_CAPABILITY("engine/services/src/explorer_unwind_service.c", CAP_FS_READ|CAP_FS_WRITE, "Reads and rewrites node.db projection rows through sqlite inside one transaction; the replay reads block bodies only through the caller-supplied reader.")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_anchor_status_controller.c", CAP_CLOCK|CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_background_quality.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/controllers/src/agent_contract_registry.c", CAP_FS_WRITE, "")

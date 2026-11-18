@@ -203,6 +203,7 @@ static bool run_only_net_headers_and_mmb(const char *only, int *failures)
         *failures += test_explorer();
         *failures += test_explorer_rpc_call();
         *failures += test_explorer_index();
+        *failures += test_explorer_index_unwind();
         printf("\n=== explorer subset complete: %d failure(s) ===\n",
                *failures);
         return true;
@@ -1360,6 +1361,7 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_explorer_rpc_call();
     *failures += test_explorer_index();
     *failures += test_zslp_ledger_saturation();
+    *failures += test_explorer_index_unwind();
     { extern int test_format_helpers_codec(void);
       *failures += test_format_helpers_codec(); }
     *failures += test_mining();

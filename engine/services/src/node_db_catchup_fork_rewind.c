@@ -22,6 +22,10 @@
 #include "controllers/sync_controller.h" // shape-layer-ok:relocated-catchup-debt
 #include "models/block.h"
 #include "models/database.h"
+#include "services/explorer_unwind_service.h"
+#include "models/explorer_index.h"
+#include "primitives/block.h"
+#include "storage/disk_block_io.h"
 #include "util/log_macros.h"
 #include "validation/chainstate.h"
 
@@ -77,18 +81,48 @@ static int fork_lowest_stale_row(struct node_db *ndb,
     return lowest_stale;
 }
 
+/* The unwind replays ZNAM / ZID / ZDIR operations from the common prefix, so
+ * it reads blocks of the ACTIVE chain at or below the fork height. */
+struct fork_block_source {
+    const struct active_chain *chain;
+    const char *datadir;
+};
+
+static bool fork_read_block(void *ctx, int height, struct block *out)
+{
+    const struct fork_block_source *r = ctx;
+    const struct block_index *pindex = active_chain_at(r->chain, height);
+    if (!pindex || !(pindex->nStatus & BLOCK_HAVE_DATA))
+        return false;
+    return read_block_from_disk_index(out, pindex, r->datadir);
+}
+
 /* Rewind the cursor to the highest height below `stale_h` that has an
  * active-chain slot (a sparse chain may lack the slot right below); none ->
- * from genesis. *fork_out receives the height rewound to. */
+ * from genesis. *fork_out receives the height rewound to.
+ *
+ * Before the cursor moves, everything the losing branch left in the
+ * projection and the overlays is unwound to the fork (see
+ * explorer_index_unwind_above). The unwind is one transaction; when it
+ * fails the cursor is still rewound so the winner is indexed (the pre-fix
+ * behaviour) and the failure is logged as an error. */
 static bool fork_rewind_below(struct node_db *ndb,
-                              const struct active_chain *chain, int stale_h,
-                              int *fork_out)
+                              const struct active_chain *chain,
+                              const char *datadir, int stale_h, int *fork_out)
 {
     int fork_h = stale_h - 1;
     const struct block_index *fork = NULL;
     while (fork_h >= 0 && !(fork = active_chain_at(chain, fork_h)))
         fork_h--;
     *fork_out = fork_h;
+    struct fork_block_source reader = { chain, datadir };
+    struct zcl_result unwound = explorer_index_unwind_above(
+        ndb, fork_h, datadir ? fork_read_block : NULL, &reader);
+    if (!unwound.ok)
+        LOG_ERROR("catchup", "reorg unwind to height %d failed (%s): ZNAM/"
+                  "ZID/ZDIR and token tables may still hold the losing "
+                  "branch; run a reindex-explorer to rebuild them", fork_h,
+                  unwound.message);
     if (fork_h < 0)
         return node_db_sync_reset_tip(ndb);
     return fork->phashBlock &&
@@ -96,7 +130,8 @@ static bool fork_rewind_below(struct node_db *ndb,
 }
 
 bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
-                                  const struct active_chain *chain, int cursor)
+                                  const struct active_chain *chain, int cursor,
+                                  const char *datadir)
 {
     if (!ndb || !ndb->open || !chain || cursor < 0)
         return false;
@@ -104,7 +139,7 @@ bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
     if (stale_h < 0)
         return false;
     int fork_h = -1;
-    bool ok = fork_rewind_below(ndb, chain, stale_h, &fork_h);
+    bool ok = fork_rewind_below(ndb, chain, datadir, stale_h, &fork_h);
     LOG_WARN("catchup", "projection row at height %d is off the active "
              "chain (reorg); projection cursor %d -> %d %s", stale_h, cursor,
              fork_h, ok ? "rewound so the winner is re-indexed"
@@ -113,11 +148,12 @@ bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
 }
 
 bool node_db_catchup_service_rewind_stale_fork(struct node_db *ndb,
-                                               const struct active_chain *chain)
+                                               const struct active_chain *chain,
+                                               const char *datadir)
 {
     int cursor = -1;
     if (!ndb || !ndb->open || !chain ||
         !node_db_sync_get_tip_height_checked(ndb, &cursor))
         return false;
-    return node_db_catchup_fork_rewind_at(ndb, chain, cursor);
+    return node_db_catchup_fork_rewind_at(ndb, chain, cursor, datadir);
 }

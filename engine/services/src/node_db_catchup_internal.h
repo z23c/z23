@@ -126,6 +126,6 @@ void catchup_sapling_tree_persist_dirty(struct node_db *ndb,
  * public wrapper is node_db_catchup_service_rewind_stale_fork. */
 bool node_db_catchup_fork_rewind_at(struct node_db *ndb,
                                   const struct active_chain *chain,
-                                  int cursor);
+                                  int cursor, const char *datadir);
 
 #endif /* ZCL_NODE_DB_CATCHUP_INTERNAL_H */

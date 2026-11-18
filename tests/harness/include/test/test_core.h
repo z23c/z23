@@ -617,6 +617,7 @@ int test_explorer(void);
 int test_explorer_rpc_call(void);
 int test_explorer_index(void);
 int test_zslp_ledger_saturation(void);
+int test_explorer_index_unwind(void);
 int test_mining(void);
 int test_utxo_commitment(void);
 int test_mmr(void);

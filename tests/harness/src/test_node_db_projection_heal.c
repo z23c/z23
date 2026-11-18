@@ -174,23 +174,23 @@ static int ph_noop_checks(struct ph_fork_fx *x)
     struct active_chain none;
     active_chain_init(&none);
     PH_CHECK("missing active slot does not rewind",
-             !node_db_catchup_service_rewind_stale_fork(ndb, &none) &&
+             !node_db_catchup_service_rewind_stale_fork(ndb, &none, NULL) &&
              node_db_sync_get_tip_height(ndb) == 1);
     active_chain_free(&none);
 
     active_chain_init(&x->ac);
     bool swapped = active_chain_install_tip_slot(&x->ac, &x->slotB);
     bool first = swapped &&
-        !node_db_catchup_service_rewind_stale_fork(ndb, &x->ac);
+        !node_db_catchup_service_rewind_stale_fork(ndb, &x->ac, x->dir);
     bool second = swapped &&
-        !node_db_catchup_service_rewind_stale_fork(ndb, &x->ac);
+        !node_db_catchup_service_rewind_stale_fork(ndb, &x->ac, x->dir);
     PH_CHECK("winner without body data does not rewind (twice)",
              first && second && node_db_sync_get_tip_height(ndb) == 1 &&
              ph_connected_rows(ndb, 1, x->hashA.data) == 1);
 
     x->slotB.nStatus = BLOCK_HAVE_DATA;
     bool healed = swapped &&
-        node_db_catchup_service_rewind_stale_fork(ndb, &x->ac);
+        node_db_catchup_service_rewind_stale_fork(ndb, &x->ac, x->dir);
     int rc = healed ? node_db_catchup_service_run(ndb, &x->ac, NULL, x->dir)
                     : -1;
     int cursor = node_db_sync_get_tip_height(ndb);
@@ -198,7 +198,7 @@ static int ph_noop_checks(struct ph_fork_fx *x)
              healed && rc >= 0 &&
              ph_connected_rows(ndb, 1, x->hashB.data) == 1);
     PH_CHECK("repeat call after healing returns false, cursor unchanged",
-             !node_db_catchup_service_rewind_stale_fork(ndb, &x->ac) &&
+             !node_db_catchup_service_rewind_stale_fork(ndb, &x->ac, x->dir) &&
              node_db_sync_get_tip_height(ndb) == cursor);
     return failures;
 }

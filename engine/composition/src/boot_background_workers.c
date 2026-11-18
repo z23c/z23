@@ -493,7 +493,7 @@ static bool projection_backfill_tip_ready(struct node_db *ndb,
      * tip height. The catchup child is not running here, so it cannot race. */
     if (svc->state)
         (void)node_db_catchup_service_rewind_stale_fork(
-            ndb, &svc->state->chain_active);
+            ndb, &svc->state->chain_active, svc->datadir);
     return node_db_sync_get_tip_height_checked(ndb, projection_tip);
 }
 

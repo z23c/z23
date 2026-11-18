@@ -216,8 +216,12 @@ int node_db_catchup_service_run(struct node_db *ndb,
  * chain's block at that height, rewind the cursor to just below the lowest
  * such row so the ascending catchup re-indexes the winners (the existing
  * db_block_save_canonical demotes each same-height loser). Returns true when
- * the cursor was rewound. Cheap when nothing is stale: one row read. */
+ * the cursor was rewound. Cheap when nothing is stale: one row read. The
+ * projection and the ZNAM/ZID/ZDIR/token overlays are first unwound to the
+ * fork (explorer_index_unwind_above); `datadir` locates the block bodies a
+ * ZNAM/ZID/ZDIR replay needs and may be NULL when none is wanted. */
 bool node_db_catchup_service_rewind_stale_fork(struct node_db *ndb,
-                                               const struct active_chain *chain);
+                                               const struct active_chain *chain,
+                                               const char *datadir);
 
 #endif /* ZCL_SERVICES_NODE_DB_CATCHUP_SERVICE_H */

@@ -1331,7 +1331,7 @@ static void catchup_report_summary(const struct catchup_pass *ps)
  * chain tip. Both tip outputs are written on every path. */
 static int catchup_tips_need_work(struct node_db *ndb,
                                   const struct active_chain *chain,
-                                  const struct wallet *w,
+                                  const struct wallet *w, const char *datadir,
                                   int *db_tip, int *chain_tip)
 {
     *db_tip = 0;
@@ -1346,7 +1346,7 @@ static int catchup_tips_need_work(struct node_db *ndb,
         return 0;  // raw-return-ok:logged by the checked tip reader
     /* A reorg replaces blocks the projection already indexed; heal the cursor
      * before the "caught up" early-out below can hide the stale rows. */
-    if (node_db_catchup_fork_rewind_at(ndb, chain, *db_tip) &&
+    if (node_db_catchup_fork_rewind_at(ndb, chain, *db_tip, datadir) &&
         !node_db_sync_get_tip_height_checked(ndb, db_tip))
         return 0;  // raw-return-ok:logged by the checked tip reader
     *chain_tip = active_chain_height(chain);
@@ -1408,7 +1408,7 @@ int node_db_catchup_service_run_origin(struct node_db *ndb, bool background,
 
     int db_tip = 0;
     int chain_tip = 0;
-    if (!catchup_tips_need_work(ndb, chain, w, &db_tip, &chain_tip))
+    if (!catchup_tips_need_work(ndb, chain, w, datadir, &db_tip, &chain_tip))
         return 0;
     if (!datadir)
         LOG_ERR("sync", "catchup: datadir is NULL (db_tip=%d, chain_tip=%d)",
