@@ -399,19 +399,28 @@ static void cb_collect_tests(struct cb_brief *b)
     for (size_t g = 0; g < literal.groups_len; g++)
         cb_add_test(b, literal.groups[g]);
     b->cut_tests = b->cut_tests || literal.groups_lost;
+    const char *paths[CB_MAX_PATHS], *routes[CB_MAX_PATHS];
+    bool risks[CB_MAX_PATHS];
+    struct agent_impact_acc *accs = b->npaths > 1
+        ? zcl_calloc(b->npaths, sizeof(*accs), "code_guide_routes") : NULL;
+    for (size_t i = 0; i < b->npaths; i++)
+        paths[i] = b->paths[i];
+    bool batched = accs && zcl_native_code_routes_many(paths, b->npaths, accs, routes, risks);
     for (size_t i = 0; i < b->npaths; i++) {
-        struct agent_impact_acc acc;
-        bool crisk = false;
-        const char *route =
-            zcl_native_code_route_for_path(b->paths[i], &acc, &crisk);
-        if (!crisk && acc.groups_len == 0) {
+        struct agent_impact_acc local;
+        struct agent_impact_acc *acc = batched ? &accs[i] : &local;
+        bool crisk = batched ? risks[i] : false;
+        const char *route = batched ? routes[i]
+            : zcl_native_code_route_for_path(b->paths[i], acc, &crisk);
+        if (!crisk && acc->groups_len == 0) {
             b->unmapped = true;
             continue;
         }
         cb_add_test(b, route);
-        for (size_t g = 0; g < acc.groups_len; g++)
-            cb_add_test(b, acc.groups[g]);
+        for (size_t g = 0; g < acc->groups_len; g++)
+            cb_add_test(b, acc->groups[g]);
     }
+    free(accs);
 }
 
 /* ── lessons ──────────────────────────────────────────────────────────── */

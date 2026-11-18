@@ -680,33 +680,108 @@ static bool aih_path_can_be_name_referenced(const char *path)
     return strncmp(path, prefix, sizeof(prefix) - 1) == 0;
 }
 
+struct aih_batch_query {
+    const char *path;
+    struct agent_impact_acc *acc;
+    char stem[ZCL_AGENT_IMPACT_GROUP_MAX], alt[ZCL_AGENT_IMPACT_GROUP_MAX];
+    const char *stem_arg;
+    bool eligible, has_alt, compound;
+};
+
+static void aih_batch_init(struct aih_batch_query *q, const char *path,
+                           struct agent_impact_acc *acc)
+{
+    q->path = path;
+    q->acc = acc;
+    /* A data file is matched by its path anywhere in the tree; a .c
+     * source keeps the tools/-only binary-name scan. */
+    if (aih_path_is_data_file(path)) {
+        q->eligible = true;
+    } else if (aih_path_can_be_name_referenced(path) &&
+               aih_basename_stem(path, q->stem)) {
+        q->stem_arg = q->stem;
+        q->has_alt = aih_underscore_variant(q->stem, q->alt);
+        q->compound = aih_stem_is_compound(q->stem);
+        q->eligible = true;
+    }
+}
+
+static bool aih_batch_directory(const char *dir, struct aih_batch_query *q, size_t count)
+{
+    struct aih_names names = {0};
+    if (!aih_names_read(dir, &names)) {
+        aih_names_free(&names);
+        return false;
+    }
+    for (size_t i = 0; i < names.count; i++) {
+        char relp[512];
+        (void)snprintf(relp, sizeof(relp), "%s/%s", dir, names.items[i]);
+        char *text = NULL;
+        size_t len = 0;
+        if (!zcl_read_whole_file_text(relp, AIH_REFERRER_MAX, &text, &len,
+                                      "agent_impact_name_reference")) {
+            aih_names_free(&names);
+            return false;
+        }
+        bool found_ready = false;
+        struct agent_impact_acc found = {0};
+        for (size_t j = 0; j < count; j++) {
+            if (!q[j].eligible || strcmp(relp, q[j].path) == 0 ||
+                !aih_referrer_hits(text, q[j].path, q[j].stem_arg, q[j].alt,
+                                   q[j].has_alt, q[j].compound))
+                continue;
+            if (!found_ready) {
+                aih_own_groups(relp, &found);
+                found_ready = true;
+            }
+            agent_impact_merge_groups(q[j].acc, &found);
+            if (found.groups_len)
+                q[j].acc->shared_rule_hits++;
+        }
+        free(text);
+    }
+    aih_names_free(&names);
+    return true;
+}
+
+bool agent_impact_name_routes_many(const char *const *paths,
+                                   struct agent_impact_acc *accs, size_t count)
+{
+    struct aih_batch_query *q = zcl_calloc(count, sizeof(*q), "agent_impact_batch");
+    if (!q)
+        return false;
+    bool any = false;
+    for (size_t i = 0; i < count; i++) {
+        aih_batch_init(&q[i], paths[i], &accs[i]);
+        any = any || q[i].eligible;
+    }
+    bool ok = true;
+    if (any)
+        for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
+            if (!aih_batch_directory(AIH_REFERRER_DIRS[d], q, count)) {
+                ok = false;
+                break;
+            }
+    free(q);
+    return ok;
+}
+
 bool agent_impact_name_routes_snapshot(const char *path,
     struct agent_impact_acc *acc, const struct agent_impact_snapshot *snapshot)
 {
     if (!path || !acc)
         return false;
-    char stem[ZCL_AGENT_IMPACT_GROUP_MAX];
-    char alt[ZCL_AGENT_IMPACT_GROUP_MAX];
-    /* A data file (stem == NULL below) is matched by its path, anywhere in
-     * the tree; a .c source keeps the tools/-only binary-name scan. */
-    bool data = aih_path_is_data_file(path);
-    const char *stem_arg = NULL;
-    bool has_alt = false, compound = false;
-    if (!data) {
-        if (!aih_path_can_be_name_referenced(path) ||
-            !aih_basename_stem(path, stem))
-            return false; // raw-return-ok:not-eligible-for-name-reference
-        has_alt = aih_underscore_variant(stem, alt);
-        compound = aih_stem_is_compound(stem);
-        stem_arg = stem;
-    }
+    struct aih_batch_query q = {0};
+    aih_batch_init(&q, path, acc);
+    if (!q.eligible)
+        return false; // raw-return-ok:not-eligible-for-name-reference
 
     bool matched = false;
     if (snapshot) {
         for (size_t i = 0; i < snapshot->count; i++) {
             const struct aih_snapshot_row *row = &snapshot->rows[i];
             if (strcmp(row->path, path) == 0 ||
-                !aih_referrer_hits(row->text, path, stem_arg, alt, has_alt, compound)) continue;
+                !aih_referrer_hits(row->text, path, q.stem_arg, q.alt, q.has_alt, q.compound)) continue;
             struct agent_impact_acc found = {0};
             if (!agent_impact_harness_routes_snapshot(row->path, &found, snapshot))
                 (void)agent_impact_apply_shared_rules(row->path, &found);
@@ -716,8 +791,8 @@ bool agent_impact_name_routes_snapshot(const char *path,
         return matched;
     }
     for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
-        aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, stem_arg, alt,
-                                   has_alt, compound, acc, &matched);
+        aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, q.stem_arg, q.alt,
+                                   q.has_alt, q.compound, acc, &matched);
     return matched;
 }
 

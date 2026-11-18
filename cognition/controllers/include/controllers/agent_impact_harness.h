@@ -94,6 +94,9 @@ bool agent_impact_string_literal_contains_whole_token(const char *text,
 bool agent_impact_apply_harness_routes(const char *path,
                                        struct agent_impact_acc *acc);
 
+bool agent_impact_name_routes_many(const char *const *paths,
+                                   struct agent_impact_acc *accs, size_t count);
+
 /* Applies rule 3: scans tests/harness/src/ and tools/lint/lintc/ (excluding
  * `path` itself) for a string-literal reference to `path`'s basename, and
  * for every hit adds the referencing file's OWN group(s) (rules 1/2 plus the

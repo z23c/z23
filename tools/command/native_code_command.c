@@ -244,15 +244,10 @@ bool code_path_is_consensus_risk(const char *path)
     return false;
 }
 
-const char *zcl_native_code_route_snapshot(const char *path,
-                                           struct agent_impact_acc *acc,
-                                           bool *consensus_risk,
-                                           const struct agent_impact_snapshot *snapshot)
+static void code_route_primary(const char *path, struct agent_impact_acc *acc,
+                               const struct agent_impact_snapshot *snapshot)
 {
-    struct agent_impact_acc local = {0};
-    struct agent_impact_acc *a = acc ? acc : &local;
-    if (acc)
-        memset(acc, 0, sizeof(*acc));
+    memset(acc, 0, sizeof(*acc));
     /* Harness-file routing runs FIRST: harness .c files under
      * tests/harness/src/ are leaves nothing #includes, so the shared rule
      * table below (which only
@@ -260,13 +255,13 @@ const char *zcl_native_code_route_snapshot(const char *path,
      * them. See agent_impact_harness.h for the two structural conventions
      * this resolves — test_<group>.c naming and the Windows-acceptance
      * sources table — ahead of any shared-rule match. */
-    (void)agent_impact_harness_routes_snapshot(path, a, snapshot);
-    (void)agent_impact_apply_shared_rules(path, a);
-    /* Secondary candidates: a harness/lint-gate file that names this path
-     * inside a string literal (a binary name, a bare path) with no
-     * #include edge. Appended last so it can only ADD to test_groups, never
-     * change which group is picked as the route below. */
-    (void)agent_impact_name_routes_snapshot(path, a, snapshot);
+    (void)agent_impact_harness_routes_snapshot(path, acc, snapshot);
+    (void)agent_impact_apply_shared_rules(path, acc);
+}
+
+static const char *code_route_finish(const char *path, struct agent_impact_acc *a,
+                                     bool *consensus_risk)
+{
     bool crisk = code_path_is_consensus_risk(path);
     if (consensus_risk) *consensus_risk = crisk;
     /* devloop_plan.c:171-185: a consensus/sealed surface always routes to the
@@ -291,6 +286,35 @@ const char *zcl_native_code_route_snapshot(const char *path,
         }
     }
     return "make_lint_gates";
+}
+
+const char *zcl_native_code_route_snapshot(const char *path,
+                                           struct agent_impact_acc *acc,
+                                           bool *consensus_risk,
+                                           const struct agent_impact_snapshot *snapshot)
+{
+    struct agent_impact_acc local = {0};
+    struct agent_impact_acc *a = acc ? acc : &local;
+    code_route_primary(path, a, snapshot);
+    /* Secondary candidates: a harness/lint-gate file that names this path
+     * inside a string literal (a binary name, a bare path) with no
+     * #include edge. Appended last so it can only ADD to test_groups, never
+     * change which group is picked as the route below. */
+    (void)agent_impact_name_routes_snapshot(path, a, snapshot);
+    return code_route_finish(path, a, consensus_risk);
+}
+
+bool zcl_native_code_routes_many(const char *const *paths, size_t count,
+                                 struct agent_impact_acc *accs,
+                                 const char **routes, bool *risks)
+{
+    for (size_t i = 0; i < count; i++)
+        code_route_primary(paths[i], &accs[i], NULL);
+    if (!agent_impact_name_routes_many(paths, accs, count))
+        return false;
+    for (size_t i = 0; i < count; i++)
+        routes[i] = code_route_finish(paths[i], &accs[i], &risks[i]);
+    return true;
 }
 
 const char *zcl_native_code_route_for_path(const char *path,

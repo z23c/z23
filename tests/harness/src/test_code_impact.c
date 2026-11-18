@@ -751,6 +751,115 @@ static void cg_guide_paths(const char *root, const char *paths,
     json_free(&input);
 }
 
+static int test_code_guide_route_parity(void)
+{
+    int failures = 0;
+    TEST("batched guide routes preserve single-path groups and risk") {
+        const char *paths[] = {
+            "tools/command/native_code_brief.c",
+            "tools/command/native_code_command.c",
+            "tests/harness/src/test_code_impact.c",
+            "core/params/include/params/params.h",
+            "zz_no_impact_fixture.c",
+            "platform/modules/platform/tests/windows_acceptance.mk"
+        };
+        enum { N = sizeof(paths) / sizeof(paths[0]) };
+        struct agent_impact_acc *many = calloc(N, sizeof(*many));
+        struct agent_impact_acc *one = calloc(1, sizeof(*one));
+        const char *routes[N];
+        bool risks[N];
+        ASSERT(many && one);
+        ASSERT(zcl_native_code_routes_many(paths, N, many, routes, risks));
+        for (size_t i = 0; i < N; i++) {
+            bool risk = false;
+            const char *route = zcl_native_code_route_for_path(paths[i], one, &risk);
+            ASSERT_STR_EQ(routes[i], route);
+            ASSERT_EQ(risks[i], risk);
+            ASSERT_EQ(many[i].groups_len, one->groups_len);
+            ASSERT_EQ(many[i].groups_lost, one->groups_lost);
+            ASSERT_EQ(many[i].shared_rule_hits, one->shared_rule_hits);
+            for (size_t j = 0; j < one->groups_len; j++)
+                ASSERT_STR_EQ(many[i].groups[j], one->groups[j]);
+        }
+        free(one);
+        free(many);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ci_batch_fallback(const char *dir, const char *label)
+{
+    const char *paths = "tools/command/unique_probe.c,tools/command/other_probe.c,core/unknown.c";
+    struct zcl_command_reply normal, fallback;
+    char a[4096], b[4096];
+    cg_guide_paths(dir, paths, &normal);
+    zcl_alloc_fault_fail_nth(label, 1);
+    cg_guide_paths(dir, paths, &fallback);
+    bool attempted = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool ok = attempted && normal.exit_code == ZCL_COMMAND_EXIT_OK &&
+              fallback.exit_code == ZCL_COMMAND_EXIT_OK &&
+              json_write(json_get(&normal.data, "tests"), a, sizeof(a)) < sizeof(a) &&
+              json_write(json_get(&fallback.data, "tests"), b, sizeof(b)) < sizeof(b) &&
+              strcmp(a, b) == 0 &&
+              json_get_bool(json_get(&normal.data, "tests_unmapped")) ==
+              json_get_bool(json_get(&fallback.data, "tests_unmapped"));
+    zcl_command_reply_free(&normal);
+    zcl_command_reply_free(&fallback);
+    return ok;
+}
+
+static bool ci_check_batch_routes(const char *dir, struct agent_impact_acc *accs)
+{
+    const char *paths[] = { "tools/command/unique_probe.c",
+                            "tools/command/other_probe.c", "core/unknown.c" };
+    const char *routes[3];
+    bool risks[3];
+    zcl_alloc_fault_fail_nth("zcl_read_whole_file_text", 3);
+    bool routed = zcl_native_code_routes_many(paths, 3, accs, routes, risks);
+    bool once = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    size_t before = accs[0].shared_rule_hits;
+    return routed && once &&
+           ci_impact_mk_write(".", "tests/harness/src/test_code_impact.c",
+                              "const char *s = \"unique_probe\";\n") &&
+           zcl_native_code_routes_many(paths, 3, accs, routes, risks) &&
+           accs[0].shared_rule_hits > before && risks[2] &&
+           ci_batch_fallback(dir, "agent_impact_batch") &&
+           ci_batch_fallback(dir, "zcl_read_whole_file_text");
+}
+
+static bool ci_batch_source_changes(void)
+{
+    char cwd[4096], dir[4096];
+    if (!getcwd(cwd, sizeof cwd) || !test_mkdtemp(dir, sizeof dir, "batch_routes"))
+        return false;
+    struct agent_impact_acc *accs = calloc(3, sizeof(*accs));
+    bool ok = accs &&
+              ci_impact_mk_write(dir, "tests/harness/src/test_code_impact.c", "int x;\n") &&
+              ci_impact_mk_write(dir, "tools/lint/lintc/placeholder.c", "int x;\n") &&
+              chdir(dir) == 0;
+    if (ok) {
+        ok = ci_check_batch_routes(dir, accs);
+        if (chdir(cwd) != 0)
+            ok = false;
+    }
+    free(accs);
+    bool cleaned = test_rm_rf_recursive(dir) == 0;
+    return ok && cleaned;
+}
+
+static int test_code_guide_source_changes(void)
+{
+    int failures = 0;
+    TEST("batched routes observe source edits on the next request") {
+        ASSERT(ci_batch_source_changes());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -2133,6 +2242,8 @@ int test_code_impact(void)
     failures += test_code_context_map_shape_overflow();
     failures += test_boot_services_rule_capacity();
     failures += test_code_context_map_warm_follows_generation();
+    failures += test_code_guide_source_changes();
+    failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();
     failures += test_code_impact_conditional_include_edge();
