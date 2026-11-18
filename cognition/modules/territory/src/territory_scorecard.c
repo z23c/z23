@@ -348,20 +348,23 @@ static void ts_scan_free(struct ts_scan *sc)
     ts_pathmemo_free(&sc->memo);
 }
 
-static bool ts_scan_alloc(struct ts_scan *sc, bool group_metadata)
+static bool ts_scan_alloc(struct ts_scan *sc, bool named_details)
 {
     sc->r = zcl_calloc(1, sizeof(*sc->r), "territory_report");
-    if (group_metadata)
+    if (named_details)
         sc->groups = zcl_malloc(sizeof(*sc->groups) * TS_GROUPS_CAP, "ts_groups");
     sc->files = zcl_malloc(sizeof(*sc->files) * (TERRITORY_MAX_FILES + 1),
                            "ts_files");
     sc->syms = zcl_malloc(sizeof(*sc->syms) * TS_SYMS_PER_FILE, "ts_syms");
     sc->refbuf = zcl_malloc(sizeof(*sc->refbuf) * TS_REFS_PROBE, "ts_refs");
-    sc->incs = zcl_malloc(sizeof(*sc->incs) * TS_INC_PER_FILE, "ts_incs");
-    sc->deps = zcl_malloc(sizeof(*sc->deps) * TS_REVDEP_CAP, "ts_deps");
+    if (named_details) {
+        sc->incs = zcl_malloc(sizeof(*sc->incs) * TS_INC_PER_FILE, "ts_incs");
+        sc->deps = zcl_malloc(sizeof(*sc->deps) * TS_REVDEP_CAP, "ts_deps");
+    }
     sc->probe = zcl_malloc(TS_HEADER_PROBE + 1, "ts_header_probe");
-    return sc->r && (!group_metadata || sc->groups) && sc->files && sc->syms && sc->refbuf &&
-           sc->incs && sc->deps && sc->probe && ts_pathmemo_init(&sc->memo);
+    return sc->r && (!named_details || sc->groups) && sc->files && sc->syms && sc->refbuf &&
+           sc->probe && (!named_details ||
+           (sc->incs && sc->deps && ts_pathmemo_init(&sc->memo)));
 }
 
 static void ts_find_group(struct ts_scan *sc)
@@ -574,7 +577,7 @@ static void ts_phase_deps(struct ts_scan *sc)
 static struct territory_report *territory_scorecard_build(
     struct codeindex *ci, const char *root, const char *name,
     const struct territory_reach_set *rs,
-    const struct territory_router *router, bool group_metadata)
+    const struct territory_router *router, bool named_details)
 {
     if (!ci || !name || !name[0])
         LOG_NULL("territory", "scorecard needs an index and a territory name");
@@ -582,15 +585,15 @@ static struct territory_report *territory_scorecard_build(
     struct ts_scan sc = {
         .ci = ci, .root = root, .name = name, .rs = rs, .router = router,
     };
-    if (!ts_scan_alloc(&sc, group_metadata)) {
+    if (!ts_scan_alloc(&sc, named_details)) {
         ts_scan_free(&sc);
         LOG_NULL("territory", "scorecard buffers for %s", name);
     }
     snprintf(sc.r->name, sizeof(sc.r->name), "%s", name);
-    if (group_metadata) ts_find_group(&sc);
+    if (named_details) ts_find_group(&sc);
     ts_phase_owns(&sc);
     ts_phase_reached(&sc);
-    ts_phase_deps(&sc);
+    if (named_details) ts_phase_deps(&sc);
 
     struct territory_report *r = sc.r;
     sc.r = NULL;

@@ -5,7 +5,7 @@
 
 #include "territory/territory.h"
 
-/* Rollup consumes counts and ranks, not named group metadata. */
+/* Rollup consumes counts and ranks, not named metadata or dependency neighbors. */
 struct territory_report *territory_scorecard_rollup(
     struct codeindex *ci, const char *root, const char *name,
     const struct territory_reach_set *rs, const struct territory_router *router);
