@@ -25,6 +25,9 @@ bool lab_in_uint(const struct zcl_command_request *rq, const char *key,
  * and the toolchain. On failure the reply carries the typed refusal. */
 bool lab_ctx_open(struct lab_ctx *ctx, const char *file,
                   struct zcl_command_reply *reply);
+/* Read source, paths and compiler identity; prepare writable state only on a miss. */
+bool lab_ctx_read(struct lab_ctx *ctx, const char *file, struct zcl_command_reply *reply);
+bool lab_ctx_prepare(struct lab_ctx *ctx, struct zcl_command_reply *reply);
 void lab_ctx_close(struct lab_ctx *ctx);
 void lab_unconfined(struct zcl_command_reply *reply);
 

@@ -707,14 +707,16 @@ void lab_test_context(const struct zcl_command_request *request,
         lab_fail(reply, "LAB_BAD_CASES", "normalize",
                  "cases is a JSON array of 1..256 objects with name, and "
                  "optional stdin, args, expect_stdout, expect_exit (0..255)");
-    } else if (!own_ctx || lab_ctx_open(ctx, file, reply)) {
+    } else if (!own_ctx || lab_ctx_read(ctx, file, reply)) {
         if (!lab_root_test(ctx, &cs, r.sanitize, r.timeout_ms, r.mem_mb))
             lab_fail(reply, "LAB_ALLOC", "root", "the lab could not allocate");
         else if (r.fresh || !lab_cache_serve(ctx, reply)) {
-            if (!lab_confinement_available())
-                lab_unconfined(reply);
-            else
-                lab_test_execute(ctx, &cs, &r, reply);
+            if (!own_ctx || lab_ctx_prepare(ctx, reply)) {
+                if (!lab_confinement_available())
+                    lab_unconfined(reply);
+                else
+                    lab_test_execute(ctx, &cs, &r, reply);
+            }
         }
         if (own_ctx)
             lab_ctx_close(ctx);

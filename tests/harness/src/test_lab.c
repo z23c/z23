@@ -437,6 +437,105 @@ static int test_lab_stdin_args(void)
     return failures;
 }
 
+static bool lt_archive_copy(const char *root, const char *base)
+{
+    struct lab_dirs source, archive;
+    struct json_value saved;
+    char dir[700];
+    if (lab_dirs_resolve(&source) != LAB_OK ||
+        snprintf(dir, sizeof(dir), "%s/receipts", base) <= 0 ||
+        mkdir(base, 0700) != 0 || mkdir(dir, 0700) != 0)
+        return false;
+    memset(&archive, 0, sizeof(archive));
+    if (snprintf(archive.receipts, sizeof(archive.receipts), "%s", dir) >=
+        (int)sizeof(archive.receipts))
+        return false;
+    json_init(&saved);
+    bool copied = lab_receipt_load(&source, root, &saved) &&
+                  lab_receipt_store(&archive, root, &saved);
+    json_free(&saved);
+    return copied;
+}
+
+static bool lt_archive_clean(const char *base)
+{
+    static const char *const unused[] = { "cc", "run", "zcc" };
+    char path[800];
+    for (size_t i = 0; i < sizeof(unused) / sizeof(unused[0]); i++) {
+        if (snprintf(path, sizeof(path), "%s/%s", base, unused[i]) <= 0 ||
+            access(path, F_OK) == 0 || errno != ENOENT)
+            return false;
+    }
+    return true;
+}
+
+static bool lt_replay_request(bool is_test, struct zcl_command_reply *reply)
+{
+    static const char input[] =
+        "{\"file\":\"" LT_FIX "hello.c\",\"cases\":[{\"name\":\"hello\"}]}";
+    return is_test ? lt_call(zcl_native_handle_lab_test, input, "zcl.lab_test.v1", reply)
+                   : lt_run("hello.c", "\"compile_only\":true,\"timeout_ms\":4123", reply);
+}
+
+static bool lt_replay_same(const struct zcl_command_reply *again, const char *root,
+                           size_t compiles, size_t runs, const char *base)
+{
+    return again->status == ZCL_COMMAND_STATUS_PASSED &&
+           lt_flag(&again->data, "cache", "hit") &&
+           lab_compile_count() == compiles && lab_run_count() == runs &&
+           lt_streq(json_get(&again->data, "root"), root) && lt_archive_clean(base);
+}
+
+
+static bool lt_replay_archive(bool is_test)
+{
+    struct zcl_command_reply first, again;
+    char base[600], root[LAB_ROOT_HEX + 1];
+    bool ok = false, switched = false;
+    if (is_test && !lab_confinement_available())
+        return true; /* This host cannot produce a test receipt. */
+    if (!lt_replay_request(is_test, &first))
+        return false;
+    if (first.status != ZCL_COMMAND_STATUS_PASSED || !json_get(&first.data, "root"))
+        goto done;
+    snprintf(root, sizeof(root), "%s", json_get_str(json_get(&first.data, "root")));
+    if (snprintf(base, sizeof(base), "%s/replay-%s", g_lt_dir, is_test ? "test" : "run") <= 0 ||
+        !lt_archive_copy(root, base) || setenv("Z23_LAB_DIR", base, 1) != 0)
+        goto done;
+    switched = true;
+    size_t compiles = lab_compile_count(), runs = lab_run_count();
+    if (!lt_replay_request(is_test, &again))
+        goto done;
+    ok = lt_replay_same(&again, root, compiles, runs, base);
+    zcl_command_reply_free(&again);
+done:
+    if (switched) (void)setenv("Z23_LAB_DIR", g_lt_dir, 1);
+    zcl_command_reply_free(&first);
+    return ok;
+}
+
+
+static int test_lab_replay_archive(void)
+{
+    int failures = 0;
+    TEST("lab run replays a receipt without creating build directories") {
+        ASSERT(lt_replay_archive(false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_lab_test_replay_archive(void)
+{
+    int failures = 0;
+    TEST("lab test replays a receipt without creating build directories") {
+        ASSERT(lt_replay_archive(true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_lab_cache(void)
 {
     int failures = 0;
@@ -1307,6 +1406,8 @@ int test_lab(void)
     failures += test_lab_resource_caps();
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
+    failures += test_lab_replay_archive();
+    failures += test_lab_test_replay_archive();
     failures += test_lab_test_cases();
 #if !defined(_WIN32)
     failures += test_lab_writerless_case_file();

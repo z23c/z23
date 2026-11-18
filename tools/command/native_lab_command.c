@@ -135,13 +135,13 @@ static void lab_err_reply(struct zcl_command_reply *reply, enum lab_err err)
     }
 }
 
-bool lab_ctx_open(struct lab_ctx *ctx, const char *file,
-                         struct zcl_command_reply *reply)
+bool lab_ctx_read(struct lab_ctx *ctx, const char *file,
+                  struct zcl_command_reply *reply)
 {
     memset(ctx, 0, sizeof(*ctx));
     enum lab_err err = file ? lab_source_load(file, &ctx->src) : LAB_OK;
     if (err == LAB_OK)
-        err = file ? lab_dirs_open(&ctx->dirs) : lab_dirs_resolve(&ctx->dirs);
+        err = lab_dirs_resolve(&ctx->dirs);
     if (err == LAB_OK && file)
         err = lab_toolchain_find(&ctx->tc);
     if (err != LAB_OK) {
@@ -149,6 +149,25 @@ bool lab_ctx_open(struct lab_ctx *ctx, const char *file,
         lab_err_reply(reply, err);
     }
     return err == LAB_OK;
+}
+
+bool lab_ctx_prepare(struct lab_ctx *ctx, struct zcl_command_reply *reply)
+{
+    enum lab_err err = lab_dirs_open(&ctx->dirs);
+    if (err != LAB_OK)
+        lab_err_reply(reply, err);
+    return err == LAB_OK;
+}
+
+bool lab_ctx_open(struct lab_ctx *ctx, const char *file, struct zcl_command_reply *reply)
+{
+    if (!lab_ctx_read(ctx, file, reply))
+        return false;
+    if (file && !lab_ctx_prepare(ctx, reply)) {
+        lab_source_free(&ctx->src);
+        return false;
+    }
+    return true;
 }
 
 void lab_ctx_close(struct lab_ctx *ctx)
@@ -336,6 +355,8 @@ static void lab_run_dispatch(struct lab_ctx *ctx, const struct lab_req *req,
         lab_fail(reply, "LAB_ALLOC", "root", "the lab could not allocate");
     else if (!req->fresh && lab_cache_serve(ctx, reply))
         return;
+    else if (!lab_ctx_prepare(ctx, reply))
+        return;
     else if (!req->compile_only && !lab_confinement_available())
         lab_unconfined(reply);
     else
@@ -348,7 +369,7 @@ void zcl_native_handle_lab_run(const struct zcl_command_request *request,
     struct lab_req req;
     struct lab_ctx ctx;
     if (!lab_req_parse(request, &req, reply) ||
-        !lab_ctx_open(&ctx, req.file, reply))
+        !lab_ctx_read(&ctx, req.file, reply))
         return;
     lab_run_dispatch(&ctx, &req, reply);
     lab_ctx_close(&ctx);
