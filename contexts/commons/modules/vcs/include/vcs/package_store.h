@@ -324,6 +324,7 @@ enum vcs_package_store_result vcs_package_store_get_chunk_at_into(
     size_t capacity, size_t *out_len);
 #ifdef ZCL_TESTING
 struct vcs_package_store_read_stats {
+    uint64_t path_lookups;
     uint64_t verified_bytes;
     uint64_t into_reads;
     uint64_t allocated_reads;

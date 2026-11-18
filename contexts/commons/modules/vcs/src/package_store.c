@@ -1160,6 +1160,9 @@ enum vcs_package_store_result vcs_package_store_get_chunk(
                    "null store/root/path/out");
     *out = NULL;
     *out_len = 0;
+#ifdef ZCL_TESTING
+    store_read_stats.path_lookups++;
+#endif
     pthread_mutex_lock(&store->lock);
     struct store_package *pkg = store_find(store, package_root, NULL);
     enum vcs_package_store_result result = VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE;
@@ -1242,26 +1245,23 @@ enum vcs_package_store_result vcs_package_store_get_chunk_at(
         pthread_mutex_unlock(&store->lock);
         return VCS_PACKAGE_STORE_ERR_CHUNK_COORD;
     }
-    /* files[].path is heap memory owned by the record, and an eviction on
-     * another thread can free it (and relocate the record itself) the
-     * moment this lock is dropped — get_chunk re-locks and re-resolves, so
-     * it must be handed a path that outlives the gap. Copy it out under
-     * the lock, the same way get_manifest_wire copies its payload below.
-     * Parse rejects any path longer than VCS_PACKAGE_PATH_MAX, so an
-     * over-long one here means a corrupt record, not a legal coordinate. */
-    const char *path = pkg->manifest.files[file_index].path;
-    char path_copy[VCS_PACKAGE_PATH_MAX + 1];
-    size_t path_len = path ? strnlen(path, sizeof(path_copy)) : sizeof(path_copy);
-    if (path_len >= sizeof(path_copy)) {
+    /* Keep the indexed record under the lock through verification: eviction
+     * cannot free or relocate it while the chunk is read. Retain the path
+     * guard for malformed records before touching the output arguments. */
+    const struct vcs_package_file *file = &pkg->manifest.files[file_index];
+    const char *path = file->path;
+    if (!path || strnlen(path, VCS_PACKAGE_PATH_MAX + 1u) > VCS_PACKAGE_PATH_MAX) {
         pthread_mutex_unlock(&store->lock);
         LOG_RETURN(VCS_PACKAGE_STORE_ERR_CHUNK_COORD, STORE_LOG,
                    "manifest path for file %u is absent or exceeds %u bytes",
                    file_index, VCS_PACKAGE_PATH_MAX);
     }
-    memcpy(path_copy, path, path_len + 1u);
+    *out = NULL;
+    *out_len = 0;
+    enum vcs_package_store_result result =
+        store_chunk_read_locked(store, pkg, file, chunk_index, NULL, 0, out, out_len);
     pthread_mutex_unlock(&store->lock);
-    return vcs_package_store_get_chunk(store, package_root, path_copy,
-                                       chunk_index, out, out_len);
+    return result;
 }
 
 enum vcs_package_store_result vcs_package_store_get_manifest_wire(

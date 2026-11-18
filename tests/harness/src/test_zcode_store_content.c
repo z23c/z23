@@ -13,6 +13,8 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
+
 #include "models/build_fabric.h"
 #include "services/build_fabric_cache.h"
 #include "services/build_fabric_service.h"
@@ -388,11 +390,97 @@ static bool store_multichunk_verified_read(struct vcs_package_store *store,
     return ok;
 }
 
+static int store_indexed_lookup_controls(struct vcs_package_store *store,
+                                         const uint8_t root[32],
+                                         const uint8_t action[32])
+{
+    int failures = 0;
+    uint8_t *out = NULL;
+    size_t len = 0;
+    (void)vcs_package_store_read_stats_for_test(true);
+    enum vcs_package_store_result result =
+        vcs_package_store_get_chunk(store, root, "action", 0, &out, &len);
+    struct vcs_package_store_read_stats reads = vcs_package_store_read_stats_for_test(true);
+    ZS_CHECK("path read: positive control records path lookup",
+        result == VCS_PACKAGE_STORE_OK && len == 32 &&
+        memcmp(out, action, 32) == 0 && reads.path_lookups == 1);
+    free(out);
+    out = NULL;
+    len = 0;
+    result = vcs_package_store_get_chunk_at(store, root, 0, 0, &out, &len);
+    reads = vcs_package_store_read_stats_for_test(true);
+    ZS_CHECK("indexed read: no path lookup is needed",
+        result == VCS_PACKAGE_STORE_OK && len == 32 &&
+        memcmp(out, action, 32) == 0 && reads.path_lookups == 0);
+    free(out);
+    return failures;
+}
+
+static int store_indexed_refusal_controls(struct vcs_package_store *store,
+    const uint8_t root[32])
+{
+    int failures = 0;
+    uint8_t sentinel = 0, unknown[32];
+    uint8_t *out = &sentinel;
+    size_t len = 123;
+    memcpy(unknown, root, 32);
+    unknown[0] ^= 1;
+    ZS_CHECK("indexed read: null store leaves outputs untouched",
+        vcs_package_store_get_chunk_at(NULL, root, 0, 0, &out, &len) ==
+            VCS_PACKAGE_STORE_ERR_NULL && out == &sentinel && len == 123);
+    ZS_CHECK("indexed read: null root leaves outputs untouched",
+        vcs_package_store_get_chunk_at(store, NULL, 0, 0, &out, &len) ==
+            VCS_PACKAGE_STORE_ERR_NULL && out == &sentinel && len == 123);
+    ZS_CHECK("indexed read: null output leaves length untouched",
+        vcs_package_store_get_chunk_at(store, root, 0, 0, NULL, &len) ==
+            VCS_PACKAGE_STORE_ERR_NULL && len == 123);
+    ZS_CHECK("indexed read: null length leaves output untouched",
+        vcs_package_store_get_chunk_at(store, root, 0, 0, &out, NULL) ==
+            VCS_PACKAGE_STORE_ERR_NULL && out == &sentinel);
+    ZS_CHECK("indexed read: unknown package leaves outputs untouched",
+        vcs_package_store_get_chunk_at(store, unknown, 0, 0, &out, &len) ==
+            VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE && out == &sentinel && len == 123);
+    ZS_CHECK("indexed read: invalid file leaves outputs untouched",
+        vcs_package_store_get_chunk_at(store, root, 2, 0, &out, &len) ==
+            VCS_PACKAGE_STORE_ERR_CHUNK_COORD && out == &sentinel && len == 123);
+    return failures;
+}
+
+static int store_indexed_late_controls(struct vcs_package_store *store,
+    const uint8_t root[32], const uint8_t *bytes)
+{
+    int failures = 0;
+    uint8_t sentinel = 0, *out = &sentinel;
+    size_t len = 123;
+    ZS_CHECK("indexed read: invalid chunk clears outputs",
+        vcs_package_store_get_chunk_at(store, root, 0, 1, &out, &len) ==
+            VCS_PACKAGE_STORE_ERR_CHUNK_COORD && out == NULL && len == 0);
+    out = &sentinel;
+    len = 123;
+    zcl_alloc_fault_fail_next("vcs_store_get_chunk");
+    enum vcs_package_store_result alloc_result =
+        vcs_package_store_get_chunk_at(store, root, 0, 0, &out, &len);
+    bool alloc_failed = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    ZS_CHECK("indexed read: allocation failure clears outputs",
+        alloc_failed && alloc_result == VCS_PACKAGE_STORE_ERR_ALLOC &&
+            out == NULL && len == 0);
+    out = NULL;
+    len = 0;
+    ZS_CHECK("indexed read: second file final chunk matches",
+        vcs_package_store_get_chunk_at(store, root, 1, 1, &out, &len) ==
+            VCS_PACKAGE_STORE_OK && len == 17 &&
+            memcmp(out, bytes + VCS_PACKAGE_CHUNK_BYTES, 17) == 0);
+    free(out);
+    return failures;
+}
+
 static int store_into_read_controls(struct vcs_package_store *store,
                                      const uint8_t root[32],
                                      const uint8_t action[32])
 {
     int failures = 0;
+    failures += store_indexed_lookup_controls(store, root, action);
     uint8_t out[32];
     memset(out, 0xa5, sizeof(out));
     size_t len = SIZE_MAX;
@@ -483,6 +571,20 @@ static int store_into_corrupt_control(struct vcs_package_store *store,
     ZS_CHECK("verified into: quarantined chunk remains missing",
         vcs_package_store_get_chunk_at_into(store, root, 0, 0, out, sizeof(out),
             &len) == VCS_PACKAGE_STORE_ERR_CHUNK_MISSING && len == 0);
+    ZS_CHECK("indexed read: restore valid CAS",
+        vcs_package_store_put_chunk(store, root, "action", 0, action, 32) ==
+            VCS_PACKAGE_STORE_OK);
+    wrote = store_write_tampered(path, tampered);
+    ZS_CHECK("indexed read: corrupt fixture writes", wrote);
+    if (!wrote) return failures;
+    allocated = out;
+    expected_len = SIZE_MAX;
+    ZS_CHECK("indexed read: corrupt CAS is quarantined and clears outputs",
+        vcs_package_store_get_chunk_at(store, root, 0, 0, &allocated, &expected_len) ==
+            VCS_PACKAGE_STORE_ERR_CHUNK_HASH && allocated == NULL && expected_len == 0);
+    ZS_CHECK("indexed read: quarantined CAS remains missing",
+        vcs_package_store_get_chunk_at(store, root, 0, 0, &allocated, &expected_len) ==
+            VCS_PACKAGE_STORE_ERR_CHUNK_MISSING && allocated == NULL && expected_len == 0);
     return failures;
 }
 
@@ -552,6 +654,8 @@ int t_store_work_output(void)
     ZS_CHECK("work output: multichunk reconstruction uses verified destination reads",
              store_multichunk_verified_read(s, root_a, action_a, bytes, bytes_len));
     failures += store_into_read_controls(s, root_a, action_a);
+    failures += store_indexed_refusal_controls(s, root_a);
+    failures += store_indexed_late_controls(s, root_a, bytes);
     free(out); out = NULL; out_len = 0;
     ZS_CHECK("work output: wrong action fails closed",
              vcs_zcode_work_output_get(
