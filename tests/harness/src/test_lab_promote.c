@@ -426,7 +426,8 @@ static int lp_case_cases_snapshot(void)
     bool ready = lp_env_open(&e);
     TEST_CASE("promotion retains exact case file bytes before either build") {
         struct zcl_command_reply r;
-        struct json_value input, cases;
+        struct json_value input;
+        struct lab_case_snapshot cases;
         char path[PATH_MAX], in[PATH_MAX + 64];
         ASSERT(ready);
         ASSERT(lp_join(path, sizeof(path), e.base, "cases.json"));
@@ -446,12 +447,36 @@ static int lp_case_cases_snapshot(void)
         ASSERT(captured);
         json_free(&input);
         ASSERT_EQ(unlink(path), 0);
-        ASSERT_EQ(cases.type, JSON_STR);
-        ASSERT_STR_EQ(json_get_str(&cases), "  " LP_CASES_OK "\n");
-        json_free(&cases);
+        ASSERT_EQ(cases.value->type, JSON_STR);
+        ASSERT_STR_EQ(json_get_str(cases.value), "  " LP_CASES_OK "\n");
+        free(cases.file_text);
         zcl_command_reply_free(&r);
     } TEST_END
     lp_env_close(&e);
+    return failures;
+}
+
+static int lp_case_snapshot_no_copy(void)
+{
+    int failures = 0;
+    TEST_CASE("validation does not copy an inline case string") {
+        struct json_value input;
+        struct lab_case_snapshot cases;
+        struct zcl_command_reply r;
+        const char *text = "{\"cases\":\"[{\\\"name\\\":\\\"one\\\"}]\"}";
+        json_init(&input);
+        ASSERT(json_read(&input, text, strlen(text)));
+        struct zcl_command_request rq = { .input = &input };
+        zcl_command_reply_init(&r, "zcl.lab_test.v1");
+        zcl_alloc_fault_fail_next("json_copy_str");
+        bool captured = lab_cases_snapshot(&rq, &cases, &r);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(captured && armed);
+        free(cases.file_text);
+        json_free(&input);
+        zcl_command_reply_free(&r);
+    } TEST_END
     return failures;
 }
 
@@ -541,6 +566,55 @@ static int lp_case_ready_snapshot(void)
         ASSERT(memcmp(bytes, original, n) == 0);
         zcl_command_reply_free(&r);
         json_free(&input);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
+static bool lp_change_cases_ready(void *context, struct zcl_command_reply *reply)
+{
+    (void)reply;
+    struct json_value *input = context;
+    for (size_t i = 0; i < input->num_children; i++) {
+        if (strcmp(input->keys[i], "cases") == 0) {
+            json_set_null(&input->children[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
+static int lp_case_ready_values(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("promotion copies array and inline cases before ready") {
+        ASSERT(ready);
+        for (size_t form = 0; form < 2; form++) {
+            char in[4 * PATH_MAX + 1024];
+            struct json_value input, inline_cases;
+            struct zcl_command_reply r;
+            json_init(&inline_cases);
+            if (form) json_set_str(&inline_cases, LP_CASES_OK);
+            char encoded[1024];
+            if (form) {
+                ASSERT_EQ(inline_cases.type, JSON_STR);
+                ASSERT(json_write(&inline_cases, encoded, sizeof encoded) < sizeof encoded);
+            }
+            snprintf(in, sizeof in, "{\"file\":\"%s\",\"cases\":%s,\"name\":\"upper\",\"version\":\"1.0.0\",\"key\":\"%s\",\"dir\":\"%s\"}", LP_UPPER, form ? encoded : LP_CASES_OK, e.key, e.dist);
+            json_free(&inline_cases);
+            json_init(&input);
+            ASSERT(json_read(&input, in, strlen(in)));
+            struct zcl_command_request request = { .input = &input };
+            zcl_command_reply_init(&r, "zcl.lab_promote.v1");
+            lab_promote_with_ready(&request, lp_change_cases_ready, &input, &r);
+            ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+            ASSERT_EQ(json_get_int(json_get(&r.data, "cases_passed")), 2);
+            ASSERT(json_is_null(json_get(&input, "cases")));
+            zcl_command_reply_free(&r);
+            json_free(&input);
+        }
     } TEST_END
     lp_env_close(&e);
     return failures;
@@ -767,6 +841,7 @@ int test_lab_promote(void)
     failures += lp_case_hotswap();
     failures += lp_case_invalid_before_key();
     failures += lp_case_ready_snapshot();
+    failures += lp_case_ready_values();
     failures += lp_case_export_borrow();
     failures += lp_case_failed_case();
     failures += lp_case_disagree();
@@ -774,6 +849,7 @@ int test_lab_promote(void)
     failures += lp_case_no_key();
     failures += lp_case_source_snapshot();
     failures += lp_case_cases_snapshot();
+    failures += lp_case_snapshot_no_copy();
     return failures;
 }
 #endif

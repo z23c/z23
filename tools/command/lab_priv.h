@@ -36,9 +36,15 @@ typedef bool (*lab_promote_ready_fn)(void *context, struct zcl_command_reply *re
 void lab_promote_with_ready(const struct zcl_command_request *request,
                             lab_promote_ready_fn ready, void *context,
                             struct zcl_command_reply *reply);
-/* Snapshot validated cases, retaining the original text for package export. */
+/* Borrow request cases or retain file text until the caller copies the value.
+ * file_view is non-owning: free file_text, never json_free file_view. */
+struct lab_case_snapshot {
+    struct json_value file_view;
+    const struct json_value *value;
+    char *file_text;
+};
 bool lab_cases_snapshot(const struct zcl_command_request *request,
-                         struct json_value *cases, struct zcl_command_reply *reply);
+                        struct lab_case_snapshot *cases, struct zcl_command_reply *reply);
 
 /* Serve the stored receipt for ctx->root when it matches this compiler. */
 bool lab_cache_serve(struct lab_ctx *ctx, struct zcl_command_reply *reply);

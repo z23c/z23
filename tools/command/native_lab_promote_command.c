@@ -367,18 +367,18 @@ void lab_promote_with_ready(const struct zcl_command_request *request,
                  "promotion requires file, cases, name, version and key with valid limits");
         return;
     }
-    struct json_value cases, test_options;
+    struct lab_case_snapshot cases;
+    struct json_value test_options;
     json_init(&test_options);
-    if (!lab_cases_snapshot(request, &cases, reply)) {
-        json_free(&cases);
+    if (!lab_cases_snapshot(request, &cases, reply))
         return;
-    }
     static const char *const keys[] = {
         "file", "sanitize", "timeout_ms", "mem_mb"
     };
     bool ok = promote_forward(request, &test_options, keys, sizeof(keys) / sizeof(keys[0])) &&
-              json_push_kv(&test_options, "cases", &cases) &&
+              json_push_kv(&test_options, "cases", cases.value) &&
               json_push_kv_bool(&test_options, "fresh", true);
+    free(cases.file_text);
     if (ok) {
         p.test.input = &test_options;
         if (!ready || ready(context, reply))
@@ -387,7 +387,6 @@ void lab_promote_with_ready(const struct zcl_command_request *request,
         lab_fail(reply, "LAB_ALLOC", "normalize", "the promotion snapshot could not be allocated");
     }
     json_free(&test_options);
-    json_free(&cases);
 }
 
 void zcl_native_handle_lab_promote(const struct zcl_command_request *request,

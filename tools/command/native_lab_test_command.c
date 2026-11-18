@@ -263,26 +263,26 @@ static void lab_cases_free(struct lab_cases *cs)
 }
 
 bool lab_cases_snapshot(const struct zcl_command_request *request,
-                         struct json_value *cases, struct zcl_command_reply *reply)
+                        struct lab_case_snapshot *cases, struct zcl_command_reply *reply)
 {
     struct lab_cases cs;
-    json_init(cases);
-    bool ok;
+    memset(cases, 0, sizeof(*cases));
     if (!lab_cases_open(request, &cs) || !lab_cases_parse(&cs)) {
         lab_cases_free(&cs);
         lab_fail(reply, "LAB_BAD_CASES", "normalize", "cases must be a valid nonempty case array");
         return false;
     }
     if (cs.file_text) {
-        json_set_str(cases, cs.file_text);
-        ok = cases->type == JSON_STR;
+        cases->file_text = cs.file_text;
+        cs.file_text = NULL;
+        cases->file_view.type = JSON_STR;
+        cases->file_view.val.s = cases->file_text;
+        cases->value = &cases->file_view;
     } else {
-        ok = json_copy_checked(cases, json_get(request->input, "cases"));
+        cases->value = json_get(request->input, "cases");
     }
-    if (!ok)
-        lab_fail(reply, "LAB_ALLOC", "normalize", "the case snapshot could not be allocated");
     lab_cases_free(&cs);
-    return ok;
+    return true;
 }
 
 static void lab_hash_case(struct lab_hasher *h, const struct lab_case *c)
