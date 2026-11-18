@@ -66,7 +66,7 @@ struct cb_brief {
     size_t nowners;
     char tests[CB_MAX_TESTS][ZCL_AGENT_IMPACT_GROUP_MAX];
     size_t ntests;
-    bool unmapped;
+    bool unmapped, test_evidence_unavailable;
     struct cb_lesson lessons[CB_MAX_LESSONS];
     size_t nlessons;
     char unavailable[64];
@@ -412,6 +412,7 @@ static void cb_collect_tests(struct cb_brief *b)
         bool crisk = batched ? risks[i] : false;
         const char *route = batched ? routes[i]
             : zcl_native_code_route_for_path(b->paths[i], acc, &crisk);
+        b->test_evidence_unavailable = b->test_evidence_unavailable || acc->referrer_read_failed;
         if (!crisk && acc->groups_len == 0) {
             b->unmapped = true;
             continue;
@@ -913,7 +914,8 @@ static bool cb_push_tests(struct json_value *data, const struct cb_brief *b)
         ok = cb_array_string(&arr, b->tests[i]);
     if (ok) ok = json_push_kv(data, "tests", &arr);
     json_free(&arr);
-    return ok && (!b->unmapped || json_push_kv_bool(data, "tests_unmapped", true));
+    return ok && (!b->unmapped || json_push_kv_bool(data, "tests_unmapped", true)) &&
+           (!b->test_evidence_unavailable || json_push_kv_bool(data, "test_evidence_unavailable", true));
 }
 
 static bool cb_push_next_cmds(struct json_value *data, const struct cb_brief *b)

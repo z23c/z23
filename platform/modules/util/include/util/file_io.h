@@ -46,4 +46,8 @@ bool zcl_read_whole_file_text_unbuffered(const char *path, size_t max_len,
                                           char **out_buf, size_t *out_len,
                                           const char *log_ctx);
 
+/* As above; limit_exceeded distinguishes the existing size bound from read failure. */
+bool zcl_read_whole_file_text_unbuffered_checked(const char *path, size_t max_len,
+    char **out_buf, size_t *out_len, const char *log_ctx, bool *limit_exceeded);
+
 #endif

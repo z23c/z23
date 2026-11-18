@@ -88,7 +88,7 @@ bool zcl_read_whole_file(const char *path, size_t max_len,
 }
 
 static bool read_text_size(FILE *f, const char *path, size_t max_len,
-                            size_t *size, const char *log_ctx)
+                            size_t *size, const char *log_ctx, bool *limit_exceeded)
 {
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
@@ -109,6 +109,7 @@ static bool read_text_size(FILE *f, const char *path, size_t max_len,
 
     size_t n = (size_t)sz;
     if (max_len > 0 && n > max_len) {
+        if (limit_exceeded) *limit_exceeded = true;
         fclose(f);
         LOG_FAIL(log_ctx ? log_ctx : "file_io",
                   "read_whole_file_text: %s is %zu bytes, exceeds cap %zu",
@@ -131,7 +132,7 @@ static void text_stream_buffer(FILE *stream, bool unbuffered)
 
 static bool read_whole_file_text(const char *path, size_t max_len,
                                  char **out_buf, size_t *out_len,
-                                 const char *log_ctx, bool unbuffered)
+                                 const char *log_ctx, bool unbuffered, bool *limit_exceeded)
 {
     if (out_buf) *out_buf = NULL;
     if (out_len) *out_len = 0;
@@ -144,7 +145,7 @@ static bool read_whole_file_text(const char *path, size_t max_len,
                   "read_whole_file_text: read open failed for %s", path);
     text_stream_buffer(f, unbuffered);
     size_t n;
-    if (!read_text_size(f, path, max_len, &n, log_ctx)) return false;
+    if (!read_text_size(f, path, max_len, &n, log_ctx, limit_exceeded)) return false;
 
     char *buf = zcl_malloc(n + 1, "zcl_read_whole_file_text");
     if (!buf) {
@@ -176,12 +177,19 @@ bool zcl_read_whole_file_text(const char *path, size_t max_len,
                               char **out_buf, size_t *out_len,
                               const char *log_ctx)
 {
-    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, false);
+    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, false, NULL);
 }
 
 bool zcl_read_whole_file_text_unbuffered(const char *path, size_t max_len,
                                          char **out_buf, size_t *out_len,
                                          const char *log_ctx)
 {
-    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, true);
+    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, true, NULL);
+}
+
+bool zcl_read_whole_file_text_unbuffered_checked(const char *path, size_t max_len,
+    char **out_buf, size_t *out_len, const char *log_ctx, bool *limit_exceeded)
+{
+    if (limit_exceeded) *limit_exceeded = false;
+    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, true, limit_exceeded);
 }

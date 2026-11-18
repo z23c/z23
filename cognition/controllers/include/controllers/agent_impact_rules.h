@@ -19,6 +19,7 @@ struct agent_impact_acc {
     bool consensus_risk;
     bool agent_api_changed;
     bool groups_lost; /* Sticky loss of a unique or overlong token. */
+    bool referrer_read_failed; /* Navigation evidence incomplete; not proof selection. */
 };
 
 /* Zero-initialize acc. NULL/empty inputs and duplicates are no-ops. A full

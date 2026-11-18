@@ -176,7 +176,7 @@ static void cost_group_count(struct json_value *data, const struct agent_impact_
     (void)json_push_kv_int(data, "test_groups_retained_count", (int64_t)acc->groups_len);
     (void)json_push_kv_bool(data, "test_groups_lost", acc->groups_lost);
     (void)json_push_kv_bool(data, "test_groups_truncated", shown < acc->groups_len || acc->groups_lost);
-    if (acc->groups_lost) {
+    if (acc->groups_lost || acc->referrer_read_failed) {
         struct json_value unknown;
         json_init(&unknown); json_set_null(&unknown);
         (void)json_push_kv(data, "total_groups", &unknown); json_free(&unknown);
@@ -192,6 +192,8 @@ static void cost_summary(char summary[320], const char *route,
                          const struct cost_totals *totals)
 {
     char route_part[128];
+    const char *unknown = (acc->groups_lost || acc->referrer_read_failed)
+        ? " (additional groups unknown)" : "";
     if (acc->groups_len > 1) {
         (void)snprintf(route_part, sizeof(route_part),
                        "routes to group %s (+%zu more)", route, acc->groups_len - 1);
@@ -202,17 +204,17 @@ static void cost_summary(char summary[320], const char *route,
     if (totals->overflow) {
         (void)snprintf(summary, 320,
                        "%s; measured total unavailable (sum overflow)%s", route_part,
-                       acc->groups_lost ? " (additional groups unknown)" : "");
+                       unknown);
     } else if (totals->measured > 0) {
         (void)snprintf(summary, 320,
                        "%s; last measured %.1fs across %zu/%zu retained groups%s",
                        route_part, (double)totals->ms / 1000.0, totals->measured,
-                       acc->groups_len, acc->groups_lost ? " (additional groups unknown)" : "");
+                       acc->groups_len, unknown);
     } else {
         (void)snprintf(summary, 320,
                        "%s; not measured in this checkout yet%s "
                        "(run make t-fast ONLY=%s)", route_part,
-                       acc->groups_lost ? " (additional groups unknown)" : "", route);
+                       unknown, route);
     }
 }
 
@@ -274,8 +276,10 @@ void zcl_native_handle_code_cost(
     cost_total_emit(&reply->data, &totals);
     (void)json_push_kv_int(&reply->data, "measured_groups", (int64_t)totals.measured);
     cost_group_count(&reply->data, &acc, shown);
+    if (acc.referrer_read_failed)
+        (void)json_push_kv_bool(&reply->data, "test_evidence_unavailable", true);
     (void)json_push_kv_bool(&reply->data, "timing_complete",
-                            have_timing && !acc.groups_lost && !totals.overflow &&
+                            have_timing && !acc.groups_lost && !acc.referrer_read_failed && !totals.overflow &&
                             totals.measured == acc.groups_len);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 

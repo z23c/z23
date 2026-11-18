@@ -652,9 +652,12 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
 
         char *text = NULL;
         size_t len = 0;
-        if (!zcl_read_whole_file_text_unbuffered(relp, AIH_REFERRER_MAX, &text, &len,
-                                      "agent_impact_name_reference"))
+        bool limit_exceeded = false;
+        if (!zcl_read_whole_file_text_unbuffered_checked(relp, AIH_REFERRER_MAX, &text, &len,
+                                      "agent_impact_name_reference", &limit_exceeded)) {
+            if (!limit_exceeded) acc->referrer_read_failed = true;
             continue;
+        }
         bool hit = aih_referrer_hits(text, path, stem, alt, has_alt, compound);
         free(text);
         (void)len;

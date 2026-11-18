@@ -47,7 +47,9 @@ static FILE *file_io_observe_open(const char *path)
 #define zcl_read_whole_file file_io_observed_read
 #define zcl_read_whole_file_text file_io_observed_read_text
 #define zcl_read_whole_file_text_unbuffered file_io_observed_read_text_unbuffered
+#define zcl_read_whole_file_text_unbuffered_checked file_io_observed_read_text_unbuffered_checked
 #include "../../../platform/modules/util/src/file_io.c"
+#undef zcl_read_whole_file_text_unbuffered_checked
 #undef zcl_read_whole_file_text_unbuffered
 #undef zcl_read_whole_file_text
 #undef setvbuf

@@ -2476,11 +2476,52 @@ static bool ci_name_route_fixture(void)
     return ok;
 }
 
+static bool ci_name_route_unreadable(void)
+{
+#if !defined(_WIN32)
+    char cwd[4096], dir[4096], link[4096];
+    if (!getcwd(cwd, sizeof cwd) || !test_mkdtemp(dir, sizeof dir, "impact_unreadable"))
+        return false;
+    bool ok = ci_name_route_files(dir);
+    int n = snprintf(link, sizeof link, "%s/tests/harness/src/test_missing.c", dir);
+    ok = ok && n > 0 && (size_t)n < sizeof link && symlink("absent.c", link) == 0;
+    struct json_value input;
+    struct zcl_command_reply reply;
+    json_init(&input); json_set_object(&input);
+    ok = ok && json_push_kv_str(&input, "path", "tools/command/unique_probe.c");
+    struct zcl_command_request req = {.input = &input, .view = "normal", .invoked_name = "code.tests"};
+    zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+    if (ok && chdir(dir) == 0) {
+        zcl_native_handle_code_tests(&req, &reply);
+        ok = json_get_bool(json_get(&reply.data, "test_evidence_unavailable"));
+        struct zcl_command_reply guide;
+        cg_guide_paths(".", "tools/command/unique_probe.c,tools/command/other_probe.c", &guide);
+        ok = ok && json_get_bool(json_get(&guide.data, "test_evidence_unavailable"));
+        zcl_command_reply_free(&guide);
+        ok &= unlink("tests/harness/src/test_missing.c") == 0;
+        ok &= unlink("tests/harness/src/test_code_impact.c") == 0;
+        ok &= unlink("tests/harness/src/test_dev_job.c") == 0;
+        ok &= unlink("tests/harness/src/test_fleet_parity.c") == 0;
+        ok &= unlink("tests/harness/src/test_os_proc.txt") == 0;
+        ok &= rmdir("tests/harness/src") == 0;
+        ok &= rmdir("tests/harness") == 0;
+        ok &= rmdir("tests") == 0;
+        ok = chdir(cwd) == 0 && ok;
+    } else ok = false;
+    zcl_command_reply_free(&reply); json_free(&input);
+    test_cleanup_tmpdir(dir);
+    return ok;
+#else
+    return true;
+#endif
+}
+
 static int test_code_name_route_order(void)
 {
     int failures = 0;
     TEST("code impact: reference names use byte order including symlinks") {
         ASSERT(ci_name_route_fixture());
+        ASSERT(ci_name_route_unreadable());
         PASS();
     } _test_next:;
     return failures;

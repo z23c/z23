@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define FH_FIX "test-tmp/ci_firsthour"
 
@@ -377,7 +378,7 @@ static int test_fh_cost_hidden_group(void)
 /* Build a real timing artifact for the entire retained route. Variant 0 is
  * complete; 1/2/3 omit, mistype or negate one selected duration. */
 static bool fh_cost_full_artifact(const struct agent_impact_acc *acc,
-                                  size_t invalid_index, unsigned variant)
+                                  size_t invalid_index, unsigned variant, const char *root)
 {
     char text[32768];
     size_t used = 0;
@@ -394,7 +395,7 @@ static bool fh_cost_full_artifact(const struct agent_impact_acc *acc,
     }
     n = snprintf(text + used, sizeof(text) - used, "]}");
     return n > 0 && (size_t)n < sizeof(text) - used &&
-           fh_mk_write(FH_FIX, ".cache/test-timing/last-run.json", text);
+           fh_mk_write(root, ".cache/test-timing/last-run.json", text);
 }
 
 static int test_fh_cost_duration_validity(void)
@@ -406,7 +407,7 @@ static int test_fh_cost_duration_validity(void)
         ASSERT(zcl_native_code_route_for_path("tools/ship.sh", &acc, &risk) != NULL);
         ASSERT(acc.groups_len > 12 && !acc.groups_lost);
         for (unsigned variant = 0; variant <= 3; variant++) {
-            ASSERT(fh_cost_full_artifact(&acc, acc.groups_len - 1, variant));
+            ASSERT(fh_cost_full_artifact(&acc, acc.groups_len - 1, variant, FH_FIX));
             struct zcl_command_reply cost;
             fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
                     "tools/ship.sh", NULL, &cost);
@@ -418,7 +419,7 @@ static int test_fh_cost_duration_validity(void)
                    (int64_t)(acc.groups_len - (variant != 0)));
             zcl_command_reply_free(&cost);
         }
-        ASSERT(fh_cost_full_artifact(&acc, 0, 2));
+        ASSERT(fh_cost_full_artifact(&acc, 0, 2, FH_FIX));
         struct zcl_command_reply cost;
         fh_call(zcl_native_handle_code_cost, "zcl.code_cost.v1", "code.cost",
                 "tools/ship.sh", NULL, &cost);
@@ -529,6 +530,70 @@ static int test_fh_recent_missing_inputs(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool fh_cost_unreadable_result(const struct zcl_command_reply *reply, size_t count)
+{
+    const struct json_value *total = json_get(&reply->data, "total_groups");
+    const char *summary = json_get_str(json_get(&reply->data, "summary"));
+    return total && total->type == JSON_NULL &&
+           json_get_int(json_get(&reply->data, "total_ms")) == (int64_t)count &&
+           json_get_int(json_get(&reply->data, "measured_groups")) == (int64_t)count &&
+           json_size(json_get(&reply->data, "groups")) > 0 &&
+           json_get_bool(json_get(&reply->data, "test_evidence_unavailable")) &&
+           !json_get_bool(json_get(&reply->data, "timing_complete")) &&
+           summary && strstr(summary, "additional groups unknown");
+}
+#endif
+
+static bool fh_cost_unreadable_fixture(void)
+{
+#if !defined(_WIN32)
+    char cwd[4096], dir[4096], link[4096];
+    if (!getcwd(cwd, sizeof cwd) || !test_mkdtemp(dir, sizeof dir, "cost_unreadable")) return false;
+    bool ok = fh_mk_write(dir, "tests/harness/src/test_dev_job.c", "const char *s = \"unique_probe\";\n");
+    int n = snprintf(link, sizeof link, "%s/tests/harness/src/test_missing.c", dir);
+    ok = ok && n > 0 && (size_t)n < sizeof link && symlink("absent.c", link) == 0;
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    ok = ok && json_push_kv_str(&input, "path", "tools/command/unique_probe.c");
+    struct zcl_command_request req = {.input = &input, .view = "normal", .invoked_name = "code.cost"};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.code_cost.v1");
+    if (ok && chdir(dir) == 0) {
+        struct agent_impact_acc acc = {0};
+        bool risk = false;
+        ok = zcl_native_code_route_for_path("tools/command/unique_probe.c", &acc, &risk) != NULL &&
+             acc.groups_len > 0 && fh_cost_full_artifact(&acc, 0, 0, ".");
+        zcl_native_handle_code_cost(&req, &reply);
+        ok = fh_cost_unreadable_result(&reply, acc.groups_len) && ok;
+        ok &= unlink(".cache/test-timing/last-run.json") == 0;
+        ok &= rmdir(".cache/test-timing") == 0;
+        ok &= rmdir(".cache") == 0;
+        ok &= unlink("tests/harness/src/test_missing.c") == 0;
+        ok &= unlink("tests/harness/src/test_dev_job.c") == 0;
+        ok &= rmdir("tests/harness/src") == 0;
+        ok &= rmdir("tests/harness") == 0;
+        ok &= rmdir("tests") == 0;
+        ok = chdir(cwd) == 0 && ok;
+    } else ok = false;
+    zcl_command_reply_free(&reply); json_free(&input);
+    test_cleanup_tmpdir(dir);
+    return ok;
+#else
+    return true;
+#endif
+}
+
+static int test_fh_cost_unreadable(void)
+{
+    int failures = 0;
+    TEST("code_firsthour: incomplete referrers make cost evidence unknown") {
+        ASSERT(fh_cost_unreadable_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_firsthour(void)
 {
     int failures = 0;
@@ -547,6 +612,7 @@ int test_code_firsthour(void)
     failures += test_fh_cost_unmeasured();
     failures += test_fh_cost_measured();
     failures += test_fh_cost_hidden_group();
+    failures += test_fh_cost_unreadable();
     failures += test_fh_cost_duration_validity();
     failures += test_fh_recent_history();
     failures += test_fh_recent_bogus_since();

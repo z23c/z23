@@ -356,6 +356,8 @@ const char *code_emit_route(
     (void)json_push_kv_int(&reply->data, "test_groups_retained_count",
                             (int64_t)acc.groups_len);
     (void)json_push_kv_bool(&reply->data, "test_groups_lost", acc.groups_lost);
+    if (acc.referrer_read_failed)
+        (void)json_push_kv_bool(&reply->data, "test_evidence_unavailable", true);
     (void)json_push_kv_bool(&reply->data, "test_groups_truncated",
                              shown < acc.groups_len || acc.groups_lost);
     (void)json_push_kv_str(&reply->data, "route", route);
