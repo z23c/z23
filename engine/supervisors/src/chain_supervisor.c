@@ -82,6 +82,13 @@ static void coord_esc_stall(struct liveness_contract *c)
     memset(&reval_hash, 0, sizeof(reval_hash));
     enum reval_result rr = process_block_revalidate(stuck_h, g_coord_esc_ms,
                                                      &reval_hash);
+    if (rr == REVAL_OPERATOR_HELD) {
+        /* The block at the stuck height was invalidated by the operator
+         * (invalidateblock): the held tip is intentional local policy, not a
+         * stall to escalate. reconsiderblock lifts it. */
+        LOG_INFO("supervisor", "[supervisor] chain.coord_escalation: h=%d is operator-invalidated; holding (no escalation)", stuck_h);
+        return;
+    }
     LOG_WARN("supervisor", "[supervisor] chain.coord_escalation: revalidate h=%d -> %s", stuck_h, reval_result_name(rr));
     event_emitf(EV_CHAIN_ADVANCE_DECISION, 0,
                 "revalidate height=%d result=%s",

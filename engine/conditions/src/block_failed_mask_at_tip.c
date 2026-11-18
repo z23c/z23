@@ -251,7 +251,9 @@ static bool reducer_frontier_owns_stall(struct main_state *ms,
 static bool pred_failed(const struct block_index *p, void *ctx)
 {
     (void)ctx;
-    return (p->nStatus & BLOCK_FAILED_MASK) != 0;
+    /* An operator invalidateblock is intentional, not a wedge to heal. */
+    return (p->nStatus & BLOCK_FAILED_MASK) != 0 &&
+           !(p->nStatus & BLOCK_OPERATOR_INVALID);
 }
 
 static bool pred_have_data_child(const struct block_index *p, void *tip)
@@ -356,7 +358,8 @@ static enum condition_remedy_result remedy_block_failed_mask_at_tip(void)
         (stall_type == BF_STALL_NO_ADVANCE &&
          r == REVAL_HEIGHT_NOT_FOUND) ||
         r == REVAL_RECOVERED ||
-        r == REVAL_NO_FAILURE;
+        r == REVAL_NO_FAILURE ||
+        r == REVAL_OPERATOR_HELD;
     atomic_store(&g_last_remedy_target, target);
     atomic_store(&g_last_remedy_result, (int)r);
     atomic_store(&g_last_remedy_treated_ok, treated_ok ? 1 : 0);

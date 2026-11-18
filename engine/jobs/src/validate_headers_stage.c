@@ -889,8 +889,9 @@ static bool vh_authoritative_mark(struct vh_job *job, bool clearable)
     struct block_index *bi = job ? job->mark_bi : NULL;
     if (mark_valid_header(bi))
         return true;                        /* not FAILED-masked: fast path */
-    if (bi && clearable && (bi->nStatus & BLOCK_FAILED_MASK)) {
-        bi->nStatus &= ~(unsigned)BLOCK_FAILED_MASK;
+    if (bi && clearable && (bi->nStatus & BLOCK_FAILED_MASK) &&
+        !(bi->nStatus & BLOCK_OPERATOR_INVALID)) {
+        bi->nStatus = block_status_strip_failed(bi->nStatus);
         if (mark_valid_header(bi)) {
             vh_mark_fail_recover();
             return true;

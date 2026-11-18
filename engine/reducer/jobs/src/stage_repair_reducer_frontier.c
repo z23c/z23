@@ -114,10 +114,10 @@ static bool reconcile_block_flags_clear(
         changed = true;
     }
 
-    if ((bi->nStatus & BLOCK_FAILED_MASK) &&
+    if ((bi->nStatus & BLOCK_FAILED_MASK) && !(bi->nStatus & BLOCK_OPERATOR_INVALID) &&
         ev->script_ok_hash && ev->proof_ok_hash && ev->utxo_ok_hash) {
         if (apply)
-            bi->nStatus &= ~(unsigned)BLOCK_FAILED_MASK;
+            bi->nStatus = block_status_strip_failed(bi->nStatus);
         out->failed_mask_cleared++;
         changed = true;
     }

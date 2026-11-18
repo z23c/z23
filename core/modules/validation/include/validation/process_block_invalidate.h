@@ -139,9 +139,26 @@ bool process_block_disconnect_to_parent(struct validation_state *state,
 
 /* ── Orchestrators (hash-addressed; persist + kick activation) ──── */
 
+/* Who asked for the invalidation. Only an OPERATOR invalidation is local
+ * operator policy: it is persisted across restart and exempt from automatic
+ * revalidation until reconsiderblock (zclassicd invalidateblock parity).
+ * An AUTOMATED invalidation (stale-fork healer, ...) keeps the ordinary
+ * semantics: a revalidation verdict or a restart heals it. */
+enum invalidate_origin {
+    INVALIDATE_ORIGIN_AUTOMATED = 0,
+    INVALIDATE_ORIGIN_OPERATOR  = 1,
+};
+
 /* invalidateblock <hash>. See header preamble for the contract.
  * Resolves coins_tip/params/datadir from the activation controller.
- * `out_hash` (may be NULL) is filled with the resolved pindex hash. */
+ * `out_hash` (may be NULL) is filled with the resolved pindex hash.
+ * `origin` selects operator vs automated semantics (see above). */
+enum invalidate_result process_block_invalidate_from(
+    struct main_state *ms, const struct uint256 *hash,
+    struct uint256 *out_hash, enum invalidate_origin origin);
+
+/* AUTOMATED invalidation (process_block_invalidate_from with
+ * INVALIDATE_ORIGIN_AUTOMATED). The operator RPC must call the _from form. */
 enum invalidate_result process_block_invalidate(struct main_state *ms,
                                                 const struct uint256 *hash,
                                                 struct uint256 *out_hash);

@@ -1290,3 +1290,7 @@ later lane flips it HARD.
 - 2026-11-18T05:02:12Z — REASON: prover memory review fix: release the parse-once proving keys after the boot self-test so a full-set node does not keep ~77 MB of parsed keys resident until its first send; proof bytes unchanged
   old ROOT: ad098987dae310e5942d51bce79abfef4a44627515a96143d6d4ec1a11b3a424
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-18T22:27:36Z — REASON: Local operator policy: persist ONLY an operator invalidateblock (BLOCK_OPERATOR_INVALID, set by the RPC origin, never by automated invalidation) across restart and exempt it from automatic revalidation; consensus predicates unchanged (zclassicd parity)
+  old ROOT: 2b471deaee0c711233bad347b1ba7fddd0b9f22e7c0bcab6c7fb3fa011be2acc
+  by: owner unseal ritual (make core-unseal)

@@ -88,6 +88,7 @@ static void push_block_status_flags(struct json_value *arr, unsigned nStatus)
         { BLOCK_FAILED_VALID, "BLOCK_FAILED_VALID" },
         { BLOCK_FAILED_CHILD, "BLOCK_FAILED_CHILD" },
         { BLOCK_REVALIDATE_PENDING, "BLOCK_REVALIDATE_PENDING" },
+        { BLOCK_OPERATOR_INVALID, "BLOCK_OPERATOR_INVALID" },
     };
     for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
         if (nStatus & flags[i].mask) {

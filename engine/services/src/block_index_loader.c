@@ -155,6 +155,18 @@ block_index_apply_persisted_failure_trust(struct block_index *pindex,
      * THIS load's verdict. */
     unsigned int status = pindex->nStatus & ~(unsigned int)BLOCK_REVALIDATE_PENDING;
 
+    /* An operator invalidateblock ROOT (FAILED_VALID + OPERATOR_INVALID) is a
+     * decision, not a verdict revalidation could re-derive: keep it, at any
+     * height, across every restart. Only reconsiderblock clears it. A derived
+     * descendant mark or a stale operator bit is never trusted from disk; the
+     * forward pass re-derives descendants from the root. */
+    const unsigned int op_root =
+        (unsigned int)(BLOCK_FAILED_VALID | BLOCK_OPERATOR_INVALID);
+    if ((status & op_root) == op_root) {
+        pindex->nStatus = block_status_strip_failed(status);
+        return BLOCK_FAILURE_TRUST_OPERATOR_KEPT;
+    }
+    status &= ~(unsigned int)BLOCK_OPERATOR_INVALID;
     if (!(status & (unsigned int)BLOCK_FAILED_MASK)) {
         pindex->nStatus = status; /* no persisted verdict; stale marker cleared */
         return BLOCK_FAILURE_TRUST_NONE;
@@ -576,6 +588,7 @@ static struct zcl_result bil_flat_insert_rows(
             case BLOCK_FAILURE_TRUST_STRIPPED: stripped_failed++; break;
             case BLOCK_FAILURE_TRUST_DEMOTED:  demoted_failed++;  break;
             case BLOCK_FAILURE_TRUST_NONE:     break;
+            case BLOCK_FAILURE_TRUST_OPERATOR_KEPT: break;
         }
     }
     if (stripped_failed || demoted_failed)

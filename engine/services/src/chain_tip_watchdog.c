@@ -329,7 +329,8 @@ static const char *wd_deterministic_stall_cause(void)
             struct block_index *succ =
                 block_index_get_ancestor(bh, tip->nHeight + 1);
             if (succ && succ->pprev == tip &&
-                block_is_permanently_failed(succ)) {
+                block_is_permanently_failed(succ) &&
+                !block_is_operator_invalid(succ)) {
                 struct block_index *sel = active_chain_most_work_candidate(
                     &g_ms->chain_active, &g_ms->map_block_index);
                 if (sel == NULL || sel == tip)

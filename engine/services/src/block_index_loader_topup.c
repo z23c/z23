@@ -300,7 +300,7 @@ static bool topup_insert_new(struct topup_ctx *c, const struct uint256 *h,
     bi->nBits                = dbi->nBits;
     topup_store_hdr(bi, &dbi->hashMerkleRoot, &dbi->nNonce);
     (void)block_index_set_solution(bi, NULL, 0);  /* not retained in RAM */
-    bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
+    bi->nStatus              = block_status_strip_failed(dbi->nStatus);
     bi->nCachedBranchId      = dbi->nCachedBranchId;
     bi->nTx                  = dbi->nTx;
     if (dbi->has_sprout_value) {
@@ -343,7 +343,7 @@ static void topup_hydrate_stub_fields(struct block_index *bi,
     bi->nTime                = dbi->nTime;
     bi->nBits                = dbi->nBits;
     topup_store_hdr(bi, &dbi->hashMerkleRoot, &dbi->nNonce);
-    bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
+    bi->nStatus              = block_status_strip_failed(dbi->nStatus);
     bi->nCachedBranchId      = dbi->nCachedBranchId;
     bi->nTx                  = dbi->nTx;
     if (dbi->has_sprout_value) {
@@ -828,7 +828,7 @@ static void node_db_topup_fill_new(struct block_index *bi,
      * FAILED bit. The block is body-backed on disk (file_num/data_pos), so
      * HAVE_DATA is asserted explicitly rather than trusted from the stored
      * status (which on some legacy rows omits the bit). */
-    bi->nStatus        = (unsigned int)(blk->status & ~BLOCK_FAILED_MASK);
+    bi->nStatus        = block_status_strip_failed((unsigned int)blk->status);
     if (blk->file_num >= 0)
         bi->nStatus |= BLOCK_HAVE_DATA;
     /* The stored status is carried verbatim above; seal the undo bit

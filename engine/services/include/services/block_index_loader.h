@@ -339,6 +339,7 @@ enum block_index_failure_trust_action {
     BLOCK_FAILURE_TRUST_NONE = 0, /* no persisted FAILED bit — left untouched */
     BLOCK_FAILURE_TRUST_STRIPPED, /* below the ROM checkpoint — bits stripped */
     BLOCK_FAILURE_TRUST_DEMOTED,  /* above — demoted to a revalidation candidate */
+    BLOCK_FAILURE_TRUST_OPERATOR_KEPT, /* operator invalidateblock — verdict kept */
 };
 
 /* Reconcile a just-loaded block_index entry's PERSISTED negative verdict against
@@ -359,6 +360,10 @@ enum block_index_failure_trust_action {
  *     validation when the fold reaches the block; a GENUINE failure is re-set
  *     fresh by the connect path, so behavior for genuinely-failed blocks is
  *     unchanged (no weakening).
+ *
+ * Exception: BLOCK_OPERATOR_INVALID (set by invalidateblock, cleared only by
+ * reconsiderblock) is an operator decision with no evidence to re-derive it
+ * from, so it is kept (BLOCK_FAILURE_TRUST_OPERATOR_KEPT) at every height.
  *
  * The BLOCK_REVALIDATE_PENDING marker is runtime-derived: any bit a prior save
  * round-tripped to disk is cleared first, so it reflects only THIS load. Returns

@@ -30,11 +30,23 @@
 #include "validation/main_state.h"
 #include "validation/process_block.h"
 #include "validation/process_block_invalidate.h"
+#include "validation/process_block_revalidate.h"
+#include "services/block_index_loader.h"
+#include "services/chain_restore_repair.h"
+#include "jobs/block_header_emit.h"
+#include "storage/event_log.h"
+#include "storage/event_log_payloads.h"
+#include "storage/event_log_singleton.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #define IB_CHECK(name, expr) do { \
     printf("invalidateblock: %s... ", (name)); \
@@ -106,6 +118,309 @@ static void free_idx(struct block_index *bi)
     if (!bi) return;
     free((void *)(uintptr_t)bi->phashBlock);
     free(bi);
+}
+
+
+/* ── Operator vs automated invalidation: restart + self-heal policy ───────
+ *
+ * Only an operator invalidateblock is local policy that survives a restart
+ * and is exempt from automatic revalidation. An automated invalidation (the
+ * tip_fork_stale healer) must keep healing by evidence or restart. */
+
+struct opfix {
+    struct main_state ms;
+    struct block_index *g, *a1, *a2, *a3;   /* honest chain, tip a3 */
+    struct block_index *c2, *c3, *c4;       /* heavier competing header fork */
+};
+
+static void opfix_init(struct opfix *f)
+{
+    memset(f, 0, sizeof(*f));
+    main_state_init(&f->ms);
+    f->g  = mk_idx(&f->ms, 0, 1,  0x00, NULL);
+    f->a1 = mk_idx(&f->ms, 1, 10, 0x0A, f->g);
+    f->a2 = mk_idx(&f->ms, 2, 20, 0x0B, f->a1);
+    f->a3 = mk_idx(&f->ms, 3, 30, 0x0C, f->a2);
+    f->c2 = mk_idx(&f->ms, 2, 21, 0x1B, f->a1);
+    f->c3 = mk_idx(&f->ms, 3, 31, 0x1C, f->c2);
+    f->c4 = mk_idx(&f->ms, 4, 41, 0x1D, f->c3);
+    struct block_index *hdr_only[] = { f->c2, f->c3, f->c4 };
+    for (size_t i = 0; i < 3; i++) {   /* headers without bodies */
+        hdr_only[i]->nStatus = BLOCK_VALID_TREE;
+        hdr_only[i]->nTx = 0;
+        hdr_only[i]->nChainTx = 0;
+    }
+    struct block_index *all[] = { f->g, f->a1, f->a2, f->a3,
+                                  f->c2, f->c3, f->c4 };
+    for (size_t i = 0; i < 7; i++)
+        all[i]->nBits = 0x207fffff;    /* the restart forward pass re-derives work */
+    active_chain_move_window_tip(&f->ms.chain_active, f->g);
+    active_chain_move_window_tip(&f->ms.chain_active, f->a1);
+    active_chain_move_window_tip(&f->ms.chain_active, f->a2);
+    active_chain_move_window_tip(&f->ms.chain_active, f->a3);
+    f->ms.pindex_best_header = f->a3;
+}
+
+static void opfix_free(struct opfix *f)
+{
+    free_idx(f->g);  free_idx(f->a1); free_idx(f->a2); free_idx(f->a3);
+    free_idx(f->c2); free_idx(f->c3); free_idx(f->c4);
+    main_state_free(&f->ms);
+}
+
+/* What a restart does to the in-memory index: the loader's persisted-failure
+ * policy per entry, the forward pass (derives FAILED_CHILD from a kept
+ * parent), then the boot clear-failed-above-tip repair. */
+static void opfix_restart(struct opfix *f)
+{
+    struct block_index *sorted[] = { f->g, f->a1, f->a2, f->c2,
+                                     f->a3, f->c3, f->c4 };
+    for (size_t i = 0; i < 7; i++)
+        (void)block_index_apply_persisted_failure_trust(sorted[i], 0);
+    block_index_forward_pass(sorted, 7);
+    (void)chain_restore_clear_failed_above_tip(&f->ms);
+}
+
+static bool op_root(const struct block_index *b)
+{
+    return (b->nStatus & BLOCK_FAILED_VALID) && (b->nStatus & BLOCK_OPERATOR_INVALID);
+}
+
+static bool op_derived(const struct block_index *b)
+{
+    return (b->nStatus & BLOCK_FAILED_MASK) == BLOCK_FAILED_CHILD &&
+           (b->nStatus & BLOCK_OPERATOR_INVALID);
+}
+
+static bool op_cleared(const struct opfix *f)
+{
+    return ((f->a2->nStatus | f->a3->nStatus) &
+            (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)) == 0;
+}
+
+/* (a) operator invalidate -> restart -> peer re-feeds the branch -> stays off;
+ * reconsider -> back. */
+static int check_operator_invalidation_restart(void)
+{
+    int failures = 0;
+    struct opfix f;
+    opfix_init(&f);
+    struct uint256 out;
+
+    IB_CHECK("operator: invalidate a2 ok",
+             process_block_invalidate_from(&f.ms, f.a2->phashBlock, &out,
+                                           INVALIDATE_ORIGIN_OPERATOR) ==
+                 INVALIDATE_OK);
+    IB_CHECK("operator: root carries FAILED_VALID + OPERATOR_INVALID",
+             op_root(f.a2));
+    IB_CHECK("operator: descendant carries derived CHILD + OPERATOR_INVALID",
+             op_derived(f.a3));
+    IB_CHECK("operator: honest parent untouched",
+             (f.a1->nStatus & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)) == 0);
+    IB_CHECK("operator: tip retreats to a1 and selector stays there",
+             active_chain_height(&f.ms.chain_active) == 1 &&
+             find_most_work_chain(&f.ms) == f.a1);
+
+    opfix_restart(&f);
+    IB_CHECK("restart: operator root survives the loader and boot repair",
+             op_root(f.a2) && !block_is_revalidation_pending(f.a2));
+    IB_CHECK("restart: descendant failure is re-derived from the root",
+             op_derived(f.a3));
+    IB_CHECK("restart: selector does not return to the invalidated branch",
+             find_most_work_chain(&f.ms) == f.a1);
+
+    /* The peer re-sends the invalidated branch: bodies present again and the
+     * boot repair runs again. */
+    f.a3->nStatus |= BLOCK_HAVE_DATA;
+    (void)chain_restore_clear_failed_above_tip(&f.ms);
+    IB_CHECK("peer re-feed: repair leaves root and descendant failed",
+             op_root(f.a2) && op_derived(f.a3) &&
+             find_most_work_chain(&f.ms) == f.a1);
+
+    /* reconsider (of the DESCENDANT) lifts the operator root above it. */
+    IB_CHECK("reconsider descendant: ok",
+             process_block_reconsider(&f.ms, f.a3->phashBlock, &out) ==
+                 RECONSIDER_OK);
+    IB_CHECK("reconsider: root and subtree cleared, mark gone", op_cleared(&f));
+    IB_CHECK("reconsider: node returns to the branch",
+             find_most_work_chain(&f.ms) == f.a3);
+    opfix_restart(&f);
+    IB_CHECK("reconsider: stays cleared across restart", op_cleared(&f));
+
+    opfix_free(&f);
+    return failures;
+}
+
+/* (c) revalidation never spins on an operator-marked block. */
+static int check_operator_revalidation_bounded(void)
+{
+    int failures = 0;
+    struct opfix f;
+    opfix_init(&f);
+    struct uint256 out;
+
+    (void)process_block_invalidate_from(&f.ms, f.a2->phashBlock, &out,
+                                        INVALIDATE_ORIGIN_OPERATOR);
+    unsigned st2 = f.a2->nStatus, st3 = f.a3->nStatus;
+    int bad = 0;
+    for (int i = 0; i < 1000; i++) {
+        if (process_block_revalidate(2, &f.ms, &out) != REVAL_OPERATOR_HELD ||
+            process_block_revalidate(3, &f.ms, &out) != REVAL_OPERATOR_HELD)
+            bad++;
+    }
+    IB_CHECK("revalidate: 2000 calls, all OPERATOR_HELD (no connect-failed loop)",
+             bad == 0);
+    IB_CHECK("revalidate: operator-marked blocks unchanged",
+             f.a2->nStatus == st2 && f.a3->nStatus == st3);
+    IB_CHECK("revalidate: result name is stable",
+             strcmp(reval_result_name(REVAL_OPERATOR_HELD),
+                    "operator_held") == 0);
+    opfix_free(&f);
+    return failures;
+}
+
+/* (b) the automated path (tip_fork_stale -> process_block_invalidate) keeps
+ * today's behaviour: no operator mark, healed by a restart even while the
+ * heavier competing fork's bodies fail validation. */
+static int check_automated_invalidation_heals(void)
+{
+    int failures = 0;
+    struct opfix f;
+    opfix_init(&f);
+    struct uint256 out;
+
+    /* The competing fork's bodies failed validation. */
+    f.c2->nStatus |= BLOCK_FAILED_VALID;
+    f.c3->nStatus |= BLOCK_FAILED_CHILD;
+    f.c4->nStatus |= BLOCK_FAILED_CHILD;
+
+    IB_CHECK("automated: stale-fork invalidate of honest a2 ok",
+             process_block_invalidate(&f.ms, f.a2->phashBlock, &out) ==
+                 INVALIDATE_OK);
+    IB_CHECK("automated: failure is NOT an operator mark",
+             (f.a2->nStatus & BLOCK_FAILED_VALID) &&
+             ((f.a2->nStatus | f.a3->nStatus) & BLOCK_OPERATOR_INVALID) == 0);
+    IB_CHECK("automated: node is wedged below the honest chain until healed",
+             active_chain_height(&f.ms.chain_active) == 1 &&
+             find_most_work_chain(&f.ms) == f.a1);
+
+    opfix_restart(&f);
+    IB_CHECK("automated: restart demotes the verdict (revalidation candidate)",
+             !block_has_any_failure(f.a2) && block_is_revalidation_pending(f.a2));
+    IB_CHECK("automated: after restart the node heals back to the honest chain",
+             find_most_work_chain(&f.ms) == f.a3);
+    opfix_free(&f);
+    return failures;
+}
+
+#if !defined(_WIN32)
+struct hdr_scan { const struct uint256 *hash; bool seen; unsigned status; };
+
+static bool scan_header_cb(uint64_t off, enum event_log_type type,
+                           const void *payload, size_t len, void *user)
+{
+    (void)off;
+    struct hdr_scan *s = user;
+    struct ev_block_header h;
+    const uint8_t *sol = NULL;
+    if (type != EV_BLOCK_HEADER ||
+        !ev_block_header_parse(payload, len, &h, &sol))
+        return true;
+    if (memcmp(h.hash, s->hash->data, 32) == 0) {
+        s->seen = true;
+        s->status = h.nStatus;       /* last event wins, like the projection */
+    }
+    return true;
+}
+
+static bool log_status_of(const char *path, const struct uint256 *hash,
+                          unsigned *status)
+{
+    event_log_t *log = event_log_open(path);
+    if (!log) return false;
+    struct hdr_scan s = { hash, false, 0 };
+    (void)event_log_stream(log, 0, scan_header_cb, &s);
+    event_log_close(log);
+    *status = s.status;
+    return s.seen;
+}
+
+/* Child: do the operator action against a real event log, then die by SIGKILL
+ * the instant it returns (no close, no flush, no atexit). */
+static void kill_child(const char *log_path, bool then_reconsider)
+{
+    event_log_t *log = event_log_open(log_path);
+    if (!log) _exit(2);
+    event_log_set_singleton(log);
+    struct opfix f;
+    opfix_init(&f);
+    struct uint256 out;
+    if (process_block_invalidate_from(&f.ms, f.a2->phashBlock, &out,
+                                      INVALIDATE_ORIGIN_OPERATOR) != INVALIDATE_OK)
+        _exit(3);
+    if (then_reconsider &&
+        process_block_reconsider(&f.ms, f.a2->phashBlock, &out) != RECONSIDER_OK)
+        _exit(4);
+    kill(getpid(), SIGKILL);
+    _exit(5);
+}
+
+static bool run_kill_child(const char *log_path, bool then_reconsider)
+{
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) kill_child(log_path, then_reconsider);
+    int st = 0;
+    return waitpid(pid, &st, 0) == pid && WIFSIGNALED(st) &&
+           WTERMSIG(st) == SIGKILL;
+}
+
+/* kill -9 right after invalidateblock returns: the operator mark must already
+ * be durable; after reconsiderblock the cleared status must be durable too. */
+static int check_operator_mark_durable_before_reply(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "z23_invalidate")) {
+        IB_CHECK("durable: mkdtemp", false);
+        return failures;
+    }
+    char path[PATH_MAX + 16];
+    snprintf(path, sizeof(path), "%s/events.log", dir);
+
+    struct opfix f;
+    opfix_init(&f);
+    const struct uint256 hash = *f.a2->phashBlock;
+    unsigned status = 0;
+
+    IB_CHECK("durable: child killed -9 right after invalidateblock",
+             run_kill_child(path, false));
+    IB_CHECK("durable: operator mark is on disk after the kill",
+             log_status_of(path, &hash, &status) &&
+             (status & BLOCK_FAILED_VALID) && (status & BLOCK_OPERATOR_INVALID));
+    IB_CHECK("durable: child killed -9 right after reconsiderblock",
+             run_kill_child(path, true));
+    IB_CHECK("durable: cleared status is on disk after the kill",
+             log_status_of(path, &hash, &status) &&
+             (status & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)) == 0);
+
+    opfix_free(&f);
+    (void)unlink(path);
+    (void)rmdir(dir);
+    return failures;
+}
+#endif
+
+static int check_operator_policy(void)
+{
+    int failures = 0;
+    failures += check_operator_invalidation_restart();
+    failures += check_operator_revalidation_bounded();
+    failures += check_automated_invalidation_heals();
+#if !defined(_WIN32)
+    failures += check_operator_mark_durable_before_reply();
+#endif
+    return failures;
 }
 
 int test_invalidateblock(void)
@@ -620,6 +935,8 @@ int test_invalidateblock(void)
         free_idx(g); free_idx(a1); free_idx(b1);
         main_state_free(&ms);
     }
+
+    failures += check_operator_policy();
 
     printf("invalidateblock: %d failures\n", failures);
     return failures;

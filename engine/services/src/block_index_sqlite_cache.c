@@ -272,6 +272,7 @@ static void load_block_index_cache_rows(sqlite3_stmt *sel, struct main_state *ms
             case BLOCK_FAILURE_TRUST_STRIPPED: (*stripped_failed)++; break;
             case BLOCK_FAILURE_TRUST_DEMOTED:  (*demoted_failed)++;  break;
             case BLOCK_FAILURE_TRUST_NONE:     break;
+            case BLOCK_FAILURE_TRUST_OPERATOR_KEPT: break;
         }
         (*loaded)++;
     }

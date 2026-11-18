@@ -63,7 +63,8 @@ bool rpc_invalidateblock(const struct json_value *params, bool help,
 
     struct uint256 out_hash;
     enum invalidate_result r =
-        process_block_invalidate(ctx->main_state, &hash, &out_hash);
+        process_block_invalidate_from(ctx->main_state, &hash, &out_hash,
+                                    INVALIDATE_ORIGIN_OPERATOR);
 
     if (r != INVALIDATE_OK) {
         char body[160];

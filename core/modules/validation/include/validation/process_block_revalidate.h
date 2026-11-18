@@ -109,6 +109,11 @@ enum reval_result {
                                        re-marked FAILED with new state */
     REVAL_RECOVERED            = 7, /* cleared, retried, valid; chain can
                                        advance on the next tick */
+    REVAL_OPERATOR_HELD        = 8, /* the failure at this height is an
+                                       operator invalidateblock: intentional
+                                       local policy, never auto-healed (only
+                                       reconsiderblock lifts it); nothing to
+                                       retry */
 };
 
 const char *reval_result_name(enum reval_result r);

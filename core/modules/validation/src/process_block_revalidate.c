@@ -42,6 +42,7 @@ const char *reval_result_name(enum reval_result r)
         case REVAL_PERSIST_FAILED:       return "persist_failed";
         case REVAL_CONNECT_FAILED:       return "connect_failed";
         case REVAL_RECOVERED:            return "recovered";
+        case REVAL_OPERATOR_HELD:        return "operator_held";
     }
     return "?";
 }
@@ -64,9 +65,24 @@ static struct block_index *find_failed_pindex_at_height(
         if (!p) continue;
         if (p->nHeight != target_height) continue;
         if (!(p->nStatus & BLOCK_FAILED_VALID)) continue;
+        if (p->nStatus & BLOCK_OPERATOR_INVALID) continue; /* operator policy, not a heal target */
         return p;
     }
     return NULL;
+}
+
+/* True when an operator-invalidated block (root or derived) sits at
+ * target_height: the failure there is intentional, not a wedge to heal. */
+static bool reval_operator_held_at_height(struct main_state *ms, int target_height)
+{
+    size_t iter = 0;
+    struct block_index *p;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
+        if (p && p->nHeight == target_height &&
+            (p->nStatus & BLOCK_OPERATOR_INVALID))
+            return true;
+    }
+    return false;
 }
 
 /* Find a FAILED pindex at target_height whose hash matches the supplied
@@ -83,6 +99,7 @@ static struct block_index *find_failed_pindex_by_hash(
         if (!p || !p->phashBlock) continue;
         if (p->nHeight != target_height) continue;
         if (!(p->nStatus & BLOCK_FAILED_VALID)) continue;
+        if (p->nStatus & BLOCK_OPERATOR_INVALID) continue; /* operator policy, not a heal target */
         char got[65];
         uint256_get_hex(p->phashBlock, got);
         if (strcasecmp(got, want_hex) == 0)
@@ -302,6 +319,7 @@ static struct reval_clear_counts reval_clear_failed_from_target(
          * tip we must not touch — those are durable history. */
         if (p->nHeight < target_height) continue;
         if (p->nHeight <= c.tip_h && p != failed_pindex) continue;
+        if (p->nStatus & BLOCK_OPERATOR_INVALID) continue; /* only reconsiderblock clears an operator verdict (root or derived) */
         unsigned was_failed = p->nStatus & BLOCK_FAILED_MASK;
         if (!was_failed) continue;
         p->nStatus &= ~(unsigned)BLOCK_FAILED_MASK;
@@ -425,9 +443,12 @@ enum reval_result process_block_revalidate(int target_height,
     struct block_index *any_failed =
         find_failed_pindex_at_height(ms, target_height);
     if (!any_failed) {
-        /* Either there's no entry at this height, or none of the entries
-         * have BLOCK_FAILED_VALID set. Either is a non-failure. */
-        return REVAL_HEIGHT_NOT_FOUND;
+        /* Either there is no entry at this height, or none of the entries
+         * carries a healable BLOCK_FAILED_VALID. An operator-invalidated
+         * block here is intentional local policy: report it distinctly so
+         * callers neither retry nor alarm. */
+        return reval_operator_held_at_height(ms, target_height)
+                   ? REVAL_OPERATOR_HELD : REVAL_HEIGHT_NOT_FOUND;
     }
 
     /* ── Step 2: query the quorum oracle for evidence ────────────────── */

@@ -102,6 +102,14 @@ static bool invalidate_persist_pindex(const struct block_index *p)
 {
     bool persisted =
         block_index_emit_header_event(p, "invalidate_persist", NULL, NULL);
+    /* The append may land in the reducer's deferred-sync buffer when the
+     * shared handle is armed; the operator verdict must be on disk before the
+     * RPC replies (kill -9 right after), so flush explicitly. */
+    if (persisted) {
+        event_log_t *log = event_log_singleton();
+        if (log && !event_log_flush(log))
+            persisted = false;
+    }
     if (!g_active_block_tree)
         return true;
     return persisted;
@@ -124,7 +132,7 @@ static bool invalidate_same_block(const struct block_index *a,
  * unwind.  Only the map owner is persisted; boot derives the live objects from
  * that durable status again.  These extra identities deliberately do not
  * affect the public marked/cleared counts, which count durable map entries. */
-static void invalidate_mark_live_twins(struct main_state *ms,
+static void invalidate_mark_live_twins(struct main_state *ms, unsigned bits,
                                        struct block_index *target)
 {
     if (!ms || !target)
@@ -133,7 +141,7 @@ static void invalidate_mark_live_twins(struct main_state *ms,
     struct block_index *active =
         active_chain_at(&ms->chain_active, target->nHeight);
     if (active != target && invalidate_same_block(active, target))
-        active->nStatus |= BLOCK_FAILED_VALID;
+        active->nStatus |= bits;
 
     struct block_index *header_twin =
         ms->pindex_best_header &&
@@ -143,7 +151,7 @@ static void invalidate_mark_live_twins(struct main_state *ms,
             : NULL;
     if (header_twin != target && header_twin != active &&
         invalidate_same_block(header_twin, target))
-        header_twin->nStatus |= BLOCK_FAILED_VALID;
+        header_twin->nStatus |= bits;
 }
 
 static void invalidate_clear_live_twins(struct main_state *ms,
@@ -155,7 +163,7 @@ static void invalidate_clear_live_twins(struct main_state *ms,
     struct block_index *active =
         active_chain_at(&ms->chain_active, target->nHeight);
     if (active != target && invalidate_same_block(active, target))
-        active->nStatus &= ~(unsigned)BLOCK_FAILED_ANY_MASK;
+        active->nStatus &= ~(unsigned)(BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
 
     struct block_index *header_twin =
         ms->pindex_best_header &&
@@ -165,7 +173,7 @@ static void invalidate_clear_live_twins(struct main_state *ms,
             : NULL;
     if (header_twin != target && header_twin != active &&
         invalidate_same_block(header_twin, target))
-        header_twin->nStatus &= ~(unsigned)BLOCK_FAILED_ANY_MASK;
+        header_twin->nStatus &= ~(unsigned)(BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
 }
 
 void process_block_mark_invalid(struct main_state *ms,
@@ -184,7 +192,7 @@ void process_block_mark_invalid(struct main_state *ms,
      * restores the block to fully-selectable without having to recompute
      * how far validation had previously progressed. */
     target->nStatus |= BLOCK_FAILED_VALID;
-    invalidate_mark_live_twins(ms, target);
+    invalidate_mark_live_twins(ms, BLOCK_FAILED_VALID, target);
 
     /* Propagate BLOCK_FAILED_CHILD to every descendant. Reuse the same
      * height-sorted single-pass walk the chain-advance failure path uses.
@@ -240,11 +248,46 @@ static size_t invalidate_clear_failed_descendants(struct main_state *ms,
         if (!(p->nStatus & BLOCK_FAILED_ANY_MASK)) continue;
         if (p->nHeight <= target->nHeight) continue;
         if (invalidate_pprev_reaches_target(p, target)) {
-            p->nStatus &= ~(unsigned)BLOCK_FAILED_ANY_MASK;
+            p->nStatus &= ~(unsigned)(BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
             cleared++;
         }
     }
     return cleared;
+}
+
+/* LOCAL OPERATOR POLICY: tag the already-failed target (root, persisted) and
+ * every CHILD-failed descendant (derived, in-memory) with
+ * BLOCK_OPERATOR_INVALID. Called only for an operator-origin invalidation,
+ * after process_block_mark_invalid has set the FAILED bits. Never a consensus
+ * predicate: which blocks are valid is untouched. */
+static void invalidate_mark_operator_subtree(struct main_state *ms,
+                                             struct block_index *target)
+{
+    target->nStatus |= BLOCK_OPERATOR_INVALID;
+    invalidate_mark_live_twins(ms, BLOCK_OPERATOR_INVALID, target);
+
+    size_t iter = 0;
+    struct block_index *p = NULL;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
+        if (!p || p == target) continue;
+        if ((p->nStatus & BLOCK_FAILED_MASK) != BLOCK_FAILED_CHILD) continue;
+        if (p->nHeight <= target->nHeight) continue;
+        if (invalidate_pprev_reaches_target(p, target))
+            p->nStatus |= BLOCK_OPERATOR_INVALID;
+    }
+}
+
+/* The operator-invalidated root above a (possibly derived) operator-marked
+ * block: reconsiderblock on a descendant must lift the root, not leave the
+ * subtree half-cleared. Bounded + monotonic like the other ancestry walks. */
+static struct block_index *invalidate_operator_root(struct block_index *p)
+{
+    int steps = 0;
+    while (p && (p->nStatus & BLOCK_OPERATOR_INVALID) && p->pprev &&
+           (p->pprev->nStatus & BLOCK_OPERATOR_INVALID) &&
+           p->pprev->nHeight < p->nHeight && steps++ < 200000)
+        p = p->pprev;
+    return p;
 }
 
 void process_block_clear_invalid(struct main_state *ms,
@@ -257,8 +300,8 @@ void process_block_clear_invalid(struct main_state *ms,
     size_t cleared = 0;
 
     /* Clear the target's own failure mark. */
-    if (target->nStatus & BLOCK_FAILED_ANY_MASK) {
-        target->nStatus &= ~(unsigned)BLOCK_FAILED_ANY_MASK;
+    if (target->nStatus & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)) {
+        target->nStatus &= ~(unsigned)(BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
         cleared++;
     }
     invalidate_clear_live_twins(ms, target);
@@ -420,9 +463,9 @@ static void invalidate_restore_mempool_segment(
     }
 }
 
-enum invalidate_result process_block_invalidate(struct main_state *ms,
-                                                const struct uint256 *hash,
-                                                struct uint256 *out_hash)
+enum invalidate_result process_block_invalidate_from(
+    struct main_state *ms, const struct uint256 *hash,
+    struct uint256 *out_hash, enum invalidate_origin origin)
 {
     if (out_hash) memset(out_hash, 0, sizeof(*out_hash));
     if (!ms || !hash) {
@@ -460,6 +503,11 @@ enum invalidate_result process_block_invalidate(struct main_state *ms,
      * the live recovery becomes a no-op (tip h -> same h, no UTXO unwind). */
     size_t marked_children = 0;
     process_block_mark_invalid(ms, target, &marked_children);
+    /* Only an operator request is local policy that must outlive a restart
+     * and be exempt from automatic revalidation; an automated invalidation
+     * (stale-fork healer) stays healable by evidence or restart. */
+    if (origin == INVALIDATE_ORIGIN_OPERATOR)
+        invalidate_mark_operator_subtree(ms, target);
 
     /* Persist the target's flip before the kick as well. The in-memory mark is
      * enough for the selector in this process; the LevelDB write makes the
@@ -500,6 +548,14 @@ enum invalidate_result process_block_invalidate(struct main_state *ms,
             target->nHeight, marked_children, tip_h_before, tip_h_after);
 
     return INVALIDATE_OK;
+}
+
+enum invalidate_result process_block_invalidate(struct main_state *ms,
+                                                const struct uint256 *hash,
+                                                struct uint256 *out_hash)
+{
+    return process_block_invalidate_from(ms, hash, out_hash,
+                                         INVALIDATE_ORIGIN_AUTOMATED);
 }
 
 /* Kick the engine so the now-eligible chain is re-evaluated.
@@ -569,6 +625,12 @@ enum reconsider_result process_block_reconsider(struct main_state *ms,
     }
     if (out_hash && target->phashBlock)
         *out_hash = *target->phashBlock;
+
+    /* A block under an operator invalidation is reconsidered by lifting the
+     * operator root above it (zclassicd clears the ancestors' failure too);
+     * clearing only a derived descendant would leave the root failed and the
+     * subtree half-cleared. */
+    target = invalidate_operator_root(target);
 
     /* Clear FAILED on the target + descendants. */
     size_t cleared = 0;

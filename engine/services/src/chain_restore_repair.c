@@ -713,9 +713,10 @@ int chain_restore_clear_failed_above_tip(struct main_state *ms)
     while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
         if (!p) continue;
         if (p->nHeight <= tip_h) continue;
+        if (p->nStatus & (unsigned)BLOCK_OPERATOR_INVALID) continue; /* operator verdict */
         unsigned failed = p->nStatus & (unsigned)BLOCK_FAILED_MASK;
         if (!failed) continue;
-        p->nStatus &= ~(unsigned)BLOCK_FAILED_MASK;
+        p->nStatus = block_status_strip_failed(p->nStatus);
         cleared++;
 
         /* Sticky boot (#4a — restart must not deterministically re-wedge):

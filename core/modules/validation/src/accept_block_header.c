@@ -270,7 +270,10 @@ static void block_index_repair_scrambled_heights(struct block_index *start)
 static void accept_block_header_repair_known_index(struct block_index *pindex)
 {
     block_index_repair_scrambled_heights(pindex);
-    if ((pindex->nStatus & BLOCK_FAILED_MASK) == BLOCK_FAILED_CHILD)
+    /* A derived CHILD mark below an operator invalidation is local policy, not a
+     * stale bit: a re-delivered header must not lift it (only reconsiderblock). */
+    if ((pindex->nStatus & BLOCK_FAILED_MASK) == BLOCK_FAILED_CHILD &&
+        !(pindex->nStatus & BLOCK_OPERATOR_INVALID))
         pindex->nStatus &= ~BLOCK_FAILED_CHILD;
     /* Re-arriving headers must promote nStatus from
      * BLOCK_VALID_HEADER to BLOCK_VALID_TREE. Without this, blocks

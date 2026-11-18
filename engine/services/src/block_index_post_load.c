@@ -118,6 +118,15 @@ void block_index_forward_pass(struct block_index **sorted,
         if (!(pindex->nStatus & BLOCK_FAILED_MASK) && pindex->pprev &&
             (pindex->pprev->nStatus & BLOCK_FAILED_MASK))
             pindex->nStatus |= BLOCK_FAILED_CHILD;
+
+        /* An operator-invalidated root (kept by the loader) or a descendant
+         * of one makes every derived CHILD mark below it operator-derived, so
+         * the self-heal and repair paths leave the whole subtree alone. The
+         * root's own persisted mark is the only authority; this is
+         * re-derived on every load. */
+        if (pindex->pprev && (pindex->pprev->nStatus & BLOCK_OPERATOR_INVALID) &&
+            (pindex->nStatus & BLOCK_FAILED_MASK) == BLOCK_FAILED_CHILD)
+            pindex->nStatus |= BLOCK_OPERATOR_INVALID;
     }
 }
 

@@ -72,6 +72,17 @@ enum block_status {
      * consensus state, never trusted from disk. Pure observability + diagnostics;
      * no code branches on it for validity. */
     BLOCK_REVALIDATE_PENDING = 2048,
+    /* LOCAL OPERATOR POLICY, not consensus. Set only by an operator-requested
+     * invalidateblock (never by an automated invalidation such as the
+     * stale-fork healer). On the invalidated block it accompanies
+     * BLOCK_FAILED_VALID (the "root", persisted); on every descendant it
+     * accompanies the derived BLOCK_FAILED_CHILD (in-memory only, re-derived
+     * from the root at load). Every other FAILED verdict is re-derived by
+     * revalidation and demoted at boot (block_index_apply_persisted_failure_trust),
+     * but an operator decision has no evidence to re-derive it from, so the
+     * root survives restart and the self-heal/revalidation/repair paths leave
+     * the whole operator-invalid subtree alone. Cleared only by reconsiderblock. */
+    BLOCK_OPERATOR_INVALID   = 4096,
 };
 
 #define BLOCK_VALID_CONSENSUS BLOCK_VALID_SCRIPTS
@@ -465,6 +476,30 @@ static inline bool block_has_any_failure(const struct block_index *bi)
 static inline bool block_is_revalidation_pending(const struct block_index *bi)
 {
     return (block_index_status_load(bi) & BLOCK_REVALIDATE_PENDING) != 0;
+}
+
+/* True for the operator-invalidated root and every descendant carrying the
+ * derived operator mark. Selection helpers and self-heal paths skip these. */
+static inline bool block_is_operator_invalid(const struct block_index *bi)
+{
+    return (block_index_status_load(bi) & BLOCK_OPERATOR_INVALID) != 0;
+}
+
+/* nStatus with the repairable FAILED bits removed. Only an operator ROOT
+ * (BLOCK_FAILED_VALID together with BLOCK_OPERATOR_INVALID) is a decision
+ * rather than a re-derivable verdict, so only it keeps both bits; a derived
+ * descendant mark is dropped and re-derived from the root by the forward pass.
+ * Every path that clears BLOCK_FAILED_MASK on a persisted or repairable
+ * status uses this. */
+static inline unsigned int block_status_strip_failed(unsigned int status)
+{
+    const unsigned int root =
+        (unsigned int)(BLOCK_FAILED_VALID | BLOCK_OPERATOR_INVALID);
+    if ((status & root) == root)
+        return (status & ~(unsigned int)BLOCK_FAILED_MASK) |
+               (unsigned int)BLOCK_FAILED_VALID;
+    return status &
+           ~(unsigned int)(BLOCK_FAILED_MASK | BLOCK_OPERATOR_INVALID);
 }
 
 static inline bool block_index_is_valid(const struct block_index *bi,

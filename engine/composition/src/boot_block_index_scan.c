@@ -59,8 +59,8 @@ void boot_scan_visit_index_entry(struct boot_index_scan *scan,
                                         struct block_index *sp)
 {
     /* Clear BLOCK_FAILED */
-    if (sp->nStatus & BLOCK_FAILED_MASK) {
-        sp->nStatus &= ~BLOCK_FAILED_MASK;
+    if ((sp->nStatus & BLOCK_FAILED_MASK) && !(sp->nStatus & BLOCK_OPERATOR_INVALID)) {
+        sp->nStatus = block_status_strip_failed(sp->nStatus);
         scan->cleared_failed++;
     }
     boot_scan_track_best_header(scan, sp);
