@@ -52,8 +52,9 @@ bool plugin_read_file(const char *path, size_t max, unsigned flags,
 enum plugin_status plugin_hash_path(const char *path, unsigned flags,
                                     char hex[PLUGIN_HEX_SHA3_512 + 1]);
 
-/* Copy src to an exclusive destination, hashing the written bytes. POSIX uses
- * mode; Windows creates a private file under a retained private parent. */
+/* Copy src to an exclusive destination, hashing the written bytes unless hex
+ * is NULL. POSIX uses mode; Windows creates a private file under a retained
+ * private parent. */
 enum plugin_status plugin_copy_file(const char *src, const char *dst,
                                     unsigned mode,
                                     char hex[PLUGIN_HEX_SHA3_512 + 1]);

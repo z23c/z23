@@ -21,6 +21,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ZCL_TESTING
+#include <stdatomic.h>
+#endif
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -146,22 +149,39 @@ bool plugin_read_file(const char *path, size_t max, unsigned flags,
     return true;
 }
 
+#ifdef ZCL_TESTING
+static atomic_uint g_plugin_hash_count;
+
+unsigned plugin_fs_test_hash_count(void)
+{
+    return atomic_load_explicit(&g_plugin_hash_count, memory_order_relaxed);
+}
+#endif
+
 static enum plugin_status plugin_hash_stream(FILE *in, FILE *copy,
                                              char hex[PLUGIN_HEX_SHA3_512 + 1])
 {
     unsigned char buf[16384], digest[PLUGIN_DIGEST_BYTES];
     struct sha3_512_ctx ctx;
-    sha3_512_init(&ctx);
+    if (hex) {
+#ifdef ZCL_TESTING
+        atomic_fetch_add_explicit(&g_plugin_hash_count, 1u, memory_order_relaxed);
+#endif
+        sha3_512_init(&ctx);
+    }
     size_t n;
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        sha3_512_write(&ctx, buf, n);
+        if (hex)
+            sha3_512_write(&ctx, buf, n);
         if (copy && fwrite(buf, 1, n, copy) != n)
             return PLUGIN_ERR_IO;
     }
     if (ferror(in))
         return PLUGIN_ERR_IO;
-    sha3_512_finalize(&ctx, digest);
-    zcl_hex_encode(digest, sizeof(digest), hex);
+    if (hex) {
+        sha3_512_finalize(&ctx, digest);
+        zcl_hex_encode(digest, sizeof(digest), hex);
+    }
     return PLUGIN_OK;
 }
 

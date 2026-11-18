@@ -267,6 +267,8 @@ void plugin_store_list_free(struct plugin_info *infos, size_t count);
 void plugin_store_test_fail_readdir(const char *suffix, unsigned after);
 /* Test seam: the generator behind staging and aside names. */
 unsigned long plugin_store_test_unique(void);
+/* Test seam: how many file streams this process has hashed. */
+unsigned plugin_fs_test_hash_count(void);
 #endif
 
 #endif

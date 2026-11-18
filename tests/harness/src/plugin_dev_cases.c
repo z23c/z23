@@ -81,8 +81,10 @@ static int pdc_case_fresh(struct pdc_env *e, char *first)
     size_t count = 0;
     TEST_CASE("plugin dev makes a fresh directory generation 1 and current") {
         ASSERT(pdc_write(e->exe, "version one"));
+        unsigned hashes = plugin_fs_test_hash_count();
         ASSERT(pdc_dev(e, &r));
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(plugin_fs_test_hash_count() - hashes, 4u);
         ASSERT_EQ(json_get_int(json_get(&r.data, "sequence")), 1);
         ASSERT_EQ(json_size(json_get(&r.data, "steps")), 5u);
         snprintf(first, PLUGIN_HEX_SHA3_512 + 1, "%s", json_get_str(json_get(&r.data, "generation")));

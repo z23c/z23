@@ -293,7 +293,7 @@ static enum plugin_status ps_stage(const struct ps_paths *src, const char *name,
                                    struct plugin_manifest *m)
 {
     struct ps_paths dst;
-    char leaf[PLUGIN_NAME_MAX + 16], hex[PLUGIN_HEX_SHA3_512 + 1];
+    char leaf[PLUGIN_NAME_MAX + 16];
     snprintf(leaf, sizeof(leaf), "%s.plugin.json", name);
     bool ok = plugin_join(dst.manifest, sizeof(dst.manifest), staging, leaf, NULL, NULL);
     snprintf(leaf, sizeof(leaf), "%s.plugin.sig", name);
@@ -301,11 +301,11 @@ static enum plugin_status ps_stage(const struct ps_paths *src, const char *name,
          plugin_join(dst.exe, sizeof(dst.exe), staging, name, NULL, NULL);
     if (!ok)
         return PLUGIN_ERR_ARGUMENT;
-    enum plugin_status st = plugin_copy_file(src->exe, dst.exe, 0555, hex);
+    enum plugin_status st = plugin_copy_file(src->exe, dst.exe, 0555, NULL);
     if (st == PLUGIN_OK)
-        st = plugin_copy_file(src->manifest, dst.manifest, 0444, hex);
+        st = plugin_copy_file(src->manifest, dst.manifest, 0444, NULL);
     if (st == PLUGIN_OK)
-        st = plugin_copy_file(src->sig, dst.sig, 0444, hex);
+        st = plugin_copy_file(src->sig, dst.sig, 0444, NULL);
     return st == PLUGIN_OK ? ps_verify_set(&dst, keys_file, NULL, 0, PLUGIN_OPEN_NOFOLLOW, m)
                            : st;
 }
