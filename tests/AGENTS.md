@@ -2,7 +2,15 @@
 
 # tests/
 
-`harness/src/test_<group>.c` is registered test group `<group>`; `harness/include/test/` holds shared helpers; `fixtures/` holds local fixtures (`blocks`, `fleet_observations`, `riscv-tests`).
+`harness/src/` contains test implementations; filenames do not necessarily name registered groups. `harness/include/test/` holds shared helpers, and `fixtures/` holds local fixtures (`blocks`, `fleet_observations`, `riscv-tests`).
+
+For focused editing, use `make t-list` to discover registered groups and inspect
+the test's registration and shard table to find its owner. For example,
+`dlx_case_precheck` in `harness/src/test_dev_land_precheck.c` is assigned to
+owner `1u` in `g_dlx_shard_cases` in `harness/src/test_dev_land.c`, so run
+`make t-fast-exact ONLY=dev_land_shard_02`. The exact target validates the
+selector against the registered groups. Committed-candidate proof still uses
+`make agent-verify ONLY=@changed`.
 
 Rules:
 - Run groups only through `make t-fast ONLY=<group>` (substring) or `make t-fast-exact ONLY=<group>`; never run `test_zcl` directly.
