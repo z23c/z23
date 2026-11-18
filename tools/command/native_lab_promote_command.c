@@ -28,6 +28,7 @@
 struct promote_req {
     struct zcl_command_request test;
     const struct json_value *cases;
+    const struct json_value *export_cases;
     const char *file;
     bool include_source;
     uint32_t timeout_ms, mem_mb;
@@ -407,11 +408,10 @@ static bool promote_cases_array(const struct json_value *v, uint8_t **bytes,
     return false;
 }
 
-static bool promote_cases_export(const struct zcl_command_request *rq,
+static bool promote_cases_export(const struct json_value *v,
                                  const uint8_t **bytes, size_t *len,
                                  uint8_t **storage)
 {
-    const struct json_value *v = json_get(rq->input, "cases");
     *bytes = NULL;
     *len = 0;
     if (v && v->type == JSON_ARR) {
@@ -433,7 +433,7 @@ static bool promote_cases_export(const struct zcl_command_request *rq,
 }
 
 static bool promote_export(const struct zcl_command_request *rq,
-                           const struct zcl_command_request *test,
+                           const struct json_value *cases_value,
                            const struct lab_ctx *ctx,
                            struct zcl_command_reply *reply)
 {
@@ -448,7 +448,7 @@ static bool promote_export(const struct zcl_command_request *rq,
               zcl_path_join(source, sizeof(source), dir ? dir : ".", leaf) &&
               zcl_path_join(cases, sizeof(cases), dir ? dir : ".", "cases.json") &&
               promote_name_sidecar(dir ? dir : ".", leaf, ctx->src.base) &&
-              promote_cases_export(test, &case_bytes, &case_len, &case_storage) &&
+              promote_cases_export(cases_value, &case_bytes, &case_len, &case_storage) &&
               promote_write(source, ctx->src.bytes, ctx->src.len) &&
               promote_write(cases, case_bytes, case_len) &&
               json_push_kv_str(&reply->data, "source", source) &&
@@ -484,7 +484,7 @@ static void promote_verify(const struct zcl_command_request *rq,
     } else if (promote_pack(rq, rel, reply)) {
         promote_report(reply, p, rel);
         if (reply->status == ZCL_COMMAND_STATUS_PASSED && p->include_source &&
-            !promote_export(rq, &p->test, ctx, reply)) {
+            !promote_export(rq, p->export_cases, ctx, reply)) {
             promote_refuse(reply, "LAB_PROMOTE_EXPORT_FAILED", "export",
                            "the signed pack was written, but its source and cases "
                            "could not be exported; no reproduction is claimed",
@@ -548,20 +548,26 @@ void lab_promote_with_ready(const struct zcl_command_request *request,
     static const char *const keys[] = {
         "file", "sanitize", "timeout_ms", "mem_mb"
     };
-    bool keep_case_value = p.include_source || cases.parsed.type != JSON_ARR;
+    bool keep_file = p.include_source && cases.file_text;
+    bool keep_case_value = (p.include_source && !keep_file) || cases.parsed.type != JSON_ARR;
     bool ok = promote_forward(request, &test_options, keys, sizeof(keys) / sizeof(keys[0])) &&
               (!keep_case_value || json_push_kv(&test_options, "cases", cases.value)) &&
               json_push_kv_bool(&test_options, "fresh", true);
-    free(cases.file_text);
+    if (!keep_file) {
+        free(cases.file_text);
+        cases.file_text = NULL;
+    }
     if (ok) {
         p.test.input = &test_options;
+        p.export_cases = keep_file ? &cases.file_view : json_get(&test_options, "cases");
         p.cases = cases.parsed.type == JSON_ARR ? &cases.parsed
-                  : json_get(&test_options, "cases");
+                  : p.export_cases;
         if (!ready || ready(context, reply))
             promote_snapshot(request, &p, reply);
     } else {
         lab_fail(reply, "LAB_ALLOC", "normalize", "the promotion snapshot could not be allocated");
     }
+    free(cases.file_text);
     json_free(&cases.parsed);
     json_free(&test_options);
 }

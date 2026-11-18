@@ -660,10 +660,15 @@ static int lp_case_invalid_before_key(void)
     return failures;
 }
 
+struct lp_file_probe { const char *path; bool armed; };
+
 static bool lp_remove_cases_ready(void *context, struct zcl_command_reply *reply)
 {
     (void)reply;
-    return unlink((const char *)context) == 0;
+    struct lp_file_probe *probe = context;
+    probe->armed = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    return unlink(probe->path) == 0;
 }
 
 static int lp_case_ready_snapshot(void)
@@ -688,7 +693,11 @@ static int lp_case_ready_snapshot(void)
         struct zcl_command_request request = { .input = &input };
         zcl_command_reply_init(&r, "zcl.lab_promote.v1");
         size_t before = lab_cases_test_parse_count();
-        lab_promote_with_ready(&request, lp_remove_cases_ready, path, &r);
+        struct lp_file_probe probe = { .path = path };
+        zcl_alloc_fault_fail_nth("json_copy_str", 2);
+        lab_promote_with_ready(&request, lp_remove_cases_ready, &probe, &r);
+        zcl_alloc_fault_clear();
+        ASSERT(probe.armed);
         ASSERT_EQ(lab_cases_test_parse_count() - before, 1);
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_get_int(json_get(&r.data, "cases_passed")), 2);
