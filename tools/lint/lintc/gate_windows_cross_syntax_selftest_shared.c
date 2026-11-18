@@ -108,10 +108,27 @@ int wcs_worker_empty_test(const char *base)
     return 0;
 }
 
+static int sh_worker_results(const char *out, int rows)
+{
+    char name[64], log[SH_P], rc[SH_P];
+    for (int i = 0; i < rows; i++) {
+        shp(name, sizeof name, "unit%d.c", i);
+        if (wcs_paths_for(name, out, log, sizeof log, rc, sizeof rc)) return 2;
+        struct stat st;
+        if (stat(log, &st) != 0 || stat(rc, &st) != 0) return 1;
+        FILE *result = fopen(rc, "r");
+        int status = -1;
+        if (!result) return 1;
+        int ok = fscanf(result, "%d", &status) == 1 && status == 0;
+        if (fclose(result) != 0 || !ok) return 1;
+    }
+    return 0;
+}
+
 /* Each real worker writes its own fixture result; the final row lacks newline. */
 static int sh_worker_case(const char *base, int rows, int limit)
 {
-    char list[SH_P], out[SH_P], name[64], log[SH_P], rc[SH_P];
+    char list[SH_P], out[SH_P];
     shp(list, sizeof list, "%s/cap-%d.list", base, rows);
     shp(out, sizeof out, "%s/cap-%d.out", base, rows);
     if (mkdir(out, 0700) != 0) return 2;
@@ -124,17 +141,7 @@ static int sh_worker_case(const char *base, int rows, int limit)
     if (fclose(f) != 0 || wcs_copy(g_wcs_out, sizeof g_wcs_out, out)) return 2;
     int started = 0;
     if (wcs_worker_run(list, limit, &started) != 0) return 1;
-    for (int i = 0; i < rows; i++) {
-        shp(name, sizeof name, "unit%d.c", i);
-        if (wcs_paths_for(name, out, log, sizeof log, rc, sizeof rc)) return 2;
-        struct stat st;
-        if (stat(log, &st) != 0 || stat(rc, &st) != 0) return 1;
-        FILE *result = fopen(rc, "r");
-        int status = -1;
-        if (!result) return 1;
-        int ok = fscanf(result, "%d", &status) == 1 && status == 0;
-        if (fclose(result) != 0 || !ok) return 1;
-    }
+    if (sh_worker_results(out, rows) != 0) return 1;
     return started == (rows < limit ? rows : limit) ? 0 : 1;
 }
 
