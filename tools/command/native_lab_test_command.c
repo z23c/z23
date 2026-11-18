@@ -571,7 +571,7 @@ static enum lab_check lab_run_cases(struct lab_ctx *ctx, const struct lab_cases 
         t->passed += pass;
         t->failed += !pass;
         lab_tally_findings(t, &proc, comp->sanitized);
-        if (!lab_case_row(rows, c, &proc, pass, diff, t)) {
+        if (rows && !lab_case_row(rows, c, &proc, pass, diff, t)) {
             result = LAB_CHECK_ALLOC;
             break;
         }
@@ -601,21 +601,16 @@ enum lab_check lab_cases_check(const struct zcl_command_request *rq,
     struct lab_cases cs;
     struct lab_compile *comp = zcl_calloc(1, sizeof(*comp), "lab.compile");
     struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL, .fail = fail };
-    struct json_value rows;
     enum lab_check res = comp ? LAB_CHECK_NO_CASES : LAB_CHECK_ALLOC;
-    json_init(&rows);
-    json_set_array(&rows);
     if (comp && lab_cases_load(rq, &cs)) {
-        lab_diagnostic_budget(&t, cs.n);
         comp->ok = true;
         snprintf(comp->binary, sizeof(comp->binary), "%s", binary);
-        res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, &rows, &t);
+        res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, NULL, &t);
         *passed = t.passed;
         *failed = t.failed;
     }
     if (comp)
         lab_cases_free(&cs);
-    json_free(&rows);
     free(comp);
     return res;
 }

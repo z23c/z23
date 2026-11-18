@@ -359,8 +359,13 @@ static int lp_case_source_snapshot(void)
         lab_compile_release(&ctx.dirs, &ctx.tc, &ctx.src, "snapshot-release", rel);
         ASSERT(rel->ok);
         size_t passed = 0, failed = 0;
-        ASSERT_EQ(lab_cases_check(&rq, &ctx, rel->binary, LAB_TIMEOUT_DEFAULT_MS,
-                                 LAB_MEM_DEFAULT_MB, &passed, &failed, NULL), LAB_CHECK_RAN);
+        zcl_alloc_fault_fail_nth("lab.text", 1);
+        enum lab_check check = lab_cases_check(&rq, &ctx, rel->binary, LAB_TIMEOUT_DEFAULT_MS,
+                                               LAB_MEM_DEFAULT_MB, &passed, &failed, NULL);
+        bool unused_row_alloc = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT_EQ(check, LAB_CHECK_RAN);
+        ASSERT(unused_row_alloc);
         ASSERT_EQ(passed, 1);
         ASSERT_EQ(failed, 0);
         lab_compile_cleanup(&ctx.dirs, "snapshot-release");
