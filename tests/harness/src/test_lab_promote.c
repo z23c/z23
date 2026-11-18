@@ -510,7 +510,7 @@ static int lp_case_source_snapshot(void)
         json_init(&input);
         ASSERT(json_read(&input, in, strlen(in)));
         struct zcl_command_request rq = { .input = &input };
-        lab_test_context(&rq, &ctx, &r);
+        lab_test_context(&rq, &ctx, &r, NULL);
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_get_int(json_get(&r.data, "passed")), 1);
         ASSERT_EQ(json_get_int(json_get(&r.data, "failed")), 0);
@@ -581,6 +581,7 @@ static int lp_case_cases_snapshot(void)
         ASSERT_EQ(cases.value->type, JSON_STR);
         ASSERT_STR_EQ(json_get_str(cases.value), "  " LP_CASES_OK "\n");
         free(cases.file_text);
+        json_free(&cases.parsed);
         zcl_command_reply_free(&r);
     } TEST_END
     lp_env_close(&e);
@@ -605,6 +606,7 @@ static int lp_case_snapshot_no_copy(void)
         zcl_alloc_fault_clear();
         ASSERT(captured && armed);
         free(cases.file_text);
+        json_free(&cases.parsed);
         json_free(&input);
         zcl_command_reply_free(&r);
     } TEST_END
@@ -684,7 +686,9 @@ static int lp_case_ready_snapshot(void)
         ASSERT(json_read(&input, in, strlen(in)));
         struct zcl_command_request request = { .input = &input };
         zcl_command_reply_init(&r, "zcl.lab_promote.v1");
+        size_t before = lab_cases_test_parse_count();
         lab_promote_with_ready(&request, lp_remove_cases_ready, path, &r);
+        ASSERT_EQ(lab_cases_test_parse_count() - before, 1);
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_get_int(json_get(&r.data, "cases_passed")), 2);
         ASSERT(lp_join(output, sizeof output, e.dist, "cases.json"));
@@ -739,7 +743,9 @@ static int lp_case_ready_values(void)
             ASSERT(json_read(&input, in, strlen(in)));
             struct zcl_command_request request = { .input = &input };
             zcl_command_reply_init(&r, "zcl.lab_promote.v1");
+            size_t before = lab_cases_test_parse_count();
             lab_promote_with_ready(&request, lp_change_cases_ready, &input, &r);
+            ASSERT_EQ(lab_cases_test_parse_count() - before, form ? 1 : 0);
             ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
             ASSERT_EQ(json_get_int(json_get(&r.data, "cases_passed")), 2);
             ASSERT(json_is_null(json_get(&input, "cases")));

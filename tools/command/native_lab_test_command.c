@@ -110,6 +110,23 @@ static bool lab_cases_read_extent(int fd, char *buf, size_t size)
     return false;
 }
 
+#if defined(ZCL_TESTING)
+static _Thread_local size_t lab_case_parse_calls;
+size_t lab_cases_test_parse_count(void)
+{
+    return lab_case_parse_calls;
+}
+#endif
+
+static bool lab_cases_json_read(struct json_value *value, const char *text, size_t size)
+{
+#if defined(ZCL_TESTING)
+    lab_case_parse_calls++;
+#endif
+    return json_read(value, text, size);
+}
+
+
 static bool lab_cases_read_file(const char *path, struct lab_cases *cs)
 {
     struct stat st;
@@ -133,7 +150,7 @@ static bool lab_cases_read_file(const char *path, struct lab_cases *cs)
     bool complete = buf && lab_cases_read_extent(fd, buf, size);
     int closed = close(fd);
     if (!complete || closed != 0 || memchr(buf, 0, size) ||
-        !json_read(&cs->doc, buf, size)) {
+        !lab_cases_json_read(&cs->doc, buf, size)) {
         free(buf);
         return false;
     }
@@ -148,7 +165,7 @@ static bool lab_cases_text(const char *text, struct lab_cases *cs)
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
         p++;
     if (*p == '[')
-        return json_read(&cs->doc, text, strlen(text));
+        return lab_cases_json_read(&cs->doc, text, strlen(text));
     return lab_cases_read_file(text, cs);
 }
 
@@ -247,10 +264,20 @@ static bool lab_cases_parse(const struct lab_cases *cs)
     return true;
 }
 
-static bool lab_cases_load(const struct zcl_command_request *rq, struct lab_cases *cs)
+static bool lab_cases_load(const struct zcl_command_request *rq, struct lab_cases *cs,
+                           const struct json_value *parsed)
 {
-    if (!lab_cases_open(rq, cs))
+    if (parsed) {
+        memset(cs, 0, sizeof(*cs));
+        json_init(&cs->doc);
+        cs->arr = parsed;
+        if (parsed->type != JSON_ARR || parsed->num_children == 0 ||
+            parsed->num_children > LAB_CASES_MAX)
+            return false;
+        cs->n = parsed->num_children;
+    } else if (!lab_cases_open(rq, cs)) {
         return false;
+    }
     cs->items = zcl_calloc(cs->n, sizeof(*cs->items), "lab.cases");
     return cs->items && lab_cases_parse(cs);
 }
@@ -272,6 +299,8 @@ bool lab_cases_snapshot(const struct zcl_command_request *request,
         lab_fail(reply, "LAB_BAD_CASES", "normalize", "cases must be a valid nonempty case array");
         return false;
     }
+    cases->parsed = cs.doc;
+    json_init(&cs.doc);
     if (cs.file_text) {
         cases->file_text = cs.file_text;
         cs.file_text = NULL;
@@ -597,17 +626,18 @@ static bool lab_build_test(struct json_value *d, const struct lab_ctx *ctx,
            lab_tail(d, comp, requested, comp->ok, t->findings, t->first);
 }
 
-enum lab_check lab_cases_check(const struct zcl_command_request *rq,
+enum lab_check lab_cases_check_cases(const struct zcl_command_request *rq,
                                struct lab_ctx *ctx, const char *binary,
                                uint32_t timeout_ms, uint32_t mem_mb,
                                size_t *passed, size_t *failed,
-                               struct lab_case_fail *fail)
+                               struct lab_case_fail *fail,
+                               const struct json_value *parsed)
 {
     struct lab_cases cs;
     struct lab_run_source source = { .binary = binary, .ok = true };
     struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL, .fail = fail };
     enum lab_check res = LAB_CHECK_NO_CASES;
-    if (lab_cases_load(rq, &cs)) {
+    if (lab_cases_load(rq, &cs, parsed)) {
         res = lab_run_cases(ctx, &cs, &source, timeout_ms, mem_mb, NULL, &t);
         *passed = t.passed;
         *failed = t.failed;
@@ -653,7 +683,8 @@ static void lab_test_execute(struct lab_ctx *ctx, const struct lab_cases *cs,
 }
 
 void lab_test_context(const struct zcl_command_request *request,
-                      struct lab_ctx *ctx, struct zcl_command_reply *reply)
+                            struct lab_ctx *ctx, struct zcl_command_reply *reply,
+                            const struct json_value *parsed)
 {
     struct lab_test_req r = { .sanitize = lab_in_bool(request, "sanitize", true),
                               .fresh = lab_in_bool(request, "fresh", false) };
@@ -672,7 +703,7 @@ void lab_test_context(const struct zcl_command_request *request,
                  "usage: lab test <file.c> --cases=<json file or array>");
         return;
     }
-    if (!lab_cases_load(request, &cs)) {
+    if (!lab_cases_load(request, &cs, parsed)) {
         lab_fail(reply, "LAB_BAD_CASES", "normalize",
                  "cases is a JSON array of 1..256 objects with name, and "
                  "optional stdin, args, expect_stdout, expect_exit (0..255)");
@@ -691,8 +722,18 @@ void lab_test_context(const struct zcl_command_request *request,
     lab_cases_free(&cs);
 }
 
+enum lab_check lab_cases_check(const struct zcl_command_request *rq,
+                               struct lab_ctx *ctx, const char *binary,
+                               uint32_t timeout_ms, uint32_t mem_mb,
+                               size_t *passed, size_t *failed,
+                               struct lab_case_fail *fail)
+{
+    return lab_cases_check_cases(rq, ctx, binary, timeout_ms, mem_mb,
+                                 passed, failed, fail, NULL);
+}
+
 void zcl_native_handle_lab_test(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
-    lab_test_context(request, NULL, reply);
+    lab_test_context(request, NULL, reply, NULL);
 }

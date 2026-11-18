@@ -25,6 +25,7 @@
 
 struct promote_req {
     struct zcl_command_request test;
+    const struct json_value *cases;
     const char *file;
     bool include_source;
     uint32_t timeout_ms, mem_mb;
@@ -187,7 +188,7 @@ static bool promote_cases(struct lab_ctx *ctx,
                           struct promote_req *p)
 {
     char message[192];
-    lab_test_context(&p->test, ctx, reply);
+    lab_test_context(&p->test, ctx, reply, p->cases);
     if (reply->status != ZCL_COMMAND_STATUS_PASSED)
         return false;
     const struct json_value *sanitizer = json_get(&reply->data, "sanitizer");
@@ -411,8 +412,8 @@ static void promote_verify(const struct zcl_command_request *rq,
     size_t passed = 0, failed = 0;
     char message[192];
     struct lab_case_fail fail = { { 0 }, { 0 } };
-    enum lab_check c = lab_cases_check(&p->test, ctx, rel->binary, p->timeout_ms,
-                                       p->mem_mb, &passed, &failed, &fail);
+    enum lab_check c = lab_cases_check_cases(&p->test, ctx, rel->binary, p->timeout_ms,
+                                       p->mem_mb, &passed, &failed, &fail, p->cases);
     if (c == LAB_CHECK_UNCONFINED) {
         lab_unconfined(reply);
     } else if (c == LAB_CHECK_ALLOC) {
@@ -499,11 +500,14 @@ void lab_promote_with_ready(const struct zcl_command_request *request,
     free(cases.file_text);
     if (ok) {
         p.test.input = &test_options;
+        p.cases = cases.parsed.type == JSON_ARR ? &cases.parsed
+                  : json_get(&test_options, "cases");
         if (!ready || ready(context, reply))
             promote_snapshot(request, &p, reply);
     } else {
         lab_fail(reply, "LAB_ALLOC", "normalize", "the promotion snapshot could not be allocated");
     }
+    json_free(&cases.parsed);
     json_free(&test_options);
 }
 

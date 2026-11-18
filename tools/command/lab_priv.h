@@ -31,14 +31,20 @@ void lab_unconfined(struct zcl_command_reply *reply);
 /* Test the already loaded source snapshot. Caller owns ctx and closes it;
  * promotion uses the same bytes for its subsequent release compilation. */
 void lab_test_context(const struct zcl_command_request *request,
-                      struct lab_ctx *ctx, struct zcl_command_reply *reply);
+                            struct lab_ctx *ctx, struct zcl_command_reply *reply,
+                            const struct json_value *cases);
 typedef bool (*lab_promote_ready_fn)(void *context, struct zcl_command_reply *reply);
 void lab_promote_with_ready(const struct zcl_command_request *request,
                             lab_promote_ready_fn ready, void *context,
                             struct zcl_command_reply *reply);
 /* Borrow request cases or retain file text until the caller copies the value.
- * file_view is non-owning: free file_text, never json_free file_view. */
+ * file_view is non-owning: free file_text, never json_free file_view.
+ * The caller owns parsed and must json_free it. */
+#if defined(ZCL_TESTING)
+size_t lab_cases_test_parse_count(void);
+#endif
 struct lab_case_snapshot {
+    struct json_value parsed; /* owned parsed document for text; null for array */
     struct json_value file_view;
     const struct json_value *value;
     char *file_text;
@@ -73,5 +79,11 @@ enum lab_check lab_cases_check(const struct zcl_command_request *rq,
                                uint32_t timeout_ms, uint32_t mem_mb,
                                size_t *passed, size_t *failed,
                                struct lab_case_fail *fail);
+enum lab_check lab_cases_check_cases(const struct zcl_command_request *rq,
+                                     struct lab_ctx *ctx, const char *binary,
+                                     uint32_t timeout_ms, uint32_t mem_mb,
+                                     size_t *passed, size_t *failed,
+                                     struct lab_case_fail *fail,
+                                     const struct json_value *cases);
 
 #endif
