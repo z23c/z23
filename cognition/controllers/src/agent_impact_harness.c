@@ -652,7 +652,7 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
 
         char *text = NULL;
         size_t len = 0;
-        if (!zcl_read_whole_file_text(relp, AIH_REFERRER_MAX, &text, &len,
+        if (!zcl_read_whole_file_text_unbuffered(relp, AIH_REFERRER_MAX, &text, &len,
                                       "agent_impact_name_reference"))
             continue;
         bool hit = aih_referrer_hits(text, path, stem, alt, has_alt, compound);
@@ -718,7 +718,7 @@ static bool aih_batch_directory(const char *dir, struct aih_batch_query *q, size
         (void)snprintf(relp, sizeof(relp), "%s/%s", dir, names.items[i]);
         char *text = NULL;
         size_t len = 0;
-        if (!zcl_read_whole_file_text(relp, AIH_REFERRER_MAX, &text, &len,
+        if (!zcl_read_whole_file_text_unbuffered(relp, AIH_REFERRER_MAX, &text, &len,
                                       "agent_impact_name_reference")) {
             aih_names_free(&names);
             return false;

@@ -124,9 +124,14 @@ static bool read_text_size(FILE *f, const char *path, size_t max_len,
     return true;
 }
 
-bool zcl_read_whole_file_text(const char *path, size_t max_len,
-                               char **out_buf, size_t *out_len,
-                               const char *log_ctx)
+static void text_stream_buffer(FILE *stream, bool unbuffered)
+{
+    if (unbuffered) (void)setvbuf(stream, NULL, _IONBF, 0);
+}
+
+static bool read_whole_file_text(const char *path, size_t max_len,
+                                 char **out_buf, size_t *out_len,
+                                 const char *log_ctx, bool unbuffered)
 {
     if (out_buf) *out_buf = NULL;
     if (out_len) *out_len = 0;
@@ -137,6 +142,7 @@ bool zcl_read_whole_file_text(const char *path, size_t max_len,
     if (!f)
         LOG_FAIL(log_ctx ? log_ctx : "file_io",
                   "read_whole_file_text: read open failed for %s", path);
+    text_stream_buffer(f, unbuffered);
     size_t n;
     if (!read_text_size(f, path, max_len, &n, log_ctx)) return false;
 
@@ -164,4 +170,18 @@ bool zcl_read_whole_file_text(const char *path, size_t max_len,
     *out_buf = buf;
     *out_len = n;
     return true;
+}
+
+bool zcl_read_whole_file_text(const char *path, size_t max_len,
+                              char **out_buf, size_t *out_len,
+                              const char *log_ctx)
+{
+    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, false);
+}
+
+bool zcl_read_whole_file_text_unbuffered(const char *path, size_t max_len,
+                                         char **out_buf, size_t *out_len,
+                                         const char *log_ctx)
+{
+    return read_whole_file_text(path, max_len, out_buf, out_len, log_ctx, true);
 }

@@ -41,4 +41,9 @@ bool zcl_read_whole_file_text(const char *path, size_t max_len,
                                char **out_buf, size_t *out_len,
                                const char *log_ctx);
 
+/* Read text with the same bounds and ownership, without stdio buffering. */
+bool zcl_read_whole_file_text_unbuffered(const char *path, size_t max_len,
+                                          char **out_buf, size_t *out_len,
+                                          const char *log_ctx);
+
 #endif

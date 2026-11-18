@@ -68,7 +68,9 @@ static void file_io_short_read_reset(size_t allocation_len)
 #define free file_io_observe_free
 #define zcl_read_whole_file file_io_short_observed_read
 #define zcl_read_whole_file_text file_io_short_observed_read_text
+#define zcl_read_whole_file_text_unbuffered file_io_short_observed_read_text_unbuffered
 #include "../../../platform/modules/util/src/file_io.c"
+#undef zcl_read_whole_file_text_unbuffered
 #undef zcl_read_whole_file_text
 #undef zcl_read_whole_file
 #undef free
@@ -101,6 +103,19 @@ static bool file_io_text_short_read_retired(const char *path)
     return okay;
 }
 
+static bool file_io_unbuffered_short_read_retired(const char *path)
+{
+    file_io_short_read_reset(5);
+    char *text = NULL;
+    size_t length = 0;
+    bool okay = !file_io_short_observed_read_text_unbuffered(
+        path, 4, &text, &length, "file_io_short_read_test") && !text &&
+        length == 0 && file_io_short_read_bytes == 3 &&
+        file_io_freed_allocation_zero;
+    file_io_inject_short_read = false;
+    return okay;
+}
+
 int file_io_short_read_retirement_cases(void);
 int file_io_short_read_retirement_cases(void)
 {
@@ -115,7 +130,8 @@ int file_io_short_read_retirement_cases(void)
 
     bool binary_ok = prepared && file_io_binary_short_read_retired(path);
     bool text_ok = prepared && file_io_text_short_read_retired(path);
-    bool okay = binary_ok && text_ok;
+    bool unbuffered_ok = prepared && file_io_unbuffered_short_read_retired(path);
+    bool okay = binary_ok && text_ok && unbuffered_ok;
     if (fd >= 0)
         (void)unlink(path);
     printf("path_check: short whole-file reads retire owned buffers... %s\n",
