@@ -111,7 +111,7 @@ int64_t zslp_ledger_balance_at_height(struct node_db *ndb,
  * answers for. */
 struct zslp_wallet_token {
     uint8_t token_id[32];  /* internal (node) byte order, as stored */
-    int64_t balance;       /* SUM(amount) over the wallet's UNSPENT rows */
+    int64_t balance;       /* SUM over UNSPENT rows; saturates at INT64_MAX */
     int64_t utxo_count;    /* how many unspent token outputs back it */
 };
 

@@ -17,6 +17,8 @@
 #include "models/activerecord.h"
 #include "primitives/transaction.h"
 #include "zslp/slp.h"
+#include "util/ar_step_readonly.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
@@ -27,6 +29,47 @@
 #define ZSLP_LEDGER_DIGEST_KEY "zslp_ledger_digest"
 
 DEFINE_MODEL_CALLBACKS(zslp_ledger)
+
+/* ── Exact saturating balance sums ─────────────────────────────────────
+ *
+ * Every row's amount is a valid SLP quantity (0..INT64_MAX), but a holder
+ * can hold several of them: three MINTs of 2^63-1 to one address are three
+ * valid unspent rows whose true total is 3 * (2^63-1). SQLite's SUM() of
+ * integers raises an "integer overflow" error rather than wrapping, and the
+ * query helpers answered an error as 0 — a holder of the most tokens read as
+ * holding none, and one such address emptied wallet_tokens() for every token
+ * of the wallet.
+ *
+ * The sum is therefore taken in two halves that cannot overflow
+ * (amount >> 32 and amount & 0xFFFFFFFF, each summed over at most 2^31
+ * rows) and recombined here. The result is exact while it fits in an int64
+ * and SATURATES at INT64_MAX beyond that: "at least 2^63-1", never a wrapped
+ * or zero figure. Token-gate comparisons ("balance >= threshold") stay
+ * correct under saturation. */
+#define ZSLP_SUM_COLS \
+    "COALESCE(SUM(amount>>32),0),COALESCE(SUM(amount&4294967295),0)"
+
+static int64_t zslp_amount_sat(int64_t hi_sum, int64_t lo_sum)
+{
+    if (hi_sum < 0 || lo_sum < 0)
+        return 0;   /* unreachable: amount>=0 is a column CHECK */
+    int64_t high = hi_sum + (lo_sum >> 32);
+    if (high > (INT64_MAX >> 32))
+        return INT64_MAX;
+    return (int64_t)(((uint64_t)high << 32) |
+                     ((uint64_t)lo_sum & 0xFFFFFFFFu));
+}
+
+#define ZSLP_QUERY_SAT_BOUND(ndb, stmt, sql, bind_code) do { \
+    int64_t _value = 0; \
+    AR_PREPARE_RET((ndb), (stmt), (sql), 0); \
+    bind_code; \
+    if (ar_step_checked((stmt), "zslp balance sum", NULL) == ZCL_STEP_ROW) \
+        _value = zslp_amount_sat(AR_COL_INT((stmt), 0), \
+                                 AR_COL_INT((stmt), 1)); \
+    AR_FINALIZE((stmt)); \
+    return _value; \
+} while (0)
 
 /* ── Row model ─────────────────────────────────────────────────────── */
 
@@ -206,8 +249,8 @@ int64_t zslp_ledger_balance(struct node_db *ndb, const uint8_t token_id[32],
 {
     if (!ndb || !ndb->open || !token_id || !address) return 0;
     sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(amount),0) FROM zslp_ledger "
+    ZSLP_QUERY_SAT_BOUND(ndb, s,
+        "SELECT " ZSLP_SUM_COLS " FROM zslp_ledger "
         "WHERE token_id=? AND address=? AND role=1 "
         "AND spent_by_txid IS NULL",
         AR_BIND_BLOB(s, 1, token_id, 32);
@@ -284,8 +327,8 @@ int64_t zslp_ledger_balance_at_height(struct node_db *ndb,
 {
     if (!ndb || !ndb->open || !token_id || !address || height < 0) return 0;
     sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(amount),0) FROM zslp_ledger "
+    ZSLP_QUERY_SAT_BOUND(ndb, s,
+        "SELECT " ZSLP_SUM_COLS " FROM zslp_ledger "
         "WHERE token_id=? AND address=? AND role=1" ZSLP_AS_OF_HEIGHT,
         AR_BIND_BLOB(s, 1, token_id, 32);
         AR_BIND_BLOB(s, 2, address, 20);
@@ -335,7 +378,7 @@ int zslp_ledger_wallet_tokens(struct node_db *ndb,
 
     sqlite3_stmt *s = NULL;
     AR_QUERY_LIST(ndb, s,
-        "SELECT token_id,COALESCE(SUM(amount),0),COUNT(*)"
+        "SELECT token_id," ZSLP_SUM_COLS ",COUNT(*)"
         " FROM zslp_ledger"
         " WHERE role=1 AND spent_by_txid IS NULL" ZSLP_WALLET_OWNS_ADDRESS
         " GROUP BY token_id ORDER BY token_id LIMIT ?",
@@ -348,8 +391,9 @@ int zslp_ledger_wallet_tokens(struct node_db *ndb,
             continue;
         }
         AR_READ_BLOB(s, 0, out[count].token_id, 32);
-        out[count].balance = AR_COL_INT(s, 1);
-        out[count].utxo_count = AR_COL_INT(s, 2));
+        out[count].balance = zslp_amount_sat(AR_COL_INT(s, 1),
+                                            AR_COL_INT(s, 2));
+        out[count].utxo_count = AR_COL_INT(s, 3));
 }
 
 int64_t zslp_ledger_wallet_balance(struct node_db *ndb,
@@ -357,8 +401,8 @@ int64_t zslp_ledger_wallet_balance(struct node_db *ndb,
 {
     if (!ndb || !ndb->open || !token_id) return 0;
     sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(amount),0) FROM zslp_ledger"
+    ZSLP_QUERY_SAT_BOUND(ndb, s,
+        "SELECT " ZSLP_SUM_COLS " FROM zslp_ledger"
         " WHERE token_id=? AND role=1 AND spent_by_txid IS NULL"
         ZSLP_WALLET_OWNS_ADDRESS,
         AR_BIND_BLOB(s, 1, token_id, 32));
@@ -370,8 +414,8 @@ int64_t zslp_ledger_wallet_balance_at_height(struct node_db *ndb,
 {
     if (!ndb || !ndb->open || !token_id || height < 0) return 0;
     sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(amount),0) FROM zslp_ledger"
+    ZSLP_QUERY_SAT_BOUND(ndb, s,
+        "SELECT " ZSLP_SUM_COLS " FROM zslp_ledger"
         " WHERE token_id=? AND role=1" ZSLP_AS_OF_HEIGHT
         ZSLP_WALLET_OWNS_ADDRESS,
         AR_BIND_BLOB(s, 1, token_id, 32);

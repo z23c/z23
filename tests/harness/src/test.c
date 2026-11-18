@@ -1359,6 +1359,7 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_explorer();
     *failures += test_explorer_rpc_call();
     *failures += test_explorer_index();
+    *failures += test_zslp_ledger_saturation();
     { extern int test_format_helpers_codec(void);
       *failures += test_format_helpers_codec(); }
     *failures += test_mining();
