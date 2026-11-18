@@ -36,9 +36,13 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#if defined(_WIN32)
+#include "platform/directory_transaction.h"
+#endif
 #include "plugin/plugin_store.h"
 #include "vcs/package_checkout.h"
 #include "vcs/package_manifest.h"
+#include "vcs/package_prepare.h"
 #include "vcs/package_public_shape.h"
 #include "vcs/package_release.h"
 #include "vcs/package_service.h"
@@ -46,11 +50,14 @@
 #include "vcs/package_swarm_node.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define PSW_LEAF_MAX 255u
 #define PSW_FILES_MAX 64u
@@ -430,63 +437,86 @@ static void psw_store_close(struct vcs_package_store *store, bool owned)
         vcs_package_store_close(store);
 }
 
-/* Read one file of the verified set and add its chunk-digested entry to the
- * manifest under construction. */
+/* Each pass uses a bounded buffer and checks the observed size at EOF. */
+static int psw_open_member(const char *dir, const struct psw_file *f)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, f->leaf);
+    if (n <= 0 || (size_t)n >= sizeof(path) || !f->size)
+        return -1;
+#if defined(_WIN32)
+    int fd = platform_directory_transaction_read_fd(path, false);
+#else
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+#endif
+    struct stat st;
+    if (fd >= 0 && (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+                    st.st_size < 0 || (uint64_t)st.st_size != f->size)) {
+        (void)close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static bool psw_eof(int fd)
+{
+    uint8_t byte;
+    ssize_t n;
+    do { n = read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
+    return n == 0;
+}
+
 static bool psw_manifest_add_file(struct vcs_package_manifest *manifest,
                                   const char *dir, const struct psw_file *f)
 {
-    char path[PATH_MAX];
-    uint8_t *bytes = NULL;
-    size_t len = 0;
-    int n = snprintf(path, sizeof(path), "%s/%s", dir, f->leaf);
-    bool ok = n > 0 && (size_t)n < sizeof(path) &&
-              psw_read(path, (size_t)f->size + 1, &bytes, &len) &&
-              len == f->size;
-    uint32_t chunks =
-        (uint32_t)((len + VCS_PACKAGE_CHUNK_BYTES - 1) / VCS_PACKAGE_CHUNK_BYTES);
-    uint8_t *digests =
-        ok ? zcl_malloc((size_t)chunks * 32, "plugin.swarm.digests") : NULL;
-    ok = digests != NULL;
-    for (uint32_t c = 0; c < chunks && ok; c++) {
-        size_t off = (size_t)c * VCS_PACKAGE_CHUNK_BYTES;
-        size_t cl = len - off;
-        if (cl > VCS_PACKAGE_CHUNK_BYTES)
-            cl = VCS_PACKAGE_CHUNK_BYTES;
-        ok = vcs_package_chunk_hash(bytes + off, cl, digests + c * 32);
-    }
-    ok = ok && vcs_package_manifest_add(manifest, f->leaf, f->mode, len,
+    int fd = psw_open_member(dir, f);
+    if (fd < 0) return false;
+    uint32_t chunks = (uint32_t)(1u + (f->size - 1u) / VCS_PACKAGE_CHUNK_BYTES);
+    size_t cap = f->size < VCS_PACKAGE_CHUNK_BYTES ? (size_t)f->size : VCS_PACKAGE_CHUNK_BYTES;
+    uint8_t *digests = zcl_malloc((size_t)chunks * 32u, "plugin.swarm.digests");
+    uint8_t *buffer = zcl_malloc(cap, "plugin.swarm.chunk");
+    bool ok = digests && buffer &&
+              vcs_package_prepare_hash_chunks(fd, f->size, chunks,
+                                              digests, buffer, NULL) && psw_eof(fd);
+    if (close(fd) != 0) ok = false;
+    ok = ok && vcs_package_manifest_add(manifest, f->leaf, f->mode, f->size,
                                         digests, chunks);
+    free(buffer);
     free(digests);
-    free(bytes);
     return ok;
 }
 
-/* Re-read one file after the manifest landed and put its chunks under the
- * admitted root, so a file that changed mid-publish fails closed at
- * put_chunk. */
+/* Re-read after manifest admission; put_chunk verifies the admitted hashes. */
 static enum vcs_package_store_result
 psw_store_file_chunks(struct vcs_package_store *store, const uint8_t root[32],
                       const char *dir, const struct psw_file *f)
 {
-    char path[PATH_MAX];
-    uint8_t *bytes = NULL;
-    size_t len = 0;
-    int n = snprintf(path, sizeof(path), "%s/%s", dir, f->leaf);
-    if (n <= 0 || (size_t)n >= sizeof(path) ||
-        !psw_read(path, (size_t)f->size + 1, &bytes, &len) ||
-        len != f->size)
-        return VCS_PACKAGE_STORE_ERR_IO;
-    enum vcs_package_store_result r = VCS_PACKAGE_STORE_OK;
-    for (size_t off = 0; off < len && r == VCS_PACKAGE_STORE_OK;
-         off += VCS_PACKAGE_CHUNK_BYTES) {
-        size_t cl = len - off;
-        if (cl > VCS_PACKAGE_CHUNK_BYTES)
-            cl = VCS_PACKAGE_CHUNK_BYTES;
-        r = vcs_package_store_put_chunk(
-            store, root, f->leaf, (uint32_t)(off / VCS_PACKAGE_CHUNK_BYTES),
-            bytes + off, cl);
+    int fd = psw_open_member(dir, f);
+    if (fd < 0) return VCS_PACKAGE_STORE_ERR_IO;
+    FILE *file = fdopen(fd, "rb");
+    if (!file) { (void)close(fd); return VCS_PACKAGE_STORE_ERR_IO; }
+    size_t cap = f->size < VCS_PACKAGE_CHUNK_BYTES ? (size_t)f->size : VCS_PACKAGE_CHUNK_BYTES;
+    uint8_t *buffer = zcl_malloc(cap, "plugin.swarm.chunk");
+    enum vcs_package_store_result r = buffer ? VCS_PACKAGE_STORE_OK : VCS_PACKAGE_STORE_ERR_IO;
+    uint64_t left = f->size;
+    uint32_t index = 0;
+    size_t last = 0;
+    while (r == VCS_PACKAGE_STORE_OK) {
+        size_t want = left < cap ? (size_t)left : cap;
+        if (fread(buffer, 1, want, file) != want) {
+            r = VCS_PACKAGE_STORE_ERR_IO;
+            break;
+        }
+        left -= want;
+        if (!left) { last = want; break; }
+        r = vcs_package_store_put_chunk(store, root, f->leaf, index++, buffer, want);
     }
-    free(bytes);
+    if (r == VCS_PACKAGE_STORE_OK && (fgetc(file) != EOF || ferror(file)))
+        r = VCS_PACKAGE_STORE_ERR_IO;
+    if (fclose(file) != 0 && r == VCS_PACKAGE_STORE_OK) r = VCS_PACKAGE_STORE_ERR_IO;
+    if (r == VCS_PACKAGE_STORE_OK)
+        r = vcs_package_store_put_chunk(store, root, f->leaf, index, buffer, last);
+    free(buffer);
     return r;
 }
 

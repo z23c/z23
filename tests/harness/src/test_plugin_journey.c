@@ -1596,7 +1596,11 @@ static int pj_t_reproduce(void)
         ASSERT(pj_promote_source(&f, "alias-upper.c", false));
         ASSERT(pj_chunk_file(f.dist, "partial.bin", VCS_PACKAGE_CHUNK_BYTES + 17u));
         /* The opt-in promote exported the exact source and cases. */
-        ASSERT(pj_publish(&f, root1));
+        zcl_alloc_fault_fail_nth("plugin.swarm.read", 4);
+        bool published = pj_publish(&f, root1);
+        bool read_armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(published && read_armed);
         uint8_t root_bin[32];
         ASSERT(zcl_hex_decode(root1, root_bin, 32));
         struct vcs_package_public_verdict verdict;
