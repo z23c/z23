@@ -65,6 +65,21 @@ enum lab_err lab_dirs_resolve(struct lab_dirs *d)
     return LAB_OK;
 }
 
+/* Prepare only the directory that owns private invocation workdirs. */
+enum lab_err lab_dirs_open_run(struct lab_dirs *d)
+{
+    struct stat st;
+    enum lab_err err = lab_dirs_resolve(d);
+    if (err != LAB_OK)
+        return err;
+    if (stat(d->run, &st) == 0)
+        return S_ISDIR(st.st_mode) ? LAB_OK : LAB_E_STATE;
+    if (errno != ENOENT || !zcl_result_is_ok(zcl_mkdir_p(d->run, 0700)))
+        return LAB_E_STATE;
+    return stat(d->run, &st) == 0 && S_ISDIR(st.st_mode) ? LAB_OK : LAB_E_STATE;
+}
+
+
 enum lab_err lab_dirs_open(struct lab_dirs *d)
 {
     enum lab_err err = lab_dirs_resolve(d);

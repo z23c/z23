@@ -905,7 +905,7 @@ static void plg_call_run(struct zcl_command_reply *reply, const struct plg_call_
         .args = in->args, .n_args = in->n_args,
         .timeout_ms = in->timeout_ms, .mem_mb = LAB_MEM_DEFAULT_MB,
     };
-    if (lab_dirs_open(&dirs) != LAB_OK) {
+    if (lab_dirs_open_run(&dirs) != LAB_OK) {
         plg_refuse(reply, PLUGIN_ERR_IO, "call", "the lab state directory could not be prepared");
     } else if (!lab_confinement_available()) {
         plg_run_refuse_as(reply, PLUGIN_RUN_ERR_SANDBOX, PLUGIN_OK, "call", m->name);

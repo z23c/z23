@@ -258,9 +258,26 @@ static int pdc_case_cases_pass(struct pdc_env *e)
 {
     int failures = 0;
     struct zcl_command_reply r;
+    char old_lab[PATH_MAX] = "", base[PATH_MAX], path[PATH_MAX];
+    const char *old = getenv("Z23_LAB_DIR");
+    bool had_old = old != NULL;
+    if (old) snprintf(old_lab, sizeof(old_lab), "%s", old);
     char before[PLUGIN_HEX_SHA3_512 + 1], after[PLUGIN_HEX_SHA3_512 + 1];
     size_t count = 0;
     TEST_CASE("plugin dev with passing cases makes a new current generation") {
+        ASSERT(snprintf(base, sizeof(base), "%s/lab-only-run", e->base) > 0);
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/run", base) > 0);
+        ASSERT(pdc_write(path, ""));
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
+        ASSERT(pdc_dev_cases(e, "[{\"name\":\"echo\"}]", &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_DEV_CASES_UNAVAILABLE");
+        ASSERT(!r.error.mutated);
+        zcl_command_reply_free(&r);
+        ASSERT(pdc_state(e, &count, before));
+        ASSERT_EQ(count, 2u);
+        ASSERT_EQ(unlink(path), 0);
+        ASSERT_EQ(mkdir(path, 0700), 0);
         ASSERT(pdc_dev_cases(e, "[{\"name\":\"echo\",\"stdin\":\"abc\\n\",\"expect_stdout\":\"abc\\n\",\"expect_exit\":0}]", &r));
 #if !defined(__linux__)
         /* Off Linux the cases cannot run (the lab is unsupported), so no
@@ -282,7 +299,15 @@ static int pdc_case_cases_pass(struct pdc_env *e)
         ASSERT_EQ(count, 3u);
         ASSERT_STR_EQ(after, before);
 #endif
+        ASSERT(snprintf(path, sizeof(path), "%s/cc", base) > 0);
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/receipts", base) > 0);
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/zcc", base) > 0);
+        ASSERT(access(path, F_OK) != 0);
     } TEST_END
+    if (had_old) (void)setenv("Z23_LAB_DIR", old_lab, 1);
+    else (void)unsetenv("Z23_LAB_DIR");
     return failures;
 }
 

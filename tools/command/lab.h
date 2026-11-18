@@ -109,6 +109,8 @@ struct lab_inputs {
 /* State directory: $Z23_LAB_DIR, else $HOME/.z23/lab. Creates the layout. */
 /* Resolve the same paths without creating state. */
 enum lab_err lab_dirs_resolve(struct lab_dirs *dirs);
+/* Prepare only the run directory; do not create compiler or receipt state. */
+enum lab_err lab_dirs_open_run(struct lab_dirs *dirs);
 enum lab_err lab_dirs_open(struct lab_dirs *dirs);
 enum lab_err lab_toolchain_find(struct lab_toolchain *tc);
 

@@ -168,7 +168,7 @@ static bool pdv_cases_pass(const struct zcl_command_request *request,
     if (!request->input || !json_get(request->input, "cases"))
         return true;
     memset(&ctx, 0, sizeof(ctx));
-    if (!pdv_exe_path(dev, exe, sizeof(exe)) || lab_dirs_open(&ctx.dirs) != LAB_OK) {
+    if (!pdv_exe_path(dev, exe, sizeof(exe)) || lab_dirs_open_run(&ctx.dirs) != LAB_OK) {
         pdv_gate_refuse(reply, "PLUGIN_DEV_CASES_UNAVAILABLE",
                         "the cases could not be run: the executable path or lab state is unusable", "");
         return false;

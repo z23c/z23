@@ -11,6 +11,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/lab.h"
 #include "json/json.h"
 #include "plugin/plugin_store.h"
 
@@ -147,11 +148,20 @@ static int pct_case_upper(void)
     int failures = 0;
     struct pct_env e;
     bool ready = pct_env_open(&e);
+    char old_lab[PATH_MAX] = "", base[PATH_MAX], path[PATH_MAX];
+    const char *old = getenv("Z23_LAB_DIR");
+    bool had_old = old != NULL;
+    if (old) snprintf(old_lab, sizeof(old_lab), "%s", old);
     TEST_CASE("plugin.call runs an interface 2 plugin once with stdin and returns stdout") {
         struct zcl_command_reply r;
         char hash[PLUGIN_HEX_SHA3_512 + 1];
         ASSERT(ready);
         ASSERT(pct_publish(&e, "upper", 2));
+        ASSERT(pct_join(base, sizeof(base), e.base, "lab-only-run"));
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT(pct_join(path, sizeof(path), base, "run"));
+        ASSERT_EQ(mkdir(path, 0700), 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
         ASSERT(pct_call(zcl_native_handle_plugin_call, "{\"name\":\"upper\",\"stdin\":\"abc\\n\"}", &r));
         ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
         const struct json_value *run = json_get(&r.data, "run");
@@ -164,7 +174,25 @@ static int pct_case_upper(void)
         ASSERT_EQ(plugin_hash_file(PCT_FIXTURE, hash), PLUGIN_OK);
         ASSERT_STR_EQ(json_get_str(json_get(&r.data, "sha3_512")), hash);
         zcl_command_reply_free(&r);
+        ASSERT(pct_join(path, sizeof(path), base, "cc"));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(pct_join(path, sizeof(path), base, "receipts"));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(pct_join(path, sizeof(path), base, "zcc"));
+        ASSERT(access(path, F_OK) != 0);
+        ASSERT(pct_join(path, sizeof(path), base, "run"));
+        ASSERT_EQ(rmdir(path), 0);
+        FILE *block = fopen(path, "wb");
+        ASSERT(block != NULL);
+        ASSERT_EQ(fclose(block), 0);
+        size_t runs = lab_run_count();
+        ASSERT(pct_call(zcl_native_handle_plugin_call, "{\"name\":\"upper\"}", &r));
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_IO");
+        ASSERT_EQ(lab_run_count(), runs);
+        zcl_command_reply_free(&r);
     } TEST_END
+    if (had_old) (void)setenv("Z23_LAB_DIR", old_lab, 1);
+    else (void)unsetenv("Z23_LAB_DIR");
     pct_env_close(&e);
     return failures;
 }
