@@ -306,8 +306,8 @@ static bool zslp_ledger_reset_height(struct node_db *ndb, int32_t height)
     static const char *const k_sql[] = {
         "DELETE FROM zslp_ledger WHERE created_height=?",
         "DELETE FROM zslp_validity WHERE block_height=?",
-        "UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
-        " WHERE spent_height=?",
+        ("UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
+         " WHERE spent_height=?"),
     };
     for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]); i++) {
         sqlite3_stmt *s = NULL;
@@ -357,8 +357,8 @@ static bool zslp_ledger_delete_above(struct node_db *ndb, int32_t fork_height)
     static const char *const k_sql[] = {
         "DELETE FROM zslp_ledger WHERE created_height>?",
         "DELETE FROM zslp_validity WHERE block_height>?",
-        "UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
-        " WHERE spent_height>?",
+        ("UPDATE zslp_ledger SET spent_by_txid=NULL,spent_height=NULL"
+         " WHERE spent_height>?"),
     };
     for (size_t i = 0; i < sizeof(k_sql) / sizeof(k_sql[0]); i++) {
         sqlite3_stmt *s = NULL;
