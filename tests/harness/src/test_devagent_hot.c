@@ -5,13 +5,15 @@
  * Runs against a fixture repository built here, not the checkout. It calls
  * the bound handler directly (as the CLI does after input validation), and
  * validates the input keys through the real registry. No case needs a
- * resident dev loop or spawns the test runner: every fixture file resolves to
- * no owning group.
+ * resident dev loop or spawns the test runner: the fixture has no checkout
+ * ancestor, including when a saved file resolves to an owning group.
  */
 
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_devagent.h"
+#include "platform/temp_directory.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -23,6 +25,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <paths.h>
+#endif
 
 #define DVX_PATH "dev.agent.hot"
 
@@ -172,11 +177,31 @@ static bool dvx_seed_routed_data(const char *root)
                      "const char *p = \"probes/zkhot_" "route1109.tsv\";\n");
 }
 
+static bool dvx_isolated_fixture(char root[PLATFORM_TEMP_PATH_MAX])
+{
+    char ancestor[4096];
+#if !defined(_WIN32)
+    bool made = platform_temp_directory_create_under(_PATH_TMP, "z23-hot-scratch-", root, PLATFORM_TEMP_PATH_MAX);
+#else
+    bool made = platform_temp_directory_create("z23-hot-scratch-", root, PLATFORM_TEMP_PATH_MAX);
+#endif
+    if (!made) {
+        printf("  hot: could not create isolated fixture\n");
+        return false;
+    }
+    if (zcl_devagent_checkout_root(root, ancestor, sizeof ancestor)) {
+        printf("  hot: fixture has a checkout ancestor; refusing to invoke handler\n");
+        (void)test_rm_rf_recursive(root);
+        return false;
+    }
+    return true;
+}
+
 int test_devagent_hot(void)
 {
     int failures = 0;
-    char root[512];
-    test_make_tmpdir(root, sizeof(root), "devagent_hot", "repo");
+    char root[PLATFORM_TEMP_PATH_MAX];
+    if (!dvx_isolated_fixture(root)) return 1;
 
     TEST("hot: the leaf is registered and declares path, group, cwd") {
         const struct zcl_command_spec *spec =
