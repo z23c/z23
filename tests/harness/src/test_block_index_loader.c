@@ -9,6 +9,7 @@
 #endif
 #include "test/test_core.h"
 #include "services/block_index_loader.h"
+#include "services/block_index_flat_anchor.h"
 #include "services/island_anchor.h"
 #include "services/block_index_cache_envelope.h"
 #include "services/block_index_integrity.h"
@@ -2228,6 +2229,108 @@ static int bil_fast_restart_forward_case(void)
     return failures;
 }
 
+static bool bil_mine_anchor_header(struct block_index *anchor,
+                                   struct block_header *hdr,
+                                   struct uint256 *bound)
+{
+    block_header_init(hdr);
+    hdr->nVersion = 4;
+    if (anchor && anchor->pprev)
+        hdr->hashPrevBlock = *anchor->pprev->phashBlock;
+    hdr->nTime = 1000000 + 2 * 150;
+    hdr->nBits = 0x1f07ffff;
+    memcpy(hdr->nSolution, (const unsigned char[]){1, 2, 3, 4}, 4);
+    hdr->nSolutionSize = 4;
+    struct arith_uint256 target, hash_value;
+    arith_uint256_set_compact(&target, hdr->nBits, NULL, NULL);
+    bool mined = false;
+    for (uint32_t tries = 0; tries < 2000000u && !mined; tries++) {
+        hdr->nNonce.data[0] = (uint8_t)tries;
+        hdr->nNonce.data[1] = (uint8_t)(tries >> 8);
+        hdr->nNonce.data[2] = (uint8_t)(tries >> 16);
+        block_header_get_hash(hdr, bound);
+        uint256_to_arith(&hash_value, bound);
+        mined = arith_uint256_compare(&hash_value, &target) <= 0;
+    }
+    return mined;
+}
+
+static int bil_forward_allocation_case(void)
+{
+    int failures = 0;
+    {
+        char tmpdir[256];
+        snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_alloc", getpid());
+        mkdir("./test-tmp", 0755);
+        mkdir(tmpdir, 0755);
+        struct main_state src, dst;
+        main_state_init(&src);
+        build_synthetic_chain(&src, 3);
+        const unsigned char solution[4] = {1, 2, 3, 4};
+        struct block_index *anchor = block_map_find(&src.map_block_index,
+                                                    &(struct uint256){.data = {2, 0, 0, 0xAA}});
+        struct block_header hdr;
+        struct uint256 bound;
+        bool mined = bil_mine_anchor_header(anchor, &hdr, &bound);
+        BIL_CHECK("bil: anchor header meets proof-of-work target", mined);
+        if (anchor) {
+            anchor->hashBlock = bound;
+            anchor->phashBlock = &anchor->hashBlock;
+        }
+        BIL_CHECK("bil: hash-bound anchor extension allocated",
+                  mined && anchor && block_index_set_hdrext(
+                      anchor, &hdr.hashMerkleRoot, &hdr.nNonce,
+                      solution, sizeof(solution)) &&
+                  block_index_flat_anchor_prepare(&src).ok);
+        struct zcl_result saved = save_block_index_flat_identity(tmpdir, &src, NULL);
+        BIL_CHECK("bil: allocation fixture saved", saved.ok);
+        block_index_hdrext_free(anchor);
+        main_state_free(&src);
+        struct main_state anchor_dst;
+        main_state_init(&anchor_dst);
+        struct zcl_result anchor_load = load_block_index_flat(tmpdir, &anchor_dst);
+        struct block_index *loaded_anchor = block_map_find(
+            &anchor_dst.map_block_index, &bound);
+        size_t loaded_solution_len = 0;
+        const unsigned char *loaded_solution = loaded_anchor
+            ? block_index_solution(loaded_anchor, &loaded_solution_len) : NULL;
+        BIL_CHECK("bil: hash-bound anchor trailer round-trips",
+                  anchor_load.ok && loaded_anchor &&
+                  loaded_solution_len == sizeof(solution) && loaded_solution &&
+                  memcmp(loaded_solution, solution, sizeof(solution)) == 0);
+        main_state_free(&anchor_dst);
+        main_state_init(&dst);
+        struct block_index resident;
+        block_index_init(&resident);
+        resident.hashBlock = make_test_hash(99);
+        resident.phashBlock = &resident.hashBlock;
+        resident.nHeight = 99;
+        BIL_CHECK("bil: resident entry fixture inserted",
+                  block_map_insert(&dst.map_block_index, &resident.hashBlock, &resident));
+        zcl_alloc_fault_fail_next("flat forward pass");
+        struct zcl_result r = load_block_index_flat(tmpdir, &dst);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        BIL_CHECK("bil: forward-pass allocation failure refuses load", !r.ok && fired);
+        BIL_CHECK("bil: allocation failure publishes no best header",
+                  dst.pindex_best_header == NULL);
+        struct block_index_flat_identity identity;
+        BIL_CHECK("bil: allocation failure retains no verified identity",
+                  !block_index_flat_verified_identity(tmpdir, &identity));
+        BIL_CHECK("bil: rollback preserves only usable resident entries",
+                  dst.map_block_index.size == 1 &&
+                  block_map_find(&dst.map_block_index, &resident.hashBlock) == &resident &&
+                  resident.nHeight == 99);
+        char path[512];
+        snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
+        unlink(path);
+        bil_test_unlink_arena(tmpdir);
+        rmdir(tmpdir);
+        main_state_free(&dst);
+    }
+    return failures;
+}
+
 static int bil_failed_bit_policy_unit_case(void)
 {
     int failures = 0;
@@ -3326,6 +3429,7 @@ int test_block_index_loader(void)
      * with the correct work, because load_block_index_flat unconditionally
      * re-derives it from the pointer graph. */
     failures += bil_fast_restart_forward_case();
+    failures += bil_forward_allocation_case();
 
     /* ── Persisted-FAILED-bit trust policy ─────────────────────────────
      * A stale persisted BLOCK_FAILED_VALID bit on the best-chain tip must not

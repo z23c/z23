@@ -52,8 +52,9 @@ struct boot_blkidx_load_ctx {
 void boot_blkidx_run_ladder(struct boot_blkidx_load_ctx *c);
 
 /* The timed post-ladder steps (projection top-up, node.db top-up, nChainTx
- * propagation) plus a load_rest mark; t_load is the phase start clock. */
-void boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
+ * propagation) plus a load_rest mark; t_load is the phase start clock. Returns
+ * false when an allocation failure makes the loaded index unsafe to use. */
+bool boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
                             bool rebuilt_from_log, int64_t t_load);
 
 /* dump_state entry: per-rung fire counters + last-run outcome flags. */

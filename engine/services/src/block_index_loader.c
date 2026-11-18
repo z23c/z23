@@ -391,9 +391,9 @@ static struct zcl_result bil_flat_payload_read(
 }
 
 /* No pprev or forward-pass work has run on refusal. Remove only this
- * attempt's arena pointers before releasing the arena; resident entries
- * retain their bytes and probe chains. Integer addresses avoid relational
- * comparisons between unrelated C objects. The caller checked arena size. */
+ * attempt's arena pointers before releasing the arena and its header
+ * extensions; resident entries retain their bytes and probe chains. Integer
+ * addresses avoid relational comparisons between unrelated C objects. */
 static void bil_flat_rollback(struct block_map *bm,
                                struct block_index *arena, uint32_t count)
 {
@@ -407,6 +407,8 @@ static void bil_flat_rollback(struct block_map *bm,
             bm->size--;
         }
     }
+    for (uint32_t i = 0; i < count; i++)
+        block_index_hdrext_free(&arena[i]);
 }
 
 static uint32_t bil_selected_genesis_bits(const struct chain_params *cp)
@@ -632,8 +634,18 @@ static void bil_flat_link_rows(
 
 }
 
-static void bil_flat_forward_rows(
-    struct block_index *arena, uint32_t count, struct block_index **sorted)
+static struct zcl_result bil_flat_forward_rows(
+    struct main_state *ms, struct block_index *arena, uint32_t count,
+    void **release)
+{
+    struct block_index **sorted =
+        zcl_malloc((size_t)count * sizeof(*sorted), "flat forward pass");
+    if (!sorted) {
+        bil_flat_rollback(&ms->map_block_index, arena, count);
+        return ZCL_ERR(-12, "block_index_flat: forward-pass allocation failed "
+                       "for %u entries", count);
+    }
+    *release = sorted;
 {
     /* Recompute every pointer-graph-derived field through the canonical
      * forward pass (nChainWork, nChainTx, skip links, cached branch id,
@@ -673,13 +685,9 @@ static void bil_flat_forward_rows(
          * bit for bit as before. */
         block_index_sort_forward_pass_input(sorted, n);
         block_index_forward_pass(sorted, n);
-    } else {
-        /* boot's later multi-pass nChainTx propagation still runs;
-         * work/skip recompute is what we lose — log it. */
-        LOG_WARN("block_index_flat", "block_index_flat: forward-pass alloc failed "
-                 "(%u entries) — chain stats may be stale", count);
     }
-
+    return ZCL_OK;
+}
 }
 
 static bool bil_flat_allocation_sizes_valid(size_t count)
@@ -917,10 +925,7 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     }
     t_parse_ms = platform_time_monotonic_ms() - t0_ms;
     t_fwd_ms = platform_time_monotonic_ms();
-    struct block_index **sorted =
-        zcl_malloc((size_t)count * sizeof(*sorted), "flat forward pass");
-    release = sorted; /* successful arena is retained by the map */
-    bil_flat_forward_rows(arena, count, sorted);
+    result = bil_flat_forward_rows(ms, arena, count, &release);
 finish:
     free(release);
     bil_arena_release(arena, arena_mapped, arena_bytes, arena_path,

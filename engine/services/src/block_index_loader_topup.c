@@ -708,10 +708,10 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
                    "hydration(s) — %zu entries recomputed\n",
                    ctx.stubs_hydrated, n);
         } else {
-            LOG_WARN("block_index",
+            LOG_FAIL("block_index",
                      "topup: forward-pass alloc failed after %zu stub "
-                     "hydration(s) (%zu entries) — descendant chainwork may "
-                     "be collapsed until the next boot",
+                     "hydration(s) (%zu entries) — refusing to continue "
+                     "with collapsed descendant chainwork",
                      ctx.stubs_hydrated, total);
         }
     }

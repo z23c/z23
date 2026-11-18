@@ -28,6 +28,9 @@
  */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
+#include "config/boot.h"
+#include "config/boot_blkidx_ladder.h"
 
 #include "services/block_index_loader.h"
 #include "util/boot_phase.h"
@@ -1026,9 +1029,9 @@ struct topup_fx {
     char dir[256];
     char el_path[320];
     char bip_path[320];
-    struct uint256 h100, h101, h102, h103, h104, h105;
+    struct uint256 h100, h101, h102, h103, h104, h105, h106;
     struct main_state ms;
-    struct block_index *e100, *e101, *e102, *e103, *e104, *e105;
+    struct block_index *e100, *e101, *e102, *e103, *e104, *e105, *e106;
     struct block_index *edisk;
     event_log_t *log;
     block_index_projection_t *bip;
@@ -1046,13 +1049,14 @@ static void topup_fixture_paths(struct topup_fx *fx)
     snprintf(fx->el_path, sizeof(fx->el_path), "%s/event_log.dat", fx->dir);
     snprintf(fx->bip_path, sizeof(fx->bip_path), "%s/bip.db", fx->dir);
 
-    /* Unique hashes for heights 100..105 + disk block. */
+    /* Unique hashes for heights 100..106 + disk block. */
     topup_hash_for(100, &fx->h100);
     topup_hash_for(101, &fx->h101);
     topup_hash_for(102, &fx->h102);
     topup_hash_for(103, &fx->h103);
     topup_hash_for(104, &fx->h104);
     topup_hash_for(105, &fx->h105);
+    topup_hash_for(106, &fx->h106);
 }
 
 static int topup_fixture_entries(struct topup_fx *fx)
@@ -1086,13 +1090,19 @@ static int topup_fixture_entries(struct topup_fx *fx)
         e105->nStatus = 0;
         e105->nTx = 0;
     }
+    struct block_index *e106 = topup_insert_entry(&fx->ms, &fx->h106, 106);
+    if (e106) {
+        e106->pprev = e105;
+        memset(&e106->nChainWork, 0, sizeof(e106->nChainWork));
+    }
     TOPUP_CHECK("setup: entries inserted",
-                e100 && e101 && e102 && e103 && e105);
+                e100 && e101 && e102 && e103 && e105 && e106);
     fx->e100 = e100;
     fx->e101 = e101;
     fx->e102 = e102;
     fx->e103 = e103;
     fx->e105 = e105;
+    fx->e106 = e106;
     return failures;
 }
 
@@ -1189,6 +1199,26 @@ static int topup_check_full_topup(struct topup_fx *fx)
     int failures = 0;
     /* ── Run the top-up. ─────────────────────────────────────────── */
     uint64_t progress_before = boot_progress_marker();
+    struct app_context app = {.datadir = fx->dir};
+    struct boot_blkidx_load_ctx boot = {.ctx = &app, .st = &fx->ms};
+    block_index_projection_set_singleton(fx->bip);
+    zcl_alloc_fault_fail_next("topup.forward_pass");
+    bool refused = boot_blkidx_run_topups(&boot, false, 0);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    block_index_projection_set_singleton(NULL);
+    TOPUP_CHECK("topup allocation failure refuses continued boot", !refused && fired);
+    struct block_index *stub = fx->e105;
+    stub->nHeight = 0;
+    stub->nBits = 0;
+    stub->nStatus = 0;
+    stub->nTx = 0;
+    stub->nFile = -1;
+    stub->nDataPos = 0;
+    stub->pprev = NULL;
+    memset(&stub->nChainWork, 0, sizeof(stub->nChainWork));
+    memset(&fx->e106->nChainWork, 0, sizeof(fx->e106->nChainWork));
+    fx->e106->pprev = stub;
     bool ran = block_index_projection_topup_with(fx->bip, &fx->ms, fx->dir);
     TOPUP_CHECK("topup returns ok", ran);
     TOPUP_CHECK("topup ticks boot_progress (born-red: silent nTx/iterate)",
@@ -1284,6 +1314,11 @@ static int topup_check_hydrated_stub(struct topup_fx *fx)
                 e105 && e104 &&
                 arith_uint256_compare(&e105->nChainWork,
                                       &e104->nChainWork) > 0);
+    struct block_index *e106 = fx->e106;
+    TOPUP_CHECK("e106 descendant chainwork re-derived above hydrated parent",
+                e106 && e106->pprev == e105 &&
+                arith_uint256_compare(&e106->nChainWork,
+                                      &e105->nChainWork) > 0);
     return failures;
 }
 

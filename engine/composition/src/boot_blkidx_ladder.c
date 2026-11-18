@@ -22,6 +22,7 @@
 #include "event/event.h"                       /* event_emitf, EV_BOOT_BLOCK_INDEX */
 #include "platform/time_compat.h"              /* platform_time_wall_time_t */
 #include "json/json.h"
+#include "base/safe_alloc.h"
 #include "config/boot_cursor_state.h"          /* boot_cursor_propagate_nchaintx */
 #include "util/log_macros.h"                   /* LOG_WARN */
 #include "boot_timing_marks_internal.h"       /* boot_clock_ms, boot_submark */
@@ -367,7 +368,7 @@ bool boot_blkidx_rungs_dump_state_json(struct json_value *out, const char *key)
  * propagation, and load_rest (ladder + legacy pull + recent save + file
  * links, everything the three timed steps do not cover). `t_load` is the
  * boot clock reading taken when the whole phase started. */
-void boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
+bool boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
                             bool rebuilt_from_log, int64_t t_load)
 {
     /* Projection top-up: fold the event-log block_index_projection over
@@ -377,8 +378,12 @@ void boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
      * (re-synced from peers), but a silent false drops to the flat floor.
      * Full contract: block_index_loader_topup.c. */
     int64_t t_part = boot_clock_ms();
-    if (!rebuilt_from_log &&
-        !block_index_projection_topup(c->st, c->ctx->datadir))
+    uint64_t alloc_before = zcl_alloc_failure_count();
+    bool topup_ok = rebuilt_from_log ||
+        block_index_projection_topup(c->st, c->ctx->datadir);
+    if (!topup_ok && zcl_alloc_failure_count() != alloc_before)
+        return false;
+    if (!topup_ok)
         LOG_WARN("boot",
                  "[boot] block_index projection top-up FAILED — the "
                  "connected extent may regress to the last flat-file "
@@ -408,4 +413,5 @@ void boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
     timed_ms += t_next - t_part;
     (void)boot_submark("blkidx.load_rest",
                        boot_clock_ms() - ((t_next - t_load) - timed_ms));
+    return true;
 }

@@ -1926,7 +1926,7 @@ static bool boot_seq_open_coins_state(struct app_context *ctx, struct boot_seq *
 
 /* Run the ordered block-index load ladder, then the legacy pull, the
  * projection/node.db top-ups and the nChainTx propagation. */
-static void boot_step_load_block_index_ladder(struct app_context *ctx,
+static bool boot_step_load_block_index_ladder(struct app_context *ctx,
                                               const struct chain_params *params,
                                               struct boot_seq *s)
 {
@@ -1985,8 +1985,8 @@ static void boot_step_load_block_index_ladder(struct app_context *ctx,
                    link_files.linked);
     }
     (void)boot_submark("blkidx.link_files", t_rest);
-    boot_blkidx_run_topups(&blkidx, rebuilt_from_log, t_load);
     s->rebuilt_from_log = rebuilt_from_log;
+    return boot_blkidx_run_topups(&blkidx, rebuilt_from_log, t_load);
 }
 
 /* Bulk height + pprev repair after a legacy import. */
@@ -2123,7 +2123,7 @@ static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *
         LOG_ERROR("boot", "projection tip publication is unavailable during island recovery");
         return false;
     }
-    boot_step_load_block_index_ladder(ctx, s->params, s);
+    if (!boot_step_load_block_index_ladder(ctx, s->params, s)) return false;
     if (!flysync_island_boot_materialize(&g_state)) {
         LOG_ERROR("boot", "verified island map materialization failed");
         return false;
