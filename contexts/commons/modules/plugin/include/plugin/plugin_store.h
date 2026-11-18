@@ -271,6 +271,8 @@ unsigned long plugin_store_test_unique(void);
 unsigned plugin_fs_test_hash_count(void);
 /* Test seam: how many generation IDs this process has copied into list slots. */
 unsigned plugin_store_test_generation_slot_count(void);
+/* Test seam: how many lowercase hex strings the manifest module has decoded. */
+unsigned plugin_store_test_hex_decode_count(void);
 #endif
 
 #endif

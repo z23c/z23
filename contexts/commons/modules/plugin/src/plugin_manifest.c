@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#ifdef ZCL_TESTING
+#include <stdatomic.h>
+#endif
 
 #define PM_SIG_DOMAIN "z23.plugin.manifest.v1"
 #define PM_SCHEMA "z23.plugin.v1"
@@ -201,11 +204,30 @@ bool plugin_name_valid(const char *name)
     return true;
 }
 
+#ifdef ZCL_TESTING
+static atomic_uint g_pm_validation_decodes;
+
+[[maybe_unused]] static bool pm_count_hex_decode(const char *hex, uint8_t *out, size_t want)
+{
+    atomic_fetch_add_explicit(&g_pm_validation_decodes, 1u, memory_order_relaxed);
+    return zcl_hex_decode_lower(hex, out, want);
+}
+#define zcl_hex_decode_lower pm_count_hex_decode
+
+unsigned plugin_store_test_hex_decode_count(void)
+{
+    return atomic_load_explicit(&g_pm_validation_decodes, memory_order_relaxed);
+}
+#endif
+
 bool plugin_hex_valid(const char *hex, size_t len)
 {
-    uint8_t scratch[PLUGIN_DIGEST_BYTES];
-    return len % 2 == 0 && len / 2 <= sizeof(scratch) &&
-           zcl_hex_decode_lower(hex, scratch, len / 2);
+    if (!hex || len % 2 != 0 || len > 2 * PLUGIN_DIGEST_BYTES || strlen(hex) != len)
+        return false;
+    for (size_t i = 0; i < len; i++)
+        if (zcl_hex_nibble(hex[i], false) < 0)
+            return false;
+    return true;
 }
 
 /* Reports the first repeated or unrecognised key of a JSON object. */

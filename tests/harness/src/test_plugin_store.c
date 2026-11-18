@@ -1401,7 +1401,7 @@ static int pst_case_generation_count_without_materialization(void)
 {
     int failures = 0;
     struct pst_fx fx = {0};
-    TEST_CASE("generation count enumerates ids without copying or sorting them") {
+    TEST_CASE("generation count enumerates ids without copying, sorting or decoding them") {
         size_t count = 0;
         char gens[PATH_MAX], path[PATH_MAX], saved[PATH_MAX];
         ASSERT(pst_two_generations(&fx, true));
@@ -1409,9 +1409,11 @@ static int pst_case_generation_count_without_materialization(void)
         ASSERT(pst_path(path, sizeof(path), gens, "not-a-generation"));
         ASSERT_EQ(mkdir(path, 0700), 0);
         unsigned before = plugin_store_test_generation_slot_count();
+        unsigned decodes = plugin_store_test_hex_decode_count();
         ASSERT_EQ(plugin_store_generation_count(fx.root, "hello", &count), PLUGIN_OK);
         ASSERT_EQ(count, 2u);
         ASSERT_EQ(plugin_store_test_generation_slot_count() - before, 0u);
+        ASSERT_EQ(plugin_store_test_hex_decode_count() - decodes, 0u);
 
         ASSERT(pst_plug_path(&fx, "generations-away", saved, sizeof(saved)));
         ASSERT_EQ(rename(gens, saved), 0);
