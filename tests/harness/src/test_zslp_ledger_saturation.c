@@ -119,6 +119,26 @@ int test_zslp_ledger_saturation(void)
               zslp_ledger_wallet_balance_at_height(&ndb, tokBig, 12) ==
                   INT64_MAX);
 
+    /* token 0x74: the exact saturation boundary. Two rows summing to exactly
+     * INT64_MAX (the largest representable total, carried across the 2^32
+     * boundary) stay exact; one more unit saturates. */
+    uint8_t edge[20], over[20], tokEdge[32];
+    memset(edge, 0xB4, 20);
+    memset(over, 0xB5, 20);
+    memset(tokEdge, 0x74, 32);
+    sat_row(&ndb, 0x74, 0x0B, INT64_MAX - 0xFFFFFFFFLL, edge, 10);
+    sat_row(&ndb, 0x74, 0x0C, 0xFFFFFFFFLL, edge, 11);
+    sat_row(&ndb, 0x74, 0x0D, INT64_MAX, over, 10);
+    sat_row(&ndb, 0x74, 0x0E, 1, over, 11);
+    SAT_CHECK("a sum of exactly INT64_MAX across the carry is exact",
+              zslp_ledger_balance(&ndb, tokEdge, edge) == INT64_MAX &&
+              zslp_ledger_balance_at_height(&ndb, tokEdge, edge, 10) ==
+                  INT64_MAX - 0xFFFFFFFFLL);
+    SAT_CHECK("INT64_MAX + 1 saturates, never wraps negative",
+              zslp_ledger_balance(&ndb, tokEdge, over) == INT64_MAX &&
+              zslp_ledger_balance_at_height(&ndb, tokEdge, over, 10) ==
+                  INT64_MAX);
+
     /* The sweep: the overflowing token must not hide the ordinary one. */
     struct zslp_wallet_token held[8];
     int n = zslp_ledger_wallet_tokens(&ndb, held, 8);

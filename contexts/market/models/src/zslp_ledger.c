@@ -18,7 +18,6 @@
 #include "primitives/transaction.h"
 #include "zslp/slp.h"
 #include "util/ar_step_readonly.h"
-#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
