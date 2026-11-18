@@ -204,7 +204,7 @@ _test_next:;
 static const char dlx_qualify_makefile[] =
     "T_FAST_EXACT_ARGS := fixture-default\n"
     ".PHONY: docs-capability-inventory dev-bin install-hooks lint-ready lint "
-    "t-fast-exact\n"
+    "lint-land t-fast-exact\n"
     "docs-capability-inventory dev-bin install-hooks lint-ready:\n"
     "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
     "'$(ONLY)' >> qualify-jobs.txt\n"
@@ -227,6 +227,15 @@ static const char dlx_qualify_makefile[] =
     "docs/dev/CODEBASE_MAP.md; fi\n"
     "\t@if [ \"$(QFX)\" = tree ]; then echo changed >> tracked.txt; fi\n"
     "\t@echo \"== LINT: all checks passed ==\"\n"
+    "lint-land:\n"
+    "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
+    "'$(ONLY)' >> qualify-jobs.txt\n"
+    "\t@echo lint-land >> build/scratch/qualify-stages\n"
+    "\t@if [ \"$(QFX)\" = lint ]; then echo \"FAIL gate-x\"; exit 1; fi\n"
+    "\t@if [ \"$(QFX)\" = fold ]; then echo regenerated >> "
+    "docs/dev/CODEBASE_MAP.md; fi\n"
+    "\t@if [ \"$(QFX)\" = tree ]; then echo changed >> tracked.txt; fi\n"
+    "\t@echo \"lint-land: OK\"\n"
     "t-fast-exact:\n"
     "\t@printf 'ONLY=%s\\nARGS=%s\\n' '$(ONLY)' '$(T_FAST_EXACT_ARGS)' > qualify-args.txt\n"
     "\t@printf '%s\\n' '$(ONLY)' > qualify-only.txt\n"
@@ -329,7 +338,7 @@ static bool dlx_qualify_make_trace(const struct dlx_rig *rig,
 {
     static const char *const goals[] = { "docs-capability-inventory", "dev-bin",
         "install-hooks", "lint-ready", "check-cyclomatic-complexity",
-        "lint", "t-fast-exact" };
+        "lint-land", "t-fast-exact" };
     char path[1400];
     if (snprintf(path, sizeof(path), "%s/qualify-jobs.txt", rig->clone) >=
         (int)sizeof(path))
@@ -668,7 +677,7 @@ int test_dev_land_qualify_passes(void)
         ASSERT(dlx_queue_has_one());
         (void)snprintf(path, sizeof(path), "%s/build/scratch/qualify-stages", rig.clone);
         ASSERT(dlx_slurp(path, stages, sizeof(stages) - 1, NULL));
-        ASSERT_STR_EQ(stages, "complexity\nlint\ntests\n");
+        ASSERT_STR_EQ(stages, "complexity\nlint-land\ntests\n");
         dlx_end(&c);
         PASS();
     }
@@ -731,7 +740,7 @@ int test_dev_land_qualify_complexity(void)
             } else {
                 ASSERT(dlx_slurp(path, stages, sizeof(stages) - 1, NULL));
                 ASSERT_STR_EQ(stages, i == 0 ? "complexity\n"
-                                             : "complexity\nlint\ntests\n");
+                                             : "complexity\nlint-land\ntests\n");
             }
             if (i != 2) {
                 ASSERT(strstr(dlx_str(&c, "log"), "qualify-complexity.log"));
@@ -983,53 +992,128 @@ static void dlx_route_over_cap(const char *path, struct agent_impact_acc *acc)
         dlx_add_catalog(acc, 0, 200);
 }
 
-static size_t dlx_only_count(const struct dlx_rig *rig)
+/* The make goal the shipped qualify path recorded. "lint-land" is not "lint". */
+static const char *dlx_seen_lint_goal(const char *jobs)
 {
-    char path[1400];
-    size_t n = 0;
-    int ch;
-    FILE *f;
-    if (snprintf(path, sizeof(path), "%s/qualify-only.txt", rig->clone) >=
-        (int)sizeof(path))
-        return 0;
-    f = fopen(path, "r");
-    if (!f)
-        return 0;
-    while ((ch = fgetc(f)) != EOF)
-        n += ch == ',' || ch == '\n';
-    (void)fclose(f);
-    return n;
+    if (strstr(jobs, "\nlint-land|") != NULL ||
+        strncmp(jobs, "lint-land|", 10) == 0)
+        return "lint-land";
+    if (strstr(jobs, "\nlint|") != NULL || strncmp(jobs, "lint|", 5) == 0)
+        return "lint";
+    return "";
 }
 
-/* A universal selection that qualifies: the run names its mode and cause, the
- * record keeps the true count while its list is cut at capacity, and the make
- * target receives every selected group. */
-static int dlx_universal_case(const char *tag, unsigned files,
-                              void (*route)(const char *,
-                                            struct agent_impact_acc *),
-                              size_t capture_cap, const char *cause)
+static bool dlx_jobs_slurp(const struct dlx_rig *rig, char *buf, size_t cap)
+{
+    char path[1400];
+    if (snprintf(path, sizeof(path), "%s/qualify-jobs.txt", rig->clone) >=
+        (int)sizeof(path))
+        return false;
+    return dlx_slurp(path, buf, cap - 1, NULL);
+}
+
+/* Drives the shipped qualify path and the shipped proof lint argv. */
+static int dlx_fast_isolated_case(void)
 {
     int failures = 0;
     struct dlx_call c;
     bool called = false;
-    TEST("land: qualify runs the universal set instead of refusing") {
+    char land[4096] = {0};
+    TEST("land: qualify lint goal is lint-land, not full lint") {
         struct dlx_rig rig;
-        const struct json_value *groups, *cut;
+        char jobs[2048] = {0};
+        char wt[4096];
+        char timing_env[4096 + 32];
+        const char *argv[8];
+        size_t argc = 0;
+        int64_t fallback_ms = 0;
+        const char *targets = NULL;
+        char jobs_arg[] = "-j2";
+        /* The shipped seam refuses any root that is not a private directory. */
+        test_make_tmpdir(land, sizeof(land), "qualify_proof_lint", "logs");
+        ASSERT(snprintf(wt, sizeof(wt), "%s/wt", land) > 0);
+        ASSERT(mkdir(wt, 0700) == 0);
+        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs_arg, timing_env,
+                                            sizeof(timing_env), argv, 8,
+                                            &argc, &fallback_ms, &targets));
+        ASSERT(argc == 7);
+        ASSERT_STR_EQ(argv[6], "lint");
+        ASSERT_STR_EQ(targets, "lint");
+        ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
+        ASSERT(!zcl_dev_land_qualify_lint_passed(0, "lint-land: OK\n"));
+        ASSERT(zcl_dev_land_qualify_lint_passed(0, "LINT: all checks passed\n"));
+        dlx_isolate("qualify_fast_lint");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_fast_lint", "", "",
+                               DLX_Q_LEAF_SMOKE));
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_ok(&c));
+        ASSERT(dlx_jobs_slurp(&rig, jobs, sizeof(jobs)));
+        ASSERT_STR_EQ(dlx_seen_lint_goal(jobs), "lint-land");
+        ASSERT(test_rm_rf_recursive(land) == 0);
+        land[0] = 0;
+        printf("qualify lint goal %s; proof lint target %s\n",
+               dlx_seen_lint_goal(jobs), targets);
+        PASS();
+    }
+_test_next:;
+    if (land[0])
+        (void)test_rm_rf_recursive(land);
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int dlx_fast_gate_refuses(void)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: a failing lint-land gate queues nothing") {
+        struct dlx_rig rig;
+        dlx_isolate("qualify_fast_fail");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_fast_fail", "lint", "",
+                               DLX_Q_LEAF_SMOKE));
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_LINT_FAILED"));
+        ASSERT_STR_EQ(dlx_str(&c, "step"), "lint-land");
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
+}
+
+/* A selection that is not exact is not run here. The land proof owns that
+ * set, so qualify must not launch it or record its groups as passed. */
+static int dlx_deferred_case(const char *tag, unsigned files,
+                             void (*route)(const char *,
+                                           struct agent_impact_acc *),
+                             size_t capture_cap, const char *cause)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: a non-exact route does not launch the universal set") {
+        struct dlx_rig rig;
+        char only_path[1400];
         dlx_isolate(tag);
         ASSERT(dlx_qualify_rig(&rig, tag, "", "", files));
         zcl_dev_land_qualify_test_limits(route, capture_cap);
         called = true;
-        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
-        ASSERT_STR_EQ(dlx_str(&c, "selection"), "universal");
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "selection"), "deferred");
         ASSERT_STR_EQ(dlx_str(&c, "selection_cause"), cause);
-        ASSERT(dlx_int(&c, "group_count") > 256);
-        groups = dlx_arr(&c, "groups");
-        ASSERT(groups != NULL &&
-               (int64_t)groups->num_children < dlx_int(&c, "group_count"));
-        cut = json_get(&c.reply.data, "groups_truncated");
-        ASSERT(cut != NULL && json_get_bool(cut));
-        ASSERT((int64_t)dlx_only_count(&rig) == dlx_int(&c, "group_count"));
+        ASSERT_EQ(dlx_int(&c, "group_count"), (int64_t)0);
+        ASSERT(snprintf(only_path, sizeof(only_path),
+                        "%s/qualify-only.txt", rig.clone) > 0);
+        ASSERT(!dlx_file_exists(only_path));
         ASSERT(dlx_queue_has_one());
+        printf("selection %s cause %s; universal set not launched\n",
+               dlx_str(&c, "selection"), cause);
         PASS();
     }
 _test_next:;
@@ -1064,13 +1148,15 @@ _test_next:;
 
 int test_dev_land_qualify_selection_refusals(void)
 {
-    return dlx_universal_case("qualify_lost", DLX_Q_LEAF_SMOKE, dlx_route_lost,
-                              0, "groups_lost") +
-           dlx_universal_case("qualify_over_cap",
-                              DLX_Q_LEAF_SMOKE | DLX_Q_LAND_WINDOW,
-                              dlx_route_over_cap, 0, "over_cap") +
-           dlx_universal_case("qualify_path_list", DLX_Q_LEAF_SMOKE, NULL, 16,
-                              "path_list_truncated") +
+    return dlx_fast_isolated_case() +
+           dlx_fast_gate_refuses() +
+           dlx_deferred_case("qualify_lost", DLX_Q_LEAF_SMOKE, dlx_route_lost,
+                             0, "groups_lost") +
+           dlx_deferred_case("qualify_over_cap",
+                             DLX_Q_LEAF_SMOKE | DLX_Q_LAND_WINDOW,
+                             dlx_route_over_cap, 0, "over_cap") +
+           dlx_deferred_case("qualify_path_list", DLX_Q_LEAF_SMOKE, NULL, 16,
+                             "path_list_truncated") +
            dlx_log_overflow_case();
 }
 

@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.land qualify gates -- the pre-submit checks a lane runs in its
- *          own worktree (fetch, rebase, signed tip, derived files, full
- *          lint, affected test groups) before `dev land submit` queues it.
+ *          own worktree (fetch, rebase, signed tip, derived files,
+ *          lint-land, exact affected test groups) before `dev land submit`
+ *          queues it.
  *
  * Kept apart from native_dev_land.c, which owns the queue and its rows. This
  * file owns the gate sequence and its typed refusals; every child process
@@ -38,8 +39,8 @@ struct zcl_land_qualify {
                          * names only, cut at capacity */
     size_t group_count; /* the true count, also when `groups` is cut */
     bool groups_truncated; /* `groups` lists fewer than group_count names */
-    char selection[16];    /* "routed" or "universal" */
-    char selection_cause[48]; /* why universal: groups_lost, over_cap or
+    char selection[16];    /* "routed" or "deferred" */
+    char selection_cause[48]; /* why deferred: groups_lost, over_cap or
                                * path_list_truncated; empty when routed */
 };
 
@@ -69,7 +70,7 @@ void zcl_dev_land_qualify_first_fail(const char *text, char *out, size_t cap);
 #if defined(ZCL_TESTING)
 struct agent_impact_acc;
 /* Replace the path-to-groups router and the path-list capture cap so a test
- * can drive the universal fallbacks; NULL and 0 restore the defaults. */
+ * can drive an inexact selection; NULL and 0 restore the defaults. */
 void zcl_dev_land_qualify_test_limits(
     void (*route)(const char *path, struct agent_impact_acc *acc),
     size_t capture_cap);

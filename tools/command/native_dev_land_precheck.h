@@ -84,7 +84,7 @@ int64_t zcl_land_precheck_budget_floor(int64_t automatic_ms, int64_t floor_ms);
  * of `cap` bytes holding the current note) and runs nothing; any other value
  * is refused BAD_INPUT, on every path. `checked_elsewhere` is an internal
  * flag, never an input key: true when the gates already ran for this exact
- * tree (--qualify's full lint, or the sending host on the receive path), so
+ * tree (--qualify's lint-land, or the sending host on the receive path), so
  * "run" runs nothing, while the mode check and the skip marker still apply.
  * `tip`, when not NULL, must equal the HEAD of `wt` for "run" to lint it
  * (PRECHECK_TIP_NOT_HEAD otherwise). `land_dir` is the land state directory;

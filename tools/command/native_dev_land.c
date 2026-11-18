@@ -3808,8 +3808,8 @@ static const char *dl_submit_tip(const struct zcl_command_request *req,
 }
 
 /* A qualified submission says which test groups it ran, [] when none, how many
- * there were, and whether they were routed or the universal set. A listed
- * universal selection is cut at the record's capacity; group_count is exact. */
+ * there were, and whether they were routed or deferred. A deferred selection
+ * ran no groups here; group_count is the number recorded as locally passed. */
 static void dl_submit_report_groups(struct zcl_command_reply *reply,
                                     const struct zcl_land_qualify *qr)
 {
@@ -3842,8 +3842,8 @@ static void dl_submit_report_groups(struct zcl_command_reply *reply,
 
 /* The local lint precheck, before anything is queued. note_buf holds the note
  * the row will carry. The mode is validated and the skip marker applied on
- * every path. Two paths do not run the gates: --qualify (it already ran full
- * lint on exactly this tip, and its row records that) and the receive entry
+ * every path. Two paths do not run the gates: --qualify (it already ran
+ * lint-land on exactly this tip, and its row records that) and the receive entry
  * (the sending host ran the precheck; a skip it chose is in the note). Any
  * other tip must be the worktree's HEAD, since the gates lint the worktree. */
 static bool dl_submit_precheck(const struct zcl_command_request *req,

@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.land qualify gates -- fetch, rebase, signed tip, derived files,
- *          full lint and the affected test groups, in the lane's own
+ *          lint-land and the exact affected test groups, in the lane's own
  *          worktree, before `dev land submit` queues it.
  *
  * Verdict rules:
- *   - lint passes only on a zero exit that prints "LINT: all checks passed";
+ *   - lint-land passes only on a zero exit that prints "lint-land: OK";
  *   - a test group passes only on a PASS header in the harness output and
  *     no line of its section that begins with "FAIL at". A line that merely
  *     contains "FAIL at" (the net group prints "PARSE FAIL at" on purpose)
@@ -13,17 +13,13 @@
  *     the lane changes relative to origin/main, run in one harness
  *     invocation (t-fast-exact over the whole set) so its workers run them
  *     in parallel; each group still gets its own section log;
- *   - a selection that cannot be listed exactly runs the universal set, never
- *     a short one: a path whose route lost groups, a union past
- *     DLQ_GROUPS_MAX, or a path list the capture truncated. A truncated path
- *     list goes universal too, because the universal set covers every path
- *     whatever the list held. The universal set is the selector the land
- *     proof runs for a plan it cannot narrow (every group the host can run),
- *     so qualify runs what the proof will. The result records selection
- *     "routed" or "universal" and, for universal, its cause. A group name
- *     the registry does not resolve is still refused;
- *   - the universal run prints tens of megabytes. Its capture cap and
- *     timeout scale up, and a capture that reaches its cap is refused as
+ *   - a selection that cannot be listed exactly is not run here and is not
+ *     recorded as passed: a path whose route lost groups, a union past
+ *     DLQ_GROUPS_MAX, or a path list the capture truncated. The land proof
+ *     owns that run. The result records selection "routed" or "deferred"
+ *     and, for deferred, its cause. A group name the registry does not
+ *     resolve is still refused;
+ *   - a focused run whose capture reaches its cap is refused as
  *     log_overflow: a group whose section was cut off must not read as a
  *     missing verdict.
  * Every command's merged output is kept under build/scratch/qualify-*.log in
@@ -35,9 +31,6 @@
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "controllers/agent_impact_rules.h"
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-#include "dev_proof.h"
-#endif
 #include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
 #include "util/spawn.h"
@@ -51,11 +44,8 @@
 #define DLQ_LOG_CAP (32u * 1024u * 1024u)
 #define DLQ_GIT_CAP (1024u * 1024u)
 #define DLQ_MAKE_TIMEOUT_MS (90 * 60 * 1000)
-#define DLQ_UNIVERSAL_LOG_CAP (256u * 1024u * 1024u)
-#define DLQ_UNIVERSAL_TIMEOUT_MS (240 * 60 * 1000)
 #define DLQ_GIT_TIMEOUT_MS (10 * 60 * 1000)
 #define DLQ_GROUPS_MAX 256u
-#define DLQ_GATED_CAP (64u * 1024u)
 
 struct dlq {
     const char *wt;
@@ -67,8 +57,7 @@ struct dlq {
     struct zcl_land_qualify *out;
 };
 
-/* `cap` names fit in `name`. A routed selection stops at DLQ_GROUPS_MAX; the
- * universal one needs room for the whole catalog. */
+/* `cap` names fit in `name`. A routed selection stops at DLQ_GROUPS_MAX. */
 struct dlq_groups {
     size_t count;
     size_t cap;
@@ -423,17 +412,21 @@ static bool dlq_prepare(struct dlq *q)
     return true;
 }
 
+/* lint-land is the fast isolated target: edit-loop gates plus the cheap
+ * gates that already catch land-proof failures. Full `make lint` stays the
+ * proof's goal. A pass is that target's own closing line. */
 static bool dlq_lint(struct dlq *q)
 {
-    const char *goals[] = { "lint", NULL };
+    const char *goals[] = { "lint-land", NULL };
     char *text = NULL;
-    int rc = dlq_make(q, "lint", goals, true, &text);
-    bool passed = zcl_dev_land_qualify_lint_passed(rc, text);
+    int rc = dlq_make(q, "lint-land", goals, true, &text);
+    bool passed = rc == 0 && text && strstr(text, "lint-land: OK");
     if (!passed && text)
         dlq_first_fail(text, q->out->detail, sizeof(q->out->detail));
     free(text);
     return passed ? true
-                  : dlq_refuse(q, ZCL_LAND_QUALIFY_LINT_FAILED, "lint", NULL);
+                  : dlq_refuse(q, ZCL_LAND_QUALIFY_LINT_FAILED, "lint-land",
+                               NULL);
 }
 
 static bool dlq_complexity(struct dlq *q)
@@ -535,66 +528,21 @@ static enum dlq_pick dlq_select_path(struct dlq_groups *g, const char *path,
     return DLQ_PICK_OK;
 }
 
-#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-/* The proof's universal selector for the worktree, comma-separated. */
-static bool dlq_universal_selector(struct dlq *q, char *selector, size_t cap)
+/* A selection that cannot be listed exactly belongs to the land proof.
+ * Drop any partial list so it is not recorded as locally passed. */
+static bool dlq_defer(struct dlq *q, struct dlq_groups *g, const char *cause)
 {
-    char *gated = (char *)zcl_malloc(DLQ_GATED_CAP, "dev.land.qualify.gated");
-    uint32_t count = 0;
-    bool ok = gated != NULL &&
-              zcl_dev_proof_universal_groups(q->wt, selector, cap, &count,
-                                             gated, DLQ_GATED_CAP) &&
-              count > 0;
-    free(gated);
-    return ok;
-}
-#else
-/* The release binary does not carry dev_proof.c, so it cannot name the
- * universal set; it refuses rather than run a short one. */
-static bool dlq_universal_selector(struct dlq *q, char *selector, size_t cap)
-{
-    (void)selector;
-    (void)cap;
-    (void)snprintf(q->out->detail, sizeof(q->out->detail), "%s",
-                   "the universal selector is available only in z23-dev");
-    return false;
-}
-#endif
-
-/* Replace the selection with the universal set and scale the run for it. */
-static bool dlq_universal(struct dlq *q, struct dlq_groups *g,
-                          const char *cause)
-{
-    size_t cap = zcl_test_group_catalog_count() *
-                     (ZCL_AGENT_IMPACT_GROUP_MAX + 1) + 1;
-    char *selector = (char *)zcl_malloc(cap, "dev.land.qualify.universal");
-    bool ok = selector && dlq_universal_selector(q, selector, cap);
     g->count = 0;
-    for (char *tok = ok ? selector : NULL; ok && *tok;) {
-        size_t n = strcspn(tok, ",");
-        ok = n > 0 && n < sizeof(g->name[0]) && g->count < g->cap;
-        if (ok) {
-            memcpy(g->name[g->count], tok, n);
-            g->name[g->count++][n] = '\0';
-        }
-        tok += n + (tok[n] == ',' ? 1 : 0);
-    }
-    free(selector);
-    if (!ok)
-        return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED,
-                          "universal_selection", NULL);
-    (void)snprintf(q->out->selection, sizeof(q->out->selection), "universal");
+    (void)snprintf(q->out->selection, sizeof(q->out->selection), "deferred");
     (void)snprintf(q->out->selection_cause, sizeof(q->out->selection_cause),
                    "%s", cause);
-    q->log_cap = DLQ_UNIVERSAL_LOG_CAP;
-    q->make_timeout_ms = DLQ_UNIVERSAL_TIMEOUT_MS;
     return true;
 }
 
 /* The union of the routes for every path the lane changes. A selection that
  * cannot be listed exactly (a route that lost groups, a union past
- * DLQ_GROUPS_MAX, a truncated path list) runs the universal set instead; a
- * group name the registry does not resolve is refused.
+ * DLQ_GROUPS_MAX, a truncated path list) is deferred, not run; a group name
+ * the registry does not resolve is refused.
  *
  * zcl_spawn_capture() does not report overflow: it returns the child's exit
  * status (0 here) and silently keeps only the first cap-1 bytes. A capture
@@ -626,7 +574,7 @@ static bool dlq_select(struct dlq *q, struct dlq_groups *g)
     }
     free(paths);
     if (ok && cause)
-        ok = dlq_universal(q, g, cause);
+        ok = dlq_defer(q, g, cause);
     qsort(g->name, g->count, sizeof(g->name[0]), dlq_group_cmp);
     return ok;
 }
