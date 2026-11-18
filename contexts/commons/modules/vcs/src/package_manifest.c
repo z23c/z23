@@ -514,12 +514,9 @@ rejected:
              reject ? reject : "unknown", off, wire_len);
 }
 
-bool vcs_package_file_hash(const struct vcs_package_file *file,
-                           uint8_t out[32])
+static void package_file_hash_validated(const struct vcs_package_file *file,
+                                        uint8_t out[32])
 {
-    if (!out || !package_file_valid(file))
-        LOG_FAIL("vcs.package", "invalid package file hash input");
-
     size_t path_len = strlen(file->path);
     uint8_t path_len_le[2];
     uint8_t mode_le[4];
@@ -542,6 +539,14 @@ bool vcs_package_file_hash(const struct vcs_package_file *file,
         sha3_256_write(&ctx, file->chunk_hashes,
                        (size_t)file->chunk_count * 32u);
     sha3_256_finalize(&ctx, out);
+}
+
+bool vcs_package_file_hash(const struct vcs_package_file *file,
+                           uint8_t out[32])
+{
+    if (!out || !package_file_valid(file))
+        LOG_FAIL("vcs.package", "invalid package file hash input");
+    package_file_hash_validated(file, out);
     return true;
 }
 
@@ -568,20 +573,13 @@ bool vcs_package_manifest_root(const struct vcs_package_manifest *manifest,
     sha3_256_write(&ctx, version_le, sizeof(version_le));
     sha3_256_write(&ctx, chunk_size_le, sizeof(chunk_size_le));
     sha3_256_write(&ctx, count_le, sizeof(count_le));
-    bool ok = true;
     for (size_t i = 0; i < manifest->count; i++) {
         uint8_t file_hash[32];
-        if (!vcs_package_file_hash(&files[i], file_hash)) {
-            ok = false;
-            break;
-        }
+        package_file_hash_validated(&files[i], file_hash);
         sha3_256_write(&ctx, file_hash, sizeof(file_hash));
     }
-    if (ok)
-        sha3_256_finalize(&ctx, out);
+    sha3_256_finalize(&ctx, out);
     free(owned);
-    if (!ok)
-        LOG_FAIL("vcs.package", "package file hash failed");
     return true;
 }
 

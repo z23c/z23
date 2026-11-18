@@ -2054,6 +2054,36 @@ static bool package_prefixes_rejected(const uint8_t *wire, size_t wire_len)
     return all_clean;
 }
 
+static int package_hash_invalid_fields(void)
+{
+    int failures = 0;
+    uint8_t hash_bytes[32] = {0};
+    struct vcs_package_file invalid[] = {
+        { .path = "../bad", .mode = VCS_PACKAGE_MODE_FILE },
+        { .path = "bad-mode", .mode = 0120777u },
+        { .path = "bad-count", .mode = VCS_PACKAGE_MODE_FILE,
+          .size = 1, .chunk_count = 0 },
+        { .path = "missing-hash", .mode = VCS_PACKAGE_MODE_FILE,
+          .size = 1, .chunk_count = 1, .chunk_hashes = NULL },
+        { .path = "excess-count", .mode = VCS_PACKAGE_MODE_FILE,
+          .size = 0, .chunk_count = 1, .chunk_hashes = hash_bytes },
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        struct vcs_package_manifest m = { .files = &invalid[i], .count = 1, .cap = 1 };
+        uint8_t file_out[32], root_out[32], marker[32];
+        memset(marker, 0xa5, sizeof(marker));
+        memcpy(file_out, marker, sizeof(marker));
+        memcpy(root_out, marker, sizeof(marker));
+        VC_CHECK("package: file hash rejects invalid fields without output",
+                 !vcs_package_file_hash(&invalid[i], file_out) &&
+                 memcmp(file_out, marker, sizeof(marker)) == 0);
+        VC_CHECK("package: manifest root rejects invalid fields without output",
+                 !vcs_package_manifest_root(&m, root_out) &&
+                 memcmp(root_out, marker, sizeof(marker)) == 0);
+    }
+    return failures;
+}
+
 static int package_order_fault_controls(struct vcs_package_manifest *m)
 {
     int failures = 0;
@@ -4076,6 +4106,7 @@ int test_vcs_core(void)
     failures += t_manifest_fixedpoint();
     failures += t_package_manifest();
     failures += package_order_roundtrip();
+    failures += package_hash_invalid_fields();
     failures += package_parse_aggregate_limits();
     failures += t_package_swarm();
     failures += package_capsule_wire_tests();
