@@ -191,6 +191,8 @@ static enum plugin_status pp_publish(const struct plugin_pack_request *r,
     if (st == PLUGIN_OK && !(plugin_write_atomic(out->manifest_path, manifest, strlen(manifest)) &&
                              plugin_write_atomic(sig_path, sig, strlen(sig))))
         st = PLUGIN_ERR_IO;
+    if (st == PLUGIN_OK)
+        memcpy(out->exe_sha3, exe_sha, sizeof(out->exe_sha3));
     return st;
 }
 

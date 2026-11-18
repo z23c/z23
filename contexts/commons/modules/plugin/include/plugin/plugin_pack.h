@@ -32,6 +32,7 @@ struct plugin_pack_request {
 
 struct plugin_pack_result {
     char generation[PLUGIN_HEX_SHA3_512 + 1];
+    char exe_sha3[PLUGIN_HEX_SHA3_512 + 1];
     char public_key[PLUGIN_HEX_PUBLIC_KEY + 1];
     char manifest_path[4096];
 };

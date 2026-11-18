@@ -199,6 +199,56 @@ static bool lp_mismatched_generation_refused(const struct lp_env *e,
            plugin_store_current(e->root, res.name, &current, exe, sizeof(exe)) == PLUGIN_ERR_NO_GENERATION;
 }
 
+static bool lp_manifest_hash_is(const char *path, const char *digest)
+{
+    char bytes[4096];
+    struct plugin_manifest manifest;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    bool ok = !ferror(f) && n < sizeof(bytes) &&
+              plugin_manifest_parse(bytes, n, &manifest) == PLUGIN_OK &&
+              strcmp(manifest.exe_sha3, digest) == 0;
+    fclose(f);
+    return ok;
+}
+
+
+static int lp_case_pack_receipt_allocation(void)
+{
+    int failures = 0;
+    struct lp_env e;
+    bool ready = lp_env_open(&e);
+    TEST_CASE("plugin.pack reports a receipt allocation failure after writing") {
+        char input[2 * PATH_MAX + 512];
+        struct json_value in;
+        struct zcl_command_reply r;
+        ASSERT(ready);
+        snprintf(input, sizeof(input),
+                 "{\"exe\":\"" LP_UPPER "\",\"name\":\"upper\",\"version\":\"1.0.0\","
+                 "\"key\":\"%s\",\"dir\":\"%s\"}", e.key, e.dist);
+        json_init(&in);
+        ASSERT(json_read(&in, input, strlen(input)));
+        struct zcl_command_request request = { .input = &in };
+        zcl_command_reply_init(&r, "zcl.plugin_pack.v1");
+        zcl_alloc_fault_fail_next("json_copy_str");
+        zcl_native_handle_plugin_pack(&request, &r);
+        bool hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(hit);
+        ASSERT_STR_EQ(r.error.code, "PLUGIN_IO");
+        ASSERT(r.error.mutated);
+        ASSERT(strstr(r.error.evidence, "upper.plugin.json") != NULL);
+        ASSERT_EQ(lp_entries(e.dist), 3);
+        ASSERT(json_is_null(&r.data));
+        zcl_command_reply_free(&r);
+        json_free(&in);
+    } TEST_END
+    lp_env_close(&e);
+    return failures;
+}
+
+
 static int lp_case_roundtrip(void)
 {
     int failures = 0;
@@ -208,7 +258,9 @@ static int lp_case_roundtrip(void)
         struct zcl_command_reply p, c;
         char manifest[PATH_MAX], sig[PATH_MAX], sha[PLUGIN_HEX_SHA3_512 + 1];
         ASSERT(ready);
+        unsigned hashes_before = plugin_fs_test_hash_count();
         lp_promote(&e, LP_UPPER, LP_CASES_OK, &p);
+        ASSERT_EQ(plugin_fs_test_hash_count() - hashes_before, 1u);
         ASSERT_EQ(p.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(json_get_int(json_get(&p.data, "cases_passed")), 2);
         ASSERT(strstr(lp_str(&p.data, "release_command"), "-static-pie") != NULL);
@@ -222,6 +274,7 @@ static int lp_case_roundtrip(void)
         ASSERT_STR_EQ(p.next[0].command, "plugin.install");
         ASSERT(strstr(p.next[0].input_json, manifest) != NULL);
         ASSERT_EQ(access(manifest, R_OK), 0);
+        ASSERT(lp_manifest_hash_is(manifest, sha));
         ASSERT_EQ(access(sig, R_OK), 0);
         ASSERT_EQ(lp_entries(e.dist), 3);
         ASSERT(lp_mismatched_generation_refused(&e, &p.data));
@@ -916,6 +969,7 @@ int test_lab_promote(void)
     int failures = 0;
     printf("\n=== Lab promote tests ===\n");
     failures += lp_case_roundtrip();
+    failures += lp_case_pack_receipt_allocation();
     failures += lp_case_hotswap();
     failures += lp_case_invalid_before_key();
     failures += lp_case_ready_snapshot();

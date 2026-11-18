@@ -75,23 +75,31 @@ static bool plg_begin(const struct zcl_command_request *request,
     return true;
 }
 
-void plg_push_capabilities(struct json_value *obj, unsigned mask)
+static bool plg_capabilities_checked(struct json_value *obj, unsigned mask)
 {
     struct json_value caps;
+    bool ok = true;
     json_init(&caps);
     json_set_array(&caps);
-    for (unsigned i = 0; plugin_capability_name(i); i++) {
-        struct json_value s;
-        json_init(&s);
+    for (unsigned i = 0; ok && plugin_capability_name(i); i++) {
         if (mask & (1u << i)) {
+            struct json_value s;
+            json_init(&s);
             json_set_str(&s, plugin_capability_name(i));
-            (void)json_push_back(&caps, &s);
+            ok = s.type == JSON_STR && json_push_back(&caps, &s);
+            json_free(&s);
         }
-        json_free(&s);
     }
-    (void)json_push_kv(obj, "capabilities", &caps);
+    ok = ok && json_push_kv(obj, "capabilities", &caps);
     json_free(&caps);
+    return ok;
 }
+
+void plg_push_capabilities(struct json_value *obj, unsigned mask)
+{
+    (void)plg_capabilities_checked(obj, mask);
+}
+
 
 /* Capabilities arrive as a JSON array of names or one comma-separated string. */
 static bool plg_cap_csv(const char *csv, unsigned *mask)
@@ -159,6 +167,22 @@ bool plg_interface(const struct zcl_command_request *request, int *out)
     return n == 1 || n == 2;
 }
 
+static bool plg_pack_data(struct json_value *data, const struct plugin_pack_request *pack,
+                          const struct plugin_pack_result *result)
+{
+    json_set_object(data);
+    return json_push_kv_str(data, "schema", "zcl.plugin_pack.v1") &&
+           json_push_kv_str(data, "name", pack->name) &&
+           json_push_kv_str(data, "version", pack->version) &&
+           json_push_kv_int(data, "interface_version", pack->interface_version) &&
+           json_push_kv_str(data, "generation", result->generation) &&
+           json_push_kv_str(data, "public_key", result->public_key) &&
+           json_push_kv_str(data, "manifest", result->manifest_path) &&
+           json_push_kv_str(data, "exe_sha3_512", result->exe_sha3) &&
+           plg_capabilities_checked(data, pack->capabilities);
+}
+
+
 void zcl_native_handle_plugin_pack(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -186,15 +210,13 @@ void zcl_native_handle_plugin_pack(const struct zcl_command_request *request,
         plg_refuse(reply, st, "pack", key_fault ? pack.key_path : pack.exe_path);
         return;
     }
-    json_set_object(&reply->data);
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_pack.v1");
-    (void)json_push_kv_str(&reply->data, "name", pack.name);
-    (void)json_push_kv_str(&reply->data, "version", pack.version);
-    (void)json_push_kv_int(&reply->data, "interface_version", pack.interface_version);
-    (void)json_push_kv_str(&reply->data, "generation", result.generation);
-    (void)json_push_kv_str(&reply->data, "public_key", result.public_key);
-    (void)json_push_kv_str(&reply->data, "manifest", result.manifest_path);
-    plg_push_capabilities(&reply->data, pack.capabilities);
+    if (!plg_pack_data(&reply->data, &pack, &result)) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        plg_refuse(reply, PLUGIN_ERR_IO, "pack", result.manifest_path);
+        reply->error.mutated = true;
+        return;
+    }
     reply->error.mutated = true;
     plg_next_install(reply, result.manifest_path);
 }

@@ -287,13 +287,20 @@ static void promote_report(struct zcl_command_reply *reply,
     snprintf(version, sizeof(version), "%s", promote_str(&reply->data, "version"));
     snprintf(generation, sizeof(generation), "%s", promote_str(&reply->data, "generation"));
     snprintf(key, sizeof(key), "%s", promote_str(&reply->data, "public_key"));
+    const char *packed_sha = promote_str(&reply->data, "exe_sha3_512");
+    if (!lab_root_valid(packed_sha)) {
+        lab_fail(reply, "LAB_ALLOC", "serialize", "the pack digest is unavailable");
+        reply->error.mutated = true;
+        snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", manifest);
+        return;
+    }
+    snprintf(sha, sizeof(sha), "%s", packed_sha);
     n = strlen(manifest);
     snprintf(sig, sizeof(sig), "%.*ssig", (int)(n >= 4 ? n - 4 : n), manifest);
     json_free(&reply->data);
     json_init(&reply->data);
     json_set_object(&reply->data);
-    if (plugin_hash_file(rel->binary, sha) != PLUGIN_OK ||
-        !json_push_kv_str(&reply->data, "schema", "zcl.lab_promote.v1") ||
+    if (!json_push_kv_str(&reply->data, "schema", "zcl.lab_promote.v1") ||
         !json_push_kv_str(&reply->data, "root", p->root) ||
         !json_push_kv_int(&reply->data, "cases_passed", (int64_t)p->passed) ||
         !json_push_kv_str(&reply->data, "release_command", rel->command) ||
@@ -303,8 +310,11 @@ static void promote_report(struct zcl_command_reply *reply,
         !json_push_kv_str(&reply->data, "manifest", manifest) ||
         !json_push_kv_str(&reply->data, "signature", sig) ||
         !json_push_kv_str(&reply->data, "generation", generation) ||
-        !json_push_kv_str(&reply->data, "public_key", key))
+        !json_push_kv_str(&reply->data, "public_key", key)) {
         lab_fail(reply, "LAB_ALLOC", "serialize", "the receipt could not be built");
+        reply->error.mutated = true;
+        snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", manifest);
+    }
 }
 
 static bool promote_write(const char *path, const uint8_t *bytes, size_t len)
