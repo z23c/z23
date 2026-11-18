@@ -536,8 +536,13 @@ static void lab_tally_findings(struct lab_tally *t, const struct lab_proc *p,
     t->findings += n;
 }
 
+struct lab_run_source {
+    const char *binary;
+    bool ok, sanitized;
+};
+
 static enum lab_check lab_run_cases(struct lab_ctx *ctx, const struct lab_cases *cs,
-                                    const struct lab_compile *comp, uint32_t timeout_ms,
+                                    const struct lab_run_source *source, uint32_t timeout_ms,
                                     uint32_t mem_mb, struct json_value *rows,
                                     struct lab_tally *t)
 {
@@ -550,19 +555,19 @@ static enum lab_check lab_run_cases(struct lab_ctx *ctx, const struct lab_cases 
         const struct lab_case *c = &cs->items[i];
         struct lab_inputs in = { .stdin_data = c->stdin_data,
             .stdin_len = strlen(c->stdin_data), .args = c->args,
-            .n_args = c->n_args, .sanitize = comp->sanitized,
+            .n_args = c->n_args, .sanitize = source->sanitized,
             .timeout_ms = timeout_ms, .mem_mb = mem_mb };
         lab_proc_reset(&proc);
-        if (comp->ok)
-            lab_run_binary(&ctx->dirs, comp->binary, comp->sanitized, &in, &proc);
+        if (source->ok)
+            lab_run_binary(&ctx->dirs, source->binary, source->sanitized, &in, &proc);
         else
             snprintf(proc.detail, sizeof(proc.detail), "compile failed");
         if (proc.launch == LAB_LAUNCH_UNCONFINED) {
             result = LAB_CHECK_UNCONFINED;
             break;
         }
-        bool pass = comp->ok && lab_case_verdict(c, &proc, timeout_ms, diff, sizeof(diff));
-        if (!comp->ok)
+        bool pass = source->ok && lab_case_verdict(c, &proc, timeout_ms, diff, sizeof(diff));
+        if (!source->ok)
             snprintf(diff, sizeof(diff), "compile failed");
         if (!pass && t->fail && t->failed == 0) {
             snprintf(t->fail->name, sizeof(t->fail->name), "%s", c->name);
@@ -570,7 +575,7 @@ static enum lab_check lab_run_cases(struct lab_ctx *ctx, const struct lab_cases 
         }
         t->passed += pass;
         t->failed += !pass;
-        lab_tally_findings(t, &proc, comp->sanitized);
+        lab_tally_findings(t, &proc, source->sanitized);
         if (rows && !lab_case_row(rows, c, &proc, pass, diff, t)) {
             result = LAB_CHECK_ALLOC;
             break;
@@ -599,19 +604,15 @@ enum lab_check lab_cases_check(const struct zcl_command_request *rq,
                                struct lab_case_fail *fail)
 {
     struct lab_cases cs;
-    struct lab_compile *comp = zcl_calloc(1, sizeof(*comp), "lab.compile");
+    struct lab_run_source source = { .binary = binary, .ok = true };
     struct lab_tally t = { .diff_left = LAB_DIFF_TOTAL, .fail = fail };
-    enum lab_check res = comp ? LAB_CHECK_NO_CASES : LAB_CHECK_ALLOC;
-    if (comp && lab_cases_load(rq, &cs)) {
-        comp->ok = true;
-        snprintf(comp->binary, sizeof(comp->binary), "%s", binary);
-        res = lab_run_cases(ctx, &cs, comp, timeout_ms, mem_mb, NULL, &t);
+    enum lab_check res = LAB_CHECK_NO_CASES;
+    if (lab_cases_load(rq, &cs)) {
+        res = lab_run_cases(ctx, &cs, &source, timeout_ms, mem_mb, NULL, &t);
         *passed = t.passed;
         *failed = t.failed;
     }
-    if (comp)
-        lab_cases_free(&cs);
-    free(comp);
+    lab_cases_free(&cs);
     return res;
 }
 
@@ -635,8 +636,10 @@ static void lab_test_execute(struct lab_ctx *ctx, const struct lab_cases *cs,
         return;
     }
     lab_compile_source(&ctx->dirs, &ctx->tc, &ctx->src, ctx->root, r->sanitize, comp);
+    struct lab_run_source source = { .binary = comp->binary, .ok = comp->ok,
+                                     .sanitized = comp->sanitized };
     enum lab_check result = comp->unconfined ? LAB_CHECK_UNCONFINED :
-        lab_run_cases(ctx, cs, comp, r->timeout_ms, r->mem_mb, &rows, &t);
+        lab_run_cases(ctx, cs, &source, r->timeout_ms, r->mem_mb, &rows, &t);
     if (result == LAB_CHECK_UNCONFINED)
         lab_unconfined(reply);
     else if (result == LAB_CHECK_ALLOC)

@@ -321,6 +321,35 @@ static int lp_case_no_key(void)
     return failures;
 }
 
+static bool lp_long_binary(const char *base, const char *binary, char path[PATH_MAX])
+{
+    static const char segment[] = "workspace_abcdefghijklmnopqrstuvwxyz_abcdefghijklmnopqrstuvwxyz";
+    if (snprintf(path, PATH_MAX, "%s", base) >= PATH_MAX)
+        return false;
+    while (strlen(path) <= 1024) {
+        size_t n = strlen(path);
+        if (snprintf(path + n, PATH_MAX - n, "/%s", segment) >= (int)(PATH_MAX - n) ||
+            mkdir(path, 0700) != 0)
+            return false;
+    }
+    size_t n = strlen(path);
+    return snprintf(path + n, PATH_MAX - n, "/fixture") < (int)(PATH_MAX - n) &&
+           link(binary, path) == 0;
+}
+
+static bool lp_long_cleanup(const char *base, char path[PATH_MAX])
+{
+    bool ok = unlink(path) == 0;
+    char *slash = strrchr(path, '/');
+    while (slash && (size_t)(slash - path) > strlen(base)) {
+        *slash = '\0';
+        if (rmdir(path) != 0)
+            ok = false;
+        slash = strrchr(path, '/');
+    }
+    return ok;
+}
+
 static int lp_case_source_snapshot(void)
 {
     int failures = 0;
@@ -330,7 +359,7 @@ static int lp_case_source_snapshot(void)
         struct lab_ctx ctx;
         struct zcl_command_reply r;
         struct json_value input;
-        char path[PATH_MAX], in[PATH_MAX + 512];
+        char path[PATH_MAX], long_binary[PATH_MAX], in[PATH_MAX + 512];
         const char *source = "#include <stdio.h>\nint main(void) { puts(\"snapshot\"); return 0; }\n";
         ASSERT(ready);
         ASSERT(lp_join(path, sizeof(path), e.base, "snapshot.c"));
@@ -366,6 +395,18 @@ static int lp_case_source_snapshot(void)
         zcl_alloc_fault_clear();
         ASSERT_EQ(check, LAB_CHECK_RAN);
         ASSERT(unused_row_alloc);
+        ASSERT_EQ(passed, 1);
+        ASSERT_EQ(failed, 0);
+        ASSERT(lp_long_binary(e.base, rel->binary, long_binary));
+        zcl_alloc_fault_fail_nth("lab.compile", 1);
+        check = lab_cases_check(&rq, &ctx, long_binary, LAB_TIMEOUT_DEFAULT_MS,
+                                LAB_MEM_DEFAULT_MB, &passed, &failed, NULL);
+        bool unused_compile_alloc = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        bool removed_long = lp_long_cleanup(e.base, long_binary);
+        ASSERT_EQ(check, LAB_CHECK_RAN);
+        ASSERT(unused_compile_alloc);
+        ASSERT(removed_long);
         ASSERT_EQ(passed, 1);
         ASSERT_EQ(failed, 0);
         lab_compile_cleanup(&ctx.dirs, "snapshot-release");
