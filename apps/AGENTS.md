@@ -11,3 +11,5 @@ Rules:
 - `zcl-ledger` signing and device material is custody-adjacent: no real keys or seeds in fixtures.
 
 Tests: each program documents its own; run `make lint-fast` for repository-level gates.
+For Android, run `make -C apps/z23android test-fast` for SDK-free development-loop checks and `make -C apps/z23android test` for the full Linux host suite.
+With a selected device, `make -C apps/z23android preview-dev` runs the fast checks before building, installing and launching the isolated preview.

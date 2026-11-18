@@ -20,6 +20,15 @@ export ANDROID_SDK_ROOT=/path/to/android-sdk
 export JAVA_HOME=/path/to/jdk
 ```
 
+From `apps/z23android`, `make help` summarizes the development commands.
+Run `make doctor` to check CMake, the host compiler's C23 support, `awk`,
+`sed`, `patch`, `readelf`, the NDK, SDK, JDK and ADB before building; when
+`ANDROID_SERIAL` is set, it also checks that the device is online.
+<!-- claim: symbol-present doctor apps/z23android/Makefile # build and optional device prerequisite check -->
+Quirc preparation is incremental: unchanged pinned sources and patches are
+reused, while changed inputs or missing generated sources trigger regeneration.
+<!-- claim: symbol-present QUIRC_STAMP apps/z23android/Makefile # incremental pinned quirc preparation -->
+
 From the repository root, build the Android node and its pinned dependencies,
 then package the app:
 
@@ -105,8 +114,32 @@ make install SDK_ROOT="$ANDROID_SDK_ROOT" ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" J
 make launch SDK_ROOT="$ANDROID_SDK_ROOT" ANDROID_SERIAL="$ANDROID_SERIAL"
 ```
 
-Run these commands from `apps/z23android`. `make install` builds the APK before
-installing it. The node stores its data in the app's private storage.
+Run these commands from `apps/z23android`. Install and launch first check that
+the selected device is online; `make install` then builds the APK before
+installing it. Use `make run` to build, install and open in one step, and
+`make rebuild` to reset production packaging outputs first. `make logs`
+follows the native `z23` log tag. The node stores its data in app-private storage.
+
+### Preview development loop
+
+Build, install and open the isolated voice preview with `make preview-run`, or
+use `make preview-dev` to run `test-fast` before that build/install/launch
+loop; a failed regression stops before packaging. Use `preview-apk` to build
+without a device, `preview-install` to install, `preview-launch` to reopen and
+`preview-logs` to follow logs. `preview-rebuild` resets only preview manifest
+and APK outputs before running.
+<!-- claim: symbol-present preview-dev apps/z23android/Makefile # fast checks precede preview packaging -->
+
+The preview writes `build/android-app/z23-preview.apk` and uses a separate
+package and private app state. Native, package, Quirc and asset intermediates
+are shared with production under the selected `BUILD_DIR`; only the generated
+manifest and APK are preview-specific. `preview-clean` removes those two
+preview outputs without deleting shared native objects or the signing key.
+`make clean` also resets production and preview native, package, Quirc and
+asset outputs while preserving the development key and on-device app state.
+<!-- claim: symbol-present clean-production apps/z23android/Makefile # scoped production and preview cleanup -->
+The run targets do not use `am force-stop`: the embedded node needs its
+graceful shutdown path to flush databases.
 
 ### One-time state installation
 
@@ -497,6 +530,10 @@ change hosts or spend funds.
   building and leaves any previous APK in place. The proving parameters are not a
   prerequisite: a preview leaves them out unless `PREVIEW_PARAMS=1` (then
   `vendor/params` or `PARAMS_DIR` must hold them, as for `make apk`).
+- `make -C apps/z23android test-fast` runs `test-workflow`, `test-clean`,
+  `test-doctor` and `test-quirc` without an Android SDK, NDK, JDK or device.
+  The full `test` target includes these checks.
+  <!-- claim: symbol-present test-fast apps/z23android/Makefile # SDK-free app development-loop checks -->
 - A developer sees why the phone node is stuck without root: the app forwards
   the node console log's boot stage changes, `[boot]` timings, Tor bootstrap
   progress and peer handshakes to logcat as written, at most 20 lines a second.

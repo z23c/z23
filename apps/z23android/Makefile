@@ -30,6 +30,10 @@ PACK_PARAMS ?= 1
 PREVIEW_PARAMS ?= 0
 # Only preview-apk selects this; check-node verifies the exact generated manifest.
 PACKAGE_PREVIEW ?= 0
+QUIRC_VENDOR_FILES := $(wildcard ../../vendor/quirc/*.[ch])
+QUIRC_INPUTS := $(QUIRC_VENDOR_FILES) ../../vendor/quirc/patches/strict-c23.patch
+QUIRC_OUTPUTS := $(patsubst ../../vendor/quirc/%,$(QUIRC_DIR)/%,$(QUIRC_VENDOR_FILES))
+QUIRC_STAMP := $(QUIRC_DIR)/.strict-c23.stamp
 HOST_CC ?= cc
 HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 ifeq ($(shell uname -s),Darwin)
@@ -46,11 +50,39 @@ endif
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: check-probe dexgen test-dexgen test-watch apk aligned-apk native install launch check-config check-node check-params prepare-quirc test bridge test-bridge
-prepare-quirc:
+.PHONY: help doctor clean clean-production rebuild preview-rebuild preview-dev check-probe dexgen test-dexgen test-watch apk aligned-apk native install launch run check-config check-node check-params prepare-quirc test bridge test-bridge
+help:
+	@printf '%s\n' \
+	  'make run           Build, install and launch the production app' \
+	  'make preview-run   Build, install and launch the isolated preview app' \
+	  'make preview-dev   Test, build, install and launch the preview app' \
+	  'make rebuild       Clean, rebuild and launch the production app' \
+	  'make preview-rebuild Clean, rebuild and launch the preview app' \
+	  'make logs          Follow native z23 logs on the selected device' \
+	  'make preview-logs  Follow the same logs while previewing' \
+	  'make test-fast     Run SDK-free development-loop regression tests' \
+	  'make test          Build and run the Linux host tests' \
+	  'make clean         Reset production and preview packaging outputs' \
+	  'make preview-clean Reset only preview packaging outputs' \
+	  'make doctor        Check build tools and optional device readiness' \
+	  'make check-config  Check all build tool prerequisites' \
+	  'make check-node    Check the Android node executable' \
+	  'Set ANDROID_SERIAL, SDK_ROOT, ANDROID_NDK_ROOT and JAVA_HOME as needed.'
+
+prepare-quirc: $(QUIRC_STAMP)
+	@set -e; for file in $(QUIRC_OUTPUTS); do \
+	  if test ! -f "$$file"; then \
+	    rm -f '$(QUIRC_STAMP)'; \
+	    $(MAKE) --no-print-directory '$(QUIRC_STAMP)'; \
+	    break; \
+	  fi; \
+	done
+
+$(QUIRC_STAMP): $(QUIRC_INPUTS)
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
 	patch -s -d '$(QUIRC_DIR)' -p1 < ../../vendor/quirc/patches/strict-c23.patch
+	@touch '$@'
 
 bridge:
 	@mkdir -p '$(BUILD_DIR)'
@@ -84,7 +116,7 @@ HOST_SOURCES := bridge_auth.c bridge/assistant.c bridge/http.c bridge/fleet_prob
   ../../contexts/commons/packages/zsha256/src/zsha256.c \
   ../../platform/modules/sha3/src/sha3.c \
   ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c
-.PHONY: speech-bridge speech-probe test-voice test-host preview-apk
+.PHONY: speech-bridge speech-probe test-voice test-host test-fast test-workflow test-clean test-doctor test-quirc check-device logs preview-apk preview-install preview-launch preview-logs preview-run preview-clean
 speech-bridge:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) bridge/speech_main.c $(HOST_SOURCES) \
@@ -110,6 +142,10 @@ test-dexgen:
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/dexgen_test.c -o '$(BUILD_DIR)/dexgen-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/dexgen-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/dexgen-test' "$$scratch" $$(test -x '$(DEXDUMP)' && echo '$(DEXDUMP)')
+check-device:
+	@test -n '$(ANDROID_SERIAL)' || { echo 'Set ANDROID_SERIAL to one adb device serial' >&2; exit 1; }
+	@command -v '$(ADB)' >/dev/null || { echo 'Set SDK_ROOT or ADB to the installed Android platform tools' >&2; exit 1; }
+	@'$(ADB)' -s '$(ANDROID_SERIAL)' get-state >/dev/null
 
 preview-apk:
 	@printf '%s\n' '$(PREVIEW_APP_ID)' | grep -E '^org\.z23\.voicepreview(\.[a-z0-9_]+)*$$' >/dev/null || \
@@ -118,6 +154,158 @@ preview-apk:
 	sed -e 's/package="org.z23.nativeapp"/package="$(PREVIEW_APP_ID)"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
 	$(MAKE) apk PACKAGE_PREVIEW=1 PACK_PARAMS='$(PREVIEW_PARAMS)' APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
+preview-install: check-device
+	$(MAKE) --no-print-directory preview-apk
+	'$(ADB)' -s '$(ANDROID_SERIAL)' install -r '$(BUILD_DIR)/z23-preview.apk'
+
+preview-launch: check-device
+	'$(ADB)' -s '$(ANDROID_SERIAL)' shell am start -n '$(PREVIEW_APP_ID)/android.app.NativeActivity'
+
+logs preview-logs: check-device
+	'$(ADB)' -s '$(ANDROID_SERIAL)' logcat -s z23
+
+preview-run: preview-install
+	$(MAKE) --no-print-directory preview-launch
+
+preview-dev: check-device
+	$(MAKE) --no-print-directory test-fast
+	$(MAKE) --no-print-directory preview-run
+
+.PHONY: check-build-dir
+check-build-dir:
+	@set -e; dir='$(BUILD_DIR)'; \
+	  if test -z "$$dir"; then echo 'BUILD_DIR must not be empty' >&2; exit 1; fi; \
+	  if test -e "$$dir"; then \
+	    if ! test -d "$$dir"; then echo 'BUILD_DIR must be a directory' >&2; exit 1; fi; \
+	    resolved=$$(cd "$$dir" && pwd -P) || { echo 'BUILD_DIR cannot be resolved' >&2; exit 1; }; \
+	    if test "$$resolved" = / || test "$$resolved" = //; then echo 'BUILD_DIR must not resolve to /' >&2; exit 1; fi; \
+	  fi
+
+preview-clean clean-production: check-build-dir
+
+preview-clean:
+	rm -rf '$(BUILD_DIR)/preview'
+	rm -f '$(BUILD_DIR)/z23-preview.apk'
+
+clean: preview-clean clean-production
+
+clean-production:
+	rm -rf '$(BUILD_DIR)/native' '$(BUILD_DIR)/package' '$(BUILD_DIR)/quirc' '$(BUILD_DIR)/assets'
+	rm -f '$(BUILD_DIR)/resources.apk' '$(BUILD_DIR)/unsigned.apk' '$(BUILD_DIR)/aligned.apk' '$(BUILD_DIR)/z23.apk'
+
+rebuild: check-device
+	$(MAKE) --no-print-directory clean-production
+	$(MAKE) --no-print-directory run
+
+preview-rebuild: check-device
+	$(MAKE) --no-print-directory preview-clean
+	$(MAKE) --no-print-directory preview-run
+
+test-workflow:
+	@mkdir -p '$(BUILD_DIR)'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/workflow-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; \
+	  $(MAKE) --no-print-directory -n preview-run BUILD_DIR="$$scratch/preview-build" ADB=/bin/true ANDROID_SERIAL=fixture > "$$scratch/preview.log"; \
+	  grep -F 'z23-preview.apk' "$$scratch/preview.log" >/dev/null; \
+	  grep -F 'PACKAGE_PREVIEW=1' "$$scratch/preview.log" >/dev/null; \
+	  ! grep -F 'am force-stop' "$$scratch/preview.log" >/dev/null; \
+	  grep -F '$(PREVIEW_APP_ID)/android.app.NativeActivity' "$$scratch/preview.log" >/dev/null; \
+	  $(MAKE) --no-print-directory -n run BUILD_DIR="$$scratch/production-build" ADB=/bin/true ANDROID_SERIAL=fixture > "$$scratch/production.log"; \
+	  grep -F 'z23.apk' "$$scratch/production.log" >/dev/null; \
+	  ! grep -F 'z23-preview.apk' "$$scratch/production.log" >/dev/null; \
+	  ! grep -F 'am force-stop' "$$scratch/production.log" >/dev/null; \
+	  grep -F 'org.z23.nativeapp/android.app.NativeActivity' "$$scratch/production.log" >/dev/null; \
+	  $(MAKE) --no-print-directory -n logs ADB=/bin/true ANDROID_SERIAL=fixture > "$$scratch/logs.log"; \
+	  grep -F 'logcat -s z23' "$$scratch/logs.log" >/dev/null; \
+	  $(MAKE) --no-print-directory -n preview-logs ADB=/bin/true ANDROID_SERIAL=fixture > "$$scratch/preview-logs.log"; \
+	  grep -F 'logcat -s z23' "$$scratch/preview-logs.log" >/dev/null; \
+	  $(MAKE) --no-print-directory -n preview-apk BUILD_DIR="$$scratch/key-build" KEYSTORE="$$scratch/preserved.keystore" > "$$scratch/key.log"; \
+	  grep -F -- "--ks '$$scratch/preserved.keystore'" "$$scratch/key.log" >/dev/null; \
+	  ! grep -F 'development.keystore' "$$scratch/key.log" >/dev/null; \
+	  mkdir -p "$$scratch/offline/native"; \
+	  touch "$$scratch/offline/native/keep"; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory rebuild BUILD_DIR="$$scratch/offline" ADB=/bin/false ANDROID_SERIAL=fixture >/dev/null 2>&1; then exit 1; fi; \
+	  test -f "$$scratch/offline/native/keep"; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory check-device ADB=z23-missing-adb ANDROID_SERIAL=fixture >/dev/null 2>&1; then exit 1; fi; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory check-device ADB=/bin/true ANDROID_SERIAL= >/dev/null 2>&1; then exit 1; fi; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory preview-dev BUILD_DIR="$$scratch/gate" ADB=/bin/true ANDROID_SERIAL=fixture TEST_FAST_FAIL=1 > "$$scratch/gate.log" 2>&1; then exit 1; fi; \
+	  ! grep -F 'PACKAGE_PREVIEW=1' "$$scratch/gate.log" >/dev/null; \
+	  test ! -e "$$scratch/gate/preview/AndroidManifest.xml"
+	@printf '%s\n' 'workflow tests passed'
+
+test-clean:
+	@mkdir -p '$(BUILD_DIR)'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clean-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; \
+	  mkdir -p "$$scratch/preview" "$$scratch/native" "$$scratch/package" "$$scratch/quirc" "$$scratch/assets"; \
+	  touch "$$scratch/z23-preview.apk" "$$scratch/z23.apk" "$$scratch/resources.apk" "$$scratch/development.keystore" "$$scratch/hosts-test"; \
+	  MAKEFLAGS= $(MAKE) --no-print-directory --silent preview-clean BUILD_DIR="$$scratch"; \
+	  test ! -e "$$scratch/preview" && test ! -e "$$scratch/z23-preview.apk"; \
+	  test -f "$$scratch/z23.apk" && test -d "$$scratch/native" && test -f "$$scratch/development.keystore"; \
+	  MAKEFLAGS= $(MAKE) --no-print-directory --silent clean BUILD_DIR="$$scratch"; \
+	  test ! -e "$$scratch/native" && test ! -e "$$scratch/package" && test ! -e "$$scratch/quirc" && test ! -e "$$scratch/assets"; \
+	  test ! -e "$$scratch/z23.apk" && test ! -e "$$scratch/resources.apk"; \
+	  test -f "$$scratch/development.keystore" && test -f "$$scratch/hosts-test"; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory --silent check-build-dir BUILD_DIR= >/dev/null 2>&1; then exit 1; fi; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory --silent check-build-dir BUILD_DIR=/ >/dev/null 2>&1; then exit 1; fi; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory --silent check-build-dir SHELL=/bin/bash BUILD_DIR=// >/dev/null 2>&1; then exit 1; fi; \
+	  ln -s / "$$scratch/root-link"; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory --silent check-build-dir BUILD_DIR="$$scratch/root-link" >/dev/null 2>&1; then exit 1; fi; \
+	  test -f "$$scratch/development.keystore" && test -f "$$scratch/hosts-test"
+	@printf '%s\n' 'clean tests passed'
+
+test-quirc:
+	@mkdir -p '$(BUILD_DIR)'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/quirc-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; \
+	  mkdir -p "$$scratch/quirc"; \
+	  touch "$$scratch/quirc/.strict-c23.stamp" "$$scratch/quirc/quirc.c" "$$scratch/quirc/decode.c" \
+	    "$$scratch/quirc/identify.c" "$$scratch/quirc/version_db.c" \
+	    "$$scratch/quirc/quirc.h" "$$scratch/quirc/quirc_internal.h"; \
+	  $(MAKE) --no-print-directory -n prepare-quirc BUILD_DIR="$$scratch" > "$$scratch/current.log"; \
+	  ! grep -F 'patch -s' "$$scratch/current.log" >/dev/null; \
+	  rm "$$scratch/quirc/decode.c"; \
+	  $(MAKE) --no-print-directory -n prepare-quirc BUILD_DIR="$$scratch" > "$$scratch/missing.log"; \
+	  grep -F 'patch -s' "$$scratch/missing.log" >/dev/null; \
+	  touch "$$scratch/quirc/.strict-c23.stamp" "$$scratch/quirc/decode.c"; \
+	  rm "$$scratch/quirc/quirc.h"; \
+	  $(MAKE) --no-print-directory -n prepare-quirc BUILD_DIR="$$scratch" > "$$scratch/header.log"; \
+	  grep -F 'patch -s' "$$scratch/header.log" >/dev/null
+	@printf '%s\n' 'quirc tests passed'
+
+.PHONY: test-fast-guard
+test-fast: test-fast-guard test-workflow test-clean test-doctor test-quirc
+
+test-fast-guard:
+	@test -z '$(TEST_FAST_FAIL)' || { echo 'Forced test-fast failure' >&2; exit 1; }
+
+test-doctor:
+	@mkdir -p '$(BUILD_DIR)'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/doctor-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; \
+	  mkdir -p "$$scratch/bin" "$$scratch/ndk/build/cmake" "$$scratch/sdk/platforms/android-35" \
+	    "$$scratch/sdk/build-tools/35.0.0" "$$scratch/sdk/platform-tools" "$$scratch/jdk/bin"; \
+	  touch "$$scratch/ndk/build/cmake/android.toolchain.cmake" "$$scratch/sdk/platforms/android-35/android.jar"; \
+	  for tool in aapt zipalign apksigner; do ln -s /bin/true "$$scratch/sdk/build-tools/35.0.0/$$tool"; done; \
+	  ln -s /bin/true "$$scratch/sdk/platform-tools/adb"; \
+	  for tool in keytool jar; do ln -s /bin/true "$$scratch/jdk/bin/$$tool"; done; \
+	  printf '%s\n' '#!/bin/sh' 'exec $(HOST_CC) "$$@"' > "$$scratch/bin/host-cc"; \
+	  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "cmake version 4.0.0"' > "$$scratch/bin/cmake"; \
+	  chmod +x "$$scratch/bin/host-cc" "$$scratch/bin/cmake"; \
+	  args="PATH=$$scratch/bin:/usr/bin:/bin HOST_CC=$$scratch/bin/host-cc SDK_ROOT=$$scratch/sdk ANDROID_NDK_ROOT=$$scratch/ndk JAVA_HOME=$$scratch/jdk ADB=$$scratch/sdk/platform-tools/adb"; \
+	  MAKEFLAGS= MAKEOVERRIDES= $(MAKE) --no-print-directory doctor $$args ANDROID_SERIAL= > "$$scratch/doctor.log"; \
+	  grep -F 'Android build tools are ready.' "$$scratch/doctor.log" >/dev/null; \
+	  grep -F 'Connect a device and set ANDROID_SERIAL' "$$scratch/doctor.log" >/dev/null; \
+	  MAKEFLAGS= MAKEOVERRIDES= $(MAKE) --no-print-directory doctor $$args ANDROID_SERIAL=fixture > "$$scratch/device.log"; \
+	  grep -F 'Device fixture is online.' "$$scratch/device.log" >/dev/null; \
+	  ln -sf /bin/false "$$scratch/sdk/platform-tools/adb"; \
+	  if MAKEFLAGS= MAKEOVERRIDES= $(MAKE) --no-print-directory doctor $$args ANDROID_SERIAL=fixture > "$$scratch/offline.log" 2>&1; then exit 1; fi; \
+	  ! grep -F 'Device fixture is online.' "$$scratch/offline.log" >/dev/null; \
+	  MAKEFLAGS= MAKEOVERRIDES= $(MAKE) --no-print-directory check-config $$args ADB=z23-missing-adb > "$$scratch/device-free.log"; \
+	  if MAKEFLAGS= MAKEOVERRIDES= $(MAKE) --no-print-directory doctor $$args ADB=z23-missing-adb ANDROID_SERIAL= >/dev/null 2>&1; then exit 1; fi; \
+	  printf '%s\n' '#!/bin/sh' 'printf "%s\n" "cmake version 3.21.4"' > "$$scratch/bin/cmake"; \
+	  if MAKEFLAGS= $(MAKE) --no-print-directory check-config $$args >/dev/null 2>&1; then exit 1; fi
+	@printf '%s\n' 'doctor tests passed'
 
 test-voice:
 	@mkdir -p '$(BUILD_DIR)'
@@ -134,7 +322,7 @@ test-startup-auth:
 	  tests/startup_auth_test.c startup_auth.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/startup-auth-test'
 	'$(BUILD_DIR)/startup-auth-test'
 
-test: prepare-quirc test-params-launch test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access test-camera-frame test-residue test-startup-auth
+test: prepare-quirc test-fast test-params-launch test-bridge test-voice test-host test-game test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz test-setup test-camera-access test-camera-frame test-residue test-startup-auth
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -293,6 +481,17 @@ check-probe:
 
 check-config:
 	@$(MAKE) --no-print-directory check-probe
+	@command -v awk >/dev/null || { echo 'Install awk to validate build tool versions' >&2; exit 1; }
+	@command -v sed >/dev/null || { echo 'Install sed to generate the preview manifest' >&2; exit 1; }
+	@command -v cmake >/dev/null || { echo 'Install CMake 3.22 or newer' >&2; exit 1; }
+	@version=$$(cmake --version) && printf '%s\n' "$$version" | \
+	  awk 'NR == 1 { split($$3, v, "."); ok = v[1] > 3 || (v[1] == 3 && v[2] >= 22) } END { exit !ok }' || \
+	  { echo 'Install CMake 3.22 or newer' >&2; exit 1; }
+	@command -v '$(firstword $(HOST_CC))' >/dev/null || { echo 'Set HOST_CC to an installed C23 compiler' >&2; exit 1; }
+	@printf '%s\n' 'int main(void) { return 0; }' | $(HOST_CC) -std=c23 -x c -fsyntax-only - >/dev/null 2>&1 || \
+	  { echo 'HOST_CC must accept C23 with -std=c23' >&2; exit 1; }
+	@command -v patch >/dev/null || { echo 'Install patch to prepare the pinned quirc sources' >&2; exit 1; }
+	@command -v readelf >/dev/null || { echo 'Install readelf (usually provided by binutils) to inspect the Android node' >&2; exit 1; }
 	@test -f '$(ANDROID_NDK_ROOT)/build/cmake/android.toolchain.cmake' || { echo 'Set ANDROID_NDK_ROOT to the installed NDK' >&2; exit 1; }
 	@test -r '$(ANDROID_JAR)' && test -x '$(TOOLS)/aapt' && test -x '$(TOOLS)/zipalign' && test -x '$(TOOLS)/apksigner' || { echo 'Set SDK_ROOT and BUILD_TOOLS_VERSION to an installed Android SDK' >&2; exit 1; }
 	@test -x '$(JAVA_HOME)/bin/keytool' && test -x '$(JAVA_HOME)/bin/jar' || { echo 'Set JAVA_HOME to an installed JDK' >&2; exit 1; }
@@ -303,6 +502,13 @@ check-config:
 check-params:
 	@test -d '$(PARAMS_DIR)' || { echo 'Proving parameters not found: put the files listed in $(PARAMS_SUMS) in $(PARAMS_DIR) or set PARAMS_DIR.' >&2; exit 1; }
 	@out=$$(cd '$(PARAMS_DIR)' && sha256sum -c '$(abspath $(PARAMS_SUMS))' 2>&1) || { printf '%s\n' "$$out" >&2; echo 'Proving parameters in $(PARAMS_DIR) are missing or do not match $(PARAMS_SUMS); refusing to build.' >&2; exit 1; }
+
+doctor: check-config
+	@command -v '$(ADB)' >/dev/null || { echo 'Set SDK_ROOT or ADB to the installed Android platform tools' >&2; exit 1; }
+	@printf '%s\n' 'Android build tools are ready.'
+	@if test -n '$(ANDROID_SERIAL)'; then \
+	  $(MAKE) --no-print-directory check-device && printf '%s\n' 'Device $(ANDROID_SERIAL) is online.'; else \
+	  printf '%s\n' 'Connect a device and set ANDROID_SERIAL to check it too.'; fi
 
 native: check-config prepare-quirc
 	cmake -S . -B '$(BUILD_DIR)/native' \
@@ -352,13 +558,15 @@ check-signer-output: check-signer-input
 	  test "$$actual" = "$$expected" || { echo "APK signer does not match EXPECTED_SIGNER_SHA256" >&2; exit 1; }; \
 	fi
 
-install: apk
-	@test -n '$(ANDROID_SERIAL)' || { echo 'Set ANDROID_SERIAL to one adb device serial' >&2; exit 1; }
+install: check-device
+	$(MAKE) --no-print-directory apk
 	'$(ADB)' -s '$(ANDROID_SERIAL)' install -r '$(APK)'
 
-launch:
-	@test -n '$(ANDROID_SERIAL)' || { echo 'Set ANDROID_SERIAL to one adb device serial' >&2; exit 1; }
+launch: check-device
 	'$(ADB)' -s '$(ANDROID_SERIAL)' shell am start -n '$(APP_ID)/android.app.NativeActivity'
+
+run: install
+	$(MAKE) --no-print-directory launch
 
 HOST_TEST_BASE := $(SPEECH_JSON) ../../platform/modules/sha3/src/sha3.c
 .PHONY: test-params-launch
