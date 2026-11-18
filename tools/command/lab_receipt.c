@@ -192,6 +192,8 @@ static size_t lab_text_unit(const unsigned char *s, size_t left, char *out,
 bool lab_json_text(struct json_value *obj, const char *key, const char *text,
                    size_t len, size_t escaped_cap, bool *cut)
 {
+    if (len == 0)
+        return json_push_kv_str(obj, key, "");
     char *out = zcl_malloc(escaped_cap * 3 + 8, "lab.text");
     size_t olen = 0, cost = 0, i = 0;
     if (!out)

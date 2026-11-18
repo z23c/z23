@@ -1080,6 +1080,45 @@ static int test_lab_wrapper_failure(void)
 }
 #endif
 
+static int test_lab_empty_text(void)
+{
+    int failures = 0;
+    TEST_CASE("empty receipt text avoids temporary buffers and preserves cut") {
+        struct json_value obj;
+        json_init(&obj);
+        json_set_object(&obj);
+        zcl_alloc_fault_fail_next("lab.text");
+        bool ok = true, cuts = true;
+        for (size_t i = 0; i < 512; i++) {
+            bool cut = (i % 2) != 0;
+            if (!lab_json_text(&obj, "same", "", 0, 0, &cut)) {
+                ok = false;
+                break;
+            }
+            cuts = cuts && cut == ((i % 2) != 0);
+        }
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(ok && armed && cuts);
+        ASSERT_EQ(json_size(&obj), 512u);
+        ASSERT_STR_EQ(json_get_str(json_get(&obj, "same")), "");
+        zcl_alloc_fault_fail_next("json_push_kv_key");
+        bool cut = true;
+        bool inserted = lab_json_text(&obj, "fail", "", 0, 0, &cut);
+        bool fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(!inserted && fired && cut);
+        ASSERT_EQ(json_size(&obj), 512u);
+        zcl_alloc_fault_fail_next("lab.text");
+        inserted = lab_json_text(&obj, "nonempty", "x", 1, 1, &cut);
+        fired = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(!inserted && fired && cut);
+        json_free(&obj);
+    } TEST_END
+    return failures;
+}
+
 int test_lab(void)
 {
     int failures = 0;
@@ -1092,6 +1131,7 @@ int test_lab(void)
         lt_close();
         return failures;
     }
+    failures += test_lab_empty_text();
     failures += test_lab_hello();
 #if defined(__linux__)
     failures += test_lab_kit_handles();
