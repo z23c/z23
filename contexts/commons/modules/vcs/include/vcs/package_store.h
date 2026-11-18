@@ -306,6 +306,13 @@ enum vcs_package_store_result vcs_package_store_get_chunk_at(
     struct vcs_package_store *store, const uint8_t package_root[32],
     uint32_t file_index, uint32_t chunk_index, uint8_t **out,
     size_t *out_len);
+/* Verify stored bytes and independent digest/length expectations. Mismatch
+ * clears outputs without quarantining valid CAS data. */
+enum vcs_package_store_result vcs_package_store_get_chunk_at_expected(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    uint32_t file_index, uint32_t chunk_index, const uint8_t expected_hash[32],
+    size_t expected_len, uint8_t **out, size_t *out_len);
+
 /* Read and verify directly into caller-owned unpublished memory. Capacity
  * is checked before writing. On refusal *out_len is zero; destination may
  * contain untrusted partial bytes and must not be published. Successful

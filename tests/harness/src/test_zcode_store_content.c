@@ -412,7 +412,34 @@ static int store_into_read_controls(struct vcs_package_store *store,
         vcs_package_store_get_chunk_at_into(store, root, 0, 0, NULL, 0,
                                               &len) == VCS_PACKAGE_STORE_ERR_NULL &&
         len == 0);
+    uint8_t hash[32], bad[32], *allocated = NULL;
+    ZS_CHECK("expected read: fixture digest", vcs_package_chunk_hash(action, 32, hash));
+    memcpy(bad, hash, sizeof(bad));
+    bad[0] ^= 1;
+    len = SIZE_MAX;
+    ZS_CHECK("expected read: independent digest mismatch refuses",
+        vcs_package_store_get_chunk_at_expected(store, root, 0, 0, bad, 32,
+            &allocated, &len) == VCS_PACKAGE_STORE_ERR_CHUNK_HASH &&
+        allocated == NULL && len == 0);
+    len = SIZE_MAX;
+    ZS_CHECK("expected read: independent length mismatch refuses",
+        vcs_package_store_get_chunk_at_expected(store, root, 0, 0, hash, 31,
+            &allocated, &len) == VCS_PACKAGE_STORE_ERR_CHUNK_HASH &&
+        allocated == NULL && len == 0);
+    ZS_CHECK("expected read: valid bytes remain available after mismatches",
+        vcs_package_store_get_chunk_at_expected(store, root, 0, 0, hash, 32,
+            &allocated, &len) == VCS_PACKAGE_STORE_OK &&
+        len == 32 && memcmp(allocated, action, 32) == 0);
+    free(allocated);
     return failures;
+}
+
+static bool store_write_tampered(const char *path, const uint8_t bytes[32])
+{
+    FILE *file = fopen(path, "wb");
+    bool wrote = file && fwrite(bytes, 1, 32, file) == 32;
+    if (file) wrote = fclose(file) == 0 && wrote;
+    return wrote;
 }
 
 static int store_into_corrupt_control(struct vcs_package_store *store,
@@ -430,11 +457,24 @@ static int store_into_corrupt_control(struct vcs_package_store *store,
     zs_store_path(path, sizeof(path), dd, suffix);
     memcpy(tampered, action, sizeof(tampered));
     tampered[7] ^= 0xff;
-    FILE *file = fopen(path, "wb");
-    bool wrote = file && fwrite(tampered, 1, sizeof(tampered), file) ==
-                            sizeof(tampered);
-    if (file) wrote = fclose(file) == 0 && wrote;
+    bool wrote = store_write_tampered(path, tampered);
     ZS_CHECK("verified into: corrupted CAS fixture writes", wrote);
+    if (!wrote) return failures;
+    uint8_t *allocated = NULL;
+    size_t expected_len = SIZE_MAX;
+    ZS_CHECK("expected read: corrupt CAS refuses without output",
+        vcs_package_store_get_chunk_at_expected(store, root, 0, 0, hash, 32,
+            &allocated, &expected_len) == VCS_PACKAGE_STORE_ERR_CHUNK_HASH &&
+        allocated == NULL && expected_len == 0);
+    ZS_CHECK("expected read: corrupt CAS quarantined",
+        vcs_package_store_get_chunk_at_expected(store, root, 0, 0, hash, 32,
+            &allocated, &expected_len) == VCS_PACKAGE_STORE_ERR_CHUNK_MISSING &&
+        allocated == NULL && expected_len == 0);
+    ZS_CHECK("verified into: restore valid CAS",
+        vcs_package_store_put_chunk(store, root, "action", 0, action, 32) ==
+            VCS_PACKAGE_STORE_OK);
+    wrote = store_write_tampered(path, tampered);
+    ZS_CHECK("verified into: rewrite corrupted CAS fixture", wrote);
     if (!wrote) return failures;
     size_t len = SIZE_MAX;
     ZS_CHECK("verified into: hash refusal publishes no length",

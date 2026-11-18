@@ -183,11 +183,13 @@ static bool checkout_write_chunks(
          ok && chunk_index < file->chunk_count; chunk_index++) {
         uint8_t *chunk = NULL;
         size_t chunk_len = 0;
-        ok = vcs_package_store_get_chunk_at(
+        uint64_t remaining = file->size - (uint64_t)chunk_index * VCS_PACKAGE_CHUNK_BYTES;
+        size_t expected_len = remaining > VCS_PACKAGE_CHUNK_BYTES ?
+            VCS_PACKAGE_CHUNK_BYTES : (size_t)remaining;
+        ok = vcs_package_store_get_chunk_at_expected(
                  store, package_root, file_index, chunk_index,
+                 file->chunk_hashes + (size_t)chunk_index * 32u, expected_len,
                  &chunk, &chunk_len) == VCS_PACKAGE_STORE_OK &&
-             vcs_package_verify_chunk(file, chunk_index, chunk,
-                                      chunk_len) &&
              checkout_write_all(fd, chunk, chunk_len);
         if (ok && metrics) {
             metrics->chunks++;

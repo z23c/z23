@@ -1193,6 +1193,35 @@ enum vcs_package_store_result vcs_package_store_get_chunk_at_into(
     return result;
 }
 
+enum vcs_package_store_result vcs_package_store_get_chunk_at_expected(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    uint32_t file_index, uint32_t chunk_index, const uint8_t expected_hash[32],
+    size_t expected_len, uint8_t **out, size_t *out_len)
+{
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!store || !package_root || !expected_hash || !out || !out_len)
+        return VCS_PACKAGE_STORE_ERR_NULL;
+    pthread_mutex_lock(&store->lock);
+    struct store_package *pkg = store_find(store, package_root, NULL);
+    const struct vcs_package_file *file = pkg && file_index < pkg->manifest.count ?
+        &pkg->manifest.files[file_index] : NULL;
+    enum vcs_package_store_result result = pkg ?
+        store_chunk_read_locked(store, pkg, file, chunk_index, NULL, 0, out, out_len) :
+        VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE;
+    if (result == VCS_PACKAGE_STORE_OK &&
+        (*out_len != expected_len ||
+         memcmp(file->chunk_hashes + (size_t)chunk_index * 32u,
+                expected_hash, 32) != 0)) {
+        free(*out);
+        *out = NULL;
+        *out_len = 0;
+        result = VCS_PACKAGE_STORE_ERR_CHUNK_HASH;
+    }
+    pthread_mutex_unlock(&store->lock);
+    return result;
+}
+
 /* ── reads: slice-12 swarm coordinates ────────────────────────────── */
 
 enum vcs_package_store_result vcs_package_store_get_chunk_at(
