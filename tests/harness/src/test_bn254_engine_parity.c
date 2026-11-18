@@ -28,8 +28,14 @@
  *       public inputs, an edited verifying key (in place, so a cached key is
  *       stale) and the key restored;
  *   E7  concurrent verification, one thread per core, valid and invalid
- *       proofs, through the shared key tables.
- * E1-E6 run once per engine instance: the portable multiply and, when the CPU
+ *       proofs, through the shared key tables;
+ *   E8  E1/E2 again on edge-valued Fq12 inputs (0, 1, -1, q-1, sparse), which
+ *       reach fq_neg(0) and the other zero-coefficient paths;
+ *   E9  ACCEPTING proofs whose pairing products contain identity operands
+ *       (A+acc = O, A+acc+C = O, C = O, A = O, B = O, identity key elements),
+ *       built on keys with known discrete logs, plus one-point tweaks of each:
+ *       the same verdict as the original, and every valid one accepted.
+ * E1-E6, E8 and E9 run once per engine instance: the portable multiply and, when the CPU
  * has BMI2+ADX, the MULX one. */
 
 #include "test/test_core.h"
@@ -952,6 +958,314 @@ static int check_verify_engine(void)
     return failures;
 }
 
+/* ── E8: edge-valued field elements ───────────────────────────── */
+
+/* Coefficient kinds: 0, 1, the limbs of q-1, -1 (Montgomery), random. Zero
+ * coefficients reach fq_neg(0) through conjugation and the Frobenius maps,
+ * which random inputs almost never do. */
+static void edge_fq(struct bn_fq *f, int kind)
+{
+    static const uint64_t q_minus_1[4] = {
+        0x3c208c16d87cfd46ULL, 0x97816a916871ca8dULL,
+        0xb85045b68181585dULL, 0x30644e72e131a029ULL
+    };
+    switch (kind) {
+    case 0: bn_fq_zero(f); break;
+    case 1: bn_fq_one(f); break;
+    case 2: memcpy(f->d, q_minus_1, sizeof q_minus_1); break;
+    case 3: bn_fq_one(f); bn_fq_neg(f, f); break;
+    default: rand_fq(f); break;
+    }
+}
+
+/* Coefficient i of f is of `kind` when bit i of mask is set, else 0. */
+static void edge_fq12(struct bn_fq12 *f, int kind, unsigned mask)
+{
+    struct bn_fq c[12];
+    _Static_assert(sizeof c == sizeof *f, "Fq12 is 12 Fq");
+    for (int i = 0; i < 12; i++) {
+        if ((mask >> i) & 1u)
+            edge_fq(&c[i], kind);
+        else
+            bn_fq_zero(&c[i]);
+    }
+    memcpy(f, c, sizeof *f);
+}
+
+/* Number of results that differ between the engine and the original for the
+ * final exponentiation, product, square, inverse, Frobenius maps and the sparse
+ * multiply by g's line slots. */
+static int edge_tower_differs(const struct bn_fq12 *f, const struct bn_fq12 *g)
+{
+    struct bn_fq12 r;
+    struct legacy_bn_fq12 lf, lg, lr, sp;
+    int bad = 0;
+    memcpy(&lf, f, sizeof lf);
+    memcpy(&lg, g, sizeof lg);
+    r = *f;
+    bn254_test_final_exp(&r);
+    lr = lf;
+    legacy_bn254_x_final_exp(&lr);
+    bad += !SAME(r, lr);
+    bn254_test_fq12_mul(&r, f, g);
+    legacy_bn_fq12_mul(&lr, &lf, &lg);
+    bad += !SAME(r, lr);
+    bn254_test_fq12_sqr(&r, f);
+    legacy_bn_fq12_sq(&lr, &lf);
+    bad += !SAME(r, lr);
+    bn254_test_fq12_inv(&r, f);
+    legacy_bn_fq12_inv(&lr, &lf);
+    bad += !SAME(r, lr);
+    for (int p = 1; p <= 3; p++) {
+        bn254_test_fq12_frob(&r, f, p);
+        legacy_bn_fq12_frobenius_map(&lr, &lf, p);
+        bad += !SAME(r, lr);
+    }
+    legacy_bn_fq12_zero(&sp);
+    sp.c0.c0 = lg.c0.c0;
+    sp.c0.c2 = lg.c0.c2;
+    sp.c1.c1 = lg.c1.c1;
+    r = *f;
+    bn254_test_fq12_mul_by_024(&r, &g->c0.c0, &g->c1.c1, &g->c0.c2);
+    legacy_bn_fq12_mul(&lr, &lf, &sp);
+    bad += !SAME(r, lr);
+    return bad;
+}
+
+/* Cyclotomic squaring of the easy-part image of f against the generic square. */
+static int edge_cyc_differs(const struct bn_fq12 *f)
+{
+    struct legacy_bn_fq12 lf, t0, t1, c, lr;
+    struct bn_fq12 cc, r;
+    memcpy(&lf, f, sizeof lf);
+    t0 = lf;
+    legacy_bn_fq12_conjugate(&t0);
+    legacy_bn_fq12_inv(&t1, &lf);
+    legacy_bn_fq12_mul(&c, &t0, &t1);
+    legacy_bn_fq12_frobenius_map(&t0, &c, 2);
+    legacy_bn_fq12_mul(&c, &t0, &c);
+    memcpy(&cc, &c, sizeof cc);
+    bn254_test_fq12_cyc_sqr(&r, &cc);
+    legacy_bn_fq12_sq(&lr, &c);
+    return !SAME(r, lr);
+}
+
+static int check_edge_values(void)
+{
+    int failures = 0, bad = 0, n = 0;
+    static const unsigned masks[8] = { 0xfffu, 0x001u, 0x041u, 0x015u, 0x2a0u, 0x800u, 0x555u, 0xaaau };
+    legacy_bn254_x_init();
+    for (int kind = 0; kind < 5; kind++)
+        for (int m = 0; m < 8; m++) {
+            struct bn_fq12 f, g;
+            edge_fq12(&f, kind, masks[m]);
+            edge_fq12(&g, (kind + 2) % 5, masks[(m + 3) % 8]);
+            bad += edge_tower_differs(&f, &g);
+            bad += edge_cyc_differs(&f);
+            n++;
+        }
+    printf("E8: tower ops, sparse multiply, cyclotomic square, final exponentiation on edge values "
+           "(0, 1, -1, q-1, sparse; %d pairs, %d results differ)... ", n, bad);
+    if (bad == 0) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* ── E9: accepting proofs with identity operands ──────────────── */
+
+/* Keys with known discrete logs, so valid proofs come from point operations
+ * alone. Flavour 0: rC_Z = gamma = G2. Flavour 1: alpha_A, rC_Z, gamma and
+ * gamma_beta (G1 and G2) are the identity. IC holds an identity and a repeated
+ * point; points are Jacobian. */
+struct syn_key {
+    struct ppzksnark_vk vk;
+    struct bn_g1 ic[10];
+    uint64_t beta[4], aa[4], ab[4], ac[4];
+    int flavour;
+};
+
+static void syn_key_identities(struct syn_key *k)
+{
+    bn_g2_identity(&k->vk.alpha_a_g2);
+    bn_g2_identity(&k->vk.rc_z_g2);
+    bn_g2_identity(&k->vk.gamma_g2);
+    bn_g2_identity(&k->vk.gamma_beta_g2);
+    bn_g1_identity(&k->vk.gamma_beta_g1);
+}
+
+static void syn_key_make(struct syn_key *k, int flavour)
+{
+    struct bn_g1 g;
+    struct bn_g2 h;
+    memset(k, 0, sizeof *k);
+    k->flavour = flavour;
+    g1_generator(&g);
+    bn254_g2_one(&h);
+    rand_scalar(k->beta);
+    rand_scalar(k->aa);
+    rand_scalar(k->ab);
+    rand_scalar(k->ac);
+    for (int i = 0; i < 10; i++)
+        rand_g1(&k->ic[i], true);
+    bn_g1_identity(&k->ic[4]);
+    k->ic[6] = k->ic[2];
+    g2_scalar_mul(&k->vk.alpha_a_g2, &h, k->aa);
+    bn_g1_scalar_mul(&k->vk.alpha_b_g1, &g, k->ab);
+    g2_scalar_mul(&k->vk.alpha_c_g2, &h, k->ac);
+    k->vk.gamma_g2 = h;
+    bn_g1_scalar_mul(&k->vk.gamma_beta_g1, &g, k->beta);
+    g2_scalar_mul(&k->vk.gamma_beta_g2, &h, k->beta);
+    k->vk.rc_z_g2 = h;
+    if (flavour == 1)
+        syn_key_identities(k);
+    k->vk.ic = k->ic;
+    k->vk.ic_len = 10;
+}
+
+/* Public inputs: random, with 0, r, r-1, r+1, 2^256-1 and the other edge
+ * scalars mixed in. */
+static void syn_inputs(uint64_t in[9][4])
+{
+    for (int i = 0; i < 9; i++) {
+        rand_scalar(in[i]);
+        if (rnd() & 1)
+            memcpy(in[i], k_msm_edge[rnd() % 12], 32);
+    }
+}
+
+static void syn_acc(struct bn_g1 *acc, const struct syn_key *k, const uint64_t in[9][4])
+{
+    *acc = k->ic[0];
+    for (int i = 0; i < 9; i++) {
+        struct bn_g1 t;
+        bn_g1_scalar_mul(&t, &k->ic[i + 1], in[i]);
+        bn_g1_add(acc, acc, &t);
+    }
+}
+
+/* H, K (and C for flavour 1) that satisfy checks 4 and 5 for the key. */
+static void syn_proof_finish(struct ppzksnark_proof *p, const struct syn_key *k,
+                             const struct bn_g1 *aacc, const struct bn_g1 *bg, const uint64_t b[4])
+{
+    struct bn_g1 t, s;
+    if (k->flavour == 1) {
+        bn_g1_identity(&p->a_prime);         /* alpha_A = O */
+        bn_g1_scalar_mul(&p->c, aacc, b);    /* rC_Z = O: C = b (A + acc) */
+        bn_g1_scalar_mul(&p->c_prime, &p->c, k->ac);
+        rand_g1(&p->h, true);                /* H and K meet only identities */
+        rand_g1(&p->k, true);
+        return;
+    }
+    bn_g1_scalar_mul(&t, aacc, b);           /* rC_Z = 1: H = b (A + acc) - C */
+    bn_g1_neg(&s, &p->c);
+    bn_g1_add(&p->h, &t, &s);
+    bn_g1_add(&t, aacc, &p->c);              /* gamma = 1: K = beta (A + acc + C + b G1) */
+    bn_g1_add(&t, &t, bg);
+    bn_g1_scalar_mul(&p->k, &t, k->beta);
+}
+
+/* shape 0 random, 1 A = -acc, 2 C = -(A + acc), 3 C = O, 4 A = O, 5 B = O */
+static void syn_proof(struct ppzksnark_proof *p, const struct syn_key *k,
+                      const uint64_t in[9][4], int shape)
+{
+    struct bn_g1 g, acc, aacc, bg;
+    struct bn_g2 h;
+    uint64_t b[4];
+    g1_generator(&g);
+    bn254_g2_one(&h);
+    rand_scalar(b);
+    if (shape == 5)
+        memset(b, 0, sizeof b);
+    syn_acc(&acc, k, in);
+    rand_g1(&p->a, true);
+    if (shape == 1)
+        bn_g1_neg(&p->a, &acc);
+    if (shape == 4)
+        bn_g1_identity(&p->a);
+    g2_scalar_mul(&p->b, &h, b);
+    bn_g1_scalar_mul(&bg, &g, b);
+    rand_g1(&p->c, true);
+    bn_g1_add(&aacc, &p->a, &acc);
+    if (shape == 2)
+        bn_g1_neg(&p->c, &aacc);
+    if (shape == 3)
+        bn_g1_identity(&p->c);
+    bn_g1_scalar_mul(&p->a_prime, &p->a, k->aa);
+    bn_g1_scalar_mul(&p->b_prime, &bg, k->ab);
+    bn_g1_scalar_mul(&p->c_prime, &p->c, k->ac);
+    syn_proof_finish(p, k, &aacc, &bg, b);
+}
+
+static bool syn_verify_legacy(const struct syn_key *k, const struct ppzksnark_proof *p,
+                              const uint64_t in[9][4])
+{
+    struct legacy_ppzksnark_vk lvk;
+    struct legacy_bn_g1 lic[10];
+    struct legacy_ppzksnark_proof lp;
+    memcpy(&lvk, &k->vk, sizeof lvk);
+    memcpy(lic, k->ic, sizeof lic);
+    lvk.ic = lic;
+    memcpy(&lp, p, sizeof lp);
+    return legacy_ppzksnark_verify(&lvk, &lp, in, 9);
+}
+
+/* Moves one proof element off its valid value (7 = g_B). */
+static void syn_tweak(struct ppzksnark_proof *p, int which)
+{
+    struct bn_g1 g;
+    struct bn_g2 h;
+    struct bn_g1 *pts[7] = { &p->a, &p->a_prime, &p->b_prime, &p->c, &p->c_prime, &p->k, &p->h };
+    g1_generator(&g);
+    bn254_g2_one(&h);
+    if (which < 7)
+        bn_g1_add(pts[which], pts[which], &g);
+    else
+        bn_g2_add(&p->b, &p->b, &h);
+}
+
+struct syn_tally { int n, accepted, differ, refused; };
+
+static void syn_case(const struct syn_key *k, int shape, struct syn_tally *t)
+{
+    uint64_t in[9][4];
+    struct ppzksnark_proof p;
+    syn_inputs(in);
+    syn_proof(&p, k, (const uint64_t (*)[4])in, shape);
+    for (int tw = -1; tw < 8; tw++) {
+        struct ppzksnark_proof q = p;
+        if (tw >= 0)
+            syn_tweak(&q, tw);
+        bool a = ppzksnark_verify(&k->vk, &q, (const uint64_t (*)[4])in, 9);
+        bool b = syn_verify_legacy(k, &q, (const uint64_t (*)[4])in);
+        t->n++;
+        t->accepted += a;
+        t->differ += (a != b);
+        t->refused += (tw < 0 && !a);
+    }
+}
+
+static int check_identity_proofs(void)
+{
+    int failures = 0;
+    static struct syn_key keys[3];
+    struct syn_tally t = {0};
+    syn_key_make(&keys[0], 0);
+    syn_key_make(&keys[1], 1);
+    syn_key_make(&keys[2], 0);
+    enum zcl_log_level saved_level = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
+    for (int round = 0; round < 2; round++)
+        for (int ki = 0; ki < 3; ki++)
+            for (int shape = 0; shape < 6; shape++)
+                syn_case(&keys[(ki + round) % 3], shape, &t);
+    zcl_log_level_set(saved_level);
+    printf("E9: %d synthetic verifications (3 keys interleaved; A+acc = O, A+acc+C = O, C = O, "
+           "A = O, B = O, identity key elements; one-point tweaks): %d accepted, %d differ, "
+           "%d valid refused\n", t.n, t.accepted, t.differ, t.refused);
+    ENG_CHECK("E9: verdicts equal the original on every synthetic case", t.differ == 0);
+    ENG_CHECK("E9: every valid synthetic proof (identity operands included) is accepted", t.refused == 0);
+    return failures;
+}
+
 /* ── E7: concurrent verification ──────────────────────────────── */
 
 #define PAR_THREADS 16
@@ -1040,6 +1354,8 @@ static int run_engine(int which, const char *label)
     failures += check_subgroup_test();
     failures += check_msm();
     failures += check_verify_engine();
+    failures += check_edge_values();
+    failures += check_identity_proofs();
     return failures;
 }
 
