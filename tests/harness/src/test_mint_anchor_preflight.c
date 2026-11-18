@@ -627,7 +627,6 @@ static int test_normal_preflight_marker_only_in_wal(void)
     MAP_CHECK("wal-only: marker seen in the WAL is refused, nothing changes",
               map_marked_preflight(dir, &verdict) && !verdict);
     failures += map_alternate_temp_root(dir, db);
-    failures += map_failure_reasons(dir);
     if (db)
         sqlite3_close(db);
     map_cleanup_dir(dir);
@@ -778,6 +777,7 @@ static int test_normal_preflight_copy_fallbacks(void)
     map_remove_shm(dir);
     MAP_CHECK("no-shm: ordinary WAL allowed via copy, no fsync, source untouched",
               map_copy_fallback(dir, &verdict) && verdict);
+    failures += map_failure_reasons(dir);
     map_cleanup_dir(dir);
     mkdir_p(dir);
     MAP_CHECK("no-shm: producer marker fixture", map_crash_fixture(dir, MINT_ANCHOR_IN_PROGRESS_KEY));
