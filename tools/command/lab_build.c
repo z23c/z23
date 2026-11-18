@@ -450,12 +450,46 @@ static void lab_compile_once(const struct lab_dirs *d,
     lab_proc_free(&proc);
 }
 
+static bool lab_sanitizer_option(const char *line)
+{
+    return strstr(line, "-fsanitize") &&
+        (strstr(line, "unrecognized command-line option") ||
+         strstr(line, "unrecognized argument") || strstr(line, "not supported") ||
+         strstr(line, "unsupported option") || strstr(line, "unsupported argument") ||
+         strstr(line, "unknown argument") || strstr(line, "unknown option"));
+}
+
+static bool lab_sanitizer_runtime(const char *line)
+{
+    return (strstr(line, "-lasan") || strstr(line, "-lubsan") ||
+            strstr(line, "libasan") || strstr(line, "libubsan")) &&
+        (strstr(line, "cannot find") || strstr(line, "cannot open") ||
+         strstr(line, "not found") || strstr(line, "No such file or directory"));
+}
+
+static bool lab_sanitizer_failure_line(const char *line)
+{
+    struct lab_diag diag;
+    if (strstr(line, " | ") || lab_parse_line(line, strlen(line), &diag))
+        return false;
+    return lab_sanitizer_option(line) || lab_sanitizer_runtime(line);
+}
+
 static bool lab_sanitizer_missing(const struct lab_compile *c)
 {
-    return strstr(c->tail, "sanitize") || strstr(c->tail, "-lasan") ||
-           strstr(c->tail, "-lubsan") || strstr(c->tail, "libasan") ||
-           strstr(c->tail, "libubsan");
+    const char *line = c->tail;
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        size_t n = end ? (size_t)(end - line) : strlen(line);
+        char text[LAB_TAIL_MAX + 1];
+        snprintf(text, sizeof(text), "%.*s", (int)(n < sizeof(text) - 1 ? n : sizeof(text) - 1), line);
+        if (lab_sanitizer_failure_line(text))
+            return true;
+        line = end ? end + 1 : line + n;
+    }
+    return false;
 }
+
 
 static bool lab_compile_dir(const struct lab_dirs *d, const struct lab_source *src,
                             const char *name, char dir[LAB_PATH],

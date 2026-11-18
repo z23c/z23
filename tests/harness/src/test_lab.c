@@ -185,6 +185,42 @@ static int test_lab_link_error(void)
 }
 
 
+static int test_lab_sanitizer_identifier(void)
+{
+    int failures = 0;
+    TEST("lab compile: source identifier does not trigger sanitizer retry") {
+        struct zcl_command_reply probe;
+        ASSERT(lt_run("hello.c", "", &probe));
+        ASSERT(lt_refused_or_ok(&probe));
+        bool sanitizer_available = lt_flag(&probe.data, "sanitizer", "enabled");
+        zcl_command_reply_free(&probe);
+        char path[600], input[1024];
+        struct zcl_command_reply r;
+        ASSERT(snprintf(path, sizeof(path), "%s/sanitize-source.c", g_lt_dir) > 0);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("int main(void) { return sanitize_value; }\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(snprintf(input, sizeof(input),
+                        "{\"file\":\"%s\",\"compile_only\":true,\"fresh\":true}", path) > 0);
+        size_t before = lab_compile_count();
+        ASSERT(lt_call(zcl_native_handle_lab_run, input, "zcl.lab_run.v1", &r));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(!lt_flag(&r.data, "compile", "ok"));
+        if (sanitizer_available)
+            ASSERT_EQ(lab_compile_count(), before + 1);
+        else
+            ASSERT(lab_compile_count() == before + 1 || lab_compile_count() == before + 2);
+        const struct json_value *diag = lt_at(&r.data, "compile", "diagnostics");
+        ASSERT(diag && diag->num_children > 0);
+        ASSERT(lt_has(&diag->children[0], "message", NULL, "sanitize_value"));
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_lab_compile_error(void)
 {
     int failures = 0;
@@ -1219,6 +1255,7 @@ int test_lab(void)
     failures += test_lab_wrapper_failure();
 #endif
     failures += test_lab_compile_error();
+    failures += test_lab_sanitizer_identifier();
     failures += test_lab_link_error();
     failures += test_lab_exit_and_stderr();
     failures += test_lab_crash();
