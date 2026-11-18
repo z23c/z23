@@ -1391,6 +1391,97 @@ static int test_code_packet_definition_evidence(void)
     return failures;
 }
 
+static int test_code_packet_impact_failure(void)
+{
+    int failures = 0;
+    TEST("code_packet: failed impact traversal refuses unobserved counts") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_index_build());
+        const char *files[] = { "core/modules/net/src/pk_small.c" };
+        struct zcl_command_reply reply;
+        pkt_call("Inspect dependents", NULL, 0, files, 1, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *impact = pkt_first(&reply, "impact");
+        ASSERT(impact && json_get_int(json_get(impact, "transitive_dependents")) > 0);
+        ASSERT_STR_EQ(json_get_str(json_get(impact, "include_dimension")), "no-include-graph");
+        zcl_command_reply_free(&reply);
+        const char *empty[] = { "core/modules/net/src/pk_long.c" };
+        pkt_call("No dependents", NULL, 0, empty, 1, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        impact = pkt_first(&reply, "impact");
+        ASSERT(impact && json_get_int(json_get(impact, "direct_dependents")) == 0);
+        ASSERT_EQ(json_get_int(json_get(impact, "transitive_dependents")), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(impact, "include_dimension")), "no-include-graph");
+        zcl_command_reply_free(&reply);
+        size_t before = json_test_live_blocks();
+        for (unsigned nth = 1; nth <= 2; nth++) {
+            zcl_alloc_fault_fail_nth("ci_closure_refbuf", nth);
+            pkt_call("Inspect dependents", NULL, 0, files, 1, 20, &reply);
+            bool consumed = zcl_alloc_fault_armed_label() == NULL;
+            zcl_alloc_fault_clear();
+            ASSERT(consumed);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+            ASSERT_STR_EQ(reply.error.code, "PACKET_IMPACT_UNAVAILABLE");
+            ASSERT(reply.error.retryable);
+            ASSERT(json_empty(&reply.data));
+            zcl_command_reply_free(&reply);
+            ASSERT_EQ(json_test_live_blocks(), before);
+        }
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
+static bool pkt_reverse_include_fixture(void)
+{
+    if (!pkt_fixture() || !pkt_write("core/modules/net/include/net/shared.h", "int shared(void);\n"))
+        return false;
+    for (int i = 0; i < 121; i++) {
+        char src[160], dep[160], text[512];
+        (void)snprintf(src, sizeof(src), "core/modules/net/src/impact_reader_%03d.c", i);
+        (void)snprintf(dep, sizeof(dep), "build/obj/impact_reader_%03d.d", i);
+        (void)snprintf(text, sizeof(text), "build/obj/impact_reader_%03d.o: %s core/modules/net/include/net/shared.h\n", i, src);
+        if (!pkt_write(src, "int impact_reader(void) { return 1; }\n") || !pkt_write(dep, text))
+            return false;
+    }
+    return pkt_index_build();
+}
+
+static int test_code_packet_reverse_impact_failure(void)
+{
+    int failures = 0;
+    TEST("code_packet: reverse include failure refuses unobserved count") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_reverse_include_fixture());
+        const char *files[] = { "core/modules/net/include/net/shared.h" };
+        struct zcl_command_reply reply;
+        pkt_call("Inspect include readers", NULL, 0, files, 1, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *impact = pkt_first(&reply, "impact");
+        ASSERT(impact && json_get_int(json_get(impact, "include_dependents")) == 120);
+        ASSERT_STR_EQ(json_get_str(json_get(impact, "include_dimension")), "closure-truncated");
+        zcl_command_reply_free(&reply);
+        size_t before = json_test_live_blocks();
+        zcl_alloc_fault_fail_next("ci_revinc_probe");
+        pkt_call("Inspect include readers", NULL, 0, files, 1, 20, &reply);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "PACKET_IMPACT_UNAVAILABLE");
+        ASSERT(reply.error.retryable && json_empty(&reply.data));
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(json_test_live_blocks(), before);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1423,5 +1514,7 @@ int test_code_packet(void)
     failures += test_code_packet_exact_name();
     failures += test_code_packet_exact_capped();
     failures += test_code_packet_definition_evidence();
+    failures += test_code_packet_impact_failure();
+    failures += test_code_packet_reverse_impact_failure();
     return failures;
 }

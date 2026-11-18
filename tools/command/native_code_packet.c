@@ -63,6 +63,7 @@ struct pk_run {
     bool neighborhoods;
     bool declarations;
     bool declaration_output_failed;
+    char impact_error_path[256];
     struct agent_impact_acc *route_accs;
     const char *routes[PK_TOUCH_MAX];
     bool route_risks[PK_TOUCH_MAX];
@@ -790,9 +791,8 @@ static int pk_closure(struct codeindex *ci, const char *path, int depth,
     char changed[1][256];
     memset(changed[0], 0, sizeof(changed[0]));
     (void)snprintf(changed[0], sizeof(changed[0]), "%s", path);
-    int n = codeindex_impact_closure(ci, changed, 1, depth, out, CODE_IMPACT_CAP,
-                                     trunc);
-    return n < 0 ? 0 : n;
+    return codeindex_impact_closure(ci, changed, 1, depth, out, CODE_IMPACT_CAP,
+                                    trunc);
 }
 
 static int pk_others(char (*list)[256], int n, const char *self,
@@ -809,23 +809,25 @@ static int pk_others(char (*list)[256], int n, const char *self,
     return others;
 }
 
-static void pk_do_impact(struct pk_run *run, const char *path)
+static bool pk_do_impact(struct pk_run *run, const char *path)
 {
     static char direct[CODE_IMPACT_CAP][256];
     static char full[CODE_IMPACT_CAP][256];
     static char incdeps[CODE_IMPACT_CAP][256];
     bool t1 = false, t2 = false;
     int n1 = pk_closure(run->ctx.ci, path, 1, direct, &t1);
+    if (n1 < 0) return false;
     int n2 = pk_closure(run->ctx.ci, path, 0, full, &t2);
+    if (n2 < 0) return false;
+    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+    int ni = codeindex_reverse_includes(run->ctx.ci, path, incdeps,
+                                        CODE_IMPACT_CAP, &dim);
+    if (ni < 0) return false;
     struct json_value o, top;
     pk_obj(&o);
     json_init(&top); json_set_array(&top);
     int d1 = pk_others(direct, n1, path, NULL);
     int d2 = pk_others(full, n2, path, &top);
-    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
-    int ni = codeindex_reverse_includes(run->ctx.ci, path, incdeps,
-                                        CODE_IMPACT_CAP, &dim);
-    if (ni < 0) ni = 0;
     (void)json_push_kv_str(&o, "file", path);
     (void)json_push_kv_int(&o, "direct_dependents", d1);
     (void)json_push_kv_int(&o, "transitive_dependents", d2);
@@ -845,6 +847,7 @@ static void pk_do_impact(struct pk_run *run, const char *path)
     pk_sb_add(&run->keep, "; %d reader(s) by #include (%s)\n", ni,
               codeindex_include_dim_label(dim));
     json_free(&top);
+    return true;
 }
 
 /* The class a command resolves to. A command with no row in
@@ -927,8 +930,10 @@ static void pk_do_touched(struct pk_run *run, int i)
         pk_claim(run, indexed, indexed ? "code index" : "not in the code index",
                  "file %s is in the code index", path);
     pk_do_tests(run, path, i);
-    if (indexed)
-        pk_do_impact(run, path);
+    if (indexed && !pk_do_impact(run, path)) {
+        (void)snprintf(run->impact_error_path, sizeof(run->impact_error_path), "%s", path);
+        return;
+    }
     pk_do_capability(run, path, indexed);
     if (strncmp(path, "tests/", 6) == 0) run->traps |= PK_TRAP_TESTS;
     if (strncmp(path, "tools/command/", 14) == 0) run->traps |= PK_TRAP_COMMAND;
@@ -1074,6 +1079,7 @@ static void pk_run_reset(struct pk_run *run, int max_lines)
     (void)snprintf(run->f.name, sizeof(run->f.name), "%s", name);
     run->ntouch = 0;
     run->declaration_output_failed = false;
+    run->impact_error_path[0] = 0;
     run->traps = 0;
     run->ctx.max_lines = max_lines;
 }
@@ -1118,10 +1124,11 @@ static void pk_assemble(struct pk_run *run, int max_lines)
     for (int i = 0; i < run->in.nfile; i++)
         pk_touch_add(run, run->in.files[i], true);
     pk_routes_prepare(run);
-    for (int i = 0; i < run->ntouch; i++)
+    for (int i = 0; i < run->ntouch && !run->impact_error_path[0]; i++)
         pk_do_touched(run, i);
     free(run->route_accs);
     run->route_accs = NULL;
+    if (run->impact_error_path[0]) return;
     run->f.ntouch = run->ntouch;
     int missing = 0;
     for (int i = 0; i < run->f.ngroup; i++)
@@ -1223,7 +1230,7 @@ bool zcl_packet_test_tail(struct json_value *out)
 }
 #endif
 
-enum pk_render_result { PK_RENDER_OK, PK_RENDER_FIT, PK_RENDER_ALLOC };
+enum pk_render_result { PK_RENDER_OK, PK_RENDER_FIT, PK_RENDER_ALLOC, PK_RENDER_IMPACT };
 
 static bool pk_render_fits(const struct pk_run *run, const struct pk_sb *files,
                            const struct pk_sb *doc)
@@ -1293,6 +1300,7 @@ static enum pk_render_result pk_fit(struct pk_run *run, size_t cap,
     for (;;) {
         if (reuse_files) run->ctx.max_lines = lines;
         else pk_assemble(run, lines);
+        if (run->impact_error_path[0]) return PK_RENDER_IMPACT;
         enum pk_render_result result = pk_render(run, out);
         if (result == PK_RENDER_ALLOC) return result;
         bool ok = result == PK_RENDER_OK;
@@ -1436,6 +1444,17 @@ void zcl_native_handle_code_packet(const struct zcl_command_request *request,
     struct json_value out;
     enum pk_render_result fit = pk_fit(run, pk_reply_cap(request), &out);
     if (fit != PK_RENDER_OK) {
+        if (fit == PK_RENDER_IMPACT) {
+            json_free(&reply->data);
+            json_init(&reply->data);
+            json_set_object(&reply->data);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INTERNAL, "PACKET_IMPACT_UNAVAILABLE",
+                                   "assemble", true, false,
+                                   "could not determine packet impact", run->impact_error_path);
+            pk_run_free(run);
+            return;
+        }
         if (fit == PK_RENDER_ALLOC) {
             zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                    ZCL_COMMAND_EXIT_INTERNAL, "OUT_OF_MEMORY",
