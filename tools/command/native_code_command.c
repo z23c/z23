@@ -325,14 +325,29 @@ bool zcl_native_code_routes_many(const char *const *paths, size_t count,
     return zcl_native_code_routes_many_at(".", paths, count, accs, routes, risks);
 }
 
-const char *zcl_native_code_route_at(const char *root, const char *path,
-    struct agent_impact_acc *acc, bool *consensus_risk)
+static const char *code_route_at(const char *root, const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk, bool focus_without_failures)
 {
     struct agent_impact_acc local = {0};
     struct agent_impact_acc *a = acc ? acc : &local;
     code_route_primary(root, path, a, NULL);
-    (void)agent_impact_name_routes_at(root, path, a);
+    bool established = code_path_is_consensus_risk(path) ||
+                       (a->shared_rule_hits > 0 && a->groups_len > 0);
+    if (!focus_without_failures || !established)
+        (void)agent_impact_name_routes_at(root, path, a);
     return code_route_finish(path, a, consensus_risk);
+}
+
+const char *zcl_native_code_focus_route_at(const char *root, const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk, bool has_failed_groups)
+{
+    return code_route_at(root, path, acc, consensus_risk, !has_failed_groups);
+}
+
+const char *zcl_native_code_route_at(const char *root, const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk)
+{
+    return code_route_at(root, path, acc, consensus_risk, false);
 }
 
 const char *zcl_native_code_route_for_path(const char *path,

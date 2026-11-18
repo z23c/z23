@@ -17,6 +17,8 @@ bool zcl_native_code_routes_many_at(const char *root, const char *const *paths, 
                                     struct agent_impact_acc *accs, const char **routes, bool *risks);
 const char *zcl_native_code_route_at(const char *root, const char *path,
                                      struct agent_impact_acc *acc, bool *consensus_risk);
+const char *zcl_native_code_focus_route_at(const char *root, const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk, bool has_failed_groups);
 
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"

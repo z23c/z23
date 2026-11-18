@@ -37,14 +37,20 @@ static void focus_push_str(struct json_value *arr, const char *s)
     json_free(&item);
 }
 
+struct focus_route_context {
+    const char *root;
+    bool has_failed_groups;
+};
+
 static size_t focus_route(const char *path,
                           char (*out)[SPECIALIST_GROUP_MAX], size_t cap,
                           void *user)
 {
-    const char *root = *(const char *const *)user;
-    struct agent_impact_acc acc = {0};
+    const struct focus_route_context *ctx = user;
+    struct agent_impact_acc acc;
     bool crisk = false;
-    (void)zcl_native_code_route_at(root, path, &acc, &crisk);
+    (void)zcl_native_code_focus_route_at(ctx->root, path, &acc, &crisk,
+                                         ctx->has_failed_groups);
     if (acc.shared_rule_hits == 0 && !crisk)
         return 0;
     size_t n = 0;
@@ -278,7 +284,8 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
 
     struct specialist_focus_hit hits[SPECIALIST_FOCUS_HIT_CAP];
     bool truncated = false;
-    int n = specialist_focus_rank(ci, spec, &ev, focus_route, &root, hits,
+    struct focus_route_context route_ctx = {root, ev.failed_count > 0};
+    int n = specialist_focus_rank(ci, spec, &ev, focus_route, &route_ctx, hits,
                                   SPECIALIST_FOCUS_HIT_CAP, &truncated);
     codeindex_close(ci);
     if (n < 0) {

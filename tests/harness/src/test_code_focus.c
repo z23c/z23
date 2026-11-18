@@ -5,6 +5,7 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_focus.h"
 #include "command/native_command.h"
@@ -601,6 +602,33 @@ static int test_focus_selected_root(void)
     return failures;
 }
 
+static int test_focus_primary_only(void)
+{
+    int failures = 0;
+    TEST("code_focus: no failed groups avoids unnecessary secondary scan") {
+        test_rm_rf_recursive(FOCUS_FIX);
+        ASSERT(focus_mk_write(FOCUS_FIX, "tools/command/native_code_focus_" "primary1109.c",
+                              "int focus_primary1109(void) { return 0; }\n"));
+        ASSERT(focus_mk_write(FOCUS_FIX, "tests/harness/src/test_fleet_parity.c",
+                              "const char *s = \"native_code_focus_" "primary1109\";\n"));
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json",
+                              "{\"groups\":[]}"));
+        struct zcl_command_reply reply;
+        zcl_alloc_fault_fail_next("agent_impact_names");
+        focus_call_name("codeindex", FOCUS_FIX, &reply);
+        bool armed = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(armed);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_size(json_get(&reply.data, "files")), 0);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    test_rm_rf_recursive(FOCUS_FIX);
+    return failures;
+}
+
 int test_code_focus(void)
 {
     int failures = 0;
@@ -614,6 +642,7 @@ int test_code_focus(void)
     failures += test_focus_work_cap();
     failures += test_focus_rank();
     failures += test_focus_selected_root();
+    failures += test_focus_primary_only();
     failures += test_focus_notes_read_cap();
     return failures;
 }
