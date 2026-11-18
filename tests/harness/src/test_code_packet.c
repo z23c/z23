@@ -21,6 +21,8 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
+#include <sqlite3.h>
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
@@ -416,11 +418,11 @@ static int test_code_packet_unrelated_large_file(void)
         ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ok");
         ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
         zcl_command_reply_free(&reply);
-        pkt_call("Capped global results never prove uniqueness", capped, 1, NULL, 0, 120, &reply);
-        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "lookup_capped");
+        pkt_call("Unique exact global result", capped, 1, NULL, 0, 120, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "ok");
         zcl_command_reply_free(&reply);
-        pkt_call("Capped supplied results never prove uniqueness", capped, 1, files, 2, 120, &reply);
-        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "lookup_capped");
+        pkt_call("Unique exact result with supplied files", capped, 1, files, 2, 120, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "ok");
         zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
@@ -551,7 +553,7 @@ static int test_code_packet_declaration_limits(void)
     TEST("code_packet: declaration caps, absent declarations and static scopes stay explicit") {
         struct zcl_command_reply reply;
         const char *names[] = {"pk_decl_many", "pk_long", "packet_rank", "pk_aux"};
-        const char *states[] = {"candidate_cap", "complete", "not_applicable_static", "lookup_capped"};
+        const char *states[] = {"candidate_cap", "complete", "not_applicable_static", "not_applicable_static"};
         const size_t counts[] = {4, 0, 0, 0};
         const char *files[] = {"core/modules/net/src/pk_service.c"};
         for (int i = 0; i < 4; i++) {
@@ -1217,6 +1219,178 @@ static int test_code_packet_exact_symbol_total(void)
     return failures;
 }
 
+static int test_code_packet_exact_name(void)
+{
+    int failures = 0;
+    TEST("code_packet: exact symbol survives many substring matches") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_index_build());
+        const char *symbols[] = { "pk_aux" };
+        struct zcl_command_reply reply;
+        pkt_call("Inspect exact symbol", symbols, 1, NULL, 0, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), "core/modules/net/src/pk_service.c");
+        char at[300];
+        (void)snprintf(at, sizeof(at), "%s:%lld", "core/modules/net/src/pk_service.c",
+                       (long long)json_get_int(json_get(ex, "site_line")));
+        const struct json_value *claims = json_get(&reply.data, "claims");
+        bool found = false;
+        for (size_t i = 0; claims && i < claims->num_children; i++) {
+            const struct json_value *row = json_at(claims, i);
+            const char *text = json_get_str(json_get(row, "claim"));
+            if (text && strcmp(text, "symbol pk_aux is defined once") == 0) {
+                ASSERT(json_get_bool(json_get(row, "value")));
+                ASSERT_STR_EQ(json_get_str(json_get(row, "at")), at);
+                found = true;
+            }
+        }
+        ASSERT(found);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
+static const struct json_value *pkt_named_claim(const struct zcl_command_reply *reply,
+                                                const char *name)
+{
+    const struct json_value *claims = json_get(&reply->data, "claims");
+    for (size_t i = 0; claims && i < claims->num_children; i++) {
+        const struct json_value *row = json_at(claims, i);
+        const char *text = json_get_str(json_get(row, "claim"));
+        if (text && strcmp(text, name) == 0) return row;
+    }
+    return NULL;
+}
+
+static int test_code_packet_exact_capped(void)
+{
+    int failures = 0;
+    TEST("code_packet: genuinely capped exact results remain conservative") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        char path[160];
+        for (int i = 0; i < 65; i++) {
+            (void)snprintf(path, sizeof(path), "core/modules/net/src/pk_repeat_%02d.c", i);
+            ASSERT(pkt_write(path, "static int packet_collision(void) { return 1; }\n"));
+        }
+        ASSERT(pkt_index_build());
+        const char *symbols[] = { "packet_collision" };
+        const char *files[] = { "core/modules/net/src/pk_repeat_00.c",
+                                "core/modules/net/src/pk_repeat_01.c" };
+        struct zcl_command_reply reply;
+        pkt_call("Capped globally", symbols, 1, NULL, 0, 20, &reply);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "lookup_capped");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "declaration_candidates_status")), "lookup_capped");
+        ASSERT(pkt_named_claim(&reply, "symbol packet_collision is defined once") == NULL);
+        const struct json_value *claim = pkt_named_claim(&reply, "global definition count for packet_collision is known");
+        ASSERT(claim && !json_get_bool(json_get(claim, "value")));
+        ASSERT_STR_EQ(json_get_str(json_get(claim, "at")), "exact lookup incomplete; uniqueness unproven");
+        zcl_command_reply_free(&reply);
+        pkt_call("Capped scoped", symbols, 1, files, 1, 20, &reply);
+        ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
+        ASSERT(pkt_named_claim(&reply, "symbol packet_collision is defined once") == NULL);
+        claim = pkt_named_claim(&reply, "global definition count for packet_collision is known");
+        ASSERT(claim && !json_get_bool(json_get(claim, "value")));
+        ASSERT_STR_EQ(json_get_str(json_get(claim, "at")), "exact lookup incomplete; uniqueness unproven");
+        zcl_command_reply_free(&reply);
+        pkt_call("Capped scoped ambiguity", symbols, 1, files, 2, 20, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "ambiguous");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
+static bool pkt_add_aux_variant(int line_delta, const char *declaration)
+{
+    struct codeindex *ci = codeindex_open(PKT_FIX);
+    if (!ci) return false;
+    struct ci_symbol symbol;
+    bool found = false;
+    bool ok = codeindex_symbol(ci, "pk_aux", &symbol, &found) && found;
+    codeindex_close(ci);
+    struct ci_store *store = ci_store_open_path(PKT_FIX "/.codeindex/index.kv");
+    if (!store) return false;
+    if (ok) {
+        symbol.def_line += line_delta;
+        (void)snprintf(symbol.decl_path, sizeof(symbol.decl_path), "%s", declaration);
+        symbol.decl_line = 1;
+        ok = ci_store_put_symbol(store, &symbol);
+    }
+    ci_store_close(store);
+    return ok;
+}
+
+static bool pkt_corrupt_aux(void)
+{
+    struct ci_store *store = ci_store_open_path(PKT_FIX "/.codeindex/index.kv");
+    if (!store) return false;
+    bool ok = sqlite3_exec(ci_store_db(store),
+        "UPDATE symbols SET row_sha3=zeroblob(32) WHERE name='pk_aux'",
+        NULL, NULL, NULL) == SQLITE_OK;
+    ci_store_close(store);
+    return ok;
+}
+
+static int test_code_packet_definition_evidence(void)
+{
+    int failures = 0;
+    TEST("code_packet: uniqueness uses distinct verified definition sites") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_write("core/modules/net/include/net/only_decl.h", "int packet_only_decl(void);\n"));
+        ASSERT(pkt_index_build());
+        ASSERT(pkt_add_aux_variant(0, "core/modules/net/include/net/duplicate.h"));
+        const char *symbols[] = { "pk_aux" };
+        struct zcl_command_reply reply;
+        pkt_call("Duplicate definition site", symbols, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "ok");
+        const struct json_value *claim = pkt_named_claim(&reply, "symbol pk_aux is defined once");
+        ASSERT(claim && json_get_bool(json_get(claim, "value")));
+        zcl_command_reply_free(&reply);
+        ASSERT(pkt_add_aux_variant(1, "core/modules/net/include/net/other.h"));
+        pkt_call("Distinct definition sites", symbols, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "ambiguous");
+        claim = pkt_named_claim(&reply, "symbol pk_aux is defined once");
+        ASSERT(claim && !json_get_bool(json_get(claim, "value")));
+        zcl_command_reply_free(&reply);
+        ASSERT(pkt_corrupt_aux());
+        pkt_call("Corrupt exact symbol", symbols, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "lookup_failed");
+        ASSERT(pkt_named_claim(&reply, "symbol pk_aux is defined once") == NULL);
+        claim = pkt_named_claim(&reply, "global definition count for pk_aux is known");
+        ASSERT(claim && !json_get_bool(json_get(claim, "value")));
+        ASSERT_STR_EQ(json_get_str(json_get(claim, "at")), "exact lookup incomplete; uniqueness unproven");
+        zcl_command_reply_free(&reply);
+        const char *decl[] = { "packet_only_decl" };
+        pkt_call("Declaration only", decl, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "declaration_only");
+        claim = pkt_named_claim(&reply, "symbol packet_only_decl is defined once");
+        ASSERT(claim && !json_get_bool(json_get(claim, "value")));
+        ASSERT_STR_EQ(json_get_str(json_get(claim, "at")), "declaration only: core/modules/net/include/net/only_decl.h:1");
+        zcl_command_reply_free(&reply);
+        const char *missing[] = { "packet_unfound_symbol" };
+        pkt_call("Missing exact symbol", missing, 1, NULL, 0, 20, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "not_found");
+        claim = pkt_named_claim(&reply, "symbol packet_unfound_symbol is defined once");
+        ASSERT(claim && !json_get_bool(json_get(claim, "value")));
+        ASSERT_STR_EQ(json_get_str(json_get(claim, "at")), "not in the code index");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1246,5 +1420,8 @@ int test_code_packet(void)
     failures += test_code_packet_files_only_retry();
     failures += test_code_packet_batch_fallback();
     failures += test_code_packet_partial_routes();
+    failures += test_code_packet_exact_name();
+    failures += test_code_packet_exact_capped();
+    failures += test_code_packet_definition_evidence();
     return failures;
 }

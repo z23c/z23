@@ -45,6 +45,9 @@ struct pk_choice {
     struct pk_declaration declarations[PK_DECL_CAP];
     int ndecl;
     const char *declaration_status;
+    bool definition_count_known;
+    int definition_count, exact_count;
+    char definition_at[300];
 };
 
 /* One assembly of the packet; rebuilt (cache kept) when the reply must shrink. */
@@ -374,29 +377,22 @@ static bool pk_json_excerpt(struct json_value *arr, const struct pk_excerpt *ex,
     return true;
 }
 
-/* "symbol X is defined once": every exact-name definition the index holds. */
+/* The claim uses the same complete exact enumeration as symbol selection. */
 static void pk_claim_defined_once(struct pk_run *run, const char *name,
-                                  const struct ci_symbol *s)
+                                  const struct pk_choice *choice)
 {
-    static struct ci_symbol hits[CODE_OTHER_DEF_CAP + 4];
-    int nh = codeindex_find(run->ctx.ci, name, hits,
-                            (int)(sizeof(hits) / sizeof(hits[0])));
-    int defs = 0;
-    char at[300];
-    at[0] = '\0';
-    for (int i = 0; i < nh; i++) {
-        if (strcmp(hits[i].name, name) != 0 || hits[i].def_path[0] == '\0')
-            continue;
-        if (defs++ == 0)
-            (void)snprintf(at, sizeof(at), "%s:%d", hits[i].def_path,
-                           hits[i].def_line);
+    if (!choice->definition_count_known) {
+        pk_claim(run, false, "exact lookup incomplete; uniqueness unproven",
+                 "global definition count for %s is known", name);
+        return;
     }
-    if (!s)
-        (void)snprintf(at, sizeof(at), "not in the code index");
-    else if (defs == 0)
-        (void)snprintf(at, sizeof(at), "declaration only: %s:%d", s->decl_path,
-                       s->decl_line);
-    pk_claim(run, defs == 1, at, "symbol %s is defined once", name);
+    const char *at = choice->definition_at;
+    if (!choice->definition_count && !choice->exact_count)
+        at = "not in the code index";
+    else if (!choice->definition_count && !at[0])
+        at = "declaration only; no indexed definition";
+    pk_claim(run, choice->definition_count == 1,
+             at, "symbol %s is defined once", name);
 }
 
 struct pk_match {
@@ -418,7 +414,8 @@ static void pk_match_add(struct pk_match *match, const struct ci_symbol *symbol)
     }
     const struct ci_symbol *old = &match->symbol;
     if (!strcmp(old->def_path, symbol->def_path) && old->def_line == symbol->def_line &&
-        !strcmp(old->decl_path, symbol->decl_path) && old->decl_line == symbol->decl_line) return;
+        (definition || (!strcmp(old->decl_path, symbol->decl_path) &&
+                        old->decl_line == symbol->decl_line))) return;
     match->count++;
 }
 
@@ -508,13 +505,43 @@ static void pk_declarations_collect(struct pk_choice *choice, const char *name,
     }
 }
 
+static void pk_definition_evidence(struct pk_choice *choice,
+                                   const struct ci_symbol *hits, int count)
+{
+    choice->definition_count_known = true;
+    choice->exact_count = count;
+    const struct ci_symbol *first = NULL;
+    for (int i = 0; i < count; i++) {
+        if (!hits[i].def_path[0]) {
+            if (!choice->definition_at[0] && hits[i].decl_path[0])
+                (void)snprintf(choice->definition_at, sizeof(choice->definition_at),
+                               "declaration only: %s:%d", hits[i].decl_path, hits[i].decl_line);
+            continue;
+        }
+        if (!first) {
+            first = &hits[i];
+            choice->definition_count = 1;
+            (void)snprintf(choice->definition_at, sizeof(choice->definition_at),
+                           "%s:%d", hits[i].def_path, hits[i].def_line);
+        } else if (first->def_line != hits[i].def_line ||
+                   strcmp(first->def_path, hits[i].def_path) != 0) {
+            choice->definition_count = 2;
+            break;
+        }
+    }
+}
+
 static const char *pk_resolve_symbol(struct pk_run *run, const char *name, struct pk_choice *choice)
 {
     static struct ci_symbol hits[PK_LOOKUP_CAP];
-    int n = codeindex_find(run->ctx.ci, name, hits, PK_LOOKUP_CAP);
+    int n = 0;
+    enum codeindex_exact_status exact =
+        codeindex_find_exact_checked(run->ctx.ci, name, hits, PK_LOOKUP_CAP, &n);
     choice->declaration_status = "lookup_failed";
-    if (n < 0) return "lookup_failed";
-    if (n < PK_LOOKUP_CAP) {
+    if (exact == CODEINDEX_EXACT_ERROR || exact == CODEINDEX_EXACT_CORRUPT)
+        return "lookup_failed";
+    if (exact == CODEINDEX_EXACT_COMPLETE) {
+        pk_definition_evidence(choice, hits, n);
         choice->status = pk_complete_matches(run, name, hits, n, &choice->symbol);
         pk_declarations_collect(choice, name, hits, n);
         return choice->status;
@@ -625,7 +652,7 @@ static void pk_do_symbol(struct pk_run *run, int index)
         pk_sb_add(&run->exc, "### %s  NOT AVAILABLE: %s (try `code find %s`)\n\n",
                   name, ex.status, name);
     }
-    pk_claim_defined_once(run, name, found ? &s : NULL);
+    pk_claim_defined_once(run, name, choice);
     pk_excerpt_free(&ex);
 }
 
