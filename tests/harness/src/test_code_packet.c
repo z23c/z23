@@ -626,7 +626,12 @@ static int test_code_packet_tests_match_code_tests(void)
                                           .invoked_name = "code.tests" };
         struct zcl_command_reply tests;
         zcl_command_reply_init(&tests, "zcl.code_tests.v1");
+        char cwd[4096];
+        ASSERT(getcwd(cwd, sizeof cwd));
+        ASSERT(chdir(PKT_FIX) == 0);
         zcl_native_handle_code_tests(&rq, &tests);
+        bool restored = chdir(cwd) == 0;
+        ASSERT(restored);
         ASSERT(tests.status == ZCL_COMMAND_STATUS_PASSED);
         struct zcl_command_reply reply;
         const char *files[] = { path };
@@ -1104,15 +1109,10 @@ static bool pkt_partial_route_fallback(void)
     if (!getcwd(cwd, sizeof(cwd)) || !test_mkdtemp(dir, sizeof(dir), "packet_routes"))
         return false;
     bool entered = chdir(dir) == 0;
-    bool ok = entered && mkdir("tests", 0755) == 0 &&
-              mkdir("tests/harness", 0755) == 0 &&
-              mkdir("tests/harness/src", 0755) == 0;
-    FILE *f = ok ? fopen("tests/harness/src/test_code_packet.c", "wb") : NULL;
-    if (f) {
-        ok = fputs("const char *x = \"native_code_capsule\";\n", f) >= 0;
-        if (fclose(f) != 0) ok = false;
-    } else ok = false;
-    if (ok) ok = pkt_fixture() && pkt_index_build();
+    bool ok = entered;
+    if (ok) ok = pkt_fixture() &&
+        pkt_write("tests/harness/src/test_code_packet.c",
+                  "const char *x = \"native_code_capsule\";\n") && pkt_index_build();
     if (ok) ok = pkt_partial_compare();
     if (entered && chdir(cwd) != 0) ok = false;
     if (test_rm_rf_recursive(dir) != 0) ok = false;
@@ -1518,6 +1518,68 @@ static int test_code_packet_index_recovery(void)
     return failures;
 }
 
+static int test_code_packet_root_routes(void)
+{
+    int failures = 0;
+    TEST("code_packet: routes referrers from the selected source root") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_write("tests/harness/src/test_dev_job.c",
+                         "const char *s = \"native_code_capsule\";\n"));
+        ASSERT(pkt_write("tests/harness/src/packet_windows_fixture.c", "int fixture;\n"));
+        ASSERT(pkt_write("platform/modules/platform/tests/windows_acceptance.mk",
+                         "ZCL_WINDOWS_ACCEPTANCE_probe_SOURCES := tests/harness/src/packet_windows_fixture.c\n"));
+        ASSERT(pkt_write("tools/lint/lintc/empty.c", "int empty;\n"));
+        ASSERT(pkt_index_build());
+        char cwd[4096], root[4096];
+        ASSERT(getcwd(cwd, sizeof cwd));
+        int n = snprintf(root, sizeof root, "%s/%s", cwd, PKT_FIX);
+        ASSERT(n > 0 && (size_t)n < sizeof root);
+        struct json_value input;
+        json_init(&input);
+        const char *text = "{\"goal\":\"Root routes\",\"files\":[\"tools/command/native_code_capsule.c\"],\"max_lines\":20}";
+        ASSERT(json_read(&input, text, strlen(text)));
+        struct zcl_command_reply reply;
+        pkt_run(root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *groups = json_get(pkt_first(&reply, "tests"), "test_groups");
+        bool found = false;
+        for (size_t i = 0; i < json_size(groups); i++)
+            if (strcmp(json_get_str(json_at(groups, i)), "dev_job") == 0) found = true;
+        ASSERT(found);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        json_init(&input);
+        text = "{\"goal\":\"Root routes\",\"files\":[\"tools/command/native_code_capsule.c\",\"tests/harness/src/packet_windows_fixture.c\"],\"max_lines\":20}";
+        ASSERT(json_read(&input, text, strlen(text)));
+        pkt_run(root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *rows = json_get(&reply.data, "tests");
+        ASSERT_EQ(json_size(rows), 2);
+        ASSERT(json_get_bool(json_get(json_at(rows, 1), "matched")));
+        groups = json_get(json_at(rows, 0), "test_groups");
+        found = false;
+        for (size_t i = 0; i < json_size(groups); i++)
+            if (strcmp(json_get_str(json_at(groups, i)), "dev_job") == 0) found = true;
+        ASSERT(found);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+#if !defined(_WIN32)
+        ASSERT(symlink("absent.c", PKT_FIX "/tests/harness/src/test_missing.c") == 0);
+        json_init(&input);
+        ASSERT(json_read(&input, text, strlen(text)));
+        pkt_run(root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(pkt_first(&reply, "tests"), "test_evidence_unavailable")));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+#endif
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 int test_code_packet(void)
 {
     int failures = 0;
@@ -1547,6 +1609,7 @@ int test_code_packet(void)
     failures += test_code_packet_files_only_retry();
     failures += test_code_packet_batch_fallback();
     failures += test_code_packet_partial_routes();
+    failures += test_code_packet_root_routes();
     failures += test_code_packet_exact_name();
     failures += test_code_packet_exact_capped();
     failures += test_code_packet_definition_evidence();

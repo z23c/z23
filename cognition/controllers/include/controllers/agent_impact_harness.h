@@ -94,6 +94,11 @@ bool agent_impact_string_literal_contains_whole_token(const char *text,
 bool agent_impact_apply_harness_routes(const char *path,
                                        struct agent_impact_acc *acc);
 
+bool agent_impact_harness_routes_at(const char *root, const char *path, struct agent_impact_acc *acc);
+bool agent_impact_name_routes_at(const char *root, const char *path, struct agent_impact_acc *acc);
+bool agent_impact_name_routes_many_at(const char *root, const char *const *paths,
+                                      struct agent_impact_acc *accs, size_t count);
+
 bool agent_impact_name_routes_many(const char *const *paths,
                                    struct agent_impact_acc *accs, size_t count);
 

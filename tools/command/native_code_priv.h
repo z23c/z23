@@ -13,6 +13,11 @@
 
 #include "command/native_command.h"
 
+bool zcl_native_code_routes_many_at(const char *root, const char *const *paths, size_t count,
+                                    struct agent_impact_acc *accs, const char **routes, bool *risks);
+const char *zcl_native_code_route_at(const char *root, const char *path,
+                                     struct agent_impact_acc *acc, bool *consensus_risk);
+
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"
 #include "territory/territory.h"

@@ -244,7 +244,7 @@ bool code_path_is_consensus_risk(const char *path)
     return false;
 }
 
-static void code_route_primary(const char *path, struct agent_impact_acc *acc,
+static void code_route_primary(const char *root, const char *path, struct agent_impact_acc *acc,
                                const struct agent_impact_snapshot *snapshot)
 {
     memset(acc, 0, sizeof(*acc));
@@ -255,7 +255,8 @@ static void code_route_primary(const char *path, struct agent_impact_acc *acc,
      * them. See agent_impact_harness.h for the two structural conventions
      * this resolves — test_<group>.c naming and the Windows-acceptance
      * sources table — ahead of any shared-rule match. */
-    (void)agent_impact_harness_routes_snapshot(path, acc, snapshot);
+    if (snapshot) (void)agent_impact_harness_routes_snapshot(path, acc, snapshot);
+    else (void)agent_impact_harness_routes_at(root, path, acc);
     (void)agent_impact_apply_shared_rules(path, acc);
 }
 
@@ -295,7 +296,7 @@ const char *zcl_native_code_route_snapshot(const char *path,
 {
     struct agent_impact_acc local = {0};
     struct agent_impact_acc *a = acc ? acc : &local;
-    code_route_primary(path, a, snapshot);
+    code_route_primary(".", path, a, snapshot);
     /* Secondary candidates: a harness/lint-gate file that names this path
      * inside a string literal (a binary name, a bare path) with no
      * #include edge. Appended last so it can only ADD to test_groups, never
@@ -304,17 +305,34 @@ const char *zcl_native_code_route_snapshot(const char *path,
     return code_route_finish(path, a, consensus_risk);
 }
 
-bool zcl_native_code_routes_many(const char *const *paths, size_t count,
+bool zcl_native_code_routes_many_at(const char *root, const char *const *paths, size_t count,
                                  struct agent_impact_acc *accs,
                                  const char **routes, bool *risks)
 {
     for (size_t i = 0; i < count; i++)
-        code_route_primary(paths[i], &accs[i], NULL);
-    if (!agent_impact_name_routes_many(paths, accs, count))
+        code_route_primary(root, paths[i], &accs[i], NULL);
+    if (!agent_impact_name_routes_many_at(root, paths, accs, count))
         return false;
     for (size_t i = 0; i < count; i++)
         routes[i] = code_route_finish(paths[i], &accs[i], &risks[i]);
     return true;
+}
+
+bool zcl_native_code_routes_many(const char *const *paths, size_t count,
+                                 struct agent_impact_acc *accs,
+                                 const char **routes, bool *risks)
+{
+    return zcl_native_code_routes_many_at(".", paths, count, accs, routes, risks);
+}
+
+const char *zcl_native_code_route_at(const char *root, const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk)
+{
+    struct agent_impact_acc local = {0};
+    struct agent_impact_acc *a = acc ? acc : &local;
+    code_route_primary(root, path, a, NULL);
+    (void)agent_impact_name_routes_at(root, path, a);
+    return code_route_finish(path, a, consensus_risk);
 }
 
 const char *zcl_native_code_route_for_path(const char *path,

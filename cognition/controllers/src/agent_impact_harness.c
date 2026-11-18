@@ -16,6 +16,7 @@
 #include "sha3/sha3.h"
 #include "util/compare.h"
 #include "util/file_io.h"
+#include "util/path_util.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -272,11 +273,13 @@ bool agent_impact_windows_acceptance_table_lists(const char *table_text,
     return false;
 }
 
-static bool aih_path_in_windows_acceptance_table(const char *rel_path)
+static bool aih_path_in_windows_acceptance_table(const char *root, const char *rel_path)
 {
     char *text = NULL;
     size_t len = 0;
-    if (!zcl_read_whole_file_text(AIH_WINDOWS_ACCEPTANCE_TABLE, AIH_TABLE_MAX,
+    char full[4096];
+    if (!zcl_path_join(full, sizeof(full), root, AIH_WINDOWS_ACCEPTANCE_TABLE) ||
+        !zcl_read_whole_file_text(full, AIH_TABLE_MAX,
                                   &text, &len, "agent_impact_harness"))
         return false;
     bool hit = agent_impact_windows_acceptance_table_lists(text, rel_path);
@@ -285,7 +288,7 @@ static bool aih_path_in_windows_acceptance_table(const char *rel_path)
     return hit;
 }
 
-bool agent_impact_harness_routes_snapshot(const char *path,
+static bool aih_harness_routes(const char *root, const char *path,
     struct agent_impact_acc *acc, const struct agent_impact_snapshot *snapshot)
 {
     if (!path || !acc)
@@ -300,12 +303,23 @@ bool agent_impact_harness_routes_snapshot(const char *path,
         return true;
     }
     if (snapshot ? agent_impact_windows_acceptance_table_lists(snapshot->table, path)
-                 : aih_path_in_windows_acceptance_table(path)) {
+                 : aih_path_in_windows_acceptance_table(root, path)) {
         agent_impact_add_group(acc, "make_lint_gates");
         acc->shared_rule_hits++;
         return true;
     }
     return false;
+}
+
+bool agent_impact_harness_routes_snapshot(const char *path, struct agent_impact_acc *acc,
+    const struct agent_impact_snapshot *snapshot)
+{
+    return aih_harness_routes(".", path, acc, snapshot);
+}
+
+bool agent_impact_harness_routes_at(const char *root, const char *path, struct agent_impact_acc *acc)
+{
+    return aih_harness_routes(root, path, acc, NULL);
 }
 
 bool agent_impact_apply_harness_routes(const char *path, struct agent_impact_acc *acc)
@@ -489,17 +503,17 @@ static bool aih_stem_is_compound(const char *stem)
 /* The referencing file's own group(s): rules 1/2 above, plus the shared rule
  * table it would earn on its own merits. Never rule 3 — a referencer never
  * chains into a second referencer's referencers. */
-static void aih_own_groups(const char *referrer_path, struct agent_impact_acc *dst)
+static void aih_own_groups(const char *root, const char *referrer_path, struct agent_impact_acc *dst)
 {
-    if (!agent_impact_apply_harness_routes(referrer_path, dst))
+    if (!agent_impact_harness_routes_at(root, referrer_path, dst))
         (void)agent_impact_apply_shared_rules(referrer_path, dst);
 }
 
-static void aih_merge_referrer_hit(const char *referrer_path,
+static void aih_merge_referrer_hit(const char *root, const char *referrer_path,
                                    struct agent_impact_acc *acc, bool *matched)
 {
     struct agent_impact_acc found = {0};
-    aih_own_groups(referrer_path, &found);
+    aih_own_groups(root, referrer_path, &found);
     agent_impact_merge_groups(acc, &found);
     if (found.groups_len > 0) {
         acc->shared_rule_hits++;
@@ -632,14 +646,19 @@ static bool aih_names_read(const char *dir, struct aih_names *names)
 /* Visits the directory's .c files in sorted name order. `code tests` caps the
  * groups it prints, so a readdir() (filesystem) order made WHICH groups
  * survived the cap differ between a lived-in tree and a clean checkout. */
-static void aih_scan_dir_for_reference(const char *dir, const char *path,
+static void aih_scan_dir_for_reference(const char *root, const char *dir, const char *path,
                                        const char *stem, const char *alt,
                                        bool has_alt, bool compound,
                                        struct agent_impact_acc *acc,
                                        bool *matched)
 {
     struct aih_names names = {0};
-    if (!aih_names_read(dir, &names)) {
+    char full_dir[4096];
+    if (!zcl_path_join(full_dir, sizeof(full_dir), root, dir)) {
+        acc->referrer_read_failed = true;
+        return;
+    }
+    if (!aih_names_read(full_dir, &names)) {
         aih_names_free(&names);
         return;
     }
@@ -653,7 +672,9 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
         char *text = NULL;
         size_t len = 0;
         bool limit_exceeded = false;
-        if (!zcl_read_whole_file_text_unbuffered_checked(relp, AIH_REFERRER_MAX, &text, &len,
+        char full[4096];
+        if (!zcl_path_join(full, sizeof(full), root, relp) ||
+            !zcl_read_whole_file_text_unbuffered_checked(full, AIH_REFERRER_MAX, &text, &len,
                                       "agent_impact_name_reference", &limit_exceeded)) {
             if (!limit_exceeded) acc->referrer_read_failed = true;
             continue;
@@ -662,7 +683,7 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
         free(text);
         (void)len;
         if (hit)
-            aih_merge_referrer_hit(relp, acc, matched);
+            aih_merge_referrer_hit(root, relp, acc, matched);
     }
     aih_names_free(&names);
 }
@@ -709,10 +730,11 @@ static void aih_batch_init(struct aih_batch_query *q, const char *path,
     }
 }
 
-static bool aih_batch_directory(const char *dir, struct aih_batch_query *q, size_t count)
+static bool aih_batch_directory(const char *root, const char *dir, struct aih_batch_query *q, size_t count)
 {
     struct aih_names names = {0};
-    if (!aih_names_read(dir, &names)) {
+    char full_dir[4096];
+    if (!zcl_path_join(full_dir, sizeof(full_dir), root, dir) || !aih_names_read(full_dir, &names)) {
         aih_names_free(&names);
         return false;
     }
@@ -721,7 +743,9 @@ static bool aih_batch_directory(const char *dir, struct aih_batch_query *q, size
         (void)snprintf(relp, sizeof(relp), "%s/%s", dir, names.items[i]);
         char *text = NULL;
         size_t len = 0;
-        if (!zcl_read_whole_file_text_unbuffered(relp, AIH_REFERRER_MAX, &text, &len,
+        char full[4096];
+        if (!zcl_path_join(full, sizeof(full), root, relp) ||
+            !zcl_read_whole_file_text_unbuffered(full, AIH_REFERRER_MAX, &text, &len,
                                       "agent_impact_name_reference")) {
             aih_names_free(&names);
             return false;
@@ -734,7 +758,7 @@ static bool aih_batch_directory(const char *dir, struct aih_batch_query *q, size
                                    q[j].has_alt, q[j].compound))
                 continue;
             if (!found_ready) {
-                aih_own_groups(relp, &found);
+                aih_own_groups(root, relp, &found);
                 found_ready = true;
             }
             agent_impact_merge_groups(q[j].acc, &found);
@@ -747,7 +771,7 @@ static bool aih_batch_directory(const char *dir, struct aih_batch_query *q, size
     return true;
 }
 
-bool agent_impact_name_routes_many(const char *const *paths,
+bool agent_impact_name_routes_many_at(const char *root, const char *const *paths,
                                    struct agent_impact_acc *accs, size_t count)
 {
     struct aih_batch_query *q = zcl_calloc(count, sizeof(*q), "agent_impact_batch");
@@ -761,7 +785,7 @@ bool agent_impact_name_routes_many(const char *const *paths,
     bool ok = true;
     if (any)
         for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
-            if (!aih_batch_directory(AIH_REFERRER_DIRS[d], q, count)) {
+            if (!aih_batch_directory(root, AIH_REFERRER_DIRS[d], q, count)) {
                 ok = false;
                 break;
             }
@@ -769,7 +793,13 @@ bool agent_impact_name_routes_many(const char *const *paths,
     return ok;
 }
 
-bool agent_impact_name_routes_snapshot(const char *path,
+bool agent_impact_name_routes_many(const char *const *paths,
+                                   struct agent_impact_acc *accs, size_t count)
+{
+    return agent_impact_name_routes_many_at(".", paths, accs, count);
+}
+
+static bool aih_name_routes(const char *root, const char *path,
     struct agent_impact_acc *acc, const struct agent_impact_snapshot *snapshot)
 {
     if (!path || !acc)
@@ -794,9 +824,20 @@ bool agent_impact_name_routes_snapshot(const char *path,
         return matched;
     }
     for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
-        aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, q.stem_arg, q.alt,
+        aih_scan_dir_for_reference(root, AIH_REFERRER_DIRS[d], path, q.stem_arg, q.alt,
                                    q.has_alt, q.compound, acc, &matched);
     return matched;
+}
+
+bool agent_impact_name_routes_snapshot(const char *path, struct agent_impact_acc *acc,
+    const struct agent_impact_snapshot *snapshot)
+{
+    return aih_name_routes(".", path, acc, snapshot);
+}
+
+bool agent_impact_name_routes_at(const char *root, const char *path, struct agent_impact_acc *acc)
+{
+    return aih_name_routes(root, path, acc, NULL);
 }
 
 bool agent_impact_apply_name_reference_routes(const char *path, struct agent_impact_acc *acc)

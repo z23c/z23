@@ -754,7 +754,7 @@ static void pk_do_tests(struct pk_run *run, const char *path, int index)
     struct agent_impact_acc *acc = run->route_accs ? &run->route_accs[index] : &local;
     bool crisk = run->route_accs ? run->route_risks[index] : false;
     const char *route = run->route_accs ? run->routes[index]
-        : zcl_native_code_route_for_path(path, acc, &crisk);
+        : zcl_native_code_route_at(run->ctx.root, path, acc, &crisk);
     struct json_value o, raw, ids;
     pk_obj(&o);
     json_init(&raw); json_set_array(&raw);
@@ -771,6 +771,8 @@ static void pk_do_tests(struct pk_run *run, const char *path, int index)
     (void)json_push_kv_bool(&o, "consensus_risk", crisk);
     (void)json_push_kv_bool(&o, "matched", acc->shared_rule_hits > 0);
     (void)json_push_kv_bool(&o, "groups_lost", acc->groups_lost);
+    if (acc->referrer_read_failed)
+        (void)json_push_kv_bool(&o, "test_evidence_unavailable", true);
     (void)json_push_kv(&o, "test_groups", &raw);
     (void)json_push_kv(&o, "groups", &ids);
     json_free(&raw); json_free(&ids);
@@ -1106,7 +1108,7 @@ static void pk_routes_prepare(struct pk_run *run)
     if (!run->route_accs) return;
     const char *paths[PK_TOUCH_MAX];
     for (int i = 0; i < run->ntouch; i++) paths[i] = run->touch[i];
-    if (!zcl_native_code_routes_many(paths, (size_t)run->ntouch, run->route_accs,
+    if (!zcl_native_code_routes_many_at(run->ctx.root, paths, (size_t)run->ntouch, run->route_accs,
                                      run->routes, run->route_risks)) {
         free(run->route_accs);
         run->route_accs = NULL;
