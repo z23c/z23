@@ -612,6 +612,54 @@ static int check_fq2_sqrt_curve_point(void)
     return failures;
 }
 
+/* P1: libsnark pairs a G1 identity at the affine point (0, 1)
+ * (alt_bn128_G1::to_affine_coordinates leaves (0,1,0) and the Miller loop
+ * then evaluates its lines there). With x_P = 0 every line value loses its
+ * x_P term, the Miller value lies in a proper subfield of Fq12 and the final
+ * exponentiation maps it to 1, so libsnark's e(O, Q) is 1 and the verifier
+ * dropping the factor (bn254_engine.inc: a pair with no line table
+ * contributes 1) computes the same function, on the positive side and on the
+ * unitary_inverse side alike. The differential gate class pairing.g1_infinity
+ * agrees with libsnark itself on 50 of 50; this pins the same fact in the
+ * unit suite for P = (0, 1) and (0, -1) over k*G2, k = 1..24, and shows a
+ * real G1 point does not pair to 1. */
+static int check_g1_identity_pairing_is_one(void)
+{
+    int failures = 0;
+    struct bn_g2 gen, q;
+    struct bn_fq12 one;
+    bn254_g2_one(&gen);
+    bn_g2_identity(&q);
+    bn_fq12_one(&one);
+    bool all_one = true, neg_one = true;
+    for (int k = 1; k <= 24; k++) {
+        struct bn_g1 p;
+        struct bn_fq12 r;
+        bn_g2_add(&q, &q, &gen);
+        bn_fq_zero(&p.x);
+        bn_fq_one(&p.y);
+        bn_fq_one(&p.z);
+        bn254_pairing(&r, &p, &q);
+        if (!bn_fq12_eq(&r, &one)) all_one = false;
+        bn_fq_neg(&p.y, &p.y);
+        bn254_pairing(&r, &p, &q);
+        if (!bn_fq12_eq(&r, &one)) neg_one = false;
+    }
+    PAR_CHECK("P1: pairing at (0,1) is 1 for k*G2, k = 1..24", all_one);
+    PAR_CHECK("P1: pairing at (0,-1) is 1 for k*G2, k = 1..24", neg_one);
+
+    /* (1, 2) is the generator of G1 on y^2 = x^3 + 3. */
+    struct bn_g1 g1;
+    struct bn_fq12 r;
+    bn_fq_one(&g1.x);
+    bn_fq_one(&g1.y);
+    bn_fq_add(&g1.y, &g1.y, &g1.y);
+    bn_fq_one(&g1.z);
+    bn254_pairing(&r, &g1, &gen);
+    PAR_CHECK("P1: a real G1 point does not pair to 1", !bn_fq12_eq(&r, &one));
+    return failures;
+}
+
 int test_bn254_phgr13_parity(void)
 {
     printf("\n=== BN254 PHGR13 decode parity with zclassicd ===\n");
@@ -627,6 +675,7 @@ int test_bn254_phgr13_parity(void)
     failures += check_g2_outside_subgroup();
     failures += check_fq2_sqrt();
     failures += check_fq2_sqrt_curve_point();
+    failures += check_g1_identity_pairing_is_one();
 
     printf("BN254 PHGR13 decode parity: %s (%d failures)\n",
            failures == 0 ? "OK" : "FAIL", failures);
