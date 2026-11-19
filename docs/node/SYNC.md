@@ -276,6 +276,13 @@ build/bin/z23 --importblockindex "$HOME/.zclassic"
 build/bin/z23
 ```
 
+**Trust and limits:** this ordinary recipe is assisted bootstrap, not a
+sovereign genesis fold. The normal boot imports the legacy UTXO set near the
+legacy tip; it does not rebuild historical anchor/nullifier state from block
+bodies and cannot cure a shielded-history gap. When full-history reconstruction
+is required, use the sovereign fold below instead of a plain boot.
+<!-- claim: symbol-present boot_step_import_legacy_utxos engine/composition/src/boot.c # ordinary boot imports legacy UTXOs unless explicitly disabled -->
+
 Skipping step 1 is a footgun: importing UTXOs without the header import leaves a
 ~3.1M-header hole (headers=960) and the node pins. The old single-flag forms
 (`-cold-import=`/`-fastimport=`) no longer exist. Passing one does **not**
@@ -289,6 +296,43 @@ grep stderr for `unrecognized flag` after any flag change.
 **Caveat:** the legacy cold import is slow (a ~12k-block header band backfills
 over P2P, and the first boot can latch a transient freeze that needs a restart).
 The robust path for a known-good datadir is to copy one onto the target lane.
+
+### Sovereign full-history fold (fresh isolated datadir)
+
+For a sovereign rebuild, including after `-import-complete-shielded` refuses a
+source/target height mismatch, use a fresh isolated datadir and these exact
+commands. The positional target `node.db` is required: `-datadir` does not
+select the `--importblockindex` destination.
+
+```bash
+# 1. Import headers into the explicit fresh target, never the default datadir.
+build/bin/z23 --importblockindex "$HOME/.zclassic" \
+  /path/to/fresh-z23/node.db
+
+# 2. Fold and fully validate every block body offline; expect hours, then exit.
+ZCL_FULL_FOLD_FROM_GENESIS=1 build/bin/z23 \
+  -datadir=/path/to/fresh-z23 -full-fold -nolegacyutxoimport
+
+# 3. After terminal success, verify normally with legacy UTXO import disabled.
+build/bin/z23 -datadir=/path/to/fresh-z23 -nolegacyutxoimport
+```
+
+`-full-fold` implies `-nolegacyutxoimport`; stating both makes the trust boundary
+explicit. It keeps the legacy block-body links, resets derived state to genesis,
+and self-drives all reducer stages offline to the imported header tip.
+`ZCL_FULL_FOLD_FROM_GENESIS=1` forces that reset even on a previously seeded
+copy. The one-shot exports a sovereign bundle only after full validation, then
+exits. Do **not** add `-nolegacyimport` (it removes the body links) or
+`-mint-anchor-fast` (it skips the required full validation). Step 3 and the
+subsequent service configuration must retain `-nolegacyutxoimport`: the genesis
+reset clears `leveldb_utxo_migrated`, so a plain boot can import assisted legacy
+UTXOs again. After that boot, verify status, the reducer frontier, and exact
+tip-hash parity against `zclassicd` before any service cutover.
+<!-- claim: symbol-present leveldb_utxo_migrated engine/composition/src/boot_mint_anchor_reset.c # genesis reset clears the legacy UTXO migration marker -->
+<!-- claim: symbol-present importblockindex_cli_mode engine/entry/main_cli_modes.c # positional target prevents default-datadir writes -->
+<!-- claim: symbol-present args_arm_fold engine/composition/src/args.c # full-fold disables only the legacy UTXO import and preserves body links -->
+<!-- claim: symbol-present boot_full_fold_reset engine/composition/src/boot_full_fold.c # forced genesis reset and offline fold to the imported header tip -->
+<!-- claim: symbol-present boot_full_fold_conclude engine/composition/src/boot_full_fold.c # terminal verdict and full-validation sovereign bundle export -->
 
 ### Consolidated daily-driver loader (assisted legacy bootstrap)
 

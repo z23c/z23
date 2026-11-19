@@ -536,11 +536,14 @@ of thousands of blocks. If the wedged node's island root sits *below* the
 (or never lands on it), the guard refuses (`source best-block bind FAILED:
 source=<hash> target=<hash>`) — correctly, since importing future nullifiers
 would reject valid forward spends. When this happens the
-cure is **not applicable to that datadir**; do not force it. The reliable path
-is then a **fresh full-history rebuild** (two-step `--importblockindex` +
-genesis body-fold, which builds complete anchor+nullifier state with no gap)
-and a service cutover to the fresh datadir — see [`docs/node/SYNC.md`](node/SYNC.md)
-Method 3.
+cure is **not applicable to that datadir**; do not force it. The required
+fail-closed route is then a **fresh full-history rebuild** in an isolated
+datadir. Use the exact positional-target `--importblockindex` + `-full-fold`
+commands in
+[`SYNC.md` Method 3: Sovereign full-history fold](node/SYNC.md#sovereign-full-history-fold-fresh-isolated-datadir).
+A plain normal boot is assisted and does not perform the required genesis fold.
+Terminal fold success alone is not cutover proof: first complete normal
+verification and exact tip-hash parity against `zclassicd`.
 
 **Prevention:** this wedge is the expected next step after a transparent-only
 seed, not a defect — run `-import-complete-shielded` once, right after the
