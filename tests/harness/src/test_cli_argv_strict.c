@@ -619,6 +619,38 @@ static int cas_test_double_dash_targets_accepted(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static int cas_test_tasks_profile(void)
+{
+    int failures = 0;
+    char home[] = "/tmp/z23-task-profile-XXXXXX";
+    if (!mkdtemp(home)) { perror("task profile fixture"); return 1; }
+    TEST("Tasks writes to the named app profile and keeps the default separate") {
+        char profile[128], flag[144], out[8192];
+        snprintf(profile, sizeof(profile), "%s/work", home);
+        snprintf(flag, sizeof(flag), "--datadir=%s", profile);
+        char *add[] = {(char *)CAS_BIN, (char *)"app", (char *)"tasks", flag,
+            (char *)"--input={\"action\":\"add\",\"expected_revision\":0,\"title\":\"profile witness\"}", NULL};
+        char *list[] = {(char *)CAS_BIN, flag, (char *)"app", (char *)"tasks", (char *)"list", NULL};
+        char *named[] = {(char *)CAS_BIN, (char *)"app", (char *)"tasks", (char *)"list", profile, NULL};
+        char *plain[] = {(char *)CAS_BIN, (char *)"app", (char *)"tasks", (char *)"list", NULL};
+        ASSERT_EQ(cas_run(add, home, out, sizeof(out)), 0);
+        ASSERT(cas_contains(out, profile));
+        ASSERT_EQ(cas_run(list, home, out, sizeof(out)), 0);
+        ASSERT(cas_contains(out, "profile witness"));
+        ASSERT_EQ(cas_run(named, home, out, sizeof(out)), 0);
+        ASSERT(cas_contains(out, "profile witness"));
+        snprintf(cas_extra_env, sizeof(cas_extra_env), "ZCL_DATADIR=%s", profile);
+        ASSERT_EQ(cas_run(plain, home, out, sizeof(out)), 0);
+        ASSERT(!cas_contains(out, "profile witness"));
+        PASS();
+    } _test_next:;
+    cas_extra_env[0] = '\0';
+    if (test_rm_rf_recursive(home) != 0) ++failures;
+    return failures;
+}
+#endif
+
 static int cas_test_missing_value_refuses(void)
 {
     int failures = 0;
@@ -1493,6 +1525,9 @@ int test_cli_argv_strict(void)
 
     failures += cas_test_observed_incident_refuses();
     failures += cas_test_double_dash_datadir_refuses();
+#if !defined(_WIN32)
+    failures += cas_test_tasks_profile();
+#endif
     failures += cas_test_double_dash_targets_accepted();
     failures += cas_test_missing_value_refuses();
     failures += cas_test_typo_after_command_word_refuses();

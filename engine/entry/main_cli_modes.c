@@ -2629,6 +2629,7 @@ int cli_main(int argc, char **argv)
     int parse_rc = cli_parse_target_args(argc, argv, &t);
     if (parse_rc != CLI_ARGS_OK)
         return parse_rc;
+    const bool datadir_on_argv = t.datadir_set;
     cli_bound_method = t.method;
     cli_bound_params = params_storage;
     cli_bound_nparams = t.nparams;
@@ -2679,7 +2680,7 @@ int cli_main(int argc, char **argv)
     if (zcl_native_command_is_root(method)) {
         return cli_native_registry_dispatch(method,
             (const char *const *)params_storage, t.nparams, datadir, cli_port,
-            t.regtest_set, t.testnet_set, t.datadir_set);
+            t.regtest_set, t.testnet_set, t.datadir_set, datadir_on_argv);
     }
 
     if (cli_static_agent_method(method)) {

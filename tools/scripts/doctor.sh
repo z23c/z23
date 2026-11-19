@@ -17,6 +17,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TSV="${ZCL_DOCTOR_TSV:-$ROOT/tools/scripts/vendor_prereqs.tsv}"
 VENDOR_SH="$ROOT/tools/scripts/build_vendor.sh"
+# shellcheck source=tools/scripts/tor_provenance_lib.sh
+. "$ROOT/tools/scripts/tor_provenance_lib.sh"
 
 MODE="${1:-report}"
 
@@ -135,6 +137,7 @@ if [ "$MODE" = "--self-test" ]; then
     cp "$TSV" "$fresh/tools/scripts/vendor_prereqs.tsv"
     cp "$VENDOR_SH" "$fresh/tools/scripts/build_vendor.sh"
     cp "$self" "$fresh/tools/scripts/doctor.sh"
+    cp "$ROOT/tools/scripts/tor_provenance_lib.sh" "$fresh/tools/scripts/tor_provenance_lib.sh"
     out="$(GIT_CEILING_DIRECTORIES="$tmp" ZCL_DOCTOR_TSV="$fresh/tools/scripts/vendor_prereqs.tsv" \
         bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
     if grep -Eq '^[[:space:]]*ACTION[[:space:]]+(git hooks|vendor/lib|compile db)' <<<"$out"; then
@@ -144,6 +147,37 @@ if [ "$MODE" = "--self-test" ]; then
     fi
     grep -Eq '^[[:space:]]*note[[:space:]]+vendor/lib' <<<"$out" ||
         { echo "doctor selftest: FAIL — fresh clone lost the optional vendor note" >&2; exit 1; }
+
+    # Simulate a host lacking the Tor bootstrap tools without changing PATH
+    # for the other commands used by this report.
+    command() {
+        if [ "$1" = -v ]; then
+            case "$2" in autoconf|automake|aclocal|autoheader|libtoolize|glibtoolize) return 1 ;; esac
+        fi
+        builtin command "$@"
+    }
+    export -f command
+    out="$(GIT_CEILING_DIRECTORIES="$tmp" bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
+    grep -Fq 'Tor source build needs missing tools: autoconf automake aclocal autoheader libtoolize(glibtoolize)' <<<"$out" ||
+        { echo "doctor selftest: FAIL — fresh Tor source omitted missing tools" >&2; exit 1; }
+    out="$(ZCL_TOR=stub bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
+    if grep -Fq 'Tor source build needs missing tools' <<<"$out"; then
+        echo "doctor selftest: FAIL — stub build reported Tor tools" >&2; exit 1
+    fi
+    mkdir -p "$fresh/vendor/tor"
+    for generated in configure Makefile.in orconfig.h.in ar-lib config.guess config.sub compile missing install-sh; do
+        printf 'fixture\n' > "$fresh/vendor/tor/$generated"
+    done
+    chmod +x "$fresh/vendor/tor/configure"
+    out="$(bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
+    if grep -Fq 'Tor source build needs missing tools' <<<"$out"; then
+        echo "doctor selftest: FAIL — generated Tor inputs still required bootstrap tools" >&2; exit 1
+    fi
+    rm "$fresh/vendor/tor/install-sh"
+    out="$(bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
+    grep -Fq 'Tor source build needs missing tools' <<<"$out" ||
+        { echo "doctor selftest: FAIL — incomplete generated inputs were accepted" >&2; exit 1; }
+    unset -f command
 
     echo "doctor selftest: PASS"
     exit 0
@@ -214,6 +248,22 @@ if [ "$either_seen" = 1 ] && [ "$either_present" = 0 ]; then
     echo
 fi
 
+# A source build only needs these when generated inputs are incomplete. Archives
+# or a sibling checkout may avoid a source build, so this is conditional.
+tor_missing=""
+if [ "${ZCL_TOR:-full}" != stub ]; then
+    tor_src="$ROOT/vendor/tor"
+    # A cross source export can be replaced when its pin or patch changes.
+    if [ -n "${ZCL_CROSS_TRIPLE:-}" ] || ! zcl_tor_autotools_ready "$tor_src"; then
+        tor_missing="$(zcl_tor_missing_autotools | tr '\n' ' ')"
+        if [ -n "$tor_missing" ]; then
+            echo "  note     Tor source build needs missing tools: $tor_missing"
+            echo "           If Tor archives must be built from source, install autoconf, automake and libtool."
+            echo
+        fi
+    fi
+fi
+
 # --------------------------------------------------------------------------
 # Compiler capability, not just presence: -std=c23 is the actual requirement.
 # --------------------------------------------------------------------------
@@ -274,10 +324,14 @@ fi
 # --------------------------------------------------------------------------
 echo
 if [ "$missing_n" -eq 0 ]; then
-    echo "No missing prerequisites on this host."
+    if [ -n "$tor_missing" ]; then
+        echo "No missing unconditional prerequisites on this host; see the Tor source-build note above."
+    else
+        echo "No missing prerequisites on this host."
+    fi
     if [ "$missing_opt_n" -gt 0 ]; then
         echo
-        echo "Everything required is present. $missing_opt_n OPTIONAL tool(s) are absent —"
+        echo "$missing_opt_n OPTIONAL tool(s) are absent —"
         echo "the build works without them; each line above says what you give up."
         if have apt-get || have apt; then
             printf '  sudo apt-get install -y %s\n' \

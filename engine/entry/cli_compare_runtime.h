@@ -36,5 +36,6 @@ bool cli_compare_scope_cancelled(void *context);
  * signal-free native entry. */
 int cli_native_registry_dispatch(const char *method,
     const char *const *params_storage, int nparams, const char *datadir,
-    int cli_port, bool regtest_set, bool testnet_set, bool datadir_set);
+    int cli_port, bool regtest_set, bool testnet_set, bool datadir_set,
+    bool datadir_on_argv);
 #endif

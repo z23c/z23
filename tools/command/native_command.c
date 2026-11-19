@@ -4926,12 +4926,24 @@ static bool nc_main_normalize_controls(struct nc_main_state *st, int *rc)
  * controls. Each step's own early-return contract (frees st->input on
  * failure, sets *rc) is unchanged; this only removes the four separate
  * call-sites the caller would otherwise need. */
-static bool nc_main_prepare_input(struct nc_main_state *st, int *rc)
+static bool nc_main_prepare_input(struct nc_main_state *st, int *rc,
+                                  const struct zcl_native_standalone_runtime *runtime)
 {
     if (!nc_main_build_input(st, rc))
         return false;
     if (!nc_main_map_positionals(st, rc))
         return false;
+    /* Tasks defaults to its private app store. Only an actual argv profile
+     * can fill an omitted input; environment and RPC discovery target nodes. */
+    if (runtime && runtime->argv_datadir && strcmp(st->spec->path, "app.tasks") == 0 &&
+        !json_get(&st->input, "datadir") &&
+        !json_push_kv_str(&st->input, "datadir", runtime->argv_datadir)) {
+        json_free(&st->input);
+        nc_print_error(st->spec->path, "ALLOCATION_FAILED", "normalize",
+                       "could not bind the requested Tasks directory", "datadir", "", "", "");
+        *rc = ZCL_COMMAND_EXIT_INTERNAL;
+        return false;
+    }
     if (!nc_main_validate_input(st, rc))
         return false;
     if (!nc_main_normalize_controls(st, rc))
@@ -5325,7 +5337,7 @@ int zcl_native_command_main_standalone(const char *root_word, const char *const 
     if (early != NC_MAIN_CONTINUE)
         return early;
 
-    if (train ? !nc_main_train_input(&st, &rc) : !nc_main_prepare_input(&st, &rc))
+    if (train ? !nc_main_train_input(&st, &rc) : !nc_main_prepare_input(&st, &rc, runtime))
         return rc;
 
     size_t out_cap = nc_main_response_capacity(st.spec);

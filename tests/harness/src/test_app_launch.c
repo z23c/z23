@@ -611,6 +611,55 @@ static int case_handlers(struct al_fx *f)
         ASSERT(strstr(msg, "/blog") != NULL);
         ASSERT(strstr(msg, "skycombat") != NULL);
     PASS(); }
+#if !defined(_WIN32)
+    TEST("app.open of tasks points to its native open command") {
+        struct json_value tasks_in;
+        struct zcl_command_request tasks_req = {.input = &tasks_in,
+                                                .view = "normal",
+                                                .invoked_name = "app.open"};
+        json_init(&tasks_in);
+        json_set_object(&tasks_in);
+        ASSERT(json_push_kv_str(&tasks_in, "name", "tasks"));
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&tasks_req, &reply);
+        json_free(&tasks_in);
+        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+        ASSERT_STR_EQ(reply.next[1].command, "app.list");
+        zcl_command_reply_free(&reply);
+    PASS(); }
+    TEST("app.open of tasks preserves an explicit data directory") {
+        struct json_value in;
+        struct zcl_command_request req = {.input = &in, .view = "normal"};
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "name", "tasks"));
+        ASSERT(json_push_kv_str(&in, "datadir", "/tmp/my \"profile\""));
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&req, &reply);
+        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT_STR_EQ(reply.next[0].input_json,
+                      "{\"action\":\"open\",\"datadir\":\"/tmp/my \\\"profile\\\"\"}");
+        zcl_command_reply_free(&reply);
+        json_free(&in);
+    PASS(); }
+    TEST("app.open avoids an unsafe shell suggestion for a quoted path") {
+        struct json_value in;
+        struct zcl_command_request req = {.input = &in, .view = "normal"};
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "name", "tasks"));
+        ASSERT(json_push_kv_str(&in, "datadir", "/tmp/user's profile"));
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&req, &reply);
+        ASSERT_EQ(reply.next_count, 1u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.list");
+        zcl_command_reply_free(&reply);
+        json_free(&in);
+    PASS(); }
+#endif
     TEST("app.list says what can be opened and offers open and copy of the "
          "first launchable app") {
         struct json_value empty;

@@ -71,6 +71,7 @@ struct zcl_native_standalone_runtime {
     bool (*reserve_cleanup)(void *, unsigned, struct zcl_command_cleanup_slot **);
     bool (*cleanup)(void *);
     void *context;
+    const char *argv_datadir; /* Only the operator's actual command-line flag. */
 };
 int zcl_native_command_main_standalone(const char *root_word,
     const char *const *args, int nargs, const char *datadir, int rpc_port,

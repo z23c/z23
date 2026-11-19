@@ -10,6 +10,27 @@
 # Makefile rule ($(TOR_PROVENANCE_BIN)) whenever the binary is missing or
 # older than either of its two sources. Sourced, never executed.
 
+# Shared by the source builder and the read-only prerequisite report.
+zcl_tor_autotools_ready() {
+    local src="$1" generated
+    [ -x "$src/configure" ] || return 1
+    for generated in Makefile.in orconfig.h.in ar-lib config.guess config.sub compile missing install-sh; do
+        [ -s "$src/$generated" ] || return 1
+    done
+}
+
+# Print missing executables, one per line; libtool has two platform spellings.
+zcl_tor_missing_autotools() {
+    local tool
+    for tool in autoconf automake aclocal autoheader; do
+        command -v "$tool" >/dev/null 2>&1 || printf '%s\n' "$tool"
+    done
+    if ! command -v libtoolize >/dev/null 2>&1 && ! command -v glibtoolize >/dev/null 2>&1; then
+        printf '%s\n' 'libtoolize(glibtoolize)'
+    fi
+    return 0
+}
+
 zcl_tor_provenance_bin() {
     printf '%s/build/bin/z23-tor-provenance\n' "$1"
 }

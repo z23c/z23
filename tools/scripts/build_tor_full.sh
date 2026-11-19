@@ -143,32 +143,16 @@ done
 # Autoreconf can leave configure behind before automake installs its required
 # auxiliary files. Qualify the complete generated input set so an interrupted
 # bootstrap is repaired by the same autogen.sh (-i -f) route as a fresh checkout.
-tor_autotools_ready() {
-    [ -x "$TOR_SRC_DIR/configure" ] || return 1
-    local generated
-    for generated in Makefile.in orconfig.h.in ar-lib config.guess config.sub compile missing install-sh; do
-        [ -s "$TOR_SRC_DIR/$generated" ] || return 1
-    done
-}
-if ! tor_autotools_ready; then
-    missing=""
-    for tool in autoconf automake aclocal autoheader; do
-        command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
-    done
-    # libtool installs its driver as `glibtoolize` on macOS and `libtoolize`
-    # elsewhere; either spelling satisfies autoreconf.
-    if ! command -v libtoolize >/dev/null 2>&1 &&
-       ! command -v glibtoolize >/dev/null 2>&1; then
-        missing="$missing libtoolize(glibtoolize)"
-    fi
+if ! zcl_tor_autotools_ready "$TOR_SRC_DIR"; then
+    missing="$(zcl_tor_missing_autotools | tr '\n' ' ')"
     if [ -n "$missing" ]; then
         echo "tor-full: ${TOR_SRC_DIR#"$ROOT"/} has incomplete generated autotools inputs, so autogen.sh must run," >&2
-        echo "tor-full: but these autotools are absent:$missing" >&2
+        echo "tor-full: but these autotools are absent: $missing" >&2
         echo "tor-full: install autoconf, automake and libtool for this host, then rerun." >&2
         exit 4
     fi
     (cd "$TOR_SRC_DIR" && ./autogen.sh)
-    if ! tor_autotools_ready; then
+    if ! zcl_tor_autotools_ready "$TOR_SRC_DIR"; then
         echo "tor-full: autogen.sh left required generated autotools inputs incomplete" >&2
         exit 4
     fi

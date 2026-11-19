@@ -357,7 +357,33 @@ static void app_render(const struct app_open_result *r,
     app_push_opt_str(d, "log_tail", r->log_tail);
 }
 
-static void app_reply_fail(const struct app_open_result *r,
+#if !defined(_WIN32)
+static void app_tasks_next(const char *name, const struct json_value *input,
+                           struct zcl_command_reply *reply)
+{
+    if (strcmp(name, "tasks") != 0 || zcl_native_command_datadir_is_explicit())
+        return;
+    const struct json_value *value = json_get(input, "datadir");
+    const char *dir = value ? json_get_str(value) : NULL;
+    /* The terminal renderer quotes the whole JSON with shell single quotes. */
+    if (value && (!dir || dir[0] != '/' || strchr(dir, '\'')))
+        return;
+    struct json_value next;
+    char wire[384];
+    json_init(&next);
+    json_set_object(&next);
+    bool ok = json_push_kv_str(&next, "action", "open") &&
+              (!dir || json_push_kv_str(&next, "datadir", dir));
+    size_t n = ok ? json_write(&next, wire, sizeof(wire)) : 0;
+    if (n && n < sizeof(wire))
+        (void)zcl_command_reply_add_next(reply, "app.tasks", wire,
+                                         "open the native app");
+    json_free(&next);
+}
+#endif
+
+static void app_reply_fail(const struct app_open_result *r, const char *name,
+                           const struct json_value *input,
                            struct zcl_command_reply *reply)
 {
     char code[32];
@@ -370,9 +396,16 @@ static void app_reply_fail(const struct app_open_result *r,
     code[i] = '\0';
     zcl_command_reply_fail(reply, c.status, c.exit_code, code, stage,
                            c.retryable, r->pid != 0, r->message, r->hint);
-    if (r->stage == APP_STAGE_UNKNOWN_APP)
+    if (r->stage == APP_STAGE_UNKNOWN_APP) {
+#if !defined(_WIN32)
+        app_tasks_next(name, input, reply);
+#else
+        (void)name;
+        (void)input;
+#endif
         (void)zcl_command_reply_add_next(reply, "app.list", "{}",
                                          "list the launchable apps");
+    }
 }
 
 struct app_open_work {
@@ -427,7 +460,7 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
     app_launch_open(&w->env, &w->reg, name, &w->result);
     app_render(&w->result, reply);
     if (w->result.status == APP_OPEN_FAILED)
-        app_reply_fail(&w->result, reply);
+        app_reply_fail(&w->result, name, request->input, reply);
     free(w);
 }
 
