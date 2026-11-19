@@ -42,13 +42,13 @@
  *           does not replay that row and does not depend on the scalar.
  *   from    post: optional sender name (default $BOARD_AGENT, then $USER,
  *           then "local"). pull: optional exact-match sender filter.
- *   cursor  ack only: required. A non-negative integer (also as the second
- *           positional, `dev agent mail ack 42`, or a numeric string for
- *           transports that type positionals loosely), or a next_since
- *           token, which is the only cursor that resumes a multi-stream
- *           mail dir.
+ *   cursor  ack: required non-negative integer or next_since token; pull:
+ *           optional second positional integer or token. Pull prefers explicit
+ *           since, then explicit cursor, then the saved agent cursor. Composite
+ *           ACK coverage requires the exact stream and a covering offset; its
+ *           scalar floor alone does not acknowledge a row.
  *   agent   ack: optional name owning the cursor file (default: the same
- *           identity post uses). pull: when given WITHOUT since, the page
+ *           identity post uses). pull: without an explicit since or cursor, the page
  *           resumes from that agent's acked cursor (from the start when it
  *           never acked), so a reader keeps one position across restarts
  *           instead of re-walking the whole history. [A-Za-z0-9._-] only.
