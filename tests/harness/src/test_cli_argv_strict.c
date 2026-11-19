@@ -623,10 +623,13 @@ static int cas_test_double_dash_targets_accepted(void)
 static int cas_test_tasks_profile(void)
 {
     int failures = 0;
-    char home[] = "/tmp/z23-task-profile-XXXXXX";
-    if (!mkdtemp(home)) { perror("task profile fixture"); return 1; }
+    char home[PATH_MAX];
+    if (!test_mkdtemp(home, sizeof(home), "z23_task_profile")) {
+        perror("task profile fixture");
+        return 1;
+    }
     TEST("Tasks writes to the named app profile and keeps the default separate") {
-        char profile[128], flag[144], out[8192];
+        char profile[PATH_MAX + 16], flag[PATH_MAX + 32], out[8192];
         snprintf(profile, sizeof(profile), "%s/work", home);
         snprintf(flag, sizeof(flag), "--datadir=%s", profile);
         char *add[] = {(char *)CAS_BIN, (char *)"app", (char *)"tasks", flag,

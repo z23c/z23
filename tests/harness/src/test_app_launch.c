@@ -633,25 +633,39 @@ static int case_handlers(struct al_fx *f)
     TEST("app.open of tasks preserves an explicit data directory") {
         struct json_value in;
         struct zcl_command_request req = {.input = &in, .view = "normal"};
+        char datadir[PATH_MAX], expect[PATH_MAX + 80];
         json_init(&in);
         json_set_object(&in);
         ASSERT(json_push_kv_str(&in, "name", "tasks"));
-        ASSERT(json_push_kv_str(&in, "datadir", "/tmp/my \"profile\""));
+        /* absolute, under the managed tmp root — the quotes stay in the path,
+         * so the datadir must survive JSON string escaping verbatim */
+        test_fmt_tmpdir(datadir, sizeof(datadir), "zcl_app_open", "my \"profile\"");
+        ASSERT(json_push_kv_str(&in, "datadir", datadir));
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_native_handle_app_open(&req, &reply);
         ASSERT_EQ(reply.next_count, 2u);
-        ASSERT_STR_EQ(reply.next[0].input_json,
-                      "{\"action\":\"open\",\"datadir\":\"/tmp/my \\\"profile\\\"\"}");
+        /* the datadir travels embedded in one JSON string: each quote in the
+         * path is escaped once more on the way through */
+        snprintf(expect, sizeof(expect), "{\"action\":\"open\",\"datadir\":\"");
+        size_t n = strlen(expect);
+        for (const char *p = datadir; *p != '\0'; ++p) {
+            if (*p == '"') expect[n++] = '\\';
+            expect[n++] = *p;
+        }
+        snprintf(expect + n, sizeof(expect) - n, "\"}");
+        ASSERT_STR_EQ(reply.next[0].input_json, expect);
         zcl_command_reply_free(&reply);
         json_free(&in);
     PASS(); }
     TEST("app.open avoids an unsafe shell suggestion for a quoted path") {
         struct json_value in;
         struct zcl_command_request req = {.input = &in, .view = "normal"};
+        char datadir[PATH_MAX];
         json_init(&in);
         json_set_object(&in);
         ASSERT(json_push_kv_str(&in, "name", "tasks"));
-        ASSERT(json_push_kv_str(&in, "datadir", "/tmp/user's profile"));
+        test_fmt_tmpdir(datadir, sizeof(datadir), "zcl_app_open", "user's profile");
+        ASSERT(json_push_kv_str(&in, "datadir", datadir));
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_native_handle_app_open(&req, &reply);
         ASSERT_EQ(reply.next_count, 1u);

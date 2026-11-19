@@ -27,11 +27,9 @@ die() { printf 'doctor: FATAL — %s\n' "$*" >&2; exit 2; }
 [ -f "$TSV" ]       || die "missing prerequisite table: $TSV"
 [ -f "$VENDOR_SH" ] || die "missing vendor build script: $VENDOR_SH"
 
-# --------------------------------------------------------------------------
 # Coverage: every `need <tool>` in build_vendor.sh must have a row here.
 # Literal `need foo` and `need "$VAR"` both count; a variable resolves to the
 # script's own default (VENDOR_CC=cc, VENDOR_AR=ar).
-# --------------------------------------------------------------------------
 tsv_tools() { awk -F'\t' '!/^#/ && NF>1 && $1!="tool" {print $1}' "$TSV"; }
 
 needed_tools() {
@@ -42,11 +40,7 @@ needed_tools() {
         awk '{print $2}' |
         tr -d '"${}' |
         while read -r t; do
-            case "$t" in
-                VENDOR_CC) echo cc ;;
-                VENDOR_AR) echo ar ;;
-                *)         echo "$t" ;;
-            esac
+            case "$t" in VENDOR_CC) echo cc ;; VENDOR_AR) echo ar ;; *) echo "$t" ;; esac
         done | sort -u
 }
 
@@ -56,7 +50,6 @@ check_coverage() {
         [ -n "$t" ] || continue
         grep -qx "$t" <<<"$(tsv_tools)" || missing+=("$t")
     done <<<"$(needed_tools)"
-
     if [ "${#missing[@]}" -gt 0 ]; then
         printf 'doctor: FAIL — build_vendor.sh requires tools with no row in %s:\n' \
             "${TSV#"$ROOT"/}" >&2
@@ -64,17 +57,13 @@ check_coverage() {
         printf '  Add a row (tool/class/apt/dnf/why) so `make doctor` can report it.\n' >&2
         return 1
     fi
-    return 0
 }
 
 # make setup arms native hooks at <checkout>/build/githooks. The older
 # spelling was <checkout>/tools/githooks. Either is armed; anything else
 # is not.
 doctor_hooks_shape() {
-    case "$1" in
-        */build/githooks|*/tools/githooks) printf 'ok\n' ;;
-        *)                                 printf 'no\n' ;;
-    esac
+    case "$1" in */build/githooks|*/tools/githooks) printf 'ok\n' ;; *) printf 'no\n' ;; esac
 }
 
 if [ "$MODE" = "--prereq-coverage" ]; then
@@ -89,15 +78,13 @@ if [ "$MODE" = "--self-test" ]; then
     self="${BASH_SOURCE[0]}"
 
     # (1) The real table passes coverage.
-    check_coverage >/dev/null 2>&1 ||
-        { echo "doctor selftest: FAIL — real table must pass coverage" >&2; exit 1; }
+    check_coverage >/dev/null 2>&1 || { echo "doctor selftest: FAIL — real table must pass coverage" >&2; exit 1; }
 
     # (2) The coverage assertion can actually FAIL. Drop the perl row — perl
     #     is a real `need` in build_vendor.sh — and require a nonzero exit.
     grep -v $'^perl\t' "$TSV" > "$tmp/noperl.tsv"
     if ZCL_DOCTOR_TSV="$tmp/noperl.tsv" bash "$self" --prereq-coverage >/dev/null 2>&1; then
-        echo "doctor selftest: FAIL — coverage passed with the perl row removed" >&2
-        exit 1
+        echo "doctor selftest: FAIL — coverage passed with the perl row removed" >&2; exit 1
     fi
 
     # (3) A missing prerequisite produces an install line naming ONLY its
@@ -106,27 +93,20 @@ if [ "$MODE" = "--self-test" ]; then
     printf 'zcl-absent-tool-fixture\trequired\tzcl-fixture-pkg\tzcl-fixture-pkg\tfixture\n' \
         >> "$tmp/bogus.tsv"
     out="$(ZCL_DOCTOR_TSV="$tmp/bogus.tsv" bash "$self" 2>&1)"
-    grep -Fq 'zcl-fixture-pkg' <<<"$out" ||
-        { echo "doctor selftest: FAIL — missing tool produced no install line: $out" >&2; exit 1; }
-    grep -Eq 'Install the [0-9]+ missing prerequisite' <<<"$out" ||
-        { echo "doctor selftest: FAIL — missing tool not counted: $out" >&2; exit 1; }
+    grep -Fq 'zcl-fixture-pkg' <<<"$out" || { echo "doctor selftest: FAIL — missing tool produced no install line: $out" >&2; exit 1; }
+    grep -Eq 'Install the [0-9]+ missing prerequisite' <<<"$out" || { echo "doctor selftest: FAIL — missing tool not counted: $out" >&2; exit 1; }
 
     # (4) On a host where nothing is missing the doctor says so, and does NOT
     #     print an install line. This is the "never surprise the reader" half.
     out="$(bash "$self" 2>&1)"
-    if grep -Fq 'zcl-fixture-pkg' <<<"$out"; then
-        echo "doctor selftest: FAIL — fixture leaked into the real report" >&2; exit 1
-    fi
+    grep -Fq 'zcl-fixture-pkg' <<<"$out" && { echo "doctor selftest: FAIL — fixture leaked into the real report" >&2; exit 1; }
 
     # (5) After `make setup`, hooks live at build/githooks. A shape check
     #     that only accepts tools/githooks reports "not armed" on a green
     #     setup. Born-red: a path that is neither is refused.
-    [ "$(doctor_hooks_shape /checkout/build/githooks)" = ok ] ||
-        { echo "doctor selftest: FAIL — native build/githooks path not armed" >&2; exit 1; }
-    [ "$(doctor_hooks_shape /checkout/tools/githooks)" = ok ] ||
-        { echo "doctor selftest: FAIL — legacy tools/githooks path not armed" >&2; exit 1; }
-    [ "$(doctor_hooks_shape /checkout/elsewhere)" = no ] ||
-        { echo "doctor selftest: FAIL — unknown hooks path was accepted" >&2; exit 1; }
+    [ "$(doctor_hooks_shape /checkout/build/githooks)" = ok ] || { echo "doctor selftest: FAIL — native build/githooks path not armed" >&2; exit 1; }
+    [ "$(doctor_hooks_shape /checkout/tools/githooks)" = ok ] || { echo "doctor selftest: FAIL — legacy tools/githooks path not armed" >&2; exit 1; }
+    [ "$(doctor_hooks_shape /checkout/elsewhere)" = no ] || { echo "doctor selftest: FAIL — unknown hooks path was accepted" >&2; exit 1; }
 
     # (6) A fresh --recurse-submodules clone has no armed hooks, no vendor
     #     archives and no compile db, yet `make z23` builds it (vendor-ready
@@ -145,48 +125,47 @@ if [ "$MODE" = "--self-test" ]; then
         grep -E '^[[:space:]]*ACTION' <<<"$out" >&2
         exit 1
     fi
-    grep -Eq '^[[:space:]]*note[[:space:]]+vendor/lib' <<<"$out" ||
-        { echo "doctor selftest: FAIL — fresh clone lost the optional vendor note" >&2; exit 1; }
+    grep -Eq '^[[:space:]]*note[[:space:]]+vendor/lib' <<<"$out" || { echo "doctor selftest: FAIL — fresh clone lost the optional vendor note" >&2; exit 1; }
 
-    # Simulate a host lacking the Tor bootstrap tools without changing PATH
-    # for the other commands used by this report.
+    # A host lacking the Tor bootstrap tools, PATH untouched for the other
+    # commands this report runs.
     command() {
-        if [ "$1" = -v ]; then
-            case "$2" in autoconf|automake|aclocal|autoheader|libtoolize|glibtoolize) return 1 ;; esac
-        fi
+        case "$2" in autoconf|automake|aclocal|autoheader|libtoolize|glibtoolize) [ "$1" = -v ] && return 1 ;; esac
         builtin command "$@"
     }
     export -f command
+    tor_see() { grep -Fq "$1" <<<"$out" || { echo "doctor selftest: FAIL — $2" >&2; exit 1; }; }
+    tor_gone() { ! grep -Fq "$1" <<<"$out" || { echo "doctor selftest: FAIL — $2" >&2; exit 1; }; }
     out="$(GIT_CEILING_DIRECTORIES="$tmp" bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
-    grep -Fq 'Tor source build needs missing tools: autoconf automake aclocal autoheader libtoolize(glibtoolize)' <<<"$out" ||
-        { echo "doctor selftest: FAIL — fresh Tor source omitted missing tools" >&2; exit 1; }
+    tor_see 'Tor source build needs missing tools: autoconf automake aclocal autoheader libtoolize(glibtoolize)' \
+        'fresh Tor source omitted missing tools'
     out="$(ZCL_TOR=stub bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
-    if grep -Fq 'Tor source build needs missing tools' <<<"$out"; then
-        echo "doctor selftest: FAIL — stub build reported Tor tools" >&2; exit 1
-    fi
+    tor_gone 'Tor source build needs missing tools' 'stub build reported Tor tools'
     mkdir -p "$fresh/vendor/tor"
     for generated in configure Makefile.in orconfig.h.in ar-lib config.guess config.sub compile missing install-sh; do
         printf 'fixture\n' > "$fresh/vendor/tor/$generated"
     done
     chmod +x "$fresh/vendor/tor/configure"
     out="$(bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
-    if grep -Fq 'Tor source build needs missing tools' <<<"$out"; then
-        echo "doctor selftest: FAIL — generated Tor inputs still required bootstrap tools" >&2; exit 1
-    fi
+    tor_gone 'Tor source build needs missing tools' 'generated Tor inputs still required bootstrap tools'
     rm "$fresh/vendor/tor/install-sh"
     out="$(bash "$fresh/tools/scripts/doctor.sh" 2>&1)"
-    grep -Fq 'Tor source build needs missing tools' <<<"$out" ||
-        { echo "doctor selftest: FAIL — incomplete generated inputs were accepted" >&2; exit 1; }
+    tor_see 'Tor source build needs missing tools' 'incomplete generated inputs were accepted'
     unset -f command
 
     echo "doctor selftest: PASS"
     exit 0
 fi
 
-# --------------------------------------------------------------------------
 # Probe the host.
-# --------------------------------------------------------------------------
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# The one install line per manager (nothing printed when the manager is absent).
+install_cmd() {
+    case "$1" in apt) have apt-get || have apt || return 0 ;; dnf) have dnf || return 0 ;; esac
+    printf '  sudo %s install -y %s\n' "$1" \
+        "$(printf '%s\n' "${@:2}" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+}
 
 missing_apt=(); missing_dnf=(); either_present=0; either_seen=0
 missing_opt_apt=(); missing_opt_dnf=(); missing_opt_n=0
@@ -195,34 +174,25 @@ rows_required=(); rows_vendor=(); rows_optional=()
 
 while IFS=$'\t' read -r tool class apt dnf why; do
     case "$tool" in ''|'#'*|tool) continue ;; esac
-    if have "$tool"; then
-        status="ok"; present_n=$((present_n + 1))
-    else
-        status="MISSING"
-    fi
+    if have "$tool"; then status="ok"; present_n=$((present_n + 1)); else status="MISSING"; fi
     [ "$class" = "vendor-either" ] && {
         either_seen=1
         [ "$status" = "ok" ] && either_present=1
     }
     line="$(printf '  %-8s %-16s %s' "$status" "$tool" "$why")"
     case "$class" in
-        required)                 rows_required+=("$line") ;;
-        vendor|vendor-either)     rows_vendor+=("$line") ;;
-        vendor-optional)          rows_optional+=("$line") ;;
+        required)             rows_required+=("$line") ;;
+        vendor|vendor-either) rows_vendor+=("$line") ;;
+        vendor-optional)      rows_optional+=("$line") ;;
     esac
     # vendor-optional is counted SEPARATELY: absent means a slower path or one
     # named capability off, never a build that cannot proceed. Folding it into
-    # the blocking count is what made `make doctor` demand a Rust toolchain on
-    # a host that does not need one.
+    # the blocking count is what made `make doctor` demand a Rust toolchain.
     if [ "$status" = "MISSING" ]; then
         case "$class" in
             vendor-either) ;;
-            vendor-optional)
-                missing_opt_n=$((missing_opt_n + 1))
-                missing_opt_apt+=("$apt"); missing_opt_dnf+=("$dnf") ;;
-            *)
-                missing_n=$((missing_n + 1))
-                missing_apt+=("$apt"); missing_dnf+=("$dnf") ;;
+            vendor-optional) missing_opt_n=$((missing_opt_n + 1)); missing_opt_apt+=("$apt"); missing_opt_dnf+=("$dnf") ;;
+            *) missing_n=$((missing_n + 1)); missing_apt+=("$apt"); missing_dnf+=("$dnf") ;;
         esac
     fi
 done < "$TSV"
@@ -248,34 +218,26 @@ if [ "$either_seen" = 1 ] && [ "$either_present" = 0 ]; then
     echo
 fi
 
-# A source build only needs these when generated inputs are incomplete. Archives
-# or a sibling checkout may avoid a source build, so this is conditional.
+# A source build only needs these when the generated inputs are incomplete:
+# archives or a sibling checkout may avoid it; a cross export can be replaced.
 tor_missing=""
-if [ "${ZCL_TOR:-full}" != stub ]; then
-    tor_src="$ROOT/vendor/tor"
-    # A cross source export can be replaced when its pin or patch changes.
-    if [ -n "${ZCL_CROSS_TRIPLE:-}" ] || ! zcl_tor_autotools_ready "$tor_src"; then
-        tor_missing="$(zcl_tor_missing_autotools | tr '\n' ' ')"
-        if [ -n "$tor_missing" ]; then
-            echo "  note     Tor source build needs missing tools: $tor_missing"
-            echo "           If Tor archives must be built from source, install autoconf, automake and libtool."
-            echo
-        fi
+if [ "${ZCL_TOR:-full}" != stub ] && { [ -n "${ZCL_CROSS_TRIPLE:-}" ] ||
+    ! zcl_tor_autotools_ready "$ROOT/vendor/tor"; }; then
+    tor_missing="$(zcl_tor_missing_autotools | tr '\n' ' ')"
+    if [ -n "$tor_missing" ]; then
+        echo "  note     Tor source build needs missing tools: $tor_missing"
+        echo "           If Tor archives must be built from source, install autoconf, automake and libtool."
+        echo
     fi
 fi
 
-# --------------------------------------------------------------------------
 # Compiler capability, not just presence: -std=c23 is the actual requirement.
-# --------------------------------------------------------------------------
 c23_probe=""
 if have cc; then
     probe="$(mktemp "${TMPDIR:-/tmp}/zcl-c23-XXXXXX.c")"
     printf '[[nodiscard]] static int f(void){return 0;}\nint main(void){return f();}\n' > "$probe"
-    if cc -std=c23 -fsyntax-only "$probe" >/dev/null 2>&1; then
-        c23_probe="ok"
-    else
-        c23_probe="fail"
-    fi
+    c23_probe="fail"
+    cc -std=c23 -fsyntax-only "$probe" >/dev/null 2>&1 && c23_probe="ok"
     rm -f "$probe"
 fi
 case "$c23_probe" in
@@ -283,24 +245,17 @@ case "$c23_probe" in
     fail) echo "  MISSING  cc -std=c23   present but rejects C23 — need gcc 14+ or a newer clang"
           missing_n=$((missing_n + 1))
           missing_apt+=("gcc"); missing_dnf+=("gcc") ;;
-    *)    ;;
 esac
 
-# --------------------------------------------------------------------------
 # Repository-side setup that is not a package.
-# --------------------------------------------------------------------------
 echo
 echo "Repository setup:"
 # core.hooksPath is written per worktree and is normally the relative spelling
-# `build/githooks`, which Git resolves against the worktree running the hook.
-# An older checkout may still carry an absolute spelling, from the shared
-# config or from a worktree config `git worktree add` copied. Both are armed;
-# the substance is "setup's armed hooks are the armed hooks", not the spelling.
+# `build/githooks`; an older checkout may carry an absolute spelling from the
+# shared config or a copied worktree config. Both are armed; the substance is
+# "setup's armed hooks are the armed hooks", not the spelling.
 hooks="$(git -C "$ROOT" config --get core.hooksPath 2>/dev/null || true)"
-case "$hooks" in
-    ""|/*) hooks_target="${hooks:-/nonexistent}" ;;
-    *)     hooks_target="$ROOT/$hooks" ;;
-esac
+case "$hooks" in ""|/*) hooks_target="${hooks:-/nonexistent}" ;; *) hooks_target="$ROOT/$hooks" ;; esac
 hooks_abs="$(realpath -m -- "$hooks_target" 2>/dev/null || echo /nonexistent)"
 hooks_shape="$(doctor_hooks_shape "$hooks_abs")"
 if [ "$hooks_shape" = ok ] && [ -x "$hooks_abs/pre-push" ]; then
@@ -308,50 +263,27 @@ if [ "$hooks_shape" = ok ] && [ -x "$hooks_abs/pre-push" ]; then
 else
     echo "  note     git hooks       not armed (developers only; optional: make setup)"
 fi
-if [ -e "$ROOT/vendor/lib/libcrypto.a" ]; then
-    echo "  ok       vendor/lib      vendored archives present"
-else
-    echo "  note     vendor/lib      archives absent; make z23 builds them (optional: make vendor)"
-fi
-if [ -f "$ROOT/compile_commands.json" ]; then
-    echo "  ok       compile db      compile_commands.json present (clangd/LSP)"
-else
-    echo "  note     compile db      absent (clangd/LSP only; optional: make setup)"
-fi
+if [ -e "$ROOT/vendor/lib/libcrypto.a" ]; then echo "  ok       vendor/lib      vendored archives present"
+else echo "  note     vendor/lib      archives absent; make z23 builds them (optional: make vendor)"; fi
+if [ -f "$ROOT/compile_commands.json" ]; then echo "  ok       compile db      compile_commands.json present (clangd/LSP)"
+else echo "  note     compile db      absent (clangd/LSP only; optional: make setup)"; fi
 
-# --------------------------------------------------------------------------
 # The payoff: one install line per manager, listing ONLY what is missing.
-# --------------------------------------------------------------------------
 echo
 if [ "$missing_n" -eq 0 ]; then
-    if [ -n "$tor_missing" ]; then
-        echo "No missing unconditional prerequisites on this host; see the Tor source-build note above."
-    else
-        echo "No missing prerequisites on this host."
-    fi
+    if [ -n "$tor_missing" ]; then echo "No missing unconditional prerequisites on this host; see the Tor source-build note above."
+    else echo "No missing prerequisites on this host."; fi
     if [ "$missing_opt_n" -gt 0 ]; then
         echo
         echo "$missing_opt_n OPTIONAL tool(s) are absent —"
         echo "the build works without them; each line above says what you give up."
-        if have apt-get || have apt; then
-            printf '  sudo apt-get install -y %s\n' \
-                "$(printf '%s\n' "${missing_opt_apt[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')"
-        fi
-        if have dnf; then
-            printf '  sudo dnf install -y %s\n' \
-                "$(printf '%s\n' "${missing_opt_dnf[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')"
-        fi
+        install_cmd apt "${missing_opt_apt[@]}"
+        install_cmd dnf "${missing_opt_dnf[@]}"
     fi
 else
     echo "Install the $missing_n missing prerequisite(s):"
-    if have apt-get || have apt; then
-        printf '  sudo apt-get install -y %s\n' \
-            "$(printf '%s\n' "${missing_apt[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')"
-    fi
-    if have dnf; then
-        printf '  sudo dnf install -y %s\n' \
-            "$(printf '%s\n' "${missing_dnf[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//')"
-    fi
+    install_cmd apt "${missing_apt[@]}"
+    install_cmd dnf "${missing_dnf[@]}"
     if ! have apt-get && ! have apt && ! have dnf; then
         echo "  (no apt or dnf on this host — package names by distro:)"
         printf '  apt: %s\n' "$(printf '%s\n' "${missing_apt[@]}" | sort -u | tr '\n' ' ')"

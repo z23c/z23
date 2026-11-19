@@ -12,10 +12,10 @@
 
 # Shared by the source builder and the read-only prerequisite report.
 zcl_tor_autotools_ready() {
-    local src="$1" generated
-    [ -x "$src/configure" ] || return 1
+    [ -x "$1/configure" ] || return 1
+    local generated
     for generated in Makefile.in orconfig.h.in ar-lib config.guess config.sub compile missing install-sh; do
-        [ -s "$src/$generated" ] || return 1
+        [ -s "$1/$generated" ] || return 1
     done
 }
 
@@ -25,10 +25,10 @@ zcl_tor_missing_autotools() {
     for tool in autoconf automake aclocal autoheader; do
         command -v "$tool" >/dev/null 2>&1 || printf '%s\n' "$tool"
     done
-    if ! command -v libtoolize >/dev/null 2>&1 && ! command -v glibtoolize >/dev/null 2>&1; then
+    # Either spelling satisfies autoreconf; naming both in one token keeps the
+    # doctor's note and build_tor_full.sh's failure line identical.
+    command -v libtoolize >/dev/null 2>&1 || command -v glibtoolize >/dev/null 2>&1 ||
         printf '%s\n' 'libtoolize(glibtoolize)'
-    fi
-    return 0
 }
 
 zcl_tor_provenance_bin() {
@@ -41,8 +41,7 @@ zcl_tor_prepare_environment() {
     [ "$(uname -s 2>/dev/null || echo unknown)" = Darwin ] || return 0
     MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
     if [ "$MACOSX_DEPLOYMENT_TARGET" != 14.0 ]; then
-        echo "$1: Darwin requires MACOSX_DEPLOYMENT_TARGET=14.0" >&2
-        return 2
+        echo "$1: Darwin requires MACOSX_DEPLOYMENT_TARGET=14.0" >&2; return 2
     fi
     export MACOSX_DEPLOYMENT_TARGET
 }
@@ -61,14 +60,8 @@ zcl_tor_prepare_environment() {
 # what "the compiler" was.
 zcl_tor_effective_cc() {
     local build_dir="$1" triple="${2:-}" cc
-    if [ -n "$triple" ]; then
-        printf '%s\n' "${VENDOR_CC:-$triple-gcc}"
-        return 0
-    fi
-    if [ -n "${VENDOR_CC:-}" ]; then
-        printf '%s\n' "$VENDOR_CC"
-        return 0
-    fi
+    if [ -n "$triple" ]; then printf '%s\n' "${VENDOR_CC:-$triple-gcc}"; return 0; fi
+    if [ -n "${VENDOR_CC:-}" ]; then printf '%s\n' "$VENDOR_CC"; return 0; fi
     cc="$(awk -F'=' '/^CC[ \t]*=/{ sub(/^[ \t]*/, "", $2); print $2; exit }' \
         "$build_dir/Makefile" 2>/dev/null || true)"
     [ -n "$cc" ] || cc="${CC:-cc}"
