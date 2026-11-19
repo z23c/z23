@@ -1873,6 +1873,12 @@ static int fmx_t_sent_local_ack(void)
         fmx_end(&s);
         ASSERT(fmx_state_agrees(gid, "desk-second", "queued"));
         ASSERT(fmx_state_agrees(gid, "desk-first", "acknowledged"));
+        fmx_state_file("mail", "cursor.desk-crew", "5|\n", false);
+        ASSERT(fmx_state_agrees(gid, "desk-first", "queued"));
+        fmx_state_file("mail", "cursor.desk-crew", "5|other.jsonl:9999\n", false);
+        ASSERT(fmx_state_agrees(gid, "desk-first", "queued"));
+        fmx_state_file("mail", "cursor.desk-crew", "5|outbox.jsonl:1\n", false);
+        ASSERT(fmx_state_agrees(gid, "desk-first", "queued"));
         fmx_state_file("mail", "cursor.desk-crew", "5|garbage\n", false);
         ASSERT(fmx_state_agrees(gid, "desk-first", "queued"));
         fmx_evidence(&b, gid, "mail", "desk-first");
@@ -6538,8 +6544,8 @@ static int fmx_t_ack_framing(void)
     clock_set_default(&fixed_clock);
     static const struct { const char *wire; size_t len; bool valid; } rows[] = {
         {"7", 1, true}, {"7\n", 2, true}, {"9223372036854775807", 19, true},
-        {"7|outbox:120\n", sizeof("7|outbox:120\n") - 1, true},
-        {"7|outbox:120,inbox.peer-host:4096\n", sizeof("7|outbox:120,inbox.peer-host:4096\n") - 1, true},
+        {"7|outbox:120\n", sizeof("7|outbox:120\n") - 1, false},
+        {"7|outbox:120,inbox.peer-host:4096\n", sizeof("7|outbox:120,inbox.peer-host:4096\n") - 1, false},
         {"7|\0x\n", 5, false}, {" 7", 2, false}, {"+7", 2, false},
         {"7\0garbage\n", 10, false}, {"7junk\n", 6, false},
         {"7\n8\n", 4, false}, {"9223372036854775808\n", 20, false},
@@ -6561,6 +6567,24 @@ static int fmx_t_ack_framing(void)
             ASSERT(fmx_state_agrees(gid, "ack-framing", rows[i].valid ? "acknowledged" : "queued"));
             fmx_restore();
         }
+        PASS();
+    }
+    TEST("steer: a complete composite cursor covers its actual stream boundary") {
+        char gid[64], code[64], path[1400], token[1500];
+        struct stat st;
+        fmx_isolate("ack_real_boundary");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        fmx_ref_attempt(gid, "ack-framing", "ack-framing", code, sizeof(code));
+        ASSERT_STR_EQ(code, "");
+        ASSERT(snprintf(path, sizeof(path), "%s/z23/dev/mail/outbox.jsonl", g_fmx_state) > 0);
+        ASSERT(stat(path, &st) == 0 && st.st_size > 120);
+        ASSERT(snprintf(token, sizeof(token), "7|outbox.jsonl:%lld\n", (long long)st.st_size) > 0);
+        fmx_state_file("mail", "cursor.field-agent", token, false);
+        ASSERT(fmx_state_agrees(gid, "ack-framing", "acknowledged"));
+        ASSERT(snprintf(token, sizeof(token), "7|outbox.jsonl:%lld,inbox.peer-host.jsonl:4096\n", (long long)st.st_size) > 0);
+        fmx_state_file("mail", "cursor.field-agent", token, false);
+        ASSERT(fmx_state_agrees(gid, "ack-framing", "acknowledged"));
+        fmx_restore();
         PASS();
     }
 _test_next:; fmx_restore(); clock_set_default(saved_clock); return failures;

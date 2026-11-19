@@ -20,6 +20,8 @@ void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply,
                                   const char *key_digest, bool require_existing);
 
+bool zcl_devagent_mail_cursor_valid(const char *token);
+
 bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
                                      long long row_end, long long seq);
 

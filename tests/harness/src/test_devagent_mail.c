@@ -1640,6 +1640,41 @@ _test_next:;
 }
 
 /* An ack persists the caller's cursor to the agent's cursor file. */
+static int test_mail_ack_invalid_composite(void)
+{
+    int failures = 0;
+    struct dvx_call a = {0};
+    TEST("mail: malformed composite ack never replaces the stored cursor") {
+        static const char *const bad[] = {"5|garbage", "5|outbox:1,outbox:2", "5|outbox:9223372036854775808", "5|outbox:1,"};
+        dvx_isolate("ack_invalid_composite");
+        dvx_ack(&a, "alice", 7);
+        ASSERT(dvx_run(&a) && dvx_ok(&a));
+        dvx_end(&a);
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            dvx_begin(&a);
+            (void)json_push_kv_str(&a.input, "action", "ack");
+            (void)json_push_kv_str(&a.input, "agent", "alice");
+            (void)json_push_kv_str(&a.input, "cursor", bad[i]);
+            ASSERT(dvx_run(&a));
+            ASSERT(!dvx_ok(&a));
+            ASSERT_STR_EQ(a.reply.error.code, "BAD_INPUT");
+            dvx_end(&a);
+            char path[1200], text[64];
+            dvx_maildir(path, sizeof(path));
+            size_t len = strlen(path);
+            ASSERT(len + sizeof("/cursor.alice") < sizeof(path));
+            strcat(path, "/cursor.alice");
+            FILE *f = fopen(path, "rb"); ASSERT(f);
+            ASSERT(fgets(text, sizeof(text), f) != NULL);
+            ASSERT_EQ(fclose(f), 0);
+            ASSERT_STR_EQ(text, "7\n");
+        }
+        PASS();
+    }
+_test_next:;
+    dvx_end(&a); dvx_restore(); return failures;
+}
+
 static int test_mail_ack_persists_cursor(void)
 {
     int failures = 0;
@@ -2232,6 +2267,7 @@ static int test_mail_post_ack_checks(void)
     if (failures) return failures;
     failures += test_mail_post_resume_token();
     if (failures) return failures;
+    failures += test_mail_ack_invalid_composite();
     failures += test_mail_ack_persists_cursor();
     if (failures) return failures;
     failures += test_mail_body_refusals();

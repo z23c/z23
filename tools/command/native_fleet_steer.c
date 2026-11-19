@@ -1396,7 +1396,7 @@ static long long fmc_ack_cursor(const char *agent)
     size_t len = fmc_ack_read(agent, buf, sizeof(buf));
     long long cursor = fmc_ack_parse(buf, len);
     if (cursor >= 0 && strchr(buf, '|') &&
-        !zcl_devagent_mail_cursor_covers(buf, "", 0, 0)) return -1;
+        !zcl_devagent_mail_cursor_valid(buf)) return -1;
     return cursor;
 }
 

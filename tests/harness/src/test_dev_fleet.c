@@ -689,6 +689,26 @@ _test_next:;
     return failures;
 }
 
+static int acc_mail_ack_invalid(const struct acc_rig *r)
+{
+    int failures = 0;
+    char env[ACC_PATH + 32], path[ACC_PATH + 80], out[32768], text[32];
+    TEST("fleet acceptance: malformed composite ack cannot replace a cursor") {
+        ASSERT(snprintf(env, sizeof(env), "XDG_STATE_HOME=%s/mail-state", r->root) > 0);
+        ASSERT(acc_mail_command(env, r->bin, "ack", "7", "--agent=alice", out, sizeof(out)));
+        ASSERT(!acc_mail_command(env, r->bin, "ack", "5|garbage", "--agent=alice", out, sizeof(out)));
+        ASSERT(strstr(out, "BAD_INPUT") != NULL);
+        ASSERT(snprintf(path, sizeof(path), "%s/mail-state/z23/dev/mail/cursor.alice", r->root) > 0);
+        FILE *f = fopen(path, "rb"); ASSERT(f);
+        ASSERT(fgets(text, sizeof(text), f) != NULL);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_STR_EQ(text, "7\n");
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int acc_run(void)
 {
     int failures = 0;
@@ -701,6 +721,7 @@ static int acc_run(void)
     }
     if (built) {
         failures += acc_mail_cursor(&rig);
+        failures += acc_mail_ack_invalid(&rig);
         failures += acc_check_inventory(&rig);
         failures += acc_check_gates(&rig);
         failures += acc_check_freshness(&rig);

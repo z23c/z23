@@ -1659,7 +1659,16 @@ static bool dvm_cursor_covered_entries(const char *p, const char *stream,
     return true;
 }
 
-/* Validate the complete cursor before using either floor or stream offset. */
+/* Composite syntax validation is independent from row coverage. */
+bool zcl_devagent_mail_cursor_valid(const char *token)
+{
+    struct dvm_pull_filter filter = {0};
+    bool ignored;
+    return token && strlen(token) < DVM_TOKEN_CAP &&
+        dvm_since_token(token, &filter) &&
+        dvm_cursor_covered_entries(filter.token, "", 0, &ignored);
+}
+
 bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
                                      long long row_end, long long seq)
 {
@@ -1669,7 +1678,7 @@ bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
         strlen(token) >= DVM_TOKEN_CAP || !dvm_since_token(token, &filter) ||
         !dvm_cursor_covered_entries(filter.token, stream, row_end, &covered))
         return false;
-    return seq <= filter.since || covered;
+    return covered;
 }
 
 /* Apply the token's per-stream offsets. A stream the token names but the
@@ -2440,7 +2449,7 @@ static bool dvm_ack_cursor(const struct zcl_command_request *req,
         *token = NULL; /* a number, or a numeric string */
         return true;
     }
-    if (*token && strchr(*token, '|') && dvm_cursor_text_ok(*token))
+    if (*token && zcl_devagent_mail_cursor_valid(*token))
         return true;
     dvm_fail(reply, "BAD_INPUT",
              "ack needs a non-negative cursor or a next_since token",
