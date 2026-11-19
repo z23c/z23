@@ -1155,12 +1155,12 @@ install_payload_macos_generation() {
     if has_app_source "$stage"; then
         [ ! -L "$prefix/share/z23/apps" ] || die "apps installation directory must not be a symlink"
         install_directories "$prefix/share/z23/apps"
-        [ ! -e "$prefix/share/z23/apps/skycombat" ] || [ -L "$prefix/share/z23/apps/skycombat" ] \
-            || die "skycombat source selector is not an installer-managed link"
-        atomic_relative_link ../lib/z23/current/z23-skycombat "$prefix/bin/z23-skycombat" \
-            || die "cannot link the current macOS game"
-        atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/skycombat" \
-            || die "cannot link the current macOS app source"
+        local app=skycombat; [ -n "$(manifest_digest_of "$dest" z23-tasks)" ] && app=tasks
+        [ ! -e "$prefix/share/z23/apps/$app" ] || [ -L "$prefix/share/z23/apps/$app" ] || die "$app selector not installer-managed"
+        atomic_relative_link "../lib/z23/current/z23-$app" "$prefix/bin/z23-$app" \
+            || die "cannot link the current macOS $app app"
+        atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/$app" \
+            || die "cannot link the current macOS $app source"
     fi
     install_docs "$prefix"
 }
