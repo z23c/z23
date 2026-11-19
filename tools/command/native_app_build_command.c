@@ -35,7 +35,19 @@
  * with a bounded log tail, refuses CLOSURE_DRIFT when a depfile names an
  * input the plan's closure did not declare, stores the image at
  * <datadir>/app_build/images/<image_sha3> and saves the record under
- * <datadir>/app_build/records. Nothing is executed but the build. */
+ * <datadir>/app_build/records. Nothing is executed but the build.
+ *
+ * Build forms. A copy with a root Makefile takes the make-fragment path,
+ * byte-identical to its previous behavior. A copy with NO root Makefile is
+ * routed through the one vcs package lifecycle when its release carries a
+ * zcode recipe that declares programs: plan binds the copy identity to the
+ * release recipe, confirm installs through package_lifecycle (the confined
+ * z23-package-verify worker compiles; nothing here compiles) and reads the
+ * exact installed program back through the resident acceptance projection,
+ * replying with the verified receipt identity (receipt_id, program
+ * bin/<short name>, artifact_sha3) plus the tasks preview offer candidate
+ * (preview_root, preview_receipt, preview_program, artifact_sha3). A copy
+ * with NEITHER form refuses NO_BUILD_FORM, naming both expected forms. */
 
 #include "command/native_command.h"
 
@@ -52,7 +64,10 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
+#include "platform/time_compat.h"
 #include "sha3/sha3.h"
+#include "services/package_lifecycle.h"
+#include "services/package_resident.h"
 #include "util/authority_receipt.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
@@ -95,6 +110,11 @@ struct zab {
     struct app_image_build cached;
     bool cache_hit;
     bool confine;
+    /* Recipe build form: the copy has no root Makefile and its release
+     * carries a zcode recipe with programs (installed as bin/<short name>). */
+    bool recipe_build;
+    uint8_t recipe_root[32];
+    char program[VCS_PACKAGE_PATH_MAX];
 };
 
 static void zab_fail(struct zab *z, const char *code, bool mutated,
@@ -264,15 +284,70 @@ static bool zab_dependencies_match(struct zab *z)
     return true;
 }
 
-static bool zab_make_fragment(struct zab *z)
+/* The release's zcode recipe, read from this datadir's store and parsed.
+ * The recipe root the persisted release commits names the exact wire, so
+ * what a receive stored is what this build follows. Reports the package's
+ * short name (the part of the release name after the publisher's slash),
+ * which names the installed program output. */
+static bool zab_release_recipe(struct zab *z, struct vcs_package_recipe *recipe,
+                               char *short_name, size_t cap)
 {
-    char path[ZAB_PATH];
+    struct vcs_package_release release;
+    uint8_t release_id[32];
+    if (zcl_package_copy_find_release(z->datadir, z->copy.parent_release,
+                                      &release, release_id) !=
+        ZCL_PACKAGE_COPY_FOUND)
+        return false;
+    const char *slash = strchr(release.name, '/');
+    const char *leaf = slash ? slash + 1 : release.name;
+    if (!leaf[0] || strlen(leaf) >= cap)
+        return false;
+    memcpy(short_name, leaf, strlen(leaf) + 1);
+    char dir[ZAB_PATH], path[ZAB_PATH], hex[65];
+    zcl_hex_encode(release.recipe_root, 32, hex);
+    if (!zcl_path_join(dir, sizeof(dir), z->datadir, "zcode/recipes") ||
+        !zcl_path_join(path, sizeof(path), dir, hex))
+        return false;
+    size_t len = 0;
+    uint8_t *wire = zcl_native_source_bundle_read(path, &len);
+    bool ok = wire && vcs_package_recipe_parse(wire, len, recipe) ==
+                          VCS_PACKAGE_RECIPE_OK;
+    free(wire);
+    return ok;
+}
+
+/* Which build form the saved copy carries. A root Makefile keeps the make
+ * fragment path byte-identical; without one, a release recipe that declares
+ * at least one program routes the build through the vcs package lifecycle
+ * (its first program installs as bin/<short name>). A copy with NEITHER
+ * form refuses, naming both. */
+static bool zab_build_form(struct zab *z)
+{
+    char path[ZAB_PATH], short_name[128];
     struct stat st;
     if (zcl_path_join(path, sizeof(path), zab_source(z), "Makefile") &&
-        lstat(path, &st) == 0 && S_ISREG(st.st_mode))
+        lstat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        z->recipe_build = false;
         return true;
-    zab_fail(z, "NO_MAKE_FRAGMENT", false, "the copy has no Makefile with "
-             "print-app-closure and app targets", z->copy_dir);
+    }
+    struct vcs_package_recipe recipe;
+    vcs_package_recipe_init(&recipe);
+    bool routed = zab_release_recipe(z, &recipe, short_name,
+                                     sizeof(short_name)) &&
+        recipe.programs.count > 0 &&
+        vcs_package_recipe_program_output(recipe.programs.items[0],
+                                          short_name, z->program,
+                                          sizeof(z->program)) &&
+        vcs_package_recipe_root(&recipe, z->recipe_root) ==
+            VCS_PACKAGE_RECIPE_OK;
+    vcs_package_recipe_free(&recipe);
+    if (routed) {
+        z->recipe_build = true;
+        return true;
+    }
+    zab_fail(z, "NO_BUILD_FORM", false, "the copy has neither build form: "
+             "no Makefile with print-app-closure and app targets, and no "
+             "zcode recipe with programs in its release", z->copy_dir);
     return false;
 }
 
@@ -327,6 +402,163 @@ static bool zab_cache(struct zab *z)
     return true;
 }
 
+/* ── the recipe build form (no Makefile; release recipe with programs) ── */
+
+/* The recipe plan binds the copy's saved identity to the release recipe the
+ * build will follow; confirm re-derives it exactly like the make plan. */
+static void zab_recipe_plan_id(struct zab *z)
+{
+    static const char domain[] = "zcl.app_build.recipe_plan.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, z->copy.fork_version, 32);
+    sha3_256_write(&sha, z->copy.selected_version, 32);
+    sha3_256_write(&sha, z->package_root, 32);
+    sha3_256_write(&sha, z->recipe_root, 32);
+    sha3_256_write(&sha, z->dependency_root, 32);
+    sha3_256_finalize(&sha, z->plan_id);
+}
+
+/* The caller may pin the clock for deterministic tests; host clock otherwise.
+ * The same value stamps the lifecycle plan and its expiry. */
+static int64_t zab_recipe_now(const struct zab *z)
+{
+    const struct json_value *v = json_get(z->input, "now_unix");
+    return v && v->type == JSON_INT && json_get_int(v) > 0
+        ? (int64_t)json_get_int(v) : (int64_t)platform_time_wall_unix();
+}
+
+static void zab_recipe_refuse(struct zab *z, const char *code,
+                              const char *rule, const char *detail,
+                              bool mutated)
+{
+    char why[PACKAGE_LIFECYCLE_RULE_MAX + PACKAGE_LIFECYCLE_DETAIL_MAX + 32];
+    (void)snprintf(why, sizeof(why), "%s: %s",
+                   rule && rule[0] ? rule : "lifecycle-refused",
+                   detail && detail[0] ? detail : "no detail reported");
+    zab_fail(z, code, mutated, why, ZAB_COMMAND);
+}
+
+/* The recipe form's describe: the copy identity, the release recipe it
+ * follows, and the installed program the build targets. */
+static void zab_recipe_describe(struct zab *z, const char *stage)
+{
+    struct json_value *d = &z->reply->data;
+    (void)json_push_kv_str(d, "stage", stage);
+    (void)json_push_kv_str(d, "copy", z->copy_dir);
+    (void)json_push_kv_str(d, "authorization",
+                           zcl_package_copy_adoption_name(z->auth));
+    zcl_package_copy_push_root(d, "version", z->copy.selected_version);
+    zcl_package_copy_push_root(d, "package_root", z->package_root);
+    zcl_package_copy_push_root(d, "recipe_root", z->recipe_root);
+    zcl_package_copy_push_root(d, "dependency_root", z->dependency_root);
+    (void)json_push_kv_str(d, "recipe_program", z->program);
+    (void)json_push_kv_bool(d, "recipe_build", true);
+    zcl_package_copy_push_root(d, "plan_id", z->plan_id);
+}
+
+/* The commit reply carries the verified receipt's identity, and the tasks
+ * preview offer candidate under the exact keys the tasks offer command
+ * reads (preview_root, preview_receipt, preview_program, artifact_sha3). */
+static void zab_recipe_commit_reply(struct zab *z,
+    const struct package_resident_artifact *a)
+{
+    struct json_value *d = &z->reply->data;
+    zab_recipe_describe(z, "commit");
+    zcl_package_copy_push_root(d, "receipt_id", a->receipt_id);
+    (void)json_push_kv_str(d, "program", a->output);
+    (void)json_push_kv_str(d, "artifact_sha3", a->accepted.image_sha3_hex);
+    (void)json_push_kv_str(d, "program_path", a->locator);
+    zcl_package_copy_push_root(d, "preview_root", a->package_root);
+    zcl_package_copy_push_root(d, "preview_receipt", a->receipt_id);
+    (void)json_push_kv_str(d, "preview_program", a->output);
+    (void)json_push_kv_bool(d, "make_ran", false);
+    (void)json_push_kv_bool(d, "executed", false);
+    (void)json_push_kv_str(d, "next", "the tasks preview offer carries this "
+                           "verified receipt; Keep in the receive flow "
+                           "submits it");
+    z->reply->error.mutated = true;
+}
+
+/* The installed target's receipt step, or NULL when none carries one. */
+static const struct package_lifecycle_step *zab_installed_step(
+    const struct package_lifecycle_commit_report *done,
+    const uint8_t package_root[32])
+{
+    const struct package_lifecycle_step *step = NULL;
+    for (size_t i = 0; i < done->step_count; ++i)
+        if (!memcmp(done->steps[i].root, package_root, 32) &&
+            done->steps[i].has_receipt)
+            step = &done->steps[i];
+    return step;
+}
+
+/* Install through the one package lifecycle and copy the installed target's
+ * receipt step out; false with a fail-closed refusal otherwise. The step is
+ * copied because the commit report is this function's local storage. */
+static bool zab_recipe_install(struct zab *z,
+    const struct package_lifecycle_plan_report *plan, int64_t now,
+    struct package_lifecycle_step *out)
+{
+    struct package_lifecycle_commit_report done;
+    memset(&done, 0, sizeof(done));
+    struct zcl_result r = package_lifecycle_commit(z->datadir, plan->plan_id,
+                                                  now, &done);
+    if (r.ok && done.installed &&
+        memcmp(done.active_root, z->package_root, 32) == 0) {
+        const struct package_lifecycle_step *step =
+            zab_installed_step(&done, z->package_root);
+        if (step) {
+            memcpy(out, step, sizeof(*out));
+            return true;
+        }
+        zab_fail(z, "RECIPE_BUILD_REFUSED", true,
+                 "the lifecycle installed this package without a receipt",
+                 ZAB_COMMAND);
+        return false;
+    }
+    zab_recipe_refuse(z, "RECIPE_BUILD_REFUSED",
+                      r.ok ? (done.rule[0] ? done.rule : "not-installed")
+                           : "lifecycle-commit-failed",
+                      r.ok ? done.detail : r.message, true);
+    return false;
+}
+
+/* Build and install through the one vcs package lifecycle, then read the
+ * exact installed program back through the resident acceptance projection.
+ * Every refusal is fail-closed: an unready plan, a failed install, an
+ * install without a receipt, or an artifact that does not verify. */
+static void zab_recipe_build(struct zab *z)
+{
+    char hex[65];
+    zcl_hex_encode(z->package_root, 32, hex);
+    int64_t now = zab_recipe_now(z);
+    struct package_lifecycle_plan_report plan;
+    memset(&plan, 0, sizeof(plan));
+    struct zcl_result r = package_lifecycle_plan(z->datadir, hex, now, &plan);
+    if (!r.ok || !plan.ready) {
+        zab_recipe_refuse(z, "RECIPE_PLAN_REFUSED",
+                          r.ok ? plan.rule : "lifecycle-plan-failed",
+                          r.ok ? plan.detail : r.message, false);
+        return;
+    }
+    struct package_lifecycle_step installed;
+    if (!zab_recipe_install(z, &plan, now, &installed))
+        return;
+    struct package_resident_artifact artifact;
+    r = package_resident_artifact_read(z->datadir, z->package_root,
+                                       installed.receipt_id, z->program,
+                                       &artifact);
+    if (!r.ok) {
+        zab_fail(z, "RECIPE_ARTIFACT_REFUSED", true,
+                 "the installed program did not verify against its receipt",
+                 r.message);
+        return;
+    }
+    zab_recipe_commit_reply(z, &artifact);
+}
+
 static void zab_plan_id(struct zab *z)
 {
     struct sha3_256_ctx sha;
@@ -360,15 +592,23 @@ static bool zab_environment(struct zab *z)
     return true;
 }
 
-/* Every check and root a plan and its confirm both derive. */
+/* Every check and root a plan and its confirm both derive. The recipe form
+ * derives the copy's roots plus its release-recipe binding and skips every
+ * make-only stage; the make form is unchanged. */
 static bool zab_derive(struct zab *z)
 {
     if (!zab_resolve(z) || !zab_open_copy(z))
         return false;
-    if (!zab_authorize(z) || !zab_selected_source(z) || !zab_make_fragment(z) ||
-        !zab_package(z) || !zab_dependencies_match(z) || !zab_store_paths(z) ||
-        !zab_environment(z)) return false;
+    if (!zab_authorize(z) || !zab_selected_source(z) || !zab_build_form(z) ||
+        !zab_package(z) || !zab_dependencies_match(z) || !zab_store_paths(z))
+        return false;
+    if (z->recipe_build) {
+        zab_recipe_plan_id(z);
+        return true;
+    }
     z->confine = app_build_make_confinable();
+    if (!zab_environment(z))
+        return false;
     if (!zab_closure(z) || !zab_cache(z))
         return false;
     zab_plan_id(z);
@@ -776,7 +1016,8 @@ static void zab_confirm(struct zab *z)
                                        ZAB_COMMAND))
         return;
     if (!z->cache_hit) {
-        zab_build(z);
+        if (z->recipe_build) zab_recipe_build(z);
+        else zab_build(z);
         return;
     }
     uint8_t k[32];
@@ -808,7 +1049,8 @@ void zcl_native_handle_app_build(const struct zcl_command_request *request,
         if (zcl_package_copy_confirmed(request->input)) {
             zab_confirm(z);
         } else {
-            zab_describe(z, "plan", !z->confine);
+            if (z->recipe_build) zab_recipe_describe(z, "plan");
+            else zab_describe(z, "plan", !z->confine);
             (void)json_push_kv_str(&reply->data, "next", "repeat with this "
                                    "plan_id and confirm:true to build");
         }

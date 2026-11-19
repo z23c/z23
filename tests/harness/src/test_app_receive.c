@@ -2090,6 +2090,173 @@ static int rdiag_case(enum rdiag_mode mode)
     zcl_command_reply_free(&reply); json_free(&input); return failures;
 }
 #endif
+/* ── app.build build-form routing (recipe vs make fragment) ──────────── */
+
+static const char k_meta_program[] =
+    "{\n  \"schema\": 1,\n  \"name\": \"stub/tinyprog\",\n"
+    "  \"semver\": \"0.1.0\",  \"language\": \"c23\",\n"
+    "  \"license\": \"Apache-2.0\",  \"include_dir\": \"include\",\n"
+    "  \"source_dir\": \"src\",  \"dependencies\": [],\n"
+    "  \"programs\": [\"app/main.c\"]\n}\n";
+
+/* One stub source tree's directories: the shared include/ and src/, plus
+ * app/ when the variant declares a program. */
+static bool abc_stub_dirs(struct abc_world *w, bool programs)
+{
+    static const char *const dirs[] = {"include", "src"};
+    if (mkdir(w->src, 0700) != 0 || !abc_license(w->src)) return false;
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+        char dir[ABC_PATH];
+        int n = snprintf(dir, sizeof(dir), "%s/%s", w->src, dirs[i]);
+        if (n < 0 || (size_t)n >= sizeof(dir) || mkdir(dir, 0700) != 0) return false;
+    }
+    if (!programs) return true;
+    char dir[ABC_PATH];
+    int n = snprintf(dir, sizeof(dir), "%s/app", w->src);
+    return n >= 0 && (size_t)n < sizeof(dir) && mkdir(dir, 0700) == 0;
+}
+
+/* One stub source tree in all three build forms this card distinguishes:
+ * a make fragment (the original path), a zcode recipe with programs (the
+ * package-lifecycle path), and neither (a fail-closed refusal). */
+static bool abc_stub_variant(struct abc_world *w, bool makefile, bool programs)
+{
+    if (!abc_stub_dirs(w, programs)) return false;
+    bool ok = abc_put(w->src, "zcode-package.json",
+                      programs ? k_meta_program : k_meta) &&
+        abc_put(w->src, "include/boost.h", "#define BOOST 1\n") &&
+        /* A program package's translation units hold one main(), in app/:
+         * src/ is the library the program links, as the verifier links it. */
+        abc_put(w->src, "src/main.c",
+                programs ? "int tinyprog_value(void) { return 7; }\n" : k_main);
+    if (ok && programs) ok = abc_put(w->src, "app/main.c", k_main);
+    if (ok && makefile) ok = abc_put(w->src, "Makefile", k_makefile);
+    return ok;
+}
+
+static bool rt_setup_form(struct receive_fixture *f, bool makefile, bool programs)
+{
+    memset(f, 0, sizeof(*f));
+    if (!test_mkdtemp(f->world.root, sizeof(f->world.root), "app_receive")) return false;
+    (void)snprintf(f->world.src, sizeof(f->world.src), "%s/source", f->world.root);
+    (void)snprintf(f->datadir, sizeof(f->datadir), "%s/bob-data", f->world.root);
+    (void)snprintf(f->destination, sizeof(f->destination), "%s/bob-copy", f->world.root);
+    (void)snprintf(f->file, sizeof(f->file), "%s/first.z23share", f->world.root);
+    (void)snprintf(f->alternate, sizeof(f->alternate), "%s/second.z23share", f->world.root);
+    (void)snprintf(f->backup, sizeof(f->backup), "%s/first.saved", f->world.root);
+    (void)snprintf(f->key, sizeof(f->key), "%s/sender.key", f->world.root);
+    char publisher[PLUGIN_HEX_PUBLIC_KEY + 1];
+    return abc_stub_variant(&f->world, makefile, programs) &&
+        plugin_keygen(f->key, publisher) == PLUGIN_OK &&
+        rt_bundle(f, f->file, 1);
+}
+
+static bool rz_text(const struct zcl_command_reply *reply, const char *key,
+                    const char *want)
+{
+    const char *got = json_get_str(json_get(&reply->data, key));
+    return got && !strcmp(got, want);
+}
+
+static bool rz_root(const struct zcl_command_reply *reply, const char *key,
+                    const char *want)
+{
+    const char *got = json_get_str(json_get(&reply->data, key));
+    return got && strlen(got) == 64 && !strcmp(got, want);
+}
+
+/* The commit reply's build identity: built through the recipe form, no make
+ * ran, nothing executed, and the installed program is named. */
+static bool rz_commit_fields(const struct zcl_command_reply *built,
+                             const struct receive_fixture *f)
+{
+    const char *program = json_get_str(json_get(&built->data, "program"));
+    const char *receipt = json_get_str(json_get(&built->data, "receipt_id"));
+    const char *digest = json_get_str(json_get(&built->data, "artifact_sha3"));
+    return built->status == ZCL_COMMAND_STATUS_PASSED &&
+        rz_text(built, "stage", "commit") &&
+        rz_text(built, "recipe_program", "bin/tinyprog") &&
+        rz_root(built, "package_root", f->package) &&
+        json_get_bool(json_get(&built->data, "recipe_build")) &&
+        !json_get_bool(json_get(&built->data, "make_ran")) &&
+        !json_get_bool(json_get(&built->data, "executed")) &&
+        program && !strcmp(program, "bin/tinyprog") &&
+        receipt && strlen(receipt) == 64 &&
+        digest && strlen(digest) == 64;
+}
+
+/* The tasks preview offer candidate mirrors the verified receipt exactly. */
+static bool rz_commit_offer(const struct zcl_command_reply *built,
+                            const struct receive_fixture *f)
+{
+    const char *receipt = json_get_str(json_get(&built->data, "receipt_id"));
+    const char *digest = json_get_str(json_get(&built->data, "artifact_sha3"));
+    return rz_root(built, "preview_root", f->package) &&
+        rz_root(built, "preview_receipt", receipt) &&
+        rz_text(built, "preview_program", "bin/tinyprog") &&
+        rz_text(built, "artifact_sha3", digest);
+}
+
+/* The recipe plan: the routing is visible, the package root matches the
+ * received release, and a plan_id is returned for confirm. */
+static bool rz_plan_fields(const struct zcl_command_reply *reply,
+                           const struct receive_fixture *f, char plan[65])
+{
+    const char *plan_id = json_get_str(json_get(&reply->data, "plan_id"));
+    bool ok = reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        rz_text(reply, "stage", "plan") &&
+        rz_text(reply, "recipe_program", "bin/tinyprog") &&
+        rz_root(reply, "package_root", f->package) &&
+        json_get_bool(json_get(&reply->data, "recipe_build")) &&
+        plan_id && strlen(plan_id) == 64;
+    if (ok) memcpy(plan, plan_id, 65);
+    return ok;
+}
+
+static int rz_build_case(bool makefile, bool programs)
+{
+    int failures = 0;
+    struct receive_fixture f = {0};
+    struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST(programs ? "app.build routes a no-Makefile program release through "
+                    "the zcode package lifecycle"
+                  : "app.build refuses a copy with neither Makefile nor a "
+                    "zcode recipe with programs") {
+        ASSERT(rt_setup_form(&f, makefile, programs));
+        ASSERT(rt_attempt(&f, RT_CONFIRM));
+        ASSERT(rt_input(&input, &f) &&
+            json_push_kv_str(&input, "copy", f.destination) &&
+            json_push_kv_str(&input, "now_unix", "20400"));
+        struct zcl_command_request request = {.input = &input};
+        zcl_native_handle_app_build(&request, &reply);
+        if (!programs) {
+            ASSERT(rt_failed_with(&reply, "NO_BUILD_FORM"));
+            const char *message = reply.error.message;
+            ASSERT(message && strstr(message, "Makefile") &&
+                strstr(message, "zcode recipe"));
+            PASS();
+        } else {
+            char plan[65];
+            ASSERT(rz_plan_fields(&reply, &f, plan));
+            ASSERT(json_push_kv_str(&input, "plan_id", plan) &&
+                json_push_kv_bool(&input, "confirm", true));
+            struct zcl_command_reply built;
+            zcl_command_reply_init(&built, "zcl.app_receive.v1");
+            zcl_native_handle_app_build(&request, &built);
+            bool ok = rz_commit_fields(&built, &f) && rz_commit_offer(&built, &f);
+            if (!ok)
+                fprintf(stderr, "RECIPE_BUILD status=%d code=%s msg=%s why=%s stage=%s\n",
+                    built.status, built.error.code, built.error.message,
+                    built.error.evidence,
+                    json_get_str(json_get(&built.data, "stage")));
+            ASSERT(ok);
+            PASS();
+        }
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input); return failures;
+}
+
 int test_app_receive(void)
 {
     int failures = rt_wrap_cases();
@@ -2124,6 +2291,8 @@ int test_app_receive(void)
 #if defined(__linux__)
     failures += rdiag_case(RDIAG_CLOSE);
 #endif
+    failures += rz_build_case(false, true);
+    failures += rz_build_case(false, false);
     /* Native harness owns fixture retirement; preserve failed state for diagnosis. */
     return failures;
 }
