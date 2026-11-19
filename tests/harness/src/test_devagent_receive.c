@@ -701,6 +701,172 @@ static long long rtx_answers(const char *ref, const char *needle)
     return hits;
 }
 
+/* One steer-sent row. fleet.steer.send appends it through dev.agent.mail
+ * onto outbox.jsonl and records the seq, so evidence can still call it
+ * queued until this receiver covers that byte. */
+static bool rtx_steer_kind(const char *grant, const char *ref,
+                           const char *body, const char *key, const char *kind)
+{
+    struct rtx_call c;
+    struct json_value item, items;
+    const struct json_value *accepted;
+    bool ok;
+    json_init(&item);
+    json_set_object(&item);
+    json_init(&items);
+    json_set_array(&items);
+    (void)json_push_kv_str(&item, "to", "box-a");
+    (void)json_push_kv_str(&item, "body", body);
+    (void)json_push_kv_str(&item, "ref", ref);
+    (void)json_push_kv_str(&item, "idempotency_key", key);
+    (void)json_push_kv_str(&item, "kind", kind);
+    (void)json_push_back(&items, &item);
+    rtx_begin(&c, "fleet.steer.send", "zcl.fleet_steer_send.v1");
+    (void)json_push_kv_str(&c.input, "grant", grant);
+    (void)json_push_kv_str(&c.input, "from", "chatgpt");
+    (void)json_push_kv(&c.input, "items", &items);
+    zcl_native_handle_fleet_steer_send(&c.request, &c.reply);
+    accepted = json_get(&c.reply.data, "accepted");
+    ok = rtx_ok(&c) && accepted && accepted->type == JSON_INT &&
+         json_get_int(accepted) == 1;
+    rtx_end(&c);
+    json_free(&items);
+    json_free(&item);
+    return ok;
+}
+
+static bool rtx_steer_result(const char *grant, const char *ref,
+                             const char *body, const char *key)
+{
+    return rtx_steer_kind(grant, ref, body, key, "result");
+}
+
+static bool rtx_json_str(const struct json_value *v, const char *want)
+{
+    const char *s;
+    if (!v || v->type != JSON_STR)
+        return false;
+    s = json_get_str(v);
+    return s && strcmp(s, want) == 0;
+}
+
+/* 1 when this page names `ref` and its stream fits. 0 when the page does
+ * not. -1 when the first matching ref has no usable stream: later rows on
+ * this page are not a substitute, and the caller still turns the page. */
+static int rtx_stream_on_page(const struct json_value *rows, const char *ref,
+                              char *out, size_t cap)
+{
+    size_t i, n = (rows && rows->type == JSON_ARR) ? json_size(rows) : 0u;
+    for (i = 0; i < n; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *r = row ? json_get(row, "ref") : NULL;
+        const struct json_value *s = row ? json_get(row, "stream") : NULL;
+        const char *stream;
+        if (!rtx_json_str(r, ref))
+            continue;
+        stream = (s && s->type == JSON_STR) ? json_get_str(s) : NULL;
+        if (!stream || strlen(stream) >= cap)
+            return -1;
+        (void)snprintf(out, cap, "%s", stream);
+        return 1;
+    }
+    return 0;
+}
+
+/* Stream name of one mail row, from the shipped pull. A long outbox is
+ * paged, so this follows next_since until the ref appears. */
+static bool rtx_row_stream(const char *ref, char *out, size_t cap)
+{
+    char since[4096] = "";
+    bool more = true;
+    bool ok = false;
+    for (int page = 0; more && !ok && page < 1000; page++) {
+        struct rtx_call c;
+        const struct json_value *tr;
+        int hit;
+        rtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+        (void)json_push_kv_str(&c.input, "action", "pull");
+        if (since[0])
+            (void)json_push_kv_str(&c.input, "since", since);
+        else
+            (void)json_push_kv_int(&c.input, "since", 0);
+        zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+        if (!rtx_ok(&c)) {
+            rtx_end(&c);
+            return false;
+        }
+        hit = rtx_stream_on_page(json_get(&c.reply.data, "rows"), ref, out, cap);
+        ok = hit > 0;
+        tr = json_get(&c.reply.data, "truncated");
+        more = tr && tr->type == JSON_BOOL && json_get_bool(tr);
+        (void)snprintf(since, sizeof(since), "%s",
+                       rtx_reply_str(&c, "next_since"));
+        rtx_end(&c);
+    }
+    return ok;
+}
+
+static void rtx_evidence_state(const char *grant, const char *ref,
+                               char *out, size_t cap)
+{
+    struct rtx_call e;
+    const struct json_value *st;
+    const char *s = "";
+    rtx_begin(&e, "fleet.steer.evidence", "zcl.fleet_steer_evidence.v1");
+    (void)json_push_kv_str(&e.input, "grant", grant);
+    (void)json_push_kv_str(&e.input, "type", "mail");
+    (void)json_push_kv_str(&e.input, "ref", ref);
+    zcl_native_handle_fleet_steer_evidence(&e.request, &e.reply);
+    st = json_get(&e.reply.data, "state");
+    if (rtx_ok(&e) && st && st->type == JSON_STR && json_get_str(st))
+        s = json_get_str(st);
+    (void)snprintf(out, cap, "%s", s);
+    rtx_end(&e);
+}
+
+/* Brief state of the chatgpt row for `ref`, or empty when that row is
+ * absent. The caller compares it with the evidence state. */
+static void rtx_brief_state(const char *grant, const char *ref,
+                            char *out, size_t cap)
+{
+    struct rtx_call b;
+    const struct json_value *changes, *row, *s;
+    size_t i, n;
+    out[0] = '\0';
+    rtx_begin(&b, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_str(&b.input, "grant", grant);
+    (void)json_push_kv_int(&b.input, "since", 0);
+    zcl_native_handle_fleet_steer_brief(&b.request, &b.reply);
+    changes = rtx_ok(&b) ? json_get(&b.reply.data, "changes") : NULL;
+    n = (changes && changes->type == JSON_ARR) ? json_size(changes) : 0u;
+    for (i = 0; i < n; i++) {
+        row = json_at(changes, i);
+        if (!rtx_json_str(row ? json_get(row, "ref") : NULL, ref))
+            continue;
+        if (!rtx_json_str(row ? json_get(row, "from") : NULL, "chatgpt"))
+            continue;
+        s = json_get(row, "state");
+        if (s && s->type == JSON_STR && json_get_str(s))
+            (void)snprintf(out, cap, "%s", json_get_str(s));
+        break;
+    }
+    rtx_end(&b);
+}
+
+/* Evidence state for one mail ref, and the same state on the brief. */
+static bool rtx_ref_state(const char *grant, const char *ref,
+                          char *out, size_t cap)
+{
+    char estate[32], bstate[32];
+    rtx_evidence_state(grant, ref, estate, sizeof(estate));
+    rtx_brief_state(grant, ref, bstate, sizeof(bstate));
+    if (estate[0] == '\0' || strcmp(estate, bstate) != 0)
+        return false;
+    if (cap > 0)
+        (void)snprintf(out, cap, "%s", estate);
+    return true;
+}
+
 static void rtx_path(char *out, size_t cap, const char *tail)
 {
     (void)snprintf(out, cap, "%s/z23/dev/%s", g_rtx_state, tail);
@@ -1027,6 +1193,12 @@ static int test_receive_intake_paging(void)
         ASSERT_EQ(st.seen, 1);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(rtx_answers("job-fresh2", "state=accepted"), 1);
+        ASSERT_EQ(rtx_answers("job-fresh2", "disposition=ACCEPTED"), 1);
+        {
+            char cursor[4096];
+            ASSERT(rtx_read("mail/cursor.box-a", cursor, sizeof(cursor)));
+            ASSERT(strchr(cursor, '|') != NULL);
+        }
         rtx_restore();
         PASS();
     }
@@ -1052,9 +1224,11 @@ static int test_receive_intake_paging(void)
         ASSERT_EQ(total, 300);
         ASSERT_EQ(rtx_count_dir("receive/answered"), 300);
         ASSERT_EQ(rtx_answers("job-b-299", "RECEIVE_SENDER_UNGRANTED"), 1);
+        ASSERT_EQ(rtx_answers("job-b-299", "disposition=BLOCKED"), 1);
         /* Drained: the next beat reads nothing again. */
         ASSERT_EQ(rtx_beat_once(&st), 1);
         ASSERT_EQ(st.seen, 0);
+        ASSERT_EQ(rtx_answers("job-b-299", "disposition=BLOCKED"), 1);
         rtx_restore();
         PASS();
     }
@@ -1083,6 +1257,8 @@ static int test_receive_intake_paging(void)
         ASSERT_EQ(rtx_queue_count("queued", "job-r1"), 1);
         ASSERT_EQ(rtx_queue_count("queued", "job-r2"), 1);
         ASSERT_EQ(rtx_answers("job-r1", "state=accepted"), 1);
+        ASSERT_EQ(rtx_answers("job-r1", "disposition=ACCEPTED"), 1);
+        ASSERT_EQ(rtx_answers("job-r2", "disposition=ACCEPTED"), 1);
         ASSERT(rtx_status_intake(err, sizeof(err), &fails, state,
                                  sizeof(state)));
         ASSERT_STR_EQ(state, "resuming");
@@ -1090,6 +1266,154 @@ static int test_receive_intake_paging(void)
         rtx_restore();
         PASS();
     }
+
+    TEST("a skipped same-recipient result stays queued")
+    {
+        struct rcv_beat_stats st;
+        char gid[80], body[4096], state[32], cursor[4096];
+        rtx_isolate("skip-result");
+        ASSERT(rtx_mint("chatgpt", "brief,send,evidence", 3600, gid,
+                        sizeof(gid)));
+        rtx_direction(body, sizeof(body), "hex_codec", "Handle the directive.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-keep", body, 1));
+        /* The result shares the recipient and sits where a kind=directive
+         * pull walks past it. Acking that pull's raw next_since would
+         * cover it. */
+        ASSERT(rtx_steer_result(gid, "job-aside", "left unread",
+                                "aside-key-1"));
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.intake_failed, 0);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(rtx_answers("job-keep", "disposition=ACCEPTED"), 1);
+        ASSERT(rtx_read("mail/cursor.box-a", cursor, sizeof(cursor)));
+        ASSERT(strchr(cursor, '|') != NULL);
+        ASSERT(rtx_ref_state(gid, "job-aside", state, sizeof(state)));
+        ASSERT_STR_EQ(state, "queued");
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.seen, 0);
+        ASSERT_EQ(st.intake_failed, 0);
+        ASSERT_EQ(rtx_answers("job-keep", "disposition=ACCEPTED"), 1);
+        ASSERT(rtx_ref_state(gid, "job-aside", state, sizeof(state)));
+        ASSERT_STR_EQ(state, "queued");
+        rtx_restore();
+        PASS();
+    }
+
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
+static int test_receive_page_hole(void)
+{
+    int failures = 0;
+
+    TEST("a leading result stays queued across a truncated directive page")
+    {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        char gid[80], body[4200], prompt[2100], state[32], ws[1200];
+        char ref[64], key[64], aside_stream[64], past_stream[64];
+        char intake[4096], cursor[4096], readf[4096];
+        const char *ipos, *cpos, *rpos;
+        size_t overhead;
+        int i;
+        rtx_isolate("page-hole");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "1111111111111111111111111111111111111111"));
+        ASSERT(rtx_mint("chatgpt", "brief,send,evidence", 3600, gid,
+                        sizeof(gid)));
+        /* One result, then more directive bytes than one mail page holds.
+         * Steer accepts at most 2048 body bytes. Six of those fill a page
+         * (16384 estimated row bytes); the seventh directive is past it.
+         * All of them are mail posts on outbox.jsonl. */
+        ASSERT(rtx_steer_kind(gid, "job-aside", "left unread", "aside-key-1",
+                              "result"));
+        rtx_direction_sel(body, sizeof(body), "receiver", "", "");
+        overhead = strlen(body);
+        ASSERT(overhead > 0 && overhead < 2048);
+        memset(prompt, 'x', 2048 - overhead);
+        prompt[2048 - overhead] = '\0';
+        rtx_direction_sel(body, sizeof(body), "receiver", "", prompt);
+        ASSERT(strlen(body) == 2048);
+        for (i = 0; i < 6; i++) {
+            (void)snprintf(ref, sizeof(ref), "job-p%02d", i);
+            (void)snprintf(key, sizeof(key), "page-key-%02d", i);
+            ASSERT(rtx_steer_kind(gid, ref, body, key, "directive"));
+        }
+        ASSERT(rtx_steer_kind(gid, "job-past", body, "past-key-1",
+                              "directive"));
+        ASSERT(rtx_row_stream("job-aside", aside_stream, sizeof(aside_stream)));
+        ASSERT(rtx_row_stream("job-past", past_stream, sizeof(past_stream)));
+        ASSERT_STR_EQ(aside_stream, "outbox.jsonl");
+        ASSERT_STR_EQ(past_stream, aside_stream);
+        {
+            struct rtx_call page;
+            const struct json_value *rows, *tr;
+            size_t n, ri;
+            bool saw_past = false;
+            rtx_begin(&page, "dev.agent.mail", "zcl.agent_mail.v1");
+            (void)json_push_kv_str(&page.input, "action", "pull");
+            (void)json_push_kv_int(&page.input, "since", 0);
+            (void)json_push_kv_str(&page.input, "kind", "directive");
+            zcl_native_handle_dev_agent_mail(&page.request, &page.reply);
+            ASSERT(rtx_ok(&page));
+            tr = json_get(&page.reply.data, "truncated");
+            ASSERT(tr && tr->type == JSON_BOOL && json_get_bool(tr));
+            rows = json_get(&page.reply.data, "rows");
+            n = (rows && rows->type == JSON_ARR) ? json_size(rows) : 0u;
+            ASSERT(n > 0);
+            for (ri = 0; ri < n; ri++) {
+                const struct json_value *r = json_get(json_at(rows, ri), "ref");
+                if (r && r->type == JSON_STR &&
+                    strcmp(json_get_str(r), "job-past") == 0)
+                    saw_past = true;
+            }
+            ASSERT(!saw_past);
+            rtx_end(&page);
+        }
+        rtx_opts_ws(&o, ws);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.intake_failed, 0);
+        ASSERT_EQ(st.admitted, 7);
+        ASSERT_EQ(rtx_answers("job-past", "disposition=ACCEPTED"), 1);
+        ASSERT_EQ(rtx_answers("job-p00", "disposition=ACCEPTED"), 1);
+        ASSERT(rtx_ref_state(gid, "job-aside", state, sizeof(state)));
+        ASSERT_STR_EQ(state, "queued");
+        ASSERT(rtx_read("receive/intake.state", intake, sizeof(intake)));
+        ASSERT(rtx_read("mail/cursor.box-a", cursor, sizeof(cursor)));
+        ASSERT(rtx_read("mail/read.box-a", readf, sizeof(readf)));
+        ipos = strncmp(intake, "position=", 9) == 0 ? intake + 9 : intake;
+        cpos = cursor;
+        rpos = readf;
+        ASSERT(strchr(ipos, '\n') != NULL);
+        *strchr(ipos, '\n') = '\0';
+        if (strchr(cpos, '\n') != NULL)
+            *strchr(cpos, '\n') = '\0';
+        if (strchr(rpos, '\n') != NULL)
+            *strchr(rpos, '\n') = '\0';
+        ASSERT(strcmp(ipos, cpos) != 0);
+        ASSERT(strcmp(ipos, rpos) != 0);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT_EQ(st.intake_failed, 0);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT_EQ(rtx_answers("job-past", "disposition=ACCEPTED"), 1);
+        ASSERT(rtx_ref_state(gid, "job-aside", state, sizeof(state)));
+        ASSERT_STR_EQ(state, "queued");
+        rtx_restore();
+        PASS();
+    }
+
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
+static int test_receive_intake_tail(void)
+{
+    int failures = 0;
 
     TEST("an intake failure is logged, counted and shown, never silent")
     {
@@ -2002,6 +2326,8 @@ int test_devagent_receive(void)
     failures += test_receive_marker_retry(0);
     failures += test_receive_marker_retry(2);
     failures += test_receive_intake_paging();
+    failures += test_receive_page_hole();
+    failures += test_receive_intake_tail();
     failures += test_receive_answer_fields();
     failures += test_receive_queue_order();
     failures += test_receive_engine();
@@ -2458,16 +2784,17 @@ int test_devagent_receive(void)
         ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
         ASSERT_EQ(st.admitted, 1);
         ASSERT_EQ(rtx_queue_count("queued", "job-rs"), 1);
-        /* CRASH SHAPE B — the queue post landed and the accept never got
-         * out. The retry (a fresh row, so no marker covers it) reconciles
-         * the existing record and adds no second queue row. */
+        /* CRASH SHAPE B — the queue post landed. The retry (a fresh row,
+         * so no marker covers it) reconciles the existing record, adds no
+         * second queue row, and does not post a second disposition. */
         ASSERT(rtx_deliver_as("retry", "chatgpt", "box-a", "job-rs", body, 1));
         memset(&st, 0, sizeof(st));
         ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
         ASSERT_EQ(st.admitted, 0);
         ASSERT_EQ(st.reconciled, 1);
         ASSERT_EQ(rtx_queue_count("queued", "job-rs"), 1);
-        ASSERT_EQ(rtx_answers("job-rs", "state=accepted"), 2);
+        ASSERT_EQ(rtx_answers("job-rs", "state=accepted"), 1);
+        ASSERT_EQ(rtx_answers("job-rs", "disposition=ACCEPTED"), 1);
         /* A run directory alone also makes a ref known. A ref this
          * receiver never briefed is then a conflict, not a second job:
          * fail closed rather than run somebody else's name. */
@@ -3045,10 +3372,11 @@ int test_devagent_receive(void)
         ASSERT_EQ(st.refused, 0);
         ASSERT_EQ(st.reconciled, 1);
         ASSERT_EQ(rtx_queue_count("queued", "job-rep"), 1);
-        ASSERT_EQ(rtx_answers("job-rep", "state=accepted"), 2);
-        /* The replay's answer repeats the evidence the ref was decided
+        ASSERT_EQ(rtx_answers("job-rep", "state=accepted"), 1);
+        ASSERT_EQ(rtx_answers("job-rep", "disposition=ACCEPTED"), 1);
+        /* The one accept still carries the evidence the ref was decided
          * with, not a fresh resolution. */
-        ASSERT_EQ(rtx_answers("job-rep", "workspace_selector=receiver"), 2);
+        ASSERT_EQ(rtx_answers("job-rep", "workspace_selector=receiver"), 1);
         ASSERT(rtx_read("receive/brief/job-rep.brief", brief, sizeof(brief)));
         ASSERT(strstr(brief, ws) != NULL);
         rtx_restore();

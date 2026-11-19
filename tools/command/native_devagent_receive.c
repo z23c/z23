@@ -24,9 +24,11 @@
  *      box's remote-bound rows and its answers to carried directives.
  *   1. INTAKE. dev.agent.mail is called in-process (the same shape
  *      fleet.steer uses) with action=pull, kind=directive, and `since` set
- *      to the durable INTAKE CURSOR: the mail leaf's own next_since token,
- *      stored in <state>/receive/intake.state, or the integer 0 when there
- *      is none yet. Mail answers in bounded pages, so a beat drains at most
+ *      to the durable INTAKE CURSOR: the pull's raw next_since, stored in
+ *      <state>/receive/intake.state, or the integer 0 when there is none
+ *      yet. Ack and read store only the prefix of rows that page returned,
+ *      so a filtered row ahead of them stays uncovered and a later page is
+ *      still reached. Mail answers in bounded pages, so a beat drains at most
  *      RCV_PAGES_PER_BEAT pages and the next beat continues from the
  *      cursor; no row is ever dropped because the history is long. The
  *      cursor is advanced only AFTER every row of a page was handled, so a
@@ -86,14 +88,17 @@
  *   4. IDEMPOTENCE AND CONFLICT, with no work ledger of its own. A ref is
  *      "known" when a queue row, a run directory, or an outcome names it.
  *      For a known ref the stored brief bytes decide: byte-identical body
- *      reconciles (nothing is queued again, nothing executes again, the
- *      existing state is re-answered); a different body is refused as a
+ *      reconciles (nothing is queued again, nothing executes again, and
+ *      no second disposition is posted); a different body is refused as a
  *      CONFLICT, because one ref names one exact piece of work.
- *   5. ANSWER. Only after the queue actually accepted the row (or an
- *      existing one was reconciled) does an accept row go back to the
- *      sender under the SAME ref, carrying the queue seq and the brief
- *      digest. An accept is never posted because bytes arrived. A refusal
- *      answers under the same ref too, with its reason.
+ *   5. ANSWER. Only after the queue actually accepted the row does one
+ *      accept go back to the sender under the SAME ref, carrying the queue
+ *      seq and the brief digest. A replay posts that accept when the first
+ *      post never landed, and does not post a second ACCEPTED, DEFERRED,
+ *      or BLOCKED body. An accept is never posted
+ *      because bytes arrived. A refusal answers under the same ref too,
+ *      with its reason, and a row still waiting on the board posts none
+ *      until that decision.
  *   6. EXECUTION belongs to dev.agent.worker's own resident loop, which
  *      already gates the run and posts the result mail row under the same
  *      ref through the closed pass predicate. Nothing here reimplements
@@ -1583,27 +1588,31 @@ bool zcl_devagent_receive_answer_input(const char *to, const char *ref,
     return true;
 }
 
-static void rcv_answer(struct rcv_ctx *c, const struct rcv_row *v,
+static bool rcv_answer(struct rcv_ctx *c, const struct rcv_row *v,
                        const char *kind, const char *body)
 {
     struct rcv_sub sub;
     char input[RCV_INPUT_CAP];
-    if (c->dry) return;
+    bool ok = false;
+    if (c->dry)
+        return true;
     if (!zcl_devagent_receive_answer_input(v->from, v->ref, kind, body,
                                           c->receiver, input, sizeof(input))) {
         LOG_WARN(RCV_LOG, "answer refused: invalid encoding or capacity");
-        return;
+        return false;
     }
     rcv_sub_begin(&sub, "zcl.agent_mail.v1", "dev.agent.mail");
     if (sub.valid && rcv_sub_input(&sub, input)) {
         zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
         sub.ran = true;
-        c->answer_ok = rcv_sub_ok(&sub);
+        ok = rcv_sub_ok(&sub);
+        c->answer_ok = ok;
     }
     if (!c->answer_ok)
         LOG_WARN(RCV_LOG, "answer refused by dev.agent.mail for ref %s",
                  rcv_ref_ok(v->ref) ? v->ref : "(invalid)");
     rcv_sub_end(&sub);
+    return ok;
 }
 
 static void rcv_answer_refuse(struct rcv_ctx *c, const struct rcv_row *v,
@@ -1615,6 +1624,7 @@ static void rcv_answer_refuse(struct rcv_ctx *c, const struct rcv_row *v,
     LOG_WARN(RCV_LOG, "refused directive src=%s: %s (%s)", src, reason,
              detail);
     if (snprintf(body, sizeof(body),
+                 "disposition=BLOCKED\n"
                  "receiver=%s\nstate=refused\nsrc=%s\nreason=%s\n"
                  "detail=%s\n",
                  c->receiver, src, reason, detail) >= (int)sizeof(body))
@@ -1638,6 +1648,7 @@ static void rcv_answer_accept(struct rcv_ctx *c, const struct rcv_row *v,
     char sha[65];
     rcv_brief_digest(v->body, sha);
     if (snprintf(body, sizeof(body),
+                 "disposition=ACCEPTED\n"
                  "receiver=%s\nstate=accepted\nsrc=%s\nqueue_seq=%lld\n"
                  "stage=%s\nkind=%s\ngate=%s\nbrief_sha3=%s\n%s",
                  c->receiver, src, seq, stage, d->kind, d->gate, sha,
@@ -1951,19 +1962,51 @@ static void rcv_evidence_replay(const char *path, char *out, size_t cap)
         rcv_evidence_fragment(record, out, cap);
 }
 
+/* True when this receiver already appended a disposition for `ref`.
+ * The marker is per source row. The disposition is per ref: a source whose
+ * accept never landed still posts it, and a second source of the same ref
+ * does not add another. */
+static bool rcv_disposition_posted(const struct rcv_ctx *c, const char *ref)
+{
+    char path[3400];
+    char from_pat[160], ref_pat[160];
+    FILE *f;
+    char line[8200];
+    bool found = false;
+    if (!c || !ref || !ref[0])
+        return true;
+    if (snprintf(path, sizeof(path), "%s/outbox.jsonl", c->p.maildir) >=
+            (int)sizeof(path) ||
+        snprintf(from_pat, sizeof(from_pat), "\"from\":\"%s\"",
+                 c->receiver) >= (int)sizeof(from_pat) ||
+        snprintf(ref_pat, sizeof(ref_pat), "\"ref\":\"%s\"", ref) >=
+            (int)sizeof(ref_pat))
+        return true;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    while (!found && fgets(line, sizeof(line), f))
+        found = strstr(line, from_pat) && strstr(line, ref_pat) &&
+                strstr(line, "disposition=");
+    (void)fclose(f);
+    return found;
+}
+
 /* ── idempotence and conflict ──────────────────────────────────────────── */
 
-/* The ref is already known to the queue, a run dir, or an outcome. Exactly
- * two answers: the byte-identical RECEIVED body reconciles against the
- * existing record and queues nothing; a different body is a conflict and
- * executes nothing. Nothing here re-resolves a selector and nothing here
- * rewrites a brief, so a receiver restarted against a DIFFERENT workspace
- * cannot move settled work into it — the decided ref keeps the path it was
- * decided with, or it is a conflict.
+/* The ref is already known to the queue, a run dir, or an outcome. The
+ * byte-identical RECEIVED body reconciles against the existing record and
+ * queues nothing. It posts the one accept only when that post never
+ * landed, and it does not post a second disposition. A different body is
+ * a conflict and executes nothing. Nothing here re-resolves a selector
+ * and nothing here rewrites a brief, so a receiver restarted against a
+ * DIFFERENT workspace cannot move settled work into it.
  *
  * A ref briefed before this receiver kept the received bytes has no
  * .received file; it is compared against the brief, exactly as it always
- * was, so an upgrade mid-flight turns no replay into a false conflict. */
+ * was, so an upgrade mid-flight turns no replay into a false conflict.
+ * When the accept is already in the outbox, answer_ok stays set so the
+ * source marker can still be published. */
 static void rcv_reconcile(struct rcv_ctx *c, const struct rcv_row *v,
                           const char *src, const struct rcv_direction *d,
                           const struct rcv_known *k,
@@ -1983,6 +2026,10 @@ static void rcv_reconcile(struct rcv_ctx *c, const struct rcv_row *v,
         return;
     }
     c->st->reconciled++;
+    if (rcv_disposition_posted(c, v->ref)) {
+        c->answer_ok = true;
+        return;
+    }
     rcv_evidence_replay(f->evidence, evidence, sizeof(evidence));
     rcv_answer_accept(c, v, src, d, k->seq, k->stage, evidence);
 }
@@ -2121,6 +2168,9 @@ static bool rcv_admit_board(struct rcv_ctx *c, const struct rcv_row *v,
         c->deferred = true;
         LOG_WARN(RCV_LOG, "board row src=%s waits: %s (%s)", src, d.code,
                  d.detail);
+        /* No disposition yet. The answered marker stays unwritten so a
+         * later beat posts the one ACCEPTED or BLOCKED. A DEFERRED body
+         * here would be a second disposition under the same ref. */
         return false;
     }
     if (d.verdict == ZCL_BOARDMAIL_REFUSE) {
@@ -2323,39 +2373,133 @@ static bool rcv_page_tail(const struct rcv_sub *sub, char *next, size_t cap,
     return true;
 }
 
-/* Pull and handle one page of directives after `since` ("" = from the
- * beginning). Rows are handled in page order before the caller may
- * advance the cursor past them. False with *code set on intake failure. */
-static bool rcv_intake_page(struct rcv_ctx *c, const char *since, char *next,
-                            size_t cap, bool *more, char *code, size_t ccap)
+static void rcv_note_read(const struct rcv_ctx *c, const char *token)
+{
+    if (!c->dry && token && token[0])
+        (void)zcl_devagent_mail_record_read(c->receiver, token);
+}
+
+/* Coverage base: the ack file, not the intake cursor. Absent, unreadable,
+ * or not a token means start at 0, which covers no real row. The newline
+ * an ack writes is not part of the token. */
+static void rcv_cover_load(const struct rcv_ctx *c, char *out, size_t cap)
+{
+    char path[3400];
+    size_t n;
+    if (!out || cap == 0)
+        return;
+    out[0] = '\0';
+    if (c->dry)
+        return;
+    if (snprintf(path, sizeof(path), "%s/cursor.%s", c->p.maildir,
+                 c->receiver) <= 0 ||
+        !rcv_read_file(path, out, cap)) {
+        out[0] = '\0';
+        return;
+    }
+    n = strlen(out);
+    if (n > 0 && out[n - 1] == '\n')
+        out[--n] = '\0';
+    if (!rcv_pos_ok(out))
+        out[0] = '\0';
+}
+
+/* Persist the intake token as this receiver's ack. The token already
+ * passed rcv_pos_ok, and the receiver name is a cursor name, so neither
+ * can smuggle a quote into the mail request. */
+static void rcv_ack_token(const struct rcv_ctx *c, const char *token)
 {
     struct rcv_sub sub;
-    const struct json_value *rows;
     char input[RCV_POS_MAX + 96];
-    size_t n, i;
-    /* The cursor passed rcv_pos_ok (no quote, no backslash), so it is
-     * spliced into the fixed pull object verbatim. */
+    int n;
+    if (c->dry || !token || !rcv_pos_ok(token))
+        return;
+    n = snprintf(input, sizeof(input),
+                 "{\"action\":\"ack\",\"agent\":\"%s\",\"cursor\":\"%s\"}",
+                 c->receiver, token);
+    if (n <= 0 || (size_t)n >= sizeof(input))
+        return;
+    rcv_sub_begin(&sub, "zcl.agent_mail.v1", "dev.agent.mail");
+    if (sub.valid && rcv_sub_input(&sub, input)) {
+        zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
+        sub.ran = true;
+    }
+    rcv_sub_end(&sub);
+}
+
+/* The cursor passed rcv_pos_ok (no quote, no backslash), so it is spliced
+ * into the fixed pull object verbatim. The caller ends `sub`. */
+static void rcv_intake_open(struct rcv_sub *sub, const char *since)
+{
+    char input[RCV_POS_MAX + 96];
     int w = since[0] ? snprintf(input, sizeof(input),
                                 "{\"action\":\"pull\",\"since\":\"%s\","
                                 "\"kind\":\"directive\"}", since)
                      : snprintf(input, sizeof(input), "%s",
                                 "{\"action\":\"pull\",\"since\":0,"
                                 "\"kind\":\"directive\"}");
-    rcv_sub_begin(&sub, "zcl.agent_mail.v1", "dev.agent.mail");
-    if (sub.valid && w > 0 && (size_t)w < sizeof(input) &&
-        rcv_sub_input(&sub, input)) {
-        zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
-        sub.ran = true;
-    }
-    if (!rcv_sub_ok(&sub) || !rcv_page_tail(&sub, next, cap, more)) {
-        (void)snprintf(code, ccap, "%s",
-                       !sub.valid ? "MAIL_LEAF_UNAVAILABLE"
-                       : sub.reply.error.code[0] ? sub.reply.error.code
-                                                 : "MAIL_REPLY_UNREADABLE");
+    rcv_sub_begin(sub, "zcl.agent_mail.v1", "dev.agent.mail");
+    if (!sub->valid || w <= 0 || (size_t)w >= sizeof(input))
+        return;
+    if (!rcv_sub_input(sub, input))
+        return;
+    zcl_native_handle_dev_agent_mail(&sub->request, &sub->reply);
+    sub->ran = true;
+}
+
+static void rcv_intake_code(const struct rcv_sub *sub, char *code, size_t ccap)
+{
+    const char *s = "MAIL_REPLY_UNREADABLE";
+    if (!sub->valid)
+        s = "MAIL_LEAF_UNAVAILABLE";
+    else if (sub->reply.error.code[0])
+        s = sub->reply.error.code;
+    (void)snprintf(code, ccap, "%s", s);
+}
+
+/* Advance `cover` to the prefix of rows this page returned. A gap leaves
+ * it where it was, so a leading result stays uncovered. */
+static void rcv_cover_take(char *cover, size_t cover_cap, const char *raw,
+                           const struct json_value *rows)
+{
+    char covered[RCV_POS_MAX];
+    const char *base = (cover && cover[0]) ? cover : "0";
+    size_t n = (rows && rows->type == JSON_ARR) ? json_size(rows) : 0u;
+    if (n == 0 || !cover || cover_cap == 0)
+        return;
+    if (!zcl_devagent_mail_cursor_prefix(base, raw, rows, covered,
+                                         sizeof(covered)))
+        return;
+    if (!rcv_pos_ok(covered) || strlen(covered) >= cover_cap)
+        return;
+    (void)snprintf(cover, cover_cap, "%s", covered);
+}
+
+/* Pull and handle one page of directives after `since` ("" = from the
+ * beginning). `next` receives the pull's raw next_since: that is the next
+ * intake resume, including bytes the kind filter walked past. `cover` is
+ * the ack base on the way in and, when this page has a prefix, the prefix
+ * of rows actually returned on the way out. A gap does not move it, so a
+ * leading result stays uncovered while intake still resumes after the
+ * directives this page returned. False with *code set on intake failure. */
+static bool rcv_intake_page(struct rcv_ctx *c, const char *since, char *next,
+                            size_t cap, bool *more, char *code, size_t ccap,
+                            char *cover, size_t cover_cap)
+{
+    struct rcv_sub sub;
+    const struct json_value *rows;
+    char raw[RCV_POS_MAX];
+    size_t n, i;
+    rcv_intake_open(&sub, since);
+    if (!rcv_sub_ok(&sub) || !rcv_page_tail(&sub, raw, sizeof(raw), more) ||
+        strlen(raw) >= cap) {
+        rcv_intake_code(&sub, code, ccap);
         rcv_sub_end(&sub);
         return false;
     }
+    (void)snprintf(next, cap, "%s", raw);
     rows = json_get(&sub.reply.data, "rows");
+    rcv_cover_take(cover, cover_cap, raw, rows);
     n = (rows && rows->type == JSON_ARR) ? json_size(rows) : 0u;
     for (i = 0; i < n; i++)
         rcv_row_handle(c, json_at(rows, i));
@@ -2373,33 +2517,44 @@ static struct zcl_boardmail_ctx rcv_board_ctx(const struct rcv_ctx *c)
     return b;
 }
 
-/* Drain up to `cap` pages. An undecided row or failed answer/marker holds
- * the cursor while later rows are still decided. Existing markers make task
- * replay idempotent; sync their directory before advancing past them. */
+/* Drain up to `cap` intake pages from `since`. Intake stores the pull's
+ * raw next_since. Ack and read store only the prefix of returned rows, so
+ * a leading result stays uncovered while a later page is still reached.
+ * An undecided row or a failed answer-directory sync holds that resume.
+ * Existing markers make the replay idempotent. */
 static void rcv_intake_drain(struct rcv_ctx *c, char *since, unsigned cap)
 {
-    char next[RCV_POS_MAX], code[64];
+    char next[RCV_POS_MAX], code[64], cover[RCV_POS_MAX], was[RCV_POS_MAX];
     unsigned pages = 0;
     bool more = true;
+    rcv_cover_load(c, cover, sizeof(cover));
     while (more && pages++ < cap) {
         c->page_had_marker = false;
+        (void)snprintf(was, sizeof(was), "%s", cover);
         if (!rcv_intake_page(c, since, next, RCV_POS_MAX, &more, code,
-                             sizeof(code))) {
+                             sizeof(code), cover, sizeof(cover))) {
             rcv_intake_failed(c, code, since);
             return;
         }
         (void)snprintf(since, RCV_POS_MAX, "%s", next);
-        if (!c->dry && !c->deferred && strcmp(since, c->intake.pos) != 0) {
+        if (c->dry || c->deferred)
+            continue;
+        if (strcmp(since, c->intake.pos) != 0) {
             if (c->page_had_marker &&
                 (rcv_io_fault(c->p.ansdir, 3) != 0 ||
                  !platform_private_parent_flush(c->p.ansdir))) {
-                LOG_WARN(RCV_LOG, "cannot sync answered directory %s", c->p.ansdir);
+                LOG_WARN(RCV_LOG, "cannot sync answered directory %s",
+                         c->p.ansdir);
                 c->deferred = true;
                 continue;
             }
             (void)snprintf(c->intake.pos, sizeof(c->intake.pos), "%s",
                            since);
             rcv_intake_save(c);
+        }
+        if (strcmp(cover, was) != 0) {
+            rcv_note_read(c, cover);
+            rcv_ack_token(c, cover);
         }
     }
 }

@@ -2112,6 +2112,573 @@ _test_next:;
 #endif /* !defined(_WIN32) */
 
 
+static const char *wtx_field(const struct json_value *row, const char *key)
+{
+    const struct json_value *v = row ? json_get(row, key) : NULL;
+    const char *s;
+    if (!v || v->type != JSON_STR)
+        return "";
+    s = json_get_str(v);
+    return s ? s : "";
+}
+
+static bool wtx_note_is_deferred(const struct json_value *row, const char *ref)
+{
+    return strcmp(wtx_field(row, "kind"), "note") == 0 &&
+           strcmp(wtx_field(row, "ref"), ref) == 0 &&
+           strstr(wtx_field(row, "body"), "disposition=DEFERRED\n") != NULL;
+}
+
+static int wtx_deferred_notes(const char *ref)
+{
+    struct wtx_call c;
+    const struct json_value *arr;
+    int found = 0;
+    size_t i, n;
+    wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&c.input, "action", "pull");
+    (void)json_push_kv_int(&c.input, "since", 0);
+    zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+    arr = wtx_ok(&c) ? json_get(&c.reply.data, "rows") : NULL;
+    n = arr && arr->type == JSON_ARR ? json_size(arr) : 0;
+    for (i = 0; i < n; i++) {
+        if (wtx_note_is_deferred(json_at(arr, i), ref))
+            found++;
+    }
+    wtx_end(&c);
+    return found;
+}
+
+static bool wtx_cursor_token(const char *agent)
+{
+    char path[1400], buf[4096];
+    FILE *f;
+    size_t n;
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/mail/cursor.%s", g_wtx_state,
+                   agent);
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    return fclose(f) == 0 && strchr(buf, '|') != NULL;
+}
+
+static int wtx_count_page(const struct json_value *rows, const char *ref)
+{
+    size_t i, n;
+    int found = 0;
+    n = rows && rows->type == JSON_ARR ? json_size(rows) : 0;
+    for (i = 0; i < n; i++) {
+        const struct json_value *row = json_at(rows, i);
+        if (ref) {
+            if (wtx_note_is_deferred(row, ref))
+                found++;
+            continue;
+        }
+        if (strcmp(wtx_field(row, "kind"), "note") == 0 &&
+            strstr(wtx_field(row, "body"), "disposition=DEFERRED\n") != NULL)
+            found++;
+    }
+    return found;
+}
+
+/* One mail page. *more is the leaf's truncated bit. next receives next_since. */
+static int wtx_pull_deferred(const char *since, const char *ref, char *next,
+                             size_t cap, bool *more)
+{
+    struct wtx_call c;
+    const struct json_value *tr;
+    const char *tok;
+    int found;
+    wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&c.input, "action", "pull");
+    if (since && since[0])
+        (void)json_push_kv_str(&c.input, "since", since);
+    else
+        (void)json_push_kv_int(&c.input, "since", 0);
+    zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+    if (!wtx_ok(&c)) {
+        wtx_end(&c);
+        return -1;
+    }
+    found = wtx_count_page(json_get(&c.reply.data, "rows"), ref);
+    tr = json_get(&c.reply.data, "truncated");
+    *more = tr && tr->type == JSON_BOOL && json_get_bool(tr);
+    tok = wtx_field(&c.reply.data, "next_since");
+    if ((size_t)snprintf(next, cap, "%s", tok) >= cap)
+        found = -1;
+    wtx_end(&c);
+    return found;
+}
+
+/* Every deferred note, paging until the mailbox is exhausted. ref NULL
+ * counts them all; a name counts that ref only. Stop when the page is
+ * done or the resume token does not advance. */
+static int wtx_deferred_total(const char *ref)
+{
+    char token[4096], next[4096];
+    int total = 0;
+    int guard = 0;
+    token[0] = '\0';
+    for (;;) {
+        bool more = false;
+        int n = wtx_pull_deferred(token, ref, next, sizeof(next), &more);
+        if (n < 0)
+            return -1;
+        total += n;
+        if (!more)
+            return total;
+        if (next[0] == '\0' || strcmp(next, token) == 0 || ++guard > 20000)
+            return -1;
+        memcpy(token, next, strlen(next) + 1);
+    }
+}
+
+static bool wtx_post_directive(const char *ref, const char *body)
+{
+    struct wtx_call c;
+    bool ok;
+    wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&c.input, "action", "post");
+    (void)json_push_kv_str(&c.input, "from", "guide");
+    (void)json_push_kv_str(&c.input, "to", "wtx");
+    (void)json_push_kv_str(&c.input, "kind", "directive");
+    (void)json_push_kv_str(&c.input, "ref", ref);
+    (void)json_push_kv_str(&c.input, "body", body);
+    zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+    ok = wtx_ok(&c);
+    wtx_end(&c);
+    return ok;
+}
+
+static bool wtx_post_n_directives(int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        char ref[32];
+        (void)snprintf(ref, sizeof(ref), "wtx-b%03d", i);
+        if (!wtx_post_directive(ref, "backlog\n"))
+            return false;
+    }
+    return true;
+}
+
+static void wtx_inbox_drive_opts(struct wkr_drive_opts *o, const char *session,
+                                 long long deadline, long long idle_start)
+{
+    wtx_opts(o, "wtx", session);
+    o->deadline_s = deadline;
+    o->max_jobs = 0;
+    o->idle_start_s = idle_start;
+    o->idle_limit_s = 60;
+}
+
+static int g_wtx_late_posts;
+static int g_wtx_job_posts;
+
+static void wtx_post_job_mail(void)
+{
+    if (g_wtx_job_posts)
+        return;
+    g_wtx_job_posts = 1;
+    (void)wtx_post_directive("wtx-job", "after startup\n");
+}
+
+/* One directive, posted from the empty-claim hook so it cannot be
+ * present at the startup check. */
+static void wtx_post_late_mail(void)
+{
+    struct wtx_call c;
+    if (g_wtx_late_posts)
+        return;
+    g_wtx_late_posts = 1;
+    wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&c.input, "action", "post");
+    (void)json_push_kv_str(&c.input, "from", "guide");
+    (void)json_push_kv_str(&c.input, "to", "wtx");
+    (void)json_push_kv_str(&c.input, "kind", "directive");
+    (void)json_push_kv_str(&c.input, "ref", "wtx-late");
+    (void)json_push_kv_str(&c.input, "body", "while idle\n");
+    zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+    wtx_end(&c);
+}
+
+static int wtx_inbox_idle_case(void)
+{
+    int failures = 0;
+    TEST("worker: mail that arrives while idle is deferred once") {
+        struct wkr_drive_opts o;
+        g_wtx_late_posts = 0;
+        wtx_isolate("inbox-idle");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        wtx_opts(&o, "wtx", "s-idle");
+        o.deadline_s = 8;
+        o.max_jobs = 0;
+        o.idle_start_s = 1;
+        o.idle_limit_s = 1;
+        o.timed_idle_only = true;
+        zcl_devagent_worker_test_after_empty_claim = wtx_post_late_mail;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        zcl_devagent_worker_test_after_empty_claim = NULL;
+        ASSERT_EQ(g_wtx_late_posts, 1);
+        ASSERT_EQ(wtx_deferred_notes("wtx-late"), 1);
+        ASSERT(wtx_cursor_token("wtx"));
+        o.deadline_s = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_notes("wtx-late"), 1);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    zcl_devagent_worker_test_after_empty_claim = NULL;
+    wtx_restore();
+    return failures;
+}
+
+#if !defined(_WIN32)
+static void wtx_stop_when_late_noted(void)
+{
+    if (wtx_deferred_notes("wtx-late") >= 1)
+        raise(SIGTERM);
+}
+
+static int wtx_inbox_wake_case(void)
+{
+    int failures = 0;
+    TEST("worker: a mail write wakes the idle checkpoint") {
+        struct wkr_drive_opts o;
+        long long t0, elapsed;
+        g_wtx_late_posts = 0;
+        wtx_isolate("inbox-wake");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        wtx_opts(&o, "wtx", "s-mailwake");
+        o.deadline_s = 60;
+        o.max_jobs = 0;
+        o.idle_start_s = 30;
+        o.idle_limit_s = 60;
+        zcl_devagent_worker_test_after_empty_claim = wtx_post_late_mail;
+        zcl_devagent_worker_test_after_inbox = wtx_stop_when_late_noted;
+        t0 = (long long)platform_time_monotonic_ms();
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        elapsed = (long long)platform_time_monotonic_ms() - t0;
+        zcl_devagent_worker_test_after_empty_claim = NULL;
+        zcl_devagent_worker_test_after_inbox = NULL;
+        ASSERT_EQ(g_wtx_late_posts, 1);
+        ASSERT_EQ(wtx_deferred_notes("wtx-late"), 1);
+        ASSERT(wtx_cursor_token("wtx"));
+        ASSERT(elapsed < 3000);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    zcl_devagent_worker_test_after_empty_claim = NULL;
+    zcl_devagent_worker_test_after_inbox = NULL;
+    wtx_restore();
+    return failures;
+}
+#endif
+
+static int wtx_inbox_job_case(void)
+{
+    int failures = 0;
+    TEST("worker: a finished job checkpoints mail posted after startup") {
+        struct wkr_drive_opts o;
+        g_wtx_job_posts = 0;
+        wtx_isolate("inbox-job");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        wtx_queue_post("wtx-job-row");
+        wtx_opts(&o, "wtx", "s-jobmail");
+        o.deadline_s = 30;
+        o.max_jobs = 1;
+        o.idle_limit_s = 2;
+        zcl_devagent_worker_test_before_step = wtx_post_job_mail;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        zcl_devagent_worker_test_before_step = NULL;
+        ASSERT_EQ(g_wtx_job_posts, 1);
+        ASSERT_EQ(wtx_deferred_notes("wtx-job"), 1);
+        ASSERT(wtx_cursor_token("wtx"));
+        o.deadline_s = 0;
+        o.max_jobs = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_notes("wtx-job"), 1);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    zcl_devagent_worker_test_before_step = NULL;
+    wtx_restore();
+    return failures;
+}
+
+static int wtx_inbox_checkpoint_case(void)
+{
+    int failures = 0;
+    TEST("worker: startup checkpoint defers its own mail once") {
+        struct wkr_drive_opts o;
+        struct wtx_call c;
+        wtx_isolate("inbox");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+        (void)json_push_kv_str(&c.input, "action", "post");
+        (void)json_push_kv_str(&c.input, "from", "guide");
+        (void)json_push_kv_str(&c.input, "to", "wtx");
+        (void)json_push_kv_str(&c.input, "kind", "directive");
+        (void)json_push_kv_str(&c.input, "ref", "wtx-inbox");
+        (void)json_push_kv_str(&c.input, "body", "check the inbox\n");
+        zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+        ASSERT(wtx_ok(&c));
+        wtx_end(&c);
+        wtx_opts(&o, "wtx", "s-inbox");
+        o.deadline_s = 0;
+        o.max_jobs = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_notes("wtx-inbox"), 1);
+        ASSERT(wtx_cursor_token("wtx"));
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_notes("wtx-inbox"), 1);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    wtx_restore();
+    return failures;
+}
+
+#if !defined(_WIN32)
+static int g_wtx_hook_notes;
+static int g_wtx_hook_claims;
+static int g_wtx_during_posts;
+static int g_wtx_empty_claims;
+static pid_t g_wtx_stop_pid = -1;
+
+static void wtx_stop_reap(void)
+{
+    if (g_wtx_stop_pid > 0) {
+        kill(g_wtx_stop_pid, SIGKILL);
+        (void)waitpid(g_wtx_stop_pid, NULL, 0);
+        g_wtx_stop_pid = -1;
+    }
+}
+
+/* Observe the notes the startup check already stored, then stop before
+ * the idle wait. The drive's own handler turns this into a clean return. */
+static void wtx_stop_at_empty_claim(void)
+{
+    g_wtx_hook_claims++;
+    g_wtx_hook_notes = wtx_deferred_total(NULL);
+    raise(SIGTERM);
+}
+
+static void wtx_post_during_check(void)
+{
+    if (g_wtx_during_posts)
+        return;
+    g_wtx_during_posts = 1;
+    (void)wtx_post_directive("wtx-during", "during check\n");
+}
+
+static void wtx_count_empty_claim(void)
+{
+    g_wtx_empty_claims++;
+}
+
+static void wtx_clear_inbox_hooks(void)
+{
+    zcl_devagent_worker_test_after_empty_claim = NULL;
+    zcl_devagent_worker_test_after_inbox = NULL;
+    zcl_devagent_worker_test_after_first_note = NULL;
+    zcl_devagent_worker_test_before_step = NULL;
+}
+
+static int wtx_inbox_wide_case(void)
+{
+    int failures = 0;
+    TEST("worker: a 4097-directive backlog is deferred before the idle wait") {
+        struct wkr_drive_opts o;
+        long long t0, elapsed;
+        g_wtx_hook_claims = 0;
+        g_wtx_hook_notes = -1;
+        wtx_isolate("inbox-wide");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_post_n_directives(4097));
+        wtx_inbox_drive_opts(&o, "s-wide", 120, 180);
+        o.idle_limit_s = 180;
+        zcl_devagent_worker_test_after_empty_claim = wtx_stop_at_empty_claim;
+        t0 = (long long)platform_time_monotonic_ms();
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        elapsed = (long long)platform_time_monotonic_ms() - t0;
+        wtx_clear_inbox_hooks();
+        ASSERT_EQ(g_wtx_hook_claims, 1);
+        ASSERT_EQ(g_wtx_hook_notes, 4097);
+        ASSERT(wtx_cursor_token("wtx"));
+        ASSERT(elapsed < 180000);
+        o.deadline_s = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_total(NULL), 4097);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    wtx_clear_inbox_hooks();
+    wtx_restore();
+    return failures;
+}
+
+static int wtx_inbox_backlog_case(void)
+{
+    int failures = 0;
+    TEST("worker: a 257-directive backlog is deferred before the idle wait") {
+        struct wkr_drive_opts o;
+        long long t0, elapsed;
+        g_wtx_hook_claims = 0;
+        g_wtx_hook_notes = -1;
+        wtx_isolate("inbox-backlog");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_post_n_directives(257));
+        wtx_inbox_drive_opts(&o, "s-backlog", 25, 30);
+        zcl_devagent_worker_test_after_empty_claim = wtx_stop_at_empty_claim;
+        t0 = (long long)platform_time_monotonic_ms();
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        elapsed = (long long)platform_time_monotonic_ms() - t0;
+        wtx_clear_inbox_hooks();
+        ASSERT_EQ(g_wtx_hook_claims, 1);
+        ASSERT_EQ(g_wtx_hook_notes, 257);
+        ASSERT(wtx_cursor_token("wtx"));
+        ASSERT(elapsed < 25000);
+        o.deadline_s = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_total(NULL), 257);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    wtx_clear_inbox_hooks();
+    wtx_restore();
+    return failures;
+}
+
+static int wtx_inbox_during_case(void)
+{
+    int failures = 0;
+    TEST("worker: a directive posted during the inbox check is deferred before idle") {
+        struct wkr_drive_opts o;
+        long long t0, elapsed;
+        g_wtx_hook_claims = 0;
+        g_wtx_hook_notes = -1;
+        g_wtx_during_posts = 0;
+        wtx_isolate("inbox-during");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_post_n_directives(257));
+        wtx_inbox_drive_opts(&o, "s-during", 25, 30);
+        zcl_devagent_worker_test_after_first_note = wtx_post_during_check;
+        zcl_devagent_worker_test_after_empty_claim = wtx_stop_at_empty_claim;
+        t0 = (long long)platform_time_monotonic_ms();
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        elapsed = (long long)platform_time_monotonic_ms() - t0;
+        wtx_clear_inbox_hooks();
+        ASSERT_EQ(g_wtx_during_posts, 1);
+        ASSERT_EQ(g_wtx_hook_claims, 1);
+        ASSERT_EQ(g_wtx_hook_notes, 258);
+        ASSERT_EQ(wtx_deferred_total("wtx-during"), 1);
+        ASSERT(wtx_cursor_token("wtx"));
+        ASSERT(elapsed < 25000);
+        o.deadline_s = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_total(NULL), 258);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    wtx_clear_inbox_hooks();
+    wtx_restore();
+    return failures;
+}
+
+/* One row already in the mailbox, plus one appended after the first note
+ * and before the check returns. A check that stops on the first
+ * non-truncated page never sees the second row. */
+static int wtx_inbox_during_short_case(void)
+{
+    int failures = 0;
+    TEST("worker: mail appended before the inbox check returns is deferred once") {
+        struct wkr_drive_opts o;
+        long long t0, elapsed;
+        g_wtx_hook_claims = 0;
+        g_wtx_hook_notes = -1;
+        g_wtx_during_posts = 0;
+        wtx_isolate("inbox-during-short");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_post_directive("wtx-seed", "seed\n"));
+        wtx_inbox_drive_opts(&o, "s-during-short", 25, 30);
+        zcl_devagent_worker_test_after_first_note = wtx_post_during_check;
+        zcl_devagent_worker_test_after_empty_claim = wtx_stop_at_empty_claim;
+        t0 = (long long)platform_time_monotonic_ms();
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        elapsed = (long long)platform_time_monotonic_ms() - t0;
+        wtx_clear_inbox_hooks();
+        ASSERT_EQ(g_wtx_during_posts, 1);
+        ASSERT_EQ(g_wtx_hook_claims, 1);
+        ASSERT_EQ(g_wtx_hook_notes, 2);
+        ASSERT_EQ(wtx_deferred_total("wtx-during"), 1);
+        ASSERT(wtx_cursor_token("wtx"));
+        ASSERT(elapsed < 25000);
+        o.deadline_s = 0;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        ASSERT_EQ(wtx_deferred_total(NULL), 2);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    wtx_clear_inbox_hooks();
+    wtx_restore();
+    return failures;
+}
+
+static int wtx_inbox_empty_wait_case(void)
+{
+    int failures = 0;
+    TEST("worker: an empty inbox stays inside its first idle wait") {
+        struct wkr_drive_opts o;
+        long long t0, elapsed;
+        void (*old)(int);
+        g_wtx_empty_claims = 0;
+        g_wtx_stop_pid = -1;
+        wtx_isolate("inbox-empty");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        wtx_inbox_drive_opts(&o, "s-empty", 12, 5);
+        old = signal(SIGTERM, SIG_IGN);
+        g_wtx_stop_pid = fork();
+        ASSERT(g_wtx_stop_pid >= 0);
+        if (g_wtx_stop_pid == 0) {
+            sleep(3);
+            kill(getppid(), SIGTERM);
+            _exit(0);
+        }
+        zcl_devagent_worker_test_after_empty_claim = wtx_count_empty_claim;
+        t0 = (long long)platform_time_monotonic_ms();
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        elapsed = (long long)platform_time_monotonic_ms() - t0;
+        wtx_clear_inbox_hooks();
+        wtx_stop_reap();
+        (void)signal(SIGTERM, old);
+        ASSERT_EQ(g_wtx_empty_claims, 1);
+        ASSERT_EQ(wtx_deferred_total(NULL), 0);
+        ASSERT(!wtx_cursor_token("wtx"));
+        ASSERT(elapsed >= 2500);
+        ASSERT(elapsed < 4500);
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    wtx_clear_inbox_hooks();
+    wtx_stop_reap();
+    (void)signal(SIGTERM, SIG_DFL);
+    wtx_restore();
+    return failures;
+}
+#endif
+
 static void wtx_report(int failures)
 {
     if (failures == 0)
@@ -2124,6 +2691,17 @@ int test_devagent_worker(void);
 int test_devagent_worker(void)
 {
     int failures = wtx_option_encoding();
+    failures += wtx_inbox_job_case();
+    failures += wtx_inbox_checkpoint_case();
+    failures += wtx_inbox_idle_case();
+#if !defined(_WIN32)
+    failures += wtx_inbox_wake_case();
+    failures += wtx_inbox_wide_case();
+    failures += wtx_inbox_backlog_case();
+    failures += wtx_inbox_during_case();
+    failures += wtx_inbox_during_short_case();
+    failures += wtx_inbox_empty_wait_case();
+#endif
 
 #if !defined(_WIN32)
     failures += wtx_status_cases();

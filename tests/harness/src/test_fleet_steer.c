@@ -6094,6 +6094,7 @@ static int fmx_t_mailbox(void)
             (void)prev_seq_ts;
             ASSERT(strstr(fmx_str(&c, "screen"), "\xe2\x86\x92") != NULL);
             more = fmx_bool(&c, "more");
+            ASSERT_STR_EQ(fmx_str(&c, "cursor_token"), fmx_str(&c, "cursor"));
             (void)snprintf(cursor, sizeof(cursor), "%s", fmx_str(&c, "cursor"));
             ASSERT(cursor[0] != '\0');
             fmx_end(&c);
@@ -6113,6 +6114,8 @@ static int fmx_t_mailbox(void)
         ASSERT(fmx_ok(&c));
         ASSERT_EQ((int)fmx_int(&c, "count"), 0);
         ASSERT(!fmx_bool(&c, "more"));
+        ASSERT_STR_EQ(fmx_str(&c, "cursor_token"), fmx_str(&c, "cursor"));
+        ASSERT(strchr(fmx_str(&c, "cursor_token"), '|') != NULL);
         fmx_end(&c);
         /* from and ref-prefix filters */
         fmx_mbox_call(&c, NULL, "alice", NULL, 64);
@@ -6140,6 +6143,10 @@ static int fmx_t_mailbox(void)
         ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_mailbox));
         ASSERT(!fmx_ok(&c));
         ASSERT_STR_EQ(c.reply.error.code, "STEER_MAILBOX_FOREIGN");
+        ASSERT(strstr(c.reply.error.message, "carol") == NULL);
+        ASSERT(strstr(c.reply.error.evidence, "carol") == NULL);
+        ASSERT(strstr(c.reply.error.message, grant) == NULL);
+        ASSERT(strstr(c.reply.error.evidence, grant) == NULL);
         fmx_end(&c);
         fmx_mbox_call(&c, other, "alice", NULL, 5);   /* no brief scope */
         ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_mailbox));
@@ -7246,6 +7253,226 @@ static int fmx_t_forward_fault(void)
     return failures;
 }
 
+static void fmx_plant(const char *leaf, const char *agent, const char *text)
+{
+    char path[1400];
+    FILE *f;
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/mail/%s.%s", g_fmx_state,
+                     leaf, agent);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        fmx_fixture_fail("plant path exceeds bound");
+    f = fopen(path, "wb");
+    if (!f)
+        fmx_fixture_fail("cannot plant a mail position");
+    if (fputs(text, f) == EOF || fclose(f) != 0)
+        fmx_fixture_fail("cannot write a mail position");
+}
+
+static void fmx_plant_line(const char *leaf, const char *agent, const char *text)
+{
+    char buf[4200];
+    int n = snprintf(buf, sizeof(buf), "%s\n", text);
+    if (n <= 0 || (size_t)n >= sizeof(buf))
+        fmx_fixture_fail("plant line exceeds bound");
+    fmx_plant(leaf, agent, buf);
+}
+
+static void fmx_unplant(const char *leaf, const char *agent)
+{
+    char path[1400];
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/mail/%s.%s", g_fmx_state,
+                     leaf, agent);
+    if (n > 0 && (size_t)n < sizeof(path))
+        (void)remove(path);
+}
+
+static bool fmx_next_since(char *out, size_t cap)
+{
+    struct fmx_call p;
+    const char *s;
+    bool ok = false;
+    json_init(&p.input);
+    json_set_object(&p.input);
+    memset(&p.request, 0, sizeof(p.request));
+    p.request.input = &p.input;
+    p.request.spec = zcl_command_registry_find(zcl_command_catalog(),
+                                               "dev.agent.mail", NULL);
+    zcl_command_reply_init(&p.reply, "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&p.input, "action", "pull");
+    (void)json_push_kv_int(&p.input, "since", 0);
+    zcl_native_handle_dev_agent_mail(&p.request, &p.reply);
+    s = p.reply.status == ZCL_COMMAND_STATUS_PASSED ? fmx_str(&p, "next_since")
+                                                    : "";
+    if (s[0] && strchr(s, '|') && strncmp(s, "0|", 2) == 0 && strlen(s) < cap) {
+        snprintf(out, cap, "%s", s);
+        ok = true;
+    }
+    zcl_command_reply_free(&p.reply);
+    json_free(&p.input);
+    return ok;
+}
+
+static bool fmx_ack_str(const char *agent, const char *token)
+{
+    struct fmx_call a;
+    bool ok;
+    json_init(&a.input);
+    json_set_object(&a.input);
+    memset(&a.request, 0, sizeof(a.request));
+    a.request.input = &a.input;
+    a.request.spec = zcl_command_registry_find(zcl_command_catalog(),
+                                               "dev.agent.mail", NULL);
+    zcl_command_reply_init(&a.reply, "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&a.input, "action", "ack");
+    (void)json_push_kv_str(&a.input, "agent", agent);
+    (void)json_push_kv_str(&a.input, "cursor", token);
+    zcl_native_handle_dev_agent_mail(&a.request, &a.reply);
+    ok = a.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+         strcmp(fmx_str(&a, "cursor"), token) == 0 &&
+         strcmp(fmx_str(&a, "cursor_token"), token) == 0;
+    zcl_command_reply_free(&a.reply);
+    json_free(&a.input);
+    return ok;
+}
+
+static bool fmx_gap_view(const char *gid, const char *from, const char *ref,
+                         char *state, size_t cap, bool *acked)
+{
+    struct fmx_call b;
+    const struct json_value *r;
+    bool ok = false;
+    state[0] = '\0';
+    *acked = false;
+    fmx_brief(&b, gid, 0);
+    if (fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b)) {
+        r = fmx_reply(&b, from, ref);
+        if (r) {
+            (void)snprintf(state, cap, "%s", fmx_wstr(r, "state"));
+            *acked = json_get_bool(json_get(r, "acked"));
+            ok = state[0] != '\0';
+        }
+    }
+    fmx_end(&b);
+    return ok;
+}
+
+static long long fmx_ack_floor(const char *gid, const char *ref)
+{
+    struct fmx_call e;
+    long long v = -2;
+    fmx_evidence(&e, gid, "mail", ref);
+    if (fmx_run(&e, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&e))
+        v = fmx_int(&e, "ack_cursor");
+    fmx_end(&e);
+    return v;
+}
+
+static int fmx_t_delivery_gap(void)
+{
+    int failures = 0;
+
+    TEST("steer: read, alias, and a floor-0 token stay distinct from execution") {
+        char gid[64], token[4096], reply_state[32], now[32];
+        bool acked = true;
+        long long before, seq;
+        fmx_isolate("delivery_gap");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        before = fmx_mail_count();
+        seq = fmx_send_one(gid, FMX_SENDER, "desk-crew", "gap-read", "gap-read-1");
+        ASSERT(seq >= 1);
+        ASSERT_EQ(fmx_mail_count(), before + 1);
+        ASSERT(fmx_send_one(gid, FMX_SENDER, "desk-crew", "gap-read",
+                            "gap-read-1") >= 1);
+        ASSERT_EQ(fmx_mail_count(), before + 1);
+        ASSERT(fmx_state_agrees(gid, "gap-read", "queued"));
+        ASSERT(fmx_next_since(token, sizeof(token)));
+        ASSERT(strncmp(token, "0|", 2) == 0);
+        ASSERT(strstr(token, "outbox.jsonl:") != NULL);
+
+        fmx_plant_line("read", "desk-crew", token);
+        ASSERT(fmx_state_agrees(gid, "gap-read", "read"));
+        ASSERT(fmx_gap_view(gid, FMX_SENDER, "gap-read", reply_state,
+                            sizeof(reply_state), &acked));
+        ASSERT_STR_EQ(reply_state, "queued");
+        ASSERT(!acked);
+
+        fmx_plant_line("cursor", "other-agent", token);
+        ASSERT(fmx_state_agrees(gid, "gap-read", "read"));
+        fmx_plant("alias", "desk-crew", "mid-agent\n");
+        fmx_plant("alias", "mid-agent", "other-agent\n");
+        ASSERT(fmx_state_agrees(gid, "gap-read", "read"));
+        fmx_unplant("alias", "mid-agent");
+        fmx_plant("alias", "desk-crew", "other-agent\n");
+        /* The read file is this recipient's own evidence. One hop must
+         * not replace it with another label's cursor. */
+        ASSERT(fmx_state_agrees(gid, "gap-read", "read"));
+        fmx_unplant("read", "desk-crew");
+        ASSERT(fmx_state_agrees(gid, "gap-read", "acknowledged"));
+        fmx_plant("alias", "desk-crew", "mid-agent\n");
+        ASSERT(fmx_state_agrees(gid, "gap-read", "queued"));
+        fmx_unplant("alias", "desk-crew");
+        fmx_unplant("cursor", "other-agent");
+        ASSERT(fmx_state_agrees(gid, "gap-read", "queued"));
+
+        ASSERT(fmx_ack_str("desk-crew", token));
+        ASSERT(fmx_ack_str("desk-crew", token));
+        ASSERT(fmx_state_agrees(gid, "gap-read", "acknowledged"));
+        ASSERT_EQ(fmx_ack_floor(gid, "gap-read"), 0);
+        ASSERT(fmx_gap_view(gid, FMX_SENDER, "gap-read", reply_state,
+                            sizeof(reply_state), &acked));
+        ASSERT_STR_EQ(reply_state, "acked");
+        ASSERT(acked);
+        ASSERT(fmx_state_agrees(gid, "gap-read", "acknowledged"));
+
+        ASSERT(fmx_send_one(gid, FMX_SENDER, "nobody-home", "gap-missing",
+                            "gap-missing-1") >= 1);
+        ASSERT(fmx_state_agrees(gid, "gap-missing", "queued"));
+
+        ASSERT(fmx_send_one(gid, FMX_SENDER, "*", "gap-bcast", "gap-bcast-1") >= 1);
+        ASSERT(fmx_state_agrees(gid, "gap-bcast", "queued"));
+        fmx_now_ts(now, sizeof(now));
+        fmx_seed_inbox("desk-crew", now, 80, "desk-crew", FMX_SENDER, "note",
+                       "disposition=DEFERRED", "gap-bcast");
+        ASSERT(fmx_state_agrees(gid, "gap-bcast", "acknowledged"));
+        ASSERT(fmx_gap_view(gid, FMX_SENDER, "gap-bcast", reply_state,
+                            sizeof(reply_state), &acked));
+        ASSERT_STR_EQ(reply_state, "queued");
+        ASSERT(!acked);
+
+        fmx_seed_outcome("gap-read", 0);
+        ASSERT(fmx_state_agrees(gid, "gap-read", "completed"));
+        ASSERT(fmx_state_agrees(gid, "gap-read", "completed"));
+        ASSERT(fmx_state_agrees(gid, "gap-missing", "queued"));
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a broken cursor recovers and a zero offset does not cover") {
+        char gid[64], token[4096];
+        fmx_isolate("delivery_recover");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        ASSERT(fmx_send_one(gid, FMX_SENDER, "desk-crew", "gap-recover",
+                            "gap-recover-1") >= 1);
+        ASSERT(fmx_next_since(token, sizeof(token)));
+        fmx_plant("cursor", "desk-crew", "0\n");
+        ASSERT(fmx_state_agrees(gid, "gap-recover", "queued"));
+        fmx_plant_line("cursor", "desk-crew", "0|outbox.jsonl:0");
+        ASSERT(fmx_state_agrees(gid, "gap-recover", "queued"));
+        fmx_plant_line("cursor", "desk-crew", "0|outbox.jsonl");
+        ASSERT(fmx_state_agrees(gid, "gap-recover", "queued"));
+        fmx_plant_line("cursor", "desk-crew", token);
+        ASSERT(fmx_state_agrees(gid, "gap-recover", "acknowledged"));
+        ASSERT_EQ(fmx_ack_floor(gid, "gap-recover"), 0);
+        ASSERT(fmx_state_agrees(gid, "gap-recover", "acknowledged"));
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int fsd_deliver_checks(void);
 int test_fleet_steer(void);
 int fmx_task_projection_checks(void);
@@ -7337,6 +7564,7 @@ int test_fleet_steer(void)
     failures += fmx_t_candidate_unknown();
     failures += fmx_t_candidate_from_mail();
     failures += fmx_t_candidate_reports();
+    failures += fmx_t_delivery_gap();
 
     /* No ASSERT lives in this function, so no goto needs the label: the
      * hook is always cleared on the single fall-through path. */

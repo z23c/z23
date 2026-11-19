@@ -64,28 +64,33 @@
  * counts, a fresh IDEMPOTENCY_CONFLICT/BAD_INPUT/mail refusal does not) —
  * it is never just the item-result count.
  *
- * STATES. queued, delivered, acknowledged, completed — four different
- * facts; absence of evidence is reported as the earlier state, never
- * skipped ahead. The closed vocabulary never grows.
+ * STATES. queued, read, acknowledged, completed — four different facts.
+ * Absence of evidence stays at the earlier state. "read" is only the
+ * receiver's mail/read.<to> file covering the row. It is not an
+ * acknowledgement and it is not execution. "completed" stays a retained
+ * queue outcome with an explicit pass verdict and rc 0.
  *
  * The sender's own outbox is ALWAYS inside the sender's own pull, so
  * "visible in pull" is no evidence at all that a directive this host sent
  * ever left this machine. So the rule splits on who wrote the row:
  *   - A row THIS host sent through steer — its seq and recipient are
  *     recorded in <state>/steer/sent.jsonl — is "queued" until there is
- *     RECEIVER evidence, and never "delivered". Either of two facts
- *     promotes it straight to "acknowledged": (a) a mail row whose `from`
- *     is the sent row's `to` carrying the SAME ref, which is what a
- *     transport brings back into an inbox.<peer>.jsonl file, or (b) the
- *     local ack cursor <state>/mail/cursor.<to> covering its legacy scalar
- *     floor or its exact stream offset, which is how a receiver on THIS host
- *     acks. Composite offsets keep independently numbered streams and later
- *     rows from borrowing one another's acknowledgment. Both are the
- *     receiver's own writing; the sender can forge neither by posting.
+ *     RECEIVER evidence, and never "delivered". "acknowledged" is either
+ *     (a) a mail row whose `from` is the sent row's `to` carrying the SAME
+ *     ref (any other party when `to` is `*`), which is what a transport
+ *     brings back, or (b) <state>/mail/cursor.<to> covering the row. A
+ *     scalar cursor covers seq <= floor. A next_since token also covers
+ *     when its stream offset is at or past that row's end, even if the
+ *     token's integer floor is 0. mail/alias.<stale> is one live label,
+ *     followed once, and only when that recipient has neither a read nor
+ *     a cursor file. An alias copies nothing and grants no send authority.
+ *     Named replies still have to be later, address the sender, and agree
+ *     on attempt; the sender cannot forge that by posting.
  *   - Every other row — an inbound row a transport delivered here, an
  *     ordinary local post — reads as before: "delivered", because it
  *     really is visible where its reader reads, and "acknowledged" once
- *     the ack cursor covers it.
+ *     the ack cursor covers it. A reply does not promote an inbound row,
+ *     and an inbound row is never "read".
  * "completed" is resolved for either kind from a retained queue outcome
  * naming the ref with an explicit pass verdict and rc 0. A change row
  * still "queued" carries queued_age_s, and a directive this host sent
@@ -99,7 +104,9 @@
  * the rows already pulled by ref (+ attempt when both state one):
  * answered (a later `result` under the ref, from the addressee or
  * addressed back to the origin by anyone but the origin), else acked (the
- * receiver's ack cursor only; a reply is never an ack), else queued; with
+ * receiver's ack cursor covers the row, including a string next_since
+ * token; a reply is never an ack and a read file is never an ack), else
+ * queued; with
  * the directive's own sent_ts/sent_age_s apart from answer_ts/answer_age_s.
  * An answered directive is never a "no receiver evidence" blocker.
  *
@@ -1562,6 +1569,204 @@ static void fmc_row_tally(struct json_value *agents, struct json_value *work,
     }
 }
 
+/* One "<stream>:<offset>" entry of a next_since token. The integer floor
+ * can be 0 for every pull that started at 0; the offset is the position
+ * that actually passed this row. */
+static bool fmc_ack_entry_covers(const char *entry, const struct fmc_row *v)
+{
+    const char *colon;
+    char *end = NULL;
+    long long off;
+    size_t nlen;
+    if (!entry || !v || !v->stream || !v->stream[0] || v->row_end < 0)
+        return false;
+    colon = strchr(entry, ':');
+    if (!colon || colon == entry)
+        return false;
+    nlen = (size_t)(colon - entry);
+    if (nlen != strlen(v->stream) || strncmp(entry, v->stream, nlen) != 0)
+        return false;
+    errno = 0;
+    off = strtoll(colon + 1, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0' || off < 0)
+        return false;
+    return off >= v->row_end;
+}
+
+static bool fmc_token_covers_row(const char *token, const struct fmc_row *v)
+{
+    const char *bar;
+    char entry[160];
+    if (!token)
+        return false;
+    bar = strchr(token, '|');
+    if (!bar || bar[1] == '\0')
+        return false;
+    for (bar = bar + 1; *bar;) {
+        const char *comma = strchr(bar, ',');
+        size_t n = comma ? (size_t)(comma - bar) : strlen(bar);
+        if (n == 0 || n >= sizeof(entry))
+            return false;
+        memcpy(entry, bar, n);
+        entry[n] = '\0';
+        if (fmc_ack_entry_covers(entry, v))
+            return true;
+        if (!comma)
+            break;
+        bar = comma + 1;
+    }
+    return false;
+}
+
+/* Floor coverage stays (so "7|outbox:120" still covers seq <= 7). A floor
+ * of 0 still covers by stream offset. An invalid token covers nothing. */
+static bool fmc_text_covers(char *buf, size_t len, const struct fmc_row *v)
+{
+    long long floor;
+    if (!v || len == 0)
+        return false;
+    floor = fmc_ack_parse(buf, len);
+    if (floor >= 0 && v->seq <= floor)
+        return true;
+    return floor >= 0 && fmc_token_covers_row(buf, v);
+}
+
+static bool fmc_mail_leaf_ok(const char *leaf)
+{
+    return leaf && (strcmp(leaf, "cursor") == 0 || strcmp(leaf, "read") == 0 ||
+                    strcmp(leaf, "alias") == 0);
+}
+
+static bool fmc_agent_exact(const char *agent, char *clean, size_t cap)
+{
+    if (!fmc_clean_agent(agent, clean, cap))
+        return false;
+    return strcmp(agent, clean) == 0;
+}
+
+static bool fmc_read_capped(FILE *f, char *buf, size_t cap, size_t *out_len)
+{
+    size_t len = fread(buf, 1, cap, f);
+    bool failed = ferror(f) != 0 || len == cap || fclose(f) != 0;
+    if (failed)
+        return false;
+    *out_len = len;
+    return true;
+}
+
+/* Bytes of mail/<leaf>.<agent>. The agent must already be a cursor name:
+ * a stripped spelling must not open a different file. A full buffer is
+ * not a cursor. */
+static bool fmc_mail_text(const char *leaf, const char *agent, char *buf,
+                          size_t cap, size_t *out_len)
+{
+    char root[4096], path[4096 + 96];
+    char clean[FMC_NAME_MAX + 1];
+    FILE *f;
+    int n;
+    if (!fmc_mail_leaf_ok(leaf) || !buf || cap < 2 || !out_len)
+        return false;
+    if (!fmc_agent_exact(agent, clean, sizeof(clean)))
+        return false;
+    if (!platform_state_root_existing(root, sizeof(root)))
+        return false;
+    n = snprintf(path, sizeof(path), "%s/mail/%s.%s", root, leaf, clean);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    return fmc_read_capped(f, buf, cap, out_len);
+}
+
+/* mail/alias.<stale> holds one live agent name. No chain, no self-alias. */
+static bool fmc_alias_target(const char *agent, char *live, size_t cap)
+{
+    char buf[FMC_NAME_MAX + 2];
+    char clean[FMC_NAME_MAX + 1];
+    size_t n = 0;
+    if (!live || cap <= FMC_NAME_MAX)
+        return false;
+    if (!fmc_mail_text("alias", agent, buf, sizeof(buf), &n))
+        return false;
+    if (n == 0 || memchr(buf, '\0', n))
+        return false;
+    if (buf[n - 1] == '\n')
+        n--;
+    if (n > 0 && buf[n - 1] == '\r')
+        n--;
+    if (n == 0 || n > FMC_NAME_MAX)
+        return false;
+    memcpy(live, buf, n);
+    live[n] = '\0';
+    if (!fmc_clean_agent(live, clean, sizeof(clean)) ||
+        strcmp(live, clean) != 0)
+        return false;
+    return strcmp(live, agent) != 0;
+}
+
+/* True when mail/<leaf>.<agent> exists. A present file blocks an alias
+ * even when its bytes do not cover the row. */
+static bool fmc_mail_present(const char *leaf, const char *agent)
+{
+    char root[4096], path[4096 + 96];
+    char clean[FMC_NAME_MAX + 1];
+    FILE *f;
+    int n;
+    if (!fmc_mail_leaf_ok(leaf) || !fmc_agent_exact(agent, clean, sizeof(clean)))
+        return false;
+    if (!platform_state_root_existing(root, sizeof(root)))
+        return false;
+    n = snprintf(path, sizeof(path), "%s/mail/%s.%s", root, leaf, clean);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    (void)fclose(f);
+    return true;
+}
+
+/* An alias is one hop, and only for a label that has no position file. */
+static bool fmc_alias_allowed(const char *agent, const char *leaf)
+{
+    const char *other = strcmp(leaf, "cursor") == 0 ? "read" : "cursor";
+    return !fmc_mail_present(leaf, agent) && !fmc_mail_present(other, agent);
+}
+
+static bool fmc_pos_covers(const char *agent, const struct fmc_row *v,
+                           const char *leaf, bool alias_ok)
+{
+    char buf[FMC_ACK_TOKEN_CAP + 1];
+    char live[FMC_NAME_MAX + 1];
+    size_t n = 0;
+    if (!v)
+        return false;
+    if (!fmc_mail_text(leaf, agent, buf, sizeof(buf), &n)) {
+        if (!alias_ok || !fmc_alias_allowed(agent, leaf) ||
+            !fmc_alias_target(agent, live, sizeof(live)))
+            return false;
+        return fmc_pos_covers(live, v, leaf, false);
+    }
+    return fmc_text_covers(buf, n, v);
+}
+
+/* One hop, and only when this recipient has neither a read nor a cursor
+ * file. The target's own cursor is not followed further. */
+static bool fmc_alias_ack(const struct fmc_row *v)
+{
+    char live[FMC_NAME_MAX + 1];
+    if (!v || !fmc_alias_allowed(v->to, "cursor") ||
+        !fmc_alias_target(v->to, live, sizeof(live)))
+        return false;
+    return fmc_pos_covers(live, v, "cursor", false);
+}
+
+static bool fmc_read_covers(const struct fmc_row *v)
+{
+    return v && fmc_pos_covers(v->to, v, "read", true);
+}
+
 static bool fmc_reply_compatible(const struct fmc_row *directive, const struct fmc_row *reply);
 
 static bool fmc_reply_addressed(const struct fmc_row *d, const struct fmc_row *r)
@@ -1606,6 +1811,14 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
         if (r.observed_disposition[0]) continue;
         if (strcmp(r.from, v->from) == 0)
             continue;
+        /* `to` of `*` names no cursor file. A note from anyone but the
+         * sender is that broadcast's receiver evidence. A named recipient
+         * still has to be later, addressed back, and attempt-compatible. */
+        if (strcmp(v->to, "*") == 0) {
+            if (strcmp(r.ref, v->ref) == 0 && r.from[0])
+                return true;
+            continue;
+        }
         if (fmc_direct_reply(v, &r, &conflicts))
             return true;
     }
@@ -1625,11 +1838,13 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
 static const char *fmc_row_state_with_read(const struct fmc_row *v,
     const struct json_value *rows, const char *sent_path, const char *typed)
 {
-    bool acked = fmc_row_acked(v) || typed;
+    bool acked = fmc_row_acked(v) || typed || fmc_alias_ack(v);
     if (!fmc_sent_by_us(sent_path, v->seq, v->to))
         return acked ? "acknowledged" : "delivered";
     if (acked || fmc_rows_reply_from(rows, v))
         return "acknowledged";
+    if (fmc_read_covers(v))
+        return "read";
     return "queued";
 }
 
@@ -3172,7 +3387,7 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
 {
     struct json_value o;
     struct fmc_answer a;
-    bool acked = fmc_row_acked(v) || typed;
+    bool acked = fmc_row_acked(v) || typed || fmc_alias_ack(v);
     bool answered = fmc_answer_find(rows, v, &a);
     json_init(&o);
     json_set_object(&o);
@@ -5720,21 +5935,44 @@ static void fmc_do_send(const struct zcl_command_request *req,
  * One bounded object by exact reference, never a log: a mail row with
  * ref==ref, a queue row/outcome with name==ref, or one board post by id. */
 
+/* Same outcome rule brief uses when it upgrades a change to completed.
+ * A queue that does not answer leaves the mail state unchanged. */
+static bool fmc_mail_outcome_done(const struct zcl_command_request *req,
+                                  const char *ref)
+{
+    struct fmc_sub sub;
+    bool done = false;
+    fmc_sub_begin(&sub, "zcl.agent_queue.v1", req, "dev.agent.queue");
+    if (sub.valid &&
+        fmc_sub_input(&sub, "{\"action\":\"status\",\"json\":true}")) {
+        zcl_native_handle_dev_agent_queue(&sub.request, &sub.reply);
+        sub.ran = true;
+        if (fmc_sub_ok(&sub))
+            done = fmc_outcome_completes(
+                json_get(&sub.reply.data, "outcomes"), ref);
+    }
+    fmc_sub_end(&sub);
+    return done;
+}
+
 /* Lifecycle state for one mail row, resolved by exactly the rule the
- * brief's changes[] uses (fmc_row_state), so the two never disagree about
- * the same row: a row this host sent through steer reads "queued" until
- * the recipient replies under the same ref or the local ack cursor covers
- * it, and is never called "delivered" from the sender's own outbox; any
- * other row reads "delivered", or "acknowledged" on the cursor.
- * `ack_cursor` still reports the receiver cursor itself so the caller can
- * check the promotion, and an unparseable row reports the earliest state
- * rather than guessing. `rows` is the pull this lookup already holds. */
-static void fmc_evidence_mail_ack(struct zcl_command_reply *reply,
+ * brief's changes[] uses (fmc_row_state, then a retained pass outcome),
+ * so the two never disagree about the same row: a row this host sent
+ * through steer reads "queued" until the recipient replies under the same
+ * ref or the local ack cursor covers it, and is never called "delivered"
+ * from the sender's own outbox. A read file alone is "read". Any other
+ * row reads "delivered", or "acknowledged" on the cursor. A pass outcome
+ * with rc 0 then reads "completed". `ack_cursor` stays the integer floor.
+ * An unparseable row reports the earliest state rather than guessing.
+ * `rows` is the pull this lookup already holds. */
+static void fmc_evidence_mail_ack(const struct zcl_command_request *req,
+                                  struct zcl_command_reply *reply,
                                   const struct json_value *r,
                                   const struct json_value *rows)
 {
     struct fmc_row v;
     char sent_path[4096 + 32];
+    const char *state;
     if (!fmc_row_parse(r, &v)) {
         (void)json_push_kv_int(&reply->data, "ack_cursor", -1);
         (void)json_push_kv_str(&reply->data, "state", "queued");
@@ -5742,9 +5980,11 @@ static void fmc_evidence_mail_ack(struct zcl_command_reply *reply,
     }
     if (!fmc_sent_path_read(sent_path, sizeof(sent_path)))
         sent_path[0] = '\0';
+    state = fmc_row_state(&v, rows, sent_path);
+    if (fmc_mail_outcome_done(req, v.ref))
+        state = "completed";
     (void)json_push_kv_int(&reply->data, "ack_cursor", fmc_ack_cursor(v.to));
-    (void)json_push_kv_str(&reply->data, "state",
-                           fmc_row_state(&v, rows, sent_path));
+    (void)json_push_kv_str(&reply->data, "state", state);
 }
 
 /* Copy one whole JSON value onto the reply under "object". The sources are
@@ -5889,7 +6129,7 @@ static void fmc_evidence_mail(const struct zcl_command_request *req,
     }
     if (hit) {
         if (fmc_emit_object(reply, "mail", hit))
-            fmc_evidence_mail_ack(reply, hit, &rows);
+            fmc_evidence_mail_ack(req, reply, hit, &rows);
         json_free(&rows);
         return;
     }
@@ -7116,6 +7356,7 @@ static void fmc_mbox_finish(struct zcl_command_reply *reply, struct fmc_mbox *m,
         json_push_kv(&reply->data, "rows", &m->rows) &&
         json_push_kv_int(&reply->data, "count", (long long)m->emitted) &&
         json_push_kv_str(&reply->data, "cursor", cursor) &&
+        json_push_kv_str(&reply->data, "cursor_token", cursor) &&
         json_push_kv_bool(&reply->data, "more", more) &&
         json_push_kv_int(&reply->data, "body_cap_bytes", FMC_MBOX_BODY_MAX) &&
         json_push_kv_int(&reply->data, "bodies_truncated",

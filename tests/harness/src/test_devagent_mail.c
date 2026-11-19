@@ -1519,6 +1519,32 @@ static int test_mail_prefix_cursor(void)
         json_free(&rows); json_init(&rows); json_set_array(&rows);
         ASSERT(zcl_devagent_mail_cursor_prefix(start, end, &rows, token, sizeof(token)));
         ASSERT_STR_EQ(token, start);
+        /* A later returned row does not cover the bytes in front of it. */
+        json_free(&rows); json_init(&rows); json_set_array(&rows);
+        json_free(&row); json_init(&row); json_set_object(&row);
+        ASSERT(json_push_kv_str(&row, "stream", "outbox.jsonl"));
+        ASSERT(json_push_kv_int(&row, "row_offset", 20));
+        ASSERT(json_push_kv_int(&row, "row_end", 40));
+        ASSERT(json_push_back(&rows, &row));
+        ASSERT(zcl_devagent_mail_cursor_prefix("0|outbox.jsonl:0",
+                                               "0|outbox.jsonl:40", &rows,
+                                               token, sizeof(token)));
+        ASSERT_STR_EQ(token, "0|outbox.jsonl:0");
+        json_free(&rows); json_init(&rows); json_set_array(&rows);
+        json_free(&row); json_init(&row); json_set_object(&row);
+        ASSERT(json_push_kv_str(&row, "stream", "outbox.jsonl"));
+        ASSERT(json_push_kv_int(&row, "row_offset", 0));
+        ASSERT(json_push_kv_int(&row, "row_end", 20));
+        ASSERT(json_push_back(&rows, &row));
+        json_free(&row); json_init(&row); json_set_object(&row);
+        ASSERT(json_push_kv_str(&row, "stream", "outbox.jsonl"));
+        ASSERT(json_push_kv_int(&row, "row_offset", 30));
+        ASSERT(json_push_kv_int(&row, "row_end", 40));
+        ASSERT(json_push_back(&rows, &row));
+        ASSERT(zcl_devagent_mail_cursor_prefix("0|outbox.jsonl:0",
+                                               "0|outbox.jsonl:40", &rows,
+                                               token, sizeof(token)));
+        ASSERT_STR_EQ(token, "0|outbox.jsonl:20");
         PASS();
     } _test_next:;
     json_free(&row); json_free(&rows);

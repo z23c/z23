@@ -95,6 +95,7 @@
 #include "platform/directory_compat.h"
 #include "platform/directory_watcher.h"
 #include "platform/positioned_file.h"
+#include "platform/private_directory.h"
 #include "platform/process_lock.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
@@ -1532,11 +1533,25 @@ struct wkr_qsig {
     bool present;
 };
 
+/* Identity of the mail directory's *.jsonl streams. Cursor and read
+ * files are not streams, and a read of a stream does not change this. */
+struct wkr_mail_sig {
+    int nfiles;
+    uint64_t size;
+    int64_t mtime;
+    uint64_t ident;
+};
+
 struct wkr_idle {
     struct platform_directory_watcher watcher;
+    struct platform_directory_watcher mail;
     bool watching;
+    bool mail_watching;
+    bool mail_woke;
     char queuedir[4096];
+    char maildir[4096];
     struct wkr_qsig base;
+    struct wkr_mail_sig mail_sig;
 };
 
 static void wkr_qsig_take(const char *queuedir, struct wkr_qsig *sig)
@@ -1564,10 +1579,81 @@ static bool wkr_qsig_moved(const struct wkr_idle *idle)
            now.ino != idle->base.ino;
 }
 
-static bool wkr_stop_asked(void *opaque)
+static bool wkr_jsonl_name(const char *name)
 {
-    (void)opaque;
-    return g_wkr_term != 0;
+    size_t n;
+    if (!name)
+        return false;
+    n = strlen(name);
+    return n > 6 && strcmp(name + n - 6, ".jsonl") == 0;
+}
+
+/* False when the directory cannot be listed. A failed listing is not a
+ * mail change: treating it as one would wake every slice. */
+static bool wkr_mail_sig_take(const char *maildir, struct wkr_mail_sig *sig)
+{
+    struct platform_directory_list files = {0};
+    size_t i;
+    memset(sig, 0, sizeof(*sig));
+    if (!maildir ||
+        !platform_directory_list_regular_sorted(maildir, &files)) {
+        platform_directory_list_free(&files);
+        return false;
+    }
+    for (i = 0; i < files.count; i++) {
+        const struct platform_directory_entry *e = &files.entries[i];
+        if (!e->snapshot_valid || !wkr_jsonl_name(e->name))
+            continue;
+        sig->nfiles++;
+        sig->size += e->size;
+        sig->mtime += e->modified_seconds;
+        sig->ident ^= e->file_low;
+    }
+    platform_directory_list_free(&files);
+    return true;
+}
+
+static bool wkr_mail_sig_same(const struct wkr_mail_sig *a,
+                              const struct wkr_mail_sig *b)
+{
+    return a->nfiles == b->nfiles && a->size == b->size &&
+           a->mtime == b->mtime && a->ident == b->ident;
+}
+
+static void wkr_mail_resnap(struct wkr_idle *idle)
+{
+    struct wkr_mail_sig now;
+    if (!idle->mail_watching)
+        return;
+    if (wkr_mail_sig_take(idle->maildir, &now))
+        idle->mail_sig = now;
+}
+
+/* Sampled from the queue wait. A mail-directory event wakes the inbox
+ * check only when a *.jsonl stream actually changed. */
+static bool wkr_wake_stop(void *opaque)
+{
+    struct wkr_idle *idle = opaque;
+    enum platform_directory_watch_result r;
+    struct wkr_mail_sig now;
+    if (g_wkr_term != 0)
+        return true;
+    if (!idle || !idle->mail_watching)
+        return false;
+    r = platform_directory_watcher_wait(&idle->mail, 0, NULL, NULL);
+    if (r == PLATFORM_DIRECTORY_WATCH_ERROR) {
+        platform_directory_watcher_close(&idle->mail);
+        idle->mail_watching = false;
+        return false;
+    }
+    if (r != PLATFORM_DIRECTORY_WATCH_CHANGED &&
+        r != PLATFORM_DIRECTORY_WATCH_OVERFLOW)
+        return false;
+    if (!wkr_mail_sig_take(idle->maildir, &now) ||
+        wkr_mail_sig_same(&idle->mail_sig, &now))
+        return false;
+    idle->mail_woke = true;
+    return true;
 }
 
 /* Milliseconds from now until `until_ms` on the monotonic clock, >= 0. */
@@ -1588,6 +1674,28 @@ static void wkr_idle_sleep_until(long long until_ms)
     }
 }
 
+static void wkr_mail_watch_open(struct wkr_idle *idle, bool timed_only)
+{
+    platform_directory_watcher_init(&idle->mail);
+    idle->mail_watching = false;
+    idle->mail_woke = false;
+    idle->maildir[0] = '\0';
+    memset(&idle->mail_sig, 0, sizeof(idle->mail_sig));
+    if (timed_only || !wkr_state_dir(idle->maildir, sizeof(idle->maildir),
+                                     "mail"))
+        return;
+    if (!platform_private_directory_ensure(idle->maildir)) {
+        idle->maildir[0] = '\0';
+        return;
+    }
+    idle->mail_watching =
+        platform_directory_watcher_open(&idle->mail, idle->maildir);
+    if (idle->mail_watching)
+        wkr_mail_resnap(idle);
+    else
+        idle->maildir[0] = '\0';
+}
+
 static void wkr_idle_open(struct wkr_idle *idle, const char *queuedir,
                           bool timed_only)
 {
@@ -1596,13 +1704,17 @@ static void wkr_idle_open(struct wkr_idle *idle, const char *queuedir,
     memset(&idle->base, 0, sizeof(idle->base));
     idle->watching = !timed_only && platform_directory_watcher_open(
                                         &idle->watcher, idle->queuedir);
+    wkr_mail_watch_open(idle, timed_only);
 }
 
 static void wkr_idle_close(struct wkr_idle *idle)
 {
     if (idle->watching)
         platform_directory_watcher_close(&idle->watcher);
+    if (idle->mail_watching)
+        platform_directory_watcher_close(&idle->mail);
     idle->watching = false;
+    idle->mail_watching = false;
 }
 
 /* Block for at most wait_ms. True when the queue ledger changed and a
@@ -1619,7 +1731,13 @@ static bool wkr_idle_wait(struct wkr_idle *idle, long long wait_ms)
             return false;
         }
         r = platform_directory_watcher_wait(&idle->watcher, (uint32_t)left,
-                                            wkr_stop_asked, NULL);
+                                            wkr_wake_stop, idle);
+        if (g_wkr_term != 0)
+            return false;
+        if (r == PLATFORM_DIRECTORY_WATCH_STOPPED && idle->mail_woke) {
+            idle->mail_woke = false;
+            return true;
+        }
         if (r == PLATFORM_DIRECTORY_WATCH_ERROR)
             wkr_idle_close(idle);
         else if (r != PLATFORM_DIRECTORY_WATCH_CHANGED &&
@@ -1726,7 +1844,282 @@ static void wkr_lock_drop(struct wkr_lock *lk)
 
 #ifdef ZCL_TESTING
 void (*zcl_devagent_worker_test_after_empty_claim)(void) = NULL;
+void (*zcl_devagent_worker_test_after_inbox)(void) = NULL;
+void (*zcl_devagent_worker_test_after_first_note)(void) = NULL;
+void (*zcl_devagent_worker_test_before_step)(void) = NULL;
+static bool g_wkr_first_note;
 #endif
+
+/* Once per check, after the first note is stored and before the check
+ * returns. Shipped builds have nothing to call. */
+static void wkr_after_first_note(void)
+{
+#ifdef ZCL_TESTING
+    if (g_wkr_first_note)
+        return;
+    g_wkr_first_note = true;
+    if (zcl_devagent_worker_test_after_first_note)
+        zcl_devagent_worker_test_after_first_note();
+#endif
+}
+
+static const char *wkr_json_str(const struct json_value *row, const char *key)
+{
+    const struct json_value *v = row ? json_get(row, key) : NULL;
+    const char *s;
+    if (!v || v->type != JSON_STR)
+        return "";
+    s = json_get_str(v);
+    return s ? s : "";
+}
+
+static bool wkr_reply_path(const char *worker, const char *ref, char *path,
+                           size_t cap)
+{
+    char dir[4096];
+    int n;
+    if (!wkr_state_dir(dir, sizeof(dir), "mail"))
+        return false;
+    n = snprintf(path, cap, "%s/reply.%s.%s", dir, worker, ref);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool wkr_marker_held(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return errno != ENOENT;
+    (void)fclose(f);
+    return true;
+}
+
+static void wkr_marker_store(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return;
+    if (fclose(f) == 0) {
+#if !defined(_WIN32)
+        (void)chmod(path, 0600);
+#endif
+    }
+}
+
+/* Kind note, never result: a result would look like execution. */
+static bool wkr_post_note(const char *worker, const char *ref, const char *to)
+{
+    struct wkr_sub sub;
+    char body[96], ebody[256], eref[192], eto[160], input[768];
+    int n;
+    bool posted = false;
+    n = snprintf(body, sizeof(body), "disposition=DEFERRED\nref=%s\n", ref);
+    if (n <= 0 || (size_t)n >= sizeof(body))
+        return false;
+    if (!zcl_devagent_worker_json_escape(body, ebody, sizeof(ebody)) ||
+        !zcl_devagent_worker_json_escape(ref, eref, sizeof(eref)) ||
+        !zcl_devagent_worker_json_escape(to, eto, sizeof(eto)))
+        return false;
+    n = snprintf(input, sizeof(input),
+                 "{\"action\":\"post\",\"to\":\"%s\",\"kind\":\"note\","
+                 "\"body\":\"%s\",\"ref\":\"%s\",\"from\":\"%.48s\"}",
+                 eto, ebody, eref, worker);
+    if (n <= 0 || (size_t)n >= sizeof(input))
+        return false;
+    wkr_sub_begin(&sub, "zcl.agent_mail.v1", "dev.agent.mail");
+    if (sub.valid && wkr_sub_input(&sub, input)) {
+        zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
+        sub.ran = true;
+        posted = wkr_sub_ok(&sub);
+    }
+    wkr_sub_end(&sub);
+    return posted;
+}
+
+static bool wkr_inbox_notes(const struct wkr_sub *sub, const char *worker)
+{
+    const struct json_value *rows = json_get(&sub->reply.data, "rows");
+    size_t n, i;
+    if (!rows || rows->type != JSON_ARR)
+        return false;
+    n = json_size(rows);
+    for (i = 0; i < n; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *kind = wkr_json_str(row, "kind");
+        const char *to = wkr_json_str(row, "to");
+        const char *ref = wkr_json_str(row, "ref");
+        const char *from = wkr_json_str(row, "from");
+        char path[4200];
+        const char *dest;
+        if (strcmp(kind, "directive") != 0 || strcmp(to, worker) != 0)
+            continue;
+        if (!zcl_devagent_name_ok(ref))
+            continue;
+        if (!wkr_reply_path(worker, ref, path, sizeof(path)) ||
+            wkr_marker_held(path))
+            continue;
+        dest = (zcl_devagent_name_ok(from) && strcmp(from, worker) != 0)
+                   ? from : "*";
+        if (!wkr_post_note(worker, ref, dest))
+            return false;
+        wkr_marker_store(path);
+        wkr_after_first_note();
+    }
+    return true;
+}
+
+static void wkr_drop_cursor(const char *worker)
+{
+    char dir[4096], path[4200];
+    int n;
+    if (!wkr_state_dir(dir, sizeof(dir), "mail"))
+        return;
+    n = snprintf(path, sizeof(path), "%s/cursor.%s", dir, worker);
+    if (n > 0 && (size_t)n < sizeof(path))
+        (void)remove(path);
+}
+
+static bool wkr_inbox_open(const char *worker, struct wkr_sub *sub,
+                           char *token, size_t cap, long long *count,
+                           bool *stale)
+{
+    char input[192];
+    const char *next;
+    const char *code;
+    int n;
+    *count = 0;
+    *stale = false;
+    token[0] = '\0';
+    if (!zcl_devagent_name_ok(worker))
+        return false;
+    n = snprintf(input, sizeof(input),
+                 "{\"action\":\"pull\",\"to\":\"%s\",\"agent\":\"%s\"}",
+                 worker, worker);
+    if (n <= 0 || (size_t)n >= sizeof(input))
+        return false;
+    wkr_sub_begin(sub, "zcl.agent_mail.v1", "dev.agent.mail");
+    if (!sub->valid || !wkr_sub_input(sub, input)) {
+        wkr_sub_end(sub);
+        return false;
+    }
+    zcl_native_handle_dev_agent_mail(&sub->request, &sub->reply);
+    sub->ran = true;
+    if (!wkr_sub_ok(sub)) {
+        code = sub->reply.error.code;
+        *stale = code[0] && strcmp(code, "MAIL_CURSOR_STALE") == 0;
+        wkr_sub_end(sub);
+        return false;
+    }
+    *count = wkr_sub_int(sub, "count", 0);
+    next = wkr_sub_str(sub, "next_since");
+    if (!next || !strchr(next, '|') || strlen(next) >= cap) {
+        wkr_sub_end(sub);
+        return false;
+    }
+    (void)snprintf(token, cap, "%s", next);
+    return true;
+}
+
+static void wkr_inbox_ack(const char *worker, const char *token)
+{
+    struct wkr_sub sub;
+    char input[4600];
+    int n;
+    if (!token || !strchr(token, '|'))
+        return;
+    n = snprintf(input, sizeof(input),
+                 "{\"action\":\"ack\",\"agent\":\"%s\",\"cursor\":\"%s\"}",
+                 worker, token);
+    if (n <= 0 || (size_t)n >= sizeof(input))
+        return;
+    wkr_sub_begin(&sub, "zcl.agent_mail.v1", "dev.agent.mail");
+    if (sub.valid && wkr_sub_input(&sub, input)) {
+        zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
+        sub.ran = true;
+    }
+    wkr_sub_end(&sub);
+}
+
+/* One pull. 1 = a page of this worker's mail was acked, and a row
+ * appended while that page was noted is still unread. 0 = stop. -1 =
+ * the stored cursor is stale. An empty pull writes nothing: the
+ * worker's own note is addressed to the sender, so it is not a reason
+ * to pull again. */
+static int wkr_inbox_page(const char *worker, char *prev, size_t cap)
+{
+    struct wkr_sub sub;
+    char token[4096];
+    long long count = 0;
+    bool stale = false;
+    if (!wkr_inbox_open(worker, &sub, token, sizeof(token), &count, &stale))
+        return stale ? -1 : 0;
+    if (count <= 0 || (prev[0] != '\0' && strcmp(token, prev) == 0)) {
+        wkr_sub_end(&sub);
+        return 0;
+    }
+    (void)snprintf(prev, cap, "%s", token);
+    (void)zcl_devagent_mail_record_read(worker, token);
+    if (!wkr_inbox_notes(&sub, worker)) {
+        wkr_sub_end(&sub);
+        return 0;
+    }
+    wkr_inbox_ack(worker, token);
+    wkr_sub_end(&sub);
+    return 1;
+}
+
+/* Startup, each idle return, and each finished job. Keep pulling while
+ * each pull acks a new resume token. Stop when the pull is empty, the
+ * pull fails, or the token does not advance, so a backlog past sixty-four
+ * pages is deferred before the drive idles and a stuck cursor cannot
+ * spin. A stale cursor is dropped once; markers keep the replay from
+ * posting twice. */
+static void wkr_inbox_checkpoint(const struct wkr_drive_opts *opts)
+{
+    char prev[4096];
+    bool retried = false;
+    if (!opts)
+        return;
+#ifdef ZCL_TESTING
+    g_wkr_first_note = false;
+#endif
+    prev[0] = '\0';
+    for (;;) {
+        int rc = wkr_inbox_page(opts->worker, prev, sizeof(prev));
+        if (rc < 0 && !retried) {
+            retried = true;
+            prev[0] = '\0';
+            wkr_drop_cursor(opts->worker);
+            continue;
+        }
+        if (rc <= 0)
+            return;
+    }
+}
+
+/* True when this drive has used its deadline or its job cap. */
+static bool wkr_drive_spent(const struct wkr_drive_opts *opts,
+                            long long t0_s, long long jobs)
+{
+    if (platform_time_wall_unix() - t0_s >= opts->deadline_s)
+        return true;
+    return opts->max_jobs > 0 && jobs >= opts->max_jobs;
+}
+
+/* True when the idle streak says the drive should stop. The inbox check
+ * runs on the mail wake and on the ordinary end of the wait. */
+static bool wkr_after_idle(const struct wkr_drive_opts *opts,
+                           struct wkr_idle *idle, long long *idle_ms,
+                           long long *wait_s)
+{
+    bool stop = wkr_drive_idle(opts, idle, idle_ms, wait_s);
+    wkr_inbox_checkpoint(opts);
+    wkr_mail_resnap(idle);
+#ifdef ZCL_TESTING
+    if (zcl_devagent_worker_test_after_inbox)
+        zcl_devagent_worker_test_after_inbox();
+#endif
+    return stop;
+}
 
 long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
                                     wkr_executor_fn exec)
@@ -1755,19 +2148,25 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     wkr_idle_open(&idle, queuedir, opts->timed_idle_only);
     t0_s = platform_time_wall_unix();
     wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
+    wkr_inbox_checkpoint(opts);
+    wkr_mail_resnap(&idle);
     while (!g_wkr_term) {
         long long done;
-        if (platform_time_wall_unix() - t0_s >= opts->deadline_s)
-            break;
-        if (opts->max_jobs > 0 && jobs >= opts->max_jobs)
+        if (wkr_drive_spent(opts, t0_s, jobs))
             break;
         wkr_reap();
         wkr_qsig_take(queuedir, &idle.base);
+#ifdef ZCL_TESTING
+        if (zcl_devagent_worker_test_before_step)
+            zcl_devagent_worker_test_before_step();
+#endif
         /* A refused seam processes nothing: idle instead of re-adopting
          * the same orphan in a tight loop. */
         done = wkr_drive_step(opts, exec);
         jobs += done;
         if (done > 0) {
+            wkr_inbox_checkpoint(opts);
+            wkr_mail_resnap(&idle);
             idle_ms = 0;
             wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
             continue;
@@ -1776,7 +2175,7 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
         if (zcl_devagent_worker_test_after_empty_claim)
             zcl_devagent_worker_test_after_empty_claim();
 #endif
-        if (wkr_drive_idle(opts, &idle, &idle_ms, &wait_s))
+        if (wkr_after_idle(opts, &idle, &idle_ms, &wait_s))
             break;
     }
     wkr_idle_close(&idle);

@@ -3295,6 +3295,8 @@ static int gw_t_brief_token(void)
         ASSERT_EQ(st, 200);
         ASSERT(gw_body_has(b, "\"name\":\"steer_brief\""));
         ASSERT(gw_body_has(b, "\"since\":{\"type\":[\"integer\",\"string\"]}"));
+        ASSERT(gw_body_has(b, "\"name\":\"steer_mailbox\""));
+        ASSERT(gw_body_has(b, "\"anyOf\":[{\"type\":\"string\",\"minLength\":1},{\"type\":\"integer\",\"minimum\":0}]"));
         ASSERT(gw_body_has(b, "cursor_token"));
         free(b);
         PASS();
@@ -3354,6 +3356,17 @@ static int gw_t_brief_token(void)
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "\"isError\":false"));
         ASSERT(!gw_body_has(b, "ref-gw-y"));
+        free(b);
+        /* The token's integer floor is not that token: since 0 still
+         * returns the rows the string cursor already passed. */
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":0}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 60, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "ref-gw-x"));
+        ASSERT(gw_body_has(b, "ref-gw-y"));
         free(b);
         PASS();
     }

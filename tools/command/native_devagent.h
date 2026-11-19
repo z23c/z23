@@ -37,6 +37,10 @@ bool zcl_devagent_receive_admission(const char *ref, const char *body,
 bool zcl_devagent_mail_cursor_prefix(const char *resume, const char *end_token,
     const struct json_value *rows, char *out, size_t cap);
 
+/* Record that `agent` has read through a next_since token. This writes
+ * mail/read.<agent> only. It does not move the ack cursor. */
+bool zcl_devagent_mail_record_read(const char *agent, const char *token);
+
 /* Internal fleet-brief mail pull. It skips global-max scans while pages
  * remain and replays the final page through the normal path; direct mail
  * commands retain per-page cursor behavior. Call only from fleet brief. */
@@ -384,6 +388,18 @@ const char *zcl_devagent_worker_test_compose_task(const char *brief,
  * claim), before it idles. NULL (the default) does nothing. Lets a fixture
  * order a post after the first empty claim. */
 extern void (*zcl_devagent_worker_test_after_empty_claim)(void);
+/* Called after the inbox check that follows an idle wait. NULL does
+ * nothing. A fixture uses it to observe that the check ran. */
+extern void (*zcl_devagent_worker_test_after_inbox)(void);
+/* Called once per inbox check, after the first deferred note is stored
+ * and before that check returns. NULL does nothing. Shipped builds do
+ * not call it. A fixture uses it to append one row while the check is
+ * still running. */
+extern void (*zcl_devagent_worker_test_after_first_note)(void);
+/* Called once at the start of each drive step, after the startup inbox
+ * check and before the claim. NULL does nothing. A fixture posts mail
+ * here so only the finished-job checkpoint can see it. */
+extern void (*zcl_devagent_worker_test_before_step)(void);
 #endif
 bool zcl_devagent_worker_write_atomic(const char *path, const char *text,
                                       size_t len);

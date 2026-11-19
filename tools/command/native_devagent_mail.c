@@ -2178,17 +2178,24 @@ static bool dvm_prefix_base(struct dvm_pull_state *ps, const char *resume,
     return true;
 }
 
+/* A returned row moves this stream only when it begins at the cursor.
+ * One offset covers every earlier byte, so a later row_end would mark an
+ * unreturned row in front of it as read. A gap leaves the cursor put. */
 static bool dvm_prefix_row(struct dvm_pull_state *ps, const struct json_value *row)
 {
     const struct json_value *name = json_get(row, "stream");
     const struct json_value *start = json_get(row, "row_offset");
     const struct json_value *end = json_get(row, "row_end");
+    long long from, to;
     if (!name || name->type != JSON_STR || !start || start->type != JSON_INT ||
         !end || end->type != JSON_INT) return false;
     struct dvm_stream *stream = dvm_prefix_find(ps, json_get_str(name));
-    if (!stream || json_get_int(start) < stream->off || json_get_int(end) <= json_get_int(start) ||
-        json_get_int(end) > stream->head_end) return false;
-    stream->off = json_get_int(end);
+    from = json_get_int(start);
+    to = json_get_int(end);
+    if (!stream || from < stream->off || to <= from || to > stream->head_end)
+        return false;
+    if (from == stream->off)
+        stream->off = to;
     return true;
 }
 
@@ -2552,6 +2559,55 @@ static struct dvm_ack_write_result dvm_ack_write_cursor(
 }
 #endif
 
+/* True when path already holds exactly these bytes. Rewriting the same
+ * read cursor fires the mail directory watcher and spins a resident. */
+static bool dvm_file_same(const char *path, const char *text, size_t len)
+{
+    char have[DVM_TOKEN_CAP + 2];
+    FILE *f;
+    size_t n;
+    int bad;
+    if (!path || !text || len == 0 || len >= sizeof(have))
+        return false;
+    f = fopen(path, "rb");
+    if (!f)
+        return false;
+    n = fread(have, 1, sizeof(have), f);
+    bad = ferror(f);
+    if (fclose(f) != 0 || bad)
+        return false;
+    return n == len && memcmp(have, text, len) == 0;
+}
+
+/* mail/read.<agent> is the READ position. Same token grammar as an ack,
+ * and never a substitute for cursor.<agent>. */
+bool zcl_devagent_mail_record_read(const char *agent, const char *token)
+{
+    char maildir[DVM_PATH_CAP];
+    char path[DVM_PATH_CAP];
+    char tmp[DVM_PATH_CAP];
+    char text[DVM_TOKEN_CAP + 2];
+    int path_length, temp_length;
+    size_t len;
+    if (!dvm_cursor_name_ok(agent) || !dvm_cursor_text_ok(token) ||
+        !strchr(token, '|'))
+        return false;
+    if (!dvm_mail_dir(maildir, sizeof(maildir), true))
+        return false;
+    path_length = snprintf(path, sizeof(path), "%s/read.%s", maildir, agent);
+    temp_length = snprintf(tmp, sizeof(tmp), "%s/.read.%s.%ld.tmp", maildir,
+                           agent, (long)getpid());
+    if (path_length <= 0 || (size_t)path_length >= sizeof(path) ||
+        temp_length <= 0 || (size_t)temp_length >= sizeof(tmp))
+        return false;
+    len = (size_t)snprintf(text, sizeof(text), "%s\n", token);
+    if (len == 0 || len >= sizeof(text))
+        return false;
+    if (dvm_file_same(path, text, len))
+        return true;
+    return dvm_ack_write_cursor(tmp, path, text, len).code == NULL;
+}
+
 /* The cursor to store: a scalar (*token = NULL) or a next_since token.
  * False with a fail reply already written. */
 static bool dvm_ack_cursor(const struct zcl_command_request *req,
@@ -2619,9 +2675,10 @@ static void dvm_ack(const struct zcl_command_request *req,
     }
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_str(&reply->data, "agent", agent);
-    if (token)
+    if (token) {
         (void)json_push_kv_str(&reply->data, "cursor", token);
-    else
+        (void)json_push_kv_str(&reply->data, "cursor_token", token);
+    } else
         (void)json_push_kv_int(&reply->data, "cursor", cursor);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
