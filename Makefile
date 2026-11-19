@@ -1183,6 +1183,7 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/publish_build_alias_main.c \
 	tools/dev/doctor_build_main.c \
 	tools/dev/copy_vendor_include_main.c \
+	tools/dev/land_preflight_main.c \
 	tools/dev/stable_publish_containment_main.c \
 	tools/dev/arena_product_journey_main.c \
 	tools/dev/sovereign_source_network_main.c \
@@ -3495,6 +3496,22 @@ $(BIN_DIR)/copy-vendor-include: tools/dev/copy_vendor_include.c \
 	    -Itools/dev -o "$@.tmp" tools/dev/copy_vendor_include.c \
 	    tools/dev/copy_vendor_include_main.c && mv -f "$@.tmp" "$@"
 
+# Cold-proof preflight: grades tools/dev/proof_dependencies.def against this
+# tree (artifact present or make rule visible in the Makefile text; make is
+# never run). Same standalone shape as copy-vendor-include above.
+$(BIN_DIR)/land-preflight: tools/dev/land_preflight.c \
+		tools/dev/land_preflight_main.c tools/dev/land_preflight.h \
+		tools/dev/proof_dependencies.h tools/dev/proof_dependencies.def
+	@mkdir -p "$(dir $@)"
+	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
+	    $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \
+	    -Itools/dev -o "$@.tmp" tools/dev/land_preflight.c \
+	    tools/dev/land_preflight_main.c && mv -f "$@.tmp" "$@"
+
+check-land-preflight: $(BIN_DIR)/land-preflight
+	@$(BIN_DIR)/land-preflight --selftest
+
 # Auto-vendor: if any required archive is absent, build it.  The per-archive
 # rule lets `make zclassic23` pull in `make vendor` transparently on a fresh
 # clone without re-running the whole script when the libs are already there.
@@ -3507,7 +3524,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         install-replay-canary replay-canary-linger-status \
         coverage coverage-clean ci audit release \
         bench bench-crypto-verify bench-regress \
-	lint check-build-epoch-integrity check-checkout-lock check-malloc check-posix-ere-only check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-dev-proof-native-fast-path \
+	lint check-build-epoch-integrity check-checkout-lock check-land-preflight check-malloc check-posix-ere-only check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-dev-proof-native-fast-path \
         check-coins-lookup-nullcheck check-observability-pairing \
         check-silent-errors-services check-silent-errors-controllers \
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
@@ -17437,6 +17454,7 @@ LINT_GATES := \
     check-toolchain \
     check-build-epoch-integrity \
     check-checkout-lock \
+    check-land-preflight \
     check-no-stray-untracked-source \
     check-codeindex-coverage \
     check-mind-owns-rebuild \
