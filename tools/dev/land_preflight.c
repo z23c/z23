@@ -112,8 +112,35 @@ static void lp_fix_for(const char *dep, char *fix, size_t cap)
         snprintf(fix, cap, "make install-hooks");
 }
 
-/* Replace every "$(VAR)" whose name is build_dir/bin_dir/exeext with the
- * parsed value, twice, because BIN_DIR's own value references BUILD_DIR. */
+/* Resolve one Makefile variable name against the parsed layout. The two
+ * full-path tools are composed here: $(LINTC_TOOL) is $(BIN_DIR)/z23-lint
+ * (Makefile:7286) and $(CAPABILITY_INVENTORY_TOOL) is $(BIN_DIR)/
+ * gen_capability_inventory$(ZCL_HOST_EXEEXT) (Makefile:868) — their rule
+ * lines use the bare variable as the whole target. */
+static const char *lp_var_value(const char *name, const char *build_dir,
+                                const char *bin_dir, const char *exeext)
+{
+    static char lintc[LP_TOKEN_MAX], inv[LP_TOKEN_MAX];
+    if (strcmp(name, "BUILD_DIR") == 0)
+        return build_dir;
+    if (strcmp(name, "BIN_DIR") == 0)
+        return bin_dir;
+    if (strcmp(name, "ZCL_HOST_EXEEXT") == 0)
+        return exeext;
+    if (strcmp(name, "LINTC_TOOL") == 0) {
+        snprintf(lintc, sizeof lintc, "%s/z23-lint", bin_dir);
+        return lintc;
+    }
+    if (strcmp(name, "CAPABILITY_INVENTORY_TOOL") == 0) {
+        snprintf(inv, sizeof inv, "%s/gen_capability_inventory%s", bin_dir,
+                 exeext);
+        return inv;
+    }
+    return NULL;
+}
+
+/* Replace every "$(VAR)" whose name lp_var_value resolves with the parsed
+ * value, twice, because BIN_DIR's own value references BUILD_DIR. */
 static void lp_expand_vars(char *tok, size_t cap, const char *build_dir,
                            const char *bin_dir, const char *exeext)
 {
@@ -135,13 +162,7 @@ static void lp_expand_vars(char *tok, size_t cap, const char *build_dir,
             size_t n = (size_t)(close - body);
             memcpy(name, body, n);
             name[n] = '\0';
-            const char *val = NULL;
-            if (strcmp(name, "BUILD_DIR") == 0)
-                val = build_dir;
-            else if (strcmp(name, "BIN_DIR") == 0)
-                val = bin_dir;
-            else if (strcmp(name, "ZCL_HOST_EXEEXT") == 0)
-                val = exeext;
+            const char *val = lp_var_value(name, build_dir, bin_dir, exeext);
             if (!val) {
                 out[o++] = tok[i++];
                 continue;
@@ -284,7 +305,9 @@ static bool lp_rule_reachable(const char *makefile, const char *target,
     return found;
 }
 
-/* Every make goal named in the fix must have a text-visible rule. */
+/* Every make goal named in the fix must have a text-visible rule — all of
+ * them, not any: one unreachable goal in a multi-goal fix means the fix
+ * command itself would fail halfway. */
 static bool lp_fix_buildable(const char *makefile, const char *fix,
                              const char *exeext)
 {
@@ -292,7 +315,7 @@ static bool lp_fix_buildable(const char *makefile, const char *fix,
     snprintf(buf, sizeof buf, "%s", fix);
     char *save = buf;
     char *word = strtok(save, " ");
-    bool any_rule = false;
+    bool all_rules = true;
     bool any_goal = false;
     while (word != NULL) {
         if (strcmp(word, "make") == 0) {
@@ -300,11 +323,11 @@ static bool lp_fix_buildable(const char *makefile, const char *fix,
             continue;
         }
         any_goal = true;
-        if (lp_rule_reachable(makefile, word, exeext))
-            any_rule = true;
+        if (!lp_rule_reachable(makefile, word, exeext))
+            all_rules = false;
         word = strtok(NULL, " ");
     }
-    return any_goal && any_rule;
+    return any_goal && all_rules;
 }
 
 enum lp_state { LP_CODE, LP_BLOCK, LP_LINE };
@@ -395,7 +418,7 @@ static int lp_split_fields(const char *call,
         if (o + 1 < LP_TOKEN_MAX)
             fields[nf][o++] = *p;
     }
-    for (int i = 0; i <= nf; i++)
+    for (int i = 0; i < nf; i++)
         lp_trim(fields[i]);
     return nf;
 }
