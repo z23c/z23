@@ -751,6 +751,9 @@ static int t_anchor_repair_oom(void)
     coins_view_cache_init(&cache, &backing);
     coins_view_cache_set_best_block(&cache, &ah);
     block_index_heights_repaired_reset_for_test();
+    int primed = block_index_repair_heights(&ms);
+    bool gate_was_set = primed >= 0 && block_index_heights_repaired();
+    genesis.nHeight = 7;
     struct bii_post_activation_result result;
     zcl_alloc_fault_fail_nth("height_repair_mark", 1);
     int rc = bii_repair_post_activation_anchor(&ms, &cache,
@@ -759,7 +762,7 @@ static int t_anchor_repair_oom(void)
     BII_RUN("bii: post-activation OOM refuses restoration and the repaired gate",
             rc == -1 && result.heights_repropagated == -1 &&
             result.tip_restore_refused && !result.tip_restored &&
-            !block_index_heights_repaired());
+            gate_was_set && !block_index_heights_repaired());
     main_state_free(&ms);
     return failures;
 }

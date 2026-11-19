@@ -445,6 +445,7 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
 {
     if (out_max_height) *out_max_height = -1;
     if (!ms) return 0;
+    atomic_store(&g_heights_repaired, false);
 
     struct timespec t0;
     platform_time_monotonic_timespec(&t0);
