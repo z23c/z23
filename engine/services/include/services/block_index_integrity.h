@@ -244,7 +244,8 @@ int block_index_repair_heights(struct main_state *ms);
  * is always checked. When a wrong height IS found above the cursor the full
  * genesis-rooted propagation runs (idempotent — it never disturbs an
  * already-correct below-cursor prefix). out_max_height (optional) receives the
- * highest nHeight present so the caller can advance the cursor.
+ * highest corrected nHeight present so the caller can advance the cursor.
+ * Returns -1 when snapshot or scratch allocation fails; no repaired flag is set.
  * block_index_repair_heights(ms) == block_index_repair_heights_range(ms,-1,NULL). */
 int block_index_repair_heights_range(struct main_state *ms, int min_height,
                                      int *out_max_height);
@@ -252,6 +253,10 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
 /* Returns true if block_index_repair_heights() has been called
  * (even if it repaired 0 entries — the scan itself is the signal). */
 bool block_index_heights_repaired(void);
+
+#ifdef ZCL_TESTING
+void block_index_heights_repaired_reset_for_test(void);
+#endif
 
 /* ── pprev chain repair ────────────────────────────────────────
  * Reads hashPrevBlock from block data on disk for every entry with
@@ -300,7 +305,7 @@ struct bii_post_activation_result {
     int  heights_fixed_down;     /* walking down from coins_bi */
     int  heights_repropagated;   /* forward multi-pass */
     bool tip_restored;           /* active tip moved to coins_bi */
-    bool tip_restore_refused;    /* coins_bi not disk-backed */
+    bool tip_restore_refused;    /* repair failure or coins_bi not disk-backed */
     int  tip_restore_old_h;
     int  tip_restore_new_h;
 };

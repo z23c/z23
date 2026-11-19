@@ -119,7 +119,7 @@ int boot_cursor_repair_heights(struct main_state *ms, struct node_db *ndb)
                "(upto=%lld) — skipping\n",
                ms->map_block_index.size, (long long)heights_done);
 
-    if (ndb && ndb->open && hmax > (int)heights_done) {
+    if (repaired >= 0 && ndb && ndb->open && hmax > (int)heights_done) {
         node_db_state_set_int(ndb, BOOT_CUR_HEIGHTS, hmax);
         node_db_state_set_int(ndb, BOOT_CUR_HEIGHTS_CNT,
                               (int64_t)ms->map_block_index.size);

@@ -57,7 +57,7 @@ void boot_cursor_install_reorg_clamp(struct node_db *ndb);
  * BOOT_CUR_HEIGHTS_CNT, re-scans only above the cursor when the map size is
  * unchanged, re-stamps the high-water. Returns the number of heights repaired
  * (accumulated into index_repaired by the caller, exactly like the un-cursored
- * block_index_repair_heights it replaces). */
+ * block_index_repair_heights it replaces), or -1 on allocation refusal without advancing the high-water. */
 int boot_cursor_repair_heights(struct main_state *ms, struct node_db *ndb);
 
 /* #2 — cursor-gated nChainTx propagation. Reads BOOT_CUR_NCHAINTX, restricts

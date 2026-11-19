@@ -165,8 +165,11 @@ void boot_repair_header_post_activation_anchor(void *ctx)
 
     if (!svc)
         return;
-    (void)bii_repair_post_activation_anchor(svc->state, svc->coins_tip,
-                                            svc->datadir, &result);
+    int rc = bii_repair_post_activation_anchor(svc->state, svc->coins_tip,
+                                               svc->datadir, &result);
+    if (rc < 0)
+        LOG_ERROR("boot", "post-activation anchor repair refused; "
+                  "header index remains unverified");
 }
 
 int boot_scan_header_block_files(void *ctx)

@@ -469,6 +469,12 @@ bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *
      * Without this, header processing fixes heights 160-at-a-time which
      * is far too slow for 3M+ entries with wrong heights. */
     index_repaired += boot_repair_height_cursor(ms, ndb);
+    if (index_repaired < 0) {
+        LOG_ERROR("boot", "block index height repair allocation failed; "
+                  "refusing to continue with unverified chainwork");
+        (void)boot_repair_cursor_tx_end(ndb, repair_tx, false);
+        return false;
+    }
     /* pprev chain repair: fix corrupted pprev pointers from LDB import (reads
      * hashPrevBlock from disk; must run after height repair). Cursor-gated on
      * `pprev_repaired_height`: only rescan blocks above the verified cursor and
@@ -491,7 +497,13 @@ bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *
         }
         if (pprev_fixed > 0) {
             index_repaired += pprev_fixed;
-            index_repaired += block_index_repair_heights(ms);
+            int height_fixed = block_index_repair_heights(ms);
+            if (height_fixed < 0) {
+                LOG_ERROR("boot", "block index post-pprev height repair failed");
+                (void)boot_repair_cursor_tx_end(ndb, repair_tx, false);
+                return false;
+            }
+            index_repaired += height_fixed;
         }
         if (ndb->open && pprev_max > (int)pprev_done)
             node_db_state_set_int(ndb, "pprev_repaired_height",

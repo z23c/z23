@@ -13,8 +13,8 @@
 // a block-index repair toolkit, not a pass/fail service. The repair entry
 // points return int *counts* of entries fixed (block_index_repair_heights /
 // _pprev — callers accumulate them: `index_repaired += ...`), not error
-// codes, except that _pprev returns -1 for allocation refusal before it
-// mutates links; bii_repair_post_activation_anchor returns 0/-1 sentinels (each
+// codes, except that _heights and _pprev return -1 for allocation refusal;
+// bii_repair_post_activation_anchor returns 0/-1 sentinels (each
 // `raw-return-ok:sentinel`) while its real verdict travels in struct
 // bii_post_activation_result (tip_restored / tip_restore_refused / heights
 // fixed). The remaining surface is enum->name getters (const char*), void
@@ -141,6 +141,13 @@ bool block_index_heights_repaired(void)
 {
     return atomic_load(&g_heights_repaired);
 }
+
+#ifdef ZCL_TESTING
+void block_index_heights_repaired_reset_for_test(void)
+{
+    atomic_store(&g_heights_repaired, false);
+}
+#endif
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe: reuses the
  * lock-guarded bii_get_recovery_status() snapshot. */
@@ -395,10 +402,10 @@ static int bii_height_propagate(struct block_index *const *arr, size_t n,
     if (!stack) {
         LOG_WARN("height", "[height-repair] stack alloc failed for %zu "
                  "entries — heights left as stored this boot", n);
-        return 0;
+        return -1; // raw-return-ok:allocation-refusal-before-propagation
     }
     struct bii_height_walk w = { byptr, n, mark, stack };
-    int repaired = 0;
+    int repaired = bii_height_mark_genesis(arr, n, byptr, mark);
     for (size_t i = 0; i < n; i++) {
         size_t idx = bii_ptr_index(byptr, n, arr[i]);
         if (idx >= n || mark[idx] != BII_MARK_UNSEEN)
@@ -446,7 +453,7 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
     size_t n = 0;
     if (!block_map_snapshot_indices(&ms->map_block_index, &arr, &n)) {
         LOG_WARN("height", "[height-repair] block-map snapshot failed");
-        return 0;
+        return -1; // raw-return-ok:allocation-or-snapshot-refusal
     }
     if (n == 0) {
         free(arr);
@@ -505,14 +512,19 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
         free(byptr);
         free(mark);
         free(arr);
-        atomic_store(&g_heights_repaired, true);
-        return 0;
+        return -1; // raw-return-ok:allocation-refusal-before-height-mutation
     }
     memcpy(byptr, arr, n * sizeof(*byptr));
     qsort(byptr, n, sizeof(*byptr), bii_cmp_ptr);
 
-    repaired += bii_height_mark_genesis(arr, n, byptr, mark);
-    repaired += bii_height_propagate(arr, n, byptr, mark);
+    int propagated = bii_height_propagate(arr, n, byptr, mark);
+    if (propagated < 0) {
+        free(byptr);
+        free(mark);
+        free(arr);
+        return -1; // raw-return-ok:allocation-refusal-before-work-recompute
+    }
+    repaired += propagated;
 
     /* Pass 3: Recompute nChainWork now that heights are correct — same
      * genesis-rooted gate: chain work derived from a detached root's
@@ -1008,6 +1020,12 @@ int bii_repair_post_activation_anchor(
         if (total > 0)
             printf("[bii-anchor] re-propagated %d heights forward\n",
                    total);
+        if (total < 0) {
+            result->tip_restore_refused = true;
+            LOG_ERROR("bii", "[bii-anchor] height re-propagation failed; "
+                      "refusing tip restoration");
+            return -1; // raw-return-ok:allocation-refusal-before-tip-restore
+        }
     }
 
     /* Step 4: restore active tip if it's below the anchor */

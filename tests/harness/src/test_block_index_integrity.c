@@ -20,6 +20,7 @@
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "models/database.h"
+#include "coins/coins_view.h"
 #include "event/event.h"
 #include "sha3/sha3.h"
 #include "util/safe_alloc.h"
@@ -726,6 +727,43 @@ static int t_anchor_repair_null_inputs(void)
     return failures;
 }
 
+static int t_anchor_repair_oom(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 gh = chain_params_get()->consensus.hashGenesisBlock;
+    struct uint256 ah = {0};
+    ah.data[0] = 0xA1;
+    struct block_index genesis = {0};
+    genesis.phashBlock = &gh;
+    genesis.nHeight = 7;
+    genesis.nBits = 0x2007ffff;
+    struct block_index anchor = {0};
+    anchor.phashBlock = &ah;
+    anchor.nHeight = 100001;
+    anchor.nBits = 0x2007ffff;
+    test_block_map_insert(&ms.map_block_index, &gh, &genesis);
+    test_block_map_insert(&ms.map_block_index, &ah, &anchor);
+    struct coins_view backing;
+    struct coins_view_cache cache;
+    memset(&backing, 0, sizeof(backing));
+    coins_view_cache_init(&cache, &backing);
+    coins_view_cache_set_best_block(&cache, &ah);
+    block_index_heights_repaired_reset_for_test();
+    struct bii_post_activation_result result;
+    zcl_alloc_fault_fail_nth("height_repair_mark", 1);
+    int rc = bii_repair_post_activation_anchor(&ms, &cache,
+                                               "/nonexistent-anchor", &result);
+    zcl_alloc_fault_clear();
+    BII_RUN("bii: post-activation OOM refuses restoration and the repaired gate",
+            rc == -1 && result.heights_repropagated == -1 &&
+            result.tip_restore_refused && !result.tip_restored &&
+            !block_index_heights_repaired());
+    main_state_free(&ms);
+    return failures;
+}
+
 /* ── Aggregator ─────────────────────────────────────────────── */
 
 /* ── 19. pprev repair skips work the fast-boot cursor already covers ────
@@ -1317,6 +1355,17 @@ static bool bii_boot_oom_case(struct bii_boot_fx *fx)
            bii_boot_cursors_are(fx, -2, -2, -2);
 }
 
+static bool bii_boot_height_oom_case(struct bii_boot_fx *fx)
+{
+    int out = -999;
+    zcl_alloc_fault_fail_nth("height_repair_mark", 1);
+    bool refused = !boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
+                                                   &fx->ndb, &out);
+    zcl_alloc_fault_clear();
+    return refused && out == -999 && !fx->ndb.tx_open &&
+           bii_boot_cursors_are(fx, -2, -2, -2);
+}
+
 static bool bii_boot_retry_case(struct bii_boot_fx *fx)
 {
     for (int i = 0; i < BII_BOOT_N; i++)
@@ -1356,6 +1405,8 @@ static int t_mg_boot_pprev_oom_rolls_back_cursors(void)
         bii_boot_free(&fx);
         return failures;
     }
+    BII_RUN("bii: boot height OOM rolls back repair cursors",
+            bii_boot_height_oom_case(&fx));
     BII_RUN("bii: boot pprev OOM rolls back height and pprev cursors",
             bii_boot_oom_case(&fx));
     BII_RUN("bii: boot retry after OOM repairs stale flat work and stamps cursors",
@@ -1864,6 +1915,101 @@ static int t_mg_hr_long_offset_chain(void)
     return failures;
 }
 
+static bool hr_oom_case(const char *label)
+{
+    enum { N = 6 };
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+    blocks[N - 1].nHeight = 999;
+    zcl_alloc_fault_fail_nth(label, 1);
+    int refused = block_index_repair_heights_range(&ms, -1, NULL);
+    zcl_alloc_fault_clear();
+    bool preserved = blocks[N - 1].nHeight == 999;
+    int repaired = block_index_repair_heights_range(&ms, -1, NULL);
+    bool ok = refused == -1 && preserved && repaired == 1 &&
+              heights_are_index(blocks, N);
+    main_state_free(&ms);
+    return ok;
+}
+
+static bool hr_genesis_oom_case(void)
+{
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hash = chain_params_get()->consensus.hashGenesisBlock;
+    struct block_index genesis = {0};
+    genesis.phashBlock = &hash;
+    genesis.nHeight = 7;
+    genesis.nBits = 0x2007ffff;
+    test_block_map_insert(&ms.map_block_index, &hash, &genesis);
+    block_index_heights_repaired_reset_for_test();
+    zcl_alloc_fault_fail_nth("height_repair_stack", 1);
+    int refused = block_index_repair_heights(&ms);
+    zcl_alloc_fault_clear();
+    bool preserved = genesis.nHeight == 7 && work_is(&genesis, 0) &&
+                     !block_index_heights_repaired();
+    int repaired = block_index_repair_heights(&ms);
+    bool ok = refused == -1 && preserved && repaired == 1 &&
+              genesis.nHeight == 0 && work_is(&genesis, 1);
+    main_state_free(&ms);
+    return ok;
+}
+
+static int t_mg_hr_allocation_refusal(void)
+{
+    int failures = 0;
+    static const char *const labels[] = {
+        "block_map_snapshot_indices", "height_repair_byptr",
+        "height_repair_mark", "height_repair_stack"
+    };
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++)
+        BII_RUN("bii: height-repair OOM refuses and retries", hr_oom_case(labels[i]));
+    BII_RUN("bii: stack OOM leaves wrong genesis height and work untouched",
+            hr_genesis_oom_case());
+    return failures;
+}
+
+static bool hr_cursor_state(struct node_db *ndb, int64_t want_height,
+                            int64_t want_count)
+{
+    int64_t height = 0, count = 0;
+    return node_db_state_get_int(ndb, BOOT_CUR_HEIGHTS, &height) &&
+           node_db_state_get_int(ndb, BOOT_CUR_HEIGHTS_CNT, &count) &&
+           height == want_height && count == want_count;
+}
+
+static int t_mg_hr_cursor_allocation_refusal(void)
+{
+    int failures = 0;
+    enum { N = 6 };
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index blocks[N];
+    struct uint256 hashes[N];
+    bcs_build_chain(&ms, blocks, hashes, N);
+    blocks[N - 1].nHeight = 999;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ok = node_db_open(&ndb, ":memory:") &&
+              node_db_state_set_int(&ndb, BOOT_CUR_HEIGHTS, -2) &&
+              node_db_state_set_int(&ndb, BOOT_CUR_HEIGHTS_CNT, -2);
+    zcl_alloc_fault_fail_nth("height_repair_mark", 1);
+    int refused = ok ? boot_cursor_repair_heights(&ms, &ndb) : -2;
+    zcl_alloc_fault_clear();
+    bool preserved = hr_cursor_state(&ndb, -2, -2);
+    int repaired = ok ? boot_cursor_repair_heights(&ms, &ndb) : -2;
+    bool committed = hr_cursor_state(&ndb, N - 1, N);
+    BII_RUN("bii: cursor height-repair OOM preserves and retry stamps high-water",
+            ok && refused == -1 && preserved && repaired == 1 && committed && heights_are_index(blocks, N));
+    if (ndb.open)
+        node_db_close(&ndb);
+    main_state_free(&ms);
+    return failures;
+}
+
 static int bii_mutant_gap_tests(void)
 {
     int failures = 0;
@@ -1885,6 +2031,8 @@ static int bii_mutant_gap_tests(void)
     failures += t_mg_hr_detached_work();
     failures += t_mg_hr_lone_entries();
     failures += t_mg_hr_long_offset_chain();
+    failures += t_mg_hr_allocation_refusal();
+    failures += t_mg_hr_cursor_allocation_refusal();
     return failures;
 }
 
@@ -2265,6 +2413,7 @@ int test_block_index_integrity(void)
     failures += t_height_repair_single();
     failures += t_height_repair_detached_subtree();
     failures += t_anchor_repair_null_inputs();
+    failures += t_anchor_repair_oom();
     failures += t_pprev_repair_cursor_skip();
     failures += t_bcs_fingerprint();
     failures += t_bcs_repair_heights_range_cursor();
