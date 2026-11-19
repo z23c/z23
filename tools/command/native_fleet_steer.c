@@ -1505,6 +1505,15 @@ static void fmc_row_tally(struct json_value *agents, struct json_value *work,
 
 static bool fmc_reply_compatible(const struct fmc_row *directive, const struct fmc_row *reply);
 
+static bool fmc_reply_addressed(const struct fmc_row *d, const struct fmc_row *r)
+{
+    return !strcmp(r->to, d->from) || !strcmp(r->to, "*");
+}
+
+struct fmc_reply_conflicts { bool any, target, attempt_any, attempt_target; };
+static struct fmc_reply_conflicts fmc_reply_conflicts(const struct json_value *, const struct fmc_row *);
+static bool fmc_reply_conflicting(const struct fmc_reply_conflicts *, const struct fmc_row *, const struct fmc_row *, bool);
+
 /* True when the pulled rows carry a reply from this row's recipient under
  * the same ref: the row a transport brings back into inbox.<peer>.jsonl,
  * and the only proof available here that the directive left this host. A
@@ -1519,6 +1528,9 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
     size_t n, i;
     if (!rows || rows->type != JSON_ARR || !v || !v->ref[0] || !v->to[0])
         return false;
+    struct fmc_reply_conflicts conflicts = {0};
+    if (!strcmp(v->kind, "directive"))
+        conflicts = fmc_reply_conflicts(rows, v);
     n = json_size(rows);
     for (i = 0; i < n; i++) {
         struct fmc_row r;
@@ -1527,7 +1539,9 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
         if (strcmp(r.from, v->from) == 0)
             continue;
         if (strcmp(r.from, v->to) == 0 && strcmp(r.ref, v->ref) == 0 &&
-            fmc_reply_compatible(v, &r))
+            fmc_reply_addressed(v, &r) &&
+            fmc_reply_compatible(v, &r) &&
+            !fmc_reply_conflicting(&conflicts, v, &r, true))
             return true;
     }
     return false;
@@ -2903,7 +2917,8 @@ static void fmc_stale_summary(struct json_value *blockers, int stale)
  *             (answer_match "reply_to_origin" — every box posts as its Unix
  *             user, so the reply's author need not carry the role name);
  *             an attempt= stated on both sides must agree;
- *   state     answered, else acked, else queued.
+ *   state     answered, ambiguous, else acked, else queued.
+ *             Unbound reply-to-origin matches are marked as heuristics.
  * sent_ts/sent_age_s are the directive's own time; answer_ts/answer_age_s
  * the reply's. The lifecycle `state` beside it keeps its closed
  * vocabulary; a reply never becomes an ack there either unless it came
@@ -2913,6 +2928,7 @@ struct fmc_answer {
     const struct fmc_row *row;
     struct fmc_row keep;
     const char *match;
+    bool ambiguous;
 };
 
 static bool fmc_attempt_unique(const char *body)
@@ -2987,8 +3003,53 @@ static const char *fmc_answer_match(const struct fmc_row *d,
     if (!fmc_reply_compatible(d, r))
         return NULL;
     if (strcmp(r->from, d->to) == 0)
-        return "addressee";
+        return fmc_reply_addressed(d, r) ? "addressee" : NULL;
     return strcmp(r->to, d->from) == 0 ? "reply_to_origin" : NULL;
+}
+
+/* Distinct source rows remain distinct even when their directive text agrees. */
+static bool fmc_same_source_row(const struct fmc_row *a, const struct fmc_row *b)
+{
+    return a->stream[0] && a->row_sha3[0] && a->row_offset >= 0 &&
+        a->row_end > a->row_offset && a->seq == b->seq &&
+        a->row_offset == b->row_offset && a->row_end == b->row_end &&
+        !strcmp(a->stream, b->stream) && !strcmp(a->row_sha3, b->row_sha3);
+}
+
+/* One linear pass per directive; same-attempt candidates are tracked apart
+ * so a reply with an explicit attempt may disambiguate them. */
+static struct fmc_reply_conflicts fmc_reply_conflicts(const struct json_value *rows,
+                                                      const struct fmc_row *d)
+{
+    struct fmc_reply_conflicts c = {0};
+    size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u;
+    for (size_t i = 0; i < n; i++) {
+        struct fmc_row other;
+        if (!fmc_row_parse(json_at(rows, i), &other) ||
+            strcmp(other.kind, "directive") != 0 ||
+            strcmp(other.from, d->from) != 0 || strcmp(other.ref, d->ref) != 0 ||
+            fmc_same_source_row(d, &other)) continue;
+        bool same = strcmp(other.to, d->to) == 0;
+        c.any = true;
+        if (same) c.target = true;
+        if (fmc_attempt_agrees(d->body, other.body)) {
+            c.attempt_any = true;
+            if (same) c.attempt_target = true;
+        }
+    }
+    return c;
+}
+
+static bool fmc_reply_conflicting(const struct fmc_reply_conflicts *c,
+                                  const struct fmc_row *d,
+                                  const struct fmc_row *r, bool direct)
+{
+    char a[24], b[24];
+    bool bound = fmc_body_kv(d->body, "attempt", a, sizeof(a)) &&
+                 fmc_body_kv(r->body, "attempt", b, sizeof(b));
+    bool target = bound ? c->attempt_target : c->target;
+    bool any = bound ? c->attempt_any : c->any;
+    return target || (!direct && any);
 }
 
 /* The newest answer to d among the pulled rows. */
@@ -2998,12 +3059,18 @@ static bool fmc_answer_find(const struct json_value *rows,
     size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u, i;
     a->row = NULL;
     a->match = NULL;
+    a->ambiguous = false;
+    struct fmc_reply_conflicts conflicts = fmc_reply_conflicts(rows, d);
     for (i = 0; d->ref[0] && i < n; i++) {
         struct fmc_row r;
         const char *m;
         if (!fmc_row_parse(json_at(rows, i), &r))
             continue;
         m = fmc_answer_match(d, &r);
+        if (m && fmc_reply_conflicting(&conflicts, d, &r, !strcmp(m, "addressee"))) {
+            a->ambiguous = true;
+            continue;
+        }
         if (!m || (a->row && strcmp(r.ts, a->keep.ts) <= 0))
             continue;
         a->keep = r;
@@ -3025,6 +3092,7 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
     json_init(&o);
     json_set_object(&o);
     bool ok = json_push_kv_str(&o, "state", answered ? "answered"
+                                         : a.ambiguous ? "ambiguous"
                                          : acked ? "acked" : "queued");
     ok &= json_push_kv_bool(&o, "acked", acked);
     ok &= fmc_put_known(&o, "sent_ts", fmc_ts_unix(v->ts) >= 0 ? v->ts : "");
@@ -3035,6 +3103,9 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
                       answered ? fmc_age_s(now, a.row->ts) : -1);
     ok &= fmc_put_known(&o, "answered_by", answered ? a.row->from : "");
     ok &= fmc_put_known(&o, "answer_match", answered ? a.match : "");
+    if (answered)
+        ok &= json_push_kv_bool(&o, "answer_heuristic",
+                                !strcmp(a.match, "reply_to_origin"));
     if (ok) ok = json_push_kv(item, "reply", &o);
     json_free(&o);
     return ok;
@@ -6524,6 +6595,31 @@ static void fmc_mbox_screen_line(struct fmc_mbox *m, const struct fmc_row *v)
         m->screen_dropped++;
 }
 
+static bool fmc_mbox_locator_valid(const struct fmc_row *v)
+{
+    unsigned char hash[32];
+    size_t n = strlen(v->stream);
+    return n >= 7 && fmc_is_token(v->stream, 128, false) &&
+        !strcmp(v->stream + n - 6, ".jsonl") && v->seq > 0 && v->row_offset >= 0 &&
+        v->row_end > v->row_offset && strlen(v->row_sha3) == 64 &&
+        zcl_hex_decode_lower(v->row_sha3, hash, sizeof(hash));
+}
+
+static bool fmc_mbox_fields(struct json_value *o, const struct fmc_row *v,
+                            const char *body, size_t take, size_t full)
+{
+    return json_push_kv_int(o, "seq", v->seq) &&
+        json_push_kv_str(o, "ts", v->ts) &&
+        json_push_kv_str(o, "from", v->from) &&
+        json_push_kv_str(o, "to", v->to) &&
+        json_push_kv_str(o, "kind", v->kind) &&
+        json_push_kv_str(o, "ref", v->ref) &&
+        json_push_kv_str(o, "body", body) &&
+        json_push_kv_bool(o, "body_truncated", take < full) &&
+        json_push_kv_int(o, "body_bytes", (long long)full) &&
+        fmc_row_locator(o, v);
+}
+
 /* Append one row; false when the row bytes would pass the page bound (the
  * caller stops BEFORE this row so the cursor stays exact). */
 static bool fmc_mbox_add(struct fmc_mbox *m, const struct fmc_row *v)
@@ -6537,15 +6633,7 @@ static bool fmc_mbox_add(struct fmc_mbox *m, const struct fmc_row *v)
     body[take] = '\0';
     json_init(&o);
     json_set_object(&o);
-    ok = json_push_kv_int(&o, "seq", v->seq) &&
-         json_push_kv_str(&o, "ts", v->ts) &&
-         json_push_kv_str(&o, "from", v->from) &&
-         json_push_kv_str(&o, "to", v->to) &&
-         json_push_kv_str(&o, "kind", v->kind) &&
-         json_push_kv_str(&o, "ref", v->ref) &&
-         json_push_kv_str(&o, "body", body) &&
-         json_push_kv_bool(&o, "body_truncated", take < full) &&
-         json_push_kv_int(&o, "body_bytes", (long long)full);
+    ok = fmc_mbox_fields(&o, v, body, take, full);
     size = ok ? json_write(&o, NULL, 0) + 1 : 0;
     if (!ok || (m->emitted > 0 && m->bytes + size > FMC_MBOX_ROW_BYTES) ||
         !json_push_back(&m->rows, &o)) {
@@ -6719,6 +6807,10 @@ static const char *fmc_mbox_scan(struct fmc_mbox *m,
         if (!fmc_row_parse(json_at(arr, i), &v) ||
             (plen && strncmp(v.ref, r->prefix, plen) != 0))
             continue;
+        if (!fmc_mbox_locator_valid(&v)) {
+            fmc_sub_end(&sub);
+            return "mail_row_identity_unavailable";
+        }
         if (matched >= r->skip &&
             (m->emitted >= m->limit || !fmc_mbox_add(m, &v)))
             r->full = true;

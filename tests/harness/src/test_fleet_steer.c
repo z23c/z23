@@ -4782,6 +4782,145 @@ static bool fmx_correlation_observe(const char *state, const char *reply_state,
     return ok;
 }
 
+static const struct json_value *fmx_change_to(const struct fmx_call *c,
+                                              const char *to, const char *ref)
+{
+    const struct json_value *rows = fmx_arr(c, "changes");
+    size_t n = rows ? json_size(rows) : 0;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *r = json_at(rows, i);
+        if (strcmp(fmx_wstr(r, "to"), to) == 0 &&
+            strcmp(fmx_wstr(r, "ref"), ref) == 0 &&
+            strcmp(fmx_wstr(r, "kind"), "directive") == 0)
+            return r;
+    }
+    return NULL;
+}
+
+static const struct json_value *fmx_change_seq(const struct fmx_call *c, long long seq)
+{
+    const struct json_value *rows = fmx_arr(c, "changes");
+    size_t n = rows ? json_size(rows) : 0;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *r = json_at(rows, i);
+        if (fmx_wint(r, "seq") == seq && !strcmp(fmx_wstr(r, "kind"), "directive"))
+            return r;
+    }
+    return NULL;
+}
+
+static void fmx_correlation_same_target(const char *tag, const char *second_body)
+{
+    fmx_correlation_seed(tag, "2026-01-03T00:00:00Z", "result", "attempt=2\\n");
+    fmx_seed_inbox("second", "2026-01-02T00:00:00Z", 9, FMX_SENDER,
+                   "receiver", "directive", second_body, "reused-ref");
+    fmx_state_file("steer", "sent.jsonl",
+                   "{\"key\":\"second\",\"seq\":9,\"to\":\"receiver\","
+                   "\"ref\":\"reused-ref\"}\n", true);
+}
+
+static int fmx_t_ambiguous_correlation(void)
+{
+    int failures = 0;
+    const clock_iface_t *saved = clock_default();
+    clock_iface_t fixed = {fmx_activity_monotonic_ns, fmx_activity_wall_ms,
+                           (void *)saved};
+    clock_set_default(&fixed);
+    TEST("steer: distinct identical directives cannot share one answer") {
+        struct fmx_call b;
+        fmx_correlation_same_target("same-target", "attempt=2\\n");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        const struct json_value *a = fmx_change_seq(&b, 7);
+        const struct json_value *c = fmx_change_seq(&b, 9);
+        ASSERT(a && c);
+        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(a, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
+        fmx_end(&b);
+        ASSERT(fmx_ack("receiver", 9));
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        a = fmx_change_seq(&b, 7); c = fmx_change_seq(&b, 9);
+        ASSERT(a && c);
+        ASSERT_STR_EQ(fmx_wstr(a, "state"), "acknowledged");
+        ASSERT_STR_EQ(fmx_wstr(c, "state"), "acknowledged");
+        fmx_end(&b); fmx_restore(); PASS();
+    }
+    TEST("steer: explicit different attempts uniquely identify the answer") {
+        struct fmx_call b;
+        fmx_correlation_same_target("different-attempts", "attempt=3\\n");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        const struct json_value *a = fmx_change_seq(&b, 7);
+        const struct json_value *c = fmx_change_seq(&b, 9);
+        ASSERT(a && c);
+        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "answered");
+        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(a, "state"), "acknowledged");
+        ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
+        fmx_end(&b); fmx_restore(); PASS();
+    }
+
+    TEST("steer: an answer without attempt cannot choose distinct attempts") {
+        struct fmx_call b;
+        fmx_correlation_seed("unknown-attempt", "2026-01-03T00:00:00Z", "result", "done");
+        fmx_seed_inbox("second", "2026-01-02T00:00:00Z", 9, FMX_SENDER,
+                       "receiver", "directive", "attempt=3\\n", "reused-ref");
+        fmx_state_file("steer", "sent.jsonl",
+                       "{\"key\":\"second\",\"seq\":9,\"to\":\"receiver\","
+                       "\"ref\":\"reused-ref\"}\n", true);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        const struct json_value *a = fmx_change_seq(&b, 7);
+        const struct json_value *c = fmx_change_seq(&b, 9);
+        ASSERT(a && c);
+        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(a, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
+        fmx_end(&b); fmx_restore(); PASS();
+    }
+
+    TEST("steer: recipient result addressed elsewhere does not answer") {
+        fmx_isolate("foreign-result");
+        fmx_prime_mail();
+        fmx_seed_inbox("self", "2026-01-02T00:00:00Z", 7, FMX_SENDER,
+                       "receiver", "directive", "attempt=2\\n", "reused-ref");
+        fmx_state_file("steer", "sent.jsonl",
+                       "{\"key\":\"foreign\",\"seq\":7,\"to\":\"receiver\","
+                       "\"ref\":\"reused-ref\"}\n", true);
+        fmx_seed_inbox("receiver", "2026-01-03T00:00:00Z", 8, "receiver", "elsewhere",
+                       "result", "attempt=2\\n", "reused-ref");
+        ASSERT(fmx_correlation_observe("queued", "queued", true));
+        fmx_restore(); PASS();
+    }
+
+    TEST("steer: same-ref result does not answer another recipient") {
+        struct fmx_call b;
+        fmx_correlation_seed("two-recipients", "2026-01-03T00:00:00Z",
+                             "result", "attempt=2\\n");
+        fmx_seed_inbox("second", "2026-01-02T00:00:00Z", 9, FMX_SENDER,
+                       "other-recipient", "directive", "attempt=2\\n", "reused-ref");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        const struct json_value *first = fmx_change_to(&b, "receiver", "reused-ref");
+        const struct json_value *second = fmx_change_to(&b, "other-recipient", "reused-ref");
+        ASSERT(first && second);
+        ASSERT_STR_EQ(fmx_wstr(json_get(first, "reply"), "state"), "answered");
+        ASSERT_STR_EQ(fmx_wstr(json_get(second, "reply"), "state"), "ambiguous");
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    clock_set_default(saved);
+    return failures;
+}
+
 static int fmx_t_recipient_correlation(void)
 {
     int failures = 0;
@@ -4912,6 +5051,7 @@ static int fmx_t_reply_correlation(void)
         ASSERT(fmx_wint(r, "answer_seq") == 727);
         ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "box-user");
         ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "reply_to_origin");
+        ASSERT(json_get_bool(json_get(r, "answer_heuristic")));
         ASSERT(fmx_wint(r, "answer_age_s") >= 0);
         ASSERT(fmx_wint(r, "sent_age_s") >= 0);
         /* Never an ack synthesized from the reply. */
@@ -5600,6 +5740,27 @@ static void fmx_mbox_seed(void)
     fmx_seed_inbox("s2", "2026-10-01T00:04:00Z", 300, "dave", "alice", "note", big, "big-1");
 }
 
+static bool fmx_mbox_exact_body(const char *grant, const struct json_value *row)
+{
+    struct fmx_call e;
+    const char *keys[] = {"stream", "row_offset", "seq", "row_sha3"};
+    fmx_evidence(&e, grant, "mail", "big-1");
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const struct json_value *v = json_get(row, keys[i]);
+        ok = ok && v && json_push_kv(&e.input, keys[i], v);
+    }
+    ok = ok && fmx_run(&e, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&e);
+    const struct json_value *obj = ok ? fmx_get(&e, "object") : NULL;
+    const char *body = obj ? fmx_wstr(obj, "body") : "";
+    ok = ok && obj && strcmp(fmx_wstr(obj, "to"), "alice") == 0 &&
+        strcmp(fmx_wstr(obj, "row_sha3"), fmx_wstr(row, "row_sha3")) == 0 &&
+        strlen(body) == 2000;
+    for (size_t i = 0; ok && i < 2000; i++) ok = body[i] == 'z';
+    fmx_end(&e);
+    return ok;
+}
+
 static int fmx_t_mailbox(void)
 {
     int failures = 0;
@@ -5613,10 +5774,11 @@ static int fmx_t_mailbox(void)
         struct fmx_call c;
         fmx_isolate("mailbox");
         fmx_mbox_seed();
+        ASSERT(fmx_mint_as("brief,evidence", "alice", grant, sizeof(grant)));
         for (;;) {
             const struct json_value *rows;
             bool more;
-            fmx_mbox_call(&c, NULL, "alice", cursor, 20);
+            fmx_mbox_call(&c, grant, "alice", cursor, 20);
             ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_mailbox));
             ASSERT(fmx_ok(&c));
             rows = fmx_arr(&c, "rows");
@@ -5625,6 +5787,9 @@ static int fmx_t_mailbox(void)
             for (size_t i = 0; i < json_size(rows); i++) {
                 const struct json_value *r = json_at(rows, i);
                 long long seq = json_get_int(json_get(r, "seq"));
+                ASSERT(json_get(r, "stream") != NULL);
+                ASSERT(json_get(r, "row_offset") != NULL);
+                ASSERT(json_get(r, "row_sha3") != NULL);
                 ASSERT_STR_EQ(json_get_str(json_get(r, "to")), "alice");
                 ASSERT(seq > 0 && seq < 400);
                 ASSERT(!seen[seq]); /* no repeat */
@@ -5634,6 +5799,7 @@ static int fmx_t_mailbox(void)
                     truncated_rows++;
                     ASSERT_EQ((int)strlen(json_get_str(json_get(r, "body"))), 480);
                     ASSERT_EQ((int)json_get_int(json_get(r, "body_bytes")), 2000);
+                    ASSERT(fmx_mbox_exact_body(grant, r));
                 } else {
                     ASSERT(strlen(json_get_str(json_get(r, "body"))) < 480);
                 }
@@ -6855,6 +7021,7 @@ int test_fleet_steer(void)
     failures += fmx_t_sessions();
     failures += fmx_t_session_edges();
     failures += fmx_t_reply_correlation();
+    failures += fmx_t_ambiguous_correlation();
     failures += fmx_t_recipient_correlation();
     failures += fmx_t_remote_round_trip();
     failures += fmx_t_pool_unmeasured();
