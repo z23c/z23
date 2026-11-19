@@ -19,6 +19,7 @@
 struct aic_work {
     struct app_confirm view;
     struct app_installed_source source;
+    char app[APP_INSTALLED_SOURCE_APP_MAX + 1u];
     char datadir[4400], key[4400], publisher[67];
     bool key_exists;
 #if defined(ZCL_TESTING)
@@ -40,7 +41,7 @@ static bool aic_keys(const struct json_value *in)
         seen |= bit;
     }
     const char *name = zcl_package_copy_str(in, "name");
-    return name && !strcmp(name, "skycombat");
+    return app_installed_source_supported(name);
 }
 static bool aic_project_receipt(struct json_value *data, const char *dir)
 {
@@ -76,15 +77,18 @@ static bool aic_receipt_bound(const struct zcl_command_request *request,
 static bool aic_inputs(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, struct aic_work *w)
 {
-    if (!aic_keys(request->input)) return aic_fail(reply, "BAD_INPUT", "Provide installed app name skycombat and optional datadir only.");
+    if (!aic_keys(request->input)) return aic_fail(reply, "BAD_INPUT", "Provide an installed app name (skycombat or tasks) and optional datadir only.");
+    const char *name = zcl_package_copy_str(request->input, "name");
     const char *dir = zcl_package_copy_datadir(request->input, reply, "app.adopt");
     if (!dir) return false;
     if (dir[0] != '/' || strlen(dir) >= sizeof(w->datadir))
         return aic_fail(reply, "BAD_DATADIR", "An absolute bounded application data directory is required.");
     memcpy(w->datadir, dir, strlen(dir) + 1);
+    if (snprintf(w->app, sizeof(w->app), "%s", name) >= (int)sizeof(w->app))
+        return aic_fail(reply, "BAD_INPUT", "The installed app name is out of bounds.");
     if (!aic_receipt_bound(request, reply, dir)) return false;
     char why[256];
-    if (!app_installed_source_resolve("skycombat", &w->source, why, sizeof(why)))
+    if (!app_installed_source_resolve(w->app, &w->source, why, sizeof(why)))
         return aic_fail(reply, "INSTALLED_SOURCE_UNAVAILABLE", why);
     return app_personalize_key_probe(reply, w->key, sizeof(w->key), w->publisher, &w->key_exists);
 }
@@ -99,7 +103,8 @@ static bool aic_model(struct aic_work *w, char *why, size_t cap)
     w->view.window_title = "Make my copy";
     zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_STATUS_CARD);
     (void)snprintf(m->request_id, sizeof(m->request_id), "installed-copy");
-    (void)snprintf(m->title, sizeof(m->title), "Make Sky Combat yours?");
+    (void)snprintf(m->title, sizeof(m->title), "Make %s yours?",
+                   strcmp(w->source.app, "skycombat") ? "Tasks" : "Sky Combat");
     (void)snprintf(m->summary, sizeof(m->summary), "Create an editable personal copy from this installed version.");
     zcl_hex_encode(w->source.projection_sha3, 32, m->exact_root);
     m->action_count = 4;
@@ -121,7 +126,7 @@ static bool aic_recheck(struct aic_work *w, struct zcl_command_reply *reply)
 {
     struct app_installed_source current; app_installed_source_init(&current);
     char why[256], key[4400], publisher[67]; bool exists = false;
-    bool ok = app_installed_source_resolve("skycombat", &current, why, sizeof(why)) &&
+    bool ok = app_installed_source_resolve(w->app, &current, why, sizeof(why)) &&
         !memcmp(current.projection_sha3, w->source.projection_sha3, 32);
     app_installed_source_free(&current);
     if (!ok) return aic_fail(reply, "INSTALLED_SOURCE_CHANGED", "The installed app changed; review a fresh copy request.");

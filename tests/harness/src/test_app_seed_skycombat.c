@@ -142,6 +142,7 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 /* Explicit installed acceptance. These environment inputs belong only to the
  * harness: production resolver still uses the running executable exclusively. */
 #include "command/app_installed_source.h"
+#include "command/app_installed_source_resolve.h"
 #include "command/app_image.h"
 #include "command/app_copy_build.h"
 #include "command/app_toolchain.h"
@@ -161,11 +162,15 @@ static int ass_runs_qa_frames(struct ass_world *w, const char *xvfb)
 #include "vcs/vcs.h"
 #include "vcs/source_bundle.h"
 #include "vcs/package_store.h"
+#include "vcs/package_prepare.h"
+#include "base/safe_alloc.h"
 #include "sha3/sha3.h"
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -1704,6 +1709,504 @@ static bool asi_prepare_installed(struct ass_world *w, struct asi_run *r)
     return asi_export(w, r) && asi_original(w, r) && asi_kit(w, r) &&
         asi_package(w, r) && asi_install(w, r) && asi_desktop_installed(r) && asi_docs_installed(r);
 }
+
+/* ── installed Tasks source: a staged generation resolves as the only source ──
+ *
+ * The SOURCE_UNKNOWN scenario: a fresh install has no checkout in the working
+ * directory, so `app copy tasks` must resolve its source from the staged
+ * installed generation (share/z23/apps/<hash>/ plus bin/z23-tasks) through
+ * app_installed_source_resolve. This fixture stages that generation by hand —
+ * real ztasks package bytes, a real captured ZVCS tree and source bundle, the
+ * real manifest/recipe wires, a fabricated-but-bound build record and image —
+ * then runs the actual installed node from an empty working directory. It is
+ * the skycombat staging+resolve+verify pattern applied to tasks. */
+
+#define ATS_TASKS_DIR "contexts/commons/packages/ztasks"
+#define ATS_NODE "build/bin/z23"
+static const char *const ats_files[] = {
+    "LICENSE", "README.md", "app/main.c", "include/ztasks/ztasks.h",
+    "src/ztasks.c", "tests/test_ztasks.c", "zcode-package.json"
+};
+/* The 13 base manifest rows of a tasks source release, in resolver enum order. */
+static const char *const ats_rows[] = {
+    "AGENT_CARD.md", "app-build.wire", "installed-source.json",
+    "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme",
+    "z23-package-verify", "z23-tasks", "zclassic23", "zclassic23-acme",
+    "zclassic23-package-verify"
+};
+#define ATS_ROW_COUNT (sizeof(ats_rows) / sizeof(ats_rows[0]))
+
+static bool ats_write(const char *path, const void *bytes, size_t len, mode_t mode)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = (len == 0 || fwrite(bytes, 1, len, f) == len) && fclose(f) == 0 &&
+        chmod(path, mode) == 0;
+    if (!ok) (void)unlink(path);
+    return ok;
+}
+static bool ats_copy_file(const char *from, const char *to, mode_t mode)
+{
+    FILE *in = fopen(from, "rb"), *out = to && in ? fopen(to, "wb") : NULL;
+    bool ok = in && out;
+    while (ok) {
+        char block[65536];
+        size_t n = fread(block, 1, sizeof(block), in);
+        if (n == 0) break;
+        ok = fwrite(block, 1, n, out) == n;
+    }
+    if (in) ok = feof(in) && !ferror(in) && fclose(in) == 0 && ok;
+    if (out) ok = fclose(out) == 0 && chmod(to, mode) == 0 && ok;
+    if (!ok && to) (void)unlink(to);
+    return ok;
+}
+static bool ats_slurp(const char *path, char *buf, size_t cap, size_t *len)
+{
+    *len = 0;
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) return false;
+    *len = fread(buf, 1, cap, f);
+    bool ok = ferror(f) == 0 && feof(f) && fclose(f) == 0;
+    return ok;
+}
+static bool ats_sha256_bytes(const void *bytes, size_t len, char hex[65])
+{
+    struct sha256_ctx h; uint8_t d[32];
+    sha256_init(&h); sha256_write(&h, bytes, len); sha256_finalize(&h, d);
+    zcl_hex_encode(d, sizeof(d), hex);
+    return true;
+}
+static bool ats_sha256_file(const char *path, char hex[65])
+{
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) return false;
+    struct sha256_ctx h; uint8_t d[32]; char block[65536]; size_t n;
+    sha256_init(&h);
+    while ((n = fread(block, 1, sizeof(block), f)) != 0)
+        sha256_write(&h, (const uint8_t *)block, n);
+    bool ok = feof(f) && !ferror(f) && fclose(f) == 0;
+    sha256_finalize(&h, d);
+    zcl_hex_encode(d, sizeof(d), hex);
+    return ok;
+}
+static void ats_sha3_hex(const void *bytes, size_t len, char hex[65])
+{
+    uint8_t d[32];
+    zcl_sha3_256(bytes, len, d);
+    zcl_hex_encode(d, sizeof(d), hex);
+}
+static bool ats_mkdir_p(const char *base, const char *rel)
+{
+    char path[ASS_PATH];
+    if (!asi_path(path, sizeof(path), base, rel)) return false;
+    for (char *at = path + strlen(base) + 1; *at; at++)
+        if (*at == '/') {
+            *at = 0;
+            if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+            *at = '/';
+        }
+    return mkdir(path, 0700) == 0 || errno == EEXIST;
+}
+
+struct ats_stage {
+    const struct ass_world *w;
+    char base[ASS_PATH];
+    char node[ASS_PATH], prefix[ASS_PATH], gen[ASS_PATH];
+    char home[ASS_PATH], datadir[ASS_PATH], empty[ASS_PATH], src[ASS_PATH];
+    struct vcs_package_prepared prepared;
+    uint8_t record_wire[APP_IMAGE_BUILD_WIRE_BYTES];
+    uint8_t *bundle;
+    char *projection, *image;
+    size_t bundle_len, projection_len, image_len;
+    char tree_hex[65], package_hex[65], recipe_root_hex[65], record_id_hex[65];
+    char image_hex[65], bundle_hex[65], manifest_hex[65], recipe_hex[65];
+    char record_hex[65], node_hex[65];
+};
+static void ats_stage_free(struct ats_stage *s)
+{
+    vcs_package_prepared_free(&s->prepared);
+    free(s->bundle); free(s->projection); free(s->image);
+    memset(s, 0, sizeof(*s));
+}
+/* Copy the shipped ztasks package into a private source dir. The staging
+ * base is the caller-owned directory (see ass_tasks_installed: it must sit
+ * under trusted ancestors, so never a group/other-writable temp root). */
+static bool ats_prepare_source(struct ats_stage *s)
+{
+    if (!asi_path(s->src, sizeof(s->src), s->base, "tasks-src") ||
+        mkdir(s->src, 0700) != 0)
+        return false;
+    for (size_t i = 0; i < sizeof(ats_files) / sizeof(ats_files[0]); ++i) {
+        char from[ASS_PATH], rel[128], to[ASS_PATH];
+        if (!asi_path(from, sizeof(from), s->w->source, ATS_TASKS_DIR) ||
+            (int)snprintf(rel, sizeof(rel), "%s/%s", ATS_TASKS_DIR,
+                          ats_files[i]) >= (int)sizeof(rel) ||
+            !asi_path(from, sizeof(from), s->w->source, rel) ||
+            !asi_path(to, sizeof(to), s->src, ats_files[i]))
+            return false;
+        char *slash = strrchr(to, '/');
+        if (!slash) return false;
+        *slash = 0;
+        if (!ats_mkdir_p(s->base, to + strlen(s->base) + 1)) return false;
+        *slash = '/';
+        char body[65536]; size_t n = 0;
+        if (!ats_slurp(from, body, sizeof(body), &n) ||
+            !ats_write(to, body, n, 0600))
+            return false;
+    }
+    return true;
+}
+/* Real retained wires from the real ztasks bytes: a captured ZVCS tree, the
+ * transport bundle over it, and the package manifest/recipe wires. */
+static bool ats_source(struct ats_stage *s)
+{
+    struct vcs_source_bundle_metrics metrics;
+    uint8_t tree[32]; char detail[256] = "";
+    if (!ats_prepare_source(s)) {
+        printf("  [tasks fixture: package copy failed]\n");
+        return false;
+    }
+    if (vcs_tree_capture_path(s->src, tree) != VCS_OK) {
+        printf("  [tasks fixture: ZVCS capture failed]\n");
+        return false;
+    }
+    if (vcs_source_bundle_create(s->src, tree, &s->bundle, &s->bundle_len,
+                                 &metrics) != VCS_SOURCE_BUNDLE_OK) {
+        printf("  [tasks fixture: source bundle create failed]\n");
+        return false;
+    }
+    if (vcs_package_prepare_content(s->src, &s->prepared, detail,
+                                    sizeof(detail)) != VCS_PACKAGE_PREPARE_OK) {
+        printf("  [tasks fixture: package prepare failed: %s]\n", detail);
+        return false;
+    }
+    zcl_hex_encode(tree, sizeof(tree), s->tree_hex);
+    zcl_hex_encode(s->prepared.package_root, 32, s->package_hex);
+    zcl_hex_encode(s->prepared.recipe_root, 32, s->recipe_root_hex);
+    ats_sha3_hex(s->bundle, s->bundle_len, s->bundle_hex);
+    ats_sha3_hex(s->prepared.manifest_wire, s->prepared.manifest_wire_len,
+                 s->manifest_hex);
+    ats_sha3_hex(s->prepared.recipe_wire, s->prepared.recipe_wire_len,
+                 s->recipe_hex);
+    return true;
+}
+/* A build record bound to the staged package root and the image bytes. */
+static bool ats_record(struct ats_stage *s)
+{
+    static const uint8_t root[32] = {1};
+    struct app_image_build rec;
+    uint8_t digest[32], record_id[32];
+    s->image_len = 8192;
+    s->image = zcl_malloc(s->image_len, "ats.tasks.image");
+    if (!s->image) return false;
+    for (size_t i = 0; i < s->image_len; ++i)
+        s->image[i] = (uint8_t)(i * 7 + 3);
+    zcl_sha3_256((const unsigned char *)s->image, s->image_len, digest);
+    zcl_hex_encode(digest, sizeof(digest), s->image_hex);
+    memset(&rec, 0, sizeof(rec));
+    memcpy(rec.package_root, s->prepared.package_root, 32);
+    memcpy(rec.closure_root, root, 32);
+    memcpy(rec.env_root, root, 32);
+    memcpy(rec.dependency_root, root, 32);
+    memcpy(rec.image_sha3, digest, 32);
+    rec.image_volume = 1;
+    rec.image_size = (uint64_t)s->image_len;
+    bool ok = app_image_build_encode(&rec, s->record_wire).ok &&
+        app_image_build_id(&rec, record_id).ok;
+    ats_sha3_hex(s->record_wire, sizeof(s->record_wire), s->record_hex);
+    zcl_hex_encode(record_id, sizeof(record_id), s->record_id_hex);
+    return ok;
+}
+/* The canonical installed-source projection, written by the JSON writer so
+ * the loader's canonical round-trip check holds by construction. */
+static bool ats_projection(struct ats_stage *s)
+{
+    static const struct { const char *key; } keys[] = {
+        {"schema"}, {"app"}, {"bundle_file"}, {"bundle_sha3"}, {"tree_root"},
+        {"manifest_file"}, {"manifest_sha3"}, {"package_root"},
+        {"recipe_file"}, {"recipe_sha3"}, {"recipe_root"}, {"record_file"},
+        {"record_sha3"}, {"record_id"}, {"image_sha3"}
+    };
+    const char *values[] = {
+        APP_INSTALLED_SOURCE_SCHEMA, "tasks", APP_INSTALLED_SOURCE_BUNDLE,
+        s->bundle_hex, s->tree_hex, APP_INSTALLED_SOURCE_MANIFEST,
+        s->manifest_hex, s->package_hex, APP_INSTALLED_SOURCE_RECIPE,
+        s->recipe_hex, s->recipe_root_hex, APP_INSTALLED_SOURCE_RECORD,
+        s->record_hex, s->record_id_hex, s->image_hex
+    };
+    struct json_value doc; json_init(&doc); json_set_object(&doc);
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); ++i)
+        ok = json_push_kv_str(&doc, keys[i].key, values[i]);
+    if (ok) {
+        s->projection_len = json_write(&doc, s->projection,
+                                       APP_INSTALLED_SOURCE_PROJECTION_MAX);
+        ok = s->projection_len > 0 &&
+            s->projection_len < APP_INSTALLED_SOURCE_PROJECTION_MAX;
+    }
+    json_free(&doc);
+    return ok;
+}
+/* Member bytes for manifest row `row`; the node row (z23) is a file digest. */
+static const char *ats_inert_tag(int row)
+{
+    if (row == 11) return ats_rows[7];
+    if (row == 12) return ats_rows[8];
+    return ats_rows[row];
+}
+static bool ats_row_bytes(const struct ats_stage *s, int row,
+                          const void **bytes, size_t *len)
+{
+    static char inert[256];
+    *bytes = NULL; *len = 0;
+    switch (row) {
+    case 1: *bytes = s->record_wire; *len = sizeof(s->record_wire); return true;
+    case 2: *bytes = s->projection; *len = s->projection_len; return true;
+    case 3: *bytes = s->prepared.manifest_wire; *len = s->prepared.manifest_wire_len; return true;
+    case 4: *bytes = s->prepared.recipe_wire; *len = s->prepared.recipe_wire_len; return true;
+    case 5: *bytes = s->bundle; *len = s->bundle_len; return true;
+    case 9: *bytes = s->image; *len = s->image_len; return true;
+    case 0: case 7: case 8: case 11: case 12: break;
+    default: return false;
+    }
+    /* The zclassic23 rows are the z23 rows under legacy names: one digest,
+     * identical bytes (the resolver refuses a differing alias pair). */
+    const char *tag = ats_inert_tag(row);
+    int n = snprintf(inert, sizeof(inert), "inert installed %s row: tasks fixture\n",
+                     tag);
+    if (n <= 0 || n >= (int)sizeof(inert)) return false;
+    *bytes = inert; *len = (size_t)n;
+    return true;
+}
+static bool ats_row_file(const struct ats_stage *s, int row)
+{
+    char path[ASS_PATH];
+    if (!asi_path(path, sizeof(path), s->gen, ats_rows[row])) return false;
+    if (row == 6 || row == 10) return ats_copy_file(s->node, path, 0555);
+    const void *bytes; size_t len;
+    return ats_row_bytes(s, row, &bytes, &len) &&
+        ats_write(path, bytes, len, 0444);
+}
+static bool ats_sums(const struct ats_stage *s, char *sums, size_t cap, char id_hex[65])
+{
+    size_t at = 0;
+    for (int row = 0; row < (int)ATS_ROW_COUNT; ++row) {
+        char hex[65]; bool ok;
+        if (row == 6 || row == 10) ok = ats_sha256_file(s->node, hex);
+        else {
+            const void *bytes; size_t len;
+            ok = ats_row_bytes(s, row, &bytes, &len) &&
+                ats_sha256_bytes(bytes, len, hex);
+        }
+        if (!ok) return false;
+        int n = snprintf(sums + at, cap - at, "%s  %s\n", hex, ats_rows[row]);
+        if (n <= 0 || (size_t)n >= cap - at) return false;
+        at += (size_t)n;
+    }
+    return ats_sha256_bytes(sums, at, id_hex);
+}
+static bool ats_fill_generation(struct ats_stage *s, const char *sums)
+{
+    for (int row = 0; row < (int)ATS_ROW_COUNT; ++row)
+        if (!ats_row_file(s, row)) return false;
+    char sums_path[ASS_PATH];
+    return asi_path(sums_path, sizeof(sums_path), s->gen, "SHA256SUMS") &&
+        ats_write(sums_path, sums, strlen(sums), 0444);
+}
+/* The trusted install prefix: directories, per-app bin link and selector. */
+static bool ats_prefix_dirs(struct ats_stage *s)
+{
+    int n = snprintf(s->prefix, sizeof(s->prefix), "%s/tasks-prefix", s->base);
+    return n > 0 && (size_t)n < sizeof(s->prefix) &&
+        asi_path(s->home, sizeof(s->home), s->base, "tasks-home") &&
+        asi_path(s->datadir, sizeof(s->datadir), s->base, "tasks-data") &&
+        asi_path(s->empty, sizeof(s->empty), s->base, "tasks-empty") &&
+        ats_mkdir_p(s->base, "tasks-prefix/bin") &&
+        ats_mkdir_p(s->base, "tasks-prefix/share/z23/apps") &&
+        ats_mkdir_p(s->base, "tasks-home") &&
+        ats_mkdir_p(s->base, "tasks-data") &&
+        ats_mkdir_p(s->base, "tasks-empty");
+}
+static bool ats_generation_dir(struct ats_stage *s, char *sums, size_t cap,
+                               char *id_hex, char *apps, size_t apps_cap)
+{
+    if (!ats_sums(s, sums, cap, id_hex) ||
+        !asi_path(apps, apps_cap, s->prefix, "share/z23/apps") ||
+        (int)snprintf(s->gen, sizeof(s->gen), "%s/%s", apps, id_hex) >=
+            (int)sizeof(s->gen) || mkdir(s->gen, 0700) != 0)
+        return false;
+    return ats_fill_generation(s, sums) && chmod(s->gen, 0555) == 0;
+}
+static bool ats_links(struct ats_stage *s, const char *id_hex, const char *apps)
+{
+    char bin[ASS_PATH], leaf[ASS_PATH];
+    return asi_path(bin, sizeof(bin), s->prefix, "bin/z23") &&
+        ats_copy_file(s->node, bin, 0555) &&
+        asi_path(leaf, sizeof(leaf), s->prefix, "bin/z23-tasks") &&
+        symlink("../share/z23/apps/tasks/z23-tasks", leaf) == 0 &&
+        asi_path(leaf, sizeof(leaf), apps, "tasks") &&
+        symlink(id_hex, leaf) == 0;
+}
+/* Stage prefix, generation and per-app links; returns the generation dir. */
+static bool ats_stage_all(struct ats_stage *s)
+{
+    char sums[16384], id_hex[65], apps[ASS_PATH];
+    bool ok = asi_path(s->node, sizeof(s->node), s->w->source, ATS_NODE) &&
+        access(s->node, X_OK) == 0 && ats_prefix_dirs(s) &&
+        ats_source(s) && ats_record(s);
+    s->projection = zcl_malloc(APP_INSTALLED_SOURCE_PROJECTION_MAX,
+                               "ats.tasks.projection");
+    ok = ok && s->projection && ats_projection(s) &&
+        ats_generation_dir(s, sums, sizeof(sums), id_hex, apps, sizeof(apps));
+    return ok && ats_links(s, id_hex, apps);
+}
+/* One installed-node run of `app copy tasks` from an empty working dir. */
+static int ats_run_copy(const struct ats_stage *s, char *out, size_t cap,
+                        bool *timed_out)
+{
+    char data[ASS_PATH + 64], self[ASS_PATH];
+    int n = snprintf(data, sizeof(data), "--datadir=%s", s->datadir);
+    if (n <= 0 || (size_t)n >= sizeof(data) ||
+        !asi_path(self, sizeof(self), s->prefix, "bin/z23"))
+        return -1;
+    const char *const argv[] = {self, "app", "copy", "--json", "--app=tasks",
+                                data, NULL};
+    return zcl_spawn_capture_in_dir_observed(argv, s->empty, out, cap,
+                                             180000, timed_out);
+}
+static int ats_copy_with_home(const struct ats_stage *s, char *out, size_t cap,
+                              bool *timed_out)
+{
+    char saved_home[1024];
+    const char *home = getenv("HOME");
+    (void)snprintf(saved_home, sizeof(saved_home), "%s", home ? home : "");
+    if (setenv("HOME", s->home, 1) != 0) return -1;
+    int rc = ats_run_copy(s, out, cap, timed_out);
+    if (saved_home[0]) (void)setenv("HOME", saved_home, 1);
+    else (void)unsetenv("HOME");
+    return rc;
+}
+/* One node run from an empty cwd must come back `ok` with the installed-
+ * source plan: the generation, not the checkout, resolved the source. */
+static bool ats_resolves_installed(const struct ats_stage *s)
+{
+    char out[65536];
+    bool timed = false;
+    int rc = ats_copy_with_home(s, out, sizeof(out), &timed);
+    if (rc != 0 || timed)
+        printf("  [tasks fixture copy child rc=%d timed=%d stdout: %s]\n",
+               rc, timed, out);
+    if (rc != 0 || timed) return false;
+    struct json_value reply; json_init(&reply);
+    bool ok = json_read(&reply, out, strlen(out)) &&
+        json_get_bool(json_get(&reply, "ok"));
+    const struct json_value *data = ok ? json_get(&reply, "data") : NULL;
+    ok = ok && data != NULL &&
+        !strcmp(json_get_str(json_get(data, "stage")), "plan") &&
+        !strcmp(json_get_str(json_get(data, "source")),
+                "verified installed app") &&
+        !strcmp(json_get_str(json_get(data, "app")), "tasks");
+    json_free(&reply);
+    return ok;
+}
+/* Flip one image byte: the same run must now refuse, end to end. */
+static bool ats_tamper_refuses(const struct ats_stage *s)
+{
+    char path[ASS_PATH], body[8192 + 1u], out[65536];
+    size_t n = 0;
+    bool timed = false;
+    if (!asi_path(path, sizeof(path), s->gen, "z23-tasks") ||
+        !ats_slurp(path, body, sizeof(body), &n) || n != s->image_len)
+        return false;
+    body[0] ^= 0xff;
+    if (chmod(path, 0600) != 0 || !ats_write(path, body, n, 0444))
+        return false;
+    int rc = ats_copy_with_home(s, out, sizeof(out), &timed);
+    return rc != 0 && !timed;
+}
+/* The staging base must sit under trusted ancestors (the resolver refuses
+ * group/other-writable parents), and the runner relocates HOME into its
+ * scratch; the owner's passwd home is the one path that carries the trusted
+ * ancestors a real install would resolve through. */
+static bool ats_stage_root(char *root, size_t cap)
+{
+    const char *home = getenv("HOME");
+    struct stat st;
+    errno = 0;
+    struct passwd *pw = getpwuid(geteuid());
+    if (pw && pw->pw_dir && pw->pw_dir[0] == '/') home = pw->pw_dir;
+    if (!home || home[0] != '/' || lstat(home, &st) != 0 ||
+        !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 022))
+        return false;
+    int n = snprintf(root, cap, "%s/.z23-tasks-XXXXXX", home);
+    return n > 0 && (size_t)n < cap && mkdtemp(root) != NULL;
+}
+/* The fixture-level proof: one staged tasks generation, the real node, an
+ * empty working directory. Skips loudly when this host has no node binary,
+ * or when no trusted-ancestor staging root exists: the resolver refuses
+ * group/other-writable parents, and the runner scratch under /dev/shm (and
+ * this repo lane under a group-writable development directory) never
+ * qualifies. The owner's HOME does, on exactly the hosts where a real
+ * install would also resolve. */
+static int ass_tasks_installed(struct ass_world *w)
+{
+    int failures = 0;
+    struct ats_stage s; memset(&s, 0, sizeof(s)); s.w = w;
+    char probe[ASS_PATH], root[ASS_PATH];
+    if (!asi_path(probe, sizeof(probe), w->source, ATS_NODE) ||
+        access(probe, X_OK) != 0) {
+        printf("app.seed skycombat: tasks installed resolve... SKIP (no "
+               "build/bin/z23 on this host)\n");
+        return 0;
+    }
+    if (!ats_stage_root(root, sizeof(root))) {
+        printf("app.seed skycombat: tasks installed resolve... SKIP (no "
+               "trusted-ancestor staging root on this host)\n");
+        return 0;
+    }
+    (void)snprintf(s.base, sizeof(s.base), "%s", root);
+    TEST("a staged tasks generation resolves app copy tasks with no checkout "
+         "in cwd; a tampered image member fails closed") {
+        ASSERT(ats_stage_all(&s));
+        ASSERT(ats_resolves_installed(&s));
+        ASSERT(ats_tamper_refuses(&s));
+        PASS();
+    } _test_next:;
+    ats_stage_free(&s);
+    if (test_rm_rf_recursive(root) != 0) {
+        printf("app.seed skycombat: tasks fixture cleanup failed; retained=%s\n",
+               root);
+        ++failures;
+    }
+    return failures;
+}
+/* The name gates themselves: tasks behaves like skycombat, others stay out. */
+static int ass_tasks_gates(struct ass_world *w)
+{
+    (void)w;
+    int failures = 0;
+    TEST("installed-source gates admit tasks beside skycombat and refuse "
+         "other names") {
+        struct app_installed_source source; app_installed_source_init(&source);
+        char why[256] = "";
+        ASSERT(app_installed_source_select("tasks", &source, why,
+                                           sizeof(why)) ==
+               APP_INSTALLED_SOURCE_UNSELECTED);
+        ASSERT(app_installed_source_select("skycombat", &source, why,
+                                           sizeof(why)) ==
+               APP_INSTALLED_SOURCE_UNSELECTED);
+        ASSERT(app_installed_source_select("soundboard", &source, why,
+                                           sizeof(why)) ==
+               APP_INSTALLED_SOURCE_REFUSED);
+        why[0] = 0;
+        ASSERT(!app_installed_source_resolve("tasks", &source, why,
+                                             sizeof(why)));
+        ASSERT(!strstr(why, "Only installed skycombat"));
+        app_installed_source_free(&source);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static bool asi_prepare_mode(struct ass_world *w, struct asi_run *r)
 {
     r->offline = getenv("ZCL_TEST_INSTALLED_APP_ORIGINAL_SHARE") != NULL;
@@ -1804,6 +2307,10 @@ int test_app_seed_skycombat(void)
         failures += ass_runs_qa_frames(&w, xvfb);
     if (!failures)
         failures += ass_installed(&w);
+    if (!failures)
+        failures += ass_tasks_gates(&w);
+    if (!failures)
+        failures += ass_tasks_installed(&w);
     asf_xvfb_stop(&w.xvfb);
     ass_world_restore(&w);
     if (!failures && getenv("ZCL_TEST_INSTALLED_APP_ORIGINAL_SHARE")) return 0;

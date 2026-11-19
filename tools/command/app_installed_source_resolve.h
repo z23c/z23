@@ -3,8 +3,12 @@
 #ifndef ZCL_APP_INSTALLED_SOURCE_RESOLVE_H
 #define ZCL_APP_INSTALLED_SOURCE_RESOLVE_H
 #include "command/app_installed_source.h"
+/* True for exactly the app names whose installed layout grammar this resolver
+ * carries ("skycombat", "tasks"); every gate below keys on it. */
+bool app_installed_source_supported(const char *app);
 /* out must be initialized; previous contents are freed, also on refusal.
- * Only skycombat is supported. No environment/cwd lookup, writes or execution.
+ * Only skycombat and tasks are supported. No environment/cwd lookup, writes
+ * or execution.
  * Authority is the retained installer manifest under root/euid-owned ancestors
  * without group/other write permission, NOT cryptographic upstream provenance.
  * Writable sticky ancestors are refused too. Authorized owner replacement is

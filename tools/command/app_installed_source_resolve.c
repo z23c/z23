@@ -104,24 +104,49 @@ static bool isr_exe_path(char *out, size_t cap)
 #endif
     return true;
 }
-#if defined(__linux__)
-static bool isr_game_link(const char *prefix)
+/* The installed-source grammar is per app: the selector link name under
+ * share/z23/apps and the executable member the bin link names. */
+static const char *const isr_apps[] = { "skycombat", "tasks" };
+#define ISR_APP_COUNT (sizeof(isr_apps) / sizeof(isr_apps[0]))
+static const char *isr_game_member(const char *app)
 {
-    static const char target[] = "../share/z23/apps/skycombat/z23-skycombat";
-    char bin[ISR_PATH], actual[sizeof(target)];
+    return strcmp(app, "skycombat") ? "z23-tasks" : "z23-skycombat";
+}
+static const char *isr_selector(const char *app)
+{
+    return strcmp(app, "skycombat") ? "tasks" : "skycombat";
+}
+bool app_installed_source_supported(const char *app)
+{
+    if (!app) return false;
+    for (size_t i = 0; i < ISR_APP_COUNT; ++i)
+        if (!strcmp(app, isr_apps[i])) return true;
+    return false;
+}
+#if defined(__linux__)
+static bool isr_game_link(const char *prefix, const char *app)
+{
+    char target[96], link[32], bin[ISR_PATH], actual[sizeof(target)];
+    int n = snprintf(target, sizeof(target), "../share/z23/apps/%s/%s",
+                     isr_selector(app), isr_game_member(app));
+    if (n <= 0 || (size_t)n >= sizeof(target)) return false;
+    n = snprintf(link, sizeof(link), "z23-%s", app);
+    if (n <= 0 || (size_t)n >= sizeof(link)) return false;
     if (!zcl_path_join(bin, sizeof(bin), prefix, "bin")) return false;
     int fd = isr_directory(bin);
     if (fd < 0) return false;
-    ssize_t n = readlinkat(fd, "z23-skycombat", actual, sizeof(actual));
-    bool ok = n == (ssize_t)(sizeof(target) - 1);
-    if (ok) ok = !memcmp(actual, target, sizeof(target) - 1);
+    ssize_t got = readlinkat(fd, link, actual, sizeof(actual));
+    size_t want = strlen(target);
+    bool ok = got == (ssize_t)want;
+    if (ok) ok = !memcmp(actual, target, want);
     if (close(fd) != 0) ok = false;
     return ok;
 }
 #endif
-static bool isr_layout(struct isr_layout *l)
+static bool isr_layout(struct isr_layout *l, const char *app)
 {
     memset(l, 0, sizeof(*l));
+    if (!app_installed_source_supported(app)) return false;
     if (!isr_exe_path(l->exe, sizeof(l->exe))) return false;
     size_t n = strlen(l->exe);
 #if defined(__APPLE__)
@@ -139,11 +164,11 @@ static bool isr_layout(struct isr_layout *l)
     if (n <= 8 || strcmp(l->exe + n - 8, "/bin/z23")) return false;
     char parent[ISR_PATH];
     memcpy(parent, l->exe, n - 8); parent[n-8] = 0;
-    if (!isr_game_link(parent)) return false;
+    if (!isr_game_link(parent, app)) return false;
     if (!zcl_path_join(l->dir, sizeof(l->dir), parent, "share/z23/apps")) return false;
     int fd = isr_directory(l->dir);
     if (fd < 0) return false;
-    ssize_t count = readlinkat(fd, "skycombat", l->generation, sizeof(l->generation));
+    ssize_t count = readlinkat(fd, isr_selector(app), l->generation, sizeof(l->generation));
     close(fd);
     if (count != 64) return false;
     l->generation[64] = 0;
@@ -197,10 +222,12 @@ static bool isr_member(int dir, const char *name, size_t maximum,
     if (close(fd) != 0) ok = false;
     return ok;
 }
-static int isr_row(const char *name)
+static int isr_row(const char *name, const char *app)
 {
-    for (int i = 0; i < ISR_ROWS; ++i)
-        if (!strcmp(name, isr_names[i])) return i;
+    for (int i = 0; i < ISR_ROWS; ++i) {
+        const char *row = i == ISR_GAME ? isr_game_member(app) : isr_names[i];
+        if (!strcmp(name, row)) return i;
+    }
     return -1;
 }
 static bool isr_mac_shape(const struct isr_manifest *m, bool mac,
@@ -226,7 +253,8 @@ static bool isr_shape(const struct isr_manifest *m, bool mac)
     if (kit && (kit != 2 || mac || desktop != ISR_DESKTOP_END - ISR_BASE_ROWS)) return false;
     return desktop == 0 || (!mac && desktop == ISR_DESKTOP_END - ISR_BASE_ROWS);
 }
-static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m, bool mac)
+static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m,
+                      bool mac, const char *app)
 {
     memset(m, 0, sizeof(*m));
     if (memchr(bytes, 0, length)) return false;
@@ -235,7 +263,7 @@ static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m, bool m
         char *nl = memchr(at, '\n', (size_t)(end-at));
         if (!nl || nl-at < 67 || at[64] != ' ' || at[65] != ' ') return false;
         *nl = 0; at[64] = 0;
-        int row = isr_row(at+66);
+        int row = isr_row(at+66, app);
         if (row < 0 || m->digest[row][0] || !isr_lower_hex(at)) return false;
         memcpy(m->digest[row], at, 65); at = nl+1;
     }
@@ -245,14 +273,14 @@ static bool isr_parse(char *bytes, size_t length, struct isr_manifest *m, bool m
         !strcmp(m->digest[ISR_VERIFY], m->digest[ISR_VERIFY_ALIAS]);
 }
 static bool isr_manifest(int dir, const struct isr_layout *l,
-    struct isr_manifest *m, char manifest_hash[65])
+    struct isr_manifest *m, char manifest_hash[65], const char *app)
 {
     char bytes[ISR_MANIFEST + 1]; size_t length = 0;
     if (!isr_member(dir, "SHA256SUMS", ISR_MANIFEST, manifest_hash,
             bytes, ISR_MANIFEST, &length)) return false;
     bytes[length] = 0;
     if (!l->mac && strcmp(manifest_hash, l->generation)) return false;
-    if (!isr_parse(bytes, length, m, l->mac)) return false;
+    if (!isr_parse(bytes, length, m, l->mac, app)) return false;
     return !l->mac || !strcmp(m->digest[ISR_NODE], l->generation);
 }
 static bool isr_same_self(int named, FILE *self, const struct isr_manifest *m)
@@ -306,12 +334,13 @@ bool zcl_test_installed_desktop_manifest(int dir, const char *wire, size_t lengt
     if (!wire || length > ISR_MANIFEST) return false;
     char bytes[ISR_MANIFEST + 1]; struct isr_manifest manifest;
     memcpy(bytes, wire, length); bytes[length] = 0;
-    return isr_parse(bytes, length, &manifest, mac) &&
+    return isr_parse(bytes, length, &manifest, mac, "skycombat") &&
         isr_assets_range(dir, &manifest, ISR_BASE_ROWS, ISR_DESKTOP_END) &&
         isr_optional_assets(dir, &manifest);
 }
 #endif
-static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
+static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65],
+                       const char *app)
 {
     uint8_t projection[4096]; size_t length = 0;
     char hex[65];
@@ -326,13 +355,13 @@ static bool isr_assets(int dir, const struct isr_manifest *m, char pin[65])
             zcl_hex_encode(digest, sizeof(digest), pin);
         }
     }
-    return isr_member(dir, isr_names[ISR_GAME], isr_limits[ISR_GAME],
+    return isr_member(dir, isr_game_member(app), isr_limits[ISR_GAME],
         hex, NULL, 0, &length) && !strcmp(hex, m->digest[ISR_GAME]) &&
         isr_assets_range(dir, m, ISR_BASE_ROWS, ISR_DESKTOP_END) &&
         isr_optional_assets(dir, m);
 }
 static bool isr_retained(const struct app_installed_source *out,
-    const struct isr_manifest *m)
+    const struct isr_manifest *m, const char *app)
 {
     const struct app_installed_source_bytes *const bytes[] = {
         &out->record, &out->projection, &out->manifest, &out->recipe, &out->bundle
@@ -343,37 +372,41 @@ static bool isr_retained(const struct app_installed_source *out,
         sha256_finalize(&hash, digest); zcl_hex_encode(digest, sizeof(digest), hex);
         if (strcmp(hex, m->digest[ISR_RECORD+i])) return false;
     }
-    return !strcmp(out->app, "skycombat");
+    return !strcmp(out->app, app);
 }
-static bool isr_binding_matches(int dir, const struct isr_layout *l, const char *mh)
+static bool isr_binding_matches(int dir, const struct isr_layout *l,
+                                const char *mh, const char *app)
 {
     struct isr_layout again; struct isr_manifest final; char final_hash[65];
-    return isr_layout(&again) && !strcmp(l->exe, again.exe) && !strcmp(l->dir, again.dir) &&
-        isr_manifest(dir, l, &final, final_hash) && !strcmp(mh, final_hash);
+    return isr_layout(&again, app) && !strcmp(l->exe, again.exe) &&
+        !strcmp(l->dir, again.dir) &&
+        isr_manifest(dir, l, &final, final_hash, app) && !strcmp(mh, final_hash);
 }
 static bool isr_recheck(int dir, const struct isr_layout *l,
-    const struct isr_manifest *manifest, const char *mh, const char *pin)
+    const struct isr_manifest *manifest, const char *mh, const char *pin,
+    const char *app)
 {
     /* Recheck selector, manifest and member bytes after loader pathname reads;
      * authorized whole-install replacement remains outside this threat model. */
     char final_pin[65];
-    if (!isr_binding_matches(dir, l, mh)) return false;
-    if (!isr_assets(dir, manifest, final_pin) || strcmp(pin, final_pin)) return false;
+    if (!isr_binding_matches(dir, l, mh, app)) return false;
+    if (!isr_assets(dir, manifest, final_pin, app) || strcmp(pin, final_pin)) return false;
     return isr_self(l, manifest);
 }
-static bool isr_resolve(struct app_installed_source *out, char *why, size_t cap)
+static bool isr_resolve(struct app_installed_source *out, char *why, size_t cap,
+                        const char *app)
 {
     struct isr_layout l;
-    if (!isr_layout(&l)) return false;
+    if (!isr_layout(&l, app)) return false;
     int dir = isr_directory(l.dir);
     if (dir < 0) return false;
     struct isr_manifest manifest; char mh[65], pin[65], image[ISR_PATH];
-    bool ok = isr_manifest(dir, &l, &manifest, mh) && isr_self(&l, &manifest);
-    if (ok) ok = isr_assets(dir, &manifest, pin);
-    if (ok) ok = zcl_path_join(image, sizeof(image), l.dir, isr_names[ISR_GAME]);
+    bool ok = isr_manifest(dir, &l, &manifest, mh, app) && isr_self(&l, &manifest);
+    if (ok) ok = isr_assets(dir, &manifest, pin, app);
+    if (ok) ok = zcl_path_join(image, sizeof(image), l.dir, isr_game_member(app));
     if (ok) ok = app_installed_source_load(l.dir, pin, image, out, why, cap);
-    if (ok) ok = isr_retained(out, &manifest);
-    if (ok) ok = isr_recheck(dir, &l, &manifest, mh, pin);
+    if (ok) ok = isr_retained(out, &manifest, app);
+    if (ok) ok = isr_recheck(dir, &l, &manifest, mh, pin, app);
     if (close(dir) != 0) ok = false;
     return ok;
 }
@@ -409,9 +442,18 @@ static int isr_toolchain_candidate(void)
     struct stat st;
     if (lstat(path, &st) == 0) return 1;
     if (errno != ENOENT) return -1;
-    if (!zcl_path_join(path, sizeof(path), prefix, "bin/z23-skycombat")) return -1;
-    if (lstat(path, &st) == 0) return S_ISLNK(st.st_mode) ? 1 : 0;
-    return errno == ENOENT ? 0 : -1;
+    int seen = 0;
+    for (size_t i = 0; i < ISR_APP_COUNT; ++i) {
+        char link[32];
+        int n = snprintf(link, sizeof(link), "z23-%s", isr_apps[i]);
+        if (n <= 0 || (size_t)n >= sizeof(link)) return -1;
+        if (!zcl_path_join(path, sizeof(path), prefix, link)) return -1;
+        if (lstat(path, &st) == 0) {
+            if (!S_ISLNK(st.st_mode)) continue;
+            seen = 1;
+        } else if (errno != ENOENT) return -1;
+    }
+    return seen;
 #endif
 }
 static bool isr_kit_bytes(int dir, int row, const struct isr_manifest *manifest,
@@ -444,7 +486,7 @@ bool zcl_test_installed_toolchain_manifest(int dir, const char *wire, size_t len
     char bytes[ISR_MANIFEST + 1]; struct isr_manifest manifest;
     memcpy(bytes, wire, length); bytes[length] = 0;
     struct app_installed_toolchain kit = {0};
-    bool ok = isr_parse(bytes, length, &manifest, mac) &&
+    bool ok = isr_parse(bytes, length, &manifest, mac, "skycombat") &&
         manifest.digest[ISR_KIT_DESCRIPTOR][0] &&
         isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &kit.descriptor) &&
         isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &kit.bundle);
@@ -458,23 +500,33 @@ static bool isr_toolchain_identity(int dir, const struct isr_layout *layout,
     return isr_self(layout, manifest) &&
         isr_optional_assets(dir, manifest);
 }
+static bool isr_toolchain_kit(int dir, const struct isr_layout *layout,
+    struct app_installed_toolchain *out, const char *tool_app, bool *selected)
+{
+    struct isr_manifest manifest; char hash[65];
+    bool ok = isr_manifest(dir, layout, &manifest, hash, tool_app) &&
+        isr_toolchain_identity(dir, layout, &manifest);
+    *selected = ok && manifest.digest[ISR_KIT_DESCRIPTOR][0];
+    if (*selected) ok = isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &out->descriptor) &&
+        isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &out->bundle);
+    if (ok) ok = isr_binding_matches(dir, layout, hash, tool_app) &&
+        isr_toolchain_identity(dir, layout, &manifest);
+    return ok;
+}
 static enum app_installed_toolchain_status isr_toolchain(
     struct app_installed_toolchain *out)
 {
     int candidate = isr_toolchain_candidate();
     if (candidate == 0) return APP_INSTALLED_TOOLCHAIN_UNSELECTED;
     struct isr_layout layout;
-    if (candidate < 0 || !isr_layout(&layout)) return APP_INSTALLED_TOOLCHAIN_REFUSED;
+    const char *tool_app = NULL;
+    for (size_t i = 0; !tool_app && i < ISR_APP_COUNT; ++i)
+        if (isr_layout(&layout, isr_apps[i])) tool_app = isr_apps[i];
+    if (candidate < 0 || !tool_app) return APP_INSTALLED_TOOLCHAIN_REFUSED;
     int dir = isr_directory(layout.dir);
     if (dir < 0) return APP_INSTALLED_TOOLCHAIN_REFUSED;
-    struct isr_manifest manifest; char hash[65];
-    bool ok = isr_manifest(dir, &layout, &manifest, hash) &&
-        isr_toolchain_identity(dir, &layout, &manifest);
-    bool selected = ok && manifest.digest[ISR_KIT_DESCRIPTOR][0];
-    if (selected) ok = isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &out->descriptor) &&
-        isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &out->bundle);
-    if (ok) ok = isr_binding_matches(dir, &layout, hash) &&
-        isr_toolchain_identity(dir, &layout, &manifest);
+    bool selected = false;
+    bool ok = isr_toolchain_kit(dir, &layout, out, tool_app, &selected);
     if (close(dir) != 0) ok = false;
     return !ok ? APP_INSTALLED_TOOLCHAIN_REFUSED : selected ?
         APP_INSTALLED_TOOLCHAIN_VERIFIED : APP_INSTALLED_TOOLCHAIN_UNSELECTED;
@@ -510,12 +562,12 @@ bool app_installed_source_resolve(const char *app,
 {
     (void)app_installed_source_message(why, cap, "");
     if (out) app_installed_source_free(out);
-    if (!out || !app || strcmp(app, "skycombat")) {
-        (void)app_installed_source_message(why, cap, "Only installed skycombat is supported");
+    if (!out || !app_installed_source_supported(app)) {
+        (void)app_installed_source_message(why, cap, "Only installed skycombat and tasks are supported");
         return false;
     }
 #if defined(__linux__) || defined(__APPLE__)
-    if (isr_resolve(out, why, cap)) {
+    if (isr_resolve(out, why, cap, app)) {
         (void)app_installed_source_message(why, cap,
             os_proc_self_exe_identity() == OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE ?
             "installer manifest verified; running-inode identity; recheck at consent/use" :
@@ -534,8 +586,8 @@ bool app_installed_source_resolve(const char *app,
 enum app_installed_source_status app_installed_source_select(const char *app,
     struct app_installed_source *out, char *why, size_t cap)
 {
-    if (!out || !app || strcmp(app, "skycombat")) {
-        (void)app_installed_source_message(why, cap, "Only installed skycombat is supported");
+    if (!out || !app_installed_source_supported(app)) {
+        (void)app_installed_source_message(why, cap, "Only installed skycombat and tasks are supported");
         return APP_INSTALLED_SOURCE_REFUSED;
     }
 #if defined(__linux__) || defined(__APPLE__)

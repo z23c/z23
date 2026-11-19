@@ -42,7 +42,13 @@
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
 #include "vcs/package_prepare.h"
+#include "vcs/package_manifest.h"
+#include "vcs/package_recipe.h"
 #include "vcs/package_release.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
+#include "core/uint256.h"
+#include "sha3/sha3.h"
 
 #if defined(_WIN32)
 int test_app_front_door(void);
@@ -1131,6 +1137,185 @@ static int afd_changed_dependencies(struct afd_world *w)
 
 /* The confirm half makes the owner's signing key on first use; the front
  * door tells the person once, with the path, and not on the next copy. */
+/* ── tasks copy carry: a datadir tasks release flows through the front door ──
+ * The tasks journey rides the same copy carry as skycombat: with a tasks
+ * release already in the datadir (published through the same wire formats the
+ * zcode lifecycle uses), `app copy tasks` adopts it into an editable copy —
+ * no seeding, no apps/ member, no installed-source gate. */
+static const struct { const char *path; const char *body; } aftp_files[] = {
+    {"LICENSE", "Apache-2.0\n"},
+    {"app/main.c", "int main(void) { return 0; }\n"},
+    {"include/tasks.h", "#pragma once\n"},
+    {"src/tasks.c", "#include \"tasks.h\"\n"},
+    {"tests/test_tasks.c", "int main(void) { return 0; }\n"},
+};
+static bool aftp_put(const char *base, const char *rel, const void *bytes, size_t len)
+{
+    char path[AFD_PATH + 128];
+    int n = snprintf(path, sizeof(path), "%s/%s", base, rel);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    return fwrite(bytes, 1, len, f) == len && fclose(f) == 0;
+}
+static bool aftp_mkdirs(const char *zcode)
+{
+    static const char *const subs[] = {"manifests", "releases", "staging",
+                                       "pins", "cas", "cas/sha3", "recipes"};
+    char dir[AFD_PATH + 64];
+    if (mkdir(zcode, 0700) != 0) {
+        printf("  [tasks fixture: mkdir %s failed: %s]\n", zcode, strerror(errno));
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(subs) / sizeof(subs[0]); ++i) {
+        int n = snprintf(dir, sizeof(dir), "%s/%s", zcode, subs[i]);
+        if (n <= 0 || (size_t)n >= sizeof(dir) || mkdir(dir, 0700) != 0) {
+            printf("  [tasks fixture: mkdir %s failed: %s]\n", dir, strerror(errno));
+            return false;
+        }
+    }
+    return true;
+}
+/* Add every fixture member to the manifest and its bytes to the CAS shard. */
+static bool aftp_members(const char *zcode, struct vcs_package_manifest *m)
+{
+    char hex[65], shard[AFD_PATH + 96], path[AFD_PATH + 96];
+    for (size_t i = 0; i < sizeof(aftp_files) / sizeof(aftp_files[0]); ++i) {
+        uint8_t hash[32];
+        struct sha3_256_ctx c;
+        size_t len = strlen(aftp_files[i].body);
+        sha3_256_init(&c);
+        sha3_256_write(&c, (const uint8_t *)aftp_files[i].body, len);
+        sha3_256_finalize(&c, hash);
+        zcl_hex_encode(hash, 32, hex);
+        bool added = vcs_package_manifest_add(m, aftp_files[i].path,
+                                              VCS_PACKAGE_MODE_FILE, len, hash, 1) &&
+            (int)snprintf(shard, sizeof(shard), "%s/cas/sha3/%.2s", zcode, hex) <
+                (int)sizeof(shard) &&
+            (int)snprintf(path, sizeof(path), "cas/sha3/%.2s/%s", hex, hex) <
+                (int)sizeof(path);
+        int made = added ? mkdir(shard, 0700) : -1;
+        if (!added || (made != 0 && errno != EEXIST) ||
+            !aftp_put(zcode, path, aftp_files[i].body, len)) {
+            printf("  [tasks fixture: member %s refused]\n", aftp_files[i].path);
+            return false;
+        }
+    }
+    return true;
+}
+/* The recipe rows of the tasks package, then the signed release wire. */
+static bool aftp_recipe_wires(struct vcs_package_recipe *r,
+                              struct vcs_package_manifest *m,
+                              uint8_t recipe_root[32], uint8_t root_out[32],
+                              uint8_t **rwire, size_t *rlen,
+                              uint8_t **mwire, size_t *mlen)
+{
+    bool ok = vcs_package_recipe_add_header(r, "include/tasks.h", NULL) &&
+        vcs_package_recipe_add_source(r, "src/tasks.c", NULL) &&
+        vcs_package_recipe_add_test_source(r, "tests/test_tasks.c", NULL) &&
+        vcs_package_recipe_add_include_dir(r, "include", NULL) &&
+        vcs_package_recipe_add_library(r, VCS_PACKAGE_RECIPE_LIB_LIBC, NULL) &&
+        vcs_package_recipe_add_program(r, "app/main.c", NULL);
+    vcs_package_recipe_set_test_limits(r, 0, 60, UINT64_C(64) * 1024 * 1024);
+    ok = ok && vcs_package_recipe_root(r, recipe_root) == VCS_PACKAGE_RECIPE_OK &&
+        vcs_package_recipe_serialize(r, rwire, rlen) == VCS_PACKAGE_RECIPE_OK &&
+        vcs_package_manifest_root(m, root_out) &&
+        vcs_package_manifest_serialize(m, mwire, mlen);
+    if (!ok)
+        printf("  [tasks fixture: recipe or manifest wires refused]\n");
+    return ok;
+}
+static bool aftp_release_wire(const struct privkey *sk, const struct pubkey *pk,
+                              const uint8_t root_out[32],
+                              const uint8_t recipe_root[32], uint8_t id[32],
+                              char release_hex[65], uint8_t **relwire,
+                              size_t *relen)
+{
+    struct vcs_package_release rel;
+    struct uint256 h;
+    unsigned char compact[COMPACT_SIGNATURE_SIZE];
+    memset(&rel, 0, sizeof(rel));
+    rel.schema_version = VCS_PACKAGE_RELEASE_VERSION;
+    (void)snprintf(rel.name, sizeof(rel.name), "ztasks/tasks");
+    (void)snprintf(rel.semver, sizeof(rel.semver), "0.1.0");
+    memcpy(rel.package_root, root_out, 32);
+    memcpy(rel.publisher_pubkey, pk->vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    rel.publisher_sequence = 1;
+    /* empty = no reward address; the store refuses non-chain addresses */
+    rel.reward_address[0] = 0;
+    (void)snprintf(rel.license, sizeof(rel.license), "Apache-2.0");
+    memcpy(rel.recipe_root, recipe_root, 32);
+    (void)snprintf(rel.chain_id, sizeof(rel.chain_id), "zclassic-main");
+    bool ok = vcs_package_release_id(&rel, id) == VCS_PACKAGE_RELEASE_OK &&
+        privkey_sign_compact(sk, (memcpy(h.data, id, 32), &h), compact) &&
+        (memcpy(rel.signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES),
+         vcs_package_release_serialize(&rel, relwire, relen) ==
+             VCS_PACKAGE_RELEASE_OK);
+    if (ok) zcl_hex_encode(id, 32, release_hex);
+    return ok;
+}
+static bool aftp_store(const char *zcode, const uint8_t root_out[32],
+                       const uint8_t recipe_root[32], const char *release_hex,
+                       const uint8_t *mwire, size_t mlen,
+                       const uint8_t *rwire, size_t rlen,
+                       const uint8_t *relwire, size_t relen)
+{
+    char root_hex[65], recipe_hex[65], path[AFD_PATH + 96];
+    zcl_hex_encode(root_out, 32, root_hex);
+    zcl_hex_encode(recipe_root, 32, recipe_hex);
+    return (int)snprintf(path, sizeof(path), "manifests/%s", root_hex) <
+            (int)sizeof(path) && aftp_put(zcode, path, mwire, mlen) &&
+        (int)snprintf(path, sizeof(path), "recipes/%s", recipe_hex) <
+            (int)sizeof(path) && aftp_put(zcode, path, rwire, rlen) &&
+        (int)snprintf(path, sizeof(path), "releases/%s", release_hex) <
+            (int)sizeof(path) && aftp_put(zcode, path, relwire, relen);
+}
+static bool aftp_publish(const char *datadir, uint8_t root_out[32],
+                         char release_hex[65])
+{
+    char zcode[AFD_PATH];
+    struct vcs_package_manifest m; vcs_package_manifest_init(&m);
+    struct vcs_package_recipe r; vcs_package_recipe_init(&r);
+    struct privkey sk; struct pubkey pk;
+    uint8_t *mwire = NULL, *rwire = NULL, *relwire = NULL;
+    size_t mlen = 0, rlen = 0, relen = 0;
+    uint8_t recipe_root[32], id[32];
+    privkey_init(&sk);
+    memset(sk.vch, 0x11, 32); sk.fValid = true; sk.fCompressed = true;
+    bool ok = (int)snprintf(zcode, sizeof(zcode), "%s/zcode", datadir) <
+            (int)sizeof(zcode) && aftp_mkdirs(zcode) && ecc_start_once() &&
+        privkey_get_pubkey(&sk, &pk);
+    ok = ok && aftp_members(zcode, &m) && aftp_recipe_wires(&r, &m,
+        recipe_root, root_out, &rwire, &rlen, &mwire, &mlen);
+    ok = ok && aftp_release_wire(&sk, &pk, root_out, recipe_root, id,
+                                 release_hex, &relwire, &relen);
+    ok = ok && aftp_store(zcode, root_out, recipe_root, release_hex,
+                          mwire, mlen, rwire, rlen, relwire, relen);
+    free(mwire); free(rwire); free(relwire);
+    vcs_package_manifest_free(&m); vcs_package_recipe_free(&r);
+    return ok;
+}
+static int afd_tasks_carry(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("app front door: a datadir tasks release carries into an editable copy") {
+        char datadir[AFD_PATH], home[AFD_PATH], copy[AFD_PATH + 32], release[65];
+        struct asf_door run;
+        struct stat st;
+        uint8_t root[32];
+        (void)snprintf(datadir, sizeof(datadir), "%s/tasks-data", w->root);
+        (void)snprintf(home, sizeof(home), "%s/tasks-home", w->root);
+        ASSERT(mkdir(datadir, 0700) == 0 && mkdir(home, 0700) == 0);
+        ASSERT(aftp_publish(datadir, root, release));
+        asf_door_run(home, w->saved_cwd, datadir, "copy", "tasks",
+                     ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT_EQ(run.rc, 0);
+        (void)snprintf(copy, sizeof(copy), "%s/copies/tasks-1", datadir);
+        ASSERT(stat(copy, &st) == 0 && S_ISDIR(st.st_mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int afd_key_note_after_confirm(const struct afd_world *w)
 {
     int failures = 0;
@@ -1303,6 +1488,8 @@ int test_app_front_door(void)
     }
     if (!failures)
         failures += afd_key_note_after_confirm(&w);
+    if (!failures)
+        failures += afd_tasks_carry(&w);
     if (!failures)
         failures += afd_quiet_logs(&w);
     if (!failures) {

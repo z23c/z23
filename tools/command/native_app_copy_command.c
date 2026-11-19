@@ -134,7 +134,7 @@ static bool zac_find(struct zac *z)
  * checkout seed path; a selected but broken install never falls back. */
 static bool zac_installed_plan(struct zac *z)
 {
-    if (z->have_release || strcmp(z->app, "skycombat")) return true;
+    if (z->have_release || !app_installed_source_supported(z->app)) return true;
     char why[256] = "";
     enum app_installed_source_status status = app_installed_source_select(
         z->app, &z->source, why, sizeof(why));
