@@ -23,6 +23,7 @@
 #include "jobs/refold_progress.h"
 #include "script/script.h"
 #include "script/standard.h"
+#include "services/authority_projection_audit.h"
 #include "services/chain_state_service.h"
 #include "storage/coins_kv.h"
 #include "storage/coins_ram.h"
@@ -1233,6 +1234,7 @@ int64_t utxo_mirror_rebuild_now_reason(struct utxo_mirror_sync_service *svc,
     atomic_fetch_add(&svc->rows_written, rebuild.written);
     atomic_store(&svc->last_mirror_height, (int64_t)rebuild.applied_through);
     atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
+    (void)ap_audit_run_once();
     LOG_INFO("utxo_mirror",
              "[utxo_mirror] operator rebuild: %lld rows, synced to height %d",
              (long long)rebuild.written, rebuild.applied_through);

@@ -403,12 +403,11 @@ static int ums_test_confirmed_recovery(struct utxo_mirror_sync_service *svc,
               utxo_mirror_rebuild_now(svc) == 4);
     UMS_CHECK("recovery: rebuilt projection matches the authority",
               ums_roots_equal(ndbp, pdb));
-    UMS_CHECK("recovery: clean audit ran", ap_audit_run_once());
     struct json_value clean = {0};
     json_set_object(&clean);
     (void)ap_audit_dump_state_json(&clean, NULL);
     const char *clean_keys = json_get_str(json_get(&clean, "diff_keys"));
-    UMS_CHECK("recovery: clean audit clears the confirmed blocker",
+    UMS_CHECK("recovery: rebuild's clean audit clears the confirmed blocker",
               !json_get_bool(json_get(&clean, "blocker_active")) &&
               !blocker_exists("authority_projection_divergence") &&
               json_get_int(json_get(&clean, "divergence_streak")) == 0 &&
@@ -1365,6 +1364,16 @@ static int ums_check_wire(struct utxo_mirror_sync_service *svc, const char *name
     return failures;
 }
 
+static bool ums_wire_fresh_clean_audit(const struct zcl_command_reply *reply,
+                                       const struct json_value *audited)
+{
+    return !json_get_bool(json_get(&reply->data, "audit_diff_scan_error")) &&
+           !json_get_bool(json_get(audited, "blocker_active")) &&
+           !blocker_exists("authority_projection_divergence") &&
+           json_get_int(json_get(audited, "passes_total")) == 1 &&
+           json_get_int(json_get(audited, "diff_count")) == 0;
+}
+
 static int ums_test_controller_wire(bool forwarded)
 {
     int failures = 0;
@@ -1424,8 +1433,8 @@ static int ums_test_controller_wire(bool forwarded)
         (struct ums_wire){"VERIFY_MISMATCH", false, "quarantined", NULL});
     UMS_CHECK("wire: bad row spent", coins_kv_spend(fx.pdb, btx, 0));
 
-    /* Success: truthful data fields, and a previously incomplete audit scan is
-     * reported as such rather than implied clean. */
+    /* Success: truthful data fields, and the rebuild's fresh clean audit
+     * supersedes a previously incomplete scan. */
     g_ap_test_ndb = &fx.ndb;
     g_utxo_mirror_sync = &fx.svc;
     UMS_CHECK("wire: equal-height projection", utxo_mirror_rebuild_now(&fx.svc) == 3);
@@ -1444,8 +1453,12 @@ static int ums_test_controller_wire(bool forwarded)
     UMS_CHECK("wire/ok: current_state healthy", st && strcmp(st, "healthy") == 0);
     UMS_CHECK("wire/ok: quarantine cleared",
               !json_get_bool(json_get(&reply.data, "quarantined")));
-    UMS_CHECK("wire/ok: incomplete audit diagnostics are surfaced",
-              json_get_bool(json_get(&reply.data, "audit_diff_scan_error")));
+    struct json_value audited = {0};
+    json_set_object(&audited);
+    (void)ap_audit_dump_state_json(&audited, NULL);
+    UMS_CHECK("wire/ok: fresh clean audit supersedes incomplete diagnostics",
+              ums_wire_fresh_clean_audit(&reply, &audited));
+    json_free(&audited);
     zcl_command_reply_free(&reply);
 
     /* Post-commit projection failure: committed, mutated, no retry advice. */
