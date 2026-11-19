@@ -1070,6 +1070,43 @@ static int rtx_answer_marker_fault(const char *path, int phase)
     return 0;
 }
 
+static int test_receive_note_replay(void)
+{
+    int failures = 0;
+    TEST("a deferred note does not stand in for the missing accept") {
+        struct rcv_beat_stats st;
+        char body[4096], outbox[1400];
+        const char *note =
+            "{\"seq\":1,\"ts\":\"2026-11-19T00:00:00Z\",\"from\":\"box-a\","
+            "\"to\":\"chatgpt\",\"kind\":\"note\","
+            "\"body\":\"disposition=DEFERRED\\nref=job-note\\n\","
+            "\"ref\":\"job-note\"}\n";
+        rtx_isolate("note-replay");
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction(body, sizeof(body), "hex_codec", "Retry past a note.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-note", body, 1));
+        rtx_path(outbox, sizeof(outbox), "mail/outbox.jsonl");
+        FILE *f = fopen(outbox, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs(note, f) != EOF);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(chmod(outbox, 0400), 0);
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(rtx_answers("job-note", "disposition=ACCEPTED"), 0);
+        ASSERT_EQ(chmod(outbox, 0600), 0);
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.seen, 1);
+        ASSERT_EQ(rtx_answers("job-note", "disposition=ACCEPTED"), 1);
+        ASSERT_EQ(rtx_answers("job-note", "disposition=DEFERRED"), 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-note"), 1);
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
 static int test_receive_answer_retry(void)
 {
     int failures = 0;
@@ -2322,6 +2359,7 @@ int test_devagent_receive(void)
     int failures = 0;
 
 #if !defined(_WIN32)
+    failures += test_receive_note_replay();
     failures += test_receive_answer_retry();
     failures += test_receive_marker_retry(0);
     failures += test_receive_marker_retry(2);

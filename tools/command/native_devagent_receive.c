@@ -1962,11 +1962,37 @@ static void rcv_evidence_replay(const char *path, char *out, size_t cap)
         rcv_evidence_fragment(record, out, cap);
 }
 
+/* A claim or a problem is a disposition. A note may carry the letters
+ * disposition= and is not that post. Kind is written before the body, so
+ * a body that quotes a kind field does not count. problems_only selects
+ * the conflict answer: an earlier accept does not stand in for a BLOCKED. */
+static bool rcv_disposition_line(const char *line, const char *from_pat,
+                                 const char *ref_pat, bool problems_only)
+{
+    const char *kind;
+    const char *body;
+    bool claim;
+    bool problem;
+    if (!line || !strstr(line, from_pat) || !strstr(line, ref_pat))
+        return false;
+    kind = strstr(line, "\"kind\":\"");
+    body = strstr(line, "\"body\":");
+    if (!kind || !body || kind > body)
+        return false;
+    claim = strncmp(kind, "\"kind\":\"claim\"", 14) == 0;
+    problem = strncmp(kind, "\"kind\":\"problem\"", 16) == 0;
+    if (!(problems_only ? problem : (claim || problem)))
+        return false;
+    return strstr(body, "disposition=") != NULL;
+}
+
 /* True when this receiver already appended a disposition for `ref`.
  * The marker is per source row. The disposition is per ref: a source whose
  * accept never landed still posts it, and a second source of the same ref
- * does not add another. */
-static bool rcv_disposition_posted(const struct rcv_ctx *c, const char *ref)
+ * does not add another. problems_only is the conflict replay: a BLOCKED
+ * already in the outbox is not posted again, and an accept is not one. */
+static bool rcv_outbox_has(const struct rcv_ctx *c, const char *ref,
+                           bool problems_only)
 {
     char path[3400];
     char from_pat[160], ref_pat[160];
@@ -1986,10 +2012,21 @@ static bool rcv_disposition_posted(const struct rcv_ctx *c, const char *ref)
     if (!f)
         return false;
     while (!found && fgets(line, sizeof(line), f))
-        found = strstr(line, from_pat) && strstr(line, ref_pat) &&
-                strstr(line, "disposition=");
+        found = rcv_disposition_line(line, from_pat, ref_pat, problems_only);
     (void)fclose(f);
     return found;
+}
+
+/* The disposition is already in the outbox. The source marker may still
+ * be missing, so the caller treats the answer as published and does not
+ * post a second one. */
+static bool rcv_mark_settled(struct rcv_ctx *c, const char *ref,
+                             bool problems_only)
+{
+    if (!rcv_outbox_has(c, ref, problems_only))
+        return false;
+    c->answer_ok = true;
+    return true;
 }
 
 /* ── idempotence and conflict ──────────────────────────────────────────── */
@@ -2016,20 +2053,20 @@ static void rcv_reconcile(struct rcv_ctx *c, const struct rcv_row *v,
     char evidence[1024];
     const char *path = rcv_exists(f->received) ? f->received : f->brief;
     if (!rcv_read_file(path, stored, sizeof(stored))) {
-        rcv_answer_refuse(c, v, src, "RECEIVE_REF_CONFLICT",
-                          "ref-claimed-without-a-brief-from-this-receiver");
+        if (!rcv_mark_settled(c, v->ref, true))
+            rcv_answer_refuse(c, v, src, "RECEIVE_REF_CONFLICT",
+                              "ref-claimed-without-a-brief-from-this-receiver");
         return;
     }
     if (strcmp(stored, v->body) != 0) {
-        rcv_answer_refuse(c, v, src, "RECEIVE_REF_CONFLICT",
-                          "received-body-differs");
+        if (!rcv_mark_settled(c, v->ref, true))
+            rcv_answer_refuse(c, v, src, "RECEIVE_REF_CONFLICT",
+                              "received-body-differs");
         return;
     }
     c->st->reconciled++;
-    if (rcv_disposition_posted(c, v->ref)) {
-        c->answer_ok = true;
+    if (rcv_mark_settled(c, v->ref, false))
         return;
-    }
     rcv_evidence_replay(f->evidence, evidence, sizeof(evidence));
     rcv_answer_accept(c, v, src, d, k->seq, k->stage, evidence);
 }

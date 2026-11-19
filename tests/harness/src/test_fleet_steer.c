@@ -7367,6 +7367,35 @@ static long long fmx_ack_floor(const char *gid, const char *ref)
     return v;
 }
 
+static int fmx_t_floor_offset(void)
+{
+    int failures = 0;
+    TEST("steer: a composite floor does not cover a row its offset missed") {
+        char gid[64];
+        long long seq;
+        fmx_isolate("floor_offset");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        seq = fmx_send_one(gid, FMX_SENDER, "desk-crew", "gap-floor",
+                           "gap-floor-1");
+        ASSERT(seq >= 1 && seq <= 7);
+        fmx_plant_line("read", "desk-crew", "7|outbox.jsonl:0");
+        ASSERT(fmx_state_agrees(gid, "gap-floor", "queued"));
+        fmx_unplant("read", "desk-crew");
+        fmx_plant_line("cursor", "other-agent", "7|outbox.jsonl:0");
+        fmx_plant("alias", "desk-crew", "other-agent\n");
+        ASSERT(fmx_state_agrees(gid, "gap-floor", "queued"));
+        fmx_unplant("alias", "desk-crew");
+        fmx_unplant("cursor", "other-agent");
+        fmx_plant_line("read", "desk-crew", "7");
+        ASSERT(fmx_state_agrees(gid, "gap-floor", "read"));
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_delivery_gap(void)
 {
     int failures = 0;
@@ -7564,6 +7593,7 @@ int test_fleet_steer(void)
     failures += fmx_t_candidate_unknown();
     failures += fmx_t_candidate_from_mail();
     failures += fmx_t_candidate_reports();
+    failures += fmx_t_floor_offset();
     failures += fmx_t_delivery_gap();
 
     /* No ASSERT lives in this function, so no goto needs the label: the

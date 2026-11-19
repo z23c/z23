@@ -1618,17 +1618,20 @@ static bool fmc_token_covers_row(const char *token, const struct fmc_row *v)
     return false;
 }
 
-/* Floor coverage stays (so "7|outbox:120" still covers seq <= 7). A floor
- * of 0 still covers by stream offset. An invalid token covers nothing. */
+/* A scalar cursor covers by sequence. A composite token covers only when
+ * its stream offset has passed the row: the floor is a pull bound, and a
+ * row that offset missed stays uncovered. An invalid token covers nothing. */
 static bool fmc_text_covers(char *buf, size_t len, const struct fmc_row *v)
 {
     long long floor;
     if (!v || len == 0)
         return false;
     floor = fmc_ack_parse(buf, len);
-    if (floor >= 0 && v->seq <= floor)
-        return true;
-    return floor >= 0 && fmc_token_covers_row(buf, v);
+    if (floor < 0)
+        return false;
+    if (!strchr(buf, '|'))
+        return v->seq <= floor;
+    return fmc_token_covers_row(buf, v);
 }
 
 static bool fmc_mail_leaf_ok(const char *leaf)
