@@ -21,6 +21,9 @@
 #include "config/runtime.h"
 #include "controllers/sync_controller.h"
 #include "models/block.h"
+#include "core/serialize.h"
+#include "zslp/slp.h"
+#include "script/standard.h"
 
 static int count_rows(struct node_db *ndb, const char *sql)
 {
@@ -589,6 +592,257 @@ static int check_closed_db_read_untouched(struct node_db *ndb)
     return 1;
 }
 
+/* ── token-name-rules parity vectors ─────────────────────────────────────
+ * tests/fixtures/token_name_rules/token_name_rules.txt is shared byte for byte
+ * with zclassicd (src/test/data/token_name_rules.txt): both implementations
+ * read every record and must give the same answer.
+ *   ZSLP-VOUT0:   an SLP message counts only as vout[0]'s script;
+ *   ZNAM-OWNER-2: the owner of a name transaction is the address of the output
+ *                 its first input spends, rendered by script type (P2PKH ->
+ *                 P2PKH address, P2SH -> P2SH address, anything else none).
+ * A missing file fails the test; it is never skipped. */
+
+#define TNR_VECTORS "tests/fixtures/token_name_rules/token_name_rules.txt"
+
+static int tnr_hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decodes `hex` into out (cap bytes); returns the length or -1. */
+static int tnr_hex_decode(const char *hex, uint8_t *out, size_t cap)
+{
+    size_t n = strlen(hex);
+    if (n % 2 != 0 || n / 2 > cap)
+        return -1;
+    for (size_t i = 0; i < n / 2; i++) {
+        int hi = tnr_hex_nibble(hex[2 * i]), lo = tnr_hex_nibble(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0)
+            return -1;
+        out[i] = (uint8_t)(hi * 16 + lo);
+    }
+    return (int)(n / 2);
+}
+
+/* Splits `line` in place at '|' into at most `max` fields; returns the count. */
+static int tnr_split(char *line, char **f, int max)
+{
+    int n = 0;
+    f[n++] = line;
+    for (char *p = line; *p && n < max; p++) {
+        if (*p == '|') {
+            *p = '\0';
+            f[n++] = p + 1;
+        }
+    }
+    return n;
+}
+
+/* Deserializes `hex` into *tx (caller frees); false on any parse problem. */
+static bool tnr_tx_from_hex(const char *hex, struct transaction *tx)
+{
+    static uint8_t raw[8192];
+    int n = tnr_hex_decode(hex, raw, sizeof(raw));
+    if (n <= 0)
+        return false;
+    struct byte_stream stream;
+    stream_init_from_data(&stream, raw, (size_t)n);
+    transaction_init(tx);
+    if (!transaction_deserialize(tx, &stream) || stream_remaining(&stream) != 0) {
+        transaction_free(tx);
+        return false;
+    }
+    transaction_compute_hash(tx);
+    return true;
+}
+
+/* Run the per-block indexer over a one-tx block at `height`. */
+static bool tnr_index_tx(struct node_db *ndb, struct transaction *tx, int height)
+{
+    struct block blk;
+    block_init(&blk);
+    blk.vtx = tx;
+    blk.num_vtx = 1;
+    blk.header.nTime = 1700000000u + (uint32_t)height;
+    struct uint256 bhash;
+    memset(&bhash, 0, sizeof(bhash));
+    memset(bhash.data, 0x60, 32);
+    bhash.data[0] = (uint8_t)height;
+    bhash.data[1] = (uint8_t)(height >> 8);
+    struct block_index pindex;
+    memset(&pindex, 0, sizeof(pindex));
+    pindex.nHeight = height;
+    pindex.phashBlock = &bhash;
+    uint8_t prev_receipt[32] = {0}, out_receipt[32];
+    bool ok = explorer_index_block(ndb, &blk, &pindex, prev_receipt,
+                                   out_receipt, NULL, NULL);
+    blk.vtx = NULL;
+    blk.num_vtx = 0;
+    return ok;
+}
+
+static const char *tnr_slp_type_name(int t)
+{
+    return t == SLP_TX_GENESIS ? "genesis" : t == SLP_TX_MINT ? "mint" :
+           t == SLP_TX_SEND ? "send" : "other";
+}
+
+/* One slp record: what the index reads from the transaction. */
+static int tnr_slp_record(const char *id, const char *hex, const char *want)
+{
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!explorer_fixture_db_open(&ndb)) {
+        printf("explorer_index: token-name-rules slp %s: db open FAIL\n", id);
+        return 1;
+    }
+    struct transaction tx;
+    if (!tnr_tx_from_hex(hex, &tx)) {
+        printf("explorer_index: token-name-rules slp %s: bad hex FAIL\n", id);
+        node_db_close(&ndb);
+        return 1;
+    }
+    bool indexed = tnr_index_tx(&ndb, &tx, 100);
+    int tokens = count_rows(&ndb, "SELECT COUNT(*) FROM zslp_tokens");
+    int slp_rows = count_rows(&ndb, "SELECT COUNT(*) FROM op_returns WHERE is_slp=1");
+    const char *got = "none";
+    if (slp_rows == 1 && tx.num_vout > 0) {
+        struct slp_message m;
+        if (slp_parse(tx.vout[0].script_pub_key.data,
+                      tx.vout[0].script_pub_key.size, &m))
+            got = tnr_slp_type_name((int)m.type);
+        else
+            got = "unparseable";
+    }
+    /* A rejected message projects nothing: no token row either. */
+    bool projected_ok = strcmp(want, "genesis") == 0 ? tokens == 1 : tokens == 0;
+    bool ok = indexed && strcmp(got, want) == 0 && projected_ok &&
+              (strcmp(want, "none") == 0 ? slp_rows == 0 : slp_rows == 1);
+    if (!ok)
+        printf("explorer_index: token-name-rules slp %s: got %s (tokens=%d "
+               "is_slp rows=%d) want %s FAIL\n", id, got, tokens, slp_rows, want);
+    transaction_free(&tx);
+    node_db_close(&ndb);
+    return ok ? 0 : 1;
+}
+
+/* One znam step against the scenario's open db. */
+static int tnr_znam_step(struct node_db *ndb, const char *scenario,
+                         const char *step, const char *prev_hex,
+                         const char *tx_hex, const char *want, int height)
+{
+    uint8_t prev[256];
+    int plen = tnr_hex_decode(prev_hex, prev, sizeof(prev));
+    struct transaction tx;
+    if (plen <= 0 || !tnr_tx_from_hex(tx_hex, &tx)) {
+        printf("explorer_index: token-name-rules znam %s/%s: bad record FAIL\n",
+               scenario, step);
+        return 1;
+    }
+    /* The spent output as the indexer would have recorded it. */
+    uint8_t a20[20];
+    bool has = false;
+    enum script_type st = utxo_classify_script(prev, (size_t)plen, a20, &has);
+    bool seeded = tx.num_vin > 0 &&
+                  db_tx_output_save(ndb, tx.vin[0].prevout.hash.data,
+                                    tx.vin[0].prevout.n, 5 * COIN, (int)st,
+                                    has ? a20 : NULL, height - 1);
+    bool indexed = seeded && tnr_index_tx(ndb, &tx, height);
+
+    /* want: <name>=<owner>/<type>:<value> or <name>=- */
+    char got[256];
+    char name[ZNAM_NAME_MAX + 1];
+    const char *eq = strchr(want, '=');
+    if (!eq || (size_t)(eq - want) > ZNAM_NAME_MAX) {
+        printf("explorer_index: token-name-rules znam %s/%s: bad expect FAIL\n",
+               scenario, step);
+        transaction_free(&tx);
+        return 1;
+    }
+    memcpy(name, want, (size_t)(eq - want));
+    name[eq - want] = '\0';
+    struct znam_entry e;
+    memset(&e, 0, sizeof(e));
+    if (db_znam_find(ndb, name, &e))
+        snprintf(got, sizeof(got), "%s=%s/%d:%s", name, e.owner_address,
+                 (int)e.target_type, e.target_value);
+    else
+        snprintf(got, sizeof(got), "%s=-", name);
+    bool ok = indexed && strcmp(got, want) == 0;
+    if (!ok)
+        printf("explorer_index: token-name-rules znam %s/%s: got %s want %s "
+               "FAIL\n", scenario, step, got, want);
+    transaction_free(&tx);
+    return ok ? 0 : 1;
+}
+
+static int test_token_name_rules_vectors(void)
+{
+    printf("explorer_index: token-name-rules parity vectors... ");
+    const char *path = getenv("TOKEN_NAME_RULES_VECTORS");
+    FILE *fp = fopen(path && *path ? path : TNR_VECTORS, "r");
+    if (!fp) {
+        printf("FAIL (vector file missing: %s)\n", path && *path ? path : TNR_VECTORS);
+        return 1;
+    }
+    int failures = 0;
+    int slp_records = 0, slp_accepted = 0, znam_records = 0;
+    char line[16384];
+    char scenario[96] = "";
+    struct node_db zdb;
+    bool zdb_open = false;
+    int height = 100;
+    memset(&zdb, 0, sizeof(zdb));
+    while (fgets(line, sizeof(line), fp)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = '\0';
+        if (n == 0 || line[0] == '#')
+            continue;
+        char *f[8];
+        int nf = tnr_split(line, f, 8);
+        if (strcmp(f[0], "slp") == 0 && nf == 4) {
+            failures += tnr_slp_record(f[1], f[2], f[3]);
+            slp_records++;
+            if (strcmp(f[3], "none") != 0)
+                slp_accepted++;
+        } else if (strcmp(f[0], "znam") == 0 && nf == 6) {
+            if (!zdb_open || strcmp(scenario, f[1]) != 0) {
+                if (zdb_open)
+                    node_db_close(&zdb);
+                memset(&zdb, 0, sizeof(zdb));
+                zdb_open = explorer_fixture_db_open(&zdb);
+                snprintf(scenario, sizeof(scenario), "%s", f[1]);
+                height = 100;
+                if (!zdb_open) {
+                    failures++;
+                    break;
+                }
+            }
+            failures += tnr_znam_step(&zdb, f[1], f[2], f[3], f[4], f[5],
+                                      height++);
+            znam_records++;
+        } else {
+            printf("\nexplorer_index: token-name-rules: unrecognised record "
+                   "%s FAIL\n", f[0]);
+            failures++;
+        }
+    }
+    fclose(fp);
+    if (zdb_open)
+        node_db_close(&zdb);
+    if (slp_records < 15 || slp_accepted < 5 || znam_records < 20)
+        failures++;
+    if (failures == 0)
+        printf("OK (%d slp, %d znam)\n", slp_records, znam_records);
+    else
+        printf("FAIL (%d slp, %d znam records)\n", slp_records, znam_records);
+    return failures;
+}
+
 int test_explorer_index(void)
 {
     int failures = 0;
@@ -643,6 +897,7 @@ int test_explorer_index(void)
 
     /* Late-join async fold contiguity (own node.db + db service). */
     failures += test_async_fold_contiguity();
+    failures += test_token_name_rules_vectors();
 
     failures += check_closed_db_read_untouched(&ndb);
 

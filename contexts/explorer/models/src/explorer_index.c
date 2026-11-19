@@ -405,6 +405,20 @@ bool db_tx_output_addr(struct node_db *ndb, const uint8_t txid[32],
         AR_READ_BLOB(s, 0, addr20, 20));
 }
 
+bool db_tx_output_addr_typed(struct node_db *ndb, const uint8_t txid[32],
+                             uint32_t vout, uint8_t addr20[20],
+                             int *script_type)
+{
+    if (!ndb || !ndb->open || !txid || !addr20 || !script_type)
+        return false;
+    sqlite3_stmt *s = NULL;
+    AR_QUERY_ONE_BOOL(ndb, s,
+        "SELECT address_hash, script_type FROM tx_outputs WHERE txid=? AND vout=?"
+        " AND address_hash IS NOT NULL",
+        (AR_BIND_BLOB(s, 1, txid, 32), AR_BIND_INT(s, 2, (int)vout)),
+        { AR_READ_BLOB(s, 0, addr20, 20); *script_type = (int)AR_COL_INT(s, 1); });
+}
+
 /* ── Reindex truncate ──────────────────────────────────────────────── */
 
 bool db_explorer_index_truncate(struct node_db *ndb)
@@ -456,8 +470,13 @@ static void index_op_return(struct node_db *ndb, const struct transaction *tx,
      * probed here — the flag is needed BEFORE any overlay dispatch. The
      * PROJECTION is the registry's job (its ZSLP apply re-parses, which is
      * the registry's decoupling contract). */
+    /* Rule ZSLP-VOUT0 (token-name-rules, shared with zclassicd): an SLP
+     * message is the script of vout[0] and of no other output (the SLP
+     * specification's rule). The first OP_RETURN of a transaction is the only
+     * one dispatched, so an SLP script at any other position is not a
+     * message: the flag stays 0 and the ZSLP overlay ignores it too. */
     struct slp_message slpmsg;
-    bool is_slp = slp_parse(script, len, &slpmsg);
+    bool is_slp = out == tx->vout && slp_parse(script, len, &slpmsg);
 
     if (!db_op_return_save(ndb, tx->hash.data, height, script, len, is_slp))
         LOG_WARN("explorer", "index_op_return: op_returns save failed at h=%d",

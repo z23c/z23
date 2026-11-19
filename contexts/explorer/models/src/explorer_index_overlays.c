@@ -83,6 +83,47 @@ bool explorer_index_owner_address(struct node_db *ndb,
                               out, outsize);
 }
 
+bool explorer_index_znam_owner_address(struct node_db *ndb,
+                                       const struct transaction *tx,
+                                       char *out, size_t outsize)
+{
+    if (!ndb || !tx || !out || outsize == 0)
+        LOG_FAIL("explorer", "explorer_index_znam_owner_address: invalid args");
+
+    if (tx->num_vin == 0 || outpoint_is_null(&tx->vin[0].prevout))
+        return false;
+    uint8_t addr20[20];
+    int script_type = 0;
+    if (!db_tx_output_addr_typed(ndb, tx->vin[0].prevout.hash.data,
+                                 tx->vin[0].prevout.n, addr20, &script_type))
+        return false;
+
+    /* Rule ZNAM-OWNER-2: the rendering follows the type of the spent output.
+     * A key hash and a script hash of the same 20 bytes are different owners. */
+    struct tx_destination dest;
+    memset(&dest, 0, sizeof(dest));
+    if (script_type == SCRIPT_P2PKH) {
+        dest.type = DEST_KEY_ID;
+        memcpy(dest.id.key.id.data, addr20, 20);
+    } else if (script_type == SCRIPT_P2SH) {
+        dest.type = DEST_SCRIPT_ID;
+        memcpy(dest.id.script.hash.data, addr20, 20);
+    } else {
+        return false;
+    }
+
+    const struct chain_params *cp = chain_params_get();
+    if (!cp)
+        return false;
+    size_t pk_len = 0, sc_len = 0;
+    const unsigned char *pk_pfx =
+        chain_params_base58_prefix(cp, B58_PUBKEY_ADDRESS, &pk_len);
+    const unsigned char *sc_pfx =
+        chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_len);
+    return encode_destination(&dest, pk_pfx, pk_len, sc_pfx, sc_len,
+                              out, outsize);
+}
+
 /* ── ZNAM ──────────────────────────────────────────────────────────── */
 
 static int apply_znam_register(struct node_db *ndb, const struct transaction *tx,
@@ -202,8 +243,14 @@ static void apply_znam_set_text_op(struct node_db *ndb,
      * master pubkey. Runs AFTER the owner check above, so a non-owner
      * never reaches it. Any other key, or a value that is not 64 hex
      * chars, projects nothing. */
+    /* The identity projection keeps its own owner form (both script types as
+     * a P2PKH address, as the ZID anchors write it); ZNAM-OWNER-2 changes
+     * only who owns a NAME, so the feed gets the signer it always got. */
+    char zid_signer[64] = "";
+    if (!explorer_index_owner_address(ndb, tx, zid_signer, sizeof(zid_signer)))
+        snprintf(zid_signer, sizeof(zid_signer), "%s", owner);
     explorer_index_apply_znam_zid_text(ndb, tx, zm->name, zm->text_key,
-                                       zm->text_value, owner, height);
+                                       zm->text_value, zid_signer, height);
 }
 
 /* Apply one parsed ZNAM op into the node.db registry tables (path A).
@@ -211,7 +258,7 @@ static void apply_znam_set_text_op(struct node_db *ndb,
  * SET_TEXT) are correct only under the genesis-ascending walk the catchup
  * driver guarantees. Every mutation of an existing name (UPDATE, TRANSFER,
  * SET_RECORD, SET_TEXT) is authorized against the current owner — the first
- * input's P2PKH signer — so only the owner can change a name's records.
+ * input's signer (P2PKH or P2SH address, ZNAM-OWNER-2) — so only the owner can change a name's records.
  * RENEW is permissionless and only extends expiry_height. Failures are
  * logged and skipped — never fatal. */
 static void apply_znam(struct node_db *ndb, const struct transaction *tx,
@@ -221,8 +268,8 @@ static void apply_znam(struct node_db *ndb, const struct transaction *tx,
         return;
 
     char owner[64] = "";
-    bool have_owner = explorer_index_owner_address(ndb, tx, owner,
-                                                   sizeof(owner));
+    bool have_owner = explorer_index_znam_owner_address(ndb, tx, owner,
+                                                        sizeof(owner));
 
     switch (zm->command) {
     case ZNAM_CMD_REGISTER:
@@ -297,6 +344,13 @@ static bool ov_apply_zslp(struct node_db *ndb, const struct transaction *tx,
                           int height, void *ctx)
 {
     (void)ctx;
+    /* Rule ZSLP-VOUT0 (token-name-rules, shared with zclassicd): the message
+     * is vout[0]'s script and no other output's. The dispatcher hands over the
+     * first OP_RETURN; when that is not vout[0] it is not an SLP message. */
+    if (tx->num_vout == 0 ||
+        tx->vout[0].script_pub_key.size != script_len ||
+        memcmp(tx->vout[0].script_pub_key.data, script, script_len) != 0)
+        return false;  // raw-return-ok:message is not in vout[0], attacker-payable chain data, so logging would storm
     struct slp_message m;
     if (!slp_parse(script, script_len, &m))
         return false;  // raw-return-ok:lokad matched, body malformed -- attacker-payable chain data, so logging would storm

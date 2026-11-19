@@ -128,6 +128,13 @@ void db_view_integrity_test_step_fail(bool enabled);
 bool db_tx_output_addr(struct node_db *ndb, const uint8_t txid[32],
                        uint32_t vout, uint8_t addr20[20]);
 
+/* As db_tx_output_addr, and also the script type the output was classified as
+ * (enum script_type: SCRIPT_P2PKH or SCRIPT_P2SH when an address hash is
+ * recorded). ZNAM owner rule ZNAM-OWNER-2 renders the owner by this type. */
+bool db_tx_output_addr_typed(struct node_db *ndb, const uint8_t txid[32],
+                             uint32_t vout, uint8_t addr20[20],
+                             int *script_type);
+
 /* Truncate every explorer projection + on-chain ZNAM table. Used by the
  * -reindex-explorer driver before the genesis..tip re-walk (ZNAM FCFS /
  * TRANSFER are not partial-replay safe, so they MUST be cleared too).
@@ -157,6 +164,17 @@ const struct overlay_registry *explorer_index_overlays(void);
 bool explorer_index_owner_address(struct node_db *ndb,
                                   const struct transaction *tx,
                                   char *out, size_t outsize);
+
+/* The ZNAM owner, rule ZNAM-OWNER-2 (token-name-rules): the address of the
+ * output the first input spends, rendered by the TYPE of that output: an exact
+ * P2PKH script is the P2PKH address, an exact P2SH script is the P2SH address
+ * (a key hash and a script hash with the same 20 bytes are two owners).
+ * Returns false (no owner, the op is ignored) for a coinbase, a missing
+ * prevout row, or any other script. explorer_index_owner_address above is
+ * unchanged: ZID and ZDIR still render both forms as a P2PKH address. */
+bool explorer_index_znam_owner_address(struct node_db *ndb,
+                                       const struct transaction *tx,
+                                       char *out, size_t outsize);
 
 /* ── ZID identity feeds (models/explorer_index_zid.c) ───────────────
  *

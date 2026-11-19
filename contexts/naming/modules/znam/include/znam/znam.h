@@ -16,7 +16,8 @@
  * Lokad ID: "ZNAM" (0x5a4e414d)
  *
  * Commands: REGISTER, UPDATE, TRANSFER, RENEW, SET_RECORD, SET_TEXT
- * Ownership determined by first input's address (P2PKH signer).
+ * Ownership (rule ZNAM-OWNER-2): the address of the output the first input
+ * spends, rendered by script type: P2PKH -> P2PKH address, P2SH -> P2SH address.
  * First-come-first-served registration, like ENS FIFSRegistrar. */
 
 #ifndef ZCL_ZNAM_H
