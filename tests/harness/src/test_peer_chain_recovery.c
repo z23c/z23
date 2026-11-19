@@ -1,0 +1,639 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
+ *
+ * test_peer_chain_recovery — isolated copy-first recovery of observation history.
+ * Exercises the real standalone binary against local SQLite fixtures, including
+ * live WAL state and structural corruption confined to the observation b-tree. */
+
+#include "test/test_core.h"
+#include "test/host_tool_capture.h"
+
+#include <sqlite3.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#if defined(_WIN32)
+#define RECOVERY_BIN "build/bin/peer_chain_recovery.exe"
+#else
+#define RECOVERY_BIN "build/bin/peer_chain_recovery"
+#endif
+
+struct recovery_bytes {
+    unsigned char *data;
+    long size;
+};
+
+static int recovery_run(const char *source, const char *destination,
+                        char *out, size_t cap)
+{
+    const char *argv[] = {RECOVERY_BIN, source, destination, NULL};
+    return test_host_tool_capture(argv, out, cap, 15000);
+}
+
+static bool recovery_exec(sqlite3 *db, const char *sql)
+{
+    char *error = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &error);
+    if (rc != SQLITE_OK)
+        fprintf(stderr, "peer_chain_recovery fixture SQL failed: %s\n",
+                error ? error : sqlite3_errmsg(db));
+    sqlite3_free(error);
+    return rc == SQLITE_OK;
+}
+
+static bool recovery_fixture(const char *path)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    bool ok = recovery_exec(db,
+        "PRAGMA page_size=4096;"
+        "CREATE TABLE peer_chain_observations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "peer_id INTEGER NOT NULL,"
+        "addr TEXT NOT NULL DEFAULT '',"
+        "user_agent TEXT NOT NULL DEFAULT '',"
+        "version INTEGER NOT NULL DEFAULT 0,"
+        "best_height INTEGER NOT NULL DEFAULT -1,"
+        "tip_hash TEXT NOT NULL DEFAULT '',"
+        "latency_us INTEGER NOT NULL DEFAULT 0,"
+        "inbound INTEGER NOT NULL DEFAULT 0,"
+        "first_seen INTEGER NOT NULL DEFAULT 0,"
+        "last_seen INTEGER NOT NULL DEFAULT 0,"
+        "observed_at INTEGER NOT NULL);"
+        "CREATE INDEX idx_peer_chain_obs_observed_at "
+        "ON peer_chain_observations(observed_at DESC);"
+        "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY);"
+        "INSERT INTO schema_migrations VALUES('027');"
+        "CREATE TABLE unrelated(id INTEGER PRIMARY KEY, value TEXT NOT NULL);"
+        "INSERT INTO unrelated VALUES(1, 'survive');"
+        "INSERT INTO peer_chain_observations("
+        "peer_id,addr,user_agent,version,best_height,tip_hash,latency_us,"
+        "inbound,first_seen,last_seen,observed_at) VALUES("
+        "7,'peer','agent',70015,100,'hash',25,0,10,11,"
+        "72623859790382856);");
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_analyze_fixture(const char *path)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK;
+    if (ok) ok = recovery_exec(db,
+        "CREATE TABLE unrelated_plain(value TEXT NOT NULL);"
+        "INSERT INTO unrelated_plain VALUES('keep-stats');"
+        "CREATE INDEX idx_unrelated_value ON unrelated(value);"
+        "ANALYZE;");
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_statistics_present(sqlite3 *db, const char *table, bool *present)
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1",
+        -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC) == SQLITE_OK;
+    int rc = ok ? sqlite3_step(st) : SQLITE_MISUSE;
+    *present = rc == SQLITE_ROW;
+    if (!*present && rc != SQLITE_DONE) ok = false;
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_statistics_add(sqlite3 *db, const char *statistics,
+                                    const char *table, const char *index,
+                                    bool table_only, int *count)
+{
+    char *sql = sqlite3_mprintf("SELECT count(*) FROM %s WHERE tbl=?1%s",
+        statistics, table_only ? " AND idx IS NULL" : index ? " AND idx=?2" : "");
+    if (!sql) return false;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC) == SQLITE_OK;
+    if (ok && index && !table_only)
+        ok = sqlite3_bind_text(st, 2, index, -1, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok) {
+        *count += sqlite3_column_int(st, 0);
+        ok = sqlite3_step(st) == SQLITE_DONE;
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    sqlite3_free(sql);
+    return ok;
+}
+
+static int recovery_statistics_count(const char *path, const char *table,
+                                     const char *index, bool table_only)
+{
+    static const char *const tables[] = {
+        "sqlite_stat1", "sqlite_stat2", "sqlite_stat3", "sqlite_stat4"
+    };
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+    bool ok = true;
+    int count = 0;
+    for (size_t i = 0; ok && i < sizeof tables / sizeof tables[0]; i++) {
+        bool present = false;
+        ok = recovery_statistics_present(db, tables[i], &present) &&
+             (!present || recovery_statistics_add(db, tables[i], table, index,
+                                                  table_only, &count));
+    }
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok ? count : -1;
+}
+
+static bool recovery_live_wal(const char *path, sqlite3 **writer)
+{
+    bool ok = sqlite3_open(path, writer) == SQLITE_OK;
+    if (ok) ok = recovery_exec(*writer,
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;"
+        "UPDATE unrelated SET value='wal-survive' WHERE id=1;"
+        "INSERT INTO peer_chain_observations("
+        "peer_id,observed_at) VALUES(8,99);");
+    if (!ok && *writer) {
+        sqlite3_close(*writer);
+        *writer = NULL;
+    }
+    return ok;
+}
+
+static struct recovery_bytes recovery_read(const char *path)
+{
+    struct recovery_bytes bytes = {NULL, -1};
+    FILE *file = fopen(path, "rb");
+    if (!file) return bytes;
+    bool ok = fseek(file, 0, SEEK_END) == 0;
+    bytes.size = ok ? ftell(file) : -1;
+    if (bytes.size > 0) bytes.data = malloc((size_t)bytes.size);
+    ok = bytes.size > 0 && bytes.data && fseek(file, 0, SEEK_SET) == 0 &&
+         fread(bytes.data, 1, (size_t)bytes.size, file) == (size_t)bytes.size;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) {
+        free(bytes.data);
+        bytes.data = NULL;
+        bytes.size = -1;
+    }
+    return bytes;
+}
+
+static bool recovery_same_bytes(const char *path, const struct recovery_bytes *before)
+{
+    struct recovery_bytes after = recovery_read(path);
+    bool ok = after.size == before->size && after.size > 0 &&
+              memcmp(after.data, before->data, (size_t)before->size) == 0;
+    free(after.data);
+    return ok;
+}
+
+static bool recovery_quick_check(const char *path, bool expect_ok)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_prepare_v2(db, "PRAGMA quick_check(1)", -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok) {
+        const unsigned char *text = sqlite3_column_text(st, 0);
+        bool clean = text && strcmp((const char *)text, "ok") == 0;
+        if (!clean)
+            fprintf(stderr, "expected fixture corruption: %s\n",
+                    text ? text : (const unsigned char *)"?");
+        ok = clean == expect_ok;
+    }
+    if (st) sqlite3_finalize(st);
+    if (db) sqlite3_close(db);
+    return ok;
+}
+
+static bool recovery_page_location(const char *path, const char *table,
+                                   int *rootpage, int *page_size)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_prepare_v2(db, "PRAGMA page_size", -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok) *page_size = sqlite3_column_int(st, 0);
+    if (st) sqlite3_finalize(st);
+    st = NULL;
+    if (ok) ok = sqlite3_prepare_v2(db,
+        "SELECT rootpage FROM sqlite_schema WHERE type='table' AND name=?1",
+        -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok) *rootpage = sqlite3_column_int(st, 0);
+    if (st) sqlite3_finalize(st);
+    if (db) sqlite3_close(db);
+    return ok && *rootpage > 1 && *page_size >= 512;
+}
+
+static bool recovery_corrupt_observed_at(const char *path)
+{
+    int rootpage = 0, page_size = 0;
+    if (!recovery_page_location(path, "peer_chain_observations", &rootpage, &page_size))
+        return false;
+    FILE *file = fopen(path, "r+b");
+    unsigned char header[7];
+    bool ok = file && fseek(file, (long)(rootpage - 1) * page_size, SEEK_SET) == 0 &&
+              fread(header, 1, sizeof header, file) == sizeof header &&
+              header[0] == 0x0d && header[3] == 0 && header[4] == 1;
+    /* A leaf cell pointer outside the page is structural b-tree corruption.
+     * Dropping the leaf still succeeds because it need not decode the row. */
+    ok = ok && fseek(file, (long)(rootpage - 1) * page_size + 5, SEEK_SET) == 0 &&
+         fputc(0xff, file) == 0xff && fputc(0xff, file) == 0xff;
+    if (file && fclose(file) != 0) ok = false;
+    return ok;
+}
+
+static bool recovery_zero_observation_root(const char *path)
+{
+    int rootpage = 0, page_size = 0;
+    if (!recovery_page_location(path, "peer_chain_observations", &rootpage, &page_size))
+        return false;
+    FILE *file = fopen(path, "r+b");
+    unsigned char *zero = calloc(1, (size_t)page_size);
+    bool ok = file && zero && fseek(file, (long)(rootpage - 1) * page_size, SEEK_SET) == 0 &&
+              fwrite(zero, 1, (size_t)page_size, file) == (size_t)page_size;
+    if (file && fclose(file) != 0) ok = false;
+    free(zero);
+    return ok;
+}
+
+static int recovery_zero_pages(const char *path)
+{
+    int rootpage = 0, page_size = 0;
+    if (!recovery_page_location(path, "peer_chain_observations", &rootpage, &page_size))
+        return -1;
+    FILE *file = fopen(path, "rb");
+    unsigned char *page = malloc((size_t)page_size);
+    bool ok = file && page;
+    int zero_pages = 0;
+    while (ok) {
+        size_t got = fread(page, 1, (size_t)page_size, file);
+        if (got == 0) {
+            if (ferror(file)) ok = false;
+            break;
+        }
+        if (got != (size_t)page_size) {
+            ok = false;
+            break;
+        }
+        bool zero = true;
+        for (int i = 0; i < page_size; i++) {
+            if (page[i] != 0) {
+                zero = false;
+                break;
+            }
+        }
+        if (zero) zero_pages++;
+    }
+    if (file && fclose(file) != 0) ok = false;
+    free(page);
+    return ok ? zero_pages : -1;
+}
+
+static bool recovery_corrupt_unrelated(const char *path)
+{
+    int rootpage = 0, page_size = 0;
+    if (!recovery_page_location(path, "unrelated", &rootpage, &page_size)) return false;
+    FILE *file = fopen(path, "r+b");
+    bool ok = file && fseek(file, (long)(rootpage - 1) * page_size, SEEK_SET) == 0 &&
+              fputc(0xff, file) == 0xff;
+    if (file && fclose(file) != 0) ok = false;
+    return ok;
+}
+
+static bool recovery_verify_destination(const char *path, const char *unrelated)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    bool ok = recovery_quick_check(path, true) &&
+              sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    const char *sql =
+        "SELECT (SELECT count(*) FROM peer_chain_observations),"
+        "(SELECT value FROM unrelated WHERE id=1),"
+        "(SELECT version FROM schema_migrations WHERE version='027'),"
+        "(SELECT count(*) FROM sqlite_schema WHERE name IN"
+        "('peer_chain_observations','idx_peer_chain_obs_observed_at'))";
+    if (ok) ok = sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok) {
+        const unsigned char *value = sqlite3_column_text(st, 1);
+        const unsigned char *version = sqlite3_column_text(st, 2);
+        ok = sqlite3_column_int(st, 0) == 0 && value && version &&
+             strcmp((const char *)value, unrelated) == 0 &&
+             strcmp((const char *)version, "027") == 0 &&
+             sqlite3_column_int(st, 3) == 2 && sqlite3_step(st) == SQLITE_DONE;
+    }
+    if (st) sqlite3_finalize(st);
+    if (db) sqlite3_close(db);
+    return ok;
+}
+
+static bool recovery_absent(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) != 0;
+}
+
+static bool recovery_write_sentinel(const char *path)
+{
+    FILE *file = fopen(path, "wb");
+    bool ok = file && fwrite("keep", 1, 4, file) == 4;
+    if (file && fclose(file) != 0) ok = false;
+    return ok;
+}
+
+static int test_peer_chain_recovery_clean_wal(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], temporary[4608], out[4096] = {0};
+    sqlite3 *writer = NULL;
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "clean");
+    TEST("peer_chain_recovery: live WAL copy recovers cleanly and preserves source") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp",
+                        destination) > 0);
+        ASSERT(recovery_fixture(source));
+        ASSERT(recovery_live_wal(source, &writer));
+        struct stat wal;
+        char wal_path[4608];
+        ASSERT(snprintf(wal_path, sizeof(wal_path), "%s-wal", source) > 0);
+        ASSERT(stat(wal_path, &wal) == 0 && wal.st_size > 0);
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "pre-recovery quick_check: ok") != NULL);
+        ASSERT(strstr(out, "final quick_check: ok") != NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_verify_destination(destination, "wal-survive"));
+        ASSERT(recovery_absent(temporary));
+        free(before.data);
+        PASS();
+    } _test_next:;
+    if (writer) sqlite3_close(writer);
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_corrupt_observation(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], out[4096] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "corrupt");
+    TEST("peer_chain_recovery: observation-only corruption resets to a clean empty table") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(recovery_fixture(source));
+        ASSERT(recovery_corrupt_observed_at(source));
+        ASSERT(recovery_quick_check(source, false));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "pre-recovery quick_check: ok") == NULL);
+        ASSERT(strstr(out, "pre-recovery quick_check:") != NULL);
+        ASSERT(strstr(out, "final quick_check: ok") != NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_verify_destination(destination, "survive"));
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_zero_root(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], out[4096] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "zero-root");
+    TEST("peer_chain_recovery: an all-zero 4KiB observation root is fully rebuilt") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(recovery_fixture(source));
+        ASSERT(recovery_zero_observation_root(source));
+        ASSERT(recovery_zero_pages(source) == 1);
+        ASSERT(recovery_quick_check(source, false));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "pre-recovery quick_check: ok") == NULL);
+        ASSERT(strstr(out, "final quick_check: ok") != NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_verify_destination(destination, "survive"));
+        ASSERT(recovery_zero_pages(destination) == 0);
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_statistics(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], out[4096] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "statistics");
+    TEST("peer_chain_recovery: recovery clears only observation ANALYZE statistics") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(recovery_fixture(source));
+        ASSERT(recovery_analyze_fixture(source));
+        int observation_stats = recovery_statistics_count(
+            source, "peer_chain_observations", NULL, false);
+        int observation_index_stats = recovery_statistics_count(
+            source, "peer_chain_observations", "idx_peer_chain_obs_observed_at", false);
+        int unrelated_table_stats = recovery_statistics_count(
+            source, "unrelated_plain", NULL, true);
+        int unrelated_index_stats = recovery_statistics_count(
+            source, "unrelated", "idx_unrelated_value", false);
+        ASSERT(observation_stats > 0 && observation_index_stats > 0);
+        ASSERT(unrelated_table_stats > 0 && unrelated_index_stats > 0);
+        ASSERT(recovery_corrupt_observed_at(source));
+        ASSERT(recovery_quick_check(source, false));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "final quick_check: ok") != NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_verify_destination(destination, "survive"));
+        ASSERT(recovery_statistics_count(
+            destination, "peer_chain_observations", NULL, false) == 0);
+        ASSERT(recovery_statistics_count(
+            destination, "unrelated_plain", NULL, true) == unrelated_table_stats);
+        ASSERT(recovery_statistics_count(
+            destination, "unrelated", "idx_unrelated_value", false) == unrelated_index_stats);
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_residual_corruption(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], temporary[4608], out[4096] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "residual");
+    TEST("peer_chain_recovery: unrelated residual corruption publishes nothing") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp",
+                        destination) > 0);
+        ASSERT(recovery_fixture(source));
+        ASSERT(recovery_corrupt_unrelated(source));
+        ASSERT(recovery_quick_check(source, false));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 1);
+        ASSERT(strstr(out, "final quick_check: ok") == NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_absent(destination));
+        ASSERT(recovery_absent(temporary));
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_refusals(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], temporary[4608], out[2048] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "refuse");
+    TEST("peer_chain_recovery: aliases, destinations, and temporary files never clobber") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp",
+                        destination) > 0);
+        ASSERT(recovery_fixture(source));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(recovery_write_sentinel(destination));
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 1);
+        struct recovery_bytes sentinel = { (unsigned char *)"keep", 4 };
+        ASSERT(recovery_same_bytes(destination, &sentinel));
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(remove(destination) == 0);
+        ASSERT(recovery_write_sentinel(temporary));
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 1);
+        ASSERT(recovery_same_bytes(temporary, &sentinel));
+        ASSERT(recovery_absent(destination));
+        ASSERT(recovery_run(source, source, out, sizeof(out)) == 1);
+        ASSERT(recovery_same_bytes(source, &before));
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_destination_sidecars(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], temporary[4608], out[2048] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "sidecars");
+    TEST("peer_chain_recovery: destination journal, WAL, and SHM files are never clobbered") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp",
+                        destination) > 0);
+        ASSERT(recovery_fixture(source));
+        struct recovery_bytes before = recovery_read(source);
+        struct recovery_bytes sentinel = { (unsigned char *)"keep", 4 };
+        ASSERT(before.data != NULL);
+        static const char *const suffixes[] = {"-journal", "-wal", "-shm"};
+        for (size_t i = 0; i < sizeof suffixes / sizeof suffixes[0]; i++) {
+            char sidecar[4608];
+            ASSERT(snprintf(sidecar, sizeof(sidecar), "%s%s", destination, suffixes[i]) > 0);
+            ASSERT(recovery_write_sentinel(sidecar));
+            ASSERT(recovery_run(source, destination, out, sizeof(out)) == 1);
+            ASSERT(recovery_same_bytes(sidecar, &sentinel));
+            ASSERT(recovery_absent(destination));
+            ASSERT(recovery_absent(temporary));
+            ASSERT(recovery_same_bytes(source, &before));
+            ASSERT(remove(sidecar) == 0);
+        }
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_peer_chain_recovery_unlink_after_publish(void)
+{
+    int failures = 0;
+#if defined(__linux__)
+    char dir[4096], source[4608], destination[4608], temporary[4608], out[4096] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "unlink");
+    TEST("peer_chain_recovery: post-publication unlink failure preserves success and destination") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp",
+                        destination) > 0);
+        ASSERT(recovery_fixture(source));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(setenv("LD_PRELOAD", "build/fixtures/peer_chain_recovery_unlink_fault.so", 1) == 0);
+        ASSERT(setenv("ZCL_TEST_PEER_RECOVERY_UNLINK", temporary, 1) == 0);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "final quick_check: ok") != NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_verify_destination(destination, "survive"));
+        struct stat destination_stat, temporary_stat;
+        ASSERT(stat(destination, &destination_stat) == 0);
+        ASSERT(stat(temporary, &temporary_stat) == 0);
+        ASSERT(destination_stat.st_dev == temporary_stat.st_dev &&
+               destination_stat.st_ino == temporary_stat.st_ino);
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)unsetenv("LD_PRELOAD");
+    (void)unsetenv("ZCL_TEST_PEER_RECOVERY_UNLINK");
+    (void)test_rm_rf_recursive(dir);
+#else
+    TEST("peer_chain_recovery: post-publication unlink failure preserves success and destination") {
+        printf("not applicable (Linux LD_PRELOAD fault; Windows publication has no unlink step)\n");
+    } _test_next:;
+#endif
+    return failures;
+}
+
+int test_peer_chain_recovery(void)
+{
+    int failures = 0;
+    struct stat st;
+    if (stat(RECOVERY_BIN, &st) != 0 || (st.st_mode & S_IXUSR) == 0) {
+        fprintf(stderr, "peer_chain_recovery: required %s missing "
+                        "(run: make peer_chain_recovery)\n", RECOVERY_BIN);
+        return 1;
+    }
+#if defined(__linux__)
+    if (stat("build/fixtures/peer_chain_recovery_unlink_fault.so", &st) != 0) {
+        fprintf(stderr, "peer_chain_recovery: required unlink fault fixture missing "
+                        "(run: make peer-chain-recovery-unlink-fault)\n");
+        return 1;
+    }
+#endif
+    failures += test_peer_chain_recovery_clean_wal();
+    failures += test_peer_chain_recovery_corrupt_observation();
+    failures += test_peer_chain_recovery_zero_root();
+    failures += test_peer_chain_recovery_statistics();
+    failures += test_peer_chain_recovery_residual_corruption();
+    failures += test_peer_chain_recovery_refusals();
+    failures += test_peer_chain_recovery_destination_sidecars();
+    failures += test_peer_chain_recovery_unlink_after_publish();
+    return failures;
+}

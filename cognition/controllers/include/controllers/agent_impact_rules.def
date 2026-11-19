@@ -112,6 +112,7 @@ AGENT_IMPACT_RULE("engine/services/src/segment_sealer_service.c|engine/services/
 AGENT_IMPACT_RULE("engine/conditions/src/segment_corruption.c|engine/conditions/include/conditions/segment_corruption.h|tests/harness/src/test_segment_corruption.c", "segment_corruption chain_segment condition_engine syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("tools/consensus_rule_sweep.c|tools/consensus_rule_sweep.h|tests/harness/src/test_consensus_rule_sweep.c", "consensus_rule_sweep make_lint_gates")
 AGENT_IMPACT_RULE("tools/jsonq.c|tests/harness/src/test_jsonq.c|tests/harness/include/test/jsonq_fixture_adapter.h", "jsonq make_lint_gates")
+AGENT_IMPACT_RULE("tools/peer_chain_recovery.c|tools/peer_chain_recovery_standalone.c|tests/harness/src/test_peer_chain_recovery.c|tests/harness/fixtures/peer_chain_recovery_unlink_fault.c", "peer_chain_recovery make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/sim/src/simnet_chaos_faults.c|engine/modules/sim/include/sim/simnet_chaos_faults.h|tests/harness/src/test_always_sync_chaos.c", "always_sync_chaos always_sync_lifecycle reducer_frontier segment_corruption supervisor condition_engine stage_repair make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_always_sync_lifecycle.c", "always_sync_lifecycle make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_read_leaf_no_datadir_write.c", "read_leaf_no_datadir_write make_lint_gates")

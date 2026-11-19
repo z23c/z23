@@ -894,6 +894,37 @@ build/bin/z23 core storage stats # inspect cache sizes
 
 ---
 
+## `peer_chain_observations` reports `SQLITE_CORRUPT`
+
+Use this only for corruption localized to the observational peer-chain history.
+The standalone utility is **copy-first only**. It opens `SOURCE_DB` read-only,
+uses SQLite's online backup API to include committed live WAL state, and resets
+only `peer_chain_observations` and its preserved `observed_at` index in the copy.
+It prints the first pre-recovery `quick_check(1)` result, then requires a final
+`ok`, an empty recovered table, and unchanged table/index SQL before publishing.
+Any residual corruption publishes nothing.
+
+```bash
+make peer_chain_recovery
+SOURCE_DB=/path/to/source/node.db
+DEST_DB=/path/to/isolated/node.recovered.db
+build/bin/peer_chain_recovery "$SOURCE_DB" "$DEST_DB"
+```
+
+`DEST_DB`, `DEST_DB.peer_chain_recovery.tmp`, `DEST_DB-journal`, `DEST_DB-wal`,
+and `DEST_DB-shm` must not already exist. The tool refuses these paths at
+preflight and checks the destination sidecars again immediately before
+publication; it never overwrites them. Rebuilding the full temporary copy with
+`VACUUM` requires disk space and time proportional to the copy size. The source
+remains unchanged. The utility does **not** replace a live database, stop or
+restart a node, clear recovery latches,
+or suppress quarantine. Review the recovered copy and use a separate explicitly
+authorized procedure for any later replacement decision.
+<!-- claim: symbol-present peer_chain_recovery_main tools/peer_chain_recovery.c # copy-first recovery implementation -->
+<!-- claim: symbol-present peer_chain_recovery Makefile # standalone build target -->
+
+---
+
 ## Boot Failure (Node Won't Start)
 
 **Symptoms:** Service fails to start.

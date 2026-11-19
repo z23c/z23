@@ -2649,6 +2649,8 @@ Z23_FLAG("ZCL_TEST_LOG", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:auto")
 Z23_FLAG("ZCL_TEST_ONLY", "env_test", "-", "-",
           "first use tests/harness/src/test.c:auto; documented at docs/quality/CHAOS_HARNESS.md:518: ZCL_TEST_ONLY=chaos_harness build/bin/test_zcl")
+Z23_FLAG("ZCL_TEST_PEER_RECOVERY_UNLINK", "env_test", "-", "-",
+          "exact temporary path whose unlink is refused by the isolated Linux publication-cleanup fixture; first use tests/harness/fixtures/peer_chain_recovery_unlink_fault.c:auto")
 Z23_FLAG("ZCL_TEST_PERF_ASSERTS", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_coins_ram.c:auto")
 Z23_FLAG("ZCL_TEST_PERF_BUDGET_SEC", "env_test", "-", "-",

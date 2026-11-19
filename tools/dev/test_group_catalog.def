@@ -1856,6 +1856,10 @@ ZCL_TEST_GROUP(export_snapshot)
  * contract. The binary is a standalone `make sqlq` artifact; the group
  * is required through its declared BUILD need. */
 ZCL_TEST_GROUP(sqlq)
+/* Copy-first peer-chain observation recovery: clean and live-WAL copies,
+ * observation-confined corruption, residual-corruption refusal, exact source
+ * preservation, and no-overwrite publication against isolated fixtures. */
+ZCL_TEST_GROUP(peer_chain_recovery)
 /* p2_invariant_check P2 self-heal invariant diagnostic regressions
  * (tools/p2_invariant_check.c -> build/bin/p2_invariant_check): the
  * HOLDS/drift/malformed/absent/missing-cursor exit contract, the LE
