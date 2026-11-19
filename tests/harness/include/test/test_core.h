@@ -1000,6 +1000,7 @@ int test_boot_blocktree_cleanup(void);
 int test_boot_legacy_blocks(void);
 int test_boot_flyclient(void);
 int test_boot_memory_guard(void);
+int test_boot_net_budgets(void);
 int test_path_check(void);
 int test_parse_num(void);
 int test_boot_progress(void);

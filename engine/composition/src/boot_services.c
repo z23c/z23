@@ -1349,6 +1349,10 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     zcl_service_kernel_init(&svc->network_kernel);
     zcl_service_kernel_init(&svc->runtime_kernel);
     zcl_service_kernel_init(&svc->frontend_kernel);
+    /* Net budgets register before the mempool adapter's start_all so the
+     * kernel starts them first (env defaults precede admission/peers). */
+    if (!boot_start_net_budgets_service(svc))
+        return false;
     if (!boot_start_mempool_limits_service(svc))
         return false;
     svc->runtime.db_service = svc->db_service;

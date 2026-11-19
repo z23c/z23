@@ -41,6 +41,11 @@
 
 bool boot_params_thread_failure_is_fatal(const struct app_context *ctx, const char *network_id);
 
+/* Registers the net_budgets service on svc->service_kernel; full contract in
+ * config/boot_net_budgets.h. Call BEFORE boot_start_mempool_limits_service
+ * so the kernel's first start_all starts it (env defaults precede peers). */
+bool boot_start_net_budgets_service(struct boot_svc_ctx *svc);
+
 /* True only for the real boot node database during pre-service cutover. */
 bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb);
 bool boot_wallet_cutover_recovery_context_matches(const struct node_db *ndb,

@@ -1344,6 +1344,7 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_boot_legacy_blocks();
     *failures += test_boot_flyclient();
     *failures += test_boot_memory_guard();
+    *failures += test_boot_net_budgets();
     *failures += test_store();
     *failures += test_store_listing();
     *failures += test_store_buyer();
