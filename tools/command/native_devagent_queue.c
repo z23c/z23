@@ -47,7 +47,8 @@
  *            queue/wait/<name>.json, and claims the next runnable row in
  *            the same call. WAITING_EXTERNAL is a worker-task wait. It is
  *            not a fleet.steer delivery state, it does not occupy the
- *            worker, and cancel drops it the way it drops a queued row.
+ *            worker, and name-only cancel drops it like a queued row;
+ *            exact cancel refuses it with CANCEL_NOT_QUEUED.
  *   json     status only, optional bool: with true the reply carries the
  *            structured shape only; otherwise screen carries the human
  *            rendering too.
@@ -112,6 +113,9 @@
  * "dev.fleet.queue-reprioritize" and returns {state:"queued", name, seq,
  * attempt, previous_priority, priority, changed} or
  * PRIORITY_IDENTITY_MISMATCH/PRIORITY_RUNNING/PRIORITY_NOT_QUEUED.
+ * The separate dev.fleet.queue-cancel leaf requires the same exact identity
+ * without priority or terminate, removes only a queued row, and identifies
+ * itself as "dev.fleet.queue-cancel" with the removed seq and attempt.
  *
  * PROCESS RULE. Spawn only through zcl_spawn_detached() from util/spawn.h.
  * popen(), system() and a shell command string are forbidden and gated.
@@ -132,6 +136,7 @@
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_devagent_queue_read.h"
+#include "command/native_dev_land_remote_shared.h"
 
 #include "base/safe_alloc.h"
 #include "base/hex.h"
@@ -171,6 +176,7 @@
 
 #define DVQ_LEAF "dev.agent.queue"
 #define DVQ_PRIORITY_LEAF "dev.fleet.queue-reprioritize"
+#define DVQ_CANCEL_LEAF "dev.fleet.queue-cancel"
 
 /* Bounded budgets: every file this leaf reads or writes is capped, so a
  * hostile state dir cannot grow the process without bound. */
@@ -185,20 +191,10 @@
 
 /* ── failure ───────────────────────────────────────────────────────────── */
 
-static void dvq_fail_leaf(struct zcl_command_reply *reply, const char *leaf,
-    const char *code, const char *phase, const char *msg, const char *evidence)
-{
-    (void)json_push_kv_str(&reply->data, "leaf", leaf);
-    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                           ZCL_COMMAND_EXIT_FAILED, code, phase, false,
-                           false, msg, evidence);
-    reply->error.human_action_required = true;
-}
-
 static void dvq_fail(struct zcl_command_reply *reply, const char *code,
                      const char *phase, const char *msg, const char *evidence)
 {
-    dvq_fail_leaf(reply, DVQ_LEAF, code, phase, msg, evidence);
+    zcl_dlr_fail(reply, DVQ_LEAF, code, phase, msg, evidence);
 }
 
 /* ── input accessors ───────────────────────────────────────────────────── */
@@ -2639,26 +2635,68 @@ static void dvq_claim(const struct zcl_command_request *req,
     reply->exit_code = 0;
 }
 
-static bool dvq_reprioritize_input(const struct zcl_command_request *req,
-    const char **name, long long *seq, long long *attempt, long long *priority)
+static bool dvq_identity_numbers(const struct zcl_command_request *req,
+    long long *seq, long long *attempt)
 {
     const struct json_value *s = json_get(req->input, "seq");
     const struct json_value *a = json_get(req->input, "attempt");
-    const struct json_value *p = json_get(req->input, "priority");
-    *name = dvq_str(req, "name");
-    if (!*name || !dvq_name_ok(*name) || !s || s->type != JSON_INT ||
-        !a || a->type != JSON_INT || !p || p->type != JSON_INT)
+    if (!s || s->type != JSON_INT || !a || a->type != JSON_INT)
         return false;
     *seq = json_get_int(s);
     *attempt = json_get_int(a);
-    *priority = json_get_int(p);
-    return *seq > 0 && *attempt > 0 && *priority >= 0 && *priority <= 3;
+    return *seq > 0 && *attempt > 0;
 }
 
-static bool dvq_reprioritize_select(struct dvq_row *rows, size_t nrows,
-    const char *name, long long seq, long long attempt, size_t *at,
+static bool dvq_identity_input(const struct zcl_command_request *req,
+    const char **name, long long *seq, long long *attempt)
+{
+    *name = dvq_str(req, "name");
+    return *name && dvq_name_ok(*name) &&
+           dvq_identity_numbers(req, seq, attempt);
+}
+
+static bool dvq_priority_input(const struct zcl_command_request *req,
+                               long long *priority)
+{
+    const struct json_value *p = json_get(req->input, "priority");
+    if (!p || p->type != JSON_INT)
+        return false;
+    *priority = json_get_int(p);
+    return *priority >= 0 && *priority <= 3;
+}
+
+static void dvq_exact_missing(size_t matches, bool cancelling,
     const char **code, const char **message, const char **evidence,
     const char *qpath)
+{
+    *code = matches ? "QUEUE_READ_FAILED" :
+        cancelling ? "CANCEL_NOT_FOUND" : "PRIORITY_IDENTITY_MISMATCH";
+    *message = matches ? "queue contains duplicate exact task identities" :
+        "no queue row matches the exact name, seq and attempt";
+    *evidence = matches ? qpath : "exact task identity";
+}
+
+static void dvq_exact_state(bool cancelling, bool running,
+    const char **code, const char **message, const char **evidence)
+{
+    if (running) {
+        *code = cancelling ? "CANCEL_RUNNING" : "PRIORITY_RUNNING";
+        *message = cancelling ?
+            "a running row belongs to its worker; exact cancel never terminates it" :
+            "a running row belongs to its worker; only queued rows reprioritize";
+        *evidence = "exact row is running";
+        return;
+    }
+    *code = cancelling ? "CANCEL_NOT_QUEUED" : "PRIORITY_NOT_QUEUED";
+    *message = cancelling ? "only queued rows cancel exactly" :
+        "only queued rows reprioritize";
+    *evidence = "exact row is not queued";
+}
+
+static bool dvq_exact_select(struct dvq_row *rows, size_t nrows,
+    const char *name, long long seq, long long attempt, size_t *at,
+    const char **code, const char **message, const char **evidence,
+    const char *qpath, bool cancelling)
 {
     size_t matches = 0;
     for (size_t i = 0; i < nrows; i++) {
@@ -2669,22 +2707,12 @@ static bool dvq_reprioritize_select(struct dvq_row *rows, size_t nrows,
         }
     }
     if (matches != 1) {
-        *code = matches ? "QUEUE_READ_FAILED" : "PRIORITY_IDENTITY_MISMATCH";
-        *message = matches ? "queue contains duplicate exact task identities" :
-            "no queue row matches the exact name, seq and attempt";
-        *evidence = matches ? qpath : "exact task identity";
-        return false;
-    }
-    if (strcmp(rows[*at].state, "running") == 0) {
-        *code = "PRIORITY_RUNNING";
-        *message = "a running row belongs to its worker; only queued rows reprioritize";
-        *evidence = "exact row is running";
+        dvq_exact_missing(matches, cancelling, code, message, evidence, qpath);
         return false;
     }
     if (strcmp(rows[*at].state, "queued") != 0) {
-        *code = "PRIORITY_NOT_QUEUED";
-        *message = "only queued rows reprioritize";
-        *evidence = "exact row is not queued";
+        dvq_exact_state(cancelling, strcmp(rows[*at].state, "running") == 0,
+            code, message, evidence);
         return false;
     }
     return true;
@@ -2702,26 +2730,27 @@ static void dvq_reprioritize(const struct zcl_command_request *req,
     int lock = -1;
     bool changed;
     if (!req || !req->input ||
-        !dvq_reprioritize_input(req, &name, &seq, &attempt, &priority)) {
-        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "BAD_INPUT", "reprioritize",
+        !dvq_identity_input(req, &name, &seq, &attempt) ||
+        !dvq_priority_input(req, &priority)) {
+        zcl_dlr_fail(reply, DVQ_PRIORITY_LEAF, "BAD_INPUT", "reprioritize",
             "name, seq, attempt and priority 0..3 select one queued row",
             "input identity or priority missing, misspelled, or out of range");
         return;
     }
     if (!dvq_dirs_resolve(&d, true)) {
-        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "STATE_DIR_FAILED", "reprioritize",
+        zcl_dlr_fail(reply, DVQ_PRIORITY_LEAF, "STATE_DIR_FAILED", "reprioritize",
             "cannot resolve the owner-private state root", "platform_state_root");
         return;
     }
     if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.queue) >=
         (int)sizeof(qpath)) {
-        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "QUEUE_READ_FAILED", "reprioritize",
+        zcl_dlr_fail(reply, DVQ_PRIORITY_LEAF, "QUEUE_READ_FAILED", "reprioritize",
             "the queue path does not fit its buffer", "platform_state_root too long");
         return;
     }
     lock = dvq_lock(d.queue);
     if (lock < 0) {
-        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "QUEUE_READ_FAILED", "reprioritize",
+        zcl_dlr_fail(reply, DVQ_PRIORITY_LEAF, "QUEUE_READ_FAILED", "reprioritize",
             "cannot take the queue lock", qpath);
         return;
     }
@@ -2731,8 +2760,8 @@ static void dvq_reprioritize(const struct zcl_command_request *req,
         evidence = qpath;
         goto fail;
     }
-    if (!dvq_reprioritize_select(rows, nrows, name, seq, attempt, &at,
-        &code, &message, &evidence, qpath))
+    if (!dvq_exact_select(rows, nrows, name, seq, attempt, &at,
+        &code, &message, &evidence, qpath, false))
         goto fail;
     previous = rows[at].priority;
     changed = previous != priority;
@@ -2761,16 +2790,18 @@ static void dvq_reprioritize(const struct zcl_command_request *req,
 fail:
     free(rows);
     dvq_unlock(lock);
-    dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, code, "reprioritize", message, evidence);
+    zcl_dlr_fail(reply, DVQ_PRIORITY_LEAF, code, "reprioritize", message, evidence);
 }
 
 /* Bounded cancel: drop queued (unclaimed) rows naming name, so a later
- * next never launches them. Running rows belong to their worker —
- * stopping one is the worker's own responsibility, never this action's.
- * Terminal outcomes are history and are never rewritten. Grant revoke
- * reaches here through the steer adapter, which cancels each queued row
- * its grant sent; direct cancel still refuses running rows. Lock,
- * temp+rename rewrite, typed refuses; no new state system appears. */
+ * next never launches them. The separate exact leaf selects one queued row
+ * by seq+attempt and has no terminate input. Running rows belong to their
+ * worker — stopping one is the worker's own
+ * responsibility, never this action's. Terminal outcomes are history and
+ * are never rewritten. Grant revoke reaches here through the steer adapter,
+ * which cancels each queued row its grant sent; direct cancel still refuses
+ * running rows. Lock, temp+rename rewrite, typed refuses; no new state
+ * system appears. */
 static bool dvq_cancel_terminate(const struct zcl_command_request *req)
 {
     const struct json_value *v = json_get(req->input, "terminate");
@@ -2778,7 +2809,8 @@ static bool dvq_cancel_terminate(const struct zcl_command_request *req)
 }
 
 static void dvq_cancel_filter(struct dvq_row *rows, size_t nrows,
-                              const char *name, bool terminate,
+                              const char *name, long long seq,
+                              long long attempt, bool exact, bool terminate,
                               struct dvq_row *kept, size_t *nkept,
                               size_t *dropped, size_t *terminated, bool *live)
 {
@@ -2788,7 +2820,8 @@ static void dvq_cancel_filter(struct dvq_row *rows, size_t nrows,
     *terminated = 0;
     *live = false;
     for (i = 0; i < nrows; i++) {
-        if (strcmp(rows[i].name, name) == 0) {
+        if (strcmp(rows[i].name, name) == 0 &&
+            (!exact || (rows[i].seq == seq && rows[i].attempt == attempt))) {
             if (strcmp(rows[i].state, "queued") == 0 ||
                 strcmp(rows[i].state, "WAITING_EXTERNAL") == 0) {
                 (*dropped)++;
@@ -2807,54 +2840,25 @@ static void dvq_cancel_filter(struct dvq_row *rows, size_t nrows,
     }
 }
 
-static void dvq_cancel(const struct zcl_command_request *req,
-                       struct zcl_command_reply *reply)
+static void dvq_cancel_locked(const struct dvq_dirs *d, const char *qpath,
+    const char *leaf, struct zcl_command_reply *reply, const char *name, long long seq,
+    long long attempt, bool exact, bool terminate, int lock)
 {
-    struct dvq_dirs d;
     struct dvq_row *rows = NULL, *kept = NULL;
-    size_t nrows = 0, nkept = 0, dropped = 0, terminated = 0;
+    size_t nrows = 0, nkept = 0, dropped = 0, terminated = 0, at = 0;
     bool live = false;
-    bool terminate = false;
-    char qpath[4096];
-    const char *name;
-    int lock = -1;
-    if (!req || !req->input) {
-        dvq_fail(reply, "BAD_INPUT", "cancel",
-                 "dev.agent.queue cancel needs a name",
-                 "request.input was missing");
-        return;
-    }
-    terminate = dvq_cancel_terminate(req);
-    name = dvq_str(req, "name");
-    if (!name || !dvq_name_ok(name)) {
-        dvq_fail(reply, "BAD_INPUT", "cancel",
-                 "name matches [A-Za-z0-9_.-]{1,64} and is never . or ..",
-                 "input.name missing, misspelled, or escaping");
-        return;
-    }
-    if (!dvq_dirs_resolve(&d, true)) {
-        dvq_fail(reply, "STATE_DIR_FAILED", "cancel",
-                 "cannot resolve the owner-private state root",
-                 "platform_state_root");
-        return;
-    }
-    if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.queue) >=
-        (int)sizeof(qpath)) {
-        dvq_fail(reply, "QUEUE_READ_FAILED", "cancel",
-                 "the queue path does not fit its buffer",
-                 "platform_state_root too long");
-        return;
-    }
-    lock = dvq_lock(d.queue);
-    if (lock < 0) {
-        dvq_fail(reply, "QUEUE_READ_FAILED", "cancel",
-                 "cannot take the queue lock", qpath);
-        return;
-    }
+    const char *code = NULL, *message = NULL, *evidence = NULL;
     if (!dvq_load_rows(qpath, &rows, &nrows)) {
         dvq_unlock(lock);
-        dvq_fail(reply, "QUEUE_READ_FAILED", "cancel",
-                 "cannot read the queue file", qpath);
+        zcl_dlr_fail(reply, leaf, "QUEUE_READ_FAILED", "cancel",
+                     "cannot read the queue file", qpath);
+        return;
+    }
+    if (exact && !dvq_exact_select(rows, nrows, name, seq, attempt, &at,
+        &code, &message, &evidence, qpath, true)) {
+        free(rows);
+        dvq_unlock(lock);
+        zcl_dlr_fail(reply, leaf, code, "cancel", message, evidence);
         return;
     }
     if (nrows > 0) {
@@ -2862,29 +2866,33 @@ static void dvq_cancel(const struct zcl_command_request *req,
         if (!kept) {
             free(rows);
             dvq_unlock(lock);
-            dvq_fail(reply, "QUEUE_WRITE_FAILED", "cancel",
-                     "cannot stage the kept rows", qpath);
+            zcl_dlr_fail(reply, leaf, "QUEUE_WRITE_FAILED", "cancel",
+                         "cannot stage the kept rows", qpath);
             return;
         }
     }
-    dvq_cancel_filter(rows, nrows, name, terminate, kept, &nkept, &dropped,
-                      &terminated, &live);
+    dvq_cancel_filter(rows, nrows, name, seq, attempt, exact, terminate,
+                      kept, &nkept, &dropped, &terminated, &live);
     if (dropped > 0 &&
-        !dvq_rewrite_rows(d.queue, qpath, kept, nkept)) {
+        !dvq_rewrite_rows(d->queue, qpath, kept, nkept)) {
         free(rows);
         free(kept);
         dvq_unlock(lock);
-        dvq_fail(reply, "QUEUE_WRITE_FAILED", "cancel",
-                 "cannot rewrite the queue file", qpath);
+        zcl_dlr_fail(reply, leaf, "QUEUE_WRITE_FAILED", "cancel",
+                     "cannot rewrite the queue file", qpath);
         return;
     }
     free(rows);
     free(kept);
     dvq_unlock(lock);
     if (dropped > 0) {
-        (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
+        (void)json_push_kv_str(&reply->data, "leaf", leaf);
         (void)json_push_kv_str(&reply->data, "state", "cancelled");
         (void)json_push_kv_str(&reply->data, "name", name);
+        if (exact) {
+            (void)json_push_kv_int(&reply->data, "seq", seq);
+            (void)json_push_kv_int(&reply->data, "attempt", attempt);
+        }
         (void)json_push_kv_int(&reply->data, "cancelled",
                                (long long)(dropped - terminated));
         (void)json_push_kv_int(&reply->data, "terminated",
@@ -2895,13 +2903,79 @@ static void dvq_cancel(const struct zcl_command_request *req,
         return;
     }
     if (live) {
-        dvq_fail(reply, "CANCEL_RUNNING", "cancel",
-                 "a running row with that name belongs to its worker",
-                 "only queued rows cancel");
+        zcl_dlr_fail(reply, leaf, "CANCEL_RUNNING", "cancel",
+                     "a running row with that name belongs to its worker",
+                     "only queued rows cancel");
         return;
     }
-    dvq_fail(reply, "CANCEL_NOT_FOUND", "cancel",
-             "no queued row carries that name", "nothing to stop");
+    zcl_dlr_fail(reply, leaf, "CANCEL_NOT_FOUND", "cancel",
+                 "no queued row carries that name", "nothing to stop");
+}
+
+static void dvq_cancel_run(const char *leaf, struct zcl_command_reply *reply,
+    const char *name, long long seq, long long attempt, bool exact,
+    bool terminate)
+{
+    struct dvq_dirs d;
+    char qpath[4096];
+    int lock;
+    if (!dvq_dirs_resolve(&d, true)) {
+        zcl_dlr_fail(reply, leaf, "STATE_DIR_FAILED", "cancel",
+                     "cannot resolve the owner-private state root",
+                     "platform_state_root");
+        return;
+    }
+    if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.queue) >=
+        (int)sizeof(qpath)) {
+        zcl_dlr_fail(reply, leaf, "QUEUE_READ_FAILED", "cancel",
+                     "the queue path does not fit its buffer",
+                     "platform_state_root too long");
+        return;
+    }
+    lock = dvq_lock(d.queue);
+    if (lock < 0) {
+        zcl_dlr_fail(reply, leaf, "QUEUE_READ_FAILED", "cancel",
+                     "cannot take the queue lock", qpath);
+        return;
+    }
+    dvq_cancel_locked(&d, qpath, leaf, reply, name, seq, attempt, exact,
+                      terminate, lock);
+}
+
+static void dvq_cancel(const struct zcl_command_request *req,
+                       struct zcl_command_reply *reply)
+{
+    const char *name;
+    if (!req || !req->input) {
+        dvq_fail(reply, "BAD_INPUT", "cancel",
+                 "dev.agent.queue cancel needs a name",
+                 "request.input was missing");
+        return;
+    }
+    name = dvq_str(req, "name");
+    if (!name || !dvq_name_ok(name)) {
+        dvq_fail(reply, "BAD_INPUT", "cancel",
+                 "name matches [A-Za-z0-9_.-]{1,64} and is never . or ..",
+                 "input.name missing, misspelled, or escaping");
+        return;
+    }
+    dvq_cancel_run(DVQ_LEAF, reply, name, 0, 0, false,
+                   dvq_cancel_terminate(req));
+}
+
+static void dvq_cancel_exact(const struct zcl_command_request *req,
+                             struct zcl_command_reply *reply)
+{
+    const char *name;
+    long long seq, attempt;
+    if (!req || !req->input ||
+        !dvq_identity_input(req, &name, &seq, &attempt)) {
+        zcl_dlr_fail(reply, DVQ_CANCEL_LEAF, "BAD_INPUT", "cancel",
+                     "exact cancel needs a valid name, seq and attempt",
+                     "input identity missing, misspelled, escaping, or invalid");
+        return;
+    }
+    dvq_cancel_run(DVQ_CANCEL_LEAF, reply, name, seq, attempt, true, false);
 }
 
 /* The `pool` object of a status reply. Every count is null — never 0 — when
@@ -4933,4 +5007,11 @@ void zcl_native_handle_dev_agent_queue_reprioritize(
 {
     if (!reply) return;
     dvq_reprioritize(request, reply);
+}
+
+void zcl_native_handle_dev_agent_queue_cancel_exact(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!reply) return;
+    dvq_cancel_exact(request, reply);
 }

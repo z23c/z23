@@ -33,6 +33,7 @@
 
 #define DQO_PATH "dev.agent.queue"
 #define DQO_PRIORITY_PATH "dev.fleet.queue-reprioritize"
+#define DQO_CANCEL_PATH "dev.fleet.queue-cancel"
 
 static char g_dqo_state[1024];
 static char g_dqo_saved_xdg[4096];
@@ -176,6 +177,86 @@ static bool dqo_priority_call(const char *name, long long seq,
     return ran;
 }
 
+struct dqo_cancel_reply {
+    char code[64];
+    char leaf[40];
+    long long seq;
+    long long attempt;
+    long long cancelled;
+    long long terminated;
+};
+
+static void dqo_cancel_begin(struct dqo_call *c, const char *name)
+{
+    json_init(&c->input);
+    json_set_object(&c->input);
+    memset(&c->request, 0, sizeof(c->request));
+    c->request.input = &c->input;
+    c->request.spec = zcl_command_registry_find(zcl_command_catalog(),
+        DQO_CANCEL_PATH, NULL);
+    zcl_command_reply_init(&c->reply, "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&c->input, "name", name);
+}
+
+static bool dqo_cancel_finish(struct dqo_call *c, bool ran,
+    struct dqo_cancel_reply *out)
+{
+    const struct json_value *v;
+    memset(out, 0, sizeof(*out));
+    out->seq = out->attempt = out->cancelled = out->terminated = -1;
+    (void)snprintf(out->code, sizeof(out->code), "%s",
+        c->reply.status == ZCL_COMMAND_STATUS_PASSED ? "" : c->reply.error.code);
+    const char *leaf = json_get_str(json_get(&c->reply.data, "leaf"));
+    (void)snprintf(out->leaf, sizeof(out->leaf), "%s", leaf ? leaf : "");
+    if ((v = json_get(&c->reply.data, "seq")) && v->type == JSON_INT)
+        out->seq = json_get_int(v);
+    if ((v = json_get(&c->reply.data, "attempt")) && v->type == JSON_INT)
+        out->attempt = json_get_int(v);
+    if ((v = json_get(&c->reply.data, "cancelled")) && v->type == JSON_INT)
+        out->cancelled = json_get_int(v);
+    if ((v = json_get(&c->reply.data, "terminated")) && v->type == JSON_INT)
+        out->terminated = json_get_int(v);
+    dqo_end(c);
+    return ran;
+}
+
+static bool dqo_cancel_exact(const char *name, long long seq,
+    long long attempt, bool terminate, struct dqo_cancel_reply *out)
+{
+    struct dqo_call c;
+    dqo_cancel_begin(&c, name);
+    (void)json_push_kv_int(&c.input, "seq", seq);
+    (void)json_push_kv_int(&c.input, "attempt", attempt);
+    if (terminate)
+        (void)json_push_kv_bool(&c.input, "terminate", true);
+    return dqo_cancel_finish(&c,
+        dqo_run_handler(&c, zcl_native_handle_dev_agent_queue_cancel_exact), out);
+}
+
+static bool dqo_cancel_unpaired(const char *name, bool seq_only,
+    struct dqo_cancel_reply *out)
+{
+    struct dqo_call c;
+    dqo_cancel_begin(&c, name);
+    if (seq_only)
+        (void)json_push_kv_int(&c.input, "seq", 2);
+    else
+        (void)json_push_kv_int(&c.input, "attempt", 1);
+    return dqo_cancel_finish(&c,
+        dqo_run_handler(&c, zcl_native_handle_dev_agent_queue_cancel_exact), out);
+}
+
+static bool dqo_cancel_wrong_type(const char *name,
+    struct dqo_cancel_reply *out)
+{
+    struct dqo_call c;
+    dqo_cancel_begin(&c, name);
+    (void)json_push_kv_str(&c.input, "seq", "2");
+    (void)json_push_kv_str(&c.input, "attempt", "1");
+    return dqo_cancel_finish(&c,
+        dqo_run_handler(&c, zcl_native_handle_dev_agent_queue_cancel_exact), out);
+}
+
 /* Claim once; the claimed name, or "" when the queue had nothing READY. */
 static void dqo_claim(char *name, size_t cap)
 {
@@ -217,6 +298,18 @@ static bool dqo_append(const char *file, const char *line)
         return false;
     ok = fputs(line, f) >= 0;
     return fclose(f) == 0 && ok;
+}
+
+static bool dqo_queue_row(long long seq, const char *name, int priority)
+{
+    char line[1024];
+    (void)snprintf(line, sizeof(line),
+        "{\"seq\":%lld,\"ts\":\"2026-09-18T00:00:00Z\",\"kind\":\"leaf\","
+        "\"name\":\"%s\",\"group\":\"\",\"path\":\"\",\"brief\":\"\","
+        "\"model\":\"\",\"attempt\":1,\"priority\":%d,\"state\":\"queued\","
+        "\"worktree\":\"\",\"pid_or_unit\":\"\",\"started\":0}\n",
+        seq, name, priority);
+    return dqo_append("queue.jsonl", line);
 }
 
 static int dqo_case_priority(void)
@@ -294,14 +387,74 @@ static int dqo_case_reprioritize(void)
         ASSERT(dqo_priority_call("waiting", 3, 1, 0, &r));
         ASSERT_STR_EQ(r.code, "PRIORITY_NOT_QUEUED");
         ASSERT(dqo_post_ok("duplicate", 2, NULL));
-        ASSERT(dqo_append("queue.jsonl",
-            "{\"seq\":4,\"ts\":\"2026-09-18T00:00:00Z\",\"kind\":\"leaf\","
-            "\"name\":\"duplicate\",\"group\":\"\",\"path\":\"\",\"brief\":\"\","
-            "\"model\":\"\",\"attempt\":1,\"priority\":2,\"state\":\"queued\","
-            "\"worktree\":\"\",\"pid_or_unit\":\"\",\"started\":0}\n"));
+        ASSERT(dqo_queue_row(4, "duplicate", 2));
         ASSERT(dqo_priority_call("duplicate", 4, 1, 0, &r));
         ASSERT_STR_EQ(r.code, "QUEUE_READ_FAILED");
         ASSERT_STR_EQ(r.leaf, DQO_PRIORITY_PATH);
+        PASS();
+    }
+_test_next:;
+    dqo_restore();
+    return failures;
+}
+
+static int dqo_case_cancel_exact(void)
+{
+    int failures = 0;
+    TEST("queue order: exact cancel cannot remove a stale or running task") {
+        struct dqo_cancel_reply r;
+        char tmp[1300];
+        dqo_isolate("cancel-exact");
+        ASSERT(dqo_post_ok("victim", 3, NULL));
+        ASSERT(dqo_post_ok("other", 1, NULL));
+        (void)snprintf(tmp, sizeof(tmp), "%s/z23/dev/queue/queue.jsonl.tmp",
+            g_dqo_state);
+#if !defined(_WIN32)
+        ASSERT(mkdir(tmp, 0700) == 0);
+#endif
+        ASSERT(dqo_cancel_exact("victim", 1, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "QUEUE_WRITE_FAILED");
+        ASSERT(r.cancelled == -1 && r.terminated == -1);
+#if !defined(_WIN32)
+        ASSERT(rmdir(tmp) == 0);
+#endif
+        ASSERT(dqo_cancel_exact("victim", 1, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "");
+        ASSERT_STR_EQ(r.leaf, DQO_CANCEL_PATH);
+        ASSERT(r.seq == 1 && r.attempt == 1 && r.cancelled == 1 &&
+            r.terminated == 0);
+        ASSERT(dqo_cancel_exact("victim", 1, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "CANCEL_NOT_FOUND");
+        ASSERT(!dqo_cancel_exact("other", 2, 0, false, &r));
+        ASSERT(dqo_cancel_unpaired("other", true, &r));
+        ASSERT_STR_EQ(r.code, "BAD_INPUT");
+        ASSERT(dqo_cancel_unpaired("other", false, &r));
+        ASSERT_STR_EQ(r.code, "BAD_INPUT");
+        ASSERT(!dqo_cancel_wrong_type("other", &r));
+        ASSERT(dqo_claim_is("other"));
+        ASSERT(!dqo_cancel_exact("other", 2, 1, true, &r));
+        ASSERT(dqo_cancel_exact("other", 2, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "CANCEL_RUNNING");
+        ASSERT(r.cancelled == -1 && r.terminated == -1);
+        ASSERT(dqo_cancel_exact("other", 2, 2, false, &r));
+        ASSERT_STR_EQ(r.code, "CANCEL_NOT_FOUND");
+        ASSERT(dqo_post_ok("waiting", 3, "owner"));
+        ASSERT(dqo_claim_is(""));
+        ASSERT(dqo_cancel_exact("waiting", 3, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "CANCEL_NOT_QUEUED");
+        ASSERT(dqo_queue_row(4, "renewed", 2));
+        ASSERT(dqo_queue_row(5, "renewed", 2));
+        ASSERT(dqo_cancel_exact("renewed", 4, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "");
+        ASSERT(r.cancelled == 1 && r.terminated == 0);
+        ASSERT(dqo_claim_is("renewed"));
+        ASSERT(dqo_cancel_exact("renewed", 5, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "CANCEL_RUNNING");
+        ASSERT(dqo_queue_row(6, "duplicate-cancel", 2));
+        ASSERT(dqo_queue_row(6, "duplicate-cancel", 2));
+        ASSERT(dqo_cancel_exact("duplicate-cancel", 6, 1, false, &r));
+        ASSERT_STR_EQ(r.code, "QUEUE_READ_FAILED");
+        ASSERT(r.cancelled == -1 && r.terminated == -1);
         PASS();
     }
 _test_next:;
@@ -454,6 +607,7 @@ int test_devagent_queue_order(void)
 #endif
     failures += dqo_case_priority();
     failures += dqo_case_reprioritize();
+    failures += dqo_case_cancel_exact();
     failures += dqo_case_after();
     failures += dqo_case_legacy_and_refusals();
     failures += dqo_case_backpressure();

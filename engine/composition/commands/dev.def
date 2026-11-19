@@ -2960,6 +2960,33 @@ ZCL_COMMAND_DEV_COMMAND(
     "exact queued reprioritization is a development-lane coordination surface",
     "z23-dev dev fleet queue-reprioritize")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.fleet.queue-cancel", "dev.fleet", "",
+    "Cancel one exact queued task",
+    "Removes only the queued row matching name, seq and attempt, under the "
+    "existing scheduler lock and atomic rewrite. Every selector is required, "
+    "so a stale ChatGPT observation cannot cancel a later incarnation of the "
+    "same ref. Running rows refuse CANCEL_RUNNING, other non-queued states "
+    "refuse CANCEL_NOT_QUEUED, absent or stale identities refuse "
+    "CANCEL_NOT_FOUND, and duplicate exact identities refuse "
+    "QUEUE_READ_FAILED. Success returns the removed identity. This leaf has "
+    "no terminate input and never signals or removes a running process. "
+    "Legacy name-only cancellation remains in dev.agent.queue for grant "
+    "revocation. Local operator authority only; no remote or grant adapter "
+    "is implied.", 16384,
+    "agent,queue,cancel,exact,task",
+    "zcl.agent_queue_cancel_input.v1", "zcl.agent_queue.v1",
+    "name,seq,attempt", "name,seq,attempt",
+    "z23-dev dev fleet queue-cancel --name=<ref> --seq=1 --attempt=1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_agent_queue_cancel_exact,
+    "exact queued cancellation is a development-lane coordination surface",
+    "z23-dev dev fleet queue-cancel")
+
 /* ── dev.agent.worker ──────────────────────────────────────────────────────
  * The resident dev-only loop that consumes dev.agent.queue continuously.
  * It claims ONE job (queue claim persists claim.json first), runs the
