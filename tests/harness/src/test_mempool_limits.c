@@ -14,6 +14,7 @@
 #include "validation/txmempool.h"
 #include "event/event.h"
 #include "platform/os_proc.h"
+#include "util/hw_profile.h"
 #include "util/mem_pressure.h"
 
 #include <stdatomic.h>
@@ -106,9 +107,14 @@ static int mlt_defaults_match_builtin(void)
     int failures = 0;
     printf("mempool_limits: config defaults... ");
     {
+        unsetenv("ZCL_MEMPOOL_MAX_BYTES");
         struct mempool_limits_config cfg;
         mempool_limits_config_defaults(&cfg);
-        bool ok = cfg.max_bytes      == MEMPOOL_LIMITS_DEFAULT_MAX_BYTES;
+        /* Same formula as mempool_limits_config_defaults: the byte
+         * cap falls back to this host's RAM-class default. */
+        const int64_t class_default = mempool_limits_class_default_max_bytes(
+            hw_profile_ram_class_of(hw_profile_ram_bytes()));
+        bool ok = cfg.max_bytes      == class_default;
         ok = ok && cfg.max_tx_count  == MEMPOOL_LIMITS_DEFAULT_MAX_TX_COUNT;
         ok = ok && cfg.expiry_seconds == MEMPOOL_LIMITS_DEFAULT_EXPIRY_SEC;
         ok = ok && cfg.min_relay_fee_zat == MEMPOOL_LIMITS_DEFAULT_MIN_RELAY;
@@ -132,6 +138,14 @@ static int mlt_env_overrides_limits_config(void)
         struct mempool_limits_config cfg;
         mempool_limits_config_defaults(&cfg);
         bool ok = cfg.max_bytes        == 1048576;
+        /* 1 MB is not any class's default, so a pass here proves
+         * ZCL_MEMPOOL_MAX_BYTES beats every RAM class. */
+        ok = ok && cfg.max_bytes
+                != mempool_limits_class_default_max_bytes(HW_PROFILE_RAM_HIGH);
+        ok = ok && cfg.max_bytes
+                != mempool_limits_class_default_max_bytes(HW_PROFILE_RAM_MEDIUM);
+        ok = ok && cfg.max_bytes
+                != mempool_limits_class_default_max_bytes(HW_PROFILE_RAM_LOW);
         ok = ok && cfg.max_tx_count    == 42;
         ok = ok && cfg.expiry_seconds  == 3600;
         ok = ok && cfg.min_relay_fee_zat == 500;
@@ -141,6 +155,23 @@ static int mlt_env_overrides_limits_config(void)
         unsetenv("ZCL_MEMPOOL_EXPIRY_SECONDS");
         unsetenv("ZCL_MIN_RELAY_FEE_ZAT");
         unsetenv("ZCL_MEMPOOL_LIMITS_TICK_SEC");
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* ── 2b. class-default byte caps (pure anchors) ───────── */
+static int mlt_class_defaults_anchor(void)
+{
+    int failures = 0;
+    printf("mempool_limits: class default byte caps... ");
+    {
+        bool ok = mempool_limits_class_default_max_bytes(HW_PROFILE_RAM_HIGH)
+                      == MEMPOOL_LIMITS_DEFAULT_MAX_BYTES;
+        ok = ok && mempool_limits_class_default_max_bytes(HW_PROFILE_RAM_MEDIUM)
+                      == (int64_t)(200LL * 1024 * 1024);
+        ok = ok && mempool_limits_class_default_max_bytes(HW_PROFILE_RAM_LOW)
+                      == (int64_t)(100LL * 1024 * 1024);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
     return failures;
@@ -582,6 +613,7 @@ int test_mempool_limits(void)
 
     failures += mlt_defaults_match_builtin();
     failures += mlt_env_overrides_limits_config();
+    failures += mlt_class_defaults_anchor();
     failures += mlt_enforce_keeps_pool_under_caps();
     failures += mlt_enforce_drops_lowest_fee_per_byte();
     failures += mlt_enforce_drops_until_byte_cap();

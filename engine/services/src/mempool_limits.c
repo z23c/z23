@@ -42,6 +42,7 @@
 #include <time.h>
 
 #include "supervisors/domains.h"
+#include "util/hw_profile.h"
 #include "util/log_macros.h"
 #include "util/mem_pressure.h"
 #include "util/safe_alloc.h"
@@ -236,12 +237,27 @@ static int env_int(const char *name, int fallback)
     return (int)parsed;
 }
 
+/* Byte-cap default by RAM class. HIGH keeps the flat 300 MB default
+ * byte-identical; LOW/MEDIUM tighten so a mempool-at-cap node (300 MB
+ * wire cap + 30-50 MB service overhead) stays inside its RAM budget.
+ * Pure: no env reads, no hardware probing — callers pass the class. */
+int64_t mempool_limits_class_default_max_bytes(enum hw_profile_ram_class cls)
+{
+    switch (cls) {
+    case HW_PROFILE_RAM_LOW:    return (int64_t)(100LL * 1024 * 1024);
+    case HW_PROFILE_RAM_MEDIUM: return (int64_t)(200LL * 1024 * 1024);
+    case HW_PROFILE_RAM_HIGH:   return MEMPOOL_LIMITS_DEFAULT_MAX_BYTES;
+    }
+    return MEMPOOL_LIMITS_DEFAULT_MAX_BYTES;
+}
+
 void mempool_limits_config_defaults(struct mempool_limits_config *cfg)
 {
     if (!cfg) return;
     memset(cfg, 0, sizeof(*cfg));
-    cfg->max_bytes =
-        env_i64("ZCL_MEMPOOL_MAX_BYTES", MEMPOOL_LIMITS_DEFAULT_MAX_BYTES);
+    cfg->max_bytes = env_i64("ZCL_MEMPOOL_MAX_BYTES",
+        mempool_limits_class_default_max_bytes(
+            hw_profile_ram_class_of(hw_profile_ram_bytes())));
     cfg->max_tx_count =
         env_i64("ZCL_MEMPOOL_MAX_TXS", MEMPOOL_LIMITS_DEFAULT_MAX_TX_COUNT);
     cfg->expiry_seconds =

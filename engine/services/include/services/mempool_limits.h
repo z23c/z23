@@ -57,6 +57,7 @@
 #define ZCL_SERVICES_MEMPOOL_LIMITS_H
 
 #include "platform/time_compat.h"
+#include "util/hw_profile.h"
 #include "util/result.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -71,7 +72,10 @@ struct tx_mempool;
  * back. Environment overrides are read once in
  * `mempool_limits_config_defaults`.
  *
- *   ZCL_MEMPOOL_MAX_BYTES       int64  (default 300 MB)
+ *   ZCL_MEMPOOL_MAX_BYTES       int64  (default 300 MB; the byte cap
+ *                               default scales with RAM class — HIGH
+ *                               300 MB, MEDIUM 200 MB, LOW 100 MB —
+ *                               see `mempool_limits_class_default_max_bytes`)
  *   ZCL_MEMPOOL_MAX_TXS         int64  (default 50 000)
  *   ZCL_MEMPOOL_EXPIRY_SECONDS  int64  (default 72*3600 = 72 h)
  *   ZCL_MIN_RELAY_FEE_ZAT       int64  (default 100 zatoshi)
@@ -83,6 +87,13 @@ struct tx_mempool;
 #define MEMPOOL_LIMITS_DEFAULT_EXPIRY_SEC   (int64_t)(72LL * 3600)
 #define MEMPOOL_LIMITS_DEFAULT_MIN_RELAY    (int64_t)100
 #define MEMPOOL_LIMITS_DEFAULT_TICK_SEC     60
+
+/* Byte-cap default for a host's RAM class (pure decision, no env
+ * reads). HIGH == MEMPOOL_LIMITS_DEFAULT_MAX_BYTES unchanged; LOW
+ * and MEDIUM hosts get tighter caps so a mempool-at-cap node stays
+ * within its RAM budget. `ZCL_MEMPOOL_MAX_BYTES` still wins on
+ * every host when set. */
+int64_t mempool_limits_class_default_max_bytes(enum hw_profile_ram_class cls);
 
 /* ── Config ─────────────────────────────────────────────────── */
 
