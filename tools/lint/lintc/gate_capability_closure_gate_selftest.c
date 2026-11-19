@@ -609,11 +609,41 @@ static int cgs_case_x(const struct ccs_fx *fx)
     return cgs_check(fx, "x", &cfg, 0, NULL, "X: objects newer than their sources grade as before, not stale");
 }
 
+/* True when this process can read a file chmod-ed to 0000: root, or a runner
+ * holding CAP_DAC_OVERRIDE. The FATAL expectation of the chmod-000 cases only
+ * holds when the probe fails; a probe that cannot even stage its file also
+ * reports false, so the case runs and fails open-eyed rather than skips. */
+static bool cgs_can_read_unreadable(void)
+{
+    static bool probed, can;
+    struct ccs_fx fx;
+    char path[CCD_PATH];
+    int w, r;
+    if (probed)
+        return can;
+    probed = true;
+    if (ccs_scratch(&fx) != 0)
+        return false;
+    ccs_path(&fx, "unreadable_probe", path);
+    w = open(path, O_CREAT | O_WRONLY | O_EXCL, 0600);
+    if (w < 0 || fchmod(w, 0) != 0 || close(w) != 0) {
+        if (w >= 0)
+            close(w);
+        rap_rm_rf(fx.base);
+        return false;
+    }
+    r = open(path, O_RDONLY);
+    can = r >= 0 && close(r) == 0;
+    (void)unlink(path);
+    rap_rm_rf(fx.base);
+    return can;
+}
+
 static int cgs_skip_root(const char *label)
 {
-    if (geteuid() != 0)
+    if (!cgs_can_read_unreadable())
         return 0;
-    printf("  SKIP %s: running as root, chmod 000 does not deny the read\n", label);
+    printf("  SKIP %s: privileged process, chmod 000 does not deny the read\n", label);
     return 1;
 }
 
