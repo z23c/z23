@@ -410,6 +410,9 @@ static bool rcv_scope_ok(const char *s)
  * ends; nothing here outlives one beat. */
 struct rcv_row {
     long long seq;
+    long long row_offset;
+    const char *stream;
+    const char *row_sha3;
     const char *ts;
     const char *from;
     const char *to;
@@ -1420,6 +1423,10 @@ static bool rcv_row_parse(const struct json_value *r, struct rcv_row *v)
     if (!s || s->type != JSON_INT)
         return false;
     v->seq = (long long)json_get_int(s);
+    s = json_get(r, "row_offset");
+    v->row_offset = s && s->type == JSON_INT ? json_get_int(s) : -1;
+    v->stream = rcv_field(r, "stream");
+    v->row_sha3 = rcv_field(r, "row_sha3");
     v->ts = rcv_field(r, "ts");
     v->from = rcv_field(r, "from");
     v->to = rcv_field(r, "to");
@@ -1868,14 +1875,28 @@ static bool rcv_hex_token(const char *s, size_t want)
     return true;
 }
 
+static bool rcv_source_render(const struct rcv_row *row, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (!row || row->row_offset < 0 || !rcv_label_token(row->to, 64) ||
+        !rcv_label_token(row->stream, 128) || !rcv_hex_token(row->row_sha3, 64))
+        return true;
+    int n = snprintf(out, cap,
+        "source_to=%s\nsource_stream=%s\nsource_offset=%lld\nsource_sha3=%s\n",
+        row->to, row->stream, row->row_offset, row->row_sha3);
+    return n > 0 && (size_t)n < cap;
+}
+
 static bool rcv_evidence_render(const struct rcv_direction *d,
                                 const struct rcv_workspace *w,
                                 const char *brief, const char *sender,
                                 const char *binding, const char *expiry,
-                                const char *signer, char *out, size_t cap)
+                                const char *signer, const struct rcv_row *row,
+                                char *out, size_t cap)
 {
     char wsd[65], bd[65];
     char sigline[128];
+    char source[512] = "";
     int n;
     if (!rcv_label_token(sender, 64) ||
         !rcv_hex_token(binding, ZCL_FLEET_STEER_BINDING_HEX))
@@ -1893,17 +1914,18 @@ static bool rcv_evidence_render(const struct rcv_direction *d,
             return false;
         sigline[0] = '\0';
     }
+    if (!rcv_source_render(row, source, sizeof(source))) return false;
     rcv_brief_digest(w->root, wsd);
     rcv_brief_digest(brief, bd);
     n = snprintf(out, cap,
                  "sender=%s\nsender_binding=%s\ngrant_expiry=%s\n%s"
                  "workspace_selector=%s\nworkspace_sha3=%s\n"
                  "workspace_head=%s\nworkspace_tree_sha3=%s\n"
-                 "resolved_sha3=%s\nworkspace=%s\n",
+                 "resolved_sha3=%s\n%sworkspace=%s\n",
                  sender, binding, expiry, sigline,
                  d->selector ? d->workspace : "absolute", wsd,
                  w->head[0] ? w->head : "none", w->tree[0] ? w->tree : "none",
-                 bd, w->root);
+                 bd, source, w->root);
     return n > 0 && (size_t)n < cap;
 }
 
@@ -2015,7 +2037,7 @@ static void rcv_install(struct rcv_ctx *c, const struct rcv_row *v,
         return;
     if (!rcv_brief_render(v->body, w->root, brief, sizeof(brief)) ||
         !rcv_evidence_render(d, w, brief, v->from, v->sender_binding, expiry,
-                             board ? v->board_signer : "", record,
+                             board ? v->board_signer : "", v, record,
                              sizeof(record))) {
         rcv_answer_refuse(c, v, src, "RECEIVE_WORKSPACE_INVALID",
                           "resolved-brief-too-long");
@@ -2669,6 +2691,7 @@ static const char *rcv_lock_state(const struct rcv_paths *p)
 
 #endif /* _WIN32 */
 
+
 /* ONE definition of the public entry point, above the platform split: the
  * arms differ only in how the singleton and the watch are held, and two
  * non-static bodies for one name is what check-arm-symbol-single refuses. */
@@ -2712,6 +2735,107 @@ long long zcl_devagent_receive_drive(const struct rcv_drive_opts *opts,
         st = &local;
     }
     return rcv_drive_posix(opts, st);
+}
+
+
+/* Verify one live queue row against stable receiver-owned admission files. */
+static bool rcv_proof_read(const char *path, char *out, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(out, 1, cap - 1, f);
+    bool ok = !ferror(f) && feof(f) && !memchr(out, 0, n);
+    if (fclose(f) != 0) ok = false;
+    out[ok ? n : 0] = 0;
+    return ok;
+}
+
+static size_t rcv_admission_matches(const struct json_value *rows,
+    const char *ref, long long seq, long long attempt, const char *brief)
+{
+    size_t matches = 0;
+    if (!rows || rows->type != JSON_ARR) return 0;
+    for (size_t i = 0; i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *sv = json_get(row, "seq");
+        const struct json_value *av = json_get(row, "attempt");
+        if (!sv || sv->type != JSON_INT || json_get_int(sv) != seq ||
+            !av || av->type != JSON_INT || json_get_int(av) != attempt ||
+            strcmp(rcv_field(row, "name"), ref) ||
+            strcmp(rcv_field(row, "brief"), brief)) continue;
+        matches++;
+    }
+    return matches;
+}
+
+static bool rcv_admission_queue(const char *ref, long long seq,
+                                long long attempt, const char *brief)
+{
+    struct rcv_sub sub;
+    rcv_sub_begin(&sub, "zcl.agent_queue.v1", "dev.agent.queue");
+    bool ok = sub.valid && rcv_sub_input(&sub, "{\"action\":\"status\",\"json\":true}");
+    if (ok) { zcl_native_handle_dev_agent_queue(&sub.request, &sub.reply); sub.ran = true; }
+    size_t count = 0;
+    if (ok && rcv_sub_ok(&sub)) {
+        count += rcv_admission_matches(json_get(&sub.reply.data, "queued"), ref, seq, attempt, brief);
+        count += rcv_admission_matches(json_get(&sub.reply.data, "running"), ref, seq, attempt, brief);
+    }
+    rcv_sub_end(&sub);
+    return count == 1;
+}
+
+static bool rcv_admission_field(const char *record, const char *key,
+                                const char *expected)
+{
+    size_t keylen = strlen(key), want = strlen(expected), count = 0;
+    bool same = false;
+    for (const char *p = record; *p;) {
+        const char *end = strchr(p, '\n');
+        if (!end) return false;
+        if ((size_t)(end - p) > keylen && !memcmp(p, key, keylen) && p[keylen] == '=') {
+            count++;
+            same = (size_t)(end - p - keylen - 1) == want &&
+                   !memcmp(p + keylen + 1, expected, want);
+        }
+        p = end + 1;
+    }
+    return count == 1 && same;
+}
+
+static bool rcv_admission_files(const struct rcv_ref_files *f, const char *body,
+    const char *resolved_hash, const char *source_to, const char *stream,
+    long long offset, const char *source_sha3)
+{
+    char received[RCV_BRIEF_MAX], brief[RCV_BRIEF_MAX], evidence[2048], digest[65], offset_text[32];
+    if (!rcv_proof_read(f->received, received, sizeof(received)) || strcmp(received, body) ||
+        !rcv_proof_read(f->brief, brief, sizeof(brief)) ||
+        !rcv_proof_read(f->evidence, evidence, sizeof(evidence))) return false;
+    rcv_brief_digest(brief, digest);
+    if (strcmp(digest, resolved_hash)) return false;
+    int n = snprintf(offset_text, sizeof(offset_text), "%lld", offset);
+    return n > 0 && (size_t)n < sizeof(offset_text) &&
+        rcv_admission_field(evidence, "resolved_sha3", digest) &&
+        rcv_admission_field(evidence, "source_to", source_to) &&
+        rcv_admission_field(evidence, "source_stream", stream) &&
+        rcv_admission_field(evidence, "source_offset", offset_text) &&
+        rcv_admission_field(evidence, "source_sha3", source_sha3);
+}
+
+bool zcl_devagent_receive_admission(const char *ref, const char *body,
+                                    long long seq, long long attempt,
+                                    const char *resolved_hash, const char *source_to,
+                                    const char *stream, long long offset,
+                                    const char *source_sha3)
+{
+    struct rcv_ctx c = {0};
+    struct rcv_ref_files files;
+    if (!rcv_ref_ok(ref) || !body || seq <= 0 || attempt < 0 || !resolved_hash ||
+        !rcv_hex_token(resolved_hash, 64) || !rcv_label_token(source_to, 64) ||
+        !rcv_label_token(stream, 128) || offset < 0 || !rcv_hex_token(source_sha3, 64) ||
+        !rcv_paths_resolve(&c.p) || !rcv_ref_files_of(&c, ref, &files)) return false;
+    return rcv_admission_files(&files, body, resolved_hash, source_to, stream, offset, source_sha3) &&
+           rcv_admission_queue(ref, seq, attempt, files.brief) &&
+           rcv_admission_files(&files, body, resolved_hash, source_to, stream, offset, source_sha3);
 }
 
 /* ── status: facts only, writes nothing ────────────────────────────────── */

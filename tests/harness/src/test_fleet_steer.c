@@ -5868,6 +5868,186 @@ static bool fmx_mbox_exact_body(const char *grant, const struct json_value *row)
     return ok;
 }
 
+static bool fmx_disposition_item(struct json_value *item,
+    const struct json_value *row, const char *state, const char *key,
+    const char *hash, long long bytes)
+{
+    static const char *const keys[] = {"stream", "row_offset", "seq", "row_sha3"};
+    struct json_value d;
+    json_init(&d); json_set_object(&d);
+    bool ok = true;
+    for (size_t i = 0; i < 4; i++) {
+        const struct json_value *v = json_get(row, keys[i]);
+        ok = ok && v && json_push_kv(&d, keys[i], v);
+    }
+    ok = ok && json_push_kv_bool(&d, "read", true) &&
+        json_push_kv_int(&d, "read_bytes", bytes) &&
+        json_push_kv_str(&d, "read_sha3", hash) &&
+        json_push_kv_str(&d, "state", state);
+    fmx_item(item, "bob", "read receipt", "work-1", key);
+    ok = ok && json_push_kv_str(item, "kind", "result") &&
+         json_push_kv(item, "disposition", &d);
+    json_free(&d);
+    return ok;
+}
+
+static bool fmx_wrong_disposition(const char *grant, const struct json_value *row,
+                                  const char *hash, long long bytes, const char *field)
+{
+    struct fmx_call sent = {0};
+    struct json_value item, items;
+    json_init(&item); json_init(&items); json_set_array(&items);
+    bool ok = fmx_disposition_item(&item, row, "DEFERRED", field, hash, bytes);
+    struct json_value *value = (struct json_value *)json_get(&item, field);
+    if (value) json_set_str(value, "wrong-target");
+    ok = ok && value && json_get_str(value) && json_push_back(&items, &item);
+    ok = ok && fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent);
+    const struct json_value *r = ok ? json_at(fmx_arr(&sent, "items"), 0) : NULL;
+    ok = r && !strcmp(fmx_wstr(r, "error"), "BAD_DISPOSITION");
+    fmx_end(&sent); json_free(&item); json_free(&items);
+    return ok;
+}
+
+static int fmx_t_disposition_verified(void)
+{
+    int failures = 0;
+    struct fmx_call box = {0}, sent = {0};
+    struct json_value item, items;
+    char grant[64], limited[64], raw[530], body[530], hash[65];
+    unsigned char digest[32];
+    json_init(&item); json_init(&items);
+    TEST("steer: explicit full read dispositions bind exact evidence and retry") {
+        fmx_isolate("disposition_verified");
+        memset(raw, 'x', 500); strcpy(raw + 500, "\\u00e9");
+        memset(body, 'x', 500); strcpy(body + 500, "\xc3\xa9");
+        sha3_256((const unsigned char *)body, strlen(body), digest);
+        zcl_hex_encode(digest, sizeof(digest), hash);
+        ASSERT(fmx_mint_as("brief,send,evidence", "alice", grant, sizeof(grant)));
+        ASSERT(fmx_mint_as("brief,send", "alice", limited, sizeof(limited)));
+        fmx_seed_inbox("peer", "2026-09-20T00:00:00Z", 7, "bob", "alice", "directive", raw, "work-1");
+
+        long long before = fmx_mail_count();
+        fmx_mbox_call(&box, grant, "alice", NULL, 20);
+        ASSERT(fmx_run(&box, zcl_native_handle_fleet_steer_mailbox) && fmx_ok(&box));
+        const struct json_value *rows = fmx_arr(&box, "rows");
+        ASSERT(rows && json_size(rows) == 1);
+        const struct json_value *row = json_at(rows, 0);
+        ASSERT(json_get_bool(json_get(row, "body_truncated")));
+        ASSERT_EQ(fmx_mail_count(), before);
+        const char *const states[] = {"DEFERRED", "BLOCKED"};
+        for (size_t i = 0; i < 2; i++) {
+            char key[32]; snprintf(key, sizeof(key), "decision-%zu", i);
+            json_set_array(&items);
+            ASSERT(fmx_disposition_item(&item, row, states[i], key, hash, (long long)strlen(body)));
+            ASSERT(json_push_back(&items, &item));
+            ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
+            ASSERT_EQ(fmx_int(&sent, "accepted"), 1);
+            const struct json_value *first = json_at(fmx_arr(&sent, "items"), 0);
+            ASSERT(first && json_get_bool(json_get(first, "verified_read")));
+            ASSERT_STR_EQ(fmx_wstr(first, "disposition"), states[i]);
+            fmx_end(&sent);
+            struct json_value *d = (struct json_value *)json_get(&items.children[0], "disposition");
+            ASSERT(d && d->num_children == 8);
+            for (size_t j = 0; j < 4; j++) {
+                char *k = d->keys[j]; d->keys[j] = d->keys[7-j]; d->keys[7-j] = k;
+                struct json_value v = d->children[j];
+                d->children[j] = d->children[7-j]; d->children[7-j] = v;
+            }
+            ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
+            ASSERT_EQ(fmx_int(&sent, "accepted"), 1);
+            const struct json_value *reply = json_at(fmx_arr(&sent, "items"), 0);
+            ASSERT(json_get_bool(json_get(reply, "duplicate")));
+            fmx_end(&sent); json_free(&item); json_free(&items);
+        }
+        ASSERT_EQ(fmx_mail_count(), before + 2);
+        json_set_array(&items);
+        ASSERT(fmx_disposition_item(&item, row, "DEFERRED", "bad-length", hash, 480));
+        ASSERT(json_push_back(&items, &item));
+        ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
+        ASSERT_EQ(fmx_int(&sent, "accepted"), 0);
+        fmx_end(&sent);
+        ASSERT(fmx_send_from(&sent, limited, "alice", &items) && fmx_ok(&sent));
+        ASSERT_EQ(fmx_int(&sent, "accepted"), 0);
+        ASSERT_EQ(fmx_mail_count(), before + 2);
+        ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "to"));
+        ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "ref"));
+        ASSERT_EQ(fmx_mail_count(), before + 2);
+        PASS();
+    }
+_test_next:;
+    json_free(&item); json_free(&items); fmx_end(&sent); fmx_end(&box); fmx_restore();
+    return failures;
+}
+
+static int fmx_t_disposition_hint(void)
+{
+    int failures = 0;
+    struct fmx_call b = {0};
+    char grant[64], code[64];
+    TEST("steer: imported disposition hints do not complete work or verify a read") {
+        fmx_isolate("disposition_hint");
+        ASSERT(fmx_mint("brief,send,evidence", grant, sizeof(grant)));
+        fmx_ref_attempt(grant, "hint-work", "hint-key", code, sizeof(code));
+        ASSERT_STR_EQ(code, "");
+        fmx_state_file("mail", "inbox.peer.jsonl",
+            "{\"seq\":1,\"ts\":\"2099-01-01T00:00:00Z\",\"from\":\"field-agent\","
+            "\"to\":\"steer-caller\",\"kind\":\"result\",\"body\":\"receipt\","
+            "\"ref\":\"hint-work\",\"steer_disposition\":{\"state\":\"DEFERRED\"}}\n", false);
+        fmx_brief(&b, grant, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        const struct json_value *change = fmx_change_row(&b, "steer-caller", "hint-work");
+        ASSERT(change != NULL);
+        ASSERT_STR_EQ(fmx_wstr(change, "state"), "queued");
+        const struct json_value *reply = json_get(change, "reply");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(reply, "observed_disposition"), "DEFERRED");
+        const struct json_value *verified = json_get(reply, "disposition_verified");
+        ASSERT(verified && verified->type == JSON_BOOL && !json_get_bool(verified));
+        PASS();
+    }
+_test_next:;
+    fmx_end(&b); fmx_restore(); return failures;
+}
+
+static int fmx_t_disposition_invalid(void)
+{
+    int failures = 0;
+    struct fmx_call call = {0};
+    struct json_value items, item, disposition;
+    json_init(&items);
+    json_init(&item);
+    json_init(&disposition);
+    TEST("steer: a claimed read with missing exact evidence cannot be queued") {
+        char grant[64];
+        fmx_isolate("disposition_invalid");
+        ASSERT(fmx_mint_as("brief,send,evidence", "alice", grant, sizeof(grant)));
+        json_set_array(&items);
+        fmx_item(&item, "bob", "read receipt", "work-1", "receipt-1");
+        (void)json_push_kv_str(&item, "kind", "result");
+        json_set_object(&disposition);
+        (void)json_push_kv_bool(&disposition, "read", true);
+        (void)json_push_kv_str(&disposition, "state", "ACCEPTED");
+        (void)json_push_kv(&item, "disposition", &disposition);
+        (void)json_push_back(&items, &item);
+        ASSERT(fmx_send_from(&call, grant, "alice", &items));
+        ASSERT(fmx_ok(&call));
+        ASSERT_EQ(fmx_int(&call, "accepted"), 0);
+        ASSERT_EQ(fmx_mail_count(), 0);
+        const struct json_value *row = json_at(fmx_arr(&call, "items"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "state")), "refused");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "error")), "BAD_DISPOSITION");
+        PASS();
+    }
+_test_next:;
+    json_free(&disposition);
+    json_free(&item);
+    json_free(&items);
+    fmx_end(&call);
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_mailbox(void)
 {
     int failures = 0;
@@ -7122,6 +7302,9 @@ int test_fleet_steer(void)
     failures += fmx_t_grant_list();
     failures += fmx_t_grant_list_full();
     failures += fmx_t_grant_list_paged();
+    failures += fmx_t_disposition_verified();
+    failures += fmx_t_disposition_hint();
+    failures += fmx_t_disposition_invalid();
     failures += fmx_t_mailbox();
     failures += fmx_t_peer_grants();
     failures += fmx_t_revoke_cancels_queued();

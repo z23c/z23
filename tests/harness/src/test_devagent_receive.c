@@ -15,6 +15,8 @@
 
 #include "test/test_core.h"
 
+#include "base/hex.h"
+#include "sha3/sha3.h"
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
@@ -458,6 +460,153 @@ static void rtx_opts(struct rcv_drive_opts *o, long long beats)
 }
 
 /* One queue verb with at most one extra string key. */
+static bool rtx_typed_accept(const char *grant, const char *body,
+    const char *source, const char *resolved, const char *key, const char *decision,
+    long long *seq, bool *duplicate)
+{
+    struct rtx_call c;
+    struct json_value items, item, d;
+    unsigned char digest[32]; char hash[65];
+    sha3_256((const unsigned char *)body, strlen(body), digest);
+    zcl_hex_encode(digest, sizeof(digest), hash);
+    json_init(&items); json_set_array(&items);
+    json_init(&item); json_set_object(&item);
+    json_init(&d); json_set_object(&d);
+    bool ok = json_push_kv_str(&d, "stream", "inbox.chatgpt.jsonl");
+    ok &= json_push_kv_int(&d, "row_offset", 0);
+    ok &= json_push_kv_int(&d, "seq", 1);
+    ok &= json_push_kv_str(&d, "row_sha3", source);
+    ok &= json_push_kv_bool(&d, "read", true);
+    ok &= json_push_kv_int(&d, "read_bytes", (long long)strlen(body));
+    ok &= json_push_kv_str(&d, "read_sha3", hash);
+    ok &= json_push_kv_str(&d, "state", decision);
+    if (!strcmp(decision, "ACCEPTED")) {
+        ok &= json_push_kv_int(&d, "queue_seq", 1);
+        ok &= json_push_kv_int(&d, "queue_attempt", 1);
+        ok &= json_push_kv_str(&d, "resolved_sha3", resolved);
+    }
+    ok &= json_push_kv_str(&item, "to", "chatgpt");
+    ok &= json_push_kv_str(&item, "body", "receipt");
+    ok &= json_push_kv_str(&item, "ref", "job-001");
+    ok &= json_push_kv_str(&item, "kind", "result");
+    ok &= json_push_kv_str(&item, "idempotency_key", key);
+    ok &= json_push_kv(&item, "disposition", &d);
+    ok &= json_push_back(&items, &item);
+    rtx_begin(&c, "fleet.steer.send", "zcl.fleet_steer_send.v1");
+    ok &= json_push_kv_str(&c.input, "grant", grant);
+    ok &= json_push_kv_str(&c.input, "from", "box-a");
+    ok &= json_push_kv(&c.input, "items", &items);
+    if (ok) zcl_native_handle_fleet_steer_send(&c.request, &c.reply);
+    const struct json_value *rows = ok && rtx_ok(&c) ? json_get(&c.reply.data, "items") : NULL;
+    const struct json_value *row = rows ? json_at(rows, 0) : NULL;
+    const struct json_value *v = row ? json_get(row, "seq") : NULL;
+    const struct json_value *read = row ? json_get(row, "verified_read") : NULL;
+    ok = v && v->type == JSON_INT && read && read->type == JSON_BOOL && json_get_bool(read);
+    if (ok) {
+        *seq = json_get_int(v);
+        const struct json_value *dup = json_get(row, "duplicate");
+        *duplicate = dup && dup->type == JSON_BOOL && json_get_bool(dup);
+    }
+    rtx_end(&c); json_free(&d); json_free(&item); json_free(&items);
+    return ok;
+}
+
+static const struct json_value *rtx_typed_row(const struct json_value *rows)
+{
+    const struct json_value *chosen = NULL;
+    for (size_t i = 0; rows && i < json_size(rows); i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *d = json_get(row, "observed_disposition");
+        if (d && d->type == JSON_STR && !strcmp(json_get_str(d), "ACCEPTED")) chosen = row;
+    }
+    return chosen;
+}
+
+static bool rtx_typed_evidence_ok(const struct rtx_call *evidence)
+{
+    if (!rtx_ok(evidence)) return false;
+    const struct json_value *verified = json_get(&evidence->reply.data, "verified_read");
+    const struct json_value *d = json_get(&evidence->reply.data, "disposition");
+    const struct json_value *state = d ? json_get(d, "state") : NULL;
+    return verified && verified->type == JSON_BOOL && json_get_bool(verified) &&
+        state && state->type == JSON_STR && !strcmp(json_get_str(state), "ACCEPTED");
+}
+
+static bool rtx_typed_evidence_input(struct rtx_call *evidence,
+                                     const struct json_value *chosen,
+                                     const char *grant)
+{
+    if (!chosen) return false;
+    bool ok = json_push_kv_str(&evidence->input, "grant", grant);
+    ok &= json_push_kv_str(&evidence->input, "type", "mail");
+    ok &= json_push_kv_str(&evidence->input, "ref", "job-001");
+    const char *const keys[] = {"stream", "row_offset", "seq", "row_sha3"};
+    for (size_t i = 0; i < 4 && ok; i++)
+        ok = json_push_kv(&evidence->input, keys[i], json_get(chosen, keys[i]));
+    return ok;
+}
+
+static bool rtx_typed_projection(const char *grant, bool foreign)
+{
+    struct rtx_call pull, evidence;
+    rtx_begin(&pull, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&pull.input, "action", "pull");
+    (void)json_push_kv_str(&pull.input, "since", "0|");
+    zcl_native_handle_dev_agent_mail(&pull.request, &pull.reply);
+    const struct json_value *rows = rtx_ok(&pull) ? json_get(&pull.reply.data, "rows") : NULL;
+    const struct json_value *chosen = rtx_typed_row(rows);
+    rtx_begin(&evidence, "fleet.steer.evidence", "zcl.fleet_steer_evidence.v1");
+    bool ok = rtx_typed_evidence_input(&evidence, chosen, grant);
+    if (ok) zcl_native_handle_fleet_steer_evidence(&evidence.request, &evidence.reply);
+    ok = ok && rtx_typed_evidence_ok(&evidence);
+    if (foreign) ok = !rtx_ok(&evidence) && !strcmp(evidence.reply.error.code, "STEER_EVIDENCE_FOREIGN");
+    rtx_end(&evidence); rtx_end(&pull);
+    return ok;
+}
+
+static bool rtx_typed_brief_fields(const struct json_value *ref,
+    const struct json_value *seq, const struct json_value *state,
+    const struct json_value *stream)
+{
+    return ref && ref->type == JSON_STR && !strcmp(json_get_str(ref), "job-001") &&
+        seq && seq->type == JSON_INT && state && state->type == JSON_STR &&
+        stream && stream->type == JSON_STR && !strcmp(json_get_str(stream), "inbox.chatgpt.jsonl");
+}
+
+static int rtx_typed_brief_row(const struct json_value *row)
+{
+    const struct json_value *ref = json_get(row, "ref");
+    const struct json_value *seq = json_get(row, "seq");
+    const struct json_value *state = json_get(row, "state");
+    const struct json_value *stream = json_get(row, "stream");
+    if (!rtx_typed_brief_fields(ref, seq, state, stream)) return 0;
+    if (json_get_int(seq) == 2 && !strcmp(json_get_str(state), "delivered")) return 2;
+    if (json_get_int(seq) != 1 || strcmp(json_get_str(state), "acknowledged")) return 0;
+    const struct json_value *reply = json_get(row, "reply");
+    const struct json_value *verified = reply ? json_get(reply, "disposition_verified") : NULL;
+    const struct json_value *decision = reply ? json_get(reply, "observed_disposition") : NULL;
+    return verified && verified->type == JSON_BOOL && json_get_bool(verified) &&
+        decision && decision->type == JSON_STR && !strcmp(json_get_str(decision), "ACCEPTED") ? 1 : 0;
+}
+
+static bool rtx_typed_brief(const char *grant)
+{
+    struct rtx_call b;
+    rtx_begin(&b, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_str(&b.input, "grant", grant);
+    (void)json_push_kv_int(&b.input, "since", 0);
+    zcl_native_handle_fleet_steer_brief(&b.request, &b.reply);
+    const struct json_value *rows = rtx_ok(&b) ? json_get(&b.reply.data, "changes") : NULL;
+    bool first = false, second = false;
+    for (size_t i = 0; rows && i < json_size(rows); i++) {
+        int match = rtx_typed_brief_row(json_at(rows, i));
+        if (match == 1) first = true;
+        if (match == 2) second = true;
+    }
+    rtx_end(&b);
+    return first && second;
+}
+
 static bool rtx_queue(const char *action, const char *k1, const char *v1,
                       const char *k2, const char *v2)
 {
@@ -1896,6 +2045,62 @@ int test_devagent_receive(void)
         ASSERT_EQ(rtx_answers("job-001", "queue_seq=1"), 1);
         ASSERT_EQ(rtx_answers("job-001", "brief_sha3="), 1);
         ASSERT(rtx_exists("receive/brief/job-001.brief"));
+        char evidence[2048], resolved[65], source[65];
+        ASSERT(rtx_read("receive/brief/job-001.evidence", evidence, sizeof(evidence)));
+        const char *r = strstr(evidence, "resolved_sha3=");
+        const char *h = strstr(evidence, "source_sha3=");
+        ASSERT(r && h);
+        ASSERT(sscanf(r, "resolved_sha3=%64[0-9a-f]", resolved) == 1);
+        ASSERT(sscanf(h, "source_sha3=%64[0-9a-f]", source) == 1);
+        char lockpath[1600];
+        ASSERT(snprintf(lockpath, sizeof(lockpath), "%s/z23/dev/receive/receive.lock", g_rtx_state) > 0);
+        int lockfd = open(lockpath, O_RDWR | O_CLOEXEC);
+        ASSERT(lockfd >= 0 && flock(lockfd, LOCK_EX | LOCK_NB) == 0);
+        ASSERT(zcl_devagent_receive_admission("job-001", body, 1, 1, resolved,
+                                               "box-a", "inbox.chatgpt.jsonl", 0, source));
+        ASSERT(!zcl_devagent_receive_admission("job-001", body, 2, 1, resolved,
+                                                "box-a", "inbox.chatgpt.jsonl", 0, source));
+        ASSERT(!zcl_devagent_receive_admission("job-001", body, 1, 1, resolved,
+                                                "other", "inbox.chatgpt.jsonl", 0, source));
+        ASSERT_EQ(flock(lockfd, LOCK_UN), 0);
+        ASSERT_EQ(close(lockfd), 0);
+        char recipient_grant[64], inbox[1600];
+        long long sent_seq = -1, replay_seq = -1;
+        bool duplicate = false;
+        ASSERT(rtx_mint("box-a", "brief,send,evidence", 3600, recipient_grant, sizeof(recipient_grant)));
+        char sentpath[1600];
+        ASSERT(snprintf(sentpath, sizeof(sentpath), "%s/z23/dev/steer/sent.jsonl", g_rtx_state) > 0);
+        FILE *sentfile = fopen(sentpath, "wb"); ASSERT(sentfile);
+        ASSERT_EQ(fclose(sentfile), 0);
+        ASSERT_EQ(chmod(sentpath, 0400), 0);
+        ASSERT(rtx_typed_accept(recipient_grant, body, source, resolved, "deferred-key", "DEFERRED", &sent_seq, &duplicate));
+        ASSERT(!duplicate);
+        ASSERT(rtx_typed_accept(recipient_grant, body, source, resolved, "accepted-key", "ACCEPTED", &sent_seq, &duplicate));
+        ASSERT(!duplicate);
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-001", body, 2));
+        ASSERT(rtx_typed_brief(recipient_grant));
+        ASSERT(rtx_queue("claim", "worker", "wtx", "session", "s1"));
+        ASSERT_EQ(rtx_queue_count("running", "job-001"), 1);
+        ASSERT(rtx_write("engine/job-001/a1/receipt.json", "{\"verdict\":\"PASS\",\"candidate\":\"candidate.diff\"}\n"));
+        ASSERT(rtx_queue("reap", NULL, NULL, NULL, NULL));
+        ASSERT_EQ(rtx_queue_count("running", "job-001"), 0);
+        ASSERT_EQ(rtx_queue_count("outcomes", "job-001"), 1);
+        ASSERT(snprintf(inbox, sizeof(inbox), "%s/z23/dev/mail/inbox.chatgpt.jsonl", g_rtx_state) > 0);
+        ASSERT_EQ(unlink(inbox), 0);
+        ASSERT_EQ(chmod(sentpath, 0600), 0);
+        ASSERT(rtx_typed_accept(recipient_grant, body, source, resolved, "accepted-key", "ACCEPTED", &replay_seq, &duplicate));
+        ASSERT(duplicate && replay_seq == sent_seq);
+        ASSERT(!rtx_typed_accept(recipient_grant, "different body", source, resolved, "accepted-key", "ACCEPTED", &replay_seq, &duplicate));
+        ASSERT(rtx_typed_projection(recipient_grant, false));
+        char sender_grant[64], foreign_grant[64];
+        char same_label_grant[64];
+        ASSERT(rtx_mint("box-a", "brief,send,evidence", 3600, same_label_grant, sizeof(same_label_grant)));
+        ASSERT(!rtx_typed_accept(same_label_grant, body, source, resolved, "accepted-key", "ACCEPTED", &replay_seq, &duplicate));
+        ASSERT(rtx_mint("chatgpt", "evidence", 3600, sender_grant, sizeof(sender_grant)));
+        ASSERT(rtx_mint("mallory", "evidence", 3600, foreign_grant, sizeof(foreign_grant)));
+        ASSERT(rtx_typed_projection(sender_grant, false));
+        ASSERT(rtx_typed_projection(foreign_grant, true));
+        ASSERT(!rtx_typed_accept(recipient_grant, body, source, resolved, "new-key", "ACCEPTED", &replay_seq, &duplicate));
         rtx_restore();
         PASS();
     }

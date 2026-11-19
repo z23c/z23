@@ -18,12 +18,19 @@ struct json_value;
 /* Internal authenticated steer entry: key digest is not public mail input. */
 void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply,
-                                  const char *key_digest, bool require_existing);
+                                  const char *key_digest, bool require_existing,
+                                  const char *disposition, bool probe);
 
 bool zcl_devagent_mail_cursor_valid(const char *token);
 
 bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
                                      long long row_end, long long seq);
+
+bool zcl_devagent_receive_admission(const char *ref, const char *body,
+                                    long long seq, long long attempt,
+                                    const char *resolved_hash, const char *source_to,
+                                    const char *stream, long long offset,
+                                    const char *source_sha3);
 
 /* Pure cursor projection for a native merge prefix. Rows must carry native
  * stream/start/end provenance; this grants no read or mutation authority. */

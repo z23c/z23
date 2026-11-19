@@ -1458,6 +1458,8 @@ struct fmc_row {
     const char *kind;
     const char *body;
     const char *ref;
+    const char *observed_disposition, *observed_stream, *observed_sha3, *sender_binding;
+    long long observed_offset, observed_seq;
 };
 
 static const char *fmc_row_field(const struct json_value *r, const char *key)
@@ -1489,6 +1491,14 @@ static bool fmc_row_parse(const struct json_value *r, struct fmc_row *v)
     v->kind = fmc_row_field(r, "kind");
     v->body = fmc_row_field(r, "body");
     v->ref = fmc_row_field(r, "ref");
+    v->observed_disposition = fmc_row_field(r, "observed_disposition");
+    v->observed_stream = fmc_row_field(r, "observed_stream");
+    v->observed_sha3 = fmc_row_field(r, "observed_sha3");
+    v->sender_binding = fmc_row_field(r, "sender_binding");
+    const struct json_value *oo = json_get(r, "observed_offset");
+    const struct json_value *os = json_get(r, "observed_seq");
+    v->observed_offset = oo && oo->type == JSON_INT ? json_get_int(oo) : -1;
+    v->observed_seq = os && os->type == JSON_INT ? json_get_int(os) : -1;
     return true;
 }
 
@@ -1502,6 +1512,37 @@ static bool fmc_row_acked(const struct fmc_row *v)
     char *bar = strchr(buf, '|');
     return bar ? zcl_devagent_mail_cursor_covers(buf, v->stream, v->row_end, v->seq)
                : v->seq <= cursor;
+}
+
+/* Local private source rows are minted only after full typed validation.
+ * Imported hints do not establish a read or acknowledge another row. */
+static bool fmc_typed_read_matches(const struct fmc_row *d,
+                                   const struct fmc_row *r)
+{
+    if (strcmp(d->kind, "directive") || strcmp(r->kind, "result") ||
+        strcmp(r->stream, "outbox.jsonl") || !r->observed_disposition[0] ||
+        !strcmp(r->observed_disposition, "UNVERIFIED")) return false;
+    if (strcmp(r->from, d->to) || strcmp(r->to, d->from) || strcmp(r->ref, d->ref) ||
+        strcmp(r->observed_stream, d->stream) || strcmp(r->observed_sha3, d->row_sha3) ||
+        r->observed_offset != d->row_offset || r->observed_seq != d->seq) return false;
+    return r->sender_binding[0] &&
+        !zcl_fleet_steer_grant_binding_live(r->from, r->sender_binding, "send");
+}
+
+static const char *fmc_typed_read(const struct json_value *rows, const struct fmc_row *d)
+{
+    if (strcmp(d->kind, "directive") || !rows || rows->type != JSON_ARR) return NULL;
+    const char *latest = NULL;
+    long long latest_offset = -1;
+    for (size_t i = 0; i < json_size(rows); i++) {
+        struct fmc_row r;
+        if (fmc_row_parse(json_at(rows, i), &r) && r.observed_disposition[0] &&
+            r.row_offset > latest_offset && fmc_typed_read_matches(d, &r)) {
+            latest = r.observed_disposition;
+            latest_offset = r.row_offset;
+        }
+    }
+    return latest;
 }
 
 /* Roster plus directives-as-work. */
@@ -1540,6 +1581,14 @@ static bool fmc_reply_conflicting(const struct fmc_reply_conflicts *, const stru
  * promote itself. Bounded by the pull the brief already holds; nothing is
  * accumulated. Only strictly later valid timestamps establish ordering;
  * equal seconds are ambiguous, and stream sequence numbers are not comparable. */
+static bool fmc_direct_reply(const struct fmc_row *v, const struct fmc_row *r,
+                             const struct fmc_reply_conflicts *conflicts)
+{
+    return !strcmp(r->from, v->to) && !strcmp(r->ref, v->ref) &&
+        fmc_reply_addressed(v, r) && fmc_reply_compatible(v, r) &&
+        !fmc_reply_conflicting(conflicts, v, r, true);
+}
+
 static bool fmc_rows_reply_from(const struct json_value *rows,
                                 const struct fmc_row *v)
 {
@@ -1554,12 +1603,10 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
         struct fmc_row r;
         if (!fmc_row_parse(json_at(rows, i), &r))
             continue;
+        if (r.observed_disposition[0]) continue;
         if (strcmp(r.from, v->from) == 0)
             continue;
-        if (strcmp(r.from, v->to) == 0 && strcmp(r.ref, v->ref) == 0 &&
-            fmc_reply_addressed(v, &r) &&
-            fmc_reply_compatible(v, &r) &&
-            !fmc_reply_conflicting(&conflicts, v, &r, true))
+        if (fmc_direct_reply(v, &r, &conflicts))
             return true;
     }
     return false;
@@ -1575,16 +1622,21 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
  * ordinary local post) is genuinely visible where its reader reads, so it
  * stays "delivered" and upgrades on the cursor. "completed" is resolved
  * later against queue outcomes. */
-static const char *fmc_row_state(const struct fmc_row *v,
-                                 const struct json_value *rows,
-                                 const char *sent_path)
+static const char *fmc_row_state_with_read(const struct fmc_row *v,
+    const struct json_value *rows, const char *sent_path, const char *typed)
 {
-    bool acked = fmc_row_acked(v);
+    bool acked = fmc_row_acked(v) || typed;
     if (!fmc_sent_by_us(sent_path, v->seq, v->to))
         return acked ? "acknowledged" : "delivered";
     if (acked || fmc_rows_reply_from(rows, v))
         return "acknowledged";
     return "queued";
+}
+
+static const char *fmc_row_state(const struct fmc_row *v,
+    const struct json_value *rows, const char *sent_path)
+{
+    return fmc_row_state_with_read(v, rows, sent_path, fmc_typed_read(rows, v));
 }
 
 /* ── brief: time and body fields ─────────────────────────────────────────
@@ -1909,6 +1961,7 @@ static void fmc_roster_note(struct fmc_roster *ro, const struct fmc_row *v)
 {
     char name[FMC_NAME_MAX + 2];
     struct fmc_worker *e;
+    if (v->observed_disposition[0]) return;
     if (strcmp(v->kind, "result") == 0)
         fmc_roster_done(ro, v->ref);
     if (!fmc_body_kv(v->body, "receiver", name, sizeof(name)) &&
@@ -2942,6 +2995,7 @@ static void fmc_stale_summary(struct json_value *blockers, int stale)
  * from the addressee by name, as before. */
 
 struct fmc_answer {
+    const char *observed_disposition;
     const struct fmc_row *row;
     struct fmc_row keep;
     const char *match;
@@ -3076,6 +3130,7 @@ static bool fmc_answer_find(const struct json_value *rows,
     size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u, i;
     a->row = NULL;
     a->match = NULL;
+    a->observed_disposition = NULL;
     a->ambiguous = false;
     struct fmc_reply_conflicts conflicts = fmc_reply_conflicts(rows, d);
     for (i = 0; d->ref[0] && i < n; i++) {
@@ -3084,6 +3139,11 @@ static bool fmc_answer_find(const struct json_value *rows,
         if (!fmc_row_parse(json_at(rows, i), &r))
             continue;
         m = fmc_answer_match(d, &r);
+        if (m && r.observed_disposition[0]) {
+            if (!fmc_reply_conflicting(&conflicts, d, &r, !strcmp(m, "addressee")))
+                a->observed_disposition = r.observed_disposition;
+            continue;
+        }
         if (m && fmc_reply_conflicting(&conflicts, d, &r, !strcmp(m, "addressee"))) {
             a->ambiguous = true;
             continue;
@@ -3098,12 +3158,21 @@ static bool fmc_answer_find(const struct json_value *rows,
 }
 
 /* The reply object for one directive change row. */
+static bool fmc_reply_disposition(struct json_value *out, const char *typed,
+                                  const struct fmc_answer *answer)
+{
+    if (!typed && !answer->observed_disposition) return true;
+    return json_push_kv_str(out, "observed_disposition",
+                            typed ? typed : answer->observed_disposition) &&
+           json_push_kv_bool(out, "disposition_verified", typed != NULL);
+}
+
 static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
-                           const struct json_value *rows, long long now)
+                           const struct json_value *rows, long long now, const char *typed)
 {
     struct json_value o;
     struct fmc_answer a;
-    bool acked = fmc_row_acked(v);
+    bool acked = fmc_row_acked(v) || typed;
     bool answered = fmc_answer_find(rows, v, &a);
     json_init(&o);
     json_set_object(&o);
@@ -3111,6 +3180,7 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
                                          : a.ambiguous ? "ambiguous"
                                          : acked ? "acked" : "queued");
     ok &= json_push_kv_bool(&o, "acked", acked);
+    ok &= fmc_reply_disposition(&o, typed, &a);
     ok &= fmc_put_known(&o, "sent_ts", fmc_ts_unix(v->ts) >= 0 ? v->ts : "");
     ok &= fmc_put_known_int(&o, "sent_age_s", fmc_age_s(now, v->ts));
     ok &= fmc_put_known_int(&o, "answer_seq", answered ? a.row->seq : -1);
@@ -3183,7 +3253,8 @@ static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
 {
     struct json_value item;
     char lead[FMC_LEAD_MAX + 1];
-    const char *state = fmc_row_state(v, rows, sent_path);
+    const char *typed = fmc_typed_read(rows, v);
+    const char *state = fmc_row_state_with_read(v, rows, sent_path, typed);
     bool queued = strcmp(state, "queued") == 0;
 #ifdef ZCL_TESTING
     if (s_fmc_before_change_projection) s_fmc_before_change_projection();
@@ -3204,8 +3275,12 @@ static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
         ok &= json_push_kv_str(&item, fields[i].key, fields[i].value);
     ok &= fmc_row_locator(&item, v);
+    if (v->observed_disposition[0]) {
+        ok &= json_push_kv_str(&item, "observed_disposition", v->observed_disposition);
+        ok &= json_push_kv_bool(&item, "disposition_verified", false);
+    }
     ok &= fmc_put_int(&item, "queued_age_s", queued ? fmc_age_s(now, v->ts) : -1);
-    if (!strcmp(v->kind, "directive")) ok &= fmc_reply_emit(&item, v, rows, now);
+    if (!strcmp(v->kind, "directive")) ok &= fmc_reply_emit(&item, v, rows, now, typed);
     ok = ok && fmc_change_shape(&item, v);
     size_t before = json_size(changes);
     if (ok) ok = json_push_back(changes, &item);
@@ -4409,7 +4484,7 @@ static bool fmc_directory_fit(struct json_value *data, struct json_value *trunc,
     if (!dir) return true;
     struct json_value *labels = (struct json_value *)json_get(dir, "labels");
     struct json_value *state = (struct json_value *)json_get(dir, "state");
-    if (!labels || labels->type != JSON_ARR || !state || state->type != JSON_STR) return false;
+    if (!labels || labels->type != JSON_ARR || !state || state->type != JSON_STR || !json_get_str(state)) return false;
     if (!labels->num_children || json_write(data, NULL, 0) <= budget) return true;
     json_set_str(state, "truncated");
     if (state->type != JSON_STR) return false;
@@ -5012,6 +5087,7 @@ static long long fmc_post_directive(const struct zcl_command_request *req,
                                     const struct fmc_sender *s,
                                     const char *key, bool require_existing,
                                     bool *duplicate,
+                                    const char *disposition, bool probe,
                                     char *why, size_t why_cap,
                                     char *message, size_t message_cap)
 {
@@ -5041,7 +5117,7 @@ static long long fmc_post_directive(const struct zcl_command_request *req,
     sha3_256_write(&hash, (const uint8_t *)key, strlen(key));
     sha3_256_finalize(&hash, digest);
     zcl_hex_encode(digest, sizeof(digest), key_digest);
-    zcl_devagent_mail_steer_post(&sub.request, &sub.reply, key_digest, require_existing);
+    zcl_devagent_mail_steer_post(&sub.request, &sub.reply, key_digest, require_existing, disposition, probe);
     sub.ran = true;
     if (!fmc_sub_ok(&sub)) {
         if (fmc_mail_guidance_code(sub.reply.error.code))
@@ -5169,7 +5245,7 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
                                  const struct fmc_item_fields *f,
                                  long long seq, bool duplicate, bool record,
                                  const char *sent_path, const char *from,
-                                 const char *grant)
+                                 const char *grant, const struct json_value *disposition)
 {
     /* `from` here is the resolved sender, never the caller's claim. */
     struct json_value item;
@@ -5204,6 +5280,10 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
         (void)json_push_kv_int(&item, "seq", seq);
         (void)json_push_kv_bool(&item, "duplicate", duplicate);
     }
+    if (disposition) {
+        (void)json_push_kv_bool(&item, "verified_read", true);
+        (void)json_push_kv_str(&item, "disposition", fmc_item_str(disposition, "state"));
+    }
     struct zcl_boardmail_delivery route;
     zcl_devagent_boardmail_observe(f->to, f->ref, &route);
     (void)json_push_kv_str(&item, "route_snapshot", route.label);
@@ -5236,7 +5316,7 @@ static size_t fmc_mail_escaped_len(const char *s)
  * default — the widest agent name it accepts. Bounded from above, so a row
  * is never accepted here and then stranded by export. */
 static bool fmc_remote_row_too_large(const struct fmc_item_fields *f,
-                                     const struct fmc_sender *s)
+                                     const struct fmc_sender *s, size_t extra)
 {
     static const char shell[] =
         "{\"seq\":,\"ts\":\"\",\"from\":\"\",\"to\":\"\",\"kind\":\"directive\","
@@ -5250,7 +5330,245 @@ static bool fmc_remote_row_too_large(const struct fmc_item_fields *f,
          fmc_mail_escaped_len(f->ref);
     if (from)
         n += sizeof(bind_shell) - 1u + strlen(s->binding);
-    return n > ZCL_BOARDMAIL_TEXT_MAX;
+    return n + extra > ZCL_BOARDMAIL_TEXT_MAX;
+}
+
+/* A typed result is an explicit full-body claim against one retained row. */
+static const char *const fmc_disposition_keys[] = {"stream", "row_offset", "seq", "row_sha3",
+    "read", "read_bytes", "read_sha3", "state", "queue_seq", "queue_attempt", "resolved_sha3"};
+
+static bool fmc_disposition_keys_ok(const struct json_value *d, size_t n)
+{
+    if (d->num_children != n) return false;
+    for (size_t i = 0; i < n; i++) {
+        size_t count = 0;
+        for (size_t j = 0; j < d->num_children; j++)
+            if (d->keys[j] && !strcmp(d->keys[j], fmc_disposition_keys[i])) count++;
+        if (count != 1) return false;
+    }
+    return true;
+}
+
+static bool fmc_disposition_read_ok(const struct json_value *d)
+{
+    const struct json_value *read = json_get(d, "read");
+    const struct json_value *bytes = json_get(d, "read_bytes");
+    const char *hash = fmc_item_str(d, "read_sha3");
+    unsigned char decoded[32];
+    return read && read->type == JSON_BOOL && json_get_bool(read) &&
+        bytes && bytes->type == JSON_INT && json_get_int(bytes) >= 0 &&
+        hash && zcl_hex_decode_lower(hash, decoded, sizeof(decoded));
+}
+
+static bool fmc_disposition_admission_ok(const struct json_value *d)
+{
+    const struct json_value *seq = json_get(d, "queue_seq");
+    const struct json_value *attempt = json_get(d, "queue_attempt");
+    const char *resolved = fmc_item_str(d, "resolved_sha3");
+    unsigned char decoded[32];
+    return seq && seq->type == JSON_INT && json_get_int(seq) > 0 &&
+        attempt && attempt->type == JSON_INT && json_get_int(attempt) >= 0 &&
+        resolved && zcl_hex_decode_lower(resolved, decoded, sizeof(decoded));
+}
+
+static bool fmc_disposition_shape(const struct json_value *d)
+{
+    if (!d || d->type != JSON_OBJ) return false;
+    const char *state = fmc_item_str(d, "state");
+    if (!state) return false;
+    bool accepted = !strcmp(state, "ACCEPTED");
+    if (!accepted && strcmp(state, "DEFERRED") && strcmp(state, "BLOCKED")) return false;
+    return fmc_disposition_keys_ok(d, accepted ? 11 : 8) &&
+        fmc_disposition_read_ok(d) && (!accepted || fmc_disposition_admission_ok(d));
+}
+
+static bool fmc_object_unique(const struct json_value *o)
+{
+    if (!o || o->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < o->num_children; i++) {
+        if (!o->keys[i]) return false;
+        for (size_t j = 0; j < i; j++)
+            if (!strcmp(o->keys[i], o->keys[j])) return false;
+    }
+    return true;
+}
+
+static bool fmc_disposition_raw(const struct json_value *raw,
+                                const struct json_value *d,
+                                const struct fmc_item_fields *f,
+                                const char *from)
+{
+    static const char *const keys[] = {"from", "to", "kind", "ref", "body"};
+    if (!fmc_object_unique(raw)) return false;
+    for (size_t i = 0; i < 5; i++)
+        if (!fmc_item_str(raw, keys[i])) return false;
+    const struct json_value *seq = json_get(raw, "seq");
+    if (!seq || seq->type != JSON_INT ||
+        json_get_int(seq) != json_get_int(json_get(d, "seq"))) return false;
+    const char *body = fmc_item_str(raw, "body");
+    if (strcmp(fmc_item_str(raw, "to"), from) ||
+        strcmp(fmc_item_str(raw, "from"), f->to) ||
+        strcmp(fmc_item_str(raw, "kind"), "directive") ||
+        strcmp(fmc_item_str(raw, "ref"), f->ref) ||
+        (long long)strlen(body) != json_get_int(json_get(d, "read_bytes")))
+        return false;
+    unsigned char digest[32];
+    char hex[65];
+    sha3_256((const unsigned char *)body, strlen(body), digest);
+    zcl_hex_encode(digest, sizeof(digest), hex);
+    return !strcmp(hex, json_get_str(json_get(d, "read_sha3")));
+}
+
+static bool fmc_disposition_encode(const struct json_value *d, char *wire,
+                                   size_t cap)
+{
+    size_t nkeys = d->num_children;
+    struct json_value ordered;
+    json_init(&ordered); json_set_object(&ordered);
+    bool ok = true;
+    for (size_t i = 0; i < nkeys && ok; i++)
+        ok = json_push_kv(&ordered, fmc_disposition_keys[i], json_get(d, fmc_disposition_keys[i]));
+    size_t n = ok ? json_write(&ordered, wire, cap) : 0;
+    json_free(&ordered);
+    return n > 0 && n < cap;
+}
+
+static bool fmc_disposition_authorized(const struct json_value *d,
+    const struct fmc_item_fields *f, const char *from, const char *grant)
+{
+    struct fmc_grant g;
+    return grant && grant[0] && from && from[0] &&
+        !fmc_grant_check_row(grant, "evidence", &g) &&
+        !strcmp(g.label, from) && !strcmp(f->kind, "result") &&
+        fmc_disposition_shape(d);
+}
+
+static bool fmc_disposition_admission(const struct json_value *d,
+    const struct fmc_item_fields *f, const struct json_value *raw,
+    const char *from, bool required)
+{
+    if (!required || strcmp(fmc_item_str(d, "state"), "ACCEPTED")) return true;
+    return zcl_devagent_receive_admission(f->ref, fmc_item_str(raw, "body"),
+        json_get_int(json_get(d, "queue_seq")), json_get_int(json_get(d, "queue_attempt")),
+        fmc_item_str(d, "resolved_sha3"), from, fmc_item_str(d, "stream"),
+        json_get_int(json_get(d, "row_offset")), fmc_item_str(d, "row_sha3"));
+}
+
+static bool fmc_disposition_verify(const struct zcl_command_request *req,
+    const struct json_value *d, const struct fmc_item_fields *f,
+    const char *from, const char *grant, char *wire, size_t cap, bool require_admission)
+{
+    struct fmc_sub sub;
+    struct json_value raw;
+    const char *const keys[] = {"stream", "row_offset", "seq", "row_sha3"};
+    bool ok = fmc_disposition_authorized(d, f, from, grant);
+    if (!ok) return false;
+    fmc_sub_begin(&sub, "zcl.agent_mail.v1", req, "dev.agent.mail");
+    ok = sub.valid && json_push_kv_str(&sub.input, "action", "exact") &&
+         json_push_kv_str(&sub.input, "ref", f->ref);
+    for (size_t i = 0; i < 4 && ok; i++) {
+        const struct json_value *v = json_get(d, keys[i]);
+        ok = v && json_push_kv(&sub.input, keys[i], v);
+    }
+    if (ok) fmc_mail_invoke(&sub, false);
+    const struct json_value *line = json_get(&sub.reply.data, "raw_line");
+    json_init(&raw);
+    ok = ok && sub.reply.status == ZCL_COMMAND_STATUS_PASSED && line &&
+         line->type == JSON_STR && json_read(&raw, json_get_str(line), strlen(json_get_str(line))) &&
+         fmc_disposition_raw(&raw, d, f, from);
+    if (ok) ok = fmc_disposition_admission(d, f, &raw, from, require_admission);
+    if (ok) ok = fmc_disposition_encode(d, wire, cap);
+    json_free(&raw);
+    fmc_sub_end(&sub);
+    return ok;
+}
+
+struct fmc_send_reconcile {
+    const struct zcl_command_request *req;
+    const struct fmc_item_fields *f;
+    const struct fmc_sender *sender;
+    const char *sent_path, *grant, *from;
+    struct json_value *items;
+    const struct json_value *disposition;
+    char *wire;
+    size_t index;
+    long long seq;
+    int receipt;
+    bool keyed;
+};
+
+/* 0 refuses, 1 is an old unkeyed replay, 2 continues to source lookup. */
+static int fmc_send_reconcile_receipt(struct fmc_send_reconcile *c)
+{
+    char recorded[17], presented[17];
+    c->receipt = fmc_sent_find(c->sent_path, c->f->key, &c->seq, recorded,
+                               c->grant, &c->keyed);
+    if (c->receipt < 0) {
+        fmc_send_item_refused(c->items, c->index, c->f->to, "SENT_UNAVAILABLE");
+        return 0;
+    }
+    if (!c->receipt) return 2;
+    fmc_payload_sum(c->f->to, c->f->body, c->f->ref, c->from, c->f->kind, presented);
+    if (!recorded[0] || strcmp(recorded, presented) || (!c->keyed && c->disposition)) {
+        fmc_send_item_refused(c->items, c->index, c->f->to, "IDEMPOTENCY_CONFLICT");
+        return 0;
+    }
+    if (c->keyed) return 2;
+    fmc_send_item_accept(c->items, c->index, c->f, c->seq, true, false,
+                         c->sent_path, c->from, c->grant, NULL);
+    return 1;
+}
+
+/* 0 refuses, 1 replays, 2 admits a fresh, verified disposition. */
+static int fmc_send_reconcile_disposition(struct fmc_send_reconcile *c)
+{
+    char why[64], message[sizeof(((struct zcl_command_reply *)0)->error.message)];
+    bool duplicate = false;
+    long long seq = fmc_post_directive(c->req, c->f->to, c->f->kind, c->f->body,
+        c->f->ref, c->sender, c->f->key, true, &duplicate, c->wire, true,
+        why, sizeof(why), message, sizeof(message));
+    if (seq >= 0) {
+        if (c->keyed && seq != c->seq) {
+            fmc_send_item_refused(c->items, c->index, c->f->to, "SENT_SOURCE_MISMATCH");
+            return 0;
+        }
+        fmc_send_item_accept(c->items, c->index, c->f, seq, true, c->receipt == 0,
+                             c->sent_path, c->from, c->grant, c->disposition);
+        return 1;
+    }
+    if (c->receipt > 0 || strcmp(why, "MAIL_SOURCE_NOT_FOUND")) {
+        fmc_send_item_refused(c->items, c->index, c->f->to, why);
+        return 0;
+    }
+    if (!fmc_disposition_verify(c->req, c->disposition, c->f, c->from, c->grant,
+                                c->wire, 2048, true)) {
+        fmc_send_item_refused(c->items, c->index, c->f->to, "BAD_DISPOSITION");
+        return 0;
+    }
+    return 2;
+}
+
+static bool fmc_send_preflight(const struct json_value *it,
+    struct fmc_send_reconcile *c, struct fmc_item_fields *f,
+    const struct fmc_sender *sender)
+{
+    const char *error = "BAD_INPUT";
+    if (!fmc_send_item_fields(it, c->from, f, &error)) {
+        const char *to = it && it->type == JSON_OBJ ? fmc_item_str(it, "to") : NULL;
+        fmc_send_item_refused(c->items, c->index, to, error);
+        return false;
+    }
+    if (c->disposition && (!fmc_disposition_authorized(c->disposition, f, c->from, c->grant) ||
+        !fmc_disposition_encode(c->disposition, c->wire, 2048))) {
+        fmc_send_item_refused(c->items, c->index, f->to, "BAD_DISPOSITION");
+        return false;
+    }
+    if (zcl_devagent_boardmail_remote(f->to) &&
+        fmc_remote_row_too_large(f, sender, c->disposition ? strlen(c->wire) + 24u : 0)) {
+        fmc_send_item_refused(c->items, c->index, f->to, "STEER_REMOTE_BODY_TOO_LARGE");
+        return false;
+    }
+    return true;
 }
 
 /* One send item: validate, reconcile idempotency, post, record. Emits its
@@ -5269,62 +5587,25 @@ static bool fmc_send_item(const struct zcl_command_request *req,
     char why[64];
     char message[sizeof(((struct zcl_command_reply *)0)->error.message)];
     const char *from = fmc_sender_name(s);
-    const char *shape_error = "BAD_INPUT";
-    if (!fmc_send_item_fields(it, from, &f, &shape_error)) {
-        const char *to =
-            (it && it->type == JSON_OBJ) ? fmc_item_str(it, "to") : NULL;
-        fmc_send_item_refused(items, index, to, shape_error);
-        return false;
+    const struct json_value *disposition = json_get(it, "disposition");
+    char disposition_wire[2048];
+    struct fmc_send_reconcile c = {
+        .req = req, .f = &f, .sender = s, .sent_path = sent_path,
+        .grant = grant, .from = from, .items = items, .disposition = disposition,
+        .wire = disposition_wire, .index = index, .seq = -1
+    };
+    if (!fmc_send_preflight(it, &c, &f, s)) return false;
+    int verdict = fmc_send_reconcile_receipt(&c);
+    if (verdict != 2) return verdict == 1;
+    if (disposition) {
+        verdict = fmc_send_reconcile_disposition(&c);
+        if (verdict != 2) return verdict == 1;
     }
-    /* A directive for another enrolled box travels as one signed board
-     * note; one that cannot fit is refused now, before any mail exists. */
-    if (zcl_devagent_boardmail_remote(f.to) &&
-        fmc_remote_row_too_large(&f, s)) {
-        fmc_send_item_refused(items, index, f.to,
-                              "STEER_REMOTE_BODY_TOO_LARGE");
-        return false;
-    }
-    /* Reconcile: same key AND same payload returns the recorded accept
-     * with no second row. A different payload under a recorded key is
-     * refused: the key names one exact delivery. A row without a digest
-     * predates digests and is unverifiable, never a match.
-     *
-     * Every sender reaching this point has already been bound to its
-     * credential by fmc_sender_resolve(), which runs once for the whole
-     * batch before any of this. That order is deliberate: reconcile
-     * answers with somebody else's recorded row, so a second party
-     * presenting the same key under a different claimed name must be
-     * refused BEFORE it is consulted, or the reconcile path becomes the
-     * bypass the binding closed. */
-    {
-        char recorded[17], presented[17];
-        receipt = fmc_sent_find(sent_path, f.key, &seq, recorded, grant, &keyed);
-        if (receipt < 0) {
-            fmc_send_item_refused(items, index, f.to, "SENT_UNAVAILABLE");
-            return false;
-        }
-        if (receipt > 0) {
-            fmc_payload_sum(f.to, f.body, f.ref, from, f.kind, presented);
-            if (recorded[0] && strcmp(recorded, presented) == 0) {
-                if (!keyed) {
-                    fmc_send_item_accept(items, index, &f, seq, true, false,
-                                         sent_path, from, grant);
-                    return true;
-                }
-            } else {
-                LOG_ERROR(FMC_LOG,
-                          "send: payload conflict under key (to=%s seq=%lld)",
-                          f.to, seq);
-                fmc_send_item_refused(items, index, f.to,
-                                      "IDEMPOTENCY_CONFLICT");
-                return false;
-            }
-        }
-    }
-    why[0] = '\0';
+    seq = c.seq; keyed = c.keyed; receipt = c.receipt;
+    why[0] = 0;
     long long recorded_seq = seq;
-    seq = fmc_post_directive(req, f.to, f.kind, f.body, f.ref, s, f.key,
-                             keyed, &duplicate, why,
+     seq = fmc_post_directive(req, f.to, f.kind, f.body, f.ref, s, f.key,
+                             keyed, &duplicate, disposition ? disposition_wire : NULL, false, why,
                              sizeof(why), message, sizeof(message));
     if (seq < 0) {
         fmc_send_item_refused_message(items, index, f.to,
@@ -5336,7 +5617,7 @@ static bool fmc_send_item(const struct zcl_command_request *req,
         return false;
     }
     fmc_send_item_accept(items, index, &f, seq, duplicate, receipt == 0, sent_path, from,
-                         grant);
+                         grant, disposition);
     return true;
 }
 
@@ -5482,6 +5763,67 @@ static bool fmc_emit_object(struct zcl_command_reply *reply,
     return true;
 }
 
+/* Only an authenticated local outbox row can project locally verified state.
+ * Imported board rows need independent signed-text validation. */
+static bool fmc_disposition_project_raw(const struct json_value *object,
+                                        struct json_value *raw)
+{
+    const char *stream = fmc_item_str(object, "stream");
+    const char *line = fmc_item_str(object, "raw_line");
+    return stream && !strcmp(stream, "outbox.jsonl") && line &&
+        json_read(raw, line, strlen(line)) && fmc_object_unique(raw);
+}
+
+static bool fmc_disposition_own_source(const struct fmc_grant *g,
+    const char *from, const char *stamp)
+{
+    char binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
+    return !strcmp(from, g->label) && stamp &&
+        zcl_fleet_steer_sender_binding(g->id, g->label, binding, sizeof(binding)) &&
+        !strcmp(stamp, binding);
+}
+
+static bool fmc_disposition_recipient(const struct fmc_grant *g,
+    const char *from, const char *to, const char *stamp)
+{
+    return !strcmp(to, g->label) && stamp &&
+        !zcl_fleet_steer_grant_binding_live(from, stamp, "send");
+}
+
+/* -1 means a typed row is foreign to this grant; 0 is unverified. */
+static int fmc_disposition_project_authority(const struct zcl_command_request *req,
+                                              const struct json_value *raw)
+{
+    const struct json_value *d = json_get(raw, "steer_disposition");
+    if (!d) return 0;
+    const char *from = fmc_item_str(raw, "from"), *to = fmc_item_str(raw, "to");
+    const char *stamp = fmc_item_str(raw, "sender_binding");
+    const char *key = fmc_item_str(raw, "steer_key");
+    const char *grant = fmc_str(req, "grant");
+    struct fmc_grant g;
+    unsigned char decoded[32];
+    if (!grant || fmc_grant_check_row(grant, "evidence", &g) || !g.label[0] ||
+        !from || !to || (strcmp(g.label, from) && strcmp(g.label, to))) return -1;
+    bool own = fmc_disposition_own_source(&g, from, stamp);
+    bool recipient = fmc_disposition_recipient(&g, from, to, stamp);
+    return (own || recipient) && key && zcl_hex_decode_lower(key, decoded, sizeof(decoded)) &&
+        fmc_disposition_shape(d) ? 1 : 0;
+}
+
+static int fmc_disposition_project(const struct zcl_command_request *req,
+                                    const struct json_value *object,
+                                    struct zcl_command_reply *reply)
+{
+    struct json_value raw;
+    json_init(&raw);
+    int authority = fmc_disposition_project_raw(object, &raw)
+        ? fmc_disposition_project_authority(req, &raw) : 0;
+    bool written = authority >= 0 && json_push_kv_bool(&reply->data, "verified_read", authority == 1);
+    if (authority == 1) written = written && json_push_kv(&reply->data, "disposition", json_get(&raw, "steer_disposition"));
+    json_free(&raw);
+    return authority < 0 ? -1 : written ? 1 : 0;
+}
+
 static void fmc_evidence_mail_exact(const struct zcl_command_request *req,
     struct zcl_command_reply *reply)
 {
@@ -5494,7 +5836,14 @@ static void fmc_evidence_mail_exact(const struct zcl_command_request *req,
     if (ready) fmc_mail_invoke(&sub, false);
     if (!ready || sub.reply.status != ZCL_COMMAND_STATUS_PASSED)
         fmc_fail(reply, "EVIDENCE_UNAVAILABLE", "exact retained mail did not match or answer", "dev.agent.mail");
-    else fmc_emit_object(reply, "mail", &sub.reply.data);
+    else {
+        int projected = fmc_disposition_project(req, &sub.reply.data, reply);
+        if (projected < 0)
+            fmc_fail(reply, "STEER_EVIDENCE_FOREIGN", "typed receipt belongs to other participants", "recipient");
+        else if (!projected)
+            fmc_fail(reply, "EVIDENCE_UNAVAILABLE", "cannot project verified disposition", "allocation");
+        else (void)fmc_emit_object(reply, "mail", &sub.reply.data);
+    }
     fmc_sub_end(&sub);
 }
 

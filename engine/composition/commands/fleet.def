@@ -769,9 +769,9 @@ ZCL_COMMAND_READY_COMMAND(
     "mail row could exceed that note's 2048 bytes is refused "
     "STEER_REMOTE_BODY_TOO_LARGE before any mail is written. The batch "
     "fails outright "
-    "only on bad batch input or a bad grant. Delivery, acknowledgement "
-    "and completion are observed later through brief and evidence, never "
-    "claimed here. It contacts no peer and never waits.", 65536,
+    "only on bad batch input or a bad grant. Explicit result dispositions verify "
+    "a full read against exact evidence; acceptance is not execution. "
+    "It contacts no peer and never waits.", 65536,
     "fleet,steer,send,steering,chatgpt,directive,idempotent",
     "zcl.fleet_steer_send.input.v1", "zcl.fleet_steer_send.v1",
     "grant,items,from", "items",

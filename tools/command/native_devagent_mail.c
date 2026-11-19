@@ -803,6 +803,9 @@ struct dvm_row {
      * interpreted here. */
     char board_post[DVM_BOARD_HEX + 1];
     char board_signer[DVM_BOARD_HEX + 1];
+    char observed_disposition[16];
+    char observed_stream[129], observed_sha3[65];
+    long long observed_offset, observed_seq;
 };
 
 /* Domain includes its NUL; record includes the original terminating newline. */
@@ -816,6 +819,73 @@ static void dvm_row_hash(const char *raw, size_t len, char hex[65])
     sha3_256_write(&ctx, (const unsigned char *)raw, len);
     sha3_256_finalize(&ctx, sum);
     zcl_hex_encode(sum, sizeof(sum), hex);
+}
+
+static bool dvm_unique_fields(const struct json_value *object)
+{
+    if (!object || object->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < object->num_children; i++) {
+        if (!object->keys[i]) return false;
+        for (size_t j = 0; j < i; j++)
+            if (!strcmp(object->keys[i], object->keys[j])) return false;
+    }
+    return true;
+}
+
+static bool dvm_observed_locator_strings(const struct json_value *stream,
+                                         const struct json_value *hash)
+{
+    unsigned char decoded[32];
+    return stream && stream->type == JSON_STR && json_get_str(stream) &&
+        strlen(json_get_str(stream)) < 129 && hash && hash->type == JSON_STR &&
+        json_get_str(hash) && zcl_hex_decode_lower(json_get_str(hash), decoded, sizeof(decoded));
+}
+
+static bool dvm_observed_locator_values(const struct json_value *stream,
+    const struct json_value *hash, const struct json_value *offset,
+    const struct json_value *seq, const struct json_value *read)
+{
+    return dvm_observed_locator_strings(stream, hash) &&
+        offset && offset->type == JSON_INT && json_get_int(offset) >= 0 &&
+        seq && seq->type == JSON_INT && json_get_int(seq) > 0 &&
+        read && read->type == JSON_BOOL && json_get_bool(read);
+}
+
+static void dvm_observed_source(const struct json_value *raw,
+                                const struct json_value *d, struct dvm_row *r)
+{
+    if (!dvm_unique_fields(raw) || !dvm_unique_fields(d)) return;
+    const struct json_value *stream = json_get(d, "stream");
+    const struct json_value *hash = json_get(d, "row_sha3");
+    const struct json_value *offset = json_get(d, "row_offset");
+    const struct json_value *seq = json_get(d, "seq");
+    const struct json_value *read = json_get(d, "read");
+    if (!dvm_observed_locator_values(stream, hash, offset, seq, read)) return;
+    (void)snprintf(r->observed_stream, sizeof(r->observed_stream), "%s", json_get_str(stream));
+    (void)snprintf(r->observed_sha3, sizeof(r->observed_sha3), "%s", json_get_str(hash));
+    r->observed_offset = json_get_int(offset);
+    r->observed_seq = json_get_int(seq);
+}
+
+/* Pulled metadata is only an unverified hint; it cannot complete work. */
+static bool dvm_observed_disposition(const char *line, struct dvm_row *r)
+{
+    if (!strstr(line, "\"steer_disposition\"")) return true;
+    struct json_value raw;
+    json_init(&raw);
+    bool ok = json_read(&raw, line, strlen(line)) && raw.type == JSON_OBJ;
+    const struct json_value *d = ok ? json_get(&raw, "steer_disposition") : NULL;
+    if (d) {
+        (void)snprintf(r->observed_disposition, sizeof(r->observed_disposition), "UNVERIFIED");
+        const struct json_value *v = d->type == JSON_OBJ ? json_get(d, "state") : NULL;
+        const char *state = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+        if (state && (!strcmp(state, "ACCEPTED") || !strcmp(state, "DEFERRED") ||
+                      !strcmp(state, "BLOCKED")))
+            (void)snprintf(r->observed_disposition, sizeof(r->observed_disposition), "%s", state);
+        dvm_observed_source(&raw, d, r);
+    }
+    json_free(&raw);
+    return ok;
 }
 
 static bool dvm_parse_row(const char *line, struct dvm_row *r)
@@ -850,7 +920,7 @@ static bool dvm_parse_row(const char *line, struct dvm_row *r)
     if (!dvm_line_str(line, "board_signer", r->board_signer,
                       sizeof(r->board_signer)))
         r->board_signer[0] = '\0';
-    return true;
+    return dvm_observed_disposition(line, r);
 }
 
 static int dvm_row_cmp(const void *a, const void *b)
@@ -886,6 +956,7 @@ static void dvm_fail(struct zcl_command_reply *reply, const char *code,
  * and the platform write. */
 struct dvm_post_input {
     const char *to, *kind, *body, *from, *ref, *sender_binding;
+    const char *disposition;
 };
 
 /* A binding is 32 lowercase hex or nothing at all. Checked for shape only:
@@ -1110,6 +1181,20 @@ static const char *const dvm_steer_names[] = {
     "seq", "steer_key", "to", "kind", "body", "from", "ref", "sender_binding"
 };
 
+static bool dvm_disposition_equal(const struct json_value *row, const char *expected)
+{
+    const struct json_value *v = json_get(row, "steer_disposition");
+    size_t count = 0;
+    for (size_t i = 0; i < row->num_children; i++)
+        if (row->keys[i] && !strcmp(row->keys[i], "steer_disposition")) count++;
+    if (count > 1) return false;
+    if (!expected) return v == NULL;
+    if (!v || v->type != JSON_OBJ) return false;
+    char wire[2048];
+    size_t n = json_write(v, wire, sizeof(wire));
+    return n > 0 && n < sizeof(wire) && strcmp(wire, expected) == 0;
+}
+
 static bool dvm_steer_values_equal(const struct json_value *row,
                                    const size_t count[8],
                                    const struct dvm_post_input *in)
@@ -1121,7 +1206,7 @@ static bool dvm_steer_values_equal(const struct json_value *row,
         if (!s && i == 5 && count[i + 2] == 0) s = "";
         if (count[i + 2] > 1 || !s || strcmp(s, values[i]) != 0) return false;
     }
-    return true;
+    return dvm_disposition_equal(row, in->disposition);
 }
 
 static bool dvm_steer_key_valid(const struct json_value *kv, size_t count)
@@ -1233,6 +1318,15 @@ static bool dvm_post_append(const struct dvm_post_input *in,
         }
         len = len - 2 + (size_t)n;
     }
+    if (in->disposition) {
+        int n = snprintf(line + len - 2, sizeof(line) - len + 2,
+                         ",\"steer_disposition\":%s}\n", in->disposition);
+        if (n <= 0 || (size_t)n >= sizeof(line) - len + 2) {
+            dvm_fail(reply, "BAD_INPUT", "disposition row too large", outbox);
+            return false;
+        }
+        len = len - 2 + (size_t)n;
+    }
     bool written = dvm_post_write_line(outbox, line, len) &&
                    (!key || dvm_steer_sync(outbox, maildir));
     if (!written)
@@ -1241,10 +1335,19 @@ static bool dvm_post_append(const struct dvm_post_input *in,
 }
 
 /* post.lock serializes keyed lookup, sequence allocation and append. */
+static bool dvm_probe_absent(bool probe, int existing,
+    struct platform_private_file *lock, struct zcl_command_reply *reply)
+{
+    if (!probe || existing != 0) return false;
+    platform_private_file_close(lock);
+    dvm_fail(reply, "MAIL_SOURCE_NOT_FOUND", "keyed source is absent", "outbox");
+    return true;
+}
+
 static bool dvm_post_locked(const struct dvm_post_input *in,
                             struct zcl_command_reply *reply,
                             const char *maildir, const char *outbox,
-                            const char *ts, const char *key, bool require_existing,
+                            const char *ts, const char *key, bool require_existing, bool probe,
                             long long *seq, bool *duplicate)
 {
     char lock_path[DVM_PATH_CAP];
@@ -1261,6 +1364,7 @@ static bool dvm_post_locked(const struct dvm_post_input *in,
     }
     long long next_seq = 1;
     int existing = key ? dvm_steer_scan(outbox, key, in, seq, &next_seq) : 0;
+    if (dvm_probe_absent(probe, existing, &lock, reply)) return false;
     if (existing < 0 || existing == 2 || (require_existing && existing == 0)) {
         platform_private_file_close(&lock);
         dvm_fail(reply, existing == 2 ? "IDEMPOTENCY_CONFLICT" : "MAIL_READ_FAILED",
@@ -1287,7 +1391,8 @@ static bool dvm_post_locked(const struct dvm_post_input *in,
 
 static void dvm_post(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply, const char *maildir,
-                     const char *steer_key, bool require_existing)
+                     const char *steer_key, bool require_existing,
+                     const char *disposition, bool probe)
 {
     struct dvm_post_input in;
     char outbox[DVM_PATH_CAP];
@@ -1305,6 +1410,7 @@ static void dvm_post(const struct zcl_command_request *req,
                  "request.input was missing");
         return;
     }
+    in.disposition = disposition;
     invalid = dvm_post_validate(req, &in);
     if (invalid) {
         dvm_fail(reply, invalid->code, invalid->message, invalid->evidence);
@@ -1333,7 +1439,7 @@ static void dvm_post(const struct zcl_command_request *req,
     }
 
     if (!dvm_post_locked(&in, reply, maildir, outbox, ts, steer_key,
-                         require_existing, &seq, &duplicate))
+                         require_existing, probe, &seq, &duplicate))
         return;
     if (duplicate) {
         (void)json_push_kv_int(&reply->data, "seq", seq);
@@ -1874,7 +1980,7 @@ static size_t dvm_row_cost(const struct dvm_row *r)
            dvm_json_len(r->to) + dvm_json_len(r->kind) +
            dvm_json_len(r->body) + dvm_json_len(r->ref) +
            dvm_json_len(r->sender_binding) + dvm_json_len(r->board_post) +
-           dvm_json_len(r->board_signer);
+           dvm_json_len(r->board_signer) + (r->observed_disposition[0] ? 256u + dvm_json_len(r->observed_disposition) + dvm_json_len(r->observed_stream) : 0);
 }
 
 /* The stream whose next unread row sorts first by (ts, from, seq); a tie goes
@@ -2175,6 +2281,14 @@ static void dvm_pull_build_reply(struct zcl_command_reply *reply,
         ok &= json_push_kv_str(&item, "sender_binding", r->sender_binding);
         ok &= json_push_kv_str(&item, "board_post", r->board_post);
         ok &= json_push_kv_str(&item, "board_signer", r->board_signer);
+        if (r->observed_disposition[0])
+            ok &= json_push_kv_str(&item, "observed_disposition", r->observed_disposition);
+        if (r->observed_stream[0]) {
+            ok &= json_push_kv_str(&item, "observed_stream", r->observed_stream);
+            ok &= json_push_kv_str(&item, "observed_sha3", r->observed_sha3);
+            ok &= json_push_kv_int(&item, "observed_offset", r->observed_offset);
+            ok &= json_push_kv_int(&item, "observed_seq", r->observed_seq);
+        }
         ok &= json_push_back(&arr, &item);
         json_free(&item);
     }
@@ -2702,7 +2816,7 @@ static void dvm_handle(const struct zcl_command_request *request,
         return;
     }
     if (strcmp(action, "post") == 0) {
-        dvm_post(request, reply, maildir, NULL, false);
+        dvm_post(request, reply, maildir, NULL, false, NULL, false);
         return;
     }
     if (strcmp(action, "pull") == 0) {
@@ -2721,7 +2835,8 @@ static void dvm_handle(const struct zcl_command_request *request,
  * sender. The digest is never accepted through the public mail schema. */
 void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply,
-                                  const char *key_digest, bool require_existing)
+                                  const char *key_digest, bool require_existing,
+                                  const char *disposition, bool probe)
 {
     char maildir[4096];
     if (!reply || !key_digest || strlen(key_digest) != 64) return;
@@ -2729,7 +2844,7 @@ void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
         dvm_fail(reply, "STATE_DIR_FAILED", "cannot resolve mail dir", "platform_state_root/mail");
         return;
     }
-    dvm_post(request, reply, maildir, key_digest, require_existing);
+    dvm_post(request, reply, maildir, key_digest, require_existing, disposition, probe);
 }
 
 void zcl_native_handle_dev_agent_mail(

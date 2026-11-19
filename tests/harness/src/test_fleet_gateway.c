@@ -765,6 +765,9 @@ static int gw_t_handshake(void)
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "\"name\":\"steer_brief\""));
         ASSERT(gw_body_has(b, "\"name\":\"steer_send\""));
+        ASSERT(gw_body_has(b, "\"disposition\""));
+        ASSERT(gw_body_has(b, "\"queue_seq\""));
+        ASSERT(gw_body_has(b, "\"resolved_sha3\""));
         ASSERT(gw_body_has(b, "\"name\":\"steer_evidence\""));
         ASSERT(gw_body_has(b, "\"name\":\"steer_deliver\""));
         ASSERT(gw_body_has(b, "\"name\":\"wiki_find\""));
@@ -2671,6 +2674,14 @@ static int gw_t_life_send_ack(void)
         int st = 0, sn;
         long long seq;
         ASSERT(gw_mint(node, "brief,send,evidence", g_life_gid));
+        sn = snprintf(args, sizeof(args),
+            "{\"grant\":\"%s\",\"from\":\"" GW_LIFE_FROM "\",\"items\":[{\"to\":\"" GW_LIFE_TO "\",\"body\":\"receipt\",\"ref\":\"" GW_LIFE_REF "\",\"kind\":\"result\",\"idempotency_key\":\"bad-disposition\",\"disposition\":{\"read\":true,\"state\":\"DEFERRED\"}}]}",
+            g_life_gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_send", args, 29, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "BAD_DISPOSITION"));
+        free(b);
         sn = snprintf(args, sizeof(args),
                       "{\"grant\":\"%s\",\"from\":\"" GW_LIFE_FROM "\","
                       "\"items\":[{\"to\":\"" GW_LIFE_TO "\","
