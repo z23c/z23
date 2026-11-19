@@ -72,9 +72,12 @@ static bool boot_net_budgets_set_default(const struct boot_net_budget_row *row)
     char value[32];
     snprintf(value, sizeof(value), "%lld", (long long)row->bytes);
     if (platform_environment_set(row->name, value, 0) != 0) {
+        /* This service registers OPTIONAL: a setenv failure continues boot
+         * with the kernel/core defaults standing, so the message must not
+         * claim a boot refusal that the service kernel will not perform. */
         fprintf(stderr,
-                "[boot] net_budgets: setenv %s=%s failed; refusing to boot "
-                "with an unbudgeted peer path\n",
+                "[boot] net_budgets: setenv %s=%s failed; continuing with "
+                "kernel/core defaults\n",
                 row->name, value);
         return false;
     }
@@ -105,13 +108,21 @@ static bool boot_net_budgets_start(void *ctx)
     if (!boot_net_budgets_apply_class(cls))
         return false;
     struct boot_net_budgets budgets;
-    if (boot_net_budgets_for_class(cls, &budgets))
-        printf("Net budgets started (ram=%s send_total=%lldMiB "
-               "recv_total=%lldMiB)\n",
+    if (boot_net_budgets_for_class(cls, &budgets)) {
+        /* Report the APPLIED budgets (env readback in MiB), not the decided
+         * ones: an operator override must be visible as such on this line. */
+        const char *send_env = getenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES");
+        const char *recv_env = getenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES");
+        long long send_mib = send_env ? strtoll(send_env, NULL, 10) >> 20
+                                      : (long long)(budgets.send_total_bytes >> 20);
+        long long recv_mib = recv_env ? strtoll(recv_env, NULL, 10) >> 20
+                                      : (long long)(budgets.recv_total_bytes >> 20);
+        printf("Net budgets started (ram=%s send_total=%lldMiB%s "
+               "recv_total=%lldMiB%s)\n",
                boot_net_budgets_class_name(cls),
-               (long long)(budgets.send_total_bytes >> 20),
-               (long long)(budgets.recv_total_bytes >> 20));
-    else
+               send_mib, send_env ? " (override)" : "",
+               recv_mib, recv_env ? " (override)" : "");
+    } else
         printf("Net budgets started (ram=%s defaults=kernel)\n",
                boot_net_budgets_class_name(cls));
     return true;
