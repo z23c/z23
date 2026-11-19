@@ -77,9 +77,11 @@
  *     promotes it straight to "acknowledged": (a) a mail row whose `from`
  *     is the sent row's `to` carrying the SAME ref, which is what a
  *     transport brings back into an inbox.<peer>.jsonl file, or (b) the
- *     local ack cursor <state>/mail/cursor.<to> covering its seq, which is
- *     how a receiver on THIS host acks. Both are the receiver's own
- *     writing; the sender can forge neither by posting.
+ *     local ack cursor <state>/mail/cursor.<to> covering its legacy scalar
+ *     floor or its exact stream offset, which is how a receiver on THIS host
+ *     acks. Composite offsets keep independently numbered streams and later
+ *     rows from borrowing one another's acknowledgment. Both are the
+ *     receiver's own writing; the sender can forge neither by posting.
  *   - Every other row — an inbound row a transport delivered here, an
  *     ordinary local post — reads as before: "delivered", because it
  *     really is visible where its reader reads, and "acknowledged" once
@@ -1326,20 +1328,16 @@ static bool fmc_push_distinct(struct json_value *arr, const char *s,
     return true;
 }
 
-/* Keep only the mail leaf's cursor alphabet so a `to` name can never
- * escape the mail dir. False when nothing survives. */
+/* Use the mail cursor alphabet without changing the recipient identity. */
 static bool fmc_clean_agent(const char *agent, char *out, size_t cap)
 {
-    size_t i, o = 0;
-    if (!agent || !out || cap == 0)
+    if (!agent || !agent[0] || strlen(agent) > 128 || strlen(agent) >= cap)
         return false;
-    for (i = 0; agent[i] && o + 1 < cap; i++) {
-        char c = agent[i];
-        if (isalnum((unsigned char)c) || c == '.' || c == '_' || c == '-')
-            out[o++] = c;
-    }
-    out[o] = '\0';
-    return o > 0;
+    for (const char *p = agent; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '_' && *p != '-')
+            return false;
+    memcpy(out, agent, strlen(agent) + 1);
+    return true;
 }
 
 /* Receiver ack cursor from the mail leaf's cursor.<agent> file. Returns -1
@@ -1370,28 +1368,36 @@ static long long fmc_ack_parse(char *buf, size_t len)
     return v;
 }
 
-static long long fmc_ack_cursor(const char *agent)
+static size_t fmc_ack_read(const char *agent, char *buf, size_t cap)
 {
-    char root[4096], path[4096 + 64];
-    char clean[FMC_NAME_MAX + 1];
+    char root[4096], path[4096 + 130];
+    char clean[129];
     FILE *f;
-    char buf[FMC_ACK_TOKEN_CAP + 1];
     int n;
-    if (!fmc_clean_agent(agent, clean, sizeof(clean)))
-        return -1;
-    if (!platform_state_root_existing(root, sizeof(root)))
-        return -1;
+    if (cap <= FMC_ACK_TOKEN_CAP ||
+        !fmc_clean_agent(agent, clean, sizeof(clean)) ||
+        !platform_state_root_existing(root, sizeof(root)))
+        return 0;
     n = snprintf(path, sizeof(path), "%s/mail/cursor.%s", root, clean);
     if (n <= 0 || (size_t)n >= sizeof(path))
-        return -1;
+        return 0;
     f = fopen(path, "rb");
     if (!f)
-        return -1;
-    size_t len = fread(buf, 1, sizeof(buf), f);
-    bool failed = ferror(f) != 0 || len == sizeof(buf);
+        return 0;
+    size_t len = fread(buf, 1, cap, f);
+    bool failed = ferror(f) != 0 || len == cap;
     failed |= fclose(f) != 0;
-    if (failed) return -1;
-    return fmc_ack_parse(buf, len);
+    return failed ? 0 : len;
+}
+
+static long long fmc_ack_cursor(const char *agent)
+{
+    char buf[FMC_ACK_TOKEN_CAP + 1];
+    size_t len = fmc_ack_read(agent, buf, sizeof(buf));
+    long long cursor = fmc_ack_parse(buf, len);
+    if (cursor >= 0 && strchr(buf, '|') &&
+        !zcl_devagent_mail_cursor_covers(buf, "", 0, 0)) return -1;
+    return cursor;
 }
 
 /* Closed completion vocabulary. Only an explicit pass verdict with a
@@ -1486,6 +1492,18 @@ static bool fmc_row_parse(const struct json_value *r, struct fmc_row *v)
     return true;
 }
 
+static bool fmc_row_acked(const struct fmc_row *v)
+{
+    char buf[FMC_ACK_TOKEN_CAP + 1];
+    size_t len = fmc_ack_read(v->to, buf, sizeof(buf));
+    long long cursor = fmc_ack_parse(buf, len);
+    if (cursor < 0)
+        return false;
+    char *bar = strchr(buf, '|');
+    return bar ? zcl_devagent_mail_cursor_covers(buf, v->stream, v->row_end, v->seq)
+               : v->seq <= cursor;
+}
+
 /* Roster plus directives-as-work. */
 static void fmc_row_tally(struct json_value *agents, struct json_value *work,
                           const struct fmc_row *v)
@@ -1561,8 +1579,7 @@ static const char *fmc_row_state(const struct fmc_row *v,
                                  const struct json_value *rows,
                                  const char *sent_path)
 {
-    long long ack = fmc_ack_cursor(v->to);
-    bool acked = ack >= 0 && v->seq <= ack;
+    bool acked = fmc_row_acked(v);
     if (!fmc_sent_by_us(sent_path, v->seq, v->to))
         return acked ? "acknowledged" : "delivered";
     if (acked || fmc_rows_reply_from(rows, v))
@@ -3086,8 +3103,7 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
 {
     struct json_value o;
     struct fmc_answer a;
-    long long ack = fmc_ack_cursor(v->to);
-    bool acked = ack >= 0 && v->seq <= ack;
+    bool acked = fmc_row_acked(v);
     bool answered = fmc_answer_find(rows, v, &a);
     json_init(&o);
     json_set_object(&o);

@@ -595,6 +595,34 @@ static bool fmx_ack(const char *agent, long long cursor)
     return ok;
 }
 
+static bool fmx_ack_token(const char *agent, const char *cursor)
+{
+    struct fmx_call a;
+    fmx_begin(&a, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&a.input, "action", "ack");
+    (void)json_push_kv_str(&a.input, "agent", agent);
+    (void)json_push_kv_str(&a.input, "cursor", cursor);
+    bool ok = fmx_run(&a, zcl_native_handle_dev_agent_mail) && fmx_ok(&a);
+    fmx_end(&a);
+    return ok;
+}
+
+static bool fmx_read_composite_cursor(const char *agent, char *cursor, size_t cap)
+{
+    struct fmx_call pull;
+    fmx_begin(&pull, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&pull.input, "action", "pull");
+    (void)json_push_kv_str(&pull.input, "agent", agent);
+    bool ok = fmx_run(&pull, zcl_native_handle_dev_agent_mail) && fmx_ok(&pull) &&
+        fmx_int(&pull, "count") > 0 && !fmx_bool(&pull, "truncated");
+    const char *next = fmx_str(&pull, "next_since");
+    ok = ok && next[0] && strlen(next) < cap && strstr(next, "0|") == next &&
+        strstr(next, "inbox.peer.jsonl:") && strstr(next, "outbox.jsonl:");
+    if (ok) memcpy(cursor, next, strlen(next) + 1);
+    fmx_end(&pull);
+    return ok;
+}
+
 /* Seed one queue outcome row so completed-by-ref has evidence to match.
  * The queue status leaf parses this exact reap format. */
 static void fmx_seed_outcome(const char *name, int rc)
@@ -1758,6 +1786,9 @@ _test_next:;
 
 /* The other half of the rule: a receiver on THIS host acks by writing the
  * mail cursor, and that promotes the same sent row. */
+static void fmx_state_file(const char *dirrel, const char *file,
+                           const char *text, bool append);
+
 static int fmx_t_sent_local_ack(void)
 {
     int failures = 0;
@@ -1788,6 +1819,76 @@ static int fmx_t_sent_local_ack(void)
         ASSERT(fmx_state_agrees(gid, "desk-check", "queued"));
         ASSERT(fmx_ack("desk-crew", seq));
         ASSERT(fmx_state_agrees(gid, "desk-check", "acknowledged"));
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a persisted composite cursor acknowledges only rows actually read") {
+        struct fmx_call s, b;
+        struct json_value items, item;
+        char gid[64], cursor[4096];
+        fmx_isolate("sent_composite_ack");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        fmx_seed_inbox("peer", "2026-09-16T00:00:00Z", 1, "peer",
+                       "desk-crew", "note", "already delivered", "peer-note");
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "desk-crew", "read the first directive", "desk-first",
+                 "key-composite-1");
+        ASSERT(json_push_back(&items, &item));
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "steer-caller", &items));
+        json_free(&items);
+        ASSERT(fmx_ok(&s));
+        fmx_end(&s);
+        ASSERT(fmx_read_composite_cursor("desk-crew", cursor, sizeof(cursor)));
+        ASSERT(fmx_ack_token("desk-crew", cursor));
+        /* A fresh status call re-reads the string cursor from disk. Its leading
+         * scalar is zero; the outbox stream offset is the actual acknowledgment. */
+        ASSERT(fmx_state_agrees(gid, "desk-first", "acknowledged"));
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        const struct json_value *changes = fmx_arr(&b, "changes");
+        bool reply_acked = false;
+        for (size_t i = 0; changes && i < json_size(changes); i++) {
+            const struct json_value *change = json_at(changes, i);
+            if (strcmp(json_get_str(json_get(change, "ref")), "desk-first") != 0)
+                continue;
+            const struct json_value *reply = json_get(change, "reply");
+            reply_acked = json_get_bool(json_get(reply, "acked"));
+        }
+        ASSERT(reply_acked);
+        fmx_end(&b);
+        /* A later outbox row is beyond the persisted stream offset and must not
+         * inherit the first row's acknowledgment. */
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "desk-crew", "read the second directive", "desk-second",
+                 "key-composite-2");
+        ASSERT(json_push_back(&items, &item));
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "steer-caller", &items));
+        json_free(&items);
+        ASSERT(fmx_ok(&s));
+        fmx_end(&s);
+        ASSERT(fmx_state_agrees(gid, "desk-second", "queued"));
+        ASSERT(fmx_state_agrees(gid, "desk-first", "acknowledged"));
+        fmx_state_file("mail", "cursor.desk-crew", "5|garbage\n", false);
+        ASSERT(fmx_state_agrees(gid, "desk-first", "queued"));
+        fmx_evidence(&b, gid, "mail", "desk-first");
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&b));
+        ASSERT_EQ(fmx_int(&b, "ack_cursor"), -1);
+        fmx_end(&b);
+        fmx_state_file("mail", "cursor.desk-crew", "5|outbox.jsonl:10,outbox.jsonl:20\n", false);
+        ASSERT(fmx_state_agrees(gid, "desk-first", "queued"));
+        fmx_seed_inbox("peer", "2026-09-16T00:00:01Z", 2, "peer",
+                       "dev@box", "note", "private", "label-collision");
+        fmx_state_file("mail", "cursor.devbox", "9\n", false);
+        fmx_evidence(&b, gid, "mail", "label-collision");
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&b));
+        ASSERT_EQ(fmx_int(&b, "ack_cursor"), -1);
+        ASSERT_STR_EQ(fmx_str(&b, "state"), "delivered");
+        fmx_end(&b);
         fmx_restore();
         PASS();
     }

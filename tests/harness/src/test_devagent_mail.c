@@ -2199,6 +2199,19 @@ static int test_mail_post_resume_token(void)
             ASSERT_STR_EQ(json_get_str(json_get(row, "body")), "after-marker");
         }
         dvx_end(&p);
+        dvx_begin(&p);
+        (void)json_push_kv_str(&p.input, "action", "pull");
+        (void)json_push_kv_str(&p.input, "cursor", token);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 1);
+        dvx_end(&p);
+        dvx_begin(&p);
+        (void)json_push_kv_str(&p.input, "action", "pull");
+        (void)json_push_kv_str(&p.input, "cursor", token);
+        (void)json_push_kv_str(&p.input, "since", "0|");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 3);
+        dvx_end(&p);
         dvx_restore();
         PASS();
     }

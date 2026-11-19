@@ -20,6 +20,9 @@ void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply,
                                   const char *key_digest, bool require_existing);
 
+bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
+                                     long long row_end, long long seq);
+
 /* Pure cursor projection for a native merge prefix. Rows must carry native
  * stream/start/end provenance; this grants no read or mutation authority. */
 bool zcl_devagent_mail_cursor_prefix(const char *resume, const char *end_token,

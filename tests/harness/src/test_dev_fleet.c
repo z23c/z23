@@ -633,6 +633,62 @@ _test_next:;
     return failures;
 }
 
+static bool acc_mail_command(const char *env, const char *bin,
+                             const char *action, const char *a, const char *b,
+                             char *out, size_t cap)
+{
+    const char *argv[] = {"env", env, bin, "dev", "agent", "mail", action,
+                          a, b, strcmp(action, "post") == 0 ? "--kind=note" : NULL, NULL};
+    return zcl_spawn_capture(argv, out, cap, ACC_TIMEOUT_MS) == 0;
+}
+
+static bool acc_mail_count(const char *wire, long long count, const char *body)
+{
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, wire, strlen(wire));
+    const struct json_value *data = ok ? json_get(&doc, "data") : NULL;
+    const struct json_value *rows = data ? json_get(data, "rows") : NULL;
+    const struct json_value *n = data ? json_get(data, "count") : NULL;
+    ok = n && n->type == JSON_INT && json_get_int(n) == count && rows &&
+         rows->type == JSON_ARR && (long long)json_size(rows) == count;
+    if (ok && body) {
+        const struct json_value *v = json_get(json_at(rows, 0), "body");
+        ok = v && v->type == JSON_STR && !strcmp(json_get_str(v), body);
+    }
+    json_free(&doc);
+    return ok;
+}
+
+static int acc_mail_cursor(const struct acc_rig *r)
+{
+    int failures = 0;
+    char env[ACC_PATH + 32], token[4096], out[32768];
+    struct json_value doc;
+    json_init(&doc);
+    TEST("fleet acceptance: positional mail cursor resumes and explicit since wins") {
+        ASSERT(snprintf(env, sizeof(env), "XDG_STATE_HOME=%s/mail-state", r->root) > 0);
+        ASSERT(acc_mail_command(env, r->bin, "post", "--to=alice", "--body=first", out, sizeof(out)));
+        ASSERT(json_read(&doc, out, strlen(out)));
+        const struct json_value *data = json_get(&doc, "data");
+        const struct json_value *value = data ? json_get(data, "next_since") : NULL;
+        ASSERT(value && value->type == JSON_STR && strlen(json_get_str(value)) < sizeof(token));
+        strcpy(token, json_get_str(value));
+        json_free(&doc);
+        ASSERT(acc_mail_command(env, r->bin, "post", "--to=alice", "--body=after-marker", out, sizeof(out)));
+        ASSERT(acc_mail_command(env, r->bin, "pull", token, NULL, out, sizeof(out)));
+        ASSERT(acc_mail_count(out, 1, "after-marker"));
+        ASSERT(acc_mail_command(env, r->bin, "pull", "1", NULL, out, sizeof(out)));
+        ASSERT(acc_mail_count(out, 1, "after-marker"));
+        ASSERT(acc_mail_command(env, r->bin, "pull", token, "--since=0|", out, sizeof(out)));
+        ASSERT(acc_mail_count(out, 2, NULL));
+        PASS();
+    }
+_test_next:;
+    json_free(&doc);
+    return failures;
+}
+
 static int acc_run(void)
 {
     int failures = 0;
@@ -644,6 +700,7 @@ static int acc_run(void)
         PASS();
     }
     if (built) {
+        failures += acc_mail_cursor(&rig);
         failures += acc_check_inventory(&rig);
         failures += acc_check_gates(&rig);
         failures += acc_check_freshness(&rig);

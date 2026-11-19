@@ -1444,10 +1444,11 @@ static bool dvm_pull_parse_filter(const struct zcl_command_request *req,
     filter->resumed = "start";
     if (!req || !req->input)
         return true;
-    v = json_get(req->input, "since");
+    const char *cursor_key = json_get(req->input, "since") ? "since" : "cursor";
+    v = json_get(req->input, cursor_key);
     if (v)
         filter->resumed = "since";
-    if (v && !dvm_int(req, "since", &filter->since) &&
+    if (v && !dvm_int(req, cursor_key, &filter->since) &&
         !(v->type == JSON_STR && dvm_since_token(json_get_str(v), filter))) {
         dvm_fail(reply, "BAD_INPUT",
                  "since is a non-negative cursor or a next_since token",
@@ -1629,6 +1630,46 @@ static const char *dvm_token_entry(const char *p, char *name, size_t cap,
         return "a resume offset is a non-negative integer";
     *next = *end == ',' ? end + 1 : end;
     return NULL;
+}
+
+static bool dvm_cursor_duplicate(char names[][DVM_STREAM_NAME_MAX + 1],
+                                 size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!strcmp(names[i], names[count])) return true;
+    return false;
+}
+
+static bool dvm_cursor_covered_entries(const char *p, const char *stream,
+                                       long long row_end, bool *covered)
+{
+    char names[DVM_STREAMS_MAX][DVM_STREAM_NAME_MAX + 1];
+    size_t count = 0;
+    *covered = false;
+    while (*p) {
+        long long offset;
+        const char *start = p;
+        if (count == DVM_STREAMS_MAX ||
+            dvm_token_entry(p, names[count], sizeof(names[count]), &offset, &p) ||
+            dvm_cursor_duplicate(names, count)) return false;
+        if (!strcmp(names[count], stream) && row_end <= offset) *covered = true;
+        count++;
+        if (p > start && p[-1] == ',' && !*p) return false;
+    }
+    return true;
+}
+
+/* Validate the complete cursor before using either floor or stream offset. */
+bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
+                                     long long row_end, long long seq)
+{
+    struct dvm_pull_filter filter = {0};
+    bool covered;
+    if (!token || !stream || row_end < 0 || seq < 0 ||
+        strlen(token) >= DVM_TOKEN_CAP || !dvm_since_token(token, &filter) ||
+        !dvm_cursor_covered_entries(filter.token, stream, row_end, &covered))
+        return false;
+    return seq <= filter.since || covered;
 }
 
 /* Apply the token's per-stream offsets. A stream the token names but the
@@ -2240,7 +2281,7 @@ static bool dvm_pull_resume_agent(const struct zcl_command_request *req,
     char path[DVM_PATH_CAP];
     FILE *f;
     size_t n;
-    if (!agent || json_get(req->input, "since"))
+    if (!agent || json_get(req->input, "since") || json_get(req->input, "cursor"))
         return true;
     if (!dvm_cursor_name_ok(agent)) {
         dvm_fail(reply, "BAD_INPUT", "agent names the cursor owner",
