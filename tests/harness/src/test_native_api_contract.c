@@ -1576,6 +1576,23 @@ static int test_leaf_json_contract(void)
     return failures;
 }
 
+static int test_agent_cursor_input_refused(void)
+{
+    int failures = 0, rc = -1;
+    char wire[8192];
+    TEST_CASE("worker and receiver reject a cursor in public JSON input") {
+        const char *worker[] = {"agent", "worker", "--input={\"action\":\"status\",\"cursor\":0}"};
+        const char *receiver[] = {"agent", "receive", "--input={\"action\":\"status\",\"receiver\":\"box\",\"cursor\":0}"};
+        ASSERT(uniform_cli("dev", worker, 3, wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(wire, "unknown input key 'cursor'") != NULL);
+        ASSERT(uniform_cli("dev", receiver, 3, wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(wire, "unknown input key 'cursor'") != NULL);
+    } TEST_END
+    return failures;
+}
+
 static int test_uniform_input_file(void)
 {
     int failures = 0;
@@ -5020,6 +5037,7 @@ int test_native_api_contract(void)
     failures += test_packet_advertised_example();
     failures += test_packet_input_recovery();
     failures += test_leaf_json_contract();
+    failures += test_agent_cursor_input_refused();
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();
     failures += test_format_flag_binds_leaf_input();
