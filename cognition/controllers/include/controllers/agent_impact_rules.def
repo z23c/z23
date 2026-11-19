@@ -3663,3 +3663,5 @@ AGENT_IMPACT_RULE("tools/command/native_app_host_view.c|tools/command/native_app
  * harness group that drives discovery, leaf rebuild, admission, and proof. */
 AGENT_IMPACT_RULE("engine/controllers/src/loop_span_controller.c|engine/controllers/include/controllers/loop_span.h|tests/harness/fixtures/loop_span_plugin.c|tests/harness/src/test_loop_span.c", "loop_span")
 AGENT_IMPACT_RULE("core/modules/sapling/src/bn254.c|core/modules/sapling/src/bn254_engine.inc|core/modules/sapling/src/bn254_accel.c|core/modules/sapling/src/mont_adx.h|core/modules/sapling/include/sapling/bn254.h|core/modules/sapling/include/sapling/bn254_accel.h|tests/harness/src/test_bn254_engine_parity.c|tests/harness/src/bn254_legacy_reference.c|tests/harness/include/test/bn254_legacy_reference.h", "bn254_engine_parity bn254 bn254_accel bn254_phgr13_parity phgr13_fix sprout_phgr13_kat")
+/* token-name-rules: the shared parity vector file is read by the explorer index test (ZSLP-VOUT0, ZNAM-OWNER-2). */
+AGENT_IMPACT_RULE("tests/fixtures/token_name_rules/*|tests/harness/src/test_explorer_index.c|contexts/explorer/models/src/explorer_index_overlays.c", "explorer_index make_lint_gates")
