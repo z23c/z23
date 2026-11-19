@@ -34,9 +34,11 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
@@ -695,6 +697,80 @@ static int ntf_st_narrow(const char *root, const char *baseline)
     return bad;
 }
 
+/* True when this process can read a file chmod-ed to 0000: root, or a runner
+ * holding CAP_DAC_OVERRIDE. The UNPROVEN expectation of the unreadable-file
+ * case only holds when the probe fails; a probe that cannot even stage its
+ * file also reports false, so the case runs and fails open-eyed rather than
+ * skips. (Same probe the capability-closure selftest landed in 286be2d4e0;
+ * a local copy — its ccs_scratch staging is private to that gate.) */
+static bool ntf_can_read_unreadable(void)
+{
+    static bool probed, can;
+    char td[4096], path[4096];
+    const char *tdenv = getenv("TMPDIR");
+    int w, r;
+    if (probed)
+        return can;
+    probed = true;
+    if (ovf(snprintf(td, sizeof td, "%s/z23-lint-ntf-probe-XXXXXX",
+                     tdenv ? tdenv : "test-tmp"),
+            sizeof td))
+        return false;
+    (void)mkdir(tdenv ? tdenv : "test-tmp", 0700);
+    if (!mkdtemp(td))
+        return false;
+    if (ovf(snprintf(path, sizeof path, "%s/unreadable_probe", td),
+            sizeof path)) {
+        (void)rap_rm_rf(td);
+        return false;
+    }
+    w = open(path, O_CREAT | O_WRONLY | O_EXCL, 0600);
+    if (w < 0 || fchmod(w, 0) != 0 || close(w) != 0) {
+        if (w >= 0)
+            close(w);
+        (void)rap_rm_rf(td);
+        return false;
+    }
+    r = open(path, O_RDONLY);
+    can = r >= 0 && close(r) == 0;
+    (void)unlink(path);
+    (void)rap_rm_rf(td);
+    return can;
+}
+
+/* The unreadable-fixture case: a file chmod-ed to 0 must be UNPROVEN, not
+ * silently skipped. Split from check_no_bare_tmp_fixture_selftest() to keep
+ * both under the cyclomatic-complexity cap. */
+static int ntf_case_unreadable(const char *root)
+{
+    if (ntf_can_read_unreadable()) {
+        printf("  SKIP unreadable-file case: privileged process, chmod 000 "
+               "does not deny the read\n");
+        return 0;
+    }
+    char case_path[4096];
+    if (ovf(snprintf(case_path, sizeof case_path, "%s/case.c", root),
+            sizeof case_path))
+        return 1;
+    if (csr_write(case_path, "int x;\n") || chmod(case_path, 0) != 0)
+        return 1;
+    char base_path[4096];
+    (void)snprintf(base_path, sizeof base_path, "%s/baseline.txt", root);
+    (void)csr_write(base_path, "");
+    const char *roots[1] = { root };
+    FILE *out = tmpfile(), *err = tmpfile();
+    int rc = (out && err)
+                 ? ntf_run_cfg(roots, 1, base_path, "", 0, 0, out, err)
+                 : 1;
+    if (out) fclose(out);
+    if (err) fclose(err);
+    if (rc != 2)
+        fprintf(stderr, "check_no_bare_tmp_fixture selftest: "
+                        "unreadable file want rc 2 got %d\n", rc);
+    (void)chmod(case_path, 0600);
+    return rc != 2;
+}
+
 int check_no_bare_tmp_fixture_selftest(void)
 {
     /* Every `make check-<gate>` recipe runs with ZCL_LINT_PRODUCTION_SCAN=1
@@ -755,34 +831,7 @@ int check_no_bare_tmp_fixture_selftest(void)
     /* a stale row (file no longer has that many, or any, live sites) fails */
     bad |= ntf_st_case(root, "int x;\n", baseline1, 1, "STALE");
     /* an unreadable file is UNPROVEN, not silently skipped */
-    {
-        char case_path[4096];
-        if (ovf(snprintf(case_path, sizeof case_path, "%s/case.c", root),
-                sizeof case_path)) {
-            bad = 1;
-        } else if (csr_write(case_path, "int x;\n")
-                  || chmod(case_path, 0) != 0) {
-            bad = 1;
-        } else {
-            char base_path[4096];
-            (void)snprintf(base_path, sizeof base_path, "%s/baseline.txt",
-                           root);
-            (void)csr_write(base_path, "");
-            const char *roots[1] = { root };
-            FILE *out = tmpfile(), *err = tmpfile();
-            int rc = (out && err)
-                         ? ntf_run_cfg(roots, 1, base_path, "", 0, 0, out, err)
-                         : 1;
-            if (out) fclose(out);
-            if (err) fclose(err);
-            if (rc != 2) {
-                fprintf(stderr, "check_no_bare_tmp_fixture selftest: "
-                                "unreadable file want rc 2 got %d\n", rc);
-                bad = 1;
-            }
-            (void)chmod(case_path, 0600);
-        }
-    }
+    bad |= ntf_case_unreadable(root);
     bad |= ntf_st_narrow(root, baseline1);
     (void)rap_rm_rf(root);
     if (had_prod)
