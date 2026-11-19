@@ -737,6 +737,114 @@ static bool rtx_history_pages(void)
     return paged;
 }
 
+static int g_rtx_answer_marker_hits;
+static int g_rtx_answer_marker_phase;
+
+/* Fail before publishing an answer marker, leaving other writes untouched. */
+static int rtx_answer_marker_fault(const char *path, int phase)
+{
+    bool marker = strstr(path, "/receive/answered/") != NULL;
+    size_t n = strlen(path);
+    const char *tail = "/receive/answered";
+    bool directory = n >= strlen(tail) && strcmp(path + n - strlen(tail), tail) == 0;
+    if (phase == g_rtx_answer_marker_phase && (marker || directory)) {
+        g_rtx_answer_marker_hits++;
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+static int test_receive_answer_retry(void)
+{
+    int failures = 0;
+    TEST("answer append failure replays the same page after restart") {
+        struct rcv_beat_stats st;
+        char body[4096], outbox[1400];
+        rtx_isolate("answer-retry");
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction(body, sizeof(body), "hex_codec", "Retry an answer.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-answer", body, 1));
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-other", body, 2));
+        rtx_path(outbox, sizeof(outbox), "mail/outbox.jsonl");
+        FILE *f = fopen(outbox, "wb");
+        ASSERT(f != NULL);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(chmod(outbox, 0400), 0);
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.admitted, 2);
+        ASSERT_EQ(rtx_queue_count("queued", "job-answer"), 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-other"), 1);
+        ASSERT_EQ(chmod(outbox, 0600), 0);
+        /* A new drive reloads the durable cursor, as after restart. */
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.seen, 2);
+        ASSERT_EQ(rtx_queue_count("queued", "job-answer"), 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-other"), 1);
+        ASSERT(rtx_answers("job-answer", "state=accepted") >= 1);
+        ASSERT(rtx_answers("job-other", "state=accepted") >= 1);
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
+static int test_receive_marker_retry(int phase)
+{
+    int failures = 0;
+    TEST("answer marker failure replays without a duplicate job") {
+        struct rcv_beat_stats st;
+        char body[4096];
+        rtx_isolate(phase == 0 ? "marker-retry" : "marker-parent-retry");
+        ASSERT(rtx_mint("chatgpt", "send", 3600, NULL, 0));
+        rtx_direction(body, sizeof(body), "hex_codec", "Retry a marker.");
+        ASSERT(rtx_deliver("chatgpt", "box-a", "job-marker", body, 1));
+        g_rtx_answer_marker_hits = 0;
+        g_rtx_answer_marker_phase = phase;
+        zcl_devagent_receive_test_io(rtx_answer_marker_fault);
+        long long beat = rtx_beat_once(&st);
+        zcl_devagent_receive_test_io(NULL);
+        ASSERT_EQ(beat, 1);
+        ASSERT_EQ(g_rtx_answer_marker_hits, 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-marker"), 1);
+        ASSERT_EQ(rtx_answers("job-marker", "state=accepted"), 1);
+        if (phase == 2) {
+            g_rtx_answer_marker_hits = 0;
+            g_rtx_answer_marker_phase = 3;
+            zcl_devagent_receive_test_io(rtx_answer_marker_fault);
+            beat = rtx_beat_once(&st);
+            zcl_devagent_receive_test_io(NULL);
+            ASSERT_EQ(beat, 1);
+            ASSERT_EQ(g_rtx_answer_marker_hits, 1);
+            ASSERT_EQ(st.seen, 1);
+        }
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.seen, 1);
+        ASSERT_EQ(rtx_queue_count("queued", "job-marker"), 1);
+        ASSERT(rtx_answers("job-marker", "state=accepted") >= 1);
+        ASSERT_EQ(rtx_count_dir("receive/answered"), 1);
+        char outbox[4096], source[21];
+        ASSERT(rtx_read("mail/outbox.jsonl", outbox, sizeof(outbox)));
+        const char *src = strstr(outbox, "src=");
+        ASSERT(src != NULL && strlen(src) >= 20);
+        memcpy(source, src, 20); source[20] = 0;
+        long long answers = rtx_answers("job-marker", "state=accepted");
+        ASSERT(answers >= 1);
+        ASSERT_EQ(rtx_answers("job-marker", source), answers);
+        ASSERT_EQ(rtx_beat_once(&st), 1);
+        ASSERT_EQ(st.seen, 0);
+        ASSERT_EQ(rtx_count_dir("receive/answered"), 1);
+        ASSERT_EQ(rtx_answers("job-marker", "state=accepted"), answers);
+        PASS();
+    }
+_test_next:;
+    zcl_devagent_receive_test_io(NULL);
+    rtx_restore();
+    return failures;
+}
+
 static int test_receive_intake_paging(void)
 {
     int failures = 0;
@@ -1741,6 +1849,9 @@ int test_devagent_receive(void)
     int failures = 0;
 
 #if !defined(_WIN32)
+    failures += test_receive_answer_retry();
+    failures += test_receive_marker_retry(0);
+    failures += test_receive_marker_retry(2);
     failures += test_receive_intake_paging();
     failures += test_receive_answer_fields();
     failures += test_receive_queue_order();

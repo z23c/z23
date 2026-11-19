@@ -1502,9 +1502,10 @@ struct rcv_ctx {
     bool dry; /* status: decide and count, write and post nothing */
     struct rcv_beat_stats *st;
     struct rcv_intake intake;
-    /* A board row this beat could not decide (its node did not answer):
-     * the intake cursor must not move past it. */
+    /* Any undecided row or failed answer/marker keeps the page cursor. */
     bool deferred;
+    bool answer_ok;       /* current row posted an answer */
+    bool page_had_marker; /* replay observed an existing marker */
 };
 
 /* Ask the queue whether it already holds this ref, then the run dirs, then
@@ -1547,7 +1548,7 @@ static void rcv_ref_known(struct rcv_ctx *c, const char *ref,
 /* Post one answer row to the sender under the SAME ref. Flat scanner-safe
  * key=value lines with no path and no slash of any kind: the mail leaf
  * refuses a body carrying a filesystem path, and the brief lives outside
- * the checkout by design. Best-effort — the queue row is the record. */
+ * the checkout by design. Failed answers keep the intake page for replay. */
 /* Checked composer; false leaves no usable document. No dispatch here. */
 bool zcl_devagent_receive_answer_input(const char *to, const char *ref,
     const char *kind, const char *body, const char *receiver, char *input, size_t cap);
@@ -1590,10 +1591,11 @@ static void rcv_answer(struct rcv_ctx *c, const struct rcv_row *v,
     if (sub.valid && rcv_sub_input(&sub, input)) {
         zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
         sub.ran = true;
-        if (!rcv_sub_ok(&sub))
-            LOG_WARN(RCV_LOG, "answer refused by dev.agent.mail for ref %s",
-                     rcv_ref_ok(v->ref) ? v->ref : "(invalid)");
+        c->answer_ok = rcv_sub_ok(&sub);
     }
+    if (!c->answer_ok)
+        LOG_WARN(RCV_LOG, "answer refused by dev.agent.mail for ref %s",
+                 rcv_ref_ok(v->ref) ? v->ref : "(invalid)");
     rcv_sub_end(&sub);
 }
 
@@ -2184,14 +2186,18 @@ static void rcv_row_handle(struct rcv_ctx *c, const struct json_value *r)
     c->st->seen++;
     rcv_row_digest(&v, src);
     if (rcv_answered(c, src, marker, sizeof(marker))) {
+        c->page_had_marker = true;
         c->st->already++;
         return;
     }
     /* The marker is written AFTER the answer: a crash in between costs one
      * duplicate answer on the next beat, never a duplicate queue row. An
      * undecided board row gets no marker, so a later beat decides it. */
-    if (rcv_admit(c, &v, src) && !c->dry)
-        (void)rcv_write_atomic(marker, "", 0);
+    c->answer_ok = false;
+    if (rcv_admit(c, &v, src) && !c->dry) {
+        if (!c->answer_ok || !rcv_write_atomic(marker, "", 0))
+            c->deferred = true;
+    }
 }
 
 /* ── the intake cursor ─────────────────────────────────────────────────── */
@@ -2345,16 +2351,16 @@ static struct zcl_boardmail_ctx rcv_board_ctx(const struct rcv_ctx *c)
     return b;
 }
 
-/* Drain up to `cap` intake pages from `since`. The durable cursor follows
- * the pages only until a board row is left undecided: from then on this
- * beat keeps deciding later rows, but the cursor stays where the next beat
- * must replay from, and the answer markers make that replay idempotent. */
+/* Drain up to `cap` pages. An undecided row or failed answer/marker holds
+ * the cursor while later rows are still decided. Existing markers make task
+ * replay idempotent; sync their directory before advancing past them. */
 static void rcv_intake_drain(struct rcv_ctx *c, char *since, unsigned cap)
 {
     char next[RCV_POS_MAX], code[64];
     unsigned pages = 0;
     bool more = true;
     while (more && pages++ < cap) {
+        c->page_had_marker = false;
         if (!rcv_intake_page(c, since, next, RCV_POS_MAX, &more, code,
                              sizeof(code))) {
             rcv_intake_failed(c, code, since);
@@ -2362,6 +2368,13 @@ static void rcv_intake_drain(struct rcv_ctx *c, char *since, unsigned cap)
         }
         (void)snprintf(since, RCV_POS_MAX, "%s", next);
         if (!c->dry && !c->deferred && strcmp(since, c->intake.pos) != 0) {
+            if (c->page_had_marker &&
+                (rcv_io_fault(c->p.ansdir, 3) != 0 ||
+                 !platform_private_parent_flush(c->p.ansdir))) {
+                LOG_WARN(RCV_LOG, "cannot sync answered directory %s", c->p.ansdir);
+                c->deferred = true;
+                continue;
+            }
             (void)snprintf(c->intake.pos, sizeof(c->intake.pos), "%s",
                            since);
             rcv_intake_save(c);
