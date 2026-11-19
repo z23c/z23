@@ -386,7 +386,15 @@ int t_native_agent_api_contract(void)
         ASSERT(strstr(main_buf, "strcmp(method, \"--status\")") != NULL);
         ASSERT(strstr(main_buf, "cli_runtime_rpc_method") == NULL);
         ASSERT(strstr(main_buf, "zcl_native_command_is_root(method)") != NULL);
-        ASSERT(strstr(main_buf, "zcl_native_command_main(method") != NULL);
+        /* The dispatch unified on the standalone runtime: the profile fix
+         * routes the argv-datadir distinction through .argv_datadir instead
+         * of a Windows-only #else arm, so the pin follows the one call form
+         * and the new member that carries the routing. */
+        ASSERT(strstr(main_buf,
+                      "zcl_native_command_main_standalone(method") != NULL);
+        ASSERT(strstr(main_buf,
+                      ".argv_datadir = datadir_on_argv ? datadir : NULL")
+               != NULL);
         ASSERT(strstr(main_buf, "strcmp(argv[i], \"--agent\")") != NULL);
         ASSERT(strstr(main_buf, "strcmp(argv[i], \"--status\")") != NULL);
         ASSERT(strstr(main_buf, "cli_static_agent_method") != NULL);
