@@ -143,6 +143,27 @@ int64_t block_index_failed_bits_demoted(void)
     return atomic_load_explicit(&g_failed_bits_demoted, memory_order_relaxed);
 }
 
+static _Atomic int64_t g_operator_invalid_kept = 0;
+
+int64_t block_index_operator_invalid_kept(void)
+{
+    return atomic_load_explicit(&g_operator_invalid_kept, memory_order_relaxed);
+}
+
+/* Operator roots are rare and each one holds the chain off a branch on
+ * purpose: name every one at load so the operator can find it again. */
+static void block_index_note_operator_root(const struct block_index *pindex)
+{
+    atomic_fetch_add_explicit(&g_operator_invalid_kept, 1,
+                              memory_order_relaxed);
+    char hex[65] = "unknown";
+    if (pindex->phashBlock)
+        uint256_get_hex(pindex->phashBlock, hex);
+    LOG_WARN("block_index",
+             "operator invalidateblock kept at load height=%d hash=%s "
+             "(reconsiderblock lifts it)", pindex->nHeight, hex);
+}
+
 enum block_index_failure_trust_action
 block_index_apply_persisted_failure_trust(struct block_index *pindex,
                                            int32_t checkpoint_height)
@@ -164,6 +185,7 @@ block_index_apply_persisted_failure_trust(struct block_index *pindex,
         (unsigned int)(BLOCK_FAILED_VALID | BLOCK_OPERATOR_INVALID);
     if ((status & op_root) == op_root) {
         pindex->nStatus = block_status_strip_failed(status);
+        block_index_note_operator_root(pindex);
         return BLOCK_FAILURE_TRUST_OPERATOR_KEPT;
     }
     status &= ~(unsigned int)BLOCK_OPERATOR_INVALID;

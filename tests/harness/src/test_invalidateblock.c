@@ -221,9 +221,12 @@ static int check_operator_invalidation_restart(void)
              active_chain_height(&f.ms.chain_active) == 1 &&
              find_most_work_chain(&f.ms) == f.a1);
 
+    int64_t kept_before = block_index_operator_invalid_kept();
     opfix_restart(&f);
     IB_CHECK("restart: operator root survives the loader and boot repair",
              op_root(f.a2) && !block_is_revalidation_pending(f.a2));
+    IB_CHECK("restart: the kept operator root is counted for the operator",
+             block_index_operator_invalid_kept() == kept_before + 1);
     IB_CHECK("restart: descendant failure is re-derived from the root",
              op_derived(f.a3));
     IB_CHECK("restart: selector does not return to the invalidated branch",
@@ -313,6 +316,35 @@ static int check_automated_invalidation_heals(void)
     return failures;
 }
 
+/* (d) an automated invalidation of a block already under an operator root
+ * must not become a second, persisted operator root. */
+static int check_automated_under_operator_root(void)
+{
+    int failures = 0;
+    struct opfix f;
+    opfix_init(&f);
+    struct uint256 out;
+
+    (void)process_block_invalidate_from(&f.ms, f.a2->phashBlock, &out,
+                                        INVALIDATE_ORIGIN_OPERATOR);
+    IB_CHECK("nested automated: invalidate of an operator-held block is ok",
+             process_block_invalidate(&f.ms, f.a3->phashBlock, &out) ==
+                 INVALIDATE_OK);
+    IB_CHECK("nested automated: held block gains no FAILED_VALID of its own",
+             op_derived(f.a3));
+    opfix_restart(&f);
+    IB_CHECK("nested automated: restart re-derives it, no second root",
+             op_root(f.a2) && op_derived(f.a3));
+    IB_CHECK("nested automated: reconsider of the root ok",
+             process_block_reconsider(&f.ms, f.a2->phashBlock, &out) ==
+                 RECONSIDER_OK);
+    opfix_restart(&f);
+    IB_CHECK("nested automated: subtree stays cleared across restart",
+             op_cleared(&f) && find_most_work_chain(&f.ms) == f.a3);
+    opfix_free(&f);
+    return failures;
+}
+
 #if !defined(_WIN32)
 struct hdr_scan { const struct uint256 *hash; bool seen; unsigned status; };
 
@@ -347,7 +379,8 @@ static bool log_status_of(const char *path, const struct uint256 *hash,
 
 /* Child: do the operator action against a real event log, then die by SIGKILL
  * the instant it returns (no close, no flush, no atexit). */
-static void kill_child(const char *log_path, bool then_reconsider)
+static void kill_child(const char *log_path, bool then_reconsider,
+                       bool nested_root)
 {
     event_log_t *log = event_log_open(log_path);
     if (!log) _exit(2);
@@ -358,6 +391,11 @@ static void kill_child(const char *log_path, bool then_reconsider)
     if (process_block_invalidate_from(&f.ms, f.a2->phashBlock, &out,
                                       INVALIDATE_ORIGIN_OPERATOR) != INVALIDATE_OK)
         _exit(3);
+    /* A second operator invalidateblock below the first root. */
+    if (nested_root &&
+        process_block_invalidate_from(&f.ms, f.a3->phashBlock, &out,
+                                      INVALIDATE_ORIGIN_OPERATOR) != INVALIDATE_OK)
+        _exit(6);
     if (then_reconsider &&
         process_block_reconsider(&f.ms, f.a2->phashBlock, &out) != RECONSIDER_OK)
         _exit(4);
@@ -365,11 +403,12 @@ static void kill_child(const char *log_path, bool then_reconsider)
     _exit(5);
 }
 
-static bool run_kill_child(const char *log_path, bool then_reconsider)
+static bool run_kill_child(const char *log_path, bool then_reconsider,
+                           bool nested_root)
 {
     pid_t pid = fork();
     if (pid < 0) return false;
-    if (pid == 0) kill_child(log_path, then_reconsider);
+    if (pid == 0) kill_child(log_path, then_reconsider, nested_root);
     int st = 0;
     return waitpid(pid, &st, 0) == pid && WIFSIGNALED(st) &&
            WTERMSIG(st) == SIGKILL;
@@ -394,14 +433,24 @@ static int check_operator_mark_durable_before_reply(void)
     unsigned status = 0;
 
     IB_CHECK("durable: child killed -9 right after invalidateblock",
-             run_kill_child(path, false));
+             run_kill_child(path, false, false));
     IB_CHECK("durable: operator mark is on disk after the kill",
              log_status_of(path, &hash, &status) &&
              (status & BLOCK_FAILED_VALID) && (status & BLOCK_OPERATOR_INVALID));
     IB_CHECK("durable: child killed -9 right after reconsiderblock",
-             run_kill_child(path, true));
+             run_kill_child(path, true, false));
     IB_CHECK("durable: cleared status is on disk after the kill",
              log_status_of(path, &hash, &status) &&
+             (status & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)) == 0);
+
+    /* A second operator root below the first: reconsider of the upper root
+     * clears both, and the lower one's on-disk record must say so, or the
+     * loader would keep it as an operator root after restart. */
+    const struct uint256 hash3 = *f.a3->phashBlock;
+    IB_CHECK("durable: child killed -9 after nested invalidate + reconsider",
+             run_kill_child(path, true, true));
+    IB_CHECK("durable: nested root's cleared status is on disk",
+             log_status_of(path, &hash3, &status) &&
              (status & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)) == 0);
 
     opfix_free(&f);
@@ -417,6 +466,7 @@ static int check_operator_policy(void)
     failures += check_operator_invalidation_restart();
     failures += check_operator_revalidation_bounded();
     failures += check_automated_invalidation_heals();
+    failures += check_automated_under_operator_root();
 #if !defined(_WIN32)
     failures += check_operator_mark_durable_before_reply();
 #endif

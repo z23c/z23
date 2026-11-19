@@ -377,6 +377,9 @@ block_index_apply_persisted_failure_trust(struct block_index *pindex,
  * it. Surfaced by diag_block_index_dump_state_json. Reentrant/lock-free. */
 int64_t block_index_failed_bits_stripped(void);
 int64_t block_index_failed_bits_demoted(void);
+/* Operator invalidateblock roots kept at load (BLOCK_FAILURE_TRUST_OPERATOR_KEPT).
+ * Each is also logged with its height and hash. Reentrant/lock-free. */
+int64_t block_index_operator_invalid_kept(void);
 
 /* One entry's nChainWork from its parent (or, parentless, its own proof; the
  * registered FlySync island root keeps its recorded work). The loader, the

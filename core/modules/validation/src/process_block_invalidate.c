@@ -479,6 +479,22 @@ enum invalidate_result process_block_invalidate_from(
     if (found != INVALIDATE_OK)
         return found;
 
+    /* A block already held by an operator invalidation ABOVE it (derived
+     * CHILD + operator mark, no FAILED_VALID of its own) is excluded from
+     * selection until reconsiderblock. An automated invalidation adds nothing
+     * there, and marking it would persist FAILED_VALID + BLOCK_OPERATOR_INVALID,
+     * which the loader keeps as an operator root: the automated verdict would
+     * outlive restart and the operator's reconsiderblock. Leave it alone. */
+    if (origin == INVALIDATE_ORIGIN_AUTOMATED &&
+        (target->nStatus & BLOCK_OPERATOR_INVALID) &&
+        !(target->nStatus & BLOCK_FAILED_VALID)) {
+        LOG_INFO_IN("process_block_invalidate", "validation",
+                    "invalidate: h=%d is already held by an operator "
+                    "invalidation; automated request is a no-op",
+                    target->nHeight);
+        return INVALIDATE_OK;
+    }
+
     char hex[65];
     uint256_get_hex(target->phashBlock ? target->phashBlock : hash, hex);
     int tip_h_before = active_chain_height(&ms->chain_active);
@@ -606,6 +622,28 @@ static void reconsider_remove_reconnected_mempool(struct main_state *ms,
     }
 }
 
+/* Clear and persist every strict descendant of `target` that carries its own
+ * BLOCK_FAILED_VALID. Returns false on the first persist failure; *count is
+ * the number cleared and persisted before it. */
+static bool reconsider_clear_persisted_descendants(struct main_state *ms,
+                                                   struct block_index *target,
+                                                   size_t *count)
+{
+    *count = 0;
+    size_t iter = 0;
+    struct block_index *p = NULL;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
+        if (!p || p == target || !(p->nStatus & BLOCK_FAILED_VALID)) continue;
+        if (p->nHeight <= target->nHeight) continue;
+        if (!invalidate_pprev_reaches_target(p, target)) continue;
+        p->nStatus &= ~(unsigned)(BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
+        if (!invalidate_persist_pindex(p))
+            return false;
+        (*count)++;
+    }
+    return true;
+}
+
 enum reconsider_result process_block_reconsider(struct main_state *ms,
                                                 const struct uint256 *hash,
                                                 struct uint256 *out_hash)
@@ -632,9 +670,24 @@ enum reconsider_result process_block_reconsider(struct main_state *ms,
      * subtree half-cleared. */
     target = invalidate_operator_root(target);
 
+    /* A descendant carrying its OWN FAILED_VALID (a second invalidateblock
+     * below this root, or an automated one) has that verdict on disk. Clear
+     * and persist those first: otherwise only memory forgets them, and a
+     * persisted FAILED_VALID + BLOCK_OPERATOR_INVALID comes back as an
+     * operator root at the next restart although the operator lifted it
+     * (zclassicd writes every block reconsiderblock clears). */
+    size_t own_cleared = 0;
+    if (!reconsider_clear_persisted_descendants(ms, target, &own_cleared)) {
+        LOG_RETURN(RECONSIDER_PERSIST_FAILED, "validation",
+                    "reconsider: failed to persist a cleared descendant "
+                    "below h=%d (%zu persisted before the failure)",
+                    target->nHeight, own_cleared);
+    }
+
     /* Clear FAILED on the target + descendants. */
     size_t cleared = 0;
     process_block_clear_invalid(ms, target, &cleared);
+    cleared += own_cleared;
     if (cleared == 0) {
         char hex[65];
         uint256_get_hex(target->phashBlock ? target->phashBlock : hash, hex);

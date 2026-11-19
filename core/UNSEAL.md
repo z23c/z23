@@ -1294,3 +1294,7 @@ later lane flips it HARD.
 - 2026-11-18T22:27:36Z — REASON: Local operator policy: persist ONLY an operator invalidateblock (BLOCK_OPERATOR_INVALID, set by the RPC origin, never by automated invalidation) across restart and exempt it from automatic revalidation; consensus predicates unchanged (zclassicd parity)
   old ROOT: 2b471deaee0c711233bad347b1ba7fddd0b9f22e7c0bcab6c7fb3fa011be2acc
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-18T23:59:07Z — REASON: review fix for operator invalidateblock: an automated invalidation of a block already under an operator invalidation must not persist as a new operator root, and reconsiderblock must durably clear every operator root it lifts below the reconsidered one; local operator policy only, consensus predicates unchanged
+  old ROOT: 5a05acde949203cdbcef1ddbf4d62c5857ddf7f52f44f3c1669f49cb1941cbdd
+  by: owner unseal ritual (make core-unseal)

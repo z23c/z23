@@ -320,6 +320,10 @@ bool diag_block_index_dump_state_json(struct json_value *out, const char *key)
                      block_index_failed_bits_stripped());
     json_push_kv_int(out, "failed_bits_demoted_above_checkpoint",
                      block_index_failed_bits_demoted());
+    /* Operator invalidateblock roots the loaders kept (local policy; each is
+     * logged with its hash at load, cleared only by reconsiderblock). */
+    json_push_kv_int(out, "operator_invalid_kept_at_load",
+                     block_index_operator_invalid_kept());
 
     if (!bi) {
         json_push_kv_bool(out, "found", false);
