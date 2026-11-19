@@ -264,6 +264,8 @@ void block_index_heights_repaired_reset_for_test(void);
  * Also recomputes nChainWork and nChainTx after repair.
  * Returns the number of fixes, or -1 when either pointer array cannot be
  * allocated; allocation refusal happens before any pprev or height mutation.
+ * Any unreadable parent record also returns -1; the caller must abort rather
+ * than advancing the repaired-through cursor or serving the repaired index.
  *
  * Must be called AFTER block_index_repair_heights(), BEFORE header sync. */
 /* min_height: only re-scan blocks with nHeight > min_height (pass -1 for a

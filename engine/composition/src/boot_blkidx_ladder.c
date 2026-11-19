@@ -490,7 +490,7 @@ bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *
         int pprev_fixed = block_index_repair_pprev(ms, ctx->datadir,
                                                    (int)pprev_done, &pprev_max);
         if (pprev_fixed < 0) {
-            LOG_ERROR("boot", "block index pprev repair allocation failed; "
+            LOG_ERROR("boot", "block index pprev repair failed; "
                       "refusing to continue with unverified chainwork");
             (void)boot_repair_cursor_tx_end(ndb, repair_tx, false);
             return false;

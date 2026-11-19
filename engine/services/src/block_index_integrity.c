@@ -750,6 +750,24 @@ static bool bii_pprev_alloc_scratch(size_t n, struct block_index ***arr_out,
  *
  * Call AFTER block_index_repair_heights() so heights are correct.
  * After pprev repair, recomputes nChainWork and nChainTx. */
+static bool bii_pprev_finish_chain(struct main_state *ms,
+    struct block_index **arr, struct block_index **all, size_t n,
+    int repaired, int heights_fixed, int read_errors)
+{
+    if (repaired > 0 || heights_fixed > 0)
+        bii_pprev_recompute_chain(ms, all, n);
+    if (read_errors > 0) {
+        free(arr);
+        free(all);
+        LOG_ERROR("block_index", "pprev repair encountered %d unreadable "
+                  "headers; refusing to certify repaired chainwork", read_errors);
+        return false;
+    }
+    free(arr);
+    free(all);
+    return true;
+}
+
 int block_index_repair_pprev(struct main_state *ms, const char *datadir,
                              int min_height, int *out_max_height)
 {
@@ -840,13 +858,9 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
 
     disk_block_io_read_fd_cache_exit();
 
-    /* After fixing pprev, recompute nChainWork and nChainTx.
-     * Sort all entries by height for forward propagation. */
-    if (repaired > 0 || heights_fixed > 0)
-        bii_pprev_recompute_chain(ms, all, n);
-
-    free(arr);
-    free(all);
+    if (!bii_pprev_finish_chain(ms, arr, all, n, repaired, heights_fixed,
+                                read_errors))
+        return -1; // raw-return-ok:unreadable-parent-record-refusal
 
     struct timespec t1;
     platform_time_monotonic_timespec(&t1);

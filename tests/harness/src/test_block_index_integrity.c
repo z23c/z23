@@ -1303,6 +1303,7 @@ struct bii_boot_fx {
     struct uint256 hashes[BII_BOOT_N];
     struct node_db ndb;
     struct app_context ctx;
+    char repair_dir[256];
 };
 
 static bool bii_boot_init(struct bii_boot_fx *fx)
@@ -1328,6 +1329,8 @@ static void bii_boot_free(struct bii_boot_fx *fx)
     if (fx->ndb.open)
         node_db_close(&fx->ndb);
     main_state_free(&fx->ms);
+    if (fx->repair_dir[0])
+        (void)test_rm_rf_recursive(fx->repair_dir);
 }
 
 static bool bii_boot_cursors_are(struct bii_boot_fx *fx, int64_t heights,
@@ -1355,6 +1358,40 @@ static bool bii_boot_oom_case(struct bii_boot_fx *fx)
            bii_boot_cursors_are(fx, -2, -2, -2);
 }
 
+static bool bii_boot_read_error_case(struct bii_boot_fx *fx)
+{
+    char blocks[300], path[320];
+
+    bii_make_tmpdir(fx->repair_dir, sizeof(fx->repair_dir));
+    fx->ctx.datadir = fx->repair_dir;
+    snprintf(blocks, sizeof(blocks), "%s/blocks", fx->ctx.datadir);
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", fx->ctx.datadir);
+    if ((mkdir(blocks, 0755) != 0 && errno != EEXIST))
+        return false;
+    FILE *file = fopen(path, "w+b");
+    if (!file)
+        return false;
+    uint8_t record[36] = {0};
+    memcpy(record + 4, fx->hashes[1].data, 32);
+    bool wrote = fseek(file, 140, SEEK_SET) == 0 &&
+                 fwrite(record, 1, sizeof(record), file) == sizeof(record);
+    memcpy(record + 4, fx->hashes[0].data, 32);
+    wrote = fseek(file, 174, SEEK_SET) == 0 &&
+            fwrite(record, 1, 35, file) == 35 && wrote;
+    wrote = fclose(file) == 0 && wrote;
+    fx->blocks[1].nStatus = BLOCK_HAVE_DATA;
+    fx->blocks[1].nDataPos = 174;
+    fx->blocks[2].nStatus = BLOCK_HAVE_DATA;
+    fx->blocks[2].nDataPos = 140;
+    fx->blocks[2].pprev = NULL;
+    fx->blocks[BII_BOOT_N - 1].nHeight = BII_BOOT_N - 1;
+    int out = -999;
+    bool refused = wrote && !boot_blkidx_repair_block_index(
+        &fx->ctx, &fx->ms, &fx->ndb, &out);
+    return refused && out == -999 && !fx->ndb.tx_open &&
+           bii_boot_cursors_are(fx, -2, -2, -2);
+}
+
 static bool bii_boot_height_oom_case(struct bii_boot_fx *fx)
 {
     int out = -999;
@@ -1366,8 +1403,29 @@ static bool bii_boot_height_oom_case(struct bii_boot_fx *fx)
            bii_boot_cursors_are(fx, -2, -2, -2);
 }
 
+static bool bii_boot_repair_short_record(struct bii_boot_fx *fx)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", fx->ctx.datadir);
+    FILE *file = fopen(path, "r+b");
+    if (file) {
+        uint8_t record[36] = {0};
+        memcpy(record + 4, fx->hashes[0].data, 32);
+        if (fseek(file, 174, SEEK_SET) != 0 ||
+            fwrite(record, 1, sizeof(record), file) != sizeof(record)) {
+            fclose(file);
+            return false;
+        }
+        if (fclose(file) != 0)
+            return false;
+    }
+    return true;
+}
+
 static bool bii_boot_retry_case(struct bii_boot_fx *fx)
 {
+    if (!bii_boot_repair_short_record(fx))
+        return false;
     for (int i = 0; i < BII_BOOT_N; i++)
         memset(&fx->blocks[i].nChainWork, 0,
                sizeof(fx->blocks[i].nChainWork));
@@ -1383,6 +1441,18 @@ static bool bii_boot_retry_case(struct bii_boot_fx *fx)
     return retried && out == 1 && work && cursors;
 }
 
+static bool bii_boot_read_retry_case(struct bii_boot_fx *fx)
+{
+    if (!bii_boot_repair_short_record(fx))
+        return false;
+    int out = -999;
+    bool retried = boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
+                                                  &fx->ndb, &out);
+    return retried && out == 0 && work_is_chain(fx->blocks, BII_BOOT_N) &&
+           bii_boot_cursors_are(fx, BII_BOOT_N - 1, BII_BOOT_N,
+                                BII_BOOT_N - 1);
+}
+
 static bool bii_boot_foreign_tx_case(struct bii_boot_fx *fx)
 {
     if (!node_db_begin(&fx->ndb))
@@ -1394,6 +1464,23 @@ static bool bii_boot_foreign_tx_case(struct bii_boot_fx *fx)
     if (fx->ndb.tx_open)
         node_db_rollback(&fx->ndb);
     return kept && !fx->ndb.tx_open;
+}
+
+static int t_mg_boot_pprev_read_error(void)
+{
+    int failures = 0;
+    struct bii_boot_fx fx;
+    if (!bii_boot_init(&fx)) {
+        BII_RUN("bii: boot pprev read-error fixture setup", false);
+        bii_boot_free(&fx);
+        return failures;
+    }
+    BII_RUN("bii: boot pprev read error rolls back repair cursors",
+            bii_boot_read_error_case(&fx));
+    BII_RUN("bii: boot no-op retry after record repair preserves valid work",
+            bii_boot_read_retry_case(&fx));
+    bii_boot_free(&fx);
+    return failures;
 }
 
 static int t_mg_boot_pprev_oom_rolls_back_cursors(void)
@@ -1663,7 +1750,14 @@ static int t_mg_pprev_short_record(void)
     BII_RUN("bii: pprev short record is not read as a parent",
             ok && !fx.b[1].pprev);
     BII_RUN("bii: pprev record ending at end of file is read whole",
-            fx.b[2].pprev == &fx.b[1] && r == 1);
+            fx.b[2].pprev == &fx.b[1] && r == -1);
+    BII_RUN("bii: pprev read error recomputes the valid child before refusal",
+            work_is(&fx.b[2], 2));
+    bool repaired_file = pp_put(&fx, 0, (long)fx.b[1].nDataPos,
+                                &fx.h[0], 36);
+    r = repaired_file ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -2;
+    BII_RUN("bii: pprev retry after record repair restores complete chainwork",
+            repaired_file && r == 1 && work_is_chain(fx.b, 3));
     pp_free(&fx);
     return failures;
 }
@@ -2015,6 +2109,7 @@ static int bii_mutant_gap_tests(void)
     int failures = 0;
     failures += t_mg_names();
     failures += t_mg_boot_pprev_oom_rolls_back_cursors();
+    failures += t_mg_boot_pprev_read_error();
     failures += t_mg_status_replaced();
     failures += t_mg_dump_fields();
     failures += t_mg_pprev_scan_set();
