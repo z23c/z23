@@ -313,7 +313,7 @@ prepare_bundled_docs() {
 # never a wildcard — because "any file the manifest names" is how an
 # attacker adds an extra.
 # The opt-in POSIX app set is exactly the current seven plus six fixed
-# game/source members. It is not accepted as an arbitrary manifest extension.
+# game/source members (the app binary row is per app: z23-skycombat or z23-tasks); not an arbitrary extension.
 RELEASE_MEMBERS_LEGACY="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify zclassic23-acme"
 RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 z23-package-verify zclassic23-package-verify z23-acme zclassic23-acme"
 APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
@@ -331,7 +331,7 @@ payload_max_bytes() {
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
         docs.root) printf '%s\n' 65 ;;
         docs.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
-        z23-skycombat|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
+        z23-skycombat|z23-tasks|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
         z23-app-macos) printf '%s\n' "$((4 * 1024 * 1024))" ;;
         Z23Apps-Info.plist) printf '%s\n' 65536 ;;
         installed-source.json) printf '%s\n' 4096 ;;
@@ -371,6 +371,7 @@ manifest_alias_source() {
 RELEASE_NAMES_CURRENT=$'AGENT_CARD.md\nz23\nz23-acme\nz23-package-verify\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_LEGACY=$'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_APP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
+RELEASE_NAMES_APP_TASKS="$(printf '%s\n' "$RELEASE_NAMES_APP" z23-tasks | LC_ALL=C sort | grep -vx z23-skycombat)"
 RELEASE_NAMES_APP_DESKTOP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\norg.zclassic.SkyCombat.desktop\norg.zclassic.ZClassic23.desktop\norg.zclassic.ZClassic23.svg\norg.zclassic.ZClassic23.xml\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 
 RELEASE_NAMES_APP_TOOLCHAIN="$(printf '%s\n' "$RELEASE_NAMES_APP_DESKTOP" app-toolchain.json app-toolchain.bundle | LC_ALL=C sort)"
@@ -384,7 +385,7 @@ validate_manifest_contract() {
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|docs\.(root|bundle)|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|docs\.(root|bundle)|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-tasks|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
         "$manifest" || true)"
     { [ "$lines" -eq 5 ] || [ "$lines" -eq 7 ] || [ "$lines" -eq 9 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 15 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ] || [ "$lines" -eq 21 ]; } && [ "$matching" -eq "$lines" ] \
         || die "SHA256SUMS must contain a supported exact release set with an optional complete docs pair"
@@ -397,7 +398,7 @@ validate_manifest_contract() {
         [ "$(printf '%s\n' "$names" | grep -xc 'docs.root')" -eq 1 ] || die "duplicate docs member"
         names="$(printf '%s\n' "$names" | grep -Ev '^docs\.(bundle|root)$')"
     fi
-    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_MACOS" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
+    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_TASKS" ] || [ "$names" = "$RELEASE_NAMES_APP_MACOS" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
         || die "SHA256SUMS must name each required release member exactly once"
     # z23 and zclassic23 are one program under two names, and the release
     # says so with one digest in two rows. The same holds for each helper
@@ -799,11 +800,12 @@ install_docs() {
 }
 
 has_app_source() {
-    [ -n "$(manifest_digest_of "$1" z23-skycombat)" ]
+    local app; for app in skycombat tasks; do [ -n "$(manifest_digest_of "$1" "z23-$app")" ] && return 0; done; return 1
 }
 
 app_payload_members() {
-    printf '%s\n' "$APP_SOURCE_MEMBERS"
+    # One app executable per release: the wire set's binary row follows the app (exact sets above).
+    if [ -n "$(manifest_digest_of "$1" z23-tasks)" ]; then printf '%s\n' "z23-tasks ${APP_SOURCE_MEMBERS#z23-skycombat }"; else printf '%s\n' "$APP_SOURCE_MEMBERS"; fi
     if [ -n "$(manifest_digest_of "$1" z23-app-macos)" ]; then
         printf '%s\n' "$APP_MACOS_MEMBERS"
     fi
@@ -823,18 +825,17 @@ app_payload_members() {
 install_app_members() {
     local stage="$1" dest="$2" name
     for name in $(app_payload_members "$stage"); do
-        if [ "$name" = z23-skycombat ] || [ "$name" = z23-app-macos ]; then
-            install -m 555 "$stage/$name" "$dest/$name" || die "could not install $name"
-        else
-            install -m 444 "$stage/$name" "$dest/$name" || die "could not install $name"
-        fi
+        case "$name" in
+        z23-*) install -m 555 "$stage/$name" "$dest/$name" || die "could not install $name" ;;
+        *) install -m 444 "$stage/$name" "$dest/$name" || die "could not install $name" ;;
+        esac
         [ "$(sha256_file "$dest/$name")" = "$(manifest_digest_of "$stage" "$name")" ] \
             || die "installed app member differs: $name"
     done
 }
 
 install_app_source_linux() {
-    local stage="$1" prefix="$2" root id dest incoming name
+    local stage="$1" prefix="$2" root id dest incoming name app
     has_app_source "$stage" || return 0
     root="$prefix/share/z23/apps"
     [ ! -L "$root" ] || die "apps installation directory must not be a symlink"
@@ -859,11 +860,10 @@ install_app_source_linux() {
     fi
     [ "$(sha256_file "$prefix/bin/z23")" = "$(manifest_digest_of "$dest" z23)" ] \
         || die "installed node is outside the retained app release manifest"
-    [ ! -e "$root/skycombat" ] || [ -L "$root/skycombat" ] \
-        || die "skycombat source selector is not an installer-managed link"
-    atomic_relative_link ../share/z23/apps/skycombat/z23-skycombat "$prefix/bin/z23-skycombat" \
-        || die "cannot link the installed game"
-    atomic_relative_link "$id" "$root/skycombat" || die "cannot select installed app source"
+    app=skycombat; [ -n "$(manifest_digest_of "$dest" z23-tasks)" ] && app=tasks
+    [ ! -e "$root/$app" ] || [ -L "$root/$app" ] || die "$app source selector is not an installer-managed link"
+    atomic_relative_link "../share/z23/apps/$app/z23-$app" "$prefix/bin/z23-$app" || die "cannot link the installed $app app"
+    atomic_relative_link "$id" "$root/$app" || die "cannot select installed app source"
 }
 
 # Desktop string decoding precedes Exec argument decoding. Never evaluate an
