@@ -10,6 +10,7 @@
  *     failed dependency never unlocks it;
  *   - rows written before the fields existed read as P3, no dependency;
  *   - malformed priority/depends_on are refused at post and store nothing;
+ *   - exact queued reprioritization is atomic, idempotent and state-guarded;
  *   - post refuses QUEUE_FULL once the queued bound is reached.
  * Isolated XDG_STATE_HOME; the handler is called in-process after the real
  * registry validates the input keys. No model, network or spawn.
@@ -25,8 +26,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define DQO_PATH "dev.agent.queue"
+#define DQO_PRIORITY_PATH "dev.fleet.queue-reprioritize"
 
 static char g_dqo_state[1024];
 static char g_dqo_saved_xdg[4096];
@@ -71,7 +77,8 @@ static void dqo_begin(struct dqo_call *c, const char *action)
 }
 
 /* Validate through the REAL registry, then call the handler. */
-static bool dqo_run(struct dqo_call *c)
+static bool dqo_run_handler(struct dqo_call *c,
+    void (*handler)(const struct zcl_command_request *, struct zcl_command_reply *))
 {
     char why[256];
     if (!c->request.spec ||
@@ -80,8 +87,13 @@ static bool dqo_run(struct dqo_call *c)
         printf("[input rejected: %s] ", why);
         return false;
     }
-    zcl_native_handle_dev_agent_queue(&c->request, &c->reply);
+    handler(&c->request, &c->reply);
     return true;
+}
+
+static bool dqo_run(struct dqo_call *c)
+{
+    return dqo_run_handler(c, zcl_native_handle_dev_agent_queue);
 }
 
 static void dqo_end(struct dqo_call *c)
@@ -116,6 +128,52 @@ static bool dqo_post_ok(const char *name, int priority, const char *after)
 {
     char code[64];
     return dqo_post(name, priority, after, code, sizeof(code)) && !code[0];
+}
+
+struct dqo_priority_reply {
+    char code[64];
+    char leaf[40];
+    long long seq;
+    long long attempt;
+    long long previous;
+    long long priority;
+    bool changed;
+};
+
+static bool dqo_priority_call(const char *name, long long seq,
+    long long attempt, int priority, struct dqo_priority_reply *out)
+{
+    struct dqo_call c;
+    memset(out, 0, sizeof(*out));
+    out->seq = out->attempt = out->previous = out->priority = -1;
+    json_init(&c.input);
+    json_set_object(&c.input);
+    memset(&c.request, 0, sizeof(c.request));
+    c.request.input = &c.input;
+    c.request.spec = zcl_command_registry_find(zcl_command_catalog(),
+        DQO_PRIORITY_PATH, NULL);
+    zcl_command_reply_init(&c.reply, "zcl.agent_queue.v1");
+    (void)json_push_kv_str(&c.input, "name", name);
+    (void)json_push_kv_int(&c.input, "seq", seq);
+    (void)json_push_kv_int(&c.input, "attempt", attempt);
+    (void)json_push_kv_int(&c.input, "priority", priority);
+    bool ran = dqo_run_handler(&c, zcl_native_handle_dev_agent_queue_reprioritize);
+    (void)snprintf(out->code, sizeof(out->code), "%s",
+        c.reply.status == ZCL_COMMAND_STATUS_PASSED ? "" : c.reply.error.code);
+    (void)snprintf(out->leaf, sizeof(out->leaf), "%s",
+        json_get_str(json_get(&c.reply.data, "leaf")));
+    const struct json_value *v;
+    if ((v = json_get(&c.reply.data, "seq")) && v->type == JSON_INT)
+        out->seq = json_get_int(v);
+    if ((v = json_get(&c.reply.data, "attempt")) && v->type == JSON_INT)
+        out->attempt = json_get_int(v);
+    if ((v = json_get(&c.reply.data, "previous_priority")) && v->type == JSON_INT)
+        out->previous = json_get_int(v);
+    if ((v = json_get(&c.reply.data, "priority")) && v->type == JSON_INT)
+        out->priority = json_get_int(v);
+    out->changed = json_get_bool(json_get(&c.reply.data, "changed"));
+    dqo_end(&c);
+    return ran;
 }
 
 /* Claim once; the claimed name, or "" when the queue had nothing READY. */
@@ -175,6 +233,75 @@ static int dqo_case_priority(void)
         ASSERT(dqo_claim_is("p1-late"));
         ASSERT(dqo_claim_is("p3-first"));
         ASSERT(dqo_claim_is(""));
+        PASS();
+    }
+_test_next:;
+    dqo_restore();
+    return failures;
+}
+
+static int dqo_case_reprioritize(void)
+{
+    int failures = 0;
+    TEST("queue order: exact queued identity reprioritizes atomically") {
+        struct dqo_priority_reply r;
+        char tmp[1300];
+        dqo_isolate("reprioritize");
+        ASSERT(dqo_post_ok("promoted", 3, NULL));
+        ASSERT(dqo_post_ok("other", 1, NULL));
+        ASSERT(dqo_priority_call("promoted", 1, 1, 0, &r));
+        ASSERT_STR_EQ(r.code, "");
+        ASSERT_STR_EQ(r.leaf, DQO_PRIORITY_PATH);
+        ASSERT(r.changed && r.seq == 1 && r.attempt == 1 &&
+            r.previous == 3 && r.priority == 0);
+        (void)snprintf(tmp, sizeof(tmp), "%s/z23/dev/queue/queue.jsonl.tmp",
+            g_dqo_state);
+#if !defined(_WIN32)
+        ASSERT(mkdir(tmp, 0700) == 0);
+#endif
+        ASSERT(dqo_priority_call("promoted", 1, 1, 0, &r));
+        ASSERT_STR_EQ(r.code, "");
+        ASSERT(!r.changed && r.seq == 1 && r.attempt == 1 &&
+            r.previous == 0 && r.priority == 0);
+#if !defined(_WIN32)
+        ASSERT(rmdir(tmp) == 0);
+        ASSERT(mkdir(tmp, 0700) == 0);
+#endif
+        ASSERT(dqo_priority_call("promoted", 1, 1, 3, &r));
+        ASSERT_STR_EQ(r.code, "QUEUE_WRITE_FAILED");
+        ASSERT_STR_EQ(r.leaf, DQO_PRIORITY_PATH);
+#if !defined(_WIN32)
+        ASSERT(rmdir(tmp) == 0);
+#endif
+        ASSERT(dqo_claim_is("promoted"));
+        ASSERT(dqo_priority_call("promoted", 1, 1, 0, &r));
+        ASSERT_STR_EQ(r.code, "PRIORITY_RUNNING");
+        ASSERT(dqo_priority_call("other", 1, 1, 1, &r));
+        ASSERT_STR_EQ(r.code, "PRIORITY_IDENTITY_MISMATCH");
+        ASSERT(dqo_priority_call("other", 2, 2, 1, &r));
+        ASSERT_STR_EQ(r.code, "PRIORITY_IDENTITY_MISMATCH");
+        ASSERT(dqo_priority_call("other", 2, 1, 4, &r));
+        ASSERT_STR_EQ(r.code, "BAD_INPUT");
+        ASSERT(dqo_priority_call("other", 2, 1, 0, &r));
+        ASSERT_STR_EQ(r.code, "");
+        ASSERT(r.changed && r.seq == 2 && r.attempt == 1 &&
+            r.previous == 1 && r.priority == 0);
+        ASSERT(dqo_claim_is("other"));
+        ASSERT(dqo_post_ok("waiting", 3, "owner"));
+        ASSERT(dqo_claim_is(""));
+        ASSERT(dqo_priority_call("waiting", 3, 1, 3, &r));
+        ASSERT_STR_EQ(r.code, "PRIORITY_NOT_QUEUED");
+        ASSERT(dqo_priority_call("waiting", 3, 1, 0, &r));
+        ASSERT_STR_EQ(r.code, "PRIORITY_NOT_QUEUED");
+        ASSERT(dqo_post_ok("duplicate", 2, NULL));
+        ASSERT(dqo_append("queue.jsonl",
+            "{\"seq\":4,\"ts\":\"2026-09-18T00:00:00Z\",\"kind\":\"leaf\","
+            "\"name\":\"duplicate\",\"group\":\"\",\"path\":\"\",\"brief\":\"\","
+            "\"model\":\"\",\"attempt\":1,\"priority\":2,\"state\":\"queued\","
+            "\"worktree\":\"\",\"pid_or_unit\":\"\",\"started\":0}\n"));
+        ASSERT(dqo_priority_call("duplicate", 4, 1, 0, &r));
+        ASSERT_STR_EQ(r.code, "QUEUE_READ_FAILED");
+        ASSERT_STR_EQ(r.leaf, DQO_PRIORITY_PATH);
         PASS();
     }
 _test_next:;
@@ -326,6 +453,7 @@ int test_devagent_queue_order(void)
     return failures;
 #endif
     failures += dqo_case_priority();
+    failures += dqo_case_reprioritize();
     failures += dqo_case_after();
     failures += dqo_case_legacy_and_refusals();
     failures += dqo_case_backpressure();

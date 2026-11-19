@@ -60,6 +60,12 @@
  * row (ready, blocker) and never runs or cancels a held row. Nothing else
  * reorders work.
  *
+ * The separate dev.fleet.queue-reprioritize leaf uses
+ * zcl.agent_queue_reprioritize_input.v1 and requires name, seq, attempt and
+ * priority. It holds the same scheduler lock, preserves the exact row's
+ * other codec fields, refuses running and WAITING_EXTERNAL rows, and returns
+ * changed:false without rewriting when the priority already matches.
+ *
  * ONE LIVE ROW PER NAME. A name is one run directory, so post refuses
  * NAME_IN_FLIGHT while a row with that name is queued or running, and the
  * existing row keeps its seq and attempt. Cancel or a terminal outcome
@@ -102,6 +108,10 @@
  * CLAIM_COMPLETED when the closed predicate already finished the name.
  * reap's reclaimed counts running rows returned to queued because their
  * claimant died before the run's first artifact (see orphan reclaim).
+ * The separate reprioritize leaf identifies itself as
+ * "dev.fleet.queue-reprioritize" and returns {state:"queued", name, seq,
+ * attempt, previous_priority, priority, changed} or
+ * PRIORITY_IDENTITY_MISMATCH/PRIORITY_RUNNING/PRIORITY_NOT_QUEUED.
  *
  * PROCESS RULE. Spawn only through zcl_spawn_detached() from util/spawn.h.
  * popen(), system() and a shell command string are forbidden and gated.
@@ -160,6 +170,7 @@
 #endif
 
 #define DVQ_LEAF "dev.agent.queue"
+#define DVQ_PRIORITY_LEAF "dev.fleet.queue-reprioritize"
 
 /* Bounded budgets: every file this leaf reads or writes is capped, so a
  * hostile state dir cannot grow the process without bound. */
@@ -174,14 +185,20 @@
 
 /* ── failure ───────────────────────────────────────────────────────────── */
 
-static void dvq_fail(struct zcl_command_reply *reply, const char *code,
-                     const char *phase, const char *msg, const char *evidence)
+static void dvq_fail_leaf(struct zcl_command_reply *reply, const char *leaf,
+    const char *code, const char *phase, const char *msg, const char *evidence)
 {
-    (void)json_push_kv_str(&reply->data, "leaf", DVQ_LEAF);
+    (void)json_push_kv_str(&reply->data, "leaf", leaf);
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_FAILED, code, phase, false,
                            false, msg, evidence);
     reply->error.human_action_required = true;
+}
+
+static void dvq_fail(struct zcl_command_reply *reply, const char *code,
+                     const char *phase, const char *msg, const char *evidence)
+{
+    dvq_fail_leaf(reply, DVQ_LEAF, code, phase, msg, evidence);
 }
 
 /* ── input accessors ───────────────────────────────────────────────────── */
@@ -2622,6 +2639,131 @@ static void dvq_claim(const struct zcl_command_request *req,
     reply->exit_code = 0;
 }
 
+static bool dvq_reprioritize_input(const struct zcl_command_request *req,
+    const char **name, long long *seq, long long *attempt, long long *priority)
+{
+    const struct json_value *s = json_get(req->input, "seq");
+    const struct json_value *a = json_get(req->input, "attempt");
+    const struct json_value *p = json_get(req->input, "priority");
+    *name = dvq_str(req, "name");
+    if (!*name || !dvq_name_ok(*name) || !s || s->type != JSON_INT ||
+        !a || a->type != JSON_INT || !p || p->type != JSON_INT)
+        return false;
+    *seq = json_get_int(s);
+    *attempt = json_get_int(a);
+    *priority = json_get_int(p);
+    return *seq > 0 && *attempt > 0 && *priority >= 0 && *priority <= 3;
+}
+
+static bool dvq_reprioritize_select(struct dvq_row *rows, size_t nrows,
+    const char *name, long long seq, long long attempt, size_t *at,
+    const char **code, const char **message, const char **evidence,
+    const char *qpath)
+{
+    size_t matches = 0;
+    for (size_t i = 0; i < nrows; i++) {
+        if (strcmp(rows[i].name, name) == 0 && rows[i].seq == seq &&
+            rows[i].attempt == attempt) {
+            *at = i;
+            matches++;
+        }
+    }
+    if (matches != 1) {
+        *code = matches ? "QUEUE_READ_FAILED" : "PRIORITY_IDENTITY_MISMATCH";
+        *message = matches ? "queue contains duplicate exact task identities" :
+            "no queue row matches the exact name, seq and attempt";
+        *evidence = matches ? qpath : "exact task identity";
+        return false;
+    }
+    if (strcmp(rows[*at].state, "running") == 0) {
+        *code = "PRIORITY_RUNNING";
+        *message = "a running row belongs to its worker; only queued rows reprioritize";
+        *evidence = "exact row is running";
+        return false;
+    }
+    if (strcmp(rows[*at].state, "queued") != 0) {
+        *code = "PRIORITY_NOT_QUEUED";
+        *message = "only queued rows reprioritize";
+        *evidence = "exact row is not queued";
+        return false;
+    }
+    return true;
+}
+
+static void dvq_reprioritize(const struct zcl_command_request *req,
+                             struct zcl_command_reply *reply)
+{
+    struct dvq_dirs d;
+    struct dvq_row *rows = NULL;
+    size_t nrows = 0, at = 0;
+    const char *name, *code = NULL, *message = NULL, *evidence = NULL;
+    long long seq, attempt, priority, previous;
+    char qpath[4096];
+    int lock = -1;
+    bool changed;
+    if (!req || !req->input ||
+        !dvq_reprioritize_input(req, &name, &seq, &attempt, &priority)) {
+        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "BAD_INPUT", "reprioritize",
+            "name, seq, attempt and priority 0..3 select one queued row",
+            "input identity or priority missing, misspelled, or out of range");
+        return;
+    }
+    if (!dvq_dirs_resolve(&d, true)) {
+        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "STATE_DIR_FAILED", "reprioritize",
+            "cannot resolve the owner-private state root", "platform_state_root");
+        return;
+    }
+    if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.queue) >=
+        (int)sizeof(qpath)) {
+        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "QUEUE_READ_FAILED", "reprioritize",
+            "the queue path does not fit its buffer", "platform_state_root too long");
+        return;
+    }
+    lock = dvq_lock(d.queue);
+    if (lock < 0) {
+        dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, "QUEUE_READ_FAILED", "reprioritize",
+            "cannot take the queue lock", qpath);
+        return;
+    }
+    if (!dvq_load_rows(qpath, &rows, &nrows)) {
+        code = "QUEUE_READ_FAILED";
+        message = "cannot read the queue file";
+        evidence = qpath;
+        goto fail;
+    }
+    if (!dvq_reprioritize_select(rows, nrows, name, seq, attempt, &at,
+        &code, &message, &evidence, qpath))
+        goto fail;
+    previous = rows[at].priority;
+    changed = previous != priority;
+    if (changed) {
+        rows[at].priority = priority;
+        if (!dvq_rewrite_rows(d.queue, qpath, rows, nrows)) {
+            code = "QUEUE_WRITE_FAILED";
+            message = "cannot rewrite the queue file";
+            evidence = qpath;
+            goto fail;
+        }
+    }
+    free(rows);
+    dvq_unlock(lock);
+    (void)json_push_kv_str(&reply->data, "leaf", DVQ_PRIORITY_LEAF);
+    (void)json_push_kv_str(&reply->data, "state", "queued");
+    (void)json_push_kv_str(&reply->data, "name", name);
+    (void)json_push_kv_int(&reply->data, "seq", seq);
+    (void)json_push_kv_int(&reply->data, "attempt", attempt);
+    (void)json_push_kv_int(&reply->data, "previous_priority", previous);
+    (void)json_push_kv_int(&reply->data, "priority", priority);
+    (void)json_push_kv_bool(&reply->data, "changed", changed);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+    return;
+fail:
+    free(rows);
+    dvq_unlock(lock);
+    dvq_fail_leaf(reply, DVQ_PRIORITY_LEAF, code, "reprioritize", message, evidence);
+}
+
 /* Bounded cancel: drop queued (unclaimed) rows naming name, so a later
  * next never launches them. Running rows belong to their worker —
  * stopping one is the worker's own responsibility, never this action's.
@@ -4746,7 +4888,7 @@ void zcl_native_handle_dev_agent_queue(
         return;
     if (!request || !request->input) {
         dvq_fail(reply, "BAD_INPUT", "route",
-                 "dev.agent.queue needs an action: post|next|reap|status|cancel",
+                 "dev.agent.queue needs an action: post|next|claim|reap|status|cancel",
                  "request.input was missing");
         return;
     }
@@ -4784,4 +4926,11 @@ void zcl_native_handle_dev_agent_queue(
     dvq_fail(reply, "UNKNOWN_ACTION", "route",
              "action is one of post|next|claim|reap|status|cancel",
              "input.action unknown");
+}
+
+void zcl_native_handle_dev_agent_queue_reprioritize(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!reply) return;
+    dvq_reprioritize(request, reply);
 }

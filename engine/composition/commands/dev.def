@@ -2931,6 +2931,35 @@ ZCL_COMMAND_DEV_COMMAND(
     "the unit queue is a development-lane coordination surface",
     "z23-dev dev agent queue")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.fleet.queue-reprioritize", "dev.fleet", "",
+    "Reprioritize one exact queued task",
+    "Changes only priority on the one queued row matching name, seq and "
+    "attempt, under the existing scheduler lock and atomic rewrite. Every "
+    "selector is required, so a stale ChatGPT observation cannot rename a "
+    "later incarnation of the same ref. A same-priority call returns "
+    "changed:false without rewriting; a changed call succeeds only after "
+    "the rewrite. Running rows refuse PRIORITY_RUNNING, other non-queued "
+    "states refuse PRIORITY_NOT_QUEUED, and an absent or stale identity "
+    "refuses PRIORITY_IDENTITY_MISMATCH. Other fields represented by the "
+    "existing queue codec stay unchanged; unknown extension fields follow "
+    "that codec's existing rewrite behavior. Local operator authority only; "
+    "no remote or grant "
+    "adapter is implied.", 16384,
+    "agent,queue,priority,reprioritize,exact,task",
+    "zcl.agent_queue_reprioritize_input.v1", "zcl.agent_queue.v1",
+    "name,seq,attempt,priority", "name,seq,attempt,priority",
+    "z23-dev dev fleet queue-reprioritize --name=<ref> --seq=1 --attempt=1 --priority=0",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_agent_queue_reprioritize,
+    "exact queued reprioritization is a development-lane coordination surface",
+    "z23-dev dev fleet queue-reprioritize")
+
 /* ── dev.agent.worker ──────────────────────────────────────────────────────
  * The resident dev-only loop that consumes dev.agent.queue continuously.
  * It claims ONE job (queue claim persists claim.json first), runs the

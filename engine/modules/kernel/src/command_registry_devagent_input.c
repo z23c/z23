@@ -51,14 +51,15 @@ static bool devagent_ledger_add_int(const char *path, const char *key,
     return true;
 }
 
-/* dev.agent.queue's post priority: `--priority=1` types as an integer. The
- * handler owns the 0..3 range and refuses the rest by name; the transport
- * admits only a small non-negative integer, scoped to this one leaf. */
+/* Queue post and exact reprioritize priority: `--priority=1` types as an
+ * integer. The handlers own the 0..3 range and refuse the rest by name; the
+ * transport admits only a small non-negative integer, scoped to these leaves. */
 static bool devagent_queue_priority(const char *path, const char *key,
                                     const struct json_value *value,
                                     bool *type_ok)
 {
-    if (!path || strcmp(path, "dev.agent.queue") != 0 ||
+    if (!path || (strcmp(path, "dev.agent.queue") != 0 &&
+        strcmp(path, "dev.fleet.queue-reprioritize") != 0) ||
         strcmp(key, "priority") != 0)
         return false;
     *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
