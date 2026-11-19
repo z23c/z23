@@ -277,6 +277,12 @@ fixture_corpus_refusal() { # rejected native inputs must emit no usable JSON
     }
 }
 
+registry_row_feedback() {
+    [ "$1" = 1 ] || return 0
+    echo "registry: a row MOVED -- rebuild and run the affected tests:" >&2
+    echo "           make t-fast-exact ONLY=zcode_package_registry,zcode_swarm_net,zcode_score_receipt" >&2
+}
+
 run_selftest() {
     local tmp rounds i old_leaf old_consumer new_leaf new_consumer
     local top_dir=contexts/commons/modules/top
@@ -409,6 +415,17 @@ run_selftest() {
         return 1
     fi
     echo "  selftest ok: non-registry leaf root repins its dependent and transitive consumer"
+    local feedback
+    feedback=$(registry_row_feedback 0 2>&1)
+    [ -z "$feedback" ] || { echo "SELFTEST FAILED: unchanged row emitted feedback" >&2; return 1; }
+    feedback=$(registry_row_feedback 1 2>&1)
+    local commands
+    commands=$(printf "%s\n" "$feedback" | sed -n "s/^[[:space:]]*\(make[[:space:]].*\)$/\1/p")
+    [ "$commands" = "make t-fast-exact ONLY=zcode_package_registry,zcode_swarm_net,zcode_score_receipt" ] || {
+        echo "SELFTEST FAILED: moved row must name the exact focused test command" >&2
+        return 1
+    }
+    echo "  selftest ok: row feedback selects exact tests only when changed"
     echo "[zcode_registry_rederive] SELFTEST PASS (omitted manifests fail; non-registry roots reach a terminal fixpoint)"
 }
 
@@ -487,20 +504,8 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     if out=$("$BIN" 2>&1); then
         if [ "$changed_any" = 1 ]; then
             echo "registry: CLEAN after $((round - 1)) fixpoint round(s); ${#PACKAGE_MANIFESTS[@]} package manifests covered"
-            # This script rebuilds ONLY $BIN. Three test sources include the
-            # same engine/composition/zcode_package_registry.def and compile the row into
-            # build/bin/test_parallel, so until that is relinked the suite is
-            # still asserting the OLD root and will report a mismatch that no
-            # longer exists. That exact stale-binary reading has already been
-            # mistaken for a real regression once. Say so, every time a row
-            # actually moved.
-            if [ "$registry_changed" = 1 ]; then
-                echo "registry: a row MOVED -- rebuild before trusting the suite:" >&2
-                echo "           make -j\"\$(getconf _NPROCESSORS_ONLN)\" test_parallel" >&2
-                echo "         build/bin/test_parallel still embeds the old root" >&2
-                echo "         until it is relinked (test_zcode_package_registry," >&2
-                echo "         test_zcode_swarm_net, test_zcode_score_receipt)." >&2
-            fi
+            # The focused runner rebuilds the tests that embed the changed row.
+            registry_row_feedback "$registry_changed"
         else
             echo "registry: CLEAN -- no drift, nothing to do; ${#PACKAGE_MANIFESTS[@]} package manifests covered"
         fi
