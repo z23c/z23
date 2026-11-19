@@ -7758,6 +7758,21 @@ static bool ic_fresh_edit_lint_mixed(void)
     return ic_fresh_edit_lint() && ic_split_w("tools/zz/m1.txt", "unrelated\n");
 }
 
+/* A new lint header beside an unrelated row outside the tree: only the
+ * changed rows can name it, so it is admitted named-only, not structural. */
+static bool ic_fresh_edit_lint_hdr(void)
+{
+    return ic_split_w("tools/lint/lintc/gate_fresh_hdr.h", "/* h */\n") &&
+           ic_split_w("tools/zz/m1.txt", "unrelated\n");
+}
+
+/* The base tree's unchanged core/a/a.h names this stem. */
+static bool ic_fresh_edit_lint_hdr_mention(void)
+{
+    return ic_split_w("tools/lint/lintc/gate_fresh_named.h", "/* h */\n") &&
+           ic_split_w("tools/zz/m1.txt", "unrelated\n");
+}
+
 static bool ic_fresh_edit_lint_fixture(void)
 {
     return ic_split_w("tools/lint/fixtures/fresh_probe.c.fixture", "int x;\n");
@@ -7940,6 +7955,8 @@ static bool ic_fresh_fixture_build(void)
         {"freshlintoutside", ic_fresh_edit_lint_outside},
         {"freshlintwildcard", ic_fresh_edit_lint_wildcard},
         {"freshlintmixed", ic_fresh_edit_lint_mixed},
+        {"freshlinthdr", ic_fresh_edit_lint_hdr},
+        {"freshlinthdrmention", ic_fresh_edit_lint_hdr_mention},
         {"freshlintfixture", ic_fresh_edit_lint_fixture},
         {"freshlintmention", ic_fresh_edit_lint_mention},
         {"freshandroid", ic_fresh_edit_android},
@@ -8002,6 +8019,8 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshlintoutside", 'A', NULL, NULL}, /* changed external consumer */
     {"freshlintwildcard", 'A', NULL, NULL}, /* changed external build route */
     {"freshlintmixed", 'A', NULL, NULL}, /* conservatively refuse mixed rows */
+    {"freshlinthdr", 0, "code_inventory", NULL}, /* a sealed header named only by the change */
+    {"freshlinthdrmention", 'A', NULL, NULL}, /* an unchanged file names its stem */
     {"freshlintfixture", 0, "make_lint_gates", NULL}, /* a new lint fixture */
     {"freshandroid", 0, "code_inventory", NULL},     /* the app's own build */
     {"freshandroidres", 0, "code_inventory", NULL},  /* any file type there */
@@ -8139,14 +8158,14 @@ static int test_ic_changed_set_fresh_source_closure(void)
 }
 
 
-/* ── a deleted shell script that nothing names stays exact ─────────────────
+/* ── a deleted shell script that nothing live names stays exact ────────────
  *
  * The shell-to-C program deletes a script in almost every lane. When no
- * tracked file at the verified revision names its basename, nothing can run
- * or read it: the selection is the groups the rule table maps its own path
- * to, under the reason deleted-script-closure. A script that is still named,
- * any other deleted kind (.c, .h, .def, .txt) and any git failure stay the
- * full catalog. */
+ * tracked file at the verified revision names its basename outside a
+ * comment, nothing can run or read it: the selection is the groups the rule
+ * table maps its own path to, under the reason deleted-script-closure. A
+ * script that is still named by live text, any other deleted kind (.c, .h,
+ * .def, .txt) and any git failure stay the full catalog. */
 static bool ic_del_rm(const char *what)
 {
     return ic_split_git(what);
@@ -8170,6 +8189,49 @@ static bool ic_del_edit_named_c(void)
 static bool ic_del_edit_named_doc(void)
 {
     return ic_del_rm("git rm -q tools/scripts/named_doc.sh");
+}
+
+/* A line comment names this one. */
+static bool ic_del_edit_named_line(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_line.sh");
+}
+
+/* A string literal runs this one. */
+static bool ic_del_edit_named_live(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_live.sh");
+}
+
+/* A '#' line in a Makefile fragment documents this one. */
+static bool ic_del_edit_named_hash(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_hash.sh");
+}
+
+/* A '#' heading in a markdown document names this one. */
+static bool ic_del_edit_named_head(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_head.sh");
+}
+
+/* A shell comment line ending in a backslash precedes the live line that
+ * runs this one. */
+static bool ic_del_edit_named_cont(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_cont.sh");
+}
+
+/* A makefile comment continued across a backslash newline names this one. */
+static bool ic_del_edit_named_mkcont(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_mkcont.sh");
+}
+
+/* This one is named inside a block comment that never closes. */
+static bool ic_del_edit_named_open(void)
+{
+    return ic_del_rm("git rm -q tools/scripts/named_open.sh");
 }
 
 static bool ic_del_edit_mixed(void)
@@ -8198,6 +8260,48 @@ static bool ic_del_edit_dot_txt(void)
     return ic_del_rm("git rm -q docs/lonely.txt");
 }
 
+/* The deleted scripts the mention cases probe, plus the C and make mentions:
+ * one live Makefile rule, a block comment, a line comment, a string literal,
+ * a Makefile comment line, a makefile comment make really does continue, and
+ * an unterminated block comment. */
+static bool ic_del_base_mention_scripts(void)
+{
+    return ic_split_w("tools/scripts/named_c.sh", "echo c\n") &&
+           ic_split_w("tools/scripts/named_doc.sh", "echo doc\n") &&
+           ic_split_w("tools/scripts/named_line.sh", "echo line\n") &&
+           ic_split_w("tools/scripts/named_live.sh", "echo live\n") &&
+           ic_split_w("tools/scripts/named_hash.sh", "echo hash\n") &&
+           ic_split_w("tools/scripts/named_head.sh", "echo head\n") &&
+           ic_split_w("tools/scripts/named_cont.sh", "echo cont\n") &&
+           ic_split_w("tools/scripts/named_mkcont.sh", "echo mkcont\n") &&
+           ic_split_w("tools/scripts/named_open.sh", "echo open\n") &&
+           ic_split_w("core/a/ref.c", "/* runs named_c.sh */\n") &&
+           ic_split_w("core/a/line.c", "// runs named_line.sh\n") &&
+           ic_split_w("core/a/live.c",
+                      "const char *cmd = \"sh named_live.sh\";\n") &&
+           ic_split_w("notes.mk", "# runs named_hash.sh\n") &&
+           ic_split_w("deep.mk",
+                      "# runs named_mkcont.sh \\\nstill a comment\n") &&
+           ic_split_w("core/a/open.c", "/* runs named_open.sh\n");
+}
+
+/* The non-C, non-make mentions, every byte of which stays live: prose and a
+ * heading in markdown, and a shell comment whose backslash newline does not
+ * continue it. */
+static bool ic_del_base_mention_docs(void)
+{
+    return ic_split_w("docs/NOTES.md", "run named_doc.sh by hand\n") &&
+           ic_split_w("docs/HEAD.md", "# run named_head.sh by hand\n") &&
+           ic_split_w("tools/cont.sh",
+                      "# note \\\nsh tools/scripts/named_cont.sh\n");
+}
+
+/* The deleted scripts and the files that name them. */
+static bool ic_del_base_mentions(void)
+{
+    return ic_del_base_mention_scripts() && ic_del_base_mention_docs();
+}
+
 static bool ic_del_base_build(void)
 {
     if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
@@ -8207,11 +8311,8 @@ static bool ic_del_base_build(void)
         return false;
     return ic_split_w("tools/scripts/gone.sh", "echo gone\n") &&
            ic_split_w("tools/scripts/named_mk.sh", "echo mk\n") &&
-           ic_split_w("tools/scripts/named_c.sh", "echo c\n") &&
-           ic_split_w("tools/scripts/named_doc.sh", "echo doc\n") &&
            ic_split_w("Makefile", "all:\n\tsh tools/scripts/named_mk.sh\n") &&
-           ic_split_w("core/a/ref.c", "/* runs named_c.sh */\n") &&
-           ic_split_w("docs/NOTES.md", "run named_doc.sh by hand\n") &&
+           ic_del_base_mentions() &&
            ic_split_w("core/a/lonely.c", "int lonely(void)\n{\n    return 0;\n}\n") &&
            ic_split_w("core/a/lonely.h", "/* lonely */\n") &&
            ic_split_w("core/a/lonely.def", "/* lonely */\n") &&
@@ -8230,6 +8331,13 @@ static bool ic_del_fixture_build(void)
         {"named_mk", ic_del_edit_named_mk},
         {"named_c", ic_del_edit_named_c},
         {"named_doc", ic_del_edit_named_doc},
+        {"named_line", ic_del_edit_named_line},
+        {"named_live", ic_del_edit_named_live},
+        {"named_hash", ic_del_edit_named_hash},
+        {"named_head", ic_del_edit_named_head},
+        {"named_cont", ic_del_edit_named_cont},
+        {"named_mkcont", ic_del_edit_named_mkcont},
+        {"named_open", ic_del_edit_named_open},
         {"mixed", ic_del_edit_mixed},
         {"dot_c", ic_del_edit_dot_c},
         {"dot_h", ic_del_edit_dot_h},
@@ -8247,19 +8355,27 @@ struct ic_del_case {
     const char *name;
     bool exact;
     bool break_grep;   /* make `git grep` fail while `git diff` still works */
+    const char *path;  /* the deleted script the case probes */
 };
 
 static const struct ic_del_case ic_del_cases[] = {
-    {"unnamed", true, false},     /* a script nothing names */
-    {"named_mk", false, false},   /* still named by the Makefile */
-    {"named_c", false, false},    /* still named by a C source */
-    {"named_doc", false, false},  /* still named by a document */
-    {"mixed", false, false},      /* one unnamed script, one named */
-    {"dot_c", false, false},      /* a deleted .c */
-    {"dot_h", false, false},      /* a deleted .h */
-    {"dot_def", false, false},    /* a deleted .def */
-    {"dot_txt", false, false},    /* a deleted .txt */
-    {"gitfail", false, true},     /* the reference search itself fails */
+    {"unnamed", true, false, "tools/scripts/gone.sh"},
+    {"named_mk", false, false, "tools/scripts/named_mk.sh"},
+    {"named_c", true, false, "tools/scripts/named_c.sh"},
+    {"named_doc", false, false, "tools/scripts/named_doc.sh"},
+    {"named_line", true, false, "tools/scripts/named_line.sh"},
+    {"named_live", false, false, "tools/scripts/named_live.sh"},
+    {"named_hash", true, false, "tools/scripts/named_hash.sh"},
+    {"named_head", false, false, "tools/scripts/named_head.sh"},
+    {"named_cont", false, false, "tools/scripts/named_cont.sh"},
+    {"named_mkcont", true, false, "tools/scripts/named_mkcont.sh"},
+    {"named_open", false, false, "tools/scripts/named_open.sh"},
+    {"mixed", false, false, "tools/scripts/gone.sh"},
+    {"dot_c", false, false, "core/a/lonely.c"},
+    {"dot_h", false, false, "core/a/lonely.h"},
+    {"dot_def", false, false, "core/a/lonely.def"},
+    {"dot_txt", false, false, "docs/lonely.txt"},
+    {"gitfail", false, true, "tools/scripts/gone.sh"},
 };
 
 static bool ic_del_read_sha(const char *name, char *sha, size_t size)
@@ -8286,10 +8402,10 @@ static bool ic_del_check(const struct ic_del_case *c,
                strcmp(reason, "changed-input-structure") == 0;
     bool kept = false;
     for (size_t i = 0; i < set->count; i++)
-        kept = kept || strcmp(set->files[i], "tools/scripts/gone.sh") == 0;
+        kept = kept || strcmp(set->files[i], c->path) == 0;
     return !set->structural_path && set->deleted_count == 1 && kept &&
            set->deleted_path &&
-           strcmp(set->deleted_path, "tools/scripts/gone.sh") == 0 &&
+           strcmp(set->deleted_path, c->path) == 0 &&
            strcmp(reason, "deleted-script-closure") == 0 &&
            (size_t)selected < zcl_test_group_catalog_count() &&
            strstr(selector, "make_lint_gates") != NULL;

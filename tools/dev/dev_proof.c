@@ -2704,8 +2704,10 @@ static bool dp_fresh_named_only_by_changed(const struct dp_split_ctx *c,
  * (dp_changed_set_widen). apps/z23android/ has its own build, which the root
  * build and the test groups never enter. A row of any file type there is
  * admitted only when every changed row and every file at `local` naming its
- * file name is inside the same tree. Mixed changes fall back to structural
- * selection. Other apps are not sealed: the test harness and the
+ * file name is inside the same tree. Mixed changes fall back to the
+ * named-only rule for a sealed leaf that is not compiled there (see
+ * dp_fresh_leaf_admit), and to structural selection otherwise. Other apps
+ * are not sealed: the test harness and the
  * engine reach apps/skycombat. A deleted row never comes here. */
 #define DP_FRESH_LINT_ROOT "tools/lint/"
 #define DP_FRESH_LINT_PATH "tools/lint/lintc/gate_lint_gate_wiring.c"
@@ -2999,8 +3001,10 @@ static bool dp_fresh_sidecar_admit(const struct dp_split_ctx *c,
  * files are planned through the changed rows, so its text needs no reading.
  * It is admitted under the fresh `.c` rules for path and naming, stays in the
  * closure input and takes the same walker groups (dp_changed_set_widen).
- * Any other file type in a sealed tree comes through here too, under the
- * sealed rule. Anything else stays structural. */
+ * Any other file type in a sealed tree comes through here too: under the
+ * sealed rule, or, when the sealed rule refuses a mixed change, under the
+ * same named-only rule (dp_fresh_named_only_by_changed). Anything else stays
+ * structural. */
 static bool dp_fresh_is_leaf(const char *path)
 {
     size_t n = strlen(path);
@@ -3015,8 +3019,9 @@ static bool dp_fresh_leaf_admit(const struct dp_split_ctx *c, const char **refs,
 {
     const char *added = refs[i];
     char stem[DP_SPLIT_LEAF_MAX + 1];
-    if (dp_fresh_sealed(added))
-        return dp_fresh_sealed_admit(c, refs, count, added);
+    if (dp_fresh_sealed(added) &&
+        dp_fresh_sealed_admit(c, refs, count, added))
+        return true;
     return dp_split_name_safe(added) &&
            strlen(dp_split_leaf(added)) <= DP_SPLIT_LEAF_MAX &&
            dp_fresh_path_allowed(added) &&
@@ -3118,12 +3123,22 @@ static void dp_changed_set_split_classify(
  * exact only when ALL of these hold, each read at `local`, the revision being
  * verified:
  *   - the row's status is `D` and its safe path ends in `.sh`;
- *   - no tracked file at `local` names its basename anywhere. A plain
- *     substring search over every tracked file, so no Makefile rule, test,
- *     script, C source, rule table, baseline or document can run or read it,
- *     and an include or embed line that names it (an `#include`, `#embed`,
- *     `__has_include`, a continuation or a macro-pasted name) is caught
- *     without being parsed.
+ *   - no tracked file at `local` names its basename in live text. A plain
+ *     substring search over every tracked file decides where the name is
+ *     spelled; only a spelling inside a comment is dead. A C-family file
+ *     (the extensions dp_deleted_c_like guards) has its line and block
+ *     comment spans dropped, with quoted spans kept live; a makefile (a
+ *     `Makefile*` name or a `.mk` suffix, the only non-C files whose comment
+ *     grammar this admits) has a line-start `#` dropped, the comment running
+ *     to the end of make's logical line with backslash continuations
+ *     included; every other file keeps every byte live, so a `#` there -
+ *     markdown prose, a shell comment that ends at the newline, or no
+ *     comment at all - can never hide a mention. No Makefile
+ *     rule, test, script, C source, rule table, baseline or document that
+ *     names it in live text can run or read it, and an include or embed line
+ *     that names it (an `#include`, `#embed`, `__has_include`, a continuation
+ *     or a macro-pasted name) is caught without being parsed. An unterminated
+ *     comment, quote or oversized blob refuses the row.
  * It keeps its own path in the plan, so the groups the rule table maps that
  * path to still run, and it never takes the docs-only shortcut. Any other
  * deleted, renamed or type-changed row, and any git failure, leaves the row
@@ -3137,15 +3152,143 @@ static bool dp_deleted_is_sh(const char *path)
     return n > 3 && strcmp(path + n - 3, ".sh") == 0;
 }
 
+/* The C-family spellings whose comments are `//` and `slash-star`. Only
+ * provably-C spellings: `.in`, `.y` and `.l` are excluded because a `//` in
+ * them may be live text (an m4 quote, a flex pattern), not a comment. */
+static bool dp_deleted_c_like(const char *path)
+{
+    static const char *const exts[] = {".c", ".h", ".inc", ".def", ".S", ".s",
+                                       ".i", ".cc", ".cpp", ".hh", ".hpp"};
+    size_t n = strlen(path);
+    for (size_t i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+        size_t m = strlen(exts[i]);
+        if (n > m && strcmp(path + n - m, exts[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* The make spellings whose comment is a `#` running to the end of the logical
+ * line, backslash continuations included. Only `Makefile*` names and `.mk`
+ * suffixes: any other file's `#` may be markdown prose or a shell comment
+ * that ends at the newline, so its bytes stay live. */
+static bool dp_deleted_is_make(const char *path)
+{
+    const char *base = dp_split_leaf(path);
+    return strncmp(base, "Makefile", 8) == 0 ||
+           (strlen(base) > 3 && strcmp(base + strlen(base) - 3, ".mk") == 0);
+}
+
+/* Does the live text of a C-family file name `leaf`? Comments are dead; a
+ * quoted span is live but never opens a comment; anything unterminated
+ * refuses (a false here would admit the row, so it returns true). */
+static bool dp_deleted_live_c(const char *text, const char *leaf)
+{
+    const char *chunk = text;
+    for (const char *p = text; *p;) {
+        if (p[0] == '/' && (p[1] == '*' || p[1] == '/')) {
+            if (dp_split_contains(chunk, (size_t)(p - chunk), leaf)) return true;
+            p = p[1] == '*' ? dp_split_skip_block(p) : dp_split_eol(p);
+            if (!p) return true;
+            if (*p == '\n') p++;
+            chunk = p;
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            const char *end = dp_split_skip_quoted(p);
+            if (!end) return true;
+            p = end;
+            /* The quoted span stays in the live chunk. */
+            continue;
+        }
+        p++;
+    }
+    return dp_split_contains(chunk, strlen(chunk), leaf);
+}
+
+/* Does the live text of a makefile name `leaf`? A line-start `#` is a comment
+ * to the end of make's logical line, and make alone continues a comment
+ * across a backslash newline - so this runs only on makefiles. A shell or
+ * markdown `#` line ends at the raw newline and never reaches this scanner:
+ * those files keep every byte live. */
+static bool dp_deleted_live_hash(const char *text, const char *leaf)
+{
+    const char *chunk = text;
+    bool blank = true;
+    for (const char *p = text; *p;) {
+        if (*p == '#' && blank) {
+            if (dp_split_contains(chunk, (size_t)(p - chunk), leaf)) return true;
+            p = dp_split_eol(p);
+            if (*p == '\n') p++;
+            chunk = p;
+            blank = true;
+            continue;
+        }
+        if (*p == '\n') blank = true;
+        else if (*p != ' ' && *p != '\t') blank = false;
+        p++;
+    }
+    return dp_split_contains(chunk, strlen(chunk), leaf);
+}
+
+/* Does one tracked file at `local` name `leaf` in live text? Every uncertain
+ * read (an unsafe path, a failed git call, a truncated, oversized or
+ * NUL-bearing blob) answers yes and keeps the row universal. */
+static bool dp_deleted_file_live(const struct dp_split_ctx *c,
+                                 const char *file, const char *leaf)
+{
+    char spec[PATH_MAX + 64];
+    if (!dp_split_name_safe(file) ||
+        snprintf(spec, sizeof(spec), "%s:%s", c->local, file) >=
+            (int)sizeof(spec))
+        return true;
+    const char *argv[] = {"git", "show", spec, NULL};
+    struct zcl_devloop_process_result r = {0};
+    if (!zcl_devloop_process_run(c->root, argv, 30000, &r) || r.timed_out ||
+        r.cancelled || r.term_signal != 0 || r.output_truncated ||
+        r.output_len >= ZCL_DEVLOOP_OUTPUT_MAX)
+        return true;
+    char *text = zcl_malloc(r.output_len + 1, "proof deleted blob");
+    if (!text) return true;
+    memcpy(text, r.output, r.output_len);
+    text[r.output_len] = '\0';
+    bool live = memchr(text, '\0', r.output_len) != NULL ||
+                (dp_deleted_c_like(file)
+                     ? dp_deleted_live_c(text, leaf)
+                     : dp_deleted_is_make(file)
+                           ? dp_deleted_live_hash(text, leaf)
+                           : dp_split_contains(text, strlen(text), leaf));
+    free(text);
+    return live;
+}
+
+/* Does any tracked file at `local` name `leaf` in live text? A grep failure
+ * or an unreadable listing answers yes. */
+static bool dp_deleted_mentioned(const struct dp_split_ctx *c, const char *leaf)
+{
+    char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof deleted listing");
+    if (!listing) return true;
+    const char *argv[] = {"git", "grep", "-l", "-a", "-F", "-e", leaf,
+                          c->local, NULL};
+    int rc = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX);
+    size_t lead = strlen(c->local);
+    bool mentioned = rc != 0 && rc != 1;
+    char *save = NULL;
+    for (char *line = rc == 0 ? strtok_r(listing, "\n", &save) : NULL;
+         !mentioned && line; line = strtok_r(NULL, "\n", &save))
+        mentioned = strlen(line) <= lead + 1 ||
+                    memcmp(line, c->local, lead) != 0 || line[lead] != ':' ||
+                    dp_deleted_file_live(c, line + lead + 1, leaf);
+    free(listing);
+    return mentioned;
+}
+
 static bool dp_deleted_admit(const struct dp_split_ctx *c, const char *path)
 {
     const char *leaf = dp_split_leaf(path);
     if (!dp_split_name_safe(path) || strlen(leaf) > DP_SPLIT_LEAF_MAX ||
         leaf[0] == '-')
         return false;
-    const char *argv[] = {"git", "grep", "-q", "-a", "-F", "-e", leaf,
-                          c->local, NULL};
-    return dp_split_git(c->root, argv, NULL, 0) == 1;
+    return !dp_deleted_mentioned(c, leaf);
 }
 
 /* Settle every deleted `.sh` row: an unreferenced one is counted and stays in

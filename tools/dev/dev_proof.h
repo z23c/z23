@@ -389,7 +389,8 @@ struct zcl_dev_proof_changed_set {
     /* Added capability sidecars of fresh rows (see dp_fresh_sidecar_admit). */
     size_t fresh_sidecars;
     /* A deleted `.sh` that no tracked file at the verified revision names by
-     * basename is not structural: nothing can run or read it, so its impact is
+     * basename in live text (a spelling inside a comment is dead) is not
+     * structural: nothing can run or read it, so its impact is
      * the groups the rule table maps its own path to. It stays in the plan and
      * the selection is exact, under the reason deleted-script-closure.
      * `deleted_path` is the first such row, `deleted_count` how many. */
