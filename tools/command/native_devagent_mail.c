@@ -1106,6 +1106,98 @@ static const struct dvm_fail_info *dvm_post_compose(
     return NULL;
 }
 
+static const char *const dvm_steer_names[] = {
+    "seq", "steer_key", "to", "kind", "body", "from", "ref", "sender_binding"
+};
+
+static bool dvm_steer_values_equal(const struct json_value *row,
+                                   const size_t count[8],
+                                   const struct dvm_post_input *in)
+{
+    const char *values[] = {in->to, in->kind, in->body, in->from, in->ref, in->sender_binding};
+    for (size_t i = 0; i < 6; i++) {
+        const struct json_value *v = json_get(row, dvm_steer_names[i + 2]);
+        const char *s = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+        if (!s && i == 5 && count[i + 2] == 0) s = "";
+        if (count[i + 2] > 1 || !s || strcmp(s, values[i]) != 0) return false;
+    }
+    return true;
+}
+
+static bool dvm_steer_key_valid(const struct json_value *kv, size_t count)
+{
+    unsigned char decoded[32];
+    return count == 1 && kv && kv->type == JSON_STR && json_get_str(kv) &&
+        strlen(json_get_str(kv)) == 64 &&
+        zcl_hex_decode_lower(json_get_str(kv), decoded, sizeof(decoded));
+}
+
+static int dvm_steer_row_object(const struct json_value *row, const char *key,
+                                const struct dvm_post_input *in, long long *seq)
+{
+    size_t count[8] = {0};
+    for (size_t i = 0; i < row->num_children; i++)
+        for (size_t j = 0; j < 8; j++)
+            if (row->keys[i] && strcmp(row->keys[i], dvm_steer_names[j]) == 0) count[j]++;
+    const struct json_value *v = json_get(row, "seq");
+    if (count[0] != 1 || !v || v->type != JSON_INT ||
+        json_get_int(v) < 0 || json_get_int(v) == LLONG_MAX) return -1;
+    *seq = json_get_int(v);
+    if (!count[1]) return 0;
+    const struct json_value *kv = json_get(row, "steer_key");
+    if (!dvm_steer_key_valid(kv, count[1])) return -1;
+    if (strcmp(json_get_str(kv), key) != 0) return 0;
+    return dvm_steer_values_equal(row, count, in) ? 1 : 2;
+}
+
+/* Validate each source sequence and compare the exact keyed delivery. */
+static int dvm_steer_row(const char *line, const char *key,
+                         const struct dvm_post_input *in, long long *seq)
+{
+    struct json_value row;
+    json_init(&row);
+    if (!json_read(&row, line, strlen(line)) || row.type != JSON_OBJ) {
+        json_free(&row); return -1;
+    }
+    int result = dvm_steer_row_object(&row, key, in, seq);
+    json_free(&row);
+    return result;
+}
+
+/* One pass supplies both the matching source row and the next sequence. */
+static int dvm_steer_scan(const char *path, const char *key,
+                          const struct dvm_post_input *in, long long *seq,
+                          long long *next)
+{
+    *next = 1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return errno == ENOENT ? 0 : -1;
+    char line[DVM_LINE_CAP];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        if (!n || line[n - 1] != '\n') { found = -1; break; }
+        long long candidate = -1;
+        int r = dvm_steer_row(line, key, in, &candidate);
+        if (r < 0 || (r > 0 && found > 0)) { found = -1; break; }
+        if (candidate >= *next) *next = candidate + 1;
+        if (r > 0) { found = r; *seq = candidate; }
+    }
+    if (ferror(f)) found = -1;
+    if (fclose(f) != 0) found = -1;
+    return found;
+}
+
+static bool dvm_steer_sync(const char *outbox, const char *maildir)
+{
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool ok = platform_private_file_open_locked_create_wait(outbox, &file);
+    if (ok) ok = platform_private_file_flush(&file);
+    platform_private_file_close(&file);
+    return ok && platform_private_parent_flush(maildir);
+}
+
 /* The reply's `delivery` (and `hint`, when local mail names no roster box). */
 static void dvm_post_delivery(struct zcl_command_reply *reply, const char *to,
                               const char *ref)
@@ -1120,21 +1212,93 @@ static void dvm_post_delivery(struct zcl_command_reply *reply, const char *to,
 static void dvm_post_attach_resume(struct zcl_command_reply *reply,
                                    const char *maildir);
 
+static bool dvm_post_append(const struct dvm_post_input *in,
+                            struct zcl_command_reply *reply,
+                            const char *maildir, const char *outbox,
+                            const char *ts, const char *key, long long seq)
+{
+    char line[DVM_LINE_CAP];
+    size_t len;
+    const struct dvm_fail_info *invalid = dvm_post_compose(in, seq, ts, line, sizeof(line), &len);
+    if (invalid) {
+        dvm_fail(reply, invalid->code, invalid->message, invalid->evidence);
+        return false;
+    }
+    if (key) {
+        int n = snprintf(line + len - 2, sizeof(line) - len + 2,
+                         ",\"steer_key\":\"%s\"}\n", key);
+        if (n <= 0 || (size_t)n >= sizeof(line) - len + 2) {
+            dvm_fail(reply, "BAD_INPUT", "keyed row too large", outbox);
+            return false;
+        }
+        len = len - 2 + (size_t)n;
+    }
+    bool written = dvm_post_write_line(outbox, line, len) &&
+                   (!key || dvm_steer_sync(outbox, maildir));
+    if (!written)
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot append the private outbox", outbox);
+    return written;
+}
+
+/* post.lock serializes keyed lookup, sequence allocation and append. */
+static bool dvm_post_locked(const struct dvm_post_input *in,
+                            struct zcl_command_reply *reply,
+                            const char *maildir, const char *outbox,
+                            const char *ts, const char *key, bool require_existing,
+                            long long *seq, bool *duplicate)
+{
+    char lock_path[DVM_PATH_CAP];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s/post.lock", maildir);
+    if (n <= 0 || (size_t)n >= sizeof(lock_path)) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "mail lock path exceeds its bound", maildir);
+        return false;
+    }
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    if (!platform_private_file_open_locked_create_wait(lock_path, &lock)) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot lock the private outbox", lock_path);
+        return false;
+    }
+    long long next_seq = 1;
+    int existing = key ? dvm_steer_scan(outbox, key, in, seq, &next_seq) : 0;
+    if (existing < 0 || existing == 2 || (require_existing && existing == 0)) {
+        platform_private_file_close(&lock);
+        dvm_fail(reply, existing == 2 ? "IDEMPOTENCY_CONFLICT" : "MAIL_READ_FAILED",
+                 "cannot reconcile keyed post", outbox);
+        return false;
+    }
+    if (existing == 1) {
+        bool synced = dvm_steer_sync(outbox, maildir);
+        platform_private_file_close(&lock);
+        if (!synced) dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot sync keyed post", outbox);
+        *duplicate = synced;
+        return synced;
+    }
+    if (key) *seq = next_seq;
+    else if (!dvm_post_next_seq(outbox, seq)) {
+        platform_private_file_close(&lock);
+        dvm_fail(reply, "MAIL_READ_FAILED", "cannot read the private outbox", outbox);
+        return false;
+    }
+    bool written = dvm_post_append(in, reply, maildir, outbox, ts, key, *seq);
+    platform_private_file_close(&lock);
+    return written;
+}
+
 static void dvm_post(const struct zcl_command_request *req,
-                     struct zcl_command_reply *reply, const char *maildir)
+                     struct zcl_command_reply *reply, const char *maildir,
+                     const char *steer_key, bool require_existing)
 {
     struct dvm_post_input in;
     char outbox[DVM_PATH_CAP];
-    char lock_path[DVM_PATH_CAP];
     char ts[40];
-    char line[DVM_LINE_CAP];
     const struct dvm_fail_info *invalid;
     const char *code;
     char msg[256];
-    long long seq;
+    long long seq = 0;
     time_t now;
     struct tm tm_utc;
-    size_t len;
+    bool duplicate = false;
 
     if (!req || !req->input) {
         dvm_fail(reply, "BAD_INPUT", "dev.agent.mail post needs to, kind, body",
@@ -1168,41 +1332,16 @@ static void dvm_post(const struct zcl_command_request *req,
         return;
     }
 
-    path_length = snprintf(lock_path, sizeof(lock_path), "%s/post.lock",
-                           maildir);
-    if (path_length <= 0 || (size_t)path_length >= sizeof(lock_path)) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "mail lock path exceeds its bound",
-                 maildir);
+    if (!dvm_post_locked(&in, reply, maildir, outbox, ts, steer_key,
+                         require_existing, &seq, &duplicate))
+        return;
+    if (duplicate) {
+        (void)json_push_kv_int(&reply->data, "seq", seq);
+        (void)json_push_kv_bool(&reply->data, "duplicate", true);
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = 0;
         return;
     }
-    struct platform_private_file lock;
-    platform_private_file_init(&lock);
-    if (!platform_private_file_open_locked_create_wait(lock_path, &lock)) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot lock the private outbox",
-                 lock_path);
-        return;
-    }
-    if (!dvm_post_next_seq(outbox, &seq)) {
-        platform_private_file_close(&lock);
-        dvm_fail(reply, "MAIL_READ_FAILED", "cannot read the private outbox",
-                 outbox);
-        return;
-    }
-
-    invalid = dvm_post_compose(&in, seq, ts, line, sizeof(line), &len);
-    if (invalid) {
-        platform_private_file_close(&lock);
-        dvm_fail(reply, invalid->code, invalid->message, invalid->evidence);
-        return;
-    }
-
-    if (!dvm_post_write_line(outbox, line, len)) {
-        platform_private_file_close(&lock);
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot append the private outbox",
-                 outbox);
-        return;
-    }
-    platform_private_file_close(&lock);
 
     const char *to = in.to, *kind = in.kind, *body = in.body, *from = in.from,
                *ref = in.ref;
@@ -2513,7 +2652,7 @@ static void dvm_handle(const struct zcl_command_request *request,
         return;
     }
     if (strcmp(action, "post") == 0) {
-        dvm_post(request, reply, maildir);
+        dvm_post(request, reply, maildir, NULL, false);
         return;
     }
     if (strcmp(action, "pull") == 0) {
@@ -2526,6 +2665,21 @@ static void dvm_handle(const struct zcl_command_request *request,
     }
     dvm_fail(reply, "BAD_INPUT", "action is one of post|pull|exact|ack",
              "input.action unknown");
+}
+
+/* Internal steer seam: the caller has already resolved and authorized the
+ * sender. The digest is never accepted through the public mail schema. */
+void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply,
+                                  const char *key_digest, bool require_existing)
+{
+    char maildir[4096];
+    if (!reply || !key_digest || strlen(key_digest) != 64) return;
+    if (!dvm_mail_dir(maildir, sizeof(maildir), true)) {
+        dvm_fail(reply, "STATE_DIR_FAILED", "cannot resolve mail dir", "platform_state_root/mail");
+        return;
+    }
+    dvm_post(request, reply, maildir, key_digest, require_existing);
 }
 
 void zcl_native_handle_dev_agent_mail(

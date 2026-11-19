@@ -203,6 +203,7 @@
 #include "platform/directory_compat.h"
 #include "platform/os_proc.h"
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "services/disk_monitor.h"
@@ -1093,8 +1094,26 @@ static bool fmc_sent_match(const char *line, const char *key, long long *seq,
     }
     *seq = s; return true;
 }
+static bool fmc_sent_owner(const char *line, const char *grant,
+                           char sum[17], bool *keyed)
+{
+    struct json_value obj;
+    json_init(&obj);
+    if (!json_read(&obj, line, strlen(line)) || obj.type != JSON_OBJ) {
+        json_free(&obj); return false;
+    }
+    const struct json_value *g = json_get(&obj, "grant");
+    const char *owner = g && g->type == JSON_STR ? json_get_str(g) : "";
+    const struct json_value *src = json_get(&obj, "source");
+    *keyed = src && src->type == JSON_STR &&
+        strcmp(json_get_str(src), "keyed") == 0;
+    if (!owner || strcmp(owner, grant ? grant : "") != 0) sum[0] = 0;
+    json_free(&obj);
+    return true;
+}
+
 static int fmc_sent_find(const char *path, const char *key, long long *seq,
-                          char sum[17])
+                          char sum[17], const char *grant, bool *keyed)
 {
     FILE *f;
     char line[FMC_LINE_CAP];
@@ -1109,7 +1128,11 @@ static int fmc_sent_find(const char *path, const char *key, long long *seq,
     while ((read_rc = fmc_revoke_read_line(f, line)) > 0) {
         long long candidate; char digest[17] = {0};
         if (fmc_sent_match(line, key, &candidate, digest)) {
-            *seq = candidate; memcpy(sum, digest, sizeof(digest)); found = true;
+            if (!fmc_sent_owner(line, grant, digest, keyed)) {
+                read_rc = -1; break;
+            }
+            *seq = candidate; memcpy(sum, digest, sizeof(digest));
+            found = true;
         }
     }
     bool failed = read_rc < 0 || ferror(f) != 0;
@@ -4900,6 +4923,8 @@ static long long fmc_post_directive(const struct zcl_command_request *req,
                                     const char *body,
                                     const char *ref,
                                     const struct fmc_sender *s,
+                                    const char *key, bool require_existing,
+                                    bool *duplicate,
                                     char *why, size_t why_cap,
                                     char *message, size_t message_cap)
 {
@@ -4920,7 +4945,16 @@ static long long fmc_post_directive(const struct zcl_command_request *req,
         fmc_sub_end(&sub);
         return -1;
     }
-    zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
+    struct sha3_256_ctx hash;
+    uint8_t digest[32];
+    char key_digest[65];
+    static const char domain[] = "z23.steer.key.v1";
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&hash, (const uint8_t *)key, strlen(key));
+    sha3_256_finalize(&hash, digest);
+    zcl_hex_encode(digest, sizeof(digest), key_digest);
+    zcl_devagent_mail_steer_post(&sub.request, &sub.reply, key_digest, require_existing);
     sub.ran = true;
     if (!fmc_sub_ok(&sub)) {
         if (fmc_mail_guidance_code(sub.reply.error.code))
@@ -4935,6 +4969,8 @@ static long long fmc_post_directive(const struct zcl_command_request *req,
         fmc_sub_end(&sub);
         return -1;
     }
+    const struct json_value *dv = json_get(&sub.reply.data, "duplicate");
+    *duplicate = dv && dv->type == JSON_BOOL && json_get_bool(dv);
     seq = fmc_sub_int(&sub, "seq", -1);
     fmc_sub_end(&sub);
     return seq;
@@ -5044,7 +5080,7 @@ static void fmc_send_item_refused(struct json_value *items, size_t index,
  * digest, the ref, and the grant for reconcile and revoke-cancel. */
 static void fmc_send_item_accept(struct json_value *items, size_t index,
                                  const struct fmc_item_fields *f,
-                                 long long seq, bool duplicate,
+                                 long long seq, bool duplicate, bool record,
                                  const char *sent_path, const char *from,
                                  const char *grant)
 {
@@ -5063,9 +5099,9 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
         eref[0] = '\0';
     n = snprintf(sent_line, sizeof(sent_line),
                  "{\"key\":\"%s\",\"to\":\"%s\",\"seq\":%lld,\"state\":"
-                 "\"queued\",\"sum\":\"%s\",\"ref\":\"%s\",\"grant\":\"%s\"}\n",
+                 "\"queued\",\"sum\":\"%s\",\"ref\":\"%s\",\"grant\":\"%s\",\"source\":\"keyed\"}\n",
                  f->key, f->to, seq, sum, eref, grant ? grant : "");
-    if (!duplicate && (n <= 0 || (size_t)n >= sizeof(sent_line) ||
+    if (record && (n <= 0 || (size_t)n >= sizeof(sent_line) ||
                        !fmc_append_line(sent_path, sent_line, (size_t)n))) {
         /* The mail row exists but the receipt did not persist: report the
          * seq honestly and let the caller's retry reconcile by key on a
@@ -5074,7 +5110,7 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
                   f->to, seq);
         (void)json_push_kv_str(&item, "state", "queued");
         (void)json_push_kv_int(&item, "seq", seq);
-        (void)json_push_kv_bool(&item, "duplicate", false);
+        (void)json_push_kv_bool(&item, "duplicate", duplicate);
         (void)json_push_kv_str(&item, "warning", "SENT_RECORD_LOST");
     } else {
         (void)json_push_kv_str(&item, "state", "queued");
@@ -5122,6 +5158,7 @@ static bool fmc_remote_row_too_large(const struct fmc_item_fields *f,
     const char *from = fmc_sender_name(s);
     size_t n = sizeof(shell) - 1u + 19u + 20u;
     n += from ? fmc_mail_escaped_len(from) : 128u;
+    n += sizeof(",\"steer_key\":\"\"") - 1u + 64u;
     n += fmc_mail_escaped_len(f->to) + fmc_mail_escaped_len(f->body) +
          fmc_mail_escaped_len(f->ref);
     if (from)
@@ -5139,7 +5176,9 @@ static bool fmc_send_item(const struct zcl_command_request *req,
                           const char *grant, struct json_value *items)
 {
     struct fmc_item_fields f;
-    long long seq;
+    long long seq = -1;
+    bool keyed = false, duplicate = false;
+    int receipt;
     char why[64];
     char message[sizeof(((struct zcl_command_reply *)0)->error.message)];
     const char *from = fmc_sender_name(s);
@@ -5172,7 +5211,7 @@ static bool fmc_send_item(const struct zcl_command_request *req,
      * bypass the binding closed. */
     {
         char recorded[17], presented[17];
-        int receipt = fmc_sent_find(sent_path, f.key, &seq, recorded);
+        receipt = fmc_sent_find(sent_path, f.key, &seq, recorded, grant, &keyed);
         if (receipt < 0) {
             fmc_send_item_refused(items, index, f.to, "SENT_UNAVAILABLE");
             return false;
@@ -5180,29 +5219,61 @@ static bool fmc_send_item(const struct zcl_command_request *req,
         if (receipt > 0) {
             fmc_payload_sum(f.to, f.body, f.ref, from, f.kind, presented);
             if (recorded[0] && strcmp(recorded, presented) == 0) {
-                fmc_send_item_accept(items, index, &f, seq, true, sent_path,
-                                     from, grant);
-                return true;
+                if (!keyed) {
+                    fmc_send_item_accept(items, index, &f, seq, true, false,
+                                         sent_path, from, grant);
+                    return true;
+                }
+            } else {
+                LOG_ERROR(FMC_LOG,
+                          "send: payload conflict under key (to=%s seq=%lld)",
+                          f.to, seq);
+                fmc_send_item_refused(items, index, f.to,
+                                      "IDEMPOTENCY_CONFLICT");
+                return false;
             }
-            LOG_ERROR(FMC_LOG,
-                      "send: payload conflict under key (to=%s seq=%lld)",
-                      f.to, seq);
-            fmc_send_item_refused(items, index, f.to,
-                                  "IDEMPOTENCY_CONFLICT");
-            return false;
         }
     }
     why[0] = '\0';
-    seq = fmc_post_directive(req, f.to, f.kind, f.body, f.ref, s, why,
+    long long recorded_seq = seq;
+    seq = fmc_post_directive(req, f.to, f.kind, f.body, f.ref, s, f.key,
+                             keyed, &duplicate, why,
                              sizeof(why), message, sizeof(message));
     if (seq < 0) {
         fmc_send_item_refused_message(items, index, f.to,
                               why[0] ? why : "POST_FAILED", message);
         return false;
     }
-    fmc_send_item_accept(items, index, &f, seq, false, sent_path, from,
+    if (keyed && seq != recorded_seq) {
+        fmc_send_item_refused(items, index, f.to, "SENT_SOURCE_MISMATCH");
+        return false;
+    }
+    fmc_send_item_accept(items, index, &f, seq, duplicate, receipt == 0, sent_path, from,
                          grant);
     return true;
+}
+
+/* Serialize receipt lookup, mail post and receipt repair. Mail takes post.lock
+ * inside this region; no mail path acquires this steer lock in reverse. */
+static bool fmc_send_item_locked(const struct zcl_command_request *req,
+                                 const struct json_value *it, size_t index,
+                                 const struct fmc_sender *sender,
+                                 const char *sent_path, const char *grant,
+                                 struct json_value *items)
+{
+    char path[4096 + 64];
+    int n = snprintf(path, sizeof(path), "%s.lock", sent_path);
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    if (n <= 0 || (size_t)n >= sizeof(path) ||
+        !platform_private_file_open_locked_create_wait(path, &lock)) {
+        fmc_send_item_refused(items, index, "", "SENT_UNAVAILABLE");
+        platform_private_file_close(&lock);
+        return false;
+    }
+    bool ok = fmc_send_item(req, it, index, sender, sent_path, grant, items);
+    platform_private_file_close(&lock);
+    return ok;
 }
 
 static void fmc_do_send(const struct zcl_command_request *req,
@@ -5259,7 +5330,7 @@ static void fmc_do_send(const struct zcl_command_request *req,
         json_init(&items);
         json_set_array(&items);
         for (i = 0; i < n; i++) {
-            if (fmc_send_item(req, json_at(arr, i), i, &sender, sent_path,
+            if (fmc_send_item_locked(req, json_at(arr, i), i, &sender, sent_path,
                               grant, &items))
                 accepted++;
         }

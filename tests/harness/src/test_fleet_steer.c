@@ -53,6 +53,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1247,6 +1248,212 @@ _test_next:;
     fmx_restore();
     return failures;
 }
+
+#if !defined(_WIN32)
+static bool fmx_keyed_outbox_private(const char *gid)
+{
+    char path[1400], text[8192];
+    snprintf(path, sizeof(path), "%s/z23/dev/mail/outbox.jsonl", g_fmx_state);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    bool ok = !ferror(f) && feof(f);
+    ok = fclose(f) == 0 && ok;
+    text[n] = 0;
+    return ok && strstr(text, "steer_key") && !strstr(text, "lost-key") && !strstr(text, gid);
+}
+
+static bool fmx_rewrite_receipt_seq(const char *path, char digit)
+{
+    char text[4096];
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    size_t n = fread(text, 1, sizeof(text) - 1, f);
+    text[n] = 0;
+    char *at = strstr(text, "\"seq\":");
+    bool ok = !ferror(f) && feof(f) && at && (at[6] == '1' || at[6] == '9');
+    if (ok) {
+        at[6] = digit;
+        ok = fseek(f, 0, SEEK_SET) == 0 && fwrite(text, 1, n, f) == n;
+    }
+    return fclose(f) == 0 && ok;
+}
+#endif
+
+#if !defined(_WIN32)
+static int fmx_t_lost_receipt_retry(void)
+{
+    int failures = 0;
+    char gid[64], other[64], path[1400];
+    struct fmx_call s;
+    struct json_value items, item;
+    const struct json_value *row;
+    long long seq;
+    TEST("steer: retry recovers the original outbox row after receipt loss") {
+        fmx_isolate("lost-receipt");
+        ASSERT(fmx_mint("send", gid, sizeof(gid)));
+        ASSERT(fmx_mint("send", other, sizeof(other)));
+        snprintf(path, sizeof(path), "%s/z23/dev/steer/sent.jsonl", g_fmx_state);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT_EQ(chmod(path, 0400), 0);
+        json_init(&items); json_set_array(&items);
+        fmx_item(&item, "field-agent", "check the water pump", "pump-check", "lost-key");
+        (void)json_push_back(&items, &item); json_free(&item);
+        ASSERT(fmx_send(&s, gid, &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "warning")), "SENT_RECORD_LOST");
+        seq = json_get_int(json_get(row, "seq"));
+        ASSERT(seq > 0);
+        fmx_end(&s);
+        ASSERT_EQ(fmx_mail_count(), 1);
+        ASSERT(fmx_send(&s, gid, &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT(json_get_bool(json_get(row, "duplicate")));
+        ASSERT_EQ(json_get_int(json_get(row, "seq")), seq);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "warning")), "SENT_RECORD_LOST");
+        fmx_end(&s);
+        ASSERT_EQ(fmx_mail_count(), 1);
+        ASSERT(fmx_keyed_outbox_private(gid));
+        ASSERT_EQ(chmod(path, 0600), 0);
+        ASSERT(fmx_send(&s, gid, &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT(json_get_bool(json_get(row, "duplicate")));
+        ASSERT_EQ(json_get_int(json_get(row, "seq")), seq);
+        fmx_end(&s);
+        ASSERT_EQ(fmx_mail_count(), 1);
+        struct json_value changed, changed_item;
+        json_init(&changed); json_set_array(&changed);
+        fmx_item(&changed_item, "field-agent", "check the other pump", "pump-check", "lost-key");
+        (void)json_push_back(&changed, &changed_item); json_free(&changed_item);
+        ASSERT(fmx_send(&s, gid, &changed));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "error")), "IDEMPOTENCY_CONFLICT");
+        fmx_end(&s); json_free(&changed);
+        ASSERT_EQ(fmx_mail_count(), 1);
+        ASSERT(fmx_send(&s, other, &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "state")), "refused");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "error")), "IDEMPOTENCY_CONFLICT");
+        fmx_end(&s);
+        ASSERT_EQ(fmx_mail_count(), 1);
+        ASSERT(fmx_rewrite_receipt_seq(path, 57));
+        ASSERT(fmx_send(&s, gid, &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "error")), "SENT_SOURCE_MISMATCH");
+        fmx_end(&s);
+        ASSERT(fmx_rewrite_receipt_seq(path, 49));
+        ASSERT_EQ(fmx_mail_count(), 1);
+        struct fmx_call q, revoke;
+        fmx_begin(&q, "dev.agent.queue", "zcl.agent_queue.v1");
+        (void)json_push_kv_str(&q.input, "action", "post");
+        (void)json_push_kv_str(&q.input, "kind", "leaf");
+        (void)json_push_kv_str(&q.input, "name", "pump-check");
+        ASSERT(fmx_run(&q, zcl_native_handle_dev_agent_queue) && fmx_ok(&q));
+        fmx_end(&q);
+        fmx_begin(&revoke, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        (void)json_push_kv_str(&revoke.input, "action", "revoke");
+        (void)json_push_kv_str(&revoke.input, "id", gid);
+        ASSERT(fmx_run(&revoke, zcl_native_handle_fleet_steer_grant) && fmx_ok(&revoke));
+        ASSERT_EQ(json_get_int(json_get(&revoke.reply.data, "cancelled")), 1);
+        fmx_end(&revoke);
+        json_free(&items);
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+#endif
+
+#if !defined(_WIN32)
+struct fmx_race_result { long long seq; int duplicate; int ok; };
+static void fmx_race_child(const char *gid, int start, int result)
+{
+    char token;
+    struct fmx_race_result out = {-1, 0, 0};
+    struct fmx_call s;
+    struct json_value items, item;
+    if (read(start, &token, 1) != 1) _exit(2);
+    json_init(&items); json_set_array(&items);
+    fmx_item(&item, "field-agent", "same payload", "race-ref", "race-key");
+    (void)json_push_back(&items, &item); json_free(&item);
+    if (fmx_send(&s, gid, &items) && fmx_ok(&s)) {
+        const struct json_value *row = json_at(fmx_arr(&s, "items"), 0);
+        const struct json_value *seq = row ? json_get(row, "seq") : NULL;
+        const struct json_value *dup = row ? json_get(row, "duplicate") : NULL;
+        if (seq && seq->type == JSON_INT && dup && dup->type == JSON_BOOL) {
+            out.seq = json_get_int(seq); out.duplicate = json_get_bool(dup); out.ok = 1;
+        }
+    }
+    fmx_end(&s); json_free(&items);
+    _exit(write(result, &out, sizeof(out)) == sizeof(out) ? 0 : 3);
+}
+static bool fmx_race_child_ok(bool waited, int status)
+{
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool fmx_race_pair(const char *gid, struct fmx_race_result *a,
+                          struct fmx_race_result *b)
+{
+    int start[2], result[2];
+    if (pipe(start) != 0) return false;
+    if (pipe(result) != 0) { close(start[0]); close(start[1]); return false; }
+    pid_t c1 = fork();
+    if (c1 == 0) {
+        close(start[1]); close(result[0]); alarm(30);
+        fmx_race_child(gid, start[0], result[1]);
+    }
+    pid_t c2 = c1 >= 0 ? fork() : -1;
+    if (c2 == 0) {
+        close(start[1]); close(result[0]); alarm(30);
+        fmx_race_child(gid, start[0], result[1]);
+    }
+    close(start[0]); close(result[1]);
+    bool started = c1 > 0 && c2 > 0;
+    ssize_t sent = started ? write(start[1], "xx", 2) : 0;
+    close(start[1]);
+    ssize_t n1 = read(result[0], a, sizeof(*a));
+    ssize_t n2 = read(result[0], b, sizeof(*b));
+    close(result[0]);
+    int s1 = 0, s2 = 0;
+    bool done1 = c1 > 0 && waitpid(c1, &s1, 0) == c1;
+    bool done2 = c2 > 0 && waitpid(c2, &s2, 0) == c2;
+    return started && sent == 2 && n1 == (ssize_t)sizeof(*a) &&
+        n2 == (ssize_t)sizeof(*b) && fmx_race_child_ok(done1, s1) &&
+        fmx_race_child_ok(done2, s2);
+}
+
+static int fmx_t_keyed_race(void)
+{
+    int failures = 0;
+    TEST("steer: simultaneous same-key sends produce one receipt and row") {
+        char gid[64], path[1400];
+        struct fmx_race_result a, b;
+        fmx_isolate("keyed-race");
+        ASSERT(fmx_mint("send", gid, sizeof(gid)));
+        ASSERT(fmx_race_pair(gid, &a, &b));
+        ASSERT(a.ok && b.ok && a.seq > 0 && a.seq == b.seq && a.duplicate + b.duplicate == 1);
+        ASSERT_EQ(fmx_mail_count(), 1);
+        snprintf(path, sizeof(path), "%s/z23/dev/steer/sent.jsonl", g_fmx_state);
+        FILE *f = fopen(path, "rb"); ASSERT(f != NULL);
+        int lines = 0, ch; while ((ch = fgetc(f)) != EOF) if (ch == '\n') lines++;
+        ASSERT_EQ(fclose(f), 0); ASSERT_EQ(lines, 1);
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+#endif
 
 static int fmx_t_duplicate(void)
 {
@@ -6609,6 +6816,10 @@ int test_fleet_steer(void)
     failures += fmx_t_brief_watermark();
     failures += fmx_t_brief_deferred_cursor();
     failures += fmx_t_evidence();
+#if !defined(_WIN32)
+    failures += fmx_t_lost_receipt_retry();
+    failures += fmx_t_keyed_race();
+#endif
     failures += fmx_t_duplicate();
     failures += fmx_t_lifecycle();
     failures += fmx_t_sent_needs_receiver();

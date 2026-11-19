@@ -15,6 +15,11 @@ struct zcl_command_request;
 struct zcl_command_reply;
 struct json_value;
 
+/* Internal authenticated steer entry: key digest is not public mail input. */
+void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply,
+                                  const char *key_digest, bool require_existing);
+
 /* Pure cursor projection for a native merge prefix. Rows must carry native
  * stream/start/end provenance; this grants no read or mutation authority. */
 bool zcl_devagent_mail_cursor_prefix(const char *resume, const char *end_token,
