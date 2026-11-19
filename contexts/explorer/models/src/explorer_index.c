@@ -411,12 +411,14 @@ bool db_tx_output_addr_typed(struct node_db *ndb, const uint8_t txid[32],
 {
     if (!ndb || !ndb->open || !txid || !addr20 || !script_type)
         return false;
+    enum { TXOA_ADDRESS_HASH, TXOA_SCRIPT_TYPE }; /* SELECT order below */
     sqlite3_stmt *s = NULL;
     AR_QUERY_ONE_BOOL(ndb, s,
         "SELECT address_hash, script_type FROM tx_outputs WHERE txid=? AND vout=?"
         " AND address_hash IS NOT NULL",
         (AR_BIND_BLOB(s, 1, txid, 32), AR_BIND_INT(s, 2, (int)vout)),
-        { AR_READ_BLOB(s, 0, addr20, 20); *script_type = (int)AR_COL_INT(s, 1); });
+        { AR_READ_BLOB(s, TXOA_ADDRESS_HASH, addr20, 20);
+          *script_type = (int)AR_COL_INT(s, TXOA_SCRIPT_TYPE); });
 }
 
 /* ── Reindex truncate ──────────────────────────────────────────────── */
