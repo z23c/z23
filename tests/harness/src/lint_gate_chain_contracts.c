@@ -359,24 +359,33 @@ int t_boot_repaired_index_persistence_contract(void)
 {
     int failures = 0;
     char *buf = NULL;
+    char *ladder = NULL;
     TEST("boot persists repaired canonical block index") {
         char path[PATH_MAX];
         ASSERT(repo_path(path, sizeof(path), "engine/composition/src/boot.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
-        char *height_repair = strstr(buf, "block_index_repair_heights(&g_state)");
-        char *pprev_repair = strstr(buf, "block_index_repair_pprev(&g_state");
-        char *repaired_save = strstr(buf, "Block index repaired: saving canonical flat file");
-        char *integrity = strstr(buf, "bii_verify(ctx->datadir");
+        ASSERT(repo_path(path, sizeof(path),
+                         "engine/composition/src/boot_blkidx_ladder.c") == 0);
+        ASSERT(read_entire_file(path, &ladder) == 0);
+        char *height_repair = strstr(ladder, "block_index_repair_heights(ms)");
+        char *pprev_repair = strstr(ladder, "block_index_repair_pprev(ms");
+        char *repaired_save = strstr(ladder, "Block index repaired: saving canonical flat file");
+        char *sequence = strstr(buf, "static bool boot_seq_load_block_index");
+        ASSERT(sequence != NULL);
+        char *repair_call = strstr(sequence, "boot_blkidx_repair_block_index(ctx, &g_state");
         ASSERT(height_repair != NULL);
         ASSERT(pprev_repair != NULL);
         ASSERT(repaired_save != NULL);
+        ASSERT(repair_call != NULL);
+        char *integrity = strstr(repair_call, "boot_step_gate_block_index_integrity(ctx");
         ASSERT(integrity != NULL);
         ASSERT(height_repair < repaired_save);
         ASSERT(pprev_repair < repaired_save);
-        ASSERT(repaired_save < integrity);
+        ASSERT(repair_call < integrity);
         PASS();
     } _test_next:;
     free(buf);
+    free(ladder);
     return failures;
 }
 
