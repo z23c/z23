@@ -2591,6 +2591,206 @@ static int rlc_ztasks_lifecycle_rollback(const char *base,
     return failures;
 }
 
+/* ── stage f: hermetic install/update/failure/rollback case ──────────────
+ * One registered hermetic case that links install, update, a forced
+ * failure and rollback for the shipped ztasks package: everything runs in
+ * an isolated datadir of its own, with no live node, no network, and no
+ * resident process — package_lifecycle_rollback is exercised directly
+ * (the in-process lifecycle path test_zcode_add.c drives through the
+ * command), not through the serving gate the trap above owns. */
+#if !defined(_WIN32)
+
+static bool rlc_herm_setup(char *base, size_t base_cap, char *zcode,
+                           size_t zcode_cap)
+{
+    rlc_private_base(base, base_cap);
+    int n = snprintf(zcode, zcode_cap, "%s/zcode", base);
+    return n > 0 && (size_t)n < zcode_cap;
+}
+
+static bool rlc_herm_install_path(const char *base,
+                                  const struct rlc_binding *b, char *out,
+                                  size_t cap)
+{
+    int n = snprintf(out, cap, "%s/zcode/installed/%s", base, b->root_hex);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool rlc_herm_distinct(const struct rlc_binding *x,
+                              const struct rlc_binding *y)
+{
+    return memcmp(x->root, y->root, 32) != 0;
+}
+
+static bool rlc_herm_active_is(const char *base, const uint8_t root[32],
+                               size_t want_generations)
+{
+    uint8_t active_root[32];
+    size_t generations = 0;
+    bool present = false;
+    struct zcl_result active = package_lifecycle_active(
+        base, RLC_APP, active_root, &generations, &present);
+    return active.ok && present && generations == want_generations &&
+           memcmp(active_root, root, 32) == 0;
+}
+
+/* A rollback that must refuse: the named rule is reported, no generation
+ * is appended, and the active root is untouched. */
+static bool rlc_herm_rollback_refused(const char *base, const char *name,
+                                      const char *want_rule,
+                                      const uint8_t active_root[32],
+                                      size_t want_generations)
+{
+    struct package_lifecycle_rollback_report report;
+    struct zcl_result rolled = package_lifecycle_rollback(
+        base, name, INT64_C(1700000010), &report);
+    return !rolled.ok && strcmp(report.rule, want_rule) == 0 &&
+           rlc_herm_active_is(base, active_root, want_generations);
+}
+
+static int rlc_herm_single_generation_refusals(const char *base,
+                                               const struct rlc_binding *a)
+{
+    int failures = 0;
+    RLC_CHECK("stage f hermetic: the shipped ztasks package installs its "
+              "0.2.0 generation into an isolated datadir",
+              rlc_herm_active_is(base, a->root, 1));
+    RLC_CHECK("stage f hermetic: a one-generation package has nothing to "
+              "go back to — named rollback refuses by rule and changes "
+              "nothing",
+              rlc_herm_rollback_refused(base, RLC_APP,
+                                        "no-previous-generation", a->root,
+                                        1));
+    RLC_CHECK("stage f hermetic: a package that was never installed here "
+              "is refused by rule and changes nothing",
+              rlc_herm_rollback_refused(base, "ztasks/no-such-package",
+                                        "never-installed", a->root, 1));
+    return failures;
+}
+
+/* Delete the updated generation's install tree and prove only it is gone. */
+static bool rlc_herm_break_updated(const char *base,
+                                   const struct rlc_binding *a,
+                                   const struct rlc_binding *b)
+{
+    char a_install[RLC_INSTALL_PATH_MAX], b_install[RLC_INSTALL_PATH_MAX];
+    return rlc_herm_install_path(base, b, b_install, sizeof(b_install)) &&
+        rlc_herm_install_path(base, a, a_install, sizeof(a_install)) &&
+        test_rm_rf_recursive(b_install) == 0 &&
+        stat(b_install, &(struct stat){0}) != 0 && errno == ENOENT &&
+        stat(a_install, &(struct stat){0}) == 0;
+}
+
+static int rlc_herm_update_default_rollback(const char *base,
+                                            const char *zcode,
+                                            const struct rlc_binding *a,
+                                            struct rlc_binding *b)
+{
+    int failures = 0;
+    bool updated = rlc_install_ztasks_variant(base, zcode, "0.3.0", 3,
+                                              "No tasks yet (0.3.0).",
+                                              RLC_PREVIEW_OK, b);
+    RLC_CHECK("stage f hermetic: the 0.3.0 update activates a distinct "
+              "generation as the second entry of the log",
+              updated && rlc_herm_distinct(a, b) &&
+                  rlc_herm_active_is(base, b->root, 2));
+    bool broken = updated && rlc_herm_break_updated(base, a, b);
+    RLC_CHECK("stage f hermetic: the forced failure deletes only the "
+              "broken 0.3.0 install tree and leaves the prior generation "
+              "intact",
+              broken);
+    struct package_lifecycle_rollback_report report;
+    struct zcl_result rolled = broken
+        ? package_lifecycle_rollback(base, NULL, INT64_C(1700000002),
+                                     &report)
+        : ZCL_ERR(-1, "forced failure did not land");
+    RLC_CHECK("stage f hermetic: default rollback depends on nothing the "
+              "broken version could have damaged — it selects the "
+              "just-changed package and restores the EXACT prior root",
+              rolled.ok && report.selected_by_default &&
+                  strcmp(report.name, RLC_APP) == 0 &&
+                  memcmp(report.from_root, b->root, 32) == 0 &&
+                  memcmp(report.to_root, a->root, 32) == 0 &&
+                  report.generation_count == 3 &&
+                  rlc_herm_active_is(base, a->root, 3));
+    return failures;
+}
+
+static int rlc_herm_target_invalid_refusal(const char *base,
+                                           const char *zcode,
+                                           const struct rlc_binding *a,
+                                           struct rlc_binding *c)
+{
+    int failures = 0;
+    bool installed = rlc_install_ztasks_variant(base, zcode, "0.4.0", 4,
+                                                "No tasks yet (0.4.0).",
+                                                RLC_PREVIEW_OK, c);
+    char a_install[RLC_INSTALL_PATH_MAX];
+    bool target_gone = installed &&
+        rlc_herm_install_path(base, a, a_install, sizeof(a_install)) &&
+        test_rm_rf_recursive(a_install) == 0;
+    RLC_CHECK("stage f hermetic: the 0.4.0 update activates while the "
+              "rollback target's install tree is removed",
+              target_gone && rlc_herm_active_is(base, c->root, 4));
+    RLC_CHECK("stage f hermetic: rollback refuses fail-closed when the "
+              "target generation is no longer installed — the rule names "
+              "quarantine/reinstall guidance and nothing changes",
+              installed &&
+                  rlc_herm_rollback_refused(base, RLC_APP,
+                                            "rollback-target-invalid",
+                                            c->root, 4));
+    return failures;
+}
+
+static int rlc_herm_nothing_installed(void)
+{
+    int failures = 0;
+    char empty[256], empty_zcode[320];
+    if (!rlc_herm_setup(empty, sizeof(empty), empty_zcode,
+                        sizeof(empty_zcode))) {
+        RLC_CHECK("stage f hermetic: nothing-installed fixture sets up",
+                  false);
+        return failures + 1;
+    }
+    struct package_lifecycle_rollback_report report;
+    struct zcl_result rolled = package_lifecycle_rollback(
+        empty, NULL, INT64_C(1700000003), &report);
+    RLC_CHECK("stage f hermetic: an empty datadir has nothing to go back "
+              "from — the default pick refuses by rule",
+              !rolled.ok &&
+                  strcmp(report.rule, "nothing-installed") == 0 &&
+                  !report.selected_by_default);
+    test_rm_rf(empty);
+    return failures;
+}
+
+static int rlc_stage_f_hermetic_lifecycle(void)
+{
+    int failures = rlc_herm_nothing_installed();
+    char base[256], zcode[320];
+    struct rlc_binding a, b, c;
+    if (!rlc_herm_setup(base, sizeof(base), zcode, sizeof(zcode))) {
+        RLC_CHECK("stage f hermetic: an isolated fixture datadir is "
+                  "created under the system temp directory", false);
+        return failures + 1;
+    }
+    if (!rlc_install_ztasks_variant(base, zcode, "0.2.0", 2,
+                                    "No tasks yet (0.2.0).",
+                                    RLC_PREVIEW_OK, &a)) {
+        RLC_CHECK("stage f hermetic: the shipped ztasks package installs "
+                  "its 0.2.0 generation into an isolated datadir", false);
+        test_rm_rf(base);
+        return failures + 1;
+    }
+    failures += rlc_herm_single_generation_refusals(base, &a);
+    failures += rlc_herm_update_default_rollback(base, zcode, &a, &b);
+    failures += rlc_herm_target_invalid_refusal(base, zcode, &a, &c);
+    test_rm_rf(base);
+    return failures;
+}
+
+#endif /* !defined(_WIN32) */
+
 static bool rlc_artifact_rederives(const struct zcl_result *ar,
                                    const struct package_resident_artifact *art,
                                    const char *ztasks_sha3)
@@ -2792,6 +2992,10 @@ int test_resident_launch_contract(void)
                   "distinct artifact digests",
                   rlc_generation_ladder_ok(variants, ztasks_sha3, &n1, &n2,
                                            &b));
+        /* The hermetic lifecycle walk owns its fixtures and must always
+         * run: gating it on the ladder would silently skip rollback
+         * coverage whenever the shared install path fails. */
+        failures += rlc_stage_f_hermetic_lifecycle();
         if (variants) {
             struct rlc_binding n;
             rlc_binding_fill(&n, ztasks_root, ztasks_receipt, ztasks_sha3);
