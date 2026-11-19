@@ -127,12 +127,6 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
 struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main_state *ms,
                                                 size_t max_entries);
 
-/* Drop resident pages from the successful canonical file-backed load arena.
- * The mapping and entries remain valid; later reads refault and writes stay
- * shared. Returns the advised byte count, or 0 for another owner, an anonymous
- * arena, an unsupported platform, or an advisory failure. */
-size_t block_index_flat_release_arena_pages(struct main_state *ms);
-
 /* Hot tip window the aging entry point below leaves resident: the newest
  * BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES of the arena (the newest blocks'
  * entries, where pprev/pskip walks concentrate). The steady-state node RSS
@@ -145,14 +139,41 @@ size_t block_index_flat_release_arena_pages(struct main_state *ms);
  * MADV_DONTNEED over the cold prefix below the newest `window_bytes` and
  * keep that tip window resident. The arena is height-ascending, so the
  * cold prefix is the oldest blocks' entries; dropped entries read back
- * identically on refault and dirty pages keep their writes (same shared-
- * file guarantee as block_index_flat_release_arena_pages). Callable
- * repeatedly. Same guard and no-op shape as the release above: 0 for
- * another owner, an anonymous fallback arena, a window covering the whole
- * arena, an unsupported platform, or an advisory failure; otherwise the
- * advised byte count. */
+ * identically on refault and dirty pages keep their writes (the mapping
+ * and entries stay valid; shared-file semantics make the advise a pure
+ * residency drop). Callable repeatedly — the boot composition's paced
+ * re-age worker calls it again each time the tip height has advanced,
+ * so walks' re-faults are dropped again. The owner pointer IS the
+ * guard: g_bil_flat_arena_* are written only by the boot-time flat load
+ * (bil_flat_arena_register), before any caller of this entry point can
+ * exist, so a foreign main_state — or a call on an anonymous fallback
+ * arena, which registration never admits — is a lock-free no-op, and no
+ * separate lock exists or is needed. Returns 0 for another owner, an
+ * anonymous fallback arena, a window covering the whole arena, an
+ * unsupported platform, or an advisory failure; otherwise the advised
+ * byte count. */
 size_t block_index_flat_age_arena_pages(struct main_state *ms,
                                         size_t window_bytes);
+
+/* Re-age window the paced entry point below enforces: a pass runs only
+ * when at least this many seconds elapsed since the last one. */
+#define BLOCK_INDEX_ARENA_REAGE_SECONDS 300
+
+/* Paced periodic re-aging, the boot composition's maintenance-tick entry:
+ * age only when BOTH guards hold — at least BLOCK_INDEX_ARENA_REAGE_SECONDS
+ * elapsed since the last pass (idle-time cadence), AND `tip_height`
+ * advanced since it (new blocks are what grow the resident set again:
+ * their inserts fault fresh arena entries and walks pull neighbours in).
+ * The baselines are loader-owned and start "due immediately" (clock 0,
+ * height -1), so the FIRST call ages — the boot-time SERVICES_RUNNING
+ * pass and every later pass go through this one entry point. The
+ * baselines advance even when the age itself no-ops (anonymous fallback
+ * arena): they ARE the pace. Callers are the boot composition's single
+ * re-age worker (the boot-time pass runs before the worker spawns), so
+ * the plain baselines need no lock. Returns the advised byte count, 0
+ * when paced out or when the underlying age is a no-op. */
+size_t block_index_flat_paced_reage(struct main_state *ms, int tip_height,
+                                    int64_t now_ms, size_t window_bytes);
 
 /* Load a bounded flat index into an empty private state without publishing a
  * global flat identity. This admits no header, chain or endpoint authority.

@@ -71,24 +71,32 @@ static void bil_test_unlink_arena(const char *dir)
 }
 
 #if defined(__linux__)
-extern size_t block_index_flat_release_arena_pages(struct main_state *)
-    __attribute__((weak));
 extern size_t block_index_flat_age_arena_pages(struct main_state *, size_t)
     __attribute__((weak));
+extern size_t block_index_flat_paced_reage(struct main_state *, int,
+                                           int64_t, size_t)
+    __attribute__((weak));
 #endif
 
-static size_t bil_test_release_arena_pages(struct main_state *ms)
+/* The paced wrapper flags an absent implementation with (size_t)-1, like
+ * the aging wrapper: the reage fixture's checks must FAIL when the entry
+ * point is missing, not silently pass as no-ops. */
+static size_t bil_test_paced_reage(struct main_state *ms, int height,
+                                   int64_t now_ms, size_t window)
 {
 #if defined(__linux__)
-    if (!block_index_flat_release_arena_pages)
-        return 0;
+    if (!block_index_flat_paced_reage)
+        return (size_t)-1;
+    return block_index_flat_paced_reage(ms, height, now_ms, window);
+#else
+    (void)ms; (void)height; (void)now_ms; (void)window;
+    return (size_t)-1;
 #endif
-    return block_index_flat_release_arena_pages(ms);
 }
 
-/* Unlike the release wrapper above, the aging wrapper flags an absent
- * implementation with (size_t)-1 instead of 0: the aging fixture's checks
- * must FAIL when the entry point is missing, not silently pass as no-ops. */
+/* The aging wrapper flags an absent implementation with (size_t)-1
+ * instead of 0: the aging fixtures' checks must FAIL when the entry point
+ * is missing, not silently pass as no-ops. */
 static size_t bil_test_age_arena_pages(struct main_state *ms, size_t window)
 {
 #if defined(__linux__)
@@ -647,17 +655,6 @@ static int bil_flat_arena_file_case(void)
             stat(arena_path, &st) == 0 &&
             st.st_size == (off_t)(100u * sizeof(struct block_index));
 
-        size_t expected_release = 0;
-#if defined(__linux__)
-        if (arena_ok)
-            expected_release = (size_t)st.st_size;
-#endif
-        size_t initial_released = bil_test_release_arena_pages(&ms2);
-        struct main_state nonowner;
-        main_state_init(&nonowner);
-        size_t nonowner_release = bil_test_release_arena_pages(&nonowner);
-        main_state_free(&nonowner);
-
         struct uint256 first_hash = make_test_hash(0);
         struct uint256 last_hash = make_test_hash(99);
         struct block_index *first = block_map_find(&ms2.map_block_index,
@@ -668,23 +665,11 @@ static int bil_flat_arena_file_case(void)
             last && last->nHeight == 99 && last->pprev &&
             last->pprev->nHeight == 98 &&
             ms2.map_block_index.size == ms.map_block_index.size;
-        bool dirty_ok = loaded && first;
-        if (dirty_ok) {
-            first->nHeight = 7;
-            size_t released = bil_test_release_arena_pages(&ms2);
-            dirty_ok = released == expected_release && first->nHeight == 7;
-            first->nHeight = 0;
-        }
 
         BIL_CHECK("bil: flat load arena is a file-backed mapping with exact byte size",
                   arena_ok);
-        BIL_CHECK("bil: canonical owner releases all arena pages",
-                  initial_released == expected_release);
-        BIL_CHECK("bil: non-owner cannot release the canonical arena",
-                  nonowner_release == 0);
-        BIL_CHECK("bil: file-backed arena entries and links survive page release",
+        BIL_CHECK("bil: file-backed arena entries and links load intact",
                   entries_ok);
-        BIL_CHECK("bil: shared writes survive another page release", dirty_ok);
 
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
@@ -919,6 +904,201 @@ static int bil_flat_arena_age_case(void)
                "freshly aged %lldus\n", hops, (long long)warm_us,
                (long long)cold_us);
         (void)fault_sum; (void)warm_sum; (void)cold_sum;
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
+        unlink(path);
+        bil_test_unlink_arena(tmpdir);
+        rmdir(tmpdir);
+        main_state_free(&ms);
+        main_state_free(&ms2);
+    }
+    return failures;
+}
+#endif
+
+/* Periodic re-aging (boot.c's paced worker cadence, driven through the
+ * loader's paced entry point): pass 1 runs with the fresh baselines
+ * (clock just past the re-age window, tip height set) and must age; a
+ * pass with the clock INSIDE the re-age window, and one with the height
+ * UNCHANGED, must each be paced out to a no-op. Then the cold prefix is
+ * WALKED so its pages re-fault exactly as later pprev/pskip walks do in
+ * a serving node, and a second pass with BOTH guards advanced (fake tip
+ * height beyond the pass-1 baseline, fake clock a full window later)
+ * must re-drop the re-faulted prefix to the same byte count while the
+ * tip window stays resident through BOTH passes; every entry must still
+ * read back identically afterwards. */
+#if defined(__linux__)
+
+/* Present-page count guard for the reage case: the probe fails loudly
+ * (not as zero) when the fixture never mapped an arena. */
+static size_t bil_reage_present_or_fail(const void *addr, size_t bytes)
+{
+    if (!addr || !bytes)
+        return (size_t)-1;
+    return bil_test_present_pages(addr, bytes);
+}
+
+/* The fixture's arena must be the canonical exact-size file-backed
+ * mapping; *arena_bytes_out carries its size for the page math. */
+static bool bil_reage_arena_ok(bool loaded, struct block_index *first,
+                               struct block_index *tip, const char *tmpdir,
+                               size_t chain_n, size_t *arena_bytes_out)
+{
+    if (!loaded || !first || !tip)
+        return false;
+    char arena_path[512];
+    snprintf(arena_path, sizeof(arena_path), "%s/.block_index.arena",
+             tmpdir);
+    struct stat st;
+    if (stat(arena_path, &st) != 0)
+        return false;
+    if (st.st_size != (off_t)(chain_n * sizeof(struct block_index)))
+        return false;
+    *arena_bytes_out = (size_t)st.st_size;
+    return true;
+}
+
+/* One re-aging pass: walk the whole pprev chain (faulting every entry's
+ * page, the exact shape of a deep pprev/pskip walk), keep the tip window
+ * hot, run the paced entry with the caller's fake height/clock, then
+ * report the whole-arena and tip-window residency. */
+struct bil_reage_pass {
+    size_t aged;
+    size_t present;
+    size_t tip_present;
+};
+
+static struct bil_reage_pass bil_reage_run_pass(
+    struct main_state *ms2, struct block_index *first,
+    struct block_index *tip, size_t arena_bytes, size_t window,
+    uintptr_t last_page, size_t page_size, int fake_height,
+    int64_t fake_clock_ms, unsigned *sum_out)
+{
+    unsigned sum = 0;
+    for (struct block_index *cur = tip; cur; cur = cur->pprev)
+        sum += (unsigned)cur->nHeight;
+    if (tip)
+        sum += (unsigned)tip->nHeight; /* keep the tip window hot */
+    struct bil_reage_pass p;
+    p.aged = bil_test_paced_reage(ms2, fake_height, fake_clock_ms, window);
+    p.present = bil_reage_present_or_fail(first, arena_bytes);
+    p.tip_present = bil_reage_present_or_fail((const void *)last_page,
+                                              page_size);
+    *sum_out += sum;
+    return p;
+}
+
+static int bil_flat_arena_reage_case(void)
+{
+    int failures = 0;
+    const int chain_n = 2000;
+    const size_t resident_fail = (size_t)-1;
+    {
+        struct main_state ms;
+        main_state_init(&ms);
+        build_synthetic_chain(&ms, chain_n);
+
+        char tmpdir[256];
+        snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_reage", getpid());
+        mkdir("./test-tmp", 0755);
+        mkdir(tmpdir, 0755);
+
+        save_block_index_flat(tmpdir, &ms);
+
+        struct main_state ms2;
+        main_state_init(&ms2);
+        bool loaded = load_block_index_flat(tmpdir, &ms2).ok;
+
+        struct uint256 first_hash = make_test_hash(0);
+        struct uint256 tip_hash = make_test_hash(chain_n - 1);
+        struct block_index *first = NULL;
+        struct block_index *tip = NULL;
+        if (loaded) {
+            first = block_map_find(&ms2.map_block_index, &first_hash);
+            tip = block_map_find(&ms2.map_block_index, &tip_hash);
+        }
+
+        long page_l = sysconf(_SC_PAGESIZE);
+        size_t page_size = 4096;
+        if (page_l > 0)
+            page_size = (size_t)page_l;
+        size_t arena_bytes = 0;
+        bool arena_ok = bil_reage_arena_ok(loaded, first, tip, tmpdir,
+                                           (size_t)chain_n, &arena_bytes);
+        size_t window_bytes = page_size; /* keep only the newest page hot */
+        size_t expected_cold = 0;
+        if (arena_bytes > window_bytes)
+            expected_cold = (arena_bytes - window_bytes) /
+                            page_size * page_size;
+        /* Residency of the tip window: the arena's final page (the newest
+         * entries' page, which the one-page window keeps hot). */
+        uintptr_t last_page = ((uintptr_t)first + arena_bytes - 1) &
+                              ~(uintptr_t)(page_size - 1);
+
+        /* Pass 1: fresh baselines (clock 0, height -1 in the loader), so
+         * a clock just past one re-age window and the current tip height
+         * are both "advanced" — exactly the boot-time pass. */
+        int fake_height = chain_n - 1;
+        int64_t fake_clock_ms = (int64_t)300 * 1000 + 1;
+        unsigned pass1_sum = 0;
+        struct bil_reage_pass p1 = bil_reage_run_pass(
+            &ms2, first, tip, arena_bytes, window_bytes, last_page,
+            page_size, fake_height, fake_clock_ms, &pass1_sum);
+
+        /* Pacing controls: the clock INSIDE the re-age window and the
+         * height UNCHANGED must each be paced out to a no-op. */
+        size_t paced_in_window = bil_test_paced_reage(
+            &ms2, fake_height + 1, fake_clock_ms + 1, window_bytes);
+        size_t paced_same_height = bil_test_paced_reage(
+            &ms2, fake_height, fake_clock_ms + (int64_t)300 * 1000 + 1,
+            window_bytes);
+
+        /* A later pprev/pskip walk re-faults the cold prefix. */
+        unsigned refault_sum = 0;
+        for (struct block_index *cur = tip; cur; cur = cur->pprev)
+            refault_sum += (unsigned)cur->nHeight;
+        size_t present_refaulted =
+            bil_reage_present_or_fail(first, arena_bytes);
+        size_t tip_refaulted =
+            bil_reage_present_or_fail((const void *)last_page, page_size);
+
+        /* The paced worker's guards have now advanced: fake tip height
+         * past the pass-1 baseline, fake clock a full window later. */
+        fake_height += 100;
+        fake_clock_ms += (int64_t)300 * 1000 + 1;
+        unsigned pass2_sum = 0;
+        struct bil_reage_pass p2 = bil_reage_run_pass(
+            &ms2, first, tip, arena_bytes, window_bytes, last_page,
+            page_size, fake_height, fake_clock_ms, &pass2_sum);
+
+        BIL_CHECK("bil: reage fixture maps a file-backed arena", arena_ok);
+        BIL_CHECK("bil: first paced pass drops the cold prefix",
+                  expected_cold > 0 && p1.aged == expected_cold);
+        BIL_CHECK("bil: pass inside the reage window is paced out",
+                  paced_in_window == 0);
+        BIL_CHECK("bil: pass with an unchanged tip height is paced out",
+                  paced_same_height == 0);
+        BIL_CHECK("bil: cold-prefix walk re-faults the aged pages",
+                  p1.present != resident_fail &&
+                  present_refaulted > p1.present);
+        BIL_CHECK("bil: paced second pass re-drops the re-faulted prefix",
+                  p2.aged == expected_cold);
+        BIL_CHECK("bil: residency drops again after the second pass",
+                  p2.present != resident_fail &&
+                  p2.present < present_refaulted);
+        BIL_CHECK("bil: tip window stays resident across both passes",
+                  p1.tip_present == 1 && tip_refaulted == 1 &&
+                  p2.tip_present == 1);
+        BIL_CHECK("bil: entries and pprev links survive the second pass",
+                  bil_test_age_entries_ok(loaded, first, tip, chain_n,
+                                          &ms, &ms2));
+        printf("bil: reage with guards advanced (height %d, clock "
+               "%lldms): pass1 %zu bytes / %zu pages, refault %zu pages, "
+               "pass2 %zu bytes / %zu pages\n", fake_height,
+               (long long)fake_clock_ms, p1.aged, p1.present,
+               present_refaulted, p2.aged, p2.present);
+        (void)pass1_sum; (void)refault_sum; (void)pass2_sum;
 
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
@@ -3555,6 +3735,7 @@ int test_block_index_loader(void)
     failures += bil_flat_arena_file_case();
 #if defined(__linux__)
     failures += bil_flat_arena_age_case();
+    failures += bil_flat_arena_reage_case();
 #endif
 #if defined(ZCL_TESTING) && !defined(_WIN32) && !defined(__APPLE__)
     failures += bil_flat_reservation_cases();

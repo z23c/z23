@@ -741,47 +741,27 @@ static void bil_flat_arena_register(struct main_state *ms,
     g_bil_flat_arena_bytes = bytes;
 }
 
-size_t block_index_flat_release_arena_pages(struct main_state *ms)
-{
-    if (!ms || ms != g_bil_flat_arena_owner || !g_bil_flat_arena_base ||
-        !g_bil_flat_arena_bytes)
-        return 0;
-#if defined(__linux__)
-    if (madvise(g_bil_flat_arena_base, g_bil_flat_arena_bytes,
-                MADV_DONTNEED) != 0) {
-        LOG_WARN("block_index_flat",
-                 "Block index arena page release failed: %s", strerror(errno));
-        return 0;
-    }
-    LOG_INFO("block_index_flat",
-             "Block index arena: released %zu resident bytes",
-             g_bil_flat_arena_bytes);
-    return g_bil_flat_arena_bytes;
-#else
-    return 0;
-#endif
-}
-
-/* Windowed aging of the same canonical file-backed load arena: advise
+/* Windowed aging of the canonical file-backed load arena: advise
  * MADV_DONTNEED over the COLD PREFIX below the newest `window_bytes` —
  * the hot tip window, where pprev/pskip walks concentrate — and leave the
  * window itself resident. The arena is height-ascending (the writer
  * height-sorts the flat file), so the cold prefix is exactly the oldest
  * blocks' entries; the steady-state RSS objective (node_rss_mb) is
- * arena_bytes minus this window, which the boot-time whole-arena release
- * above cannot hold because every later walk re-faults the prefix and
- * nothing evicts clean shared pages without pressure.
+ * arena_bytes minus this window, and a ONE-SHOT age cannot hold it: every
+ * later walk re-faults the prefix, which is why the boot composition runs
+ * its paced re-age worker against this entry point.
  *
- * Guard: the SAME owner-pointer check the release uses — no separate lock
- * (none exists in this TU; the globals are written only by the boot-time
- * load, before any caller of this entry point runs). And because
- * registration happens only for a CANONICAL, FILE-MAPPED arena
- * (bil_flat_arena_register), the anonymous zcl_calloc fallback is
- * structurally invisible here: the call is a no-op for a fallback arena,
- * never an madvise over anonymous memory. Shared-file semantics give the
- * dropped entries the same guarantee the whole-arena release relies on
- * (and the arena fixture proves): they read back identically on refault
- * and dirty pages keep their writes.
+ * Owner-pointer guard rationale: the globals are written ONLY by the
+ * boot-time flat load (bil_flat_arena_register), before any caller of
+ * this entry point can exist — the boot-time age and the periodic re-age
+ * worker both run strictly after that load — so a plain pointer compare
+ * is a complete, lock-free guard: no separate lock exists in this TU and
+ * none is needed. Because registration happens only for a CANONICAL,
+ * FILE-MAPPED arena, the anonymous zcl_calloc fallback is structurally
+ * invisible here: the call is a no-op for a fallback arena, never an
+ * madvise over anonymous memory. Shared-file semantics give the dropped
+ * entries the residency-drop guarantee the fixture proves: they read
+ * back identically on refault and dirty pages keep their writes.
  *
  * Callable repeatedly — a later call re-ages pages re-faulted since the
  * last one. Returns the advised byte count, or 0 for another owner, a
@@ -814,6 +794,32 @@ size_t block_index_flat_age_arena_pages(struct main_state *ms,
 #else
     return 0;
 #endif
+}
+
+/* Paced re-aging baselines. Start "due immediately" (clock 0, height -1)
+ * so the FIRST call ages — the boot-time SERVICES_RUNNING pass and every
+ * later maintenance pass go through this one entry point. Plain (non-
+ * atomic) by contract: the only runtime callers are the boot composition's
+ * single re-age worker, and the boot-time pass runs BEFORE that worker
+ * spawns, so the two never overlap. */
+static int64_t g_bil_flat_reage_last_ms;
+static int64_t g_bil_flat_reage_last_height = -1;
+
+size_t block_index_flat_paced_reage(struct main_state *ms, int tip_height,
+                                    int64_t now_ms, size_t window_bytes)
+{
+    if (now_ms - g_bil_flat_reage_last_ms <
+        (int64_t)BLOCK_INDEX_ARENA_REAGE_SECONDS * 1000)
+        return 0;
+    if (tip_height < 0 || tip_height == g_bil_flat_reage_last_height)
+        return 0;
+    size_t aged = block_index_flat_age_arena_pages(ms, window_bytes);
+    /* Advance the baselines even when the age no-ops (anonymous fallback
+     * arena): they ARE the pace — without this, a fallback boot would
+     * re-enter the (guarded, zero-cost) age call on every worker tick. */
+    g_bil_flat_reage_last_ms = now_ms;
+    g_bil_flat_reage_last_height = tip_height;
+    return aged;
 }
 
 /* ── File-backed load arena ────────────────────────────────

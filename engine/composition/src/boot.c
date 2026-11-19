@@ -979,20 +979,50 @@ static struct zcl_result sr_network_ready(void *ctx)
         return ZCL_ERR(-1, "network boundary reached without a connman");
     return ZCL_OK;
 }
+// supervisor-ok:paced-arena-reage — registry-owned 5 s-tick worker; exits on the shutdown flag and is joined by the registry; its only periodic work is the loader's paced re-age below, so no resident domain loop needs a liveness contract.
+/* The SERVICES_RUNNING age runs once per boot and every later pprev/pskip
+ * walk re-faults the dropped cold prefix — without a repeat, steady-state
+ * RSS climbs right back — so the worker re-invokes the loader's paced
+ * entry point (guards live with its baselines). */
+static _Atomic bool g_arena_reage_worker_live;
+
+static void *arena_reage_main(void *arg)
+{
+    (void)arg;
+    while (!thread_registry_shutdown_requested()) {
+        struct timespec ts = { .tv_sec = 5, .tv_nsec = 0 };
+        nanosleep(&ts, NULL);
+        if (!thread_registry_shutdown_requested())
+            (void)block_index_flat_paced_reage(
+                &g_state, active_chain_height(&g_state.chain_active),
+                boot_clock_ms(), BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES);
+    }
+    return NULL;
+}
+
 static struct zcl_result sr_services_running(void *ctx)
 {
     (void)ctx;
     boot_step_start_maintenance_services();
-    /* Windowed arena aging (replaces the former whole-arena release): drop
-     * the cold prefix below the hot tip window instead of the whole arena,
-     * so the newest blocks' entries stay hot for pprev/pskip walks while
-     * the ~700 MB cold prefix stays kernel-reclaimable. The call is a
-     * self-guarding no-op when the load fell back to the anonymous arena.
-     * The same aging entry point is repeat-safe, so a periodic re-aging
-     * pass can call it again once a maintenance hook exists; no such hook
-     * exists in this boot step today. */
-    (void)block_index_flat_age_arena_pages(&g_state,
-                                           BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES);
+    /* Windowed arena aging (replaces the former whole-arena release):
+     * keep the newest blocks' tip window hot and drop the ~700 MB cold
+     * prefix (kernel-reclaimable); self-guarding no-op for the anonymous
+     * fallback arena. Also the paced re-age baseline: the worker above
+     * repeats it whenever block_index_flat_paced_reage's guards hold, so
+     * later walks' re-faults are dropped again, not climbed into RSS. */
+    (void)block_index_flat_paced_reage(
+        &g_state, active_chain_height(&g_state.chain_active),
+        boot_clock_ms(), BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES);
+    bool live = false;
+    if (atomic_compare_exchange_strong(&g_arena_reage_worker_live, &live,
+                                       true) &&
+        // thread-supervision-ok:registry-owned-reage — exits on the shutdown flag and is reaped by the registry join at shutdown; 5 s tick, no locks held.
+        thread_registry_spawn("bil_arena_reage", arena_reage_main, NULL,
+                              NULL) != 0) {
+        atomic_store(&g_arena_reage_worker_live, false);
+        fprintf(stderr, "WARNING: arena re-age worker did not start; "
+                "periodic cold-prefix re-aging disabled\n");
+    }
     return ZCL_OK;
 }
 static struct zcl_result sr_sandbox_enter(void *ctx)
