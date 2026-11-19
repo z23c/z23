@@ -402,7 +402,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LIST_BUDGET,
     "app,build,copy,image,compile,make,remix,game,cache",
     "zcl.app_build.input.v1", "zcl.app_build.v1",
-    "copy,datadir,dependency_root,plan_id,confirm,version", "copy",
+    "copy,datadir,dependency_root,plan_id,confirm,version,now_unix", "copy",
     "z23 app build --input='{\"copy\":\"skycombat-1\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
