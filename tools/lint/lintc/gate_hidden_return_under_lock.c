@@ -32,14 +32,21 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 #include "gate_hidden_return_under_lock_priv.h"
 
 static const char k_hrl_gate[] = "check-hidden-return-under-lock";
-static const char *const k_hrl_roots[] = {
+/* NULL-terminated for the shared lint_narrow_roots_prefix hook; the walk
+ * loops use HRL_NROOTS, not the sizeof count. */
+enum { HRL_NROOTS = 7 };
+static const char *const k_hrl_roots[HRL_NROOTS + 1] = {
     "core", "engine", "contexts", "platform", "tools", "apps", "cognition",
+    NULL,
 };
 static const char *const k_hrl_lock[] = {
     "zcl_mutex_lock", "pthread_mutex_lock", "platform_mutex_lock",
@@ -298,16 +305,22 @@ static int hrl_line(void *ctx, const char *line, size_t len)
     return 0;
 }
 
-int hrl_scan_file(const char *path, FILE *out, int *findings)
+static int hrl_scan_file_at(const char *open_path, const char *logical,
+                            FILE *out, int *findings)
 {
     struct hrl_st st;
     struct hrl_st *s = &st;
     memset(s, 0, sizeof *s);
-    s->path = path;
+    s->path = logical;
     s->out = out;
-    int rc = lc_each_line(path, hrl_line, s, 0);
+    int rc = lc_each_line(open_path, hrl_line, s, 0);
     *findings += s->findings;
     return rc ? 2 : 0;
+}
+
+int hrl_scan_file(const char *path, FILE *out, int *findings)
+{
+    return hrl_scan_file_at(path, path, out, findings);
 }
 
 struct hrl_walk {
@@ -330,12 +343,27 @@ static int hrl_on_file(const char *path, void *ctx)
     return hrl_scan_file(path, w->out, &w->findings);
 }
 
+static int hrl_report(const struct hrl_walk *w, FILE *out)
+{
+    if (w->findings == 0) {
+        fprintf(out, "%s: OK -- %d files, no hidden return under a held lock\n",
+                k_hrl_gate, w->files);
+        return 0;
+    }
+    fprintf(out,
+            "%s: FAIL -- %d hidden return(s) while a lock is held\n"
+            "FIX: LOG_FAIL, LOG_RETURN and the GUARD_NOT_NULL family return from the\n"
+            "function. Under a lock use LOG_ERROR, unlock, then return explicitly.\n",
+            k_hrl_gate, w->findings);
+    return 1;
+}
+
 int hrl_check_root(const char *root, FILE *out)
 {
     struct hrl_walk w = { .out = out };
     char dir[1024];
     int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof k_hrl_roots / sizeof k_hrl_roots[0];
+    for (size_t i = 0; rc == 0 && i < (size_t)HRL_NROOTS;
          i++) {
         if (ovf(snprintf(dir, sizeof dir, "%s/%s", root, k_hrl_roots[i]),
                 sizeof dir))
@@ -347,21 +375,71 @@ int hrl_check_root(const char *root, FILE *out)
     if (gate_require_scanned(w.files, HRL_FLOOR, k_hrl_gate,
                              "expected thousands of .c files under the roots"))
         return 2;
-    if (w.findings == 0) {
-        fprintf(out, "%s: OK -- %d files, no hidden return under a held lock\n",
-                k_hrl_gate, w.files);
+    return hrl_report(&w, out);
+}
+
+/* hrl_path_form/hrl_repo/hrl_under_roots bodies live in the shared
+ * narrowing hooks (lint_narrow_hook.h); the selftest keeps calling the
+ * under-roots symbol. */
+static const char *hrl_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form_opt(path, repo);
+}
+
+static int hrl_repo(const struct lint_changed *ch, char out[4096],
+                    const char **repo)
+{
+    return lint_narrow_repo_opt(ch, out, repo);
+}
+
+static int hrl_under_roots(const char *path)
+{
+    return lint_narrow_roots_prefix(path, k_hrl_roots);
+}
+
+static int hrl_selected_file(const char *root, const char *path,
+                             struct hrl_walk *w)
+{
+    char full[4096];
+    struct stat st;
+    if (ovf(snprintf(full, sizeof full, "%s/%s", root, path), sizeof full))
+        return die("z23-lint: path too long: %s\n", path);
+    if (lstat(full, &st) != 0)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot stat %s\n", full);
+    if (!S_ISREG(st.st_mode))
         return 0;
+    w->files++;
+    return hrl_scan_file_at(full, path, w->out, &w->findings);
+}
+
+int hrl_check_changed(const char *root, const struct lint_changed *ch, FILE *out)
+{
+    char repo_buf[4096];
+    const char *repo;
+    if (hrl_repo(ch, repo_buf, &repo) != 0)
+        return 2;
+    struct hrl_walk w = { .out = out };
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < ch->n; i++) {
+        const char *path = hrl_path_form(ch->path[i], repo);
+        size_t n = strlen(path);
+        if (n >= 2 && path[n - 2] == '.' && path[n - 1] == 'c' &&
+            hrl_under_roots(path) && !hrl_skip_path(path))
+            rc = hrl_selected_file(root, path, &w);
     }
-    fprintf(out,
-            "%s: FAIL -- %d hidden return(s) while a lock is held\n"
-            "FIX: LOG_FAIL, LOG_RETURN and the GUARD_NOT_NULL family return from the\n"
-            "function. Under a lock use LOG_ERROR, unlock, then return explicitly.\n",
-            k_hrl_gate, w.findings);
-    return 1;
+    if (rc == 0 && lint_examined_print(w.files, 0) < 0)
+        rc = 2;
+    return rc ? 2 : hrl_report(&w, out);
 }
 
 int check_hidden_return_under_lock_run(int argc, char **argv)
 {
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
     const char *root = argc >= 1 ? argv[0] : ".";
-    return hrl_check_root(root, stdout);
+    int rc = changed.active ? hrl_check_changed(root, &changed, stdout)
+                            : hrl_check_root(root, stdout);
+    lint_changed_free(&changed);
+    return rc;
 }

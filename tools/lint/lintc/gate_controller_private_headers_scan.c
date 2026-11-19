@@ -94,6 +94,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 /* CPHS_MAXF bounds every tracked .c and .h path, not a subset: the tree
  * passed 8192 on 2026-11-02 (8340), so the cap has headroom to 65536. */
@@ -523,6 +524,35 @@ int cphs_scan_all(const char *root)
     int rc = 0;
     for (int i = 0; rc == 0 && i < g_cphs_nfiles; i++)
         rc = cphs_scan_file(g_cphs_files[i], root);
+    return rc;
+}
+
+/* cphs_path_form body lives in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static const char *cphs_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form_opt(path, repo);
+}
+
+int cphs_scan_changed(const char *root, const struct lint_changed *ch,
+                      const char *repo)
+{
+    g_cphs_nedges = 0;
+    g_cphs_eused = 0;
+    int rc = 0, examined = 0;
+    for (int i = 0; rc == 0 && i < g_cphs_nfiles; i++) {
+        const char *path = cphs_display(g_cphs_files[i], root);
+        int selected = 0;
+        for (int k = 0; k < ch->n; k++)
+            if (strcmp(cphs_path_form(ch->path[k], repo), path) == 0)
+                selected = 1;
+        if (!selected)
+            continue;
+        examined++;
+        rc = cphs_scan_file(g_cphs_files[i], root);
+    }
+    if (rc == 0 && lint_examined_print(examined, 0) < 0)
+        rc = 2;
     return rc;
 }
 

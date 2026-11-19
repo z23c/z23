@@ -93,6 +93,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 /* The native collect + include scan (gate_controller_private_headers_scan.c). */
 int cphs_comp(void);
@@ -101,6 +102,8 @@ int cphs_collect(const char *root);
 int cphs_nfiles(void);
 int cphs_count_private(const char *hroot, int *out);
 int cphs_scan_all(const char *root);
+int cphs_scan_changed(const char *root, const struct lint_changed *ch,
+                      const char *repo);
 void cphs_sort_uniq(void);
 const char *const *cphs_edges(int *out_n);
 
@@ -255,7 +258,62 @@ static int cph_preflight(const char *root, const char *hroot,
     return 0;
 }
 
-static int cph_body(void)
+/* cph_path_form's body lives in the shared narrowing hooks
+ * (lint_narrow_hook.h, lint_narrow_repo_form_opt). */
+
+/* The edge rows are "path:edge" strings; the shared filter matches one
+ * changed path per call, so the repo root routes through file scope. */
+static const char *g_cph_narrow_repo;
+
+static int cph_edge_match(const char *row, const char *path)
+{
+    path = lint_narrow_repo_form_opt(path, g_cph_narrow_repo);
+    const char *colon = strchr(row, ':');
+    if (!colon)
+        return 0;
+    size_t n = (size_t)(colon - row);
+    return strlen(path) == n && memcmp(path, row, n) == 0;
+}
+
+static void cph_base_narrow(const struct lint_changed *ch, const char *repo)
+{
+    int w = 0;
+    for (int i = 0; i < g_cph_nrows; i++) {
+        const char *row = g_cph_rows[i];
+        g_cph_narrow_repo = repo;
+        int keep = lint_narrow_filter_keys((const char *const *)ch->path, ch->n, &row, 1,
+                                           (int)sizeof row, cph_edge_match);
+        g_cph_narrow_repo = NULL;
+        if (keep) {
+            g_cph_rows[w] = g_cph_rows[i];
+            g_cph_seen[w] = g_cph_seen[i];
+            w++;
+        }
+    }
+    g_cph_nrows = w;
+}
+
+static int cph_private_name(const char *path)
+{
+    size_t n = strlen(path);
+    return (n >= 11 && strcmp(path + n - 11, "_internal.h") == 0) ||
+           (n >= 10 && strcmp(path + n - 10, "_private.h") == 0);
+}
+
+/* The narrowing-hook descriptor: a changed controller private header keeps
+ * the whole-tree run; the repo root and baseline compare are shared. */
+static const struct lint_narrow_gate k_cph_narrow_gate = {
+    k_cph_name, NULL, lint_narrow_repo_form_opt, cph_private_name, NULL, NULL, 0
+};
+
+static int cph_narrow_ok(const struct lint_changed *ch, const char *baseline,
+                         const char *repo)
+{
+    (void)repo;
+    return lint_narrow_ok(ch, baseline, &k_cph_narrow_gate);
+}
+
+static int cph_body(const struct lint_changed *narrow, const char *repo)
 {
     const char *root = env_or("ZCL_CONTROLLER_PRIVATE_SCAN_ROOT", ".");
     const char *hroot = env_or("ZCL_CONTROLLER_PRIVATE_HEADER_ROOT", "");
@@ -264,13 +322,17 @@ static int cph_body(void)
     int rc = cph_preflight(root, hroot, baseline);
     if (rc == 0)
         rc = cph_load_baseline(baseline);
+    if (rc == 0 && narrow) {
+        cph_base_narrow(narrow, repo);
+        rc = cphs_scan_changed(root, narrow, repo);
+    }
     /* The shell runs collect_files TWICE: once into mapfile for the
      * preflight (cph_preflight above), then again inside
      * scan_external_edges — so find's diagnostics surface twice. This
      * second collection replaces the file set the scan iterates. */
-    if (rc == 0)
+    if (rc == 0 && !narrow)
         rc = cphs_collect(root);
-    if (rc == 0)
+    if (rc == 0 && !narrow)
         rc = cphs_scan_all(root);
     if (rc == 0) {
         cphs_sort_uniq();
@@ -281,8 +343,9 @@ static int cph_body(void)
 
 int check_controller_private_headers_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
     char root[4096];
     int rc = cic_repo_root(root, sizeof root);
     if (rc == 0 && chdir(root) != 0)
@@ -293,9 +356,14 @@ int check_controller_private_headers_run(int argc, char **argv)
     if (rc == 0)
         rc = cphs_comp();
     if (rc == 0) {
-        rc = cph_body();
+        const struct lint_changed *narrow =
+            cph_narrow_ok(&changed, env_or("ZCL_CONTROLLER_PRIVATE_BASELINE",
+                                           k_cph_baseline_default), root)
+                ? &changed : NULL;
+        rc = cph_body(narrow, root);
         cphs_drop();
         regfree(&g_cph_comment);
     }
+    lint_changed_free(&changed);
     return rc;
 }

@@ -6,7 +6,11 @@
  * x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only over every seam .c file
  * minus the files the Makefile's own non-Linux LIB_SRCS filter drops, and
  * ratchets the realized diagnostic sites against
- * tools/lint/windows_platform_seam_baseline.txt. The Windows API floor
+ * tools/lint/windows_platform_seam_baseline.txt. With --changed-files, a set
+ * containing only non-header, non-build-definition inputs scans just changed
+ * seam .c files and leaves unrelated baseline rows untouched; any header,
+ * .def, .inc, .mk, Makefile or baseline input retains the whole scan. UPDATE refuses a
+ * narrowed baseline rewrite. The Windows API floor
  * defines are parsed from the Makefile, never guessed. Absent compiler is
  * UNOBSERVED (exit 0, never printed as a pass) unless ZCL_REQUIRE_MINGW=1.
  * Selftest: gate_windows_platform_seam_selftest.c drives wps_check_root
@@ -33,6 +37,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 #define WPS_GATE "check-windows-platform-seam"
 #define WPS_SEAM "platform/modules/platform/src"
@@ -58,6 +63,7 @@ enum {
 enum { WPS_SCAN = 0, WPS_MODE_SITES = 1, WPS_UPDATE = 2, WPS_SELFTEST = 3 };
 
 struct wps_env {
+    const struct lint_changed *changed;
     char cc[128];
     char flags[WPS_FLAGS][WPS_FLAG];
     int nflags;
@@ -79,7 +85,8 @@ struct wps_base {
     int n;
 };
 
-int wps_check_root(const char *root, FILE *out, FILE *err, int mode);
+int wps_check_root(const char *root, const struct lint_changed *changed,
+                   FILE *out, FILE *err, int mode);
 
 /* ── small shared helpers ─────────────────────────────────────────── */
 
@@ -205,36 +212,65 @@ static int wps_exec_status(int fd)
     return r > 0; /* any byte means the child wrote an errno: exec failed */
 }
 
-/* Runs argv. 0 = ran (*status set), 1 = exec failed, 2 = internal error
- * (including output larger than cap), already named on stderr. Combined
- * stdout+stderr in out. */
-static int wps_spawn(char *const argv[], int devnull, char *out, size_t cap,
-                     int *status)
+struct wps_process {
+    pid_t pid;
+    int outfd;
+    int execfd;
+    int devnull;
+};
+
+static int wps_spawn_start(char *const argv[], int devnull,
+                           struct wps_process *process)
 {
-    int exep[2], outp[2], xs, rd = 0, st = 0;
-    pid_t pid, wr;
-    if (pipe(exep) != 0 || pipe(outp) != 0)
+    int exep[2], outp[2];
+    process->pid = -1;
+    process->outfd = process->execfd = -1;
+    process->devnull = devnull;
+    if (pipe(exep) != 0)
         return wps_fail("pipe failed: %s", strerror(errno));
-    (void)fcntl(exep[1], F_SETFD, FD_CLOEXEC);
-    pid = fork();
-    if (pid < 0)
+    if (pipe(outp) != 0) {
+        close(exep[0]); close(exep[1]);
+        return wps_fail("pipe failed: %s", strerror(errno));
+    }
+    /* Later workers must not retain earlier workers' parent-side readers. */
+    if (fcntl(exep[1], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(exep[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(outp[0], F_SETFD, FD_CLOEXEC) != 0) {
+        close(exep[0]); close(exep[1]); close(outp[0]); close(outp[1]);
+        return wps_fail("pipe close-on-exec failed: %s", strerror(errno));
+    }
+    process->pid = fork();
+    if (process->pid < 0) {
+        close(exep[0]); close(exep[1]); close(outp[0]); close(outp[1]);
         return wps_fail("fork failed: %s", strerror(errno));
-    if (pid == 0) {
+    }
+    if (process->pid == 0) {
         close(exep[0]);
         close(outp[0]);
         wps_child(argv, devnull, outp[1], exep[1]);
     }
     close(exep[1]);
     close(outp[1]);
+    process->outfd = outp[0];
+    process->execfd = exep[0];
+    return 0;
+}
+
+static int wps_spawn_finish(struct wps_process *process, char *out, size_t cap,
+                            int *status)
+{
+    int xs, rd = 0, st = 0;
+    pid_t wr;
     /* A failed read still closes the pipe and reaps the child: a writer
      * left with no reader gets SIGPIPE, so waitpid cannot hang. */
-    if (!devnull && out)
-        rd = wps_read_all(outp[0], out, cap);
-    close(outp[0]);
-    xs = wps_exec_status(exep[0]);
-    close(exep[0]);
-    while ((wr = waitpid(pid, &st, 0)) < 0 && errno == EINTR)
+    if (!process->devnull && out)
+        rd = wps_read_all(process->outfd, out, cap);
+    close(process->outfd);
+    xs = wps_exec_status(process->execfd);
+    close(process->execfd);
+    while ((wr = waitpid(process->pid, &st, 0)) < 0 && errno == EINTR)
         ;
+    process->pid = -1;
     if (wr < 0)
         return wps_fail("waitpid failed: %s", strerror(errno));
     if (rd)
@@ -248,6 +284,18 @@ static int wps_spawn(char *const argv[], int devnull, char *out, size_t cap,
     else
         *status = 1;
     return 0;
+}
+
+/* Runs argv. 0 = ran (*status set), 1 = exec failed, 2 = internal error
+ * (including output larger than cap), already named on stderr. Combined
+ * stdout+stderr in out. */
+static int wps_spawn(char *const argv[], int devnull, char *out, size_t cap,
+                     int *status)
+{
+    struct wps_process process;
+    if (wps_spawn_start(argv, devnull, &process) != 0)
+        return 2;
+    return wps_spawn_finish(&process, out, cap, status);
 }
 
 /* command -v semantics: a name with a slash is a path; otherwise search
@@ -649,6 +697,16 @@ static int wps_is_exempt(const struct wps_env *e, const char *rel)
     return 0;
 }
 
+static int wps_changed_has(const struct wps_env *e, const char *rel)
+{
+    if (!e->changed)
+        return 1;
+    for (int i = 0; i < e->changed->n; i++)
+        if (strcmp(e->changed->path[i], rel) == 0)
+            return 1;
+    return 0;
+}
+
 static int wps_maybe_src(const char *dir, const char *name, struct wps_env *e)
 {
     char rel[WPS_SRC], full[WPS_PATH];
@@ -661,7 +719,7 @@ static int wps_maybe_src(const char *dir, const char *name, struct wps_env *e)
         return wps_pathov();
     if (stat(full, &st) != 0 || !S_ISREG(st.st_mode))
         return 0;
-    if (wps_is_exempt(e, rel))
+    if (wps_is_exempt(e, rel) || !wps_changed_has(e, rel))
         return 0;
     if (e->nsrcs >= WPS_SRCS) {
         fprintf(stderr, "%s: seam sources exceed %d\n", WPS_GATE, WPS_SRCS);
@@ -740,12 +798,12 @@ static int wps_extract_sites(const char *out, const regex_t *re,
     return 0;
 }
 
-static int wps_compile_one(const char *root, struct wps_env *e, int i,
-                           char *out, size_t cap)
+static int wps_compile_start(const char *root, struct wps_env *e, int i,
+                             struct wps_process *process)
 {
     static char *argv[WPS_ARGV];
     static char path[WPS_PATH];
-    int k = 0, j, st = 0, rc;
+    int k = 0, j;
     argv[k++] = e->cc;
     for (j = 0; j < e->nflags; j++)
         argv[k++] = e->flags[j];
@@ -757,36 +815,52 @@ static int wps_compile_one(const char *root, struct wps_env *e, int i,
         return wps_pathov();
     argv[k++] = path;
     argv[k] = NULL;
-    rc = wps_spawn(argv, 0, out, cap, &st);
-    (void)st;
-    if (rc == 1) {
-        fprintf(stderr, "%s: compiler '%s' disappeared mid-run\n", WPS_GATE,
-                e->cc);
-        return 2;
-    }
-    if (rc != 0)
-        return 2; /* wps_spawn named the failure */
-    return 0;
+    return wps_spawn_start(argv, 0, process);
 }
 
 static int wps_scan(const char *root, struct wps_env *e, FILE *err)
 {
-    static char outbuf[WPS_OUTBUF];
+    enum { WPS_JOBS = 4 };
+    static struct {
+        struct wps_process process;
+        int source;
+        char out[WPS_OUTBUF];
+    } jobs[WPS_JOBS];
     regex_t re;
-    int i, r;
+    int r;
     if ((r = regcomp(&re, WPS_DIAG_RE, REG_EXTENDED)) != 0)
         return reg_fail(&re, r);
-    for (i = 0; i < e->nsrcs; i++) {
-        int rc = wps_compile_one(root, e, i, outbuf, sizeof outbuf);
-        if (rc == 0)
-            rc = wps_extract_sites(outbuf, &re, e, i, err);
-        if (rc) {
-            regfree(&re);
-            return rc;
+    int next = 0, oldest = 0, active = 0, result = 0;
+    while (next < e->nsrcs || active > 0) {
+        while (result == 0 && active < WPS_JOBS && next < e->nsrcs) {
+            int slot = (oldest + active) % WPS_JOBS;
+            jobs[slot].source = next;
+            result = wps_compile_start(root, e, next, &jobs[slot].process);
+            if (result != 0)
+                break;
+            active++;
+            next++;
         }
+        if (active == 0)
+            break;
+        int st = 0;
+        int rc = wps_spawn_finish(&jobs[oldest].process, jobs[oldest].out,
+                                  sizeof jobs[oldest].out, &st);
+        if (rc == 1 && result == 0)
+            fprintf(stderr, "%s: compiler '%s' disappeared mid-run\n", WPS_GATE,
+                    e->cc);
+        if (result == 0) {
+            if (rc == 0)
+                result = wps_extract_sites(jobs[oldest].out, &re, e,
+                                           jobs[oldest].source, err);
+            else
+                result = 2;
+        }
+        active--;
+        oldest = (oldest + 1) % WPS_JOBS;
     }
     regfree(&re);
-    return 0;
+    return result;
 }
 
 /* ── baseline and verdicts ────────────────────────────────────────── */
@@ -884,7 +958,7 @@ static int wps_diff_rows(const struct wps_env *e, const struct wps_base *b,
         }
     }
     for (i = 0; i < b->n; i++) {
-        if (wps_src_index(e, b->path[i]) >= 0)
+        if (e->changed || wps_src_index(e, b->path[i]) >= 0)
             continue;
         if (*nimps >= WPS_ROWS)
             return wps_fail("diff rows exceed %d", WPS_ROWS);
@@ -1225,6 +1299,8 @@ static int wps_stage2_sources(const char *root, struct wps_env *e, FILE *err)
     rc = wps_list_srcs(root, e);
     if (rc)
         return rc;
+    if (e->changed)
+        return lint_examined_print(e->nsrcs, 0) < 0 ? 2 : 0;
     if (ovf(snprintf(msg, sizeof msg,
                      "scanned '%s' minus %d Makefile-exempt file(s) — a "
                      "directory move or an exemption parse gone wrong would "
@@ -1253,11 +1329,13 @@ static int wps_stage3(const char *root, struct wps_env *e, int mode, FILE *out,
     return wps_ratchet(root, e, out, err);
 }
 
-int wps_check_root(const char *root, FILE *out, FILE *err, int mode)
+int wps_check_root(const char *root, const struct lint_changed *changed,
+                   FILE *out, FILE *err, int mode)
 {
     static struct wps_env e;
     int rc, avail;
     memset(&e, 0, sizeof e);
+    e.changed = changed;
     if (ovf(snprintf(e.cc, sizeof e.cc, "%s",
                      env_or("ZCL_MINGW_CC", WPS_CC_DEF)),
             sizeof e.cc))
@@ -1283,9 +1361,50 @@ int wps_check_root(const char *root, FILE *out, FILE *err, int mode)
     return wps_stage3(root, &e, mode, out, err);
 }
 
+/* wps_suffix body lives in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static int wps_suffix(const char *path, const char *suffix)
+{
+    return lint_narrow_suffix(path, suffix);
+}
+
+/* A changed header/make input re-drives the whole-tree cross-compile; the
+ * gate never resolves a repo root, so the shared hook runs repo-less with
+ * no baseline compare (REPO_RESOLVE passes NULL through, PATH_FORM NULL
+ * keeps the raw path). */
+static int wps_repo_none(const struct lint_changed *ch, char out[4096],
+                         const char **repo)
+{
+    (void)ch;
+    (void)out;
+    *repo = NULL;
+    return 0;
+}
+
+static int wps_keep(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    return wps_suffix(path, ".h") || wps_suffix(path, ".def") ||
+           wps_suffix(path, ".inc") || wps_suffix(path, ".mk") ||
+           strcmp(base, "Makefile") == 0 || strcmp(path, WPS_BASE) == 0;
+}
+
+static const struct lint_narrow_gate k_wps_narrow_gate = {
+    WPS_GATE, NULL, NULL, wps_keep, wps_repo_none, NULL, 0
+};
+
+int wps_narrow_ok(const struct lint_changed *ch)
+{
+    return lint_narrow_ok(ch, NULL, &k_wps_narrow_gate);
+}
+
 int check_windows_platform_seam_run(int argc, char **argv)
 {
-    int mode = WPS_SCAN;
+    struct lint_changed ch;
+    int mode = WPS_SCAN, rc;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
     if (argc >= 1) {
         if (strcmp(argv[0], "--self-test") == 0)
             mode = WPS_SELFTEST;
@@ -1295,5 +1414,13 @@ int check_windows_platform_seam_run(int argc, char **argv)
     if (mode == WPS_SCAN &&
         strcmp(env_or("ZCL_LINT_MODE", ""), "UPDATE") == 0)
         mode = WPS_UPDATE;
-    return wps_check_root(".", stdout, stderr, mode);
+    const struct lint_changed *narrow = wps_narrow_ok(&ch) ? &ch : NULL;
+    if (mode == WPS_UPDATE && ch.active) {
+        fputs("check-windows-platform-seam: --changed-files cannot rewrite the baseline\n", stderr);
+        lint_changed_free(&ch);
+        return 2;
+    }
+    rc = wps_check_root(".", narrow, stdout, stderr, mode);
+    lint_changed_free(&ch);
+    return rc;
 }

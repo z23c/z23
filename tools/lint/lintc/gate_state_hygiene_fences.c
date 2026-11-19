@@ -22,7 +22,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 /* A handful of bare json_value locals per file is plenty; overflow is fatal. */
 enum { JVI_PEND = 32, JVI_NAME = 64, JVI_LINE = 8192 };
@@ -31,7 +33,7 @@ enum { OWP_ROOT_MAX = 16, OWP_ROOT_BUF = 4096 };
 
 struct jvi_slot { char n[JVI_NAME]; int line; };
 struct jvi_pend { struct jvi_slot e[JVI_PEND]; int n; };
-struct jvi_acc { int hits; int emit; };
+struct jvi_acc { int hits; int emit; int files; };
 
 struct owp_re { regex_t a, b, mark; };
 struct owp_acc {
@@ -252,7 +254,67 @@ static int jvi_on_path(const char *path, void *ctx)
     size_t n = strlen(path);
     if (n < 2 || path[n - 2] != '.' || path[n - 1] != 'c')
         return 0;
-    return jvi_scan_file(ctx, path);
+    struct jvi_acc *a = ctx;
+    a->files++;
+    return jvi_scan_file(a, path);
+}
+
+/* jvi_path_form/jvi_repo bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static const char *jvi_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form_opt(path, repo);
+}
+
+static int jvi_repo(const struct lint_changed *ch, char out[4096],
+                    const char **repo)
+{
+    return lint_narrow_repo_opt(ch, out, repo);
+}
+
+struct jvi_selected {
+    const struct lint_changed *ch;
+    const char *repo;
+    struct jvi_acc *acc;
+    char last[RS_PATH];
+};
+
+static int jvi_changed_has(const struct jvi_selected *sel, const char *path)
+{
+    for (int i = 0; i < sel->ch->n; i++)
+        if (strcmp(jvi_path_form(sel->ch->path[i], sel->repo), path) == 0)
+            return 1;
+    return 0;
+}
+
+static int jvi_selected_index(const char *path, int stage, void *vctx)
+{
+    struct jvi_selected *sel = vctx;
+    (void)stage;
+    if (!jvi_changed_has(sel, path) || strcmp(sel->last, path) == 0)
+        return 0;
+    int rc = jvi_on_path(path, sel->acc);
+    if (rc == 0 && ovf(snprintf(sel->last, sizeof sel->last, "%s", path),
+                       sizeof sel->last))
+        return 2;
+    return rc;
+}
+
+static int jvi_select(const struct lint_changed *ch, struct jvi_acc *a)
+{
+    char repo_buf[4096];
+    const char *repo;
+    if (jvi_repo(ch, repo_buf, &repo) != 0)
+        return 2;
+    struct jvi_selected sel = { .ch = ch, .repo = repo, .acc = a, .last = {0} };
+    char bad[8] = {0};
+    a->files = 0;
+    if (lint_git_index_foreach(jvi_selected_index, &sel, bad) != 0) {
+        fprintf(stderr, "check_json_value_init: UNPROVEN — git index%s%s\n",
+                bad[0] ? " extension " : "", bad);
+        return 2;
+    }
+    return lint_examined_print(a->files, 0) < 0 ? 2 : 0;
 }
 
 static int jvi_fail_msg(void)
@@ -268,12 +330,18 @@ static int jvi_fail_msg(void)
 
 int check_json_value_init_run(int argc, char **argv)
 {
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
     /* gate_commands.def still forwards the shell original's hyphenated flag. */
-    if (argc >= 1 && strcmp(argv[0], "--self-test") == 0)
+    if (argc >= 1 && strcmp(argv[0], "--self-test") == 0) {
+        lint_changed_free(&changed);
         return check_json_value_init_selftest();
-    (void)argv;
+    }
     struct jvi_acc a = { .emit = 1 };
-    int rc = each_zpath(k_ls_all, jvi_on_path, &a);
+    int rc = changed.active ? jvi_select(&changed, &a)
+                            : each_zpath(k_ls_all, jvi_on_path, &a);
+    lint_changed_free(&changed);
     if (rc)
         return rc;
     if (a.hits)
@@ -324,9 +392,132 @@ static int jvi_st_c(void)
                    "json_init then json_set_object on one line");
 }
 
+static int jvi_st_select(const char *root, const char *path, int want_rc,
+                         int want_hits, int want_files)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd) || chdir(root) != 0)
+        return 1;
+    char *paths[] = { (char *)path };
+    struct lint_changed one = { paths, 1, 1 };
+    struct jvi_acc a = {0};
+    int rc = jvi_select(&one, &a);
+    if (chdir(cwd) != 0)
+        return 1;
+    int bad = rc != want_rc || a.hits != want_hits || a.files != want_files;
+    if (bad)
+        fprintf(stderr, "json narrowed case failed: %s rc=%d hits=%d files=%d\n",
+                path, rc, a.hits, a.files);
+    return bad;
+}
+
+static int jvi_st_git(const char *root)
+{
+    char quoted[8192], cmd[8192], out[1024];
+    if (sh_single_quote(root, quoted, sizeof quoted) != 0 ||
+        ovf(snprintf(cmd, sizeof cmd,
+            "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
+            "git -C %s init -q . && git -C %s add -f -- .", quoted, quoted),
+            sizeof cmd))
+        return 1;
+    int code = 0;
+    return capture_cmd(cmd, out, sizeof out, &code) != 0 || code != 0;
+}
+
+static int jvi_st_conflict(const char *root)
+{
+    char quoted[8192], info[1024], cmd[8192];
+    if (sh_single_quote(root, quoted, sizeof quoted) != 0)
+        return 1;
+    if (ovf(snprintf(cmd, sizeof cmd, "git -C %s ls-files -s -- engine/x/bad.c",
+                     quoted), sizeof cmd))
+        return 1;
+    int code = 0;
+    if (capture_cmd(cmd, info, sizeof info, &code) != 0 || code != 0 ||
+        strlen(info) < 50 || memcmp(info, "100644 ", 7) != 0 ||
+        info[47] != ' ' || info[48] != '0' || info[49] != '\t')
+        return 1;
+    char hash[41];
+    memcpy(hash, info + 7, 40);
+    hash[40] = '\0';
+    if (ovf(snprintf(cmd, sizeof cmd,
+        "git -C %s update-index --force-remove -- engine/x/bad.c && "
+        "printf '100644 %s 1\\tengine/x/bad.c\\n100644 %s 2\\tengine/x/bad.c\\n"
+        "100644 %s 3\\tengine/x/bad.c\\n' | git -C %s update-index --index-info",
+        quoted, hash, hash, hash, quoted), sizeof cmd))
+        return 1;
+    return capture_cmd(cmd, info, sizeof info, &code) != 0 || code != 0;
+}
+
+static const char *const k_jvi_git_env[] = {
+    "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", NULL
+};
+struct jvi_st_env { char *value[6]; };
+
+/* The save/clear/restore bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h); the selftest keeps calling the jvi_* names. */
+static int jvi_st_env_save(struct jvi_st_env *env)
+{
+    return lint_narrow_env_save(k_jvi_git_env, env->value,
+                                (int)(sizeof env->value / sizeof env->value[0]));
+}
+
+static int jvi_st_env_clear(struct jvi_st_env *env)
+{
+    (void)env;
+    return lint_narrow_env_clear(k_jvi_git_env,
+                                 (int)(sizeof env->value / sizeof env->value[0]));
+}
+
+static int jvi_st_env_restore(struct jvi_st_env *env)
+{
+    return lint_narrow_env_restore(k_jvi_git_env, env->value,
+                                   (int)(sizeof env->value /
+                                         sizeof env->value[0]));
+}
+
+static int jvi_st_narrow(void)
+{
+    static const char bad_src[] =
+        "void f(void) {\n    struct json_value arr;\n    json_set_array(&arr);\n}\n";
+    static const char good_src[] = "int f(void) { return 0; }\n";
+    char root[4096], bad_path[4096], good_path[4096], missing_path[4096];
+    if (lint_mkdtemp(root, sizeof root, "jvi-narrow") != 0 ||
+        ovf(snprintf(bad_path, sizeof bad_path, "%s/engine/x/bad.c", root),
+            sizeof bad_path) ||
+        ovf(snprintf(good_path, sizeof good_path, "%s/engine/x/good.c", root),
+            sizeof good_path) ||
+        ovf(snprintf(missing_path, sizeof missing_path, "%s/engine/x/missing.c", root),
+            sizeof missing_path) ||
+        csr_write(bad_path, bad_src) || csr_write(good_path, good_src) ||
+        csr_write(missing_path, good_src))
+        return 1;
+    struct jvi_st_env env;
+    if (jvi_st_env_save(&env)) {
+        (void)rap_rm_rf(root);
+        return 1;
+    }
+    int bad = jvi_st_env_clear(&env);
+    if (!bad) {
+        bad = jvi_st_git(root);
+        bad |= jvi_st_select(root, "engine/x/bad.c", 0, 1, 1);
+        bad |= jvi_st_select(root, "engine/x/good.c", 0, 0, 1);
+        bad |= jvi_st_select(root, "docs/README.md", 0, 0, 0);
+        bad |= unlink(missing_path) != 0;
+        bad |= jvi_st_select(root, "engine/x/missing.c", 2, 0, 1);
+        if (!bad)
+            bad |= jvi_st_conflict(root);
+        bad |= jvi_st_select(root, "engine/x/bad.c", 0, 1, 1);
+    }
+    bad |= rap_rm_rf(root);
+    bad |= jvi_st_env_restore(&env);
+    return bad;
+}
+
 int check_json_value_init_selftest(void)
 {
-    int bad = jvi_st_a() | jvi_st_b() | jvi_st_c();
+    int bad = jvi_st_a() | jvi_st_b() | jvi_st_c() | jvi_st_narrow();
     return st_ok(bad,
                  "OK: check_json_value_init self-test (detects the bad shape, passes both good shapes)\n");
 }

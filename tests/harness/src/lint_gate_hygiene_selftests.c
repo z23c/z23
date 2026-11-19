@@ -788,6 +788,10 @@ int t_no_dev_history_in_contracts(void)
     unlink_rel(NO_DEV_HISTORY_FIXTURE_DST);
     unlink_rel(NO_DEV_HISTORY_ALLOWLIST_FIXTURE_DST);
 
+    /* Four sequential whole-tree scans run output-silent; a heartbeat before
+     * each keeps the parallel harness's 300 s silence watchdog fed under
+     * cold-proof load (each scan alone can stretch past 80 s there). */
+    printf("[lint-gate] no-dev-history: baseline scan\n"); fflush(stdout);
     int baseline_rc = run_gate_script(NO_DEV_HISTORY_SCRIPT_REL, NULL);
 
     const char *violating_body =
@@ -800,6 +804,7 @@ int t_no_dev_history_in_contracts(void)
     int allow_planted =
         (repo_path(path, sizeof(path), NO_DEV_HISTORY_ALLOWLIST_FIXTURE_DST) == 0 &&
          write_file(path, violating_body) == 0) ? 0 : -1;
+    printf("[lint-gate] no-dev-history: allowlisted scan\n"); fflush(stdout);
     int allow_rc =
         allow_planted == 0 ? run_gate_script(NO_DEV_HISTORY_SCRIPT_REL, NULL) : -1;
     unlink_rel(NO_DEV_HISTORY_ALLOWLIST_FIXTURE_DST);
@@ -807,9 +812,11 @@ int t_no_dev_history_in_contracts(void)
     int planted =
         (repo_path(path, sizeof(path), NO_DEV_HISTORY_FIXTURE_DST) == 0 &&
          write_file(path, violating_body) == 0) ? 0 : -1;
+    printf("[lint-gate] no-dev-history: tripping scan\n"); fflush(stdout);
     int trip_rc =
         planted == 0 ? run_gate_script(NO_DEV_HISTORY_SCRIPT_REL, NULL) : -1;
     unlink_rel(NO_DEV_HISTORY_FIXTURE_DST);
+    printf("[lint-gate] no-dev-history: recovery scan\n"); fflush(stdout);
     int recover_rc = run_gate_script(NO_DEV_HISTORY_SCRIPT_REL, NULL);
 
     int makefile_wired = 0;

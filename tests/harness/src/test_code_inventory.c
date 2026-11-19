@@ -1054,6 +1054,32 @@ static void ci_include_semantics(const struct ci_inventory_report *report,
     }
 }
 
+static void ci_exact_include_collision(void)
+{
+    const char *path = CI_INCLUDE_FIX
+        "/platform/modules/duplicate/include/a/shared.h";
+    CI_ASSERT(system("mkdir -p " CI_INCLUDE_FIX
+        "/platform/modules/duplicate/include/a "
+        CI_INCLUDE_FIX "/platform/modules/duplicate/src") == 0);
+    CI_ASSERT(ci_write(path, "int include_probe_a(void);\n"));
+    CI_ASSERT(ci_write(CI_INCLUDE_FIX
+        "/platform/modules/duplicate/src/duplicate.c",
+        "int include_probe_a(void) { return 5; }\n"));
+    struct ci_inventory_report *report = codeindex_inventory_analyze(CI_INCLUDE_FIX);
+    CI_ASSERT(report != NULL);
+    if (!report) return;
+    const struct ci_inventory_capability *a = ci_cap(report,
+        "platform/modules/demo/include/a/shared.h");
+    const struct ci_inventory_capability *duplicate = ci_cap(report,
+        "platform/modules/duplicate/include/a/shared.h");
+    CI_ASSERT(a && a->production_use_files == 1);
+    CI_ASSERT(a && a->test_use_files == 0);
+    CI_ASSERT(a && a->registered_test_symbols == 0);
+    CI_ASSERT(duplicate && duplicate->production_use_files == 0);
+    CI_ASSERT(report->unresolved_include_sites == 10);
+    codeindex_inventory_free(report);
+}
+
 static void ci_include_resolution_lifetime(void)
 {
     CI_ASSERT(ci_include_fixture());
@@ -1086,6 +1112,7 @@ static void ci_include_resolution_lifetime(void)
     free(before);
     free(after);
     codeindex_inventory_free(restored);
+    ci_exact_include_collision();
     if (!ci_failures)
         TEST_DISCARD(system("rm -rf " CI_INCLUDE_FIX));
 }

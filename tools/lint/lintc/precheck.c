@@ -70,6 +70,8 @@ struct pc_opts {
     size_t n_sel;
     size_t sel[PC_MAX_GATES];
     bool skipped[PC_MAX_GATES];   /* by selected index */
+    char diff[8192];
+    int diff_ok;
 };
 
 struct pc_slot {
@@ -271,7 +273,8 @@ static const char *pc_here_changed(const struct pc_opts *o, size_t item,
 {
     if ((item % 2) != 0 || !o->changed || !o->changed[0])
         return NULL;
-    if (!lint_fast_gate_narrow(name, 1))
+    if (!lint_fast_gate_narrow(name, 1)
+        && !lint_fast_gate_narrow_names(name, 1, o->diff_ok ? o->diff : NULL))
         return NULL;
     return o->changed;
 }
@@ -488,6 +491,27 @@ static void pc_auto_save(const struct lint_gate *tab, const struct pc_opts *o,
         fputs("precheck: warning: could not cache the base results\n", stderr);
 }
 
+static bool pc_needs_diff(const struct lint_gate *tab, const struct pc_opts *o)
+{
+    for (size_t k = 0; k < o->n_sel; k++)
+        if (!o->skipped[k] &&
+            lint_fast_gate_narrow_names(tab[o->sel[k]].name, 1, ""))
+            return true;
+    return false;
+}
+
+static void pc_prepare_diff(const struct lint_gate *tab, struct pc_opts *o,
+                            const struct precheck_base *pb, bool autob)
+{
+    if (!o->changed || !o->changed[0] || !pc_needs_diff(tab, o))
+        return;
+    char sha[80];
+    const char *base = autob ? pb->sha : sha;
+    if (!autob && !lint_fast_merge_base(sha, sizeof sha))
+        return;
+    o->diff_ok = lint_fast_diff_names(base, o->diff, sizeof o->diff);
+}
+
 static int pc_run_report(const struct lint_gate *tab, struct pc_opts *o)
 {
     struct precheck_base pb;
@@ -500,6 +524,7 @@ static int pc_run_report(const struct lint_gate *tab, struct pc_opts *o)
     int opened = autob ? pc_auto_open(o, tab, &pb, rc) : 0;
     if (opened != 0)
         return opened == 4 ? 0 : opened;
+    pc_prepare_diff(tab, o, &pb, autob);
     int run = pc_run_all(tab, o, rc, &cap);
     if (autob && run == 0)
         pc_auto_save(tab, o, &pb, rc);

@@ -46,14 +46,19 @@ static bool is_ident_char(int c) { return isalnum(c) || c == '_'; }
 static bool is_keyword(const char *s)
 {
     static const char *const kw[] = {
-        "if", "for", "while", "switch", "return", "sizeof", "do", "else",
-        "case", "default", "goto", "break", "continue", "typeof", "alignof",
-        "_Alignof", "static_assert", "_Static_assert", "defined",
-        "__attribute__", "asm", "__asm__", "catch", NULL,
+        "_Alignof", "_Static_assert", "__asm__", "__attribute__", "alignof",
+        "asm", "break", "case", "catch", "continue", "default", "defined",
+        "do", "else", "for", "goto", "if", "return", "sizeof",
+        "static_assert", "switch", "typeof", "while",
     };
-    for (size_t i = 0; kw[i]; i++)
-        if (strcmp(s, kw[i]) == 0) return true;
-    return false;
+    size_t lo = 0, hi = sizeof kw / sizeof kw[0];
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = strcmp(s, kw[mid]);
+        if (c <= 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo < sizeof kw / sizeof kw[0] && strcmp(s, kw[lo]) == 0;
 }
 
 /* A token that is a C keyword / type qualifier is never a real symbol name;
@@ -62,18 +67,21 @@ static bool is_keyword(const char *s)
 static bool is_reserved_name(const char *s)
 {
     static const char *const rk[] = {
-        "extern", "static", "const", "volatile", "register", "inline",
-        "void", "char", "short", "int", "long", "float", "double",
-        "signed", "unsigned", "struct", "union", "enum", "typedef",
-        "return", "goto", "sizeof", "restrict", "_Bool", "bool",
-        "_Atomic", "_Noreturn", "_Thread_local", "else", "do", "if",
-        "for", "while", "switch", "case", "default", "break", "continue",
-        "static_assert", "_Static_assert",
-        NULL,
+        "_Atomic", "_Bool", "_Noreturn", "_Static_assert", "_Thread_local",
+        "bool", "break", "case", "char", "const", "continue", "default",
+        "do", "double", "else", "enum", "extern", "float", "for", "goto",
+        "if", "inline", "int", "long", "register", "restrict", "return",
+        "short", "signed", "sizeof", "static", "static_assert", "struct",
+        "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
     };
-    for (size_t i = 0; rk[i]; i++)
-        if (strcmp(s, rk[i]) == 0) return true;
-    return false;
+    size_t lo = 0, hi = sizeof rk / sizeof rk[0];
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = strcmp(s, rk[mid]);
+        if (c <= 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return lo < sizeof rk / sizeof rk[0] && strcmp(s, rk[lo]) == 0;
 }
 
 /* ── line index ─────────────────────────────────────────────────────── */

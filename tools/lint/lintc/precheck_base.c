@@ -26,7 +26,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-enum { PB_ARGV_MAX = 24, PB_NAME_MAX = 255 };
+enum { PB_ARGV_MAX = 96, PB_NAME_MAX = 255 };
 
 [[noreturn]] static void pb_exec(const char *const *argv, const int *p)
 {
@@ -40,26 +40,39 @@ enum { PB_ARGV_MAX = 24, PB_NAME_MAX = 255 };
     _exit(127);
 }
 
-static void pb_slurp(int fd, char *out, size_t cap)
+static void pb_out_finish(char *out, size_t cap, size_t used)
+{
+    if (!out || cap == 0)
+        return;
+    while (used > 0 && isspace((unsigned char)out[used - 1]))
+        used--;
+    out[used] = '\0';
+}
+
+static int pb_slurp(int fd, char *out, size_t cap)
 {
     size_t used = 0;
     char junk[256];
+    int rc = 0;
     for (;;) {
         char *dst = out && used + 1 < cap ? out + used : junk;
         size_t room = out && used + 1 < cap ? cap - 1 - used : sizeof junk;
         ssize_t n = read(fd, dst, room);
         if (n < 0 && errno == EINTR)
             continue;
-        if (n <= 0)
+        if (n < 0) {
+            rc = -1;
             break;
+        }
+        if (n == 0)
+            break;
+        if (out && dst == junk)
+            rc = -2;
         if (dst != junk)
             used += (size_t)n;
     }
-    if (out && cap > 0) {
-        while (used > 0 && isspace((unsigned char)out[used - 1]))
-            used--;
-        out[used] = '\0';
-    }
+    pb_out_finish(out, cap, used);
+    return rc;
 }
 
 int precheck_base_git(const char *dir, const char *const *args, char *out,
@@ -91,11 +104,13 @@ int precheck_base_git(const char *dir, const char *const *args, char *out,
     if (pid == 0)
         pb_exec(argv, p);
     close(p[1]);
-    pb_slurp(p[0], out, cap);
+    int io = pb_slurp(p[0], out, cap);
     close(p[0]);
     while (waitpid(pid, &st, 0) < 0)
         if (errno != EINTR)
             return -1;
+    if (io != 0)
+        return -1;
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 

@@ -266,7 +266,8 @@ static const char k_clock_script[] =
     "build/bin/z23-lint check-no-raw-clock-outside-platform";
 
 struct clock_acc { regex_t *re; char *buf; size_t cap, used;
-                   int (*keep)(const char *, const char *); int raw; };
+                   int (*keep)(const char *, const char *); int raw;
+                   const char *disk_root; int files; };
 
 static int clock_comp(regex_t *re)
 {
@@ -294,8 +295,16 @@ static int scan_clock(const char *path, void *ctx)
 {
     struct clock_acc *a = ctx;
     if (a->keep && !a->keep(path, "")) return 0;
-    FILE *f = fopen(path, "r");
-    if (!f) return die("z23-lint: cannot open %s\n", path);
+    char full[4096];
+    const char *disk = path;
+    if (a->disk_root) {
+        if (ovf(snprintf(full, sizeof full, "%s/%s", a->disk_root, path),
+                         sizeof full))
+            return die("z23-lint: path too long: %s\n", path);
+        disk = full;
+    }
+    FILE *f = fopen(disk, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", disk);
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
@@ -311,7 +320,7 @@ static int scan_clock(const char *path, void *ctx)
         if (ovf(k, a->cap - a->used)) { rc = 2; break; }
         a->used += (size_t)k;
     }
-    return fin(f, line, path, rc);
+    return fin(f, line, disk, rc);
 }
 
 
@@ -331,20 +340,36 @@ static int clock_walk(const char *const *roots, size_t nr, void *ctx)
     return rc;
 }
 
-int check_no_raw_clock_outside_platform_run(int argc, char **argv)
+static const char *clock_path_form(const char *path, const char *repo)
 {
-    (void)argc; (void)argv;
-    const char *mode = clock_mode();
-    int rc = rs_init();
-    if (rc) return rc;
-    regex_t re;
-    rc = clock_comp(&re);
-    if (rc) return rc;
-    char matches[CLK_MATCH];
-    matches[0] = '\0';
-    struct clock_acc a = {
-        .re = &re, .buf = matches, .cap = sizeof matches, .used = 0, .keep = clock_keep
-    };
+    if (strncmp(path, "./", 2) == 0)
+        path += 2;
+    if (!repo)
+        return path;
+    size_t len = strlen(repo);
+    if (len && repo[len - 1] == '/')
+        len--;
+    if (strcmp(path, repo) == 0)
+        return ".";
+    if (strncmp(path, repo, len) == 0 && path[len] == '/')
+        return path + len + 1;
+    return path;
+}
+
+enum { CLK_ROOT_MAX = 2 * RS_MAX + 11 };
+
+static int clock_root_add(char roots[][RS_PATH], int *n, const char *path)
+{
+    if (*n >= CLK_ROOT_MAX)
+        return die("z23-lint: raw-clock scan root overflow\n", "");
+    if (ovf(snprintf(roots[*n], RS_PATH, "%s", path), RS_PATH))
+        return 2;
+    (*n)++;
+    return 0;
+}
+
+static int clock_roots(char roots[][RS_PATH], int *nroots)
+{
     static const char *const prefix[] = {
         "tools", "engine/composition", "engine/application",
         "platform/adapters", "platform/ports"
@@ -352,16 +377,158 @@ int check_no_raw_clock_outside_platform_run(int argc, char **argv)
     static const char *const suffix[] = {
         "core/consensus", "core/params", "core/math", "core/chainparams"
     };
-    rc = clock_walk(prefix, sizeof prefix / sizeof prefix[0], &a);
-    char dirs[RS_MAX][RS_PATH];
-    int n = 0;
-    if (rc == 0) rc = repo_shape_dirs("app", "", dirs, RS_MAX, &n);
-    for (int i = 0; rc == 0 && i < n; i++) rc = walk_src(dirs[i], 1, scan_clock, &a);
-    n = 0;
-    if (rc == 0) rc = repo_shape_dirs("lib", "", dirs, RS_MAX, &n);
-    for (int i = 0; rc == 0 && i < n; i++) rc = walk_src(dirs[i], 1, scan_clock, &a);
-    if (rc == 0) rc = clock_walk(k_domain, sizeof k_domain / sizeof k_domain[0], &a);
-    if (rc == 0) rc = clock_walk(suffix, sizeof suffix / sizeof suffix[0], &a);
+    int rc = rs_init();
+    if (rc)
+        return rc;
+    *nroots = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof prefix / sizeof prefix[0]; i++)
+        rc = clock_root_add(roots, nroots, prefix[i]);
+    for (int family = 0; rc == 0 && family < 2; family++) {
+        static char dirs[RS_MAX][RS_PATH];
+        int ndirs = 0;
+        rc = repo_shape_dirs(family == 0 ? "app" : "lib", "", dirs, RS_MAX, &ndirs);
+        for (int i = 0; rc == 0 && i < ndirs; i++)
+            rc = clock_root_add(roots, nroots, dirs[i]);
+    }
+    for (size_t i = 0; rc == 0 && i < 2; i++)
+        rc = clock_root_add(roots, nroots, k_domain[i]);
+    for (size_t i = 0; rc == 0 && i < sizeof suffix / sizeof suffix[0]; i++)
+        rc = clock_root_add(roots, nroots, suffix[i]);
+    return rc;
+}
+
+static int clock_walk_roots(char roots[][RS_PATH], int nroots, struct clock_acc *a)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < nroots; i++)
+        rc = walk_src(roots[i], 1, scan_clock, a);
+    return rc;
+}
+
+static int clock_under_roots(const char *path, char roots[][RS_PATH], int nroots,
+                             const char *repo)
+{
+    for (int i = 0; i < nroots; i++) {
+        const char *root = clock_path_form(roots[i], repo);
+        if (!root[0] || strcmp(root, ".") == 0)
+            return path[0] != '/';
+        size_t len = strlen(root);
+        while (len > 1 && root[len - 1] == '/')
+            len--;
+        if (len == 1 && root[0] == '/')
+            return 1;
+        if (strncmp(path, root, len) == 0 && path[len] == '/')
+            return 1;
+    }
+    return 0;
+}
+
+static int clock_selected_file(const char *root, const char *path,
+                               struct clock_acc *a)
+{
+    char full[4096];
+    struct stat st;
+    if (ovf(snprintf(full, sizeof full, "%s/%s", root, path), sizeof full))
+        return die("z23-lint: path too long: %s\n", path);
+    if (lstat(full, &st) != 0)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot stat %s\n", full);
+    if (!S_ISREG(st.st_mode))
+        return 0;
+    int rc = scan_clock(path, a);
+    if (rc == 0)
+        a->files++;
+    return rc;
+}
+
+static int clock_repo(const struct lint_changed *ch, char roots[][RS_PATH],
+                      int nroots, char out[4096], const char **repo)
+{
+    *repo = NULL;
+    if (cic_repo_root(out, 4096) == 0) {
+        *repo = out;
+        return 0;
+    }
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = ch->path[i];
+        if (strncmp(path, "./", 2) == 0)
+            path += 2;
+        if (path[0] == '/')
+            return 2;
+    }
+    for (int i = 0; i < nroots; i++) {
+        const char *root = roots[i];
+        if (strncmp(root, "./", 2) == 0)
+            root += 2;
+        if (root[0] == '/')
+            return 2;
+    }
+    return 0;
+}
+
+static int clock_selected(const char *root, const struct lint_changed *ch,
+                          char roots[][RS_PATH], int nroots, struct clock_acc *a)
+{
+    char repo_buf[4096];
+    const char *repo;
+    if (clock_repo(ch, roots, nroots, repo_buf, &repo) != 0)
+        return 2;
+    a->files = 0;
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < ch->n; i++) {
+        const char *path = clock_path_form(ch->path[i], repo);
+        size_t len = strlen(path);
+        if (len >= 2 && path[len - 2] == '.' &&
+            (path[len - 1] == 'c' || path[len - 1] == 'h') &&
+            clock_under_roots(path, roots, nroots, repo))
+            rc = clock_selected_file(root, path, a);
+    }
+    return rc;
+}
+
+static int clock_narrow_ok(const struct lint_changed *ch)
+{
+    if (!ch->active)
+        return 0;
+    char repo_buf[4096];
+    const char *repo;
+    if (clock_repo(ch, NULL, 0, repo_buf, &repo) != 0)
+        return 0;
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = clock_path_form(ch->path[i], repo);
+        if (strcmp(path, "Makefile") == 0 ||
+            strcmp(path, "engine/composition/lib_module_order.def") == 0)
+            return 0;
+    }
+    return 1;
+}
+
+int check_no_raw_clock_outside_platform_run(int argc, char **argv)
+{
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
+    const char *mode = clock_mode();
+    static char roots[CLK_ROOT_MAX][RS_PATH];
+    int nroots = 0;
+    int rc = clock_roots(roots, &nroots);
+    regex_t re;
+    if (rc == 0)
+        rc = clock_comp(&re);
+    if (rc) {
+        lint_changed_free(&ch);
+        return rc;
+    }
+    char matches[CLK_MATCH];
+    matches[0] = '\0';
+    struct clock_acc a = {
+        .re = &re, .buf = matches, .cap = sizeof matches, .used = 0, .keep = clock_keep
+    };
+    int narrow = clock_narrow_ok(&ch);
+    rc = narrow ? clock_selected(".", &ch, roots, nroots, &a)
+                : clock_walk_roots(roots, nroots, &a);
+    if (rc == 0 && narrow && lint_examined_print(a.files, 0) < 0)
+        rc = 2;
+    lint_changed_free(&ch);
     int violations = 0;
     if (rc == 0) rc = gate_count_and_report(matches, &violations);
     if (rc == 0) rc = clock_summary(violations, mode);
@@ -380,6 +547,61 @@ static int keep_case(int (*keep)(const char *, const char *), const regex_t *re,
         return 1;
     if (gate_count_and_report(buf, &n)) return 1;
     return n != want_n || clock_grade(n, mode) != want_rc;
+}
+
+static int clock_st_selected(const char *root, regex_t *re, const char *path,
+                             const char *body, int want_hit, int want_files)
+{
+    char disk[4096], matches[1024] = {0}, roots[1][RS_PATH] = { "tools" };
+    if (body && (ovf(snprintf(disk, sizeof disk, "%s/%s", root, path),
+                              sizeof disk) || csr_write(disk, body)))
+        return 2;
+    struct clock_acc a = {
+        .re = re, .buf = matches, .cap = sizeof matches, .keep = clock_keep,
+        .disk_root = root
+    };
+    char *paths[] = { (char *)path };
+    struct lint_changed ch = { paths, 1, 1 };
+    int rc = clock_selected(root, &ch, roots, 1, &a);
+    if (rc)
+        return rc;
+    if ((a.used != 0) != want_hit || a.files != want_files) {
+        fprintf(stderr, "raw-clock narrowed case failed: %s used=%zu files=%d\n",
+                path, a.used, a.files);
+        return 1;
+    }
+    return 0;
+}
+
+static int clock_st_authorities(void)
+{
+    char *paths[] = { "Makefile" };
+    struct lint_changed ch = { paths, 1, 1 };
+    if (clock_narrow_ok(&ch))
+        return 1;
+    paths[0] = "engine/composition/lib_module_order.def";
+    if (clock_narrow_ok(&ch))
+        return 1;
+    paths[0] = "docs/README.md";
+    if (!clock_narrow_ok(&ch))
+        return 1;
+    ch.active = 0;
+    return clock_narrow_ok(&ch);
+}
+
+static int clock_st_narrow(regex_t *re, const char *hit, const char *marked)
+{
+    char root[4096];
+    if (lint_mkdtemp(root, sizeof root, "clock-narrow") != 0)
+        return 2;
+    int bad = clock_st_selected(root, re, "tools/narrow.c", hit, 1, 1)
+            | clock_st_selected(root, re, "tools/narrow.c", marked, 0, 1)
+            | clock_st_selected(root, re, "docs/README.md", NULL, 0, 0)
+            | clock_st_selected(root, re, "tools/missing.c", NULL, 0, 0)
+            | clock_st_selected(root, re, "engine/narrow.c", hit, 0, 0)
+            | clock_st_authorities();
+    int clean = rap_rm_rf(root);
+    return bad | clean;
 }
 
 int check_no_raw_clock_outside_platform_selftest(void)
@@ -409,7 +631,8 @@ int check_no_raw_clock_outside_platform_selftest(void)
             | keep_case(clock_keep, &re, "tools/lint/foo.c", "int x = 1;", 0, 0, "FAIL")
             | keep_case(clock_keep, &re, "tools/lint/foo.c", hit, 1, 1, "FAIL")
             | keep_case(clock_keep, &re, "platform/modules/platform/src/clock.c", hit, 0, 0, "FAIL")
-            | keep_case(clock_keep, &re, "tools/lint/foo.c", marked, 0, 0, "FAIL");
+            | keep_case(clock_keep, &re, "tools/lint/foo.c", marked, 0, 0, "FAIL")
+            | clock_st_narrow(&re, hit, marked);
     if (setenv("ZCL_LINT_MODE", "WARN", 1) != 0) bad = 1;
     bad |= keep_case(clock_keep, &re, "tools/lint/foo.c", hit, 1, 0, clock_mode());
     if (had_mode ? setenv("ZCL_LINT_MODE", saved_mode, 1)

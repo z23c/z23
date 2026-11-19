@@ -5,8 +5,8 @@
  * the ZCODE_PACKAGE registry rows, a manifest's top-level JSON array fields,
  * and the shipped-source enumeration (files[] honoured exactly, else
  * src+.c and tests+.c). Ported alongside tools/lint/lintc/gate_package_capabilities.c
- * and tools/lint/zcode_pkg_sources.sh, which check_package_capabilities.sh
- * sourced.
+ * from check_package_capabilities.sh and its sourced helper
+ * tools/lint/zcode_pkg_sources.sh, both since retired.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

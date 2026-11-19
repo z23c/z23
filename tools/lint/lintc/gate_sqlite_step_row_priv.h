@@ -32,6 +32,10 @@ int ssr_count(const char *buf);
 /* Walk the scan roots under `root`; record each file with a count > 0
  * (path relative to root). *files receives the number of files read. */
 int ssr_collect(const char *root, struct ssr_set *live, int *files);
+int ssr_collect_changed(const char *root, const struct lint_changed *ch,
+                        struct ssr_set *live, int *files);
+int ssr_base_narrow(struct ssr_set *base, const struct lint_changed *ch);
+int ssr_narrow_ok(const struct lint_changed *ch, const char *baseline);
 
 int ssr_set_put(struct ssr_set *s, const char *path, int count);
 int ssr_set_get(const struct ssr_set *s, const char *path);

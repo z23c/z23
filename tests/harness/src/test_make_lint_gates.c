@@ -2004,19 +2004,27 @@ static int t_agent_verify_preflight(void)
         "grep -q 'dev-bin ZCL_TEST_WERROR=1' calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
-        "for gate in check-capability-closure proof-lint-prebuild docs-capability-inventory check-kpi-floor lint-fast; do grep -q \"$gate\" calls; done\n"
+        /* The deduped agent-verify recipe runs no standalone inventory or
+         * KPI step: check-kpi-floor moved inside lint-fast (with
+         * docs-capability-inventory as its own prerequisite), so only the
+         * three static steps are left to count. */
+        "for gate in check-capability-closure proof-lint-prebuild lint-fast; do grep -q \"$gate\" calls; done\n"
         "grep -q 'agent-verify: check-capability-closure rc=0' build/scratch/agent-verify.rc\n"
         "grep -q 'agent-verify: proof-lint-prebuild rc=0' build/scratch/agent-verify.rc\n"
         "ln1() { grep -n -m1 -- \"$1\" calls | cut -d: -f1; }\n"
-        "p0=$(ln1 check-cyclomatic-complexity); p1=$(ln1 t-fast-exact); p2=$(ln1 check-capability-closure); p3=$(ln1 proof-lint-prebuild); p4=$(ln1 docs-capability-inventory)\n"
+        "p0=$(ln1 check-cyclomatic-complexity); p1=$(ln1 t-fast-exact); p2=$(ln1 check-capability-closure); p3=$(ln1 proof-lint-prebuild); p4=$(ln1 lint-fast)\n"
         "[ \"$p0\" -lt \"$p1\" ]; [ \"$p1\" -lt \"$p2\" ]; [ \"$p2\" -lt \"$p3\" ]; [ \"$p3\" -lt \"$p4\" ]\n"
-        "for gate in check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild docs-capability-inventory check-kpi-floor lint-fast; do grep -Eq \"^agent-verify: $gate rc=0 secs=[0-9]+$\" build/scratch/agent-verify.rc; done\n"
+        "for gate in check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild lint-fast; do grep -Eq \"^agent-verify: $gate rc=0 secs=[0-9]+$\" build/scratch/agent-verify.rc; done\n"
         "grep -Eq '^agent-verify: dev-bin rc=0 secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         "grep -Eq '^agent-verify: selection exact groups=1 .* select_secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         ": > calls; : > selector-calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@route > route.log 2>&1\n"
         "grep -q -- --route-only selector-calls; [ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]\n"
         ": > calls; if FAIL_TEST=1 make --no-print-directory MAKE=./submake agent-verify ONLY=models > later.log 2>&1; then exit 1; fi\n"
-        "for gate in check-capability-closure proof-lint-prebuild docs-capability-inventory check-kpi-floor lint-fast; do grep -q \"$gate\" calls; done\n"
+        /* The deduped agent-verify recipe runs no standalone inventory or
+         * KPI step: check-kpi-floor moved inside lint-fast (with
+         * docs-capability-inventory as its own prerequisite), so only the
+         * three static steps are left to count. */
+        "for gate in check-capability-closure proof-lint-prebuild lint-fast; do grep -q \"$gate\" calls; done\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (t-fast-exact)' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
         ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=models > explicit.log 2>&1\n"
@@ -2028,7 +2036,12 @@ static int t_agent_verify_preflight(void)
     return bad;
 }
 
-/* Run the actual agent-verify and KPI recipes with a counted phony generator. */
+/* Run the actual agent-verify and KPI recipes with a counted phony generator.
+ * Since the agent-verify dedup, the recipe's trailing steps are
+ * check-capability-closure, proof-lint-prebuild and lint-fast; the KPI floor
+ * (with the inventory as its prerequisite) is reached through lint-fast, so
+ * the once-per-trip counting is pinned on the standalone check-kpi-floor
+ * target the fixture extracts verbatim. */
 static int t_agent_verify_inventory_once(void)
 {
     static const char script[] =
@@ -2046,20 +2059,27 @@ static int t_agent_verify_inventory_once(void)
         "printf '#!/bin/sh\\nif [ \"$2\" = --selftest ]; then echo selftest >> calls; else echo kpi >> calls; [ \"${FAIL_KPI:-0}\" = 0 ]; fi\\n' > build/bin/z23-lint\n"
         "chmod +x build/bin/z23-lint\n"
         "make --no-print-directory agent-verify ONLY=fixture > normal.log 2>&1\n"
+        /* The deduped recipe owns no inventory trip of its own: the KPI
+         * floor runs inside lint-fast (stubbed here to a log line), so
+         * agent-verify itself must leave calls without inventory work. */
+        "[ \"$(grep -c '^inventory$' calls)\" = 0 ]; [ \"$(grep -c '^lint$' calls)\" = 1 ]\n"
+        "grep -q 'agent-verify: lint-fast rc=0' build/scratch/agent-verify.rc\n"
+        "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
+        /* The counted-generator contract now lives where lint-fast gets it:
+         * the standalone check-kpi-floor target builds the inventory as its
+         * own prerequisite, once per make trip, selftest before real run. */
+        "rm -f calls failed-once; make --no-print-directory check-kpi-floor > standalone.log 2>&1\n"
         "[ \"$(grep -c '^inventory$' calls)\" = 1 ]; [ \"$(grep -c '^selftest$' calls)\" = 1 ]; [ \"$(grep -c '^kpi$' calls)\" = 1 ]\n"
-        "grep -q 'agent-verify: docs-capability-inventory rc=0' build/scratch/agent-verify.rc\n"
-        "grep -q 'agent-verify: check-kpi-floor rc=0' build/scratch/agent-verify.rc\n"
-        "rm -f calls failed-once; if FAIL_INVENTORY=once make --no-print-directory agent-verify ONLY=fixture > once.log 2>&1; then exit 1; fi\n"
+        "rm -f calls; if FAIL_INVENTORY=once make --no-print-directory check-kpi-floor > once.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 1 ]; if grep -Eq '^(selftest|kpi)$' calls; then exit 1; fi\n"
+        "if ! FAIL_INVENTORY=once make --no-print-directory check-kpi-floor >> once.log 2>&1; then exit 1; fi\n"
         "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; [ \"$(grep -c '^selftest$' calls)\" = 1 ]; [ \"$(grep -c '^kpi$' calls)\" = 1 ]\n"
-        "grep -q 'agent-verify: FAILED (docs-capability-inventory)' build/scratch/agent-verify.rc\n"
-        "grep -q 'agent-verify: check-kpi-floor rc=0' build/scratch/agent-verify.rc\n"
-        "rm -f calls; if FAIL_INVENTORY=always make --no-print-directory agent-verify ONLY=fixture > always.log 2>&1; then exit 1; fi\n"
-        "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; if grep -Eq '^(selftest|kpi)$' calls; then exit 1; fi; grep -q '^lint$' calls\n"
-        "grep -q 'agent-verify: FAILED (docs-capability-inventory check-kpi-floor)' build/scratch/agent-verify.rc\n"
-        "rm -f calls; if FAIL_KPI=1 make --no-print-directory agent-verify ONLY=fixture > kpi.log 2>&1; then exit 1; fi\n"
-        "[ \"$(grep -c '^inventory$' calls)\" = 1 ]; grep -q '^selftest$' calls; grep -q '^kpi$' calls; grep -q '^lint$' calls\n"
-        "grep -q 'agent-verify: FAILED (check-kpi-floor)' build/scratch/agent-verify.rc\n"
-        "rm -f calls; make --no-print-directory check-kpi-floor > standalone.log 2>&1; make --no-print-directory check-kpi-floor >> standalone.log 2>&1\n"
+        "rm -f calls failed-once; if FAIL_INVENTORY=always make --no-print-directory check-kpi-floor > always.log 2>&1; then exit 1; fi\n"
+        "if FAIL_INVENTORY=always make --no-print-directory check-kpi-floor >> always.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; if grep -Eq '^(selftest|kpi)$' calls; then exit 1; fi\n"
+        "rm -f calls; if FAIL_KPI=1 make --no-print-directory check-kpi-floor > kpi.log 2>&1; then exit 1; fi\n"
+        "[ \"$(grep -c '^inventory$' calls)\" = 1 ]; grep -q '^selftest$' calls; grep -q '^kpi$' calls\n"
+        "rm -f calls; make --no-print-directory check-kpi-floor > twice.log 2>&1; make --no-print-directory check-kpi-floor >> twice.log 2>&1\n"
         "[ \"$(grep -c '^inventory$' calls)\" = 2 ]; [ \"$(grep -c '^selftest$' calls)\" = 2 ]; [ \"$(grep -c '^kpi$' calls)\" = 2 ]\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "inventory_once");
@@ -2083,7 +2103,11 @@ static int t_agent_verify_empty_exact(void)
         "if grep -q t-fast-exact calls; then exit 1; fi\n"
         "grep -Fq 'agent-verify: selection exact groups=0 ' build/scratch/agent-verify.rc\n"
         "grep -Fq 'agent-verify: exact groups=0 selects no runtime tests; static gates still run' build/scratch/agent-verify.rc\n"
-        "for gate in check-capability-closure proof-lint-prebuild docs-capability-inventory check-kpi-floor lint-fast; do grep -q \"$gate\" calls; done\n"
+        /* The deduped agent-verify recipe runs no standalone inventory or
+         * KPI step: check-kpi-floor moved inside lint-fast (with
+         * docs-capability-inventory as its own prerequisite), so only the
+         * three static steps are left to count. */
+        "for gate in check-capability-closure proof-lint-prebuild lint-fast; do grep -q \"$gate\" calls; done\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
         ": > calls; SELECTOR_REPLY='{\"groups\":\"\",\"selector\":\"universal\",\"groups_selected\":0}'; export SELECTOR_REPLY\n"
         "if make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > empty-universal.log 2>&1; then exit 1; fi\n"

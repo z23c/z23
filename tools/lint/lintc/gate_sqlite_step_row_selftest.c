@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "lintc.h"
 #include "gate_sqlite_step_row_priv.h"
 
@@ -75,7 +76,8 @@ static int ssr_st_plant(const char *root, const char *rel, const char *text)
 }
 
 /* Run the real scan + report over root against a baseline text. */
-static int ssr_st_verdict(const char *root, const char *baseline)
+static int ssr_st_verdict(const char *root, const char *baseline,
+                          const struct lint_changed *changed)
 {
     static struct ssr_set live, base;
     char bpath[4096];
@@ -85,9 +87,12 @@ static int ssr_st_verdict(const char *root, const char *baseline)
         return 2;
     int rc = csr_write(bpath, baseline);
     if (rc == 0)
-        rc = ssr_collect(root, &live, &files);
+        rc = changed ? ssr_collect_changed(root, changed, &live, &files)
+                     : ssr_collect(root, &live, &files);
     if (rc == 0)
         rc = ssr_load_baseline(&base, bpath);
+    if (rc == 0 && changed)
+        rc = ssr_base_narrow(&base, changed);
     if (rc)
         return rc + 100;
     FILE *sink = tmpfile();
@@ -138,12 +143,93 @@ static int ssr_st_ratchet(const char *root)
         rc = ssr_st_plant(root, "vendor/v.c", k_ssr_bad);
     if (rc == 0)
         rc = ssr_st_plant(root, "engine/vendor/v.c", k_ssr_bad);
+    if (rc == 0)
+        rc = ssr_st_plant(root, "contexts/commons/corpus/x.c", k_ssr_bad);
     for (size_t i = 0; rc == 0 && i < sizeof cases / sizeof cases[0]; i++) {
-        int got = ssr_st_verdict(root, cases[i].baseline);
+        int got = ssr_st_verdict(root, cases[i].baseline, NULL);
         if (got != cases[i].want)
             rc = ssr_st_fail(cases[i].msg, got);
     }
     return rc;
+}
+
+static int ssr_st_baseline_guard(void)
+{
+    static const char path[] = "tools/lint/sqlite_step_row_baseline.txt";
+    char *baseline_path[] = { (char *)path };
+    struct lint_changed baseline = { baseline_path, 1, 1 };
+    if (ssr_narrow_ok(&baseline, path))
+        return ssr_st_fail("baseline edit allowed narrowing", 1);
+    char *dot_path[] = { "./tools/lint/sqlite_step_row_baseline.txt" };
+    struct lint_changed dot = { dot_path, 1, 1 };
+    if (ssr_narrow_ok(&dot, path))
+        return ssr_st_fail("./baseline edit allowed narrowing", 1);
+    struct lint_changed empty = { NULL, 0, 1 };
+    return ssr_narrow_ok(&empty, path) ? 0
+         : ssr_st_fail("empty changed set refused narrowing", 0);
+}
+
+static int ssr_st_sandbox(const char *root, char cwd[4096], char repo[4096])
+{
+    if (!getcwd(cwd, 4096) || cic_repo_root(repo, 4096) != 0 ||
+        chdir(root) != 0)
+        return 2;
+    if (setenv("ZCL_LINT_REPO_ROOT", repo, 1) == 0)
+        return 0;
+    if (chdir(cwd) != 0)
+        return 2;
+    return 2;
+}
+
+static int ssr_st_update_refusal(const char *root)
+{
+    char cwd[4096], repo[4096], saved[64];
+    const char *old = getenv("ZCL_LINT_MODE");
+    int had_repo = getenv("ZCL_LINT_REPO_ROOT") != NULL;
+    int got = -1;
+    if ((old && ovf(snprintf(saved, sizeof saved, "%s", old), sizeof saved)) ||
+        ssr_st_sandbox(root, cwd, repo) != 0)
+        return 2;
+    if (setenv("ZCL_LINT_MODE", "UPDATE", 1) == 0 &&
+        csr_write("./changed.txt", "engine/x/src/good.c\n") == 0 &&
+        csr_write("tools/lint/sqlite_step_row_baseline.txt", "") == 0) {
+        char *args[] = { "--changed-files=changed.txt", NULL };
+        got = check_sqlite_step_row_run(1, args);
+    }
+    int rc = old ? setenv("ZCL_LINT_MODE", saved, 1)
+                 : unsetenv("ZCL_LINT_MODE");
+    if (chdir(cwd) != 0)
+        rc = 2;
+    if (!had_repo && unsetenv("ZCL_LINT_REPO_ROOT") != 0)
+        rc = 2;
+    if (rc)
+        return 2;
+    return got == 2 ? 0 : ssr_st_fail("changed UPDATE was accepted", got);
+}
+
+static int ssr_st_narrowed(const char *root)
+{
+    static const struct { const char *path, *baseline; int want; } cases[] = {
+        { "docs/README.md", "", 0 },
+        { "engine/x/src/good.c", "engine/x/src/bad.c 5\n", 0 },
+        { "engine/x/src/bad.c", "engine/x/src/bad.c 5\n", 0 },
+        { "engine/x/src/bad.c", "engine/x/src/bad.c 4\n", 1 },
+        { "engine/x/src/bad.c", "", 1 },
+        { "engine/x/src/bad.c", "engine/x/src/bad.c 6\n", 1 },
+        { "engine/x/tests/t.c", "", 0 },
+        { "engine/vendor/v.c", "", 0 },
+        { "contexts/commons/corpus/x.c", "", 0 },
+        { "engine/x/src/gone.c", "engine/x/src/gone.c 1\n", 1 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char *paths[] = { (char *)cases[i].path };
+        struct lint_changed one = { paths, 1, 1 };
+        int got = ssr_st_verdict(root, cases[i].baseline, &one);
+        if (got != cases[i].want)
+            return ssr_st_fail("narrowed baseline verdict mismatch", got);
+    }
+    int rc = ssr_st_baseline_guard();
+    return rc ? rc : ssr_st_update_refusal(root);
 }
 
 int check_sqlite_step_row_selftest(void)
@@ -156,6 +242,8 @@ int check_sqlite_step_row_selftest(void)
     if (rc)
         return rc;
     rc = ssr_st_ratchet(root);
+    if (rc == 0)
+        rc = ssr_st_narrowed(root);
     int clean = rap_rm_rf(root);
     if (rc)
         return rc;
@@ -164,7 +252,7 @@ int check_sqlite_step_row_selftest(void)
     printf("[%s] SELFTEST PASS (five shapes counted; checked, captured, "
            "#define, comment, literal and digit-separator forms not; exact "
            "baseline passes; grown, new, stale and dead rows fail; a "
-           "malformed row is fatal; tests/ and vendor/ are not scanned)\n",
-           k_ssr_st);
+           "malformed row is fatal; tests/ and vendor/ are not scanned; "
+           "narrowed verdicts and UPDATE refusal hold)\n", k_ssr_st);
     return 0;
 }

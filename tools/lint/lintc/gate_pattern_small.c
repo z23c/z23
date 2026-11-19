@@ -2,12 +2,13 @@
  *
  * purpose: gate family — small pattern-matching lint gates of the C23 lint
  * runtime (check-no-python, check-malloc, check-dev-proof-native-fast-path,
- * check-before-save-hooks, check-pthread-create, check-silent-error-returns,
- * check-no-gnu-va-args, check-blob-read-bounds).
+ * check-before-save-hooks, check-blob-read-bounds). The pthread/silent-
+ * return/va-args trio (struct lg_acc, pt_pair_comp) lives in the sibling
+ * gate_pattern_guard.c, moved there to stay under the 1500-line ceiling.
  */
 
 /*
- * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-pthread-create, check-silent-error-returns, check-no-gnu-va-args, check-blob-read-bounds, check-posix-ere-only
+ * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-blob-read-bounds, check-posix-ere-only
  * Default landing spot for a FUTURE gate port: a filesystem-tree-walking
  * gate (walk_src/clock_walk/repo_shape_room_dirs) joins gate_tree_walk.c;
  * a git-tracked-enumeration gate (each_zpath/each_zpath_st) joins whichever
@@ -30,6 +31,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 static const char k_ls_refs[] =
     "git ls-files -z -- AGENTS.md CLAUDE.md README.md Makefile "
@@ -280,15 +282,66 @@ static const char *const k_mal_roots[] = {
     "core", "engine", "contexts", "cognition", "platform", "tools"
 };
 
-static int mal_pass(const char *nm, const char *xtra, struct bln_set *found)
+static int mal_eligible(const char *path)
+{
+    size_t n = strlen(path);
+    if (n < 3 || path[n - 2] != '.' || (path[n - 1] != 'c' && path[n - 1] != 'h'))
+        return 0;
+    for (size_t i = 0; i < sizeof k_mal_roots / sizeof k_mal_roots[0]; i++) {
+        size_t len = strlen(k_mal_roots[i]);
+        if (strncmp(path, k_mal_roots[i], len) == 0 && path[len] == '/')
+            return 1;
+    }
+    return 0;
+}
+
+static int mal_regular(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) == 0)
+        return S_ISREG(st.st_mode) ? 1 : 0;
+    if (errno == ENOENT)
+        return 0;
+    (void)fprintf(stderr, "z23-lint: cannot stat %s: %s\n", path, strerror(errno));
+    return -1;
+}
+
+static int mal_changed_count(const struct lint_changed *ch)
+{
+    int count = 0;
+    for (int i = 0; i < ch->n; i++) {
+        if (!mal_eligible(ch->path[i]))
+            continue;
+        int regular = mal_regular(ch->path[i]);
+        if (regular < 0)
+            return -1;
+        count += regular;
+    }
+    return count;
+}
+
+static int mal_pass(const char *nm, const char *xtra, struct bln_set *found,
+                    const struct lint_changed *ch)
 {
     regex_t hit, excl;
     int cr = compile_mal(&hit, &excl, nm, xtra);
     if (cr) return cr;
     struct mal_acc a = { .hit = &hit, .excl = &excl, .hits = 0, .nm = nm, .found = found };
     int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof k_mal_roots / sizeof k_mal_roots[0]; i++)
-        rc = walk_src_root("check-malloc", k_mal_roots[i], 1, scan_mal, &a);
+    if (!ch) {
+        for (size_t i = 0; rc == 0 && i < sizeof k_mal_roots / sizeof k_mal_roots[0]; i++)
+            rc = walk_src_root("check-malloc", k_mal_roots[i], 1, scan_mal, &a);
+    } else {
+        for (int i = 0; rc == 0 && i < ch->n; i++) {
+            if (!mal_eligible(ch->path[i]))
+                continue;
+            int regular = mal_regular(ch->path[i]);
+            if (regular < 0)
+                rc = 2;
+            else if (regular)
+                rc = scan_mal(ch->path[i], &a);
+        }
+    }
     drop2(&hit, &excl);
     return rc;
 }
@@ -300,36 +353,87 @@ static int mal_pass(const char *nm, const char *xtra, struct bln_set *found)
  * though require_scan_root() alone would not catch it. */
 enum { MAL_SCAN_FLOOR = 4000 };
 
-int check_malloc_run(int argc, char **argv)
+static int mal_base_narrow(struct bln_set *base, const struct lint_changed *ch)
 {
-    (void)argc;
-    (void)argv;
-    int nfiles = 0;
-    int rc = walk_count_roots("check-malloc", k_mal_roots,
-                              sizeof k_mal_roots / sizeof k_mal_roots[0], 1,
-                              &nfiles);
-    if (rc == 0)
-        rc = gate_require_scanned(nfiles, MAL_SCAN_FLOOR, "check-malloc",
-                                  "scanned far fewer .c/.h files than expected "
-                                  "under the production roots — extension "
-                                  "filter or root list regression?");
-    if (rc) return rc;
-    rc = mal_seam_verify();
-    if (rc) return rc;
+    struct bln_set selected = {0};
+    for (int i = 0; i < base->count; i++) {
+        for (int k = 0; k < ch->n; k++) {
+            size_t len = strlen(ch->path[k]);
+            if (strncmp(base->n[i], ch->path[k], len) == 0 &&
+                base->n[i][len] == ':') {
+                int rc = bln_add(&selected, base->n[i]);
+                if (rc)
+                    return rc;
+                break;
+            }
+        }
+    }
+    *base = selected;
+    return 0;
+}
+
+static int mal_narrow_ok(const struct lint_changed *ch)
+{
+    if (!ch->active)
+        return 0;
+    for (int i = 0; i < ch->n; i++)
+        if (strcmp(ch->path[i], k_mal_baseline) == 0)
+            return 0;
+    return 1;
+}
+
+static int mal_scan_report(const struct lint_changed *narrow)
+{
     struct bln_set base = {0}, found = {0};
-    rc = bln_load(&base, k_mal_baseline);
-    if (rc) return rc;
-    rc = mal_pass("malloc", "|zcl_calloc|zcl_realloc", &found);
+    int rc = bln_load(&base, k_mal_baseline);
+    if (rc == 0 && narrow)
+        rc = mal_base_narrow(&base, narrow);
     if (rc == 0)
-        rc = mal_pass("calloc", "", &found);
+        rc = mal_pass("malloc", "|zcl_calloc|zcl_realloc", &found, narrow);
     if (rc == 0)
-        rc = mal_pass("realloc", "", &found);
+        rc = mal_pass("calloc", "", &found, narrow);
+    if (rc == 0)
+        rc = mal_pass("realloc", "", &found, narrow);
+    if (rc == 0 && narrow) {
+        int count = mal_changed_count(narrow);
+        rc = count < 0 || lint_examined_print(count, 0) < 0 ? 2 : 0;
+    }
     if (rc == 0)
         rc = bln_diff_report(stderr, "check-malloc", k_mal_baseline, &base, &found);
     if (rc == 0)
         return puts("  OK: every bare malloc/calloc/realloc site is pinned in "
                     "tools/lint/malloc_baseline.txt (shrink-only)") < 0
                    ? die("z23-lint: write failed\n", "") : 0;
+    return rc;
+}
+
+static int mal_run(const struct lint_changed *narrow)
+{
+    int rc = 0;
+    if (!narrow) {
+        int nfiles = 0;
+        rc = walk_count_roots("check-malloc", k_mal_roots,
+                              sizeof k_mal_roots / sizeof k_mal_roots[0], 1,
+                              &nfiles);
+        if (rc == 0)
+            rc = gate_require_scanned(nfiles, MAL_SCAN_FLOOR, "check-malloc",
+                                      "scanned far fewer .c/.h files than expected "
+                                      "under the production roots — extension "
+                                      "filter or root list regression?");
+        if (rc)
+            return rc;
+    }
+    rc = mal_seam_verify();
+    return rc ? rc : mal_scan_report(narrow);
+}
+
+int check_malloc_run(int argc, char **argv)
+{
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
+    int rc = mal_run(mal_narrow_ok(&ch) ? &ch : NULL);
+    lint_changed_free(&ch);
     return rc;
 }
 
@@ -396,6 +500,63 @@ static int mal_other_header_caught_proof(void)
     return rc != 0 || other.hits != 1;
 }
 
+static int mal_selection_selftest(void)
+{
+    const char *link = "tools/lint/_malloc_narrow_symlink.c";
+    const char *old = getenv("ZCL_LINT_PRODUCTION_SCAN");
+    char saved[64];
+    if (old && strlen(old) >= sizeof saved)
+        return 1;
+    if (old)
+        strcpy(saved, old);
+    if (setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1) != 0)
+        return 1;
+    int eligible = mal_eligible("tools/_fixture.c");
+    if (old)
+        (void)setenv("ZCL_LINT_PRODUCTION_SCAN", saved, 1);
+    else
+        (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
+    if (!eligible) {
+        fputs("check_malloc selftest: production fixture was excluded\n", stderr);
+        return 1;
+    }
+    (void)unlink(link);
+    struct stat st;
+    if (symlink("lintc/gate_pattern_small.c", link) != 0)
+        return 1;
+    if (stat(link, &st) != 0) {
+        (void)unlink(link);
+        return 1;
+    }
+    int regular = mal_regular(link);
+    if (unlink(link) != 0 || regular != 0) {
+        fputs("check_malloc selftest: symlink selection differs from full walk\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
+static int mal_narrow_selftest(void)
+{
+    struct bln_set base = {0};
+    char *one_path[] = { "tools/a.c" };
+    struct lint_changed one = { one_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    char *baseline_path[] = { "tools/lint/malloc_baseline.txt" };
+    struct lint_changed baseline = { baseline_path, 1, 1 };
+    if (bln_add(&base, "tools/a.c:malloc") != 0 ||
+        bln_add(&base, "tools/b.c:calloc") != 0 ||
+        mal_base_narrow(&base, &one) != 0)
+        return 1;
+    if (base.count != 1 || !bln_has(&base, "tools/a.c:malloc") ||
+        bln_has(&base, "tools/b.c:calloc") || mal_narrow_ok(&baseline) ||
+        !mal_narrow_ok(&one) || !mal_narrow_ok(&empty)) {
+        fputs("check_malloc selftest: narrowed baseline mismatch\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 int check_malloc_selftest(void)
 {
     regex_t mh, me, ch, ce, rh, re;
@@ -433,6 +594,8 @@ int check_malloc_selftest(void)
     bad |= require_scan_root("check-malloc", "app") == 0;
     bad |= mal_seam_exempt_proof();
     bad |= mal_other_header_caught_proof();
+    bad |= mal_selection_selftest();
+    bad |= mal_narrow_selftest();
     return st_ok(bad, "check_malloc selftest: OK\n");
 }
 
@@ -617,330 +780,6 @@ int check_before_save_hooks_selftest(void)
             | want(t, &plain, "static bool db_wallet_key_save_v2(", 0);
     drop2(&hook, &plain);
     return st_ok(bad, "check_before_save_hooks selftest: OK\n");
-}
-
-struct lg_acc {
-    regex_t *hit;
-    regex_t *excl;
-    regex_t *prev;
-    const char *skip_sub;
-    const char *skip_eq;
-    int hits;
-    /* Optional shrink-only-baseline recording: when sym is set, every hit
-     * also adds "<path>:<sym>" to *found (once per file). NULL for callers
-     * that FAIL on any hit instead of ratcheting a baseline. */
-    const char *sym;
-    struct bln_set *found;
-};
-
-static int lg_got(const regex_t *hit, const regex_t *excl, const regex_t *prev,
-                  const char *p, const char *s);
-
-/* Baseline-record one hit at `path` (a->sym set) into *a->found, as
- * "<path>:<sym>"; a no-op for callers that FAIL on any hit instead. */
-static int lg_record_hit(struct lg_acc *a, const char *path)
-{
-    if (!a->sym)
-        return 0;
-    char key[BLN_ROW];
-    if (ovf(snprintf(key, sizeof key, "%s:%s", path, a->sym), sizeof key))
-        return 2;
-    return bln_add(a->found, key);
-}
-
-static int scan_lg(const char *path, void *ctx)
-{
-    struct lg_acc *a = ctx;
-    if ((a->skip_sub && strstr(path, a->skip_sub) != NULL)
-        || (a->skip_eq && strcmp(path, a->skip_eq) == 0))
-        return 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return die("z23-lint: cannot open %s\n", path);
-    char *buf[2] = { NULL, NULL };
-    size_t cap[2] = { 0, 0 };
-    int cur = 0, lineno = 0, rc = 0;
-    ssize_t n;
-    while ((n = getline(&buf[cur], &cap[cur], f)) >= 0) {
-        char *line = buf[cur];
-        lineno++;
-        const char *prevline = lineno > 1 ? buf[1 - cur] : NULL;
-        if (lg_got(a->hit, a->excl, a->prev, prevline, line)) {
-            if (n > 0 && line[n - 1] == '\n')
-                line[n - 1] = '\0';
-            if (fprintf(stdout, "%s:%d:%s\n", path, lineno, line) < 0) {
-                rc = die("z23-lint: write failed\n", "");
-                break;
-            }
-            a->hits++;
-            rc = lg_record_hit(a, path);
-            if (rc)
-                break;
-        }
-        cur = 1 - cur;
-    }
-    rc = fin(f, NULL, path, rc);
-    free(buf[0]);
-    free(buf[1]);
-    return rc;
-}
-
-static int lg_got(const regex_t *hit, const regex_t *excl, const regex_t *prev,
-                  const char *p, const char *s)
-{
-    if (regexec(hit, s, 0, NULL, 0) != 0)
-        return 0;
-    if (regexec(excl, s, 0, NULL, 0) == 0)
-        return 0;
-    if (p && regexec(prev, p, 0, NULL, 0) == 0)
-        return 0;
-    return 1;
-}
-
-static int lg_want(const char *tag, const regex_t *hit, const regex_t *excl,
-                   const regex_t *prev, const char *p, const char *s, int w)
-{
-    if (lg_got(hit, excl, prev, p, s) != w) {
-        fprintf(stderr, "%s selftest: want %d: %s\n", tag, w, s);
-        return 1;
-    }
-    return 0;
-}
-
-static int pt_comp(regex_t *hit, regex_t *excl, regex_t *prev)
-{
-    int cr = compile_pat(hit, REG_EXTENDED, "pthread_create",
-                         "[[:space:]]*\\(", "", "");
-    if (cr)
-        return cr;
-    cr = pair_comp(excl, REG_EXTENDED, "thread_registry_spawn",
-                   "|thread_registry_trampoline", "|raw-pthread-ok", "",
-                   prev, REG_EXTENDED, "raw-pthread-ok", "", "", "");
-    if (cr)
-        regfree(hit);
-    return cr;
-}
-
-static const char k_pt_baseline[] = "tools/lint/pthread_create_baseline.txt";
-
-/* Production C roots — "lib" and "config" were dead (renamed away); the
- * gate silently scanned only "app" (also dead) and "tools", i.e. nothing
- * of substance, and reported clean. See malloc_baseline.txt for the same
- * root-rename story. */
-static const char *const k_pt_roots[] = {
-    "core", "engine", "contexts", "cognition", "platform", "tools"
-};
-
-/* Measured 2026-09-06: 2644 .c files under the production roots. */
-enum { PT_SCAN_FLOOR = 2400 };
-
-int check_pthread_create_run(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-    int nfiles = 0;
-    int rc = walk_count_roots("check-pthread-create", k_pt_roots,
-                              sizeof k_pt_roots / sizeof k_pt_roots[0], 0,
-                              &nfiles);
-    if (rc == 0)
-        rc = gate_require_scanned(nfiles, PT_SCAN_FLOOR, "check-pthread-create",
-                                  "scanned far fewer .c files than expected "
-                                  "under the production roots");
-    if (rc) return rc;
-    regex_t hit, excl, prev;
-    int cr = pt_comp(&hit, &excl, &prev);
-    if (cr)
-        return cr;
-    struct bln_set base = {0}, found = {0};
-    rc = bln_load(&base, k_pt_baseline);
-    if (rc) {
-        drop3(&hit, &excl, &prev);
-        return rc;
-    }
-    struct lg_acc a = {
-        .hit = &hit, .excl = &excl, .prev = &prev,
-        .skip_sub = "tests/harness/include/test/",
-        .skip_eq = "platform/modules/util/src/thread_registry.c",
-        .hits = 0, .sym = "pthread_create", .found = &found
-    };
-    for (size_t i = 0; rc == 0 && i < sizeof k_pt_roots / sizeof k_pt_roots[0]; i++)
-        rc = walk_src_root("check-pthread-create", k_pt_roots[i], 0, scan_lg, &a);
-    if (rc == 0)
-        rc = bln_diff_report(stderr, "check-pthread-create", k_pt_baseline, &base, &found);
-    if (rc == 0)
-        fputs("  OK: every raw pthread_create site is pinned in "
-              "tools/lint/pthread_create_baseline.txt (shrink-only)\n", stdout);
-    drop3(&hit, &excl, &prev);
-    return rc;
-}
-
-int check_pthread_create_selftest(void)
-{
-    regex_t hit, excl, prev;
-    int cr = pt_comp(&hit, &excl, &prev);
-    if (cr)
-        return cr;
-    const char *t = "check_pthread_create";
-    int bad = lg_want(t, &hit, &excl, &prev, NULL,
-                      "    pthread_crea" "te(&t, 0, f, 0);", 1)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "    thread_registry_spawn(...)", 0)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "    pthread_crea" "te(&t, 0, f, 0); // raw-pthread-ok: x", 0)
-            | lg_want(t, &hit, &excl, &prev, "// raw-pthread-ok: startup",
-                      "pthread_crea" "te(", 0)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "my_pthread_create_wrapper(", 0);
-    bad |= require_scan_root("check-pthread-create", "lib") == 0;
-    drop3(&hit, &excl, &prev);
-    return st_ok(bad, "check_pthread_create selftest: OK\n");
-}
-
-static int ser_comp(regex_t *hit, regex_t *excl, regex_t *prev)
-{
-    int cr = compile_pat(hit, REG_EXTENDED, "return -1;", "", "", "");
-    if (cr)
-        return cr;
-    cr = pair_comp(excl, REG_EXTENDED, "LOG_ERR|LOG_FAIL|LOG_RETURN|log_json",
-                   "|(//|/\\*) raw-return-ok:[A-Za-z][A-Za-z0-9_-]+", "", "",
-                   prev, REG_EXTENDED, "LOG_ERR|LOG_FAIL|LOG_RETURN|",
-                   "log_json.*error", "", "");
-    if (cr)
-        regfree(hit);
-    return cr;
-}
-
-int check_silent_error_returns_run(int argc, char **argv)
-{
-    if (argc < 4)
-        return die("usage: check_silent_error_returns.sh <scan-dir> <fail-label> <ok-label> <fix-hint>\n",
-                   "");
-    regex_t hit, excl, prev;
-    int cr = ser_comp(&hit, &excl, &prev);
-    if (cr)
-        return cr;
-    struct lg_acc a = {
-        .hit = &hit, .excl = &excl, .prev = &prev,
-        .skip_sub = NULL, .skip_eq = NULL, .hits = 0
-    };
-    int rc = walk_src(argv[0], 0, scan_lg, &a);
-    if (rc == 0 && a.hits) {
-        printf("FAIL: silent error returns found in %s (%s)\n", argv[1], argv[3]);
-        rc = 1;
-    } else if (rc == 0) {
-        printf("  OK: all %s error returns logged\n", argv[2]);
-    }
-    drop3(&hit, &excl, &prev);
-    return rc;
-}
-
-int check_silent_error_returns_selftest(void)
-{
-    regex_t hit, excl, prev;
-    int cr = ser_comp(&hit, &excl, &prev);
-    if (cr)
-        return cr;
-    const char *t = "check_silent_error_returns";
-    int bad = lg_want(t, &hit, &excl, &prev, NULL, "    return -1;", 1)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "    LOG_ERR(\"x\"); return -1;", 0)
-            | lg_want(t, &hit, &excl, &prev, "    LOG_FAIL(\"bad\");",
-                      "    return -1;", 0)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "    return -1; // raw-return-ok:reason_1", 0)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "    return -1; // raw-return-ok:", 1)
-            | lg_want(t, &hit, &excl, &prev, "    log_json(\"error\", ...)",
-                      "    return -1;", 0)
-            | lg_want(t, &hit, &excl, &prev, "    log_json(\"info\", ...)",
-                      "    return -1;", 1);
-    drop3(&hit, &excl, &prev);
-    return st_ok(bad, "check_silent_error_returns selftest: OK\n");
-}
-
-static int va_comp(regex_t *hit, regex_t *excl, regex_t *prev)
-{
-    int cr = compile_pat(hit, REG_EXTENDED, ",[[:space:]]*##", "[[:space:]]*",
-                         "__VA", "_ARGS__");
-    if (cr) return cr;
-    cr = pair_comp(excl, REG_EXTENDED, "gnu-va-args-ok", "", "", "",
-                   prev, REG_EXTENDED, "gnu-va-args-ok", "", "", "");
-    if (cr) regfree(hit);
-    return cr;
-}
-
-static const char k_va_baseline[] = "tools/lint/gnu_va_args_baseline.txt";
-
-/* Production C roots — this gate used to walk two engine/platform
- * sub-directories plus four dead tokens (app config lib domain src) and
- * missed engine/{composition,controllers,entry,models,services,supervisors,
- * conditions,jobs,modules,...} and most of contexts/cognition/platform
- * entirely. Re-rooted onto the full production tree. */
-static const char *const k_va_roots[] = {
-    "core", "engine", "contexts", "cognition", "platform", "tools"
-};
-
-/* Measured 2026-09-06 under the production roots (.c+.h): 4337 files. */
-enum { VA_SCAN_FLOOR = 4000 };
-
-int check_no_gnu_va_args_run(int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    int nfiles = 0;
-    int rc = walk_count_roots("check-no-gnu-va-args", k_va_roots,
-                              sizeof k_va_roots / sizeof k_va_roots[0], 1,
-                              &nfiles);
-    if (rc == 0)
-        rc = gate_require_scanned(nfiles, VA_SCAN_FLOOR, "check-no-gnu-va-args",
-                                  "scanned far fewer .c/.h files than expected "
-                                  "under the production roots");
-    if (rc) return rc;
-    regex_t hit, excl, prev;
-    int cr = va_comp(&hit, &excl, &prev);
-    if (cr) return cr;
-    struct bln_set base = {0}, found = {0};
-    rc = bln_load(&base, k_va_baseline);
-    if (rc) {
-        drop3(&hit, &excl, &prev);
-        return rc;
-    }
-    struct lg_acc a = {
-        .hit = &hit, .excl = &excl, .prev = &prev, .hits = 0,
-        .sym = "gnu-va-args", .found = &found
-    };
-    for (size_t i = 0; rc == 0 && i < sizeof k_va_roots / sizeof k_va_roots[0]; i++)
-        rc = walk_src_root("check-no-gnu-va-args", k_va_roots[i], 1, scan_lg, &a);
-    if (rc == 0)
-        rc = bln_diff_report(stderr, "check-no-gnu-va-args", k_va_baseline, &base, &found);
-    if (rc == 0)
-        fputs("  OK: every GNU comma-swallowing __VA_ARGS__ site is pinned in "
-              "tools/lint/gnu_va_args_baseline.txt (shrink-only)\n", stdout);
-    drop3(&hit, &excl, &prev);
-    return rc;
-}
-
-int check_no_gnu_va_args_selftest(void)
-{
-    regex_t hit, excl, prev;
-    int cr = va_comp(&hit, &excl, &prev);
-    if (cr) return cr;
-    const char *t = "check_no_gnu_va_args";
-    char h[72], m[88];
-    if (snprintf(h, sizeof h, "    fprintf(stderr, fmt, ##%s", "__VA_ARGS__);")
-            >= (int)sizeof h
-        || snprintf(m, sizeof m, "%s // gnu-va-args-ok: legacy", h) >= (int)sizeof m) {
-        drop3(&hit, &excl, &prev);
-        return die("z23-lint: selftest buffer overflow\n", "");
-    }
-    int bad = lg_want(t, &hit, &excl, &prev, NULL, h, 1)
-            | lg_want(t, &hit, &excl, &prev, NULL,
-                      "    LOG_ERR(fmt __VA_OPT__(,) __VA_ARGS__);", 0)
-            | lg_want(t, &hit, &excl, &prev, NULL, m, 0)
-            | lg_want(t, &hit, &excl, &prev, "// gnu-va-args-ok: legacy", h, 0)
-            | lg_want(t, &hit, &excl, &prev, NULL, "    x = a ## b;", 0);
-    bad |= require_scan_root("check-no-gnu-va-args", "domain") == 0;
-    drop3(&hit, &excl, &prev);
-    return st_ok(bad, "check_no_gnu_va_args selftest: OK\n");
 }
 
 /* check-blob-read-bounds — port of the awk state machine from the original

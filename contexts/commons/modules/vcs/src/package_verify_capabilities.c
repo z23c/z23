@@ -701,7 +701,8 @@ static bool pkgcap_sources_add(struct pkgcap_sources *s, const char *path)
 
 /* The fallback when the manifest declares no `files` array: the package ships
  * its whole tree, and the compilable part of that is src plus tests. This is
- * the same rule zcode_pkg_sources() in tools/lint states, deliberately — if
+ * the same rule the retired tools/lint/zcode_pkg_sources.sh stated, and that
+ * tools/lint/lintc/gate_package_capabilities_parse.c now states natively — if
  * the two disagreed about which files are shipped, one of them would be
  * grading a set the other never sees. */
 static bool pkgcap_sources_from_dir(const char *package_dir, const char *sub,

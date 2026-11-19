@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include "lintc.h"
 
 enum { CYC_NAME = 96 };
 
@@ -25,6 +26,10 @@ int cyc_scan_text(const char *text, const char *path,
 /* The gate over root against base_path in the given mode. */
 int cyc_check(const char *root, const char *base_path, const char *mode,
               int report, int tighten, FILE *out, FILE *err);
+int cyc_check_with_changed(const char *root, const char *base_path,
+                           const char *mode, int report, int tighten, FILE *out,
+                           FILE *err, const struct lint_changed *changed);
+int cyc_narrow_ok(const struct lint_changed *ch, const char *baseline);
 /* Writes exact pins for every over-cap function under root. */
 int cyc_write_baseline(const char *root, const char *base_path);
 

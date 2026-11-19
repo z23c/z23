@@ -5,9 +5,23 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-bash "$ROOT/tools/scripts/vendor_lock_selftest.sh"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-vendor-offline-selftest.XXXXXX")"
-trap 'rm -rf "$SANDBOX"' EXIT HUP INT TERM
+lock_pid=
+cleanup()
+{
+    status=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$lock_pid" ]; then
+        wait "$lock_pid" || :
+        cat "$lock_log"
+    fi
+    rm -rf "$SANDBOX"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # A populated shared vendor archive cache would satisfy the archive these cases
 # delete. Every case below sees an empty private one unless it opts in.
 export VENDOR_ARCHIVE_CACHE="$SANDBOX/vendor-archive-cache"
@@ -15,9 +29,24 @@ mkdir -p "$VENDOR_ARCHIVE_CACHE"
 
 fail()
 {
+    wait_lock_selftest || :
     printf 'build_vendor_offline_selftest: FAIL: %s\n' "$*" >&2
     exit 1
 }
+
+wait_lock_selftest()
+{
+    [ -n "$lock_pid" ] || return 0
+    local status=0
+    wait "$lock_pid" || status=$?
+    lock_pid=
+    cat "$lock_log"
+    return "$status"
+}
+
+lock_log="$SANDBOX/vendor-lock-selftest.log"
+bash "$ROOT/tools/scripts/vendor_lock_selftest.sh" >"$lock_log" 2>&1 &
+lock_pid=$!
 
 mkdir -p "$SANDBOX/tools/scripts" "$SANDBOX/tools/dev" "$SANDBOX/vendor/.cache" \
     "$SANDBOX/vendor/lib" "$SANDBOX/vendor/include" "$SANDBOX/bin"
@@ -38,7 +67,15 @@ for dependency in platform/modules/platform/src/clock.c \
     cp "$ROOT/$dependency" "$SANDBOX/$dependency"
 done
 cp "$ROOT/tools/vendor_lock.c" "$SANDBOX/tools/"
-cp "$ROOT/tools/dev/build-epoch-key.sh" "$SANDBOX/tools/dev/"
+cp "$ROOT/tools/dev/build-epoch-key.sh" "$SANDBOX/tools/dev/build-epoch-key-real.sh"
+export VENDOR_LOCK_KEY_TRACE="$SANDBOX/vendor-key.trace"
+cat > "$SANDBOX/tools/dev/build-epoch-key.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\${1:-}" >> "$VENDOR_LOCK_KEY_TRACE"
+exec "$SANDBOX/tools/dev/build-epoch-key-real.sh" "\$@"
+EOF
+chmod +x "$SANDBOX/tools/dev/build-epoch-key.sh"
+: > "$VENDOR_LOCK_KEY_TRACE"
 
 for tool in curl wget; do
     printf '%s\n' '#!/usr/bin/env bash' \
@@ -58,6 +95,8 @@ fi
 [[ "$output" == *'offline cache miss or checksum failure: zlib-1.3.1.tar.gz'* ]] ||
     fail 'cache-miss refusal did not name the missing pinned archive'
 [ ! -s "$contact_log" ] || fail 'offline mode invoked a downloader'
+[[ "$(awk '{ n++ } END { print n + 0 }' "$VENDOR_LOCK_KEY_TRACE")" == 1 ]] ||
+    fail 'lock handoff repeated compiler identity derivation'
 
 # The compiler driver grounds slash-containing relative tools at the source
 # root. Compilation must use that same executable from a different cwd.
@@ -163,6 +202,10 @@ if command -v c++ >/dev/null 2>&1; then
         fail 'a C driver without a C++ front end could not identify the lock helper compiler'
 fi
 
+if ! wait_lock_selftest; then
+    fail 'vendor lock selftest failed'
+fi
+
 # Bad bootstrap identities must refuse before touching an existing helper.
 cp -R "$SANDBOX/build/bin/vendor-lock" "$SANDBOX/helper-cache-before"
 cp "$SANDBOX/tools/dev/build-epoch-key.sh" "$SANDBOX/key-driver-before"
@@ -185,9 +228,14 @@ cp "$SANDBOX/provenance-before" "$SANDBOX/tools/scripts/vendor_provenance_lib.sh
 diff -r "$SANDBOX/helper-cache-before" "$SANDBOX/build/bin/vendor-lock" >/dev/null ||
     fail 'identity refusal modified cached helper bytes'
 mkdir "$SANDBOX/unknown-legacy.lock"
-if output="$(VENDOR_LOCK_HELD=1 VENDOR_LOCK_DIR="$SANDBOX/unknown-legacy.lock" \
+helper_path="$(find "$SANDBOX/build/bin/vendor-lock" -type f -name vendor-lock -print -quit)"
+[[ "$helper_path" =~ /[0-9a-f]{64}/vendor-lock$ ]] || fail 'qualified helper missing'
+helper_key="${helper_path%/vendor-lock}"
+helper_key="${helper_key##*/}"
+if output="$(VENDOR_LOCK_HELD=1 VENDOR_LOCK_HELPER_KEY="$helper_key" \
+    VENDOR_LOCK_DIR="$SANDBOX/unknown-legacy.lock" \
     ZCL_VENDOR_OFFLINE=1 "$SANDBOX/tools/scripts/build_vendor.sh" libz.a 2>&1)"; then
-    fail 'forged environment bypassed unknown legacy lock'
+    fail 'helper key or forged environment bypassed unknown legacy lock'
 fi
 [[ "$output" == *vendor_lock_legacy_directory_refused* ]] || fail 'legacy refusal unnamed'
 [[ -d "$SANDBOX/unknown-legacy.lock" ]] || fail 'unknown legacy owner removed'
@@ -297,6 +345,7 @@ chmod +x "$SANDBOX/bin/fake-android-cc"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$SANDBOX/bin/llvm-ar"
 chmod +x "$SANDBOX/bin/llvm-ar"
 
+identity_calls="$(awk '{ n++ } END { print n + 0 }' "$VENDOR_LOCK_KEY_TRACE")"
 for archive in libsecp256k1.a libsecp256k1-darwin.a; do
     if output="$(cd "$SANDBOX" && VENDOR_TARGET=aarch64-linux-android24 \
         PATH="$SANDBOX/bin:$PATH" ANDROID_NDK_ROOT="$SANDBOX/fake-ndk" VENDOR_CC="$SANDBOX/bin/fake-android-cc" \
@@ -307,6 +356,8 @@ for archive in libsecp256k1.a libsecp256k1-darwin.a; do
     [[ "$output" == *'archive is not required for this target'* ]] ||
         fail 'cross archive refusal did not reach REQUIRED check'
 done
+[[ "$(awk '{ n++ } END { print n + 0 }' "$VENDOR_LOCK_KEY_TRACE")" == "$identity_calls" ]] ||
+    fail 'out-of-target provenance refusal derived a lock compiler identity'
 if output="$(cd "$SANDBOX" && VENDOR_TARGET=aarch64-linux-android24 \
     PATH="$SANDBOX/bin:$PATH" ANDROID_NDK_ROOT="$SANDBOX/fake-ndk" VENDOR_CC="$SANDBOX/bin/fake-android-cc" \
     VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 tools/scripts/build_vendor.sh \
@@ -351,6 +402,37 @@ if [ -f "$zlib_tarball" ]; then
         fail 'corrupt cache bundle was accepted'
     fi
 fi
+
+# An OpenSSL failure must not release dependent libevent work, and all
+# independent workers must be reaped before the driver reports failure.
+rm -rf "$SANDBOX/vendor/.cache" "$VENDOR_ARCHIVE_CACHE"
+mkdir -p "$SANDBOX/vendor/.cache" "$VENDOR_ARCHIVE_CACHE"
+if (cd "$SANDBOX" && VENDOR_FORCE=1 ZCL_VENDOR_OFFLINE=1 VENDOR_MAX_PARALLEL=3 \
+    tools/scripts/build_vendor.sh libcrypto.a libevent.a libz.a \
+    >"$SANDBOX/parallel-failure.log" 2>&1); then
+    fail 'offline parallel misses unexpectedly built archives'
+fi
+grep -q 'offline cache miss or checksum failure: openssl' "$SANDBOX/parallel-failure.log" ||
+    fail 'parallel driver did not report the OpenSSL cache miss'
+if grep -q 'libevent 2.1.12' "$SANDBOX/parallel-failure.log"; then
+    fail 'libevent started after its OpenSSL dependency failed'
+fi
+children="$(ps --ppid $$ -o comm=,args=)"
+[[ "$children" != *"tools/scripts/build_vendor.sh"* ]] ||
+    fail 'parallel vendor worker remained active after failure'
+if (cd "$SANDBOX" && VENDOR_FORCE=1 ZCL_VENDOR_OFFLINE=1 VENDOR_MAX_PARALLEL=1 \
+    tools/scripts/build_vendor.sh libcrypto.a libevent.a libz.a \
+    >"$SANDBOX/serial-failure.log" 2>&1); then
+    fail 'offline serial misses unexpectedly built archives'
+fi
+grep -q 'offline cache miss or checksum failure: openssl' "$SANDBOX/serial-failure.log" ||
+    fail 'serial driver did not report the OpenSSL cache miss'
+if grep -q 'libevent 2.1.12' "$SANDBOX/serial-failure.log"; then
+    fail 'serial libevent started after its OpenSSL dependency failed'
+fi
+children="$(ps --ppid $$ -o comm=,args=)"
+[[ "$children" != *"tools/scripts/build_vendor.sh"* ]] ||
+    fail 'serial vendor worker remained active after failure'
 
 printf '%s\n' \
     'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'

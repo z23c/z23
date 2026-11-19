@@ -126,12 +126,13 @@ static int inv_ev_cap_exact(const struct inv_ev_cap_order *order, int count,
     int lo = 0, hi = count;
     while (lo < hi) {
         int mid = lo + (hi - lo) / 2;
-        int c = strcmp(order[mid].token, token);
-        if (c == 0) return order[mid].index;
-        if (c < 0) lo = mid + 1;
+        if (strcmp(order[mid].token, token) < 0) lo = mid + 1;
         else hi = mid;
     }
-    return -1;
+    if (lo >= count || strcmp(order[lo].token, token) != 0 ||
+        (lo + 1 < count && strcmp(order[lo + 1].token, token) == 0))
+        return -1;
+    return order[lo].index;
 }
 
 static int inv_ev_resolve_include(const struct inv_scan *scan,
@@ -474,6 +475,25 @@ static int inv_ev_resolve_body(const struct inv_ev_body_order *order,
     return found;
 }
 
+static int inv_ev_resolve_caller(const struct inv_ev_body_order *order,
+                                 int body_count, const struct inv_scan *scan,
+                                 const struct ci_inventory_report *report,
+                                 const uint8_t *cap_files, size_t stride,
+                                 const struct inv_ref *ref,
+                                 const char **last_name, int *last_file,
+                                 int *last_result)
+{
+    if (*last_name && *last_file == ref->file_index &&
+        strcmp(*last_name, ref->enclosing) == 0)
+        return *last_result;
+    *last_name = ref->enclosing;
+    *last_file = ref->file_index;
+    *last_result = inv_ev_resolve_body(order, body_count, scan, report,
+                                       cap_files, stride, ref->enclosing,
+                                       ref->file_index);
+    return *last_result;
+}
+
 /* Body lookup depends only on the frozen scan and include visibility.
  * Resolve each edge once before fixed-point propagation; -2 means the
  * callee has no body, while -1 retains an ambiguous body candidate. */
@@ -487,14 +507,15 @@ static struct inv_ev_resolved_ref *inv_ev_resolve_refs(
         "ci_inventory_resolved_refs");
     if (scan->ref_count && !edges) return NULL;
     const struct inv_ref *previous = NULL;
-    int previous_to = -2;
+    const char *last_name = NULL;
+    int previous_to = -2, last_file = -1, last_result = -1;
     for (int i = 0; i < scan->ref_count; i++) {
         edges[i].from = -1;
         edges[i].to = -2;
         if (!scan->refs[i].enclosing[0]) continue;
-        edges[i].from = inv_ev_resolve_body(order, scan->body_count, scan,
-            report, cap_files, stride, scan->refs[i].enclosing,
-            scan->refs[i].file_index);
+        edges[i].from = inv_ev_resolve_caller(order, scan->body_count, scan,
+            report, cap_files, stride, &scan->refs[i], &last_name,
+            &last_file, &last_result);
         if (edges[i].from < 0) continue;
         /* References are sorted by callee and file. Retain missing and
          * ambiguous results too; visibility is frozen for this call. */

@@ -88,6 +88,9 @@ int zc_disp(const char *want, const char *msg);
 int zc_build(const char *label, const char *const *env, char sha[ZC_SHA]);
 int zc_stage_build(const char *tag, const char *const *env, char sha[ZC_SHA]);
 
+struct lint_changed;
+int zc_changed_relevant(const struct lint_changed *ch);
+
 /* Sections: 0 continue, nonzero stop with exit 1. */
 int zc_sec_basic(void);
 int zc_boot_status_selftest(void);

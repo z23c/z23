@@ -40,9 +40,12 @@ static const char k_serial_pro[] = " check-git-hooks-installed check-build-epoch
 static const char k_serial_epi[] = " check-codeindex-coverage check-cookbook ";
 static const char k_poles[] =
     " check-windows-cross-syntax check-standalone-tools-link check-clang-portability"
-    " check-vcs-no-sha1 check-windows-acceptance check-outparam-init-before-return ";
+    " check-vcs-no-sha1 check-windows-acceptance check-outparam-init-before-return"
+    " check-vendor-provenance check-zcc-cache check-windows-platform-seam ";
 
 static const char *g_run_changed;
+static char g_run_diff[8192];
+static int g_run_diff_ok;
 
 static int resolve_default(void *ctx, const char *gate, char *cmd, size_t cap)
 {
@@ -60,7 +63,9 @@ static int resolve_with_changed(void *ctx, const char *gate, char *cmd, size_t c
     int rc = resolve_default(ctx, gate, cmd, cap);
     if (rc != 0 || !g_run_changed || !g_run_changed[0])
         return rc;
-    if (!lint_fast_gate_narrow(gate, 1))
+    if (!lint_fast_gate_narrow(gate, 1)
+        && !lint_fast_gate_narrow_names(gate, 1,
+                                        g_run_diff_ok ? g_run_diff : NULL))
         return 0;
     return lint_fast_append_changed(cmd, cap, g_run_changed);
 }
@@ -318,6 +323,14 @@ static int start_run(const struct run_args *a)
         (void)snprintf(state, sizeof state, "%s/.cache/lint-timing", cwd);
     (void)snprintf(lint_bin, sizeof lint_bin, "%s/z23-lint", a->bin_dir);
     g_run_changed = run_scope(a);
+    g_run_diff_ok = 0;
+    g_run_diff[0] = '\0';
+    if (g_run_changed && g_run_changed[0]) {
+        char base[80];
+        if (lint_fast_merge_base(base, sizeof base))
+            g_run_diff_ok = lint_fast_diff_names(base, g_run_diff,
+                                                 sizeof g_run_diff);
+    }
     o = (struct lr_opts){ a->jobs, state, lint_bin, a->bin_dir,
                           env_int(getenv("ZCL_LINT_BUDGET_SEC"), DEFAULT_BUDGET),
                           getenv("ZCL_LINT_VERBOSE") && !strcmp(getenv("ZCL_LINT_VERBOSE"), "1"),

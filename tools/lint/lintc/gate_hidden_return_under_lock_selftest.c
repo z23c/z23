@@ -134,6 +134,51 @@ static int hrls_missing_case(const char *root)
     return 0;
 }
 
+static int hrls_narrow_case(const char *root, const char *path, const char *src,
+                            int want_rc, const char *needle)
+{
+    char full[HRLS_PATH];
+    if (src && (ovf(snprintf(full, sizeof full, "%s/%s", root, path),
+                            sizeof full) || csr_write(full, src)))
+        return 1;
+    char *paths[] = { (char *)path };
+    struct lint_changed one = { paths, 1, 1 };
+    FILE *sink = tmpfile();
+    if (!sink)
+        return die("z23-lint: tmpfile failed\n", "");
+    int rc = hrl_check_changed(root, &one, sink);
+    char text[4096] = {0};
+    int bad = rc != want_rc || csr_slurp(sink, text, sizeof text) ||
+              !strstr(text, needle);
+    fclose(sink);
+    if (bad)
+        fprintf(stderr, "hidden-return narrowed case failed: %s rc=%d text=%s\n",
+                path, rc, text);
+    return bad;
+}
+
+static int hrls_narrow(const char *root)
+{
+    static const struct {
+        const char *path, *src, *needle;
+        int want_rc;
+    } cases[] = {
+        { "docs/README.md", NULL, "OK -- 0 files", 0 },
+        { "engine/x/case.c", k_hrls_cases[0].src, "engine/x/case.c", 1 },
+        { "engine/x/case.c", k_hrls_cases[4].src, "OK -- 1 files", 0 },
+        { "engine/tests/case.c", k_hrls_cases[0].src, "OK -- 0 files", 0 },
+        { "engine/vendor/case.c", k_hrls_cases[0].src, "OK -- 0 files", 0 },
+        { "contexts/commons/corpus/case.c", k_hrls_cases[0].src, "OK -- 0 files", 0 },
+        { "engine/x/case.h", k_hrls_cases[0].src, "OK -- 0 files", 0 },
+        { "engine/missing.c", NULL, "OK -- 0 files", 0 },
+    };
+    int failed = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        failed += hrls_narrow_case(root, cases[i].path, cases[i].src,
+                                   cases[i].want_rc, cases[i].needle) != 0;
+    return failed;
+}
+
 int check_hidden_return_under_lock_selftest(void)
 {
     char root[HRLS_PATH];
@@ -144,9 +189,10 @@ int check_hidden_return_under_lock_selftest(void)
     size_t failed = hrls_missing_case(root) != 0;
     for (size_t i = 0; i < ncases; i++)
         failed += hrls_run_case(root, &k_hrls_cases[i]) != 0;
+    failed += hrls_narrow(root);
     rap_rm_rf(root);
     if (failed)
         fprintf(stderr, "FAIL: check_hidden_return_under_lock selftest: %zu of %zu cases\n",
-                failed, ncases + 1);
+                failed, ncases + 9);
     return st_ok(failed != 0, "check-hidden-return-under-lock selftest: OK\n");
 }

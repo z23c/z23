@@ -16,6 +16,7 @@
 #include <string.h>
 #include "lintc.h"
 #include "gate_byte_order_codec_single_priv.h"
+#include "lint_narrow_hook.h"
 
 static const char k_bo_baseline_default[] =
     "tools/lint/byte_order_codec_baseline.txt";
@@ -258,12 +259,29 @@ static int bo_finish_report(FILE *out, int nviol, int nstale, const char *mode,
     return 0;
 }
 
+static int bo_base_narrow(struct bln_set *base, const struct bo_pathset *scan)
+{
+    struct bln_set selected = {0};
+    for (int i = 0; i < base->count; i++) {
+        if (!bo_pathset_has(scan, base->n[i]))
+            continue;
+        int rc = bln_add(&selected, base->n[i]);
+        if (rc)
+            return rc;
+    }
+    *base = selected;
+    return 0;
+}
+
 static int bo_eval_report(const struct bo_pathset *scan,
                           const struct bo_pathset *found, const char *baseline,
-                          const char *mode, FILE *out)
+                          const char *mode, FILE *out,
+                          const struct lint_changed *changed)
 {
     struct bln_set base = {0};
     int rc = bln_load(&base, baseline);
+    if (rc == 0 && changed)
+        rc = bo_base_narrow(&base, scan);
     if (rc)
         return rc;
     struct bo_pathset viol;
@@ -281,18 +299,21 @@ static int bo_eval_report(const struct bo_pathset *scan,
 static int bo_eval_scan(const struct bo_eval_opts *opts, FILE *err,
                         struct bo_pathset *scan, struct bo_pathset *found)
 {
-    int rc = bo_collect(opts->roots, opts->nroots, scan);
-    if (rc)
-        return rc;
-    rc = gate_require_scanned(scan->n, opts->floor, k_bo_gate,
-                              "no production .c/.h under the declared roots");
-    if (rc)
-        return rc;
-    if (opts->coverage) {
-        rc = bo_coverage_check(scan, opts->coverage_allowance, err);
-        if (rc)
-            return rc;
+    int rc;
+    if (opts->changed) {
+        rc = bo_collect_changed(opts->roots, opts->nroots, opts->changed, scan);
+        if (rc == 0 && lint_examined_print(scan->n, 0) < 0)
+            rc = 2;
+    } else {
+        rc = bo_collect(opts->roots, opts->nroots, scan);
+        if (rc == 0)
+            rc = gate_require_scanned(scan->n, opts->floor, k_bo_gate,
+                                      "no production .c/.h under the declared roots");
+        if (rc == 0 && opts->coverage)
+            rc = bo_coverage_check(scan, opts->coverage_allowance, err);
     }
+    if (rc)
+        return rc;
     struct bo_regexes r;
     rc = bo_comp_regexes(&r);
     if (rc)
@@ -317,7 +338,8 @@ int bo_eval(const struct bo_eval_opts *opts, FILE *out, FILE *err)
             return die("z23-lint: write failed\n", "");
         return 0;
     }
-    return bo_eval_report(&scan, &found, opts->baseline, opts->mode, out);
+    return bo_eval_report(&scan, &found, opts->baseline, opts->mode, out,
+                          opts->changed);
 }
 
 static int bo_opts_default(struct bo_eval_opts *opts)
@@ -341,13 +363,46 @@ static int bo_opts_default(struct bo_eval_opts *opts)
     return 0;
 }
 
+static const char *bo_path_form(const char *path, const char *repo)
+{
+    if (strncmp(path, "./", 2) == 0)
+        path += 2;
+    size_t len = strlen(repo);
+    if (len && repo[len - 1] == '/')
+        len--;
+    if (strncmp(path, repo, len) == 0 && path[len] == '/')
+        return path + len + 1;
+    return path;
+}
+
+/* The narrowing-hook descriptor: this gate's path form and nothing else —
+ * the repo root, baseline compare and whole-tree refusal are the shared
+ * lint_narrow_ok body. */
+static const struct lint_narrow_gate k_bo_narrow_gate = {
+    k_bo_gate, NULL, bo_path_form, NULL, NULL, NULL, 0
+};
+
+int bo_narrow_ok(const struct lint_changed *ch, const char *baseline)
+{
+    return lint_narrow_ok(ch, baseline, &k_bo_narrow_gate);
+}
+
 int check_byte_order_codec_single_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
     struct bo_eval_opts opts = {0};
     int rc = bo_opts_default(&opts);
     if (rc)
         return rc;
-    return bo_eval(&opts, stdout, stderr);
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
+    if (ch.active && strcmp(opts.mode, "UPDATE") == 0) {
+        fputs("check-byte-order-codec-single: --changed-files cannot rewrite the baseline\n", stderr);
+        lint_changed_free(&ch);
+        return 2;
+    }
+    opts.changed = bo_narrow_ok(&ch, opts.baseline) ? &ch : NULL;
+    rc = bo_eval(&opts, stdout, stderr);
+    lint_changed_free(&ch);
+    return rc;
 }

@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 enum { HCS_MAXF = 8192, HCS_PATH = RS_PATH, HCS_MAXR = RS_MAX, HCS_LINE = 8192 };
 
@@ -584,6 +585,79 @@ static int hcs_active_roots(char droots[][RS_PATH], int ndroots,
     return 0;
 }
 
+/* hcs_path_form/hcs_under_roots bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h); the selftest keeps calling the under-roots symbol. */
+int hcs_under_roots(const char *path, char roots[][RS_PATH], int nroots,
+                    const char *repo)
+{
+    return lint_narrow_under_roots(path, roots, nroots, repo);
+}
+
+/* ── the shared narrowing hooks (lint_narrow_hook.h) ───────────────────── */
+
+struct hcs_narrow {
+    char (*roots)[RS_PATH];
+    int nroots;
+    const char *repo;
+    char (*out)[HCS_PATH];
+    int max;
+    int *n;
+};
+
+static int hcs_collect_skip(void *vctx, const char *path)
+{
+    struct hcs_narrow *c = vctx;
+    return hcs_excluded(path) ||
+           !lint_narrow_under_roots(path, c->roots, c->nroots, c->repo);
+}
+
+static int hcs_collect_emit(void *vctx, const char *path)
+{
+    struct hcs_narrow *c = vctx;
+    size_t len = strlen(path);
+    if (*c->n >= c->max || len >= HCS_PATH)
+        return die("z23-lint: changed scan set overflow\n", "");
+    memcpy(c->out[*c->n], path, len + 1);
+    (*c->n)++;
+    return 0;
+}
+
+static const struct lint_narrow_gate k_hcs_narrow_gate = {
+    k_hcs_gate, NULL, lint_narrow_repo_form, NULL, NULL, hcs_collect_skip, 1
+};
+
+int hcs_collect_changed(char roots[][RS_PATH], int nroots,
+                        const struct lint_changed *ch, char out[][HCS_PATH],
+                        int max, int *n)
+{
+    char repo[4096];
+    struct hcs_narrow ctx = { roots, nroots, repo, out, max, n };
+    *n = 0;
+    return lint_narrow_collect(ch, repo, &k_hcs_narrow_gate, hcs_collect_emit,
+                               &ctx);
+}
+
+int hcs_narrow_ok(const struct lint_changed *ch, const char *baseline)
+{
+    return lint_narrow_ok(ch, baseline, &k_hcs_narrow_gate);
+}
+
+static int hcs_base_narrow(struct bln_set *base, char files[][HCS_PATH], int nfiles)
+{
+    const char *changed[HCS_MAXF];
+    for (int i = 0; i < nfiles && i < HCS_MAXF; i++)
+        changed[i] = files[i];
+    /* MATCH NULL: the baseline rows are kept by exact strcmp against the
+     * already-formed scan set, compacted in place inside the set. The old
+     * body failed closed (2) when building the kept set could not allocate;
+     * in-place compaction performs no allocation, so no failure path
+     * remains and 0 is the only outcome. */
+    base->count = lint_narrow_filter_keys(changed, nfiles < HCS_MAXF ? nfiles : HCS_MAXF,
+                                          (const char **)base->n, base->count,
+                                          BLN_ROW, NULL);
+    return 0;
+}
+
 static int hcs_detect(char files[][HCS_PATH], int nfiles, struct bln_set *found)
 {
     regex_t ladder, scanf_re, table, nibble;
@@ -624,48 +698,73 @@ static int hcs_diff_baseline(const struct bln_set *found, const struct bln_set *
     return rc;
 }
 
+static int hcs_scan_files(char droots[][RS_PATH], char sroots[][RS_PATH],
+                          int ndroots, int nsroots,
+                          const struct lint_changed *narrow,
+                          const struct lint_changed *changed,
+                          char files[][HCS_PATH], int *nfiles,
+                          struct bln_set *found)
+{
+    int rc;
+    if (narrow) {
+        rc = hcs_collect_changed(sroots, nsroots, changed, files, HCS_MAXF, nfiles);
+        if (rc == 0 && lint_examined_print(*nfiles, 0) < 0)
+            rc = 2;
+    } else {
+        rc = hcs_collect(sroots, nsroots, files, HCS_MAXF, nfiles);
+        if (rc == 0) {
+            char hint[4096];
+            rc = hcs_floor_hint(sroots, nsroots, hint, sizeof hint);
+            long floor_v = 800;
+            hcs_allowance_parse(env_or("ZCL_HEX_CODEC_FILE_FLOOR", "800"), &floor_v);
+            if (rc == 0)
+                rc = gate_require_scanned(*nfiles, (int)floor_v, k_hcs_gate, hint);
+        }
+        if (rc == 0 && strcmp(env_or("ZCL_HEX_CODEC_COVERAGE", "1"), "1") == 0)
+            rc = hcs_coverage(droots, ndroots, files, *nfiles);
+    }
+    return rc ? rc : hcs_detect(files, *nfiles, found);
+}
+
 int check_hex_codec_single_run(int argc, char **argv)
 {
     static char droots[HCS_MAXR][RS_PATH], sroots[HCS_MAXR][RS_PATH];
     static char files[HCS_MAXF][HCS_PATH];
     static struct bln_set found = {0}, base = {0}, violations = {0}, stale = {0};
     int ndroots = 0, nsroots = 0, nfiles = 0, rc;
-    (void)argc;
-    (void)argv;
     rc = hcs_default_roots(droots, HCS_MAXR, &ndroots);
     if (rc)
         return rc;
     rc = hcs_active_roots(droots, ndroots, sroots, &nsroots);
     if (rc)
         return rc;
-    rc = hcs_collect(sroots, nsroots, files, HCS_MAXF, &nfiles);
-    if (rc)
-        return rc;
-    char hint[4096];
-    rc = hcs_floor_hint(sroots, nsroots, hint, sizeof hint);
-    if (rc)
-        return rc;
-    long floor_v = 800;
-    hcs_allowance_parse(env_or("ZCL_HEX_CODEC_FILE_FLOOR", "800"), &floor_v);
-    rc = gate_require_scanned(nfiles, (int)floor_v, k_hcs_gate, hint);
-    if (rc)
-        return rc;
-    if (strcmp(env_or("ZCL_HEX_CODEC_COVERAGE", "1"), "1") == 0) {
-        rc = hcs_coverage(droots, ndroots, files, nfiles);
-        if (rc)
-            return rc;
-    }
-    rc = hcs_detect(files, nfiles, &found);
-    if (rc)
-        return rc;
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
     const char *base_path = env_or("ZCL_HEX_CODEC_BASELINE", k_hcs_base_default);
     const char *mode = clock_mode();
-    if (strcmp(mode, "UPDATE") == 0)
-        return hcs_write_baseline(&found, base_path);
-    rc = bln_load(&base, base_path);
-    if (rc)
+    if (changed.active && strcmp(mode, "UPDATE") == 0) {
+        fputs("check-hex-codec-single: --changed-files cannot rewrite the baseline\n", stderr);
+        lint_changed_free(&changed);
+        return 2;
+    }
+    const struct lint_changed *narrow = hcs_narrow_ok(&changed, base_path) ? &changed : NULL;
+    rc = hcs_scan_files(droots, sroots, ndroots, nsroots, narrow, &changed,
+                        files, &nfiles, &found);
+    if (rc) {
+        lint_changed_free(&changed);
         return rc;
-    rc = hcs_diff_baseline(&found, &base, &violations, &stale);
+    }
+    if (strcmp(mode, "UPDATE") == 0) {
+        lint_changed_free(&changed);
+        return hcs_write_baseline(&found, base_path);
+    }
+    rc = bln_load(&base, base_path);
+    if (rc == 0 && narrow)
+        rc = hcs_base_narrow(&base, files, nfiles);
+    if (rc == 0)
+        rc = hcs_diff_baseline(&found, &base, &violations, &stale);
+    lint_changed_free(&changed);
     if (rc)
         return rc;
     return hcs_report(&violations, &stale, base_path, mode, nfiles, found.count,

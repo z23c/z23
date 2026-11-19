@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 enum { NTF_MAX = 1024, NTF_LINEBUF = CSTRIP_LINE_MAX, NTF_KEEP_LINES = 4 };
 enum { NTF_SCAN_FLOOR = 2800 };
@@ -237,6 +238,9 @@ struct ntf_walk_ctx {
     int nroots;
     const char *self;
     int considered;
+    const struct lint_changed *selected;
+    const char *repo;
+    char last[RS_PATH];
 };
 
 static int ntf_visit(const char *path, void *ctxv)
@@ -249,10 +253,40 @@ static int ntf_visit(const char *path, void *ctxv)
     return ntf_scan_file(path, c->s);
 }
 
+/* ntf_path_form/ntf_repo bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static const char *ntf_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form_opt(path, repo);
+}
+
+static int ntf_repo(const struct lint_changed *ch, char out[4096],
+                    const char **repo)
+{
+    return lint_narrow_repo_opt(ch, out, repo);
+}
+
+static int ntf_changed_has(const struct ntf_walk_ctx *c, const char *path)
+{
+    for (int i = 0; i < c->selected->n; i++)
+        if (strcmp(ntf_path_form(c->selected->path[i], c->repo), path) == 0)
+            return 1;
+    return 0;
+}
+
 static int ntf_on_idx(const char *path, int stage, void *ctx)
 {
     (void)stage;
-    return ntf_visit(path, ctx);
+    struct ntf_walk_ctx *c = ctx;
+    if (!c->selected)
+        return ntf_visit(path, ctx);
+    if (!ntf_changed_has(c, path) || strcmp(c->last, path) == 0)
+        return 0;
+    int rc = ntf_visit(path, ctx);
+    if (rc == 0 && ovf(snprintf(c->last, sizeof c->last, "%s", path),
+                       sizeof c->last))
+        return 2;
+    return rc;
 }
 
 static int ntf_on_walk(const char *path, void *ctx)
@@ -358,6 +392,23 @@ static int ntf_cmp_row(const void *a, const void *b)
 
 /* ── run / --write-baseline ───────────────────────────────────────────── */
 
+static int ntf_finish(const struct ntf_set *base, const struct ntf_set *found,
+                      const char *baseline_path, FILE *out, FILE *err)
+{
+    if (ntf_compare(err, base, found, baseline_path)) {
+        fputs("\nMove a new/grown bare \"/tmp fixture literal onto "
+              "test_mkdtemp()/test_mkstemp()/test_fmt_tmpdir() (test_core.h) "
+              "under test-tmp/, or pin a legitimate exception as a "
+              "shrink-only row in ", out);
+        fputs(baseline_path, out);
+        fputs(".\n", out);
+        return 1;
+    }
+    fprintf(out, "check-no-bare-tmp-fixture: clean — %d file(s) hold pinned "
+                "bare-tmp fixture sites, no growth, none stale\n", base->n);
+    return 0;
+}
+
 static int ntf_run_cfg(const char *const *roots, int nroots,
                        const char *baseline_path, const char *self,
                        int use_git, int floor, FILE *out, FILE *err)
@@ -374,18 +425,97 @@ static int ntf_run_cfg(const char *const *roots, int nroots,
                               "scanned far fewer .c/.h files than expected "
                               "under its roots");
     if (rc) return rc;
-    if (ntf_compare(err, &base, &found, baseline_path)) {
-        fputs("\nMove a new/grown bare \"/tmp fixture literal onto "
-              "test_mkdtemp()/test_mkstemp()/test_fmt_tmpdir() (test_core.h) "
-              "under test-tmp/, or pin a legitimate exception as a "
-              "shrink-only row in ", out);
-        fputs(baseline_path, out);
-        fputs(".\n", out);
-        return 1;
+    return ntf_finish(&base, &found, baseline_path, out, err);
+}
+
+static int ntf_logical(const char *root, const char *path, char out[4096])
+{
+    if (strcmp(root, ".") == 0)
+        return ovf(snprintf(out, 4096, "%s", path), 4096);
+    return ovf(snprintf(out, 4096, "%s/%s", root, path), 4096);
+}
+
+static int ntf_selected_file(const char *root, const char *path,
+                             struct ntf_walk_ctx *ctx)
+{
+    char full[4096];
+    struct stat st;
+    if (ntf_logical(root, path, full) != 0)
+        return 2;
+    if (lstat(full, &st) != 0)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot stat %s\n", full);
+    if (!S_ISREG(st.st_mode))
+        return 0;
+    return ntf_visit(full, ctx);
+}
+
+static int ntf_base_narrow(const char *root, struct ntf_set *base,
+                           const struct lint_changed *ch, const char *repo)
+{
+    static struct ntf_set selected;
+    selected.n = 0;
+    for (int i = 0; i < base->n; i++) {
+        for (int k = 0; k < ch->n; k++) {
+            char logical[4096];
+            if (ntf_logical(root, ntf_path_form(ch->path[k], repo), logical) != 0)
+                return 2;
+            if (strcmp(base->v[i].path, logical) == 0) {
+                selected.v[selected.n++] = base->v[i];
+                break;
+            }
+        }
     }
-    fprintf(out, "check-no-bare-tmp-fixture: clean — %d file(s) hold pinned "
-                "bare-tmp fixture sites, no growth, none stale\n", base.n);
+    *base = selected;
     return 0;
+}
+
+static int ntf_collect_changed(struct ntf_walk_ctx *ctx,
+                               const struct lint_changed *ch, int use_git,
+                               const char *const *roots, int nroots,
+                               const char *repo)
+{
+    struct stat st;
+    int indexed = use_git && stat(".git", &st) == 0;
+    int rc = 0;
+    if (indexed) {
+        char bad[8] = {0};
+        rc = lint_git_index_foreach(ntf_on_idx, ctx, bad);
+        if (rc) {
+            fprintf(stderr, "check-no-bare-tmp-fixture: UNPROVEN — git index%s%s\n",
+                    bad[0] ? " extension " : "", bad);
+            return rc;
+        }
+    }
+    for (int i = 0; rc == 0 && !indexed && i < ch->n; i++)
+        rc = ntf_selected_file(nroots == 1 ? roots[0] : ".",
+                               ntf_path_form(ch->path[i], repo), ctx);
+    return rc;
+}
+
+static int ntf_run_changed(const char *const *roots, int nroots,
+                           const char *baseline_path, const char *self,
+                           int use_git, const struct lint_changed *ch,
+                           FILE *out, FILE *err)
+{
+    char repo_buf[4096];
+    const char *repo;
+    if (ntf_repo(ch, repo_buf, &repo) != 0)
+        return 2;
+    struct ntf_set base = {0}, found = {0};
+    int rc = ntf_load_baseline(&base, baseline_path);
+    if (rc == 0)
+        rc = ntf_base_narrow(nroots == 1 ? roots[0] : ".", &base, ch, repo);
+    if (rc)
+        return rc;
+    struct ntf_walk_ctx ctx = { .s = &found, .roots = roots, .nroots = nroots,
+                               .self = self, .considered = 0,
+                               .selected = ch, .repo = repo, .last = {0} };
+    rc = ntf_collect_changed(&ctx, ch, use_git, roots, nroots, repo);
+    if (rc == 0 && lint_examined_print(ctx.considered, 0) < 0)
+        rc = 2;
+    if (rc)
+        return rc;
+    return ntf_finish(&base, &found, baseline_path, out, err);
 }
 
 static int ntf_write_baseline(const char *const *roots, int nroots,
@@ -418,13 +548,40 @@ static int ntf_write_baseline(const char *const *roots, int nroots,
                ? die("z23-lint: write failed: %s\n", baseline_path) : 0;
 }
 
+/* The narrowing-hook descriptor: ntf's repo-optional resolver and path
+ * form steer the shared lint_narrow_ok baseline compare. */
+static const struct lint_narrow_gate k_ntf_narrow_gate = {
+    "check-no-bare-tmp-fixture", NULL, ntf_path_form, NULL, ntf_repo, NULL, 0
+};
+
+static int ntf_narrow_ok(const struct lint_changed *ch)
+{
+    return lint_narrow_ok(ch, k_ntf_baseline, &k_ntf_narrow_gate);
+}
+
 int check_no_bare_tmp_fixture_run(int argc, char **argv)
 {
-    if (argc >= 1 && strcmp(argv[0], "--write-baseline") == 0)
-        return ntf_write_baseline(k_ntf_roots, NTF_NROOT, k_ntf_self,
-                                  k_ntf_baseline, NTF_SCAN_FLOOR);
-    return ntf_run_cfg(k_ntf_roots, NTF_NROOT, k_ntf_baseline, k_ntf_self, 1,
-                       NTF_SCAN_FLOOR, stdout, stderr);
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
+    if (changed.active && argc >= 1 && strcmp(argv[0], "--write-baseline") == 0) {
+        fputs("check-no-bare-tmp-fixture: --changed-files cannot rewrite the baseline\n",
+              stderr);
+        lint_changed_free(&changed);
+        return 2;
+    }
+    int rc;
+    if (changed.active && ntf_narrow_ok(&changed))
+        rc = ntf_run_changed(k_ntf_roots, NTF_NROOT, k_ntf_baseline, k_ntf_self, 1,
+                             &changed, stdout, stderr);
+    else if (argc >= 1 && strcmp(argv[0], "--write-baseline") == 0)
+        rc = ntf_write_baseline(k_ntf_roots, NTF_NROOT, k_ntf_self,
+                                k_ntf_baseline, NTF_SCAN_FLOOR);
+    else
+        rc = ntf_run_cfg(k_ntf_roots, NTF_NROOT, k_ntf_baseline, k_ntf_self, 1,
+                         NTF_SCAN_FLOOR, stdout, stderr);
+    lint_changed_free(&changed);
+    return rc;
 }
 
 /* ── selftest ─────────────────────────────────────────────────────────── */
@@ -486,6 +643,56 @@ static int ntf_st_case(const char *root, const char *case_body,
                         "needle '%s'; got rc %d, stdout:\n%s\nstderr:\n%s\n",
                 want_rc, needle ? needle : "(none)", rc, obuf, ebuf);
     return ok ? 0 : 1;
+}
+
+static int ntf_st_case_changed(const char *root, const char *case_body,
+                               const char *baseline_body, const char *path,
+                               int want_rc, const char *needle)
+{
+    char case_path[4096], base_path[4096];
+    if (ntf_st_write(root, case_body, baseline_body, case_path,
+                     sizeof case_path, base_path, sizeof base_path))
+        return 1;
+    char *paths[] = { (char *)path };
+    struct lint_changed one = { paths, 1, 1 };
+    const char *roots[] = { root };
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (!out || !err) {
+        if (out) fclose(out);
+        if (err) fclose(err);
+        return 1;
+    }
+    int rc = ntf_run_changed(roots, 1, base_path, "", 0, &one, out, err);
+    char obuf[4096], ebuf[4096];
+    int bad = csr_slurp(out, obuf, sizeof obuf) || csr_slurp(err, ebuf, sizeof ebuf);
+    fclose(out);
+    fclose(err);
+    int ok = rc == want_rc &&
+             (!needle || strstr(obuf, needle) || strstr(ebuf, needle));
+    if (!ok) {
+        fprintf(stderr, "bare-tmp narrowed case failed: %s rc=%d want=%d\n",
+                path, rc, want_rc);
+        return 1;
+    }
+    return bad;
+}
+
+static int ntf_st_narrow(const char *root, const char *baseline)
+{
+    static const char literal[] = "char x[] = \"/tmp/planted_XXXXXX\";\n";
+    int bad = ntf_st_case_changed(root, literal, "", "case.c", 1, "case.c:1")
+            | ntf_st_case_changed(root, literal, baseline, "case.c", 0, "1 file(s)")
+            | ntf_st_case_changed(root, "int x;\n", baseline, "case.c", 1, "STALE")
+            | ntf_st_case_changed(root, literal, baseline, "other.c", 0, NULL);
+    char gone[4160];
+    if (ovf(snprintf(gone, sizeof gone, "%s/gone.c 1\n", root), sizeof gone))
+        return 1;
+    bad |= ntf_st_case_changed(root, "int x;\n", gone, "gone.c", 1, "STALE");
+    char *baseline_path[] = { (char *)k_ntf_baseline };
+    struct lint_changed edit = { baseline_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    bad |= ntf_narrow_ok(&edit) || !ntf_narrow_ok(&empty);
+    return bad;
 }
 
 int check_no_bare_tmp_fixture_selftest(void)
@@ -576,6 +783,7 @@ int check_no_bare_tmp_fixture_selftest(void)
             (void)chmod(case_path, 0600);
         }
     }
+    bad |= ntf_st_narrow(root, baseline1);
     (void)rap_rm_rf(root);
     if (had_prod)
         (void)setenv("ZCL_LINT_PRODUCTION_SCAN", old_prod_buf, 1);

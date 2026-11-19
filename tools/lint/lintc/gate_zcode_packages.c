@@ -13,11 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "base/safe_alloc.h"
 #include "platform/toolchain.h"
 #include "util/spawn.h"
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 enum { ZPKG_MAX = 32, ZSRC_MAX = 512, ZMONO_MAX = 2048, ZINC_MAX = 32,
        ZSLURP = 32768, ZCAP = 256 * 1024 };
@@ -362,19 +364,92 @@ static int zpr_run_success(int ns)
         return die("z23-lint: write failed\n", "");
     return 0;
 }
+static int zpr_prefix(const char *path, const char *prefix)
+{
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+/* zpr_suffix body lives in the shared narrowing hooks
+ * (lint_narrow_hook.h), alongside the zpr relevant and wait shapes. */
+static int zpr_suffix(const char *path, const char *suffix)
+{
+    return lint_narrow_suffix(path, suffix);
+}
+
+static int zpr_source_relevant(const char *path)
+{
+    return zpr_prefix(path, "core/") || zpr_prefix(path, "contexts/commons/") ||
+           zpr_prefix(path, "contexts/explorer/") ||
+           zpr_prefix(path, "engine/composition/") ||
+           zpr_prefix(path, "platform/") || zpr_prefix(path, "vendor/") ||
+           zpr_prefix(path, "tools/dev/") || zpr_prefix(path, "tools/zcode") ||
+           zpr_prefix(path, "tools/scripts/zcode") ||
+           zpr_prefix(path, "tools/lint/lintc/");
+}
+
+static int zpr_build_relevant(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    size_t n = strlen(path);
+    base = base ? base + 1 : path;
+    return (n >= 2 && path[n - 2] == '.' && path[n - 1] == 'h') ||
+           zpr_suffix(path, ".def") || zpr_suffix(path, ".inc") ||
+           zpr_suffix(path, ".mk") || strcmp(base, "Makefile") == 0;
+}
+
+static int zpr_either_relevant(const char *path)
+{
+    return zpr_source_relevant(path) || zpr_build_relevant(path);
+}
+
+static int zpr_relevant(const struct lint_changed *ch)
+{
+    return lint_narrow_relevant(ch, zpr_either_relevant);
+}
+
+static int zpr_wait(pid_t pid)
+{
+    return lint_narrow_wait_pid(pid, "zcode registry");
+}
+
+static int zpr_run_parallel_sources(char *cap, size_t capn,
+                                    char mono[][RS_PATH], int *nm)
+{
+    (void)fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0)
+        return die("z23-lint: zcode registry fork failed: %s\n", strerror(errno));
+    if (pid == 0) {
+        int rc = zpr_run_rederive(cap, capn);
+        if (fflush(NULL) != 0 && rc == 0)
+            rc = die("z23-lint: zcode registry child flush failed: %s\n",
+                     strerror(errno));
+        _exit(rc);
+    }
+    int mono_rc = zpr_run_monolith_sources(cap, capn, mono, nm);
+    int rederive_rc = zpr_wait(pid);
+    return rederive_rc != 0 ? rederive_rc : mono_rc;
+}
+
 int check_zcode_package_registry_run(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
+    if (!zpr_relevant(&ch)) {
+        lint_changed_free(&ch);
+        return lint_examined_print(0, 0) < 0 ? 2 : 0;
+    }
+    lint_changed_free(&ch);
     char root[4096];
     if (cic_repo_root(root, sizeof root) || chdir(root) != 0)
         return die("z23-lint: cannot scan %s\n", root);
     static char cap[ZCAP];
     int rc;
-    if ((rc = zpr_run_rederive(cap, sizeof cap))) return rc;
     static char pkg_src[ZSRC_MAX][RS_PATH], mono[ZMONO_MAX][RS_PATH];
     int ns = 0, nm = 0;
     if ((rc = zpr_run_pkg_sources(pkg_src, &ns))) return rc;
-    if ((rc = zpr_run_monolith_sources(cap, sizeof cap, mono, &nm))) return rc;
+    if ((rc = zpr_run_parallel_sources(cap, sizeof cap, mono, &nm))) return rc;
     if ((rc = zpr_run_reject_empty(ns, nm))) return rc;
     if ((rc = zpr_run_exact_once(pkg_src, ns, mono, nm))) return rc;
     if ((rc = zpr_run_host_optional(mono, nm))) return rc;
@@ -501,6 +576,35 @@ static int zpr_st_captured_lines(int *bad)
     regfree(&re);
     return rc;
 }
+static int zpr_st_relevant(void)
+{
+    char *doc_paths[] = { "docs/README.md" };
+    struct lint_changed docs = { doc_paths, 1, 1 };
+    char *core_path[] = { "core/modules/crypto/src/sha256.c" };
+    struct lint_changed core = { core_path, 1, 1 };
+    char *explorer_path[] = { "contexts/explorer/modules/presentation/src/presentation.c" };
+    struct lint_changed explorer = { explorer_path, 1, 1 };
+    char *package_path[] = { "contexts/commons/packages/zb32/zcode-package.json" };
+    struct lint_changed package = { package_path, 1, 1 };
+    char *platform_path[] = { "platform/modules/json/src/json.c" };
+    struct lint_changed platform = { platform_path, 1, 1 };
+    char *tool_path[] = { "tools/dev/jsonq.c" };
+    struct lint_changed tool = { tool_path, 1, 1 };
+    char *gate_path[] = { "tools/lint/lintc/gate_zcode_packages.c" };
+    struct lint_changed gate = { gate_path, 1, 1 };
+    char *header_path[] = { "platform/modules/json/include/json/json.h" };
+    struct lint_changed header = { header_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    if (zpr_relevant(&docs) || zpr_relevant(&empty) ||
+        !zpr_relevant(&core) || !zpr_relevant(&explorer) ||
+        !zpr_relevant(&package) || !zpr_relevant(&platform) ||
+        !zpr_relevant(&tool) || !zpr_relevant(&gate) || !zpr_relevant(&header)) {
+        fputs("check_zcode_package_registry selftest: changed-input relevance mismatch\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 int check_zcode_package_registry_selftest(void)
 {
     char msg[512], ok[512], chosen[RS_PATH], mono[4][RS_PATH];
@@ -512,6 +616,7 @@ int check_zcode_package_registry_selftest(void)
     if (zpr_st_codec_scan(&bad)) return 2;
     if (zpr_st_excluded_hits(mono, &bad)) return 2;
     if (zpr_st_captured_lines(&bad)) return 2;
+    if (zpr_st_relevant()) return 2;
     return st_ok(bad, "check_zcode_package_registry selftest: OK\n");
 }
 

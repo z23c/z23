@@ -111,4 +111,4 @@ LINT_ROW("check-result-discard", "ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-
 // shape = full tree). The land proof and `make lint` never narrow.
 LINT_ROW_FILES("check-no-api-keys", "tools/lint/lintc/gate_git_scan_a.c")
 LINT_ROW_FILES("check-fortify-masked-decls", "tools/lint/lintc/gate_fortify_masked_decls.c")
-LINT_ROW_FILES("check-raw-sqlite", "tools/lint/lintc/gate_raw_sqlite.c tools/lint/lintc/gate_raw_sqlite_ctx.c tools/lint/lintc/gate_raw_sqlite_exec.c tools/lint/lintc/gate_raw_sqlite_priv.h")
+LINT_ROW_FILES("check-raw-sqlite", "tools/lint/lintc/gate_raw_sqlite.c tools/lint/lintc/gate_raw_sqlite_ctx.c tools/lint/lintc/gate_raw_sqlite_exec.c tools/lint/lintc/gate_raw_sqlite_priv.h tools/lint/lintc/gate_raw_sqlite_selftest.c tools/lint/lintc/lintc_text.c")

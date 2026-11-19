@@ -8,6 +8,7 @@
 #define GATE_HIDDEN_RETURN_UNDER_LOCK_PRIV_H
 
 #include <stdio.h>
+#include "lintc.h"
 
 /* Scans one C file. Each hidden-return macro used while a directly acquired
  * lock is held is reported to out as "path:line: ..." and counted in
@@ -18,5 +19,6 @@ int hrl_scan_file(const char *path, FILE *out, int *findings);
 /* Scans the production roots under root. Returns 0 clean, 1 on a finding,
  * 2 on an I/O error or a hollow scan. Reports go to out. */
 int hrl_check_root(const char *root, FILE *out);
+int hrl_check_changed(const char *root, const struct lint_changed *ch, FILE *out);
 
 #endif

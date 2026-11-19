@@ -184,6 +184,12 @@ int lint_changed_bind(int *argc, char ***argv, struct lint_changed *out);
 void lint_changed_free(struct lint_changed *out);
 int lint_fast_should_narrow(int per_file, int set_supplied, int source_matches);
 int lint_fast_gate_narrow(const char *name, int set_supplied);
+int lint_fast_merge_base(char *sha, size_t cap);
+int lint_fast_gate_narrow_base(const char *name, int set_supplied,
+                               const char *base);
+int lint_fast_diff_names(const char *base, char *out, size_t cap);
+int lint_fast_gate_narrow_names(const char *name, int set_supplied,
+                                const char *names);
 /* The LINT_ROW_FILES("gate", "sources") marker rows of gate_commands.def
  * (fast_narrow.c): the declared per-file sources of a gate the run driver may
  * narrow to a changed-path set, NULL for a gate that is not marked. */

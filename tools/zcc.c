@@ -453,8 +453,8 @@ static char **compiler_child_env(void)
     return child_env;
 }
 
-static int run_argv(char *const argv[], const char *stdout_path,
-                    const char *stderr_path)
+static pid_t run_argv_start(char *const argv[], const char *stdout_path,
+                            const char *stderr_path)
 {
     char **child_env = compiler_child_env();
     if (!child_env) return -1;
@@ -475,8 +475,11 @@ static int run_argv(char *const argv[], const char *stdout_path,
                                             argv, child_env) : prep;
     (void)posix_spawn_file_actions_destroy(&actions);
     free(child_env);
-    if (launched != 0)
-        return -1;
+    return launched == 0 ? pid : -1;
+}
+
+static int run_argv_wait(pid_t pid)
+{
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR)
@@ -485,6 +488,13 @@ static int run_argv(char *const argv[], const char *stdout_path,
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
     return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+}
+
+static int run_argv(char *const argv[], const char *stdout_path,
+                    const char *stderr_path)
+{
+    pid_t pid = run_argv_start(argv, stdout_path, stderr_path);
+    return pid < 0 ? -1 : run_argv_wait(pid);
 }
 
 /* ── argv analysis ───────────────────────────────────────────────────── */
@@ -1498,21 +1508,41 @@ static bool apple_tool_read_output(const char *scratch,
     return !strchr(output, '\n') && !strchr(output, '\r');
 }
 
-static bool apple_tool_query_output(char *const query[],
-                                    char output[PATH_MAX])
+static pid_t apple_tool_query_start(char *const query[], char scratch[PATH_MAX])
 {
-    char scratch[PATH_MAX];
     const char *temp = getenv("TMPDIR");
     if (!temp || !*temp) temp = "/tmp";
-    int written = snprintf(scratch, sizeof scratch, "%s/zcc-tool.XXXXXX", temp);
-    if (written < 0 || (size_t)written >= sizeof scratch) return false;
+    int written = snprintf(scratch, PATH_MAX, "%s/zcc-tool.XXXXXX", temp);
+    if (written < 0 || (size_t)written >= PATH_MAX) return -1;
     int fd = mkstemp(scratch);
-    if (fd < 0) return false;
-    bool ok = close(fd) == 0 && run_argv(query, scratch, NULL) == 0;
+    if (fd < 0) return -1;
+    if (close(fd) != 0) {
+        (void)unlink(scratch);
+        return -1;
+    }
+    pid_t pid = run_argv_start(query, scratch, NULL);
+    if (pid < 0) (void)unlink(scratch);
+    return pid;
+}
+
+static bool apple_tool_query_finish(pid_t pid, const char *scratch,
+                                    char output[PATH_MAX])
+{
+    bool ok = run_argv_wait(pid) == 0;
     if (ok) ok = apple_tool_read_output(scratch, output);
     (void)unlink(scratch);
     return ok;
 }
+
+#if defined(__APPLE__)
+static bool apple_tool_query_output(char *const query[],
+                                    char output[PATH_MAX])
+{
+    char scratch[PATH_MAX];
+    pid_t pid = apple_tool_query_start(query, scratch);
+    return pid >= 0 && apple_tool_query_finish(pid, scratch, output);
+}
+#endif
 
 /* The selected Clang is large (257 MiB in the CLT used for this probe).
  * Rehashing it for every object would turn a cold build into hours. Keep the
@@ -1932,23 +1962,43 @@ static bool hash_apple_assembler(struct sha3_256_ctx *h,
  * previously absent earlier -B candidate can change selection. The private
  * development memo avoids rehashing an unchanged large frontend, while a
  * changed file identity or ctime forces a new byte digest. */
-static bool hash_linux_selected_tool(struct sha3_256_ctx *h,
-                                     const struct plan *pl,
-                                     const char *query_flag,
-                                     const char *label,
-                                     const char *cache_root)
+static bool hash_linux_selected_tools(struct sha3_256_ctx *h,
+                                      const struct plan *pl,
+                                      const char *cache_root)
 {
-    char **query = apple_tool_query_argv(pl, query_flag);
-    if (!query) return false;
-    char output[PATH_MAX], selected[PATH_MAX], digest[HEXLEN + 1u];
-    bool ok = apple_tool_query_output(query, output) &&
-              resolve_cc(output, selected) &&
-              apple_tool_digest_cached(selected, cache_root, label, digest);
-    free(query);
-    if (!ok) return false;
-    hstr(h, label);
-    hstr(h, selected);
-    hstr(h, digest);
+    static const char *const flags[] = {
+        "-print-prog-name=cc1", "-print-prog-name=as",
+    };
+    static const char *const labels[] = { "linux-cc1", "linux-as" };
+    char **query[] = {
+        apple_tool_query_argv(pl, flags[0]),
+        apple_tool_query_argv(pl, flags[1]),
+    };
+    if (!query[0] || !query[1]) {
+        free(query[0]); free(query[1]);
+        return false;
+    }
+    char scratch[2][PATH_MAX], output[2][PATH_MAX];
+    pid_t pids[] = {
+        apple_tool_query_start(query[0], scratch[0]),
+        apple_tool_query_start(query[1], scratch[1]),
+    };
+    bool ok[2] = { false, false };
+    for (size_t i = 0; i < 2; i++) {
+        if (pids[i] >= 0)
+            ok[i] = apple_tool_query_finish(pids[i], scratch[i], output[i]);
+        free(query[i]);
+    }
+    if (!ok[0] || !ok[1]) return false;
+    for (size_t i = 0; i < 2; i++) {
+        char selected[PATH_MAX], digest[HEXLEN + 1u];
+        if (!resolve_cc(output[i], selected) ||
+            !apple_tool_digest_cached(selected, cache_root, labels[i], digest))
+            return false;
+        hstr(h, labels[i]);
+        hstr(h, selected);
+        hstr(h, digest);
+    }
     return true;
 }
 #endif
@@ -2083,8 +2133,15 @@ static bool hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl,
     char ccpath[PATH_MAX];
     hstr(h, ZCC_MAGIC);
     char digest[HEXLEN + 1u];
-    if (!resolve_cc(pl->argv[0], ccpath) || !file_hex(ccpath, digest))
+    if (!resolve_cc(pl->argv[0], ccpath))
         return false;
+#if defined(__APPLE__) || defined(__linux__)
+    if (!apple_tool_digest_cached(ccpath, cache_root, "driver", digest))
+        return false;
+#else
+    if (!file_hex(ccpath, digest))
+        return false;
+#endif
     hstr(h, ccpath);
     hstr(h, digest);
 #if defined(__APPLE__)
@@ -2092,10 +2149,7 @@ static bool hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl,
         !hash_apple_assembler(h, pl, cache_root))
         return false;
 #elif defined(__linux__)
-    if (!hash_linux_selected_tool(h, pl, "-print-prog-name=cc1",
-                                  "linux-cc1", cache_root) ||
-        !hash_linux_selected_tool(h, pl, "-print-prog-name=as",
-                                  "linux-as", cache_root))
+    if (!hash_linux_selected_tools(h, pl, cache_root))
         return false;
 #else
     (void)cache_root;
@@ -2699,16 +2753,23 @@ static bool pp_other_input(const struct plan *pl, int i, int src_idx)
     return other_input;
 }
 
+struct preprocess_job {
+    char **argv;
+    char path[PATH_MAX];
+    pid_t pid;
+};
+
 /* Preprocess ONE source with the same flags, minus everything that would
  * make the compiler do more than preprocess or write a second artifact. */
-static bool preprocess(const struct plan *pl, int src_idx, const char *tmpdir,
-                       struct buf *out)
+static bool preprocess_start(const struct plan *pl, int src_idx,
+                             const char *tmpdir, struct preprocess_job *job)
 {
-    char **pa = zcl_calloc((size_t)pl->argc + 3u, sizeof *pa, "zcc -E argv");
-    if (!pa)
+    job->argv = zcl_calloc((size_t)pl->argc + 3u, sizeof *job->argv,
+                           "zcc -E argv");
+    if (!job->argv)
         return false;
     int n = 0;
-    pa[n++] = pl->argv[0];
+    job->argv[n++] = pl->argv[0];
     for (int i = 1; i < pl->argc; i++) {
         if (i == pl->out_idx)
             continue;
@@ -2725,22 +2786,32 @@ static bool preprocess(const struct plan *pl, int src_idx, const char *tmpdir,
             continue;
         if (strncmp(a, "-l", 2) == 0 && a[2])
             continue;
-        pa[n++] = pl->argv[i];
+        job->argv[n++] = pl->argv[i];
     }
-    pa[n++] = (char *)"-E";
-    pa[n] = NULL;
+    job->argv[n++] = (char *)"-E";
+    job->argv[n] = NULL;
 
-    char path[PATH_MAX];
-    snprintf(path, sizeof path, "%.3000s/pp.%d.%d", tmpdir, (int)getpid(),
-             src_idx);
-    int rc = run_argv(pa, path, "/dev/null");
-    free(pa);
-    if (rc != 0) {
-        unlink(path);
+    snprintf(job->path, sizeof job->path, "%.3000s/pp.%d.%d", tmpdir,
+             (int)getpid(), src_idx);
+    job->pid = run_argv_start(job->argv, job->path, "/dev/null");
+    if (job->pid < 0) {
+        unlink(job->path);
+        free(job->argv);
         return false;
     }
-    bool ok = read_file(path, out);
-    unlink(path);
+    return true;
+}
+
+static bool preprocess_finish(struct preprocess_job *job, struct buf *out)
+{
+    int rc = run_argv_wait(job->pid);
+    free(job->argv);
+    if (rc != 0) {
+        unlink(job->path);
+        return false;
+    }
+    bool ok = read_file(job->path, out);
+    unlink(job->path);
     return ok;
 }
 
@@ -2835,35 +2906,70 @@ static void hash_pp(struct sha3_256_ctx *h, const unsigned char *p, size_t len,
     hash_pp_text(h, p, len, rm);
 }
 
+static bool content_first_start(const struct plan *pl, const char *tmpdir,
+                                struct preprocess_job *first)
+{
+    return pl->src_n == 0 ||
+           preprocess_start(pl, pl->src[0], tmpdir, first);
+}
+
+static void content_first_abort(const struct plan *pl,
+                                struct preprocess_job *first)
+{
+    if (pl->src_n == 0)
+        return;
+    struct buf pp = { 0 };
+    (void)preprocess_finish(first, &pp);
+    buf_free(&pp);
+}
+
+static bool content_hash_sources(struct sha3_256_ctx *h, const struct plan *pl,
+                                 const char *tmpdir,
+                                 struct preprocess_job *first, struct deps *d,
+                                 const char *raw, const struct rootmap *rm)
+{
+    for (int i = 0; i < pl->src_n; i++) {
+        struct preprocess_job job = *first;
+        if (i > 0 && !preprocess_start(pl, pl->src[i], tmpdir, &job))
+            return false;
+        struct buf pp = { 0 };
+        if (!preprocess_finish(&job, &pp)) {
+            buf_free(&pp);
+            return false;
+        }
+        deps_scan(d, pp.p, pp.len);
+        hash_mapped_path(h, rm, pl->argv[pl->src[i]], 0u);
+        hash_pp(h, pp.p, pp.len, raw, rm);
+        buf_free(&pp);
+        if (d->failed)
+            return false;
+    }
+    return true;
+}
+
 static bool content_key(const struct plan *pl, const char *tmpdir,
                         const char *cache_root,
                         struct deps *d,
                         char out[HEXLEN + 1u])
 {
+    struct preprocess_job first;
+    if (!content_first_start(pl, tmpdir, &first))
+        return false;
     struct sha3_256_ctx h;
     sha3_256_init(&h);
     hstr(&h, "content");
-    if (!hash_toolchain(&h, pl, cache_root))
+    if (!hash_toolchain(&h, pl, cache_root)) {
+        content_first_abort(pl, &first);
         return false;
+    }
     char cwd[PATH_MAX], recorded[PATH_MAX];
     const char *real = getcwd(cwd, sizeof cwd) ? cwd : NULL;
     const char *raw = real && recorded_cwd(pl, real, recorded) ? real : NULL;
     struct rootmap rm_store;
     const struct rootmap *rm =
         real && root_map(pl, real, &rm_store) ? &rm_store : NULL;
-    for (int i = 0; i < pl->src_n; i++) {
-        struct buf pp = { 0 };
-        if (!preprocess(pl, pl->src[i], tmpdir, &pp)) {
-            buf_free(&pp);
-            return false;
-        }
-        deps_scan(d, pp.p, pp.len);
-        hash_mapped_path(&h, rm, pl->argv[pl->src[i]], 0u);
-        hash_pp(&h, pp.p, pp.len, raw, rm);
-        buf_free(&pp);
-        if (d->failed)
-            return false;
-    }
+    if (!content_hash_sources(&h, pl, tmpdir, &first, d, raw, rm))
+        return false;
     for (int i = 0; i < pl->blob_n; i++) {
         struct buf b = { 0 };
         if (!read_file(pl->argv[pl->blob[i]], &b)) {

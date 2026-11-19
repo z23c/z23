@@ -65,10 +65,7 @@ static int cphw_path(char *buf, size_t cap, const char *rel)
     return ovf(snprintf(buf, cap, "%s/%s", g_cphw_tmp, rel), cap);
 }
 
-/* run_fixture: all three ZCL_CONTROLLER_PRIVATE_* assignments on every
- * inner run, then the gate for real; merge=1 is the call site's
- * `>/dev/null 2>&1`, merge=0 its `>/dev/null` (stderr stays live). */
-static int cphw_fixture(const char *scan_root, int merge, int *code)
+static int cphw_env(const char *scan_root)
 {
     char hroot[4096], base[4096];
     int rc = cphw_path(hroot, sizeof hroot,
@@ -84,6 +81,15 @@ static int cphw_fixture(const char *scan_root, int merge, int *code)
     if (rc == 0
         && setenv("ZCL_CONTROLLER_PRIVATE_BASELINE", base, 1) != 0)
         rc = die("z23-lint: setenv failed\n", "");
+    return rc;
+}
+
+/* run_fixture: all three ZCL_CONTROLLER_PRIVATE_* assignments on every
+ * inner run, then the gate for real; merge=1 is the call site's
+ * `>/dev/null 2>&1`, merge=0 its `>/dev/null` (stderr stays live). */
+static int cphw_fixture(const char *scan_root, int merge, int *code)
+{
+    int rc = cphw_env(scan_root);
     if (rc)
         return rc;
     static char sink[CPHW_SINK];
@@ -250,6 +256,65 @@ static int cphw_phase3(void)
     return rc;
 }
 
+static int cphw_narrow(const char *path, int want)
+{
+    char list[4096], flag[4096 + 32], text[4096];
+    int rc = cphw_env(g_cphw_tmp);
+    if (rc == 0)
+        rc = cphw_path(list, sizeof list, "changed.txt");
+    if (rc == 0)
+        rc = ovf(snprintf(text, sizeof text, "%s\n", path), sizeof text)
+             ? 2 : cphw_write("changed.txt", text);
+    if (rc == 0)
+        rc = ovf(snprintf(flag, sizeof flag, "--changed-files=%s", list),
+                 sizeof flag) ? 2 : 0;
+    if (rc == 0) {
+        char *args[] = { flag, NULL };
+        rc = check_controller_private_headers_run(1, args);
+    }
+    if (rc != want) {
+        fprintf(stderr, "controller-private narrowed case failed: %s rc=%d want=%d\n",
+                path, rc, want);
+        return 1;
+    }
+    return 0;
+}
+
+static int cphw_narrowed(void)
+{
+    static const char pin[] =
+        "config/src/wire.c:#include \"controllers/alpha_internal.h\"\n";
+    int rc = cphw_write_inc("config/src/wire.c", 0);
+    if (rc == 0)
+        rc = cphw_write("empty-baseline.txt", pin);
+    if (rc == 0)
+        rc = cphw_narrow("config/src/wire.c", 0);
+    if (rc == 0)
+        rc = cphw_narrow("config/src/other.c", 0);
+    cphw_rm("config/src/wire.c");
+    if (rc == 0)
+        rc = cphw_narrow("config/src/wire.c", 1);
+    if (rc == 0)
+        rc = cphw_narrow("config/src/other.c", 0);
+    if (rc == 0)
+        rc = cphw_write_inc("config/src/new.c", 0);
+    if (rc == 0)
+        rc = cphw_write("empty-baseline.txt", "");
+    if (rc == 0)
+        rc = cphw_narrow("config/src/new.c", 1);
+    cphw_rm("config/src/new.c");
+    if (rc == 0)
+        rc = cphw_write("empty-baseline.txt", pin);
+    if (rc == 0)
+        rc = cphw_narrow("app/controllers/include/controllers/alpha_internal.h", 1);
+    char baseline[4096];
+    if (rc == 0)
+        rc = cphw_path(baseline, sizeof baseline, "empty-baseline.txt");
+    if (rc == 0)
+        rc = cphw_narrow(baseline, 1);
+    return rc;
+}
+
 /* ── mandatory/optional git-index-extension coverage (root=".") ─────────
  * A synthetic one-entry DIRC index proves the "." collector (p9's fix to
  * cphs_collect in gate_controller_private_headers_scan.c) now refuses a
@@ -388,6 +453,8 @@ int check_controller_private_headers_selftest(void)
         rc = cphw_phase2();
     if (rc == 0)
         rc = cphw_phase3();
+    if (rc == 0)
+        rc = cphw_narrowed();
     if (g_cphw_tmp[0])
         (void)rap_rm_rf(g_cphw_tmp);
     if (rc == 0)

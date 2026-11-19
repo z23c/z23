@@ -1,13 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: gate family — guard-pairing pattern scans of the C23 lint
- * runtime (check-rpc-registrar, check-coins-lookup-nullcheck). Each gate
- * requires a risky bare call to be paired with, or replaced by, a
- * specific guard call.
+ * purpose: gate family — pattern-guard scans of the C23 lint runtime
+ * (check-rpc-registrar, check-coins-lookup-nullcheck, check-pthread-create,
+ * check-silent-error-returns, check-no-gnu-va-args). The rpc/registrar and
+ * coins-lookup gates require a risky bare call to be paired with, or
+ * replaced by, a specific guard call; the pthread/silent-return/va-args
+ * trio shares the two-pattern hit/exclude/prev scanner (struct lg_acc,
+ * pt_pair_comp) moved here from gate_pattern_small.c to keep both family
+ * files under the 1500-line ceiling.
  */
 
 /*
- * Gates: check-rpc-registrar, check-coins-lookup-nullcheck
+ * Gates: check-rpc-registrar, check-coins-lookup-nullcheck,
+ * check-pthread-create, check-silent-error-returns, check-no-gnu-va-args
  * This family exists because gate_pattern_small.c and gate_ratchet_ports.c
  * are in concurrent flight (other lanes), and the remaining families are
  * each within ~350 lines of the 1500-line cap — too tight for two more
@@ -29,6 +34,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 static int pg_pref(const char *path, const char *pref)
 {
@@ -462,3 +468,509 @@ int check_coins_lookup_nullcheck_selftest(void)
     (void)rap_rm_rf(tmp);
     return st_ok(bad, "check_coins_lookup_nullcheck selftest: OK\n");
 }
+
+struct lg_acc {
+    regex_t *hit;
+    regex_t *excl;
+    regex_t *prev;
+    const char *skip_sub;
+    const char *skip_eq;
+    int hits;
+    /* Optional shrink-only-baseline recording: when sym is set, every hit
+     * also adds "<path>:<sym>" to *found (once per file). NULL for callers
+     * that FAIL on any hit instead of ratcheting a baseline. */
+    const char *sym;
+    struct bln_set *found;
+    int files;
+};
+
+static int lg_got(const regex_t *hit, const regex_t *excl, const regex_t *prev,
+                  const char *p, const char *s);
+
+/* Baseline-record one hit at `path` (a->sym set) into *a->found, as
+ * "<path>:<sym>"; a no-op for callers that FAIL on any hit instead. */
+static int lg_record_hit(struct lg_acc *a, const char *path)
+{
+    if (!a->sym)
+        return 0;
+    char key[BLN_ROW];
+    if (ovf(snprintf(key, sizeof key, "%s:%s", path, a->sym), sizeof key))
+        return 2;
+    return bln_add(a->found, key);
+}
+
+static int lg_scan_at(const char *open_path, const char *logical, struct lg_acc *a)
+{
+    if ((a->skip_sub && strstr(logical, a->skip_sub) != NULL)
+        || (a->skip_eq && strcmp(logical, a->skip_eq) == 0))
+        return 0;
+    a->files++;
+    FILE *f = fopen(open_path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", open_path);
+    char *buf[2] = { NULL, NULL };
+    size_t cap[2] = { 0, 0 };
+    int cur = 0, lineno = 0, rc = 0;
+    ssize_t n;
+    while ((n = getline(&buf[cur], &cap[cur], f)) >= 0) {
+        char *line = buf[cur];
+        lineno++;
+        const char *prevline = lineno > 1 ? buf[1 - cur] : NULL;
+        if (lg_got(a->hit, a->excl, a->prev, prevline, line)) {
+            if (n > 0 && line[n - 1] == '\n')
+                line[n - 1] = '\0';
+            if (fprintf(stdout, "%s:%d:%s\n", logical, lineno, line) < 0) {
+                rc = die("z23-lint: write failed\n", "");
+                break;
+            }
+            a->hits++;
+            rc = lg_record_hit(a, logical);
+            if (rc)
+                break;
+        }
+        cur = 1 - cur;
+    }
+    rc = fin(f, NULL, open_path, rc);
+    free(buf[0]);
+    free(buf[1]);
+    return rc;
+}
+
+static int scan_lg(const char *path, void *ctx)
+{
+    return lg_scan_at(path, path, ctx);
+}
+
+static int lg_got(const regex_t *hit, const regex_t *excl, const regex_t *prev,
+                  const char *p, const char *s)
+{
+    if (regexec(hit, s, 0, NULL, 0) != 0)
+        return 0;
+    if (regexec(excl, s, 0, NULL, 0) == 0)
+        return 0;
+    if (p && regexec(prev, p, 0, NULL, 0) == 0)
+        return 0;
+    return 1;
+}
+
+static int lg_want(const char *tag, const regex_t *hit, const regex_t *excl,
+                   const regex_t *prev, const char *p, const char *s, int w)
+{
+    if (lg_got(hit, excl, prev, p, s) != w) {
+        fprintf(stderr, "%s selftest: want %d: %s\n", tag, w, s);
+        return 1;
+    }
+    return 0;
+}
+
+/* The regex strings of the two-pattern gates, and the one shared compile:
+ * a hit pattern, then the exclude/prev pair, freeing the hit regex when
+ * the pair fails. The strings live in tables so each gate's comp wrapper
+ * stays data, not a duplicated body. */
+struct pt_pair_pats {
+    const char *hit[4];
+    const char *excl[4];
+    const char *prev[4];
+};
+
+static int pt_pair_comp(regex_t *hit, regex_t *excl, regex_t *prev,
+                        const struct pt_pair_pats *pats)
+{
+    int cr = compile_pat(hit, REG_EXTENDED, pats->hit[0], pats->hit[1],
+                         pats->hit[2], pats->hit[3]);
+    if (cr)
+        return cr;
+    cr = pair_comp(excl, REG_EXTENDED, pats->excl[0], pats->excl[1],
+                   pats->excl[2], pats->excl[3], prev, REG_EXTENDED,
+                   pats->prev[0], pats->prev[1], pats->prev[2],
+                   pats->prev[3]);
+    if (cr)
+        regfree(hit);
+    return cr;
+}
+
+static const struct pt_pair_pats k_pt_pats = {
+    { "pthread_create", "[[:space:]]*\\(", "", "" },
+    { "thread_registry_spawn", "|thread_registry_trampoline",
+      "|raw-pthread-ok", "" },
+    { "raw-pthread-ok", "", "", "" }
+};
+
+static int pt_comp(regex_t *hit, regex_t *excl, regex_t *prev)
+{
+    return pt_pair_comp(hit, excl, prev, &k_pt_pats);
+}
+
+static const char k_pt_baseline[] = "tools/lint/pthread_create_baseline.txt";
+
+/* Production C roots — "lib" and "config" were dead (renamed away); the
+ * gate silently scanned only "app" (also dead) and "tools", i.e. nothing
+ * of substance, and reported clean. See malloc_baseline.txt for the same
+ * root-rename story. */
+/* NULL-terminated for the shared lint_narrow_roots_prefix hook; the walk
+ * loops use PT_NROOTS, not the sizeof count. */
+enum { PT_NROOTS = 6 };
+static const char *const k_pt_roots[PT_NROOTS + 1] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools", NULL
+};
+
+/* Measured 2026-09-06: 2644 .c files under the production roots. */
+enum { PT_SCAN_FLOOR = 2400 };
+
+/* pt_path_form/pt_repo/pt_under_roots bodies live in the shared narrowing
+ * hooks (lint_narrow_hook.h); the selftest keeps calling the under-roots
+ * symbol. */
+static const char *pt_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form_opt(path, repo);
+}
+
+static int pt_repo(const struct lint_changed *ch, char out[4096],
+                   const char **repo)
+{
+    return lint_narrow_repo_opt(ch, out, repo);
+}
+
+static int pt_under_roots(const char *path)
+{
+    return lint_narrow_roots_prefix(path, k_pt_roots);
+}
+
+static int pt_selected_file(const char *root, const char *path, struct lg_acc *a)
+{
+    char full[4096];
+    struct stat st;
+    if (ovf(snprintf(full, sizeof full, "%s/%s", root, path), sizeof full))
+        return die("z23-lint: path too long: %s\n", path);
+    if (lstat(full, &st) != 0)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot stat %s\n", full);
+    if (!S_ISREG(st.st_mode))
+        return 0;
+    return lg_scan_at(full, path, a);
+}
+
+static int pt_scan_selected(const char *root, const struct lint_changed *ch,
+                            const char *repo, struct lg_acc *a)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < ch->n; i++) {
+        const char *path = pt_path_form(ch->path[i], repo);
+        size_t n = strlen(path);
+        if (n >= 2 && path[n - 2] == '.' && path[n - 1] == 'c' &&
+            pt_under_roots(path))
+            rc = pt_selected_file(root, path, a);
+    }
+    return rc;
+}
+
+static int pt_base_narrow(struct bln_set *base, const struct lint_changed *ch,
+                          const char *repo)
+{
+    struct bln_set selected = {0};
+    for (int i = 0; i < base->count; i++) {
+        for (int k = 0; k < ch->n; k++) {
+            const char *path = pt_path_form(ch->path[k], repo);
+            size_t n = strlen(path);
+            if (strncmp(base->n[i], path, n) == 0 && base->n[i][n] == ':') {
+                int rc = bln_add(&selected, base->n[i]);
+                if (rc)
+                    return rc;
+                break;
+            }
+        }
+    }
+    *base = selected;
+    return 0;
+}
+
+/* The narrowing-hook descriptor: pt's repo-optional resolver and path
+ * form steer the shared lint_narrow_ok baseline compare. */
+static const struct lint_narrow_gate k_pt_narrow_gate = {
+    "check-pthread-create", NULL, pt_path_form, NULL, pt_repo, NULL, 0
+};
+
+static int pt_narrow_ok(const struct lint_changed *ch)
+{
+    return lint_narrow_ok(ch, k_pt_baseline, &k_pt_narrow_gate);
+}
+
+static int pt_scan_report(const char *root, const char *base_path,
+                          const struct lint_changed *narrow)
+{
+    regex_t hit, excl, prev;
+    int cr = pt_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    struct bln_set base = {0}, found = {0};
+    int rc = bln_load(&base, base_path);
+    char repo_buf[4096];
+    const char *repo = NULL;
+    if (rc == 0 && narrow)
+        rc = pt_repo(narrow, repo_buf, &repo);
+    if (rc == 0 && narrow)
+        rc = pt_base_narrow(&base, narrow, repo);
+    struct lg_acc a = {
+        .hit = &hit, .excl = &excl, .prev = &prev,
+        .skip_sub = "tests/harness/include/test/",
+        .skip_eq = "platform/modules/util/src/thread_registry.c",
+        .hits = 0, .sym = "pthread_create", .found = &found
+    };
+    if (rc == 0 && narrow) {
+        rc = pt_scan_selected(root, narrow, repo, &a);
+        if (rc == 0 && lint_examined_print(a.files, 0) < 0)
+            rc = 2;
+    }
+    for (size_t i = 0; rc == 0 && !narrow && i < (size_t)PT_NROOTS; i++)
+        rc = walk_src_root("check-pthread-create", k_pt_roots[i], 0, scan_lg, &a);
+    if (rc == 0)
+        rc = bln_diff_report(stderr, "check-pthread-create", base_path, &base, &found);
+    if (rc == 0)
+        fputs("  OK: every raw pthread_create site is pinned in "
+              "tools/lint/pthread_create_baseline.txt (shrink-only)\n", stdout);
+    drop3(&hit, &excl, &prev);
+    return rc;
+}
+
+int check_pthread_create_run(int argc, char **argv)
+{
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
+    const struct lint_changed *narrow = pt_narrow_ok(&changed) ? &changed : NULL;
+    int rc = 0;
+    if (!narrow) {
+        int nfiles = 0;
+        rc = walk_count_roots("check-pthread-create", k_pt_roots,
+                              (size_t)PT_NROOTS, 0,
+                              &nfiles);
+        if (rc == 0)
+            rc = gate_require_scanned(nfiles, PT_SCAN_FLOOR, "check-pthread-create",
+                                      "scanned far fewer .c files than expected "
+                                      "under the production roots");
+    }
+    if (rc == 0)
+        rc = pt_scan_report(".", k_pt_baseline, narrow);
+    lint_changed_free(&changed);
+    return rc;
+}
+
+static int pt_st_case(const char *root, const char *path, const char *body,
+                      const char *baseline, int want_rc)
+{
+    char full[4096], base[4096];
+    if (ovf(snprintf(base, sizeof base, "%s/baseline.txt", root), sizeof base) ||
+        csr_write(base, baseline))
+        return 1;
+    if (body && (ovf(snprintf(full, sizeof full, "%s/%s", root, path),
+                            sizeof full) || csr_write(full, body)))
+        return 1;
+    char *paths[] = { (char *)path };
+    struct lint_changed one = { paths, 1, 1 };
+    int rc = pt_scan_report(root, base, &one);
+    if (rc != want_rc)
+        fprintf(stderr, "pthread narrowed case failed: %s rc=%d want=%d\n",
+                path, rc, want_rc);
+    return rc != want_rc;
+}
+
+static int pt_st_narrow(void)
+{
+    static const char bad_src[] =
+        "int f(void) { pthread_crea" "te(&t, 0, f, 0); return 0; }\n";
+    static const char clean_src[] = "int f(void) { return 0; }\n";
+    static const struct {
+        const char *path, *body, *baseline;
+        int want;
+    } cases[] = {
+        { "docs/README.md", NULL, "", 0 },
+        { "engine/x/bad.c", bad_src, "", 2 },
+        { "engine/x/bad.c", bad_src, "engine/x/bad.c:pthread_create\n", 0 },
+        { "engine/x/bad.c", clean_src, "engine/x/bad.c:pthread_create\n", 2 },
+        { "gone.c", NULL, "gone.c:pthread_create\n", 2 },
+        { "platform/modules/util/src/thread_registry.c", bad_src, "", 0 },
+        { "engine/x/bad.h", bad_src, "", 0 },
+        { "engine/missing.c", NULL, "", 0 },
+    };
+    char root[4096];
+    if (lint_mkdtemp(root, sizeof root, "pt-narrow") != 0)
+        return 1;
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        bad |= pt_st_case(root, cases[i].path, cases[i].body,
+                          cases[i].baseline, cases[i].want);
+    char *baseline_path[] = { (char *)k_pt_baseline };
+    struct lint_changed baseline = { baseline_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    bad |= pt_narrow_ok(&baseline) || !pt_narrow_ok(&empty);
+    bad |= rap_rm_rf(root);
+    return bad;
+}
+
+int check_pthread_create_selftest(void)
+{
+    regex_t hit, excl, prev;
+    int cr = pt_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    const char *t = "check_pthread_create";
+    int bad = lg_want(t, &hit, &excl, &prev, NULL,
+                      "    pthread_crea" "te(&t, 0, f, 0);", 1)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    thread_registry_spawn(...)", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    pthread_crea" "te(&t, 0, f, 0); // raw-pthread-ok: x", 0)
+            | lg_want(t, &hit, &excl, &prev, "// raw-pthread-ok: startup",
+                      "pthread_crea" "te(", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "my_pthread_create_wrapper(", 0);
+    bad |= require_scan_root("check-pthread-create", "lib") == 0;
+    bad |= pt_st_narrow();
+    drop3(&hit, &excl, &prev);
+    return st_ok(bad, "check_pthread_create selftest: OK\n");
+}
+
+static const struct pt_pair_pats k_ser_pats = {
+    { "return -1;", "", "", "" },
+    { "LOG_ERR|LOG_FAIL|LOG_RETURN|log_json",
+      "|(//|/\\*) raw-return-ok:[A-Za-z][A-Za-z0-9_-]+", "", "" },
+    { "LOG_ERR|LOG_FAIL|LOG_RETURN|", "log_json.*error", "", "" }
+};
+
+static int ser_comp(regex_t *hit, regex_t *excl, regex_t *prev)
+{
+    return pt_pair_comp(hit, excl, prev, &k_ser_pats);
+}
+
+int check_silent_error_returns_run(int argc, char **argv)
+{
+    if (argc < 4)
+        return die("usage: check_silent_error_returns.sh <scan-dir> <fail-label> <ok-label> <fix-hint>\n",
+                   "");
+    regex_t hit, excl, prev;
+    int cr = ser_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    struct lg_acc a = {
+        .hit = &hit, .excl = &excl, .prev = &prev,
+        .skip_sub = NULL, .skip_eq = NULL, .hits = 0
+    };
+    int rc = walk_src(argv[0], 0, scan_lg, &a);
+    if (rc == 0 && a.hits) {
+        printf("FAIL: silent error returns found in %s (%s)\n", argv[1], argv[3]);
+        rc = 1;
+    } else if (rc == 0) {
+        printf("  OK: all %s error returns logged\n", argv[2]);
+    }
+    drop3(&hit, &excl, &prev);
+    return rc;
+}
+
+int check_silent_error_returns_selftest(void)
+{
+    regex_t hit, excl, prev;
+    int cr = ser_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    const char *t = "check_silent_error_returns";
+    int bad = lg_want(t, &hit, &excl, &prev, NULL, "    return -1;", 1)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    LOG_ERR(\"x\"); return -1;", 0)
+            | lg_want(t, &hit, &excl, &prev, "    LOG_FAIL(\"bad\");",
+                      "    return -1;", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    return -1; // raw-return-ok:reason_1", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    return -1; // raw-return-ok:", 1)
+            | lg_want(t, &hit, &excl, &prev, "    log_json(\"error\", ...)",
+                      "    return -1;", 0)
+            | lg_want(t, &hit, &excl, &prev, "    log_json(\"info\", ...)",
+                      "    return -1;", 1);
+    drop3(&hit, &excl, &prev);
+    return st_ok(bad, "check_silent_error_returns selftest: OK\n");
+}
+
+static const struct pt_pair_pats k_va_pats = {
+    { ",[[:space:]]*##", "[[:space:]]*", "__VA", "_ARGS__" },
+    { "gnu-va-args-ok", "", "", "" },
+    { "gnu-va-args-ok", "", "", "" }
+};
+
+static int va_comp(regex_t *hit, regex_t *excl, regex_t *prev)
+{
+    return pt_pair_comp(hit, excl, prev, &k_va_pats);
+}
+
+static const char k_va_baseline[] = "tools/lint/gnu_va_args_baseline.txt";
+
+/* Production C roots — this gate used to walk two engine/platform
+ * sub-directories plus four dead tokens (app config lib domain src) and
+ * missed engine/{composition,controllers,entry,models,services,supervisors,
+ * conditions,jobs,modules,...} and most of contexts/cognition/platform
+ * entirely. Re-rooted onto the full production tree. */
+static const char *const k_va_roots[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools"
+};
+
+/* Measured 2026-09-06 under the production roots (.c+.h): 4337 files. */
+enum { VA_SCAN_FLOOR = 4000 };
+
+int check_no_gnu_va_args_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    int nfiles = 0;
+    int rc = walk_count_roots("check-no-gnu-va-args", k_va_roots,
+                              sizeof k_va_roots / sizeof k_va_roots[0], 1,
+                              &nfiles);
+    if (rc == 0)
+        rc = gate_require_scanned(nfiles, VA_SCAN_FLOOR, "check-no-gnu-va-args",
+                                  "scanned far fewer .c/.h files than expected "
+                                  "under the production roots");
+    if (rc) return rc;
+    regex_t hit, excl, prev;
+    int cr = va_comp(&hit, &excl, &prev);
+    if (cr) return cr;
+    struct bln_set base = {0}, found = {0};
+    rc = bln_load(&base, k_va_baseline);
+    if (rc) {
+        drop3(&hit, &excl, &prev);
+        return rc;
+    }
+    struct lg_acc a = {
+        .hit = &hit, .excl = &excl, .prev = &prev, .hits = 0,
+        .sym = "gnu-va-args", .found = &found
+    };
+    for (size_t i = 0; rc == 0 && i < sizeof k_va_roots / sizeof k_va_roots[0]; i++)
+        rc = walk_src_root("check-no-gnu-va-args", k_va_roots[i], 1, scan_lg, &a);
+    if (rc == 0)
+        rc = bln_diff_report(stderr, "check-no-gnu-va-args", k_va_baseline, &base, &found);
+    if (rc == 0)
+        fputs("  OK: every GNU comma-swallowing __VA_ARGS__ site is pinned in "
+              "tools/lint/gnu_va_args_baseline.txt (shrink-only)\n", stdout);
+    drop3(&hit, &excl, &prev);
+    return rc;
+}
+
+int check_no_gnu_va_args_selftest(void)
+{
+    regex_t hit, excl, prev;
+    int cr = va_comp(&hit, &excl, &prev);
+    if (cr) return cr;
+    const char *t = "check_no_gnu_va_args";
+    char h[72], m[88];
+    if (snprintf(h, sizeof h, "    fprintf(stderr, fmt, ##%s", "__VA_ARGS__);")
+            >= (int)sizeof h
+        || snprintf(m, sizeof m, "%s // gnu-va-args-ok: legacy", h) >= (int)sizeof m) {
+        drop3(&hit, &excl, &prev);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    int bad = lg_want(t, &hit, &excl, &prev, NULL, h, 1)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    LOG_ERR(fmt __VA_OPT__(,) __VA_ARGS__);", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL, m, 0)
+            | lg_want(t, &hit, &excl, &prev, "// gnu-va-args-ok: legacy", h, 0)
+            | lg_want(t, &hit, &excl, &prev, NULL, "    x = a ## b;", 0);
+    bad |= require_scan_root("check-no-gnu-va-args", "domain") == 0;
+    drop3(&hit, &excl, &prev);
+    return st_ok(bad, "check_no_gnu_va_args selftest: OK\n");
+}
+

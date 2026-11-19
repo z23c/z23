@@ -7,6 +7,9 @@
  * gate_zcc_cache_{core,stage,tools,flight,boot}.c over gate_zcc_cache_util.c.
  * The macOS backend-selection block of the original is not ported: it only
  * ran on Darwin and needs a Mac to prove. Selftest: gate_zcc_cache_selftest.c.
+ * With --changed-files, unrelated inputs skip the expensive suite and report
+ * zero examined files. Any lint-runtime, cache, bootstrap or catalog-listed
+ * dependency runs every section; make lint and land proof always run them all.
  */
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE 1
@@ -71,11 +74,61 @@ static int zc_sections_run(void)
     return 0;
 }
 
+static int zc_prefix(const char *path, const char *prefix)
+{
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+static int zc_catalog_relevant(const struct lint_changed *ch)
+{
+    FILE *f = fopen("tools/dev/zcc-bootstrap-inputs.list", "r");
+    if (!f)
+        return 1;
+    char line[4096];
+    int relevant = 0;
+    while (!relevant && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0] || strncmp(line, "license=", 8) == 0)
+            continue;
+        for (int i = 0; i < ch->n; i++)
+            if (strcmp(line, ch->path[i]) == 0) {
+                relevant = 1;
+                break;
+            }
+    }
+    if (ferror(f))
+        relevant = 1;
+    fclose(f);
+    return relevant;
+}
+
+int zc_changed_relevant(const struct lint_changed *ch)
+{
+    if (!ch->active)
+        return 1;
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = ch->path[i];
+        if (zc_prefix(path, "tools/lint/lintc/") ||
+            zc_prefix(path, "tools/dev/zcc_") ||
+            zc_prefix(path, "tools/dev/build-epoch-") ||
+            strcmp(path, "tools/dev/zcc-bootstrap-inputs.list") == 0 ||
+            strcmp(path, "tools/zcc.c") == 0 || strcmp(path, "Makefile") == 0)
+            return 1;
+    }
+    return zc_catalog_relevant(ch);
+}
+
 int check_zcc_cache_run(int argc, char **argv)
 {
     struct utsname un;
-    (void)argc;
-    (void)argv;
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
+    if (!zc_changed_relevant(&ch)) {
+        lint_changed_free(&ch);
+        return lint_examined_print(0, 0) < 0 ? 2 : 0;
+    }
+    lint_changed_free(&ch);
     unsetenv("ZCC_VERIFIED");
     if (uname(&un) == 0 && strncmp(un.sysname, "MINGW", 5) == 0) {
         puts("check_zcc_cache: SKIP — POSIX compile-cache process backend is unavailable on native Windows");

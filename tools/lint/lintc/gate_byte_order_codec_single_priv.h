@@ -48,6 +48,8 @@ int bo_pathspec_msg(const char roots[][RS_PATH], int nroots, char *out,
  * missing == allowance passes (0). */
 int bo_coverage_check(const struct bo_pathset *scan, int allowance, FILE *err);
 
+struct lint_changed;
+
 struct bo_eval_opts {
     char roots[256][RS_PATH];
     int nroots;
@@ -56,8 +58,12 @@ struct bo_eval_opts {
     int floor;
     int coverage;
     int coverage_allowance;
+    const struct lint_changed *changed;
 };
 
+int bo_collect_changed(const char roots[][RS_PATH], int nroots,
+                       const struct lint_changed *ch, struct bo_pathset *set);
+int bo_narrow_ok(const struct lint_changed *ch, const char *baseline);
 int bo_eval(const struct bo_eval_opts *opts, FILE *out, FILE *err);
 
 #endif

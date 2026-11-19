@@ -36,11 +36,13 @@
 #include <sys/stat.h>
 #include "lintc.h"
 #include "gate_sqlite_step_row_priv.h"
+#include "lint_narrow_hook.h"
 
 static const char k_ssr_gate[] = "check-sqlite-step-row";
 static const char k_ssr_base_default[] = "tools/lint/sqlite_step_row_baseline.txt";
 static const char *const k_ssr_roots[] = {
-    "core", "engine", "contexts", "cognition", "platform", "apps", "tools"
+    "core", "engine", "contexts", "cognition", "platform", "apps", "tools",
+    NULL
 };
 static const char *const k_ssr_skip_dirs[] = {
     "tests", "vendor", "build", ".git"
@@ -308,7 +310,7 @@ int ssr_collect(const char *root, struct ssr_set *live, int *files)
 {
     struct ssr_walk w = { root, live, 0 };
     live->n = 0;
-    for (size_t i = 0; i < sizeof k_ssr_roots / sizeof k_ssr_roots[0]; i++) {
+    for (size_t i = 0; k_ssr_roots[i]; i++) {
         int rc = ssr_walk_dir(&w, k_ssr_roots[i]);
         if (rc)
             return rc;
@@ -319,24 +321,144 @@ int ssr_collect(const char *root, struct ssr_set *live, int *files)
 
 /* ── the gate ────────────────────────────────────────────────────────────── */
 
+/* ssr_path_form/ssr_under_roots bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+
+static int ssr_changed_excluded(const char *path)
+{
+    static const char *const parts[] = { "/tests/", "/vendor/", "/build/", "/.git/" };
+    for (size_t i = 0; i < sizeof parts / sizeof parts[0]; i++)
+        if (strstr(path, parts[i]) != NULL)
+            return 1;
+    return strncmp(path, "contexts/commons/corpus/",
+                   sizeof "contexts/commons/corpus/" - 1) == 0;
+}
+
+static int ssr_changed_file(const char *root, const char *path,
+                            struct ssr_set *live, int *files)
+{
+    char full[4096];
+    struct stat st;
+    if (ovf(snprintf(full, sizeof full, "%s/%s", root, path), sizeof full))
+        return die("z23-lint: check-sqlite-step-row: path too long: %s\n", path);
+    if (lstat(full, &st) != 0)
+        return errno == ENOENT ? 0
+             : die("z23-lint: check-sqlite-step-row: cannot stat %s\n", full);
+    if (!S_ISREG(st.st_mode))
+        return 0;
+    int count = 0;
+    int rc = ssr_count_file(full, &count);
+    (*files)++;
+    return rc ? rc : count > 0 ? ssr_set_put(live, path, count) : 0;
+}
+
+/* ── the shared narrowing hooks (lint_narrow_hook.h) ───────────────────── */
+
+struct ssr_narrow {
+    const char *root;
+    struct ssr_set *live;
+    int *files;
+};
+
+static int ssr_collect_skip(void *vctx, const char *path)
+{
+    (void)vctx;
+    const char *slash = strrchr(path, '/');
+    const char *nm = slash ? slash + 1 : path;
+    return !lint_narrow_roots_prefix(path, k_ssr_roots) ||
+           ssr_changed_excluded(path) ||
+           !ssr_is_source(nm);
+}
+
+static int ssr_collect_emit(void *vctx, const char *path)
+{
+    struct ssr_narrow *c = vctx;
+    return ssr_changed_file(c->root, path, c->live, c->files);
+}
+
+static const char *g_ssr_narrow_repo;
+
+static int ssr_key_match(const char *key, const char *path)
+{
+    return strcmp(key, lint_narrow_repo_form(path, g_ssr_narrow_repo)) == 0;
+}
+
+static const struct lint_narrow_gate k_ssr_narrow_gate = {
+    k_ssr_gate, NULL, lint_narrow_repo_form, NULL, NULL, ssr_collect_skip, 0
+};
+
+int ssr_collect_changed(const char *root, const struct lint_changed *ch,
+                        struct ssr_set *live, int *files)
+{
+    char repo[4096];
+    struct ssr_narrow ctx = { root, live, files };
+    live->n = 0;
+    *files = 0;
+    return lint_narrow_collect(ch, repo, &k_ssr_narrow_gate, ssr_collect_emit,
+                               &ctx);
+}
+
+int ssr_base_narrow(struct ssr_set *base, const struct lint_changed *ch)
+{
+    char repo[4096];
+    if (cic_repo_root(repo, sizeof repo) != 0)
+        return 2;
+    g_ssr_narrow_repo = repo;
+    base->n = lint_narrow_filter_keys((const char *const *)ch->path, ch->n,
+                                      (const char **)base->rows, base->n,
+                                      (int)sizeof base->rows[0], ssr_key_match);
+    g_ssr_narrow_repo = NULL;
+    return 0;
+}
+
+int ssr_narrow_ok(const struct lint_changed *ch, const char *baseline)
+{
+    return lint_narrow_ok(ch, baseline, &k_ssr_narrow_gate);
+}
+
+static int ssr_scan(int narrow, const struct lint_changed *ch,
+                    struct ssr_set *live, int *files)
+{
+    int rc;
+    if (narrow) {
+        rc = ssr_collect_changed(".", ch, live, files);
+        if (rc == 0 && lint_examined_print(*files, 0) < 0)
+            rc = 2;
+        return rc;
+    }
+    rc = ssr_collect(".", live, files);
+    if (rc)
+        return rc;
+    return gate_require_scanned(*files, SSR_SCAN_FLOOR, k_ssr_gate,
+                                "no .c/.h under core engine contexts cognition "
+                                "platform apps tools");
+}
+
 int check_sqlite_step_row_run(int argc, char **argv)
 {
     static struct ssr_set live, base;
     int files = 0;
-    (void)argc;
-    (void)argv;
-    int rc = ssr_collect(".", &live, &files);
-    if (rc)
-        return rc;
-    rc = gate_require_scanned(files, SSR_SCAN_FLOOR, k_ssr_gate,
-                              "no .c/.h under core engine contexts cognition "
-                              "platform apps tools");
-    if (rc)
-        return rc;
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
     const char *mode = clock_mode();
-    if (strcmp(mode, "UPDATE") == 0)
+    if (ch.active && strcmp(mode, "UPDATE") == 0) {
+        fputs("check-sqlite-step-row: --changed-files cannot rewrite the baseline\n",
+              stderr);
+        lint_changed_free(&ch);
+        return 2;
+    }
+    int narrow = ssr_narrow_ok(&ch, k_ssr_base_default);
+    int rc = ssr_scan(narrow, &ch, &live, &files);
+    if (rc == 0 && strcmp(mode, "UPDATE") == 0) {
+        lint_changed_free(&ch);
         return ssr_write_baseline(&live, k_ssr_base_default, stdout);
-    rc = ssr_load_baseline(&base, k_ssr_base_default);
+    }
+    if (rc == 0)
+        rc = ssr_load_baseline(&base, k_ssr_base_default);
+    if (rc == 0 && narrow)
+        rc = ssr_base_narrow(&base, &ch);
+    lint_changed_free(&ch);
     if (rc)
         return rc;
     return ssr_report(&live, &base, k_ssr_base_default, files, stdout);

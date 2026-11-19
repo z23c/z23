@@ -36,7 +36,8 @@ int precheck_base_store(const struct precheck_base *b,
                         const char *const *names, const int *rcs, size_t n);
 /* git with an argv array (NULL-terminated args), run in dir (NULL = cwd).
  * stdout goes to out (NUL-terminated, trailing whitespace trimmed; out may be
- * NULL); stderr is discarded. Returns the exit code, -1 on spawn failure. */
+ * NULL); stderr is discarded. Returns the exit code, -1 on spawn/read failure
+ * or stdout overflow. */
 int precheck_base_git(const char *dir, const char *const *args, char *out,
                       size_t cap);
 

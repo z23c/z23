@@ -105,7 +105,7 @@ static const char k_bo_st_canonical[] =
     "}\n";
 
 static int bo_st_run(const char *root, const char *baseline, int floor,
-                     int *rc_out)
+                     const struct lint_changed *changed, int *rc_out)
 {
     struct bo_eval_opts opts = {0};
     if (ovf(snprintf(opts.roots[0], RS_PATH, "%s", root), RS_PATH))
@@ -116,6 +116,7 @@ static int bo_st_run(const char *root, const char *baseline, int floor,
     opts.floor = floor;
     opts.coverage = 0;
     opts.coverage_allowance = 0;
+    opts.changed = changed;
     FILE *out = tmpfile();
     if (!out)
         return die("z23-lint: tmpfile failed\n", "");
@@ -135,7 +136,7 @@ static int bo_st_expect(const char *engine_root, const char *baseline,
     if (csr_write(fixture, body))
         return 1;
     int rc = 0;
-    if (bo_st_run(engine_root, baseline, 1, &rc))
+    if (bo_st_run(engine_root, baseline, 1, NULL, &rc))
         return 1;
     int got_fail = rc != 0;
     return (got_fail != want_fail) ? 1 : 0;
@@ -203,6 +204,136 @@ static int bo_st_coverage(void)
     return bad;
 }
 
+static int bo_st_verdict(const char *root, const char *baseline,
+                         const struct lint_changed *ch, int want,
+                         const char *label)
+{
+    int rc = 0;
+    if (bo_st_run(root, baseline, 1, ch, &rc) || rc != want) {
+        fprintf(stderr, "byte-order %s failed rc=%d want=%d\n", label, rc, want);
+        return 1;
+    }
+    return 0;
+}
+
+static int bo_st_baseline_paths(const char *repo)
+{
+    char *dot_path[] = { "./tools/lint/byte_order_codec_baseline.txt" };
+    struct lint_changed dot = { dot_path, 1, 1 };
+    if (bo_narrow_ok(&dot, dot_path[0]))
+        return 1;
+    char absolute[4096];
+    if (ovf(snprintf(absolute, sizeof absolute, "%s/tools/lint/byte_order_codec_baseline.txt", repo),
+              sizeof absolute))
+        return 1;
+    char *relative_path[] = { "tools/lint/byte_order_codec_baseline.txt" };
+    struct lint_changed relative = { relative_path, 1, 1 };
+    return bo_narrow_ok(&relative, absolute);
+}
+
+static int bo_st_root_paths(const char *repo)
+{
+    char *trailing_path[] = { "./engine/entry/main.c" };
+    struct lint_changed trailing = { trailing_path, 1, 1 };
+    char roots[1][RS_PATH] = { "engine/" };
+    struct bo_pathset selected;
+    if (bo_collect_changed(roots, 1, &trailing, &selected) != 0 || selected.n != 1)
+        return 1;
+    char absolute_source[4096], absolute_root[1][RS_PATH];
+    if (ovf(snprintf(absolute_source, sizeof absolute_source, "%s/engine/entry/main.c", repo),
+              sizeof absolute_source) ||
+        ovf(snprintf(absolute_root[0], RS_PATH, "%s/engine", repo), RS_PATH))
+        return 1;
+    char *absolute_paths[] = { absolute_source };
+    struct lint_changed absolute_change = { absolute_paths, 1, 1 };
+    if (bo_collect_changed(absolute_root, 1, &absolute_change, &selected) != 0 ||
+        selected.n != 1)
+        return 1;
+    char slash_root[1][RS_PATH] = { "/" };
+    if (bo_collect_changed(slash_root, 1, &trailing, &selected) != 0 || selected.n != 1)
+        return 1;
+    char dot_root[1][RS_PATH] = { "." };
+    if (bo_collect_changed(dot_root, 1, &trailing, &selected) != 0 || selected.n != 1)
+        return 1;
+    char dot_slash_root[1][RS_PATH] = { "./" };
+    if (bo_collect_changed(dot_slash_root, 1, &trailing, &selected) != 0 || selected.n != 1)
+        return 1;
+    char repo_root[1][RS_PATH];
+    if (ovf(snprintf(repo_root[0], RS_PATH, "%s", repo), RS_PATH))
+        return 1;
+    return bo_collect_changed(repo_root, 1, &trailing, &selected) != 0 || selected.n != 1;
+}
+
+static int bo_st_outside_path(void)
+{
+    char *outside_path[] = { "/usr/include/stdio.h" };
+    struct lint_changed outside = { outside_path, 1, 1 };
+    char dot_root[1][RS_PATH] = { "." };
+    struct bo_pathset selected;
+    return bo_collect_changed(dot_root, 1, &outside, &selected) != 0 ||
+           selected.n != 0;
+}
+
+static int bo_st_path_guards(void)
+{
+    char repo[4096];
+    if (cic_repo_root(repo, sizeof repo) != 0)
+        return 1;
+    return bo_st_baseline_paths(repo) || bo_st_root_paths(repo) ||
+           bo_st_outside_path();
+}
+
+static int bo_st_selected(const char *root, const char *baseline,
+                          const struct lint_changed *one)
+{
+    if (csr_write(one->path[0], k_bo_st_shift_store) ||
+        bo_st_verdict(root, baseline, one, 1, "selected violation") != 0)
+        return 1;
+    char row[4096];
+    if (ovf(snprintf(row, sizeof row, "%s\n", one->path[0]), sizeof row) ||
+        csr_write(baseline, row) ||
+        bo_st_verdict(root, baseline, one, 0, "selected baseline") != 0)
+        return 1;
+    return csr_write(one->path[0], k_bo_st_canonical) == 0 &&
+           bo_st_verdict(root, baseline, one, 1, "selected stale baseline") == 0 ? 0 : 1;
+}
+
+static int bo_st_narrowed(const char *tmp)
+{
+    char root[4096], baseline[4096], fixture[4096];
+    if (ovf(snprintf(root, sizeof root, "%s/engine", tmp), sizeof root) ||
+        ovf(snprintf(baseline, sizeof baseline, "%s/narrow-baseline.txt", tmp),
+              sizeof baseline) ||
+        ovf(snprintf(fixture, sizeof fixture, "%s/services/src/selftest_le.c", root),
+              sizeof fixture))
+        return 1;
+    if (csr_mkdirs(root) || csr_write(baseline, "services/src/other.c\n") ||
+        csr_write(fixture, k_bo_st_canonical))
+        return 1;
+    char *one_path[] = { fixture };
+    struct lint_changed one = { one_path, 1, 1 };
+    char roots[1][RS_PATH];
+    struct bo_pathset selected;
+    if (ovf(snprintf(roots[0], RS_PATH, "%s", root), RS_PATH) ||
+        bo_collect_changed(roots, 1, &one, &selected) != 0 || selected.n != 1) {
+        fputs("byte-order narrowed collector did not select one file\n", stderr);
+        return 1;
+    }
+    if (bo_st_verdict(root, baseline, &one, 0, "narrowed clean case") != 0)
+        return 1;
+    char *doc_path[] = { "docs/README.md" };
+    struct lint_changed docs = { doc_path, 1, 1 };
+    if (bo_st_verdict(root, baseline, &docs, 0, "unrelated case") != 0 ||
+        bo_st_selected(root, baseline, &one) != 0)
+        return 1;
+    char *baseline_path[] = { baseline };
+    struct lint_changed edit = { baseline_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    if (bo_narrow_ok(&edit, baseline) || !bo_narrow_ok(&empty, baseline))
+        return 1;
+    return bo_st_path_guards();
+}
+
 /* Scratch base: TMPDIR if the environment sets one (the runtime's
  * existing seam), else a scratch dir under HOME — never /tmp by default. */
 static int bo_st_scratch_base(char *buf, size_t cap)
@@ -233,6 +364,7 @@ int check_byte_order_codec_single_selftest(void)
     if (!tmp)
         return die("z23-lint: mkdir failed: %s\n", td);
     int bad = bo_st_shapes(tmp);
+    bad |= bo_st_narrowed(tmp);
     (void)rap_rm_rf(tmp);
     bad |= bo_st_coverage();
     return st_ok(bad, "check_byte_order_codec_single selftest: OK\n");

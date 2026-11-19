@@ -125,7 +125,6 @@ tools/lint/gate_lib.sh
 tools/lint/repo_shape.sh
 tools/lint/scan_exclusions.sh
 tools/lint/tu_result_cache.sh
-tools/lint/zcode_pkg_sources.sh
 tools/mvp_gate.sh
 tools/new_shape.sh
 tools/repro_on_copy.sh

@@ -339,6 +339,16 @@ acquire_vendor_lock() {
     # Bootstrap only host C23, with no vendor archive dependency. Bind reuse
     # to exact helper/compiler/bootstrap bytes and flags, never timestamps.
     local host_cc="${HOSTCC:-${HOST_CC:-cc}}" compiler_key source_key key helper temporary
+    # The lock parent's key is only a lookup hint. The inherited descriptor and
+    # the helper's own ownership check remain the authority to skip acquisition.
+    if [[ "${VENDOR_LOCK_HELPER_KEY:-}" =~ ^[0-9a-f]{64}$ ]]; then
+        helper="$REPO_ROOT/build/bin/vendor-lock/$VENDOR_LOCK_HELPER_KEY/vendor-lock"
+        if [[ -x "$helper" ]] &&
+           [[ "$("$helper" --build-key)" == "$VENDOR_LOCK_HELPER_KEY" ]] &&
+           "$helper" --owns "$VENDOR_LOCK_DIR" 2>/dev/null; then
+            return
+        fi
+    fi
     # This helper executes inside the POSIX build shell and retains flock's
     # descriptor across exec. MinGW/UCRT cc builds the product archives, but
     # cannot provide that host contract. Match zcc's MSYS bootstrap compiler
@@ -438,6 +448,7 @@ acquire_vendor_lock() {
     if "$helper" --owns "$VENDOR_LOCK_DIR" 2>/dev/null; then
         return
     fi
+    export VENDOR_LOCK_HELPER_KEY="$key"
     exec "$helper" "$VENDOR_LOCK_DIR" "$VENDOR_LOCK_TIMEOUT_SEC" \
         bash "$SCRIPT_DIR/build_vendor.sh" "$@"
 }
@@ -580,8 +591,8 @@ recipe_flags_host() {
 
 recipe_toolchain_sha() {
     local group="$1" cxx identities
-    identities="cc=$(vp_compiler_identity_sha "$VENDOR_CC")
-ar=$(vp_tool_identity_sha "$VENDOR_AR")"
+    identities="cc=$VENDOR_CC_ID
+ar=$VENDOR_AR_ID"
     case "$group" in
         openssl)
             identities="$identities
@@ -1210,8 +1221,6 @@ if [ -n "$VENDOR_CC_MACHINE" ] && [ "$VENDOR_CC_MACHINE" != "$(vendor_cc_machine
     esac
 fi
 mkdir -p "$LIB" "$INC" "$WORK"
-acquire_vendor_lock "$@"
-
 REQUIRED=(libsecp256k1.a libcrypto.a libssl.a libevent.a libevent_openssl.a
           libevent_pthreads.a libleveldb.a libsqlite3.a libz.a
           libtor_stub.a)
@@ -1236,6 +1245,21 @@ if [[ -n "$VENDOR_TARGET" ]]; then
     done
     REQUIRED=("${REQUIRED_CROSS[@]}")
 fi
+if [[ "${1:-}" == "--check-provenance" && $# -gt 1 ]]; then
+    for requested in "${@:2}"; do
+        in_required=false
+        for required in "${REQUIRED[@]}"; do
+            if [[ "$requested" == "$required" ]]; then in_required=true; break; fi
+        done
+        $in_required || die "archive is not required for this target"
+    done
+fi
+acquire_vendor_lock "$@"
+
+# These tools are fixed for the locked invocation. Reuse their exact identity
+# strings in every archive descriptor instead of repeating the same probes.
+VENDOR_CC_ID="$(vp_compiler_identity_sha "$VENDOR_CC")"
+VENDOR_AR_ID="$(vp_tool_identity_sha "$VENDOR_AR")"
 
 check_one_provenance() {
     local archive="$1" descriptor
@@ -1265,13 +1289,6 @@ check_provenance_set() {
 if [[ "${1:-}" == "--check-provenance" ]]; then
     shift
     if [[ $# -gt 0 ]]; then
-        for requested in "$@"; do
-            in_required=false
-            for required in "${REQUIRED[@]}"; do
-                if [[ "$requested" == "$required" ]]; then in_required=true; break; fi
-            done
-            $in_required || die "archive is not required for this target"
-        done
         check_provenance_set "$@" ||
             die "vendor provenance verification failed"
     else
@@ -1314,16 +1331,112 @@ declare -A BUILDER=(
     [libsecp256k1-android.a]=build_secp_native
 )
 
+vendor_reap_first() {
+    local rc=0
+    if ! wait "${pids[0]}"; then
+        rc=1
+    fi
+    if [[ "${pids[0]}" == "$openssl_pid" ]]; then
+        openssl_done=1
+        openssl_failed="$rc"
+    fi
+    if (( rc != 0 )); then
+        failed=1
+    fi
+    pids=("${pids[@]:1}")
+    active=$((active - 1))
+}
+
+vendor_launch() {
+    if (( active >= max_par )); then
+        vendor_reap_first
+    fi
+    ( JOBS="$group_jobs" "$1" ) &
+    pids+=("$!")
+    active=$((active + 1))
+}
+
+vendor_wait_openssl() {
+    if (( openssl_done )); then
+        return
+    fi
+    local target="$1" i found=0
+    if ! wait "$target"; then
+        openssl_failed=1
+        failed=1
+    fi
+    openssl_done=1
+    for i in "${!pids[@]}"; do
+        if [[ "${pids[i]}" == "$target" ]]; then
+            unset 'pids[i]'
+            found=1
+            break
+        fi
+    done
+    (( found )) || die "OpenSSL worker missing from vendor scheduler"
+    pids=("${pids[@]}")
+    active=$((active - 1))
+}
+
+vendor_drain() {
+    while (( active > 0 )); do
+        vendor_reap_first
+    done
+}
+
+vendor_run_builders() {
+    local -a pending=("$@")
+    local max_par="${VENDOR_MAX_PARALLEL:-3}"
+    [[ "$max_par" =~ ^[0-9]+$ ]] || die "VENDOR_MAX_PARALLEL must be a positive integer"
+    [[ "$JOBS" =~ ^[0-9]+$ ]] || die "JOBS must be a positive integer"
+    max_par=$((10#$max_par))
+    JOBS=$((10#$JOBS))
+    (( max_par > 0 && JOBS > 0 )) || die "VENDOR_MAX_PARALLEL and JOBS must be positive"
+    if (( max_par > JOBS )); then max_par="$JOBS"; fi
+    if (( max_par > ${#pending[@]} )); then max_par="${#pending[@]}"; fi
+    local group_jobs=$((JOBS / max_par))
+    local -a pids=()
+    local active=0 failed=0
+    local openssl_pid="" builder
+    local openssl_done=0 openssl_failed=0
+    local with_openssl=0 with_libevent=0
+    for builder in "${pending[@]}"; do
+        [[ "$builder" == build_openssl ]] && with_openssl=1
+        [[ "$builder" == build_libevent ]] && with_libevent=1
+    done
+    for builder in "${pending[@]}"; do
+        if (( with_openssl && with_libevent )) && [[ "$builder" == build_libevent ]]; then
+            continue
+        fi
+        vendor_launch "$builder"
+        [[ "$builder" == build_openssl ]] && openssl_pid="$!"
+    done
+    if (( with_openssl && with_libevent )); then
+        vendor_wait_openssl "$openssl_pid"
+        if (( openssl_failed == 0 )); then
+            vendor_launch build_libevent
+        fi
+    fi
+    vendor_drain
+    return "$failed"
+}
+
+BUILD_LIST=()
+build_submit() {
+    BUILD_LIST+=("$1")
+}
+
 if [[ $# -gt 0 ]]; then
     seen=""
     for a in "$@"; do
         b="${BUILDER[$a]:-}"
         [[ -n "$b" ]] || die "unknown vendor archive: $a"
-        case " $seen " in *" $b "*) ;; *) "$b"; seen="$seen $b";; esac
+        case " $seen " in *" $b "*) ;; *) build_submit "$b"; seen="$seen $b";; esac
     done
 else
-    for b in "${ALL[@]}"; do "$b"; done
+    for b in "${ALL[@]}"; do build_submit "$b"; done
 fi
+vendor_run_builders "${BUILD_LIST[@]}" || die "parallel vendor build failed"
 
 # --- verify the full set ----------------------------------------------------
 stale=()

@@ -100,12 +100,15 @@
 #endif
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 
 static const char k_db_name[] = "check_describe_budget";
 static const char k_db_tool_src[] = "tools/check_describe_budget.c";
@@ -458,12 +461,13 @@ static int db_main_body(const struct db_srcs *srcs, const char *tmp)
     return rc;
 }
 
-static int db_combined(void);
+static int db_combined(int argc, char **argv);
 
 int check_describe_budget_run(int argc, char **argv)
 {
-    if (argc == 1 && strcmp(argv[0], "--combined") == 0)
-        return db_combined();
+    if (argc >= 1 && strcmp(argv[0], "--combined") == 0 &&
+        (argc == 1 || (argc == 2 && strncmp(argv[1], "--changed-files=", 16) == 0)))
+        return db_combined(argc - 1, argv + 1);
     if (argc != 0)
         return die("check_describe_budget: unknown arguments\n", "");
     char root[4096], tmp[4096];
@@ -873,6 +877,31 @@ static int db_st_omitted(const struct db_srcs *srcs, const struct db_st *p)
     return 0;
 }
 
+static int db_st_wait(pid_t pid)
+{
+    return lint_narrow_wait_pid(pid, "describe-budget");
+}
+
+static int db_st_late_parallel(const struct db_srcs *srcs, const struct db_st *p)
+{
+    /* These checks use disjoint catalogs, binaries, and logs. */
+    (void)fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0)
+        return die("z23-lint: describe-budget fork failed: %s\n", strerror(errno));
+    if (pid == 0) {
+        int rc = db_st_missing(srcs, p);
+        if (fflush(NULL) != 0 && rc == 0)
+            rc = die("z23-lint: child output flush failed: %s\n", strerror(errno));
+        _exit(rc);
+    }
+    int omitted = db_st_omitted(srcs, p);
+    int missing = db_st_wait(pid);
+    return missing != 0 ? missing : omitted;
+}
+
+static int db_st_relevant(void);
+
 static int db_selftest_body(const struct db_srcs *srcs, const char *tmp, int combined)
 {
     struct db_st p;
@@ -884,9 +913,9 @@ static int db_selftest_body(const struct db_srcs *srcs, const char *tmp, int com
     if (rc == 0)
         rc = db_st_padded(srcs, &p);
     if (rc == 0)
-        rc = db_st_missing(srcs, &p);
+        rc = db_st_late_parallel(srcs, &p);
     if (rc == 0)
-        rc = db_st_omitted(srcs, &p);
+        rc = db_st_relevant();
     if (rc == 0)
         fputs("check_describe_budget selftest: PASS — clean tree passes; "
               "a leaf padded past ZCL_COMMAND_SPEC_BUDGET fails and is "
@@ -919,9 +948,76 @@ int check_describe_budget_selftest(void)
     return rc;
 }
 
-/* One private lifetime lets the canonical pair share its clean result. */
-static int db_combined(void)
+static int db_prefix(const char *path, const char *prefix)
 {
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+/* db_suffix body lives in the shared narrowing hooks
+ * (lint_narrow_hook.h), alongside the db/zpr relevant and wait shapes. */
+static int db_suffix(const char *path, const char *suffix)
+{
+    return lint_narrow_suffix(path, suffix);
+}
+
+static int db_source_relevant(const char *path)
+{
+    return db_prefix(path, "engine/") || db_prefix(path, "platform/") ||
+           db_prefix(path, "core/modules/crypto/") ||
+           db_prefix(path, "contexts/commons/") || db_prefix(path, "cognition/") ||
+           db_prefix(path, "vendor/") || db_prefix(path, "tools/dev/") ||
+           db_prefix(path, "tools/lint/lintc/") ||
+           strcmp(path, k_db_tool_src) == 0 || strcmp(path, k_db_baseline) == 0;
+}
+
+static int db_build_relevant(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    return db_suffix(path, ".h") || db_suffix(path, ".def") ||
+           db_suffix(path, ".inc") || db_suffix(path, ".mk") ||
+           strcmp(base, "Makefile") == 0;
+}
+
+static int db_either_relevant(const char *path)
+{
+    return db_source_relevant(path) || db_build_relevant(path);
+}
+
+static int db_relevant(const struct lint_changed *ch)
+{
+    return lint_narrow_relevant(ch, db_either_relevant);
+}
+
+static int db_st_relevant(void)
+{
+    char *doc_paths[] = { "docs/README.md", "core/modules/chain/src/block.c" };
+    struct lint_changed docs = { doc_paths, 2, 1 };
+    char *catalog_path[] = { "engine/composition/commands/core.def" };
+    struct lint_changed catalog = { catalog_path, 1, 1 };
+    char *helper_path[] = { "tools/check_describe_budget.c" };
+    struct lint_changed helper = { helper_path, 1, 1 };
+    char *baseline_path[] = { "tools/lint/describe_budget_baseline.txt" };
+    struct lint_changed baseline = { baseline_path, 1, 1 };
+    char *platform_path[] = { "platform/modules/json/src/json.c" };
+    struct lint_changed platform = { platform_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    return db_relevant(&docs) || db_relevant(&empty) ||
+           !db_relevant(&catalog) || !db_relevant(&helper) ||
+           !db_relevant(&baseline) || !db_relevant(&platform);
+}
+
+/* One private lifetime lets the canonical pair share its clean result. */
+static int db_combined(int argc, char **argv)
+{
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
+    if (!db_relevant(&changed)) {
+        lint_changed_free(&changed);
+        return lint_examined_print(0, 0) < 0 ? 2 : 0;
+    }
+    lint_changed_free(&changed);
     char root[4096], tmp[4096];
     struct db_srcs srcs;
     int rc = cic_repo_root(root, sizeof root);

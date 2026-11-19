@@ -8,6 +8,7 @@ export LC_ALL=C
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
 . "$repo_root/tools/scripts/source_identity_lib.sh" # zcl_is_sha256
+. "$repo_root/tools/dev/dev_lib.sh" # uint_field, validate_metric, validate_eval_arm_scope, validate_batch_scope, decode_base64
 readonly driver=705d16ccab6b9732c81f95159627eef18fb05a08
 readonly receipt_name=retrieval-gold-benchmark-705d16ccab6b.jsonl
 readonly receipt="$repo_root/docs/work/retrieval-gold-evidence/$receipt_name"
@@ -68,16 +69,6 @@ keys_exact() {
     [[ $observed = "$3" ]] || fail "unexpected object shape: $2"
 }
 
-uint_field() {
-    local value
-    [[ $(field_type "$1" "$2") = number ]] || fail "not a number: $2"
-    value=$(field "$1" "$2")
-    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "not a canonical integer: $2"
-    ((${#value} < ${#3} || (${#value} == ${#3} && 10#$value <= 10#$3))) ||
-        fail "integer exceeds bound: $2"
-    printf '%s' "$value"
-}
-
 bool_field() {
     local value
     [[ $(field_type "$1" "$2") = bool ]] || fail "not a boolean: $2"
@@ -104,82 +95,6 @@ hash_file() {
 
 check_hash() {
     [[ $(hash_file "$1") = "$2" ]] || fail "SHA3 differs: $1"
-}
-
-validate_metric() {
-    local available
-    keys_exact "$1" "$2" "$metric_keys"
-    available=$(bool_field "$1" "$2.available")
-    if [[ $available = true ]]; then
-        uint_field "$1" "$2.basis_points" 10000 >/dev/null
-    else
-        [[ $(field_type "$1" "$2.basis_points") = null ]] ||
-            fail "unavailable metric carries a value: $2"
-    fi
-}
-
-validate_eval_arm() {
-    local document=$1 arm=$2 expected_files=$3 expected_context=$4 expected_wrong_bp=$5
-    local actual_files actual_context actual_tokens
-    keys_exact "$document" "$arm" "$eval_arm_keys"
-    validate_metric "$document" "$arm.recall_at_5"
-    validate_metric "$document" "$arm.recall_at_20"
-    validate_metric "$document" "$arm.mrr"
-    validate_metric "$document" "$arm.wrong_scope_at_5"
-    [[ $(bool_field "$document" "$arm.wrong_scope_at_5.available") = true &&
-       $(uint_field "$document" "$arm.wrong_scope_at_5.basis_points" 10000) -eq $expected_wrong_bp ]] ||
-        fail "$arm wrong-directory-group metric differs"
-    actual_files=$(uint_field "$document" "$arm.task_unique_file_selections_at_5" 3840)
-    actual_context=$(uint_field "$document" "$arm.projected_context_bytes_at_5" 9223372036854775807)
-    actual_tokens=$(uint_field "$document" "$arm.approximate_tokens_at_5" 9223372036854775807)
-    [[ $actual_files -eq $expected_files && $actual_context -eq $expected_context &&
-       $actual_tokens -eq $(((expected_context + 3) / 4)) ]] ||
-        fail "$arm aggregate cost formula differs"
-}
-
-decode_base64() {
-    local help
-    help=$(base64 --help 2>&1 || true)
-    if grep -q -- '--decode' <<<"$help"; then
-        base64 --decode
-    else
-        base64 -D
-    fi
-}
-
-validate_batch_scope() {
-    local candidate=$1 counts=$2
-    awk '
-        function refuse(message) {
-            print "retrieval-gold-scope-receipt-check: scope bits: " message > "/dev/stderr"
-            bad = 1
-            exit 1
-        }
-        ($1 == "literal" || $1 == "bm25") && $2 == "observed" {
-            arm = $1
-            rank = 0
-            next
-        }
-        $1 == "rank" {
-            if (arm == "" || NF != 5) refuse("rank outside an observed arm")
-            rank++
-            if (rank <= 5) {
-                if ($3 != 1 || ($4 != 0 && $4 != 1))
-                    refuse("top-five rank lacks an exact scope classification")
-                selected[arm]++
-                if ($4 == 0) wrong[arm]++
-            } else if ($3 != 0 || $4 != 0) {
-                refuse("post-five rank carries undeclared scope evidence")
-            }
-            next
-        }
-        END {
-            if (!bad) {
-                print "literal\t" selected["literal"] + 0 "\t" wrong["literal"] + 0
-                print "bm25\t" selected["bm25"] + 0 "\t" wrong["bm25"] + 0
-            }
-        }
-    ' "$candidate" >"$counts" || fail "sealed batch scope classification is invalid"
 }
 
 validate_semantics() {
@@ -517,8 +432,8 @@ validate_semantics() {
        $(field "$metrics" context_cost_kind) = projected_not_read &&
        $(field "$metrics" token_basis) = 'ceil(context_bytes/4)' ]] ||
         fail "evaluator aggregation contract differs"
-    validate_eval_arm "$metrics" literal "$literal_files" "$literal_context" "$literal_wrong_bp"
-    validate_eval_arm "$metrics" bm25 "$bm25_files" "$bm25_context" "$bm25_wrong_bp"
+    validate_eval_arm_scope "$metrics" literal "$literal_files" "$literal_context" "$literal_wrong_bp"
+    validate_eval_arm_scope "$metrics" bm25 "$bm25_files" "$bm25_context" "$bm25_wrong_bp"
 }
 
 validate_canonical() {

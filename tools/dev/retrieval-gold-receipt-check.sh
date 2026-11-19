@@ -7,6 +7,7 @@ export LC_ALL=C
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
 . "$repo_root/tools/scripts/source_identity_lib.sh" # zcl_is_sha256
+. "$repo_root/tools/dev/dev_lib.sh" # uint_field, validate_metric, validate_eval_arm, decode_base64
 readonly driver=b663f019ed20d6ece26aa94b5dfe92f41bd4c0be
 readonly receipt_name="retrieval-gold-benchmark-$driver.jsonl"
 readonly receipt="$repo_root/docs/work/retrieval-gold-evidence/$receipt_name"
@@ -68,16 +69,6 @@ keys_exact() {
     [[ $observed = "$3" ]] || fail "unexpected object shape: $2"
 }
 
-uint_field() {
-    local value
-    [[ $(field_type "$1" "$2") = number ]] || fail "not a number: $2"
-    value=$(field "$1" "$2")
-    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "not a canonical integer: $2"
-    ((${#value} < ${#3} || (${#value} == ${#3} && 10#$value <= 10#$3))) ||
-        fail "integer exceeds bound: $2"
-    printf '%s' "$value"
-}
-
 bool_field() {
     local value
     [[ $(field_type "$1" "$2") = bool ]] || fail "not a boolean: $2"
@@ -104,47 +95,6 @@ hash_file() {
 
 check_hash() {
     [[ $(hash_file "$1") = "$2" ]] || fail "SHA3 differs: $1"
-}
-
-validate_metric() {
-    local available
-    keys_exact "$1" "$2" "$metric_keys"
-    available=$(bool_field "$1" "$2.available")
-    if [[ $available = true ]]; then
-        uint_field "$1" "$2.basis_points" 10000 >/dev/null
-    else
-        [[ $(field_type "$1" "$2.basis_points") = null ]] ||
-            fail "unavailable metric carries a value: $2"
-    fi
-}
-
-validate_eval_arm() {
-    local document=$1 arm=$2 expected_files=$3 expected_context=$4
-    local actual_files actual_context actual_tokens
-    keys_exact "$document" "$arm" "$eval_arm_keys"
-    validate_metric "$document" "$arm.recall_at_5"
-    validate_metric "$document" "$arm.recall_at_20"
-    validate_metric "$document" "$arm.mrr"
-    validate_metric "$document" "$arm.wrong_scope_at_5"
-    [[ $(bool_field "$document" "$arm.wrong_scope_at_5.available") = false &&
-       $(field_type "$document" "$arm.wrong_scope_at_5.basis_points") = null ]] ||
-        fail "$arm wrong-scope overclaims unavailable evidence"
-    actual_files=$(uint_field "$document" "$arm.task_unique_file_selections_at_5" 3840)
-    actual_context=$(uint_field "$document" "$arm.projected_context_bytes_at_5" 9223372036854775807)
-    actual_tokens=$(uint_field "$document" "$arm.approximate_tokens_at_5" 9223372036854775807)
-    [[ $actual_files -eq $expected_files && $actual_context -eq $expected_context &&
-       $actual_tokens -eq $(((expected_context + 3) / 4)) ]] ||
-        fail "$arm aggregate cost formula differs"
-}
-
-decode_base64() {
-    local help
-    help=$(base64 --help 2>&1 || true)
-    if grep -q -- '--decode' <<<"$help"; then
-        base64 --decode
-    else
-        base64 -D
-    fi
 }
 
 validate_semantics() {

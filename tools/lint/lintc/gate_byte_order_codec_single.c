@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 #include "gate_byte_order_codec_single_priv.h"
 
 /* An indexed shift loop: a right or left shift by 8 (optionally 8u) times
@@ -219,6 +220,47 @@ int bo_collect(const char roots[][RS_PATH], int nroots, struct bo_pathset *set)
     for (int i = 0; rc == 0 && i < nroots; i++)
         rc = walk_src(roots[i], 1, bo_collect_cb, &ctx);
     return rc;
+}
+
+/* bo_path_form/bo_under_roots bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static const char *bo_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form(path, repo);
+}
+
+static int bo_under_roots(const char *path, const char roots[][RS_PATH], int nroots,
+                          const char *repo)
+{
+    return lint_narrow_under_roots(path, (char (*)[RS_PATH])roots, nroots,
+                                   repo);
+}
+
+int bo_collect_changed(const char roots[][RS_PATH], int nroots,
+                       const struct lint_changed *ch, struct bo_pathset *set)
+{
+    char repo[4096];
+    if (cic_repo_root(repo, sizeof repo) != 0)
+        return 2;
+    set->n = 0;
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = bo_path_form(ch->path[i], repo);
+        size_t n = strlen(path);
+        struct stat st;
+        if (n < 2 || (path[n - 2] != '.' ||
+                      (path[n - 1] != 'c' && path[n - 1] != 'h')) ||
+            bo_excluded(path) || !bo_under_roots(path, roots, nroots, repo))
+            continue;
+        if (lstat(path, &st) != 0) {
+            if (errno == ENOENT)
+                continue;
+            fprintf(stderr, "z23-lint: cannot stat %s: %s\n", path, strerror(errno));
+            return 2;
+        }
+        if (S_ISREG(st.st_mode) && bo_pathset_add(set, path) != 0)
+            return 2;
+    }
+    return 0;
 }
 
 int bo_pathset_add(struct bo_pathset *set, const char *path)

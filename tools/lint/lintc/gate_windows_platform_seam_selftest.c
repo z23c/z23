@@ -11,7 +11,8 @@
  * scores zero sites — which is exactly what the clean, improvement,
  * missing-baseline, UNOBSERVED and fail-closed cases need. A baseline
  * count below the live count is the one honest way to drive the
- * regression branch without a real mingw toolchain.
+ * regression branch without a real mingw toolchain. Additional drivers
+ * exercise parallel diagnostic ordering and bounded overflow cleanup.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -22,11 +23,14 @@
 #include <unistd.h>
 #include "lintc.h"
 
-/* Modes mirrored from gate_windows_platform_seam.c; only SCAN (0) is used. */
+/* Modes mirrored from gate_windows_platform_seam.c. */
 #define WS2_SCAN 0
+#define WS2_SITES 1
 
-int wps_check_root(const char *root, FILE *out, FILE *err, int mode);
+int wps_check_root(const char *root, const struct lint_changed *changed,
+                   FILE *out, FILE *err, int mode);
 int check_windows_platform_seam_run(int argc, char **argv);
+int wps_narrow_ok(const struct lint_changed *ch);
 
 enum { WS2_PATH = 1024, WS2_NINC = 15 };
 
@@ -191,7 +195,7 @@ static int ws2_run_case(const char *root, const struct ws2_case *c)
     sink = tmpfile();
     if (!sink)
         return 2;
-    got = wps_check_root(root, sink, sink, WS2_SCAN);
+    got = wps_check_root(root, NULL, sink, sink, WS2_SCAN);
     fclose(sink);
     unsetenv("ZCL_REQUIRE_MINGW");
     if (got != c->want) {
@@ -237,21 +241,25 @@ static int ws2_scratch_base(char *out, size_t cap)
     return 0;
 }
 
-/* The two variables the cases overwrite, saved and restored so the real
+/* The variables the cases overwrite, saved and restored so the real
  * compiler probe that follows sees the caller's environment. */
-static char ws2_saved_req[64], ws2_saved_cc[WS2_PATH];
-static int ws2_has_req, ws2_has_cc;
+static char ws2_saved_req[64], ws2_saved_cc[WS2_PATH], ws2_saved_trace[WS2_PATH];
+static int ws2_has_req, ws2_has_cc, ws2_has_trace;
 
 static void ws2_save_env(void)
 {
     const char *r = getenv("ZCL_REQUIRE_MINGW");
     const char *c = getenv("ZCL_MINGW_CC");
+    const char *t = getenv("WS2_TRACE");
     ws2_has_req = r && strlen(r) < sizeof ws2_saved_req;
     ws2_has_cc = c && strlen(c) < sizeof ws2_saved_cc;
+    ws2_has_trace = t && strlen(t) < sizeof ws2_saved_trace;
     if (ws2_has_req)
         strcpy(ws2_saved_req, r);
     if (ws2_has_cc)
         strcpy(ws2_saved_cc, c);
+    if (ws2_has_trace)
+        strcpy(ws2_saved_trace, t);
 }
 
 static void ws2_restore_env(void)
@@ -264,6 +272,10 @@ static void ws2_restore_env(void)
         (void)setenv("ZCL_MINGW_CC", ws2_saved_cc, 1);
     else
         unsetenv("ZCL_MINGW_CC");
+    if (ws2_has_trace)
+        (void)setenv("WS2_TRACE", ws2_saved_trace, 1);
+    else
+        unsetenv("WS2_TRACE");
 }
 
 static int ws2_run_cases(const char *base)
@@ -279,6 +291,212 @@ static int ws2_run_cases(const char *base)
     return bad;
 }
 
+static int ws2_trace_count(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    char line[4096];
+    int n = 0;
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof line, f))
+        n++;
+    fclose(f);
+    return n;
+}
+
+static int ws2_narrow_compiler(const char *root)
+{
+    char cc[WS2_PATH], trace[WS2_PATH];
+    static const char script[] =
+        "#!/bin/sh\nprintf 'call\\n' >> \"$WS2_TRACE\"\nexec cat \"$@\"\n";
+    if (ovf(snprintf(cc, sizeof cc, "%s/trace-cc", root), sizeof cc) ||
+        ovf(snprintf(trace, sizeof trace, "%s/trace", root), sizeof trace))
+        return 2;
+    if (csr_write(cc, script) != 0 || chmod(cc, 0700) != 0 ||
+        setenv("WS2_TRACE", trace, 1) != 0 ||
+        setenv("ZCL_MINGW_CC", cc, 1) != 0)
+        return 2;
+    return 0;
+}
+
+static int ws2_no_baseline_note(FILE *sink)
+{
+    char line[4096];
+    rewind(sink);
+    while (fgets(line, sizeof line, sink))
+        if (strstr(line, "NOTE: mingw diagnostics went DOWN") ||
+            strstr(line, "platform/modules/platform/src/b.c"))
+            return 0;
+    return 1;
+}
+
+static int ws2_narrow_call(const char *root, const struct lint_changed *ch,
+                           const char *trace, int want, const char *label)
+{
+    FILE *sink = tmpfile();
+    if (!sink)
+        return 2;
+    int rc = wps_check_root(root, ch, sink, sink, WS2_SCAN);
+    int clean = ws2_no_baseline_note(sink);
+    fclose(sink);
+    int count = ws2_trace_count(trace);
+    if (rc == 0 && count == want && clean)
+        return 0;
+    fprintf(stderr, "%s: rc=%d compiler_calls=%d want=%d baseline_clean=%d\n",
+            label, rc, count, want, clean);
+    return 1;
+}
+
+static int ws2_baseline_full_run(const char *root, const char *trace)
+{
+    char list[WS2_PATH], flag[WS2_PATH + 32], cwd[WS2_PATH];
+    if (ws2_write_baseline(root, 0) != 0 ||
+        ovf(snprintf(list, sizeof list, "%s/changed", root), sizeof list) ||
+        csr_write(list, "tools/lint/windows_platform_seam_baseline.txt\n") != 0 ||
+        ovf(snprintf(flag, sizeof flag, "--changed-files=%s", list), sizeof flag) ||
+        !getcwd(cwd, sizeof cwd))
+        return 2;
+    if (chdir(root) != 0)
+        return 2;
+    char *args[] = { flag, NULL };
+    int before = ws2_trace_count(trace);
+    int rc = check_windows_platform_seam_run(1, args);
+    int count = ws2_trace_count(trace);
+    if (chdir(cwd) != 0)
+        return 2;
+    if (rc == 0 && count == before + 8)
+        return 0;
+    fprintf(stderr, "baseline full scan: rc=%d before=%d after=%d\n", rc, before, count);
+    return 1;
+}
+
+static int ws2_narrow_suite(const char *base)
+{
+    char root[WS2_PATH], trace[WS2_PATH];
+    if (ws2_case_root(base, root, sizeof root) ||
+        ovf(snprintf(trace, sizeof trace, "%s/trace", root), sizeof trace))
+        return 2;
+    if (ws2_write_makefile(root, 0) ||
+        ws2_write_srcs(root) || ws2_write_incs(root) ||
+        ws2_write_baseline(root, 2) || ws2_narrow_compiler(root))
+        return 2;
+    char *one_path[] = { "platform/modules/platform/src/a.c" };
+    struct lint_changed one = { one_path, 1, 1 };
+    if (ws2_narrow_call(root, &one, trace, 1, "narrow one-file") != 0)
+        return 1;
+    struct lint_changed empty = { NULL, 0, 1 };
+    if (ws2_narrow_call(root, &empty, trace, 1, "narrow empty") != 0)
+        return 1;
+    static const char *const unsafe[] = {
+        "platform/modules/platform/include/platform/clock.h",
+        "engine/composition/flags.def", "platform/modules/base/src/table.inc",
+        "tools/windows.mk", "Makefile", "tools/lint/windows_platform_seam_baseline.txt"
+    };
+    for (size_t i = 0; i < sizeof unsafe / sizeof unsafe[0]; i++) {
+        struct lint_changed wide = { (char **)&unsafe[i], 1, 1 };
+        if (wps_narrow_ok(&wide)) {
+            fprintf(stderr, "narrow dependency fallback missed %s\n", unsafe[i]);
+            return 1;
+        }
+    }
+    if (!wps_narrow_ok(&one) || !wps_narrow_ok(&empty) ||
+        ws2_baseline_full_run(root, trace) != 0)
+        return 1;
+    puts("  selftest ok: changed-file scans preserve baseline and force wide dependency inputs");
+    return 0;
+}
+
+static int ws2_overlap_prepare(const char *root)
+{
+    char cc[WS2_PATH];
+    static const char script[] =
+        "#!/bin/sh\n"
+        "for source in \"$@\"; do :; done\n"
+        "case \"$source\" in\n"
+        "    */a.c)\n"
+        "        attempts=0\n"
+        "        while [ ! -f \"$WS2_OVERLAP_DIR/b-called\" ] && [ \"$attempts\" -lt 200 ]; do\n"
+        "            sleep 0.005\n"
+        "            attempts=$((attempts + 1))\n"
+        "        done\n"
+        "        [ -f \"$WS2_OVERLAP_DIR/b-called\" ] || exit 91\n"
+        "        printf '%s\\n' 'a.c:1:1: warning: A'\n"
+        "        ;;\n"
+        "    */b.c)\n"
+        "        printf '%s\\n' 'b.c:2:1: warning: B'\n"
+        "        : > \"$WS2_OVERLAP_DIR/b-called\"\n"
+        "        ;;\n"
+        "    *) exec cat \"$@\" ;;\n"
+        "esac\n";
+    if (ovf(snprintf(cc, sizeof cc, "%s/overlap-cc", root), sizeof cc) ||
+        ws2_write_makefile(root, 0) || ws2_write_srcs(root) ||
+        ws2_write_incs(root) || ws2_write_baseline(root, 0) ||
+        csr_write(cc, script) != 0 || chmod(cc, 0700) != 0 ||
+        setenv("WS2_OVERLAP_DIR", root, 1) != 0 ||
+        setenv("ZCL_MINGW_CC", cc, 1) != 0)
+        return 2;
+    return 0;
+}
+
+static int ws2_overlap_suite(const char *base)
+{
+    char root[WS2_PATH];
+    if (ws2_case_root(base, root, sizeof root) || ws2_overlap_prepare(root))
+        return 2;
+    FILE *sink = tmpfile();
+    if (!sink)
+        return 2;
+    int rc = wps_check_root(root, NULL, sink, sink, WS2_SITES);
+    char text[4096];
+    rewind(sink);
+    size_t len = fread(text, 1, sizeof text - 1, sink);
+    if (ferror(sink))
+        rc = 2;
+    text[len] = '\0';
+    fclose(sink);
+    const char *a = strstr(text, "a.c:1:1: warning: A");
+    const char *b = strstr(text, "b.c:2:1: warning: B");
+    if (rc == 0 && a && b && a < b) {
+        puts("  selftest ok: parallel compiles preserve source-order diagnostics");
+        return 0;
+    }
+    fprintf(stderr, "parallel compile fixture: rc=%d output=%s\n", rc, text);
+    return 1;
+}
+
+static int ws2_overflow_suite(const char *base)
+{
+    char root[WS2_PATH], cc[WS2_PATH];
+    static const char script[] =
+        "#!/bin/sh\n"
+        "for source in \"$@\"; do :; done\n"
+        "case \"$source\" in\n"
+        "    *.c) exec awk 'BEGIN { for (i = 0; i < 1000000; i++) "
+        "printf \"x\"; print \"\" }' ;;\n"
+        "    *) printf '%s\\n' 'fixture compiler' ;;\n"
+        "esac\n";
+    if (ws2_case_root(base, root, sizeof root) ||
+        ovf(snprintf(cc, sizeof cc, "%s/overflow-cc", root), sizeof cc) ||
+        ws2_write_makefile(root, 0) || ws2_write_srcs(root) ||
+        ws2_write_incs(root) || ws2_write_baseline(root, 0) ||
+        csr_write(cc, script) != 0 || chmod(cc, 0700) != 0 ||
+        setenv("ZCL_MINGW_CC", cc, 1) != 0)
+        return 2;
+    FILE *sink = tmpfile();
+    if (!sink)
+        return 2;
+    alarm(5);
+    int rc = wps_check_root(root, NULL, sink, sink, WS2_SCAN);
+    alarm(0);
+    fclose(sink);
+    if (rc != 2) {
+        fprintf(stderr, "parallel overflow fixture: rc=%d, want 2\n", rc);
+        return 1;
+    }
+    puts("  selftest ok: parallel output overflow fails promptly");
+    return 0;
+}
+
 int check_windows_platform_seam_selftest(void)
 {
     char base[WS2_PATH];
@@ -288,6 +506,12 @@ int check_windows_platform_seam_selftest(void)
         return rc;
     ws2_save_env();
     bad = ws2_run_cases(base);
+    if (!bad)
+        bad = ws2_narrow_suite(base);
+    if (!bad)
+        bad = ws2_overlap_suite(base);
+    if (!bad)
+        bad = ws2_overflow_suite(base);
     ws2_restore_env();
     rap_rm_rf(base);
     if (bad) {

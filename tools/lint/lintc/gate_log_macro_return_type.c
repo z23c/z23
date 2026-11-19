@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "gate_log_macro_return_type_priv.h"
+#include "lint_narrow_hook.h"
 
 struct lmr_group { long long first, sum, cur; int nbr, aligned; };
 
@@ -666,12 +667,51 @@ static int lmr_walk(struct lmr_list *l, const char *dir)
     return rc;
 }
 
+/* NULL-terminated for the shared lint_narrow_roots_prefix hook; the walk
+ * loop uses LMR_NROOTS, not the sizeof count. */
+enum { LMR_NROOTS = 6 };
+static const char *const k_lmr_roots[LMR_NROOTS + 1] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools", NULL
+};
+
+/* lmr_path_form/lmr_under_roots bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static const char *lmr_path_form(const char *path, const char *repo)
+{
+    return lint_narrow_repo_form(path, repo);
+}
+
+static int lmr_under_roots(const char *path)
+{
+    return lint_narrow_roots_prefix(path, k_lmr_roots);
+}
+
+static int lmr_collect_changed(struct lmr_list *l, const struct lint_changed *ch,
+                               const char *repo)
+{
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < ch->n; i++) {
+        const char *path = lmr_path_form(ch->path[i], repo);
+        struct stat st;
+        if (!lmr_under_roots(path))
+            continue;
+        if (lstat(path, &st) != 0) {
+            if (errno == ENOENT)
+                continue;
+            return die("z23-lint: cannot stat %s\n", path);
+        }
+        rc = lmr_consider(l, path);
+    }
+    if (rc == 0 && l->n > 1)
+        qsort(l->v, l->n, sizeof l->v[0], lmr_cmp);
+    return rc;
+}
+
 static int lmr_collect(struct lmr_list *l, int argc, char **argv)
 {
-    static const char *const defaults[] = { "core", "engine", "contexts", "cognition", "platform", "tools" };
-    size_t n = argc > 0 ? (size_t)argc : sizeof defaults / sizeof defaults[0];
+    size_t n = argc > 0 ? (size_t)argc : (size_t)LMR_NROOTS;
     for (size_t i = 0; i < n; i++) {
-        const char *root = argc > 0 ? argv[i] : defaults[i];
+        const char *root = argc > 0 ? argv[i] : k_lmr_roots[i];
         struct stat st;
         if (lstat(root, &st) != 0) {
             fprintf(stderr, "check_log_macro_return_type: cannot stat %s: %s\n", root, strerror(errno));
@@ -683,6 +723,66 @@ static int lmr_collect(struct lmr_list *l, int argc, char **argv)
     }
     qsort(l->v, l->n, sizeof l->v[0], lmr_cmp);
     return 0;
+}
+
+static int lmr_scan_all(const struct lmr_list *l, struct lmr_buf *bad);
+
+static int lmrs_narrow_case(const char *root, const char *path, const char *src,
+                            int want_files, int want_bad)
+{
+    char cwd[4096], full[4096];
+    if (src && (ovf(snprintf(full, sizeof full, "%s/%s", root, path),
+                            sizeof full) || csr_write(full, src)))
+        return 1;
+    if (!getcwd(cwd, sizeof cwd) || chdir(root) != 0)
+        return 1;
+    char *paths[] = { (char *)path };
+    struct lint_changed one = { paths, 1, 1 };
+    struct lmr_list files = { 0 };
+    struct lmr_buf bad = { 0 };
+    int rc = lmr_collect_changed(&files, &one, root);
+    if (rc == 0)
+        rc = lmr_scan_all(&files, &bad);
+    if (chdir(cwd) != 0)
+        rc = 2;
+    int found = bad.n > 0;
+    int failed = rc != 0 || files.n != (size_t)want_files || found != want_bad;
+    for (size_t i = 0; i < files.n; i++)
+        free(files.v[i]);
+    free(files.v);
+    lmr_buf_free(&bad);
+    if (failed)
+        fprintf(stderr, "log-macro narrowed case failed: %s rc=%d files=%zu found=%d\n",
+                path, rc, files.n, found);
+    return failed;
+}
+
+static int lmrs_narrow(const char *root)
+{
+    static const char mismatch[] =
+        "bool f(void) { LOG_ERR(\"x\", \"bad\"); return true; }\n";
+    static const char clean[] = "int f(void) { return 0; }\n";
+    static const struct {
+        const char *path, *src;
+        int files, bad;
+    } cases[] = {
+        { "docs/README.md", NULL, 0, 0 },
+        { "engine/x/bad.c", mismatch, 1, 1 },
+        { "engine/x/good.c", clean, 1, 0 },
+        { "engine/x/bad.h", mismatch, 1, 1 },
+        { "engine/tests/bad.c", mismatch, 1, 1 },
+        { "engine/vendor/bad.c", mismatch, 0, 0 },
+        { "engine/build/bad.c", mismatch, 0, 0 },
+        { "engine/.git/bad.c", mismatch, 0, 0 },
+        { "contexts/commons/corpus/bad.c", mismatch, 1, 1 },
+        { "engine/x/bad.txt", mismatch, 0, 0 },
+        { "engine/missing.c", NULL, 0, 0 },
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        bad |= lmrs_narrow_case(root, cases[i].path, cases[i].src,
+                                cases[i].files, cases[i].bad);
+    return bad;
 }
 
 /* These tests live beside the private traversal functions so the scanner's
@@ -733,6 +833,7 @@ int lmr_filesystem_selftest(void)
     for (size_t i = 0; i < files.n; i++)
         free(files.v[i]);
     free(files.v);
+    bad |= lmrs_narrow(tmp);
     bad |= rap_rm_rf(tmp) != 0;
     if (bad)
         fputs("check_log_macro_return_type: filesystem SELFTEST FAILED\n", stderr);
@@ -781,14 +882,28 @@ static int lmr_report(const struct lmr_buf *bad)
 
 int check_log_macro_return_type_run(int argc, char **argv)
 {
-    char root[4096];
-    if (cic_repo_root(root, sizeof root))
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
         return 2;
-    if (chdir(root) != 0)
+    char root[4096];
+    if (cic_repo_root(root, sizeof root)) {
+        lint_changed_free(&changed);
+        return 2;
+    }
+    if (chdir(root) != 0) {
+        lint_changed_free(&changed);
         return die("z23-lint: cannot enter %s\n", root);
+    }
     struct lmr_list files = { 0 };
     struct lmr_buf bad = { 0 };
-    int rc = lmr_collect(&files, argc, argv);
+    int rc;
+    if (changed.active && argc == 0) {
+        rc = lmr_collect_changed(&files, &changed, root);
+        if (rc == 0 && lint_examined_print(files.n, 0) < 0)
+            rc = 2;
+    } else {
+        rc = lmr_collect(&files, argc, argv);
+    }
     if (rc == 0)
         rc = lmr_scan_all(&files, &bad);
     if (rc == 0)
@@ -797,5 +912,6 @@ int check_log_macro_return_type_run(int argc, char **argv)
         free(files.v[i]);
     free(files.v);
     lmr_buf_free(&bad);
+    lint_changed_free(&changed);
     return rc;
 }

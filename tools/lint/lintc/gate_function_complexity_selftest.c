@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 #include "gate_function_complexity_priv.h"
 
 /* ── selftest ──────────────────────────────────────────────────────────── */
@@ -464,8 +465,10 @@ static int cyc_st_base_path(const char *root, char *bpath, size_t cap)
 
 /* Write base_body as the fixture baseline and run the gate once against the
  * fixture, optionally with --tighten-baseline semantics. */
-static int cyc_st_exec(const char *root, const char *base_body,
-                       const char *mode, int tighten, struct cyc_st_run *r)
+static int cyc_st_exec_changed(const char *root, const char *base_body,
+                               const char *mode, int tighten,
+                               const struct lint_changed *changed,
+                               struct cyc_st_run *r)
 {
     char bpath[8192];
     if (cyc_st_base_path(root, bpath, sizeof bpath)
@@ -479,12 +482,19 @@ static int cyc_st_exec(const char *root, const char *base_body,
             fclose(err);
         return 1;
     }
-    r->rc = cyc_check(root, bpath, mode, 0, tighten, out, err);
+    r->rc = cyc_check_with_changed(root, bpath, mode, 0, tighten, out, err,
+                                   changed);
     int bad = csr_slurp(out, r->out, sizeof r->out)
         || csr_slurp(err, r->err, sizeof r->err);
     fclose(out);
     fclose(err);
     return bad;
+}
+
+static int cyc_st_exec(const char *root, const char *base_body,
+                       const char *mode, int tighten, struct cyc_st_run *r)
+{
+    return cyc_st_exec_changed(root, base_body, mode, tighten, NULL, r);
 }
 
 /* Pass when the run returned want_rc and needle (NULL: any text) appears on
@@ -665,34 +675,27 @@ static int cyc_st_scope_contents(const char *s)
         strstr(s, "ignored") != NULL;
 }
 
-static const char *const k_cyc_git_env[] = {
+static const char *const k_cyc_saved_env[] = {
     "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", NULL
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "ZCL_CYCLOMATIC_ROOT", "ZCL_CYCLOMATIC_BASELINE", "ZCL_LINT_MODE",
+    "ZCL_LINT_REPO_ROOT", NULL
 };
-struct cyc_st_env { char *value[6]; };
+struct cyc_st_env { char *value[10]; };
 
+/* The save/restore bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h); the selftest keeps calling the cyc_* names. */
 static int cyc_st_env_save(struct cyc_st_env *env)
 {
-    memset(env, 0, sizeof *env);
-    for (int i = 0; k_cyc_git_env[i]; i++) {
-        const char *value = getenv(k_cyc_git_env[i]);
-        if (value && !(env->value[i] = strdup(value))) {
-            for (int j = 0; j < i; j++) free(env->value[j]);
-            return 1;
-        }
-    }
-    return 0;
+    return lint_narrow_env_save(k_cyc_saved_env, env->value,
+                                (int)(sizeof env->value / sizeof env->value[0]));
 }
 
 static int cyc_st_env_restore(struct cyc_st_env *env)
 {
-    int bad = 0;
-    for (int i = 0; k_cyc_git_env[i]; i++) {
-        if (env->value[i]) bad |= setenv(k_cyc_git_env[i], env->value[i], 1) != 0;
-        else bad |= unsetenv(k_cyc_git_env[i]) != 0;
-        free(env->value[i]);
-    }
-    return bad;
+    return lint_narrow_env_restore(k_cyc_saved_env, env->value,
+                                   (int)(sizeof env->value /
+                                         sizeof env->value[0]));
 }
 
 static int cyc_st_scope_git_check(void)
@@ -707,6 +710,49 @@ static int cyc_st_scope_git_check(void)
     return bad;
 }
 
+static int cyc_st_scope_git_narrow(void)
+{
+    char *paths[] = { "one.c" };
+    struct lint_changed one = { paths, 1, 1 };
+    char errors[8192] = {0};
+    FILE *out = tmpfile(), *err = tmpfile();
+    int bad = !out || !err;
+    if (!bad) {
+        int rc = cyc_check_with_changed(NULL, "baseline.txt", "RATCHET", 0, 0,
+                                        out, err, &one);
+        bad = rc != 1 || csr_slurp(err, errors, sizeof errors) ||
+              !strstr(errors, "one.c:") ||
+              !strstr(errors, "1 complexity violation(s)");
+        if (bad)
+            fprintf(stderr, "unmerged narrowed rc=%d err=%s\n", rc, errors);
+    }
+    if (out) fclose(out);
+    if (err) fclose(err);
+    return bad;
+}
+
+static int cyc_st_scope_git_conflict(void)
+{
+    char info[1024], cmd[4096];
+    int code = 0;
+    if (capture_cmd("git ls-files -s -- one.c", info, sizeof info, &code) != 0 ||
+        code != 0 || strlen(info) < 50 || memcmp(info, "100644 ", 7) != 0 ||
+        info[47] != ' ' || info[48] != '0' || info[49] != '\t')
+        return 1;
+    char hash[41];
+    memcpy(hash, info + 7, 40);
+    hash[40] = '\0';
+    int n = snprintf(cmd, sizeof cmd,
+        "git update-index --force-remove -- one.c && "
+        "printf '100644 %s 1\\tone.c\\n100644 %s 2\\tone.c\\n"
+        "100644 %s 3\\tone.c\\n' | git update-index --index-info",
+        hash, hash, hash);
+    if (ovf(n, sizeof cmd) || capture_cmd(cmd, info, sizeof info, &code) != 0 ||
+        code != 0)
+        return 1;
+    return cyc_st_scope_git_narrow();
+}
+
 /* The production rail enumerates Git's index, rather than walking the tree. */
 static int cyc_st_scope_git_clean(const char *root)
 {
@@ -714,7 +760,7 @@ static int cyc_st_scope_git_clean(const char *root)
     struct cyc_st_env env;
     if (cyc_st_env_save(&env)) return 1;
     int bad = 0;
-    for (int i = 0; k_cyc_git_env[i]; i++) bad |= unsetenv(k_cyc_git_env[i]) != 0;
+    for (int i = 0; k_cyc_saved_env[i]; i++) bad |= unsetenv(k_cyc_saved_env[i]) != 0;
     if (!getcwd(old, sizeof old) || chdir(root)) {
         (void)cyc_st_env_restore(&env);
         return 1;
@@ -723,6 +769,7 @@ static int cyc_st_scope_git_clean(const char *root)
     if (!bad) bad = capture_cmd("GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null "
         "sh -c 'git init -q . && git add -f -- .' 2>&1", cmdout, sizeof cmdout, &code) || code;
     if (!bad) bad = cyc_st_scope_git_check();
+    if (!bad) bad = cyc_st_scope_git_conflict();
     if (chdir(old)) bad = 1;
     if (cyc_st_env_restore(&env)) bad = 1;
     return bad;
@@ -895,6 +942,93 @@ static int cyc_st_hist(void)
     return bad;
 }
 
+static int cyc_st_narrow_one(const char *root, const char *path,
+                             const char *baseline, const char *mode, int want,
+                             const char *needle)
+{
+    char *paths[] = { (char *)path };
+    struct lint_changed one = { paths, 1, 1 };
+    struct cyc_st_run r;
+    if (cyc_st_exec_changed(root, baseline, mode, 0, &one, &r))
+        return 1;
+    return cyc_st_want(&r, "narrowed complexity", want, needle);
+}
+
+static int cyc_st_narrow(const char *root)
+{
+    static const struct {
+        const char *path, *baseline, *mode;
+        int want;
+        const char *needle;
+    } cases[] = {
+        { "docs/README.md", "", "RATCHET", 0, "0 functions scanned in 0 files" },
+        { "case.c", "case.c:over_cap:16\n", "RATCHET", 0,
+          "2 functions scanned in 1 files" },
+        { "case.c", "", "RATCHET", 1, "not pinned" },
+        { "case.c", "case.c:over_cap:15\n", "RATCHET", 1, "grew M=15 -> M=16" },
+        { "case.c", "case.c:over_cap:17\n", "RATCHET", 0, "shrank M=17 -> M=16" },
+        { "case.c", "case.c:over_cap:16\nother.c:other:20\n", "RATCHET", 0, NULL },
+        { "case.c", "case.c:over_cap:16\ncase.c:ghost:20\n", "RATCHET", 1,
+          "stale baseline" },
+        { "gone.c", "gone.c:ghost:20\n", "RATCHET", 1, "stale baseline" },
+        { "case.c", "", "FAIL", 1, "baseline ignored" },
+    };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        bad |= cyc_st_narrow_one(root, cases[i].path, cases[i].baseline,
+                                 cases[i].mode, cases[i].want, cases[i].needle);
+    return bad;
+}
+
+static int cyc_st_baseline_guard(void)
+{
+    static const char path[] = "tools/lint/cyclomatic_complexity_baseline.txt";
+    char *paths[] = { (char *)path };
+    struct lint_changed edit = { paths, 1, 1 };
+    if (cyc_narrow_ok(&edit, path))
+        return 1;
+    char *dot[] = { "./tools/lint/cyclomatic_complexity_baseline.txt" };
+    struct lint_changed dotted = { dot, 1, 1 };
+    if (cyc_narrow_ok(&dotted, path))
+        return 1;
+    struct lint_changed empty = { NULL, 0, 1 };
+    if (!cyc_narrow_ok(&empty, path) ||
+        setenv("ZCL_LINT_REPO_ROOT", "relative", 1) != 0)
+        return 1;
+    return cyc_narrow_ok(&edit, "/repo/tools/lint/cyclomatic_complexity_baseline.txt") != 0;
+}
+
+static int cyc_st_mutations(const char *root)
+{
+    struct cyc_st_env env;
+    if (cyc_st_env_save(&env))
+        return 1;
+    char base[8192], list[8192], flag[8192 + 32];
+    int bad = ovf(snprintf(base, sizeof base, "%s/baseline.txt", root), sizeof base)
+            || ovf(snprintf(list, sizeof list, "%s/changed.txt", root), sizeof list)
+            || ovf(snprintf(flag, sizeof flag, "--changed-files=%s", list), sizeof flag)
+            || setenv("ZCL_CYCLOMATIC_ROOT", root, 1) != 0
+            || setenv("ZCL_CYCLOMATIC_BASELINE", base, 1) != 0
+            || setenv("ZCL_LINT_MODE", "RATCHET", 1) != 0
+            || csr_write(base, "case.c:over_cap:16\n")
+            || csr_write(list, "case.c\n");
+    if (!bad) {
+        char *report[] = { flag, "--report", NULL };
+        char *write[] = { flag, "--write-baseline", NULL };
+        char *tighten[] = { flag, "--tighten-baseline", NULL };
+        bad |= check_cyclomatic_complexity_run(2, report) != 2;
+        bad |= check_cyclomatic_complexity_run(2, write) != 2;
+        bad |= check_cyclomatic_complexity_run(2, tighten) != 2;
+        char got[8192];
+        if (cyc_st_read_base(root, got, sizeof got) ||
+            strcmp(got, "case.c:over_cap:16\n") != 0)
+            bad = 1;
+    }
+    bad |= cyc_st_baseline_guard();
+    bad |= cyc_st_env_restore(&env);
+    return bad;
+}
+
 int check_cyclomatic_complexity_selftest(void)
 {
     int bad = cyc_st_metric() | cyc_st_hist() | cyc_st_scope();
@@ -968,6 +1102,8 @@ int check_cyclomatic_complexity_selftest(void)
         bad |= cyc_st_case(root, "case.c:over_cap:16\n", "FAIL", 1,
                            "baseline ignored");
         bad |= cyc_st_writeback(root);
+        bad |= cyc_st_narrow(root);
+        bad |= cyc_st_mutations(root);
     }
     (void)rap_rm_rf(root);
     return st_ok(bad, "check_cyclomatic_complexity selftest: OK\n");

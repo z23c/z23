@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
@@ -86,16 +87,51 @@ static int zs_text(void)
     return 0;
 }
 
+static int zs_catalog_self_entry(void)
+{
+    char *paths[] = { "tools/dev/zcc-bootstrap-inputs.list" };
+    struct lint_changed catalog = { paths, 1, 1 };
+    char cwd[ZC_PATH];
+    if (csr_mkdirs(zcw("catalog-test/tools/dev")) != 0 ||
+        zc_put("catalog-test/tools/dev/zcc-bootstrap-inputs.list",
+               "platform/modules/sha3/src/sha3.c\n") != 0 ||
+        !getcwd(cwd, sizeof cwd) || chdir(zcw("catalog-test")) != 0)
+        return zs_fail("catalog self-entry fixture setup");
+    int relevant = zc_changed_relevant(&catalog);
+    if (chdir(cwd) != 0)
+        return zs_fail("catalog self-entry fixture restore");
+    return relevant ? 0 : zs_fail("removing the catalog self-entry hid its own edit");
+}
+
+static int zs_changed_selection(void)
+{
+    char *doc_paths[] = { "docs/README.md" };
+    char *sha_paths[] = { "platform/modules/sha3/src/sha3.c" };
+    char *gate_paths[] = { "tools/lint/lintc/gate_zcc_cache_core.c" };
+    struct lint_changed docs = { doc_paths, 1, 1 };
+    struct lint_changed sha = { sha_paths, 1, 1 };
+    struct lint_changed gate = { gate_paths, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    struct lint_changed wide = { NULL, 0, 0 };
+    if (zc_changed_relevant(&docs) || zc_changed_relevant(&empty))
+        return zs_fail("unrelated or empty selection ran the cache suite");
+    if (!zc_changed_relevant(&sha) || !zc_changed_relevant(&gate) ||
+        !zc_changed_relevant(&wide))
+        return zs_fail("a cache dependency did not force the full suite");
+    return zs_catalog_self_entry();
+}
+
 int check_zcc_cache_selftest(void)
 {
     int rc;
     memset(&zc, 0, sizeof zc);
     if (zc_mkwork("zcl-zcc-selftest.XXXXXX"))
         return zs_fail("scratch directory");
-    rc = zs_child() || zs_wait_owner() || zs_files() || zs_text() || zc_boot_status_selftest();
+    rc = zs_child() || zs_wait_owner() || zs_files() || zs_text() ||
+         zs_changed_selection() || zc_boot_status_selftest();
     rap_rm_rf(zc.work);
     if (rc == 0)
         puts("check_zcc_cache: selftest OK (child ownership, capture, exit and signal codes, "
-             "env set/unset, log counting, LOOKUP matching, sed, find, copy, bootstrap status)");
+             "env set/unset, log counting, LOOKUP matching, sed, find, copy, changed-input selection, bootstrap status)");
     return rc;
 }

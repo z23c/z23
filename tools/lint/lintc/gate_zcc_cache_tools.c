@@ -9,6 +9,7 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE 1
 #endif
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -116,6 +117,109 @@ static int lt_prog_name(const char *prog, char *out, size_t cap)
     return rc;
 }
 
+static int lt_query_failure(void)
+{
+    if (csr_mkdirs(zcw("query-scratch")) != 0 ||
+        zc_put("query-fail-cc",
+            "#!/bin/sh\n"
+            "case \" $* \" in\n"
+            "    *-print-prog-name=cc1*)\n"
+            "        attempts=0\n"
+            "        while [ \"$attempts\" -lt 200 ] && [ ! -f \"$QUERY_AS_CALLED\" ]; do\n"
+            "            sleep 0.005\n"
+            "            attempts=$((attempts + 1))\n"
+            "        done\n"
+            "        [ -f \"$QUERY_AS_CALLED\" ] || exit 91\n"
+            "        cc \"$@\" || exit $?\n"
+            "        : > \"$QUERY_CC1_DONE\"\n"
+            "        ;;\n"
+            "    *-print-prog-name=as*)\n"
+            "        : > \"$QUERY_AS_CALLED\"\n"
+            "        exit 42\n"
+            "        ;;\n"
+            "    *)\n"
+            "        exec cc \"$@\"\n"
+            "        ;;\n"
+            "esac\n") != 0 || chmod(zcw("query-fail-cc"), 0700) != 0)
+        return 1;
+    const char *const env[] = { zc_zd("query-failure-cache"),
+        zcf("ZCC_LOG=%s", zcw("query-failure.log")),
+        zcf("TMPDIR=%s", zcw("query-scratch")),
+        zcf("QUERY_AS_CALLED=%s", zcw("query-as-called")),
+        zcf("QUERY_CC1_DONE=%s", zcw("query-cc1-done")), NULL };
+    struct zc_cmd c = { .argv = ZC_ARGV(zc.zcc, zcw("query-fail-cc"),
+        "-std=c23", "-O0", "-c", zcw("main.c"), "-o", zcw("query-fail.o")),
+        .env = env, .errf = "/dev/null" };
+    if (zc_run(&c) != 0)
+        return 1;
+    zc_want(zc_exists(zcw("query-as-called")),
+            "Linux tool query failure skipped the assembler query");
+    zc_want(zc_exists(zcw("query-cc1-done")),
+            "Linux frontend query did not observe the assembler query or complete");
+    zc_want(zc_line_with_prefix(zcw("query-failure.log"), "UNKEY"),
+            "Linux failed tool query did not fall back to an uncached compile");
+    DIR *dir = opendir(zcw("query-scratch"));
+    zc_want(dir != NULL, "Linux tool query scratch directory is missing");
+    if (!dir)
+        return 1;
+    bool leftover = false;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+        leftover |= strncmp(entry->d_name, "zcc-tool.", 9) == 0;
+    closedir(dir);
+    zc_want(!leftover, "Linux tool query failure left scratch files");
+    return 0;
+}
+
+static int lt_preprocess_overlap(void)
+{
+    if (zc_put("preprocess-overlap-cc",
+            "#!/bin/sh\n"
+            "case \" $* \" in\n"
+            "    *-print-prog-name=cc1*)\n"
+            "        : > \"$OVERLAP_CC1\"\n"
+            "        attempts=0\n"
+            "        while [ \"$attempts\" -lt 200 ] && [ ! -f \"$OVERLAP_PP\" ]; do\n"
+            "            sleep 0.005\n"
+            "            attempts=$((attempts + 1))\n"
+            "        done\n"
+            "        [ -f \"$OVERLAP_PP\" ] || exit 91\n"
+            "        exec cc \"$@\"\n"
+            "        ;;\n"
+            "    *-print-prog-name=as*) exec cc \"$@\" ;;\n"
+            "    *-E*)\n"
+            "        : > \"$OVERLAP_PP\"\n"
+            "        attempts=0\n"
+            "        while [ \"$attempts\" -lt 200 ] && [ ! -f \"$OVERLAP_CC1\" ]; do\n"
+            "            sleep 0.005\n"
+            "            attempts=$((attempts + 1))\n"
+            "        done\n"
+            "        [ -f \"$OVERLAP_CC1\" ] || exit 92\n"
+            "        exec cc \"$@\"\n"
+            "        ;;\n"
+            "    *) exec cc \"$@\" ;;\n"
+            "esac\n") != 0 || chmod(zcw("preprocess-overlap-cc"), 0700) != 0)
+        return 1;
+    const char *const env[] = { zc_zd("preprocess-overlap-cache"),
+        zcf("ZCC_LOG=%s", zcw("preprocess-overlap.log")),
+        zcf("OVERLAP_CC1=%s", zcw("overlap-cc1")),
+        zcf("OVERLAP_PP=%s", zcw("overlap-pp")), NULL };
+    struct zc_cmd c = { .argv = ZC_ARGV(zc.zcc, zcw("preprocess-overlap-cc"),
+        "-std=c23", "-O0", "-c", zcw("main.c"), "-o", zcw("overlap.o")),
+        .env = env, .errf = "/dev/null" };
+    if (zc_run(&c) != 0)
+        return 1;
+    zc_disp_in(zcw("preprocess-overlap.log"), "MISS",
+               "Linux overlapped preprocessing was not a cold MISS");
+    if (zc_run(&c) != 0)
+        return 1;
+    zc_disp_in(zcw("preprocess-overlap.log"), "HIT",
+               "Linux overlapped preprocessing was not a warm HIT");
+    zc_want(zc_exists(zcw("overlap-cc1")) && zc_exists(zcw("overlap-pp")),
+            "Linux preprocessing did not overlap toolchain hashing");
+    return 0;
+}
+
 int zc_sec_linux(void)
 {
     char as[ZC_PATH];
@@ -145,7 +249,11 @@ int zc_sec_linux(void)
     sel[strcspn(sel, "\n")] = '\0';
     zc_want(strcmp(sel, zcw("linux-tools/cc1")) == 0,
             "Linux driver did not select fixture frontend");
-    return lt_mutate("frontend", "cc1", "linux-frontend-cache", lt_rewrite_fe);
+    if (lt_mutate("frontend", "cc1", "linux-frontend-cache", lt_rewrite_fe))
+        return 1;
+    if (lt_query_failure())
+        return 1;
+    return lt_preprocess_overlap();
 }
 
 /* ---- named libraries ---- */

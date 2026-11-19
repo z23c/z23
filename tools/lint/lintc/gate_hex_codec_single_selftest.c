@@ -27,6 +27,40 @@
 #include <unistd.h>
 #include "lintc.h"
 
+int hcs_under_roots(const char *path, char roots[][RS_PATH], int nroots,
+                    const char *repo);
+int hcs_collect_changed(char roots[][RS_PATH], int nroots,
+                        const struct lint_changed *ch, char out[][RS_PATH],
+                        int max, int *n);
+
+static int hcs_st_root_c(const char *root, const char *repo)
+{
+    char cwd[4096], roots[1][RS_PATH] = { "." }, selected[1][RS_PATH];
+    char *paths[] = { ".c" };
+    struct lint_changed one = { paths, 1, 1 };
+    int n = 0, rc = 1;
+    int had_repo = getenv("ZCL_LINT_REPO_ROOT") != NULL;
+    if (!getcwd(cwd, sizeof cwd) || chdir(root) != 0)
+        return 1;
+    if (setenv("ZCL_LINT_REPO_ROOT", repo, 1) != 0) {
+        if (chdir(cwd) != 0)
+            return 2;
+        return 1;
+    }
+    if (csr_write("./.c", "int root_c;\n") == 0 &&
+        hcs_collect_changed(roots, 1, &one, selected, 1, &n) == 0 &&
+        n == 1 && strcmp(selected[0], ".c") == 0)
+        rc = 0;
+    int restore = chdir(cwd);
+    if (!had_repo)
+        restore |= unsetenv("ZCL_LINT_REPO_ROOT");
+    if (restore != 0)
+        return 1;
+    if (rc != 0)
+        fputs("hex exact two-character .c selection failed\n", stderr);
+    return rc;
+}
+
 static const char k_hcs_gate[] = "check_hex_codec_single";
 /* The CLI-registered gate name (hyphenated, main.c's k_gates table and the
  * Makefile target) — distinct from k_hcs_gate above, which is the
@@ -114,6 +148,116 @@ static int hcs_cov_case(int want, const char *msg, const char *const *assigns)
     return 0;
 }
 
+static int hcs_st_write_list(const char *path, const char *target)
+{
+    char text[4096];
+    if (ovf(snprintf(text, sizeof text, "%s\n", target), sizeof text))
+        return 2;
+    return csr_write(path, text);
+}
+
+static int hcs_st_narrow_call(char *args[], int want, const char *label)
+{
+    int rc = check_hex_codec_single_run(1, args);
+    if (rc != want) {
+        fprintf(stderr, "%s: %s rc=%d want=%d\n", k_hcs_gate, label, rc, want);
+        return 1;
+    }
+    return 0;
+}
+
+static int hcs_st_selected(char *args[], const char *fixture,
+                           const char *base_env, const char *changed,
+                           const char *canonical, const char *violating)
+{
+    if (hcs_st_write_list(changed, fixture) || csr_write(fixture, violating) ||
+        hcs_st_narrow_call(args, 1, "selected violation") != 0)
+        return 1;
+    if (csr_write(base_env, fixture) ||
+        hcs_st_narrow_call(args, 0, "selected baseline") != 0)
+        return 1;
+    return csr_write(fixture, canonical) == 0 &&
+           hcs_st_narrow_call(args, 1, "selected stale baseline") == 0 ? 0 : 1;
+}
+
+static int hcs_st_update(char *args[], const char *fixture,
+                         const char *base_env, const char *changed)
+{
+    if (hcs_st_write_list(changed, base_env) ||
+        hcs_st_narrow_call(args, 1, "baseline edit full scan") != 0)
+        return 1;
+    if (hcs_st_write_list(changed, fixture) ||
+        setenv("ZCL_LINT_MODE", "UPDATE", 1) != 0)
+        return 1;
+    return hcs_st_narrow_call(args, 2, "changed UPDATE refusal") != 0 ||
+           setenv("ZCL_LINT_MODE", "FAIL", 1) != 0;
+}
+
+static int hcs_st_narrow_setup(const char *root, char roots_env[4096],
+                               char base_env[4096], char fixture[4096],
+                               char changed[4096], const char *canonical)
+{
+    if (ovf(snprintf(roots_env, 4096, "%s/engine", root), 4096) ||
+        ovf(snprintf(base_env, 4096, "%s/baseline.txt", root), 4096) ||
+        ovf(snprintf(fixture, 4096, "%s/engine/services/src/selftest_hex.c", root),
+              4096) ||
+        ovf(snprintf(changed, 4096, "%s/changed.txt", root), 4096))
+        return 2;
+    return setenv("ZCL_HEX_CODEC_SCAN_ROOTS", roots_env, 1) != 0 ||
+           setenv("ZCL_HEX_CODEC_COVERAGE", "0", 1) != 0 ||
+           setenv("ZCL_HEX_CODEC_FILE_FLOOR", "1", 1) != 0 ||
+           setenv("ZCL_HEX_CODEC_BASELINE", base_env, 1) != 0 ||
+           setenv("ZCL_LINT_MODE", "FAIL", 1) != 0 ||
+           csr_write(base_env, "other.c\n") || csr_write(fixture, canonical) ||
+           hcs_st_write_list(changed, fixture);
+}
+
+static int hcs_st_path_guards(const char *roots_env)
+{
+    char repo[4096];
+    if (cic_repo_root(repo, sizeof repo) != 0)
+        return 1;
+    char roots[1][RS_PATH] = { "." };
+    if (hcs_under_roots("/usr/include/stdio.h", roots, 1, repo) ||
+        !hcs_under_roots("engine/entry/main.c", roots, 1, repo)) {
+        fputs("hex changed-root outside/inside mismatch\n", stderr);
+        return 1;
+    }
+    return hcs_st_root_c(roots_env, repo);
+}
+
+static int hcs_st_narrowed(const char *root)
+{
+    static const char canonical[] =
+        "#include \"base/hex.h\"\n"
+        "static void emit(const unsigned char id[32], char out[65])\n"
+        "{\n    zcl_hex_encode(id, 32, out);\n}\n";
+    static const char violating[] =
+        "static void my_hex(const unsigned char *in, size_t n, char *out)\n"
+        "{\n    static const char hexd[] = \"0123456789" "abcdef\";\n"
+        "    for (size_t i = 0; i < n; i++) {\n"
+        "        out[2 * i]     = hexd[(in[i] >>" " 4) & 0xf];\n"
+        "        out[2 * i + 1] = hexd[in[i] & 0xf];\n    }\n"
+        "    out[2 * n] = 0;\n}\n";
+    char roots_env[4096], base_env[4096], fixture[4096], changed[4096];
+    if (hcs_st_narrow_setup(root, roots_env, base_env, fixture, changed, canonical) != 0)
+        return 2;
+    char flag[4096 + 32];
+    if (ovf(snprintf(flag, sizeof flag, "--changed-files=%s", changed), sizeof flag))
+        return 2;
+    char *args[] = { flag, NULL };
+    if (hcs_st_narrow_call(args, 0, "narrowed clean case") != 0)
+        return 1;
+    if (hcs_st_write_list(changed, "docs/README.md") ||
+        hcs_st_narrow_call(args, 0, "unrelated case") != 0)
+        return 1;
+    if (hcs_st_selected(args, fixture, base_env, changed, canonical, violating) != 0)
+        return 1;
+    if (hcs_st_update(args, fixture, base_env, changed) != 0)
+        return 1;
+    return hcs_st_path_guards(roots_env);
+}
+
 int check_hex_codec_single_selftest(void)
 {
     const char *td = env_or("TMPDIR", "test-tmp");
@@ -165,6 +309,8 @@ int check_hex_codec_single_selftest(void)
             "static void emit(const unsigned char id[32], char out[65])\n"
             "{\n    zcl_hex_encode(id, 32, out);\n}\n");
 
+    if (rc == 0)
+        rc = hcs_st_narrowed(root);
     if (rc == 0) {
         static const char *const c1[] = { NULL };
         rc = hcs_cov_case(0, "the complete scan did not pass its coverage "

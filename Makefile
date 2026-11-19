@@ -18131,8 +18131,8 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 	@tools/scripts/first_build_timing.sh --self-test
 	@echo "══ pr-check: passed ══"
 
-# agent-verify: the one verification trip for an edit. It runs the four checks
-# every edit must pass, each as its own sub-make with its own log. Complexity fails fast before
+# agent-verify: the one verification trip for an edit. It runs the required
+# checks, each as its own sub-make with its own log. Complexity fails fast before
 # selector setup; later failures are collected so one trip shows each red step. Full lint and the
 # wide group list stay with the landing step. The test step builds with
 # ZCL_TEST_WERROR=1, as the land proof's bundle build does, so a compiler
@@ -18153,9 +18153,9 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # skipped. The stack gate still runs the proof's full set.
 # The check-capability-closure step is the land proof's closure gate; it
 # prepares and grades the dev epoch after the focused test has reported.
-# The check-kpi-floor step reads the floor file tools/lint/kpi_floor.txt and
-# the inputs its metrics measure: build/gen/CAPABILITY_INVENTORY.jsonl (built
-# by the step before it), engine/composition/commands/catalog.def,
+# The lint-fast check-kpi-floor gate reads tools/lint/kpi_floor.txt and the
+# inputs its metrics measure: build/gen/CAPABILITY_INVENTORY.jsonl (built by
+# the runner's inventory prerequisite), engine/composition/commands/catalog.def,
 # tests/harness/src, tools/dev/test_group_catalog.def, the Makefile and
 # tools/lint/{bash_allowlist,file_size_policy_baseline,determinism_baseline,
 # orphan_placement_baseline}.txt. So a KPI regression such as a new duplicate
@@ -18233,9 +18233,6 @@ agent-verify:
 	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; fi; \
 	 av_step check-capability-closure; \
 	 av_step proof-lint-prebuild; \
-	 av_step docs-capability-inventory; \
-	 if [ "$$rc" -eq 0 ]; then av_step check-kpi-floor -o docs-capability-inventory; \
-	 else av_step check-kpi-floor; fi; \
 	 av_step lint-fast; \
 	 if [ -z "$$failed" ]; then \
 	    av_total; echo "agent-verify: OK" | tee -a build/scratch/agent-verify.rc; \

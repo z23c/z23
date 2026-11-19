@@ -2,6 +2,9 @@
  *
  * purpose: gate family — raw malloc/calloc/realloc freeze (check-raw-malloc).
  * .git probe first; lint_git_index_foreach only when .git exists.
+ * --changed-files scans the same production root/exclusion set only at the
+ * changed paths, skipping deleted files and reporting the examined count.
+ * No argument keeps the full-tree scan used by make lint and land proof.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -227,20 +230,52 @@ static int rma_scan_file(const char *path, const regex_t *re,
     return 0;
 }
 
-static int rma_run(void)
+static int rma_collect_changed(struct rma_set *s,
+                               const char (*roots)[RS_PATH], int nr,
+                               const struct lint_changed *ch)
+{
+    s->n = 0;
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = ch->path[i];
+        struct stat st;
+        if (!rma_is_ch(path) || lint_path_is_excluded(path) ||
+            !rma_under(path, roots, nr))
+            continue;
+        if (stat(path, &st) != 0) {
+            if (errno == ENOENT)
+                continue;
+            return 2;
+        }
+        if (S_ISREG(st.st_mode) && rma_add(s, path) != 0)
+            return 2;
+    }
+    return 0;
+}
+
+static int rma_prepare(struct rma_set *files, struct rma_set *allow,
+                       const struct lint_changed *ch)
+{
+    char roots[RS_MAX][RS_PATH];
+    int nr = 0, rc = rma_fill_roots(roots, &nr);
+    if (rc)
+        return rc;
+    rc = rma_load_allow(allow, k_rma_allow);
+    if (rc)
+        return rc;
+    rc = ch && ch->active ? rma_collect_changed(files, roots, nr, ch)
+                          : rma_collect(files, roots, nr);
+    if (rc)
+        return rc;
+    return ch && ch->active && lint_examined_print(files->n, 0) < 0 ? 2 : 0;
+}
+
+static int rma_run(const struct lint_changed *ch)
 {
     static struct rma_set files, allow;
     static char viol[RMA_HIT][RMA_LINE];
-    char roots[RS_MAX][RS_PATH];
     regex_t re;
-    int nr = 0, nv = 0, nallow = 0, rc, i;
-    rc = rma_fill_roots(roots, &nr);
-    if (rc)
-        return rc;
-    rc = rma_load_allow(&allow, k_rma_allow);
-    if (rc)
-        return rc;
-    rc = rma_collect(&files, roots, nr);
+    int nv = 0, nallow = 0, rc, i;
+    rc = rma_prepare(&files, &allow, ch);
     if (rc)
         return rc;
     if (reg_fail(&re, regcomp(&re, k_rma_call, REG_EXTENDED)))
@@ -303,11 +338,29 @@ static int rma_viol_selftest(void)
     return 0;
 }
 
+static int rma_changed_selftest(void)
+{
+    char roots[RS_MAX][RS_PATH];
+    int nr = 0;
+    static struct rma_set files;
+    char *paths[] = { "docs/README.md", "tools/lint/lintc/gate_raw_malloc.c",
+                      "tools/deleted-fixture.c" };
+    struct lint_changed ch = { paths, 3, 1 };
+    if (rma_fill_roots(roots, &nr) != 0 ||
+        rma_collect_changed(&files, roots, nr, &ch) != 0)
+        return 1;
+    if (files.n == 1 && strcmp(files.p[0], paths[1]) == 0)
+        return 0;
+    fprintf(stderr, "check_raw_malloc selftest: changed-file collection "
+                    "returned %d files, want only %s\n", files.n, paths[1]);
+    return 1;
+}
+
 int check_raw_malloc_selftest(void)
 {
-    if (rma_viol_selftest() != 0)
+    if (rma_viol_selftest() != 0 || rma_changed_selftest() != 0)
         return 1;
-    int rc = rma_run();
+    int rc = rma_run(NULL);
     if (rc != 0) {
         fprintf(stderr, "check_raw_malloc selftest: FAIL — clean tree rc=%d "
                         "want=0\n", rc);
@@ -320,7 +373,10 @@ int check_raw_malloc_selftest(void)
 
 int check_raw_malloc_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
-    return rma_run();
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
+    int rc = rma_run(&ch);
+    lint_changed_free(&ch);
+    return rc;
 }

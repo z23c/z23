@@ -11,6 +11,10 @@
  * compiles it -fsyntax-only with the frozen resident action plan
  * (build/hotswap-fast/flags.env: CC and DEV_CFLAGS, -Werror included), in
  * parallel (ZCL_CC_JOBS workers, default 8).
+ * With --changed-files, manifest/orphan checks stay whole while only rows
+ * whose owner or sibling TU changed compile. Header, adapter, manifest,
+ * compiler-plan, Make or lint-runtime inputs force every row; no argument
+ * retains the complete compile used by make lint and land proof.
  *
  * It also refuses a story set that drifted from the manifest: a row whose
  * derived story file is missing, a story file no row claims, or two rows
@@ -30,6 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_narrow_hook.h"
 #include "../../dev/hotfork_unity.h"
 
 struct hfs_row {
@@ -260,24 +265,70 @@ static int hfs_jobs(void)
     return jobs < 1 ? 1 : jobs > HFS_JOBS_MAX ? HFS_JOBS_MAX : jobs;
 }
 
-/* Compiles every unity through a bounded FIFO window of popen() workers. */
-static int hfs_compile_all(const struct hfs_set *set, int *red)
+static int hfs_row_relevant(const struct hfs_row *row,
+                            const struct lint_changed *ch)
 {
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = ch->path[i];
+        if (strcmp(path, row->source_tu) == 0)
+            return 1;
+        const char *s = row->sibling_tus;
+        size_t want = strlen(path);
+        while (*s) {
+            const char *end = strchr(s, '|');
+            size_t len = end ? (size_t)(end - s) : strlen(s);
+            if (len == want && memcmp(s, path, want) == 0)
+                return 1;
+            if (!end)
+                break;
+            s = end + 1;
+        }
+    }
+    return 0;
+}
+
+static size_t hfs_filter_rows(const struct hfs_set *set,
+                              const struct lint_changed *ch,
+                              struct hfs_row *selected)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < set->count; i++)
+        if (hfs_row_relevant(&set->rows[i], ch))
+            selected[n++] = set->rows[i];
+    return n;
+}
+
+/* Compiles selected unities through a bounded FIFO window of popen() workers. */
+static int hfs_compile_all(const struct hfs_set *set,
+                           const struct lint_changed *ch, size_t *compiled, int *red)
+{
+    static struct hfs_row selected[HFS_ROWS_MAX];
+    struct hfs_set chosen = *set;
+    if (ch) {
+        chosen.rows = selected;
+        chosen.count = hfs_filter_rows(set, ch, selected);
+        if (compiled) *compiled = chosen.count;
+        if (lint_examined_print((int)chosen.count, 0) < 0)
+            return 2;
+    } else {
+        if (compiled) *compiled = chosen.count;
+    }
     FILE *slot[HFS_JOBS_MAX] = {0};
     size_t jobs = (size_t)hfs_jobs();
     int rc = 0;
-    for (size_t i = 0; rc == 0 && i < set->count + jobs; i++) {
+    for (size_t i = 0; rc == 0 && i < chosen.count + jobs; i++) {
         if (i >= jobs)
-            rc = hfs_drain(slot[i % jobs], &set->rows[i - jobs], red);
-        if (rc == 0 && i < set->count) {
-            rc = hfs_prepare(set, i);
+            rc = hfs_drain(slot[i % jobs], &chosen.rows[i - jobs], red);
+        if (rc == 0 && i < chosen.count) {
+            rc = hfs_prepare(&chosen, i);
             slot[i % jobs] = g_hfs_cmd[0] ? popen(g_hfs_cmd, "r") : NULL;
         }
     }
     return rc;
 }
 
-static int hfs_check(const struct hfs_set *set, int *red)
+static int hfs_check(const struct hfs_set *set,
+                     const struct lint_changed *ch, size_t *compiled, int *red)
 {
     *red = 0;
     if (set->count == 0 || set->count > HFS_ROWS_MAX)
@@ -286,7 +337,7 @@ static int hfs_check(const struct hfs_set *set, int *red)
     int rc = hfs_orphans(set, red);
     for (size_t i = 0; rc == 0 && i < set->count; i++)
         rc = hfs_row_shape(set, i, red);
-    return rc ? rc : hfs_compile_all(set, red);
+    return rc ? rc : hfs_compile_all(set, ch, compiled, red);
 }
 
 /* Creates build/<stem>.XXXXXX under the repo root; `out` gets its path. */
@@ -323,21 +374,60 @@ static int64_t hfs_now_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* hfs_suffix body lives in the shared narrowing hooks
+ * (lint_narrow_hook.h). */
+static int hfs_suffix(const char *path, const char *suffix)
+{
+    return lint_narrow_suffix(path, suffix);
+}
+
+static int hfs_prefix(const char *path, const char *prefix)
+{
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+static int hfs_narrow_ok(const struct lint_changed *ch)
+{
+    if (!ch->active)
+        return 0;
+    for (int i = 0; i < ch->n; i++) {
+        const char *path = ch->path[i];
+        const char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (hfs_suffix(path, ".h") || hfs_suffix(path, ".def") ||
+            hfs_suffix(path, ".inc") || hfs_suffix(path, ".mk") ||
+            strcmp(base, "Makefile") == 0 ||
+            strcmp(path, "engine/composition/hotfork_capsules.def") == 0 ||
+            strcmp(path, "build/hotswap-fast/flags.env") == 0 ||
+            hfs_prefix(path, "tools/dev/hotfork_stories/") ||
+            hfs_prefix(path, "tools/dev/hotfork_unity") ||
+            hfs_prefix(path, "tools/lint/lintc/"))
+            return 0;
+    }
+    return 1;
+}
+
 int check_hotfork_stories_run(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    struct lint_changed ch;
+    if (lint_changed_bind(&argc, &argv, &ch) != 0)
+        return 2;
     char root[4096], work[4096];
     int64_t started = hfs_now_ms();
     int rc = hfs_root(root, sizeof root);
     if (rc == 0)
         rc = hfs_workdir(root, "hotfork-stories", work, sizeof work);
-    if (rc)
+    if (rc) {
+        lint_changed_free(&ch);
         return rc;
+    }
     struct hfs_set set = { root, work, k_hfs_rows,
                            sizeof k_hfs_rows / sizeof k_hfs_rows[0] };
+    size_t compiled = set.count;
+    const struct lint_changed *narrow = hfs_narrow_ok(&ch) ? &ch : NULL;
     int red = 0;
-    rc = hfs_check(&set, &red);
+    rc = hfs_check(&set, narrow, &compiled, &red);
+    lint_changed_free(&ch);
     int cl = rap_rm_rf(work);
     if (rc || cl)
         return rc ? rc : cl;
@@ -349,7 +439,7 @@ int check_hotfork_stories_run(int argc, char **argv)
         return 1;
     }
     printf("check-hotfork-stories: OK — %zu/%zu capsule unities compile with "
-           "the frozen dev flags (%d jobs, %lld ms)\n", set.count, set.count,
+           "the frozen dev flags (%d jobs, %lld ms)\n", compiled, set.count,
            hfs_jobs(), (long long)(hfs_now_ms() - started));
     return 0;
 }
@@ -433,7 +523,7 @@ static int hfs_selftest_expect(const char *dir, const char *work,
                            "hf_selftest_add" };
     struct hfs_set set = { dir, work, &row, 1 };
     int red = 0;
-    int rc = hfs_check(&set, &red);
+    int rc = hfs_check(&set, NULL, NULL, &red);
     if (rc)
         return rc;
     const char *verdict = want->want_red ? "RED" : "GREEN";
@@ -547,6 +637,62 @@ static int hfs_selftest_body(const char *fixture, const char *work)
     return 0;
 }
 
+static int hfs_sibling_selftest(void)
+{
+    struct hfs_row row = k_hfs_rows[0];
+    row.sibling_tus = "tools/alpha.c|tools/beta.c";
+    struct hfs_set set = { NULL, NULL, &row, 1 };
+    struct hfs_row selected[1];
+    char *sibling_path[] = { "tools/beta.c" };
+    struct lint_changed sibling = { sibling_path, 1, 1 };
+    if (hfs_filter_rows(&set, &sibling, selected) != 1)
+        return 1;
+    char *prefix_path[] = { "tools/beta" };
+    char *suffix_path[] = { "tools/beta-extra.c" };
+    struct lint_changed prefix = { prefix_path, 1, 1 };
+    struct lint_changed suffix = { suffix_path, 1, 1 };
+    return hfs_filter_rows(&set, &prefix, selected) == 0 &&
+           hfs_filter_rows(&set, &suffix, selected) == 0 ? 0 : 1;
+}
+
+static int hfs_narrow_selftest(void)
+{
+    size_t count = sizeof k_hfs_rows / sizeof k_hfs_rows[0];
+    if (count == 0)
+        return 1;
+    struct hfs_set set = { NULL, NULL, k_hfs_rows, count };
+    struct hfs_row selected[HFS_ROWS_MAX];
+    char *owner_path[] = { (char *)k_hfs_rows[0].source_tu };
+    struct lint_changed owner = { owner_path, 1, 1 };
+    if (!hfs_narrow_ok(&owner) ||
+        hfs_filter_rows(&set, &owner, selected) != 1 ||
+        strcmp(selected[0].source_tu, k_hfs_rows[0].source_tu) != 0)
+        return 1;
+    char *doc_path[] = { "docs/README.md" };
+    struct lint_changed docs = { doc_path, 1, 1 };
+    struct lint_changed empty = { NULL, 0, 1 };
+    char *header_path[] = { "platform/modules/base/include/base/safe_alloc.h" };
+    struct lint_changed header = { header_path, 1, 1 };
+    char *manifest_path[] = { "engine/composition/hotfork_capsules.def" };
+    struct lint_changed manifest = { manifest_path, 1, 1 };
+    char *adapter_path[] = { "tools/dev/hotfork_stories/example.txt" };
+    struct lint_changed adapter = { adapter_path, 1, 1 };
+    char *lintc_path[] = { "tools/lint/lintc/gate_hotfork_stories.c" };
+    struct lint_changed lintc = { lintc_path, 1, 1 };
+    char *plan_path[] = { "build/hotswap-fast/flags.env" };
+    struct lint_changed plan = { plan_path, 1, 1 };
+    if (hfs_filter_rows(&set, &docs, selected) != 0 ||
+        hfs_filter_rows(&set, &empty, selected) != 0 ||
+        !hfs_narrow_ok(&empty) || hfs_narrow_ok(&header) ||
+        hfs_narrow_ok(&manifest) || hfs_narrow_ok(&adapter) ||
+        hfs_narrow_ok(&lintc) || hfs_narrow_ok(&plan) ||
+        hfs_sibling_selftest() != 0) {
+        fputs("check-hotfork-stories selftest: changed-row selection mismatch\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 int check_hotfork_stories_selftest(void)
 {
     char root[4096], fixture[4096], work[4096];
@@ -563,6 +709,8 @@ int check_hotfork_stories_selftest(void)
     if (rc == 0 && (puts("══ check-hotfork-stories selftest ══") < 0 ||
                     fflush(stdout) != 0))
         rc = die("z23-lint: write failed\n", "");
+    if (rc == 0)
+        rc = hfs_narrow_selftest();
     if (rc == 0)
         rc = hfs_selftest_body(fixture, work);
     int cl = rap_rm_rf(fixture);

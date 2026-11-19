@@ -56,12 +56,14 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "lintc.h"
 #include "gate_function_complexity_priv.h"
+#include "lint_narrow_hook.h"
 
 enum { CYC_MAX = 15, CYC_TOP = 20 };
 /* --report histogram: M = CYC_HIST_LO .. CYC_HIST_LO + CYC_HIST_N - 1. */
@@ -1110,57 +1112,212 @@ static int cyc_ratchet(const char *base_path, int tighten, FILE *hits,
                             k_cyc_tighten_cmd);
 }
 
-int cyc_check(const char *root, const char *base_path,
-                     const char *mode, int report, int tighten, FILE *out,
-                     FILE *err)
+/* cyc_path_form/cyc_repo bodies live in the shared narrowing hooks
+ * (lint_narrow_hook.h): the repo-root-tolerant path form and the resolver
+ * that refuses only absolute changed paths when the root is missing. */
+
+static int cyc_source(const char *path)
 {
-    if (!report && lint_base_load(&g_cyc_pins, base_path, err))
+    size_t n = strlen(path);
+    if (n >= 4 && (strcmp(path + n - 4, ".def") == 0 ||
+                   strcmp(path + n - 4, ".inc") == 0))
+        return 1;
+    return n >= 2 && path[n - 2] == '.' &&
+           (path[n - 1] == 'c' || path[n - 1] == 'h');
+}
+
+static int cyc_changed_has(const struct lint_changed *ch, const char *repo,
+                           const char *path)
+{
+    for (int i = 0; i < ch->n; i++)
+        if (strcmp(lint_narrow_repo_form_opt(ch->path[i], repo), path) == 0)
+            return 1;
+    return 0;
+}
+
+struct cyc_selected {
+    const struct lint_changed *ch;
+    const char *repo;
+    struct cyc_walk *walk;
+    char last[RS_PATH];
+};
+
+static int cyc_selected_index(const char *path, int stage, void *vctx)
+{
+    struct cyc_selected *sel = vctx;
+    (void)stage;
+    if (!cyc_source(path) || !cyc_changed_has(sel->ch, sel->repo, path) ||
+        strcmp(sel->last, path) == 0)
+        return 0;
+    int rc = cyc_on_path(path, sel->walk);
+    if (rc == 0 &&
+        ovf(snprintf(sel->last, sizeof sel->last, "%s", path), sizeof sel->last))
         return 2;
-    FILE *hits = tmpfile();
-    if (!hits)
-        return die("z23-lint: tmpfile failed\n", "");
-    struct cyc_acc a;
-    memset(&a, 0, sizeof a);
-    a.out = hits;
-    a.mode = mode;
-    struct cyc_walk w = {
-        root, root ? strlen(root) : 0, cyc_on_func, &a, 0
-    };
+    return rc;
+}
+
+static int cyc_selected_file(const char *root, const char *path,
+                             struct cyc_walk *w)
+{
+    char full[4096];
+    struct stat st;
+    if (path[0] == '/' || cyc_excluded(path))
+        return 0;
+    if (ovf(snprintf(full, sizeof full, "%s/%s", root, path), sizeof full))
+        return die("z23-lint: path too long: %s\n", path);
+    if (lstat(full, &st) != 0)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot stat %s\n", full);
+    if (!S_ISREG(st.st_mode))
+        return 0;
+    w->files++;
+    return cyc_scan_open(full, path, w);
+}
+
+static int cyc_scan_selected(const char *root, const struct lint_changed *ch,
+                             const char *repo, struct cyc_walk *w)
+{
+    if (!root) {
+        struct cyc_selected sel = { ch, repo, w, {0} };
+        char bad[8] = {0};
+        if (lint_git_index_foreach(cyc_selected_index, &sel, bad) != 0)
+            return die("z23-lint: cannot read Git index for complexity scan\n", "");
+        return 0;
+    }
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < ch->n; i++) {
+        const char *path = lint_narrow_repo_form_opt(ch->path[i], repo);
+        if (cyc_source(path))
+            rc = cyc_selected_file(root, path, w);
+    }
+    return rc;
+}
+
+/* The pin rows carry their key first (struct lb_row), so the shared filter
+ * compacts whole rows in place. The repo root routes through file scope
+ * because the shared match callback only sees one path at a time. */
+static const char *g_cyc_narrow_repo;
+
+static int cyc_key_match(const char *key, const char *path)
+{
+    path = lint_narrow_repo_form_opt(path, g_cyc_narrow_repo);
+    size_t n = strlen(path);
+    return strncmp(key, path, n) == 0 && key[n] == ':';
+}
+
+static void cyc_base_narrow(const struct lint_changed *ch, const char *repo)
+{
+    g_cyc_narrow_repo = repo;
+    g_cyc_pins.n = lint_narrow_filter_keys((const char *const *)ch->path, ch->n,
+                                           (const char **)g_cyc_pins.row,
+                                           g_cyc_pins.n,
+                                           (int)sizeof g_cyc_pins.row[0],
+                                           cyc_key_match);
+    g_cyc_narrow_repo = NULL;
+}
+
+/* The narrowing-hook descriptor: the repo-root-tolerant form and the
+ * resolver that refuses only absolute changed paths when the root is
+ * missing; everything else is the shared lint_narrow_ok body. */
+static const struct lint_narrow_gate k_cyc_narrow_gate = {
+    "check-cyclomatic-complexity", NULL, lint_narrow_repo_form_opt, NULL,
+    lint_narrow_repo_opt, NULL, 0
+};
+
+int cyc_narrow_ok(const struct lint_changed *ch, const char *baseline)
+{
+    return lint_narrow_ok(ch, baseline, &k_cyc_narrow_gate);
+}
+
+struct cyc_eval {
+    const char *root, *base_path, *mode, *repo;
+    const struct lint_changed *changed;
+    struct cyc_acc acc;
+    struct cyc_walk walk;
+};
+
+static int cyc_measure(struct cyc_eval *e, int report, int tighten, FILE *hits,
+                       FILE *out)
+{
     int rc;
-    if (root)
-        rc = walk_src(root, 3, cyc_on_walk_file, &w);
+    if (e->changed)
+        rc = cyc_scan_selected(e->root, e->changed, e->repo, &e->walk);
+    else if (e->root)
+        rc = walk_src(e->root, 3, cyc_on_walk_file, &e->walk);
     else
-        rc = each_zpath(k_cyc_ls, cyc_on_path, &w);
-    if (rc == 0 && strcmp(mode, "FAIL") != 0 && !report) {
-        int cv = cyc_ratchet(base_path, tighten, hits, out);
+        rc = each_zpath(k_cyc_ls, cyc_on_path, &e->walk);
+    if (e->changed && rc == 0 && lint_examined_print(e->walk.files, 0) < 0)
+        rc = 2;
+    if (rc == 0 && strcmp(e->mode, "FAIL") != 0 && !report) {
+        int cv = cyc_ratchet(e->base_path, tighten, hits, out);
         if (cv < 0)
             rc = 2;
         else
-            a.viol += cv;
+            e->acc.viol += cv;
     }
-    if (rc) {
-        fclose(hits);
-        return rc;
-    }
+    return rc;
+}
+
+static int cyc_finish(struct cyc_eval *e, int report, FILE *hits, FILE *out,
+                      FILE *err)
+{
     if (report) {
-        rc = cyc_report(&a, w.files, out);
+        int rc = cyc_report(&e->acc, e->walk.files, out);
         fclose(hits);
         return rc;
     }
-    if (a.viol) {
-        rc = cyc_dump_viol(&a, hits, mode, err);
+    if (e->acc.viol) {
+        int rc = cyc_dump_viol(&e->acc, hits, e->mode, err);
         fclose(hits);
         return rc;
     }
     if (fprintf(out, "check_cyclomatic_complexity: OK — %d functions "
                 "scanned in %d files, %d baseline pin(s) exact at cap "
                 "%d (mode: %s)\n",
-                a.funcs, w.files, g_cyc_pins.n, CYC_MAX, mode) < 0) {
+                e->acc.funcs, e->walk.files, g_cyc_pins.n, CYC_MAX, e->mode) < 0) {
         fclose(hits);
         return die("z23-lint: write failed\n", "");
     }
     fclose(hits);
     return 0;
+}
+
+int cyc_check_with_changed(const char *root, const char *base_path,
+                           const char *mode, int report, int tighten, FILE *out,
+                           FILE *err, const struct lint_changed *changed)
+{
+    if (changed && (report || tighten))
+        return 2;
+    char repo_buf[4096];
+    const char *repo = NULL;
+    if (changed && lint_narrow_repo_opt(changed, repo_buf, &repo) != 0)
+        return 2;
+    if (!report && lint_base_load(&g_cyc_pins, base_path, err))
+        return 2;
+    if (changed && !report)
+        cyc_base_narrow(changed, repo);
+    FILE *hits = tmpfile();
+    if (!hits)
+        return die("z23-lint: tmpfile failed\n", "");
+    struct cyc_eval e = {
+        .root = root, .base_path = base_path, .mode = mode, .repo = repo,
+        .changed = changed, .acc = { .out = hits, .mode = mode }
+    };
+    e.walk = (struct cyc_walk) {
+        root, root ? strlen(root) : 0, cyc_on_func, &e.acc, 0
+    };
+    int rc = cyc_measure(&e, report, tighten, hits, out);
+    if (rc) {
+        fclose(hits);
+        return rc;
+    }
+    return cyc_finish(&e, report, hits, out, err);
+}
+
+int cyc_check(const char *root, const char *base_path, const char *mode,
+              int report, int tighten, FILE *out, FILE *err)
+{
+    return cyc_check_with_changed(root, base_path, mode, report, tighten, out,
+                                  err, NULL);
 }
 
 static int cyc_mode_valid(const char *m)
@@ -1228,20 +1385,43 @@ static int cyc_args(int argc, char **argv, int *report, int *write_base,
     return *report + *write_base + *tighten > 1;
 }
 
+static int cyc_cli_validate(int argc, char **argv, struct lint_changed *changed,
+                            int *report, int *write_base, int *tighten,
+                            const char **mode)
+{
+    if (cyc_args(argc, argv, report, write_base, tighten)) {
+        lint_changed_free(changed);
+        return die("usage: z23-lint check-cyclomatic-complexity "
+                   "[--report | --write-baseline | --tighten-baseline]\n", "");
+    }
+    *mode = env_or("ZCL_LINT_MODE", "RATCHET");
+    if (!cyc_mode_valid(*mode)) {
+        lint_changed_free(changed);
+        return die("z23-lint: ZCL_LINT_MODE must be WARN, RATCHET, or FAIL\n", "");
+    }
+    if (*tighten && strcmp(*mode, "RATCHET") != 0) {
+        lint_changed_free(changed);
+        return die("z23-lint: --tighten-baseline needs ZCL_LINT_MODE=RATCHET\n", "");
+    }
+    if (changed->active && (*report || *write_base || *tighten)) {
+        fputs("check-cyclomatic-complexity: --changed-files cannot be used "
+              "with --report or baseline updates\n", stderr);
+        lint_changed_free(changed);
+        return 2;
+    }
+    return 0;
+}
+
 int check_cyclomatic_complexity_run(int argc, char **argv)
 {
+    struct lint_changed changed;
+    if (lint_changed_bind(&argc, &argv, &changed) != 0)
+        return 2;
     int report = 0, write_base = 0, tighten = 0;
-    if (cyc_args(argc, argv, &report, &write_base, &tighten))
-        return die("usage: z23-lint check-cyclomatic-complexity "
-                   "[--report | --write-baseline | --tighten-baseline]\n",
-                   "");
-    const char *mode = env_or("ZCL_LINT_MODE", "RATCHET");
-    if (!cyc_mode_valid(mode))
-        return die("z23-lint: ZCL_LINT_MODE must be WARN, RATCHET, or FAIL\n",
-                   "");
-    if (tighten && strcmp(mode, "RATCHET") != 0)
-        return die("z23-lint: --tighten-baseline needs ZCL_LINT_MODE=RATCHET\n",
-                   "");
+    const char *mode = NULL;
+    if (cyc_cli_validate(argc, argv, &changed, &report, &write_base, &tighten,
+                         &mode) != 0)
+        return 2;
     const char *root = getenv("ZCL_CYCLOMATIC_ROOT");
     if (root && !root[0])
         root = NULL;
@@ -1250,14 +1430,23 @@ int check_cyclomatic_complexity_run(int argc, char **argv)
     if (!base || !base[0]) {
         if (root) {
             if (ovf(snprintf(base_buf, sizeof base_buf, "%s/%s", root,
-                             k_cyc_base_rel), sizeof base_buf))
+                             k_cyc_base_rel), sizeof base_buf)) {
+                lint_changed_free(&changed);
                 return 2;
+            }
             base = base_buf;
         } else {
             base = k_cyc_base_rel;
         }
     }
-    if (write_base)
+    if (write_base) {
+        lint_changed_free(&changed);
         return cyc_write_baseline(root, base);
-    return cyc_check(root, base, mode, report, tighten, stdout, stderr);
+    }
+    const struct lint_changed *narrow = cyc_narrow_ok(&changed, base)
+                                      ? &changed : NULL;
+    int rc = cyc_check_with_changed(root, base, mode, report, tighten, stdout,
+                                    stderr, narrow);
+    lint_changed_free(&changed);
+    return rc;
 }

@@ -14,6 +14,8 @@
 #include "test/test_core.h"
 
 #include "lint/lintc/run_priv.h"
+#include "lint/lintc/lintc.h"
+#include "lint/lintc/precheck_base.h"
 
 #include <limits.h>
 #include <fcntl.h>
@@ -867,6 +869,31 @@ static int test_lrun_seal(void)
     return failures;
 }
 
+static int test_lrun_fast_names(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: one source diff snapshot selects only unchanged gate sources") {
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-no-api-keys", 1, ""), 1);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-no-api-keys", 1,
+                    "tools/lint/lintc/gate_git_scan_a.c\n"), 0);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-no-api-keys", 1,
+                    "tools/lint/lintc/gate_git_scan_a.c.extra\n"), 1);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-no-api-keys", 1,
+                    "x/tools/lint/lintc/gate_git_scan_a.c\n"), 1);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-sqlite-step-row", 1,
+                    "tools/lint/lintc/gate_sqlite_step_row_priv.h\n"), 0);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-not-registered", 1, ""), 0);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-no-api-keys", 0, ""), 0);
+        ASSERT_EQ(lint_fast_gate_narrow_names("check-no-api-keys", 1, NULL), 0);
+        const char *version[] = { "--version", NULL };
+        char text[128], tiny[4];
+        ASSERT_EQ(precheck_base_git(NULL, version, text, sizeof text), 0);
+        ASSERT_EQ(precheck_base_git(NULL, version, tiny, sizeof tiny), -1);
+        PASS();
+    } TEST_END
+    return failures;
+}
+
 /* The actual public tool must use the platform's checked build-job cap. */
 static void lrun_build_jobs_child(FILE *capture, const char *cap, bool extra)
 {
@@ -921,6 +948,7 @@ static int test_lrun_build_jobs(void)
 int test_lint_run(void)
 {
     int failures = 0;
+    failures += test_lrun_fast_names();
     failures += test_lrun_build_jobs();
     failures += test_lrun_seal();
     failures += test_lrun_verdicts();
