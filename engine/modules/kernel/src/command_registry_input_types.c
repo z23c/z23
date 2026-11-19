@@ -20,7 +20,8 @@
 #include <stdio.h>
 #include <string.h>
 
-static bool cr_key_in(const char *key, const char *const *keys, size_t count)
+bool command_registry_key_in_set(const char *key, const char *const *keys,
+                                 size_t count)
 {
     for (size_t i = 0; i < count; i++)
         if (strcmp(key, keys[i]) == 0)
@@ -104,7 +105,7 @@ static bool cr_bool_key(const char *key)
         "shielded_only",
         "birthday_at_local_tip", "prepare",
     };
-    return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
+    return command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0])) ||
            command_registry_devagent_input_extra_bool_key(key);
 }
 
@@ -137,7 +138,7 @@ static bool cr_match_arrays(const char *key, const struct json_value *value,
         *type_ok = value->type == JSON_OBJ && value->num_children <= 256u;
         return true;
     }
-    if (cr_key_in(key, root_sets, sizeof(root_sets) / sizeof(root_sets[0]))) {
+    if (command_registry_key_in_set(key, root_sets, sizeof(root_sets) / sizeof(root_sets[0]))) {
         *type_ok = cr_str_array(value, 64u, 64u);
         return true;
     }
@@ -1293,7 +1294,7 @@ static bool cr_telegram_descriptor(const struct zcl_command_spec *spec, const ch
 static bool cr_objectives_path_key(const char *path, const char *key)
 {
     static const char *const keys[] = { "outcomes", "attempts_dir", "repo", "lintc_dir", "baseline", "brief" };
-    return !strcmp(path, "fleet.objectives") && cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0]));
+    return !strcmp(path, "fleet.objectives") && command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0]));
 }
 
 static bool cr_general_descriptor(
@@ -1312,12 +1313,12 @@ static bool cr_general_descriptor(
         out->type = JSON_INT;
         out->minimum = host_bound->lo;
         out->maximum = host_bound->hi;
-    } else if (cr_key_in(key, strings, sizeof(strings) / sizeof(strings[0])) ||
+    } else if (command_registry_key_in_set(key, strings, sizeof(strings) / sizeof(strings[0])) ||
                cr_docs_path_key(spec->path, key) || cr_objectives_path_key(spec->path, key)) {
         out->type = JSON_STR;
         out->max_bytes = zcl_command_registry_input_str_max(key);
         out->enum_values = cr_string_enums(key);
-    } else if (cr_key_in(key, integers, sizeof(integers) / sizeof(integers[0]))) {
+    } else if (command_registry_key_in_set(key, integers, sizeof(integers) / sizeof(integers[0]))) {
         const struct cr_int_bound *bound = cr_find_int_bound(key);
         if (!bound)
             return false;

@@ -31,17 +31,6 @@
 
 #include <string.h>
 
-/* True if `key` is one of `keys[0..count)`. The one loop every fixed-set
- * arm below shares, so a new key list is a new table, not a new loop. */
-static bool devagent_key_in_set(const char *key, const char *const *keys,
-                               size_t count)
-{
-    for (size_t i = 0; i < count; i++)
-        if (strcmp(key, keys[i]) == 0)
-            return true;
-    return false;
-}
-
 /* fleet.ledger.add's gauge/counter fields. Gauges can be signed; counters
  * include measured zero. `value` and `limit` are scoped to this exact leaf
  * because those names are common enough to mean something else elsewhere. */
@@ -55,7 +44,7 @@ static bool devagent_ledger_add_int(const char *path, const char *key,
         "bytes", "limit",
     };
     if (!path || strcmp(path, "fleet.ledger.add") != 0 ||
-        !devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+        !command_registry_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
         return false;
     *type_ok = value->type == JSON_INT &&
               (strcmp(key, "value") == 0 || json_get_int(value) >= 0);
@@ -89,7 +78,7 @@ bool command_registry_devagent_integer_descriptor(
         "attempt", "max_age_days", "ceiling_lines", "max_rows",
     };
     bool seq = strcmp(key, "seq") == 0;
-    if (!seq && !devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+    if (!seq && !command_registry_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
         return false;
     out->type = JSON_INT;
     out->minimum = 1;
@@ -182,10 +171,10 @@ static bool devagent_experiment_quantity(const char *path, const char *key,
         "fleet.experiment.predict", "fleet.experiment.result",
         "fleet.receipt.append",
     };
-    if (path && !devagent_key_in_set(path, leaves,
+    if (path && !command_registry_key_in_set(path, leaves,
                                      sizeof leaves / sizeof leaves[0]))
         return false;
-    if (!devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+    if (!command_registry_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
         return false;
     *type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
     return true;

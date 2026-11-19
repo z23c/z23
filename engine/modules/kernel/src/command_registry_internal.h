@@ -36,6 +36,8 @@ bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
  * The rest of the per-key JSON type/range rules behind
  * zcl_command_registry_input_validate(). command_registry_input_value_type_ok()
  * returns true when this arm owns `key` (even if *type_ok is false). */
+bool command_registry_key_in_set(const char *key, const char *const *keys,
+                                 size_t count);
 bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
                                           const char *key,
                                           const struct json_value *value,
