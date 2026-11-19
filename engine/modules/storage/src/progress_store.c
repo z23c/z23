@@ -134,16 +134,57 @@ static bool progress_store_candidate_state(sqlite3 *db, bool *contained)
 }
 
 /* consensus.db's page cache + mmap window scale with measured RAM (via
- * hw_profile), capped at this file's ceilings (256 MiB cache, 512
- * MiB mmap — a pure read-path/memory-residency control, unrelated to WAL
- * journaling or on-disk format). Same fixed values on any >=8 GiB-RAM box;
- * scales DOWN on constrained ones instead of unconditionally requesting a
- * 256 MiB cache + 512 MiB mmap window for one connection regardless of RAM.
- * The ceilings are deliberately below the hw_profile defaults' 1 GiB / 2 GiB:
+ * hw_profile), capped at the class ceilings in storage/memory_profile.h
+ * (a pure read-path/memory-residency control, unrelated to WAL journaling
+ * or on-disk format). HIGH hosts keep the canonical pair (256 MiB cache,
+ * 512 MiB mmap); MEDIUM (8..32 GiB) and LOW (< 8 GiB) hosts fold under
+ * lower per-class ceilings (<= 384 / <= 192 MiB per connection) — so the
+ * sizing really does scale DOWN on constrained hosts instead of letting an
+ * 8 GiB box request the same 768 MiB window as a 98 GiB soak host. The
+ * ceilings stay deliberately below the hw_profile defaults' 1 GiB / 2 GiB:
  * folding is slower under them, but a big-RAM host no longer grows the
- * per-connection residency with its RAM. Floors are unchanged.
- * The PROGRESS_STORE_{CACHE,MMAP}_{FLOOR,CEIL}_* clamps are defined in
- * storage/memory_profile.h so tests can reference the exact applied values. */
+ * per-connection residency with its RAM. Floors scale with their ceilings
+ * so hw_profile's ceiling<floor coercion can never silently ignore a class
+ * ceiling. The PROGRESS_STORE_{CACHE,MMAP}_{FLOOR,CEIL}_* clamps are
+ * defined in storage/memory_profile.h so tests can reference the exact
+ * applied values. */
+
+/* The folding (open-time) cache clamps for one RAM class. Pure: maps the
+ * class to its documented (floor, ceil) KiB pair, nothing else. Non-static
+ * so the harness tests can pin each class's pair directly; unknown classes
+ * fold to HIGH (the canonical pair). */
+void progress_store_folding_cache_clamps(enum hw_profile_ram_class ram_class,
+                                         int64_t *floor_kib, int64_t *ceil_kib)
+{
+    if (ram_class == HW_PROFILE_RAM_LOW) {
+        *floor_kib = PROGRESS_STORE_CACHE_FLOOR_KIB_LOW;
+        *ceil_kib = PROGRESS_STORE_CACHE_CEIL_KIB_LOW;
+    } else if (ram_class == HW_PROFILE_RAM_MEDIUM) {
+        *floor_kib = PROGRESS_STORE_CACHE_FLOOR_KIB_MEDIUM;
+        *ceil_kib = PROGRESS_STORE_CACHE_CEIL_KIB_MEDIUM;
+    } else {
+        *floor_kib = PROGRESS_STORE_CACHE_FLOOR_KIB;
+        *ceil_kib = PROGRESS_STORE_CACHE_CEIL_KIB;
+    }
+}
+
+/* The folding (open-time) mmap clamps for one RAM class; same contract as
+ * progress_store_folding_cache_clamps(). */
+void progress_store_folding_mmap_clamps(enum hw_profile_ram_class ram_class,
+                                        int64_t *floor_bytes,
+                                        int64_t *ceil_bytes)
+{
+    if (ram_class == HW_PROFILE_RAM_LOW) {
+        *floor_bytes = PROGRESS_STORE_MMAP_FLOOR_BYTES_LOW;
+        *ceil_bytes = PROGRESS_STORE_MMAP_CEIL_BYTES_LOW;
+    } else if (ram_class == HW_PROFILE_RAM_MEDIUM) {
+        *floor_bytes = PROGRESS_STORE_MMAP_FLOOR_BYTES_MEDIUM;
+        *ceil_bytes = PROGRESS_STORE_MMAP_CEIL_BYTES_MEDIUM;
+    } else {
+        *floor_bytes = PROGRESS_STORE_MMAP_FLOOR_BYTES;
+        *ceil_bytes = PROGRESS_STORE_MMAP_CEIL_BYTES;
+    }
+}
 
 /* Apply WAL + reasonable durability/recovery pragmas. Errors here are
  * fatal for the open (caller will close & fail). */
@@ -153,10 +194,16 @@ static void progress_store_folding_sizing(int64_t *cache_kib,
 {
     hw_profile_init(NULL);
     int64_t ram = hw_profile_ram_bytes();
-    *cache_kib = hw_profile_sqlite_cache_kib(
-        ram, PROGRESS_STORE_CACHE_FLOOR_KIB, PROGRESS_STORE_CACHE_CEIL_KIB);
-    *mmap_bytes = hw_profile_sqlite_mmap_bytes(
-        ram, PROGRESS_STORE_MMAP_FLOOR_BYTES, PROGRESS_STORE_MMAP_CEIL_BYTES);
+    int64_t cache_floor_kib, cache_ceil_kib;
+    int64_t mmap_floor_bytes, mmap_ceil_bytes;
+    progress_store_folding_cache_clamps(hw_profile_ram_class_of(ram),
+                                        &cache_floor_kib, &cache_ceil_kib);
+    progress_store_folding_mmap_clamps(hw_profile_ram_class_of(ram),
+                                       &mmap_floor_bytes, &mmap_ceil_bytes);
+    *cache_kib = hw_profile_sqlite_cache_kib(ram, cache_floor_kib,
+                                             cache_ceil_kib);
+    *mmap_bytes = hw_profile_sqlite_mmap_bytes(ram, mmap_floor_bytes,
+                                               mmap_ceil_bytes);
 }
 
 /* Switch the open consensus.db handle between the folding sizing and the

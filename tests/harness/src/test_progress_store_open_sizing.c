@@ -9,6 +9,7 @@
 #include "test/test_core.h"
 
 #include "storage/progress_store.h"
+#include "util/hw_profile.h"
 
 #include <pthread.h>
 #include <sqlite3.h>
@@ -24,6 +25,45 @@
     if (expr) { printf("  ps_open_sizing: %s... OK\n", (name)); }       \
     else { printf("  ps_open_sizing: %s... FAIL\n", (name)); failures++; } \
 } while (0)
+
+/* progress_store.c's pure per-RAM-class folding selector (non-static so the
+ * harness can pin every class's documented pair; prototypes live here, like
+ * test.c's inline externs). */
+extern void progress_store_folding_cache_clamps(enum hw_profile_ram_class cls,
+                                                int64_t *floor_kib,
+                                                int64_t *ceil_kib);
+extern void progress_store_folding_mmap_clamps(enum hw_profile_ram_class cls,
+                                               int64_t *floor_bytes,
+                                               int64_t *ceil_bytes);
+
+/* Pin one class's selector output against the documented (floor, ceil)
+ * literals. Pure: the input is the enum, so this holds on any host. */
+static void po_pin_clamps(int *failures, enum hw_profile_ram_class cls,
+                          const char *name, int64_t want_cache_floor,
+                          int64_t want_cache_ceil, int64_t want_mmap_floor,
+                          int64_t want_mmap_ceil)
+{
+    int64_t cache_floor, cache_ceil, mmap_floor, mmap_ceil;
+    progress_store_folding_cache_clamps(cls, &cache_floor, &cache_ceil);
+    progress_store_folding_mmap_clamps(cls, &mmap_floor, &mmap_ceil);
+    char label[128];
+    snprintf(label, sizeof(label), "%s: cache clamps are the documented pair",
+             name);
+    PO_CHECK(label, cache_floor == want_cache_floor &&
+                    cache_ceil == want_cache_ceil);
+    snprintf(label, sizeof(label), "%s: mmap clamps are the documented pair",
+             name);
+    PO_CHECK(label, mmap_floor == want_mmap_floor &&
+                    mmap_ceil == want_mmap_ceil);
+    snprintf(label, sizeof(label),
+             "%s: cache floor <= ceiling (ceiling<floor coercion cannot fire)",
+             name);
+    PO_CHECK(label, cache_floor <= cache_ceil);
+    snprintf(label, sizeof(label),
+             "%s: mmap floor <= ceiling (ceiling<floor coercion cannot fire)",
+             name);
+    PO_CHECK(label, mmap_floor <= mmap_ceil);
+}
 
 static int64_t po_pragma(sqlite3 *db, const char *sql)
 {
@@ -66,6 +106,20 @@ int test_progress_store_open_sizing(void)
 {
     printf("\n=== progress_store open sizing tests ===\n");
     int failures = 0;
+
+    /* Per-class folding ceilings: every class's documented pair pinned via
+     * the pure selector, HIGH against the legacy canonical literals so a
+     * class-table regression goes red even on a HIGH-RAM host. */
+    po_pin_clamps(&failures, HW_PROFILE_RAM_LOW, "LOW",
+                  16 * 1024, 64 * 1024,
+                  64LL * 1024 * 1024, 128LL * 1024 * 1024);
+    po_pin_clamps(&failures, HW_PROFILE_RAM_MEDIUM, "MEDIUM",
+                  32 * 1024, 128 * 1024,
+                  128LL * 1024 * 1024, 256LL * 1024 * 1024);
+    po_pin_clamps(&failures, HW_PROFILE_RAM_HIGH, "HIGH",
+                  64 * 1024, 256 * 1024,
+                  256LL * 1024 * 1024, 512LL * 1024 * 1024);
+
     char dir[256];
     test_make_tmpdir(dir, sizeof(dir), "ps_open_sizing", "gate");
     char path[300];

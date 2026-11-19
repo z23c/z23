@@ -13,6 +13,7 @@
 #include "storage/memory_profile.h"
 #include "storage/progress_store.h"
 #include "storage/projection_store.h"
+#include "util/hw_profile.h"
 
 #include <sqlite3.h>
 #include <pthread.h>
@@ -25,6 +26,16 @@
     if (expr) { printf("  memory_profile: %s... OK\n", (name)); }       \
     else { printf("  memory_profile: %s... FAIL\n", (name)); failures++; } \
 } while (0)
+
+/* progress_store.c's pure per-RAM-class folding selector (non-static so the
+ * harness can recompute the applied sizing per class; prototypes live here,
+ * like test.c's inline externs). */
+extern void progress_store_folding_cache_clamps(enum hw_profile_ram_class cls,
+                                                int64_t *floor_kib,
+                                                int64_t *ceil_kib);
+extern void progress_store_folding_mmap_clamps(enum hw_profile_ram_class cls,
+                                               int64_t *floor_bytes,
+                                               int64_t *ceil_bytes);
 
 static int64_t mp_pragma(sqlite3 *db, const char *sql)
 {
@@ -167,6 +178,25 @@ int test_storage_memory_profile(void)
     MP_CHECK("open is folding-sized (projection 256 MiB / 64 MiB)",
              j_mmap0 == 256LL * 1024 * 1024 &&
              j_cache0 == -(64LL * 1024));
+    /* Wiring pin: the open's folding sizing must equal this host's class
+     * selector pair run through the unchanged hw_profile clamps — so the
+     * per-class table is what the store actually applies, not just what the
+     * selector returns. The projection pair pinned above is deliberately
+     * flat: the projection store sizes from its own BIP constants, not the
+     * folding class table. */
+    hw_profile_init(NULL);
+    const int64_t ram = hw_profile_ram_bytes();
+    const enum hw_profile_ram_class host_class = hw_profile_ram_class_of(ram);
+    int64_t host_cache_floor, host_cache_ceil, host_mmap_floor, host_mmap_ceil;
+    progress_store_folding_cache_clamps(host_class, &host_cache_floor,
+                                        &host_cache_ceil);
+    progress_store_folding_mmap_clamps(host_class, &host_mmap_floor,
+                                       &host_mmap_ceil);
+    MP_CHECK("open readback equals this host's class-selected clamps",
+             p_cache0 == -hw_profile_sqlite_cache_kib(ram, host_cache_floor,
+                                                      host_cache_ceil) &&
+             p_mmap0 == hw_profile_sqlite_mmap_bytes(ram, host_mmap_floor,
+                                                     host_mmap_ceil));
     MP_CHECK("starts folding", !storage_memory_profile_is_steady());
     MP_CHECK("round trip at open", mp_roundtrip(pdb, jdb, 0));
 

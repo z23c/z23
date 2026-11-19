@@ -12,7 +12,9 @@
  * sizing.
  *
  * IBD cost note: the folding ceilings are bounded on purpose (256 MiB cache
- * + 512 MiB mmap per connection, see progress_store.c). Folding under them
+ * + 512 MiB mmap per connection on a HIGH-RAM host, see progress_store.c).
+ * Constrained hosts fold under per-class ceilings instead: MEDIUM (8..32 GiB)
+ * <= 384 MiB and LOW (< 8 GiB) <= 192 MiB per connection. Folding under them
  * is slower per page than the old RAM-scaled 1 GiB / 2 GiB sizing would be
  * on a big-RAM host, but the peak residency no longer grows with host RAM —
  * the fold pays a bounded, known cost instead of an unbounded one.
@@ -24,11 +26,27 @@
 /* progress_store.c's folding (open-time) sizing clamps, applied through
  * hw_profile_sqlite_cache_kib() / hw_profile_sqlite_mmap_bytes(). They live
  * here so the steady/folding documentation and the ceilings they bound stay
- * in one place and tests can reference the exact applied values. */
-#define PROGRESS_STORE_CACHE_FLOOR_KIB   (64 * 1024)           /* 64 MiB */
-#define PROGRESS_STORE_CACHE_CEIL_KIB    (256 * 1024)          /* 256 MiB */
-#define PROGRESS_STORE_MMAP_FLOOR_BYTES  (256LL * 1024 * 1024) /* 256 MiB */
-#define PROGRESS_STORE_MMAP_CEIL_BYTES   (512LL * 1024 * 1024) /* 512 MiB */
+ * in one place and tests can reference the exact applied values.
+ *
+ * The HIGH pair below is the canonical folding sizing (unchanged); the
+ * MEDIUM and LOW pairs cut a constrained host's per-connection footprint
+ * (LOW <= 64 MiB cache + 128 MiB mmap = 192 MiB). Every floor scales with
+ * its ceiling so hw_profile's ceiling<floor coercion can never silently
+ * ignore a class ceiling. */
+#define PROGRESS_STORE_CACHE_FLOOR_KIB   (64 * 1024)           /* HIGH: 64 MiB */
+#define PROGRESS_STORE_CACHE_CEIL_KIB    (256 * 1024)          /* HIGH: 256 MiB */
+#define PROGRESS_STORE_MMAP_FLOOR_BYTES  (256LL * 1024 * 1024) /* HIGH: 256 MiB */
+#define PROGRESS_STORE_MMAP_CEIL_BYTES   (512LL * 1024 * 1024) /* HIGH: 512 MiB */
+
+#define PROGRESS_STORE_CACHE_FLOOR_KIB_MEDIUM   (32 * 1024)            /* 32 MiB */
+#define PROGRESS_STORE_CACHE_CEIL_KIB_MEDIUM    (128 * 1024)           /* 128 MiB */
+#define PROGRESS_STORE_MMAP_FLOOR_BYTES_MEDIUM  (128LL * 1024 * 1024)  /* 128 MiB */
+#define PROGRESS_STORE_MMAP_CEIL_BYTES_MEDIUM   (256LL * 1024 * 1024)  /* 256 MiB */
+
+#define PROGRESS_STORE_CACHE_FLOOR_KIB_LOW   (16 * 1024)              /* 16 MiB */
+#define PROGRESS_STORE_CACHE_CEIL_KIB_LOW    (64 * 1024)              /* 64 MiB */
+#define PROGRESS_STORE_MMAP_FLOOR_BYTES_LOW  (64LL * 1024 * 1024)     /* 64 MiB */
+#define PROGRESS_STORE_MMAP_CEIL_BYTES_LOW   (128LL * 1024 * 1024)    /* 128 MiB */
 #ifndef ZCL_STORAGE_MEMORY_PROFILE_H
 #define ZCL_STORAGE_MEMORY_PROFILE_H
 
