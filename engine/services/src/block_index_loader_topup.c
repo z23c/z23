@@ -459,9 +459,9 @@ static bool topup_row_cb(const uint8_t hash[32],
     return true;
 }
 
-/* Second pass: link pprev for entries this top-up inserted. Re-iterates
- * the projection (hashPrev is not retained on the in-memory entry);
- * pre-existing entries keep their loader-resolved pprev. */
+/* Second pass: link pprev for entries this top-up inserted. hashPrev is not
+ * retained on the in-memory entry; pre-existing entries keep their
+ * loader-resolved pprev. */
 static bool topup_link_pprev_cb(const uint8_t hash[32],
                                 const struct disk_block_index *dbi,
                                 void *user)
@@ -582,15 +582,32 @@ static int topup_iterate_rows(struct block_index_projection *bip,
 }
 
 static int topup_link_pprev_pass(struct block_index_projection *bip,
-                                 struct main_state *ms, bool bounded,
+                                 struct topup_ctx *ctx, bool bounded,
                                  const struct block_index_flat_identity *ident)
 {
-    return bounded
-        ? block_index_projection_iterate_dirty_if_bound(
+    if (bounded)
+        return block_index_projection_iterate_dirty_if_bound(
             bip, ident->payload_sha3, ident->payload_size,
-            ident->row_count, topup_link_pprev_cb, ms)
-        : block_index_projection_iterate_storage_order(
-            bip, topup_link_pprev_cb, ms);
+            ident->row_count, topup_link_pprev_cb, ctx->ms);
+
+    for (size_t i = 0; i < ctx->new_count; i++) {
+        struct block_index *bi = ctx->new_entries[i];
+        if (!bi || !bi->phashBlock)
+            LOG_ERR("block_index",
+                    "topup: pprev link entry %zu has no block hash", i);
+        struct disk_block_index dbi;
+        disk_block_index_init(&dbi);
+        enum bip_lookup_result lookup = block_index_projection_lookup_strict(
+            bip, bi->phashBlock->data, &dbi);
+        if (lookup != BIP_LOOKUP_PRESENT)
+            LOG_ERR("block_index",
+                    "topup: pprev link projection row %s at h=%d",
+                    lookup == BIP_LOOKUP_ABSENT
+                        ? "absent" : "corrupt or unreadable",
+                    bi->nHeight);
+        (void)topup_link_pprev_cb(bi->phashBlock->data, &dbi, ctx->ms);
+    }
+    return 0;
 }
 
 static const char *topup_source_name(bool bounded)
@@ -674,10 +691,10 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
            topup_source_name(bounded), ctx.rows);
 
     if (ctx.inserted > 0 || ctx.stubs_hydrated > 0) {
-        int link_rc = topup_link_pprev_pass(bip, ms, bounded, &identity);
+        int link_rc = topup_link_pprev_pass(bip, &ctx, bounded, &identity);
         if (link_rc < 0) {
             free(ctx.new_entries);
-            LOG_FAIL("block_index", "topup: pprev link iterate failed");
+            LOG_FAIL("block_index", "topup: pprev link failed");
         }
         topup_compute_inserted_chainwork(&ctx);
     }
