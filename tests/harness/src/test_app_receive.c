@@ -2227,7 +2227,7 @@ static int rz_build_case(bool makefile, bool programs)
         ASSERT(rt_attempt(&f, RT_CONFIRM));
         ASSERT(rt_input(&input, &f) &&
             json_push_kv_str(&input, "copy", f.destination) &&
-            json_push_kv_str(&input, "now_unix", "20400"));
+            json_push_kv_int(&input, "now_unix", 20400));
         struct zcl_command_request request = {.input = &input};
         zcl_native_handle_app_build(&request, &reply);
         if (!programs) {
