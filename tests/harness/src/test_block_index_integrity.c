@@ -13,6 +13,8 @@
 #include "json/json.h"
 
 #include "services/block_index_integrity.h"
+#include "config/boot.h"
+#include "config/boot_blkidx_ladder.h"
 #include "config/boot_cursor_state.h"
 #include "validation/main_state.h"
 #include "chain/chainparams.h"
@@ -20,6 +22,7 @@
 #include "models/database.h"
 #include "event/event.h"
 #include "sha3/sha3.h"
+#include "util/safe_alloc.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1254,6 +1257,115 @@ static bool work_is_chain(const struct block_index *b, int n)
     return true;
 }
 
+enum { BII_BOOT_N = 101 };
+
+struct bii_boot_fx {
+    struct main_state ms;
+    struct block_index blocks[BII_BOOT_N];
+    struct uint256 hashes[BII_BOOT_N];
+    struct node_db ndb;
+    struct app_context ctx;
+};
+
+static bool bii_boot_init(struct bii_boot_fx *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    main_state_init(&fx->ms);
+    bcs_build_chain(&fx->ms, fx->blocks, fx->hashes, BII_BOOT_N);
+    fx->ctx.datadir = "/nonexistent-pprev-repair";
+    if (!node_db_open(&fx->ndb, ":memory:"))
+        return false;
+    for (int i = 0; i < BII_BOOT_N; i++)
+        fx->blocks[i].nStatus = 0;
+    fx->blocks[BII_BOOT_N - 1].nHeight = 1000;
+    return node_db_state_set_int(&fx->ndb, BOOT_CUR_HEIGHTS, -2) &&
+           node_db_state_set_int(&fx->ndb, BOOT_CUR_HEIGHTS_CNT, -2) &&
+           node_db_state_set_int(&fx->ndb, "pprev_repaired_height", -2);
+}
+
+static void bii_boot_free(struct bii_boot_fx *fx)
+{
+    if (fx->ndb.tx_open)
+        node_db_rollback(&fx->ndb);
+    if (fx->ndb.open)
+        node_db_close(&fx->ndb);
+    main_state_free(&fx->ms);
+}
+
+static bool bii_boot_cursors_are(struct bii_boot_fx *fx, int64_t heights,
+                                 int64_t count, int64_t pprev)
+{
+    int64_t got_heights = 0, got_count = 0, got_pprev = 0;
+    bool read = node_db_state_get_int(&fx->ndb, BOOT_CUR_HEIGHTS, &got_heights) &&
+           node_db_state_get_int(&fx->ndb, BOOT_CUR_HEIGHTS_CNT, &got_count) &&
+           node_db_state_get_int(&fx->ndb, "pprev_repaired_height", &got_pprev);
+    printf("[read=%d cursors=%lld,%lld,%lld expected=%lld,%lld,%lld] ", read,
+           (long long)got_heights, (long long)got_count, (long long)got_pprev,
+           (long long)heights, (long long)count, (long long)pprev);
+    return read &&
+           got_heights == heights && got_count == count && got_pprev == pprev;
+}
+
+static bool bii_boot_oom_case(struct bii_boot_fx *fx)
+{
+    int out = -999;
+    zcl_alloc_fault_fail_nth("pprev_repair_all", 1);
+    bool refused = !boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
+                                                   &fx->ndb, &out);
+    zcl_alloc_fault_clear();
+    return refused && out == -999 && !fx->ndb.tx_open &&
+           bii_boot_cursors_are(fx, -2, -2, -2);
+}
+
+static bool bii_boot_retry_case(struct bii_boot_fx *fx)
+{
+    for (int i = 0; i < BII_BOOT_N; i++)
+        memset(&fx->blocks[i].nChainWork, 0,
+               sizeof(fx->blocks[i].nChainWork));
+    fx->blocks[BII_BOOT_N - 1].nHeight = 1000;
+    int out = -999;
+    bool retried = boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
+                                                  &fx->ndb, &out);
+    bool work = work_is_chain(fx->blocks, BII_BOOT_N);
+    bool cursors = bii_boot_cursors_are(fx, BII_BOOT_N - 1, BII_BOOT_N,
+                                        BII_BOOT_N - 1);
+    printf("[retried=%d out=%d cursors=%d work=%d] ", retried, out,
+           cursors, work);
+    return retried && out == 1 && work && cursors;
+}
+
+static bool bii_boot_foreign_tx_case(struct bii_boot_fx *fx)
+{
+    if (!node_db_begin(&fx->ndb))
+        return false;
+    int out = -999;
+    bool refused = !boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
+                                                   &fx->ndb, &out);
+    bool kept = refused && fx->ndb.tx_open && out == -999;
+    if (fx->ndb.tx_open)
+        node_db_rollback(&fx->ndb);
+    return kept && !fx->ndb.tx_open;
+}
+
+static int t_mg_boot_pprev_oom_rolls_back_cursors(void)
+{
+    int failures = 0;
+    struct bii_boot_fx fx;
+    if (!bii_boot_init(&fx)) {
+        BII_RUN("bii: boot pprev fixture setup", false);
+        bii_boot_free(&fx);
+        return failures;
+    }
+    BII_RUN("bii: boot pprev OOM rolls back height and pprev cursors",
+            bii_boot_oom_case(&fx));
+    BII_RUN("bii: boot retry after OOM repairs stale flat work and stamps cursors",
+            bii_boot_retry_case(&fx));
+    BII_RUN("bii: boot repair refuses a foreign transaction without rolling it back",
+            bii_boot_foreign_tx_case(&fx));
+    bii_boot_free(&fx);
+    return failures;
+}
+
 static bool heights_are_index(const struct block_index *b, int n)
 {
     for (int i = 0; i < n; i++)
@@ -1425,6 +1537,60 @@ static int t_mg_pprev_fix_details(void)
             "total", pp_detail_tx(&fx));
     BII_RUN("bii: pprev repair recomputes chain work after a relink",
             work_is_chain(fx.b, 7));
+    pp_free(&fx);
+    return failures;
+}
+
+static void pp_recompute_work_from(struct pp_fx *fx, int first)
+{
+    for (int i = first; i < fx->n; i++) {
+        struct arith_uint256 proof = GetBlockProof(&fx->b[i]);
+        if (fx->b[i].pprev)
+            arith_uint256_add(&fx->b[i].nChainWork,
+                              &fx->b[i].pprev->nChainWork, &proof);
+        else
+            fx->b[i].nChainWork = proof;
+    }
+}
+
+static int t_mg_pprev_allocation_refusal(void)
+{
+    int failures = 0;
+    struct pp_fx fx;
+    bool ok = pp_init(&fx, 5) && pp_put_default(&fx);
+    if (ok) {
+        pp_recompute_work_from(&fx, 0);
+        fx.b[2].pprev = &fx.b[0];
+        pp_recompute_work_from(&fx, 2);
+    }
+    struct arith_uint256 stale_work = fx.b[2].nChainWork;
+    zcl_alloc_fault_fail_nth("pprev_repair_all", 1);
+    int r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -2;
+    bool refused = ok && r == -1 && fx.b[2].pprev == &fx.b[0] &&
+                   arith_uint256_compare(&fx.b[2].nChainWork,
+                                         &stale_work) == 0;
+    BII_RUN("bii: pprev work-array OOM refuses before relinking", refused);
+    zcl_alloc_fault_clear();
+    r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -2;
+    BII_RUN("bii: pprev retry after OOM repairs links and cumulative work",
+            refused && r == 1 && fx.b[2].pprev == &fx.b[1] &&
+            work_is_chain(fx.b, 5));
+    pp_free(&fx);
+    return failures;
+}
+
+static int t_mg_pprev_scan_allocation_refusal(void)
+{
+    int failures = 0;
+    struct pp_fx fx;
+    bool ok = pp_init(&fx, 3) && pp_put_default(&fx);
+    if (ok)
+        fx.b[1].pprev = NULL;
+    zcl_alloc_fault_fail_nth("pprev_repair_arr", 1);
+    int r = ok ? block_index_repair_pprev(&fx.ms, fx.dir, -1, NULL) : -2;
+    BII_RUN("bii: pprev scan-array OOM is an explicit refusal without mutation",
+            ok && r == -1 && !fx.b[1].pprev);
+    zcl_alloc_fault_clear();
     pp_free(&fx);
     return failures;
 }
@@ -1652,8 +1818,8 @@ static int t_mg_hr_lone_entries(void)
     test_block_map_insert(&ms.map_block_index, &gh, &g);
     out = -999;
     int r = block_index_repair_heights_range(&ms, -1, &out);
-    BII_RUN("bii: a lone wrong genesis is repaired and its max reported",
-            r == 1 && g.nHeight == 0 && out == 7 && work_is(&g, 1));
+    BII_RUN("bii: a lone wrong genesis reports its corrected max",
+            r == 1 && g.nHeight == 0 && out == 0 && work_is(&g, 1));
     main_state_free(&ms);
 
     main_state_init(&ms);
@@ -1702,12 +1868,15 @@ static int bii_mutant_gap_tests(void)
 {
     int failures = 0;
     failures += t_mg_names();
+    failures += t_mg_boot_pprev_oom_rolls_back_cursors();
     failures += t_mg_status_replaced();
     failures += t_mg_dump_fields();
     failures += t_mg_pprev_scan_set();
     failures += t_mg_pprev_max_reads_env();
     failures += t_mg_pprev_disk_order();
     failures += t_mg_pprev_fix_details();
+    failures += t_mg_pprev_allocation_refusal();
+    failures += t_mg_pprev_scan_allocation_refusal();
     failures += t_mg_pprev_short_record();
     failures += t_mg_pprev_edges();
     failures += t_mg_hr_clean_stubs();

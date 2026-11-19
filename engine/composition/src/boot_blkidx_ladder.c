@@ -4,8 +4,8 @@
  * post }; the driver iterates them in the SAME order the old hand-written
  * if/else chain ran, fires each applicable rung's load (+ optional post), and
  * bumps that rung's fire counter. The loader functions themselves are
- * unchanged — this file only owns the dispatch shape + the flat_union_tainted
- * guard (now a first-class context field) + the fire-counter dump_state entry.
+ * unchanged — this file owns the dispatch shape, post-load structural repair,
+ * and the flat_union_tainted guard (now a first-class context field) + the fire-counter dump_state entry.
  * Split out of boot.c for the E1 file-size ceiling (same seam pattern as
  * engine/composition/src/boot_legacy_import.c). */
 
@@ -24,6 +24,8 @@
 #include "json/json.h"
 #include "base/safe_alloc.h"
 #include "config/boot_cursor_state.h"          /* boot_cursor_propagate_nchaintx */
+#include "config/boot_memory_guard.h"
+#include "services/block_index_integrity.h"
 #include "util/log_macros.h"                   /* LOG_WARN */
 #include "boot_timing_marks_internal.h"       /* boot_clock_ms, boot_submark */
 
@@ -413,5 +415,95 @@ bool boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
     timed_ms += t_next - t_part;
     (void)boot_submark("blkidx.load_rest",
                        boot_clock_ms() - ((t_next - t_load) - timed_ms));
+    return true;
+}
+
+static bool boot_repair_cursor_tx_begin(struct node_db *ndb, bool *open)
+{
+    *open = false;
+    if (!ndb->open)
+        return true;
+    if (ndb->tx_open || !node_db_begin(ndb)) {
+        LOG_ERROR("boot", "block index repair cursor transaction could not "
+                  "begin; refusing repair");
+        return false;
+    }
+    *open = true;
+    return true;
+}
+
+static bool boot_repair_cursor_tx_end(struct node_db *ndb, bool open, bool commit)
+{
+    if (!open)
+        return true;
+    if (commit && node_db_commit(ndb))
+        return true;
+    if (commit)
+        LOG_ERROR("boot", "block index repair cursor commit failed: %s",
+                  ndb->db ? sqlite3_errmsg(ndb->db) : "db unavailable");
+    if (!node_db_rollback(ndb))
+        LOG_ERROR("boot", "block index repair cursor rollback failed");
+    return false;
+}
+
+static int boot_repair_height_cursor(struct main_state *ms, struct node_db *ndb)
+{
+    if (ms->map_block_index.size <= 100)
+        return 0;
+    return boot_cursor_repair_heights(ms, ndb);
+}
+
+/* Bulk height + pprev repair after a legacy import. */
+bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *ms,
+                                    struct node_db *ndb, int *index_repaired_out)
+{
+    int index_repaired = 0;
+    bool repair_tx = false;
+    if (!boot_repair_cursor_tx_begin(ndb, &repair_tx))
+        return false;
+    /* Log block index memory usage */
+    boot_block_index_memory_log_loaded(ms->map_block_index.size,
+                                       ms->map_block_index.capacity);
+    /* Bulk height repair: fix scrambled nHeight values from LDB import.
+     * This must run AFTER block index is loaded but BEFORE header sync.
+     * Without this, header processing fixes heights 160-at-a-time which
+     * is far too slow for 3M+ entries with wrong heights. */
+    index_repaired += boot_repair_height_cursor(ms, ndb);
+    /* pprev chain repair: fix corrupted pprev pointers from LDB import (reads
+     * hashPrevBlock from disk; must run after height repair). Cursor-gated on
+     * `pprev_repaired_height`: only rescan blocks above the verified cursor and
+     * re-stamp it, so a consistent index (e.g. right after --importblockindex)
+     * skips the O(chain) disk walk. A fresh datadir has no cursor (-1) and does
+     * the full walk once. */
+    if (ms->map_block_index.size > 100) {
+        int64_t pprev_done = -1;
+        if (ndb->open)
+            node_db_state_get_int(ndb, "pprev_repaired_height",
+                                  &pprev_done);
+        int pprev_max = -1;
+        int pprev_fixed = block_index_repair_pprev(ms, ctx->datadir,
+                                                   (int)pprev_done, &pprev_max);
+        if (pprev_fixed < 0) {
+            LOG_ERROR("boot", "block index pprev repair allocation failed; "
+                      "refusing to continue with unverified chainwork");
+            (void)boot_repair_cursor_tx_end(ndb, repair_tx, false);
+            return false;
+        }
+        if (pprev_fixed > 0) {
+            index_repaired += pprev_fixed;
+            index_repaired += block_index_repair_heights(ms);
+        }
+        if (ndb->open && pprev_max > (int)pprev_done)
+            node_db_state_set_int(ndb, "pprev_repaired_height",
+                                  pprev_max);
+    }
+    if (!boot_repair_cursor_tx_end(ndb, repair_tx, true))
+        return false;
+    if (index_repaired > 0 && ms->map_block_index.size > 1000) {
+        printf("Block index repaired: saving canonical flat file "
+               "(%d repairs)\n", index_repaired);
+        save_block_index_flat(ctx->datadir, ms);
+    }
+    *index_repaired_out = index_repaired;
     return true;
 }

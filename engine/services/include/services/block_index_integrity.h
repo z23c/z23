@@ -257,6 +257,8 @@ bool block_index_heights_repaired(void);
  * Reads hashPrevBlock from block data on disk for every entry with
  * BLOCK_HAVE_DATA and fixes pprev if it points to the wrong parent.
  * Also recomputes nChainWork and nChainTx after repair.
+ * Returns the number of fixes, or -1 when either pointer array cannot be
+ * allocated; allocation refusal happens before any pprev or height mutation.
  *
  * Must be called AFTER block_index_repair_heights(), BEFORE header sync. */
 /* min_height: only re-scan blocks with nHeight > min_height (pass -1 for a

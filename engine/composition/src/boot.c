@@ -1989,49 +1989,6 @@ static bool boot_step_load_block_index_ladder(struct app_context *ctx,
     return boot_blkidx_run_topups(&blkidx, rebuilt_from_log, t_load);
 }
 
-/* Bulk height + pprev repair after a legacy import. */
-static void boot_step_repair_block_index(struct app_context *ctx,
-                                         struct boot_seq *s)
-{
-    int index_repaired = 0;
-    /* Log block index memory usage */
-    boot_block_index_memory_log_loaded(g_state.map_block_index.size,
-                                       g_state.map_block_index.capacity);
-    /* Bulk height repair: fix scrambled nHeight values from LDB import.
-     * This must run AFTER block index is loaded but BEFORE header sync.
-     * Without this, header processing fixes heights 160-at-a-time which
-     * is far too slow for 3M+ entries with wrong heights. */
-    if (g_state.map_block_index.size > 100)
-        index_repaired += boot_cursor_repair_heights(&g_state, &g_node_db);
-    /* pprev chain repair: fix corrupted pprev pointers from LDB import (reads
-     * hashPrevBlock from disk; must run after height repair). Cursor-gated on
-     * `pprev_repaired_height`: only rescan blocks above the verified cursor and
-     * re-stamp it, so a consistent index (e.g. right after --importblockindex)
-     * skips the O(chain) disk walk. A fresh datadir has no cursor (-1) and does
-     * the full walk once. */
-    if (g_state.map_block_index.size > 100) {
-        int64_t pprev_done = -1;
-        if (g_node_db.open)
-            node_db_state_get_int(&g_node_db, "pprev_repaired_height",
-                                  &pprev_done);
-        int pprev_max = -1;
-        int pprev_fixed = block_index_repair_pprev(&g_state, ctx->datadir,
-                                                   (int)pprev_done, &pprev_max);
-        if (pprev_fixed > 0) {
-            index_repaired += pprev_fixed;
-            index_repaired += block_index_repair_heights(&g_state);
-        }
-        if (g_node_db.open && pprev_max > (int)pprev_done)
-            node_db_state_set_int(&g_node_db, "pprev_repaired_height",
-                                  pprev_max);
-    }
-    if (index_repaired > 0 && g_state.map_block_index.size > 1000) {
-        printf("Block index repaired: saving canonical flat file "
-               "(%d repairs)\n", index_repaired);
-        save_block_index_flat(ctx->datadir, &g_state);
-    }
-    s->index_repaired = index_repaired;
-}
 
 /* Quarantine a corrupt block index and drive the bounded re-derive ladder,
  * unless the operator opted out with ZCL_ALLOW_CORRUPT_INDEX=1. */
@@ -2129,7 +2086,8 @@ static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *
         return false;
     }
     boot_topmark("block_index_load", t_phase);
-    boot_step_repair_block_index(ctx, s);
+    if (!boot_blkidx_repair_block_index(ctx, &g_state, &g_node_db, &s->index_repaired))
+        return false;
     if (!boot_step_gate_block_index_integrity(ctx, s->replay_pending))
         return false;
     /* BLOCK_INDEX_LOADED boundary: the block index is loaded, repaired, and

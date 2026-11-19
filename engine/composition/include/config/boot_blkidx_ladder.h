@@ -4,7 +4,7 @@
  * comes from — projection rebuild, flat file, sqlite cache, kill-9 projection
  * rebuild, flat-union taint check, blocks-table hydrate, LevelDB — live here as
  * a const rung table iterated in order, keeping boot.c under the E1 file-size
- * ceiling. The flat_union_tainted guard (the LevelDB rung's mid-boot
+ * ceiling. Post-load structural repair lives beside the ladder. The flat_union_tainted guard (the LevelDB rung's mid-boot
  * flat-save gate) is a first-class field of the shared context. Per-rung fire counters are surfaced via the boot_block_index_rungs
  * dump_state entry (see CLAUDE.md "Adding state introspection"). */
 #ifndef CONFIG_BOOT_BLKIDX_LADDER_H
@@ -56,6 +56,10 @@ void boot_blkidx_run_ladder(struct boot_blkidx_load_ctx *c);
  * false when an allocation failure makes the loaded index unsafe to use. */
 bool boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
                             bool rebuilt_from_log, int64_t t_load);
+
+/* Repair loaded heights and parent links, committing durable cursors only on success. */
+bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *ms,
+                                    struct node_db *ndb, int *index_repaired_out);
 
 /* dump_state entry: per-rung fire counters + last-run outcome flags. */
 bool boot_blkidx_rungs_dump_state_json(struct json_value *out, const char *key);

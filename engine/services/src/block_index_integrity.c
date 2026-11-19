@@ -13,7 +13,8 @@
 // a block-index repair toolkit, not a pass/fail service. The repair entry
 // points return int *counts* of entries fixed (block_index_repair_heights /
 // _pprev — callers accumulate them: `index_repaired += ...`), not error
-// codes; bii_repair_post_activation_anchor returns 0/-1 sentinels (each
+// codes, except that _pprev returns -1 for allocation refusal before it
+// mutates links; bii_repair_post_activation_anchor returns 0/-1 sentinels (each
 // `raw-return-ok:sentinel`) while its real verdict travels in struct
 // bii_post_activation_result (tip_restored / tip_restore_refused / heights
 // fixed). The remaining surface is enum->name getters (const char*), void
@@ -519,6 +520,8 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
      * the earlier sort used the pre-repair labels, and parents must be
      * recomputed before their children. */
     qsort(arr, n, sizeof(*arr), bii_cmp_height);
+    if (out_max_height && n > 0)
+        *out_max_height = arr[n - 1]->nHeight;
     bii_height_recompute_work(arr, n, byptr, mark);
 
     free(byptr);
@@ -654,14 +657,15 @@ static bool bii_pprev_fix_entry(struct main_state *ms, const char *datadir,
     return true;
 }
 
-/* Recompute nChainWork/nChainTx over ALL entries after pprev changed. */
-static void bii_pprev_recompute_chain(struct main_state *ms, size_t n)
+/* Recompute nChainWork/nChainTx over ALL entries after pprev changed.
+ * `all` is caller-owned scratch with space for n pointers. */
+static void bii_pprev_recompute_chain(struct main_state *ms,
+                                      struct block_index **all, size_t n)
 {
     size_t iter = 0;
     struct block_index *pi;
     /* Re-collect ALL entries (not just HAVE_DATA) for chain recomputation */
     size_t all_count = 0;
-    struct block_index **all = zcl_malloc(n * sizeof(*all), "pprev_repair_all");
     if (all) {
         iter = 0;
         while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
@@ -698,12 +702,31 @@ static void bii_pprev_recompute_chain(struct main_state *ms, size_t n)
              * entries this repair touched. Safe on a NULL pprev. */
             block_index_build_skip(b);
         }
-        free(all);
 
         if (fixed_work > 0 || fixed_tx > 0)
             printf("[pprev-repair] recomputed: %d chain_work, %d chain_tx\n",
                    fixed_work, fixed_tx);
     }
+}
+
+static bool bii_pprev_alloc_scratch(size_t n, struct block_index ***arr_out,
+                                    struct block_index ***all_out)
+{
+    struct block_index **arr = zcl_malloc(n * sizeof(*arr), "pprev_repair_arr");
+    if (!arr) {
+        LOG_WARN("pprev", "[pprev-repair] malloc failed for %zu entries", n);
+        return false;
+    }
+    struct block_index **all = zcl_malloc(n * sizeof(*all), "pprev_repair_all");
+    if (!all) {
+        free(arr);
+        LOG_WARN("pprev", "[pprev-repair] work-array malloc failed for %zu "
+                 "entries before mutation", n);
+        return false;
+    }
+    *arr_out = arr;
+    *all_out = all;
+    return true;
 }
 
 /* ── pprev chain repair ────────────────────────────────────────
@@ -729,11 +752,9 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
 
     /* Collect entries with BLOCK_HAVE_DATA into an array sorted by
      * (nFile, nDataPos) so we read each block file sequentially. */
-    struct block_index **arr = zcl_malloc(n * sizeof(*arr), "pprev_repair_arr");
-    if (!arr) {
-        LOG_WARN("pprev", "[pprev-repair] malloc failed for %zu entries", n);
-        return 0;
-    }
+    struct block_index **arr, **all;
+    if (!bii_pprev_alloc_scratch(n, &arr, &all))
+        return -1; // raw-return-ok:allocation-refusal-before-mutation
 
     int max_h;
     size_t count = bii_pprev_collect(ms, arr, min_height, &max_h);
@@ -744,6 +765,7 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
                "scan above min_height=%d\n", max_h, min_height);
         fflush(stdout);
         free(arr);
+        free(all);
         return 0;
     }
     qsort(arr, count, sizeof(*arr), bii_cmp_disk_pos);
@@ -809,9 +831,10 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
     /* After fixing pprev, recompute nChainWork and nChainTx.
      * Sort all entries by height for forward propagation. */
     if (repaired > 0 || heights_fixed > 0)
-        bii_pprev_recompute_chain(ms, n);
+        bii_pprev_recompute_chain(ms, all, n);
 
     free(arr);
+    free(all);
 
     struct timespec t1;
     platform_time_monotonic_timespec(&t1);
