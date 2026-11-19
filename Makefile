@@ -18137,6 +18137,20 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # wide group list stay with the landing step. The test step builds with
 # ZCL_TEST_WERROR=1, as the land proof's bundle build does, so a compiler
 # warning fails here instead of after a queue wait (row 916, 10-23).
+# The test step also runs with the verdict cache on (T_FAST_EXACT_ARGS=--cache):
+# a repeated trip re-runs only the groups whose source closure, built harness
+# artifact, toolkey or environment changed since the stored PASS; the rest are
+# served from the checkout's .zvcs store after the record itself is re-verified
+# (magic, PASS verdict, key echo). This cannot hide a regression: the verdict
+# key folds the exact harness bytes, the per-group source-closure content
+# hashes and the environment digest, so any edit to a group's inputs misses
+# and that group runs fresh. Groups carrying an activated proof contract are
+# uncacheable by design and always run; load-flaky, marker-carrying and
+# load-unobserved passes are never stored. This is a dev-side screen only:
+# the land queue still runs its own cold proof set (its receipt reuse is a
+# separate mechanism), and T_FAST_EXACT_ARGS=--cold-audit (or --no-cache)
+# remains the audit path that re-runs cold and reports divergence from any
+# stored verdict.
 #   make -j28 agent-verify ONLY=@changed        (default: the proof's groups)
 #   make -j28 agent-verify ONLY=<group,group>   (an explicit set, unchanged)
 # ONLY=@changed runs exactly the test groups the land proof selects for this
@@ -18230,7 +18244,7 @@ agent-verify:
 	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \
-	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; fi; \
+	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1 T_FAST_EXACT_ARGS=--cache; fi; \
 	 av_step check-capability-closure; \
 	 av_step proof-lint-prebuild; \
 	 av_step lint-fast; \
