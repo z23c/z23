@@ -46,6 +46,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <time.h>
+#endif
 #include "test/setup_result.h"
 #include "android_block_index_memory_fixture.h"
 
@@ -70,6 +73,8 @@ static void bil_test_unlink_arena(const char *dir)
 #if defined(__linux__)
 extern size_t block_index_flat_release_arena_pages(struct main_state *)
     __attribute__((weak));
+extern size_t block_index_flat_age_arena_pages(struct main_state *, size_t)
+    __attribute__((weak));
 #endif
 
 static size_t bil_test_release_arena_pages(struct main_state *ms)
@@ -79,6 +84,21 @@ static size_t bil_test_release_arena_pages(struct main_state *ms)
         return 0;
 #endif
     return block_index_flat_release_arena_pages(ms);
+}
+
+/* Unlike the release wrapper above, the aging wrapper flags an absent
+ * implementation with (size_t)-1 instead of 0: the aging fixture's checks
+ * must FAIL when the entry point is missing, not silently pass as no-ops. */
+static size_t bil_test_age_arena_pages(struct main_state *ms, size_t window)
+{
+#if defined(__linux__)
+    if (!block_index_flat_age_arena_pages)
+        return (size_t)-1;
+    return block_index_flat_age_arena_pages(ms, window);
+#else
+    (void)ms; (void)window;
+    return (size_t)-1;
+#endif
 }
 
 /* Build a minimal block_index chain of `n` blocks in main_state. */
@@ -676,6 +696,241 @@ static int bil_flat_arena_file_case(void)
     }
     return failures;
 }
+
+/* Present-page count over [addr, addr+len) from /proc/self/pagemap (bit 63,
+ * readable unprivileged), rounded down to the page grid first. THIS is the
+ * residency measure MADV_DONTNEED moves on a MAP_SHARED file-backed
+ * mapping: mincore consults the PAGE CACHE, which keeps every page of the
+ * backing file resident whether or not the process still maps it — a
+ * standalone probe shows mincore unchanged across MADV_DONTNEED while the
+ * page-table mapping drops. (size_t)-1 on any failure, so a broken probe
+ * fails the case loudly. */
+#if defined(__linux__)
+static size_t bil_test_present_pages(const void *addr, size_t len)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    size_t page_size = page > 0 ? (size_t)page : 4096;
+    uintptr_t base = (uintptr_t)addr & ~(uintptr_t)(page_size - 1);
+    size_t npages = (len + page_size - 1) / page_size;
+    int fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0)
+        return (size_t)-1;
+    uint64_t *entries = malloc(npages * sizeof(*entries));
+    if (!entries) {
+        close(fd);
+        return (size_t)-1;
+    }
+    off_t off = (off_t)(base / page_size) * (off_t)sizeof(*entries);
+    size_t present = (size_t)-1;
+    if (pread(fd, entries, npages * sizeof(*entries), off) ==
+        (ssize_t)(npages * sizeof(*entries))) {
+        present = 0;
+        for (size_t i = 0; i < npages; i++)
+            present += (entries[i] >> 63) != 0;
+    }
+    free(entries);
+    close(fd);
+    return present;
+}
+#endif
+
+/* Median of five timed pprev walks of `hops` links from `tip`, in
+ * microseconds (clock_gettime, CLOCK_MONOTONIC). When `ms` is non-NULL the
+ * cold prefix is re-aged before EVERY rep, so all five walk the freshly
+ * dropped (disk-backed) prefix rather than one cold walk followed by warm
+ * ones. The walk sum is folded into *out_sum so the optimizer cannot drop
+ * it. */
+#if defined(__linux__)
+static int64_t bil_test_walk_us(struct main_state *ms, size_t window,
+                                const struct block_index *tip, int hops,
+                                unsigned *out_sum)
+{
+    int64_t samples[5];
+    for (size_t r = 0; r < 5; r++) {
+        if (ms)
+            (void)block_index_flat_age_arena_pages(ms, window);
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        const struct block_index *cur = tip;
+        unsigned sum = 0;
+        for (int i = 0; i < hops && cur; i++, cur = cur->pprev)
+            sum += (unsigned)cur->nHeight;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        samples[r] = (int64_t)(t1.tv_sec - t0.tv_sec) * 1000000 +
+                     (t1.tv_nsec - t0.tv_nsec) / 1000;
+        *out_sum += sum;
+    }
+    for (size_t i = 1; i < 5; i++) { /* insertion sort, 5 elements */
+        int64_t v = samples[i];
+        size_t j = i;
+        while (j > 0 && samples[j - 1] > v) {
+            samples[j] = samples[j - 1];
+            j--;
+        }
+        samples[j] = v;
+    }
+    return samples[2];
+}
+#endif
+
+/* Windowed arena aging (block_index_flat_age_arena_pages, the sibling of
+ * the whole-arena release the fixture above exercises): fault EVERY entry's
+ * page, age the cold prefix below a one-page tip window, and prove with
+ * the /proc/self/pagemap present-bit count that the process's residency
+ * drops while every entry still reads back identically after the refault —
+ * full pprev chain, dirty-write survival, and the same no-op guards the
+ * release has (non-owner, window >= arena). The timed pprev walks print
+ * the cold-prefix refault cost against the all-resident walk (objective
+ * node_rss_mb perf note). Post-aging data integrity: every entry still
+ * reads back, the pprev chain is intact at the tip, and the map size is
+ * unchanged. */
+#if defined(__linux__)
+static bool bil_test_age_entries_ok(bool loaded, struct block_index *first,
+                                    struct block_index *tip, int chain_n,
+                                    const struct main_state *ms,
+                                    const struct main_state *ms2)
+{
+    return loaded && first && first->nHeight == 0 &&
+           tip && tip->nHeight == chain_n - 1 && tip->pprev &&
+           tip->pprev->nHeight == chain_n - 2 &&
+           ms2->map_block_index.size == ms->map_block_index.size;
+}
+
+/* A dirty shared write below the window survives ANOTHER aging pass, and
+ * the entry's links still resolve. */
+static bool bil_test_age_dirty_ok(struct block_index *first,
+                                  struct block_index *tip, int chain_n,
+                                  struct main_state *ms2, size_t window)
+{
+    if (!first || !tip)
+        return false;
+    first->nHeight = 7;
+    size_t released = bil_test_age_arena_pages(ms2, window);
+    bool ok = released != (size_t)-1 && first->nHeight == 7 &&
+              tip->pprev && tip->pprev->nHeight == chain_n - 2;
+    first->nHeight = 0;
+    return ok;
+}
+
+static int bil_flat_arena_age_case(void)
+{
+    int failures = 0;
+    const int chain_n = 2000;
+    const int hops = 1000;
+    const size_t resident_fail = (size_t)-1;
+    {
+        struct main_state ms;
+        main_state_init(&ms);
+        build_synthetic_chain(&ms, chain_n);
+
+        char tmpdir[256];
+        snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_age", getpid());
+        mkdir("./test-tmp", 0755);
+        mkdir(tmpdir, 0755);
+
+        save_block_index_flat(tmpdir, &ms);
+
+        struct main_state ms2;
+        main_state_init(&ms2);
+        bool loaded = load_block_index_flat(tmpdir, &ms2).ok;
+
+        char arena_path[512];
+        snprintf(arena_path, sizeof(arena_path), "%s/.block_index.arena",
+                 tmpdir);
+        struct stat st;
+        bool arena_ok = loaded && stat(arena_path, &st) == 0 &&
+                        st.st_size ==
+                        (off_t)((size_t)chain_n * sizeof(struct block_index));
+
+        struct block_index *first = NULL;
+        struct block_index *tip = NULL;
+        if (loaded) {
+            struct uint256 first_hash = make_test_hash(0);
+            first = block_map_find(&ms2.map_block_index, &first_hash);
+            struct uint256 tip_hash = make_test_hash(chain_n - 1);
+            tip = block_map_find(&ms2.map_block_index, &tip_hash);
+        }
+
+        long page_l = sysconf(_SC_PAGESIZE);
+        size_t page_size = 4096;
+        if (page_l > 0)
+            page_size = (size_t)page_l;
+        size_t arena_bytes = 0;
+        if (arena_ok)
+            arena_bytes = (size_t)st.st_size;
+        size_t window_bytes = page_size; /* keep only the newest page hot */
+        size_t expected_cold = 0;
+        if (arena_bytes > window_bytes)
+            expected_cold = (arena_bytes - window_bytes) /
+                            page_size * page_size;
+
+        /* Fault every entry's page: read nHeight along the whole pprev
+         * chain (the synthetic chain has no forks, so the walk touches all
+         * chain_n arena entries). */
+        unsigned fault_sum = 0;
+        for (struct block_index *cur = tip; cur; cur = cur->pprev)
+            fault_sum += (unsigned)cur->nHeight;
+
+        struct main_state nonowner;
+        main_state_init(&nonowner);
+        size_t nonowner_aged =
+            bil_test_age_arena_pages(&nonowner, window_bytes);
+        main_state_free(&nonowner);
+        size_t whole_window_aged =
+            bil_test_age_arena_pages(&ms2, arena_bytes + page_size);
+
+        size_t before = resident_fail;
+        size_t after = resident_fail;
+        size_t aged = resident_fail;
+        unsigned warm_sum = 0;
+        unsigned cold_sum = 0;
+        int64_t warm_us = -1;
+        int64_t cold_us = -1;
+        if (first && tip) {
+            before = bil_test_present_pages(first, arena_bytes);
+            warm_us = bil_test_walk_us(NULL, window_bytes, tip, hops,
+                                       &warm_sum);
+            aged = bil_test_age_arena_pages(&ms2, window_bytes);
+            after = bil_test_present_pages(first, arena_bytes);
+            if (aged != resident_fail)
+                cold_us = bil_test_walk_us(&ms2, window_bytes, tip, hops,
+                                           &cold_sum);
+        }
+
+        BIL_CHECK("bil: arena aging entry point is linked",
+                  block_index_flat_age_arena_pages != NULL);
+        BIL_CHECK("bil: aging fixture maps a file-backed arena", arena_ok);
+        BIL_CHECK("bil: non-owner cannot age the canonical arena",
+                  nonowner_aged == 0);
+        BIL_CHECK("bil: window covering the whole arena is a no-op",
+                  whole_window_aged == 0);
+        BIL_CHECK("bil: aging drops the cold prefix below the tip window",
+                  expected_cold > 0 && aged == expected_cold);
+        BIL_CHECK("bil: page-table residency decreases after aging",
+                  before != resident_fail && after != resident_fail &&
+                  after < before);
+        BIL_CHECK("bil: aged entries and pprev links survive the refault",
+                  bil_test_age_entries_ok(loaded, first, tip, chain_n,
+                                          &ms, &ms2));
+        BIL_CHECK("bil: shared writes survive another aging pass",
+                  bil_test_age_dirty_ok(first, tip, chain_n, &ms2,
+                                        window_bytes));
+        printf("bil: pprev walk of %d entries: resident %lldus, "
+               "freshly aged %lldus\n", hops, (long long)warm_us,
+               (long long)cold_us);
+        (void)fault_sum; (void)warm_sum; (void)cold_sum;
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
+        unlink(path);
+        bil_test_unlink_arena(tmpdir);
+        rmdir(tmpdir);
+        main_state_free(&ms);
+        main_state_free(&ms2);
+    }
+    return failures;
+}
+#endif
 
 static int bil_flat_pprev_link_case(void)
 {
@@ -3298,6 +3553,9 @@ int test_block_index_loader(void)
 
     failures += bil_flat_round_trip_case();
     failures += bil_flat_arena_file_case();
+#if defined(__linux__)
+    failures += bil_flat_arena_age_case();
+#endif
 #if defined(ZCL_TESTING) && !defined(_WIN32) && !defined(__APPLE__)
     failures += bil_flat_reservation_cases();
 #endif

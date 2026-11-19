@@ -762,6 +762,60 @@ size_t block_index_flat_release_arena_pages(struct main_state *ms)
 #endif
 }
 
+/* Windowed aging of the same canonical file-backed load arena: advise
+ * MADV_DONTNEED over the COLD PREFIX below the newest `window_bytes` —
+ * the hot tip window, where pprev/pskip walks concentrate — and leave the
+ * window itself resident. The arena is height-ascending (the writer
+ * height-sorts the flat file), so the cold prefix is exactly the oldest
+ * blocks' entries; the steady-state RSS objective (node_rss_mb) is
+ * arena_bytes minus this window, which the boot-time whole-arena release
+ * above cannot hold because every later walk re-faults the prefix and
+ * nothing evicts clean shared pages without pressure.
+ *
+ * Guard: the SAME owner-pointer check the release uses — no separate lock
+ * (none exists in this TU; the globals are written only by the boot-time
+ * load, before any caller of this entry point runs). And because
+ * registration happens only for a CANONICAL, FILE-MAPPED arena
+ * (bil_flat_arena_register), the anonymous zcl_calloc fallback is
+ * structurally invisible here: the call is a no-op for a fallback arena,
+ * never an madvise over anonymous memory. Shared-file semantics give the
+ * dropped entries the same guarantee the whole-arena release relies on
+ * (and the arena fixture proves): they read back identically on refault
+ * and dirty pages keep their writes.
+ *
+ * Callable repeatedly — a later call re-ages pages re-faulted since the
+ * last one. Returns the advised byte count, or 0 for another owner, a
+ * window covering the whole arena, an unsupported platform, or an
+ * advisory failure. */
+size_t block_index_flat_age_arena_pages(struct main_state *ms,
+                                        size_t window_bytes)
+{
+    if (!ms || ms != g_bil_flat_arena_owner || !g_bil_flat_arena_base ||
+        !g_bil_flat_arena_bytes || window_bytes >= g_bil_flat_arena_bytes)
+        return 0;
+#if defined(__linux__)
+    size_t cold_bytes = g_bil_flat_arena_bytes - window_bytes;
+    long page = sysconf(_SC_PAGESIZE);
+    size_t page_size = page > 0 ? (size_t)page : 4096;
+    cold_bytes -= cold_bytes % page_size; /* whole pages only */
+    if (!cold_bytes)
+        return 0;
+    if (madvise(g_bil_flat_arena_base, cold_bytes, MADV_DONTNEED) != 0) {
+        LOG_WARN("block_index_flat",
+                 "Block index arena cold-prefix aging failed: %s",
+                 strerror(errno));
+        return 0;
+    }
+    LOG_INFO("block_index_flat",
+             "Block index arena: aged %zu cold bytes below the %zu-byte "
+             "tip window",
+             cold_bytes, window_bytes);
+    return cold_bytes;
+#else
+    return 0;
+#endif
+}
+
 /* ── File-backed load arena ────────────────────────────────
  *
  * Scout-verified design (lane block-index-arena-mmap-1111): the bulk-load
@@ -885,7 +939,11 @@ static bool bil_arena_file_map(const char *datadir, size_t count,
 /* Allocate the load arena: file-backed when the datadir allows it (see
  * bil_arena_file_map above), the anonymous zcl_calloc fallback otherwise.
  * Returns the arena or NULL; *mapped_out tells bil_arena_release which
- * release form applies. */
+ * release form applies. The fallback is LOUD: that arena is fully
+ * resident-dirty for the process lifetime (no MADV_DONTNEED is possible
+ * on it), so a silent fallback would hide exactly the memory shape this
+ * loader exists to avoid — paired with bil_flat_load's file-backed
+ * mapping INFO on the success path. */
 static struct block_index *bil_arena_alloc(const char *datadir,
                                            uint32_t count, bool *mapped_out,
                                            char *path_out, size_t path_cap)
@@ -895,6 +953,12 @@ static struct block_index *bil_arena_alloc(const char *datadir,
                                      path_cap);
     if (!arena)
         arena = zcl_calloc(count, sizeof(struct block_index), "block_index arena");
+    if (arena && !*mapped_out)
+        LOG_WARN("block_index_flat",
+                 "Block index arena: file-backed mapping unavailable, "
+                 "%zu bytes load as a resident anonymous fallback "
+                 "(its pages cannot be released)",
+                 (size_t)count * sizeof(struct block_index));
     return arena;
 }
 

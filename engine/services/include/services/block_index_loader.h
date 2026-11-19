@@ -133,6 +133,27 @@ struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main
  * arena, an unsupported platform, or an advisory failure. */
 size_t block_index_flat_release_arena_pages(struct main_state *ms);
 
+/* Hot tip window the aging entry point below leaves resident: the newest
+ * BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES of the arena (the newest blocks'
+ * entries, where pprev/pskip walks concentrate). The steady-state node RSS
+ * objective is arena_bytes minus this window, so the default is the largest
+ * window that keeps the objective under its 1024 MB ceiling on a full
+ * mainnet index (~700 MB arena) while leaving recent-block walks hot. */
+#define BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES (64u * 1024u * 1024u)
+
+/* Age the successful canonical file-backed load arena: advise
+ * MADV_DONTNEED over the cold prefix below the newest `window_bytes` and
+ * keep that tip window resident. The arena is height-ascending, so the
+ * cold prefix is the oldest blocks' entries; dropped entries read back
+ * identically on refault and dirty pages keep their writes (same shared-
+ * file guarantee as block_index_flat_release_arena_pages). Callable
+ * repeatedly. Same guard and no-op shape as the release above: 0 for
+ * another owner, an anonymous fallback arena, a window covering the whole
+ * arena, an unsupported platform, or an advisory failure; otherwise the
+ * advised byte count. */
+size_t block_index_flat_age_arena_pages(struct main_state *ms,
+                                        size_t window_bytes);
+
 /* Load a bounded flat index into an empty private state without publishing a
  * global flat identity. This admits no header, chain or endpoint authority.
  * Discard the private state after any failure. */

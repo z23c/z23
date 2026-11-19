@@ -983,7 +983,16 @@ static struct zcl_result sr_services_running(void *ctx)
 {
     (void)ctx;
     boot_step_start_maintenance_services();
-    (void)block_index_flat_release_arena_pages(&g_state);
+    /* Windowed arena aging (replaces the former whole-arena release): drop
+     * the cold prefix below the hot tip window instead of the whole arena,
+     * so the newest blocks' entries stay hot for pprev/pskip walks while
+     * the ~700 MB cold prefix stays kernel-reclaimable. The call is a
+     * self-guarding no-op when the load fell back to the anonymous arena.
+     * The same aging entry point is repeat-safe, so a periodic re-aging
+     * pass can call it again once a maintenance hook exists; no such hook
+     * exists in this boot step today. */
+    (void)block_index_flat_age_arena_pages(&g_state,
+                                           BLOCK_INDEX_ARENA_HOT_WINDOW_BYTES);
     return ZCL_OK;
 }
 static struct zcl_result sr_sandbox_enter(void *ctx)
