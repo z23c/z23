@@ -134,15 +134,16 @@ static bool progress_store_candidate_state(sqlite3 *db, bool *contained)
 }
 
 /* consensus.db's page cache + mmap window scale with measured RAM (via
- * hw_profile), capped at this file's ceilings (1 GiB cache, 2
- * GiB mmap — a pure read-path/memory-residency control, unrelated to WAL
- * journaling or on-disk format). Same fixed values on any >=32 GiB-RAM box;
- * scales DOWN on constrained ones instead of unconditionally requesting a 1
- * GiB cache + 2 GiB mmap window for one connection regardless of RAM. */
-#define PROGRESS_STORE_CACHE_FLOOR_KIB   (64 * 1024)                /* 64 MiB */
-#define PROGRESS_STORE_CACHE_CEIL_KIB    (1024 * 1024)              /* 1 GiB */
-#define PROGRESS_STORE_MMAP_FLOOR_BYTES  (256LL * 1024 * 1024)      /* 256 MiB */
-#define PROGRESS_STORE_MMAP_CEIL_BYTES   (2LL * 1024 * 1024 * 1024) /* 2 GiB */
+ * hw_profile), capped at this file's ceilings (256 MiB cache, 512
+ * MiB mmap — a pure read-path/memory-residency control, unrelated to WAL
+ * journaling or on-disk format). Same fixed values on any >=8 GiB-RAM box;
+ * scales DOWN on constrained ones instead of unconditionally requesting a
+ * 256 MiB cache + 512 MiB mmap window for one connection regardless of RAM.
+ * The ceilings are deliberately below the hw_profile defaults' 1 GiB / 2 GiB:
+ * folding is slower under them, but a big-RAM host no longer grows the
+ * per-connection residency with its RAM. Floors are unchanged.
+ * The PROGRESS_STORE_{CACHE,MMAP}_{FLOOR,CEIL}_* clamps are defined in
+ * storage/memory_profile.h so tests can reference the exact applied values. */
 
 /* Apply WAL + reasonable durability/recovery pragmas. Errors here are
  * fatal for the open (caller will close & fail). */

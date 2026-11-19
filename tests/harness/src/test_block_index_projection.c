@@ -39,6 +39,12 @@
  *                                from the last commit, no loss, no duplicate
  *  16. passive_checkpoint_then_close — PASSIVE checkpoint after catch-up keeps
  *                                the db readable; close leaves no WAL bytes
+ *  31. release_steady_cache   — rss-trim release arm resets cache_size to
+ *                                BIP_STEADY_PAGE_CACHE_KIB; valid env override
+ *                                still wins; mmap stays at BIP_MMAP_BYTES;
+ *                                a real progress store's PRAGMA cache_size/
+ *                                mmap_size match the PROGRESS_STORE_*_CEIL
+ *                                clamps from storage/memory_profile.h
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */
@@ -49,7 +55,10 @@
 #include "platform/os_proc.h"
 #include "util/storage_pacing.h"
 #include "util/boot_scan.h"
+#include "util/hw_profile.h"
 #include "storage/block_index_projection.h"
+#include "storage/progress_store.h"
+#include "storage/memory_profile.h"
 #include "storage/event_log.h"
 #include "storage/event_log_payloads.h"
 #include "test_group_catalog.h"
@@ -1352,6 +1361,37 @@ static int64_t bip_pragma_cache_size(block_index_projection_t *p)
     return v;
 }
 
+/* Same shape and caveat as bip_pragma_cache_size: reads PRAGMA mmap_size on
+ * the projection's own sqlite handle. */
+static int64_t bip_pragma_mmap_bytes(block_index_projection_t *p)
+{
+    sqlite3_stmt *stmt = NULL;
+    int64_t v = 0;
+    if (!p || sqlite3_prepare_v2(p->db, "PRAGMA mmap_size", -1, &stmt, NULL)
+            != SQLITE_OK)
+        return 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) // raw-sql-ok:test-pragma-read
+        v = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return v;
+}
+
+/* Read any single-value PRAGMA off a raw connection the caller already
+ * leases (progress_store_tx_lock or equivalent). 0 on error, matching the
+ * helpers above. */
+static int64_t bip_raw_pragma_int64(sqlite3 *db, const char *pragma)
+{
+    char sql[64];
+    snprintf(sql, sizeof(sql), "PRAGMA %s", pragma);
+    sqlite3_stmt *stmt = NULL;
+    int64_t v = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) // raw-sql-ok:test-pragma-read
+        v = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return v;
+}
+
 static int run_page_cache_pragmas(int *failures)
 {
     int start_failures = *failures;
@@ -1522,6 +1562,124 @@ static int run_cache_file(int *failures)
     sqlite3_close(db);
     bip_cleanup_dir(dir);
     return *failures - start;
+}
+
+/* 31. release_steady_cache — the rss-trim release arm resets cache_size to
+ * BIP_STEADY_PAGE_CACHE_KIB (not the open-time ceiling), a valid
+ * ZCL_BIP_PAGE_CACHE_KIB override still wins on release, mmap stays at
+ * BIP_MMAP_BYTES, and a real progress store connection reports exactly the
+ * folding PRAGMA values the PROGRESS_STORE_{CACHE,MMAP}_CEIL_* clamps
+ * (storage/memory_profile.h) produce for this host's measured RAM — so
+ * widening or deleting those ceilings turns this case red. */
+static int run_release_steady_cache(int *failures)
+{
+    int start_failures = *failures;
+
+    char saved[64];
+    bool had = false;
+    {
+        const char *cur = getenv("ZCL_BIP_PAGE_CACHE_KIB");
+        if (cur) {
+            snprintf(saved, sizeof(saved), "%s", cur);
+            had = true;
+        }
+    }
+    unsetenv("ZCL_BIP_PAGE_CACHE_KIB");
+
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "steady");
+    char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+
+    event_log_t *log = event_log_open(el_path);
+    BIP_CHECK("steady: event log opens", log != NULL);
+    if (!log) goto done;
+
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    BIP_CHECK("steady: projection opens", p != NULL);
+    if (!p) { event_log_close(log); goto done; }
+    BIP_CHECK("steady: open applies full ceiling",
+              bip_pragma_cache_size(p) == -(int64_t)BIP_PAGE_CACHE_KIB);
+    BIP_CHECK("steady: release succeeds",
+              block_index_projection_release_cache(p) >= 0);
+    BIP_CHECK("steady: release resets to steady ceiling",
+              bip_pragma_cache_size(p) == -(int64_t)BIP_STEADY_PAGE_CACHE_KIB);
+    BIP_CHECK("steady: mmap stays at BIP_MMAP_BYTES",
+              bip_pragma_mmap_bytes(p) == (int64_t)BIP_MMAP_BYTES);
+    block_index_projection_close(p);
+
+    setenv("ZCL_BIP_PAGE_CACHE_KIB", "4096", 1);
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("steady: override opens", p != NULL);
+    if (p) {
+        BIP_CHECK("steady: valid override wins on release",
+                  block_index_projection_release_cache(p) >= 0 &&
+                  bip_pragma_cache_size(p) == -4096);
+        block_index_projection_close(p);
+    }
+
+    event_log_close(log);
+    bip_cleanup_dir(dir);
+done:
+    if (had)
+        setenv("ZCL_BIP_PAGE_CACHE_KIB", saved, 1);
+    else
+        unsetenv("ZCL_BIP_PAGE_CACHE_KIB");
+
+    /* Folding ceilings are observable on a real connection: progress_store
+     * clamps hw_profile's RAM-scaled sizing through the
+     * PROGRESS_STORE_{CACHE,MMAP}_CEIL_* constants (storage/memory_profile.h)
+     * when it applies its open PRAGMAs. Open a fresh store, read back the
+     * connection's actual PRAGMA cache_size/mmap_size, and assert they equal
+     * the same clamp recomputed here against those constants — so widening
+     * or deleting them changes what a real connection reports (on any host
+     * whose RAM ratio exceeds the ceiling) and this case goes red. */
+    char pdir[256];
+    test_make_tmpdir(pdir, sizeof(pdir), "bip", "steady_ps");
+    BIP_CHECK("steady: progress store opens", progress_store_open(pdir));
+    sqlite3 *ps = progress_store_db();
+    BIP_CHECK("steady: progress store handle present", ps != NULL);
+    if (ps) {
+        progress_store_tx_lock();
+        const int64_t ps_cache = bip_raw_pragma_int64(ps, "cache_size");
+        const int64_t ps_mmap = bip_raw_pragma_int64(ps, "mmap_size");
+        progress_store_tx_unlock();
+        hw_profile_init(NULL);
+        const int64_t ram = hw_profile_ram_bytes();
+        const int64_t want_cache = hw_profile_sqlite_cache_kib(
+            ram, PROGRESS_STORE_CACHE_FLOOR_KIB,
+            PROGRESS_STORE_CACHE_CEIL_KIB);
+        const int64_t want_mmap = hw_profile_sqlite_mmap_bytes(
+            ram, PROGRESS_STORE_MMAP_FLOOR_BYTES,
+            PROGRESS_STORE_MMAP_CEIL_BYTES);
+        BIP_CHECK("steady: folding cache_size at memory_profile ceiling",
+                  ps_cache == -want_cache);
+        BIP_CHECK("steady: folding mmap_size at memory_profile ceiling",
+                  ps_mmap == want_mmap);
+
+        /* Fixed anchors: the checks above compare the connection against a
+         * clamp computed from the same constants progress_store applies, so
+         * they alone cannot see the constants move. Two anchors go red if
+         * the ceilings are widened back to the old hw_profile defaults
+         * (1 GiB / 2 GiB): literals pinning the bounded design values, and —
+         * on hosts with more than 32 GiB RAM, where the hw_profile ratios
+         * (ram/32768 KiB cache, ram/16 mmap) already exceed those old
+         * defaults — the connection's own readback. On smaller hosts the
+         * constant references above still break the build if the constants
+         * are deleted. */
+        BIP_CHECK("steady: cache ceiling stays bounded at 256 MiB",
+                  PROGRESS_STORE_CACHE_CEIL_KIB == 256 * 1024);
+        BIP_CHECK("steady: mmap ceiling stays bounded at 512 MiB",
+                  PROGRESS_STORE_MMAP_CEIL_BYTES == 512LL * 1024 * 1024);
+        if (ram > INT64_C(34359738368) /* 32 GiB */) {
+            BIP_CHECK("steady: folding cache pinned to 256 MiB on big-RAM host",
+                      ps_cache == -(256 * 1024));
+            BIP_CHECK("steady: folding mmap pinned to 512 MiB on big-RAM host",
+                      ps_mmap == 512LL * 1024 * 1024);
+        }
+    }
+    progress_store_close();
+    bip_cleanup_dir(pdir);
+    return *failures - start_failures;
 }
 
 
@@ -2296,6 +2454,7 @@ static const struct bip_case g_bip_cases[] = {
     {"cache_budget", run_cache_budget, 3},
     {"cache_prefetch", run_cache_prefetch, 4},
     {"cache_file", run_cache_file, 5},
+    {"release_steady_cache", run_release_steady_cache, 5},
     {"single_header_consumed", run_single_header_consumed, 6},
     {"get_by_height", run_get_by_height, 7},
     {"iterate_canonical", run_iterate_canonical, 0},
@@ -2434,9 +2593,9 @@ int test_block_index_projection(void)
     size_t owned = 0;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) owned += counts[i];
 #ifdef _WIN32
-    const size_t expected_cases = 29;
-#else
     const size_t expected_cases = 30;
+#else
+    const size_t expected_cases = 31;
 #endif
     BIP_CHECK("partition: all cases have one owner",
               BIP_CASE_COUNT == expected_cases && owned == BIP_CASE_COUNT && unique);

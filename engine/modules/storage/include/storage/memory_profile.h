@@ -11,9 +11,24 @@
  * connection's folding value); the folding profile restores the open-time
  * sizing.
  *
+ * IBD cost note: the folding ceilings are bounded on purpose (256 MiB cache
+ * + 512 MiB mmap per connection, see progress_store.c). Folding under them
+ * is slower per page than the old RAM-scaled 1 GiB / 2 GiB sizing would be
+ * on a big-RAM host, but the peak residency no longer grows with host RAM —
+ * the fold pays a bounded, known cost instead of an unbounded one.
+ *
  * PRAGMA-only: cache_size and mmap_size change how SQLite holds and reads
  * pages, never which bytes are read or written, transaction boundaries or
  * durability. */
+
+/* progress_store.c's folding (open-time) sizing clamps, applied through
+ * hw_profile_sqlite_cache_kib() / hw_profile_sqlite_mmap_bytes(). They live
+ * here so the steady/folding documentation and the ceilings they bound stay
+ * in one place and tests can reference the exact applied values. */
+#define PROGRESS_STORE_CACHE_FLOOR_KIB   (64 * 1024)           /* 64 MiB */
+#define PROGRESS_STORE_CACHE_CEIL_KIB    (256 * 1024)          /* 256 MiB */
+#define PROGRESS_STORE_MMAP_FLOOR_BYTES  (256LL * 1024 * 1024) /* 256 MiB */
+#define PROGRESS_STORE_MMAP_CEIL_BYTES   (512LL * 1024 * 1024) /* 512 MiB */
 #ifndef ZCL_STORAGE_MEMORY_PROFILE_H
 #define ZCL_STORAGE_MEMORY_PROFILE_H
 

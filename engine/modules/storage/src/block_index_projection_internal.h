@@ -71,6 +71,11 @@
 #define BIP_PAGE_CACHE_KIB 262144
 #define BIP_MMAP_BYTES     0
 
+/* Steady release ceiling: block_index_projection_release_cache() resets the
+ * PRAGMA to this after an rss trim instead of the full open-time ceiling, so
+ * a trimmed page cache does not regrow to BIP_PAGE_CACHE_KIB on touch. */
+#define BIP_STEADY_PAGE_CACHE_KIB 32768
+
 struct os_proc_mem;
 /* Optional read-only warmup before catch-up; zero budget means no change. */
 uint64_t block_index_projection_cache_budget(uint64_t bytes,
@@ -78,6 +83,9 @@ uint64_t block_index_projection_cache_budget(uint64_t bytes,
 uint64_t block_index_projection_cache_warm(sqlite3_file *file, uint64_t bytes);
 void block_index_projection_cache_prepare(sqlite3 *db);
 long bip_page_cache_kib(void);   /* steady page-cache KiB (env-overridable) */
+/* Release-arm ceiling: env override wins when valid, else BIP_STEADY_*.
+ * Defined in block_index_projection_cache.c next to its only caller. */
+long bip_steady_page_cache_kib(void);
 
 struct block_index_projection {
     sqlite3       *db;

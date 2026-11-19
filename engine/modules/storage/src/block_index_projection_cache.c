@@ -117,6 +117,22 @@ void block_index_projection_cache_prepare(sqlite3 *db)
              warmed, (int64_t)bytes);
 }
 
+/* Release-arm ceiling: the env override wins when it parses inside the same
+ * [2048, 4194304] range bip_page_cache_kib() accepts on open; anything else
+ * falls back to the steady constant (matching open-time's policy of ignoring
+ * an out-of-range value). Best-effort sizing: this cannot fail. */
+long bip_steady_page_cache_kib(void)
+{
+    const char *e = getenv("ZCL_BIP_PAGE_CACHE_KIB");
+    if (e && *e) {
+        char *end = NULL;
+        long v = strtol(e, &end, 10);
+        if (end && !*end && v >= 2048 && v <= 4194304)
+            return v;
+    }
+    return (long)BIP_STEADY_PAGE_CACHE_KIB;
+}
+
 int64_t block_index_projection_release_cache(block_index_projection_t *p)
 {
     if (!p || !p->db || pthread_mutex_trylock(&p->mu) != 0)
@@ -128,7 +144,7 @@ int64_t block_index_projection_release_cache(block_index_projection_t *p)
         before = cur;
     char pragma[64];
     snprintf(pragma, sizeof(pragma), "PRAGMA cache_size=-%ld",
-             bip_page_cache_kib());
+             bip_steady_page_cache_kib());
     if (sqlite3_exec(p->db, pragma, NULL, NULL, NULL) != SQLITE_OK)
         LOG_WARN("block_index_projection", "steady cache sizing failed: %s",
                  sqlite3_errmsg(p->db));
