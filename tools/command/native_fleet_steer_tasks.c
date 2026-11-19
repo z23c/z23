@@ -3,7 +3,8 @@
  * This file opens no files, takes no locks, executes nothing and joins no
  * names. Queue dependency decisions come unchanged from the scheduler.
  * Landing PASS is an exact pair admitted by dev.proof.status; review and
- * remote acceptance remain unknown. Mail/board reports cannot promote it. */
+ * remote acceptance remain unknown. Mail/board reports cannot promote it.
+ * Landing steering is copied only when its candidate commit and seq match. */
 #include "command/native_fleet_steer_tasks.h"
 #include <stdio.h>
 #include <string.h>
@@ -375,23 +376,98 @@ static bool ft_land_column_priority(struct json_value *out,
         json_push_kv(out, "priority", &none);
 }
 
+static bool ft_land_steer_match(const struct json_value *steer,
+    const struct json_value *row)
+{
+    if (!steer || steer->type != JSON_OBJ || !ft_sha(ft_str(steer, "candidate")))
+        return false;
+    if (strcmp(ft_str(steer, "candidate"), ft_str(row, "tip")) != 0)
+        return false;
+    return ft_int(steer, "seq") > 0 && ft_int(steer, "seq") == ft_int(row, "seq");
+}
+
+static bool ft_land_steer_projected(struct json_value *out,
+    const struct json_value *steer, const struct json_value *land)
+{
+    static const char *const strings[] = {"candidate", "phase", "owner",
+        "lease", "proof_state", "receiver_driver", "first_missing_transition",
+        "wake_command", "remote_state"};
+    struct json_value projected = {0};
+    bool complete = true;
+    json_set_object(&projected);
+    for (size_t i = 0; i < sizeof(strings) / sizeof(strings[0]); i++) {
+        const struct json_value *value = json_get(steer, strings[i]);
+        complete = complete && value && value->type == JSON_STR &&
+            json_get_str(value)[0];
+        if (!ft_copy(&projected, strings[i], steer, strings[i], JSON_STR))
+            goto fail;
+    }
+    complete = complete && ft_int(steer, "seq") > 0 &&
+        ft_str(land, "incident")[0];
+    if (!ft_copy(&projected, "seq", steer, "seq", JSON_INT) ||
+        !ft_copy(&projected, "incident", land, "incident", JSON_STR) ||
+        !json_push_kv_str(&projected, "remote_state_basis",
+            "submitter_cached_origin_main_not_fresh_acceptance") ||
+        !json_push_kv(out, "landing_steer", &projected) ||
+        !json_push_kv_bool(out, "landing_steer_complete", complete))
+        goto fail;
+    json_free(&projected);
+    return true;
+fail:
+    json_free(&projected);
+    return false;
+}
+
+static bool ft_land_steer(struct json_value *out, const struct json_value *row,
+    const struct json_value *land)
+{
+    const struct json_value *steer = json_get(land, "steer");
+    bool match = ft_land_steer_match(steer, row);
+    struct json_value none = {0};
+    if (!json_push_kv_str(out, "landing_steer_link", match ? "exact" : "unknown") ||
+        !json_push_kv_str(out, "landing_steer_reason", match
+            ? "candidate_commit_and_seq"
+            : "no_exact_candidate_commit_and_seq_observation"))
+        return false;
+    if (match) return ft_land_steer_projected(out, steer, land);
+    return json_push_kv(out, "landing_steer", &none) &&
+        json_push_kv_bool(out, "landing_steer_complete", false);
+}
+
+static const char *ft_land_row_state(const struct json_value *row,
+    const struct json_value *proof, const char *section, long long observed,
+    long long now, const char **reason, bool *identity)
+{
+    const char *state = ft_land_state(row, proof, section, now, reason);
+    *identity = ft_identity(row, "tip") && ft_sha(ft_str(row, "tip"));
+    if (!*identity) { state = "unknown"; *reason = "landing_identity_incomplete"; }
+    if (strcmp(ft_fresh(observed, now), "fresh") != 0) {
+        state = "unknown"; *reason = "source_observation_not_fresh";
+    }
+    return state;
+}
+
+static bool ft_land_row_projection(struct json_value *out,
+    const struct json_value *row, const char *section, long long observed,
+    long long now, const struct json_value *land)
+{
+    return ft_common(out, row, "dev.land", "tip", observed, now) &&
+        ft_land_fields(out, row) && ft_land_history(out, row, section) &&
+        ft_land_steer(out, row, land);
+}
+
 static void ft_land_row(struct zcl_fmc_tasks *v, const struct json_value *row,
     const struct json_value *proof, const char *section,
-    long long observed, long long now)
+    long long observed, long long now, const struct json_value *land)
 {
     struct json_value out = {0}, p = {0};
     const char *reason;
-    const char *state = ft_land_state(row, proof, section, now, &reason);
+    bool identity;
+    const char *state = ft_land_row_state(row, proof, section, observed, now,
+        &reason, &identity);
     bool exact = ft_exact_proof(row, proof);
-    bool identity = ft_identity(row, "tip") && ft_sha(ft_str(row, "tip"));
-    if (!identity) { state = "unknown"; reason = "landing_identity_incomplete"; }
-    if (strcmp(ft_fresh(observed, now), "fresh") != 0) {
-        state = "unknown"; reason = "source_observation_not_fresh";
-    }
     bool ok = ft_proof_object(&p, proof, exact) &&
-        ft_common(&out, row, "dev.land", "tip", observed, now) &&
-        ft_land_fields(&out, row) &&
-        ft_land_history(&out, row, section) &&
+        ft_land_row_projection(&out, row, section, observed, now, land) &&
         json_push_kv_str(&out, "state", state) &&
         ft_land_column_priority(&out, section, state) &&
         json_push_kv_str(&out, "reason", reason) &&
@@ -411,13 +487,13 @@ bool zcl_fmc_tasks_land(struct zcl_fmc_tasks *v, const struct json_value *land,
     bool ok = true;
     const struct json_value *flight = json_get(land, "in_flight");
     if (flight && flight->type == JSON_OBJ)
-        ft_land_row(v, flight, proof, "in_flight", observed, now);
+        ft_land_row(v, flight, proof, "in_flight", observed, now, land);
     else if (flight) ok = false;
     for (size_t s = 0; s < 2; s++) {
         const struct json_value *arr = json_get(land, sections[s]);
         if (!arr || arr->type != JSON_ARR) { ok = false; continue; }
         for (size_t i = 0; i < json_size(arr); i++)
-            ft_land_row(v, json_at(arr, i), NULL, sections[s], observed, now);
+            ft_land_row(v, json_at(arr, i), NULL, sections[s], observed, now, land);
     }
     v->land_ok = ok && (!flight || ft_exact_proof(flight, proof));
     return ok;

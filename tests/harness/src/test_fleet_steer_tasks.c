@@ -130,6 +130,107 @@ static int ft_landing_cases(void)
     return 0;
 }
 
+static int ft_landing_steer_mismatch(const char *candidate, int seq)
+{
+    char text[2048];
+    (void)snprintf(text, sizeof(text), "{\"queued\":[{\"seq\":390,"
+        "\"attempt\":2,\"tip\":\"" FT_HEAD "\",\"state\":\"queued\"}],"
+        "\"outcomes\":[],\"incident\":\"none\",\"steer\":{"
+        "\"candidate\":\"%s\",\"seq\":%d}}", candidate, seq);
+    struct json_value land = ft_parse(text);
+    struct zcl_fmc_tasks v;
+    zcl_fmc_tasks_init(&v);
+    FT_CHECK(zcl_fmc_tasks_land(&v, &land, NULL, 1000, 1000));
+    const struct json_value *row = json_at(&v.rows, 0);
+    FT_CHECK(ft_is(row, "landing_steer_link", "unknown"));
+    FT_CHECK(json_is_null(json_get(row, "landing_steer")));
+    FT_CHECK(!json_get_bool(json_get(row, "landing_steer_complete")));
+    json_free(&land);
+    zcl_fmc_tasks_free(&v);
+    return 0;
+}
+
+static int ft_landing_steer_partial(void)
+{
+    struct json_value land = ft_parse("{\"queued\":[{\"seq\":390,"
+        "\"attempt\":2,\"tip\":\"" FT_HEAD "\",\"state\":\"queued\"}],"
+        "\"outcomes\":[],\"steer\":{\"candidate\":\"" FT_HEAD "\",\"seq\":390}}");
+    struct zcl_fmc_tasks v;
+    zcl_fmc_tasks_init(&v);
+    FT_CHECK(zcl_fmc_tasks_land(&v, &land, NULL, 1000, 1000));
+    const struct json_value *row = json_at(&v.rows, 0);
+    const struct json_value *steer = json_get(row, "landing_steer");
+    FT_CHECK(ft_is(row, "landing_steer_link", "exact"));
+    FT_CHECK(!json_get_bool(json_get(row, "landing_steer_complete")));
+    FT_CHECK(steer && steer->type == JSON_OBJ);
+    FT_CHECK(json_is_null(json_get(steer, "owner")));
+    FT_CHECK(json_is_null(json_get(steer, "remote_state")));
+    FT_CHECK(json_is_null(json_get(steer, "incident")));
+    json_free(&land);
+    zcl_fmc_tasks_free(&v);
+    return 0;
+}
+
+static int ft_landing_steer_cases(void)
+{
+    struct zcl_fmc_tasks v;
+    struct json_value land = ft_parse("{\"queued\":["
+        "{\"seq\":390,\"attempt\":2,\"tip\":\"" FT_HEAD "\",\"state\":\"queued\"},"
+        "{\"seq\":391,\"attempt\":1,\"tip\":\"" FT_OLD "\",\"state\":\"queued\"}],"
+        "\"outcomes\":[],\"incident\":\"drain_absent\",\"steer\":{"
+        "\"candidate\":\"" FT_HEAD "\",\"seq\":390,\"phase\":\"queued\","
+        "\"owner\":\"unclaimed\",\"lease\":\"none\",\"proof_state\":\"not_requested\","
+        "\"receiver_driver\":\"no_active_drain timer_unit=absent\","
+        "\"first_missing_transition\":\"claim\","
+        "\"wake_command\":\"z23 dev land step\","
+        "\"remote_state\":\"cached:" FT_BASE "\"}}");
+    zcl_fmc_tasks_init(&v);
+    FT_CHECK(zcl_fmc_tasks_land(&v, &land, NULL, 1000, 1000));
+    const struct json_value *row = ft_task(&v, FT_HEAD);
+    const struct json_value *steer = json_get(row, "landing_steer");
+    FT_CHECK(ft_is(row, "landing_steer_link", "exact"));
+    FT_CHECK(json_get_bool(json_get(row, "landing_steer_complete")));
+    FT_CHECK(steer && steer->type == JSON_OBJ);
+    FT_CHECK(ft_is(steer, "owner", "unclaimed"));
+    FT_CHECK(ft_is(steer, "first_missing_transition", "claim"));
+    FT_CHECK(ft_is(steer, "receiver_driver", "no_active_drain timer_unit=absent"));
+    FT_CHECK(ft_is(steer, "wake_command", "z23 dev land step"));
+    FT_CHECK(ft_is(steer, "remote_state", "cached:" FT_BASE));
+    FT_CHECK(ft_is(steer, "remote_state_basis", "submitter_cached_origin_main_not_fresh_acceptance"));
+    FT_CHECK(ft_is(steer, "incident", "drain_absent"));
+    FT_CHECK(json_is_null(json_get(row, "owner")));
+    row = ft_task(&v, FT_OLD);
+    FT_CHECK(ft_is(row, "landing_steer_link", "unknown"));
+    FT_CHECK(json_is_null(json_get(row, "landing_steer")));
+    json_free(&land);
+    zcl_fmc_tasks_free(&v);
+
+    land = ft_parse("{\"queued\":[],\"outcomes\":[],\"in_flight\":{"
+        "\"seq\":390,\"attempt\":2,\"tip\":\"" FT_HEAD "\",\"local\":\"" FT_HEAD "\","
+        "\"base\":\"" FT_BASE "\",\"phase\":\"prove\"},\"incident\":\"none\",\"steer\":{"
+        "\"candidate\":\"" FT_HEAD "\",\"seq\":390,\"phase\":\"prove\","
+        "\"owner\":\"pid:42\",\"lease\":\"step.lock:held\",\"proof_state\":\"running\","
+        "\"receiver_driver\":\"beat_active\",\"first_missing_transition\":\"proof\","
+        "\"wake_command\":\"busy\",\"remote_state\":\"unknown: gitdir unreadable\"}}");
+    struct json_value proof = ft_parse("{\"local_commit\":\"" FT_HEAD "\","
+        "\"remote_base\":\"" FT_BASE "\",\"status\":\"passed\",\"worker_id\":88}");
+    zcl_fmc_tasks_init(&v);
+    FT_CHECK(zcl_fmc_tasks_land(&v, &land, &proof, 1000, 1000));
+    row = json_at(&v.rows, 0);
+    steer = json_get(row, "landing_steer");
+    FT_CHECK(json_get_int(json_get(row, "owner")) == 88);
+    FT_CHECK(ft_is(steer, "owner", "pid:42"));
+    FT_CHECK(ft_is(steer, "lease", "step.lock:held"));
+    FT_CHECK(ft_is(steer, "incident", "none"));
+    json_free(&proof);
+    json_free(&land);
+    zcl_fmc_tasks_free(&v);
+    FT_CHECK(ft_landing_steer_mismatch(FT_HEAD, 391) == 0);
+    FT_CHECK(ft_landing_steer_mismatch(FT_OLD, 390) == 0);
+    FT_CHECK(ft_landing_steer_partial() == 0);
+    return 0;
+}
+
 static int ft_missing_and_overflow(void)
 {
     struct zcl_fmc_tasks v;
@@ -515,7 +616,7 @@ static int ft_metadata_oom_cases(void)
 int fmx_task_projection_checks(void);
 int fmx_task_projection_checks(void)
 {
-    int failures = ft_queue_cases() + ft_landing_cases() + ft_missing_and_overflow() + ft_reports_are_not_authority() + ft_screen_incomplete_cases() + ft_metadata_cases() + ft_metadata_escape_cases() + ft_metadata_oom_cases();
-    if (!failures) printf("fleet task projection: queue, liveness, freshness, exact proof, review/publication separation, metadata and bounds passed\n");
+    int failures = ft_queue_cases() + ft_landing_cases() + ft_landing_steer_cases() + ft_missing_and_overflow() + ft_reports_are_not_authority() + ft_screen_incomplete_cases() + ft_metadata_cases() + ft_metadata_escape_cases() + ft_metadata_oom_cases();
+    if (!failures) printf("fleet task projection: queue, liveness, freshness, exact proof and landing steering, review/publication separation, metadata and bounds passed\n");
     return failures;
 }
