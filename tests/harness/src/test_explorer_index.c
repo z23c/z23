@@ -645,12 +645,12 @@ static int tnr_split(char *line, char **f, int max)
 static bool tnr_tx_from_hex(const char *hex, struct transaction *tx)
 {
     static uint8_t raw[8192];
+    transaction_init(tx);
     int n = tnr_hex_decode(hex, raw, sizeof(raw));
     if (n <= 0)
         return false;
     struct byte_stream stream;
     stream_init_from_data(&stream, raw, (size_t)n);
-    transaction_init(tx);
     if (!transaction_deserialize(tx, &stream) || stream_remaining(&stream) != 0) {
         transaction_free(tx);
         return false;
@@ -779,67 +779,91 @@ static int tnr_znam_step(struct node_db *ndb, const char *scenario,
     return ok ? 0 : 1;
 }
 
+/* State of one pass over the vector file. */
+struct tnr_run {
+    int failures;
+    int slp_records, slp_accepted, znam_records;
+    char scenario[96];
+    struct node_db zdb;
+    bool zdb_open;
+    int height;
+};
+
+/* A znam record: steps of one scenario share one db, a new scenario opens a
+ * fresh one. */
+static void tnr_run_znam(struct tnr_run *r, char **f)
+{
+    if (!r->zdb_open || strcmp(r->scenario, f[1]) != 0) {
+        if (r->zdb_open)
+            node_db_close(&r->zdb);
+        memset(&r->zdb, 0, sizeof(r->zdb));
+        r->zdb_open = explorer_fixture_db_open(&r->zdb);
+        snprintf(r->scenario, sizeof(r->scenario), "%s", f[1]);
+        r->height = 100;
+        if (!r->zdb_open) {
+            r->failures++;
+            return;
+        }
+    }
+    r->failures += tnr_znam_step(&r->zdb, f[1], f[2], f[3], f[4], f[5],
+                                 r->height++);
+    r->znam_records++;
+}
+
+/* One non-comment line of the vector file. */
+static void tnr_run_line(struct tnr_run *r, char *line)
+{
+    char *f[8];
+    int nf = tnr_split(line, f, 8);
+    if (strcmp(f[0], "slp") == 0 && nf == 4) {
+        r->failures += tnr_slp_record(f[1], f[2], f[3]);
+        r->slp_records++;
+        if (strcmp(f[3], "none") != 0)
+            r->slp_accepted++;
+    } else if (strcmp(f[0], "znam") == 0 && nf == 6) {
+        tnr_run_znam(r, f);
+    } else {
+        printf("\nexplorer_index: token-name-rules: unrecognised record "
+               "%s FAIL\n", f[0]);
+        r->failures++;
+    }
+}
+
+/* Reads every record of the file; stops at the first failing one. */
+static void tnr_run_file(struct tnr_run *r, FILE *fp)
+{
+    char line[16384];
+    while (r->failures == 0 && fgets(line, sizeof(line), fp)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = '\0';
+        if (n > 0 && line[0] != '#')
+            tnr_run_line(r, line);
+    }
+}
+
 static int test_token_name_rules_vectors(void)
 {
     printf("explorer_index: token-name-rules parity vectors... ");
     const char *path = getenv("TOKEN_NAME_RULES_VECTORS");
-    FILE *fp = fopen(path && *path ? path : TNR_VECTORS, "r");
+    if (!path || !*path)
+        path = TNR_VECTORS;
+    FILE *fp = fopen(path, "r");
     if (!fp) {
-        printf("FAIL (vector file missing: %s)\n", path && *path ? path : TNR_VECTORS);
+        printf("FAIL (vector file missing: %s)\n", path);
         return 1;
     }
-    int failures = 0;
-    int slp_records = 0, slp_accepted = 0, znam_records = 0;
-    char line[16384];
-    char scenario[96] = "";
-    struct node_db zdb;
-    bool zdb_open = false;
-    int height = 100;
-    memset(&zdb, 0, sizeof(zdb));
-    while (fgets(line, sizeof(line), fp)) {
-        size_t n = strlen(line);
-        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-            line[--n] = '\0';
-        if (n == 0 || line[0] == '#')
-            continue;
-        char *f[8];
-        int nf = tnr_split(line, f, 8);
-        if (strcmp(f[0], "slp") == 0 && nf == 4) {
-            failures += tnr_slp_record(f[1], f[2], f[3]);
-            slp_records++;
-            if (strcmp(f[3], "none") != 0)
-                slp_accepted++;
-        } else if (strcmp(f[0], "znam") == 0 && nf == 6) {
-            if (!zdb_open || strcmp(scenario, f[1]) != 0) {
-                if (zdb_open)
-                    node_db_close(&zdb);
-                memset(&zdb, 0, sizeof(zdb));
-                zdb_open = explorer_fixture_db_open(&zdb);
-                snprintf(scenario, sizeof(scenario), "%s", f[1]);
-                height = 100;
-                if (!zdb_open) {
-                    failures++;
-                    break;
-                }
-            }
-            failures += tnr_znam_step(&zdb, f[1], f[2], f[3], f[4], f[5],
-                                      height++);
-            znam_records++;
-        } else {
-            printf("\nexplorer_index: token-name-rules: unrecognised record "
-                   "%s FAIL\n", f[0]);
-            failures++;
-        }
-    }
+    struct tnr_run run;
+    memset(&run, 0, sizeof(run));
+    tnr_run_file(&run, fp);
     fclose(fp);
-    if (zdb_open)
-        node_db_close(&zdb);
-    if (slp_records < 15 || slp_accepted < 5 || znam_records < 20)
-        failures++;
-    if (failures == 0)
-        printf("OK (%d slp, %d znam)\n", slp_records, znam_records);
-    else
-        printf("FAIL (%d slp, %d znam records)\n", slp_records, znam_records);
+    if (run.zdb_open)
+        node_db_close(&run.zdb);
+    bool enough = run.slp_records >= 15 && run.slp_accepted >= 5 &&
+                  run.znam_records >= 20;
+    int failures = run.failures + (enough ? 0 : 1);
+    printf("%s (%d slp, %d znam%s)\n", failures == 0 ? "OK" : "FAIL",
+           run.slp_records, run.znam_records, failures ? " records" : "");
     return failures;
 }
 
