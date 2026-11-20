@@ -44,7 +44,8 @@ static const char k_schema[] =
     "pubkey_hash BLOB PRIMARY KEY,"
     "pubkey BLOB,privkey BLOB,compressed INT,created_at INT);"
     "CREATE TABLE wallet_keypool("
-    "pubkey_hash BLOB PRIMARY KEY,generation INTEGER NOT NULL UNIQUE);"
+    "pubkey_hash BLOB PRIMARY KEY,generation INTEGER NOT NULL UNIQUE,"
+    "FOREIGN KEY(pubkey_hash) REFERENCES wallet_keys(pubkey_hash) ON DELETE CASCADE);"
     "CREATE TABLE wallet_key_encryption("
     "id INTEGER PRIMARY KEY CHECK(id=1),wrapped_dek BLOB NOT NULL);"
     "CREATE TABLE wallet_sapling_keys("
@@ -1287,10 +1288,7 @@ done:
 
 static bool wse_keypool_fixture(sqlite3 *db, const struct key_id *kid)
 {
-    if (sqlite3_exec(db, "PRAGMA foreign_keys=ON; DROP TABLE wallet_keypool;"
-        "CREATE TABLE wallet_keypool(pubkey_hash BLOB PRIMARY KEY,"
-        "generation INTEGER NOT NULL UNIQUE, FOREIGN KEY(pubkey_hash)"
-        " REFERENCES wallet_keys(pubkey_hash) ON DELETE CASCADE);"
+    if (sqlite3_exec(db, "PRAGMA foreign_keys=ON;"
         "UPDATE wallet_keys SET created_at=12345", NULL, NULL, NULL) != SQLITE_OK)
         return false;
     int enabled = 0;
@@ -1334,6 +1332,7 @@ static int test_plaintext_migration_preserves_keypool(void)
     test_make_tmpdir(dir, sizeof(dir), "wallet_sqlite_enc", "migration_pool");
     snprintf(path, sizeof(path), "%s/wallet.db", dir);
     sqlite3 *db = NULL;
+    sqlite3_stmt *count = NULL;
     struct wallet_sqlite ws = {0};
     struct wallet *before = NULL, *after = NULL;
     TEST("wallet_sqlite_enc: plaintext migration preserves keypool identity") {
@@ -1369,12 +1368,12 @@ static int test_plaintext_migration_preserves_keypool(void)
         ASSERT_EQ(after->key_pool_size, 1);
         ASSERT_EQ(after->key_pool[0].generation, 42);
         ASSERT(wallet_sqlite_delete_key_r(&ws, &pk).ok);
-        sqlite3_stmt *st = NULL;
-        ASSERT(sqlite3_prepare_v2(db, "SELECT count(*) FROM wallet_keypool", -1, &st, NULL) == SQLITE_OK);
-        ASSERT(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0);
-        sqlite3_finalize(st);
+        ASSERT(sqlite3_prepare_v2(db, "SELECT count(*) FROM wallet_keypool", -1, &count, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_step(count) == SQLITE_ROW && sqlite3_column_int(count, 0) == 0);
+        sqlite3_finalize(count); count = NULL;
         PASS();
     } _test_next:;
+    if (count) sqlite3_finalize(count);
     if (ws.open) wallet_sqlite_close(&ws);
     if (db) sqlite3_close(db);
     if (before) free_wallet(before);
