@@ -70,8 +70,20 @@ static FILE *block_fopen_wide(const char *path, const char *mode)
 }
 #endif
 
+#if defined(ZCL_TESTING)
+static _Thread_local int (*g_test_open_error)(const char *, const char *);
+void disk_block_io_test_set_open_error(int (*hook)(const char *, const char *))
+{
+    g_test_open_error = hook;
+}
+#endif
+
 static FILE *block_fopen(const char *path, const char *mode)
 {
+#if defined(ZCL_TESTING)
+    int error = g_test_open_error ? g_test_open_error(path, mode) : 0;
+    if (error) { errno = error; return NULL; }
+#endif
     FILE *file = fopen(path, mode);
 #if defined(_WIN32)
     if (!file)

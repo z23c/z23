@@ -17,30 +17,19 @@
 #include <unistd.h>
 
 #if !defined(_WIN32)
-#include <dlfcn.h>
-/* Only this thread's exact fixture path can fail, and only its first rb+ open.
- * Other streams use libc unchanged; no host files or library are modified. */
+/* Only this thread's exact fixture path and first rb+ open fail. */
 static _Thread_local const char *dbio_fault_path;
 static _Thread_local int dbio_open_error, dbio_open_hits;
-FILE *fopen(const char *path, const char *mode)
+static int dbio_open_fault(const char *path, const char *mode)
 {
     if (dbio_fault_path && strcmp(path, dbio_fault_path) == 0 &&
         strcmp(mode, "rb+") == 0 && dbio_open_error) {
-        errno = dbio_open_error;
+        int error = dbio_open_error;
         dbio_open_error = 0;
         dbio_open_hits++;
-        return NULL;
+        return error;
     }
-    void *symbol = dlsym(RTLD_NEXT, "fopen");
-    FILE *(*native_open)(const char *, const char *);
-    static_assert(sizeof(native_open) == sizeof(symbol));
-    if (!symbol) {
-        fprintf(stderr, "disk block fixture: cannot resolve libc fopen\n");
-        errno = ENOSYS;
-        return NULL;
-    }
-    memcpy(&native_open, &symbol, sizeof(native_open));
-    return native_open(path, mode);
+    return 0;
 }
 #endif
 
@@ -1377,7 +1366,9 @@ static int test_open_error_preserves_frames(int error)
         dbio_fault_path = path;
         dbio_open_error = error;
         dbio_open_hits = 0;
+        disk_block_io_test_set_open_error(dbio_open_fault);
         FILE *file = open_block_file(tmpdir, &pos, false);
+        disk_block_io_test_set_open_error(NULL);
         dbio_fault_path = NULL;
         dbio_open_error = 0;
         bool refused = file == NULL;

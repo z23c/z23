@@ -187,6 +187,8 @@ void disk_block_io_set_have_data_hook(disk_block_have_data_hook_fn fn,
 void disk_block_io_quiesce_have_data_hook(void);
 
 #if defined(ZCL_TESTING)
+/* Test-only, thread-local failure injection before the CRT open. */
+void disk_block_io_test_set_open_error(int (*hook)(const char *, const char *));
 /* Invoke the real completion hook once, exactly as storage does. Tests only;
  * production callers use the internal fire site. */
 void disk_block_io_test_fire_have_data_hook(void);
