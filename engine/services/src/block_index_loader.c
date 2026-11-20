@@ -729,6 +729,8 @@ static bool bil_flat_allocation_sizes_valid(size_t count)
 static struct main_state *g_bil_flat_arena_owner;
 static struct block_index *g_bil_flat_arena_base;
 static size_t g_bil_flat_arena_bytes;
+static int64_t g_bil_flat_reage_last_ms;
+static int64_t g_bil_flat_reage_last_height = -1;
 
 static void bil_flat_arena_register(struct main_state *ms,
                                     struct block_index *arena, size_t bytes,
@@ -739,6 +741,8 @@ static void bil_flat_arena_register(struct main_state *ms,
     g_bil_flat_arena_owner = ms;
     g_bil_flat_arena_base = arena;
     g_bil_flat_arena_bytes = bytes;
+    g_bil_flat_reage_last_ms = 0;
+    g_bil_flat_reage_last_height = -1;
 }
 
 /* Windowed aging of the canonical file-backed load arena: advise
@@ -796,19 +800,19 @@ size_t block_index_flat_age_arena_pages(struct main_state *ms,
 #endif
 }
 
-/* Paced re-aging baselines. Start "due immediately" (clock 0, height -1)
+/* Paced re-aging baselines. Start "due immediately" (height -1)
  * so the FIRST call ages — the boot-time SERVICES_RUNNING pass and every
  * later maintenance pass go through this one entry point. Plain (non-
  * atomic) by contract: the only runtime callers are the boot composition's
  * single re-age worker, and the boot-time pass runs BEFORE that worker
  * spawns, so the two never overlap. */
-static int64_t g_bil_flat_reage_last_ms;
-static int64_t g_bil_flat_reage_last_height = -1;
-
 size_t block_index_flat_paced_reage(struct main_state *ms, int tip_height,
                                     int64_t now_ms, size_t window_bytes)
 {
-    if (now_ms - g_bil_flat_reage_last_ms <
+    if (g_bil_flat_arena_owner && ms != g_bil_flat_arena_owner)
+        return 0;
+    if (g_bil_flat_reage_last_height >= 0 &&
+        now_ms - g_bil_flat_reage_last_ms <
         (int64_t)BLOCK_INDEX_ARENA_REAGE_SECONDS * 1000)
         return 0;
     if (tip_height < 0 || tip_height == g_bil_flat_reage_last_height)

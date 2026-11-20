@@ -989,6 +989,58 @@ static struct bil_reage_pass bil_reage_run_pass(
     return p;
 }
 
+static bool bil_reage_pages_dropped(size_t before, size_t after)
+{
+    return before != (size_t)-1 && after != (size_t)-1 && after < before;
+}
+
+static bool bil_reage_reregister_case(struct main_state *source,
+                                      struct main_state *old_owner,
+                                      int height, int64_t now_ms,
+                                      int chain_n, size_t page_size)
+{
+    char dir[256];
+    snprintf(dir, sizeof dir, "./test-tmp/%d_bil_reage_new", getpid());
+    mkdir(dir, 0755);
+    save_block_index_flat(dir, source);
+    struct main_state next;
+    main_state_init(&next);
+    bool loaded = load_block_index_flat(dir, &next).ok;
+    struct uint256 first_hash = make_test_hash(0);
+    struct uint256 tip_hash = make_test_hash(chain_n - 1);
+    struct block_index *first = loaded ? block_map_find(&next.map_block_index, &first_hash) : NULL;
+    struct block_index *tip = loaded ? block_map_find(&next.map_block_index, &tip_hash) : NULL;
+    size_t bytes = 0;
+    bool mapped = bil_reage_arena_ok(loaded, first, tip, dir, (size_t)chain_n, &bytes);
+    unsigned sum = 0;
+    for (struct block_index *cur = tip; cur; cur = cur->pprev)
+        sum += (unsigned)cur->nHeight;
+    size_t before = bil_reage_present_or_fail(first, bytes);
+    size_t aged = bil_test_paced_reage(&next, height, now_ms, page_size);
+    size_t after = bil_reage_present_or_fail(first, bytes);
+    for (struct block_index *cur = tip; cur; cur = cur->pprev)
+        sum += (unsigned)cur->nHeight;
+    size_t refaulted = bil_reage_present_or_fail(first, bytes);
+    int64_t due_ms = now_ms + 300001;
+    size_t foreign = bil_test_paced_reage(old_owner, height + 1, due_ms, page_size);
+    size_t aged_again = bil_test_paced_reage(&next, height + 2, due_ms, page_size);
+    size_t after_again = bil_reage_present_or_fail(first, bytes);
+    bool ok = mapped && sum == (unsigned)(chain_n * (chain_n - 1)) &&
+              aged > 0 && aged != (size_t)-1 &&
+              bil_reage_pages_dropped(before, after) && foreign == 0 &&
+              aged_again == aged && bil_reage_pages_dropped(refaulted, after_again);
+    printf("bil: replacement arena: first %zu bytes %zu->%zu pages; "
+           "foreign %zu; second %zu bytes %zu->%zu pages\n", aged,
+           before, after, foreign, aged_again, refaulted, after_again);
+    char path[512];
+    snprintf(path, sizeof path, "%s/block_index.bin", dir);
+    unlink(path);
+    bil_test_unlink_arena(dir);
+    rmdir(dir);
+    main_state_free(&next);
+    return ok;
+}
+
 static int bil_flat_arena_reage_case(void)
 {
     int failures = 0;
@@ -1036,11 +1088,10 @@ static int bil_flat_arena_reage_case(void)
         uintptr_t last_page = ((uintptr_t)first + arena_bytes - 1) &
                               ~(uintptr_t)(page_size - 1);
 
-        /* Pass 1: fresh baselines (clock 0, height -1 in the loader), so
-         * a clock just past one re-age window and the current tip height
-         * are both "advanced" — exactly the boot-time pass. */
+        /* The first pass is due even when the host monotonic clock has not
+         * yet reached one re-age window. */
         int fake_height = chain_n - 1;
-        int64_t fake_clock_ms = (int64_t)300 * 1000 + 1;
+        int64_t fake_clock_ms = 1;
         unsigned pass1_sum = 0;
         struct bil_reage_pass p1 = bil_reage_run_pass(
             &ms2, first, tip, arena_bytes, window_bytes, last_page,
@@ -1093,6 +1144,9 @@ static int bil_flat_arena_reage_case(void)
         BIL_CHECK("bil: entries and pprev links survive the second pass",
                   bil_test_age_entries_ok(loaded, first, tip, chain_n,
                                           &ms, &ms2));
+        BIL_CHECK("bil: replacement canonical arena gets a fresh first pass",
+                  bil_reage_reregister_case(&ms, &ms2, fake_height,
+                                            fake_clock_ms + 1, chain_n, page_size));
         printf("bil: reage with guards advanced (height %d, clock "
                "%lldms): pass1 %zu bytes / %zu pages, refault %zu pages, "
                "pass2 %zu bytes / %zu pages\n", fake_height,
