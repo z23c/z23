@@ -18,6 +18,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,66 +118,98 @@ static int trace_cb(unsigned type, void *ctx, void *p, void *x)
     return 0;
 }
 
-/* g_lock pins the handle until unregister. A trylock, never a blocking
- * registry -> SQLite acquisition, protects the ENTIRE statement lifetime.
- * Register/unregister take SQLite -> registry to protect callback context. */
-static void observe_connection(struct txn_trace_entry *entry, int *state,
-                                int *busy)
+#define TXN_TRACE_DETAIL_MAX 4
+#define TXN_TRACE_SQL_MAX 128
+struct txn_trace_detail {
+    uintptr_t stmt;
+    bool sql_truncated;
+    char sql[TXN_TRACE_SQL_MAX];
+};
+enum txn_unavailable { TXN_AVAILABLE, TXN_CONNECTION_BUSY, TXN_NO_MUTEX };
+struct txn_trace_observation {
+    uintptr_t db;
+    char label[48];
+    int state, busy, autocommit, unavailable, details;
+    struct txn_trace_detail detail[TXN_TRACE_DETAIL_MAX];
+};
+
+/* g_lock pins handles; the SQLite mutex pins statement lifetimes. */
+static void observe_connection(struct txn_trace_entry *entry,
+                               struct txn_trace_observation *o)
 {
     sqlite3 *db = entry->db;
     sqlite3_mutex *mutex = sqlite3_db_mutex(db);
-    *state = -1;
-    *busy = -1;
-    if (!mutex || sqlite3_mutex_try(mutex) != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
-                "[db-txn-trace] STATE owner=%s db=%p unavailable=%s\n",
-                entry->label, (void *)db,
-                mutex ? "connection_busy" : "no_connection_mutex");
+    o->db = (uintptr_t)db;
+    memcpy(o->label, entry->label, sizeof(o->label));
+    o->state = o->busy = -1;
+    o->unavailable = mutex ? TXN_CONNECTION_BUSY : TXN_NO_MUTEX;
+    if (!mutex || sqlite3_mutex_try(mutex) != SQLITE_OK)
         return;
-    }
-    *state = sqlite3_txn_state(db, NULL);
-    *busy = *state < SQLITE_TXN_NONE ? -1 : 0;
-    fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
-            "[db-txn-trace] STATE owner=%s db=%p txn=%s autocommit=%d%s\n",
-            entry->label, (void *)db, txn_state_name(*state),
-            sqlite3_get_autocommit(db), *state == SQLITE_TXN_WRITE
-                ? "  <-- HOLDS WRITE LOCK (candidate holder)" : "");
-    if (*state > SQLITE_TXN_NONE) {
+    o->unavailable = TXN_AVAILABLE;
+    o->state = sqlite3_txn_state(db, NULL);
+    o->autocommit = sqlite3_get_autocommit(db);
+    o->busy = o->state < SQLITE_TXN_NONE ? -1 : 0;
+    if (o->state > SQLITE_TXN_NONE) {
         sqlite3_stmt *stmt = NULL;
         while ((stmt = sqlite3_next_stmt(db, stmt)) != NULL) {
-            if (!sqlite3_stmt_busy(stmt))
-                continue;
-            ++*busy;
+            if (!sqlite3_stmt_busy(stmt)) continue;
+            ++o->busy;
+            if (o->details == TXN_TRACE_DETAIL_MAX) continue;
+            struct txn_trace_detail *d = &o->detail[o->details++];
+            d->stmt = (uintptr_t)stmt;
             const char *sql = sqlite3_sql(stmt);
-            fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
-                    "[db-txn-trace]   BUSY-STMT owner=%s db=%p "
-                    "stmt=%p sql=\"%s\"\n", entry->label, (void *)db,
-                    (void *)stmt, sql ? sql : "(null)");
+            d->sql_truncated = sql && strnlen(sql, sizeof(d->sql)) == sizeof(d->sql);
+            snprintf(d->sql, sizeof(d->sql), "%.*s", (int)sizeof(d->sql) - 1,
+                     sql ? sql : "(null)");
         }
     }
     sqlite3_mutex_leave(mutex);
 }
 
+static void emit_observation(const struct txn_trace_observation *o)
+{
+    if (o->unavailable) {
+        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                "[db-txn-trace] STATE owner=%s db=%p unavailable=%s\n",
+                o->label, (void *)o->db,
+                o->unavailable == TXN_CONNECTION_BUSY ? "connection_busy" : "no_connection_mutex");
+        return;
+    }
+    fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+            "[db-txn-trace] STATE owner=%s db=%p txn=%s autocommit=%d%s\n",
+            o->label, (void *)o->db, txn_state_name(o->state), o->autocommit,
+            o->state == SQLITE_TXN_WRITE ? "  <-- HOLDS WRITE LOCK (candidate holder)" : "");
+    for (int i = 0; i < o->details; i++)
+        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                "[db-txn-trace]   BUSY-STMT owner=%s db=%p stmt=%p sql=\"%s\"%s\n",
+                o->label, (void *)o->db, (void *)o->detail[i].stmt, o->detail[i].sql,
+                o->detail[i].sql_truncated ? " sql_truncated=1" : "");
+    if (o->busy > o->details)
+        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                "[db-txn-trace]   BUSY-STMT owner=%s truncated=%d total=%d\n",
+                o->label, o->busy - o->details, o->busy);
+}
+
 static void publish_snapshot(void)
 {
+    struct txn_trace_observation observations[ZCL_DB_TXN_TRACE_MAX_CONNS] = {0};
     pthread_mutex_lock(&g_lock);
     zcl_snapshot_publish_begin(&g_snap_env);
     int count = 0;
     for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++) {
-        if (!g_entries[i].db)
-            continue;
-        int state, busy;
-        observe_connection(&g_entries[i], &state, &busy);
-        atomic_store_explicit(&g_snap[count].txn_state, state, memory_order_relaxed);
-        atomic_store_explicit(&g_snap[count].busy_stmts, busy, memory_order_relaxed);
+        if (!g_entries[i].db) continue;
+        struct txn_trace_observation *o = &observations[count];
+        observe_connection(&g_entries[i], o);
+        atomic_store_explicit(&g_snap[count].txn_state, o->state, memory_order_relaxed);
+        atomic_store_explicit(&g_snap[count].busy_stmts, o->busy, memory_order_relaxed);
         for (size_t j = 0; j < sizeof(g_snap[count].label); j++)
-            atomic_store_explicit(&g_snap[count].label[j], g_entries[i].label[j],
-                                  memory_order_relaxed);
+            atomic_store_explicit(&g_snap[count].label[j], o->label[j], memory_order_relaxed);
         count++;
     }
     atomic_store_explicit(&g_snap_count, count, memory_order_relaxed);
     zcl_snapshot_publish_end(&g_snap_env, count);
     pthread_mutex_unlock(&g_lock);
+    for (int i = 0; i < count; i++) emit_observation(&observations[i]);
     fflush(stderr);
 }
 

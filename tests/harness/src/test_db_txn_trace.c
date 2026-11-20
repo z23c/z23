@@ -3,6 +3,7 @@
 #include "util/db_txn_trace.h"
 #include "json/json.h"
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <time.h>
@@ -11,6 +12,7 @@ static sqlite3_stmt *dtt_next(sqlite3 *, sqlite3_stmt *);
 static int dtt_busy(sqlite3_stmt *);
 static const char *dtt_sql(sqlite3_stmt *);
 static int dtt_sleep(const struct timespec *, struct timespec *);
+static int dtt_fprintf(FILE *, const char *, ...);
 
 /* Compile the actual tracer with private names and test-only API boundaries. */
 #define zcl_db_txn_trace_enabled dtt_enabled
@@ -21,10 +23,12 @@ static int dtt_sleep(const struct timespec *, struct timespec *);
 #define sqlite3_stmt_busy dtt_busy
 #define sqlite3_sql dtt_sql
 #define nanosleep dtt_sleep
+#define fprintf dtt_fprintf
 #ifndef DB_TXN_TRACE_SOURCE
 #define DB_TXN_TRACE_SOURCE "../../../platform/modules/util/src/db_txn_trace.c"
 #endif
 #include DB_TXN_TRACE_SOURCE
+#undef fprintf
 #undef nanosleep
 #undef sqlite3_sql
 #undef sqlite3_stmt_busy
@@ -48,9 +52,28 @@ static struct {
     sqlite3_stmt *stmt;
     int request, response, status[3], sleeps;
     bool seen[3], stop_probe, scan_done, start_finalizer, finalizer_probed;
-    bool gate_dumper;
+    bool gate_dumper, gate_sink, sink_entered, release_sink;
     int finalizer_try, finalize_rc;
 } dtt;
+
+static int dtt_fprintf(FILE *stream, const char *format, ...)
+{
+    if (strstr(format, "[db-txn-trace] STATE")) {
+        pthread_mutex_lock(&dtt_control);
+        if (dtt.gate_sink) {
+            dtt.sink_entered = true;
+            pthread_cond_broadcast(&dtt_changed);
+            while (!dtt.release_sink)
+                pthread_cond_wait(&dtt_changed, &dtt_control);
+        }
+        pthread_mutex_unlock(&dtt_control);
+    }
+    va_list args;
+    va_start(args, format);
+    int result = vfprintf(stream, format, args);
+    va_end(args);
+    return result;
+}
 
 static void *dtt_probe_worker(void *unused)
 {
@@ -403,6 +426,72 @@ static int dtt_nonblocking_unknown(void)
     return failures;
 }
 
+static int dtt_blocked_state_sink(void)
+{
+    int failures = 0;
+    struct dtt_contention race = {
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER
+    };
+    int rc = sqlite3_open_v2(":memory:", &race.db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+    dtt_check("sink fixture opens", rc == SQLITE_OK && race.db, &failures);
+    if (rc != SQLITE_OK || !race.db) { sqlite3_close(race.db); return failures; }
+    pthread_mutex_lock(&dtt_control);
+    dtt.sleeps = ZCL_DB_TXN_TRACE_DUMP_SECS + 1;
+    pthread_mutex_unlock(&dtt_control);
+    dtt_register(race.db, "sink-owner");
+    dtt_check("sink dumper joined", dtt_join_dumper() == 0, &failures);
+    pthread_mutex_lock(&dtt_control);
+    dtt.gate_sink = true;
+    dtt.sink_entered = dtt.release_sink = false;
+    pthread_mutex_unlock(&dtt_control);
+    pthread_t collector;
+    bool started = pthread_create(&collector, NULL, dtt_collect_held, &race) == 0;
+    dtt_check("sink collector starts", started, &failures);
+    pthread_mutex_lock(&dtt_control);
+    struct timespec deadline;
+    timespec_get(&deadline, TIME_UTC);
+    deadline.tv_sec += 2;
+    while (started && !dtt.sink_entered)
+        if (pthread_cond_timedwait(&dtt_changed, &dtt_control, &deadline) != 0) break;
+    bool blocked = dtt.sink_entered;
+    pthread_mutex_unlock(&dtt_control);
+    dtt_check("STATE sink is blocked", blocked, &failures);
+    if (blocked) {
+        sqlite3_mutex *mutex = sqlite3_db_mutex(race.db);
+        int lock_rc = sqlite3_mutex_try(mutex);
+        dtt_check("SQLite remains accessible during STATE output", lock_rc == SQLITE_OK, &failures);
+        if (lock_rc == SQLITE_OK) {
+            dtt_check("same connection executes SQL", sqlite3_exec(race.db, "SELECT 1", NULL, NULL, NULL) == SQLITE_OK, &failures);
+            sqlite3_mutex_leave(mutex);
+        }
+        int registry_rc = pthread_mutex_trylock(&g_lock);
+        dtt_check("registry remains accessible during STATE output", registry_rc == 0, &failures);
+        if (registry_rc == 0) pthread_mutex_unlock(&g_lock);
+        struct json_value snapshot;
+        json_init(&snapshot);
+        dtt_dump(&snapshot, NULL);
+        dtt_check("snapshot is published before STATE output",
+            json_get_bool(json_get(&snapshot, "observation_complete")) &&
+            json_get_int(json_get(&snapshot, "connection_count")) == 1, &failures);
+        json_free(&snapshot);
+    }
+    pthread_mutex_lock(&dtt_control);
+    dtt.release_sink = true;
+    pthread_cond_broadcast(&dtt_changed);
+    pthread_mutex_unlock(&dtt_control);
+    if (started) pthread_join(collector, NULL);
+    pthread_mutex_lock(&dtt_control);
+    dtt.gate_sink = false;
+    pthread_mutex_unlock(&dtt_control);
+    dtt_unregister(race.db);
+    dtt_check("sink fixture closes", sqlite3_close(race.db) == SQLITE_OK, &failures);
+    pthread_cond_destroy(&race.changed);
+    pthread_mutex_destroy(&race.mutex);
+    return failures;
+}
+
 static int dtt_torn_unknown(void)
 {
     int failures = 0;
@@ -427,6 +516,7 @@ int test_db_txn_trace(void)
     failures += dtt_fullmutex_inspection();
     dtt.db = NULL;
     failures += dtt_nonblocking_unknown();
+    failures += dtt_blocked_state_sink();
     failures += dtt_torn_unknown();
     return failures;
 }
