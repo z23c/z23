@@ -32,6 +32,8 @@ struct zcl_result task_editor_submit(struct task_editor *editor,
  * draft Saved. Changed reports a consumed completion, including failure. */
 struct zcl_result task_editor_poll(struct task_editor *editor, bool *changed);
 struct zcl_result task_editor_request_close(struct task_editor *editor);
+/* Explicit failed-save recovery: reload durable state before discarding a draft. */
+struct zcl_result task_editor_discard_reload(struct task_editor *editor);
 struct zcl_result task_editor_model(const struct task_editor *editor,
     struct zcl_present_model_v1 *model);
 struct zcl_result task_editor_window_run(struct task_editor *editor);

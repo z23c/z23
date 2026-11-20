@@ -462,6 +462,120 @@ static struct zcl_result te_wait(struct task_editor *editor)
     return ZCL_ERR(-1, "task editor test: save completion not observed");
 }
 
+#if defined(ZCL_TESTING)
+bool zcl_test_task_editor_window_action(struct task_editor *editor,
+    enum task_editor_status painted, bool display_ok, bool close_requested, bool *back);
+
+struct te_conflict {
+    struct package_resident_store store;
+    struct task_document row;
+    struct task_editor a, b;
+    bool back;
+    char original_dir[4096];
+};
+
+static int te_conflict_save(struct te_conflict *c, const char *directory)
+{
+    int failures = 0;
+    TE_CHECK("open conflict store", package_resident_store_open_app(&c->store, directory, "local/conflict").ok);
+    TE_CHECK("create conflict task", task_document_apply(&c->store, 0, TASK_DOCUMENT_ADD, 0, "Original", &c->row).ok);
+    TE_CHECK("open both editors", task_editor_open(&c->a, directory, "local/conflict").ok &&
+        task_editor_open(&c->b, directory, "local/conflict").ok &&
+        task_editor_select(&c->a, 1).ok && task_editor_select(&c->b, 1).ok);
+    TE_CHECK("keep both drafts", task_editor_type(&c->a, 'A', false).ok && task_editor_type(&c->b, 'B', false).ok);
+    TE_CHECK("discard unavailable before failure", !task_editor_discard_reload(&c->b).ok && c->b.dirty &&
+        !strcmp(c->b.form.fields[0].value, "OriginalB"));
+    TE_CHECK("first editor saves", task_editor_submit(&c->a, TASK_DOCUMENT_EDIT).ok && te_wait(&c->a).ok);
+    TE_CHECK("stale save preserves draft", task_editor_submit(&c->b, TASK_DOCUMENT_EDIT).ok && !te_wait(&c->b).ok &&
+        c->b.status == TASK_EDITOR_FAILED && c->b.dirty && !strcmp(c->b.form.fields[0].value, "OriginalB"));
+    return failures;
+}
+
+static int te_conflict_guard(struct te_conflict *c)
+{
+    int failures = 0;
+    TE_CHECK("titlebar close retries instead of discarding", !zcl_test_task_editor_window_action(&c->b,
+        TASK_EDITOR_FAILED, true, true, &c->back) && c->b.pending && c->b.dirty && !te_wait(&c->b).ok &&
+        !strcmp(c->b.form.fields[0].value, "OriginalB"));
+    TE_CHECK("failed paint cannot authorize discard", !zcl_test_task_editor_window_action(&c->b,
+        TASK_EDITOR_FAILED, false, false, &c->back) && !c->back && c->b.dirty);
+    TE_CHECK("new input invalidates displayed discard", zcl_present_window_form_edit_v1(&c->b.form, 0, '!', false) &&
+        !zcl_test_task_editor_window_action(&c->b, TASK_EDITOR_FAILED, true, false, &c->back) &&
+        !c->back && c->b.dirty && c->b.status == TASK_EDITOR_UNSAVED && !strcmp(c->b.form.fields[0].value, "OriginalB!"));
+    TE_CHECK("retry still detects stale revision", task_editor_submit(&c->b, TASK_DOCUMENT_EDIT).ok && !te_wait(&c->b).ok);
+    return failures;
+}
+
+static int te_conflict_read_failure(struct te_conflict *c)
+{
+    int failures = 0;
+    (void)snprintf(c->original_dir, sizeof(c->original_dir), "%s", c->b.directory);
+    (void)snprintf(c->b.directory, sizeof(c->b.directory), "/dev/null/no-task-store");
+    TE_CHECK("failed reload keeps draft and recovery available", !zcl_test_task_editor_window_action(&c->b,
+        TASK_EDITOR_FAILED, true, false, &c->back) && !c->back && c->b.dirty &&
+        c->b.status == TASK_EDITOR_FAILED && !strcmp(c->b.form.fields[0].value, "OriginalB!"));
+    (void)snprintf(c->b.directory, sizeof(c->b.directory), "%s", c->original_dir);
+    return failures;
+}
+
+static int te_conflict_discard(struct te_conflict *c)
+{
+    int failures = 0;
+    TE_CHECK("explicit discard reloads and returns", zcl_test_task_editor_window_action(&c->b,
+        TASK_EDITOR_FAILED, true, false, &c->back) && c->back && !c->b.dirty && c->b.closing &&
+        c->b.saved.state.revision == c->a.saved.state.revision && c->b.saved.can_undo &&
+        !strcmp(c->b.form.fields[0].value, "OriginalA"));
+    TE_CHECK("reload did not write", task_document_read(&c->store, &c->row).ok &&
+        c->row.state.revision == c->a.saved.state.revision && !strcmp(c->row.state.tasks[0].title, "OriginalA") && c->row.can_undo);
+    return failures;
+}
+
+static int te_conflict_deleted(struct te_conflict *c, const char *directory)
+{
+    int failures = 0;
+    TE_CHECK("reopen stale editor for delete", task_editor_open(&c->b, directory, "local/conflict").ok &&
+        task_editor_select(&c->b, 1).ok && task_editor_type(&c->b, 'C', false).ok);
+    TE_CHECK("delete selected task elsewhere", task_document_apply(&c->store, c->row.state.revision,
+        TASK_DOCUMENT_DELETE, 1, NULL, &c->row).ok);
+    TE_CHECK("deleted selection fails stale save", task_editor_submit(&c->b, TASK_DOCUMENT_EDIT).ok && !te_wait(&c->b).ok);
+    c->back = false;
+    TE_CHECK("discard deleted selection returns without replacement", zcl_test_task_editor_window_action(&c->b,
+        TASK_EDITOR_FAILED, true, false, &c->back) && c->back && c->b.selected_id == 0 &&
+        c->b.saved.state.count == 0 && c->b.saved.state.revision == c->row.state.revision && !c->b.dirty);
+    TE_CHECK("deleted selection reload did not write", task_document_read(&c->store, &c->row).ok && c->row.state.count == 0 &&
+        c->row.state.revision == c->b.saved.state.revision && c->row.can_undo);
+    TE_CHECK("close conflict store", package_resident_store_close(&c->store).ok);
+    return failures;
+}
+
+static int te_normal_back(const char *directory)
+{
+    int failures = 0;
+    struct task_editor editor = {0};
+    bool back = false;
+    TE_CHECK("open ordinary editor", task_editor_open(&editor, directory, "local/normal-back").ok);
+    TE_CHECK("type ordinary draft", task_editor_type(&editor, 'N', false).ok);
+    TE_CHECK("ordinary Back saves instead of discarding", !zcl_test_task_editor_window_action(&editor,
+        TASK_EDITOR_UNSAVED, true, false, &back) && back && editor.pending && editor.dirty);
+    TE_CHECK("ordinary Back completes durable save", te_wait(&editor).ok && editor.closing && !editor.dirty &&
+        editor.saved.state.count == 1 && !strcmp(editor.saved.state.tasks[0].title, "N"));
+    return failures;
+}
+
+static int te_conflict_recovery(const char *directory)
+{
+    struct te_conflict c = {0};
+    int failures = te_conflict_save(&c, directory);
+    failures += te_conflict_guard(&c);
+    failures += te_conflict_read_failure(&c);
+    failures += te_conflict_discard(&c);
+    failures += te_conflict_deleted(&c, directory);
+    failures += te_normal_back(directory);
+    return failures;
+}
+
+#endif
+
 static int te_focus(struct task_editor *editor)
 {
     int failures = 0;
@@ -675,6 +789,9 @@ static int td_editor_acceptance(const char *directory)
     failures += tl_acceptance(directory);
     failures += te_drafts(&editor);
     failures += te_busy(&editor, directory);
+#if defined(ZCL_TESTING)
+    failures += te_conflict_recovery(directory);
+#endif
     struct task_editor reopened = {0};
     TE_CHECK("restart keeps exact latest editor contents", task_editor_open(&reopened,
         directory, "local/editor").ok && reopened.saved.state.count == 1 &&

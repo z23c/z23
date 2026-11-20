@@ -61,7 +61,10 @@ static struct zcl_result tw_paint(struct task_editor_window *window)
 {
     struct zcl_present_model_v1 model;
     ZCL_CHECK(task_editor_model(window->editor, &model));
-    if (window->back) (void)snprintf(model.actions[0].label, sizeof(model.actions[0].label), "Back to tasks");
+    if (window->editor->status == TASK_EDITOR_FAILED)
+        (void)snprintf(model.actions[0].label, sizeof(model.actions[0].label), "%s",
+                       window->back ? "Discard & go back" : "Discard & close");
+    else if (window->back) (void)snprintf(model.actions[0].label, sizeof(model.actions[0].label), "Back to tasks");
     struct zcl_present_model_bitmap_v1 next = {0};
     char error[256];
     if (!zcl_present_model_render_editor_v1(&model, &next, error, sizeof(error)))
@@ -94,6 +97,24 @@ static void tw_back_intent(bool *back, const struct zcl_present_window_event_v1 
     else if (close_requested && event->outcome != ZCL_PRESENT_WINDOW_ACTION) *back = false;
 }
 
+static void tw_dispatch(struct task_editor_window *window,
+    const struct zcl_present_window_event_v1 *event, bool close_requested)
+{
+    struct task_editor *editor = window->editor;
+    bool discard = event->outcome == ZCL_PRESENT_WINDOW_ACTION && event->action_index == 0 &&
+        window->painted_status == TASK_EDITOR_FAILED && !close_requested;
+    if (discard) {
+        if (window->display_result.ok && editor->status == TASK_EDITOR_FAILED && !editor->pending) {
+            struct zcl_result result = task_editor_discard_reload(editor);
+            if (result.ok && window->back) *window->back = true;
+            if (!result.ok) LOG_ERROR("task-editor", "%s", result.message);
+        }
+    } else {
+        tw_back_intent(window->back, event, close_requested);
+        tw_action(editor, event, close_requested);
+    }
+}
+
 static void tw_update(void *opaque, const struct zcl_present_window_event_v1 *event,
     bool close_requested, bool *redraw, bool *allow_close)
 {
@@ -102,8 +123,7 @@ static void tw_update(void *opaque, const struct zcl_present_window_event_v1 *ev
     bool changed = false;
     struct zcl_result result = task_editor_poll(editor, &changed);
     if (!result.ok) LOG_ERROR("task-editor", "%s", result.message);
-    tw_back_intent(window->back, event, close_requested);
-    tw_action(editor, event, close_requested);
+    tw_dispatch(window, event, close_requested);
     *allow_close = editor->closing && !editor->pending && !editor->dirty;
     *redraw = editor->status != window->painted_status ||
         strcmp(editor->failure, window->painted_failure) != 0;
@@ -119,6 +139,22 @@ static void tw_update(void *opaque, const struct zcl_present_window_event_v1 *ev
     window->painted_status = editor->status;
     (void)snprintf(window->painted_failure, sizeof(window->painted_failure), "%s", editor->failure);
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_test_task_editor_window_action(struct task_editor *editor,
+    enum task_editor_status painted, bool display_ok, bool close_requested, bool *back)
+{
+    struct task_editor_window window = { .editor = editor, .back = back,
+        .painted_status = painted, .display_result = display_ok ? ZCL_OK : ZCL_ERR(-1, "display failed") };
+    const struct zcl_present_window_event_v1 event = {
+        .outcome = close_requested ? ZCL_PRESENT_WINDOW_DISMISSED : ZCL_PRESENT_WINDOW_ACTION,
+        .action_index = close_requested ? UINT32_MAX : 0 };
+    bool redraw = false, allow_close = false;
+    tw_update(&window, &event, close_requested, &redraw, &allow_close);
+    zcl_present_model_bitmap_free_v1(&window.bitmap);
+    return allow_close;
+}
+#endif
 
 static struct zcl_result tw_run(struct task_editor *editor, bool *back)
 {

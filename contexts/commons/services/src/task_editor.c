@@ -78,18 +78,24 @@ static void te_title(struct task_editor *editor)
                    editor->form.fields[0].value);
 }
 
+static struct zcl_result te_read(const char *directory, const char *app, struct task_document *saved)
+{
+    struct package_resident_store store = {0};
+    struct zcl_result result = package_resident_store_open_app(&store, directory, app);
+    if (result.ok) result = task_document_read(&store, saved);
+    struct zcl_result closed = package_resident_store_close(&store);
+    if (result.ok && !closed.ok) result = closed;
+    return result;
+}
+
 struct zcl_result task_editor_open(struct task_editor *editor,
     const char *directory, const char *app)
 {
     if (!editor || !directory || !app || strlen(directory) >= sizeof(editor->directory) ||
         strlen(app) >= sizeof(editor->app))
         return ZCL_ERR(-1, "task-editor: bounded application directory and identity required");
-    struct package_resident_store store = {0};
     struct task_document saved;
-    struct zcl_result result = package_resident_store_open_app(&store, directory, app);
-    if (result.ok) result = task_document_read(&store, &saved);
-    struct zcl_result closed = package_resident_store_close(&store);
-    if (result.ok && !closed.ok) result = closed;
+    struct zcl_result result = te_read(directory, app, &saved);
     if (!result.ok) return result;
     *editor = (struct task_editor){ .saved = saved, .status = TASK_EDITOR_SAVED };
     editor->form = (struct zcl_present_window_form_v1){
@@ -205,6 +211,22 @@ struct zcl_result task_editor_request_close(struct task_editor *editor)
     if (editor->pending || !editor->dirty) return ZCL_OK;
     return task_editor_submit(editor,
         editor->selected_id ? TASK_DOCUMENT_EDIT : TASK_DOCUMENT_ADD);
+}
+
+struct zcl_result task_editor_discard_reload(struct task_editor *editor)
+{
+    if (!editor || editor->pending || editor->status != TASK_EDITOR_FAILED)
+        return ZCL_ERR(-1, "task-editor: discard is available after a failed save");
+    struct task_document saved;
+    struct zcl_result result = te_read(editor->directory, editor->app, &saved);
+    if (!result.ok) return te_failure(editor, result);
+    editor->saved = saved;
+    te_title(editor);
+    editor->dirty = false;
+    editor->failure[0] = '\0';
+    editor->status = TASK_EDITOR_SAVED;
+    editor->closing = true;
+    return ZCL_OK;
 }
 
 struct zcl_result task_editor_finish(struct task_editor *editor)
