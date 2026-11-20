@@ -340,6 +340,49 @@ static int test_bei_input_hash_failure(const char *root)
     return failures;
 }
 
+static int test_bei_key_stream(const char *root)
+{
+    static const char digest[] = "7d8ad353438cfe346217501b5f605281724d1b51746608e8f1f10ec5668427f5";
+    static const char expected[] = "7d8ad353438cfe346217501b5f605281724d1b51746608e8f1f10ec5668427f5\n";
+    static const char compiler[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char system_id[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    int failures = 0;
+    TEST("key streams its exact v3 vector and refuses bad hashes") {
+        char out[128], dir[PATH_MAX], shim[PATH_MAX], path_env[2 * PATH_MAX];
+        const char *path = getenv("PATH");
+        ASSERT(path != NULL);
+        int n = snprintf(dir, sizeof dir, "%s/key-bin", root);
+        ASSERT(n > 0 && (size_t)n < sizeof dir);
+        ASSERT(mkdir(dir, 0700) == 0);
+        n = snprintf(shim, sizeof shim, "%s/sha256sum", dir);
+        ASSERT(n > 0 && (size_t)n < sizeof shim);
+        n = snprintf(path_env, sizeof path_env, "PATH=%s:%s", dir, path);
+        ASSERT(n > 0 && (size_t)n < sizeof path_env);
+        const char *args[] = {"env", "TMPDIR=/dev/null", "bash", "tools/dev/build-epoch-key.sh",
+                              "key", compiler, "vector", "-O2", "-pthread", system_id, NULL};
+        /* Independent OpenSSL SHA-256 of the NUL-delimited v3 vector. */
+        ASSERT_EQ(test_host_tool_capture(args, out, sizeof out, 30000), 0);
+        ASSERT_STR_EQ(out, expected);
+        const char *stub_args[] = {"env", path_env, "bash", "tools/dev/build-epoch-key.sh",
+                                   "key", compiler, "vector", "-O2", "-pthread", system_id, NULL};
+        char stub[256];
+        n = snprintf(stub, sizeof stub, "#!/bin/sh\ncat >/dev/null || exit 1\nprintf '%%s *-\\n' '%s'\n", digest);
+        ASSERT(n > 0 && (size_t)n < sizeof stub);
+        ASSERT_EQ(bei_put(shim, stub, 1), 0);
+        ASSERT_EQ(test_host_tool_capture(stub_args, out, sizeof out, 30000), 0);
+        ASSERT_STR_EQ(out, expected);
+        ASSERT_EQ(bei_put(shim, "#!/bin/sh\ncat >/dev/null || exit 1\nprintf '%064d  -\\n' 0\nexit 1\n", 1), 0);
+        ASSERT_EQ(test_host_tool_capture(stub_args, out, sizeof out, 30000), 2);
+        ASSERT_STR_EQ(out, "");
+        ASSERT_EQ(bei_put(shim, "#!/bin/sh\ncat >/dev/null || exit 1\nprintf 'malformed\\n'\n", 1), 0);
+        ASSERT_EQ(test_host_tool_capture(stub_args, out, sizeof out, 30000), 2);
+        ASSERT_STR_EQ(out, "");
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
 int test_build_epoch_integrity(void);
 int test_build_epoch_integrity(void)
 {
@@ -352,6 +395,7 @@ int test_build_epoch_integrity(void)
     failures += test_bei_change(root);
     failures += test_bei_open(root);
     failures += test_bei_input_hash_failure(root);
+    failures += test_bei_key_stream(root);
     if (failures == 0)
         printf("test_build_epoch_integrity: all passed\n");
     else

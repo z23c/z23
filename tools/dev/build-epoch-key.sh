@@ -874,17 +874,15 @@ key)
     COMPILE_FLAGS="${COMPILE_FLAGS//"$SCOPE_ROOT"/<repo-root>}"
     LINK_FLAGS="${LINK_FLAGS//"$SCOPE_ROOT"/<repo-root>}"
 
-    WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch.XXXXXX")" ||
-        fail 'could not create build epoch workspace'
-    {
-        printf 'zcl.build_compile_epoch.v3\0'
-        printf 'compiler_id_sha256\0%s\0' "$COMPILER_ID"
-        printf 'profile\0%s\0' "$PROFILE"
-        printf 'compile_flags\0%s\0' "$COMPILE_FLAGS"
-        printf 'link_flags\0%s\0' "$LINK_FLAGS"
-        printf 'build_system_sha256\0%s\0' "$BUILD_SYSTEM"
-    } > "$WORK/epoch.preimage"
-    sha256_file "$WORK/epoch.preimage"
+    HASH_LINE="$(printf '%s\0' 'zcl.build_compile_epoch.v3' \
+        'compiler_id_sha256' "$COMPILER_ID" 'profile' "$PROFILE" \
+        'compile_flags' "$COMPILE_FLAGS" 'link_flags' "$LINK_FLAGS" \
+        'build_system_sha256' "$BUILD_SYSTEM" | sha256sum)" ||
+        fail 'could not hash the compile epoch preimage'
+    HASH_PATTERN='^([0-9a-f]{64}) [ *]-$'
+    [[ "$HASH_LINE" =~ $HASH_PATTERN ]] ||
+        fail 'compile epoch hash returned malformed output'
+    printf '%s\n' "${BASH_REMATCH[1]}"
     ;;
 
 build-system-id)
