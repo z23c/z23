@@ -3,6 +3,7 @@
  * boot_wallet_phrase — implementation. See config/boot_wallet_phrase.h. */
 
 #include "config/boot_wallet_phrase.h"
+#include "config/boot_error.h"
 
 #include "event/event.h"
 #include "models/database.h"
@@ -464,23 +465,48 @@ void boot_wallet_adopt_seed_if_it_governs(struct wallet *w)
 /* Row count of `table`: 0 when it does not exist (a datadir that never held a
  * wallet has none) and -1 for anything else that stops the count, because an
  * unreadable answer must never read as empty. */
-static int64_t boot_wallet_table_rows(sqlite3 *db, const char *table)
+static int64_t boot_wallet_table_rows_detail(sqlite3 *db, const char *table, int *error)
 {
     char sql[96], missing[96];
     sqlite3_stmt *s = NULL;
     int64_t n = -1;
-    if (!db)
-        return -1;
-    snprintf(sql, sizeof(sql), "SELECT count(*) FROM %s", table);
-    snprintf(missing, sizeof(missing), "no such table: %s", table);
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK || !s) {
-        if (strcmp(sqlite3_errmsg(db), missing) == 0)
-            n = 0;
-    } else if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        n = sqlite3_column_int64(s, 0);
+    int rc = SQLITE_MISUSE;
+    if (db) {
+        snprintf(sql, sizeof(sql), "SELECT count(*) FROM %s", table);
+        snprintf(missing, sizeof(missing), "no such table: %s", table);
+        rc = sqlite3_prepare_v2(db, sql, -1, &s, NULL);
+        if (rc != SQLITE_OK || !s) {
+            if (rc != SQLITE_OK && strcmp(sqlite3_errmsg(db), missing) == 0) {
+                n = 0; rc = SQLITE_OK;
+            }
+        } else {
+            rc = AR_STEP_ROW_READONLY(s);
+            if (rc == SQLITE_ROW) { n = sqlite3_column_int64(s, 0); rc = SQLITE_OK; }
+        }
     }
-    sqlite3_finalize(s);
+    int final = sqlite3_finalize(s);
+    if (rc == SQLITE_OK && final != SQLITE_OK) { rc = final; n = -1; }
+    if (error) *error = rc;
     return n;
+}
+
+static int64_t boot_wallet_table_rows(sqlite3 *db, const char *table)
+{
+    return boot_wallet_table_rows_detail(db, table, NULL);
+}
+
+int64_t boot_wallet_key_rows_or_exit(struct node_db *ndb)
+{
+    int rc = SQLITE_OK;
+    sqlite3 *db = ndb && ndb->open ? ndb->db : NULL;
+    int64_t rows = boot_wallet_table_rows_detail(db, "wallet_keys", &rc);
+    if (rows < 0) {
+        boot_error_report(BOOT_ERROR_FATAL, "WALLET_KEY_COUNT_FAILED", "wallet_load",
+                          "Wallet key count could not be read; startup stopped.",
+                          NULL, 0, "wallet_keys count sqlite_rc=%d", rc);
+        exit(1);
+    }
+    return rows;
 }
 
 /* An unreadable table counts as one row at risk. */
@@ -493,7 +519,7 @@ static int64_t boot_wallet_rows_or_risk(sqlite3 *db, const char *table)
 int64_t boot_wallet_rows_at_risk(struct node_db *ndb, int64_t key_rows)
 {
     sqlite3 *db = ndb && ndb->open ? ndb->db : NULL;
-    return (key_rows > 0 ? key_rows : 0) +
+    return (key_rows < 0 ? 1 : key_rows) +
            boot_wallet_rows_or_risk(db, "wallet_seed") +
            boot_wallet_rows_or_risk(db, "wallet_sapling_keys");
 }

@@ -30,6 +30,7 @@
 #include "conditions/checkpoint_header_solution_repair.h"
 #include "config/boot.h"
 #include "config/boot_internal.h"
+#include "config/boot_wallet_phrase.h"
 #include "config/boot_error.h"
 #include "config/boot_datadir_lock.h"
 #include "config/boot_consensus_bundle_marker.h"
@@ -1652,6 +1653,70 @@ static int case_wallet_read_failure_stops_startup(void)
     return failures;
 }
 
+static struct wallet_sqlite *csir_count_wallet;
+static void csir_wallet_count_exit_check(void)
+{
+    if (strcmp(boot_error_first_code(), "WALLET_KEY_COUNT_FAILED") != 0 ||
+        csir_count_wallet->open) _exit(4);
+}
+
+static int csir_deny_wallet_keys(void *ctx, int action, const char *a,
+    const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)b; (void)c; (void)d;
+    return action == SQLITE_READ && a && strcmp(a, "wallet_keys") == 0 ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool csir_wallet_count_configure(struct node_db *node, int mode, int *interrupted)
+{
+    if (mode == 0 && sqlite3_exec(node->db, "DROP TABLE wallet_keys", NULL, NULL, NULL) != SQLITE_OK) return false;
+    if (mode == 2 && sqlite3_exec(node->db, "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed) VALUES(zeroblob(20),X'01',zeroblob(32),1)", NULL, NULL, NULL) != SQLITE_OK) return false;
+    if (mode == 3 && sqlite3_set_authorizer(node->db, csir_deny_wallet_keys, NULL) != SQLITE_OK) return false;
+    if (mode == 4) sqlite3_progress_handler(node->db, 1, csir_interrupt_once, interrupted);
+    if (mode == 5) node->open = false;
+    return true;
+}
+
+static void csir_wallet_count_child(const char *dir, int mode)
+{
+    struct node_db *node; struct wallet_sqlite *ws;
+    struct wallet *wallet; struct main_state *main;
+    boot_wallet_cutover_test_slots(&node, &ws, &wallet, &main);
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (n < 0 || (size_t)n >= sizeof(path) || !node_db_open(node, path)) _exit(2);
+    int interrupted = 0;
+    if (!csir_wallet_count_configure(node, mode, &interrupted)) _exit(2);
+    boot_error_reset_for_testing();
+    csir_count_wallet = ws;
+    if (mode >= 3 && atexit(csir_wallet_count_exit_check) != 0) _exit(2);
+    int64_t rows = -2; bool opened = false;
+    boot_wallet_open_persistence_test(dir, &rows, &opened);
+    if (mode >= 3) _exit(3);
+    if (mode == 1 && boot_wallet_rows_at_risk(node, -1) != 1) _exit(5);
+    _exit(rows == (mode == 2 ? 1 : 0) && opened == (mode != 0) ? 0 : 3);
+}
+
+static int case_wallet_count_fail_closed(void)
+{
+    int failures = 0;
+    const char *cases[] = {"missing wallet keys is empty", "empty wallet keys count zero",
+        "existing wallet key count preserved", "key count prepare error stops boot",
+        "key count step error stops boot", "closed database stops boot"};
+    for (int mode = 0; mode < 6; mode++) {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "csir_wallet_count", "case");
+        fflush(NULL);
+        pid_t child = fork();
+        if (child == 0) csir_wallet_count_child(dir, mode);
+        int status = 0;
+        CSIR_CHECK(cases[mode], child > 0 && waitpid(child, &status, 0) == child &&
+            WIFEXITED(status) && WEXITSTATUS(status) == (mode >= 3 ? 1 : 0));
+        test_rm_rf_recursive(dir);
+    }
+    return failures;
+}
+
 static int csir_deny_pragmas(void *ctx, int action, const char *a,
     const char *b, const char *c, const char *d)
 {
@@ -1904,6 +1969,7 @@ int test_consensus_state_install_runtime(void)
     failures += case_gate_store_datadir();
     failures += case_owner_gate_refusal_writes_nothing();
     failures += case_wallet_read_failure_stops_startup();
+    failures += case_wallet_count_fail_closed();
     failures += case_tip_finalize_failure_stops_boundary();
     failures += case_regtest_producer_input();
     printf("=== consensus_state_install_runtime: %d failure(s) ===\n", failures);

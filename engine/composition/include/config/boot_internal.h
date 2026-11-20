@@ -80,6 +80,7 @@ struct zcl_result boot_install_terminal_bundle(struct node_db *ndb,
 #ifdef ZCL_TESTING
 bool boot_wallet_cutover_preflight_test(const char *datadir, bool *pending);
 void boot_wallet_read_persisted_test(const char *datadir);
+void boot_wallet_open_persistence_test(const char *datadir, int64_t *rows, bool *opened);
 bool boot_chain_tip_resolved_test(void);
 void boot_wallet_cutover_test_slots(struct node_db **ndb, struct wallet_sqlite **ws,
                                     struct wallet **wallet, struct main_state **main);

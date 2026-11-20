@@ -163,9 +163,12 @@ void boot_wallet_creation_blocked(void);
  * it was found: legacy random key generation, unchanged derivation. */
 void boot_wallet_adopt_seed_if_it_governs(struct wallet *w);
 
+/* Missing wallet_keys is empty; an unreadable count stops boot. */
+int64_t boot_wallet_key_rows_or_exit(struct node_db *ndb);
+
 /* Wallet rows on disk before the persistence layer opens, for the refusal that
  * stops a boot from going on past a wallet it cannot read: `key_rows` (the
- * wallet_keys count, <= 0 when unknown) plus the seed and Sapling key rows. A
+ * wallet_keys count, negative when unknown) plus the seed and Sapling key rows. A
  * wallet made by `core wallet create` holds only the last two. */
 int64_t boot_wallet_rows_at_risk(struct node_db *ndb, int64_t key_rows);
 

@@ -1237,24 +1237,7 @@ static void boot_wallet_open_persistence(struct app_context *ctx,
      * so a live reorg clamps them down (next boot re-derives above the fork). */
     if (g_node_db.open)
         boot_cursor_install_reorg_clamp(&g_node_db);
-    /* Determine the on-disk wallet_keys row count BEFORE attempting to
-     * open the wallet_sqlite subsystem. Used below for the abort
-     * decisions — we only refuse to proceed when there's something to
-     * lose. */
-    int64_t pre_open_key_rows = 0;          /* 0 = empty; -1 = cannot determine */
-    if (g_node_db.open) {
-        sqlite3_stmt *wk_count = NULL;
-        if (sqlite3_prepare_v2(g_node_db.db,
-                "SELECT count(*) FROM wallet_keys",
-                -1, &wk_count, NULL) == SQLITE_OK && wk_count) {
-            if (AR_STEP_ROW_READONLY(wk_count) == SQLITE_ROW)
-                pre_open_key_rows = sqlite3_column_int64(wk_count, 0);
-            sqlite3_finalize(wk_count);
-        } else {
-            /* wallet_keys table absent — fell through to STATE B. */
-            pre_open_key_rows = -1;
-        }
-    }
+    int64_t pre_open_key_rows = boot_wallet_key_rows_or_exit(&g_node_db);
     /* Attempt to open — use the rich-error *_r API (Agent 2) so any
      * prepare failure carries a WSQL_* code + message + source
      * location we can surface in the abort diagnostic. */
@@ -1282,6 +1265,14 @@ static void boot_wallet_open_persistence(struct app_context *ctx,
     *out_key_rows = pre_open_key_rows;
     *out_sqlite_open = sqlite_open;
 }
+
+#ifdef ZCL_TESTING
+void boot_wallet_open_persistence_test(const char *datadir, int64_t *rows, bool *opened)
+{
+    struct app_context ctx = {.datadir = datadir};
+    boot_wallet_open_persistence(&ctx, rows, opened);
+}
+#endif
 
 /* STATE C — load keys, keypool, txs, sapling keys, scripts and scan height,
  * then run the canary and the keystore-count invariant. */
