@@ -7,6 +7,7 @@
 #include "core/serialize.h"
 #include "config/boot_internal.h"
 #include "services/block_index_loader.h"
+#include "services/chain_restore_disk_repair.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include <errno.h>
@@ -1416,6 +1417,70 @@ _test_next:
     return failures;
 }
 
+/* A valid frame can start inside the previous eight-byte probe. */
+static bool padded_write_block(const char *dir, struct block *b,
+                               struct disk_block_pos *pos)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", dir);
+    FILE *f = fopen(path, "ab");
+    if (!f) return false;
+    const unsigned char padding[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0x24};
+    bool ok = fwrite(padding, 1, sizeof(padding), f) == sizeof(padding);
+    long offset = ftell(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok || offset < 0 || (unsigned long)offset > UINT32_MAX) return false;
+    pos->nFile = 0;
+    pos->nPos = (unsigned int)offset;
+    return write_block_to_disk(b, pos, dir, TEST_MSG_START);
+}
+
+static bool padded_build_chain(struct main_state *ms, const char *dir,
+                               struct block_index **entries,
+                               struct uint256 *hashes, unsigned int *positions)
+{
+    struct uint256 prev = {0};
+    for (int i = 0; i < 3; i++) {
+        struct block b;
+        build_test_block(&b, 80000u + (uint32_t)i);
+        b.header.hashPrevBlock = prev;
+        block_get_hash(&b, &hashes[i]);
+        struct disk_block_pos pos;
+        bool ok = padded_write_block(dir, &b, &pos);
+        block_free(&b);
+        if (!ok) return false;
+        positions[i] = pos.nPos;
+        entries[i] = chainstate_insert_block_index((struct chainstate *)ms, &hashes[i]);
+        if (!entries[i]) return false;
+        entries[i]->nHeight = i;
+        prev = hashes[i];
+    }
+    return true;
+}
+
+static int test_restore_padded_frames(void)
+{
+    char dir[256];
+    make_test_dir(dir, sizeof(dir));
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index *entries[3] = {0};
+    struct uint256 hashes[3];
+    unsigned int positions[3];
+    bool ok = padded_build_chain(&ms, dir, entries, hashes, positions);
+    if (ok) ok = active_chain_install_tip_slot(&ms.chain_active, entries[2]);
+    if (ok) ok = chain_restore_rebuild_active_chain_from_block_files(&ms, entries[2], dir) == 3;
+    for (int i = 0; ok && i < 3; i++)
+        ok = active_chain_at(&ms.chain_active, i) == entries[i] &&
+             entries[i]->nFile == 0 && entries[i]->nDataPos == positions[i] &&
+             entries[i]->phashBlock && uint256_eq(entries[i]->phashBlock, &hashes[i]) &&
+             entries[i]->pprev == (i ? entries[i-1] : NULL);
+    if (!ok) printf("FAIL: padded block-frame restore\n");
+    main_state_free(&ms);
+    cleanup_test_dir(dir);
+    return ok ? 0 : 1;
+}
+
 int test_disk_block_io(void)
 {
     printf("\n=== disk_block_io (pread thread safety) ===\n");
@@ -1443,6 +1508,7 @@ int test_disk_block_io(void)
     failures += test_scoped_read_fd_cache();
     failures += test_scan_duplicate_keeps_earliest_copy();
     failures += test_position_repair_from_local_copy();
+    failures += test_restore_padded_frames();
     failures += test_block_pos_filename_datadir_contract();
     failures += test_flat_save_gate_skips_when_quiet();
     failures += test_flat_save_gate_saves_on_cleared();

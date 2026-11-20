@@ -574,7 +574,8 @@ static bool chain_restore_index_block_file(
         unsigned char prefix[8];
         while (fread(prefix, 1, sizeof(prefix), f) == sizeof(prefix)) {
             if (memcmp(prefix, magic, 4) != 0) {
-                if (fseek(f, -7L, SEEK_CUR) != 0)
+                const unsigned char *next = memchr(prefix + 1, magic[0], sizeof(prefix) - 1);
+                if (next && fseek(f, (long)(next - (prefix + sizeof(prefix))), SEEK_CUR) != 0)
                     break;
                 continue;
             }
