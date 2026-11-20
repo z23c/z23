@@ -39,12 +39,14 @@
 #include "test/test_core.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
+#include "controllers/wallet_helpers.h"
 #include "models/database.h"
 #include "ports/wallet_backup_store_port.h"
 #include "services/wallet_backup_service.h"
 #include "services/wallet_restore_service.h"
 #include "validation/chainstate.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_sqlite.h"
 
 #include <sqlite3.h>
 #include <stdint.h>
@@ -974,6 +976,164 @@ static int wr_test_target_path_case(const char *backup_path, bool fits,
 #endif
 
 /* ── the group ──────────────────────────────────────────────── */
+#if !defined(_WIN32)
+static bool wr_watch_write(struct wallet_sqlite *ws, uint8_t tag, char *address, size_t cap)
+{
+    uint8_t hash[20];
+    struct tx_destination dest = {0};
+    memset(hash, tag, sizeof(hash));
+    dest.type = DEST_KEY_ID;
+    memcpy(dest.id.key.id.data, hash, sizeof(hash));
+    return wallet_encode_destination(&dest, address, cap) &&
+           wallet_sqlite_write_watch_only(ws, hash, address);
+}
+
+static bool wr_watch_values(sqlite3_stmt *s, const uint8_t hash[20], const char *address, int64_t time)
+{
+    return sqlite3_column_type(s, 0) == SQLITE_BLOB && sqlite3_column_bytes(s, 0) == 20 &&
+           sqlite3_column_blob(s, 0) && memcmp(sqlite3_column_blob(s, 0), hash, 20) == 0 &&
+           sqlite3_column_type(s, 1) == SQLITE_TEXT && sqlite3_column_text(s, 1) &&
+           strcmp((const char *)sqlite3_column_text(s, 1), address) == 0 &&
+           sqlite3_column_type(s, 2) == SQLITE_INTEGER && sqlite3_column_int64(s, 2) == time;
+}
+
+static bool wr_watch_row(const char *path, uint8_t tag, const char *address, int64_t time)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    uint8_t hash[20];
+    memset(hash, tag, sizeof(hash));
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_prepare_v2(db, "SELECT address_hash,address,created_at FROM wallet_watch_only WHERE address_hash=?", -1, &s, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_blob(s, 1, hash, sizeof(hash), SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(s) == SQLITE_ROW && wr_watch_values(s, hash, address, time) &&
+                 sqlite3_step(s) == SQLITE_DONE;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wr_sentinel_unchanged(const char *path)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_prepare_v2(db, "SELECT k,v FROM unrelated_sentinel", -1, &s, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_type(s, 0) == SQLITE_INTEGER &&
+                 sqlite3_column_int(s, 0) == 7 && sqlite3_column_type(s, 1) == SQLITE_TEXT &&
+                 sqlite3_column_text(s, 1) && strcmp((const char *)sqlite3_column_text(s, 1), "unchanged") == 0 &&
+                 sqlite3_step(s) == SQLITE_DONE;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wr_missing_watch_restore(const char *backup, const char *target, const char *target_db)
+{
+    struct wallet_restore_request req = {.backup_path = backup, .datadir = target};
+    struct wallet_restore_report rep = {0};
+    struct zcl_result result = wallet_restore_run(&req, &rep);
+    const struct wallet_restore_table_report *watch = wr_find(&rep, "wallet_watch_only");
+    return result.ok && watch && !watch->in_backup && rep.manifest_mismatches == 0 &&
+           wr_watch_row(target_db, 1, "target-collision", 19) &&
+           wr_watch_row(target_db, 0, "target-sentinel", 17) && wr_sentinel_unchanged(target_db);
+}
+
+static int wr_test_watch_compat(const char *source, const char *legacy, const char *target,
+                                const char *target_db, const char *scratch)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open_v2(legacy, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK;
+    if (ok) ok = wr_exec(db, "DROP TABLE wallet_watch_only; DELETE FROM " WALLET_BACKUP_MANIFEST_TABLE
+                             " WHERE table_name='wallet_watch_only';");
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    WR_CHECK("old nine-table backup restores and preserves target rows",
+             ok && wr_missing_watch_restore(legacy, target, target_db));
+    char dir[256], backup[512] = "", err[256] = "";
+    snprintf(dir, sizeof(dir), "%s/missing", scratch);
+    struct node_db src = {0};
+    int64_t count = -1;
+    ok = platform_private_directory_ensure(dir) && node_db_open(&src, source);
+    if (ok) ok = wr_exec(src.db, "DROP TABLE wallet_watch_only");
+    struct zcl_result result = {0};
+    if (ok) result = wallet_backup_run_once(dir, &src, backup, sizeof(backup), &count, err, sizeof(err));
+    node_db_close(&src);
+    WR_CHECK("source without watch-only table remains backup-compatible",
+             ok && result.ok && wr_count_in_file(backup, "wallet_watch_only") == -1);
+    WR_CHECK("missing-table backup restores and preserves target rows",
+             ok && result.ok && wr_missing_watch_restore(backup, target, target_db));
+    return failures;
+}
+
+static bool wr_watch_target(const char *path)
+{
+    struct node_db dst = {0};
+    bool ok = node_db_open(&dst, path);
+    if (ok) ok = wr_exec(dst.db,
+        "INSERT INTO wallet_watch_only VALUES(zeroblob(20), 'target-sentinel', 17);"
+        "INSERT INTO wallet_watch_only VALUES(x'0101010101010101010101010101010101010101', 'target-collision', 19);"
+        "CREATE TABLE unrelated_sentinel(k INTEGER PRIMARY KEY, v TEXT);"
+        "INSERT INTO unrelated_sentinel VALUES(7, 'unchanged');");
+    node_db_close(&dst);
+    return ok;
+}
+
+static bool wr_watch_source(struct node_db *src, char address[2][128])
+{
+    struct wallet_sqlite ws = {0};
+    bool ok = wallet_sqlite_open_r(&ws, src->db).ok;
+    if (ok) ok = wr_watch_write(&ws, 1, address[0], sizeof(address[0])) &&
+                 wr_watch_write(&ws, 2, address[1], sizeof(address[1]));
+    wallet_sqlite_close(&ws);
+    if (ok) ok = wr_exec(src->db, "UPDATE wallet_watch_only SET created_at=2222 WHERE address_hash=x'0202020202020202020202020202020202020202'");
+    return ok;
+}
+
+static int wr_test_watch_backup(void)
+{
+    int failures = 0;
+    char scratch[200], source[256], backup_dir[256], target[256], target_db[320];
+    char backup[512] = "", err[256] = "", address[2][128];
+    struct node_db src = {0};
+    int64_t count = -1;
+    if (!test_mkdtemp(scratch, sizeof(scratch), "wr_watch")) return 1;
+    snprintf(source, sizeof(source), "%s/source.db", scratch);
+    snprintf(backup_dir, sizeof(backup_dir), "%s/backup", scratch);
+    snprintf(target, sizeof(target), "%s/target", scratch);
+    snprintf(target_db, sizeof(target_db), "%s/node.db", target);
+    bool setup = platform_private_directory_ensure(backup_dir) &&
+                 platform_private_directory_ensure(target) && node_db_open(&src, source);
+    if (setup) setup = wr_watch_source(&src, address);
+    if (setup) setup = wr_watch_target(target_db);
+    struct zcl_result br = {0};
+    if (setup) br = wallet_backup_run_once(backup_dir, &src, backup, sizeof(backup),
+                                           &count, err, sizeof(err));
+    node_db_close(&src);
+    WR_CHECK("watch-only fixture and backup succeed", setup && br.ok);
+    WR_CHECK("backup captures imported watch-only addresses",
+             br.ok && wr_count_in_file(backup, "wallet_watch_only") == 2);
+    struct wallet_restore_report rep = {0};
+    struct wallet_restore_request req = {.backup_path = backup, .datadir = target};
+    struct zcl_result rr = {0};
+    if (br.ok) rr = wallet_restore_run(&req, &rep);
+    const struct wallet_restore_table_report *watch = wr_find(&rep, "wallet_watch_only");
+    WR_CHECK("restore reports and inserts imported watch-only addresses",
+             rr.ok && watch && watch->in_backup && watch->rows_inserted == 1 && watch->rows_collided == 1);
+    WR_CHECK("restore retains unrelated watch-only address",
+             wr_count_in_file(target_db, "wallet_watch_only") == 3);
+    WR_CHECK("restore retains unrelated target table",
+             wr_count_in_file(target_db, "unrelated_sentinel") == 1);
+    WR_CHECK("restored imported row has exact typed values", wr_watch_row(target_db, 2, address[1], 2222));
+    WR_CHECK("existing colliding row is unchanged", wr_watch_row(target_db, 1, "target-collision", 19));
+    WR_CHECK("existing unrelated row is unchanged", wr_watch_row(target_db, 0, "target-sentinel", 17));
+    WR_CHECK("unrelated target values are unchanged", wr_sentinel_unchanged(target_db));
+    failures += wr_test_watch_compat(source, backup, target, target_db, scratch);
+    WR_CHECK("removed watch-only fixture", test_rm_rf_recursive(scratch) == 0);
+    return failures;
+}
+#endif
+
 
 int test_wallet_restore(void)
 {
@@ -1135,6 +1295,7 @@ int test_wallet_restore(void)
     failures += wr_test_encrypted(req, backup_path, backup_dir, target_db, n_wallet_tables);
 
     failures += wr_test_rescan_reports_missing_bodies();
+    failures += wr_test_watch_backup();
 
     /* ---- cleanup ---- */
     {

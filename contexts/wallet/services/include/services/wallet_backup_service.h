@@ -25,11 +25,8 @@
  * ------
  *
  *   - A background thread started from boot. Every
- *     `interval_seconds` the thread copies the nine wallet tables
- *     (`wallet_keys`, `wallet_keypool`, `wallet_key_encryption`,
- *     `wallet_sapling_keys`, `wallet_seed`,
- *     `wallet_scripts`, `wallet_transactions`, `wallet_utxos`,
- *     `wallet_sapling_notes`) via ATTACH + `CREATE TABLE AS
+ *     `interval_seconds` the thread copies the wallet tables listed by
+ *     `wallet_backup_tables()` via ATTACH + `CREATE TABLE AS
  *     SELECT` into a `wallet_backup_<unix_ts>.sqlite` file in
  *     `backup_dir`.
  *   - After each write the service reopens the copy and verifies the

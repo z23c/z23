@@ -75,6 +75,7 @@ static const char *const WALLET_TABLES[] = {
     "wallet_transactions",
     "wallet_utxos",
     "wallet_sapling_notes",
+    "wallet_watch_only",
 };
 
 

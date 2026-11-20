@@ -403,7 +403,7 @@ static bool recovery_wallet_equal(sqlite3 *source, const char *path)
     bool ok = sqlite3_open_v2(path, &dest, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
     size_t count = 0;
     const char *const *tables = wallet_backup_tables(&count);
-    if (count != 9) ok = false;
+    if (count != 10) ok = false;
     for (size_t i = 0; ok && i < count; i++)
         ok = recovery_wallet_table_equal(source, dest, tables[i]);
     if (dest && sqlite3_close(dest) != SQLITE_OK) ok = false;
@@ -446,6 +446,7 @@ static bool recovery_wallet_seed_fixture(sqlite3 *db)
         "INSERT INTO wallet_keypool(pubkey_hash,generation) VALUES(zeroblob(20),7);"
         "INSERT INTO wallet_key_encryption(id,wrapped_dek) VALUES(1,x'050006');"
         "INSERT INTO wallet_seed(id,seed,next_child) VALUES(1,x'070008090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425',42);"
+        "INSERT INTO wallet_watch_only(address_hash,address,created_at) VALUES(x'010002', 'synthetic', 37);"
         "INSERT INTO wallet_scripts(script_hash,redeem_script) VALUES(x'09000a',x'0b000c');"
         "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,child_index,address) VALUES(x'0d000e',x'0f0010',x'110012',x'130014',x'150016',3,'synthetic');"
         "INSERT INTO wallet_transactions(txid,raw_tx,time_received,from_me) VALUES(x'170018',x'19001a',19,1);"

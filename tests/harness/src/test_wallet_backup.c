@@ -700,6 +700,21 @@ static bool wb_force_enc_restart_preserved(bool restarted,
                   status->last_encrypted_path) == 0;
 }
 
+static bool wb_legacy_receipt_refused(struct wb_fixture *f, const struct wallet_backup_config *cfg)
+{
+    bool ok = sqlite3_exec(f->ndb.db, "UPDATE wallet_backup_receipts SET tables_verified=9", NULL, NULL, NULL) == SQLITE_OK &&
+              sqlite3_changes(f->ndb.db) == 1;
+    bool started = ok && wallet_backup_start(cfg, &f->ndb).ok;
+    struct wallet_backup_status status = {0};
+    if (started) wallet_backup_status_snapshot(&status);
+    wallet_backup_stop();
+    bool refused = started && status.last_encrypted_run_unix == 0 &&
+                   status.last_encrypted_tables_verified == 0 && status.last_encrypted_path[0] == '\0';
+    bool restored = sqlite3_exec(f->ndb.db, "UPDATE wallet_backup_receipts SET tables_verified=10", NULL, NULL, NULL) == SQLITE_OK &&
+                    sqlite3_changes(f->ndb.db) == 1;
+    return refused && restored;
+}
+
 static int t_force_now_encrypted(void)
 {
     int failures = 0;
@@ -746,6 +761,9 @@ static int t_force_now_encrypted(void)
                                &latest_is_plaintext);
     int64_t rows = wb_force_enc_decrypt_rows(f.backup_dir, &status,
                                              has_encrypted_suffix);
+
+    bool old_receipt_refused = wb_legacy_receipt_refused(&f, &cfg);
+    WB_RUN("wb: old nine-table encrypted receipt does not authorize freshness", old_receipt_refused);
 
     bool tampered;
     wb_force_enc_append_tamper_byte(&tampered, status.last_encrypted_path);
