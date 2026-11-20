@@ -282,6 +282,8 @@ static struct zcl_result tu_execute(struct task_update_job *job, struct package_
     ZCL_CHECK(tu_stop_orphan(job));
     if (atomic_load_explicit(&job->cancelled, memory_order_relaxed))
         return ZCL_ERR(-1, "Preview cancelled. Working version and data retained.");
+    if (rc == 4)
+        return ZCL_ERR(-1, "Safe execution could not be verified. Your Tasks, data and Undo history were retained.");
     unsigned long long pid = 0, token = 0, confined_us = 0;
     long long entered_us = 0;
     char returned_nonce[65], trailing;

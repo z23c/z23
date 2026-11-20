@@ -4334,7 +4334,7 @@ static int pv_app_preview_mode(int argc, char **argv)
     if (!pv_app_preview_ready(&run, preview.nonce)) {
         fprintf(stderr, "task-preview: refused exit=%d signal=%d timeout=%d: %s\n",
             run.exit_code, run.term_signal, run.timed_out, run.stderr_buf);
-        return 5;
+        return run.sandbox_fail ? 4 : 5;
     }
     printf("app-preview-ok %llu %llu %s %lld %llu\n", (unsigned long long)g_pv_preview_pid,
            (unsigned long long)g_pv_preview_token, preview.nonce,
