@@ -171,6 +171,27 @@ static bool run_child_in_job(HANDLE job, PROCESS_INFORMATION process,
     return resumed;
 }
 
+static bool start_child(const wchar_t *program, wchar_t *line, DWORD flags,
+                        const wchar_t *cwd, STARTUPINFOEXW *startup,
+                        PROCESS_INFORMATION *process)
+{
+    if (CreateProcessW(program, line, NULL, NULL, TRUE, flags, NULL, cwd,
+                       &startup->StartupInfo, process))
+        return true;
+
+    DWORD error = GetLastError();
+    char message[96];
+    int length = snprintf(message, sizeof(message),
+                          "z23-headless-run: CreateProcessW failed (Windows error %lu).\r\n",
+                          (unsigned long)error);
+    DWORD written = 0;
+    if (length > 0 && (size_t)length < sizeof(message) &&
+        (!WriteFile(startup->StartupInfo.hStdError, message, (DWORD)length, &written, NULL) ||
+         written != (DWORD)length))
+        fputs(message, stderr);
+    return false;
+}
+
 static void release_run_resources(bool started, PROCESS_INFORMATION process,
                                   HANDLE job, HDESK desktop,
                                   LPPROC_THREAD_ATTRIBUTE_LIST attributes,
@@ -248,9 +269,8 @@ int wmain(int argc, wchar_t **argv)
     DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
                   BELOW_NORMAL_PRIORITY_CLASS |
                   CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-    bool started = attributes_ok && job_ok && desktop && CreateProcessW(
-        argv[6], line, NULL, NULL, TRUE, flags, NULL, argv[2],
-        &startup.StartupInfo, &process);
+    bool started = attributes_ok && job_ok && desktop &&
+        start_child(argv[6], line, flags, argv[2], &startup, &process);
     (void)SetThreadErrorMode(previous_thread_mode, NULL);
     DWORD exit_code = 125;
     bool resumed = run_child_in_job(job, process, started, &exit_code);
