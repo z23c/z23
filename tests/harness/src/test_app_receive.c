@@ -107,6 +107,7 @@ struct receive_fixture {
     struct abc_world world;
     char datadir[900], destination[900], file[900], alternate[900], backup[900], key[900];
     char publisher[67], package[65], release[65];
+    const char *release_namespace;
 };
 static bool rt_bundle(struct receive_fixture *f, const char *output, uint64_t sequence)
 {
@@ -122,8 +123,12 @@ static bool rt_bundle(struct receive_fixture *f, const char *output, uint64_t se
     uint8_t tree[32];
     char detail[256] = {0};
     bool ok = plugin_dist_release_key_sign(f->key, NULL, options.publisher_pubkey, NULL, &why) == PLUGIN_DIST_OK &&
-        vcs_package_prepare(&options, &prepared, detail, sizeof(detail)) == VCS_PACKAGE_PREPARE_OK &&
-        plugin_dist_release_key_sign(f->key, prepared.signing_digest,
+        vcs_package_prepare(&options, &prepared, detail, sizeof(detail)) == VCS_PACKAGE_PREPARE_OK;
+    if (ok && f->release_namespace) {
+        (void)snprintf(prepared.release.name, sizeof(prepared.release.name), "%s", f->release_namespace);
+        ok = vcs_package_release_id(&prepared.release, prepared.signing_digest) == VCS_PACKAGE_RELEASE_OK;
+    }
+    ok = ok && plugin_dist_release_key_sign(f->key, prepared.signing_digest,
             options.publisher_pubkey, prepared.release.signature, &why) == PLUGIN_DIST_OK &&
         vcs_package_release_serialize(&prepared.release, &wire, &wire_len) == VCS_PACKAGE_RELEASE_OK &&
         vcs_tree_capture_path(f->world.src, tree) == VCS_OK;
@@ -2098,6 +2103,12 @@ static const char k_meta_program[] =
     "  \"license\": \"Apache-2.0\",  \"include_dir\": \"include\",\n"
     "  \"source_dir\": \"src\",  \"dependencies\": [],\n"
     "  \"programs\": [\"app/main.c\"]\n}\n";
+static const char k_meta_tasks[] =
+    "{\n  \"schema\": 1,\n  \"name\": \"ztasks/ztasks\",\n"
+    "  \"semver\": \"0.1.0\",  \"language\": \"c23\",\n"
+    "  \"license\": \"Apache-2.0\",  \"include_dir\": \"include\",\n"
+    "  \"source_dir\": \"src\",  \"dependencies\": [],\n"
+    "  \"programs\": [\"app/main.c\"]\n}\n";
 
 /* One stub source tree's directories: the shared include/ and src/, plus
  * app/ when the variant declares a program. */
@@ -2149,6 +2160,26 @@ static bool rt_setup_form(struct receive_fixture *f, bool makefile, bool program
     return abc_stub_variant(&f->world, makefile, programs) &&
         plugin_keygen(f->key, publisher) == PLUGIN_OK &&
         rt_bundle(f, f->file, 1);
+}
+
+static bool rt_setup_tasks(struct receive_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    if (!test_mkdtemp(f->world.root, sizeof(f->world.root), "app_receive")) return false;
+    (void)snprintf(f->world.src, sizeof(f->world.src), "%s/source", f->world.root);
+    (void)snprintf(f->datadir, sizeof(f->datadir), "%s/bob-data", f->world.root);
+    (void)snprintf(f->destination, sizeof(f->destination), "%s/bob-copy", f->world.root);
+    (void)snprintf(f->file, sizeof(f->file), "%s/first.z23share", f->world.root);
+    (void)snprintf(f->alternate, sizeof(f->alternate), "%s/second.z23share", f->world.root);
+    (void)snprintf(f->backup, sizeof(f->backup), "%s/first.saved", f->world.root);
+    (void)snprintf(f->key, sizeof(f->key), "%s/sender.key", f->world.root);
+    char publisher[PLUGIN_HEX_PUBLIC_KEY + 1];
+    return abc_stub_dirs(&f->world, true) &&
+        abc_put(f->world.src, "zcode-package.json", k_meta_tasks) &&
+        abc_put(f->world.src, "include/boost.h", "#define BOOST 1\n") &&
+        abc_put(f->world.src, "src/main.c", "int ztasks_value(void) { return 7; }\n") &&
+        abc_put(f->world.src, "app/main.c", k_main) &&
+        plugin_keygen(f->key, publisher) == PLUGIN_OK && rt_bundle(f, f->file, 1);
 }
 
 static bool rz_text(const struct zcl_command_reply *reply, const char *key,
@@ -2320,6 +2351,57 @@ static bool rz_open_offer(const struct zcl_command_reply *reply,
         rz_open_preview_offer(reply, f, digest);
 }
 
+static bool rz_receive_file(struct receive_fixture *f, const char *path,
+                            struct zcl_command_reply *reply)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "file", path) &&
+        json_push_kv_str(&input, "destination", f->destination) &&
+        json_push_kv_str(&input, "datadir", f->datadir);
+    struct zcl_command_request request = {.input = &input};
+    if (ok) zcl_native_handle_app_receive_copy(&request, reply);
+    const char *id = json_get_str(json_get(&reply->data, "plan_id"));
+    char plan[65] = {0};
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED && id && strlen(id) == 64)
+        memcpy(plan, id, 65);
+    ok = plan[0] && json_push_kv_str(&input, "plan_id", plan) &&
+        json_push_kv_bool(&input, "confirm", true);
+    zcl_command_reply_free(reply);
+    zcl_command_reply_init(reply, "zcl.app_receive_open.v1");
+    if (ok) zcl_native_handle_app_receive_copy(&request, reply);
+    json_free(&input);
+    return reply->status == ZCL_COMMAND_STATUS_PASSED;
+}
+
+static int rz_competing_release_case(void)
+{
+    int failures = 0;
+    struct receive_fixture f = {0};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive_open.v1");
+    TEST("Tasks receive refuses to build a competing release for one root") {
+        ASSERT(rt_setup_tasks(&f));
+        char original_key[900], second_key[900], publisher[PLUGIN_HEX_PUBLIC_KEY + 1];
+        (void)snprintf(original_key, sizeof(original_key), "%s", f.key);
+        (void)snprintf(second_key, sizeof(second_key), "%s/competitor.key", f.world.root);
+        ASSERT(plugin_keygen(second_key, publisher) == PLUGIN_OK);
+        (void)snprintf(f.key, sizeof(f.key), "%s", second_key);
+        f.release_namespace = "competitor/ztasks";
+        ASSERT(rt_bundle(&f, f.alternate, 2));
+        f.release_namespace = NULL;
+        (void)snprintf(f.key, sizeof(f.key), "%s", original_key);
+        ASSERT(rz_receive_file(&f, f.alternate, &reply));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.app_receive_open.v1");
+        ASSERT(!rz_receive_file(&f, f.file, &reply));
+        ASSERT_STR_EQ(reply.error.code, "RELEASE_IDENTITY_MISMATCH");
+        ASSERT(!json_get_bool(json_get(&reply.data, "preview_offered")));
+        ASSERT(!json_get_bool(json_get(&reply.data, "executed")));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
 /* `z23 app open FILE.z23share` of a recipe-form release: the receive/open
  * launch stage completes to the kept install's preview, never a
  * spawn-and-wait window wait. */
@@ -2388,6 +2470,7 @@ int test_app_receive(void)
 #endif
     failures += rz_build_case(false, true);
     failures += rz_build_case(false, false);
+    failures += rz_competing_release_case();
     failures += rz_open_case();
     /* Native harness owns fixture retirement; preserve failed state for diagnosis. */
     return failures;
@@ -4225,7 +4308,7 @@ static bool rud_one(struct ru_run *r, const char *mode, uint32_t expected)
 static bool rud_cases(struct ru_run *r)
 {
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
-        "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced"};
+        "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced", "click"};
     bool ok = true;
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i) {
         bool passed = rud_one(r, modes[i], (i == 3 || i == 7) ? 77u : 0u);

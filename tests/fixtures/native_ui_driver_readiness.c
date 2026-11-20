@@ -15,14 +15,15 @@
 
 enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE,
     NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS, NUR_REPLACED, NUR_NOT_REPLACED,
-    NUR_DESTROY_ATTR, NUR_DESTROY_IMAGE, NUR_BAD_ATTR };
+    NUR_DESTROY_ATTR, NUR_DESTROY_IMAGE, NUR_BAD_ATTR, NUR_CLICK };
 static struct {
     enum nur_mode mode;
     Display *owner;
     Window window, victim;
     GC gc;
-    unsigned int sleeps, presses, releases, images;
+    unsigned int sleeps, presses, releases, images, button_presses, button_releases;
     KeySym pressed[4], released[4];
+    int click_x, click_y;
     bool injected, first_null, count_ok;
 } nur;
 
@@ -37,6 +38,19 @@ static int nur_sleep(const struct timespec *duration, struct timespec *remaining
     ++nur.sleeps;
     return nanosleep(duration, remaining);
 }
+static void nur_button_event(const XEvent *event)
+{
+    if (event->type == ButtonPress) {
+        ++nur.button_presses;
+        nur.click_x = event->xbutton.x; nur.click_y = event->xbutton.y;
+        if (nur.mode == NUR_CLICK) {
+            XSetForeground(nur.owner, nur.gc, WhitePixel(nur.owner, DefaultScreen(nur.owner)));
+            XFillRectangle(nur.owner, nur.window, nur.gc, 0, 0, 80, 60);
+        }
+    }
+    if (event->type == ButtonRelease) ++nur.button_releases;
+}
+
 static void nur_events(void)
 {
     (void)XSync(nur.owner, False);
@@ -58,20 +72,18 @@ static void nur_events(void)
                 nur.released[nur.releases] = XLookupKeysym(&event.xkey, 0);
             ++nur.releases;
         }
+        if (event.type == ButtonPress || event.type == ButtonRelease)
+            nur_button_event(&event);
     }
     (void)XSync(nur.owner, False);
 }
-static Status nur_send(Display *display, Window window, Bool propagate,
-                       long mask, XEvent *event)
+static void nur_after_event(int type)
 {
-    Status result = XSendEvent(display, window, propagate, mask, event);
-    (void)XSync(display, False);
-    nur_events();
-    if (nur.mode == NUR_DESTROY_ATTR && event->type == KeyRelease) {
+    if (nur.mode == NUR_DESTROY_ATTR && type == KeyRelease) {
         XDestroyWindow(nur.owner, nur.window); (void)XSync(nur.owner, False);
         nur.window = None; nur.injected = true;
     }
-    if (nur.mode == NUR_REPLACED && event->type == KeyRelease) {
+    if (nur.mode == NUR_REPLACED && type == KeyRelease) {
         char *name = NULL;
         if (XFetchName(nur.owner, nur.window, &name) && name) {
             int screen = DefaultScreen(nur.owner);
@@ -79,12 +91,40 @@ static Status nur_send(Display *display, Window window, Bool propagate,
             nur.window = XCreateSimpleWindow(nur.owner, RootWindow(nur.owner, screen),
                 8, 8, 80, 60, 0, 0, 0);
             XStoreName(nur.owner, nur.window, name);
-            XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask);
+            XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask |
+                ButtonPressMask | ButtonReleaseMask);
             XMapWindow(nur.owner, nur.window);
             XFree(name);
             (void)XSync(nur.owner, False);
         }
     }
+}
+static Status nur_send(Display *display, Window window, Bool propagate,
+                       long mask, XEvent *event)
+{
+    Status result = XSendEvent(display, window, propagate, mask, event);
+    (void)XSync(display, False);
+    nur_events();
+    nur_after_event(event->type);
+    return result;
+}
+extern int XTestFakeKeyEvent(Display *, unsigned int, Bool, unsigned long);
+extern int XTestFakeButtonEvent(Display *, unsigned int, Bool, unsigned long);
+static int nur_xtest_key(Display *display, unsigned int code, Bool pressed,
+                         unsigned long delay)
+{
+    int result = XTestFakeKeyEvent(display, code, pressed, delay);
+    (void)XSync(display, False);
+    nur_events();
+    nur_after_event(pressed ? KeyPress : KeyRelease);
+    return result;
+}
+static int nur_xtest_button(Display *display, unsigned int button, Bool pressed,
+                            unsigned long delay)
+{
+    int result = XTestFakeButtonEvent(display, button, pressed, delay);
+    (void)XSync(display, False);
+    nur_events();
     return result;
 }
 static XImage *nur_image(Display *display, Drawable drawable, int x, int y,
@@ -169,6 +209,8 @@ static int nur_error(Display *display, XErrorEvent *error)
  * count delivered events and provoke one real error. No production test hook. */
 #define nanosleep nur_sleep
 #define XSendEvent nur_send
+#define XTestFakeKeyEvent nur_xtest_key
+#define XTestFakeButtonEvent nur_xtest_button
 #define XGetImage nur_image
 #define XGetWindowAttributes nur_attributes
 #define XFetchName nur_fetch_name
@@ -180,6 +222,8 @@ static int nur_error(Display *display, XErrorEvent *error)
 #undef XFetchName
 #undef XGetWindowAttributes
 #undef XGetImage
+#undef XTestFakeButtonEvent
+#undef XTestFakeKeyEvent
 #undef XSendEvent
 #undef nanosleep
 
@@ -203,7 +247,8 @@ static bool nur_open(char title[96])
     nur.gc = XCreateGC(nur.owner, nur.window, 0, NULL);
     if (!nur.gc) return false;
     XStoreName(nur.owner, nur.window, title);
-    XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask);
+    XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask |
+        ButtonPressMask | ButtonReleaseMask);
     if (nur.mode == NUR_UNCHANGED || nur.mode == NUR_UNEXPECTED || nur.mode >= NUR_RACE)
         XMapWindow(nur.owner, nur.window);
     (void)XSync(nur.owner, False);
@@ -220,6 +265,11 @@ static bool nur_discovery_result(int result)
 {
     return result == 0 && nur.injected && nur.count_ok && nur.presses == 1 && nur.releases == 1 && nur.images >= 2;
 }
+static bool nur_click_result(int result)
+{
+    return result == 0 && nur.button_presses == 1 && nur.button_releases == 1 &&
+        nur.click_x == 12 && nur.click_y == 14 && nur.images >= 2;
+}
 static bool nur_basic_result(int result)
 {
     if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE)
@@ -229,6 +279,7 @@ static bool nur_basic_result(int result)
             nur.presses == 0 && nur.releases == 0;
     if (nur.mode == NUR_UNCHANGED)
         return result == 1 && nur.images >= 2 && nur.presses == 1 && nur.releases == 1;
+    if (nur.mode == NUR_CLICK) return nur_click_result(result);
     return false; /* Unexpected error must terminate through nur_error. */
 }
 static bool nur_result(int result)
@@ -241,8 +292,9 @@ static bool nur_result(int result)
 }
 static bool nur_mode_parse(const char *name)
 {
+    if (strcmp(name, "click") == 0) { nur.mode = NUR_CLICK; return true; }
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
-        "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced"};
+        "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced", "click"};
     for (size_t i = 0; i < sizeof(modes)/sizeof(modes[0]); ++i)
         if (!strcmp(name, modes[i])) { nur.mode = (enum nur_mode)i; return true; }
     return false;
@@ -263,7 +315,9 @@ static int nur_run_driver(char *option)
 {
     char *args[] = {"native_ui_driver", option, "--key=tab", "--expect-pixels-change", "--timeout-ms=200", NULL};
     char *replace_args[] = {"native_ui_driver", option, "--key=1", "--expect-window-replaced", "--timeout-ms=200", NULL};
+    char *click_args[] = {"native_ui_driver", option, "--key=click=12,14", "--expect-pixels-change", "--timeout-ms=200", NULL};
     if (nur.mode == NUR_KEYS) return nur_keys(option) ? 0 : 1;
+    if (nur.mode == NUR_CLICK) return native_ui_driver_main(5, click_args);
     return (nur.mode == NUR_REPLACED || nur.mode == NUR_NOT_REPLACED) ?
         native_ui_driver_main(5, replace_args) : native_ui_driver_main(5, args);
 }
@@ -312,8 +366,10 @@ int main(int argc, char **argv)
         (void)XSetErrorHandler(previous);
     }
     bool ok = ready && nur_result(result);
-    printf("UI_DRIVER_FIXTURE mode=%s driver_exit=%d presses=%u releases=%u images=%u sleeps=%u first_null=%d passed=%d\n",
-        argv[1], result, nur.presses, nur.releases, nur.images, nur.sleeps, nur.first_null, ok);
+    printf("UI_DRIVER_FIXTURE mode=%s driver_exit=%d presses=%u releases=%u buttons=%u/%u xy=%d,%d images=%u sleeps=%u first_null=%d passed=%d\n",
+        argv[1], result, nur.presses, nur.releases, nur.button_presses,
+        nur.button_releases, nur.click_x, nur.click_y, nur.images, nur.sleeps,
+        nur.first_null, ok);
     if (nur.gc) XFreeGC(nur.owner, nur.gc);
     if (nur.victim != None && !nur.injected) XDestroyWindow(nur.owner, nur.victim);
     if (nur.window != None) XDestroyWindow(nur.owner, nur.window);

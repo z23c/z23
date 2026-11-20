@@ -121,12 +121,63 @@ static bool send_close(Display *display, Window window)
     return true;
 }
 
+extern int XTestFakeButtonEvent(Display *, unsigned int, Bool, unsigned long);
+extern int XTestFakeKeyEvent(Display *, unsigned int, Bool, unsigned long);
+extern int XTestFakeMotionEvent(Display *, int, int, int, unsigned long);
+
+static bool send_click(Display *display, Window root, Window window, int x, int y)
+{
+    if (window == None) return false;
+    XWindowAttributes attributes;
+    if (!XGetWindowAttributes(display, window, &attributes) || x < 0 || y < 0 ||
+        x >= attributes.width || y >= attributes.height)
+        return false;
+    int root_x = 0, root_y = 0;
+    Window child = None;
+    if (!XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child))
+        return false;
+    XEvent event;
+    memset(&event, 0, sizeof(event));
+    event.xbutton.type = ButtonPress;
+    event.xbutton.display = display;
+    event.xbutton.window = window;
+    event.xbutton.root = root;
+    event.xbutton.subwindow = None;
+    event.xbutton.time = CurrentTime;
+    event.xbutton.x = x;
+    event.xbutton.y = y;
+    event.xbutton.x_root = root_x;
+    event.xbutton.y_root = root_y;
+    event.xbutton.same_screen = True;
+    event.xbutton.button = Button1;
+    XWarpPointer(display, None, window, 0, 0, 0, 0, x, y);
+    (void)XSync(display, False);
+    (void)XTestFakeMotionEvent(display, DefaultScreen(display), root_x, root_y, 0);
+    if (XTestFakeButtonEvent(display, Button1, True, 0) &&
+        XTestFakeButtonEvent(display, Button1, False, 0)) {
+        (void)XSync(display, False);
+        return true;
+    }
+    if (!XSendEvent(display, window, False, ButtonPressMask, &event))
+        return false;
+    event.xbutton.type = ButtonRelease;
+    if (!XSendEvent(display, window, False, ButtonReleaseMask, &event))
+        return false;
+    (void)XSync(display, False);
+    return true;
+}
+
 static bool send_key(Display *display, Window root, Window window,
                      KeySym key)
 {
     KeyCode keycode = XKeysymToKeycode(display, key);
     if (keycode == 0)
         return false;
+    if (XTestFakeKeyEvent(display, keycode, True, 0) &&
+        XTestFakeKeyEvent(display, keycode, False, 0)) {
+        (void)XSync(display, False);
+        return true;
+    }
     XEvent event;
     memset(&event, 0, sizeof(event));
     event.xkey.type = KeyPress;
@@ -326,7 +377,8 @@ static bool ui_driver_options_usable(const struct ui_driver_options *options)
         ((options->expect_pixels_change || options->expect_window_replaced) && !options->key) ||
         (options->expect_pixels_change && options->expect_window_replaced))
         return false;
-    return !options->key || find_ui_driver_key(options->key) != NULL;
+    return !options->key || strncmp(options->key, "click=", 6) == 0 ||
+        find_ui_driver_key(options->key) != NULL;
 }
 
 static bool wait_for_replacement(Display *display, Window root, const char *title,
@@ -378,6 +430,7 @@ static bool send_window_event(Display *display, Window root, Window window,
         return false;
     if (key_sym == NoSymbol)
         return send_close(display, window);
+    XSetInputFocus(display, window, RevertToParent, CurrentTime);
     return send_key(display, root, window, key_sym);
 }
 
@@ -430,9 +483,13 @@ static bool deliver_event(Display *display, Window root, Window window, unsigned
         XSelectInput(display, window, StructureNotifyMask);
         (void)XSync(display, False);
     }
+    bool click = options->key && strncmp(options->key, "click=", 6) == 0;
+    int click_x = 0, click_y = 0;
     bool sent = (!options->expect_window_replaced || count == 1) &&
-        send_window_event(display, root, window, options->expect_pixels_change,
-                          before, ui_driver_key_symbol(options->key));
+        (click ? sscanf(options->key + 6, "%d,%d", &click_x, &click_y) == 2 &&
+                 send_click(display, root, window, click_x, click_y) :
+                 send_window_event(display, root, window, options->expect_pixels_change,
+                                   before, ui_driver_key_symbol(options->key)));
     unsigned int attempts = options->timeout_ms / 20u;
     bool changed = pixels_changed_after_send(display, window, before, attempts, sent,
                                              options->expect_pixels_change);

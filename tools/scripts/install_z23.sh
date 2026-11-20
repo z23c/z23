@@ -82,7 +82,7 @@ sha256_check_manifest() {
     fi
 }
 
-# Public fetch ceilings. The manifest has at most nineteen checksum rows;
+# Public fetch ceilings. The manifest has at most 23 checksum rows;
 # 2 KiB leaves bounded format headroom. Node aliases are currently below 32 MiB,
 # the confined verifier below 96 MiB, and the certificate worker (a small
 # static-ish TLS client, currently ~5 MB) below 32 MiB; these limits allow
@@ -295,28 +295,10 @@ prepare_bundled_docs() {
     INSTALL_DOCS_SOURCE="$scratch/docs"
 }
 
-# The release is an EXACT CLOSED SET. The current set is seven names: the
-# node, the confined package verifier and the certificate worker each under
-# their z23 name AND under the legacy zclassic23 name (byte-identical, the
-# same two-name rule the node has always had), plus AGENT_CARD.md. A release
-# cut before the rename carries the five-name legacy set (no z23-<helper>
-# rows); a new installer still takes it, and an old installer still takes a
-# new release because every legacy name it requires is present.
-# AGENT_CARD.md is in it
-# and is not "just documentation": its whole job is to tell a coding agent
-# which commands to run, so a tampered card is instruction injection into
-# whatever assistant installs the node. The certificate worker is in it because a
-# node that can obtain a certificate but never installs the one binary that
-# can renew it is a node that goes dark the day the certificate expires —
-# see write_cert_renew_units below. A release that claims everything is
-# verified does not get to ship one unverified file. The set stays exact —
-# never a wildcard — because "any file the manifest names" is how an
-# attacker adds an extra.
-# The opt-in POSIX app set is exactly the current seven plus six fixed
-# game/source members (the app binary row is per app: z23-skycombat or z23-tasks); not an arbitrary extension.
+# Release members are an exact closed set; wildcards are never accepted.
 RELEASE_MEMBERS_LEGACY="AGENT_CARD.md z23 zclassic23 zclassic23-package-verify zclassic23-acme"
 RELEASE_MEMBERS="AGENT_CARD.md z23 zclassic23 z23-package-verify zclassic23-package-verify z23-acme zclassic23-acme"
-APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
+APP_SOURCE_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire" APP_TASKS_MEMBERS="tasks.z23share tasks-source.root"
 APP_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
 APP_MACOS_MEMBERS="z23-app-macos Z23Apps-Info.plist"
 APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
@@ -331,7 +313,8 @@ payload_max_bytes() {
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
         docs.root) printf '%s\n' 65 ;;
         docs.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
-        z23-skycombat|z23-tasks|source.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
+        z23-skycombat|z23-tasks|source.bundle|tasks.z23share) printf '%s\n' "$((64 * 1024 * 1024))" ;;
+        tasks-source.root) printf '%s\n' 65 ;;
         z23-app-macos) printf '%s\n' "$((4 * 1024 * 1024))" ;;
         Z23Apps-Info.plist) printf '%s\n' 65536 ;;
         installed-source.json) printf '%s\n' 4096 ;;
@@ -367,27 +350,25 @@ manifest_alias_source() {
     fi
 }
 
-# Sorted (LC_ALL=C) names of the four accepted shapes, compared literally.
 RELEASE_NAMES_CURRENT=$'AGENT_CARD.md\nz23\nz23-acme\nz23-package-verify\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_LEGACY=$'AGENT_CARD.md\nz23\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 RELEASE_NAMES_APP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
-RELEASE_NAMES_APP_TASKS="$(printf '%s\n' "$RELEASE_NAMES_APP" z23-tasks | LC_ALL=C sort | grep -vx z23-skycombat)"
 RELEASE_NAMES_APP_DESKTOP=$'AGENT_CARD.md\napp-build.wire\ninstalled-source.json\nmanifest.wire\norg.zclassic.SkyCombat.desktop\norg.zclassic.ZClassic23.desktop\norg.zclassic.ZClassic23.svg\norg.zclassic.ZClassic23.xml\nrecipe.wire\nsource.bundle\nz23\nz23-acme\nz23-package-verify\nz23-skycombat\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
 
 RELEASE_NAMES_APP_TOOLCHAIN="$(printf '%s\n' "$RELEASE_NAMES_APP_DESKTOP" app-toolchain.json app-toolchain.bundle | LC_ALL=C sort)"
 RELEASE_NAMES_APP_MACOS="$(printf '%s\n' "$RELEASE_NAMES_APP" z23-app-macos Z23Apps-Info.plist | LC_ALL=C sort)"
 
 validate_manifest_contract() {
-    local manifest="$1" bytes lines matching names dir name twin
+    local manifest="$1" bytes lines matching names dir name twin tasks_count
     [ -f "$manifest" ] || die "SHA256SUMS missing after fetch"
     bytes="$(wc -c <"$manifest" | tr -d ' ')"
     [ "$bytes" -le "$REMOTE_MANIFEST_MAX_BYTES" ] \
         || die "SHA256SUMS exceeds $REMOTE_MANIFEST_MAX_BYTES bytes"
     lines="$(wc -l <"$manifest" | tr -d ' ')"
     matching="$(LC_ALL=C grep -Ec \
-        '^[0-9a-f]{64}  (AGENT_CARD\.md|docs\.(root|bundle)|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-tasks|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
+        '^[0-9a-f]{64}  (AGENT_CARD\.md|docs\.(root|bundle)|z23|zclassic23|z23-package-verify|zclassic23-package-verify|z23-acme|zclassic23-acme|z23-skycombat|z23-tasks|z23-app-macos|Z23Apps-Info\.plist|installed-source\.json|source\.bundle|manifest\.wire|recipe\.wire|app-build\.wire|app-toolchain\.(json|bundle)|tasks\.z23share|tasks-source\.root|org\.zclassic\.SkyCombat\.desktop|org\.zclassic\.ZClassic23\.(desktop|svg|xml))$' \
         "$manifest" || true)"
-    { [ "$lines" -eq 5 ] || [ "$lines" -eq 7 ] || [ "$lines" -eq 9 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 15 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ] || [ "$lines" -eq 21 ]; } && [ "$matching" -eq "$lines" ] \
+    { [ "$lines" -eq 5 ] || [ "$lines" -eq 7 ] || [ "$lines" -eq 9 ] || [ "$lines" -eq 13 ] || [ "$lines" -eq 15 ] || [ "$lines" -eq 17 ] || [ "$lines" -eq 19 ] || [ "$lines" -eq 21 ] || [ "$lines" -eq 23 ]; } && [ "$matching" -eq "$lines" ] \
         || die "SHA256SUMS must contain a supported exact release set with an optional complete docs pair"
     names="$(awk '{print $2}' "$manifest" | LC_ALL=C sort)"
     local docs_count
@@ -398,12 +379,17 @@ validate_manifest_contract() {
         [ "$(printf '%s\n' "$names" | grep -xc 'docs.root')" -eq 1 ] || die "duplicate docs member"
         names="$(printf '%s\n' "$names" | grep -Ev '^docs\.(bundle|root)$')"
     fi
-    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_TASKS" ] || [ "$names" = "$RELEASE_NAMES_APP_MACOS" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
+    tasks_count="$(printf '%s\n' "$names" | grep -Ec '^(tasks\.z23share|tasks-source\.root)$' || true)"
+    if [ "$tasks_count" -ne 0 ]; then
+        [ "$tasks_count" -eq 2 ] && [ "$(printf '%s\n' "$names" | grep -xc tasks.z23share)" -eq 1 ] && [ "$(printf '%s\n' "$names" | grep -xc tasks-source.root)" -eq 1 ] || die "Tasks share and root must appear together exactly once"
+        names="$(printf '%s\n' "$names" | grep -Ev '^(tasks\.z23share|tasks-source\.root)$')"; [ "$names" != "$RELEASE_NAMES_CURRENT" ] && [ "$names" != "$RELEASE_NAMES_LEGACY" ] || die "Tasks share requires an app payload"
+    fi
+    if [ -n "$(manifest_digest_of "$(dirname "$manifest")" z23-tasks)" ]; then
+        [ "$tasks_count" -eq 0 ] || die "binary Tasks and signed share are mutually exclusive"; [ "$(printf '%s\n' "$names" | grep -xc z23-tasks)" -eq 1 ] && [ -z "$(manifest_digest_of "$(dirname "$manifest")" z23-skycombat)" ] || die "binary Tasks must replace the game"
+        names="$(printf '%s\n' "$names" | sed 's/^z23-tasks$/z23-skycombat/' | LC_ALL=C sort)"
+    fi
+    [ "$names" = "$RELEASE_NAMES_CURRENT" ] || [ "$names" = "$RELEASE_NAMES_LEGACY" ] || [ "$names" = "$RELEASE_NAMES_APP" ] || [ "$names" = "$RELEASE_NAMES_APP_MACOS" ] || [ "$names" = "$RELEASE_NAMES_APP_DESKTOP" ] || [ "$names" = "$RELEASE_NAMES_APP_TOOLCHAIN" ] \
         || die "SHA256SUMS must name each required release member exactly once"
-    # z23 and zclassic23 are one program under two names, and the release
-    # says so with one digest in two rows. The same holds for each helper
-    # that ships under both names. If a pair ever differs this is not a
-    # release we understand: refuse rather than guess which name is real.
     dir="$(dirname "$manifest")"
     for name in zclassic23 zclassic23-package-verify zclassic23-acme; do
         twin="$(manifest_alias_source "$dir" "$name")"
@@ -804,8 +790,8 @@ has_app_source() {
 }
 
 app_payload_members() {
-    # One app executable per release: the wire set's binary row follows the app (exact sets above).
     if [ -n "$(manifest_digest_of "$1" z23-tasks)" ]; then printf '%s\n' "z23-tasks ${APP_SOURCE_MEMBERS#z23-skycombat }"; else printf '%s\n' "$APP_SOURCE_MEMBERS"; fi
+    if [ -n "$(manifest_digest_of "$1" tasks.z23share)" ]; then printf '%s\n' "$APP_TASKS_MEMBERS"; fi
     if [ -n "$(manifest_digest_of "$1" z23-app-macos)" ]; then
         printf '%s\n' "$APP_MACOS_MEMBERS"
     fi
@@ -834,6 +820,12 @@ install_app_members() {
     done
 }
 
+verify_tasks_share() {
+    local stage="$1" dest="$2" verified actual expected name; [ -n "$(manifest_digest_of "$stage" tasks.z23share)" ] || return 0
+    verified="$("$stage/z23" zcode package bundle verify "--file=$dest/tasks.z23share")" || die "Tasks share verification refused"
+    name="$(printf '%s\n' "$verified" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"; actual="$(printf '%s\n' "$verified" | sed -n 's/.*"package_root":"\([0-9a-f][0-9a-f]*\)".*/\1/p')"; expected="$(sed -n '1p' "$dest/tasks-source.root")"; [ "${name##*/}" = "ztasks" ] && [ "$actual" = "$expected" ] || die "Tasks share identity differs from its retained root"
+}
+
 install_app_source_linux() {
     local stage="$1" prefix="$2" root id dest incoming name app
     has_app_source "$stage" || return 0
@@ -847,12 +839,12 @@ install_app_source_linux() {
         for name in $(app_payload_members "$stage") SHA256SUMS; do
             cmp -s "$stage/$name" "$dest/$name" || die "app source generation collision: $id"
         done
+        verify_tasks_share "$stage" "$dest"
     else
         incoming="$(mktemp -d "$root/.incoming.XXXXXX")" || die "cannot stage app source"
         install_app_members "$stage" "$incoming"
+        verify_tasks_share "$stage" "$incoming"
         install -m 444 "$stage/SHA256SUMS" "$incoming/SHA256SUMS"
-        # Trusted installer prefix; refuse concurrent directory creation rather
-        # than merging into it. A failed staging tree is retained for diagnosis.
         [ ! -e "$dest" ] && [ ! -L "$dest" ] || die "app source destination appeared"
         mv -Tn -- "$incoming" "$dest" || die "cannot commit app source generation"
         [ ! -e "$incoming" ] || die "app source destination appeared; staging retained"
@@ -864,6 +856,7 @@ install_app_source_linux() {
     [ ! -e "$root/$app" ] || [ -L "$root/$app" ] || die "$app source selector is not an installer-managed link"
     atomic_relative_link "../share/z23/apps/$app/z23-$app" "$prefix/bin/z23-$app" || die "cannot link the installed $app app"
     atomic_relative_link "$id" "$root/$app" || die "cannot select installed app source"
+    if [ -n "$(manifest_digest_of "$stage" tasks.z23share)" ]; then [ ! -e "$root/tasks" ] || [ -L "$root/tasks" ] || die "Tasks source selector is not installer-managed"; atomic_relative_link "$id" "$root/tasks" || die "cannot select installed Tasks source"; fi
 }
 
 # Desktop string decoding precedes Exec argument decoding. Never evaluate an
@@ -1155,12 +1148,13 @@ install_payload_macos_generation() {
     if has_app_source "$stage"; then
         [ ! -L "$prefix/share/z23/apps" ] || die "apps installation directory must not be a symlink"
         install_directories "$prefix/share/z23/apps"
-        local app=skycombat; [ -n "$(manifest_digest_of "$dest" z23-tasks)" ] && app=tasks
+        local app=skycombat; [ -n "$(manifest_digest_of "$stage" z23-tasks)" ] && app=tasks
         [ ! -e "$prefix/share/z23/apps/$app" ] || [ -L "$prefix/share/z23/apps/$app" ] || die "$app selector not installer-managed"
         atomic_relative_link "../lib/z23/current/z23-$app" "$prefix/bin/z23-$app" \
             || die "cannot link the current macOS $app app"
         atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/$app" \
             || die "cannot link the current macOS $app source"
+        if [ -n "$(manifest_digest_of "$stage" tasks.z23share)" ]; then [ ! -e "$prefix/share/z23/apps/tasks" ] || [ -L "$prefix/share/z23/apps/tasks" ] || die "Tasks source selector is not installer-managed"; atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/tasks" || die "cannot link macOS Tasks source"; verify_tasks_share "$stage" "$MACOS_GENERATION"; fi
     fi
     install_docs "$prefix"
 }
@@ -3148,7 +3142,14 @@ selftest_macos_app_manifest() {
         printf 'inert %s\n' "$name" >"$app/$name"
     done
 }
-
+selftest_tasks_manifest() {
+    local app="$SELFTEST_TMP/tasks-app-manifest" name rc; mkdir -p "$app"; cp "$SELFTEST_TMP/app-release/"* "$app/"
+    for name in $APP_DESKTOP_MEMBERS $APP_TASKS_MEMBERS; do printf 'inert %s\n' "$name" >"$app/$name"; done; (cd "$app" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS $APP_DESKTOP_MEMBERS $APP_TASKS_MEMBERS >SHA256SUMS)
+    validate_manifest_contract "$app/SHA256SUMS"; verify_strict "$app"
+    (cd "$app" && sha256sum $RELEASE_MEMBERS $APP_TASKS_MEMBERS >node-only); rc=0; (validate_manifest_contract "$app/node-only") >/dev/null 2>&1 || rc=$?; [ "$rc" -ne 0 ] || die "selftest: node-only Tasks share accepted"
+    grep -v '  z23-skycombat$' "$app/SHA256SUMS" >"$app/binary"; printf 'inert\n' >"$app/z23-tasks"; (cd "$app" && sha256sum z23-tasks >>binary); rc=0; (validate_manifest_contract "$app/binary") >/dev/null 2>&1 || rc=$?; [ "$rc" -ne 0 ] || die "selftest: binary Tasks plus share accepted"
+    for name in $APP_TASKS_MEMBERS; do grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"; rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?; [ "$rc" -ne 0 ] || die "selftest: partial Tasks app set accepted"; done
+}
 selftest_app_toolchain() {
     local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/kit-release" prefix="$SELFTEST_TMP/kit-prefix" name id rc
     mkdir -p "$app"
@@ -3439,7 +3440,7 @@ selftest() {
     selftest_current_release
     selftest_install_directory_modes
     selftest_app_source
-    selftest_macos_app_manifest
+    selftest_macos_app_manifest; selftest_tasks_manifest
     selftest_app_toolchain
     selftest_app_mode
     selftest_local_manifest_refusals

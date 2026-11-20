@@ -22,7 +22,7 @@
 #include "lintc.h"
 #include "gate_standalone_tools_link_priv.h"
 
-static const char k_suffix[] = " -o $@ $< -Wl,-l:libX11.so.6";
+static const char k_suffix[] = " -o $@ $< -Wl,-l:libX11.so.6 -Wl,-l:libXtst.so.6";
 
 int stl_wait(pid_t pid)
 {
@@ -184,7 +184,7 @@ static int stl_x11_write(const char *dir, const char *flags, const char *readine
         "\t\"$$z23_x11_probe_dir/probe\" && printf ok >\"$$z23_x11_probe_dir/ran\""
         " || exit 1\n"
         "\t@if %s -o \"$$z23_x11_probe_dir/x11\" \"$$z23_x11_probe_dir/probe.c\""
-        " -Wl,-l:libX11.so.6 >\"$$z23_x11_probe_dir/link.log\" 2>&1; "
+        " -Wl,-l:libX11.so.6 -Wl,-l:libXtst.so.6 >\"$$z23_x11_probe_dir/link.log\" 2>&1; "
         "then printf present >\"$$z23_x11_probe_dir/state\"; "
         "else printf failed >\"$$z23_x11_probe_dir/state\"; fi\n"
         "zcl-x11-cover:\n"

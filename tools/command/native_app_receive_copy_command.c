@@ -7,8 +7,9 @@
  * free <datadir>/copies/<name>-<n>; nothing is written. Confirm receives
  * trusting exactly the publisher and package root the verify read from the
  * file (never a value the caller typed), then builds (app.build) and opens
- * (app.run.copy) that build's exact image. A file that does not verify
- * stops at the plan and keeps nothing. */
+ * (app.run.copy) that build's exact image. Tasks packages instead use their
+ * native zcode.use recipe and file a task preview offer without executing it.
+ * A file that does not verify stops at the plan and keeps nothing. */
 
 #include "command/native_command.h"
 
@@ -16,8 +17,12 @@
 #include "command/native_app_compose.h"
 #include "command/native_zcode_package_copy.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "services/package_lifecycle.h"
+#include "vcs/package_publish.h"
+#include "vcs/package_release.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
 
@@ -75,6 +80,15 @@ static const struct zcl_app_observation_field zrv_open_fields[] = {
     {"package_root", JSON_STR}, {"image_sha3", JSON_STR}, {"pid", JSON_INT},
     {"start_token", JSON_STR}, {"mapped_proof", JSON_STR},
     {"settled_alive", JSON_BOOL}, {"executed", JSON_BOOL}
+};
+static const struct zcl_app_observation_field zrv_use_fields[] = {
+    {"active_root", JSON_STR}, {"build_receipt_id", JSON_STR},
+    {"installed", JSON_BOOL}, {"receipt_reused", JSON_BOOL}
+};
+static const struct zcl_app_observation_field zrv_offer_fields[] = {
+    {"offer_revision", JSON_INT}, {"preview_root", JSON_STR},
+    {"preview_receipt", JSON_STR}, {"preview_program", JSON_STR},
+    {"has_kept_program", JSON_BOOL}, {"dismissed", JSON_BOOL}
 };
 
 static bool zrv_receive_input(struct zrv *z, struct json_value *in)
@@ -276,8 +290,209 @@ static void zrv_open_result(struct zrv *z, struct zcl_command_reply *inner, bool
     zrv_describe(z, "commit");
     (void)json_push_kv_str(&z->reply->data, "image_sha3", zcl_app_inner_str(inner, "image_sha3"));
 }
+static bool zrv_tasks_package(struct zrv *z)
+{
+    char base[ZCL_PACKAGE_COPY_BASE_MAX + 1u];
+    const char *name = zcl_app_inner_str(&z->verify, "name");
+    return name && (zcl_package_copy_name_base(name, base),
+                    strcmp(base, "ztasks") == 0);
+}
+
+static const struct vcs_package_release *zrv_best_release(
+    const struct vcs_package_release *all, size_t count, const uint8_t package[32])
+{
+    const struct vcs_package_release *selected = NULL;
+    for (size_t i = 0; i < count; ++i) {
+        const struct vcs_package_release *candidate = &all[i];
+        if (memcmp(candidate->package_root, package, 32) == 0 &&
+            (!selected || candidate->publisher_sequence > selected->publisher_sequence))
+            selected = candidate;
+    }
+    return selected;
+}
+
+static bool zrv_selected_release(struct zrv *z)
+{
+    const char *root = zcl_app_inner_str(&z->verify, "package_root");
+    const char *expected = zcl_app_inner_str(&z->verify, "release_id");
+    uint8_t package[32], expected_id[32], selected_id[32];
+    char dir[APP_COPY_BUILD_PATH];
+    int n = snprintf(dir, sizeof(dir), "%s/zcode", z->datadir);
+    size_t count = 0, skipped = 0;
+    struct vcs_package_release *all = zcl_calloc(VCS_PACKAGE_PUBLISH_MAX_RELEASES,
+        sizeof(*all), "app.receive.releases");
+    bool ok = root && expected && zcl_hex_decode_lower(root, package, 32) &&
+        zcl_hex_decode_lower(expected, expected_id, 32) && all && n > 0 &&
+        (size_t)n < sizeof(dir) && vcs_package_publish_load_releases(dir, all,
+            VCS_PACKAGE_PUBLISH_MAX_RELEASES, &count, &skipped);
+    const struct vcs_package_release *selected = ok ?
+        zrv_best_release(all, count, package) : NULL;
+    ok = ok && selected &&
+        vcs_package_release_id(selected, selected_id) == VCS_PACKAGE_RELEASE_OK &&
+        memcmp(selected_id, expected_id, 32) == 0;
+    free(all);
+    if (ok) return true;
+    zcl_package_copy_fail(z->reply, "RELEASE_IDENTITY_MISMATCH", true,
+        "A different signed release would be selected for this package root; inspect competing releases before building.",
+        expected ? expected : z->dest);
+    return false;
+}
+
+static bool zrv_use_plan(struct zrv *z, struct json_value *in, char use_plan[65])
+{
+    const char *root = zcl_app_inner_str(&z->verify, "package_root");
+    const char *kv[] = {"name_or_root", root, "datadir", z->datadir};
+    if (!root) return false;
+    if (!zcl_app_input(in, kv, 4)) {
+        zcl_package_copy_fail(z->reply, "ALLOC", true, "Tasks install input", z->dest);
+        return false;
+    }
+    struct zcl_command_reply plan;
+    if (!zcl_app_inner_call("zcode.use", in, &plan, NULL)) {
+        zcl_app_inner_fail(z->reply, &plan, true);
+        zcl_command_reply_free(&plan);
+        return false;
+    }
+    const char *plan_id = zcl_app_inner_str(&plan, "plan_id");
+    if (plan_id && strlen(plan_id) == 64)
+        (void)snprintf(use_plan, 65, "%s", plan_id);
+    zcl_command_reply_free(&plan);
+    if (use_plan[0]) return true;
+    zcl_package_copy_fail(z->reply, "PLAN_ID_MISSING", true,
+                          "Tasks install returned no usable plan ID", z->dest);
+    return false;
+}
+
+static bool zrv_receipt_identity(struct zrv *z, const char active_root[65],
+    const char receipt_id[65])
+{
+    const char *package = zcl_app_inner_str(&z->verify, "package_root");
+    const char *recipe = zcl_app_inner_str(&z->verify, "recipe_root");
+    uint8_t expected_package[32], expected_recipe[32], active[32], id[32];
+    struct vcs_package_build_receipt receipt;
+    bool ok = package && recipe && zcl_hex_decode_lower(package, expected_package, 32) &&
+        zcl_hex_decode_lower(recipe, expected_recipe, 32) &&
+        zcl_hex_decode_lower(active_root, active, 32) &&
+        zcl_hex_decode_lower(receipt_id, id, 32) &&
+        package_lifecycle_receipt_read(z->datadir, id, &receipt).ok &&
+        memcmp(active, expected_package, 32) == 0 &&
+        memcmp(receipt.package_root, expected_package, 32) == 0 &&
+        memcmp(receipt.recipe_root, expected_recipe, 32) == 0;
+    if (ok) return true;
+    zcl_package_copy_fail(z->reply, "RELEASE_IDENTITY_MISMATCH", true,
+        "The installed receipt does not match the signed package and recipe; the preview was not offered.",
+        zcl_app_inner_str(&z->verify, "release_id"));
+    return false;
+}
+
+static bool zrv_use_commit(struct zrv *z, struct json_value *in,
+    char active_root[65], char receipt_id[65])
+{
+    struct zcl_command_reply use;
+    if (!zcl_app_inner_call("zcode.use", in, &use, NULL)) {
+        zcl_app_inner_fail(z->reply, &use, true);
+        zcl_command_reply_free(&use);
+        return false;
+    }
+    const char *active = zcl_app_inner_str(&use, "active_root");
+    const struct json_value *steps = json_get(&use.data, "steps");
+    const struct json_value *last = steps && json_size(steps) ?
+        json_at(steps, json_size(steps) - 1u) : NULL;
+    const char *receipt = last ? json_get_str(json_get(last, "build_receipt_id")) : NULL;
+    const struct json_value *reused = last ? json_get(last, "receipt_reused") : NULL;
+    if (active) (void)snprintf(active_root, 65, "%s", active);
+    if (receipt) (void)snprintf(receipt_id, 65, "%s", receipt);
+    struct zcl_command_reply normalized;
+    zcl_command_reply_init(&normalized, "zcl.zcode_use.v1");
+    bool ok = active_root[0] && receipt_id[0] &&
+        zrv_receipt_identity(z, active_root, receipt_id) && reused &&
+        json_copy_checked(&normalized.data, &use.data) &&
+        json_push_kv_str(&normalized.data, "build_receipt_id", receipt_id) &&
+        json_push_kv(&normalized.data, "receipt_reused", reused) &&
+        zrv_observe(z, "build_observation", "zcode.use", &normalized,
+            zrv_use_fields, sizeof(zrv_use_fields) / sizeof(zrv_use_fields[0]));
+    zcl_command_reply_free(&normalized);
+    zcl_command_reply_free(&use);
+    return ok;
+}
+
+static int64_t zrv_offer_revision(struct zrv *z)
+{
+    struct json_value in;
+    const char *status_kv[] = {"action", "offer-status", "datadir", z->datadir};
+    if (!zcl_app_input(&in, status_kv, 4)) {
+        zcl_package_copy_fail(z->reply, "ALLOC", true, "Tasks offer-state input", z->dest);
+        json_free(&in);
+        return -1;
+    }
+    struct zcl_command_reply status;
+    if (!zcl_app_inner_call("app.tasks", &in, &status, NULL)) {
+        zcl_app_inner_fail(z->reply, &status, true);
+        zcl_command_reply_free(&status);
+        json_free(&in);
+        return -1;
+    }
+    const struct json_value *revision = json_get(&status.data, "offer_revision");
+    int64_t expected = revision && revision->type == JSON_INT ? json_get_int(revision) : -1;
+    zcl_command_reply_free(&status);
+    json_free(&in);
+    if (expected >= 0) return expected;
+    zcl_package_copy_fail(z->reply, "OFFER_STATE_UNAVAILABLE", true,
+        "Tasks did not return its current offer revision", z->dest);
+    return -1;
+}
+
+static bool zrv_offer_tasks(struct zrv *z)
+{
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    char use_plan[65] = "", active_root[65] = "", receipt_id[65] = "";
+    bool ok = zrv_selected_release(z) && zrv_use_plan(z, &in, use_plan) &&
+        json_push_kv_str(&in, "plan_id", use_plan) &&
+        zrv_use_commit(z, &in, active_root, receipt_id);
+    json_free(&in);
+    if (!ok) return false;
+    int64_t expected = zrv_offer_revision(z);
+    if (expected < 0) return false;
+    struct json_value offer_in;
+    json_init(&offer_in);
+    json_set_object(&offer_in);
+    ok = json_push_kv_str(&offer_in, "action", "offer") &&
+        json_push_kv_str(&offer_in, "datadir", z->datadir) &&
+        json_push_kv_str(&offer_in, "preview_root", active_root) &&
+        json_push_kv_str(&offer_in, "preview_receipt", receipt_id) &&
+        json_push_kv_str(&offer_in, "preview_program", "bin/ztasks") &&
+        json_push_kv_int(&offer_in, "expected_offer_revision", expected);
+    if (!ok) {
+        zcl_package_copy_fail(z->reply, "ALLOC", true, "Tasks offer input", z->dest);
+        json_free(&offer_in);
+        return false;
+    }
+    struct zcl_command_reply offer;
+    if (!zcl_app_inner_call("app.tasks", &offer_in, &offer, NULL)) {
+        zcl_app_inner_fail(z->reply, &offer, true);
+        zcl_command_reply_free(&offer);
+        json_free(&offer_in);
+        return false;
+    }
+    ok = zrv_observe(z, "preview_offer", "app.tasks", &offer, zrv_offer_fields,
+        sizeof(zrv_offer_fields) / sizeof(zrv_offer_fields[0])) &&
+        json_push_kv_bool(&z->reply->data, "preview_offered", true) &&
+        json_push_kv_bool(&z->reply->data, "executed", false);
+    zcl_command_reply_free(&offer);
+    json_free(&offer_in);
+    return ok;
+}
+
 static void zrv_build_open(struct zrv *z)
 {
+    if (zrv_tasks_package(z)) {
+        if (!zrv_offer_tasks(z) && z->reply->status == ZCL_COMMAND_STATUS_PASSED)
+            zcl_package_copy_fail(z->reply, "OBSERVATION_UNAVAILABLE", true,
+                "Tasks was kept but its build or preview offer could not be verified", z->dest);
+        return;
+    }
     struct zcl_command_reply inner, build;
     if (!zrv_build(z, &build)) {
         zcl_app_inner_fail(z->reply, &build, true);

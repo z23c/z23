@@ -59,13 +59,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FLOOR_GATE="$REPO_ROOT/build/bin/z23-lint"
 NODE_AUDIT="$REPO_ROOT/tools/scripts/check_c23_node_binary.sh"
-APP_SOURCE=""
-APP_SOURCE_SHA3=""
+APP_SOURCE="" APP_SOURCE_SHA3="" TASKS_SHARE="" TASKS_SHARE_SHA256=""
 APP_TOOLCHAIN=""
 APP_TOOLCHAIN_SHA3=""
 NODE_ONLY=0
 APP_VERIFIER="$REPO_ROOT/build/bin/z23-dev"
-APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire"
+APP_MEMBERS="z23-skycombat installed-source.json source.bundle manifest.wire recipe.wire app-build.wire" APP_TASKS_MEMBERS="tasks.z23share tasks-source.root"
 APP_TOOLCHAIN_MEMBERS="app-toolchain.json app-toolchain.bundle"
 LINUX_DESKTOP_MEMBERS="org.zclassic.SkyCombat.desktop org.zclassic.ZClassic23.desktop org.zclassic.ZClassic23.svg org.zclassic.ZClassic23.xml"
 DARWIN_APP_MEMBERS="z23-app-macos Z23Apps-Info.plist"
@@ -296,7 +295,7 @@ write_sha256sums() {
         || die "no release member set for platform $platform"
     if [ "$with_app" = 1 ]; then
         case "$platform" in linux-x86_64|darwin-arm64) ;; *) die "app source requires a POSIX release" ;; esac
-        members="$members $APP_MEMBERS"
+        members="$members $APP_MEMBERS"; [ -z "$TASKS_SHARE" ] || members="$members $APP_TASKS_MEMBERS"
         [ "$platform" != linux-x86_64 ] || members="$members $LINUX_DESKTOP_MEMBERS"
         [ "$platform" != darwin-arm64 ] || members="$members $DARWIN_APP_MEMBERS"
     fi
@@ -436,14 +435,12 @@ verify_app_source() {
 }
 
 app_source_options() {
-    if [ "$NODE_ONLY" -eq 1 ]; then
-        [ -z "$APP_SOURCE" ] && [ -z "$APP_SOURCE_SHA3" ] || die "--node-only conflicts with app source inputs"
-    fi
+    [ "$NODE_ONLY" -eq 0 ] || { [ -z "$APP_SOURCE" ] && [ -z "$APP_SOURCE_SHA3" ] && [ -z "$TASKS_SHARE" ] && [ -z "$TASKS_SHARE_SHA256" ] || die "--node-only conflicts with app inputs"; }
+    [ "$FRONT_DOOR" -eq 0 ] || { [ -z "$APP_SOURCE" ] && [ -z "$APP_SOURCE_SHA3" ] && [ -z "$TASKS_SHARE" ] && [ -z "$TASKS_SHARE_SHA256" ] || die "app inputs conflict with --front-door"; }; if [ -n "$TASKS_SHARE" ] || [ -n "$TASKS_SHARE_SHA256" ]; then [ -n "$TASKS_SHARE" ] && [ "${#TASKS_SHARE_SHA256}" -eq 64 ] || die "--tasks-share and --tasks-share-sha256 must be supplied together"; case "$TASKS_SHARE_SHA256" in *[!0-9a-f]*) die "Tasks share digest must be lowercase64 hex" ;; esac; fi
     if [ -z "$APP_SOURCE" ] && [ -z "$APP_SOURCE_SHA3" ]; then return 0; fi
     [ -n "$APP_SOURCE" ] && [ "${#APP_SOURCE_SHA3}" -eq 64 ] \
         || die "--app-source and --app-source-sha3 must be supplied together"
     case "$APP_SOURCE_SHA3" in *[!0-9a-f]*) die "app projection digest must be lowercase64 hex" ;; esac
-    [ "$FRONT_DOOR" -eq 0 ] || die "app source belongs to a runtime release, not --front-door"
     APP_SOURCE="$(cd "$APP_SOURCE" && pwd -P)" || die "app source directory unavailable"
 }
 
@@ -508,6 +505,12 @@ copy_app_source() {
     verify_app_source "$out" "$out/z23-skycombat"
 }
 
+copy_tasks_share() {
+    local out="$1" verified root name; [ -z "$TASKS_SHARE" ] && return 0
+    [ -f "$TASKS_SHARE" ] && [ ! -L "$TASKS_SHARE" ] && [ "$(sha256_digest "$TASKS_SHARE")" = "$TASKS_SHARE_SHA256" ] || die "Tasks share file or digest refused"
+    verified="$(docs_run_runtime "$out/z23" zcode package bundle verify "--file=$TASKS_SHARE")" || die "Tasks share verification refused"; name="$(printf '%s\n' "$verified" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"; root="$(printf '%s\n' "$verified" | sed -n 's/.*"package_root":"\([0-9a-f][0-9a-f]*\)".*/\1/p')"; [ "${name##*/}" = "ztasks" ] && [ "${#root}" -eq 64 ] || die "Tasks share identity refused"
+    cp -- "$TASKS_SHARE" "$out/tasks.z23share" && printf '%s\n' "$root" >"$out/tasks-source.root" || die "could not retain Tasks share identity"
+}
 package_from_bin() {
     local bin_dir="$1" out_dir="$2" want_platform="${3-}"
     local src="" exe="" platform="" strip_tool="" members="" member="" source_name="" candidate=""
@@ -604,7 +607,7 @@ package_from_bin() {
         [ "$(cd "$out_dir" && pwd -P)" != "$APP_SOURCE" ] || die "release output must differ from app source"
     fi
     [ -z "$APP_TOOLCHAIN" ] || [ "$out_dir" != "$APP_TOOLCHAIN" ] || die "release output must differ from toolchain input"
-    for member in $APP_MEMBERS $LINUX_DESKTOP_MEMBERS $DARWIN_APP_MEMBERS $APP_TOOLCHAIN_MEMBERS docs.bundle docs.root; do rm -f -- "$out_dir/$member"; done
+    for member in $APP_MEMBERS $APP_TASKS_MEMBERS $LINUX_DESKTOP_MEMBERS $DARWIN_APP_MEMBERS $APP_TOOLCHAIN_MEMBERS docs.bundle docs.root; do rm -f -- "$out_dir/$member"; done
     for member in $members; do rm -f "$out_dir/$member"; done
     rm -f "$out_dir/AGENT_CARD.md" "$out_dir/SHA256SUMS"
     strip_binary "$platform" "$src" "$out_dir/z23$exe" || die "strip failed"
@@ -628,8 +631,7 @@ package_from_bin() {
     for member in $members; do
         assert_platform_minimum_os "$platform" "$out_dir/$member"
     done
-    copy_agent_card "$out_dir"
-    copy_app_source "$out_dir"
+    copy_agent_card "$out_dir"; copy_app_source "$out_dir"; copy_tasks_share "$out_dir"
     copy_app_toolchain "$out_dir"
     if [ -n "$APP_SOURCE" ] && [ "$platform" = linux-x86_64 ]; then
         for member in $LINUX_DESKTOP_MEMBERS; do
@@ -1348,6 +1350,7 @@ while [ $# -gt 0 ]; do
         --bin) [ $# -ge 2 ] || die "--bin needs a directory"; BIN_DIR="$2"; shift 2 ;;
         --out) [ $# -ge 2 ] || die "--out needs a directory"; OUT_DIR="$2"; shift 2 ;;
         --app-source) [ $# -ge 2 ] || die "--app-source needs a directory"; APP_SOURCE="$2"; shift 2 ;;
+        --tasks-share) [ $# -ge 2 ] || die "--tasks-share needs a file"; TASKS_SHARE="$2"; shift 2 ;; --tasks-share-sha256) [ $# -ge 2 ] || die "--tasks-share-sha256 needs a digest"; TASKS_SHARE_SHA256="$2"; shift 2 ;;
         --app-source-sha3) [ $# -ge 2 ] || die "--app-source-sha3 needs a digest"; APP_SOURCE_SHA3="$2"; shift 2 ;;
         --app-toolchain) [ $# -ge 2 ] || die "--app-toolchain needs a directory"; APP_TOOLCHAIN="$2"; shift 2 ;;
         --app-toolchain-sha3) [ $# -ge 2 ] || die "--app-toolchain-sha3 needs a digest"; APP_TOOLCHAIN_SHA3="$2"; shift 2 ;;

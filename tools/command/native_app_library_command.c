@@ -1522,6 +1522,19 @@ static bool al_share_dispatch(struct library *w, const char *id, const struct ap
     if (!strcmp(id, "publish")) return al_publish(w, env, reply);
     return al_host_link(w, env, exe, reply);
 }
+static void al_open_row(struct library *w, const struct app_launch_env *env,
+    const char *datadir, struct zcl_command_reply *reply)
+{
+    struct library_row *row = &w->rows[w->index];
+    struct app_launch_env selected = *env;
+    if (datadir) {
+        int n = snprintf(selected.datadir, sizeof(selected.datadir), "%s", datadir);
+        if (n < 0 || (size_t)n >= sizeof(selected.datadir))
+            (void)snprintf(selected.datadir, sizeof(selected.datadir), "invalid");
+    }
+    zcl_native_app_open_snapshot(&selected, &row->entry, row->saved ? &row->selection : NULL, reply);
+}
+
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
@@ -1542,8 +1555,7 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
     }
     if (!strcmp(id, "open")) {
         w->receive_current = false;
-        struct library_row *row = &w->rows[w->index];
-        zcl_native_app_open_snapshot(env, &row->entry, row->saved ? &row->selection : NULL, reply);
+        al_open_row(w, env, datadir, reply);
         return false;
     }
     return true;

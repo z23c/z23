@@ -26,6 +26,10 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "command/app_image.h"
+#include "command/native_app_launch.h"
+#include "command/native_app_compose.h"
+#include "command/native_zcode_package_copy.h"
 #include "config/command_catalog.h"
 #include "core/uint256.h"
 #include "json/json.h"
@@ -51,6 +55,7 @@
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_release.h"
+#include "vcs/package_store.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -469,12 +474,13 @@ static bool rlc_publish_recipe(const struct rlc_file *files, size_t file_count,
 
 /* Publish one package (manifest + CAS chunks + recipe + signed release)
  * into <datadir>/zcode — the za_publish_ex idiom of test_zcode_add.c. */
-static bool rlc_publish(const char *zcode, const char *name,
+static bool rlc_publish_reward(const char *zcode, const char *name,
                         const char *semver, uint64_t sequence,
                         const struct rlc_file *files, size_t file_count,
                         const char *header_path, const char *source_path,
                         const char *test_path, const char *include_dir,
-                        const char *program_path, uint8_t root_out[32])
+                        const char *program_path, const char *reward,
+                        uint8_t root_out[32])
 {
     bool ok = rlc_publish_dirs(zcode);
     if (!ok)
@@ -525,7 +531,7 @@ static bool rlc_publish(const char *zcode, const char *name,
     memcpy(rel.package_root, root_out, 32);
     memcpy(rel.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
     rel.publisher_sequence = sequence;
-    (void)snprintf(rel.reward_address, sizeof(rel.reward_address), "t1fixture");
+    (void)snprintf(rel.reward_address, sizeof(rel.reward_address), "%s", reward);
     (void)snprintf(rel.license, sizeof(rel.license), "Apache-2.0");
     memcpy(rel.recipe_root, recipe_root, 32);
     (void)snprintf(rel.chain_id, sizeof(rel.chain_id), "zclassic-main");
@@ -549,6 +555,18 @@ static bool rlc_publish(const char *zcode, const char *name,
     ok = rlc_write_file(path, relwire, rellen);
     free(relwire);
     return ok;
+}
+
+static bool rlc_publish(const char *zcode, const char *name,
+                        const char *semver, uint64_t sequence,
+                        const struct rlc_file *files, size_t file_count,
+                        const char *header_path, const char *source_path,
+                        const char *test_path, const char *include_dir,
+                        const char *program_path, uint8_t root_out[32])
+{
+    return rlc_publish_reward(zcode, name, semver, sequence, files, file_count,
+        header_path, source_path, test_path, include_dir, program_path,
+        "t1fixture", root_out);
 }
 
 /* Plan + commit one published package through the production lifecycle,
@@ -805,17 +823,17 @@ static char *rlc_patch_ztasks_app(const char *source, size_t length,
     return isolated;
 }
 
-static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
+static bool rlc_install_ztasks_variant_reward(const char *base, const char *zcode,
                                        const char *semver, uint64_t sequence,
                                        const char *list_line, enum rlc_preview_fault fault,
-                                       struct rlc_binding *out)
+                                       const char *reward, struct rlc_binding *out)
 {
     const char *const paths[] = {
         "LICENSE", "README.md", "app/main.c", "include/ztasks/ztasks.h",
-        "src/ztasks.c", "tests/test_ztasks.c",
+        "src/ztasks.c", "tests/test_ztasks.c", "zcode-package.json",
     };
-    struct rlc_file files[6];
-    for (size_t i = 0; i < 6; i++) {
+    struct rlc_file files[7];
+    for (size_t i = 0; i < 7; i++) {
         char path[512];
         (void)snprintf(path, sizeof(path), "%s/%s", RLC_ZTASKS_DIR,
                        paths[i]);
@@ -841,11 +859,11 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
     }
     uint8_t root[32], receipt[32];
     char sha3[65];
-    bool ok = rlc_publish(zcode, "ztasks/ztasks", semver, sequence, files, 6,
+    bool ok = rlc_publish_reward(zcode, "ztasks/ztasks", semver, sequence, files, 7,
                           "include/ztasks/ztasks.h", "src/ztasks.c",
-                          "tests/test_ztasks.c", "include", "app/main.c",
+                          "tests/test_ztasks.c", "include", "app/main.c", reward,
                           root);
-    for (size_t i = 0; i < 6; i++)
+    for (size_t i = 0; i < 7; i++)
         free((void *)files[i].content);
     if (!ok)
         return false;
@@ -858,6 +876,15 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
         return false;
     rlc_binding_fill(out, root, receipt, sha3);
     return true;
+}
+
+static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
+                                       const char *semver, uint64_t sequence,
+                                       const char *list_line, enum rlc_preview_fault fault,
+                                       struct rlc_binding *out)
+{
+    return rlc_install_ztasks_variant_reward(base, zcode, semver, sequence,
+        list_line, fault, "t1fixture", out);
 }
 
 /* Force a serving generation failure: same-length corruption of the installed
@@ -1207,6 +1234,208 @@ static int rlc_task_snapshot_reuse(const char *base, const struct rlc_binding *b
     }
     RLC_CHECK("task return: retained snapshot released", package_resident_close(&image).ok);
     return failures;
+}
+
+struct rlc_app_keep_facts {
+    const char *valid, *destination, *version, *env, *deps;
+    const struct rlc_binding *binding;
+};
+
+static int rlc_app_keep_tamper(const struct rlc_app_keep_facts *facts)
+{
+    char image_path[4400];
+    (void)snprintf(image_path, sizeof(image_path), "%s/zcode/installed/%s/bin/ztasks",
+                   facts->valid, facts->binding->root_hex);
+    if (!rlc_write_file(image_path, "tampered", 7)) return 1;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "name", "tasks") &&
+        json_push_kv_str(&input, "copy", facts->destination) &&
+        json_push_kv_str(&input, "version", facts->version) &&
+        json_push_kv_str(&input, "datadir", facts->valid) &&
+        json_push_kv_str(&input, "env_root", facts->env) &&
+        json_push_kv_str(&input, "dependency_root", facts->deps) &&
+        json_push_kv_str(&input, "image_sha3", facts->binding->sha3) &&
+        json_push_kv_str(&input, "record_id", facts->binding->receipt_hex) &&
+        json_push_kv_bool(&input, "accept_execution", true) &&
+        json_push_kv_int(&input, "expected_revision", 1);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_keep.v1");
+    if (ok) {
+        zcl_native_handle_app_keep(&request, &reply);
+        ok = reply.status != ZCL_COMMAND_STATUS_PASSED &&
+            !strcmp(reply.error.code, "IMAGE_REFUSED");
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok ? 0 : 1;
+}
+
+static int rlc_app_keep_customize(const struct rlc_app_keep_facts *facts)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "name", "tasks");
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_customize.v1");
+    if (ok) {
+        zcl_native_handle_app_customize(&request, &reply);
+        ok = reply.status == ZCL_COMMAND_STATUS_PASSED &&
+            json_get_int(json_get(&reply.data, "selection_revision")) == 1 &&
+            !strcmp(json_get_str(json_get(&reply.data, "head_version")), facts->version);
+        if (!ok) fprintf(stderr, "app keep customize: %s %s\n", reply.error.code, reply.error.message);
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok ? 0 : 1;
+}
+
+static int rlc_app_keep_open(void)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "name", "tasks") &&
+        json_push_kv_bool(&input, "accept_execution", true);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    app_launch_test_set_desktop(0);
+    bool handled = ok && zcl_native_app_open_kept(&request, &reply);
+    app_launch_test_set_desktop(-1);
+    const char *result = json_get_str(json_get(&reply.data, "result"));
+    ok = handled && reply.status == ZCL_COMMAND_STATUS_PASSED && result &&
+        strstr(result, "Keep receipt") != NULL;
+    if (!ok) fprintf(stderr, "app keep open: %s %s\n", reply.error.code, reply.error.message);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok ? 0 : 1;
+}
+
+static int rlc_app_keep_open_selected(const struct rlc_app_keep_facts *facts)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "name", "tasks") &&
+        json_push_kv_str(&input, "copy", facts->destination) &&
+        json_push_kv_str(&input, "version", facts->version) &&
+        json_push_kv_str(&input, "datadir", facts->valid) &&
+        json_push_kv_str(&input, "env_root", facts->env) &&
+        json_push_kv_str(&input, "dependency_root", facts->deps) &&
+        json_push_kv_str(&input, "image_sha3", facts->binding->sha3) &&
+        json_push_kv_str(&input, "record_id", facts->binding->receipt_hex) &&
+        json_push_kv_bool(&input, "accept_execution", true);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    app_launch_test_set_desktop(0);
+    if (ok) zcl_native_handle_app_open_selected(&request, &reply);
+    app_launch_test_set_desktop(-1);
+    const char *result = json_get_str(json_get(&reply.data, "result"));
+    ok = reply.status == ZCL_COMMAND_STATUS_PASSED && result &&
+        strstr(result, "Keep receipt") != NULL;
+    if (!ok) fprintf(stderr, "app keep selected open: %s %s\n", reply.error.code, reply.error.message);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok ? 0 : 1;
+}
+
+static int rlc_app_keep_commit(const struct rlc_app_keep_facts *facts)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "name", "tasks") &&
+        json_push_kv_str(&input, "copy", facts->destination) &&
+        json_push_kv_str(&input, "version", facts->version) &&
+        json_push_kv_str(&input, "datadir", facts->valid) &&
+        json_push_kv_str(&input, "env_root", facts->env) &&
+        json_push_kv_str(&input, "dependency_root", facts->deps) &&
+        json_push_kv_str(&input, "image_sha3", facts->binding->sha3) &&
+        json_push_kv_str(&input, "record_id", facts->binding->receipt_hex) &&
+        json_push_kv_bool(&input, "accept_execution", true) &&
+        json_push_kv_int(&input, "expected_revision", 0);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_keep.v1");
+    if (ok) {
+        zcl_native_handle_app_keep(&request, &reply);
+        ok = reply.status == ZCL_COMMAND_STATUS_PASSED;
+        if (!ok) fprintf(stderr, "app keep commit: %s %s %s\n", reply.error.code,
+                         reply.error.message, reply.error.evidence);
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    if (!ok) return 1;
+    if (rlc_app_keep_customize(facts) != 0) return 1;
+    if (rlc_app_keep_open() != 0) return 1;
+    return rlc_app_keep_open_selected(facts);
+}
+
+static int rlc_app_keep_adopt(const char *valid, const struct rlc_binding *binding,
+                              char destination[4400], char version[65])
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "root", binding->root_hex) &&
+        json_push_kv_str(&input, "datadir", valid);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_package_adopt.v1");
+    const char *old_dir = zcl_native_command_datadir();
+    int old_port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(valid, 0);
+    if (ok) ok = zcl_app_inner_plan_confirm("zcode.package.adopt", &input, &reply);
+    if (!ok) fprintf(stderr, "app keep adopt: %s %s\n", reply.error.code, reply.error.message);
+    const char *adopted = zcl_app_inner_str(&reply, "copy");
+    if (adopted) (void)snprintf(destination, 4400, "%s", adopted);
+    zcl_command_reply_free(&reply);
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
+    json_free(&input);
+    if (!ok) return 1;
+    struct zcl_package_copy copy;
+    ok = zcl_package_copy_open_selected_as(destination, ZCL_PACKAGE_COPY_READ,
+                                          &copy, NULL, "app.keep", NULL) != 0;
+    if (ok) zcl_hex_encode(copy.selected_version, 32, version);
+    zcl_package_copy_close(&copy);
+    return ok ? 0 : 1;
+}
+
+static int rlc_app_keep_receipt(const char *base, const struct rlc_binding *binding)
+{
+    (void)binding;
+    char valid[4400], zcode[4400];
+    int n = snprintf(valid, sizeof(valid), "%s/app-keep-store", base);
+    if (n <= 0 || (size_t)n >= sizeof(valid) || mkdir(valid, 0700) != 0) return 1;
+    (void)snprintf(zcode, sizeof(zcode), "%s/zcode", valid);
+    struct rlc_binding fresh;
+    if (!rlc_install_ztasks_variant_reward(valid, zcode, "0.99.0", 99,
+        "Keep receipt", RLC_PREVIEW_OK, "", &fresh)) return 1;
+    char required[4400];
+    (void)snprintf(required, sizeof(required), "%s/staging", zcode);
+    if (!rlc_mkdir_p(required)) return 1;
+    (void)snprintf(required, sizeof(required), "%s/pins", zcode);
+    if (!rlc_mkdir_p(required)) return 1;
+    char destination[4400], version[65];
+    if (rlc_app_keep_adopt(valid, &fresh, destination, version) != 0) return 1;
+    struct vcs_package_build_receipt receipt;
+    if (!package_lifecycle_receipt_read(valid, fresh.receipt, &receipt).ok) return 1;
+    struct vcs_package_lock empty = {0};
+    uint8_t dependencies[32];
+    app_image_dependency_root(&empty, dependencies);
+    char env[65], deps[65];
+    zcl_hex_encode(receipt.toolchain_capsule_root, 32, env);
+    zcl_hex_encode(dependencies, 32, deps);
+    struct rlc_app_keep_facts facts = {
+        .valid = valid, .destination = destination, .version = version,
+        .env = env, .deps = deps, .binding = &fresh,
+    };
+    return rlc_app_keep_commit(&facts) || rlc_app_keep_tamper(&facts);
 }
 
 static int rlc_task_journey(const char *base, const struct rlc_binding *n,
@@ -2591,13 +2820,6 @@ static int rlc_ztasks_lifecycle_rollback(const char *base,
     return failures;
 }
 
-/* ── stage f: hermetic install/update/failure/rollback case ──────────────
- * One registered hermetic case that links install, update, a forced
- * failure and rollback for the shipped ztasks package: everything runs in
- * an isolated datadir of its own, with no live node, no network, and no
- * resident process — package_lifecycle_rollback is exercised directly
- * (the in-process lifecycle path test_zcode_add.c drives through the
- * command), not through the serving gate the trap above owns. */
 #if !defined(_WIN32)
 
 static bool rlc_herm_setup(char *base, size_t base_cap, char *zcode,
@@ -2634,8 +2856,6 @@ static bool rlc_herm_active_is(const char *base, const uint8_t root[32],
            memcmp(active_root, root, 32) == 0;
 }
 
-/* A rollback that must refuse: the named rule is reported, no generation
- * is appended, and the active root is untouched. */
 static bool rlc_herm_rollback_refused(const char *base, const char *name,
                                       const char *want_rule,
                                       const uint8_t active_root[32],
@@ -2668,7 +2888,6 @@ static int rlc_herm_single_generation_refusals(const char *base,
     return failures;
 }
 
-/* Delete the updated generation's install tree and prove only it is gone. */
 static bool rlc_herm_break_updated(const char *base,
                                    const struct rlc_binding *a,
                                    const struct rlc_binding *b)
@@ -2948,6 +3167,11 @@ int test_resident_launch_contract(void)
         zcl_hex_encode(parker_root, 32, parker_root_hex);
         zcl_hex_encode(parker_receipt, 32, parker_receipt_hex);
 
+        struct rlc_binding original;
+        rlc_binding_fill(&original, ztasks_root, ztasks_receipt, ztasks_sha3);
+        RLC_CHECK("app keep: zcode receipt exposes the same saved source",
+                  rlc_app_keep_receipt(base, &original) == 0);
+
         failures += rlc_ztasks_lifecycle_rollback(base, zcode,
                                                    ztasks_root);
 
@@ -2992,9 +3216,6 @@ int test_resident_launch_contract(void)
                   "distinct artifact digests",
                   rlc_generation_ladder_ok(variants, ztasks_sha3, &n1, &n2,
                                            &b));
-        /* The hermetic lifecycle walk owns its fixtures and must always
-         * run: gating it on the ladder would silently skip rollback
-         * coverage whenever the shared install path fails. */
         failures += rlc_stage_f_hermetic_lifecycle();
         if (variants) {
             struct rlc_binding n;

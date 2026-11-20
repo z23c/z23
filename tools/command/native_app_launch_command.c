@@ -110,11 +110,10 @@ static bool app_open_admit(const struct app_launch_env *env,
 {
     char known[256], text[384], hint[300];
     *entry = app_launch_registry_find(reg, name);
-    /* A built-in pointer row (no window, no raise, no args) is served by a
-     * native command, not a desktop window: refusing it here lets the
-     * not-found branch below carry its app.tasks/app.list next actions on
-     * every host, instead of making the reply depend on DISPLAY. */
-    if (*entry && !app_launch_entry_is_windowed(*entry)) *entry = NULL;
+    /* Built-in pointer rows and headless Tasks use native command actions.
+     * A desktop keeps the real windowed Tasks row. */
+    if (*entry && (!app_launch_entry_is_windowed(*entry) ||
+                   (!env->desktop && strcmp((*entry)->id, "tasks") == 0))) *entry = NULL;
     if (!*entry) {
         (void)app_launch_known_names(reg, known, sizeof(known));
         snprintf(hint, sizeof(hint), "known apps: %s", known);
@@ -254,19 +253,34 @@ static void app_open_locked(const struct app_launch_env *env,
                             const struct app_launch_entry *entry,
                             struct app_open_result *out)
 {
+    struct app_launch_entry launch = *entry;
+    bool tasks = strcmp(entry->id, "tasks") == 0;
     const char *found_by = NULL;
-    long pid = app_launch_running_pid(env, entry, &found_by);
+    long pid = tasks ? 0 : app_launch_running_pid(env, entry, &found_by);
     if (pid) {
         app_open_raise(entry, pid, found_by, out);
         return;
     }
+    if (tasks && env->datadir[0]) {
+        int n = launch.arg_count < APP_LAUNCH_ARGS_MAX ?
+            snprintf(launch.args[launch.arg_count], sizeof(launch.args[0]),
+                     "--datadir=%s", env->datadir) : -1;
+        if (env->datadir[0] != '/' || n <= 0 ||
+            (size_t)n >= sizeof(launch.args[0])) {
+            app_fail(out, APP_STAGE_UNSUPPORTED,
+                     "The selected Tasks profile cannot be passed safely.",
+                     "use an absolute bounded app profile");
+            return;
+        }
+        ++launch.arg_count;
+    }
     struct app_spawn_outcome sp;
-    (void)app_proc_spawn_and_wait(entry, out->log_path, env->ready_timeout_ms,
+    (void)app_proc_spawn_and_wait(&launch, out->log_path, env->ready_timeout_ms,
                                   env->settle_ms, &sp);
     if (sp.pid && sp.ready && !sp.exited)
-        app_open_spawned(env, entry, &sp, out);
+        app_open_spawned(env, &launch, &sp, out);
     else
-        app_open_failed_spawn(entry, &sp, env->ready_timeout_ms, out);
+        app_open_failed_spawn(&launch, &sp, env->ready_timeout_ms, out);
 }
 
 void app_launch_open(const struct app_launch_env *env,
@@ -366,8 +380,9 @@ static void app_render(const struct app_open_result *r,
 static void app_tasks_next(const char *name, const struct json_value *input,
                            struct zcl_command_reply *reply)
 {
-    if (strcmp(name, "tasks") != 0 || zcl_native_command_datadir_is_explicit())
-        return;
+    if ((strcmp(name, "tasks") != 0 && strcmp(name, "task") != 0 &&
+         strcmp(name, "ztasks") != 0) ||
+        zcl_native_command_datadir_is_explicit()) return;
     const struct json_value *value = json_get(input, "datadir");
     const char *dir = value ? json_get_str(value) : NULL;
     /* The terminal renderer quotes the whole JSON with shell single quotes. */
@@ -461,6 +476,14 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
         free(w);
         return;
     }
+    const char *datadir = zcl_native_command_datadir_is_explicit() ?
+        zcl_native_command_datadir() : json_get_str(json_get(request->input, "datadir"));
+    if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
+    if (datadir) {
+        int n = snprintf(w->env.datadir, sizeof(w->env.datadir), "%s", datadir);
+        if (n < 0 || (size_t)n >= sizeof(w->env.datadir))
+            (void)snprintf(w->env.datadir, sizeof(w->env.datadir), "invalid");
+    }
     app_launch_registry_load(&w->env, &w->reg);
     app_launch_open(&w->env, &w->reg, name, &w->result);
     app_render(&w->result, reply);
@@ -503,7 +526,8 @@ static void app_list_entry(const struct app_launch_env *env,
     (void)json_push_kv_str(item, "raise", e->raise_sigusr1 ? "sigusr1"
                                                            : "unsupported");
     (void)json_push_kv_str(item, "path", e->executable);
-    long pid = e->installed ? app_launch_running_pid(env, e, &found_by) : 0;
+    long pid = e->installed && strcmp(e->id, "tasks") != 0 ?
+        app_launch_running_pid(env, e, &found_by) : 0;
     struct json_value running;
     json_init(&running);
     if (pid)

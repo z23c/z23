@@ -3002,9 +3002,17 @@ static void tag_xdg_leave(struct tag_xdg *x)
 }
 static bool tag_discover_library_layout(const struct zcl_present_model_v1 *model, bool detail)
 {
-    if (model->action_count != (detail ? 4u : 3u) || !strstr(model->summary, "tinyapp")) return false;
-    return detail || (!strcmp(model->actions[0].id, "choose") &&
-        !strcmp(model->actions[1].id, "create") && !strcmp(model->actions[2].id, "home"));
+    if (detail) return model->action_count == 4u && strstr(model->summary, "tinyapp");
+    if (model->action_count == 3u)
+        return strstr(model->summary, "tinyapp") &&
+            !strcmp(model->actions[0].id, "choose") &&
+            !strcmp(model->actions[1].id, "create") &&
+            !strcmp(model->actions[2].id, "home");
+    return model->action_count == 4u && strstr(model->summary, "tinyapp") &&
+        !strcmp(model->actions[0].id, "choose") &&
+        !strcmp(model->actions[1].id, "previous") &&
+        !strcmp(model->actions[2].id, "create") &&
+        !strcmp(model->actions[3].id, "home");
 }
 static bool tag_discover_library_card(struct tag_discover *d, const struct zcl_present_model_v1 *model,
     struct zcl_present_window_event_v1 *event)

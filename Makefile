@@ -10645,8 +10645,8 @@ check-tor-dial-prewarm: $(LINTC_TOOL)
 # Physical native-agent UI acceptance driver. It links only the workstation's
 # X11 client ABI and sends one bounded event to an exact titled window; it owns
 # no node/package authority and is never shipped. Link the stable runtime
-# SONAME directly so a physical runner needs the X11 runtime, not a distro's
-# optional development-package linker alias.
+# SONAMEs directly so a physical runner needs the X11/XTest runtimes, not a
+# distro's optional development-package linker aliases.
 NATIVE_UI_DRIVER_BIN = $(BIN_DIR)/native_ui_driver
 .PHONY: native-ui-driver
 native-ui-driver: $(NATIVE_UI_DRIVER_BIN)
@@ -10654,7 +10654,7 @@ $(NATIVE_UI_DRIVER_BIN): tools/native_ui_driver.c
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/x11/include \
-	    -o $@ $< -Wl,-l:libX11.so.6
+	    -o $@ $< -Wl,-l:libX11.so.6 -Wl,-l:libXtst.so.6
 
 # Existing app_receive_ui build-needs selects native-ui-driver. Its deterministic
 # X11 fixture includes that exact driver source; no production test hooks.
@@ -10665,7 +10665,7 @@ $(NATIVE_UI_READINESS_BIN): tests/fixtures/native_ui_driver_readiness.c tools/na
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/x11/include \
-	    -o $@ $< -Wl,-l:libX11.so.6
+	    -o $@ $< -Wl,-l:libX11.so.6 -Wl,-l:libXtst.so.6
 endif
 
 # Crash recovery harness: fork zclassic23, SIGKILL at random points,

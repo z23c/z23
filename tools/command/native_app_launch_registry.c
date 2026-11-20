@@ -128,8 +128,10 @@ static bool app_xdg_path(char *out, size_t cap, const char *xdg_var,
  * tests can pin both the headless and the desktop answer on any host (the
  * lab_test_force_confinement_failure idiom). */
 static int app_launch_desktop_forced = -1;
+static const char *app_launch_bin_dir_forced;
 
 void app_launch_test_set_desktop(int desktop) { app_launch_desktop_forced = desktop; }
+void app_launch_test_set_bin_dir(const char *dir) { app_launch_bin_dir_forced = dir; }
 
 bool app_launch_env_from_process(struct app_launch_env *env, char *why,
                                  size_t why_size)
@@ -137,7 +139,10 @@ bool app_launch_env_from_process(struct app_launch_env *env, char *why,
     memset(env, 0, sizeof(*env));
     env->ready_timeout_ms = APP_LAUNCH_READY_TIMEOUT_MS;
     env->settle_ms = APP_LAUNCH_SETTLE_MS;
-    if (!app_self_dir(env->bin_dir, sizeof(env->bin_dir)))
+    if (app_launch_bin_dir_forced)
+        (void)snprintf(env->bin_dir, sizeof(env->bin_dir), "%s",
+                       app_launch_bin_dir_forced);
+    else if (!app_self_dir(env->bin_dir, sizeof(env->bin_dir)))
         env->bin_dir[0] = '\0';
     if (!app_xdg_path(env->config_path, sizeof(env->config_path),
                       "XDG_CONFIG_HOME", ".config", "/apps.tsv"))

@@ -245,6 +245,7 @@ static int case_apps_tools(struct ma *m, long *app_pid)
         ASSERT(ma_has(m, "launchable"));
         ASSERT(ma_has(m, "fixtureapp"));
         ASSERT(ma_has(m, "skycombat"));
+        ASSERT(ma_has(m, "tasks"));
     PASS(); }
     TEST("apps_open opens the app and waits for ready") {
         ASSERT(ma_tool(m, 4, "apps_open", "{\"name\":\"fixtureapp\"}"));

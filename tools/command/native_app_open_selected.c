@@ -11,6 +11,7 @@
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
+#include "services/package_lifecycle.h"
 #include "sha3/sha3.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
@@ -153,6 +154,48 @@ static bool as_package(struct as_open *a)
     return true;
 }
 
+static const char *as_zcode_program(struct as_open *a,
+    const struct vcs_package_build_receipt *receipt)
+{
+    uint8_t id[32], dependencies[32];
+    struct vcs_package_lock empty = {0};
+    app_image_dependency_root(&empty, dependencies);
+    if (vcs_package_build_id(receipt, id) != VCS_PACKAGE_BUILD_OK ||
+        memcmp(id, a->record_id, 32) || memcmp(receipt->package_root, a->package, 32) ||
+        memcmp(receipt->toolchain_capsule_root, a->env, 32) || receipt->dep_count != 0 ||
+        memcmp(a->deps, dependencies, 32) || !vcs_package_build_installable(receipt))
+        return NULL;
+    const char *program = NULL;
+    for (size_t i = 0; i < receipt->output_count; ++i)
+        if (!strcmp(receipt->outputs[i].path, "bin/ztasks") &&
+            memcmp(receipt->outputs[i].sha3, a->image_sha, 32) == 0)
+            program = receipt->outputs[i].path;
+    return program;
+}
+
+static bool as_zcode_record(struct as_open *a)
+{
+    struct vcs_package_build_receipt receipt;
+    struct zcl_result result = package_lifecycle_receipt_read(a->datadir, a->record_id, &receipt);
+    if (!result.ok) return as_fail(a, "BUILD_RECORD_MISSING", "no matching valid build record", result.message);
+    const char *program = as_zcode_program(a, &receipt);
+    if (!program) return as_fail(a, "BUILD_IDENTITY_MISMATCH", "the requested image and record do not match the saved version", AS_COMMAND);
+    memcpy(a->record.package_root, receipt.package_root, 32);
+    memcpy(a->record.closure_root, receipt.recipe_root, 32);
+    memcpy(a->record.env_root, receipt.toolchain_capsule_root, 32);
+    memcpy(a->record.dependency_root, a->deps, 32);
+    char root[65], base[AS_PATH];
+    zcl_hex_encode(receipt.package_root, 32, root);
+    int n = snprintf(base, sizeof(base), "%s/zcode/installed/%s", a->datadir, root);
+    if (n <= 0 || (size_t)n >= sizeof(base) ||
+        !zcl_path_join(a->image, sizeof(a->image), base, program))
+        return as_fail(a, "BAD_IMAGE_PATH", "installed Tasks image path is too long", a->datadir);
+    result = app_image_capture(a->image, &a->record);
+    if (!result.ok || memcmp(a->record.image_sha3, a->image_sha, 32) != 0)
+        return as_fail(a, "IMAGE_REFUSED", "the installed Tasks image no longer matches its receipt", result.message);
+    return true;
+}
+
 static bool as_record(struct as_open *a)
 {
     char records[AS_PATH], images[AS_PATH], hex[65];
@@ -161,7 +204,11 @@ static bool as_record(struct as_open *a)
         return as_fail(a, "BAD_DATADIR", "build store path is too long", a->datadir);
     bool hit = false;
     struct zcl_result result = app_image_build_load(records, a->package, a->env, a->deps, &a->record, &hit);
-    if (!result.ok || !hit) return as_fail(a, "BUILD_RECORD_MISSING", "no matching valid build record", result.message);
+    if (!result.ok || !hit) {
+        if (strcmp(a->entry.id, "tasks") != 0)
+            return as_fail(a, "BUILD_RECORD_MISSING", "no matching valid build record", result.message);
+        return as_zcode_record(a);
+    }
     uint8_t id[32];
     result = app_image_build_id(&a->record, id);
     if (!result.ok || memcmp(id, a->record_id, 32) || memcmp(a->record.image_sha3, a->image_sha, 32))
@@ -345,14 +392,18 @@ static bool as_validated(struct as_open *a)
     return as_copy(a) && as_package(a) && as_record(a);
 }
 
+static bool as_tasks_open(struct as_open *a);
+
 void zcl_native_handle_app_open_selected(const struct zcl_command_request *request,
                                          struct zcl_command_reply *reply)
 {
     struct as_open *a = zcl_calloc(1, sizeof(*a), "app-open-selected");
     if (!a) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate selected app state", AS_COMMAND); return; }
     a->input = request->input; a->reply = reply;
-    if (as_inputs(a) && as_catalog(a) && as_current_revision(a) &&
-        as_validated(a) && as_desktop(a)) as_launch(a);
+    if (as_inputs(a) && as_catalog(a) && as_current_revision(a) && as_validated(a)) {
+        if (strcmp(a->entry.id, "tasks") == 0) (void)as_tasks_open(a);
+        else if (as_desktop(a)) as_launch(a);
+    }
     as_cleanup(a);
 }
 
@@ -397,6 +448,96 @@ static bool as_keep_image(struct as_open *a)
     resident_launch_close(&launch);
     return r.ok || as_fail(a, "IMAGE_REFUSED", "the built image no longer matches its record", r.message);
 }
+static void as_tasks_fail(struct as_open *a, struct zcl_command_reply *out)
+{
+    bool prior = a->reply->error.mutated;
+    zcl_app_inner_fail(a->reply, out, false);
+    a->reply->error.mutated = prior || out->error.mutated;
+}
+
+static bool as_tasks_action(struct as_open *a, const char *action)
+{
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    bool identity = strcmp(action, "activate") != 0;
+    bool ok = json_push_kv_str(&in, "app", "local/tasks") &&
+        json_push_kv_str(&in, "action", action) &&
+        json_push_kv_str(&in, "datadir", a->datadir) &&
+        json_push_kv_bool(&in, "accept_execution", true) &&
+        (!identity || (zcl_package_copy_push_root(&in, "package_root", a->package) &&
+        zcl_package_copy_push_root(&in, "receipt_id", a->record_id) &&
+        zcl_package_copy_push_root(&in, "artifact_sha3", a->image_sha) &&
+        json_push_kv_str(&in, "program", "bin/ztasks")));
+    struct zcl_command_reply out;
+    zcl_command_reply_init(&out, "zcl.package_resident.v1");
+    if (ok) ok = zcl_app_inner_call("app.invoke.package", &in, &out, NULL);
+    if (!ok) as_tasks_fail(a, &out);
+    else {
+        json_free(&a->reply->data);
+        a->reply->data = out.data;
+        json_init(&out.data);
+    }
+    if (ok && (!strcmp(action, "accept") || !strcmp(action, "activate")))
+        a->reply->error.mutated = true;
+    a->reply->error.mutated |= out.error.mutated;
+    zcl_command_reply_free(&out);
+    json_free(&in);
+    return ok;
+}
+
+static bool as_tasks_activate(struct as_open *a)
+{
+    return as_tasks_action(a, "accept") && as_tasks_action(a, "activate");
+}
+
+static bool as_tasks_open(struct as_open *a)
+{
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "action", "offer-status") &&
+        json_push_kv_str(&in, "datadir", a->datadir);
+    struct zcl_command_reply status;
+    zcl_command_reply_init(&status, "zcl.task_document.v1");
+    if (ok) ok = zcl_app_inner_call("app.tasks", &in, &status, NULL);
+    if (!ok) {
+        as_tasks_fail(a, &status);
+        zcl_command_reply_free(&status);
+        json_free(&in);
+        return false;
+    }
+    char package[65], receipt[65], image[65];
+    zcl_hex_encode(a->package, 32, package);
+    zcl_hex_encode(a->record_id, 32, receipt);
+    zcl_hex_encode(a->image_sha, 32, image);
+    bool matches = json_get_bool(json_get(&status.data, "has_kept_program")) &&
+        !strcmp(package, json_get_str(json_get(&status.data, "kept_root"))) &&
+        !strcmp(receipt, json_get_str(json_get(&status.data, "kept_receipt"))) &&
+        !strcmp(image, json_get_str(json_get(&status.data, "kept_artifact_sha3"))) &&
+        !strcmp("bin/ztasks", json_get_str(json_get(&status.data, "kept_program")));
+    zcl_command_reply_free(&status);
+    json_free(&in);
+    if (!matches && !as_tasks_activate(a)) return false;
+    if (!a->env_cfg.desktop) return as_tasks_action(a, "invoke");
+    json_init(&in);
+    json_set_object(&in);
+    ok = json_push_kv_str(&in, "action", "open") &&
+        json_push_kv_str(&in, "datadir", a->datadir);
+    struct zcl_command_reply opened;
+    zcl_command_reply_init(&opened, "zcl.task_document.v1");
+    if (ok) ok = zcl_app_inner_call("app.tasks", &in, &opened, NULL);
+    if (!ok) as_tasks_fail(a, &opened);
+    else {
+        json_free(&a->reply->data);
+        a->reply->data = opened.data;
+        json_init(&opened.data);
+    }
+    zcl_command_reply_free(&opened);
+    json_free(&in);
+    return ok;
+}
+
 static void as_keep(struct as_open *a, uint64_t expected)
 {
     if (!as_keep_image(a)) return;
@@ -561,12 +702,14 @@ static int as_kept_load(struct as_open *a)
 static void as_kept_launch(struct as_open *a)
 {
     (void)as_kept_input(a);
-    if (as_validated(a)) {
-        if (memcmp(a->copy.fork_version, a->kept.fork, 32) ||
-            memcmp(a->copy.parent_release, a->kept.parent, 32) || memcmp(a->package, a->kept.package, 32))
-            as_fail(a, "SELECTION_MISMATCH", "kept selection no longer matches its copy", a->entry.id);
-        else if (as_desktop(a)) as_launch(a);
+    if (!as_validated(a)) return;
+    if (memcmp(a->copy.fork_version, a->kept.fork, 32) ||
+        memcmp(a->copy.parent_release, a->kept.parent, 32) || memcmp(a->package, a->kept.package, 32)) {
+        as_fail(a, "SELECTION_MISMATCH", "kept selection no longer matches its copy", a->entry.id);
+        return;
     }
+    if (strcmp(a->entry.id, "tasks") == 0) (void)as_tasks_open(a);
+    else if (as_desktop(a)) as_launch(a);
 }
 /* Reserved routes are always handled, including missing/corrupt selections. */
 bool zcl_native_app_open_kept(const struct zcl_command_request *request,
@@ -610,6 +753,28 @@ static bool as_snapshot_catalog(struct as_open *a, const struct app_launch_entry
     return true;
 }
 
+static void as_snapshot_launch(struct as_open *a, const struct app_launch_entry *entry)
+{
+    struct app_open_result result;
+    struct app_launch_env launch_env = a->env_cfg;
+    const char *datadir = launch_env.datadir[0] ? NULL : zcl_native_command_datadir();
+    if (datadir) {
+        int n = snprintf(launch_env.datadir, sizeof(launch_env.datadir), "%s", datadir);
+        if (n < 0 || (size_t)n >= sizeof(launch_env.datadir))
+            (void)snprintf(launch_env.datadir, sizeof(launch_env.datadir), "invalid");
+    }
+    app_launch_open(&launch_env, &a->registry, entry->id, &result);
+    if (result.status == APP_OPEN_FAILED) {
+        as_fail(a, "APP_OPEN_FAILED", result.message, result.hint);
+        return;
+    }
+    (void)json_push_kv_str(&a->reply->data, "status", app_open_status_name(result.status));
+    (void)json_push_kv_str(&a->reply->data, "name", entry->id);
+    (void)json_push_kv_int(&a->reply->data, "pid", result.pid);
+    (void)json_push_kv_str(&a->reply->data, "executable", result.executable);
+    (void)json_push_kv_str(&a->reply->data, "sha256", result.sha256);
+}
+
 void zcl_native_app_open_snapshot(const struct app_launch_env *env,
     const struct app_launch_entry *entry, const struct app_selection *selection,
     struct zcl_command_reply *reply)
@@ -633,19 +798,7 @@ void zcl_native_app_open_snapshot(const struct app_launch_env *env,
         a->kept = *selection;
         as_kept_launch(a);
     } else {
-        /* The resolved catalog is used directly: a concurrent Keep cannot
-         * cause name-only resolution to substitute an undisplayed image. */
-        struct app_open_result result;
-        app_launch_open(env, &a->registry, entry->id, &result);
-        if (result.status == APP_OPEN_FAILED)
-            as_fail(a, "APP_OPEN_FAILED", result.message, result.hint);
-        else {
-            (void)json_push_kv_str(&reply->data, "status", app_open_status_name(result.status));
-            (void)json_push_kv_str(&reply->data, "name", entry->id);
-            (void)json_push_kv_int(&reply->data, "pid", result.pid);
-            (void)json_push_kv_str(&reply->data, "executable", result.executable);
-            (void)json_push_kv_str(&reply->data, "sha256", result.sha256);
-        }
+        as_snapshot_launch(a, entry);
     }
     as_cleanup(a);
 }

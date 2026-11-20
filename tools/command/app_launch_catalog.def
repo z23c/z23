@@ -39,11 +39,6 @@ ZCL_APP_LAUNCH("skycombat", "sky,sky-combat,airplane", "z23-skycombat",
                ZCL_APP_RAISE_SIGUSR1, "make game",
                ZCL_APP_ARGV("--qa-frames=120", "--capture=%s"), "preview.png")
 
-/* ztasks is headless: the resident wire and the preview verifier drive it
- * over fd 3 and files, so there is no window to wait for ("still running
- * after the settle time") and no SIGUSR1 raise. No PREVIEW row: a built
- * copy's preview is the verifier's --app-preview run, not a PNG capture. */
-ZCL_APP_LAUNCH("tasks", "ztasks", "z23-tasks",
-               ZCL_APP_ARGV(), "",
+ZCL_APP_LAUNCH("tasks", "task,ztasks", "z23", ZCL_APP_ARGV("app", "tasks", "open"), "",
                ZCL_APP_RAISE_UNSUPPORTED, "z23 app copy tasks",
                ZCL_APP_ARGV(), "")

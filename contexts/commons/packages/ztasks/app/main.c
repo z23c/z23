@@ -105,7 +105,8 @@ static bool task_apply(struct ta_state *state, const char *input, const char *no
     if (strncmp(input, "add ", 4) == 0 && ta_title_valid(input + 4) && state->count < TA_MAX_TASKS) {
         struct ta_task *task = &state->tasks[state->count];
         task->id = (uint64_t)state->count + 1u;
-        (void)snprintf(task->title, sizeof(task->title), "%s", input + 4);
+        (void)snprintf(task->title, sizeof(task->title), "%.*s",
+                       (int)sizeof(task->title) - 1, input + 4);
         state->count++;
         state->revision++;
         state->last_write++;

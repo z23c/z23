@@ -281,6 +281,63 @@ static int case_open_raise_reopen(struct al_fx *f)
         ASSERT(f->res.pid > 1);
         ASSERT(f->res.pid != first);
     PASS(); }
+    TEST("Tasks opens its selected profile instead of reusing the node") {
+        al_kill_all();
+        char exe[PATH_MAX], profile[PATH_MAX], row[PATH_MAX + 128];
+        ASSERT(al_path(exe, sizeof(exe), f->env.bin_dir, "z23") &&
+               al_copy_exe(AL_FIXTURE, exe, 0700));
+        ASSERT(al_path(profile, sizeof(profile), f->root, "selected \"profile\"") &&
+               mkdir(profile, 0700) == 0);
+        ASSERT(al_row(row, sizeof(row), "nodeapp", "-", exe, "-", "ready", f->raised) > 0);
+        ASSERT(al_write_file(f->env.config_path, row, 0600));
+        app_launch_registry_load(&f->env, &f->reg);
+        ASSERT(f->reg.config_error[0] == '\0');
+        (void)snprintf(f->env.datadir, sizeof(f->env.datadir), "%s", profile);
+        al_open(f, "nodeapp");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
+        long node = f->res.pid;
+        al_open(f, "tasks");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
+        ASSERT(f->res.pid > 1 && f->res.pid != node);
+        char path[PATH_MAX], actual[1024], expected[1024];
+        ASSERT(al_path(path, sizeof(path), profile, "tasks-argv"));
+        FILE *args = fopen(path, "re");
+        ASSERT(args);
+        size_t n = fread(actual, 1, sizeof(actual) - 1, args);
+        ASSERT(fclose(args) == 0);
+        actual[n] = '\0';
+        ASSERT(snprintf(expected, sizeof(expected),
+                        "app\ntasks\nopen\n--datadir=%s\n", profile) > 0);
+        ASSERT_STR_EQ(actual, expected);
+        ASSERT(al_write_tsv(f));
+        app_launch_registry_load(&f->env, &f->reg);
+        ASSERT(f->reg.config_error[0] == '\0');
+    PASS(); }
+    TEST("My Apps snapshot opens Tasks with its selected profile") {
+        char other[PATH_MAX], old[PATH_MAX];
+        ASSERT(al_path(other, sizeof(other), f->root, "global-other") &&
+               mkdir(other, 0700) == 0);
+        (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        zcl_native_bridge_bind_rpc(other, 0);
+        const struct app_launch_entry *tasks = app_launch_registry_find(&f->reg, "tasks");
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_app_open_snapshot(&f->env, tasks, NULL, &reply);
+        zcl_native_bridge_bind_rpc(old, old_port);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        char path[PATH_MAX], actual[1024], expected[1024];
+        ASSERT(al_path(path, sizeof(path), f->env.datadir, "tasks-argv"));
+        FILE *args = fopen(path, "re");
+        ASSERT(args);
+        size_t n = fread(actual, 1, sizeof(actual) - 1, args);
+        ASSERT(fclose(args) == 0);
+        actual[n] = '\0';
+        ASSERT(snprintf(expected, sizeof(expected),
+                        "app\ntasks\nopen\n--datadir=%s\n", f->env.datadir) > 0);
+        ASSERT_STR_EQ(actual, expected);
+        zcl_command_reply_free(&reply);
+    PASS(); }
 _test_next:;
     al_kill_all();
     return failures;
@@ -305,11 +362,12 @@ static int case_refusals(struct al_fx *f)
         ASSERT(strstr(f->res.message, "z23-skycombat"));
         ASSERT_STR_EQ(f->res.hint, "build it with make game");
     PASS(); }
-    /* The tasks pointer row is registered (the hint names it beside
-     * skycombat) yet refused: a headless built-in row is served by a
-     * native command, not this windowed-open path, on every host. */
+    /* Without a desktop, Tasks is served by its native command rather than
+     * this windowed-open path; the catalog hint still names both apps. */
     TEST("the known headless tasks name refuses unknown_app, with its hint") {
+        f->env.desktop = false;
         al_open(f, "tasks");
+        f->env.desktop = true;
         ASSERT_STR_EQ(app_open_status_name(f->res.status), "failed");
         ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "unknown_app");
         ASSERT(strstr(f->res.message, "tasks"));
@@ -581,6 +639,7 @@ static int case_handlers(struct al_fx *f)
     struct zcl_command_reply reply = {0};
     struct zcl_command_request request = {.input = &input, .view = "normal"};
     al_env_save(saved, nsaved);
+    app_launch_test_set_desktop(0);
     json_init(&input);
     json_set_object(&input);
     TEST("app.open without a name is refused as MISSING_NAME") {
@@ -643,6 +702,27 @@ static int case_handlers(struct al_fx *f)
         ASSERT_STR_EQ(reply.next[1].command, "app.list");
         zcl_command_reply_free(&reply);
     PASS(); }
+    TEST("app.open of task aliases keeps native next actions headless") {
+        const char *aliases[] = {"task", "ztasks"};
+        for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
+            struct json_value alias_in;
+            struct zcl_command_request alias_req = {.input = &alias_in,
+                                                    .view = "normal",
+                                                    .invoked_name = "app.open"};
+            json_init(&alias_in);
+            json_set_object(&alias_in);
+            ASSERT(json_push_kv_str(&alias_in, "name", aliases[i]));
+            zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            zcl_native_handle_app_open(&alias_req, &reply);
+            json_free(&alias_in);
+            ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+            ASSERT_EQ(reply.next_count, 2u);
+            ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+            ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+            ASSERT_STR_EQ(reply.next[1].command, "app.list");
+            zcl_command_reply_free(&reply);
+        }
+    PASS(); }
     TEST("app.open of tasks preserves an explicit data directory") {
         struct json_value in;
         struct zcl_command_request req = {.input = &in, .view = "normal"};
@@ -668,6 +748,41 @@ static int case_handlers(struct al_fx *f)
         snprintf(expect + n, sizeof(expect) - n, "\"}");
         ASSERT_STR_EQ(reply.next[0].input_json, expect);
         zcl_command_reply_free(&reply);
+        json_free(&in);
+    PASS(); }
+    TEST("app.open default datadir fallback reaches desktop Tasks") {
+        struct json_value in;
+        struct zcl_command_request req = {.input = &in, .view = "normal"};
+        struct zcl_command_reply open_reply;
+        char old[PATH_MAX], profile[PATH_MAX], path[PATH_MAX];
+        char actual[1024], expected[1024];
+        ASSERT(al_path(profile, sizeof(profile), f->root, "default-profile") &&
+               mkdir(profile, 0700) == 0);
+        (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        ASSERT(!zcl_native_command_datadir_is_explicit());
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "name", "tasks"));
+        zcl_native_bridge_bind_rpc(profile, 0);
+        app_launch_test_set_bin_dir(f->env.bin_dir);
+        app_launch_test_set_desktop(1);
+        zcl_command_reply_init(&open_reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&req, &open_reply);
+        app_launch_test_set_desktop(-1);
+        app_launch_test_set_bin_dir(NULL);
+        zcl_native_bridge_bind_rpc(old, old_port);
+        ASSERT(open_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(al_path(path, sizeof(path), profile, "tasks-argv"));
+        FILE *args = fopen(path, "re");
+        ASSERT(args);
+        size_t n = fread(actual, 1, sizeof(actual) - 1, args);
+        ASSERT(fclose(args) == 0);
+        actual[n] = '\0';
+        ASSERT(snprintf(expected, sizeof(expected),
+                        "app\ntasks\nopen\n--datadir=%s\n", profile) > 0);
+        ASSERT_STR_EQ(actual, expected);
+        zcl_command_reply_free(&open_reply);
         json_free(&in);
     PASS(); }
     TEST("app.open avoids an unsafe shell suggestion for a quoted path") {
@@ -714,6 +829,7 @@ static int case_handlers(struct al_fx *f)
         json_free(&empty);
     PASS(); }
 _test_next:;
+    app_launch_test_set_desktop(-1);
     zcl_command_reply_free(&reply);
     json_free(&input);
     al_env_restore(saved, nsaved);
@@ -723,9 +839,9 @@ _test_next:;
 /* The desktop seam pins the admit order at the handler layer on any host:
  * an operator apps.tsv row whose executable is missing refuses NO_DESKTOP
  * (the desktop gate precedes the installed check), the same row refuses
- * NOT_INSTALLED once a desktop exists, and the headless tasks pointer row
- * is refused UNKNOWN_APP with its native-command next actions on both
- * desktop answers — DISPLAY-independent by construction. */
+ * NOT_INSTALLED once a desktop exists, and headless Tasks is refused
+ * UNKNOWN_APP with its native-command next actions — DISPLAY-independent
+ * by construction. */
 #if !defined(_WIN32)
 static int case_open_desktop(struct al_fx *f)
 {
@@ -786,24 +902,21 @@ static int case_open_desktop(struct al_fx *f)
         ASSERT_EQ(reply.next_count, 0u);
         zcl_command_reply_free(&reply);
     PASS(); }
-    /* Block D: the pointer row refuses UNKNOWN_APP with its next actions
-     * whether the desktop probe says headless or desktop. */
-    TEST("the tasks pointer row refuses UNKNOWN_APP with next actions on "
-         "both desktop answers") {
+    /* Block D: headless Tasks refuses UNKNOWN_APP with native actions;
+     * case_open_raise_reopen covers the real desktop window separately. */
+    TEST("headless Tasks refuses UNKNOWN_APP with its native next actions") {
         json_set_object(&input);
         ASSERT(json_push_kv_str(&input, "name", "tasks"));
-        for (int desktop = 0; desktop <= 1; desktop++) {
-            app_launch_test_set_desktop(desktop);
-            zcl_command_reply_init(&reply, "zcl.app_open.v1");
-            zcl_native_handle_app_open(&request, &reply);
-            app_launch_test_set_desktop(-1);
-            ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
-            ASSERT_EQ(reply.next_count, 2u);
-            ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
-            ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
-            ASSERT_STR_EQ(reply.next[1].command, "app.list");
-            zcl_command_reply_free(&reply);
-        }
+        app_launch_test_set_desktop(0);
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        app_launch_test_set_desktop(-1);
+        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+        ASSERT_STR_EQ(reply.next[1].command, "app.list");
+        zcl_command_reply_free(&reply);
     PASS(); }
 _test_next:;
     app_launch_test_set_desktop(-1);
@@ -3000,7 +3113,7 @@ static bool al_library_fill(struct al_fx *f)
      * reaches exactly 32 rows. */
     if (!al_path(builtin, sizeof(builtin), f->env.bin_dir, "z23-skycombat") ||
         !al_copy_exe(AL_FIXTURE, builtin, 0700) ||
-        !al_path(tasks, sizeof(tasks), f->env.bin_dir, "z23-tasks") ||
+        !al_path(tasks, sizeof(tasks), f->env.bin_dir, "z23") ||
         !al_copy_exe(AL_FIXTURE, tasks, 0700) || !al_library_catalog(f, 14) ||
         !app_launch_state_dir_ready(f->env.state_dir)) return false;
     for (unsigned i = 0; i < 16; ++i) {
@@ -3135,8 +3248,12 @@ _test_next:;
 }
 static void al_library_all_rows_actions(struct al_library_script *s)
 {
-    for (unsigned i = 0; i < 16; ++i) s->actions[i] = 1;
-    for (unsigned i = 16; i < 47; ++i) s->actions[i] = 2;
+    for (unsigned i = 0; i < 8; ++i) {
+        s->actions[2 * i] = 2;
+        s->actions[2 * i + 1] = 1;
+    }
+    for (unsigned i = 16; i < 31; ++i) s->actions[i] = 2;
+    for (unsigned i = 31; i < 47; ++i) s->actions[i] = (i & 1u) ? 1u : 2u;
     s->actions[47] = 3;
 }
 static int case_library_bounds(void)
@@ -3157,7 +3274,11 @@ static int case_library_bounds(void)
         struct al_library_script s = {.count = 48, .valid = true};
         al_library_all_rows_actions(&s);
         zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        const char *old_dir = zcl_native_command_datadir();
+        int old_port = zcl_native_command_rpc_port();
+        zcl_native_bridge_bind_rpc(f.root, 0);
         zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
         ASSERT(s.valid && s.calls == 48 && s.saved_label && !s.errors);
         ASSERT(strstr(s.last_summary, "App 32 of 32."));
         ASSERT(!json_get(&reply.data, "pid"));

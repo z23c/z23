@@ -73,6 +73,7 @@ struct app_launch_env {
     char bin_dir[APP_LAUNCH_PATH_MAX];     /* "" = unknown: builtins absent */
     char config_path[APP_LAUNCH_PATH_MAX]; /* "" = no operator file */
     char state_dir[APP_LAUNCH_PATH_MAX];
+    char datadir[APP_LAUNCH_PATH_MAX];     /* selected app profile */
     bool desktop;
     int ready_timeout_ms;
     int settle_ms;
@@ -140,6 +141,7 @@ bool app_launch_env_from_process(struct app_launch_env *env, char *why,
  * desktop, nonzero = desktop), so handler tests pin both answers on any
  * host; -1 restores the process probe. */
 void app_launch_test_set_desktop(int desktop);
+void app_launch_test_set_bin_dir(const char *dir);
 
 /* Built-in rows, then the operator file. An unsafe operator file is refused
  * whole (config_error); the built-in rows are still listed. */

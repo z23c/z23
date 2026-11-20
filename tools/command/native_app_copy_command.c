@@ -28,6 +28,8 @@
 #include "command/native_app_personalize_command.h"
 #include "command/native_app_seed_installed.h"
 
+#include "platform/directory_compat.h"
+#include "platform/os_proc.h"
 #include "base/hex.h"
 #include "config/command_catalog.h"
 #include "base/safe_alloc.h"
@@ -35,9 +37,11 @@
 #include "vcs/package_publish.h"
 #include "vcs/package_release.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define ZAC_COMMAND "app.copy"
 #define ZAC_PLAN_DOMAIN "zcl.app_copy.plan.v1"
@@ -61,7 +65,7 @@ struct zac {
     char key_path[ZAC_PATH];
     uint8_t plan_id[32];
     struct app_installed_source source;
-    bool installed, key_exists;
+    bool installed, tasks_share, key_exists;
     char publisher[67];
 };
 
@@ -130,11 +134,85 @@ static bool zac_find(struct zac *z)
     return ok && !z->ambiguous;
 }
 
+static enum app_installed_source_status zac_tasks_apps_dir(char *apps, size_t cap)
+{
+    char exe[ZAC_PATH];
+    if (!os_proc_exe_path(exe, sizeof(exe))) return APP_INSTALLED_SOURCE_REFUSED;
+    char *suffix = strstr(exe, "/bin/z23");
+    char *generation = strstr(exe, "/lib/z23/generations/");
+    const char *leaf = strrchr(exe, '/');
+    if (suffix && suffix[8] == '\0') *suffix = '\0';
+    else if (generation && leaf && strcmp(leaf, "/z23") == 0) *generation = '\0';
+    else return APP_INSTALLED_SOURCE_UNSELECTED;
+    int n = snprintf(apps, cap, "%s/share/z23/apps", exe);
+    struct stat st;
+    if (n <= 0 || (size_t)n >= cap) return APP_INSTALLED_SOURCE_REFUSED;
+    if (stat(apps, &st) != 0)
+        return errno == ENOENT ? APP_INSTALLED_SOURCE_UNSELECTED : APP_INSTALLED_SOURCE_REFUSED;
+    return APP_INSTALLED_SOURCE_VERIFIED;
+}
+
+static enum app_installed_source_status zac_tasks_share_path(char *out, size_t cap)
+{
+    char apps[ZAC_PATH], selected[ZAC_PATH];
+    enum app_installed_source_status status = zac_tasks_apps_dir(apps, sizeof(apps));
+    if (status != APP_INSTALLED_SOURCE_VERIFIED) return status;
+    int n = snprintf(selected, sizeof(selected), "%s/tasks", apps);
+    if (n <= 0 || (size_t)n >= sizeof(selected) ||
+        !platform_directory_canonical_real(selected, selected, sizeof(selected)))
+        return APP_INSTALLED_SOURCE_REFUSED;
+    n = snprintf(out, cap, "%s/tasks.z23share", selected);
+    if (n <= 0 || (size_t)n >= cap) return APP_INSTALLED_SOURCE_REFUSED;
+    struct stat st;
+    if (lstat(out, &st) != 0)
+        return errno == ENOENT ? APP_INSTALLED_SOURCE_UNSELECTED : APP_INSTALLED_SOURCE_REFUSED;
+    return S_ISREG(st.st_mode) ? APP_INSTALLED_SOURCE_VERIFIED : APP_INSTALLED_SOURCE_REFUSED;
+}
+
+static bool zac_installed_tasks_plan(struct zac *z)
+{
+    char file[ZAC_PATH];
+    if (z->have_release || strcmp(z->app, "tasks") != 0) return true;
+    enum app_installed_source_status status = zac_tasks_share_path(file, sizeof(file));
+    if (status == APP_INSTALLED_SOURCE_UNSELECTED) return true;
+    if (status != APP_INSTALLED_SOURCE_VERIFIED) {
+        zcl_package_copy_fail(z->reply, "INSTALLED_SOURCE_UNAVAILABLE", false,
+            "Installed Tasks source could not be verified",
+            "layout, selector, regular share file or canonical path mismatch");
+        return false;
+    }
+    json_init(&z->inner_in);
+    json_set_object(&z->inner_in);
+    const char *kv[] = {"file", file, "datadir", z->datadir};
+    z->inner_live = true;
+    if (!zcl_app_input(&z->inner_in, kv, 4)) {
+        zcl_package_copy_fail(z->reply, "ALLOC", false, "Tasks receive input", ZAC_COMMAND);
+        return false;
+    }
+    if (!zcl_app_inner_call("app.receive-copy", &z->inner_in, &z->inner, NULL)) {
+        zcl_app_inner_fail(z->reply, &z->inner, false);
+        return false;
+    }
+    const char *inner_plan = zcl_app_inner_str(&z->inner, "plan_id");
+    uint8_t inner_id[32];
+    if (!inner_plan || !zcl_hex_decode_lower(inner_plan, inner_id, sizeof(inner_id))) {
+        zcl_package_copy_fail(z->reply, "PLAN_ID_MISSING", false,
+                              "Tasks receive returned no valid plan ID", ZAC_COMMAND);
+        return false;
+    }
+    z->tasks_share = z->installed = true;
+    (void)snprintf(z->inner_plan, sizeof(z->inner_plan), "%s", inner_plan);
+    const char *parts[] = {z->app, z->datadir, "app.receive-copy", z->inner_plan};
+    zcl_app_plan_id(ZAC_PLAN_DOMAIN, parts, 4, z->plan_id);
+    return true;
+}
+
 /* Return false only on refusal. An unselected executable keeps the existing
  * checkout seed path; a selected but broken install never falls back. */
 static bool zac_installed_plan(struct zac *z)
 {
-    if (z->have_release || !app_installed_source_supported(z->app)) return true;
+    if (!zac_installed_tasks_plan(z)) return false;
+    if (z->installed || z->have_release || !app_installed_source_supported(z->app)) return true;
     char why[256] = "";
     enum app_installed_source_status status = app_installed_source_select(
         z->app, &z->source, why, sizeof(why));
@@ -158,8 +236,34 @@ static bool zac_installed_plan(struct zac *z)
     return true;
 }
 
+static void zac_tasks_reply(struct zac *z)
+{
+    struct json_value outer;
+    json_init(&outer);
+    json_set_object(&outer);
+    bool ok = true;
+    for (size_t i = 0; i < z->inner.data.num_children; i++) {
+        if (strcmp(z->inner.data.keys[i], "plan_id") != 0)
+            ok = json_push_kv(&outer, z->inner.data.keys[i],
+                              &z->inner.data.children[i]) && ok;
+    }
+    ok = ok && zcl_package_copy_push_root(&outer, "plan_id", z->plan_id);
+    if (!ok) {
+        json_free(&outer);
+        zcl_package_copy_fail(z->reply, "ALLOC", false,
+                              "Cannot describe Tasks receive plan", ZAC_COMMAND);
+        return;
+    }
+    json_free(&z->reply->data);
+    z->reply->data = outer;
+}
+
 static void zac_installed_reply(struct zac *z)
 {
+    if (z->tasks_share) {
+        zac_tasks_reply(z);
+        return;
+    }
     struct json_value data; json_init(&data); json_set_object(&data);
     struct json_value *d = &data;
     char projection[65], package[65], image[65];
@@ -187,9 +291,23 @@ static void zac_installed_reply(struct zac *z)
 
 static void zac_push_key(struct json_value *d, const struct zcl_command_reply *from);
 
+static void zac_tasks_confirm(struct zac *z)
+{
+    if (!json_push_kv_str(&z->inner_in, "plan_id", z->inner_plan) ||
+        !json_push_kv_bool(&z->inner_in, "confirm", true)) {
+        zcl_package_copy_fail(z->reply, "ALLOC", false, "Tasks receive confirmation", ZAC_COMMAND);
+        return;
+    }
+    (void)zcl_app_inner_call("app.receive-copy", &z->inner_in, z->reply, NULL);
+}
+
 static void zac_installed_confirm(struct zac *z)
 {
     if (!zcl_package_copy_plan_matches(z->input, z->plan_id, z->reply, ZAC_COMMAND)) return;
+    if (z->tasks_share) {
+        zac_tasks_confirm(z);
+        return;
+    }
     struct json_value in; json_init(&in); json_set_object(&in);
     bool ok = json_push_kv_str(&in, "app", z->app) &&
               json_push_kv_str(&in, "datadir", z->datadir);

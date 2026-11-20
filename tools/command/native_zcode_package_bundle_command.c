@@ -268,6 +268,7 @@ static void zpb_describe(struct zpb_receive *s, const char *stage)
     (void)json_push_kv_str(d, "semver", s->share.release.semver);
     (void)json_push_kv_str(d, "release_id", s->release_hex);
     (void)json_push_kv_str(d, "package_root", s->package_hex);
+    zcl_package_copy_push_root(d, "recipe_root", s->share.release.recipe_root);
     (void)json_push_kv_str(d, "publisher_fingerprint", s->fingerprint);
     (void)json_push_kv_int(d, "publisher_sequence",
                            (int64_t)s->share.release.publisher_sequence);
