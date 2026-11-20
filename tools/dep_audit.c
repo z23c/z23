@@ -609,7 +609,9 @@ static bool provenance_ok(const char *root, const char *archive)
      * fixed redirection and the script path as a separate positional value. */
     const char *const args[] = {
         "z23_bounded_run", "600000", "\"" DEP_AUDIT_BASH "\"",
-        "-c", "\"source \\\"$0\\\" \\\"$@\\\" </dev/null >/dev/null 2>&1\"",
+        "-c", "\"if command -v cc >/dev/null; then export PATH=$PATH:/usr/bin; "
+              "else export PATH=/ucrt64/bin:/usr/bin:$PATH; fi; "
+              "source \\\"$0\\\" \\\"$@\\\" </dev/null >/dev/null 2>&1\"",
         quoted_script, "--check-provenance", archive, NULL
     };
     return _spawnv(_P_WAIT, runner, args) == 0;
