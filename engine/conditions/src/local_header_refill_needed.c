@@ -21,6 +21,10 @@ static _Atomic int g_peer_max_at_detect = -1;
 static _Atomic int g_last_witness_peer_max = -1;
 static _Atomic int g_last_witness_arrived;
 static _Atomic int g_last_best_header_body_target = -1;
+static struct condition c_local_header_refill_needed;
+/* Accessed under main_state.cs_main, alongside the active tip. */
+static struct uint256 g_tip_hash_at_detect;
+static bool g_tip_hash_known;
 
 #ifdef ZCL_TESTING
 static _Atomic int g_test_remedy_calls;
@@ -86,15 +90,20 @@ static bool detect_local_header_refill_needed(void)
         next_h = tip_h + 1;
         missing = peer_max >= next_h &&
             !sync_monitor_active_next_child_exists(ms, tip, next_h);
+        /* Detection precedes witness even for an active episode. Preserve
+         * the episode's parent until it is witnessed or superseded. */
+        if (missing &&
+            !atomic_load(&c_local_header_refill_needed.state.currently_active)) {
+            atomic_store(&g_tip_at_detect, tip_h);
+            atomic_store(&g_missing_height, next_h);
+            atomic_store(&g_peer_max_at_detect, peer_max);
+            g_tip_hash_known = tip->phashBlock != NULL;
+            if (g_tip_hash_known)
+                g_tip_hash_at_detect = *tip->phashBlock;
+        }
     }
     zcl_mutex_unlock(&ms->cs_main);
-    if (!missing)
-        return false;
-
-    atomic_store(&g_tip_at_detect, tip_h);
-    atomic_store(&g_missing_height, next_h);
-    atomic_store(&g_peer_max_at_detect, peer_max);
-    return true;
+    return missing;
 }
 
 static enum condition_remedy_result remedy_local_header_refill_needed(void)
@@ -103,6 +112,8 @@ static enum condition_remedy_result remedy_local_header_refill_needed(void)
     int next_h = atomic_load(&g_missing_height);
     int peers = sync_monitor_local_header_refill(
         cm, next_h, "condition:local_header_refill_needed");
+    if (peers < 0)
+        return COND_REMEDY_SKIP;
     struct watchdog_local_recovery_stats lr;
     sync_monitor_get_local_recovery_stats(&lr);
     struct bsp_decision decision;
@@ -154,13 +165,23 @@ static enum condition_remedy_result remedy_local_header_refill_needed(void)
     return COND_REMEDY_OK;
 }
 
+/* Caller holds cs_main; absence of a hash is not evidence of replacement. */
+static bool local_refill_parent_superseded(const struct block_index *tip)
+{
+    if (!tip) return false;
+    if (tip->nHeight < atomic_load(&g_tip_at_detect)) return true;
+    return g_tip_hash_known && tip->phashBlock &&
+        !uint256_eq(&g_tip_hash_at_detect, tip->phashBlock);
+}
+
 static bool witness_local_header_refill_needed(int64_t target_at_detect)
 {
     (void)target_at_detect;
     /* Witness the symptom MOVED, not that detect flipped. The remedy's job
      * was to supply the missing header at g_missing_height. Verify forward
      * progress directly: either that header child now exists (it arrived), or
-     * peers no longer reach that height (the gap closed from the other end).
+     * peers no longer reach that height (the gap closed from the other end),
+     * or the original active parent was superseded by a reorg.
      * Re-running detect would only confirm "the poison I named is gone" — a
      * tautology forbidden by Law 7. */
     int missing_h = atomic_load(&g_missing_height);
@@ -174,19 +195,26 @@ static bool witness_local_header_refill_needed(int64_t target_at_detect)
 
     int peer_max = connman_max_peer_height(cm);
     atomic_store(&g_last_witness_peer_max, peer_max);
-    if (peer_max < missing_h)
+    if (peer_max < missing_h) {
+        sync_monitor_local_header_refill_witnessed(missing_h);
         return true; /* peers retreated below the needed height */
+    }
 
     bool arrived = false;
+    bool rewound = false;
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *tip = active_chain_tip(&ms->chain_active);
     if (tip && tip->nHeight >= missing_h)
         arrived = true;
+    else if (local_refill_parent_superseded(tip))
+        rewound = true;
     else if (tip)
         arrived = sync_monitor_active_next_child_exists(ms, tip, missing_h);
     zcl_mutex_unlock(&ms->cs_main);
     atomic_store(&g_last_witness_arrived, arrived ? 1 : 0);
-    return arrived; /* the missing header child actually showed up */
+    if (arrived || rewound)
+        sync_monitor_local_header_refill_witnessed(missing_h);
+    return arrived || rewound; /* arrived or old frontier superseded */
 }
 
 static void read_current_tip_and_missing_child(struct main_state *ms,
@@ -276,7 +304,7 @@ static bool detail_local_header_refill_needed(struct json_value *out)
                                 lr.last_reason);
     ok = ok && json_push_kv_str(
         out, "remedy_contract",
-        "refill is witnessed when the missing child arrives or peers no longer advertise the missing height");
+        "refill ends when the missing child arrives, peers no longer advertise its height, or the active parent is superseded");
     return ok;
 }
 
@@ -307,6 +335,7 @@ void local_header_refill_needed_test_reset(void)
     atomic_store(&g_last_witness_peer_max, -1);
     atomic_store(&g_last_witness_arrived, 0);
     atomic_store(&g_last_best_header_body_target, -1);
+    g_tip_hash_known = false;
     atomic_store(&g_test_remedy_calls, 0);
 }
 

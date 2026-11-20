@@ -87,6 +87,26 @@ static struct {
  * cs_nodes-derived state to locals and only touches g_local_recovery after
  * releasing cs_nodes, so the two never nest. */
 static pthread_mutex_t g_local_recovery_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_local_recovery_generation;
+#ifdef ZCL_TESTING
+static void (*g_refill_test_phase)(int);
+#endif
+
+/* Caller holds g_local_recovery_lock. */
+static void local_refill_clear_locked(void)
+{
+    memset(&g_local_recovery, 0, sizeof(g_local_recovery));
+    atomic_fetch_add(&g_local_recovery_generation, 1);
+}
+
+void sync_monitor_local_header_refill_witnessed(int missing_height)
+{
+    pthread_mutex_lock(&g_local_recovery_lock);
+    if (g_local_recovery.active &&
+        g_local_recovery.missing_height == missing_height)
+        local_refill_clear_locked();
+    pthread_mutex_unlock(&g_local_recovery_lock);
+}
 
 void sync_monitor_init(void)
 {
@@ -96,7 +116,7 @@ void sync_monitor_init(void)
     g_condition_mp = NULL;
     condition_engine_set_main_state(NULL);
     pthread_mutex_lock(&g_local_recovery_lock);
-    memset(&g_local_recovery, 0, sizeof(g_local_recovery));
+    local_refill_clear_locked();
     pthread_mutex_unlock(&g_local_recovery_lock);
     memset(g_last_recovery_reason, 0, sizeof(g_last_recovery_reason));
     memset(g_last_recovery_trigger, 0, sizeof(g_last_recovery_trigger));
@@ -105,6 +125,7 @@ void sync_monitor_init(void)
     atomic_store(&g_last_observed_provable_tip, -1);
 #ifdef ZCL_TESTING
     atomic_store(&g_tip_advance_test_override, false);
+    g_refill_test_phase = NULL;
 #endif
     atomic_store(&g_recoveries_total, 0);
     atomic_store(&g_last_recovery_time, 0);
@@ -178,6 +199,11 @@ void sync_monitor_on_block_connected(int height)
      * authoritative progress; receipt of another body is not tip advance. */
     if (reducer_frontier_provable_tip_is_published())
         return;
+    pthread_mutex_lock(&g_local_recovery_lock);
+    if (!reducer_frontier_provable_tip_is_published() &&
+        g_local_recovery.active && g_local_recovery.missing_height <= height)
+        local_refill_clear_locked();
+    pthread_mutex_unlock(&g_local_recovery_lock);
     atomic_store(&g_last_block_connected_ts,
                  (int64_t)platform_time_wall_time_t());
     atomic_store(&g_last_block_connected_height, height);
@@ -779,25 +805,43 @@ static void local_refill_record_locked(int next_h, const char *reason,
         g_local_recovery.retries_exhausted = true;
 }
 
-int sync_monitor_local_header_refill(struct connman *cm,
-                                     int next_h,
-                                     const char *reason)
+static void local_refill_begin(int next_h, int *previous, uint64_t *generation)
 {
-    if (!cm)
-        return 0;
+    pthread_mutex_lock(&g_local_recovery_lock);
+    if (!g_local_recovery.active ||
+        g_local_recovery.missing_height != next_h) {
+        local_refill_clear_locked();
+        g_local_recovery.active = true;
+        g_local_recovery.missing_height = next_h;
+    }
+    *previous = g_local_recovery.retry_count;
+    *generation = atomic_load(&g_local_recovery_generation);
+    pthread_mutex_unlock(&g_local_recovery_lock);
+}
 
+static bool local_refill_finish(int next_h, const char *reason, int eligible,
+                                bool rotated_peer, uint64_t generation)
+{
+    bool recorded = false;
+    pthread_mutex_lock(&g_local_recovery_lock);
+    if (generation == atomic_load(&g_local_recovery_generation)) {
+        local_refill_record_locked(next_h, reason, eligible, rotated_peer);
+        recorded = true;
+    }
+    pthread_mutex_unlock(&g_local_recovery_lock);
+    return recorded;
+}
+
+static int local_refill_scan(struct connman *cm, int next_h, int previous,
+                             uint64_t generation, bool *rotated_peer)
+{
     int eligible = 0;
     struct p2p_node *worst = NULL;
-    bool rotated_peer = false;
-
-    /* Snapshot the prior retry count before taking cs_nodes so the peer scan
-     * never touches g_local_recovery while cs_nodes is held (lock-order: the
-     * recovery lock must not nest under cs_nodes). */
-    pthread_mutex_lock(&g_local_recovery_lock);
-    int prev_retry_count = g_local_recovery.retry_count;
-    pthread_mutex_unlock(&g_local_recovery_lock);
-
     zcl_mutex_lock(&cm->manager.cs_nodes);
+    if (generation != atomic_load(&g_local_recovery_generation)) {
+        zcl_mutex_unlock(&cm->manager.cs_nodes);
+        return -1; // raw-return-ok:stale-refill-attempt
+    }
     for (size_t i = 0; i < cm->manager.num_nodes; i++) {
         struct p2p_node *n = cm->manager.nodes[i];
         if (!local_refill_peer_eligible(n, next_h))
@@ -816,20 +860,48 @@ int sync_monitor_local_header_refill(struct connman *cm,
             worst = n;
     }
 
-    if (local_refill_should_rotate(prev_retry_count, worst, eligible)) {
+    if (local_refill_should_rotate(previous, worst, eligible)) {
         (void)p2p_node_request_disconnect(worst, P2P_DISCONNECT_SYNC_STALL,
             P2P_DISCONNECT_SOURCE_SYNC, worst->endpoint_generation);
-        rotated_peer = true;
+        *rotated_peer = true;
     }
     zcl_mutex_unlock(&cm->manager.cs_nodes);
+    return eligible;
+}
+
+int sync_monitor_local_header_refill(struct connman *cm,
+                                     int next_h,
+                                     const char *reason)
+{
+    if (!cm)
+        return 0;
+
+    /* Each missing height gets its own retry budget. A generation prevents a
+     * late scan from restoring a witnessed or superseded episode. */
+    int prev_retry_count;
+    uint64_t generation;
+    bool rotated_peer = false;
+    local_refill_begin(next_h, &prev_retry_count, &generation);
+#ifdef ZCL_TESTING
+    if (g_refill_test_phase)
+        g_refill_test_phase(0);
+#endif
+    int eligible = local_refill_scan(cm, next_h, prev_retry_count, generation,
+                                     &rotated_peer);
+    if (eligible < 0)
+        return -1; // raw-return-ok:stale-refill-attempt
+#ifdef ZCL_TESTING
+    if (g_refill_test_phase)
+        g_refill_test_phase(1);
+#endif
+    if (!local_refill_finish(next_h, reason, eligible, rotated_peer, generation))
+        return -1; // raw-return-ok:stale-refill-attempt
+    if (generation != atomic_load(&g_local_recovery_generation))
+        return -1; // raw-return-ok:stale-refill-attempt
     if (prev_retry_count > 0 &&
         eligible < LOCAL_HEADER_REFILL_MIN_PEERS) {
         connman_kick_seed_discovery(cm);
     }
-
-    pthread_mutex_lock(&g_local_recovery_lock);
-    local_refill_record_locked(next_h, reason, eligible, rotated_peer);
-    pthread_mutex_unlock(&g_local_recovery_lock);
 
     return eligible;
 }
@@ -992,6 +1064,11 @@ bool sync_monitor_dump_state_json(struct json_value *out, const char *key)
 }
 
 #ifdef ZCL_TESTING
+void sync_monitor_test_set_refill_phase(void (*hook)(int))
+{
+    g_refill_test_phase = hook;
+}
+
 void sync_monitor_test_set_local_recovery(bool active,
                                           bool retries_exhausted,
                                           int missing_height,

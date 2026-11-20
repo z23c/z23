@@ -9,7 +9,8 @@
  * REMEDY: sync_monitor_local_header_refill(next_h); if block_source_policy
  *   decision=proceed, force SYNC_HEADERS_DOWNLOAD + kick_local_sync.
  * WITNESSED: the missing header child at g_missing_height now exists, OR
- *   peers retreated below that height (the gap closed from the other end).
+ *   peers retreated below that height, OR the original active parent was
+ *   superseded by a rewind or same-height replacement.
  * COND_WARN; poll_secs=5 (backoff 300s, max_attempts 3). */
 void register_local_header_refill_needed(void);
 

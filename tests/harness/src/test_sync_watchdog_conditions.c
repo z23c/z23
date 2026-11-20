@@ -1138,12 +1138,13 @@ static int sync_watchdog_case_refill_clears_on_tip_advance(void)
         struct download_manager dm;
         struct main_state ms;
         reset_sync_watchdog(&cm, &dm, &ms);
+        reducer_frontier_provable_tip_set(100);
         bool ok = true;
         register_local_header_refill_needed();
 
         struct block_index tip = {0};
         tip.nHeight = 10;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
+        ok &= active_chain_move_window_tip(&ms.chain_active, &tip);
         struct p2p_node peer = {0};
         peer.id = 1;
         peer.starting_height = 20;
@@ -1157,20 +1158,177 @@ static int sync_watchdog_case_refill_clears_on_tip_advance(void)
         sync_set_state(SYNC_BLOCKS_DOWNLOAD, "test");
 
         condition_engine_tick();
-        ok = ok && local_header_refill_needed_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
+        ok &= local_header_refill_needed_test_remedy_calls() == 1;
+        ok &= condition_engine_get_active_count() == 1;
 
         struct block_index advanced = {0};
+        struct uint256 advanced_hash = {0};
+        advanced_hash.data[0] = 1;
         advanced.nHeight = 11;
-        peer.starting_height = 11;
-        ok = ok && active_chain_move_window_tip(&ms.chain_active, &advanced);
+        advanced.phashBlock = &advanced_hash;
+        ok &= active_chain_move_window_tip(&ms.chain_active, &advanced);
         condition_engine_tick();
-        ok = ok && condition_engine_get_active_count() == 0;
+        ok &= condition_engine_get_active_count() == 0;
+        struct watchdog_local_recovery_stats lr;
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= !lr.active;
+        fake_clock_set(&clock, 4706);
+        condition_engine_tick();
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= condition_engine_get_active_count() == 1;
+        ok &= lr.active && lr.missing_height == 12 && lr.retry_count == 1;
+        struct block_index replacement = {0};
+        struct uint256 replacement_hash = {0};
+        replacement_hash.data[0] = 2;
+        replacement.nHeight = 11;
+        replacement.phashBlock = &replacement_hash;
+        ok &= active_chain_move_window_tip(&ms.chain_active, &replacement);
+        condition_engine_tick();
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= condition_engine_get_active_count() == 0 && !lr.active;
+        fake_clock_set(&clock, 4712);
+        condition_engine_tick();
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= condition_engine_get_active_count() == 1;
+        ok &= lr.active && lr.missing_height == 12 && lr.retry_count == 1;
+        struct block_index rewound = {0};
+        rewound.nHeight = 8;
+        ok &= active_chain_move_window_tip(&ms.chain_active, &rewound);
+        condition_engine_tick();
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= condition_engine_get_active_count() == 0 && !lr.active;
+        fake_clock_set(&clock, 4718);
+        condition_engine_tick();
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= condition_engine_get_active_count() == 1;
+        ok &= lr.active && lr.missing_height == 9 && lr.retry_count == 1;
+        peer.starting_height = 8;
+        condition_engine_tick();
+        sync_monitor_get_local_recovery_stats(&lr);
+        ok &= condition_engine_get_active_count() == 0 && !lr.active;
         SYNC_WATCHDOG_CHECK(
             "local header refill clears after active tip advances", ok);
         cleanup_sync_watchdog();
         main_state_free(&ms);
+        reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
+
+static int sync_watchdog_case_refill_progress_scope(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    reducer_frontier_provable_tip_reset();
+    reset_sync_watchdog(&cm, &dm, &ms);
+    struct p2p_node peers[2] = {0};
+    struct p2p_node *nodes[] = { &peers[0], &peers[1] };
+    for (int i = 0; i < 2; i++) {
+        peers[i].id = (uint32_t)(i + 1);
+        peers[i].starting_height = 100;
+        peers[i].state = PEER_ACTIVE;
+    }
+    cm.manager.nodes = nodes;
+    cm.manager.num_nodes = 2;
+    struct watchdog_local_recovery_stats lr;
+    sync_monitor_test_set_local_recovery(true, true, 11, 3, "next-child-missing");
+    (void)sync_monitor_local_header_refill(&cm, 12, "new gap");
+    sync_monitor_get_local_recovery_stats(&lr);
+    bool ok = lr.active && lr.missing_height == 12 && lr.retry_count == 1 &&
+              lr.peer_rotation_count == 0 && !lr.retries_exhausted;
+    (void)sync_monitor_local_header_refill(&cm, 12, "same gap");
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= lr.retry_count == 2 && lr.peer_rotation_count == 1 &&
+         !lr.retries_exhausted;
+    (void)sync_monitor_local_header_refill(&cm, 12, "same gap again");
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= lr.retry_count == 3 && lr.retries_exhausted;
+
+    reducer_frontier_provable_tip_set(12);
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= lr.active && lr.retries_exhausted;
+    sync_monitor_local_header_refill_witnessed(12);
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= !lr.active && !lr.retries_exhausted && !lr.mirror_repair_gated;
+    reducer_frontier_provable_tip_set(9);
+    (void)sync_monitor_local_header_refill(&cm, 10, "rewound gap");
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= lr.active && lr.missing_height == 10 && lr.retry_count == 1;
+    sync_monitor_on_block_connected(100);
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= lr.active && lr.missing_height == 10;
+    reducer_frontier_provable_tip_reset();
+    sync_monitor_on_block_connected(10);
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok &= !lr.active;
+    SYNC_WATCHDOG_CHECK("refill follows target and authoritative progress", ok);
+    cleanup_sync_watchdog();
+    main_state_free(&ms);
+    reducer_frontier_provable_tip_reset();
+    return failures;
+}
+
+static void sync_watchdog_refill_cancel_witness(int phase)
+{
+    if (phase == 0) sync_monitor_local_header_refill_witnessed(20);
+}
+
+static void sync_watchdog_refill_boot_progress(int phase)
+{
+    if (phase == 0) sync_monitor_on_block_connected(20);
+}
+
+static void sync_watchdog_refill_cancel_after_scan(int phase)
+{
+    if (phase == 1) sync_monitor_local_header_refill_witnessed(20);
+}
+
+static int sync_watchdog_case_refill_cancellation(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct download_manager dm;
+    struct main_state ms;
+    reducer_frontier_provable_tip_reset();
+    reset_sync_watchdog(&cm, &dm, &ms);
+    struct p2p_node peer = {0};
+    peer.id = 1;
+    peer.starting_height = 30;
+    peer.state = PEER_ACTIVE;
+    peer.last_getheaders_time = 123;
+    struct p2p_node peer2 = {0};
+    peer2.id = 2;
+    peer2.starting_height = 30;
+    peer2.state = PEER_ACTIVE;
+    peer2.last_getheaders_time = 124;
+    struct p2p_node *nodes[] = { &peer, &peer2 };
+    cm.manager.nodes = nodes;
+    cm.manager.num_nodes = 2;
+    struct watchdog_local_recovery_stats lr;
+    sync_monitor_test_set_local_recovery(true, false, 20, 1, "next-child-missing");
+    sync_monitor_test_set_refill_phase(sync_watchdog_refill_cancel_witness);
+    int rc = sync_monitor_local_header_refill(&cm, 20, "cancelled refill");
+    sync_monitor_get_local_recovery_stats(&lr);
+    bool ok = rc < 0 && !lr.active && peer.last_getheaders_time == 123 &&
+              peer2.last_getheaders_time == 124 && !peer.disconnect && !peer2.disconnect;
+    reducer_frontier_provable_tip_reset();
+    sync_monitor_test_set_local_recovery(true, false, 20, 1, "next-child-missing");
+    sync_monitor_test_set_refill_phase(sync_watchdog_refill_boot_progress);
+    rc = sync_monitor_local_header_refill(&cm, 20, "boot progress");
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok = ok && rc < 0 && !lr.active && peer.last_getheaders_time == 123;
+    sync_monitor_test_set_local_recovery(true, false, 20, 1, "next-child-missing");
+    sync_monitor_test_set_refill_phase(sync_watchdog_refill_cancel_after_scan);
+    rc = sync_monitor_local_header_refill(&cm, 20, "cancelled after scan");
+    sync_monitor_get_local_recovery_stats(&lr);
+    ok = ok && rc < 0 && !lr.active;
+    sync_monitor_test_set_refill_phase(NULL);
+    SYNC_WATCHDOG_CHECK("refill cannot restore an episode after progress", ok);
+    cleanup_sync_watchdog();
+    main_state_free(&ms);
+    reducer_frontier_provable_tip_reset();
     return failures;
 }
 
@@ -1197,6 +1355,8 @@ int test_sync_watchdog_conditions(void)
     failures += sync_watchdog_case_refill_fork_body();
     failures += sync_watchdog_case_refill_waits_for_outbound();
     failures += sync_watchdog_case_refill_clears_on_tip_advance();
+    failures += sync_watchdog_case_refill_progress_scope();
+    failures += sync_watchdog_case_refill_cancellation();
 
     cleanup_sync_watchdog();
     return failures;

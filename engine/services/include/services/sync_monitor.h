@@ -97,9 +97,13 @@ struct zcl_result sync_monitor_queue_best_header_body_checked(
     const struct uint256 *expected_hash,
     const char *reason,
     bool *queued_out);
+/* Returns eligible peer count, or -1 when the episode was superseded. */
 int sync_monitor_local_header_refill(struct connman *cm,
                                      int next_h,
                                      const char *reason);
+/* End only the matching missing-header episode after its condition witnesses
+ * arrival, a peer retreat, or a superseding frontier. Does not report progress. */
+void sync_monitor_local_header_refill_witnessed(int missing_height);
 bool sync_monitor_active_next_child_exists(struct main_state *ms,
                                            struct block_index *tip,
                                            int next_h);
@@ -159,6 +163,7 @@ static inline void sync_monitor_push_local_recovery_health_json(
 }
 
 #ifdef ZCL_TESTING
+void sync_monitor_test_set_refill_phase(void (*hook)(int));
 void sync_monitor_test_set_local_recovery(bool active,
                                           bool retries_exhausted,
                                           int missing_height,
