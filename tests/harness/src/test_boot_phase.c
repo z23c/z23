@@ -728,6 +728,7 @@ static int test_boot_replay_provenance(void)
  * existing timeout line can identify the last completed authentication step. */
 struct bp_stage_event { int64_t when_us; char stage; };
 static int bp_stage_fd = -1;
+static int bp_progress_fd = -1;
 
 static void bp_stage_emit(char stage)
 {
@@ -735,6 +736,7 @@ static void bp_stage_emit(char stage)
     if (bp_stage_fd < 0) return;
     struct bp_stage_event event = { .when_us = platform_time_monotonic_us(), .stage = stage };
     (void)send(bp_stage_fd, &event, sizeof(event), MSG_DONTWAIT | MSG_NOSIGNAL);
+    (void)send(bp_progress_fd, &event, sizeof(event), MSG_DONTWAIT | MSG_NOSIGNAL);
 #else
     (void)stage;
 #endif
@@ -1292,10 +1294,20 @@ static void bp_checkpoint_child(const char *dir, int mode)
     bp_checkpoint_open_faults(&r, db, path);
     bp_checkpoint_resume_faults(&r, dir, mode);
 }
-static bool bp_checkpoint_wait(pid_t child, int expected, const char *label, int trace_fd)
+static bool bp_checkpoint_progress(int fd)
+{
+    if (fd < 0) return false;
+    bool progress = false;
+    struct bp_stage_event event;
+    while (read(fd, &event, sizeof(event)) == (ssize_t)sizeof(event)) progress = true;
+    return progress;
+}
+
+static bool bp_checkpoint_wait(pid_t child, int expected, const char *label,
+                               int trace_fd, int progress_fd)
 {
     int status = 0;
-    for (int i = 0; i < 400; ++i) {
+    for (int idle = 0; idle < 400;) {
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) {
             bool ok = WIFEXITED(status) && WEXITSTATUS(status) == expected;
@@ -1313,9 +1325,12 @@ static bool bp_checkpoint_wait(pid_t child, int expected, const char *label, int
             fprintf(stderr, "\nFAIL checkpoint %s: waitpid errno=%d\n", label, errno);
             return false;
         }
+        if (bp_checkpoint_progress(progress_fd)) idle = 0;
+        else ++idle;
         (void)poll(NULL, 0, 50);
     }
-    fprintf(stderr, "\nFAIL checkpoint %s: child timeout after 400 polls of 50 ms\n", label);
+    fprintf(stderr, "\nFAIL checkpoint %s: child timeout after 400 polls of 50 ms%s\n",
+            label, progress_fd >= 0 ? " without progress" : "");
     (void)kill(child, SIGKILL); (void)waitpid(child, &status, 0);
     (void)bp_stage_report(trace_fd, label, true); return false;
 }
@@ -1342,15 +1357,18 @@ static bool bp_trace_open(int trace[2])
 #endif
 
 static bool bp_checkpoint_trace(int mode, const char *label, const char *dir,
-                                int trace[2])
+                                int trace[2], int progress[2])
 {
     (void)label; (void)dir;
 #if defined(__linux__)
-    if (mode == 6 && !bp_trace_open(trace)) {
+    if (mode == 6 && (!bp_trace_open(trace) || !bp_trace_open(progress))) {
+        if (trace[0] >= 0) close(trace[0]);
+        if (trace[1] >= 0) close(trace[1]);
         fprintf(stderr, "\nFAIL checkpoint %s: trace channel unavailable\n", label);
         test_rm_rf(dir); return false;
     }
 #else
+    (void)progress;
     if (mode == 6 && socketpair(AF_UNIX, SOCK_DGRAM, 0, trace) == 0) {
         if (fcntl(trace[0], F_SETFL, O_NONBLOCK) != 0 ||
             fcntl(trace[1], F_SETFL, O_NONBLOCK) != 0) {
@@ -1364,20 +1382,24 @@ static bool bp_checkpoint_trace(int mode, const char *label, const char *dir,
 static bool bp_checkpoint_extra(int mode, const char *label)
 {
     char dir[256]; test_make_tmpdir(dir, sizeof(dir), "boot_phase", label);
-    int trace[2] = {-1, -1};
-    if (!bp_checkpoint_trace(mode, label, dir, trace)) return false;
+    int trace[2] = {-1, -1}, progress[2] = {-1, -1};
+    if (!bp_checkpoint_trace(mode, label, dir, trace, progress)) return false;
     pid_t parent = getpid(); pid_t child = fork();
     if (!child) {
         if (trace[0] >= 0) close(trace[0]);
+        if (progress[0] >= 0) close(progress[0]);
         bp_stage_fd = trace[1];
+        bp_progress_fd = progress[1];
         bp_stage_emit('c'); /* child entry, before fixture setup */
         if (!os_proc_bind_parent_death(SIGKILL, (uint64_t)parent)) _exit(23);
         bp_checkpoint_child(dir, mode);
     }
     if (trace[1] >= 0) close(trace[1]);
+    if (progress[1] >= 0) close(progress[1]);
     if (child < 0) fprintf(stderr, "\nFAIL checkpoint %s: fork errno=%d\n", label, errno);
-    bool ok = child > 0 && bp_checkpoint_wait(child, 0, label, trace[0]);
+    bool ok = child > 0 && bp_checkpoint_wait(child, 0, label, trace[0], progress[0]);
     if (trace[0] >= 0) close(trace[0]);
+    if (progress[0] >= 0) close(progress[0]);
     if (ok && mode == 3) {
         ok = bp_checkpoint_reopen(dir, 10, false);
         if (!ok) fprintf(stderr, "\nFAIL checkpoint %s: reopen expected=10 fixed_digest=0\n", label);
@@ -1393,7 +1415,7 @@ static bool bp_checkpoint_crash_case(int mode, const char *label, int exit_code,
         bp_checkpoint_child(dir, mode);
     }
     if (child < 0) fprintf(stderr, "\nFAIL checkpoint %s: fork errno=%d\n", label, errno);
-    bool ok = child > 0 && bp_checkpoint_wait(child, exit_code, label, -1);
+    bool ok = child > 0 && bp_checkpoint_wait(child, exit_code, label, -1, -1);
     if (ok) {
         ok = bp_checkpoint_reopen(dir, expected, true);
         if (!ok) fprintf(stderr, "\nFAIL checkpoint %s: reopen expected=%d fixed_digest=1\n", label, expected);
