@@ -37,6 +37,7 @@
 #include "storage/event_log.h"
 #include "storage/event_log_payloads.h"
 #include "storage/event_log_singleton.h"
+#include "storage/txdb.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -44,6 +45,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -458,6 +460,148 @@ static int check_operator_mark_durable_before_reply(void)
     (void)rmdir(dir);
     return failures;
 }
+
+/* Permit exactly one cleared header to reach the file. Deferred appends
+ * exercise the operator's explicit flush. Exit without close to model
+ * a restart while the target write is still refused. */
+static int partial_clear_child(const char *path)
+{
+    struct opfix f;
+    opfix_init(&f);
+    struct block_tree_db tree = {0};
+    g_active_block_tree = &tree;
+    event_log_t *log = event_log_open(path);
+    if (!log) return 1;
+    event_log_set_singleton(log);
+    if (process_block_invalidate_from(&f.ms, f.a2->phashBlock, NULL,
+                                     INVALIDATE_ORIGIN_OPERATOR) != INVALIDATE_OK)
+        return 2;
+    uint64_t first = event_log_size(log);
+    if (process_block_invalidate_from(&f.ms, f.a3->phashBlock, NULL,
+                                     INVALIDATE_ORIGIN_OPERATOR) != INVALIDATE_OK)
+        return 3;
+    uint64_t end = event_log_size(log);
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_FSIZE, &limit) || end <= first) return 4;
+    limit.rlim_cur = end + (end - first);
+    if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR || setrlimit(RLIMIT_FSIZE, &limit))
+        return 5;
+    event_log_test_set_force_per_append(0);
+    event_log_set_deferred_sync(log, true);
+    if (!event_log_deferred_sync_enabled(log)) return 6;
+    if (process_block_reconsider(&f.ms, f.a2->phashBlock, NULL) !=
+        RECONSIDER_PERSIST_FAILED) return 7;
+    return op_root(f.a2) && op_root(f.a3) ? 0 : 8;
+}
+
+static int check_partial_clear_restart(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "z23_reconsider_partial")) {
+        IB_CHECK("partial clear: create fixture", false);
+        return failures;
+    }
+    char path[PATH_MAX + 16];
+    snprintf(path, sizeof(path), "%s/events.log", dir);
+    pid_t pid = fork();
+    if (pid == 0) _exit(partial_clear_child(path));
+    int st = 0;
+    IB_CHECK("partial clear: target flush refused with both live roots held",
+        pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    struct opfix f;
+    opfix_init(&f);
+    unsigned root = 0, child = 0;
+    IB_CHECK("partial clear: upper root remains durable, lower clear reached disk",
+        log_status_of(path, f.a2->phashBlock, &root) &&
+        log_status_of(path, f.a3->phashBlock, &child) &&
+        (root & BLOCK_FAILED_VALID) && (root & BLOCK_OPERATOR_INVALID) &&
+        !(child & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)));
+    f.a2->nStatus = root;
+    f.a3->nStatus = child;
+    opfix_restart(&f);
+    IB_CHECK("partial clear: restart holds the whole subtree",
+        op_root(f.a2) && op_derived(f.a3));
+    struct block_tree_db tree = {0};
+    struct block_tree_db *prior_tree = g_active_block_tree;
+    event_log_t *prior_log = event_log_singleton();
+    event_log_t *log = event_log_open(path);
+    event_log_set_singleton(log);
+    g_active_block_tree = &tree;
+    IB_CHECK("partial clear: retry on descendant completes",
+        log && process_block_reconsider(&f.ms, f.a3->phashBlock, NULL) == RECONSIDER_OK &&
+        op_cleared(&f));
+    g_active_block_tree = prior_tree;
+    event_log_set_singleton(prior_log);
+    if (log) event_log_close(log);
+    IB_CHECK("partial clear: retried root clear reached disk",
+        log_status_of(path, f.a2->phashBlock, &root) &&
+        !(root & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)));
+    opfix_free(&f);
+    (void)unlink(path);
+    (void)rmdir(dir);
+    return failures;
+}
+
+static int check_reconsider_write_retry(bool nested)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    if (!test_mkdtemp(dir, sizeof(dir), "z23_reconsider_retry")) {
+        IB_CHECK("retry: create event-log fixture", false);
+        return failures;
+    }
+    char path[PATH_MAX + 16];
+    snprintf(path, sizeof(path), "%s/events.log", dir);
+    struct opfix f;
+    opfix_init(&f);
+    struct block_tree_db tree = {0};
+    struct block_tree_db *prior_tree = g_active_block_tree;
+    event_log_t *prior_log = event_log_singleton();
+    g_active_block_tree = &tree;
+    event_log_t *log = event_log_open(path);
+    event_log_set_singleton(log);
+    IB_CHECK("retry: record operator root", log &&
+        process_block_invalidate_from(&f.ms, f.a2->phashBlock, NULL,
+                                     INVALIDATE_ORIGIN_OPERATOR) == INVALIDATE_OK);
+    if (nested) {
+        IB_CHECK("retry: record nested operator root",
+            process_block_invalidate_from(&f.ms, f.a3->phashBlock, NULL,
+                                         INVALIDATE_ORIGIN_OPERATOR) == INVALIDATE_OK);
+    }
+    event_log_set_singleton(NULL);
+    if (log) event_log_close(log);
+    log = event_log_open_readonly(path);
+    event_log_set_singleton(log);
+    IB_CHECK("retry: operator receives persistence error", log &&
+        process_block_reconsider(&f.ms, f.a2->phashBlock, NULL) ==
+            RECONSIDER_PERSIST_FAILED);
+    IB_CHECK("retry: subtree remains held after write refusal",
+        op_root(f.a2) && (nested ? op_root(f.a3) : op_derived(f.a3)));
+    event_log_set_singleton(NULL);
+    if (log) event_log_close(log);
+    log = event_log_open(path);
+    event_log_set_singleton(log);
+    IB_CHECK("retry: writable store completes reconsideration", log &&
+        process_block_reconsider(&f.ms, f.a2->phashBlock, NULL) == RECONSIDER_OK &&
+        op_cleared(&f));
+    event_log_set_singleton(prior_log);
+    if (log) event_log_close(log);
+    g_active_block_tree = prior_tree;
+    unsigned status = 0;
+    IB_CHECK("retry: root clear survives reopen",
+        log_status_of(path, f.a2->phashBlock, &status) &&
+        !(status & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)));
+    if (nested) {
+        IB_CHECK("retry: nested root clear survives reopen",
+            log_status_of(path, f.a3->phashBlock, &status) &&
+            !(status & (BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID)));
+    }
+    opfix_free(&f);
+    (void)unlink(path);
+    (void)rmdir(dir);
+    return failures;
+}
 #endif
 
 static int check_operator_policy(void)
@@ -469,6 +613,9 @@ static int check_operator_policy(void)
     failures += check_automated_under_operator_root();
 #if !defined(_WIN32)
     failures += check_operator_mark_durable_before_reply();
+    failures += check_reconsider_write_retry(false);
+    failures += check_reconsider_write_retry(true);
+    failures += check_partial_clear_restart();
 #endif
     return failures;
 }

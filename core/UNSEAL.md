@@ -1298,3 +1298,7 @@ later lane flips it HARD.
 - 2026-11-18T23:59:07Z — REASON: review fix for operator invalidateblock: an automated invalidation of a block already under an operator invalidation must not persist as a new operator root, and reconsiderblock must durably clear every operator root it lifts below the reconsidered one; local operator policy only, consensus predicates unchanged
   old ROOT: 5a05acde949203cdbcef1ddbf4d62c5857ddf7f52f44f3c1669f49cb1941cbdd
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-20T05:00:25Z — REASON: Owner-authorized reconsiderblock storage-error retry: retain local operator holds until cleared header records are durable. Preserve zclassicd successful reconsideration and all consensus predicates.
+  old ROOT: 6a3f7b0ced7e032b5a94d100f5e97300f646bf1eee6880742d906c368455870b
+  by: owner unseal ritual (make core-unseal)

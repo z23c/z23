@@ -98,10 +98,11 @@ static bool process_block_reconcile_mempool_segment(
 
 /* Persist a single pindex's current nStatus to the event-sourced projection.
  * Tests without a wired runtime keep their historical in-memory-only seam. */
-static bool invalidate_persist_pindex(const struct block_index *p)
+static bool invalidate_persist_pindex(const struct block_index *p, unsigned clear_status)
 {
     bool persisted =
-        block_index_emit_header_event(p, "invalidate_persist", NULL, NULL);
+        block_index_emit_header_event_clearing(p, clear_status, "invalidate_persist",
+                                              NULL, NULL);
     /* The append may land in the reducer's deferred-sync buffer when the
      * shared handle is armed; the operator verdict must be on disk before the
      * RPC replies (kill -9 right after), so flush explicitly. */
@@ -529,7 +530,7 @@ enum invalidate_result process_block_invalidate_from(
      * enough for the selector in this process; the LevelDB write makes the
      * operator action restart-stable before reducer recovery begins. Descendant
      * CHILD marks are derived from the persisted target on boot. */
-    bool persisted = invalidate_persist_pindex(target);
+    bool persisted = invalidate_persist_pindex(target, 0);
     if (!persisted) {
         LOG_RETURN(INVALIDATE_PERSIST_FAILED, "validation",
                     "invalidate: failed to persist FAILED_VALID for h=%d "
@@ -622,24 +623,26 @@ static void reconsider_remove_reconnected_mempool(struct main_state *ms,
     }
 }
 
-/* Clear and persist every strict descendant of `target` that carries its own
- * BLOCK_FAILED_VALID. Returns false on the first persist failure; *count is
- * the number cleared and persisted before it. */
-static bool reconsider_clear_persisted_descendants(struct main_state *ms,
-                                                   struct block_index *target,
-                                                   size_t *count)
+/* Prepare durable clears without changing the live selector. If a write
+ * fails, all roots remain discoverable on retry. Repeated header records
+ * are idempotent in the projection. */
+static bool reconsider_persist_descendants(struct main_state *ms,
+                                           struct block_index *target,
+                                           bool *pending)
 {
-    *count = 0;
+    const unsigned mask = BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID;
+    *pending = (target->nStatus & mask) != 0;
     size_t iter = 0;
     struct block_index *p = NULL;
     while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (!p || p == target || !(p->nStatus & BLOCK_FAILED_VALID)) continue;
+        if (!p || p == target || !(p->nStatus & BLOCK_FAILED_ANY_MASK)) continue;
+        bool own_failure = (p->nStatus & BLOCK_FAILED_VALID) != 0;
+        if (!own_failure && *pending) continue;
         if (p->nHeight <= target->nHeight) continue;
         if (!invalidate_pprev_reaches_target(p, target)) continue;
-        p->nStatus &= ~(unsigned)(BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
-        if (!invalidate_persist_pindex(p))
+        *pending = true;
+        if (own_failure && !invalidate_persist_pindex(p, mask))
             return false;
-        (*count)++;
     }
     return true;
 }
@@ -676,19 +679,15 @@ enum reconsider_result process_block_reconsider(struct main_state *ms,
      * persisted FAILED_VALID + BLOCK_OPERATOR_INVALID comes back as an
      * operator root at the next restart although the operator lifted it
      * (zclassicd writes every block reconsiderblock clears). */
-    size_t own_cleared = 0;
-    if (!reconsider_clear_persisted_descendants(ms, target, &own_cleared)) {
+    bool pending;
+    if (!reconsider_persist_descendants(ms, target, &pending)) {
         LOG_RETURN(RECONSIDER_PERSIST_FAILED, "validation",
                     "reconsider: failed to persist a cleared descendant "
-                    "below h=%d (%zu persisted before the failure)",
-                    target->nHeight, own_cleared);
+                    "below h=%d", target->nHeight);
     }
 
-    /* Clear FAILED on the target + descendants. */
-    size_t cleared = 0;
-    process_block_clear_invalid(ms, target, &cleared);
-    cleared += own_cleared;
-    if (cleared == 0) {
+    if (!pending) {
+        invalidate_clear_live_twins(ms, target);
         char hex[65];
         uint256_get_hex(target->phashBlock ? target->phashBlock : hash, hex);
         fprintf(stderr, // obs-ok:reconsider-no-failure
@@ -698,13 +697,16 @@ enum reconsider_result process_block_reconsider(struct main_state *ms,
     }
 
     /* Persist the target's cleared status. */
-    bool persisted = invalidate_persist_pindex(target);
+    bool persisted = invalidate_persist_pindex(target,
+        BLOCK_FAILED_ANY_MASK | BLOCK_OPERATOR_INVALID);
     if (!persisted) {
         LOG_RETURN(RECONSIDER_PERSIST_FAILED, "validation",
                     "reconsider: failed to persist cleared status for h=%d",
                     target->nHeight);
     }
 
+    size_t cleared = 0;
+    process_block_clear_invalid(ms, target, &cleared);
     reconsider_kick_best_header(ms);
     reconsider_remove_reconnected_mempool(ms, target);
 

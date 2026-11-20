@@ -35,8 +35,8 @@
 #include <stdint.h>
 #include <string.h>
 
-static inline bool block_index_emit_header_event(
-        const struct block_index *bi, const char *tag,
+static inline bool block_index_emit_header_event_clearing(
+        const struct block_index *bi, unsigned clear_status, const char *tag,
         _Atomic uint64_t *emit_ok, _Atomic uint64_t *emit_fail)
 {
     if (!bi || !bi->phashBlock)
@@ -69,7 +69,7 @@ static inline bool block_index_emit_header_event(
         memcpy(h.hashPrev, bi->pprev->phashBlock->data, 32);
     /* else: genesis — hashPrev stays all-zero (memset above) */
     h.height        = bi->nHeight;
-    h.nStatus       = block_index_status_load(bi);
+    h.nStatus       = block_index_status_load(bi) & ~clear_status;
     h.nFile         = block_index_file_load(bi);
     h.nDataPos      = block_index_data_pos_load(bi);
     h.nUndoPos      = block_index_undo_pos_load(bi);
@@ -108,6 +108,13 @@ static inline bool block_index_emit_header_event(
     if (emit_ok)
         atomic_fetch_add_explicit(emit_ok, 1, memory_order_relaxed);
     return true;
+}
+
+static inline bool block_index_emit_header_event(
+        const struct block_index *bi, const char *tag,
+        _Atomic uint64_t *emit_ok, _Atomic uint64_t *emit_fail)
+{
+    return block_index_emit_header_event_clearing(bi, 0, tag, emit_ok, emit_fail);
 }
 
 /* Lightweight counterpart of block_index_emit_header_event() above — see the
