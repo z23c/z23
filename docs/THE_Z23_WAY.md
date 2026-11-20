@@ -86,8 +86,9 @@ its floor in the same commit, so the gain stays.
 5. **Review.** One reviewer who is not the author, of any model, reads the
    exact commit. Commits are signed; an AI-written commit ends with a
    `Co-Authored-By:` trailer naming the model.
-6. **Land.** `build/bin/z23-dev dev land submit --worktree=$PWD`, then
-   `build/bin/z23-dev dev land status`. The land queue proves the tip (full
+6. **Land.** `build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME`,
+   replacing the placeholder with one unique train name reused across retries,
+   then `build/bin/z23-dev dev land status`. The land queue proves the tip (full
    lint once, every affected group) and publishes it. Nobody pushes `main` by
    hand; `make install-hooks` installs the native hook that guards it. A
    refusal names its reason: fix the cause, do not route around it.

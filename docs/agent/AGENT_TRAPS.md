@@ -442,8 +442,9 @@ out.
   (`tools/command/native_dev_land_qualify.c:281-292`, called at `:886`). The HEAD
   changes even when qualify refuses. Range-diff the old and new heads, for
   example `git range-diff OLD_BASE..OLD_HEAD NEW_BASE..NEW_HEAD`, then resubmit
-  at the new head with `build/bin/z23-dev dev land submit --worktree=$PWD`. The
-  old head is in `git reflog`.
+  at the new head with `build/bin/z23-dev dev land submit --worktree=$PWD
+  --note=STABLE_TRAIN_NAME`, reusing the original train name. The old head is
+  in `git reflog`.
 
 - **A rebase that resolves a conflict can drop an added hunk silently.**
   Measured 2026-11-02: a lane rebased onto a rewritten

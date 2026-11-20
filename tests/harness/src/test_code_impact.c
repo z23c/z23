@@ -1154,7 +1154,9 @@ static int test_code_guide(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "lint_command")),
                       "make lint-fast") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "push_command")),
-                      "build/bin/z23-dev dev land submit --worktree=$PWD") == 0);
+                      "build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME") == 0);
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "push_note")),
+                      "unique train name; reuse it across retries") != NULL);
         ASSERT(strcmp(json_get_str(json_get(&reply.data,
                                              "legacy_parity_command")),
                       "make pre-push-ci") == 0);

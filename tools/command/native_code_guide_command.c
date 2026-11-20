@@ -38,7 +38,9 @@ static bool cg_render_static(struct zcl_command_reply *reply)
         json_push_kv_str(&reply->data, "legacy_parity_command",
                          "make pre-push-ci") &&
         json_push_kv_str(&reply->data, "push_command",
-                         "build/bin/z23-dev dev land submit --worktree=$PWD") &&
+                         "build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME") &&
+        json_push_kv_str(&reply->data, "push_note",
+                         "Replace STABLE_TRAIN_NAME with one unique train name; reuse it across retries") &&
         json_push_kv_str(
             &reply->data, "never",
             "test_zcl; omit -datadir; stash; reset; force-push") &&

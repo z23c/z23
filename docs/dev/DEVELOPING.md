@@ -1610,9 +1610,11 @@ or establish general code safety.
 ### Landing a stack of commits
 
 Put the ready commits on one lane branch, or submit several lanes. The land
-queue (`z23-dev dev land submit --worktree=$PWD`, then `dev land status`)
-rebases each row onto current `origin/main` and proves the tip it assembled;
-with `ZCL_LAND_TRAIN_WIDTH` set (the lander service sets 8) it stacks up to
+queue (`z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME`, then
+`dev land status`) rebases each row onto current `origin/main` and proves the
+tip it assembled. Replace the placeholder with one unique train name and reuse
+it across retries so landing latency and attempt metrics identify that train.
+With `ZCL_LAND_TRAIN_WIDTH` set (the lander service sets 8) it stacks up to
 that many queued rows behind one exact proof. A red lint-land on the stacked
 tip halves the stack, keeping its leading rows; the rows left out stay queued.
 The steps below and the native
@@ -1661,7 +1663,8 @@ Before committing:
    `dev land` tools under `devbuild --wait`. Their receipt gate and persisted
    outcome support replacement workers; no permanent lead approval is needed.
    Never `git push` main from a lane worktree; submit with
-   `build/bin/z23-dev dev land submit --worktree=$PWD`.
+   `build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME`,
+   reusing the same train name on any resubmission.
    Do not create a GitHub Issue or pull request for coordination.
 9. Verify with `dev land status` that the row landed, then confirm local
    HEAD, `origin/main`, and the remote branch SHA agree.
