@@ -1282,7 +1282,7 @@ struct zcl_result wsql_flush_commit_txn(struct wallet_sqlite *ws)
 /* Unlock the wallet domains, roll the transaction back, and report it. */
 static struct zcl_result wsql_flush_rollback_txn(struct wallet_sqlite *ws,
                                                  struct wallet *w, bool held,
-                                                 struct wsql_flush_halt h)
+                                                 struct wsql_flush_halt h, bool count_failed)
 {
     if (held) zcl_mutex_unlock(&w->sapling_keys.cs);
     if (held) zcl_mutex_unlock(&w->keystore.cs);
@@ -1298,6 +1298,7 @@ static struct zcl_result wsql_flush_rollback_txn(struct wallet_sqlite *ws,
             if (rb_err) sqlite3_free(rb_err);
         }
     }
+    if (count_failed) return wsql_fail(ws, h.first_fail);
     return wsql_fail(ws, ZCL_ERR(WSQL_WRITE_FAIL,
         "flush: rolled back — keys=%d keypool=%d tx=%d zseed=%d zkey=%d "
         "script=%d scanh=%d; first failure: [%d] %s",
@@ -1333,13 +1334,36 @@ static void wsql_flush_unlock_wallet(struct wallet *w, bool held)
     zcl_mutex_unlock(&w->cs);
 }
 
+static struct zcl_result wsql_flush_optional_evidence(struct wallet_sqlite *ws,
+    struct wallet *w, struct node_db *db, const struct wallet_create_pending *creation,
+    int64_t *count_out, int64_t *count)
+{
+    if (!wsql_flush_creation_proof(ws, w, db, creation))
+        return ZCL_ERR(WSQL_WRITE_FAIL, "flush: creation proof transition failed");
+    return count_out ? wallet_sqlite_key_count_r(ws, count) : ZCL_OK;
+}
+
+static struct zcl_result wsql_flush_finish(struct wallet_sqlite *ws,
+    struct wallet *w, bool held, int64_t *count_out, int64_t count)
+{
+    wsql_flush_unlock_wallet(w, held);
+    struct zcl_result result = wsql_flush_commit_txn(ws);
+    if (result.ok && count_out) *count_out = count;
+    return result;
+}
+
+
 static struct zcl_result wallet_sqlite_flush_scope_r(
     struct wallet_sqlite *ws, struct wallet *w, bool full_state,
-    struct node_db *creation_db, const struct wallet_create_pending *creation)
+    struct node_db *creation_db, const struct wallet_create_pending *creation,
+    int64_t *count_out)
 {
     struct zcl_result pre = wsql_flush_precheck(ws, w);
     if (!pre.ok)
         return pre;
+
+    int64_t count = 0;
+    bool count_failed = false;
 
     /* Create/load the wallet DEK before BEGIN. Creating it inside this
      * transaction and later rolling back would leave a cached orphan key. */
@@ -1392,29 +1416,36 @@ static struct zcl_result wallet_sqlite_flush_scope_r(
     h = wsql_flush_write_scripts_and_scan(ws, w, full_state);
     if (h.halt)
         goto rollback;
-    if (!wsql_flush_creation_proof(ws, w, creation_db, creation)) {
-        h.halt = true; h.first_fail = ZCL_ERR(WSQL_WRITE_FAIL, "flush: creation proof transition failed");
+    struct zcl_result evidence = wsql_flush_optional_evidence(ws, w, creation_db, creation, count_out, &count);
+    if (!evidence.ok) {
+        count_failed = evidence.code == WSQL_READ_FAIL;
+        h.first_fail = evidence;
         goto rollback;
     }
 #ifdef ZCL_TESTING
     if (creation && wsql_creation_exit_before_commit) _Exit(42);
 #endif
 
-    wsql_flush_unlock_wallet(w, held);
-    return wsql_flush_commit_txn(ws);
+    return wsql_flush_finish(ws, w, held, count_out, count);
 
 rollback:
-    return wsql_flush_rollback_txn(ws, w, held, h);
+    return wsql_flush_rollback_txn(ws, w, held, h, count_failed);
 }
 
-struct zcl_result wallet_sqlite_flush_r(struct wallet_sqlite *ws, struct wallet *w) { return wallet_sqlite_flush_scope_r(ws, w, true, NULL, NULL); }
-struct zcl_result wallet_sqlite_flush_transactions_r(struct wallet_sqlite *ws, struct wallet *w) { return wallet_sqlite_flush_scope_r(ws, w, false, NULL, NULL); }
+struct zcl_result wallet_sqlite_flush_r(struct wallet_sqlite *ws, struct wallet *w) { return wallet_sqlite_flush_scope_r(ws, w, true, NULL, NULL, NULL); }
+struct zcl_result wallet_sqlite_flush_transactions_r(struct wallet_sqlite *ws, struct wallet *w) { return wallet_sqlite_flush_scope_r(ws, w, false, NULL, NULL, NULL); }
+
+struct zcl_result wallet_sqlite_flush_counted_r(struct wallet_sqlite *ws, struct wallet *w, int64_t *count)
+{
+    if (!count) return ZCL_ERR(WSQL_NULL_ARG, "flush: key count output missing");
+    return wallet_sqlite_flush_scope_r(ws, w, true, NULL, NULL, count);
+}
 
 struct zcl_result wallet_sqlite_flush_created_r(struct wallet_sqlite *ws, struct wallet *w,
     struct node_db *ndb, const struct wallet_create_pending *pending)
 {
     if (!ws || !w || !ndb || !pending) return ZCL_ERR(WSQL_NULL_ARG, "creation flush arguments missing");
-    struct zcl_result result = wallet_sqlite_flush_scope_r(ws, w, true, ndb, pending);
+    struct zcl_result result = wallet_sqlite_flush_scope_r(ws, w, true, ndb, pending, NULL);
     if (!result.ok && ws->db && !sqlite3_get_autocommit(ws->db)) {
         LOG_ERROR("wallet_sqlite", "creation flush rollback left a live transaction");
         _Exit(EXIT_FAILURE);

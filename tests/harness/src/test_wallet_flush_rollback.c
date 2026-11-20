@@ -1650,9 +1650,144 @@ static int test_cutover_flush_atomic(void)
     return failures;
 }
 
+static int wfr_deny_count(void *ctx, int action, const char *a, const char *b,
+                          const char *db, const char *trigger)
+{
+    (void)a; (void)db; (void)trigger;
+    if (action == SQLITE_FUNCTION && b && strcmp(b, "count") == 0) {
+        *(bool *)ctx = true;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int wfr_reject_commit(void *ctx)
+{
+    (void)ctx;
+    return 1;
+}
+
+static bool wfr_count_readonly(const char *path, const struct key_id *original, int want)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_db_readonly(db, "main") == 1 &&
+        sqlite3_prepare_v2(db, "SELECT count(*), sum(pubkey_hash=?) FROM wallet_keys",
+                           -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(stmt, 1, original->id.data, 20, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_INTEGER &&
+        sqlite3_column_int64(stmt, 0) == want && sqlite3_column_int64(stmt, 1) == 1 &&
+        sqlite3_step(stmt) == SQLITE_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+struct wfr_count_fixture {
+    char dir[1024], path[1200];
+    sqlite3 *db;
+    struct wallet_sqlite ws;
+    struct wallet *wallet;
+    struct key_id original;
+    int64_t count;
+};
+
+static bool wfr_count_empty_flush(struct wfr_count_fixture *f)
+{
+    int64_t count = -1;
+    return wallet_sqlite_flush_counted_r(&f->ws, f->wallet, &count).ok && count == 0 &&
+           wallet_sqlite_key_count_r(&f->ws, &count).ok && count == 0;
+}
+
+static bool wfr_count_setup(struct wfr_count_fixture *f)
+{
+    test_make_tmpdir(f->dir, sizeof(f->dir), "wallet", "counted-flush");
+    int n = snprintf(f->path, sizeof(f->path), "%s/wallet.db", f->dir);
+    struct privkey k1, k2;
+    struct pubkey p1, p2;
+    make_key(&k1, &p1, 0x41);
+    make_key(&k2, &p2, 0x42);
+    f->original = pubkey_get_id(&p1);
+    f->count = -77;
+    return n > 0 && (size_t)n < sizeof(f->path) &&
+        sqlite3_open(f->path, &f->db) == SQLITE_OK &&
+        sqlite3_exec(f->db, k_flush_schema, NULL, NULL, NULL) == SQLITE_OK &&
+        wallet_sqlite_open_r(&f->ws, f->db).ok && (f->wallet = alloc_wallet_t()) &&
+        wfr_count_empty_flush(f) && keystore_add_key(&f->wallet->keystore, &k1) &&
+        wallet_sqlite_flush_counted_r(&f->ws, f->wallet, &f->count).ok && f->count == 1 &&
+        wfr_count_readonly(f->path, &f->original, 1) &&
+        keystore_add_key(&f->wallet->keystore, &k2);
+}
+
+static bool wfr_count_read_failure(struct wfr_count_fixture *f)
+{
+    bool denied = false;
+    if (sqlite3_set_authorizer(f->db, wfr_deny_count, &denied) != SQLITE_OK) return false;
+    f->count = -77;
+    struct zcl_result read = wallet_sqlite_key_count_r(&f->ws, &f->count);
+    if (read.ok || read.code != WSQL_READ_FAIL || f->count != -77 || !denied) {
+        (void)sqlite3_set_authorizer(f->db, NULL, NULL);
+        return false;
+    }
+    denied = false;
+    struct zcl_result result = wallet_sqlite_flush_counted_r(&f->ws, f->wallet, &f->count);
+    (void)sqlite3_set_authorizer(f->db, NULL, NULL);
+    return !result.ok && result.code == WSQL_READ_FAIL && denied && f->count == -77 &&
+           sqlite3_get_autocommit(f->db) && wfr_count_readonly(f->path, &f->original, 1);
+}
+
+static bool wfr_count_commit_failure(struct wfr_count_fixture *f)
+{
+    (void)sqlite3_commit_hook(f->db, wfr_reject_commit, NULL);
+    f->count = -77;
+    struct zcl_result result = wallet_sqlite_flush_counted_r(&f->ws, f->wallet, &f->count);
+    (void)sqlite3_commit_hook(f->db, NULL, NULL);
+    return !result.ok && result.code == WSQL_TXN_COMMIT_FAIL && f->count == -77 &&
+           sqlite3_get_autocommit(f->db) && wfr_count_readonly(f->path, &f->original, 1);
+}
+
+static bool wfr_counted_flush_fixture(void)
+{
+    struct wfr_count_fixture f = {0};
+    bool ok = wfr_count_setup(&f);
+    if (ok) ok = wfr_count_read_failure(&f);
+    if (ok) ok = wfr_count_commit_failure(&f);
+    if (ok) ok = wallet_sqlite_flush_counted_r(&f.ws, f.wallet, &f.count).ok &&
+                 f.count == 2 && wfr_count_readonly(f.path, &f.original, 2);
+    if (f.ws.open) wallet_sqlite_close(&f.ws);
+    if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
+    free_wallet_t(f.wallet);
+    (void)test_rm_rf_recursive(f.dir);
+    return ok;
+}
+
+static bool wfr_count_invalid_handles(void)
+{
+    int64_t count = -77;
+    struct wallet_sqlite closed = {0};
+    return wallet_sqlite_key_count_r(NULL, &count).code == WSQL_NULL_ARG &&
+           wallet_sqlite_key_count_r(&closed, NULL).code == WSQL_NULL_ARG &&
+           wallet_sqlite_key_count_r(&closed, &count).code == WSQL_DB_NOT_OPEN &&
+           count == -77;
+}
+
+static int test_flush_count_is_transactional(void)
+{
+    int failures = 0;
+    TEST("flush: key count and original identifier survive read and commit failures") {
+        ASSERT(wfr_count_invalid_handles());
+        ASSERT(wfr_counted_flush_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 int test_wallet_flush_rollback(void)
 {
     int failures = 0;
+    failures += test_flush_count_is_transactional();
     failures += test_flush_clean_commits_everything();
     failures += test_flush_tx_write_failure_rolls_back();
     failures += test_flush_bool_wrapper_returns_false();

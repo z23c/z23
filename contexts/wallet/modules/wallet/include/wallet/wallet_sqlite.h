@@ -192,6 +192,13 @@ struct zcl_result wallet_sqlite_delete_key_r(struct wallet_sqlite *ws,
  * BEGIN/COMMIT failure. */
 struct zcl_result wallet_sqlite_flush_r(struct wallet_sqlite *ws,
                                         struct wallet *w);
+/* Read the stored transparent-key count. Output is unchanged on failure. */
+struct zcl_result wallet_sqlite_key_count_r(struct wallet_sqlite *ws, int64_t *count);
+/* Count durable transparent keys inside the flush transaction; output is set
+ * only after commit. A count read error rolls back and returns WSQL_READ_FAIL.
+ * The caller must serialize all use of the underlying SQLite connection. */
+struct zcl_result wallet_sqlite_flush_counted_r(struct wallet_sqlite *ws,
+                                                struct wallet *w, int64_t *count);
 struct node_db;
 struct wallet_create_pending;
 #ifdef ZCL_TESTING
