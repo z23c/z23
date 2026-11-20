@@ -434,6 +434,94 @@ static bool wrc_import_address(struct wrc_fx *fx, struct json_value *result)
     return ok;
 }
 
+static int wrc_deny_utxo(void *ctx, int action, const char *table,
+                         const char *column, const char *db, const char *trigger)
+{
+    (void)ctx; (void)column; (void)db; (void)trigger;
+    return action == SQLITE_READ && table && strcmp(table, "utxos") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int wrc_enumeration_empty_and_cap(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: checked enumeration preserves empty and capped results") {
+        ASSERT(wrc_open(&fx, true));
+        struct db_utxo out[1];
+        ASSERT(db_utxo_list_for_address_checked(&fx.ndb, fx.addr_hash, out, 1) == 0);
+        struct wrc_row rows[] = {{WRC_AGREE, 1, 7, 7, false},
+                                 {WRC_AGREE, 2, 8, 8, false}};
+        ASSERT(wrc_seed_utxos(&fx, rows, 2));
+        memset(out, 0xff, sizeof(out));
+        db_utxo_list_interrupt_after_row_for_test(true);
+        int count = db_utxo_list_for_address_checked(&fx.ndb, fx.addr_hash, out, 1);
+        db_utxo_list_interrupt_after_row_for_test(false);
+        ASSERT(count == 1);
+        ASSERT(out[0].script == NULL && out[0].script_len == 0);
+        struct db_utxo legacy[2];
+        db_utxo_list_interrupt_after_row_for_test(true);
+        count = db_utxo_list_for_address(&fx.ndb, fx.addr_hash, legacy, 2);
+        db_utxo_list_interrupt_after_row_for_test(false);
+        ASSERT(count == 1 && legacy[0].script == NULL);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+static int wrc_import_enumeration_failure(bool watch_only, bool partial)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST(watch_only ? "wallet_rows_coins: importaddress reports enumeration failure" :
+                      "wallet_rows_coins: importprivkey reports enumeration failure") {
+        struct wrc_row rows[] = {{WRC_AGREE, 1, 7, 7, false},
+                                 {WRC_AGREE, 2, 8, 8, false}};
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_utxos(&fx, rows, 2));
+        if (partial)
+            db_utxo_list_interrupt_after_row_for_test(true);
+        else
+            ASSERT(sqlite3_set_authorizer(fx.ndb.db, wrc_deny_utxo, NULL) == SQLITE_OK);
+        struct json_value result;
+        bool imported = watch_only ? wrc_import_address(&fx, &result) :
+                                     wrc_import(&fx, &result);
+        db_utxo_list_interrupt_after_row_for_test(false);
+        sqlite3_set_authorizer(fx.ndb.db, NULL, NULL);
+        ASSERT(imported);
+        if (watch_only) {
+            ASSERT(wrc_reply_has(json_get(&result, "warning"), "coin discovery incomplete"));
+            ASSERT(json_get_bool(json_get(&result, "coin_discovery_incomplete")));
+        } else {
+            ASSERT(wrc_reply_has(&result, "coin discovery incomplete"));
+        }
+        ASSERT(wrc_wallet_rows(&fx) == 0);
+        json_free(&result);
+        ASSERT(watch_only ? wrc_import_address(&fx, &result) : wrc_import(&fx, &result));
+        ASSERT(wrc_wallet_rows(&fx) == 2);
+        int64_t value;
+        int height;
+        bool coinbase;
+        ASSERT(wrc_wallet_row(&fx, 1, &value, &height, &coinbase));
+        ASSERT(value == WRC_COIN_AMOUNT && height == 7 && !coinbase);
+        ASSERT(wrc_wallet_row(&fx, 2, &value, &height, &coinbase));
+        ASSERT(value == WRC_COIN_AMOUNT && height == 8 && !coinbase);
+        if (watch_only) {
+            ASSERT(json_get_int(json_get(&result, "utxos")) == 2);
+            ASSERT(json_get_real(json_get(&result, "balance")) ==
+                   (double)(2 * WRC_COIN_AMOUNT) / 1e8);
+            ASSERT(json_get(&result, "coin_discovery_incomplete") == NULL);
+        }
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int wrc_import_save_failure(bool watch_only)
 {
     int failures = 0;
@@ -1191,6 +1279,11 @@ int wrc_run_tests(void)
     failures += wrc_import_disagreeing_rows_skipped();
     failures += wrc_import_height_comes_from_coin();
     failures += wrc_import_without_coins_view_withholds();
+    failures += wrc_enumeration_empty_and_cap();
+    failures += wrc_import_enumeration_failure(false, false);
+    failures += wrc_import_enumeration_failure(false, true);
+    failures += wrc_import_enumeration_failure(true, false);
+    failures += wrc_import_enumeration_failure(true, true);
     failures += wrc_import_save_failure(false);
     failures += wrc_import_save_failure(true);
     failures += wrc_importaddress_skips_disagreeing_rows();

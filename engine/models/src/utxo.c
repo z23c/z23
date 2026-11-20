@@ -237,17 +237,34 @@ int64_t db_utxo_balance_for_address(struct node_db *ndb,
         AR_BIND_BLOB(s, 1, address_hash, 20));
 }
 
-int db_utxo_list_for_address(struct node_db *ndb,
-                             const uint8_t address_hash[20],
-                             struct db_utxo *out, size_t max)
+#ifdef ZCL_TESTING
+static bool utxo_list_interrupt_after_row;
+void db_utxo_list_interrupt_after_row_for_test(bool enabled)
 {
-    if (!ndb->open) return 0;
+    utxo_list_interrupt_after_row = enabled;
+}
+#endif
+
+static int utxo_list_for_address(struct node_db *ndb,
+                                 const uint8_t address_hash[20],
+                                 struct db_utxo *out, size_t max, bool *failed)
+{
+    *failed = true;
+    if (!ndb || !ndb->open || !ndb->db || !address_hash || !out)
+        return 0;
     sqlite3_stmt *s = NULL;
-    AR_QUERY_LIST(ndb, s,
+    AR_PREPARE_RET(ndb, s,
         "SELECT txid,vout,value,script_type,height,is_coinbase"
-        " FROM utxos WHERE address_hash=? ORDER BY height",
-        out, max,
-        AR_BIND_BLOB(s, 1, address_hash, 20),
+        " FROM utxos WHERE address_hash=? ORDER BY height", 0);
+    if (sqlite3_bind_blob(s, 1, address_hash, 20, SQLITE_TRANSIENT) != SQLITE_OK) {
+        AR_FINALIZE(s);
+        return 0;
+    }
+    int count = 0;
+    enum zcl_step step = ZCL_STEP_DONE;
+    while ((size_t)count < max &&
+           (step = ar_step_checked(s, "utxo: list address", NULL)) == ZCL_STEP_ROW) {
+        memset(&out[count], 0, sizeof(out[count]));
         AR_READ_BLOB(s, 0, out[count].txid, 32);
         out[count].vout = (uint32_t)AR_COL_INT(s, 1);
         out[count].value = AR_COL_INT(s, 2);
@@ -255,7 +272,32 @@ int db_utxo_list_for_address(struct node_db *ndb,
         memcpy(out[count].address_hash, address_hash, 20);
         out[count].has_address = true;
         out[count].height = (int)AR_COL_INT(s, 4);
-        out[count].is_coinbase = AR_COL_INT(s, 5) != 0);
+        out[count].is_coinbase = AR_COL_INT(s, 5) != 0;
+        count++;
+#ifdef ZCL_TESTING
+        if (utxo_list_interrupt_after_row) sqlite3_interrupt(ndb->db);
+#endif
+    }
+    int final_rc = sqlite3_finalize(s);
+    *failed = step == ZCL_STEP_ERROR || final_rc != SQLITE_OK;
+    return count;
+}
+
+int db_utxo_list_for_address(struct node_db *ndb,
+                             const uint8_t address_hash[20],
+                             struct db_utxo *out, size_t max)
+{
+    bool failed;
+    return utxo_list_for_address(ndb, address_hash, out, max, &failed);
+}
+
+int db_utxo_list_for_address_checked(struct node_db *ndb,
+                                     const uint8_t address_hash[20],
+                                     struct db_utxo *out, size_t max)
+{
+    bool failed;
+    int count = utxo_list_for_address(ndb, address_hash, out, max, &failed);
+    return failed ? -1 : count;
 }
 
 /* Two probes, cheapest first. Contract (and the "false means not found

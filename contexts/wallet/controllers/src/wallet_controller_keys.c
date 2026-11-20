@@ -121,6 +121,7 @@ struct import_tally {
     int imported;
     int skipped;
     int save_failed;
+    bool enumeration_failed;
     int64_t value;   /* sum of the imported rows */
     bool withheld;   /* no coins view: no row was looked at */
     bool capped;     /* the row cap was reached: more rows may exist */
@@ -157,8 +158,12 @@ static void import_confirmed_rows(struct wallet_rpc_context *ctx,
         return;
     }
     struct db_utxo utxos[WALLET_IMPORT_ROW_CAP];
-    int found = db_utxo_list_for_address(ctx->node_db, addr_hash, utxos,
+    int found = db_utxo_list_for_address_checked(ctx->node_db, addr_hash, utxos,
                                          WALLET_IMPORT_ROW_CAP);
+    if (found < 0) {
+        tally->enumeration_failed = true;
+        return;
+    }
     tally->capped = found >= WALLET_IMPORT_ROW_CAP;
     for (int i = 0; i < found; i++) {
         struct db_utxo full;
@@ -258,6 +263,27 @@ static const struct import_phrases *import_phrases_pick(
     return *holed ? &import_phrases_holed : &import_phrases_full;
 }
 
+static int import_warning_details(char *msg, size_t cap, int n,
+                                  const struct import_tally *tally,
+                                  const struct import_phrases *ph)
+{
+    if (tally->enumeration_failed && n >= 0 && (size_t)n < cap)
+        n += snprintf(msg + n, cap - (size_t)n,
+                      "%scoin discovery incomplete: UTXO enumeration failed; retry the import.",
+                      n > 0 ? " " : "Imported; ");
+    if (tally->save_failed > 0 && n >= 0 && (size_t)n < cap)
+        n += snprintf(msg + n, cap - (size_t)n,
+                      "%s%d wallet UTXO row%s could not be saved; retry the import.",
+                      n > 0 ? " " : "Imported; ", tally->save_failed,
+                      tally->save_failed == 1 ? "" : "s");
+    if (tally->capped && n >= 0 && (size_t)n < cap)
+        n += snprintf(msg + n, cap - (size_t)n,
+                      "%sOnly the first %d rows were looked at; %s",
+                      n > 0 ? " " : "Imported; ", WALLET_IMPORT_ROW_CAP,
+                      ph->capped);
+    return n;
+}
+
 /* The warning an import owes the caller, or false when every row agreed.
  * rescanwallet rewrites wallet_utxos from the blocks and needs the coins
  * database; rescanblockchain does not (it changes the in-memory wallet only).
@@ -282,16 +308,7 @@ static bool import_warning(char *msg, size_t cap, bool have_db,
                      "Imported; %d utxos rows skipped because the coins "
                      "database does not confirm them.%s", tally->skipped,
                      ph->skipped);
-    if (tally->save_failed > 0 && n >= 0 && (size_t)n < cap)
-        n += snprintf(msg + n, cap - (size_t)n,
-                      "%s%d wallet UTXO row%s could not be saved; retry the import.",
-                      n > 0 ? " " : "Imported; ", tally->save_failed,
-                      tally->save_failed == 1 ? "" : "s");
-    if (tally->capped && n >= 0 && (size_t)n < cap)
-        n += snprintf(msg + n, cap - (size_t)n,
-                      "%sOnly the first %d rows were looked at; %s",
-                      n > 0 ? " " : "Imported; ", WALLET_IMPORT_ROW_CAP,
-                      ph->capped);
+    n = import_warning_details(msg, cap, n, tally, ph);
     if (holed && msg[0] != '\0')
         import_holed_advice(msg, cap, n, &cov);
     return msg[0] != '\0';
@@ -426,6 +443,7 @@ bool rpc_importaddress(const struct json_value *params, bool help,
         "\nWatch a transparent address without importing its private key.\n"
         "Tracks balance and transactions but cannot spend.\n"
         "If UTXO writes fail, utxos_save_failed counts them and warning advises retry.\n"
+        "coin_discovery_incomplete signals a failed UTXO enumeration.\n"
         "\nArguments:\n"
         "1. \"address\"     (string, required) The transparent address\n");
 
@@ -503,6 +521,8 @@ bool rpc_importaddress(const struct json_value *params, bool help,
                        true)) {
         LOG_WARN("wallet", "importaddress: %s", msg);
         json_push_kv_int(result, "utxos_skipped", tally.skipped);
+        if (tally.enumeration_failed)
+            json_push_kv_bool(result, "coin_discovery_incomplete", true);
         if (tally.save_failed > 0)
             json_push_kv_int(result, "utxos_save_failed", tally.save_failed);
         json_push_kv_bool(result, "coin_discovery_withheld", tally.withheld);

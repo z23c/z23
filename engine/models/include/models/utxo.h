@@ -41,6 +41,15 @@ void db_utxo_free(struct db_utxo *u);
 int64_t db_utxo_balance_for_address(struct node_db *ndb,
                                      const uint8_t address_hash[20]);
 
+#ifdef ZCL_TESTING
+void db_utxo_list_interrupt_after_row_for_test(bool enabled);
+#endif
+
+/* Returns -1 on enumeration failure; otherwise returns the row count. */
+int db_utxo_list_for_address_checked(struct node_db *ndb,
+                                     const uint8_t address_hash[20],
+                                     struct db_utxo *out, size_t max);
+
 /* List UTXOs for an address. Returns count, fills array up to max. */
 int db_utxo_list_for_address(struct node_db *ndb,
                              const uint8_t address_hash[20],
