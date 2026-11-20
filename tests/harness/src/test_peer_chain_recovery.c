@@ -445,7 +445,7 @@ static bool recovery_wallet_seed_fixture(sqlite3 *db)
         "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed,created_at) VALUES(zeroblob(20),x'010002',x'030004',1,11);"
         "INSERT INTO wallet_keypool(pubkey_hash,generation) VALUES(zeroblob(20),7);"
         "INSERT INTO wallet_key_encryption(id,wrapped_dek) VALUES(1,x'050006');"
-        "INSERT INTO wallet_seed(id,seed,next_child) VALUES(1,x'070008090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324',42);"
+        "INSERT INTO wallet_seed(id,seed,next_child) VALUES(1,x'070008090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425',42);"
         "INSERT INTO wallet_scripts(script_hash,redeem_script) VALUES(x'09000a',x'0b000c');"
         "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,child_index,address) VALUES(x'0d000e',x'0f0010',x'110012',x'130014',x'150016',3,'synthetic');"
         "INSERT INTO wallet_transactions(txid,raw_tx,time_received,from_me) VALUES(x'170018',x'19001a',19,1);"
@@ -458,7 +458,7 @@ static int test_peer_chain_recovery_wallet_wal(void)
     int failures = 0;
     char dir[4096], source[4608], destination[4608], wal[4700], out[4096] = {0};
     struct node_db ndb = {0};
-    sqlite3 *published = NULL;
+    sqlite3 *published = NULL, *writer = NULL;
     test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "wallet-wal");
     TEST("peer_chain_recovery: published WAL snapshot preserves all typed wallet rows") {
         ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
@@ -466,13 +466,14 @@ static int test_peer_chain_recovery_wallet_wal(void)
         ASSERT(snprintf(wal, sizeof(wal), "%s-wal", source) > 0);
         ASSERT(node_db_open(&ndb, source));
         ASSERT(recovery_wallet_seed_fixture(ndb.db));
+        ASSERT(recovery_exec(ndb.db, "INSERT INTO peer_chain_observations(peer_id,observed_at) VALUES(8,99)"));
         ASSERT(recovery_exec(ndb.db, "PRAGMA wal_checkpoint(TRUNCATE);"));
         node_db_close(&ndb);
         ASSERT(recovery_zero_observation_root(source));
         ASSERT(recovery_quick_check(source, false));
-        ASSERT(sqlite3_open(source, &ndb.db) == SQLITE_OK);
-        ASSERT(recovery_exec(ndb.db, "PRAGMA wal_autocheckpoint=0;"));
-        ASSERT(recovery_exec(ndb.db, "UPDATE wallet_seed SET next_child=43 WHERE id=1; UPDATE wallet_sapling_notes SET witness_data=x'2b002c',witness_height=6"));
+        ASSERT(sqlite3_open(source, &writer) == SQLITE_OK);
+        ASSERT(recovery_exec(writer, "PRAGMA wal_autocheckpoint=0;"));
+        ASSERT(recovery_exec(writer, "UPDATE wallet_seed SET next_child=43 WHERE id=1; UPDATE wallet_sapling_notes SET witness_data=x'2b002c',witness_height=6"));
         struct stat wal_stat;
         ASSERT(stat(wal, &wal_stat) == 0 && wal_stat.st_size > 0);
         ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
@@ -480,17 +481,17 @@ static int test_peer_chain_recovery_wallet_wal(void)
         ASSERT(strstr(out, "pre-recovery quick_check:") != NULL);
         ASSERT(recovery_wallet_integrity(destination));
         ASSERT(recovery_wallet_peer_empty(destination));
-        ASSERT(recovery_wallet_equal(ndb.db, destination));
+        ASSERT(recovery_wallet_equal(writer, destination));
         ASSERT(sqlite3_open(destination, &published) == SQLITE_OK);
-        ASSERT(recovery_exec(published, "UPDATE wallet_seed SET seed=x'070009' WHERE id=1"));
+        ASSERT(recovery_exec(published, "UPDATE wallet_sapling_notes SET witness_data=x'2b002d'"));
         ASSERT(sqlite3_close(published) == SQLITE_OK);
         published = NULL;
-        ASSERT(!recovery_wallet_equal(ndb.db, destination));
+        ASSERT(!recovery_wallet_equal(writer, destination));
         PASS();
     } _test_next:;
     if (published) sqlite3_close(published);
     if (ndb.open) node_db_close(&ndb);
-    else if (ndb.db) sqlite3_close(ndb.db);
+    if (writer) sqlite3_close(writer);
     (void)test_rm_rf_recursive(dir);
     return failures;
 }
