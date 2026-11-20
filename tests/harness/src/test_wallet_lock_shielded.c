@@ -2193,6 +2193,143 @@ static int test_locked_flush_refuses_an_unsealed_key_without_a_row(void)
     return failures;
 }
 
+#ifdef ZCL_TESTING
+#define rpc_z_exportkey wls_fixture_z_exportkey
+#define rpc_z_importkey wls_fixture_z_importkey
+#define wallet_shielded_import_refused wls_fixture_import_refused
+#define rpc_z_exportviewingkey wls_fixture_z_exportviewingkey
+#define rpc_z_getmemo wls_fixture_z_getmemo
+#include "../../../contexts/wallet/controllers/src/wallet_shielded_keys.c"
+#undef rpc_z_getmemo
+#undef rpc_z_exportviewingkey
+#undef wallet_shielded_import_refused
+#undef rpc_z_importkey
+#undef rpc_z_exportkey
+static _Thread_local bool wls_import_pause;
+struct wls_import_barrier { pthread_mutex_t mu; pthread_cond_t cv; bool entered, release; };
+struct wls_import_task { struct wls_fixture *f; const char *key; bool ok; };
+
+static bool wls_import_rpc(struct wls_fixture *f, const char *key, const char *rescan)
+{
+    struct json_value params, value, result;
+    json_init(&params); json_set_array(&params); json_init(&value); json_init(&result);
+    json_set_str(&value, key); json_push_back(&params, &value);
+    json_set_str(&value, rescan); json_push_back(&params, &value);
+    bool ok = wls_fixture_z_importkey(&params, false, &result);
+    (void)f;
+    json_free(&result); json_free(&value); json_free(&params);
+    return ok;
+}
+
+static void wls_import_barrier_hook(void *arg)
+{
+    if (!wls_import_pause) return;
+    struct wls_import_barrier *gate = arg;
+    pthread_mutex_lock(&gate->mu);
+    gate->entered = true;
+    pthread_cond_broadcast(&gate->cv);
+    while (!gate->release) pthread_cond_wait(&gate->cv, &gate->mu);
+    pthread_mutex_unlock(&gate->mu);
+}
+
+static void *wls_import_first(void *arg)
+{
+    struct wls_import_task *task = arg;
+    wls_import_pause = true;
+    task->ok = wls_import_rpc(task->f, task->key, "no");
+    return NULL;
+}
+
+static bool wls_import_overlap(struct wls_fixture *f, const char *a, const char *b)
+{
+    struct wls_import_barrier gate = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false };
+    struct wls_import_task task = { f, a, false };
+    wallet_import_set_published_hook(wls_import_barrier_hook, &gate);
+    pthread_t thread;
+    bool started = pthread_create(&thread, NULL, wls_import_first, &task) == 0;
+    pthread_mutex_lock(&gate.mu);
+    struct timespec until; timespec_get(&until, TIME_UTC); until.tv_sec += WLS_JOIN_SECONDS;
+    while (started && !gate.entered)
+        if (pthread_cond_timedwait(&gate.cv, &gate.mu, &until) != 0) break;
+    bool entered = gate.entered;
+    pthread_mutex_unlock(&gate.mu);
+    bool second = entered && wls_import_rpc(f, b, "no");
+    pthread_mutex_lock(&gate.mu); gate.release = true;
+    pthread_cond_broadcast(&gate.cv); pthread_mutex_unlock(&gate.mu);
+    if (started) pthread_join(thread, NULL);
+    wallet_import_set_published_hook(NULL, NULL);
+    pthread_cond_destroy(&gate.cv); pthread_mutex_destroy(&gate.mu);
+    return started && entered && second && task.ok;
+}
+
+static int wls_deny_sapling_write(void *unused, int action, const char *a,
+                                  const char *b, const char *c, const char *d)
+{
+    (void)unused; (void)b; (void)c; (void)d;
+    return (action == SQLITE_INSERT || action == SQLITE_UPDATE) && a &&
+           strcmp(a, "wallet_sapling_keys") == 0 ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool wls_contains_tag(struct wallet *wallet, uint8_t tag)
+{
+    uint8_t material[32]; memset(material, tag, sizeof(material));
+    struct zip32_xsk xsk; zip32_xsk_master(&xsk, material, sizeof(material));
+    bool found = sapling_keystore_contains_xsk(&wallet->sapling_keys, &xsk);
+    memory_cleanse(&xsk, sizeof(xsk)); memory_cleanse(material, sizeof(material));
+    return found;
+}
+
+static int test_import_key_durability(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: overlapping no-rescan imports persist each requested key") {
+        ASSERT(wls_provision(&f, true, false)); ASSERT(wls_boot(&f));
+        char a[512], b[512];
+        ASSERT(wls_foreign_key_string(a, sizeof(a), 0x31));
+        ASSERT(wls_foreign_key_string(b, sizeof(b), 0x32));
+        ASSERT(wls_import_overlap(&f, a, b));
+        ASSERT(wls_boot(&f));
+        ASSERT(wls_contains_tag(f.w, 0x31)); ASSERT(wls_contains_tag(f.w, 0x32));
+        memory_cleanse(a, sizeof(a)); memory_cleanse(b, sizeof(b));
+        wls_teardown(&f); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_import_key_retry_durability(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: failed no-rescan import retries without false success") {
+        ASSERT(wls_provision(&f, true, false)); ASSERT(wls_boot(&f));
+        char a[512]; ASSERT(wls_foreign_key_string(a, sizeof(a), 0x33));
+        ASSERT(sqlite3_set_authorizer(f.db, wls_deny_sapling_write, NULL) == SQLITE_OK);
+        ASSERT(!wls_import_rpc(&f, a, "no"));
+        ASSERT(sqlite3_set_authorizer(f.db, NULL, NULL) == SQLITE_OK);
+        ASSERT(wls_import_rpc(&f, a, "whenkeyisnew"));
+        ASSERT(wls_boot(&f)); ASSERT(wls_contains_tag(f.w, 0x33));
+        memory_cleanse(a, sizeof(a)); wls_teardown(&f); PASS();
+    } _test_next:;
+    return failures;
+}
+static int test_import_key_without_database(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: import without persistence does not claim success") {
+        ASSERT(wls_provision(&f, true, false)); ASSERT(wls_boot(&f));
+        char a[512]; ASSERT(wls_foreign_key_string(a, sizeof(a), 0x34));
+        rpc_wallet_set_state(f.w, NULL, NULL, NULL, NULL, NULL);
+        ASSERT(!wls_import_rpc(&f, a, "no"));
+        ASSERT(!wls_import_rpc(&f, a, "whenkeyisnew"));
+        rpc_wallet_set_state(f.w, NULL, NULL, &f.ws, NULL, NULL);
+        memory_cleanse(a, sizeof(a)); wls_teardown(&f); PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_wallet_lock_shielded(void);
 int test_wallet_lock_shielded(void)
 {
@@ -2245,6 +2382,11 @@ int test_wallet_lock_shielded(void)
     failures += test_import_key_refuses_once_the_lock_is_published();
     failures += test_refused_reimport_keeps_the_existing_key_row();
     failures += test_refused_sapling_import_is_never_reported_as_added();
+#ifdef ZCL_TESTING
+    failures += test_import_key_durability();
+    failures += test_import_key_retry_durability();
+    failures += test_import_key_without_database();
+#endif
     wallet_lock_reset_for_test();
     return failures;
 }
