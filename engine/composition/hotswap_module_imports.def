@@ -215,6 +215,8 @@ HOTSWAP_MODULE_IMPORT("strerror", "LIBC")
 HOTSWAP_MODULE_IMPORT("strlen", "LIBC")
 HOTSWAP_MODULE_IMPORT("strncmp", "LIBC")
 HOTSWAP_MODULE_IMPORT("strnlen", "LIBC")
+/* Used by logging to extract a source basename. */
+HOTSWAP_MODULE_IMPORT("strrchr", "LIBC")
 HOTSWAP_MODULE_IMPORT("strstr", "LIBC")
 HOTSWAP_MODULE_IMPORT("strtod", "LIBC")
 HOTSWAP_MODULE_IMPORT("strtok", "LIBC")
