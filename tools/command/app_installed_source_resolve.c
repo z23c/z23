@@ -112,10 +112,12 @@ static const char *isr_game_member(const char *app)
 {
     return strcmp(app, "skycombat") ? "z23-tasks" : "z23-skycombat";
 }
+#if !defined(__APPLE__)
 static const char *isr_selector(const char *app)
 {
     return strcmp(app, "skycombat") ? "tasks" : "skycombat";
 }
+#endif
 bool app_installed_source_supported(const char *app)
 {
     if (!app) return false;
