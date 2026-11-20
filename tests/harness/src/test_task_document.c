@@ -120,6 +120,10 @@ static int td_actions(struct package_resident_store *store, struct task_document
         TASK_DOCUMENT_EDIT, id, "stale", row).ok && row->state.revision == 2);
     TD_CHECK("complete", task_document_apply(store, 2, TASK_DOCUMENT_COMPLETE, id,
         NULL, row).ok && row->state.tasks[0].done == 1);
+    TD_CHECK("saving the same title preserves undo", task_document_apply(store, 3,
+        TASK_DOCUMENT_EDIT, id, "Buy oat milk", row).ok && row->state.revision == 3 && row->can_undo);
+    TD_CHECK("repeating completion preserves undo", task_document_apply(store, 3,
+        TASK_DOCUMENT_COMPLETE, id, NULL, row).ok && row->state.revision == 3);
     TD_CHECK("undo completion", task_document_apply(store, 3, TASK_DOCUMENT_UNDO, 0,
         NULL, row).ok && row->state.tasks[0].done == 0);
     TD_CHECK("delete", task_document_apply(store, 4, TASK_DOCUMENT_DELETE, id,

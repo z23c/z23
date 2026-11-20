@@ -131,13 +131,33 @@ static struct zcl_result td_edit(struct task_document *row,
     return ZCL_OK;
 }
 
-static struct zcl_result td_change(struct task_document *row,
+static bool td_state_equal(const struct ta_state *a, const struct ta_state *b)
+{
+    unsigned char first[TA_PAYLOAD], second[TA_PAYLOAD];
+    uint32_t first_length, second_length;
+    return ta_state_encode(a, first, &first_length) &&
+        ta_state_encode(b, second, &second_length) && first_length == second_length &&
+        memcmp(first, second, first_length) == 0;
+}
+
+static struct zcl_result td_change(struct package_resident_store *store, struct task_document *row,
     enum task_document_action action, uint64_t id, const char *title)
 {
-    if (action != TASK_DOCUMENT_UNDO) return td_edit(row, action, id, title);
-    if (!row->can_undo) return ZCL_ERR(-1, "task-undo: nothing to undo");
-    row->state = row->undo;
-    row->can_undo = false;
+    uint64_t revision = row->state.revision + 1;
+    if (action == TASK_DOCUMENT_UNDO) {
+        if (!row->can_undo) return ZCL_ERR(-1, "task-undo: nothing to undo");
+        row->state = row->undo;
+        row->can_undo = false;
+    } else {
+        struct ta_state before = row->state;
+        ZCL_CHECK(td_edit(row, action, id, title));
+        if (td_state_equal(&before, &row->state)) return ZCL_OK;
+        row->undo = before;
+        row->can_undo = true;
+    }
+    row->state.revision = revision;
+    row->state.last_write = revision;
+    if (!td_save(store, row)) return ZCL_ERR(-1, "task-save: write failed; prior data retained");
     return ZCL_OK;
 }
 
@@ -152,16 +172,7 @@ struct zcl_result task_document_apply(struct package_resident_store *store,
     struct zcl_result result = task_document_read(store, &row);
     if (result.ok && (row.state.revision != expected_revision || expected_revision >= INT64_MAX))
         result = ZCL_ERR(-1, "task-save: stale or exhausted revision; reload before saving");
-    if (result.ok) {
-        struct ta_state before = row.state;
-        result = td_change(&row, action, task_id, title);
-        if (result.ok) {
-            row.state.revision = expected_revision + 1;
-            row.state.last_write = row.state.revision;
-            if (action != TASK_DOCUMENT_UNDO) { row.undo = before; row.can_undo = true; }
-            if (!td_save(store, &row)) result = ZCL_ERR(-1, "task-save: write failed; prior data retained");
-        }
-    }
+    if (result.ok) result = td_change(store, &row, action, task_id, title);
     if (result.ok) result = td_sql(store, "COMMIT");
     if (!result.ok && !sqlite3_get_autocommit(store->db)) {
         struct zcl_result rollback = td_sql(store, "ROLLBACK");
@@ -180,15 +191,6 @@ struct zcl_result task_document_capture(struct package_resident_store *store,
     (void)snprintf(checkpoint.app, sizeof(checkpoint.app), "%s", store->app);
     *out = checkpoint;
     return ZCL_OK;
-}
-
-static bool td_state_equal(const struct ta_state *a, const struct ta_state *b)
-{
-    unsigned char first[TA_PAYLOAD], second[TA_PAYLOAD];
-    uint32_t first_length, second_length;
-    return ta_state_encode(a, first, &first_length) &&
-        ta_state_encode(b, second, &second_length) && first_length == second_length &&
-        memcmp(first, second, first_length) == 0;
 }
 
 struct zcl_result task_document_check_current(struct package_resident_store *store,
