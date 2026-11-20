@@ -3860,15 +3860,46 @@ static void dl_submit_report_groups(struct zcl_command_reply *reply,
  * lint-land on exactly this tip, and its row records that) and the receive entry
  * (the sending host ran the precheck; a skip it chose is in the note). Any
  * other tip must be the worktree's HEAD, since the gates lint the worktree. */
+static void dl_submit_note_basename(const char *path, char *note, size_t cap)
+{
+    static const char *const shared[] = {
+        "main", "wt", "z23", "clone", "worktree", "checkout"
+    };
+    size_t end = strlen(path), start;
+    while (end > 1 && (path[end - 1] == '/' || path[end - 1] == '\\')) end--;
+    start = end;
+    while (start > 0 && path[start - 1] != '/' && path[start - 1] != '\\') start--;
+    size_t length = end - start;
+    if (!length || length >= cap) return;
+    for (size_t i = 0; i < sizeof(shared) / sizeof(shared[0]); i++)
+        if (strlen(shared[i]) == length && memcmp(path + start, shared[i], length) == 0)
+            return;
+    memcpy(note, path + start, length);
+    note[length] = '\0';
+}
+
+static void dl_submit_default_note(const char *root, const char *top,
+                                   char *note, size_t cap)
+{
+    char path[2 * DL_MARKER_PATH_CAP + 2], canonical[DL_MARKER_PATH_CAP];
+    int n = platform_path_is_absolute(top)
+        ? snprintf(path, sizeof(path), "%s", top)
+        : snprintf(path, sizeof(path), "%s/%s", root, top);
+    if (n <= 0 || (size_t)n >= sizeof(path) ||
+        !platform_directory_canonical_real(path, canonical, sizeof(canonical))) return;
+    dl_submit_note_basename(canonical, note, cap);
+}
+
 static bool dl_submit_precheck(const struct zcl_command_request *req,
                                const struct dl_dirs *d, const char *root,
-                               const char *full, bool sender_checked,
+                               const char *top, const char *full, bool sender_checked,
                                const struct zcl_land_qualify *qr,
                                char *note_buf, size_t cap,
                                struct zcl_command_reply *reply)
 {
     const char *note = dl_str(req, "note");
-    (void)snprintf(note_buf, cap, "%s", note ? note : "");
+    if (note) (void)snprintf(note_buf, cap, "%s", note);
+    else dl_submit_default_note(root, top, note_buf, cap);
     const struct json_value *budget = json_get(req->input, "precheck_budget_ms");
     return zcl_dev_land_precheck_budgeted(DL_LEAF, root, d->land, dl_str(req, "precheck"),
                                  full, sender_checked || qr->tip[0] != '\0',
@@ -4147,7 +4178,7 @@ static void dl_submit(const struct zcl_command_request *req,
     bool qualify = flag && flag->type == JSON_BOOL && flag->val.b;
     if (!dl_submit_initial(req, sender_checked, qualify, &s, reply)) return;
     if (qualify && !dl_submit_qualified(req, &s, reply)) return;
-    if (!dl_submit_precheck(req, &s.dirs, s.root, s.full, sender_checked,
+    if (!dl_submit_precheck(req, &s.dirs, s.root, s.top, s.full, sender_checked,
                             &s.qualify, s.note, sizeof(s.note), reply)) return;
     dl_submit_enqueue(&s, reply);
 }

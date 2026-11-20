@@ -1824,6 +1824,28 @@ bool dlx_pc_unproven_gate_skipped(void)
     return ok;
 }
 
+static bool dlx_pc_named_train_note(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char named[sizeof(rig.clone) + 16], nested[sizeof(named) + 16];
+    if (!dlx_pc_rig(&rig, "precheck_named", true, "check-core-seal\n"))
+        return false;
+    (void)snprintf(named, sizeof(named), "%s-offline-retry", rig.clone);
+    bool ok = rename(rig.clone, named) == 0;
+    if (ok) (void)snprintf(nested, sizeof(nested), "%s/nested", named);
+    if (ok) ok = mkdir(nested, 0700) == 0;
+    if (ok) (void)snprintf(rig.clone, sizeof(rig.clone), "%s/.", nested);
+    if (ok) {
+        dlx_pc_submit(&c, &rig, "skip", NULL);
+        ok = dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1;
+        dlx_end(&c);
+    }
+    ok = ok && dlx_pc_queued_note("clone-offline-retry [precheck skipped]");
+    dlx_restore();
+    return ok;
+}
+
 bool dlx_pc_clean_lane_queued(void)
 {
     struct dlx_rig rig;
@@ -1841,9 +1863,10 @@ bool dlx_pc_clean_lane_queued(void)
          dlx_arr(&c, "precheck_skipped") &&
          dlx_arr(&c, "precheck_skipped")->num_children == 0;
     dlx_end(&c);
-    ok = ok && dlx_queue_has_one() && dlx_pc_ran(&rig, "check-core-seal");
+    ok = ok && dlx_queue_has_one() && dlx_pc_ran(&rig, "check-core-seal") &&
+         dlx_pc_queued_note("");
     dlx_restore();
-    return ok;
+    return ok && dlx_pc_named_train_note();
 }
 
 bool dlx_pc_queued_note(const char *want)
