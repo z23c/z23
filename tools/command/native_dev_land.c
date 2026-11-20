@@ -485,26 +485,36 @@ struct dl_string_result {
 /* Value is copied into caller-owned storage; no JSON allocation is borrowed.
  * ABSENT has no value, unlike FOUND with an empty string. INVALID never
  * masquerades as optional absence. Every caller must choose its policy. */
-[[nodiscard]] static struct dl_string_result dl_line_string(
-    const char *line, const char *key, char *out, size_t cap)
+[[nodiscard]] static struct dl_string_result dl_doc_string(
+    const struct json_value *doc, const char *key, char *out, size_t cap)
 {
     struct dl_string_result result = { .state = DL_STRING_INVALID };
     if (out && cap) out[0] = '\0';
-    if (!line || !key || !out || cap == 0)
+    if (!doc || doc->type != JSON_OBJ || !key || !out || cap == 0)
         return result;
-    struct json_value doc;
-    json_init(&doc);
-    if (json_read(&doc, line, strlen(line)) && doc.type == JSON_OBJ) {
-        const struct json_value *value = json_get(&doc, key);
-        if (!value) result.state = DL_STRING_ABSENT;
-        else if (value->type == JSON_STR && value->val.s) {
-            size_t length = strlen(value->val.s);
-            if (length < cap) {
-                memcpy(out, value->val.s, length + 1);
-                result = (struct dl_string_result){ DL_STRING_FOUND, out, length };
-            }
+    const struct json_value *value = json_get(doc, key);
+    if (!value) result.state = DL_STRING_ABSENT;
+    else if (value->type == JSON_STR && value->val.s) {
+        size_t length = strlen(value->val.s);
+        if (length < cap) {
+            memcpy(out, value->val.s, length + 1);
+            result = (struct dl_string_result){ DL_STRING_FOUND, out, length };
         }
     }
+    return result;
+}
+
+[[nodiscard]] static struct dl_string_result dl_line_string(
+    const char *line, const char *key, char *out, size_t cap)
+{
+    if (out && cap) out[0] = '\0';
+    if (!line) return (struct dl_string_result){ .state = DL_STRING_INVALID };
+    struct json_value doc;
+    json_init(&doc);
+    bool valid = json_read(&doc, line, strlen(line));
+    struct dl_string_result result = valid
+        ? dl_doc_string(&doc, key, out, cap)
+        : (struct dl_string_result){ .state = DL_STRING_INVALID };
     json_free(&doc);
     return result;
 }
@@ -1075,12 +1085,16 @@ static bool dl_optional_row_strings(const char *line, struct dl_row *r)
         { "seal_old_root", r->seal_old_root, sizeof(r->seal_old_root) },
         { "seal_new_root", r->seal_new_root, sizeof(r->seal_new_root) }
     };
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
-        struct dl_string_result value = dl_line_string(line, fields[i].key,
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, line, strlen(line));
+    for (size_t i = 0; ok && i < sizeof(fields) / sizeof(fields[0]); i++) {
+        struct dl_string_result value = dl_doc_string(&doc, fields[i].key,
             fields[i].out, fields[i].cap);
-        if (value.state == DL_STRING_INVALID) return false;
+        ok = value.state != DL_STRING_INVALID;
     }
-    return true;
+    json_free(&doc);
+    return ok;
 }
 
 static bool dl_parse_dispatch_fields(const char *line, struct dl_row *r)
