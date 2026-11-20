@@ -2002,6 +2002,14 @@ static enum wrc_coverage coverage_fixture(struct wallet_sqlite *ws, const uint8_
     return result;
 }
 
+static int coverage_deny_rollback(void *unused, int action, const char *arg,
+                                  const char *b, const char *c, const char *d)
+{
+    (void)unused; (void)b; (void)c; (void)d;
+    return action == SQLITE_TRANSACTION && arg && !strcmp(arg, "ROLLBACK")
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
 static int coverage_shielded_fixture(void)
 {
     int failures = 0;
@@ -2036,6 +2044,11 @@ static int coverage_shielded_fixture(void)
         if (opened.ok) {
             DR_CHECK("coverage: readonly snapshot complete", coverage_fixture(&ro_ws, seed) == WRC_COVERAGE_COMPLETE);
             DR_CHECK("coverage: readonly snapshot released", sqlite3_get_autocommit(ro_db));
+            DR_CHECK("coverage: inject rollback refusal", sqlite3_set_authorizer(ro_db, coverage_deny_rollback, NULL) == SQLITE_OK);
+            DR_CHECK("coverage: rollback refusal is unknown", coverage_fixture(&ro_ws, seed) == WRC_COVERAGE_UNKNOWN);
+            DR_CHECK("coverage: refused snapshot retained", !sqlite3_get_autocommit(ro_db));
+            DR_CHECK("coverage: clear rollback refusal", sqlite3_set_authorizer(ro_db, NULL, NULL) == SQLITE_OK);
+            DR_CHECK("coverage: release refused snapshot", sqlite3_exec(ro_db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK && sqlite3_get_autocommit(ro_db));
             wallet_sqlite_close(&ro_ws);
         }
         zcl_native_node_db_close_readonly(&ro_db, &ro_ndb);
@@ -2080,6 +2093,42 @@ static int coverage_shielded_fixture(void)
 }
 
 
+static int coverage_transparent_fixture(struct wallet_sqlite *ws, struct wallet *w,
+                                        struct node_db *ndb)
+{
+    int failures = 0;
+    for (int mixed = 0; mixed < 2; mixed++) {
+        if (mixed) {
+            struct privkey independent;
+            privkey_make_new(&independent, true);
+            struct pubkey independent_pub;
+            privkey_get_pubkey(&independent, &independent_pub);
+            mixed_fixture_key_id = pubkey_get_id(&independent_pub);
+            DR_CHECK("mixed: key is not already in phrase wallet", !keystore_have_key(&w->keystore, &mixed_fixture_key_id));
+            DR_CHECK("mixed: add independent key", keystore_add_key(&w->keystore, &independent));
+            DR_CHECK("mixed: persist independent key", wallet_sqlite_flush_r(ws, w).ok);
+        }
+        uint8_t coverage_seed[32];
+        DR_CHECK("coverage: seed readable", wallet_sqlite_read_sapling_seed(ws, coverage_seed));
+        struct timespec coverage_begin, coverage_end;
+        clock_gettime(CLOCK_MONOTONIC, &coverage_begin);
+        enum wrc_coverage coverage = coverage_fixture(ws, coverage_seed);
+        clock_gettime(CLOCK_MONOTONIC, &coverage_end);
+        printf("    coverage elapsed ms: %.2f\n", (coverage_end.tv_sec - coverage_begin.tv_sec) * 1000.0 + (coverage_end.tv_nsec - coverage_begin.tv_nsec) / 1000000.0);
+        memory_cleanse(coverage_seed, sizeof(coverage_seed));
+        printf("    synthetic %s coverage=%d\n", mixed ? "mixed" : "control", (int)coverage);
+        DR_CHECK("coverage: correct for fixture", coverage == (mixed ? WRC_COVERAGE_INCOMPLETE : WRC_COVERAGE_COMPLETE));
+    }
+    DR_CHECK("coverage: corrupt transparent pubkey", sqlite3_exec(ndb->db, "UPDATE wallet_keys SET pubkey=zeroblob(length(pubkey)) WHERE rowid=(SELECT min(rowid) FROM wallet_keys)", NULL, NULL, NULL) == SQLITE_OK);
+    uint8_t corrupt_seed[32];
+    DR_CHECK("coverage: reload seed for corrupt row", wallet_sqlite_read_sapling_seed(ws, corrupt_seed));
+    DR_CHECK("coverage: corrupt transparent identity unknown", coverage_fixture(ws, corrupt_seed) == WRC_COVERAGE_UNKNOWN);
+    memory_cleanse(corrupt_seed, sizeof(corrupt_seed));
+    DR_CHECK("coverage: repair transparent fixture", wallet_sqlite_flush_r(ws, w).ok);
+    return failures;
+}
+
+
 static int act4_recovery_phrase(void)
 {
     int failures = 0;
@@ -2120,34 +2169,7 @@ static int act4_recovery_phrase(void)
     DR_CHECK("act4: flush the wallet",
              wallet_sqlite_flush_r(&live_ws, live_w).ok);
 
-    for (int mixed = 0; mixed < 2; mixed++) {
-        if (mixed) {
-            struct privkey independent;
-            privkey_make_new(&independent, true);
-            struct pubkey independent_pub;
-            privkey_get_pubkey(&independent, &independent_pub);
-            mixed_fixture_key_id = pubkey_get_id(&independent_pub);
-            DR_CHECK("mixed: key is not already in phrase wallet", !keystore_have_key(&live_w->keystore, &mixed_fixture_key_id));
-            DR_CHECK("mixed: add independent key", keystore_add_key(&live_w->keystore, &independent));
-            DR_CHECK("mixed: persist independent key", wallet_sqlite_flush_r(&live_ws, live_w).ok);
-        }
-        uint8_t coverage_seed[32];
-        DR_CHECK("coverage: seed readable", wallet_sqlite_read_sapling_seed(&live_ws, coverage_seed));
-        struct timespec coverage_begin, coverage_end;
-        clock_gettime(CLOCK_MONOTONIC, &coverage_begin);
-        enum wrc_coverage coverage = coverage_fixture(&live_ws, coverage_seed);
-        clock_gettime(CLOCK_MONOTONIC, &coverage_end);
-        printf("    coverage elapsed ms: %.2f\n", (coverage_end.tv_sec - coverage_begin.tv_sec) * 1000.0 + (coverage_end.tv_nsec - coverage_begin.tv_nsec) / 1000000.0);
-        memory_cleanse(coverage_seed, sizeof(coverage_seed));
-        printf("    synthetic %s coverage=%d\n", mixed ? "mixed" : "control", (int)coverage);
-        DR_CHECK("coverage: correct for fixture", coverage == (mixed ? WRC_COVERAGE_INCOMPLETE : WRC_COVERAGE_COMPLETE));
-    }
-    DR_CHECK("coverage: corrupt transparent pubkey", sqlite3_exec(live_ndb.db, "UPDATE wallet_keys SET pubkey=zeroblob(length(pubkey)) WHERE rowid=(SELECT min(rowid) FROM wallet_keys)", NULL, NULL, NULL) == SQLITE_OK);
-    uint8_t corrupt_seed[32];
-    DR_CHECK("coverage: reload seed for corrupt row", wallet_sqlite_read_sapling_seed(&live_ws, corrupt_seed));
-    DR_CHECK("coverage: corrupt transparent identity unknown", coverage_fixture(&live_ws, corrupt_seed) == WRC_COVERAGE_UNKNOWN);
-    memory_cleanse(corrupt_seed, sizeof(corrupt_seed));
-    DR_CHECK("coverage: repair transparent fixture", wallet_sqlite_flush_r(&live_ws, live_w).ok);
+    failures += coverage_transparent_fixture(&live_ws, live_w, &live_ndb);
 
     /* The address a user would actually be handed and would actually
      * publish. THIS is the string that has to come back. */

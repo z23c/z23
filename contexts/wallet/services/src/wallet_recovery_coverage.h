@@ -6,7 +6,8 @@ struct wallet_sqlite;
 struct wallet;
 enum wrc_coverage { WRC_COVERAGE_UNKNOWN, WRC_COVERAGE_COMPLETE, WRC_COVERAGE_INCOMPLETE };
 /* old must be a freshly initialized empty wallet owned by the caller;
- * its contents may be replaced with the rebuilt wallet.
+ * its contents may be replaced with the rebuilt wallet. The caller owns and
+ * must close the connection if SQLite cannot release the read transaction.
  * Compares persisted wallet material with the actual offline empty-target
  * rebuild. UNKNOWN includes read failures and unverifiable stored rows. */
 enum wrc_coverage wrc_recovery_coverage(struct wallet_sqlite *ws, struct wallet *old,

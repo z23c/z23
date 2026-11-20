@@ -30,6 +30,25 @@ static bool coverage_counts(sqlite3 *db, int64_t counts[4])
     return ok;
 }
 
+static bool coverage_transparent_row(sqlite3_stmt *s, const struct wallet *old)
+{
+    int len = sqlite3_column_bytes(s, 1);
+    const unsigned char *hash = sqlite3_column_blob(s, 0);
+    const unsigned char *stored = sqlite3_column_blob(s, 1);
+    int64_t compressed = sqlite3_column_int64(s, 2);
+    if (sqlite3_column_type(s, 0) != SQLITE_BLOB || sqlite3_column_bytes(s, 0) != 20 ||
+        sqlite3_column_type(s, 1) != SQLITE_BLOB || !hash || !stored ||
+        sqlite3_column_type(s, 2) != SQLITE_INTEGER ||
+        !((len == 33 && compressed == 1) || (len == 65 && compressed == 0)))
+        return false;
+    struct pubkey pk = {0}, actual = {0};
+    pubkey_set(&pk, stored, (unsigned int)len);
+    struct key_id id = pubkey_get_id(&pk);
+    return !memcmp(hash, id.id.data, 20) &&
+        keystore_get_pubkey(&old->keystore, &id, &actual) &&
+        actual.size == pk.size && !memcmp(actual.vch, pk.vch, pk.size);
+}
+
 static bool coverage_transparent_rows(sqlite3 *db, const struct wallet *old)
 {
     sqlite3_stmt *s = NULL;
@@ -41,32 +60,12 @@ static bool coverage_transparent_rows(sqlite3 *db, const struct wallet *old)
     bool ok = true;
     enum zcl_step step;
     while ((step = ar_step_checked(s, "coverage transparent", NULL)) == ZCL_STEP_ROW) {
-        int len = sqlite3_column_bytes(s, 1);
-        const unsigned char *hash = sqlite3_column_blob(s, 0);
-        const unsigned char *stored = sqlite3_column_blob(s, 1);
-        int64_t compressed = sqlite3_column_int64(s, 2);
-        if (sqlite3_column_type(s, 0) != SQLITE_BLOB || sqlite3_column_bytes(s, 0) != 20 ||
-            sqlite3_column_type(s, 1) != SQLITE_BLOB || !hash || !stored ||
-            sqlite3_column_type(s, 2) != SQLITE_INTEGER ||
-            !((len == 33 && compressed == 1) || (len == 65 && compressed == 0))) {
-            ok = false;
-            break;
-        }
-        struct pubkey pk = {0}, actual = {0};
-        pubkey_set(&pk, stored, (unsigned int)len);
-        struct key_id id = pubkey_get_id(&pk);
-        if (memcmp(hash, id.id.data, 20) ||
-            !keystore_get_pubkey(&old->keystore, &id, &actual) ||
-            actual.size != pk.size || memcmp(actual.vch, pk.vch, pk.size)) {
-            ok = false;
-            break;
-        }
+        if (!coverage_transparent_row(s, old)) { ok = false; break; }
     }
     if (step != ZCL_STEP_DONE) ok = false;
     if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
     return ok;
 }
-
 
 struct coverage_public {
     struct key_id transparent[MAX_KEYSTORE_KEYS];
@@ -114,11 +113,29 @@ static bool coverage_contains_keys(const struct coverage_public *pub,
     return true;
 }
 
-enum wrc_coverage wrc_recovery_coverage(struct wallet_sqlite *ws, struct wallet *old,
-                                        const uint8_t seed[32])
+static bool coverage_load_wallet(struct wallet_sqlite *ws, struct wallet *old,
+                                 const uint8_t seed[32], const int64_t counts[4])
 {
-    if (!ws || !ws->open || !old || !seed || old->keystore.num_keys || old->sapling_keys.num_keys) return WRC_COVERAGE_UNKNOWN;
-    int64_t counts[4] = {0};
+    if (!wallet_sqlite_read_keys_r(ws, old).ok ||
+        !wallet_sqlite_read_sapling_keys(ws, old) ||
+        counts[0] != (int64_t)old->keystore.num_keys ||
+        counts[1] != (int64_t)old->sapling_keys.num_keys ||
+        keystore_num_sealed(&old->keystore) || old->sapling_keys.num_damaged ||
+        old->sapling_keys.num_unscannable) return false;
+    zcl_mutex_lock(&old->sapling_keys.cs);
+    bool ok = wallet_sqlite_verify_startup_sapling_in_tx_locked_r(ws, old, ws->db).ok;
+    zcl_mutex_unlock(&old->sapling_keys.cs);
+    if (!ok || !old->sapling_keys.has_seed || memcmp(seed, old->sapling_keys.seed, 32) ||
+        !coverage_transparent_rows(ws->db, old)) return false;
+    for (size_t i = 0; i < MAX_SAPLING_KEYS; i++)
+        if (old->sapling_keys.keys[i].used && old->sapling_keys.keys[i].secret_wiped)
+            return false;
+    return true;
+}
+
+static enum wrc_coverage coverage_snapshot(struct wallet_sqlite *ws, struct wallet *old,
+                                            const uint8_t seed[32], struct coverage_public *pub)
+{
     sqlite3_mutex *mu = sqlite3_db_mutex(ws->db);
     if (!mu) return WRC_COVERAGE_UNKNOWN;
     sqlite3_mutex_enter(mu);
@@ -126,51 +143,31 @@ enum wrc_coverage wrc_recovery_coverage(struct wallet_sqlite *ws, struct wallet 
         sqlite3_mutex_leave(mu);
         return WRC_COVERAGE_UNKNOWN;
     }
-    if (sqlite3_exec(ws->db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
-        if (!sqlite3_get_autocommit(ws->db)) (void)sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
-        if (!sqlite3_get_autocommit(ws->db)) abort();
-        sqlite3_mutex_leave(mu);
-        return WRC_COVERAGE_UNKNOWN;
-    }
-    if (!coverage_counts(ws->db, counts)) {
-        (void)sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
-        if (!sqlite3_get_autocommit(ws->db)) abort();
-        sqlite3_mutex_leave(mu);
-        return WRC_COVERAGE_UNKNOWN;
-    }
-    struct coverage_public *pub = zcl_calloc(1, sizeof(*pub), "coverage.public");
-    if (!pub) {
-        (void)sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
-        if (!sqlite3_get_autocommit(ws->db)) abort();
-        sqlite3_mutex_leave(mu);
-        return WRC_COVERAGE_UNKNOWN;
-    }
     enum wrc_coverage result = WRC_COVERAGE_UNKNOWN;
-    if (!wallet_sqlite_read_keys_r(ws, old).ok ||
-        !wallet_sqlite_read_sapling_keys(ws, old) ||
-        counts[0] != (int64_t)old->keystore.num_keys ||
-        counts[1] != (int64_t)old->sapling_keys.num_keys ||
-        keystore_num_sealed(&old->keystore) || old->sapling_keys.num_damaged ||
-        old->sapling_keys.num_unscannable) goto done;
-    zcl_mutex_lock(&old->sapling_keys.cs);
-    bool sapling_ok = wallet_sqlite_verify_startup_sapling_in_tx_locked_r(ws, old, ws->db).ok;
-    zcl_mutex_unlock(&old->sapling_keys.cs);
-    if (!sapling_ok || !old->sapling_keys.has_seed ||
-        memcmp(seed, old->sapling_keys.seed, 32) ||
-        !coverage_transparent_rows(ws->db, old)) goto done;
-    for (size_t i = 0; i < MAX_SAPLING_KEYS; i++)
-        if (old->sapling_keys.keys[i].used && old->sapling_keys.keys[i].secret_wiped)
-            goto done;
-    if (counts[2] || counts[3]) { result = WRC_COVERAGE_INCOMPLETE; goto done; }
+    int64_t counts[4] = {0};
+    if (sqlite3_exec(ws->db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK ||
+        !coverage_counts(ws->db, counts) || !coverage_load_wallet(ws, old, seed, counts))
+        goto finish;
+    if (counts[2] || counts[3]) { result = WRC_COVERAGE_INCOMPLETE; goto finish; }
     coverage_collect(pub, old);
     result = WRC_COVERAGE_COMPLETE;
-done:
-    if (sqlite3_exec(ws->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+finish:
+    if (!sqlite3_get_autocommit(ws->db) &&
+        sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK)
         result = WRC_COVERAGE_UNKNOWN;
-        if (!sqlite3_get_autocommit(ws->db)) (void)sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
-    }
-    if (!sqlite3_get_autocommit(ws->db)) abort();
+    if (!sqlite3_get_autocommit(ws->db)) result = WRC_COVERAGE_UNKNOWN;
     sqlite3_mutex_leave(mu);
+    return result;
+}
+
+enum wrc_coverage wrc_recovery_coverage(struct wallet_sqlite *ws, struct wallet *old,
+                                        const uint8_t seed[32])
+{
+    if (!ws || !ws->open || !old || !seed || old->keystore.num_keys || old->sapling_keys.num_keys)
+        return WRC_COVERAGE_UNKNOWN;
+    struct coverage_public *pub = zcl_calloc(1, sizeof(*pub), "coverage.public");
+    if (!pub) return WRC_COVERAGE_UNKNOWN;
+    enum wrc_coverage result = coverage_snapshot(ws, old, seed, pub);
     if (result == WRC_COVERAGE_COMPLETE) {
         wallet_free(old);
         wallet_init(old);
