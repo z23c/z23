@@ -907,6 +907,12 @@ It prints the first pre-recovery `quick_check(1)` result, then requires a final
 `ok`, an empty recovered table, and unchanged table/index SQL before publishing.
 Any residual corruption publishes nothing.
 
+For WAL sources, recovery pins a read snapshot only during the backup. Concurrent
+writers can continue, but WAL pages may remain retained until that snapshot is
+released. Rollback-journal sources are released before backup. Backup stops without publishing
+if its copied-page high-water mark does not advance for 30 seconds; the existing
+busy retry limit also applies. A single filesystem or SQLite call may take longer.
+
 ```bash
 make peer_chain_recovery
 SOURCE_DB=/path/to/source/node.db

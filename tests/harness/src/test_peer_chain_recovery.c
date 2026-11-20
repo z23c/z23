@@ -659,6 +659,44 @@ static int test_peer_chain_recovery_directory_sync_after_publish(void)
     return failures;
 }
 
+#if defined(__linux__)
+static int test_peer_chain_recovery_live_writes(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], dest[4608], tmp[4700], out[4096];
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "active");
+    const char *modes[] = { "wal", "stall" };
+    for (int i = 0; i < 2; i++) {
+        out[0] = 0;
+        snprintf(source, sizeof(source), "%s/source%d.db", dir, i);
+        snprintf(dest, sizeof(dest), "%s/dest%d.db", dir, i);
+        snprintf(tmp, sizeof(tmp), "%s.peer_chain_recovery.tmp", dest);
+        bool ok = recovery_fixture(source);
+        sqlite3 *db = NULL;
+        ok = ok && sqlite3_open(source, &db) == SQLITE_OK;
+        if (ok && i == 0) ok = recovery_exec(db, "PRAGMA journal_mode=WAL");
+        if (ok) ok = recovery_exec(db, "INSERT INTO unrelated VALUES(2, hex(zeroblob(600000)))");
+        if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+        const char *argv[] = { "build/fixtures/peer_chain_recovery_snapshot", modes[i], source, dest, NULL };
+        int rc = ok ? test_host_tool_capture(argv, out, sizeof(out), 15000) : -1;
+        if (i == 0) {
+            bool snapshot_ok = rc == 0 && recovery_verify_destination(dest, "survive");
+            printf("peer_chain_recovery: WAL snapshot survives concurrent commits... %s\n",
+                   snapshot_ok ? "OK" : "FAIL");
+            if (!snapshot_ok) failures++;
+        } else {
+            bool failed_cleanly = rc == 0 && strstr(out, "repeated restarts reached stall deadline") &&
+                                  recovery_absent(dest) && recovery_absent(tmp);
+            printf("peer_chain_recovery: rollback restarts stop without publication... %s\n",
+                   failed_cleanly ? "OK" : "FAIL");
+            if (!failed_cleanly) { fprintf(stderr, "fixture rc=%d output=%s\n", rc, out); failures++; }
+        }
+    }
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
 int test_peer_chain_recovery(void)
 {
     int failures = 0;
@@ -674,6 +712,9 @@ int test_peer_chain_recovery(void)
                         "(run: make peer-chain-recovery-unlink-fault)\n");
         return 1;
     }
+#endif
+#if defined(__linux__)
+    failures += test_peer_chain_recovery_live_writes();
 #endif
     failures += test_peer_chain_recovery_clean_wal();
     failures += test_peer_chain_recovery_corrupt_observation();

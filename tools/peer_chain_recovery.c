@@ -3,6 +3,7 @@
 
 #include "multicall.h"
 #include "platform/file_sync.h"
+#include "platform/time_compat.h"
 #include "platform/windows_path.h"
 #include "util/ar_step_readonly.h"
 
@@ -20,6 +21,7 @@
 #include <unistd.h>
 #endif
 
+#define RECOVERY_STALL_MS 30000
 #define RECOVERY_SUFFIX ".peer_chain_recovery.tmp"
 #define OBSERVATION_TABLE "peer_chain_observations"
 #define OBSERVATION_INDEX "idx_peer_chain_obs_observed_at"
@@ -189,27 +191,40 @@ static bool recovery_close(sqlite3 **db, const char *label)
     return true;
 }
 
+/* Bound an unchanged high-water mark; healthy large copies keep advancing. */
 static bool recovery_backup(sqlite3 *source, sqlite3 *copy)
 {
     sqlite3_backup *backup = sqlite3_backup_init(copy, "main", source, "main");
     if (!backup) {
-        fprintf(stderr, "peer_chain_recovery: backup init failed: %s\n",
-                sqlite3_errmsg(copy));
+        fprintf(stderr, "peer_chain_recovery: backup init failed: %s\n", sqlite3_errmsg(copy));
         return false;
     }
-    int rc = SQLITE_OK;
-    int retries = 0;
-    while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
+    int rc = SQLITE_OK, retries = 0, best_copied = -1;
+    int64_t last_progress = platform_time_monotonic_ms();
+    bool clock_bad = last_progress <= 0, stalled = false;
+    while (!clock_bad && !stalled && (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED)) {
         if (rc != SQLITE_OK && ++retries > 50) break;
         if (rc != SQLITE_OK) sqlite3_sleep(10);
         rc = sqlite3_backup_step(backup, 128);
+        int64_t now = platform_time_monotonic_ms();
+        if (now <= 0 || now < last_progress) { clock_bad = true; break; }
+        if (rc == SQLITE_OK) {
+            int copied = sqlite3_backup_pagecount(backup) - sqlite3_backup_remaining(backup);
+            if (copied > best_copied) { best_copied = copied; last_progress = now; }
+        }
+        if (rc != SQLITE_DONE && now - last_progress >= RECOVERY_STALL_MS) stalled = true;
+    }
+    if (clock_bad || stalled) {
+        fprintf(stderr, "peer_chain_recovery: %s\n", clock_bad ?
+                "monotonic clock unavailable or reversed" :
+                "backup stalled without progress for 30 seconds");
+        rc = SQLITE_ABORT;
     }
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     int finish = sqlite3_backup_finish(backup);
     if (rc == SQLITE_OK) rc = finish;
     if (rc != SQLITE_OK) {
-        fprintf(stderr, "peer_chain_recovery: online backup failed: %s\n",
-                sqlite3_errmsg(copy));
+        fprintf(stderr, "peer_chain_recovery: online backup failed: %s\n", sqlite3_errmsg(copy));
         return false;
     }
     return true;
@@ -224,6 +239,42 @@ static bool recovery_exec(sqlite3 *db, const char *sql, const char *label)
             error ? error : sqlite3_errmsg(db));
     sqlite3_free(error);
     return false;
+}
+
+/* WAL permits a fixed read snapshot without blocking writers; it can retain WAL
+ * pages until the backup finishes. Rollback-journal mode stays unpinned. */
+static bool recovery_snapshot_backup(sqlite3 *source, sqlite3 *copy)
+{
+    if (!recovery_exec(source, "BEGIN", "begin source snapshot")) return false;
+    bool ok = recovery_exec(source, "SELECT count(*) FROM sqlite_schema", "pin source snapshot");
+    sqlite3_stmt *mode = NULL;
+    int rc = ok ? sqlite3_prepare_v2(source, "PRAGMA journal_mode", -1, &mode, NULL) : SQLITE_ERROR;
+    if (ok && rc != SQLITE_OK) {
+        fprintf(stderr, "peer_chain_recovery: journal mode prepare failed rc=%d: %s\n", rc, sqlite3_errmsg(source));
+        ok = false;
+    }
+    bool wal = false;
+    if (ok) {
+        rc = sqlite3_step(mode);
+        const unsigned char *name = rc == SQLITE_ROW ? sqlite3_column_text(mode, 0) : NULL;
+        if (!name) {
+            fprintf(stderr, "peer_chain_recovery: journal mode step failed rc=%d: %s\n", rc, sqlite3_errmsg(source));
+            ok = false;
+        } else {
+            wal = sqlite3_stricmp((const char *)name, "wal") == 0;
+        }
+    }
+    if (mode) {
+        int final = sqlite3_finalize(mode);
+        if (final != SQLITE_OK) {
+            fprintf(stderr, "peer_chain_recovery: journal mode finalize failed rc=%d: %s\n", final, sqlite3_errmsg(source));
+            ok = false;
+        }
+    }
+    if (ok && wal) ok = recovery_backup(source, copy);
+    if (!recovery_exec(source, "ROLLBACK", "release source snapshot")) ok = false;
+    if (ok && !wal) ok = recovery_backup(source, copy);
+    return ok;
 }
 
 static bool recovery_pre_check(sqlite3 *db)
@@ -630,7 +681,7 @@ static bool recovery_work(struct recovery_job *job)
     if (!recovery_create_temporary(job->temporary)) return false;
     job->temporary_created = true;
     return recovery_open(&job->copy, job->temporary, SQLITE_OPEN_READWRITE, "copy") &&
-           recovery_backup(job->source, job->copy) &&
+           recovery_snapshot_backup(job->source, job->copy) &&
            recovery_close(&job->source, "source") &&
            recovery_pre_check(job->copy) &&
            recovery_schema_read(job->copy, "table", OBSERVATION_TABLE, &job->table) &&

@@ -10132,7 +10132,7 @@ $(PEER_CHAIN_RECOVERY_BIN): tools/peer_chain_recovery.c \
     tools/peer_chain_recovery_standalone.c tools/multicall.h \
     platform/modules/platform/include/platform/windows_path.h \
     platform/modules/util/include/util/ar_step_readonly.h \
-    platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
+    platform/modules/base/src/result.c platform/modules/base/src/log_level.c platform/modules/platform/src/clock.c \
     vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
@@ -10140,16 +10140,27 @@ $(PEER_CHAIN_RECOVERY_BIN): tools/peer_chain_recovery.c \
 	    -Iplatform/modules/platform/include -Iplatform/modules/base/include \
 	    -Iplatform/modules/util/include \
 	    -o $@ tools/peer_chain_recovery.c tools/peer_chain_recovery_standalone.c \
-	    platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
+	    platform/modules/base/src/result.c platform/modules/base/src/log_level.c platform/modules/platform/src/clock.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 PEER_CHAIN_RECOVERY_UNLINK_FAULT = $(BUILD_DIR)/fixtures/peer_chain_recovery_unlink_fault.so
 .PHONY: peer-chain-recovery-unlink-fault
-peer-chain-recovery-unlink-fault: $(PEER_CHAIN_RECOVERY_UNLINK_FAULT)
+peer-chain-recovery-unlink-fault: $(PEER_CHAIN_RECOVERY_UNLINK_FAULT) $(BUILD_DIR)/fixtures/peer_chain_recovery_snapshot
 $(PEER_CHAIN_RECOVERY_UNLINK_FAULT): tests/harness/fixtures/peer_chain_recovery_unlink_fault.c
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_GNU_SOURCE -fPIC -shared -o $@ $< -ldl
+
+$(BUILD_DIR)/fixtures/peer_chain_recovery_snapshot: tests/harness/fixtures/peer_chain_recovery_snapshot.c tools/peer_chain_recovery.c \
+    platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
+    platform/modules/platform/src/clock.c vendor/lib/libsqlite3.a
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Ivendor/include -Itools \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include \
+	    -Iplatform/modules/util/include -o $@ $< platform/modules/base/src/result.c \
+	    platform/modules/base/src/log_level.c platform/modules/platform/src/clock.c \
+	    vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 # Nested JSON path query for operator scripts. Python is banned; grep/sed
 # covers flat RPC fields, and this C23 walker covers nested envelopes.
