@@ -3,6 +3,7 @@
  *          a changed input, and a fail-open key. */
 
 #include "test/test_core.h"
+#include "test/host_tool_capture.h"
 
 #include "build_epoch_integrity.h"
 
@@ -312,6 +313,33 @@ static int test_bei_open(const char *root)
     return failures;
 }
 
+static int test_bei_input_hash_failure(const char *root)
+{
+    int failures = 0;
+    TEST("build-system-id refuses a failed input hash without emitting an identity") {
+        char shim[PATH_MAX], hit[PATH_MAX], path_env[2 * PATH_MAX], out[128];
+        const char *path = getenv("PATH");
+        ASSERT(path != NULL);
+        int n = snprintf(path_env, sizeof path_env, "PATH=%s:%s", root, path);
+        ASSERT(n > 0 && (size_t)n < sizeof path_env);
+        n = snprintf(shim, sizeof shim, "%s/sha256sum", root);
+        ASSERT(n > 0 && (size_t)n < sizeof shim);
+        n = snprintf(hit, sizeof hit, "%s.hit", shim);
+        ASSERT(n > 0 && (size_t)n < sizeof hit);
+        ASSERT_EQ(bei_put(shim, "#!/bin/sh\n"
+            "if mkdir \"$0.hit\" 2>/dev/null; then exit 1; fi\n"
+            "PATH=${PATH#*:}; export PATH\nexec sha256sum \"$@\"\n", 1), 0);
+        const char *argv[] = {"env", path_env, "bash", "tools/dev/build-epoch-key.sh",
+                              "build-system-id", NULL};
+        ASSERT_EQ(test_host_tool_capture(argv, out, sizeof out, 30000), 2);
+        ASSERT(access(hit, F_OK) == 0);
+        ASSERT_STR_EQ(out, "");
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
 int test_build_epoch_integrity(void);
 int test_build_epoch_integrity(void)
 {
@@ -323,6 +351,7 @@ int test_build_epoch_integrity(void)
     failures += test_bei_hit(root);
     failures += test_bei_change(root);
     failures += test_bei_open(root);
+    failures += test_bei_input_hash_failure(root);
     if (failures == 0)
         printf("test_build_epoch_integrity: all passed\n");
     else

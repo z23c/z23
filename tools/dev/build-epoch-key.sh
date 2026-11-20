@@ -920,14 +920,28 @@ build-system-id)
     done < "$ZCC_BOOTSTRAP_CATALOG"
     WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-system.XXXXXX")" ||
         fail 'could not create build-system fingerprint workspace'
-    : > "$WORK/build-system.preimage"
-    printf 'zcl.build_system_id.v1\0' >> "$WORK/build-system.preimage"
     for f in "${BUILD_SYSTEM_FILES[@]}"; do
         [ -f "$f" ] || fail "build-system input is missing: $f"
-        printf 'file\0%s\0%s\0' "${f#"$ROOT"/}" "$(sha256_file "$f")" \
-            >> "$WORK/build-system.preimage"
     done
-    sha256_file "$WORK/build-system.preimage"
+    sha256sum -z -- "${BUILD_SYSTEM_FILES[@]}" > "$WORK/input-digests" ||
+        fail 'could not hash all build-system inputs'
+    {
+        printf 'zcl.build_system_id.v1\0'
+        for f in "${BUILD_SYSTEM_FILES[@]}"; do
+            IFS= read -r -d '' record || fail "missing build-system digest: $f"
+            digest="${record:0:64}"
+            is_sha256 "$digest" &&
+                { [ "$record" = "$digest  $f" ] || [ "$record" = "$digest *$f" ]; } ||
+                fail "invalid build-system digest: $f"
+            printf 'file\0%s\0%s\0' "${f#"$ROOT"/}" "$digest"
+        done
+        if IFS= read -r -d '' record || [ -n "$record" ]; then
+            fail 'unexpected trailing build-system digest data'
+        fi
+    } < "$WORK/input-digests" > "$WORK/build-system.preimage"
+    digest="$(sha256_file "$WORK/build-system.preimage")" && is_sha256 "$digest" ||
+        fail 'could not hash the build-system preimage'
+    printf '%s\n' "$digest"
     ;;
 
 *)
