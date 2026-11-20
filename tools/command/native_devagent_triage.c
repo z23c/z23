@@ -25,9 +25,15 @@
  *   ahead                 commits in base..branch
  *   unlanded              commits in base..branch with no patch-equivalent
  *                         commit in base: the lines of `git cherry <base>
- *                         <branch>` that begin with '+'. -1 (unknown) when
- *                         that output filled its buffer and cannot be read
- *                         in full.
+ *                         <branch>` that begin with '+'. 0 when ahead == 0
+ *                         (no Git call). -1 when not measured (already delete
+ *                         by age: last_commit_age_days > max_age_days AND
+ *                         behind > 500) or when the output could not be read
+ *                         in full. `git cherry` ignores merge commits, so a
+ *                         branch whose only unlanded content sits inside a
+ *                         merge commit has unlanded 0 and is binned delete.
+ *                         The leaf deletes nothing; ahead stays in the row
+ *                         for that reason.
  *   behind                commits in branch..base
  *   last_commit_age_days  whole days between the branch head's commit time
  *                         and now
@@ -41,8 +47,8 @@
  *             max_age_days AND behind > 500;
  *   else "land"   when merge_clean;
  *   else "rebase".
- * An unknown unlanded (-1) never matches "unlanded == 0", so that branch is
- * binned by the rest of RULE alone.
+ * A -1 never matches "unlanded == 0", so that branch is binned by the rest of
+ * RULE alone (an age-skipped branch is delete by the age clause).
  *
  * OUTPUT (zcl.agent_triage.v1) on ok=true
  *   leaf       "dev.agent.triage"
@@ -225,14 +231,34 @@ static long long dvg_count_unlanded(const char *text, size_t cap)
     return n;
 }
 
-/* Run the six per-branch probes in order — head SHA, ahead, unlanded, behind,
- * commit time, merge-tree — filling head/ahead/unlanded/behind/age_days/
- * merge_clean. Returns the first non-zero git exit status, with `line` naming
- * that argv, or 0 when every probe ran; a non-zero merge-tree is the
- * merge_clean=false answer, never a failure. The caller logs and owns the
- * failure path. */
+/* The age rule's delete clause alone: old, and far behind the base. */
+static bool dvg_old_far_behind(long long age_days, long long max_age_days,
+                               long long behind)
+{
+    return age_days > max_age_days && behind > 500;
+}
+
+/* One `git cherry <base> <branch>` probe: sets *unlanded from its output. */
+static int dvg_probe_unlanded(const char *cwd, const char *base,
+                              const char *branch, char *out, size_t outcap,
+                              char *line, size_t linecap, long long *unlanded)
+{
+    const char *argv_cherry[] = {"cherry", base, branch, NULL};
+    int rc = dvg_git(cwd, argv_cherry, out, outcap, line, linecap);
+    if (rc == 0)
+        *unlanded = dvg_count_unlanded(out, outcap);
+    return rc;
+}
+
+/* Run the per-branch probes in order — head SHA, ahead, behind, commit time,
+ * then unlanded (git cherry, only when it can change the bin), merge-tree —
+ * filling head/ahead/unlanded/behind/age_days/merge_clean. Returns the first
+ * non-zero git exit status, with `line` naming that argv, or 0 when every
+ * probe ran; a non-zero merge-tree is the merge_clean=false answer, never a
+ * failure. The caller logs and owns the failure path. */
 static int dvg_measure_branch(const char *cwd, const char *base,
-                              const char *branch, time_t now, char *head,
+                              const char *branch, time_t now,
+                              long long max_age_days, char *head,
                               size_t headcap, char *out, size_t outcap,
                               char *line, size_t linecap, long long *ahead,
                               long long *unlanded, long long *behind,
@@ -258,14 +284,6 @@ static int dvg_measure_branch(const char *cwd, const char *base,
             return rc;
         dvg_strip(out);
         *ahead = dvg_parse_ll(out);
-    }
-
-    {
-        const char *argv_cherry[] = {"cherry", base, branch, NULL};
-        rc = dvg_git(cwd, argv_cherry, out, outcap, line, linecap);
-        if (rc != 0)
-            return rc;
-        *unlanded = dvg_count_unlanded(out, outcap);
     }
 
     (void)snprintf(range_behind, sizeof(range_behind), "%s..%s", branch,
@@ -294,6 +312,17 @@ static int dvg_measure_branch(const char *cwd, const char *base,
         }
     }
 
+    if (ahead == 0) {
+        *unlanded = 0;
+    } else if (dvg_old_far_behind(*age_days, max_age_days, *behind)) {
+        *unlanded = -1;
+    } else {
+        rc = dvg_probe_unlanded(cwd, base, branch, out, outcap, line, linecap,
+                                unlanded);
+        if (rc != 0)
+            return rc;
+    }
+
     {
         const char *argv_mt[] = {"merge-tree", "--write-tree", base,
                                  branch, NULL};
@@ -313,7 +342,7 @@ static const char *dvg_bin_branch(long long ahead, long long unlanded,
 {
     const char *bin;
     if (ahead == 0 || unlanded == 0 ||
-        (age_days > max_age_days && behind > 500))
+        dvg_old_far_behind(age_days, max_age_days, behind))
         bin = "delete";
     else if (merge_clean)
         bin = "land";
@@ -385,9 +414,10 @@ void zcl_native_handle_dev_agent_triage(
         bool merge_clean;
         const char *bin;
 
-        rc = dvg_measure_branch(cwd, base, branch, now, head, sizeof(head),
-                                out, sizeof(out), line, sizeof(line), &ahead,
-                                &unlanded, &behind, &age_days, &merge_clean);
+        rc = dvg_measure_branch(cwd, base, branch, now, max_age_days, head,
+                                sizeof(head), out, sizeof(out), line,
+                                sizeof(line), &ahead, &unlanded, &behind,
+                                &age_days, &merge_clean);
         if (rc != 0) {
             dvg_git_failed(reply, line, rc);
             json_free(&row);

@@ -325,6 +325,8 @@ int test_devagent_triage(void)
         (void)json_push_kv_str(&c.input, "base", "main");
         ASSERT(dvx_run(&c));
         ASSERT(dvx_ok(&c));
+        /* Nothing ahead: no Git call, so unlanded is 0 by definition. */
+        ASSERT_EQ(dvx_row_int(&c, "merged", "unlanded"), 0);
         /* One commit, patch-equivalent to main but not hash-equal to it. */
         ASSERT_EQ(dvx_row_int(&c, "landed", "ahead"), 1);
         ASSERT_EQ(dvx_row_int(&c, "landed", "unlanded"), 0);
