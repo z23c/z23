@@ -1370,6 +1370,7 @@ struct pv_compiler {
     const char *path; /* absolute executable selected by the supervisor */
     char version[VCS_PACKAGE_ATTEST_COMPILER_VERSION_MAX + 1u];
     bool available;
+    bool probe_sandbox_fail;
     uint8_t outcome; /* enum vcs_package_attest_outcome (build verdict) */
 };
 
@@ -5095,6 +5096,7 @@ static void pv_probe_one_compiler(struct pv_compiler *compiler,
                                     rules, n_rules, NULL, 10000);
     struct pv_run capability = pv_run_child(PV_PROCESS_COMPILER,
         cargv, NULL, NULL, false, NULL, 0, NULL, 10000);
+    compiler->probe_sandbox_fail = pr.sandbox_fail || capability.sandbox_fail;
     if (pr.launched && pr.exited && pr.exit_code == 0 &&
         pr.stdout_buf[0] && capability.launched && capability.exited &&
         capability.exit_code == 0) {
@@ -7095,6 +7097,17 @@ static void pv_pipeline_rehome_rule_paths(
                 po->rules[i].path = po->link_deps[d].install_dir;
 }
 
+static void pv_report_no_compiler(const struct pv_compiler compilers[2], bool emit_mode)
+{
+    if (compilers[0].probe_sandbox_fail || compilers[1].probe_sandbox_fail) {
+        const char *reason = "could not safely verify the compiler";
+        fprintf(stderr, "%s: %s — no attestation signed\n", PV_LOG, reason);
+        if (emit_mode) fprintf(stdout, "%s\n", reason);
+    } else {
+        fprintf(stderr, "%s: neither gcc nor clang is available — no attestation signed\n", PV_LOG);
+    }
+}
+
 /* The build+test+sanitizer pipeline: temp work tree through the
  * standard-profile refusal gate. Split out of pv_main_posix to keep its
  * cyclomatic complexity bounded; behavior, ordering, and every early-exit
@@ -7108,7 +7121,7 @@ static int pv_main_run_pipeline(
     struct vcs_package_manifest *manifest, struct vcs_package_release *release,
     const char *plan_path, const char **fast_cache_dir_io,
     bool standard_profile, const uint8_t emit_lock_root[32],
-    bool allow_testless_standard, struct pv_pipeline_out *po)
+    bool allow_testless_standard, bool emit_mode, struct pv_pipeline_out *po)
 {
     const char *fast_cache_dir = *fast_cache_dir_io;
     int rc;
@@ -7295,9 +7308,7 @@ static int pv_main_run_pipeline(
 
     /* No compiler at all: there is no honest verdict to sign. */
     if (!compilers[0].available && !compilers[1].available) {
-        fprintf(stderr,
-                "%s: neither gcc nor clang is available — no attestation "
-                "signed\n", PV_LOG);
+        pv_report_no_compiler(compilers, emit_mode);
         pv_rm_rf(work);
         vcs_package_recipe_free(recipe);
         vcs_package_manifest_free(manifest);
@@ -7431,7 +7442,7 @@ static int pv_main_posix(int argc, char **argv)
         emit_dep_count, full_isolation, package_root, release_id, recipe_root,
         verifier_pubkey, &recipe, &manifest, &release, plan_path,
         &fast_cache_dir, standard_profile, emit_lock_root,
-        allow_testless_standard, &po);
+        allow_testless_standard, emit_dir != NULL, &po);
     if (rc != PV_CONTINUE) return rc;
 
     if (emit_dir) {
