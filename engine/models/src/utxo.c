@@ -300,49 +300,59 @@ int db_utxo_list_for_address_checked(struct node_db *ndb,
     return failed ? -1 : count;
 }
 
-/* Two probes, cheapest first. Contract (and the "false means not found
- * here" warning) is on the declaration in models/utxo.h. A missing or
- * unprepared table makes AR_QUERY_INT64_BOUND yield 0, i.e. "no history" —
- * the safe direction: the gap scan's floor still derives the standard
- * lookahead, it just cannot extend past it. */
-static int64_t utxo_addr_probe(struct node_db *ndb, const char *sql,
-                               const uint8_t address_hash[20])
+/* A positive result from either table is sufficient; absence needs both reads. */
+static int utxo_history_probe(struct node_db *ndb, const char *sql,
+                              const uint8_t *address_hash)
 {
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s, sql,
-        AR_BIND_BLOB(s, 1, address_hash, 20));
+    sqlite3_stmt *stmt = NULL;
+    AR_PREPARE_RET(ndb, stmt, sql, -1);
+    if (address_hash && sqlite3_bind_blob(stmt, 1, address_hash, 20, SQLITE_STATIC) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    enum zcl_step step = ar_step_checked(stmt, "address history", NULL);
+    int rc = sqlite3_finalize(stmt);
+    if (step == ZCL_STEP_ERROR || rc != SQLITE_OK) return -1;
+    return step == ZCL_STEP_ROW ? 1 : 0;
+}
+
+static int utxo_history_checked(struct node_db *ndb, const uint8_t *address_hash,
+                                bool global)
+{
+    if (!ndb || !ndb->open || !ndb->db || (!global && !address_hash)) return -1;
+    const char *utxos = global ?
+        "SELECT 1 FROM utxos WHERE address_hash IS NOT NULL LIMIT 1" :
+        "SELECT 1 FROM utxos WHERE address_hash=? LIMIT 1";
+    const char *outputs = global ?
+        "SELECT 1 FROM tx_outputs WHERE address_hash IS NOT NULL LIMIT 1" :
+        "SELECT 1 FROM tx_outputs WHERE address_hash=? LIMIT 1";
+    int first = utxo_history_probe(ndb, utxos, global ? NULL : address_hash);
+    if (first > 0) return 1;
+    int second = utxo_history_probe(ndb, outputs, global ? NULL : address_hash);
+    if (second > 0) return 1;
+    return first < 0 || second < 0 ? -1 : 0;
+}
+
+int db_address_has_chain_history_checked(struct node_db *ndb,
+                                         const uint8_t address_hash[20])
+{
+    return utxo_history_checked(ndb, address_hash, false);
 }
 
 bool db_address_has_chain_history(struct node_db *ndb,
                                   const uint8_t address_hash[20])
 {
-    if (!ndb || !ndb->open || !address_hash)
-        return false;
-    if (utxo_addr_probe(ndb,
-            "SELECT 1 FROM utxos WHERE address_hash=? LIMIT 1",
-            address_hash) != 0)
-        return true;
-    return utxo_addr_probe(ndb,
-            "SELECT 1 FROM tx_outputs WHERE address_hash=? LIMIT 1",
-            address_hash) != 0;
+    return db_address_has_chain_history_checked(ndb, address_hash) > 0;
 }
 
-static int64_t utxo_any_row(struct node_db *ndb, const char *sql)
+int db_address_index_populated_checked(struct node_db *ndb)
 {
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s, sql, (void)0);
+    return utxo_history_checked(ndb, NULL, true);
 }
 
 bool db_address_index_populated(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open)
-        return false;
-    if (utxo_any_row(ndb,
-            "SELECT 1 FROM utxos WHERE address_hash IS NOT NULL LIMIT 1") != 0)
-        return true;
-    return utxo_any_row(ndb,
-            "SELECT 1 FROM tx_outputs WHERE address_hash IS NOT NULL LIMIT 1")
-           != 0;
+    return db_address_index_populated_checked(ndb) > 0;
 }
 
 int64_t db_utxo_count(struct node_db *ndb)

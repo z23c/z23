@@ -2898,9 +2898,143 @@ static bool wcr_key_digest(const char *dir, struct wcr_digest *d)
     return ok;
 }
 
-/* An at-tip restore of a transparent wallet asks the chain nothing, even
- * where history for its phrase exists, and its keys are exactly the floor
- * keys a restore with no chain derives. */
+/* Refuse only the intended history queries at the recovery scan boundary. */
+static bool wcr_history_deny_after_global;
+static bool wcr_history_global_seen;
+static int wcr_history_denied;
+
+static int wcr_history_authorize(void *ctx, int action, const char *a,
+                                 const char *b, const char *db, const char *trigger)
+{
+    (void)db; (void)trigger;
+    if (action == SQLITE_READ && a && b && strcmp(b, "address_hash") == 0 &&
+        (strcmp(a, "utxos") == 0 || strcmp(a, "tx_outputs") == 0) &&
+        (!ctx || strcmp(a, ctx) == 0)) {
+        wcr_history_denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static void wcr_history_fault_hook(sqlite3 *db, bool address_phase, void *ctx)
+{
+    (void)ctx;
+    if (address_phase) wcr_history_global_seen = true;
+    if (address_phase == wcr_history_deny_after_global)
+        (void)sqlite3_set_authorizer(db, wcr_history_authorize, NULL);
+}
+
+static bool wcr_history_wallet_empty(const char *dir)
+{
+    char path[1200];
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int n = snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool open = n > 0 && (size_t)n < sizeof(path) &&
+        sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_db_readonly(db, "main") == 1;
+    bool empty = open && sqlite3_prepare_v2(db,
+        "SELECT (SELECT count(*) FROM wallet_keys),"
+        "(SELECT count(*) FROM wallet_sapling_keys),"
+        "(SELECT count(*) FROM wallet_seed),"
+        "(SELECT count(*) FROM tx_outputs WHERE txid=zeroblob(32) AND vout=0"
+        " AND value=1000 AND block_height=950)", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW;
+    for (int i = 0; empty && i < 4; i++)
+        empty = sqlite3_column_type(stmt, i) == SQLITE_INTEGER &&
+                sqlite3_column_int64(stmt, i) == (i == 3 ? 1 : 0);
+    if (empty) empty = sqlite3_step(stmt) == SQLITE_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) empty = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) empty = false;
+    return empty;
+}
+
+static int wcr_history_error_case(bool dry_run, bool after_global)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wallet_recovery_report report = {0};
+    bool fixture = wcr_history_chain(dir, sizeof(dir),
+                                      dry_run ? (after_global ? "history_plan_key" : "history_plan_global") :
+                                                (after_global ? "history_commit_key" : "history_commit_global"));
+    struct wallet_recovery_request req = {
+        .datadir = dir, .phrase = WCR_RESTORE_PHRASE, .dry_run = dry_run,
+    };
+    wallet_lock_reset_for_test();
+    setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+    wcr_history_deny_after_global = after_global;
+    wcr_history_global_seen = false;
+    wcr_history_denied = 0;
+    wallet_recovery_test_history_hook(wcr_history_fault_hook, NULL);
+    struct zcl_result result = fixture ? wallet_recovery_run(&req, &report) : ZCL_ERR(-1, "fixture setup");
+    wallet_recovery_test_history_hook(NULL, NULL);
+    unsetenv("ZCL_ALLOW_PLAINTEXT_WALLET");
+    printf("    history fault: dry=%d after_global=%d denied=%d global=%d result=%d code=%d message=%s\n",
+           dry_run, after_global, wcr_history_denied, wcr_history_global_seen,
+           result.ok, result.code, result.message);
+    WCR_CHECK("history read error refuses restore before writing wallet state",
+              fixture && wcr_history_denied > 0 && !result.ok && result.code == -66 &&
+              strstr(result.message, "address history") && !report.seed_installed &&
+              (!after_global || wcr_history_global_seen) && wcr_history_wallet_empty(dir));
+    return failures;
+}
+
+static bool wcr_history_fixture_hit(sqlite3 *db, uint8_t hit[20])
+{
+    sqlite3_stmt *stmt = NULL;
+    bool have = sqlite3_prepare_v2(db, "SELECT address_hash FROM tx_outputs LIMIT 1",
+                                   -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_bytes(stmt, 0) == 20 &&
+        sqlite3_column_blob(stmt, 0) != NULL;
+    if (have) memcpy(hit, sqlite3_column_blob(stmt, 0), 20);
+    if (sqlite3_finalize(stmt) != SQLITE_OK) have = false;
+    return have;
+}
+
+/* A hit in either table is conclusive; a miss cannot hide a failed read. */
+static int wcr_history_mixed(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct node_db db = {0};
+    uint8_t hit[20], miss[20];
+    memset(miss, 0xff, sizeof(miss));
+    bool open = wcr_history_chain(dir, sizeof(dir), "history_mixed") && wcr_open(&db, dir);
+    bool have = open && wcr_history_fixture_hit(db.db, hit);
+    wcr_history_denied = 0;
+    bool armed = have && memcmp(hit, miss, sizeof(hit)) != 0 &&
+                 sqlite3_set_authorizer(db.db, wcr_history_authorize, "utxos") == SQLITE_OK;
+    WCR_CHECK("history hit survives another table read error",
+              armed && db_address_index_populated_checked(&db) == 1 &&
+              db_address_has_chain_history_checked(&db, hit) == 1 &&
+              wcr_history_denied >= 2);
+    WCR_CHECK("history miss does not hide another table read error",
+              armed && db_address_has_chain_history_checked(&db, miss) == -1);
+    if (open) (void)sqlite3_set_authorizer(db.db, NULL, NULL);
+    bool cleared = open && sqlite3_exec(db.db, "DELETE FROM tx_outputs", NULL, NULL, NULL) == SQLITE_OK;
+    wcr_history_denied = 0;
+    armed = cleared && sqlite3_set_authorizer(db.db, wcr_history_authorize, "utxos") == SQLITE_OK;
+    WCR_CHECK("empty global history cannot hide another table read error",
+              armed && db_address_index_populated_checked(&db) == -1 && wcr_history_denied > 0);
+    if (open) {
+        (void)sqlite3_set_authorizer(db.db, NULL, NULL);
+        node_db_close(&db);
+    }
+    return failures;
+}
+
+static int wcr_history_errors(void)
+{
+    int failures = 0;
+    failures += wcr_history_mixed();
+    failures += wcr_history_error_case(true, false);
+    failures += wcr_history_error_case(false, false);
+    failures += wcr_history_error_case(true, true);
+    failures += wcr_history_error_case(false, true);
+    return failures;
+}
+
+/* An at-tip restore asks no history and derives the offline floor. */
 static int restore_tip_reads_no_history(void)
 {
     int failures = 0;
@@ -3806,6 +3940,7 @@ int test_wallet_create(void)
     failures += t_recovery_reply_fields();
     failures += t_restore_at_local_tip();
     failures += t_scan_positive_control();
+    failures += wcr_history_errors();
     failures += t_unsynced_create();
     checkpoints_reset_sha3_override_for_test();
     if (failures == 0)

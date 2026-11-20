@@ -68,6 +68,12 @@ int db_utxo_list_for_address(struct node_db *ndb,
  * every address — which is why the gap scan carries an unconditional floor
  * and why its caller reports whether a chain was actually consulted. This
  * function must not be read as proof an address is unused. */
+/* Checked readers return 1 for found, 0 for absent and -1 for unknown.
+ * A hit in either table is conclusive; a miss requires both reads. */
+int db_address_has_chain_history_checked(struct node_db *ndb,
+                                         const uint8_t address_hash[20]);
+int db_address_index_populated_checked(struct node_db *ndb);
+
 bool db_address_has_chain_history(struct node_db *ndb,
                                   const uint8_t address_hash[20]);
 

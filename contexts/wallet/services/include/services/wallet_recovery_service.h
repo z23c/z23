@@ -217,6 +217,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
 struct zcl_result wallet_recovery_refuse_live_process(void);
 
 #ifdef ZCL_TESTING
+void wallet_recovery_test_history_hook(void (*hook)(sqlite3 *, bool, void *), void *ctx);
 struct zcl_result wallet_recovery_test_ensure_datadir(
     const char *datadir, struct wallet_recovery_report *out);
 #endif

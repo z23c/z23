@@ -169,6 +169,25 @@ static void wrc_tighten_modes(const char *db_path)
     }
 }
 
+#ifdef ZCL_TESTING
+static void (*wrc_history_test_hook)(sqlite3 *, bool, void *);
+static void *wrc_history_test_context;
+
+void wallet_recovery_test_history_hook(void (*hook)(sqlite3 *, bool, void *), void *ctx)
+{
+    wrc_history_test_hook = hook;
+    wrc_history_test_context = ctx;
+}
+
+static void wrc_history_test_fire(struct node_db *db, bool address_phase)
+{
+    if (db && wrc_history_test_hook)
+        wrc_history_test_hook(db->db, address_phase, wrc_history_test_context);
+}
+#else
+#define wrc_history_test_fire(db, address_phase) ((void)0)
+#endif
+
 /* ── "has this address been used?" — the gap scan's oracle ───────────
  *
  * Answered from the chain THIS datadir already holds. A restore into a
@@ -177,12 +196,20 @@ static void wrc_tighten_modes(const char *db_path)
  * an empty datadir has nothing to consult, gets a NULL oracle, and derives
  * the floor — which is stated in the report rather than glossed as full
  * coverage. See wallet_derive_gap_limited in wallet/wallet.h. */
+struct wrc_history_context {
+    struct node_db *db;
+    bool failed;
+};
+
 static bool wrc_address_used(const struct key_id *id, void *ctx)
 {
-    struct node_db *ndb = (struct node_db *)ctx;
-    if (!id || !ndb || !ndb->open)
-        return false;
-    return db_address_has_chain_history(ndb, id->id.data);
+    struct wrc_history_context *history = ctx;
+    if (!history) return false;
+    if (!id) history->failed = true;
+    if (history->failed) return false;
+    int used = db_address_has_chain_history_checked(history->db, id->id.data);
+    if (used < 0) history->failed = true;
+    return used > 0;
 }
 
 /* Rebuild the key material the phrase determines, into an already-rooted
@@ -192,10 +219,14 @@ static struct zcl_result wrc_rebuild_transparent(
     struct wallet_recovery_report *out)
 {
     struct wallet_gap_scan scan;
-    if (!wallet_derive_gap_limited(w, chain ? wrc_address_used : NULL,
-                                   chain, &scan))
-        return ZCL_ERR(-64, "could not derive the address keys from the "
-                            "phrase");
+    struct wrc_history_context history = { .db = chain };
+    wrc_history_test_fire(chain, true);
+    bool derived = wallet_derive_gap_limited(w, chain ? wrc_address_used : NULL,
+                                            &history, &scan);
+    if (history.failed)
+        return ZCL_ERR(-66, "could not read address history; recovery stopped before saving wallet keys");
+    if (!derived)
+        return ZCL_ERR(-64, "could not derive the address keys from the phrase");
 
     out->receiving_keys = scan.external_derived;
     out->change_keys = scan.internal_derived;
@@ -1186,17 +1217,23 @@ struct zcl_result wrc_swap_to_write_handle(
  * only when there is something to ask, so "no history found" is never
  * printed for "nothing to look in". out->history_skip records which reason
  * held, so the reply states it rather than "no chain" for every one. */
-static struct node_db *wrc_history_oracle(
+static struct zcl_result wrc_history_oracle(
     const struct wallet_recovery_request *req, struct wrc_run *st,
-    struct wallet_recovery_report *out)
+    struct wallet_recovery_report *out, struct node_db **chain)
 {
+    *chain = NULL;
     out->history_skip =
         req->shielded_only     ? WALLET_RECOVERY_HISTORY_SHIELDED_ONLY
         : req->record_birthday ? WALLET_RECOVERY_HISTORY_NEW_PHRASE
                                : WALLET_RECOVERY_HISTORY_NO_CHAIN;
     if (out->history_skip != WALLET_RECOVERY_HISTORY_NO_CHAIN || !st->have_db)
-        return NULL;
-    return db_address_index_populated(&st->ndb) ? &st->ndb : NULL;
+        return ZCL_OK;
+    wrc_history_test_fire(&st->ndb, false);
+    int populated = db_address_index_populated_checked(&st->ndb);
+    if (populated < 0)
+        return ZCL_ERR(-66, "could not read address history; recovery stopped before saving wallet keys");
+    if (populated > 0) *chain = &st->ndb;
+    return ZCL_OK;
 }
 
 /* Root the wallet on the phrase, rebuild its keys and, on a commit, flush. */
@@ -1210,8 +1247,10 @@ static struct zcl_result wrc_rebuild_and_flush(
         return ZCL_ERR(-64, "could not root the wallet on the recovery phrase");
     /* Same scan on both paths, against the same chain, so the plan's
      * numbers are the commit's numbers. */
-    rc = wrc_rebuild_keys(w, wrc_history_oracle(req, st, out),
-                          req->shielded_only, out);
+    struct node_db *chain = NULL;
+    rc = wrc_history_oracle(req, st, out, &chain);
+    if (!rc.ok) return rc;
+    rc = wrc_rebuild_keys(w, chain, req->shielded_only, out);
     if (!rc.ok)
         return rc;
 
