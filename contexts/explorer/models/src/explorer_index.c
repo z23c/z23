@@ -354,9 +354,12 @@ int64_t db_view_integrity_contiguous_height(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return -1;
     sqlite3_stmt *s = NULL;
+    /* One statement preserves the snapshot; separate aggregates let SQLite
+     * use its count operation and the primary-key endpoints. */
     AR_PREPARE_RET(ndb, s,
-        "SELECT COUNT(*),COALESCE(MIN(height),-1),COALESCE(MAX(height),-1) "
-        "FROM view_integrity", -1);
+        "SELECT (SELECT COUNT(*) FROM view_integrity),"
+        "COALESCE((SELECT MIN(height) FROM view_integrity),-1),"
+        "COALESCE((SELECT MAX(height) FROM view_integrity),-1)", -1);
     int64_t count = -1, min = -1, max = -1;
     if (ar_step_checked(s, "view_integrity summary", NULL) == ZCL_STEP_ROW) {
         int col = 0;

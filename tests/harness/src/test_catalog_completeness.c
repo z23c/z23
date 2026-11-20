@@ -723,6 +723,63 @@ static int cc_ndb_floor_variants(void)
     return failures;
 }
 
+struct cc_integrity_trace {
+    int summaries;
+    int fullscan_steps;
+    int vm_steps;
+};
+
+static int cc_integrity_trace_profile(unsigned kind, void *ctx,
+                                      void *statement, void *elapsed)
+{
+    (void)elapsed;
+    struct cc_integrity_trace *trace = ctx;
+    sqlite3_stmt *stmt = statement;
+    const char *sql = sqlite3_sql(stmt);
+    if (kind == SQLITE_TRACE_PROFILE && sql &&
+        strstr(sql, "view_integrity") && strstr(sql, "COALESCE")) {
+        trace->summaries++;
+        trace->fullscan_steps = sqlite3_stmt_status(
+            stmt, SQLITE_STMTSTATUS_FULLSCAN_STEP, 0);
+        trace->vm_steps = sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    return 0;
+}
+
+static int cc_integrity_summary_cases(struct node_db *ndb)
+{
+    int failures = 0;
+    CC_CHECK("integrity summary: empty fixture",
+             cc_exec(ndb->db, "DELETE FROM view_integrity"));
+    CC_CHECK("integrity summary: empty has no prefix",
+             db_view_integrity_contiguous_height(ndb) == -1);
+    CC_CHECK("integrity summary: max height boundary fixture",
+             cc_exec(ndb->db,
+                     "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+                     "(0,zeroblob(32)),(9223372036854775807,zeroblob(32))"));
+    CC_CHECK("integrity summary: max height fails closed",
+             db_view_integrity_contiguous_height(ndb) == -1);
+    CC_CHECK("integrity summary: dense fixture",
+             cc_exec(ndb->db,
+                     "DELETE FROM view_integrity;"
+                     "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL "
+                     "SELECT x+1 FROM n WHERE x<8191) "
+                     "INSERT INTO view_integrity(height,sha3_hash) "
+                     "SELECT x,zeroblob(32) FROM n"));
+    struct cc_integrity_trace trace = {0};
+    bool installed = sqlite3_trace_v2(ndb->db, SQLITE_TRACE_PROFILE,
+                                      cc_integrity_trace_profile, &trace) == SQLITE_OK;
+    int64_t cursor = installed ? db_view_integrity_contiguous_height(ndb) : -1;
+    bool removed = sqlite3_trace_v2(ndb->db, 0, NULL, NULL) == SQLITE_OK;
+    CC_CHECK("integrity summary: dense prefix", cursor == 8191);
+    printf("  integrity summary: statements=%d fullscan=%d vm_steps=%d\n",
+           trace.summaries, trace.fullscan_steps, trace.vm_steps);
+    CC_CHECK("integrity summary: bounded SQLite row steps",
+             installed && removed && trace.summaries == 1 &&
+             trace.fullscan_steps == 0 && trace.vm_steps < 512);
+    return failures;
+}
+
 static int cc_sparse_integrity_cases(struct node_db *ndb)
 {
     int failures = 0;
@@ -775,6 +832,7 @@ static int cc_ndb_rows_body(struct node_db *ndb)
     failures += cc_explorer_coverage_sweep(ndb);
     failures += cc_ndb_floor_variants();
     failures += cc_sparse_integrity_cases(ndb);
+    failures += cc_integrity_summary_cases(ndb);
 
     /* With the progress store closed the floor and every anchor row are
      * unavailable: a closed store never manufactures coverage. */
