@@ -24,6 +24,7 @@ PUBLISH_TOOL="$ROOT/build/bin/publish-build-alias"
 OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
 IDENTITY_TOOL="$SELF_DIR/build-epoch-open-file-identity.sh"
+. "$ROOT/tools/scripts/source_identity_lib.sh"
 
 # Select real, verified compiler drivers for the probe pair. This selftest
 # compiles actual C and fingerprints an actual C++ toolchain, so both sides
@@ -353,15 +354,17 @@ compiler_id_at()
     local cwd="$1" cc="$2" cxx="$3" scope="$4"
     shift 4
     cd "$cwd" || return 1
-    exec env "$@" "$KEY_TOOL" compiler-id "$cc" "$cxx" "$scope"
+    exec env "${PAIR_CLEAR[@]}" "$@" "$KEY_TOOL" compiler-id "$cc" "$cxx" "$scope"
 }
+PAIR_CLEAR=()
 compiler_id_pair()
 {
     local failed=0 i
     local -a left_env=() right_env=()
-    if [ "$#" -eq 10 ]; then
-        left_env=("SDKROOT=${9}")
-        right_env=("SDKROOT=${10}")
+    if [ "$#" -eq 10 ] || [ "$#" -eq 11 ]; then
+        [ -z "${9}" ] || left_env+=("${9}")
+        [ -z "${10}" ] || right_env+=("${10}")
+        [ -z "${11:-}" ] || right_env+=("${11}")
     elif [ "$#" -ne 8 ]; then
         fail 'invalid immutable compiler identity pair'
     fi
@@ -384,10 +387,9 @@ compiler_id_pair()
         cat "$WORK/identity-pair-one.err" "$WORK/identity-pair-two.err" >&2
         fail 'immutable compiler identity pair failed'
     fi
-    PAIR_ONE_ID="$(cat "$WORK/identity-pair-one.out")"
-    PAIR_TWO_ID="$(cat "$WORK/identity-pair-two.out")"
-    [[ "$PAIR_ONE_ID" =~ ^[0-9a-f]{64}$ ]] &&
-    [[ "$PAIR_TWO_ID" =~ ^[0-9a-f]{64}$ ]] ||
+    PAIR_ONE_ID="$(cat "$WORK/identity-pair-one.out")" || fail 'left identity output unavailable'
+    PAIR_TWO_ID="$(cat "$WORK/identity-pair-two.out")" || fail 'right identity output unavailable'
+    zcl_is_sha256 "$PAIR_ONE_ID" && zcl_is_sha256 "$PAIR_TWO_ID" ||
         fail 'immutable compiler identity pair returned an invalid fingerprint'
 }
 
@@ -422,8 +424,7 @@ mkdir -p "$WORK/probe-one" "$WORK/probe with spaces" "$WORK/sdk-one" "$WORK/sdk-
 compiler_id_pair "$WORK/probe-one" "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT" \
     "$WORK/probe with spaces" "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT"
 CWD_COMPILER_ID="$PAIR_ONE_ID"
-SPACE_COMPILER_ID="$PAIR_TWO_ID"
-[ "$CWD_COMPILER_ID" = "$SPACE_COMPILER_ID" ] ||
+[ "$CWD_COMPILER_ID" = "$PAIR_TWO_ID" ] ||
     fail 'incidental C/C++ compilation directories changed compiler identity'
 ARGV_COMPILER_ID="$(cd "$WORK/probe-one" &&
     "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND -DEPOCH_ARGV_PROBE=1" "$PORTABLE_CXX_COMMAND" "$ROOT")"
@@ -440,20 +441,16 @@ case "$("${portable_cc_argv[@]}" --version 2>/dev/null)" in
             explicit_cc="$PORTABLE_CC_COMMAND $explicit_dirs"
             compiler_id_pair "$WORK/probe-one" "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT" \
                 "$WORK/probe with spaces" "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT"
-            EXPLICIT_ONE_ID="$PAIR_ONE_ID"
-            EXPLICIT_TWO_ID="$PAIR_TWO_ID"
-            [ "$EXPLICIT_ONE_ID" = "$EXPLICIT_TWO_ID" ] ||
+            [ "$PAIR_ONE_ID" = "$PAIR_TWO_ID" ] ||
                 fail 'identical explicit Clang directories changed identity across cwd'
-            [ "$EXPLICIT_ONE_ID" != "$CWD_COMPILER_ID" ] ||
+            [ "$PAIR_ONE_ID" != "$CWD_COMPILER_ID" ] ||
                 fail 'explicit Clang directory overrides disappeared from identity'
         done
         ;;
 esac
 compiler_id_pair "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" \
-    "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" "$WORK/sdk-one" "$WORK/sdk-two"
-SDK_ONE_ID="$PAIR_ONE_ID"
-SDK_TWO_ID="$PAIR_TWO_ID"
-[ "$SDK_ONE_ID" != "$SDK_TWO_ID" ] ||
+    "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" "SDKROOT=$WORK/sdk-one" "SDKROOT=$WORK/sdk-two"
+[ "$PAIR_ONE_ID" != "$PAIR_TWO_ID" ] ||
     fail 'SDK selection disappeared during directory normalization'
 
 # v5 cross-tree scope (ZRC-0007 probe-before-build): the same tree addressed
@@ -472,12 +469,10 @@ ln -sfn -- "$WORK" "$WORK/scope-link/aliased"
     fail 'scope aliases must be real symbolic links'
 compiler_id_pair "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" \
     "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$WORK/scope-link/tree"
-TREE_DIRECT_ID="$PAIR_ONE_ID"
-TREE_ALIAS_ID="$PAIR_TWO_ID"
-[ "$TREE_DIRECT_ID" = "$TREE_ALIAS_ID" ] ||
+[ "$PAIR_ONE_ID" = "$PAIR_TWO_ID" ] ||
     fail 'same tree keyed differently through an aliased scope root'
 TREE_SLASH_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT/")"
-[ "$TREE_DIRECT_ID" = "$TREE_SLASH_ID" ] ||
+[ "$PAIR_ONE_ID" = "$TREE_SLASH_ID" ] ||
     fail 'trailing-slash scope spelling keyed differently'
 # Nested one level so the scope-relative address keeps a slash: bare
 # tool names stay POSIX PATH lookups (only slash-containing relative
@@ -490,9 +485,7 @@ printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CXX_COMMAND" > "$SCOPE_CXX_WRAPPE
 chmod +x "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER"
 compiler_id_pair "$ROOT" "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK" \
     "$ROOT" "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK/scope-link/aliased"
-SCOPE_DIRECT_ID="$PAIR_ONE_ID"
-SCOPE_ALIAS_ID="$PAIR_TWO_ID"
-[ "$SCOPE_DIRECT_ID" = "$SCOPE_ALIAS_ID" ] ||
+[ "$PAIR_ONE_ID" = "$PAIR_TWO_ID" ] ||
     fail 'in-scope wrapper keyed differently through an aliased scope root'
 if "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" >/dev/null 2>&1; then
     fail 'compiler-id without a scope root was accepted'
@@ -1833,7 +1826,7 @@ phase compiler-id-degraded-probe-refused
 # unchanged toolchain are byte-identical.
 SHIM_ID="$(shim_compiler_id)" ||
     fail 'fixture driver did not produce a compiler fingerprint'
-[[ "$SHIM_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'fixture compiler fingerprint is malformed'
+zcl_is_sha256 "$SHIM_ID" || fail 'fixture compiler fingerprint is malformed'
 [ "$SHIM_ID" = "$(shim_compiler_id)" ] ||
     fail 'back-to-back compiler fingerprints of one unchanged driver disagreed'
 
@@ -1861,8 +1854,19 @@ printf '#!/bin/sh\nexit 0\n' > "$SHIM_DIR/ldreal/ld.fixture"
 chmod +x "$SHIM_DIR/ldreal/ld.fixture"
 [ "$(shim_compiler_id PATH="$SHIM_PATH:$SHIM_DIR/ldnoise")" = "$SHIM_ID" ] ||
     fail 'non-linker ld* tools on PATH moved the compiler identity'
-[ "$(shim_compiler_id PATH="$SHIM_PATH:$SHIM_DIR/ldreal")" != "$SHIM_ID" ] ||
-    fail 'a selectable ld.<name> linker on PATH did not move the identity'
+shim_linker_changed()
+{
+    local id
+    id="$(shim_compiler_id PATH="$SHIM_PATH:$SHIM_DIR/ldreal")" || return 1
+    zcl_is_sha256 "$id" && [ "$id" != "$SHIM_ID" ]
+}
+shim_linker_changed || fail 'a selectable ld.<name> linker on PATH did not move the identity'
+if (KEY_TOOL=/bin/false; shim_linker_changed); then
+    fail 'failed linker fingerprint was accepted as different'
+fi
+if (KEY_TOOL=/bin/true; shim_linker_changed); then
+    fail 'malformed linker fingerprint was accepted as different'
+fi
 
 # A1: one failing probe must refuse, naming the probe -- never a digest.
 if shim_compiler_id SHIMCC_FLAKE_ALWAYS=1 \
@@ -2059,36 +2063,32 @@ done
 chmod +x "$SHIM_ZCC" "$SHIM_DIR/wrap/ccache" "$SHIM_DIR/wrap/sccache" \
     "$SHIM_DIR/wrap/mystery"
 
-# One derivation under a private HOME with none of the caller's cache
-# variables; the remaining arguments are the pair's only difference.
-cache_env_compiler_id()
-{
-    local cc="$1" name
-    local -a clear=()
-    shift
-    for name in $(compgen -e); do
-        case "$name" in CCACHE_*|SCCACHE_*) clear+=(-u "$name") ;; esac
-    done
-    shim_env env "${clear[@]}" HOME="$SHIM_HOME" "$@" \
-        "$KEY_TOOL" compiler-id "$cc" "$cc" "$SHIM_SCOPE"
-}
-
-# Both derivations must succeed and differ (`differ`) or agree (`agree`).
+# Both derivations clear the caller's cache environment and must agree or differ.
 cache_env_pair()
 {
-    local want="$1" label="$2" cc="$3" left="$4" right="$5" a b
-    a="$(cache_env_compiler_id "$cc" "$left")" ||
-        fail "$label: no compiler fingerprint with $left"
-    b="$(cache_env_compiler_id "$cc" "$right")" ||
-        fail "$label: no compiler fingerprint with $right"
-    if [ "$want" = differ ] && [ "$a" = "$b" ]; then
+    local want="$1" label="$2" cc="$3" left="$4" right="$5" name
+    local -a PAIR_CLEAR=(-u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u COMPILER_PATH -u LIBRARY_PATH -u SDKROOT)
+    for name in $(compgen -e); do
+        case "$name" in CCACHE_*|SCCACHE_*) PAIR_CLEAR+=(-u "$name") ;; esac
+    done
+    PAIR_CLEAR+=("HOME=$SHIM_HOME" "PATH=$SHIM_PATH")
+    compiler_id_pair "$ROOT" "$cc" "$cc" "$SHIM_SCOPE" "$ROOT" "$cc" "$cc" "$SHIM_SCOPE" "$left" "$right" "${6:-}"
+    if [ "$want" = differ ] && [ "$PAIR_ONE_ID" = "$PAIR_TWO_ID" ]; then
         fail "$label: $left and $right gave the same compiler identity"
     fi
-    if [ "$want" = agree ] && [ "$a" != "$b" ]; then
+    if [ "$want" = agree ] && [ "$PAIR_ONE_ID" != "$PAIR_TWO_ID" ]; then
         fail "$label: $left and $right gave different compiler identities"
     fi
-    return 0
 }
+if (KEY_TOOL=/bin/false; cache_env_pair agree refusal "$SHIM_CC" '' '') 2>/dev/null; then
+    fail 'two failed cache fingerprints were accepted as equal'
+fi
+if (KEY_TOOL=/bin/true; cache_env_pair agree malformed "$SHIM_CC" '' '') 2>/dev/null; then
+    fail 'malformed cache fingerprints were accepted as equal'
+fi
+if (cache_env_pair differ asymmetric "$SHIM_CC" SHIMCC_FLAKE_ALWAYS=1 SHIMCC_VERSION_TAG=2) 2>/dev/null; then
+    fail 'failed cache fingerprint was accepted as different'
+fi
 
 # (a) ccache as the compile command binds every CCACHE_* value.
 cache_env_pair differ 'ccache cc, CCACHE_BASEDIR' "$SHIM_DIR/wrap/ccache cc" \
@@ -2115,9 +2115,8 @@ cache_env_pair agree 'zcc cc, CCACHE_MAXSIZE' "$SHIM_ZCC $SHIM_CC" \
     CCACHE_MAXSIZE=20G CCACHE_MAXSIZE=512M
 cache_env_pair agree 'zcc cc, SCCACHE_DIR' "$SHIM_ZCC $SHIM_CC" \
     SCCACHE_DIR=/a SCCACHE_DIR=/b
-[ "$(cache_env_compiler_id "$SHIM_ZCC $SHIM_CC")" = \
-  "$(cache_env_compiler_id "$SHIM_ZCC $SHIM_CC" CCACHE_DIR=/a CCACHE_MAXSIZE=512M)" ] ||
-    fail 'zcc cc: setting CCACHE_DIR and CCACHE_MAXSIZE moved the compiler identity'
+cache_env_pair agree 'zcc cc, combined cache environment' "$SHIM_ZCC $SHIM_CC" \
+    '' CCACHE_DIR=/a CCACHE_MAXSIZE=512M
 
 phase vendor-inputs-unchanged
 vendor_inputs_unchanged
