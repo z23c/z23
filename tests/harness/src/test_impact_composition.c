@@ -2542,6 +2542,46 @@ static bool ic_pr72_rpc_maps(const char *path, const char *group)
     return ic_acc_has_group(&acc, group);
 }
 
+static int test_ic_storage_memory_profile_proof_mapping(void)
+{
+    int failures = 0;
+    TEST("impact composition: storage memory profile selects its dependent proofs") {
+        static const char *const paths[] = {
+            "engine/modules/storage/src/storage_memory_profile.c",
+            "engine/modules/storage/include/storage/memory_profile.h",
+        };
+        static const char *const groups[] = {
+            "storage_memory_profile", "telemetry_storage",
+            "reducer_drive_guard", "supervisor_production_tree",
+        };
+        for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+            struct agent_impact_acc impact = {0};
+            ASSERT(agent_impact_apply_shared_rules(paths[i], &impact));
+            struct zcl_devloop_plan plan;
+            ASSERT(zcl_devloop_plan_files(&paths[i], 1, &plan));
+            for (size_t j = 0; j < sizeof groups / sizeof groups[0]; j++) {
+                ASSERT(ic_acc_has_group(&impact, groups[j]));
+                ASSERT(ic_group_in(plan.path_groups, plan.path_groups_len,
+                                   groups[j]));
+            }
+        }
+        static const char *const header_groups[] = {
+            "progress_store_open_sizing", "block_index_projection",
+        };
+        struct agent_impact_acc header = {0};
+        ASSERT(agent_impact_apply_shared_rules(paths[1], &header));
+        struct zcl_devloop_plan header_plan;
+        ASSERT(zcl_devloop_plan_files(&paths[1], 1, &header_plan));
+        for (size_t i = 0; i < sizeof header_groups / sizeof header_groups[0]; i++) {
+            ASSERT(ic_acc_has_group(&header, header_groups[i]));
+            ASSERT(ic_group_in(header_plan.path_groups,
+                               header_plan.path_groups_len, header_groups[i]));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_pr72_rpc_routes(void)
 {
     int failures = 0;
@@ -17975,6 +18015,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_block_log_source_plan();
     failures += test_ic_lint_token_selects_every_shard();
     failures += test_ic_snapshot_overlays_current_symbols();
+    failures += test_ic_storage_memory_profile_proof_mapping();
     failures += test_ic_pr72_rpc_routes();
     failures += test_ic_sqlq_proof_mapping();
     failures += test_ic_wallet_recovery_status_proof_mapping();
