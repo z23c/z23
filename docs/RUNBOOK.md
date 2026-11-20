@@ -904,7 +904,7 @@ The standalone utility is **copy-first only**. It opens `SOURCE_DB` read-only,
 uses SQLite's online backup API to include committed live WAL state, and resets
 only `peer_chain_observations` and its preserved `observed_at` index in the copy.
 It prints the first pre-recovery `quick_check(1)` result, then requires a final
-`ok`, an empty recovered table, and unchanged table/index SQL before publishing.
+`ok`, a clean foreign-key check, an empty recovered table, and unchanged table/index SQL before publishing.
 Any residual corruption publishes nothing.
 
 For WAL sources, recovery pins a read snapshot only during the backup. Concurrent

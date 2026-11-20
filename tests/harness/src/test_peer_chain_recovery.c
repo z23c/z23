@@ -703,6 +703,72 @@ static int test_peer_chain_recovery_live_writes(void)
 }
 #endif
 
+static bool recovery_source_fk_valid(const char *path, bool observation)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    const char *sql = observation ?
+        "SELECT count(*) FROM dependent JOIN peer_chain_observations ON dependent.ref=peer_chain_observations.id" :
+        "SELECT count(*) FROM dependent JOIN unrelated ON dependent.ref=unrelated.id";
+    if (ok) ok = sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1;
+    if (st && sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    st = NULL;
+    if (ok) ok = sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_foreign_key_check LIMIT 1", -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_DONE;
+    if (st && sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_prepare_foreign_keys(const char *source, bool orphan)
+{
+    if (!recovery_fixture(source)) return false;
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(source, &db) == SQLITE_OK;
+    const char *sql = orphan ?
+        "PRAGMA foreign_keys=ON; CREATE TABLE dependent(id INTEGER PRIMARY KEY, ref INTEGER REFERENCES peer_chain_observations(id)); INSERT INTO dependent VALUES(1,1);" :
+        "PRAGMA foreign_keys=ON; CREATE TABLE dependent(id INTEGER PRIMARY KEY, ref INTEGER REFERENCES unrelated(id)); INSERT INTO dependent VALUES(1,1);";
+    if (ok) ok = recovery_exec(db, sql);
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok && recovery_source_fk_valid(source, orphan);
+}
+
+static bool recovery_fk_result(bool orphan, int rc, const char *destination,
+                               const char *temporary)
+{
+    if (orphan)
+        return rc != 0 && recovery_absent(destination) && recovery_absent(temporary);
+    return rc == 0 && recovery_verify_destination(destination, "survive") &&
+           recovery_source_fk_valid(destination, false);
+}
+
+static int test_peer_chain_recovery_foreign_keys(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], temporary[4700], out[4096];
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "foreign-keys");
+    for (int orphan = 0; orphan < 2; orphan++) {
+        snprintf(source, sizeof(source), "%s/source%d.db", dir, orphan);
+        snprintf(destination, sizeof(destination), "%s/dest%d.db", dir, orphan);
+        snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp", destination);
+        bool ok = recovery_prepare_foreign_keys(source, orphan != 0);
+        struct recovery_bytes before = recovery_read(source);
+        ok = ok && before.data != NULL;
+        int rc = ok ? recovery_run(source, destination, out, sizeof(out)) : -1;
+        bool result = ok && recovery_same_bytes(source, &before) &&
+                      recovery_source_fk_valid(source, orphan != 0);
+        result = result && recovery_fk_result(orphan != 0, rc, destination, temporary);
+        printf("peer_chain_recovery: %s foreign keys... %s\n",
+               orphan ? "reject orphaned" : "preserve clean", result ? "OK" : "FAIL");
+        if (!result) failures++;
+        free(before.data);
+    }
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_peer_chain_recovery(void)
 {
     int failures = 0;
@@ -723,6 +789,7 @@ int test_peer_chain_recovery(void)
     failures += test_peer_chain_recovery_live_writes();
 #endif
     failures += test_peer_chain_recovery_clean_wal();
+    failures += test_peer_chain_recovery_foreign_keys();
     failures += test_peer_chain_recovery_corrupt_observation();
     failures += test_peer_chain_recovery_zero_root();
     failures += test_peer_chain_recovery_statistics();

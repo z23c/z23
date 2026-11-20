@@ -693,6 +693,34 @@ static bool recovery_preflight(struct recovery_job *job)
            recovery_open(&job->source, job->source_path, SQLITE_OPEN_READONLY, "source");
 }
 
+static bool recovery_foreign_keys_clean(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    int rc = sqlite3_prepare_v2(db, "PRAGMA main.foreign_key_check",
+                               -1, &st, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "peer_chain_recovery: foreign-key check prepare failed rc=%d: %s\n",
+                rc, sqlite3_errmsg(db));
+        return false;
+    }
+    if (sqlite3_column_count(st) != 4) {
+        fputs("peer_chain_recovery: foreign-key check unavailable; refusing publication\n", stderr);
+        (void)sqlite3_finalize(st);
+        return false;
+    }
+    struct zcl_result error = {0};
+    enum zcl_step step = ar_step_checked(st, "peer recovery foreign-key check", &error);
+    if (step == ZCL_STEP_ROW)
+        fputs("peer_chain_recovery: foreign-key violation; refusing publication\n", stderr);
+    else if (step == ZCL_STEP_ERROR)
+        fprintf(stderr, "peer_chain_recovery: foreign-key check step failed rc=%d\n", error.code);
+    int final = sqlite3_finalize(st);
+    if (final != SQLITE_OK)
+        fprintf(stderr, "peer_chain_recovery: foreign-key check finalize failed rc=%d: %s\n",
+                final, sqlite3_errmsg(db));
+    return step == ZCL_STEP_DONE && final == SQLITE_OK;
+}
+
 static bool recovery_repair_copy(struct recovery_job *job)
 {
     return recovery_forget(job->copy) &&
@@ -700,6 +728,7 @@ static bool recovery_repair_copy(struct recovery_job *job)
            recovery_open(&job->copy, job->temporary, SQLITE_OPEN_READWRITE, "rebuild copy") &&
            recovery_rebuild(job->copy, &job->table, &job->index) &&
            recovery_final_check(job->copy) &&
+           recovery_foreign_keys_clean(job->copy) &&
            recovery_empty(job->copy) &&
            recovery_schema_unchanged(job->copy, &job->table, &job->index);
 }
