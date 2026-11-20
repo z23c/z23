@@ -175,10 +175,10 @@ static bool bundle_action(const char *path, bool assemble)
 static bool matching_link(int dir, const char *name, const char *target)
 {
     char value[PATH_MAX];
-    ssize_t n = readlinkat(dir, name, value, sizeof(value) - 1u);
-    if (n < 0 || (size_t)n >= sizeof(value) - 1u) return false;
-    value[n] = 0;
-    return strcmp(value, target) == 0;
+    ssize_t n = readlinkat(dir, name, value, sizeof(value));
+    if (n < 0) { if (errno == EINVAL) errno = EEXIST; return false; }
+    if ((size_t)n == strlen(target) && memcmp(value, target, (size_t)n) == 0) return true;
+    errno = EEXIST; return false;
 }
 static bool current_bundle_valid(const char *prefix)
 {
@@ -206,17 +206,26 @@ static bool managed_link(const struct register_paths *paths)
     if (mkdir(paths->applications, 0700) != 0 && errno != EEXIST) return false;
     int dir = open(paths->applications, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dir < 0) return false;
-    if (matching_link(dir, BUNDLE, paths->target)) { close(dir); return true; }
+    if (matching_link(dir, BUNDLE, paths->target)) return close(dir) == 0;
     /* Exclusive creation preserves every pre-existing foreign entry. */
     bool ok = symlinkat(paths->target, dir, BUNDLE) == 0;
     if (!ok && errno == EEXIST) ok = matching_link(dir, BUNDLE, paths->target);
-    if (close(dir) != 0) ok = false;
+    int saved = errno;
+    if (close(dir) != 0) { if (ok) return false; }
+    errno = saved;
     return ok;
 }
 static bool register_link(const char *prefix, char *link_path, size_t cap)
 {
     struct register_paths paths;
-    return register_paths(prefix, link_path, cap, &paths) && managed_link(&paths);
+    if (!register_paths(prefix, link_path, cap, &paths)) return false;
+    if (managed_link(&paths)) return true;
+    if (errno == EEXIST) {
+        fprintf(stderr, "z23-app-macos: %s is already occupied. Open the installed app in Finder: %s\n",
+                link_path, paths.target);
+        errno = EEXIST;
+    }
+    return false;
 }
 static bool launch_register(const char *path)
 {
@@ -226,7 +235,9 @@ static bool launch_register(const char *path)
     if (error) { errno = error; return false; }
     int status; pid_t done;
     do { done = waitpid(pid, &status, 0); } while (done < 0 && errno == EINTR);
-    return done == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (done != pid) return false;
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return true;
+    errno = EIO; return false;
 }
 int z23_app_macos_install(int argc, char **argv)
 {
