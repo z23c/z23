@@ -76,31 +76,26 @@ static int cp_reap(pid_t pid, int *rc)
     return 0;
 }
 
-static int cp_open_redirect(posix_spawn_file_actions_t *fa, const char *path,
-                            int target)
-{
-    if (!path)
-        return -1;
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    posix_spawn_file_actions_adddup2(fa, fd < 0 ? -1 : fd, target);
-    return fd;
-}
-
 int cp_spawn(const char *file, char *const argv[], const char *so,
              const char *se, int *rc)
 {
     extern char **environ;
     posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    int sofd = cp_open_redirect(&fa, so, 1);
-    int sefd = cp_open_redirect(&fa, se, 2);
+    if (posix_spawn_file_actions_init(&fa) != 0) return -1;
+    const int flags = O_WRONLY | O_CREAT | O_TRUNC;
+    int err = 0;
+    if (so)
+        err = posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, so, flags, 0644);
+    if (!err && se) {
+        /* Merged diagnostics must share one file offset. */
+        if (so && !strcmp(so, se))
+            err = posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+        else
+            err = posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, se, flags, 0644);
+    }
     pid_t pid;
-    int err = posix_spawnp(&pid, file, &fa, NULL, argv, environ);
+    if (!err) err = posix_spawnp(&pid, file, &fa, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
-    if (sofd >= 0)
-        close(sofd);
-    if (sefd >= 0)
-        close(sefd);
     return err ? -1 : cp_reap(pid, rc);
 }
 

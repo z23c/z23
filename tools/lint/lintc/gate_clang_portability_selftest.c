@@ -298,10 +298,33 @@ static int cps_cache_proof(struct cp_ctx *c, const char *self)
                "cache proof\n", "");
 }
 
+static int cps_capture_case(struct cp_ctx *c)
+{
+    char log[CP_PATH], bytes[8];
+    if (cps_snp(log, "%s/merged-output", c->work)) return 2;
+    char *av[] = { (char *)"sh", (char *)"-c",
+        (char *)"printf A; printf B >&2; printf C; exit 7", NULL };
+    int rc;
+    if (cp_spawn(av[0], av, log, log, &rc) != 0 || rc != 7)
+        return cps_fail("merged compiler capture lost the exit status");
+    FILE *f = fopen(log, "rb");
+    if (!f) return 2;
+    bool ok = fread(bytes, 1, sizeof bytes, f) == 3 && !ferror(f) &&
+              memcmp(bytes, "ABC", 3) == 0;
+    if (fclose(f) != 0 || !ok) return cps_fail("compiler output streams overwrote each other");
+    char *pass[] = { (char *)"true", NULL };
+    if ((cp_spawn(pass[0], pass, c->work, log, &rc) == 0 && rc == 0) ||
+        (cp_spawn(pass[0], pass, log, c->work, &rc) == 0 && rc == 0))
+        return cps_fail("compiler passed with an unusable output destination");
+    return 0;
+}
+
 static int cps_run_all(struct cp_ctx *c)
 {
     char self[CP_PATH];
     int rc = cp_build_flags(c);
+    if (!rc)
+        rc = cps_capture_case(c);
     if (!rc)
         rc = cps_probe_cases(c);
     if (!rc)

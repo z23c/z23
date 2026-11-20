@@ -443,12 +443,32 @@ static int cpt_edits(struct cpt_st *st)
     cps_static_write(u3, "#include \"shared.h\"\nint unit_3(void);\n");
     return cpt_run_want(st, st->n, 0, 0, "reverting one TU was not 16/0");
 }
+static int cpt_disabled_compile(struct cpt_st *st)
+{
+    struct cp_ctx *c = st->c;
+    char one[CP_PATH];
+    int rb = cpt_runfile_count(st->runs);
+    if (cps_snp(c->out_dir, "%s/disabled-out", st->base) ||
+        cp_mkdirs(c->out_dir) != 0 || cps_snp(one, "%s/src/u0.c", st->root))
+        return cpt_fail("cannot prepare the disabled-cache compiler fixture");
+    if (cp_compile_one(c, one) != 0 || cpt_runfile_count(st->runs) != rb + 1)
+        return cpt_fail("a disabled cache did not invoke the compiler once");
+    char key[CP_PATH], log[CP_PATH], status[CP_PATH], code[16];
+    struct stat sb;
+    cp_key(one, key, sizeof key);
+    if (cps_snp(log, "%s/%s.log", c->out_dir, key) ||
+        cps_snp(status, "%s/%s.rc", c->out_dir, key) ||
+        stat(log, &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_size != 0 ||
+        cp_first_line(status, code, sizeof code) != 0 || strcmp(code, "0") != 0)
+        return cpt_fail("disabled-cache compiler log or status differs from the stub result");
+    return 0;
+}
+
 
 /* (7) ZCL_LINT_TU_CACHE=0: no serve, no store */
 static int cpt_disabled(struct cpt_st *st)
 {
     struct cp_ctx *c = st->c;
-    char one[CP_PATH];
     unsetenv("ZCL_TU_CACHE_SELFTEST_FORCE");
     setenv("ZCL_LINT_TU_CACHE", "0", 1);
     cps_snp(c->work, "%s/work", st->base);
@@ -463,12 +483,7 @@ static int cpt_disabled(struct cpt_st *st)
         strcmp(c->miss[c->nsrc - 1], c->srcs[c->nsrc - 1]) != 0)
         return cpt_fail("a disabled cache did not plan every source as a "
                         "miss");
-    int rb = cpt_runfile_count(st->runs);
-    cps_snp(one, "%s/src/u0.c", st->root);
-    cp_compile_one(c, one);
-    if (cpt_runfile_count(st->runs) == rb)
-        return cpt_fail("a disabled cache did not invoke the compiler");
-    return 0;
+    return cpt_disabled_compile(st);
 }
 
 /* (8) real wiring: real compiler, real flags, one real source. The cold
