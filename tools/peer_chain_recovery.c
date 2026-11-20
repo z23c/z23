@@ -267,36 +267,38 @@ static bool recovery_exec(sqlite3 *db, const char *sql, const char *label)
     return false;
 }
 
+static bool recovery_wal_mode(sqlite3 *source, bool *wal)
+{
+    sqlite3_stmt *mode = NULL;
+    int rc = sqlite3_prepare_v2(source, "PRAGMA journal_mode", -1, &mode, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "peer_chain_recovery: journal mode prepare failed rc=%d: %s\n", rc, sqlite3_errmsg(source));
+        return false;
+    }
+    struct zcl_result step_error = {0};
+    enum zcl_step step = ar_step_checked(mode, "journal mode", &step_error);
+    rc = step == ZCL_STEP_ERROR ? step_error.code :
+         (step == ZCL_STEP_ROW ? SQLITE_ROW : SQLITE_DONE);
+    const unsigned char *name = step == ZCL_STEP_ROW ? sqlite3_column_text(mode, 0) : NULL;
+    bool ok = name != NULL;
+    if (ok) *wal = sqlite3_stricmp((const char *)name, "wal") == 0;
+    else fprintf(stderr, "peer_chain_recovery: journal mode step failed rc=%d: %s\n", rc, sqlite3_errmsg(source));
+    int final = sqlite3_finalize(mode);
+    if (final != SQLITE_OK) {
+        fprintf(stderr, "peer_chain_recovery: journal mode finalize failed rc=%d: %s\n", final, sqlite3_errmsg(source));
+        ok = false;
+    }
+    return ok;
+}
+
 /* WAL permits a fixed read snapshot without blocking writers; it can retain WAL
  * pages until the backup finishes. Rollback-journal mode stays unpinned. */
 static bool recovery_snapshot_backup(sqlite3 *source, sqlite3 *copy)
 {
     if (!recovery_exec(source, "BEGIN", "begin source snapshot")) return false;
-    bool ok = recovery_exec(source, "SELECT count(*) FROM sqlite_schema", "pin source snapshot");
-    sqlite3_stmt *mode = NULL;
-    int rc = ok ? sqlite3_prepare_v2(source, "PRAGMA journal_mode", -1, &mode, NULL) : SQLITE_ERROR;
-    if (ok && rc != SQLITE_OK) {
-        fprintf(stderr, "peer_chain_recovery: journal mode prepare failed rc=%d: %s\n", rc, sqlite3_errmsg(source));
-        ok = false;
-    }
     bool wal = false;
-    if (ok) {
-        rc = sqlite3_step(mode);
-        const unsigned char *name = rc == SQLITE_ROW ? sqlite3_column_text(mode, 0) : NULL;
-        if (!name) {
-            fprintf(stderr, "peer_chain_recovery: journal mode step failed rc=%d: %s\n", rc, sqlite3_errmsg(source));
-            ok = false;
-        } else {
-            wal = sqlite3_stricmp((const char *)name, "wal") == 0;
-        }
-    }
-    if (mode) {
-        int final = sqlite3_finalize(mode);
-        if (final != SQLITE_OK) {
-            fprintf(stderr, "peer_chain_recovery: journal mode finalize failed rc=%d: %s\n", final, sqlite3_errmsg(source));
-            ok = false;
-        }
-    }
+    bool ok = recovery_exec(source, "SELECT count(*) FROM sqlite_schema", "pin source snapshot") &&
+              recovery_wal_mode(source, &wal);
     if (ok && wal) ok = recovery_backup(source, copy);
     if (!recovery_exec(source, "ROLLBACK", "release source snapshot")) ok = false;
     if (ok && !wal) ok = recovery_backup(source, copy);
