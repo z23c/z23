@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include "platform/clock.h"
 
 
 /* Change the native fixture's one empty pushed-tip field, without adding
@@ -1067,7 +1068,12 @@ static bool dlx_pc_depfile_files(const struct dlx_rig *rig, int mode)
 {
     static const char script[] =
         "#!/bin/sh\nprintf '%s\\n' \"$0\" >> build/depfile-ran\n"
-        "if [ -f build/depfile-timeout ]; then sleep 2; touch build/depfile-completed; fi\n"
+        "if [ -f build/depfile-timeout ]; then\n"
+        "  attempts=0\n"
+        "  while [ ! -f build/depfile-release ]; do\n"
+        "    attempts=$((attempts + 1)); [ \"$attempts\" -le 600 ] || break; sleep 0.05\n"
+        "  done\n"
+        "  sleep 2; touch build/depfile-completed\nfi\n"
         "if [ -f build/depfile-exit ]; then exit \"$(cat build/depfile-exit)\"; fi\nexit 0\n";
     char old[1400]; struct stat st;
     if (snprintf(old, sizeof(old), "%s/tools/dev/make-depfile-scope-selftest.sh", rig->clone) >= (int)sizeof(old) ||
@@ -1182,19 +1188,63 @@ static bool dlx_pc_depfile_setup(struct dlx_rig *rig, int mode)
 static bool dlx_pc_depfile_no_completion(const struct dlx_rig *rig)
 {
     char path[1400];
+    if (!dlx_pc_file(rig, "depfile-release", "1\n")) return false;
     platform_sleep_ms(2300); /* The killed script's two-second marker window. */
     int n = snprintf(path, sizeof(path), "%s/build/depfile-completed", rig->clone);
     return n > 0 && (size_t)n < sizeof(path) && !dlx_file_exists(path);
 }
 
-bool dlx_pc_depfile_case(int mode)
+/* Only the forked timeout fixture installs this clock. The shell records its
+ * complete call before time advances, and waits for release so scheduling
+ * cannot let it finish before the parent observes the timeout. */
+struct dlx_depfile_clock {
+    const clock_iface_t *prior;
+    char marker[1400];
+    int64_t start_ns;
+};
+
+static int64_t dlx_depfile_mono(void *self)
+{
+    const struct dlx_depfile_clock *clock = self;
+    int64_t now = clock->prior->now_monotonic_ns(clock->prior->self);
+    int saved_errno = errno;
+    struct stat marker;
+    bool started = stat(clock->marker, &marker) == 0 &&
+        marker.st_size >= (off_t)(sizeof("./build/bin/depfile-scope-launch\n") - 1);
+    errno = saved_errno;
+    if (started)
+        return now + INT64_C(500000000);
+    /* A broken launcher still reaches its real timeout after this watchdog. */
+    return now - clock->start_ns < INT64_C(30000000000) ? clock->start_ns : now;
+}
+
+static int64_t dlx_depfile_wall(void *self)
+{
+    const struct dlx_depfile_clock *clock = self;
+    return clock->prior->now_wall_ms(clock->prior->self);
+}
+
+static bool dlx_pc_depfile_timeout_run(struct dlx_call *call, const struct dlx_rig *rig)
+{
+    struct dlx_depfile_clock state = { .prior = clock_default() };
+    const clock_iface_t clock = { dlx_depfile_mono, dlx_depfile_wall, &state };
+    int n = snprintf(state.marker, sizeof(state.marker), "%s/build/depfile-ran", rig->clone);
+    if (n < 0 || (size_t)n >= sizeof(state.marker)) return false;
+    state.start_ns = state.prior->now_monotonic_ns(state.prior->self);
+    zcl_dev_land_precheck_test_budget(500);
+    clock_set_default(&clock);
+    bool ran = dlx_run(call);
+    clock_set_default(state.prior);
+    zcl_dev_land_precheck_test_budget(0);
+    return ran;
+}
+
+static bool dlx_pc_depfile_run_case(int mode)
 {
     struct dlx_rig rig; struct dlx_call c;
     if (!dlx_pc_depfile_setup(&rig, mode)) { dlx_restore(); return false; }
-    if (mode == 6) zcl_dev_land_precheck_test_budget(500);
     dlx_pc_submit(&c, &rig, NULL, NULL);
-    bool ran = dlx_run(&c);
-    zcl_dev_land_precheck_test_budget(0);
+    bool ran = mode == 6 ? dlx_pc_depfile_timeout_run(&c, &rig) : dlx_run(&c);
     bool ok = ran && dlx_pc_depfile_verdict(&c, &rig, mode);
     if (mode == 6) ok = dlx_pc_depfile_no_completion(&rig) && ok;
     if (!ok) fprintf(stderr, "depfile precheck mode=%d ran=%d error=%s gate=%s calls=%d\n",
@@ -1202,6 +1252,18 @@ bool dlx_pc_depfile_case(int mode)
     dlx_end(&c);
     dlx_restore();
     return ok;
+}
+
+bool dlx_pc_depfile_case(int mode)
+{
+    if (mode != 6) return dlx_pc_depfile_run_case(mode);
+    pid_t child = fork();
+    if (child == 0) _exit(dlx_pc_depfile_run_case(mode) ? 0 : 1);
+    if (child < 0) return false;
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 static bool dlx_pc_ship_files(const struct dlx_rig *rig, bool ready)
