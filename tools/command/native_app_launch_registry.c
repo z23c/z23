@@ -124,6 +124,13 @@ static bool app_xdg_path(char *out, size_t cap, const char *xdg_var,
     return n > 0 && (size_t)n < cap;
 }
 
+/* Test seam: while >= 0, the desktop probe below is overridden so handler
+ * tests can pin both the headless and the desktop answer on any host (the
+ * lab_test_force_confinement_failure idiom). */
+static int app_launch_desktop_forced = -1;
+
+void app_launch_test_set_desktop(int desktop) { app_launch_desktop_forced = desktop; }
+
 bool app_launch_env_from_process(struct app_launch_env *env, char *why,
                                  size_t why_size)
 {
@@ -148,6 +155,8 @@ bool app_launch_env_from_process(struct app_launch_env *env, char *why,
 #else
     env->desktop = true;
 #endif
+    if (app_launch_desktop_forced >= 0)
+        env->desktop = app_launch_desktop_forced != 0;
     return true;
 }
 
@@ -467,6 +476,16 @@ app_launch_registry_find(const struct app_launch_registry *reg,
                 return e;
     }
     return NULL;
+}
+
+/* True when the row opens a desktop window: builtin-scoped, so operator
+ * apps.tsv rows and app_launch_kept_entry descriptors (builtin=false) are
+ * always windowed; a built-in row only when it declares a SIGUSR1 raise,
+ * a ready marker or arguments. */
+bool app_launch_entry_is_windowed(const struct app_launch_entry *entry)
+{
+    return !entry->builtin || entry->raise_sigusr1 ||
+           entry->ready_marker[0] != '\0' || entry->arg_count != 0;
 }
 
 bool app_launch_known_names(const struct app_launch_registry *reg, char *out,

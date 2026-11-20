@@ -857,6 +857,49 @@ static int asd_refusals_app(const struct asd_world *w)
     return failures;
 }
 
+/* The real checkout's tasks wrapper: staged from this checkout the way the
+ * front door does it, its declared closure held by the tree alone, and its
+ * `app` target builds the ztasks program with depfiles that name only the
+ * declared inputs. */
+static int asd_tasks_member(struct asd_world *w)
+{
+    int failures = 0;
+    TEST("app.seed: the tasks wrapper of this checkout stages and builds the "
+         "ztasks program") {
+        char source[ASD_PATH], dest[ASD_PATH], build[ASD_PATH], out[ASD_PATH];
+        struct app_seed_stage ws;
+        ASSERT(getcwd(source, sizeof(source)) != NULL);
+        (void)snprintf(dest, sizeof(dest), "%s/tasks-stage", w->datadir1);
+        (void)snprintf(build, sizeof(build), "%s/tasks-build", w->datadir1);
+        ASSERT(mkdir(dest, 0700) == 0 && mkdir(build, 0700) == 0);
+        bool ok = app_seed_stage(source, "tasks", dest, &ws);
+        if (!ok)
+            printf("  [tasks seed: %s %s]\n", ws.code, ws.why);
+        ASSERT(ok);
+        ASSERT_EQ(ws.mapped, 3u);  /* the ztasks package files the build reads */
+        ASSERT_EQ(ws.closure, 4u); /* Makefile, two sources, one header */
+        char why[320] = "";
+        struct app_build_closure closure;
+        const struct app_build_make q = {.copy_dir = dest,
+                                         .confine = app_build_make_confinable()};
+        ASSERT(app_build_closure_query(&q, &closure, why, sizeof(why), NULL));
+        struct app_build_make_result r;
+        const struct app_build_make m = {.copy_dir = dest, .work_dir = build,
+                                         .confine = app_build_make_confinable()};
+        (void)snprintf(out, sizeof(out), "%s/out", build);
+        ASSERT(mkdir(out, 0700) == 0);
+        app_build_make_run(&m, out, &r);
+        if (!r.ok)
+            printf("  [tasks build: %s | %s]\n", r.why, r.tail);
+        ASSERT(r.ok);
+        ASSERT(app_build_depfiles_declared(&m, out, &closure, why,
+                                           sizeof(why)));
+        app_build_closure_free(&closure);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 enum asd_progress_case { ASD_PROGRESS_NORMAL, ASD_PROGRESS_CLOSE, ASD_PROGRESS_UI_FAIL, ASD_PROGRESS_PARTIAL,
     ASD_PROGRESS_ALLOC, ASD_PROGRESS_MAIN_ALLOC, ASD_PROGRESS_START, ASD_PROGRESS_PREPARE };
@@ -1060,6 +1103,8 @@ int test_app_seed(void)
         failures += asd_copy_builds(&w);
     if (!failures)
         failures += asd_refusals(&w) + asd_refusals_app(&w);
+    if (!failures)
+        failures += asd_tasks_member(&w);
     if (w.saved_home[0])
         (void)setenv("HOME", w.saved_home, 1);
     if (!failures)

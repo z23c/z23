@@ -1,0 +1,11 @@
+# Tasks app seed: the checkout files the wrapper build reads that live
+# outside apps/tasks, copied into the seeded package at the canonical package
+# layout the tree's zcode-package.json declares (include/, src/ and the
+# declared app/ program), so the package prepares and the entrypoint
+# (Makefile) compiles the commons ztasks package in place. Keep this list
+# equal to the non-apps/tasks lines of `make print-app-closure`: app seed
+# refuses a tree whose print-app-closure names a file the tree does not hold.
+
+contexts/commons/packages/ztasks/app/main.c app/main.c
+contexts/commons/packages/ztasks/include/ztasks/ztasks.h include/ztasks/ztasks.h
+contexts/commons/packages/ztasks/src/ztasks.c src/ztasks.c

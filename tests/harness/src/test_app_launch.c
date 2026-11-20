@@ -169,8 +169,8 @@ static bool al_write_tsv(struct al_fx *f)
            al_write_file(f->env.config_path, text, 0600);
 }
 
-/* The fixture's paths under f->root. bin_dir is an empty directory, so the
- * built-in skycombat row is never installed here. */
+/* The fixture paths under f->root. bin_dir is an empty directory, so the
+ * built-in rows (skycombat, tasks) are never installed here. */
 static bool al_paths(struct al_fx *f)
 {
     bool ok = al_path(f->env.bin_dir, sizeof(f->env.bin_dir), f->root, "bin") &&
@@ -249,7 +249,7 @@ static int case_open_raise_reopen(struct al_fx *f)
     long first = 0;
     TEST("open starts the app and waits for its ready marker") {
         ASSERT(f->reg.config_error[0] == '\0');
-        ASSERT(f->reg.count == 7u);
+        ASSERT(f->reg.count == 8u);
         al_open(f, "fixtureapp");
         ASSERT_STR_EQ(app_open_status_name(f->res.status), "opened");
         ASSERT(f->res.pid > 1);
@@ -304,6 +304,19 @@ static int case_refusals(struct al_fx *f)
         ASSERT_STR_EQ(f->res.id, "skycombat");
         ASSERT(strstr(f->res.message, "z23-skycombat"));
         ASSERT_STR_EQ(f->res.hint, "build it with make game");
+    PASS(); }
+    /* The tasks pointer row is registered (the hint names it beside
+     * skycombat) yet refused: a headless built-in row is served by a
+     * native command, not this windowed-open path, on every host. */
+    TEST("the known headless tasks name refuses unknown_app, with its hint") {
+        al_open(f, "tasks");
+        ASSERT_STR_EQ(app_open_status_name(f->res.status), "failed");
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "unknown_app");
+        ASSERT(strstr(f->res.message, "tasks"));
+        ASSERT(strstr(f->res.hint, "tasks"));
+        ASSERT(strstr(f->res.hint, "skycombat"));
+        ASSERT_EQ(f->res.id[0], '\0');
+        ASSERT_EQ(f->res.pid, 0);
     PASS(); }
     TEST("without a desktop session open is refused as no_desktop") {
         f->env.desktop = false;
@@ -404,7 +417,7 @@ static int case_unsafe_tsv(struct al_fx *f)
         app_launch_registry_load(&f->env, &f->reg);
         ASSERT(chmod(f->env.config_path, 0600) == 0);
         ASSERT(strstr(f->reg.config_error, "not group- or world-writable"));
-        ASSERT(f->reg.count == 1u); /* the built-in rows only */
+        ASSERT(f->reg.count == 2u); /* the built-in rows only */
         al_open(f, "fixtureapp");
         ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "config_refused");
         ASSERT_EQ(f->res.pid, 0);
@@ -413,7 +426,7 @@ static int case_unsafe_tsv(struct al_fx *f)
         const char *why = al_load_tsv(f, "relative.tsv",
                                       "relapp\t-\tbin/app\t-\t-\n", 0600);
         ASSERT(strstr(why, "absolute path"));
-        ASSERT(f->reg.count == 1u);
+        ASSERT(f->reg.count == 2u);
     PASS(); }
     TEST("a group-writable executable refuses the file") {
         ASSERT(al_path(unsafe_exe, sizeof(unsafe_exe), f->root, "app-gw"));
@@ -421,7 +434,7 @@ static int case_unsafe_tsv(struct al_fx *f)
         snprintf(row, sizeof(row), "gwapp\t-\t%s\t-\t-\n", unsafe_exe);
         const char *why = al_load_tsv(f, "gw.tsv", row, 0600);
         ASSERT(strstr(why, "group- or world-writable"));
-        ASSERT(f->reg.count == 1u);
+        ASSERT(f->reg.count == 2u);
     PASS(); }
     TEST("a name that collides with a built-in refuses the file") {
         snprintf(row, sizeof(row), "mine\tsky\t%s\t-\t-\n", f->bin_ready);
@@ -706,6 +719,99 @@ _test_next:;
     al_env_restore(saved, nsaved);
     return failures;
 }
+
+/* The desktop seam pins the admit order at the handler layer on any host:
+ * an operator apps.tsv row whose executable is missing refuses NO_DESKTOP
+ * (the desktop gate precedes the installed check), the same row refuses
+ * NOT_INSTALLED once a desktop exists, and the headless tasks pointer row
+ * is refused UNKNOWN_APP with its native-command next actions on both
+ * desktop answers — DISPLAY-independent by construction. */
+#if !defined(_WIN32)
+static int case_open_desktop(struct al_fx *f)
+{
+    int failures = 0;
+    struct al_saved_env saved[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL},
+                                   {"XDG_STATE_HOME", NULL}};
+    size_t nsaved = sizeof(saved) / sizeof(saved[0]);
+    struct json_value input;
+    struct zcl_command_reply reply = {0};
+    struct zcl_command_request request = {.input = &input, .view = "normal",
+                                          .invoked_name = "app.open"};
+    char dir[PATH_MAX], tsv_path[PATH_MAX], tsv[PATH_MAX + 64], exe[PATH_MAX];
+    int n;
+    al_env_save(saved, nsaved);
+    json_init(&input);
+    json_set_object(&input);
+    /* Block A (staging): an operator row at root/z23/apps.tsv — the path
+     * XDG_CONFIG_HOME=f->root names in Block B — whose absolute executable
+     * is missing, so the registry parses it with installed=false. */
+    TEST("staging: an operator apps.tsv row with a missing executable") {
+        ASSERT(snprintf(dir, sizeof(dir), "%s/z23", f->root) > 0);
+        ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        ASSERT(snprintf(exe, sizeof(exe), "%s/ghost-missing-bin", f->root) > 0);
+        ASSERT(snprintf(tsv_path, sizeof(tsv_path), "%s/apps.tsv", dir) > 0);
+        n = snprintf(tsv, sizeof(tsv), "ghostapp\t-\t%s\t-\t-\n", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(tsv));
+        ASSERT(al_write_file(tsv_path, tsv, 0600));
+    PASS(); }
+    /* Block B: headless, the operator row reaches the desktop gate before
+     * its installed check. */
+    TEST("an operator row refuses NO_DESKTOP before its installed check") {
+        ASSERT(setenv("HOME", f->root, 1) == 0);
+        ASSERT(setenv("XDG_CONFIG_HOME", f->root, 1) == 0);
+        ASSERT(unsetenv("XDG_STATE_HOME") == 0);
+        ASSERT(json_push_kv_str(&input, "name", "ghostapp"));
+        app_launch_test_set_desktop(0);
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        app_launch_test_set_desktop(-1);
+        ASSERT_STR_EQ(reply.error.code, "NO_DESKTOP");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "no_desktop");
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "message")),
+                      "no desktop session on this host"));
+        ASSERT_EQ(reply.next_count, 0u);
+        zcl_command_reply_free(&reply);
+    PASS(); }
+    /* Block C: the same input with the desktop forced, pinning the true
+     * gate order. */
+    TEST("the same operator row refuses NOT_INSTALLED with a desktop") {
+        app_launch_test_set_desktop(1);
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        app_launch_test_set_desktop(-1);
+        ASSERT_STR_EQ(reply.error.code, "NOT_INSTALLED");
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "message")),
+                      "ghostapp is not installed"));
+        ASSERT_EQ(reply.next_count, 0u);
+        zcl_command_reply_free(&reply);
+    PASS(); }
+    /* Block D: the pointer row refuses UNKNOWN_APP with its next actions
+     * whether the desktop probe says headless or desktop. */
+    TEST("the tasks pointer row refuses UNKNOWN_APP with next actions on "
+         "both desktop answers") {
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "name", "tasks"));
+        for (int desktop = 0; desktop <= 1; desktop++) {
+            app_launch_test_set_desktop(desktop);
+            zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            zcl_native_handle_app_open(&request, &reply);
+            app_launch_test_set_desktop(-1);
+            ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+            ASSERT_EQ(reply.next_count, 2u);
+            ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+            ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+            ASSERT_STR_EQ(reply.next[1].command, "app.list");
+            zcl_command_reply_free(&reply);
+        }
+    PASS(); }
+_test_next:;
+    app_launch_test_set_desktop(-1);
+    json_free(&input);
+    al_env_restore(saved, nsaved);
+    return failures;
+}
+#endif /* !_WIN32 */
 
 /* A stranger with only the public words finds app.open. */
 static int case_discover(void)
@@ -2888,9 +2994,14 @@ static int case_library_profile_input(void)
 }
 static bool al_library_fill(struct al_fx *f)
 {
-    char builtin[PATH_MAX], name[33];
+    char builtin[PATH_MAX], tasks[PATH_MAX], name[33];
+    /* 14 tsv rows + the two built-in rows fill the registry's 16-entry cap;
+     * with both built-ins installed and 16 kept selections the library still
+     * reaches exactly 32 rows. */
     if (!al_path(builtin, sizeof(builtin), f->env.bin_dir, "z23-skycombat") ||
-        !al_copy_exe(AL_FIXTURE, builtin, 0700) || !al_library_catalog(f, 15) ||
+        !al_copy_exe(AL_FIXTURE, builtin, 0700) ||
+        !al_path(tasks, sizeof(tasks), f->env.bin_dir, "z23-tasks") ||
+        !al_copy_exe(AL_FIXTURE, tasks, 0700) || !al_library_catalog(f, 14) ||
         !app_launch_state_dir_ready(f->env.state_dir)) return false;
     for (unsigned i = 0; i < 16; ++i) {
         struct app_selection saved;
@@ -3670,6 +3781,9 @@ _test_next:
     failures += case_stale_record(&f);
     failures += case_process_env(&f);
     failures += case_handlers(&f);
+#if !defined(_WIN32)
+    failures += case_open_desktop(&f);
+#endif
     failures += case_discover();
     failures += case_advertisement_view();
     failures += case_discover_page_view();

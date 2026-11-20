@@ -110,6 +110,11 @@ static bool app_open_admit(const struct app_launch_env *env,
 {
     char known[256], text[384], hint[300];
     *entry = app_launch_registry_find(reg, name);
+    /* A built-in pointer row (no window, no raise, no args) is served by a
+     * native command, not a desktop window: refusing it here lets the
+     * not-found branch below carry its app.tasks/app.list next actions on
+     * every host, instead of making the reply depend on DISPLAY. */
+    if (*entry && !app_launch_entry_is_windowed(*entry)) *entry = NULL;
     if (!*entry) {
         (void)app_launch_known_names(reg, known, sizeof(known));
         snprintf(hint, sizeof(hint), "known apps: %s", known);

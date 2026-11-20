@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "name": "tasks/tasks",
+  "semver": "0.1.0",
+  "language": "c23",
+  "license": "Apache-2.0",
+  "include_dir": "include",
+  "source_dir": "src",
+  "dependencies": [],
+  "programs": ["app/main.c"]
+}

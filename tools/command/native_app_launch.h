@@ -136,6 +136,10 @@ struct app_open_result {
  * False (with why) when the state directory cannot be named. */
 bool app_launch_env_from_process(struct app_launch_env *env, char *why,
                                  size_t why_size);
+/* Test seam: while desktop >= 0 the probe above is overridden (0 = no
+ * desktop, nonzero = desktop), so handler tests pin both answers on any
+ * host; -1 restores the process probe. */
+void app_launch_test_set_desktop(int desktop);
 
 /* Built-in rows, then the operator file. An unsafe operator file is refused
  * whole (config_error); the built-in rows are still listed. */
@@ -145,6 +149,10 @@ void app_launch_registry_load(const struct app_launch_env *env,
 const struct app_launch_entry *
 app_launch_registry_find(const struct app_launch_registry *reg,
                          const char *name);
+/* True when the row opens a desktop window: builtin-scoped, so operator
+ * apps.tsv rows and kept descriptors are always windowed; a built-in row
+ * only when it declares a raise, a ready marker or arguments. */
+bool app_launch_entry_is_windowed(const struct app_launch_entry *entry);
 /* A built copy's compiled-in PREVIEW run: args are the arguments after the
  * image path, with the capture slot filled by capture_path
  * (<dir>/<preview_file>). Only built-in rows carry one. */

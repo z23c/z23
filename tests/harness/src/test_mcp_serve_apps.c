@@ -264,7 +264,7 @@ static int case_apps_tools(struct ma *m, long *app_pid)
         ASSERT(ma_tool(m, 6, "apps_open", "{\"name\":\"nosuchapp\"}"));
         ASSERT(ma_has(m, "\"isError\":true"));
         ASSERT(ma_has(m, "UNKNOWN_APP"));
-        ASSERT(ma_has(m, "known apps: skycombat, fixtureapp"));
+        ASSERT(ma_has(m, "known apps: skycombat, tasks, fixtureapp"));
     PASS(); }
     TEST("apps_open without a name is a bad argument") {
         ASSERT(ma_tool(m, 7, "apps_open", "{}"));

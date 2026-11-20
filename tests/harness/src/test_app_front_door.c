@@ -1318,6 +1318,33 @@ static int afd_tasks_carry(struct afd_world *w)
     } _test_next:;
     return failures;
 }
+/* The checkout member, not a datadir release: running from this checkout the
+ * first `app copy tasks` seeds apps/tasks (the wrapper Makefile plus the
+ * ztasks package files zcode-seed.def maps), signs it and adopts the copy.
+ * Without an apps/tasks member the seed refuses APP_UNKNOWN and nothing is
+ * written. */
+static int afd_tasks_checkout(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("app front door: `app copy tasks` from this checkout seeds the "
+         "checkout member") {
+        char datadir[AFD_PATH], home[AFD_PATH], copy[AFD_PATH + 32];
+        struct asf_door run;
+        struct stat st;
+        (void)snprintf(datadir, sizeof(datadir), "%s/tasks-checkout-data", w->root);
+        (void)snprintf(home, sizeof(home), "%s/tasks-checkout-home", w->root);
+        ASSERT(mkdir(datadir, 0700) == 0 && mkdir(home, 0700) == 0);
+        asf_door_run(home, w->saved_cwd, datadir, "copy", "tasks",
+                     ZCL_CLI_CONFIRM_YES, &run);
+        if (run.rc != 0)
+            printf("  [copy tasks refused: %.400s]\n", run.text);
+        ASSERT_EQ(run.rc, 0);
+        (void)snprintf(copy, sizeof(copy), "%s/copies/tasks-1", datadir);
+        ASSERT(stat(copy, &st) == 0 && S_ISDIR(st.st_mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int afd_key_note_after_confirm(const struct afd_world *w)
 {
     int failures = 0;
@@ -1614,6 +1641,8 @@ int test_app_front_door(void)
         failures += afd_key_note_after_confirm(&w);
     if (!failures)
         failures += afd_tasks_carry(&w);
+    if (!failures)
+        failures += afd_tasks_checkout(&w);
     if (!failures)
         failures += afd_quiet_logs(&w);
     if (!failures) {

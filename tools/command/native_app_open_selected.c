@@ -185,6 +185,13 @@ static bool as_catalog(struct as_open *a)
     if (a->registry.config_error[0])
         return as_fail(a, "CONFIG_REFUSED", "the app catalog is unsafe or malformed", a->registry.config_error);
     const struct app_launch_entry *entry = app_launch_registry_find(&a->registry, a->name);
+    /* A headless catalog row declares no SIGUSR1 raise and no ready marker:
+     * there is no window to bring to front or wait for, so it is not
+     * launchable by this windowed-open path at all. Treating it as
+     * not-found keeps the UNKNOWN_APP contract (and its native-command
+     * next actions, e.g. app.tasks for ztasks) instead of failing at the
+     * desktop gate, which would make the reply depend on DISPLAY. */
+    if (entry && !app_launch_entry_is_windowed(entry)) entry = NULL;
     if (!entry) return as_fail(a, "UNKNOWN_APP", "no launchable app has that name", a->name);
     a->entry = *entry;
     return true;
