@@ -50,6 +50,11 @@ static int tor_build_path_policy_check(int status)
     return 0;
 }
 
+static int tor_build_path_letter(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
 /* These bytes become Make syntax and then compiler argv. Refuse characters
  * requiring either language's quoting rather than evaluating a path as code. */
 static int tor_build_path_root_safe(const char *root)
@@ -57,17 +62,14 @@ static int tor_build_path_root_safe(const char *root)
     if (!root || strlen(root) >= 4096) return 0;
     if (root[0] != '/') {
 #ifdef _WIN32
-        int drive = (root[0] >= 'A' && root[0] <= 'Z') ||
-                    (root[0] >= 'a' && root[0] <= 'z');
-        if (!drive || root[1] != ':' || root[2] != '/') return 0;
+        if (!tor_build_path_letter(root[0]) || root[1] != ':' || root[2] != '/') return 0;
 #else
         return 0;
 #endif
     }
     for (const unsigned char *p = (const unsigned char *)root; *p; p++) {
-        int alpha = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z');
         int digit = *p >= '0' && *p <= '9';
-        if (!alpha && !digit && !strchr("/._:-", *p)) return 0;
+        if (!tor_build_path_letter(*p) && !digit && !strchr("/._:-", *p)) return 0;
     }
     return 1;
 }
