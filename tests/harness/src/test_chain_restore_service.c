@@ -40,6 +40,7 @@
 
 extern bool process_block_test_hydrate_index_from_disk(
     struct block_index *pindex, const char *datadir);
+extern bool chain_restore_disk_pos_test_tags(void);
 
 /* ── Plan tests ────────────────────────────────────────────────── */
 
@@ -2260,11 +2261,22 @@ static int test_chain_restore_walks_abort_on_shutdown(void) {
 /* ── Registration ──────────────────────────────────────────────── */
 
 
+static int test_block_file_position_tags(void)
+{
+    int failures = 0;
+    TEST("block-file position tags retain full hash identity and wide ordinals") {
+        ASSERT(chain_restore_disk_pos_test_tags());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_block_file_rebuild_across_files(void)
 {
     int failures = 0;
     TEST("block-file rebuild reads consecutive headers and switches files") {
-        enum { first_count = 32 };
+        /* Cross a dense-row chunk boundary before the later-file duplicate. */
+        enum { first_count = 256 };
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "restore_stream", "two_files");
         struct main_state ms;
@@ -2278,14 +2290,26 @@ static int test_block_file_rebuild_across_files(void)
         }
         struct disk_block_pos pos = { .nFile = 1 };
         struct uint256 hash;
+        const uint32_t tip_bits = 0x1e14f400u + first_count;
+        const uint32_t tip_time = 1700000000u + first_count;
         ASSERT(write_chain_block_fixture(dir, &pos, expected[first_count - 1]->phashBlock,
-                                         0x1e14f420u, 1700000032u, &hash));
+                                         tip_bits, tip_time, &hash));
         struct block_index *tip = chainstate_insert_block_index(
             (struct chainstate *)&ms, &hash);
         ASSERT(tip != NULL);
         expected[first_count] = tip;
         tip->nHeight = first_count;
         ASSERT(active_chain_move_window_tip(&ms.chain_active, tip));
+        tip->nFile = 7;
+        struct block_index *before_first = active_chain_at(&ms.chain_active, 0);
+        struct block_index *before_tip = active_chain_at(&ms.chain_active, first_count);
+        zcl_alloc_fault_fail_nth("chain_restore/disk_pos_rows", 2);
+        int refused = chain_restore_rebuild_active_chain_from_block_files(&ms, tip, dir);
+        zcl_alloc_fault_clear();
+        ASSERT(refused == 0);
+        ASSERT(tip->nFile == 7);
+        ASSERT(active_chain_at(&ms.chain_active, 0) == before_first);
+        ASSERT(active_chain_at(&ms.chain_active, first_count) == before_tip);
         ASSERT(chain_restore_rebuild_active_chain_from_block_files(&ms, tip, dir)
                == first_count + 1);
         for (int h = 0; h <= first_count; ++h) {
@@ -2298,7 +2322,7 @@ static int test_block_file_rebuild_across_files(void)
         struct disk_block_pos later = { .nFile = 2 };
         struct uint256 duplicate;
         ASSERT(write_chain_block_fixture(dir, &later, expected[first_count - 1]->phashBlock,
-                                         0x1e14f420u, 1700000032u, &duplicate));
+                                         tip_bits, tip_time, &duplicate));
         ASSERT(uint256_eq(&duplicate, &hash));
         ASSERT(chain_restore_rebuild_active_chain_from_block_files(&ms, tip, dir)
                == first_count + 1);
@@ -2357,6 +2381,7 @@ int test_chain_restore_service(void) {
     failures += test_finalize_verified_scopes_trust_flag();
     failures += test_finalize_quarantine_preserves_served_floor();
     failures += test_finalize_never_waits_for_progress_under_main();
+    failures += test_block_file_position_tags();
     failures += test_block_file_rebuild_across_files();
     failures += test_rebuild_active_chain_is_o_chain_not_delta();
     failures += test_unclean_restart_recovery_is_o_delta();

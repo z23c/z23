@@ -319,16 +319,18 @@ int chain_restore_rebuild_active_chain_from_disk(
 
 struct chain_restore_disk_pos_entry {
     struct uint256 hash;
-    /* Zero marks an empty slot; scanner file numbers are 0..9998. */
-    int file_plus_one;
+    int file;
     unsigned int pos;
 };
 
 struct chain_restore_disk_pos_map {
-    struct chain_restore_disk_pos_entry *entries;
+    void *slots; /* zero is empty; tagged ordinals occupy the remaining values */
+    struct chain_restore_disk_pos_entry **chunks;
     size_t capacity;
     size_t size;
 };
+
+#define CHAIN_RESTORE_POS_CHUNK_ROWS 256u
 
 static uint64_t chain_restore_hash_key(const struct uint256 *h)
 {
@@ -342,12 +344,29 @@ static bool chain_restore_disk_pos_map_init(
     size_t expected)
 {
     size_t cap = 4096;
-    while (cap < expected * 2)
-        cap *= 2;
-    m->entries = zcl_calloc(cap, sizeof(*m->entries),
-                            "chain_restore/disk_pos_map");
-    if (!m->entries)
+    if (expected > SIZE_MAX / 2)
         return false;
+    while (cap < expected * 2) {
+        if (cap > SIZE_MAX / 2)
+            return false;
+        cap *= 2;
+    }
+    size_t width = cap <= UINT32_MAX ? sizeof(uint32_t) : sizeof(size_t);
+    if (cap > SIZE_MAX / width)
+        return false;
+    /* cap is a power of two at least 4096, so every chunk is full. */
+    size_t chunk_count = cap / CHAIN_RESTORE_POS_CHUNK_ROWS;
+    if (chunk_count > SIZE_MAX / sizeof(*m->chunks))
+        return false;
+    m->slots = zcl_calloc(cap, width, "chain_restore/disk_pos_slots");
+    if (!m->slots)
+        return false;
+    m->chunks = zcl_calloc(chunk_count, sizeof(*m->chunks), "chain_restore/disk_pos_chunks");
+    if (!m->chunks) {
+        free(m->slots);
+        m->slots = NULL;
+        return false;
+    }
     m->capacity = cap;
     m->size = 0;
     return true;
@@ -358,10 +377,65 @@ static void chain_restore_disk_pos_map_free(
 {
     if (!m)
         return;
-    free(m->entries);
-    m->entries = NULL;
+    size_t chunk_count = m->size / CHAIN_RESTORE_POS_CHUNK_ROWS +
+                         (m->size % CHAIN_RESTORE_POS_CHUNK_ROWS != 0);
+    for (size_t i = 0; i < chunk_count; i++)
+        free(m->chunks[i]);
+    free(m->chunks);
+    free(m->slots);
+    m->chunks = NULL;
+    m->slots = NULL;
     m->capacity = 0;
     m->size = 0;
+}
+
+static struct chain_restore_disk_pos_entry *chain_restore_disk_pos_row(
+    const struct chain_restore_disk_pos_map *m, size_t ordinal)
+{
+    return &m->chunks[ordinal / CHAIN_RESTORE_POS_CHUNK_ROWS]
+                     [ordinal % CHAIN_RESTORE_POS_CHUNK_ROWS];
+}
+
+static struct chain_restore_disk_pos_entry *chain_restore_disk_pos_new_row(
+    struct chain_restore_disk_pos_map *m)
+{
+    size_t ordinal = m->size;
+    if (ordinal % CHAIN_RESTORE_POS_CHUNK_ROWS == 0) {
+        m->chunks[ordinal / CHAIN_RESTORE_POS_CHUNK_ROWS] =
+            zcl_malloc(CHAIN_RESTORE_POS_CHUNK_ROWS * sizeof(struct chain_restore_disk_pos_entry),
+                       "chain_restore/disk_pos_rows");
+        if (!m->chunks[ordinal / CHAIN_RESTORE_POS_CHUNK_ROWS])
+            return NULL;
+    }
+    return chain_restore_disk_pos_row(m, ordinal);
+}
+
+/* Capacity is a power of two. Its low mask bits hold the row ordinal; the
+ * remaining bits carry a hash tag and a high occupied bit, so zero is empty.
+ * The tag is only a filter: a match still requires the entire 256-bit hash. */
+static size_t chain_restore_disk_pos_tag(const struct chain_restore_disk_pos_map *m,
+                                         uint64_t key)
+{
+    size_t mask = m->capacity - 1;
+    if (m->capacity <= UINT32_MAX)
+        return ((uint32_t)(key >> 32) | UINT32_C(0x80000000)) & ~(uint32_t)mask;
+    return ((size_t)key | (SIZE_MAX - (SIZE_MAX >> 1))) & ~mask;
+}
+
+static size_t chain_restore_disk_pos_slot_get(const struct chain_restore_disk_pos_map *m,
+                                              size_t slot)
+{
+    return m->capacity <= UINT32_MAX ? ((const uint32_t *)m->slots)[slot]
+                                      : ((const size_t *)m->slots)[slot];
+}
+
+static void chain_restore_disk_pos_slot_set(struct chain_restore_disk_pos_map *m,
+                                             size_t slot, size_t value)
+{
+    if (m->capacity <= UINT32_MAX)
+        ((uint32_t *)m->slots)[slot] = (uint32_t)value;
+    else
+        ((size_t *)m->slots)[slot] = value;
 }
 
 static bool chain_restore_disk_pos_map_put(
@@ -370,21 +444,31 @@ static bool chain_restore_disk_pos_map_put(
     int file,
     unsigned int pos)
 {
-    if (!m || !m->entries || m->capacity == 0)
+    if (!m || !m->slots || m->capacity == 0)
         return false;
-    size_t idx = chain_restore_hash_key(hash) & (m->capacity - 1);
+    uint64_t key = chain_restore_hash_key(hash);
+    size_t mask = m->capacity - 1;
+    size_t idx = key & mask;
+    size_t tag = chain_restore_disk_pos_tag(m, key);
     for (size_t i = 0; i < m->capacity; i++) {
         size_t slot = (idx + i) & (m->capacity - 1);
-        struct chain_restore_disk_pos_entry *e = &m->entries[slot];
-        if (!e->file_plus_one) {
+        size_t encoded = chain_restore_disk_pos_slot_get(m, slot);
+        if (!encoded) {
+            struct chain_restore_disk_pos_entry *e = chain_restore_disk_pos_new_row(m);
+            if (!e)
+                return false;
             e->hash = *hash;
-            e->file_plus_one = file + 1;
+            e->file = file;
             e->pos = pos;
+            chain_restore_disk_pos_slot_set(m, slot, tag | m->size);
             m->size++;
             return true;
         }
+        if ((encoded & ~mask) != tag)
+            continue;
+        struct chain_restore_disk_pos_entry *e = chain_restore_disk_pos_row(m, encoded & mask);
         if (uint256_eq(&e->hash, hash)) {
-            e->file_plus_one = file + 1;
+            e->file = file;
             e->pos = pos;
             return true;
         }
@@ -397,19 +481,71 @@ chain_restore_disk_pos_map_find(
     const struct chain_restore_disk_pos_map *m,
     const struct uint256 *hash)
 {
-    if (!m || !m->entries || m->capacity == 0)
+    if (!m || !m->slots || m->capacity == 0)
         return NULL;
-    size_t idx = chain_restore_hash_key(hash) & (m->capacity - 1);
+    uint64_t key = chain_restore_hash_key(hash);
+    size_t mask = m->capacity - 1;
+    size_t idx = key & mask;
+    size_t tag = chain_restore_disk_pos_tag(m, key);
     for (size_t i = 0; i < m->capacity; i++) {
         size_t slot = (idx + i) & (m->capacity - 1);
-        const struct chain_restore_disk_pos_entry *e = &m->entries[slot];
-        if (!e->file_plus_one)
+        size_t encoded = chain_restore_disk_pos_slot_get(m, slot);
+        if (!encoded)
             return NULL;
+        if ((encoded & ~mask) != tag)
+            continue;
+        const struct chain_restore_disk_pos_entry *e = chain_restore_disk_pos_row(m, encoded & mask);
         if (uint256_eq(&e->hash, hash))
             return e;
     }
     return NULL;
 }
+
+#ifdef ZCL_TESTING
+#if SIZE_MAX > UINT32_MAX
+static bool chain_restore_disk_pos_test_wide_slot(void)
+{
+    size_t slot = 0;
+    struct chain_restore_disk_pos_map wide = { .slots = &slot,
+        .capacity = ((size_t)UINT32_MAX + 1) * 2 };
+    size_t tag = chain_restore_disk_pos_tag(&wide, UINT64_C(0x123456789abcdef0));
+    size_t ordinal = (size_t)UINT32_MAX + 17;
+    size_t value = tag | ordinal;
+    chain_restore_disk_pos_slot_set(&wide, 0, value);
+    return tag != 0 && chain_restore_disk_pos_slot_get(&wide, 0) == value &&
+           (value & (wide.capacity - 1)) == ordinal;
+}
+#endif
+
+/* Exercise full-hash collision filtering and the wide slot encoding without
+ * allocating a multi-billion-slot table. */
+bool chain_restore_disk_pos_test_tags(void)
+{
+    struct chain_restore_disk_pos_map m = {0};
+    if (chain_restore_disk_pos_map_init(&m, SIZE_MAX)) {
+        chain_restore_disk_pos_map_free(&m);
+        return false;
+    }
+    if (!chain_restore_disk_pos_map_init(&m, 2))
+        return false; // raw-return-ok:fixture-allocation-refused
+    struct uint256 a = {0}, b = {0}, missing = {0};
+    a.data[31] = 1;
+    b.data[31] = 2;
+    missing.data[31] = 3;
+    bool ok = chain_restore_disk_pos_map_put(&m, &a, 0, 10) &&
+              chain_restore_disk_pos_map_put(&m, &b, 1, 20) &&
+              chain_restore_disk_pos_map_put(&m, &a, 2, 30);
+    const struct chain_restore_disk_pos_entry *ea = chain_restore_disk_pos_map_find(&m, &a);
+    const struct chain_restore_disk_pos_entry *eb = chain_restore_disk_pos_map_find(&m, &b);
+    ok = ok && m.size == 2 && ea && eb && ea->file == 2 && ea->pos == 30 &&
+         eb->file == 1 && eb->pos == 20 && !chain_restore_disk_pos_map_find(&m, &missing);
+    chain_restore_disk_pos_map_free(&m);
+#if SIZE_MAX > UINT32_MAX
+    ok = ok && chain_restore_disk_pos_test_wide_slot();
+#endif
+    return ok;
+}
+#endif
 
 static bool chain_restore_scan_args_ok(const char *datadir,
                                        const struct chain_restore_disk_pos_map *map)
@@ -573,7 +709,7 @@ int chain_restore_rebuild_active_chain_from_block_files(
             chain_restore_disk_pos_map_find(&pos_map, &want);
         if (!pos)
             break;
-        int file = pos->file_plus_one - 1;
+        int file = pos->file;
         struct block_header hdr;
         if (!chain_restore_read_header_at_pos(datadir, file, pos->pos,
                                               &cached, &cached_file, &hdr))
