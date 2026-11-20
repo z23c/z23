@@ -7,6 +7,7 @@
 #include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "config/boot_blkidx_ladder.h"
+#include "config/boot_block_tree_cache.h"
 #include "config/boot_blocktree_cleanup.h"
 #include "config/boot_flight_recorder.h"
 #include "config/flysync_island.h"
@@ -1605,8 +1606,10 @@ static void boot_step_open_block_tree(struct app_context *ctx)
     if (!blocktree_cleanup.blocktree_path_ready)
         fprintf(stderr, "Warning: block tree path unavailable for datadir %s\n",
                 ctx->datadir ? ctx->datadir : "(null)");
+    /* Bind the RAM-class LRU cap before the open; operator env wins. */
+    boot_block_tree_cache_limits_apply_class(hw_profile_ram_class_of(hw_profile_ram_bytes()));
     if (block_tree_db_open(&g_block_tree, blocktree_path,
-                           256 << 20, false, false)) {
+                           boot_block_tree_cache_size(), false, false)) {
         g_block_tree_open = true;
         g_active_block_tree = &g_block_tree;
     } else {

@@ -270,6 +270,8 @@ Z23_FLAG("ZCL_BLOCK_INDEX_PEAK_ROWS", "env_test", "140000", "-",
           "row count of the flat block-index fixture that bil_flat_boot_peak_case loads in a child process to report its peak-memory growth (default 140000); first use tests/harness/src/test_block_index_loader.c:auto")
 Z23_FLAG("ZCL_BLOCK_SCAN_WORKERS", "env_runtime", "-", "-",
           "first use engine/composition/src/boot_block_file_scan.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:28: | 2026-05-24 | 6e0f6a82c | #1 cold import identity | serial 48.9s / default-workers 57....")
+Z23_FLAG("ZCL_BLOCK_TREE_CACHE_BYTES", "env_runtime", "268435456", "-",
+          "byte cap for the process-lifetime block tree LevelDB LRU, read by both open sites through boot_block_tree_cache_size; RAM-class boot default LOW 64 MiB / MEDIUM 128 MiB / HIGH 256 MiB, an explicit env always wins (engine/composition/src/boot_block_tree_cache.c:auto)")
 Z23_FLAG("ZCL_BODY_HISTORY_BACKFILL_MODE", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/body_backfill_service.c:auto")
 Z23_FLAG("ZCL_BOOTSTRAP_CC", "env_build", "cc", "-",

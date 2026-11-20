@@ -10,6 +10,7 @@
 #include "platform/time_compat.h"
 #include "config/flysync_island.h"
 #include "config/bundle_exporter.h"
+#include "config/boot_block_tree_cache.h"
 #include "config/boot_cursor_state.h"
 #include "config/boot_datadir_lock.h"
 #include "config/boot_internal.h"
@@ -284,7 +285,7 @@ static bool boot_pending_runtime_stores_open(const char *datadir, struct node_db
         return false;
     if (!coins_view_sqlite_open(coins, ndb->db))
         return false;
-    if (!block_tree_db_open(tree, path, 256 << 20, false, false)) {
+    if (!block_tree_db_open(tree, path, boot_block_tree_cache_size(), false, false)) {
         coins_view_sqlite_close(coins);
         return false;
     }
