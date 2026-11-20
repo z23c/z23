@@ -391,15 +391,17 @@ static bool zrv_use_commit(struct zrv *z, struct json_value *in,
     struct zcl_command_reply use;
     if (!zcl_app_inner_call("zcode.use", in, &use, NULL)) {
         zcl_app_inner_fail(z->reply, &use, true);
+        if (strcmp(use.error.code, "BUILD_FAILED") == 0)
+            zrv_build_recovery(z);
         zcl_command_reply_free(&use);
         return false;
     }
     const char *active = zcl_app_inner_str(&use, "active_root");
     const struct json_value *steps = json_get(&use.data, "steps");
-    const struct json_value *last = steps && json_size(steps) ?
-        json_at(steps, json_size(steps) - 1u) : NULL;
+    size_t count = json_size(steps);
+    const struct json_value *last = count ? json_at(steps, count - 1u) : NULL;
     const char *receipt = last ? json_get_str(json_get(last, "build_receipt_id")) : NULL;
-    const struct json_value *reused = last ? json_get(last, "receipt_reused") : NULL;
+    const struct json_value *reused = json_get(last, "receipt_reused");
     if (active) (void)snprintf(active_root, 65, "%s", active);
     if (receipt) (void)snprintf(receipt_id, 65, "%s", receipt);
     struct zcl_command_reply normalized;
