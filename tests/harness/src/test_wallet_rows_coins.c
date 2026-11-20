@@ -434,6 +434,44 @@ static bool wrc_import_address(struct wrc_fx *fx, struct json_value *result)
     return ok;
 }
 
+static int wrc_import_save_failure(bool watch_only)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST(watch_only ? "wallet_rows_coins: importaddress reports save failure" :
+                      "wallet_rows_coins: importprivkey reports save failure") {
+        struct wrc_row rows[] = {
+            {WRC_AGREE, 1, 7, 7, false},
+            {WRC_AGREE, 2, 7, 7, false},
+            {WRC_BAD_AMOUNT, 3, 7, 7, false},
+        };
+        ASSERT(wrc_open(&fx, true));
+        ASSERT(wrc_seed_utxos(&fx, rows, 3));
+        ASSERT(sqlite3_exec(fx.ndb.db,
+            "CREATE TRIGGER refuse_one BEFORE INSERT ON wallet_utxos "
+            "WHEN substr(NEW.txid,1,1)=x'02' BEGIN SELECT RAISE(FAIL,'fixture'); END",
+            NULL, NULL, NULL) == SQLITE_OK);
+        struct json_value result;
+        ASSERT(watch_only ? wrc_import_address(&fx, &result) : wrc_import(&fx, &result));
+        ASSERT(wrc_wallet_rows(&fx) == 1);
+        if (watch_only) {
+            ASSERT(json_get_int(json_get(&result, "utxos")) == 1);
+            ASSERT(json_get_real(json_get(&result, "balance")) == (double)WRC_COIN_AMOUNT / 1e8);
+            ASSERT(json_get_int(json_get(&result, "utxos_save_failed")) == 1);
+            ASSERT(json_get_int(json_get(&result, "utxos_skipped")) == 1);
+            ASSERT(wrc_reply_has(json_get(&result, "warning"), "1 wallet UTXO row could not be saved"));
+        } else {
+            ASSERT(wrc_reply_has(&result, "1 wallet UTXO row could not be saved"));
+            ASSERT(wrc_reply_has(&result, "1 utxos rows skipped"));
+        }
+        json_free(&result);
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int wrc_importaddress_skips_disagreeing_rows(void)
 {
     int failures = 0;
@@ -1135,6 +1173,8 @@ int wrc_run_tests(void)
     failures += wrc_import_disagreeing_rows_skipped();
     failures += wrc_import_height_comes_from_coin();
     failures += wrc_import_without_coins_view_withholds();
+    failures += wrc_import_save_failure(false);
+    failures += wrc_import_save_failure(true);
     failures += wrc_importaddress_skips_disagreeing_rows();
     failures += wrc_importaddress_without_coins_view_withholds();
     failures += wrc_importprivkey_says_when_capped();

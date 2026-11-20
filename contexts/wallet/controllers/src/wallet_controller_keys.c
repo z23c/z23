@@ -120,6 +120,7 @@ struct zcl_result wallet_import_key_commit(const struct wallet_rpc_context *ctx,
 struct import_tally {
     int imported;
     int skipped;
+    int save_failed;
     int64_t value;   /* sum of the imported rows */
     bool withheld;   /* no coins view: no row was looked at */
     bool capped;     /* the row cap was reached: more rows may exist */
@@ -127,7 +128,7 @@ struct import_tally {
 
 /* Copy one utxos row into wallet_utxos, with the height and coinbase flag of
  * the coin that confirmed it. */
-static void import_save_row(struct node_db *ndb, const struct db_utxo *row,
+static bool import_save_row(struct node_db *ndb, const struct db_utxo *row,
                             const uint8_t addr_hash[20],
                             const struct wallet_row_coin *coin)
 {
@@ -141,7 +142,7 @@ static void import_save_row(struct node_db *ndb, const struct db_utxo *row,
     wu.script_len = row->script_len;
     wu.height = coin->height;
     wu.is_coinbase = coin->is_coinbase;
-    db_wallet_utxo_save(ndb, &wu);
+    return db_wallet_utxo_save(ndb, &wu);
 }
 
 /* The utxos table only nominates candidates: a row becomes a wallet_utxos row
@@ -170,9 +171,12 @@ static void import_confirmed_rows(struct wallet_rpc_context *ctx,
         if (wallet_row_check_coin(ctx->coins_tip, full.txid, full.vout,
                                   full.value, full.script, full.script_len,
                                   &coin) == WALLET_ROW_AGREES) {
-            import_save_row(ctx->node_db, &full, addr_hash, &coin);
-            tally->imported++;
-            tally->value += full.value;
+            if (import_save_row(ctx->node_db, &full, addr_hash, &coin)) {
+                tally->imported++;
+                tally->value += full.value;
+            } else {
+                tally->save_failed++;
+            }
         } else {
             tally->skipped++;
         }
@@ -278,6 +282,11 @@ static bool import_warning(char *msg, size_t cap, bool have_db,
                      "Imported; %d utxos rows skipped because the coins "
                      "database does not confirm them.%s", tally->skipped,
                      ph->skipped);
+    if (tally->save_failed > 0 && n >= 0 && (size_t)n < cap)
+        n += snprintf(msg + n, cap - (size_t)n,
+                      "%s%d wallet UTXO row%s could not be saved; retry the import.",
+                      n > 0 ? " " : "Imported; ", tally->save_failed,
+                      tally->save_failed == 1 ? "" : "s");
     if (tally->capped && n >= 0 && (size_t)n < cap)
         n += snprintf(msg + n, cap - (size_t)n,
                       "%sOnly the first %d rows were looked at; %s",
@@ -416,6 +425,7 @@ bool rpc_importaddress(const struct json_value *params, bool help,
     RPC_HELP(help, result, "importaddress \"address\"\n"
         "\nWatch a transparent address without importing its private key.\n"
         "Tracks balance and transactions but cannot spend.\n"
+        "If UTXO writes fail, utxos_save_failed counts them and warning advises retry.\n"
         "\nArguments:\n"
         "1. \"address\"     (string, required) The transparent address\n");
 
@@ -493,6 +503,8 @@ bool rpc_importaddress(const struct json_value *params, bool help,
                        true)) {
         LOG_WARN("wallet", "importaddress: %s", msg);
         json_push_kv_int(result, "utxos_skipped", tally.skipped);
+        if (tally.save_failed > 0)
+            json_push_kv_int(result, "utxos_save_failed", tally.save_failed);
         json_push_kv_bool(result, "coin_discovery_withheld", tally.withheld);
         json_push_kv_bool(result, "rows_capped", tally.capped);
         json_push_kv_str(result, "warning", msg);
