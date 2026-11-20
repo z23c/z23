@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "multicall.h"
+#include "platform/file_sync.h"
 #include "platform/windows_path.h"
 #include "util/ar_step_readonly.h"
 
@@ -467,9 +468,102 @@ static bool recovery_schema_unchanged(sqlite3 *db,
     return ok;
 }
 
+static bool recovery_sync_temporary(const char *temporary)
+{
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    if (!platform_windows_wide_path(temporary, wide)) return false;
+    HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "peer_chain_recovery: recovered file open for sync failed (%lu)\n",
+                (unsigned long)GetLastError());
+        return false;
+    }
+    bool ok = FlushFileBuffers(handle) != 0;
+    DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    if (!CloseHandle(handle) && ok) {
+        ok = false;
+        error = GetLastError();
+    }
+    if (!ok)
+        fprintf(stderr, "peer_chain_recovery: recovered file sync or close failed (%lu)\n",
+                (unsigned long)error);
+    return ok;
+#else
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(temporary, flags);
+    if (fd < 0) {
+        fprintf(stderr, "peer_chain_recovery: recovered file open for sync failed: %s\n",
+                strerror(errno));
+        return false;
+    }
+    int synced = platform_file_sync(fd);
+    int sync_error = errno;
+    int closed = close(fd);
+    int close_error = errno;
+    if (synced != 0 || closed != 0) {
+        fprintf(stderr, "peer_chain_recovery: recovered file sync or close failed: %s\n",
+                strerror(synced != 0 ? sync_error : close_error));
+        return false;
+    }
+    return true;
+#endif
+}
+
+#if !defined(_WIN32)
+static bool recovery_sync_parent(const char *destination)
+{
+    char *parent = sqlite3_mprintf("%s", destination);
+    if (!parent) {
+        fputs("peer_chain_recovery: out of memory\n", stderr);
+        return false;
+    }
+    char *slash = strrchr(parent, '/');
+    if (slash == parent) {
+        slash[1] = '\0';
+    } else if (slash) {
+        *slash = '\0';
+    } else {
+        memcpy(parent, ".", 2);
+    }
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+    int fd = open(parent, flags);
+    sqlite3_free(parent);
+    if (fd < 0) {
+        fprintf(stderr, "peer_chain_recovery: parent directory sync failed for %s: %s\n",
+                destination, strerror(errno));
+        return false;
+    }
+    int synced = platform_file_sync(fd);
+    int sync_error = errno;
+    int closed = close(fd);
+    int close_error = errno;
+    bool ok = (synced == 0 || sync_error == EINVAL) && closed == 0;
+    if (!ok)
+        fprintf(stderr, "peer_chain_recovery: parent directory sync failed for %s: %s\n",
+                destination,
+                strerror(synced != 0 && sync_error != EINVAL ? sync_error : close_error));
+    return ok;
+}
+#endif
+
 static bool recovery_publish(const char *temporary, const char *destination,
                              bool *temporary_created, bool *published)
 {
+    if (!recovery_sync_temporary(temporary)) return false;
 #if defined(_WIN32)
     wchar_t from[32768], to[32768];
     bool ok = platform_windows_wide_path(temporary, from) &&
@@ -489,9 +583,10 @@ static bool recovery_publish(const char *temporary, const char *destination,
             fprintf(stderr, "peer_chain_recovery: published %s; temporary unlink needs cleanup: %s\n",
                     destination, strerror(errno));
         }
+        ok = recovery_sync_parent(destination);
     }
 #endif
-    if (!ok)
+    if (!ok && !*published)
         fprintf(stderr, "peer_chain_recovery: no-replace publication failed for %s\n",
                 destination);
     return ok;
