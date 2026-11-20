@@ -14803,7 +14803,7 @@ DEP_AUDIT_INCLUDES = -Iplatform/modules/base/include \
     -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: dep-audit
 dep-audit: $(DEP_AUDIT_BIN)
-$(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS) $(SPAWN_BINARY_HEADERS)
+$(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS) $(SPAWN_BINARY_HEADERS) platform/modules/platform/include/platform/environment_compat.h
 	@mkdir -p $(dir $@)
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \

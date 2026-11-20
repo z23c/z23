@@ -23,6 +23,7 @@
 
 #include "base/safe_alloc.h"
 #include "platform/clock.h"
+#include "platform/environment_compat.h"
 #include "util/spawn.h"
 
 #include <limits.h>
@@ -660,7 +661,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "dep_audit: working directory is not resolvable\n");
         return 1;
     }
-    if (setenv("VENDOR_PROVENANCE_QUIET", "1", 1) != 0) {
+    if (platform_environment_set("VENDOR_PROVENANCE_QUIET", "1", 1) != 0) {
         fprintf(stderr, "dep_audit: cannot set VENDOR_PROVENANCE_QUIET\n");
         return 1;
     }
