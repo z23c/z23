@@ -3034,6 +3034,63 @@ static int wcr_history_errors(void)
     return failures;
 }
 
+struct wcr_count_fault {
+    bool pending;
+    int fired;
+};
+
+static int wcr_count_fault_progress(void *ctx)
+{
+    struct wcr_count_fault *fault = ctx;
+    if (!fault->pending) return 0;
+    fault->pending = false;
+    fault->fired++;
+    return 1;
+}
+
+static int wcr_count_fault_trace(unsigned type, void *ctx, void *stmt, void *sql)
+{
+    (void)stmt;
+    struct wcr_count_fault *fault = ctx;
+    const char *text = sql;
+    if (type == SQLITE_TRACE_STMT && text && strstr(text, "FROM wallet_keys") &&
+        (strstr(text, "COUNT(") || strstr(text, "count(")))
+        fault->pending = true;
+    return 0;
+}
+
+static void wcr_count_fault_hook(sqlite3 *db, bool address_phase, void *ctx)
+{
+    if (!address_phase) return;
+    sqlite3_progress_handler(db, 1, wcr_count_fault_progress, ctx);
+    (void)sqlite3_trace_v2(db, SQLITE_TRACE_STMT, wcr_count_fault_trace, ctx);
+}
+
+static int wcr_postcount_failure(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wallet_recovery_report report = {0};
+    struct wcr_count_fault fault = {0};
+    bool fixture = wcr_history_chain(dir, sizeof(dir), "postcount_failure");
+    struct wallet_recovery_request req = {
+        .datadir = dir, .phrase = WCR_RESTORE_PHRASE, .dry_run = false,
+    };
+    wallet_lock_reset_for_test();
+    setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+    wallet_recovery_test_history_hook(wcr_count_fault_hook, &fault);
+    struct zcl_result result = fixture ? wallet_recovery_run(&req, &report) : ZCL_ERR(-1, "fixture setup");
+    wallet_recovery_test_history_hook(NULL, NULL);
+    unsetenv("ZCL_ALLOW_PLAINTEXT_WALLET");
+    bool intact = fixture && wcr_history_wallet_empty(dir);
+    printf("    postcount fault: fired=%d result=%d code=%d installed=%d intact=%d message=%s\n",
+           fault.fired, result.ok, result.code, report.seed_installed, intact, result.message);
+    WCR_CHECK("key count read failure refuses before the recovery commit",
+              fixture && fault.fired == 1 && !result.ok && result.code == -66 &&
+              strstr(result.message, "key count") && !report.seed_installed && intact);
+    return failures;
+}
+
 /* An at-tip restore asks no history and derives the offline floor. */
 static int restore_tip_reads_no_history(void)
 {
@@ -3941,6 +3998,7 @@ int test_wallet_create(void)
     failures += t_restore_at_local_tip();
     failures += t_scan_positive_control();
     failures += wcr_history_errors();
+    failures += wcr_postcount_failure();
     failures += t_unsynced_create();
     checkpoints_reset_sha3_override_for_test();
     if (failures == 0)

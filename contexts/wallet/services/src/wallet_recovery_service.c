@@ -1303,11 +1303,14 @@ static struct zcl_result wrc_rebuild_and_flush(
 
     /* One writer: the encryption-aware wallet_sqlite layer, in one
      * transaction, exactly as boot flushes a freshly minted keypool. */
-    struct zcl_result fr = wallet_sqlite_flush_r(&st->ws, w);
-    if (!fr.ok)
-        return ZCL_ERR(-65, "could not save the recovered wallet: %s",
-                       fr.message);
-    out->keys_after = db_wallet_key_count(&st->ndb);
+    int64_t keys_after = 0;
+    struct zcl_result fr = wallet_sqlite_flush_counted_r(&st->ws, w, &keys_after);
+    if (!fr.ok) {
+        if (fr.code == WSQL_READ_FAIL)
+            return ZCL_ERR(-66, "could not read wallet key count; recovery was not committed");
+        return ZCL_ERR(-65, "could not save the recovered wallet: %s", fr.message);
+    }
+    out->keys_after = keys_after;
     out->seed_installed = true;
     wrc_record_birthday(req, &st->ndb, w, local_creation, out);
     node_db_wal_checkpoint(&st->ndb);
