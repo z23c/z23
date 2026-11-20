@@ -19,6 +19,7 @@
 #include "controllers/vault_intent_controller.h"
 #include "base/hex.h"
 #include "core/core_io.h"
+#include "encoding/utilstrencodings.h"
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
 #include "keys/key_io.h"
@@ -427,6 +428,19 @@ static bool rpc_safety_stub_load_header(int height, const uint8_t hash[32],
 
 static const struct node_db_runtime_port rpc_safety_header_port = {
     .load_header_by_hash_height = rpc_safety_stub_load_header,
+};
+
+static const struct block_header *rs_raw_header;
+static bool rs_raw_header_load(int height, const uint8_t hash[32],
+                               struct block_header *out)
+{
+    (void)height; (void)hash;
+    if (!rs_raw_header) return false;
+    *out = *rs_raw_header;
+    return true;
+}
+static const struct node_db_runtime_port rs_raw_header_port = {
+    .load_header_by_hash_height = rs_raw_header_load,
 };
 
 static bool rpc_safety_build_chain(struct main_state *ms,
@@ -1085,6 +1099,8 @@ static void rs_rawtx_build_block(struct rs_rawtx_fx *fx)
     fx->body.header.nVersion = 4;
     fx->body.header.nTime = 1700000000;
     fx->body.header.nBits = 0x2000ffff;
+    fx->body.header.nSolutionSize = MAX_SOLUTION_SIZE;
+    memset(fx->body.header.nSolution, 0x5a, MAX_SOLUTION_SIZE);
     if (fx->ok) {
         fx->body.vtx = zcl_calloc(1, sizeof(*fx->body.vtx),
                                   "rpc_safety.rawtx_block");
@@ -1351,6 +1367,79 @@ static void rs_rawtx_verbose_cases(struct rs_rawtx_fx *fx)
     reducer_frontier_provable_tip_reset();
 }
 
+enum rs_header_case {
+    HEADER_DEFAULT, HEADER_VERBOSE, HEADER_DISK, HEADER_NUMERIC,
+    HEADER_PORT, HEADER_BAD_PORT_DISK, HEADER_ABOVE_TIP,
+    HEADER_BAD_PORT_NO_DISK, HEADER_NULL, HEADER_CASE_COUNT
+};
+
+static bool rs_rawtx_header_result(enum rs_header_case i, bool called,
+                                   const struct json_value *result,
+                                   const char *expected)
+{
+    if (i == HEADER_DEFAULT || i == HEADER_VERBOSE)
+        return called && result->type == JSON_OBJ;
+    if (i == HEADER_NUMERIC || i == HEADER_ABOVE_TIP ||
+        i == HEADER_BAD_PORT_NO_DISK || i == HEADER_NULL) return !called;
+    return called && result->type == JSON_STR &&
+           strcmp(json_get_str(result), expected) == 0;
+}
+
+static bool rs_rawtx_header_case(struct rs_rawtx_fx *fx, enum rs_header_case i,
+                                 const char *expected)
+{
+    struct json_value params, arg, result;
+    json_init(&params); json_set_array(&params);
+    json_init(&arg); json_set_str(&arg, fx->block_hex);
+    (void)json_push_back(&params, &arg);
+    if (i != HEADER_DEFAULT) {
+        if (i == HEADER_NUMERIC) json_set_int(&arg, 0);
+        else if (i == HEADER_NULL) json_set_null(&arg);
+        else json_set_bool(&arg, i == HEADER_VERBOSE);
+        (void)json_push_back(&params, &arg);
+    }
+    rs_raw_header = i == HEADER_PORT ? &fx->body.header : NULL;
+    node_db_runtime_port_set(i == HEADER_PORT ? &rs_raw_header_port :
+        (i == HEADER_BAD_PORT_DISK || i == HEADER_BAD_PORT_NO_DISK)
+            ? &rpc_safety_header_port : NULL);
+    json_init(&result);
+    bool called = rpc_table_execute(&fx->tbl, "getblockheader", &params, &result);
+    bool ok = rs_rawtx_header_result(i, called, &result, expected);
+    static const char *const names[] = {
+        "default", "verbose", "disk", "numeric", "verified port",
+        "mismatched port with disk", "above tip", "mismatched port without disk", "null"
+    };
+    if (!ok) printf("header case %s failed (called=%d type=%d) ", names[i], called, result.type);
+    json_free(&result); json_free(&arg); json_free(&params);
+    return ok;
+}
+
+static void rs_rawtx_header_cases(struct rs_rawtx_fx *fx)
+{
+    struct byte_stream wire;
+    stream_init(&wire, 256);
+    fx->ok = fx->ok && block_header_serialize(&fx->body.header, &wire);
+    char expected[4096];
+    HexStr(wire.data, wire.size, false, expected, sizeof(expected));
+    reducer_frontier_provable_tip_set(0);
+    struct block_index *bi = block_map_find(&fx->ms.map_block_index, &fx->body_hash);
+    unsigned saved_status = bi ? bi->nStatus : 0;
+    for (enum rs_header_case i = HEADER_DEFAULT; i < HEADER_CASE_COUNT; i++) {
+        if (bi) {
+            bi->nHeight = i == HEADER_ABOVE_TIP ? 1 : 0;
+            bi->nStatus = saved_status;
+            if (i == HEADER_PORT || i == HEADER_BAD_PORT_NO_DISK)
+                bi->nStatus &= ~BLOCK_HAVE_DATA;
+        }
+        fx->ok = rs_rawtx_header_case(fx, i, expected) && fx->ok;
+    }
+    if (bi) bi->nStatus = saved_status;
+    node_db_runtime_port_set(NULL);
+    rs_raw_header = NULL;
+    reducer_frontier_provable_tip_reset();
+    stream_free(&wire);
+}
+
 static void rs_rawtx_cleanup(struct rs_rawtx_fx *fx)
 {
     wallet_rpc_context_set_node_db(NULL);
@@ -1385,6 +1474,7 @@ static int rs_case_rawtx_locator(void)
     rs_rawtx_no_indexes(&fx);
     rs_rawtx_block_txids(&fx);
     rs_rawtx_verbose_cases(&fx);
+    rs_rawtx_header_cases(&fx);
     rs_rawtx_cleanup(&fx);
 
     if (fx.ok) printf("OK\n");

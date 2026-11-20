@@ -325,6 +325,52 @@ void block_header_to_json(const struct block_index *bi,
     }
 }
 
+static bool rpc_header_matches(const struct block_header *header,
+                               const struct uint256 *expected)
+{
+    if (header->nSolutionSize > MAX_SOLUTION_SIZE) return false;
+    struct uint256 actual;
+    block_header_get_hash(header, &actual);
+    return uint256_eq(&actual, expected);
+}
+
+static bool rpc_raw_header(struct blockchain_context *ctx,
+                           const struct block_index *bi,
+                           struct json_value *result)
+{
+    struct block_header header;
+    block_header_init(&header);
+    bool found = bi->phashBlock && node_db_runtime_load_header_by_hash_height(
+        bi->nHeight, bi->phashBlock->data, &header) &&
+        rpc_header_matches(&header, bi->phashBlock);
+    if (!found && bi->phashBlock && ctx->datadir) {
+        struct block block;
+        block_init(&block);
+        if (read_block_from_disk_index(&block, bi, ctx->datadir) &&
+            rpc_header_matches(&block.header, bi->phashBlock)) {
+            header = block.header;
+            found = true;
+        }
+        block_free(&block);
+    }
+    if (!found) {
+        json_set_str(result, "Block header unavailable");
+        LOG_FAIL("blockchain", "getblockheader: verified header unavailable at height %d", bi->nHeight);
+    }
+    unsigned char bytes[BLOCK_HEADER_SIZE + 3 + MAX_SOLUTION_SIZE];
+    struct byte_stream wire = { .data = bytes, .capacity = sizeof(bytes) };
+    if (!block_header_serialize(&header, &wire)) {
+        json_set_str(result, "Block header serialization failed");
+        LOG_FAIL("blockchain", "getblockheader: serialization failed at height %d", bi->nHeight);
+    }
+    char hex[2 * sizeof(bytes) + 1];
+    HexStr(bytes, wire.size, false, hex, sizeof(hex));
+    json_set_str(result, hex);
+    if (result->type != JSON_STR)
+        LOG_FAIL("blockchain", "getblockheader: raw response allocation failed at height %d", bi->nHeight);
+    return true;
+}
+
 bool rpc_getblockheader(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -336,6 +382,14 @@ bool rpc_getblockheader(const struct json_value *params, bool help,
     rpc_params_init(&p, params);
     rpc_params_expect(&p, 1, 2);
     const char *hash_str = rpc_require_str(&p, 0, "hash");
+    bool verbose = true;
+    if (p.valid && json_size(params) > 1) {
+        const struct json_value *v = json_at(params, 1);
+        if (v->type != JSON_BOOL)
+            rpc_params_set_error(&p, "Parameter verbose must be boolean");
+        else
+            verbose = json_get_bool(v);
+    }
     if (rpc_params_invalid(&p)) {
         rpc_params_error(&p, result);
         LOG_FAIL("blockchain", "getblockheader: invalid params");
@@ -360,6 +414,8 @@ bool rpc_getblockheader(const struct json_value *params, bool help,
                  hash_str, bi->nHeight, hstar);
     }
 
+    if (!verbose)
+        return rpc_raw_header(ctx, bi, result);
     block_header_to_json(bi, result);
     return true;
 }
