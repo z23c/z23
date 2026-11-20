@@ -112,57 +112,67 @@ enum wallet_passphrase_check wallet_sqlite_check_passphrase(
 
 /* ── Sapling seed & keys ───────────────────────────────────────── */
 
-bool wallet_sqlite_write_sapling_seed(struct wallet_sqlite *ws,
-                                        const uint8_t seed[32])
+static enum wallet_seed_state wsql_seed_fetch(struct wallet_sqlite *ws,
+                                              uint8_t blob[512], size_t *blob_len,
+                                              int *storage_type);
+static enum wallet_seed_state wsql_seed_classify(const uint8_t *blob,
+                                                 size_t blob_len, uint8_t *seed);
+
+static int wsql_bind_seed_expected(sqlite3_stmt *stmt, int index, int type,
+                                   const uint8_t *blob, size_t len)
 {
-    if (!ws || !ws->open)
-        LOG_FAIL("wallet_sqlite", "write_sapling_seed: not open");
+    if (type == SQLITE_NULL) return sqlite3_bind_null(stmt, index);
+    if (type == SQLITE_TEXT)
+        return sqlite3_bind_text(stmt, index, (const char *)blob, (int)len, SQLITE_TRANSIENT);
+    if (type == SQLITE_BLOB)
+        return sqlite3_bind_blob(stmt, index, blob, (int)len, SQLITE_TRANSIENT);
+    return SQLITE_MISMATCH;
+}
 
-    /* Never replace a stored seed with a different one. A seed this process
-     * did not read back (locked, damaged, unreadable) is treated as present. */
-    uint8_t stored[32];
-    enum wallet_seed_state stored_state =
-        wallet_sqlite_sapling_seed_state(ws, stored);
-    bool same = (stored_state == WALLET_SEED_PLAINTEXT ||
-                 stored_state == WALLET_SEED_UNLOCKED) &&
-                memcmp(stored, seed, 32) == 0;
-    memory_cleanse(stored, sizeof(stored));
-    if (stored_state != WALLET_SEED_ABSENT && !same)
-        LOG_FAIL("wallet_sqlite", "write_sapling_seed: refused, a different "
-                 "seed is already stored (state %d)", (int)stored_state);
-
-    int next_child = 0;
-    sqlite3_reset(ws->stmt_seed_read);
-    if (AR_STEP_ROW_READONLY(ws->stmt_seed_read) == SQLITE_ROW)
-        next_child = sqlite3_column_int(ws->stmt_seed_read, 1);
-    /* Release the cursor immediately. A cached SELECT left parked on
-     * SQLITE_ROW keeps an implicit read transaction (WAL snapshot) open on
-     * this shared connection; every later write on the same handle (wallet
-     * flush, node_db state_set, catchup) then fails forever with
-     * SQLITE_BUSY_SNAPSHOT ("database is locked"). See node_db lock-holder
-     * fix. */
-    sqlite3_reset(ws->stmt_seed_read);
-
-    uint8_t *enc_blob = NULL;
+bool wallet_sqlite_write_sapling_seed(struct wallet_sqlite *ws,
+                                      const uint8_t seed[32])
+{
+    if (!ws || !ws->open || !seed)
+        LOG_FAIL("wallet_sqlite", "write_sapling_seed: invalid input");
+    uint8_t observed[512] = {0}, plain[32] = {0};
+    size_t observed_len = 0;
+    int observed_type = SQLITE_NULL;
+    enum wallet_seed_state state = wsql_seed_fetch(ws, observed, &observed_len,
+                                                    &observed_type);
+    if (state == WALLET_SEED_PLAINTEXT)
+        state = wsql_seed_classify(observed, observed_len, plain);
+    bool same = (state == WALLET_SEED_PLAINTEXT || state == WALLET_SEED_UNLOCKED) &&
+                memcmp(plain, seed, sizeof(plain)) == 0;
+    memory_cleanse(plain, sizeof(plain));
+    if (state != WALLET_SEED_ABSENT && !same) {
+        memory_cleanse(observed, sizeof(observed));
+        LOG_FAIL("wallet_sqlite", "write_sapling_seed: refused, stored seed unavailable or different");
+    }
+    uint8_t *enc = NULL;
     size_t enc_len = 0;
-    bool encrypted = wsql_encrypt_blob(seed, 32, &enc_blob, &enc_len);
-    if (!encrypted && wsql_plaintext_forbidden())
-        LOG_FAIL("wallet_sqlite", "write_sapling_seed: refused, the wallet is "
-                 "encrypted at rest and locked; plaintext seed not written");
-
-    sqlite3_reset(ws->stmt_seed_write);
-    if (encrypted)
-        sqlite3_bind_blob(ws->stmt_seed_write, 1,
-                          enc_blob, (int)enc_len, SQLITE_TRANSIENT);
-    else
-        sqlite3_bind_blob(ws->stmt_seed_write, 1, seed, 32, SQLITE_STATIC);
-    sqlite3_bind_int(ws->stmt_seed_write, 2, next_child);
-
-    bool ok = AR_STEP_WRITE(ws->stmt_seed_write) == SQLITE_DONE;
-    if (enc_blob) { memory_cleanse(enc_blob, enc_len); free(enc_blob); }
-    if (!ok)
-        LOG_FAIL("wallet_sqlite", "write_sapling_seed: step failed: %s",
-                 sqlite3_errmsg(ws->db));
+    bool encrypted = wsql_encrypt_blob(seed, 32, &enc, &enc_len);
+    if (!encrypted && wsql_plaintext_forbidden()) {
+        memory_cleanse(observed, sizeof(observed));
+        LOG_FAIL("wallet_sqlite", "write_sapling_seed: refused, wallet locked");
+    }
+    sqlite3_stmt *stmt = ws->stmt_seed_write;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    int rc = sqlite3_bind_blob(stmt, 1, encrypted ? enc : seed,
+                               encrypted ? (int)enc_len : 32, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK)
+        rc = wsql_bind_seed_expected(stmt, 2, observed_type, observed, observed_len);
+    if (rc == SQLITE_OK) rc = AR_STEP_WRITE(stmt);
+    bool matched = rc == SQLITE_ROW;
+    if (matched) rc = AR_STEP_WRITE(stmt);
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    memory_cleanse(observed, sizeof(observed));
+    if (enc) { memory_cleanse(enc, enc_len); free(enc); }
+    if (rc != SQLITE_DONE)
+        LOG_FAIL("wallet_sqlite", "write_sapling_seed: write failed rc=%d", rc);
+    if (!matched)
+        LOG_FAIL("wallet_sqlite", "write_sapling_seed: stored seed changed during write");
     return true;
 }
 
@@ -180,11 +190,14 @@ bool wallet_sqlite_write_sapling_seed(struct wallet_sqlite *ws,
  * row was copied out". */
 static enum wallet_seed_state wsql_seed_fetch(struct wallet_sqlite *ws,
                                               uint8_t blob[512],
-                                              size_t *blob_len)
+                                              size_t *blob_len, int *storage_type)
 {
     *blob_len = 0;
+    if (storage_type) *storage_type = SQLITE_NULL;
     sqlite3_reset(ws->stmt_seed_read);
     int rc = AR_STEP_ROW_READONLY(ws->stmt_seed_read);
+    if (rc == SQLITE_ROW && storage_type)
+        *storage_type = sqlite3_column_type(ws->stmt_seed_read, 0);
     int len = rc == SQLITE_ROW ? sqlite3_column_bytes(ws->stmt_seed_read, 0) : 0;
     const void *data = len > 0 ? sqlite3_column_blob(ws->stmt_seed_read, 0)
                                : NULL;
@@ -234,7 +247,7 @@ enum wallet_seed_state wallet_sqlite_sapling_seed_state(
     if (!ws || !ws->open) return WALLET_SEED_UNREADABLE;
     uint8_t blob[512];
     size_t blob_len = 0;
-    enum wallet_seed_state st = wsql_seed_fetch(ws, blob, &blob_len);
+    enum wallet_seed_state st = wsql_seed_fetch(ws, blob, &blob_len, NULL);
     if (st == WALLET_SEED_PLAINTEXT)
         st = wsql_seed_classify(blob, blob_len, seed);
     memory_cleanse(blob, sizeof(blob));
@@ -246,7 +259,7 @@ bool wsql_sapling_seed_row_exists(struct wallet_sqlite *ws)
     if (!ws || !ws->open) return false;
     uint8_t blob[512];
     size_t blob_len = 0;
-    enum wallet_seed_state st = wsql_seed_fetch(ws, blob, &blob_len);
+    enum wallet_seed_state st = wsql_seed_fetch(ws, blob, &blob_len, NULL);
     memory_cleanse(blob, sizeof(blob));
     return st == WALLET_SEED_PLAINTEXT || st == WALLET_SEED_MALFORMED;
 }

@@ -884,11 +884,165 @@ static int test_boot_opens_node_db_before_wallet(void)
     return failures;
 }
 
+struct seed_race { struct wallet_sqlite *ws; sqlite3 *other; const char *sql; int rc; bool fired; };
+static int seed_race_trace(unsigned kind, void *ctx, void *stmt, void *unused)
+{
+    (void)unused;
+    struct seed_race *r = ctx;
+    if (kind == SQLITE_TRACE_STMT && stmt == r->ws->stmt_seed_write && !r->fired) {
+        r->fired = true;
+        r->rc = sqlite3_exec(r->other, r->sql, NULL, NULL, NULL);
+    }
+    return 0;
+}
+
+static int test_seed_counter_race(bool create)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    sqlite3 *db = NULL, *other = NULL;
+    sqlite3_stmt *s = NULL;
+    struct wallet_sqlite ws = {0};
+    TEST(create ? "wallet seed: competing creator cannot be replaced" :
+                  "wallet seed: concurrent counter progression is preserved") {
+        clear_passphrase();
+        char path[320];
+        test_make_tmpdir(dir, sizeof(dir), "wallet_persistence", create ? "seed-create" : "seed-counter");
+        snprintf(path, sizeof(path), "%s/wallet.db", dir);
+        db = open_fixture_db(path, true);
+        ASSERT(db != NULL);
+        ASSERT(sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_open(path, &other) == SQLITE_OK);
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+        uint8_t seed[32] = {0};
+        if (!create) {
+            ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+            ASSERT(sqlite3_exec(db, "UPDATE wallet_seed SET next_child=123 WHERE id=1", NULL, NULL, NULL) == SQLITE_OK);
+        }
+        struct seed_race race = { .ws = &ws, .other = other, .rc = -1,
+            .sql = create ? "INSERT INTO wallet_seed VALUES(1,CAST(zeroblob(31)||x'01' AS BLOB),777)" :
+                            "UPDATE wallet_seed SET next_child=777 WHERE id=1" };
+        ASSERT(sqlite3_trace_v2(db, SQLITE_TRACE_STMT, seed_race_trace, &race) == SQLITE_OK);
+        bool wrote = wallet_sqlite_write_sapling_seed(&ws, seed);
+        sqlite3_trace_v2(db, 0, NULL, NULL);
+        ASSERT(race.fired && race.rc == SQLITE_OK);
+        if (create) ASSERT(!wrote);
+        else if (!wrote) ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        ASSERT(sqlite3_prepare_v2(other, "SELECT seed,next_child FROM wallet_seed WHERE id=1", -1, &s, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_step(s) == SQLITE_ROW);
+        ASSERT_EQ(sqlite3_column_int64(s, 1), 777);
+        const uint8_t *saved = sqlite3_column_blob(s, 0);
+        uint8_t expected[32] = {0};
+        if (create) expected[31] = 1;
+        ASSERT(saved && sqlite3_column_bytes(s, 0) == 32);
+        ASSERT(memcmp(saved, expected, sizeof(expected)) == 0);
+        PASS();
+    } _test_next:;
+    if (db) sqlite3_trace_v2(db, 0, NULL, NULL);
+    if (s) sqlite3_finalize(s);
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (other) sqlite3_close(other);
+    if (db) sqlite3_close(db);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_seed_removed_race(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    sqlite3 *db = NULL, *other = NULL;
+    struct wallet_sqlite ws = {0};
+    TEST("wallet seed: a removed seed is not recreated by a stale writer") {
+        clear_passphrase();
+        char path[320];
+        test_make_tmpdir(dir, sizeof(dir), "wallet_persistence", "seed-removed");
+        snprintf(path, sizeof(path), "%s/wallet.db", dir);
+        db = open_fixture_db(path, true);
+        ASSERT(db);
+        ASSERT(sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_open(path, &other) == SQLITE_OK);
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+        uint8_t seed[32] = {0};
+        ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        struct seed_race race = { .ws = &ws, .other = other, .rc = -1,
+                                  .sql = "DELETE FROM wallet_seed WHERE id=1" };
+        ASSERT(sqlite3_trace_v2(db, SQLITE_TRACE_STMT, seed_race_trace, &race) == SQLITE_OK);
+        bool wrote = wallet_sqlite_write_sapling_seed(&ws, seed);
+        sqlite3_trace_v2(db, 0, NULL, NULL);
+        ASSERT(race.fired && race.rc == SQLITE_OK && !wrote);
+        ASSERT(wallet_sqlite_sapling_seed_state(&ws, NULL) == WALLET_SEED_ABSENT);
+        PASS();
+    } _test_next:;
+    if (db) sqlite3_trace_v2(db, 0, NULL, NULL);
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (other) sqlite3_close(other);
+    if (db) sqlite3_close(db);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_seed_legacy_text(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    struct wallet_sqlite ws = {0};
+    TEST("wallet seed: an existing text-stored seed keeps its counter") {
+        clear_passphrase();
+        db = open_fixture_db(":memory:", true);
+        ASSERT(db);
+        ASSERT(sqlite3_exec(db, "INSERT INTO wallet_seed VALUES(1,CAST(zeroblob(32) AS TEXT),123)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+        uint8_t seed[32] = {0};
+        ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        sqlite3_stmt *s = NULL;
+        ASSERT(sqlite3_prepare_v2(db, "SELECT next_child FROM wallet_seed WHERE id=1", -1, &s, NULL) == SQLITE_OK);
+        int step = sqlite3_step(s);
+        sqlite3_int64 counter = step == SQLITE_ROW ? sqlite3_column_int64(s, 0) : -1;
+        sqlite3_finalize(s);
+        ASSERT(step == SQLITE_ROW && counter == 123);
+        PASS();
+    } _test_next:;
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (db) sqlite3_close(db);
+    return failures;
+}
+
+static int test_seed_nested_rollback(void)
+{
+    int failures = 0;
+    TEST("wallet seed: nested rollback does not commit seed or counter") {
+        clear_passphrase();
+        sqlite3 *db = open_fixture_db(":memory:", true);
+        ASSERT(db);
+        struct wallet_sqlite ws;
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+        uint8_t seed[32] = {0};
+        ASSERT(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        ASSERT(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_sapling_seed_state(&ws, NULL) == WALLET_SEED_ABSENT);
+        ASSERT(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
+        ASSERT(sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_sapling_seed_state(&ws, NULL) == WALLET_SEED_PLAINTEXT);
+        wallet_sqlite_close(&ws);
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int wallet_db_seed_retirement_cases(void);
 
 int test_wallet_persistence_cycle(void)
 {
     int failures = wallet_db_seed_retirement_cases();
+    failures += test_seed_counter_race(false);
+    failures += test_seed_counter_race(true);
+    failures += test_seed_removed_race();
+    failures += test_seed_legacy_text();
+    failures += test_seed_nested_rollback();
     failures += test_boot_opens_node_db_before_wallet();
     failures += test_open_empty_schema_ok();
     failures += test_self_test_passes();

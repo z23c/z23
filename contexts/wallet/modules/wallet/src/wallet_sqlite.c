@@ -365,8 +365,11 @@ struct zcl_result wallet_sqlite_open_r(struct wallet_sqlite *ws, sqlite3 *db)
           " FROM wallet_transactions",
           "wallet_transactions", "tx_read" },
         { &ws->stmt_seed_write,
-          "INSERT OR REPLACE INTO wallet_seed(id, seed, next_child)"
-          " VALUES(1, ?, ?)",
+          "INSERT INTO wallet_seed(id,seed,next_child) "
+          "SELECT 1,?1,0 WHERE ?2 IS NULL OR EXISTS("
+          "SELECT 1 FROM wallet_seed WHERE id=1 AND seed IS ?2) "
+          "ON CONFLICT(id) DO UPDATE SET seed=excluded.seed "
+          "WHERE wallet_seed.seed IS ?2 RETURNING id",
           "wallet_seed", "seed_write" },
         { &ws->stmt_seed_read,
           "SELECT seed, next_child FROM wallet_seed WHERE id=1",
