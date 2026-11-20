@@ -41,9 +41,13 @@ static void tlw_update(void *context, const struct zcl_present_window_event_v1 *
 {
     struct task_list_window *window = context;
     struct task_list *list = &window->list;
-    struct zcl_result result = task_list_poll(list);
+    bool update_action = event->outcome == ZCL_PRESENT_WINDOW_ACTION &&
+        list->updates && list->update;
+    struct zcl_result result = update_action ?
+        task_list_action(list, event->action_index) : task_list_poll(list);
     if (result.ok && event->outcome == ZCL_PRESENT_WINDOW_ACTION)
-        result = task_list_action(list, event->action_index);
+        result = update_action ? task_list_poll(list) :
+            task_list_action(list, event->action_index);
     else if (close_requested && event->outcome != ZCL_PRESENT_WINDOW_ACTION)
         list->closing = true;
     if (!result.ok) {
@@ -61,6 +65,21 @@ static void tlw_update(void *context, const struct zcl_present_window_event_v1 *
         list->repaint = false;
     }
 }
+
+#ifdef ZCL_TESTING
+struct zcl_result zcl_test_task_list_window_action(struct task_list *list, uint32_t action)
+{
+    struct task_list_window window = { .list = *list, .display = ZCL_OK };
+    const struct zcl_present_window_event_v1 event = {
+        .outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = action
+    };
+    bool redraw = false, allow_close = false;
+    tlw_update(&window, &event, false, &redraw, &allow_close);
+    *list = window.list;
+    zcl_present_model_bitmap_free_v1(&window.bitmap);
+    return window.display;
+}
+#endif
 
 static struct zcl_result tlw_run(struct task_list_window *window)
 {

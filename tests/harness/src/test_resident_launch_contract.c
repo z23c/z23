@@ -1028,9 +1028,56 @@ static int rlc_task_focus(struct task_list *list)
     return failures;
 }
 
+extern bool zcl_test_task_update_completed(struct task_update *update);
+extern struct zcl_result zcl_test_task_list_window_action(struct task_list *list, uint32_t action);
+
+static int rlc_task_cancel_completed(struct task_update *update, struct task_list *list)
+{
+    int failures = 0;
+    RLC_CHECK("task updates: second preview starts for completion race",
+        task_list_action(list, 0).ok && task_list_action(list, 0).ok && update->pending);
+    int64_t deadline = platform_time_monotonic_us() + INT64_C(180000000);
+    while (!zcl_test_task_update_completed(update) && platform_time_monotonic_us() < deadline) {
+        const struct timespec tick = { 0, 1000000 };
+        (void)nanosleep(&tick, NULL);
+    }
+    struct zcl_present_model_v1 model;
+    RLC_CHECK("task updates: completed worker still displays Cancel preview",
+        zcl_test_task_update_completed(update) && task_list_model(list, &model).ok &&
+        strcmp(model.actions[0].label, "Cancel preview") == 0);
+    return failures;
+}
+
+static int rlc_task_cancel_race(struct task_update *update, struct task_editor *editor,
+    struct task_list *list, const struct package_resident_identity *candidate)
+{
+    int failures = 0;
+    update->candidate = *candidate;
+    struct package_resident_store store = {0};
+    struct package_resident_record before, after;
+    struct task_document expected = editor->saved, observed;
+    RLC_CHECK("task updates: cancel race fixture reads working program",
+        package_resident_store_open_app(&store, editor->directory, editor->app).ok &&
+        package_resident_record_read(&store, &before).ok);
+    failures += rlc_task_cancel_completed(update, list);
+    RLC_CHECK("task updates: rendered Cancel cannot become Keep after completion",
+        zcl_test_task_list_window_action(list, 0).ok && !update->pending && !update->ready &&
+        update->phase == TASK_UPDATE_CANCELLED && strstr(update->message, "Preview cancelled") &&
+        package_resident_record_read(&store, &after).ok &&
+        package_resident_identity_equal(&before.current, &after.current) &&
+        task_document_read(&store, &observed).ok && rlc_task_equal(&observed, &expected));
+    if (update->pending || update->ready) {
+        task_update_cancel(update);
+        (void)rlc_task_wait(update);
+    }
+    RLC_CHECK("task updates: cancel race fixture closes", package_resident_store_close(&store).ok);
+    return failures;
+}
+
 static int rlc_task_panel(struct task_update *update, struct task_editor *editor)
 {
     int failures = 0;
+    const struct package_resident_identity candidate = update->candidate;
     struct task_list list;
     task_list_init(&list, editor);
     list.update = update;
@@ -1047,6 +1094,7 @@ static int rlc_task_panel(struct task_update *update, struct task_editor *editor
     failures += rlc_task_typing(editor);
     RLC_CHECK("task updates: preview completes separately", rlc_task_wait(update));
     RLC_CHECK("task updates: discard never changes live contents", task_list_action(&list, 1).ok && !update->ready);
+    failures += rlc_task_cancel_race(update, editor, &list, &candidate);
     return failures;
 }
 

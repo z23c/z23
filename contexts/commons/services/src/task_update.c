@@ -485,6 +485,11 @@ static struct zcl_result tu_kept(struct task_update *update, const struct task_u
     return result;
 }
 
+static bool tu_switches_program(const struct task_update_job *job)
+{
+    return job->keep || job->go_back || job->refresh;
+}
+
 struct zcl_result task_update_poll(struct task_update *update, bool *changed)
 {
     if (!update || !changed) return ZCL_ERR(-1, "Task update owner and changed output required.");
@@ -500,8 +505,12 @@ struct zcl_result task_update_poll(struct task_update *update, bool *changed)
     update->confined_us = job->confined_us;
     memcpy(update->step_us, job->step_us, sizeof(update->step_us));
     struct zcl_result result = job->result;
-    if (result.ok && (job->keep || job->go_back || job->refresh)) {
+    if (result.ok && tu_switches_program(job)) {
         result = tu_kept(update, job);
+    } else if (result.ok && atomic_load_explicit(&job->cancelled, memory_order_relaxed)) {
+        update->phase = TASK_UPDATE_CANCELLED;
+        (void)snprintf(update->message, sizeof(update->message),
+            "Preview cancelled. Working version and data retained.");
     } else if (result.ok) {
         (void)snprintf(update->preview, sizeof(update->preview), "%s", job->view);
         update->phase = TASK_UPDATE_READY;
@@ -515,6 +524,14 @@ struct zcl_result task_update_poll(struct task_update *update, bool *changed)
     if (update->ready != job) free(job);
     return result;
 }
+
+#ifdef ZCL_TESTING
+bool zcl_test_task_update_completed(struct task_update *update)
+{
+    return update && update->pending &&
+        atomic_load_explicit(&update->pending->completed, memory_order_acquire);
+}
+#endif
 
 struct zcl_result task_update_finish(struct task_update *update)
 {
