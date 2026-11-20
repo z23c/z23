@@ -1214,15 +1214,17 @@ static int bil_flat_scrambled_height_case(void)
         struct main_state ms;
         main_state_init(&ms);
 
-        /* Ghost parent: a hash P points at that is not inserted. */
-        struct uint256 ghost_hash = make_test_hash(900);
+        struct uint256 p_hash = make_test_hash(10);
+        struct uint256 c_hash = make_test_hash(11);
+        /* C is saved immediately before P. Its first 31 hash bytes match
+         * P's missing ghost parent; the final byte must still distinguish it. */
+        struct uint256 ghost_hash = c_hash;
+        ghost_hash.data[31] ^= 1;
         struct block_index ghost;
         block_index_init(&ghost);
         ghost.hashBlock = ghost_hash;
         ghost.phashBlock = &ghost.hashBlock;
 
-        struct uint256 p_hash = make_test_hash(10);
-        struct uint256 c_hash = make_test_hash(11);
         struct block_index *P = chainstate_insert_block_index(
             (struct chainstate *)&ms, &p_hash);
         struct block_index *C = chainstate_insert_block_index(
@@ -3436,6 +3438,44 @@ static int bil_flat_private_identity_case(const char *dir)
     return failures;
 }
 
+/* The first flat row duplicates a resident parent. Its arena slot is not
+ * admitted, so the following child must resolve the resident map entry. */
+static int bil_flat_resident_parent_case(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], path[PATH_MAX + 32];
+    if (!test_mkdtemp(dir, sizeof(dir), "bil_resident_parent")) {
+        BIL_CHECK("bil: resident-parent fixture directory", false);
+        return failures;
+    }
+    struct main_state src, dst;
+    main_state_init(&src);
+    main_state_init(&dst);
+    build_synthetic_chain(&src, 2);
+    bool written = save_block_index_flat_identity(dir, &src, NULL).ok;
+    struct block_index resident;
+    block_index_init(&resident);
+    resident.hashBlock = make_test_hash(0);
+    resident.phashBlock = &resident.hashBlock;
+    resident.nHeight = 0;
+    resident.nBits = 0x1f07ffff;
+    resident.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    bool inserted = block_map_insert(&dst.map_block_index, &resident.hashBlock, &resident);
+    bool loaded = written && inserted && load_block_index_flat(dir, &dst).ok;
+    struct uint256 child_hash = make_test_hash(1);
+    struct block_index *child = block_map_find(&dst.map_block_index, &child_hash);
+    BIL_CHECK("bil: adjacent duplicate resolves the existing resident parent",
+              loaded && block_map_find(&dst.map_block_index, &resident.hashBlock) == &resident &&
+              child && child->pprev == &resident);
+    main_state_free(&dst);
+    main_state_free(&src);
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    unlink(path);
+    bil_test_unlink_arena(dir);
+    rmdir(dir);
+    return failures;
+}
+
 static int bil_flat_budget_case(void)
 {
     int failures = 0;
@@ -3875,6 +3915,7 @@ int test_block_index_loader(void)
     if (getenv("ZCL_HISTORY_ARCHIVE_DIR"))
         failures += bil_history_probe_case();
     failures += bil_flat_budget_case();
+    failures += bil_flat_resident_parent_case();
     if (getenv("ZCL_BLOCK_INDEX_MEMORY_DIR"))
         failures += bil_am_android_memory_case();
 

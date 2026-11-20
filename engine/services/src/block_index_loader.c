@@ -664,6 +664,13 @@ static void bil_flat_link_rows(
             bil_flat_release_rows(rel, i);
         }
         struct block_index *pindex = &arena[i];
+        /* The preceding arena row is usable only if it was admitted; a
+         * duplicate can leave its slot empty while the map owns the parent. */
+        if (i && arena[i - 1].phashBlock &&
+            memcmp(arena[i - 1].hashBlock.data, entries[i].prev_hash, 32) == 0) {
+            pindex->pprev = &arena[i - 1];
+            continue;
+        }
         bool has_prev = false;
         for (int pb = 0; pb < 32; pb++)
             if (entries[i].prev_hash[pb]) { has_prev = true; break; }
