@@ -53,7 +53,7 @@ core/modules/net/src/onion_service.c 6
 core/modules/net/src/rom_seed_ledger.c 3
 core/modules/sync/src/stage.c 1
 core/modules/sync/src/stage_lcc.c 4
-engine/composition/src/boot.c 2
+engine/composition/src/boot.c 1
 engine/composition/src/boot_flight_recorder.c 4
 engine/composition/src/boot_full_fold.c 1
 engine/composition/src/boot_index.c 2
@@ -63,7 +63,6 @@ engine/composition/src/boot_refold_staged.c 1
 engine/composition/src/boot_services.c 3
 engine/composition/src/boot_snapshot_import.c 4
 engine/composition/src/boot_steps.c 2
-engine/composition/src/boot_wallet_phrase.c 1
 engine/composition/src/boot_wallet_rebuild.c 1
 engine/composition/src/consensus_state_install_derived_state.c 1
 engine/composition/src/consensus_state_snapshot_candidate_validate.c 2
