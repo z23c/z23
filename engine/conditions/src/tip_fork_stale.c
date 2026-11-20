@@ -182,7 +182,17 @@ static bool same_index_hash(const struct block_index *a,
                             const struct block_index *b)
 {
     return a && b && a->phashBlock && b->phashBlock &&
+           !uint256_is_null(a->phashBlock) &&
            uint256_eq(a->phashBlock, b->phashBlock);
+}
+
+static bool distinct_at_height(const struct block_index *a,
+                               const struct block_index *b, int height)
+{
+    return a && b && a->nHeight == height && b->nHeight == height &&
+           a->phashBlock && b->phashBlock &&
+           !uint256_is_null(a->phashBlock) && !uint256_is_null(b->phashBlock) &&
+           !uint256_eq(a->phashBlock, b->phashBlock);
 }
 
 static bool same_parent_hash(const struct block_index *a,
@@ -289,7 +299,7 @@ static bool active_tip_is_stale_sibling(struct block_index *bh,
 {
     struct block_index *bh_at_tip = block_index_get_ancestor(bh, (int)tip_h);
     return (tip->nStatus & BLOCK_HAVE_DATA) && !block_has_any_failure(tip) &&
-           bh_at_tip && !same_index_hash(bh_at_tip, tip) &&
+           distinct_at_height(bh_at_tip, tip, (int)tip_h) &&
            !block_has_any_failure(bh_at_tip) &&
            same_parent_hash(bh_at_tip, tip);
 }
@@ -335,9 +345,8 @@ static bool detect_tip_fork_stale(void)
 
     struct block_index *bh_at_target =
         block_index_get_ancestor(bh, target);
-    if (same_index_hash(bh_at_target, child))
-        return false; /* child IS on the best-header chain — LEGIT, never
-                       * invalidate. Just a missing body; let IBD fetch it. */
+    if (!distinct_at_height(bh_at_target, child, target))
+        return false; // raw-return-ok:insufficient-fork-evidence
 
     /* Confirmed stale fork: tip stalled, a higher-work header chain exists,
      * and the data-bearing child at tip+1 is off that chain. */

@@ -227,6 +227,70 @@ static bool tfs_confirmed_stale_fork_ok(struct main_state *ms, int tip_h)
     return ok;
 }
 
+/* A higher-work header may be known before its ancestry is available. */
+static bool tfs_missing_ancestry_is_not_stale(struct main_state *ms, int tip_h,
+                                               bool zero_hash)
+{
+    condition_engine_reset_for_testing();
+    tip_fork_stale_test_reset();
+    main_state_init(ms);
+    block_height_census_test_reset();
+    struct uint256 hashes[256], child_hash, best_hash, empty_hash = {0};
+    struct block_index unknown = {0};
+    unknown.nHeight = tip_h + 1;
+    unknown.phashBlock = &empty_hash;
+    struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
+    struct block_index *child = tfs_insert(ms, &child_hash, 1, tip_h + 1,
+        tip, (uint64_t)(tip_h + 2), BLOCK_VALID_TRANSACTIONS | BLOCK_HAVE_DATA);
+    struct block_index *best = tfs_insert(ms, &best_hash, 2, tip_h + 2,
+        zero_hash ? &unknown : NULL, (uint64_t)(tip_h + 1000), BLOCK_VALID_TREE);
+    ms->pindex_best_header = best;
+    condition_engine_set_main_state(ms);
+    register_tip_fork_stale();
+    tip_fork_stale_test_set_remedy_stubs(stub_invalidate, stub_rebuild);
+    tip_fork_stale_test_force_stall(tip_h, 400);
+    condition_engine_tick();
+    bool ok = tip && child && best &&
+              tip_fork_stale_test_invalidate_calls() == 0 &&
+              tip_fork_stale_test_rebuild_calls() == 0 &&
+              condition_engine_get_active_count() == 0;
+    /* The synthetic pre-identity row is stack-owned. */
+    if (best && zero_hash) best->pprev = NULL;
+    return ok;
+}
+
+static bool tfs_unknown_parent_is_not_sibling(struct main_state *ms, int tip_h)
+{
+    condition_engine_reset_for_testing();
+    tip_fork_stale_test_reset();
+    main_state_init(ms);
+    block_height_census_test_reset();
+    struct uint256 hashes[256], canonical_hash, header_hashes[8], empty = {0};
+    struct block_index *best = NULL;
+    struct block_index *tip = tfs_build_incident_shape(
+        ms, hashes, &canonical_hash, header_hashes, tip_h, 23, &best);
+    struct block_index *canonical = best ? block_index_get_ancestor(best, tip_h) : NULL;
+    if (!tip || !canonical) return false;
+    struct block_index *tip_parent = tip->pprev;
+    struct block_index *canonical_parent = canonical->pprev;
+    struct block_index unknown_a = {0}, unknown_b = {0};
+    unknown_a.phashBlock = &empty;
+    unknown_b.phashBlock = &empty;
+    tip->pprev = &unknown_a;
+    canonical->pprev = &unknown_b;
+    condition_engine_set_main_state(ms);
+    register_tip_fork_stale();
+    tip_fork_stale_test_set_remedy_stubs(stub_invalidate, stub_rebuild);
+    tip_fork_stale_test_force_stall(tip_h, 400);
+    condition_engine_tick();
+    bool ok = tip_fork_stale_test_invalidate_calls() == 0 &&
+              tip_fork_stale_test_rebuild_calls() == 0 &&
+              condition_engine_get_active_count() == 0;
+    tip->pprev = tip_parent;
+    canonical->pprev = canonical_parent;
+    return ok;
+}
+
 /* Same-height stale sibling of the best-header chain. */
 static bool tfs_same_height_stale_sibling_ok(struct main_state *ms, int tip_h)
 {
@@ -647,6 +711,36 @@ int test_tip_fork_stale(void)
 
         condition_engine_set_main_state(NULL);
         g_advance_ms = NULL; g_advance_to = NULL;
+        condition_engine_reset_for_testing();
+        tip_fork_stale_test_reset();
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        bool ok = tfs_missing_ancestry_is_not_stale(&ms, TIP_H, false);
+        TFS_CHECK("missing best-header ancestry does not invalidate", ok);
+        condition_engine_set_main_state(NULL);
+        condition_engine_reset_for_testing();
+        tip_fork_stale_test_reset();
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        bool ok = tfs_missing_ancestry_is_not_stale(&ms, TIP_H, true);
+        TFS_CHECK("unknown best-header identity does not invalidate", ok);
+        condition_engine_set_main_state(NULL);
+        condition_engine_reset_for_testing();
+        tip_fork_stale_test_reset();
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        bool ok = tfs_unknown_parent_is_not_sibling(&ms, TIP_H);
+        TFS_CHECK("unknown parent identities do not establish siblings", ok);
+        condition_engine_set_main_state(NULL);
         condition_engine_reset_for_testing();
         tip_fork_stale_test_reset();
         main_state_free(&ms);
