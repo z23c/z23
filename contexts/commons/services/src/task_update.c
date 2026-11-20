@@ -473,7 +473,7 @@ void task_update_cancel(struct task_update *update)
 static struct zcl_result tu_kept(struct task_update *update, const struct task_update_job *job)
 {
     (void)snprintf(update->active, sizeof(update->active), "%s", job->view);
-    update->active_revision = job->checkpoint.document.state.revision;
+    update->active_document = job->checkpoint.document;
     update->active_valid = true;
     update->phase = TASK_UPDATE_KEPT;
     (void)snprintf(update->message, sizeof(update->message), "%s",

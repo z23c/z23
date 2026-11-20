@@ -99,6 +99,16 @@ struct zcl_result task_list_action(struct task_list *list, uint32_t action)
     return tl_edit(list, action == 0);
 }
 
+static void tl_adopt_update(struct task_list *list)
+{
+    struct task_editor *editor = list->editor;
+    if (list->update->active_document.state.revision > editor->saved.state.revision &&
+        !editor->pending && !editor->dirty && !editor->closing && editor->status == TASK_EDITOR_SAVED) {
+        editor->saved = list->update->active_document;
+        task_list_refresh(list);
+    }
+}
+
 struct zcl_result task_list_poll(struct task_list *list)
 {
     if (!list || !list->editor) return ZCL_ERR(-1, "task-list: durable editor required");
@@ -114,9 +124,12 @@ struct zcl_result task_list_poll(struct task_list *list)
         result = task_update_poll(list->update, &updated);
         list->repaint |= updated;
         if (!result.ok) return tl_failure(list, result);
-        if (list->update->active_valid && !list->update->pending &&
-            list->update->active_revision != list->editor->saved.state.revision)
-            return task_update_refresh(list->update);
+        if (list->update->active_valid && !list->update->pending) {
+            tl_adopt_update(list);
+            if (list->update->active_document.state.revision < list->editor->saved.state.revision) {
+                return task_update_refresh(list->update);
+            }
+        }
     }
     return ZCL_OK;
 }

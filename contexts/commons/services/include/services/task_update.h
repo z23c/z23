@@ -22,7 +22,7 @@ struct task_update {
     struct task_update_images *images;
     enum task_update_phase phase;
     char preview[4096], active[4096], message[256];
-    uint64_t active_revision;
+    struct task_document active_document;
     bool active_valid;
     int64_t elapsed_us, helper_startup_us, confined_us;
     enum task_update_step step;

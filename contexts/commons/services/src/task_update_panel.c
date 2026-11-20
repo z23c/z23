@@ -114,7 +114,7 @@ void task_update_row(const struct task_list *list, uint32_t index,
                      struct zcl_present_model_item_v1 *item)
 {
     const struct task_update *update = list->update;
-    if (!update || !update->active_valid || update->active_revision != list->editor->saved.state.revision) return;
+    if (!update || !update->active_valid || update->active_document.state.revision != list->editor->saved.state.revision) return;
     const char *line = update->active;
     for (uint32_t i = 0; i < index; ++i) {
         const char *end = strchr(line, '\n');

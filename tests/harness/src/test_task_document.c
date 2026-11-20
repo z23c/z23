@@ -750,6 +750,74 @@ static int tl_failure_test(struct task_list *list, const char *directory)
     return failures;
 }
 
+static int tl_adopt_snapshot_test(struct task_list *list, const struct task_document *newer,
+    uint64_t selected_id)
+{
+    int failures = 0;
+    TE_CHECK("select task before its row moves", tl_key_test(list, ZCL_PRESENT_INPUT_DOWN, false) &&
+        list->selected_id == selected_id);
+    TE_CHECK("clean list adopts verified newer snapshot and Undo", task_list_poll(list).ok &&
+        list->editor->saved.state.revision == newer->state.revision && list->editor->saved.can_undo &&
+        !strcmp(list->editor->saved.state.tasks[0].title, "After") &&
+        !strcmp(list->editor->saved.undo.tasks[0].title, "Second") && list->selected_id == selected_id &&
+        list->selected == 0 && !list->update->pending);
+    TE_CHECK("subsequent poll does not restart refresh", task_list_poll(list).ok && !list->update->pending);
+    return failures;
+}
+
+static int tl_snapshot_undo_test(struct task_list *list, struct package_resident_store *store,
+    struct task_document *newer, uint64_t selected_id)
+{
+    int failures = 0;
+    TE_CHECK("Undo after adoption starts", task_list_action(list, 3).ok && task_list_action(list, 2).ok &&
+        list->editor->pending && task_editor_finish(list->editor).ok);
+    TE_CHECK("Undo restores newer snapshot history durably", task_document_read(store, newer).ok &&
+        !strcmp(newer->state.tasks[0].title, "Second") && newer->state.revision == list->editor->saved.state.revision);
+    TE_CHECK("other editor deletes selection", task_document_apply(store, newer->state.revision,
+        TASK_DOCUMENT_DELETE, selected_id, NULL, newer).ok);
+    list->update->active_document = *newer;
+    TE_CHECK("adoption clears a deleted selection", task_list_poll(list).ok &&
+        list->editor->saved.state.count == 0 && list->selected_id == 0 && !list->update->pending);
+    return failures;
+}
+
+static int tl_newer_snapshot_test(const char *directory)
+{
+    int failures = 0;
+    struct package_resident_store store = {0};
+    struct task_document newer = {0};
+    struct task_editor editor = {0};
+    struct task_update update = {0};
+    struct task_list list;
+    TE_CHECK("open refresh fixture", package_resident_store_open_app(&store, directory, "local/refresh-list").ok);
+    TE_CHECK("create refresh task", task_document_apply(&store, 0, TASK_DOCUMENT_ADD, 0, "Before", &newer).ok);
+    TE_CHECK("create selected task", task_document_apply(&store, newer.state.revision,
+        TASK_DOCUMENT_ADD, 0, "Second", &newer).ok);
+    uint64_t selected_id = newer.state.tasks[1].id;
+    TE_CHECK("open older list snapshot", task_editor_open(&editor, directory, "local/refresh-list").ok &&
+        task_editor_select(&editor, selected_id).ok);
+    struct task_document older = editor.saved;
+    task_list_init(&list, &editor);
+    list.update = &update;
+    TE_CHECK("other editor removes preceding task", task_document_apply(&store, newer.state.revision,
+        TASK_DOCUMENT_DELETE, 1, NULL, &newer).ok);
+    TE_CHECK("other editor advances durable state", task_document_apply(&store, newer.state.revision,
+        TASK_DOCUMENT_EDIT, selected_id, "After", &newer).ok && newer.can_undo);
+    update.active_document = newer;
+    update.active_valid = true;
+    TE_CHECK("dirty draft is not replaced", task_editor_type(&editor, '!', false).ok &&
+        task_list_poll(&list).ok && editor.saved.state.revision < newer.state.revision &&
+        editor.dirty && !strcmp(editor.form.fields[0].value, "Second!") && !update.pending);
+    TE_CHECK("reopen clean older list", task_editor_open(&editor, directory, "local/refresh-list").ok);
+    editor.saved = older;
+    task_list_init(&list, &editor);
+    list.update = &update;
+    failures += tl_adopt_snapshot_test(&list, &newer, selected_id);
+    failures += tl_snapshot_undo_test(&list, &store, &newer, selected_id);
+    TE_CHECK("close refresh fixture", package_resident_store_close(&store).ok);
+    return failures;
+}
+
 static int tl_acceptance(const char *directory)
 {
     int failures = 0;
@@ -772,6 +840,7 @@ static int tl_acceptance(const char *directory)
         reopened.saved.state.count == editor.saved.state.count &&
         memcmp(reopened.saved.state.tasks, editor.saved.state.tasks, sizeof(editor.saved.state.tasks)) == 0);
     failures += tl_failure_test(&list, directory);
+    failures += tl_newer_snapshot_test(directory);
     TE_CHECK("list releases its save worker", task_editor_finish(&editor).ok && !editor.pending);
     return failures;
 }
