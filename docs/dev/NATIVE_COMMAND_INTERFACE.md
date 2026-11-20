@@ -1170,9 +1170,9 @@ its own exit code, rather than one generic message:
 command, with no `-datadir=` and no cookie at the resolved default datadir,
 prints a `zcl.cli_local_instances.v1` JSON document listing every sibling
 `~/.zclassic-c23*` instance this scan found (datadir, recorded port, and a
-bounded live/dead TCP probe) instead of a bare failure — one command answers
+bounded TCP probe) instead of a bare failure — one command answers
 "what nodes exist on this host", with exit code `5` (transient — the
-*default* target has nothing running, but this is not a dead end).
+*default* target has nothing running, but this is not a dead end). `alive_count` counts distinct reachable ports. A reachable port recorded by multiple directories has `state` `ambiguous` for each: the probe cannot identify which directory owns it. Identify the node independently and pass its explicit `-datadir`; port auto-discovery refuses ambiguous matches.
 
 ## 26. Terminal human presentation layer (wf/terminal-ux)
 

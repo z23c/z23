@@ -592,17 +592,33 @@ static int car_test_status_lists_local_instances(const char *home,
     TEST("cli auth: bare `status`, no -datadir=/-rpcport= given and no "
          "cookie in the (empty, HOME-scoped) default datadir, lists every "
          "sibling ~/.zclassic-c23* instance instead of a bare failure") {
+        uint16_t dead_port = car_reserve_port();
+        ASSERT(dead_port != 0);
+        car_write_dead_fixture(decoy_dir, dead_port, "fixture:fixture");
+        char duplicate[700], live_row[900], duplicate_row[900];
+        snprintf(duplicate, sizeof(duplicate), "%s/.zclassic-c23-carduplicate", home);
         char *argv[] = { (char *)CAR_BIN, (char *)"status", NULL };
         char out[65536] = {0};
         int rc = car_run(argv, car_build_envp(home, NULL), out, sizeof(out));
+        ASSERT(car_contains(out, "\"alive_count\":1"));
+        ASSERT(car_contains(out, "\"state\":\"alive\""));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_TRANSIENT);
+        car_write_dead_fixture(duplicate, live_port, "fixture:fixture");
+        snprintf(live_row, sizeof(live_row), "\"datadir\":\"%s\",\"rpcport\":%u,\"state\":\"ambiguous\"", live_dir, live_port);
+        snprintf(duplicate_row, sizeof(duplicate_row), "\"datadir\":\"%s\",\"rpcport\":%u,\"state\":\"ambiguous\"", duplicate, live_port);
+        memset(out, 0, sizeof(out));
+        rc = car_run(argv, car_build_envp(home, NULL), out, sizeof(out));
 
         ASSERT(car_contains(out, "zcl.cli_local_instances.v1"));
         ASSERT(car_contains(out, live_dir));
-        ASSERT(car_contains(out, "\"state\":\"alive\""));
+        ASSERT(car_contains(out, live_row));
+        ASSERT(car_contains(out, duplicate_row));
+        ASSERT(car_contains(out, "\"alive_count\":1"));
+        ASSERT(car_contains(out, "identify the node independently"));
+        car_rm_shallow_dir(duplicate);
         ASSERT(car_contains(out, decoy_dir));
         ASSERT(car_contains(out, "\"state\":\"dead\""));
         ASSERT_EQ(rc, ZCL_COMMAND_EXIT_TRANSIENT);
-        (void)live_port;
         PASS();
     } _test_next:;
     return failures;
@@ -667,7 +683,7 @@ int test_cli_auth_robust(void)
 
     /* Best-effort cleanup of every fixture path this file creates. */
     static const char *const car_fixture_leaf_names[] = {
-        "cardecoy", "carlive", "carnocookie", "carshared",
+        "carduplicate", "cardecoy", "carlive", "carnocookie", "carshared",
         "carshareddecoy", "cartimeout",
     };
     for (size_t i = 0;

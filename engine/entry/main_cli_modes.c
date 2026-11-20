@@ -1594,18 +1594,21 @@ static bool cli_probe_port_alive(int port, int timeout_ms)
     return alive;
 }
 
-/* Shared instance-listing scan behind both `status`'s no-default-instance
- * fallback and the -rpcport= auto-discovery refusal below. Scans
- * `<HOME>/.zclassic-c23*` for every recorded RPC port, probes each for
- * liveness, and appends one JSON object per candidate to `instances`
- * (`instances` must already be json_init'd + json_set_array'd by the
- * caller). When `tag_port >= 0`, each entry also carries
- * `"port_match": <bool>` — whether that candidate's recorded port equals
- * `tag_port` — so a refusal listing can show the operator exactly which
- * sibling(s) claim the port they asked for. Returns the count of
- * candidates found alive. */
+static size_t cli_port_matches(const int *ports, size_t n, int port, size_t *first)
+{
+    size_t count = 0;
+    *first = n;
+    for (size_t i = 0; i < n; i++) {
+        if (ports[i] != port) continue;
+        if (!count) *first = i;
+        count++;
+    }
+    return count;
+}
+
+/* Probe each recorded endpoint once; shared live ports cannot identify a datadir. */
 static size_t cli_append_local_instances(struct json_value *instances,
-                                         int tag_port)
+                                         int tag_port, bool *ambiguous)
 {
     const char *home = getenv("HOME");
     size_t alive_count = 0;
@@ -1614,18 +1617,26 @@ static size_t cli_append_local_instances(struct json_value *instances,
 
     char *candidates[CLI_DATADIR_GLOB_MAX];
     size_t n = cli_list_datadir_candidates(home, candidates);
+    int ports[CLI_DATADIR_GLOB_MAX] = {0};
+    bool reachable[CLI_DATADIR_GLOB_MAX] = {0};
+    for (size_t i = 0; i < n; i++)
+        cli_read_stored_rpcport(candidates[i], &ports[i]);
     for (size_t i = 0; i < n; i++) {
-        int stored_port = 0;
-        if (cli_read_stored_rpcport(candidates[i], &stored_port)) {
-            bool alive = cli_probe_port_alive(stored_port, 200);
-            if (alive)
-                alive_count++;
+        int stored_port = ports[i];
+        if (stored_port) {
+            size_t first;
+            size_t matches = cli_port_matches(ports, n, stored_port, &first);
+            bool alive = first < i ? reachable[first] : cli_probe_port_alive(stored_port, 200);
+            reachable[i] = alive;
+            if (alive && first == i) alive_count++;
+            bool shared = alive && matches > 1;
+            if (shared && ambiguous) *ambiguous = true;
             struct json_value inst;
             json_init(&inst);
             json_set_object(&inst);
             json_push_kv_str(&inst, "datadir", candidates[i]);
             json_push_kv_int(&inst, "rpcport", stored_port);
-            json_push_kv_str(&inst, "state", alive ? "alive" : "dead");
+            json_push_kv_str(&inst, "state", shared ? "ambiguous" : (alive ? "alive" : "dead"));
             if (tag_port >= 0)
                 json_push_kv_bool(&inst, "port_match",
                                   stored_port == tag_port);
@@ -1637,16 +1648,7 @@ static size_t cli_append_local_instances(struct json_value *instances,
     return alive_count;
 }
 
-/* `status` with no live node in the caller's DEFAULT datadir (no
- * `-datadir=` given, and the resolved default has no `.cookie`) used
- * to just fail — leaving "what's actually running on this host?" to a
- * manual `ps`/`ss` hunt. Instead, answer it: scan
- * `<HOME>/.zclassic-c23*` for every recorded RPC port and report each
- * one's datadir + port + a live liveness probe. Prints one
- * `zcl.cli_local_instances.v1` JSON document to stdout (so a script can
- * still parse it) and returns ZCL_COMMAND_EXIT_TRANSIENT — the default
- * target genuinely has nothing running right now, but the answer is
- * never a bare, undifferentiated failure. */
+/* List recorded endpoints when the default datadir has no cookie. */
 static int cli_print_local_instances_status_fallback(const char *default_datadir)
 {
     struct json_value doc;
@@ -1664,11 +1666,13 @@ static int cli_print_local_instances_status_fallback(const char *default_datadir
     struct json_value instances;
     json_init(&instances);
     json_set_array(&instances);
-    size_t alive_count = cli_append_local_instances(&instances, -1);
+    bool ambiguous = false;
+    size_t alive_count = cli_append_local_instances(&instances, -1, &ambiguous);
     json_push_kv(&doc, "instances", &instances);
     json_free(&instances);
     json_push_kv_int(&doc, "alive_count", (int64_t)alive_count);
     json_push_kv_str(&doc, "remedy",
+                     ambiguous ? "multiple datadirs record a reachable port; identify the node independently and pass -datadir=<DIR>" :
                      alive_count > 0
                          ? "pass -rpcport=<PORT> (auth auto-discovers the "
                            "matching -datadir) or -datadir=<DIR> to target "
@@ -1723,7 +1727,7 @@ static int cli_refuse_rpcport_autodiscovery(int port,
     struct json_value instances;
     json_init(&instances);
     json_set_array(&instances);
-    cli_append_local_instances(&instances, port);
+    cli_append_local_instances(&instances, port, NULL);
     size_t match_count = 0;
     for (size_t i = 0; i < json_size(&instances); i++) {
         const struct json_value *inst = json_at(&instances, i);
