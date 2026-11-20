@@ -561,16 +561,37 @@ int t_block_index_flat_atomic_save_contract(void)
         char *fn        = strstr(buf, "ssio_write_embedded(");
         ASSERT(fn != NULL);
         char *open_tmp  = strstr(fn, "fopen(tmp_path, \"wb\")");
-        char *fsync_fd  = strstr(fn, "(void)platform_file_sync(fd)");
-        char *replace_tmp = strstr(
-            fn, "platform_path_replace(tmp_path, body_path)");
+        char *sync_check = strstr(fn, "if (fd < 0 || platform_file_sync(fd) != 0)\n"
+            "        return ssio_embedded_fail(f, tmp_path, spec, \"file sync\", errno)");
+        char *sync_fail = strstr(fn, "return ssio_embedded_fail(f, tmp_path, spec, \"file sync\", errno)");
+        char *close_check = strstr(fn, "if (fclose(f) != 0)\n"
+            "        return ssio_embedded_fail(NULL, tmp_path, spec, \"file close\", errno)");
+        char *close_fail = strstr(fn, "return ssio_embedded_fail(NULL, tmp_path, spec, \"file close\", errno)");
+        char *replace_tmp = strstr(fn, "platform_path_replace(tmp_path, body_path)");
         char *unlink_err = strstr(fn, "unlink(tmp_path)");
+        char *parent_check = strstr(fn, "if (!platform_private_parent_flush(datadir))");
+        char *parent_fail = strstr(fn, "return ZCL_ERR(-7, \"%s: replacement visible; parent flush failed, \"");
+        char *fn_end = strstr(fn, "enum ssio_read_verdict ssio_verify_embedded(");
+        char *cleanup = strstr(buf, "static struct zcl_result ssio_embedded_fail(");
         ASSERT(open_tmp != NULL);
-        ASSERT(fsync_fd != NULL);
+        ASSERT(sync_check != NULL);
+        ASSERT(sync_fail != NULL);
+        ASSERT(close_check != NULL);
+        ASSERT(close_fail != NULL);
         ASSERT(replace_tmp != NULL);
         ASSERT(unlink_err != NULL);
-        ASSERT(open_tmp < fsync_fd);
-        ASSERT(fsync_fd < replace_tmp);
+        ASSERT(parent_check != NULL);
+        ASSERT(parent_fail != NULL);
+        ASSERT(fn_end != NULL);
+        ASSERT(cleanup != NULL && cleanup < fn);
+        char *cleanup_unlink = strstr(cleanup, "unlink(tmp_path)");
+        char *cleanup_return = strstr(cleanup, "return ZCL_ERR(-9,");
+        ASSERT(cleanup_unlink != NULL && cleanup_unlink < fn);
+        ASSERT(cleanup_return != NULL && cleanup_return < fn);
+        ASSERT(open_tmp < sync_check && sync_check < sync_fail);
+        ASSERT(sync_fail < close_check && close_check < close_fail);
+        ASSERT(close_fail < replace_tmp && replace_tmp < parent_check);
+        ASSERT(parent_check < parent_fail && parent_fail < fn_end);
         PASS();
     } _test_next:;
     free(buf);
