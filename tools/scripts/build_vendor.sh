@@ -137,12 +137,12 @@ VENDOR_LOCK_TIMEOUT_SEC="${VENDOR_LOCK_TIMEOUT_SEC:-600}"
 }
 
 # --- pinned versions + SHA256 (verified upstream-published hashes) ----------
-SQLITE_YEAR="2025"
-SQLITE_AMALG="sqlite-amalgamation-3490000"   # SQLite 3.49.0
+SQLITE_YEAR="2026"
+SQLITE_AMALG="sqlite-amalgamation-3510300"   # SQLite 3.51.3
 SQLITE_URL="https://www.sqlite.org/${SQLITE_YEAR}/${SQLITE_AMALG}.zip"
-SQLITE_SHA="cb6851ebad74913672014c20f642bbd7883552c4747780583a54ee1cd493f13b"
-SQLITE_C_SHA="032f545fd56206903bf25309714acb924504ab599f80b51002b89d08579b0485"
-SQLITE_H_SHA="003d87c193f4a0e363543905deabd377924f03437e068823ec6b674a0fe31eba"
+SQLITE_SHA="acb1e6f5d832484bf6d32b681e858c38add8b2acdfd42ac5df24b8afb46552b4"
+SQLITE_C_SHA="9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5"
+SQLITE_H_SHA="19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d"
 
 OPENSSL_VER="3.0.16"                          # >= project min-safe floor (3.0.16)
 OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz"

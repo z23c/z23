@@ -326,6 +326,48 @@ static bool vc_store_transport_with_license(
     return ok;
 }
 
+static bool vc_store_legacy_sqlite(struct vcs_package_store *store,
+    const struct vcs_source_package_transport *transport, bool duplicate,
+    uint8_t root[32])
+{
+    static const char old[] = "vendor/.cache/sqlite-amalgamation-3490000.zip";
+    static const char current[] = "vendor/.cache/sqlite-amalgamation-3510300.zip";
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    bool ok = true;
+    size_t count = vcs_source_package_transport_file_count(transport);
+    for (size_t i = 0; ok && i < count; i++) {
+        const char *path = NULL;
+        const uint8_t *bytes = NULL;
+        size_t len = 0;
+        ok = vcs_source_package_transport_file_at(transport, i, &path, &bytes, &len);
+        if (ok && strcmp(path, current) == 0) {
+            if (duplicate)
+                ok = vcs_package_content_add_file(&manifest, current, VCS_PACKAGE_MODE_FILE, bytes, len);
+            path = old;
+        }
+        if (ok) ok = vcs_package_content_add_file(&manifest, path, VCS_PACKAGE_MODE_FILE, bytes, len);
+    }
+    uint8_t *wire = NULL, admitted[32];
+    size_t wire_len = 0;
+    ok = ok && vcs_package_manifest_root(&manifest, root) &&
+         vcs_package_manifest_serialize(&manifest, &wire, &wire_len) &&
+         vcs_package_store_put_manifest(store, wire, wire_len, admitted) == VCS_PACKAGE_STORE_OK &&
+         memcmp(root, admitted, 32) == 0;
+    free(wire);
+    for (size_t i = 0; ok && i < manifest.count; i++) {
+        const struct vcs_package_file *file = &manifest.files[i];
+        const uint8_t *bytes = NULL;
+        size_t len = 0;
+        const char *lookup = strcmp(file->path, old) == 0 ? current : file->path;
+        ok = vc_transport_file(transport, lookup, &bytes, &len);
+        ok = vc_store_put_file_chunks(store, root, file, bytes, len, ok);
+    }
+    vcs_package_manifest_free(&manifest);
+    return ok;
+}
+
+
 static bool vc_file_matches(const char *dir, const char *rel,
                             const char *expect);
 
@@ -451,7 +493,7 @@ static int tsb_write_fixture_files(struct tsb_ctx *ctx)
              vc_write(ctx->source, "vendor/.cache/openssl-3.0.16.tar.gz",
                       "openssl") &&
              vc_write(ctx->source,
-                      "vendor/.cache/sqlite-amalgamation-3490000.zip",
+                      "vendor/.cache/sqlite-amalgamation-3510300.zip",
                       "sqlite") &&
              vc_write(ctx->source, "vendor/.cache/zlib-1.3.1.tar.gz", "zlib"));
     char executable[1024];
@@ -875,6 +917,32 @@ static int tsb_checkout_success_and_refusals(
     return failures;
 }
 
+static int tsb_checkout_legacy_sqlite(struct tsb_ctx *ctx,
+                                      struct vcs_package_store *store)
+{
+    int failures = 0;
+    char legacy[4096], duplicate[4096];
+    uint8_t legacy_root[32] = {0}, duplicate_root[32] = {0};
+    test_make_tmpdir(legacy, sizeof(legacy), "vcs_core", "legacy-sqlite");
+    test_make_tmpdir(duplicate, sizeof(duplicate), "vcs_core", "duplicate-sqlite");
+    VC_CHECK("historical SQLite input keeps its manifest filename",
+             vc_store_legacy_sqlite(store, &ctx->transport, false, legacy_root) &&
+             vcs_source_package_checkout(store, legacy_root, ctx->first_root,
+                 ctx->lane_pubkey, ctx->package_workspace, legacy, NULL) ==
+                 VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
+             vc_file_matches(legacy, "vendor/.cache/sqlite-amalgamation-3490000.zip", "sqlite") &&
+             !vc_file_matches(legacy, "vendor/.cache/sqlite-amalgamation-3510300.zip", "sqlite"));
+    VC_CHECK("both SQLite input names are refused",
+             vc_store_legacy_sqlite(store, &ctx->transport, true, duplicate_root) &&
+             vcs_source_package_checkout(store, duplicate_root, ctx->first_root,
+                 ctx->lane_pubkey, ctx->package_workspace, duplicate, NULL) !=
+                 VCS_SOURCE_PACKAGE_CHECKOUT_OK);
+    test_rm_rf(legacy);
+    test_rm_rf(duplicate);
+    return failures;
+}
+
+
 static int tsb_package_store_and_checkout(struct tsb_ctx *ctx)
 {
     int failures = 0;
@@ -886,6 +954,7 @@ static int tsb_package_store_and_checkout(struct tsb_ctx *ctx)
                                                        proprietary_root);
     failures += tsb_checkout_success_and_refusals(ctx, carrier_store,
                                                   proprietary_root);
+    failures += tsb_checkout_legacy_sqlite(ctx, carrier_store);
     vcs_package_store_close(carrier_store);
     vcs_source_package_transport_free(&ctx->transport);
     return failures;

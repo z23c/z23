@@ -31,7 +31,7 @@ static bool dat_versions(const char *root, const char *target, bool valid)
     DAT_FILE(lib, "libcrypto.a", valid ? "OpenSSL 3.1.0\n" : "OpenSSL 1.0.0\n");
     DAT_FILE(lib, "libevent.a", "2.1.12-stable\n");
     DAT_FILE(lib, "libz.a", "deflate 1.3.1\n");
-    DAT_FILE(inc, "sqlite3.h", "#define SQLITE_VERSION \"3.46.0\"\n");
+    DAT_FILE(inc, "sqlite3.h", "#define SQLITE_VERSION \"3.51.3\"\n");
 #undef DAT_FILE
     return true;
 }
@@ -110,6 +110,9 @@ int test_dep_audit_target(void)
         ASSERT(unlink(file) == 0);
         ASSERT(dat_run(absolute, "aarch64-linux-android24", "libsecp256k1-android.a") == 1);
         ASSERT(dat_run(absolute, NULL, NULL) == 0);
+        snprintf(file, sizeof(file), "%s/vendor/include/sqlite3.h", absolute);
+        ASSERT(dat_write(file, "#define SQLITE_VERSION \"3.49.0\"\n", 0600));
+        ASSERT(dat_run(absolute, NULL, NULL) == 1);
         PASS();
     } _test_next:;
     test_rm_rf(root);

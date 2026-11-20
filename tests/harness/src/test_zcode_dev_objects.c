@@ -541,7 +541,7 @@ static bool zd_seed_offline_vendor_inputs(const char *workspace)
         "leveldb-1.23.tar.gz",
         "libevent-2.1.12.tar.gz",
         "openssl-3.0.16.tar.gz",
-        "sqlite-amalgamation-3490000.zip",
+        "sqlite-amalgamation-3510300.zip",
         "zlib-1.3.1.tar.gz",
     };
     char vendor[1024], cache[1024], path[1200];

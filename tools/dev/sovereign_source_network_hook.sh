@@ -234,7 +234,7 @@ for archive in \
     leveldb-1.23.tar.gz \
     libevent-2.1.12.tar.gz \
     openssl-3.0.16.tar.gz \
-    sqlite-amalgamation-3490000.zip \
+    sqlite-amalgamation-3510300.zip \
     zlib-1.3.1.tar.gz; do
     [ -f "$REPO_ROOT/vendor/.cache/$archive" ] ||
         ssn_die "publisher is missing pinned offline input $archive"
@@ -463,7 +463,7 @@ for archive in \
     leveldb-1.23.tar.gz \
     libevent-2.1.12.tar.gz \
     openssl-3.0.16.tar.gz \
-    sqlite-amalgamation-3490000.zip \
+    sqlite-amalgamation-3510300.zip \
     zlib-1.3.1.tar.gz; do
     cp "$CONSUMER_DEST/vendor/.cache/$archive" \
         "$CONSUMER_DEST/zclassic23/vendor/.cache/$archive"

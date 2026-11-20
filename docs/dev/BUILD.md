@@ -605,7 +605,7 @@ against its minimum-safe version.
 | `libcrypto.a`, `libssl.a` | OpenSSL | 3.0.16 | fetched + built | https://github.com/openssl/openssl |
 | `libevent.a`, `libevent_openssl.a`, `libevent_pthreads.a` | libevent | 2.1.12 | fetched + built | https://github.com/libevent/libevent |
 | `libleveldb.a` | LevelDB | 1.23 | fetched + built | https://github.com/google/leveldb |
-| `libsqlite3.a` | SQLite (amalgamation) | 3.49.0 | fetched + built | https://www.sqlite.org/ |
+| `libsqlite3.a` | SQLite (amalgamation) | 3.51.3 | fetched + built | https://www.sqlite.org/ |
 | `libz.a` | zlib | 1.3.1 | fetched + built | https://github.com/madler/zlib |
 
 That is 10 archives: nine source builds plus the committed
@@ -628,7 +628,7 @@ Notes:
   node links still use `cc`; the Makefile asks `c++` for libstdc++'s directory
   and adds it to the linker search path so mixed distro compiler packages do
   not break cold remote builds.
-- **SQLite 3.49.0** amalgamation; `make vendor` also refreshes
+- **SQLite 3.51.3** amalgamation; `make vendor` also refreshes
   `vendor/include/sqlite3.h` and `vendor/sqlite3.c` so the rest of the build
   (e.g. `tools/sqlq.c`) stays in sync.
 - **Historical external reference vectors are inert data.** They retain their

@@ -30,7 +30,7 @@ static const char *const offline_input_paths[] = {
     "vendor/.cache/leveldb-1.23.tar.gz",
     "vendor/.cache/libevent-2.1.12.tar.gz",
     "vendor/.cache/openssl-3.0.16.tar.gz",
-    "vendor/.cache/sqlite-amalgamation-3490000.zip",
+    "vendor/.cache/sqlite-amalgamation-3510300.zip",
     "vendor/.cache/zlib-1.3.1.tar.gz",
 };
 

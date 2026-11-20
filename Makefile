@@ -483,7 +483,13 @@ VENDOR_ARCHIVES = $(NODE_VENDOR_ARCHIVES) \
 VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(VENDOR_ARCHIVES))
 NODE_VENDOR_LIBS = $(addprefix $(ZCL_VENDOR_LIB)/,$(NODE_VENDOR_ARCHIVES))
 VENDOR_BOOTSTRAP_MK := build/identity/vendor-inputs-ready.mk
-VENDOR_MISSING_INPUTS := $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS))
+# An old SQLite pin must cross vendor repair before source identity capture.
+SQLITE_VENDOR_PIN = $(shell grep ^SQLITE_SHA= tools/scripts/build_vendor.sh | cut -d "\"" -f 2)
+SQLITE_VENDOR_STALE = $(shell test ! -f $(ZCL_VENDOR_LIB)/libsqlite3.a || \
+    grep -qx "source_sha256=$(SQLITE_VENDOR_PIN)" \
+    $(ZCL_VENDOR_LIB)/.provenance/libsqlite3.a.stamp 2>/dev/null || \
+    printf "%s" $(ZCL_VENDOR_LIB)/libsqlite3.a)
+VENDOR_MISSING_INPUTS = $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS)) $(SQLITE_VENDOR_STALE)
 VENDOR_REPAIR_GOALS := vendor-ready deploy install
 VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 # windows-make.ps1 builds this launcher before it can contain the build's

@@ -48,6 +48,7 @@ struct source_checkout_loaded {
     size_t authority_len;
     uint8_t *offline[VCS_SOURCE_PACKAGE_OFFLINE_INPUT_MAX];
     size_t offline_len[VCS_SOURCE_PACKAGE_OFFLINE_INPUT_MAX];
+    const char *offline_path[VCS_SOURCE_PACKAGE_OFFLINE_INPUT_MAX];
     size_t offline_count;
 };
 
@@ -165,6 +166,8 @@ static bool source_checkout_shard_index(const char *path, uint16_t *index_out)
 
 static int source_checkout_offline_index(const char *path)
 {
+    if (strcmp(path, "vendor/.cache/sqlite-amalgamation-3490000.zip") == 0)
+        path = "vendor/.cache/sqlite-amalgamation-3510300.zip";
     for (size_t i = 0; i < vcs_source_package_offline_input_count(); i++)
         if (strcmp(path, vcs_source_package_offline_input_path(i)) == 0)
             return (int)i;
@@ -424,6 +427,7 @@ static enum vcs_source_package_checkout_result source_checkout_load_variable(
                     &loaded->offline[offline],
                     &loaded->offline_len[offline]))
                 return VCS_SOURCE_PACKAGE_CHECKOUT_CHUNK;
+            loaded->offline_path[offline] = path;
             seen_offline[offline] = true;
             offline_count++;
             recognized++;
@@ -729,7 +733,7 @@ static bool source_checkout_write_offline_files(
          ok && i < vcs_source_package_offline_input_count(); i++) {
         if (UINT64_MAX - total < loaded->offline_len[i] ||
             !source_checkout_windows_write_relative(
-                &root, vcs_source_package_offline_input_path(i),
+                &root, loaded->offline_path[i],
                 loaded->offline[i], loaded->offline_len[i]))
             ok = false;
         else
@@ -752,7 +756,7 @@ static bool source_checkout_write_offline_files(
         return false;
     uint64_t total = 0;
     for (size_t i = 0; i < vcs_source_package_offline_input_count(); i++) {
-        const char *relative = vcs_source_package_offline_input_path(i);
+        const char *relative = loaded->offline_path[i];
         char path[SOURCE_CHECKOUT_PATH_MAX];
         n = snprintf(path, sizeof(path), "%s/%s", destination, relative);
         if (n <= 0 || (size_t)n >= sizeof(path) ||

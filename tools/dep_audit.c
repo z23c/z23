@@ -59,8 +59,8 @@
 /* Minimum safe versions. Update when new advisories drop. */
 #define OPENSSL_MIN "3.0.16"
 #define OPENSSL_NOTE "CVE-2024-12797 (MITM on RFC7250), CVE-2024-9143 (low-level bignum OOB)"
-#define SQLITE_MIN "3.46.0"
-#define SQLITE_NOTE "CVE-2024-0232 (jsonb blob crash)"
+#define SQLITE_MIN "3.51.3"
+#define SQLITE_NOTE "SQLite 3.51.3 fixes WAL-reset corruption"
 #define LIBEVENT_MIN "2.1.12"
 #define LIBEVENT_NOTE "no known CVEs in 2.1.12"
 #define LEVELDB_MIN "1.18"

@@ -201,6 +201,11 @@ int test_sqlite_step_errors(void);
 int test_sqlite_step_errors(void)
 {
     int failures = 0;
+    SSE_CHECK("linked SQLite version matches the selected header",
+              sqlite3_libversion_number() == SQLITE_VERSION_NUMBER &&
+              SQLITE_VERSION_NUMBER == 3051003);
+    SSE_CHECK("linked SQLite source identity matches the selected header",
+              strcmp(sqlite3_sourceid(), SQLITE_SOURCE_ID) == 0);
     char dir[256];
     test_make_tmpdir(dir, sizeof(dir), "sqlite_step_errors", "main");
 
