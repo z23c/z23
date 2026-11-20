@@ -2017,6 +2017,7 @@ static int t_agent_verify_preflight(void)
         "for gate in check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild lint-fast; do grep -Eq \"^agent-verify: $gate rc=0 secs=[0-9]+$\" build/scratch/agent-verify.rc; done\n"
         "grep -Eq '^agent-verify: dev-bin rc=0 secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         "grep -Eq '^agent-verify: selection exact groups=1 .* select_secs=[0-9]+$' build/scratch/agent-verify.rc\n"
+        "grep -q -- '--base=base' selector-calls\n"
         ": > calls; : > selector-calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@route > route.log 2>&1\n"
         "grep -q -- --route-only selector-calls; [ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]\n"
         ": > calls; if FAIL_TEST=1 make --no-print-directory MAKE=./submake agent-verify ONLY=models > later.log 2>&1; then exit 1; fi\n"
@@ -2031,6 +2032,28 @@ static int t_agent_verify_preflight(void)
         "if grep -q dev-bin calls; then exit 1; fi; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "preflight");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
+static int t_agent_verify_base_override(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p build/bin bin\n"
+        "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
+        "printf '#!/bin/sh\\ncase $1 in status) exit 0;; merge-base) if [ \"$2\" = --is-ancestor ]; then [ \"${BAD_ANCESTOR:-0}\" = 0 ]; else echo base; fi;; rev-parse) [ \"${BAD_COMMIT:-0}\" = 0 ] || exit 1; [ \"$3\" = \"refs/heads/a\\$b^{commit}\" ] || exit 1; echo explicit-base;; *) exit 1;; esac\\n' > bin/git; chmod +x bin/git\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\n' > submake; chmod +x submake\n"
+        "printf '#!/bin/sh\necho \"$*\" >> selector-calls\ncat <<END\n{\"groups\":\"models\",\"selector\":\"exact\",\"groups_selected\":1}\nEND\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
+        "PATH=\"$2/bin:$PATH\"; export PATH\n"
+        "make --no-print-directory MAKE=./submake agent-verify ONLY=@changed AGENT_VERIFY_BASE='refs/heads/a$b' > override.log 2>&1\n"
+        "grep -q -- '--base=explicit-base' selector-calls; grep -q 'base=explicit-base' build/scratch/agent-verify.rc\n"
+        ": > calls; : > selector-calls; if BAD_ANCESTOR=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed AGENT_VERIFY_BASE='refs/heads/a$b' > ancestor.log 2>&1; then exit 1; fi\n"
+        "grep -q 'AGENT_VERIFY_BASE=explicit-base is not an ancestor of HEAD' ancestor.log; [ ! -s selector-calls ]\n"
+        ": > calls; : > selector-calls; if BAD_COMMIT=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed AGENT_VERIFY_BASE='refs/heads/a$b' > commit.log 2>&1; then exit 1; fi\n"
+        "grep -q 'AGENT_VERIFY_BASE=refs/heads/a$b is not a commit' commit.log; [ ! -s selector-calls ]\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "base_override");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
@@ -2132,7 +2155,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_agent_verify_preflight() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 

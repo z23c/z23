@@ -18191,14 +18191,15 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 #   make -j28 agent-verify ONLY=@changed        (default: the proof's groups)
 #   make -j28 agent-verify ONLY=<group,group>   (an explicit set, unchanged)
 # ONLY=@changed runs exactly the test groups the land proof selects for this
-# lane: `z23-dev dev proof select` against the merge-base with origin/main,
-# the proof worker's own planner and selector over every committed path
+# lane: `z23-dev dev proof select` against the merge-base with origin/main by
+# default, or AGENT_VERIFY_BASE when that names an ancestor of HEAD, using the
+# proof worker's own planner and selector over every committed path
 # changed since then. A universal selection (an added, deleted or type-changed
 # path, or a plan that does not close) runs the proof's whole set, never a
 # narrowed one; the `agent-verify: selection ...` line says which and why.
 # ONLY=@route is a screen, not the proof's set: the union of the shared-rule
-# route groups of every committed path changed since the merge-base (`dev proof
-# select --route-only`), with no include/call closure, so it never goes
+# route groups of every committed path changed since the selected base (`dev
+# proof select --route-only`), with no include/call closure, so it never goes
 # universal. A path that routes to no group is named on the selection line
 # (detail=unrouted=N first=<path>); with no routed group the test step is
 # skipped. The stack gate still runs the proof's full set.
@@ -18261,7 +18262,13 @@ agent-verify:
 	    b0=$$(date +%s); \
 	    $(MAKE) --no-print-directory dev-bin ZCL_TEST_WERROR=1 >build/scratch/agent-verify.dev-bin.log 2>&1 || { echo "agent-verify: dev-bin failed; see build/scratch/agent-verify.dev-bin.log" >&2; exit 2; }; \
 	    echo "agent-verify: dev-bin rc=0 secs=$$(($$(date +%s) - b0))" | tee -a build/scratch/agent-verify.rc; \
-	    base=$$(git merge-base origin/main HEAD) || { echo "agent-verify: no merge-base with origin/main; use ONLY=<group,group>" >&2; exit 2; }; \
+	    av_base='$(subst ','"'"',$(value AGENT_VERIFY_BASE))'; \
+	    if [ -n "$$av_base" ]; then \
+	       base=$$(git rev-parse --verify "$${av_base}^{commit}") || { echo "agent-verify: AGENT_VERIFY_BASE=$$av_base is not a commit" >&2; exit 2; }; \
+	       git merge-base --is-ancestor "$$base" HEAD || { echo "agent-verify: AGENT_VERIFY_BASE=$$base is not an ancestor of HEAD" >&2; exit 2; }; \
+	    else \
+	       base=$$(git merge-base origin/main HEAD) || { echo "agent-verify: no merge-base with origin/main; use ONLY=<group,group>" >&2; exit 2; }; \
+	    fi; \
 	    q0=$$(date +%s); \
 	    sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>build/scratch/agent-verify.select.err); \
 	    case "$$sel" in *'"reason":"plan-not-closed"'*) sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>>build/scratch/agent-verify.select.err);; esac; \
