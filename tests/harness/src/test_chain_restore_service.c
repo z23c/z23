@@ -2335,6 +2335,48 @@ static int test_block_file_rebuild_across_files(void)
     } _test_next:;
     return failures;
 }
+/* The indexed disk walk must accept a complete header at EOF and switch
+ * streams, but refuse a header truncated below the fixed minimum. */
+static int test_indexed_disk_short_header_and_file_switch(void)
+{
+    int failures = 0;
+    TEST("indexed disk rebuild accepts short final header and switches files") {
+        char dir[256], path[320];
+        test_make_tmpdir(dir, sizeof(dir), "restore_stream", "indexed_short");
+        struct main_state ms;
+        main_state_init(&ms);
+        struct block_index *parent = ods_build_disk_chain(&ms, dir, 2);
+        ASSERT(parent != NULL);
+        struct disk_block_pos pos = { .nFile = 1 };
+        struct uint256 hash;
+        ASSERT(write_chain_block_fixture(dir, &pos, parent->phashBlock,
+                                         0x1e14f402, 1700000002, &hash));
+        struct block_index *tip = chainstate_insert_block_index(
+            (struct chainstate *)&ms, &hash);
+        ASSERT(tip != NULL);
+        tip->nHeight = 2;
+        tip->nBits = 0x1e14f402;
+        tip->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        tip->nFile = pos.nFile;
+        tip->nDataPos = pos.nPos;
+        tip->pprev = parent;
+        ASSERT(active_chain_move_window_tip(&ms.chain_active, tip));
+        snprintf(path, sizeof(path), "%s/blocks/blk00001.dat", dir);
+        /* Fixture header has an empty solution: 140 fixed bytes + size byte. */
+        ASSERT(truncate(path, (off_t)pos.nPos + 141) == 0);
+        ASSERT(chain_restore_rebuild_active_chain_from_disk(&ms, tip, dir) == 3);
+        ASSERT(active_chain_at(&ms.chain_active, 0) == parent->pprev);
+        ASSERT(active_chain_at(&ms.chain_active, 1) == parent);
+        ASSERT(active_chain_at(&ms.chain_active, 2) == tip);
+        ASSERT(truncate(path, (off_t)pos.nPos + 140) == 0);
+        ASSERT(chain_restore_rebuild_active_chain_from_disk(&ms, tip, dir) == 0);
+        main_state_free(&ms);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_chain_restore_service(void) {
     int failures = 0;
     /* Plan tests */
@@ -2383,6 +2425,7 @@ int test_chain_restore_service(void) {
     failures += test_finalize_never_waits_for_progress_under_main();
     failures += test_block_file_position_tags();
     failures += test_block_file_rebuild_across_files();
+    failures += test_indexed_disk_short_header_and_file_switch();
     failures += test_rebuild_active_chain_is_o_chain_not_delta();
     failures += test_unclean_restart_recovery_is_o_delta();
     failures += test_chain_restore_walks_abort_on_shutdown();

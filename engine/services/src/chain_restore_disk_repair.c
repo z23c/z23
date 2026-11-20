@@ -23,7 +23,9 @@
 #include "util/boot_scan.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
+#include "platform/positioned_io.h"
 
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -91,9 +93,21 @@ static bool chain_restore_read_header_bytes(
             return false;
         *cached_file = file;
     }
+#if !defined(_WIN32) && LONG_MAX >= UINT_MAX
+    /* Preserve partial bytes when EOF or an error follows data. */
+    *nread = 0;
+    while (*nread < cap) {
+        int64_t n = platform_positioned_read(fileno(*cached), buf + *nread,
+                                             cap - *nread, (uint64_t)pos + *nread);
+        if (n <= 0)
+            break;
+        *nread += (size_t)n;
+    }
+#else
     if (fseek(*cached, (long)pos, SEEK_SET) != 0)
         return false;
     *nread = fread(buf, 1, cap, *cached); // disk-io-lock: boot-local repair
+#endif
     return *nread >= 4 + 32 + 32 + 32 + 4 + 4 + 32 + 1;
 }
 
