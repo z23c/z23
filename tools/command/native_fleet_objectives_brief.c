@@ -4,11 +4,13 @@
  *          card, from the per-objective row in
  *          engine/composition/objective_work.def.
  *
- * WHAT IT DECIDES. Nothing new: the pick is zcl_objectives_next over the
- * rows `fleet.objectives` itself measured. With runner_ok_only the rows are
- * first narrowed to the ones whose work row says an unattended runner may
- * take them, then the same function picks the largest-gap unmet row. The
- * leaf reads what fleet.objectives reads and writes nothing. */
+ * WHAT IT DECIDES. The pick is zcl_objectives_next over the rows
+ * `fleet.objectives` itself measured, except an automatic brief never issues
+ * a warm-restart card from a sample without source identity. With
+ * runner_ok_only the rows are first narrowed to the ones whose work row says
+ * an unattended runner may take them, then the same function picks the
+ * largest-gap unmet row. It reads what fleet.objectives reads and writes
+ * nothing. */
 
 #include "native_fleet_objectives.h"
 
@@ -411,8 +413,18 @@ static bool brief_build(struct json_value *card, const struct json_value *next,
                      brief_push_pins(card, in, tgt->path)));
 }
 
+static bool brief_unattributed_boot(const struct json_value *row)
+{
+    const char *id = json_get_str(json_get(row, "id"));
+    const char *note = json_get_str(json_get(row, "note"));
+    return id && strcmp(id, "node_warm_restart_s") == 0 &&
+           note && strstr(note, "source identity unavailable") != NULL;
+}
+
 /* The measured rows narrowed to `only_id` (when set) and to runner_ok rows
- * (when `runner_only`), as a new array. False on allocation failure. */
+ * (when `runner_only`), as a new array. Automatic selection never issues a
+ * card from an unattributed boot sample; explicit inspection retains it.
+ * False on allocation failure. */
 static bool brief_narrow(const struct json_value *rows, const char *only_id,
                          bool runner_only, struct json_value *out)
 {
@@ -422,6 +434,8 @@ static bool brief_narrow(const struct json_value *rows, const char *only_id,
         const char *id = json_get_str(json_get(row, "id"));
         const struct brief_work *work = brief_find(id);
         if (only_id && (!id || strcmp(id, only_id) != 0))
+            continue;
+        if (!only_id && brief_unattributed_boot(row))
             continue;
         if (runner_only && (!work || !work->runner_ok))
             continue;

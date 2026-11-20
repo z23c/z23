@@ -393,6 +393,19 @@ static int fob_case_boot_provenance(const char *root, const struct fob_paths *p)
         fob_end(&next); fob_end(&c);
         PASS();
     }
+    TEST("brief: automatic selection skips an unattributed boot sample") {
+        char dir[700];
+        struct fob_call c;
+        (void)snprintf(dir, sizeof(dir), "%s/boot", root);
+        (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", dir, 1);
+        bool called = fob_brief(&c, p, NULL, false);
+        (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOB_NOWHERE "/datadir", 1);
+        ASSERT(called);
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fob_objective_id(&c), "node_rss_mb");
+        fob_end(&c);
+        PASS();
+    }
 _test_next:;
     return failures;
 }
