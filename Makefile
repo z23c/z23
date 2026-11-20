@@ -5565,7 +5565,7 @@ endif
 $(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c \
 		platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
-	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(if $(ZCL_HOST_WINDOWS),$(or $(HOST_CC),cc),$(CC)) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Iplatform/modules/base/include \
 	    $(Z23_BOUNDED_RUN_PLATFORM_FLAGS) -o $@ $^
 
@@ -14803,11 +14803,15 @@ DEP_AUDIT_INCLUDES = -Iplatform/modules/base/include \
     -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: dep-audit
 dep-audit: $(DEP_AUDIT_BIN)
+ifeq ($(ZCL_HOST_WINDOWS),1)
+DEP_AUDIT_HOST_FLAGS = '-DDEP_AUDIT_BASH="$(shell cygpath -am /usr/bin/bash.exe)"'
+$(DEP_AUDIT_BIN): | $(BIN_DIR)/z23_bounded_run
+endif
 $(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS) $(SPAWN_BINARY_HEADERS) platform/modules/platform/include/platform/environment_compat.h
 	@mkdir -p $(dir $@)
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \
-	    $(DEP_AUDIT_INCLUDES) \
+	    $(DEP_AUDIT_INCLUDES) $(DEP_AUDIT_HOST_FLAGS) \
 	    -o $@ $(DEP_AUDIT_SRCS) $(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread)
 
 # mutation-campaign measures whether a test group would NOTICE if the code it

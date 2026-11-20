@@ -34,6 +34,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <process.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -108,7 +111,9 @@ struct audit {
     char json_rows[MAX_ROWS][JSON_ROW_CAP];
 };
 
+#ifndef _WIN32
 static unsigned char scratch[PROVENANCE_CAPTURE_BYTES];
+#endif
 
 /* ── byte helpers ─────────────────────────────────────────────────────── */
 
@@ -581,17 +586,40 @@ static void emit_secp(struct audit *a, bool locked, bool cross)
 
 /* ── provenance and root discovery ────────────────────────────────────── */
 
-/* build_vendor.sh --check-provenance [archive], launched without a shell.
+/* Run the repository's fixed build_vendor.sh --check-provenance [archive].
  * VENDOR_PROVENANCE_QUIET is inherited from the environment set in main(). */
 static bool provenance_ok(const char *root, const char *archive)
 {
     char script[PATH_MAX];
     build_path(script, sizeof script, root, BUILD_VENDOR_REL);
+#ifdef _WIN32
+    char *program = NULL;
+    if (_get_pgmptr(&program) || !program)
+        return false;
+    char runner[PATH_MAX], quoted_script[PATH_MAX + 2];
+    const char *name = program + strlen(program);
+    while (name > program && name[-1] != '/' && name[-1] != '\\')
+        --name;
+    int n = snprintf(runner, sizeof runner, "%.*sz23_bounded_run.exe",
+                     (int)(name - program), program);
+    if (name == program || n < 0 || (size_t)n >= sizeof runner || !script[0])
+        return false;
+    snprintf(quoted_script, sizeof quoted_script, "\"%s\"", script);
+    /* The CRT joins these arguments into one command line. Bash receives a
+     * fixed redirection and the script path as a separate positional value. */
+    const char *const args[] = {
+        "z23_bounded_run", "600000", "\"" DEP_AUDIT_BASH "\"",
+        "-c", "\"source \\\"$0\\\" \\\"$@\\\" </dev/null >/dev/null 2>&1\"",
+        quoted_script, "--check-provenance", archive, NULL
+    };
+    return _spawnv(_P_WAIT, runner, args) == 0;
+#else
     const char *const argv[] = { script, "--check-provenance", archive, NULL };
     struct zcl_spawn_binary_observation obs;
     struct zcl_result res = zcl_spawn_capture_binary(
         argv, scratch, sizeof scratch, PROVENANCE_TIMEOUT_MS, &obs);
     return res.ok;
+#endif
 }
 
 static bool probe_root(const char *dir)
@@ -622,6 +650,11 @@ static bool find_repo_root(char *root, size_t cap)
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof cwd))
         return false;
+#ifdef _WIN32
+    for (char *p = cwd; *p; ++p)
+        if (*p == '\\')
+            *p = '/';
+#endif
     snprintf(root, cap, "%s", cwd);
     do {
         if (probe_root(root))
